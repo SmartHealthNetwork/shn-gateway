@@ -55,7 +55,7 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// S1: require the binding-critical metadata fields even though the Hub already
+	// Require the binding-critical metadata fields even though the Hub already
 	// guards them — the payer must not assume an implicitly-trusted Hub channel
 	// (network-separation). An empty CorrelationID would otherwise skip the token's
 	// correlation binding below (VerifyBound treats "" as skip) AND be echoed into

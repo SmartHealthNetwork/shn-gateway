@@ -1,9 +1,10 @@
 # shn-gateway
 
-The **SHN Smart Gateway** is a partner-deployable component that processes
-prior-authorization exchanges as a holder behind the SHN Hub, with
-sealed-leg authority. The canonical private source lives in the SHN
-substrate repository; this repository is a published snapshot.
+The **SHN Smart Gateway** is a partner-deployable component that carries a
+holder's exchanges across organizational boundaries behind the SHN Hub, with
+sealed-leg authority. The substrate is workflow-general; the first workflow
+delivered on it is Da Vinci prior authorization. The canonical private source
+lives in the SHN substrate repository; this repository is a published snapshot.
 
 ## Install
 

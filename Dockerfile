@@ -1,4 +1,4 @@
-# E3e3: STANDALONE build of the PUBLIC gateway binary (cmd/gateway within this module).
+# STANDALONE build of the PUBLIC gateway binary (cmd/gateway within this module).
 # Build context = THIS module (gateway/) — a partner clones only shn-gateway, no sdk/
 # sibling. shn-sdk resolves from the public Go proxy via the go.mod require (v0.7.0),
 # so there is no local replace. Our cloud + smoke build this exact artifact (dogfood).
