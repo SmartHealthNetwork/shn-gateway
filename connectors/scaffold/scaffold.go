@@ -66,6 +66,16 @@ func (s *Scaffold) ResolvePatient(memberID string) (pci string, demo engine.Demo
 	return shnsdk.ResolvePCI(memberID, demo.BirthDate, demo.FamilyName), demo, true
 }
 
+// PatientFHIRRef returns the FHIR Patient ref for an operated $populate subject.
+// TODO(partner): if your FHIR store assigns its own Patient ids, resolve memberID → that id
+// here (the logical "Patient/<member>" works when your store's Patient id IS the member).
+func (s *Scaffold) PatientFHIRRef(memberID string) (string, bool) {
+	if memberID != scaffoldMember {
+		return "", false
+	}
+	return "Patient/" + memberID, true
+}
+
 // CoverageInforce reads the US Core Coverage RECORD (CMS-0057). The eligibility
 // DETERMINATION is the payer's Adjudicator; this only reports the record state.
 func (s *Scaffold) CoverageInforce(memberID string) (inforce bool, reason string) {

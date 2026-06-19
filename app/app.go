@@ -70,6 +70,24 @@ type config struct {
 	FHIRClientAlg   string
 	FHIRClientScope string
 	FHIRClientKID   string
+
+	// Optional native-forward payer block (the PARTNER Da Vinci payer is a different
+	// external party from the FHIR SoR — distinct credentials; design §7). Setting
+	// PayerDavinciBaseURL switches the payer's read-only legs to native forwarding.
+	PayerDavinciBaseURL   string
+	PayerDavinciTokenURL  string
+	PayerDavinciClientID  string
+	PayerDavinciClientKey string
+	PayerDavinciClientAlg string
+	PayerDavinciScope     string
+	PayerDavinciClientKID string
+	PayerDavinciPASNative bool
+
+	// Optional native DTR population (provider-local). PROVIDER_DTR_NATIVE switches DTR
+	// population from the in-house managed backend to forwarding the provider's own SDC
+	// Questionnaire/$populate endpoint. Unauthenticated this slice.
+	ProviderDTRNative      bool
+	ProviderDTRPopulateURL string
 }
 
 var validRoles = map[string]bool{
@@ -134,6 +152,18 @@ func loadConfig(getenv func(string) string) (config, error) {
 		FHIRClientScope:  def("FHIR_CLIENT_SCOPE", "system/*.read"),
 		FHIRClientKID:    getenv("FHIR_CLIENT_KID"),
 
+		PayerDavinciBaseURL:   getenv("PAYER_DAVINCI_BASE_URL"),
+		PayerDavinciTokenURL:  getenv("PAYER_DAVINCI_TOKEN_URL"),
+		PayerDavinciClientID:  getenv("PAYER_DAVINCI_CLIENT_ID"),
+		PayerDavinciClientKey: getenv("PAYER_DAVINCI_CLIENT_KEY"),
+		PayerDavinciClientAlg: getenv("PAYER_DAVINCI_CLIENT_ALG"),
+		PayerDavinciScope:     def("PAYER_DAVINCI_SCOPE", "system/*.read"),
+		PayerDavinciClientKID: getenv("PAYER_DAVINCI_CLIENT_KID"),
+		PayerDavinciPASNative: getenv("PAYER_DAVINCI_PAS_NATIVE") == "true",
+
+		ProviderDTRNative:      getenv("PROVIDER_DTR_NATIVE") == "true",
+		ProviderDTRPopulateURL: getenv("PROVIDER_DTR_POPULATE_URL"),
+
 		AuthzPubkeyURL:     getenv("AUTHZ_PUBKEY_URL"),
 		HubTransportKeyURL: getenv("HUB_TRANSPORT_KEY_URL"),
 	}
@@ -148,6 +178,9 @@ func loadConfig(getenv func(string) string) (config, error) {
 		{"FHIR_DATA_URL", cfg.FHIRDataURL},
 		{"REGISTRAR_URL", cfg.RegistrarURL},
 		{"FHIR_TOKEN_URL", cfg.FHIRTokenURL},
+		{"PAYER_DAVINCI_BASE_URL", cfg.PayerDavinciBaseURL},
+		{"PAYER_DAVINCI_TOKEN_URL", cfg.PayerDavinciTokenURL},
+		{"PROVIDER_DTR_POPULATE_URL", cfg.ProviderDTRPopulateURL},
 		{"SHN_DISCOVERY_URL", cfg.DiscoveryURL},
 		{"AUTHZ_PUBKEY_URL", cfg.AuthzPubkeyURL},
 		{"HUB_TRANSPORT_KEY_URL", cfg.HubTransportKeyURL},
@@ -167,6 +200,25 @@ func loadConfig(getenv func(string) string) (config, error) {
 		if cfg.FHIRClientAlg != "ES384" && cfg.FHIRClientAlg != "RS384" {
 			return config{}, fmt.Errorf("gateway: FHIR_CLIENT_ALG must be ES384|RS384, got %q", cfg.FHIRClientAlg)
 		}
+	}
+
+	// All-or-nothing partner-payer credentials (design §7): a partial block is a
+	// misconfig (someone intended auth and fat-fingered it) → hard error. Zero creds is
+	// the deliberate-unauthenticated mode (warned at build, not errored here).
+	if cfg.PayerDavinciTokenURL != "" {
+		if cfg.PayerDavinciBaseURL == "" {
+			return config{}, fmt.Errorf("gateway: PAYER_DAVINCI_TOKEN_URL set requires PAYER_DAVINCI_BASE_URL")
+		}
+		if cfg.PayerDavinciClientID == "" || cfg.PayerDavinciClientKey == "" {
+			return config{}, fmt.Errorf("gateway: PAYER_DAVINCI_TOKEN_URL requires PAYER_DAVINCI_CLIENT_ID and PAYER_DAVINCI_CLIENT_KEY")
+		}
+		if cfg.PayerDavinciClientAlg != "ES384" && cfg.PayerDavinciClientAlg != "RS384" {
+			return config{}, fmt.Errorf("gateway: PAYER_DAVINCI_CLIENT_ALG must be ES384|RS384, got %q", cfg.PayerDavinciClientAlg)
+		}
+	}
+
+	if cfg.ProviderDTRNative && cfg.ProviderDTRPopulateURL == "" {
+		return config{}, fmt.Errorf("gateway: PROVIDER_DTR_NATIVE=true requires PROVIDER_DTR_POPULATE_URL")
 	}
 
 	return cfg, nil
@@ -399,6 +451,34 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		AuditURL:        firstNonEmpty(cfg.AuditURL, endpoints.Audit),
 		PHGURL:          firstNonEmpty(cfg.PHGURL, endpoints.PHG),
 	}
+	// Native-forward payer mode (design §1.2/§7): the read-only legs forward to a partner
+	// Da Vinci endpoint; PAS stays on the sandbox fallback. Setting Responder here means
+	// engine.New uses it directly (it only derives from Adjudicator when Responder==nil).
+	if cfg.PayerDavinciBaseURL != "" {
+		if cfg.PayerDavinciTokenURL == "" {
+			fmt.Fprintf(stdout, "gateway: WARNING PAYER_DAVINCI_BASE_URL set without PAYER_DAVINCI_TOKEN_URL — forwarding to the payer UNAUTHENTICATED\n")
+		}
+		pdc, perr := payerDavinciHTTPClient(cfg)
+		if perr != nil {
+			return b, perr
+		}
+		if pdc == nil {
+			pdc = client // the substrate HTTP client; unauthenticated forward
+		}
+		// Fail loud: a PAS-native gateway MUST have a real payer Store for the shadow
+		// ledger + EOB (design §5.2; mirrors the payer-role derive-then-guard at
+		// gateway/engine/gateway.go:163-171). Without it a PAS leg would dispatch into
+		// a nil store and panic at runtime.
+		if cfg.PayerDavinciPASNative && store == nil {
+			return b, fmt.Errorf("gateway: PAYER_DAVINCI_PAS_NATIVE=true requires a payer Store")
+		}
+		native := engine.NewNativeResponder(pdc, cfg.PayerDavinciBaseURL, store, clock)
+		fallback := engine.NewSandboxResponder(gwCfg.Adjudicator, sor, store, clock)
+		gwCfg.Responder = engine.NewCompositeResponder(native, fallback, cfg.PayerDavinciPASNative)
+	}
+	if cfg.ProviderDTRNative {
+		gwCfg.Populator = engine.NewNativePopulator(client, cfg.ProviderDTRPopulateURL)
+	}
 	fmt.Fprintf(stdout, "gateway: role=%s holder=%s listening on %s\n", cfg.Role, bundle.Identity.HolderID, cfg.Addr)
 	b = built{addr: cfg.Addr, handler: engine.New(gwCfg).Handler(), reg: reg, registrarURL: registrarURL, client: client}
 	return b, nil
@@ -512,6 +592,27 @@ func fhirHTTPClient(cfg config) (*http.Client, error) {
 	})
 	if err != nil {
 		return nil, fmt.Errorf("smartauth client: %w", err)
+	}
+	return hc, nil
+}
+
+// payerDavinciHTTPClient returns the client the native-forward Responder uses to reach
+// the partner Da Vinci payer. When the PAYER_DAVINCI SMART quad is set it authenticates
+// via SMART Backend Services; else nil ⇒ unauthenticated (deliberate sandbox mode).
+func payerDavinciHTTPClient(cfg config) (*http.Client, error) {
+	if cfg.PayerDavinciTokenURL == "" {
+		return nil, nil // unauthenticated (deliberate; warned at build)
+	}
+	key, err := loadSmartKey(cfg.PayerDavinciClientKey, cfg.PayerDavinciClientAlg)
+	if err != nil {
+		return nil, fmt.Errorf("load payer-davinci client key: %w", err)
+	}
+	hc, err := smartauth.NewHTTPClient(smartauth.Config{
+		TokenURL: cfg.PayerDavinciTokenURL, ClientID: cfg.PayerDavinciClientID, Scope: cfg.PayerDavinciScope,
+		Alg: cfg.PayerDavinciClientAlg, Key: key, KID: cfg.PayerDavinciClientKID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("payer-davinci smartauth client: %w", err)
 	}
 	return hc, nil
 }

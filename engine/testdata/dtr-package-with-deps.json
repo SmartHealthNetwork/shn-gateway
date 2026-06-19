@@ -1,0 +1,9 @@
+{
+  "resourceType": "Bundle",
+  "type": "collection",
+  "entry": [
+    { "resource": { "resourceType": "Library", "id": "cql-lib-1", "url": "http://example.org/Library/cql-lib-1" } },
+    { "resource": { "resourceType": "Questionnaire", "id": "real-partner-q", "url": "http://example.org/Questionnaire/real-partner-q", "status": "active" } },
+    { "resource": { "resourceType": "ValueSet", "id": "vs-1", "url": "http://example.org/ValueSet/vs-1" } }
+  ]
+}

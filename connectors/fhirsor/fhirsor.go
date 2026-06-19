@@ -89,6 +89,18 @@ func (s *SoR) ResolvePatient(memberID string) (string, engine.Demo, bool) {
 	return pci, engine.Demo{BirthDate: birth, FamilyName: family}, true
 }
 
+// PatientFHIRRef returns "Patient/<store-id>" — the FHIR store's resource id for the member
+// (resolved by identifier; the id may be partition-scoped). This is the resolvable subject for an
+// operated $populate (which reads the store directly; the logical member ref and identifier-based
+// subjects don't resolve).
+func (s *SoR) PatientFHIRRef(memberID string) (string, bool) {
+	_, id, ok := s.resolvePatient(memberID)
+	if !ok {
+		return "", false
+	}
+	return "Patient/" + id, true
+}
+
 // CoverageInforce reports whether the member's coverage is active. active → (true,"");
 // any other status → (false,"coverage-terminated"); no coverage / unknown → (false,"").
 func (s *SoR) CoverageInforce(memberID string) (bool, string) {

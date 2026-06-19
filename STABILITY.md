@@ -28,6 +28,55 @@ changes will be noted in the changelog):
 | `connectors/scaffold` | Runnable `SystemOfRecord` skeleton for custom / legacy backends |
 | `connectors/smartauth` | SMART Backend Services HTTP client for FHIR SoR authentication |
 
+`engine.Config.Adjudicator` is the **supported partner injection point** for payer
+decisioning. It is stable across minor versions. Do not depend on
+`engine.LegResponder` — it is an internal 0.x seam (see below).
+
+## Internal seams (not for partner use)
+
+`engine.LegResponder` is the gateway's internal payer-content seam (FHIR-in /
+FHIR-out). It is **unstable**: it may change in any 0.x minor version without
+notice. Partners who need to customize payer decisions should inject a custom
+`engine.Config.Adjudicator`; the engine derives the internal `LegResponder` from
+it automatically. `LegResponder` will be promoted to `shnsdk` once its shape has
+stabilized across both the native-forward and managed connector families; until
+then it is gateway-internal only.
+
+`engine.NewNativeResponder` is the native-forward Da Vinci forwarder; it handles
+the read-only legs and — when `PAYER_DAVINCI_PAS_NATIVE=true` — the PAS legs too
+(submit/update forwarded to the partner's `/Claim/$submit`). It is an internal
+`LegResponder` 0.x seam. The composite Responder routes read-only legs to native
+and the PAS pair to native or the sandbox fallback depending on the switch. This is
+not a partner contract. They will graduate to `connectors/davinci` when
+`LegResponder` is promoted to `shnsdk`.
+
+`engine.Populator` is the gateway-internal provider-side DTR population seam
+(FHIR-in / QuestionnaireResponse-out). It is a **0.x internal seam** and is NOT
+a published `shn-sdk` contract this slice. Two backends exist: **managed** (wraps
+the existing `FillQuestionnaire` — the sandbox/demo green-keeper, not a general
+legacy fallback) and **native** (forward to a provider's SDC
+`Questionnaire/$populate` endpoint, selected by `PROVIDER_DTR_NATIVE` +
+`PROVIDER_DTR_POPULATE_URL`). A third backend (operated CQL engine) is a
+config-only drop-in when that slice lands. `Populator` follows `LegResponder` to
+`connectors/` and eventually `shnsdk` once the shape is proven stable across
+backends.
+
+No test-only exported shim was added for the DTR package extractor — the §8.3
+anti-circularity proof (`TestExtractQuestionnaireFromPackage_ReturnsVerbatimAndDropsDeps`)
+runs in-package (`gateway/engine`) against the unexported `extractQuestionnaireFromPackage`
+function, so the extractor is never exposed beyond its single production call site in
+`originate.go` (the consumer, in-package). The `dtr-questionnaire-fetch` leg's
+`ResponseFHIR` is the full `$questionnaire-package` collection Bundle: the sandbox path
+wraps via `buildQuestionnairePackage`; the native path forwards the partner's package
+verbatim. The consumer (`originate.go`) extracts the bare Questionnaire for F5/auto-fill;
+the dependent Libraries/ValueSets survive the wire intact inside the Bundle.
+
+The exported `engine.ParseCoverageEligibilityResponsePatient` /
+`engine.ParsePASResponsePatients` FHIR-subject readers (used by the outbound
+patient fence) are part of the same internal seam — exported only so the
+substrate's adversarial tests can drive them, **not** a partner contract. They
+promote to `shnsdk` with `LegResponder`.
+
 ## Unsupported internals
 
 `internal/` packages and `cmd/` binaries are implementation details and may

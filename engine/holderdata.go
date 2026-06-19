@@ -338,6 +338,14 @@ func (d *StubHolderData) ResolvePatient(memberID string) (pci string, demo Demo,
 	return pci, p.demo, true
 }
 
+// PatientFHIRRef — the in-memory stub uses logical refs (no FHIR store / scoped ids).
+func (d *StubHolderData) PatientFHIRRef(memberID string) (string, bool) {
+	if _, ok := stubPersonas[memberID]; !ok {
+		return "", false
+	}
+	return "Patient/" + memberID, true
+}
+
 // CoverageInforce answers whether the member's coverage is in force. Unknown
 // members are treated as not in force.
 func (d *StubHolderData) CoverageInforce(memberID string) (inforce bool, reason string) {

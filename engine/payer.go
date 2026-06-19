@@ -6,7 +6,6 @@
 package engine
 
 import (
-	"encoding/json"
 	"net/http"
 	"strings"
 
@@ -89,20 +88,19 @@ func (g *Gateway) handleCRDInbound(w http.ResponseWriter, r *http.Request, env s
 		}
 	}
 
-	cpt, err := shnsdk.ParseServiceRequestCPT(srJSON)
+	result, err := g.cfg.Responder.Handle(ctx, "crd-order-select", env.Metadata.CorrelationID, tok.Subject, reqJSON)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "parse CPT failed"})
+		// Handle's error return is a build/marshal fault (gateway's own) → 500.
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "responder failed"})
 		return
 	}
-
-	paRequired, canonical := g.cfg.Adjudicator.OrderSelect(cpt)
-	cardsJSON, err := shnsdk.BuildCards(paRequired, canonical)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build cards failed"})
+	if result.Status != 0 {
+		// e.g. 400 "parse CPT failed" — surfaced by the connector, not an error.
+		writeJSON(w, result.Status, map[string]string{"error": result.Message})
 		return
 	}
-
-	g.respondLeg(w, r, "payer-coverage", "crd-cards", "crd-order-select", env.Metadata.CorrelationID, cardsJSON, tok.Subject, env.Metadata.Sender, "")
+	// CRD cards are not a FHIR resource: no (C) fence, no egress-$validate.
+	g.respondLeg(w, r, "payer-coverage", "crd-cards", "crd-order-select", env.Metadata.CorrelationID, result.ResponseFHIR, tok.Subject, env.Metadata.Sender, "")
 }
 
 // handleDTRInbound answers a DTR questionnaire fetch: parse the canonical, look
@@ -116,24 +114,26 @@ func (g *Gateway) handleDTRInbound(w http.ResponseWriter, r *http.Request, env s
 		return
 	}
 
-	var fetch shnsdk.QuestionnaireFetchRequest
-	if err := json.Unmarshal(reqJSON, &fetch); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "parse questionnaire fetch failed"})
+	result, err := g.cfg.Responder.Handle(ctx, "dtr-questionnaire-fetch", env.Metadata.CorrelationID, tok.Subject, reqJSON)
+	if err != nil {
+		// build/marshal fault (gateway's own) → 500
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "responder failed"})
 		return
 	}
-
-	questionnaireJSON, ok := g.cfg.Adjudicator.Questionnaire(fetch.Canonical)
-	if !ok {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown questionnaire canonical"})
+	if result.Status != 0 {
+		// e.g. 400 "unknown questionnaire canonical"
+		writeJSON(w, result.Status, map[string]string{"error": result.Message})
 		return
 	}
-
-	if status, msg := g.validateFHIR(ctx, questionnaireJSON, "egress"); status != 0 {
+	if status, msg := g.fenceResponseSubject("dtr-questionnaire-fetch", "", result); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
-
-	g.respondLeg(w, r, "payer-coverage", "dtr-questionnaire", "dtr-questionnaire-fetch", env.Metadata.CorrelationID, questionnaireJSON, tok.Subject, env.Metadata.Sender, "")
+	if status, msg := g.validateFHIR(ctx, result.ResponseFHIR, "egress"); status != 0 {
+		writeJSON(w, status, map[string]string{"error": msg})
+		return
+	}
+	g.respondLeg(w, r, "payer-coverage", "dtr-questionnaire", "dtr-questionnaire-fetch", env.Metadata.CorrelationID, result.ResponseFHIR, tok.Subject, env.Metadata.Sender, "")
 }
 
 // bindBundleSubject enforces PAS bundle-internal patient consistency and binds it
@@ -166,6 +166,60 @@ func (g *Gateway) bindBundleSubject(cb shnsdk.ClaimBundle, tok shnsdk.Token) (st
 	}
 	if cb.HasDiagnosticReport && strings.TrimPrefix(cb.DiagnosticReportSubject, "Patient/") != member {
 		return http.StatusForbidden, "inconsistent patient in PAS bundle"
+	}
+	return 0, ""
+}
+
+// fenceResponseSubject is the (C) outbound fence: a connector must not swap the
+// patient between the request it was handed and the response it returned. It
+// compares the response resource's patient ref to boundPatientRef (the inbound
+// member-namespace ref, e.g. "Patient/<member>", already proven by (A) to resolve
+// to pci == tok.Subject). NOT compared to tok.Subject, which is a derived PCI.
+// Returns (0,"") on pass or (status, msg) to write. Per-leg arms are added as each
+// leg moves behind the seam.
+func (g *Gateway) fenceResponseSubject(leg, boundPatientRef string, res LegResult) (int, string) {
+	switch leg {
+	case "coverage-eligibility":
+		ref, err := ParseCoverageEligibilityResponsePatient(res.ResponseFHIR)
+		if err != nil {
+			return http.StatusInternalServerError, "parse response subject failed"
+		}
+		if ref != boundPatientRef {
+			return http.StatusForbidden, "response patient does not match request patient"
+		}
+	case "crd-order-select":
+		// cards are not FHIR / patient-agnostic — no outbound subject to fence.
+	case "dtr-questionnaire-fetch":
+		// §6.2: the response is a $questionnaire-package Bundle; walk its Questionnaire
+		// entries (the wrapper has no top-level subject) and reject if any carries one.
+		if packageQuestionnaireHasSubject(res.ResponseFHIR) {
+			return http.StatusForbidden, "questionnaire response unexpectedly carries a subject"
+		}
+	case "pas-claim", "pas-claim-update":
+		// The sealed ClaimResponse leg: every ClaimResponse patient (bare CR for
+		// approved/denied, the Bundle's CR for pended) must equal the bound request
+		// patient. (pas-claim-update is included now so the update leg needs no fence
+		// change when it moves behind the seam; it is harmless until then.)
+		refs, err := ParsePASResponsePatients(res.ResponseFHIR)
+		if err != nil {
+			return http.StatusInternalServerError, "parse response subject failed"
+		}
+		for _, ref := range refs {
+			if ref != boundPatientRef {
+				return http.StatusForbidden, "response patient does not match request patient"
+			}
+		}
+		// The EOB Store side-effect (RecordEOB) never travels a sealed leg, so the
+		// response check above cannot see it — fence its subject here too.
+		for _, se := range res.SideEffectFHIR {
+			ref, err := parseEOBPatient(se)
+			if err != nil {
+				return http.StatusInternalServerError, "parse side-effect subject failed"
+			}
+			if ref != boundPatientRef {
+				return http.StatusForbidden, "side-effect patient does not match request patient"
+			}
+		}
 	}
 	return 0, ""
 }
@@ -210,144 +264,71 @@ func (g *Gateway) handlePASInbound(w http.ResponseWriter, r *http.Request, env s
 		return
 	}
 
-	// FR-20: pass cb.HasDiagnosticReport so the pended branch fires when the submit
-	// bundle lacks an operative DiagnosticReport (prior-surgery case, UC-04). The
-	// Adjudicator owns the auth-number randomness (sandbox: crypto/rand, unguessable).
-	dec, err := g.cfg.Adjudicator.PriorAuth(cb.QRJSON, cb.HasDiagnosticReport)
+	// The decision/build/branch tail now lives behind the LegResponder seam
+	// (sandboxResponder.Handle "pas-claim"): the connector owns the PriorAuth
+	// decision, the three response builds (pended/approved/denied), the EOB
+	// side-effect, and the Store-write Commit. The engine keeps authority (the
+	// (A)/(B) bindBundleSubject above + the (C) fenceResponseSubject below),
+	// sealing, edge-$validate, and audit. This is the first MUTATING leg: the EOB
+	// surfaces as result.SideEffectFHIR (egress-$validated before Commit, FR-36),
+	// and result.Commit does the Store write (RecordEOB/RecordPendedClaim) AFTER
+	// buildResponseLeg and BEFORE writeLeg — exactly today's
+	// buildResponseLeg → RecordEOB/RecordPended → writeLeg ordering.
+	boundPatientRef := cb.ClaimPatient
+	result, err := g.cfg.Responder.Handle(ctx, "pas-claim", env.Metadata.CorrelationID, tok.Subject, bundleJSON)
 	if err != nil {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		// build/marshal fault (gateway's own) → 500.
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "responder failed"})
 		return
 	}
-
-	switch dec.Outcome {
-	case shnsdk.PASPended:
-		// FR-20: build the pended response (Bundle with ClaimResponse+Task) and
-		// respond so the provider can attach supplemental data for exchange-2.
-		pendedJSON, err := shnsdk.BuildPendedResponse(cb.ClaimPatient, env.Metadata.CorrelationID, dec.NeededItems, g.cfg.Clock())
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build pended response failed"})
-			return
+	// Arm defer-rollback-unless-committed: a claim acquired in Handle is released
+	// on any pre-commit early return. (Submit acquires no claim today — Rollback is
+	// nil — but the seam carries it for the update leg.)
+	committed := false
+	defer func() {
+		if !committed && result.Rollback != nil {
+			result.Rollback()
 		}
-		if status, msg := g.validateFHIR(ctx, pendedJSON, "egress"); status != 0 {
-			writeJSON(w, status, map[string]string{"error": msg})
-			return
-		}
-		// review-fixes-6 #1: build the response leg BEFORE committing payer state,
-		// so a response-leg failure (unknown requester, seal, encode) cannot orphan
-		// the pended-claim ledger. The only irreversible residual is a failure of the
-		// final HTTP write in writeLeg AFTER the commit, which needs an outbox/ack
-		// model (deferred).
-		//
-		// FR-21/FR-6: record this pended claim (payer-local, metadata-only) so the
-		// follow-up ClaimUpdate can be bound to a REAL prior pend (see
-		// handlePASUpdateInbound). Keyed by subject PCI + this exchange's correlation.
-		respBytes, status, msg := g.buildResponseLeg(r, "payer-coverage", "pas-response", "pas-claim", env.Metadata.CorrelationID, pendedJSON, tok.Subject, env.Metadata.Sender, "")
-		if status != 0 {
-			writeJSON(w, status, map[string]string{"error": msg})
-			return
-		}
-		if err := g.cfg.Store.RecordPendedClaim(tok.Subject, env.Metadata.CorrelationID); err != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "holder write failed (pended claim)"})
-			return
-		}
-		writeLeg(w, respBytes)
-
-	case shnsdk.PASApproved:
-		crJSON, err := shnsdk.BuildClaimResponse(dec.PreAuthRef, dec.ValidUntil, cb.ClaimPatient, env.Metadata.CorrelationID, g.cfg.Clock())
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build claim response failed"})
-			return
-		}
-		if status, msg := g.validateFHIR(ctx, crJSON, "egress"); status != 0 {
-			writeJSON(w, status, map[string]string{"error": msg})
-			return
-		}
-		// FR-28: build the PDex PA EOB for the approved decision and store it in the
-		// payer's own decision state (AI-1-compatible), readable via the Patient
-		// Access API — mirrors the denied branch so the patient's Smart Health
-		// account can show APPROVED prior authorizations, carrying the auth number.
-		eobJSON, err := shnsdk.BuildPADecisionEOB(shnsdk.PADecisionEOBParams{
-			ID:          "eob-" + env.Metadata.CorrelationID,
-			PatientRef:  cb.ClaimPatient,
-			CoverageRef: "Coverage/" + strings.TrimPrefix(cb.ClaimPatient, "Patient/"),
-			CPTCode:     "72148",
-			Decision:    shnsdk.PADecisionApproved,
-			AuthNumber:  dec.PreAuthRef,
-			Created:     g.cfg.Clock(),
-		})
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build EOB failed"})
-			return
-		}
-		if status, msg := g.validateFHIR(ctx, eobJSON, "egress"); status != 0 {
-			writeJSON(w, status, map[string]string{"error": msg})
-			return
-		}
-		// review-fixes-6 #1: build the response leg BEFORE committing payer state
-		// so a response-leg failure (unknown requester, seal, encode) cannot orphan
-		// the EOB. The residual write-after-commit gap is the deferred outbox/ack.
-		respBytes, status, msg := g.buildResponseLeg(r, "payer-coverage", "pas-response", "pas-claim", env.Metadata.CorrelationID, crJSON, tok.Subject, env.Metadata.Sender, "")
-		if status != 0 {
-			writeJSON(w, status, map[string]string{"error": msg})
-			return
-		}
-		if err := g.cfg.Store.RecordEOB(tok.Subject, "eob-"+env.Metadata.CorrelationID, eobJSON); err != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "holder write failed (eob)"})
-			return
-		}
-		writeLeg(w, respBytes)
-
-	default: // shnsdk.PASDenied
-		// FR-22 (UC-08): a real denied ClaimResponse with the PAS reviewAction (A3),
-		// rationale, appeal window, and peer-to-peer instruction.
-		rationale := dec.DenyReason
-		if rationale == "" {
-			rationale = "Conservative therapy of at least 6 weeks is not documented (4 weeks on record); request does not meet the payer's medical-necessity policy for advanced lumbar imaging."
-		}
-		denJSON, err := shnsdk.BuildDeniedResponse(cb.ClaimPatient, env.Metadata.CorrelationID, rationale, g.cfg.Clock())
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build denied response failed"})
-			return
-		}
-		if status, msg := g.validateFHIR(ctx, denJSON, "egress"); status != 0 {
-			writeJSON(w, status, map[string]string{"error": msg})
-			return
-		}
-		// FR-28: build the PDex PA EOB for the patient surface and store it in the
-		// payer's own decision state (AI-1-compatible), readable via the Patient
-		// Access API. Coverage ref derived from the patient ref by stripping the
-		// "Patient/" prefix and using "Coverage/" as the prefix (payer-local ref).
-		eobJSON, err := shnsdk.BuildPADecisionEOB(shnsdk.PADecisionEOBParams{
-			ID:          "eob-" + env.Metadata.CorrelationID,
-			PatientRef:  cb.ClaimPatient,
-			CoverageRef: "Coverage/" + strings.TrimPrefix(cb.ClaimPatient, "Patient/"),
-			CPTCode:     "72148",
-			Decision:    shnsdk.PADecisionDenied,
-			AuthNumber:  "",
-			Created:     g.cfg.Clock(),
-		})
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build EOB failed"})
-			return
-		}
-		if status, msg := g.validateFHIR(ctx, eobJSON, "egress"); status != 0 {
-			writeJSON(w, status, map[string]string{"error": msg})
-			return
-		}
-		// review-fixes-6 #1: build the response leg BEFORE committing payer state
-		// so a response-leg failure (unknown requester, seal, encode) cannot orphan
-		// the EOB. The residual write-after-commit gap is the deferred outbox/ack.
-		respBytes, status, msg := g.buildResponseLeg(r, "payer-coverage", "pas-response", "pas-claim", env.Metadata.CorrelationID, denJSON, tok.Subject, env.Metadata.Sender, "")
-		if status != 0 {
-			writeJSON(w, status, map[string]string{"error": msg})
-			return
-		}
-		if err := g.cfg.Store.RecordEOB(tok.Subject, "eob-"+env.Metadata.CorrelationID, eobJSON); err != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "holder write failed (eob)"})
-			return
-		}
-		writeLeg(w, respBytes)
+	}()
+	if result.Status != 0 {
+		// e.g. 422 from a PriorAuth decision error.
+		writeJSON(w, result.Status, map[string]string{"error": result.Message})
+		return
 	}
+	// (C) outbound fence: the connector must not have swapped the patient between
+	// the request and the response/side-effect. Checks the ClaimResponse subject(s)
+	// AND the EOB side-effect against boundPatientRef.
+	if status, msg := g.fenceResponseSubject("pas-claim", boundPatientRef, result); status != 0 {
+		writeJSON(w, status, map[string]string{"error": msg})
+		return
+	}
+	// Egress-$validate the response AND every side-effect (the EOB) before the Store
+	// write — matching today's per-branch egress-validate of the response then the
+	// EOB before RecordEOB. PAS egress = g.validateFHIR (422 on a profile failure).
+	for _, b := range append([][]byte{result.ResponseFHIR}, result.SideEffectFHIR...) {
+		if status, msg := g.validateFHIR(ctx, b, "egress"); status != 0 {
+			writeJSON(w, status, map[string]string{"error": msg})
+			return
+		}
+	}
+	// review-fixes-6 #1: build the response leg BEFORE committing payer state, so a
+	// response-leg failure (unknown requester, seal, encode) cannot orphan the EOB /
+	// pended-claim ledger. The only irreversible residual is a failure of the final
+	// HTTP write in writeLeg AFTER the commit (deferred outbox/ack).
+	respBytes, status, msg := g.buildResponseLeg(r, "payer-coverage", "pas-response", "pas-claim", env.Metadata.CorrelationID, result.ResponseFHIR, tok.Subject, env.Metadata.Sender, "")
+	if status != 0 {
+		writeJSON(w, status, map[string]string{"error": msg})
+		return
+	}
+	if result.Commit != nil {
+		if err := result.Commit(); err != nil {
+			// Store-write failure → 502 (parity with today's RecordEOB/RecordPended 502).
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "holder write failed"})
+			return
+		}
+	}
+	committed = true
+	writeLeg(w, respBytes)
 }
 
 // handlePASUpdateInbound adjudicates a PAS ClaimUpdate amendment (FR-21): it parses
@@ -384,33 +365,14 @@ func (g *Gateway) handlePASUpdateInbound(w http.ResponseWriter, r *http.Request,
 	// AND that original must be a REAL claim this payer actually pended for THIS
 	// patient — authority is evaluated against current payer state and the
 	// pended→approved transition is genuine. The payer-local pended-claim ledger
-	// (metadata only, AI-1-compatible) enforces this.
+	// (metadata only, AI-1-compatible) enforces this. The Claim.related PRESENCE check
+	// stays engine-side (it is an (A)/(B) authority precondition); the atomic
+	// BeginClaimUpdate test-and-set now runs INSIDE the connector's Handle (its own
+	// ledger serialization point) — see sandboxResponder "pas-claim-update".
 	if cb.RelatedClaim == "" {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "ClaimUpdate missing original-claim reference (Claim.related)"})
 		return
 	}
-	// ATOMIC claim: this single test-and-set is the current-state authority check AND
-	// the serialization point — only one update can be in flight for a given pended
-	// claim. No prior pend, a replay of an already-approved update, or a second
-	// concurrent update all get false → 409.
-	claimed, err := g.cfg.Store.BeginClaimUpdate(tok.Subject, cb.RelatedClaim)
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "holder write failed (begin update)"})
-		return
-	}
-	if !claimed {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "ClaimUpdate references no pending claim available for this patient"})
-		return
-	}
-	// Release the claim back to pended unless this update actually approves (set just
-	// before the approved response), so a mid-adjudication failure or an insufficient
-	// amendment never strands the claim and a later complete amendment can transition it.
-	approved := false
-	defer func() {
-		if !approved {
-			_ = g.cfg.Store.ReleaseClaimUpdate(tok.Subject, cb.RelatedClaim)
-		}
-	}()
 
 	// FR-32: a ClaimUpdate MUST carry Provenance ATTRIBUTING the supplemental data —
 	// not merely present. The Provenance must name an agent AND target the EXACT
@@ -457,48 +419,67 @@ func (g *Gateway) handlePASUpdateInbound(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	dec, err := g.cfg.Adjudicator.PriorAuth(cb.QRJSON, cb.HasDiagnosticReport)
+	// The decision/build tail + the pended ledger now live behind the LegResponder seam
+	// (sandboxResponder.Handle "pas-claim-update"): the connector owns the atomic
+	// BeginClaimUpdate (pre-decision serialization), the PriorAuth re-adjudication, the
+	// approved ClaimResponse build, and the Store transition (Commit=FinalizeClaimUpdate,
+	// Rollback=ReleaseClaimUpdate). The engine keeps authority (the (A)/(B) checks above +
+	// the (C) fence below), sealing, edge-$validate, and audit. The update leg builds NO
+	// EOB (only submit does) and carries NO SideEffectFHIR — the egress-$validate is just
+	// result.ResponseFHIR.
+	boundPatientRef := cb.ClaimPatient
+	result, err := g.cfg.Responder.Handle(ctx, "pas-claim-update", env.Metadata.CorrelationID, tok.Subject, bundleJSON)
+	// Arm defer-rollback-unless-committed on the returned result BEFORE checking err: a
+	// BuildClaimResponse error returns LegResult{Rollback: release}, err — so the claim
+	// acquired in BeginClaimUpdate is still released by this defer. This is the subtlest
+	// correctness point of the refactor.
+	committed := false
+	defer func() {
+		if !committed && result.Rollback != nil {
+			result.Rollback()
+		}
+	}()
 	if err != nil {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		// build/marshal fault (gateway's own) → 500; the defer above still releases the
+		// claim because result.Rollback was set alongside the error.
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "responder failed"})
 		return
 	}
-	if dec.Outcome != shnsdk.PASApproved {
-		// Still insufficient: the deferred ReleaseClaimUpdate returns the claim to
-		// pended so a later, complete amendment can still transition it.
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "amendment still insufficient"})
+	if result.Status != 0 {
+		// 409 (no pending claim), 422 (insufficient amendment / PriorAuth decision error),
+		// or 502 (begin-update store fail). Insufficient/PriorAuth-error already released
+		// the claim via the defer (Rollback set); the 409 acquired nothing (no Rollback).
+		writeJSON(w, result.Status, map[string]string{"error": result.Message})
 		return
 	}
-
-	crJSON, err := shnsdk.BuildClaimResponse(dec.PreAuthRef, dec.ValidUntil, cb.ClaimPatient, env.Metadata.CorrelationID, g.cfg.Clock())
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build claim response failed"})
-		return
-	}
-	if status, msg := g.validateFHIR(ctx, crJSON, "egress"); status != 0 {
+	// (C) outbound fence: the connector must not have swapped the patient between the
+	// request and the response. Same fence arm as submit (pas-claim/pas-claim-update).
+	if status, msg := g.fenceResponseSubject("pas-claim-update", boundPatientRef, result); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
-
-	// review-fixes-6 #1: build the response leg BEFORE finalizing. If the build
-	// fails, we return with approved still false, so the deferred ReleaseClaimUpdate
-	// returns the claim to pended (the provider can retry) — no finalized-but-
-	// unanswered claim. The residual outbox/ack gap (write failure after finalize)
-	// is deferred.
-	//
-	// FR-21: only NOW — after the approved ClaimResponse is built and egress-validated
-	// — complete the pended→approved transition. Finalize (remove) the claim so a
-	// replayed update no longer finds it, and mark approved so the deferred release
-	// does not run. A failure ABOVE this point leaves the claim claimable again
-	// (defer releases it back to pended), so the provider can retry.
-	respBytes, status, msg := g.buildResponseLeg(r, "payer-coverage", "pas-update-response", "pas-claim-update", env.Metadata.CorrelationID, crJSON, tok.Subject, env.Metadata.Sender, "")
+	if status, msg := g.validateFHIR(ctx, result.ResponseFHIR, "egress"); status != 0 {
+		writeJSON(w, status, map[string]string{"error": msg})
+		return
+	}
+	// review-fixes-6 #1: build the response leg BEFORE committing (FinalizeClaimUpdate). If
+	// the build fails we return with committed still false, so the deferred Rollback
+	// (ReleaseClaimUpdate) returns the claim to pended (the provider can retry) — no
+	// finalized-but-unanswered claim. The residual outbox/ack gap (write failure after
+	// finalize) is deferred — exactly today's buildResponseLeg → FinalizeClaimUpdate →
+	// writeLeg ordering.
+	respBytes, status, msg := g.buildResponseLeg(r, "payer-coverage", "pas-update-response", "pas-claim-update", env.Metadata.CorrelationID, result.ResponseFHIR, tok.Subject, env.Metadata.Sender, "")
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
-	if err := g.cfg.Store.FinalizeClaimUpdate(tok.Subject, cb.RelatedClaim); err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "holder write failed (finalize update)"})
-		return
+	if result.Commit != nil {
+		if err := result.Commit(); err != nil {
+			// FinalizeClaimUpdate store-write failure → 502 (parity with today).
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "holder write failed (finalize update)"})
+			return
+		}
 	}
-	approved = true
+	committed = true
 	writeLeg(w, respBytes)
 }

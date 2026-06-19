@@ -90,7 +90,7 @@ docker build -t shn-gateway .
 **Option B — Go binary:**
 
 ```sh
-go install github.com/SmartHealthNetwork/shn-gateway/cmd/gateway@v0.1.2
+go install github.com/SmartHealthNetwork/shn-gateway/cmd/gateway@v0.2.0
 ```
 
 The image runs as a non-root user (uid/gid 65532, distroless) — see
@@ -414,6 +414,70 @@ coverage and medical-necessity policy, inject a custom `shnsdk.Adjudicator`
 through the `engine.Config.Adjudicator` seam — the same interface the SDK
 responder uses, so one implementation works in both. See
 [`STABILITY.md`](STABILITY.md) for the supported `engine` seam.
+
+> **Note:** The `engine.LegResponder` interface is an **internal, unstable 0.x
+> seam** — it may change in any minor version. Do not depend on it directly.
+> `engine.Config.Adjudicator` is the **supported** partner injection point and
+> will remain stable across minor versions.
+
+#### Native-forward payer mode (`PAYER_DAVINCI_*`)
+
+Setting `PAYER_DAVINCI_BASE_URL` switches the payer gateway into **native-forward
+mode**: the three read-only Da Vinci legs (coverage eligibility, CRD order-select,
+and DTR questionnaire fetch) are forwarded to a real partner Da Vinci endpoint
+instead of being adjudicated by the sandbox fallback. PAS (the claim submission
+legs) also forward when `PAYER_DAVINCI_PAS_NATIVE=true` is set; without it, PAS
+falls back to the sandbox adjudicator. A gateway with `PAYER_DAVINCI_BASE_URL` set
+and `PAYER_DAVINCI_PAS_NATIVE=true` is **fully native**: all five payer legs
+forward to your partner. A payer Store (`SHN_STORE_DATABASE_URL` or holdersim) is
+required when `PAYER_DAVINCI_PAS_NATIVE=true` — `build()` fails at startup otherwise.
+
+| Env var | Description |
+|---|---|
+| `PAYER_DAVINCI_BASE_URL` | Base URL of the partner Da Vinci payer (e.g. `https://api.payer.example/davinci`). Setting this enables native-forward mode. |
+| `PAYER_DAVINCI_TOKEN_URL` | SMART Backend Services token endpoint for the partner. Required if the partner requires authentication. |
+| `PAYER_DAVINCI_CLIENT_ID` | SMART client id for the partner. Required when `PAYER_DAVINCI_TOKEN_URL` is set. |
+| `PAYER_DAVINCI_CLIENT_KEY` | SMART client private key (PEM path or inline PEM). Required when `PAYER_DAVINCI_TOKEN_URL` is set. |
+| `PAYER_DAVINCI_CLIENT_ALG` | `ES384` or `RS384`. Required when `PAYER_DAVINCI_TOKEN_URL` is set. |
+| `PAYER_DAVINCI_SCOPE` | Requested scope. Default `system/*.read`. |
+| `PAYER_DAVINCI_CLIENT_KID` | Key id for the client assertion JWK, if the partner requires it. |
+| `PAYER_DAVINCI_PAS_NATIVE` | `true` to forward PAS submit/update legs to the partner's `/Claim/$submit`. Default `false` (sandbox PAS fallback). Requires a payer Store. |
+
+**All-or-nothing rule:** if `PAYER_DAVINCI_TOKEN_URL` is set, then
+`PAYER_DAVINCI_CLIENT_ID`, `PAYER_DAVINCI_CLIENT_KEY`, and
+`PAYER_DAVINCI_CLIENT_ALG` must also be set — a partial credential block is a
+hard startup error (a likely misconfig). Setting `PAYER_DAVINCI_BASE_URL` alone
+(no token URL) is valid and forwards to the partner **unauthenticated** — the
+gateway logs a warning on startup to make this mode visible.
+
+The engine continues to own authority enforcement: every forwarded leg is still
+independently authorized, sealed, and audited through the substrate. The (C)
+outbound subject fence (`fenceResponseSubject`) applies to all native-forwarded
+responses — including PAS submit/update when `PAYER_DAVINCI_PAS_NATIVE=true`. If
+the partner returns a response about a different patient than the request, the
+engine rejects it before sealing (a 403, not a sealed foreign-patient leg).
+
+### Provider DTR population (`PROVIDER_DTR_*`)
+
+On the **provider** side, the DTR leg fills the payer's questionnaire from the
+member's clinical data. By default the gateway uses a **managed** populator that
+fills the sandbox lumbar-MRI questionnaire from the system of record (the stub, or
+your `FHIR_DATA_URL`). To populate **arbitrary** DTR questionnaires — the real Da
+Vinci DTR case, where questionnaires carry CQL expressions the gateway does not
+itself evaluate — forward population to an SDC `Questionnaire/$populate` engine:
+
+| Env var | Description |
+|---|---|
+| `PROVIDER_DTR_NATIVE` | `true` to forward DTR population to an SDC `$populate` engine instead of the managed sandbox populator. Default `false`. |
+| `PROVIDER_DTR_POPULATE_URL` | The SDC `Questionnaire/$populate` endpoint. Required when `PROVIDER_DTR_NATIVE=true`. |
+
+A **CMS-0057-conformant** provider runs its own DTR client and points
+`PROVIDER_DTR_POPULATE_URL` at it. A provider without a DTR client yet can point it
+at a `$populate` CQL engine you operate (for example a HAPI FHIR Clinical Reasoning
+server) — the same SDC contract, populated centrally (DTR-as-a-service). Either way
+the engine keeps authority: the populated `QuestionnaireResponse` is fenced to the
+member it was populated for — a response about a different patient is rejected before
+it can reach PAS — then sealed and audited like any other leg.
 
 ### Durable claim state
 

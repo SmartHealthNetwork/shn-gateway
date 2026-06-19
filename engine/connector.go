@@ -10,6 +10,13 @@ import shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 // holdersim network client (separated stack).
 type SystemOfRecord interface {
 	ResolvePatient(memberID string) (pci string, demo Demo, found bool)
+	// PatientFHIRRef returns the FHIR Patient reference ("Patient/<id>") as known to the
+	// backing FHIR store — the resolvable subject for an operated SDC Questionnaire/$populate
+	// (which reads the store directly and cannot resolve the logical member ref or an
+	// identifier-based subject). For a real FHIR SoR this is the store's (possibly scoped)
+	// resource id; the in-memory stub returns the logical "Patient/<member>". found=false ⇒
+	// the caller falls back to the logical ref.
+	PatientFHIRRef(memberID string) (ref string, found bool)
 	// CoverageInforce reads the US Core Coverage RECORD (CMS-0057: Coverage is a
 	// FHIR record on the Patient/Provider Access APIs). The eligibility
 	// DETERMINATION is the payer's decision — made by Adjudicator.Eligibility,

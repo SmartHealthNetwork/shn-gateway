@@ -176,15 +176,29 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	inforce, reason := g.cfg.Adjudicator.Eligibility(member)
-
-	crrJSON, err := shnsdk.BuildEligibilityResponse(env.Metadata.CorrelationID, "Patient/"+member, inforce, reason, g.cfg.Clock())
+	boundPatientRef := "Patient/" + member
+	result, err := g.cfg.Responder.Handle(ctx, "coverage-eligibility", env.Metadata.CorrelationID, tok.Subject, cerJSON)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build response failed"})
+		// Handle's error return is a build/marshal fault (gateway's own) → 500, parity
+		// with today's StatusInternalServerError build-failure paths. NOT 502.
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "responder failed"})
 		return
 	}
-
-	egress, err := g.cfg.Validator.Validate(ctx, crrJSON, "")
+	// result.Status carries a connector-signalled HTTP outcome (e.g. PAS 409/422);
+	// the eligibility leg never sets it today, but the shared pipeline shape checks it.
+	if result.Status != 0 {
+		writeJSON(w, result.Status, map[string]string{"error": result.Message})
+		return
+	}
+	if status, msg := g.fenceResponseSubject("coverage-eligibility", boundPatientRef, result); status != 0 {
+		writeJSON(w, status, map[string]string{"error": msg})
+		return
+	}
+	// Egress $validate, behavior-identical to the pre-seam inline path: validator
+	// error → 500 "validator unavailable"; !Valid → 500 "egress validation failed".
+	// (NOT g.validateFHIR, which returns 422 on !Valid — that would change the
+	// failure-path contract.)
+	egress, err := g.cfg.Validator.Validate(ctx, result.ResponseFHIR, "")
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "validator unavailable"})
 		return
@@ -194,7 +208,7 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	g.respondLeg(w, r, "payer-coverage", "eligibility-response", "coverage-eligibility", env.Metadata.CorrelationID, crrJSON, tok.Subject, env.Metadata.Sender, "")
+	g.respondLeg(w, r, "payer-coverage", "eligibility-response", "coverage-eligibility", env.Metadata.CorrelationID, result.ResponseFHIR, tok.Subject, env.Metadata.Sender, "")
 }
 
 // handleFederatedQueryInbound is the facility source-side handler (UC-05, §8.4

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
@@ -177,5 +178,59 @@ func TestResolveDiscovery_SurfacesFHIRValidate(t *testing.T) {
 	const envURL = "https://local-validator.example/fhir"
 	if got := firstNonEmpty(envURL, endpoints.FHIRValidate); got != envURL {
 		t.Fatalf("explicit-env precedence: got %q, want %q", got, envURL)
+	}
+}
+
+func TestLoadConfig_PayerDavinciPartialQuadIsError(t *testing.T) {
+	env := map[string]string{
+		"ROLE": "payer", "SHN_SECRETS": "/x", "SHN_DISCOVERY_URL": "https://d",
+		"PAYER_DAVINCI_BASE_URL":  "https://payer.example",
+		"PAYER_DAVINCI_TOKEN_URL": "https://payer.example/token",
+		// CLIENT_ID / CLIENT_KEY deliberately missing → hard error.
+	}
+	_, err := loadConfig(func(k string) string { return env[k] })
+	if err == nil || !strings.Contains(err.Error(), "PAYER_DAVINCI_TOKEN_URL requires") {
+		t.Fatalf("want partial-quad error, got %v", err)
+	}
+}
+
+func TestLoadConfig_PayerDavinciBaseOnlyIsOK(t *testing.T) {
+	env := map[string]string{
+		"ROLE": "payer", "SHN_SECRETS": "/x", "SHN_DISCOVERY_URL": "https://d",
+		"PAYER_DAVINCI_BASE_URL": "https://payer.example", // zero creds → deliberate unauthenticated
+	}
+	cfg, err := loadConfig(func(k string) string { return env[k] })
+	if err != nil {
+		t.Fatalf("base-only should load: %v", err)
+	}
+	if cfg.PayerDavinciBaseURL != "https://payer.example" || cfg.PayerDavinciTokenURL != "" {
+		t.Errorf("cfg = %+v", cfg)
+	}
+}
+
+func TestLoadConfig_ProviderDTRNativeRequiresPopulateURL(t *testing.T) {
+	env := map[string]string{
+		"ROLE": "provider", "SHN_SECRETS": "/x", "SHN_DISCOVERY_URL": "https://d",
+		"PROVIDER_DTR_NATIVE": "true",
+		// PROVIDER_DTR_POPULATE_URL deliberately unset.
+	}
+	_, err := loadConfig(func(k string) string { return env[k] })
+	if err == nil {
+		t.Fatal("want error: PROVIDER_DTR_NATIVE=true without PROVIDER_DTR_POPULATE_URL")
+	}
+}
+
+// A malformed PROVIDER_DTR_POPULATE_URL fails loud at build (checkOptionalURL),
+// consistent with every other URL field — and regardless of mode (the loop validates
+// any set URL; NATIVE off here proves the well-formedness check is independent of the
+// both-or-neither presence check).
+func TestLoadConfig_ProviderDTRPopulateURLMalformed(t *testing.T) {
+	env := map[string]string{
+		"ROLE": "provider", "SHN_SECRETS": "/x", "SHN_DISCOVERY_URL": "https://d",
+		"PROVIDER_DTR_POPULATE_URL": "notaurl", // scheme-less → rejected by checkOptionalURL
+	}
+	_, err := loadConfig(func(k string) string { return env[k] })
+	if err == nil {
+		t.Fatal("want error: malformed PROVIDER_DTR_POPULATE_URL")
 	}
 }

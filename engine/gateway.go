@@ -74,9 +74,18 @@ type Config struct {
 	// gateway made inline before); a partner injects their own. The same interface backs the public SDK
 	// Responder, so one Adjudicator works against both surfaces (Edge premise).
 	Adjudicator shnsdk.Adjudicator
-	Client      *http.Client
-	Clock       func() time.Time
-	NPI         string
+	// Responder is the payer content seam. Normally left nil and DERIVED from
+	// Adjudicator in NewGateway (keeping the STABILITY-supported Adjudicator
+	// injection seam working). A test/partner MAY inject a custom LegResponder.
+	Responder LegResponder
+	// Populator is the DTR population seam (provider-local). Normally left nil and
+	// DEFAULTED to the managed backend (today's FillQuestionnaire) in New; the native
+	// pass-through backend is injected by config (PROVIDER_DTR_NATIVE). A test MAY
+	// inject a custom Populator.
+	Populator Populator
+	Client    *http.Client
+	Clock     func() time.Time
+	NPI       string
 	// CorrelationGen generates a new correlation ID for each outbound scenario
 	// request. Defaults to newCorrelationID (crypto-random 128-bit hex string).
 	// Override in tests for deterministic IDs.
@@ -151,8 +160,24 @@ func New(cfg Config) *Gateway {
 			panic("gateway: HubTransportPub required for role " + cfg.Role + " (mounts /substrate/inbound; hop-auth has no off state)")
 		}
 	}
-	if cfg.Role == "payer" && cfg.Adjudicator == nil {
-		panic("gateway: Config.Adjudicator is required for the payer role (the four payer decision points route through it)")
+	// Derive the default content seam from the injected Adjudicator (the
+	// partner-facing field), so a partner constructing the engine directly with an
+	// Adjudicator still works (STABILITY seam). EVERY payer leg now routes through
+	// Responder — no leg calls cfg.Adjudicator directly — so the derived Responder
+	// is the sole content surface and Adjudicator's only role is to derive it.
+	if cfg.Responder == nil && cfg.Adjudicator != nil {
+		cfg.Responder = NewSandboxResponder(cfg.Adjudicator, cfg.SoR, cfg.Store, cfg.Clock)
+	}
+	// A payer REQUIRES a content Responder. Adjudicator is the SUPPORTED partner
+	// decision seam: setting it auto-derives the default Responder above (every
+	// existing caller takes this path). A test/partner MAY instead inject a custom
+	// LegResponder directly (the native-forward case) with no Adjudicator. Either
+	// way the Responder must be non-nil, so the guard is now Responder-nil.
+	if cfg.Role == "payer" && cfg.Responder == nil {
+		panic("gateway: the payer role requires a content Responder — set Config.Adjudicator (the supported decision seam; it derives the Responder) or inject Config.Responder")
+	}
+	if cfg.Populator == nil {
+		cfg.Populator = newManagedPopulator(cfg.SoR)
 	}
 	return &Gateway{
 		cfg:      cfg,
@@ -176,7 +201,7 @@ type pendState struct {
 	coverageRef string
 	pci         string
 	pasCorr     string
-	filled      []filledItem
+	filled      []FilledItem
 	needed      []string
 }
 

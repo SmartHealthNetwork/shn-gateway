@@ -1,0 +1,82 @@
+package engine
+
+import (
+	"context"
+	"testing"
+)
+
+// recordingResponder records which legs it was asked to handle and returns a tagged
+// ResponseFHIR so the test can tell which delegate ran.
+type recordingResponder struct {
+	tag  string
+	legs *[]string
+}
+
+func (r recordingResponder) Handle(_ context.Context, leg, _, _ string, _ []byte) (LegResult, error) {
+	*r.legs = append(*r.legs, r.tag+":"+leg)
+	return LegResult{ResponseFHIR: []byte(r.tag)}, nil
+}
+
+func TestCompositeResponder_RoutesReadOnlyToNative(t *testing.T) {
+	var nativeLegs, fallbackLegs []string
+	native := recordingResponder{tag: "native", legs: &nativeLegs}
+	fallback := recordingResponder{tag: "fallback", legs: &fallbackLegs}
+	c := NewCompositeResponder(native, fallback, false)
+
+	for _, leg := range []string{"coverage-eligibility", "crd-order-select", "dtr-questionnaire-fetch"} {
+		res, err := c.Handle(context.Background(), leg, "corr", "pci", nil)
+		if err != nil {
+			t.Fatalf("%s: %v", leg, err)
+		}
+		if string(res.ResponseFHIR) != "native" {
+			t.Errorf("%s routed to %s, want native", leg, res.ResponseFHIR)
+		}
+	}
+	for _, leg := range []string{"pas-claim", "pas-claim-update"} {
+		res, err := c.Handle(context.Background(), leg, "corr", "pci", nil)
+		if err != nil {
+			t.Fatalf("%s: %v", leg, err)
+		}
+		if string(res.ResponseFHIR) != "fallback" {
+			t.Errorf("%s routed to %s, want fallback", leg, res.ResponseFHIR)
+		}
+	}
+	if len(nativeLegs) != 3 || len(fallbackLegs) != 2 {
+		t.Errorf("routing counts: native=%v fallback=%v", nativeLegs, fallbackLegs)
+	}
+}
+
+// routeName drives one leg through the composite and returns the tag of whichever
+// delegate handled it (recordingResponder tags its ResponseFHIR with its own name).
+func routeName(t *testing.T, c LegResponder, leg string) string {
+	t.Helper()
+	res, err := c.Handle(context.Background(), leg, "", "", nil)
+	if err != nil {
+		t.Fatalf("%s: %v", leg, err)
+	}
+	return string(res.ResponseFHIR)
+}
+
+func TestComposite_PASNativeRoutesPairBothOrNeither(t *testing.T) {
+	var nl, fl []string
+	native := recordingResponder{tag: "native", legs: &nl}
+	fallback := recordingResponder{tag: "fallback", legs: &fl}
+
+	off := NewCompositeResponder(native, fallback, false)
+	for _, leg := range []string{"pas-claim", "pas-claim-update"} {
+		if got := routeName(t, off, leg); got != "fallback" {
+			t.Fatalf("PAS off: leg %s routed to %s, want fallback", leg, got)
+		}
+	}
+	on := NewCompositeResponder(native, fallback, true)
+	for _, leg := range []string{"pas-claim", "pas-claim-update"} {
+		if got := routeName(t, on, leg); got != "native" {
+			t.Fatalf("PAS on: leg %s routed to %s, want native", leg, got)
+		}
+	}
+	for _, c := range []LegResponder{off, on} {
+		if got := routeName(t, c, "coverage-eligibility"); got != "native" {
+			t.Fatalf("read-only leg routed to %s, want native", got)
+		}
+	}
+}

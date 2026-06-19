@@ -10,49 +10,50 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
-// filledItem is the gateway-engine-LOCAL attribution surface for a DTR auto-filled
+// FilledItem is the gateway-engine-LOCAL attribution surface for a DTR auto-filled
 // QR item (console response, QRItems field). The SDK's FillQuestionnaire drops the
 // FilledItem summary (UI-only — §9); the gateway reconstructs it via fillSummary
 // from the ClinicalContext. JSON tags are byte-for-byte compatible with the original
 // dtr.FilledItem shape so the console response format is unchanged.
-type filledItem struct {
+type FilledItem struct {
 	LinkID    string `json:"linkId"`
 	Answer    string `json:"answer"`
 	Origin    string `json:"origin"`
 	SourceRef string `json:"sourceRef,omitempty"`
 }
 
-// fillSummary reconstructs the []filledItem summary from the ClinicalContext —
+// fillSummary reconstructs the []FilledItem summary from the ClinicalContext —
 // the same items AutoFill would have populated, in the same order. Called after
 // shnsdk.FillQuestionnaire (which drops FilledItem) to preserve the console surface.
 // Items with a negative/absent flag (prior-surgery=false, etc.) are omitted, matching
 // AutoFill's behaviour. functional-status-oswestry is intentionally absent (no local source).
-func fillSummary(cc shnsdk.ClinicalContext) []filledItem {
-	var out []filledItem
-	out = append(out, filledItem{
+func fillSummary(cc shnsdk.ClinicalContext) []FilledItem {
+	var out []FilledItem
+	out = append(out, FilledItem{
 		LinkID:    "conservative-therapy-weeks",
 		Answer:    itoa(cc.ConservativeTherapyWeeks),
 		Origin:    "auto",
 		SourceRef: cc.ConservativeTherapyRef,
 	})
-	out = append(out, filledItem{
+	out = append(out, FilledItem{
 		LinkID:    "neuro-deficit",
 		Answer:    boolStr(cc.NeuroDeficit),
 		Origin:    "auto",
 		SourceRef: cc.NeuroDeficitRef,
 	})
-	out = append(out, filledItem{
+	out = append(out, FilledItem{
 		LinkID:    "prior-imaging",
 		Answer:    boolStr(cc.PriorImaging),
 		Origin:    "auto",
 		SourceRef: cc.PriorImagingRef,
 	})
 	if cc.PriorSurgery {
-		out = append(out, filledItem{
+		out = append(out, FilledItem{
 			LinkID:    "prior-surgery",
 			Answer:    "true",
 			Origin:    "auto",
@@ -60,7 +61,7 @@ func fillSummary(cc shnsdk.ClinicalContext) []filledItem {
 		})
 	}
 	if cc.HighDisability {
-		out = append(out, filledItem{
+		out = append(out, FilledItem{
 			LinkID:    "high-disability",
 			Answer:    "true",
 			Origin:    "auto",
@@ -68,7 +69,7 @@ func fillSummary(cc shnsdk.ClinicalContext) []filledItem {
 		})
 	}
 	if cc.PatientReported {
-		out = append(out, filledItem{
+		out = append(out, FilledItem{
 			LinkID: "patient-reported-required",
 			Answer: "true",
 			Origin: "auto",
@@ -219,7 +220,7 @@ type uc03Resp struct {
 	PARequired  bool         `json:"paRequired"`
 	AuthNumber  string       `json:"authNumber"`
 	ValidUntil  string       `json:"validUntil"`
-	QRItems     []filledItem `json:"qrItems"`
+	QRItems     []FilledItem `json:"qrItems"`
 	PendedItems []string     `json:"pendedItems,omitempty"`
 }
 
@@ -228,7 +229,7 @@ type crdDtrResult struct {
 	qrJSON, srJSON          []byte
 	patientRef, coverageRef string
 	pci                     string
-	filled                  []filledItem
+	filled                  []FilledItem
 }
 
 // runCRDThenDTR executes the shared CRD order-select + DTR fetch + local auto-fill
@@ -295,13 +296,24 @@ func (g *Gateway) runCRDThenDTR(w http.ResponseWriter, r *http.Request, member s
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build dtr request failed"})
 		return crdDtrResult{}, false
 	}
-	questionnaireJSON, err := g.roundTrip(ctx, r, g.cfg.CounterpartID, "provider-tpo", "payer-coverage", "dtr-questionnaire-fetch", "dtr-questionnaire", "dtr-questionnaire-fetch", "questionnaire-only", pci, g.cfg.CorrelationGen(), "", dtrReq)
+	packageJSON, err := g.roundTrip(ctx, r, g.cfg.CounterpartID, "provider-tpo", "payer-coverage", "dtr-questionnaire-fetch", "dtr-questionnaire", "dtr-questionnaire-fetch", "questionnaire-only", pci, g.cfg.CorrelationGen(), "", dtrReq)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return crdDtrResult{}, false
 	}
-	if status, msg := g.validateFHIR(ctx, questionnaireJSON, "ingress"); status != 0 {
+	if status, msg := g.validateFHIR(ctx, packageJSON, "ingress"); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
+		return crdDtrResult{}, false
+	}
+
+	// §6.2: the DTR-fetch leg carries the full $questionnaire-package collection
+	// Bundle (its dependent Libraries/ValueSets survive the wire for Step 3, which
+	// will read them from packageJSON here). Extract the bare Questionnaire for the
+	// F5 canonical check + auto-fill. A package with no Questionnaire is a partner
+	// fault → 502 (the guard relocated from native.go's producer-side extract).
+	questionnaireJSON, err := extractQuestionnaireFromPackage(packageJSON)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "fetched questionnaire package has no Questionnaire"})
 		return crdDtrResult{}, false
 	}
 
@@ -318,21 +330,45 @@ func (g *Gateway) runCRDThenDTR(w http.ResponseWriter, r *http.Request, member s
 		return crdDtrResult{}, false
 	}
 
-	cc, ok := g.cfg.SoR.ClinicalContext(member)
-	if !ok {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "no clinical context for member"})
-		return crdDtrResult{}, false
+	// The operated $populate engine reads the FHIR store directly, so its subject must be the
+	// store-resolvable Patient ref (a scoped id), NOT the logical SHN ref. Resolve it via the SoR
+	// (the stub returns the logical ref, so the managed/hermetic path is unchanged). Falls back to
+	// the logical ref when the SoR can't resolve it.
+	subjectFHIRRef := patientRef
+	if ref, ok := g.cfg.SoR.PatientFHIRRef(member); ok && ref != "" {
+		subjectFHIRRef = ref
 	}
-	qrJSON, err := shnsdk.FillQuestionnaire(questionnaireJSON, cc, shnsdk.QRContext{
-		PatientRef:  patientRef,
-		CoverageRef: coverageRef,
-		OrderRef:    "ServiceRequest/sr-" + member,
-		Authored:    g.cfg.Clock(),
+	qrJSON, fill, err := g.cfg.Populator.Populate(ctx, packageJSON, PopulateContext{
+		Member:         member,
+		PatientRef:     patientRef,
+		SubjectFHIRRef: subjectFHIRRef,
+		CoverageRef:    coverageRef,
+		OrderRef:       "ServiceRequest/sr-" + member,
+		Authored:       g.cfg.Clock(),
 	})
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "auto-fill failed"})
+		writeJSON(w, statusForPopulateErr(err), map[string]string{"error": err.Error()})
 		return crdDtrResult{}, false
 	}
+	// QR-SUBJECT FENCE — uniform across backends, compared against the LOGICAL PatientRef. Managed
+	// fills with PatientRef directly. The native backend reads the FHIR store by the (possibly
+	// scoped) SubjectFHIRRef, verifies the returned QR is about THAT patient, and normalizes
+	// QR.subject → PatientRef before returning — so by here both backends present the logical ref.
+	// (Comparing against the scoped SubjectFHIRRef here would wrongly reject the managed+real-SoR
+	// combination, where managed sets the logical ref but the SoR resolves a scoped id.) 502.
+	if subj, serr := questionnaireResponseSubject(qrJSON); serr != nil || subj != patientRef {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "populated QR subject does not match patient"})
+		return crdDtrResult{}, false
+	}
+	// QR-QUESTIONNAIRE FENCE — uniform across backends. F5 (above) checks the FETCHED
+	// Questionnaire's url before the seam; it never sees the returned QR's self-declared
+	// `questionnaire`. A native engine can return a QR for a DIFFERENT questionnaire. Reject
+	// any QR whose questionnaire (url-part) ≠ canonical. 502.
+	if qq, qerr := questionnaireResponseCanonical(qrJSON); qerr != nil || qq != canonical {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "populated QR questionnaire does not match canonical"})
+		return crdDtrResult{}, false
+	}
+
 	if status, msg := g.validateFHIR(ctx, qrJSON, "egress"); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return crdDtrResult{}, false
@@ -344,8 +380,77 @@ func (g *Gateway) runCRDThenDTR(w http.ResponseWriter, r *http.Request, member s
 		patientRef:  patientRef,
 		coverageRef: coverageRef,
 		pci:         pci,
-		filled:      fillSummary(cc),
+		filled:      fill,
 	}, true
+}
+
+// statusForPopulateErr maps a Populator error to an HTTP status. A managed
+// FillQuestionnaire marshal/unsupported error is the gateway's own fault → 500
+// (behavior-preserving: the inline path returned 500 here, and this never trips on the
+// 8 sandbox scenarios). errNoClinicalContext (a data fault) and errPopulateUpstream
+// (a native $populate fault) are partner/data faults → 502.
+func statusForPopulateErr(err error) int {
+	switch {
+	case errors.Is(err, errNoClinicalContext):
+		return http.StatusBadGateway
+	case errors.Is(err, errPopulateUpstream):
+		return http.StatusBadGateway
+	case errors.Is(err, errPopulateForeignSubject):
+		return http.StatusBadGateway
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
+// questionnaireResponseSubject returns the QR's subject.reference.
+func questionnaireResponseSubject(qrJSON []byte) (string, error) {
+	var probe struct {
+		Subject struct {
+			Reference string `json:"reference"`
+		} `json:"subject"`
+	}
+	if err := json.Unmarshal(qrJSON, &probe); err != nil {
+		return "", err
+	}
+	return probe.Subject.Reference, nil
+}
+
+// setQuestionnaireResponseSubject rewrites the QR's subject.reference (JSON-level, preserving every
+// other field/order). Used to normalize the operated engine's store-resolvable subject (a scoped
+// FHIR id) back to the logical SHN ref after the QR-subject fence has verified it. On a parse
+// failure it returns the input unchanged (the egress validate that follows then rejects it).
+func setQuestionnaireResponseSubject(qrJSON []byte, ref string) []byte {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(qrJSON, &m); err != nil {
+		return qrJSON
+	}
+	subj, err := json.Marshal(map[string]string{"reference": ref})
+	if err != nil {
+		return qrJSON
+	}
+	m["subject"] = subj
+	out, err := json.Marshal(m)
+	if err != nil {
+		return qrJSON
+	}
+	return out
+}
+
+// questionnaireResponseCanonical returns the URL-PART of the QR's `questionnaire`
+// canonical (version stripped). The managed QR sets a VERSIONED canonical
+// (e.g. ".../pa-lumbar-mri|1.0.0") while the F5 `canonical` is the bare url — so the
+// fence compares url-parts, not the raw versioned string.
+func questionnaireResponseCanonical(qrJSON []byte) (string, error) {
+	var probe struct {
+		Questionnaire string `json:"questionnaire"`
+	}
+	if err := json.Unmarshal(qrJSON, &probe); err != nil {
+		return "", err
+	}
+	if i := strings.IndexByte(probe.Questionnaire, '|'); i >= 0 {
+		return probe.Questionnaire[:i], nil
+	}
+	return probe.Questionnaire, nil
 }
 
 // handleUC02 runs the no-PA CRD round-trip: a covered member's X-ray order is
@@ -588,7 +693,7 @@ type uc05Resp struct {
 	PARequired    bool         `json:"paRequired"`
 	AuthNumber    string       `json:"authNumber,omitempty"`
 	ValidUntil    string       `json:"validUntil,omitempty"`
-	QRItems       []filledItem `json:"qrItems,omitempty"`
+	QRItems       []FilledItem `json:"qrItems,omitempty"`
 	PendedItems   []string     `json:"pendedItems,omitempty"`
 	FacilityID    string       `json:"facilityId,omitempty"`
 	Pended        bool         `json:"pended,omitempty"`
