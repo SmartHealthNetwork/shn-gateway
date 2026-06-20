@@ -222,6 +222,30 @@ own via [§7](#7-integrate-your-internal-systems).
 | `FHIR_CLIENT_KID` | Key id for the client assertion JWK, if your server requires it. |
 | `SHN_STORE_DATABASE_URL` | Postgres DSN for durable claim-state storage. Omit for in-memory (non-durable across restarts). |
 
+### Accept Da Vinci requests from a provider EHR (provider, optional)
+
+Set `PROVIDER_DAVINCI_INGRESS=1` to mount the provider-side Da Vinci ingress: the
+gateway accepts a provider EHR / reference-implementation's **native Da Vinci
+requests** — CDS Hooks order-select (Coverage Requirements Discovery),
+`Questionnaire/$questionnaire-package` (DTR), and `Claim/$submit` (PAS) — resolves
+and inlines the payer's prefetch from **your own system of record** (non-aggregating;
+no callback to the provider), and forwards conformant requests through the substrate.
+
+Inbound requests authenticate via **SMART Backend Services**: the gateway hosts its
+own `POST /oauth/token` and `GET /.well-known/smart-configuration`, verifies a
+registered client's signed JWT assertion (`private_key_jwt`, ES384/RS384), issues a
+short-lived bearer, and verifies it on every ingress call.
+
+| Env var | Description |
+|---|---|
+| `PROVIDER_DAVINCI_INGRESS` | Set to `1` to mount the ingress on the provider gateway. |
+| `PROVIDER_DAVINCI_INGRESS_BASE_URL` | The gateway's public base URL — the SMART audience the gateway pins and the token endpoint it advertises. **Required** when the ingress is enabled. |
+| `INGRESS_CLIENTS_FILE` | Path to a JSON array of registered inbound clients: `[{"client_id":"…","alg":"ES384","public_key_pem":"-----BEGIN PUBLIC KEY-----…","scopes":["system/Davinci.write"]}]`. **Required** (≥1 client) when the ingress is enabled. |
+
+Enabling the ingress without a base URL or at least one valid registered client is a
+hard startup error. (Exposing this ingress on a public edge and full UDAP dynamic
+client registration are planned future enhancements.)
+
 ### Advanced overrides (rarely needed)
 
 Each substrate endpoint and trust-anchor key URL is resolved from discovery by
