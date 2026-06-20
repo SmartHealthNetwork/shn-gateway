@@ -137,8 +137,8 @@ func (s *SoR) CoverageInforce(memberID string) (bool, string) {
 // server (FR-15). found=false when there is no anchoring Condition (mirrors the stub's
 // hasClinical). Per field: resource found => (value, "Type/id"); absent => (zero, ""). PriorSurgery
 // is code-aware: searches Procedures keyed on shnsdk.ProcedureValueSet (Flag 4). The remaining
-// demo-faithful heuristics are the Condition-anchor found and the ODI-presence HighDisability
-// (spec §5). PatientReported is the workflow-routing REQUIREMENT signal ("this case requires a
+// demo-faithful heuristics are the Condition-anchor found and the ODI-presence HighDisability.
+// PatientReported is the workflow-routing REQUIREMENT signal ("this case requires a
 // patient-attested functional-status item" — what DTR auto-fill keys off, dtr.go), sourced from
 // the SHN-local urn:shn:clinical-context|patient-reported-required Observation. This supersedes
 // an earlier design that conflated this requirement flag with the QR-signature-time

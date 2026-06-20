@@ -5,7 +5,7 @@ import "context"
 // LegResponder is the per-leg payer CONTENT seam (FHIR-in / FHIR-out). The engine
 // owns authority (the A/B inbound fences + the C outbound fence), sealing, edge
 // $validate, and audit; the connector owns content only — the decision and the
-// response FHIR. See docs/superpowers/specs/2026-06-18-payer-responder-seam-design.md §2.
+// response FHIR.
 //
 // leg is the inbound TransactionType. corrID + subjectPCI are engine-owned,
 // leg-invariant authority outputs the connector needs for builders/Store keys
@@ -15,7 +15,7 @@ type LegResponder interface {
 	Handle(ctx context.Context, leg, corrID, subjectPCI string, requestFHIR []byte) (LegResult, error)
 }
 
-// LegResult is what a LegResponder returns. See spec §2 for the field contract.
+// LegResult is what a LegResponder returns.
 type LegResult struct {
 	ResponseFHIR   []byte       // sealed back; engine (C)-fences + egress-$validates (FHIR legs)
 	SideEffectFHIR [][]byte     // payer-local FHIR to persist (EOB); engine egress-$validates each before Commit

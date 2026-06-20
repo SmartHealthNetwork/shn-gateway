@@ -177,13 +177,13 @@ func (g *Gateway) handleScenario(w http.ResponseWriter, r *http.Request) {
 	// exact envelope it will ride in (C2): token.CorrelationID == envelope CID.
 	correlationID := g.cfg.CorrelationGen()
 
-	// UC-01 uses the SAME authorized-sealed-leg helper as UC-02/03 (roundTrip):
-	// authorize(eligibility-inquiry) → seal → Hub /route → verify the response leg
+	// UC-01 uses the SAME authorized-sealed-leg helper as UC-02/03 (OriginateLeg →
+	// roundTrip): authorize(eligibility-inquiry) → seal → Hub /route → verify the response leg
 	// (respOp eligibility-response, bound to this correlationID, Sender=="payer",
 	// subject==pci) → decrypt. Folding UC-01 onto the shared helper keeps the
 	// trust-critical response-leg verification in ONE place — no duplicated copy to
 	// drift.
-	crrJSON, err := g.roundTrip(ctx, r, g.cfg.CounterpartID, "provider-tpo", "payer-coverage", "eligibility-inquiry", "eligibility-response", "coverage-eligibility", "eligibility-scope", pci, correlationID, "", cerJSON)
+	crrJSON, err := g.OriginateLeg(ctx, r, g.cfg.CounterpartID, "coverage-eligibility", pci, correlationID, "", Content{WorkstreamType: workstreamPA, Bytes: cerJSON})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
@@ -191,8 +191,8 @@ func (g *Gateway) handleScenario(w http.ResponseWriter, r *http.Request) {
 
 	// Ingress-validate the decrypted response (load-bearing). A payer returning an
 	// invalid CRR is an UPSTREAM failure → 502 (preserves the UC-01 contract; only
-	// the response-leg token verification was folded into roundTrip, not the
-	// validation-status semantics).
+	// the response-leg token verification was folded into roundTrip (via OriginateLeg),
+	// not the validation-status semantics).
 	ingress, err := g.cfg.Validator.Validate(ctx, crrJSON, "")
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "validator unavailable"})
@@ -275,7 +275,7 @@ func (g *Gateway) runCRDThenDTR(w http.ResponseWriter, r *http.Request, member s
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build order-select failed"})
 		return crdDtrResult{}, false
 	}
-	crdRespJSON, err := g.roundTrip(ctx, r, g.cfg.CounterpartID, "provider-tpo", "payer-coverage", "crd-order-select", "crd-cards", "crd-order-select", "crd-context", pci, g.cfg.CorrelationGen(), "", crdReq)
+	crdRespJSON, err := g.OriginateLeg(ctx, r, g.cfg.CounterpartID, "crd-order-select", pci, g.cfg.CorrelationGen(), "", Content{WorkstreamType: workstreamPA, Bytes: crdReq})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return crdDtrResult{}, false
@@ -285,9 +285,9 @@ func (g *Gateway) runCRDThenDTR(w http.ResponseWriter, r *http.Request, member s
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "card parse failed"})
 		return crdDtrResult{}, false
 	}
-	// Per-value switch on the CRD card result (Finding 1 + Finding 2 of the design
-	// spec §3). Every non-happy-path value is handled fail-closed with no silent
-	// fall-through. FR-G25; AI-1 (a coverage denial STOPS, never proceeds silently).
+	// Per-value switch on the CRD card result (FR-G25). Every non-happy-path value
+	// is handled fail-closed with no silent fall-through. AI-1: a coverage denial
+	// STOPS, never proceeds silently.
 	switch {
 	case cov.Covered == shnsdk.CoveredNotCovered:
 		// Explicit terminal stop — a coverage denial STOPS, never silently "proceeds".
@@ -318,7 +318,7 @@ func (g *Gateway) runCRDThenDTR(w http.ResponseWriter, r *http.Request, member s
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build dtr request failed"})
 		return crdDtrResult{}, false
 	}
-	packageJSON, err := g.roundTrip(ctx, r, g.cfg.CounterpartID, "provider-tpo", "payer-coverage", "dtr-questionnaire-fetch", "dtr-questionnaire", "dtr-questionnaire-fetch", "questionnaire-only", pci, g.cfg.CorrelationGen(), "", dtrReq)
+	packageJSON, err := g.OriginateLeg(ctx, r, g.cfg.CounterpartID, "dtr-questionnaire-fetch", pci, g.cfg.CorrelationGen(), "", Content{WorkstreamType: workstreamPA, Bytes: dtrReq})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return crdDtrResult{}, false
@@ -503,7 +503,7 @@ func (g *Gateway) handleUC02(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Every FHIR resource crossing the substrate is validated — the Coverage in
-	// the CRD prefetch included (spec §3).
+	// the CRD prefetch included.
 	if status, msg := g.validateFHIR(ctx, coverageJSON, "egress"); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
@@ -516,7 +516,7 @@ func (g *Gateway) handleUC02(w http.ResponseWriter, r *http.Request) {
 	}
 
 	correlationID := g.cfg.CorrelationGen()
-	respJSON, err := g.roundTrip(ctx, r, g.cfg.CounterpartID, "provider-tpo", "payer-coverage", "crd-order-select", "crd-cards", "crd-order-select", "crd-context", pci, correlationID, "", reqJSON)
+	respJSON, err := g.OriginateLeg(ctx, r, g.cfg.CounterpartID, "crd-order-select", pci, correlationID, "", Content{WorkstreamType: workstreamPA, Bytes: reqJSON})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
@@ -569,7 +569,7 @@ func (g *Gateway) handleUC03(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
-	claimRespJSON, err := g.roundTrip(ctx, r, g.cfg.CounterpartID, "provider-tpo", "payer-coverage", "pas-submit", "pas-response", "pas-claim", "pas-bundle", res.pci, pasCorr, "", bundleJSON)
+	claimRespJSON, err := g.OriginateLeg(ctx, r, g.cfg.CounterpartID, "pas-claim", res.pci, pasCorr, "", Content{WorkstreamType: workstreamPA, Bytes: bundleJSON})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
@@ -625,7 +625,7 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
-	pendedResp, err := g.roundTrip(ctx, r, g.cfg.CounterpartID, "provider-tpo", "payer-coverage", "pas-submit", "pas-response", "pas-claim", "pas-bundle", res.pci, pasCorr, "", bundleJSON)
+	pendedResp, err := g.OriginateLeg(ctx, r, g.cfg.CounterpartID, "pas-claim", res.pci, pasCorr, "", Content{WorkstreamType: workstreamPA, Bytes: bundleJSON})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
@@ -683,7 +683,7 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// ClaimUpdate exchange — expect APPROVED.
-	updateResp, err := g.roundTrip(ctx, r, g.cfg.CounterpartID, "provider-tpo", "payer-coverage", "pas-update-submit", "pas-update-response", "pas-claim-update", "pas-update-bundle", res.pci, updateCorr, "", updateBundle)
+	updateResp, err := g.OriginateLeg(ctx, r, g.cfg.CounterpartID, "pas-claim-update", res.pci, updateCorr, "", Content{WorkstreamType: workstreamPA, Bytes: updateBundle})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
@@ -779,7 +779,7 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
-	pendedResp, err := g.roundTrip(ctx, r, g.cfg.CounterpartID, "provider-tpo", "payer-coverage", "pas-submit", "pas-response", "pas-claim", "pas-bundle", res.pci, pasCorr, "", bundleJSON)
+	pendedResp, err := g.OriginateLeg(ctx, r, g.cfg.CounterpartID, "pas-claim", res.pci, pasCorr, "", Content{WorkstreamType: workstreamPA, Bytes: bundleJSON})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
@@ -810,7 +810,7 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 	fqCorr := g.cfg.CorrelationGen()
 	// custodian = the facility id, so the Authorization Framework checks consent for
 	// THIS source. No consent (noconsent branch) → authorize fails → PA stays pended.
-	recordsJSON, err := g.roundTrip(ctx, r, facility.ID, "provider-tpo", "facility-disclosure", "federated-query-submit", "federated-query-response", "federated-query", "named-docs-only", res.pci, fqCorr, facility.ID, queryJSON)
+	recordsJSON, err := g.OriginateLeg(ctx, r, facility.ID, "federated-query", res.pci, fqCorr, facility.ID, Content{WorkstreamType: workstreamPA, Bytes: queryJSON})
 	if err != nil {
 		// Distinguish a genuine consent DENIAL from an infrastructure/integrity
 		// failure. ONLY an authorization denial (the no-consent branch) leaves the PA
@@ -846,7 +846,7 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
-	updateResp, err := g.roundTrip(ctx, r, g.cfg.CounterpartID, "provider-tpo", "payer-coverage", "pas-update-submit", "pas-update-response", "pas-claim-update", "pas-update-bundle", res.pci, updateCorr, "", updateBundle)
+	updateResp, err := g.OriginateLeg(ctx, r, g.cfg.CounterpartID, "pas-claim-update", res.pci, updateCorr, "", Content{WorkstreamType: workstreamPA, Bytes: updateBundle})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
@@ -909,7 +909,7 @@ func (g *Gateway) handleUC08(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	claimRespJSON, err := g.roundTrip(ctx, r, g.cfg.CounterpartID, "provider-tpo", "payer-coverage", "pas-submit", "pas-response", "pas-claim", "pas-bundle", res.pci, pasCorr, "", bundleJSON)
+	claimRespJSON, err := g.OriginateLeg(ctx, r, g.cfg.CounterpartID, "pas-claim", res.pci, pasCorr, "", Content{WorkstreamType: workstreamPA, Bytes: bundleJSON})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return

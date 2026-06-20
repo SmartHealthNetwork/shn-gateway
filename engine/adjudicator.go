@@ -45,7 +45,7 @@ func NewSandboxAdjudicator(sor SystemOfRecord, clock func() time.Time) shnsdk.Ad
 
 // Eligibility consults the US Core Coverage RECORD (SoR.CoverageInforce) and
 // returns the determination. CMS-0057: Coverage is a record; eligibility is a
-// payer decision that reads it (spec §1).
+// payer decision that reads it.
 func (s *sandboxAdjudicator) Eligibility(memberID string) (bool, string) {
 	return s.sor.CoverageInforce(memberID)
 }
@@ -104,6 +104,23 @@ func NewSandboxResponder(adj shnsdk.Adjudicator, sor SystemOfRecord, store Store
 	return &sandboxResponder{adj: adj, sor: sor, store: store, clock: clock}
 }
 
+// crdCardsForCPT runs the shared CRD adjudication tail: CPT → coverage decision → rendered cards.
+// Used by BOTH the minimized (crd-order-select) and conformant (crd-order-select-native) cases.
+func (s *sandboxResponder) crdCardsForCPT(cpt string) (LegResult, error) {
+	paRequired, canonical := s.adj.OrderSelect(cpt)
+	cov := shnsdk.CardCoverage{Covered: "covered"}
+	if paRequired {
+		cov.PANeeded, cov.Questionnaires = "auth-needed", []string{canonical}
+	} else {
+		cov.PANeeded = "no-auth"
+	}
+	cardsJSON, err := shnsdk.BuildCards(cov)
+	if err != nil {
+		return LegResult{}, fmt.Errorf("build cards: %w", err)
+	}
+	return LegResult{ResponseFHIR: cardsJSON}, nil
+}
+
 func (s *sandboxResponder) Handle(ctx context.Context, leg, corrID, subjectPCI string, requestFHIR []byte) (LegResult, error) {
 	switch leg {
 	case "coverage-eligibility":
@@ -130,18 +147,17 @@ func (s *sandboxResponder) Handle(ctx context.Context, leg, corrID, subjectPCI s
 			// DTR unknown-canonical 400.
 			return LegResult{Status: http.StatusBadRequest, Message: "parse CPT failed"}, nil
 		}
-		paRequired, canonical := s.adj.OrderSelect(cpt)
-		cov := shnsdk.CardCoverage{Covered: "covered"}
-		if paRequired {
-			cov.PANeeded, cov.Questionnaires = "auth-needed", []string{canonical}
-		} else {
-			cov.PANeeded = "no-auth"
+		return s.crdCardsForCPT(cpt)
+	case "crd-order-select-native":
+		srJSON, ok := extractConformantSR(requestFHIR)
+		if !ok {
+			return LegResult{Status: http.StatusBadRequest, Message: "no ServiceRequest in draftOrders"}, nil
 		}
-		cardsJSON, err := shnsdk.BuildCards(cov)
+		cpt, err := shnsdk.ParseServiceRequestCPT(srJSON)
 		if err != nil {
-			return LegResult{}, fmt.Errorf("build cards: %w", err)
+			return LegResult{Status: http.StatusBadRequest, Message: "parse CPT failed"}, nil
 		}
-		return LegResult{ResponseFHIR: cardsJSON}, nil
+		return s.crdCardsForCPT(cpt)
 	case "dtr-questionnaire-fetch":
 		var fetch shnsdk.QuestionnaireFetchRequest
 		if err := json.Unmarshal(requestFHIR, &fetch); err != nil {
@@ -182,7 +198,7 @@ func (s *sandboxResponder) Handle(ctx context.Context, leg, corrID, subjectPCI s
 		dec, err := s.adj.PriorAuth(cb.QRJSON, cb.HasDiagnosticReport)
 		if err != nil {
 			// A PriorAuth DECISION error is a 422 via Status (mirrors today's
-			// handlePASInbound), NOT the generic 500 the error return maps to. spec §2 D.
+			// handlePASInbound), NOT the generic 500 the error return maps to.
 			return LegResult{Status: http.StatusUnprocessableEntity, Message: err.Error()}, nil
 		}
 		switch dec.Outcome {

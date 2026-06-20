@@ -76,7 +76,7 @@ func (g *Gateway) handleCRDInbound(w http.ResponseWriter, r *http.Request, env s
 
 	// Only AFTER the subject binds do we ingress-validate the FHIR resources via
 	// the external $validate — every FHIR resource crossing the substrate is
-	// validated (spec §3), fail-closed as before.
+	// validated, fail-closed as before.
 	if status, msg := g.validateFHIR(ctx, srJSON, "ingress"); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return

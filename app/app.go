@@ -32,7 +32,7 @@ import (
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
-// config is the collapsed PUBLIC config surface (spec §3). Required:
+// config is the collapsed PUBLIC config surface. Required:
 // SHN_DISCOVERY_URL (the single anchor), ROLE, SHN_SECRETS (the bundle dir).
 // Everything else is discovery-resolved or an optional override. The seed /
 // SHN_MANIFEST path of the substrate cmd/gateway is intentionally dropped — the
@@ -72,7 +72,7 @@ type config struct {
 	FHIRClientKID   string
 
 	// Optional native-forward payer block (the PARTNER Da Vinci payer is a different
-	// external party from the FHIR SoR — distinct credentials; design §7). Setting
+	// external party from the FHIR SoR — distinct credentials). Setting
 	// PayerDavinciBaseURL switches the payer's read-only legs to native forwarding.
 	PayerDavinciBaseURL   string
 	PayerDavinciTokenURL  string
@@ -94,6 +94,27 @@ type config struct {
 	// Questionnaire/$populate endpoint. Unauthenticated this slice.
 	ProviderDTRNative      bool
 	ProviderDTRPopulateURL string
+
+	// ProviderDavinciIngress mounts the Da Vinci ingress routes (CRD /cds-services,
+	// DTR $questionnaire-package, PAS $submit) on the provider role. Set by
+	// PROVIDER_DAVINCI_INGRESS (any non-empty value enables). When enabled,
+	// PROVIDER_DAVINCI_INGRESS_BASE_URL and INGRESS_CLIENTS_FILE are required —
+	// a mounted-but-universally-401 ingress is a footgun (FR-G13 all-or-nothing).
+	ProviderDavinciIngress bool
+
+	// ProviderDavinciIngressBaseURL is the CONFIG-PINNED SMART Backend Services aud
+	// (token endpoint aud + bearer aud). Never request-derived. Set by
+	// PROVIDER_DAVINCI_INGRESS_BASE_URL. Required when ProviderDavinciIngress is set.
+	ProviderDavinciIngressBaseURL string
+	// ProviderDavinciIngressClientsFile is the path to the JSON registration file
+	// ([{client_id, alg, public_key_pem, scopes}]). Set by INGRESS_CLIENTS_FILE.
+	// Required when ProviderDavinciIngress is set.
+	ProviderDavinciIngressClientsFile string
+
+	// IngressBaseURL and IngressClients are resolved from ProviderDavinciIngressBaseURL
+	// + IngressClientsFile by loadConfig and passed directly into engine.Config.
+	IngressBaseURL string
+	IngressClients map[string]engine.IngressClientRegistration
 }
 
 var validRoles = map[string]bool{
@@ -170,6 +191,10 @@ func loadConfig(getenv func(string) string) (config, error) {
 
 		ProviderDTRNative:      getenv("PROVIDER_DTR_NATIVE") == "true",
 		ProviderDTRPopulateURL: getenv("PROVIDER_DTR_POPULATE_URL"),
+		ProviderDavinciIngress: getenv("PROVIDER_DAVINCI_INGRESS") != "",
+
+		ProviderDavinciIngressBaseURL:     getenv("PROVIDER_DAVINCI_INGRESS_BASE_URL"),
+		ProviderDavinciIngressClientsFile: getenv("INGRESS_CLIENTS_FILE"),
 
 		AuthzPubkeyURL:     getenv("AUTHZ_PUBKEY_URL"),
 		HubTransportKeyURL: getenv("HUB_TRANSPORT_KEY_URL"),
@@ -188,6 +213,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 		{"PAYER_DAVINCI_BASE_URL", cfg.PayerDavinciBaseURL},
 		{"PAYER_DAVINCI_TOKEN_URL", cfg.PayerDavinciTokenURL},
 		{"PROVIDER_DTR_POPULATE_URL", cfg.ProviderDTRPopulateURL},
+		{"PROVIDER_DAVINCI_INGRESS_BASE_URL", cfg.ProviderDavinciIngressBaseURL},
 		{"SHN_DISCOVERY_URL", cfg.DiscoveryURL},
 		{"AUTHZ_PUBKEY_URL", cfg.AuthzPubkeyURL},
 		{"HUB_TRANSPORT_KEY_URL", cfg.HubTransportKeyURL},
@@ -228,7 +254,82 @@ func loadConfig(getenv func(string) string) (config, error) {
 		return config{}, fmt.Errorf("gateway: PROVIDER_DTR_NATIVE=true requires PROVIDER_DTR_POPULATE_URL")
 	}
 
+	// All-or-nothing ingress registration (FR-G13): PROVIDER_DAVINCI_INGRESS
+	// requires a config-pinned base URL AND >=1 valid registered client. A provider that
+	// enables the ingress without registered clients gets a universally-401 ingress —
+	// that is a footgun, not a safe default, so we refuse to boot.
+	if cfg.ProviderDavinciIngress {
+		if role != "provider" {
+			return config{}, fmt.Errorf("gateway: PROVIDER_DAVINCI_INGRESS is provider-only (role=%q)", role)
+		}
+		if cfg.ProviderDavinciIngressBaseURL == "" {
+			return config{}, fmt.Errorf("gateway: PROVIDER_DAVINCI_INGRESS requires PROVIDER_DAVINCI_INGRESS_BASE_URL (the config-pinned SMART aud)")
+		}
+		clients, err := loadIngressClients(cfg.ProviderDavinciIngressClientsFile)
+		if err != nil {
+			return config{}, fmt.Errorf("gateway: ingress clients: %w", err)
+		}
+		if len(clients) == 0 {
+			return config{}, fmt.Errorf("gateway: PROVIDER_DAVINCI_INGRESS requires INGRESS_CLIENTS_FILE with >=1 registered client (a mounted-but-universally-401 ingress is a footgun)")
+		}
+		cfg.IngressBaseURL = cfg.ProviderDavinciIngressBaseURL
+		cfg.IngressClients = clients
+	}
+
 	return cfg, nil
+}
+
+// loadIngressClients parses the inbound-client registration file: a JSON array of
+// {client_id, alg, public_key_pem, scopes}. alg must be ES384|RS384 and the PEM must
+// parse — a malformed entry is a hard boot error (the FR-G13 all-or-nothing posture).
+// Returns nil (not error) when path is empty — the caller then enforces the
+// must-have->=1-client invariant.
+func loadIngressClients(path string) (map[string]engine.IngressClientRegistration, error) {
+	if path == "" {
+		return nil, nil
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	var arr []struct {
+		ClientID     string   `json:"client_id"`
+		Alg          string   `json:"alg"`
+		PublicKeyPEM string   `json:"public_key_pem"`
+		Scopes       []string `json:"scopes"`
+	}
+	if err := json.Unmarshal(raw, &arr); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	out := map[string]engine.IngressClientRegistration{}
+	for i, c := range arr {
+		if c.ClientID == "" {
+			return nil, fmt.Errorf("entry %d: empty client_id", i)
+		}
+		if c.Alg != "ES384" && c.Alg != "RS384" {
+			return nil, fmt.Errorf("client %q: alg must be ES384|RS384, got %q", c.ClientID, c.Alg)
+		}
+		pemBytes := []byte(c.PublicKeyPEM)
+		// Parse the PEM here for fail-fast boot-time error attribution. Note:
+		// engine.newIngressAuthServer re-parses the same bytes into its pubKeys map —
+		// this parse is intentional and must not be removed as an "optimization".
+		switch c.Alg {
+		case "ES384":
+			if _, err := jwt.ParseECPublicKeyFromPEM(pemBytes); err != nil {
+				return nil, fmt.Errorf("client %q: bad ES384 public key: %w", c.ClientID, err)
+			}
+		case "RS384":
+			if _, err := jwt.ParseRSAPublicKeyFromPEM(pemBytes); err != nil {
+				return nil, fmt.Errorf("client %q: bad RS384 public key: %w", c.ClientID, err)
+			}
+		}
+		scopes := c.Scopes
+		if len(scopes) == 0 {
+			scopes = []string{"system/Davinci.write"}
+		}
+		out[c.ClientID] = engine.IngressClientRegistration{Alg: c.Alg, PublicKeyPEM: pemBytes, Scopes: scopes}
+	}
+	return out, nil
 }
 
 func checkOptionalURL(name, v string) error {
@@ -495,6 +596,9 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	if cfg.ProviderDTRNative {
 		gwCfg.Populator = engine.NewNativePopulator(client, cfg.ProviderDTRPopulateURL)
 	}
+	gwCfg.IngressEnabled = cfg.ProviderDavinciIngress
+	gwCfg.IngressBaseURL = cfg.IngressBaseURL
+	gwCfg.IngressClients = cfg.IngressClients
 	fmt.Fprintf(stdout, "gateway: role=%s holder=%s listening on %s\n", cfg.Role, bundle.Identity.HolderID, cfg.Addr)
 	b = built{addr: cfg.Addr, handler: engine.New(gwCfg).Handler(), reg: reg, registrarURL: registrarURL, client: client}
 	return b, nil

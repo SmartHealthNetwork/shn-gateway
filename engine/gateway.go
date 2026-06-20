@@ -55,7 +55,7 @@ type Config struct {
 	AuthzURL string
 	AuthzPub ed25519.PublicKey
 	// HubTransportPub verifies the per-hop X-Hub-Assertion the Hub sends with
-	// every /substrate/inbound forward (responder-enablement spec §A3). REQUIRED
+	// every /substrate/inbound forward (per-hop transport auth). REQUIRED
 	// for roles that mount /substrate/inbound (payer/facility/phg): New panics
 	// without it — mandatory enforcement, no "configured off" state.
 	HubTransportPub ed25519.PublicKey
@@ -83,15 +83,32 @@ type Config struct {
 	// pass-through backend is injected by config (PROVIDER_DTR_NATIVE). A test MAY
 	// inject a custom Populator.
 	Populator Populator
-	Client    *http.Client
-	Clock     func() time.Time
-	NPI       string
+	// IngressEnabled mounts the Da Vinci ingress routes on the provider role.
+	// Set from PROVIDER_DAVINCI_INGRESS by app.go. The routes fail-closed without
+	// ingressAuthBypass (real inbound UDAP auth is a planned future enhancement), so
+	// enabling them in prod is safe — they reject every call.
+	IngressEnabled bool
+	// IngressBaseURL is the gateway's CONFIG-PINNED public base URL: the SMART
+	// Backend Services aud (assertion + bearer) and the advertised token endpoint.
+	// Never request-derived (no Host-header spoof). Required when IngressEnabled and
+	// not bypassed. Set from PROVIDER_DAVINCI_INGRESS_BASE_URL by app.go.
+	IngressBaseURL string
+	// IngressClients are the config-registered inbound clients (client_id →
+	// public key + scopes). Required (>=1) when IngressEnabled and not bypassed.
+	IngressClients map[string]IngressClientRegistration
+	// ingressAuthBypass skips the (deferred) inbound participant auth on the ingress.
+	// UNEXPORTED and set ONLY by EnableIngressForTest — never read from env, never set
+	// by build() (image purity, scaffold pattern).
+	ingressAuthBypass bool
+	Client            *http.Client
+	Clock             func() time.Time
+	NPI               string
 	// CorrelationGen generates a new correlation ID for each outbound scenario
 	// request. Defaults to newCorrelationID (crypto-random 128-bit hex string).
 	// Override in tests for deterministic IDs.
 	CorrelationGen func() string
 	// ConsentURL is the Trust-operated Global Person Consent service URL (facility
-	// only). The facility's consent backstop (§8.4) re-confirms a TREAT permit here
+	// only). The facility's consent backstop re-confirms a TREAT permit here
 	// before releasing any records. When empty the backstop fails closed (no consent
 	// service ⇒ no disclosure).
 	ConsentURL string
@@ -115,15 +132,25 @@ type Gateway struct {
 	mu      sync.Mutex
 	pending map[string]pendState
 
+	// exchanges is the Layer-2 Exchange-correlation seam (the DaVinciIngress origination
+	// driver groups each ingress call's legs under one Exchange.ID). In-memory default;
+	// a durable/expiring/shared impl is a planned future drop-in behind ExchangeStore.
+	exchanges ExchangeStore
+
 	// paReplay rejects a patient-access correlationId re-presented within
 	// paReplayWindow (consume-once replay binding on the direct Patient Access read).
 	paReplay *shnsdk.ReplayGuard
 
 	// hubJTI enforces one-time-use on the Hub's X-Hub-Assertion jti at
-	// /substrate/inbound (spec §A3). In-memory per-replica; cross-replica replay
+	// /substrate/inbound. In-memory per-replica; cross-replica replay
 	// is bounded by the 2-minute assertion TTL (single-task sandbox today; a shared
 	// store is the additive revisit if gateways ever scale horizontally).
 	hubJTI *shnsdk.ReplayGuard
+
+	// ingressAuth is the gateway-hosted SMART Backend Services authorization server +
+	// bearer verifier for the DaVinciIngress. nil when the ingress is disabled OR
+	// running under the test-only bypass; ingressAuthOK is nil-safe.
+	ingressAuth *ingressAuthServer
 }
 
 // New constructs a Gateway. The clock defaults to time.Now and the client to
@@ -179,12 +206,24 @@ func New(cfg Config) *Gateway {
 	if cfg.Populator == nil {
 		cfg.Populator = newManagedPopulator(cfg.SoR)
 	}
-	return &Gateway{
-		cfg:      cfg,
-		pending:  map[string]pendState{},
-		paReplay: shnsdk.NewReplayGuard(paReplayWindow, paReplayMaxEntries),
-		hubJTI:   shnsdk.NewReplayGuard(shnsdk.MaxAssertionTTL, 1<<16),
+	g := &Gateway{
+		cfg:       cfg,
+		pending:   map[string]pendState{},
+		exchanges: NewInMemoryExchangeStore(),
+		paReplay:  shnsdk.NewReplayGuard(paReplayWindow, paReplayMaxEntries),
+		hubJTI:    shnsdk.NewReplayGuard(shnsdk.MaxAssertionTTL, 1<<16),
 	}
+	// Build the inbound auth server only for a real-auth ingress (not under the
+	// test bypass — body-conformance tests don't register clients). app.go has
+	// already validated registrations; a failure here is a config invariant.
+	if cfg.IngressEnabled && !cfg.ingressAuthBypass {
+		ia, err := newIngressAuthServer(cfg.IngressBaseURL, cfg.IngressClients, cfg.Clock)
+		if err != nil {
+			panic("gateway: " + err.Error())
+		}
+		g.ingressAuth = ia
+	}
+	return g
 }
 
 // pendState is the provider's own in-flight PA workflow state for a PENDED
@@ -235,6 +274,20 @@ func (g *Gateway) Reset() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.pending = map[string]pendState{}
+	// A fresh demo run starts with no stale exchanges, consistent with the pending map.
+	// The Exchange store holds only metadata-only LegRecords.
+	g.exchanges = NewInMemoryExchangeStore()
+}
+
+// ExchangeSnapshot returns a copy of the gateway's current Exchanges (test observability of the
+// metadata-only correlation seam). It is a DEV/TEST-ONLY accessor, NOT a stable cross-impl API:
+// it returns nil for any store that is not the in-memory impl (a durable store would need its own
+// observability), so Gate-1 tests rely on it only against the in-memory default.
+func (g *Gateway) ExchangeSnapshot() []Exchange {
+	if m, ok := g.exchanges.(*inMemoryExchangeStore); ok {
+		return m.snapshot()
+	}
+	return nil
 }
 
 // pendingForPatient returns the resume token of a pended scenario for (scenario,
@@ -309,6 +362,16 @@ func (g *Gateway) Handler() http.Handler {
 		// this route so a pended UC-06/07 does not survive as an orphaned questionnaire
 		// (which would 502 on a stale patient submit). Internal — provider-gw is not public.
 		mux.HandleFunc("POST /scenario/reset", g.handleScenarioReset)
+		if g.cfg.IngressEnabled {
+			mux.HandleFunc("GET /cds-services", g.handleCDSDiscovery)
+			mux.HandleFunc("POST /cds-services/{id}", g.handleCRDIngress)
+			mux.HandleFunc("POST /Questionnaire/$questionnaire-package", g.handleDTRIngress)
+			mux.HandleFunc("POST /Claim/$submit", g.handlePASIngress)
+			if g.ingressAuth != nil {
+				mux.HandleFunc("POST /oauth/token", g.ingressAuth.handleToken)
+				mux.HandleFunc("GET /.well-known/smart-configuration", g.ingressAuth.handleSmartConfig)
+			}
+		}
 	case "payer":
 		mux.HandleFunc("POST /substrate/inbound", g.handleInbound)
 		// FR-28: CMS-0057 Patient Access API — conformant FHIR search + instance read
@@ -324,6 +387,28 @@ func (g *Gateway) Handler() http.Handler {
 		mux.HandleFunc("POST /substrate/inbound", g.handleInbound)
 	}
 	return mux
+}
+
+// EnableIngressForTest enables the Da Vinci ingress routes AND the test-only auth bypass on
+// cfg. It is the ONLY affordance that sets ingressAuthBypass; build()/main MUST never call it
+// (enforced by ingress_imagepurity_test.go — the scaffold image-purity pattern).
+func EnableIngressForTest(cfg *Config) {
+	cfg.IngressEnabled = true
+	cfg.ingressAuthBypass = true
+}
+
+// ingressAuthOK gates every ingress route. Real SMART Backend Services bearer
+// verification at the gateway edge; the test-only bypass is the only other path to
+// true (build-time-absent). Nil-safe: a Gateway with no auth server (zero value, or
+// ingress disabled) fails closed WITHOUT panicking.
+func (g *Gateway) ingressAuthOK(r *http.Request) bool {
+	if g.cfg.ingressAuthBypass {
+		return true
+	}
+	if g.ingressAuth == nil {
+		return false // fail-closed: no inbound auth configured
+	}
+	return g.ingressAuth.verifyBearer(r)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -545,6 +630,32 @@ func (g *Gateway) roundTrip(ctx context.Context, r *http.Request, recipient, req
 		return nil, fmt.Errorf("response decryption failed")
 	}
 	return respPayload, nil
+}
+
+// OriginateLeg is the origination leg-primitive: it runs one authorized, sealed,
+// Hub-routed exchange for legType, reading the authority frames / operations / scope
+// from `paCatalog` (the PA Layer-3 module) instead of taking them as positional
+// literals. recipient stays a parameter (payer legs target CounterpartID; facility/phg
+// legs target a LookupByRole result). An unknown legType is a caller bug (the Originator
+// only passes catalog legTypes) and fails closed with an error.
+//
+// The content.WorkstreamType guard is the SELECTION SEAM in embryo: today exactly one
+// module exists, so it fail-closes anything not tagged workstreamPA; when a second
+// workstream lands this becomes `catalogFor(content.WorkstreamType)`. So the catalog is
+// single-source-of-truth across both edges NOW (origination + the handleInbound
+// FulfillLeg dispatch read the same `paCatalog`, hence "cannot drift"), and
+// module-neutral LATER — this seam is reserved but not yet code-enforced (the primitive
+// still names `paCatalog`). This is the origination MIRROR of the payer-side FulfillLeg
+// pattern.
+func (g *Gateway) OriginateLeg(ctx context.Context, r *http.Request, recipient, legType, pci, correlationID, custodian string, content Content) ([]byte, error) {
+	if content.WorkstreamType != workstreamPA {
+		return nil, fmt.Errorf("OriginateLeg: content workstream %q not served by this gateway", content.WorkstreamType)
+	}
+	spec, ok := paCatalog[legType]
+	if !ok {
+		return nil, fmt.Errorf("OriginateLeg: unknown legType %q", legType)
+	}
+	return g.roundTrip(ctx, r, recipient, spec.ReqFrame, spec.RespFrame, spec.Op, spec.RespOp, legType, spec.Scope, pci, correlationID, custodian, content.Bytes)
 }
 
 // validateFHIR runs the configured validator over a FHIR resource on the given

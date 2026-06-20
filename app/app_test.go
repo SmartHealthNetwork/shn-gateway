@@ -2,13 +2,19 @@ package app
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -232,5 +238,145 @@ func TestLoadConfig_ProviderDTRPopulateURLMalformed(t *testing.T) {
 	_, err := loadConfig(func(k string) string { return env[k] })
 	if err == nil {
 		t.Fatal("want error: malformed PROVIDER_DTR_POPULATE_URL")
+	}
+}
+
+// ---- Ingress config tests ----
+
+// baseProviderEnv returns the minimum env that reaches the ingress validation block:
+// ROLE=provider, SHN_SECRETS (required by loadConfig), SHN_DISCOVERY_URL (required),
+// and PROVIDER_DAVINCI_INGRESS=1 (enables the ingress block we want to test).
+func baseProviderEnv() map[string]string {
+	return map[string]string{
+		"ROLE":                     "provider",
+		"SHN_SECRETS":              "/etc/shn",
+		"SHN_DISCOVERY_URL":        "https://disc.test",
+		"PROVIDER_DAVINCI_INGRESS": "1",
+	}
+}
+
+// writeClientsFile writes body to a temp file and returns its path.
+func writeClientsFile(t *testing.T, body string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "clients.json")
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// testValidClientsJSON generates a real ES384 SubjectPublicKeyInfo PEM, embeds it
+// in a JSON registration array, and returns the JSON string. Generating the PEM in
+// Go avoids truncated-PEM literals that wouldn't parse.
+func testValidClientsJSON(t *testing.T) string {
+	t.Helper()
+	k, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate ES384 key: %v", err)
+	}
+	der, err := x509.MarshalPKIXPublicKey(&k.PublicKey)
+	if err != nil {
+		t.Fatalf("marshal PKIX pubkey: %v", err)
+	}
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
+
+	type clientEntry struct {
+		ClientID     string   `json:"client_id"`
+		Alg          string   `json:"alg"`
+		PublicKeyPEM string   `json:"public_key_pem"`
+		Scopes       []string `json:"scopes"`
+	}
+	entries := []clientEntry{
+		{
+			ClientID:     "br-provider",
+			Alg:          "ES384",
+			PublicKeyPEM: string(pemBytes),
+			Scopes:       []string{"system/Davinci.write"},
+		},
+	}
+	raw, err := json.Marshal(entries)
+	if err != nil {
+		t.Fatalf("marshal clients JSON: %v", err)
+	}
+	return string(raw)
+}
+
+// TestLoadConfig_IngressRequiresBaseURLAndClients: ingress on, but no base URL / no
+// clients → hard boot error (all-or-nothing FR-G13 posture).
+func TestLoadConfig_IngressRequiresBaseURLAndClients(t *testing.T) {
+	e := baseProviderEnv()
+	// No PROVIDER_DAVINCI_INGRESS_BASE_URL; no INGRESS_CLIENTS_FILE.
+	if _, err := loadConfig(func(k string) string { return e[k] }); err == nil {
+		t.Fatal("ingress enabled with no base URL/clients: want error, got nil")
+	}
+}
+
+// TestLoadConfig_IngressBaseURLMalformed: a scheme-less base URL fails the
+// checkOptionalURL loop before reaching the ingress block.
+func TestLoadConfig_IngressBaseURLMalformed(t *testing.T) {
+	e := baseProviderEnv()
+	e["PROVIDER_DAVINCI_INGRESS_BASE_URL"] = "notaurl"
+	e["INGRESS_CLIENTS_FILE"] = writeClientsFile(t, testValidClientsJSON(t))
+	_, err := loadConfig(func(k string) string { return e[k] })
+	if err == nil {
+		t.Fatal("malformed PROVIDER_DAVINCI_INGRESS_BASE_URL: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "PROVIDER_DAVINCI_INGRESS_BASE_URL") {
+		t.Fatalf("error should reference the env var name, got: %v", err)
+	}
+}
+
+// TestLoadConfig_IngressBaseURLSetButNoClients: the most likely misconfig — operator
+// sets PROVIDER_DAVINCI_INGRESS and PROVIDER_DAVINCI_INGRESS_BASE_URL but forgets
+// INGRESS_CLIENTS_FILE → hard error on the zero-clients branch.
+func TestLoadConfig_IngressBaseURLSetButNoClients(t *testing.T) {
+	e := baseProviderEnv()
+	e["PROVIDER_DAVINCI_INGRESS_BASE_URL"] = "https://gw.test"
+	// INGRESS_CLIENTS_FILE deliberately unset.
+	_, err := loadConfig(func(k string) string { return e[k] })
+	if err == nil {
+		t.Fatal("ingress with base URL but no clients file: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "INGRESS_CLIENTS_FILE") {
+		t.Fatalf("error should reference INGRESS_CLIENTS_FILE, got: %v", err)
+	}
+}
+
+// TestLoadConfig_IngressRejectsBadAlg: alg HS256 is rejected outright (only ES384|RS384 allowed).
+func TestLoadConfig_IngressRejectsBadAlg(t *testing.T) {
+	e := baseProviderEnv()
+	e["PROVIDER_DAVINCI_INGRESS_BASE_URL"] = "https://gw.test"
+	e["INGRESS_CLIENTS_FILE"] = writeClientsFile(t,
+		`[{"client_id":"x","alg":"HS256","public_key_pem":"irrelevant"}]`)
+	if _, err := loadConfig(func(k string) string { return e[k] }); err == nil {
+		t.Fatal("bad-alg (HS256): want error, got nil")
+	}
+}
+
+// TestLoadConfig_IngressRejectsBadPEM: valid alg (ES384) but malformed PEM → hard error.
+func TestLoadConfig_IngressRejectsBadPEM(t *testing.T) {
+	e := baseProviderEnv()
+	e["PROVIDER_DAVINCI_INGRESS_BASE_URL"] = "https://gw.test"
+	e["INGRESS_CLIENTS_FILE"] = writeClientsFile(t,
+		`[{"client_id":"x","alg":"ES384","public_key_pem":"nope"}]`)
+	if _, err := loadConfig(func(k string) string { return e[k] }); err == nil {
+		t.Fatal("bad-PEM (ES384/nope): want error, got nil")
+	}
+}
+
+// TestLoadConfig_IngressValid: base URL + a real ES384 registration → success.
+func TestLoadConfig_IngressValid(t *testing.T) {
+	e := baseProviderEnv()
+	e["PROVIDER_DAVINCI_INGRESS_BASE_URL"] = "https://gw.test"
+	e["INGRESS_CLIENTS_FILE"] = writeClientsFile(t, testValidClientsJSON(t))
+	cfg, err := loadConfig(func(k string) string { return e[k] })
+	if err != nil {
+		t.Fatalf("valid ingress config: %v", err)
+	}
+	if len(cfg.IngressClients) != 1 {
+		t.Fatalf("IngressClients: want 1, got %d", len(cfg.IngressClients))
+	}
+	if cfg.IngressBaseURL != "https://gw.test" {
+		t.Fatalf("IngressBaseURL = %q, want %q", cfg.IngressBaseURL, "https://gw.test")
 	}
 }

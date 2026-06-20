@@ -18,27 +18,14 @@ import (
 
 // ---- Payer role ----
 
-// inboundReqOp maps an inbound TransactionType to the request operation the
-// authz token MUST be pinned to (C2). An unknown TransactionType has no entry
-// and is rejected before any token verification.
-var inboundReqOp = map[string]string{
-	"coverage-eligibility":    "eligibility-inquiry",
-	"crd-order-select":        "crd-order-select",
-	"dtr-questionnaire-fetch": "dtr-questionnaire-fetch",
-	"pas-claim":               "pas-submit",
-	"pas-claim-update":        "pas-update-submit",
-	"federated-query":         "federated-query-submit",
-	"patient-dtr":             "patient-dtr-request",
-}
-
 func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
-	// Per-hop transport auth (spec §A3): verify the Hub's X-Hub-Assertion FIRST,
-	// header only, before the body is read or the envelope decoded — an
-	// unauthenticated caller never reaches the decoder. Sig + issuer pin ("hub")
-	// + audience (this holder) + bounds + jti one-time-use. The jti guard is
-	// in-memory ⇒ PER-REPLICA; cross-replica replay is dominated by the 2-minute
-	// TTL (single-task sandbox services today; a shared store is the additive
-	// revisit if gateways ever scale horizontally).
+	// Per-hop transport auth: verify the Hub's X-Hub-Assertion FIRST, header only,
+	// before the body is read or the envelope decoded — an unauthenticated caller
+	// never reaches the decoder. Sig + issuer pin ("hub") + audience (this holder)
+	// + bounds + jti one-time-use. The jti guard is in-memory ⇒ PER-REPLICA;
+	// cross-replica replay is dominated by the 2-minute TTL (single-task sandbox
+	// services today; a shared store is the additive revisit if gateways ever
+	// scale horizontally).
 	if !g.verifyHubAssertion(r) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "missing or invalid hub assertion"})
 		return
@@ -80,9 +67,11 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Map TransactionType → expected request op. Unknown types are rejected with
-	// 400 BEFORE token verification: they are not part of the protocol surface.
-	reqOp, known := inboundReqOp[env.Metadata.TransactionType]
+	// FulfillLeg dispatch: the inbound leg's expected request op + authority frame come
+	// from the SAME PA catalog the origination side reads (workstream_pa.go), so the two
+	// edges cannot drift. An unknown legType has no catalog entry and is rejected 400
+	// BEFORE any token verification — it is not part of the protocol surface.
+	spec, known := paCatalog[env.Metadata.TransactionType]
 	if !known {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown transaction type"})
 		return
@@ -102,7 +91,7 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 	// lifted into a different envelope/operation and replayed, and stops one holder
 	// routing using another holder's token.
 	if err := shnsdk.VerifyBound(tok, g.cfg.AuthzPub, g.cfg.Clock(),
-		"provider-tpo", reqOp, env.Metadata.CorrelationID, env.Metadata.Sender, "", sha256hex(env.Ciphertext)); err != nil {
+		spec.ReqFrame, spec.Op, env.Metadata.CorrelationID, env.Metadata.Sender, "", sha256hex(env.Ciphertext)); err != nil {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "authz verification failed"})
 		return
 	}
@@ -112,6 +101,8 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 		g.handleEligibilityInbound(w, r, env, tok)
 	case "crd-order-select":
 		g.handleCRDInbound(w, r, env, tok)
+	case "crd-order-select-native":
+		g.handleCRDNativeInbound(w, r, env, tok)
 	case "dtr-questionnaire-fetch":
 		g.handleDTRInbound(w, r, env, tok)
 	case "pas-claim":

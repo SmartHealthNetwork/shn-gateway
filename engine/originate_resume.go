@@ -36,7 +36,7 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 		writeJSON(w, status, map[string]string{"error": msg})
 		return pendState{}, false
 	}
-	pendedResp, err := g.roundTrip(ctx, r, g.cfg.CounterpartID, "provider-tpo", "payer-coverage", "pas-submit", "pas-response", "pas-claim", "pas-bundle", res.pci, pasCorr, "", bundleJSON)
+	pendedResp, err := g.OriginateLeg(ctx, r, g.cfg.CounterpartID, "pas-claim", res.pci, pasCorr, "", Content{WorkstreamType: workstreamPA, Bytes: bundleJSON})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return pendState{}, false
@@ -145,7 +145,7 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 		writeJSON(w, status, map[string]string{"error": msg})
 		return false
 	}
-	updateResp, err := g.roundTrip(ctx, r, g.cfg.CounterpartID, "provider-tpo", "payer-coverage", "pas-update-submit", "pas-update-response", "pas-claim-update", "pas-update-bundle", st.pci, updateCorr, "", updateBundle)
+	updateResp, err := g.OriginateLeg(ctx, r, g.cfg.CounterpartID, "pas-claim-update", st.pci, updateCorr, "", Content{WorkstreamType: workstreamPA, Bytes: updateBundle})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return false
@@ -227,7 +227,7 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 		return false
 	}
 	pdCorr := g.cfg.CorrelationGen()
-	pdRespJSON, err := g.roundTrip(ctx, r, phg.ID, "provider-tpo", "patient-authorship", "patient-dtr-request", "patient-dtr-response", "patient-dtr", "patient-authorship-only", st.pci, pdCorr, "", pdReq)
+	pdRespJSON, err := g.OriginateLeg(ctx, r, phg.ID, "patient-dtr", st.pci, pdCorr, "", Content{WorkstreamType: workstreamPA, Bytes: pdReq})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "patient-dtr exchange failed: " + err.Error()})
 		return false
@@ -273,7 +273,7 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 		writeJSON(w, status, map[string]string{"error": msg})
 		return false
 	}
-	updateResp, err := g.roundTrip(ctx, r, g.cfg.CounterpartID, "provider-tpo", "payer-coverage", "pas-update-submit", "pas-update-response", "pas-claim-update", "pas-update-bundle", st.pci, updateCorr, "", updateBundle)
+	updateResp, err := g.OriginateLeg(ctx, r, g.cfg.CounterpartID, "pas-claim-update", st.pci, updateCorr, "", Content{WorkstreamType: workstreamPA, Bytes: updateBundle})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return false

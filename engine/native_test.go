@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -284,5 +285,65 @@ func TestNativeResponder_NilStoreOKForReadOnly(t *testing.T) {
 		[]byte(`{"resourceType":"CoverageEligibilityRequest"}`))
 	if err != nil || res.Status != 0 {
 		t.Fatalf("read-only leg with nil store must succeed: err=%v status=%d", err, res.Status)
+	}
+}
+
+// TestNativeResponder_CRDNativeForwardsVerbatim proves crd-order-select-native forwards
+// the conformant CDS Hooks request VERBATIM (no augmentCRDHook minimized re-shaping),
+// then normalizes the partner response identically to the minimized CRD leg (FR-G25,
+// rung-1 faithful pass-through).
+func TestNativeResponder_CRDNativeForwardsVerbatim(t *testing.T) {
+	p := newStubPartner(t)
+	// The partner returns a split-shape coverage-information (same fixture as the minimized leg test).
+	partnerCard := []byte(`{"cards":[{"suggestions":[{"actions":[{"resource":{"extension":[` +
+		`{"url":"http://hl7.org/fhir/us/davinci-crd/StructureDefinition/ext-coverage-information",` +
+		`"extension":[{"url":"covered","valueCode":"covered"},{"url":"pa-needed","valueCode":"no-auth"}]}]}}]}]}]}`)
+	p.respByPath["/cds-services/shn-order-select"] = partnerCard
+	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", nil, nil)
+
+	// A conformant CDS Hooks request: hookInstance already present, draftOrders is a Bundle.
+	conformant := []byte(`{"hook":"order-select","hookInstance":"hi-1","context":{"userId":"Practitioner/p1","patientId":"MBR-COVERED","draftOrders":{"resourceType":"Bundle","type":"collection","entry":[{"fullUrl":"urn:uuid:sr1","resource":{"resourceType":"ServiceRequest","id":"sr1","subject":{"reference":"Patient/MBR-COVERED"}}}]},"selections":["ServiceRequest/sr1"]},"prefetch":{"coverage":{"resourceType":"Coverage","beneficiary":{"reference":"Patient/MBR-COVERED"}}}}`)
+	res, err := n.Handle(context.Background(), "crd-order-select-native", "corr", "pci", conformant)
+	if err != nil {
+		t.Fatalf("native conformant CRD: %v", err)
+	}
+	if res.Status != 0 {
+		t.Fatalf("native conformant CRD: status=%d msg=%q", res.Status, res.Message)
+	}
+	// Response is normalized to canonical SHN cards (FR-G25), same as the minimized leg.
+	if _, perr := shnsdk.ParseCards(res.ResponseFHIR); perr != nil {
+		t.Fatalf("response not normalized to cards: %v", perr)
+	}
+	// Verbatim: the partner received the conformant Bundle draftOrders (NOT minimized shaping).
+	// p.lastBody is the raw bytes the stub partner received.
+	if !bytes.Contains(p.lastBody, []byte(`"resourceType":"Bundle"`)) {
+		t.Fatalf("partner did not receive the conformant Bundle draftOrders verbatim: %s", p.lastBody)
+	}
+	// Verbatim also means hookInstance was NOT regenerated — the original "hi-1" survives.
+	if !bytes.Contains(p.lastBody, []byte(`"hookInstance":"hi-1"`)) {
+		t.Fatalf("partner did not receive the original hookInstance verbatim: %s", p.lastBody)
+	}
+	// Complement: the partner must NOT have received the MINIMIZED scalar draftOrders shape
+	// (an array of bare resources, `"draftOrders":[{`) — only the conformant Bundle.
+	if bytes.Contains(p.lastBody, []byte(`"draftOrders":[{`)) {
+		t.Fatalf("partner received minimized scalar draftOrders — reshaping leaked: %s", p.lastBody)
+	}
+}
+
+// TestNativeResponder_CRDNativeUnmappablePartnerIs502 is the per-leg fail-closed rejection row for
+// the conformant leg: an unmappable partner CRD response (no resolvable coverage-information) → 502,
+// never silent empty cards. The minimized leg has the same guard; this pins it for crd-order-select-
+// native independently so a future de-sharing of normalizeCRDResponse cannot silently regress it.
+func TestNativeResponder_CRDNativeUnmappablePartnerIs502(t *testing.T) {
+	p := newStubPartner(t)
+	p.respByPath["/cds-services/shn-order-select"] = []byte(`{"cards":[{"summary":"x"}]}`)
+	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", nil, nil)
+	res, err := n.Handle(context.Background(), "crd-order-select-native", "corr", "pci",
+		[]byte(`{"hook":"order-select","hookInstance":"hi-1","context":{"patientId":"MBR-COVERED","draftOrders":{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"ServiceRequest"}}]}}}`))
+	if err != nil {
+		t.Fatalf("Handle returned error (want Status 502, not error): %v", err)
+	}
+	if res.Status != http.StatusBadGateway {
+		t.Errorf("Status = %d, want 502 (un-mappable partner CRD card)", res.Status)
 	}
 }

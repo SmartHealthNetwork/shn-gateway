@@ -1,7 +1,7 @@
 // davincimap.go — translators between SHN's internal leg shapes and the real Da Vinci
-// wire ops. See the design spec §3/§4: SHN's CRD hook omits the CDS-Hooks-required
+// wire ops. SHN's CRD hook omits the CDS-Hooks-required
 // hookInstance; the DTR leg's ResponseFHIR is the full $questionnaire-package collection
-// Bundle (§6.2) — buildQuestionnairePackage wraps the sandbox Questionnaire, native.go
+// Bundle — buildQuestionnairePackage wraps the sandbox Questionnaire, native.go
 // forwards a real partner's package VERBATIM, and extractQuestionnaireFromPackage
 // (consumer-side, called from originate.go) extracts the bare Questionnaire for
 // F5/auto-fill. Deps survive the wire. normalizeCRDCoverage (FR-G25) projects a partner

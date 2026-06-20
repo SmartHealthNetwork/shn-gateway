@@ -131,21 +131,18 @@ func (n *nativeResponder) Handle(ctx context.Context, leg, corrID, subjectPCI st
 		if bad.Status != 0 {
 			return bad, nil
 		}
-		// FR-G25: normalize the partner CRD service's split coverage-information
-		// (davincimap.go: split-shape only, systemActions primary path)
-		// to the canonical CardCoverage, then re-render SHN cards so the sealed substrate
-		// carries the canonical shape (never the partner's RI-specific wire form). Fails
-		// closed (502) when no canonical coverage is resolvable — the CRD leg has no
-		// $validate net.
-		cov, lr := normalizeCRDCoverage(body)
-		if lr.Status != 0 {
-			return lr, nil
+		return normalizeCRDResponse(body)
+
+	case "crd-order-select-native":
+		// The request is ALREADY a conformant CDS Hooks request (br-provider's bytes via
+		// the ingress); forward it VERBATIM — no augmentCRDHook minimized shaping.
+		// Rung-1 faithful pass-through: br-payer receives br-provider's actual request
+		// bytes. The response side is identical to the minimized leg (FR-G25).
+		body, bad := n.post(ctx, "/cds-services/"+n.crdServiceID, requestFHIR, "CRD")
+		if bad.Status != 0 {
+			return bad, nil
 		}
-		cardsJSON, err := shnsdk.BuildCards(cov)
-		if err != nil {
-			return LegResult{}, fmt.Errorf("engine: render normalized cards: %w", err)
-		}
-		return LegResult{ResponseFHIR: cardsJSON}, nil
+		return normalizeCRDResponse(body)
 
 	case "dtr-questionnaire-fetch":
 		var fetch struct {
@@ -206,6 +203,24 @@ func (n *nativeResponder) post(ctx context.Context, path string, body []byte, la
 		return nil, LegResult{Status: http.StatusBadGateway, Message: "upstream payer " + label + " returned " + resp.Status}
 	}
 	return rb, LegResult{}
+}
+
+// normalizeCRDResponse is the shared CRD response tail (FR-G25): normalize the
+// partner's coverage-information to the canonical CardCoverage (davincimap.go), then
+// re-render SHN cards with shnsdk.BuildCards. Used by BOTH the minimized
+// (crd-order-select) and conformant (crd-order-select-native) native CRD cases, so
+// the response behaviour is byte-identical regardless of which request shape was sent.
+// Fails closed (Status 502) when no canonical coverage is resolvable.
+func normalizeCRDResponse(body []byte) (LegResult, error) {
+	cov, lr := normalizeCRDCoverage(body)
+	if lr.Status != 0 {
+		return lr, nil
+	}
+	cardsJSON, err := shnsdk.BuildCards(cov)
+	if err != nil {
+		return LegResult{}, fmt.Errorf("engine: render normalized cards: %w", err)
+	}
+	return LegResult{ResponseFHIR: cardsJSON}, nil
 }
 
 func newHookInstance() (string, error) {

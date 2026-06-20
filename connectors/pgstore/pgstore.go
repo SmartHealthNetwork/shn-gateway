@@ -31,7 +31,7 @@ import (
 	engine "github.com/SmartHealthNetwork/shn-gateway/engine"
 )
 
-// PgStore is the public reference durable Store impl (parent spec §6). The
+// PgStore is the public reference durable Store impl. The
 // compile-time conformance assertion lives in-package now that pgstore is in the
 // gateway module (connectors→engine is the only import direction; engine never
 // imports connectors, so this is cycle-free).

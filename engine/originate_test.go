@@ -1,5 +1,5 @@
 // originate_test.go — hermetic unit tests for runCRDThenDTR's per-value behavior
-// switch (Finding 1 + Finding 2 of the design spec §3, FR-G25).
+// switch (FR-G25).
 //
 // Injection approach: a stubSubstrate intercepts the Gateway's HTTP client at
 // the transport level. For /authorize it returns a pre-signed Token (using a

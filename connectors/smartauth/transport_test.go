@@ -77,7 +77,7 @@ func TestNewHTTPClient_TokenErrorFailsRequest(t *testing.T) {
 
 // TestBearerTransport_DoesNotMutateCallerRequest asserts that bearerTransport clones
 // the request before injecting Authorization so the CALLER'S original request header
-// is never touched (spec §6 / RoundTripper contract). This is the belt-and-suspenders
+// is never touched (RoundTripper contract). This is the belt-and-suspenders
 // assertion for the RoundTripper non-mutation contract.
 func TestBearerTransport_DoesNotMutateCallerRequest(t *testing.T) {
 	key, _ := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
