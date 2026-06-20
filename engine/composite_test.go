@@ -17,13 +17,14 @@ func (r recordingResponder) Handle(_ context.Context, leg, _, _ string, _ []byte
 	return LegResult{ResponseFHIR: []byte(r.tag)}, nil
 }
 
-func TestCompositeResponder_RoutesReadOnlyToNative(t *testing.T) {
+func TestCompositeResponder_RoutesDaVinciToNativeEligibilityToFallback(t *testing.T) {
 	var nativeLegs, fallbackLegs []string
 	native := recordingResponder{tag: "native", legs: &nativeLegs}
 	fallback := recordingResponder{tag: "fallback", legs: &fallbackLegs}
 	c := NewCompositeResponder(native, fallback, false)
 
-	for _, leg := range []string{"coverage-eligibility", "crd-order-select", "dtr-questionnaire-fetch"} {
+	// CRD and DTR forward native; no-Da-Vinci-RI implements eligibility → managed fallback.
+	for _, leg := range []string{"crd-order-select", "dtr-questionnaire-fetch"} {
 		res, err := c.Handle(context.Background(), leg, "corr", "pci", nil)
 		if err != nil {
 			t.Fatalf("%s: %v", leg, err)
@@ -32,7 +33,7 @@ func TestCompositeResponder_RoutesReadOnlyToNative(t *testing.T) {
 			t.Errorf("%s routed to %s, want native", leg, res.ResponseFHIR)
 		}
 	}
-	for _, leg := range []string{"pas-claim", "pas-claim-update"} {
+	for _, leg := range []string{"coverage-eligibility", "pas-claim", "pas-claim-update"} {
 		res, err := c.Handle(context.Background(), leg, "corr", "pci", nil)
 		if err != nil {
 			t.Fatalf("%s: %v", leg, err)
@@ -41,7 +42,7 @@ func TestCompositeResponder_RoutesReadOnlyToNative(t *testing.T) {
 			t.Errorf("%s routed to %s, want fallback", leg, res.ResponseFHIR)
 		}
 	}
-	if len(nativeLegs) != 3 || len(fallbackLegs) != 2 {
+	if len(nativeLegs) != 2 || len(fallbackLegs) != 3 {
 		t.Errorf("routing counts: native=%v fallback=%v", nativeLegs, fallbackLegs)
 	}
 }
@@ -74,9 +75,10 @@ func TestComposite_PASNativeRoutesPairBothOrNeither(t *testing.T) {
 			t.Fatalf("PAS on: leg %s routed to %s, want native", leg, got)
 		}
 	}
+	// coverage-eligibility always routes to fallback regardless of pasNative (managed).
 	for _, c := range []LegResponder{off, on} {
-		if got := routeName(t, c, "coverage-eligibility"); got != "native" {
-			t.Fatalf("read-only leg routed to %s, want native", got)
+		if got := routeName(t, c, "coverage-eligibility"); got != "fallback" {
+			t.Fatalf("coverage-eligibility routed to %s, want fallback (always managed)", got)
 		}
 	}
 }

@@ -82,6 +82,12 @@ type config struct {
 	PayerDavinciScope     string
 	PayerDavinciClientKID string
 	PayerDavinciPASNative bool
+	// PayerDavinciCRDServiceID is the escape-hatch override for the partner's CDS
+	// Hooks order-select service id. When empty, DiscoverCRDServiceID fetches
+	// {PAYER_DAVINCI_BASE_URL}/cds-services at boot and selects the single
+	// "order-select" service (FR-G26). Set explicitly when the partner's CRD service
+	// uses a different hook name — e.g. br-payer's "order-sign-crd" (hook:order-sign).
+	PayerDavinciCRDServiceID string
 
 	// Optional native DTR population (provider-local). PROVIDER_DTR_NATIVE switches DTR
 	// population from the in-house managed backend to forwarding the provider's own SDC
@@ -152,14 +158,15 @@ func loadConfig(getenv func(string) string) (config, error) {
 		FHIRClientScope:  def("FHIR_CLIENT_SCOPE", "system/*.read"),
 		FHIRClientKID:    getenv("FHIR_CLIENT_KID"),
 
-		PayerDavinciBaseURL:   getenv("PAYER_DAVINCI_BASE_URL"),
-		PayerDavinciTokenURL:  getenv("PAYER_DAVINCI_TOKEN_URL"),
-		PayerDavinciClientID:  getenv("PAYER_DAVINCI_CLIENT_ID"),
-		PayerDavinciClientKey: getenv("PAYER_DAVINCI_CLIENT_KEY"),
-		PayerDavinciClientAlg: getenv("PAYER_DAVINCI_CLIENT_ALG"),
-		PayerDavinciScope:     def("PAYER_DAVINCI_SCOPE", "system/*.read"),
-		PayerDavinciClientKID: getenv("PAYER_DAVINCI_CLIENT_KID"),
-		PayerDavinciPASNative: getenv("PAYER_DAVINCI_PAS_NATIVE") == "true",
+		PayerDavinciBaseURL:      getenv("PAYER_DAVINCI_BASE_URL"),
+		PayerDavinciTokenURL:     getenv("PAYER_DAVINCI_TOKEN_URL"),
+		PayerDavinciClientID:     getenv("PAYER_DAVINCI_CLIENT_ID"),
+		PayerDavinciClientKey:    getenv("PAYER_DAVINCI_CLIENT_KEY"),
+		PayerDavinciClientAlg:    getenv("PAYER_DAVINCI_CLIENT_ALG"),
+		PayerDavinciScope:        def("PAYER_DAVINCI_SCOPE", "system/*.read"),
+		PayerDavinciClientKID:    getenv("PAYER_DAVINCI_CLIENT_KID"),
+		PayerDavinciPASNative:    getenv("PAYER_DAVINCI_PAS_NATIVE") == "true",
+		PayerDavinciCRDServiceID: getenv("PAYER_DAVINCI_CRD_SERVICE_ID"),
 
 		ProviderDTRNative:      getenv("PROVIDER_DTR_NATIVE") == "true",
 		ProviderDTRPopulateURL: getenv("PROVIDER_DTR_POPULATE_URL"),
@@ -472,7 +479,16 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		if cfg.PayerDavinciPASNative && store == nil {
 			return b, fmt.Errorf("gateway: PAYER_DAVINCI_PAS_NATIVE=true requires a payer Store")
 		}
-		native := engine.NewNativeResponder(pdc, cfg.PayerDavinciBaseURL, store, clock)
+		// FR-G26: discover the partner's CDS Hooks order-select service id at boot.
+		// If PAYER_DAVINCI_CRD_SERVICE_ID is set it wins (escape hatch — needed for
+		// partners whose CRD service uses a different hook name, e.g. br-payer's
+		// "order-sign-crd" which registers hook:order-sign rather than order-select).
+		// Fail-closed: an ambiguous or absent order-select service aborts boot.
+		crdSvcID, discErr := engine.DiscoverCRDServiceID(ctx, pdc, cfg.PayerDavinciBaseURL, cfg.PayerDavinciCRDServiceID)
+		if discErr != nil {
+			return b, fmt.Errorf("gateway: CRD service-id discovery: %w", discErr)
+		}
+		native := engine.NewNativeResponder(pdc, cfg.PayerDavinciBaseURL, crdSvcID, store, clock)
 		fallback := engine.NewSandboxResponder(gwCfg.Adjudicator, sor, store, clock)
 		gwCfg.Responder = engine.NewCompositeResponder(native, fallback, cfg.PayerDavinciPASNative)
 	}

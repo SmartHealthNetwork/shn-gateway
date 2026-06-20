@@ -50,6 +50,19 @@ and the PAS pair to native or the sandbox fallback depending on the switch. This
 not a partner contract. They will graduate to `connectors/davinci` when
 `LegResponder` is promoted to `shnsdk`.
 
+As of the P4 native-Da-Vinci-interop slice, the native-forward CRD leg
+**normalizes a real partner RI's `coverage-information`** (`normalizeCRDCoverage`,
+the split `covered`/`paNeeded`/`questionnaires[]`/`satisfiedPaId` shape → the
+`shnsdk.CardCoverage` canonical, fail-closed) and **discovers the order-select CDS
+service id** from the partner's `/cds-services` (`DiscoverCRDServiceID`, override →
+unique-service → fail-closed); the PAS leg normalizes the partner's `$submit`
+response Bundle via a content discriminator (`normalizePASResponse`). These map a
+real RI's **response** vocabulary; the **request** direction (a conformant CDS Hooks
+order-select with the payer's prefetch resolved-and-inlined) is a provider-side
+follow-on slice, not a payer-edge concern. The widened `shnsdk.CardCoverage` card
+contract is a **breaking** `shn-sdk` change shipped in **v0.10.0** (see the SDK
+changelog); this gateway requires `shn-sdk v0.10.0`.
+
 `engine.Populator` is the gateway-internal provider-side DTR population seam
 (FHIR-in / QuestionnaireResponse-out). It is a **0.x internal seam** and is NOT
 a published `shn-sdk` contract this slice. Two backends exist: **managed** (wraps

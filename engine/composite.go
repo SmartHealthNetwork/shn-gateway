@@ -1,8 +1,10 @@
 // composite.go — the compositeResponder routes a CONFIG-DERIVED set of legs to a
-// native LegResponder and every other leg to a fallback (design §5.1). Read-only legs
-// forward whenever native mode is on; the PAS pair forwards only when pasNative is set,
-// toggled BOTH-OR-NEITHER so a native submit + sandbox amendment can never split
-// decision authority (design §3).
+// native LegResponder and every other leg to a fallback. CRD and DTR forward whenever
+// native mode is on; the PAS pair forwards only when pasNative is set, toggled
+// BOTH-OR-NEITHER so a native submit + sandbox amendment can never split decision
+// authority. The coverage-eligibility leg always routes to the fallback (managed):
+// none of the common Da Vinci RIs implement CoverageEligibilityRequest adjudication;
+// the composite still accepts eligibility but the managed connector makes the decision.
 package engine
 
 import "context"
@@ -15,11 +17,12 @@ type compositeResponder struct {
 
 var _ LegResponder = (*compositeResponder)(nil)
 
-// NewCompositeResponder routes the read-only legs (always) and — when pasNative — the
-// PAS pair to native; everything else to fallback.
+// NewCompositeResponder routes the Da Vinci legs (crd-order-select,
+// dtr-questionnaire-fetch) to native and — when pasNative — the PAS pair; everything
+// else (including coverage-eligibility) routes to fallback. coverage-eligibility is
+// always managed: no common Da Vinci RI implements CoverageEligibilityRequest adjudication.
 func NewCompositeResponder(native, fallback LegResponder, pasNative bool) LegResponder {
 	forwarded := map[string]bool{
-		"coverage-eligibility":    true,
 		"crd-order-select":        true,
 		"dtr-questionnaire-fetch": true,
 	}

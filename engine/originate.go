@@ -280,15 +280,37 @@ func (g *Gateway) runCRDThenDTR(w http.ResponseWriter, r *http.Request, member s
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return crdDtrResult{}, false
 	}
-	paRequired, canonical, err := shnsdk.ParseCards(crdRespJSON)
+	cov, err := shnsdk.ParseCards(crdRespJSON)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "card parse failed"})
 		return crdDtrResult{}, false
 	}
-	if !paRequired || canonical == "" {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "expected PA-required card with canonical"})
+	// Per-value switch on the CRD card result (Finding 1 + Finding 2 of the design
+	// spec §3). Every non-happy-path value is handled fail-closed with no silent
+	// fall-through. FR-G25; AI-1 (a coverage denial STOPS, never proceeds silently).
+	switch {
+	case cov.Covered == shnsdk.CoveredNotCovered:
+		// Explicit terminal stop — a coverage denial STOPS, never silently "proceeds".
+		// Patient-facing denial UX is deferred (§10).
+		writeJSON(w, http.StatusOK, map[string]any{"paRequired": false, "covered": false, "outcome": "not-covered"})
+		return crdDtrResult{}, false
+	case cov.PANeeded == shnsdk.PANeededSatisfied:
+		// TYPE-ready (SatisfiedPaID carried); the proceed-with-existing-auth
+		// short-circuit is a new terminal-success path, deferred fail-closed this
+		// slice. Distinct message — a real conformant payer is most likely to hit
+		// this branch.
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "PA already satisfied — short-circuit not yet implemented"})
+		return crdDtrResult{}, false
+	case cov.PANeeded == shnsdk.PANeededConditional || cov.Covered == shnsdk.CoveredConditional:
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "conditional coverage unsupported this slice"})
+		return crdDtrResult{}, false
+	case !cov.NeedsDTR() || !cov.PARequired():
+		// This path (UC-03+) requires BOTH a questionnaire (doc-needed axis) and
+		// PA (pa-needed axis).
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "expected PA-required card with questionnaire"})
 		return crdDtrResult{}, false
 	}
+	canonical := shnsdk.StripCanonicalVersion(cov.Questionnaires[0])
 
 	// --- DTR round-trip: fetch Questionnaire, validate, auto-fill locally. ---
 	dtrReq, err := json.Marshal(shnsdk.QuestionnaireFetchRequest{Canonical: canonical})
@@ -500,7 +522,7 @@ func (g *Gateway) handleUC02(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	paRequired, _, err := shnsdk.ParseCards(respJSON)
+	cov, err := shnsdk.ParseCards(respJSON)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "card parse failed"})
 		return
@@ -519,7 +541,7 @@ func (g *Gateway) handleUC02(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, uc02Resp{
-		PARequired:  paRequired,
+		PARequired:  cov.PARequired(),
 		CardSummary: cardSummary,
 	})
 }

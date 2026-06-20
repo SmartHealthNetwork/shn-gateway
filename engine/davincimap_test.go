@@ -2,10 +2,13 @@ package engine
 
 import (
 	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
 func TestAugmentCRDHook_AddsHookInstance(t *testing.T) {
@@ -151,5 +154,195 @@ func TestBuildQuestionnairePackage_WrapsAndRoundTrips(t *testing.T) {
 func TestBuildQuestionnairePackage_RejectsInvalidJSON(t *testing.T) {
 	if _, err := buildQuestionnairePackage([]byte("{not json")); err == nil {
 		t.Error("expected error wrapping invalid Questionnaire json")
+	}
+}
+
+// TestNormalizeCRDCoverage_RealRI_brpayer replays a LIVE captured br-payer CRD response
+// through the normalizer. The br-payer RI (CRD STU 2.2.1) places the split
+// coverage-information at systemActions[].resource.extension[] — the primary walk path.
+// Asserts: covered=covered, pa-needed=auth-needed (PARequired true), questionnaire present
+// (NeedsDTR true). FR-G25.
+func TestNormalizeCRDCoverage_RealRI_brpayer(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "br-payer", "crd-response.json"))
+	if err != nil {
+		t.Fatal(err) // fixture IS committed
+	}
+	cov, lr := normalizeCRDCoverage(raw)
+	if lr.Status != 0 {
+		t.Fatalf("rejected real br-payer card: %d %s", lr.Status, lr.Message)
+	}
+	if cov.Covered != shnsdk.CoveredCovered {
+		t.Fatalf("covered=%q, want %q", cov.Covered, shnsdk.CoveredCovered)
+	}
+	if !cov.PARequired() {
+		t.Fatalf("pa-needed=auth-needed must be PARequired; got PANeeded=%q", cov.PANeeded)
+	}
+	// The br-payer response carries questionnaire=http://example.org/fhir/Questionnaire/PriorAuthRequired.
+	if !cov.NeedsDTR() {
+		t.Fatalf("questionnaire sub-extension present; NeedsDTR must be true; got Questionnaires=%v", cov.Questionnaires)
+	}
+}
+
+// TestNormalizeCRDCoverage_STU21_split reads the forward-target STU-2.1 split shape
+// (covered + pa-needed + questionnaire sub-extensions) 1:1 onto CardCoverage.
+func TestNormalizeCRDCoverage_STU21_split(t *testing.T) {
+	// synthetic 2.1 split-shape fixture (inline) with covered+auth-needed+questionnaire.
+	body := []byte(`{"cards":[{"suggestions":[{"actions":[{"resource":{"extension":[{"url":"http://hl7.org/fhir/us/davinci-crd/StructureDefinition/ext-coverage-information","extension":[{"url":"covered","valueCode":"covered"},{"url":"pa-needed","valueCode":"auth-needed"},{"url":"questionnaire","valueCanonical":"http://example/Q|1.0.0"}]}]}}]}]}]}`)
+	cov, lr := normalizeCRDCoverage(body)
+	if lr.Status != 0 {
+		t.Fatal(lr.Message)
+	}
+	if !cov.PARequired() || !cov.NeedsDTR() {
+		t.Fatalf("2.1 split: %+v", cov)
+	}
+	if cov.Questionnaires[0] != "http://example/Q|1.0.0" {
+		t.Fatalf("questionnaire canonical = %q", cov.Questionnaires[0])
+	}
+}
+
+// TestNormalizeCRDCoverage_STU21_CardExtensionFallback proves the defensive fallback:
+// some RIs put coverage-information on cards[].extension[] (a bare card extension) rather
+// than the suggestion's update-action resource. The normalizer must find it there too.
+func TestNormalizeCRDCoverage_STU21_CardExtensionFallback(t *testing.T) {
+	body := []byte(`{"cards":[{"extension":[{"url":"http://hl7.org/fhir/us/davinci-crd/StructureDefinition/ext-coverage-information","extension":[{"url":"covered","valueCode":"covered"},{"url":"pa-needed","valueCode":"no-auth"}]}]}]}`)
+	cov, lr := normalizeCRDCoverage(body)
+	if lr.Status != 0 {
+		t.Fatalf("card.extension fallback rejected: %d %s", lr.Status, lr.Message)
+	}
+	if cov.Covered != shnsdk.CoveredCovered || cov.PARequired() {
+		t.Fatalf("fallback → %+v, want covered+no-auth", cov)
+	}
+}
+
+// TestNormalizeCRDCoverage_Unmappable fails closed when no coverage-information signal is
+// resolvable in the response (502, since the CRD leg has no $validate net).
+func TestNormalizeCRDCoverage_Unmappable(t *testing.T) {
+	_, lr := normalizeCRDCoverage([]byte(`{"cards":[{"summary":"x"}]}`))
+	if lr.Status != http.StatusBadGateway {
+		t.Fatalf("un-mappable must 502, got %d", lr.Status)
+	}
+}
+
+// TestNormalizeCRDCoverage_MalformedBody fails closed on a non-JSON partner body.
+func TestNormalizeCRDCoverage_MalformedBody(t *testing.T) {
+	_, lr := normalizeCRDCoverage([]byte(`{not json`))
+	if lr.Status != http.StatusBadGateway {
+		t.Fatalf("malformed body must 502, got %d", lr.Status)
+	}
+}
+
+// TestNormalizePASResponse_BareClaimResponse verifies that a bare ClaimResponse
+// (already in SHN canonical shape) passes through unchanged.
+func TestNormalizePASResponse_BareClaimResponse(t *testing.T) {
+	input := []byte(`{"resourceType":"ClaimResponse","outcome":"complete","preAuthRef":"PA-abc123","status":"active","use":"preauthorization"}`)
+	out, lr := normalizePASResponse(input)
+	if lr.Status != 0 {
+		t.Fatalf("bare ClaimResponse must pass through; got 502: %s", lr.Message)
+	}
+	if string(out) != string(input) {
+		t.Errorf("bare ClaimResponse output differs from input:\n got: %s\nwant: %s", out, input)
+	}
+}
+
+// TestNormalizePASResponse_SHNPendedBundle verifies that an SHN pended Bundle
+// (ClaimResponse + Task) passes through unchanged — the Task-pass-through branch.
+func TestNormalizePASResponse_SHNPendedBundle(t *testing.T) {
+	input := []byte(`{"resourceType":"Bundle","type":"collection","entry":[` +
+		`{"resource":{"resourceType":"ClaimResponse","outcome":"queued"}},` +
+		`{"resource":{"resourceType":"Task","status":"requested"}}]}`)
+	out, lr := normalizePASResponse(input)
+	if lr.Status != 0 {
+		t.Fatalf("SHN pended Bundle must pass through; got 502: %s", lr.Message)
+	}
+	if string(out) != string(input) {
+		t.Errorf("SHN pended Bundle output differs from input:\n got: %s\nwant: %s", out, input)
+	}
+}
+
+// TestNormalizePASResponse_BundleCompleteUnwrap verifies that a Bundle containing a
+// ClaimResponse with outcome=="complete" (the real Da Vinci approve/deny shape) is
+// unwrapped to just the bare ClaimResponse.
+func TestNormalizePASResponse_BundleCompleteUnwrap(t *testing.T) {
+	crJSON := `{"resourceType":"ClaimResponse","outcome":"complete","preAuthRef":"PA-xyz"}`
+	input := []byte(`{"resourceType":"Bundle","type":"collection","entry":[` +
+		`{"resource":` + crJSON + `},` +
+		`{"resource":{"resourceType":"Organization","id":"org1"}}]}`)
+	out, lr := normalizePASResponse(input)
+	if lr.Status != 0 {
+		t.Fatalf("Bundle(complete ClaimResponse) must unwrap; got 502: %s", lr.Message)
+	}
+	// Output must be the bare ClaimResponse, not the Bundle.
+	var probe struct {
+		ResourceType string `json:"resourceType"`
+		Outcome      string `json:"outcome"`
+		PreAuthRef   string `json:"preAuthRef"`
+	}
+	if err := json.Unmarshal(out, &probe); err != nil {
+		t.Fatalf("unwrapped output not valid JSON: %v", err)
+	}
+	if probe.ResourceType != "ClaimResponse" || probe.Outcome != "complete" || probe.PreAuthRef != "PA-xyz" {
+		t.Errorf("unwrapped = %+v, want ClaimResponse/complete/PA-xyz", probe)
+	}
+}
+
+// TestNormalizePASResponse_OtherBundle_FailClosed verifies that a Bundle with no Task
+// and no complete ClaimResponse (e.g. a real-RI queued/pended shape) fails closed with
+// a 502 — deferred normalization (DEF-G1).
+func TestNormalizePASResponse_OtherBundle_FailClosed(t *testing.T) {
+	input := []byte(`{"resourceType":"Bundle","type":"collection","entry":[` +
+		`{"resource":{"resourceType":"ClaimResponse","outcome":"queued"}}]}`)
+	_, lr := normalizePASResponse(input)
+	if lr.Status != http.StatusBadGateway {
+		t.Fatalf("other Bundle must 502 fail-closed, got %d", lr.Status)
+	}
+}
+
+// TestNormalizePASResponse_Unparseable_FailClosed verifies that unparseable input
+// fails closed with 502.
+func TestNormalizePASResponse_Unparseable_FailClosed(t *testing.T) {
+	_, lr := normalizePASResponse([]byte(`{not json`))
+	if lr.Status != http.StatusBadGateway {
+		t.Fatalf("unparseable must 502 fail-closed, got %d", lr.Status)
+	}
+}
+
+// TestNormalizePASResponse_RealRI_brpayer is the LIVE real-RI proof: it loads the
+// committed br-payer $submit approve response (a Bundle wrapping a ClaimResponse with
+// outcome:complete + reviewAction A1 + preAuthRef in the "number" sub-extension), runs
+// it through normalizePASResponse, and asserts the unwrapped bare ClaimResponse is
+// readable by shnsdk.ParseClaimResponse as approved with preAuthRef=="AUTH-0001" (FR-G28).
+func TestNormalizePASResponse_RealRI_brpayer(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "br-payer", "pas-submit-response.json"))
+	if err != nil {
+		t.Fatalf("read br-payer fixture: %v", err)
+	}
+	// The br-payer fixture is a Bundle with a ClaimResponse(complete) + an Organization
+	// entry — no Task present. Discriminator must unwrap to the bare ClaimResponse.
+	out, lr := normalizePASResponse(raw)
+	if lr.Status != 0 {
+		t.Fatalf("normalizePASResponse rejected real br-payer approve Bundle: %d %s", lr.Status, lr.Message)
+	}
+	// The output must be a bare ClaimResponse (not a Bundle).
+	var top struct {
+		ResourceType string `json:"resourceType"`
+	}
+	if err := json.Unmarshal(out, &top); err != nil {
+		t.Fatalf("unwrapped output not valid JSON: %v", err)
+	}
+	if top.ResourceType != "ClaimResponse" {
+		t.Fatalf("unwrapped resourceType = %q, want ClaimResponse", top.ResourceType)
+	}
+	// ParseClaimResponse must read it as approved with preAuthRef AUTH-0001.
+	// The auth number lives in item[0].adjudication[0].extension[reviewAction].extension[number]
+	// (real Da Vinci RI convention) — not in a top-level preAuthRef field.
+	parsed, err := shnsdk.ParseClaimResponse(out)
+	if err != nil {
+		t.Fatalf("ParseClaimResponse on unwrapped br-payer ClaimResponse: %v", err)
+	}
+	if parsed.Outcome != "approved" {
+		t.Errorf("outcome = %q, want approved", parsed.Outcome)
+	}
+	if parsed.PreAuthRef != "AUTH-0001" {
+		t.Errorf("preAuthRef = %q, want AUTH-0001", parsed.PreAuthRef)
 	}
 }

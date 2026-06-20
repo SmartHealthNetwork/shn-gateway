@@ -131,7 +131,13 @@ func (s *sandboxResponder) Handle(ctx context.Context, leg, corrID, subjectPCI s
 			return LegResult{Status: http.StatusBadRequest, Message: "parse CPT failed"}, nil
 		}
 		paRequired, canonical := s.adj.OrderSelect(cpt)
-		cardsJSON, err := shnsdk.BuildCards(paRequired, canonical)
+		cov := shnsdk.CardCoverage{Covered: "covered"}
+		if paRequired {
+			cov.PANeeded, cov.Questionnaires = "auth-needed", []string{canonical}
+		} else {
+			cov.PANeeded = "no-auth"
+		}
+		cardsJSON, err := shnsdk.BuildCards(cov)
 		if err != nil {
 			return LegResult{}, fmt.Errorf("build cards: %w", err)
 		}

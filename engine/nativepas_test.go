@@ -37,7 +37,7 @@ func TestNativePAS_Submit(t *testing.T) {
 		body := []byte(`{"resourceType":"ClaimResponse","outcome":"complete","preAuthRef":"` + partnerRef + `","preAuthPeriod":{"end":"2030-01-01"}}`)
 		srv := stubPartnerSrv(t, http.StatusOK, body)
 		store := NewStubHolderData()
-		n := NewNativeResponder(srv.Client(), srv.URL, store, fixedClock).(*nativeResponder)
+		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", store, fixedClock).(*nativeResponder)
 		res, err := n.Handle(context.Background(), "pas-claim", "corr-1", "PCI-1", claimApproved)
 		if err != nil || res.Status != 0 {
 			t.Fatalf("approved: err=%v status=%d", err, res.Status)
@@ -63,7 +63,7 @@ func TestNativePAS_Submit(t *testing.T) {
 		body := []byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"ClaimResponse","outcome":"queued"}},{"resource":{"resourceType":"Task","status":"requested"}}]}`)
 		srv := stubPartnerSrv(t, http.StatusOK, body)
 		store := NewStubHolderData()
-		n := NewNativeResponder(srv.Client(), srv.URL, store, fixedClock)
+		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", store, fixedClock)
 		res, err := n.Handle(context.Background(), "pas-claim", "corr-1", "PCI-1", claimApproved)
 		if err != nil || res.Status != 0 {
 			t.Fatalf("pended: err=%v status=%d", err, res.Status)
@@ -81,7 +81,7 @@ func TestNativePAS_Submit(t *testing.T) {
 		// ParseServiceRequestCPT errors → 400 (§1.4). A MISSING SR entry is a different
 		// path (ParseClaimBundle 500) — not tested here.
 		srv := stubPartnerSrv(t, http.StatusOK, []byte(`{}`))
-		n := NewNativeResponder(srv.Client(), srv.URL, NewStubHolderData(), fixedClock)
+		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", NewStubHolderData(), fixedClock)
 		res, err := n.Handle(context.Background(), "pas-claim", "corr-1", "PCI-1", claimCPTlessSR)
 		if err != nil || res.Status != http.StatusBadRequest {
 			t.Fatalf("want 400, got status=%d err=%v", res.Status, err)
@@ -90,7 +90,7 @@ func TestNativePAS_Submit(t *testing.T) {
 
 	t.Run("partner 500 -> 502", func(t *testing.T) {
 		srv := stubPartnerSrv(t, http.StatusInternalServerError, []byte(`boom`))
-		n := NewNativeResponder(srv.Client(), srv.URL, NewStubHolderData(), fixedClock)
+		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", NewStubHolderData(), fixedClock)
 		res, err := n.Handle(context.Background(), "pas-claim", "corr-1", "PCI-1", claimApproved)
 		if err != nil || res.Status != http.StatusBadGateway {
 			t.Fatalf("want 502, got status=%d err=%v", res.Status, err)
@@ -176,7 +176,7 @@ func TestNativePAS_Update(t *testing.T) {
 		body := []byte(`{"resourceType":"ClaimResponse","outcome":"complete","preAuthRef":"P-1","preAuthPeriod":{"end":"2030-01-01"}}`)
 		srv := stubPartnerSrv(t, http.StatusOK, body)
 		s := seedPended()
-		n := NewNativeResponder(srv.Client(), srv.URL, s, fixedClock)
+		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", s, fixedClock)
 		res, err := n.Handle(context.Background(), "pas-claim-update", "corr-1", "PCI-1", claim)
 		if err != nil || res.Status != 0 {
 			t.Fatalf("approved update: err=%v status=%d", err, res.Status)
@@ -192,7 +192,7 @@ func TestNativePAS_Update(t *testing.T) {
 	t.Run("partner 500 AFTER Begin -> 502 WITH Rollback (no strand)", func(t *testing.T) {
 		srv := stubPartnerSrv(t, http.StatusInternalServerError, []byte(`boom`))
 		s := seedPended()
-		n := NewNativeResponder(srv.Client(), srv.URL, s, fixedClock)
+		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", s, fixedClock)
 		res, err := n.Handle(context.Background(), "pas-claim-update", "corr-1", "PCI-1", claim)
 		if err != nil || res.Status != http.StatusBadGateway {
 			t.Fatalf("want 502, got status=%d err=%v", res.Status, err)
@@ -205,7 +205,7 @@ func TestNativePAS_Update(t *testing.T) {
 	t.Run("no prior pend -> 409 (derived-ledger fail-safe)", func(t *testing.T) {
 		srv := stubPartnerSrv(t, http.StatusOK, []byte(`{"resourceType":"ClaimResponse","outcome":"complete","preAuthRef":"P-1"}`))
 		s := NewStubHolderData() // NOT seeded
-		n := NewNativeResponder(srv.Client(), srv.URL, s, fixedClock)
+		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", s, fixedClock)
 		res, _ := n.Handle(context.Background(), "pas-claim-update", "corr-1", "PCI-1", claim)
 		if res.Status != http.StatusConflict {
 			t.Fatalf("divergence/no-pend must be 409, got %d", res.Status)
@@ -216,7 +216,7 @@ func TestNativePAS_Update(t *testing.T) {
 		denied := loadDeniedClaimResponseBytes(t)
 		srv := stubPartnerSrv(t, http.StatusOK, denied)
 		s := seedPended()
-		n := NewNativeResponder(srv.Client(), srv.URL, s, fixedClock)
+		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", s, fixedClock)
 		res, _ := n.Handle(context.Background(), "pas-claim-update", "corr-1", "PCI-1", claim)
 		if res.Status != http.StatusUnprocessableEntity || res.Rollback == nil {
 			t.Fatalf("non-approved update is 422 + Rollback (defensive parity §3), got status=%d rollback=%v", res.Status, res.Rollback != nil)

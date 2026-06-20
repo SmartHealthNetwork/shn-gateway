@@ -2,9 +2,11 @@
 // forwards each read-only leg to a partner's real Da Vinci endpoint over a
 // SMART-authenticated *http.Client and returns the partner's FHIR. The engine still
 // owns authority (the (A)/(B) inbound fences + the (C) outbound subject fence, now
-// defending a real party), sealing, edge $validate, and audit (AI-11). native.go
-// itself imports no shnsdk symbols; the PAS legs (nativepas.go) reuse the originator's
-// PUBLISHED shnsdk parsers (standalone-build safe). It implements the internal, unstable
+// defending a real party), sealing, edge $validate, and audit (AI-11). The PAS legs
+// (nativepas.go) reuse the originator's PUBLISHED shnsdk parsers; the CRD leg normalizes
+// the partner's coverage-information to the canonical shnsdk.CardCoverage (FR-G25,
+// normalizeCRDCoverage in davincimap.go) and re-renders SHN cards with shnsdk.BuildCards,
+// so this file references shnsdk too. It implements the internal, unstable
 // engine.LegResponder (STABILITY: connectors/* is the supported surface); it
 // graduates to connectors/davinci when LegResponder promotes to shnsdk.
 package engine
@@ -14,37 +16,97 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"time"
+
+	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
-// crdServiceID is the conventional CDS Hooks order-select service id this slice
-// posts to. Endpoint discovery (/cds-services) is the deferred refinement (§6.4).
-const crdServiceID = "shn-order-select"
+// crdHook is the CDS Hooks hook name SHN originates for the CRD leg. Discovery
+// selects the partner CDS service whose "hook" field matches this value (FR-G26).
+const crdHook = "order-select"
 
 const maxPartnerBody = 8 << 20 // 8 MiB cap on a partner response body
 
 type nativeResponder struct {
-	client  *http.Client
-	baseURL string
-	store   Store // gateway-owned shadow ledger + EOB Store for the PAS legs (nil ⇒ read-only only)
-	clock   func() time.Time
+	client       *http.Client
+	baseURL      string
+	crdServiceID string // discovered or overridden at construction (FR-G26)
+	store        Store  // gateway-owned shadow ledger + EOB Store for the PAS legs (nil ⇒ read-only only)
+	clock        func() time.Time
 }
 
 var _ LegResponder = (*nativeResponder)(nil)
 
 // NewNativeResponder builds the native-forward Responder over a ready *http.Client
-// (in production a smartauth bearer client; in tests a fixed-bearer client). store is
-// the gateway-owned Store the PAS legs use (pended ledger + EOB); a nil store is valid
-// for a read-only-only native responder. clock is used for the gateway-projected EOB
-// `created`; nil ⇒ time.Now.
-func NewNativeResponder(client *http.Client, baseURL string, store Store, clock func() time.Time) LegResponder {
+// (in production a smartauth bearer client; in tests a fixed-bearer client).
+// crdServiceID is the partner's CDS Hooks order-select service id, resolved at boot
+// via DiscoverCRDServiceID (FR-G26). store is the gateway-owned Store the PAS legs
+// use (pended ledger + EOB); a nil store is valid for a read-only-only native
+// responder. clock is used for the gateway-projected EOB `created`; nil ⇒ time.Now.
+func NewNativeResponder(client *http.Client, baseURL, crdServiceID string, store Store, clock func() time.Time) LegResponder {
 	if clock == nil {
 		clock = time.Now
 	}
-	return &nativeResponder{client: client, baseURL: baseURL, store: store, clock: clock}
+	return &nativeResponder{client: client, baseURL: baseURL, crdServiceID: crdServiceID, store: store, clock: clock}
+}
+
+// DiscoverCRDServiceID resolves the partner's CDS Hooks order-select service id from
+// GET {base}/cds-services (FR-G26, OWD-G8). If override is non-empty it is returned
+// immediately (escape hatch for partners whose hook name differs from SHN's
+// origination hook — e.g. br-payer's order-sign service). Otherwise the listing is
+// fetched, filtered to services whose hook matches SHN's crdHook ("order-select"),
+// and the id of exactly one match is returned. Zero matches → error (fail-closed);
+// multiple matches → error (ambiguous; set PAYER_DAVINCI_CRD_SERVICE_ID). A
+// non-2xx or parse error is a fatal boot error (fail-closed per FR-G26).
+func DiscoverCRDServiceID(ctx context.Context, client *http.Client, base, override string) (string, error) {
+	if override != "" {
+		return override, nil
+	}
+	url := base + "/cds-services"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", fmt.Errorf("engine: build GET %s: %w", url, err)
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("engine: GET %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxPartnerBody))
+	if err != nil {
+		return "", fmt.Errorf("engine: read %s: %w", url, err)
+	}
+	if resp.StatusCode/100 != 2 {
+		return "", fmt.Errorf("engine: GET %s returned %s", url, resp.Status)
+	}
+	var listing struct {
+		Services []struct {
+			ID   string `json:"id"`
+			Hook string `json:"hook"`
+		} `json:"services"`
+	}
+	if err := json.Unmarshal(body, &listing); err != nil {
+		return "", fmt.Errorf("engine: parse %s: %w", url, err)
+	}
+	var matches []string
+	for _, svc := range listing.Services {
+		if svc.Hook == crdHook {
+			matches = append(matches, svc.ID)
+		}
+	}
+	switch len(matches) {
+	case 1:
+		return matches[0], nil
+	case 0:
+		return "", fmt.Errorf("engine: no %q service at %s (set PAYER_DAVINCI_CRD_SERVICE_ID to override)", crdHook, url)
+	default:
+		return "", fmt.Errorf("engine: ambiguous: %d %q services at %s; set PAYER_DAVINCI_CRD_SERVICE_ID to select one", len(matches), crdHook, url)
+	}
 }
 
 func (n *nativeResponder) Handle(ctx context.Context, leg, corrID, subjectPCI string, requestFHIR []byte) (LegResult, error) {
@@ -65,11 +127,25 @@ func (n *nativeResponder) Handle(ctx context.Context, leg, corrID, subjectPCI st
 		if err != nil {
 			return LegResult{}, err // gateway's own build fault → 500
 		}
-		body, bad := n.post(ctx, "/cds-services/"+crdServiceID, hook, "CRD")
+		body, bad := n.post(ctx, "/cds-services/"+n.crdServiceID, hook, "CRD")
 		if bad.Status != 0 {
 			return bad, nil
 		}
-		return LegResult{ResponseFHIR: body}, nil
+		// FR-G25: normalize the partner CRD service's split coverage-information
+		// (davincimap.go: split-shape only, systemActions primary path)
+		// to the canonical CardCoverage, then re-render SHN cards so the sealed substrate
+		// carries the canonical shape (never the partner's RI-specific wire form). Fails
+		// closed (502) when no canonical coverage is resolvable — the CRD leg has no
+		// $validate net.
+		cov, lr := normalizeCRDCoverage(body)
+		if lr.Status != 0 {
+			return lr, nil
+		}
+		cardsJSON, err := shnsdk.BuildCards(cov)
+		if err != nil {
+			return LegResult{}, fmt.Errorf("engine: render normalized cards: %w", err)
+		}
+		return LegResult{ResponseFHIR: cardsJSON}, nil
 
 	case "dtr-questionnaire-fetch":
 		var fetch struct {

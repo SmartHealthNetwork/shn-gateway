@@ -1,0 +1,79 @@
+{
+  "cards": [],
+  "systemActions": [
+    {
+      "type": "update",
+      "description": "Add coverage information to DeviceRequest",
+      "resource": {
+        "resourceType": "DeviceRequest",
+        "id": "prior-auth-required-device-request",
+        "extension": [
+          {
+            "url": "http://hl7.org/fhir/us/davinci-crd/StructureDefinition/ext-coverage-information",
+            "extension": [
+              {
+                "url": "coverage",
+                "valueReference": {
+                  "reference": "Coverage/coverage-1"
+                }
+              },
+              {
+                "url": "covered",
+                "valueCode": "covered"
+              },
+              {
+                "url": "pa-needed",
+                "valueCode": "auth-needed"
+              },
+              {
+                "url": "doc-needed",
+                "valueCode": "no-doc"
+              },
+              {
+                "url": "questionnaire",
+                "valueCanonical": "http://example.org/fhir/Questionnaire/PriorAuthRequired"
+              },
+              {
+                "url": "billingCode",
+                "valueCoding": {
+                  "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+                  "code": "L8000"
+                }
+              },
+              {
+                "url": "date",
+                "valueDate": "2026-06-19"
+              },
+              {
+                "url": "coverage-assertion-id",
+                "valueString": "prior-auth-2026-06-19-coverage-1"
+              }
+            ]
+          }
+        ],
+        "status": "draft",
+        "intent": "original-order",
+        "codeCodeableConcept": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "L8000"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/example"
+        },
+        "authoredOn": "2026-06-19T21:53:54+00:00",
+        "requester": {
+          "reference": "Practitioner/PractitionerExample"
+        },
+        "insurance": [
+          {
+            "reference": "Coverage/coverage-1"
+          }
+        ]
+      }
+    }
+  ]
+}
