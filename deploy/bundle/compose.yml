@@ -1,0 +1,36 @@
+# FR-G3 config-only deployment bundle — the partner install unit.
+# A partner sets the three required inputs and `docker compose up`:
+#   SHN_DISCOVERY_URL  the discovery anchor (e.g. https://accounts.shn-preview.dev/discovery)
+#   ROLE               provider | payer | facility | phg
+#   SHN_SECRETS         host path to the `shn register` bundle dir (mounted at /etc/shn)
+# The IG-loaded $validate sidecar is co-located here — no separate validator host, and
+# PHI never leaves the partner boundary (OWD-G9). FHIR_VALIDATE_URL defaults to the
+# local sidecar; everything else is discovery-resolved.
+services:
+  validator:
+    build:
+      context: ../validator
+      dockerfile: Dockerfile
+    # Co-located $validate; not published externally. Healthcheck gates gateway start.
+    healthcheck:
+      test: ["CMD", "/healthcheck"]
+      interval: 15s
+      timeout: 5s
+      retries: 60
+      start_period: 900s
+
+  gateway:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    environment:
+      SHN_DISCOVERY_URL: ${SHN_DISCOVERY_URL:?set SHN_DISCOVERY_URL to the discovery anchor}
+      ROLE: ${ROLE:?set ROLE to provider|payer|facility|phg}
+      SHN_SECRETS: /etc/shn
+      FHIR_VALIDATE_URL: http://validator:8080/fhir
+      PORT: "8080"
+    volumes:
+      - ${SHN_SECRETS:?set SHN_SECRETS to your shn register bundle dir}:/etc/shn:ro
+    depends_on:
+      validator:
+        condition: service_healthy

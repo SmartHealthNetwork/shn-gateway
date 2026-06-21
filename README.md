@@ -191,6 +191,19 @@ descriptor does **not** advertise a validator, so you must supply one:
 If neither is set (and discovery advertises none), the gateway exits with
 `refusing to run without per-message validation (FR-36)`.
 
+**Recommended: co-locate the validator in your own boundary.** Run the IG-loaded
+`$validate` as a sidecar alongside the gateway and point `FHIR_VALIDATE_URL` at it
+(e.g. `http://validator:8080/fhir`). Because `$validate` needs the full (PHI-bearing)
+resource, co-location keeps PHI **inside your boundary** — it is never sent to an
+SHN-operated validator. This is the config-only deployment posture: the gateway image
+plus a co-located IG-loaded validator, with no separate validator host to stand up.
+
+This repository ships that wiring ready-made: **`deploy/bundle/compose.yml`** pairs the
+gateway with a co-located IG-loaded `$validate` sidecar as a config-only unit. Clone the
+repo, set `SHN_DISCOVERY_URL` / `ROLE` / `SHN_SECRETS`, and
+`docker compose -f deploy/bundle/compose.yml up --build` — no separate validator host.
+See [`deploy/bundle/README.md`](deploy/bundle/README.md).
+
 ### Per-role
 
 | Env var | Applies to | Description |

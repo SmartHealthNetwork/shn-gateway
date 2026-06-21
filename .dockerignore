@@ -2,3 +2,4 @@ Dockerfile
 .dockerignore
 *_test.go
 testdata/
+deploy/
