@@ -100,15 +100,13 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 	case "coverage-eligibility":
 		g.handleEligibilityInbound(w, r, env, tok)
 	case "crd-order-select":
-		g.handleCRDInbound(w, r, env, tok)
-	case "crd-order-select-native":
 		g.handleCRDNativeInbound(w, r, env, tok)
 	case "dtr-questionnaire-fetch":
 		g.handleDTRInbound(w, r, env, tok)
 	case "pas-claim":
-		g.handlePASInbound(w, r, env, tok)
+		g.handlePASNativeInbound(w, r, env, tok)
 	case "pas-claim-update":
-		g.handlePASUpdateInbound(w, r, env, tok)
+		g.handlePASUpdateNativeInbound(w, r, env, tok)
 	case "federated-query":
 		g.handleFederatedQueryInbound(w, r, env, tok)
 	case "patient-dtr":
@@ -202,7 +200,7 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 	g.respondLeg(w, r, "payer-coverage", "eligibility-response", "coverage-eligibility", env.Metadata.CorrelationID, result.ResponseFHIR, tok.Subject, env.Metadata.Sender, "")
 }
 
-// handleFederatedQueryInbound is the facility source-side handler (UC-05, §8.4
+// handleFederatedQueryInbound is the facility source-side handler (UC-05, consent
 // backstop). The Hub-verified request token is already bound (handleInbound), but
 // the facility re-enforces, independently: (1) the leg carries a consent ref; (2)
 // consentsvc confirms a TREAT permit whose custodian is THIS facility and whose
@@ -252,7 +250,7 @@ func (g *Gateway) handleFederatedQueryInbound(w http.ResponseWriter, r *http.Req
 
 	// (2) Consent backstop: independently confirm the four-way permit AND learn the
 	// authenticated consent reference the consent service reports. The facility
-	// refuses to release even if a bad token reached it (§8.4). The returned ref —
+	// refuses to release even if a bad token reached it. The returned ref —
 	// not the provider-supplied wire field — is what anchors the Provenance below
 	// (attribution integrity, FR-32/C11).
 	consentRef, status, msg := g.consentBackstop(ctx, pci, env.Metadata.Sender)

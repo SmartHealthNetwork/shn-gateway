@@ -35,25 +35,10 @@ var paCatalog = map[string]legSpec{
 		Op: "eligibility-inquiry", RespOp: "eligibility-response", Scope: "eligibility-scope",
 		Physics: LegPhysics{Kind: KindRequestResponse, Effect: EffectReadOnly, Timing: TimingSync, Locality: LocalitySubstrate},
 	},
-	"crd-order-select": {
-		ReqFrame: "provider-tpo", RespFrame: "payer-coverage",
-		Op: "crd-order-select", RespOp: "crd-cards", Scope: "crd-context",
-		Physics: LegPhysics{Kind: KindRequestResponse, Effect: EffectReadOnly, Timing: TimingSync, Locality: LocalitySubstrate},
-	},
 	"dtr-questionnaire-fetch": {
 		ReqFrame: "provider-tpo", RespFrame: "payer-coverage",
 		Op: "dtr-questionnaire-fetch", RespOp: "dtr-questionnaire", Scope: "questionnaire-only",
 		Physics: LegPhysics{Kind: KindRequestResponse, Effect: EffectReadOnly, Timing: TimingSync, Locality: LocalitySubstrate},
-	},
-	"pas-claim": {
-		ReqFrame: "provider-tpo", RespFrame: "payer-coverage",
-		Op: "pas-submit", RespOp: "pas-response", Scope: "pas-bundle",
-		Physics: LegPhysics{Kind: KindRequestResponse, Effect: EffectMutating, Timing: TimingSync, Locality: LocalitySubstrate},
-	},
-	"pas-claim-update": {
-		ReqFrame: "provider-tpo", RespFrame: "payer-coverage",
-		Op: "pas-update-submit", RespOp: "pas-update-response", Scope: "pas-update-bundle",
-		Physics: LegPhysics{Kind: KindRequestResponse, Effect: EffectMutating, Timing: TimingSync, Locality: LocalitySubstrate},
 	},
 	"federated-query": {
 		ReqFrame: "provider-tpo", RespFrame: "facility-disclosure",
@@ -65,9 +50,25 @@ var paCatalog = map[string]legSpec{
 		Op: "patient-dtr-request", RespOp: "patient-dtr-response", Scope: "patient-authorship-only",
 		Physics: LegPhysics{Kind: KindRequestResponse, Effect: EffectReadOnly, Timing: TimingSync, Locality: LocalitySubstrate},
 	},
-	"crd-order-select-native": {
+	"crd-order-select": {
 		ReqFrame: "provider-tpo", RespFrame: "payer-coverage",
-		Op: "crd-order-select-native", RespOp: "crd-cards", Scope: "crd-context",
+		Op: "crd-order-select", RespOp: "crd-cards", Scope: "crd-context",
 		Physics: LegPhysics{Kind: KindRequestResponse, Effect: EffectReadOnly, Timing: TimingSync, Locality: LocalitySubstrate},
+	},
+	"pas-claim": {
+		ReqFrame: "provider-tpo", RespFrame: "payer-coverage",
+		Op: "pas-submit", RespOp: "pas-response", Scope: "pas-bundle",
+		Physics: LegPhysics{Kind: KindRequestResponse, Effect: EffectMutating, Timing: TimingSync, Locality: LocalitySubstrate},
+	},
+	// F-B1: the conformant amended re-POST leg — the UPDATE-family analog of pas-claim
+	// (which is the conformant SUBMIT leg). It carries the update op-family (Op
+	// pas-update-submit; RespOp pas-update-response; Scope pas-update-bundle — NOT pas-bundle),
+	// reusing the update resp-op exactly as pas-claim reuses pas-response. Keeping it in the
+	// pas-update-bundle scope preserves the pas-bundle ∥ pas-update-bundle min-necessary
+	// distinction (FR-34/C12).
+	"pas-claim-update": {
+		ReqFrame: "provider-tpo", RespFrame: "payer-coverage",
+		Op: "pas-update-submit", RespOp: "pas-update-response", Scope: "pas-update-bundle",
+		Physics: LegPhysics{Kind: KindRequestResponse, Effect: EffectMutating, Timing: TimingSync, Locality: LocalitySubstrate},
 	},
 }

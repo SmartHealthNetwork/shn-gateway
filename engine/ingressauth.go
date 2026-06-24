@@ -39,7 +39,7 @@ const (
 	ingressScope     = "system/Davinci.write"
 	assertionType    = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
 
-	// maxAssertionLifetime caps the client_assertion lifetime (RFC 7523 §3 / SMART
+	// maxAssertionLifetime caps the client_assertion lifetime (RFC 7523 / SMART
 	// Backend Services recommends <= 5 min). It MUST be <= ingressJTIWindow so a jti is
 	// remembered for the assertion's entire valid life — otherwise a long-lived assertion
 	// could be replayed after the jti window evicts it.
@@ -110,7 +110,7 @@ func newIngressAuthServer(baseURL string, clients map[string]IngressClientRegist
 func (s *ingressAuthServer) tokenURL() string { return s.baseURL + ingressTokenPath }
 
 // oauthErr writes a generic OAuth2 error — never an internal jwt/crypto detail.
-// RFC 6749 §5.2: token-error responses MUST carry Cache-Control: no-store.
+// RFC 6749: token-error responses MUST carry Cache-Control: no-store.
 func oauthErr(w http.ResponseWriter, status int, code, desc string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
@@ -168,7 +168,7 @@ func (s *ingressAuthServer) handleToken(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	// Cap assertion lifetime: exp must not be more than maxAssertionLifetime past now
-	// (RFC 7523 §3 / SMART Backend Services). WithExpirationRequired guarantees exp is
+	// (RFC 7523 / SMART Backend Services). WithExpirationRequired guarantees exp is
 	// present and non-nil after a successful parse.
 	expTime, err := claims.GetExpirationTime()
 	if err != nil || expTime == nil || expTime.Time.After(s.now().Add(maxAssertionLifetime)) {
@@ -193,7 +193,7 @@ func (s *ingressAuthServer) handleToken(w http.ResponseWriter, r *http.Request) 
 		oauthErr(w, http.StatusInternalServerError, "server_error", "issue bearer")
 		return
 	}
-	// RFC 6749 §5.1: successful token responses MUST carry Cache-Control: no-store.
+	// RFC 6749: successful token responses MUST carry Cache-Control: no-store.
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Pragma", "no-cache")
@@ -238,6 +238,95 @@ func (s *ingressAuthServer) verifyBearer(r *http.Request) bool {
 		jwt.WithAudience(s.baseURL),
 		jwt.WithTimeFunc(s.now))
 	return err == nil
+}
+
+// audUnder reports whether aud is the config base itself or a path strictly under it.
+// PATH-BOUNDARY-SAFE: the base+"/" check rejects the suffix-of-authority bypass — for
+// base "https://x:8080", aud "https://x:8080.evil.com/y" must NOT pass (a naive
+// strings.HasPrefix(aud, base) would let it through). Empty aud never passes.
+// FR-G28 UDAP B2B.
+func audUnder(aud, base string) bool {
+	return aud != "" && (aud == base || strings.HasPrefix(aud, base+"/"))
+}
+
+// verifyDirectBearer implements the UDAP B2B direct-bearer path (design
+// docs/superpowers/specs/2026-06-22-udap-b2b-ingress-auth-design.md): a CONFIG-registered
+// client's self-signed private_key_jwt presented DIRECTLY as the Authorization bearer (the
+// form br-provider's BFF sends), verified per-call against the registered key. Distinct
+// from verifyBearer (the gateway's OWN ephemeral ES384 bearer); the two are token-shape
+// DISJOINT (an issued bearer carries no iss), so the OR in ingressAuthOK cannot fail open.
+// Authority is edge-only (never reaches authorize()); org-level TPO; scope is advisory and
+// NOT enforced on either path. A registered client implicitly gains both auth modes.
+func (s *ingressAuthServer) verifyDirectBearer(r *http.Request) bool {
+	h := r.Header.Get("Authorization")
+	if !strings.HasPrefix(h, "Bearer ") {
+		return false
+	}
+	raw := strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
+
+	// Peek iss (unverified) → select the registered key + alg. An issued ephemeral bearer
+	// has no iss, so it fails here — keeping the two paths disjoint.
+	var unv jwt.MapClaims
+	if _, _, err := jwt.NewParser().ParseUnverified(raw, &unv); err != nil {
+		return false
+	}
+	clientID, _ := unv["iss"].(string)
+	if clientID == "" {
+		return false
+	}
+	reg, ok := s.clients[clientID]
+	pub := s.pubKeys[clientID]
+	if !ok || pub == nil {
+		return false
+	}
+
+	// alg PINNED to the registration (no alg confusion); exp required; signature vs the
+	// registered key. aud is NOT checked by the parser (jwt.WithAudience is exact-match and
+	// br-provider's aud varies per endpoint) — audUnder below does the path-boundary pin.
+	claims := jwt.MapClaims{}
+	if _, err := jwt.NewParser(
+		jwt.WithValidMethods([]string{reg.Alg}),
+		jwt.WithExpirationRequired(),
+		jwt.WithTimeFunc(s.now),
+	).ParseWithClaims(raw, claims, func(*jwt.Token) (any, error) { return pub, nil }); err != nil {
+		return false
+	}
+	// sub is OPTIONAL: br-provider's CDS client JWT omits it (verified against the real
+	// token — it emits iss/aud/exp/iat/jti only). RFC 7523 client auth identifies the
+	// client by iss, which we verify against the REGISTERED key; an absent sub is accepted,
+	// but a PRESENT sub that differs from iss is rejected (no identity confusion).
+	if sub, present := claims["sub"].(string); present && sub != clientID {
+		return false
+	}
+	// aud path-boundary-pinned to the config base (never r.Host). At least one aud entry
+	// must be the base or a path under it.
+	auds, err := claims.GetAudience()
+	if err != nil {
+		return false
+	}
+	audOK := false
+	for _, a := range auds {
+		if audUnder(a, s.baseURL) {
+			audOK = true
+			break
+		}
+	}
+	if !audOK {
+		return false
+	}
+	// exp capped to <= now + maxAssertionLifetime (same as the assertion path).
+	expTime, err := claims.GetExpirationTime()
+	if err != nil || expTime == nil || expTime.Time.After(s.now().Add(maxAssertionLifetime)) {
+		return false
+	}
+	// jti PRESENCE required but NOT one-time-use: a presented bearer is reusable within its
+	// exp, matching the replayable issued bearer (single-use would wedge
+	// br-provider's discovery-GET-then-hook-POST with one JWT and buys no security over the
+	// existing replayable-bearer posture).
+	if jtiVal, _ := claims["jti"].(string); jtiVal == "" {
+		return false
+	}
+	return true
 }
 
 func (s *ingressAuthServer) handleSmartConfig(w http.ResponseWriter, r *http.Request) {

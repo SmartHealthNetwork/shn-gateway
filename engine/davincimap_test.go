@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"os"
@@ -11,44 +12,20 @@ import (
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
-func TestAugmentCRDHook_AddsHookInstance(t *testing.T) {
-	in := []byte(`{"hook":"order-select","context":{"patientId":"Patient/p1","draftOrders":[{"resourceType":"ServiceRequest"}]},"prefetch":{"coverage":{"resourceType":"Coverage"}}}`)
-	out, err := augmentCRDHook(in, "hi-123")
-	if err != nil {
-		t.Fatalf("augmentCRDHook: %v", err)
-	}
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(out, &m); err != nil {
-		t.Fatalf("unmarshal out: %v", err)
-	}
-	if got := strings.Trim(string(m["hookInstance"]), `"`); got != "hi-123" {
-		t.Errorf("hookInstance = %q, want hi-123", got)
-	}
-	// Original fields preserved.
-	if _, ok := m["hook"]; !ok {
-		t.Error("hook field dropped")
-	}
-	if _, ok := m["context"]; !ok {
-		t.Error("context field dropped")
-	}
-}
-
-func TestAugmentCRDHook_RejectsMalformed(t *testing.T) {
-	if _, err := augmentCRDHook([]byte(`not json`), "hi"); err == nil {
-		t.Error("expected error on malformed hook JSON")
-	}
-}
-
 func TestBuildQuestionnairePackageRequest(t *testing.T) {
-	out, err := buildQuestionnairePackageRequest("http://example.org/Questionnaire/lumbar")
+	// Absent-coverage path (the sandbox / 8-UC-demo path): canonical-only, EXACTLY as
+	// before the Gap-B fix. This locks the demo-path parity — a regression that started
+	// emitting a coverage param when none was supplied fails here.
+	out, err := buildQuestionnairePackageRequest("http://example.org/Questionnaire/lumbar", nil)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
 	var p struct {
 		ResourceType string `json:"resourceType"`
 		Parameter    []struct {
-			Name           string `json:"name"`
-			ValueCanonical string `json:"valueCanonical"`
+			Name           string          `json:"name"`
+			ValueCanonical string          `json:"valueCanonical"`
+			Resource       json.RawMessage `json:"resource"`
 		} `json:"parameter"`
 	}
 	if err := json.Unmarshal(out, &p); err != nil {
@@ -63,7 +40,63 @@ func TestBuildQuestionnairePackageRequest(t *testing.T) {
 	}
 }
 
-// TestExtractQuestionnaireFromPackage_ReturnsVerbatimAndDropsDeps IS the §8.3
+// TestBuildQuestionnairePackageRequest_CarriesCoverage is the Gap-B regression guard
+// (FR-G28): when the inbound $questionnaire-package carried a coverage Parameters
+// resource, the native-forward rebuild MUST emit a `coverage` parameter carrying that
+// resource VERBATIM — a real Da Vinci payer (br-payer) 400s with "The 'coverage'
+// parameter is required (min=1)" otherwise. The payer-gw carries the provider's coverage
+// through (non-aggregation: it does NOT fabricate one).
+func TestBuildQuestionnairePackageRequest_CarriesCoverage(t *testing.T) {
+	coverage := json.RawMessage(`{"resourceType":"Coverage","id":"cov-1","status":"active",` +
+		`"beneficiary":{"reference":"Patient/p1"}}`)
+	out, err := buildQuestionnairePackageRequest("http://example.org/Questionnaire/lumbar", coverage)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	var p struct {
+		Parameter []struct {
+			Name           string          `json:"name"`
+			ValueCanonical string          `json:"valueCanonical"`
+			Resource       json.RawMessage `json:"resource"`
+		} `json:"parameter"`
+	}
+	if err := json.Unmarshal(out, &p); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	var qSeen, covSeen bool
+	for _, param := range p.Parameter {
+		switch param.Name {
+		case "questionnaire":
+			qSeen = true
+			if param.ValueCanonical != "http://example.org/Questionnaire/lumbar" {
+				t.Errorf("questionnaire canonical = %q", param.ValueCanonical)
+			}
+		case "coverage":
+			covSeen = true
+			// The Coverage resource is carried VERBATIM (round-trip equal under JSON).
+			var got, want any
+			if err := json.Unmarshal(param.Resource, &got); err != nil {
+				t.Fatalf("coverage resource not valid json: %v", err)
+			}
+			if err := json.Unmarshal(coverage, &want); err != nil {
+				t.Fatalf("want coverage not valid json: %v", err)
+			}
+			gb, _ := json.Marshal(got)
+			wb, _ := json.Marshal(want)
+			if string(gb) != string(wb) {
+				t.Errorf("coverage resource = %s, want %s", gb, wb)
+			}
+		}
+	}
+	if !qSeen {
+		t.Error("questionnaire parameter missing")
+	}
+	if !covSeen {
+		t.Error("coverage parameter missing — payer would 400")
+	}
+}
+
+// TestExtractQuestionnaireFromPackage_ReturnsVerbatimAndDropsDeps IS the
 // anti-circularity proof, satisfied IN-PACKAGE against the unexported extractor: the
 // fixture is a STANDALONE hand-authored $questionnaire-package (Library + Questionnaire
 // + ValueSet) loaded from a reviewable golden file — NOT wrap(sandboxQ) — so extraction
@@ -97,10 +130,10 @@ func TestExtractQuestionnaireFromPackage_ReturnsVerbatimAndDropsDeps(t *testing.
 	if probe.ResourceType != "Questionnaire" || probe.ID != "real-partner-q" {
 		t.Errorf("extracted = %s, want the Questionnaire entry real-partner-q", q)
 	}
-	// (b) the dropped deps are NOT in the output (lossy narrowing, VISIBLE — §6.2).
+	// (b) the dropped deps are NOT in the output (lossy narrowing, VISIBLE).
 	if strings.Contains(string(q), "Library") || strings.Contains(string(q), "ValueSet") ||
 		strings.Contains(string(q), "cql-lib-1") || strings.Contains(string(q), "vs-1") {
-		t.Errorf("extracted output leaked dropped package deps (see follow-up §6.2): %s", q)
+		t.Errorf("extracted output leaked dropped package deps: %s", q)
 	}
 }
 
@@ -285,15 +318,29 @@ func TestNormalizePASResponse_BundleCompleteUnwrap(t *testing.T) {
 	}
 }
 
-// TestNormalizePASResponse_OtherBundle_FailClosed verifies that a Bundle with no Task
-// and no complete ClaimResponse (e.g. a real-RI queued/pended shape) fails closed with
-// a 502 — deferred normalization (DEF-G1).
-func TestNormalizePASResponse_OtherBundle_FailClosed(t *testing.T) {
+// TestNormalizePASResponse_QueuedBundle_PassThrough verifies that a Bundle with a queued
+// ClaimResponse (real-RI pended shape, no SHN Task) passes through unchanged — DEF-G1 lifted.
+// br-payer's amended re-POST response is exactly this shape (A4 queued, no Task).
+func TestNormalizePASResponse_QueuedBundle_PassThrough(t *testing.T) {
 	input := []byte(`{"resourceType":"Bundle","type":"collection","entry":[` +
 		`{"resource":{"resourceType":"ClaimResponse","outcome":"queued"}}]}`)
+	out, lr := normalizePASResponse(input)
+	if lr.Status != 0 {
+		t.Fatalf("queued Bundle must pass through (DEF-G1 lifted), got status=%d msg=%s", lr.Status, lr.Message)
+	}
+	if !bytes.Equal(out, input) {
+		t.Fatalf("queued Bundle pass-through must be verbatim")
+	}
+}
+
+// TestNormalizePASResponse_UnknownBundle_FailClosed verifies that a Bundle with no Task,
+// no complete ClaimResponse, and no queued ClaimResponse fails closed with 502.
+func TestNormalizePASResponse_UnknownBundle_FailClosed(t *testing.T) {
+	input := []byte(`{"resourceType":"Bundle","type":"collection","entry":[` +
+		`{"resource":{"resourceType":"Claim","outcome":"active"}}]}`)
 	_, lr := normalizePASResponse(input)
 	if lr.Status != http.StatusBadGateway {
-		t.Fatalf("other Bundle must 502 fail-closed, got %d", lr.Status)
+		t.Fatalf("unknown Bundle must 502 fail-closed, got %d", lr.Status)
 	}
 }
 
@@ -303,6 +350,26 @@ func TestNormalizePASResponse_Unparseable_FailClosed(t *testing.T) {
 	_, lr := normalizePASResponse([]byte(`{not json`))
 	if lr.Status != http.StatusBadGateway {
 		t.Fatalf("unparseable must 502 fail-closed, got %d", lr.Status)
+	}
+}
+
+// TestNormalizePASResponse_BrPayerPended pins the relay's A4 path against the REAL captured br-payer
+// home-oxygen $submit response. Converts the R-2(b) "discover live" risk into a
+// hermetic guard. Case A′ (verified live): br-payer's A4 Bundle{ClaimResponse(queued,A4)+Org+Task}
+// carries a Task, so normalizePASResponse's Task branch passes it through verbatim (Status 0, no
+// 502 — DEF-G1 does not bite), and ParsePendedResponse reads it as pended.
+func TestNormalizePASResponse_BrPayerPended(t *testing.T) {
+	body, err := os.ReadFile(filepath.Join("testdata", "br-payer", "pas-submit-response-pended.json"))
+	if err != nil {
+		t.Fatalf("read pended golden: %v", err)
+	}
+	norm, lr := normalizePASResponse(body)
+	if lr.Status != 0 {
+		t.Fatalf("br-payer A4 must pass through (it has a Task), got %d: %s", lr.Status, lr.Message)
+	}
+	pended, _, perr := shnsdk.ParsePendedResponse(norm)
+	if perr != nil || !pended {
+		t.Fatalf("br-payer A4 must read as pended via ParsePendedResponse; pended=%v err=%v", pended, perr)
 	}
 }
 

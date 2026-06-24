@@ -19,12 +19,16 @@ type dtrPackageParams struct {
 	} `json:"parameter"`
 }
 
-// dtrFromPackageParams extracts the questionnaire canonical (required) and a patient reference
-// (from the coverage beneficiary, if present) from a $questionnaire-package request.
-func dtrFromPackageParams(body []byte) (canonical, patientRef string, ok bool) {
+// dtrFromPackageParams extracts the questionnaire canonical (required), a patient reference
+// (from the coverage beneficiary, if present, for per-patient authz), and the raw Coverage
+// resource bytes (the `coverage` param's resource, if present) from a $questionnaire-package
+// request. The Coverage is carried VERBATIM through the dtr-questionnaire-fetch leg so the
+// native-forward rebuild can re-emit it as the payer-required `coverage` parameter
+// (FR-G28); it is nil when the request carried no coverage (the sandbox / 8-UC-demo path).
+func dtrFromPackageParams(body []byte) (canonical, patientRef string, coverage json.RawMessage, ok bool) {
 	var p dtrPackageParams
 	if err := json.Unmarshal(body, &p); err != nil {
-		return "", "", false
+		return "", "", nil, false
 	}
 	for _, param := range p.Parameter {
 		switch param.Name {
@@ -32,10 +36,11 @@ func dtrFromPackageParams(body []byte) (canonical, patientRef string, ok bool) {
 			canonical = param.ValueCanonical
 		case "coverage":
 			patientRef = patientRefOf(param.Resource) // beneficiary.reference
+			coverage = param.Resource                 // carried verbatim through the leg
 		}
 	}
 	if canonical == "" {
-		return "", "", false
+		return "", "", nil, false
 	}
-	return canonical, patientRef, true
+	return canonical, patientRef, coverage, true
 }

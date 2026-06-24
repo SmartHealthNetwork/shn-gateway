@@ -26,7 +26,7 @@ func TestInMemoryExchangeStore_BeginAppendGet(t *testing.T) {
 		t.Fatalf("Get: legs = %+v, want one leg with child corr", got.Legs)
 	}
 	if ex.ID == got.Legs[0].CorrelationID {
-		t.Fatal("§11 violated: parent Exchange.ID equals child leg CorrelationID")
+		t.Fatal("parent Exchange.ID must not equal child leg CorrelationID")
 	}
 }
 

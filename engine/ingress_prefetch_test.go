@@ -81,7 +81,7 @@ func TestEnsureSelfContained_UnresolvableFailsClosed(t *testing.T) {
 	}
 }
 
-// DEF-INGRESS-BUNDLE (closes the §4 fence's deferred gap): a KEPT serviceHistory Bundle whose
+// DEF-INGRESS-BUNDLE (closes the subject fence's deferred gap): a KEPT serviceHistory Bundle whose
 // entry references a DIFFERENT patient must fail closed (403) — a crafted history Bundle must
 // not smuggle wrong-patient resources into the sealed request.
 func TestEnsureSelfContained_KeptBundleWrongPatientFailsClosed(t *testing.T) {

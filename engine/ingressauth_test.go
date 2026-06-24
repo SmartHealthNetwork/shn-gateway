@@ -128,7 +128,7 @@ func TestIngressTokenEndpoint_IssuesBearer(t *testing.T) {
 	if bearerClaims["scope"] != tr.Scope {
 		t.Errorf("bearer scope = %v, want %q", bearerClaims["scope"], tr.Scope)
 	}
-	// Cache headers: RFC 6749 §5.1
+	// Cache headers: RFC 6749
 	if cc := w.Header().Get("Cache-Control"); cc != "no-store" {
 		t.Errorf("Cache-Control = %q, want no-store", cc)
 	}

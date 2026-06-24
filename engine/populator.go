@@ -15,7 +15,7 @@ import (
 //   - nativePopulator  — forward to an SDC Questionnaire/$populate endpoint (pass-through)
 //   - (future) operated CQL engine — same interface, config-only drop-in
 //
-// Populate takes the full §6.2 package (so a backend that needs the bundled
+// Populate takes the full $questionnaire-package (so a backend that needs the bundled
 // Libraries/ValueSets can use them) and returns the populated QR JSON plus an OPTIONAL
 // per-item fill summary (nil when the backend did not itself fill — e.g. a remote
 // $populate engine did, so the gateway has no per-item attribution to surface).

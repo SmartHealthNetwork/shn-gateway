@@ -14,7 +14,7 @@ import (
 func TestManagedPopulator_ByteParityWithInlineFill(t *testing.T) {
 	sor := NewStubHolderData() // the demo SoR personas
 	member := "MBR-COVERED"
-	pkg := wrapSandboxPackage(t) // §6.2 one-entry package around the sandbox Questionnaire
+	pkg := wrapSandboxPackage(t) // one-entry package around the sandbox Questionnaire
 
 	cc, ok := sor.ClinicalContext(member)
 	if !ok {
@@ -45,7 +45,7 @@ func TestManagedPopulator_ByteParityWithInlineFill(t *testing.T) {
 	}
 }
 
-// wrapSandboxPackage builds the §6.2 one-entry $questionnaire-package around the
+// wrapSandboxPackage builds the one-entry $questionnaire-package around the
 // sandbox Questionnaire (the shape originate.go receives on the DTR-fetch leg).
 func wrapSandboxPackage(t *testing.T) []byte {
 	t.Helper()

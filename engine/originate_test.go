@@ -214,7 +214,7 @@ func (s *stubSubstrate) handleRoute(_ *http.Request, body []byte) (*http.Respons
 	meta := shnsdk.Metadata{
 		Sender:          "payer",
 		Recipient:       "provider",
-		TransactionType: "crd-order-select",
+		TransactionType: env.Metadata.TransactionType, // echo the request leg (crd-order-select, etc.)
 		AuthorityFrame:  respFrame,
 		Timestamp:       s.clock().UTC().Format(time.RFC3339),
 		CorrelationID:   corrID,

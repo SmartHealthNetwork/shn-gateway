@@ -165,61 +165,6 @@ func TestNativeResponder_EligibilityForwardsVerbatim(t *testing.T) {
 		t.Errorf("forwarded to %q", p.lastPath)
 	}
 }
-
-func TestNativeResponder_CRDAddsHookInstanceAndNormalizes(t *testing.T) {
-	p := newStubPartner(t)
-	// The partner returns a split-shape coverage-information (covered=covered, pa-needed=no-auth);
-	// the CRD leg NORMALIZES it (FR-G25) and re-renders canonical SHN cards rather than
-	// forwarding the partner's RI-specific wire form verbatim.
-	partnerCard := []byte(`{"cards":[{"suggestions":[{"actions":[{"resource":{"extension":[` +
-		`{"url":"http://hl7.org/fhir/us/davinci-crd/StructureDefinition/ext-coverage-information",` +
-		`"extension":[{"url":"covered","valueCode":"covered"},{"url":"pa-needed","valueCode":"no-auth"}]}]}}]}]}]}`)
-	// The conventional CDS service path (Task: keep in sync with native.go's const).
-	p.respByPath["/cds-services/shn-order-select"] = partnerCard
-	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", nil, nil)
-
-	res, err := n.Handle(context.Background(), "crd-order-select", "corr", "pci",
-		[]byte(`{"hook":"order-select","context":{"patientId":"p1","draftOrders":[{}]}}`))
-	if err != nil {
-		t.Fatalf("Handle: %v", err)
-	}
-	if res.Status != 0 {
-		t.Fatalf("Status = %d, want 0", res.Status)
-	}
-	// The response is the canonical SHN cards (normalized), NOT the partner bytes verbatim.
-	cov, perr := shnsdk.ParseCards(res.ResponseFHIR)
-	if perr != nil {
-		t.Fatalf("response is not canonical SHN cards: %v (%s)", perr, res.ResponseFHIR)
-	}
-	if cov.Covered != shnsdk.CoveredCovered || cov.PARequired() {
-		t.Errorf("normalized coverage = %+v, want covered+no-auth", cov)
-	}
-	// The forwarded hook carries the CDS-Hooks-required hookInstance.
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(p.lastBody, &m); err != nil {
-		t.Fatalf("forwarded body not JSON: %v", err)
-	}
-	if _, ok := m["hookInstance"]; !ok {
-		t.Errorf("forwarded hook missing hookInstance: %s", p.lastBody)
-	}
-}
-
-// TestNativeResponder_CRDUnmappablePartnerIs502 proves the CRD leg fails closed when the
-// partner returns a card with no resolvable coverage-information (FR-G25; no $validate net).
-func TestNativeResponder_CRDUnmappablePartnerIs502(t *testing.T) {
-	p := newStubPartner(t)
-	p.respByPath["/cds-services/shn-order-select"] = []byte(`{"cards":[{"summary":"x"}]}`)
-	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", nil, nil)
-	res, err := n.Handle(context.Background(), "crd-order-select", "corr", "pci",
-		[]byte(`{"hook":"order-select","context":{"patientId":"p1","draftOrders":[{}]}}`))
-	if err != nil {
-		t.Fatalf("Handle returned error (want Status 502, not error): %v", err)
-	}
-	if res.Status != http.StatusBadGateway {
-		t.Errorf("Status = %d, want 502 (un-mappable partner CRD card)", res.Status)
-	}
-}
-
 func TestNativeResponder_DTRForwardsPackageVerbatim(t *testing.T) {
 	p := newStubPartner(t)
 	// A deps-RICH package — the native path must forward it byte-for-byte (deps preserved).
@@ -274,6 +219,78 @@ func TestNativeResponder_DTRForwardsQuestionnaireLessPackageVerbatim(t *testing.
 	}
 }
 
+// TestNativeResponder_DTRForwardsCoverageWhenCarried is the Gap-B end-to-end leg guard
+// (FR-G28): a dtr-questionnaire-fetch leg request carrying a Coverage resource must yield
+// a forwarded $questionnaire-package body that INCLUDES a `coverage` parameter — a real
+// Da Vinci payer (br-payer) 400s "The 'coverage' parameter is required (min=1)" otherwise.
+// The leg request is the published shnsdk.QuestionnaireFetchRequest (canonical + optional
+// coverage), so this also proves native.go reads the optional coverage off the wire.
+func TestNativeResponder_DTRForwardsCoverageWhenCarried(t *testing.T) {
+	p := newStubPartner(t)
+	p.respByPath["/Questionnaire/$questionnaire-package"] =
+		[]byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"Questionnaire","url":"http://x/q"}}]}`)
+	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", nil, nil)
+
+	coverage := json.RawMessage(`{"resourceType":"Coverage","id":"cov-1","status":"active","beneficiary":{"reference":"Patient/p1"}}`)
+	reqFHIR, err := json.Marshal(shnsdk.QuestionnaireFetchRequest{Canonical: "http://x/q", Coverage: coverage})
+	if err != nil {
+		t.Fatalf("marshal fetch request: %v", err)
+	}
+	if _, err := n.Handle(context.Background(), "dtr-questionnaire-fetch", "corr", "pci", reqFHIR); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	var got struct {
+		Parameter []struct {
+			Name     string          `json:"name"`
+			Resource json.RawMessage `json:"resource"`
+		} `json:"parameter"`
+	}
+	if err := json.Unmarshal(p.lastBody, &got); err != nil {
+		t.Fatalf("forwarded body not Parameters: %v (%s)", err, p.lastBody)
+	}
+	var covParam json.RawMessage
+	for _, pr := range got.Parameter {
+		if pr.Name == "coverage" {
+			covParam = pr.Resource
+		}
+	}
+	if covParam == nil {
+		t.Fatalf("forwarded $questionnaire-package missing coverage parameter (payer would 400): %s", p.lastBody)
+	}
+	if !bytes.Contains(covParam, []byte(`"resourceType":"Coverage"`)) ||
+		!bytes.Contains(covParam, []byte(`"id":"cov-1"`)) {
+		t.Errorf("coverage parameter resource not the carried Coverage: %s", covParam)
+	}
+}
+
+// TestNativeResponder_DTRRejectsMalformedFetch locks the fail-closed posture preserved
+// across the Gap-B switch from jsonUnmarshalStrictCanonical to unmarshaling the published
+// QuestionnaireFetchRequest: a malformed body OR a missing/empty canonical → 400 (parity
+// with the sandbox's 400, never a 500), and the partner is never called.
+func TestNativeResponder_DTRRejectsMalformedFetch(t *testing.T) {
+	for name, body := range map[string]string{
+		"not-json":          `{not json`,
+		"missing-canonical": `{"coverage":{"resourceType":"Coverage"}}`,
+		"empty-canonical":   `{"canonical":""}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := newStubPartner(t)
+			n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", nil, nil)
+			res, err := n.Handle(context.Background(), "dtr-questionnaire-fetch", "corr", "pci", []byte(body))
+			if err != nil {
+				t.Fatalf("Handle returned error (want Status 400, not error): %v", err)
+			}
+			if res.Status != http.StatusBadRequest {
+				t.Errorf("Status = %d, want 400", res.Status)
+			}
+			if p.lastBody != nil {
+				t.Errorf("partner was called on a malformed fetch: %s", p.lastBody)
+			}
+		})
+	}
+}
+
 func TestNativeResponder_NilStoreOKForReadOnly(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -288,7 +305,7 @@ func TestNativeResponder_NilStoreOKForReadOnly(t *testing.T) {
 	}
 }
 
-// TestNativeResponder_CRDNativeForwardsVerbatim proves crd-order-select-native forwards
+// TestNativeResponder_CRDNativeForwardsVerbatim proves crd-order-select forwards
 // the conformant CDS Hooks request VERBATIM (no augmentCRDHook minimized re-shaping),
 // then normalizes the partner response identically to the minimized CRD leg (FR-G25,
 // rung-1 faithful pass-through).
@@ -303,7 +320,7 @@ func TestNativeResponder_CRDNativeForwardsVerbatim(t *testing.T) {
 
 	// A conformant CDS Hooks request: hookInstance already present, draftOrders is a Bundle.
 	conformant := []byte(`{"hook":"order-select","hookInstance":"hi-1","context":{"userId":"Practitioner/p1","patientId":"MBR-COVERED","draftOrders":{"resourceType":"Bundle","type":"collection","entry":[{"fullUrl":"urn:uuid:sr1","resource":{"resourceType":"ServiceRequest","id":"sr1","subject":{"reference":"Patient/MBR-COVERED"}}}]},"selections":["ServiceRequest/sr1"]},"prefetch":{"coverage":{"resourceType":"Coverage","beneficiary":{"reference":"Patient/MBR-COVERED"}}}}`)
-	res, err := n.Handle(context.Background(), "crd-order-select-native", "corr", "pci", conformant)
+	res, err := n.Handle(context.Background(), "crd-order-select", "corr", "pci", conformant)
 	if err != nil {
 		t.Fatalf("native conformant CRD: %v", err)
 	}
@@ -338,12 +355,43 @@ func TestNativeResponder_CRDNativeUnmappablePartnerIs502(t *testing.T) {
 	p := newStubPartner(t)
 	p.respByPath["/cds-services/shn-order-select"] = []byte(`{"cards":[{"summary":"x"}]}`)
 	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", nil, nil)
-	res, err := n.Handle(context.Background(), "crd-order-select-native", "corr", "pci",
+	res, err := n.Handle(context.Background(), "crd-order-select", "corr", "pci",
 		[]byte(`{"hook":"order-select","hookInstance":"hi-1","context":{"patientId":"MBR-COVERED","draftOrders":{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"ServiceRequest"}}]}}}`))
 	if err != nil {
 		t.Fatalf("Handle returned error (want Status 502, not error): %v", err)
 	}
 	if res.Status != http.StatusBadGateway {
 		t.Errorf("Status = %d, want 502 (un-mappable partner CRD card)", res.Status)
+	}
+}
+
+// TestNativeResponder_SplitBaseURLs proves CRD (CDS Hooks) posts to the CDS base
+// while DTR/PAS post to the FHIR base — the br-payer topology (CDS at root, FHIR
+// under /fhir). Two httptest servers stand in for the two bases.
+func TestNativeResponder_SplitBaseURLs(t *testing.T) {
+	var cdsPath, fhirPath string
+	cds := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cdsPath = r.URL.Path
+		w.Write([]byte(`{"cards":[],"systemActions":[]}`))
+	}))
+	defer cds.Close()
+	fhir := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fhirPath = r.URL.Path
+		w.Write([]byte(`{"resourceType":"Bundle","type":"collection","entry":[]}`))
+	}))
+	defer fhir.Close()
+
+	n := NewNativeResponder(fhir.Client(), fhir.URL, "order-sign-crd", nil, nil, WithCDSBaseURL(cds.URL))
+	// CRD → CDS base
+	_, _ = n.Handle(context.Background(), "crd-order-select", "c", "p",
+		[]byte(`{"hook":"order-sign","context":{"patientId":"x"}}`))
+	if cdsPath != "/cds-services/order-sign-crd" {
+		t.Errorf("CRD path on CDS server = %q, want /cds-services/order-sign-crd", cdsPath)
+	}
+	// DTR → FHIR base
+	_, _ = n.Handle(context.Background(), "dtr-questionnaire-fetch", "c", "p",
+		[]byte(`{"canonical":"http://x/Questionnaire/Q"}`))
+	if fhirPath != "/Questionnaire/$questionnaire-package" {
+		t.Errorf("DTR path on FHIR server = %q, want /Questionnaire/$questionnaire-package", fhirPath)
 	}
 }

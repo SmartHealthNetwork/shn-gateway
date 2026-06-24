@@ -98,7 +98,7 @@ func questionnaireHasSubject(b []byte) bool {
 
 // packageQuestionnaireHasSubject reports whether ANY Questionnaire entry in a
 // $questionnaire-package collection Bundle carries a subject. The DTR-fetch leg
-// response is now a package Bundle (§6.2); the bare-resource questionnaireHasSubject
+// response is now a package Bundle; the bare-resource questionnaireHasSubject
 // would probe the Bundle wrapper (which has no subject) and silently pass, so the
 // (C) subject fence must walk the package's Questionnaire entries. A partner could
 // include several Questionnaires, so it checks every one. Unexported: only

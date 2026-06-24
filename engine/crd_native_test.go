@@ -61,12 +61,37 @@ func TestConformantCRDBind_DivergentSubject(t *testing.T) {
 	}
 }
 
+// TestConformantCRDBind_AcceptsOriginatorBuilt is the SECOND oracle (after the SDK
+// byte-match golden test): the payer-side conformantCRDBind accepts the request the
+// Originator's SDK builder (BuildConformantOrderSelectRequest + BuildCoverageWithPayer)
+// produces. This proves the producer↔consumer contract holds for the convergence shape
+// without re-running through the golden file.
+func TestConformantCRDBind_AcceptsOriginatorBuilt(t *testing.T) {
+	srJSON, err := shnsdk.BuildServiceRequest("72148", "MRI lumbar spine w/o contrast", "M51.16", "Patient/MBR-COVERED")
+	if err != nil {
+		t.Fatalf("BuildServiceRequest: %v", err)
+	}
+	covJSON, err := shnsdk.BuildCoverageWithPayer("Patient/MBR-COVERED", "Coverage/MBR-COVERED")
+	if err != nil {
+		t.Fatalf("BuildCoverageWithPayer: %v", err)
+	}
+	reqJSON, err := shnsdk.BuildConformantOrderSelectRequest(srJSON, covJSON, "Patient/MBR-COVERED")
+	if err != nil {
+		t.Fatalf("BuildConformantOrderSelectRequest: %v", err)
+	}
+	g := &Gateway{cfg: Config{SoR: NewStubHolderData()}}
+	pci, _, _ := g.cfg.SoR.ResolvePatient("MBR-COVERED")
+	if _, _, status, msg := g.conformantCRDBind(reqJSON, pci); status != 0 {
+		t.Fatalf("conformantCRDBind rejected Originator-built request: %d %s", status, msg)
+	}
+}
+
 func TestSandboxResponder_ConformantCRD(t *testing.T) {
 	data := NewStubHolderData()
 	clock := func() time.Time { return adjTestClock }
 	adj := NewSandboxAdjudicator(data, clock)
 	s := NewSandboxResponder(adj, data, data, clock)
-	res, err := s.Handle(context.Background(), "crd-order-select-native", "corr-1", "pci-1", conformantCRD("MBR-COVERED", "72148"))
+	res, err := s.Handle(context.Background(), "crd-order-select", "corr-1", "pci-1", conformantCRD("MBR-COVERED", "72148"))
 	if err != nil {
 		t.Fatalf("conformant sandbox CRD: %v", err)
 	}

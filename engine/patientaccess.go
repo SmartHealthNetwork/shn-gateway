@@ -106,7 +106,7 @@ func (g *Gateway) handlePatientAccessEOBByID(w http.ResponseWriter, r *http.Requ
 }
 
 // serveEOB validates the served FHIR body, audits the read with the resulting
-// outcome (MANDATORY — §10 every-operation-audited, FR-33), and only THEN writes
+// outcome (MANDATORY — every-operation-audited, FR-33), and only THEN writes
 // the body. Order is validate → audit → write: a payload that fails egress
 // validation is audited as a REJECTED read (never a false "answered") and is never
 // disclosed (fail closed). A gateway that mounts the Patient Access API with NO
@@ -126,7 +126,7 @@ func (g *Gateway) serveEOB(w http.ResponseWriter, r *http.Request, subjectPCI st
 	if status != 0 {
 		outcome = "rejected"
 	}
-	// §10: BOTH the disclosed read and the rejected read are recorded. If the audit
+	// BOTH the disclosed read and the rejected read are recorded. If the audit
 	// cannot be written the read is not served (502).
 	if err := g.auditPatientAccess(r.Context(), subjectPCI, outcome); err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "patient-access read audit failed"})
@@ -217,7 +217,7 @@ func containsBytes(set [][]byte, b []byte) bool {
 // auditPatientAccess appends a metadata-only "patient-access-read" record to the
 // Audit Plane so the read surfaces in the patient projection (FR-29/FR-33), signed
 // with the payer's holder key (an authorized audit signer in harness/devstack). It
-// is MANDATORY, not best-effort: §10 requires EVERY operation to produce a
+// is MANDATORY, not best-effort: the substrate requires EVERY operation to produce a
 // tamper-evident AuditEvent, so — consistent with the Hub's audit-before-forward
 // model — the read is NOT served if it cannot be audited (serveEOB returns 502
 // before disclosing). The AuditURL=="" no-op branch below is defensive: serveEOB

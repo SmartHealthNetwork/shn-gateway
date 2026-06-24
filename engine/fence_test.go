@@ -44,3 +44,62 @@ func TestFenceResponseSubject_DTR(t *testing.T) {
 		t.Fatalf("subjectless package: got status %d, want 0", status)
 	}
 }
+
+// claimResponseFor returns a minimal bare ClaimResponse JSON whose patient.reference is ref —
+// the shape ParsePASResponsePatients reads (fhirread.go).
+func claimResponseFor(t *testing.T, ref string) []byte {
+	t.Helper()
+	return []byte(`{"resourceType":"ClaimResponse","patient":{"reference":"` + ref + `"}}`)
+}
+
+// eobFor returns a minimal ExplanationOfBenefit JSON whose patient.reference is ref — the shape
+// parseEOBPatient reads (fhirread.go).
+func eobFor(t *testing.T, ref string) []byte {
+	t.Helper()
+	return []byte(`{"resourceType":"ExplanationOfBenefit","patient":{"reference":"` + ref + `"}}`)
+}
+
+// The converged conformant PAS legs (pas-claim / pas-claim-update) carry the (C)
+// outbound fence under TWO independent flags: member-fence the
+// ClaimResponse iff !ResponseSubjectForeign (R-7), and the SHN-produced EOB side-effect is fenced
+// UNCONDITIONALLY. Sandbox posture = both flags false = strict (fail-closed). Native posture =
+// both set via markForeignRelay (a real br-payer answers in its OWN namespace).
+
+func TestFenceConformantPAS_SandboxSwap_Rejected(t *testing.T) {
+	g := &Gateway{} // fenceResponseSubject reads no Gateway state for the PAS arm
+	// sandbox posture: both flags false (zero value). A response naming a DIFFERENT member must 403.
+	res := LegResult{ResponseFHIR: claimResponseFor(t, "Patient/MBR-OTHER")}
+	if status, _ := g.fenceResponseSubject("pas-claim", "Patient/MBR-COVERED", res); status != http.StatusForbidden {
+		t.Fatalf("sandbox swap: status=%d, want 403", status)
+	}
+}
+
+func TestFenceConformantPAS_ForeignRelay_StandsDown(t *testing.T) {
+	g := &Gateway{}
+	// native posture: ResponseSubjectForeign=true. A foreign-namespace ClaimResponse must PASS (R-7).
+	res := LegResult{ResponseFHIR: claimResponseFor(t, "Patient/SubscriberExample"), ResponseSubjectForeign: true, ResponseRelayed: true}
+	if status, msg := g.fenceResponseSubject("pas-claim", "Patient/MBR-COVERED", res); status != 0 {
+		t.Fatalf("foreign relay stand-down: status=%d msg=%q, want 0", status, msg)
+	}
+}
+
+func TestFenceConformantPAS_ForeignRelay_WrongEOB_Rejected(t *testing.T) {
+	g := &Gateway{}
+	// Even under a foreign relay, the SHN-produced EOB side-effect is fenced UNCONDITIONALLY.
+	res := LegResult{
+		ResponseFHIR:           claimResponseFor(t, "Patient/SubscriberExample"),
+		SideEffectFHIR:         [][]byte{eobFor(t, "Patient/MBR-OTHER")},
+		ResponseSubjectForeign: true, ResponseRelayed: true,
+	}
+	if status, _ := g.fenceResponseSubject("pas-claim", "Patient/MBR-COVERED", res); status != http.StatusForbidden {
+		t.Fatalf("wrong-member EOB under relay: status=%d, want 403", status)
+	}
+}
+
+func TestFenceConformantPASUpdate_SandboxSwap_Rejected(t *testing.T) {
+	g := &Gateway{}
+	res := LegResult{ResponseFHIR: claimResponseFor(t, "Patient/MBR-OTHER")}
+	if status, _ := g.fenceResponseSubject("pas-claim-update", "Patient/MBR-COVERED", res); status != http.StatusForbidden {
+		t.Fatalf("update sandbox swap: status=%d, want 403", status)
+	}
+}

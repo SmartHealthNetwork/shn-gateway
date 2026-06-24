@@ -74,14 +74,19 @@ type config struct {
 	// Optional native-forward payer block (the PARTNER Da Vinci payer is a different
 	// external party from the FHIR SoR — distinct credentials). Setting
 	// PayerDavinciBaseURL switches the payer's read-only legs to native forwarding.
-	PayerDavinciBaseURL   string
-	PayerDavinciTokenURL  string
-	PayerDavinciClientID  string
-	PayerDavinciClientKey string
-	PayerDavinciClientAlg string
-	PayerDavinciScope     string
-	PayerDavinciClientKID string
-	PayerDavinciPASNative bool
+	PayerDavinciBaseURL string
+	// PayerDavinciCDSBaseURL is the base for the partner's CDS Hooks (CRD) posts when it
+	// is NOT co-located with the FHIR base — e.g. br-payer serves CDS Hooks at root
+	// /cds-services but FHIR ops under /fhir. Empty ⇒ CDS uses PayerDavinciBaseURL
+	// (co-located default). FR-G28 / OWD-G8.
+	PayerDavinciCDSBaseURL string
+	PayerDavinciTokenURL   string
+	PayerDavinciClientID   string
+	PayerDavinciClientKey  string
+	PayerDavinciClientAlg  string
+	PayerDavinciScope      string
+	PayerDavinciClientKID  string
+	PayerDavinciPASNative  bool
 	// PayerDavinciCRDServiceID is the escape-hatch override for the partner's CDS
 	// Hooks order-select service id. When empty, DiscoverCRDServiceID fetches
 	// {PAYER_DAVINCI_BASE_URL}/cds-services at boot and selects the single
@@ -180,6 +185,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 		FHIRClientKID:    getenv("FHIR_CLIENT_KID"),
 
 		PayerDavinciBaseURL:      getenv("PAYER_DAVINCI_BASE_URL"),
+		PayerDavinciCDSBaseURL:   getenv("PAYER_DAVINCI_CDS_BASE_URL"),
 		PayerDavinciTokenURL:     getenv("PAYER_DAVINCI_TOKEN_URL"),
 		PayerDavinciClientID:     getenv("PAYER_DAVINCI_CLIENT_ID"),
 		PayerDavinciClientKey:    getenv("PAYER_DAVINCI_CLIENT_KEY"),
@@ -235,7 +241,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 		}
 	}
 
-	// All-or-nothing partner-payer credentials (design §7): a partial block is a
+	// All-or-nothing partner-payer credentials: a partial block is a
 	// misconfig (someone intended auth and fat-fingered it) → hard error. Zero creds is
 	// the deliberate-unauthenticated mode (warned at build, not errored here).
 	if cfg.PayerDavinciTokenURL != "" {
@@ -559,7 +565,7 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		AuditURL:        firstNonEmpty(cfg.AuditURL, endpoints.Audit),
 		PHGURL:          firstNonEmpty(cfg.PHGURL, endpoints.PHG),
 	}
-	// Native-forward payer mode (design §1.2/§7): the read-only legs forward to a partner
+	// Native-forward payer mode: the read-only legs forward to a partner
 	// Da Vinci endpoint; PAS stays on the sandbox fallback. Setting Responder here means
 	// engine.New uses it directly (it only derives from Adjudicator when Responder==nil).
 	if cfg.PayerDavinciBaseURL != "" {
@@ -574,7 +580,7 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 			pdc = client // the substrate HTTP client; unauthenticated forward
 		}
 		// Fail loud: a PAS-native gateway MUST have a real payer Store for the shadow
-		// ledger + EOB (design §5.2; mirrors the payer-role derive-then-guard at
+		// ledger + EOB (mirrors the payer-role derive-then-guard at
 		// gateway/engine/gateway.go:163-171). Without it a PAS leg would dispatch into
 		// a nil store and panic at runtime.
 		if cfg.PayerDavinciPASNative && store == nil {
@@ -585,13 +591,22 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		// partners whose CRD service uses a different hook name, e.g. br-payer's
 		// "order-sign-crd" which registers hook:order-sign rather than order-select).
 		// Fail-closed: an ambiguous or absent order-select service aborts boot.
-		crdSvcID, discErr := engine.DiscoverCRDServiceID(ctx, pdc, cfg.PayerDavinciBaseURL, cfg.PayerDavinciCRDServiceID)
+		// CDS Hooks may live on a different base than the FHIR ops (e.g. br-payer: CDS at
+		// root, FHIR under /fhir). cdsBase defaults to the FHIR base when unset (FR-G28).
+		cdsBase := cfg.PayerDavinciBaseURL
+		if cfg.PayerDavinciCDSBaseURL != "" {
+			cdsBase = cfg.PayerDavinciCDSBaseURL
+		}
+		crdSvcID, discErr := engine.DiscoverCRDServiceID(ctx, pdc, cdsBase, cfg.PayerDavinciCRDServiceID)
 		if discErr != nil {
 			return b, fmt.Errorf("gateway: CRD service-id discovery: %w", discErr)
 		}
-		native := engine.NewNativeResponder(pdc, cfg.PayerDavinciBaseURL, crdSvcID, store, clock)
+		native := engine.NewNativeResponder(pdc, cfg.PayerDavinciBaseURL, crdSvcID, store, clock, engine.WithCDSBaseURL(cfg.PayerDavinciCDSBaseURL))
 		fallback := engine.NewSandboxResponder(gwCfg.Adjudicator, sor, store, clock)
 		gwCfg.Responder = engine.NewCompositeResponder(native, fallback, cfg.PayerDavinciPASNative)
+		// The native-forward DTR response is a foreign Da Vinci package SHN can't $validate
+		// (R-8 near-relay): tell the engine to skip the DTR egress foreign-$validate (FR-G28).
+		gwCfg.PayerDavinciNative = true
 	}
 	if cfg.ProviderDTRNative {
 		gwCfg.Populator = engine.NewNativePopulator(client, cfg.ProviderDTRPopulateURL)

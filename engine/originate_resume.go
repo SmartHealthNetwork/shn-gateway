@@ -27,7 +27,10 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 		return pendState{}, false
 	}
 	pasCorr := g.cfg.CorrelationGen()
-	bundleJSON, err := shnsdk.BuildClaimBundle(res.qrJSON, res.srJSON, res.patientRef, res.coverageRef, pasCorr, g.cfg.Clock())
+	bundleJSON, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
+		QR: res.qrJSON, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef,
+		Corr: pasCorr, Created: g.cfg.Clock(),
+	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build bundle failed"})
 		return pendState{}, false
@@ -136,7 +139,10 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 	}
 	updateCorr := g.cfg.CorrelationGen()
 	// UC-06: diagnosticReport=nil; the amended QR is the supplemental data.
-	updateBundle, err := shnsdk.BuildClaimUpdateBundle(amendedQR, st.srJSON, nil, provJSON, st.patientRef, st.coverageRef, updateCorr, st.pasCorr, g.cfg.Clock())
+	updateBundle, err := shnsdk.BuildConformantClaimUpdateBundle(shnsdk.ConformantClaimUpdateInputs{
+		QR: amendedQR, SR: st.srJSON, PatientRef: st.patientRef, CoverageRef: st.coverageRef,
+		Provenance: provJSON, DiagnosticReport: nil, Corr: updateCorr, OriginalCorr: st.pasCorr, Created: g.cfg.Clock(),
+	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build update bundle failed"})
 		return false
@@ -264,7 +270,10 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 		return false
 	}
 	updateCorr := g.cfg.CorrelationGen()
-	updateBundle, err := shnsdk.BuildClaimUpdateBundle(amendedQR, st.srJSON, nil, provJSON, st.patientRef, st.coverageRef, updateCorr, st.pasCorr, g.cfg.Clock())
+	updateBundle, err := shnsdk.BuildConformantClaimUpdateBundle(shnsdk.ConformantClaimUpdateInputs{
+		QR: amendedQR, SR: st.srJSON, PatientRef: st.patientRef, CoverageRef: st.coverageRef,
+		Provenance: provJSON, DiagnosticReport: nil, Corr: updateCorr, OriginalCorr: st.pasCorr, Created: g.cfg.Clock(),
+	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build update bundle failed"})
 		return false

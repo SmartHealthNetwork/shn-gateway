@@ -17,7 +17,7 @@ import (
 
 // FilledItem is the gateway-engine-LOCAL attribution surface for a DTR auto-filled
 // QR item (console response, QRItems field). The SDK's FillQuestionnaire drops the
-// FilledItem summary (UI-only — §9); the gateway reconstructs it via fillSummary
+// FilledItem summary (UI-only); the gateway reconstructs it via fillSummary
 // from the ClinicalContext. JSON tags are byte-for-byte compatible with the original
 // dtr.FilledItem shape so the console response format is unchanged.
 type FilledItem struct {
@@ -270,7 +270,7 @@ func (g *Gateway) runCRDThenDTR(w http.ResponseWriter, r *http.Request, member s
 	}
 
 	// --- CRD round-trip: must come back PA-required with a canonical. ---
-	crdReq, err := shnsdk.BuildOrderSelectRequest(srJSON, coverageJSON, patientRef)
+	crdReq, err := shnsdk.BuildConformantOrderSelectRequest(srJSON, coverageJSON, patientRef)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build order-select failed"})
 		return crdDtrResult{}, false
@@ -291,7 +291,7 @@ func (g *Gateway) runCRDThenDTR(w http.ResponseWriter, r *http.Request, member s
 	switch {
 	case cov.Covered == shnsdk.CoveredNotCovered:
 		// Explicit terminal stop — a coverage denial STOPS, never silently "proceeds".
-		// Patient-facing denial UX is deferred (§10).
+		// Patient-facing denial UX is deferred.
 		writeJSON(w, http.StatusOK, map[string]any{"paRequired": false, "covered": false, "outcome": "not-covered"})
 		return crdDtrResult{}, false
 	case cov.PANeeded == shnsdk.PANeededSatisfied:
@@ -328,7 +328,7 @@ func (g *Gateway) runCRDThenDTR(w http.ResponseWriter, r *http.Request, member s
 		return crdDtrResult{}, false
 	}
 
-	// §6.2: the DTR-fetch leg carries the full $questionnaire-package collection
+	// The DTR-fetch leg carries the full $questionnaire-package collection
 	// Bundle (its dependent Libraries/ValueSets survive the wire for Step 3, which
 	// will read them from packageJSON here). Extract the bare Questionnaire for the
 	// F5 canonical check + auto-fill. A package with no Questionnaire is a partner
@@ -509,7 +509,7 @@ func (g *Gateway) handleUC02(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	reqJSON, err := shnsdk.BuildOrderSelectRequest(srJSON, coverageJSON, patientRef)
+	reqJSON, err := shnsdk.BuildConformantOrderSelectRequest(srJSON, coverageJSON, patientRef)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build order-select failed"})
 		return
@@ -560,7 +560,10 @@ func (g *Gateway) handleUC03(w http.ResponseWriter, r *http.Request) {
 
 	// --- PAS round-trip: submit the preauth bundle, expect an approval. ---
 	pasCorr := g.cfg.CorrelationGen()
-	bundleJSON, err := shnsdk.BuildClaimBundle(res.qrJSON, res.srJSON, res.patientRef, res.coverageRef, pasCorr, g.cfg.Clock())
+	bundleJSON, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
+		QR: res.qrJSON, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef,
+		Corr: pasCorr, Created: g.cfg.Clock(),
+	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build bundle failed"})
 		return
@@ -616,7 +619,10 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 
 	// PAS submit — expect PENDED (no operative DiagnosticReport yet).
 	pasCorr := g.cfg.CorrelationGen()
-	bundleJSON, err := shnsdk.BuildClaimBundle(res.qrJSON, res.srJSON, res.patientRef, res.coverageRef, pasCorr, g.cfg.Clock())
+	bundleJSON, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
+		QR: res.qrJSON, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef,
+		Corr: pasCorr, Created: g.cfg.Clock(),
+	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build bundle failed"})
 		return
@@ -672,7 +678,10 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	updateCorr := g.cfg.CorrelationGen()
-	updateBundle, err := shnsdk.BuildClaimUpdateBundle(res.qrJSON, res.srJSON, drJSON, provJSON, res.patientRef, res.coverageRef, updateCorr, pasCorr, g.cfg.Clock())
+	updateBundle, err := shnsdk.BuildConformantClaimUpdateBundle(shnsdk.ConformantClaimUpdateInputs{
+		QR: res.qrJSON, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef,
+		Provenance: provJSON, DiagnosticReport: drJSON, Corr: updateCorr, OriginalCorr: pasCorr, Created: g.cfg.Clock(),
+	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build update bundle failed"})
 		return
@@ -770,7 +779,10 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 
 	// PAS submit — expect PENDED (no operative DiagnosticReport yet).
 	pasCorr := g.cfg.CorrelationGen()
-	bundleJSON, err := shnsdk.BuildClaimBundle(res.qrJSON, res.srJSON, res.patientRef, res.coverageRef, pasCorr, g.cfg.Clock())
+	bundleJSON, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
+		QR: res.qrJSON, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef,
+		Corr: pasCorr, Created: g.cfg.Clock(),
+	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build bundle failed"})
 		return
@@ -837,7 +849,10 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 
 	// --- ClaimUpdate with the externally-retrieved DiagnosticReport + Provenance. ---
 	updateCorr := g.cfg.CorrelationGen()
-	updateBundle, err := shnsdk.BuildClaimUpdateBundle(res.qrJSON, res.srJSON, drJSON, provJSON, res.patientRef, res.coverageRef, updateCorr, pasCorr, g.cfg.Clock())
+	updateBundle, err := shnsdk.BuildConformantClaimUpdateBundle(shnsdk.ConformantClaimUpdateInputs{
+		QR: res.qrJSON, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef,
+		Provenance: provJSON, DiagnosticReport: drJSON, Corr: updateCorr, OriginalCorr: pasCorr, Created: g.cfg.Clock(),
+	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build update bundle failed"})
 		return
@@ -899,7 +914,10 @@ func (g *Gateway) handleUC08(w http.ResponseWriter, r *http.Request) {
 	// PAS submit — expect DENIED (4 weeks conservative therapy < 6, no prior surgery,
 	// not high-disability → Adjudicate returns Denied).
 	pasCorr := g.cfg.CorrelationGen()
-	bundleJSON, err := shnsdk.BuildClaimBundle(res.qrJSON, res.srJSON, res.patientRef, res.coverageRef, pasCorr, g.cfg.Clock())
+	bundleJSON, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
+		QR: res.qrJSON, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef,
+		Corr: pasCorr, Created: g.cfg.Clock(),
+	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build bundle failed"})
 		return
@@ -943,7 +961,7 @@ func (g *Gateway) handleUC08(w http.ResponseWriter, r *http.Request) {
 	// the console can show the patient view in one click. This stands in for the
 	// patient app (the patient would query the PHG directly). It is INTENTIONALLY
 	// fail-open — a PHG hiccup must not fail the real denial decision, which already
-	// succeeded on the substrate. The §10 patient-surfacing requirement is proven
+	// succeeded on the substrate. The patient-surfacing requirement is proven
 	// INDEPENDENTLY of this convenience path by TestUC08_PatientSurfacingDirect
 	// (which queries the PHG directly and fails if surfacing is skipped), so this
 	// fail-open cannot silently hide a broken patient surface.

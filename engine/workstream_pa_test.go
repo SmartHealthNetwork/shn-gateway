@@ -9,12 +9,11 @@ func TestPACatalog_Ops(t *testing.T) {
 	want := map[string]string{
 		"coverage-eligibility":    "eligibility-inquiry",
 		"crd-order-select":        "crd-order-select",
-		"crd-order-select-native": "crd-order-select-native",
 		"dtr-questionnaire-fetch": "dtr-questionnaire-fetch",
-		"pas-claim":               "pas-submit",
-		"pas-claim-update":        "pas-update-submit",
 		"federated-query":         "federated-query-submit",
 		"patient-dtr":             "patient-dtr-request",
+		"pas-claim":               "pas-submit",
+		"pas-claim-update":        "pas-update-submit",
 	}
 	if len(paCatalog) != len(want) {
 		t.Fatalf("paCatalog has %d entries, want %d", len(paCatalog), len(want))
@@ -54,8 +53,8 @@ func TestOriginateLeg_UnknownLegTypeFailsClosed(t *testing.T) {
 }
 
 // TestOriginateLeg_WrongWorkstreamFailsClosed proves the WorkstreamType selection-seam
-// guard fires BEFORE the catalog lookup: a VALID legType ("crd-order-select") carried by
-// a FOREIGN WorkstreamType must fail closed without ever reaching paCatalog or roundTrip
+// guard fires BEFORE the catalog lookup: a VALID legType ("crd-order-select") carried
+// by a FOREIGN WorkstreamType must fail closed without ever reaching paCatalog or roundTrip
 // (a future catalogFor() would have no catalog for that workstream). The error returns
 // cleanly on a zero-value Gateway — if the guard did NOT fire first, the valid legType
 // would reach roundTrip and panic on the nil registry, failing the test differently.

@@ -56,7 +56,7 @@ func patientRefOf(resource json.RawMessage) string {
 	return ""
 }
 
-// memberForPCI re-reads the bare context.patientId member (already validated by the §4 fence).
+// memberForPCI re-reads the bare context.patientId member (already validated by the subject fence).
 func (g *Gateway) memberForPCI(body []byte) string {
 	var req ingressCDSRequest
 	_ = json.Unmarshal(body, &req)
@@ -209,7 +209,7 @@ func (g *Gateway) ingressEnsureSelfContained(body []byte, member, pci string) ([
 // fenceKeptBundle closes DEF-INGRESS-BUNDLE (the subject fence's deferred gap): a KEPT prefetch value
 // that is a searchset Bundle must have every entry's patient subject resolve to the bound pci,
 // else a crafted history Bundle could smuggle wrong-patient resources into the sealed request.
-// Non-Bundle values are covered by the §4 single-resource fence; this returns ok for them.
+// Non-Bundle values are covered by the single-resource fence; this returns ok for them.
 func (g *Gateway) fenceKeptBundle(value json.RawMessage, pci string) (int, string) {
 	var probe struct {
 		ResourceType string `json:"resourceType"`

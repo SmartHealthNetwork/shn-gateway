@@ -33,6 +33,7 @@ func TestCompositeResponder_RoutesDaVinciToNativeEligibilityToFallback(t *testin
 			t.Errorf("%s routed to %s, want native", leg, res.ResponseFHIR)
 		}
 	}
+	// pasNative=false, so the conformant PAS pair routes to the managed fallback too.
 	for _, leg := range []string{"coverage-eligibility", "pas-claim", "pas-claim-update"} {
 		res, err := c.Handle(context.Background(), leg, "corr", "pci", nil)
 		if err != nil {
@@ -79,6 +80,28 @@ func TestComposite_PASNativeRoutesPairBothOrNeither(t *testing.T) {
 	for _, c := range []LegResponder{off, on} {
 		if got := routeName(t, c, "coverage-eligibility"); got != "fallback" {
 			t.Fatalf("coverage-eligibility routed to %s, want fallback (always managed)", got)
+		}
+	}
+}
+
+// failingFallback fails the test if invoked. Used as the composite fallback to prove the
+// forwarded legs route to NATIVE, never the sandbox — FR-G28 / finding #3:
+// crd-order-select (the conformant CRD leg the P5 ingress emits) used to fall
+// through to the sandbox, masking the real br-payer in the opt-in two-RI gate.
+type failingFallback struct{ t *testing.T }
+
+func (f failingFallback) Handle(_ context.Context, leg, _, _ string, _ []byte) (LegResult, error) {
+	f.t.Fatalf("fallback invoked for forwarded leg %q — should route to native", leg)
+	return LegResult{}, nil
+}
+
+func TestComposite_ForwardsConformantCRDNative(t *testing.T) {
+	var nl []string
+	native := recordingResponder{tag: "native", legs: &nl}
+	c := NewCompositeResponder(native, failingFallback{t}, true) // pasNative on
+	for _, leg := range []string{"crd-order-select", "dtr-questionnaire-fetch", "pas-claim", "pas-claim-update"} {
+		if got := routeName(t, c, leg); got != "native" {
+			t.Errorf("leg %q routed to %s, want native", leg, got)
 		}
 	}
 }

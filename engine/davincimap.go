@@ -26,30 +26,23 @@ import (
 // valueCoding shape some older draft images emit is a pre-STU ballot artifact and is not read.
 const extCoverageInformation = "http://hl7.org/fhir/us/davinci-crd/StructureDefinition/ext-coverage-information"
 
-// augmentCRDHook adds the CDS-Hooks-required hookInstance to SHN's minimized
-// order-select hook, preserving every other field. SHN's OrderSelectRequest omits
-// hookInstance (sdk/crd.go); a real /cds-services endpoint requires it.
-func augmentCRDHook(hookJSON []byte, hookInstance string) ([]byte, error) {
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(hookJSON, &m); err != nil {
-		return nil, fmt.Errorf("engine: parse CRD hook: %w", err)
+// buildQuestionnairePackageRequest translates SHN's {canonical[, coverage]} DTR fetch into
+// a Da Vinci $questionnaire-package Parameters request. When coverage is present, it is
+// appended VERBATIM as a `coverage` parameter resource — a real Da Vinci payer (br-payer)
+// 400s "The 'coverage' parameter is required (min=1)" without it (FR-G28). The
+// coverage is the PROVIDER's inbound Coverage carried through the leg; the payer-gw never
+// fabricates one (non-aggregation). When coverage is nil the output is canonical-only —
+// byte-identical to the pre-fix request, so the sandbox / 8-UC-demo path is unchanged.
+func buildQuestionnairePackageRequest(canonical string, coverage json.RawMessage) ([]byte, error) {
+	parameter := []map[string]any{
+		{"name": "questionnaire", "valueCanonical": canonical},
 	}
-	hi, err := json.Marshal(hookInstance)
-	if err != nil {
-		return nil, fmt.Errorf("engine: marshal hookInstance: %w", err)
+	if len(coverage) > 0 {
+		parameter = append(parameter, map[string]any{"name": "coverage", "resource": coverage})
 	}
-	m["hookInstance"] = hi
-	return json.Marshal(m)
-}
-
-// buildQuestionnairePackageRequest translates SHN's {canonical} DTR fetch into a
-// Da Vinci $questionnaire-package Parameters request.
-func buildQuestionnairePackageRequest(canonical string) ([]byte, error) {
 	params := map[string]any{
 		"resourceType": "Parameters",
-		"parameter": []map[string]any{
-			{"name": "questionnaire", "valueCanonical": canonical},
-		},
+		"parameter":    parameter,
 	}
 	return json.Marshal(params)
 }
@@ -86,7 +79,7 @@ func extractQuestionnaireFromPackage(packageBundle []byte) ([]byte, error) {
 
 // buildQuestionnairePackage wraps a bare Questionnaire into a one-entry
 // $questionnaire-package collection Bundle — the uniform DTR-fetch leg response
-// shape (§6.2). The sandbox payer has no dependent Libraries/ValueSets, so this
+// shape. The sandbox payer has no dependent Libraries/ValueSets, so this
 // wrapper is honestly deps-free; a real partner's package (forwarded VERBATIM by
 // native.go) carries them. This function uses no shnsdk symbols directly (the file
 // itself does, via the CRD/PAS normalizers). The byte shape
@@ -280,8 +273,10 @@ func mapCoverageInformation(subs []subExtension) (shnsdk.CardCoverage, LegResult
 //     (covers both approve A1 and deny A3 — a denial is also outcome:complete; the
 //     originator's ParseClaimResponse reads the reviewAction code to distinguish them).
 //   - Bundle with a Task entry → SHN pended shape → pass through unchanged.
-//   - any other Bundle (e.g. queued/pended real-RI shape with no SHN Task) → 502 fail-closed
-//     (real-RI pended normalization is deferred; DEF-G1 / AI-9 keeps this additive).
+//   - Bundle with a ClaimResponse whose outcome=="queued" (real-RI pended shape, no SHN Task) →
+//     DEF-G1 lifted: pass through unchanged so ParsePendedResponse identifies it as pended.
+//     br-payer's amended re-POST response is exactly this shape (A4, queued, no Task).
+//   - any other Bundle (no complete/queued ClaimResponse, no Task) → 502 fail-closed.
 //   - unparseable or unknown top-level resourceType → 502 fail-closed.
 //
 // A zero-Status LegResult means "proceed" (caller should use the returned bytes).
@@ -303,8 +298,12 @@ func normalizePASResponse(body []byte) ([]byte, LegResult) {
 		return body, LegResult{}
 
 	case "Bundle":
-		// Walk entries: find a ClaimResponse(complete) to unwrap, or a Task (SHN pended).
+		// Walk entries: find a ClaimResponse(complete) to unwrap, or a Task (SHN pended),
+		// or a ClaimResponse(queued) (real-RI pended, DEF-G1 lifted).
 		hasTask := false
+		hasCompleteClaimResponse := false
+		hasQueuedClaimResponse := false
+		var completeClaimResponseBytes json.RawMessage
 		for _, e := range top.Entry {
 			var rt struct {
 				ResourceType string `json:"resourceType"`
@@ -313,31 +312,33 @@ func normalizePASResponse(body []byte) ([]byte, LegResult) {
 			if err := json.Unmarshal(e.Resource, &rt); err != nil {
 				continue
 			}
-			if rt.ResourceType == "Task" {
+			switch {
+			case rt.ResourceType == "Task":
 				hasTask = true
+			case rt.ResourceType == "ClaimResponse" && rt.Outcome == "complete":
+				hasCompleteClaimResponse = true
+				completeClaimResponseBytes = e.Resource
+			case rt.ResourceType == "ClaimResponse" && rt.Outcome == "queued":
+				hasQueuedClaimResponse = true
 			}
 		}
 		if hasTask {
 			// SHN pended Bundle (ClaimResponse + Task) — pass through unchanged.
 			return body, LegResult{}
 		}
-		// No Task: look for a ClaimResponse with outcome=="complete" to unwrap.
-		for _, e := range top.Entry {
-			var rt struct {
-				ResourceType string `json:"resourceType"`
-				Outcome      string `json:"outcome"`
-			}
-			if err := json.Unmarshal(e.Resource, &rt); err != nil {
-				continue
-			}
-			if rt.ResourceType == "ClaimResponse" && rt.Outcome == "complete" {
-				// Unwrap: return just the entry resource bytes.
-				return []byte(e.Resource), LegResult{}
-			}
+		if hasCompleteClaimResponse {
+			// Unwrap the complete ClaimResponse (A1 approve or A3 deny).
+			return []byte(completeClaimResponseBytes), LegResult{}
 		}
-		// Bundle with neither an SHN Task nor a complete ClaimResponse → 502 fail-closed.
-		// (E.g. a real-RI queued/pending Bundle — deferred, DEF-G1.)
-		return nil, fail502("PAS response Bundle is neither SHN-pended (no Task) nor a complete ClaimResponse (no outcome=complete)")
+		if hasQueuedClaimResponse {
+			// Real-RI pended Bundle (queued ClaimResponse, no SHN Task) — DEF-G1 lifted.
+			// br-payer's amended re-POST response is exactly this shape (A4 queued, no Task);
+			// pass through so ParsePendedResponse identifies it as pended. The update
+			// responder (handlePASClaimUpdateNative) converts a pended re-POST to 422.
+			return body, LegResult{}
+		}
+		// Bundle with no complete/queued ClaimResponse and no Task → 502 fail-closed.
+		return nil, fail502("PAS response Bundle is neither SHN-pended (no Task) nor a complete or queued ClaimResponse")
 
 	default:
 		return nil, fail502("PAS response has unexpected resourceType: " + top.ResourceType)
@@ -356,20 +357,4 @@ func NormalizePASResponseForTest(body []byte) ([]byte, LegResult) {
 // canonical coverage can be resolved (the CRD leg has no $validate net).
 func fail502(msg string) LegResult {
 	return LegResult{Status: http.StatusBadGateway, Message: "engine: " + msg}
-}
-
-// jsonUnmarshalStrictCanonical extracts a non-empty "canonical" string from the DTR
-// fetch request body, erroring on malformed JSON or a missing/empty canonical.
-func jsonUnmarshalStrictCanonical(data []byte, out *string) error {
-	var probe struct {
-		Canonical string `json:"canonical"`
-	}
-	if err := json.Unmarshal(data, &probe); err != nil {
-		return err
-	}
-	if probe.Canonical == "" {
-		return fmt.Errorf("engine: DTR fetch missing canonical")
-	}
-	*out = probe.Canonical
-	return nil
 }

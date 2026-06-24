@@ -1,8 +1,8 @@
-// crd_native.go — the CONFORMANT CRD leg (crd-order-select-native): the payer-side inbound
+// crd_native.go — the CONFORMANT CRD leg (crd-order-select): the payer-side inbound
 // handler + subject-bind for a conformant CDS Hooks order-select request (context.draftOrders
-// is a FHIR Bundle). This is the rung-1 faithful pass-through path (br-provider's verbatim bytes
-// → br-payer); the minimized crd-order-select leg (handleCRDInbound) is the rung-2 construct
-// path and is UNTOUCHED.
+// is a FHIR Bundle). This is the only CRD coverage-discovery contract (br-provider's verbatim
+// bytes → br-payer); the minimized crd-order-select leg + its handler are no longer
+// part of the contract.
 package engine
 
 import (
@@ -112,7 +112,7 @@ func (g *Gateway) handleCRDNativeInbound(w http.ResponseWriter, r *http.Request,
 			return
 		}
 	}
-	result, err := g.cfg.Responder.Handle(ctx, "crd-order-select-native", env.Metadata.CorrelationID, tok.Subject, reqJSON)
+	result, err := g.cfg.Responder.Handle(ctx, "crd-order-select", env.Metadata.CorrelationID, tok.Subject, reqJSON)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "responder failed"})
 		return
@@ -121,5 +121,5 @@ func (g *Gateway) handleCRDNativeInbound(w http.ResponseWriter, r *http.Request,
 		writeJSON(w, result.Status, map[string]string{"error": result.Message})
 		return
 	}
-	g.respondLeg(w, r, "payer-coverage", "crd-cards", "crd-order-select-native", env.Metadata.CorrelationID, result.ResponseFHIR, tok.Subject, env.Metadata.Sender, "")
+	g.respondLeg(w, r, "payer-coverage", "crd-cards", "crd-order-select", env.Metadata.CorrelationID, result.ResponseFHIR, tok.Subject, env.Metadata.Sender, "")
 }

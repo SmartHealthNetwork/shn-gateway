@@ -78,6 +78,15 @@ type Config struct {
 	// Adjudicator in NewGateway (keeping the STABILITY-supported Adjudicator
 	// injection seam working). A test/partner MAY inject a custom LegResponder.
 	Responder LegResponder
+	// PayerDavinciNative reports that the payer Responder native-forwards the read-only
+	// legs to a REAL partner Da Vinci endpoint (PAYER_DAVINCI_BASE_URL set). When true the
+	// DTR $questionnaire-package response is a FOREIGN Da Vinci Bundle (dtr-std-questionnaire /
+	// dtr-questionnaireresponse profiles) that SHN — which hosts US Core only — cannot
+	// $validate; like the conformant crd-order-select / pas-claim legs (R-8),
+	// the DTR response is a NEAR-RELAY: the trust-critical subject fence still runs, but the
+	// engine does NOT foreign-$validate it. false ⇒ the sandbox path (SHN's own
+	// US-Core-resolvable package), which still egress-$validates byte-identically. FR-G28.
+	PayerDavinciNative bool
 	// Populator is the DTR population seam (provider-local). Normally left nil and
 	// DEFAULTED to the managed backend (today's FillQuestionnaire) in New; the native
 	// pass-through backend is injected by config (PROVIDER_DTR_NATIVE). A test MAY
@@ -408,7 +417,10 @@ func (g *Gateway) ingressAuthOK(r *http.Request) bool {
 	if g.ingressAuth == nil {
 		return false // fail-closed: no inbound auth configured
 	}
-	return g.ingressAuth.verifyBearer(r)
+	// SMART Backend Services issued bearer (token-exchange) OR a UDAP B2B direct bearer
+	// (a registered client's self-signed private_key_jwt, the form br-provider sends).
+	// Token-shape disjoint, so the OR cannot fail open (FR-G28 UDAP B2B).
+	return g.ingressAuth.verifyBearer(r) || g.ingressAuth.verifyDirectBearer(r)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

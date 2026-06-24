@@ -1,4 +1,4 @@
-// native.go — the native-forward payer LegResponder (Case 1, design §0/§3). It
+// native.go — the native-forward payer LegResponder (Case 1). It
 // forwards each read-only leg to a partner's real Da Vinci endpoint over a
 // SMART-authenticated *http.Client and returns the partner's FHIR. The engine still
 // owns authority (the (A)/(B) inbound fences + the (C) outbound subject fence, now
@@ -14,8 +14,6 @@ package engine
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -33,10 +31,26 @@ const maxPartnerBody = 8 << 20 // 8 MiB cap on a partner response body
 
 type nativeResponder struct {
 	client       *http.Client
-	baseURL      string
+	baseURL      string // FHIR base ($questionnaire-package, $submit, CoverageEligibilityRequest)
+	cdsBaseURL   string // CDS Hooks base (/cds-services/{id}); defaults to baseURL when co-located
 	crdServiceID string // discovered or overridden at construction (FR-G26)
 	store        Store  // gateway-owned shadow ledger + EOB Store for the PAS legs (nil ⇒ read-only only)
 	clock        func() time.Time
+}
+
+// NativeOption configures optional nativeResponder behavior.
+type NativeOption func(*nativeResponder)
+
+// WithCDSBaseURL overrides the base used for CDS Hooks (CRD) posts, for partners whose
+// CDS Hooks endpoint is NOT co-located with their FHIR base — e.g. br-payer serves CDS
+// Hooks at root /cds-services but FHIR ops under /fhir. Unset ⇒ CDS posts use the FHIR
+// baseURL (co-located default, the prior behavior). FR-G28 / OWD-G8.
+func WithCDSBaseURL(cdsBaseURL string) NativeOption {
+	return func(n *nativeResponder) {
+		if cdsBaseURL != "" {
+			n.cdsBaseURL = cdsBaseURL
+		}
+	}
 }
 
 var _ LegResponder = (*nativeResponder)(nil)
@@ -47,11 +61,15 @@ var _ LegResponder = (*nativeResponder)(nil)
 // via DiscoverCRDServiceID (FR-G26). store is the gateway-owned Store the PAS legs
 // use (pended ledger + EOB); a nil store is valid for a read-only-only native
 // responder. clock is used for the gateway-projected EOB `created`; nil ⇒ time.Now.
-func NewNativeResponder(client *http.Client, baseURL, crdServiceID string, store Store, clock func() time.Time) LegResponder {
+func NewNativeResponder(client *http.Client, baseURL, crdServiceID string, store Store, clock func() time.Time, opts ...NativeOption) LegResponder {
 	if clock == nil {
 		clock = time.Now
 	}
-	return &nativeResponder{client: client, baseURL: baseURL, crdServiceID: crdServiceID, store: store, clock: clock}
+	n := &nativeResponder{client: client, baseURL: baseURL, cdsBaseURL: baseURL, crdServiceID: crdServiceID, store: store, clock: clock}
+	for _, o := range opts {
+		o(n)
+	}
+	return n
 }
 
 // DiscoverCRDServiceID resolves the partner's CDS Hooks order-select service id from
@@ -109,68 +127,73 @@ func DiscoverCRDServiceID(ctx context.Context, client *http.Client, base, overri
 	}
 }
 
+// markForeignRelay marks a LegResult as a verbatim foreign-far-end relay: ResponseFHIR (when
+// present) is the real RI's bytes in the RI's OWN patient namespace. The engine then skips the
+// response member-fence (R-7) and the response egress-$validate (R-8) for this result, while
+// fencing+validating the SHN-produced side-effects (EOB) unconditionally. Both flags are set
+// together here (native = produced-by-foreign AND foreign-namespace); the conformant-mock north
+// star is the only producer that would set them apart. Single declaration site per leg
+// (covers every internal return of handlePASClaim*Native) — fail-closed if ever missed (zero value
+// = strict fence + $validate).
+func markForeignRelay(r LegResult) LegResult {
+	r.ResponseRelayed = true
+	r.ResponseSubjectForeign = true
+	return r
+}
+
 func (n *nativeResponder) Handle(ctx context.Context, leg, corrID, subjectPCI string, requestFHIR []byte) (LegResult, error) {
 	switch leg {
 	case "coverage-eligibility":
-		body, bad := n.post(ctx, "/CoverageEligibilityRequest", requestFHIR, "eligibility")
+		body, bad := n.post(ctx, n.baseURL, "/CoverageEligibilityRequest", requestFHIR, "eligibility")
 		if bad.Status != 0 {
 			return bad, nil
 		}
 		return LegResult{ResponseFHIR: body}, nil
 
 	case "crd-order-select":
-		hi, err := newHookInstance()
-		if err != nil {
-			return LegResult{}, fmt.Errorf("engine: hookInstance: %w", err)
-		}
-		hook, err := augmentCRDHook(requestFHIR, hi)
-		if err != nil {
-			return LegResult{}, err // gateway's own build fault → 500
-		}
-		body, bad := n.post(ctx, "/cds-services/"+n.crdServiceID, hook, "CRD")
-		if bad.Status != 0 {
-			return bad, nil
-		}
-		return normalizeCRDResponse(body)
-
-	case "crd-order-select-native":
 		// The request is ALREADY a conformant CDS Hooks request (br-provider's bytes via
 		// the ingress); forward it VERBATIM — no augmentCRDHook minimized shaping.
 		// Rung-1 faithful pass-through: br-payer receives br-provider's actual request
 		// bytes. The response side is identical to the minimized leg (FR-G25).
-		body, bad := n.post(ctx, "/cds-services/"+n.crdServiceID, requestFHIR, "CRD")
+		body, bad := n.post(ctx, n.cdsBaseURL, "/cds-services/"+n.crdServiceID, requestFHIR, "CRD")
 		if bad.Status != 0 {
 			return bad, nil
 		}
 		return normalizeCRDResponse(body)
 
 	case "dtr-questionnaire-fetch":
-		var fetch struct {
-			Canonical string `json:"canonical"`
-		}
-		if err := jsonUnmarshalStrictCanonical(requestFHIR, &fetch.Canonical); err != nil {
-			// Malformed CLIENT request → 400 (parity with sandbox's 400, not 500).
+		// Parse the published leg request: canonical (required) + an OPTIONAL coverage
+		// resource carried verbatim from the inbound $questionnaire-package (FR-G28).
+		// Fail-closed posture: malformed JSON or a missing/empty canonical → 400 (parity
+		// with the sandbox's 400, not 500).
+		var fetch shnsdk.QuestionnaireFetchRequest
+		if err := json.Unmarshal(requestFHIR, &fetch); err != nil || fetch.Canonical == "" {
 			return LegResult{Status: http.StatusBadRequest, Message: "parse questionnaire fetch failed"}, nil
 		}
-		params, err := buildQuestionnairePackageRequest(fetch.Canonical)
+		// Carry the provider's coverage through (when present) so the real Da Vinci payer's
+		// required `coverage` parameter is satisfied; nil coverage → canonical-only request
+		// (byte-identical to the pre-fix sandbox/demo path).
+		params, err := buildQuestionnairePackageRequest(fetch.Canonical, fetch.Coverage)
 		if err != nil {
 			return LegResult{}, err // build fault → 500
 		}
-		body, bad := n.post(ctx, "/Questionnaire/$questionnaire-package", params, "DTR")
+		body, bad := n.post(ctx, n.baseURL, "/Questionnaire/$questionnaire-package", params, "DTR")
 		if bad.Status != 0 {
 			return bad, nil
 		}
-		// §6.2: forward the partner's $questionnaire-package Bundle VERBATIM (the
+		// Forward the partner's $questionnaire-package Bundle VERBATIM (the
 		// dependent Libraries/ValueSets are preserved for Step 3). The package→
 		// Questionnaire extraction — and the no-Questionnaire 502 — is now a consumer
 		// concern (originate.go), so this leg no longer inspects the body.
 		return LegResult{ResponseFHIR: body}, nil
 
 	case "pas-claim":
-		return n.handlePASClaim(ctx, corrID, subjectPCI, requestFHIR)
+		res, err := n.handlePASClaimNative(ctx, corrID, subjectPCI, requestFHIR)
+		return markForeignRelay(res), err
 
 	case "pas-claim-update":
-		return n.handlePASClaimUpdate(ctx, corrID, subjectPCI, requestFHIR)
+		res, err := n.handlePASClaimUpdateNative(ctx, corrID, subjectPCI, requestFHIR)
+		return markForeignRelay(res), err
 
 	default:
 		// The composite routes the read-only + PAS legs here; this is defensive for an
@@ -179,12 +202,12 @@ func (n *nativeResponder) Handle(ctx context.Context, leg, corrID, subjectPCI st
 	}
 }
 
-// post forwards body to baseURL+path. A transport error or a non-2xx status maps to a
+// post forwards body to base+path. A transport error or a non-2xx status maps to a
 // 502 LegResult (upstream payer failure); never an error return (reserved for the
 // gateway's own faults → 500). Returns (responseBody, LegResult{}) on success or
 // (nil, LegResult{Status:502,…}) on upstream failure.
-func (n *nativeResponder) post(ctx context.Context, path string, body []byte, label string) ([]byte, LegResult) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, n.baseURL+path, bytes.NewReader(body))
+func (n *nativeResponder) post(ctx context.Context, base, path string, body []byte, label string) ([]byte, LegResult) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, LegResult{Status: http.StatusBadGateway, Message: "upstream payer " + label + " request build failed"}
 	}
@@ -205,12 +228,10 @@ func (n *nativeResponder) post(ctx context.Context, path string, body []byte, la
 	return rb, LegResult{}
 }
 
-// normalizeCRDResponse is the shared CRD response tail (FR-G25): normalize the
-// partner's coverage-information to the canonical CardCoverage (davincimap.go), then
-// re-render SHN cards with shnsdk.BuildCards. Used by BOTH the minimized
-// (crd-order-select) and conformant (crd-order-select-native) native CRD cases, so
-// the response behaviour is byte-identical regardless of which request shape was sent.
-// Fails closed (Status 502) when no canonical coverage is resolvable.
+// normalizeCRDResponse is the CRD response tail (FR-G25): normalize the partner's
+// coverage-information to the canonical CardCoverage (davincimap.go), then re-render
+// SHN cards with shnsdk.BuildCards. Used by the conformant crd-order-select
+// native CRD case. Fails closed (Status 502) when no canonical coverage is resolvable.
 func normalizeCRDResponse(body []byte) (LegResult, error) {
 	cov, lr := normalizeCRDCoverage(body)
 	if lr.Status != 0 {
@@ -221,12 +242,4 @@ func normalizeCRDResponse(body []byte) (LegResult, error) {
 		return LegResult{}, fmt.Errorf("engine: render normalized cards: %w", err)
 	}
 	return LegResult{ResponseFHIR: cardsJSON}, nil
-}
-
-func newHookInstance() (string, error) {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b), nil
 }

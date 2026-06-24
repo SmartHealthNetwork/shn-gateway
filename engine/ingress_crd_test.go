@@ -90,7 +90,7 @@ func TestIngressSubjectPCI_MissingPatientId(t *testing.T) {
 
 // A bare prefetch.patient resource whose IDENTITY (its id, not a reference) is a DIFFERENT person
 // than the bound patient fails closed (403) — patientRefOf can't see a Patient's id, so this is the
-// dedicated §4 fence for the prefetch Patient (a different person's demographics must not ride into
+// dedicated fence for the prefetch Patient (a different person's demographics must not ride into
 // the bound patient's sealed exchange).
 func TestIngressSubjectPCI_DivergentPrefetchPatientFailsClosed(t *testing.T) {
 	g := &Gateway{cfg: Config{SoR: NewStubHolderData()}}

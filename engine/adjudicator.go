@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
@@ -105,7 +104,7 @@ func NewSandboxResponder(adj shnsdk.Adjudicator, sor SystemOfRecord, store Store
 }
 
 // crdCardsForCPT runs the shared CRD adjudication tail: CPT → coverage decision → rendered cards.
-// Used by BOTH the minimized (crd-order-select) and conformant (crd-order-select-native) cases.
+// Used by the conformant crd-order-select case.
 func (s *sandboxResponder) crdCardsForCPT(cpt string) (LegResult, error) {
 	paRequired, canonical := s.adj.OrderSelect(cpt)
 	cov := shnsdk.CardCoverage{Covered: "covered"}
@@ -135,20 +134,6 @@ func (s *sandboxResponder) Handle(ctx context.Context, leg, corrID, subjectPCI s
 		}
 		return LegResult{ResponseFHIR: crrJSON}, nil
 	case "crd-order-select":
-		osReq, err := shnsdk.ParseOrderSelectRequest(requestFHIR)
-		if err != nil {
-			return LegResult{}, fmt.Errorf("parse order-select: %w", err)
-		}
-		cpt, err := shnsdk.ParseServiceRequestCPT([]byte(osReq.Context.DraftOrders[0]))
-		if err != nil {
-			// PRESERVE today's exact status+message: a malformed CPT is a 400
-			// (handleCRDInbound returned 400 "parse CPT failed" today), NOT the
-			// generic 500 the error return maps to. Surface via Status, like the
-			// DTR unknown-canonical 400.
-			return LegResult{Status: http.StatusBadRequest, Message: "parse CPT failed"}, nil
-		}
-		return s.crdCardsForCPT(cpt)
-	case "crd-order-select-native":
 		srJSON, ok := extractConformantSR(requestFHIR)
 		if !ok {
 			return LegResult{Status: http.StatusBadRequest, Message: "no ServiceRequest in draftOrders"}, nil
@@ -170,7 +155,7 @@ func (s *sandboxResponder) Handle(ctx context.Context, leg, corrID, subjectPCI s
 		if !ok {
 			return LegResult{Status: http.StatusBadRequest, Message: "unknown questionnaire canonical"}, nil
 		}
-		// §6.2: uniform leg shape — wrap the bare Questionnaire into a one-entry
+		// Uniform leg shape — wrap the bare Questionnaire into a one-entry
 		// $questionnaire-package collection Bundle (honestly deps-free; the sandbox
 		// has none). The consumer extracts the bare Questionnaire on the far side.
 		pkg, err := buildQuestionnairePackage(questionnaireJSON)
@@ -179,54 +164,62 @@ func (s *sandboxResponder) Handle(ctx context.Context, leg, corrID, subjectPCI s
 		}
 		return LegResult{ResponseFHIR: pkg}, nil
 	case "pas-claim":
-		cb, err := shnsdk.ParseClaimBundle(requestFHIR)
-		if err != nil {
-			return LegResult{}, fmt.Errorf("parse bundle: %w", err)
+		// The conformant leg's live path forwards to the real RI (the composite routes it to
+		// native, which relays byte-verbatim AND projects the same EOB + pend Store side-effects
+		// — "pure relay" is a wire property, the EOB is an orthogonal
+		// side-effect). Here (no real RI) the
+		// SANDBOX adjudicates the conformant bundle AND records the same Store side-effects the
+		// minimized pas-claim case does — the four-cell submit cell:
+		//   - PASPended  → Commit RecordPendedClaim (THE load-bearing handoff: the later
+		//                  pas-claim-update leg's BeginClaimUpdate can only find a recorded pend).
+		//   - PASApproved/PASDenied → BuildPADecisionEOB + SideEffectFHIR + Commit RecordEOB
+		//                  (FR-28/FR-34 Patient-Access EOB).
+		// Lifted from the minimized pas-claim case above (not re-derived) so the two stay
+		// consistent until the minimized case is removed (rekey-is-net; both coexist now).
+		s2, status, msg := parseConformantPASSubjects(requestFHIR)
+		if status != 0 {
+			return LegResult{Status: status, Message: msg}, nil
 		}
-		// Design §1.4 (lineage gap #1): source the CPT from the Claim's
-		// ServiceRequest once and use it for the EOB. A ServiceRequest whose
-		// CPT coding is absent is a malformed CLIENT request → 400, not a
-		// generic 500 (mirrors the crd-order-select "parse CPT failed" 400).
-		cpt, cerr := shnsdk.ParseServiceRequestCPT(cb.SRJSON)
+		if s2.qrJSON == nil {
+			// The bind allows a QR-less conformant bundle (R-5), but the sandbox must adjudicate.
+			return LegResult{Status: http.StatusBadRequest, Message: "conformant PAS bundle missing QuestionnaireResponse"}, nil
+		}
+		// Source the CPT from the conformant Claim's ServiceRequest (mirrors the minimized
+		// case at :190). A CPT-less SR is a malformed CLIENT request → 400, not a generic 500.
+		cpt, cerr := shnsdk.ParseServiceRequestCPT(s2.srJSON)
 		if cerr != nil {
 			return LegResult{Status: http.StatusBadRequest, Message: "claim missing service request CPT"}, nil
 		}
-		// FR-20: pass cb.HasDiagnosticReport so the pended branch fires when the
-		// submit bundle lacks an operative DiagnosticReport (prior-surgery case,
-		// UC-04). The Adjudicator owns the auth-number randomness (sandbox:
-		// crypto/rand, unguessable).
-		dec, err := s.adj.PriorAuth(cb.QRJSON, cb.HasDiagnosticReport)
+		dec, err := s.adj.PriorAuth(s2.qrJSON, s2.hasDR)
 		if err != nil {
-			// A PriorAuth DECISION error is a 422 via Status (mirrors today's
-			// handlePASInbound), NOT the generic 500 the error return maps to.
 			return LegResult{Status: http.StatusUnprocessableEntity, Message: err.Error()}, nil
 		}
+		patientRef := "Patient/" + s2.member
+		coverageRef := "Coverage/" + s2.member
 		switch dec.Outcome {
 		case shnsdk.PASPended:
-			// FR-20: build the pended response (Bundle with ClaimResponse+Task) so the
-			// provider can attach supplemental data for exchange-2. FR-21/FR-6: record
-			// this pended claim (payer-local, metadata-only) via Commit so the follow-up
-			// ClaimUpdate can be bound to a REAL prior pend, keyed by subject PCI + corr.
-			pendedJSON, err := shnsdk.BuildPendedResponse(cb.ClaimPatient, corrID, dec.NeededItems, s.clock())
+			pendedJSON, err := shnsdk.BuildPendedResponse(patientRef, corrID, dec.NeededItems, s.clock())
 			if err != nil {
 				return LegResult{}, fmt.Errorf("build pended: %w", err)
 			}
+			// FR-21/FR-6: record this pended claim (payer-local, metadata-only) so the follow-up
+			// ClaimUpdate (pas-claim-update) can bind to a REAL prior pend, keyed by subject PCI +
+			// corr. This is the pend→update handoff.
 			return LegResult{
 				ResponseFHIR: pendedJSON,
 				Commit:       func() error { return s.store.RecordPendedClaim(subjectPCI, corrID) },
 			}, nil
 		case shnsdk.PASApproved:
-			crJSON, err := shnsdk.BuildClaimResponse(dec.PreAuthRef, dec.ValidUntil, cb.ClaimPatient, corrID, s.clock())
+			crJSON, err := shnsdk.BuildClaimResponse(dec.PreAuthRef, dec.ValidUntil, patientRef, corrID, s.clock())
 			if err != nil {
 				return LegResult{}, fmt.Errorf("build claim response: %w", err)
 			}
-			// FR-28: build the PDex PA EOB for the approved decision; it surfaces as a
-			// Store side-effect (RecordEOB) readable via the Patient Access API, carrying
-			// the auth number. The engine egress-$validates it before Commit.
+			// FR-28: build the PDex PA EOB for the approved decision (Store side-effect via RecordEOB,
+			// readable via the Patient Access API, carrying the auth number).
 			eobJSON, err := shnsdk.BuildPADecisionEOB(shnsdk.PADecisionEOBParams{
 				ID:          "eob-" + corrID,
-				PatientRef:  cb.ClaimPatient,
-				CoverageRef: "Coverage/" + strings.TrimPrefix(cb.ClaimPatient, "Patient/"),
+				PatientRef:  patientRef,
+				CoverageRef: coverageRef,
 				CPTCode:     cpt,
 				Decision:    shnsdk.PADecisionApproved,
 				AuthNumber:  dec.PreAuthRef,
@@ -242,22 +235,20 @@ func (s *sandboxResponder) Handle(ctx context.Context, leg, corrID, subjectPCI s
 				Commit:         func() error { return s.store.RecordEOB(subjectPCI, eobID, eobJSON) },
 			}, nil
 		default: // shnsdk.PASDenied
-			// FR-22 (UC-08): a real denied ClaimResponse with the PAS reviewAction (A3),
-			// rationale, appeal window, and peer-to-peer instruction.
 			rationale := dec.DenyReason
 			if rationale == "" {
 				rationale = sandboxDenyRationale
 			}
-			denJSON, err := shnsdk.BuildDeniedResponse(cb.ClaimPatient, corrID, rationale, s.clock())
+			denJSON, err := shnsdk.BuildDeniedResponse(patientRef, corrID, rationale, s.clock())
 			if err != nil {
 				return LegResult{}, fmt.Errorf("build denied: %w", err)
 			}
-			// FR-28: build the PDex PA EOB for the patient surface (denied form, CARC 50)
-			// — same Store side-effect as the approved branch, AuthNumber empty.
+			// FR-28: build the PDex PA EOB for the patient surface (denied form, CARC 50) —
+			// same Store side-effect as the approved branch, AuthNumber empty.
 			eobJSON, err := shnsdk.BuildPADecisionEOB(shnsdk.PADecisionEOBParams{
 				ID:          "eob-" + corrID,
-				PatientRef:  cb.ClaimPatient,
-				CoverageRef: "Coverage/" + strings.TrimPrefix(cb.ClaimPatient, "Patient/"),
+				PatientRef:  patientRef,
+				CoverageRef: coverageRef,
 				CPTCode:     cpt,
 				Decision:    shnsdk.PADecisionDenied,
 				AuthNumber:  "",
@@ -274,51 +265,53 @@ func (s *sandboxResponder) Handle(ctx context.Context, leg, corrID, subjectPCI s
 			}, nil
 		}
 	case "pas-claim-update":
-		cb, err := shnsdk.ParseClaimBundle(requestFHIR)
-		if err != nil {
-			return LegResult{}, fmt.Errorf("parse bundle: %w", err)
+		// CANARY #1: the four-cell UPDATE cell on the CONFORMANT leg — the in-process
+		// pend→approve resolution (FinalizeClaimUpdate) two stateless-on-update RIs cannot
+		// co-demonstrate. Lifted from the minimized "pas-claim-update" case above (not re-derived)
+		// so the two stay consistent until the minimized one is removed (rekey-is-net; both
+		// coexist now). The ONLY deltas are the conformant reads: the prior-claim key comes from
+		// parseConformantPASUpdateFacts (the strict ParseClaimBundle cannot parse the conformant
+		// bundle), and the QR/member/hasDR come from parseConformantPASSubjects. No EOB on the
+		// update leg.
+		s2, status, msg := parseConformantPASSubjects(requestFHIR)
+		if status != 0 {
+			return LegResult{Status: status, Message: msg}, nil
 		}
-		// FR-21 + FR-6: ATOMIC test-and-set is the current-state authority check AND the
-		// serialization point — only one update can be in flight for a given pended claim.
-		// It runs INSIDE Handle (the connector's serialization point over its OWN ledger),
-		// pre-decision. A store-write error → 502 via Status (parity with today's begin-update
-		// 502); !claimed (no prior pend / replay of an approved update / a second concurrent
-		// update) → 409 via Status. Neither routes via the error return.
-		claimed, err := s.store.BeginClaimUpdate(subjectPCI, cb.RelatedClaim)
+		if s2.qrJSON == nil {
+			// The bind tolerates a QR-less conformant bundle (R-5), but the sandbox must adjudicate.
+			return LegResult{Status: http.StatusBadRequest, Message: "conformant ClaimUpdate missing QuestionnaireResponse"}, nil
+		}
+		f, fstatus, fmsg := parseConformantPASUpdateFacts(requestFHIR)
+		if fstatus != 0 {
+			return LegResult{Status: fstatus, Message: fmsg}, nil
+		}
+		related := f.relatedClaim
+		// FR-21 + FR-6: ATOMIC test-and-set — current-state authority + serialization (mirror :386).
+		claimed, err := s.store.BeginClaimUpdate(subjectPCI, related)
 		if err != nil {
 			return LegResult{Status: http.StatusBadGateway, Message: "holder write failed (begin update)"}, nil
 		}
 		if !claimed {
 			return LegResult{Status: http.StatusConflict, Message: "ClaimUpdate references no pending claim available for this patient"}, nil
 		}
-		// Rollback = ReleaseClaimUpdate: returned on EVERY post-Begin path (the 422
-		// insufficient/PriorAuth-error paths AND the BuildClaimResponse-error path) so a
-		// mid-adjudication failure or an insufficient amendment never strands the claim and a
-		// later complete amendment can transition it. The engine arms a defer on the returned
-		// result BEFORE checking err, so the build-error path releases too. The ReleaseClaimUpdate
-		// error is ignored exactly as today (`_ =`).
-		release := func() { _ = s.store.ReleaseClaimUpdate(subjectPCI, cb.RelatedClaim) }
-		dec, err := s.adj.PriorAuth(cb.QRJSON, cb.HasDiagnosticReport)
+		// Rollback = ReleaseClaimUpdate: armed on EVERY post-Begin path (mirror :393-399).
+		release := func() { _ = s.store.ReleaseClaimUpdate(subjectPCI, related) }
+		dec, err := s.adj.PriorAuth(s2.qrJSON, s2.hasDR)
 		if err != nil {
-			// A PriorAuth DECISION error is a 422 via Status (mirrors today's update leg),
-			// NOT the generic 500 the error return maps to. Claim released via Rollback.
 			return LegResult{Status: http.StatusUnprocessableEntity, Message: err.Error(), Rollback: release}, nil
 		}
 		if dec.Outcome != shnsdk.PASApproved {
-			// Still insufficient: the claim is released (Rollback) back to pended so a later,
-			// complete amendment can still transition it.
+			// Still insufficient: release back to pended so a later complete amendment can transition it.
 			return LegResult{Status: http.StatusUnprocessableEntity, Message: "amendment still insufficient", Rollback: release}, nil
 		}
-		// Approved: build the ClaimResponse. NOTE: the update leg builds NO EOB (only submit
-		// does). A build error returns Rollback alongside the error so the engine defer (armed
-		// before the err check) still releases the claim.
-		crJSON, err := shnsdk.BuildClaimResponse(dec.PreAuthRef, dec.ValidUntil, cb.ClaimPatient, corrID, s.clock())
+		// Approved: build the ClaimResponse. The update leg builds NO EOB (only submit does).
+		patientRef := "Patient/" + s2.member
+		crJSON, err := shnsdk.BuildClaimResponse(dec.PreAuthRef, dec.ValidUntil, patientRef, corrID, s.clock())
 		if err != nil {
 			return LegResult{Rollback: release}, fmt.Errorf("build claim response: %w", err)
 		}
 		// FR-21: Commit = FinalizeClaimUpdate completes the pended→approved transition AFTER
 		// buildResponseLeg, so a replayed update no longer finds the claim.
-		related := cb.RelatedClaim
 		return LegResult{
 			ResponseFHIR: crJSON,
 			Commit:       func() error { return s.store.FinalizeClaimUpdate(subjectPCI, related) },

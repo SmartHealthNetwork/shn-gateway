@@ -23,7 +23,7 @@ var _ engine.SystemOfRecord = (*SoR)(nil)
 
 // SoR reads a holder's US Core FHIR server. Locality (provider vs facility vs payer) is
 // enforced by the partition URL passed to New; a single per-role SoR instance handles one
-// partition (wiring §3.1 — WithMemberSystem is no longer needed).
+// partition (WithMemberSystem is no longer needed).
 type SoR struct {
 	fc *fhirclient.Client
 }
@@ -45,7 +45,7 @@ func NewFromURL(baseURL string, hc *http.Client) *SoR {
 // resolvePatient returns the parsed Patient and its server id, or ok=false. Shared
 // by ResolvePatient (demographics) and CoverageInforce (beneficiary lookup).
 // Searches by shnsdk.MemberSystem identifier; partition locality is enforced by the
-// base URL in s.fc (wiring §3.1).
+// base URL in s.fc.
 //
 // Uses context.Background because SystemOfRecord does not thread a ctx (threading
 // request context/deadline into the FHIR reads is a tracked concern;
