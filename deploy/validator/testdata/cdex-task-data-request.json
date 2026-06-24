@@ -1,0 +1,65 @@
+{
+  "resourceType": "Task",
+  "meta": {
+    "profile": [
+      "http://hl7.org/fhir/us/davinci-cdex/StructureDefinition/cdex-task-data-request"
+    ]
+  },
+  "status": "requested",
+  "intent": "order",
+  "code": {
+    "coding": [
+      {
+        "system": "http://hl7.org/fhir/us/davinci-cdex/CodeSystem/cdex-temp",
+        "code": "data-request-query"
+      }
+    ]
+  },
+  "for": {
+    "reference": "Patient/MBR-UC05"
+  },
+  "authoredOn": "2026-06-24T00:00:00Z",
+  "requester": {
+    "identifier": {
+      "system": "http://example.org/payer-ids",
+      "value": "payer-1"
+    }
+  },
+  "owner": {
+    "identifier": {
+      "system": "http://hl7.org/fhir/sid/us-npi",
+      "value": "9941339108"
+    }
+  },
+  "input": [
+    {
+      "type": {
+        "coding": [
+          {
+            "system": "http://hl7.org/fhir/us/davinci-hrex/CodeSystem/hrex-temp",
+            "code": "data-query"
+          }
+        ]
+      },
+      "valueString": "DiagnosticReport?patient=Patient/MBR-UC05&date=ge2024-01-01&date=le2026-12-31"
+    },
+    {
+      "type": {
+        "coding": [
+          {
+            "system": "http://hl7.org/fhir/us/davinci-cdex/CodeSystem/cdex-temp",
+            "code": "purpose-of-use"
+          }
+        ]
+      },
+      "valueCodeableConcept": {
+        "coding": [
+          {
+            "system": "http://terminology.hl7.org/CodeSystem/v3-ActReason",
+            "code": "TREAT"
+          }
+        ]
+      }
+    }
+  ]
+}

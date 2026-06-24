@@ -4,7 +4,7 @@
 # the validator runs on an --internal docker network (no egress), so if any IG — or
 # a transitive dependency — were not baked, $validate?profile=<canonical> reports
 # "Invalid profile. Failed to retrieve profile with url=...". Pass criterion: all
-# three Da Vinci profiles (PAS/DTR/PDex) RESOLVE with the network isolated. A bare
+# four Da Vinci profiles (PAS/DTR/PDex/CDex) RESOLVE with the network isolated. A bare
 # OperationOutcome is NOT sufficient — HAPI returns one even when the profile
 # silently failed to load.
 set -euo pipefail
@@ -44,11 +44,12 @@ done
 [ "${ready}" = "1" ] || { echo "FAIL: metadata never served offline (baked IGs/deps did not load)"; docker logs "${CONTAINER}" | tail -60; exit 1; }
 
 # (golden | resourceType | Da Vinci canonical) — these canonicals must resolve on
-# the 6-IG HAPI; the check is profile RESOLUTION, not a bare 200.
+# the 8-IG HAPI; the check is profile RESOLUTION, not a bare 200.
 probes=(
   "claim-bundle.json|Bundle|http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-pas-request-bundle"
   "questionnaireresponse-autofill.json|QuestionnaireResponse|http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/dtr-questionnaireresponse"
   "eob-approved.json|ExplanationOfBenefit|http://hl7.org/fhir/us/davinci-pdex/StructureDefinition/pdex-priorauthorization"
+  "cdex-task-data-request.json|Task|http://hl7.org/fhir/us/davinci-cdex/StructureDefinition/cdex-task-data-request"
 )
 for p in "${probes[@]}"; do
   IFS='|' read -r file rt canon <<<"${p}"
@@ -64,4 +65,4 @@ for i in oo.get("issue",[]):
 print("OK: resolved offline -> %s"%canon)
 ' "${canon}"
 done
-echo "VALIDATOR OFFLINE VERIFY OK (PAS/DTR/PDex profiles resolved with the network isolated)"
+echo "VALIDATOR OFFLINE VERIFY OK (PAS/DTR/PDex/CDex profiles resolved with the network isolated)"

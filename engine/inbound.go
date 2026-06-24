@@ -230,14 +230,14 @@ func (g *Gateway) handleFederatedQueryInbound(w http.ResponseWriter, r *http.Req
 
 	// (4) Narrowness: parse + validate the query shape BEFORE any disclosure. A
 	// missing/disallowed type or absent patient fails here (no bulk, FR-26).
-	q, err := shnsdk.ParseQuery(queryJSON)
+	parsed, err := shnsdk.ParseCDexTaskDataRequest(queryJSON)
 	if err != nil {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "query rejected: " + err.Error()})
 		return
 	}
 
 	// (3) Bind the token subject to the queried patient.
-	member := strings.TrimPrefix(q.PatientRef, "Patient/")
+	member := strings.TrimPrefix(parsed.PatientRef, "Patient/")
 	pci, _, found := g.cfg.SoR.ResolvePatient(member)
 	if !found {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown member"})
@@ -271,14 +271,14 @@ func (g *Gateway) handleFederatedQueryInbound(w http.ResponseWriter, r *http.Req
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no records for member"})
 		return
 	}
-	resources := make([][]byte, 0, len(q.Types)+1)
+	resources := make([][]byte, 0, len(parsed.Queries)+1)
 	var drRef, fallbackRef string
-	for _, typ := range q.Types {
-		res, present := held[typ]
+	for _, query := range parsed.Queries {
+		res, present := held[query.ResourceType]
 		if !present {
 			continue // named type the facility happens not to hold; skip (min-necessary)
 		}
-		if !q.InRange(recordClinicalDate(res)) {
+		if !query.InRange(recordClinicalDate(res)) {
 			continue // FR-24: only disclose named records within the stated date range
 		}
 		if status, msg := g.validateFHIR(ctx, res, "egress"); status != 0 {
@@ -294,7 +294,7 @@ func (g *Gateway) handleFederatedQueryInbound(w http.ResponseWriter, r *http.Req
 		if fallbackRef == "" {
 			fallbackRef = ref
 		}
-		if typ == "DiagnosticReport" {
+		if query.ResourceType == "DiagnosticReport" {
 			drRef = ref
 		}
 	}
@@ -322,9 +322,18 @@ func (g *Gateway) handleFederatedQueryInbound(w http.ResponseWriter, r *http.Req
 	}
 	resources = append(resources, provJSON)
 
-	bundleJSON, err := shnsdk.BuildRecordsBundle(resources)
+	inner, err := shnsdk.BuildRecordsBundle(resources)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build records bundle failed"})
+		return
+	}
+	bundleJSON, err := shnsdk.BuildCDexQueryResult(queryJSON, inner)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build cdex result failed"})
+		return
+	}
+	if status, msg := g.validateFHIR(ctx, bundleJSON, "egress"); status != 0 {
+		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
 

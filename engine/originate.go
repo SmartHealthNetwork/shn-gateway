@@ -813,38 +813,50 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "no facility registered"})
 		return
 	}
-	queryJSON, err := shnsdk.BuildQuery(res.patientRef, []string{"DiagnosticReport", "DocumentReference"},
-		"2024-01-01", g.cfg.Clock().UTC().Format("2006-01-02"))
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build query failed"})
-		return
-	}
-	fqCorr := g.cfg.CorrelationGen()
-	// custodian = the facility id, so the Authorization Framework checks consent for
-	// THIS source. No consent (noconsent branch) → authorize fails → PA stays pended.
-	recordsJSON, err := g.OriginateLeg(ctx, r, facility.ID, "federated-query", res.pci, fqCorr, facility.ID, Content{WorkstreamType: workstreamPA, Bytes: queryJSON})
-	if err != nil {
-		// Distinguish a genuine consent DENIAL from an infrastructure/integrity
-		// failure. ONLY an authorization denial (the no-consent branch) leaves the PA
-		// validly pended; a facility outage, a tampered response, or a transport error
-		// is a real 502 and must NOT be misreported to the operator as "consent denied".
-		if errors.Is(err, errAuthorizationDenied) {
-			writeJSON(w, http.StatusOK, uc05Resp{PARequired: true, Pended: true, ConsentDenied: true, PendedItems: needed})
+	// FR-24 names two document types; cdex-9 mandates exactly one data-query per CDex Task,
+	// so the substrate federates one consent-gated leg per named type (FR-25 per-leg consent,
+	// FR-26 only-matching-records-traverse). The DiagnosticReport leg yields the ClaimUpdate
+	// evidence; the DocumentReference leg's named records traverse + are audited but are not
+	// adjudication evidence (ExtractCDexEvidence pulls DiagnosticReport + Provenance).
+	var drJSON, provJSON []byte
+	for _, docType := range []string{"DiagnosticReport", "DocumentReference"} {
+		reqMeta := shnsdk.CDexTaskMeta{AuthoredOn: g.cfg.Clock(), Requester: g.cfg.HolderID, Owner: facility.ID}
+		queryJSON, err := shnsdk.BuildCDexTaskDataRequest(res.patientRef, docType,
+			"2024-01-01", g.cfg.Clock().UTC().Format("2006-01-02"), reqMeta)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build query failed"})
 			return
 		}
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "federated query failed: " + err.Error()})
-		return
-	}
-	// Ingress-validate the facility's searchset BEFORE trusting/extracting its
-	// resources (defense in depth — every resource crossing the substrate is validated).
-	if status, msg := g.validateFHIR(ctx, recordsJSON, "ingress"); status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
-		return
-	}
-	drJSON, provJSON, err := shnsdk.ExtractOperativeEvidence(recordsJSON)
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "federated response parse failed: " + err.Error()})
-		return
+		fqCorr := g.cfg.CorrelationGen()
+		// custodian = facility.ID so the Authorization Framework gates consent for THIS source per leg (FR-25).
+		recordsJSON, err := g.OriginateLeg(ctx, r, facility.ID, "federated-query", res.pci, fqCorr, facility.ID, Content{WorkstreamType: workstreamPA, Bytes: queryJSON})
+		if err != nil {
+			// Distinguish a genuine consent DENIAL from an infrastructure/integrity
+			// failure. ONLY an authorization denial (the no-consent branch) leaves the PA
+			// validly pended; a facility outage, a tampered response, or a transport error
+			// is a real 502 and must NOT be misreported to the operator as "consent denied".
+			if errors.Is(err, errAuthorizationDenied) {
+				writeJSON(w, http.StatusOK, uc05Resp{PARequired: true, Pended: true, ConsentDenied: true, PendedItems: needed})
+				return
+			}
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "federated query failed: " + err.Error()})
+			return
+		}
+		// Ingress-validate the facility's searchset BEFORE trusting/extracting its
+		// resources (defense in depth — every resource crossing the substrate is validated).
+		if status, msg := g.validateFHIR(ctx, recordsJSON, "ingress"); status != 0 {
+			writeJSON(w, status, map[string]string{"error": msg})
+			return
+		}
+		// Only the DiagnosticReport leg yields adjudication evidence; the DocRef leg's records
+		// were ingress-validated + audited above but are not PAS evidence (see the loop comment).
+		if docType == "DiagnosticReport" {
+			drJSON, provJSON, err = shnsdk.ExtractCDexEvidence(recordsJSON)
+			if err != nil {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "federated response parse failed: " + err.Error()})
+				return
+			}
+		}
 	}
 
 	// --- ClaimUpdate with the externally-retrieved DiagnosticReport + Provenance. ---

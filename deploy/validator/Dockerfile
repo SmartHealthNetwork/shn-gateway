@@ -1,4 +1,4 @@
-# FR-G3 config-only validator sidecar: hapiproject/hapi + all six FHIR IGs baked
+# FR-G3 config-only validator sidecar: hapiproject/hapi + all eight FHIR IGs baked
 # OFFLINE (downloaded at build time, loaded at runtime from file://, no registry
 # egress at boot). Same pinned HAPI engine our conformance gates use, so what we
 # test is what partners deploy. Single-tenant $validate
@@ -19,7 +19,9 @@ RUN curl -fLSso hl7.fhir.us.core-6.1.0.tgz         https://packages.simplifier.n
  && curl -fLSso hl7.fhir.us.davinci-dtr-2.0.1.tgz  https://packages.simplifier.net/hl7.fhir.us.davinci-dtr/2.0.1 \
  && curl -fLSso hl7.fhir.us.davinci-pas-2.0.1.tgz  https://packages.simplifier.net/hl7.fhir.us.davinci-pas/2.0.1 \
  && curl -fLSso hl7.fhir.us.davinci-pdex-2.1.0.tgz https://packages.simplifier.net/hl7.fhir.us.davinci-pdex/2.1.0 \
- && curl -fLSso hl7.fhir.uv.sdc-3.0.0.tgz          https://packages.simplifier.net/hl7.fhir.uv.sdc/3.0.0
+ && curl -fLSso hl7.fhir.uv.sdc-3.0.0.tgz          https://packages.simplifier.net/hl7.fhir.uv.sdc/3.0.0 \
+ && curl -fLSso hl7.fhir.us.davinci-cdex-2.1.0.tgz https://packages.simplifier.net/hl7.fhir.us.davinci-cdex/2.1.0 \
+ && curl -fLSso hl7.fhir.us.davinci-hrex-1.1.0.tgz https://packages.simplifier.net/hl7.fhir.us.davinci-hrex/1.1.0
 
 # Stage 3: HAPI validator with the IGs baked + loaded from file:// (offline at runtime).
 FROM hapiproject/hapi@sha256:1be4d7ffe7a35a9fb46151851e5a20b25c5016f16c8ef8b59b0c807ad06a40c1
@@ -42,4 +44,10 @@ ENV hapi.fhir.implementationguides.uscore.packageUrl=file:///packages/hl7.fhir.u
     hapi.fhir.implementationguides.pdex.version=2.1.0 \
     hapi.fhir.implementationguides.sdc.packageUrl=file:///packages/hl7.fhir.uv.sdc-3.0.0.tgz \
     hapi.fhir.implementationguides.sdc.name=hl7.fhir.uv.sdc \
-    hapi.fhir.implementationguides.sdc.version=3.0.0
+    hapi.fhir.implementationguides.sdc.version=3.0.0 \
+    hapi.fhir.implementationguides.cdex.packageUrl=file:///packages/hl7.fhir.us.davinci-cdex-2.1.0.tgz \
+    hapi.fhir.implementationguides.cdex.name=hl7.fhir.us.davinci-cdex \
+    hapi.fhir.implementationguides.cdex.version=2.1.0 \
+    hapi.fhir.implementationguides.hrex.packageUrl=file:///packages/hl7.fhir.us.davinci-hrex-1.1.0.tgz \
+    hapi.fhir.implementationguides.hrex.name=hl7.fhir.us.davinci-hrex \
+    hapi.fhir.implementationguides.hrex.version=1.1.0
