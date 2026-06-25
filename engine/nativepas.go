@@ -90,21 +90,19 @@ func (n *nativeResponder) handlePASClaimUpdateNative(ctx context.Context, corrID
 // bundle is read by parseConformantPASSubjects (the engine-local conformant extractor; the strict
 // shnsdk.ParseClaimBundle the minimized leg used is no longer part of the contract):
 // the EOB patientRef is the BOUND member (R-7, request-side — never the response member, which
-// a real RI answers in its own namespace), and the CPT comes from the conformant bundle's
-// ServiceRequest (the SAME 72148 the EOB-provenance canary checks). handlePASNativeInbound
+// a real RI answers in its own namespace), and the procedure {system,code} comes from the
+// conformant bundle's ServiceRequest (CPT or HCPCS — the SAME 72148 the EOB-provenance canary
+// checks for the CPT persona). handlePASNativeInbound
 // egress-$validates SideEffectFHIR + Commits.
 func (n *nativeResponder) handlePASClaimNative(ctx context.Context, corrID, subjectPCI string, requestFHIR []byte) (LegResult, error) {
 	s, status, msg := parseConformantPASSubjects(requestFHIR)
 	if status != 0 {
 		return LegResult{Status: status, Message: msg}, nil
 	}
-	// Extract CPT for the EOB side-effect. A real partner's ServiceRequest may use HCPCS
-	// (e.g. L8000 / E0424 from br-payer goldens) rather than the AMA CPT system. The FORWARD is
-	// unconditional (never gated on CPT parseability — a HCPCS-coded request is valid); the EOB is
-	// built only when a CPT code is present. An absent CPT means no EOB side-effect this leg (the
-	// relay still happens, pend/approve still threaded). The EOB is "soft":
-	// the EOB is a Store projection keyed to the CPT, not a relay gate.
-	cpt, cptDisplay, _ := shnsdk.ParseServiceRequestProcedure(s.srJSON) // best-effort; empty CPT → no EOB built below
+	// Source the order's procedure {system, code, display} (CPT or HCPCS) for the EOB side-effect.
+	// system flows from the order so a HCPCS order yields a HCPCS-system EOB (FR-28) — threaded as
+	// a unit. The FORWARD is unconditional; an unrecognized system → empty code → no EOB (soft).
+	procSystem, cpt, cptDisplay, _ := shnsdk.ParseServiceRequestProductCoding(s.srJSON) // best-effort; empty cpt → no EOB built below
 	body, bad := n.post(ctx, n.baseURL, "/Claim/$submit", requestFHIR, "PAS submit")
 	if bad.Status != 0 {
 		return bad, nil
@@ -131,10 +129,10 @@ func (n *nativeResponder) handlePASClaimNative(ctx context.Context, corrID, subj
 		return LegResult{Status: http.StatusBadGateway, Message: "upstream payer PAS submit response untranslatable"}, nil
 	}
 	if cpt == "" {
-		// No CPT coding → no EOB side-effect (soft — relay complete, no Store write).
+		// No recognized {CPT,HCPCS} product coding → no EOB side-effect (soft — relay complete, no Store write).
 		return LegResult{ResponseFHIR: norm}, nil
 	}
-	eobJSON, err := n.projectDecisionEOB(corrID, "Patient/"+s.member, cpt, cptDisplay, parsed)
+	eobJSON, err := n.projectDecisionEOB(corrID, "Patient/"+s.member, procSystem, cpt, cptDisplay, parsed)
 	if err != nil {
 		return LegResult{}, fmt.Errorf("engine: nativePAS build conformant EOB: %w", err) // our build fault → 500
 	}
@@ -149,21 +147,23 @@ func (n *nativeResponder) handlePASClaimNative(ctx context.Context, corrID, subj
 // projectDecisionEOB synthesises the gateway-local PDex EOB SINGLE-SOURCED from the
 // partner's decision: AuthNumber is the partner's parsed preAuthRef (never
 // minted), CPTCode + CPTDisplay are the Claim's ServiceRequest procedure (never
-// hardcoded). No engine guard — the construction makes it true; the adversarial row
-// makes a mint/pin loud.
-func (n *nativeResponder) projectDecisionEOB(corrID, patientRef, cpt, cptDisplay string, parsed shnsdk.PriorAuthResult) ([]byte, error) {
+// hardcoded), ProcedureSystem flows from the order so a HCPCS order yields a
+// HCPCS-system EOB (FR-28). No engine guard — the construction makes it true;
+// the adversarial row makes a mint/pin loud.
+func (n *nativeResponder) projectDecisionEOB(corrID, patientRef, procSystem, cpt, cptDisplay string, parsed shnsdk.PriorAuthResult) ([]byte, error) {
 	decision, authNumber := shnsdk.PADecisionApproved, parsed.PreAuthRef
 	if parsed.Outcome == "denied" {
 		decision, authNumber = shnsdk.PADecisionDenied, ""
 	}
 	return shnsdk.BuildPADecisionEOB(shnsdk.PADecisionEOBParams{
-		ID:          "eob-" + corrID,
-		PatientRef:  patientRef,
-		CoverageRef: "Coverage/" + strings.TrimPrefix(patientRef, "Patient/"),
-		CPTCode:     cpt,
-		CPTDisplay:  cptDisplay,
-		Decision:    decision,
-		AuthNumber:  authNumber,
-		Created:     n.clock(),
+		ID:              "eob-" + corrID,
+		PatientRef:      patientRef,
+		CoverageRef:     "Coverage/" + strings.TrimPrefix(patientRef, "Patient/"),
+		CPTCode:         cpt,
+		CPTDisplay:      cptDisplay,
+		ProcedureSystem: procSystem,
+		Decision:        decision,
+		AuthNumber:      authNumber,
+		Created:         n.clock(),
 	})
 }

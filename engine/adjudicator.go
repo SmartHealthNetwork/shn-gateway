@@ -184,13 +184,12 @@ func (s *sandboxResponder) Handle(ctx context.Context, leg, corrID, subjectPCI s
 			// The bind allows a QR-less conformant bundle (R-5), but the sandbox must adjudicate.
 			return LegResult{Status: http.StatusBadRequest, Message: "conformant PAS bundle missing QuestionnaireResponse"}, nil
 		}
-		// Source the CPT + display from the conformant Claim's ServiceRequest (the EOB's
-		// productOrService coding — FR-28 — so the patient surface shows the ACTUAL ordered
-		// service, never a hardcoded persona). A CPT-less SR is a malformed CLIENT request →
-		// 400, not a generic 500.
-		cpt, cptDisplay, cerr := shnsdk.ParseServiceRequestProcedure(s2.srJSON)
+		// Source the procedure {system, code, display} from the conformant Claim's ServiceRequest
+		// (the EOB's productOrService coding — FR-28, system flows from the order). A
+		// {CPT,HCPCS}-less SR is a malformed CLIENT request → 400.
+		procSystem, cpt, cptDisplay, cerr := shnsdk.ParseServiceRequestProductCoding(s2.srJSON)
 		if cerr != nil {
-			return LegResult{Status: http.StatusBadRequest, Message: "claim missing service request CPT"}, nil
+			return LegResult{Status: http.StatusBadRequest, Message: "claim service request missing CPT/HCPCS coding"}, nil
 		}
 		dec, err := s.adj.PriorAuth(s2.qrJSON, s2.hasDR)
 		if err != nil {
@@ -219,14 +218,15 @@ func (s *sandboxResponder) Handle(ctx context.Context, leg, corrID, subjectPCI s
 			// FR-28: build the PDex PA EOB for the approved decision (Store side-effect via RecordEOB,
 			// readable via the Patient Access API, carrying the auth number).
 			eobJSON, err := shnsdk.BuildPADecisionEOB(shnsdk.PADecisionEOBParams{
-				ID:          "eob-" + corrID,
-				PatientRef:  patientRef,
-				CoverageRef: coverageRef,
-				CPTCode:     cpt,
-				CPTDisplay:  cptDisplay,
-				Decision:    shnsdk.PADecisionApproved,
-				AuthNumber:  dec.PreAuthRef,
-				Created:     s.clock(),
+				ID:              "eob-" + corrID,
+				PatientRef:      patientRef,
+				CoverageRef:     coverageRef,
+				CPTCode:         cpt,
+				CPTDisplay:      cptDisplay,
+				ProcedureSystem: procSystem,
+				Decision:        shnsdk.PADecisionApproved,
+				AuthNumber:      dec.PreAuthRef,
+				Created:         s.clock(),
 			})
 			if err != nil {
 				return LegResult{}, fmt.Errorf("build EOB: %w", err)
@@ -249,14 +249,15 @@ func (s *sandboxResponder) Handle(ctx context.Context, leg, corrID, subjectPCI s
 			// FR-28: build the PDex PA EOB for the patient surface (denied form, CARC 50) —
 			// same Store side-effect as the approved branch, AuthNumber empty.
 			eobJSON, err := shnsdk.BuildPADecisionEOB(shnsdk.PADecisionEOBParams{
-				ID:          "eob-" + corrID,
-				PatientRef:  patientRef,
-				CoverageRef: coverageRef,
-				CPTCode:     cpt,
-				CPTDisplay:  cptDisplay,
-				Decision:    shnsdk.PADecisionDenied,
-				AuthNumber:  "",
-				Created:     s.clock(),
+				ID:              "eob-" + corrID,
+				PatientRef:      patientRef,
+				CoverageRef:     coverageRef,
+				CPTCode:         cpt,
+				CPTDisplay:      cptDisplay,
+				ProcedureSystem: procSystem,
+				Decision:        shnsdk.PADecisionDenied,
+				AuthNumber:      "",
+				Created:         s.clock(),
 			})
 			if err != nil {
 				return LegResult{}, fmt.Errorf("build EOB: %w", err)

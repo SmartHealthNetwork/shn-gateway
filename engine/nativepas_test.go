@@ -3,6 +3,7 @@ package engine
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -14,6 +15,27 @@ import (
 // fixedClock is the deterministic clock the native-PAS tests inject for the
 // gateway-projected EOB `created`.
 var fixedClock = func() time.Time { return time.Unix(1700000000, 0).UTC() }
+
+// eobProcedureSystemBytes returns item[0].productOrService.coding[0].system of an EOB JSON.
+func eobProcedureSystemBytes(t *testing.T, eobJSON []byte) string {
+	t.Helper()
+	var eob struct {
+		Item []struct {
+			ProductOrService struct {
+				Coding []struct {
+					System string `json:"system"`
+				} `json:"coding"`
+			} `json:"productOrService"`
+		} `json:"item"`
+	}
+	if err := json.Unmarshal(eobJSON, &eob); err != nil {
+		t.Fatalf("unmarshal EOB: %v", err)
+	}
+	if len(eob.Item) == 0 || len(eob.Item[0].ProductOrService.Coding) == 0 {
+		t.Fatalf("EOB has no productOrService coding: %s", eobJSON)
+	}
+	return eob.Item[0].ProductOrService.Coding[0].System
+}
 
 // stubPartnerSrv is a partner $submit endpoint returning a fixed status + body.
 // (Named distinctly from the native_test.go stubPartner struct, same package.)
@@ -82,17 +104,14 @@ func TestNativeSubmit_ConformantRecordsEOB(t *testing.T) {
 		}
 	})
 
-	t.Run("HCPCS-coded ServiceRequest: forwards (no 400), no EOB (soft)", func(t *testing.T) {
-		// A real partner may code the order in HCPCS (e.g. E0424 home-oxygen, L8000) rather than the
-		// AMA CPT system ParseServiceRequestCPT matches. The conformant submit native-forward MUST
-		// RELAY such a request (it is valid) — it must NOT 400 on CPT parseability (the EOB is a Store
-		// projection, not a relay gate). The EOB is simply skipped when no AMA CPT is present
-		// ("soft"; the HCPCS→EOB mapping is a later carry-forward). A minimal
-		// conformant bundle whose ServiceRequest carries an HCPCS code → parseConformantPASSubjects
-		// binds it, ParseServiceRequestCPT returns "" → no EOB, but the relay still completes.
+	t.Run("HCPCS-coded ServiceRequest (http): forwards AND builds an EOB with the HCPCS system (DEF-14)", func(t *testing.T) {
+		// DEF-14: a real partner codes the order in HCPCS Level II (E0424 home-oxygen, L8000).
+		// The pinned systemHCPCS is http:// (the br-provider wire value) — note this fixture is
+		// normalized from the prior https:// (a behavior-update, not s/https/http/). The EOB is now
+		// built and carries coding.system == HCPCS (no longer the "soft" no-EOB).
 		hcpcs := []byte(`{"resourceType":"Bundle","type":"collection","entry":[
 			{"resource":{"resourceType":"Claim","patient":{"reference":"Patient/MBR-COVERED"}}},
-			{"resource":{"resourceType":"ServiceRequest","subject":{"reference":"Patient/MBR-COVERED"},"code":{"coding":[{"system":"https://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets","code":"E0424"}]}}},
+			{"resource":{"resourceType":"ServiceRequest","subject":{"reference":"Patient/MBR-COVERED"},"code":{"coding":[{"system":"http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets","code":"E0424","display":"Stationary Oxygen System"}]}}},
 			{"resource":{"resourceType":"Coverage","beneficiary":{"reference":"Patient/MBR-COVERED"}}},
 			{"resource":{"resourceType":"QuestionnaireResponse","subject":{"reference":"Patient/MBR-COVERED"}}}
 		]}`)
@@ -101,18 +120,75 @@ func TestNativeSubmit_ConformantRecordsEOB(t *testing.T) {
 		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", NewStubHolderData(), fixedClock)
 		res, err := n.Handle(context.Background(), "pas-claim", "corr-hcpcs", "PCI-1", hcpcs)
 		if err != nil {
-			t.Fatalf("HCPCS conformant submit: unexpected error (must relay, not 500): %v", err)
+			t.Fatalf("HCPCS conformant submit: unexpected error: %v", err)
 		}
 		if res.Status != 0 {
-			t.Fatalf("HCPCS conformant submit must FORWARD (status 0), got %d msg=%s (best-effort CPT must not 400)", res.Status, res.Message)
+			t.Fatalf("HCPCS submit must FORWARD (status 0), got %d msg=%s", res.Status, res.Message)
 		}
 		if !bytes.Equal(res.ResponseFHIR, body) {
 			t.Fatalf("HCPCS submit response not relayed verbatim")
 		}
-		if len(res.SideEffectFHIR) != 0 || res.Commit != nil {
-			t.Fatalf("HCPCS submit (no AMA CPT) must emit NO EOB (soft); got side-effects=%d commit=%v", len(res.SideEffectFHIR), res.Commit != nil)
+		if len(res.SideEffectFHIR) != 1 || res.Commit == nil {
+			t.Fatalf("HCPCS submit must now build ONE EOB side-effect + Commit; got side-effects=%d commit=%v", len(res.SideEffectFHIR), res.Commit != nil)
+		}
+		if got := eobProcedureSystemBytes(t, res.SideEffectFHIR[0]); got != "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets" {
+			t.Fatalf("EOB procedure system = %q, want HCPCS (the half-fix CPT-lock is forbidden)", got)
 		}
 	})
+
+	t.Run("unrecognized procedure system: forwards, NO EOB (honest soft fallback)", func(t *testing.T) {
+		// An order whose only coding is a non-{CPT,HCPCS} system yields no product coding → honest
+		// no-EOB (the relay still completes). This preserves the soft fallback the allowlist guarantees.
+		other := []byte(`{"resourceType":"Bundle","type":"collection","entry":[
+			{"resource":{"resourceType":"Claim","patient":{"reference":"Patient/MBR-COVERED"}}},
+			{"resource":{"resourceType":"ServiceRequest","subject":{"reference":"Patient/MBR-COVERED"},"code":{"coding":[{"system":"http://snomed.info/sct","code":"12345","display":"x"}]}}},
+			{"resource":{"resourceType":"Coverage","beneficiary":{"reference":"Patient/MBR-COVERED"}}},
+			{"resource":{"resourceType":"QuestionnaireResponse","subject":{"reference":"Patient/MBR-COVERED"}}}
+		]}`)
+		body := []byte(`{"resourceType":"ClaimResponse","outcome":"complete","preAuthRef":"P-OTHER"}`)
+		srv := stubPartnerSrv(t, http.StatusOK, body)
+		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", NewStubHolderData(), fixedClock)
+		res, err := n.Handle(context.Background(), "pas-claim", "corr-other", "PCI-1", other)
+		if err != nil {
+			t.Fatalf("unrecognized-system submit: unexpected error: %v", err)
+		}
+		if res.Status != 0 || !bytes.Equal(res.ResponseFHIR, body) {
+			t.Fatalf("unrecognized-system submit must forward verbatim; status=%d", res.Status)
+		}
+		if len(res.SideEffectFHIR) != 0 || res.Commit != nil {
+			t.Fatalf("unrecognized-system submit must emit NO EOB (soft); got side-effects=%d", len(res.SideEffectFHIR))
+		}
+	})
+}
+
+// TestNativePAS_EOBSystemTracksOrder is the DEF-14 no-wrong-EOB guard: the EOB's
+// procedure system must equal the ORDER's system for every recognized procedure
+// system — never the hardcoded CPT. A regression that re-hardcodes the system (the
+// half-fix the DEF-14 entry calls worse than the honest no-EOB) fails the HCPCS row.
+func TestNativePAS_EOBSystemTracksOrder(t *testing.T) {
+	for _, tc := range []struct{ name, system, code, display string }{
+		{"cpt", "http://www.ama-assn.org/go/cpt", "72148", "MRI lumbar spine w/o contrast"},
+		{"hcpcs", "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets", "L8000", "Breast prosthesis, mastectomy bra"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bundle := []byte(`{"resourceType":"Bundle","type":"collection","entry":[
+				{"resource":{"resourceType":"Claim","patient":{"reference":"Patient/MBR-COVERED"}}},
+				{"resource":{"resourceType":"ServiceRequest","subject":{"reference":"Patient/MBR-COVERED"},"code":{"coding":[{"system":"` + tc.system + `","code":"` + tc.code + `","display":"` + tc.display + `"}]}}},
+				{"resource":{"resourceType":"Coverage","beneficiary":{"reference":"Patient/MBR-COVERED"}}},
+				{"resource":{"resourceType":"QuestionnaireResponse","subject":{"reference":"Patient/MBR-COVERED"}}}
+			]}`)
+			body := []byte(`{"resourceType":"ClaimResponse","outcome":"complete","preAuthRef":"P-1"}`)
+			srv := stubPartnerSrv(t, http.StatusOK, body)
+			n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", NewStubHolderData(), fixedClock)
+			res, err := n.Handle(context.Background(), "pas-claim", "corr-"+tc.name, "PCI-1", bundle)
+			if err != nil || res.Status != 0 || len(res.SideEffectFHIR) != 1 {
+				t.Fatalf("%s: want forward + 1 EOB; err=%v status=%d sideeffects=%d", tc.name, err, res.Status, len(res.SideEffectFHIR))
+			}
+			if got := eobProcedureSystemBytes(t, res.SideEffectFHIR[0]); got != tc.system {
+				t.Fatalf("%s: EOB system = %q, want the ORDER's system %q (no hardcode)", tc.name, got, tc.system)
+			}
+		})
+	}
 }
 
 // loadDeniedClaimResponseBytes builds a bare ClaimResponse with a terminal A3
