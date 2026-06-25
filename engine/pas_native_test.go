@@ -179,6 +179,89 @@ func TestSandbox_PASClaimNative_ApprovesOriginatorBuilt(t *testing.T) {
 	}
 }
 
+// nonLumbarConformantBundle builds a LEAN conformant $submit bundle IDENTICAL to
+// originatorBuiltConformantBundle EXCEPT the ServiceRequest carries a NON-lumbar
+// procedure (CPT 29881, knee arthroscopy). The QR is still the lumbar approval QR,
+// so the sandbox (which adjudicates on the QR, never the SR's CPT) still APPROVES —
+// which is the whole point: the resulting EOB's productOrService display MUST flow
+// from THIS ServiceRequest, not the hardcoded lumbar persona (DEF-14, FR-28).
+func nonLumbarConformantBundle(t *testing.T, member string) []byte {
+	t.Helper()
+	ref := "Patient/" + member
+	created := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	srJSON, err := shnsdk.BuildServiceRequest("29881", "Arthroscopy, knee, surgical, with meniscectomy", "M23.2", ref)
+	if err != nil {
+		t.Fatalf("BuildServiceRequest: %v", err)
+	}
+	qrJSON, err := shnsdk.FillQuestionnaire(shnsdk.SandboxLumbarQuestionnaire(), shnsdk.SandboxUC03Context(), shnsdk.QRContext{
+		PatientRef:  ref,
+		CoverageRef: "Coverage/convergence-coverage",
+		OrderRef:    "ServiceRequest/convergence-sr",
+		Authored:    created,
+	})
+	if err != nil {
+		t.Fatalf("FillQuestionnaire: %v", err)
+	}
+	got, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
+		QR:          qrJSON,
+		SR:          srJSON,
+		PatientRef:  ref,
+		CoverageRef: "Coverage/convergence-coverage",
+		Corr:        "followups-knee-0001",
+		Created:     created,
+	})
+	if err != nil {
+		t.Fatalf("BuildConformantClaimBundle: %v", err)
+	}
+	return got
+}
+
+// TestSandbox_PASClaim_EOBDisplayFromServiceRequest (DEF-14, FR-28): the approved-path
+// EOB's item[0].productOrService.coding[0].display must be SOURCED from the request's
+// ServiceRequest, not the hardcoded "MRI lumbar spine w/o contrast" persona string.
+// The sandbox adjudicates on the QR (lumbar approval), so a knee SR (29881) + the
+// lumbar QR still APPROVES — the EOB then carries the knee CPT AND the knee display.
+// This is the load-bearing proof of the de-personalization: all live personas are 72148
+// lumbar, so only a non-lumbar SR can distinguish "display flows from the SR" from
+// "display is the hardcoded lumbar literal".
+func TestSandbox_PASClaim_EOBDisplayFromServiceRequest(t *testing.T) {
+	s := newSandboxResponderForTest(t)
+	res, err := s.Handle(context.Background(), "pas-claim", "corr-knee", "pci-covered",
+		nonLumbarConformantBundle(t, "MBR-COVERED"))
+	if err != nil {
+		t.Fatalf("sandbox pas-claim: %v", err)
+	}
+	if res.Status != 0 {
+		t.Fatalf("status=%d msg=%s", res.Status, res.Message)
+	}
+	if len(res.SideEffectFHIR) == 0 {
+		t.Fatal("approved pas-claim must emit the EOB side-effect")
+	}
+	var eob struct {
+		Item []struct {
+			ProductOrService struct {
+				Coding []struct {
+					Code    string `json:"code"`
+					Display string `json:"display"`
+				} `json:"coding"`
+			} `json:"productOrService"`
+		} `json:"item"`
+	}
+	if err := json.Unmarshal(res.SideEffectFHIR[0], &eob); err != nil {
+		t.Fatalf("parse EOB: %v", err)
+	}
+	got := eob.Item[0].ProductOrService.Coding[0]
+	if got.Code != "29881" {
+		t.Fatalf("EOB CPT = %q, want 29881", got.Code)
+	}
+	if got.Display == "MRI lumbar spine w/o contrast" {
+		t.Fatal("DEF-14 regression: EOB display is the hardcoded lumbar persona, not the actual service")
+	}
+	if got.Display != "Arthroscopy, knee, surgical, with meniscectomy" {
+		t.Fatalf("EOB display = %q, want the knee service display", got.Display)
+	}
+}
+
 // --- the conformant amended re-POST golden -------
 
 // TestTask0B_ConformantUpdateGoldenBinds is the update-golden oracle, pointed at the

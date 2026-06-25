@@ -184,9 +184,11 @@ func (s *sandboxResponder) Handle(ctx context.Context, leg, corrID, subjectPCI s
 			// The bind allows a QR-less conformant bundle (R-5), but the sandbox must adjudicate.
 			return LegResult{Status: http.StatusBadRequest, Message: "conformant PAS bundle missing QuestionnaireResponse"}, nil
 		}
-		// Source the CPT from the conformant Claim's ServiceRequest (mirrors the minimized
-		// case at :190). A CPT-less SR is a malformed CLIENT request → 400, not a generic 500.
-		cpt, cerr := shnsdk.ParseServiceRequestCPT(s2.srJSON)
+		// Source the CPT + display from the conformant Claim's ServiceRequest (the EOB's
+		// productOrService coding — FR-28 — so the patient surface shows the ACTUAL ordered
+		// service, never a hardcoded persona). A CPT-less SR is a malformed CLIENT request →
+		// 400, not a generic 500.
+		cpt, cptDisplay, cerr := shnsdk.ParseServiceRequestProcedure(s2.srJSON)
 		if cerr != nil {
 			return LegResult{Status: http.StatusBadRequest, Message: "claim missing service request CPT"}, nil
 		}
@@ -221,6 +223,7 @@ func (s *sandboxResponder) Handle(ctx context.Context, leg, corrID, subjectPCI s
 				PatientRef:  patientRef,
 				CoverageRef: coverageRef,
 				CPTCode:     cpt,
+				CPTDisplay:  cptDisplay,
 				Decision:    shnsdk.PADecisionApproved,
 				AuthNumber:  dec.PreAuthRef,
 				Created:     s.clock(),
@@ -250,6 +253,7 @@ func (s *sandboxResponder) Handle(ctx context.Context, leg, corrID, subjectPCI s
 				PatientRef:  patientRef,
 				CoverageRef: coverageRef,
 				CPTCode:     cpt,
+				CPTDisplay:  cptDisplay,
 				Decision:    shnsdk.PADecisionDenied,
 				AuthNumber:  "",
 				Created:     s.clock(),

@@ -104,7 +104,7 @@ func (n *nativeResponder) handlePASClaimNative(ctx context.Context, corrID, subj
 	// built only when a CPT code is present. An absent CPT means no EOB side-effect this leg (the
 	// relay still happens, pend/approve still threaded). The EOB is "soft":
 	// the EOB is a Store projection keyed to the CPT, not a relay gate.
-	cpt, _ := shnsdk.ParseServiceRequestCPT(s.srJSON) // best-effort; empty → no EOB built below
+	cpt, cptDisplay, _ := shnsdk.ParseServiceRequestProcedure(s.srJSON) // best-effort; empty CPT → no EOB built below
 	body, bad := n.post(ctx, n.baseURL, "/Claim/$submit", requestFHIR, "PAS submit")
 	if bad.Status != 0 {
 		return bad, nil
@@ -134,7 +134,7 @@ func (n *nativeResponder) handlePASClaimNative(ctx context.Context, corrID, subj
 		// No CPT coding → no EOB side-effect (soft — relay complete, no Store write).
 		return LegResult{ResponseFHIR: norm}, nil
 	}
-	eobJSON, err := n.projectDecisionEOB(corrID, "Patient/"+s.member, cpt, parsed)
+	eobJSON, err := n.projectDecisionEOB(corrID, "Patient/"+s.member, cpt, cptDisplay, parsed)
 	if err != nil {
 		return LegResult{}, fmt.Errorf("engine: nativePAS build conformant EOB: %w", err) // our build fault → 500
 	}
@@ -148,9 +148,10 @@ func (n *nativeResponder) handlePASClaimNative(ctx context.Context, corrID, subj
 
 // projectDecisionEOB synthesises the gateway-local PDex EOB SINGLE-SOURCED from the
 // partner's decision: AuthNumber is the partner's parsed preAuthRef (never
-// minted), CPTCode is the Claim's procedure (never hardcoded). No engine guard — the
-// construction makes it true; the adversarial row makes a mint/pin loud.
-func (n *nativeResponder) projectDecisionEOB(corrID, patientRef, cpt string, parsed shnsdk.PriorAuthResult) ([]byte, error) {
+// minted), CPTCode + CPTDisplay are the Claim's ServiceRequest procedure (never
+// hardcoded). No engine guard — the construction makes it true; the adversarial row
+// makes a mint/pin loud.
+func (n *nativeResponder) projectDecisionEOB(corrID, patientRef, cpt, cptDisplay string, parsed shnsdk.PriorAuthResult) ([]byte, error) {
 	decision, authNumber := shnsdk.PADecisionApproved, parsed.PreAuthRef
 	if parsed.Outcome == "denied" {
 		decision, authNumber = shnsdk.PADecisionDenied, ""
@@ -160,6 +161,7 @@ func (n *nativeResponder) projectDecisionEOB(corrID, patientRef, cpt string, par
 		PatientRef:  patientRef,
 		CoverageRef: "Coverage/" + strings.TrimPrefix(patientRef, "Patient/"),
 		CPTCode:     cpt,
+		CPTDisplay:  cptDisplay,
 		Decision:    decision,
 		AuthNumber:  authNumber,
 		Created:     n.clock(),
