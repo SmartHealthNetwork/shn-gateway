@@ -284,6 +284,28 @@ var stubPersonas = map[string]persona{
 		},
 		hasClinical: true,
 	},
+	// MBR-UC07HCPCS: the in-process mirror of the two-RI L8000 DV-approve.
+	// HCPCS order (L8000); a DIRECT CRD→DTR→PAS approve (NOT patient-authorship — that
+	// distinctive stays UC-07/MBR-UC07). DEF-4 stub (AI-9): it answers the REUSED lumbar
+	// questionnaire (clinical fixture smell — a HCPCS order on an MSK questionnaire — accepted;
+	// the fidelity that matters is the HCPCS order code → HCPCS EOB → render). weeks=6, no
+	// pend trigger → SandboxAdjudicate approves on the first submit.
+	"MBR-UC07HCPCS": {
+		demo:    Demo{BirthDate: "1977-01-30", FamilyName: "Nakamura"},
+		inforce: true,
+		clinical: shnsdk.ClinicalContext{
+			ConditionCode:            "M51.16",
+			ConditionRef:             "Condition/cond-m5116",
+			ConservativeTherapyWeeks: 6,
+			ConservativeTherapyRef:   "Observation/obs-pt-weeks",
+			ConservativeDate:         "2026-05-20",
+			NeuroDeficit:             false,
+			NeuroDeficitRef:          "Observation/obs-neuro",
+			PriorImaging:             true,
+			PriorImagingRef:          "DiagnosticReport/dr-xray",
+		},
+		hasClinical: true,
+	},
 	// MBR-UC07 (Nadia Haddad) — UC-07 patient-entry: pends on a missing PATIENT-reported
 	// (patient-attested) functional status; approves once the patient authors + attests
 	// it via the Trust-operated PHG (FR-18/27). NeuroDeficitRef is included so the

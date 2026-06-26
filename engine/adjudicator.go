@@ -49,12 +49,15 @@ func (s *sandboxAdjudicator) Eligibility(memberID string) (bool, string) {
 	return s.sor.CoverageInforce(memberID)
 }
 
-// OrderSelect decides PA-required for a CPT and, when required, the DTR
-// questionnaire canonical. Inlines the CPT-72148 rule (points at the shnsdk
-// constants for PARequired / QuestionnaireCanonicalLumbarMRI).
+// OrderSelect decides PA-required for a procedure code and, when required, the
+// DTR questionnaire canonical. Inlines the CPT-72148 and L8000 rules (points at
+// the shnsdk constants for PARequired / QuestionnaireCanonicalLumbarMRI).
 // crd.BuildCards is pure rendering and takes the verdict from here.
-func (s *sandboxAdjudicator) OrderSelect(cpt string) (bool, string) {
-	if cpt == "72148" {
+func (s *sandboxAdjudicator) OrderSelect(code string) (bool, string) {
+	switch code {
+	case "72148": // CPT — lumbar MRI (UC-03/04/06/07)
+		return true, shnsdk.QuestionnaireCanonicalLumbarMRI
+	case "L8000": // HCPCS — §3.2 HCPCS approve persona; reuses the lumbar questionnaire (DEF-4 stub, AI-9)
 		return true, shnsdk.QuestionnaireCanonicalLumbarMRI
 	}
 	return false, ""
@@ -103,10 +106,10 @@ func NewSandboxResponder(adj shnsdk.Adjudicator, sor SystemOfRecord, store Store
 	return &sandboxResponder{adj: adj, sor: sor, store: store, clock: clock}
 }
 
-// crdCardsForCPT runs the shared CRD adjudication tail: CPT → coverage decision → rendered cards.
-// Used by the conformant crd-order-select case.
-func (s *sandboxResponder) crdCardsForCPT(cpt string) (LegResult, error) {
-	paRequired, canonical := s.adj.OrderSelect(cpt)
+// crdCardsForCode runs the shared CRD adjudication tail: procedure code → coverage decision → rendered cards.
+// Only caller: sandboxResponder.Handle, case `crd-order-select`.
+func (s *sandboxResponder) crdCardsForCode(code string) (LegResult, error) {
+	paRequired, canonical := s.adj.OrderSelect(code)
 	cov := shnsdk.CardCoverage{Covered: "covered"}
 	if paRequired {
 		cov.PANeeded, cov.Questionnaires = "auth-needed", []string{canonical}
@@ -138,11 +141,14 @@ func (s *sandboxResponder) Handle(ctx context.Context, leg, corrID, subjectPCI s
 		if !ok {
 			return LegResult{Status: http.StatusBadRequest, Message: "no ServiceRequest in draftOrders"}, nil
 		}
-		cpt, err := shnsdk.ParseServiceRequestCPT(srJSON)
+		// §3.1: accept {CPT, HCPCS} product coding (was ParseServiceRequestCPT, CPT-only —
+		// which 400'd a HCPCS order before any decision). The CRD DECISION keys on the
+		// code; the system axis is carried by the EOB build (FR-28).
+		_, code, _, err := shnsdk.ParseServiceRequestProductCoding(srJSON)
 		if err != nil {
-			return LegResult{Status: http.StatusBadRequest, Message: "parse CPT failed"}, nil
+			return LegResult{Status: http.StatusBadRequest, Message: "parse procedure coding failed"}, nil
 		}
-		return s.crdCardsForCPT(cpt)
+		return s.crdCardsForCode(code)
 	case "dtr-questionnaire-fetch":
 		var fetch shnsdk.QuestionnaireFetchRequest
 		if err := json.Unmarshal(requestFHIR, &fetch); err != nil {

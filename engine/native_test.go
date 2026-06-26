@@ -219,7 +219,7 @@ func TestNativeResponder_DTRForwardsQuestionnaireLessPackageVerbatim(t *testing.
 	}
 }
 
-// TestNativeResponder_DTRForwardsCoverageWhenCarried is the Gap-B end-to-end leg guard
+// TestNativeResponder_DTRForwardsCoverageWhenCarried is the coverage-carry end-to-end leg guard
 // (FR-G28): a dtr-questionnaire-fetch leg request carrying a Coverage resource must yield
 // a forwarded $questionnaire-package body that INCLUDES a `coverage` parameter — a real
 // Da Vinci payer (br-payer) 400s "The 'coverage' parameter is required (min=1)" otherwise.
@@ -265,7 +265,7 @@ func TestNativeResponder_DTRForwardsCoverageWhenCarried(t *testing.T) {
 }
 
 // TestNativeResponder_DTRRejectsMalformedFetch locks the fail-closed posture preserved
-// across the Gap-B switch from jsonUnmarshalStrictCanonical to unmarshaling the published
+// across the coverage-carry switch from jsonUnmarshalStrictCanonical to unmarshaling the published
 // QuestionnaireFetchRequest: a malformed body OR a missing/empty canonical → 400 (parity
 // with the sandbox's 400, never a 500), and the partner is never called.
 func TestNativeResponder_DTRRejectsMalformedFetch(t *testing.T) {

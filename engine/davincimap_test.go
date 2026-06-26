@@ -14,7 +14,7 @@ import (
 
 func TestBuildQuestionnairePackageRequest(t *testing.T) {
 	// Absent-coverage path (the sandbox / 8-UC-demo path): canonical-only, EXACTLY as
-	// before the Gap-B fix. This locks the demo-path parity — a regression that started
+	// before the coverage-carry fix. This locks the demo-path parity — a regression that started
 	// emitting a coverage param when none was supplied fails here.
 	out, err := buildQuestionnairePackageRequest("http://example.org/Questionnaire/lumbar", nil)
 	if err != nil {
@@ -40,7 +40,7 @@ func TestBuildQuestionnairePackageRequest(t *testing.T) {
 	}
 }
 
-// TestBuildQuestionnairePackageRequest_CarriesCoverage is the Gap-B regression guard
+// TestBuildQuestionnairePackageRequest_CarriesCoverage is the coverage-carry regression guard
 // (FR-G28): when the inbound $questionnaire-package carried a coverage Parameters
 // resource, the native-forward rebuild MUST emit a `coverage` parameter carrying that
 // resource VERBATIM — a real Da Vinci payer (br-payer) 400s with "The 'coverage'

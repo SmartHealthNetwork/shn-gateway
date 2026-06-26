@@ -232,13 +232,18 @@ type crdDtrResult struct {
 	filled                  []FilledItem
 }
 
-// runCRDThenDTR executes the shared CRD order-select + DTR fetch + local auto-fill
-// for a covered member: it resolves the patient, builds+validates the SR and
-// Coverage, runs the CRD round-trip (must come back PA-required with a canonical),
-// fetches+validates the Questionnaire, verifies its url matches the advertised
-// canonical, and auto-fills the QR from local clinical context. On any failure it
-// writes the HTTP error and returns ok=false. Shared by UC-03/04/06 (DRY).
+// runCRDThenDTR is the CPT-72148 lumbar prefix (UC-03/04/06), unchanged.
+// Delegates to runCRDThenDTROrder with the standard CPT lumbar order so existing
+// callers are byte-unchanged.
 func (g *Gateway) runCRDThenDTR(w http.ResponseWriter, r *http.Request, member string) (crdDtrResult, bool) {
+	return g.runCRDThenDTROrder(w, r, member, systemCPTBuild, "72148", "MRI lumbar spine w/o contrast", "M51.16")
+}
+
+// runCRDThenDTROrder is the generalized CRD order-select + DTR fetch + auto-fill prefix.
+// The order's {system, code, display, dx} are explicit so a HCPCS scenario (§3.2) can
+// originate an L8000 order; existing callers delegate with the CPT lumbar order (byte-unchanged).
+// On any failure it writes the HTTP error and returns ok=false.
+func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, member, system, code, display, dx string) (crdDtrResult, bool) {
 	ctx := r.Context()
 
 	pci, _, found := g.cfg.SoR.ResolvePatient(member)
@@ -249,7 +254,7 @@ func (g *Gateway) runCRDThenDTR(w http.ResponseWriter, r *http.Request, member s
 	patientRef := "Patient/" + member
 	coverageRef := "Coverage/" + member
 
-	srJSON, err := shnsdk.BuildServiceRequest("72148", "MRI lumbar spine w/o contrast", "M51.16", patientRef)
+	srJSON, err := BuildServiceRequestCoded(system, code, display, dx, patientRef)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build request failed"})
 		return crdDtrResult{}, false
@@ -554,6 +559,67 @@ func (g *Gateway) handleUC03(w http.ResponseWriter, r *http.Request) {
 	const srRef = "ServiceRequest/sr-uc03"
 
 	res, ok := g.runCRDThenDTR(w, r, "MBR-COVERED")
+	if !ok {
+		return
+	}
+
+	// --- PAS round-trip: submit the preauth bundle, expect an approval. ---
+	pasCorr := g.cfg.CorrelationGen()
+	bundleJSON, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
+		QR: res.qrJSON, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef,
+		Corr: pasCorr, Created: g.cfg.Clock(),
+	})
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build bundle failed"})
+		return
+	}
+	if status, msg := g.validateFHIR(ctx, bundleJSON, "egress"); status != 0 {
+		writeJSON(w, status, map[string]string{"error": msg})
+		return
+	}
+	claimRespJSON, err := g.OriginateLeg(ctx, r, g.cfg.CounterpartID, "pas-claim", res.pci, pasCorr, "", Content{WorkstreamType: workstreamPA, Bytes: bundleJSON})
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	if status, msg := g.validateFHIR(ctx, claimRespJSON, "ingress"); status != 0 {
+		writeJSON(w, status, map[string]string{"error": msg})
+		return
+	}
+	parsed, err := shnsdk.ParseClaimResponse(claimRespJSON)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "claim response parse failed"})
+		return
+	}
+	if parsed.Outcome != "approved" {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "preauthorization not approved"})
+		return
+	}
+
+	// FR-23: persist the payer-issued auth number against the SR reference.
+	if err := g.cfg.Store.StoreAuthNumber(srRef, parsed.PreAuthRef); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "holder write failed (auth number)"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, uc03Resp{
+		PARequired: true,
+		AuthNumber: parsed.PreAuthRef,
+		ValidUntil: parsed.ValidUntil,
+		QRItems:    res.filled,
+	})
+}
+
+// handleUC07HCPCS runs the HCPCS (L8000) DV-approve path — the in-process mirror of the
+// two-RI L8000 approve (§3.2): CRD (PA-required) → DTR auto-fill → PAS approve on first
+// submit → the payer projects a HCPCS-system PDex PA EOB into the Patient-Access Store
+// (FR-28; system flows from the L8000 order). NOT patient-authorship.
+func (g *Gateway) handleUC07HCPCS(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	const srRef = "ServiceRequest/sr-uc07hcpcs"
+
+	res, ok := g.runCRDThenDTROrder(w, r, "MBR-UC07HCPCS",
+		systemHCPCSBuild, "L8000", "Breast prosthesis, mastectomy bra", "M51.16")
 	if !ok {
 		return
 	}

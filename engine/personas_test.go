@@ -7,6 +7,7 @@ func TestPersonaRefs_ResolveToPCIs(t *testing.T) {
 	want := map[string]bool{
 		"coveredPci": true, "notCoveredPci": true, "uc04Pci": true,
 		"uc05Pci": true, "uc06Pci": true, "uc07Pci": true, "uc08Pci": true,
+		"uc07HcpcsPci": true,
 	}
 	if len(PersonaRefs) != len(want) {
 		t.Fatalf("PersonaRefs len = %d, want %d", len(PersonaRefs), len(want))

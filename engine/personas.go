@@ -22,4 +22,5 @@ var PersonaRefs = []PersonaRef{
 	{"uc06Pci", "MBR-UC06"},
 	{"uc07Pci", "MBR-UC07"},
 	{"uc08Pci", "MBR-UC08"},
+	{"uc07HcpcsPci", "MBR-UC07HCPCS"},
 }
