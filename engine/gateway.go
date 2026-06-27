@@ -48,6 +48,11 @@ type Config struct {
 	// (the payer's id). Replaces the literal "payer" in routing call sites.
 	// The payer side does not use it — it replies to the inbound envelope's Sender.
 	CounterpartID string
+	// OriginationProfile selects the per-UC behavior lane: "" / "sandbox" = the sandbox
+	// shape (default); "composite" = drive real br-payer verdicts (Mode A, harness-provider-gw
+	// only). A5 reads it to treat a legitimate PAS pend as a terminal success in composite
+	// (br-payer never resolves A4→A1); B1 also keys the HCPCS code map on it. Spec 2B-bis/2C.
+	OriginationProfile string
 	// Identity is the gateway's substrate identity: its holder signing key (used to
 	// sign holder assertions and patient-access audit records) plus its envelope-
 	// encryption keypair (used to open inbound sealed payloads and seal responses).
@@ -675,6 +680,14 @@ func (g *Gateway) OriginateLeg(ctx context.Context, r *http.Request, recipient, 
 // leg, returning the gateway-standard (status,message) on failure. dir is
 // "egress" or "ingress" purely for the error message; status is 0 on success.
 func (g *Gateway) validateFHIR(ctx context.Context, resourceJSON []byte, dir string) (int, string) {
+	// Composite (Mode A) ingress artifacts are the counterparty's (br-payer's) RELAYED foreign
+	// bytes — SHN does not $validate foreign bundles (R-8/FR-36: SHN certifies only what it
+	// PRODUCES and hosts US Core only; the composite payer's responses stay relayed:true). The
+	// sandbox lane (SHN-produced responses) still validates ingress; egress (always SHN-produced)
+	// always validates. br-payer's Da Vinci DTR/PAS bytes fail a US-Core-only validator.
+	if dir == "ingress" && g.cfg.OriginationProfile == "composite" {
+		return 0, ""
+	}
 	res, err := g.cfg.Validator.Validate(ctx, resourceJSON, "")
 	if err != nil {
 		return http.StatusInternalServerError, "validator unavailable"

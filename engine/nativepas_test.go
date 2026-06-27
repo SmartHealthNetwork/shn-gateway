@@ -273,4 +273,97 @@ func TestNativeUpdate_ApprovedFinalizes(t *testing.T) {
 			t.Fatalf("non-approved conformant update is 422 + Rollback (defensive parity), got status=%d rollback=%v", res.Status, res.Rollback != nil)
 		}
 	})
+
+	// §2B-bis (E2): a real Da Vinci payer (br-payer) RE-PENDS a conformant amendment (A4) and
+	// auto-resolves A4→A1 only on its own timer. The update leg must POLL GET ClaimResponse/{id}
+	// until A1 — NOT 422 on the re-pend — then relay the resolved A1 + Finalize. The timer flips
+	// the SAME id (in-place), so the re-query target is parsed from the re-pend response.
+	t.Run("re-pend (A4) -> poll resolves to A1 -> approved + Finalize", func(t *testing.T) {
+		// Composite bundle carries infoChanged → the re-pend POLLS for the timer-resolved A1
+		// (a carry-forward amendment without infoChanged would surface the re-pend as 422).
+		bundle := originatorBuiltConformantUpdateBundleProfile(t, true)
+		var getCount int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.Method {
+			case http.MethodPost: // /Claim/$submit → A4 re-pend (queued ClaimResponse Bundle, id cr-9)
+				_, _ = w.Write([]byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"ClaimResponse","id":"cr-9","status":"active","outcome":"queued"}}]}`))
+			case http.MethodGet: // GET /ClaimResponse/cr-9 → A4 first, A1 (the timer) second
+				getCount++
+				if getCount >= 2 {
+					_, _ = w.Write([]byte(`{"resourceType":"ClaimResponse","id":"cr-9","status":"active","outcome":"complete","preAuthRef":"AUTH-0042","preAuthPeriod":{"end":"2030-01-01"}}`))
+					return
+				}
+				_, _ = w.Write([]byte(`{"resourceType":"ClaimResponse","id":"cr-9","status":"active","outcome":"queued"}`))
+			default:
+				http.Error(w, "unexpected", http.StatusNotFound)
+			}
+		}))
+		defer srv.Close()
+		s := seedPended()
+		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", s, fixedClock,
+			WithPendReQuery(2*time.Second, 5*time.Millisecond))
+		res, err := n.Handle(context.Background(), "pas-claim-update", "corr-1", pci, bundle)
+		if err != nil || res.Status != 0 {
+			t.Fatalf("re-pend->poll->A1: err=%v status=%d msg=%s", err, res.Status, res.Message)
+		}
+		if getCount < 2 {
+			t.Fatalf("expected the leg to RE-QUERY ClaimResponse (getCount>=2), got %d", getCount)
+		}
+		parsed, perr := shnsdk.ParseClaimResponse(res.ResponseFHIR)
+		if perr != nil || parsed.Outcome != "approved" || parsed.PreAuthRef != "AUTH-0042" {
+			t.Fatalf("resolved response must be approved AUTH-0042, got outcome=%q ref=%q err=%v", parsed.Outcome, parsed.PreAuthRef, perr)
+		}
+		if res.Commit == nil || res.Rollback == nil {
+			t.Fatalf("resolved update must Finalize (Commit) + keep Rollback armed")
+		}
+	})
+
+	// The bound is a HARD stop: a pend that never resolves within the poll deadline is 422 +
+	// Rollback (a genuine non-resolution, never a silent pass).
+	t.Run("re-pend that never resolves -> 422 + Rollback (no silent pass)", func(t *testing.T) {
+		bundle := originatorBuiltConformantUpdateBundleProfile(t, true) // infoChanged → polls
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if r.Method == http.MethodPost {
+				_, _ = w.Write([]byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"ClaimResponse","id":"cr-stuck","status":"active","outcome":"queued"}}]}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"resourceType":"ClaimResponse","id":"cr-stuck","status":"active","outcome":"queued"}`)) // never A1
+		}))
+		defer srv.Close()
+		s := seedPended()
+		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", s, fixedClock,
+			WithPendReQuery(15*time.Millisecond, 5*time.Millisecond))
+		res, _ := n.Handle(context.Background(), "pas-claim-update", "corr-1", pci, bundle)
+		if res.Status != http.StatusUnprocessableEntity || res.Rollback == nil {
+			t.Fatalf("an unresolved pend must be 422 + Rollback, got status=%d rollback=%v", res.Status, res.Rollback != nil)
+		}
+	})
+
+	// Gate rejection arm: a CARRY-FORWARD amendment (no infoChanged → br-payer keeps the prior
+	// decision, does NOT re-evaluate) must NOT poll — it surfaces the re-pend as 422 "amendment still
+	// insufficient" (the two-RI carry+adjudicate observation, D-2RI-6). Proves the poll is scoped to
+	// re-evaluation-requesting (infoChanged) amendments, so it cannot silently change that lane.
+	t.Run("re-pend WITHOUT infoChanged -> 422, never polled (carry-forward)", func(t *testing.T) {
+		var getCount int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if r.Method == http.MethodGet {
+				getCount++
+			}
+			_, _ = w.Write([]byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"ClaimResponse","id":"cr-cf","status":"active","outcome":"queued"}}]}`))
+		}))
+		defer srv.Close()
+		s := seedPended()
+		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", s, fixedClock,
+			WithPendReQuery(2*time.Second, 5*time.Millisecond))
+		res, _ := n.Handle(context.Background(), "pas-claim-update", "corr-1", pci, bundle) // sandbox bundle = no infoChanged
+		if res.Status != http.StatusUnprocessableEntity || res.Rollback == nil {
+			t.Fatalf("carry-forward (no infoChanged) re-pend must be 422 + Rollback, got status=%d rollback=%v", res.Status, res.Rollback != nil)
+		}
+		if getCount != 0 {
+			t.Fatalf("carry-forward amendment must NOT poll ClaimResponse, but GET fired %d time(s)", getCount)
+		}
+	})
 }

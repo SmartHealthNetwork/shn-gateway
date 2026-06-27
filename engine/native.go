@@ -30,13 +30,27 @@ const crdHook = "order-select"
 const maxPartnerBody = 8 << 20 // 8 MiB cap on a partner response body
 
 type nativeResponder struct {
-	client       *http.Client
-	baseURL      string // FHIR base ($questionnaire-package, $submit, CoverageEligibilityRequest)
-	cdsBaseURL   string // CDS Hooks base (/cds-services/{id}); defaults to baseURL when co-located
-	crdServiceID string // discovered or overridden at construction (FR-G26)
-	store        Store  // gateway-owned shadow ledger + EOB Store for the PAS legs (nil ⇒ read-only only)
-	clock        func() time.Time
+	client          *http.Client
+	baseURL         string // FHIR base ($questionnaire-package, $submit, CoverageEligibilityRequest)
+	cdsBaseURL      string // CDS Hooks base (/cds-services/{id}); defaults to baseURL when co-located
+	crdServiceID    string // discovered or overridden at construction (FR-G26)
+	crdHookOverride string // when set, the request hook is rewritten to this before CRD forward (FR-G26; br-payer's order-sign)
+	store           Store  // gateway-owned shadow ledger + EOB Store for the PAS legs (nil ⇒ read-only only)
+	clock           func() time.Time
+	// PAS pend re-query: a real Da Vinci payer (br-payer) re-pends a conformant
+	// amendment (persistUpdatePath keeps a conditional item A4 + reschedules) and auto-resolves
+	// A4→A1 only on its own timer (PasPendedResolutionService, pas.pended-resolution-delay-seconds).
+	// On a re-pended ClaimUpdate the responder polls GET ClaimResponse/{id} until A1 (or timeout →
+	// 422, no silent pass). Timeout MUST exceed the payer's resolution delay (E4 lowers it to 3s for
+	// the harness) and stay under the originator's 30s Hub-client timeout.
+	pendReQueryTimeout  time.Duration
+	pendReQueryInterval time.Duration
 }
+
+const (
+	defaultPendReQueryTimeout  = 12 * time.Second
+	defaultPendReQueryInterval = 1 * time.Second
+)
 
 // NativeOption configures optional nativeResponder behavior.
 type NativeOption func(*nativeResponder)
@@ -53,6 +67,32 @@ func WithCDSBaseURL(cdsBaseURL string) NativeOption {
 	}
 }
 
+// WithCRDHook sets the CDS Hooks hook value the native-forward stamps on the CRD request
+// before forwarding, to match the partner's configured CRD service (e.g. br-payer's
+// order-sign-crd demands hook:order-sign while SHN originates the canonical order-select).
+// Unset ⇒ forward the originator's hook verbatim (the prior behavior).
+func WithCRDHook(hook string) NativeOption {
+	return func(n *nativeResponder) {
+		if hook != "" {
+			n.crdHookOverride = hook
+		}
+	}
+}
+
+// WithPendReQuery overrides the PAS pend re-query poll timeout + interval (E2). Zero values keep
+// the defaults. Used to make the hermetic nativeResponder tests fast (short interval) and to let
+// the harness tune the bound relative to the payer's resolution delay (E4).
+func WithPendReQuery(timeout, interval time.Duration) NativeOption {
+	return func(n *nativeResponder) {
+		if timeout > 0 {
+			n.pendReQueryTimeout = timeout
+		}
+		if interval > 0 {
+			n.pendReQueryInterval = interval
+		}
+	}
+}
+
 var _ LegResponder = (*nativeResponder)(nil)
 
 // NewNativeResponder builds the native-forward Responder over a ready *http.Client
@@ -65,7 +105,10 @@ func NewNativeResponder(client *http.Client, baseURL, crdServiceID string, store
 	if clock == nil {
 		clock = time.Now
 	}
-	n := &nativeResponder{client: client, baseURL: baseURL, cdsBaseURL: baseURL, crdServiceID: crdServiceID, store: store, clock: clock}
+	n := &nativeResponder{
+		client: client, baseURL: baseURL, cdsBaseURL: baseURL, crdServiceID: crdServiceID, store: store, clock: clock,
+		pendReQueryTimeout: defaultPendReQueryTimeout, pendReQueryInterval: defaultPendReQueryInterval,
+	}
 	for _, o := range opts {
 		o(n)
 	}
@@ -155,7 +198,18 @@ func (n *nativeResponder) Handle(ctx context.Context, leg, corrID, subjectPCI st
 		// the ingress); forward it VERBATIM — no augmentCRDHook minimized shaping.
 		// Rung-1 faithful pass-through: br-payer receives br-provider's actual request
 		// bytes. The response side is identical to the minimized leg (FR-G25).
-		body, bad := n.post(ctx, n.cdsBaseURL, "/cds-services/"+n.crdServiceID, requestFHIR, "CRD")
+		// When crdHookOverride is set, rewrite the request's top-level "hook" field to
+		// match the partner CRD service's declared hook (e.g. br-payer's order-sign-crd
+		// demands hook:order-sign while SHN originates hook:order-select — 400 otherwise).
+		fwd := requestFHIR
+		if n.crdHookOverride != "" {
+			rewritten, herr := rewriteCDSHook(requestFHIR, n.crdHookOverride)
+			if herr != nil {
+				return LegResult{}, herr // malformed request envelope → 500 (gateway fault)
+			}
+			fwd = rewritten
+		}
+		body, bad := n.post(ctx, n.cdsBaseURL, "/cds-services/"+n.crdServiceID, fwd, "CRD")
 		if bad.Status != 0 {
 			return bad, nil
 		}
@@ -228,6 +282,29 @@ func (n *nativeResponder) post(ctx context.Context, base, path string, body []by
 	return rb, LegResult{}
 }
 
+// get reads base+path (the read sibling of post), reusing the same authed client. Used by the PAS
+// pend re-query (GET ClaimResponse/{id}). Same 502-on-failure / never-error-return contract as post.
+func (n *nativeResponder) get(ctx context.Context, base, path, label string) ([]byte, LegResult) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+path, nil)
+	if err != nil {
+		return nil, LegResult{Status: http.StatusBadGateway, Message: "upstream payer " + label + " request build failed"}
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := n.client.Do(req)
+	if err != nil {
+		return nil, LegResult{Status: http.StatusBadGateway, Message: "upstream payer " + label + " unreachable"}
+	}
+	defer resp.Body.Close()
+	rb, err := io.ReadAll(io.LimitReader(resp.Body, maxPartnerBody))
+	if err != nil {
+		return nil, LegResult{Status: http.StatusBadGateway, Message: "upstream payer " + label + " read failed"}
+	}
+	if resp.StatusCode/100 != 2 {
+		return nil, LegResult{Status: http.StatusBadGateway, Message: "upstream payer " + label + " returned " + resp.Status}
+	}
+	return rb, LegResult{}
+}
+
 // normalizeCRDResponse is the CRD response tail (FR-G25): normalize the partner's
 // coverage-information to the canonical CardCoverage (davincimap.go), then re-render
 // SHN cards with shnsdk.BuildCards. Used by the conformant crd-order-select
@@ -242,4 +319,20 @@ func normalizeCRDResponse(body []byte) (LegResult, error) {
 		return LegResult{}, fmt.Errorf("engine: render normalized cards: %w", err)
 	}
 	return LegResult{ResponseFHIR: cardsJSON}, nil
+}
+
+// rewriteCDSHook returns reqJSON with its top-level "hook" set to hook, preserving every
+// other field verbatim. Used to adapt SHN's canonical order-select request to a partner
+// CRD service registered under a different hook (br-payer's order-sign-crd).
+func rewriteCDSHook(reqJSON []byte, hook string) ([]byte, error) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(reqJSON, &m); err != nil {
+		return nil, fmt.Errorf("engine: rewrite CDS hook: %w", err)
+	}
+	hookJSON, err := json.Marshal(hook)
+	if err != nil {
+		return nil, fmt.Errorf("engine: rewrite CDS hook: %w", err)
+	}
+	m["hook"] = hookJSON
+	return json.Marshal(m)
 }

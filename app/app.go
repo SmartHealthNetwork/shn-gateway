@@ -93,6 +93,15 @@ type config struct {
 	// "order-select" service (FR-G26). Set explicitly when the partner's CRD service
 	// uses a different hook name — e.g. br-payer's "order-sign-crd" (hook:order-sign).
 	PayerDavinciCRDServiceID string
+	// PayerDavinciCRDHook is the CDS Hooks hook value to stamp on the CRD request before
+	// forwarding, matching the partner's CRD service (br-payer's order-sign-crd ⇒ order-sign).
+	// Empty ⇒ forward the originator's hook verbatim. PAYER_DAVINCI_CRD_HOOK.
+	PayerDavinciCRDHook string
+
+	// OriginationProfile selects the per-UC origination lane: "" / "sandbox"
+	// keep the CPT/lumbar order shape; "composite" originates the HCPCS codes the real
+	// br-payer adjudicates. ORIGINATION_PROFILE.
+	OriginationProfile string
 
 	// Optional native DTR population (provider-local). PROVIDER_DTR_NATIVE switches DTR
 	// population from the in-house managed backend to forwarding the provider's own SDC
@@ -194,6 +203,8 @@ func loadConfig(getenv func(string) string) (config, error) {
 		PayerDavinciClientKID:    getenv("PAYER_DAVINCI_CLIENT_KID"),
 		PayerDavinciPASNative:    getenv("PAYER_DAVINCI_PAS_NATIVE") == "true",
 		PayerDavinciCRDServiceID: getenv("PAYER_DAVINCI_CRD_SERVICE_ID"),
+		PayerDavinciCRDHook:      getenv("PAYER_DAVINCI_CRD_HOOK"),
+		OriginationProfile:       getenv("ORIGINATION_PROFILE"),
 
 		ProviderDTRNative:      getenv("PROVIDER_DTR_NATIVE") == "true",
 		ProviderDTRPopulateURL: getenv("PROVIDER_DTR_POPULATE_URL"),
@@ -564,6 +575,8 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		ConsentURL:      firstNonEmpty(cfg.ConsentURL, endpoints.Consent),
 		AuditURL:        firstNonEmpty(cfg.AuditURL, endpoints.Audit),
 		PHGURL:          firstNonEmpty(cfg.PHGURL, endpoints.PHG),
+
+		OriginationProfile: cfg.OriginationProfile,
 	}
 	// Native-forward payer mode: the read-only legs forward to a partner
 	// Da Vinci endpoint; PAS stays on the sandbox fallback. Setting Responder here means
@@ -601,7 +614,9 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		if discErr != nil {
 			return b, fmt.Errorf("gateway: CRD service-id discovery: %w", discErr)
 		}
-		native := engine.NewNativeResponder(pdc, cfg.PayerDavinciBaseURL, crdSvcID, store, clock, engine.WithCDSBaseURL(cfg.PayerDavinciCDSBaseURL))
+		native := engine.NewNativeResponder(pdc, cfg.PayerDavinciBaseURL, crdSvcID, store, clock,
+			engine.WithCDSBaseURL(cfg.PayerDavinciCDSBaseURL),
+			engine.WithCRDHook(cfg.PayerDavinciCRDHook))
 		fallback := engine.NewSandboxResponder(gwCfg.Adjudicator, sor, store, clock)
 		gwCfg.Responder = engine.NewCompositeResponder(native, fallback, cfg.PayerDavinciPASNative)
 		// The native-forward DTR response is a foreign Da Vinci package SHN can't $validate
@@ -610,6 +625,15 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	}
 	if cfg.ProviderDTRNative {
 		gwCfg.Populator = engine.NewNativePopulator(client, cfg.ProviderDTRPopulateURL)
+	} else if cfg.OriginationProfile == "composite" {
+		// Mode A composite: the foreign Da Vinci questionnaires are manual-entry; fill their
+		// required items from the recorded persona DTR answer book (honesty invariant). The
+		// author is the provider/clinician that recorded the answers (dtrx-1 needs an author).
+		npi := cfg.NPI
+		if npi == "" {
+			npi = "1234567890" // matches the app-config default (def("NPI", "1234567890"))
+		}
+		gwCfg.Populator = engine.NewSeededPopulator("Practitioner/" + npi)
 	}
 	gwCfg.IngressEnabled = cfg.ProviderDavinciIngress
 	gwCfg.IngressBaseURL = cfg.IngressBaseURL

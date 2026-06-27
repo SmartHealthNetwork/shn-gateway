@@ -1,8 +1,8 @@
-// order_build.go — gateway-local stub (build-side product-coding gap). shnsdk.BuildServiceRequest
+// order_build.go — gateway-local stub for deferral D-PCB-1 (build-side product-coding gap). shnsdk.BuildServiceRequest
 // is CPT-system-locked, so the gateway cannot build a HCPCS order via the published SDK.
 // This gateway-local GENERIC builder takes the system explicitly — the EXACT shape the SDK
 // will eventually get (BuildServiceRequestCoded). When a real partner consumer needs to build
-// HCPCS orders via the SDK, lift this into sdk/order.go (additive) and honor its
+// HCPCS orders via the SDK, lift this into sdk/order.go (additive) and honor the D-PCB-1
 // rejection test before recording it closed. Parity-pinned to shnsdk.BuildServiceRequest for
 // CPT (test/sdkparity/order_coded_parity_test.go) so it cannot drift before the pull-in.
 package engine
@@ -25,7 +25,7 @@ const (
 )
 
 // BuildServiceRequestCoded builds a DRAFT US-Core ServiceRequest with an explicit procedure
-// code system (CPT or HCPCS). Generic form of shnsdk.BuildServiceRequest.
+// code system (CPT or HCPCS). Generic form of shnsdk.BuildServiceRequest (deferral D-PCB-1).
 func BuildServiceRequestCoded(system, code, display, dxCode, patientRef string) ([]byte, error) {
 	sr := fhir.ServiceRequest{
 		Meta:   &fhir.Meta{Profile: []string{profileUSCoreServiceRequest}},

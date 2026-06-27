@@ -365,6 +365,33 @@ func TestNativeResponder_CRDNativeUnmappablePartnerIs502(t *testing.T) {
 	}
 }
 
+// TestNativeResponder_RewritesCRDHook proves the native-forward rewrites the request
+// hook to the configured CRD service's hook before forwarding — SHN originates
+// hook:order-select but br-payer's order-sign-crd demands hook:order-sign (400 otherwise).
+func TestNativeResponder_RewritesCRDHook(t *testing.T) {
+	var gotHook string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Hook string `json:"hook"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		gotHook = body.Hook
+		// minimal valid cards response so normalizeCRDResponse succeeds
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"cards":[],"systemActions":[]}`))
+	}))
+	defer srv.Close()
+
+	n := NewNativeResponder(srv.Client(), srv.URL, "order-sign-crd", nil, nil, WithCRDHook("order-sign"))
+	reqJSON := []byte(`{"hook":"order-select","hookInstance":"hi","context":{"draftOrders":{"resourceType":"Bundle","entry":[]}},"prefetch":{}}`)
+	if _, err := n.Handle(context.Background(), "crd-order-select", "corr", "pci", reqJSON); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if gotHook != "order-sign" {
+		t.Fatalf("forwarded hook = %q, want order-sign (rewritten)", gotHook)
+	}
+}
+
 // TestNativeResponder_SplitBaseURLs proves CRD (CDS Hooks) posts to the CDS base
 // while DTR/PAS post to the FHIR base — the br-payer topology (CDS at root, FHIR
 // under /fhir). Two httptest servers stand in for the two bases.

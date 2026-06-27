@@ -123,6 +123,50 @@ func TestQuestionnaireHasSubject(t *testing.T) {
 	}
 }
 
+// TestPackageQuestionnaireHasSubject_ParametersWrapper is the REJECTION TEST for the
+// (C) subject fence against br-payer's real $questionnaire-package shape. br-payer
+// returns a Parameters wrapper (dtr-qpackage-output-parameters) rather than a bare
+// Bundle; without unwrapping, packageQuestionnaireHasSubject would see no entries and
+// return false — silently defeating the fence. This test requires:
+//  1. A Parameters{packagebundle → Bundle{Questionnaire WITH subject}} → true (fence
+//     catches the foreign subject through the wrapper).
+//  2. A Parameters{packagebundle → Bundle{Questionnaire WITHOUT subject}} → false.
+//  3. A bare Bundle{Questionnaire WITH subject} → true (regression: existing path unchanged).
+//  4. A bare Bundle{Questionnaire WITHOUT subject} → false (regression: existing path unchanged).
+func TestPackageQuestionnaireHasSubject_ParametersWrapper(t *testing.T) {
+	// (1) REJECTION: Parameters wrapper with a subject-bearing Questionnaire → MUST return true.
+	withSubjectWrapped := []byte(`{"resourceType":"Parameters","parameter":[` +
+		`{"name":"packagebundle","resource":{"resourceType":"Bundle","type":"collection","entry":[` +
+		`{"resource":{"resourceType":"Questionnaire","id":"q-with-subject","subject":{"reference":"Patient/X"}}}` +
+		`]}}]}`)
+	if !packageQuestionnaireHasSubject(withSubjectWrapped) {
+		t.Error("REJECTION TEST FAILED: Parameters-wrapped Questionnaire with subject must return true (fence must not be vacuous against br-payer wrapper)")
+	}
+
+	// (2) Parameters wrapper with a clean Questionnaire → false.
+	cleanWrapped := []byte(`{"resourceType":"Parameters","parameter":[` +
+		`{"name":"packagebundle","resource":{"resourceType":"Bundle","type":"collection","entry":[` +
+		`{"resource":{"resourceType":"Questionnaire","id":"q-clean"}}` +
+		`]}}]}`)
+	if packageQuestionnaireHasSubject(cleanWrapped) {
+		t.Error("Parameters-wrapped Questionnaire without subject must return false")
+	}
+
+	// (3) Bare Bundle regression: subject-bearing Questionnaire → true (existing path unchanged).
+	withSubjectBare := []byte(`{"resourceType":"Bundle","type":"collection","entry":[` +
+		`{"resource":{"resourceType":"Questionnaire","subject":{"reference":"Patient/X"}}}]}`)
+	if !packageQuestionnaireHasSubject(withSubjectBare) {
+		t.Error("bare Bundle with subject-bearing Questionnaire must still return true")
+	}
+
+	// (4) Bare Bundle regression: clean Questionnaire → false (existing path unchanged).
+	cleanBare := []byte(`{"resourceType":"Bundle","type":"collection","entry":[` +
+		`{"resource":{"resourceType":"Questionnaire","id":"q-clean"}}]}`)
+	if packageQuestionnaireHasSubject(cleanBare) {
+		t.Error("bare Bundle with subjectless Questionnaire must still return false")
+	}
+}
+
 // TestParseEOBPatient round-trips a BuildPADecisionEOB EOB through parseEOBPatient
 // and asserts the rejections (wrong resourceType, missing patient, malformed).
 func TestParseEOBPatient(t *testing.T) {

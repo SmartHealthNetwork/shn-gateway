@@ -144,6 +144,62 @@ func originatorBuiltConformantBundle(t *testing.T, member string) []byte {
 	return got
 }
 
+// TestPasMemberFromRef covers the tolerant member extractor used by the payer-side bind:
+// a relative ref and an absolute fullUrl both yield the bare id; a ref with no Patient/
+// segment is returned unchanged (so ResolvePatient fails closed → unknown member).
+func TestPasMemberFromRef(t *testing.T) {
+	cases := map[string]string{
+		"Patient/MBR-COVERED":                          "MBR-COVERED",
+		"https://shn.example/fhir/Patient/MBR-COVERED": "MBR-COVERED",
+		"urn:uuid:no-patient-segment":                  "urn:uuid:no-patient-segment",
+	}
+	for in, want := range cases {
+		if got := pasMemberFromRef(in); got != want {
+			t.Errorf("pasMemberFromRef(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestParseConformantPASSubjects_AbsoluteRefs proves the composite lane (Mode A) bundle —
+// ABSOLUTIZED refs (ContainedInsurer+AbsoluteRefs, so a real Da Vinci payer resolves them) —
+// still binds at the SHN payer-gw: the member resolves from the absolute fullUrl refs and the
+// patient-consistency fence holds. Without the tolerant extractor this 400s "unknown member".
+func TestParseConformantPASSubjects_AbsoluteRefs(t *testing.T) {
+	const member = "MBR-COVERED"
+	ref := "Patient/" + member
+	created := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	srJSON, err := shnsdk.BuildServiceRequest("72148", "MRI lumbar spine w/o contrast", "M51.16", ref)
+	if err != nil {
+		t.Fatalf("BuildServiceRequest: %v", err)
+	}
+	qrJSON, err := shnsdk.FillQuestionnaire(shnsdk.SandboxLumbarQuestionnaire(), shnsdk.SandboxUC03Context(), shnsdk.QRContext{
+		PatientRef:  ref,
+		CoverageRef: "Coverage/convergence-coverage",
+		OrderRef:    "ServiceRequest/convergence-sr",
+		Authored:    created,
+	})
+	if err != nil {
+		t.Fatalf("FillQuestionnaire: %v", err)
+	}
+	got, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
+		QR:               qrJSON,
+		SR:               srJSON,
+		PatientRef:       ref,
+		CoverageRef:      "Coverage/convergence-coverage",
+		Corr:             "convergence-pas-submit-0001",
+		Created:          created,
+		ContainedInsurer: true,
+		AbsoluteRefs:     true,
+	})
+	if err != nil {
+		t.Fatalf("BuildConformantClaimBundle: %v", err)
+	}
+	s, status, msg := parseConformantPASSubjects(got)
+	if status != 0 || s.member != member {
+		t.Fatalf("absolute-ref composite bundle rejected by payer-gw bind: status=%d (%s) member=%q, want %q", status, msg, s.member, member)
+	}
+}
+
 // TestParseConformantPASSubjects_AcceptsOriginatorBuilt: the payer-side bind accepts the
 // LEAN conformant $submit bundle the Originator builds (shnsdk.BuildConformantClaimBundle)
 // — it three-way subject-binds to the member, exactly like the golden. This is the
@@ -712,6 +768,13 @@ func TestSandbox_PASClaimNative_NoQR_400(t *testing.T) {
 // reproducible via a standard FillQuestionnaire call; the builder stamps ids/strips meta.profile
 // idempotently). Mirrors the sdk-side conformantUpdateInputsFromGolden helper.
 func originatorBuiltConformantUpdateBundle(t *testing.T) []byte {
+	return originatorBuiltConformantUpdateBundleProfile(t, false)
+}
+
+// originatorBuiltConformantUpdateBundleProfile builds the same bundle; when composite==true it
+// sets the composite-lane flags (ContainedInsurer/AbsoluteRefs/PayerOrgEntry) so the refs are
+// absolutized exactly as harness-provider-gw produces them for a real Da Vinci payer.
+func originatorBuiltConformantUpdateBundleProfile(t *testing.T, composite bool) []byte {
 	t.Helper()
 	const member = "MBR-COVERED"
 	created := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
@@ -761,11 +824,29 @@ func originatorBuiltConformantUpdateBundle(t *testing.T) []byte {
 		Corr:             "convergence-pas-update-0001",
 		OriginalCorr:     "convergence-pas-submit-0001",
 		Created:          created,
+		ContainedInsurer: composite,
+		AbsoluteRefs:     composite,
+		PayerOrgEntry:    composite,
 	})
 	if err != nil {
 		t.Fatalf("BuildConformantClaimUpdateBundle: %v", err)
 	}
 	return got
+}
+
+// TestConformantPASUpdateBind_AcceptsAbsolutizedComposite is the regression guard for the layer-3
+// amendment 403: the composite lane absolutizes bundle refs (AbsoluteRefs) so a real Da Vinci payer
+// resolves them, which rewrites Provenance.target to its absolute fullUrl. The update-bind guard's
+// supplemental-data check (conformantPASUpdateBind) must match the absolutized target to the
+// DiagnosticReport, exactly as it matches the relative form — else UC-04/06 (which only reach the
+// amendment once the layer-3 A3 fix lets the initial submit pend) 403 "ClaimUpdate Provenance does
+// not target the supplemental data". Same absolutization-tolerance class as pasMemberFromRef.
+func TestConformantPASUpdateBind_AcceptsAbsolutizedComposite(t *testing.T) {
+	g, pci := updateGatewayForTest(t)
+	composite := originatorBuiltConformantUpdateBundleProfile(t, true)
+	if _, status, msg := g.conformantPASUpdateBind(composite, pci); status != 0 {
+		t.Fatalf("composite (absolutized) update bundle rejected: status=%d (%s), want 0", status, msg)
+	}
 }
 
 // TestParseConformantPASUpdate_AcceptsOriginatorBuilt: the payer-side conformant parser accepts the

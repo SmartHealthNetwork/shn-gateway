@@ -22,7 +22,17 @@ import (
 // pendState carries everything completeClinician/completePatient needs to resume.
 func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenario, member string) (pendState, bool) {
 	ctx := r.Context()
-	res, ok := g.runCRDThenDTR(w, r, member)
+	codes := originationCodes(g.cfg.OriginationProfile)
+	var o orderTuple
+	switch scenario {
+	case "uc06":
+		o = codes.uc06
+	case "uc07":
+		o = codes.uc07
+	default:
+		o = codes.uc03 // unreachable for current callers; safe default
+	}
+	res, ok := g.runCRDThenDTROrder(w, r, member, o.system, o.code, o.display, o.dx, false)
 	if !ok {
 		return pendState{}, false
 	}
@@ -30,6 +40,9 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 	bundleJSON, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
 		QR: res.qrJSON, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef,
 		Corr: pasCorr, Created: g.cfg.Clock(),
+		ContainedInsurer: g.cfg.OriginationProfile == "composite",
+		AbsoluteRefs:     g.cfg.OriginationProfile == "composite",
+		PayerOrgEntry:    g.cfg.OriginationProfile == "composite", // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build bundle failed"})
@@ -142,6 +155,9 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 	updateBundle, err := shnsdk.BuildConformantClaimUpdateBundle(shnsdk.ConformantClaimUpdateInputs{
 		QR: amendedQR, SR: st.srJSON, PatientRef: st.patientRef, CoverageRef: st.coverageRef,
 		Provenance: provJSON, DiagnosticReport: nil, Corr: updateCorr, OriginalCorr: st.pasCorr, Created: g.cfg.Clock(),
+		ContainedInsurer: g.cfg.OriginationProfile == "composite",
+		AbsoluteRefs:     g.cfg.OriginationProfile == "composite",
+		PayerOrgEntry:    g.cfg.OriginationProfile == "composite", // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build update bundle failed"})
@@ -160,12 +176,11 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 		writeJSON(w, status, map[string]string{"error": msg})
 		return false
 	}
-	parsed, err := shnsdk.ParseClaimResponse(updateResp)
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "claim response parse failed"})
-		return false
-	}
-	if parsed.Outcome != "approved" {
+	// The composite amendment resolves to a genuine terminal A1 (the payer-gw polled
+	// br-payer's timer A4→A1). UC-06's distinctive is DTR fill + clinician attestation → Attested.
+	// AmendmentCorr is the evidence the attestation re-POST leg ran.
+	parsed, approved := g.classifyResolution(updateResp)
+	if !approved {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "preauthorization not approved after amendment"})
 		return false
 	}
@@ -173,7 +188,7 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "holder write failed (auth number)"})
 		return false
 	}
-	writeJSON(w, http.StatusOK, uc03Resp{PARequired: true, AuthNumber: parsed.PreAuthRef, ValidUntil: parsed.ValidUntil, QRItems: st.filled, PendedItems: st.needed})
+	writeJSON(w, http.StatusOK, uc03Resp{PARequired: true, AuthNumber: parsed.PreAuthRef, ValidUntil: parsed.ValidUntil, AmendmentCorr: updateCorr, QRItems: st.filled, PendedItems: st.needed, Attested: true})
 	return true
 }
 
@@ -273,6 +288,9 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 	updateBundle, err := shnsdk.BuildConformantClaimUpdateBundle(shnsdk.ConformantClaimUpdateInputs{
 		QR: amendedQR, SR: st.srJSON, PatientRef: st.patientRef, CoverageRef: st.coverageRef,
 		Provenance: provJSON, DiagnosticReport: nil, Corr: updateCorr, OriginalCorr: st.pasCorr, Created: g.cfg.Clock(),
+		ContainedInsurer: g.cfg.OriginationProfile == "composite",
+		AbsoluteRefs:     g.cfg.OriginationProfile == "composite",
+		PayerOrgEntry:    g.cfg.OriginationProfile == "composite", // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build update bundle failed"})
@@ -291,8 +309,11 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 		writeJSON(w, status, map[string]string{"error": msg})
 		return false
 	}
-	parsed, err := shnsdk.ParseClaimResponse(updateResp)
-	if err != nil || parsed.Outcome != "approved" {
+	// UC-07 is patient attestation → Attested. Composite UC-07 (L8000) → A1 approve
+	// directly (no pend); the amendment-resolution path is shared with UC-04/06. AmendmentCorr is
+	// the evidence the attestation re-POST leg ran.
+	parsed, approved := g.classifyResolution(updateResp)
+	if !approved {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "preauthorization not approved after patient attestation"})
 		return false
 	}
@@ -300,7 +321,7 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "holder write failed (auth number)"})
 		return false
 	}
-	writeJSON(w, http.StatusOK, uc03Resp{PARequired: true, AuthNumber: parsed.PreAuthRef, ValidUntil: parsed.ValidUntil, QRItems: st.filled, PendedItems: st.needed})
+	writeJSON(w, http.StatusOK, uc03Resp{PARequired: true, AuthNumber: parsed.PreAuthRef, ValidUntil: parsed.ValidUntil, AmendmentCorr: updateCorr, QRItems: st.filled, PendedItems: st.needed, Attested: true})
 	return true
 }
 

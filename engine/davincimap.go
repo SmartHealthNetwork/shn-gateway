@@ -47,6 +47,41 @@ func buildQuestionnairePackageRequest(canonical string, coverage json.RawMessage
 	return json.Marshal(params)
 }
 
+// unwrapQuestionnairePackage normalises the two $questionnaire-package response shapes:
+//
+//   - br-payer (a8bece4) returns a Parameters resource profiled on
+//     dtr-qpackage-output-parameters; the inner collection Bundle lives at
+//     parameter[name=="packagebundle"].resource.
+//   - SHN's own sandbox/native path returns a bare collection Bundle (resourceType=="Bundle").
+//
+// When the input is a Parameters wrapper the function returns the packagebundle resource
+// bytes so that the downstream walker sees a plain Bundle in both cases. If the
+// Parameters has no packagebundle parameter, raw is returned unchanged and the downstream
+// walk will fail with its normal "no Questionnaire" error (not a silent mismatch). A bare
+// Bundle (or any other top-level resourceType) is returned byte-identical — the sandbox
+// and native paths are completely unaffected.
+func unwrapQuestionnairePackage(raw []byte) []byte {
+	var top struct {
+		ResourceType string `json:"resourceType"`
+		Parameter    []struct {
+			Name     string          `json:"name"`
+			Resource json.RawMessage `json:"resource"`
+		} `json:"parameter"`
+	}
+	if err := json.Unmarshal(raw, &top); err != nil {
+		return raw // malformed — let the downstream walker surface the error
+	}
+	if top.ResourceType != "Parameters" {
+		return raw // bare Bundle or anything else — byte-identical pass-through
+	}
+	for _, p := range top.Parameter {
+		if p.Name == "packagebundle" && len(p.Resource) > 0 {
+			return p.Resource
+		}
+	}
+	return raw // Parameters with no packagebundle — downstream walk will error
+}
+
 // extractQuestionnaireFromPackage pulls the bare Questionnaire entry out of a
 // $questionnaire-package collection Bundle, returning its bytes VERBATIM. Called by the
 // consumer (originate.go) after the full package has crossed the wire — the package's
@@ -54,7 +89,12 @@ func buildQuestionnairePackageRequest(canonical string, coverage json.RawMessage
 // returns the bare Questionnaire that originate.go feeds to ParseQuestionnaireURL (F5)
 // and FillQuestionnaire (auto-fill). A package with no Questionnaire entry returns an
 // error (→ 502 at the consumer: partner fault).
+//
+// unwrapQuestionnairePackage is called first so that br-payer's Parameters wrapper
+// (dtr-qpackage-output-parameters) is normalised to its inner Bundle before the walk;
+// the sandbox/native bare-Bundle path is byte-identical.
 func extractQuestionnaireFromPackage(packageBundle []byte) ([]byte, error) {
+	packageBundle = unwrapQuestionnairePackage(packageBundle)
 	var bundle struct {
 		Entry []struct {
 			Resource json.RawMessage `json:"resource"`

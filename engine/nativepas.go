@@ -9,9 +9,11 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
@@ -59,8 +61,38 @@ func (n *nativeResponder) handlePASClaimUpdateNative(ctx context.Context, corrID
 		return LegResult{Status: http.StatusBadGateway, Message: "upstream payer PAS update response unparseable", Rollback: release}, nil
 	}
 	if pended {
-		// Partner re-pended ⇒ still insufficient → 422 + release.
-		return LegResult{Status: http.StatusUnprocessableEntity, Message: "amendment still insufficient", Rollback: release}, nil
+		// A carry-forward amendment (no infoChanged → br-payer keeps the prior decision, does NOT
+		// re-evaluate) surfaces the re-pend AS-IS — the two-RI carry+adjudicate observation (D-2RI-6:
+		// the carried evidence does not DRIVE br-payer's code-constant verdict). Only an amendment
+		// that REQUESTED re-evaluation (infoChanged) polls for the timer-resolved terminal A1.
+		if !requestClaimHasInfoChanged(requestFHIR) {
+			return LegResult{Status: http.StatusUnprocessableEntity, Message: "amendment still insufficient", Rollback: release}, nil
+		}
+		// A real Da Vinci payer (br-payer) RE-PENDS an infoChanged amendment — persistUpdatePath
+		// re-evaluates the item (G0151 conditional → A4) and reschedules — and resolves A4→A1 ONLY on its
+		// own timer (PasPendedResolutionService.resolveAuthorization flips A4→A1 IN PLACE on the same id).
+		// The amendment genuinely ran (br-payer accepted + re-evaluated it); the TIMER is what approves it.
+		// Poll GET ClaimResponse/{id} until the timer flips it to A1. The deadline starts HERE — after
+		// the ClaimUpdate $submit rescheduled the timer (user note: poll the rescheduled timer).
+		crID := claimResponseIDFromPASResponse(norm)
+		if crID == "" {
+			return LegResult{Status: http.StatusBadGateway, Message: "re-pended PAS update response has no ClaimResponse id to re-query", Rollback: release}, nil
+		}
+		resolved, rerr := n.pollClaimResponseUntilApproved(ctx, crID)
+		if rerr != nil {
+			return LegResult{Status: http.StatusBadGateway, Message: "PAS pend re-query failed", Rollback: release}, nil
+		}
+		if resolved == nil {
+			// Never resolved within the bound → genuine non-resolution, never a silent pass.
+			return LegResult{Status: http.StatusUnprocessableEntity, Message: "amendment still pended after re-query", Rollback: release}, nil
+		}
+		// Resolved to A1: relay the resolved ClaimResponse + Finalize the shadow ledger (same as the
+		// directly-approved path below). No EOB on the update leg. Rollback stays armed.
+		return LegResult{
+			ResponseFHIR: resolved,
+			Commit:       func() error { return n.store.FinalizeClaimUpdate(subjectPCI, related) },
+			Rollback:     release,
+		}, nil
 	}
 	parsed, err := shnsdk.ParseClaimResponse(norm)
 	if err != nil {
@@ -166,4 +198,121 @@ func (n *nativeResponder) projectDecisionEOB(corrID, patientRef, procSystem, cpt
 		AuthNumber:      authNumber,
 		Created:         n.clock(),
 	})
+}
+
+// pollClaimResponseUntilApproved polls the partner's GET ClaimResponse/{id} until it resolves to an
+// approved (A1) ClaimResponse, or the bound (pendReQueryTimeout/Interval) is exhausted. br-payer
+// auto-approves a pended (A4) item after pas.pended-resolution-delay-seconds
+// (PasPendedResolutionService → PasResponseBuilder.finalizePendedItems flips A4→A1 IN PLACE on the
+// same id). Returns the resolved A1 response bytes (canonical, via normalizePASResponse), or
+// (nil,nil) if it never resolved within the bound — a non-error so the caller 422s (no silent pass).
+// Count-bounded (no clock dependency); the deadline starts at the call (post-ClaimUpdate, the
+// rescheduled timer).
+func (n *nativeResponder) pollClaimResponseUntilApproved(ctx context.Context, claimResponseID string) ([]byte, error) {
+	interval := n.pendReQueryInterval
+	if interval <= 0 {
+		interval = defaultPendReQueryInterval
+	}
+	attempts := int(n.pendReQueryTimeout / interval)
+	if attempts < 1 {
+		attempts = 1
+	}
+	for i := 0; i < attempts; i++ {
+		body, bad := n.get(ctx, n.baseURL, "/ClaimResponse/"+claimResponseID, "PAS re-query")
+		if bad.Status != 0 {
+			return nil, fmt.Errorf("PAS re-query ClaimResponse/%s: upstream status %d", claimResponseID, bad.Status)
+		}
+		norm, lr := normalizePASResponse(body)
+		if lr.Status == 0 {
+			if res, perr := shnsdk.ParseClaimResponse(norm); perr == nil && res.Outcome == "approved" {
+				return norm, nil
+			}
+		}
+		if i < attempts-1 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(interval):
+			}
+		}
+	}
+	return nil, nil // never resolved within the bound
+}
+
+// pasInfoChangedExtURL is the Da Vinci PAS Claim-item infoChanged extension (the engine-local mirror
+// of the SDK's pasInfoChangedExtensionURL — different modules). Its presence on the amendment's
+// operative Claim item is what distinguishes a re-evaluation-requesting amendment (poll for the
+// timer-resolved A1) from a carry-forward amendment (surface the re-pend as-is).
+const pasInfoChangedExtURL = "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-infoChanged"
+
+// requestClaimHasInfoChanged reports whether the amendment's operative Claim item carries the PAS
+// infoChanged extension. br-payer re-evaluates an infoChanged item (handleUpdate) then re-pends a
+// conditional code (G0151) → A4, which its timer resolves to A1 — so only these poll. A no-infoChanged
+// amendment is a carry-forward (br-payer keeps the prior decision); this leg surfaces that re-pend
+// as-is (the two-RI carry+adjudicate observation, D-2RI-6).
+func requestClaimHasInfoChanged(requestFHIR []byte) bool {
+	var b struct {
+		Entry []struct {
+			Resource struct {
+				ResourceType string `json:"resourceType"`
+				Item         []struct {
+					Extension []struct {
+						URL string `json:"url"`
+					} `json:"extension"`
+				} `json:"item"`
+			} `json:"resource"`
+		} `json:"entry"`
+	}
+	if err := json.Unmarshal(requestFHIR, &b); err != nil {
+		return false
+	}
+	for _, e := range b.Entry {
+		if e.Resource.ResourceType != "Claim" {
+			continue
+		}
+		for _, it := range e.Resource.Item {
+			for _, ext := range it.Extension {
+				if ext.URL == pasInfoChangedExtURL {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// claimResponseIDFromPASResponse extracts the (server-assigned) ClaimResponse id from a normalized
+// PAS response. br-payer re-pends the SAME ClaimResponse in place (persistUpdatePath wraps the
+// existing CR), so its id is the GET re-query target. Reads ClaimResponse.id, falling back to the
+// entry fullUrl's last segment. Empty when none found.
+func claimResponseIDFromPASResponse(norm []byte) string {
+	var probe struct {
+		ResourceType string `json:"resourceType"`
+		ID           string `json:"id"`
+		Entry        []struct {
+			FullURL  string `json:"fullUrl"`
+			Resource struct {
+				ResourceType string `json:"resourceType"`
+				ID           string `json:"id"`
+			} `json:"resource"`
+		} `json:"entry"`
+	}
+	if err := json.Unmarshal(norm, &probe); err != nil {
+		return ""
+	}
+	if probe.ResourceType == "ClaimResponse" && probe.ID != "" {
+		return probe.ID
+	}
+	for _, e := range probe.Entry {
+		if e.Resource.ResourceType != "ClaimResponse" {
+			continue
+		}
+		if e.Resource.ID != "" {
+			return e.Resource.ID
+		}
+		if i := strings.LastIndex(e.FullURL, "ClaimResponse/"); i >= 0 {
+			return e.FullURL[i+len("ClaimResponse/"):]
+		}
+	}
+	return ""
 }

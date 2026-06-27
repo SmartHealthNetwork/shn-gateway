@@ -9,7 +9,7 @@ import (
 // TestBuildServiceRequestCoded_SystemConstsAnchoredToParser pins the gateway-local
 // system constants (order_build.go) to the EXACT canonical values shnsdk.ParseServiceRequestProductCoding
 // accepts — the FHIR validator does not check system URI values, so without this a drifted
-// systemHCPCSBuild/systemCPTBuild would silently build a wrong-system order.
+// systemHCPCSBuild/systemCPTBuild would silently build a wrong-system order (deferral D-PCB-1).
 func TestBuildServiceRequestCoded_SystemConstsAnchoredToParser(t *testing.T) {
 	cases := []struct{ name, system, code string }{
 		{"cpt", systemCPTBuild, "72148"},

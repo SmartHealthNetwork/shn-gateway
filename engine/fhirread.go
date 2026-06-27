@@ -103,7 +103,13 @@ func questionnaireHasSubject(b []byte) bool {
 // (C) subject fence must walk the package's Questionnaire entries. A partner could
 // include several Questionnaires, so it checks every one. Unexported: only
 // fenceResponseSubject uses it.
+//
+// unwrapQuestionnairePackage is called first so that br-payer's Parameters wrapper
+// (dtr-qpackage-output-parameters) is normalised to its inner Bundle before the walk.
+// Without this, the fence would see no entries in the Parameters wrapper and return
+// false — silently becoming vacuous against br-payer's real response shape.
 func packageQuestionnaireHasSubject(b []byte) bool {
+	b = unwrapQuestionnairePackage(b)
 	var bundle struct {
 		Entry []struct {
 			Resource json.RawMessage `json:"resource"`

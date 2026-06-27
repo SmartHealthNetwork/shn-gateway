@@ -217,11 +217,16 @@ type uc02Resp struct {
 }
 
 type uc03Resp struct {
-	PARequired  bool         `json:"paRequired"`
-	AuthNumber  string       `json:"authNumber"`
-	ValidUntil  string       `json:"validUntil"`
-	QRItems     []FilledItem `json:"qrItems"`
-	PendedItems []string     `json:"pendedItems,omitempty"`
+	PARequired bool   `json:"paRequired"`
+	AuthNumber string `json:"authNumber,omitempty"`
+	ValidUntil string `json:"validUntil,omitempty"`
+	// AuthNumber/ValidUntil/QRItems are omitempty. A composite UC-04/06 amendment now resolves to a
+	// genuine terminal A1 (the payer-gw polls br-payer's timer-driven A4→A1), so the
+	// approve path always carries a non-empty AuthNumber — there is no terminal-pend response.
+	QRItems       []FilledItem `json:"qrItems,omitempty"`
+	PendedItems   []string     `json:"pendedItems,omitempty"`
+	AmendmentCorr string       `json:"amendmentCorr,omitempty"` // UC-04/06: the pas-claim-update corrId — proves the amendment leg ran (C4)
+	Attested      bool         `json:"attested,omitempty"`      // UC-06/07: clinician/patient attestation applied (C4 UC-06 distinctive)
 }
 
 // crdDtrResult carries the outputs of the CRD+DTR prefix shared by UC-03/04/06.
@@ -232,18 +237,17 @@ type crdDtrResult struct {
 	filled                  []FilledItem
 }
 
-// runCRDThenDTR is the CPT-72148 lumbar prefix (UC-03/04/06), unchanged.
-// Delegates to runCRDThenDTROrder with the standard CPT lumbar order so existing
-// callers are byte-unchanged.
-func (g *Gateway) runCRDThenDTR(w http.ResponseWriter, r *http.Request, member string) (crdDtrResult, bool) {
-	return g.runCRDThenDTROrder(w, r, member, systemCPTBuild, "72148", "MRI lumbar spine w/o contrast", "M51.16")
-}
-
 // runCRDThenDTROrder is the generalized CRD order-select + DTR fetch + auto-fill prefix.
-// The order's {system, code, display, dx} are explicit so a HCPCS scenario (§3.2) can
+// The order's {system, code, display, dx} are explicit so a HCPCS scenario can
 // originate an L8000 order; existing callers delegate with the CPT lumbar order (byte-unchanged).
 // On any failure it writes the HTTP error and returns ok=false.
-func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, member, system, code, display, dx string) (crdDtrResult, bool) {
+// proceedOnNotCovered (handleUC08 composite ONLY): when true, a not-covered CRD verdict
+// does NOT terminally stop — the order is returned so the caller can carry it to PAS for
+// br-payer's formal A2 "Not Certified" ClaimResponse (D-S2-2). The generic
+// FR-G25/AI-1 STOP is the DEFAULT (false) for every other caller and is unchanged. The
+// opt-in never yields an auth on a denial: handleUC08 asserts the PAS result is DENIED
+// (its approved→502 guard), so a not-covered order routed to PAS can only deny, never approve.
+func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, member, system, code, display, dx string, proceedOnNotCovered bool) (crdDtrResult, bool) {
 	ctx := r.Context()
 
 	pci, _, found := g.cfg.SoR.ResolvePatient(member)
@@ -264,7 +268,7 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 		return crdDtrResult{}, false
 	}
 
-	coverageJSON, err := shnsdk.BuildCoverage(patientRef, coverageRef)
+	coverageJSON, err := shnsdk.BuildCoverageWithPayer(patientRef, coverageRef)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build coverage failed"})
 		return crdDtrResult{}, false
@@ -290,13 +294,26 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "card parse failed"})
 		return crdDtrResult{}, false
 	}
-	// Per-value switch on the CRD card result (FR-G25). Every non-happy-path value
-	// is handled fail-closed with no silent fall-through. AI-1: a coverage denial
-	// STOPS, never proceeds silently.
+	// Generic verdict-driven switch on the CRD card result (FR-G25). A
+	// config-only gateway must handle ANY conformant CRD verdict it observes, not just
+	// the sandbox shape (always covered + PA + DTR). The PA decision keys on the
+	// pa-needed axis ONLY (PARequired); whether a DTR questionnaire is fetched is decided
+	// separately by the doc-needed axis (NeedsDTR), below. Every non-proceeding value is
+	// handled fail-closed with no silent fall-through. AI-1: a coverage denial STOPS,
+	// never proceeds silently.
 	switch {
 	case cov.Covered == shnsdk.CoveredNotCovered:
-		// Explicit terminal stop — a coverage denial STOPS, never silently "proceeds".
-		// Patient-facing denial UX is deferred.
+		if proceedOnNotCovered {
+			// Composite UC-08 ONLY (D-S2-2): a not-covered CRD verdict IS the denial
+			// scenario; carry the order to PAS for br-payer's formal A2 "Not Certified"
+			// ClaimResponse + rationale (not-covered → A2). This does NOT weaken FR-G25/AI-1:
+			// handleUC08 asserts the PAS result is DENIED (502 on any approval), so a
+			// not-covered order can never yield an auth. Not-covered carries no questionnaire
+			// (NeedsDTR=false) → return the built order straight for the PAS submit.
+			return crdDtrResult{srJSON: srJSON, patientRef: patientRef, coverageRef: coverageRef, pci: pci}, true
+		}
+		// AI-1: a coverage denial STOPS — never routes DTR/PAS. (adversarial Row 1)
+		// Explicit terminal stop; patient-facing denial UX is deferred.
 		writeJSON(w, http.StatusOK, map[string]any{"paRequired": false, "covered": false, "outcome": "not-covered"})
 		return crdDtrResult{}, false
 	case cov.PANeeded == shnsdk.PANeededSatisfied:
@@ -306,109 +323,119 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 		// this branch.
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "PA already satisfied — short-circuit not yet implemented"})
 		return crdDtrResult{}, false
-	case cov.PANeeded == shnsdk.PANeededConditional || cov.Covered == shnsdk.CoveredConditional:
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "conditional coverage unsupported this slice"})
-		return crdDtrResult{}, false
-	case !cov.NeedsDTR() || !cov.PARequired():
-		// This path (UC-03+) requires BOTH a questionnaire (doc-needed axis) and
-		// PA (pa-needed axis).
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "expected PA-required card with questionnaire"})
+	case !cov.PARequired():
+		// Generic: PA decision keys on the pa-needed axis. No PA (incl.
+		// pa-needed:conditional, which is NOT auth-needed/performpa) ⇒ this prefix
+		// (UC-03+) has nothing to submit; the no-PA path is UC-02's handleUC02, not here.
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "expected PA-required card"})
 		return crdDtrResult{}, false
 	}
-	canonical := shnsdk.StripCanonicalVersion(cov.Questionnaires[0])
+	// PA is required (covered OR conditional coverage both proceed). Whether a
+	// DTR questionnaire is fetched is decided by the doc-needed axis (NeedsDTR),
+	// independently: no-doc (br-payer L8000) skips DTR straight to PAS; clinical
+	// (br-payer G0151) routes DTR.
+	res := crdDtrResult{srJSON: srJSON, patientRef: patientRef, coverageRef: coverageRef, pci: pci}
+	if cov.NeedsDTR() {
+		canonical := shnsdk.StripCanonicalVersion(cov.Questionnaires[0])
 
-	// --- DTR round-trip: fetch Questionnaire, validate, auto-fill locally. ---
-	dtrReq, err := json.Marshal(shnsdk.QuestionnaireFetchRequest{Canonical: canonical})
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build dtr request failed"})
-		return crdDtrResult{}, false
-	}
-	packageJSON, err := g.OriginateLeg(ctx, r, g.cfg.CounterpartID, "dtr-questionnaire-fetch", pci, g.cfg.CorrelationGen(), "", Content{WorkstreamType: workstreamPA, Bytes: dtrReq})
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
-		return crdDtrResult{}, false
-	}
-	if status, msg := g.validateFHIR(ctx, packageJSON, "ingress"); status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
-		return crdDtrResult{}, false
+		// --- DTR round-trip: fetch Questionnaire, validate, auto-fill locally. ---
+		// In composite (Mode A), carry the Coverage so the native-forward re-emits the
+		// payer-required coverage param on $questionnaire-package — a real Da Vinci payer
+		// (br-payer) 400s without it (the v0.11.0 QuestionnaireFetchRequest.Coverage
+		// seam). The sandbox responder doesn't need it, so gate on the profile to keep the
+		// sandbox dtr-questionnaire-fetch leg byte-identical (C1 discipline).
+		fetch := shnsdk.QuestionnaireFetchRequest{Canonical: canonical}
+		if g.cfg.OriginationProfile == "composite" {
+			fetch.Coverage = coverageJSON
+		}
+		dtrReq, err := json.Marshal(fetch)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build dtr request failed"})
+			return crdDtrResult{}, false
+		}
+		packageJSON, err := g.OriginateLeg(ctx, r, g.cfg.CounterpartID, "dtr-questionnaire-fetch", pci, g.cfg.CorrelationGen(), "", Content{WorkstreamType: workstreamPA, Bytes: dtrReq})
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			return crdDtrResult{}, false
+		}
+		if status, msg := g.validateFHIR(ctx, packageJSON, "ingress"); status != 0 {
+			writeJSON(w, status, map[string]string{"error": msg})
+			return crdDtrResult{}, false
+		}
+
+		// The DTR-fetch leg carries the full $questionnaire-package collection
+		// Bundle (its dependent Libraries/ValueSets survive the wire for Step 3, which
+		// will read them from packageJSON here). Extract the bare Questionnaire for the
+		// F5 canonical check + auto-fill. A package with no Questionnaire is a partner
+		// fault → 502 (the guard relocated from native.go's producer-side extract).
+		questionnaireJSON, err := extractQuestionnaireFromPackage(packageJSON)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "fetched questionnaire package has no Questionnaire"})
+			return crdDtrResult{}, false
+		}
+
+		// F5: verify the fetched Questionnaire's url matches the canonical the payer
+		// advertised in the CRD card. A mismatch means the payer returned a different
+		// questionnaire than the card claimed — reject to prevent canonical substitution.
+		fetchedURL, err := shnsdk.ParseQuestionnaireURL(questionnaireJSON)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "fetched questionnaire url parse failed"})
+			return crdDtrResult{}, false
+		}
+		if fetchedURL != canonical {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "fetched questionnaire does not match advertised canonical"})
+			return crdDtrResult{}, false
+		}
+
+		// The operated $populate engine reads the FHIR store directly, so its subject must be the
+		// store-resolvable Patient ref (a scoped id), NOT the logical SHN ref. Resolve it via the SoR
+		// (the stub returns the logical ref, so the managed/hermetic path is unchanged). Falls back to
+		// the logical ref when the SoR can't resolve it.
+		subjectFHIRRef := patientRef
+		if ref, ok := g.cfg.SoR.PatientFHIRRef(member); ok && ref != "" {
+			subjectFHIRRef = ref
+		}
+		qrJSON, fill, err := g.cfg.Populator.Populate(ctx, packageJSON, PopulateContext{
+			Member:         member,
+			PatientRef:     patientRef,
+			SubjectFHIRRef: subjectFHIRRef,
+			CoverageRef:    coverageRef,
+			OrderRef:       "ServiceRequest/sr-" + member,
+			Authored:       g.cfg.Clock(),
+		})
+		if err != nil {
+			writeJSON(w, statusForPopulateErr(err), map[string]string{"error": err.Error()})
+			return crdDtrResult{}, false
+		}
+		// QR-SUBJECT FENCE — uniform across backends, compared against the LOGICAL PatientRef. Managed
+		// fills with PatientRef directly. The native backend reads the FHIR store by the (possibly
+		// scoped) SubjectFHIRRef, verifies the returned QR is about THAT patient, and normalizes
+		// QR.subject → PatientRef before returning — so by here both backends present the logical ref.
+		// (Comparing against the scoped SubjectFHIRRef here would wrongly reject the managed+real-SoR
+		// combination, where managed sets the logical ref but the SoR resolves a scoped id.) 502.
+		if subj, serr := questionnaireResponseSubject(qrJSON); serr != nil || subj != patientRef {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "populated QR subject does not match patient"})
+			return crdDtrResult{}, false
+		}
+		// QR-QUESTIONNAIRE FENCE — uniform across backends. F5 (above) checks the FETCHED
+		// Questionnaire's url before the seam; it never sees the returned QR's self-declared
+		// `questionnaire`. A native engine can return a QR for a DIFFERENT questionnaire. Reject
+		// any QR whose questionnaire (url-part) ≠ canonical. 502.
+		if qq, qerr := questionnaireResponseCanonical(qrJSON); qerr != nil || qq != canonical {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "populated QR questionnaire does not match canonical"})
+			return crdDtrResult{}, false
+		}
+
+		if status, msg := g.validateFHIR(ctx, qrJSON, "egress"); status != 0 {
+			writeJSON(w, status, map[string]string{"error": msg})
+			return crdDtrResult{}, false
+		}
+
+		res.qrJSON = qrJSON
+		res.filled = fill
 	}
 
-	// The DTR-fetch leg carries the full $questionnaire-package collection
-	// Bundle (its dependent Libraries/ValueSets survive the wire for Step 3, which
-	// will read them from packageJSON here). Extract the bare Questionnaire for the
-	// F5 canonical check + auto-fill. A package with no Questionnaire is a partner
-	// fault → 502 (the guard relocated from native.go's producer-side extract).
-	questionnaireJSON, err := extractQuestionnaireFromPackage(packageJSON)
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "fetched questionnaire package has no Questionnaire"})
-		return crdDtrResult{}, false
-	}
-
-	// F5: verify the fetched Questionnaire's url matches the canonical the payer
-	// advertised in the CRD card. A mismatch means the payer returned a different
-	// questionnaire than the card claimed — reject to prevent canonical substitution.
-	fetchedURL, err := shnsdk.ParseQuestionnaireURL(questionnaireJSON)
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "fetched questionnaire url parse failed"})
-		return crdDtrResult{}, false
-	}
-	if fetchedURL != canonical {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "fetched questionnaire does not match advertised canonical"})
-		return crdDtrResult{}, false
-	}
-
-	// The operated $populate engine reads the FHIR store directly, so its subject must be the
-	// store-resolvable Patient ref (a scoped id), NOT the logical SHN ref. Resolve it via the SoR
-	// (the stub returns the logical ref, so the managed/hermetic path is unchanged). Falls back to
-	// the logical ref when the SoR can't resolve it.
-	subjectFHIRRef := patientRef
-	if ref, ok := g.cfg.SoR.PatientFHIRRef(member); ok && ref != "" {
-		subjectFHIRRef = ref
-	}
-	qrJSON, fill, err := g.cfg.Populator.Populate(ctx, packageJSON, PopulateContext{
-		Member:         member,
-		PatientRef:     patientRef,
-		SubjectFHIRRef: subjectFHIRRef,
-		CoverageRef:    coverageRef,
-		OrderRef:       "ServiceRequest/sr-" + member,
-		Authored:       g.cfg.Clock(),
-	})
-	if err != nil {
-		writeJSON(w, statusForPopulateErr(err), map[string]string{"error": err.Error()})
-		return crdDtrResult{}, false
-	}
-	// QR-SUBJECT FENCE — uniform across backends, compared against the LOGICAL PatientRef. Managed
-	// fills with PatientRef directly. The native backend reads the FHIR store by the (possibly
-	// scoped) SubjectFHIRRef, verifies the returned QR is about THAT patient, and normalizes
-	// QR.subject → PatientRef before returning — so by here both backends present the logical ref.
-	// (Comparing against the scoped SubjectFHIRRef here would wrongly reject the managed+real-SoR
-	// combination, where managed sets the logical ref but the SoR resolves a scoped id.) 502.
-	if subj, serr := questionnaireResponseSubject(qrJSON); serr != nil || subj != patientRef {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "populated QR subject does not match patient"})
-		return crdDtrResult{}, false
-	}
-	// QR-QUESTIONNAIRE FENCE — uniform across backends. F5 (above) checks the FETCHED
-	// Questionnaire's url before the seam; it never sees the returned QR's self-declared
-	// `questionnaire`. A native engine can return a QR for a DIFFERENT questionnaire. Reject
-	// any QR whose questionnaire (url-part) ≠ canonical. 502.
-	if qq, qerr := questionnaireResponseCanonical(qrJSON); qerr != nil || qq != canonical {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "populated QR questionnaire does not match canonical"})
-		return crdDtrResult{}, false
-	}
-
-	if status, msg := g.validateFHIR(ctx, qrJSON, "egress"); status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
-		return crdDtrResult{}, false
-	}
-
-	return crdDtrResult{
-		qrJSON:      qrJSON,
-		srJSON:      srJSON,
-		patientRef:  patientRef,
-		coverageRef: coverageRef,
-		pci:         pci,
-		filled:      fill,
-	}, true
+	return res, true
 }
 
 // statusForPopulateErr maps a Populator error to an HTTP status. A managed
@@ -492,7 +519,8 @@ func (g *Gateway) handleUC02(w http.ResponseWriter, r *http.Request) {
 	}
 	patientRef := "Patient/MBR-COVERED"
 
-	srJSON, err := shnsdk.BuildServiceRequest("72100", "X-ray lumbar spine", "M51.16", patientRef)
+	o := originationCodes(g.cfg.OriginationProfile).uc02
+	srJSON, err := BuildServiceRequestCoded(o.system, o.code, o.display, o.dx, patientRef)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build request failed"})
 		return
@@ -502,7 +530,7 @@ func (g *Gateway) handleUC02(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	coverageJSON, err := shnsdk.BuildCoverage(patientRef, "Coverage/MBR-COVERED")
+	coverageJSON, err := shnsdk.BuildCoverageWithPayer(patientRef, "Coverage/MBR-COVERED")
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build coverage failed"})
 		return
@@ -558,7 +586,8 @@ func (g *Gateway) handleUC03(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	const srRef = "ServiceRequest/sr-uc03"
 
-	res, ok := g.runCRDThenDTR(w, r, "MBR-COVERED")
+	o := originationCodes(g.cfg.OriginationProfile).uc03
+	res, ok := g.runCRDThenDTROrder(w, r, "MBR-COVERED", o.system, o.code, o.display, o.dx, false)
 	if !ok {
 		return
 	}
@@ -568,6 +597,9 @@ func (g *Gateway) handleUC03(w http.ResponseWriter, r *http.Request) {
 	bundleJSON, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
 		QR: res.qrJSON, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef,
 		Corr: pasCorr, Created: g.cfg.Clock(),
+		ContainedInsurer: g.cfg.OriginationProfile == "composite",
+		AbsoluteRefs:     g.cfg.OriginationProfile == "composite",
+		PayerOrgEntry:    g.cfg.OriginationProfile == "composite", // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build bundle failed"})
@@ -618,8 +650,8 @@ func (g *Gateway) handleUC07HCPCS(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	const srRef = "ServiceRequest/sr-uc07hcpcs"
 
-	res, ok := g.runCRDThenDTROrder(w, r, "MBR-UC07HCPCS",
-		systemHCPCSBuild, "L8000", "Breast prosthesis, mastectomy bra", "M51.16")
+	o := originationCodes(g.cfg.OriginationProfile).uc07hcpcs
+	res, ok := g.runCRDThenDTROrder(w, r, "MBR-UC07HCPCS", o.system, o.code, o.display, o.dx, false)
 	if !ok {
 		return
 	}
@@ -629,6 +661,9 @@ func (g *Gateway) handleUC07HCPCS(w http.ResponseWriter, r *http.Request) {
 	bundleJSON, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
 		QR: res.qrJSON, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef,
 		Corr: pasCorr, Created: g.cfg.Clock(),
+		ContainedInsurer: g.cfg.OriginationProfile == "composite",
+		AbsoluteRefs:     g.cfg.OriginationProfile == "composite",
+		PayerOrgEntry:    g.cfg.OriginationProfile == "composite", // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build bundle failed"})
@@ -671,6 +706,20 @@ func (g *Gateway) handleUC07HCPCS(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// classifyResolution classifies a PAS (update) ClaimResponse at a resolution site as approved or
+// not. A composite amendment now resolves to a genuine terminal A1 — the payer-gw
+// responder polls br-payer's timer-driven A4→A1 and returns the resolved A1 (or 422→OriginateLeg
+// err on non-resolution), so a resolution site sees ONLY approved | denied | error here, never a
+// live pend. Anything not approved → caller 502s (a denial or an unresolved pend is a genuine
+// non-approval, never a silent pass — C1).
+func (g *Gateway) classifyResolution(respJSON []byte) (parsed shnsdk.PriorAuthResult, approved bool) {
+	p, err := shnsdk.ParseClaimResponse(respJSON)
+	if err == nil && p.Outcome == "approved" {
+		return p, true
+	}
+	return shnsdk.PriorAuthResult{}, false
+}
+
 // handleUC04 runs the pended-then-approved PA path: CRD+DTR (same prefix as
 // UC-03) → PAS submit → PENDED (no operative DiagnosticReport yet) → ClaimUpdate
 // with the provider-LOCAL operative report + Provenance → approved (FR-20/21).
@@ -678,7 +727,8 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	const srRef = "ServiceRequest/sr-uc04"
 
-	res, ok := g.runCRDThenDTR(w, r, "MBR-UC04")
+	o := originationCodes(g.cfg.OriginationProfile).uc04
+	res, ok := g.runCRDThenDTROrder(w, r, "MBR-UC04", o.system, o.code, o.display, o.dx, false)
 	if !ok {
 		return
 	}
@@ -688,6 +738,9 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 	bundleJSON, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
 		QR: res.qrJSON, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef,
 		Corr: pasCorr, Created: g.cfg.Clock(),
+		ContainedInsurer: g.cfg.OriginationProfile == "composite",
+		AbsoluteRefs:     g.cfg.OriginationProfile == "composite",
+		PayerOrgEntry:    g.cfg.OriginationProfile == "composite", // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build bundle failed"})
@@ -747,6 +800,9 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 	updateBundle, err := shnsdk.BuildConformantClaimUpdateBundle(shnsdk.ConformantClaimUpdateInputs{
 		QR: res.qrJSON, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef,
 		Provenance: provJSON, DiagnosticReport: drJSON, Corr: updateCorr, OriginalCorr: pasCorr, Created: g.cfg.Clock(),
+		ContainedInsurer: g.cfg.OriginationProfile == "composite",
+		AbsoluteRefs:     g.cfg.OriginationProfile == "composite",
+		PayerOrgEntry:    g.cfg.OriginationProfile == "composite", // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build update bundle failed"})
@@ -767,12 +823,12 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
-	parsedUpd, err := shnsdk.ParseClaimResponse(updateResp)
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "claim response parse failed"})
-		return
-	}
-	if parsedUpd.Outcome != "approved" {
+	// The composite amendment resolves to a genuine terminal A1 (the payer-gw polled
+	// br-payer's timer A4→A1). UC-04 is a DiagnosticReport amendment, NOT an attestation → no
+	// Attested. AmendmentCorr is the evidence the amendment leg ran (the A1 was reached
+	// THROUGH the amendment, not a bare approve); AuthNumber is br-payer's real AUTH-NNNN.
+	parsedUpd, approved := g.classifyResolution(updateResp)
+	if !approved {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "preauthorization not approved after amendment"})
 		return
 	}
@@ -780,7 +836,7 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "holder write failed (auth number)"})
 		return
 	}
-	writeJSON(w, http.StatusOK, uc03Resp{PARequired: true, AuthNumber: parsedUpd.PreAuthRef, ValidUntil: parsedUpd.ValidUntil, QRItems: res.filled, PendedItems: needed})
+	writeJSON(w, http.StatusOK, uc03Resp{PARequired: true, AuthNumber: parsedUpd.PreAuthRef, ValidUntil: parsedUpd.ValidUntil, AmendmentCorr: updateCorr, QRItems: res.filled, PendedItems: needed})
 }
 
 // uc05Resp is the UC-05 result. ConsentDenied/Pended mark the negative branch
@@ -838,7 +894,8 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 		srRef = "ServiceRequest/sr-uc05-noconsent"
 	}
 
-	res, ok := g.runCRDThenDTR(w, r, member)
+	o := originationCodes(g.cfg.OriginationProfile).uc05
+	res, ok := g.runCRDThenDTROrder(w, r, member, o.system, o.code, o.display, o.dx, false)
 	if !ok {
 		return
 	}
@@ -848,6 +905,9 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 	bundleJSON, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
 		QR: res.qrJSON, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef,
 		Corr: pasCorr, Created: g.cfg.Clock(),
+		ContainedInsurer: g.cfg.OriginationProfile == "composite",
+		AbsoluteRefs:     g.cfg.OriginationProfile == "composite",
+		PayerOrgEntry:    g.cfg.OriginationProfile == "composite", // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build bundle failed"})
@@ -930,6 +990,9 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 	updateBundle, err := shnsdk.BuildConformantClaimUpdateBundle(shnsdk.ConformantClaimUpdateInputs{
 		QR: res.qrJSON, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef,
 		Provenance: provJSON, DiagnosticReport: drJSON, Corr: updateCorr, OriginalCorr: pasCorr, Created: g.cfg.Clock(),
+		ContainedInsurer: g.cfg.OriginationProfile == "composite",
+		AbsoluteRefs:     g.cfg.OriginationProfile == "composite",
+		PayerOrgEntry:    g.cfg.OriginationProfile == "composite", // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build update bundle failed"})
@@ -984,7 +1047,11 @@ type uc08Resp struct {
 func (g *Gateway) handleUC08(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	res, ok := g.runCRDThenDTR(w, r, "MBR-UC08")
+	o := originationCodes(g.cfg.OriginationProfile).uc08
+	// Composite (Mode A): br-payer's J3490 CRD verdict is NOT-COVERED, so opt in to carry the
+	// order past the FR-G25 stop to PAS → the formal A2 "Not Certified" ClaimResponse
+	// (D-S2-2). Sandbox keeps the covered+PA→PAS-deny path (proceedOnNotCovered stays false).
+	res, ok := g.runCRDThenDTROrder(w, r, "MBR-UC08", o.system, o.code, o.display, o.dx, g.cfg.OriginationProfile == "composite")
 	if !ok {
 		return
 	}
@@ -995,6 +1062,9 @@ func (g *Gateway) handleUC08(w http.ResponseWriter, r *http.Request) {
 	bundleJSON, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
 		QR: res.qrJSON, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef,
 		Corr: pasCorr, Created: g.cfg.Clock(),
+		ContainedInsurer: g.cfg.OriginationProfile == "composite",
+		AbsoluteRefs:     g.cfg.OriginationProfile == "composite",
+		PayerOrgEntry:    g.cfg.OriginationProfile == "composite", // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build bundle failed"})

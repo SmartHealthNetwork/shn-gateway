@@ -144,6 +144,50 @@ func TestExtractQuestionnaireFromPackage_NoQuestionnaire(t *testing.T) {
 	}
 }
 
+// TestExtractQuestionnaireFromPackage_ParametersWrapper is the regression test for
+// br-payer's $questionnaire-package response shape: a Parameters wrapper with
+// parameter[name=="packagebundle"].resource == the collection Bundle. The extractor
+// must unwrap to the inner Bundle before walking entries, so that the Questionnaire
+// is found exactly as in the bare-Bundle case. Spike capture: br-payer a8bece4
+// returns the DTR dtr-qpackage-output-parameters Parameters shape.
+func TestExtractQuestionnaireFromPackage_ParametersWrapper(t *testing.T) {
+	// Minimal fixture: Parameters{packagebundle → Bundle{Questionnaire}}.
+	wrapped := []byte(`{"resourceType":"Parameters","parameter":[` +
+		`{"name":"packagebundle","resource":{"resourceType":"Bundle","type":"collection","entry":[` +
+		`{"resource":{"resourceType":"Library","id":"lib1"}},` +
+		`{"resource":{"resourceType":"Questionnaire","id":"wrapped-q","url":"http://example.org/Q/wrapped-q","status":"active"}}` +
+		`]}},` +
+		`{"name":"outcome","resource":{"resourceType":"OperationOutcome"}}` +
+		`]}`)
+
+	q, err := extractQuestionnaireFromPackage(wrapped)
+	if err != nil {
+		t.Fatalf("extractQuestionnaireFromPackage on Parameters wrapper: %v", err)
+	}
+	var probe struct {
+		ResourceType string `json:"resourceType"`
+		ID           string `json:"id"`
+	}
+	if err := json.Unmarshal(q, &probe); err != nil {
+		t.Fatalf("unmarshal extracted: %v", err)
+	}
+	if probe.ResourceType != "Questionnaire" || probe.ID != "wrapped-q" {
+		t.Errorf("extracted = %s, want Questionnaire wrapped-q", q)
+	}
+}
+
+// TestExtractQuestionnaireFromPackage_ParametersWrapper_NoPackagebundle confirms that
+// a Parameters response with no packagebundle parameter passes through unchanged and
+// the downstream walk fails with its normal "no Questionnaire" error (not a panic or
+// silent mismatch).
+func TestExtractQuestionnaireFromPackage_ParametersWrapper_NoPackagebundle(t *testing.T) {
+	noBundle := []byte(`{"resourceType":"Parameters","parameter":[{"name":"outcome","resource":{"resourceType":"OperationOutcome"}}]}`)
+	_, err := extractQuestionnaireFromPackage(noBundle)
+	if err == nil {
+		t.Error("expected error when Parameters has no packagebundle param")
+	}
+}
+
 func TestBuildQuestionnairePackage_WrapsAndRoundTrips(t *testing.T) {
 	q := []byte(`{"resourceType":"Questionnaire","id":"q1","url":"http://x/q"}`)
 	pkg, err := buildQuestionnairePackage(q)

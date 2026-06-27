@@ -70,7 +70,14 @@ func parseConformantPASSubjects(bundleJSON []byte) (conformantPASSubjects, int, 
 		}
 		switch rt.ResourceType {
 		case "Claim":
-			claimPat, haveClaim = ref("patient"), true
+			// Bind the member from the OPERATIVE Claim — the FIRST Claim entry, exactly as br-payer
+			// selects it (PasBundleValidator.validateCommon → getEntryFirstRep). A composite PAS
+			// Claim Update also carries the PRIOR Claim as a non-first linkage entry (a minimal
+			// {resourceType,id,identifier} with no patient — sdk buildPriorClaimEntry); it must NOT
+			// clobber the operative Claim.patient. First-Claim-wins.
+			if !haveClaim {
+				claimPat, haveClaim = ref("patient"), true
+			}
 		case "ServiceRequest":
 			srSubject, haveSR, s.srJSON = ref("subject"), true, e.Resource
 		case "Coverage":
@@ -92,19 +99,37 @@ func parseConformantPASSubjects(bundleJSON []byte) (conformantPASSubjects, int, 
 	if !haveCov || covBene == "" {
 		return conformantPASSubjects{}, http.StatusBadRequest, "PAS bundle missing Coverage.beneficiary"
 	}
-	member := strings.TrimPrefix(claimPat, "Patient/")
-	if strings.TrimPrefix(srSubject, "Patient/") != member ||
-		strings.TrimPrefix(covBene, "Patient/") != member {
+	// Extract the member id tolerantly: the composite lane (Mode A) ABSOLUTIZES bundle
+	// refs so a real Da Vinci payer (br-payer) resolves them ("https://shn.example/fhir/
+	// Patient/MBR" not "Patient/MBR"); the sandbox keeps relative refs. pasMemberFromRef
+	// reads the bare id from either form, so SHN's member bind works regardless of base
+	// while the patient-consistency fence below still compares the SAME member identity.
+	member := pasMemberFromRef(claimPat)
+	if pasMemberFromRef(srSubject) != member ||
+		pasMemberFromRef(covBene) != member {
 		return conformantPASSubjects{}, http.StatusForbidden, "inconsistent patient in PAS bundle"
 	}
-	if qrSubject != "" && strings.TrimPrefix(qrSubject, "Patient/") != member {
+	if qrSubject != "" && pasMemberFromRef(qrSubject) != member {
 		return conformantPASSubjects{}, http.StatusForbidden, "inconsistent patient in PAS bundle"
 	}
-	if s.hasDR && strings.TrimPrefix(drSubject, "Patient/") != member {
+	if s.hasDR && pasMemberFromRef(drSubject) != member {
 		return conformantPASSubjects{}, http.StatusForbidden, "inconsistent patient in PAS bundle"
 	}
 	s.member = member
 	return s, 0, ""
+}
+
+// pasMemberFromRef returns the bare member id from a Patient reference, tolerating BOTH a
+// relative ref ("Patient/MBR") and an absolute fullUrl ("https://host/base/Patient/MBR").
+// The composite lane absolutizes bundle refs (so br-payer resolves them); SHN's member bind
+// must read the id regardless of base. Identical to the old strings.TrimPrefix(...,"Patient/")
+// for the relative case (LastIndex hits index 0). A ref with no "Patient/" segment is returned
+// unchanged, so the downstream ResolvePatient fails closed (unknown member).
+func pasMemberFromRef(ref string) string {
+	if i := strings.LastIndex(ref, "Patient/"); i >= 0 {
+		return ref[i+len("Patient/"):]
+	}
+	return ref
 }
 
 // ingressPASNativeSubjectPCI resolves the bound member of a conformant PAS bundle to a pci
@@ -521,7 +546,11 @@ func (g *Gateway) conformantPASUpdateBind(bundleJSON []byte, tokSubject string) 
 		wantTarget = "QuestionnaireResponse/" + f.qrID
 	}
 	for _, ref := range f.provenanceTargets {
-		if ref == wantTarget {
+		// Tolerate the composite lane's ABSOLUTE refs: absolutizeBundleRefs rewrites
+		// Provenance.target to its absolute fullUrl (".../DiagnosticReport/<id>") so a real
+		// Da Vinci payer resolves it. Match either the relative wantTarget or any ref ending
+		// in "/<wantTarget>" — same absolutization-tolerance as pasMemberFromRef.
+		if ref == wantTarget || strings.HasSuffix(ref, "/"+wantTarget) {
 			return memberRef, 0, ""
 		}
 	}
