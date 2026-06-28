@@ -61,6 +61,24 @@ func TestConformantCRDBind_DivergentSubject(t *testing.T) {
 	}
 }
 
+// TestConformantCRDBind_RejectsNonServiceRequest is the hermetic guard for the spec §7 resourceType
+// mis-seed property: a non-ServiceRequest open order (e.g. a mis-seeded DeviceRequest read by
+// OpenOrder for an order-select scenario) can NOT reach the order-select branch. handleUC04 is
+// hardcoded to order-select (not resourceType-routed), so a DeviceRequest order lands here, where
+// firstServiceRequest finds no ServiceRequest in draftOrders and the bind fails closed (400) — never
+// a silent wrong-card success. (A live mutation of OpenOrder's returned order is search-index-timing
+// nondeterministic; this bind is the real fail-closed boundary, so it is guarded hermetically.)
+func TestConformantCRDBind_RejectsNonServiceRequest(t *testing.T) {
+	g := &Gateway{cfg: Config{SoR: NewStubHolderData()}}
+	pci, _, _ := g.cfg.SoR.ResolvePatient("MBR-COVERED")
+	// draftOrders carries a DeviceRequest (no ServiceRequest) — the mis-seeded resourceType.
+	body := []byte(`{"hook":"order-select","context":{"patientId":"MBR-COVERED","draftOrders":{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"DeviceRequest","status":"active","subject":{"reference":"Patient/MBR-COVERED"},"codeCodeableConcept":{"coding":[{"system":"http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets","code":"E0431"}]}}}]}},"prefetch":{"coverage":{"resourceType":"Coverage","beneficiary":{"reference":"Patient/MBR-COVERED"}}}}`)
+	_, _, status, msg := g.conformantCRDBind(body, pci)
+	if status != 400 {
+		t.Fatalf("DeviceRequest-only draftOrders: status=%d (%s), want 400 (no ServiceRequest → fail closed)", status, msg)
+	}
+}
+
 // TestConformantCRDBind_AcceptsOriginatorBuilt is the SECOND oracle (after the SDK
 // byte-match golden test): the payer-side conformantCRDBind accepts the request the
 // Originator's SDK builder (BuildConformantOrderSelectRequest + BuildCoverageWithPayer)

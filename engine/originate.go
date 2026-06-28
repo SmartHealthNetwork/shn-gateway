@@ -245,10 +245,52 @@ type uc03Resp struct {
 
 // crdDtrResult carries the outputs of the CRD+DTR prefix shared by UC-03/04/06.
 type crdDtrResult struct {
-	qrJSON, srJSON          []byte
+	qrJSON, srJSON []byte
+	// questionnaireJSON is the bare Questionnaire extracted from the fetched $questionnaire-package
+	// (nil on the no-DTR paths). The provider-data UC-04 lane re-fills it by attestation when the
+	// operated $populate auto-pops nothing (the adaptive HomeHealthAssessment has 0 CQL items).
+	questionnaireJSON       []byte
 	patientRef, coverageRef string
 	pci                     string
 	filled                  []FilledItem
+}
+
+// orderSource returns the origination order bytes for the active profile. Under
+// provider-data it reads the member's open order from the SoR (the order code/dx
+// trace to the provider's seeded data, never a literal); otherwise it builds the order
+// from the per-UC tuple (the self-contained composite/sandbox demo). The else branch
+// keeps the exact BuildServiceRequestCoded call verbatim so composite stays byte-identical.
+// Returns (orderJSON, httpStatus, msg); status 0 == ok.
+func (g *Gateway) orderSource(member, patientRef, system, code, display, dx string) ([]byte, int, string) {
+	if g.cfg.OriginationProfile == "provider-data" {
+		order, ok := g.cfg.SoR.OpenOrder(member)
+		if !ok {
+			return nil, http.StatusBadGateway, "no open order for member in SoR"
+		}
+		// The product coding comes from the DATA (ServiceRequest.code / DeviceRequest
+		// codeCodeableConcept), never a literal — fail closed if it carries no {CPT,HCPCS} coding.
+		if _, _, _, err := shnsdk.ParseOrderProductCoding(order); err != nil {
+			return nil, http.StatusBadGateway, "open order has no recognized product coding"
+		}
+		return order, 0, ""
+	}
+	sr, err := BuildServiceRequestCoded(system, code, display, dx, patientRef)
+	if err != nil {
+		return nil, http.StatusInternalServerError, "build request failed"
+	}
+	return sr, 0, ""
+}
+
+// sceneMember returns the distinct provider-data persona member for a scenario, or the
+// composite/sandbox default otherwise. Distinct members are REQUIRED in the provider-data lane:
+// the order is read via OpenOrder(member) (keyed on member ONLY), so two scenarios sharing a
+// member would read the same order. composite/sandbox keep their default member (the order is
+// built from the per-UC tuple there, so a shared member is harmless and byte-identical).
+func (g *Gateway) sceneMember(defaultMember, providerDataMember string) string {
+	if g.cfg.OriginationProfile == "provider-data" {
+		return providerDataMember
+	}
+	return defaultMember
 }
 
 // runCRDThenDTROrder is the generalized CRD order-select + DTR fetch + auto-fill prefix.
@@ -272,9 +314,9 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 	patientRef := "Patient/" + member
 	coverageRef := "Coverage/" + member
 
-	srJSON, err := BuildServiceRequestCoded(system, code, display, dx, patientRef)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build request failed"})
+	srJSON, status, msg := g.orderSource(member, patientRef, system, code, display, dx)
+	if status != 0 {
+		writeJSON(w, status, map[string]string{"error": msg})
 		return crdDtrResult{}, false
 	}
 	if status, msg := g.validateFHIR(ctx, srJSON, "egress"); status != 0 {
@@ -447,6 +489,9 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 
 		res.qrJSON = qrJSON
 		res.filled = fill
+		// Surface the fetched bare Questionnaire so a caller (provider-data UC-04) can re-fill it
+		// by attestation when $populate auto-pops nothing (it stays nil on the no-DTR paths).
+		res.questionnaireJSON = questionnaireJSON
 	}
 
 	return res, true
@@ -574,6 +619,17 @@ func questionnaireResponseCanonical(qrJSON []byte) (string, error) {
 // handleUC02 runs the no-PA CRD round-trip: a covered member's X-ray order is
 // CRD-checked and comes back with an info card → paRequired=false.
 func (g *Gateway) handleUC02(w http.ResponseWriter, r *http.Request) {
+	// UC-02 (no-PA) is DESCOPED for the provider-data lane (D-PD-2): no faithful service order
+	// reaches a no-PA CRD card off provider data. Unlike the orderSource-routed scenarios (which
+	// fail closed at OpenOrder when the member has no seeded order), handleUC02 builds its order INLINE
+	// (BuildServiceRequestCoded), so without this guard the provider-data lane would originate a
+	// hardcoded literal order — contradicting the provider-data principle that EVERY origination traces
+	// to the provider's seeded SoR. Fail closed, matching the implicit fail-closed the other descoped
+	// scenarios already get. (composite/sandbox are unaffected — they originate the no-PA order.)
+	if g.cfg.OriginationProfile == "provider-data" {
+		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "UC-02 (no-PA) is descoped for the provider-data lane (D-PD-2)"})
+		return
+	}
 	ctx := r.Context()
 
 	pci, _, found := g.cfg.SoR.ResolvePatient("MBR-COVERED")
@@ -784,19 +840,66 @@ func (g *Gateway) classifyResolution(respJSON []byte) (parsed shnsdk.PriorAuthRe
 	return shnsdk.PriorAuthResult{}, false
 }
 
-// handleUC04 runs the pended-then-approved PA path: CRD+DTR (same prefix as
-// UC-03) → PAS submit → PENDED (no operative DiagnosticReport yet) → ClaimUpdate
-// with the provider-LOCAL operative report + Provenance → approved (FR-20/21).
+// handleUC04 runs the pended-then-approved PA path. Two profile lanes share the CRD+DTR prefix:
+//   - composite/sandbox: CRD+DTR → PAS submit → PENDED (no operative DiagnosticReport yet) →
+//     ClaimUpdate with the provider-LOCAL operative report + Provenance → approved (FR-20/21).
+//   - provider-data (L1): ATTEST the adaptive HomeHealthAssessment off the seeded order (the
+//     operated $populate auto-pops nothing), then the lean single-shot PAS tail with NO
+//     amendment (D-PD-1 defers the operative-DiagnosticReport amendment). The attested QR is
+//     verdict-INERT — br-payer's A4→A1 is its pend-resolution timer, not a QR-driven verdict.
 func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	const srRef = "ServiceRequest/sr-uc04"
 
 	o := originationCodes(g.cfg.OriginationProfile).uc04
-	res, ok := g.runCRDThenDTROrder(w, r, "MBR-UC04", o.system, o.code, o.display, o.dx, false)
+	member := g.sceneMember("MBR-UC04", "MBR-PD-UC04")
+	res, ok := g.runCRDThenDTROrder(w, r, member, o.system, o.code, o.display, o.dx, false)
 	if !ok {
 		return
 	}
 
+	if g.cfg.OriginationProfile == "provider-data" {
+		// provider-data (L1): ATTEST the adaptive HomeHealthAssessment questionnaire off the seeded
+		// order ($populate auto-pops nothing), then the lean single-shot tail (D-PD-1: no
+		// amendment). Every attested answer traces to the seeded order (res.srJSON); the attested QR
+		// is verdict-INERT — br-payer's A4→A1 is its pend-resolution timer, not a QR-driven verdict.
+		answers, err := uc04AttestationAnswers(res.srJSON)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			return
+		}
+		orderRef, ok := resourceRef(res.srJSON) // Bug-2: persist against the REAL seeded order ref, not the composite literal.
+		if !ok {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "order missing id"})
+			return
+		}
+		attestedQR, err := shnsdk.FillQuestionnaireFromAnswers(res.questionnaireJSON, answers,
+			"Organization/"+g.cfg.HolderID,
+			shnsdk.QRContext{PatientRef: res.patientRef, CoverageRef: res.coverageRef, OrderRef: orderRef, Authored: g.cfg.Clock()})
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "attest questionnaire failed"})
+			return
+		}
+		if status, msg := g.validateFHIR(ctx, attestedQR, "egress"); status != 0 {
+			writeJSON(w, status, map[string]string{"error": msg})
+			return
+		}
+		parsed, _, status, msg := g.submitClaimAndResolve(ctx, r, res.pci, res.srJSON, attestedQR, res.patientRef, res.coverageRef)
+		if status != 0 {
+			writeJSON(w, status, map[string]string{"error": msg})
+			return
+		}
+		if err := g.cfg.Store.StoreAuthNumber(orderRef, parsed.PreAuthRef); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "holder write failed (auth number)"})
+			return
+		}
+		// Surface the attested answer VALUES (the traces-to-seed evidence, the UC-04 analog of
+		// HomeOxygen's qrAnswers).
+		writeJSON(w, http.StatusOK, uc03Resp{PARequired: true, AuthNumber: parsed.PreAuthRef, ValidUntil: parsed.ValidUntil, QRAnswers: attestedAnswerValues(answers)})
+		return
+	}
+
+	// composite/sandbox: the operative-DiagnosticReport amendment tail (UNCHANGED below).
 	// PAS submit — expect PENDED (no operative DiagnosticReport yet).
 	pasCorr := g.cfg.CorrelationGen()
 	bundleJSON, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{

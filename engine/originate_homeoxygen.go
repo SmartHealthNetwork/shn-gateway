@@ -172,41 +172,14 @@ func (g *Gateway) handleHomeOxygen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// --- PAS — mirror handleUC03's tail, but the order resource is the DeviceRequest. The
-	// genuine outcome is conditional-coverage A4-pended → A1; the native responder's pend
-	// re-query resolves A4→A1, so the FINAL observed Outcome is "approved" (A1). ---
-	pasCorr := g.cfg.CorrelationGen()
-	bundleJSON, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
-		QR: qrJSON, SR: orderJSON, PatientRef: patientRef, CoverageRef: coverageRef,
-		Corr: pasCorr, Created: g.cfg.Clock(),
-		ContainedInsurer: targetsBrPayer(g.cfg.OriginationProfile),
-		AbsoluteRefs:     targetsBrPayer(g.cfg.OriginationProfile),
-		PayerOrgEntry:    targetsBrPayer(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
-	})
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build bundle failed"})
-		return
-	}
-	if status, msg := g.validateFHIR(ctx, bundleJSON, "egress"); status != 0 {
+	// --- PAS — the shared lean single-shot tail (submitClaimAndResolve). The order resource is the
+	// DeviceRequest, so InfoChanged stays false (orderIsDeviceRequest) — its order type alone routes
+	// the payer gate to poll the timer-resolved A1. The genuine outcome is conditional-coverage
+	// A4-pended → A1; the payer responder's pend re-query resolves A4→A1, so the FINAL observed
+	// Outcome is "approved" (A1). ---
+	parsed, _, status, msg := g.submitClaimAndResolve(ctx, r, pci, orderJSON, qrJSON, patientRef, coverageRef)
+	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
-		return
-	}
-	claimRespJSON, err := g.OriginateLeg(ctx, r, g.cfg.CounterpartID, "pas-claim", pci, pasCorr, "", Content{WorkstreamType: workstreamPA, Bytes: bundleJSON})
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
-		return
-	}
-	if status, msg := g.validateFHIR(ctx, claimRespJSON, "ingress"); status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
-		return
-	}
-	parsed, err := shnsdk.ParseClaimResponse(claimRespJSON)
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "claim response parse failed"})
-		return
-	}
-	if parsed.Outcome != "approved" {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "preauthorization not approved"})
 		return
 	}
 

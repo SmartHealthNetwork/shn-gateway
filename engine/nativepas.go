@@ -150,13 +150,20 @@ func (n *nativeResponder) handlePASClaimNative(ctx context.Context, corrID, subj
 		return LegResult{Status: http.StatusBadGateway, Message: "upstream payer PAS submit response unparseable"}, nil
 	}
 	if pended {
-		// SINGLE-SHOT DME (HomeOxygen provider-data lane): a DeviceRequest order has NO follow-up
-		// amendment leg — its conditional-coverage pend (A4) auto-resolves on br-payer's timer
-		// (PasPendedResolutionService, PAS_PENDED_RESOLUTION_DELAY_SECONDS). Poll GET
-		// ClaimResponse/{id} until the timer flips it to the terminal A1 (the SAME machinery the
-		// ClaimUpdate path uses). A ServiceRequest order keeps the prior behavior (return the pend so
-		// the composite UC-04/06 amendment leg can run) — so this does NOT regress the amendment lanes.
-		if orderIsDeviceRequest(s.srJSON) {
+		// SINGLE-SHOT submit → POLL the timer-resolved terminal A1. Two single-shot lanes both poll
+		// the SAME GET ClaimResponse/{id} machinery (the one the composite ClaimUpdate path uses):
+		//   1. a DeviceRequest order (HomeOxygen provider-data DME lane) — no amendment leg exists; and
+		//   2. a ServiceRequest order whose submit bundle signals "resolve to terminal" via the Da Vinci
+		//      PAS infoChanged item extension (the provider-data order-select single-shot lane, D-PD-1).
+		// br-payer's conditional-coverage pend (A4) auto-resolves on its own timer
+		// (PasPendedResolutionService, PAS_PENDED_RESOLUTION_DELAY_SECONDS) — flipping A4→A1 IN PLACE on
+		// the same ClaimResponse id, reachable by a bare GET (no amendment needed). infoChanged here is
+		// purely SHN's POLL DISCRIMINATOR, NOT a verdict input: on a fresh submit (no Claim.related[prior])
+		// it is benign on br-payer (its re-evaluation is gated on a prior claim), so the verdict is still
+		// br-payer's code-keyed CQL constant and the A4→A1 is still the timer. A ServiceRequest WITHOUT
+		// infoChanged keeps the prior behavior — return the A4 pend so the composite UC-04/06 amendment
+		// leg can bind to it — so this does NOT regress the amendment lanes.
+		if orderIsDeviceRequest(s.srJSON) || requestClaimHasInfoChanged(requestFHIR) {
 			crID := claimResponseIDFromPASResponse(norm)
 			if crID == "" {
 				return LegResult{Status: http.StatusBadGateway, Message: "pended PAS submit response has no ClaimResponse id to re-query"}, nil

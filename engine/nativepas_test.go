@@ -161,6 +161,119 @@ func TestNativeSubmit_ConformantRecordsEOB(t *testing.T) {
 	})
 }
 
+// serviceRequestSubmitBundle builds a single-shot conformant ServiceRequest $submit bundle via the
+// SDK (the same builder the originator uses), with InfoChanged toggled — so the payer-gate test
+// drives the REAL built bytes its requestClaimHasInfoChanged poll discriminator reads.
+func serviceRequestSubmitBundle(t *testing.T, infoChanged bool) []byte {
+	t.Helper()
+	sr := []byte(`{"resourceType":"ServiceRequest","id":"sr-x","status":"active","intent":"order","subject":{"reference":"Patient/MBR-COVERED"},"code":{"coding":[{"system":"http://www.ama-assn.org/go/cpt","code":"72148","display":"MRI lumbar spine w/o contrast"}]}}`)
+	b, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
+		SR: sr, PatientRef: "Patient/MBR-COVERED", CoverageRef: "Coverage/MBR-COVERED",
+		Corr: "corr-sr-submit", Created: fixedClock(), InfoChanged: infoChanged,
+	})
+	if err != nil {
+		t.Fatalf("serviceRequestSubmitBundle (infoChanged=%v): %v", infoChanged, err)
+	}
+	return b
+}
+
+// TestRequestClaimHasInfoChanged_OnBuiltSubmitBundle is the focused predicate proof: the gateway's
+// requestClaimHasInfoChanged poll discriminator fires true on an SDK-built InfoChanged:true submit
+// bundle and false on a default one. This is what flips the single-shot ServiceRequest into the
+// timer-poll lane while a composite UC-04 submit (default, no InfoChanged) stays in the pend lane.
+// infoChanged is the poll discriminator, NOT a verdict input.
+func TestRequestClaimHasInfoChanged_OnBuiltSubmitBundle(t *testing.T) {
+	if !requestClaimHasInfoChanged(serviceRequestSubmitBundle(t, true)) {
+		t.Fatalf("requestClaimHasInfoChanged must be TRUE on an InfoChanged:true submit bundle")
+	}
+	if requestClaimHasInfoChanged(serviceRequestSubmitBundle(t, false)) {
+		t.Fatalf("requestClaimHasInfoChanged must be FALSE on a default submit bundle (composite UC-04 stays in the pend lane)")
+	}
+}
+
+// TestNativeSubmit_SingleShotServiceRequestInfoChanged proves the widened submit gate
+// (handlePASClaimNative): a SINGLE-SHOT ServiceRequest whose submit bundle carries infoChanged now
+// POLLS the timer-resolved A1 (the SAME GET ClaimResponse/{id} machinery the DeviceRequest single-shot
+// + the composite ClaimUpdate use) — while a ServiceRequest WITHOUT infoChanged keeps the prior
+// behavior (return the A4 pend so the composite amendment leg can run). No regression to the
+// amendment lanes.
+func TestNativeSubmit_SingleShotServiceRequestInfoChanged(t *testing.T) {
+	// A4-on-$submit then A1-on-GET partner (the real br-payer timer shape: A4 at submit, the
+	// resolution flips A4→A1 in place on the same ClaimResponse id, reachable by a bare GET).
+	a4thenA1 := func(t *testing.T) (*httptest.Server, *int) {
+		t.Helper()
+		var getCount int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.Method {
+			case http.MethodPost: // /Claim/$submit → A4 pend (queued ClaimResponse Bundle, id cr-ss)
+				_, _ = w.Write([]byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"ClaimResponse","id":"cr-ss","status":"active","outcome":"queued"}}]}`))
+			case http.MethodGet: // GET /ClaimResponse/cr-ss → A4 first, A1 (the timer) second
+				getCount++
+				if getCount >= 2 {
+					_, _ = w.Write([]byte(`{"resourceType":"ClaimResponse","id":"cr-ss","status":"active","outcome":"complete","preAuthRef":"AUTH-SS-1","preAuthPeriod":{"end":"2030-01-01"}}`))
+					return
+				}
+				_, _ = w.Write([]byte(`{"resourceType":"ClaimResponse","id":"cr-ss","status":"active","outcome":"queued"}`))
+			default:
+				http.Error(w, "unexpected", http.StatusNotFound)
+			}
+		}))
+		t.Cleanup(srv.Close)
+		return srv, &getCount
+	}
+
+	t.Run("infoChanged single-shot SR -> poll resolves to A1 (approved)", func(t *testing.T) {
+		bundle := serviceRequestSubmitBundle(t, true)
+		srv, getCount := a4thenA1(t)
+		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", NewStubHolderData(), fixedClock,
+			WithPendReQuery(2*time.Second, 5*time.Millisecond))
+		res, err := n.Handle(context.Background(), "pas-claim", "corr-ss", "PCI-1", bundle)
+		if err != nil || res.Status != 0 {
+			t.Fatalf("infoChanged single-shot SR: err=%v status=%d msg=%s", err, res.Status, res.Message)
+		}
+		if *getCount < 2 {
+			t.Fatalf("expected the submit leg to POLL ClaimResponse (getCount>=2), got %d", *getCount)
+		}
+		parsed, perr := shnsdk.ParseClaimResponse(res.ResponseFHIR)
+		if perr != nil || parsed.Outcome != "approved" || parsed.PreAuthRef != "AUTH-SS-1" {
+			t.Fatalf("resolved response must be approved AUTH-SS-1, got outcome=%q ref=%q err=%v", parsed.Outcome, parsed.PreAuthRef, perr)
+		}
+	})
+
+	t.Run("no-infoChanged SR -> keeps the A4 pend (RecordPendedClaim, no poll) — composite amendment lane", func(t *testing.T) {
+		bundle := serviceRequestSubmitBundle(t, false)
+		var getCount int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if r.Method == http.MethodGet {
+				getCount++
+			}
+			// A4 pend on $submit; a GET (if it ever fired — it must not) would stay queued.
+			_, _ = w.Write([]byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"ClaimResponse","id":"cr-cf","status":"active","outcome":"queued"}}]}`))
+		}))
+		defer srv.Close()
+		store := NewStubHolderData()
+		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", store, fixedClock,
+			WithPendReQuery(2*time.Second, 5*time.Millisecond))
+		res, err := n.Handle(context.Background(), "pas-claim", "corr-cf", "PCI-1", bundle)
+		if err != nil || res.Status != 0 {
+			t.Fatalf("no-infoChanged SR: err=%v status=%d msg=%s", err, res.Status, res.Message)
+		}
+		// The pend is surfaced as-is (verbatim Bundle) + RecordPendedClaim, NO EOB — the composite
+		// amendment leg binds to this prior pend.
+		if res.Commit == nil || len(res.SideEffectFHIR) != 0 {
+			t.Fatalf("no-infoChanged SR submit must RecordPendedClaim + emit NO EOB; commit=%v sideeffects=%d", res.Commit != nil, len(res.SideEffectFHIR))
+		}
+		if pended, _, perr := shnsdk.ParsePendedResponse(res.ResponseFHIR); perr != nil || !pended {
+			t.Fatalf("no-infoChanged SR must surface the pend as-is; pended=%v err=%v", pended, perr)
+		}
+		if getCount != 0 {
+			t.Fatalf("no-infoChanged SR must NOT poll ClaimResponse, but GET fired %d time(s)", getCount)
+		}
+	})
+}
+
 // TestNativePAS_EOBSystemTracksOrder is the DEF-14 no-wrong-EOB guard: the EOB's
 // procedure system must equal the ORDER's system for every recognized procedure
 // system — never the hardcoded CPT. A regression that re-hardcodes the system (the
