@@ -109,3 +109,13 @@ func (s *Scaffold) FacilityRecords(memberID string) (records map[string][]byte, 
 	// TODO(partner): on a facility deployment, return the requested records.
 	return nil, false
 }
+
+// OpenOrder: the scaffold does not hold open orders; the provider-data lane requires a real
+// FHIR SoR (FHIR_DATA_URL). Returns found=false.
+// TODO(partner): read the member's active ServiceRequest or DeviceRequest from your backend.
+func (s *Scaffold) OpenOrder(memberID string) ([]byte, bool) { return nil, false }
+
+// ResolveByReference: the scaffold does not resolve FHIR references; the provider-data lane
+// requires a real FHIR SoR (FHIR_DATA_URL). Returns found=false.
+// TODO(partner): perform a direct FHIR read for the given relative reference from your backend.
+func (s *Scaffold) ResolveByReference(_ string) ([]byte, bool) { return nil, false }

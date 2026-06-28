@@ -55,6 +55,15 @@ var paCatalog = map[string]legSpec{
 		Op: "crd-order-select", RespOp: "crd-cards", Scope: "crd-context",
 		Physics: LegPhysics{Kind: KindRequestResponse, Effect: EffectReadOnly, Timing: TimingSync, Locality: LocalitySubstrate},
 	},
+	// crd-order-dispatch: the order-dispatch sibling of crd-order-select.
+	// A DISTINCT Op is load-bearing: handleInbound pins spec.Op per TransactionType into
+	// VerifyBound; sharing the Op with crd-order-select would let an order-select token
+	// be lifted onto an order-dispatch envelope — an AI-11/C2 regression.
+	"crd-order-dispatch": {
+		ReqFrame: "provider-tpo", RespFrame: "payer-coverage",
+		Op: "crd-order-dispatch", RespOp: "crd-dispatch-cards", Scope: "crd-context",
+		Physics: LegPhysics{Kind: KindRequestResponse, Effect: EffectReadOnly, Timing: TimingSync, Locality: LocalitySubstrate},
+	},
 	"pas-claim": {
 		ReqFrame: "provider-tpo", RespFrame: "payer-coverage",
 		Op: "pas-submit", RespOp: "pas-response", Scope: "pas-bundle",

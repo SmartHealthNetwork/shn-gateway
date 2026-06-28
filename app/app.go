@@ -97,6 +97,12 @@ type config struct {
 	// forwarding, matching the partner's CRD service (br-payer's order-sign-crd ⇒ order-sign).
 	// Empty ⇒ forward the originator's hook verbatim. PAYER_DAVINCI_CRD_HOOK.
 	PayerDavinciCRDHook string
+	// PayerDavinciDispatchServiceID is the partner's CDS service id for the
+	// crd-order-dispatch leg. Empty ⇒ dispatch leg fails closed (502). PAYER_DAVINCI_DISPATCH_SERVICE_ID.
+	PayerDavinciDispatchServiceID string
+	// PayerDavinciDispatchHook is the CDS Hooks hook value to stamp on the order-dispatch
+	// request before forwarding. Empty ⇒ forward the originator's hook verbatim. PAYER_DAVINCI_DISPATCH_HOOK.
+	PayerDavinciDispatchHook string
 
 	// OriginationProfile selects the per-UC origination lane: "" / "sandbox"
 	// keep the CPT/lumbar order shape; "composite" originates the HCPCS codes the real
@@ -193,18 +199,20 @@ func loadConfig(getenv func(string) string) (config, error) {
 		FHIRClientScope:  def("FHIR_CLIENT_SCOPE", "system/*.read"),
 		FHIRClientKID:    getenv("FHIR_CLIENT_KID"),
 
-		PayerDavinciBaseURL:      getenv("PAYER_DAVINCI_BASE_URL"),
-		PayerDavinciCDSBaseURL:   getenv("PAYER_DAVINCI_CDS_BASE_URL"),
-		PayerDavinciTokenURL:     getenv("PAYER_DAVINCI_TOKEN_URL"),
-		PayerDavinciClientID:     getenv("PAYER_DAVINCI_CLIENT_ID"),
-		PayerDavinciClientKey:    getenv("PAYER_DAVINCI_CLIENT_KEY"),
-		PayerDavinciClientAlg:    getenv("PAYER_DAVINCI_CLIENT_ALG"),
-		PayerDavinciScope:        def("PAYER_DAVINCI_SCOPE", "system/*.read"),
-		PayerDavinciClientKID:    getenv("PAYER_DAVINCI_CLIENT_KID"),
-		PayerDavinciPASNative:    getenv("PAYER_DAVINCI_PAS_NATIVE") == "true",
-		PayerDavinciCRDServiceID: getenv("PAYER_DAVINCI_CRD_SERVICE_ID"),
-		PayerDavinciCRDHook:      getenv("PAYER_DAVINCI_CRD_HOOK"),
-		OriginationProfile:       getenv("ORIGINATION_PROFILE"),
+		PayerDavinciBaseURL:           getenv("PAYER_DAVINCI_BASE_URL"),
+		PayerDavinciCDSBaseURL:        getenv("PAYER_DAVINCI_CDS_BASE_URL"),
+		PayerDavinciTokenURL:          getenv("PAYER_DAVINCI_TOKEN_URL"),
+		PayerDavinciClientID:          getenv("PAYER_DAVINCI_CLIENT_ID"),
+		PayerDavinciClientKey:         getenv("PAYER_DAVINCI_CLIENT_KEY"),
+		PayerDavinciClientAlg:         getenv("PAYER_DAVINCI_CLIENT_ALG"),
+		PayerDavinciScope:             def("PAYER_DAVINCI_SCOPE", "system/*.read"),
+		PayerDavinciClientKID:         getenv("PAYER_DAVINCI_CLIENT_KID"),
+		PayerDavinciPASNative:         getenv("PAYER_DAVINCI_PAS_NATIVE") == "true",
+		PayerDavinciCRDServiceID:      getenv("PAYER_DAVINCI_CRD_SERVICE_ID"),
+		PayerDavinciCRDHook:           getenv("PAYER_DAVINCI_CRD_HOOK"),
+		PayerDavinciDispatchServiceID: getenv("PAYER_DAVINCI_DISPATCH_SERVICE_ID"),
+		PayerDavinciDispatchHook:      getenv("PAYER_DAVINCI_DISPATCH_HOOK"),
+		OriginationProfile:            getenv("ORIGINATION_PROFILE"),
 
 		ProviderDTRNative:      getenv("PROVIDER_DTR_NATIVE") == "true",
 		ProviderDTRPopulateURL: getenv("PROVIDER_DTR_POPULATE_URL"),
@@ -269,6 +277,9 @@ func loadConfig(getenv func(string) string) (config, error) {
 
 	if cfg.ProviderDTRNative && cfg.ProviderDTRPopulateURL == "" {
 		return config{}, fmt.Errorf("gateway: PROVIDER_DTR_NATIVE=true requires PROVIDER_DTR_POPULATE_URL")
+	}
+	if cfg.OriginationProfile == "provider-data" && cfg.ProviderDTRPopulateURL == "" {
+		return config{}, fmt.Errorf("gateway: ORIGINATION_PROFILE=provider-data requires PROVIDER_DTR_POPULATE_URL (the operated $populate endpoint)")
 	}
 
 	// All-or-nothing ingress registration (FR-G13): PROVIDER_DAVINCI_INGRESS
@@ -616,7 +627,8 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		}
 		native := engine.NewNativeResponder(pdc, cfg.PayerDavinciBaseURL, crdSvcID, store, clock,
 			engine.WithCDSBaseURL(cfg.PayerDavinciCDSBaseURL),
-			engine.WithCRDHook(cfg.PayerDavinciCRDHook))
+			engine.WithCRDHook(cfg.PayerDavinciCRDHook),
+			engine.WithCRDDispatchService(cfg.PayerDavinciDispatchServiceID, cfg.PayerDavinciDispatchHook))
 		fallback := engine.NewSandboxResponder(gwCfg.Adjudicator, sor, store, clock)
 		gwCfg.Responder = engine.NewCompositeResponder(native, fallback, cfg.PayerDavinciPASNative)
 		// The native-forward DTR response is a foreign Da Vinci package SHN can't $validate
@@ -634,6 +646,10 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 			npi = "1234567890" // matches the app-config default (def("NPI", "1234567890"))
 		}
 		gwCfg.Populator = engine.NewSeededPopulator("Practitioner/" + npi)
+	} else if cfg.OriginationProfile == "provider-data" {
+		// Operated-CQL $populate against the provider tenant (the crux of the
+		// provider-data lane). PROVIDER_DTR_POPULATE_URL is validated at loadConfig.
+		gwCfg.Populator = engine.NewNativePopulator(client, cfg.ProviderDTRPopulateURL)
 	}
 	gwCfg.IngressEnabled = cfg.ProviderDavinciIngress
 	gwCfg.IngressBaseURL = cfg.IngressBaseURL

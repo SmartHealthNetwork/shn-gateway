@@ -365,6 +365,7 @@ func (g *Gateway) Handler() http.Handler {
 		mux.HandleFunc("POST /scenario/uc07", g.handleUC07)
 		mux.HandleFunc("POST /scenario/uc07hcpcs", g.handleUC07HCPCS)
 		mux.HandleFunc("POST /scenario/uc08", g.handleUC08)
+		mux.HandleFunc("POST /scenario/homeoxygen", g.handleHomeOxygen)
 		mux.HandleFunc("POST /scenario/uc06/start", g.handleUC06Start)
 		mux.HandleFunc("POST /scenario/uc06/complete", g.handleUC06Complete)
 		mux.HandleFunc("POST /scenario/uc06/cancel", g.handleScenarioCancel)
@@ -389,6 +390,14 @@ func (g *Gateway) Handler() http.Handler {
 		}
 	case "payer":
 		mux.HandleFunc("POST /substrate/inbound", g.handleInbound)
+		// The native-forward (composite) payer is an INTERNAL conformance-harness participant
+		// that holds in-memory pending/exchanges across runs; the separated/cloud console reset
+		// clears them too (separated-reset-clears-gateway-state). Gated on PayerDavinciNative so
+		// the PUBLIC built-in sandbox payer-gw never exposes an unauthenticated state-clearing
+		// route. Generic g.Reset() (clears pending+exchanges), same handler as the provider lane.
+		if g.cfg.PayerDavinciNative {
+			mux.HandleFunc("POST /scenario/reset", g.handleScenarioReset)
+		}
 		// FR-28: CMS-0057 Patient Access API — conformant FHIR search + instance read
 		// over the PDex PA EOB, gated by a patient-access authority token. Distinct
 		// from the sealed substrate legs. FR-37: the CapabilityStatement for this
@@ -680,12 +689,12 @@ func (g *Gateway) OriginateLeg(ctx context.Context, r *http.Request, recipient, 
 // leg, returning the gateway-standard (status,message) on failure. dir is
 // "egress" or "ingress" purely for the error message; status is 0 on success.
 func (g *Gateway) validateFHIR(ctx context.Context, resourceJSON []byte, dir string) (int, string) {
-	// Composite (Mode A) ingress artifacts are the counterparty's (br-payer's) RELAYED foreign
-	// bytes — SHN does not $validate foreign bundles (R-8/FR-36: SHN certifies only what it
-	// PRODUCES and hosts US Core only; the composite payer's responses stay relayed:true). The
-	// sandbox lane (SHN-produced responses) still validates ingress; egress (always SHN-produced)
-	// always validates. br-payer's Da Vinci DTR/PAS bytes fail a US-Core-only validator.
-	if dir == "ingress" && g.cfg.OriginationProfile == "composite" {
+	// br-payer-targeting lanes (composite, provider-data) relay the counterparty's FOREIGN bytes
+	// on ingress — SHN does not $validate foreign bundles (R-8/FR-36: SHN certifies only what it
+	// PRODUCES and hosts US Core only; the br-payer's responses stay relayed:true). The sandbox
+	// lane (SHN-produced responses) still validates ingress; egress (always SHN-produced) always
+	// validates. br-payer's Da Vinci DTR/PAS bytes fail a US-Core-only validator.
+	if dir == "ingress" && targetsBrPayer(g.cfg.OriginationProfile) {
 		return 0, ""
 	}
 	res, err := g.cfg.Validator.Validate(ctx, resourceJSON, "")

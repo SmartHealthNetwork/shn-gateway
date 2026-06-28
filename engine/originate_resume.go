@@ -40,9 +40,9 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 	bundleJSON, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
 		QR: res.qrJSON, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef,
 		Corr: pasCorr, Created: g.cfg.Clock(),
-		ContainedInsurer: g.cfg.OriginationProfile == "composite",
-		AbsoluteRefs:     g.cfg.OriginationProfile == "composite",
-		PayerOrgEntry:    g.cfg.OriginationProfile == "composite", // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
+		ContainedInsurer: targetsBrPayer(g.cfg.OriginationProfile),
+		AbsoluteRefs:     targetsBrPayer(g.cfg.OriginationProfile),
+		PayerOrgEntry:    targetsBrPayer(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build bundle failed"})
@@ -155,9 +155,9 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 	updateBundle, err := shnsdk.BuildConformantClaimUpdateBundle(shnsdk.ConformantClaimUpdateInputs{
 		QR: amendedQR, SR: st.srJSON, PatientRef: st.patientRef, CoverageRef: st.coverageRef,
 		Provenance: provJSON, DiagnosticReport: nil, Corr: updateCorr, OriginalCorr: st.pasCorr, Created: g.cfg.Clock(),
-		ContainedInsurer: g.cfg.OriginationProfile == "composite",
-		AbsoluteRefs:     g.cfg.OriginationProfile == "composite",
-		PayerOrgEntry:    g.cfg.OriginationProfile == "composite", // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
+		ContainedInsurer: targetsBrPayer(g.cfg.OriginationProfile),
+		AbsoluteRefs:     targetsBrPayer(g.cfg.OriginationProfile),
+		PayerOrgEntry:    targetsBrPayer(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build update bundle failed"})
@@ -288,9 +288,9 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 	updateBundle, err := shnsdk.BuildConformantClaimUpdateBundle(shnsdk.ConformantClaimUpdateInputs{
 		QR: amendedQR, SR: st.srJSON, PatientRef: st.patientRef, CoverageRef: st.coverageRef,
 		Provenance: provJSON, DiagnosticReport: nil, Corr: updateCorr, OriginalCorr: st.pasCorr, Created: g.cfg.Clock(),
-		ContainedInsurer: g.cfg.OriginationProfile == "composite",
-		AbsoluteRefs:     g.cfg.OriginationProfile == "composite",
-		PayerOrgEntry:    g.cfg.OriginationProfile == "composite", // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
+		ContainedInsurer: targetsBrPayer(g.cfg.OriginationProfile),
+		AbsoluteRefs:     targetsBrPayer(g.cfg.OriginationProfile),
+		PayerOrgEntry:    targetsBrPayer(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build update bundle failed"})

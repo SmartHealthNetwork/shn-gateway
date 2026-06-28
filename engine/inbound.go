@@ -101,6 +101,8 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 		g.handleEligibilityInbound(w, r, env, tok)
 	case "crd-order-select":
 		g.handleCRDNativeInbound(w, r, env, tok)
+	case "crd-order-dispatch":
+		g.handleCRDDispatchInbound(w, r, env, tok)
 	case "dtr-questionnaire-fetch":
 		g.handleDTRInbound(w, r, env, tok)
 	case "pas-claim":

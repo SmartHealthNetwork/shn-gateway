@@ -25,6 +25,7 @@ var _ LegResponder = (*compositeResponder)(nil)
 func NewCompositeResponder(native, fallback LegResponder, pasNative bool) LegResponder {
 	forwarded := map[string]bool{
 		"crd-order-select":        true, // the conformant CRD leg (P5 ingress) — FR-G28: forward to the real payer, never the sandbox
+		"crd-order-dispatch":      true, // the conformant order-dispatch CRD leg — forward to the real payer
 		"dtr-questionnaire-fetch": true,
 	}
 	if pasNative {

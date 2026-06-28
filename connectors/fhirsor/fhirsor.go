@@ -347,6 +347,53 @@ func rewriteSubject(resourceJSON []byte, ref string) []byte {
 	return out
 }
 
+// OpenOrder returns the member's open order resource bytes for headless origination (FR-A3).
+// Searches DeviceRequest first (DME/HME orders, e.g. HomeOxygen), then ServiceRequest
+// (procedure orders), both scoped to patient + status=active. found=false when neither yields a
+// result or the patient cannot be resolved. The caller parses the product coding via
+// shnsdk.ParseOrderProductCoding — the gateway never synthesizes the order.
+//
+// The returned order's subject.reference is rewritten to "Patient/<memberID>" (same rationale as
+// SupplementalReport/FacilityRecords): HAPI stores the order with a partition-scoped subject
+// (e.g. "Patient/pat-mbrox-provider"), but the substrate protocol layer + the payer-side AI-11
+// order-dispatch bind resolve the patient by the canonical MEMBER id. Without this the payer-gw's
+// conformantCRDDispatchBind cannot resolve the dispatched order's subject → 403 "inconsistent
+// patient in order-dispatch". The order's id + performer are preserved (the handler reads them
+// to build the dispatchedOrders ref + resolve the supplier).
+func (s *SoR) OpenOrder(memberID string) ([]byte, bool) {
+	_, pid, ok := s.resolvePatient(memberID)
+	if !ok {
+		return nil, false
+	}
+	for _, rtype := range []string{"DeviceRequest", "ServiceRequest"} {
+		if raw, found := s.firstResourceBytes(rtype, url.Values{
+			"patient": {pid}, "status": {"active"},
+		}); found {
+			return rewriteSubject(raw, "Patient/"+memberID), true
+		}
+	}
+	return nil, false
+}
+
+// ResolveByReference returns the raw bytes of a resource named by a relative reference
+// (e.g. "Organization/dme-1") via a direct FHIR read (GET {type}/{id}).
+// found=false when the resource is absent (404) or a transport/parse error occurs (logged).
+// Used to resolve an order's performer (the DME supplier Organization) for headless
+// order-dispatch origination.
+func (s *SoR) ResolveByReference(ref string) ([]byte, bool) {
+	parts := strings.SplitN(ref, "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		log.Printf("fhirsor: ResolveByReference: invalid ref %q (want Type/id)", ref)
+		return nil, false
+	}
+	body, found, err := s.fc.Read(context.Background(), parts[0], parts[1])
+	if err != nil {
+		log.Printf("fhirsor: ResolveByReference %q: %v", ref, err)
+		return nil, false
+	}
+	return body, found
+}
+
 // firstResourceBytes returns the raw bytes of the first entry of a patient-scoped search, or
 // ok=false (no match / transport error, logged — fail-safe per the SystemOfRecord contract).
 func (s *SoR) firstResourceBytes(resourceType string, q url.Values) ([]byte, bool) {

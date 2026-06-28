@@ -78,7 +78,11 @@ func parseConformantPASSubjects(bundleJSON []byte) (conformantPASSubjects, int, 
 			if !haveClaim {
 				claimPat, haveClaim = ref("patient"), true
 			}
-		case "ServiceRequest":
+		case "ServiceRequest", "DeviceRequest":
+			// The ORDER entry — a procedure ServiceRequest OR a DME DeviceRequest (HomeOxygen
+			// provider-data lane; the SDK PAS builder carries the order as convergence-sr or
+			// convergence-dr per resourceType). Both bind the order subject the same way; haveSR
+			// gates "an order is present" regardless of order resource type.
 			srSubject, haveSR, s.srJSON = ref("subject"), true, e.Resource
 		case "Coverage":
 			covBene, haveCov = ref("beneficiary"), true
@@ -94,7 +98,7 @@ func parseConformantPASSubjects(bundleJSON []byte) (conformantPASSubjects, int, 
 		return conformantPASSubjects{}, http.StatusBadRequest, "PAS bundle missing Claim.patient"
 	}
 	if !haveSR {
-		return conformantPASSubjects{}, http.StatusBadRequest, "PAS bundle missing ServiceRequest"
+		return conformantPASSubjects{}, http.StatusBadRequest, "PAS bundle missing order (ServiceRequest or DeviceRequest)"
 	}
 	if !haveCov || covBene == "" {
 		return conformantPASSubjects{}, http.StatusBadRequest, "PAS bundle missing Coverage.beneficiary"

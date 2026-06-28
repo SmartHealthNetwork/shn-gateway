@@ -392,6 +392,29 @@ func TestNativeResponder_RewritesCRDHook(t *testing.T) {
 	}
 }
 
+// TestNativeResponder_CRDDispatchForwardsVerbatim proves crd-order-dispatch forwards
+// the verbatim CDS Hooks request to the partner's dispatch CDS service, preserving
+// the order-dispatch hook + the dispatchedOrders + performer fields.
+func TestNativeResponder_CRDDispatchForwardsVerbatim(t *testing.T) {
+	p := newStubPartner(t)
+	partnerCard := []byte(`{"cards":[{"suggestions":[{"actions":[{"resource":{"extension":[` +
+		`{"url":"http://hl7.org/fhir/us/davinci-crd/StructureDefinition/ext-coverage-information",` +
+		`"extension":[{"url":"covered","valueCode":"conditional"},{"url":"pa-needed","valueCode":"auth-needed"}]}]}}]}]}]}`)
+	p.respByPath["/cds-services/order-dispatch-crd"] = partnerCard
+	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", nil, nil,
+		WithCRDDispatchService("order-dispatch-crd", "order-dispatch"))
+	req := []byte(`{"hook":"order-dispatch","context":{"patientId":"MBR-OX","dispatchedOrders":["DeviceRequest/dr1"],"performer":"Organization/dme1"},"prefetch":{}}`)
+	if _, err := n.Handle(context.Background(), "crd-order-dispatch", "corr", "pci", req); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(p.lastBody, []byte(`"dispatchedOrders"`)) || !bytes.Contains(p.lastBody, []byte(`"performer"`)) {
+		t.Fatalf("dispatch context dropped on forward: %s", p.lastBody)
+	}
+	if !bytes.Contains(p.lastBody, []byte(`"hook":"order-dispatch"`)) {
+		t.Fatalf("hook not preserved/rewritten: %s", p.lastBody)
+	}
+}
+
 // TestNativeResponder_SplitBaseURLs proves CRD (CDS Hooks) posts to the CDS base
 // while DTR/PAS post to the FHIR base — the br-payer topology (CDS at root, FHIR
 // under /fhir). Two httptest servers stand in for the two bases.

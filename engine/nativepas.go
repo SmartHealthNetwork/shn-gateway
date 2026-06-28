@@ -134,7 +134,9 @@ func (n *nativeResponder) handlePASClaimNative(ctx context.Context, corrID, subj
 	// Source the order's procedure {system, code, display} (CPT or HCPCS) for the EOB side-effect.
 	// system flows from the order so a HCPCS order yields a HCPCS-system EOB (FR-28) — threaded as
 	// a unit. The FORWARD is unconditional; an unrecognized system → empty code → no EOB (soft).
-	procSystem, cpt, cptDisplay, _ := shnsdk.ParseServiceRequestProductCoding(s.srJSON) // best-effort; empty cpt → no EOB built below
+	// ParseOrderProductCoding handles BOTH a ServiceRequest order and a DeviceRequest order (the
+	// HomeOxygen provider-data lane), so a DME DeviceRequest still yields its HCPCS EOB.
+	procSystem, cpt, cptDisplay, _ := shnsdk.ParseOrderProductCoding(s.srJSON) // best-effort; empty cpt → no EOB built below
 	body, bad := n.post(ctx, n.baseURL, "/Claim/$submit", requestFHIR, "PAS submit")
 	if bad.Status != 0 {
 		return bad, nil
@@ -148,12 +150,34 @@ func (n *nativeResponder) handlePASClaimNative(ctx context.Context, corrID, subj
 		return LegResult{Status: http.StatusBadGateway, Message: "upstream payer PAS submit response unparseable"}, nil
 	}
 	if pended {
-		// FR-21/FR-6: record the pend (payer-local, metadata-only) so the follow-up conformant
-		// ClaimUpdate (pas-claim-update) BeginClaimUpdate can bind to a REAL prior pend.
-		return LegResult{
-			ResponseFHIR: norm,
-			Commit:       func() error { return n.store.RecordPendedClaim(subjectPCI, corrID) },
-		}, nil
+		// SINGLE-SHOT DME (HomeOxygen provider-data lane): a DeviceRequest order has NO follow-up
+		// amendment leg — its conditional-coverage pend (A4) auto-resolves on br-payer's timer
+		// (PasPendedResolutionService, PAS_PENDED_RESOLUTION_DELAY_SECONDS). Poll GET
+		// ClaimResponse/{id} until the timer flips it to the terminal A1 (the SAME machinery the
+		// ClaimUpdate path uses). A ServiceRequest order keeps the prior behavior (return the pend so
+		// the composite UC-04/06 amendment leg can run) — so this does NOT regress the amendment lanes.
+		if orderIsDeviceRequest(s.srJSON) {
+			crID := claimResponseIDFromPASResponse(norm)
+			if crID == "" {
+				return LegResult{Status: http.StatusBadGateway, Message: "pended PAS submit response has no ClaimResponse id to re-query"}, nil
+			}
+			resolved, rerr := n.pollClaimResponseUntilApproved(ctx, crID)
+			if rerr != nil {
+				return LegResult{Status: http.StatusBadGateway, Message: "PAS pend re-query failed"}, nil
+			}
+			if resolved == nil {
+				// Never resolved within the bound → genuine non-resolution, never a silent pass.
+				return LegResult{Status: http.StatusUnprocessableEntity, Message: "single-shot PAS still pended after re-query"}, nil
+			}
+			norm = resolved // fall through to the approved EOB-projection path below
+		} else {
+			// FR-21/FR-6: record the pend (payer-local, metadata-only) so the follow-up conformant
+			// ClaimUpdate (pas-claim-update) BeginClaimUpdate can bind to a REAL prior pend.
+			return LegResult{
+				ResponseFHIR: norm,
+				Commit:       func() error { return n.store.RecordPendedClaim(subjectPCI, corrID) },
+			}, nil
+		}
 	}
 	parsed, err := shnsdk.ParseClaimResponse(norm)
 	if err != nil {
@@ -198,6 +222,20 @@ func (n *nativeResponder) projectDecisionEOB(corrID, patientRef, procSystem, cpt
 		AuthNumber:      authNumber,
 		Created:         n.clock(),
 	})
+}
+
+// orderIsDeviceRequest reports whether the PAS order entry is a DeviceRequest (the HomeOxygen DME
+// provider-data lane) vs a ServiceRequest (the procedure lanes). The single-shot DME lane has no
+// amendment leg, so its conditional-coverage pend is auto-resolved on submit; ServiceRequest lanes
+// keep the pend for their amendment. "" / unparseable ⇒ false (treated as the procedure default).
+func orderIsDeviceRequest(orderJSON []byte) bool {
+	var p struct {
+		ResourceType string `json:"resourceType"`
+	}
+	if json.Unmarshal(orderJSON, &p) != nil {
+		return false
+	}
+	return p.ResourceType == "DeviceRequest"
 }
 
 // pollClaimResponseUntilApproved polls the partner's GET ClaimResponse/{id} until it resolves to an

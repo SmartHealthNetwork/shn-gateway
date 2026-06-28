@@ -9,6 +9,7 @@ func TestPACatalog_Ops(t *testing.T) {
 	want := map[string]string{
 		"coverage-eligibility":    "eligibility-inquiry",
 		"crd-order-select":        "crd-order-select",
+		"crd-order-dispatch":      "crd-order-dispatch",
 		"dtr-questionnaire-fetch": "dtr-questionnaire-fetch",
 		"federated-query":         "federated-query-submit",
 		"patient-dtr":             "patient-dtr-request",

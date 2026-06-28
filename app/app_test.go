@@ -380,3 +380,70 @@ func TestLoadConfig_IngressValid(t *testing.T) {
 		t.Fatalf("IngressBaseURL = %q, want %q", cfg.IngressBaseURL, "https://gw.test")
 	}
 }
+
+// ---- provider-data origination config tests ----
+
+// TestLoadConfig_ProviderDataRequiresPopulateURL: ORIGINATION_PROFILE=provider-data
+// without PROVIDER_DTR_POPULATE_URL is a boot error (the operated $populate endpoint
+// is the crux of the provider-data lane).
+func TestLoadConfig_ProviderDataRequiresPopulateURL(t *testing.T) {
+	e := map[string]string{
+		"ROLE":                "provider",
+		"SHN_SECRETS":         "/x",
+		"SHN_DISCOVERY_URL":   "https://d",
+		"ORIGINATION_PROFILE": "provider-data",
+		// PROVIDER_DTR_POPULATE_URL deliberately unset.
+	}
+	_, err := loadConfig(func(k string) string { return e[k] })
+	if err == nil {
+		t.Fatal("want error: ORIGINATION_PROFILE=provider-data without PROVIDER_DTR_POPULATE_URL")
+	}
+	if !strings.Contains(err.Error(), "PROVIDER_DTR_POPULATE_URL") {
+		t.Fatalf("error should reference PROVIDER_DTR_POPULATE_URL, got: %v", err)
+	}
+}
+
+// TestLoadConfig_ProviderDataWithPopulateURLIsOK: the minimum valid provider-data config
+// loads cleanly and the OriginationProfile is carried.
+func TestLoadConfig_ProviderDataWithPopulateURLIsOK(t *testing.T) {
+	e := map[string]string{
+		"ROLE":                      "provider",
+		"SHN_SECRETS":               "/x",
+		"SHN_DISCOVERY_URL":         "https://d",
+		"ORIGINATION_PROFILE":       "provider-data",
+		"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate",
+	}
+	cfg, err := loadConfig(func(k string) string { return e[k] })
+	if err != nil {
+		t.Fatalf("valid provider-data config: %v", err)
+	}
+	if cfg.OriginationProfile != "provider-data" {
+		t.Fatalf("OriginationProfile = %q, want %q", cfg.OriginationProfile, "provider-data")
+	}
+	if cfg.ProviderDTRPopulateURL != "https://populate.test/fhir/Questionnaire/$populate" {
+		t.Fatalf("ProviderDTRPopulateURL = %q, want full URL", cfg.ProviderDTRPopulateURL)
+	}
+}
+
+// TestLoadConfig_DispatchEnvVars: PAYER_DAVINCI_DISPATCH_SERVICE_ID and
+// PAYER_DAVINCI_DISPATCH_HOOK are carried into the config fields used by
+// WithCRDDispatchService (the crd-order-dispatch leg).
+func TestLoadConfig_DispatchEnvVars(t *testing.T) {
+	e := map[string]string{
+		"ROLE":                              "payer",
+		"SHN_SECRETS":                       "/x",
+		"SHN_DISCOVERY_URL":                 "https://d",
+		"PAYER_DAVINCI_DISPATCH_SERVICE_ID": "order-dispatch-crd",
+		"PAYER_DAVINCI_DISPATCH_HOOK":       "order-dispatch",
+	}
+	cfg, err := loadConfig(func(k string) string { return e[k] })
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.PayerDavinciDispatchServiceID != "order-dispatch-crd" {
+		t.Fatalf("PayerDavinciDispatchServiceID = %q; want %q", cfg.PayerDavinciDispatchServiceID, "order-dispatch-crd")
+	}
+	if cfg.PayerDavinciDispatchHook != "order-dispatch" {
+		t.Fatalf("PayerDavinciDispatchHook = %q; want %q", cfg.PayerDavinciDispatchHook, "order-dispatch")
+	}
+}

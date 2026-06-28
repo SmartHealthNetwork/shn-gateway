@@ -26,6 +26,14 @@ type SystemOfRecord interface {
 	ClinicalContext(memberID string) (shnsdk.ClinicalContext, bool)
 	SupplementalReport(memberID string) ([]byte, bool)
 	FacilityRecords(memberID string) (records map[string][]byte, found bool)
+	// OpenOrder returns the member's open order resource bytes (a ServiceRequest or
+	// DeviceRequest) for headless origination. found=false when none. The caller parses the
+	// product coding via shnsdk.ParseOrderProductCoding — the gateway never synthesizes the order.
+	OpenOrder(memberID string) (orderJSON []byte, found bool)
+	// ResolveByReference returns the bytes of a resource named by a relative reference
+	// (e.g. "Organization/dme-1") from the FHIR SoR. found=false when absent. Used to resolve
+	// an order's performer (the DME supplier Organization) for headless order-dispatch origination.
+	ResolveByReference(ref string) (resourceJSON []byte, found bool)
 }
 
 // Store is the gateway's own durable business state (metadata/decision only —

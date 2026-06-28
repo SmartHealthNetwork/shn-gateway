@@ -12,6 +12,7 @@ package engine
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -586,5 +587,39 @@ func TestRunCRDThenDTROrder_NamesPayer(t *testing.T) {
 	bare, _ := shnsdk.BuildCoverage("Patient/MBR-COVERED", "Coverage/MBR-COVERED")
 	if strings.Contains(string(bare), "#cms-payer") {
 		t.Fatal("bare BuildCoverage unexpectedly names cms-payer; the distinction this task relies on is gone")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// targetsBrPayer predicate tests (A4)
+// ---------------------------------------------------------------------------
+
+// failIfCalledValidator is a shnsdk.Validator test double that fails the test if Validate
+// is ever called. Used to assert that the R-8 ingress-$validate skip is in effect.
+type failIfCalledValidator struct{ t *testing.T }
+
+func (f failIfCalledValidator) Validate(_ context.Context, _ []byte, _ string) (shnsdk.Result, error) {
+	f.t.Fatal("validator must not be called (R-8 ingress skip expected)")
+	return shnsdk.Result{}, nil
+}
+
+func TestTargetsBrPayer(t *testing.T) {
+	for _, p := range []string{"composite", "provider-data"} {
+		if !targetsBrPayer(p) {
+			t.Fatalf("%q should target br-payer", p)
+		}
+	}
+	for _, p := range []string{"", "sandbox"} {
+		if targetsBrPayer(p) {
+			t.Fatalf("%q must not target br-payer", p)
+		}
+	}
+}
+
+// R-8: provider-data relays br-payer's foreign DTR/PAS bytes → ingress $validate MUST be skipped.
+func TestValidateFHIR_IngressSkip_ProviderData(t *testing.T) {
+	g := &Gateway{cfg: Config{OriginationProfile: "provider-data", Validator: failIfCalledValidator{t}}}
+	if status, _ := g.validateFHIR(context.Background(), []byte(`{}`), "ingress"); status != 0 {
+		t.Fatalf("provider-data ingress must skip $validate (R-8); got status=%d", status)
 	}
 }

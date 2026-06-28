@@ -30,13 +30,15 @@ const crdHook = "order-select"
 const maxPartnerBody = 8 << 20 // 8 MiB cap on a partner response body
 
 type nativeResponder struct {
-	client          *http.Client
-	baseURL         string // FHIR base ($questionnaire-package, $submit, CoverageEligibilityRequest)
-	cdsBaseURL      string // CDS Hooks base (/cds-services/{id}); defaults to baseURL when co-located
-	crdServiceID    string // discovered or overridden at construction (FR-G26)
-	crdHookOverride string // when set, the request hook is rewritten to this before CRD forward (FR-G26; br-payer's order-sign)
-	store           Store  // gateway-owned shadow ledger + EOB Store for the PAS legs (nil ⇒ read-only only)
-	clock           func() time.Time
+	client               *http.Client
+	baseURL              string // FHIR base ($questionnaire-package, $submit, CoverageEligibilityRequest)
+	cdsBaseURL           string // CDS Hooks base (/cds-services/{id}); defaults to baseURL when co-located
+	crdServiceID         string // discovered or overridden at construction (FR-G26)
+	crdHookOverride      string // when set, the request hook is rewritten to this before CRD forward (FR-G26; br-payer's order-sign)
+	crdDispatchServiceID string // partner's order-dispatch CDS service id (order-dispatch leg)
+	crdDispatchHook      string // when set, the request hook is rewritten to this before order-dispatch forward
+	store                Store  // gateway-owned shadow ledger + EOB Store for the PAS legs (nil ⇒ read-only only)
+	clock                func() time.Time
 	// PAS pend re-query: a real Da Vinci payer (br-payer) re-pends a conformant
 	// amendment (persistUpdatePath keeps a conditional item A4 + reschedules) and auto-resolves
 	// A4→A1 only on its own timer (PasPendedResolutionService, pas.pended-resolution-delay-seconds).
@@ -77,6 +79,13 @@ func WithCRDHook(hook string) NativeOption {
 			n.crdHookOverride = hook
 		}
 	}
+}
+
+// WithCRDDispatchService configures the partner's order-dispatch CDS service id + hook for the
+// crd-order-dispatch leg (distinct from order-select's crdServiceID/crdHookOverride). ONE payer-gw
+// serves both: crd-order-select→order-sign-crd, crd-order-dispatch→order-dispatch-crd.
+func WithCRDDispatchService(serviceID, hook string) NativeOption {
+	return func(n *nativeResponder) { n.crdDispatchServiceID, n.crdDispatchHook = serviceID, hook }
 }
 
 // WithPendReQuery overrides the PAS pend re-query poll timeout + interval (E2). Zero values keep
@@ -240,6 +249,24 @@ func (n *nativeResponder) Handle(ctx context.Context, leg, corrID, subjectPCI st
 		// Questionnaire extraction — and the no-Questionnaire 502 — is now a consumer
 		// concern (originate.go), so this leg no longer inspects the body.
 		return LegResult{ResponseFHIR: body}, nil
+
+	case "crd-order-dispatch":
+		if n.crdDispatchServiceID == "" {
+			return LegResult{Status: http.StatusBadGateway, Message: "crd-order-dispatch not configured (set PAYER_DAVINCI_DISPATCH_SERVICE_ID)"}, nil
+		}
+		fwd := requestFHIR
+		if n.crdDispatchHook != "" {
+			rewritten, herr := rewriteCDSHook(requestFHIR, n.crdDispatchHook)
+			if herr != nil {
+				return LegResult{}, herr // malformed request envelope → 500 (gateway fault)
+			}
+			fwd = rewritten
+		}
+		body, bad := n.post(ctx, n.cdsBaseURL, "/cds-services/"+n.crdDispatchServiceID, fwd, "CRD-dispatch")
+		if bad.Status != 0 {
+			return bad, nil
+		}
+		return normalizeCRDResponse(body)
 
 	case "pas-claim":
 		res, err := n.handlePASClaimNative(ctx, corrID, subjectPCI, requestFHIR)

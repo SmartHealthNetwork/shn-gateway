@@ -67,6 +67,36 @@ func (c *Client) Search(ctx context.Context, resourceType string, query url.Valu
 	return &b, nil
 }
 
+// Read issues GET {base}/{resourceType}/{id} and returns the raw response bytes.
+// Non-2xx or a read failure is an error; 404 returns an error (callers inspect the
+// status via errors.Is or by treating the error as absence).
+// found=false is returned for 404 specifically (resource absent); other errors are
+// returned as (nil, false, err) — callers that want fail-safe semantics ignore err.
+func (c *Client) Read(ctx context.Context, resourceType, id string) (body []byte, found bool, err error) {
+	u := c.base + "/" + resourceType + "/" + id
+	req, rerr := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if rerr != nil {
+		return nil, false, fmt.Errorf("fhirclient: new request: %w", rerr)
+	}
+	req.Header.Set("Accept", "application/fhir+json")
+	resp, rerr := c.hc.Do(req)
+	if rerr != nil {
+		return nil, false, fmt.Errorf("fhirclient: GET %s/%s: %w", resourceType, id, rerr)
+	}
+	defer resp.Body.Close()
+	body, rerr = io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+	if rerr != nil {
+		return nil, false, fmt.Errorf("fhirclient: read body: %w", rerr)
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, false, nil
+	}
+	if resp.StatusCode/100 != 2 {
+		return nil, false, fmt.Errorf("fhirclient: GET %s/%s: status %d: %s", resourceType, id, resp.StatusCode, truncate(body))
+	}
+	return body, true, nil
+}
+
 func truncate(b []byte) string {
 	const max = 200
 	if len(b) > max {

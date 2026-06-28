@@ -421,6 +421,14 @@ func (d *StubHolderData) SupplementalReport(memberID string) ([]byte, bool) {
 	return raw, true
 }
 
+// OpenOrder: the in-memory stub does not hold open orders; the provider-data lane
+// requires a real FHIR SoR (FHIR_DATA_URL). Returns found=false.
+func (d *StubHolderData) OpenOrder(_ string) ([]byte, bool) { return nil, false }
+
+// ResolveByReference: the in-memory stub does not resolve FHIR references; the
+// provider-data lane requires a real FHIR SoR (FHIR_DATA_URL). Returns found=false.
+func (d *StubHolderData) ResolveByReference(_ string) ([]byte, bool) { return nil, false }
+
 // FacilityRecords returns metro-spine's held records for MBR-UC05 (UC-05): the
 // operative DiagnosticReport and its DocumentReference. All other members yield
 // found=false. The provider does NOT hold these — they are retrieved by the

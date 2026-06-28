@@ -10,10 +10,18 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
+
+// targetsBrPayer reports whether the origination profile targets a real Da Vinci PAS payer
+// (br-payer), which needs the contained-insurer / absolute-refs / payer-org-entry / DTR-coverage
+// handling AND the R-8 ingress-$validate skip for br-payer's relayed foreign bytes. Generalized
+// from the composite-only literal so a new br-payer lane (provider-data) can't regress the
+// contained-payor → uniform-A3 bug OR $validate foreign relayed bytes (R-8).
+func targetsBrPayer(profile string) bool { return profile == "composite" || profile == "provider-data" }
 
 // FilledItem is the gateway-engine-LOCAL attribution surface for a DTR auto-filled
 // QR item (console response, QRItems field). The SDK's FillQuestionnaire drops the
@@ -227,6 +235,12 @@ type uc03Resp struct {
 	PendedItems   []string     `json:"pendedItems,omitempty"`
 	AmendmentCorr string       `json:"amendmentCorr,omitempty"` // UC-04/06: the pas-claim-update corrId — proves the amendment leg ran (C4)
 	Attested      bool         `json:"attested,omitempty"`      // UC-06/07: clinician/patient attestation applied (C4 UC-06 distinctive)
+	// QRAnswers surfaces the operated-$populate computed answer values keyed by the questionnaire
+	// linkId (provider-data HomeOxygen only — the native populator drops FilledItem attribution, so
+	// the values are read straight off the returned QR). It is the C1 crux evidence: it proves the
+	// $populate ran br-payer's real prepop CQL against the seeded observations (2.2=86 O₂-sat /
+	// 2.3=54 PaO₂), not an answer book. Empty when no quantity answers populated (e.g. aged-out obs).
+	QRAnswers map[string]string `json:"qrAnswers,omitempty"`
 }
 
 // crdDtrResult carries the outputs of the CRD+DTR prefix shared by UC-03/04/06.
@@ -345,7 +359,7 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 		// seam). The sandbox responder doesn't need it, so gate on the profile to keep the
 		// sandbox dtr-questionnaire-fetch leg byte-identical (C1 discipline).
 		fetch := shnsdk.QuestionnaireFetchRequest{Canonical: canonical}
-		if g.cfg.OriginationProfile == "composite" {
+		if targetsBrPayer(g.cfg.OriginationProfile) {
 			fetch.Coverage = coverageJSON
 		}
 		dtrReq, err := json.Marshal(fetch)
@@ -490,6 +504,56 @@ func setQuestionnaireResponseSubject(qrJSON []byte, ref string) []byte {
 	return out
 }
 
+// questionnaireResponseNumericAnswers walks the QR's nested items and returns, for every item that
+// carries a numeric answer, a {linkId → value} map (the value rendered as a string, e.g. "86").
+// Used only by the provider-data HomeOxygen handler to surface the operated-$populate computed O₂
+// values (linkIds 2.2/2.3) as the C1 crux evidence — the native populator drops per-item FilledItem
+// attribution, so the values are read straight off the QR. It reads BOTH answer shapes: the operated
+// HAPI CR engine emits a `valueDecimal` for a `quantity`-type item (verified live against the
+// HomeOxygen questionnaire), while the managed/hermetic populator may emit a `valueQuantity`; either
+// is accepted. An empty/aged-out QR (no numeric answers) yields an empty map.
+func questionnaireResponseNumericAnswers(qrJSON []byte) map[string]string {
+	var qr struct {
+		Item []qrItemNode `json:"item"`
+	}
+	if err := json.Unmarshal(qrJSON, &qr); err != nil {
+		return nil
+	}
+	out := map[string]string{}
+	var walk func(items []qrItemNode)
+	walk = func(items []qrItemNode) {
+		for _, it := range items {
+			for _, a := range it.Answer {
+				switch {
+				case a.ValueDecimal != nil:
+					out[it.LinkID] = strconv.FormatFloat(*a.ValueDecimal, 'f', -1, 64)
+				case a.ValueQuantity != nil && a.ValueQuantity.Value != nil:
+					out[it.LinkID] = strconv.FormatFloat(*a.ValueQuantity.Value, 'f', -1, 64)
+				}
+			}
+			walk(it.Item)
+		}
+	}
+	walk(qr.Item)
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// qrItemNode is the recursive QR item shape questionnaireResponseNumericAnswers reads (only the
+// fields it needs: linkId, numeric answers — decimal or quantity — and nested items).
+type qrItemNode struct {
+	LinkID string `json:"linkId"`
+	Answer []struct {
+		ValueDecimal  *float64 `json:"valueDecimal"`
+		ValueQuantity *struct {
+			Value *float64 `json:"value"`
+		} `json:"valueQuantity"`
+	} `json:"answer"`
+	Item []qrItemNode `json:"item"`
+}
+
 // questionnaireResponseCanonical returns the URL-PART of the QR's `questionnaire`
 // canonical (version stripped). The managed QR sets a VERSIONED canonical
 // (e.g. ".../pa-lumbar-mri|1.0.0") while the F5 `canonical` is the bare url — so the
@@ -597,9 +661,9 @@ func (g *Gateway) handleUC03(w http.ResponseWriter, r *http.Request) {
 	bundleJSON, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
 		QR: res.qrJSON, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef,
 		Corr: pasCorr, Created: g.cfg.Clock(),
-		ContainedInsurer: g.cfg.OriginationProfile == "composite",
-		AbsoluteRefs:     g.cfg.OriginationProfile == "composite",
-		PayerOrgEntry:    g.cfg.OriginationProfile == "composite", // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
+		ContainedInsurer: targetsBrPayer(g.cfg.OriginationProfile),
+		AbsoluteRefs:     targetsBrPayer(g.cfg.OriginationProfile),
+		PayerOrgEntry:    targetsBrPayer(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build bundle failed"})
@@ -661,9 +725,9 @@ func (g *Gateway) handleUC07HCPCS(w http.ResponseWriter, r *http.Request) {
 	bundleJSON, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
 		QR: res.qrJSON, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef,
 		Corr: pasCorr, Created: g.cfg.Clock(),
-		ContainedInsurer: g.cfg.OriginationProfile == "composite",
-		AbsoluteRefs:     g.cfg.OriginationProfile == "composite",
-		PayerOrgEntry:    g.cfg.OriginationProfile == "composite", // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
+		ContainedInsurer: targetsBrPayer(g.cfg.OriginationProfile),
+		AbsoluteRefs:     targetsBrPayer(g.cfg.OriginationProfile),
+		PayerOrgEntry:    targetsBrPayer(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build bundle failed"})
@@ -738,9 +802,9 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 	bundleJSON, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
 		QR: res.qrJSON, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef,
 		Corr: pasCorr, Created: g.cfg.Clock(),
-		ContainedInsurer: g.cfg.OriginationProfile == "composite",
-		AbsoluteRefs:     g.cfg.OriginationProfile == "composite",
-		PayerOrgEntry:    g.cfg.OriginationProfile == "composite", // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
+		ContainedInsurer: targetsBrPayer(g.cfg.OriginationProfile),
+		AbsoluteRefs:     targetsBrPayer(g.cfg.OriginationProfile),
+		PayerOrgEntry:    targetsBrPayer(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build bundle failed"})
@@ -800,9 +864,9 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 	updateBundle, err := shnsdk.BuildConformantClaimUpdateBundle(shnsdk.ConformantClaimUpdateInputs{
 		QR: res.qrJSON, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef,
 		Provenance: provJSON, DiagnosticReport: drJSON, Corr: updateCorr, OriginalCorr: pasCorr, Created: g.cfg.Clock(),
-		ContainedInsurer: g.cfg.OriginationProfile == "composite",
-		AbsoluteRefs:     g.cfg.OriginationProfile == "composite",
-		PayerOrgEntry:    g.cfg.OriginationProfile == "composite", // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
+		ContainedInsurer: targetsBrPayer(g.cfg.OriginationProfile),
+		AbsoluteRefs:     targetsBrPayer(g.cfg.OriginationProfile),
+		PayerOrgEntry:    targetsBrPayer(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build update bundle failed"})
@@ -905,9 +969,9 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 	bundleJSON, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
 		QR: res.qrJSON, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef,
 		Corr: pasCorr, Created: g.cfg.Clock(),
-		ContainedInsurer: g.cfg.OriginationProfile == "composite",
-		AbsoluteRefs:     g.cfg.OriginationProfile == "composite",
-		PayerOrgEntry:    g.cfg.OriginationProfile == "composite", // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
+		ContainedInsurer: targetsBrPayer(g.cfg.OriginationProfile),
+		AbsoluteRefs:     targetsBrPayer(g.cfg.OriginationProfile),
+		PayerOrgEntry:    targetsBrPayer(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build bundle failed"})
@@ -990,9 +1054,9 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 	updateBundle, err := shnsdk.BuildConformantClaimUpdateBundle(shnsdk.ConformantClaimUpdateInputs{
 		QR: res.qrJSON, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef,
 		Provenance: provJSON, DiagnosticReport: drJSON, Corr: updateCorr, OriginalCorr: pasCorr, Created: g.cfg.Clock(),
-		ContainedInsurer: g.cfg.OriginationProfile == "composite",
-		AbsoluteRefs:     g.cfg.OriginationProfile == "composite",
-		PayerOrgEntry:    g.cfg.OriginationProfile == "composite", // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
+		ContainedInsurer: targetsBrPayer(g.cfg.OriginationProfile),
+		AbsoluteRefs:     targetsBrPayer(g.cfg.OriginationProfile),
+		PayerOrgEntry:    targetsBrPayer(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build update bundle failed"})
@@ -1051,7 +1115,7 @@ func (g *Gateway) handleUC08(w http.ResponseWriter, r *http.Request) {
 	// Composite (Mode A): br-payer's J3490 CRD verdict is NOT-COVERED, so opt in to carry the
 	// order past the FR-G25 stop to PAS → the formal A2 "Not Certified" ClaimResponse
 	// (D-S2-2). Sandbox keeps the covered+PA→PAS-deny path (proceedOnNotCovered stays false).
-	res, ok := g.runCRDThenDTROrder(w, r, "MBR-UC08", o.system, o.code, o.display, o.dx, g.cfg.OriginationProfile == "composite")
+	res, ok := g.runCRDThenDTROrder(w, r, "MBR-UC08", o.system, o.code, o.display, o.dx, targetsBrPayer(g.cfg.OriginationProfile))
 	if !ok {
 		return
 	}
@@ -1062,9 +1126,9 @@ func (g *Gateway) handleUC08(w http.ResponseWriter, r *http.Request) {
 	bundleJSON, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
 		QR: res.qrJSON, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef,
 		Corr: pasCorr, Created: g.cfg.Clock(),
-		ContainedInsurer: g.cfg.OriginationProfile == "composite",
-		AbsoluteRefs:     g.cfg.OriginationProfile == "composite",
-		PayerOrgEntry:    g.cfg.OriginationProfile == "composite", // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
+		ContainedInsurer: targetsBrPayer(g.cfg.OriginationProfile),
+		AbsoluteRefs:     targetsBrPayer(g.cfg.OriginationProfile),
+		PayerOrgEntry:    targetsBrPayer(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build bundle failed"})
