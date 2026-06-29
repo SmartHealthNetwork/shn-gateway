@@ -35,6 +35,22 @@ func TestHandleUC04_ThreadsSceneMember(t *testing.T) {
 	}
 }
 
+// handleUC08 must thread sceneMember so provider-data reads its own seeded J3490 order
+// (OpenOrder is keyed on member) while composite stays on MBR-UC08.
+func TestHandleUC08_ThreadsSceneMember(t *testing.T) {
+	src, err := os.ReadFile("originate.go")
+	if err != nil {
+		t.Fatalf("read source: %v", err)
+	}
+	fn := extractFunc(t, string(src), "handleUC08")
+	if !strings.Contains(fn, `g.sceneMember("MBR-UC08", "MBR-PD-UC08")`) {
+		t.Fatalf("handleUC08 does not thread sceneMember(MBR-UC08, MBR-PD-UC08)")
+	}
+	if strings.Contains(fn, `runCRDThenDTROrder(w, r, "MBR-UC08"`) {
+		t.Fatalf("handleUC08 still passes the MBR-UC08 literal to runCRDThenDTROrder — must pass the sceneMember result")
+	}
+}
+
 // extractFunc returns the source text of the named top-level Gateway method (brace-balanced).
 // Shared by the static wiring guards in this package.
 func extractFunc(t *testing.T, src, name string) string {

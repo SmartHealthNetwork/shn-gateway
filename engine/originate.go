@@ -1218,7 +1218,8 @@ func (g *Gateway) handleUC08(w http.ResponseWriter, r *http.Request) {
 	// Composite (Mode A): br-payer's J3490 CRD verdict is NOT-COVERED, so opt in to carry the
 	// order past the FR-G25 stop to PAS → the formal A2 "Not Certified" ClaimResponse
 	// (D-S2-2). Sandbox keeps the covered+PA→PAS-deny path (proceedOnNotCovered stays false).
-	res, ok := g.runCRDThenDTROrder(w, r, "MBR-UC08", o.system, o.code, o.display, o.dx, targetsBrPayer(g.cfg.OriginationProfile))
+	member := g.sceneMember("MBR-UC08", "MBR-PD-UC08")
+	res, ok := g.runCRDThenDTROrder(w, r, member, o.system, o.code, o.display, o.dx, targetsBrPayer(g.cfg.OriginationProfile))
 	if !ok {
 		return
 	}
