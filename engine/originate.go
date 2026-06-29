@@ -235,11 +235,16 @@ type uc03Resp struct {
 	PendedItems   []string     `json:"pendedItems,omitempty"`
 	AmendmentCorr string       `json:"amendmentCorr,omitempty"` // UC-04/06: the pas-claim-update corrId — proves the amendment leg ran (C4)
 	Attested      bool         `json:"attested,omitempty"`      // UC-06/07: clinician/patient attestation applied (C4 UC-06 distinctive)
-	// QRAnswers surfaces the operated-$populate computed answer values keyed by the questionnaire
-	// linkId (provider-data HomeOxygen only — the native populator drops FilledItem attribution, so
-	// the values are read straight off the returned QR). It is the C1 crux evidence: it proves the
-	// $populate ran br-payer's real prepop CQL against the seeded observations (2.2=86 O₂-sat /
-	// 2.3=54 PaO₂), not an answer book. Empty when no quantity answers populated (e.g. aged-out obs).
+	// QRAnswers surfaces answer values keyed by the questionnaire linkId across the provider-data
+	// scenarios, with provenance that DIFFERS by family — never conflate them:
+	//   - HomeOxygen: operated-$populate COMPUTED values (the native populator drops FilledItem
+	//     attribution, so they are read straight off the returned QR). This is the crux evidence the
+	//     $populate ran br-payer's real prepop CQL against the seeded observations (2.2=86 O₂-sat /
+	//     2.3=54 PaO₂), not an answer book. Empty when no quantity answers populated (e.g. aged-out obs).
+	//   - UC-04 / UC-06: ORG-ATTESTED-FROM-SEED base values (1.1 service category / 3.1 dx, attested
+	//     from the seeded order — the adaptive HomeHealthAssessment is 0-CQL, so $populate auto-pops
+	//     nothing). These are traces-to-seed evidence, NOT CQL-computed; the QR is verdict-INERT
+	//     (br-payer's A4→A1 is its pend-resolution timer).
 	QRAnswers map[string]string `json:"qrAnswers,omitempty"`
 }
 

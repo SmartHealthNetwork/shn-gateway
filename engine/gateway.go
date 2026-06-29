@@ -29,6 +29,17 @@ import (
 // linkId, so it is hoisted to a single const.
 const oswestryLinkID = "functional-status-oswestry"
 
+// hhaFunctionalStatusLinkID is the HomeHealthAssessment questionnaire's free-text functional-status
+// item (the Oswestry analog), the clinician-entered manual item for provider-data UC-06 — linkId
+// "3.2" "Functional limitations" (type text, 0-CQL), confirmed against br-payer's live
+// $questionnaire-package.
+const hhaFunctionalStatusLinkID = "3.2"
+
+// defaultHHAFunctionalLimitations is the operator-supplied free-text functional-status narrative for
+// the provider-data UC-06 clinician attestation when none is provided (the free-text analog of the
+// composite Oswestry "42"; D-2RI-1 — operator-supplied, NOT derived from a clinical SoR fact).
+const defaultHHAFunctionalLimitations = "Impaired ambulation and reduced lower-extremity strength limiting independent mobility; skilled physical therapy indicated."
+
 // Per-message FHIR validation: the payload-blind Hub cannot validate payloads
 // (AI-2), so validation lives at the gateways on egress and ingress. Every
 // Validate call passes an EMPTY profile = base-R4 validation via $validate
@@ -256,6 +267,7 @@ type pendState struct {
 	pasCorr     string
 	filled      []FilledItem
 	needed      []string
+	qrAnswers   map[string]string // provider-data UC-06: the org-attested base answer trace (1.1/3.1), surfaced in the response as FR-17 mixed-provenance evidence
 }
 
 // storePending saves st under a fresh opaque resume token and returns it.

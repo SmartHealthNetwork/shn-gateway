@@ -36,9 +36,41 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 	if !ok {
 		return pendState{}, false
 	}
+	// provider-data UC-06: the operated $populate on the 0-CQL HomeHealthAssessment auto-pops
+	// nothing, so org-attest the base items from the seeded order (the UC-04 lane's attestation)
+	// BEFORE the pended submit. The pended QR then carries org-sourced base provenance (1.1/3.1),
+	// against which completeClinician's clinician-entered functional-status item contrasts (FR-17
+	// mixed provenance). Verdict-INERT — HHA is 0-CQL and br-payer's A4→A1 is its pend-resolution
+	// timer. composite/sandbox and UC-07 keep res.qrJSON byte-unchanged.
+	qrForSubmit := res.qrJSON
+	var baseTrace map[string]string
+	if g.cfg.OriginationProfile == "provider-data" && scenario == "uc06" {
+		answers, err := uc04AttestationAnswers(res.srJSON)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			return pendState{}, false
+		}
+		orderRef, ok := resourceRef(res.srJSON)
+		if !ok {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "order missing id"})
+			return pendState{}, false
+		}
+		qrForSubmit, err = shnsdk.FillQuestionnaireFromAnswers(res.questionnaireJSON, answers,
+			"Organization/"+g.cfg.HolderID,
+			shnsdk.QRContext{PatientRef: res.patientRef, CoverageRef: res.coverageRef, OrderRef: orderRef, Authored: g.cfg.Clock()})
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "attest base questionnaire failed"})
+			return pendState{}, false
+		}
+		if status, msg := g.validateFHIR(ctx, qrForSubmit, "egress"); status != 0 {
+			writeJSON(w, status, map[string]string{"error": msg})
+			return pendState{}, false
+		}
+		baseTrace = attestedAnswerValues(answers)
+	}
 	pasCorr := g.cfg.CorrelationGen()
 	bundleJSON, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
-		QR: res.qrJSON, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef,
+		QR: qrForSubmit, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef,
 		Corr: pasCorr, Created: g.cfg.Clock(),
 		ContainedInsurer: targetsBrPayer(g.cfg.OriginationProfile),
 		AbsoluteRefs:     targetsBrPayer(g.cfg.OriginationProfile),
@@ -69,7 +101,7 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 	needed := neededItemCodes(neededItems)
 	return pendState{
 		scenario:    scenario,
-		qrJSON:      res.qrJSON,
+		qrJSON:      qrForSubmit,
 		srJSON:      res.srJSON,
 		patientRef:  res.patientRef,
 		coverageRef: res.coverageRef,
@@ -77,6 +109,7 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 		pasCorr:     pasCorr,
 		filled:      res.filled,
 		needed:      needed,
+		qrAnswers:   baseTrace,
 	}, true
 }
 
@@ -94,7 +127,7 @@ func (g *Gateway) handleUC06(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request"})
 		return
 	}
-	st, ok := g.scenarioToPend(w, r, "uc06", "MBR-UC06")
+	st, ok := g.scenarioToPend(w, r, "uc06", g.sceneMember("MBR-UC06", "MBR-PD-UC06"))
 	if !ok {
 		return
 	}
@@ -110,10 +143,27 @@ func (g *Gateway) handleUC06(w http.ResponseWriter, r *http.Request) {
 // single-call path byte-identical.
 func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st pendState, score, npi string) bool {
 	ctx := r.Context()
-	const srRef = "ServiceRequest/sr-uc06"
+	srRef := "ServiceRequest/sr-uc06" // composite/sandbox literal
+	linkID := oswestryLinkID
 	const uc06QRID = "qr-uc06"
+	// provider-data UC-06: bind to the REAL seeded order ref (not the composite literal) and attest
+	// the HHA's free-text functional-status item (clinician-entered manual entry), NOT the
+	// 72148/lumbar oswestry item. The attested value is operator-supplied (D-2RI-1); verdict-inert
+	// (the A4→A1 is the pend-resolution timer).
+	if g.cfg.OriginationProfile == "provider-data" {
+		ref, ok := resourceRef(st.srJSON)
+		if !ok {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "order missing id"})
+			return false
+		}
+		srRef = ref
+		linkID = hhaFunctionalStatusLinkID
+		if score == "" {
+			score = defaultHHAFunctionalLimitations
+		}
+	}
 	if score == "" {
-		score = "42" // preserved default
+		score = "42" // preserved composite default (Oswestry score)
 	}
 	if npi == "" {
 		npi = g.cfg.NPI
@@ -121,7 +171,7 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 	if npi == "" {
 		npi = "1999999999"
 	}
-	itemJSON, err := shnsdk.BuildManualAttestedItem(oswestryLinkID, score,
+	itemJSON, err := shnsdk.BuildManualAttestedItem(linkID, score,
 		shnsdk.Attestation{NPI: npi, Text: "I attest these are my clinical findings.", When: g.cfg.Clock().Format("2006-01-02")})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build manual item failed"})
@@ -188,7 +238,7 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "holder write failed (auth number)"})
 		return false
 	}
-	writeJSON(w, http.StatusOK, uc03Resp{PARequired: true, AuthNumber: parsed.PreAuthRef, ValidUntil: parsed.ValidUntil, AmendmentCorr: updateCorr, QRItems: st.filled, PendedItems: st.needed, Attested: true})
+	writeJSON(w, http.StatusOK, uc03Resp{PARequired: true, AuthNumber: parsed.PreAuthRef, ValidUntil: parsed.ValidUntil, AmendmentCorr: updateCorr, QRItems: st.filled, PendedItems: st.needed, Attested: true, QRAnswers: st.qrAnswers})
 	return true
 }
 
@@ -335,7 +385,7 @@ type startResp struct {
 
 // handleUC06Start runs UC-06 to PENDED and parks it under a resume token.
 func (g *Gateway) handleUC06Start(w http.ResponseWriter, r *http.Request) {
-	st, ok := g.scenarioToPend(w, r, "uc06", "MBR-UC06")
+	st, ok := g.scenarioToPend(w, r, "uc06", g.sceneMember("MBR-UC06", "MBR-PD-UC06"))
 	if !ok {
 		return
 	}
