@@ -40,6 +40,11 @@ const hhaFunctionalStatusLinkID = "3.2"
 // composite Oswestry "42"; D-2RI-1 — operator-supplied, NOT derived from a clinical SoR fact).
 const defaultHHAFunctionalLimitations = "Impaired ambulation and reduced lower-extremity strength limiting independent mobility; skilled physical therapy indicated."
 
+// defaultHHAFunctionalLimitationsPatient is the operator-supplied free-text functional-status narrative
+// for provider-data UC-07 when the patient provides none (the patient analog of the clinician default;
+// D-2RI-1 — operator-supplied, NOT a real patient's authored value, which is DEF-9/OIDC-LOCAL).
+const defaultHHAFunctionalLimitationsPatient = "I have trouble walking and standing without help and need physical therapy to regain my strength and mobility."
+
 // Per-message FHIR validation: the payload-blind Hub cannot validate payloads
 // (AI-2), so validation lives at the gateways on egress and ingress. Every
 // Validate call passes an EMPTY profile = base-R4 validation via $validate

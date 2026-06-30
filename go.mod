@@ -3,7 +3,7 @@ module github.com/SmartHealthNetwork/shn-gateway
 go 1.26
 
 require (
-	github.com/SmartHealthNetwork/shn-sdk v0.22.0
+	github.com/SmartHealthNetwork/shn-sdk v0.23.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/samply/golang-fhir-models/fhir-models v0.3.2

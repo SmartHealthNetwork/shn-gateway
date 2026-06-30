@@ -143,12 +143,16 @@ func (g *Gateway) handleScenario(w http.ResponseWriter, r *http.Request) {
 
 	// A participant-facing gateway rejects unknown branches rather than silently
 	// treating anything non-"covered" as not-covered.
+	// provider-data lane uses distinct UC-01 personas (MBR-PD-UC01/MBR-PD-UC01-NC) so
+	// each scenario reads its OWN seeded Coverage; composite/sandbox keep the shared
+	// MBR-COVERED/MBR-NOTCOVERED defaults (byte-identical — sceneMember returns the
+	// default literal for non-provider-data OriginationProfile).
 	var memberID string
 	switch req.Branch {
 	case "covered":
-		memberID = "MBR-COVERED"
+		memberID = g.sceneMember("MBR-COVERED", "MBR-PD-UC01")
 	case "notcovered":
-		memberID = "MBR-NOTCOVERED"
+		memberID = g.sceneMember("MBR-NOTCOVERED", "MBR-PD-UC01-NC")
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown branch"})
 		return
@@ -1059,10 +1063,10 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown branch"})
 		return
 	}
-	member := "MBR-UC05"
+	member := g.sceneMember("MBR-UC05", "MBR-PD-UC05")
 	srRef := "ServiceRequest/sr-uc05"
 	if req.Branch == "noconsent" {
-		member = "MBR-UC05-NOCONSENT"
+		member = g.sceneMember("MBR-UC05-NOCONSENT", "MBR-PD-UC05-NC")
 		srRef = "ServiceRequest/sr-uc05-noconsent"
 	}
 
@@ -1070,6 +1074,19 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 	res, ok := g.runCRDThenDTROrder(w, r, member, o.system, o.code, o.display, o.dx, false)
 	if !ok {
 		return
+	}
+
+	// provider-data (L1): persist the auth against the REAL seeded order ref, not the
+	// composite literal — Bug-2 pattern from handleUC04. The noconsent branch never
+	// reaches StoreAuthNumber (returns consentDenied earlier), so the re-assigned srRef
+	// is moot there but harmless.
+	if g.cfg.OriginationProfile == "provider-data" {
+		ref, ok := resourceRef(res.srJSON)
+		if !ok {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "order missing id"})
+			return
+		}
+		srRef = ref
 	}
 
 	// PAS submit — expect PENDED (no operative DiagnosticReport yet).

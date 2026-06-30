@@ -44,7 +44,7 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 	// timer. composite/sandbox and UC-07 keep res.qrJSON byte-unchanged.
 	qrForSubmit := res.qrJSON
 	var baseTrace map[string]string
-	if g.cfg.OriginationProfile == "provider-data" && scenario == "uc06" {
+	if g.cfg.OriginationProfile == "provider-data" && (scenario == "uc06" || scenario == "uc07") {
 		answers, err := uc04AttestationAnswers(res.srJSON)
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
@@ -258,7 +258,7 @@ func (g *Gateway) handleUC07(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request"})
 		return
 	}
-	st, ok := g.scenarioToPend(w, r, "uc07", "MBR-UC07")
+	st, ok := g.scenarioToPend(w, r, "uc07", g.sceneMember("MBR-UC07", "MBR-PD-UC07"))
 	if !ok {
 		return
 	}
@@ -273,17 +273,35 @@ func (g *Gateway) handleUC07(w http.ResponseWriter, r *http.Request) {
 // score defaults to "42", keeping the single-call path byte-identical.
 func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pendState, score string) bool {
 	ctx := r.Context()
-	const srRef = "ServiceRequest/sr-uc07"
+	srRef := "ServiceRequest/sr-uc07" // composite/sandbox literal
+	linkID := oswestryLinkID
 	const uc07QRID = "qr-uc07"
-	if score == "" {
-		score = "42" // default Oswestry score for the demo/harness
-	}
-	// #5: fail fast on an invalid provided score before burning the sealed
-	// patient-dtr leg — a clean 400 for the console rather than an opaque round-trip
-	// error. The empty→"42" demo default above is validated here too (it passes).
-	if err := shnsdk.ValidatePatientAnswer(oswestryLinkID, score); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid patient answer: " + err.Error()})
-		return false
+	// provider-data UC-07: bind to the REAL seeded order ref (not the composite literal) and attest
+	// the HHA's free-text functional-status item (patient-entered), NOT the 72148/lumbar oswestry
+	// item. The attested value is operator-supplied (D-2RI-1); verdict-inert (the A4→A1 is the
+	// pend-resolution timer). Patient analog of completeClinician's provider-data branch.
+	if g.cfg.OriginationProfile == "provider-data" {
+		ref, ok := resourceRef(st.srJSON)
+		if !ok {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "order missing id"})
+			return false
+		}
+		srRef = ref
+		linkID = hhaFunctionalStatusLinkID
+		if score == "" {
+			score = defaultHHAFunctionalLimitationsPatient
+		}
+	} else {
+		if score == "" {
+			score = "42" // default Oswestry score for the demo/harness
+		}
+		// #5: fail fast on an invalid provided score before burning the sealed
+		// patient-dtr leg — a clean 400 for the console rather than an opaque round-trip
+		// error. The empty→"42" demo default above is validated here too (it passes).
+		if err := shnsdk.ValidatePatientAnswer(oswestryLinkID, score); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid patient answer: " + err.Error()})
+			return false
+		}
 	}
 
 	// --- Patient-DTR exchange: ask the Trust PHG to have the patient author + attest. ---
@@ -292,7 +310,7 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "no PHG registered"})
 		return false
 	}
-	pdReq, err := json.Marshal(patientDTRRequest{LinkID: oswestryLinkID, Answer: score, PatientRef: st.patientRef})
+	pdReq, err := json.Marshal(patientDTRRequest{LinkID: linkID, Answer: score, PatientRef: st.patientRef})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build patient-dtr request failed"})
 		return false
@@ -371,7 +389,7 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "holder write failed (auth number)"})
 		return false
 	}
-	writeJSON(w, http.StatusOK, uc03Resp{PARequired: true, AuthNumber: parsed.PreAuthRef, ValidUntil: parsed.ValidUntil, AmendmentCorr: updateCorr, QRItems: st.filled, PendedItems: st.needed, Attested: true})
+	writeJSON(w, http.StatusOK, uc03Resp{PARequired: true, AuthNumber: parsed.PreAuthRef, ValidUntil: parsed.ValidUntil, AmendmentCorr: updateCorr, QRItems: st.filled, PendedItems: st.needed, Attested: true, QRAnswers: st.qrAnswers})
 	return true
 }
 
@@ -395,7 +413,7 @@ func (g *Gateway) handleUC06Start(w http.ResponseWriter, r *http.Request) {
 
 // handleUC07Start runs UC-07 to PENDED and parks it under a resume token.
 func (g *Gateway) handleUC07Start(w http.ResponseWriter, r *http.Request) {
-	st, ok := g.scenarioToPend(w, r, "uc07", "MBR-UC07")
+	st, ok := g.scenarioToPend(w, r, "uc07", g.sceneMember("MBR-UC07", "MBR-PD-UC07"))
 	if !ok {
 		return
 	}

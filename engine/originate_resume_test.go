@@ -8,6 +8,26 @@ import (
 	"time"
 )
 
+// TestCompletePatient_ProviderData_RejectsOrderWithoutID proves the provider-data UC-07 patient
+// amendment fails CLOSED when the parked order has no resolvable id — it must bind to the REAL
+// seeded order ref, never a composite literal. Hermetic: resourceRef is checked before any leg.
+func TestCompletePatient_ProviderData_RejectsOrderWithoutID(t *testing.T) {
+	g := &Gateway{cfg: Config{
+		OriginationProfile: "provider-data",
+		Clock:              func() time.Time { return time.Unix(0, 0).UTC() },
+	}}
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/scenario/uc07/complete", nil)
+	st := pendState{scenario: "uc07", srJSON: []byte(`{"resourceType":"ServiceRequest","status":"active"}`)} // no id
+
+	if ok := g.completePatient(w, r, st, ""); ok {
+		t.Fatalf("completePatient returned ok=true for an order without an id; want fail-closed")
+	}
+	if w.Code != http.StatusBadGateway || !strings.Contains(w.Body.String(), "order missing id") {
+		t.Fatalf("status=%d body=%q, want 502 + 'order missing id'", w.Code, w.Body.String())
+	}
+}
+
 // TestCompleteClinician_ProviderData_RejectsOrderWithoutID proves the provider-data UC-06 amendment
 // fails CLOSED when the parked order has no resolvable id — the amendment must bind to the REAL seeded
 // order ref (resourceRef), never a composite literal. Hermetic: resourceRef is checked BEFORE any leg
