@@ -180,22 +180,22 @@ func serviceRequestSubmitBundle(t *testing.T, infoChanged bool) []byte {
 // TestRequestClaimHasInfoChanged_OnBuiltSubmitBundle is the focused predicate proof: the gateway's
 // requestClaimHasInfoChanged poll discriminator fires true on an SDK-built InfoChanged:true submit
 // bundle and false on a default one. This is what flips the single-shot ServiceRequest into the
-// timer-poll lane while a composite UC-04 submit (default, no InfoChanged) stays in the pend lane.
+// timer-poll lane while a sandbox UC-04 submit (default, no InfoChanged) stays in the pend lane.
 // infoChanged is the poll discriminator, NOT a verdict input.
 func TestRequestClaimHasInfoChanged_OnBuiltSubmitBundle(t *testing.T) {
 	if !requestClaimHasInfoChanged(serviceRequestSubmitBundle(t, true)) {
 		t.Fatalf("requestClaimHasInfoChanged must be TRUE on an InfoChanged:true submit bundle")
 	}
 	if requestClaimHasInfoChanged(serviceRequestSubmitBundle(t, false)) {
-		t.Fatalf("requestClaimHasInfoChanged must be FALSE on a default submit bundle (composite UC-04 stays in the pend lane)")
+		t.Fatalf("requestClaimHasInfoChanged must be FALSE on a default submit bundle (sandbox UC-04 stays in the pend lane)")
 	}
 }
 
 // TestNativeSubmit_SingleShotServiceRequestInfoChanged proves the widened submit gate
 // (handlePASClaimNative): a SINGLE-SHOT ServiceRequest whose submit bundle carries infoChanged now
 // POLLS the timer-resolved A1 (the SAME GET ClaimResponse/{id} machinery the DeviceRequest single-shot
-// + the composite ClaimUpdate use) — while a ServiceRequest WITHOUT infoChanged keeps the prior
-// behavior (return the A4 pend so the composite amendment leg can run). No regression to the
+// + the ClaimUpdate amendment use) — while a ServiceRequest WITHOUT infoChanged keeps the prior
+// behavior (return the A4 pend so the sandbox amendment leg can run). No regression to the
 // amendment lanes.
 func TestNativeSubmit_SingleShotServiceRequestInfoChanged(t *testing.T) {
 	// A4-on-$submit then A1-on-GET partner (the real br-payer timer shape: A4 at submit, the
@@ -241,7 +241,7 @@ func TestNativeSubmit_SingleShotServiceRequestInfoChanged(t *testing.T) {
 		}
 	})
 
-	t.Run("no-infoChanged SR -> keeps the A4 pend (RecordPendedClaim, no poll) — composite amendment lane", func(t *testing.T) {
+	t.Run("no-infoChanged SR -> keeps the A4 pend (RecordPendedClaim, no poll) — sandbox amendment lane", func(t *testing.T) {
 		bundle := serviceRequestSubmitBundle(t, false)
 		var getCount int
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -260,7 +260,7 @@ func TestNativeSubmit_SingleShotServiceRequestInfoChanged(t *testing.T) {
 		if err != nil || res.Status != 0 {
 			t.Fatalf("no-infoChanged SR: err=%v status=%d msg=%s", err, res.Status, res.Message)
 		}
-		// The pend is surfaced as-is (verbatim Bundle) + RecordPendedClaim, NO EOB — the composite
+		// The pend is surfaced as-is (verbatim Bundle) + RecordPendedClaim, NO EOB — the sandbox
 		// amendment leg binds to this prior pend.
 		if res.Commit == nil || len(res.SideEffectFHIR) != 0 {
 			t.Fatalf("no-infoChanged SR submit must RecordPendedClaim + emit NO EOB; commit=%v sideeffects=%d", res.Commit != nil, len(res.SideEffectFHIR))

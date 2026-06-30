@@ -8,7 +8,7 @@ import (
 
 // handleUC04 must profile-gate the provider-data lane: ATTEST the questionnaire off the seeded
 // order + run the lean single-shot PAS tail (no amendment), persisting against the REAL seeded
-// order ref — while the composite/sandbox lane keeps its operative-DiagnosticReport amendment tail
+// order ref — while the sandbox lane keeps its operative-DiagnosticReport amendment tail
 // byte-unchanged. Static source guard (the live e2e/tworilive gate exercises the runtime path).
 func TestHandleUC04_ProviderDataAttestsAndLeanTail(t *testing.T) {
 	src, err := os.ReadFile("originate.go")
@@ -17,7 +17,7 @@ func TestHandleUC04_ProviderDataAttestsAndLeanTail(t *testing.T) {
 	}
 	fn := extractFunc(t, string(src), "handleUC04")
 
-	// The provider-data branch must come BEFORE the composite amendment block.
+	// The provider-data branch must come BEFORE the sandbox amendment block.
 	gateIdx := strings.Index(fn, `g.cfg.OriginationProfile == "provider-data"`)
 	if gateIdx < 0 {
 		t.Fatalf("handleUC04 does not profile-gate on OriginationProfile == \"provider-data\"")
@@ -36,27 +36,27 @@ func TestHandleUC04_ProviderDataAttestsAndLeanTail(t *testing.T) {
 	}
 
 	// Bug-2: persist against the REAL seeded order ref (resourceRef(res.srJSON)), never the
-	// composite `srRef` literal, in the provider-data lane.
+	// sandbox `srRef` literal, in the provider-data lane.
 	pdBranch := fn[gateIdx:]
-	// Trim to the provider-data branch (ends at the closing `return` before the composite comment).
-	if end := strings.Index(pdBranch, "composite/sandbox: the operative-DiagnosticReport amendment tail"); end > 0 {
+	// Trim to the provider-data branch (ends at the closing `return` before the sandbox comment).
+	if end := strings.Index(pdBranch, "sandbox: the operative-DiagnosticReport amendment tail"); end > 0 {
 		pdBranch = pdBranch[:end]
 	}
 	if !strings.Contains(pdBranch, "orderRef, ok := resourceRef(res.srJSON)") {
 		t.Fatalf("provider-data lane must derive the order ref via resourceRef(res.srJSON)")
 	}
 	if strings.Contains(pdBranch, "StoreAuthNumber(srRef") {
-		t.Fatalf("provider-data lane must persist against the seeded order ref, not the composite srRef literal")
+		t.Fatalf("provider-data lane must persist against the seeded order ref, not the sandbox srRef literal")
 	}
 
-	// The composite/sandbox lane keeps its amendment tail (pas-claim-update + SupplementalReport).
+	// The sandbox lane keeps its amendment tail (pas-claim-update + SupplementalReport).
 	for _, want := range []string{
 		`"pas-claim-update"`,
 		`g.cfg.SoR.SupplementalReport("MBR-UC04")`,
 		"BuildConformantClaimUpdateBundle",
 	} {
 		if !strings.Contains(fn, want) {
-			t.Fatalf("handleUC04 composite amendment tail missing %q (must stay byte-unchanged)", want)
+			t.Fatalf("handleUC04 sandbox amendment tail missing %q (must stay byte-unchanged)", want)
 		}
 	}
 }

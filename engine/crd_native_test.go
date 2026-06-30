@@ -61,21 +61,44 @@ func TestConformantCRDBind_DivergentSubject(t *testing.T) {
 	}
 }
 
-// TestConformantCRDBind_RejectsNonServiceRequest is the hermetic guard for the spec §7 resourceType
-// mis-seed property: a non-ServiceRequest open order (e.g. a mis-seeded DeviceRequest read by
-// OpenOrder for an order-select scenario) can NOT reach the order-select branch. handleUC04 is
-// hardcoded to order-select (not resourceType-routed), so a DeviceRequest order lands here, where
-// firstServiceRequest finds no ServiceRequest in draftOrders and the bind fails closed (400) — never
-// a silent wrong-card success. (A live mutation of OpenOrder's returned order is search-index-timing
-// nondeterministic; this bind is the real fail-closed boundary, so it is guarded hermetically.)
-func TestConformantCRDBind_RejectsNonServiceRequest(t *testing.T) {
+// TestConformantCRDBind_RejectsNoOrder is the hermetic fail-closed guard: a draftOrders Bundle that
+// carries NO CDS order resource (no ServiceRequest AND no DeviceRequest — only a non-order resource)
+// fails closed (400), never a silent wrong-card success. The order-select leg carries either a
+// ServiceRequest (UC-04) or a DeviceRequest (UC-02 HospitalBeds), so the bind no longer rejects a
+// DeviceRequest per se — it rejects the absence of any order (see TestConformantCRDBind_AcceptsDeviceRequest).
+func TestConformantCRDBind_RejectsNoOrder(t *testing.T) {
 	g := &Gateway{cfg: Config{SoR: NewStubHolderData()}}
 	pci, _, _ := g.cfg.SoR.ResolvePatient("MBR-COVERED")
-	// draftOrders carries a DeviceRequest (no ServiceRequest) — the mis-seeded resourceType.
-	body := []byte(`{"hook":"order-select","context":{"patientId":"MBR-COVERED","draftOrders":{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"DeviceRequest","status":"active","subject":{"reference":"Patient/MBR-COVERED"},"codeCodeableConcept":{"coding":[{"system":"http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets","code":"E0431"}]}}}]}},"prefetch":{"coverage":{"resourceType":"Coverage","beneficiary":{"reference":"Patient/MBR-COVERED"}}}}`)
+	// draftOrders carries only a Patient — no ServiceRequest, no DeviceRequest.
+	body := []byte(`{"hook":"order-select","context":{"patientId":"MBR-COVERED","draftOrders":{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"Patient","id":"MBR-COVERED"}}]}},"prefetch":{"coverage":{"resourceType":"Coverage","beneficiary":{"reference":"Patient/MBR-COVERED"}}}}`)
 	_, _, status, msg := g.conformantCRDBind(body, pci)
 	if status != 400 {
-		t.Fatalf("DeviceRequest-only draftOrders: status=%d (%s), want 400 (no ServiceRequest → fail closed)", status, msg)
+		t.Fatalf("no-order draftOrders: status=%d (%s), want 400 (no ServiceRequest or DeviceRequest → fail closed)", status, msg)
+	}
+}
+
+// TestConformantCRDBind_AcceptsDeviceRequest proves the order-select leg's bind accepts a
+// DeviceRequest order (UC-02 HospitalBeds E0250) whose subject, the coverage beneficiary, and
+// context.patientId all reference one member resolving to the token PCI. The subject-bind is
+// order-type-agnostic (it reads subject.reference, present on both ServiceRequest and DeviceRequest);
+// the security property (order.subject == coverage.beneficiary == context.patientId == token PCI)
+// holds for a DeviceRequest exactly as for a ServiceRequest.
+func TestConformantCRDBind_AcceptsDeviceRequest(t *testing.T) {
+	g := &Gateway{cfg: Config{SoR: NewStubHolderData()}}
+	pci, _, _ := g.cfg.SoR.ResolvePatient("MBR-COVERED")
+	body := []byte(`{"hook":"order-select","context":{"patientId":"MBR-COVERED","draftOrders":{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"DeviceRequest","id":"dr1","status":"draft","intent":"order","subject":{"reference":"Patient/MBR-COVERED"},"reasonCode":[{"coding":[{"system":"http://hl7.org/fhir/sid/icd-10-cm","code":"M62.81"}]}],"codeCodeableConcept":{"coding":[{"system":"http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets","code":"E0250"}]}}}]},"selections":["DeviceRequest/dr1"]},"prefetch":{"coverage":{"resourceType":"Coverage","beneficiary":{"reference":"Patient/MBR-COVERED"}}}}`)
+	orderJSON, covJSON, status, msg := g.conformantCRDBind(body, pci)
+	if status != 0 {
+		t.Fatalf("DeviceRequest order-select: status=%d (%s), want 0 (HospitalBeds E0250 DeviceRequest is a valid order-select order)", status, msg)
+	}
+	if len(orderJSON) == 0 || len(covJSON) == 0 {
+		t.Fatalf("DeviceRequest order-select: empty orderJSON=%d/covJSON=%d, want both non-empty for downstream validation", len(orderJSON), len(covJSON))
+	}
+	// The divergent-subject security property still holds for a DeviceRequest: a DR whose subject
+	// disagrees with the coverage/context is rejected (the subject-bind is order-type-agnostic).
+	divergent := []byte(`{"hook":"order-select","context":{"patientId":"MBR-COVERED","draftOrders":{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"DeviceRequest","subject":{"reference":"Patient/MBR-NOTCOVERED"},"codeCodeableConcept":{"coding":[{"system":"http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets","code":"E0250"}]}}}]}},"prefetch":{"coverage":{"resourceType":"Coverage","beneficiary":{"reference":"Patient/MBR-COVERED"}}}}`)
+	if _, _, status, _ := g.conformantCRDBind(divergent, pci); status != 400 {
+		t.Fatalf("divergent DeviceRequest subject: status=%d, want 400 (subject-bind holds for DeviceRequest)", status)
 	}
 }
 

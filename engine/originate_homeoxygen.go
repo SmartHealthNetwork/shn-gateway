@@ -1,11 +1,13 @@
-// originate_homeoxygen.go — handleHomeOxygen, the provider-data order-dispatch
-// origination handler.
+// originate_homeoxygen.go — originateDispatch, the provider-data order-dispatch
+// origination prong (handleHomeOxygen = the MBR-OX wrapper; UC-03 provider-data = the
+// MBR-PD-UC03 wrapper).
 //
-// Unlike the UC-01…08 handlers, handleHomeOxygen originates OFF PROVIDER DATA ONLY: it
-// reads the member's seeded open order (a DeviceRequest) from the FHIR SoR and drives
+// Unlike the UC-01…08 handlers, originateDispatch originates OFF PROVIDER DATA ONLY: it
+// reads the given member's seeded open order (a DeviceRequest) from the FHIR SoR and drives
 // CRD(order-dispatch) → DTR(operated $populate) → PAS through the substrate. There is no
 // hardcoded order code and no answer book — the order code, the diagnosis, and the
 // supplier ALL come from the SoR (OpenOrder + ResolveByReference of the order's performer).
+// It serves any seeded order-dispatch member: HomeOxygen = MBR-OX (E0431), UC-03 = MBR-PD-UC03 (E1390).
 //
 // It deliberately does NOT call runCRDThenDTROrder: that helper builds a ServiceRequest
 // from a literal code and originates crd-order-SELECT, whose verdict switch REJECTS any
@@ -28,8 +30,12 @@ const homeOxygenMember = "MBR-OX"
 
 // handleHomeOxygen originates the HomeOxygen PA off the member's seeded DeviceRequest.
 func (g *Gateway) handleHomeOxygen(w http.ResponseWriter, r *http.Request) {
+	g.originateDispatch(w, r, homeOxygenMember) // homeOxygenMember = "MBR-OX"
+}
+
+// originateDispatch originates an order-dispatch PA off the given member's seeded DeviceRequest.
+func (g *Gateway) originateDispatch(w http.ResponseWriter, r *http.Request, member string) {
 	ctx := r.Context()
-	member := homeOxygenMember
 
 	pci, _, found := g.cfg.SoR.ResolvePatient(member)
 	if !found {

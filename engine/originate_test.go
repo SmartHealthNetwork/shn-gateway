@@ -347,7 +347,7 @@ func TestRunCRDThenDTR_NotCovered(t *testing.T) {
 
 // TestRunCRDThenDTROrder_NotCovered_ProceedFlag proves the proceedOnNotCovered param
 // (Unit 2 / spec §6 D-S2-2). The generic not-covered STOP (FR-G25 / AI-1) is the DEFAULT
-// (false) for every caller; ONLY a caller that opts in (handleUC08 composite, to carry the
+// (false) for every caller; ONLY a caller that opts in (handleUC08 provider-data, to carry the
 // not-covered J3490 order to PAS for br-payer's formal A2 "Not Certified" ClaimResponse)
 // proceeds past it with the order built. The opt-in never yields an auth on a denial:
 // handleUC08 still asserts the PAS result is DENIED (the existing approved→502 guard).
@@ -529,11 +529,11 @@ func classifyTestGateway(t *testing.T, profile string) *Gateway {
 }
 
 // TestClassifyResolution is the C4 rejection discipline for the PAS-resolution decision
-// (spec §2B-bis): ONLY a genuine A1 approval is approved. A composite amendment now resolves to a
+// (spec §2B-bis): ONLY a genuine A1 approval is approved. An amendment now resolves to a
 // real A1 at the payer-gw responder (it polls br-payer's timer A4→A1), so a resolution site sees
 // approved | denied | unresolved-pend here — and everything not approved → caller 502s (a pend can
 // never mask a denial or be a silent pass — C1). Profile-independent now (the per-profile terminal
-// pend is gone); both profiles asserted so no assertion is vacuous.
+// pend is gone); both the provider-data and sandbox profiles asserted so no assertion is vacuous.
 func TestClassifyResolution(t *testing.T) {
 	// approved: bare ClaimResponse, outcome complete + preAuthRef present.
 	approved := []byte(`{"resourceType":"ClaimResponse","outcome":"complete","use":"preauthorization","preAuthRef":"PA-0123456789ab","preAuthPeriod":{"end":"2026-09-02"}}`)
@@ -552,14 +552,14 @@ func TestClassifyResolution(t *testing.T) {
 		in           []byte
 		wantApproved bool
 	}{
-		{"approved/composite", "composite", approved, true},
+		{"approved/provider-data", "provider-data", approved, true},
 		{"approved/sandbox", "", approved, true},
-		{"denied/composite", "composite", denied, false},   // denial → 502 (C1)
-		{"denied/sandbox", "", denied, false},              // denial → 502 (C1)
-		{"pend/composite", "composite", pend, false},       // unresolved pend → 502 (no silent pass)
-		{"pend/sandbox", "", pend, false},                  // unresolved pend → 502 (no silent pass)
-		{"garbage/composite", "composite", garbage, false}, // unparseable → fail closed
-		{"garbage/sandbox", "", garbage, false},            // unparseable → fail closed
+		{"denied/provider-data", "provider-data", denied, false},   // denial → 502 (C1)
+		{"denied/sandbox", "", denied, false},                      // denial → 502 (C1)
+		{"pend/provider-data", "provider-data", pend, false},       // unresolved pend → 502 (no silent pass)
+		{"pend/sandbox", "", pend, false},                          // unresolved pend → 502 (no silent pass)
+		{"garbage/provider-data", "provider-data", garbage, false}, // unparseable → fail closed
+		{"garbage/sandbox", "", garbage, false},                    // unparseable → fail closed
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -604,12 +604,11 @@ func (f failIfCalledValidator) Validate(_ context.Context, _ []byte, _ string) (
 }
 
 func TestTargetsBrPayer(t *testing.T) {
-	for _, p := range []string{"composite", "provider-data"} {
-		if !targetsBrPayer(p) {
-			t.Fatalf("%q should target br-payer", p)
-		}
+	if !targetsBrPayer("provider-data") {
+		t.Fatal("provider-data should target br-payer")
 	}
-	for _, p := range []string{"", "sandbox"} {
+	// "", "sandbox" are SHN-produced (not br-payer); "composite" is removed (no longer a lane).
+	for _, p := range []string{"", "sandbox", "composite"} {
 		if targetsBrPayer(p) {
 			t.Fatalf("%q must not target br-payer", p)
 		}

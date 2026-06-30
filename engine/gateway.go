@@ -37,7 +37,7 @@ const hhaFunctionalStatusLinkID = "3.2"
 
 // defaultHHAFunctionalLimitations is the operator-supplied free-text functional-status narrative for
 // the provider-data UC-06 clinician attestation when none is provided (the free-text analog of the
-// composite Oswestry "42"; D-2RI-1 — operator-supplied, NOT derived from a clinical SoR fact).
+// sandbox Oswestry "42"; D-2RI-1 — operator-supplied, NOT derived from a clinical SoR fact).
 const defaultHHAFunctionalLimitations = "Impaired ambulation and reduced lower-extremity strength limiting independent mobility; skilled physical therapy indicated."
 
 // defaultHHAFunctionalLimitationsPatient is the operator-supplied free-text functional-status narrative
@@ -65,9 +65,9 @@ type Config struct {
 	// The payer side does not use it — it replies to the inbound envelope's Sender.
 	CounterpartID string
 	// OriginationProfile selects the per-UC behavior lane: "" / "sandbox" = the sandbox
-	// shape (default); "composite" = drive real br-payer verdicts (Mode A, harness-provider-gw
-	// only). A5 reads it to treat a legitimate PAS pend as a terminal success in composite
-	// (br-payer never resolves A4→A1); B1 also keys the HCPCS code map on it. Spec 2B-bis/2C.
+	// shape (default, SHN-produced, byte-unchanged); "provider-data" = originate every UC off
+	// the provider's seeded SoR and drive real br-payer verdicts (Mode A). targetsBrPayer keys
+	// the contained-insurer / absolute-refs / R-8 ingress-skip handling on it. Spec 2B-bis/2C.
 	OriginationProfile string
 	// Identity is the gateway's substrate identity: its holder signing key (used to
 	// sign holder assertions and patient-access audit records) plus its envelope-
@@ -706,7 +706,7 @@ func (g *Gateway) OriginateLeg(ctx context.Context, r *http.Request, recipient, 
 // leg, returning the gateway-standard (status,message) on failure. dir is
 // "egress" or "ingress" purely for the error message; status is 0 on success.
 func (g *Gateway) validateFHIR(ctx context.Context, resourceJSON []byte, dir string) (int, string) {
-	// br-payer-targeting lanes (composite, provider-data) relay the counterparty's FOREIGN bytes
+	// the br-payer-targeting lane (provider-data) relays the counterparty's FOREIGN bytes
 	// on ingress — SHN does not $validate foreign bundles (R-8/FR-36: SHN certifies only what it
 	// PRODUCES and hosts US Core only; the br-payer's responses stay relayed:true). The sandbox
 	// lane (SHN-produced responses) still validates ingress; egress (always SHN-produced) always

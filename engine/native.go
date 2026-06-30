@@ -277,8 +277,8 @@ func (n *nativeResponder) Handle(ctx context.Context, leg, corrID, subjectPCI st
 		return markForeignRelay(res), err
 
 	default:
-		// The composite routes the read-only + PAS legs here; this is defensive for an
-		// unrouted leg.
+		// The br-payer-targeting lane routes the read-only + PAS legs here; this is defensive
+		// for an unrouted leg.
 		return LegResult{}, fmt.Errorf("engine: nativeResponder: unhandled leg %q", leg)
 	}
 }

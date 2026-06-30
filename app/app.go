@@ -105,8 +105,8 @@ type config struct {
 	PayerDavinciDispatchHook string
 
 	// OriginationProfile selects the per-UC origination lane: "" / "sandbox"
-	// keep the CPT/lumbar order shape; "composite" originates the HCPCS codes the real
-	// br-payer adjudicates. ORIGINATION_PROFILE.
+	// keep the CPT/lumbar order shape; "provider-data" originates every UC off the
+	// provider's seeded SoR and drives real br-payer verdicts. ORIGINATION_PROFILE.
 	OriginationProfile string
 
 	// Optional native DTR population (provider-local). PROVIDER_DTR_NATIVE switches DTR
@@ -637,15 +637,6 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	}
 	if cfg.ProviderDTRNative {
 		gwCfg.Populator = engine.NewNativePopulator(client, cfg.ProviderDTRPopulateURL)
-	} else if cfg.OriginationProfile == "composite" {
-		// Mode A composite: the foreign Da Vinci questionnaires are manual-entry; fill their
-		// required items from the recorded persona DTR answer book (honesty invariant). The
-		// author is the provider/clinician that recorded the answers (dtrx-1 needs an author).
-		npi := cfg.NPI
-		if npi == "" {
-			npi = "1234567890" // matches the app-config default (def("NPI", "1234567890"))
-		}
-		gwCfg.Populator = engine.NewSeededPopulator("Practitioner/" + npi)
 	} else if cfg.OriginationProfile == "provider-data" {
 		// Operated-CQL $populate against the provider tenant (the crux of the
 		// provider-data lane). PROVIDER_DTR_POPULATE_URL is validated at loadConfig.

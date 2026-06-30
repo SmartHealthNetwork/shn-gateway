@@ -7,20 +7,20 @@ import (
 )
 
 // sceneMember resolves the distinct provider-data member under provider-data, and the
-// default (composite/sandbox) member otherwise (byte-identical to today).
+// default (sandbox) member otherwise (byte-identical to today).
 func TestSceneMember_ProfileDispatch(t *testing.T) {
 	gp := &Gateway{cfg: Config{OriginationProfile: "provider-data"}}
 	if got := gp.sceneMember("MBR-UC04", "MBR-PD-UC04"); got != "MBR-PD-UC04" {
 		t.Fatalf("provider-data sceneMember = %q, want MBR-PD-UC04", got)
 	}
-	gc := &Gateway{cfg: Config{OriginationProfile: "composite"}}
+	gc := &Gateway{cfg: Config{OriginationProfile: "sandbox"}}
 	if got := gc.sceneMember("MBR-UC04", "MBR-PD-UC04"); got != "MBR-UC04" {
-		t.Fatalf("composite sceneMember = %q, want MBR-UC04 (must stay byte-identical)", got)
+		t.Fatalf("sandbox sceneMember = %q, want MBR-UC04 (must stay byte-identical)", got)
 	}
 }
 
 // handleUC04 must thread sceneMember so provider-data reads its own seeded G0151 order
-// (OpenOrder is keyed on member) while composite stays on MBR-UC04.
+// (OpenOrder is keyed on member) while the sandbox lane stays on MBR-UC04.
 func TestHandleUC04_ThreadsSceneMember(t *testing.T) {
 	src, err := os.ReadFile("originate.go")
 	if err != nil {
@@ -36,7 +36,7 @@ func TestHandleUC04_ThreadsSceneMember(t *testing.T) {
 }
 
 // handleUC08 must thread sceneMember so provider-data reads its own seeded J3490 order
-// (OpenOrder is keyed on member) while composite stays on MBR-UC08.
+// (OpenOrder is keyed on member) while the sandbox lane stays on MBR-UC08.
 func TestHandleUC08_ThreadsSceneMember(t *testing.T) {
 	src, err := os.ReadFile("originate.go")
 	if err != nil {

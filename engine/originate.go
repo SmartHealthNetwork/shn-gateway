@@ -18,10 +18,10 @@ import (
 
 // targetsBrPayer reports whether the origination profile targets a real Da Vinci PAS payer
 // (br-payer), which needs the contained-insurer / absolute-refs / payer-org-entry / DTR-coverage
-// handling AND the R-8 ingress-$validate skip for br-payer's relayed foreign bytes. Generalized
-// from the composite-only literal so a new br-payer lane (provider-data) can't regress the
-// contained-payor → uniform-A3 bug OR $validate foreign relayed bytes (R-8).
-func targetsBrPayer(profile string) bool { return profile == "composite" || profile == "provider-data" }
+// handling AND the R-8 ingress-$validate skip for br-payer's relayed foreign bytes. provider-data
+// is the sole br-payer-targeting origination lane — it must not regress the contained-payor →
+// uniform-A3 bug OR $validate foreign relayed bytes (R-8). The sandbox lane is SHN-produced.
+func targetsBrPayer(profile string) bool { return profile == "provider-data" }
 
 // FilledItem is the gateway-engine-LOCAL attribution surface for a DTR auto-filled
 // QR item (console response, QRItems field). The SDK's FillQuestionnaire drops the
@@ -144,7 +144,7 @@ func (g *Gateway) handleScenario(w http.ResponseWriter, r *http.Request) {
 	// A participant-facing gateway rejects unknown branches rather than silently
 	// treating anything non-"covered" as not-covered.
 	// provider-data lane uses distinct UC-01 personas (MBR-PD-UC01/MBR-PD-UC01-NC) so
-	// each scenario reads its OWN seeded Coverage; composite/sandbox keep the shared
+	// each scenario reads its OWN seeded Coverage; the sandbox lane keeps the shared
 	// MBR-COVERED/MBR-NOTCOVERED defaults (byte-identical — sceneMember returns the
 	// default literal for non-provider-data OriginationProfile).
 	var memberID string
@@ -224,7 +224,9 @@ func (g *Gateway) handleScenario(w http.ResponseWriter, r *http.Request) {
 }
 
 type uc02Resp struct {
+	Covered     string `json:"covered"`
 	PARequired  bool   `json:"paRequired"`
+	NeedsDTR    bool   `json:"needsDTR"`
 	CardSummary string `json:"cardSummary"`
 }
 
@@ -232,9 +234,9 @@ type uc03Resp struct {
 	PARequired bool   `json:"paRequired"`
 	AuthNumber string `json:"authNumber,omitempty"`
 	ValidUntil string `json:"validUntil,omitempty"`
-	// AuthNumber/ValidUntil/QRItems are omitempty. A composite UC-04/06 amendment now resolves to a
-	// genuine terminal A1 (the payer-gw polls br-payer's timer-driven A4→A1), so the
-	// approve path always carries a non-empty AuthNumber — there is no terminal-pend response.
+	// AuthNumber/ValidUntil/QRItems are omitempty. The UC-04/06 amendment tail resolves to a
+	// genuine terminal A1, so the approve path always carries a non-empty AuthNumber — there
+	// is no terminal-pend response.
 	QRItems       []FilledItem `json:"qrItems,omitempty"`
 	PendedItems   []string     `json:"pendedItems,omitempty"`
 	AmendmentCorr string       `json:"amendmentCorr,omitempty"` // UC-04/06: the pas-claim-update corrId — proves the amendment leg ran (C4)
@@ -267,8 +269,8 @@ type crdDtrResult struct {
 // orderSource returns the origination order bytes for the active profile. Under
 // provider-data it reads the member's open order from the SoR (the order code/dx
 // trace to the provider's seeded data, never a literal); otherwise it builds the order
-// from the per-UC tuple (the self-contained composite/sandbox demo). The else branch
-// keeps the exact BuildServiceRequestCoded call verbatim so composite stays byte-identical.
+// from the per-UC tuple (the self-contained sandbox demo). The else branch
+// keeps the exact BuildServiceRequestCoded call verbatim so sandbox stays byte-identical.
 // Returns (orderJSON, httpStatus, msg); status 0 == ok.
 func (g *Gateway) orderSource(member, patientRef, system, code, display, dx string) ([]byte, int, string) {
 	if g.cfg.OriginationProfile == "provider-data" {
@@ -291,9 +293,9 @@ func (g *Gateway) orderSource(member, patientRef, system, code, display, dx stri
 }
 
 // sceneMember returns the distinct provider-data persona member for a scenario, or the
-// composite/sandbox default otherwise. Distinct members are REQUIRED in the provider-data lane:
+// sandbox default otherwise. Distinct members are REQUIRED in the provider-data lane:
 // the order is read via OpenOrder(member) (keyed on member ONLY), so two scenarios sharing a
-// member would read the same order. composite/sandbox keep their default member (the order is
+// member would read the same order. The sandbox lane keeps its default member (the order is
 // built from the per-UC tuple there, so a shared member is harmless and byte-identical).
 func (g *Gateway) sceneMember(defaultMember, providerDataMember string) string {
 	if g.cfg.OriginationProfile == "provider-data" {
@@ -306,12 +308,14 @@ func (g *Gateway) sceneMember(defaultMember, providerDataMember string) string {
 // The order's {system, code, display, dx} are explicit so a HCPCS scenario can
 // originate an L8000 order; existing callers delegate with the CPT lumbar order (byte-unchanged).
 // On any failure it writes the HTTP error and returns ok=false.
-// proceedOnNotCovered (handleUC08 composite ONLY): when true, a not-covered CRD verdict
-// does NOT terminally stop — the order is returned so the caller can carry it to PAS for
-// br-payer's formal A2 "Not Certified" ClaimResponse (D-S2-2). The generic
-// FR-G25/AI-1 STOP is the DEFAULT (false) for every other caller and is unchanged. The
-// opt-in never yields an auth on a denial: handleUC08 asserts the PAS result is DENIED
-// (its approved→502 guard), so a not-covered order routed to PAS can only deny, never approve.
+// proceedOnNotCovered (the provider-data handleUC08 caller): when true, a not-covered CRD
+// verdict does NOT terminally stop — the order is returned so the caller can carry it to PAS for
+// br-payer's formal A2 "Not Certified" ClaimResponse (D-S2-2). handleUC08 passes
+// targetsBrPayer(profile), which is true only for provider-data (the live br-payer lane); the
+// sandbox lane keeps the generic FR-G25/AI-1 STOP (false). The generic STOP is the DEFAULT
+// (false) for every other caller and is unchanged. The opt-in never yields an auth on a denial:
+// handleUC08 asserts the PAS result is DENIED (its approved→502 guard), so a not-covered order
+// routed to PAS can only deny, never approve.
 func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, member, system, code, display, dx string, proceedOnNotCovered bool) (crdDtrResult, bool) {
 	ctx := r.Context()
 
@@ -369,7 +373,7 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 	switch {
 	case cov.Covered == shnsdk.CoveredNotCovered:
 		if proceedOnNotCovered {
-			// Composite UC-08 ONLY (D-S2-2): a not-covered CRD verdict IS the denial
+			// provider-data UC-08 (D-S2-2): a not-covered CRD verdict IS the denial
 			// scenario; carry the order to PAS for br-payer's formal A2 "Not Certified"
 			// ClaimResponse + rationale (not-covered → A2). This does NOT weaken FR-G25/AI-1:
 			// handleUC08 asserts the PAS result is DENIED (502 on any approval), so a
@@ -404,7 +408,8 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 		canonical := shnsdk.StripCanonicalVersion(cov.Questionnaires[0])
 
 		// --- DTR round-trip: fetch Questionnaire, validate, auto-fill locally. ---
-		// In composite (Mode A), carry the Coverage so the native-forward re-emits the
+		// In the br-payer-targeting lane (provider-data), carry the Coverage so the
+		// native-forward re-emits the
 		// payer-required coverage param on $questionnaire-package — a real Da Vinci payer
 		// (br-payer) 400s without it (the v0.11.0 QuestionnaireFetchRequest.Coverage
 		// seam). The sandbox responder doesn't need it, so gate on the profile to keep the
@@ -625,33 +630,32 @@ func questionnaireResponseCanonical(qrJSON []byte) (string, error) {
 	return probe.Questionnaire, nil
 }
 
-// handleUC02 runs the no-PA CRD round-trip: a covered member's X-ray order is
-// CRD-checked and comes back with an info card → paRequired=false.
+// handleUC02 runs the no-PA CRD round-trip: a covered member's order is CRD-checked and comes
+// back covered with no prior-auth required. provider-data originates a seeded E0250 hospital-bed
+// DeviceRequest (HospitalBeds → covered/no-PA/no-DTR); the sandbox lane originates the per-UC
+// tuple (an X-ray order). Surfaces the covered/no-PA/no-DTR triple (NeedsDTR is the
+// reasonCode discriminator, asserted by the live gate).
 func (g *Gateway) handleUC02(w http.ResponseWriter, r *http.Request) {
-	// UC-02 (no-PA) is DESCOPED for the provider-data lane (D-PD-2): no faithful service order
-	// reaches a no-PA CRD card off provider data. Unlike the orderSource-routed scenarios (which
-	// fail closed at OpenOrder when the member has no seeded order), handleUC02 builds its order INLINE
-	// (BuildServiceRequestCoded), so without this guard the provider-data lane would originate a
-	// hardcoded literal order — contradicting the provider-data principle that EVERY origination traces
-	// to the provider's seeded SoR. Fail closed, matching the implicit fail-closed the other descoped
-	// scenarios already get. (composite/sandbox are unaffected — they originate the no-PA order.)
-	if g.cfg.OriginationProfile == "provider-data" {
-		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "UC-02 (no-PA) is descoped for the provider-data lane (D-PD-2)"})
-		return
-	}
 	ctx := r.Context()
 
-	pci, _, found := g.cfg.SoR.ResolvePatient("MBR-COVERED")
+	// UC-02 (no-PA) originates the seeded E0250 hospital-bed DeviceRequest off provider data
+	// (the MBR-PD-UC02 persona) — D-PD-2 is dropped. The order is read via orderSource → OpenOrder
+	// in the provider-data lane (it traces to the provider's seeded SoR, never a literal); a
+	// mis-seeded member with no open order fails closed at OpenOrder. The sandbox lane originates
+	// the no-PA order off the per-UC tuple (byte-unchanged).
+	member := g.sceneMember("MBR-COVERED", "MBR-PD-UC02")
+
+	pci, _, found := g.cfg.SoR.ResolvePatient(member)
 	if !found {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown member"})
 		return
 	}
-	patientRef := "Patient/MBR-COVERED"
+	patientRef := "Patient/" + member
 
 	o := originationCodes(g.cfg.OriginationProfile).uc02
-	srJSON, err := BuildServiceRequestCoded(o.system, o.code, o.display, o.dx, patientRef)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build request failed"})
+	srJSON, status, msg := g.orderSource(member, patientRef, o.system, o.code, o.display, o.dx)
+	if status != 0 {
+		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
 	if status, msg := g.validateFHIR(ctx, srJSON, "egress"); status != 0 {
@@ -659,7 +663,7 @@ func (g *Gateway) handleUC02(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	coverageJSON, err := shnsdk.BuildCoverageWithPayer(patientRef, "Coverage/MBR-COVERED")
+	coverageJSON, err := shnsdk.BuildCoverageWithPayer(patientRef, "Coverage/"+member)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build coverage failed"})
 		return
@@ -702,8 +706,17 @@ func (g *Gateway) handleUC02(w http.ResponseWriter, r *http.Request) {
 		cardSummary = rawCards.Cards[0].Summary
 	}
 
+	// Surface the CRD coverage-info TRIPLE — the live two-RI gate asserts UC-02 off
+	// covered/no-PA/no-DTR (Covered=="covered" + PARequired()==false + NeedsDTR()==false),
+	// NOT a card-summary string. The visible card is HospitalBeds' always-on "Document
+	// medical necessity for hospital bed" guidance card, surfaced for logging only.
+	// NeedsDTR()==false is the reasonCode-discriminator guard: the seeded E0250 carries a
+	// reasonCode (Documentation Required=false) so br-payer returns no questionnaire — that
+	// discriminator is held by the live two-RI gate's NeedsDTR==false hard assertion.
 	writeJSON(w, http.StatusOK, uc02Resp{
+		Covered:     cov.Covered,
 		PARequired:  cov.PARequired(),
+		NeedsDTR:    cov.NeedsDTR(),
 		CardSummary: cardSummary,
 	})
 }
@@ -712,6 +725,16 @@ func (g *Gateway) handleUC02(w http.ResponseWriter, r *http.Request) {
 // local auto-fill → PAS submit → approval. On approval the provider stores the
 // auth number for the SR (FR-23) and answers paRequired=true.
 func (g *Gateway) handleUC03(w http.ResponseWriter, r *http.Request) {
+	if g.cfg.OriginationProfile == "provider-data" {
+		// UC-03 off provider data = the HomeOxygenDispatch path (the only br-payer family that PA-requires
+		// + launches a DTR + GENUINELY auto-fills it via operated $populate). E1390 vs HomeOxygen's E0431;
+		// the approval is br-payer's pend-resolution timer (D-2RI-3), and the genuine auto-fill (the $populate
+		// runs the real prepop CQL against the seeded O2 obs) is UC-03's distinctive. The implicit fail-closed
+		// at OpenOrder is preserved (a mis-seeded MBR-PD-UC03 with no E1390 order fails closed there).
+		g.originateDispatch(w, r, "MBR-PD-UC03")
+		return
+	}
+
 	ctx := r.Context()
 	const srRef = "ServiceRequest/sr-uc03"
 
@@ -836,11 +859,11 @@ func (g *Gateway) handleUC07HCPCS(w http.ResponseWriter, r *http.Request) {
 }
 
 // classifyResolution classifies a PAS (update) ClaimResponse at a resolution site as approved or
-// not. A composite amendment now resolves to a genuine terminal A1 — the payer-gw
-// responder polls br-payer's timer-driven A4→A1 and returns the resolved A1 (or 422→OriginateLeg
-// err on non-resolution), so a resolution site sees ONLY approved | denied | error here, never a
-// live pend. Anything not approved → caller 502s (a denial or an unresolved pend is a genuine
-// non-approval, never a silent pass — C1).
+// not. The amendment resolves to a genuine terminal A1 — the payer-gw responder polls br-payer's
+// timer-driven A4→A1 and returns the resolved A1 (or 422→OriginateLeg err on non-resolution), so a
+// resolution site sees ONLY approved | denied | error here, never a live pend. Anything not
+// approved → caller 502s (a denial or an unresolved pend is a genuine non-approval, never a silent
+// pass — C1).
 func (g *Gateway) classifyResolution(respJSON []byte) (parsed shnsdk.PriorAuthResult, approved bool) {
 	p, err := shnsdk.ParseClaimResponse(respJSON)
 	if err == nil && p.Outcome == "approved" {
@@ -850,7 +873,7 @@ func (g *Gateway) classifyResolution(respJSON []byte) (parsed shnsdk.PriorAuthRe
 }
 
 // handleUC04 runs the pended-then-approved PA path. Two profile lanes share the CRD+DTR prefix:
-//   - composite/sandbox: CRD+DTR → PAS submit → PENDED (no operative DiagnosticReport yet) →
+//   - sandbox: CRD+DTR → PAS submit → PENDED (no operative DiagnosticReport yet) →
 //     ClaimUpdate with the provider-LOCAL operative report + Provenance → approved (FR-20/21).
 //   - provider-data (L1): ATTEST the adaptive HomeHealthAssessment off the seeded order (the
 //     operated $populate auto-pops nothing), then the lean single-shot PAS tail with NO
@@ -877,7 +900,7 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 			return
 		}
-		orderRef, ok := resourceRef(res.srJSON) // Bug-2: persist against the REAL seeded order ref, not the composite literal.
+		orderRef, ok := resourceRef(res.srJSON) // Bug-2: persist against the REAL seeded order ref, not the sandbox literal.
 		if !ok {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "order missing id"})
 			return
@@ -908,7 +931,7 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// composite/sandbox: the operative-DiagnosticReport amendment tail (UNCHANGED below).
+	// sandbox: the operative-DiagnosticReport amendment tail (UNCHANGED below).
 	// PAS submit — expect PENDED (no operative DiagnosticReport yet).
 	pasCorr := g.cfg.CorrelationGen()
 	bundleJSON, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
@@ -999,7 +1022,7 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
-	// The composite amendment resolves to a genuine terminal A1 (the payer-gw polled
+	// The amendment resolves to a genuine terminal A1 (the payer-gw polled
 	// br-payer's timer A4→A1). UC-04 is a DiagnosticReport amendment, NOT an attestation → no
 	// Attested. AmendmentCorr is the evidence the amendment leg ran (the A1 was reached
 	// THROUGH the amendment, not a bare approve); AuthNumber is br-payer's real AUTH-NNNN.
@@ -1077,7 +1100,7 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// provider-data (L1): persist the auth against the REAL seeded order ref, not the
-	// composite literal — Bug-2 pattern from handleUC04. The noconsent branch never
+	// sandbox literal — Bug-2 pattern from handleUC04. The noconsent branch never
 	// reaches StoreAuthNumber (returns consentDenied earlier), so the re-assigned srRef
 	// is moot there but harmless.
 	if g.cfg.OriginationProfile == "provider-data" {
@@ -1237,7 +1260,7 @@ func (g *Gateway) handleUC08(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	o := originationCodes(g.cfg.OriginationProfile).uc08
-	// Composite (Mode A): br-payer's J3490 CRD verdict is NOT-COVERED, so opt in to carry the
+	// provider-data (Mode A): br-payer's J3490 CRD verdict is NOT-COVERED, so opt in to carry the
 	// order past the FR-G25 stop to PAS → the formal A2 "Not Certified" ClaimResponse
 	// (D-S2-2). Sandbox keeps the covered+PA→PAS-deny path (proceedOnNotCovered stays false).
 	member := g.sceneMember("MBR-UC08", "MBR-PD-UC08")

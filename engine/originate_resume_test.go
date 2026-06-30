@@ -10,7 +10,7 @@ import (
 
 // TestCompletePatient_ProviderData_RejectsOrderWithoutID proves the provider-data UC-07 patient
 // amendment fails CLOSED when the parked order has no resolvable id — it must bind to the REAL
-// seeded order ref, never a composite literal. Hermetic: resourceRef is checked before any leg.
+// seeded order ref, never a sandbox literal. Hermetic: resourceRef is checked before any leg.
 func TestCompletePatient_ProviderData_RejectsOrderWithoutID(t *testing.T) {
 	g := &Gateway{cfg: Config{
 		OriginationProfile: "provider-data",
@@ -30,7 +30,7 @@ func TestCompletePatient_ProviderData_RejectsOrderWithoutID(t *testing.T) {
 
 // TestCompleteClinician_ProviderData_RejectsOrderWithoutID proves the provider-data UC-06 amendment
 // fails CLOSED when the parked order has no resolvable id — the amendment must bind to the REAL seeded
-// order ref (resourceRef), never a composite literal. Hermetic: resourceRef is checked BEFORE any leg
+// order ref (resourceRef), never a sandbox literal. Hermetic: resourceRef is checked BEFORE any leg
 // or validator call, so no network/validator is needed.
 func TestCompleteClinician_ProviderData_RejectsOrderWithoutID(t *testing.T) {
 	g := &Gateway{cfg: Config{

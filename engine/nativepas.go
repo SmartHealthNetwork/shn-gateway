@@ -151,7 +151,7 @@ func (n *nativeResponder) handlePASClaimNative(ctx context.Context, corrID, subj
 	}
 	if pended {
 		// SINGLE-SHOT submit → POLL the timer-resolved terminal A1. Two single-shot lanes both poll
-		// the SAME GET ClaimResponse/{id} machinery (the one the composite ClaimUpdate path uses):
+		// the SAME GET ClaimResponse/{id} machinery (the one the ClaimUpdate amendment path uses):
 		//   1. a DeviceRequest order (HomeOxygen provider-data DME lane) — no amendment leg exists; and
 		//   2. a ServiceRequest order whose submit bundle signals "resolve to terminal" via the Da Vinci
 		//      PAS infoChanged item extension (the provider-data order-select single-shot lane, D-PD-1).
@@ -161,7 +161,7 @@ func (n *nativeResponder) handlePASClaimNative(ctx context.Context, corrID, subj
 		// purely SHN's POLL DISCRIMINATOR, NOT a verdict input: on a fresh submit (no Claim.related[prior])
 		// it is benign on br-payer (its re-evaluation is gated on a prior claim), so the verdict is still
 		// br-payer's code-keyed CQL constant and the A4→A1 is still the timer. A ServiceRequest WITHOUT
-		// infoChanged keeps the prior behavior — return the A4 pend so the composite UC-04/06 amendment
+		// infoChanged keeps the prior behavior — return the A4 pend so the sandbox UC-04/06 amendment
 		// leg can bind to it — so this does NOT regress the amendment lanes.
 		if orderIsDeviceRequest(s.srJSON) || requestClaimHasInfoChanged(requestFHIR) {
 			crID := claimResponseIDFromPASResponse(norm)

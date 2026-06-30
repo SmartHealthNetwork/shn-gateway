@@ -5,21 +5,21 @@ import (
 	"testing"
 )
 
-// composite/sandbox orderSource returns exactly BuildServiceRequestCoded(tuple) bytes —
-// byte-identical to the pre-refactor call (composite must not regress).
-func TestOrderSource_CompositeBuildsFromTuple(t *testing.T) {
-	g := &Gateway{cfg: Config{OriginationProfile: "composite"}}
+// sandbox orderSource returns exactly BuildServiceRequestCoded(tuple) bytes —
+// byte-identical to the pre-refactor call (the sandbox lane must not regress).
+func TestOrderSource_SandboxBuildsFromTuple(t *testing.T) {
+	g := &Gateway{cfg: Config{OriginationProfile: "sandbox"}}
 	patientRef := "Patient/MBR-COVERED"
-	want, err := BuildServiceRequestCoded(systemHCPCSBuild, "E0250", "Hospital bed", "Z74.01", patientRef)
+	want, err := BuildServiceRequestCoded(systemCPTBuild, "72148", "MRI lumbar spine w/o contrast", "M51.16", patientRef)
 	if err != nil {
 		t.Fatalf("baseline build: %v", err)
 	}
-	got, status, msg := g.orderSource("MBR-COVERED", patientRef, systemHCPCSBuild, "E0250", "Hospital bed", "Z74.01")
+	got, status, msg := g.orderSource("MBR-COVERED", patientRef, systemCPTBuild, "72148", "MRI lumbar spine w/o contrast", "M51.16")
 	if status != 0 {
 		t.Fatalf("orderSource status=%d msg=%q, want 0", status, msg)
 	}
 	if string(got) != string(want) {
-		t.Fatalf("orderSource(composite) bytes differ from BuildServiceRequestCoded — composite would regress")
+		t.Fatalf("orderSource(sandbox) bytes differ from BuildServiceRequestCoded — sandbox would regress")
 	}
 }
 

@@ -160,10 +160,10 @@ func TestPasMemberFromRef(t *testing.T) {
 	}
 }
 
-// TestParseConformantPASSubjects_AbsoluteRefs proves the composite lane (Mode A) bundle —
-// ABSOLUTIZED refs (ContainedInsurer+AbsoluteRefs, so a real Da Vinci payer resolves them) —
-// still binds at the SHN payer-gw: the member resolves from the absolute fullUrl refs and the
-// patient-consistency fence holds. Without the tolerant extractor this 400s "unknown member".
+// TestParseConformantPASSubjects_AbsoluteRefs proves the br-payer-targeting lane (provider-data)
+// bundle — ABSOLUTIZED refs (ContainedInsurer+AbsoluteRefs, so a real Da Vinci payer resolves
+// them) — still binds at the SHN payer-gw: the member resolves from the absolute fullUrl refs and
+// the patient-consistency fence holds. Without the tolerant extractor this 400s "unknown member".
 func TestParseConformantPASSubjects_AbsoluteRefs(t *testing.T) {
 	const member = "MBR-COVERED"
 	ref := "Patient/" + member
@@ -196,7 +196,7 @@ func TestParseConformantPASSubjects_AbsoluteRefs(t *testing.T) {
 	}
 	s, status, msg := parseConformantPASSubjects(got)
 	if status != 0 || s.member != member {
-		t.Fatalf("absolute-ref composite bundle rejected by payer-gw bind: status=%d (%s) member=%q, want %q", status, msg, s.member, member)
+		t.Fatalf("absolute-ref br-payer bundle rejected by payer-gw bind: status=%d (%s) member=%q, want %q", status, msg, s.member, member)
 	}
 }
 
@@ -771,10 +771,10 @@ func originatorBuiltConformantUpdateBundle(t *testing.T) []byte {
 	return originatorBuiltConformantUpdateBundleProfile(t, false)
 }
 
-// originatorBuiltConformantUpdateBundleProfile builds the same bundle; when composite==true it
-// sets the composite-lane flags (ContainedInsurer/AbsoluteRefs/PayerOrgEntry) so the refs are
-// absolutized exactly as harness-provider-gw produces them for a real Da Vinci payer.
-func originatorBuiltConformantUpdateBundleProfile(t *testing.T, composite bool) []byte {
+// originatorBuiltConformantUpdateBundleProfile builds the same bundle; when brPayer==true it
+// sets the br-payer-targeting flags (ContainedInsurer/AbsoluteRefs/PayerOrgEntry) so the refs are
+// absolutized exactly as the provider-data lane produces them for a real Da Vinci payer.
+func originatorBuiltConformantUpdateBundleProfile(t *testing.T, brPayer bool) []byte {
 	t.Helper()
 	const member = "MBR-COVERED"
 	created := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
@@ -824,9 +824,9 @@ func originatorBuiltConformantUpdateBundleProfile(t *testing.T, composite bool) 
 		Corr:             "convergence-pas-update-0001",
 		OriginalCorr:     "convergence-pas-submit-0001",
 		Created:          created,
-		ContainedInsurer: composite,
-		AbsoluteRefs:     composite,
-		PayerOrgEntry:    composite,
+		ContainedInsurer: brPayer,
+		AbsoluteRefs:     brPayer,
+		PayerOrgEntry:    brPayer,
 	})
 	if err != nil {
 		t.Fatalf("BuildConformantClaimUpdateBundle: %v", err)
@@ -834,18 +834,19 @@ func originatorBuiltConformantUpdateBundleProfile(t *testing.T, composite bool) 
 	return got
 }
 
-// TestConformantPASUpdateBind_AcceptsAbsolutizedComposite is the regression guard for the layer-3
-// amendment 403: the composite lane absolutizes bundle refs (AbsoluteRefs) so a real Da Vinci payer
-// resolves them, which rewrites Provenance.target to its absolute fullUrl. The update-bind guard's
-// supplemental-data check (conformantPASUpdateBind) must match the absolutized target to the
-// DiagnosticReport, exactly as it matches the relative form — else UC-04/06 (which only reach the
-// amendment once the layer-3 A3 fix lets the initial submit pend) 403 "ClaimUpdate Provenance does
-// not target the supplemental data". Same absolutization-tolerance class as pasMemberFromRef.
-func TestConformantPASUpdateBind_AcceptsAbsolutizedComposite(t *testing.T) {
+// TestConformantPASUpdateBind_AcceptsAbsolutizedBrPayer is the regression guard for the layer-3
+// amendment 403: the br-payer-targeting lane absolutizes bundle refs (AbsoluteRefs) so a real Da
+// Vinci payer resolves them, which rewrites Provenance.target to its absolute fullUrl. The
+// update-bind guard's supplemental-data check (conformantPASUpdateBind) must match the absolutized
+// target to the DiagnosticReport, exactly as it matches the relative form — else UC-04/06 (which
+// only reach the amendment once the layer-3 A3 fix lets the initial submit pend) 403 "ClaimUpdate
+// Provenance does not target the supplemental data". Same absolutization-tolerance class as
+// pasMemberFromRef.
+func TestConformantPASUpdateBind_AcceptsAbsolutizedBrPayer(t *testing.T) {
 	g, pci := updateGatewayForTest(t)
-	composite := originatorBuiltConformantUpdateBundleProfile(t, true)
-	if _, status, msg := g.conformantPASUpdateBind(composite, pci); status != 0 {
-		t.Fatalf("composite (absolutized) update bundle rejected: status=%d (%s), want 0", status, msg)
+	brPayerBundle := originatorBuiltConformantUpdateBundleProfile(t, true)
+	if _, status, msg := g.conformantPASUpdateBind(brPayerBundle, pci); status != 0 {
+		t.Fatalf("br-payer (absolutized) update bundle rejected: status=%d (%s), want 0", status, msg)
 	}
 }
 

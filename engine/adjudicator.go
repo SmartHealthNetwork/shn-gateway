@@ -137,9 +137,9 @@ func (s *sandboxResponder) Handle(ctx context.Context, leg, corrID, subjectPCI s
 		}
 		return LegResult{ResponseFHIR: crrJSON}, nil
 	case "crd-order-select":
-		srJSON, ok := extractConformantSR(requestFHIR)
+		srJSON, ok := extractConformantOrder(requestFHIR)
 		if !ok {
-			return LegResult{Status: http.StatusBadRequest, Message: "no ServiceRequest in draftOrders"}, nil
+			return LegResult{Status: http.StatusBadRequest, Message: "no order in draftOrders"}, nil
 		}
 		// §3.1: accept {CPT, HCPCS} product coding (was ParseServiceRequestCPT, CPT-only —
 		// which 400'd a HCPCS order before any decision). The CRD DECISION keys on the

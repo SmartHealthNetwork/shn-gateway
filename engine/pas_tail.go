@@ -4,7 +4,7 @@
 //
 // submitClaimAndResolve is the SINGLE-SHOT submit tail: build the conformant Claim Bundle →
 // egress-$validate → originate the pas-claim leg → ingress-$validate → classify the resolved
-// ClaimResponse. There is NO amendment leg on this tail (that is the composite UC-04/06 path).
+// ClaimResponse. There is NO amendment leg on this tail (that is the sandbox UC-04/06 path).
 // A single-shot ServiceRequest sets the Da Vinci PAS infoChanged item extension so the payer
 // gate POLLS the timer-resolved terminal A1 (handlePASClaimNative); a single-shot DeviceRequest
 // (HomeOxygen) does NOT — its order type alone routes it to the same poll. infoChanged is the

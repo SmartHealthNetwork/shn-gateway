@@ -13,37 +13,55 @@ import (
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
-// extractConformantSR pulls the ServiceRequest JSON from a conformant CDS Hooks request's
-// draftOrders Bundle (the first entry whose resource is a ServiceRequest).
+// extractConformantOrder pulls the order JSON from a conformant CDS Hooks request's draftOrders
+// Bundle (the first entry whose resource is a CDS order — a ServiceRequest OR a DeviceRequest).
 //
-// NOTE: this returns the FIRST ServiceRequest only. The payer-side bind below is
-// defense-in-depth, NOT the comprehensive guard: the INGRESS (ingressCRDSubjectPCI,
-// ingress_crd.go) already enforces that EVERY draftOrders entry + prefetch resource resolves
-// to the bound PCI before the request is sealed, and the ingress is the sole origin of this
-// leg's sealed bytes. A multi-entry Bundle with a rogue second SR is rejected at the ingress.
-func extractConformantSR(reqJSON []byte) ([]byte, bool) {
+// NOTE: this returns the FIRST order only. The payer-side bind below is defense-in-depth, NOT the
+// comprehensive guard: the INGRESS (ingressCRDSubjectPCI, ingress_crd.go) already enforces that
+// EVERY draftOrders entry + prefetch resource resolves to the bound PCI before the request is
+// sealed, and the ingress is the sole origin of this leg's sealed bytes. A multi-entry Bundle with
+// a rogue second order is rejected at the ingress.
+func extractConformantOrder(reqJSON []byte) ([]byte, bool) {
 	var req ingressCDSRequest
 	if err := json.Unmarshal(reqJSON, &req); err != nil {
 		return nil, false
 	}
-	sr := firstServiceRequest(req)
-	return sr, sr != nil
+	order := firstOrder(req)
+	return order, order != nil
 }
 
-// firstServiceRequest returns the first draftOrders entry whose resource is a ServiceRequest,
-// from an already-parsed request (so callers that already hold the parsed request do not
-// re-unmarshal). nil if none.
-func firstServiceRequest(req ingressCDSRequest) []byte {
+// firstOrder returns the first draftOrders entry whose resource is a CDS order — a ServiceRequest
+// OR a DeviceRequest. The order-select hook legitimately carries either (UC-04 a G0151 PT
+// ServiceRequest; UC-02 an E0250 hospital-bed DeviceRequest — br-payer's CdsResourceExtractor
+// accepts both), so the leg's bind is order-type-agnostic. From an already-parsed request (so
+// callers that hold the parsed request do not re-unmarshal). nil if none.
+func firstOrder(req ingressCDSRequest) []byte {
 	for _, e := range req.Context.DraftOrders.Entry {
 		var probe struct {
 			ResourceType string `json:"resourceType"`
 		}
 		_ = json.Unmarshal(e.Resource, &probe)
-		if probe.ResourceType == "ServiceRequest" {
+		if probe.ResourceType == "ServiceRequest" || probe.ResourceType == "DeviceRequest" {
 			return e.Resource
 		}
 	}
 	return nil
+}
+
+// orderSubjectRef reads subject.reference from a CDS order resource (ServiceRequest OR
+// DeviceRequest — both carry the patient as subject.reference). Used by the order-select subject
+// bind, which is order-type-agnostic (the SDK's ParseServiceRequestSubject is SR-locked, so the
+// bind parses the subject here instead — keeping the SDK out of the payer-side gateway path).
+func orderSubjectRef(orderJSON []byte) (string, bool) {
+	var probe struct {
+		Subject struct {
+			Reference string `json:"reference"`
+		} `json:"subject"`
+	}
+	if err := json.Unmarshal(orderJSON, &probe); err != nil || probe.Subject.Reference == "" {
+		return "", false
+	}
+	return probe.Subject.Reference, true
 }
 
 // conformantCRDBind subject-binds a conformant order-select request to tokSubject (the payer's
@@ -57,14 +75,14 @@ func (g *Gateway) conformantCRDBind(reqJSON []byte, tokSubject string) (srJSON, 
 	if err := json.Unmarshal(reqJSON, &req); err != nil {
 		return nil, nil, http.StatusBadRequest, "parse cds request failed"
 	}
-	srJSON = firstServiceRequest(req)
+	srJSON = firstOrder(req)
 	if len(srJSON) == 0 {
-		return nil, nil, http.StatusBadRequest, "no ServiceRequest in draftOrders"
+		return nil, nil, http.StatusBadRequest, "no order (ServiceRequest or DeviceRequest) in draftOrders"
 	}
 	covJSON = req.Prefetch["coverage"]
-	srSubjectRef, err := shnsdk.ParseServiceRequestSubject(srJSON)
-	if err != nil {
-		return nil, nil, http.StatusBadRequest, "parse service request subject failed"
+	srSubjectRef, ok := orderSubjectRef(srJSON)
+	if !ok {
+		return nil, nil, http.StatusBadRequest, "parse order subject failed"
 	}
 	covBeneRef, err := shnsdk.ParseCoverageBeneficiary(covJSON)
 	if err != nil {

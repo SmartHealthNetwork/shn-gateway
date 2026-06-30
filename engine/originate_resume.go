@@ -41,7 +41,7 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 	// BEFORE the pended submit. The pended QR then carries org-sourced base provenance (1.1/3.1),
 	// against which completeClinician's clinician-entered functional-status item contrasts (FR-17
 	// mixed provenance). Verdict-INERT — HHA is 0-CQL and br-payer's A4→A1 is its pend-resolution
-	// timer. composite/sandbox and UC-07 keep res.qrJSON byte-unchanged.
+	// timer. sandbox and UC-07 keep res.qrJSON byte-unchanged.
 	qrForSubmit := res.qrJSON
 	var baseTrace map[string]string
 	if g.cfg.OriginationProfile == "provider-data" && (scenario == "uc06" || scenario == "uc07") {
@@ -143,10 +143,10 @@ func (g *Gateway) handleUC06(w http.ResponseWriter, r *http.Request) {
 // single-call path byte-identical.
 func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st pendState, score, npi string) bool {
 	ctx := r.Context()
-	srRef := "ServiceRequest/sr-uc06" // composite/sandbox literal
+	srRef := "ServiceRequest/sr-uc06" // sandbox literal
 	linkID := oswestryLinkID
 	const uc06QRID = "qr-uc06"
-	// provider-data UC-06: bind to the REAL seeded order ref (not the composite literal) and attest
+	// provider-data UC-06: bind to the REAL seeded order ref (not the sandbox literal) and attest
 	// the HHA's free-text functional-status item (clinician-entered manual entry), NOT the
 	// 72148/lumbar oswestry item. The attested value is operator-supplied (D-2RI-1); verdict-inert
 	// (the A4→A1 is the pend-resolution timer).
@@ -163,7 +163,7 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 		}
 	}
 	if score == "" {
-		score = "42" // preserved composite default (Oswestry score)
+		score = "42" // preserved sandbox default (Oswestry score)
 	}
 	if npi == "" {
 		npi = g.cfg.NPI
@@ -226,7 +226,7 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 		writeJSON(w, status, map[string]string{"error": msg})
 		return false
 	}
-	// The composite amendment resolves to a genuine terminal A1 (the payer-gw polled
+	// The amendment resolves to a genuine terminal A1 (the payer-gw polled
 	// br-payer's timer A4→A1). UC-06's distinctive is DTR fill + clinician attestation → Attested.
 	// AmendmentCorr is the evidence the attestation re-POST leg ran.
 	parsed, approved := g.classifyResolution(updateResp)
@@ -238,7 +238,14 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "holder write failed (auth number)"})
 		return false
 	}
-	writeJSON(w, http.StatusOK, uc03Resp{PARequired: true, AuthNumber: parsed.PreAuthRef, ValidUntil: parsed.ValidUntil, AmendmentCorr: updateCorr, QRItems: st.filled, PendedItems: st.needed, Attested: true, QRAnswers: st.qrAnswers})
+	resp := uc03Resp{PARequired: true, AuthNumber: parsed.PreAuthRef, ValidUntil: parsed.ValidUntil, AmendmentCorr: updateCorr, QRItems: st.filled, PendedItems: st.needed, Attested: true}
+	// The org-attested base trace (1.1/3.1 from the seeded order) is a provider-data-only field;
+	// sandbox st.qrAnswers is nil (omitempty) so this gate is byte-identical, but it keeps
+	// the "every provider-data path gates on OriginationProfile" invariant explicit (review note).
+	if g.cfg.OriginationProfile == "provider-data" {
+		resp.QRAnswers = st.qrAnswers
+	}
+	writeJSON(w, http.StatusOK, resp)
 	return true
 }
 
@@ -273,10 +280,10 @@ func (g *Gateway) handleUC07(w http.ResponseWriter, r *http.Request) {
 // score defaults to "42", keeping the single-call path byte-identical.
 func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pendState, score string) bool {
 	ctx := r.Context()
-	srRef := "ServiceRequest/sr-uc07" // composite/sandbox literal
+	srRef := "ServiceRequest/sr-uc07" // sandbox literal
 	linkID := oswestryLinkID
 	const uc07QRID = "qr-uc07"
-	// provider-data UC-07: bind to the REAL seeded order ref (not the composite literal) and attest
+	// provider-data UC-07: bind to the REAL seeded order ref (not the sandbox literal) and attest
 	// the HHA's free-text functional-status item (patient-entered), NOT the 72148/lumbar oswestry
 	// item. The attested value is operator-supplied (D-2RI-1); verdict-inert (the A4→A1 is the
 	// pend-resolution timer). Patient analog of completeClinician's provider-data branch.
@@ -389,7 +396,14 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "holder write failed (auth number)"})
 		return false
 	}
-	writeJSON(w, http.StatusOK, uc03Resp{PARequired: true, AuthNumber: parsed.PreAuthRef, ValidUntil: parsed.ValidUntil, AmendmentCorr: updateCorr, QRItems: st.filled, PendedItems: st.needed, Attested: true, QRAnswers: st.qrAnswers})
+	resp := uc03Resp{PARequired: true, AuthNumber: parsed.PreAuthRef, ValidUntil: parsed.ValidUntil, AmendmentCorr: updateCorr, QRItems: st.filled, PendedItems: st.needed, Attested: true}
+	// The org-attested base trace (1.1/3.1 from the seeded order) is a provider-data-only field;
+	// sandbox st.qrAnswers is nil (omitempty) so this gate is byte-identical, but it keeps
+	// the "every provider-data path gates on OriginationProfile" invariant explicit (review note).
+	if g.cfg.OriginationProfile == "provider-data" {
+		resp.QRAnswers = st.qrAnswers
+	}
+	writeJSON(w, http.StatusOK, resp)
 	return true
 }
 
