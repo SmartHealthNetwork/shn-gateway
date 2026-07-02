@@ -119,3 +119,22 @@ func (s *Scaffold) OpenOrder(memberID string) ([]byte, bool) { return nil, false
 // requires a real FHIR SoR (FHIR_DATA_URL). Returns found=false.
 // TODO(partner): perform a direct FHIR read for the given relative reference from your backend.
 func (s *Scaffold) ResolveByReference(_ string) ([]byte, bool) { return nil, false }
+
+// OpenCoverage returns the member's Coverage record — the routing/identity SOURCE the gateway reads
+// at every origination site (FR-G40: the payer the exchange routes to, and the payer identity the
+// payload carries, both derive from this). The demo persona models a contained-payor Coverage naming
+// the CMS payer (shnsdk.CMSPayerIdentity), the same shape the substrate stub uses, so the scaffold
+// boots and runs UC-01/UC-03 out of the box.
+// TODO(partner): return the member's REAL Coverage record bytes from your system of record. Its
+// payor must name a payer your gateway's PAYER_DIRECTORY routes (contained Organization, an external
+// Organization resolvable via ResolveByReference, or an inline payor identifier).
+func (s *Scaffold) OpenCoverage(memberID string) ([]byte, bool) {
+	if memberID != scaffoldMember {
+		return nil, false
+	}
+	cov, err := shnsdk.BuildCoverageWithPayer("Patient/"+memberID, "Coverage/"+memberID, shnsdk.CMSPayerIdentity)
+	if err != nil {
+		return nil, false
+	}
+	return cov, true
+}

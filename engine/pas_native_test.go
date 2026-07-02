@@ -137,6 +137,7 @@ func originatorBuiltConformantBundle(t *testing.T, member string) []byte {
 		CoverageRef: "Coverage/convergence-coverage",
 		Corr:        "convergence-pas-submit-0001",
 		Created:     created,
+		Payer:       shnsdk.CMSPayerIdentity,
 	})
 	if err != nil {
 		t.Fatalf("BuildConformantClaimBundle: %v", err)
@@ -190,6 +191,7 @@ func TestParseConformantPASSubjects_AbsoluteRefs(t *testing.T) {
 		Created:          created,
 		ContainedInsurer: true,
 		AbsoluteRefs:     true,
+		Payer:            shnsdk.CMSPayerIdentity,
 	})
 	if err != nil {
 		t.Fatalf("BuildConformantClaimBundle: %v", err)
@@ -265,6 +267,7 @@ func nonLumbarConformantBundle(t *testing.T, member string) []byte {
 		CoverageRef: "Coverage/convergence-coverage",
 		Corr:        "followups-knee-0001",
 		Created:     created,
+		Payer:       shnsdk.CMSPayerIdentity,
 	})
 	if err != nil {
 		t.Fatalf("BuildConformantClaimBundle: %v", err)
@@ -687,6 +690,7 @@ func conformantPASBundlePended(t *testing.T, member string) []byte {
 		CoverageRef: "Coverage/convergence-coverage",
 		Corr:        "convergence-pas-pend-0001",
 		Created:     created,
+		Payer:       shnsdk.CMSPayerIdentity,
 	})
 	if err != nil {
 		t.Fatalf("BuildConformantClaimBundle: %v", err)
@@ -827,6 +831,7 @@ func originatorBuiltConformantUpdateBundleProfile(t *testing.T, brPayer bool) []
 		ContainedInsurer: brPayer,
 		AbsoluteRefs:     brPayer,
 		PayerOrgEntry:    brPayer,
+		Payer:            shnsdk.CMSPayerIdentity,
 	})
 	if err != nil {
 		t.Fatalf("BuildConformantClaimUpdateBundle: %v", err)

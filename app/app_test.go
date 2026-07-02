@@ -447,3 +447,38 @@ func TestLoadConfig_DispatchEnvVars(t *testing.T) {
 		t.Fatalf("PayerDavinciDispatchHook = %q; want %q", cfg.PayerDavinciDispatchHook, "order-dispatch")
 	}
 }
+
+// TestConvergeRegistry_CarriesPayerIDs verifies convergeRegistry copies a fed
+// holder's PayerIDs onto the resulting RegistryEntry (FR-G41) — the gateway's
+// converged in-memory registry is FeedPayerRouter's index source, so a payer
+// holder's claims must survive the /holders → Registry snapshot.
+func TestConvergeRegistry_CarriesPayerIDs(t *testing.T) {
+	var enc [32]byte
+	enc[0], enc[31] = 7, 9
+	var signPub [ed25519.PublicKeySize]byte
+	signPub[0] = 3
+	holder := shnsdk.Holder{
+		ID:       "payer-b",
+		Role:     "payer",
+		EncPub:   base64.StdEncoding.EncodeToString(enc[:]),
+		SignPub:  base64.StdEncoding.EncodeToString(signPub[:]),
+		BaseURL:  "https://payer-b.example",
+		PayerIDs: []shnsdk.PayerIdentifier{{System: "urn:oid:2.16.840.1.113883.6.300", Value: "00078"}},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode([]shnsdk.Holder{holder})
+	}))
+	defer srv.Close()
+
+	reg := shnsdk.NewRegistry()
+	if err := convergeRegistry(context.Background(), http.DefaultClient, srv.URL, reg); err != nil {
+		t.Fatalf("convergeRegistry: %v", err)
+	}
+	entry, ok := reg.Lookup("payer-b")
+	if !ok {
+		t.Fatal("payer-b missing from converged registry")
+	}
+	if len(entry.PayerIDs) != 1 || entry.PayerIDs[0] != holder.PayerIDs[0] {
+		t.Fatalf("PayerIDs not converged: want %+v, got %+v", holder.PayerIDs, entry.PayerIDs)
+	}
+}

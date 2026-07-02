@@ -60,10 +60,13 @@ const defaultHHAFunctionalLimitationsPatient = "I have trouble walking and stand
 type Config struct {
 	Role     string // "provider" | "payer" | "facility"
 	HolderID string
-	// CounterpartID is the holder this gateway transacts WITH on the provider side
-	// (the payer's id). Replaces the literal "payer" in routing call sites.
-	// The payer side does not use it — it replies to the inbound envelope's Sender.
-	CounterpartID string
+	// PayerRouter resolves a Coverage.payor identity → payer holder id (FR-G40). REQUIRED on the
+	// provider side: there is NO default payer. Every payer leg's recipient is derived from the
+	// patient's own Coverage via recipientFor (AI-G11 / OWD-G10) — a miss (no coverage / no
+	// parseable payer / no directory mapping) fails closed with a legible 422, never a default
+	// route. Replaced the deleted CounterpartID. The payer side does not use it — it replies to
+	// the inbound envelope's Sender.
+	PayerRouter PayerRouter
 	// OriginationProfile selects the per-UC behavior lane: "" / "sandbox" = the sandbox
 	// shape (default, SHN-produced, byte-unchanged); "provider-data" = originate every UC off
 	// the provider's seeded SoR and drive real br-payer verdicts (Mode A). targetsBrPayer keys
@@ -256,6 +259,44 @@ func New(cfg Config) *Gateway {
 	return g
 }
 
+// recipientForWith resolves the payer holder for an exchange from a Coverage (FR-G40). resolveRef
+// resolves an EXTERNAL Coverage.payor Organization reference ("<Type>/<id>"): at origination that is
+// the provider SoR; on INGRESS it is the inbound payload's OWN resources — a conformant partner's
+// payor Organization lives in its bundle/prefetch/parameters, NOT the provider SoR (bundleRefResolver
+// et al.). No default: any miss fails closed with a legible 422 (AI-G11 / OWD-G10). status==0 ⇒ ok.
+// It also returns the parsed PayerIdentifier so an origination site can REUSE it as the emitted payer
+// (one parse, one external-Org lookup) instead of re-parsing the same Coverage.
+func (g *Gateway) recipientForWith(coverageJSON []byte, resolveRef func(string) ([]byte, bool)) (holderID string, pid shnsdk.PayerIdentifier, status int, msg string) {
+	// Fail closed when the gateway was deployed without a payer directory: no router ⇒ no routing
+	// ⇒ no default (AI-G11 / OWD-G10). Guard BEFORE the nil-interface Resolve call so a provider
+	// missing PAYER_DIRECTORY returns a legible 422 instead of panicking.
+	if g.cfg.PayerRouter == nil {
+		return "", shnsdk.PayerIdentifier{}, http.StatusUnprocessableEntity, "no payer router configured"
+	}
+	parsed, ok := shnsdk.ParsePayerIdentifier(coverageJSON, resolveRef)
+	if !ok {
+		return "", shnsdk.PayerIdentifier{}, http.StatusUnprocessableEntity, "no payer identifier on member coverage"
+	}
+	holder, ok := g.cfg.PayerRouter.Resolve(parsed)
+	if !ok {
+		return "", shnsdk.PayerIdentifier{}, http.StatusUnprocessableEntity,
+			fmt.Sprintf("no registered payer for identifier %s|%s", parsed.System, parsed.Value)
+	}
+	return holder, parsed, 0, ""
+}
+
+// recipientFor resolves the payer holder from the patient's own Coverage (FR-G40) using the provider
+// SoR as the external-payor resolver — the origination default. Thin wrapper over recipientForWith
+// that discards the parsed identity, kept for callers that only route (payerrouting_test.go).
+func (g *Gateway) recipientFor(coverageJSON []byte) (holderID string, status int, msg string) {
+	var resolveRef func(string) ([]byte, bool)
+	if g.cfg.SoR != nil {
+		resolveRef = g.cfg.SoR.ResolveByReference
+	}
+	holder, _, status, msg := g.recipientForWith(coverageJSON, resolveRef)
+	return holder, status, msg
+}
+
 // pendState is the provider's own in-flight PA workflow state for a PENDED
 // attestation scenario (UC-06/UC-07), held under an opaque resume token between
 // the run-to-PENDED step and the resume-to-APPROVED step. It is the provider's
@@ -272,7 +313,9 @@ type pendState struct {
 	pasCorr     string
 	filled      []FilledItem
 	needed      []string
-	qrAnswers   map[string]string // provider-data UC-06: the org-attested base answer trace (1.1/3.1), surfaced in the response as FR-17 mixed-provenance evidence
+	qrAnswers   map[string]string      // provider-data UC-06: the org-attested base answer trace (1.1/3.1), surfaced in the response as FR-17 mixed-provenance evidence
+	payer       shnsdk.PayerIdentifier // the member's REAL payer identity (parsed from OpenCoverage at run-to-PENDED) — threads to the resume ClaimUpdate builders so the payload's payer derives from the patient's real Coverage (FR-G40)
+	recipient   string                 // the payer HOLDER id the resume legs route to, resolved from the member's real Coverage at run-to-PENDED (recipientFor) — no default (FR-G40 / AI-G11 / OWD-G10)
 }
 
 // storePending saves st under a fresh opaque resume token and returns it.
@@ -375,6 +418,11 @@ func (g *Gateway) Handler() http.Handler {
 	case "provider":
 		mux.HandleFunc("POST /scenario/uc01", g.handleScenario)
 		mux.HandleFunc("POST /scenario/uc02", g.handleUC02)
+		// FR-G41 (Slice 2) live routing proofs off the /holders feed: uc02-payerb self-discovers a
+		// SECOND payer holder (MBR-PD-UC02-PB / 00078 → `payer-b`); uc02-unknownpayer fails closed 422
+		// (MBR-UNKNOWN-PAYER / 00099 → no registered payer). Both share the handleUC02 no-PA CRD body.
+		mux.HandleFunc("POST /scenario/uc02-payerb", g.handleUC02PayerB)
+		mux.HandleFunc("POST /scenario/uc02-unknownpayer", g.handleUC02UnknownPayer)
 		mux.HandleFunc("POST /scenario/uc03", g.handleUC03)
 		mux.HandleFunc("POST /scenario/uc04", g.handleUC04)
 		mux.HandleFunc("POST /scenario/uc05", g.handleUC05)
@@ -577,7 +625,8 @@ func (g *Gateway) postEnvelope(ctx context.Context, url string, body []byte, ass
 // /route with a holder assertion → verify the response leg (VerifyBound respOp
 // + the SAME correlationID + Sender==recipient, envelope CorrelationID match) →
 // decrypt and return the response payload. recipient is the counterpart holder
-// id (passed by callers via Config.CounterpartID rather than hardcoded).
+// id (payer legs derive it from the patient's Coverage via recipientFor — no default;
+// facility/phg legs pass a LookupByRole result).
 // reqFrame/respFrame are the authority frames for the request and response legs
 // respectively (provider→payer uses "provider-tpo"/"payer-coverage"; provider→
 // facility uses "provider-tpo"/"facility-disclosure"). custodian is forwarded to
@@ -679,8 +728,9 @@ func (g *Gateway) roundTrip(ctx context.Context, r *http.Request, recipient, req
 // OriginateLeg is the origination leg-primitive: it runs one authorized, sealed,
 // Hub-routed exchange for legType, reading the authority frames / operations / scope
 // from `paCatalog` (the PA Layer-3 module) instead of taking them as positional
-// literals. recipient stays a parameter (payer legs target CounterpartID; facility/phg
-// legs target a LookupByRole result). An unknown legType is a caller bug (the Originator
+// literals. recipient stays a parameter (payer legs derive it from the patient's Coverage
+// via recipientFor — no default; facility/phg legs target a LookupByRole result). An
+// unknown legType is a caller bug (the Originator
 // only passes catalog legTypes) and fails closed with an error.
 //
 // The content.WorkstreamType guard is the SELECTION SEAM in embryo: today exactly one

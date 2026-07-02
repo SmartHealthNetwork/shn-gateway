@@ -78,6 +78,22 @@ func (s *homeOxygenSoR) ResolveByReference(ref string) ([]byte, bool) {
 	return s.supplierJSON, true
 }
 
+// OpenCoverage returns a parseable contained-payor Coverage for MBR-OX, the routing/identity
+// SOURCE the origination handler now reads (FR-G40). The embedded StubHolderData.OpenCoverage
+// can't serve it: MBR-OX is not in stubPersonas (it lives in the FHIR-store seed), so the embedded
+// stub's ResolvePatient — which OpenCoverage keys on — would miss it. So this override synthesizes
+// the same contained 00001 Coverage the stub would, keyed on the wrapper's known member.
+func (s *homeOxygenSoR) OpenCoverage(memberID string) ([]byte, bool) {
+	if memberID != "MBR-OX" {
+		return nil, false
+	}
+	cov, err := shnsdk.BuildCoverageWithPayer("Patient/MBR-OX", "Coverage/MBR-OX", shnsdk.CMSPayerIdentity)
+	if err != nil {
+		return nil, false
+	}
+	return cov, true
+}
+
 // fakePopulator returns a canned populated QR — the operated $populate stand-in for the
 // hermetic test (the REAL CQL $populate is the live gate). It echoes back the
 // requested subject + advertised canonical so the handler's QR-subject / QR-questionnaire
@@ -315,9 +331,9 @@ func TestHandleHomeOxygen(t *testing.T) {
 
 	const fakeBase = "http://stub.test"
 	gw := New(Config{
-		Role:          "provider",
-		HolderID:      "provider",
-		CounterpartID: "payer",
+		Role:        "provider",
+		HolderID:    "provider",
+		PayerRouter: payerRouterFor(t, "payer"),
 		Identity: shnsdk.Identity{
 			HolderID: "provider",
 			SignPriv: provSignPriv,

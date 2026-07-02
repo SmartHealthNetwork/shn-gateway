@@ -75,6 +75,7 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 		ContainedInsurer: targetsBrPayer(g.cfg.OriginationProfile),
 		AbsoluteRefs:     targetsBrPayer(g.cfg.OriginationProfile),
 		PayerOrgEntry:    targetsBrPayer(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
+		Payer:            res.payer,
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build bundle failed"})
@@ -84,7 +85,7 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 		writeJSON(w, status, map[string]string{"error": msg})
 		return pendState{}, false
 	}
-	pendedResp, err := g.OriginateLeg(ctx, r, g.cfg.CounterpartID, "pas-claim", res.pci, pasCorr, "", Content{WorkstreamType: workstreamPA, Bytes: bundleJSON})
+	pendedResp, err := g.OriginateLeg(ctx, r, res.recipient, "pas-claim", res.pci, pasCorr, "", Content{WorkstreamType: workstreamPA, Bytes: bundleJSON})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return pendState{}, false
@@ -110,6 +111,8 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 		filled:      res.filled,
 		needed:      needed,
 		qrAnswers:   baseTrace,
+		payer:       res.payer,     // thread the REAL payer identity to the resume ClaimUpdate builders (FR-G40)
+		recipient:   res.recipient, // thread the coverage-derived payer HOLDER so the resume update legs route to it (FR-G40; no default)
 	}, true
 }
 
@@ -208,6 +211,7 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 		ContainedInsurer: targetsBrPayer(g.cfg.OriginationProfile),
 		AbsoluteRefs:     targetsBrPayer(g.cfg.OriginationProfile),
 		PayerOrgEntry:    targetsBrPayer(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
+		Payer:            st.payer,
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build update bundle failed"})
@@ -217,7 +221,7 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 		writeJSON(w, status, map[string]string{"error": msg})
 		return false
 	}
-	updateResp, err := g.OriginateLeg(ctx, r, g.cfg.CounterpartID, "pas-claim-update", st.pci, updateCorr, "", Content{WorkstreamType: workstreamPA, Bytes: updateBundle})
+	updateResp, err := g.OriginateLeg(ctx, r, st.recipient, "pas-claim-update", st.pci, updateCorr, "", Content{WorkstreamType: workstreamPA, Bytes: updateBundle})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return false
@@ -366,6 +370,7 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 		ContainedInsurer: targetsBrPayer(g.cfg.OriginationProfile),
 		AbsoluteRefs:     targetsBrPayer(g.cfg.OriginationProfile),
 		PayerOrgEntry:    targetsBrPayer(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
+		Payer:            st.payer,
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build update bundle failed"})
@@ -375,7 +380,7 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 		writeJSON(w, status, map[string]string{"error": msg})
 		return false
 	}
-	updateResp, err := g.OriginateLeg(ctx, r, g.cfg.CounterpartID, "pas-claim-update", st.pci, updateCorr, "", Content{WorkstreamType: workstreamPA, Bytes: updateBundle})
+	updateResp, err := g.OriginateLeg(ctx, r, st.recipient, "pas-claim-update", st.pci, updateCorr, "", Content{WorkstreamType: workstreamPA, Bytes: updateBundle})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return false

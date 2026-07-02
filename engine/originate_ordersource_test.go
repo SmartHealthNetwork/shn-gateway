@@ -45,6 +45,9 @@ func (s *noCodingSoR) OpenOrder(memberID string) ([]byte, bool) {
 	return []byte(`{"resourceType":"ServiceRequest","id":"sr-nocode","status":"active","intent":"order","code":{"coding":[{"system":"http://snomed.info/sct","code":"123456","display":"not a product code"}]},"subject":{"reference":"Patient/MBR-X"}}`), true
 }
 
+// OpenCoverage is inherited from the embedded StubHolderData (this test drives orderSource
+// directly, not a full origination handler, so OpenCoverage is never invoked).
+
 func TestOrderSource_ProviderDataOrderNoRecognizedCoding(t *testing.T) {
 	g := &Gateway{cfg: Config{OriginationProfile: "provider-data", SoR: &noCodingSoR{NewStubHolderData()}}}
 	_, status, msg := g.orderSource("MBR-X", "Patient/MBR-X", "", "", "", "")

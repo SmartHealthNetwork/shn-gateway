@@ -20,8 +20,8 @@ validator (OWD-G9).
 
 ## Run
 ```bash
-export SHN_DISCOVERY_URL=https://accounts.shn-preview.dev/discovery
-export ROLE=payer                      # provider | payer | facility | phg
+export SHN_DISCOVERY_URL=https://accounts.shn-preview.org/discovery
+export ROLE=provider                   # provider | payer | facility | phg
 export SHN_SECRETS=/abs/path/to/bundle # the `shn register -out` dir
 docker compose -f compose.yml up --build
 ```

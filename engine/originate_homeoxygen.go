@@ -72,7 +72,25 @@ func (g *Gateway) originateDispatch(w http.ResponseWriter, r *http.Request, memb
 		return
 	}
 
-	coverageJSON, err := shnsdk.BuildCoverageWithPayer(patientRef, coverageRef)
+	// Read the member's OWN open Coverage as the routing/identity SOURCE (FR-G40): the dispatch leg's
+	// payer identity derives from the patient's real Coverage, not a synthetic CMS literal. realCov
+	// stays a LOCAL (the recipient is resolved from it); the per-leg emit shapes are unchanged.
+	realCov, hasCov := g.cfg.SoR.OpenCoverage(member)
+	if !hasCov {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "no coverage on file for member"})
+		return
+	}
+	// Resolve the payer HOLDER every dispatch/DTR/PAS leg routes to AND the parsed payer identity in
+	// ONE parse of the member's own Coverage (FR-G40): no default — a miss fails closed HERE before
+	// any leg (AI-G11 / OWD-G10). `payer` threads to the dispatch/coverage/PAS builders, so
+	// routed-payer and payload-payer cannot diverge (one payer fact, read once).
+	recipient, payer, status, msg := g.recipientForWith(realCov, g.cfg.SoR.ResolveByReference)
+	if status != 0 {
+		writeJSON(w, status, map[string]string{"error": msg})
+		return
+	}
+
+	coverageJSON, err := shnsdk.BuildCoverageWithPayer(patientRef, coverageRef, payer)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build coverage failed"})
 		return
@@ -91,12 +109,13 @@ func (g *Gateway) originateDispatch(w http.ResponseWriter, r *http.Request, memb
 		DeviceRequest: orderJSON,
 		Supplier:      supplierJSON,
 		Coverage:      coverageJSON,
+		Payer:         payer,
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build order-dispatch failed"})
 		return
 	}
-	crdRespJSON, err := g.OriginateLeg(ctx, r, g.cfg.CounterpartID, "crd-order-dispatch", pci, g.cfg.CorrelationGen(), "", Content{WorkstreamType: workstreamPA, Bytes: crdReq})
+	crdRespJSON, err := g.OriginateLeg(ctx, r, recipient, "crd-order-dispatch", pci, g.cfg.CorrelationGen(), "", Content{WorkstreamType: workstreamPA, Bytes: crdReq})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
@@ -128,7 +147,7 @@ func (g *Gateway) originateDispatch(w http.ResponseWriter, r *http.Request, memb
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build dtr request failed"})
 		return
 	}
-	packageJSON, err := g.OriginateLeg(ctx, r, g.cfg.CounterpartID, "dtr-questionnaire-fetch", pci, g.cfg.CorrelationGen(), "", Content{WorkstreamType: workstreamPA, Bytes: dtrReq})
+	packageJSON, err := g.OriginateLeg(ctx, r, recipient, "dtr-questionnaire-fetch", pci, g.cfg.CorrelationGen(), "", Content{WorkstreamType: workstreamPA, Bytes: dtrReq})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
@@ -183,7 +202,7 @@ func (g *Gateway) originateDispatch(w http.ResponseWriter, r *http.Request, memb
 	// the payer gate to poll the timer-resolved A1. The genuine outcome is conditional-coverage
 	// A4-pended → A1; the payer responder's pend re-query resolves A4→A1, so the FINAL observed
 	// Outcome is "approved" (A1). ---
-	parsed, _, status, msg := g.submitClaimAndResolve(ctx, r, pci, orderJSON, qrJSON, patientRef, coverageRef)
+	parsed, _, status, msg := g.submitClaimAndResolve(ctx, r, pci, orderJSON, qrJSON, patientRef, coverageRef, payer, recipient)
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return

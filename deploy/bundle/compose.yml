@@ -1,6 +1,6 @@
 # FR-G3 config-only deployment bundle — the partner install unit.
 # A partner sets the three required inputs and `docker compose up`:
-#   SHN_DISCOVERY_URL  the discovery anchor (e.g. https://accounts.shn-preview.dev/discovery)
+#   SHN_DISCOVERY_URL  the discovery anchor (e.g. https://accounts.shn-preview.org/discovery)
 #   ROLE               provider | payer | facility | phg
 #   SHN_SECRETS         host path to the `shn register` bundle dir (mounted at /etc/shn)
 # The IG-loaded $validate sidecar is co-located here — no separate validator host, and

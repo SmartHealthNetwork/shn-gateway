@@ -27,8 +27,9 @@ type legSpec struct {
 // paCatalog is the PA workstream's leg catalog, keyed by legType (= envelope
 // TransactionType). Every entry is the EXACT literal set today's call sites pass
 // (verified byte-for-byte by workstream_pa_test.go). The recipient is NOT a catalog
-// property: payer legs target Config.CounterpartID, facility/phg legs target a
-// registry LookupByRole result, so the recipient stays a call-time argument.
+// property: payer legs derive the recipient from the patient's Coverage via recipientFor (no
+// default), facility/phg legs target a registry LookupByRole result, so the recipient stays a
+// call-time argument.
 var paCatalog = map[string]legSpec{
 	"coverage-eligibility": {
 		ReqFrame: "provider-tpo", RespFrame: "payer-coverage",

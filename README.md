@@ -208,9 +208,26 @@ See [`deploy/bundle/README.md`](deploy/bundle/README.md).
 
 | Env var | Applies to | Description |
 |---|---|---|
-| `COUNTERPART_ID` | provider | The holder id you originate to. Set it to your counterpart payer's server-assigned id (or `payer` for the built-in sandbox responder). Required to originate. |
+| `PAYER_DIRECTORY` | provider | **Optional override.** Path to a JSON file mapping a member's Coverage payor identity (`{"system","value"}`) to the payer holder id you originate to. When set, it takes precedence over the default feed-derived discovery — a static, provider-maintained map for bootstrap/testing (or when you route to a payer that does not publish its identity in the network feed). Example row: `[{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00001","holderId":"payer"}]`. |
 
-Responder roles (`payer`/`facility`/`phg`) need no `COUNTERPART_ID`: they receive
+**Payer routing is coverage-derived, off the network feed by default (FR-G41).** A provider
+gateway resolves the recipient of every payer leg from the patient's **own Coverage** payor
+identity — there is **no default payer**. By default it uses `FeedPayerRouter`: it indexes the
+converged `/holders` feed, where each `role=payer` holder publishes its operator-attested payer
+identities (`payerIds`), and maps `Coverage.payor → holder id`. This is the drop-in, many-to-many
+property — a new payer holder self-registers its identity and providers discover it with **no
+config change**. Resolution is fail-closed: a miss (no coverage / no parseable payer / no holder
+claims that identity) **fails closed with 422**, and an ambiguous identity claimed by more than one
+holder also fails closed (`AI-G12`). Set `PAYER_DIRECTORY` only to override this with a static map.
+
+**How a payer publishes its identity into the feed (payer-onboarding path).** A payer-identity is
+**operator-attested, never self-asserted** (`AI-G12`/`OWD-G11`): the applicant *claims* its payer
+identities on the Gate-A access request; the operator *vouches* them at approval (into the org's
+authorized grant); and Gate-B client registration enforces `declared ⊆ authorized` before the
+identity lands in the registrar (`UNIQUE(system,value)` globally). Only then does a provider's
+`FeedPayerRouter` route to it.
+
+Responder roles (`payer`/`facility`/`phg`) need no `PAYER_DIRECTORY`: they receive
 at `POST /substrate/inbound` and reply to whoever the Hub delivers from. A payer
 adjudicates with built-in sandbox decision logic out of the box — plug in your
 own via [§7](#7-integrate-your-internal-systems).
@@ -286,12 +303,16 @@ validator host, no backend. For production, drop `SHN_FAKE_VALIDATOR=1`, set
 docker run --rm \
   -e SHN_DISCOVERY_URL=https://accounts.shn-preview.org/discovery \
   -e ROLE=provider \
-  -e COUNTERPART_ID=acme-health-2b9c \
+  -e PAYER_DIRECTORY=/etc/shn/payer-directory.json \
   -e SHN_FAKE_VALIDATOR=1 \
   -e SHN_SECRETS=/etc/shn/bundle \
   -v "$PWD/provider-bundle:/etc/shn/bundle:ro" \
+  -v "$PWD/payer-directory.json:/etc/shn/payer-directory.json:ro" \
   -p 8080:8080 \
   shn-gateway
+
+# payer-directory.json maps your members' Coverage payor identity to the payer holder:
+#   [{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00001","holderId":"acme-health-2b9c"}]
 ```
 
 **Payer** — boots as a responder listening for Hub deliveries:
@@ -357,9 +378,11 @@ Start the payer gateway ([§5](#5-run)). The Hub will now POST deliveries to
 
 ### The provider side — originate
 
-Start the provider gateway with `COUNTERPART_ID` set to the **payer's holder id**
-from [§3](#3-register-and-get-your-bundle) (`acme-health-2b9c` in this guide), as
-in [§5](#5-run). Then originate a **coverage-eligibility** exchange (UC-01) for a
+Start the provider gateway with a `PAYER_DIRECTORY` that maps your members' Coverage
+payor identity to the **payer's holder id** from [§3](#3-register-and-get-your-bundle)
+(`acme-health-2b9c` in this guide), as in [§5](#5-run). Routing is coverage-derived
+(FR-G40): there is no default payer — the recipient is resolved per-exchange from the
+patient's own Coverage. Then originate a **coverage-eligibility** exchange (UC-01) for a
 seeded persona:
 
 ```sh
@@ -395,11 +418,13 @@ or the SDK; see the SANDBOX guide in
 ### Quick single-machine smoke (built-in sandbox payer)
 
 To confirm a provider gateway works **without** standing up a payer, point it at
-the sandbox's built-in `payer` responder — set `COUNTERPART_ID=payer` and
-originate. No payer deployment, no public endpoint required:
+the sandbox's built-in `payer` responder — provide a `PAYER_DIRECTORY` mapping the
+seeded personas' Coverage payor identity (`urn:oid:2.16.840.1.113883.6.300|00001`)
+to the built-in `payer` holder — and originate. No payer deployment, no public
+endpoint required:
 
 ```sh
-# provider gateway running with COUNTERPART_ID=payer
+# provider gateway running with PAYER_DIRECTORY mapping 00001 → payer
 curl -s -X POST localhost:8080/scenario/uc01 \
   -H 'Content-Type: application/json' -d '{"branch":"covered"}'
 # → {"covered":true,"reason":""}
@@ -426,7 +451,7 @@ Backend Services quad:
 ```sh
 docker run --rm \
   -e SHN_DISCOVERY_URL=https://accounts.shn-preview.org/discovery \
-  -e ROLE=provider -e COUNTERPART_ID=acme-health-2b9c \
+  -e ROLE=provider -e PAYER_DIRECTORY=/etc/shn/payer-directory.json \
   -e FHIR_VALIDATE_URL=https://your-hapi.example.com/fhir \
   -e FHIR_DATA_URL=https://fhir.your-org.example.com/r4 \
   -e FHIR_TOKEN_URL=https://fhir.your-org.example.com/oauth2/token \
@@ -559,7 +584,8 @@ the body.
 |---|---|
 | `refusing to run without per-message validation (FR-36)` at startup | No validator configured and discovery advertises none. Set `FHIR_VALIDATE_URL`, or `SHN_FAKE_VALIDATOR=1` for a dev smoke. |
 | `fetch discovery: …` / `fetch hub transport key: …` at startup | `SHN_DISCOVERY_URL` unreachable, or the gateway can't reach the substrate hosts it resolves. Confirm `curl $SHN_DISCOVERY_URL` works from the gateway's network. |
-| Provider originate returns `recipient "…" not in registry` | `COUNTERPART_ID` isn't a registered holder, or the registrar feed hasn't propagated yet. Confirm the counterpart appears in `shn clients` / the `/holders` feed. |
+| Provider originate returns `recipient "…" not in registry` | The payer holder resolved from the member's Coverage (feed `payerIds`, or your `PAYER_DIRECTORY` override) isn't a registered holder, or the registrar feed hasn't propagated yet. Confirm the counterpart appears in `shn clients` / the `/holders` feed. |
+| Provider originate returns `422 no payer identifier on member coverage` / `no registered payer for identifier …` | Coverage-derived routing found no route (FR-G41; no default): the member's Coverage carries no parseable payor identity, or no `role=payer` holder in the feed claims that identity (and no `PAYER_DIRECTORY` override maps it). Ensure the target payer holder published that `{system,value}` in its feed `payerIds` (payer-onboarding path), or set a `PAYER_DIRECTORY` override row. An identity claimed by **two** holders also fails closed (ambiguous — `AI-G12`). |
 | Provider originate returns `502` (routing / response sender mismatch) | The counterpart isn't reachable or didn't respond as itself. Check the payer gateway is running and its registered `--base-url` resolves publicly to it. |
 | Payer never receives a delivery | The Hub can't reach the payer's `--base-url`. It must be a public https endpoint fronting `:8080` and must not redirect on `/substrate/inbound`. Re-check the tunnel/load balancer. |
 | Payer returns `403 missing or invalid hub assertion` | The request didn't come from the Hub (e.g. a direct curl to `/substrate/inbound`). Only the Hub can deliver; originate from a provider instead. |

@@ -234,7 +234,7 @@ func gatewayWithAuth(t *testing.T, clientID string, pubPEM []byte) *Gateway {
 	g := New(Config{
 		Role:           "provider",
 		HolderID:       "provider",
-		CounterpartID:  "payer",
+		PayerRouter:    payerRouterFor(t, "payer"),
 		Identity:       shnsdk.Identity{HolderID: "provider", SignPriv: signPriv}, // required
 		IngressEnabled: true,
 		IngressBaseURL: testIngressBaseURL,

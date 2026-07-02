@@ -164,6 +164,26 @@ func (g *Gateway) handleScenario(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Read-ADD (FR-G40): UC-01 reads the member's OWN open Coverage as the routing/identity SOURCE
+	// (the eligibility leg's recipient is resolved from realCov). The eligibility REQUEST itself
+	// stays bare-insurer (BuildEligibilityRequest unchanged — insurer-coherence deferred this slice),
+	// so this read does not change the payload bytes; it only fails closed when the member has no
+	// coverage / no parseable payer on file (AI-G11 / OWD-G10).
+	realCov, hasCov := g.cfg.SoR.OpenCoverage(memberID)
+	if !hasCov {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "no coverage on file for member"})
+		return
+	}
+	// Route the eligibility leg to the payer HOLDER resolved from the member's own Coverage
+	// (FR-G40): no default — a miss (no parseable payer / no directory mapping) fails closed HERE
+	// before any leg (AI-G11 / OWD-G10). The eligibility REQUEST stays bare-insurer (unchanged), so
+	// UC-01 discards the parsed payer identity — it only routes.
+	recipient, _, status, msg := g.recipientForWith(realCov, g.cfg.SoR.ResolveByReference)
+	if status != 0 {
+		writeJSON(w, status, map[string]string{"error": msg})
+		return
+	}
+
 	cerJSON, err := shnsdk.BuildEligibilityRequest(memberID, g.cfg.NPI, g.cfg.Clock())
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build request failed"})
@@ -195,7 +215,7 @@ func (g *Gateway) handleScenario(w http.ResponseWriter, r *http.Request) {
 	// subject==pci) → decrypt. Folding UC-01 onto the shared helper keeps the
 	// trust-critical response-leg verification in ONE place — no duplicated copy to
 	// drift.
-	crrJSON, err := g.OriginateLeg(ctx, r, g.cfg.CounterpartID, "coverage-eligibility", pci, correlationID, "", Content{WorkstreamType: workstreamPA, Bytes: cerJSON})
+	crrJSON, err := g.OriginateLeg(ctx, r, recipient, "coverage-eligibility", pci, correlationID, "", Content{WorkstreamType: workstreamPA, Bytes: cerJSON})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
@@ -264,6 +284,16 @@ type crdDtrResult struct {
 	patientRef, coverageRef string
 	pci                     string
 	filled                  []FilledItem
+	// payer is the member's REAL payer identity, parsed from the member's open Coverage
+	// (OpenCoverage → ParsePayerIdentifier) at the fresh origination site (FR-G40). It threads
+	// to the payer-org-emitting PAS builders so the payload's payer derives from the patient's
+	// real Coverage, not a synthetic CMS literal.
+	payer shnsdk.PayerIdentifier
+	// recipient is the payer HOLDER id every leg of this exchange routes to, resolved from the
+	// member's real Coverage via recipientFor at the fresh origination site (FR-G40). There is NO
+	// default — a miss fails closed before any leg (AI-G11 / OWD-G10). It replaced the deleted
+	// Config.CounterpartID at the PAS-tail / resume sites (res.recipient).
+	recipient string
 }
 
 // orderSource returns the origination order bytes for the active profile. Under
@@ -327,6 +357,25 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 	patientRef := "Patient/" + member
 	coverageRef := "Coverage/" + member
 
+	// realCov is the member's OWN open Coverage — the routing/identity SOURCE (FR-G40). Its parsed
+	// payer identity feeds the egress builders so the payload's payer derives from the patient's
+	// real Coverage, not a synthetic CMS literal. realCov stays a LOCAL (never an egress payload,
+	// never stored on crdDtrResult); the recipient is resolved from it inline at this site.
+	realCov, found := g.cfg.SoR.OpenCoverage(member)
+	if !found {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "no coverage on file for member"})
+		return crdDtrResult{}, false
+	}
+	// Resolve the payer HOLDER every leg of this exchange routes to AND the parsed payer identity in
+	// ONE parse of the member's own Coverage (FR-G40): no default — a miss fails closed HERE before
+	// any leg (AI-G11 / OWD-G10). `payer` (the parsed identity) threads to the PAS builders below, so
+	// routed-payer and payload-payer cannot diverge (one payer fact, read once).
+	recipient, payer, status, msg := g.recipientForWith(realCov, g.cfg.SoR.ResolveByReference)
+	if status != 0 {
+		writeJSON(w, status, map[string]string{"error": msg})
+		return crdDtrResult{}, false
+	}
+
 	srJSON, status, msg := g.orderSource(member, patientRef, system, code, display, dx)
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
@@ -337,7 +386,9 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 		return crdDtrResult{}, false
 	}
 
-	coverageJSON, err := shnsdk.BuildCoverageWithPayer(patientRef, coverageRef)
+	// crd-order-select keeps the CONTAINED-payor egress form (BuildCoverageWithPayer); only the
+	// payer IDENTITY now derives from realCov (no synthetic CMS payer).
+	coverageJSON, err := shnsdk.BuildCoverageWithPayer(patientRef, coverageRef, payer)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build coverage failed"})
 		return crdDtrResult{}, false
@@ -353,7 +404,7 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build order-select failed"})
 		return crdDtrResult{}, false
 	}
-	crdRespJSON, err := g.OriginateLeg(ctx, r, g.cfg.CounterpartID, "crd-order-select", pci, g.cfg.CorrelationGen(), "", Content{WorkstreamType: workstreamPA, Bytes: crdReq})
+	crdRespJSON, err := g.OriginateLeg(ctx, r, recipient, "crd-order-select", pci, g.cfg.CorrelationGen(), "", Content{WorkstreamType: workstreamPA, Bytes: crdReq})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return crdDtrResult{}, false
@@ -379,7 +430,7 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 			// handleUC08 asserts the PAS result is DENIED (502 on any approval), so a
 			// not-covered order can never yield an auth. Not-covered carries no questionnaire
 			// (NeedsDTR=false) → return the built order straight for the PAS submit.
-			return crdDtrResult{srJSON: srJSON, patientRef: patientRef, coverageRef: coverageRef, pci: pci}, true
+			return crdDtrResult{srJSON: srJSON, patientRef: patientRef, coverageRef: coverageRef, pci: pci, payer: payer, recipient: recipient}, true
 		}
 		// AI-1: a coverage denial STOPS — never routes DTR/PAS. (adversarial Row 1)
 		// Explicit terminal stop; patient-facing denial UX is deferred.
@@ -403,7 +454,7 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 	// DTR questionnaire is fetched is decided by the doc-needed axis (NeedsDTR),
 	// independently: no-doc (br-payer L8000) skips DTR straight to PAS; clinical
 	// (br-payer G0151) routes DTR.
-	res := crdDtrResult{srJSON: srJSON, patientRef: patientRef, coverageRef: coverageRef, pci: pci}
+	res := crdDtrResult{srJSON: srJSON, patientRef: patientRef, coverageRef: coverageRef, pci: pci, payer: payer, recipient: recipient}
 	if cov.NeedsDTR() {
 		canonical := shnsdk.StripCanonicalVersion(cov.Questionnaires[0])
 
@@ -423,7 +474,7 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build dtr request failed"})
 			return crdDtrResult{}, false
 		}
-		packageJSON, err := g.OriginateLeg(ctx, r, g.cfg.CounterpartID, "dtr-questionnaire-fetch", pci, g.cfg.CorrelationGen(), "", Content{WorkstreamType: workstreamPA, Bytes: dtrReq})
+		packageJSON, err := g.OriginateLeg(ctx, r, recipient, "dtr-questionnaire-fetch", pci, g.cfg.CorrelationGen(), "", Content{WorkstreamType: workstreamPA, Bytes: dtrReq})
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 			return crdDtrResult{}, false
@@ -636,14 +687,41 @@ func questionnaireResponseCanonical(qrJSON []byte) (string, error) {
 // tuple (an X-ray order). Surfaces the covered/no-PA/no-DTR triple (NeedsDTR is the
 // reasonCode discriminator, asserted by the live gate).
 func (g *Gateway) handleUC02(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-
 	// UC-02 (no-PA) originates the seeded E0250 hospital-bed DeviceRequest off provider data
 	// (the MBR-PD-UC02 persona) — D-PD-2 is dropped. The order is read via orderSource → OpenOrder
 	// in the provider-data lane (it traces to the provider's seeded SoR, never a literal); a
 	// mis-seeded member with no open order fails closed at OpenOrder. The sandbox lane originates
 	// the no-PA order off the per-UC tuple (byte-unchanged).
-	member := g.sceneMember("MBR-COVERED", "MBR-PD-UC02")
+	g.originateNoPACRD(w, r, g.sceneMember("MBR-COVERED", "MBR-PD-UC02"))
+}
+
+// handleUC02PayerB is the LIVE second-payer self-discovery proof (FR-G41): the MBR-PD-UC02-PB
+// persona's own Coverage names a DISTINCT payer identity (urn:oid:…300|00078) which the provider
+// gateway's FeedPayerRouter resolves to holder `payer-b` off the /holders feed — while the persona-A
+// scenarios (MBR-COVERED / 00001) resolve to `payer`. Both are self-discovered off the SAME feed with
+// no static per-provider directory (the many-to-many drop-in property). MBR-PD-UC02-PB is seeded into
+// the provider tenant by cmd/fhirseed (shnsdk provider-data persona "uc02-payerb"). This proves
+// ROUTING (both members seal to DIFFERENT holders), not a distinct verdict — differential adjudication
+// is a Connectathon-day property (§6).
+func (g *Gateway) handleUC02PayerB(w http.ResponseWriter, r *http.Request) {
+	g.originateNoPACRD(w, r, "MBR-PD-UC02-PB")
+}
+
+// handleUC02UnknownPayer is the LIVE FeedPayerRouter fail-closed proof (AI-G11/AI-G12): the
+// MBR-UNKNOWN-PAYER persona's Coverage names a payer identity (urn:oid:…300|00099) that NO holder
+// claims in the feed, so the coverage-derived resolution fails closed with a legible 422 ("no
+// registered payer for identifier …|00099") — never a default payer. Seeded into the provider tenant
+// by cmd/fhirseed (a smoke-only negative persona, not an SDK partner-onboarding fixture).
+func (g *Gateway) handleUC02UnknownPayer(w http.ResponseWriter, r *http.Request) {
+	g.originateNoPACRD(w, r, "MBR-UNKNOWN-PAYER")
+}
+
+// originateNoPACRD runs the no-PA CRD round-trip for member: read the member's OWN Coverage as the
+// routing/identity source (FR-G40/G41 — the payer holder is resolved off Coverage.payor, no default),
+// originate a crd-order-select leg, and surface the covered/no-PA/no-DTR triple. Shared by handleUC02
+// (persona-A) and the Slice-2 second-payer / unknown-payer routing proofs.
+func (g *Gateway) originateNoPACRD(w http.ResponseWriter, r *http.Request, member string) {
+	ctx := r.Context()
 
 	pci, _, found := g.cfg.SoR.ResolvePatient(member)
 	if !found {
@@ -663,7 +741,24 @@ func (g *Gateway) handleUC02(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	coverageJSON, err := shnsdk.BuildCoverageWithPayer(patientRef, "Coverage/"+member)
+	// Read the member's OWN open Coverage as the routing/identity SOURCE (FR-G40); the egress
+	// CRD coverage keeps the contained-payor form, now carrying the REAL payer identity (no
+	// synthetic CMS literal). realCov stays a LOCAL (the recipient is resolved from it).
+	realCov, hasCov := g.cfg.SoR.OpenCoverage(member)
+	if !hasCov {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "no coverage on file for member"})
+		return
+	}
+	// Resolve the CRD leg's payer HOLDER AND the parsed payer identity in ONE parse of the member's
+	// own Coverage (FR-G40): no default — a miss fails closed HERE before the leg (AI-G11 / OWD-G10).
+	// `payer` threads to the CRD coverage builder, so routed-payer and payload-payer cannot diverge.
+	recipient, payer, status, msg := g.recipientForWith(realCov, g.cfg.SoR.ResolveByReference)
+	if status != 0 {
+		writeJSON(w, status, map[string]string{"error": msg})
+		return
+	}
+
+	coverageJSON, err := shnsdk.BuildCoverageWithPayer(patientRef, "Coverage/"+member, payer)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build coverage failed"})
 		return
@@ -682,7 +777,7 @@ func (g *Gateway) handleUC02(w http.ResponseWriter, r *http.Request) {
 	}
 
 	correlationID := g.cfg.CorrelationGen()
-	respJSON, err := g.OriginateLeg(ctx, r, g.cfg.CounterpartID, "crd-order-select", pci, correlationID, "", Content{WorkstreamType: workstreamPA, Bytes: reqJSON})
+	respJSON, err := g.OriginateLeg(ctx, r, recipient, "crd-order-select", pci, correlationID, "", Content{WorkstreamType: workstreamPA, Bytes: reqJSON})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
@@ -752,6 +847,7 @@ func (g *Gateway) handleUC03(w http.ResponseWriter, r *http.Request) {
 		ContainedInsurer: targetsBrPayer(g.cfg.OriginationProfile),
 		AbsoluteRefs:     targetsBrPayer(g.cfg.OriginationProfile),
 		PayerOrgEntry:    targetsBrPayer(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
+		Payer:            res.payer,
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build bundle failed"})
@@ -761,7 +857,7 @@ func (g *Gateway) handleUC03(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
-	claimRespJSON, err := g.OriginateLeg(ctx, r, g.cfg.CounterpartID, "pas-claim", res.pci, pasCorr, "", Content{WorkstreamType: workstreamPA, Bytes: bundleJSON})
+	claimRespJSON, err := g.OriginateLeg(ctx, r, res.recipient, "pas-claim", res.pci, pasCorr, "", Content{WorkstreamType: workstreamPA, Bytes: bundleJSON})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
@@ -816,6 +912,7 @@ func (g *Gateway) handleUC07HCPCS(w http.ResponseWriter, r *http.Request) {
 		ContainedInsurer: targetsBrPayer(g.cfg.OriginationProfile),
 		AbsoluteRefs:     targetsBrPayer(g.cfg.OriginationProfile),
 		PayerOrgEntry:    targetsBrPayer(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
+		Payer:            res.payer,
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build bundle failed"})
@@ -825,7 +922,7 @@ func (g *Gateway) handleUC07HCPCS(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
-	claimRespJSON, err := g.OriginateLeg(ctx, r, g.cfg.CounterpartID, "pas-claim", res.pci, pasCorr, "", Content{WorkstreamType: workstreamPA, Bytes: bundleJSON})
+	claimRespJSON, err := g.OriginateLeg(ctx, r, res.recipient, "pas-claim", res.pci, pasCorr, "", Content{WorkstreamType: workstreamPA, Bytes: bundleJSON})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
@@ -916,7 +1013,7 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, status, map[string]string{"error": msg})
 			return
 		}
-		parsed, _, status, msg := g.submitClaimAndResolve(ctx, r, res.pci, res.srJSON, attestedQR, res.patientRef, res.coverageRef)
+		parsed, _, status, msg := g.submitClaimAndResolve(ctx, r, res.pci, res.srJSON, attestedQR, res.patientRef, res.coverageRef, res.payer, res.recipient)
 		if status != 0 {
 			writeJSON(w, status, map[string]string{"error": msg})
 			return
@@ -940,6 +1037,7 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 		ContainedInsurer: targetsBrPayer(g.cfg.OriginationProfile),
 		AbsoluteRefs:     targetsBrPayer(g.cfg.OriginationProfile),
 		PayerOrgEntry:    targetsBrPayer(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
+		Payer:            res.payer,
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build bundle failed"})
@@ -949,7 +1047,7 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
-	pendedResp, err := g.OriginateLeg(ctx, r, g.cfg.CounterpartID, "pas-claim", res.pci, pasCorr, "", Content{WorkstreamType: workstreamPA, Bytes: bundleJSON})
+	pendedResp, err := g.OriginateLeg(ctx, r, res.recipient, "pas-claim", res.pci, pasCorr, "", Content{WorkstreamType: workstreamPA, Bytes: bundleJSON})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
@@ -1002,6 +1100,7 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 		ContainedInsurer: targetsBrPayer(g.cfg.OriginationProfile),
 		AbsoluteRefs:     targetsBrPayer(g.cfg.OriginationProfile),
 		PayerOrgEntry:    targetsBrPayer(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
+		Payer:            res.payer,
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build update bundle failed"})
@@ -1013,7 +1112,7 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// ClaimUpdate exchange — expect APPROVED.
-	updateResp, err := g.OriginateLeg(ctx, r, g.cfg.CounterpartID, "pas-claim-update", res.pci, updateCorr, "", Content{WorkstreamType: workstreamPA, Bytes: updateBundle})
+	updateResp, err := g.OriginateLeg(ctx, r, res.recipient, "pas-claim-update", res.pci, updateCorr, "", Content{WorkstreamType: workstreamPA, Bytes: updateBundle})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
@@ -1120,6 +1219,7 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 		ContainedInsurer: targetsBrPayer(g.cfg.OriginationProfile),
 		AbsoluteRefs:     targetsBrPayer(g.cfg.OriginationProfile),
 		PayerOrgEntry:    targetsBrPayer(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
+		Payer:            res.payer,
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build bundle failed"})
@@ -1129,7 +1229,7 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
-	pendedResp, err := g.OriginateLeg(ctx, r, g.cfg.CounterpartID, "pas-claim", res.pci, pasCorr, "", Content{WorkstreamType: workstreamPA, Bytes: bundleJSON})
+	pendedResp, err := g.OriginateLeg(ctx, r, res.recipient, "pas-claim", res.pci, pasCorr, "", Content{WorkstreamType: workstreamPA, Bytes: bundleJSON})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
@@ -1205,6 +1305,7 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 		ContainedInsurer: targetsBrPayer(g.cfg.OriginationProfile),
 		AbsoluteRefs:     targetsBrPayer(g.cfg.OriginationProfile),
 		PayerOrgEntry:    targetsBrPayer(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
+		Payer:            res.payer,
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build update bundle failed"})
@@ -1214,7 +1315,7 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
-	updateResp, err := g.OriginateLeg(ctx, r, g.cfg.CounterpartID, "pas-claim-update", res.pci, updateCorr, "", Content{WorkstreamType: workstreamPA, Bytes: updateBundle})
+	updateResp, err := g.OriginateLeg(ctx, r, res.recipient, "pas-claim-update", res.pci, updateCorr, "", Content{WorkstreamType: workstreamPA, Bytes: updateBundle})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
@@ -1278,6 +1379,7 @@ func (g *Gateway) handleUC08(w http.ResponseWriter, r *http.Request) {
 		ContainedInsurer: targetsBrPayer(g.cfg.OriginationProfile),
 		AbsoluteRefs:     targetsBrPayer(g.cfg.OriginationProfile),
 		PayerOrgEntry:    targetsBrPayer(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
+		Payer:            res.payer,
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build bundle failed"})
@@ -1288,7 +1390,7 @@ func (g *Gateway) handleUC08(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	claimRespJSON, err := g.OriginateLeg(ctx, r, g.cfg.CounterpartID, "pas-claim", res.pci, pasCorr, "", Content{WorkstreamType: workstreamPA, Bytes: bundleJSON})
+	claimRespJSON, err := g.OriginateLeg(ctx, r, res.recipient, "pas-claim", res.pci, pasCorr, "", Content{WorkstreamType: workstreamPA, Bytes: bundleJSON})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return

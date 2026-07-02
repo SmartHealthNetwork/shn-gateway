@@ -10,6 +10,9 @@ type fakeOrderSoR struct {
 
 func (f fakeOrderSoR) OpenOrder(string) ([]byte, bool) { return f.order, true }
 
+// OpenCoverage is inherited from the embedded StubHolderData (this test drives orderSource
+// directly, not a full origination handler, so OpenCoverage is never invoked).
+
 // REJECTION (honesty fence): a provider-data open order with NO recognized {CPT,HCPCS} product
 // coding must fail closed — the order code MUST come from the SoR data, never be assumed.
 func TestOrderSource_RejectsOrderWithoutProductCoding(t *testing.T) {

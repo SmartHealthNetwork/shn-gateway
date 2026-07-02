@@ -347,6 +347,32 @@ var stubPersonas = map[string]persona{
 		},
 		hasClinical: true,
 	},
+	// MBR-PAYERB / MBR-PAYERUNKNOWN are HERMETIC-TEST-ONLY personas (FR-G40): they exist
+	// solely so gateway/engine/payerrouting_test.go (and test/adversarial) can prove/disprove
+	// coverage-derived payer routing without standing up a real multi-payer FHIR SoR. They carry
+	// no clinical context (routing tests never reach CRD/DTR content). Deliberately NOT in
+	// PersonaRefs (personas.go): never live-seeded, never console-exposed, never driven by any UC
+	// scenario handler's sceneMember — see stubPayerOverrides below, which is what actually gives
+	// them a non-default payer identity.
+	"MBR-PAYERB": {
+		demo:    Demo{BirthDate: "1972-01-01", FamilyName: "Routingtest-PayerB"},
+		inforce: true,
+	},
+	"MBR-PAYERUNKNOWN": {
+		demo:    Demo{BirthDate: "1972-01-02", FamilyName: "Routingtest-Unknown"},
+		inforce: true,
+	},
+}
+
+// stubPayerOverrides names members whose OpenCoverage payor is DELIBERATELY DISTINCT from the
+// default CMSPayerIdentity (FR-G40: the hermetic two/three-payer routing proof). Every
+// member ABSENT from this map — i.e. every pre-existing persona — keeps resolving to
+// CMSPayerIdentity (00001), so all pre-existing hermetic origination stays green/byte-identical.
+// MBR-PAYERUNKNOWN's value (00099) is deliberately never registered in any PayerRouter used by
+// tests/harness — it exists to drive the "no registered payer" fail-closed path (AI-G11 / OWD-G10).
+var stubPayerOverrides = map[string]shnsdk.PayerIdentifier{
+	"MBR-PAYERB":       {System: shnsdk.CMSPayerIdentity.System, Value: "00078"},
+	"MBR-PAYERUNKNOWN": {System: shnsdk.CMSPayerIdentity.System, Value: "00099"},
 }
 
 // ResolvePatient returns the member's PCI and demographics. Unknown members yield
@@ -424,6 +450,27 @@ func (d *StubHolderData) SupplementalReport(memberID string) ([]byte, bool) {
 // OpenOrder: the in-memory stub does not hold open orders; the provider-data lane
 // requires a real FHIR SoR (FHIR_DATA_URL). Returns found=false.
 func (d *StubHolderData) OpenOrder(_ string) ([]byte, bool) { return nil, false }
+
+// OpenCoverage returns the stub's modeled Coverage for the member (FR-G40): a US Core
+// Coverage whose payor names the CMS payer Organization (shnsdk.CMSPayerIdentity) by DEFAULT,
+// or the member's stubPayerOverrides entry when present (the hermetic multi-payer
+// routing proof — MBR-PAYERB/MBR-PAYERUNKNOWN are the only members with an override; every
+// other member is untouched, so all pre-existing hermetic origination stays byte-identical).
+// Unknown members yield found=false.
+func (d *StubHolderData) OpenCoverage(memberID string) ([]byte, bool) {
+	if _, _, found := d.ResolvePatient(memberID); !found {
+		return nil, false
+	}
+	payer := shnsdk.CMSPayerIdentity
+	if p, ok := stubPayerOverrides[memberID]; ok {
+		payer = p
+	}
+	cov, err := shnsdk.BuildCoverageWithPayer("Patient/"+memberID, "Coverage/"+memberID, payer)
+	if err != nil {
+		return nil, false
+	}
+	return cov, true
+}
 
 // ResolveByReference: the in-memory stub does not resolve FHIR references; the
 // provider-data lane requires a real FHIR SoR (FHIR_DATA_URL). Returns found=false.

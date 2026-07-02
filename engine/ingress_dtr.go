@@ -44,3 +44,20 @@ func dtrFromPackageParams(body []byte) (canonical, patientRef string, coverage j
 	}
 	return canonical, patientRef, coverage, true
 }
+
+// dtrParamResources flattens a $questionnaire-package request's parameter[].resource blobs into a
+// resource list for resolverFromResources: an EXTERNAL payor Organization the partner carries
+// alongside the coverage parameter resolves from here, not the provider SoR (Finding 1).
+func dtrParamResources(body []byte) [][]byte {
+	var p dtrPackageParams
+	if err := json.Unmarshal(body, &p); err != nil {
+		return nil
+	}
+	out := make([][]byte, 0, len(p.Parameter))
+	for _, param := range p.Parameter {
+		if len(param.Resource) > 0 {
+			out = append(out, param.Resource)
+		}
+	}
+	return out
+}

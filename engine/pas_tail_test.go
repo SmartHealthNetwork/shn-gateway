@@ -41,7 +41,7 @@ func TestBuildPASSubmitBundle_ByteParity(t *testing.T) {
 
 	t.Run("DeviceRequest (HomeOxygen) -> InfoChanged:false, byte-identical", func(t *testing.T) {
 		order := pasTailDeviceRequest()
-		got, err := buildPASSubmitBundle(true, order, qr, patientRef, coverageRef, corr, pasTailClock())
+		got, err := buildPASSubmitBundle(true, order, qr, patientRef, coverageRef, corr, pasTailClock(), shnsdk.CMSPayerIdentity)
 		if err != nil {
 			t.Fatalf("buildPASSubmitBundle: %v", err)
 		}
@@ -51,6 +51,7 @@ func TestBuildPASSubmitBundle_ByteParity(t *testing.T) {
 			QR: qr, SR: order, PatientRef: patientRef, CoverageRef: coverageRef,
 			Corr: corr, Created: pasTailClock(),
 			ContainedInsurer: true, AbsoluteRefs: true, PayerOrgEntry: true,
+			Payer: shnsdk.CMSPayerIdentity,
 		})
 		if err != nil {
 			t.Fatalf("want bundle: %v", err)
@@ -65,7 +66,7 @@ func TestBuildPASSubmitBundle_ByteParity(t *testing.T) {
 
 	t.Run("ServiceRequest single-shot -> InfoChanged:true (poll discriminator present)", func(t *testing.T) {
 		order := pasTailServiceRequest()
-		got, err := buildPASSubmitBundle(true, order, qr, patientRef, coverageRef, corr, pasTailClock())
+		got, err := buildPASSubmitBundle(true, order, qr, patientRef, coverageRef, corr, pasTailClock(), shnsdk.CMSPayerIdentity)
 		if err != nil {
 			t.Fatalf("buildPASSubmitBundle: %v", err)
 		}
@@ -73,6 +74,7 @@ func TestBuildPASSubmitBundle_ByteParity(t *testing.T) {
 			QR: qr, SR: order, PatientRef: patientRef, CoverageRef: coverageRef,
 			Corr: corr, Created: pasTailClock(),
 			ContainedInsurer: true, AbsoluteRefs: true, PayerOrgEntry: true, InfoChanged: true,
+			Payer: shnsdk.CMSPayerIdentity,
 		})
 		if err != nil {
 			t.Fatalf("want bundle: %v", err)
@@ -89,13 +91,14 @@ func TestBuildPASSubmitBundle_ByteParity(t *testing.T) {
 		// The sandbox/managed lane (targetsBrPayer=false) keeps the byte-identical sandbox path AND
 		// never sets the poll discriminator regardless of order type.
 		order := pasTailServiceRequest()
-		got, err := buildPASSubmitBundle(false, order, qr, patientRef, coverageRef, corr, pasTailClock())
+		got, err := buildPASSubmitBundle(false, order, qr, patientRef, coverageRef, corr, pasTailClock(), shnsdk.CMSPayerIdentity)
 		if err != nil {
 			t.Fatalf("buildPASSubmitBundle: %v", err)
 		}
 		want, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
 			QR: qr, SR: order, PatientRef: patientRef, CoverageRef: coverageRef,
 			Corr: corr, Created: pasTailClock(),
+			Payer: shnsdk.CMSPayerIdentity,
 		})
 		if err != nil {
 			t.Fatalf("want bundle: %v", err)

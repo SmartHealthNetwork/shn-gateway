@@ -112,7 +112,7 @@ func TestConformantCRDBind_AcceptsOriginatorBuilt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildServiceRequest: %v", err)
 	}
-	covJSON, err := shnsdk.BuildCoverageWithPayer("Patient/MBR-COVERED", "Coverage/MBR-COVERED")
+	covJSON, err := shnsdk.BuildCoverageWithPayer("Patient/MBR-COVERED", "Coverage/MBR-COVERED", shnsdk.CMSPayerIdentity)
 	if err != nil {
 		t.Fatalf("BuildCoverageWithPayer: %v", err)
 	}

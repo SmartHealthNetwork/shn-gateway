@@ -375,6 +375,28 @@ func (s *SoR) OpenOrder(memberID string) ([]byte, bool) {
 	return nil, false
 }
 
+// OpenCoverage returns the member's Coverage record bytes (FR-G40 routing + payload source):
+// the same beneficiary-scoped Coverage search as CoverageInforce, but returning the raw
+// resource bytes rather than the in-force determination. found=false when the patient cannot
+// be resolved or no Coverage is on file.
+func (s *SoR) OpenCoverage(memberID string) ([]byte, bool) {
+	_, pid, ok := s.resolvePatient(memberID)
+	if !ok {
+		return nil, false
+	}
+	b, err := s.fc.Search(context.Background(), "Coverage", url.Values{
+		"beneficiary": {"Patient/" + pid},
+	})
+	if err != nil {
+		log.Printf("fhirsor: Coverage search for %q: %v", memberID, err)
+		return nil, false
+	}
+	if b == nil || len(b.Entry) == 0 {
+		return nil, false
+	}
+	return b.Entry[0].Resource, true
+}
+
 // ResolveByReference returns the raw bytes of a resource named by a relative reference
 // (e.g. "Organization/dme-1") via a direct FHIR read (GET {type}/{id}).
 // found=false when the resource is absent (404) or a transport/parse error occurs (logged).

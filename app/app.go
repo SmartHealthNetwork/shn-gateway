@@ -46,7 +46,6 @@ type config struct {
 	// Endpoint overrides (normally discovery-resolved; explicit env wins).
 	AuthzURL        string
 	HubURL          string
-	CounterpartID   string
 	ConsentURL      string
 	AuditURL        string
 	PHGURL          string
@@ -183,7 +182,6 @@ func loadConfig(getenv func(string) string) (config, error) {
 		DiscoveryURL:     discoveryURL,
 		AuthzURL:         getenv("AUTHZ_URL"),
 		HubURL:           getenv("HUB_URL"),
-		CounterpartID:    getenv("COUNTERPART_ID"),
 		ConsentURL:       getenv("CONSENT_URL"),
 		AuditURL:         getenv("AUDIT_URL"),
 		PHGURL:           getenv("PHG_URL"),
@@ -566,10 +564,26 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		store = pg
 	}
 
+	// PayerRouter (FR-G40/G41): default to feed-derived discovery off the converged /holders
+	// registry (FeedPayerRouter). PAYER_DIRECTORY, when set, overrides with a static
+	// provider-maintained map (test/bootstrap fallback — §3.1). No default payer holder either way.
+	var payerRouter engine.PayerRouter = engine.NewFeedPayerRouter(reg)
+	if dir := getenv("PAYER_DIRECTORY"); dir != "" {
+		entries, derr := engine.LoadPayerDirectory(dir)
+		if derr != nil {
+			return b, fmt.Errorf("gateway: PAYER_DIRECTORY: %w", derr)
+		}
+		pr, derr := engine.NewConfigPayerRouter(entries)
+		if derr != nil {
+			return b, fmt.Errorf("gateway: PAYER_DIRECTORY: %w", derr)
+		}
+		payerRouter = pr
+	}
+
 	gwCfg := engine.Config{
 		Role:            cfg.Role,
 		HolderID:        bundle.Identity.HolderID,
-		CounterpartID:   cfg.CounterpartID,
+		PayerRouter:     payerRouter,
 		Identity:        bundle.Identity,
 		AuthzURL:        firstNonEmpty(cfg.AuthzURL, endpoints.Authz),
 		AuthzPub:        trust.AuthzPub,
@@ -721,7 +735,7 @@ func convergeRegistry(ctx context.Context, c *http.Client, registrarURL string, 
 		if raw, derr := base64.StdEncoding.DecodeString(h.SignPub); derr == nil && len(raw) == ed25519.PublicKeySize {
 			signPub = ed25519.PublicKey(raw)
 		}
-		reg.Set(h.ID, shnsdk.RegistryEntry{ID: h.ID, Role: h.Role, EncPub: encPub, SignPub: signPub, BaseURL: h.BaseURL})
+		reg.Set(h.ID, shnsdk.RegistryEntry{ID: h.ID, Role: h.Role, EncPub: encPub, SignPub: signPub, BaseURL: h.BaseURL, PayerIDs: h.PayerIDs})
 	}
 	return nil
 }

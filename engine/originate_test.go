@@ -282,9 +282,9 @@ func crdTestSystem(t *testing.T, cov shnsdk.CardCoverage) (*Gateway, *stubSubstr
 	const fakeBase = "http://stub.test"
 
 	gw := New(Config{
-		Role:          "provider",
-		HolderID:      "provider",
-		CounterpartID: "payer",
+		Role:        "provider",
+		HolderID:    "provider",
+		PayerRouter: payerRouterFor(t, "payer"),
 		Identity: shnsdk.Identity{
 			HolderID: "provider",
 			SignPriv: provSignPriv,
@@ -576,7 +576,7 @@ func TestClassifyResolution(t *testing.T) {
 // resolvable named payer (contained #cms-payer), not the dangling Organization/payer —
 // a real Da Vinci payer (br-payer) 400s "lacks valid payer identifier" otherwise.
 func TestRunCRDThenDTROrder_NamesPayer(t *testing.T) {
-	covJSON, err := shnsdk.BuildCoverageWithPayer("Patient/MBR-COVERED", "Coverage/MBR-COVERED")
+	covJSON, err := shnsdk.BuildCoverageWithPayer("Patient/MBR-COVERED", "Coverage/MBR-COVERED", shnsdk.CMSPayerIdentity)
 	if err != nil {
 		t.Fatalf("BuildCoverageWithPayer: %v", err)
 	}

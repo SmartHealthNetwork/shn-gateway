@@ -30,6 +30,10 @@ type SystemOfRecord interface {
 	// DeviceRequest) for headless origination. found=false when none. The caller parses the
 	// product coding via shnsdk.ParseOrderProductCoding — the gateway never synthesizes the order.
 	OpenOrder(memberID string) (orderJSON []byte, found bool)
+	// OpenCoverage returns the member's in-force Coverage record bytes (the payer-of-record
+	// resource) for headless origination — the routing identity and the wire payload both
+	// derive from it (FR-G40). found=false when none.
+	OpenCoverage(memberID string) (coverageJSON []byte, found bool)
 	// ResolveByReference returns the bytes of a resource named by a relative reference
 	// (e.g. "Organization/dme-1") from the FHIR SoR. found=false when absent. Used to resolve
 	// an order's performer (the DME supplier Organization) for headless order-dispatch origination.

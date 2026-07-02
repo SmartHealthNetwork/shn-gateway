@@ -123,6 +123,29 @@ func parseConformantPASSubjects(bundleJSON []byte) (conformantPASSubjects, int, 
 	return s, 0, ""
 }
 
+// pasBundleCoverage returns the FIRST Coverage resource in a conformant PAS Claim Bundle, or nil
+// when none is present (routing then fails closed at recipientFor → 422). Engine-local; the PAS
+// ingress derives the payer HOLDER from the inbound bundle's Coverage — no default (FR-G40).
+func pasBundleCoverage(bundleJSON []byte) []byte {
+	var probe struct {
+		Entry []struct {
+			Resource json.RawMessage `json:"resource"`
+		} `json:"entry"`
+	}
+	if err := json.Unmarshal(bundleJSON, &probe); err != nil {
+		return nil
+	}
+	for _, e := range probe.Entry {
+		var rt struct {
+			ResourceType string `json:"resourceType"`
+		}
+		if json.Unmarshal(e.Resource, &rt) == nil && rt.ResourceType == "Coverage" {
+			return e.Resource
+		}
+	}
+	return nil
+}
+
 // pasMemberFromRef returns the bare member id from a Patient reference, tolerating BOTH a
 // relative ref ("Patient/MBR") and an absolute fullUrl ("https://host/base/Patient/MBR").
 // The br-payer-targeting lane (provider-data) absolutizes bundle refs (so br-payer resolves them);

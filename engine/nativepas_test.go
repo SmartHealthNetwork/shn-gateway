@@ -170,6 +170,7 @@ func serviceRequestSubmitBundle(t *testing.T, infoChanged bool) []byte {
 	b, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
 		SR: sr, PatientRef: "Patient/MBR-COVERED", CoverageRef: "Coverage/MBR-COVERED",
 		Corr: "corr-sr-submit", Created: fixedClock(), InfoChanged: infoChanged,
+		Payer: shnsdk.CMSPayerIdentity,
 	})
 	if err != nil {
 		t.Fatalf("serviceRequestSubmitBundle (infoChanged=%v): %v", infoChanged, err)
