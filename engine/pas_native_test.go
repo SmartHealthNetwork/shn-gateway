@@ -33,7 +33,7 @@ func readConformantGolden(t *testing.T, name string) []byte {
 // loadPASGolden loads the committed br-payer conformant $submit bundle and rebinds it onto member.
 func loadPASGolden(t *testing.T, member string) []byte {
 	t.Helper()
-	raw, err := os.ReadFile("testdata/br-payer/pas-submit-request.json")
+	raw, err := os.ReadFile("../scenariodriver/goldens/pas-submit-request.json")
 	if err != nil {
 		t.Fatalf("read golden: %v", err)
 	}

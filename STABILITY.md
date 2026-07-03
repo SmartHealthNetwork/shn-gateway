@@ -32,6 +32,27 @@ changes will be noted in the changelog):
 decisioning. It is stable across minor versions. Do not depend on
 `engine.LegResponder` — it is an internal 0.x seam (see below).
 
+## Evolving surfaces
+
+These surfaces are new and intentionally **not yet pinned to a stability tier**
+(neither "supported" nor "internal-only" in the senses above) — they are
+expected to change shape as their consumer matures:
+
+- **Observer stream** (`OBSERVER_ADDR`, `engine.Config.Observer`, `ObserverEvent` JSON,
+  `observer.Hub`): new in this release and **evolving** — field additions and event-kind
+  additions may happen in minor releases. Consumers (the SHN Kit) pin exact gateway
+  versions. Will graduate to a stability tier when the Kit's inspector stabilizes.
+
+- **`scenariodriver`** (`Config`, `Driver`, transport methods, builders, `Cards`/`ParseCards`):
+  the UC-01…08 scenario-driving package. New in this release and **evolving** — signatures and
+  return shapes may change in minor releases as the SHN Kit's daemon and the live conformance
+  gate exercise it further. Consumers pin exact gateway versions.
+
+- **`fhirseed`** (`Client` and its methods, `CRPrepopLibraries`, `SandboxProviderPersonasBundle`):
+  the partner/Kit FHIR seed loader and baked persona fixture. New in this release and
+  **evolving** — the seed sequence and fixture contents may change in minor releases as the Kit
+  stabilizes its seeding needs. Consumers pin exact gateway versions.
+
 ## Internal seams (not for partner use)
 
 `engine.LegResponder` is the gateway's internal payer-content seam (FHIR-in /

@@ -25,7 +25,8 @@ live SHN Hub.
 - [7. Integrate your internal systems](#7-integrate-your-internal-systems)
 - [8. Roles and endpoints reference](#8-roles-and-endpoints-reference)
 - [9. Troubleshooting](#9-troubleshooting)
-- [10. Further reading](#10-further-reading)
+- [10. Scenario tooling and Kit seed packages](#10-scenario-tooling-and-kit-seed-packages)
+- [11. Further reading](#11-further-reading)
 
 > **This guide targets the SHN preview sandbox.** SHN is currently in a preview
 > phase, served at `shn-preview.org` and seeded with synthetic personas (Linda
@@ -238,6 +239,22 @@ own via [§7](#7-integrate-your-internal-systems).
 |---|---|
 | `PORT` | Listening port. Default `8080`. |
 | `HOST` | Bind address. Default `0.0.0.0`. |
+
+### Observer stream (optional — local tooling)
+
+The gateway can emit a live, structured stream of its own leg, ingress, and
+validation events over a loopback-only SSE endpoint — a window onto what this
+gateway is doing, for local tooling (for example, the SHN Kit's flow
+inspector) rather than another participant. It is off unless configured, and
+the address it binds must be loopback: **the events include the request/response
+payloads flowing through this gateway's edge, so enabling it exposes the
+contents of exchanges with your connected systems to whatever process you
+point it at** — treat it like any other local access to your data, not a
+network-facing feature.
+
+| Env var | Description |
+|---|---|
+| `OBSERVER_ADDR` | Loopback `host:port` for the observer stream (SSE `GET /events`, `GET /health`): structured leg/ingress/validation events **including request/response payloads as seen at this gateway's edge**. Off unless set; non-loopback values are refused at startup. Intended for local tooling (the SHN Kit flow inspector); enabling it exposes payloads from your connected systems to local processes. |
 
 ### Connect your system of record (optional — see [§7](#7-integrate-your-internal-systems))
 
@@ -596,7 +613,36 @@ the body.
 
 ---
 
-## 10. Further reading
+## 10. Scenario tooling and Kit seed packages
+
+Two additional packages ship in this module for driving and seeding a gateway, rather than
+being the gateway itself:
+
+- **`scenariodriver`** — drives the eight Prior Authorization scenarios (UC-01…08) against a
+  Smart Gateway's edges: the Da Vinci ingress (CRD order-select, DTR `$questionnaire-package`,
+  PAS `$submit`) over a UDAP B2B direct-bearer transport, a provider BFF's origination + SDC
+  populate chain, PAS-golden builders, amend/CDex evidence builders, and clients for the
+  provider-data `/scenario/*` routes, the ops console, and the patient surface. It is consumed
+  by the live conformance gate that exercises a gateway end to end against real Da Vinci
+  reference implementations, and it is the scenario engine the SHN Kit's desktop daemon drives
+  to run the same eight scenarios with no Docker and no CLI.
+- **`fhirseed`** — a thin partner/Kit seed loader: waits for a FHIR server's readiness, creates
+  tenant partitions, installs the operated-CQL prepopulation Library fixtures, warms the
+  `$populate` engine, loads provider-data persona bundles, and writes/polls the seed-complete
+  marker. It carries only the wire-level steps that are safe to publish; the heavy sandbox
+  persona builders it seeds from stay behind that boundary. It also ships a baked provider-tenant
+  persona fixture (`fixtures/sandbox-provider-personas.json`) so a partner or the Kit can seed the
+  conformant lane's ingress member set with no builder dependency — the fixture is generated from
+  the canonical seed source and drift-guarded there, and the same resources are `$validate`d live
+  wherever a full stack is seeded.
+
+Both packages are **evolving surfaces** — see [`STABILITY.md`](STABILITY.md#evolving-surfaces).
+Pin an exact gateway version if you depend on them; their shapes may change in minor releases
+until the Kit stabilizes.
+
+---
+
+## 11. Further reading
 
 - [`STABILITY.md`](STABILITY.md) — versioning policy and the supported seam contract.
 - [`connectors/scaffold/README.md`](connectors/scaffold/README.md) — the custom

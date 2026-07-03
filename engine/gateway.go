@@ -157,6 +157,17 @@ type Config struct {
 	// This stands in for the patient app in the Connectathon demo (provider→PHG
 	// call is orchestration only, not a substrate leg). Empty → skip the PHG query.
 	PHGURL string
+	// Observer, when non-nil, receives a structured ObserverEvent at each
+	// gateway-edge seam (origination legs, Da Vinci ingress, $validate calls).
+	// PAYLOADS INCLUDED — cleartext FHIR as seen at this edge. nil (the
+	// default) = no observation. MAY BE CALLED CONCURRENTLY (handlers run on
+	// concurrent goroutines); implementations must be goroutine-safe —
+	// observer.Hub.Emit locks internally. Additive instrumentation only:
+	// emission must not change exchange behavior
+	// (TestObserver_ConformanceNeutral). SHN Kit spec §6.1; the Kit supervisor
+	// always sets it, prod deployments never have it on unless the operator
+	// opts in via OBSERVER_ADDR.
+	Observer func(ObserverEvent)
 }
 
 // Gateway is a constructed holder gateway.
@@ -245,6 +256,12 @@ func New(cfg Config) *Gateway {
 		exchanges: NewInMemoryExchangeStore(),
 		paReplay:  shnsdk.NewReplayGuard(paReplayWindow, paReplayMaxEntries),
 		hubJTI:    shnsdk.NewReplayGuard(shnsdk.MaxAssertionTTL, 1<<16),
+	}
+	// Observer seam: decorate the validator so every $validate emits
+	// validate.result (Kit spec §6.1). Only when observing — the nil path
+	// keeps the validator untouched.
+	if g.cfg.Observer != nil && g.cfg.Validator != nil {
+		g.cfg.Validator = observingValidator{inner: g.cfg.Validator, g: g}
 	}
 	// Build the inbound auth server only for a real-auth ingress (not under the
 	// test bypass — body-conformance tests don't register clients). app.go has
@@ -445,9 +462,9 @@ func (g *Gateway) Handler() http.Handler {
 		mux.HandleFunc("POST /scenario/reset", g.handleScenarioReset)
 		if g.cfg.IngressEnabled {
 			mux.HandleFunc("GET /cds-services", g.handleCDSDiscovery)
-			mux.HandleFunc("POST /cds-services/{id}", g.handleCRDIngress)
-			mux.HandleFunc("POST /Questionnaire/$questionnaire-package", g.handleDTRIngress)
-			mux.HandleFunc("POST /Claim/$submit", g.handlePASIngress)
+			mux.HandleFunc("POST /cds-services/{id}", g.observeIngress("crd-ingress", g.handleCRDIngress))
+			mux.HandleFunc("POST /Questionnaire/$questionnaire-package", g.observeIngress("dtr-ingress", g.handleDTRIngress))
+			mux.HandleFunc("POST /Claim/$submit", g.observeIngress("pas-ingress", g.handlePASIngress))
 			if g.ingressAuth != nil {
 				mux.HandleFunc("POST /oauth/token", g.ingressAuth.handleToken)
 				mux.HandleFunc("GET /.well-known/smart-configuration", g.ingressAuth.handleSmartConfig)
@@ -620,7 +637,34 @@ func (g *Gateway) postEnvelope(ctx context.Context, url string, body []byte, ass
 	return shnsdk.DecodeEnvelope(respBody)
 }
 
-// roundTrip performs one authorized sealed exchange with the counterpart holder
+// roundTrip performs one authorized sealed exchange with the counterpart
+// holder through the Hub (see roundTripInner for the mechanics). It is ALSO
+// the observer seam's origination choke point: every origination leg emits
+// leg.originated before the exchange and leg.response / leg.failed after —
+// one seam covers every UC flow in both lanes (Kit spec §6.1).
+func (g *Gateway) roundTrip(ctx context.Context, r *http.Request, recipient, reqFrame, respFrame, op, respOp, txType, scope, pci, correlationID, custodian string, payload []byte) ([]byte, error) {
+	g.observe(ObserverEvent{
+		Kind: "leg.originated", Direction: "originate", LegType: txType,
+		CorrelationID: correlationID, Counterpart: recipient,
+		AuthorityFrame: reqFrame, Op: op, Payload: json.RawMessage(payload),
+	})
+	respPayload, err := g.roundTripInner(ctx, r, recipient, reqFrame, respFrame, op, respOp, txType, scope, pci, correlationID, custodian, payload)
+	if err != nil {
+		g.observe(ObserverEvent{
+			Kind: "leg.failed", Direction: "originate", LegType: txType,
+			CorrelationID: correlationID, Counterpart: recipient, Detail: err.Error(),
+		})
+		return nil, err
+	}
+	g.observe(ObserverEvent{
+		Kind: "leg.response", Direction: "originate", LegType: txType,
+		CorrelationID: correlationID, Counterpart: recipient,
+		AuthorityFrame: respFrame, Op: respOp, Payload: json.RawMessage(respPayload),
+	})
+	return respPayload, nil
+}
+
+// roundTripInner performs one authorized sealed exchange with the counterpart holder
 // through the Hub: authorize(op) → seal(txType/reqFrame) → POST hub
 // /route with a holder assertion → verify the response leg (VerifyBound respOp
 // + the SAME correlationID + Sender==recipient, envelope CorrelationID match) →
@@ -634,7 +678,7 @@ func (g *Gateway) postEnvelope(ctx context.Context, url string, body []byte, ass
 // is empty for all other operations. The scope param documents the policy-derived
 // min-necessary scope for this exchange; the authz service derives the actual
 // scope from policy, so it is not sent on the wire.
-func (g *Gateway) roundTrip(ctx context.Context, r *http.Request, recipient, reqFrame, respFrame, op, respOp, txType, scope, pci, correlationID, custodian string, payload []byte) ([]byte, error) {
+func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient, reqFrame, respFrame, op, respOp, txType, scope, pci, correlationID, custodian string, payload []byte) ([]byte, error) {
 	_ = scope // policy-derived server-side; kept for contract clarity
 
 	recipientHolder, ok := g.cfg.Reg.Lookup(recipient)

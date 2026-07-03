@@ -73,6 +73,42 @@ func TestLoadConfig_ParsesStoreDatabaseURL(t *testing.T) {
 	}
 }
 
+// TestLoadConfig_ObserverAddrLoopbackOnly: OBSERVER_ADDR must be loopback —
+// fail-closed at config load, not a runtime warning (Kit spec §6.1). Empty =
+// off (the published-gateway default; the rejection row's config half).
+func TestLoadConfig_ObserverAddrLoopbackOnly(t *testing.T) {
+	cases := []struct {
+		addr    string
+		wantErr bool
+	}{
+		{"", false},                // off — the default
+		{"127.0.0.1:9411", false},  // loopback ok
+		{"localhost:9411", false},  // loopback ok
+		{"[::1]:9411", false},      // v6 loopback ok
+		{"0.0.0.0:9411", true},     // wildcard — refused
+		{"192.168.1.5:9411", true}, // LAN — refused
+		{"127.0.0.1", true},        // missing port — refused
+	}
+	for _, c := range cases {
+		env := map[string]string{
+			"ROLE":              "provider",
+			"SHN_SECRETS":       "/etc/shn/bundles/provider",
+			"SHN_DISCOVERY_URL": "http://accounts:8088/discovery",
+			"OBSERVER_ADDR":     c.addr,
+		}
+		cfg, err := loadConfig(func(k string) string { return env[k] })
+		if c.wantErr && err == nil {
+			t.Fatalf("OBSERVER_ADDR=%q: want error, got cfg %+v", c.addr, cfg)
+		}
+		if !c.wantErr && err != nil {
+			t.Fatalf("OBSERVER_ADDR=%q: unexpected error %v", c.addr, err)
+		}
+		if !c.wantErr && cfg.ObserverAddr != c.addr {
+			t.Fatalf("OBSERVER_ADDR=%q: cfg.ObserverAddr = %q", c.addr, cfg.ObserverAddr)
+		}
+	}
+}
+
 func TestResolveDiscovery_AnchorKeyURLOverride(t *testing.T) {
 	// Discovery advertises one (public) key URL; the env override points at another.
 	// The override must win (firstNonEmpty(env, discovery)).

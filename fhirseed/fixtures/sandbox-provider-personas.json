@@ -1,0 +1,2374 @@
+{
+  "entry": [
+    {
+      "fullUrl": "Condition/cond-m5116-mbrcovered-provider",
+      "resource": {
+        "id": "cond-m5116-mbrcovered-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-condition-problems-health-concerns"
+          ]
+        },
+        "clinicalStatus": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/condition-clinical",
+              "code": "active",
+              "display": "Active"
+            }
+          ]
+        },
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/condition-category",
+                "code": "problem-list-item",
+                "display": "Problem List Item"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://hl7.org/fhir/sid/icd-10-cm",
+              "code": "M51.16"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbrcovered-provider"
+        },
+        "resourceType": "Condition"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Condition/cond-m5116-mbrcovered-provider"
+      }
+    },
+    {
+      "fullUrl": "Condition/cond-m5116-mbruc04-provider",
+      "resource": {
+        "id": "cond-m5116-mbruc04-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-condition-problems-health-concerns"
+          ]
+        },
+        "clinicalStatus": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/condition-clinical",
+              "code": "active",
+              "display": "Active"
+            }
+          ]
+        },
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/condition-category",
+                "code": "problem-list-item",
+                "display": "Problem List Item"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://hl7.org/fhir/sid/icd-10-cm",
+              "code": "M51.16"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbruc04-provider"
+        },
+        "resourceType": "Condition"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Condition/cond-m5116-mbruc04-provider"
+      }
+    },
+    {
+      "fullUrl": "Condition/cond-m5116-mbruc05-provider",
+      "resource": {
+        "id": "cond-m5116-mbruc05-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-condition-problems-health-concerns"
+          ]
+        },
+        "clinicalStatus": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/condition-clinical",
+              "code": "active",
+              "display": "Active"
+            }
+          ]
+        },
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/condition-category",
+                "code": "problem-list-item",
+                "display": "Problem List Item"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://hl7.org/fhir/sid/icd-10-cm",
+              "code": "M51.16"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbruc05-provider"
+        },
+        "resourceType": "Condition"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Condition/cond-m5116-mbruc05-provider"
+      }
+    },
+    {
+      "fullUrl": "Condition/cond-m5116-mbruc05noconsent-provider",
+      "resource": {
+        "id": "cond-m5116-mbruc05noconsent-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-condition-problems-health-concerns"
+          ]
+        },
+        "clinicalStatus": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/condition-clinical",
+              "code": "active",
+              "display": "Active"
+            }
+          ]
+        },
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/condition-category",
+                "code": "problem-list-item",
+                "display": "Problem List Item"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://hl7.org/fhir/sid/icd-10-cm",
+              "code": "M51.16"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbruc05noconsent-provider"
+        },
+        "resourceType": "Condition"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Condition/cond-m5116-mbruc05noconsent-provider"
+      }
+    },
+    {
+      "fullUrl": "Condition/cond-m5116-mbruc06-provider",
+      "resource": {
+        "id": "cond-m5116-mbruc06-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-condition-problems-health-concerns"
+          ]
+        },
+        "clinicalStatus": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/condition-clinical",
+              "code": "active",
+              "display": "Active"
+            }
+          ]
+        },
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/condition-category",
+                "code": "problem-list-item",
+                "display": "Problem List Item"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://hl7.org/fhir/sid/icd-10-cm",
+              "code": "M51.16"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbruc06-provider"
+        },
+        "resourceType": "Condition"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Condition/cond-m5116-mbruc06-provider"
+      }
+    },
+    {
+      "fullUrl": "Condition/cond-m5116-mbruc07-provider",
+      "resource": {
+        "id": "cond-m5116-mbruc07-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-condition-problems-health-concerns"
+          ]
+        },
+        "clinicalStatus": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/condition-clinical",
+              "code": "active",
+              "display": "Active"
+            }
+          ]
+        },
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/condition-category",
+                "code": "problem-list-item",
+                "display": "Problem List Item"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://hl7.org/fhir/sid/icd-10-cm",
+              "code": "M51.16"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbruc07-provider"
+        },
+        "resourceType": "Condition"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Condition/cond-m5116-mbruc07-provider"
+      }
+    },
+    {
+      "fullUrl": "Condition/cond-m5116-mbruc07hcpcs-provider",
+      "resource": {
+        "id": "cond-m5116-mbruc07hcpcs-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-condition-problems-health-concerns"
+          ]
+        },
+        "clinicalStatus": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/condition-clinical",
+              "code": "active",
+              "display": "Active"
+            }
+          ]
+        },
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/condition-category",
+                "code": "problem-list-item",
+                "display": "Problem List Item"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://hl7.org/fhir/sid/icd-10-cm",
+              "code": "M51.16"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbruc07hcpcs-provider"
+        },
+        "resourceType": "Condition"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Condition/cond-m5116-mbruc07hcpcs-provider"
+      }
+    },
+    {
+      "fullUrl": "Condition/cond-m5116-mbruc08-provider",
+      "resource": {
+        "id": "cond-m5116-mbruc08-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-condition-problems-health-concerns"
+          ]
+        },
+        "clinicalStatus": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/condition-clinical",
+              "code": "active",
+              "display": "Active"
+            }
+          ]
+        },
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/condition-category",
+                "code": "problem-list-item",
+                "display": "Problem List Item"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://hl7.org/fhir/sid/icd-10-cm",
+              "code": "M51.16"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbruc08-provider"
+        },
+        "resourceType": "Condition"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Condition/cond-m5116-mbruc08-provider"
+      }
+    },
+    {
+      "fullUrl": "Coverage/cov-mbrcovered-provider",
+      "resource": {
+        "beneficiary": {
+          "reference": "Patient/pat-mbrcovered-provider"
+        },
+        "contained": [
+          {
+            "id": "cms-payer",
+            "identifier": [
+              {
+                "system": "urn:oid:2.16.840.1.113883.6.300",
+                "value": "00001"
+              }
+            ],
+            "name": "Conformance Payer",
+            "resourceType": "Organization"
+          }
+        ],
+        "id": "cov-mbrcovered-provider",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:coverage",
+            "value": "MBR-COVERED"
+          }
+        ],
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage"
+          ]
+        },
+        "payor": [
+          {
+            "reference": "#cms-payer"
+          }
+        ],
+        "relationship": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+              "code": "self"
+            }
+          ]
+        },
+        "resourceType": "Coverage",
+        "status": "active"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Coverage/cov-mbrcovered-provider"
+      }
+    },
+    {
+      "fullUrl": "Coverage/cov-mbrnotcovered-provider",
+      "resource": {
+        "beneficiary": {
+          "reference": "Patient/pat-mbrnotcovered-provider"
+        },
+        "contained": [
+          {
+            "id": "cms-payer",
+            "identifier": [
+              {
+                "system": "urn:oid:2.16.840.1.113883.6.300",
+                "value": "00001"
+              }
+            ],
+            "name": "Conformance Payer",
+            "resourceType": "Organization"
+          }
+        ],
+        "id": "cov-mbrnotcovered-provider",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:coverage",
+            "value": "MBR-NOTCOVERED"
+          }
+        ],
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage"
+          ]
+        },
+        "payor": [
+          {
+            "reference": "#cms-payer"
+          }
+        ],
+        "relationship": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+              "code": "self"
+            }
+          ]
+        },
+        "resourceType": "Coverage",
+        "status": "cancelled"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Coverage/cov-mbrnotcovered-provider"
+      }
+    },
+    {
+      "fullUrl": "Coverage/cov-mbruc04-provider",
+      "resource": {
+        "beneficiary": {
+          "reference": "Patient/pat-mbruc04-provider"
+        },
+        "contained": [
+          {
+            "id": "cms-payer",
+            "identifier": [
+              {
+                "system": "urn:oid:2.16.840.1.113883.6.300",
+                "value": "00001"
+              }
+            ],
+            "name": "Conformance Payer",
+            "resourceType": "Organization"
+          }
+        ],
+        "id": "cov-mbruc04-provider",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:coverage",
+            "value": "MBR-UC04"
+          }
+        ],
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage"
+          ]
+        },
+        "payor": [
+          {
+            "reference": "#cms-payer"
+          }
+        ],
+        "relationship": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+              "code": "self"
+            }
+          ]
+        },
+        "resourceType": "Coverage",
+        "status": "active"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Coverage/cov-mbruc04-provider"
+      }
+    },
+    {
+      "fullUrl": "Coverage/cov-mbruc05-provider",
+      "resource": {
+        "beneficiary": {
+          "reference": "Patient/pat-mbruc05-provider"
+        },
+        "contained": [
+          {
+            "id": "cms-payer",
+            "identifier": [
+              {
+                "system": "urn:oid:2.16.840.1.113883.6.300",
+                "value": "00001"
+              }
+            ],
+            "name": "Conformance Payer",
+            "resourceType": "Organization"
+          }
+        ],
+        "id": "cov-mbruc05-provider",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:coverage",
+            "value": "MBR-UC05"
+          }
+        ],
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage"
+          ]
+        },
+        "payor": [
+          {
+            "reference": "#cms-payer"
+          }
+        ],
+        "relationship": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+              "code": "self"
+            }
+          ]
+        },
+        "resourceType": "Coverage",
+        "status": "active"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Coverage/cov-mbruc05-provider"
+      }
+    },
+    {
+      "fullUrl": "Coverage/cov-mbruc05noconsent-provider",
+      "resource": {
+        "beneficiary": {
+          "reference": "Patient/pat-mbruc05noconsent-provider"
+        },
+        "contained": [
+          {
+            "id": "cms-payer",
+            "identifier": [
+              {
+                "system": "urn:oid:2.16.840.1.113883.6.300",
+                "value": "00001"
+              }
+            ],
+            "name": "Conformance Payer",
+            "resourceType": "Organization"
+          }
+        ],
+        "id": "cov-mbruc05noconsent-provider",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:coverage",
+            "value": "MBR-UC05-NOCONSENT"
+          }
+        ],
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage"
+          ]
+        },
+        "payor": [
+          {
+            "reference": "#cms-payer"
+          }
+        ],
+        "relationship": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+              "code": "self"
+            }
+          ]
+        },
+        "resourceType": "Coverage",
+        "status": "active"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Coverage/cov-mbruc05noconsent-provider"
+      }
+    },
+    {
+      "fullUrl": "Coverage/cov-mbruc06-provider",
+      "resource": {
+        "beneficiary": {
+          "reference": "Patient/pat-mbruc06-provider"
+        },
+        "contained": [
+          {
+            "id": "cms-payer",
+            "identifier": [
+              {
+                "system": "urn:oid:2.16.840.1.113883.6.300",
+                "value": "00001"
+              }
+            ],
+            "name": "Conformance Payer",
+            "resourceType": "Organization"
+          }
+        ],
+        "id": "cov-mbruc06-provider",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:coverage",
+            "value": "MBR-UC06"
+          }
+        ],
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage"
+          ]
+        },
+        "payor": [
+          {
+            "reference": "#cms-payer"
+          }
+        ],
+        "relationship": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+              "code": "self"
+            }
+          ]
+        },
+        "resourceType": "Coverage",
+        "status": "active"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Coverage/cov-mbruc06-provider"
+      }
+    },
+    {
+      "fullUrl": "Coverage/cov-mbruc07-provider",
+      "resource": {
+        "beneficiary": {
+          "reference": "Patient/pat-mbruc07-provider"
+        },
+        "contained": [
+          {
+            "id": "cms-payer",
+            "identifier": [
+              {
+                "system": "urn:oid:2.16.840.1.113883.6.300",
+                "value": "00001"
+              }
+            ],
+            "name": "Conformance Payer",
+            "resourceType": "Organization"
+          }
+        ],
+        "id": "cov-mbruc07-provider",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:coverage",
+            "value": "MBR-UC07"
+          }
+        ],
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage"
+          ]
+        },
+        "payor": [
+          {
+            "reference": "#cms-payer"
+          }
+        ],
+        "relationship": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+              "code": "self"
+            }
+          ]
+        },
+        "resourceType": "Coverage",
+        "status": "active"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Coverage/cov-mbruc07-provider"
+      }
+    },
+    {
+      "fullUrl": "Coverage/cov-mbruc07hcpcs-provider",
+      "resource": {
+        "beneficiary": {
+          "reference": "Patient/pat-mbruc07hcpcs-provider"
+        },
+        "contained": [
+          {
+            "id": "cms-payer",
+            "identifier": [
+              {
+                "system": "urn:oid:2.16.840.1.113883.6.300",
+                "value": "00001"
+              }
+            ],
+            "name": "Conformance Payer",
+            "resourceType": "Organization"
+          }
+        ],
+        "id": "cov-mbruc07hcpcs-provider",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:coverage",
+            "value": "MBR-UC07HCPCS"
+          }
+        ],
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage"
+          ]
+        },
+        "payor": [
+          {
+            "reference": "#cms-payer"
+          }
+        ],
+        "relationship": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+              "code": "self"
+            }
+          ]
+        },
+        "resourceType": "Coverage",
+        "status": "active"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Coverage/cov-mbruc07hcpcs-provider"
+      }
+    },
+    {
+      "fullUrl": "Coverage/cov-mbruc08-provider",
+      "resource": {
+        "beneficiary": {
+          "reference": "Patient/pat-mbruc08-provider"
+        },
+        "contained": [
+          {
+            "id": "cms-payer",
+            "identifier": [
+              {
+                "system": "urn:oid:2.16.840.1.113883.6.300",
+                "value": "00001"
+              }
+            ],
+            "name": "Conformance Payer",
+            "resourceType": "Organization"
+          }
+        ],
+        "id": "cov-mbruc08-provider",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:coverage",
+            "value": "MBR-UC08"
+          }
+        ],
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage"
+          ]
+        },
+        "payor": [
+          {
+            "reference": "#cms-payer"
+          }
+        ],
+        "relationship": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+              "code": "self"
+            }
+          ]
+        },
+        "resourceType": "Coverage",
+        "status": "active"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Coverage/cov-mbruc08-provider"
+      }
+    },
+    {
+      "fullUrl": "DiagnosticReport/dr-supp-uc04-provider",
+      "resource": {
+        "id": "dr-supp-uc04-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-diagnosticreport-note"
+          ]
+        },
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/v2-0074",
+                "code": "RAD",
+                "display": "Radiology"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://loinc.org",
+              "code": "18748-4",
+              "display": "Diagnostic imaging study"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbruc04-provider"
+        },
+        "effectiveDateTime": "2026-05-15",
+        "resourceType": "DiagnosticReport"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "DiagnosticReport/dr-supp-uc04-provider"
+      }
+    },
+    {
+      "fullUrl": "DiagnosticReport/dr-xray-mbrcovered-provider",
+      "resource": {
+        "id": "dr-xray-mbrcovered-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-diagnosticreport-note"
+          ]
+        },
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/v2-0074",
+                "code": "RAD",
+                "display": "Radiology"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.ama-assn.org/go/cpt",
+              "code": "72148",
+              "display": "Lumbar MRI"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbrcovered-provider"
+        },
+        "effectiveDateTime": "2026-05-15",
+        "resourceType": "DiagnosticReport"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "DiagnosticReport/dr-xray-mbrcovered-provider"
+      }
+    },
+    {
+      "fullUrl": "DiagnosticReport/dr-xray-mbruc04-provider",
+      "resource": {
+        "id": "dr-xray-mbruc04-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-diagnosticreport-note"
+          ]
+        },
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/v2-0074",
+                "code": "RAD",
+                "display": "Radiology"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.ama-assn.org/go/cpt",
+              "code": "72148",
+              "display": "Lumbar MRI"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbruc04-provider"
+        },
+        "effectiveDateTime": "2026-05-15",
+        "resourceType": "DiagnosticReport"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "DiagnosticReport/dr-xray-mbruc04-provider"
+      }
+    },
+    {
+      "fullUrl": "DiagnosticReport/dr-xray-mbruc05-provider",
+      "resource": {
+        "id": "dr-xray-mbruc05-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-diagnosticreport-note"
+          ]
+        },
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/v2-0074",
+                "code": "RAD",
+                "display": "Radiology"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.ama-assn.org/go/cpt",
+              "code": "72148",
+              "display": "Lumbar MRI"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbruc05-provider"
+        },
+        "effectiveDateTime": "2026-05-15",
+        "resourceType": "DiagnosticReport"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "DiagnosticReport/dr-xray-mbruc05-provider"
+      }
+    },
+    {
+      "fullUrl": "DiagnosticReport/dr-xray-mbruc05noconsent-provider",
+      "resource": {
+        "id": "dr-xray-mbruc05noconsent-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-diagnosticreport-note"
+          ]
+        },
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/v2-0074",
+                "code": "RAD",
+                "display": "Radiology"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.ama-assn.org/go/cpt",
+              "code": "72148",
+              "display": "Lumbar MRI"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbruc05noconsent-provider"
+        },
+        "effectiveDateTime": "2026-05-15",
+        "resourceType": "DiagnosticReport"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "DiagnosticReport/dr-xray-mbruc05noconsent-provider"
+      }
+    },
+    {
+      "fullUrl": "DiagnosticReport/dr-xray-mbruc06-provider",
+      "resource": {
+        "id": "dr-xray-mbruc06-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-diagnosticreport-note"
+          ]
+        },
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/v2-0074",
+                "code": "RAD",
+                "display": "Radiology"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.ama-assn.org/go/cpt",
+              "code": "72148",
+              "display": "Lumbar MRI"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbruc06-provider"
+        },
+        "effectiveDateTime": "2026-05-15",
+        "resourceType": "DiagnosticReport"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "DiagnosticReport/dr-xray-mbruc06-provider"
+      }
+    },
+    {
+      "fullUrl": "DiagnosticReport/dr-xray-mbruc07-provider",
+      "resource": {
+        "id": "dr-xray-mbruc07-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-diagnosticreport-note"
+          ]
+        },
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/v2-0074",
+                "code": "RAD",
+                "display": "Radiology"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.ama-assn.org/go/cpt",
+              "code": "72148",
+              "display": "Lumbar MRI"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbruc07-provider"
+        },
+        "effectiveDateTime": "2026-05-15",
+        "resourceType": "DiagnosticReport"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "DiagnosticReport/dr-xray-mbruc07-provider"
+      }
+    },
+    {
+      "fullUrl": "DiagnosticReport/dr-xray-mbruc07hcpcs-provider",
+      "resource": {
+        "id": "dr-xray-mbruc07hcpcs-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-diagnosticreport-note"
+          ]
+        },
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/v2-0074",
+                "code": "RAD",
+                "display": "Radiology"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.ama-assn.org/go/cpt",
+              "code": "72148",
+              "display": "Lumbar MRI"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbruc07hcpcs-provider"
+        },
+        "effectiveDateTime": "2026-05-15",
+        "resourceType": "DiagnosticReport"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "DiagnosticReport/dr-xray-mbruc07hcpcs-provider"
+      }
+    },
+    {
+      "fullUrl": "DiagnosticReport/dr-xray-mbruc08-provider",
+      "resource": {
+        "id": "dr-xray-mbruc08-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-diagnosticreport-note"
+          ]
+        },
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/v2-0074",
+                "code": "RAD",
+                "display": "Radiology"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.ama-assn.org/go/cpt",
+              "code": "72148",
+              "display": "Lumbar MRI"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbruc08-provider"
+        },
+        "effectiveDateTime": "2026-05-15",
+        "resourceType": "DiagnosticReport"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "DiagnosticReport/dr-xray-mbruc08-provider"
+      }
+    },
+    {
+      "fullUrl": "Observation/obs-neuro-mbrcovered-provider",
+      "resource": {
+        "id": "obs-neuro-mbrcovered-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-clinical-result"
+          ]
+        },
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "exam",
+                "display": "Exam"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "urn:shn:clinical-context",
+              "code": "neuro-deficit"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbrcovered-provider"
+        },
+        "valueBoolean": false,
+        "resourceType": "Observation"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Observation/obs-neuro-mbrcovered-provider"
+      }
+    },
+    {
+      "fullUrl": "Observation/obs-neuro-mbruc04-provider",
+      "resource": {
+        "id": "obs-neuro-mbruc04-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-clinical-result"
+          ]
+        },
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "exam",
+                "display": "Exam"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "urn:shn:clinical-context",
+              "code": "neuro-deficit"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbruc04-provider"
+        },
+        "valueBoolean": false,
+        "resourceType": "Observation"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Observation/obs-neuro-mbruc04-provider"
+      }
+    },
+    {
+      "fullUrl": "Observation/obs-neuro-mbruc05-provider",
+      "resource": {
+        "id": "obs-neuro-mbruc05-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-clinical-result"
+          ]
+        },
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "exam",
+                "display": "Exam"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "urn:shn:clinical-context",
+              "code": "neuro-deficit"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbruc05-provider"
+        },
+        "valueBoolean": false,
+        "resourceType": "Observation"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Observation/obs-neuro-mbruc05-provider"
+      }
+    },
+    {
+      "fullUrl": "Observation/obs-neuro-mbruc06-provider",
+      "resource": {
+        "id": "obs-neuro-mbruc06-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-clinical-result"
+          ]
+        },
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "exam",
+                "display": "Exam"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "urn:shn:clinical-context",
+              "code": "neuro-deficit"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbruc06-provider"
+        },
+        "valueBoolean": false,
+        "resourceType": "Observation"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Observation/obs-neuro-mbruc06-provider"
+      }
+    },
+    {
+      "fullUrl": "Observation/obs-neuro-mbruc07-provider",
+      "resource": {
+        "id": "obs-neuro-mbruc07-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-clinical-result"
+          ]
+        },
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "exam",
+                "display": "Exam"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "urn:shn:clinical-context",
+              "code": "neuro-deficit"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbruc07-provider"
+        },
+        "valueBoolean": false,
+        "resourceType": "Observation"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Observation/obs-neuro-mbruc07-provider"
+      }
+    },
+    {
+      "fullUrl": "Observation/obs-neuro-mbruc07hcpcs-provider",
+      "resource": {
+        "id": "obs-neuro-mbruc07hcpcs-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-clinical-result"
+          ]
+        },
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "exam",
+                "display": "Exam"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "urn:shn:clinical-context",
+              "code": "neuro-deficit"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbruc07hcpcs-provider"
+        },
+        "valueBoolean": false,
+        "resourceType": "Observation"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Observation/obs-neuro-mbruc07hcpcs-provider"
+      }
+    },
+    {
+      "fullUrl": "Observation/obs-neuro-mbruc08-provider",
+      "resource": {
+        "id": "obs-neuro-mbruc08-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-clinical-result"
+          ]
+        },
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "exam",
+                "display": "Exam"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "urn:shn:clinical-context",
+              "code": "neuro-deficit"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbruc08-provider"
+        },
+        "valueBoolean": false,
+        "resourceType": "Observation"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Observation/obs-neuro-mbruc08-provider"
+      }
+    },
+    {
+      "fullUrl": "Observation/obs-odi-mbruc06-provider",
+      "resource": {
+        "id": "obs-odi-mbruc06-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-screening-assessment"
+          ]
+        },
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "survey",
+                "display": "Survey"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://loinc.org",
+              "code": "97909-6"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbruc06-provider"
+        },
+        "valueQuantity": {
+          "value": 48,
+          "unit": "%",
+          "system": "http://unitsofmeasure.org",
+          "code": "%"
+        },
+        "resourceType": "Observation"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Observation/obs-odi-mbruc06-provider"
+      }
+    },
+    {
+      "fullUrl": "Observation/obs-pr-mbruc07-provider",
+      "resource": {
+        "id": "obs-pr-mbruc07-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-clinical-result"
+          ]
+        },
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "exam",
+                "display": "Exam"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "urn:shn:clinical-context",
+              "code": "patient-reported-required"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbruc07-provider"
+        },
+        "valueBoolean": true,
+        "resourceType": "Observation"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Observation/obs-pr-mbruc07-provider"
+      }
+    },
+    {
+      "fullUrl": "Observation/obs-ptw-mbrcovered-provider",
+      "resource": {
+        "id": "obs-ptw-mbrcovered-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-clinical-result"
+          ]
+        },
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "exam",
+                "display": "Exam"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "urn:shn:clinical-context",
+              "code": "conservative-therapy-weeks"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbrcovered-provider"
+        },
+        "effectiveDateTime": "2026-05-20",
+        "valueQuantity": {
+          "value": 6,
+          "unit": "wk",
+          "system": "http://unitsofmeasure.org",
+          "code": "wk"
+        },
+        "resourceType": "Observation"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Observation/obs-ptw-mbrcovered-provider"
+      }
+    },
+    {
+      "fullUrl": "Observation/obs-ptw-mbruc04-provider",
+      "resource": {
+        "id": "obs-ptw-mbruc04-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-clinical-result"
+          ]
+        },
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "exam",
+                "display": "Exam"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "urn:shn:clinical-context",
+              "code": "conservative-therapy-weeks"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbruc04-provider"
+        },
+        "effectiveDateTime": "2026-05-20",
+        "valueQuantity": {
+          "value": 6,
+          "unit": "wk",
+          "system": "http://unitsofmeasure.org",
+          "code": "wk"
+        },
+        "resourceType": "Observation"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Observation/obs-ptw-mbruc04-provider"
+      }
+    },
+    {
+      "fullUrl": "Observation/obs-ptw-mbruc05-provider",
+      "resource": {
+        "id": "obs-ptw-mbruc05-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-clinical-result"
+          ]
+        },
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "exam",
+                "display": "Exam"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "urn:shn:clinical-context",
+              "code": "conservative-therapy-weeks"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbruc05-provider"
+        },
+        "effectiveDateTime": "2026-05-20",
+        "valueQuantity": {
+          "value": 6,
+          "unit": "wk",
+          "system": "http://unitsofmeasure.org",
+          "code": "wk"
+        },
+        "resourceType": "Observation"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Observation/obs-ptw-mbruc05-provider"
+      }
+    },
+    {
+      "fullUrl": "Observation/obs-ptw-mbruc05noconsent-provider",
+      "resource": {
+        "id": "obs-ptw-mbruc05noconsent-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-clinical-result"
+          ]
+        },
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "exam",
+                "display": "Exam"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "urn:shn:clinical-context",
+              "code": "conservative-therapy-weeks"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbruc05noconsent-provider"
+        },
+        "valueQuantity": {
+          "value": 6,
+          "unit": "wk",
+          "system": "http://unitsofmeasure.org",
+          "code": "wk"
+        },
+        "resourceType": "Observation"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Observation/obs-ptw-mbruc05noconsent-provider"
+      }
+    },
+    {
+      "fullUrl": "Observation/obs-ptw-mbruc06-provider",
+      "resource": {
+        "id": "obs-ptw-mbruc06-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-clinical-result"
+          ]
+        },
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "exam",
+                "display": "Exam"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "urn:shn:clinical-context",
+              "code": "conservative-therapy-weeks"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbruc06-provider"
+        },
+        "effectiveDateTime": "2026-05-20",
+        "valueQuantity": {
+          "value": 6,
+          "unit": "wk",
+          "system": "http://unitsofmeasure.org",
+          "code": "wk"
+        },
+        "resourceType": "Observation"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Observation/obs-ptw-mbruc06-provider"
+      }
+    },
+    {
+      "fullUrl": "Observation/obs-ptw-mbruc07-provider",
+      "resource": {
+        "id": "obs-ptw-mbruc07-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-clinical-result"
+          ]
+        },
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "exam",
+                "display": "Exam"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "urn:shn:clinical-context",
+              "code": "conservative-therapy-weeks"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbruc07-provider"
+        },
+        "effectiveDateTime": "2026-05-20",
+        "valueQuantity": {
+          "value": 6,
+          "unit": "wk",
+          "system": "http://unitsofmeasure.org",
+          "code": "wk"
+        },
+        "resourceType": "Observation"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Observation/obs-ptw-mbruc07-provider"
+      }
+    },
+    {
+      "fullUrl": "Observation/obs-ptw-mbruc07hcpcs-provider",
+      "resource": {
+        "id": "obs-ptw-mbruc07hcpcs-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-clinical-result"
+          ]
+        },
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "exam",
+                "display": "Exam"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "urn:shn:clinical-context",
+              "code": "conservative-therapy-weeks"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbruc07hcpcs-provider"
+        },
+        "effectiveDateTime": "2026-05-20",
+        "valueQuantity": {
+          "value": 6,
+          "unit": "wk",
+          "system": "http://unitsofmeasure.org",
+          "code": "wk"
+        },
+        "resourceType": "Observation"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Observation/obs-ptw-mbruc07hcpcs-provider"
+      }
+    },
+    {
+      "fullUrl": "Observation/obs-ptw-mbruc08-provider",
+      "resource": {
+        "id": "obs-ptw-mbruc08-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-clinical-result"
+          ]
+        },
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "exam",
+                "display": "Exam"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "urn:shn:clinical-context",
+              "code": "conservative-therapy-weeks"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbruc08-provider"
+        },
+        "effectiveDateTime": "2026-05-20",
+        "valueQuantity": {
+          "value": 4,
+          "unit": "wk",
+          "system": "http://unitsofmeasure.org",
+          "code": "wk"
+        },
+        "resourceType": "Observation"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Observation/obs-ptw-mbruc08-provider"
+      }
+    },
+    {
+      "fullUrl": "Patient/pat-mbrcovered-provider",
+      "resource": {
+        "id": "pat-mbrcovered-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "value": "MBR-COVERED"
+          }
+        ],
+        "name": [
+          {
+            "family": "Johansson"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1975-04-02",
+        "resourceType": "Patient"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/pat-mbrcovered-provider"
+      }
+    },
+    {
+      "fullUrl": "Patient/pat-mbrnotcovered-provider",
+      "resource": {
+        "id": "pat-mbrnotcovered-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "value": "MBR-NOTCOVERED"
+          }
+        ],
+        "name": [
+          {
+            "family": "Reyes"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1980-09-15",
+        "resourceType": "Patient"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/pat-mbrnotcovered-provider"
+      }
+    },
+    {
+      "fullUrl": "Patient/pat-mbruc04-provider",
+      "resource": {
+        "id": "pat-mbruc04-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "value": "MBR-UC04"
+          }
+        ],
+        "name": [
+          {
+            "family": "Chen"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1982-11-03",
+        "resourceType": "Patient"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/pat-mbruc04-provider"
+      }
+    },
+    {
+      "fullUrl": "Patient/pat-mbruc05-provider",
+      "resource": {
+        "id": "pat-mbruc05-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "value": "MBR-UC05"
+          }
+        ],
+        "name": [
+          {
+            "family": "Johansson"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1968-03-12",
+        "resourceType": "Patient"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/pat-mbruc05-provider"
+      }
+    },
+    {
+      "fullUrl": "Patient/pat-mbruc05noconsent-provider",
+      "resource": {
+        "id": "pat-mbruc05noconsent-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "value": "MBR-UC05-NOCONSENT"
+          }
+        ],
+        "name": [
+          {
+            "family": "Johansson-Noconsent"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1968-03-12",
+        "resourceType": "Patient"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/pat-mbruc05noconsent-provider"
+      }
+    },
+    {
+      "fullUrl": "Patient/pat-mbruc06-provider",
+      "resource": {
+        "id": "pat-mbruc06-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "value": "MBR-UC06"
+          }
+        ],
+        "name": [
+          {
+            "family": "Reyes"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1969-07-21",
+        "resourceType": "Patient"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/pat-mbruc06-provider"
+      }
+    },
+    {
+      "fullUrl": "Patient/pat-mbruc07-provider",
+      "resource": {
+        "id": "pat-mbruc07-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "value": "MBR-UC07"
+          }
+        ],
+        "name": [
+          {
+            "family": "Haddad"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1990-08-25",
+        "resourceType": "Patient"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/pat-mbruc07-provider"
+      }
+    },
+    {
+      "fullUrl": "Patient/pat-mbruc07hcpcs-provider",
+      "resource": {
+        "id": "pat-mbruc07hcpcs-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "value": "MBR-UC07HCPCS"
+          }
+        ],
+        "name": [
+          {
+            "family": "Nakamura"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1977-01-30",
+        "resourceType": "Patient"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/pat-mbruc07hcpcs-provider"
+      }
+    },
+    {
+      "fullUrl": "Patient/pat-mbruc08-provider",
+      "resource": {
+        "id": "pat-mbruc08-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "value": "MBR-UC08"
+          }
+        ],
+        "name": [
+          {
+            "family": "Okafor"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1971-02-09",
+        "resourceType": "Patient"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/pat-mbruc08-provider"
+      }
+    },
+    {
+      "fullUrl": "Procedure/proc-mbruc04-provider",
+      "resource": {
+        "id": "proc-mbruc04-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-procedure"
+          ]
+        },
+        "status": "completed",
+        "code": {
+          "coding": [
+            {
+              "system": "http://snomed.info/sct",
+              "code": "387731002",
+              "display": "Laminectomy"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbruc04-provider"
+        },
+        "performedDateTime": "2026-05-15",
+        "resourceType": "Procedure"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Procedure/proc-mbruc04-provider"
+      }
+    },
+    {
+      "fullUrl": "Procedure/proc-mbruc05-provider",
+      "resource": {
+        "id": "proc-mbruc05-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-procedure"
+          ]
+        },
+        "status": "completed",
+        "code": {
+          "coding": [
+            {
+              "system": "http://snomed.info/sct",
+              "code": "178625001",
+              "display": "Lumbar discectomy"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbruc05-provider"
+        },
+        "performedDateTime": "2026-05-15",
+        "resourceType": "Procedure"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Procedure/proc-mbruc05-provider"
+      }
+    },
+    {
+      "fullUrl": "Procedure/proc-mbruc05noconsent-provider",
+      "resource": {
+        "id": "proc-mbruc05noconsent-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-procedure"
+          ]
+        },
+        "status": "completed",
+        "code": {
+          "coding": [
+            {
+              "system": "http://snomed.info/sct",
+              "code": "178625001",
+              "display": "Lumbar discectomy"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbruc05noconsent-provider"
+        },
+        "performedDateTime": "2026-05-15",
+        "resourceType": "Procedure"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Procedure/proc-mbruc05noconsent-provider"
+      }
+    }
+  ],
+  "resourceType": "Bundle",
+  "type": "transaction"
+}

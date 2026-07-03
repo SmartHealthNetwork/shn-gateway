@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -29,6 +30,7 @@ import (
 	pgstore "github.com/SmartHealthNetwork/shn-gateway/connectors/pgstore"
 	smartauth "github.com/SmartHealthNetwork/shn-gateway/connectors/smartauth"
 	engine "github.com/SmartHealthNetwork/shn-gateway/engine"
+	observer "github.com/SmartHealthNetwork/shn-gateway/observer"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -42,6 +44,11 @@ type config struct {
 	Addr         string
 	SecretsDir   string
 	DiscoveryURL string
+
+	// ObserverAddr is the loopback-only bind address for the observer SSE stream
+	// (Kit spec §6.1). Empty = off — the published-binary default. Set by S3's
+	// shnkitd when launching the gateway child.
+	ObserverAddr string
 
 	// Endpoint overrides (normally discovery-resolved; explicit env wins).
 	AuthzURL        string
@@ -302,6 +309,20 @@ func loadConfig(getenv func(string) string) (config, error) {
 		cfg.IngressClients = clients
 	}
 
+	// Observer stream (Kit spec §6.1): off unless OBSERVER_ADDR is set, and
+	// REFUSED unless the bind host is loopback — the observer carries edge
+	// payloads; it is a local diagnostic surface, never a network service.
+	if addr := getenv("OBSERVER_ADDR"); addr != "" {
+		host, _, err := net.SplitHostPort(addr)
+		if err != nil {
+			return config{}, fmt.Errorf("gateway: OBSERVER_ADDR %q: %v", addr, err)
+		}
+		if host != "127.0.0.1" && host != "::1" && host != "localhost" {
+			return config{}, fmt.Errorf("gateway: OBSERVER_ADDR %q is not loopback; the observer stream binds loopback only", addr)
+		}
+		cfg.ObserverAddr = addr
+	}
+
 	return cfg, nil
 }
 
@@ -486,6 +507,12 @@ type built struct {
 	reg          shnsdk.Registry // shared-reference value type; the poller mutates the same state the engine reads
 	registrarURL string
 	client       *http.Client
+
+	// observerAddr/observerHandler: the loopback SSE stream (Kit spec §6.1),
+	// non-empty/non-nil only when OBSERVER_ADDR is configured. Only Run starts
+	// this listener — HandlerWithClock embedders get no observer endpoint.
+	observerAddr    string
+	observerHandler http.Handler
 }
 
 func build(ctx context.Context, getenv func(string) string, stdout io.Writer, clock func() time.Time) (built, error) {
@@ -659,8 +686,25 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	gwCfg.IngressEnabled = cfg.ProviderDavinciIngress
 	gwCfg.IngressBaseURL = cfg.IngressBaseURL
 	gwCfg.IngressClients = cfg.IngressClients
+
+	// Observer stream: hub + engine callback, only when configured.
+	var obsHandler http.Handler
+	if cfg.ObserverAddr != "" {
+		hub := observer.NewHub()
+		gwCfg.Observer = hub.Emit
+		obsHandler = hub.Handler()
+	}
+
 	fmt.Fprintf(stdout, "gateway: role=%s holder=%s listening on %s\n", cfg.Role, bundle.Identity.HolderID, cfg.Addr)
-	b = built{addr: cfg.Addr, handler: engine.New(gwCfg).Handler(), reg: reg, registrarURL: registrarURL, client: client}
+	b = built{
+		addr:            cfg.Addr,
+		handler:         engine.New(gwCfg).Handler(),
+		reg:             reg,
+		registrarURL:    registrarURL,
+		client:          client,
+		observerAddr:    cfg.ObserverAddr,
+		observerHandler: obsHandler,
+	}
 	return b, nil
 }
 
@@ -675,7 +719,16 @@ func Run(ctx context.Context, getenv func(string) string, stdout io.Writer) erro
 	if b.registrarURL != "" {
 		go pollFeed(ctx, b.client, b.registrarURL, b.reg, 3*time.Second)
 	}
-	return http.ListenAndServe(b.addr, b.handler)
+	errc := make(chan error, 2)
+	go func() { errc <- http.ListenAndServe(b.addr, b.handler) }()
+	if b.observerAddr != "" {
+		// A bind failure here kills the gateway via the shared errc — FAIL-FAST by
+		// intent: OBSERVER_ADDR is explicit opt-in (the Kit supervisor sets it), and
+		// a silently-missing inspector stream is worse than a dead child the
+		// supervisor detects and restarts.
+		go func() { errc <- http.ListenAndServe(b.observerAddr, b.observerHandler) }()
+	}
+	return <-errc
 }
 
 // HandlerWithClock is Handler with an injected clock. The engine's per-op/per-hop

@@ -1,0 +1,30 @@
+{
+  "resourceType": "Library",
+  "id": "BasicPatientInfoPrepopulation",
+  "url": "http://example.org/fhir/Library/BasicPatientInfoPrepopulation",
+  "name": "BasicPatientInfoPrepopulation",
+  "version": "1.0.0",
+  "title": "Basic Patient Information Prepopulation",
+  "status": "active",
+  "type": {
+    "coding": [
+      {
+        "system": "http://terminology.hl7.org/CodeSystem/library-type",
+        "code": "logic-library"
+      }
+    ]
+  },
+  "relatedArtifact": [
+    {
+      "type": "depends-on",
+      "display": "FHIR Helpers",
+      "resource": "http://fhir.org/guides/cqf/common/Library/FHIRHelpers|4.0.1"
+    }
+  ],
+  "content": [
+    {
+      "contentType": "text/cql",
+      "data": "bGlicmFyeSBCYXNpY1BhdGllbnRJbmZvUHJlcG9wdWxhdGlvbiB2ZXJzaW9uICcxLjAuMCcKdXNpbmcgRkhJUiB2ZXJzaW9uICc0LjAuMScKaW5jbHVkZSBGSElSSGVscGVycyB2ZXJzaW9uICc0LjAuMScgY2FsbGVkIEZISVJIZWxwZXJzCgpjb250ZXh0IFBhdGllbnQKCmRlZmluZSAiTGFzdE5hbWUiOiBQYXRpZW50Lm5hbWVbMF0uZmFtaWx5CmRlZmluZSAiRmlyc3ROYW1lIjogUGF0aWVudC5uYW1lWzBdLmdpdmVuWzBdCmRlZmluZSAiTWlkZGxlSW5pdGlhbCI6IFN1YnN0cmluZyhQYXRpZW50Lm5hbWVbMF0uZ2l2ZW5bMV0sIDAsIDEpCmRlZmluZSAiRGF0ZU9mQmlydGgiOiBQYXRpZW50LmJpcnRoRGF0ZQpkZWZpbmUgIkdlbmRlciI6IFBhdGllbnQuZ2VuZGVyCmRlZmluZSAiSG9tZUFkZHJlc3MiOiBzaW5nbGV0b24gZnJvbSAoUGF0aWVudC5hZGRyZXNzIEEgd2hlcmUgQS51c2UgPSAnaG9tZScpCmRlZmluZSAiUGhvbmUiOiBzaW5nbGV0b24gZnJvbSAoUGF0aWVudC50ZWxlY29tIFQgd2hlcmUgVC5zeXN0ZW0gPSAncGhvbmUnKQo="
+    }
+  ]
+}
