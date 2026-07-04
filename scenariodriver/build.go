@@ -30,7 +30,8 @@ var PersonaOrders = map[string]ScenarioOrder{
 // given provider-seeded member. Coverage carries the cms-payer Org (urn:oid:2.16.840.1.113883.6.300|00001)
 // br-payer adjudicates against. The ServiceRequest carrier enables SHN's payer-side subject-bind
 // extraction; br-payer matches its PlanDefinition by code regardless of order type. hookInstance
-// is the opaque token "shn-scenariodriver" (D-S2K-5); display is omitted from the coding when empty.
+// is the fixed opaque token "shn-scenariodriver" (not per-request identity, so runs stay
+// deterministic and comparable against goldens); display is omitted from the coding when empty.
 func BuildCRDRequest(member, system, code, display string) ([]byte, error) {
 	ref := "Patient/" + member
 	coding := map[string]any{"system": system, "code": code}

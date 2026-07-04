@@ -617,7 +617,7 @@ func TestSandbox_PASClaimNative_Approves(t *testing.T) {
 // conformantPASBundleWithDeviceRequestOrder builds a minimal CONFORMANT PAS bundle whose order
 // entry is a DeviceRequest (DME home-oxygen persona shape — E1390, MBR-PD-UC03's
 // HomeOxygenDispatch code, same fixture shape as crd_dispatch_responder_test.go's
-// dispatchReqE1390) rather than a ServiceRequest. D-S7K-15's genuine-verdict fixture:
+// dispatchReqE1390) rather than a ServiceRequest. This is the genuine-verdict fixture:
 // structurally mirrors conformantPASBundleWithQR (the sandbox needs the QR to adjudicate).
 func conformantPASBundleWithDeviceRequestOrder(t *testing.T, member string) []byte {
 	t.Helper()
@@ -642,7 +642,7 @@ func conformantPASBundleWithDeviceRequestOrder(t *testing.T, member string) []by
 	return b
 }
 
-// TestSandbox_PASClaimNative_DeviceRequestOrder_GenuineVerdict is the D-S7K-15 RED->GREEN pin:
+// TestSandbox_PASClaimNative_DeviceRequestOrder_GenuineVerdict is the RED->GREEN pin:
 // before the fix, the sandbox "pas-claim" case parsed the claim's order via the STRICT
 // shnsdk.ParseServiceRequestProductCoding (ServiceRequest-only), so a DeviceRequest-backed
 // conformant claim (the HomeOxygen/UC-03 dispatch personas' own PAS submission) 400'd with
@@ -660,7 +660,7 @@ func TestSandbox_PASClaimNative_DeviceRequestOrder_GenuineVerdict(t *testing.T) 
 		t.Fatalf("sandbox pas-claim (DeviceRequest order): unexpected error (want Status, not err): %v", err)
 	}
 	if res.Status != 0 {
-		t.Fatalf("status=%d msg=%s — want a genuine verdict for a DeviceRequest-backed claim (D-S7K-15), not a parse-shape rejection", res.Status, res.Message)
+		t.Fatalf("status=%d msg=%s — want a genuine verdict for a DeviceRequest-backed claim, not a parse-shape rejection", res.Status, res.Message)
 	}
 	parsed, err := shnsdk.ParseClaimResponse(res.ResponseFHIR)
 	if err != nil || parsed.Outcome != "approved" || parsed.PreAuthRef == "" {
@@ -944,7 +944,7 @@ func TestParseConformantPASUpdate_AcceptsOriginatorBuilt(t *testing.T) {
 // (so it passes the QR check) but whose ServiceRequest has NO CPT code → the EOB's CPT source
 // (ParseOrderProductCoding) errors → 400 via Status (NOT a 500 via the error return). Mirrors the
 // minimized TestSandboxPAS_CPTlessServiceRequestIs400 (every guard ships its rejection test).
-// D-S7K-15: the guard's message text and behavior stay intact for a ServiceRequest with no
+// The guard's message text and behavior stay intact for a ServiceRequest with no
 // product coding even after the call site widened to the order-type-agnostic parser (a
 // ServiceRequest still routes through ParseServiceRequestProductCoding underneath).
 func TestSandbox_PASClaimNative_CPTlessServiceRequestIs400(t *testing.T) {
@@ -964,11 +964,11 @@ func TestSandbox_PASClaimNative_CPTlessServiceRequestIs400(t *testing.T) {
 	}
 	const wantMsg = "claim order missing CPT/HCPCS coding"
 	if res.Message != wantMsg {
-		t.Fatalf("message = %q, want %q (D-S7K-15: order-type-agnostic wording)", res.Message, wantMsg)
+		t.Fatalf("message = %q, want %q (order-type-agnostic wording)", res.Message, wantMsg)
 	}
 }
 
-// TestSandbox_PASClaimNative_DeviceRequestNoCodingIs400 is the D-S7K-15 companion rejection row:
+// TestSandbox_PASClaimNative_DeviceRequestNoCodingIs400 is the companion rejection row:
 // the SAME guard, exercised on the OTHER order type the widened parser now accepts. A
 // DeviceRequest with no codeCodeableConcept.coding must still 400 with the identical message —
 // the fix widens WHICH order types are accepted, never HOW STRICTLY a coding-less order is judged.
@@ -989,6 +989,6 @@ func TestSandbox_PASClaimNative_DeviceRequestNoCodingIs400(t *testing.T) {
 	}
 	const wantMsg = "claim order missing CPT/HCPCS coding"
 	if res.Message != wantMsg {
-		t.Fatalf("message = %q, want %q (D-S7K-15: order-type-agnostic wording)", res.Message, wantMsg)
+		t.Fatalf("message = %q, want %q (order-type-agnostic wording)", res.Message, wantMsg)
 	}
 }

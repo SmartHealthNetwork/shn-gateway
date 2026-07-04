@@ -362,14 +362,16 @@ var stubPersonas = map[string]persona{
 		demo:    Demo{BirthDate: "1972-01-02", FamilyName: "Routingtest-Unknown"},
 		inforce: true,
 	},
-	// MBR-OX / MBR-PD-UC03 — the two provider-data ORDER-DISPATCH personas (Kit S7,
-	// D-S7K-13): HomeOxygen (E0431) and its UC-03 HomeOxygenDispatch analog (E1390). Their
+	// MBR-OX / MBR-PD-UC03 — the two provider-data ORDER-DISPATCH personas:
+	// HomeOxygen (E0431) and its UC-03 HomeOxygenDispatch analog (E1390). Their
 	// PROVIDER-side facts (Patient/DeviceRequest/Coverage) come from a real or bring-your-own
 	// FHIR SoR (originate_homeoxygen.go's originateDispatch reads OpenOrder/OpenCoverage off
 	// g.cfg.SoR, never a literal) — but the PAYER-side inbound bind for the crd-order-dispatch
 	// leg (conformantCRDDispatchBind, crd_dispatch_native.go) resolves the member against
 	// THIS stub when the payer gateway boots on the memstub default (no FHIR_DATA_URL), which
-	// is what every internal/devstack / test/harness.go / Kit-counterparty payer does. Before
+	// is what every internal/devstack / test/harness.go / in-process sandbox payer does — the
+	// in-process sandbox payer must cover the same demo personas the seeded fixtures define, or
+	// payer- and provider-side census drifts apart. Before
 	// this fix the stub had no entry for either member, so that bind 400'd "unknown member"
 	// even though the hosted payer (internal/fhirseed's payer-tenant Coverage, seeded via
 	// seedCoverage) already covers both. Demo values are copied VERBATIM from

@@ -1,5 +1,6 @@
 // originate_dispatch_test.go — hermetic unit test for handleDispatch, the
-// caller-named-member wrapper around originateDispatch (Kit S7, D-S7K-5; FR-K17).
+// caller-named-member wrapper around originateDispatch (the SHN Kit's
+// free-form "run against your data" entry).
 //
 // It reuses the originate_homeoxygen_test.go fixture verbatim (homeOxygenSoR,
 // homeOxygenSubstrate, fakePopulator, buildHomeOxygenSupplier) — homeOxygenSoR's

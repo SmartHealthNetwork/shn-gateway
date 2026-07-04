@@ -1,4 +1,4 @@
-// observer_test.go — hermetic tests for the SSE hub (Kit S1, spec §6.1).
+// observer_test.go — hermetic tests for the SSE hub (see STABILITY.md).
 package observer
 
 import (

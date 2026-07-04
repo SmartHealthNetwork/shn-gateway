@@ -4,9 +4,9 @@
 // br-provider BFF (origination + SDC populate), the provider-data
 // /scenario/* origination routes, the ops console, and the patient surface.
 // It is the importable core of the live conformance gate (FR-G28) and the
-// scenario engine the SHN Kit's daemon consumes (Kit spec §5.2). Transport
-// methods return errors and raw results — assertions and environment gating
-// stay with callers.
+// scenario-driving engine the SHN Kit's daemon consumes. Transport methods
+// return errors and raw results — assertions and environment gating stay
+// with callers.
 package scenariodriver
 
 import _ "embed"

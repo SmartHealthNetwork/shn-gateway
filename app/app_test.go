@@ -74,7 +74,8 @@ func TestLoadConfig_ParsesStoreDatabaseURL(t *testing.T) {
 }
 
 // TestLoadConfig_ObserverAddrLoopbackOnly: OBSERVER_ADDR must be loopback —
-// fail-closed at config load, not a runtime warning (Kit spec §6.1). Empty =
+// fail-closed at config load, not a runtime warning: the observer stream
+// carries edge payloads and must never be reachable off-host. Empty =
 // off (the published-gateway default; the rejection row's config half).
 func TestLoadConfig_ObserverAddrLoopbackOnly(t *testing.T) {
 	cases := []struct {

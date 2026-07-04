@@ -164,9 +164,9 @@ type Config struct {
 	// concurrent goroutines); implementations must be goroutine-safe —
 	// observer.Hub.Emit locks internally. Additive instrumentation only:
 	// emission must not change exchange behavior
-	// (TestObserver_ConformanceNeutral). SHN Kit spec §6.1; the Kit supervisor
-	// always sets it, prod deployments never have it on unless the operator
-	// opts in via OBSERVER_ADDR.
+	// (TestObserver_ConformanceNeutral). See STABILITY.md; the SHN Kit's
+	// supervisor always sets it, prod deployments never have it on unless the
+	// operator opts in via OBSERVER_ADDR.
 	Observer func(ObserverEvent)
 }
 
@@ -258,8 +258,8 @@ func New(cfg Config) *Gateway {
 		hubJTI:    shnsdk.NewReplayGuard(shnsdk.MaxAssertionTTL, 1<<16),
 	}
 	// Observer seam: decorate the validator so every $validate emits
-	// validate.result (Kit spec §6.1). Only when observing — the nil path
-	// keeps the validator untouched.
+	// validate.result. Only when observing — the nil path keeps the
+	// validator untouched.
 	if g.cfg.Observer != nil && g.cfg.Validator != nil {
 		g.cfg.Validator = observingValidator{inner: g.cfg.Validator, g: g}
 	}
@@ -642,7 +642,7 @@ func (g *Gateway) postEnvelope(ctx context.Context, url string, body []byte, ass
 // holder through the Hub (see roundTripInner for the mechanics). It is ALSO
 // the observer seam's origination choke point: every origination leg emits
 // leg.originated before the exchange and leg.response / leg.failed after —
-// one seam covers every UC flow in both lanes (Kit spec §6.1).
+// one seam covers every UC flow in both lanes (see STABILITY.md).
 func (g *Gateway) roundTrip(ctx context.Context, r *http.Request, recipient, reqFrame, respFrame, op, respOp, txType, scope, pci, correlationID, custodian string, payload []byte) ([]byte, error) {
 	g.observe(ObserverEvent{
 		Kind: "leg.originated", Direction: "originate", LegType: txType,

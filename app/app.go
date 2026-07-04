@@ -45,9 +45,10 @@ type config struct {
 	SecretsDir   string
 	DiscoveryURL string
 
-	// ObserverAddr is the loopback-only bind address for the observer SSE stream
-	// (Kit spec §6.1). Empty = off — the published-binary default. Set by S3's
-	// shnkitd when launching the gateway child.
+	// ObserverAddr is the loopback-only bind address for the observer SSE stream:
+	// opt-in structured edge events for local inspection tooling (see STABILITY.md).
+	// Empty = off — the published-binary default. Set by the SHN Kit's shnkitd
+	// daemon when launching the gateway child.
 	ObserverAddr string
 
 	// Endpoint overrides (normally discovery-resolved; explicit env wins).
@@ -309,9 +310,9 @@ func loadConfig(getenv func(string) string) (config, error) {
 		cfg.IngressClients = clients
 	}
 
-	// Observer stream (Kit spec §6.1): off unless OBSERVER_ADDR is set, and
-	// REFUSED unless the bind host is loopback — the observer carries edge
-	// payloads; it is a local diagnostic surface, never a network service.
+	// Observer stream: off unless OBSERVER_ADDR is set, and REFUSED unless the
+	// bind host is loopback — the observer carries edge payloads; it is a
+	// local diagnostic surface, never a network service.
 	if addr := getenv("OBSERVER_ADDR"); addr != "" {
 		host, _, err := net.SplitHostPort(addr)
 		if err != nil {
@@ -508,7 +509,7 @@ type built struct {
 	registrarURL string
 	client       *http.Client
 
-	// observerAddr/observerHandler: the loopback SSE stream (Kit spec §6.1),
+	// observerAddr/observerHandler: the loopback SSE stream (see STABILITY.md),
 	// non-empty/non-nil only when OBSERVER_ADDR is configured. Only Run starts
 	// this listener — HandlerWithClock embedders get no observer endpoint.
 	observerAddr    string

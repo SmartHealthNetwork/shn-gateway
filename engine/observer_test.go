@@ -1,4 +1,4 @@
-// observer_test.go — hermetic tests for the observer seam (SHN Kit S1, spec §6.1).
+// observer_test.go — hermetic tests for the observer seam (see STABILITY.md).
 // The seam is ADDITIVE instrumentation: nil Observer = zero emission (the
 // default, and the published-gateway posture); a configured Observer receives
 // structured events with edge payload snapshots. Neutrality (on/off responses

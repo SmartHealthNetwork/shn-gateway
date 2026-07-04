@@ -143,8 +143,9 @@ func (g *Gateway) conformantCRDDispatchBind(reqJSON []byte, tokSubject string) (
 // ServiceRequest) from the raw dispatch CDS request's prefetch — mirrors
 // conformantCRDDispatchBind's own resolution, minus the AI-11 subject-fence (the bind already
 // ran it before the sandbox responder's crd-order-dispatch case is ever reached). Used only to
-// read the order's product coding for the sandbox's OrderSelect decision (D-S7K-13,
-// responder-parity correction) — never a subject-authority source.
+// read the order's product coding for the sandbox's OrderSelect decision — the in-process
+// sandbox responder must stay in parity with the real responder's order-dispatch handling —
+// never a subject-authority source.
 func firstDispatchedOrder(reqJSON []byte) ([]byte, bool) {
 	var req dispatchCDSRequest
 	if err := json.Unmarshal(reqJSON, &req); err != nil {

@@ -1,12 +1,12 @@
-// crd_dispatch_responder_test.go — D-S7K-13 responder-parity correction:
+// crd_dispatch_responder_test.go — sandbox responder-parity correction:
 // proves the SANDBOX payer genuinely adjudicates the crd-order-dispatch leg. Before this
 // change, "crd-order-dispatch" had no case in sandboxResponder.Handle at all — it fell to the
 // switch's default and errored "unhandled leg" (surfaced as 500 at the payer, then 502 "hub
 // routing failed" at the Hub) for every in-process payer with no native-forward wired
-// (devstack, test/harness, Kit's own counterparty). composite.go always forwards this leg to a
-// REAL Da Vinci partner when native mode is configured (never falls back to sandbox) — so this
-// gap was invisible everywhere the leg had been exercised before: cloud's brpayer-gw natively
-// forwards to a live br-payer oracle (Docker-only, test/tworilive's HomeOxygen gate), and
+// (devstack, test/harness, the SHN Kit's own counterparty). composite.go always forwards this leg
+// to a REAL Da Vinci partner when native mode is configured (never falls back to sandbox) — so
+// this gap was invisible everywhere the leg had been exercised before: cloud's brpayer-gw
+// natively forwards to a live br-payer oracle (Docker-only, test/tworilive's HomeOxygen gate), and
 // originate_homeoxygen_test.go cans the ENTIRE wire round-trip at the substrate-stub level
 // (homeoxygenSubstrate), never touching a real sandboxResponder. This test closes the sandbox
 // fallback so the leg has a genuine (not fake) DEF-4 verdict path when no native partner is
@@ -74,11 +74,11 @@ func TestSandboxAdjudicator_OrderSelect_HomeOxygenCodes(t *testing.T) {
 // through a payer's LegResponder (coverage-eligibility/crd-order-select/dtr-questionnaire-fetch/
 // pas-claim/pas-claim-update/crd-order-dispatch) — federated-query and patient-dtr are NOT
 // Responder-routed (separate FQS/PHG-surface handlers) and are deliberately excluded. This is
-// the erosion-alarm pin D-S7K-13 asked for: every leg the ENGINE's inbound catalog routes to a
+// the erosion-alarm pin: every leg the ENGINE's inbound catalog routes to a
 // payer's content Responder must have a genuine case in sandboxResponder.Handle — never silently
 // regress to the switch's "unhandled leg" default, which every in-process payer with no
-// native-forward configured (devstack/harness/Kit) would surface as a 500 (then a 502 at the
-// Hub). Kept as a literal, hand-maintained list (not introspection over inbound.go) — this
+// native-forward configured (devstack/harness/the SHN Kit) would surface as a 500 (then a 502 at
+// the Hub). Kept as a literal, hand-maintained list (not introspection over inbound.go) — this
 // hand-list cannot auto-flag a NEW leg added to inbound.go's switch; extend this list when
 // adding an inbound leg that routes through Responder.Handle, or that leg's sandbox coverage
 // goes unpinned here.
@@ -91,7 +91,7 @@ var responderRoutedLegs = []string{
 	"crd-order-dispatch",
 }
 
-// TestSandboxResponder_CoversEngineInboundLegCatalog is the D-S7K-13 parity pin: garbage input
+// TestSandboxResponder_CoversEngineInboundLegCatalog is the sandbox-parity pin: garbage input
 // for every Responder-routed leg must fail on PARSING that leg's body (a legitimate 400/500 from
 // the leg's own case), never on the switch's generic "unhandled leg" default — the signal that a
 // leg the engine's inbound catalog dispatches to has no sandbox content path at all. Before this

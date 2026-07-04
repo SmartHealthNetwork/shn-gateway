@@ -62,8 +62,8 @@ func (s *sandboxAdjudicator) OrderSelect(code string) (bool, string) {
 	case "E0431", "E1390": // HCPCS — home-oxygen DME order-dispatch personas (MBR-OX HomeOxygen / MBR-PD-UC03
 		// HomeOxygenDispatch). The sandbox has no home-oxygen-specific CQL policy — that lives only in
 		// the real br-payer oracle, exercised live (Docker) by test/tworilive's HomeOxygen gate. Reuses
-		// the lumbar questionnaire: same DEF-4 stub-reuse precedent as the L8000 HCPCS row above (D-S7K-13
-		// responder-parity correction).
+		// the lumbar questionnaire: same DEF-4 stub-reuse precedent as the L8000 HCPCS row above (added as
+		// part of the sandbox responder-parity correction for this leg).
 		return true, shnsdk.QuestionnaireCanonicalLumbarMRI
 	}
 	return false, ""
@@ -198,7 +198,7 @@ func (s *sandboxResponder) Handle(ctx context.Context, leg, corrID, subjectPCI s
 		}
 		// Source the procedure {system, code, display} from the conformant Claim's order (a
 		// ServiceRequest OR a DeviceRequest — s2.srJSON is order-type-agnostic per
-		// parseConformantPASSubjects, R-4). D-S7K-15: this READ used to be the strict
+		// parseConformantPASSubjects, R-4). This READ used to be the strict
 		// shnsdk.ParseServiceRequestProductCoding, which hard-rejected a DeviceRequest-backed
 		// claim (the HomeOxygen/UC-03 dispatch personas' own PAS submission) even though the
 		// order genuinely carries a {HCPCS} coding — just on codeCodeableConcept, not code.
@@ -343,7 +343,7 @@ func (s *sandboxResponder) Handle(ctx context.Context, leg, corrID, subjectPCI s
 			Rollback:     release,
 		}, nil
 	case "crd-order-dispatch":
-		// D-S7K-13 responder-parity correction: the order-dispatch sibling of
+		// Sandbox responder-parity correction: the order-dispatch sibling of
 		// crd-order-select — read the dispatched order (resolved from prefetch, mirroring
 		// conformantCRDDispatchBind's own resolution; the AI-11 subject-fence already ran in the
 		// bind before Handle is called) and decide via the SAME sandbox OrderSelect table.

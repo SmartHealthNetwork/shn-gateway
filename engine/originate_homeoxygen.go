@@ -34,10 +34,10 @@ func (g *Gateway) handleHomeOxygen(w http.ResponseWriter, r *http.Request) {
 	g.originateDispatch(w, r, homeOxygenMember) // homeOxygenMember = "MBR-OX"
 }
 
-// handleDispatch originates the order-dispatch PA for a caller-named member — the Kit's
-// free-form "run against your data" entry (FR-K17, Kit D-S7K-5). Same internal /scenario/*
-// posture as its siblings (never public); the origination itself is originateDispatch,
-// unchanged: order code, coverage, and supplier all come from the SoR, nothing persona-baked.
+// handleDispatch originates the order-dispatch PA for a caller-named member — the SHN Kit's
+// free-form "run against your data" entry. Same internal /scenario/* posture as its siblings
+// (never public); the origination itself is originateDispatch, unchanged: order code,
+// coverage, and supplier all come from the SoR, nothing persona-baked.
 func (g *Gateway) handleDispatch(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Member string `json:"member"`

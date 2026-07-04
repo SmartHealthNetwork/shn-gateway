@@ -36,8 +36,8 @@ import (
 // code + supplier from the SoR (not literals).
 //
 // member is a field (not a literal) so this ONE fixture shape serves both MBR-OX
-// (TestHandleHomeOxygen) and a second, differently-coded persona (D-S7K-5,
-// originate_dispatch_test.go's TestHandleDispatch_ArbitraryMember, MBR-PD-UC03/E1390) —
+// (TestHandleHomeOxygen) and a second, differently-coded persona
+// (originate_dispatch_test.go's TestHandleDispatch_ArbitraryMember, MBR-PD-UC03/E1390) —
 // proving /scenario/dispatch is genuinely member-parameterized, not hardcoded to MBR-OX.
 type homeOxygenSoR struct {
 	*StubHolderData

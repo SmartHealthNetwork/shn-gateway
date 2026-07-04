@@ -1,4 +1,5 @@
-// observer.go — the gateway observer seam (SHN Kit S1, Kit spec §6.1).
+// observer.go — the gateway observer seam: opt-in structured edge events for
+// local inspection tooling (see STABILITY.md).
 //
 // The observer is ADDITIVE instrumentation at the gateway edge: when
 // Config.Observer is non-nil, the engine emits one structured ObserverEvent at
@@ -85,7 +86,7 @@ func (v observingValidator) Validate(ctx context.Context, resourceJSON []byte, p
 // unchanged; with a nil Observer the handler runs bare (zero overhead).
 // NOTE: ingress.received fires before the handler's own auth check — the
 // observer is a loopback-local diagnostic surface and seeing rejected calls
-// is part of its job (a 401 is inspector content, Kit spec §8).
+// is part of its job (a 401 is inspector content too).
 func (g *Gateway) observeIngress(route string, h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if g.cfg.Observer == nil {
