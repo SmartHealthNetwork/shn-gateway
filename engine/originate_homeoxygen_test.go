@@ -31,11 +31,18 @@ import (
 // ---- HomeOxygen fake SoR ----
 
 // homeOxygenSoR wraps StubHolderData (for ResolvePatient/PatientFHIRRef) and adds the
-// MBR-OX open order + supplier resolution the in-memory stub lacks. It also SPIES on
+// member's open order + supplier resolution the in-memory stub lacks. It also SPIES on
 // OpenOrder / ResolveByReference so the test can assert the handler sourced the order
 // code + supplier from the SoR (not literals).
+//
+// member is a field (not a literal) so this ONE fixture shape serves both MBR-OX
+// (TestHandleHomeOxygen) and a second, differently-coded persona (D-S7K-5,
+// originate_dispatch_test.go's TestHandleDispatch_ArbitraryMember, MBR-PD-UC03/E1390) —
+// proving /scenario/dispatch is genuinely member-parameterized, not hardcoded to MBR-OX.
 type homeOxygenSoR struct {
 	*StubHolderData
+	member       string
+	demo         Demo
 	pci          string
 	orderJSON    []byte
 	performerRef string
@@ -45,26 +52,31 @@ type homeOxygenSoR struct {
 	resolveByRefCall []string
 }
 
-// ResolvePatient / PatientFHIRRef are overridden because MBR-OX lives in the FHIR-store
-// seed (internal/fhirseed), NOT the engine's in-memory stubPersonas map — the provider-
-// data lane is a real-FHIR-SoR lane. The embedded StubHolderData supplies everything else.
+// ResolvePatient / PatientFHIRRef are overridden to stand in for the PROVIDER-side real-FHIR-SoR
+// facts the provider-data lane actually reads from (mirroring OpenOrder/ResolveByReference
+// below, which the base stub can never serve — permanent provider-data-lane no-ops). This is no
+// longer the ONLY way to resolve MBR-OX/MBR-PD-UC03 at all: commit 8408638 also added both to the
+// engine's stubPersonas census (with the same demo values), so StubHolderData's own
+// ResolvePatient/PatientFHIRRef now answer for them too — that addition was for the PAYER-side
+// crd-order-dispatch inbound bind (conformantCRDDispatchBind), a separate concern from this
+// fixture's provider-side origination path. The embedded StubHolderData supplies everything else.
 func (s *homeOxygenSoR) ResolvePatient(memberID string) (string, Demo, bool) {
-	if memberID != "MBR-OX" {
+	if memberID != s.member {
 		return s.StubHolderData.ResolvePatient(memberID)
 	}
-	return s.pci, Demo{BirthDate: "1958-07-14", FamilyName: "Okafor-Oxygen"}, true
+	return s.pci, s.demo, true
 }
 
 func (s *homeOxygenSoR) PatientFHIRRef(memberID string) (string, bool) {
-	if memberID != "MBR-OX" {
+	if memberID != s.member {
 		return s.StubHolderData.PatientFHIRRef(memberID)
 	}
-	return "Patient/MBR-OX", true
+	return "Patient/" + s.member, true
 }
 
 func (s *homeOxygenSoR) OpenOrder(memberID string) ([]byte, bool) {
 	s.openOrderCalls = append(s.openOrderCalls, memberID)
-	if memberID != "MBR-OX" {
+	if memberID != s.member {
 		return nil, false
 	}
 	return s.orderJSON, true
@@ -78,16 +90,18 @@ func (s *homeOxygenSoR) ResolveByReference(ref string) ([]byte, bool) {
 	return s.supplierJSON, true
 }
 
-// OpenCoverage returns a parseable contained-payor Coverage for MBR-OX, the routing/identity
-// SOURCE the origination handler now reads (FR-G40). The embedded StubHolderData.OpenCoverage
-// can't serve it: MBR-OX is not in stubPersonas (it lives in the FHIR-store seed), so the embedded
-// stub's ResolvePatient — which OpenCoverage keys on — would miss it. So this override synthesizes
-// the same contained 00001 Coverage the stub would, keyed on the wrapper's known member.
+// OpenCoverage returns a parseable contained-payor Coverage for the fixture's member, the
+// routing/identity SOURCE the origination handler now reads (FR-G40). Since 8408638 added
+// MBR-OX/MBR-PD-UC03 to stubPersonas too, the embedded StubHolderData.OpenCoverage would in fact
+// resolve the member and produce the same contained 00001 Coverage this override does — this is
+// kept anyway for shape-symmetry with the OpenOrder/ResolveByReference provider-facts above (a
+// single fixture pinning the exact Patient/Coverage reference shape origination reads) rather
+// than relying on stub-census parity to keep holding.
 func (s *homeOxygenSoR) OpenCoverage(memberID string) ([]byte, bool) {
-	if memberID != "MBR-OX" {
+	if memberID != s.member {
 		return nil, false
 	}
-	cov, err := shnsdk.BuildCoverageWithPayer("Patient/MBR-OX", "Coverage/MBR-OX", shnsdk.CMSPayerIdentity)
+	cov, err := shnsdk.BuildCoverageWithPayer("Patient/"+s.member, "Coverage/"+s.member, shnsdk.CMSPayerIdentity)
 	if err != nil {
 		return nil, false
 	}
@@ -293,8 +307,10 @@ func TestHandleHomeOxygen(t *testing.T) {
 	clock := func() time.Time { return time.Unix(1700000000, 0).UTC() }
 
 	base := NewStubHolderData()
-	// MBR-OX is a FHIR-store seed persona (internal/fhirseed), not an engine stub persona —
-	// derive its PCI the same way the SoR does (member + birthDate + familyName).
+	// MBR-OX is a FHIR-store seed persona (internal/fhirseed) and, as of 8408638, also lives in
+	// the engine's stubPersonas census (payer-side crd-order-dispatch bind) with the same demo
+	// values — either source yields the same PCI. Derive it the same way the SoR does (member +
+	// birthDate + familyName).
 	pci := shnsdk.ResolvePCI("MBR-OX", "1958-07-14", "Okafor-Oxygen")
 
 	// Build the seeded order + supplier the way fhirseed does: an E0431
@@ -310,6 +326,8 @@ func TestHandleHomeOxygen(t *testing.T) {
 	}
 	sor := &homeOxygenSoR{
 		StubHolderData: base,
+		member:         "MBR-OX",
+		demo:           Demo{BirthDate: "1958-07-14", FamilyName: "Okafor-Oxygen"},
 		pci:            pci,
 		orderJSON:      orderJSON,
 		performerRef:   performerRef,

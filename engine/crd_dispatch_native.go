@@ -139,6 +139,23 @@ func (g *Gateway) conformantCRDDispatchBind(reqJSON []byte, tokSubject string) (
 	return firstOrder, covJSON, 0, ""
 }
 
+// firstDispatchedOrder extracts the first order-dispatch order (a DeviceRequest OR
+// ServiceRequest) from the raw dispatch CDS request's prefetch — mirrors
+// conformantCRDDispatchBind's own resolution, minus the AI-11 subject-fence (the bind already
+// ran it before the sandbox responder's crd-order-dispatch case is ever reached). Used only to
+// read the order's product coding for the sandbox's OrderSelect decision (D-S7K-13,
+// responder-parity correction) — never a subject-authority source.
+func firstDispatchedOrder(reqJSON []byte) ([]byte, bool) {
+	var req dispatchCDSRequest
+	if err := json.Unmarshal(reqJSON, &req); err != nil {
+		return nil, false
+	}
+	if len(req.Context.DispatchedOrders) == 0 {
+		return nil, false
+	}
+	return findInPrefetchByRef(req.Prefetch, req.Context.DispatchedOrders[0])
+}
+
 // handleCRDDispatchInbound serves the conformant crd-order-dispatch leg. Mirrors handleCRDNativeInbound:
 // subject-bind, ingress-validate the resolved DeviceRequest + coverage (validateFHIR respects A4's R-8
 // skip on br-payer-targeting lanes), then forward the verbatim request to the responder.

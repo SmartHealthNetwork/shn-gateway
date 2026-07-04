@@ -448,6 +448,7 @@ func (g *Gateway) Handler() http.Handler {
 		mux.HandleFunc("POST /scenario/uc07hcpcs", g.handleUC07HCPCS)
 		mux.HandleFunc("POST /scenario/uc08", g.handleUC08)
 		mux.HandleFunc("POST /scenario/homeoxygen", g.handleHomeOxygen)
+		mux.HandleFunc("POST /scenario/dispatch", g.handleDispatch)
 		mux.HandleFunc("POST /scenario/uc06/start", g.handleUC06Start)
 		mux.HandleFunc("POST /scenario/uc06/complete", g.handleUC06Complete)
 		mux.HandleFunc("POST /scenario/uc06/cancel", g.handleScenarioCancel)

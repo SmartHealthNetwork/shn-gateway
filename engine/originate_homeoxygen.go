@@ -21,6 +21,7 @@ package engine
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
@@ -31,6 +32,24 @@ const homeOxygenMember = "MBR-OX"
 // handleHomeOxygen originates the HomeOxygen PA off the member's seeded DeviceRequest.
 func (g *Gateway) handleHomeOxygen(w http.ResponseWriter, r *http.Request) {
 	g.originateDispatch(w, r, homeOxygenMember) // homeOxygenMember = "MBR-OX"
+}
+
+// handleDispatch originates the order-dispatch PA for a caller-named member — the Kit's
+// free-form "run against your data" entry (FR-K17, Kit D-S7K-5). Same internal /scenario/*
+// posture as its siblings (never public); the origination itself is originateDispatch,
+// unchanged: order code, coverage, and supplier all come from the SoR, nothing persona-baked.
+func (g *Gateway) handleDispatch(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Member string `json:"member"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&req) // lenient like the sibling handlers
+	}
+	if strings.TrimSpace(req.Member) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "member is required"})
+		return
+	}
+	g.originateDispatch(w, r, req.Member)
 }
 
 // originateDispatch originates an order-dispatch PA off the given member's seeded DeviceRequest.

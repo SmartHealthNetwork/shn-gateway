@@ -40,8 +40,13 @@ expected to change shape as their consumer matures:
 
 - **Observer stream** (`OBSERVER_ADDR`, `engine.Config.Observer`, `ObserverEvent` JSON,
   `observer.Hub`): new in this release and **evolving** — field additions and event-kind
-  additions may happen in minor releases. Consumers (the SHN Kit) pin exact gateway
-  versions. Will graduate to a stability tier when the Kit's inspector stabilizes.
+  additions may happen in minor releases. The SHN Kit's `shnkitd` daemon (`kit/relay`) is now
+  this stream's first real consumer (Kit S3): it SSE-subscribes to a provider-role gateway
+  child's `/events` and re-emits frames onto the Kit's own run-timeline bus, stamped with the
+  active run's identity. That consumer stays payer-role-aware (a payer-role gateway's stream is
+  validation-only — `kit/relay`'s package doc), and pins an exact gateway version like any other
+  consumer. The surface stays **evolving**, not yet a pinned stability tier — it will graduate
+  once the Kit's inspector stabilizes.
 
 - **`scenariodriver`** (`Config`, `Driver`, transport methods, builders, `Cards`/`ParseCards`):
   the UC-01…08 scenario-driving package. New in this release and **evolving** — signatures and

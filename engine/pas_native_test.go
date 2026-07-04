@@ -614,6 +614,74 @@ func TestSandbox_PASClaimNative_Approves(t *testing.T) {
 	}
 }
 
+// conformantPASBundleWithDeviceRequestOrder builds a minimal CONFORMANT PAS bundle whose order
+// entry is a DeviceRequest (DME home-oxygen persona shape — E1390, MBR-PD-UC03's
+// HomeOxygenDispatch code, same fixture shape as crd_dispatch_responder_test.go's
+// dispatchReqE1390) rather than a ServiceRequest. D-S7K-15's genuine-verdict fixture:
+// structurally mirrors conformantPASBundleWithQR (the sandbox needs the QR to adjudicate).
+func conformantPASBundleWithDeviceRequestOrder(t *testing.T, member string) []byte {
+	t.Helper()
+	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	ref := "Patient/" + member
+	drJSON := []byte(`{"resourceType":"DeviceRequest","id":"convergence-dr","status":"active","intent":"order","subject":{"reference":"` + ref + `"},"codeCodeableConcept":{"coding":[{"system":"http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets","code":"E1390","display":"Stationary Oxygen Concentrator"}]}}`)
+	q := shnsdk.SandboxLumbarQuestionnaire()
+	qrJSON, err := shnsdk.FillQuestionnaire(q, shnsdk.SandboxUC03Context(), shnsdk.QRContext{
+		PatientRef: ref, CoverageRef: "Coverage/" + member, OrderRef: "DeviceRequest/convergence-dr", Authored: now,
+	})
+	if err != nil {
+		t.Fatalf("FillQuestionnaire: %v", err)
+	}
+	entries := []map[string]any{
+		{"resource": map[string]any{"resourceType": "Patient", "id": member}},
+		{"resource": map[string]any{"resourceType": "Coverage", "id": "cov1", "beneficiary": map[string]any{"reference": ref}}},
+		{"resource": json.RawMessage(drJSON)},
+		{"resource": map[string]any{"resourceType": "Claim", "patient": map[string]any{"reference": ref}}},
+		{"resource": json.RawMessage(qrJSON)},
+	}
+	b, _ := json.Marshal(map[string]any{"resourceType": "Bundle", "type": "collection", "entry": entries})
+	return b
+}
+
+// TestSandbox_PASClaimNative_DeviceRequestOrder_GenuineVerdict is the D-S7K-15 RED->GREEN pin:
+// before the fix, the sandbox "pas-claim" case parsed the claim's order via the STRICT
+// shnsdk.ParseServiceRequestProductCoding (ServiceRequest-only), so a DeviceRequest-backed
+// conformant claim (the HomeOxygen/UC-03 dispatch personas' own PAS submission) 400'd with
+// "claim service request missing CPT/HCPCS coding" — even though the order genuinely carries a
+// {HCPCS} product coding, just on codeCodeableConcept rather than code. After the fix (swapping
+// to the order-type-agnostic shnsdk.ParseOrderProductCoding, the same function the native-forward
+// PAS path (nativepas.go:139) and the crd-order-dispatch sandbox case already use), this bundle
+// must resolve to a GENUINE verdict via the SAME QR-driven adjudication + EOB-build tail every
+// other pas-claim row exercises — not a parse-shape 400.
+func TestSandbox_PASClaimNative_DeviceRequestOrder_GenuineVerdict(t *testing.T) {
+	s := newSandboxResponderForTest(t)
+	res, err := s.Handle(context.Background(), "pas-claim", "corr-dr", "pci-dr",
+		conformantPASBundleWithDeviceRequestOrder(t, "MBR-PD-UC03"))
+	if err != nil {
+		t.Fatalf("sandbox pas-claim (DeviceRequest order): unexpected error (want Status, not err): %v", err)
+	}
+	if res.Status != 0 {
+		t.Fatalf("status=%d msg=%s — want a genuine verdict for a DeviceRequest-backed claim (D-S7K-15), not a parse-shape rejection", res.Status, res.Message)
+	}
+	parsed, err := shnsdk.ParseClaimResponse(res.ResponseFHIR)
+	if err != nil || parsed.Outcome != "approved" || parsed.PreAuthRef == "" {
+		t.Fatalf("want approved + ref, got %+v err=%v", parsed, err)
+	}
+	// Submit cell: same FR-34 EOB side-effect every other approved pas-claim row records —
+	// sourced from the DeviceRequest's HCPCS coding (order-type-agnostic parse), not a ServiceRequest.
+	if len(res.SideEffectFHIR) != 1 {
+		t.Fatalf("approved DeviceRequest-backed pas-claim must emit 1 EOB side-effect; got side-effects=%d", len(res.SideEffectFHIR))
+	}
+	if !bytes.Contains(res.SideEffectFHIR[0], []byte("E1390")) {
+		t.Fatalf("EOB not sourced from the DeviceRequest's HCPCS code E1390:\n%s", res.SideEffectFHIR[0])
+	}
+	if !bytes.Contains(res.SideEffectFHIR[0], []byte("http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets")) {
+		t.Fatalf("EOB procedure system must be HCPCS (order-type-agnostic parse), got:\n%s", res.SideEffectFHIR[0])
+	}
+	if res.Commit == nil {
+		t.Fatal("approved DeviceRequest-backed pas-claim must arm a RecordEOB Commit")
+	}
+}
+
 // TestSandbox_PASClaimNative_RecordsEOB (approved path): the sandbox conformant
 // pas-claim case records the FR-34 Patient-Access EOB as a Store side-effect
 // + Commit (the submit cell). Running the Commit makes the EOB readable via the
@@ -872,10 +940,13 @@ func TestParseConformantPASUpdate_AcceptsOriginatorBuilt(t *testing.T) {
 }
 
 // TestSandbox_PASClaimNative_CPTlessServiceRequestIs400 is the rejection test for the conformant
-// submit cell's CPT guard (adjudicator.go ~:297): a bundle the bind accepts AND that carries a QR
+// submit cell's CPT guard (adjudicator.go ~:202): a bundle the bind accepts AND that carries a QR
 // (so it passes the QR check) but whose ServiceRequest has NO CPT code → the EOB's CPT source
-// (ParseServiceRequestCPT) errors → 400 via Status (NOT a 500 via the error return). Mirrors the
+// (ParseOrderProductCoding) errors → 400 via Status (NOT a 500 via the error return). Mirrors the
 // minimized TestSandboxPAS_CPTlessServiceRequestIs400 (every guard ships its rejection test).
+// D-S7K-15: the guard's message text and behavior stay intact for a ServiceRequest with no
+// product coding even after the call site widened to the order-type-agnostic parser (a
+// ServiceRequest still routes through ParseServiceRequestProductCoding underneath).
 func TestSandbox_PASClaimNative_CPTlessServiceRequestIs400(t *testing.T) {
 	s := newSandboxResponderForTest(t)
 	bundle := []byte(`{"resourceType":"Bundle","entry":[
@@ -890,5 +961,34 @@ func TestSandbox_PASClaimNative_CPTlessServiceRequestIs400(t *testing.T) {
 	}
 	if res.Status != 400 {
 		t.Fatalf("want 400 (CPT-less ServiceRequest), got %d (%s)", res.Status, res.Message)
+	}
+	const wantMsg = "claim order missing CPT/HCPCS coding"
+	if res.Message != wantMsg {
+		t.Fatalf("message = %q, want %q (D-S7K-15: order-type-agnostic wording)", res.Message, wantMsg)
+	}
+}
+
+// TestSandbox_PASClaimNative_DeviceRequestNoCodingIs400 is the D-S7K-15 companion rejection row:
+// the SAME guard, exercised on the OTHER order type the widened parser now accepts. A
+// DeviceRequest with no codeCodeableConcept.coding must still 400 with the identical message —
+// the fix widens WHICH order types are accepted, never HOW STRICTLY a coding-less order is judged.
+func TestSandbox_PASClaimNative_DeviceRequestNoCodingIs400(t *testing.T) {
+	s := newSandboxResponderForTest(t)
+	bundle := []byte(`{"resourceType":"Bundle","entry":[
+		{"resource":{"resourceType":"Claim","patient":{"reference":"Patient/MBR-COVERED"}}},
+		{"resource":{"resourceType":"DeviceRequest","subject":{"reference":"Patient/MBR-COVERED"}}},
+		{"resource":{"resourceType":"Coverage","beneficiary":{"reference":"Patient/MBR-COVERED"}}},
+		{"resource":{"resourceType":"QuestionnaireResponse","subject":{"reference":"Patient/MBR-COVERED"}}}
+	]}`)
+	res, err := s.Handle(context.Background(), "pas-claim", "corr-dr-nocoding", "pci-covered", bundle)
+	if err != nil {
+		t.Fatalf("unexpected error return (must be Status 400, not 500): %v", err)
+	}
+	if res.Status != 400 {
+		t.Fatalf("want 400 (coding-less DeviceRequest), got %d (%s)", res.Status, res.Message)
+	}
+	const wantMsg = "claim order missing CPT/HCPCS coding"
+	if res.Message != wantMsg {
+		t.Fatalf("message = %q, want %q (D-S7K-15: order-type-agnostic wording)", res.Message, wantMsg)
 	}
 }

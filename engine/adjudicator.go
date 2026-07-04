@@ -59,6 +59,12 @@ func (s *sandboxAdjudicator) OrderSelect(code string) (bool, string) {
 		return true, shnsdk.QuestionnaireCanonicalLumbarMRI
 	case "L8000": // HCPCS — §3.2 HCPCS approve persona; reuses the lumbar questionnaire (DEF-4 stub, AI-9)
 		return true, shnsdk.QuestionnaireCanonicalLumbarMRI
+	case "E0431", "E1390": // HCPCS — home-oxygen DME order-dispatch personas (MBR-OX HomeOxygen / MBR-PD-UC03
+		// HomeOxygenDispatch). The sandbox has no home-oxygen-specific CQL policy — that lives only in
+		// the real br-payer oracle, exercised live (Docker) by test/tworilive's HomeOxygen gate. Reuses
+		// the lumbar questionnaire: same DEF-4 stub-reuse precedent as the L8000 HCPCS row above (D-S7K-13
+		// responder-parity correction).
+		return true, shnsdk.QuestionnaireCanonicalLumbarMRI
 	}
 	return false, ""
 }
@@ -190,12 +196,20 @@ func (s *sandboxResponder) Handle(ctx context.Context, leg, corrID, subjectPCI s
 			// The bind allows a QR-less conformant bundle (R-5), but the sandbox must adjudicate.
 			return LegResult{Status: http.StatusBadRequest, Message: "conformant PAS bundle missing QuestionnaireResponse"}, nil
 		}
-		// Source the procedure {system, code, display} from the conformant Claim's ServiceRequest
-		// (the EOB's productOrService coding — FR-28, system flows from the order). A
-		// {CPT,HCPCS}-less SR is a malformed CLIENT request → 400.
-		procSystem, cpt, cptDisplay, cerr := shnsdk.ParseServiceRequestProductCoding(s2.srJSON)
+		// Source the procedure {system, code, display} from the conformant Claim's order (a
+		// ServiceRequest OR a DeviceRequest — s2.srJSON is order-type-agnostic per
+		// parseConformantPASSubjects, R-4). D-S7K-15: this READ used to be the strict
+		// shnsdk.ParseServiceRequestProductCoding, which hard-rejected a DeviceRequest-backed
+		// claim (the HomeOxygen/UC-03 dispatch personas' own PAS submission) even though the
+		// order genuinely carries a {HCPCS} coding — just on codeCodeableConcept, not code.
+		// shnsdk.ParseOrderProductCoding handles BOTH order types (already the parser
+		// nativepas.go:139's native-forward PAS tail and the crd-order-dispatch sandbox case
+		// use); the in-process payer becomes as order-type-tolerant as the real br-payer
+		// counterparty demonstrably is (nativepas.go's best-effort parse), never more
+		// permissive. A {CPT,HCPCS}-less order (either type) is a malformed CLIENT request → 400.
+		procSystem, cpt, cptDisplay, cerr := shnsdk.ParseOrderProductCoding(s2.srJSON)
 		if cerr != nil {
-			return LegResult{Status: http.StatusBadRequest, Message: "claim service request missing CPT/HCPCS coding"}, nil
+			return LegResult{Status: http.StatusBadRequest, Message: "claim order missing CPT/HCPCS coding"}, nil
 		}
 		dec, err := s.adj.PriorAuth(s2.qrJSON, s2.hasDR)
 		if err != nil {
@@ -328,7 +342,41 @@ func (s *sandboxResponder) Handle(ctx context.Context, leg, corrID, subjectPCI s
 			Commit:       func() error { return s.store.FinalizeClaimUpdate(subjectPCI, related) },
 			Rollback:     release,
 		}, nil
+	case "crd-order-dispatch":
+		// D-S7K-13 responder-parity correction: the order-dispatch sibling of
+		// crd-order-select — read the dispatched order (resolved from prefetch, mirroring
+		// conformantCRDDispatchBind's own resolution; the AI-11 subject-fence already ran in the
+		// bind before Handle is called) and decide via the SAME sandbox OrderSelect table.
+		orderJSON, ok := firstDispatchedOrder(requestFHIR)
+		if !ok {
+			return LegResult{Status: http.StatusBadRequest, Message: "dispatched order not resolvable"}, nil
+		}
+		_, code, _, err := shnsdk.ParseOrderProductCoding(orderJSON)
+		if err != nil {
+			return LegResult{Status: http.StatusBadRequest, Message: "parse order product coding failed"}, nil
+		}
+		return s.crdDispatchCardsForCode(code)
 	default:
 		return LegResult{}, fmt.Errorf("sandboxResponder: unhandled leg %q", leg)
 	}
+}
+
+// crdDispatchCardsForCode is order-dispatch's sibling of crdCardsForCode: the card is ALWAYS
+// ADVISORY (conditional coverage), never "auth-needed" — originate_homeoxygen.go's handler
+// deliberately gates on cov.NeedsDTR(), not cov.PARequired(), because the real verdict for this
+// leg is the downstream conditional-coverage A4-pended->A1 PAS resolution, not the CRD card
+// itself. DEF-4 holds (deterministic sandbox policy, not real medical-necessity adjudication).
+func (s *sandboxResponder) crdDispatchCardsForCode(code string) (LegResult, error) {
+	needsDTR, canonical := s.adj.OrderSelect(code)
+	cov := shnsdk.CardCoverage{Covered: shnsdk.CoveredConditional}
+	if needsDTR {
+		cov.PANeeded, cov.Questionnaires = shnsdk.PANeededConditional, []string{canonical}
+	} else {
+		cov.PANeeded = shnsdk.PANeededNoAuth
+	}
+	cardsJSON, err := shnsdk.BuildCards(cov)
+	if err != nil {
+		return LegResult{}, fmt.Errorf("build dispatch cards: %w", err)
+	}
+	return LegResult{ResponseFHIR: cardsJSON}, nil
 }
