@@ -53,10 +53,11 @@ expected to change shape as their consumer matures:
   return shapes may change in minor releases as the SHN Kit's daemon and the live conformance
   gate exercise it further. Consumers pin exact gateway versions.
 
-- **`fhirseed`** (`Client` and its methods, `CRPrepopLibraries`, `SandboxProviderPersonasBundle`):
-  the partner/Kit FHIR seed loader and baked persona fixture. New in this release and
-  **evolving** — the seed sequence and fixture contents may change in minor releases as the Kit
-  stabilizes its seeding needs. Consumers pin exact gateway versions.
+- **`fhirseed`** (`Client` and its methods, `CRPrepopLibraries`, `SandboxProviderPersonasBundle`,
+  `SandboxLumbarLibrary`, `PutGlobalArtifact`): the partner/Kit FHIR seed loader and baked persona
+  fixture. New in this release and **evolving** — the seed sequence and fixture contents may
+  change in minor releases as the Kit stabilizes its seeding needs. Consumers pin exact gateway
+  versions.
 
 ## Internal seams (not for partner use)
 

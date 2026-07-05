@@ -41,9 +41,9 @@ live SHN Hub.
 ## 1. Prerequisites
 
 - **Docker** (recommended) or a **Go 1.23+ toolchain** to run the binary.
-- **Access to this repository.** It is private; you must be an invited
-  collaborator with a GitHub personal access token (`repo` scope) or an SSH key
-  on your account.
+- **This repository is public** — no account or invite needed to clone it, pull the
+  published Docker image, or `go install` the binary. (§3's sandbox registration is
+  separately invite-gated; see below.)
 - **A target substrate.** This guide uses the preview sandbox at `shn-preview.org`.
   Its discovery endpoint is `https://accounts.shn-preview.org/discovery` — a single
   anchor that resolves every other URL (Hub, Authorization Framework, registrar,
@@ -71,16 +71,12 @@ You should get a JSON descriptor listing `endpoints`, `sandboxResponders`, and
 
 ## 2. Install the gateway
 
-Set `GOPRIVATE` so the Go toolchain does not attempt the public proxy for this
-private module, and make sure your Git client can authenticate to GitHub:
-
-```sh
-export GOPRIVATE=github.com/SmartHealthNetwork/shn-gateway
-```
+Both the module and its `cmd/gateway@vX.Y.Z` tags resolve from the standard Go
+proxy — no special network configuration needed. (If you have `GOPRIVATE` set
+from an earlier private-repo setup, it is harmless to leave in place.)
 
 **Option A — Docker image (recommended).** Clone this repository and build the
-standalone image (build context is this module; the public `shn-sdk` resolves
-from the standard Go proxy):
+standalone image:
 
 ```sh
 git clone https://github.com/SmartHealthNetwork/shn-gateway.git
@@ -557,6 +553,25 @@ server) — the same SDC contract, populated centrally (DTR-as-a-service). Eithe
 the engine keeps authority: the populated `QuestionnaireResponse` is fenced to the
 member it was populated for — a response about a different patient is rejected before
 it can reach PAS — then sealed and audited like any other leg.
+
+**Pointing native DTR at the sandbox lumbar-MRI questionnaire.** The sandbox
+questionnaire's `cqf-library` extension names a CQL Library your `$populate` engine
+must be able to resolve, or population fails with "Could not load source for library
+LumbarMRICQL". Install it into the engine's `DEFAULT` partition once before pointing
+`PROVIDER_DTR_POPULATE_URL` at it — either call `fhirseed.PutGlobalArtifact` with the
+bytes from `fhirseed.SandboxLumbarLibrary()`, or PUT them directly:
+
+```go
+lib, err := fhirseed.SandboxLumbarLibrary()
+// ...
+err = fhirseed.PutGlobalArtifact(ctx, "https://your-engine/fhir/DEFAULT", validator, "Library", "LumbarMRICQL", lib)
+```
+
+```sh
+curl -X PUT -H 'Content-Type: application/fhir+json' \
+  --data-binary @lumbar-library.json \
+  https://your-engine/fhir/DEFAULT/Library/LumbarMRICQL
+```
 
 ### Durable claim state
 
