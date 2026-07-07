@@ -25,12 +25,13 @@ For a legacy/non-FHIR backend (HL7v2, X12, SQL, SOAP), implement the
    `ResolvePatient` must derive the PCI via `shnsdk.ResolvePCI(member, birthDate, family)`
    (AI-5) — do not invent your own subject identifier.
 3. Wire your connector in **either** of two identical-seam ways:
-   - **Edit the selection** in `gateway/app/app.go` (the `if cfg.FHIRDataURL == ""` `sor`/`store` assignment in `build()`), or
+   - **Edit the selection** in `app/app.go` (the `if cfg.FHIRDataURL == ""` `sor`/`store` assignment in `build()`), or
    - **Construct the engine directly** in your own `main`:
      `engine.New(engine.Config{Role: ..., SoR: yourconnector.New(...), ...}).Handler()`.
 
-Both wire the same already-public seam `engine.Config.SoR`. The automated proof that this
-seam is genuinely overridable lives in `test/tier3override`.
+Both wire the same already-public seam `engine.Config.SoR`. An automated override test
+proves the seam is genuinely overridable — it injects this scaffold as the provider
+`SystemOfRecord` and asserts the scaffold's own clinical data surfaces end-to-end.
 
 ## Why this scaffold is not config-selectable
 

@@ -77,7 +77,7 @@ and the PAS pair to native or the sandbox fallback depending on the switch. This
 not a partner contract. They will graduate to `connectors/davinci` when
 `LegResponder` is promoted to `shnsdk`.
 
-As of the P4 native-Da-Vinci-interop slice, the native-forward CRD leg
+The native-forward CRD leg
 **normalizes a real partner RI's `coverage-information`** (`normalizeCRDCoverage`,
 the split `covered`/`paNeeded`/`questionnaires[]`/`satisfiedPaId` shape → the
 `shnsdk.CardCoverage` canonical, fail-closed) and **discovers the order-select CDS
@@ -101,9 +101,9 @@ config-only drop-in when that slice lands. `Populator` follows `LegResponder` to
 `connectors/` and eventually `shnsdk` once the shape is proven stable across
 backends.
 
-No test-only exported shim was added for the DTR package extractor — the §8.3
+No test-only exported shim was added for the DTR package extractor — the
 anti-circularity proof (`TestExtractQuestionnaireFromPackage_ReturnsVerbatimAndDropsDeps`)
-runs in-package (`gateway/engine`) against the unexported `extractQuestionnaireFromPackage`
+runs in-package (`engine`) against the unexported `extractQuestionnaireFromPackage`
 function, so the extractor is never exposed beyond its single production call site in
 `originate.go` (the consumer, in-package). The `dtr-questionnaire-fetch` leg's
 `ResponseFHIR` is the full `$questionnaire-package` collection Bundle: the sandbox path

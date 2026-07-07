@@ -87,7 +87,7 @@ docker build -t shn-gateway .
 **Option B — Go binary:**
 
 ```sh
-go install github.com/SmartHealthNetwork/shn-gateway/cmd/gateway@v0.2.0
+go install github.com/SmartHealthNetwork/shn-gateway/cmd/gateway@latest
 ```
 
 The image runs as a non-root user (uid/gid 65532, distroless) — see
@@ -510,6 +510,7 @@ required when `PAYER_DAVINCI_PAS_NATIVE=true` — `build()` fails at startup oth
 | Env var | Description |
 |---|---|
 | `PAYER_DAVINCI_BASE_URL` | Base URL of the partner Da Vinci payer (e.g. `https://api.payer.example/davinci`). Setting this enables native-forward mode. |
+| `PAYER_DAVINCI_CDS_BASE_URL` | Base URL for the partner's CDS Hooks (CRD) posts when they are **not** co-located with the FHIR base — e.g. a payer that serves `/cds-services` at the root but FHIR ops under `/fhir`. Empty ⇒ CDS uses `PAYER_DAVINCI_BASE_URL`. |
 | `PAYER_DAVINCI_TOKEN_URL` | SMART Backend Services token endpoint for the partner. Required if the partner requires authentication. |
 | `PAYER_DAVINCI_CLIENT_ID` | SMART client id for the partner. Required when `PAYER_DAVINCI_TOKEN_URL` is set. |
 | `PAYER_DAVINCI_CLIENT_KEY` | SMART client private key (PEM path or inline PEM). Required when `PAYER_DAVINCI_TOKEN_URL` is set. |
@@ -517,6 +518,10 @@ required when `PAYER_DAVINCI_PAS_NATIVE=true` — `build()` fails at startup oth
 | `PAYER_DAVINCI_SCOPE` | Requested scope. Default `system/*.read`. |
 | `PAYER_DAVINCI_CLIENT_KID` | Key id for the client assertion JWK, if the partner requires it. |
 | `PAYER_DAVINCI_PAS_NATIVE` | `true` to forward PAS submit/update legs to the partner's `/Claim/$submit`. Default `false` (sandbox PAS fallback). Requires a payer Store. |
+| `PAYER_DAVINCI_CRD_SERVICE_ID` | Escape-hatch override for the partner's order-select CDS service id. Empty ⇒ the gateway fetches `{base}/cds-services` at boot and auto-selects the single order-select service (fails closed if none, or ambiguous). Set it when the partner's CRD service isn't uniquely discoverable. |
+| `PAYER_DAVINCI_CRD_HOOK` | CDS Hooks hook value to stamp on the CRD request before forwarding (e.g. a partner whose service expects `order-sign`). Empty ⇒ forward the originator's hook verbatim. |
+| `PAYER_DAVINCI_DISPATCH_SERVICE_ID` | The partner's CDS service id for the `crd-order-dispatch` leg. **Empty ⇒ the dispatch leg fails closed (502)** — set it if your flow uses order-dispatch. |
+| `PAYER_DAVINCI_DISPATCH_HOOK` | CDS Hooks hook value to stamp on the order-dispatch request before forwarding. Empty ⇒ forward the originator's hook verbatim. |
 
 **All-or-nothing rule:** if `PAYER_DAVINCI_TOKEN_URL` is set, then
 `PAYER_DAVINCI_CLIENT_ID`, `PAYER_DAVINCI_CLIENT_KEY`, and

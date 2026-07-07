@@ -31,7 +31,8 @@ at production later, change only `SHN_DISCOVERY_URL`.
 
 ## What runs
 - **validator** — `hapiproject/hapi` with US Core 6.1.0 + Da Vinci CRD/DTR/PAS 2.0.1 +
-  PDex 2.1.0 + SDC 3.0.0 loaded; serves fail-closed per-message `$validate` (FR-G29).
+  PDex 2.1.0 + CDex 2.1.0 + HRex 1.1.0 + SDC 3.0.0 loaded; serves fail-closed per-message
+  `$validate` (FR-G29).
 - **gateway** — the Smart Gateway image; `FHIR_VALIDATE_URL` points at the local sidecar
   by default. Add connector env (`FHIR_DATA_URL`, `PAYER_DAVINCI_*`, `PROVIDER_DTR_*`,
   `SHN_STORE_DATABASE_URL`, …) per the gateway README to reach your own systems; the
