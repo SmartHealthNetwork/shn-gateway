@@ -1,0 +1,58 @@
+# gateway/deploy/eval/payer/compose.eval.payer.yml
+# ┌──────────────────────────────────────────────────────────────────────────┐
+# │ EVALUATION ONLY — NOT A PRODUCTION DEPLOYMENT.                             │
+# │ A payer responder: an SHN gateway (ROLE=payer) that adjudicates all 8     │
+# │ prior-auth UCs by native-forwarding to a co-bundled reference br-payer.   │
+# │ Two-step run: build the br-payer image first (../brpayer/build.sh), then  │
+# │ `docker compose up`. For production use gateway/deploy/bundle/ and point  │
+# │ PAYER_DAVINCI_* at YOUR Da Vinci endpoint (or set a custom Adjudicator);  │
+# │ drop br-payer + validator — they are eval scaffolding. See README.md.     │
+# │ DEPLOY this to a reachable https endpoint — a payer is a Hub-DIALED        │
+# │ responder; a 127.0.0.1 payer can't register or receive Hub traffic.       │
+# └──────────────────────────────────────────────────────────────────────────┘
+services:
+  validator:
+    build: { context: ../hapi }   # reuse the eval-hapi image (US Core + Da Vinci incl PAS 2.0.1)
+    environment:
+      hapi.fhir.tenant_identification_strategy: URL_BASED
+      hapi.fhir.partitioning.partitioning_include_in_search_hashes: "false"
+      hapi.fhir.partitioning.allow_references_across_partitions: "false"
+      hapi.fhir.implementationguides.uscore.packageUrl: file:///packages/hl7.fhir.us.core-6.1.0.tgz
+      hapi.fhir.implementationguides.uscore.name: hl7.fhir.us.core
+      hapi.fhir.implementationguides.uscore.version: "6.1.0"
+      hapi.fhir.implementationguides.pas.packageUrl: file:///packages/hl7.fhir.us.davinci-pas-2.0.1.tgz
+      hapi.fhir.implementationguides.pas.name: hl7.fhir.us.davinci-pas
+      hapi.fhir.implementationguides.pas.version: "2.0.1"
+
+  br-payer:
+    image: br-payer:a8bece4          # built by ../brpayer/build.sh FIRST (image:, not build:)
+    environment:
+      PAS_PENDED_RESOLUTION_DELAY_SECONDS: "3"   # test-speed knob only (fast pend resolution)
+    ports: ["127.0.0.1:8081:8081"]
+
+  gateway:
+    build: { context: ../../.., dockerfile: Dockerfile }   # gateway/Dockerfile (three levels up from payer/)
+    environment:
+      ROLE: payer
+      PORT: "8080"
+      SHN_DISCOVERY_URL: ${SHN_DISCOVERY_URL:-https://accounts.shn-preview.org/discovery}
+      SHN_SECRETS: /etc/shn
+      # /fhir/DEFAULT, not /fhir/payer: this bundle has no seed/partition-create step, and
+      # HAPI's URL_BASED partitioning only auto-serves the DEFAULT partition — a named
+      # "payer" partition 404s until $partition-management-create-partition has run
+      # (see gateway/cmd/evalseed/steps.go's CreatePartitions, which this bundle doesn't run).
+      FHIR_VALIDATE_URL: http://validator:8080/fhir/DEFAULT
+      # Native-forward decisioning to the co-bundled br-payer (unauthenticated loopback).
+      PAYER_DAVINCI_BASE_URL: http://br-payer:8081/fhir
+      PAYER_DAVINCI_CDS_BASE_URL: http://br-payer:8081
+      PAYER_DAVINCI_CRD_SERVICE_ID: order-sign-crd
+      PAYER_DAVINCI_CRD_HOOK: order-sign
+      PAYER_DAVINCI_DISPATCH_SERVICE_ID: order-dispatch-crd
+      PAYER_DAVINCI_DISPATCH_HOOK: order-dispatch
+      PAYER_DAVINCI_PAS_NATIVE: "true"
+    volumes:
+      - ${SHN_SECRETS:?set SHN_SECRETS to your shn register --role payer bundle dir}:/etc/shn:ro
+    ports: ["127.0.0.1:8085:8080"]
+    depends_on:
+      br-payer: { condition: service_started }
+      validator: { condition: service_started }

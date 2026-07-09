@@ -14,6 +14,8 @@ A published version tag is **never re-tagged** with different content. The Go
 module proxy caches a tag's tree permanently; always bump to a new version
 rather than moving an existing tag.
 
+This gateway currently requires `shn-sdk v0.26.0` (see `go.mod`).
+
 ## Supported seams
 
 Partners may depend on the following packages across minor versions (breaking
@@ -61,61 +63,18 @@ expected to change shape as their consumer matures:
 
 ## Internal seams (not for partner use)
 
-`engine.LegResponder` is the gateway's internal payer-content seam (FHIR-in /
-FHIR-out). It is **unstable**: it may change in any 0.x minor version without
-notice. Partners who need to customize payer decisions should inject a custom
-`engine.Config.Adjudicator`; the engine derives the internal `LegResponder` from
-it automatically. `LegResponder` will be promoted to `shnsdk` once its shape has
-stabilized across both the native-forward and managed connector families; until
-then it is gateway-internal only.
+Everything under `engine.*` beyond the supported seams listed above — including
+`engine.LegResponder`, `engine.NewNativeResponder`, `engine.Populator`, and their
+helper functions and types — is gateway-internal and **unstable**: it may change
+in any 0.x minor version without notice, and none of it is a published `shn-sdk`
+contract. Partners should not import or depend on these directly.
 
-`engine.NewNativeResponder` is the native-forward Da Vinci forwarder; it handles
-the read-only legs and — when `PAYER_DAVINCI_PAS_NATIVE=true` — the PAS legs too
-(submit/update forwarded to the partner's `/Claim/$submit`). It is an internal
-`LegResponder` 0.x seam. The composite Responder routes read-only legs to native
-and the PAS pair to native or the sandbox fallback depending on the switch. This is
-not a partner contract. They will graduate to `connectors/davinci` when
-`LegResponder` is promoted to `shnsdk`.
-
-The native-forward CRD leg
-**normalizes a real partner RI's `coverage-information`** (`normalizeCRDCoverage`,
-the split `covered`/`paNeeded`/`questionnaires[]`/`satisfiedPaId` shape → the
-`shnsdk.CardCoverage` canonical, fail-closed) and **discovers the order-select CDS
-service id** from the partner's `/cds-services` (`DiscoverCRDServiceID`, override →
-unique-service → fail-closed); the PAS leg normalizes the partner's `$submit`
-response Bundle via a content discriminator (`normalizePASResponse`). These map a
-real RI's **response** vocabulary; the **request** direction (a conformant CDS Hooks
-order-select with the payer's prefetch resolved-and-inlined) is a provider-side
-follow-on slice, not a payer-edge concern. The widened `shnsdk.CardCoverage` card
-contract is a **breaking** `shn-sdk` change shipped in **v0.10.0** (see the SDK
-changelog); this gateway requires `shn-sdk v0.10.0`.
-
-`engine.Populator` is the gateway-internal provider-side DTR population seam
-(FHIR-in / QuestionnaireResponse-out). It is a **0.x internal seam** and is NOT
-a published `shn-sdk` contract this slice. Two backends exist: **managed** (wraps
-the existing `FillQuestionnaire` — the sandbox/demo green-keeper, not a general
-legacy fallback) and **native** (forward to a provider's SDC
-`Questionnaire/$populate` endpoint, selected by `PROVIDER_DTR_NATIVE` +
-`PROVIDER_DTR_POPULATE_URL`). A third backend (operated CQL engine) is a
-config-only drop-in when that slice lands. `Populator` follows `LegResponder` to
-`connectors/` and eventually `shnsdk` once the shape is proven stable across
-backends.
-
-No test-only exported shim was added for the DTR package extractor — the
-anti-circularity proof (`TestExtractQuestionnaireFromPackage_ReturnsVerbatimAndDropsDeps`)
-runs in-package (`engine`) against the unexported `extractQuestionnaireFromPackage`
-function, so the extractor is never exposed beyond its single production call site in
-`originate.go` (the consumer, in-package). The `dtr-questionnaire-fetch` leg's
-`ResponseFHIR` is the full `$questionnaire-package` collection Bundle: the sandbox path
-wraps via `buildQuestionnairePackage`; the native path forwards the partner's package
-verbatim. The consumer (`originate.go`) extracts the bare Questionnaire for F5/auto-fill;
-the dependent Libraries/ValueSets survive the wire intact inside the Bundle.
-
-The exported `engine.ParseCoverageEligibilityResponsePatient` /
-`engine.ParsePASResponsePatients` FHIR-subject readers (used by the outbound
-patient fence) are part of the same internal seam — exported only so the
-substrate's adversarial tests can drive them, **not** a partner contract. They
-promote to `shnsdk` with `LegResponder`.
+To customize partner behavior, use the stable public seams instead: inject a
+custom `engine.Config.Adjudicator` to control payer decisions, and build against
+the published `shnsdk` types for wire data — never the internal `engine.*`
+equivalents. Internal seams are promoted to `shnsdk` once their shape has proven
+stable; until then, treat them as an implementation detail that may disappear or
+change shape without notice.
 
 ## Unsupported internals
 
@@ -128,4 +87,4 @@ directly.
 The **`shn-sdk` wire vectors** and the **SHN Participant Protocol
 specification** (published with `shn-sdk`) are the conformance contract across
 gateway versions. A gateway that passes the wire-vector suite is conformant
-with the substrate protocol regardless of the gateway version it runs.
+with the SHN exchange protocol regardless of the gateway version it runs.

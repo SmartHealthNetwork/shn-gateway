@@ -1,0 +1,116 @@
+# gateway/deploy/eval/compose.eval.yml
+# ┌──────────────────────────────────────────────────────────────────────────┐
+# │ EVALUATION ONLY — NOT A PRODUCTION DEPLOYMENT.                             │
+# │ Ships a synthetic-seeded HAPI + a reference Da Vinci RI so you can watch   │
+# │ all 8 prior-auth UCs run end to end. Two-step run: build the br-provider   │
+# │ image first (brprovider/build.sh), then `docker compose up`.               │
+# │ For production use gateway/deploy/bundle/ and point FHIR_DATA_URL /        │
+# │ PROVIDER_DTR_POPULATE_URL at YOUR systems — see README.md "Production      │
+# │ cutover". Drop hapi/br-provider/certs; they are eval scaffolding.          │
+# └──────────────────────────────────────────────────────────────────────────┘
+volumes: { certs: {}, config: {} }
+services:
+  hapi:
+    build: { context: ./hapi }
+    environment:
+      hapi.fhir.implementationguides.uscore.packageUrl: file:///packages/hl7.fhir.us.core-6.1.0.tgz
+      hapi.fhir.implementationguides.uscore.name: hl7.fhir.us.core
+      hapi.fhir.implementationguides.uscore.version: "6.1.0"
+      hapi.fhir.implementationguides.cdex.packageUrl: file:///packages/hl7.fhir.us.davinci-cdex-2.1.0.tgz
+      hapi.fhir.implementationguides.cdex.name: hl7.fhir.us.davinci-cdex
+      hapi.fhir.implementationguides.cdex.version: "2.1.0"
+      hapi.fhir.implementationguides.hrex.packageUrl: file:///packages/hl7.fhir.us.davinci-hrex-1.1.0.tgz
+      hapi.fhir.implementationguides.hrex.name: hl7.fhir.us.davinci-hrex
+      hapi.fhir.implementationguides.hrex.version: "1.1.0"
+      hapi.fhir.implementationguides.pas.packageUrl: file:///packages/hl7.fhir.us.davinci-pas-2.0.1.tgz
+      hapi.fhir.implementationguides.pas.name: hl7.fhir.us.davinci-pas
+      hapi.fhir.implementationguides.pas.version: "2.0.1"
+      hapi.fhir.tenant_identification_strategy: URL_BASED
+      hapi.fhir.partitioning.partitioning_include_in_search_hashes: "false"
+      hapi.fhir.partitioning.allow_references_across_partitions: "false"
+      hapi.fhir.cr.enabled: "true"
+
+  gencerts:
+    image: alpine/openssl
+    entrypoint: ["/bin/sh", "/gencerts.sh"]
+    environment: { SECRETS: /secrets, BRPROVIDER_CLIENT_ID: http://br-provider:8080 }
+    volumes:
+      - ./brprovider/gencerts.sh:/gencerts.sh:ro
+      - certs:/secrets
+    restart: "no"
+
+  seed:
+    build: { context: ../.., dockerfile: Dockerfile.evalseed }
+    command: ["--base", "http://hapi:8080/fhir"]
+    depends_on: { hapi: { condition: service_started } }
+    restart: "no"
+
+  # Templates payer-directory.json into the shared `config` volume from PAYER_HOLDER_ID
+  # (one bundle serves both self-tests): unset reproduces the committed
+  # payer-directory.json default (conformance-payer, for provider self-eval); set routes
+  # payor 00001 to YOUR payer holder for a payer self-test.
+  payerdir:
+    image: alpine
+    entrypoint: ["/bin/sh", "/payerdir-init.sh"]
+    environment:
+      OUT: /config/payer-directory.json
+      PAYER_HOLDER_ID: ${PAYER_HOLDER_ID:-}
+    volumes:
+      - ./payerdir-init.sh:/payerdir-init.sh:ro
+      - config:/config
+    restart: "no"
+
+  gateway:
+    build: { context: ../.., dockerfile: Dockerfile }
+    environment:
+      ROLE: provider
+      PORT: "8080"
+      ORIGINATION_PROFILE: provider-data
+      SHN_DISCOVERY_URL: ${SHN_DISCOVERY_URL:-https://accounts.shn-preview.org/discovery}
+      SHN_SECRETS: /etc/shn
+      PAYER_DIRECTORY: /etc/shn-config/payer-directory.json
+      FHIR_VALIDATE_URL: http://hapi:8080/fhir/provider
+      FHIR_DATA_URL: http://hapi:8080/fhir/provider
+      PROVIDER_DTR_NATIVE: "true"
+      PROVIDER_DTR_POPULATE_URL: http://hapi:8080/fhir/provider/Questionnaire/$$populate
+      PROVIDER_DAVINCI_INGRESS: "1"
+      PROVIDER_DAVINCI_INGRESS_BASE_URL: http://gateway:8080
+      INGRESS_CLIENTS_FILE: /secrets/ingress-clients.json
+    volumes:
+      - ${SHN_SECRETS:?set SHN_SECRETS to your shn register bundle dir}:/etc/shn:ro
+      # payer-directory.json is no longer bind-mounted directly (see the committed
+      # ./payer-directory.json — kept as documentation of the default row only); the
+      # `payerdir` init templates the live file into the shared `config` volume instead.
+      - config:/etc/shn-config:ro
+      - certs:/secrets:ro
+    ports: ["127.0.0.1:8080:8080"]
+    depends_on:
+      seed: { condition: service_completed_successfully }
+      gencerts: { condition: service_completed_successfully }
+      payerdir: { condition: service_completed_successfully }
+
+  br-provider:
+    image: br-provider:43a4806          # built by brprovider/build.sh FIRST (image:, not build:)
+    environment:
+      APP_PAYER_SERVERS_0_CDS_URL: http://gateway:8080/cds-services   # container port, not host
+      APP_PAYER_SERVERS_0_FHIR_URL: http://gateway:8080
+      # SSRF allowlist: br-provider's BFF OutboundTargetValidator blocks Docker site-local
+      # hosts unless allow-listed, else the CDS/DTR relay 400s "Target host resolves to a
+      # local or non-public address". The five hosts the eval topology reaches are listed
+      # below. Spring binds indexed props wholesale, so all required hosts must be listed
+      # here — a partial list drops the app defaults.
+      SECURITY_ALLOWEDLOCALHOSTS_0: localhost
+      SECURITY_ALLOWEDLOCALHOSTS_1: 127.0.0.1
+      SECURITY_ALLOWEDLOCALHOSTS_2: "[::1]"
+      SECURITY_ALLOWEDLOCALHOSTS_3: host.docker.internal
+      SECURITY_ALLOWEDLOCALHOSTS_4: gateway
+      SECURITY_EXTERNAL_BASE_URL: http://br-provider:8080              # == ingress client_id
+      SECURITY_CERT_FILE: /secrets/provider-cert.pfx
+      SECURITY_CERT_PASSWORD: udap-test
+      SECURITY_FETCH_CERT: "false"
+    volumes:
+      - certs:/secrets:ro
+    ports: ["127.0.0.1:8082:8080"]
+    depends_on:
+      gateway: { condition: service_started }
+      gencerts: { condition: service_completed_successfully }

@@ -20,7 +20,7 @@ import (
 //     auth check on this call — it never touches the outbound JWT the BFF signs and sends on.
 //
 //  2. DTR-fetch and PAS-submit are DIRECT-MINT bearer calls straight to the ingress, not routed
-//     through the BFF (Gap A / D-2RI-4): the BFF's DTR/PAS proxy controllers authenticate with
+//     through the BFF (Gap A): the BFF's DTR/PAS proxy controllers authenticate with
 //     UDAP B2B client_credentials, which the SHN ingress cannot satisfy (it hosts no
 //     /.well-known/udap), so those calls 401 through the BFF. The Driver's existing
 //     PostQuestionnairePackage/SubmitPAS transport (Config.Key, faithful direct bearer) carries
