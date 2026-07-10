@@ -17,6 +17,7 @@ below, see [CONFIGURATION.md](CONFIGURATION.md).
 - [Native-forward payer mode](#native-forward-payer-mode)
 - [Provider DTR population](#provider-dtr-population)
 - [Durable claim state](#durable-claim-state)
+- [Seed your own FHIR server](#seed-your-own-fhir-server)
 
 ---
 
@@ -154,3 +155,41 @@ it can reach PAS — then sealed and audited like any other leg.
 Set `SHN_STORE_DATABASE_URL` to a Postgres DSN to persist in-flight
 (pended/resumable) claim state across restarts and replicas, instead of the
 default in-memory store.
+
+## Seed your own FHIR server
+
+To exercise the gateway against your own FHIR server, seed it with the same
+synthetic personas the SHN reference payer recognizes. Two bundles are shipped
+as ready-to-POST FHIR transaction Bundles:
+
+- **`seed/provider-personas.json`** — plain-EHR (provider-data) personas:
+  self-contained clinical records (Patient, Coverage, Condition, DeviceRequest,
+  Observations) for the plain-EHR flows.
+- **`seed/conformant-personas.json`** — the conformant-lane Patient roster
+  (members `MBR-COVERED`, `MBR-NOTCOVERED`, `MBR-UC06`, `MBR-UC07HCPCS`, `MBR-UC08`).
+
+Load either with a single transaction POST to your FHIR base (run from the repo root):
+
+    curl -X POST -H "Content-Type: application/fhir+json" \
+      --data-binary @seed/provider-personas.json \
+      https://your-fhir-server/fhir
+
+The reference payer recognizes **only** the member ids in these bundles; a request
+for any other member is rejected by the gateway as an unknown member.
+
+### Keep the provider-data Observations recent
+
+The provider-data bundle's Observations carry fixed dates. One flow (home-oxygen
+DTR pre-population) reads clinical Observations from the last three months, so a
+long-committed file can age out. Refresh the dates to "now" before loading:
+
+    jq --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      '(.entry[].resource | select(.resourceType=="Observation")).effectiveDateTime = $now' \
+      seed/provider-personas.json > provider-personas.fresh.json
+
+Then POST `provider-personas.fresh.json`. The conformant bundle is Patient-only
+(no dated resources) and needs no refresh.
+
+> DTR questionnaire pre-population runs on SHN's operated CQL engine, so your
+> server needs only this data. Running native DTR `$populate` on your own server
+> would additionally require the CQL libraries — a later, advanced setup.

@@ -1,0 +1,2036 @@
+{
+  "entry": [
+    {
+      "fullUrl": "Patient/MBR-PD-UC02",
+      "resource": {
+        "resourceType": "Patient",
+        "id": "MBR-PD-UC02",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "value": "MBR-PD-UC02"
+          }
+        ],
+        "name": [
+          {
+            "family": "Bergstrom-HospitalBed"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1953-09-17"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/MBR-PD-UC02"
+      }
+    },
+    {
+      "fullUrl": "Organization/org-cms-payer",
+      "resource": {
+        "resourceType": "Organization",
+        "id": "org-cms-payer",
+        "name": "Centers for Medicare \u0026 Medicaid Services",
+        "identifier": [
+          {
+            "use": "official",
+            "system": "urn:oid:2.16.840.1.113883.6.300",
+            "value": "00001"
+          }
+        ],
+        "type": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/organization-role",
+                "code": "payer"
+              }
+            ]
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Organization/org-cms-payer"
+      }
+    },
+    {
+      "fullUrl": "Coverage/cov-mbrpduc02",
+      "resource": {
+        "resourceType": "Coverage",
+        "id": "cov-mbrpduc02",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage"
+          ]
+        },
+        "status": "active",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:coverage",
+            "value": "MBR-PD-UC02"
+          }
+        ],
+        "beneficiary": {
+          "reference": "Patient/MBR-PD-UC02"
+        },
+        "relationship": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+              "code": "self"
+            }
+          ]
+        },
+        "payor": [
+          {
+            "reference": "Organization/org-cms-payer"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Coverage/cov-mbrpduc02"
+      }
+    },
+    {
+      "fullUrl": "DeviceRequest/dr-mbrpduc02-e0250",
+      "resource": {
+        "resourceType": "DeviceRequest",
+        "id": "dr-mbrpduc02-e0250",
+        "status": "active",
+        "intent": "order",
+        "codeCodeableConcept": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "E0250",
+              "display": "Hospital bed fixed height with side rails and mattress"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/MBR-PD-UC02"
+        },
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "M62.81",
+                "display": "Muscle weakness (generalized)"
+              }
+            ],
+            "text": "Generalized muscle weakness (a faithful hospital-bed indication). LOAD-BEARING reasonCode: br-payer keys Documentation Required on exists(DeviceRequest.reasonCode), and HospitalBeds attaches its DTR questionnaire only when Documentation Required=true — this reason (a real hospital-bed order carries one; persona SELECTION, not field-tuning) is what makes UC-02 no-DTR."
+          }
+        ],
+        "authoredOn": "2026-06-20"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "DeviceRequest/dr-mbrpduc02-e0250"
+      }
+    },
+    {
+      "fullUrl": "Patient/MBR-PD-UC02-PB",
+      "resource": {
+        "resourceType": "Patient",
+        "id": "MBR-PD-UC02-PB",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "value": "MBR-PD-UC02-PB"
+          }
+        ],
+        "name": [
+          {
+            "family": "Bergstrom-HospitalBed-PayerB"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1953-09-17"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/MBR-PD-UC02-PB"
+      }
+    },
+    {
+      "fullUrl": "Organization/org-payerb",
+      "resource": {
+        "resourceType": "Organization",
+        "id": "org-payerb",
+        "name": "Second Payer (Test)",
+        "identifier": [
+          {
+            "use": "official",
+            "system": "urn:oid:2.16.840.1.113883.6.300",
+            "value": "00078"
+          }
+        ],
+        "type": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/organization-role",
+                "code": "payer"
+              }
+            ]
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Organization/org-payerb"
+      }
+    },
+    {
+      "fullUrl": "Coverage/cov-mbrpduc02pb",
+      "resource": {
+        "resourceType": "Coverage",
+        "id": "cov-mbrpduc02pb",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage"
+          ]
+        },
+        "status": "active",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:coverage",
+            "value": "MBR-PD-UC02-PB"
+          }
+        ],
+        "beneficiary": {
+          "reference": "Patient/MBR-PD-UC02-PB"
+        },
+        "relationship": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+              "code": "self"
+            }
+          ]
+        },
+        "payor": [
+          {
+            "reference": "Organization/org-payerb"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Coverage/cov-mbrpduc02pb"
+      }
+    },
+    {
+      "fullUrl": "DeviceRequest/dr-mbrpduc02pb-e0250",
+      "resource": {
+        "resourceType": "DeviceRequest",
+        "id": "dr-mbrpduc02pb-e0250",
+        "status": "active",
+        "intent": "order",
+        "codeCodeableConcept": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "E0250",
+              "display": "Hospital bed fixed height with side rails and mattress"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/MBR-PD-UC02-PB"
+        },
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "M62.81",
+                "display": "Muscle weakness (generalized)"
+              }
+            ],
+            "text": "Generalized muscle weakness (a faithful hospital-bed indication). LOAD-BEARING reasonCode: br-payer keys Documentation Required on exists(DeviceRequest.reasonCode), and HospitalBeds attaches its DTR questionnaire only when Documentation Required=true — this reason (a real hospital-bed order carries one; persona SELECTION, not field-tuning) is what makes UC-02 no-DTR."
+          }
+        ],
+        "authoredOn": "2026-06-20"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "DeviceRequest/dr-mbrpduc02pb-e0250"
+      }
+    },
+    {
+      "fullUrl": "Patient/MBR-PD-UC03",
+      "resource": {
+        "resourceType": "Patient",
+        "id": "MBR-PD-UC03",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "value": "MBR-PD-UC03"
+          }
+        ],
+        "name": [
+          {
+            "family": "Diallo-OxygenConcentrator"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1956-04-09"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/MBR-PD-UC03"
+      }
+    },
+    {
+      "fullUrl": "Coverage/cov-mbrpduc03",
+      "resource": {
+        "resourceType": "Coverage",
+        "id": "cov-mbrpduc03",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage"
+          ]
+        },
+        "status": "active",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:coverage",
+            "value": "MBR-PD-UC03"
+          }
+        ],
+        "beneficiary": {
+          "reference": "Patient/MBR-PD-UC03"
+        },
+        "relationship": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+              "code": "self"
+            }
+          ]
+        },
+        "payor": [
+          {
+            "reference": "Organization/org-cms-payer"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Coverage/cov-mbrpduc03"
+      }
+    },
+    {
+      "fullUrl": "Condition/cond-mbrpduc03-j449",
+      "resource": {
+        "resourceType": "Condition",
+        "id": "cond-mbrpduc03-j449",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-condition-problems-health-concerns"
+          ]
+        },
+        "clinicalStatus": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/condition-clinical",
+              "code": "active",
+              "display": "Active"
+            }
+          ]
+        },
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/condition-category",
+                "code": "problem-list-item",
+                "display": "Problem List Item"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://hl7.org/fhir/sid/icd-10-cm",
+              "code": "J44.9",
+              "display": "Chronic obstructive pulmonary disease, unspecified"
+            }
+          ],
+          "text": "Chronic obstructive pulmonary disease, unspecified"
+        },
+        "subject": {
+          "reference": "Patient/MBR-PD-UC03"
+        }
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Condition/cond-mbrpduc03-j449"
+      }
+    },
+    {
+      "fullUrl": "Observation/obs-mbrpduc03-pulseox",
+      "resource": {
+        "resourceType": "Observation",
+        "id": "obs-mbrpduc03-pulseox",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-clinical-result"
+          ]
+        },
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "exam",
+                "display": "Exam"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://loinc.org",
+              "code": "59408-5",
+              "display": "Oxygen saturation in Arterial blood by Pulse oximetry"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/MBR-PD-UC03"
+        },
+        "effectiveDateTime": "2026-06-28T12:00:00Z",
+        "valueQuantity": {
+          "value": 87,
+          "unit": "%",
+          "system": "http://unitsofmeasure.org",
+          "code": "%"
+        }
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Observation/obs-mbrpduc03-pulseox"
+      }
+    },
+    {
+      "fullUrl": "Observation/obs-mbrpduc03-pao2",
+      "resource": {
+        "resourceType": "Observation",
+        "id": "obs-mbrpduc03-pao2",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-clinical-result"
+          ]
+        },
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "exam",
+                "display": "Exam"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://loinc.org",
+              "code": "2703-7",
+              "display": "Oxygen [Partial pressure] in Arterial blood"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/MBR-PD-UC03"
+        },
+        "effectiveDateTime": "2026-06-28T12:00:00Z",
+        "valueQuantity": {
+          "value": 53,
+          "unit": "mm[Hg]",
+          "system": "http://unitsofmeasure.org",
+          "code": "mm[Hg]"
+        }
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Observation/obs-mbrpduc03-pao2"
+      }
+    },
+    {
+      "fullUrl": "Organization/org-dme-mbrpduc03",
+      "resource": {
+        "resourceType": "Organization",
+        "id": "org-dme-mbrpduc03",
+        "name": "Riverside Respiratory Supply (Non-Contracted)",
+        "identifier": [
+          {
+            "system": "http://hl7.org/fhir/sid/us-npi",
+            "value": "1733445566"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Organization/org-dme-mbrpduc03"
+      }
+    },
+    {
+      "fullUrl": "DeviceRequest/dr-mbrpduc03-e1390",
+      "resource": {
+        "resourceType": "DeviceRequest",
+        "id": "dr-mbrpduc03-e1390",
+        "status": "active",
+        "intent": "order",
+        "codeCodeableConcept": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "E1390",
+              "display": "Oxygen concentrator, single delivery port"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/MBR-PD-UC03"
+        },
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "J44.9",
+                "display": "Chronic obstructive pulmonary disease, unspecified"
+              }
+            ],
+            "text": "Chronic obstructive pulmonary disease, unspecified"
+          }
+        ],
+        "performer": {
+          "reference": "Organization/org-dme-mbrpduc03"
+        }
+      },
+      "request": {
+        "method": "PUT",
+        "url": "DeviceRequest/dr-mbrpduc03-e1390"
+      }
+    },
+    {
+      "fullUrl": "Patient/MBR-PD-UC04",
+      "resource": {
+        "resourceType": "Patient",
+        "id": "MBR-PD-UC04",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "value": "MBR-PD-UC04"
+          }
+        ],
+        "name": [
+          {
+            "family": "Castellano-HomeHealth"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1949-03-22"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/MBR-PD-UC04"
+      }
+    },
+    {
+      "fullUrl": "Coverage/cov-mbrpduc04",
+      "resource": {
+        "resourceType": "Coverage",
+        "id": "cov-mbrpduc04",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage"
+          ]
+        },
+        "status": "active",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:coverage",
+            "value": "MBR-PD-UC04"
+          }
+        ],
+        "beneficiary": {
+          "reference": "Patient/MBR-PD-UC04"
+        },
+        "relationship": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+              "code": "self"
+            }
+          ]
+        },
+        "payor": [
+          {
+            "reference": "Organization/org-cms-payer"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Coverage/cov-mbrpduc04"
+      }
+    },
+    {
+      "fullUrl": "Condition/cond-mbrpduc04-i639",
+      "resource": {
+        "resourceType": "Condition",
+        "id": "cond-mbrpduc04-i639",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-condition-problems-health-concerns"
+          ]
+        },
+        "clinicalStatus": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/condition-clinical",
+              "code": "active",
+              "display": "Active"
+            }
+          ]
+        },
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/condition-category",
+                "code": "problem-list-item",
+                "display": "Problem List Item"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://hl7.org/fhir/sid/icd-10-cm",
+              "code": "I63.9",
+              "display": "Cerebral infarction, unspecified"
+            }
+          ],
+          "text": "Cerebral infarction"
+        },
+        "subject": {
+          "reference": "Patient/MBR-PD-UC04"
+        }
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Condition/cond-mbrpduc04-i639"
+      }
+    },
+    {
+      "fullUrl": "ServiceRequest/sr-mbrpduc04-g0151",
+      "resource": {
+        "resourceType": "ServiceRequest",
+        "id": "sr-mbrpduc04-g0151",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-servicerequest"
+          ]
+        },
+        "status": "active",
+        "intent": "order",
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "G0151",
+              "display": "Services of a qualified physical therapist in the home health setting, each 15 minutes"
+            }
+          ],
+          "text": "Services of a qualified physical therapist in the home health setting"
+        },
+        "subject": {
+          "reference": "Patient/MBR-PD-UC04"
+        },
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "I63.9",
+                "display": "Cerebral infarction"
+              }
+            ],
+            "text": "Cerebral infarction"
+          }
+        ],
+        "reasonReference": [
+          {
+            "reference": "Condition/cond-mbrpduc04-i639"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ServiceRequest/sr-mbrpduc04-g0151"
+      }
+    },
+    {
+      "fullUrl": "Patient/MBR-OX",
+      "resource": {
+        "resourceType": "Patient",
+        "id": "MBR-OX",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "value": "MBR-OX"
+          }
+        ],
+        "name": [
+          {
+            "family": "Okafor-Oxygen"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1958-07-14"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/MBR-OX"
+      }
+    },
+    {
+      "fullUrl": "Coverage/cov-mbrox",
+      "resource": {
+        "resourceType": "Coverage",
+        "id": "cov-mbrox",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage"
+          ]
+        },
+        "status": "active",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:coverage",
+            "value": "MBR-OX"
+          }
+        ],
+        "beneficiary": {
+          "reference": "Patient/MBR-OX"
+        },
+        "relationship": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+              "code": "self"
+            }
+          ]
+        },
+        "payor": [
+          {
+            "reference": "Organization/org-cms-payer"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Coverage/cov-mbrox"
+      }
+    },
+    {
+      "fullUrl": "Condition/cond-mbrox-j449",
+      "resource": {
+        "resourceType": "Condition",
+        "id": "cond-mbrox-j449",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-condition-problems-health-concerns"
+          ]
+        },
+        "clinicalStatus": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/condition-clinical",
+              "code": "active",
+              "display": "Active"
+            }
+          ]
+        },
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/condition-category",
+                "code": "problem-list-item",
+                "display": "Problem List Item"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://hl7.org/fhir/sid/icd-10-cm",
+              "code": "J44.9",
+              "display": "Chronic obstructive pulmonary disease, unspecified"
+            }
+          ],
+          "text": "Chronic obstructive pulmonary disease, unspecified"
+        },
+        "subject": {
+          "reference": "Patient/MBR-OX"
+        }
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Condition/cond-mbrox-j449"
+      }
+    },
+    {
+      "fullUrl": "Observation/obs-mbrox-pulseox",
+      "resource": {
+        "resourceType": "Observation",
+        "id": "obs-mbrox-pulseox",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-clinical-result"
+          ]
+        },
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "exam",
+                "display": "Exam"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://loinc.org",
+              "code": "59408-5",
+              "display": "Oxygen saturation in Arterial blood by Pulse oximetry"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/MBR-OX"
+        },
+        "effectiveDateTime": "2026-06-28T12:00:00Z",
+        "valueQuantity": {
+          "value": 86,
+          "unit": "%",
+          "system": "http://unitsofmeasure.org",
+          "code": "%"
+        }
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Observation/obs-mbrox-pulseox"
+      }
+    },
+    {
+      "fullUrl": "Observation/obs-mbrox-pao2",
+      "resource": {
+        "resourceType": "Observation",
+        "id": "obs-mbrox-pao2",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-clinical-result"
+          ]
+        },
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "exam",
+                "display": "Exam"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://loinc.org",
+              "code": "2703-7",
+              "display": "Oxygen [Partial pressure] in Arterial blood"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/MBR-OX"
+        },
+        "effectiveDateTime": "2026-06-28T12:00:00Z",
+        "valueQuantity": {
+          "value": 54,
+          "unit": "mm[Hg]",
+          "system": "http://unitsofmeasure.org",
+          "code": "mm[Hg]"
+        }
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Observation/obs-mbrox-pao2"
+      }
+    },
+    {
+      "fullUrl": "Organization/org-dme-mbrox",
+      "resource": {
+        "resourceType": "Organization",
+        "id": "org-dme-mbrox",
+        "name": "Acme Home Medical (Non-Contracted)",
+        "identifier": [
+          {
+            "system": "http://hl7.org/fhir/sid/us-npi",
+            "value": "1922334455"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Organization/org-dme-mbrox"
+      }
+    },
+    {
+      "fullUrl": "DeviceRequest/dr-mbrox-e0431",
+      "resource": {
+        "resourceType": "DeviceRequest",
+        "id": "dr-mbrox-e0431",
+        "status": "active",
+        "intent": "order",
+        "codeCodeableConcept": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "E0431",
+              "display": "Portable gaseous oxygen system"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/MBR-OX"
+        },
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "J44.9",
+                "display": "Chronic obstructive pulmonary disease, unspecified"
+              }
+            ],
+            "text": "Chronic obstructive pulmonary disease, unspecified"
+          }
+        ],
+        "performer": {
+          "reference": "Organization/org-dme-mbrox"
+        }
+      },
+      "request": {
+        "method": "PUT",
+        "url": "DeviceRequest/dr-mbrox-e0431"
+      }
+    },
+    {
+      "fullUrl": "Patient/MBR-PD-UC08",
+      "resource": {
+        "resourceType": "Patient",
+        "id": "MBR-PD-UC08",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "value": "MBR-PD-UC08"
+          }
+        ],
+        "name": [
+          {
+            "family": "Nakamura"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1962-07-14"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/MBR-PD-UC08"
+      }
+    },
+    {
+      "fullUrl": "Coverage/cov-mbrpduc08",
+      "resource": {
+        "resourceType": "Coverage",
+        "id": "cov-mbrpduc08",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage"
+          ]
+        },
+        "status": "active",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:coverage",
+            "value": "MBR-PD-UC08"
+          }
+        ],
+        "beneficiary": {
+          "reference": "Patient/MBR-PD-UC08"
+        },
+        "relationship": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+              "code": "self"
+            }
+          ]
+        },
+        "payor": [
+          {
+            "reference": "Organization/org-cms-payer"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Coverage/cov-mbrpduc08"
+      }
+    },
+    {
+      "fullUrl": "Condition/cond-mbrpduc08-d571",
+      "resource": {
+        "resourceType": "Condition",
+        "id": "cond-mbrpduc08-d571",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-condition-problems-health-concerns"
+          ]
+        },
+        "clinicalStatus": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/condition-clinical",
+              "code": "active",
+              "display": "Active"
+            }
+          ]
+        },
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/condition-category",
+                "code": "problem-list-item",
+                "display": "Problem List Item"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://hl7.org/fhir/sid/icd-10-cm",
+              "code": "D57.1",
+              "display": "Sickle-cell disease without crisis"
+            }
+          ],
+          "text": "Sickle-cell disease"
+        },
+        "subject": {
+          "reference": "Patient/MBR-PD-UC08"
+        }
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Condition/cond-mbrpduc08-d571"
+      }
+    },
+    {
+      "fullUrl": "ServiceRequest/sr-mbrpduc08-j3490",
+      "resource": {
+        "resourceType": "ServiceRequest",
+        "id": "sr-mbrpduc08-j3490",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-servicerequest"
+          ]
+        },
+        "status": "active",
+        "intent": "order",
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "J3490",
+              "display": "Unclassified drugs - investigational gene therapy agent"
+            }
+          ],
+          "text": "Unclassified drugs - investigational gene therapy agent"
+        },
+        "subject": {
+          "reference": "Patient/MBR-PD-UC08"
+        },
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "D57.1",
+                "display": "Sickle-cell disease"
+              }
+            ],
+            "text": "Sickle-cell disease"
+          }
+        ],
+        "reasonReference": [
+          {
+            "reference": "Condition/cond-mbrpduc08-d571"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ServiceRequest/sr-mbrpduc08-j3490"
+      }
+    },
+    {
+      "fullUrl": "Patient/MBR-PD-UC06",
+      "resource": {
+        "resourceType": "Patient",
+        "id": "MBR-PD-UC06",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "value": "MBR-PD-UC06"
+          }
+        ],
+        "name": [
+          {
+            "family": "Okonkwo-HomeHealth"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1957-11-03"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/MBR-PD-UC06"
+      }
+    },
+    {
+      "fullUrl": "Coverage/cov-mbrpduc06",
+      "resource": {
+        "resourceType": "Coverage",
+        "id": "cov-mbrpduc06",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage"
+          ]
+        },
+        "status": "active",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:coverage",
+            "value": "MBR-PD-UC06"
+          }
+        ],
+        "beneficiary": {
+          "reference": "Patient/MBR-PD-UC06"
+        },
+        "relationship": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+              "code": "self"
+            }
+          ]
+        },
+        "payor": [
+          {
+            "reference": "Organization/org-cms-payer"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Coverage/cov-mbrpduc06"
+      }
+    },
+    {
+      "fullUrl": "Condition/cond-mbrpduc06-m6281",
+      "resource": {
+        "resourceType": "Condition",
+        "id": "cond-mbrpduc06-m6281",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-condition-problems-health-concerns"
+          ]
+        },
+        "clinicalStatus": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/condition-clinical",
+              "code": "active",
+              "display": "Active"
+            }
+          ]
+        },
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/condition-category",
+                "code": "problem-list-item",
+                "display": "Problem List Item"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://hl7.org/fhir/sid/icd-10-cm",
+              "code": "M62.81",
+              "display": "Muscle weakness (generalized)"
+            }
+          ],
+          "text": "Generalized muscle weakness"
+        },
+        "subject": {
+          "reference": "Patient/MBR-PD-UC06"
+        }
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Condition/cond-mbrpduc06-m6281"
+      }
+    },
+    {
+      "fullUrl": "ServiceRequest/sr-mbrpduc06-g0151",
+      "resource": {
+        "resourceType": "ServiceRequest",
+        "id": "sr-mbrpduc06-g0151",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-servicerequest"
+          ]
+        },
+        "status": "active",
+        "intent": "order",
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "G0151",
+              "display": "Services of a qualified physical therapist in the home health setting, each 15 minutes"
+            }
+          ],
+          "text": "Services of a qualified physical therapist in the home health setting"
+        },
+        "subject": {
+          "reference": "Patient/MBR-PD-UC06"
+        },
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "M62.81",
+                "display": "Muscle weakness (generalized)"
+              }
+            ],
+            "text": "Generalized muscle weakness"
+          }
+        ],
+        "reasonReference": [
+          {
+            "reference": "Condition/cond-mbrpduc06-m6281"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ServiceRequest/sr-mbrpduc06-g0151"
+      }
+    },
+    {
+      "fullUrl": "Patient/MBR-PD-UC01",
+      "resource": {
+        "resourceType": "Patient",
+        "id": "MBR-PD-UC01",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "value": "MBR-PD-UC01"
+          }
+        ],
+        "name": [
+          {
+            "family": "Abara-Eligibility"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1971-05-22"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/MBR-PD-UC01"
+      }
+    },
+    {
+      "fullUrl": "Coverage/cov-mbrpduc01",
+      "resource": {
+        "resourceType": "Coverage",
+        "id": "cov-mbrpduc01",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage"
+          ]
+        },
+        "status": "active",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:coverage",
+            "value": "MBR-PD-UC01"
+          }
+        ],
+        "beneficiary": {
+          "reference": "Patient/MBR-PD-UC01"
+        },
+        "relationship": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+              "code": "self"
+            }
+          ]
+        },
+        "payor": [
+          {
+            "reference": "Organization/org-cms-payer"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Coverage/cov-mbrpduc01"
+      }
+    },
+    {
+      "fullUrl": "Patient/MBR-PD-UC01-NC",
+      "resource": {
+        "resourceType": "Patient",
+        "id": "MBR-PD-UC01-NC",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "value": "MBR-PD-UC01-NC"
+          }
+        ],
+        "name": [
+          {
+            "family": "Abara-Terminated"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1971-05-22"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/MBR-PD-UC01-NC"
+      }
+    },
+    {
+      "fullUrl": "Coverage/cov-mbrpduc01nc",
+      "resource": {
+        "resourceType": "Coverage",
+        "id": "cov-mbrpduc01nc",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage"
+          ]
+        },
+        "status": "cancelled",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:coverage",
+            "value": "MBR-PD-UC01-NC"
+          }
+        ],
+        "beneficiary": {
+          "reference": "Patient/MBR-PD-UC01-NC"
+        },
+        "relationship": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+              "code": "self"
+            }
+          ]
+        },
+        "payor": [
+          {
+            "reference": "Organization/org-cms-payer"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Coverage/cov-mbrpduc01nc"
+      }
+    },
+    {
+      "fullUrl": "Patient/MBR-PD-UC07",
+      "resource": {
+        "resourceType": "Patient",
+        "id": "MBR-PD-UC07",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "value": "MBR-PD-UC07"
+          }
+        ],
+        "name": [
+          {
+            "family": "Nwosu-PatientAttest"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1960-08-14"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/MBR-PD-UC07"
+      }
+    },
+    {
+      "fullUrl": "Coverage/cov-mbrpduc07",
+      "resource": {
+        "resourceType": "Coverage",
+        "id": "cov-mbrpduc07",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage"
+          ]
+        },
+        "status": "active",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:coverage",
+            "value": "MBR-PD-UC07"
+          }
+        ],
+        "beneficiary": {
+          "reference": "Patient/MBR-PD-UC07"
+        },
+        "relationship": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+              "code": "self"
+            }
+          ]
+        },
+        "payor": [
+          {
+            "reference": "Organization/org-cms-payer"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Coverage/cov-mbrpduc07"
+      }
+    },
+    {
+      "fullUrl": "Condition/cond-mbrpduc07-m6281",
+      "resource": {
+        "resourceType": "Condition",
+        "id": "cond-mbrpduc07-m6281",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-condition-problems-health-concerns"
+          ]
+        },
+        "clinicalStatus": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/condition-clinical",
+              "code": "active",
+              "display": "Active"
+            }
+          ]
+        },
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/condition-category",
+                "code": "problem-list-item",
+                "display": "Problem List Item"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://hl7.org/fhir/sid/icd-10-cm",
+              "code": "M62.81",
+              "display": "Muscle weakness (generalized)"
+            }
+          ],
+          "text": "Generalized muscle weakness"
+        },
+        "subject": {
+          "reference": "Patient/MBR-PD-UC07"
+        }
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Condition/cond-mbrpduc07-m6281"
+      }
+    },
+    {
+      "fullUrl": "ServiceRequest/sr-mbrpduc07-g0151",
+      "resource": {
+        "resourceType": "ServiceRequest",
+        "id": "sr-mbrpduc07-g0151",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-servicerequest"
+          ]
+        },
+        "status": "active",
+        "intent": "order",
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "G0151",
+              "display": "Services of a qualified physical therapist in the home health setting, each 15 minutes"
+            }
+          ],
+          "text": "Services of a qualified physical therapist in the home health setting"
+        },
+        "subject": {
+          "reference": "Patient/MBR-PD-UC07"
+        },
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "M62.81",
+                "display": "Muscle weakness (generalized)"
+              }
+            ],
+            "text": "Generalized muscle weakness"
+          }
+        ],
+        "reasonReference": [
+          {
+            "reference": "Condition/cond-mbrpduc07-m6281"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ServiceRequest/sr-mbrpduc07-g0151"
+      }
+    },
+    {
+      "fullUrl": "Patient/MBR-PD-UC05",
+      "resource": {
+        "resourceType": "Patient",
+        "id": "MBR-PD-UC05",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "value": "MBR-PD-UC05"
+          }
+        ],
+        "name": [
+          {
+            "family": "Velazquez-Federated"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1955-02-09"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/MBR-PD-UC05"
+      }
+    },
+    {
+      "fullUrl": "Coverage/cov-mbrpduc05",
+      "resource": {
+        "resourceType": "Coverage",
+        "id": "cov-mbrpduc05",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage"
+          ]
+        },
+        "status": "active",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:coverage",
+            "value": "MBR-PD-UC05"
+          }
+        ],
+        "beneficiary": {
+          "reference": "Patient/MBR-PD-UC05"
+        },
+        "relationship": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+              "code": "self"
+            }
+          ]
+        },
+        "payor": [
+          {
+            "reference": "Organization/org-cms-payer"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Coverage/cov-mbrpduc05"
+      }
+    },
+    {
+      "fullUrl": "Condition/cond-mbrpduc05-m6281",
+      "resource": {
+        "resourceType": "Condition",
+        "id": "cond-mbrpduc05-m6281",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-condition-problems-health-concerns"
+          ]
+        },
+        "clinicalStatus": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/condition-clinical",
+              "code": "active",
+              "display": "Active"
+            }
+          ]
+        },
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/condition-category",
+                "code": "problem-list-item",
+                "display": "Problem List Item"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://hl7.org/fhir/sid/icd-10-cm",
+              "code": "M62.81",
+              "display": "Muscle weakness (generalized)"
+            }
+          ],
+          "text": "Generalized muscle weakness"
+        },
+        "subject": {
+          "reference": "Patient/MBR-PD-UC05"
+        }
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Condition/cond-mbrpduc05-m6281"
+      }
+    },
+    {
+      "fullUrl": "ServiceRequest/sr-mbrpduc05-g0151",
+      "resource": {
+        "resourceType": "ServiceRequest",
+        "id": "sr-mbrpduc05-g0151",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-servicerequest"
+          ]
+        },
+        "status": "active",
+        "intent": "order",
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "G0151",
+              "display": "Services of a qualified physical therapist in the home health setting, each 15 minutes"
+            }
+          ],
+          "text": "Services of a qualified physical therapist in the home health setting"
+        },
+        "subject": {
+          "reference": "Patient/MBR-PD-UC05"
+        },
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "M62.81",
+                "display": "Muscle weakness (generalized)"
+              }
+            ],
+            "text": "Generalized muscle weakness"
+          }
+        ],
+        "reasonReference": [
+          {
+            "reference": "Condition/cond-mbrpduc05-m6281"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ServiceRequest/sr-mbrpduc05-g0151"
+      }
+    },
+    {
+      "fullUrl": "Patient/MBR-PD-UC05-NC",
+      "resource": {
+        "resourceType": "Patient",
+        "id": "MBR-PD-UC05-NC",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "value": "MBR-PD-UC05-NC"
+          }
+        ],
+        "name": [
+          {
+            "family": "Velazquez-NoConsent"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1955-02-09"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/MBR-PD-UC05-NC"
+      }
+    },
+    {
+      "fullUrl": "Coverage/cov-mbrpduc05nc",
+      "resource": {
+        "resourceType": "Coverage",
+        "id": "cov-mbrpduc05nc",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage"
+          ]
+        },
+        "status": "active",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:coverage",
+            "value": "MBR-PD-UC05-NC"
+          }
+        ],
+        "beneficiary": {
+          "reference": "Patient/MBR-PD-UC05-NC"
+        },
+        "relationship": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+              "code": "self"
+            }
+          ]
+        },
+        "payor": [
+          {
+            "reference": "Organization/org-cms-payer"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Coverage/cov-mbrpduc05nc"
+      }
+    },
+    {
+      "fullUrl": "Condition/cond-mbrpduc05nc-m6281",
+      "resource": {
+        "resourceType": "Condition",
+        "id": "cond-mbrpduc05nc-m6281",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-condition-problems-health-concerns"
+          ]
+        },
+        "clinicalStatus": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/condition-clinical",
+              "code": "active",
+              "display": "Active"
+            }
+          ]
+        },
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/condition-category",
+                "code": "problem-list-item",
+                "display": "Problem List Item"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://hl7.org/fhir/sid/icd-10-cm",
+              "code": "M62.81",
+              "display": "Muscle weakness (generalized)"
+            }
+          ],
+          "text": "Generalized muscle weakness"
+        },
+        "subject": {
+          "reference": "Patient/MBR-PD-UC05-NC"
+        }
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Condition/cond-mbrpduc05nc-m6281"
+      }
+    },
+    {
+      "fullUrl": "ServiceRequest/sr-mbrpduc05nc-g0151",
+      "resource": {
+        "resourceType": "ServiceRequest",
+        "id": "sr-mbrpduc05nc-g0151",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-servicerequest"
+          ]
+        },
+        "status": "active",
+        "intent": "order",
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "G0151",
+              "display": "Services of a qualified physical therapist in the home health setting, each 15 minutes"
+            }
+          ],
+          "text": "Services of a qualified physical therapist in the home health setting"
+        },
+        "subject": {
+          "reference": "Patient/MBR-PD-UC05-NC"
+        },
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "M62.81",
+                "display": "Muscle weakness (generalized)"
+              }
+            ],
+            "text": "Generalized muscle weakness"
+          }
+        ],
+        "reasonReference": [
+          {
+            "reference": "Condition/cond-mbrpduc05nc-m6281"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ServiceRequest/sr-mbrpduc05nc-g0151"
+      }
+    }
+  ],
+  "resourceType": "Bundle",
+  "type": "transaction"
+}

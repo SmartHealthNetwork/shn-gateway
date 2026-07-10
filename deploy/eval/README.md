@@ -25,6 +25,13 @@ The gateway originates through the real Hub to a hosted evaluation payer
 loopback: real authorization per leg, a real audit trail, real profile
 validation.
 
+> **Two ways personas get loaded.** The Docker eval stack seeds its bundled HAPI
+> automatically (`evalseed`) — you don't load anything. To seed **your own**
+> external FHIR server instead, download the seed bundles at the repo root
+> (`seed/provider-personas.json` and `seed/conformant-personas.json`) and POST
+> them (see
+> [docs/INTEGRATION.md → Seed your own FHIR server](../../docs/INTEGRATION.md#seed-your-own-fhir-server)).
+
 ## Prerequisite: an SHN developer account
 
 You need an **approved SHN developer account** before running this bundle.

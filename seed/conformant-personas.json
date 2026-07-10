@@ -1,0 +1,151 @@
+{
+  "entry": [
+    {
+      "fullUrl": "Patient/MBR-COVERED",
+      "resource": {
+        "id": "MBR-COVERED",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "value": "MBR-COVERED"
+          }
+        ],
+        "name": [
+          {
+            "family": "Johansson"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1975-04-02",
+        "resourceType": "Patient"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/MBR-COVERED"
+      }
+    },
+    {
+      "fullUrl": "Patient/MBR-NOTCOVERED",
+      "resource": {
+        "id": "MBR-NOTCOVERED",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "value": "MBR-NOTCOVERED"
+          }
+        ],
+        "name": [
+          {
+            "family": "Reyes"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1980-09-15",
+        "resourceType": "Patient"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/MBR-NOTCOVERED"
+      }
+    },
+    {
+      "fullUrl": "Patient/MBR-UC06",
+      "resource": {
+        "id": "MBR-UC06",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "value": "MBR-UC06"
+          }
+        ],
+        "name": [
+          {
+            "family": "Reyes"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1969-07-21",
+        "resourceType": "Patient"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/MBR-UC06"
+      }
+    },
+    {
+      "fullUrl": "Patient/MBR-UC07HCPCS",
+      "resource": {
+        "id": "MBR-UC07HCPCS",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "value": "MBR-UC07HCPCS"
+          }
+        ],
+        "name": [
+          {
+            "family": "Nakamura"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1977-01-30",
+        "resourceType": "Patient"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/MBR-UC07HCPCS"
+      }
+    },
+    {
+      "fullUrl": "Patient/MBR-UC08",
+      "resource": {
+        "id": "MBR-UC08",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "value": "MBR-UC08"
+          }
+        ],
+        "name": [
+          {
+            "family": "Okafor"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1971-02-09",
+        "resourceType": "Patient"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/MBR-UC08"
+      }
+    }
+  ],
+  "resourceType": "Bundle",
+  "type": "transaction"
+}

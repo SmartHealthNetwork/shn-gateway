@@ -147,3 +147,39 @@ func TestSandboxProviderPersonasBundle(t *testing.T) {
 		t.Fatal("accessor must return a copy")
 	}
 }
+
+// TestFreshenObservations_ScopeMirrorsJQRecipe pins the exact scope the
+// INTEGRATION.md "Keep the provider-data Observations recent" jq recipe mirrors:
+// FreshenObservations stamps Observation.effectiveDateTime to now and touches
+// nothing else — not non-Observation resources, not other Observation fields.
+// The doc recipe is a prose reimplementation of this function; if this scope
+// ever changes (e.g. effectivePeriod handling), that recipe half-freshens —
+// update the recipe in the same change and re-point this test.
+func TestFreshenObservations_ScopeMirrorsJQRecipe(t *testing.T) {
+	in := []byte(`{"resourceType":"Bundle","type":"transaction","entry":[
+	  {"resource":{"resourceType":"Observation","effectiveDateTime":"2020-01-01T00:00:00Z","valueString":"keep-me"}},
+	  {"resource":{"resourceType":"Condition","effectiveDateTime":"2020-01-01T00:00:00Z"}}
+	]}`)
+	out, err := FreshenObservations(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed struct {
+		Entry []struct {
+			Resource map[string]any `json:"resource"`
+		} `json:"entry"`
+	}
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	obs, cond := parsed.Entry[0].Resource, parsed.Entry[1].Resource
+	if obs["effectiveDateTime"] == "2020-01-01T00:00:00Z" {
+		t.Fatal("Observation.effectiveDateTime was not freshened")
+	}
+	if obs["valueString"] != "keep-me" {
+		t.Fatalf("FreshenObservations touched a non-effectiveDateTime field: valueString=%v", obs["valueString"])
+	}
+	if cond["effectiveDateTime"] != "2020-01-01T00:00:00Z" {
+		t.Fatalf("FreshenObservations changed a non-Observation resource: Condition.effectiveDateTime=%v", cond["effectiveDateTime"])
+	}
+}

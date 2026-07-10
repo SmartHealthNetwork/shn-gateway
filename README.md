@@ -168,6 +168,9 @@ Once everything reports ready, all eight use cases run green against the
 hosted evaluation payer. Full detail, first-run costs, and the
 production-cutover path: [`deploy/eval/README.md`](deploy/eval/README.md).
 
+- **Seed your own FHIR server** with the shipped synthetic personas — see
+  [docs/INTEGRATION.md → Seed your own FHIR server](docs/INTEGRATION.md#seed-your-own-fhir-server).
+
 ---
 
 ## 5. Choose your path
