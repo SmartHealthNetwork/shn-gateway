@@ -58,7 +58,7 @@ expected to change shape as their consumer matures:
 - **`fhirseed`** (`Client` and its methods, `CRPrepopLibraries`, `SandboxProviderPersonasBundle`,
   `SandboxLumbarLibrary`, `PutGlobalArtifact`, `ProviderDataSeedBundle`, `ConformantSeedBundle`):
   the partner/Kit FHIR seed loader, baked persona fixture, and the two downloadable seed-bundle
-  assemblers. New in this release and **evolving** — the seed sequence, fixture contents, and
+  getters (embedded baked artifacts). New in this release and **evolving** — the seed sequence, fixture contents, and
   bundle bytes may change in minor releases as the Kit stabilizes its seeding needs. Consumers pin
   exact gateway versions.
 

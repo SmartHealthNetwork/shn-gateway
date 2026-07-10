@@ -30,8 +30,24 @@ var conformantPersonas []byte
 // a FHIR transaction Bundle (idempotent PUT entries). Patient-only: the ingress
 // subject-bind reads only Patient by member identifier. Returns plain []byte
 // (no error) like SandboxProviderPersonasBundle — it copies embedded bytes and
-// cannot fail. (ProviderDataSeedBundle returns an error because it assembles
-// from the SDK at call time and that decode can fail.)
+// cannot fail.
 func ConformantSeedBundle() []byte {
 	return append([]byte(nil), conformantPersonas...)
+}
+
+// providerData is the baked provider-data (plain-EHR) persona set: the 12
+// self-contained clinical personas concatenated + deduped into one transaction
+// Bundle, generated from the private canonical seed source and drift-guarded there
+// (synthetic personas only, FR-39). Partners POST it to seed their own SoR.
+//
+//go:embed fixtures/provider-personas.json
+var providerData []byte
+
+// ProviderDataSeedBundle returns a copy of the baked provider-data seed Bundle as
+// a FHIR transaction Bundle (idempotent PUT entries). Like ConformantSeedBundle it
+// copies embedded bytes and cannot fail — the published module never recomputes
+// against its shn-sdk pin, so the downloadable seed/provider-personas.json and this
+// output are the same frozen artifact.
+func ProviderDataSeedBundle() []byte {
+	return append([]byte(nil), providerData...)
 }

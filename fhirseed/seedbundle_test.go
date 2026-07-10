@@ -33,102 +33,51 @@ func bundleKeys(t *testing.T, b []byte) []struct{ Method, URL string } {
 	return keys
 }
 
-func TestMergeProviderTransactions_CollapsesIdenticalDuplicate(t *testing.T) {
-	// Same (PUT, Organization/org) — one inline, one multi-line — identical resource.
-	inline := []byte(`{"resourceType":"Bundle","type":"transaction","entry":[` +
-		`{"fullUrl":"Organization/org","resource":{"resourceType":"Organization","id":"org","name":"X"},"request":{"method":"PUT","url":"Organization/org"}}]}`)
-	multiline := []byte(`{"resourceType":"Bundle","type":"transaction","entry":[
-		{"fullUrl":"Organization/org","resource":{
-			"resourceType":"Organization",
-			"id":"org",
-			"name":"X"
-		},"request":{"method":"PUT","url":"Organization/org"}}]}`)
-	out, err := mergeProviderTransactions([][]byte{inline, multiline})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+// The provider-data seed Bundle is an embedded, pre-baked artifact (assembled +
+// drift-guarded in the monorepo). This validates the shipped embed getter itself,
+// STRUCTURALLY and deliberately independent of the shn-sdk pin (per F1 the
+// published module embeds a frozen artifact — persona-completeness vs the SDK is
+// asserted in the monorepo's TestBakeProviderDataSeedBundle_AllPersonasNoDupURL,
+// so the public clone's tests never depend on the exact pin): one valid
+// transaction Bundle, no duplicate request.url, the single collapsed org-cms-payer
+// PUT, and a Patient PUT per provider persona (12).
+func TestProviderDataSeedBundle_EmbedValid(t *testing.T) {
+	var parsed struct {
+		ResourceType string `json:"resourceType"`
+		Type         string `json:"type"`
+		Entry        []struct {
+			Request struct {
+				Method string `json:"method"`
+				URL    string `json:"url"`
+			} `json:"request"`
+			Resource struct {
+				ResourceType string `json:"resourceType"`
+			} `json:"resource"`
+		} `json:"entry"`
 	}
-	if keys := bundleKeys(t, out); len(keys) != 1 {
-		t.Fatalf("want 1 entry after collapse, got %d: %v", len(keys), keys)
+	if err := json.Unmarshal(ProviderDataSeedBundle(), &parsed); err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestMergeProviderTransactions_HardErrorsOnConflict(t *testing.T) {
-	a := []byte(`{"resourceType":"Bundle","type":"transaction","entry":[` +
-		`{"resource":{"resourceType":"Organization","id":"org","name":"A"},"request":{"method":"PUT","url":"Organization/org"}}]}`)
-	b := []byte(`{"resourceType":"Bundle","type":"transaction","entry":[` +
-		`{"resource":{"resourceType":"Organization","id":"org","name":"B"},"request":{"method":"PUT","url":"Organization/org"}}]}`)
-	if _, err := mergeProviderTransactions([][]byte{a, b}); err == nil {
-		t.Fatal("want hard error on same-url different-resource, got nil")
+	if parsed.ResourceType != "Bundle" || parsed.Type != "transaction" {
+		t.Fatalf("not a transaction Bundle: %s/%s", parsed.ResourceType, parsed.Type)
 	}
-}
-
-// The merge emits entries through the seedEntry struct, so any entry/request
-// field beyond fullUrl/resource/request{method,url} would be silently dropped.
-// Guard against that: an entry carrying an unmodeled field (here request.ifNoneExist)
-// must hard-error, not silently strip it, so a future fixture can't lose a
-// conditional-create guard in the merged download.
-func TestMergeProviderTransactions_RejectsUnmodeledEntryField(t *testing.T) {
-	b := []byte(`{"resourceType":"Bundle","type":"transaction","entry":[` +
-		`{"resource":{"resourceType":"Organization","id":"org"},"request":{"method":"PUT","url":"Organization/org","ifNoneExist":"identifier=x"}}]}`)
-	if _, err := mergeProviderTransactions([][]byte{b}); err == nil {
-		t.Fatal("want error on entry with an unmodeled field (request.ifNoneExist), got nil")
-	}
-}
-
-func TestProviderDataSeedBundle_AllPersonasNoDupURL(t *testing.T) {
-	out, err := ProviderDataSeedBundle()
-	if err != nil {
-		t.Fatalf("ProviderDataSeedBundle: %v", err)
-	}
-	keys := bundleKeys(t, out)
 	seen := map[string]bool{}
-	for _, k := range keys {
-		id := k.Method + " " + k.URL
+	patients := 0
+	for _, e := range parsed.Entry {
+		id := e.Request.Method + " " + e.Request.URL
 		if seen[id] {
-			t.Fatalf("duplicate request.url in merged bundle: %s", id)
+			t.Fatalf("duplicate request.url in embedded bundle: %s", id)
 		}
 		seen[id] = true
+		if e.Resource.ResourceType == "Patient" {
+			patients++
+		}
 	}
-	// Exactly one org-cms-payer PUT survives the 11-way collapse.
 	if !seen["PUT Organization/org-cms-payer"] {
-		t.Fatal("merged bundle missing PUT Organization/org-cms-payer")
+		t.Fatal("embedded provider bundle missing PUT Organization/org-cms-payer")
 	}
-	// Every persona's Patient PUT is present (12 personas → 12 distinct member Patients).
-	for _, p := range shnsdk.ProviderDataPersonas() {
-		raw, err := shnsdk.ProviderDataBundle(p)
-		if err != nil {
-			t.Fatalf("ProviderDataBundle(%q): %v", p, err)
-		}
-		var b struct {
-			Entry []struct {
-				Request  struct{ URL string } `json:"request"`
-				Resource struct {
-					ResourceType string `json:"resourceType"`
-				} `json:"resource"`
-			} `json:"entry"`
-		}
-		if err := json.Unmarshal(raw, &b); err != nil {
-			t.Fatalf("unmarshal persona %q: %v", p, err)
-		}
-		for _, e := range b.Entry {
-			if e.Resource.ResourceType == "Patient" && !seen["PUT "+e.Request.URL] {
-				t.Fatalf("persona %q Patient %q missing from merged bundle", p, e.Request.URL)
-			}
-		}
-	}
-}
-
-func TestProviderDataSeedBundle_Deterministic(t *testing.T) {
-	a, err := ProviderDataSeedBundle()
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, err := ProviderDataSeedBundle()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(a) != string(b) {
-		t.Fatal("ProviderDataSeedBundle is nondeterministic")
+	if patients < 12 {
+		t.Fatalf("embedded provider bundle has %d Patient PUTs, want >= 12", patients)
 	}
 }
 
@@ -178,10 +127,7 @@ func TestConformantSeedBundle_Members(t *testing.T) {
 }
 
 func TestSeedBundles_Disjoint(t *testing.T) {
-	prov, err := ProviderDataSeedBundle()
-	if err != nil {
-		t.Fatal(err)
-	}
+	prov := ProviderDataSeedBundle()
 	conf := ConformantSeedBundle()
 	// No shared (method,url).
 	pk := map[string]bool{}
