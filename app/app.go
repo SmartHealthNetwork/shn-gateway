@@ -32,6 +32,7 @@ import (
 	engine "github.com/SmartHealthNetwork/shn-gateway/engine"
 	observer "github.com/SmartHealthNetwork/shn-gateway/observer"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
+	health "github.com/SmartHealthNetwork/shn-sdk/health"
 )
 
 // config is the collapsed PUBLIC config surface. Required:
@@ -514,6 +515,11 @@ type built struct {
 	// this listener — HandlerWithClock embedders get no observer endpoint.
 	observerAddr    string
 	observerHandler http.Handler
+
+	// healthCell is the registrar-poller /health check cell — non-nil only when
+	// registrarURL != "" (mirrors the poller-goroutine gate in Run). pollFeed's
+	// Record* calls are nil-safe, so a nil cell here is a no-op, not a crash.
+	healthCell *health.PollerCell
 }
 
 func build(ctx context.Context, getenv func(string) string, stdout io.Writer, clock func() time.Time) (built, error) {
@@ -556,7 +562,7 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	// resolves the counterpart — deterministic, no ticker.
 	reg := shnsdk.NewRegistry()
 	if registrarURL != "" {
-		if err := convergeRegistry(ctx, client, registrarURL, reg); err != nil {
+		if _, err := convergeRegistry(ctx, client, registrarURL, reg); err != nil {
 			return b, fmt.Errorf("converge peer registry from %s: %w", registrarURL, err)
 		}
 	}
@@ -580,21 +586,40 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	// memstub selected above. pgxpool.New is lazy; NewPgStore's advisory-locked
 	// EnsureSchema is the fail-fast (and the 4-gateways-one-DB race guard). Holder-
 	// scoped by construction: NewPgStore captures the bundle's HolderID.
+	// pool is hoisted out of the if so the /health wiring below can register a
+	// DBPing check when (and only when) this branch ran.
+	var pool *pgxpool.Pool
 	if cfg.StoreDatabaseURL != "" {
-		pool, perr := pgxpool.New(ctx, cfg.StoreDatabaseURL)
+		p, perr := pgxpool.New(ctx, cfg.StoreDatabaseURL)
 		if perr != nil {
 			return b, fmt.Errorf("gateway: pgxpool.New(store): %w", perr)
 		}
-		pg, serr := pgstore.NewPgStore(ctx, pool, bundle.Identity.HolderID)
+		pg, serr := pgstore.NewPgStore(ctx, p, bundle.Identity.HolderID)
 		if serr != nil {
 			return b, fmt.Errorf("gateway: pgstore.NewPgStore: %w", serr)
 		}
 		store = pg
+		pool = p
+	}
+
+	// /health: holder id as the service name — holder ids
+	// are already public via the /holders feed, non-sensitive, and distinguish the
+	// two payer-role gateways from each other. feedCell is created ONLY when a
+	// registrar is configured (mirrors the poller-goroutine gate in Run); its
+	// Check is NOT nil-safe, so it must only be Register'd inside that branch.
+	hreg := health.New(bundle.Identity.HolderID, getenv("SHN_VERSION"))
+	var feedCell *health.PollerCell
+	if registrarURL != "" {
+		feedCell = health.NewPollerCell("registrar-poller", 30*time.Second)
+		hreg.Register(feedCell.Check)
+	}
+	if pool != nil {
+		hreg.Register(health.DBPing("store", pool.Ping))
 	}
 
 	// PayerRouter (FR-G40/G41): default to feed-derived discovery off the converged /holders
 	// registry (FeedPayerRouter). PAYER_DIRECTORY, when set, overrides with a static
-	// provider-maintained map (test/bootstrap fallback — §3.1). No default payer holder either way.
+	// provider-maintained map (test/bootstrap fallback). No default payer holder either way.
 	var payerRouter engine.PayerRouter = engine.NewFeedPayerRouter(reg)
 	if dir := getenv("PAYER_DIRECTORY"); dir != "" {
 		entries, derr := engine.LoadPayerDirectory(dir)
@@ -699,12 +724,13 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	fmt.Fprintf(stdout, "gateway: role=%s holder=%s listening on %s\n", cfg.Role, bundle.Identity.HolderID, cfg.Addr)
 	b = built{
 		addr:            cfg.Addr,
-		handler:         engine.New(gwCfg).Handler(),
+		handler:         health.Wrap(hreg, engine.New(gwCfg).Handler()),
 		reg:             reg,
 		registrarURL:    registrarURL,
 		client:          client,
 		observerAddr:    cfg.ObserverAddr,
 		observerHandler: obsHandler,
+		healthCell:      feedCell,
 	}
 	return b, nil
 }
@@ -718,7 +744,7 @@ func Run(ctx context.Context, getenv func(string) string, stdout io.Writer) erro
 		return err
 	}
 	if b.registrarURL != "" {
-		go pollFeed(ctx, b.client, b.registrarURL, b.reg, 3*time.Second)
+		go pollFeed(ctx, b.client, b.registrarURL, b.reg, 3*time.Second, b.healthCell)
 	}
 	errc := make(chan error, 2)
 	go func() { errc <- http.ListenAndServe(b.addr, b.handler) }()
@@ -775,11 +801,15 @@ func selectValidator(getenv func(string) string, validatorURL string) (shnsdk.Va
 // convergeRegistry snapshots the /holders feed into reg (Holder → RegistryEntry).
 // The engine reads EncPub from reg to seal to a recipient; a malformed/missing
 // entry simply fails closed on Lookup. SDK-only — passes the gateway boundary fence.
-func convergeRegistry(ctx context.Context, c *http.Client, registrarURL string, reg shnsdk.Registry) error {
+// The returned count is the number of holders actually converged (successful
+// reg.Set iterations, i.e. excluding entries skipped for a malformed EncPub) —
+// callers feed it to the /health registrar-poller cell as the observed feed size.
+func convergeRegistry(ctx context.Context, c *http.Client, registrarURL string, reg shnsdk.Registry) (int, error) {
 	holders, err := shnsdk.FetchHolders(ctx, c, registrarURL)
 	if err != nil {
-		return err
+		return 0, err
 	}
+	n := 0
 	for _, h := range holders {
 		encPub, err := h.EncKey() // base64 → *[32]byte (sdk/holders.go)
 		if err != nil {
@@ -790,12 +820,19 @@ func convergeRegistry(ctx context.Context, c *http.Client, registrarURL string, 
 			signPub = ed25519.PublicKey(raw)
 		}
 		reg.Set(h.ID, shnsdk.RegistryEntry{ID: h.ID, Role: h.Role, EncPub: encPub, SignPub: signPub, BaseURL: h.BaseURL, PayerIDs: h.PayerIDs})
+		n++
 	}
-	return nil
+	return n, nil
 }
 
-// pollFeed re-converges the registry on an interval (post-boot peer registration/rotation).
-func pollFeed(ctx context.Context, c *http.Client, registrarURL string, reg shnsdk.Registry, every time.Duration) {
+// pollFeed re-converges the registry on an interval (post-boot peer registration/
+// rotation). cell records each attempt/outcome onto the service's /health
+// registrar-poller check — this is this path's first error visibility EVER:
+// a transient feed error used to vanish silently
+// (best-effort), now it surfaces as a degraded check until the next success.
+// cell may be nil (registrarURL configured post-boot is not a supported path
+// today, but PollerCell's Record* methods are nil-safe regardless).
+func pollFeed(ctx context.Context, c *http.Client, registrarURL string, reg shnsdk.Registry, every time.Duration, cell *health.PollerCell) {
 	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
@@ -803,7 +840,12 @@ func pollFeed(ctx context.Context, c *http.Client, registrarURL string, reg shns
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			_ = convergeRegistry(ctx, c, registrarURL, reg) // best-effort; transient feed errors are non-fatal
+			cell.RecordAttempt()
+			if n, err := convergeRegistry(ctx, c, registrarURL, reg); err != nil {
+				cell.RecordError(err)
+			} else {
+				cell.RecordSuccess(n)
+			}
 		}
 	}
 }

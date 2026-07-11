@@ -346,7 +346,7 @@ func TestRunCRDThenDTR_NotCovered(t *testing.T) {
 }
 
 // TestRunCRDThenDTROrder_NotCovered_ProceedFlag proves the proceedOnNotCovered param
-// (Unit 2 / spec §6 D-S2-2). The generic not-covered STOP (FR-G25 / AI-1) is the DEFAULT
+// (D-S2-2). The generic not-covered STOP (FR-G25 / AI-1) is the DEFAULT
 // (false) for every caller; ONLY a caller that opts in (handleUC08 provider-data, to carry the
 // not-covered J3490 order to PAS for br-payer's formal A2 "Not Certified" ClaimResponse)
 // proceeds past it with the order built. The opt-in never yields an auth on a denial:
@@ -528,8 +528,8 @@ func classifyTestGateway(t *testing.T, profile string) *Gateway {
 	})
 }
 
-// TestClassifyResolution is the C4 rejection discipline for the PAS-resolution decision
-// (spec §2B-bis): ONLY a genuine A1 approval is approved. An amendment now resolves to a
+// TestClassifyResolution is the C4 rejection discipline for the PAS-resolution decision:
+// ONLY a genuine A1 approval is approved. An amendment now resolves to a
 // real A1 at the payer-gw responder (it polls br-payer's timer A4→A1), so a resolution site sees
 // approved | denied | unresolved-pend here — and everything not approved → caller 502s (a pend can
 // never mask a denial or be a silent pass — C1). Profile-independent now (the per-profile terminal

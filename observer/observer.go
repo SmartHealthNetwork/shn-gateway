@@ -1,6 +1,6 @@
 // Package observer turns the engine's ObserverEvent callback into a
-// loopback-served SSE stream — the SHN Kit flow inspector's data source (Kit
-// spec §6.1). A ring buffer (last bufSize events) gives late/reconnecting
+// loopback-served SSE stream — the SHN Kit flow inspector's data source.
+// A ring buffer (last bufSize events) gives late/reconnecting
 // subscribers replay via Last-Event-ID; live delivery is per-subscriber
 // buffered and LOSSY under backpressure (a slow consumer misses events and
 // re-syncs from the buffer on reconnect — the stream is diagnostic, never

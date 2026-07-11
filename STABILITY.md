@@ -14,7 +14,7 @@ A published version tag is **never re-tagged** with different content. The Go
 module proxy caches a tag's tree permanently; always bump to a new version
 rather than moving an existing tag.
 
-This gateway currently requires `shn-sdk v0.26.0` (see `go.mod`).
+This gateway currently requires `shn-sdk v0.29.0` (see `go.mod`).
 
 ## Supported seams
 
@@ -54,6 +54,16 @@ expected to change shape as their consumer matures:
   the UC-01…08 scenario-driving package. New in this release and **evolving** — signatures and
   return shapes may change in minor releases as the SHN Kit's daemon and the live conformance
   gate exercise it further. Consumers pin exact gateway versions.
+
+- **`GET /health`** (served by the `app` runner in front of the engine handler): the shared
+  SHN health payload — `service` (the gateway's holder id), optional `version`
+  (from `SHN_VERSION`), `uptimeSeconds`, a worst-check-wins `status`, and a `checks`
+  array (`registrar-poller` when a registrar feed is configured; `store` when the
+  durable Postgres store is configured). The payload shape is the published
+  `shn-sdk/health` contract (v0.29.0) and is non-sensitive by construction —
+  statuses, timestamps, counts, and coarse error classes only. **Evolving**: check
+  names and the set of registered checks may change in minor releases; the JSON
+  field shape follows the `shn-sdk/health` package's compatibility.
 
 - **`fhirseed`** (`Client` and its methods, `CRPrepopLibraries`, `SandboxProviderPersonasBundle`,
   `SandboxLumbarLibrary`, `PutGlobalArtifact`, `ProviderDataSeedBundle`, `ConformantSeedBundle`):

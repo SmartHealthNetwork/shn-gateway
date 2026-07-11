@@ -23,8 +23,8 @@ type PayerDirectoryEntry struct {
 
 type payerKey struct{ system, value string }
 
-// ConfigPayerRouter is the Slice-1 resolver: a static provider-maintained map. (FeedPayerRouter,
-// network discovery, is Slice 2 behind this same interface.)
+// ConfigPayerRouter is the static resolver: a provider-maintained map. (FeedPayerRouter,
+// network discovery, is the feed-derived resolver behind this same interface.)
 type ConfigPayerRouter struct{ m map[payerKey]string }
 
 // NewConfigPayerRouter builds a router; a duplicate (system,value) is a hard error (ambiguous routing).
@@ -61,14 +61,14 @@ func LoadPayerDirectory(path string) ([]PayerDirectoryEntry, error) {
 	return entries, nil
 }
 
-// FeedPayerRouter is the Slice-2 resolver: it indexes the live converged /holders registry
+// FeedPayerRouter is the feed-derived resolver: it indexes the live converged /holders registry
 // (operator-attested payer-id claims, FR-G41) to map a Coverage.payor identity → payer holder id.
 // It resolves fresh on every call, so a post-boot feed registration/rotation is visible without a
 // restart (the FR-G10 no-restart property). Ambiguity — a (system,value) claimed by more than one
 // holder — FAILS CLOSED (ok=false), the same defense the DB UNIQUE(system,value) enforces (AI-G12).
 // It considers ONLY role=payer entries: payer-ids on a non-payer entry (a manifest-seeded holder
 // that bypasses the registrar role-gate) are never routed to — the router self-fails-closed on role
-// rather than trusting the upstream 400-gate (design §3: authority gates on holder_role==payer).
+// rather than trusting the upstream 400-gate (authority gates on holder_role==payer).
 type FeedPayerRouter struct{ reg shnsdk.Registry }
 
 // NewFeedPayerRouter builds a router backed by reg (a value type whose internals are shared; the

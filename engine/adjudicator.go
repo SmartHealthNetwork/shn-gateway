@@ -57,7 +57,7 @@ func (s *sandboxAdjudicator) OrderSelect(code string) (bool, string) {
 	switch code {
 	case "72148": // CPT — lumbar MRI (UC-03/04/06/07)
 		return true, shnsdk.QuestionnaireCanonicalLumbarMRI
-	case "L8000": // HCPCS — §3.2 HCPCS approve persona; reuses the lumbar questionnaire (DEF-4 stub, AI-9)
+	case "L8000": // HCPCS — the HCPCS approve persona; reuses the lumbar questionnaire (DEF-4 stub, AI-9)
 		return true, shnsdk.QuestionnaireCanonicalLumbarMRI
 	case "E0431", "E1390": // HCPCS — home-oxygen DME order-dispatch personas (MBR-OX HomeOxygen / MBR-PD-UC03
 		// HomeOxygenDispatch). The sandbox has no home-oxygen-specific CQL policy — that lives only in
@@ -147,7 +147,7 @@ func (s *sandboxResponder) Handle(ctx context.Context, leg, corrID, subjectPCI s
 		if !ok {
 			return LegResult{Status: http.StatusBadRequest, Message: "no order in draftOrders"}, nil
 		}
-		// §3.1: accept {CPT, HCPCS} product coding (was ParseServiceRequestCPT, CPT-only —
+		// Accept {CPT, HCPCS} product coding (was ParseServiceRequestCPT, CPT-only —
 		// which 400'd a HCPCS order before any decision). The CRD DECISION keys on the
 		// code; the system axis is carried by the EOB build (FR-28).
 		_, code, _, err := shnsdk.ParseServiceRequestProductCoding(srJSON)

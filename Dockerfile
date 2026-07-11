@@ -1,7 +1,8 @@
 # STANDALONE build of the PUBLIC gateway binary (cmd/gateway within this module).
 # Build context = THIS module (gateway/) — a partner clones only shn-gateway, no sdk/
-# sibling. shn-sdk resolves from the public Go proxy via the go.mod require (v0.7.0),
-# so there is no local replace. Our cloud + smoke build this exact artifact (dogfood).
+# sibling. shn-sdk resolves from the public Go proxy via the go.mod require (pinned
+# version tracks gateway/go.mod), so there is no local replace. Our cloud + smoke
+# build this exact artifact (dogfood).
 FROM golang:1.26 AS builder
 WORKDIR /src
 COPY go.mod go.sum ./

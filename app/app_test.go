@@ -16,9 +16,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
+	"github.com/SmartHealthNetwork/shn-sdk/health"
 )
 
 // env builds a getenv func from a map.
@@ -508,7 +511,7 @@ func TestConvergeRegistry_CarriesPayerIDs(t *testing.T) {
 	defer srv.Close()
 
 	reg := shnsdk.NewRegistry()
-	if err := convergeRegistry(context.Background(), http.DefaultClient, srv.URL, reg); err != nil {
+	if _, err := convergeRegistry(context.Background(), http.DefaultClient, srv.URL, reg); err != nil {
 		t.Fatalf("convergeRegistry: %v", err)
 	}
 	entry, ok := reg.Lookup("payer-b")
@@ -517,5 +520,86 @@ func TestConvergeRegistry_CarriesPayerIDs(t *testing.T) {
 	}
 	if len(entry.PayerIDs) != 1 || entry.PayerIDs[0] != holder.PayerIDs[0] {
 		t.Fatalf("PayerIDs not converged: want %+v, got %+v", holder.PayerIDs, entry.PayerIDs)
+	}
+}
+
+// TestConvergeRegistry_ReturnsCount verifies the count return equals the number
+// of holders actually converged into reg (successful reg.Set iterations) — the
+// count feeds cell.RecordSuccess(n) so /health's registrar-poller check reports
+// a real feed size, not just "no error".
+func TestConvergeRegistry_ReturnsCount(t *testing.T) {
+	var enc1, enc2 [32]byte
+	enc1[0] = 1
+	enc2[0] = 2
+	holders := []shnsdk.Holder{
+		{ID: "h1", Role: "provider", EncPub: base64.StdEncoding.EncodeToString(enc1[:]), BaseURL: "https://h1.example"},
+		{ID: "h2", Role: "payer", EncPub: base64.StdEncoding.EncodeToString(enc2[:]), BaseURL: "https://h2.example"},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(holders)
+	}))
+	defer srv.Close()
+
+	reg := shnsdk.NewRegistry()
+	n, err := convergeRegistry(context.Background(), http.DefaultClient, srv.URL, reg)
+	if err != nil {
+		t.Fatalf("convergeRegistry: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("n = %d, want 2", n)
+	}
+	if _, ok := reg.Lookup("h1"); !ok {
+		t.Fatal("h1 missing from converged registry")
+	}
+	if _, ok := reg.Lookup("h2"); !ok {
+		t.Fatal("h2 missing from converged registry")
+	}
+}
+
+// TestPollFeed_RecordsCell drives pollFeed against a flip-flop feed (first tick
+// 500s, second tick returns a valid one-holder /holders JSON) and asserts the
+// PollerCell sees BOTH the transient error (this path's first-ever error
+// visibility) and the eventual success.
+func TestPollFeed_RecordsCell(t *testing.T) {
+	var calls int32
+	var enc [32]byte
+	enc[0] = 1
+	holder := shnsdk.Holder{ID: "h1", Role: "provider", EncPub: base64.StdEncoding.EncodeToString(enc[:]), BaseURL: "https://h1.example"}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]shnsdk.Holder{holder})
+	}))
+	defer srv.Close()
+
+	cell := health.NewPollerCell("registrar-poller", time.Minute)
+	reg := shnsdk.NewRegistry()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go pollFeed(ctx, srv.Client(), srv.URL, reg, 5*time.Millisecond, cell)
+
+	var sawError bool
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		c := cell.Check(context.Background())
+		if c.Status == health.StatusDegraded && c.LastError != "" {
+			sawError = true
+		}
+		if c.LastSuccess != "" && c.HolderCount == 1 {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if !sawError {
+		t.Fatal("expected the first (500) tick to record a degraded/error state on the cell before success")
+	}
+	final := cell.Check(context.Background())
+	if final.LastSuccess == "" || final.HolderCount != 1 {
+		t.Fatalf("final cell state = %+v, want a recorded success with holderCount 1", final)
+	}
+	if _, ok := reg.Lookup("h1"); !ok {
+		t.Fatal("h1 missing from registry after pollFeed converged")
 	}
 }

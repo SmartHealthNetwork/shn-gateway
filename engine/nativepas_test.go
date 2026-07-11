@@ -388,7 +388,7 @@ func TestNativeUpdate_ApprovedFinalizes(t *testing.T) {
 		}
 	})
 
-	// §2B-bis (E2): a real Da Vinci payer (br-payer) RE-PENDS a conformant amendment (A4) and
+	// A real Da Vinci payer (br-payer) RE-PENDS a conformant amendment (A4) and
 	// auto-resolves A4→A1 only on its own timer. The update leg must POLL GET ClaimResponse/{id}
 	// until A1 — NOT 422 on the re-pend — then relay the resolved A1 + Finalize. The timer flips
 	// the SAME id (in-place), so the re-query target is parsed from the re-pend response.

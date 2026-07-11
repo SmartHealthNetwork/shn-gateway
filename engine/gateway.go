@@ -435,7 +435,7 @@ func (g *Gateway) Handler() http.Handler {
 	case "provider":
 		mux.HandleFunc("POST /scenario/uc01", g.handleScenario)
 		mux.HandleFunc("POST /scenario/uc02", g.handleUC02)
-		// FR-G41 (Slice 2) live routing proofs off the /holders feed: uc02-payerb self-discovers a
+		// FR-G41 live routing proofs off the /holders feed: uc02-payerb self-discovers a
 		// SECOND payer holder (MBR-PD-UC02-PB / 00078 → `payer-b`); uc02-unknownpayer fails closed 422
 		// (MBR-UNKNOWN-PAYER / 00099 → no registered payer). Both share the handleUC02 no-PA CRD body.
 		mux.HandleFunc("POST /scenario/uc02-payerb", g.handleUC02PayerB)

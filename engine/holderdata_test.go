@@ -207,7 +207,7 @@ func strconvI(i int) string {
 	return string(b)
 }
 
-// TestPersonas_UC04_UC06 verifies the two new Slice-2 personas and the
+// TestPersonas_UC04_UC06 verifies the UC-04/UC-06 personas and the
 // SupplementalReport accessor (UC-04 FR-32, FR-35/39).
 func TestPersonas_UC04_UC06(t *testing.T) {
 	d := NewStubHolderData()

@@ -1,4 +1,4 @@
-// crd_hcpcs_test.go — §3.1: the CRD intake accepts a HCPCS order (no longer CPT-locked).
+// crd_hcpcs_test.go — the CRD intake accepts a HCPCS order (no longer CPT-locked).
 package engine
 
 import (

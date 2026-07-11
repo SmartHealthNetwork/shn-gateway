@@ -702,7 +702,7 @@ func (g *Gateway) handleUC02(w http.ResponseWriter, r *http.Request) {
 // no static per-provider directory (the many-to-many drop-in property). MBR-PD-UC02-PB is seeded into
 // the provider tenant by cmd/fhirseed (shnsdk provider-data persona "uc02-payerb"). This proves
 // ROUTING (both members seal to DIFFERENT holders), not a distinct verdict — differential adjudication
-// is a Connectathon-day property (§6).
+// is a Connectathon-day property.
 func (g *Gateway) handleUC02PayerB(w http.ResponseWriter, r *http.Request) {
 	g.originateNoPACRD(w, r, "MBR-PD-UC02-PB")
 }
@@ -719,7 +719,7 @@ func (g *Gateway) handleUC02UnknownPayer(w http.ResponseWriter, r *http.Request)
 // originateNoPACRD runs the no-PA CRD round-trip for member: read the member's OWN Coverage as the
 // routing/identity source (FR-G40/G41 — the payer holder is resolved off Coverage.payor, no default),
 // originate a crd-order-select leg, and surface the covered/no-PA/no-DTR triple. Shared by handleUC02
-// (persona-A) and the Slice-2 second-payer / unknown-payer routing proofs.
+// (persona-A) and the second-payer / unknown-payer routing proofs.
 func (g *Gateway) originateNoPACRD(w http.ResponseWriter, r *http.Request, member string) {
 	ctx := r.Context()
 
@@ -891,7 +891,7 @@ func (g *Gateway) handleUC03(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleUC07HCPCS runs the HCPCS (L8000) DV-approve path — the in-process mirror of the
-// two-RI L8000 approve (§3.2): CRD (PA-required) → DTR auto-fill → PAS approve on first
+// two-RI L8000 approve: CRD (PA-required) → DTR auto-fill → PAS approve on first
 // submit → the payer projects a HCPCS-system PDex PA EOB into the Patient-Access Store
 // (FR-28; system flows from the L8000 order). NOT patient-authorship.
 func (g *Gateway) handleUC07HCPCS(w http.ResponseWriter, r *http.Request) {

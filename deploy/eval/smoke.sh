@@ -38,8 +38,8 @@ check() { # label  body  jq-predicate
   fi
   if echo "$out" | jq -e "$3" >/dev/null 2>&1; then echo "✓ $1"; else echo "✗ $1: $out"; fail=1; fi
 }
-# Assertions against the REAL structs (gateway/engine/originate*.go / originate_resume.go),
-# mode-a-onboarding.md §4. Branch-body keys verified against the real handlers: handleScenario
+# Assertions against the REAL structs (engine/originate*.go / originate_resume.go).
+# Branch-body keys verified against the real handlers: handleScenario
 # (uc01) switches on req.Branch == "covered"/"notcovered" (originate.go:151-159); handleUC05
 # switches on "", "consent", "noconsent" (originate.go:1181-1187). uc02/03/04/06/07/08 don't
 # read the body at all, so "{}" is inert.

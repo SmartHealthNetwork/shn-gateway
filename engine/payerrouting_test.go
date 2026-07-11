@@ -270,7 +270,7 @@ func twoPayerTestSystem(t *testing.T) (*Gateway, *twoPayerSubstrate) {
 	return gw, stub
 }
 
-// TestRoutesToPayerNamedByCoverage is THE Slice-1 core deliverable: it proves — hermetically,
+// TestRoutesToPayerNamedByCoverage is THE core routing proof: it proves — hermetically,
 // through the REAL sealed-envelope round trip (recipientFor → Seal → Hub /route), not just
 // recipientFor's return value — that persona A's Coverage (CMSPayerIdentity, 00001) routes to
 // payer-a and persona B's DIFFERENT Coverage (00078) routes to payer-b. FR-G40 / AI-G11.
