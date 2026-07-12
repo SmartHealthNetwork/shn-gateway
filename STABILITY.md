@@ -50,6 +50,9 @@ expected to change shape as their consumer matures:
   version like any other consumer. The surface stays **evolving**, not yet a pinned stability
   tier — it will graduate once the Kit's inspector stabilizes.
 
+  **v0.26.0** adds the `sor.read` event kind (the gateway's `SystemOfRecord` reads, one event
+  per call) — an event-kind addition, covered by the evolving-contract clause above.
+
 - **`scenariodriver`** (`Config`, `Driver`, transport methods, builders, `Cards`/`ParseCards`):
   the UC-01…08 scenario-driving package. New in this release and **evolving** — signatures and
   return shapes may change in minor releases as the SHN Kit's daemon and the live conformance

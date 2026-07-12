@@ -231,6 +231,19 @@ func New(cfg Config) *Gateway {
 			panic("gateway: HubTransportPub required for role " + cfg.Role + " (mounts /substrate/inbound; hop-auth has no off state)")
 		}
 	}
+	// Observer seam: decorate the SoR BEFORE the Responder/Populator
+	// derivations below — both capture cfg.SoR at construction
+	// (NewSandboxResponder / newManagedPopulator), and decorating at the
+	// validator's later site would leave them reading the raw SoR forever.
+	// g does not exist yet here, so the decorator closes over Observer +
+	// Clock (already defaulted above).
+	// Idempotence guard: never double-wrap (double emission) if a caller
+	// passes an already-observed SoR back through New.
+	if cfg.Observer != nil && cfg.SoR != nil {
+		if _, already := cfg.SoR.(observingSoR); !already {
+			cfg.SoR = observingSoR{inner: cfg.SoR, observer: cfg.Observer, clock: cfg.Clock}
+		}
+	}
 	// Derive the default content seam from the injected Adjudicator (the
 	// partner-facing field), so a partner constructing the engine directly with an
 	// Adjudicator still works (STABILITY seam). EVERY payer leg now routes through
@@ -259,9 +272,12 @@ func New(cfg Config) *Gateway {
 	}
 	// Observer seam: decorate the validator so every $validate emits
 	// validate.result. Only when observing — the nil path keeps the
-	// validator untouched.
+	// validator untouched. Idempotence guard: never double-wrap (double
+	// emission) if a caller passes an already-observed cfg back through New.
 	if g.cfg.Observer != nil && g.cfg.Validator != nil {
-		g.cfg.Validator = observingValidator{inner: g.cfg.Validator, g: g}
+		if _, already := g.cfg.Validator.(observingValidator); !already {
+			g.cfg.Validator = observingValidator{inner: g.cfg.Validator, g: g}
+		}
 	}
 	// Build the inbound auth server only for a real-auth ingress (not under the
 	// test bypass — body-conformance tests don't register clients). app.go has

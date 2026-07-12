@@ -102,7 +102,7 @@ func TestHub_LastEventIDSkipsReplayed(t *testing.T) {
 }
 
 // TestHub_NonJSONPayloadStillDelivered: a garbage ingress body must not cost
-// the inspector the event (plan-review finding 1) — the payload re-encodes as
+// the inspector the event — the payload re-encodes as
 // a JSON string, the Detail says so, and the event still flows.
 func TestHub_NonJSONPayloadStillDelivered(t *testing.T) {
 	hub := NewHub()

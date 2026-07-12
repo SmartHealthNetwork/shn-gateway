@@ -34,11 +34,14 @@ import (
 //	ingress.received  a Da Vinci ingress call arrived (LegType = route tag, Payload = request body)
 //	ingress.responded the ingress call was answered (Detail = HTTP status, Payload = response body)
 //	validate.result   a $validate ran (Detail = "valid" | "invalid" | "validator unavailable")
+//	sor.read          the gateway read its data source (Op = SystemOfRecord method,
+//	                  Detail = "found"/"not found"/coverage status, Payload = the
+//	                  resource bytes for byte-returning reads)
 type ObserverEvent struct {
 	Time           time.Time       `json:"time"`
 	Kind           string          `json:"kind"`
 	LegType        string          `json:"legType,omitempty"`
-	Direction      string          `json:"direction,omitempty"` // "originate" | "ingress" | "validate"
+	Direction      string          `json:"direction,omitempty"` // "originate" | "ingress" | "validate" | "sor"
 	CorrelationID  string          `json:"correlationId,omitempty"`
 	Counterpart    string          `json:"counterpart,omitempty"`
 	AuthorityFrame string          `json:"authorityFrame,omitempty"`
@@ -131,3 +134,98 @@ func (rw *recordingWriter) Write(p []byte) (int, error) {
 // (Flush, Hijack, deadlines) pass through the tee — observing a route must
 // not disable streaming behavior its handler could otherwise use.
 func (rw *recordingWriter) Unwrap() http.ResponseWriter { return rw.ResponseWriter }
+
+// observingSoR decorates the configured SystemOfRecord so EVERY data-source
+// read — whatever the call site — emits one sor.read event. Results and
+// errors pass through untouched (neutrality is pinned by
+// TestObserver_ConformanceNeutral, which drives UC-03 with the decoration
+// active).
+//
+// Unlike observingValidator this cannot hold *Gateway: the decoration must
+// land BEFORE New()'s Responder/Populator derivations capture cfg.SoR
+// (see the install site in New()), and g does not
+// exist yet at that point. It closes over the Observer func and Clock
+// directly instead.
+type observingSoR struct {
+	inner    SystemOfRecord
+	observer func(ObserverEvent)
+	clock    func() time.Time
+}
+
+func (o observingSoR) emit(op, detail string, payload []byte) {
+	e := ObserverEvent{Time: o.clock(), Kind: "sor.read", Direction: "sor", Op: op, Detail: detail}
+	if len(payload) > 0 {
+		e.Payload = json.RawMessage(payload)
+	}
+	o.observer(e)
+}
+
+func sorFoundDetail(found bool) string {
+	if found {
+		return "found"
+	}
+	return "not found"
+}
+
+func (o observingSoR) ResolvePatient(memberID string) (string, Demo, bool) {
+	pci, demo, found := o.inner.ResolvePatient(memberID)
+	o.emit("ResolvePatient", sorFoundDetail(found), nil)
+	return pci, demo, found
+}
+
+func (o observingSoR) PatientFHIRRef(memberID string) (string, bool) {
+	ref, found := o.inner.PatientFHIRRef(memberID)
+	o.emit("PatientFHIRRef", sorFoundDetail(found), nil)
+	return ref, found
+}
+
+func (o observingSoR) CoverageInforce(memberID string) (bool, string) {
+	inforce, reason := o.inner.CoverageInforce(memberID)
+	detail := "inforce"
+	if !inforce {
+		detail = reason
+		if detail == "" {
+			detail = "not inforce"
+		}
+	}
+	o.emit("CoverageInforce", detail, nil)
+	return inforce, reason
+}
+
+func (o observingSoR) ClinicalContext(memberID string) (shnsdk.ClinicalContext, bool) {
+	cc, found := o.inner.ClinicalContext(memberID)
+	o.emit("ClinicalContext", sorFoundDetail(found), nil)
+	return cc, found
+}
+
+func (o observingSoR) SupplementalReport(memberID string) ([]byte, bool) {
+	report, found := o.inner.SupplementalReport(memberID)
+	o.emit("SupplementalReport", sorFoundDetail(found), report)
+	return report, found
+}
+
+func (o observingSoR) FacilityRecords(memberID string) (map[string][]byte, bool) {
+	records, found := o.inner.FacilityRecords(memberID)
+	// No payload: a multi-resource map is not one FHIR resource snapshot
+	// (accepted gap — additive later if the inspector needs it).
+	o.emit("FacilityRecords", sorFoundDetail(found), nil)
+	return records, found
+}
+
+func (o observingSoR) OpenOrder(memberID string) ([]byte, bool) {
+	orderJSON, found := o.inner.OpenOrder(memberID)
+	o.emit("OpenOrder", sorFoundDetail(found), orderJSON)
+	return orderJSON, found
+}
+
+func (o observingSoR) OpenCoverage(memberID string) ([]byte, bool) {
+	coverageJSON, found := o.inner.OpenCoverage(memberID)
+	o.emit("OpenCoverage", sorFoundDetail(found), coverageJSON)
+	return coverageJSON, found
+}
+
+func (o observingSoR) ResolveByReference(ref string) ([]byte, bool) {
+	resourceJSON, found := o.inner.ResolveByReference(ref)
+	o.emit("ResolveByReference", sorFoundDetail(found), resourceJSON)
+	return resourceJSON, found
+}
