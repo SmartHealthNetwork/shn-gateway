@@ -30,7 +30,8 @@ func (g *Gateway) handleDTRInbound(w http.ResponseWriter, r *http.Request, env s
 	}
 	if result.Status != 0 {
 		// e.g. 400 "unknown questionnaire canonical"
-		writeJSON(w, result.Status, map[string]string{"error": result.Message})
+		g.respondLegError(w, r, "payer-coverage", "dtr-questionnaire", "dtr-questionnaire-fetch",
+			env.Metadata.CorrelationID, result, tok.Subject, env.Metadata.Sender, "")
 		return
 	}
 	if status, msg := g.fenceResponseSubject("dtr-questionnaire-fetch", "", result); status != 0 {

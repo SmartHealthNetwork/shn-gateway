@@ -118,6 +118,15 @@ caches the layers.
 Once both are built once, later `docker compose up` runs come back in
 seconds.
 
+### Drive test traffic at this payer
+
+This bundle only *responds*; something has to originate a request for it to answer.
+Originate from a provider: run the **provider** evaluation bundle with `PAYER_HOLDER_ID`
+set to this payer's holder id (see [`../README.md`](../README.md) →
+"Point it at your own payer"). That bundle needs its own `--role provider` registration —
+a payer bundle can't originate, so you can't reuse this bundle's credentials to generate
+the traffic.
+
 ## Decisioning options
 
 This bundle ships one default, but the gateway supports three ways to

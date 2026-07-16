@@ -49,6 +49,9 @@ services:
   # (one bundle serves both self-tests): unset reproduces the committed
   # payer-directory.json default (conformance-payer, for provider self-eval); set routes
   # payor 00001 to YOUR payer holder for a payer self-test.
+  # NOTE: PAYER_HOLDER_ID only changes the ROUTE — this gateway stays ROLE=provider, so
+  # SHN_SECRETS is STILL a provider bundle (NOT your payer bundle). See README.md
+  # "Point it at your own payer (payer self-test)".
   payerdir:
     image: alpine
     entrypoint: ["/bin/sh", "/payerdir-init.sh"]

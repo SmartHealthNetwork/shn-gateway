@@ -26,8 +26,9 @@ import (
 // and the shadow FinalizeClaimUpdate on approval.
 // "Pure relay" is a WIRE property; the shadow finalize is an ORTHOGONAL Store side-effect.
 // NO EOB on the update leg. CRITICAL: Rollback:release is armed on EVERY post-Begin exit —
-// including partner failure — because the read-only post() returns a 502 WITHOUT Rollback; a
-// `return bad, nil` after Begin would strand the claim permanently.
+// including a no-response fault AND a relayed partner non-2xx — because post() never attaches
+// Rollback itself; a bare `return LegResult{}, err` or `return bad, nil` after Begin would strand
+// the claim permanently.
 func (n *nativeResponder) handlePASClaimUpdateNative(ctx context.Context, corrID, subjectPCI string, requestFHIR []byte) (LegResult, error) {
 	f, status, _ := parseConformantPASUpdateFacts(requestFHIR)
 	if status != 0 {
@@ -45,9 +46,12 @@ func (n *nativeResponder) handlePASClaimUpdateNative(ctx context.Context, corrID
 	}
 	release := func() { _ = n.store.ReleaseClaimUpdate(subjectPCI, related) }
 
-	body, bad := n.post(ctx, n.baseURL, "/Claim/$submit", requestFHIR, "PAS update")
+	body, bad, err := n.post(ctx, n.baseURL, "/Claim/$submit", requestFHIR, "PAS update")
+	if err != nil {
+		return LegResult{Rollback: release}, err // post-Begin fault MUST still release the claim
+	}
 	if bad.Status != 0 {
-		bad.Rollback = release // a post-Begin partner failure MUST release the claim
+		bad.Rollback = release // a post-Begin partner non-2xx MUST release the claim (relay path)
 		return bad, nil
 	}
 	// FR-G28: normalize the partner's Bundle into SHN canonical shape before parsing.
@@ -137,9 +141,12 @@ func (n *nativeResponder) handlePASClaimNative(ctx context.Context, corrID, subj
 	// ParseOrderProductCoding handles BOTH a ServiceRequest order and a DeviceRequest order (the
 	// HomeOxygen provider-data lane), so a DME DeviceRequest still yields its HCPCS EOB.
 	procSystem, cpt, cptDisplay, _ := shnsdk.ParseOrderProductCoding(s.srJSON) // best-effort; empty cpt → no EOB built below
-	body, bad := n.post(ctx, n.baseURL, "/Claim/$submit", requestFHIR, "PAS submit")
+	body, bad, err := n.post(ctx, n.baseURL, "/Claim/$submit", requestFHIR, "PAS submit")
+	if err != nil {
+		return LegResult{}, err // no-response fault → engine 500 → "hub routing failed"
+	}
 	if bad.Status != 0 {
-		return bad, nil
+		return bad, nil // upstream non-2xx → relayable LegResult (ResponseFHIR carries the body)
 	}
 	norm, lr := normalizePASResponse(body)
 	if lr.Status != 0 {
@@ -263,7 +270,10 @@ func (n *nativeResponder) pollClaimResponseUntilApproved(ctx context.Context, cl
 		attempts = 1
 	}
 	for i := 0; i < attempts; i++ {
-		body, bad := n.get(ctx, n.baseURL, "/ClaimResponse/"+claimResponseID, "PAS re-query")
+		body, bad, err := n.get(ctx, n.baseURL, "/ClaimResponse/"+claimResponseID, "PAS re-query")
+		if err != nil {
+			return nil, fmt.Errorf("PAS re-query ClaimResponse/%s: %w", claimResponseID, err)
+		}
 		if bad.Status != 0 {
 			return nil, fmt.Errorf("PAS re-query ClaimResponse/%s: upstream status %d", claimResponseID, bad.Status)
 		}

@@ -29,8 +29,11 @@ import (
 // ObserverEvent is one structured observation at the gateway edge. Kinds:
 //
 //	leg.originated    an origination leg is about to be sent (Payload = request cleartext)
-//	leg.response      the origination leg's verified, decrypted response (Payload = response cleartext)
-//	leg.failed        the origination leg errored (Detail = error text)
+//	leg.response      the origination leg's verified, decrypted response (Payload = response
+//	                  cleartext; Status set when the recipient's app-level answer was a
+//	                  relayed non-2xx, omitted for an ordinary 2xx response)
+//	leg.failed        the origination leg errored for a reason OTHER than a relayed
+//	                  recipient response (Detail = error text)
 //	ingress.received  a Da Vinci ingress call arrived (LegType = route tag, Payload = request body)
 //	ingress.responded the ingress call was answered (Detail = HTTP status, Payload = response body)
 //	validate.result   a $validate ran (Detail = "valid" | "invalid" | "validator unavailable")
@@ -46,6 +49,7 @@ type ObserverEvent struct {
 	Counterpart    string          `json:"counterpart,omitempty"`
 	AuthorityFrame string          `json:"authorityFrame,omitempty"`
 	Op             string          `json:"op,omitempty"`
+	Status         int             `json:"status,omitempty"` // relayed recipient app-status (non-2xx relay)
 	Payload        json.RawMessage `json:"payload,omitempty"`
 	Detail         string          `json:"detail,omitempty"`
 }

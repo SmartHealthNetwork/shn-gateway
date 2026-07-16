@@ -354,16 +354,40 @@ func TestNativeUpdate_ApprovedFinalizes(t *testing.T) {
 		}
 	})
 
-	t.Run("partner 500 AFTER Begin -> 502 WITH Rollback (no strand)", func(t *testing.T) {
+	// Superseded assertion (pre-relay-recipient-response): a post-Begin partner non-2xx no
+	// longer collapses to a generic 502 — its REAL status + body relay verbatim.
+	// The Rollback guard (no strand) is unchanged and still the point of this case.
+	t.Run("partner 500 AFTER Begin -> relayed verbatim WITH Rollback (no strand)", func(t *testing.T) {
 		srv := stubPartnerSrv(t, http.StatusInternalServerError, []byte(`boom`))
 		s := seedPended()
 		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", s, fixedClock)
 		res, err := n.Handle(context.Background(), "pas-claim-update", "corr-1", pci, bundle)
-		if err != nil || res.Status != http.StatusBadGateway {
-			t.Fatalf("want 502, got status=%d err=%v", res.Status, err)
+		if err != nil || res.Status != http.StatusInternalServerError {
+			t.Fatalf("want 500 (relayed verbatim), got status=%d err=%v", res.Status, err)
+		}
+		if string(res.ResponseFHIR) != "boom" {
+			t.Fatalf("want the partner's body relayed verbatim, got %q", res.ResponseFHIR)
 		}
 		if res.Rollback == nil {
 			t.Fatalf("CRITICAL: a post-Begin partner failure MUST carry Rollback or the claim strands")
+		}
+	})
+
+	// A TRUE no-response fault (dial failure, distinct from the relayed-partner-500 case above)
+	// must still carry Rollback: n.post's fault branch returns (nil, LegResult{}, err), and
+	// handlePASClaimUpdateNative's `if err != nil { return LegResult{Rollback: release}, err }`
+	// (nativepas.go ~line 51) is the ONLY place that attaches Rollback on that path — post()
+	// itself never does. If that branch regressed to a bare `return LegResult{}, err`, this
+	// subtest's Rollback assertion goes red.
+	t.Run("partner UNREACHABLE after Begin -> error return still carries Rollback (no strand)", func(t *testing.T) {
+		s := seedPended()
+		n := NewNativeResponder(&http.Client{}, "http://127.0.0.1:1", "shn-order-select", s, fixedClock)
+		res, err := n.Handle(context.Background(), "pas-claim-update", "corr-1", pci, bundle)
+		if err == nil {
+			t.Fatal("a true no-response fault must surface as an error return, not a relayable status")
+		}
+		if res.Rollback == nil {
+			t.Fatalf("CRITICAL: a post-Begin true fault MUST carry Rollback or the claim strands")
 		}
 	})
 

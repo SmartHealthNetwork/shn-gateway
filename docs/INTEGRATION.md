@@ -10,6 +10,7 @@ For the field-by-field reference of every environment variable mentioned
 below, see [CONFIGURATION.md](CONFIGURATION.md).
 
 - [The common case — point at your FHIR server (no code)](#the-common-case--point-at-your-fhir-server-no-code)
+- [Authenticating to your backend (SMART Backend Services)](#authenticating-to-your-backend-smart-backend-services)
 - [Provider-data origination](#provider-data-origination)
 - [Native Da Vinci ingress](#native-da-vinci-ingress)
 - [A non-FHIR backend (custom connector)](#a-non-fhir-backend-custom-connector)
@@ -36,19 +37,85 @@ docker run --rm \
   -e FHIR_DATA_URL=https://fhir.your-org.example.com/r4 \
   -e FHIR_TOKEN_URL=https://fhir.your-org.example.com/oauth2/token \
   -e FHIR_CLIENT_ID=shn-gateway \
-  -e FHIR_CLIENT_KEY="$(cat client-key.pem)" \
+  -e FHIR_CLIENT_KEY=/etc/shn/client-key.pem \
   -e FHIR_CLIENT_ALG=ES384 \
   -e SHN_SECRETS=/etc/shn/bundle \
   -v "$PWD/provider-bundle:/etc/shn/bundle:ro" \
+  -v "$PWD/client-key.pem:/etc/shn/client-key.pem:ro" \
   -p 8080:8080 \
   shn-gateway
 ```
+
+`FHIR_CLIENT_KEY` is a **path to a mounted PEM file**, not the key text. See
+[Authenticating to your backend](#authenticating-to-your-backend-smart-backend-services)
+for creating that key pair and registering its public key with your server.
 
 Trust anchors, the Hub/authz/registrar, and the consent/audit/PHG planes are all
 resolved from `SHN_DISCOVERY_URL` — nothing else to wire. Payer routing resolves
 off your own patients' Coverage by default (`FeedPayerRouter`, see
 [CONFIGURATION.md](CONFIGURATION.md#per-role)); set `PAYER_DIRECTORY` only if you
 need the static override.
+
+## Authenticating to your backend (SMART Backend Services)
+
+Wherever the gateway connects **out to a server you run** — your FHIR system of
+record (`FHIR_CLIENT_*`, above) or a Da Vinci payer endpoint in
+[native-forward mode](#native-forward-payer-mode) (`PAYER_DAVINCI_*`) — it
+authenticates the same way: as a **SMART Backend Services** client presenting a
+signed JWT assertion (`private_key_jwt`).
+
+This is **asymmetric-key only**. The gateway signs each token request with a
+private key (ES384 or RS384); it has **no shared-secret (`client_secret`)
+option**. If your authorization server can issue asymmetric credentials, register
+a public key on that client for SMART Backend Services and point the gateway at
+your private key (below). A server that can issue **only** a shared secret is not
+supported by the gateway's built-in outbound auth.
+
+**The client identity is yours, not the network's.** The gateway is just a
+client of *your* authorization server, exactly like any other backend
+integration. Nothing is issued by the network operator, and the gateway does not
+host a JWKS endpoint: your **public** key is registered at your authorization
+server, and the **private** key never leaves your environment. Three steps:
+
+1. **Generate an asymmetric key pair** — EC P-384 (for `ES384`) or RSA (for
+   `RS384`). For example, with `openssl`:
+
+   ```sh
+   # EC P-384 private key — use with ALG=ES384
+   openssl ecparam -name secp384r1 -genkey -noout -out client-key.pem
+   # the matching public key, to register with your authorization server
+   openssl ec -in client-key.pem -pubout -out client-pub.pem
+   ```
+
+2. **Register the public key** (`client-pub.pem`) with your authorization server
+   as this client's key, and note the **client id** it is registered under. Most
+   servers take the public key as a JWK / JWK Set — convert the PEM if yours
+   does.
+
+3. **Point the gateway at the private key and that client id.** The
+   `PAYER_DAVINCI_*` names are shown here; the `FHIR_CLIENT_*` set is identical:
+
+   ```sh
+   -e PAYER_DAVINCI_TOKEN_URL=https://auth.your-backend.example/oauth/token \
+   -e PAYER_DAVINCI_CLIENT_ID=<the client id from step 2> \
+   -e PAYER_DAVINCI_CLIENT_KEY=/etc/shn/client-key.pem \
+   -e PAYER_DAVINCI_CLIENT_ALG=ES384 \
+   -v "$PWD/client-key.pem:/etc/shn/client-key.pem:ro"
+   ```
+
+Worth checking:
+
+- **`*_CLIENT_KEY` is a file path, not the key text.** Mount the PEM file into
+  the container and give its path; an inline PEM string is not read as a key.
+- **`aud`.** The gateway sets the assertion's `aud` to your `*_TOKEN_URL`, so
+  that must be the exact audience your authorization server expects.
+- **Scope.** The gateway requests `*_SCOPE` (default `system/*.read`). Make sure
+  it is a scope your server actually grants this client, in the scope syntax it
+  expects. `system/*.read` covers the read-only legs (coverage eligibility, CRD,
+  DTR); if you turn on PAS native forwarding (`PAYER_DAVINCI_PAS_NATIVE=true`),
+  widen it to include the write a claim submission needs.
+- **Optional `*_CLIENT_KID`.** Set it only if your server pins a specific key id
+  in the assertion header.
 
 ## Provider-data origination
 
@@ -121,7 +188,9 @@ forward to your partner. A payer Store (`SHN_STORE_DATABASE_URL` or holdersim) i
 required when `PAYER_DAVINCI_PAS_NATIVE=true` — `build()` fails at startup otherwise.
 
 See [CONFIGURATION.md](CONFIGURATION.md#native-forward-payer-mode-payer_davinci_)
-for the full field reference, including the all-or-nothing credential rule.
+for the full field reference, including the all-or-nothing credential rule, and
+[Authenticating to your backend](#authenticating-to-your-backend-smart-backend-services)
+to set up the `PAYER_DAVINCI_CLIENT_*` credentials.
 
 The engine continues to own authority enforcement regardless of native-forward
 mode: every forwarded leg is still independently authorized, sealed, and audited.

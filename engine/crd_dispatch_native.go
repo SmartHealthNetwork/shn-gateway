@@ -190,7 +190,8 @@ func (g *Gateway) handleCRDDispatchInbound(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if result.Status != 0 {
-		writeJSON(w, result.Status, map[string]string{"error": result.Message})
+		g.respondLegError(w, r, "payer-coverage", "crd-dispatch-cards", "crd-order-dispatch",
+			env.Metadata.CorrelationID, result, tok.Subject, env.Metadata.Sender, "")
 		return
 	}
 	g.respondLeg(w, r, "payer-coverage", "crd-dispatch-cards", "crd-order-dispatch", env.Metadata.CorrelationID, result.ResponseFHIR, tok.Subject, env.Metadata.Sender, "")

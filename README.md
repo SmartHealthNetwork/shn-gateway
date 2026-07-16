@@ -257,7 +257,8 @@ exchanges respectively.)
    own to stand up.
 2. **Native-forward to your own Da Vinci endpoint** (`PAYER_DAVINCI_*`) — the
    gateway forwards CRD/DTR/PAS to a Da Vinci-conformant service you already
-   run.
+   run, authenticating to it as a SMART Backend Services client (see
+   [Authenticating to your backend](docs/INTEGRATION.md#authenticating-to-your-backend-smart-backend-services)).
 3. **A custom `engine.Config.Adjudicator`** — the stable seam for your own
    coverage and medical-necessity policy, for decisioning that doesn't speak
    Da Vinci natively. See [`STABILITY.md`](STABILITY.md).
@@ -330,6 +331,7 @@ role-specific — is [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md).
 | Provider originate returns `recipient "…" not in registry` | The payer holder resolved from the member's Coverage (feed `payerIds`, or your `PAYER_DIRECTORY` override) isn't a registered holder, or the registrar feed hasn't propagated yet. Confirm the counterpart appears in `shn clients` / the `/holders` feed. |
 | Provider originate returns `422 no payer identifier on member coverage` / `no registered payer for identifier …` | Coverage-derived routing found no route (FR-G41; no default): the member's Coverage carries no parseable payor identity, or no `role=payer` holder in the feed claims that identity (and no `PAYER_DIRECTORY` override maps it). Ensure the target payer holder published that `{system,value}` in its feed `payerIds` (payer-onboarding path), or set a `PAYER_DIRECTORY` override row. An identity claimed by **two** holders also fails closed (ambiguous — `AI-G12`). |
 | Provider originate returns `502` (routing / response sender mismatch) | The counterpart isn't reachable or didn't respond as itself. Check the payer gateway is running and its registered `--base-url` resolves publicly to it. |
+| Provider originate returns `502 {"error":"authorization denied"}` | Wrong bundle for the role. This gateway is `ROLE=provider` and *originates* the request, so its `SHN_SECRETS` must be a `--role provider` bundle — authority binds to the caller's **registered role**, and a payer bundle can't originate a provider leg (the Authorization Framework denies it). Register a provider client and mount that bundle. A payer self-test needs two registrations — see [Point it at your own payer](deploy/eval/README.md#point-it-at-your-own-payer-payer-self-test). |
 | Payer never receives a delivery | The Hub can't reach the payer's `--base-url`. It must be a public https endpoint fronting `:8080` and must not redirect on `/substrate/inbound`. Re-check the tunnel/load balancer. |
 | Payer returns `403 missing or invalid hub assertion` | The request didn't come from the Hub (e.g. a direct curl to `/substrate/inbound`). Only the Hub can deliver; originate from a provider instead. |
 | Scenario call returns `400 unknown branch` / `unknown member` | The originate body must be `{"branch":"covered"}` or `{"branch":"notcovered"}`; the member must exist in the active system of record (the built-in stub carries example personas). |

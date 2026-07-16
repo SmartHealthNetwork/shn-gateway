@@ -47,6 +47,30 @@ func buildQuestionnairePackageRequest(canonical string, coverage json.RawMessage
 	return json.Marshal(params)
 }
 
+// dtrLegRequest is the gateway-internal wire shape of the dtr-questionnaire-fetch leg. It is a
+// SUPERSET of shnsdk.QuestionnaireFetchRequest: Canonical + Coverage match the SDK type's JSON
+// (so the sandbox / br-payer / adjudicator paths that unmarshal the SDK type are unaffected, and
+// with an empty Order the marshal is byte-identical), plus Order — the CRD-updated ServiceRequest
+// a partner requires as the `$questionnaire-package` `order` param (its questionnaire is
+// keyed off the order's coverage-assertion-id; it has no `questionnaire` param support). Order is
+// defined here, not in the published SDK, so the DEPLOYED payer gateway reads it without an SDK bump.
+type dtrLegRequest struct {
+	Canonical string          `json:"canonical"`
+	Coverage  json.RawMessage `json:"coverage,omitempty"`
+	Order     json.RawMessage `json:"order,omitempty"`
+}
+
+// buildQuestionnairePackageOrderRequest builds an order-driven $questionnaire-package Parameters
+// (the order-driven lane): the CRD-updated `order` (carrying the coverage-assertion-id) + the required
+// `coverage`. No `questionnaire` canonical — such a partner 500s without the order and has no canonical path.
+func buildQuestionnairePackageOrderRequest(order, coverage json.RawMessage) ([]byte, error) {
+	parameter := []map[string]any{{"name": "order", "resource": order}}
+	if len(coverage) > 0 {
+		parameter = append(parameter, map[string]any{"name": "coverage", "resource": coverage})
+	}
+	return json.Marshal(map[string]any{"resourceType": "Parameters", "parameter": parameter})
+}
+
 // unwrapQuestionnairePackage normalises the two $questionnaire-package response shapes:
 //
 //   - br-payer (a8bece4) returns a Parameters resource profiled on

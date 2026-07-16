@@ -120,9 +120,9 @@ See [INTEGRATION.md](INTEGRATION.md) for how these fit together.
 | `FHIR_DATA_URL` | FHIR R4 base URL for your system of record. **Omit to use the built-in synthetic stub** (seeded with example personas, so you can run end to end with no backend). |
 | `FHIR_TOKEN_URL` | SMART Backend Services token endpoint, if your FHIR server requires authenticated access. Requires the client quad below. |
 | `FHIR_CLIENT_ID` | SMART client id. |
-| `FHIR_CLIENT_KEY` | SMART client private key (PEM). |
+| `FHIR_CLIENT_KEY` | Path to the SMART client's private-key PEM file (the value is a path, not the key text — mount the file into the container). |
 | `FHIR_CLIENT_ALG` | `ES384` or `RS384`. |
-| `FHIR_CLIENT_SCOPE` | Requested scope. Default `system/*.read`. |
+| `FHIR_CLIENT_SCOPE` | Requested scope. Default `system/*.read` — must be a scope your server grants this client. |
 | `FHIR_CLIENT_KID` | Key id for the client assertion JWK, if your server requires it. |
 | `SHN_STORE_DATABASE_URL` | Postgres DSN for durable claim-state storage. Omit for in-memory (non-durable across restarts). |
 
@@ -173,7 +173,10 @@ synthetic placeholder).
 ## Native-forward payer mode (`PAYER_DAVINCI_*`)
 
 See [INTEGRATION.md](INTEGRATION.md#native-forward-payer-mode) for what native-forward
-mode does and when to use it.
+mode does and when to use it, and
+[Authenticating to your backend](INTEGRATION.md#authenticating-to-your-backend-smart-backend-services)
+for how to set up the SMART Backend Services credentials (asymmetric
+`private_key_jwt`, ES384/RS384 — there is no shared-secret option).
 
 | Env var | Description |
 |---|---|
@@ -181,15 +184,16 @@ mode does and when to use it.
 | `PAYER_DAVINCI_CDS_BASE_URL` | Base URL for the partner's CDS Hooks (CRD) posts when they are **not** co-located with the FHIR base — e.g. a payer that serves `/cds-services` at the root but FHIR ops under `/fhir`. Empty ⇒ CDS uses `PAYER_DAVINCI_BASE_URL`. |
 | `PAYER_DAVINCI_TOKEN_URL` | SMART Backend Services token endpoint for the partner. Required if the partner requires authentication. |
 | `PAYER_DAVINCI_CLIENT_ID` | SMART client id for the partner. Required when `PAYER_DAVINCI_TOKEN_URL` is set. |
-| `PAYER_DAVINCI_CLIENT_KEY` | SMART client private key (PEM path or inline PEM). Required when `PAYER_DAVINCI_TOKEN_URL` is set. |
+| `PAYER_DAVINCI_CLIENT_KEY` | Path to the SMART client's private-key PEM file (the value is a path, not the key text — mount the file into the container). Required when `PAYER_DAVINCI_TOKEN_URL` is set. |
 | `PAYER_DAVINCI_CLIENT_ALG` | `ES384` or `RS384`. Required when `PAYER_DAVINCI_TOKEN_URL` is set. |
-| `PAYER_DAVINCI_SCOPE` | Requested scope. Default `system/*.read`. |
+| `PAYER_DAVINCI_SCOPE` | Requested scope the gateway asks your token endpoint for. Default `system/*.read` (covers the read-only legs). Must be a scope your authorization server grants this client; widen it if you enable `PAYER_DAVINCI_PAS_NATIVE`. |
 | `PAYER_DAVINCI_CLIENT_KID` | Key id for the client assertion JWK, if the partner requires it. |
 | `PAYER_DAVINCI_PAS_NATIVE` | `true` to forward PAS submit/update legs to the partner's `/Claim/$submit`. Default `false` (built-in PAS fallback). Requires a payer Store. |
 | `PAYER_DAVINCI_CRD_SERVICE_ID` | Escape-hatch override for the partner's order-select CDS service id. Empty ⇒ the gateway fetches `{base}/cds-services` at boot and auto-selects the single order-select service (fails closed if none, or ambiguous). Set it when the partner's CRD service isn't uniquely discoverable. |
 | `PAYER_DAVINCI_CRD_HOOK` | CDS Hooks hook value to stamp on the CRD request before forwarding (e.g. a partner whose service expects `order-sign`). Empty ⇒ forward the originator's hook verbatim. |
 | `PAYER_DAVINCI_DISPATCH_SERVICE_ID` | The partner's CDS service id for the `crd-order-dispatch` leg. **Empty ⇒ the dispatch leg fails closed (502)** — set it if your flow uses order-dispatch. |
 | `PAYER_DAVINCI_DISPATCH_HOOK` | CDS Hooks hook value to stamp on the order-dispatch request before forwarding. Empty ⇒ forward the originator's hook verbatim. |
+| `PAYER_DAVINCI_CRD_COVERAGE_BUNDLE` | `true` to wrap the CRD request's bare `prefetch.coverage` in a searchset `Bundle` on egress — for a partner whose `order-sign` `coverage` prefetch is a search template that requires a Bundle (a bare `Coverage` returns 412). Default off ⇒ forwarded verbatim. |
 
 **All-or-nothing rule:** if `PAYER_DAVINCI_TOKEN_URL` is set, then
 `PAYER_DAVINCI_CLIENT_ID`, `PAYER_DAVINCI_CLIENT_KEY`, and
@@ -207,3 +211,40 @@ tradeoff.
 |---|---|
 | `PROVIDER_DTR_NATIVE` | `true` to forward DTR population to an SDC `$populate` engine instead of the managed populator. Default `false`. |
 | `PROVIDER_DTR_POPULATE_URL` | The SDC `Questionnaire/$populate` endpoint. Required when `PROVIDER_DTR_NATIVE=true`. |
+
+## Relay a recipient's error response (`RESPONDER_RELAY_ERRORS`)
+
+When your gateway is the **recipient** of an exchange (it answers a request routed
+through the Hub — the payer/responder side), an application-level failure from the far
+end — e.g. the payer's real `502` + `OperationOutcome`, or a `422` amendment rejection —
+is normally collapsed into a generic `502 {"error":"hub routing failed"}` at the
+requester's edge, because a non-`2xx` answer to the Hub is treated as a routing failure.
+
+`RESPONDER_RELAY_ERRORS=1` instead **seals the recipient's non-`2xx` answer inside the
+sealed response leg** and relays it to the requester **verbatim** (its real status + body).
+The answer rides *inside* the ciphertext, so the Hub stays payload-blind — it records the
+leg as `answered` over an opaque hash and never sees the status or body. Success answers
+are unchanged on the wire (bare FHIR, implicit `200`). A true **transport fault** (the far
+end is unreachable, or the gateway's own build/dial/read fails) is *not* an application
+answer and still surfaces as `"hub routing failed"` — only a response the far end actually
+produced is relayed.
+
+| Env var | Description |
+|---|---|
+| `RESPONDER_RELAY_ERRORS` | `1` or `true` to relay a recipient's non-`2xx` application answer verbatim through the sealed response leg. Default off (legacy `"hub routing failed"`). |
+
+**Rollout order — originators (requesters) before recipients (payers).** A requester
+gateway must be running this release to *unwrap* a relayed answer; an older requester would
+not understand it. So enable this flag **only after every originator gateway in your mesh is
+on this release**. The intended lifecycle:
+
+1. **Ship with the flag off.** Every gateway on this release is already *unwrap-tolerant* as
+   a requester (it surfaces a relayed answer if it receives one) — that ships first,
+   default-off, so nothing changes on the wire yet.
+2. **Confirm all originators are updated.** Verify every requester gateway that routes to
+   this recipient is on this release.
+3. **Turn the flag on** at the recipient(s) to begin relaying real answers.
+4. **Remove the flag** one release later, once relaying is the established default.
+
+The SHN Kit runner is co-updated for this change (it classifies the relayed not-a-member
+outcome). Keep the gateway and the Kit on matching releases when you enable the flag.

@@ -238,7 +238,8 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 		}
 	}()
 	if result.Status != 0 {
-		writeJSON(w, result.Status, map[string]string{"error": result.Message})
+		g.respondLegError(w, r, "payer-coverage", "pas-response", "pas-claim",
+			env.Metadata.CorrelationID, result, tok.Subject, env.Metadata.Sender, "")
 		return
 	}
 	// (C) outbound fence — two-predicate, namespace-aware: member-fence
@@ -339,7 +340,8 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if result.Status != 0 {
-		writeJSON(w, result.Status, map[string]string{"error": result.Message})
+		g.respondLegError(w, r, "payer-coverage", "pas-update-response", "pas-claim-update",
+			env.Metadata.CorrelationID, result, tok.Subject, env.Metadata.Sender, "")
 		return
 	}
 	// (C) outbound fence — two-predicate, namespace-aware: member-fence

@@ -6,6 +6,7 @@ package engine
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -139,6 +140,14 @@ func (g *Gateway) handleCRDIngress(w http.ResponseWriter, r *http.Request) {
 		Content: Content{WorkstreamType: workstreamPA, Bytes: sealed}, Subjects: []string{pci}}
 	if err != nil {
 		_ = g.exchanges.AppendLeg(ex.ID, leg.Project(child, "error"))
+		var re *RelayError
+		if errors.As(err, &re) {
+			// The recipient answered non-2xx — relay it verbatim.
+			w.Header().Set("Content-Type", "application/fhir+json")
+			w.WriteHeader(re.Status)
+			_, _ = w.Write(re.Body)
+			return
+		}
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
@@ -172,9 +181,9 @@ func (g *Gateway) handleDTRIngress(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "read body failed"})
 		return
 	}
-	canonical, patientRef, coverage, ok := dtrFromPackageParams(body)
+	canonical, patientRef, coverage, order, ok := dtrFromPackageParams(body)
 	if !ok {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing questionnaire canonical"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing questionnaire canonical or order"})
 		return
 	}
 	// Per-patient authz binding when the package carries a patient (the connectathon case); the
@@ -203,13 +212,16 @@ func (g *Gateway) handleDTRIngress(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
-	// Carry the provider's inbound Coverage VERBATIM through the leg (FR-G28): the
-	// native-forward rebuild re-emits it as the payer-required `coverage` parameter. nil
-	// coverage marshals away (omitempty) → byte-identical to the canonical-only request, so
-	// the demo path is unchanged. The payer-gw never fabricates coverage (non-aggregation).
-	fetch, err := json.Marshal(shnsdk.QuestionnaireFetchRequest{
+	// Carry the provider's inbound Coverage (and, for the order-driven lane, the CRD-updated `order`)
+	// VERBATIM through the leg (FR-G28): the native-forward rebuild re-emits them as the
+	// payer-required `coverage` / `order` parameters. nil coverage/order marshal away (omitempty),
+	// so with only a canonical the bytes are IDENTICAL to the SDK QuestionnaireFetchRequest marshal
+	// — the sandbox / br-payer / 8-UC demo path is byte-unchanged. Non-aggregation: the payer-gw
+	// never fabricates coverage or an order; both are provider-originated and carried through.
+	fetch, err := json.Marshal(dtrLegRequest{
 		Canonical: shnsdk.StripCanonicalVersion(canonical),
 		Coverage:  coverage,
+		Order:     order,
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build dtr fetch failed"})
@@ -223,6 +235,14 @@ func (g *Gateway) handleDTRIngress(w http.ResponseWriter, r *http.Request) {
 		Content: Content{WorkstreamType: workstreamPA, Bytes: fetch}, Subjects: subjectsOf(pci)}
 	if err != nil {
 		_ = g.exchanges.AppendLeg(ex.ID, leg.Project(child, "error"))
+		var re *RelayError
+		if errors.As(err, &re) {
+			// The recipient answered non-2xx — relay it verbatim.
+			w.Header().Set("Content-Type", "application/fhir+json")
+			w.WriteHeader(re.Status)
+			_, _ = w.Write(re.Body)
+			return
+		}
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
@@ -307,6 +327,14 @@ func (g *Gateway) handlePASIngress(w http.ResponseWriter, r *http.Request) {
 		Content: Content{WorkstreamType: workstreamPA, Bytes: body}, Subjects: []string{pci}}
 	if err != nil {
 		_ = g.exchanges.AppendLeg(ex.ID, legProj.Project(child, "error"))
+		var re *RelayError
+		if errors.As(err, &re) {
+			// The recipient answered non-2xx — relay it verbatim.
+			w.Header().Set("Content-Type", "application/fhir+json")
+			w.WriteHeader(re.Status)
+			_, _ = w.Write(re.Body)
+			return
+		}
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}

@@ -178,7 +178,8 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 	// result.Status carries a connector-signalled HTTP outcome (e.g. PAS 409/422);
 	// the eligibility leg never sets it today, but the shared pipeline shape checks it.
 	if result.Status != 0 {
-		writeJSON(w, result.Status, map[string]string{"error": result.Message})
+		g.respondLegError(w, r, "payer-coverage", "eligibility-response", "coverage-eligibility",
+			env.Metadata.CorrelationID, result, tok.Subject, env.Metadata.Sender, "")
 		return
 	}
 	if status, msg := g.fenceResponseSubject("coverage-eligibility", boundPatientRef, result); status != 0 {

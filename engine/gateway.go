@@ -111,6 +111,12 @@ type Config struct {
 	// engine does NOT foreign-$validate it. false ⇒ the sandbox path (SHN's own
 	// US-Core-resolvable package), which still egress-$validates byte-identically. FR-G28.
 	PayerDavinciNative bool
+	// RelayRecipientErrors gates the response-leg relay of a recipient's NON-2xx
+	// answer. Off (default): a non-2xx is a bare writeJSON →
+	// non-2xx-to-Hub → "hub routing failed" (legacy). On: the answer is sealed as
+	// a {status,body} wrapper and relayed verbatim. Off by default so PROVIDERS
+	// (unwrap-tolerant) upgrade before PAYERS enable the wrap.
+	RelayRecipientErrors bool
 	// Populator is the DTR population seam (provider-local). Normally left nil and
 	// DEFAULTED to the managed backend (today's FillQuestionnaire) in New; the native
 	// pass-through backend is injected by config (PROVIDER_DTR_NATIVE). A test MAY
@@ -667,6 +673,17 @@ func (g *Gateway) roundTrip(ctx context.Context, r *http.Request, recipient, req
 	})
 	respPayload, err := g.roundTripInner(ctx, r, recipient, reqFrame, respFrame, op, respOp, txType, scope, pci, correlationID, custodian, payload)
 	if err != nil {
+		var re *RelayError
+		if errors.As(err, &re) {
+			// The recipient answered non-2xx — observed as a response (with status), not a failure.
+			g.observe(ObserverEvent{
+				Kind: "leg.response", Direction: "originate", LegType: txType,
+				CorrelationID: correlationID, Counterpart: recipient,
+				AuthorityFrame: respFrame, Op: respOp, Status: re.Status,
+				Payload: json.RawMessage(re.Body),
+			})
+			return nil, err
+		}
 		g.observe(ObserverEvent{
 			Kind: "leg.failed", Direction: "originate", LegType: txType,
 			CorrelationID: correlationID, Counterpart: recipient, Detail: err.Error(),
@@ -782,6 +799,18 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 	respPayload, err := shnsdk.Open(respEnv, g.cfg.Identity.EncPub, g.cfg.Identity.EncPriv)
 	if err != nil {
 		return nil, fmt.Errorf("response decryption failed")
+	}
+	// A recipient's NON-2xx answer arrives as a sealed {status,body} wrapper; surface it
+	// as the typed *RelayError sentinel so every OriginateLeg caller's `if err != nil`
+	// aborts the exchange, and the ingress handler can unwrap it. A
+	// bare/200 payload is a success body, returned as before. Keyed on `wrapped` alone so
+	// wrap (respondLegError) and unwrap stay symmetric: respondLegError only wraps non-2xx,
+	// but even a stray wrapped-2xx yields the body here, never the wrapper JSON.
+	if status, body, wrapped := unwrapRelayResponse(respPayload); wrapped {
+		if status/100 != 2 {
+			return nil, &RelayError{Status: status, Body: body}
+		}
+		return body, nil
 	}
 	return respPayload, nil
 }
@@ -912,6 +941,40 @@ func writeLeg(w http.ResponseWriter, out []byte) {
 func (g *Gateway) respondLeg(w http.ResponseWriter, r *http.Request, respFrame, respOp, txType, inboundCorrID string, payload []byte, subjectPCI, requester, consentRef string) {
 	out, status, msg := g.buildResponseLeg(r, respFrame, respOp, txType, inboundCorrID, payload, subjectPCI, requester, consentRef)
 	if status != 0 {
+		writeJSON(w, status, map[string]string{"error": msg})
+		return
+	}
+	writeLeg(w, out)
+}
+
+// respondLegError seals a recipient's NON-2xx answer as a {status,body} wrapper and
+// relays it 200-to-Hub (verbatim) — the error-branch sibling of
+// respondLeg. buildResponseLeg is reused unchanged: the wrapper is just its payload.
+// Flag off ⇒ the legacy bare non-2xx (which the Hub turns into "hub routing failed").
+// Callers MUST invoke this in the leg handler's `if result.Status != 0` branch, which
+// returns BEFORE the R-7 fence, R-8 $validate, and PAS Commit() — a rejected claim
+// must not commit, and its armed defer-rollback must still fire.
+func (g *Gateway) respondLegError(w http.ResponseWriter, r *http.Request, respFrame, respOp, txType, corrID string, result LegResult, subjectPCI, requester, consentRef string) {
+	if !g.cfg.RelayRecipientErrors {
+		writeJSON(w, result.Status, map[string]string{"error": result.Message})
+		return
+	}
+	// Only NON-2xx answers are wrapped: roundTripInner unwraps a wrapper into a
+	// *RelayError and keys "is this an error" on status/100 != 2. A 2xx-nonzero Status here
+	// would be a connector misuse; route it to the bare success seal so the two ends stay
+	// keyed identically (wrapped ⟹ non-2xx). Keeps wrap (responder) and unwrap (originator)
+	// from disagreeing.
+	if result.Status/100 == 2 {
+		g.respondLeg(w, r, respFrame, respOp, txType, corrID, result.ResponseFHIR, subjectPCI, requester, consentRef)
+		return
+	}
+	body := result.ResponseFHIR
+	if len(body) == 0 {
+		body, _ = json.Marshal(map[string]string{"error": result.Message})
+	}
+	wrapped := wrapRelayResponse(result.Status, body)
+	out, status, msg := g.buildResponseLeg(r, respFrame, respOp, txType, corrID, wrapped, subjectPCI, requester, consentRef)
+	if status != 0 { // seal/authz BUILD failure (not the relayed app-status) → gateway fault
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}

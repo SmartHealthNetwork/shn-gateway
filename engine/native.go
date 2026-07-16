@@ -29,6 +29,8 @@ const crdHook = "order-select"
 
 const maxPartnerBody = 8 << 20 // 8 MiB cap on a partner response body
 
+const relayBodyCap = 6 << 20 // 6 MiB — headroom under the 8 MiB MaxResponseBytes for seal + wrapper
+
 type nativeResponder struct {
 	client               *http.Client
 	baseURL              string // FHIR base ($questionnaire-package, $submit, CoverageEligibilityRequest)
@@ -37,8 +39,16 @@ type nativeResponder struct {
 	crdHookOverride      string // when set, the request hook is rewritten to this before CRD forward (FR-G26; br-payer's order-sign)
 	crdDispatchServiceID string // partner's order-dispatch CDS service id (order-dispatch leg)
 	crdDispatchHook      string // when set, the request hook is rewritten to this before order-dispatch forward
-	store                Store  // gateway-owned shadow ledger + EOB Store for the PAS legs (nil ⇒ read-only only)
-	clock                func() time.Time
+	// crdCoverageBundle wraps the CRD request's bare prefetch.coverage into a searchset Bundle
+	// before forwarding — for a partner whose order-sign `coverage` prefetch is a SEARCH
+	// template (Coverage?beneficiary=…) that demands a searchset Bundle (bare Coverage → 412
+	// "Missing Coverage"). The SHN spine carries a BARE Coverage (provider routing +
+	// the payer-side bind both read bare, crd_native.go), so the wrap is a partner-scoped EGRESS
+	// step run AFTER the bind. Gated by PAYER_DAVINCI_CRD_COVERAGE_BUNDLE; off ⇒ bare verbatim
+	// (br-payer conformance untouched).
+	crdCoverageBundle bool
+	store             Store // gateway-owned shadow ledger + EOB Store for the PAS legs (nil ⇒ read-only only)
+	clock             func() time.Time
 	// PAS pend re-query: a real Da Vinci payer (br-payer) re-pends a conformant
 	// amendment (persistUpdatePath keeps a conditional item A4 + reschedules) and auto-resolves
 	// A4→A1 only on its own timer (PasPendedResolutionService, pas.pended-resolution-delay-seconds).
@@ -86,6 +96,16 @@ func WithCRDHook(hook string) NativeOption {
 // serves both: crd-order-select→order-sign-crd, crd-order-dispatch→order-dispatch-crd.
 func WithCRDDispatchService(serviceID, hook string) NativeOption {
 	return func(n *nativeResponder) { n.crdDispatchServiceID, n.crdDispatchHook = serviceID, hook }
+}
+
+// WithCRDCoverageBundle enables wrapping the CRD request's bare prefetch.coverage into a
+// searchset Bundle before forwarding — such a partner's order-sign `coverage` prefetch is a SEARCH
+// template (Coverage?beneficiary=…) demanding a searchset Bundle, while the SHN spine carries a
+// bare Coverage (provider routing + payer-side bind both read bare, crd_native.go). Idempotent:
+// an already-Bundle coverage is left as-is. Unset ⇒ forward the coverage verbatim (br-payer's
+// shape). Set via PAYER_DAVINCI_CRD_COVERAGE_BUNDLE (per-partner, opt-in).
+func WithCRDCoverageBundle(on bool) NativeOption {
+	return func(n *nativeResponder) { n.crdCoverageBundle = on }
 }
 
 // WithPendReQuery overrides the PAS pend re-query poll timeout + interval (E2). Zero values keep
@@ -196,9 +216,12 @@ func markForeignRelay(r LegResult) LegResult {
 func (n *nativeResponder) Handle(ctx context.Context, leg, corrID, subjectPCI string, requestFHIR []byte) (LegResult, error) {
 	switch leg {
 	case "coverage-eligibility":
-		body, bad := n.post(ctx, n.baseURL, "/CoverageEligibilityRequest", requestFHIR, "eligibility")
+		body, bad, err := n.post(ctx, n.baseURL, "/CoverageEligibilityRequest", requestFHIR, "eligibility")
+		if err != nil {
+			return LegResult{}, err // no-response fault → engine 500 → "hub routing failed"
+		}
 		if bad.Status != 0 {
-			return bad, nil
+			return bad, nil // upstream non-2xx → relayable LegResult (ResponseFHIR carries the body)
 		}
 		return LegResult{ResponseFHIR: body}, nil
 
@@ -218,31 +241,67 @@ func (n *nativeResponder) Handle(ctx context.Context, leg, corrID, subjectPCI st
 			}
 			fwd = rewritten
 		}
-		body, bad := n.post(ctx, n.cdsBaseURL, "/cds-services/"+n.crdServiceID, fwd, "CRD")
-		if bad.Status != 0 {
-			return bad, nil
+		// Per-partner egress shaping (AFTER the payer-side bind + ingress-$validate read the
+		// bare Coverage, crd_native.go): wrap prefetch.coverage bare→searchset-Bundle so the partner's
+		// order-sign search-template `coverage` prefetch is satisfied (bare → 412 "Missing Coverage").
+		if n.crdCoverageBundle {
+			wrapped, werr := wrapCRDCoverageSearchset(fwd)
+			if werr != nil {
+				return LegResult{}, werr // malformed request envelope → 500 (gateway fault)
+			}
+			fwd = wrapped
 		}
-		return normalizeCRDResponse(body)
+		body, bad, err := n.post(ctx, n.cdsBaseURL, "/cds-services/"+n.crdServiceID, fwd, "CRD")
+		if err != nil {
+			return LegResult{}, err // no-response fault → engine 500 → "hub routing failed"
+		}
+		if bad.Status != 0 {
+			return bad, nil // upstream non-2xx → relayable LegResult (ResponseFHIR carries the body)
+		}
+		res, nerr := normalizeCRDResponse(body)
+		if nerr != nil {
+			return res, nerr
+		}
+		// Same scope as the coverage-bundle wrap: relay the partner's CRD
+		// systemActions — the coverage-annotated order carrying the coverage-assertion-id —
+		// alongside the SHN cards, so the provider can drive DTR. The partner's $questionnaire-package
+		// REQUIRES that CRD-updated order (it 501s "ServiceRequest without a Coverage Assertion Id
+		// extension is not supported"); the normalized-cards-only response drops it. This is the
+		// faithful Da Vinci CRD→DTR handoff. br-payer (flag off) is byte-unchanged.
+		if n.crdCoverageBundle {
+			res.ResponseFHIR = mergeCRDSystemActions(res.ResponseFHIR, body)
+		}
+		return res, nil
 
 	case "dtr-questionnaire-fetch":
 		// Parse the published leg request: canonical (required) + an OPTIONAL coverage
 		// resource carried verbatim from the inbound $questionnaire-package (FR-G28).
 		// Fail-closed posture: malformed JSON or a missing/empty canonical → 400 (parity
 		// with the sandbox's 400, not 500).
-		var fetch shnsdk.QuestionnaireFetchRequest
-		if err := json.Unmarshal(requestFHIR, &fetch); err != nil || fetch.Canonical == "" {
+		var fetch dtrLegRequest
+		if err := json.Unmarshal(requestFHIR, &fetch); err != nil || (fetch.Canonical == "" && len(fetch.Order) == 0) {
 			return LegResult{Status: http.StatusBadRequest, Message: "parse questionnaire fetch failed"}, nil
 		}
-		// Carry the provider's coverage through (when present) so the real Da Vinci payer's
-		// required `coverage` parameter is satisfied; nil coverage → canonical-only request
-		// (byte-identical to the pre-fix sandbox/demo path).
-		params, err := buildQuestionnairePackageRequest(fetch.Canonical, fetch.Coverage)
+		// Two shapes: an ORDER-driven request (the CRD-updated order carries the
+		// coverage-assertion-id the partner keys the questionnaire off; it has no `questionnaire` param)
+		// or the canonical request (br-payer / sandbox). The provider's coverage is carried through
+		// in both so the partner's required `coverage` parameter is satisfied (FR-G28).
+		var params []byte
+		var err error
+		if len(fetch.Order) > 0 {
+			params, err = buildQuestionnairePackageOrderRequest(fetch.Order, fetch.Coverage)
+		} else {
+			params, err = buildQuestionnairePackageRequest(fetch.Canonical, fetch.Coverage)
+		}
 		if err != nil {
 			return LegResult{}, err // build fault → 500
 		}
-		body, bad := n.post(ctx, n.baseURL, "/Questionnaire/$questionnaire-package", params, "DTR")
+		body, bad, err := n.post(ctx, n.baseURL, "/Questionnaire/$questionnaire-package", params, "DTR")
+		if err != nil {
+			return LegResult{}, err // no-response fault → engine 500 → "hub routing failed"
+		}
 		if bad.Status != 0 {
-			return bad, nil
+			return bad, nil // upstream non-2xx → relayable LegResult (ResponseFHIR carries the body)
 		}
 		// Forward the partner's $questionnaire-package Bundle VERBATIM (the
 		// dependent Libraries/ValueSets are preserved for Step 3). The package→
@@ -262,9 +321,12 @@ func (n *nativeResponder) Handle(ctx context.Context, leg, corrID, subjectPCI st
 			}
 			fwd = rewritten
 		}
-		body, bad := n.post(ctx, n.cdsBaseURL, "/cds-services/"+n.crdDispatchServiceID, fwd, "CRD-dispatch")
+		body, bad, err := n.post(ctx, n.cdsBaseURL, "/cds-services/"+n.crdDispatchServiceID, fwd, "CRD-dispatch")
+		if err != nil {
+			return LegResult{}, err // no-response fault → engine 500 → "hub routing failed"
+		}
 		if bad.Status != 0 {
-			return bad, nil
+			return bad, nil // upstream non-2xx → relayable LegResult (ResponseFHIR carries the body)
 		}
 		return normalizeCRDResponse(body)
 
@@ -283,53 +345,60 @@ func (n *nativeResponder) Handle(ctx context.Context, leg, corrID, subjectPCI st
 	}
 }
 
-// post forwards body to base+path. A transport error or a non-2xx status maps to a
-// 502 LegResult (upstream payer failure); never an error return (reserved for the
-// gateway's own faults → 500). Returns (responseBody, LegResult{}) on success or
-// (nil, LegResult{Status:502,…}) on upstream failure.
-func (n *nativeResponder) post(ctx context.Context, base, path string, body []byte, label string) ([]byte, LegResult) {
+// post forwards body to base+path. An upstream that RETURNS an HTTP response — any
+// status — is the recipient's answer: 2xx → (body, LegResult{}, nil); non-2xx →
+// (nil, LegResult{Status:<code>, ResponseFHIR:<upstream body>}, nil) for verbatim
+// relay. A NO-RESPONSE fault (build/dial/read) is (nil, LegResult{}, error) → the
+// engine maps it to 500 → "hub routing failed".
+func (n *nativeResponder) post(ctx context.Context, base, path string, body []byte, label string) ([]byte, LegResult, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+path, bytes.NewReader(body))
 	if err != nil {
-		return nil, LegResult{Status: http.StatusBadGateway, Message: "upstream payer " + label + " request build failed"}
+		return nil, LegResult{}, fmt.Errorf("upstream payer %s request build failed: %w", label, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	resp, err := n.client.Do(req)
 	if err != nil {
-		return nil, LegResult{Status: http.StatusBadGateway, Message: "upstream payer " + label + " unreachable"}
+		return nil, LegResult{}, fmt.Errorf("upstream payer %s unreachable: %w", label, err)
 	}
 	defer resp.Body.Close()
 	rb, err := io.ReadAll(io.LimitReader(resp.Body, maxPartnerBody))
 	if err != nil {
-		return nil, LegResult{Status: http.StatusBadGateway, Message: "upstream payer " + label + " read failed"}
+		return nil, LegResult{}, fmt.Errorf("upstream payer %s read failed: %w", label, err)
 	}
 	if resp.StatusCode/100 != 2 {
-		return nil, LegResult{Status: http.StatusBadGateway, Message: "upstream payer " + label + " returned " + resp.Status}
+		if len(rb) > relayBodyCap { // headroom under MaxResponseBytes for seal + wrapper
+			return nil, LegResult{}, fmt.Errorf("upstream payer %s body too large to relay (%d bytes)", label, len(rb))
+		}
+		return nil, LegResult{Status: resp.StatusCode, ResponseFHIR: rb}, nil
 	}
-	return rb, LegResult{}
+	return rb, LegResult{}, nil
 }
 
 // get reads base+path (the read sibling of post), reusing the same authed client. Used by the PAS
-// pend re-query (GET ClaimResponse/{id}). Same 502-on-failure / never-error-return contract as post.
-func (n *nativeResponder) get(ctx context.Context, base, path, label string) ([]byte, LegResult) {
+// pend re-query (GET ClaimResponse/{id}). Same relay-non-2xx / error-on-no-response contract as post.
+func (n *nativeResponder) get(ctx context.Context, base, path, label string) ([]byte, LegResult, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+path, nil)
 	if err != nil {
-		return nil, LegResult{Status: http.StatusBadGateway, Message: "upstream payer " + label + " request build failed"}
+		return nil, LegResult{}, fmt.Errorf("upstream payer %s request build failed: %w", label, err)
 	}
 	req.Header.Set("Accept", "application/json")
 	resp, err := n.client.Do(req)
 	if err != nil {
-		return nil, LegResult{Status: http.StatusBadGateway, Message: "upstream payer " + label + " unreachable"}
+		return nil, LegResult{}, fmt.Errorf("upstream payer %s unreachable: %w", label, err)
 	}
 	defer resp.Body.Close()
 	rb, err := io.ReadAll(io.LimitReader(resp.Body, maxPartnerBody))
 	if err != nil {
-		return nil, LegResult{Status: http.StatusBadGateway, Message: "upstream payer " + label + " read failed"}
+		return nil, LegResult{}, fmt.Errorf("upstream payer %s read failed: %w", label, err)
 	}
 	if resp.StatusCode/100 != 2 {
-		return nil, LegResult{Status: http.StatusBadGateway, Message: "upstream payer " + label + " returned " + resp.Status}
+		if len(rb) > relayBodyCap { // headroom under MaxResponseBytes for seal + wrapper
+			return nil, LegResult{}, fmt.Errorf("upstream payer %s body too large to relay (%d bytes)", label, len(rb))
+		}
+		return nil, LegResult{Status: resp.StatusCode, ResponseFHIR: rb}, nil
 	}
-	return rb, LegResult{}
+	return rb, LegResult{}, nil
 }
 
 // normalizeCRDResponse is the CRD response tail (FR-G25): normalize the partner's
@@ -348,6 +417,27 @@ func normalizeCRDResponse(body []byte) (LegResult, error) {
 	return LegResult{ResponseFHIR: cardsJSON}, nil
 }
 
+// mergeCRDSystemActions returns cardsJSON with the partner's raw CRD `systemActions` merged in
+// (the coverage-annotated order the provider needs to drive DTR). A no-op when the partner
+// returned no systemActions or either side is unparseable — the SHN cards pass through unchanged.
+func mergeCRDSystemActions(cardsJSON, rawResp []byte) []byte {
+	var raw struct {
+		SystemActions json.RawMessage `json:"systemActions"`
+	}
+	if err := json.Unmarshal(rawResp, &raw); err != nil || len(raw.SystemActions) == 0 {
+		return cardsJSON
+	}
+	var cards map[string]json.RawMessage
+	if err := json.Unmarshal(cardsJSON, &cards); err != nil {
+		return cardsJSON
+	}
+	cards["systemActions"] = raw.SystemActions
+	if merged, err := json.Marshal(cards); err == nil {
+		return merged
+	}
+	return cardsJSON
+}
+
 // rewriteCDSHook returns reqJSON with its top-level "hook" set to hook, preserving every
 // other field verbatim. Used to adapt SHN's canonical order-select request to a partner
 // CRD service registered under a different hook (br-payer's order-sign-crd).
@@ -361,5 +451,55 @@ func rewriteCDSHook(reqJSON []byte, hook string) ([]byte, error) {
 		return nil, fmt.Errorf("engine: rewrite CDS hook: %w", err)
 	}
 	m["hook"] = hookJSON
+	return json.Marshal(m)
+}
+
+// wrapCRDCoverageSearchset rewrites a CDS Hooks request's prefetch.coverage from a BARE
+// Coverage resource into a searchset Bundle wrapping it verbatim, preserving every other field.
+// A partner whose `coverage` prefetch is a SEARCH template (Coverage?beneficiary=…, the partner's
+// order-sign) requires the searchset shape; the SHN spine carries a bare Coverage. No-op
+// (returns reqJSON unchanged) when prefetch or coverage is absent, or coverage is already a
+// Bundle (idempotent — never a Bundle-in-a-Bundle).
+func wrapCRDCoverageSearchset(reqJSON []byte) ([]byte, error) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(reqJSON, &m); err != nil {
+		return nil, fmt.Errorf("engine: wrap crd coverage: %w", err)
+	}
+	pfRaw, ok := m["prefetch"]
+	if !ok {
+		return reqJSON, nil
+	}
+	var pf map[string]json.RawMessage
+	if err := json.Unmarshal(pfRaw, &pf); err != nil {
+		return nil, fmt.Errorf("engine: wrap crd coverage prefetch: %w", err)
+	}
+	covRaw, ok := pf["coverage"]
+	if !ok {
+		return reqJSON, nil
+	}
+	var probe struct {
+		ResourceType string `json:"resourceType"`
+	}
+	if err := json.Unmarshal(covRaw, &probe); err != nil {
+		return nil, fmt.Errorf("engine: wrap crd coverage resource: %w", err)
+	}
+	if probe.ResourceType != "Coverage" {
+		return reqJSON, nil // absent-shaped or already a Bundle — leave verbatim (idempotent)
+	}
+	bundle := map[string]any{
+		"resourceType": "Bundle",
+		"type":         "searchset",
+		"entry":        []any{map[string]any{"resource": covRaw}},
+	}
+	bundleJSON, err := json.Marshal(bundle)
+	if err != nil {
+		return nil, fmt.Errorf("engine: marshal crd coverage searchset: %w", err)
+	}
+	pf["coverage"] = bundleJSON
+	pfJSON, err := json.Marshal(pf)
+	if err != nil {
+		return nil, fmt.Errorf("engine: marshal crd prefetch: %w", err)
+	}
+	m["prefetch"] = pfJSON
 	return json.Marshal(m)
 }

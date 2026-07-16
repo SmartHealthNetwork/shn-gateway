@@ -82,6 +82,29 @@ caches the layers.
 Once both are built once and the FHIR server has booted once, later
 `docker compose up` runs come back in seconds.
 
+## Point it at your own payer (payer self-test)
+
+By default this bundle originates to the hosted `conformance-payer`. To route the
+traffic to **your own** payer instead, set `PAYER_HOLDER_ID` to your payer's holder id:
+
+```sh
+SHN_SECRETS=/abs/path/to/my-provider-bundle PAYER_HOLDER_ID=my-payer-holder-id \
+  docker compose -f compose.eval.yml up --build
+```
+
+`PAYER_HOLDER_ID` only changes the **route**. Two things must still be true, or the leg
+is denied before it ever reaches your payer:
+
+- **`SHN_SECRETS` here is still a _provider_ bundle** — not your payer bundle. This gateway
+  is `ROLE=provider`; it *originates* the request, and the Authorization Framework binds
+  authority to the caller's **registered role**. A payer bundle can't originate a provider
+  leg — that authorization is denied, and the ingress returns
+  `HTTP 502 {"error":"authorization denied"}`. A payer self-test therefore needs **two**
+  registrations — a `--role provider` bundle here, and a `--role payer` bundle for your payer.
+- **Your payer must be up and reachable.** A payer is a Hub-*dialed* responder: it must be
+  registered under a public `baseURL` and running before you originate, or the Hub has nothing
+  to dial. Run it with the payer evaluation bundle — see [`payer/README.md`](payer/README.md).
+
 ## Production cutover
 
 Everything in this bundle other than the gateway itself — `hapi`,

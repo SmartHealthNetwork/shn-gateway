@@ -188,17 +188,21 @@ func TestNativeResponder_DTRForwardsPackageVerbatim(t *testing.T) {
 	}
 }
 
-func TestNativeResponder_PartnerNon2xxIs502(t *testing.T) {
+// TestNativeResponder_PartnerNon2xxIsRelayedVerbatim supersedes the pre-relay
+// TestNativeResponder_PartnerNon2xxIs502: post()/Handle() no longer collapse every
+// upstream non-2xx to a generic 502 — an upstream that PRODUCED a response is a
+// relayable answer, so its REAL status flows through verbatim.
+func TestNativeResponder_PartnerNon2xxIsRelayedVerbatim(t *testing.T) {
 	p := newStubPartner(t)
 	p.status = 500
 	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", nil, nil)
 	res, err := n.Handle(context.Background(), "coverage-eligibility", "corr", "pci",
 		[]byte(`{"resourceType":"CoverageEligibilityRequest"}`))
 	if err != nil {
-		t.Fatalf("Handle returned error (want Status 502, not error): %v", err)
+		t.Fatalf("Handle returned error (want a relayable Status, not error): %v", err)
 	}
-	if res.Status != http.StatusBadGateway {
-		t.Errorf("Status = %d, want 502", res.Status)
+	if res.Status != http.StatusInternalServerError {
+		t.Errorf("Status = %d, want 500 (the partner's real status, relayed verbatim)", res.Status)
 	}
 }
 
@@ -261,6 +265,84 @@ func TestNativeResponder_DTRForwardsCoverageWhenCarried(t *testing.T) {
 	if !bytes.Contains(covParam, []byte(`"resourceType":"Coverage"`)) ||
 		!bytes.Contains(covParam, []byte(`"id":"cov-1"`)) {
 		t.Errorf("coverage parameter resource not the carried Coverage: %s", covParam)
+	}
+}
+
+// TestNativeResponder_DTRForwardsOrderWhenCarried proves the order-driven DTR path (the external-payer
+// lane): a dtr-questionnaire-fetch leg request carrying an `order` (the CRD-updated ServiceRequest
+// with its coverage-assertion-id) yields a forwarded $questionnaire-package with an `order`
+// parameter (NOT `questionnaire`) plus the carried `coverage` — the external payer 501s "ServiceRequest
+// without a Coverage Assertion Id extension is not supported" / 500s without both.
+func TestNativeResponder_DTRForwardsOrderWhenCarried(t *testing.T) {
+	p := newStubPartner(t)
+	p.respByPath["/Questionnaire/$questionnaire-package"] =
+		[]byte(`{"resourceType":"Parameters","parameter":[{"name":"packagebundle","resource":{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"Questionnaire","url":"http://x/q"}}]}}]}`)
+	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", nil, nil)
+
+	order := `{"resourceType":"ServiceRequest","id":"sr-81162","status":"draft","intent":"order","extension":[{"url":"http://hl7.org/fhir/us/davinci-crd/StructureDefinition/ext-coverage-information","extension":[{"url":"coverage-assertion-id","valueString":"assert-1"}]}]}`
+	coverage := `{"resourceType":"Coverage","id":"cov-1","status":"active","beneficiary":{"reference":"Patient/p1"}}`
+	reqFHIR := []byte(`{"coverage":` + coverage + `,"order":` + order + `}`)
+	if _, err := n.Handle(context.Background(), "dtr-questionnaire-fetch", "corr", "pci", reqFHIR); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	var got struct {
+		Parameter []struct {
+			Name     string          `json:"name"`
+			Resource json.RawMessage `json:"resource"`
+		} `json:"parameter"`
+	}
+	if err := json.Unmarshal(p.lastBody, &got); err != nil {
+		t.Fatalf("forwarded body not Parameters: %v (%s)", err, p.lastBody)
+	}
+	names := map[string]json.RawMessage{}
+	for _, pr := range got.Parameter {
+		names[pr.Name] = pr.Resource
+	}
+	if _, ok := names["questionnaire"]; ok {
+		t.Errorf("order-driven DTR must NOT send a questionnaire parameter: %s", p.lastBody)
+	}
+	if _, ok := names["order"]; !ok {
+		t.Fatalf("forwarded $questionnaire-package missing the order parameter: %s", p.lastBody)
+	}
+	if !bytes.Contains(names["order"], []byte(`"coverage-assertion-id"`)) {
+		t.Errorf("order parameter dropped the coverage-assertion-id extension: %s", names["order"])
+	}
+	if _, ok := names["coverage"]; !ok {
+		t.Errorf("order-driven DTR must still carry the coverage parameter: %s", p.lastBody)
+	}
+}
+
+// TestNativeResponder_CRDMergesSystemActions proves the external-payer-lane CRD passthrough: with
+// WithCRDCoverageBundle on, the partner's CRD systemActions (the coverage-annotated order the
+// provider needs to drive DTR) are relayed alongside the normalized SHN cards; with it OFF the
+// response is cards-only (br-payer byte-unchanged).
+func TestNativeResponder_CRDMergesSystemActions(t *testing.T) {
+	partnerCRD := []byte(`{"cards":[],"systemActions":[{"type":"update","resource":{"resourceType":"ServiceRequest","id":"sr-81162","extension":[{"url":"http://hl7.org/fhir/us/davinci-crd/StructureDefinition/ext-coverage-information","extension":[{"url":"coverage-assertion-id","valueString":"assert-1"},{"url":"covered","valueCode":"covered"},{"url":"pa-needed","valueCode":"auth-needed"}]}]}}]}`)
+	run := func(t *testing.T, bundle bool) []byte {
+		p := newStubPartner(t)
+		p.respByPath["/cds-services/order-sign"] = partnerCRD
+		opts := []NativeOption{}
+		if bundle {
+			opts = append(opts, WithCRDCoverageBundle(true))
+		}
+		n := NewNativeResponder(p.srv.Client(), p.srv.URL, "order-sign", nil, nil, opts...)
+		req := []byte(`{"hook":"order-sign","context":{"draftOrders":{"resourceType":"Bundle","entry":[]}},"prefetch":{"coverage":{"resourceType":"Coverage","beneficiary":{"reference":"Patient/p1"}}}}`)
+		res, err := n.Handle(context.Background(), "crd-order-select", "corr", "pci", req)
+		if err != nil {
+			t.Fatalf("Handle: %v", err)
+		}
+		return res.ResponseFHIR
+	}
+	on := run(t, true)
+	if !bytes.Contains(on, []byte(`"systemActions"`)) || !bytes.Contains(on, []byte(`"coverage-assertion-id"`)) {
+		t.Fatalf("external-payer-lane CRD response must relay systemActions with the annotated order: %s", on)
+	}
+	if !bytes.Contains(on, []byte(`"cards"`)) {
+		t.Fatalf("CRD response must still carry the SHN cards: %s", on)
+	}
+	off := run(t, false)
+	if bytes.Contains(off, []byte(`"systemActions"`)) {
+		t.Fatalf("flag OFF (br-payer) must be cards-only, no systemActions: %s", off)
 	}
 }
 
@@ -389,6 +471,86 @@ func TestNativeResponder_RewritesCRDHook(t *testing.T) {
 	}
 	if gotHook != "order-sign" {
 		t.Fatalf("forwarded hook = %q, want order-sign (rewritten)", gotHook)
+	}
+}
+
+// TestNativeResponder_WrapsCRDCoverageBundle proves WithCRDCoverageBundle rewrites the
+// CRD request's bare prefetch.coverage into a searchset Bundle on egress — the external payer's
+// order-sign `coverage` prefetch is a SEARCH template (Coverage?beneficiary=…) demanding a
+// searchset Bundle (bare Coverage → 412 "Missing Coverage"), while the SHN spine carries a
+// BARE Coverage (provider routing + the payer-side bind both read bare, crd_native.go). The
+// wrap runs AFTER the bind, gated behind the option so br-payer conformance is untouched.
+func TestNativeResponder_WrapsCRDCoverageBundle(t *testing.T) {
+	p := newStubPartner(t)
+	p.respByPath["/cds-services/order-sign"] = []byte(`{"cards":[],"systemActions":[]}`)
+	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "order-sign", nil, nil, WithCRDCoverageBundle(true))
+	reqJSON := []byte(`{"hook":"order-sign","context":{"userId":"Practitioner/p1","draftOrders":{"resourceType":"Bundle","entry":[]}},` +
+		`"prefetch":{"patient":{"resourceType":"Patient","id":"MBR"},"coverage":{"resourceType":"Coverage","id":"cov","beneficiary":{"reference":"Patient/MBR"}}}}`)
+	if _, err := n.Handle(context.Background(), "crd-order-select", "corr", "pci", reqJSON); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	var fwd struct {
+		Prefetch struct {
+			Coverage struct {
+				ResourceType string `json:"resourceType"`
+				Type         string `json:"type"`
+				Entry        []struct {
+					Resource struct {
+						ResourceType string `json:"resourceType"`
+						ID           string `json:"id"`
+					} `json:"resource"`
+				} `json:"entry"`
+			} `json:"coverage"`
+			Patient struct {
+				ResourceType string `json:"resourceType"`
+			} `json:"patient"`
+		} `json:"prefetch"`
+	}
+	if err := json.Unmarshal(p.lastBody, &fwd); err != nil {
+		t.Fatalf("parse forwarded body: %v (%s)", err, p.lastBody)
+	}
+	cov := fwd.Prefetch.Coverage
+	if cov.ResourceType != "Bundle" || cov.Type != "searchset" {
+		t.Fatalf("forwarded prefetch.coverage = %s/%s, want Bundle/searchset: %s", cov.ResourceType, cov.Type, p.lastBody)
+	}
+	if len(cov.Entry) != 1 || cov.Entry[0].Resource.ResourceType != "Coverage" || cov.Entry[0].Resource.ID != "cov" {
+		t.Fatalf("searchset must wrap the bare Coverage verbatim: %s", p.lastBody)
+	}
+	if fwd.Prefetch.Patient.ResourceType != "Patient" {
+		t.Fatalf("prefetch.patient dropped on wrap: %s", p.lastBody)
+	}
+}
+
+// TestNativeResponder_CoverageBundleScopedAndIdempotent proves the wrap is scoped and safe:
+// with the option OFF a bare Coverage forwards verbatim (br-payer's shape, untouched); with it
+// ON an already-searchset coverage is left as-is (idempotent — never a Bundle-in-a-Bundle).
+func TestNativeResponder_CoverageBundleScopedAndIdempotent(t *testing.T) {
+	mkReq := func(covJSON string) []byte {
+		return []byte(`{"hook":"order-sign","context":{"draftOrders":{"resourceType":"Bundle","entry":[]}},"prefetch":{` + covJSON + `}}`)
+	}
+	bareCov := `"coverage":{"resourceType":"Coverage","id":"cov","beneficiary":{"reference":"Patient/MBR"}}`
+
+	// OFF: bare stays bare (no wrap without the option).
+	pOff := newStubPartner(t)
+	pOff.respByPath["/cds-services/order-sign"] = []byte(`{"cards":[],"systemActions":[]}`)
+	nOff := NewNativeResponder(pOff.srv.Client(), pOff.srv.URL, "order-sign", nil, nil)
+	if _, err := nOff.Handle(context.Background(), "crd-order-select", "c", "p", mkReq(bareCov)); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(pOff.lastBody, []byte(`"searchset"`)) {
+		t.Fatalf("option OFF must forward bare coverage verbatim: %s", pOff.lastBody)
+	}
+
+	// ON + already a searchset: not re-wrapped (exactly one searchset wrapper survives).
+	pOn := newStubPartner(t)
+	pOn.respByPath["/cds-services/order-sign"] = []byte(`{"cards":[],"systemActions":[]}`)
+	nOn := NewNativeResponder(pOn.srv.Client(), pOn.srv.URL, "order-sign", nil, nil, WithCRDCoverageBundle(true))
+	alreadyBundle := `"coverage":{"resourceType":"Bundle","type":"searchset","entry":[{"resource":{"resourceType":"Coverage","id":"cov"}}]}`
+	if _, err := nOn.Handle(context.Background(), "crd-order-select", "c", "p", mkReq(alreadyBundle)); err != nil {
+		t.Fatal(err)
+	}
+	if got := bytes.Count(pOn.lastBody, []byte(`"searchset"`)); got != 1 {
+		t.Fatalf("already-searchset coverage must not be re-wrapped (searchset count=%d): %s", got, pOn.lastBody)
 	}
 }
 

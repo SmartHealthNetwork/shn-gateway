@@ -95,6 +95,10 @@ type config struct {
 	PayerDavinciScope      string
 	PayerDavinciClientKID  string
 	PayerDavinciPASNative  bool
+	// RelayRecipientErrors gates the response-leg relay of a recipient's NON-2xx
+	// answer. See engine.Config.RelayRecipientErrors doc.
+	// RESPONDER_RELAY_ERRORS=1.
+	RelayRecipientErrors bool
 	// PayerDavinciCRDServiceID is the escape-hatch override for the partner's CDS
 	// Hooks order-select service id. When empty, DiscoverCRDServiceID fetches
 	// {PAYER_DAVINCI_BASE_URL}/cds-services at boot and selects the single
@@ -111,6 +115,12 @@ type config struct {
 	// PayerDavinciDispatchHook is the CDS Hooks hook value to stamp on the order-dispatch
 	// request before forwarding. Empty ⇒ forward the originator's hook verbatim. PAYER_DAVINCI_DISPATCH_HOOK.
 	PayerDavinciDispatchHook string
+	// PayerDavinciCRDCoverageBundle wraps the CRD request's bare prefetch.coverage into a
+	// searchset Bundle on egress — for a partner whose order-sign `coverage` prefetch
+	// is a SEARCH template demanding a Bundle (bare → 412). The SHN spine carries a bare
+	// Coverage, so this is a partner-scoped egress transform run after the bind. Off ⇒ verbatim
+	// (br-payer untouched). PAYER_DAVINCI_CRD_COVERAGE_BUNDLE=true.
+	PayerDavinciCRDCoverageBundle bool
 
 	// OriginationProfile selects the per-UC origination lane: "" / "sandbox"
 	// keep the CPT/lumbar order shape; "provider-data" originates every UC off the
@@ -215,10 +225,12 @@ func loadConfig(getenv func(string) string) (config, error) {
 		PayerDavinciScope:             def("PAYER_DAVINCI_SCOPE", "system/*.read"),
 		PayerDavinciClientKID:         getenv("PAYER_DAVINCI_CLIENT_KID"),
 		PayerDavinciPASNative:         getenv("PAYER_DAVINCI_PAS_NATIVE") == "true",
+		RelayRecipientErrors:          getenv("RESPONDER_RELAY_ERRORS") == "1" || getenv("RESPONDER_RELAY_ERRORS") == "true",
 		PayerDavinciCRDServiceID:      getenv("PAYER_DAVINCI_CRD_SERVICE_ID"),
 		PayerDavinciCRDHook:           getenv("PAYER_DAVINCI_CRD_HOOK"),
 		PayerDavinciDispatchServiceID: getenv("PAYER_DAVINCI_DISPATCH_SERVICE_ID"),
 		PayerDavinciDispatchHook:      getenv("PAYER_DAVINCI_DISPATCH_HOOK"),
+		PayerDavinciCRDCoverageBundle: getenv("PAYER_DAVINCI_CRD_COVERAGE_BUNDLE") == "true",
 		OriginationProfile:            getenv("ORIGINATION_PROFILE"),
 
 		ProviderDTRNative:      getenv("PROVIDER_DTR_NATIVE") == "true",
@@ -655,6 +667,8 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		PHGURL:          firstNonEmpty(cfg.PHGURL, endpoints.PHG),
 
 		OriginationProfile: cfg.OriginationProfile,
+
+		RelayRecipientErrors: cfg.RelayRecipientErrors,
 	}
 	// Native-forward payer mode: the read-only legs forward to a partner
 	// Da Vinci endpoint; PAS stays on the sandbox fallback. Setting Responder here means
@@ -695,7 +709,8 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		native := engine.NewNativeResponder(pdc, cfg.PayerDavinciBaseURL, crdSvcID, store, clock,
 			engine.WithCDSBaseURL(cfg.PayerDavinciCDSBaseURL),
 			engine.WithCRDHook(cfg.PayerDavinciCRDHook),
-			engine.WithCRDDispatchService(cfg.PayerDavinciDispatchServiceID, cfg.PayerDavinciDispatchHook))
+			engine.WithCRDDispatchService(cfg.PayerDavinciDispatchServiceID, cfg.PayerDavinciDispatchHook),
+			engine.WithCRDCoverageBundle(cfg.PayerDavinciCRDCoverageBundle))
 		fallback := engine.NewSandboxResponder(gwCfg.Adjudicator, sor, store, clock)
 		gwCfg.Responder = engine.NewCompositeResponder(native, fallback, cfg.PayerDavinciPASNative)
 		// The native-forward DTR response is a foreign Da Vinci package SHN can't $validate
