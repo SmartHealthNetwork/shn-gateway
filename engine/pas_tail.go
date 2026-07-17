@@ -55,27 +55,33 @@ func buildPASSubmitBundle(brPayer bool, orderJSON, qrJSON []byte, patientRef, co
 // submitClaimAndResolve is the shared lean single-shot PAS tail. It builds + egress-validates the
 // conformant Claim Bundle, originates the pas-claim leg, ingress-validates the response, and
 // classifies the resolved ClaimResponse via the EXISTING g.classifyResolution. On approval it
-// returns (parsed, respJSON, 0, ""); otherwise (PriorAuthResult{}, respJSON, status, msg) with the
-// SAME statuses/messages handleHomeOxygen produced inline (so its behavior is byte-preserved). The
-// caller does the FR-23 StoreAuthNumber + writes the response surface. respJSON is returned on every
-// path (incl. failures) for diagnosis; it is nil only when the failure precedes the leg call.
-func (g *Gateway) submitClaimAndResolve(ctx context.Context, r *http.Request, pci string, orderJSON, qrJSON []byte, patientRef, coverageRef string, payer shnsdk.PayerIdentifier, recipient string) (shnsdk.PriorAuthResult, []byte, int, string) {
+// returns (parsed, respJSON, 0, "", nil); otherwise (PriorAuthResult{}, respJSON, status, msg, err)
+// with the SAME statuses/messages handleHomeOxygen produced inline (so its behavior is
+// byte-preserved). The trailing err carries the RAW OriginateLeg error (with its %w chain intact) on
+// the leg-failure path and is nil on every other path — it exists SOLELY so the caller can attempt
+// relayOriginationError before the writeJSON(status,msg) fallback; a bare (status,msg) return would
+// re-synthesize the error to a string and DROP the *RelayError sentinel (the %w audit). The caller
+// does the FR-23 StoreAuthNumber + writes the response surface. respJSON is returned on every path
+// (incl. failures) for diagnosis; it is nil only when the failure precedes the leg call.
+func (g *Gateway) submitClaimAndResolve(ctx context.Context, r *http.Request, pci string, orderJSON, qrJSON []byte, patientRef, coverageRef string, payer shnsdk.PayerIdentifier, recipient string) (shnsdk.PriorAuthResult, []byte, int, string, error) {
 	pasCorr := g.cfg.CorrelationGen()
 	bundleJSON, err := buildPASSubmitBundle(targetsBrPayer(g.cfg.OriginationProfile), orderJSON, qrJSON, patientRef, coverageRef, pasCorr, g.cfg.Clock(), payer)
 	if err != nil {
-		return shnsdk.PriorAuthResult{}, nil, http.StatusInternalServerError, "build bundle failed"
+		return shnsdk.PriorAuthResult{}, nil, http.StatusInternalServerError, "build bundle failed", nil
 	}
 	if status, msg := g.validateFHIR(ctx, bundleJSON, "egress"); status != 0 {
-		return shnsdk.PriorAuthResult{}, nil, status, msg
+		return shnsdk.PriorAuthResult{}, nil, status, msg, nil
 	}
 	// recipient is the payer HOLDER resolved from the member's real Coverage at the fresh origination
 	// site (FR-G40) — no default; it replaced the deleted Config.CounterpartID here.
 	respJSON, err := g.OriginateLeg(ctx, r, recipient, "pas-claim", pci, pasCorr, "", Content{WorkstreamType: workstreamPA, Bytes: bundleJSON})
 	if err != nil {
-		return shnsdk.PriorAuthResult{}, nil, http.StatusBadGateway, err.Error()
+		// Return the RAW err (not just err.Error()) so the caller can relayOriginationError a framed
+		// *RelayError verbatim; msg stays for the non-relay writeJSON fallback (byte-identical).
+		return shnsdk.PriorAuthResult{}, nil, http.StatusBadGateway, err.Error(), err
 	}
 	if status, msg := g.validateFHIR(ctx, respJSON, "ingress"); status != 0 {
-		return shnsdk.PriorAuthResult{}, respJSON, status, msg
+		return shnsdk.PriorAuthResult{}, respJSON, status, msg, nil
 	}
 	// classifyResolution returns approved only for a genuine terminal A1 (the payer gate has already
 	// polled br-payer's timer A4→A1 for a single-shot); a parse failure or any non-approved outcome
@@ -85,9 +91,9 @@ func (g *Gateway) submitClaimAndResolve(ctx context.Context, r *http.Request, pc
 		// Preserve handleHomeOxygen's two distinct messages: an UNPARSEABLE 2xx is "claim response
 		// parse failed"; a parsed-but-not-approved response is "preauthorization not approved".
 		if _, perr := shnsdk.ParseClaimResponse(respJSON); perr != nil {
-			return shnsdk.PriorAuthResult{}, respJSON, http.StatusBadGateway, "claim response parse failed"
+			return shnsdk.PriorAuthResult{}, respJSON, http.StatusBadGateway, "claim response parse failed", nil
 		}
-		return shnsdk.PriorAuthResult{}, respJSON, http.StatusBadGateway, "preauthorization not approved"
+		return shnsdk.PriorAuthResult{}, respJSON, http.StatusBadGateway, "preauthorization not approved", nil
 	}
-	return parsed, respJSON, 0, ""
+	return parsed, respJSON, 0, "", nil
 }

@@ -355,8 +355,7 @@ func TestNativeUpdate_ApprovedFinalizes(t *testing.T) {
 	})
 
 	// Superseded assertion (pre-relay-recipient-response): a post-Begin partner non-2xx no
-	// longer collapses to a generic 502 — its REAL status + body relay verbatim.
-	// The Rollback guard (no strand) is unchanged and still the point of this case.
+	// longer collapses to a generic 502 — its REAL status + body relay verbatim. The Rollback guard (no strand) is unchanged and still the point of this case.
 	t.Run("partner 500 AFTER Begin -> relayed verbatim WITH Rollback (no strand)", func(t *testing.T) {
 		srv := stubPartnerSrv(t, http.StatusInternalServerError, []byte(`boom`))
 		s := seedPended()

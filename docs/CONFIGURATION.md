@@ -212,39 +212,37 @@ tradeoff.
 | `PROVIDER_DTR_NATIVE` | `true` to forward DTR population to an SDC `$populate` engine instead of the managed populator. Default `false`. |
 | `PROVIDER_DTR_POPULATE_URL` | The SDC `Questionnaire/$populate` endpoint. Required when `PROVIDER_DTR_NATIVE=true`. |
 
-## Relay a recipient's error response (`RESPONDER_RELAY_ERRORS`)
+## Sealed message frames (v1)
 
 When your gateway is the **recipient** of an exchange (it answers a request routed
 through the Hub — the payer/responder side), an application-level failure from the far
 end — e.g. the payer's real `502` + `OperationOutcome`, or a `422` amendment rejection —
-is normally collapsed into a generic `502 {"error":"hub routing failed"}` at the
-requester's edge, because a non-`2xx` answer to the Hub is treated as a routing failure.
+used to be collapsed into a generic `502 {"error":"hub routing failed"}` at the
+requester's edge, because a non-`2xx` answer to the Hub was treated as a routing failure.
 
-`RESPONDER_RELAY_ERRORS=1` instead **seals the recipient's non-`2xx` answer inside the
-sealed response leg** and relays it to the requester **verbatim** (its real status + body).
-The answer rides *inside* the ciphertext, so the Hub stays payload-blind — it records the
-leg as `answered` over an opaque hash and never sees the status or body. Success answers
-are unchanged on the wire (bare FHIR, implicit `200`). A true **transport fault** (the far
-end is unreachable, or the gateway's own build/dial/read fails) is *not* an application
-answer and still surfaces as `"hub routing failed"` — only a response the far end actually
-produced is relayed.
+As of v0.28.0, a capable pair of gateways instead exchanges a **sealed message
+frame**: the responder's real answer — its actual status, an allowlisted `Content-Type`
+header, and its body, success or not — travels *inside* the sealed response leg and is
+surfaced to the requester **verbatim**. The Hub stays payload-blind throughout: it still
+only ever sees an opaque ciphertext and records the leg as `answered` over its hash, never
+the status or body inside it. A true **transport fault** (the far end is unreachable, or
+the gateway's own build/dial/read fails) is not an application answer and still surfaces
+as `"hub routing failed"` — only a response the far end actually produced is relayed.
 
-| Env var | Description |
-|---|---|
-| `RESPONDER_RELAY_ERRORS` | `1` or `true` to relay a recipient's non-`2xx` application answer verbatim through the sealed response leg. Default off (legacy `"hub routing failed"`). |
+**Negotiation, not configuration.** There is no environment variable to set. Whether an
+exchange frames is decided per pair of holders from what each side has advertised to the
+registry: every gateway (and SDK-based participant) on a codec-capable build
+self-declares message-frame support automatically the moment it registers or rotates its
+credentials — no app-level opt-in. A response frames only when **both** the requester and
+the responder have advertised support; if either side is still on an older, pre-frame
+build, the exchange falls back byte-for-byte to the legacy contract: a bare payload on
+success (implicit `200`), and a non-`2xx` application answer collapsing to the Hub's
+generic `"hub routing failed"` on failure, exactly as before. Upgrading one gateway in a
+mesh is always safe — older peers simply keep the legacy contract until they, too,
+re-register from an upgraded build.
 
-**Rollout order — originators (requesters) before recipients (payers).** A requester
-gateway must be running this release to *unwrap* a relayed answer; an older requester would
-not understand it. So enable this flag **only after every originator gateway in your mesh is
-on this release**. The intended lifecycle:
-
-1. **Ship with the flag off.** Every gateway on this release is already *unwrap-tolerant* as
-   a requester (it surfaces a relayed answer if it receives one) — that ships first,
-   default-off, so nothing changes on the wire yet.
-2. **Confirm all originators are updated.** Verify every requester gateway that routes to
-   this recipient is on this release.
-3. **Turn the flag on** at the recipient(s) to begin relaying real answers.
-4. **Remove the flag** one release later, once relaying is the established default.
-
-The SHN Kit runner is co-updated for this change (it classifies the relayed not-a-member
-outcome). Keep the gateway and the Kit on matching releases when you enable the flag.
+**The `RESPONDER_RELAY_ERRORS` environment variable no longer exists.** It gated an
+interim, JSON-wrapper-based version of this same idea shipped in v0.27.0; that wrapper,
+its flag, and the response sniff it relied on have all been removed and replaced by the
+negotiated message frame described above. Deployments that still set
+`RESPONDER_RELAY_ERRORS` can drop the variable — it is inert.

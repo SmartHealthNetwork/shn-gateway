@@ -6,7 +6,6 @@ package engine
 
 import (
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -140,12 +139,9 @@ func (g *Gateway) handleCRDIngress(w http.ResponseWriter, r *http.Request) {
 		Content: Content{WorkstreamType: workstreamPA, Bytes: sealed}, Subjects: []string{pci}}
 	if err != nil {
 		_ = g.exchanges.AppendLeg(ex.ID, leg.Project(child, "error"))
-		var re *RelayError
-		if errors.As(err, &re) {
-			// The recipient answered non-2xx — relay it verbatim.
-			w.Header().Set("Content-Type", "application/fhir+json")
-			w.WriteHeader(re.Status)
-			_, _ = w.Write(re.Body)
+		// The recipient answered non-2xx — relay its framed answer verbatim (Content-Type
+		// from the frame, default application/fhir+json) via the shared origination helper.
+		if g.relayOriginationError(w, err) {
 			return
 		}
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
@@ -235,12 +231,9 @@ func (g *Gateway) handleDTRIngress(w http.ResponseWriter, r *http.Request) {
 		Content: Content{WorkstreamType: workstreamPA, Bytes: fetch}, Subjects: subjectsOf(pci)}
 	if err != nil {
 		_ = g.exchanges.AppendLeg(ex.ID, leg.Project(child, "error"))
-		var re *RelayError
-		if errors.As(err, &re) {
-			// The recipient answered non-2xx — relay it verbatim.
-			w.Header().Set("Content-Type", "application/fhir+json")
-			w.WriteHeader(re.Status)
-			_, _ = w.Write(re.Body)
+		// The recipient answered non-2xx — relay its framed answer verbatim (Content-Type
+		// from the frame, default application/fhir+json) via the shared origination helper.
+		if g.relayOriginationError(w, err) {
 			return
 		}
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
@@ -327,12 +320,9 @@ func (g *Gateway) handlePASIngress(w http.ResponseWriter, r *http.Request) {
 		Content: Content{WorkstreamType: workstreamPA, Bytes: body}, Subjects: []string{pci}}
 	if err != nil {
 		_ = g.exchanges.AppendLeg(ex.ID, legProj.Project(child, "error"))
-		var re *RelayError
-		if errors.As(err, &re) {
-			// The recipient answered non-2xx — relay it verbatim.
-			w.Header().Set("Content-Type", "application/fhir+json")
-			w.WriteHeader(re.Status)
-			_, _ = w.Write(re.Body)
+		// The recipient answered non-2xx — relay its framed answer verbatim (Content-Type
+		// from the frame, default application/fhir+json) via the shared origination helper.
+		if g.relayOriginationError(w, err) {
 			return
 		}
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})

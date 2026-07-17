@@ -136,6 +136,9 @@ func (g *Gateway) originateDispatch(w http.ResponseWriter, r *http.Request, memb
 	}
 	crdRespJSON, err := g.OriginateLeg(ctx, r, recipient, "crd-order-dispatch", pci, g.cfg.CorrelationGen(), "", Content{WorkstreamType: workstreamPA, Bytes: crdReq})
 	if err != nil {
+		if g.relayOriginationError(w, err) {
+			return
+		}
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
@@ -168,6 +171,9 @@ func (g *Gateway) originateDispatch(w http.ResponseWriter, r *http.Request, memb
 	}
 	packageJSON, err := g.OriginateLeg(ctx, r, recipient, "dtr-questionnaire-fetch", pci, g.cfg.CorrelationGen(), "", Content{WorkstreamType: workstreamPA, Bytes: dtrReq})
 	if err != nil {
+		if g.relayOriginationError(w, err) {
+			return
+		}
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
@@ -221,8 +227,11 @@ func (g *Gateway) originateDispatch(w http.ResponseWriter, r *http.Request, memb
 	// the payer gate to poll the timer-resolved A1. The genuine outcome is conditional-coverage
 	// A4-pended → A1; the payer responder's pend re-query resolves A4→A1, so the FINAL observed
 	// Outcome is "approved" (A1). ---
-	parsed, _, status, msg := g.submitClaimAndResolve(ctx, r, pci, orderJSON, qrJSON, patientRef, coverageRef, payer, recipient)
+	parsed, _, status, msg, err := g.submitClaimAndResolve(ctx, r, pci, orderJSON, qrJSON, patientRef, coverageRef, payer, recipient)
 	if status != 0 {
+		if g.relayOriginationError(w, err) {
+			return
+		}
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}

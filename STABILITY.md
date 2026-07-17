@@ -14,7 +14,7 @@ A published version tag is **never re-tagged** with different content. The Go
 module proxy caches a tag's tree permanently; always bump to a new version
 rather than moving an existing tag.
 
-This gateway currently requires `shn-sdk v0.29.0` (see `go.mod`).
+This gateway currently requires `shn-sdk v0.30.0` (see `go.mod`).
 
 ## Supported seams
 

@@ -523,6 +523,42 @@ func TestConvergeRegistry_CarriesPayerIDs(t *testing.T) {
 	}
 }
 
+// TestConvergeRegistry_CarriesMessageFrames verifies convergeRegistry copies a
+// fed holder's MessageFrames onto the resulting RegistryEntry — the peer cache
+// must thread the feed's self-declared frame capability so a future reader can
+// negotiate on it (no reader exists yet, this
+// only proves the field survives the /holders → Registry snapshot).
+func TestConvergeRegistry_CarriesMessageFrames(t *testing.T) {
+	var enc [32]byte
+	enc[0], enc[31] = 7, 9
+	var signPub [ed25519.PublicKeySize]byte
+	signPub[0] = 3
+	holder := shnsdk.Holder{
+		ID:            "payer-b",
+		Role:          "payer",
+		EncPub:        base64.StdEncoding.EncodeToString(enc[:]),
+		SignPub:       base64.StdEncoding.EncodeToString(signPub[:]),
+		BaseURL:       "https://payer-b.example",
+		MessageFrames: []string{"v1"},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode([]shnsdk.Holder{holder})
+	}))
+	defer srv.Close()
+
+	reg := shnsdk.NewRegistry()
+	if _, err := convergeRegistry(context.Background(), http.DefaultClient, srv.URL, reg); err != nil {
+		t.Fatalf("convergeRegistry: %v", err)
+	}
+	entry, ok := reg.Lookup("payer-b")
+	if !ok {
+		t.Fatal("payer-b missing from converged registry")
+	}
+	if !shnsdk.SupportsMessageFrameV1(entry.MessageFrames) {
+		t.Fatalf("MessageFrames not converged: want v1 support, got %v", entry.MessageFrames)
+	}
+}
+
 // TestConvergeRegistry_ReturnsCount verifies the count return equals the number
 // of holders actually converged into reg (successful reg.Set iterations) — the
 // count feeds cell.RecordSuccess(n) so /health's registrar-poller check reports

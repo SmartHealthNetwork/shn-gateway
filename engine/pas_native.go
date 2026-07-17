@@ -274,7 +274,7 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 	}
 	// Build the response leg BEFORE committing payer state (review-fixes-6 #1) so a response-leg
 	// failure (unknown requester, seal, encode) cannot orphan the EOB / pended-claim ledger.
-	respBytes, status, msg := g.buildResponseLeg(r, "payer-coverage", "pas-response", "pas-claim", env.Metadata.CorrelationID, result.ResponseFHIR, tok.Subject, env.Metadata.Sender, "")
+	respBytes, status, msg := g.buildResponseLeg(r, "payer-coverage", "pas-response", "pas-claim", env.Metadata.CorrelationID, g.framePayload(env.Metadata.Sender, http.StatusOK, "application/fhir+json", result.ResponseFHIR), tok.Subject, env.Metadata.Sender, "")
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
@@ -374,7 +374,7 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 	}
 	// Build the response leg BEFORE committing payer state (review-fixes-6 #1) so a response-leg
 	// failure cannot orphan the claim acquired in BeginClaimUpdate (the deferred Rollback releases it).
-	respBytes, status, msg := g.buildResponseLeg(r, "payer-coverage", "pas-update-response", "pas-claim-update", env.Metadata.CorrelationID, result.ResponseFHIR, tok.Subject, env.Metadata.Sender, "")
+	respBytes, status, msg := g.buildResponseLeg(r, "payer-coverage", "pas-update-response", "pas-claim-update", env.Metadata.CorrelationID, g.framePayload(env.Metadata.Sender, http.StatusOK, "application/fhir+json", result.ResponseFHIR), tok.Subject, env.Metadata.Sender, "")
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return

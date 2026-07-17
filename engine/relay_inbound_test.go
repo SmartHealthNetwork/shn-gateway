@@ -18,10 +18,10 @@ import (
 
 // inboundTestRequester bundles the requester holder id (respondLegError's `requester`
 // arg — a plain string, matching the real inbound-handler call sites, e.g.
-// crd_native.go's env.Metadata.Sender) with the X25519 key pair
-// decryptAndUnwrapResponseLeg needs to Open the sealed response leg. A real peer
-// Registry carries only PUBLIC keys (EncPub); the requester's PRIVATE key is kept
-// here, out-of-band, purely so the test can decrypt what buildResponseLeg sealed TO it.
+// crd_native.go's env.Metadata.Sender) with the X25519 key pair the test needs to
+// Open the sealed response leg. A real peer Registry carries only PUBLIC keys
+// (EncPub); the requester's PRIVATE key is kept here, out-of-band, purely so the
+// test can decrypt what buildResponseLeg sealed TO it.
 type inboundTestRequester struct {
 	ID      string
 	EncPub  *[32]byte
@@ -74,10 +74,13 @@ func (s *inboundAuthzStub) RoundTrip(req *http.Request) (*http.Response, error) 
 // newInboundTestGateway builds a hermetic PAYER Gateway wired to a fake Authorization
 // Framework (inboundAuthzStub) and a Registry carrying one requester holder
 // ("requester", role provider) — everything respondLegError's buildResponseLeg call
-// needs to mint a token and seal a response leg to that requester. Returns the
-// gateway plus the requester's id + key pair (decryptAndUnwrapResponseLeg needs the
+// needs to mint a token and seal a response leg to that requester. When frameCapable
+// is true the requester's registry entry advertises MessageFrames:["v1"] (the
+// negotiation switch): the responder frames its answers only to a
+// peer that declared it can decode; a non-capable requester gets the pre-v0.27.0 bare
+// contract. Returns the gateway plus the requester's id + key pair (the test needs the
 // private half to Open the seal — a real Registry never carries it).
-func newInboundTestGateway(t *testing.T) (*Gateway, inboundTestRequester) {
+func newInboundTestGateway(t *testing.T, frameCapable bool) (*Gateway, inboundTestRequester) {
 	t.Helper()
 	authzPub, authzPriv := genED25519(t)
 	_, paySignPriv := genED25519(t)
@@ -88,7 +91,11 @@ func newInboundTestGateway(t *testing.T) (*Gateway, inboundTestRequester) {
 	clock := func() time.Time { return time.Unix(1700000000, 0).UTC() }
 
 	reg := shnsdk.NewRegistry()
-	reg.Set("requester", shnsdk.RegistryEntry{ID: "requester", Role: "provider", EncPub: reqEncPub, SignPub: reqSignPub})
+	reqEntry := shnsdk.RegistryEntry{ID: "requester", Role: "provider", EncPub: reqEncPub, SignPub: reqSignPub}
+	if frameCapable {
+		reqEntry.MessageFrames = shnsdk.SupportedMessageFrames()
+	}
+	reg.Set("requester", reqEntry)
 
 	sor := NewStubHolderData()
 	gw := New(Config{
@@ -120,12 +127,12 @@ func newSignedInboundRequest(t *testing.T, g *Gateway, requester string) *http.R
 	return httptest.NewRequest(http.MethodPost, "/", nil).WithContext(context.Background())
 }
 
-// decryptAndUnwrapResponseLeg decodes the sealed response-leg envelope respondLegError
-// wrote to the ResponseRecorder body, Opens it with the requester's key pair (Open
-// needs only the RECIPIENT's own X25519 pair — box.OpenAnonymous — never the
-// sender's key, since Seal uses an anonymous sealed box), and unwraps the relay
-// wrapper (unwrapRelayResponse).
-func decryptAndUnwrapResponseLeg(t *testing.T, requester inboundTestRequester, body []byte) (int, []byte) {
+// openResponseLeg decodes the sealed response-leg envelope a handler wrote to the
+// ResponseRecorder body and Opens it with the requester's key pair (Open needs only
+// the RECIPIENT's own X25519 pair — box.OpenAnonymous — never the sender's key, since
+// Seal uses an anonymous sealed box). It returns the RAW sealed payload — a v1 message
+// frame for a capable requester, a bare application body for a legacy one.
+func openResponseLeg(t *testing.T, requester inboundTestRequester, body []byte) []byte {
 	t.Helper()
 	env, err := shnsdk.DecodeEnvelope(body)
 	if err != nil {
@@ -135,47 +142,93 @@ func decryptAndUnwrapResponseLeg(t *testing.T, requester inboundTestRequester, b
 	if err != nil {
 		t.Fatalf("open envelope: %v", err)
 	}
-	status, respBody, _ := unwrapRelayResponse(payload)
-	return status, respBody
+	return payload
 }
 
-// respondLegError with the flag ON must return HTTP 200 to the Hub carrying a
-// sealed envelope whose decrypted payload unwraps to {status, body}.
-func TestRespondLegError_FlagOn_SealsWrappedRelay(t *testing.T) {
-	g, requester := newInboundTestGateway(t) // helper: builds a Gateway + a requester holder in its registry
-	g.cfg.RelayRecipientErrors = true
+// TestRespondLegErrorFramesForCapableRequester (new↔new): a responder's application
+// NON-2xx answer to a frame-capable requester is sealed as a v1 message frame carrying
+// the app status, relayed 200-to-Hub. The sealed payload decodes (shnsdk.DecodeHTTPFrame)
+// to the verbatim app status + body.
+func TestRespondLegErrorFramesForCapableRequester(t *testing.T) {
+	g, requester := newInboundTestGateway(t, true)
 	oo := []byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"error"}]}`)
 	rec := httptest.NewRecorder()
-	r := newSignedInboundRequest(t, g, requester.ID) // helper: a request carrying a valid inbound correlation
+	r := newSignedInboundRequest(t, g, requester.ID)
 	g.respondLegError(rec, r, "payer-coverage", "crd-cards", "crd-order-select",
-		"corr-1", LegResult{Status: 502, ResponseFHIR: oo}, "pci-1", requester.ID, "")
+		"corr-1", LegResult{Status: 422, ResponseFHIR: oo}, "pci-1", requester.ID, "")
 	if rec.Code != 200 {
-		t.Fatalf("to-Hub status = %d, want 200 (sealed relay)", rec.Code)
+		t.Fatalf("to-Hub status = %d, want 200 (framed app answer is 200-to-Hub)", rec.Code)
 	}
-	status, body := decryptAndUnwrapResponseLeg(t, requester, rec.Body.Bytes()) // helper: Open + unwrapRelayResponse
-	if status != 502 || string(body) != string(oo) {
-		t.Fatalf("unwrapped relay = %d/%s, want 502 + OperationOutcome", status, body)
+	payload := openResponseLeg(t, requester, rec.Body.Bytes())
+	if !shnsdk.IsFramed(payload) {
+		t.Fatalf("capable requester: response payload is not a v1 frame: %q", payload)
+	}
+	hdr, body, err := shnsdk.DecodeHTTPFrame(payload)
+	if err != nil {
+		t.Fatalf("decode frame: %v", err)
+	}
+	if hdr.Status != 422 || string(body) != string(oo) {
+		t.Fatalf("framed answer = %d/%s, want 422 + OperationOutcome verbatim", hdr.Status, body)
+	}
+	if hdr.Headers["Content-Type"] != "application/fhir+json" {
+		t.Fatalf("framed Content-Type = %q, want application/fhir+json", hdr.Headers["Content-Type"])
 	}
 }
 
-// respondLegError with the flag ON, given a non-2xx LegResult with an EMPTY
-// ResponseFHIR — the shape most internal-rejection call sites carry (e.g. a DTR 400
-// "unknown questionnaire canonical" or a PAS 409 that sets only Message) — must
-// synthesize {"error": Message} as the wrapped body instead of sealing an empty one.
-func TestRespondLegError_FlagOn_SynthesizesErrorBodyWhenNoResponseFHIR(t *testing.T) {
-	g, requester := newInboundTestGateway(t)
-	g.cfg.RelayRecipientErrors = true
+// TestRespondLegErrorConnectorMisuse2xxRoutesToSuccess: a LegResult with a 2xx Status
+// handed to respondLegError is connector misuse (a success belongs on the success seal).
+// The guard reroutes it through respondLeg, so a capable requester gets a framed 200
+// SUCCESS carrying the body verbatim — never a framed error (a 2xx would be nonsensical
+// as an *AppAnswerError/*RelayError), and never bare.
+func TestRespondLegErrorConnectorMisuse2xxRoutesToSuccess(t *testing.T) {
+	g, requester := newInboundTestGateway(t, true)
+	fhir := []byte(`{"resourceType":"ClaimResponse","status":"active"}`)
+	rec := httptest.NewRecorder()
+	r := newSignedInboundRequest(t, g, requester.ID)
+	g.respondLegError(rec, r, "payer-coverage", "crd-cards", "crd-order-select",
+		"corr-1", LegResult{Status: 200, ResponseFHIR: fhir}, "pci-1", requester.ID, "")
+	if rec.Code != 200 {
+		t.Fatalf("to-Hub status = %d, want 200", rec.Code)
+	}
+	payload := openResponseLeg(t, requester, rec.Body.Bytes())
+	if !shnsdk.IsFramed(payload) {
+		t.Fatalf("capable requester: 2xx-misuse payload must be a framed success, got bare: %q", payload)
+	}
+	hdr, body, err := shnsdk.DecodeHTTPFrame(payload)
+	if err != nil {
+		t.Fatalf("decode frame: %v", err)
+	}
+	if hdr.Status != 200 || string(body) != string(fhir) {
+		t.Fatalf("2xx-misuse framed = %d/%s, want a 200 success carrying the body verbatim", hdr.Status, body)
+	}
+	if hdr.Headers["Content-Type"] != "application/fhir+json" {
+		t.Fatalf("2xx-misuse Content-Type = %q, want application/fhir+json (success seal)", hdr.Headers["Content-Type"])
+	}
+}
+
+// TestRespondLegErrorFramesSynthesizedErrorForCapableRequester: a NON-2xx answer with an
+// EMPTY ResponseFHIR (the shape most internal-rejection call sites carry — a DTR 400
+// "unknown questionnaire canonical" or a PAS 409 that sets only Message) frames a
+// synthesized {"error": Message} body as application/json, not an empty one.
+func TestRespondLegErrorFramesSynthesizedErrorForCapableRequester(t *testing.T) {
+	g, requester := newInboundTestGateway(t, true)
 	msg := "ClaimUpdate references no pending claim available for this patient"
 	rec := httptest.NewRecorder()
 	r := newSignedInboundRequest(t, g, requester.ID)
 	g.respondLegError(rec, r, "payer-coverage", "crd-cards", "crd-order-select",
 		"corr-1", LegResult{Status: 409, Message: msg}, "pci-1", requester.ID, "")
 	if rec.Code != 200 {
-		t.Fatalf("to-Hub status = %d, want 200 (sealed relay)", rec.Code)
+		t.Fatalf("to-Hub status = %d, want 200 (framed app answer is 200-to-Hub)", rec.Code)
 	}
-	status, body := decryptAndUnwrapResponseLeg(t, requester, rec.Body.Bytes()) // helper: Open + unwrapRelayResponse
-	if status != 409 {
-		t.Fatalf("unwrapped relay status = %d, want 409", status)
+	hdr, body, err := shnsdk.DecodeHTTPFrame(openResponseLeg(t, requester, rec.Body.Bytes()))
+	if err != nil {
+		t.Fatalf("decode frame: %v", err)
+	}
+	if hdr.Status != 409 {
+		t.Fatalf("framed status = %d, want 409", hdr.Status)
+	}
+	if hdr.Headers["Content-Type"] != "application/json" {
+		t.Fatalf("synthesized-body Content-Type = %q, want application/json", hdr.Headers["Content-Type"])
 	}
 	var synth map[string]string
 	if err := json.Unmarshal(body, &synth); err != nil {
@@ -186,53 +239,120 @@ func TestRespondLegError_FlagOn_SynthesizesErrorBodyWhenNoResponseFHIR(t *testin
 	}
 }
 
-// respondLegError with the flag ON must route a 2xx LegResult through the BARE
-// success seal (respondLeg), never the relay wrapper — this locks the feature's core
-// "wrap only non-2xx" invariant. Unlike decryptAndUnwrapResponseLeg
-// (which only reads unwrapRelayResponse's status+body), this test also inspects the
-// wrapped bool directly: if respondLegError ever started wrapping a 2xx, wrapped
-// would flip to true here and the test would fail.
-func TestRespondLegError_FlagOn_2xxStatusStaysBareUnwrapped(t *testing.T) {
-	g, requester := newInboundTestGateway(t)
-	g.cfg.RelayRecipientErrors = true
-	fhir := []byte(`{"resourceType":"ClaimResponse","status":"active"}`)
+// TestRespondLegErrorBareForLegacyRequester (new↔legacy): a NON-2xx answer to a
+// non-capable requester keeps the pre-v0.27.0 contract — a BARE non-2xx {"error": msg}
+// writeJSON (which the payload-blind Hub reports as its generic mechanical 502). Byte-
+// identical to the legacy shape: HTTP status == result.Status, body == {"error": msg}.
+func TestRespondLegErrorBareForLegacyRequester(t *testing.T) {
+	g, requester := newInboundTestGateway(t, false)
+	msg := "upstream payer PAS submit returned 502 Bad Gateway"
 	rec := httptest.NewRecorder()
 	r := newSignedInboundRequest(t, g, requester.ID)
 	g.respondLegError(rec, r, "payer-coverage", "crd-cards", "crd-order-select",
-		"corr-1", LegResult{Status: 200, ResponseFHIR: fhir}, "pci-1", requester.ID, "")
-	if rec.Code != 200 {
-		t.Fatalf("to-Hub status = %d, want 200 (sealed relay)", rec.Code)
+		"corr-1", LegResult{Status: 502, Message: msg}, "pci-1", requester.ID, "")
+	if rec.Code != 502 {
+		t.Fatalf("legacy requester: to-Hub status = %d, want 502 (bare non-2xx)", rec.Code)
 	}
-	status, body := decryptAndUnwrapResponseLeg(t, requester, rec.Body.Bytes()) // helper: Open + unwrapRelayResponse
-	if status != 200 || string(body) != string(fhir) {
-		t.Fatalf("unwrapped relay = %d/%s, want 200 + bare FHIR verbatim", status, body)
+	var got map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("legacy body not valid JSON: %v (%s)", err, rec.Body.String())
 	}
-	// Open the envelope again and inspect unwrapRelayResponse's wrapped bool
-	// directly — decryptAndUnwrapResponseLeg discards it, but it's exactly what
-	// proves the 2xx path took respondLeg's bare seal rather than the wrapper: a
-	// bare payload happens to unwrap to (200, payload, false) too, so status+body
-	// alone can't distinguish "genuinely bare" from "wrapped with status 200."
-	env, err := shnsdk.DecodeEnvelope(rec.Body.Bytes())
-	if err != nil {
-		t.Fatalf("decode envelope: %v", err)
-	}
-	payload, err := shnsdk.Open(env, requester.EncPub, requester.EncPriv)
-	if err != nil {
-		t.Fatalf("open envelope: %v", err)
-	}
-	if _, _, wrapped := unwrapRelayResponse(payload); wrapped {
-		t.Fatalf("2xx LegResult produced a wrapped relay payload; want bare (respondLeg), wrapped=%v", wrapped)
+	if len(got) != 1 || got["error"] != msg {
+		t.Fatalf("legacy body = %v, want exactly {\"error\": %q}", got, msg)
 	}
 }
 
-func TestRespondLegError_FlagOff_LegacyHubRoutingFailed(t *testing.T) {
-	g, requester := newInboundTestGateway(t)
-	g.cfg.RelayRecipientErrors = false
+// TestRespondLegFramesSuccessForCapableRequester (success framing): a 2xx answer to a
+// frame-capable requester is sealed as a v1 frame(200, application/fhir+json, body).
+func TestRespondLegFramesSuccessForCapableRequester(t *testing.T) {
+	g, requester := newInboundTestGateway(t, true)
+	fhir := []byte(`{"resourceType":"ClaimResponse","status":"active"}`)
 	rec := httptest.NewRecorder()
 	r := newSignedInboundRequest(t, g, requester.ID)
-	g.respondLegError(rec, r, "payer-coverage", "crd-cards", "crd-order-select",
-		"corr-1", LegResult{Status: 502, Message: "upstream payer PAS submit returned 502 Bad Gateway"}, "pci-1", requester.ID, "")
-	if rec.Code != 502 {
-		t.Fatalf("flag off: to-Hub status = %d, want 502 (legacy non-2xx)", rec.Code)
+	g.respondLeg(rec, r, "payer-coverage", "crd-cards", "crd-order-select",
+		"corr-1", fhir, "pci-1", requester.ID, "")
+	if rec.Code != 200 {
+		t.Fatalf("to-Hub status = %d, want 200", rec.Code)
+	}
+	payload := openResponseLeg(t, requester, rec.Body.Bytes())
+	if !shnsdk.IsFramed(payload) {
+		t.Fatalf("capable requester: success payload is not a v1 frame: %q", payload)
+	}
+	hdr, body, err := shnsdk.DecodeHTTPFrame(payload)
+	if err != nil {
+		t.Fatalf("decode frame: %v", err)
+	}
+	if hdr.Status != 200 || string(body) != string(fhir) {
+		t.Fatalf("framed success = %d/%s, want 200 + FHIR verbatim", hdr.Status, body)
+	}
+}
+
+// TestRespondLegBareSuccessForLegacyRequester (success framing): a 2xx answer to a
+// non-capable requester stays BARE (the pre-v0.27.0 contract) — the sealed payload is
+// the FHIR body itself, NOT a frame.
+func TestRespondLegBareSuccessForLegacyRequester(t *testing.T) {
+	g, requester := newInboundTestGateway(t, false)
+	fhir := []byte(`{"resourceType":"ClaimResponse","status":"active"}`)
+	rec := httptest.NewRecorder()
+	r := newSignedInboundRequest(t, g, requester.ID)
+	g.respondLeg(rec, r, "payer-coverage", "crd-cards", "crd-order-select",
+		"corr-1", fhir, "pci-1", requester.ID, "")
+	if rec.Code != 200 {
+		t.Fatalf("to-Hub status = %d, want 200", rec.Code)
+	}
+	payload := openResponseLeg(t, requester, rec.Body.Bytes())
+	if shnsdk.IsFramed(payload) {
+		t.Fatalf("legacy requester: success payload must be bare, got a frame")
+	}
+	if string(payload) != string(fhir) {
+		t.Fatalf("legacy success payload = %s, want bare FHIR verbatim", payload)
+	}
+}
+
+// TestPASNativeSuccessFramedForCapableRequester drives the conformant PAS submit
+// handler (handlePASNativeInbound) — whose response leg is built at the direct
+// buildResponseLeg site (pas_native.go:277) — end to end for a frame-capable
+// requester, and proves that direct site frames too: the sealed response leg decodes
+// to frame(200, application/fhir+json, ClaimResponse).
+func TestPASNativeSuccessFramedForCapableRequester(t *testing.T) {
+	g, requester := newInboundTestGateway(t, true)
+	pci, _, ok := g.cfg.SoR.ResolvePatient("MBR-COVERED")
+	if !ok {
+		t.Fatal("MBR-COVERED not resolvable in StubHolderData")
+	}
+	bundle := conformantPASBundleWithQR(t, "MBR-COVERED")
+
+	env, err := shnsdk.Seal(shnsdk.Metadata{
+		Sender:          requester.ID,
+		Recipient:       "payer",
+		TransactionType: "pas-claim",
+		AuthorityFrame:  "payer-coverage",
+		Timestamp:       g.cfg.Clock().Format(time.RFC3339),
+		CorrelationID:   "corr-pas-1",
+	}, bundle, g.cfg.Identity.EncPub)
+	if err != nil {
+		t.Fatalf("seal inbound PAS envelope: %v", err)
+	}
+	tok := shnsdk.Token{Operation: "pas-submit", Subject: pci, CorrelationID: "corr-pas-1"}
+
+	rec := httptest.NewRecorder()
+	r := newSignedInboundRequest(t, g, requester.ID)
+	g.handlePASNativeInbound(rec, r, env, tok)
+	if rec.Code != 200 {
+		t.Fatalf("to-Hub status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	payload := openResponseLeg(t, requester, rec.Body.Bytes())
+	if !shnsdk.IsFramed(payload) {
+		t.Fatalf("capable requester: PAS response payload is not a v1 frame: %q", payload)
+	}
+	hdr, body, err := shnsdk.DecodeHTTPFrame(payload)
+	if err != nil {
+		t.Fatalf("decode frame: %v", err)
+	}
+	if hdr.Status != 200 || hdr.Headers["Content-Type"] != "application/fhir+json" {
+		t.Fatalf("framed PAS answer = %d/%q, want 200 + application/fhir+json", hdr.Status, hdr.Headers["Content-Type"])
+	}
+	if parsed, perr := shnsdk.ParseClaimResponse(body); perr != nil || parsed.Outcome != "approved" {
+		t.Fatalf("framed PAS body not an approved ClaimResponse: %+v err=%v", parsed, perr)
 	}
 }

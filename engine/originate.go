@@ -23,6 +23,26 @@ import (
 // uniform-A3 bug OR $validate foreign relayed bytes (R-8). The sandbox lane is SHN-produced.
 func targetsBrPayer(profile string) bool { return profile == "provider-data" }
 
+// relayOriginationError surfaces a recipient's framed non-2xx application answer
+// (a *RelayError from OriginateLeg, unwrapped through any %w chain) to the origination
+// caller byte-identically — the same verbatim relay the Da Vinci ingress handlers do,
+// for the bespoke /scenario* origination API. Returns true iff it wrote the response;
+// callers keep their existing writeJSON fallback for every other (non-relay) error.
+func (g *Gateway) relayOriginationError(w http.ResponseWriter, err error) bool {
+	var re *RelayError
+	if !errors.As(err, &re) {
+		return false
+	}
+	ct := re.ContentType
+	if ct == "" {
+		ct = "application/fhir+json"
+	}
+	w.Header().Set("Content-Type", ct)
+	w.WriteHeader(re.Status)
+	_, _ = w.Write(re.Body)
+	return true
+}
+
 // FilledItem is the gateway-engine-LOCAL attribution surface for a DTR auto-filled
 // QR item (console response, QRItems field). The SDK's FillQuestionnaire drops the
 // FilledItem summary (UI-only); the gateway reconstructs it via fillSummary
@@ -217,6 +237,9 @@ func (g *Gateway) handleScenario(w http.ResponseWriter, r *http.Request) {
 	// drift.
 	crrJSON, err := g.OriginateLeg(ctx, r, recipient, "coverage-eligibility", pci, correlationID, "", Content{WorkstreamType: workstreamPA, Bytes: cerJSON})
 	if err != nil {
+		if g.relayOriginationError(w, err) {
+			return
+		}
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
@@ -406,6 +429,9 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 	}
 	crdRespJSON, err := g.OriginateLeg(ctx, r, recipient, "crd-order-select", pci, g.cfg.CorrelationGen(), "", Content{WorkstreamType: workstreamPA, Bytes: crdReq})
 	if err != nil {
+		if g.relayOriginationError(w, err) {
+			return crdDtrResult{}, false
+		}
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return crdDtrResult{}, false
 	}
@@ -476,6 +502,9 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 		}
 		packageJSON, err := g.OriginateLeg(ctx, r, recipient, "dtr-questionnaire-fetch", pci, g.cfg.CorrelationGen(), "", Content{WorkstreamType: workstreamPA, Bytes: dtrReq})
 		if err != nil {
+			if g.relayOriginationError(w, err) {
+				return crdDtrResult{}, false
+			}
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 			return crdDtrResult{}, false
 		}
@@ -779,6 +808,9 @@ func (g *Gateway) originateNoPACRD(w http.ResponseWriter, r *http.Request, membe
 	correlationID := g.cfg.CorrelationGen()
 	respJSON, err := g.OriginateLeg(ctx, r, recipient, "crd-order-select", pci, correlationID, "", Content{WorkstreamType: workstreamPA, Bytes: reqJSON})
 	if err != nil {
+		if g.relayOriginationError(w, err) {
+			return
+		}
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
@@ -859,6 +891,9 @@ func (g *Gateway) handleUC03(w http.ResponseWriter, r *http.Request) {
 	}
 	claimRespJSON, err := g.OriginateLeg(ctx, r, res.recipient, "pas-claim", res.pci, pasCorr, "", Content{WorkstreamType: workstreamPA, Bytes: bundleJSON})
 	if err != nil {
+		if g.relayOriginationError(w, err) {
+			return
+		}
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
@@ -924,6 +959,9 @@ func (g *Gateway) handleUC07HCPCS(w http.ResponseWriter, r *http.Request) {
 	}
 	claimRespJSON, err := g.OriginateLeg(ctx, r, res.recipient, "pas-claim", res.pci, pasCorr, "", Content{WorkstreamType: workstreamPA, Bytes: bundleJSON})
 	if err != nil {
+		if g.relayOriginationError(w, err) {
+			return
+		}
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
@@ -1013,8 +1051,11 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, status, map[string]string{"error": msg})
 			return
 		}
-		parsed, _, status, msg := g.submitClaimAndResolve(ctx, r, res.pci, res.srJSON, attestedQR, res.patientRef, res.coverageRef, res.payer, res.recipient)
+		parsed, _, status, msg, err := g.submitClaimAndResolve(ctx, r, res.pci, res.srJSON, attestedQR, res.patientRef, res.coverageRef, res.payer, res.recipient)
 		if status != 0 {
+			if g.relayOriginationError(w, err) {
+				return
+			}
 			writeJSON(w, status, map[string]string{"error": msg})
 			return
 		}
@@ -1049,6 +1090,9 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 	}
 	pendedResp, err := g.OriginateLeg(ctx, r, res.recipient, "pas-claim", res.pci, pasCorr, "", Content{WorkstreamType: workstreamPA, Bytes: bundleJSON})
 	if err != nil {
+		if g.relayOriginationError(w, err) {
+			return
+		}
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
@@ -1114,6 +1158,9 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 	// ClaimUpdate exchange — expect APPROVED.
 	updateResp, err := g.OriginateLeg(ctx, r, res.recipient, "pas-claim-update", res.pci, updateCorr, "", Content{WorkstreamType: workstreamPA, Bytes: updateBundle})
 	if err != nil {
+		if g.relayOriginationError(w, err) {
+			return
+		}
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
@@ -1231,6 +1278,9 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 	}
 	pendedResp, err := g.OriginateLeg(ctx, r, res.recipient, "pas-claim", res.pci, pasCorr, "", Content{WorkstreamType: workstreamPA, Bytes: bundleJSON})
 	if err != nil {
+		if g.relayOriginationError(w, err) {
+			return
+		}
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
@@ -1269,6 +1319,9 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 		// custodian = facility.ID so the Authorization Framework gates consent for THIS source per leg (FR-25).
 		recordsJSON, err := g.OriginateLeg(ctx, r, facility.ID, "federated-query", res.pci, fqCorr, facility.ID, Content{WorkstreamType: workstreamPA, Bytes: queryJSON})
 		if err != nil {
+			if g.relayOriginationError(w, err) {
+				return
+			}
 			// Distinguish a genuine consent DENIAL from an infrastructure/integrity
 			// failure. ONLY an authorization denial (the no-consent branch) leaves the PA
 			// validly pended; a facility outage, a tampered response, or a transport error
@@ -1317,6 +1370,9 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 	}
 	updateResp, err := g.OriginateLeg(ctx, r, res.recipient, "pas-claim-update", res.pci, updateCorr, "", Content{WorkstreamType: workstreamPA, Bytes: updateBundle})
 	if err != nil {
+		if g.relayOriginationError(w, err) {
+			return
+		}
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
@@ -1392,6 +1448,9 @@ func (g *Gateway) handleUC08(w http.ResponseWriter, r *http.Request) {
 
 	claimRespJSON, err := g.OriginateLeg(ctx, r, res.recipient, "pas-claim", res.pci, pasCorr, "", Content{WorkstreamType: workstreamPA, Bytes: bundleJSON})
 	if err != nil {
+		if g.relayOriginationError(w, err) {
+			return
+		}
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}

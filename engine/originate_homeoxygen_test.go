@@ -156,6 +156,17 @@ type homeOxygenSubstrate struct {
 	canonical      string
 
 	legTypes []string
+
+	// frameErrLeg, when non-empty, puts the substrate into v1-frame mode:
+	// the named leg answers a FRAMED non-2xx (frameErrStatus/frameErrBody/frameErrCT) while
+	// every OTHER leg answers its canned success wrapped in a v1 200 frame — modelling a
+	// frame-capable recipient that frames every answer. Requires the payer registry entry to
+	// advertise MessageFrames:["v1"] (else the originator treats the frame as a stale-feed bare
+	// payload). Zero-valued by default, so the bare-sealing tests above are byte-unaffected.
+	frameErrLeg    string
+	frameErrStatus int
+	frameErrBody   []byte
+	frameErrCT     string
 }
 
 func (s *homeOxygenSubstrate) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -236,6 +247,24 @@ func (s *homeOxygenSubstrate) handleRoute(body []byte) (*http.Response, error) {
 		respOp, respFrame = "pas-response", "payer-coverage"
 	default:
 		return errResp("stub: unexpected leg " + txType), nil
+	}
+
+	// v1-frame mode: wrap the canned success in a 200 frame, or answer the target leg with a
+	// framed non-2xx — the wire form a frame-capable payer's respondLegError produces, which the
+	// originator decodes into a *RelayError (the payer entry must advertise v1).
+	if s.frameErrLeg != "" {
+		if txType == s.frameErrLeg {
+			ct := s.frameErrCT
+			if ct == "" {
+				ct = "application/fhir+json"
+			}
+			respPayload, err = shnsdk.EncodeHTTPFrame(s.frameErrStatus, ct, s.frameErrBody)
+		} else {
+			respPayload, err = shnsdk.EncodeHTTPFrame(200, "application/fhir+json", respPayload)
+		}
+		if err != nil {
+			return errResp("stub: EncodeHTTPFrame: " + err.Error()), nil
+		}
 	}
 
 	meta := shnsdk.Metadata{

@@ -191,7 +191,7 @@ func TestNativeResponder_DTRForwardsPackageVerbatim(t *testing.T) {
 // TestNativeResponder_PartnerNon2xxIsRelayedVerbatim supersedes the pre-relay
 // TestNativeResponder_PartnerNon2xxIs502: post()/Handle() no longer collapse every
 // upstream non-2xx to a generic 502 — an upstream that PRODUCED a response is a
-// relayable answer, so its REAL status flows through verbatim.
+// relayable answer, so its REAL status flows through verbatim (relay-recipient-response).
 func TestNativeResponder_PartnerNon2xxIsRelayedVerbatim(t *testing.T) {
 	p := newStubPartner(t)
 	p.status = 500
@@ -479,7 +479,7 @@ func TestNativeResponder_RewritesCRDHook(t *testing.T) {
 // order-sign `coverage` prefetch is a SEARCH template (Coverage?beneficiary=…) demanding a
 // searchset Bundle (bare Coverage → 412 "Missing Coverage"), while the SHN spine carries a
 // BARE Coverage (provider routing + the payer-side bind both read bare, crd_native.go). The
-// wrap runs AFTER the bind, gated behind the option so br-payer conformance is untouched.
+// wrap runs AFTER the bind, gated external-payer-scoped so br-payer conformance is untouched.
 func TestNativeResponder_WrapsCRDCoverageBundle(t *testing.T) {
 	p := newStubPartner(t)
 	p.respByPath["/cds-services/order-sign"] = []byte(`{"cards":[],"systemActions":[]}`)
@@ -530,7 +530,7 @@ func TestNativeResponder_CoverageBundleScopedAndIdempotent(t *testing.T) {
 	}
 	bareCov := `"coverage":{"resourceType":"Coverage","id":"cov","beneficiary":{"reference":"Patient/MBR"}}`
 
-	// OFF: bare stays bare (no wrap without the option).
+	// OFF: bare stays bare (no wrap without the external-payer-scoped option).
 	pOff := newStubPartner(t)
 	pOff.respByPath["/cds-services/order-sign"] = []byte(`{"cards":[],"systemActions":[]}`)
 	nOff := NewNativeResponder(pOff.srv.Client(), pOff.srv.URL, "order-sign", nil, nil)

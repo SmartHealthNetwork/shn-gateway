@@ -95,10 +95,6 @@ type config struct {
 	PayerDavinciScope      string
 	PayerDavinciClientKID  string
 	PayerDavinciPASNative  bool
-	// RelayRecipientErrors gates the response-leg relay of a recipient's NON-2xx
-	// answer. See engine.Config.RelayRecipientErrors doc.
-	// RESPONDER_RELAY_ERRORS=1.
-	RelayRecipientErrors bool
 	// PayerDavinciCRDServiceID is the escape-hatch override for the partner's CDS
 	// Hooks order-select service id. When empty, DiscoverCRDServiceID fetches
 	// {PAYER_DAVINCI_BASE_URL}/cds-services at boot and selects the single
@@ -225,7 +221,6 @@ func loadConfig(getenv func(string) string) (config, error) {
 		PayerDavinciScope:             def("PAYER_DAVINCI_SCOPE", "system/*.read"),
 		PayerDavinciClientKID:         getenv("PAYER_DAVINCI_CLIENT_KID"),
 		PayerDavinciPASNative:         getenv("PAYER_DAVINCI_PAS_NATIVE") == "true",
-		RelayRecipientErrors:          getenv("RESPONDER_RELAY_ERRORS") == "1" || getenv("RESPONDER_RELAY_ERRORS") == "true",
 		PayerDavinciCRDServiceID:      getenv("PAYER_DAVINCI_CRD_SERVICE_ID"),
 		PayerDavinciCRDHook:           getenv("PAYER_DAVINCI_CRD_HOOK"),
 		PayerDavinciDispatchServiceID: getenv("PAYER_DAVINCI_DISPATCH_SERVICE_ID"),
@@ -667,8 +662,6 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		PHGURL:          firstNonEmpty(cfg.PHGURL, endpoints.PHG),
 
 		OriginationProfile: cfg.OriginationProfile,
-
-		RelayRecipientErrors: cfg.RelayRecipientErrors,
 	}
 	// Native-forward payer mode: the read-only legs forward to a partner
 	// Da Vinci endpoint; PAS stays on the sandbox fallback. Setting Responder here means
@@ -834,7 +827,7 @@ func convergeRegistry(ctx context.Context, c *http.Client, registrarURL string, 
 		if raw, derr := base64.StdEncoding.DecodeString(h.SignPub); derr == nil && len(raw) == ed25519.PublicKeySize {
 			signPub = ed25519.PublicKey(raw)
 		}
-		reg.Set(h.ID, shnsdk.RegistryEntry{ID: h.ID, Role: h.Role, EncPub: encPub, SignPub: signPub, BaseURL: h.BaseURL, PayerIDs: h.PayerIDs})
+		reg.Set(h.ID, shnsdk.RegistryEntry{ID: h.ID, Role: h.Role, EncPub: encPub, SignPub: signPub, BaseURL: h.BaseURL, PayerIDs: h.PayerIDs, MessageFrames: h.MessageFrames})
 		n++
 	}
 	return n, nil

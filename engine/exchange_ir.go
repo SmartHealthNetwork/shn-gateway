@@ -2,7 +2,7 @@
 // vocabulary the gateway moves and guards but never clinically interprets. Zero Da
 // Vinci, zero provider/payer. A workstream module (Layer 3, e.g. workstream_pa.go)
 // supplies the concrete legTypes and content shapes; this file knows only their
-// neutral envelope. The wire stays sealed Da Vinci bytes (AI-2 / OWD-G3): the IR is
+// neutral envelope. The wire stays sealed workstream-native bytes (AI-2 / OWD-G3): the IR is
 // gateway-INTERNAL, never a neutral wire format.
 package engine
 

@@ -1,14 +1,16 @@
 // gateway/engine/relay_roundtrip_test.go
 //
-// Shared in-process exchange harness for relay-recipient-response: a provider (originator) Gateway wired to a fake Hub+Authz
+// Shared in-process exchange harness for the opaque-payload message-frame spec
+// (2026-07-17): a provider (originator) Gateway wired to a fake Hub+Authz
 // RoundTripper (relaySubstrate) that seals back a TEST-CONFIGURABLE LegResult
 // on the response leg. Mirrors twoPayerTestSystem/twoPayerSubstrate
 // (payerrouting_test.go) — same seal/authz crypto helpers from
 // originate_test.go (genKeyPair/genED25519/signTestToken/sealForProvider/
 // errResp), same shape — but the fake Hub's response leg is settable per-test
-// via payerReturns instead of always sealing a canned success, so roundTripInner's unwrap, the CRD ingress handler, and
-// the Observer seam can all drive the SAME harness against a real
-// originator Gateway without faking the seal/authz crypto.
+// via payerReturns instead of always sealing a canned success, so the frame
+// decode (roundTripInner), the CRD ingress handler, and the Observer seam can
+// all drive the SAME harness against a real originator Gateway without faking
+// the seal/authz crypto.
 package engine
 
 import (
@@ -105,12 +107,13 @@ func (s *relaySubstrate) handleAuthorize(body []byte) (*http.Response, error) {
 }
 
 // handleRoute decodes the sealed outbound envelope and seals back the
-// configured LegResult: a non-2xx Status is wrapped via wrapRelayResponse —
-// byte-identical to the wire form a flag-on payer's respondLegError
-// produces — so this drives roundTripInner's unwrap faithfully. A
-// zero/2xx Status (or no setResult call at all) seals ResponseFHIR bare, or a
-// canned success-cards payload if ResponseFHIR is also unset, matching
-// twoPayerSubstrate's always-success default.
+// configured LegResult: a non-2xx Status is sealed as a v1 message frame via
+// shnsdk.EncodeHTTPFrame — byte-identical to the wire form a frame-capable payer's
+// respondLegError produces — so this drives roundTripInner's frame decode faithfully
+// (the harness recipient advertises v1, see newInProcessExchange). A zero/2xx Status
+// (or no setResult call at all) seals ResponseFHIR VERBATIM (letting the frame_originate
+// tests inject a pre-built frame or a bare stale-feed payload), or a canned
+// success-cards payload if ResponseFHIR is also unset.
 func (s *relaySubstrate) handleRoute(body []byte) (*http.Response, error) {
 	env, err := shnsdk.DecodeEnvelope(body)
 	if err != nil {
@@ -135,7 +138,14 @@ func (s *relaySubstrate) handleRoute(body []byte) (*http.Response, error) {
 			}
 		}
 	default:
-		respPayload = wrapRelayResponse(lr.Status, lr.ResponseFHIR)
+		body := lr.ResponseFHIR
+		if len(body) == 0 {
+			body, _ = json.Marshal(map[string]string{"error": lr.Message})
+		}
+		respPayload, err = shnsdk.EncodeHTTPFrame(lr.Status, "application/fhir+json", body)
+		if err != nil {
+			return errResp("stub: EncodeHTTPFrame: " + err.Error()), nil
+		}
 	}
 
 	meta := shnsdk.Metadata{
@@ -162,12 +172,12 @@ func (s *relaySubstrate) handleRoute(body []byte) (*http.Response, error) {
 }
 
 // inProcessExchange is the shared harness for relay-recipient-response tests:
-// a real provider (originator) Gateway wired to a
-// relaySubstrate standing in for the Hub + Authorization Framework.
-// payerReturns configures what the fake Hub's response leg carries; callers
-// then drive OriginateLeg or the Da Vinci ingress handlers
-// directly against env.originator. The Observer seam needs no new field — it sets
-// env.originator.cfg.Observer directly (same package).
+// a real provider (originator) Gateway wired to a relaySubstrate standing in
+// for the Hub + Authorization Framework. payerReturns configures what the
+// fake Hub's response leg carries; callers then drive OriginateLeg or the
+// Da Vinci ingress handlers directly against env.originator. Observer-related
+// cases need no new field — they set env.originator.cfg.Observer directly
+// (same package).
 type inProcessExchange struct {
 	originator *Gateway
 	substrate  *relaySubstrate
@@ -178,8 +188,8 @@ type inProcessExchange struct {
 }
 
 // payerReturns configures the fake Hub's response leg: a non-2xx lr.Status is
-// sealed as a {status,body} wrapper (the wire form a flag-on payer's
-// respondLegError produces); a zero/2xx Status seals lr.ResponseFHIR bare (or
+// sealed as a v1 message frame (the wire form a frame-capable payer's
+// respondLegError produces); a zero/2xx Status seals lr.ResponseFHIR verbatim (or
 // the harness's default success cards if ResponseFHIR is also unset).
 func (e *inProcessExchange) payerReturns(lr LegResult) {
 	e.substrate.setResult(lr)
@@ -224,19 +234,16 @@ func (e *inProcessExchange) corruptResponseToken(t *testing.T) {
 // "provider") registered against a single payer holder ("payer"), talking to
 // a relaySubstrate over Config.Client — mirroring twoPayerTestSystem
 // (payerrouting_test.go) but with a test-configurable response leg instead of
-// an always-success canned card. The originator's Config.RelayRecipientErrors
-// is deliberately left at its zero value (false): the originator's unwrap in
-// roundTripInner is UNCONDITIONAL (no flag) — RelayRecipientErrors only gates
-// the PAYER side (respondLegError), never the originator, matching
-// the providers-first rollout.
+// an always-success canned card. Both holders advertise message-frame v1
+// (SupportedMessageFrames), so the originator's roundTripInner decodes the frame
+// the substrate seals — negotiation is registry-driven, keyed
+// on the RECIPIENT's advertised frames.
 //
-// PayerRouter + EnableIngressForTest are added for the ingress path (the CRD ingress
-// drive, which routes off the inbound Coverage's CMSPayerIdentity/00001 via
-// recipientForWith and gates on ingressAuthOK first) but are INERT for the
-// originator's direct OriginateLeg drive: OriginateLeg takes `recipient` as an
-// explicit parameter and never consults PayerRouter or ingressAuthBypass.
-// TestRoundTrip_RecipientNon2xx_SurfacesRelayError is re-verified
-// green after this extension.
+// PayerRouter + EnableIngressForTest are added for the CRD ingress drive (which
+// routes off the inbound Coverage's CMSPayerIdentity/00001 via recipientForWith
+// and gates on ingressAuthOK first) but are INERT for the direct OriginateLeg
+// drive: OriginateLeg takes `recipient` as an explicit parameter and never
+// consults PayerRouter or ingressAuthBypass.
 func newInProcessExchange(t *testing.T) *inProcessExchange {
 	t.Helper()
 	authzPub, authzPriv := genED25519(t)
@@ -249,8 +256,12 @@ func newInProcessExchange(t *testing.T) *inProcessExchange {
 	stub := &relaySubstrate{authzPriv: authzPriv, providerEncPub: provEncPub, clock: clock}
 
 	reg := shnsdk.NewRegistry()
-	reg.Set("provider", shnsdk.RegistryEntry{ID: "provider", Role: "provider", EncPub: provEncPub, SignPub: authzPub})
-	reg.Set("payer", shnsdk.RegistryEntry{ID: "payer", Role: "payer", EncPub: payerEncPub, SignPub: payerSignPub})
+	reg.Set("provider", shnsdk.RegistryEntry{ID: "provider", Role: "provider", EncPub: provEncPub, SignPub: authzPub, MessageFrames: shnsdk.SupportedMessageFrames()})
+	// The recipient advertises message-frame v1 so roundTripInner decodes the frame
+	// handleRoute seals; frame_originate_test.go re-asserts this per
+	// case via advertiseRecipientFrameV1 (idempotent) and its stale-feed row seals a
+	// bare payload against this same v1-advertising entry.
+	reg.Set("payer", shnsdk.RegistryEntry{ID: "payer", Role: "payer", EncPub: payerEncPub, SignPub: payerSignPub, MessageFrames: shnsdk.SupportedMessageFrames()})
 
 	const fakeBase = "http://relay-stub.test"
 	cfg := Config{
@@ -322,9 +333,9 @@ func (e *inProcessExchange) crdIngressRequest(t *testing.T) *http.Request {
 }
 
 // End-to-end in-process: a responder whose leg returns LegResult{502, OperationOutcome}
-// (flag on, on the payer side) must surface at the originator as a *RelayError{502, body},
-// NOT a plain "hub routing failed". Reuses the in-process substrate harness (hub + authz +
-// originator gateway) above.
+// (framed by the payer, negotiated via registry v1) must surface at the originator as a
+// *RelayError{502, body}, NOT the Hub's generic mechanical fault. Reuses the in-process
+// substrate harness (hub + authz + originator gateway) above.
 func TestRoundTrip_RecipientNon2xx_SurfacesRelayError(t *testing.T) {
 	env := newInProcessExchange(t)
 	oo := []byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"error"}]}`)

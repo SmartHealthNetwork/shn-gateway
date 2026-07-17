@@ -87,6 +87,9 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 	}
 	pendedResp, err := g.OriginateLeg(ctx, r, res.recipient, "pas-claim", res.pci, pasCorr, "", Content{WorkstreamType: workstreamPA, Bytes: bundleJSON})
 	if err != nil {
+		if g.relayOriginationError(w, err) {
+			return pendState{}, false
+		}
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return pendState{}, false
 	}
@@ -223,6 +226,9 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 	}
 	updateResp, err := g.OriginateLeg(ctx, r, st.recipient, "pas-claim-update", st.pci, updateCorr, "", Content{WorkstreamType: workstreamPA, Bytes: updateBundle})
 	if err != nil {
+		if g.relayOriginationError(w, err) {
+			return false
+		}
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return false
 	}
@@ -329,6 +335,9 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 	pdCorr := g.cfg.CorrelationGen()
 	pdRespJSON, err := g.OriginateLeg(ctx, r, phg.ID, "patient-dtr", st.pci, pdCorr, "", Content{WorkstreamType: workstreamPA, Bytes: pdReq})
 	if err != nil {
+		if g.relayOriginationError(w, err) {
+			return false
+		}
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "patient-dtr exchange failed: " + err.Error()})
 		return false
 	}
@@ -382,6 +391,9 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 	}
 	updateResp, err := g.OriginateLeg(ctx, r, st.recipient, "pas-claim-update", st.pci, updateCorr, "", Content{WorkstreamType: workstreamPA, Bytes: updateBundle})
 	if err != nil {
+		if g.relayOriginationError(w, err) {
+			return false
+		}
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return false
 	}

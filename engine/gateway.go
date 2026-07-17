@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -111,12 +112,6 @@ type Config struct {
 	// engine does NOT foreign-$validate it. false ⇒ the sandbox path (SHN's own
 	// US-Core-resolvable package), which still egress-$validates byte-identically. FR-G28.
 	PayerDavinciNative bool
-	// RelayRecipientErrors gates the response-leg relay of a recipient's NON-2xx
-	// answer. Off (default): a non-2xx is a bare writeJSON →
-	// non-2xx-to-Hub → "hub routing failed" (legacy). On: the answer is sealed as
-	// a {status,body} wrapper and relayed verbatim. Off by default so PROVIDERS
-	// (unwrap-tolerant) upgrade before PAYERS enable the wrap.
-	RelayRecipientErrors bool
 	// Populator is the DTR population seam (provider-local). Normally left nil and
 	// DEFAULTED to the managed backend (today's FillQuestionnaire) in New; the native
 	// pass-through backend is injected by config (PROVIDER_DTR_NATIVE). A test MAY
@@ -800,18 +795,36 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 	if err != nil {
 		return nil, fmt.Errorf("response decryption failed")
 	}
-	// A recipient's NON-2xx answer arrives as a sealed {status,body} wrapper; surface it
+	// A frame-negotiated recipient (registry messageFrames) seals
+	// EVERY application answer — any status — as a v1 message frame; surface non-2xx
 	// as the typed *RelayError sentinel so every OriginateLeg caller's `if err != nil`
-	// aborts the exchange, and the ingress handler can unwrap it. A
-	// bare/200 payload is a success body, returned as before. Keyed on `wrapped` alone so
-	// wrap (respondLegError) and unwrap stay symmetric: respondLegError only wraps non-2xx,
-	// but even a stray wrapped-2xx yields the body here, never the wrapper JSON.
-	if status, body, wrapped := unwrapRelayResponse(respPayload); wrapped {
-		if status/100 != 2 {
-			return nil, &RelayError{Status: status, Body: body}
+	// aborts the exchange and handlers can relay the verbatim answer.
+	//
+	// Decode ANY payload bearing the frame magic, regardless of the recipient's
+	// advertised frames (hardened at final review). This is safe by the spec's own
+	// collision argument — 0x00 cannot begin any bare payload we carry (JSON/X12/XML/
+	// HL7v2 text) — and closes the INVERSE stale-feed window: a responder that
+	// correctly frames to a v1-advertising requester while OUR view of the recipient
+	// is still pre-upgrade (dynamic re-registration; a rolling deploy where provision
+	// stamps capability off the registrar's build). The recipient's advertised frames
+	// govern only expectation/observability — an advertised-but-bare answer is the
+	// (forward) stale-feed downgrade, logged loudly.
+	if shnsdk.IsFramed(respPayload) {
+		hdr, body, ferr := shnsdk.DecodeHTTPFrame(respPayload)
+		if ferr != nil {
+			return nil, fmt.Errorf("response frame decode failed")
+		}
+		if hdr.Status/100 != 2 {
+			return nil, &RelayError{Status: hdr.Status, Body: body, ContentType: hdr.Headers["Content-Type"]}
 		}
 		return body, nil
 	}
+	if shnsdk.SupportsMessageFrameV1(recipientHolder.MessageFrames) {
+		log.Printf("gateway: recipient %q advertises frame v1 but answered bare; processing as legacy (stale-feed downgrade)", recipient)
+	}
+	// Legacy path: a non-frame-negotiated recipient answers a bare application payload
+	// (pre-v0.27.0 contract) — a 2xx success body the caller consumes as-is; the Hub
+	// reports any application non-2xx as its own generic mechanical fault.
 	return respPayload, nil
 }
 
@@ -934,12 +947,38 @@ func writeLeg(w http.ResponseWriter, out []byte) {
 	_, _ = w.Write(out)
 }
 
+// frameNegotiated reports whether requester's registry entry advertises frame v1;
+// capability is two-sided — the responder only frames to a peer
+// that declared it can decode. Absent ⇒ the pre-v0.27.0 bare-payload contract.
+func (g *Gateway) frameNegotiated(requester string) bool {
+	h, ok := g.cfg.Reg.Lookup(requester)
+	return ok && shnsdk.SupportsMessageFrameV1(h.MessageFrames)
+}
+
+// framePayload wraps an application answer in the v1 HTTP frame when requester
+// negotiates it; legacy requesters get the payload bare (pre-v0.27.0 contract).
+// An encode error means an out-of-range status literal (caller bug) — fall back
+// to bare so the exchange still answers.
+func (g *Gateway) framePayload(requester string, status int, contentType string, payload []byte) []byte {
+	if !g.frameNegotiated(requester) {
+		return payload
+	}
+	framed, err := shnsdk.EncodeHTTPFrame(status, contentType, payload)
+	if err != nil {
+		return payload
+	}
+	return framed
+}
+
 // respondLeg builds and writes a response leg in one call. Used by the legs that
 // do NOT commit holder state between build and write (eligibility, CRD, DTR,
 // federated query). The PAS legs call buildResponseLeg/writeLeg explicitly so
-// they can commit state ONLY after a successful build (review-fixes-6 #1).
+// they can commit state ONLY after a successful build (review-fixes-6 #1). The
+// success payload is sealed as a v1 frame(200, application/fhir+json) for a
+// frame-negotiated requester, bare legacy otherwise.
 func (g *Gateway) respondLeg(w http.ResponseWriter, r *http.Request, respFrame, respOp, txType, inboundCorrID string, payload []byte, subjectPCI, requester, consentRef string) {
-	out, status, msg := g.buildResponseLeg(r, respFrame, respOp, txType, inboundCorrID, payload, subjectPCI, requester, consentRef)
+	framed := g.framePayload(requester, http.StatusOK, "application/fhir+json", payload)
+	out, status, msg := g.buildResponseLeg(r, respFrame, respOp, txType, inboundCorrID, framed, subjectPCI, requester, consentRef)
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
@@ -947,33 +986,38 @@ func (g *Gateway) respondLeg(w http.ResponseWriter, r *http.Request, respFrame, 
 	writeLeg(w, out)
 }
 
-// respondLegError seals a recipient's NON-2xx answer as a {status,body} wrapper and
-// relays it 200-to-Hub (verbatim) — the error-branch sibling of
-// respondLeg. buildResponseLeg is reused unchanged: the wrapper is just its payload.
-// Flag off ⇒ the legacy bare non-2xx (which the Hub turns into "hub routing failed").
-// Callers MUST invoke this in the leg handler's `if result.Status != 0` branch, which
-// returns BEFORE the R-7 fence, R-8 $validate, and PAS Commit() — a rejected claim
-// must not commit, and its armed defer-rollback must still fire.
+// respondLegError seals a recipient's application NON-2xx answer as a v1 message
+// frame carrying the app status and relays it 200-to-Hub (verbatim; spec
+// 2026-07-17) — the error-branch sibling of respondLeg. buildResponseLeg is reused
+// unchanged: the frame is just its payload. A non-negotiated (legacy) requester
+// gets the pre-v0.27.0 bare non-2xx (which the payload-blind Hub reports as its
+// generic mechanical 502). Callers MUST invoke this in the leg handler's
+// `if result.Status != 0` branch, which returns BEFORE the R-7 fence, R-8
+// $validate, and PAS Commit() — a rejected claim must not commit, and its armed
+// defer-rollback must still fire.
 func (g *Gateway) respondLegError(w http.ResponseWriter, r *http.Request, respFrame, respOp, txType, corrID string, result LegResult, subjectPCI, requester, consentRef string) {
-	if !g.cfg.RelayRecipientErrors {
-		writeJSON(w, result.Status, map[string]string{"error": result.Message})
-		return
-	}
-	// Only NON-2xx answers are wrapped: roundTripInner unwraps a wrapper into a
-	// *RelayError and keys "is this an error" on status/100 != 2. A 2xx-nonzero Status here
-	// would be a connector misuse; route it to the bare success seal so the two ends stay
-	// keyed identically (wrapped ⟹ non-2xx). Keeps wrap (responder) and unwrap (originator)
-	// from disagreeing.
-	if result.Status/100 == 2 {
+	if result.Status/100 == 2 { // connector misuse guard: a 2xx belongs on the success seal
 		g.respondLeg(w, r, respFrame, respOp, txType, corrID, result.ResponseFHIR, subjectPCI, requester, consentRef)
 		return
 	}
+	if !g.frameNegotiated(requester) {
+		// Legacy peer: the pre-v0.27.0 contract — bare non-2xx, which the
+		// payload-blind Hub reports as its generic mechanical 502.
+		writeJSON(w, result.Status, map[string]string{"error": result.Message})
+		return
+	}
 	body := result.ResponseFHIR
+	ct := "application/fhir+json"
 	if len(body) == 0 {
 		body, _ = json.Marshal(map[string]string{"error": result.Message})
+		ct = "application/json"
 	}
-	wrapped := wrapRelayResponse(result.Status, body)
-	out, status, msg := g.buildResponseLeg(r, respFrame, respOp, txType, corrID, wrapped, subjectPCI, requester, consentRef)
+	framed, err := shnsdk.EncodeHTTPFrame(result.Status, ct, body)
+	if err != nil { // out-of-range connector status: fail legible, mechanical
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "invalid application status"})
+		return
+	}
+	out, status, msg := g.buildResponseLeg(r, respFrame, respOp, txType, corrID, framed, subjectPCI, requester, consentRef)
 	if status != 0 { // seal/authz BUILD failure (not the relayed app-status) → gateway fault
 		writeJSON(w, status, map[string]string{"error": msg})
 		return

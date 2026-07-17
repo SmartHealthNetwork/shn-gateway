@@ -349,7 +349,7 @@ func (n *nativeResponder) Handle(ctx context.Context, leg, corrID, subjectPCI st
 // status — is the recipient's answer: 2xx → (body, LegResult{}, nil); non-2xx →
 // (nil, LegResult{Status:<code>, ResponseFHIR:<upstream body>}, nil) for verbatim
 // relay. A NO-RESPONSE fault (build/dial/read) is (nil, LegResult{}, error) → the
-// engine maps it to 500 → "hub routing failed".
+// engine maps it to 500 → "hub routing failed". (Relay design 2026-07-15.)
 func (n *nativeResponder) post(ctx context.Context, base, path string, body []byte, label string) ([]byte, LegResult, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+path, bytes.NewReader(body))
 	if err != nil {
