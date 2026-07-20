@@ -50,13 +50,17 @@ func TestHandleUC04_ProviderDataAttestsAndLeanTail(t *testing.T) {
 	}
 
 	// The sandbox lane keeps its amendment tail (pas-claim-update + SupplementalReport).
+	// SupplementalReport threads the resolved `member` (not the MBR-UC04 literal) so the
+	// canary twin (personaSet=canary) attaches ITS OWN operative DiagnosticReport instead of
+	// the original member's — see TestHandleUC04_ThreadsSceneMember in
+	// originate_members_test.go for the dedicated wiring guard.
 	for _, want := range []string{
 		`"pas-claim-update"`,
-		`g.cfg.SoR.SupplementalReport("MBR-UC04")`,
+		`g.cfg.SoR.SupplementalReport(member)`,
 		"BuildConformantClaimUpdateBundle",
 	} {
 		if !strings.Contains(fn, want) {
-			t.Fatalf("handleUC04 sandbox amendment tail missing %q (must stay byte-unchanged)", want)
+			t.Fatalf("handleUC04 sandbox amendment tail missing %q", want)
 		}
 	}
 }

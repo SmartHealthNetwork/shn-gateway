@@ -390,6 +390,21 @@ var stubPersonas = map[string]persona{
 	},
 }
 
+// Canary twins are generated, never hand-copied: each clones its original's
+// coverage + clinical facts (a fixture change flows to the twin) with a
+// "-Canary" family so the derived PCI is distinct and canary traffic is
+// attributable on every surface that shows a name.
+func init() {
+	for orig, twin := range CanaryTwins {
+		p, ok := stubPersonas[orig]
+		if !ok {
+			panic("engine: canary twin of unknown persona: " + orig)
+		}
+		p.demo.FamilyName += "-Canary"
+		stubPersonas[twin] = p
+	}
+}
+
 // stubPayerOverrides names members whose OpenCoverage payor is DELIBERATELY DISTINCT from the
 // default CMSPayerIdentity (FR-G40: the hermetic two/three-payer routing proof). Every
 // member ABSENT from this map — i.e. every pre-existing persona — keeps resolving to

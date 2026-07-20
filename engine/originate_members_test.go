@@ -27,11 +27,22 @@ func TestHandleUC04_ThreadsSceneMember(t *testing.T) {
 		t.Fatalf("read source: %v", err)
 	}
 	fn := extractFunc(t, string(src), "handleUC04")
-	if !strings.Contains(fn, `g.sceneMember("MBR-UC04", "MBR-PD-UC04")`) {
-		t.Fatalf("handleUC04 does not thread sceneMember(MBR-UC04, MBR-PD-UC04)")
+	if !strings.Contains(fn, `g.scenarioMember(w, r, "MBR-UC04", "MBR-PD-UC04")`) {
+		t.Fatalf("handleUC04 does not thread scenarioMember(MBR-UC04, MBR-PD-UC04)")
 	}
 	if strings.Contains(fn, `runCRDThenDTROrder(w, r, "MBR-UC04"`) {
 		t.Fatalf("handleUC04 still passes the MBR-UC04 literal to runCRDThenDTROrder — must pass the sceneMember result")
+	}
+	// The sandbox amendment tail's SupplementalReport lookup must also thread the
+	// resolved member — not the MBR-UC04 literal — or the canary twin (personaSet=canary,
+	// resolved member MBR-CANARY-UC04) gets the original member's operative
+	// DiagnosticReport attached, and the payer's member fence rejects the ClaimUpdate
+	// bundle as an inconsistent-patient 403.
+	if !strings.Contains(fn, `g.cfg.SoR.SupplementalReport(member)`) {
+		t.Fatalf("handleUC04 does not pass the resolved member to SoR.SupplementalReport")
+	}
+	if strings.Contains(fn, `SupplementalReport("MBR-UC04")`) {
+		t.Fatalf("handleUC04 still passes the MBR-UC04 literal to SoR.SupplementalReport — must pass the sceneMember result")
 	}
 }
 
@@ -43,8 +54,8 @@ func TestHandleUC08_ThreadsSceneMember(t *testing.T) {
 		t.Fatalf("read source: %v", err)
 	}
 	fn := extractFunc(t, string(src), "handleUC08")
-	if !strings.Contains(fn, `g.sceneMember("MBR-UC08", "MBR-PD-UC08")`) {
-		t.Fatalf("handleUC08 does not thread sceneMember(MBR-UC08, MBR-PD-UC08)")
+	if !strings.Contains(fn, `g.scenarioMember(w, r, "MBR-UC08", "MBR-PD-UC08")`) {
+		t.Fatalf("handleUC08 does not thread scenarioMember(MBR-UC08, MBR-PD-UC08)")
 	}
 	if strings.Contains(fn, `runCRDThenDTROrder(w, r, "MBR-UC08"`) {
 		t.Fatalf("handleUC08 still passes the MBR-UC08 literal to runCRDThenDTROrder — must pass the sceneMember result")

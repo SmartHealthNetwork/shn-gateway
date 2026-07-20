@@ -14,7 +14,7 @@ A published version tag is **never re-tagged** with different content. The Go
 module proxy caches a tag's tree permanently; always bump to a new version
 rather than moving an existing tag.
 
-This gateway currently requires `shn-sdk v0.30.0` (see `go.mod`).
+This gateway currently requires `shn-sdk v0.31.0` (see `go.mod`).
 
 ## Supported seams
 
@@ -74,6 +74,14 @@ expected to change shape as their consumer matures:
   getters (embedded baked artifacts). New in this release and **evolving** — the seed sequence, fixture contents, and
   bundle bytes may change in minor releases as the Kit stabilizes its seeding needs. Consumers pin
   exact gateway versions.
+
+- **`LegMetric`** (`engine.Config.LegMetric func(outcome string)`, consts
+  `engine.LegOutcomeRouted/Answered/Denied/Unreachable/Failed`): new in this release and
+  **evolving** — a nil-safe hook that receives one outcome string per origination-leg event at
+  the roundTrip choke point. Nil (the published-binary default) means no emission; the hook
+  carries no payloads and is conformance-neutral (`TestLegMetric_ConformanceNeutral` — responses
+  are byte-identical hook-on vs hook-off). `gateway/app` wires it to CloudWatch EMF behind the
+  `METRICS_SERVICE` opt-in (see `docs/CONFIGURATION.md`). Requires `shn-sdk` ≥ v0.31.0.
 
 ## Internal seams (not for partner use)
 

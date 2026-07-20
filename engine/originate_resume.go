@@ -133,7 +133,11 @@ func (g *Gateway) handleUC06(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request"})
 		return
 	}
-	st, ok := g.scenarioToPend(w, r, "uc06", g.sceneMember("MBR-UC06", "MBR-PD-UC06"))
+	member, ok := g.scenarioMember(w, r, "MBR-UC06", "MBR-PD-UC06")
+	if !ok {
+		return
+	}
+	st, ok := g.scenarioToPend(w, r, "uc06", member)
 	if !ok {
 		return
 	}
@@ -275,7 +279,11 @@ func (g *Gateway) handleUC07(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request"})
 		return
 	}
-	st, ok := g.scenarioToPend(w, r, "uc07", g.sceneMember("MBR-UC07", "MBR-PD-UC07"))
+	member, ok := g.scenarioMember(w, r, "MBR-UC07", "MBR-PD-UC07")
+	if !ok {
+		return
+	}
+	st, ok := g.scenarioToPend(w, r, "uc07", member)
 	if !ok {
 		return
 	}
@@ -434,7 +442,11 @@ type startResp struct {
 
 // handleUC06Start runs UC-06 to PENDED and parks it under a resume token.
 func (g *Gateway) handleUC06Start(w http.ResponseWriter, r *http.Request) {
-	st, ok := g.scenarioToPend(w, r, "uc06", g.sceneMember("MBR-UC06", "MBR-PD-UC06"))
+	member, ok := g.scenarioMember(w, r, "MBR-UC06", "MBR-PD-UC06")
+	if !ok {
+		return
+	}
+	st, ok := g.scenarioToPend(w, r, "uc06", member)
 	if !ok {
 		return
 	}
@@ -444,7 +456,11 @@ func (g *Gateway) handleUC06Start(w http.ResponseWriter, r *http.Request) {
 
 // handleUC07Start runs UC-07 to PENDED and parks it under a resume token.
 func (g *Gateway) handleUC07Start(w http.ResponseWriter, r *http.Request) {
-	st, ok := g.scenarioToPend(w, r, "uc07", g.sceneMember("MBR-UC07", "MBR-PD-UC07"))
+	member, ok := g.scenarioMember(w, r, "MBR-UC07", "MBR-PD-UC07")
+	if !ok {
+		return
+	}
+	st, ok := g.scenarioToPend(w, r, "uc07", member)
 	if !ok {
 		return
 	}

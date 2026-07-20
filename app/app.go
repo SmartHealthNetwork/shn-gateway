@@ -33,6 +33,7 @@ import (
 	observer "github.com/SmartHealthNetwork/shn-gateway/observer"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 	health "github.com/SmartHealthNetwork/shn-sdk/health"
+	metrics "github.com/SmartHealthNetwork/shn-sdk/metrics"
 )
 
 // config is the collapsed PUBLIC config surface. Required:
@@ -51,6 +52,14 @@ type config struct {
 	// Empty = off — the published-binary default. Set by the SHN Kit's shnkitd
 	// daemon when launching the gateway child.
 	ObserverAddr string
+
+	// MetricsService enables CloudWatch EMF metric emission (LegOutcome /
+	// LegError) and names this gateway's Service dimension.
+	// Empty = off — the published-binary default; the preview deployment sets
+	// it per ECS service. Namespace/env dims follow the monitor's conventions.
+	MetricsService   string
+	MetricsNamespace string
+	MetricsEnv       string
 
 	// Endpoint overrides (normally discovery-resolved; explicit env wins).
 	AuthzURL        string
@@ -330,6 +339,19 @@ func loadConfig(getenv func(string) string) (config, error) {
 			return config{}, fmt.Errorf("gateway: OBSERVER_ADDR %q is not loopback; the observer stream binds loopback only", addr)
 		}
 		cfg.ObserverAddr = addr
+	}
+
+	// EMF metrics opt-in: off unless METRICS_SERVICE names this gateway's
+	// Service dimension (the preview ECS service key). Emission is additive
+	// and fire-and-forget; the published binary keeps it off by default.
+	cfg.MetricsService = getenv("METRICS_SERVICE")
+	cfg.MetricsNamespace = getenv("METRICS_NAMESPACE")
+	if cfg.MetricsNamespace == "" {
+		cfg.MetricsNamespace = "SHN/Preview"
+	}
+	cfg.MetricsEnv = getenv("METRICS_ENV")
+	if cfg.MetricsEnv == "" {
+		cfg.MetricsEnv = "shn-preview"
 	}
 
 	return cfg, nil
@@ -727,6 +749,14 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		hub := observer.NewHub()
 		gwCfg.Observer = hub.Emit
 		obsHandler = hub.Handler()
+	}
+
+	// EMF leg metrics: opt-in via METRICS_SERVICE. EMF rides
+	// stdout → awslogs → CloudWatch; sdk/metrics is fire-and-forget and
+	// conformance-neutral (TestLegMetric_ConformanceNeutral).
+	if cfg.MetricsService != "" {
+		em := metrics.New(stdout, cfg.MetricsNamespace, map[string]string{"Env": cfg.MetricsEnv}, nil)
+		gwCfg.LegMetric = legMetricHook(em, cfg.MetricsService, cfg.Role)
 	}
 
 	fmt.Fprintf(stdout, "gateway: role=%s holder=%s listening on %s\n", cfg.Role, bundle.Identity.HolderID, cfg.Addr)

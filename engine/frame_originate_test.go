@@ -129,12 +129,29 @@ func TestOriginateStaleFeedFallback(t *testing.T) {
 	bare := []byte(`{"resourceType":"Parameters","parameter":[{"name":"stale"}]}`)
 	sealBare(env, bare) // ...but answers BARE JSON (stale-feed view)
 
+	var events []ObserverEvent
+	env.originator.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
+
 	body, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "", Content{WorkstreamType: workstreamPA, Bytes: env.crdReq})
 	if err != nil {
 		t.Fatalf("stale-feed bare payload must be processed as legacy success, got err %v", err)
 	}
 	if string(body) != string(bare) {
 		t.Fatalf("stale-feed body = %q, want bare payload %q", body, bare)
+	}
+	// The forward stale-feed downgrade emits a structured observer event (the seam
+	// the Kit's flow map consumes), not just a log line.
+	var dg *ObserverEvent
+	for i := range events {
+		if events[i].Kind == "leg.downgrade" {
+			dg = &events[i]
+		}
+	}
+	if dg == nil {
+		t.Fatalf("stale-feed downgrade did not emit a leg.downgrade observer event (events: %+v)", events)
+	}
+	if dg.CorrelationID != "corr-1" || dg.Counterpart != env.payerID || dg.LegType != "crd-order-select" {
+		t.Fatalf("leg.downgrade event fields = %+v, want corr-1/%s/crd-order-select", dg, env.payerID)
 	}
 }
 

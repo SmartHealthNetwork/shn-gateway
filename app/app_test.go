@@ -113,6 +113,47 @@ func TestLoadConfig_ObserverAddrLoopbackOnly(t *testing.T) {
 	}
 }
 
+// TestLoadConfig_MetricsDefaults: METRICS_SERVICE off by default (the
+// published-binary default); namespace/env still get their compiled defaults
+// so an operator only has to set METRICS_SERVICE to opt in.
+func TestLoadConfig_MetricsDefaults(t *testing.T) {
+	env := map[string]string{
+		"ROLE":              "provider",
+		"SHN_SECRETS":       "/etc/shn/bundles/provider",
+		"SHN_DISCOVERY_URL": "http://accounts:8088/discovery",
+	}
+	cfg, err := loadConfig(func(k string) string { return env[k] })
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.MetricsService != "" {
+		t.Fatalf("MetricsService default must be empty (off), got %q", cfg.MetricsService)
+	}
+	if cfg.MetricsNamespace != "SHN/Preview" || cfg.MetricsEnv != "shn-preview" {
+		t.Fatalf("metrics defaults wrong: ns=%q env=%q", cfg.MetricsNamespace, cfg.MetricsEnv)
+	}
+}
+
+// TestLoadConfig_MetricsServiceReadThrough: METRICS_SERVICE/METRICS_NAMESPACE/
+// METRICS_ENV are all read through verbatim when set.
+func TestLoadConfig_MetricsServiceReadThrough(t *testing.T) {
+	env := map[string]string{
+		"ROLE":              "provider",
+		"SHN_SECRETS":       "/etc/shn/bundles/provider",
+		"SHN_DISCOVERY_URL": "http://accounts:8088/discovery",
+		"METRICS_SERVICE":   "provider-data-gw",
+		"METRICS_NAMESPACE": "X",
+		"METRICS_ENV":       "Y",
+	}
+	cfg, err := loadConfig(func(k string) string { return env[k] })
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.MetricsService != "provider-data-gw" || cfg.MetricsNamespace != "X" || cfg.MetricsEnv != "Y" {
+		t.Fatalf("metrics read-through wrong: service=%q ns=%q env=%q", cfg.MetricsService, cfg.MetricsNamespace, cfg.MetricsEnv)
+	}
+}
+
 func TestResolveDiscovery_AnchorKeyURLOverride(t *testing.T) {
 	// Discovery advertises one (public) key URL; the env override points at another.
 	// The override must win (firstNonEmpty(env, discovery)).
@@ -525,9 +566,10 @@ func TestConvergeRegistry_CarriesPayerIDs(t *testing.T) {
 
 // TestConvergeRegistry_CarriesMessageFrames verifies convergeRegistry copies a
 // fed holder's MessageFrames onto the resulting RegistryEntry — the peer cache
-// must thread the feed's self-declared frame capability so a future reader can
-// negotiate on it (no reader exists yet, this
-// only proves the field survives the /holders → Registry snapshot).
+// must thread the feed's self-declared frame capability so the responder-side
+// reader (Gateway.frameNegotiated, which looks the requester's entry up in this
+// registry) can negotiate on it (opaque-payload frame). This test proves
+// the field survives the /holders → Registry snapshot that reader depends on.
 func TestConvergeRegistry_CarriesMessageFrames(t *testing.T) {
 	var enc [32]byte
 	enc[0], enc[31] = 7, 9

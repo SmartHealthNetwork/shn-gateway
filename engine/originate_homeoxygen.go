@@ -31,13 +31,23 @@ const homeOxygenMember = "MBR-OX"
 
 // handleHomeOxygen originates the HomeOxygen PA off the member's seeded DeviceRequest.
 func (g *Gateway) handleHomeOxygen(w http.ResponseWriter, r *http.Request) {
-	g.originateDispatch(w, r, homeOxygenMember) // homeOxygenMember = "MBR-OX"
+	member, ok := g.scenarioMember(w, r, homeOxygenMember, homeOxygenMember) // homeOxygenMember = "MBR-OX"
+	if !ok {
+		return
+	}
+	g.originateDispatch(w, r, member)
 }
 
 // handleDispatch originates the order-dispatch PA for a caller-named member — the SHN Kit's
 // free-form "run against your data" entry. Same internal /scenario/* posture as its siblings
 // (never public); the origination itself is originateDispatch, unchanged: order code,
 // coverage, and supplier all come from the SoR, nothing persona-baked.
+//
+// Deliberately NOT on the scenarioMember personaSet seam (observability Phase 3): every
+// sibling handler resolves a fixture member the seam remaps to a canary twin, but here the
+// caller names the member explicitly — there is no default resolution to remap, the console
+// never exposes this route, and the monitor canary never drives it. A personaSet query param
+// is simply ignored, exactly like any other unknown query param on this Kit-facing surface.
 func (g *Gateway) handleDispatch(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Member string `json:"member"`

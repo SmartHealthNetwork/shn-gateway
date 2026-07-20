@@ -169,6 +169,18 @@ type Config struct {
 	// supervisor always sets it, prod deployments never have it on unless the
 	// operator opts in via OBSERVER_ADDR.
 	Observer func(ObserverEvent)
+	// LegMetric, when non-nil, receives one outcome string per origination-leg
+	// event at the roundTrip choke point: LegOutcomeRouted when a leg is
+	// attempted, then exactly one terminal outcome — Answered (the counterpart
+	// responded: 2xx or relayed app non-2xx), Denied (the Authorization
+	// Framework denied the leg — a policy decision, not an error), Unreachable
+	// (the Hub could not be reached / did not route), or Failed (anything
+	// else). nil (the default, and the published-gateway posture) = no
+	// emission. MAY BE CALLED CONCURRENTLY; implementations must be
+	// goroutine-safe and must never block — the callback sits on the request
+	// path. Additive instrumentation only: emission must not change exchange
+	// behavior (TestLegMetric_ConformanceNeutral). Carries NO payloads.
+	LegMetric func(outcome string)
 }
 
 // Gateway is a constructed holder gateway.
@@ -595,6 +607,29 @@ type authorizeResp struct {
 // they never report a facility outage or a tampered response as "consent denied".
 var errAuthorizationDenied = errors.New("authorization denied")
 
+// LegOutcome values passed to Config.LegMetric: "routed" when an
+// origination leg is attempted, then exactly one terminal outcome.
+const (
+	LegOutcomeRouted      = "routed"
+	LegOutcomeAnswered    = "answered"
+	LegOutcomeDenied      = "denied"
+	LegOutcomeUnreachable = "unreachable"
+	LegOutcomeFailed      = "failed"
+)
+
+// errHubUnreachable marks a Hub-leg transport/routing failure (the Hub could
+// not be reached or refused to route). Same user-facing message as before —
+// it is now a typed sentinel so roundTrip can classify the leg outcome as
+// "unreachable" rather than the opaque "failed".
+var errHubUnreachable = errors.New("hub routing failed")
+
+// legMetric dispatches one LegOutcome value to the configured hook; nil-safe.
+func (g *Gateway) legMetric(outcome string) {
+	if g.cfg.LegMetric != nil {
+		g.cfg.LegMetric(outcome)
+	}
+}
+
 // authorize fetches a scope-bound token from the Authorization Framework. The
 // correlationID binds the minted token to the envelope it will ride in (C2).
 // custodian is forwarded for federated-query operations so the Authorization
@@ -666,6 +701,7 @@ func (g *Gateway) roundTrip(ctx context.Context, r *http.Request, recipient, req
 		CorrelationID: correlationID, Counterpart: recipient,
 		AuthorityFrame: reqFrame, Op: op, Payload: json.RawMessage(payload),
 	})
+	g.legMetric(LegOutcomeRouted)
 	respPayload, err := g.roundTripInner(ctx, r, recipient, reqFrame, respFrame, op, respOp, txType, scope, pci, correlationID, custodian, payload)
 	if err != nil {
 		var re *RelayError
@@ -677,8 +713,17 @@ func (g *Gateway) roundTrip(ctx context.Context, r *http.Request, recipient, req
 				AuthorityFrame: respFrame, Op: respOp, Status: re.Status,
 				Payload: json.RawMessage(re.Body),
 			})
+			g.legMetric(LegOutcomeAnswered)
 			return nil, err
 		}
+		outcome := LegOutcomeFailed
+		switch {
+		case errors.Is(err, errAuthorizationDenied):
+			outcome = LegOutcomeDenied
+		case errors.Is(err, errHubUnreachable):
+			outcome = LegOutcomeUnreachable
+		}
+		g.legMetric(outcome)
 		g.observe(ObserverEvent{
 			Kind: "leg.failed", Direction: "originate", LegType: txType,
 			CorrelationID: correlationID, Counterpart: recipient, Detail: err.Error(),
@@ -690,6 +735,7 @@ func (g *Gateway) roundTrip(ctx context.Context, r *http.Request, recipient, req
 		CorrelationID: correlationID, Counterpart: recipient,
 		AuthorityFrame: respFrame, Op: respOp, Payload: json.RawMessage(respPayload),
 	})
+	g.legMetric(LegOutcomeAnswered)
 	return respPayload, nil
 }
 
@@ -763,7 +809,7 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 
 	respEnv, err := g.postEnvelope(ctx, g.cfg.HubURL+"/route", body, assertionHeader)
 	if err != nil {
-		return nil, fmt.Errorf("hub routing failed")
+		return nil, errHubUnreachable
 	}
 
 	// C1/H2b: the response leg must be authorized just like the request leg, bound
@@ -808,7 +854,7 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 	// is still pre-upgrade (dynamic re-registration; a rolling deploy where provision
 	// stamps capability off the registrar's build). The recipient's advertised frames
 	// govern only expectation/observability — an advertised-but-bare answer is the
-	// (forward) stale-feed downgrade, logged loudly.
+	// (forward) stale-feed downgrade, logged loudly AND emitted on the observer seam.
 	if shnsdk.IsFramed(respPayload) {
 		hdr, body, ferr := shnsdk.DecodeHTTPFrame(respPayload)
 		if ferr != nil {
@@ -821,6 +867,11 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 	}
 	if shnsdk.SupportsMessageFrameV1(recipientHolder.MessageFrames) {
 		log.Printf("gateway: recipient %q advertises frame v1 but answered bare; processing as legacy (stale-feed downgrade)", recipient)
+		g.observe(ObserverEvent{
+			Kind: "leg.downgrade", Direction: "originate", LegType: txType,
+			CorrelationID: correlationID, Counterpart: recipient, Op: respOp,
+			Detail: "recipient advertises frame v1 but answered bare; processing as legacy (stale-feed downgrade)",
+		})
 	}
 	// Legacy path: a non-frame-negotiated recipient answers a bare application payload
 	// (pre-v0.27.0 contract) — a 2xx success body the caller consumes as-is; the Hub
@@ -947,7 +998,7 @@ func writeLeg(w http.ResponseWriter, out []byte) {
 	_, _ = w.Write(out)
 }
 
-// frameNegotiated reports whether requester's registry entry advertises frame v1;
+// frameNegotiated reports whether requester's registry entry advertises frame v1
 // capability is two-sided — the responder only frames to a peer
 // that declared it can decode. Absent ⇒ the pre-v0.27.0 bare-payload contract.
 func (g *Gateway) frameNegotiated(requester string) bool {
@@ -977,6 +1028,15 @@ func (g *Gateway) framePayload(requester string, status int, contentType string,
 // success payload is sealed as a v1 frame(200, application/fhir+json) for a
 // frame-negotiated requester, bare legacy otherwise.
 func (g *Gateway) respondLeg(w http.ResponseWriter, r *http.Request, respFrame, respOp, txType, inboundCorrID string, payload []byte, subjectPCI, requester, consentRef string) {
+	// Success frames seal application/fhir+json by invariant: every success leg
+	// today emits FHIR (crd cards, dtr questionnaire, eligibility, the PAS
+	// ClaimResponse, the federated-query Bundle, the patient-dtr QuestionnaireResponse,
+	// and the native-forward relay of a Da Vinci payer's fhir+json answer). The
+	// error branch (respondLegError) already threads a real Content-Type because a
+	// relayed non-2xx can be bespoke JSON. Thread a per-leg Content-Type here only
+	// when a success leg first emits non-FHIR bytes OR the originator grows a
+	// success-frame CT consumer (unframeAnswer drops success CT today) — until then
+	// a reserved field would be unread plumbing.
 	framed := g.framePayload(requester, http.StatusOK, "application/fhir+json", payload)
 	out, status, msg := g.buildResponseLeg(r, respFrame, respOp, txType, inboundCorrID, framed, subjectPCI, requester, consentRef)
 	if status != 0 {

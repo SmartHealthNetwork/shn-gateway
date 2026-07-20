@@ -134,6 +134,11 @@ type stubSubstrate struct {
 	// WHICH legs were attempted (proceeded vs skipped), not on reaching a 200 — leg 1+
 	// still returns an error, which is sufficient to prove the gate let the flow past.
 	legTypes []string
+	// denyAuthorize makes /authorize return 403 — the errAuthorizationDenied
+	// path (LegMetric outcome "denied"). failAuthorize returns 500 — the
+	// opaque "authorization failed" path (outcome "failed").
+	denyAuthorize bool
+	failAuthorize bool
 }
 
 func (s *stubSubstrate) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -159,6 +164,16 @@ func (s *stubSubstrate) RoundTrip(req *http.Request) (*http.Response, error) {
 // only to stamp AuthzToken on the outbound envelope; it does NOT verify the
 // REQUEST-leg token against AuthzPub (only the RESPONSE-leg token is verified).
 func (s *stubSubstrate) handleAuthorize(_ *http.Request, body []byte) (*http.Response, error) {
+	if s.denyAuthorize {
+		return &http.Response{
+			StatusCode: http.StatusForbidden,
+			Body:       io.NopCloser(strings.NewReader(`{"error":"forbidden"}`)),
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+		}, nil
+	}
+	if s.failAuthorize {
+		return errResp("stub: authorize forced failure"), nil
+	}
 	var req struct {
 		Frame         string `json:"frame"`
 		Operation     string `json:"operation"`

@@ -24,3 +24,22 @@ var PersonaRefs = []PersonaRef{
 	{"uc08Pci", "MBR-UC08"},
 	{"uc07HcpcsPci", "MBR-UC07HCPCS"},
 }
+
+// CanaryTwins maps each sandbox scenario member to its dedicated canary twin
+// (observability Phase 3, settled decision #1): the monitor's scenario canary
+// drives ONLY these members, so continuous canary runs never mutate the shared
+// demo personas' state (EOB accumulation, auth-number overwrites) and canary
+// audit records are attributable by PCI. Twins share the original's birthDate
+// and take family "<orig>-Canary" — the member id alone makes the PCI distinct.
+// internal/fhirseed mirrors this table (census-pinned by its canary_test.go).
+var CanaryTwins = map[string]string{
+	"MBR-COVERED":        "MBR-CANARY-COVERED",
+	"MBR-NOTCOVERED":     "MBR-CANARY-NOTCOVERED",
+	"MBR-UC04":           "MBR-CANARY-UC04",
+	"MBR-UC05":           "MBR-CANARY-UC05",
+	"MBR-UC05-NOCONSENT": "MBR-CANARY-UC05-NOCONSENT",
+	"MBR-UC06":           "MBR-CANARY-UC06",
+	"MBR-UC07":           "MBR-CANARY-UC07",
+	"MBR-UC07HCPCS":      "MBR-CANARY-UC07HCPCS",
+	"MBR-UC08":           "MBR-CANARY-UC08",
+}

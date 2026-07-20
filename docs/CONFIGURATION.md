@@ -110,6 +110,18 @@ network-facing feature.
 |---|---|
 | `OBSERVER_ADDR` | Loopback `host:port` for the observer stream (SSE `GET /events`, `GET /health`): structured leg/ingress/validation events **including request/response payloads as seen at this gateway's edge**. Off unless set; non-loopback values are refused at startup. Intended for local tooling (the SHN Kit flow inspector); enabling it exposes payloads from your connected systems to local processes. |
 
+## Exchange metrics (optional — CloudWatch EMF)
+
+The gateway can emit per-leg `LegOutcome`/`LegError` CloudWatch EMF metrics
+(counts only — no payloads, no PHI) at the origination round-trip seam. Off
+unless configured; the published binary defaults OFF.
+
+| Env var | Description |
+|---|---|
+| `METRICS_SERVICE` | Names this gateway service for the EMF `Service` dimension (e.g. `provider-data-gw`). Empty (default) disables metric emission entirely. |
+| `METRICS_NAMESPACE` | CloudWatch metrics namespace. Default `SHN/Preview`. |
+| `METRICS_ENV` | EMF `Env` dimension value. Default `shn-preview`. |
+
 ## Connect your system of record
 
 See [INTEGRATION.md](INTEGRATION.md) for how these fit together.

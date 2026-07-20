@@ -168,13 +168,17 @@ func (g *Gateway) handleScenario(w http.ResponseWriter, r *http.Request) {
 	// MBR-COVERED/MBR-NOTCOVERED defaults (byte-identical — sceneMember returns the
 	// default literal for non-provider-data OriginationProfile).
 	var memberID string
+	var ok bool
 	switch req.Branch {
 	case "covered":
-		memberID = g.sceneMember("MBR-COVERED", "MBR-PD-UC01")
+		memberID, ok = g.scenarioMember(w, r, "MBR-COVERED", "MBR-PD-UC01")
 	case "notcovered":
-		memberID = g.sceneMember("MBR-NOTCOVERED", "MBR-PD-UC01-NC")
+		memberID, ok = g.scenarioMember(w, r, "MBR-NOTCOVERED", "MBR-PD-UC01-NC")
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown branch"})
+		return
+	}
+	if !ok {
 		return
 	}
 
@@ -355,6 +359,31 @@ func (g *Gateway) sceneMember(defaultMember, providerDataMember string) string {
 		return providerDataMember
 	}
 	return defaultMember
+}
+
+// scenarioMember resolves the effective member for a /scenario/* request: the
+// lane's sceneMember default, remapped to its dedicated canary twin when the
+// request carries ?personaSet=canary (observability Phase 3, settled decision
+// #1 — the monitor canary must never drive the shared demo personas). Fails
+// closed 400 on an unknown personaSet value or a member with no twin: a typo
+// silently running the demo personas is exactly the collision the twins exist
+// to prevent. ok=false means the response is already written.
+func (g *Gateway) scenarioMember(w http.ResponseWriter, r *http.Request, defaultMember, providerDataMember string) (string, bool) {
+	member := g.sceneMember(defaultMember, providerDataMember)
+	switch ps := r.URL.Query().Get("personaSet"); ps {
+	case "":
+		return member, true
+	case "canary":
+		twin, ok := CanaryTwins[member]
+		if !ok {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no canary twin for member " + member})
+			return "", false
+		}
+		return twin, true
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown personaSet " + ps})
+		return "", false
+	}
 }
 
 // runCRDThenDTROrder is the generalized CRD order-select + DTR fetch + auto-fill prefix.
@@ -721,7 +750,11 @@ func (g *Gateway) handleUC02(w http.ResponseWriter, r *http.Request) {
 	// in the provider-data lane (it traces to the provider's seeded SoR, never a literal); a
 	// mis-seeded member with no open order fails closed at OpenOrder. The sandbox lane originates
 	// the no-PA order off the per-UC tuple (byte-unchanged).
-	g.originateNoPACRD(w, r, g.sceneMember("MBR-COVERED", "MBR-PD-UC02"))
+	member, ok := g.scenarioMember(w, r, "MBR-COVERED", "MBR-PD-UC02")
+	if !ok {
+		return
+	}
+	g.originateNoPACRD(w, r, member)
 }
 
 // handleUC02PayerB is the LIVE second-payer self-discovery proof (FR-G41): the MBR-PD-UC02-PB
@@ -733,7 +766,11 @@ func (g *Gateway) handleUC02(w http.ResponseWriter, r *http.Request) {
 // ROUTING (both members seal to DIFFERENT holders), not a distinct verdict — differential adjudication
 // is a Connectathon-day property.
 func (g *Gateway) handleUC02PayerB(w http.ResponseWriter, r *http.Request) {
-	g.originateNoPACRD(w, r, "MBR-PD-UC02-PB")
+	member, ok := g.scenarioMember(w, r, "MBR-PD-UC02-PB", "MBR-PD-UC02-PB")
+	if !ok {
+		return
+	}
+	g.originateNoPACRD(w, r, member)
 }
 
 // handleUC02UnknownPayer is the LIVE FeedPayerRouter fail-closed proof (AI-G11/AI-G12): the
@@ -742,7 +779,11 @@ func (g *Gateway) handleUC02PayerB(w http.ResponseWriter, r *http.Request) {
 // registered payer for identifier …|00099") — never a default payer. Seeded into the provider tenant
 // by cmd/fhirseed (a smoke-only negative persona, not an SDK partner-onboarding fixture).
 func (g *Gateway) handleUC02UnknownPayer(w http.ResponseWriter, r *http.Request) {
-	g.originateNoPACRD(w, r, "MBR-UNKNOWN-PAYER")
+	member, ok := g.scenarioMember(w, r, "MBR-UNKNOWN-PAYER", "MBR-UNKNOWN-PAYER")
+	if !ok {
+		return
+	}
+	g.originateNoPACRD(w, r, member)
 }
 
 // originateNoPACRD runs the no-PA CRD round-trip for member: read the member's OWN Coverage as the
@@ -858,15 +899,23 @@ func (g *Gateway) handleUC03(w http.ResponseWriter, r *http.Request) {
 		// the approval is br-payer's pend-resolution timer (D-2RI-3), and the genuine auto-fill (the $populate
 		// runs the real prepop CQL against the seeded O2 obs) is UC-03's distinctive. The implicit fail-closed
 		// at OpenOrder is preserved (a mis-seeded MBR-PD-UC03 with no E1390 order fails closed there).
-		g.originateDispatch(w, r, "MBR-PD-UC03")
+		member, ok := g.scenarioMember(w, r, "MBR-PD-UC03", "MBR-PD-UC03")
+		if !ok {
+			return
+		}
+		g.originateDispatch(w, r, member)
 		return
 	}
 
 	ctx := r.Context()
 	const srRef = "ServiceRequest/sr-uc03"
 
+	member, ok := g.scenarioMember(w, r, "MBR-COVERED", "MBR-COVERED")
+	if !ok {
+		return
+	}
 	o := originationCodes(g.cfg.OriginationProfile).uc03
-	res, ok := g.runCRDThenDTROrder(w, r, "MBR-COVERED", o.system, o.code, o.display, o.dx, false)
+	res, ok := g.runCRDThenDTROrder(w, r, member, o.system, o.code, o.display, o.dx, false)
 	if !ok {
 		return
 	}
@@ -933,8 +982,12 @@ func (g *Gateway) handleUC07HCPCS(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	const srRef = "ServiceRequest/sr-uc07hcpcs"
 
+	member, ok := g.scenarioMember(w, r, "MBR-UC07HCPCS", "MBR-UC07HCPCS")
+	if !ok {
+		return
+	}
 	o := originationCodes(g.cfg.OriginationProfile).uc07hcpcs
-	res, ok := g.runCRDThenDTROrder(w, r, "MBR-UC07HCPCS", o.system, o.code, o.display, o.dx, false)
+	res, ok := g.runCRDThenDTROrder(w, r, member, o.system, o.code, o.display, o.dx, false)
 	if !ok {
 		return
 	}
@@ -1019,7 +1072,10 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 	const srRef = "ServiceRequest/sr-uc04"
 
 	o := originationCodes(g.cfg.OriginationProfile).uc04
-	member := g.sceneMember("MBR-UC04", "MBR-PD-UC04")
+	member, ok := g.scenarioMember(w, r, "MBR-UC04", "MBR-PD-UC04")
+	if !ok {
+		return
+	}
 	res, ok := g.runCRDThenDTROrder(w, r, member, o.system, o.code, o.display, o.dx, false)
 	if !ok {
 		return
@@ -1114,7 +1170,7 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 	needed := neededItemCodes(neededItems)
 
 	// Amend: attach the provider-LOCAL operative DiagnosticReport + Provenance.
-	drJSON, drOK := g.cfg.SoR.SupplementalReport("MBR-UC04")
+	drJSON, drOK := g.cfg.SoR.SupplementalReport(member)
 	if !drOK {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "no supplemental report"})
 		return
@@ -1232,10 +1288,16 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown branch"})
 		return
 	}
-	member := g.sceneMember("MBR-UC05", "MBR-PD-UC05")
+	member, ok := g.scenarioMember(w, r, "MBR-UC05", "MBR-PD-UC05")
+	if !ok {
+		return
+	}
 	srRef := "ServiceRequest/sr-uc05"
 	if req.Branch == "noconsent" {
-		member = g.sceneMember("MBR-UC05-NOCONSENT", "MBR-PD-UC05-NC")
+		member, ok = g.scenarioMember(w, r, "MBR-UC05-NOCONSENT", "MBR-PD-UC05-NC")
+		if !ok {
+			return
+		}
 		srRef = "ServiceRequest/sr-uc05-noconsent"
 	}
 
@@ -1420,7 +1482,10 @@ func (g *Gateway) handleUC08(w http.ResponseWriter, r *http.Request) {
 	// provider-data (Mode A): br-payer's J3490 CRD verdict is NOT-COVERED, so opt in to carry the
 	// order past the FR-G25 stop to PAS → the formal A2 "Not Certified" ClaimResponse
 	// (D-S2-2). Sandbox keeps the covered+PA→PAS-deny path (proceedOnNotCovered stays false).
-	member := g.sceneMember("MBR-UC08", "MBR-PD-UC08")
+	member, ok := g.scenarioMember(w, r, "MBR-UC08", "MBR-PD-UC08")
+	if !ok {
+		return
+	}
 	res, ok := g.runCRDThenDTROrder(w, r, member, o.system, o.code, o.display, o.dx, targetsBrPayer(g.cfg.OriginationProfile))
 	if !ok {
 		return
