@@ -80,13 +80,14 @@ type config struct {
 	StoreDatabaseURL string // Postgres DSN for the durable pgstore Store (else memstub).
 
 	// Optional FHIR connector block (else memstub SoR/Store).
-	FHIRDataURL     string
-	FHIRTokenURL    string
-	FHIRClientID    string
-	FHIRClientKey   string
-	FHIRClientAlg   string
-	FHIRClientScope string
-	FHIRClientKID   string
+	FHIRDataURL      string
+	FHIRTokenURL     string
+	FHIRClientID     string
+	FHIRClientKey    string
+	FHIRClientAlg    string
+	FHIRClientScope  string
+	FHIRClientKID    string
+	FHIRClientSecret string // value, not a path (unlike *ClientKey)
 
 	// Optional native-forward payer block (the PARTNER Da Vinci payer is a different
 	// external party from the FHIR SoR — distinct credentials). Setting
@@ -96,14 +97,15 @@ type config struct {
 	// is NOT co-located with the FHIR base — e.g. br-payer serves CDS Hooks at root
 	// /cds-services but FHIR ops under /fhir. Empty ⇒ CDS uses PayerDavinciBaseURL
 	// (co-located default). FR-G28 / OWD-G8.
-	PayerDavinciCDSBaseURL string
-	PayerDavinciTokenURL   string
-	PayerDavinciClientID   string
-	PayerDavinciClientKey  string
-	PayerDavinciClientAlg  string
-	PayerDavinciScope      string
-	PayerDavinciClientKID  string
-	PayerDavinciPASNative  bool
+	PayerDavinciCDSBaseURL   string
+	PayerDavinciTokenURL     string
+	PayerDavinciClientID     string
+	PayerDavinciClientKey    string
+	PayerDavinciClientAlg    string
+	PayerDavinciScope        string
+	PayerDavinciClientKID    string
+	PayerDavinciClientSecret string // value, not a path (unlike *ClientKey)
+	PayerDavinciPASNative    bool
 	// PayerDavinciCRDServiceID is the escape-hatch override for the partner's CDS
 	// Hooks order-select service id. When empty, DiscoverCRDServiceID fetches
 	// {PAYER_DAVINCI_BASE_URL}/cds-services at boot and selects the single
@@ -167,9 +169,29 @@ var validRoles = map[string]bool{
 	"phg":      true,
 }
 
+// checkClientAuthMode enforces exactly one outbound client-auth mode per
+// credential block: private_key_jwt (KEY+ALG, preferred) or client_secret_post
+// (SECRET). prefix is the env family, "FHIR" or "PAYER_DAVINCI".
+func checkClientAuthMode(prefix, key, alg, kid, secret string) error {
+	hasJWT := key != "" || alg != "" || kid != ""
+	switch {
+	case secret != "" && hasJWT:
+		return fmt.Errorf("gateway: %s_CLIENT_SECRET and %s_CLIENT_KEY/_ALG/_KID are mutually exclusive — configure private_key_jwt (KEY+ALG) or client_secret (SECRET), not both", prefix, prefix)
+	case secret != "":
+		return nil
+	case key == "" && alg == "":
+		return fmt.Errorf("gateway: %s_TOKEN_URL requires credentials — either %s_CLIENT_KEY + %s_CLIENT_ALG (private_key_jwt, preferred) or %s_CLIENT_SECRET (client_secret_post)", prefix, prefix, prefix, prefix)
+	case key == "":
+		return fmt.Errorf("gateway: %s_CLIENT_ALG set requires %s_CLIENT_KEY", prefix, prefix)
+	case alg != "ES384" && alg != "RS384":
+		return fmt.Errorf("gateway: %s_CLIENT_ALG must be ES384|RS384, got %q", prefix, alg)
+	}
+	return nil
+}
+
 // loadConfig reads the collapsed PUBLIC surface from getenv. Mirrors the
 // substrate cmd/gateway loadConfig validation (collapsed-surface URL checks,
-// ROLE/PORT bounds, the FHIR/SMART quad guards) MINUS the seed/SHN_MANIFEST
+// ROLE/PORT bounds, the FHIR/SMART credential block guards) MINUS the seed/SHN_MANIFEST
 // path — the public binary requires SHN_DISCOVERY_URL.
 func loadConfig(getenv func(string) string) (config, error) {
 	def := func(k, d string) string {
@@ -220,6 +242,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 		FHIRClientAlg:    getenv("FHIR_CLIENT_ALG"),
 		FHIRClientScope:  def("FHIR_CLIENT_SCOPE", "system/*.read"),
 		FHIRClientKID:    getenv("FHIR_CLIENT_KID"),
+		FHIRClientSecret: getenv("FHIR_CLIENT_SECRET"),
 
 		PayerDavinciBaseURL:           getenv("PAYER_DAVINCI_BASE_URL"),
 		PayerDavinciCDSBaseURL:        getenv("PAYER_DAVINCI_CDS_BASE_URL"),
@@ -229,6 +252,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 		PayerDavinciClientAlg:         getenv("PAYER_DAVINCI_CLIENT_ALG"),
 		PayerDavinciScope:             def("PAYER_DAVINCI_SCOPE", "system/*.read"),
 		PayerDavinciClientKID:         getenv("PAYER_DAVINCI_CLIENT_KID"),
+		PayerDavinciClientSecret:      getenv("PAYER_DAVINCI_CLIENT_SECRET"),
 		PayerDavinciPASNative:         getenv("PAYER_DAVINCI_PAS_NATIVE") == "true",
 		PayerDavinciCRDServiceID:      getenv("PAYER_DAVINCI_CRD_SERVICE_ID"),
 		PayerDavinciCRDHook:           getenv("PAYER_DAVINCI_CRD_HOOK"),
@@ -275,26 +299,26 @@ func loadConfig(getenv func(string) string) (config, error) {
 		if cfg.FHIRDataURL == "" {
 			return config{}, fmt.Errorf("gateway: FHIR_TOKEN_URL set requires FHIR_DATA_URL (auth needs a FHIR server to authenticate to)")
 		}
-		if cfg.FHIRClientID == "" || cfg.FHIRClientKey == "" {
-			return config{}, fmt.Errorf("gateway: FHIR_TOKEN_URL requires FHIR_CLIENT_ID and FHIR_CLIENT_KEY")
+		if cfg.FHIRClientID == "" {
+			return config{}, fmt.Errorf("gateway: FHIR_TOKEN_URL requires FHIR_CLIENT_ID")
 		}
-		if cfg.FHIRClientAlg != "ES384" && cfg.FHIRClientAlg != "RS384" {
-			return config{}, fmt.Errorf("gateway: FHIR_CLIENT_ALG must be ES384|RS384, got %q", cfg.FHIRClientAlg)
+		if err := checkClientAuthMode("FHIR", cfg.FHIRClientKey, cfg.FHIRClientAlg, cfg.FHIRClientKID, cfg.FHIRClientSecret); err != nil {
+			return config{}, err
 		}
 	}
 
-	// All-or-nothing partner-payer credentials: a partial block is a
-	// misconfig (someone intended auth and fat-fingered it) → hard error. Zero creds is
-	// the deliberate-unauthenticated mode (warned at build, not errored here).
+	// Exactly-one-mode partner-payer credentials: a partial or mixed block is a
+	// misconfig (someone intended auth and fat-fingered it) → hard error. Zero creds
+	// is the deliberate-unauthenticated mode (warned at build, not errored here).
 	if cfg.PayerDavinciTokenURL != "" {
 		if cfg.PayerDavinciBaseURL == "" {
 			return config{}, fmt.Errorf("gateway: PAYER_DAVINCI_TOKEN_URL set requires PAYER_DAVINCI_BASE_URL")
 		}
-		if cfg.PayerDavinciClientID == "" || cfg.PayerDavinciClientKey == "" {
-			return config{}, fmt.Errorf("gateway: PAYER_DAVINCI_TOKEN_URL requires PAYER_DAVINCI_CLIENT_ID and PAYER_DAVINCI_CLIENT_KEY")
+		if cfg.PayerDavinciClientID == "" {
+			return config{}, fmt.Errorf("gateway: PAYER_DAVINCI_TOKEN_URL requires PAYER_DAVINCI_CLIENT_ID")
 		}
-		if cfg.PayerDavinciClientAlg != "ES384" && cfg.PayerDavinciClientAlg != "RS384" {
-			return config{}, fmt.Errorf("gateway: PAYER_DAVINCI_CLIENT_ALG must be ES384|RS384, got %q", cfg.PayerDavinciClientAlg)
+		if err := checkClientAuthMode("PAYER_DAVINCI", cfg.PayerDavinciClientKey, cfg.PayerDavinciClientAlg, cfg.PayerDavinciClientKID, cfg.PayerDavinciClientSecret); err != nil {
+			return config{}, err
 		}
 	}
 
@@ -567,6 +591,16 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		return b, fmt.Errorf("load bundle: %w", err)
 	}
 
+	// Fail fast on a role/bundle mismatch: a bundle registered as one role but
+	// mounted under another ROLE boots today and then default-denies at runtime
+	// (opaque 502 at the first origination). Manifest.Role is what `shn register
+	// --role` stamped — a pure-local check that catches mounting the wrong bundle;
+	// the authoritative role stays server-side (registry). An empty manifest role
+	// (pre-role-stamp bundle) is tolerated.
+	if r := bundle.Manifest.Role; r != "" && r != cfg.Role {
+		return b, fmt.Errorf("gateway: ROLE=%s but this bundle registered as %s — mount the matching bundle or fix ROLE", cfg.Role, r)
+	}
+
 	client := shnsdk.NewClient()
 
 	// Discovery resolution: trust anchors + endpoints (incl. registrar + validator); explicit env wins.
@@ -603,7 +637,7 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		stub := engine.NewStubHolderData()
 		sor, store = stub, stub
 	} else {
-		hc, herr := fhirHTTPClient(cfg) // smartauth.NewHTTPClient when the SMART quad is set, else nil (unauthenticated)
+		hc, herr := fhirHTTPClient(cfg) // smartauth.NewHTTPClient when the SMART credential block is set, else nil (unauthenticated)
 		if herr != nil {
 			return b, herr
 		}
@@ -889,21 +923,27 @@ func pollFeed(ctx context.Context, c *http.Client, registrarURL string, reg shns
 }
 
 // fhirHTTPClient builds the HTTP client for the FHIR SoR connector. When the SMART
-// quad (FHIR_TOKEN_URL + FHIR_CLIENT_ID/KEY/ALG) is set it authenticates via SMART
-// Backend Services (RFC 7523 signed-JWT client-credentials); else nil ⇒
+// credential block (FHIR_TOKEN_URL + FHIR_CLIENT_ID + ...) is set it authenticates
+// per the configured mode: RFC 7523 signed-JWT client-credentials (private_key_jwt,
+// preferred) or client_secret_post when FHIR_CLIENT_SECRET is set; else nil ⇒
 // unauthenticated (sandbox default). Mirrors cmd/gateway/main.go's connector branch.
 func fhirHTTPClient(cfg config) (*http.Client, error) {
 	if cfg.FHIRTokenURL == "" {
 		return nil, nil // unauthenticated (sandbox default)
 	}
-	key, err := loadSmartKey(cfg.FHIRClientKey, cfg.FHIRClientAlg)
-	if err != nil {
-		return nil, fmt.Errorf("load FHIR client key: %w", err)
-	}
-	hc, err := smartauth.NewHTTPClient(smartauth.Config{
+	sc := smartauth.Config{
 		TokenURL: cfg.FHIRTokenURL, ClientID: cfg.FHIRClientID, Scope: cfg.FHIRClientScope,
-		Alg: cfg.FHIRClientAlg, Key: key, KID: cfg.FHIRClientKID,
-	})
+	}
+	if cfg.FHIRClientSecret != "" {
+		sc.ClientSecret = cfg.FHIRClientSecret // client_secret_post; no key material
+	} else {
+		key, err := loadSmartKey(cfg.FHIRClientKey, cfg.FHIRClientAlg)
+		if err != nil {
+			return nil, fmt.Errorf("load FHIR client key: %w", err)
+		}
+		sc.Alg, sc.Key, sc.KID = cfg.FHIRClientAlg, key, cfg.FHIRClientKID
+	}
+	hc, err := smartauth.NewHTTPClient(sc)
 	if err != nil {
 		return nil, fmt.Errorf("smartauth client: %w", err)
 	}
@@ -911,20 +951,27 @@ func fhirHTTPClient(cfg config) (*http.Client, error) {
 }
 
 // payerDavinciHTTPClient returns the client the native-forward Responder uses to reach
-// the partner Da Vinci payer. When the PAYER_DAVINCI SMART quad is set it authenticates
-// via SMART Backend Services; else nil ⇒ unauthenticated (deliberate sandbox mode).
+// the partner Da Vinci payer. When the PAYER_DAVINCI SMART credential block is set it
+// authenticates per the configured mode: RFC 7523 signed-JWT client-credentials
+// (private_key_jwt, preferred) or client_secret_post when PAYER_DAVINCI_CLIENT_SECRET
+// is set; else nil ⇒ unauthenticated (deliberate sandbox mode).
 func payerDavinciHTTPClient(cfg config) (*http.Client, error) {
 	if cfg.PayerDavinciTokenURL == "" {
 		return nil, nil // unauthenticated (deliberate; warned at build)
 	}
-	key, err := loadSmartKey(cfg.PayerDavinciClientKey, cfg.PayerDavinciClientAlg)
-	if err != nil {
-		return nil, fmt.Errorf("load payer-davinci client key: %w", err)
-	}
-	hc, err := smartauth.NewHTTPClient(smartauth.Config{
+	sc := smartauth.Config{
 		TokenURL: cfg.PayerDavinciTokenURL, ClientID: cfg.PayerDavinciClientID, Scope: cfg.PayerDavinciScope,
-		Alg: cfg.PayerDavinciClientAlg, Key: key, KID: cfg.PayerDavinciClientKID,
-	})
+	}
+	if cfg.PayerDavinciClientSecret != "" {
+		sc.ClientSecret = cfg.PayerDavinciClientSecret // client_secret_post; no key material
+	} else {
+		key, err := loadSmartKey(cfg.PayerDavinciClientKey, cfg.PayerDavinciClientAlg)
+		if err != nil {
+			return nil, fmt.Errorf("load payer-davinci client key: %w", err)
+		}
+		sc.Alg, sc.Key, sc.KID = cfg.PayerDavinciClientAlg, key, cfg.PayerDavinciClientKID
+	}
+	hc, err := smartauth.NewHTTPClient(sc)
 	if err != nil {
 		return nil, fmt.Errorf("payer-davinci smartauth client: %w", err)
 	}

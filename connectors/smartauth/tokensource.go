@@ -5,6 +5,9 @@
 // (OWD-6/AI-11 still refuse a reusable bearer there); see the credentialing posture.
 // Signing/verification use golang-jwt/jwt/v5 (the internal/accountsvc pattern,
 // WithValidMethods alg-pinning); no hand-rolled JWS.
+// Client auth is private_key_jwt (asymmetric, preferred) or — for partner servers
+// that cannot issue asymmetric credentials — client_secret_post (Config.ClientSecret);
+// exactly one mode per Config.
 package smartauth
 
 import (
@@ -32,16 +35,21 @@ const (
 
 // Config wires a SMART Backend Services token source.
 type Config struct {
-	TokenURL     string            // SMART token endpoint
-	ClientID     string            // registered client id (iss/sub of the assertion)
-	Scope        string            // requested scope, e.g. "system/*.read"
-	Alg          string            // "ES384" | "RS384"
-	Key          crypto.PrivateKey // *ecdsa.PrivateKey (ES384) | *rsa.PrivateKey (RS384)
-	KID          string            // optional JWS header kid
-	AssertionTTL time.Duration     // default 5m
-	RefreshSkew  time.Duration     // re-mint when within this of expiry; default 60s
-	Clock        func() time.Time  // default time.Now
-	HTTPClient   *http.Client      // default a 10s-timeout client
+	TokenURL string            // SMART token endpoint
+	ClientID string            // registered client id (iss/sub of the assertion)
+	Scope    string            // requested scope, e.g. "system/*.read"
+	Alg      string            // "ES384" | "RS384"
+	Key      crypto.PrivateKey // *ecdsa.PrivateKey (ES384) | *rsa.PrivateKey (RS384)
+	KID      string            // optional JWS header kid
+	// ClientSecret switches the grant to client_secret_post (OAuth2
+	// client_credentials with client_id+client_secret in the form body) for
+	// authorization servers that cannot issue asymmetric credentials. Mutually
+	// exclusive with Key/Alg/KID; private_key_jwt is the preferred mode.
+	ClientSecret string
+	AssertionTTL time.Duration    // default 5m
+	RefreshSkew  time.Duration    // re-mint when within this of expiry; default 60s
+	Clock        func() time.Time // default time.Now
+	HTTPClient   *http.Client     // default a 10s-timeout client
 }
 
 func (c Config) clock() time.Time {
@@ -59,6 +67,23 @@ func signingMethod(alg string) (jwt.SigningMethod, error) {
 		return jwt.SigningMethodRS384, nil
 	default:
 		return nil, fmt.Errorf("smartauth: unsupported alg %q (want ES384|RS384)", alg)
+	}
+}
+
+// validateMode enforces exactly one client-auth mode: private_key_jwt (Key+Alg,
+// preferred) or client_secret_post (ClientSecret).
+func (c Config) validateMode() error {
+	hasJWT := c.Key != nil || c.Alg != "" || c.KID != ""
+	switch {
+	case hasJWT && c.ClientSecret != "":
+		return fmt.Errorf("smartauth: configure private_key_jwt (Key+Alg) or ClientSecret, not both")
+	case c.ClientSecret != "":
+		return nil
+	case c.Key == nil:
+		return fmt.Errorf("smartauth: Key required (or set ClientSecret for the client_secret_post grant)")
+	default:
+		_, err := signingMethod(c.Alg)
+		return err
 	}
 }
 
@@ -94,14 +119,26 @@ func (s *TokenSource) Token(ctx context.Context) (string, error) {
 }
 
 func (s *TokenSource) fetch(ctx context.Context) (token string, ttl time.Duration, err error) {
-	assertion, err := s.assertion()
-	if err != nil {
-		return "", 0, err
-	}
-	form := url.Values{
-		"grant_type":            {"client_credentials"},
-		"client_assertion_type": {"urn:ietf:params:oauth:client-assertion-type:jwt-bearer"},
-		"client_assertion":      {assertion},
+	var form url.Values
+	if s.ClientSecret != "" {
+		// client_secret_post: id+secret in the form body. client_secret_basic
+		// (HTTP Basic) is deliberately not offered — additive later if a partner
+		// needs it.
+		form = url.Values{
+			"grant_type":    {"client_credentials"},
+			"client_id":     {s.ClientID},
+			"client_secret": {s.ClientSecret},
+		}
+	} else {
+		assertion, err := s.assertion()
+		if err != nil {
+			return "", 0, err
+		}
+		form = url.Values{
+			"grant_type":            {"client_credentials"},
+			"client_assertion_type": {"urn:ietf:params:oauth:client-assertion-type:jwt-bearer"},
+			"client_assertion":      {assertion},
+		}
 	}
 	if s.Scope != "" {
 		form.Set("scope", s.Scope)

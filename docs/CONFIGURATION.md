@@ -130,12 +130,13 @@ See [INTEGRATION.md](INTEGRATION.md) for how these fit together.
 |---|---|
 | `ORIGINATION_PROFILE` | provider. Set to `provider-data` to originate every prior-auth UC off your seeded FHIR system of record and drive real payer verdicts — the config-only provider lane, no custom code. When set to `provider-data`, `PROVIDER_DTR_POPULATE_URL` is required (validated at boot). |
 | `FHIR_DATA_URL` | FHIR R4 base URL for your system of record. **Omit to use the built-in synthetic stub** (seeded with example personas, so you can run end to end with no backend). |
-| `FHIR_TOKEN_URL` | SMART Backend Services token endpoint, if your FHIR server requires authenticated access. Requires the client quad below. |
+| `FHIR_TOKEN_URL` | SMART Backend Services token endpoint, if your FHIR server requires authenticated access. Requires the client credential block below. |
 | `FHIR_CLIENT_ID` | SMART client id. |
-| `FHIR_CLIENT_KEY` | Path to the SMART client's private-key PEM file (the value is a path, not the key text — mount the file into the container). |
-| `FHIR_CLIENT_ALG` | `ES384` or `RS384`. |
+| `FHIR_CLIENT_KEY` | Path to the SMART client's private-key PEM file (the value is a path, not the key text — mount the file into the container). Required for `private_key_jwt` mode (i.e. when `FHIR_CLIENT_SECRET` is unset). |
+| `FHIR_CLIENT_ALG` | `ES384` or `RS384`. Required for `private_key_jwt` mode (i.e. when `FHIR_CLIENT_SECRET` is unset). |
 | `FHIR_CLIENT_SCOPE` | Requested scope. Default `system/*.read` — must be a scope your server grants this client. |
 | `FHIR_CLIENT_KID` | Key id for the client assertion JWK, if your server requires it. |
+| `FHIR_CLIENT_SECRET` | OAuth2 client secret for the `client_secret_post` `client_credentials` grant — for authorization servers that cannot issue asymmetric credentials. The value is the secret **itself, not a path** (unlike `FHIR_CLIENT_KEY`). Mutually exclusive with `FHIR_CLIENT_KEY`/`_ALG`/`_KID`; prefer `private_key_jwt` when your server supports it. |
 | `SHN_STORE_DATABASE_URL` | Postgres DSN for durable claim-state storage. Omit for in-memory (non-durable across restarts). |
 
 ## Accept Da Vinci requests from a provider EHR (provider, optional)
@@ -187,8 +188,9 @@ synthetic placeholder).
 See [INTEGRATION.md](INTEGRATION.md#native-forward-payer-mode) for what native-forward
 mode does and when to use it, and
 [Authenticating to your backend](INTEGRATION.md#authenticating-to-your-backend-smart-backend-services)
-for how to set up the SMART Backend Services credentials (asymmetric
-`private_key_jwt`, ES384/RS384 — there is no shared-secret option).
+for how to set up the SMART Backend Services credentials (`private_key_jwt`,
+ES384/RS384 — preferred — or `client_secret_post` for servers that only issue
+shared secrets).
 
 | Env var | Description |
 |---|---|
@@ -196,10 +198,11 @@ for how to set up the SMART Backend Services credentials (asymmetric
 | `PAYER_DAVINCI_CDS_BASE_URL` | Base URL for the partner's CDS Hooks (CRD) posts when they are **not** co-located with the FHIR base — e.g. a payer that serves `/cds-services` at the root but FHIR ops under `/fhir`. Empty ⇒ CDS uses `PAYER_DAVINCI_BASE_URL`. |
 | `PAYER_DAVINCI_TOKEN_URL` | SMART Backend Services token endpoint for the partner. Required if the partner requires authentication. |
 | `PAYER_DAVINCI_CLIENT_ID` | SMART client id for the partner. Required when `PAYER_DAVINCI_TOKEN_URL` is set. |
-| `PAYER_DAVINCI_CLIENT_KEY` | Path to the SMART client's private-key PEM file (the value is a path, not the key text — mount the file into the container). Required when `PAYER_DAVINCI_TOKEN_URL` is set. |
-| `PAYER_DAVINCI_CLIENT_ALG` | `ES384` or `RS384`. Required when `PAYER_DAVINCI_TOKEN_URL` is set. |
+| `PAYER_DAVINCI_CLIENT_KEY` | Path to the SMART client's private-key PEM file (the value is a path, not the key text — mount the file into the container). Required for `private_key_jwt` mode (i.e. when `PAYER_DAVINCI_CLIENT_SECRET` is unset). |
+| `PAYER_DAVINCI_CLIENT_ALG` | `ES384` or `RS384`. Required for `private_key_jwt` mode (i.e. when `PAYER_DAVINCI_CLIENT_SECRET` is unset). |
 | `PAYER_DAVINCI_SCOPE` | Requested scope the gateway asks your token endpoint for. Default `system/*.read` (covers the read-only legs). Must be a scope your authorization server grants this client; widen it if you enable `PAYER_DAVINCI_PAS_NATIVE`. |
 | `PAYER_DAVINCI_CLIENT_KID` | Key id for the client assertion JWK, if the partner requires it. |
+| `PAYER_DAVINCI_CLIENT_SECRET` | OAuth2 client secret for the `client_secret_post` `client_credentials` grant — for authorization servers that cannot issue asymmetric credentials. The value is the secret **itself, not a path** (unlike `PAYER_DAVINCI_CLIENT_KEY`). Mutually exclusive with `PAYER_DAVINCI_CLIENT_KEY`/`_ALG`/`_KID`; prefer `private_key_jwt` when your server supports it. |
 | `PAYER_DAVINCI_PAS_NATIVE` | `true` to forward PAS submit/update legs to the partner's `/Claim/$submit`. Default `false` (built-in PAS fallback). Requires a payer Store. |
 | `PAYER_DAVINCI_CRD_SERVICE_ID` | Escape-hatch override for the partner's order-select CDS service id. Empty ⇒ the gateway fetches `{base}/cds-services` at boot and auto-selects the single order-select service (fails closed if none, or ambiguous). Set it when the partner's CRD service isn't uniquely discoverable. |
 | `PAYER_DAVINCI_CRD_HOOK` | CDS Hooks hook value to stamp on the CRD request before forwarding (e.g. a partner whose service expects `order-sign`). Empty ⇒ forward the originator's hook verbatim. |
@@ -207,12 +210,14 @@ for how to set up the SMART Backend Services credentials (asymmetric
 | `PAYER_DAVINCI_DISPATCH_HOOK` | CDS Hooks hook value to stamp on the order-dispatch request before forwarding. Empty ⇒ forward the originator's hook verbatim. |
 | `PAYER_DAVINCI_CRD_COVERAGE_BUNDLE` | `true` to wrap the CRD request's bare `prefetch.coverage` in a searchset `Bundle` on egress — for a partner whose `order-sign` `coverage` prefetch is a search template that requires a Bundle (a bare `Coverage` returns 412). Default off ⇒ forwarded verbatim. |
 
-**All-or-nothing rule:** if `PAYER_DAVINCI_TOKEN_URL` is set, then
-`PAYER_DAVINCI_CLIENT_ID`, `PAYER_DAVINCI_CLIENT_KEY`, and
-`PAYER_DAVINCI_CLIENT_ALG` must also be set — a partial credential block is a
-hard startup error (a likely misconfig). Setting `PAYER_DAVINCI_BASE_URL` alone
-(no token URL) is valid and forwards to the partner **unauthenticated** — the
-gateway logs a warning on startup to make this mode visible.
+**Exactly-one-mode rule:** if `PAYER_DAVINCI_TOKEN_URL` is set, then
+`PAYER_DAVINCI_CLIENT_ID` must also be set, plus exactly one credential mode —
+`PAYER_DAVINCI_CLIENT_KEY` + `PAYER_DAVINCI_CLIENT_ALG` (`private_key_jwt`,
+preferred) or `PAYER_DAVINCI_CLIENT_SECRET` (`client_secret_post`). A partial or
+mixed credential block is a hard startup error (a likely misconfig). Setting
+`PAYER_DAVINCI_BASE_URL` alone (no token URL) is valid and forwards to the
+partner **unauthenticated** — the gateway logs a warning on startup to make this
+mode visible.
 
 ## Provider DTR population (`PROVIDER_DTR_*`)
 

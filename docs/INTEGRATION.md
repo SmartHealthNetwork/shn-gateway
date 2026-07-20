@@ -27,7 +27,7 @@ below, see [CONFIGURATION.md](CONFIGURATION.md).
 If your backend exposes **FHIR R4** (Epic, and increasingly Availity /
 Surescripts — the CMS-0057 direction), you write **no code**. Set `FHIR_DATA_URL`
 to your US Core FHIR base URL and, if it requires authenticated access, the SMART
-Backend Services quad:
+Backend Services credential block:
 
 ```sh
 docker run --rm \
@@ -61,15 +61,18 @@ need the static override.
 Wherever the gateway connects **out to a server you run** — your FHIR system of
 record (`FHIR_CLIENT_*`, above) or a Da Vinci payer endpoint in
 [native-forward mode](#native-forward-payer-mode) (`PAYER_DAVINCI_*`) — it
-authenticates the same way: as a **SMART Backend Services** client presenting a
-signed JWT assertion (`private_key_jwt`).
+authenticates the same way, as an OAuth2 `client_credentials` client — by default a
+**SMART Backend Services** signed JWT assertion (`private_key_jwt`).
 
-This is **asymmetric-key only**. The gateway signs each token request with a
-private key (ES384 or RS384); it has **no shared-secret (`client_secret`)
-option**. If your authorization server can issue asymmetric credentials, register
-a public key on that client for SMART Backend Services and point the gateway at
-your private key (below). A server that can issue **only** a shared secret is not
-supported by the gateway's built-in outbound auth.
+The gateway supports two client-auth modes at this edge, exactly one per
+credential block. **`private_key_jwt` (asymmetric, preferred):** the gateway signs
+each token request with a private key (ES384 or RS384) — register the public key
+on that client at your authorization server and point the gateway at your private
+key (below); the private key never leaves your environment. **`client_secret_post`
+(shared secret):** for authorization servers that can issue only a `client_id` +
+`client_secret`, set `*_CLIENT_SECRET` instead of the key/alg pair. The secret's
+value goes in the env var directly — it is **not a path**, unlike `*_CLIENT_KEY`.
+Prefer `private_key_jwt` whenever your server supports asymmetric registration.
 
 **The client identity is yours, not the network's.** The gateway is just a
 client of *your* authorization server, exactly like any other backend
@@ -188,7 +191,7 @@ forward to your partner. A payer Store (`SHN_STORE_DATABASE_URL` or holdersim) i
 required when `PAYER_DAVINCI_PAS_NATIVE=true` — `build()` fails at startup otherwise.
 
 See [CONFIGURATION.md](CONFIGURATION.md#native-forward-payer-mode-payer_davinci_)
-for the full field reference, including the all-or-nothing credential rule, and
+for the full field reference, including the exactly-one-mode credential rule, and
 [Authenticating to your backend](#authenticating-to-your-backend-smart-backend-services)
 to set up the `PAYER_DAVINCI_CLIENT_*` credentials.
 

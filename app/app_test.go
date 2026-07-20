@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -679,5 +680,130 @@ func TestPollFeed_RecordsCell(t *testing.T) {
 	}
 	if _, ok := reg.Lookup("h1"); !ok {
 		t.Fatal("h1 missing from registry after pollFeed converged")
+	}
+}
+
+func TestLoadConfig_PayerDavinciSecretOnlyIsOK(t *testing.T) {
+	env := map[string]string{
+		"ROLE": "payer", "SHN_SECRETS": "/x", "SHN_DISCOVERY_URL": "https://d",
+		"PAYER_DAVINCI_BASE_URL":      "https://payer.example",
+		"PAYER_DAVINCI_TOKEN_URL":     "https://payer.example/token",
+		"PAYER_DAVINCI_CLIENT_ID":     "gw",
+		"PAYER_DAVINCI_CLIENT_SECRET": "s3cret",
+	}
+	cfg, err := loadConfig(func(k string) string { return env[k] })
+	if err != nil {
+		t.Fatalf("secret-only block should load: %v", err)
+	}
+	if cfg.PayerDavinciClientSecret != "s3cret" {
+		t.Errorf("cfg = %+v", cfg)
+	}
+}
+
+func TestLoadConfig_PayerDavinciMixedModesIsError(t *testing.T) {
+	env := map[string]string{
+		"ROLE": "payer", "SHN_SECRETS": "/x", "SHN_DISCOVERY_URL": "https://d",
+		"PAYER_DAVINCI_BASE_URL":      "https://payer.example",
+		"PAYER_DAVINCI_TOKEN_URL":     "https://payer.example/token",
+		"PAYER_DAVINCI_CLIENT_ID":     "gw",
+		"PAYER_DAVINCI_CLIENT_KEY":    "/keys/k.pem",
+		"PAYER_DAVINCI_CLIENT_ALG":    "ES384",
+		"PAYER_DAVINCI_CLIENT_SECRET": "s3cret",
+	}
+	_, err := loadConfig(func(k string) string { return env[k] })
+	if err == nil || !strings.Contains(err.Error(), "not both") {
+		t.Fatalf("want mixed-modes error, got %v", err)
+	}
+}
+
+func TestLoadConfig_PayerDavinciAlgAlongsideSecretIsError(t *testing.T) {
+	env := map[string]string{
+		"ROLE": "payer", "SHN_SECRETS": "/x", "SHN_DISCOVERY_URL": "https://d",
+		"PAYER_DAVINCI_BASE_URL":      "https://payer.example",
+		"PAYER_DAVINCI_TOKEN_URL":     "https://payer.example/token",
+		"PAYER_DAVINCI_CLIENT_ID":     "gw",
+		"PAYER_DAVINCI_CLIENT_ALG":    "ES384", // jwt-mode var without its KEY, plus SECRET
+		"PAYER_DAVINCI_CLIENT_SECRET": "s3cret",
+	}
+	_, err := loadConfig(func(k string) string { return env[k] })
+	if err == nil || !strings.Contains(err.Error(), "not both") {
+		t.Fatalf("want mixed-modes error, got %v", err)
+	}
+}
+
+func TestLoadConfig_FHIRSecretOnlyIsOK(t *testing.T) {
+	env := map[string]string{
+		"ROLE": "provider", "SHN_SECRETS": "/x", "SHN_DISCOVERY_URL": "https://d",
+		"FHIR_DATA_URL":      "https://sor.example/fhir",
+		"FHIR_TOKEN_URL":     "https://sor.example/token",
+		"FHIR_CLIENT_ID":     "gw",
+		"FHIR_CLIENT_SECRET": "s3cret",
+	}
+	cfg, err := loadConfig(func(k string) string { return env[k] })
+	if err != nil {
+		t.Fatalf("secret-only FHIR block should load: %v", err)
+	}
+	if cfg.FHIRClientSecret != "s3cret" {
+		t.Errorf("cfg = %+v", cfg)
+	}
+}
+
+func TestLoadConfig_FHIRMixedModesIsError(t *testing.T) {
+	env := map[string]string{
+		"ROLE": "provider", "SHN_SECRETS": "/x", "SHN_DISCOVERY_URL": "https://d",
+		"FHIR_DATA_URL":      "https://sor.example/fhir",
+		"FHIR_TOKEN_URL":     "https://sor.example/token",
+		"FHIR_CLIENT_ID":     "gw",
+		"FHIR_CLIENT_KEY":    "/keys/k.pem",
+		"FHIR_CLIENT_ALG":    "ES384",
+		"FHIR_CLIENT_SECRET": "s3cret",
+	}
+	_, err := loadConfig(func(k string) string { return env[k] })
+	if err == nil || !strings.Contains(err.Error(), "not both") {
+		t.Fatalf("want mixed-modes error, got %v", err)
+	}
+}
+
+// buildEnvWithBundle writes a real registration bundle with the given role into a
+// temp dir and returns the minimal env for build(). SHN_DISCOVERY_URL points at a
+// closed local port so build() fails fast at discovery AFTER the bundle checks —
+// hermetic, no live network.
+func buildEnvWithBundle(t *testing.T, bundleRole, envRole string) map[string]string {
+	t.Helper()
+	dir := t.TempDir()
+	id, err := shnsdk.GenerateIdentity("h-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := shnsdk.WriteBundle(dir, id, bundleRole, "https://holder.example"); err != nil {
+		t.Fatal(err)
+	}
+	return map[string]string{
+		"ROLE": envRole, "SHN_SECRETS": dir, "SHN_DISCOVERY_URL": "http://127.0.0.1:1",
+	}
+}
+
+func TestBuild_RoleBundleMismatchFailsFast(t *testing.T) {
+	env := buildEnvWithBundle(t, "payer", "provider")
+	_, err := build(context.Background(), func(k string) string { return env[k] }, io.Discard, nil)
+	if err == nil || !strings.Contains(err.Error(), "bundle registered as payer") {
+		t.Fatalf("want role-mismatch boot error, got %v", err)
+	}
+}
+
+func TestBuild_RoleBundleMatchPassesCheck(t *testing.T) {
+	env := buildEnvWithBundle(t, "provider", "provider")
+	_, err := build(context.Background(), func(k string) string { return env[k] }, io.Discard, nil)
+	// build() then fails at discovery (closed port) — but NOT with the role error.
+	if err == nil || strings.Contains(err.Error(), "registered as") {
+		t.Fatalf("matching role must pass the bundle check, got %v", err)
+	}
+}
+
+func TestBuild_EmptyBundleRoleSkipsCheck(t *testing.T) {
+	env := buildEnvWithBundle(t, "", "provider")
+	_, err := build(context.Background(), func(k string) string { return env[k] }, io.Discard, nil)
+	if err == nil || strings.Contains(err.Error(), "registered as") {
+		t.Fatalf("pre-role-stamp bundle must skip the check, got %v", err)
 	}
 }

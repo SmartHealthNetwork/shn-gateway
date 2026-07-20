@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -132,3 +133,76 @@ type mutClock struct {
 
 func (c *mutClock) now() time.Time  { c.mu.Lock(); defer c.mu.Unlock(); return c.t }
 func (c *mutClock) set(t time.Time) { c.mu.Lock(); defer c.mu.Unlock(); c.t = t }
+
+// secretServer is a hermetic client_secret_post token endpoint: it requires the
+// form to carry the id+secret pair and NO assertion fields, and returns AT-SEC.
+func secretServer(t *testing.T, hits *int32) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(hits, 1)
+		_ = r.ParseForm()
+		if r.FormValue("grant_type") != "client_credentials" ||
+			r.FormValue("client_id") != "gw-payer" ||
+			r.FormValue("client_secret") != "s3cret" ||
+			r.FormValue("client_assertion") != "" ||
+			r.FormValue("client_assertion_type") != "" {
+			http.Error(w, `{"error":"invalid_client"}`, http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "AT-SEC", "token_type": "bearer", "expires_in": 300,
+		})
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestTokenSource_ClientSecretPost(t *testing.T) {
+	var hits int32
+	srv := secretServer(t, &hits)
+	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	clk := &mutClock{t: now}
+	ts := &TokenSource{Config: Config{
+		TokenURL: srv.URL, ClientID: "gw-payer", ClientSecret: "s3cret",
+		Scope: "system/*.read", Clock: clk.now, HTTPClient: srv.Client(),
+	}}
+	tok, err := ts.Token(context.Background())
+	if err != nil || tok != "AT-SEC" {
+		t.Fatalf("tok=%q err=%v", tok, err)
+	}
+	// Second call inside the expiry window must come from cache.
+	if _, err := ts.Token(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Fatalf("want 1 endpoint hit (cache), got %d", got)
+	}
+	// Past expiry (expires_in=300, skew=60) secret mode re-mints like jwt mode.
+	clk.set(now.Add(241 * time.Second))
+	if _, err := ts.Token(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := atomic.LoadInt32(&hits); got != 2 {
+		t.Fatalf("want re-mint past expiry, got %d hits", got)
+	}
+}
+
+func TestNewHTTPClient_ModeExclusion(t *testing.T) {
+	key, _ := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	// Both modes → construction error.
+	_, err := NewHTTPClient(Config{TokenURL: "https://t", ClientID: "c",
+		Alg: "ES384", Key: key, ClientSecret: "s"})
+	if err == nil || !strings.Contains(err.Error(), "not both") {
+		t.Fatalf("want both-modes error, got %v", err)
+	}
+	// Neither mode → construction error (fail at boot, not first read).
+	if _, err = NewHTTPClient(Config{TokenURL: "https://t", ClientID: "c"}); err == nil {
+		t.Fatal("want missing-credentials error")
+	}
+	// Secret-only → constructs.
+	if _, err = NewHTTPClient(Config{TokenURL: "https://t", ClientID: "c",
+		ClientSecret: "s"}); err != nil {
+		t.Fatalf("secret-only should construct: %v", err)
+	}
+}

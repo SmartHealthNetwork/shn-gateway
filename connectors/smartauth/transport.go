@@ -17,10 +17,7 @@ func NewHTTPClient(cfg Config) (*http.Client, error) {
 	if cfg.ClientID == "" {
 		return nil, fmt.Errorf("smartauth: ClientID required")
 	}
-	if cfg.Key == nil {
-		return nil, fmt.Errorf("smartauth: Key required")
-	}
-	if _, err := signingMethod(cfg.Alg); err != nil {
+	if err := cfg.validateMode(); err != nil {
 		return nil, err
 	}
 	ts := &TokenSource{Config: cfg}
