@@ -12,6 +12,7 @@ import (
 	"context"
 	"crypto"
 	"crypto/ed25519"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -52,6 +53,17 @@ type config struct {
 	// Empty = off — the published-binary default. Set by the SHN Kit's shnkitd
 	// daemon when launching the gateway child.
 	ObserverAddr string
+
+	// TLSCertFile/TLSKeyFile enable in-container TLS on the main listener.
+	// Both-or-neither (loadConfig enforces); empty = plain HTTP, the default.
+	// Terminating at a load balancer instead is the common deployment and stays
+	// fully supported — this exists for hops that must not carry plaintext even
+	// inside the operator's own network (e.g. an EHR/interface-engine push into
+	// the Da Vinci ingress, which carries PHI upstream of sealing and is
+	// authenticated with short-lived bearers). Conventionally paired with
+	// PORT=8443. See docs/DEPLOYMENT.md.
+	TLSCertFile string
+	TLSKeyFile  string
 
 	// MetricsService enables CloudWatch EMF metric emission (LegOutcome /
 	// LegError) and names this gateway's Service dimension.
@@ -365,6 +377,14 @@ func loadConfig(getenv func(string) string) (config, error) {
 		cfg.ObserverAddr = addr
 	}
 
+	// In-container TLS: opt-in, both-or-neither. A half-configured pair is a boot
+	// error — never a silent fall back to plaintext.
+	cfg.TLSCertFile = getenv("TLS_CERT_FILE")
+	cfg.TLSKeyFile = getenv("TLS_KEY_FILE")
+	if (cfg.TLSCertFile == "") != (cfg.TLSKeyFile == "") {
+		return config{}, fmt.Errorf("gateway: TLS_CERT_FILE and TLS_KEY_FILE must be set together (got cert=%q key=%q)", cfg.TLSCertFile, cfg.TLSKeyFile)
+	}
+
 	// EMF metrics opt-in: off unless METRICS_SERVICE names this gateway's
 	// Service dimension (the preview ECS service key). Emission is additive
 	// and fire-and-forget; the published binary keeps it off by default.
@@ -562,6 +582,11 @@ type built struct {
 	reg          shnsdk.Registry // shared-reference value type; the poller mutates the same state the engine reads
 	registrarURL string
 	client       *http.Client
+
+	// tlsCert is the optional in-container TLS keypair for the MAIN listener,
+	// nil when TLS_CERT_FILE/TLS_KEY_FILE are unset (the default). The observer
+	// listener is deliberately excluded — it binds loopback only.
+	tlsCert *tls.Certificate
 
 	// observerAddr/observerHandler: the loopback SSE stream (see STABILITY.md),
 	// non-empty/non-nil only when OBSERVER_ADDR is configured. Only Run starts
@@ -793,18 +818,57 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		gwCfg.LegMetric = legMetricHook(em, cfg.MetricsService, cfg.Role)
 	}
 
-	fmt.Fprintf(stdout, "gateway: role=%s holder=%s listening on %s\n", cfg.Role, bundle.Identity.HolderID, cfg.Addr)
+	tlsCert, err := loadTLSCert(cfg.TLSCertFile, cfg.TLSKeyFile)
+	if err != nil {
+		return b, err
+	}
+	scheme := "http"
+	if tlsCert != nil {
+		scheme = "https"
+	}
+
+	fmt.Fprintf(stdout, "gateway: role=%s holder=%s listening on %s://%s\n", cfg.Role, bundle.Identity.HolderID, scheme, cfg.Addr)
 	b = built{
 		addr:            cfg.Addr,
 		handler:         health.Wrap(hreg, engine.New(gwCfg).Handler()),
 		reg:             reg,
 		registrarURL:    registrarURL,
 		client:          client,
+		tlsCert:         tlsCert,
 		observerAddr:    cfg.ObserverAddr,
 		observerHandler: obsHandler,
 		healthCell:      feedCell,
 	}
 	return b, nil
+}
+
+// loadTLSCert loads the optional in-container TLS keypair. Both paths empty =>
+// (nil, nil): TLS off, the default. Loading happens at BUILD time so a bad cert
+// is a boot failure with a clear message, not a serve-time error surfacing after
+// the gateway has already logged that it is listening.
+func loadTLSCert(certFile, keyFile string) (*tls.Certificate, error) {
+	if certFile == "" && keyFile == "" {
+		return nil, nil
+	}
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("gateway: loading TLS keypair (cert=%q key=%q): %w", certFile, keyFile, err)
+	}
+	return &cert, nil
+}
+
+// serverFor builds the main listener's *http.Server. A nil cert yields the plain
+// HTTP server that has always been the default; a non-nil cert pins TLS 1.2 as
+// the floor (below that is not acceptable for PHI-bearing hops).
+func serverFor(addr string, h http.Handler, cert *tls.Certificate) *http.Server {
+	s := &http.Server{Addr: addr, Handler: h}
+	if cert != nil {
+		s.TLSConfig = &tls.Config{
+			Certificates: []tls.Certificate{*cert},
+			MinVersion:   tls.VersionTLS12,
+		}
+	}
+	return s
 }
 
 // Run wires the runtime (build), starts the background feed poller for post-boot
@@ -819,7 +883,15 @@ func Run(ctx context.Context, getenv func(string) string, stdout io.Writer) erro
 		go pollFeed(ctx, b.client, b.registrarURL, b.reg, 3*time.Second, b.healthCell)
 	}
 	errc := make(chan error, 2)
-	go func() { errc <- http.ListenAndServe(b.addr, b.handler) }()
+	main := serverFor(b.addr, b.handler, b.tlsCert)
+	go func() {
+		if b.tlsCert != nil {
+			// Cert/key already loaded into TLSConfig at build time.
+			errc <- main.ListenAndServeTLS("", "")
+			return
+		}
+		errc <- main.ListenAndServe()
+	}()
 	if b.observerAddr != "" {
 		// A bind failure here kills the gateway via the shared errc — FAIL-FAST by
 		// intent: OBSERVER_ADDR is explicit opt-in (the Kit supervisor sets it), and

@@ -93,6 +93,8 @@ own via [INTEGRATION.md](INTEGRATION.md#payer-decisioning).
 |---|---|
 | `PORT` | Listening port. Default `8080`. |
 | `HOST` | Bind address. Default `0.0.0.0`. |
+| `TLS_CERT_FILE` | PEM certificate for in-container TLS on the main listener. Must be set together with `TLS_KEY_FILE`; setting one alone is a startup error. Unset (default) = plain HTTP, with TLS terminated upstream at your load balancer. Conventionally paired with `PORT=8443`. TLS 1.2 floor; read once at startup, so restart to rotate. See [DEPLOYMENT.md](DEPLOYMENT.md). |
+| `TLS_KEY_FILE` | PEM private key matching `TLS_CERT_FILE`. Must be readable by uid `65532` (the container's unprivileged user). |
 
 ## Observer stream (optional — local tooling)
 

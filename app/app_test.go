@@ -6,12 +6,16 @@ import (
 	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"io"
+	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -111,6 +115,48 @@ func TestLoadConfig_ObserverAddrLoopbackOnly(t *testing.T) {
 		if !c.wantErr && cfg.ObserverAddr != c.addr {
 			t.Fatalf("OBSERVER_ADDR=%q: cfg.ObserverAddr = %q", c.addr, cfg.ObserverAddr)
 		}
+	}
+}
+
+// TestLoadConfig_TLSPairOrNeither: TLS is opt-in and both halves are required.
+// One-without-the-other is a boot error, never a silent fallback to plaintext —
+// an operator who set one and typoed the other must not get a plaintext listener.
+func TestLoadConfig_TLSPairOrNeither(t *testing.T) {
+	cases := []struct {
+		name    string
+		cert    string
+		key     string
+		wantErr bool
+	}{
+		{"neither — off, the default", "", "", false},
+		{"both set", "/etc/shn/tls/tls.crt", "/etc/shn/tls/tls.key", false},
+		{"cert without key", "/etc/shn/tls/tls.crt", "", true},
+		{"key without cert", "", "/etc/shn/tls/tls.key", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			env := map[string]string{
+				"ROLE":              "provider",
+				"SHN_SECRETS":       "/etc/shn/bundles/provider",
+				"SHN_DISCOVERY_URL": "http://accounts:8088/discovery",
+				"TLS_CERT_FILE":     c.cert,
+				"TLS_KEY_FILE":      c.key,
+			}
+			cfg, err := loadConfig(func(k string) string { return env[k] })
+			if c.wantErr {
+				if err == nil {
+					t.Fatalf("want error, got cfg %+v", cfg)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error %v", err)
+			}
+			if cfg.TLSCertFile != c.cert || cfg.TLSKeyFile != c.key {
+				t.Fatalf("cfg TLS = (%q, %q), want (%q, %q)",
+					cfg.TLSCertFile, cfg.TLSKeyFile, c.cert, c.key)
+			}
+		})
 	}
 }
 
@@ -805,5 +851,126 @@ func TestBuild_EmptyBundleRoleSkipsCheck(t *testing.T) {
 	_, err := build(context.Background(), func(k string) string { return env[k] }, io.Discard, nil)
 	if err == nil || strings.Contains(err.Error(), "registered as") {
 		t.Fatalf("pre-role-stamp bundle must skip the check, got %v", err)
+	}
+}
+
+// writeTestCert generates a self-signed localhost cert into t.TempDir() and
+// returns (certPath, keyPath, pool). Hermetic: no network, no fixture files.
+func writeTestCert(t *testing.T) (string, string, *x509.CertPool) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	tmpl := x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "localhost"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:              []string{"localhost"},
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("create cert: %v", err)
+	}
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "tls.crt")
+	keyPath := filepath.Join(dir, "tls.key")
+
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	if err := os.WriteFile(certPath, certPEM, 0o600); err != nil {
+		t.Fatalf("write cert: %v", err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatalf("marshal key: %v", err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(certPEM) {
+		t.Fatal("append cert to pool")
+	}
+	return certPath, keyPath, pool
+}
+
+// TestLoadTLSCert_OffWhenUnset: no config, no cert, no error — TLS is opt-in.
+func TestLoadTLSCert_OffWhenUnset(t *testing.T) {
+	cert, err := loadTLSCert("", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cert != nil {
+		t.Fatalf("cert = %v, want nil when unconfigured", cert)
+	}
+}
+
+// TestLoadTLSCert_FailsFastOnBadPath: an unreadable cert is a boot error, not a
+// serve-time surprise after the gateway already logged "listening".
+func TestLoadTLSCert_FailsFastOnBadPath(t *testing.T) {
+	_, err := loadTLSCert(filepath.Join(t.TempDir(), "nope.crt"), filepath.Join(t.TempDir(), "nope.key"))
+	if err == nil {
+		t.Fatal("want error for missing cert files, got nil")
+	}
+}
+
+// TestServerFor_PlainWhenNoCert: nil cert => no TLSConfig, unchanged default.
+func TestServerFor_PlainWhenNoCert(t *testing.T) {
+	s := serverFor("127.0.0.1:0", http.NewServeMux(), nil)
+	if s.TLSConfig != nil {
+		t.Fatalf("TLSConfig = %v, want nil for a plaintext listener", s.TLSConfig)
+	}
+}
+
+// TestServerFor_RealTLSHandshake: a real client completes a real handshake
+// against the configured cert and gets the handler's response. Loopback only.
+func TestServerFor_RealTLSHandshake(t *testing.T) {
+	certPath, keyPath, pool := writeTestCert(t)
+	cert, err := loadTLSCert(certPath, keyPath)
+	if err != nil {
+		t.Fatalf("loadTLSCert: %v", err)
+	}
+	if cert == nil {
+		t.Fatal("cert = nil, want a loaded keypair")
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ping", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("pong"))
+	})
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := serverFor(ln.Addr().String(), mux, cert)
+	if srv.TLSConfig == nil {
+		t.Fatal("TLSConfig = nil, want TLS configured")
+	}
+	if srv.TLSConfig.MinVersion != tls.VersionTLS12 {
+		t.Fatalf("MinVersion = %x, want TLS 1.2 (%x)", srv.TLSConfig.MinVersion, tls.VersionTLS12)
+	}
+	go func() { _ = srv.ServeTLS(ln, "", "") }()
+	t.Cleanup(func() { _ = srv.Close() })
+
+	client := &http.Client{Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
+	}}
+	resp, err := client.Get("https://" + ln.Addr().String() + "/ping")
+	if err != nil {
+		t.Fatalf("https GET: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 }
