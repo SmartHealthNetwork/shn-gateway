@@ -10,6 +10,7 @@ through wiring your own systems, see [INTEGRATION.md](INTEGRATION.md).
 - [Per-role](#per-role)
 - [Networking](#networking)
 - [Observer stream (optional — local tooling)](#observer-stream-optional--local-tooling)
+- [Operational checks (optional)](#operational-checks-optional)
 - [Connect your system of record](#connect-your-system-of-record)
 - [Accept Da Vinci requests from a provider EHR](#accept-da-vinci-requests-from-a-provider-ehr-provider-optional)
 - [Advanced overrides](#advanced-overrides-rarely-needed)
@@ -123,6 +124,65 @@ unless configured; the published binary defaults OFF.
 | `METRICS_SERVICE` | Names this gateway service for the EMF `Service` dimension (e.g. `provider-data-gw`). Empty (default) disables metric emission entirely. |
 | `METRICS_NAMESPACE` | CloudWatch metrics namespace. Default `SHN/Preview`. |
 | `METRICS_ENV` | EMF `Env` dimension value. Default `shn-preview`. |
+
+## Operational checks (optional)
+
+The gateway can probe its own outbound dependencies — your FHIR system of
+record, a partner Da Vinci payer, and every other endpoint URL you've
+configured — and report what it found, both automatically at startup and on
+demand. This is an operator diagnostic only: a failing probe never affects
+`/health` or the request-serving path.
+
+| Env var | Description |
+|---|---|
+| `CHECKS_TOKEN` | Bearer token that gates `GET`/`POST /internal/checks`. When set, a request must present `Authorization: Bearer <token>` exactly, or it gets `401`. When unset (the default), the endpoint instead accepts only requests that reach it directly from the gateway's own host (loopback), returning `403` for anything else — **note that behind any reverse proxy or load balancer, the connecting address the gateway sees is the proxy's, not the original caller's**, so leaving `CHECKS_TOKEN` unset behind a proxy means only that proxy's own host can reach it, not any external caller. Set a token to allow probing from off-host operator tooling. |
+
+**`GET /internal/checks`** returns the most recent completed run: `503`
+(`{"error":"checks have not completed yet"}`) if the gateway hasn't completed
+its first run yet (normally moments after startup), otherwise `200` with the
+run's results:
+
+```json
+{
+  "results": [
+    {
+      "id": "FHIR_DATA_URL",
+      "target": "https://sor.example",
+      "ok": true,
+      "detail": "CapabilityStatement (FHIR 4.0.1)",
+      "checkedAt": "2026-01-01T00:00:00Z",
+      "latencyMs": 42
+    }
+  ],
+  "checkedAt": "2026-01-01T00:00:00Z"
+}
+```
+
+Each result's `target` is redacted to `scheme://host` — never a path, query
+string, or credential, even if the URL you configured carried one.
+
+**`POST /internal/checks`** runs the probes immediately and returns the same
+shape, with two safety limits:
+
+- **Single-flight.** A `POST` while a run is already in progress returns `409`
+  (`{"error":"checks already running"}`) instead of starting a second,
+  overlapping run.
+- **30-second cooldown.** A `POST` within 30 seconds of the last completed run
+  returns the cached results instead of re-probing — some probes exercise the
+  same credential exchange your traffic path uses, and probing too often risks
+  tripping a partner's own rate limiting.
+
+The gateway also runs this same set of probes once automatically, shortly
+after startup, so the first `GET` after boot typically already has results.
+
+What gets probed is derived from what you've configured — no separate list to
+maintain. `FHIR_DATA_URL` and `PAYER_DAVINCI_BASE_URL` are checked with a live
+FHIR `$metadata` fetch; `FHIR_TOKEN_URL` and `PAYER_DAVINCI_TOKEN_URL` are
+checked with a live credential fetch against your configured client; every
+other endpoint URL you've set — including the [advanced
+overrides](#advanced-overrides-rarely-needed) — is checked with a plain
+reachability request. `PAYER_DIRECTORY` is a local file path, not a network
+endpoint, and is never probed.
 
 ## Connect your system of record
 

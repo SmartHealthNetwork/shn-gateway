@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	checks "github.com/SmartHealthNetwork/shn-gateway/checks"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 	"github.com/SmartHealthNetwork/shn-sdk/health"
 )
@@ -927,6 +928,198 @@ func TestServerFor_PlainWhenNoCert(t *testing.T) {
 	s := serverFor("127.0.0.1:0", http.NewServeMux(), nil)
 	if s.TLSConfig != nil {
 		t.Fatalf("TLSConfig = %v, want nil for a plaintext listener", s.TLSConfig)
+	}
+}
+
+// TestApp_ChecksEndpoint_TokenGatedAndHealthUnaffected boots the app for real
+// (build(), not Run() — no live listener/registrar poller needed) with
+// CHECKS_TOKEN set and a fake FHIR SoR, then drives /internal/checks and
+// /health over the SAME wrapped handler build() returns (the health.Wrap
+// seam checks.Handler is spliced into, app.go build()). Asserts: an
+// unauthenticated request is refused; a bearer-authenticated POST runs the
+// probes and surfaces a CapabilityStatement result for FHIR_DATA_URL; and
+// /health stays healthy even though AUDIT_URL — a well-formed but
+// unreachable target, probed as plain "reachable" per checkTargets'
+// kind overlay — fails its probe, because checks are never registered as a
+// health.Check.
+func TestApp_ChecksEndpoint_TokenGatedAndHealthUnaffected(t *testing.T) {
+	fhirSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/metadata") {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"resourceType":"CapabilityStatement","fhirVersion":"4.0.1"}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer fhirSrv.Close()
+
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	keyBody := fmt.Sprintf(`{"pubkey":%q}`, base64.StdEncoding.EncodeToString(pub))
+	keys := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(keyBody))
+	}))
+	defer keys.Close()
+	disc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"endpoints":{},"authzPublicKeyURL":%q,"hubTransportKeyURL":%q}`, keys.URL, keys.URL)
+	}))
+	defer disc.Close()
+
+	dir := t.TempDir()
+	id, err := shnsdk.GenerateIdentity("h-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := shnsdk.WriteBundle(dir, id, "provider", "https://holder.example"); err != nil {
+		t.Fatal(err)
+	}
+
+	env := map[string]string{
+		"ROLE":               "provider",
+		"SHN_SECRETS":        dir,
+		"SHN_DISCOVERY_URL":  disc.URL,
+		"SHN_FAKE_VALIDATOR": "1",
+		"FHIR_DATA_URL":      fhirSrv.URL,
+		"CHECKS_TOKEN":       "t",
+		"AUDIT_URL":          "http://127.0.0.1:1", // well-formed, unreachable
+	}
+	getenv := func(k string) string { return env[k] }
+
+	b, err := build(context.Background(), getenv, io.Discard, nil)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	srv := httptest.NewServer(b.handler)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/internal/checks")
+	if err != nil {
+		t.Fatalf("GET /internal/checks: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated GET status = %d, want 401", resp.StatusCode)
+	}
+
+	postReq, err := http.NewRequest(http.MethodPost, srv.URL+"/internal/checks", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	postReq.Header.Set("Authorization", "Bearer t")
+	resp, err = http.DefaultClient.Do(postReq)
+	if err != nil {
+		t.Fatalf("POST /internal/checks: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("authenticated POST status = %d, want 200", resp.StatusCode)
+	}
+	var body struct {
+		Results []checks.Result `json:"results"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var sawFHIR, sawAudit bool
+	for _, r := range body.Results {
+		switch r.ID {
+		case "FHIR_DATA_URL":
+			sawFHIR = true
+			if !r.OK || !strings.Contains(r.Detail, "CapabilityStatement") {
+				t.Errorf("FHIR_DATA_URL result = %+v, want OK with a CapabilityStatement detail", r)
+			}
+		case "AUDIT_URL":
+			sawAudit = true
+			if r.OK {
+				t.Errorf("AUDIT_URL result = %+v, want !OK (unreachable target)", r)
+			}
+		}
+	}
+	if !sawFHIR {
+		t.Fatalf("no FHIR_DATA_URL result in %+v", body.Results)
+	}
+	if !sawAudit {
+		t.Fatalf("no AUDIT_URL result in %+v", body.Results)
+	}
+
+	healthResp, err := http.Get(srv.URL + "/health")
+	if err != nil {
+		t.Fatalf("GET /health: %v", err)
+	}
+	defer healthResp.Body.Close()
+	if healthResp.StatusCode != http.StatusOK {
+		t.Fatalf("/health status = %d, want 200 (healthy) despite the failing AUDIT_URL probe", healthResp.StatusCode)
+	}
+}
+
+// TestFhirTokenFetch_MintsFreshTokenPerInvocation pins the fix for
+// IMPORTANT-1 (task-18 review): the /internal/checks credential-check
+// closure must construct a FRESH *smartauth.TokenSource on every invocation,
+// never a shared one hoisted outside the closure — a shared TokenSource
+// would serve its cached (still-valid) token instead of re-authenticating,
+// so a mid-window secret rotation or IdP outage would go unreported for up
+// to TTL-RefreshSkew. Calls the closure directly twice in immediate
+// succession (nothing at this layer imposes the Runner's 30s cooldown —
+// that cooldown is what bounds real-world mint frequency, per
+// checks.Runner.Run) and asserts the token endpoint was hit twice: this test
+// FAILS if fhirTokenFetch reverts to a shared/hoisted TokenSource (hits
+// would be 1, the second call served from cache).
+func TestFhirTokenFetch_MintsFreshTokenPerInvocation(t *testing.T) {
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"tok","expires_in":3600}`))
+	}))
+	defer srv.Close()
+
+	cfg := config{
+		FHIRTokenURL:     srv.URL,
+		FHIRClientID:     "gw",
+		FHIRClientSecret: "s3cret",
+		FHIRClientScope:  "system/*.read",
+	}
+	fetch := fhirTokenFetch(cfg)
+
+	if err := fetch(context.Background()); err != nil {
+		t.Fatalf("first fetch: %v", err)
+	}
+	if err := fetch(context.Background()); err != nil {
+		t.Fatalf("second fetch: %v", err)
+	}
+	if got := atomic.LoadInt32(&hits); got != 2 {
+		t.Fatalf("token endpoint hits = %d, want 2 (each invocation must mint fresh, not serve a cached token)", got)
+	}
+}
+
+// TestPayerDavinciTokenFetch_MintsFreshTokenPerInvocation is
+// TestFhirTokenFetch_MintsFreshTokenPerInvocation's PAYER_DAVINCI_*
+// counterpart — same fix, same regression shape.
+func TestPayerDavinciTokenFetch_MintsFreshTokenPerInvocation(t *testing.T) {
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"tok","expires_in":3600}`))
+	}))
+	defer srv.Close()
+
+	cfg := config{
+		PayerDavinciTokenURL:     srv.URL,
+		PayerDavinciClientID:     "gw",
+		PayerDavinciClientSecret: "s3cret",
+		PayerDavinciScope:        "system/*.read",
+	}
+	fetch := payerDavinciTokenFetch(cfg)
+
+	if err := fetch(context.Background()); err != nil {
+		t.Fatalf("first fetch: %v", err)
+	}
+	if err := fetch(context.Background()); err != nil {
+		t.Fatalf("second fetch: %v", err)
+	}
+	if got := atomic.LoadInt32(&hits); got != 2 {
+		t.Fatalf("token endpoint hits = %d, want 2 (each invocation must mint fresh, not serve a cached token)", got)
 	}
 }
 

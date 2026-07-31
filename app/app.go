@@ -27,6 +27,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	checks "github.com/SmartHealthNetwork/shn-gateway/checks"
 	fhirsor "github.com/SmartHealthNetwork/shn-gateway/connectors/fhirsor"
 	pgstore "github.com/SmartHealthNetwork/shn-gateway/connectors/pgstore"
 	smartauth "github.com/SmartHealthNetwork/shn-gateway/connectors/smartauth"
@@ -61,7 +62,7 @@ type config struct {
 	// inside the operator's own network (e.g. an EHR/interface-engine push into
 	// the Da Vinci ingress, which carries PHI upstream of sealing and is
 	// authenticated with short-lived bearers). Conventionally paired with
-	// PORT=8443. See docs/DEPLOYMENT.md.
+	// PORT=8443. See gateway/docs/DEPLOYMENT.md.
 	TLSCertFile string
 	TLSKeyFile  string
 
@@ -172,6 +173,11 @@ type config struct {
 	// + IngressClientsFile by loadConfig and passed directly into engine.Config.
 	IngressBaseURL string
 	IngressClients map[string]engine.IngressClientRegistration
+
+	// ChecksToken gates the operator connectivity-probe surface at
+	// /internal/checks. Set by CHECKS_TOKEN. Empty (the default)
+	// falls back to loopback-only access — see checks.Handler.
+	ChecksToken string
 }
 
 var validRoles = map[string]bool{
@@ -284,28 +290,13 @@ func loadConfig(getenv func(string) string) (config, error) {
 		HubTransportKeyURL: getenv("HUB_TRANSPORT_KEY_URL"),
 	}
 
-	for _, pair := range [][2]string{
-		{"AUTHZ_URL", cfg.AuthzURL},
-		{"HUB_URL", cfg.HubURL},
-		{"CONSENT_URL", cfg.ConsentURL},
-		{"AUDIT_URL", cfg.AuditURL},
-		{"PHG_URL", cfg.PHGURL},
-		{"FHIR_VALIDATE_URL", cfg.FHIRValidateURL},
-		{"FHIR_DATA_URL", cfg.FHIRDataURL},
-		{"REGISTRAR_URL", cfg.RegistrarURL},
-		{"FHIR_TOKEN_URL", cfg.FHIRTokenURL},
-		{"PAYER_DAVINCI_BASE_URL", cfg.PayerDavinciBaseURL},
-		{"PAYER_DAVINCI_TOKEN_URL", cfg.PayerDavinciTokenURL},
-		{"PROVIDER_DTR_POPULATE_URL", cfg.ProviderDTRPopulateURL},
-		{"PROVIDER_DAVINCI_INGRESS_BASE_URL", cfg.ProviderDavinciIngressBaseURL},
-		{"SHN_DISCOVERY_URL", cfg.DiscoveryURL},
-		{"AUTHZ_PUBKEY_URL", cfg.AuthzPubkeyURL},
-		{"HUB_TRANSPORT_KEY_URL", cfg.HubTransportKeyURL},
-	} {
+	for _, pair := range optionalURLs(cfg) {
 		if err := checkOptionalURL(pair[0], pair[1]); err != nil {
 			return config{}, fmt.Errorf("gateway: %w", err)
 		}
 	}
+
+	cfg.ChecksToken = getenv("CHECKS_TOKEN")
 
 	if cfg.FHIRTokenURL != "" {
 		if cfg.FHIRDataURL == "" {
@@ -465,6 +456,156 @@ func checkOptionalURL(name, v string) error {
 	return nil
 }
 
+// optionalURLs is the single table of every URL-shaped config field, keyed by
+// its env var name — SHN_DISCOVERY_URL included (it's required, but its
+// well-formedness still rides this same check). loadConfig's boot-time
+// well-formedness loop and checkTargets (the /internal/checks probe target
+// list) BOTH walk this exact table so the two can never diverge:
+// a URL added here is automatically both boot-validated and, when non-empty,
+// probed. No entry is hand-kept in a second place.
+func optionalURLs(cfg config) [][2]string {
+	return [][2]string{
+		{"AUTHZ_URL", cfg.AuthzURL},
+		{"HUB_URL", cfg.HubURL},
+		{"CONSENT_URL", cfg.ConsentURL},
+		{"AUDIT_URL", cfg.AuditURL},
+		{"PHG_URL", cfg.PHGURL},
+		{"FHIR_VALIDATE_URL", cfg.FHIRValidateURL},
+		{"FHIR_DATA_URL", cfg.FHIRDataURL},
+		{"REGISTRAR_URL", cfg.RegistrarURL},
+		{"FHIR_TOKEN_URL", cfg.FHIRTokenURL},
+		{"PAYER_DAVINCI_BASE_URL", cfg.PayerDavinciBaseURL},
+		{"PAYER_DAVINCI_TOKEN_URL", cfg.PayerDavinciTokenURL},
+		{"PROVIDER_DTR_POPULATE_URL", cfg.ProviderDTRPopulateURL},
+		{"PROVIDER_DAVINCI_INGRESS_BASE_URL", cfg.ProviderDavinciIngressBaseURL},
+		{"SHN_DISCOVERY_URL", cfg.DiscoveryURL},
+		{"AUTHZ_PUBKEY_URL", cfg.AuthzPubkeyURL},
+		{"HUB_TRANSPORT_KEY_URL", cfg.HubTransportKeyURL},
+	}
+}
+
+// checkTargets derives the /internal/checks probe targets from
+// optionalURLs(cfg) — the exact table checkOptionalURL walks at boot, so a
+// target can never be added or dropped independently of that well-formedness
+// gate. Skips unset pairs. Kind overlay: the two FHIR-facing base URLs probe
+// as fhir-metadata (a live $/metadata fetch); the two SMART token endpoints
+// probe as a live credential check via a closure over the gateway's own
+// outbound token client (fhirTokenFetch/payerDavinciTokenFetch — reusing the
+// exact SMART config the traffic path authenticates with, never a second
+// hand-rolled OAuth client); every other configured pair — including the
+// in-VPC substrate URLs (AUTHZ_URL, HUB_URL, …) that hosted tenants never set
+// but self-hosted gateways do, where probing them is exactly what an
+// operator wants — probes as a plain reachable GET. PAYER_DIRECTORY is a
+// file path, not a URL; it is not in optionalURLs and is never probed.
+func checkTargets(cfg config) []checks.Target {
+	var out []checks.Target
+	for _, pair := range optionalURLs(cfg) {
+		name, u := pair[0], pair[1]
+		if u == "" {
+			continue
+		}
+		t := checks.Target{ID: name, URL: u}
+		switch name {
+		case "FHIR_DATA_URL", "PAYER_DAVINCI_BASE_URL":
+			t.Kind = checks.KindFHIRMetadata
+		case "FHIR_TOKEN_URL":
+			t.Kind = checks.KindToken
+			t.TokenFetch = fhirTokenFetch(cfg)
+		case "PAYER_DAVINCI_TOKEN_URL":
+			t.Kind = checks.KindToken
+			t.TokenFetch = payerDavinciTokenFetch(cfg)
+		default:
+			t.Kind = checks.KindReachable
+		}
+		out = append(out, t)
+	}
+	return out
+}
+
+// classifyTokenErr turns a smartauth token-fetch error into a
+// *checks.StatusError when the failure was an HTTP status from the token
+// endpoint (smartauth.TokenSource.fetch's "token endpoint status %d: ..."
+// message — see connectors/smartauth/tokensource.go), so the /internal/checks
+// result can report the status code. checks.probeToken already refuses to
+// surface anything but a *StatusError's Code (the redaction rule): this
+// function reads the raw error text only to pull the numeric status out of
+// it, never returning that text itself — an error that doesn't match this
+// shape (a dial failure, a wrapped context error, …) passes through
+// unmodified and collapses to the fixed "credential check failed" string
+// downstream.
+func classifyTokenErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	var code int
+	if n, _ := fmt.Sscanf(err.Error(), "smartauth: token endpoint status %d:", &code); n == 1 {
+		return &checks.StatusError{Code: code}
+	}
+	return err
+}
+
+// fhirTokenFetch builds the /internal/checks credential-check closure for
+// FHIR_TOKEN_URL: a *smartauth.TokenSource built from the SAME Config
+// fhirHTTPClient authenticates the FHIR SoR connector with — the minimal
+// in-app seam the task calls for (a TokenSource, not a new smartauth export)
+// so this package never hand-rolls a second OAuth client. A key/PEM load
+// failure at target-construction time is captured and replayed as the
+// closure's error on every probe (rather than probed to death at boot) —
+// build() itself still fails fast via fhirHTTPClient before serving.
+//
+// A FRESH *smartauth.TokenSource is constructed INSIDE the returned closure,
+// on every invocation — never hoisted to a shared variable captured by the
+// closure. TokenSource.Token caches and serves a still-valid token without
+// hitting the network (that's correct behavior for the traffic-path client,
+// which wants to avoid minting on every request), but this is supposed to be
+// a LIVE credential check: a shared, closed-over TokenSource would report ok
+// in ~0ms off a cached token for up to TTL-RefreshSkew after a secret
+// rotation or IdP outage, silently stopping being a check. The Runner's own
+// 30s cooldown (checks.go) is what bounds how often this actually mints
+// against the partner IdP — it, not caching here, is the partner-lockout
+// guard.
+func fhirTokenFetch(cfg config) func(context.Context) error {
+	sc := smartauth.Config{TokenURL: cfg.FHIRTokenURL, ClientID: cfg.FHIRClientID, Scope: cfg.FHIRClientScope}
+	if cfg.FHIRClientSecret != "" {
+		sc.ClientSecret = cfg.FHIRClientSecret
+	} else {
+		key, err := loadSmartKey(cfg.FHIRClientKey, cfg.FHIRClientAlg)
+		if err != nil {
+			return func(context.Context) error { return err }
+		}
+		sc.Alg, sc.Key, sc.KID = cfg.FHIRClientAlg, key, cfg.FHIRClientKID
+	}
+	return func(ctx context.Context) error {
+		return classifyTokenErr(errFromToken(&smartauth.TokenSource{Config: sc}, ctx))
+	}
+}
+
+// payerDavinciTokenFetch is fhirTokenFetch's PAYER_DAVINCI_* counterpart,
+// mirroring payerDavinciHTTPClient's Config construction. Same fresh-
+// TokenSource-per-invocation rule applies (see fhirTokenFetch's doc).
+func payerDavinciTokenFetch(cfg config) func(context.Context) error {
+	sc := smartauth.Config{TokenURL: cfg.PayerDavinciTokenURL, ClientID: cfg.PayerDavinciClientID, Scope: cfg.PayerDavinciScope}
+	if cfg.PayerDavinciClientSecret != "" {
+		sc.ClientSecret = cfg.PayerDavinciClientSecret
+	} else {
+		key, err := loadSmartKey(cfg.PayerDavinciClientKey, cfg.PayerDavinciClientAlg)
+		if err != nil {
+			return func(context.Context) error { return err }
+		}
+		sc.Alg, sc.Key, sc.KID = cfg.PayerDavinciClientAlg, key, cfg.PayerDavinciClientKID
+	}
+	return func(ctx context.Context) error {
+		return classifyTokenErr(errFromToken(&smartauth.TokenSource{Config: sc}, ctx))
+	}
+}
+
+// errFromToken discards the minted token, keeping only the error — Token
+// itself has no error-only form.
+func errFromToken(ts *smartauth.TokenSource, ctx context.Context) error {
+	_, err := ts.Token(ctx)
+	return err
+}
+
 // trustAnchors carries the two ed25519 trust anchors resolved from /discovery.
 type trustAnchors struct {
 	AuthzPub        ed25519.PublicKey
@@ -598,6 +739,13 @@ type built struct {
 	// registrarURL != "" (mirrors the poller-goroutine gate in Run). pollFeed's
 	// Record* calls are nil-safe, so a nil cell here is a no-op, not a crash.
 	healthCell *health.PollerCell
+
+	// checksRunner drives /internal/checks — the operator
+	// connectivity-probe surface. Run starts its boot-time probe in a
+	// goroutine (never build: the listener must open without waiting on
+	// partner endpoints), and it is never registered as a health.Check —
+	// checks never gate /health.
+	checksRunner *checks.Runner
 }
 
 func build(ctx context.Context, getenv func(string) string, stdout io.Writer, clock func() time.Time) (built, error) {
@@ -828,9 +976,25 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	}
 
 	fmt.Fprintf(stdout, "gateway: role=%s holder=%s listening on %s://%s\n", cfg.Role, bundle.Identity.HolderID, scheme, cfg.Addr)
+
+	// /internal/* is the operator/control-plane surface: never forwarded at the
+	// hosted edge, token- or loopback-gated
+	// here. Inserted at this seam — shared by every role — rather
+	// than the per-role engine mux.
+	checksRunner := checks.NewRunner(checkTargets(cfg), client, clock)
+	checksH := checks.Handler(checksRunner, cfg.ChecksToken)
+	inner := health.Wrap(hreg, engine.New(gwCfg).Handler())
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/internal/checks" {
+			checksH.ServeHTTP(w, r)
+			return
+		}
+		inner.ServeHTTP(w, r)
+	})
+
 	b = built{
 		addr:            cfg.Addr,
-		handler:         health.Wrap(hreg, engine.New(gwCfg).Handler()),
+		handler:         handler,
 		reg:             reg,
 		registrarURL:    registrarURL,
 		client:          client,
@@ -838,6 +1002,7 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		observerAddr:    cfg.ObserverAddr,
 		observerHandler: obsHandler,
 		healthCell:      feedCell,
+		checksRunner:    checksRunner,
 	}
 	return b, nil
 }
@@ -882,6 +1047,9 @@ func Run(ctx context.Context, getenv func(string) string, stdout io.Writer) erro
 	if b.registrarURL != "" {
 		go pollFeed(ctx, b.client, b.registrarURL, b.reg, 3*time.Second, b.healthCell)
 	}
+	// Boot-time connectivity check: after the listener is up, not
+	// blocking it — build() must return without waiting on partner endpoints.
+	go b.checksRunner.Run(ctx) //nolint:errcheck — results land in Last()
 	errc := make(chan error, 2)
 	main := serverFor(b.addr, b.handler, b.tlsCert)
 	go func() {
