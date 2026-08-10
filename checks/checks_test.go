@@ -547,9 +547,10 @@ func wantFailure(t *testing.T, res Result, code, hint string) {
 }
 
 // 11. failure classification: one row per minting site
-// reachable through a live Runner. The transport-error rows are covered by
-// test 3b's extension (hint redaction needs the credential-bearing URL) and
-// the deadline row by TestGlobalDeadline's — both in this same change.
+// reachable through a live Runner, including a closed-port transport row.
+// The fhir-metadata transport row lives in test 3b's extension (hint
+// redaction needs the credential-bearing URL) and the deadline row in
+// TestGlobalDeadline's.
 func TestFailureClassification(t *testing.T) {
 	status503 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -662,5 +663,35 @@ func TestResultJSONFailureShape(t *testing.T) {
 	}
 	if !strings.Contains(string(failJSON), `"failure":{"code":"not-checked"}`) {
 		t.Fatalf("empty hint must be omitted, got: %s", failJSON)
+	}
+}
+
+// 13. large CapabilityStatement: a real-world HAPI /metadata enumerating a
+// full resource catalog runs ~2 MiB, comfortably over the old 1 MiB read
+// cap — which made the probe truncate mid-document and fail a HEALTHY
+// endpoint with "decode: unexpected EOF" (observed live 2026-08-10 against
+// two HAPI-backed data URLs). The cap exists to bound a hostile/unbounded
+// body, not to size-police a valid one.
+func TestFHIRMetadataLargeCapabilityStatement(t *testing.T) {
+	pad := strings.Repeat("x", 2<<20) // ~2 MiB narrative, mirroring live HAPI size
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"resourceType":"CapabilityStatement","fhirVersion":"4.0.1","text":{"div":"%s"}}`, pad)
+	}))
+	defer srv.Close()
+
+	rn := NewRunner([]Target{{ID: "big", Kind: KindFHIRMetadata, URL: srv.URL}}, http.DefaultClient, newFakeClock(time.Unix(0, 0)).Now)
+	results, err := rn.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	res := results[0]
+	if !res.OK {
+		t.Fatalf("ok=false (%s) for a valid oversized CapabilityStatement, want ok", res.Detail)
+	}
+	if res.Failure != nil {
+		t.Fatalf("Failure=%+v on an ok result, want nil (invariant: ok:true ⇒ failure nil)", res.Failure)
+	}
+	if res.Detail != "CapabilityStatement (FHIR 4.0.1)" {
+		t.Fatalf("Detail = %q, want the parsed CapabilityStatement detail", res.Detail)
 	}
 }

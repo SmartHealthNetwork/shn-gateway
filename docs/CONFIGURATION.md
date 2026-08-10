@@ -158,9 +158,9 @@ run's results:
       "target": "https://idp.example",
       "ok": false,
       "detail": "credential check failed (HTTP 401)",
-      "failure": { "code": "credential-rejected", "hint": "HTTP 401" },
       "checkedAt": "2026-01-01T00:00:00Z",
-      "latencyMs": 87
+      "latencyMs": 87,
+      "failure": { "code": "credential-rejected", "hint": "HTTP 401" }
     }
   ],
   "checkedAt": "2026-01-01T00:00:00Z"

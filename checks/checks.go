@@ -129,8 +129,13 @@ const (
 	probeTimeout = 10 * time.Second
 
 	// maxBodyBytes bounds how much of a fhir-metadata response body gets
-	// decoded.
-	maxBodyBytes = 1 << 20
+	// decoded. It guards against an unbounded body, not a merely large one:
+	// a real HAPI /metadata enumerating a full resource catalog runs ~2 MiB,
+	// and the original 1 MiB cap truncated those mid-document, failing
+	// healthy endpoints with "decode: unexpected EOF". 8 MiB gives 4×
+	// headroom over observed CapabilityStatements while keeping the probe's
+	// memory bounded.
+	maxBodyBytes = 8 << 20
 )
 
 // Runner executes a fixed set of Targets serially, single-flight and
