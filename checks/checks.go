@@ -1,14 +1,14 @@
-// Package checks implements the gateway's connectivity probe runner (spec
-// §7.1) — an ops-surface health check independent of the request-serving
-// path. It has no substrate awareness of its own: the app layer builds the
-// Target list (see gateway/app/app.go's checkOptionalURL table) and, for
-// KindToken, supplies a closure over its own configured credentials so this
-// package never handles raw secrets.
+// Package checks implements the gateway's connectivity probe runner — an
+// ops-surface health check independent of the request-serving path. It has
+// no substrate awareness of its own: the app layer builds the Target list
+// (see app/app.go's checkOptionalURL table) and, for KindToken, supplies a
+// closure over its own configured credentials so this package never
+// handles raw secrets.
 //
-// Single-flight and cooldown mirror kitd's /api/verify precedent
-// (kit/kitd/kitd.go's handleVerifyPost): ErrBusy while a run is in flight,
-// and a 30s cooldown returning cached results afterward — auth probes hit
-// partner IdPs, and repeated failures can trip partner-side lockouts.
+// Single-flight and cooldown mirror the kit daemon's verify precedent:
+// ErrBusy while a run is in flight, and a 30s cooldown returning cached
+// results afterward — auth probes hit partner IdPs, and repeated failures
+// can trip partner-side lockouts.
 package checks
 
 import (
@@ -35,7 +35,47 @@ type Result struct {
 	Detail    string    `json:"detail"`
 	CheckedAt time.Time `json:"checkedAt"`
 	LatencyMS int64     `json:"latencyMs"`
+	// Failure classifies a failing probe for machine consumption (an
+	// operator console maps Code to its own copy; Hint carries the
+	// redaction-safe specifics the code cannot). Present exactly when OK is
+	// false. Hint obeys the REDACTION RULE above: it only ever carries
+	// fragments Detail already ships.
+	Failure *Failure `json:"failure,omitempty"`
 }
+
+// Failure is Result's machine-readable failure classification. Code is a
+// closed enum (the Fail* constants); Hint is the redaction-safe variable
+// part of Detail, factored out (empty when the code says it all).
+type Failure struct {
+	Code string `json:"code"`
+	Hint string `json:"hint,omitempty"`
+}
+
+// Failure codes — a closed enum, one distinct operator meaning per code.
+const (
+	// FailUnreachable: transport-level failure (dial, DNS, TLS, per-probe
+	// timeout) — the endpoint never answered.
+	FailUnreachable = "unreachable"
+	// FailHTTPStatus: the endpoint answered with a failing status
+	// (fhir-metadata non-2xx; reachable >= 500).
+	FailHTTPStatus = "http-status"
+	// FailInvalidCapabilityStatement: a 2xx answer that is not a valid
+	// CapabilityStatement (decode failure or wrong resourceType — Hint
+	// says which).
+	FailInvalidCapabilityStatement = "invalid-capability-statement"
+	// FailCredentialRejected: the credential check failed. Deliberately
+	// neutral — this also wears a local key-load bug and a token-leg
+	// timeout (both non-StatusError closure errors), so operator copy
+	// must never say the PARTNER rejected the credential.
+	FailCredentialRejected = "credential-rejected"
+	// FailNotChecked: the run deadline starved this probe; nothing was
+	// probed.
+	FailNotChecked = "not-checked"
+	// FailInternal: a bug, not a network condition — URL parse /
+	// request-build failure on a boot-validated URL, or an unknown probe
+	// kind.
+	FailInternal = "internal"
+)
 
 // Kind selects how a Target is probed.
 type Kind string
@@ -158,6 +198,7 @@ func (r *Runner) Run(ctx context.Context) ([]Result, error) {
 				Target:    targetOf(t.URL),
 				OK:        false,
 				Detail:    "not checked — run deadline exceeded",
+				Failure:   &Failure{Code: FailNotChecked},
 				CheckedAt: r.now(),
 			})
 			continue
@@ -222,13 +263,14 @@ func (r *Runner) probe(ctx context.Context, t Target) Result {
 
 	switch t.Kind {
 	case KindFHIRMetadata:
-		res.OK, res.Detail = r.probeFHIRMetadata(pctx, t.URL)
+		res.OK, res.Detail, res.Failure = r.probeFHIRMetadata(pctx, t.URL)
 	case KindToken:
-		res.OK, res.Detail = r.probeToken(pctx, t.TokenFetch)
+		res.OK, res.Detail, res.Failure = r.probeToken(pctx, t.TokenFetch)
 	case KindReachable:
-		res.OK, res.Detail = r.probeReachable(pctx, t.URL)
+		res.OK, res.Detail, res.Failure = r.probeReachable(pctx, t.URL)
 	default:
 		res.OK, res.Detail = false, fmt.Sprintf("unknown probe kind %q", t.Kind)
+		res.Failure = &Failure{Code: FailInternal, Hint: fmt.Sprintf("unknown probe kind %q", t.Kind)}
 	}
 
 	res.LatencyMS = r.now().Sub(start).Milliseconds()
@@ -236,12 +278,15 @@ func (r *Runner) probe(ctx context.Context, t Target) Result {
 }
 
 // probeFHIRMetadata GETs <base>/metadata and expects a CapabilityStatement.
-func (r *Runner) probeFHIRMetadata(ctx context.Context, base string) (bool, string) {
+func (r *Runner) probeFHIRMetadata(ctx context.Context, base string) (bool, string, *Failure) {
 	redacted := targetOf(base)
 
 	u, err := url.Parse(base)
 	if err != nil {
-		return false, fmt.Sprintf("GET %s/metadata: %v", redacted, redactErr(err))
+		// A boot-validated URL failing to parse is a bug, not a network
+		// condition — internal, not unreachable.
+		return false, fmt.Sprintf("GET %s/metadata: %v", redacted, redactErr(err)),
+			&Failure{Code: FailInternal, Hint: redactErr(err).Error()}
 	}
 	// JoinPath appends the "metadata" path element relative to u's existing
 	// path (so a base with its own path, e.g. ".../fhir", probes
@@ -251,17 +296,20 @@ func (r *Runner) probeFHIRMetadata(ctx context.Context, base string) (bool, stri
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, full, nil)
 	if err != nil {
-		return false, fmt.Sprintf("GET %s/metadata: %v", redacted, redactErr(err))
+		return false, fmt.Sprintf("GET %s/metadata: %v", redacted, redactErr(err)),
+			&Failure{Code: FailInternal, Hint: redactErr(err).Error()}
 	}
 	resp, err := r.client.Do(req)
 	if err != nil {
-		return false, fmt.Sprintf("GET %s/metadata: %v", redacted, redactErr(err))
+		return false, fmt.Sprintf("GET %s/metadata: %v", redacted, redactErr(err)),
+			&Failure{Code: FailUnreachable, Hint: redactErr(err).Error()}
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxBodyBytes))
-		return false, fmt.Sprintf("HTTP %d", resp.StatusCode)
+		return false, fmt.Sprintf("HTTP %d", resp.StatusCode),
+			&Failure{Code: FailHTTPStatus, Hint: fmt.Sprintf("HTTP %d", resp.StatusCode)}
 	}
 
 	var cs struct {
@@ -269,50 +317,56 @@ func (r *Runner) probeFHIRMetadata(ctx context.Context, base string) (bool, stri
 		FhirVersion  string `json:"fhirVersion"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxBodyBytes)).Decode(&cs); err != nil {
-		return false, fmt.Sprintf("GET %s/metadata: decode: %v", redacted, err)
+		return false, fmt.Sprintf("GET %s/metadata: decode: %v", redacted, err),
+			&Failure{Code: FailInvalidCapabilityStatement, Hint: fmt.Sprintf("decode: %v", err)}
 	}
 	if cs.ResourceType != "CapabilityStatement" {
-		return false, fmt.Sprintf("resourceType %q, want CapabilityStatement", cs.ResourceType)
+		return false, fmt.Sprintf("resourceType %q, want CapabilityStatement", cs.ResourceType),
+			&Failure{Code: FailInvalidCapabilityStatement, Hint: fmt.Sprintf("resourceType %q", cs.ResourceType)}
 	}
-	return true, fmt.Sprintf("CapabilityStatement (FHIR %s)", cs.FhirVersion)
+	return true, fmt.Sprintf("CapabilityStatement (FHIR %s)", cs.FhirVersion), nil
 }
 
 // probeToken runs fetch as a credential check. Failures never surface
 // err.Error() verbatim (redaction rule): a *StatusError classifies to its
 // HTTP status class, anything else collapses to a fixed string.
-func (r *Runner) probeToken(ctx context.Context, fetch func(context.Context) error) (bool, string) {
+func (r *Runner) probeToken(ctx context.Context, fetch func(context.Context) error) (bool, string, *Failure) {
 	if fetch == nil {
-		return false, "credential check failed"
+		return false, "credential check failed", &Failure{Code: FailCredentialRejected}
 	}
 	err := fetch(ctx)
 	if err == nil {
-		return true, "ok"
+		return true, "ok", nil
 	}
 	var se *StatusError
 	if errors.As(err, &se) {
-		return false, fmt.Sprintf("credential check failed (HTTP %d)", se.Code)
+		return false, fmt.Sprintf("credential check failed (HTTP %d)", se.Code),
+			&Failure{Code: FailCredentialRejected, Hint: fmt.Sprintf("HTTP %d", se.Code)}
 	}
-	return false, "credential check failed"
+	return false, "credential check failed", &Failure{Code: FailCredentialRejected}
 }
 
 // probeReachable GETs target; ok when the response status is below 500 (a
 // 404 still proves the edge exists and is answering).
-func (r *Runner) probeReachable(ctx context.Context, target string) (bool, string) {
+func (r *Runner) probeReachable(ctx context.Context, target string) (bool, string, *Failure) {
 	redacted := targetOf(target)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
-		return false, fmt.Sprintf("GET %s: %v", redacted, redactErr(err))
+		return false, fmt.Sprintf("GET %s: %v", redacted, redactErr(err)),
+			&Failure{Code: FailInternal, Hint: redactErr(err).Error()}
 	}
 	resp, err := r.client.Do(req)
 	if err != nil {
-		return false, fmt.Sprintf("GET %s: %v", redacted, redactErr(err))
+		return false, fmt.Sprintf("GET %s: %v", redacted, redactErr(err)),
+			&Failure{Code: FailUnreachable, Hint: redactErr(err).Error()}
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxBodyBytes))
 
 	if resp.StatusCode >= http.StatusInternalServerError {
-		return false, fmt.Sprintf("HTTP %d", resp.StatusCode)
+		return false, fmt.Sprintf("HTTP %d", resp.StatusCode),
+			&Failure{Code: FailHTTPStatus, Hint: fmt.Sprintf("HTTP %d", resp.StatusCode)}
 	}
-	return true, fmt.Sprintf("HTTP %d", resp.StatusCode)
+	return true, fmt.Sprintf("HTTP %d", resp.StatusCode), nil
 }

@@ -152,6 +152,15 @@ run's results:
       "detail": "CapabilityStatement (FHIR 4.0.1)",
       "checkedAt": "2026-01-01T00:00:00Z",
       "latencyMs": 42
+    },
+    {
+      "id": "FHIR_TOKEN_URL",
+      "target": "https://idp.example",
+      "ok": false,
+      "detail": "credential check failed (HTTP 401)",
+      "failure": { "code": "credential-rejected", "hint": "HTTP 401" },
+      "checkedAt": "2026-01-01T00:00:00Z",
+      "latencyMs": 87
     }
   ],
   "checkedAt": "2026-01-01T00:00:00Z"
@@ -160,6 +169,15 @@ run's results:
 
 Each result's `target` is redacted to `scheme://host` — never a path, query
 string, or credential, even if the URL you configured carried one.
+
+A failing result also carries a machine-readable `failure` object: `code` is one of
+`unreachable` (the endpoint never answered), `http-status` (it answered with a failing
+status), `invalid-capability-statement` (a 2xx answer that is not a valid
+CapabilityStatement), `credential-rejected` (the credential check failed), `not-checked`
+(the run deadline left this probe unprobed), or `internal` (a gateway-side bug, not a
+network condition); `hint` carries the redaction-safe specifics (for example `HTTP 401`)
+and is omitted when the code says it all. Passing results carry no `failure` key. The
+same redaction rule applies to `hint` as to `target` and `detail`.
 
 **`POST /internal/checks`** runs the probes immediately and returns the same
 shape, with two safety limits:

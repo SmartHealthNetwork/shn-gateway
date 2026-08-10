@@ -2,6 +2,7 @@ package checks
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -153,6 +154,17 @@ func TestFHIRMetadataUnreachableRedactsCredentials(t *testing.T) {
 	if strings.ContainsAny(got.Detail, "?@") {
 		t.Errorf("Detail leaks URL query/userinfo markers: %q", got.Detail)
 	}
+	if got.Failure == nil || got.Failure.Code != FailUnreachable {
+		t.Fatalf("failure = %+v, want code %q", got.Failure, FailUnreachable)
+	}
+	if got.Failure.Hint == "" {
+		t.Fatalf("transport-error hint empty, want the redacted dial error")
+	}
+	for _, leak := range []string{"svcuser", "hunter2", "SUPERSECRET", "?", "@"} {
+		if strings.Contains(got.Failure.Hint, leak) {
+			t.Fatalf("hint leaks %q: %q", leak, got.Failure.Hint)
+		}
+	}
 }
 
 // 3c (IMPORTANT-1 regression). A base URL that already carries a query
@@ -214,6 +226,17 @@ func TestFHIRMetadataNon2xxStatus(t *testing.T) {
 }
 
 // 4. token OK / token error: error text must never surface verbatim (redaction).
+// StatusError.Error() itself is never invoked by the redaction path (probeToken
+// type-asserts the Code field directly), but the type must satisfy the error
+// interface to be returned as one — pin the string form so a format change is
+// noticed rather than silently drifting on an otherwise-unexercised method.
+func TestStatusErrorString(t *testing.T) {
+	var err error = &StatusError{Code: 503}
+	if got, want := err.Error(), "checks: status 503"; got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
+	}
+}
+
 func TestToken(t *testing.T) {
 	t.Run("ok", func(t *testing.T) {
 		rn := NewRunner([]Target{{
@@ -399,6 +422,31 @@ func TestLastBeforeAnyRun(t *testing.T) {
 	}
 }
 
+// NewRunner's nil-client/nil-now defaults are library-safety fallbacks —
+// every other test passes both explicitly — pinned here so the fallback
+// branches aren't silently dead: a nil client must not panic on Run, and a
+// nil `now` must fall back to a real clock (CheckedAt lands near time.Now,
+// not the zero value).
+func TestNewRunnerNilDefaults(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	rn := NewRunner([]Target{{ID: "reach", Kind: KindReachable, URL: srv.URL}}, nil, nil)
+	before := time.Now()
+	results, err := rn.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(results) != 1 || !results[0].OK {
+		t.Fatalf("results = %+v, want 1 OK result (nil client should default to http.DefaultClient)", results)
+	}
+	if results[0].CheckedAt.Before(before.Add(-time.Second)) {
+		t.Errorf("CheckedAt = %v, want near real now() (nil `now` should default to time.Now)", results[0].CheckedAt)
+	}
+}
+
 // 9. redaction: a target with userinfo and a query string renders scheme://host only.
 func TestTargetOfRedaction(t *testing.T) {
 	got := targetOf("https://u:p@h.example/path?x=1")
@@ -406,6 +454,35 @@ func TestTargetOfRedaction(t *testing.T) {
 	if got != want {
 		t.Errorf("targetOf = %q, want %q", got, want)
 	}
+}
+
+// targetOf's unparseable-URL branch renders "" rather than propagating a
+// parse error into a Detail string (which could itself leak raw input).
+func TestTargetOfUnparseableURL(t *testing.T) {
+	got := targetOf("://not a url")
+	if got != "" {
+		t.Errorf("targetOf(unparseable) = %q, want empty string", got)
+	}
+}
+
+// redactErr direct unit test: every current call site happens to hand it a
+// *url.Error (net/http request errors are always wrapped that way), so its
+// fallback branch — a plain, non-*url.Error error passed through unchanged —
+// is otherwise unexercised by the probe-level tests above.
+func TestRedactErr(t *testing.T) {
+	t.Run("unwraps a url.Error to its inner error", func(t *testing.T) {
+		inner := errors.New("dial tcp: connection refused")
+		ue := &url.Error{Op: "Get", URL: "https://u:secret@h.example/x?apikey=live", Err: inner}
+		if got := redactErr(ue); got != inner {
+			t.Errorf("redactErr(url.Error) = %v, want the unwrapped inner error %v", got, inner)
+		}
+	})
+	t.Run("passes a plain error through unchanged", func(t *testing.T) {
+		plain := errors.New("boom")
+		if got := redactErr(plain); got != plain {
+			t.Errorf("redactErr(plain) = %v, want %v unchanged", got, plain)
+		}
+	})
 }
 
 // 10. global deadline: probes against a server that never responds must not
@@ -446,9 +523,144 @@ func TestGlobalDeadline(t *testing.T) {
 		}
 		if res.Detail == "not checked — run deadline exceeded" {
 			neverRan++
+			wantFailure(t, res, FailNotChecked, "")
 		}
 	}
 	if neverRan == 0 {
 		t.Errorf("expected at least one probe reported as not checked, got none in %+v", results)
+	}
+}
+
+// wantFailure asserts a failing result's machine classification:
+// present, exact code, exact hint.
+func wantFailure(t *testing.T, res Result, code, hint string) {
+	t.Helper()
+	if res.OK {
+		t.Fatalf("result %q ok=true, want a failing result", res.ID)
+	}
+	if res.Failure == nil {
+		t.Fatalf("result %q Failure=nil, want {code:%q hint:%q} (invariant: ok:false ⇒ failure present)", res.ID, code, hint)
+	}
+	if res.Failure.Code != code || res.Failure.Hint != hint {
+		t.Fatalf("result %q failure = {%q %q}, want {%q %q}", res.ID, res.Failure.Code, res.Failure.Hint, code, hint)
+	}
+}
+
+// 11. failure classification: one row per minting site
+// reachable through a live Runner. The transport-error rows are covered by
+// test 3b's extension (hint redaction needs the credential-bearing URL) and
+// the deadline row by TestGlobalDeadline's — both in this same change.
+func TestFailureClassification(t *testing.T) {
+	status503 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer status503.Close()
+	notJSON := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{not json`)
+	}))
+	defer notJSON.Close()
+	wrongType := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"resourceType":"Bundle"}`)
+	}))
+	defer wrongType.Close()
+	status502 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer status502.Close()
+	okCS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"resourceType":"CapabilityStatement","fhirVersion":"4.0.1"}`)
+	}))
+	defer okCS.Close()
+	// A closed port (server started then immediately closed — the test-3
+	// idiom): dialing it fails with connection refused.
+	closed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	closedURL := closed.URL
+	closed.Close()
+
+	cases := []struct {
+		name     string
+		target   Target
+		wantOK   bool
+		code     string
+		hint     string
+		hintOnly string // non-empty: assert prefix instead of exact hint
+	}{
+		{name: "fhir-metadata non-2xx", target: Target{ID: "a", Kind: KindFHIRMetadata, URL: status503.URL},
+			code: FailHTTPStatus, hint: "HTTP 503"},
+		{name: "fhir-metadata decode", target: Target{ID: "b", Kind: KindFHIRMetadata, URL: notJSON.URL},
+			code: FailInvalidCapabilityStatement, hintOnly: "decode: "},
+		{name: "fhir-metadata wrong resourceType", target: Target{ID: "c", Kind: KindFHIRMetadata, URL: wrongType.URL},
+			code: FailInvalidCapabilityStatement, hint: `resourceType "Bundle"`},
+		{name: "fhir-metadata unparseable base", target: Target{ID: "d", Kind: KindFHIRMetadata, URL: "://bad"},
+			code: FailInternal, hint: "missing protocol scheme"},
+		{name: "reachable 502", target: Target{ID: "e", Kind: KindReachable, URL: status502.URL},
+			code: FailHTTPStatus, hint: "HTTP 502"},
+		{name: "reachable unparseable target", target: Target{ID: "m", Kind: KindReachable, URL: "://bad"},
+			code: FailInternal, hint: "missing protocol scheme"},
+		{name: "reachable closed port", target: Target{ID: "n", Kind: KindReachable, URL: closedURL},
+			code: FailUnreachable, hintOnly: "dial tcp"},
+		{name: "token status error", target: Target{ID: "f", Kind: KindToken,
+			TokenFetch: func(context.Context) error { return &StatusError{Code: 401} }},
+			code: FailCredentialRejected, hint: "HTTP 401"},
+		{name: "token plain error", target: Target{ID: "g", Kind: KindToken,
+			TokenFetch: func(context.Context) error { return errors.New("boom") }},
+			code: FailCredentialRejected, hint: ""},
+		{name: "token nil fetch", target: Target{ID: "h", Kind: KindToken},
+			code: FailCredentialRejected, hint: ""},
+		{name: "unknown probe kind", target: Target{ID: "i", Kind: Kind("bogus"), URL: okCS.URL},
+			code: FailInternal, hint: `unknown probe kind "bogus"`},
+		{name: "fhir-metadata ok carries no failure", target: Target{ID: "j", Kind: KindFHIRMetadata, URL: okCS.URL},
+			wantOK: true},
+		{name: "reachable ok carries no failure", target: Target{ID: "k", Kind: KindReachable, URL: okCS.URL},
+			wantOK: true},
+		{name: "token ok carries no failure", target: Target{ID: "l", Kind: KindToken,
+			TokenFetch: func(context.Context) error { return nil }},
+			wantOK: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rn := NewRunner([]Target{tc.target}, http.DefaultClient, newFakeClock(time.Unix(0, 0)).Now)
+			results, err := rn.Run(context.Background())
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			res := results[0]
+			if tc.wantOK {
+				if !res.OK {
+					t.Fatalf("ok=false (%s), want ok", res.Detail)
+				}
+				if res.Failure != nil {
+					t.Fatalf("Failure=%+v on an ok result, want nil (invariant: ok:true ⇒ failure nil)", res.Failure)
+				}
+				return
+			}
+			if tc.hintOnly != "" {
+				if res.Failure == nil || res.Failure.Code != tc.code || !strings.HasPrefix(res.Failure.Hint, tc.hintOnly) {
+					t.Fatalf("failure = %+v, want code %q hint prefix %q", res.Failure, tc.code, tc.hintOnly)
+				}
+				return
+			}
+			wantFailure(t, res, tc.code, tc.hint)
+		})
+	}
+}
+
+// 12. wire shape: an ok result marshals with NO
+// failure key — byte-additive over the v0.32.0 shape — and a failing
+// result's failure object omits an empty hint.
+func TestResultJSONFailureShape(t *testing.T) {
+	okJSON, err := json.Marshal(Result{ID: "x", Target: "https://h.example", OK: true, Detail: "ok"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(okJSON), "failure") {
+		t.Fatalf("ok result JSON carries a failure key: %s", okJSON)
+	}
+	failJSON, err := json.Marshal(Result{ID: "x", OK: false, Failure: &Failure{Code: FailNotChecked}})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(failJSON), `"failure":{"code":"not-checked"}`) {
+		t.Fatalf("empty hint must be omitted, got: %s", failJSON)
 	}
 }

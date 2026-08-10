@@ -83,6 +83,15 @@ expected to change shape as their consumer matures:
   are byte-identical hook-on vs hook-off). `gateway/app` wires it to CloudWatch EMF behind the
   `METRICS_SERVICE` opt-in (see `docs/CONFIGURATION.md`). Requires `shn-sdk` ≥ v0.31.0.
 
+- **`GET`/`POST /internal/checks` results** (evolving surface, since v0.32.0; structured
+  `failure` since v0.33.0). Each result is `{id, target, ok, detail, checkedAt,
+  latencyMs}` plus, on failing results only, `failure {code, hint}` with `code` drawn
+  from a closed set (`unreachable`, `http-status`, `invalid-capability-statement`,
+  `credential-rejected`, `not-checked`, `internal`). Additive-only intent: existing keys
+  and `detail` strings are stable fallbacks; new keys may appear in 0.x minors — decode
+  tolerantly, never with unknown-field rejection. See `docs/CONFIGURATION.md`
+  ("Operational checks") for semantics and redaction guarantees.
+
 ## Internal seams (not for partner use)
 
 Everything under `engine.*` beyond the supported seams listed above — including
