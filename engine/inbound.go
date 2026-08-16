@@ -96,36 +96,54 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Request framing: decrypt ONCE here, then resolve this leg's
+	// ANSWER LINE before any handler runs — a framed request states the line the
+	// originator built at (honored iff native∩laned, else a legible 422), a bare
+	// one is symmetrically recomputed. Centralizing it means the honor/refuse rule
+	// has exactly one implementation for all eight legs instead of eight copies,
+	// and the handlers receive plaintext they no longer each decrypt.
+	payload, err := shnsdk.Open(env, g.cfg.Identity.EncPub, g.cfg.Identity.EncPriv)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "decryption failed"})
+		return
+	}
+	body, answerTok, status, msg := g.unframeRequestFrom(env.Metadata.Sender, env.Metadata.TransactionType, payload)
+	if status != 0 {
+		writeJSON(w, status, map[string]string{"error": msg})
+		return
+	}
+	// The answer line rides the request context so the payer's content seam
+	// (LegResponder — a PUBLIC partner-implementable interface) can build at it
+	// without a breaking signature change; handlers additionally receive it
+	// explicitly for the frame stamp. The DECLARED SET rides alongside it so a
+	// builder that must fall back falls back to what this deployment declares, not
+	// to the library build constant (D1a).
+	r = r.WithContext(withDeclaredContractVersions(withAnswerLine(r.Context(), answerTok), g.declaredContractVersions()))
+
 	switch env.Metadata.TransactionType {
 	case "coverage-eligibility":
-		g.handleEligibilityInbound(w, r, env, tok)
+		g.handleEligibilityInbound(w, r, env, tok, body, answerTok)
 	case "crd-order-select":
-		g.handleCRDNativeInbound(w, r, env, tok)
+		g.handleCRDNativeInbound(w, r, env, tok, body, answerTok)
 	case "crd-order-dispatch":
-		g.handleCRDDispatchInbound(w, r, env, tok)
+		g.handleCRDDispatchInbound(w, r, env, tok, body, answerTok)
 	case "dtr-questionnaire-fetch":
-		g.handleDTRInbound(w, r, env, tok)
+		g.handleDTRInbound(w, r, env, tok, body, answerTok)
 	case "pas-claim":
-		g.handlePASNativeInbound(w, r, env, tok)
+		g.handlePASNativeInbound(w, r, env, tok, body, answerTok)
 	case "pas-claim-update":
-		g.handlePASUpdateNativeInbound(w, r, env, tok)
+		g.handlePASUpdateNativeInbound(w, r, env, tok, body, answerTok)
 	case "federated-query":
-		g.handleFederatedQueryInbound(w, r, env, tok)
+		g.handleFederatedQueryInbound(w, r, env, tok, body, answerTok)
 	case "patient-dtr":
-		g.handlePatientDTRInbound(w, r, env, tok)
+		g.handlePatientDTRInbound(w, r, env, tok, body, answerTok)
 	}
 }
 
 // handleEligibilityInbound is the UC-01 coverage-eligibility inbound logic,
 // unchanged from the original handleInbound body.
-func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token) {
+func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token, cerJSON []byte, answerTok string) {
 	ctx := r.Context()
-
-	cerJSON, err := shnsdk.Open(env, g.cfg.Identity.EncPub, g.cfg.Identity.EncPriv)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "decryption failed"})
-		return
-	}
 
 	// Data minimization at the holder boundary: bind the token subject to the
 	// payload's patient via a CHEAP json.Unmarshal-level parse BEFORE any external
@@ -154,7 +172,21 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 
 	// Only AFTER the subject binds do we ingress-validate the clinical payload via
 	// the external $validate — fail-closed as before.
-	ingress, err := g.cfg.Validator.Validate(ctx, cerJSON, "")
+	//
+	// F7: the lane is selected per LINE like every other validate, but this
+	// site deliberately does NOT route through g.validateFHIR — its failure contract
+	// (422 on !Valid, with the issues echoed) differs from validateFHIR's, and
+	// unifying them would change the wire. The line comes from the same
+	// shnsdk.LineOf(answerTok) call every other site uses — it is not special-cased
+	// here — and it evaluates to "" (the canonical lane) because coverage-eligibility
+	// is version-neutral (paCatalog Contract ""), so answerTok itself is always "".
+	// A nil lane keeps THIS site's 500 rather than borrowing another's.
+	ingressValidator := g.validatorForLine(shnsdk.LineOf(answerTok))
+	if ingressValidator == nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "no FHIR validator lane configured for this leg (FR-36/FR-G29)"})
+		return
+	}
+	ingress, err := ingressValidator.Validate(ctx, cerJSON, "")
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "validator unavailable"})
 		return
@@ -179,7 +211,7 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 	// the eligibility leg never sets it today, but the shared pipeline shape checks it.
 	if result.Status != 0 {
 		g.respondLegError(w, r, "payer-coverage", "eligibility-response", "coverage-eligibility",
-			env.Metadata.CorrelationID, result, tok.Subject, env.Metadata.Sender, "")
+			env.Metadata.CorrelationID, result, tok.Subject, env.Metadata.Sender, "", answerTok)
 		return
 	}
 	if status, msg := g.fenceResponseSubject("coverage-eligibility", boundPatientRef, result); status != 0 {
@@ -190,7 +222,15 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 	// error → 500 "validator unavailable"; !Valid → 500 "egress validation failed".
 	// (NOT g.validateFHIR, which returns 422 on !Valid — that would change the
 	// failure-path contract.)
-	egress, err := g.cfg.Validator.Validate(ctx, result.ResponseFHIR, "")
+	// F7: per-line lane selection, same "" (version-neutral) line as the ingress site
+	// above — and, as the note says, deliberately NOT g.validateFHIR: this site's
+	// !Valid answer is a 500, not a 422, and that distinction is the contract.
+	egressValidator := g.validatorForLine(shnsdk.LineOf(answerTok))
+	if egressValidator == nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "no FHIR validator lane configured for this leg (FR-36/FR-G29)"})
+		return
+	}
+	egress, err := egressValidator.Validate(ctx, result.ResponseFHIR, "")
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "validator unavailable"})
 		return
@@ -200,7 +240,7 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	g.respondLeg(w, r, "payer-coverage", "eligibility-response", "coverage-eligibility", env.Metadata.CorrelationID, result.ResponseFHIR, tok.Subject, env.Metadata.Sender, "")
+	g.respondLeg(w, r, "payer-coverage", "eligibility-response", "coverage-eligibility", env.Metadata.CorrelationID, result.ResponseFHIR, tok.Subject, env.Metadata.Sender, "", answerTok, result.ResponseRelayed)
 }
 
 // handleFederatedQueryInbound is the facility source-side handler (UC-05, consent
@@ -216,14 +256,8 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 // is the connectathon topology; an async/paged query is an additive fast-follow
 // (AI-9 holds: the consent check + narrowness enforcement here are unchanged when
 // adding pagination, so no one-way door is taken).
-func (g *Gateway) handleFederatedQueryInbound(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token) {
+func (g *Gateway) handleFederatedQueryInbound(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token, queryJSON []byte, answerTok string) {
 	ctx := r.Context()
-
-	queryJSON, err := shnsdk.Open(env, g.cfg.Identity.EncPub, g.cfg.Identity.EncPriv)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "decryption failed"})
-		return
-	}
 
 	// (1) The leg MUST carry a consent reference.
 	if env.Metadata.ConsentRef == "" {
@@ -284,7 +318,7 @@ func (g *Gateway) handleFederatedQueryInbound(w http.ResponseWriter, r *http.Req
 		if !query.InRange(recordClinicalDate(res)) {
 			continue // FR-24: only disclose named records within the stated date range
 		}
-		if status, msg := g.validateFHIR(ctx, res, "egress"); status != 0 {
+		if status, msg := g.validateFHIR(ctx, res, "egress", ""); status != 0 {
 			writeJSON(w, status, map[string]string{"error": msg})
 			return
 		}
@@ -319,7 +353,7 @@ func (g *Gateway) handleFederatedQueryInbound(w http.ResponseWriter, r *http.Req
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build provenance failed"})
 		return
 	}
-	if status, msg := g.validateFHIR(ctx, provJSON, "egress"); status != 0 {
+	if status, msg := g.validateFHIR(ctx, provJSON, "egress", ""); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
@@ -335,12 +369,12 @@ func (g *Gateway) handleFederatedQueryInbound(w http.ResponseWriter, r *http.Req
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build cdex result failed"})
 		return
 	}
-	if status, msg := g.validateFHIR(ctx, bundleJSON, "egress"); status != 0 {
+	if status, msg := g.validateFHIR(ctx, bundleJSON, "egress", ""); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
 
-	g.respondLeg(w, r, "facility-disclosure", "federated-query-response", "federated-query", env.Metadata.CorrelationID, bundleJSON, tok.Subject, env.Metadata.Sender, consentRef)
+	g.respondLeg(w, r, "facility-disclosure", "federated-query-response", "federated-query", env.Metadata.CorrelationID, bundleJSON, tok.Subject, env.Metadata.Sender, consentRef, answerTok, false)
 }
 
 // recordClinicalDate pulls the date a facility record is filtered on for FR-24:
@@ -407,12 +441,7 @@ type patientDTRResponse struct {
 // SCOPED (questionnaireresponse-signature, who=Patient), and responds on the
 // patient-authorship frame. The PHG persists NOTHING (OWD-8/AI-3): the patient's
 // answer arrives in the request and the attested item leaves in the response.
-func (g *Gateway) handlePatientDTRInbound(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token) {
-	reqJSON, err := shnsdk.Open(env, g.cfg.Identity.EncPub, g.cfg.Identity.EncPriv)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "decryption failed"})
-		return
-	}
+func (g *Gateway) handlePatientDTRInbound(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token, reqJSON []byte, answerTok string) {
 	var req patientDTRRequest
 	if err := json.Unmarshal(reqJSON, &req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "parse patient-dtr request failed"})
@@ -449,7 +478,7 @@ func (g *Gateway) handlePatientDTRInbound(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "marshal response failed"})
 		return
 	}
-	g.respondLeg(w, r, "patient-authorship", "patient-dtr-response", "patient-dtr", env.Metadata.CorrelationID, respJSON, tok.Subject, env.Metadata.Sender, "")
+	g.respondLeg(w, r, "patient-authorship", "patient-dtr-response", "patient-dtr", env.Metadata.CorrelationID, respJSON, tok.Subject, env.Metadata.Sender, "", answerTok, false)
 }
 
 // verifyHubAssertion checks the X-Hub-Assertion header: a shnsdk.Assertion

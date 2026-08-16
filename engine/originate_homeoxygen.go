@@ -119,17 +119,30 @@ func (g *Gateway) originateDispatch(w http.ResponseWriter, r *http.Request, memb
 		return
 	}
 
-	coverageJSON, err := shnsdk.BuildCoverageWithPayer(patientRef, coverageRef, payer)
+	// urn:shn:coverage carries the BARE member id — that identifier is a member number, not a
+	// reference, and the same bare value becomes the conformant Claim's insurance[0].coverage
+	// logical reference; coverageRef stays the reference-shaped value the QRContext roles below need.
+	coverageJSON, err := shnsdk.BuildCoverageWithPayer(patientRef, member, payer)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build coverage failed"})
 		return
 	}
-	if status, msg := g.validateFHIR(ctx, coverageJSON, "egress"); status != 0 {
+	if status, msg := g.validateFHIR(ctx, coverageJSON, "egress", ""); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
 
 	// DIVERGENCE 2 — build + originate the ORDER-DISPATCH leg (not order-select).
+	// Select-before-build — same rationale as the two
+	// crd-order-select sites (originate.go): the pa.crd builder is line-inert, so
+	// BuildLine changes no byte, but the routing axis is real and the arm-1-only
+	// backfill refused pa.crd@2.2-only peers this build serves byte-identically.
+	// crdCorr is hoisted so selection, adaptation and the leg share one correlation.
+	crdCorr := g.cfg.CorrelationGen()
+	crdRoute, ok := g.selectLegLineOrFail(w, recipient, "crd-order-dispatch", crdCorr)
+	if !ok {
+		return
+	}
 	crdReq, err := shnsdk.BuildConformantOrderDispatchRequest(shnsdk.OrderDispatchInputs{
 		PatientID:     member,
 		PatientRef:    patientRef,
@@ -144,7 +157,16 @@ func (g *Gateway) originateDispatch(w http.ResponseWriter, r *http.Request, memb
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build order-dispatch failed"})
 		return
 	}
-	crdRespJSON, err := g.OriginateLeg(ctx, r, recipient, "crd-order-dispatch", pci, g.cfg.CorrelationGen(), "", Content{WorkstreamType: workstreamPA, Bytes: crdReq})
+	// Validation posture UNCHANGED (routing-only promotion): crdReq is a CDS
+	// Hooks envelope, not a FHIR resource; coverageJSON is $validated above. No
+	// enforcement point is added or removed after egressAdapt.
+	adaptedCRDReq, _, err := g.egressAdapt(crdRoute, crdReq, ExchangeIdentity{CorrelationID: crdCorr, LegType: "crd-order-dispatch", Counterpart: recipient})
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	crdRespJSON, err := g.OriginateLeg(ctx, r, recipient, "crd-order-dispatch", pci, crdCorr, "",
+		Content{WorkstreamType: workstreamPA, ProfileID: crdRoute.Token, Route: routeInfoFor(crdRoute), Bytes: adaptedCRDReq})
 	if err != nil {
 		if g.relayOriginationError(w, err) {
 			return
@@ -168,10 +190,30 @@ func (g *Gateway) originateDispatch(w http.ResponseWriter, r *http.Request, memb
 	}
 	canonical := shnsdk.StripCanonicalVersion(cov.Questionnaires[0])
 
-	// --- DTR — operated $populate (the crux). Carry the Coverage when targeting br-payer
-	// (a real Da Vinci payer 400s $questionnaire-package without it). ---
+	// --- DTR — operated $populate (the crux). ---
+	// SELECT-BEFORE-BUILD on the fetch envelope too, not just the package
+	// answer: the fetch is LINE-DEPENDENT (2.2's DTRDef makes `coverage` 1..1),
+	// so the routed line must exist BEFORE the literal below is marshalled —
+	// exactly the runCRDThenDTROrder sibling's ordering (originate.go). The
+	// selected line also picks the validator lane the package answer is checked
+	// against (F7).
+	dtrCorr := g.cfg.CorrelationGen()
+	route, ok := g.selectLegLineOrFail(w, recipient, "dtr-questionnaire-fetch", dtrCorr)
+	if !ok {
+		return
+	}
+	dtrLine := shnsdk.LineOf(route.Token)
+	// Carry the Coverage when targeting br-payer (a real Da Vinci payer 400s
+	// $questionnaire-package without it) AND whenever the SELECTED line requires
+	// it (DTRDef.QuestionnairePackageCoverageRequired — 2.2's 1..1), regardless
+	// of profile: same gate as the sibling site, pinned by
+	// TestDispatch_DTRFetchCoverageGateFollowsSelectedLine.
 	fetch := shnsdk.QuestionnaireFetchRequest{Canonical: canonical}
-	if targetsBrPayer(g.cfg.OriginationProfile) {
+	coverageRequired := false
+	if def, ok := shnsdk.DTRLineDef(dtrLine); ok {
+		coverageRequired = def.QuestionnairePackageCoverageRequired
+	}
+	if targetsBrPayer(g.cfg.OriginationProfile) || coverageRequired {
 		fetch.Coverage = coverageJSON
 	}
 	dtrReq, err := json.Marshal(fetch)
@@ -179,7 +221,22 @@ func (g *Gateway) originateDispatch(w http.ResponseWriter, r *http.Request, memb
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build dtr request failed"})
 		return
 	}
-	packageJSON, err := g.OriginateLeg(ctx, r, recipient, "dtr-questionnaire-fetch", pci, g.cfg.CorrelationGen(), "", Content{WorkstreamType: workstreamPA, Bytes: dtrReq})
+	// egressAdapt runs here per the select-before-build pipeline, but there is
+	// deliberately NO validateFHIR enforcement point after it on THIS leg: dtrReq
+	// is QuestionnaireFetchRequest JSON, a transport ENVELOPE, not itself FHIR
+	// content the pa.dtr compat-manifest rows model — see originate.go's DTR-fetch
+	// site (runCRDThenDTROrder) for the full rationale, which applies verbatim
+	// here. OBLIGATION DISCHARGED (the multi-version spec's recorded
+	// DTR-fetch known-gap entry) — see originate.go's site for the
+	// discharge mechanism (envelopeEgressLegs pass-through), which applies
+	// verbatim here.
+	adaptedDTRReq, _, err := g.egressAdapt(route, dtrReq, ExchangeIdentity{CorrelationID: dtrCorr, LegType: "dtr-questionnaire-fetch", Counterpart: recipient})
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	packageJSON, err := g.OriginateLeg(ctx, r, recipient, "dtr-questionnaire-fetch", pci, dtrCorr, "",
+		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Bytes: adaptedDTRReq})
 	if err != nil {
 		if g.relayOriginationError(w, err) {
 			return
@@ -187,7 +244,7 @@ func (g *Gateway) originateDispatch(w http.ResponseWriter, r *http.Request, memb
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
-	if status, msg := g.validateFHIR(ctx, packageJSON, "ingress"); status != 0 {
+	if status, msg := g.validateFHIR(ctx, packageJSON, "ingress", dtrLine); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
@@ -227,7 +284,7 @@ func (g *Gateway) originateDispatch(w http.ResponseWriter, r *http.Request, memb
 	// live gate can prove the $populate ran br-payer's real prepop CQL against the seeded
 	// observations (NOT an answer book). Empty when nothing populated (e.g. aged-out obs).
 	qrAnswers := questionnaireResponseNumericAnswers(qrJSON)
-	if status, msg := g.validateFHIR(ctx, qrJSON, "egress"); status != 0 {
+	if status, msg := g.validateFHIR(ctx, qrJSON, "egress", ""); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
@@ -237,7 +294,7 @@ func (g *Gateway) originateDispatch(w http.ResponseWriter, r *http.Request, memb
 	// the payer gate to poll the timer-resolved A1. The genuine outcome is conditional-coverage
 	// A4-pended → A1; the payer responder's pend re-query resolves A4→A1, so the FINAL observed
 	// Outcome is "approved" (A1). ---
-	parsed, _, status, msg, err := g.submitClaimAndResolve(ctx, r, pci, orderJSON, qrJSON, patientRef, coverageRef, payer, recipient)
+	parsed, _, status, msg, err := g.submitClaimAndResolve(ctx, r, pci, orderJSON, qrJSON, patientRef, coverageRef, member, payer, recipient)
 	if status != 0 {
 		if g.relayOriginationError(w, err) {
 			return

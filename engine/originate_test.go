@@ -333,6 +333,71 @@ func callUC03(t *testing.T, gw *Gateway) *httptest.ResponseRecorder {
 	return rec
 }
 
+// callUC03Branch is callUC03 with an explicit branch in the JSON body
+// (handleUC03's branch switch).
+func callUC03Branch(t *testing.T, gw *Gateway, branch string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/scenario/uc03", strings.NewReader(`{"branch":"`+branch+`"}`))
+	rec := httptest.NewRecorder()
+	gw.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+// TestHandleUC03_BridgeRefuseSelectsMember pins the member half of the
+// sanctioned handleUC03 branch switch, observed the way this file's
+// existing tests observe row behavior (legAttempted/stub.legTypes) — a fresh
+// crdTestSystem fixture per branch, matching the file's one-test-one-fixture
+// idiom (stub.legTypes accumulates for the fixture's lifetime, so branches
+// must not share one). crdTestSystem's PayerRouter (payerRouterFor) is
+// registered ONLY for shnsdk.CMSPayerIdentity — the identity MBR-COVERED's
+// Coverage carries. MBR-BRIDGE-REFUSE's Coverage carries the distinct demo
+// identity engine.BridgeRefusePayerID (urn:shn:demo-payer|SHN-BRIDGE-REFUSE,
+// holderdata.go), which this fixture never registers. recipientForWith
+// (gateway.go) fails closed 422 on an unregistered payer identifier BEFORE
+// any leg is attempted (FR-G40/AI-G11/OWD-G10) — so reaching THAT specific
+// 422, naming THAT specific identifier, with NO leg attempted, proves the
+// branch switch resolved MBR-BRIDGE-REFUSE and not MBR-COVERED (which DOES
+// clear this same gate — see the "" case below and every unbranched
+// callUC03 test in this file). This is deliberately NOT a full run: the
+// demo's PAS-leg refusal only fires against the real
+// narrowed/pas-skewed peer, which this hermetic unit fixture does not stand
+// up — driving further would just hit the SAME unregistered-payer wall for a
+// different reason.
+func TestHandleUC03_BridgeRefuseSelectsMember(t *testing.T) {
+	t.Run("bridge-refuse: fails closed at routing, no leg attempted", func(t *testing.T) {
+		gw, stub, _ := crdTestSystem(t, shnsdk.CardCoverage{Covered: shnsdk.CoveredCovered, PANeeded: shnsdk.PANeededAuthNeeded})
+		rec := callUC03Branch(t, gw, "bridge-refuse")
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("want 422 (unregistered demo payer — proves member selection ran), got %d body=%s", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "SHN-BRIDGE-REFUSE") {
+			t.Errorf("body = %s, want it to name the bridge-refuse payer identifier", rec.Body.String())
+		}
+		if len(stub.legTypes) != 0 {
+			t.Errorf("legTypes = %v, want none — the routing gate must fail BEFORE any leg", stub.legTypes)
+		}
+	})
+
+	t.Run("unknown branch: 400, uc01's idiom", func(t *testing.T) {
+		gw, stub, _ := crdTestSystem(t, shnsdk.CardCoverage{Covered: shnsdk.CoveredCovered, PANeeded: shnsdk.PANeededAuthNeeded})
+		rec := callUC03Branch(t, gw, "bogus")
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("want 400, got %d body=%s", rec.Code, rec.Body.String())
+		}
+		if len(stub.legTypes) != 0 {
+			t.Errorf("legTypes = %v, want none — an unknown branch must reject before any member/SoR work", stub.legTypes)
+		}
+	})
+
+	t.Run(`"" is the literal-default branch: clears the routing gate exactly like callUC03's nil body`, func(t *testing.T) {
+		gw, stub, _ := crdTestSystem(t, shnsdk.CardCoverage{Covered: shnsdk.CoveredCovered, PANeeded: shnsdk.PANeededAuthNeeded})
+		_ = callUC03Branch(t, gw, "")
+		if !legAttempted(stub.legTypes, "crd-order-select") {
+			t.Errorf("legTypes = %v, want crd-order-select attempted — MBR-COVERED must still clear routing", stub.legTypes)
+		}
+	})
+}
+
 // ---- behavior-branch tests (FR-G25, Finding 1 + Finding 2) ----
 
 // TestRunCRDThenDTR_NotCovered verifies the explicit terminal stop for
@@ -591,7 +656,7 @@ func TestClassifyResolution(t *testing.T) {
 // resolvable named payer (contained #cms-payer), not the dangling Organization/payer —
 // a real Da Vinci payer (br-payer) 400s "lacks valid payer identifier" otherwise.
 func TestRunCRDThenDTROrder_NamesPayer(t *testing.T) {
-	covJSON, err := shnsdk.BuildCoverageWithPayer("Patient/MBR-COVERED", "Coverage/MBR-COVERED", shnsdk.CMSPayerIdentity)
+	covJSON, err := shnsdk.BuildCoverageWithPayer("Patient/MBR-COVERED", "MBR-COVERED", shnsdk.CMSPayerIdentity)
 	if err != nil {
 		t.Fatalf("BuildCoverageWithPayer: %v", err)
 	}
@@ -599,7 +664,7 @@ func TestRunCRDThenDTROrder_NamesPayer(t *testing.T) {
 		t.Fatalf("expected contained #cms-payer payer reference, got: %s", covJSON)
 	}
 	// guard: the bare builder (what we are replacing) must NOT name a resolvable payer
-	bare, _ := shnsdk.BuildCoverage("Patient/MBR-COVERED", "Coverage/MBR-COVERED")
+	bare, _ := shnsdk.BuildCoverage("Patient/MBR-COVERED", "MBR-COVERED")
 	if strings.Contains(string(bare), "#cms-payer") {
 		t.Fatal("bare BuildCoverage unexpectedly names cms-payer; the distinction this task relies on is gone")
 	}
@@ -633,7 +698,7 @@ func TestTargetsBrPayer(t *testing.T) {
 // R-8: provider-data relays br-payer's foreign DTR/PAS bytes → ingress $validate MUST be skipped.
 func TestValidateFHIR_IngressSkip_ProviderData(t *testing.T) {
 	g := &Gateway{cfg: Config{OriginationProfile: "provider-data", Validator: failIfCalledValidator{t}}}
-	if status, _ := g.validateFHIR(context.Background(), []byte(`{}`), "ingress"); status != 0 {
+	if status, _ := g.validateFHIR(context.Background(), []byte(`{}`), "ingress", ""); status != 0 {
 		t.Fatalf("provider-data ingress must skip $validate (R-8); got status=%d", status)
 	}
 }

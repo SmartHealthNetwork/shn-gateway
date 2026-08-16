@@ -1,4 +1,4 @@
-// legmetric_test.go — hermetic tests for the LegMetric hook.
+// legmetric_test.go — hermetic tests for the LegMetric hook (spec §7 #16).
 // Like the Observer seam it is ADDITIVE instrumentation: nil = zero emission
 // (the published-gateway default); neutrality is asserted on/off.
 package engine
@@ -38,7 +38,7 @@ func TestLegMetric_OriginationOutcomes(t *testing.T) {
 
 // TestLegMetric_DeniedOutcome: an authz 403 (errAuthorizationDenied) counts as
 // "denied", NOT "failed" — a policy denial (the canary's uc05-noconsent PASS
-// condition) must not ride the per-service leg-error alarm.
+// condition) must not ride the #16 leg-error alarm.
 func TestLegMetric_DeniedOutcome(t *testing.T) {
 	gw, stub, _ := crdTestSystem(t, uc03Coverage())
 	stub.denyAuthorize = true

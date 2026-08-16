@@ -132,7 +132,7 @@ func (s *Scaffold) OpenCoverage(memberID string) ([]byte, bool) {
 	if memberID != scaffoldMember {
 		return nil, false
 	}
-	cov, err := shnsdk.BuildCoverageWithPayer("Patient/"+memberID, "Coverage/"+memberID, shnsdk.CMSPayerIdentity)
+	cov, err := shnsdk.BuildCoverageWithPayer("Patient/"+memberID, memberID, shnsdk.CMSPayerIdentity)
 	if err != nil {
 		return nil, false
 	}

@@ -323,3 +323,29 @@ func TestIngressAuthOK_NilServerFailsClosedNoPanic(t *testing.T) {
 		t.Fatal("nil ingressAuth + no bypass: ingressAuthOK = true, want false")
 	}
 }
+
+// TestProviderIngressMetadata: the ingress edge publishes its per-role
+// CapabilityStatement (FR-37) — present with ingress enabled, absent (404)
+// without, like every other Da Vinci-facing route.
+func TestProviderIngressMetadata(t *testing.T) {
+	_, pub := newTestClientKey(t)
+	g := gatewayWithAuth(t, "br-provider", pub)
+	rr := httptest.NewRecorder()
+	g.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/metadata", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /metadata: want 200, got %d", rr.Code)
+	}
+	if ct := rr.Header().Get("Content-Type"); ct != "application/fhir+json" {
+		t.Fatalf("Content-Type = %q", ct)
+	}
+	if !strings.Contains(rr.Body.String(), `"SHN Provider Da Vinci Ingress"`) {
+		t.Fatal("body is not the provider ingress CapabilityStatement")
+	}
+
+	off := &Gateway{cfg: Config{Role: "provider"}} // IngressEnabled defaults false
+	rr2 := httptest.NewRecorder()
+	off.Handler().ServeHTTP(rr2, httptest.NewRequest(http.MethodGet, "/metadata", nil))
+	if rr2.Code != http.StatusNotFound {
+		t.Fatalf("ingress disabled: want 404, got %d", rr2.Code)
+	}
+}

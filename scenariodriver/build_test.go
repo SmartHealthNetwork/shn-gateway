@@ -95,7 +95,17 @@ func TestBuildQuestionnairePackageRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{`"Parameters"`, `"valueCanonical"`, `http://example.org/Questionnaire/q1|1.0`,
-		`"Coverage"`, `Patient/MBR-COVERED`, `dtr-qpackage-input-parameters`} {
+		`"Coverage"`, `Patient/MBR-COVERED`, `dtr-qpackage-input-parameters`,
+		// The urn:shn:coverage business identifier, carrying the BARE member
+		// id — the same convention shnsdk.BuildCoverageWithPayer stamps (a member
+		// number, not a reference), including its "type" v2-0203 MB coding
+		// (close-out: completes the copy).
+		// The prefetch Coverage is what makes a payer answering at DTR 2.2 able to return
+		// a QuestionnaireResponse shell at all: the engine derives that shell's
+		// coverageRef from Coverage.id ("coverage-1" here), failing closed without it —
+		// i.e. dropping the Coverage makes the whole conformant lane silently 2.0-only.
+		`"id":"coverage-1"`, `"urn:shn:coverage"`, `"value":"MBR-COVERED"`,
+		`"http://terminology.hl7.org/CodeSystem/v2-0203"`, `"MB"`} {
 		if !bytes.Contains(out, []byte(want)) {
 			t.Fatalf("package request missing %s: %s", want, out)
 		}

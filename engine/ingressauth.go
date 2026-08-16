@@ -249,8 +249,8 @@ func audUnder(aud, base string) bool {
 	return aud != "" && (aud == base || strings.HasPrefix(aud, base+"/"))
 }
 
-// verifyDirectBearer implements the UDAP B2B direct-bearer path (design
-// docs/superpowers/specs/2026-06-22-udap-b2b-ingress-auth-design.md): a CONFIG-registered
+// verifyDirectBearer implements the UDAP B2B direct-bearer path (per the UDAP
+// B2B ingress-auth design): a CONFIG-registered
 // client's self-signed private_key_jwt presented DIRECTLY as the Authorization bearer (the
 // form br-provider's BFF sends), verified per-call against the registered key. Distinct
 // from verifyBearer (the gateway's OWN ephemeral ES384 bearer); the two are token-shape

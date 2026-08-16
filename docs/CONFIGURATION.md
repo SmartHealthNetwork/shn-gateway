@@ -16,6 +16,9 @@ through wiring your own systems, see [INTEGRATION.md](INTEGRATION.md).
 - [Advanced overrides](#advanced-overrides-rarely-needed)
 - [Native-forward payer mode (`PAYER_DAVINCI_*`)](#native-forward-payer-mode-payer_davinci_)
 - [Provider DTR population (`PROVIDER_DTR_*`)](#provider-dtr-population-provider_dtr_)
+- [Sealed message frames (v1)](#sealed-message-frames-v1)
+- [Exchange contract lines (`SHN_CONTRACT_VERSIONS`)](#exchange-contract-lines-shn_contract_versions)
+- [Demo-only egress narrowing (`SHN_DEMO_EGRESS_NATIVE_LINES`)](#demo-only-egress-narrowing-shn_demo_egress_native_lines)
 
 ---
 
@@ -40,6 +43,10 @@ discovery descriptor does not advertise a validator, so you must supply one:
 
 If neither is set (and discovery advertises none), the gateway exits with
 `refusing to run without per-message validation (FR-36)`.
+
+`FHIR_VALIDATE_URL` is the **`2.0` contract line's** lane. If you declare a `2.1` or `2.2`
+line, each needs its own `$validate` endpoint — see
+[Exchange contract lines](#exchange-contract-lines-shn_contract_versions).
 
 **Recommended: co-locate the validator in your own boundary.** Run the IG-loaded
 `$validate` as a sidecar alongside the gateway and point `FHIR_VALIDATE_URL` at it
@@ -289,6 +296,8 @@ shared secrets).
 | `PAYER_DAVINCI_DISPATCH_SERVICE_ID` | The partner's CDS service id for the `crd-order-dispatch` leg. **Empty ⇒ the dispatch leg fails closed (502)** — set it if your flow uses order-dispatch. |
 | `PAYER_DAVINCI_DISPATCH_HOOK` | CDS Hooks hook value to stamp on the order-dispatch request before forwarding. Empty ⇒ forward the originator's hook verbatim. |
 | `PAYER_DAVINCI_CRD_COVERAGE_BUNDLE` | `true` to wrap the CRD request's bare `prefetch.coverage` in a searchset `Bundle` on egress — for a partner whose `order-sign` `coverage` prefetch is a search template that requires a Bundle (a bare `Coverage` returns 412). Default off ⇒ forwarded verbatim. |
+| `PAYER_DAVINCI_CONTRACT_VERSIONS` | Declared Da Vinci contract versions for the partner payer, comma-separated `<contract>@<line>` tokens (e.g. `pa.pas@2.0, pa.crd@2.0`). Two things read this: the connectivity checks verify the partner's published capability against it (`version-drift` on disagreement, FR-G46), and native-forward routing refuses (before forwarding) any leg whose contract shares no line with it (FR-G48). Requires `PAYER_DAVINCI_BASE_URL`. Unset ⇒ native-forward legs are unfiltered (today's default) and the checks skip the drift comparison. |
+| `PAYER_DAVINCI_STRICT_EXTENSIONS` | `true` to reserve the per-peer gated overlay (FR-G52) for this partner — a peer flagged this way would refuse a cross-version transform chain carrying or dropping its extensions instead of forwarding stripped or lossy content. **Currently DORMANT: setting it has no routing effect on this deployment.** The strict *consult* itself is already live where transforms are actually selected (route-layer chain selection, exercised by test-only seams), but the one peer this flag targets — the foreign Da Vinci partner reached through native-forward mode — is filtered through arm-1-only forwarding this slice (never through the chain-selection path), so the flag has nothing to gate yet. It goes live together with transform-at-the-native-forward-edge (not yet shipped; re-labeling another gateway's build product as a translated payload needs its own stamp/Provenance semantics worked out first). Default `false`. |
 
 **Exactly-one-mode rule:** if `PAYER_DAVINCI_TOKEN_URL` is set, then
 `PAYER_DAVINCI_CLIENT_ID` must also be set, plus exactly one credential mode —
@@ -343,3 +352,218 @@ interim, JSON-wrapper-based version of this same idea shipped in v0.27.0; that w
 its flag, and the response sniff it relied on have all been removed and replaced by the
 negotiated message frame described above. Deployments that still set
 `RESPONDER_RELAY_ERRORS` can drop the variable — it is inert.
+
+**Request frames are a separate, independently negotiated capability.** As of v0.38.0 the
+same v1 codec also frames the **request** leg of a version-mapped exchange, carrying the
+contract line the originator built the request at. It negotiates off its own registry
+capability (`requestFrames`), not the response direction's — so the two roll out
+independently — and, like message frames, there is **nothing to configure**: a
+codec-capable build self-declares it at registration/rotation. A peer that has not
+declared it keeps receiving byte-identical bare requests. A gateway that *has* declared it
+accepts **both** framed and bare inbound requests; declaring the capability commits only
+to being able to decode a frame, never to requiring one. `coverage-eligibility` is
+version-neutral and is never framed.
+
+## Exchange contract lines (`SHN_CONTRACT_VERSIONS`)
+
+The gateway BUILDS every prior-authorization contract at three Da Vinci generations —
+CRD/DTR/PAS at `2.0.x`, `2.1.x`, and `2.2.x` (plus PDex `2.1.x`). That is its **native**
+capability. What it **declares** to the network is a separate, operator-chosen subset, and
+only the declared set routes.
+
+| Env var | Description |
+|---|---|
+| `SHN_CONTRACT_VERSIONS` | This gateway's own **declared** exchange-contract versions: comma-separated `<contract>@<line>` tokens, e.g. `pa.crd@2.2, pa.dtr@2.2, pa.pas@2.2`. Drives leg selection, the published `CapabilityStatement`s and `.well-known/davinci-configuration`, and the declaration peers route against. Must be a **subset of the native set** (`pa.crd@{2.0,2.1,2.2}`, `pa.dtr@{2.0,2.1,2.2}`, `pa.pas@{2.0,2.1,2.2}`, `pa.pdex@2.1`) — a token outside it is a boot error, not a routing outcome. Unset ⇒ the build default, the canonical `2.0` line (`pa.crd@2.0`, `pa.dtr@2.0`, `pa.pas@2.0`, `pa.pdex@2.1`). |
+| `FHIR_VALIDATE_URL_2_1` | The `$validate` endpoint hosting the **2.1** line's IG packages. **Required** whenever `SHN_CONTRACT_VERSIONS` declares any `@2.1` line. |
+| `FHIR_VALIDATE_URL_2_2` | The `$validate` endpoint hosting the **2.2** line's IG packages. **Required** whenever `SHN_CONTRACT_VERSIONS` declares any `@2.2` line. |
+
+**One validator per line — this is not optional.** A FHIR server loads exactly **one**
+version of a given IG package, so a single HAPI cannot host CRD 2.0.1 and CRD 2.2.1 at the
+same time; a 2.2 payload validated against a 2.0-loaded server is not validated, it is
+mis-validated. Each declared non-canonical line therefore needs its own `$validate` lane.
+`FHIR_VALIDATE_URL` (the base variable, above) remains the `2.0` lane. A gateway that
+declares a line with no lane configured for it **refuses to start**:
+
+```
+gateway: SHN_CONTRACT_VERSIONS declares pa.pas@2.2 but no FHIR validator lane is
+configured for line 2.2: set FHIR_VALIDATE_URL_2_2 to a $validate endpoint hosting
+that line's IG packages (one HAPI hosts exactly one version of an IG) — refusing to
+declare a line this gateway cannot validate (FR-36/FR-G29)
+```
+
+That is deliberate: advertising a line you cannot certify would put unvalidated payloads
+on the wire (FR-36).
+
+### Opting a line in
+
+1. **Stand up the line's validator** — an IG-loaded `$validate` for that line's package
+   set. The shipped sidecar image builds per line:
+   `docker build --build-arg SHN_IG_LINE=2.2 deploy/validator/`. Point
+   `FHIR_VALIDATE_URL_2_2` at it.
+2. **Widen `SHN_CONTRACT_VERSIONS`** to include the new tokens *alongside* the ones you
+   already declare (see the grow-only rule below), and restart the gateway. It will refuse
+   to boot if step 1 is incomplete — that check is your safety net.
+3. **Re-register or rotate** (`shn rotate`) so the new declaration reaches the registrar.
+   Declaration tracks the current build/config, and it is published at
+   registration/rotation — not continuously.
+4. **Peers converge on their next registry poll.** Until they do, they are still selecting
+   against your previous declaration.
+
+**The mismatch window is benign, by design.** Between your rotation and a peer's next poll,
+that peer routes legs at your *old* line. Those legs still complete: a gateway **honors**
+an inbound request's declared line whenever it can both natively build and validate at
+it — a wider predicate than its own declared set — so in-flight and stale-routed legs are
+answered correctly rather than refused. That predicate is narrower than it sounds on a real
+deployment, though: your validator lanes are themselves built from your declared set, so
+`laned` ⊆ declared and the honor window collapses to ≈ your declared set — it buys no
+cross-line width against a stale-routed peer, only cross-contract width within a line you
+already declare, which matters most mid-roll across a multi-instance fleet.
+
+**Declared-set changes must grow, never swap or shrink.** Adding a line is safe in either
+rollout order. **Removing** one is a breaking operation: a pended prior-authorization pins
+its contract line at origination and must resume on that exact line, so dropping a line can
+strand pends that can no longer be resumed. If you must remove a line, drain outstanding
+pends first — treat it as a migration, not a config edit. The same rule holds for
+*swapping* (`2.0` → `2.2` in one step): that is a shrink and a grow at once, and the shrink
+half strands pends.
+
+### Configuring a validator lane without declaring the line (opt-in, cross-version translation)
+
+You can point `FHIR_VALIDATE_URL_2_1`/`FHIR_VALIDATE_URL_2_2` at a line's validator **without**
+adding that line's tokens to `SHN_CONTRACT_VERSIONS`. A configured-but-undeclared lane, for any
+line this build natively speaks, still enters the lane map — this is deliberate opt-in headroom
+for cross-version translation (FR-G52), and it has **two consequences, both grow-only, both
+worth understanding before you flip it**:
+
+1. **Egress:** a peer that declares that line becomes reachable by **native reach** (routing
+   arm 2 — this build constructs a genuine native payload at that line, zero transform loss)
+   even though this deployment never advertises the line itself. Without the lane configured,
+   the same peer would only be reachable, if at all, through a transform chain (arm 3) or a
+   legible refusal.
+2. **Inbound:** the SAME lane map backs what this gateway **honors** on an inbound request-frame
+   `contractVersion` claim (`docs/PARTICIPANT_PROTOCOL.md` §8.6's *native ∩ laned* rule, wider
+   than the declared set by design) — so configuring an undeclared lane widens what you'll
+   silently accept from a stale-routed peer too, not only what you can build for one. This is
+   the bidirectional nature of the opt-in: there is one lane map, read by both routing
+   directions.
+
+Lanes obey the same grow-only discipline as declared lines, for the identical pend-stranding
+reason: a resumed pended exchange needs its pinned line's lane to remain configured for as long
+as the pend can still be amended. Do not remove a `FHIR_VALIDATE_URL_<line>` env var while any
+pend may still be pinned to that line, declared or not. A single-line contract (`pa.pdex`) has
+nothing to opt into — it has only one native line and always rides the canonical lane.
+
+### CLOSED — DTR at line 2.2 on the built-in sandbox responder
+
+Previously recorded here: the sandbox payer responder that ships with this repo could not
+answer `dtr-questionnaire-fetch` at line 2.2. DTR 2.2's `DTR-QPackageBundle` profile
+requires a `QuestionnaireResponse` entry in the returned package, and its
+`QuestionnaireResponse` profile in turn requires a Coverage reference — but the sandbox DTR
+request carried only the questionnaire canonical, and the sandbox responder had no way to
+resolve a member from it. It held no honest source for either value, and fabricating
+clinical or coverage attribution on the payer side is exactly what per-message validation
+exists to prevent. A deployment that declared `pa.dtr@2.2` while running the sandbox
+responder therefore failed that leg closed (`TestDTRAt22_UnansweredGap`, now deleted).
+
+This is now closed **honestly**, on both sides of the wire:
+
+- **Request side:** DTR's `$questionnaire-package` input profile makes `coverage` **1..1**
+  at every line (min=1 everywhere; 2.2 additionally tightens `max` from `*` to `1` —
+  verified live against the pinned 2.2.0 package). `DTRDef.QuestionnairePackageCoverageRequired`
+  is `true` only at 2.2: `buildQuestionnairePackageRequestAtLine` /
+  `buildQuestionnairePackageOrderRequestAtLine` refuse an empty coverage **before the wire**
+  at that line — a legible local error naming the line and the cardinality, replacing what
+  would otherwise be a real partner's opaque 400. The provider-side fetch (`originate.go`)
+  now always attaches the requester's own (SoR-derived) Coverage at 2.2, not only on the
+  br-payer-targeting profile as before.
+- **Responder side:** the sandbox responder answers a 2.2 package with an **honest,
+  in-progress, zero-answer** `QuestionnaireResponse` shell (`buildDTRPackageQRShellAtLine`).
+  It never fabricates a subject or coverage reference — both are read straight off the
+  Coverage resource the requester just sent on the same leg
+  (`dtrPackageCoverageSubject`: `Coverage.beneficiary` for the patient, `Coverage.id` for
+  the coverage reference — the requester's own logical id, not a private identifier
+  system). The responder **fails the shell closed** if the requester's Coverage carries
+  no `id`, rather than inventing one. The shell carries zero `item` answers; the
+  auto-filled/authored `QuestionnaireResponse` that actually crosses into the PAS
+  submission is built separately and is unaffected by this entry (the consumer discards
+  it — `extractQuestionnaireFromPackage` only ever reads the bare `Questionnaire` entry).
+
+Verified live against the pinned DTR 2.2.0 package (`shn-hapi-validate-ig22`, 2026-08-12):
+a hand-built shell of this exact shape validates against `dtr-questionnaireresponse|2.2.0`
+with zero error-severity issues. `pa.dtr@2.2` is now included in the whole-line 2.2 mesh
+(`test/conformance/per_line_uc_test.go`'s `perLineMeshes`) alongside `pa.crd@2.2` and
+`pa.pas@2.2`.
+
+A **separate, pre-existing, unrelated** gap surfaced during this verification and is
+recorded here rather than fixed (out of scope for that fix — it concerns the Questionnaire the
+sandbox payer *asks*, not the QuestionnaireResponse it *answers with*): the sandbox lumbar
+Questionnaire (`shnsdk.SandboxLumbarQuestionnaire`) does not itself conform to DTR 2.2's
+`dtr-base-questionnaire` profile (`Questionnaire.subjectType` min=1 unmet, an unmet
+`sdc-2` versionAlgorithm constraint, and item-extension slices this build's pinned package
+set cannot resolve). This was already true of the existing `testdata/golden/2.2/
+questionnaire-package-pa-lumbar-mri.json` golden before this task and is not newly
+introduced by it; `make validate`'s current gate does not catch it (that golden is not in
+`pinnedProfiles`, so it validates against base R4 only, never against
+`DTR-QPackageBundle`). Tracked as a follow-up, not a blocker for this closure.
+
+### CLOSED — authored DTR answers now build at the selected line
+
+Previously recorded here: the provider-side paths that build a `QuestionnaireResponse`
+from **authored** answers — clinician manual entry, attestation, and the pended-resume
+amendment — and the managed populator's auto-fill were **not line-parameterized**. They
+emitted the 2.0-line shape regardless of the line the leg routed to, and the mismatch was
+not uniformly a loud failure: the two-RI evidence against the real 2.2 reference
+implementation found the attestation-bearing scenarios failed closed with a 422
+egress-validation error, while the pure auto-fill scenario's wrong-line QR bytes went out
+and were accepted — a **silent** wrong-line pass (the UC-03 gap).
+
+This build threads the leg-selected DTR line (`crdDtrResult.dtrLine`, resolved once at the
+`dtr-questionnaire-fetch` select-before-build site) through all three build sites: the
+managed populator's auto-fill (`managedPopulator.Populate` → `shnsdk.FillQuestionnaireAtLine`),
+and both authored-answer refills, `handleUC04`'s attestation and `scenarioToPend`'s UC-06
+attestation (both → `shnsdk.FillQuestionnaireFromAnswersAtLine`) — and their paired
+egress-`$validate` calls now check against that same line, not the canonical (2.0) lane. A
+deployment declaring only `2.0` is unaffected (byte-identical output, regression-fenced).
+Auto-fill through a **native** SDC `$populate` engine (`PROVIDER_DTR_NATIVE=true`) was
+never affected — the engine, not the gateway, shapes that response.
+
+Verified by `TestManagedPopulatorBuildsAtLine` (`gateway/engine/populator_test.go`) at the
+populator seam, and `TestAuthoredQRBuiltAtSelectedLine`
+(`gateway/engine/authoredqr_line_test.go`) end-to-end against the actual submitted PAS
+bundle's embedded `QuestionnaireResponse` for both attestation sites — both assert the DTR
+2.2 wire markers (the only line with an observable delta from 2.0/2.1: the `qr-coverage`
+extension and the `intendedUse` code-system rename), since 2.0 and 2.1 are byte-identical
+on every marker this build can check.
+
+## Demo-only egress narrowing (`SHN_DEMO_EGRESS_NATIVE_LINES`)
+
+| Env var | Description |
+|---|---|
+| `SHN_DEMO_EGRESS_NATIVE_LINES` | Comma-separated contract lines (e.g. `2.0`) that narrow **this gateway's own view of which lines it can reach natively on egress** (arm 2 — see [Configuring a validator lane without declaring the line](#configuring-a-validator-lane-without-declaring-the-line-opt-in-cross-version-translation) above for the arm numbering). Empty (unset — the default) means the full native set, unrestricted. Every token must be a line this build natively speaks; an unknown token is a boot error, and so is a set-but-lineless value (e.g. `","`) — the knob never degrades to a silent no-op. |
+
+**Narrows arm-2 routing only — arm 1 is unaffected.** This knob changes which lines a
+narrowed gateway can reach through **native-reach selection** (arm 2: building a leg at a
+line it natively speaks against a peer's declared set) — it has no effect on **arm 1**
+(a leg answered at a line both peers already share/declare): an arm-1 leg routes exactly
+as it would with the knob unset. Narrowing arm 2 makes a peer that only declares a newer
+line unreachable there, so a transform chain (arm 3) fires instead, or the leg refuses if
+no chain resolves — which is the whole point of the knob: simulating "a build that
+predates the newer contract lines" without running an older build.
+
+**Narrowing gates routing, not authoring.** A narrowed gateway still *builds* fully-shaped
+content at any line it natively speaks whenever that content rides an unaffected leg — for
+example, a DTR questionnaire package authored at 2.2 that then rides an arm-1 PAS submit.
+The knob changes what a gateway **routes as**, never what it can **author**.
+
+**Never set this in a shipped deployment config.** It exists for exactly one consumer: the
+**SHN Kit's bridging demo** (see `kit/README.md`), which restarts its own supervised
+gateway child with it set to demonstrate cross-version bridging against skewed peers. It is
+loud wherever it's set — in the boot log:
+
+```
+gateway: demo: egress-native lines narrowed to [2.0] — arm-2 native reach restricted;
+transform chains may fire (SHN_DEMO_EGRESS_NATIVE_LINES)
+```
+
+— and in the name itself: a `SHN_DEMO_*` variable set anywhere but a demo is a
+misconfiguration, not a supported deployment posture.

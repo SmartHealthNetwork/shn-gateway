@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"time"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
@@ -27,13 +28,33 @@ import (
 const extCoverageInformation = "http://hl7.org/fhir/us/davinci-crd/StructureDefinition/ext-coverage-information"
 
 // buildQuestionnairePackageRequest translates SHN's {canonical[, coverage]} DTR fetch into
-// a Da Vinci $questionnaire-package Parameters request. When coverage is present, it is
-// appended VERBATIM as a `coverage` parameter resource — a real Da Vinci payer (br-payer)
-// 400s "The 'coverage' parameter is required (min=1)" without it (FR-G28). The
-// coverage is the PROVIDER's inbound Coverage carried through the leg; the payer-gw never
-// fabricates one (non-aggregation). When coverage is nil the output is canonical-only —
-// byte-identical to the pre-fix request, so the sandbox / 8-UC-demo path is unchanged.
+// a Da Vinci $questionnaire-package Parameters request. It is
+// buildQuestionnairePackageRequestAtLine("2.0", canonical, coverage), byte-identical
+// (regression-fenced by davincimap_test.go) — the legacy name stays the 2.0 delegate so the
+// sandbox / 8-UC-demo path is unchanged.
 func buildQuestionnairePackageRequest(canonical string, coverage json.RawMessage) ([]byte, error) {
+	return buildQuestionnairePackageRequestAtLine("2.0", canonical, coverage)
+}
+
+// buildQuestionnairePackageRequestAtLine is buildQuestionnairePackageRequest
+// parameterized by DTR line ("2.0", "2.1", "2.2"). When coverage is present, it is
+// appended VERBATIM as a `coverage` parameter resource — a real Da Vinci payer (br-payer)
+// 400s "The 'coverage' parameter is required (min=1)" without it (FR-G28, every line). The
+// coverage is the PROVIDER's inbound Coverage carried through the leg; the payer-gw never
+// fabricates one (non-aggregation).
+//
+// At a line whose DTRDef sets QuestionnairePackageCoverageRequired (2.2 —
+// StructureDefinition-dtr-qpackage-input-parameters.json's `coverage` slice tightens to
+// min=1 max=1, verified live 2026-08-12), an EMPTY coverage refuses BEFORE the wire: a
+// legible local error naming the line and the 1..1 cardinality, replacing what would
+// otherwise be the partner's opaque 400. At 2.0/2.1 (coverage required but unbounded, not
+// yet gated locally — see DTRDef's doc comment) the pre-existing behavior is unchanged:
+// coverage is carried when supplied, omitted otherwise, no local refusal — so with coverage
+// nil at "2.0" the output stays canonical-only, byte-identical to the pre-fix request.
+func buildQuestionnairePackageRequestAtLine(line, canonical string, coverage json.RawMessage) ([]byte, error) {
+	if err := dtrPackageRequireCoverage(line, coverage); err != nil {
+		return nil, err
+	}
 	parameter := []map[string]any{
 		{"name": "questionnaire", "valueCanonical": canonical},
 	}
@@ -45,6 +66,22 @@ func buildQuestionnairePackageRequest(canonical string, coverage json.RawMessage
 		"parameter":    parameter,
 	}
 	return json.Marshal(params)
+}
+
+// dtrPackageRequireCoverage is the shared coverage-1..1 gate for the two
+// $questionnaire-package request builders below: at a DTR line whose
+// DTRDef sets QuestionnairePackageCoverageRequired, an empty coverage is refused before
+// any bytes are built. Unknown line -> error (fail-closed, never a silent 2.0 fallback,
+// same posture as buildQuestionnairePackageAtLine).
+func dtrPackageRequireCoverage(line string, coverage json.RawMessage) error {
+	def, ok := shnsdk.DTRLineDef(line)
+	if !ok {
+		return fmt.Errorf("engine: $questionnaire-package request: unknown DTR line %q", line)
+	}
+	if def.QuestionnairePackageCoverageRequired && len(coverage) == 0 {
+		return fmt.Errorf("engine: $questionnaire-package request at DTR line %q (profile dtr-qpackage-input-parameters) requires the coverage parameter (1..1, exactly one) but none was supplied", line)
+	}
+	return nil
 }
 
 // dtrLegRequest is the gateway-internal wire shape of the dtr-questionnaire-fetch leg. It is a
@@ -63,7 +100,20 @@ type dtrLegRequest struct {
 // buildQuestionnairePackageOrderRequest builds an order-driven $questionnaire-package Parameters
 // (the order-driven lane): the CRD-updated `order` (carrying the coverage-assertion-id) + the required
 // `coverage`. No `questionnaire` canonical — such a partner 500s without the order and has no canonical path.
+// It is buildQuestionnairePackageOrderRequestAtLine("2.0", order, coverage), byte-identical
+// (regression-fenced by davincimap_test.go).
 func buildQuestionnairePackageOrderRequest(order, coverage json.RawMessage) ([]byte, error) {
+	return buildQuestionnairePackageOrderRequestAtLine("2.0", order, coverage)
+}
+
+// buildQuestionnairePackageOrderRequestAtLine is buildQuestionnairePackageOrderRequest
+// parameterized by DTR line ("2.0", "2.1", "2.2") — same coverage-1..1 gate as
+// buildQuestionnairePackageRequestAtLine (dtrPackageRequireCoverage), for the order-driven
+// request shape.
+func buildQuestionnairePackageOrderRequestAtLine(line string, order, coverage json.RawMessage) ([]byte, error) {
+	if err := dtrPackageRequireCoverage(line, coverage); err != nil {
+		return nil, err
+	}
 	parameter := []map[string]any{{"name": "order", "resource": order}}
 	if len(coverage) > 0 {
 		parameter = append(parameter, map[string]any{"name": "coverage", "resource": coverage})
@@ -149,8 +199,28 @@ func extractQuestionnaireFromPackage(packageBundle []byte) ([]byte, error) {
 // itself does, via the CRD/PAS normalizers). The byte shape
 // (json.Marshal of this map) is load-bearing: the test loopback's default wrap
 // must match it exactly for the DTR-fetch leg to stay byte-parity in
-// test/responderparity (the wrapper is engine-value-free — no corrID/clock).
+// test/responderparity (the wrapper is engine-value-free — no corrID/clock). It is
+// buildQuestionnairePackageAtLine("2.0", questionnaire, nil), byte-identical
+// (regression-fenced by davincimap_test.go) — the third DTR twin, mirroring
+// shnsdk.BuildQuestionnairePackageAtLine / internal/dtr.WrapQuestionnairePackageAtLine.
 func buildQuestionnairePackage(questionnaire []byte) ([]byte, error) {
+	return buildQuestionnairePackageAtLine("2.0", questionnaire, nil)
+}
+
+// buildQuestionnairePackageAtLine is buildQuestionnairePackage parameterized by DTR
+// line ("2.0", "2.1", "2.2"). questionnaireResponse is OPTIONAL at "2.0"/"2.1" and,
+// when supplied, is embedded VERBATIM as a second Bundle entry (never fabricated) —
+// its fullUrl is derived from its own resourceType+id. At "2.2"
+// (shnsdk.DTRLineDef's QuestionnairePackageReturnShape=="qr-required") it is
+// MANDATORY: the DTR-QPackageBundle profile requires
+// Bundle.entry:questionnaireResponse min=1 (the DTR line delta table) — an empty
+// questionnaireResponse errors rather than emit a non-conformant package. Unknown
+// line -> error (fail-closed, never a silent 2.0 fallback).
+func buildQuestionnairePackageAtLine(line string, questionnaire, questionnaireResponse []byte) ([]byte, error) {
+	def, ok := shnsdk.DTRLineDef(line)
+	if !ok {
+		return nil, fmt.Errorf("engine: buildQuestionnairePackageAtLine: unknown DTR line %q", line)
+	}
 	// A FHIR collection Bundle requires every entry to carry a fullUrl (IG-HAPI
 	// $validate enforces this — caught by make validate, not the hermetic gate).
 	// Use the Questionnaire's canonical url as the entry identity (deterministic;
@@ -160,19 +230,147 @@ func buildQuestionnairePackage(questionnaire []byte) ([]byte, error) {
 		URL string `json:"url"`
 	}
 	if err := json.Unmarshal(questionnaire, &probe); err != nil {
-		return nil, fmt.Errorf("engine: buildQuestionnairePackage: questionnaire is not valid json: %w", err)
+		return nil, fmt.Errorf("engine: buildQuestionnairePackageAtLine: questionnaire is not valid json: %w", err)
 	}
 	if probe.URL == "" {
-		return nil, fmt.Errorf("engine: buildQuestionnairePackage: questionnaire has no url for entry fullUrl")
+		return nil, fmt.Errorf("engine: buildQuestionnairePackageAtLine: questionnaire has no url for entry fullUrl")
+	}
+	if def.QuestionnairePackageReturnShape == "qr-required" && len(questionnaireResponse) == 0 {
+		return nil, fmt.Errorf("engine: buildQuestionnairePackageAtLine: DTR line %q (profile DTR-QPackageBundle) requires a QuestionnaireResponse entry (Bundle.entry:questionnaireResponse min=1) but none was supplied", def.Line)
+	}
+	entries := []map[string]any{
+		{"fullUrl": probe.URL, "resource": json.RawMessage(questionnaire)},
+	}
+	if len(questionnaireResponse) > 0 {
+		qrURL, err := dtrPackageQuestionnaireResponseFullURL(questionnaireResponse)
+		if err != nil {
+			return nil, fmt.Errorf("engine: buildQuestionnairePackageAtLine: %w", err)
+		}
+		entries = append(entries, map[string]any{"fullUrl": qrURL, "resource": json.RawMessage(questionnaireResponse)})
 	}
 	pkg := map[string]any{
 		"resourceType": "Bundle",
 		"type":         "collection",
-		"entry": []map[string]any{
-			{"fullUrl": probe.URL, "resource": json.RawMessage(questionnaire)},
-		},
+		"entry":        entries,
 	}
 	return json.Marshal(pkg)
+}
+
+// dtrPackageBundleBaseURL is the deterministic base for a $questionnaire-package
+// entry fullUrl when embedding a caller-supplied QuestionnaireResponse (DTR line
+// 2.2's DTR-QPackageBundle profile requires one). Same convention/value as
+// shnsdk's dtrBundleBaseURL / internal/dtr's dtrPackageBundleBaseURL.
+const dtrPackageBundleBaseURL = "https://shn.example/fhir"
+
+// dtrPackageQuestionnaireResponseFullURL derives the resolvable fullUrl for a
+// QuestionnaireResponse $questionnaire-package Bundle entry (consistent with
+// Resource.id). Errors — never fabricates an id — if the resource is not a
+// QuestionnaireResponse or carries no id.
+func dtrPackageQuestionnaireResponseFullURL(questionnaireResponse []byte) (string, error) {
+	var probe struct {
+		ResourceType string `json:"resourceType"`
+		ID           string `json:"id"`
+	}
+	if err := json.Unmarshal(questionnaireResponse, &probe); err != nil {
+		return "", fmt.Errorf("questionnaireResponse is not valid json: %w", err)
+	}
+	if probe.ResourceType != "QuestionnaireResponse" {
+		return "", fmt.Errorf("expected resourceType QuestionnaireResponse, got %q", probe.ResourceType)
+	}
+	if probe.ID == "" {
+		return "", fmt.Errorf("questionnaireResponse has no id for entry fullUrl")
+	}
+	return dtrPackageBundleBaseURL + "/QuestionnaireResponse/" + probe.ID, nil
+}
+
+// dtrQRCoverageExtURL / dtrIntendedUseExtURL are the DTR QuestionnaireResponse-level
+// extensions the 2.2 QR shell (below) carries — same canonicals as sdk/dtr.go's
+// qrCoverageExt/intendedUseExt (unexported there; this file cannot reach them, so they
+// are re-declared byte-identically, same pattern as this file's own extCoverageInformation).
+const (
+	dtrQRCoverageExtURL  = "http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/qr-coverage"
+	dtrIntendedUseExtURL = "http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/intendedUse"
+)
+
+// dtrPackageCoverageSubject reads the two facts the sandbox responder's DTR-2.2 QR shell
+// needs off the REQUESTER's own Coverage resource — the fetch leg's `coverage` parameter,
+// never fabricated here: the patient reference (Coverage.beneficiary) and the coverage's
+// own logical reference, derived from Coverage.id. Both are ordinary FHIR: this reader is
+// coupled to NO private identifier system, so a conformant external Da Vinci client's plain
+// US Core Coverage answers at 2.2 exactly like one this build constructed (the
+// urn:shn:coverage identifier is a member number, not a reference, and nothing reads
+// it here). Errors — never guesses — if either fact is absent, so an id-less
+// Coverage fails the shell closed rather than silently proceeding with an empty or invented
+// reference.
+func dtrPackageCoverageSubject(coverageJSON []byte) (patientRef, coverageRef string, err error) {
+	var cov struct {
+		ID          string `json:"id"`
+		Beneficiary struct {
+			Reference string `json:"reference"`
+		} `json:"beneficiary"`
+	}
+	if uerr := json.Unmarshal(coverageJSON, &cov); uerr != nil {
+		return "", "", fmt.Errorf("engine: dtrPackageCoverageSubject: parse coverage: %w", uerr)
+	}
+	if cov.Beneficiary.Reference == "" {
+		return "", "", fmt.Errorf("engine: dtrPackageCoverageSubject: coverage carries no beneficiary reference")
+	}
+	if cov.ID == "" {
+		return "", "", fmt.Errorf("engine: dtrPackageCoverageSubject: coverage carries no id (the DTR-2.2 QR shell derives its coverage reference from the requester's own Coverage.id)")
+	}
+	return cov.Beneficiary.Reference, "Coverage/" + cov.ID, nil
+}
+
+// buildDTRPackageQRShellAtLine builds an HONEST, in-progress, zero-answer
+// QuestionnaireResponse for the sandbox responder's $questionnaire-package answer at a
+// DTR line whose QuestionnairePackageReturnShape is "qr-required" (2.2 —
+// DTR-QPackageBundle's Bundle.entry:questionnaireResponse min=1). The sandbox payer has
+// no PCI->member reverse resolution and never fabricates clinical/coverage attribution
+// (FR-36) — so this shell carries NO answers (status "in-progress", zero items) and
+// derives patientRef/coverageRef from the REQUESTER's OWN Coverage resource via
+// dtrPackageCoverageSubject — its beneficiary and its Coverage.id — never invented
+// here. id is caller-supplied (the leg
+// correlation id) so the shell is deterministic (no clock read beyond the injected
+// authored time, no randomness).
+//
+// Verified LIVE against the pinned DTR 2.2.0 package (shn-hapi-validate-ig22,
+// 2026-08-12): this exact shape — status/questionnaire/subject/authored +
+// extension:coverage + extension:intendedUse, zero items — validates against
+// dtr-questionnaireresponse|2.2.0 with ZERO error-severity issues (two benign
+// warnings: the DomainResource dom-6 narrative best-practice note, and an
+// unresolvable-canonical note because the lane cannot fetch the sandbox questionnaire
+// url over HTTP — both already tolerated elsewhere in this corpus). That claim
+// SURVIVES the later re-derivation of coverageRef (dtrPackageCoverageSubject now reads Coverage.id instead
+// of a private business identifier): the shell's SHAPE is byte-unchanged and the
+// extension still carries a logical "Coverage/<id>" reference — only the value's
+// provenance moved. The claim is re-exercised, not merely reasoned about, by the
+// close-out live gates (`make validate` plus the bridged kitlive run).
+func buildDTRPackageQRShellAtLine(line, id, canonical, patientRef, coverageRef string, authored time.Time) ([]byte, error) {
+	def, ok := shnsdk.DTRLineDef(line)
+	if !ok {
+		return nil, fmt.Errorf("engine: buildDTRPackageQRShellAtLine: unknown DTR line %q", line)
+	}
+	if id == "" || canonical == "" || patientRef == "" || coverageRef == "" {
+		return nil, fmt.Errorf("engine: buildDTRPackageQRShellAtLine: missing required field (id=%q canonical=%q patientRef=%q coverageRef=%q)",
+			id, canonical, patientRef, coverageRef)
+	}
+	qr := map[string]any{
+		"resourceType":  "QuestionnaireResponse",
+		"id":            id,
+		"status":        "in-progress",
+		"questionnaire": canonical,
+		"subject":       map[string]any{"reference": patientRef},
+		"authored":      authored.UTC().Format(time.RFC3339),
+		"extension": []map[string]any{
+			{"url": dtrQRCoverageExtURL, "valueReference": map[string]any{"reference": coverageRef}},
+			{"url": dtrIntendedUseExtURL, "valueCodeableConcept": map[string]any{"coding": []map[string]any{{
+				"system":  def.IntendedUseCodeSystem,
+				"code":    "withpa",
+				"display": "Information needed for a prior authorization",
+			}}}},
+		},
+	}
+	return json.Marshal(qr)
 }
 
 // crdResponse / crdCard / crdSuggestion / crdAction / crdSystemAction model just enough of

@@ -96,6 +96,96 @@ func TestBuildQuestionnairePackageRequest_CarriesCoverage(t *testing.T) {
 	}
 }
 
+// TestQuestionnairePackageRequestCoverageByLine is the request-side
+// coverage-1..1 gate: at DTR line 2.2 (DTRDef.QuestionnairePackageCoverageRequired), an
+// empty coverage refuses BEFORE the wire with a legible error naming the line and the
+// 1..1 cardinality — replacing what would otherwise be the partner's opaque 400 — and a
+// non-empty coverage builds normally. The legacy (unparameterized) name stays byte-identical
+// to the 2.0 delegate, fencing the earlier sandbox/8-UC-demo path.
+func TestQuestionnairePackageRequestCoverageByLine(t *testing.T) {
+	const canonical = "http://example.org/Questionnaire/lumbar"
+	coverage := json.RawMessage(`{"resourceType":"Coverage","id":"cov-1","status":"active",` +
+		`"beneficiary":{"reference":"Patient/p1"}}`)
+
+	t.Run("2.2 no coverage errors naming the line and 1..1", func(t *testing.T) {
+		_, err := buildQuestionnairePackageRequestAtLine("2.2", canonical, nil)
+		if err == nil {
+			t.Fatal("want an error refusing before the wire, got nil")
+		}
+		if !strings.Contains(err.Error(), "2.2") {
+			t.Errorf("error must name the line 2.2: %v", err)
+		}
+		if !strings.Contains(err.Error(), "1..1") {
+			t.Errorf("error must name the 1..1 cardinality: %v", err)
+		}
+	})
+	t.Run("2.2 with coverage: parameter present", func(t *testing.T) {
+		out, err := buildQuestionnairePackageRequestAtLine("2.2", canonical, coverage)
+		if err != nil {
+			t.Fatalf("build: %v", err)
+		}
+		var p struct {
+			Parameter []struct {
+				Name string `json:"name"`
+			} `json:"parameter"`
+		}
+		if err := json.Unmarshal(out, &p); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		var covSeen bool
+		for _, param := range p.Parameter {
+			if param.Name == "coverage" {
+				covSeen = true
+			}
+		}
+		if !covSeen {
+			t.Error("coverage parameter missing")
+		}
+	})
+	t.Run("2.1 no coverage does not error (min=1 max=* only — not yet gated locally)", func(t *testing.T) {
+		if _, err := buildQuestionnairePackageRequestAtLine("2.1", canonical, nil); err != nil {
+			t.Fatalf("2.1 with no coverage must NOT refuse locally (the earlier behavior): %v", err)
+		}
+	})
+	t.Run("2.0 legacy call byte-identical to the AtLine delegate", func(t *testing.T) {
+		legacy, err := buildQuestionnairePackageRequest(canonical, nil)
+		if err != nil {
+			t.Fatalf("legacy build: %v", err)
+		}
+		atLine, err := buildQuestionnairePackageRequestAtLine("2.0", canonical, nil)
+		if err != nil {
+			t.Fatalf("AtLine(2.0) build: %v", err)
+		}
+		if string(legacy) != string(atLine) {
+			t.Fatalf("legacy = %s, AtLine(2.0) = %s — must be byte-identical", legacy, atLine)
+		}
+	})
+	t.Run("order variant: same coverage-1..1 gate at 2.2", func(t *testing.T) {
+		order := json.RawMessage(`{"resourceType":"ServiceRequest","id":"sr-1"}`)
+		if _, err := buildQuestionnairePackageOrderRequestAtLine("2.2", order, nil); err == nil {
+			t.Fatal("order-driven request at 2.2 with no coverage must refuse before the wire")
+		}
+		out, err := buildQuestionnairePackageOrderRequestAtLine("2.2", order, coverage)
+		if err != nil {
+			t.Fatalf("build with coverage: %v", err)
+		}
+		if !strings.Contains(string(out), `"name":"coverage"`) {
+			t.Errorf("coverage parameter missing: %s", out)
+		}
+		legacy, err := buildQuestionnairePackageOrderRequest(order, nil)
+		if err != nil {
+			t.Fatalf("legacy order build: %v", err)
+		}
+		atLine, err := buildQuestionnairePackageOrderRequestAtLine("2.0", order, nil)
+		if err != nil {
+			t.Fatalf("AtLine(2.0) order build: %v", err)
+		}
+		if string(legacy) != string(atLine) {
+			t.Fatalf("legacy = %s, AtLine(2.0) = %s — must be byte-identical", legacy, atLine)
+		}
+	})
+}
+
 // TestExtractQuestionnaireFromPackage_ReturnsVerbatimAndDropsDeps IS the
 // anti-circularity proof, satisfied IN-PACKAGE against the unexported extractor: the
 // fixture is a STANDALONE hand-authored $questionnaire-package (Library + Questionnaire
@@ -231,6 +321,115 @@ func TestBuildQuestionnairePackage_WrapsAndRoundTrips(t *testing.T) {
 func TestBuildQuestionnairePackage_RejectsInvalidJSON(t *testing.T) {
 	if _, err := buildQuestionnairePackage([]byte("{not json")); err == nil {
 		t.Error("expected error wrapping invalid Questionnaire json")
+	}
+}
+
+// TestBuildQuestionnairePackageAtLine_RegressionFence: the legacy
+// buildQuestionnairePackage is byte-identical to AtLine("2.0", q, nil) — the
+// third twin (mirrors shnsdk.BuildQuestionnairePackageAtLine / internal/dtr.
+// WrapQuestionnairePackageAtLine).
+func TestBuildQuestionnairePackageAtLine_RegressionFence(t *testing.T) {
+	q := []byte(`{"resourceType":"Questionnaire","id":"q1","url":"http://x/q"}`)
+	legacy, err := buildQuestionnairePackage(q)
+	if err != nil {
+		t.Fatalf("buildQuestionnairePackage: %v", err)
+	}
+	atLine, err := buildQuestionnairePackageAtLine("2.0", q, nil)
+	if err != nil {
+		t.Fatalf("buildQuestionnairePackageAtLine(2.0): %v", err)
+	}
+	if !bytes.Equal(legacy, atLine) {
+		t.Fatalf("buildQuestionnairePackage != buildQuestionnairePackageAtLine(\"2.0\", nil):\n legacy: %s\n atLine: %s", legacy, atLine)
+	}
+}
+
+// TestBuildQuestionnairePackageAtLine_UnknownLineErrors: fail-closed rejection.
+func TestBuildQuestionnairePackageAtLine_UnknownLineErrors(t *testing.T) {
+	q := []byte(`{"resourceType":"Questionnaire","id":"q1","url":"http://x/q"}`)
+	if _, err := buildQuestionnairePackageAtLine("9.9", q, nil); err == nil {
+		t.Fatal("buildQuestionnairePackageAtLine(\"9.9\") = nil error, want an error")
+	}
+}
+
+// TestBuildQuestionnairePackageAtLine_QRRequiredAt22 mirrors shnsdk's
+// TestBuildQuestionnairePackageAtLine_QRRequiredAt22 / internal/dtr's
+// TestWrapQuestionnairePackageAtLine_QRRequiredAt22 (the DTR line delta table:
+// DTR-QPackageBundle's Bundle.entry:questionnaireResponse min=1 at 2.2 only).
+func TestBuildQuestionnairePackageAtLine_QRRequiredAt22(t *testing.T) {
+	q := []byte(`{"resourceType":"Questionnaire","id":"q1","url":"http://x/q"}`)
+
+	for _, line := range []string{"2.0", "2.1"} {
+		pkg, err := buildQuestionnairePackageAtLine(line, q, nil)
+		if err != nil {
+			t.Fatalf("line %s: nil QR must be accepted: %v", line, err)
+		}
+		var probe struct {
+			Entry []json.RawMessage `json:"entry"`
+		}
+		if err := json.Unmarshal(pkg, &probe); err != nil {
+			t.Fatalf("line %s: unmarshal package: %v", line, err)
+		}
+		if len(probe.Entry) != 1 {
+			t.Errorf("line %s: entry count = %d, want 1 (no QR supplied)", line, len(probe.Entry))
+		}
+	}
+
+	if _, err := buildQuestionnairePackageAtLine("2.2", q, nil); err == nil {
+		t.Fatal("buildQuestionnairePackageAtLine(\"2.2\", q, nil) = nil error, want an error (QR required)")
+	}
+
+	qr := []byte(`{"resourceType":"QuestionnaireResponse","id":"qr-1","status":"completed"}`)
+	pkg, err := buildQuestionnairePackageAtLine("2.2", q, qr)
+	if err != nil {
+		t.Fatalf("buildQuestionnairePackageAtLine(2.2, q, qr): %v", err)
+	}
+	var probe struct {
+		Entry []struct {
+			FullUrl string `json:"fullUrl"`
+		} `json:"entry"`
+	}
+	if err := json.Unmarshal(pkg, &probe); err != nil {
+		t.Fatalf("unmarshal 2.2 package: %v", err)
+	}
+	if len(probe.Entry) != 2 {
+		t.Fatalf("2.2 entry count = %d, want 2", len(probe.Entry))
+	}
+	if probe.Entry[1].FullUrl != "https://shn.example/fhir/QuestionnaireResponse/qr-1" {
+		t.Errorf("QR entry fullUrl = %q, want the derived https://shn.example/fhir/QuestionnaireResponse/qr-1", probe.Entry[1].FullUrl)
+	}
+}
+
+// TestBuildQuestionnairePackageAtLine_QRMissingIDErrors: a supplied QR with no id
+// cannot be given a resolvable fullUrl — never fabricated, so this errors. Mirrors
+// shnsdk's TestBuildQuestionnairePackageAtLine_QRMissingIDErrors / internal/dtr's
+// TestWrapQuestionnairePackageAtLine_QRMissingIDErrors.
+func TestBuildQuestionnairePackageAtLine_QRMissingIDErrors(t *testing.T) {
+	q := []byte(`{"resourceType":"Questionnaire","id":"q1","url":"http://x/q"}`)
+	qr := []byte(`{"resourceType":"QuestionnaireResponse","status":"completed"}`)
+	if _, err := buildQuestionnairePackageAtLine("2.2", q, qr); err == nil {
+		t.Fatal("buildQuestionnairePackageAtLine(2.2, q, qr-without-id) = nil error, want an error")
+	}
+}
+
+func TestDTRPackageCoverageSubjectDerivesFromCoverageID(t *testing.T) {
+	// A conformant external client's plain US Core Coverage: id + beneficiary,
+	// NO urn:shn:coverage identifier — must now SUCCEED (spec §2: the
+	// external-client-works property; the private-system coupling is removed).
+	cov := []byte(`{"resourceType":"Coverage","id":"c1","status":"active","beneficiary":{"reference":"Patient/p1"}}`)
+	patientRef, coverageRef, err := dtrPackageCoverageSubject(cov)
+	if err != nil {
+		t.Fatalf("id-carrying Coverage without private identifier must succeed: %v", err)
+	}
+	if patientRef != "Patient/p1" || coverageRef != "Coverage/c1" {
+		t.Fatalf("got (%q,%q), want (Patient/p1, Coverage/c1)", patientRef, coverageRef)
+	}
+}
+
+func TestDTRPackageCoverageSubjectFailsClosedWithoutID(t *testing.T) {
+	// Valid 2.2 coverage param minus id → error (never guess a reference).
+	cov := []byte(`{"resourceType":"Coverage","status":"active","beneficiary":{"reference":"Patient/p1"},"identifier":[{"system":"urn:shn:coverage","value":"MBR-X"}]}`)
+	if _, _, err := dtrPackageCoverageSubject(cov); err == nil {
+		t.Fatal("id-less Coverage must fail closed — the identifier is no longer a fallback")
 	}
 }
 
@@ -399,7 +598,7 @@ func TestNormalizePASResponse_Unparseable_FailClosed(t *testing.T) {
 
 // TestNormalizePASResponse_BrPayerPended pins the relay's A4 path against the REAL captured br-payer
 // home-oxygen $submit response. Converts the R-2(b) "discover live" risk into a
-// hermetic guard. Case A′ (verified live): br-payer's A4 Bundle{ClaimResponse(queued,A4)+Org+Task}
+// hermetic guard. Verified live: br-payer's A4 Bundle{ClaimResponse(queued,A4)+Org+Task}
 // carries a Task, so normalizePASResponse's Task branch passes it through verbatim (Status 0, no
 // 502 — DEF-G1 does not bite), and ParsePendedResponse reads it as pended.
 func TestNormalizePASResponse_BrPayerPended(t *testing.T) {

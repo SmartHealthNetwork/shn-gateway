@@ -21,7 +21,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -67,7 +69,7 @@ type config struct {
 	TLSKeyFile  string
 
 	// MetricsService enables CloudWatch EMF metric emission (LegOutcome /
-	// LegError) and names this gateway's Service dimension.
+	// LegError, spec §7 #16) and names this gateway's Service dimension.
 	// Empty = off — the published-binary default; the preview deployment sets
 	// it per ECS service. Namespace/env dims follow the monitor's conventions.
 	MetricsService   string
@@ -82,7 +84,32 @@ type config struct {
 	PHGURL          string
 	RegistrarURL    string
 	FHIRValidateURL string
-	NPI             string
+	// FHIRValidateURL21 / FHIRValidateURL22 are the per-LINE $validate lanes
+	// (FHIR_VALIDATE_URL_2_1 / FHIR_VALIDATE_URL_2_2, spec 2026-08-11 F7).
+	// A HAPI instance can host exactly ONE version of an IG, so a deployment that
+	// DECLARES a 2.1 or 2.2 contract line must run a validator for that line;
+	// FHIR_VALIDATE_URL remains the canonical (2.0) lane. Boot fails closed when a
+	// declared non-canonical line has no lane (FR-36/FR-G29) — see
+	// validatorLanesForDeclared.
+	FHIRValidateURL21 string
+	FHIRValidateURL22 string
+	// ContractVersions is the operator-DECLARED exchange-contract token set
+	// (SHN_CONTRACT_VERSIONS, comma-separated). Boot-validated: token grammar +
+	// membership of shnsdk.NativeContractVersions(). Empty env ⇒ this build's
+	// default declaration. Single-sourced (D1a): it drives leg selection, the
+	// published CapabilityStatements / davinci-configuration, AND the registry
+	// declaration peers select this holder against.
+	ContractVersions []string
+	NPI              string
+
+	// DemoEgressNativeLines (SHN_DEMO_EGRESS_NATIVE_LINES, kit-bridging demo
+	// only) narrows engine.Config.EgressNativeLines (D1c): restricts arm (2)'s
+	// native-reach view so transform chains can fire against skewed peers, the
+	// same seam the cross-line pair test suite uses. Empty env ⇒ nil (unset —
+	// the production default: full native reach). Boot-validated: every token
+	// must be a line of shnsdk.NativeContractVersions(). Loud by name and by
+	// boot log — never set in any shipped deploy config.
+	DemoEgressNativeLines []string
 
 	// Trust-anchor key-fetch URL overrides (first-class operator config):
 	// override the discovery-advertised key URL when the gateway runs in the same
@@ -142,6 +169,22 @@ type config struct {
 	// (br-payer untouched). PAYER_DAVINCI_CRD_COVERAGE_BUNDLE=true.
 	PayerDavinciCRDCoverageBundle bool
 
+	// PayerDavinciContractVersions is the operator-declared per-peer contract
+	// token set ("<contract>@<line>", comma-separated) the payer FHIR-metadata
+	// probe verifies published evidence against (checks.FailVersionDrift, spec
+	// 2026-08-10 §3 path 2). PAYER_DAVINCI_CONTRACT_VERSIONS. Requires
+	// PayerDavinciBaseURL — there is nothing to verify against otherwise.
+	PayerDavinciContractVersions []string
+
+	// PayerDavinciStrictExtensions carries PAYER_DAVINCI_STRICT_EXTENSIONS
+	// (the per-peer strict-extensions overlay, FR-G52) into engine.WithStrictExtensions on the
+	// native responder — nativeResponder.strictExtensions, DORMANT plumbing
+	// (no Handle-filter consult, no behavior delta; see that field's
+	// comment in gateway/engine/native.go and g.strictPeer's comment in
+	// originate.go for why this flag has NO live routing effect anywhere
+	// today). PAS_NATIVE's bool-flag precedent.
+	PayerDavinciStrictExtensions bool
+
 	// OriginationProfile selects the per-UC origination lane: "" / "sandbox"
 	// keep the CPT/lumbar order shape; "provider-data" originates every UC off the
 	// provider's seeded SoR and drives real br-payer verdicts. ORIGINATION_PROFILE.
@@ -175,7 +218,7 @@ type config struct {
 	IngressClients map[string]engine.IngressClientRegistration
 
 	// ChecksToken gates the operator connectivity-probe surface at
-	// /internal/checks. Set by CHECKS_TOKEN. Empty (the default)
+	// /internal/checks (spec §7.1). Set by CHECKS_TOKEN. Empty (the default)
 	// falls back to loopback-only access — see checks.Handler.
 	ChecksToken string
 }
@@ -185,6 +228,27 @@ var validRoles = map[string]bool{
 	"payer":    true,
 	"facility": true,
 	"phg":      true,
+}
+
+// contractVersionTokenRe mirrors the registrar admission grammar
+// (internal/registrar/service.go contractVersionRe) — the gateway cannot
+// import internal/, so the pattern is pinned here verbatim.
+var contractVersionTokenRe = regexp.MustCompile(`^[a-z0-9]+(\.[a-z0-9]+)*@[0-9]+(\.[0-9]+)*$`)
+
+// splitTrimmed splits a comma-separated env value, trims whitespace off each
+// element, and drops empties (a trailing comma or blank entry is silently
+// ignored rather than becoming a spurious "" element downstream).
+func splitTrimmed(v string) []string {
+	if v == "" {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(v, ",") {
+		if t := strings.TrimSpace(part); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // checkClientAuthMode enforces exactly one outbound client-auth mode per
@@ -240,27 +304,29 @@ func loadConfig(getenv func(string) string) (config, error) {
 	}
 
 	cfg := config{
-		Role:             role,
-		Addr:             host + ":" + port,
-		SecretsDir:       secretsDir,
-		DiscoveryURL:     discoveryURL,
-		AuthzURL:         getenv("AUTHZ_URL"),
-		HubURL:           getenv("HUB_URL"),
-		ConsentURL:       getenv("CONSENT_URL"),
-		AuditURL:         getenv("AUDIT_URL"),
-		PHGURL:           getenv("PHG_URL"),
-		RegistrarURL:     getenv("REGISTRAR_URL"),
-		FHIRValidateURL:  getenv("FHIR_VALIDATE_URL"),
-		StoreDatabaseURL: getenv("SHN_STORE_DATABASE_URL"),
-		NPI:              def("NPI", "1234567890"),
-		FHIRDataURL:      getenv("FHIR_DATA_URL"),
-		FHIRTokenURL:     getenv("FHIR_TOKEN_URL"),
-		FHIRClientID:     getenv("FHIR_CLIENT_ID"),
-		FHIRClientKey:    getenv("FHIR_CLIENT_KEY"),
-		FHIRClientAlg:    getenv("FHIR_CLIENT_ALG"),
-		FHIRClientScope:  def("FHIR_CLIENT_SCOPE", "system/*.read"),
-		FHIRClientKID:    getenv("FHIR_CLIENT_KID"),
-		FHIRClientSecret: getenv("FHIR_CLIENT_SECRET"),
+		Role:              role,
+		Addr:              host + ":" + port,
+		SecretsDir:        secretsDir,
+		DiscoveryURL:      discoveryURL,
+		AuthzURL:          getenv("AUTHZ_URL"),
+		HubURL:            getenv("HUB_URL"),
+		ConsentURL:        getenv("CONSENT_URL"),
+		AuditURL:          getenv("AUDIT_URL"),
+		PHGURL:            getenv("PHG_URL"),
+		RegistrarURL:      getenv("REGISTRAR_URL"),
+		FHIRValidateURL:   getenv("FHIR_VALIDATE_URL"),
+		FHIRValidateURL21: getenv("FHIR_VALIDATE_URL_2_1"),
+		FHIRValidateURL22: getenv("FHIR_VALIDATE_URL_2_2"),
+		StoreDatabaseURL:  getenv("SHN_STORE_DATABASE_URL"),
+		NPI:               def("NPI", "1234567890"),
+		FHIRDataURL:       getenv("FHIR_DATA_URL"),
+		FHIRTokenURL:      getenv("FHIR_TOKEN_URL"),
+		FHIRClientID:      getenv("FHIR_CLIENT_ID"),
+		FHIRClientKey:     getenv("FHIR_CLIENT_KEY"),
+		FHIRClientAlg:     getenv("FHIR_CLIENT_ALG"),
+		FHIRClientScope:   def("FHIR_CLIENT_SCOPE", "system/*.read"),
+		FHIRClientKID:     getenv("FHIR_CLIENT_KID"),
+		FHIRClientSecret:  getenv("FHIR_CLIENT_SECRET"),
 
 		PayerDavinciBaseURL:           getenv("PAYER_DAVINCI_BASE_URL"),
 		PayerDavinciCDSBaseURL:        getenv("PAYER_DAVINCI_CDS_BASE_URL"),
@@ -277,6 +343,8 @@ func loadConfig(getenv func(string) string) (config, error) {
 		PayerDavinciDispatchServiceID: getenv("PAYER_DAVINCI_DISPATCH_SERVICE_ID"),
 		PayerDavinciDispatchHook:      getenv("PAYER_DAVINCI_DISPATCH_HOOK"),
 		PayerDavinciCRDCoverageBundle: getenv("PAYER_DAVINCI_CRD_COVERAGE_BUNDLE") == "true",
+		PayerDavinciContractVersions:  splitTrimmed(getenv("PAYER_DAVINCI_CONTRACT_VERSIONS")),
+		PayerDavinciStrictExtensions:  getenv("PAYER_DAVINCI_STRICT_EXTENSIONS") == "true",
 		OriginationProfile:            getenv("ORIGINATION_PROFILE"),
 
 		ProviderDTRNative:      getenv("PROVIDER_DTR_NATIVE") == "true",
@@ -297,6 +365,40 @@ func loadConfig(getenv func(string) string) (config, error) {
 	}
 
 	cfg.ChecksToken = getenv("CHECKS_TOKEN")
+
+	// D1a: the operator-declared contract set, boot-validated ONCE here (grammar +
+	// membership of NativeContractVersions) so a typo'd or unbuildable token is a
+	// refusal to start, never a peer-visible declaration this build cannot honor.
+	declared, derr := shnsdk.ParseDeclaredContractVersions(getenv("SHN_CONTRACT_VERSIONS"))
+	if derr != nil {
+		return config{}, fmt.Errorf("gateway: SHN_CONTRACT_VERSIONS: %w", derr)
+	}
+	cfg.ContractVersions = declared
+
+	// Demo-only egress narrowing (kit bridging demo): restricts arm (2)'s
+	// native-reach view so transform chains can fire against skewed peers.
+	// Loud by name and by log — never set in any shipped deploy config.
+	if raw := strings.TrimSpace(getenv("SHN_DEMO_EGRESS_NATIVE_LINES")); raw != "" {
+		native := map[string]bool{}
+		for _, tok := range shnsdk.NativeContractVersions() {
+			native[shnsdk.LineOf(tok)] = true
+		}
+		for _, l := range strings.Split(raw, ",") {
+			l = strings.TrimSpace(l)
+			if l == "" {
+				continue
+			}
+			if !native[l] {
+				return config{}, fmt.Errorf("gateway: SHN_DEMO_EGRESS_NATIVE_LINES: unknown line %q (native lines only)", l)
+			}
+			cfg.DemoEgressNativeLines = append(cfg.DemoEgressNativeLines, l)
+		}
+		// A set-but-lineless value (e.g. ",") must refuse, not silently run
+		// un-narrowed — the knob's premise is loudness.
+		if len(cfg.DemoEgressNativeLines) == 0 {
+			return config{}, fmt.Errorf("gateway: SHN_DEMO_EGRESS_NATIVE_LINES is set but names no line (got %q)", raw)
+		}
+	}
 
 	if cfg.FHIRTokenURL != "" {
 		if cfg.FHIRDataURL == "" {
@@ -322,6 +424,17 @@ func loadConfig(getenv func(string) string) (config, error) {
 		}
 		if err := checkClientAuthMode("PAYER_DAVINCI", cfg.PayerDavinciClientKey, cfg.PayerDavinciClientAlg, cfg.PayerDavinciClientKID, cfg.PayerDavinciClientSecret); err != nil {
 			return config{}, err
+		}
+	}
+
+	if len(cfg.PayerDavinciContractVersions) > 0 {
+		if cfg.PayerDavinciBaseURL == "" {
+			return config{}, fmt.Errorf("gateway: PAYER_DAVINCI_CONTRACT_VERSIONS set requires PAYER_DAVINCI_BASE_URL")
+		}
+		for _, tok := range cfg.PayerDavinciContractVersions {
+			if len(tok) < 3 || len(tok) > 48 || !contractVersionTokenRe.MatchString(tok) {
+				return config{}, fmt.Errorf("gateway: PAYER_DAVINCI_CONTRACT_VERSIONS token %q must match <contract>@<line> (e.g. pa.pas@2.0)", tok)
+			}
 		}
 	}
 
@@ -460,9 +573,13 @@ func checkOptionalURL(name, v string) error {
 // its env var name — SHN_DISCOVERY_URL included (it's required, but its
 // well-formedness still rides this same check). loadConfig's boot-time
 // well-formedness loop and checkTargets (the /internal/checks probe target
-// list) BOTH walk this exact table so the two can never diverge:
+// list, spec §7.1) BOTH walk this exact table so the two can never diverge:
 // a URL added here is automatically both boot-validated and, when non-empty,
-// probed. No entry is hand-kept in a second place.
+// probed. No entry is hand-kept in a second place. The single sanctioned
+// exception is checkTargets' PAYER_DAVINCI_WELL_KNOWN companion target: it
+// reuses this table's already-boot-validated PAYER_DAVINCI_BASE_URL at a
+// different path, rather than being an independently configured URL of its
+// own.
 func optionalURLs(cfg config) [][2]string {
 	return [][2]string{
 		{"AUTHZ_URL", cfg.AuthzURL},
@@ -471,6 +588,8 @@ func optionalURLs(cfg config) [][2]string {
 		{"AUDIT_URL", cfg.AuditURL},
 		{"PHG_URL", cfg.PHGURL},
 		{"FHIR_VALIDATE_URL", cfg.FHIRValidateURL},
+		{"FHIR_VALIDATE_URL_2_1", cfg.FHIRValidateURL21},
+		{"FHIR_VALIDATE_URL_2_2", cfg.FHIRValidateURL22},
 		{"FHIR_DATA_URL", cfg.FHIRDataURL},
 		{"REGISTRAR_URL", cfg.RegistrarURL},
 		{"FHIR_TOKEN_URL", cfg.FHIRTokenURL},
@@ -484,7 +603,7 @@ func optionalURLs(cfg config) [][2]string {
 	}
 }
 
-// checkTargets derives the /internal/checks probe targets from
+// checkTargets derives the /internal/checks probe targets (spec §7.1) from
 // optionalURLs(cfg) — the exact table checkOptionalURL walks at boot, so a
 // target can never be added or dropped independently of that well-formedness
 // gate. Skips unset pairs. Kind overlay: the two FHIR-facing base URLs probe
@@ -496,7 +615,11 @@ func optionalURLs(cfg config) [][2]string {
 // in-VPC substrate URLs (AUTHZ_URL, HUB_URL, …) that hosted tenants never set
 // but self-hosted gateways do, where probing them is exactly what an
 // operator wants — probes as a plain reachable GET. PAYER_DIRECTORY is a
-// file path, not a URL; it is not in optionalURLs and is never probed.
+// file path, not a URL; it is not in optionalURLs and is never probed. One
+// derived companion target is appended after the loop, below —
+// PAYER_DAVINCI_WELL_KNOWN — reusing PAYER_DAVINCI_BASE_URL's already
+// boot-validated URL at a different path rather than adding a second
+// independently configured entry.
 func checkTargets(cfg config) []checks.Target {
 	var out []checks.Target
 	for _, pair := range optionalURLs(cfg) {
@@ -505,6 +628,9 @@ func checkTargets(cfg config) []checks.Target {
 			continue
 		}
 		t := checks.Target{ID: name, URL: u}
+		if name == "PAYER_DAVINCI_BASE_URL" {
+			t.DeclaredVersions = cfg.PayerDavinciContractVersions
+		}
 		switch name {
 		case "FHIR_DATA_URL", "PAYER_DAVINCI_BASE_URL":
 			t.Kind = checks.KindFHIRMetadata
@@ -518,6 +644,20 @@ func checkTargets(cfg config) []checks.Target {
 			t.Kind = checks.KindReachable
 		}
 		out = append(out, t)
+	}
+
+	// Derived companion probe (not a new table entry — same boot-validated
+	// base URL as PAYER_DAVINCI_BASE_URL, different path): the HRex
+	// .well-known/davinci-configuration, absence-tolerant (spec 2026-08-10 §3
+	// path 2). Kept out of optionalURLs so the "one table" rule still holds:
+	// this URL is never independently configured.
+	if cfg.PayerDavinciBaseURL != "" {
+		out = append(out, checks.Target{
+			ID:               "PAYER_DAVINCI_WELL_KNOWN",
+			Kind:             checks.KindDavinciConfig,
+			URL:              cfg.PayerDavinciBaseURL,
+			DeclaredVersions: cfg.PayerDavinciContractVersions,
+		})
 	}
 	return out
 }
@@ -740,12 +880,21 @@ type built struct {
 	// Record* calls are nil-safe, so a nil cell here is a no-op, not a crash.
 	healthCell *health.PollerCell
 
-	// checksRunner drives /internal/checks — the operator
+	// checksRunner drives /internal/checks (spec §7.1) — the operator
 	// connectivity-probe surface. Run starts its boot-time probe in a
 	// goroutine (never build: the listener must open without waiting on
 	// partner endpoints), and it is never registered as a health.Check —
 	// checks never gate /health.
 	checksRunner *checks.Runner
+
+	// nativeResponder is the checks-runner→responder endpoint-evidence sink built()
+	// wires checksRunner.OnResults into (nil when native-forward mode is
+	// off). Exposed for TEST OBSERVATION ONLY — TestProbeEvidenceReachesResponder
+	// reads it back (a *nativeResponder-satisfied anonymous interface
+	// assertion) to prove evidence that arrived via a REAL checksRunner.Run
+	// landed here; the WRITE path under test is exactly this field's
+	// production wiring, never a second, test-only injection route.
+	nativeResponder engine.EndpointEvidenceSetter
 }
 
 func build(ctx context.Context, getenv func(string) string, stdout io.Writer, clock func() time.Time) (built, error) {
@@ -785,6 +934,13 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 
 	// Validator: REAL operation-level, FAIL-CLOSED. Fake only on explicit opt-in. (pure helper, unit-tested)
 	validator, err := selectValidator(getenv, firstNonEmpty(cfg.FHIRValidateURL, endpoints.FHIRValidate))
+	if err != nil {
+		return b, err
+	}
+	// Per-LINE lanes (F7): fail-closed when a DECLARED multi-line contract line has
+	// no validator to answer for it. Runs here, at boot, so the refusal is a startup
+	// error naming the missing env — never a surprise 500 mid-exchange.
+	validatorLanes, err := validatorLanesForDeclared(getenv, cfg.ContractVersions, validator, cfg)
 	if err != nil {
 		return b, err
 	}
@@ -870,28 +1026,46 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	}
 
 	gwCfg := engine.Config{
-		Role:            cfg.Role,
-		HolderID:        bundle.Identity.HolderID,
-		PayerRouter:     payerRouter,
-		Identity:        bundle.Identity,
-		AuthzURL:        firstNonEmpty(cfg.AuthzURL, endpoints.Authz),
-		AuthzPub:        trust.AuthzPub,
-		HubTransportPub: trust.HubTransportPub,
-		HubURL:          firstNonEmpty(cfg.HubURL, endpoints.Hub),
-		Reg:             reg, // populated by the snapshot above
-		Validator:       validator,
-		SoR:             sor,
-		Store:           store,
-		Adjudicator:     engine.NewSandboxAdjudicator(sor, clock),
-		Clock:           clock, // production: time.Now; hermetic tests: the harness's injected clock (HandlerWithClock)
-		Client:          client,
-		NPI:             cfg.NPI,
-		ConsentURL:      firstNonEmpty(cfg.ConsentURL, endpoints.Consent),
-		AuditURL:        firstNonEmpty(cfg.AuditURL, endpoints.Audit),
-		PHGURL:          firstNonEmpty(cfg.PHGURL, endpoints.PHG),
+		Role:             cfg.Role,
+		HolderID:         bundle.Identity.HolderID,
+		PayerRouter:      payerRouter,
+		Identity:         bundle.Identity,
+		AuthzURL:         firstNonEmpty(cfg.AuthzURL, endpoints.Authz),
+		AuthzPub:         trust.AuthzPub,
+		HubTransportPub:  trust.HubTransportPub,
+		HubURL:           firstNonEmpty(cfg.HubURL, endpoints.Hub),
+		Reg:              reg, // populated by the snapshot above
+		Validator:        validator,
+		ValidatorsByLine: validatorLanes,
+		// D1a: the boot-validated declared set — read by leg selection, the published
+		// CapabilityStatements / davinci-configuration, and (through the registrar
+		// registration) the declaration peers select this holder against.
+		DeclaredContractVersions: cfg.ContractVersions,
+		// EgressNativeLines (D1c): nil in every shipped deploy; the kit-bridging
+		// demo's SHN_DEMO_EGRESS_NATIVE_LINES is the sole non-test way to set it.
+		EgressNativeLines: cfg.DemoEgressNativeLines,
+		SoR:               sor,
+		Store:             store,
+		Adjudicator:       engine.NewSandboxAdjudicator(sor, clock),
+		Clock:             clock, // production: time.Now; hermetic tests: the harness's injected clock (HandlerWithClock)
+		Client:            client,
+		NPI:               cfg.NPI,
+		ConsentURL:        firstNonEmpty(cfg.ConsentURL, endpoints.Consent),
+		AuditURL:          firstNonEmpty(cfg.AuditURL, endpoints.Audit),
+		PHGURL:            firstNonEmpty(cfg.PHGURL, endpoints.PHG),
 
 		OriginationProfile: cfg.OriginationProfile,
+		// Strict extensions (FR-G52): g.strictPeer is production-dormant BY DESIGN (always false —
+		// see its comment, gateway/engine/originate.go) — there is
+		// deliberately no engine.Config field here feeding it from env.
 	}
+	if len(cfg.DemoEgressNativeLines) > 0 {
+		fmt.Fprintf(stdout, "gateway: demo: egress-native lines narrowed to %v — arm-2 native reach restricted; transform chains may fire (SHN_DEMO_EGRESS_NATIVE_LINES)\n", cfg.DemoEgressNativeLines)
+	}
+	// evidenceSink is set below iff native-forward mode is on — the
+	// checks-runner→responder endpoint-evidence wiring target (nil-safe: no native responder,
+	// no sink to feed).
+	var evidenceSink engine.EndpointEvidenceSetter
 	// Native-forward payer mode: the read-only legs forward to a partner
 	// Da Vinci endpoint; PAS stays on the sandbox fallback. Setting Responder here means
 	// engine.New uses it directly (it only derives from Adjudicator when Responder==nil).
@@ -928,11 +1102,30 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		if discErr != nil {
 			return b, fmt.Errorf("gateway: CRD service-id discovery: %w", discErr)
 		}
+		// WithDeclaredContractVersions is scoped to the NATIVE responder only (spec
+		// 2026-08-10 §4 foreign-endpoint filter): NewCompositeResponder routes read-only
+		// legs to native and PAS to the sandbox fallback unless PayerDavinciPASNative
+		// (composite.go), so a sandbox-fallback PAS leg is correctly NOT filtered by
+		// this foreign declaration — the sandbox payer is not the foreign peer.
 		native := engine.NewNativeResponder(pdc, cfg.PayerDavinciBaseURL, crdSvcID, store, clock,
 			engine.WithCDSBaseURL(cfg.PayerDavinciCDSBaseURL),
 			engine.WithCRDHook(cfg.PayerDavinciCRDHook),
 			engine.WithCRDDispatchService(cfg.PayerDavinciDispatchServiceID, cfg.PayerDavinciDispatchHook),
-			engine.WithCRDCoverageBundle(cfg.PayerDavinciCRDCoverageBundle))
+			engine.WithCRDCoverageBundle(cfg.PayerDavinciCRDCoverageBundle),
+			engine.WithDeclaredContractVersions(cfg.PayerDavinciContractVersions),
+			// The foreign-peer filter's OWN half is this deployment's declared
+			// set — the same accessor selection, the CapabilityStatements and the
+			// registry declaration read — never the library build constant.
+			engine.WithOwnContractVersions(cfg.ContractVersions),
+			// Strict extensions (FR-G52): DORMANT plumbing (native.go's Handle never consults it, and
+			// g.strictPeer never reads it either — strictPeer is
+			// unconditionally false, its own comment explains why). Goes
+			// live together with transform-at-the-native-forward-edge.
+			engine.WithStrictExtensions(cfg.PayerDavinciStrictExtensions),
+			// Endpoint evidence: same-origin-drop notes ride the file's existing WARNING-line
+			// stdout precedent (e.g. the unauthenticated-forward warning above).
+			engine.WithEndpointEvidenceObserver(func(note string) { fmt.Fprintf(stdout, "gateway: %s\n", note) }))
+		evidenceSink = native
 		fallback := engine.NewSandboxResponder(gwCfg.Adjudicator, sor, store, clock)
 		gwCfg.Responder = engine.NewCompositeResponder(native, fallback, cfg.PayerDavinciPASNative)
 		// The native-forward DTR response is a foreign Da Vinci package SHN can't $validate
@@ -950,15 +1143,19 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	gwCfg.IngressBaseURL = cfg.IngressBaseURL
 	gwCfg.IngressClients = cfg.IngressClients
 
-	// Observer stream: hub + engine callback, only when configured.
+	// Observer stream: hub + engine callback, only when configured. The demo
+	// endpoint (POST /demo/transform) rides the SAME mux via
+	// composeObserverHandler — it inherits this branch's OBSERVER_ADDR gate
+	// and the loopback-only bind validation already enforced at config load,
+	// so there is no separate opt-in or listener for it.
 	var obsHandler http.Handler
 	if cfg.ObserverAddr != "" {
 		hub := observer.NewHub()
 		gwCfg.Observer = hub.Emit
-		obsHandler = hub.Handler()
+		obsHandler = composeObserverHandler(hub.Handler())
 	}
 
-	// EMF leg metrics: opt-in via METRICS_SERVICE. EMF rides
+	// EMF leg metrics (spec §7 #16): opt-in via METRICS_SERVICE. EMF rides
 	// stdout → awslogs → CloudWatch; sdk/metrics is fire-and-forget and
 	// conformance-neutral (TestLegMetric_ConformanceNeutral).
 	if cfg.MetricsService != "" {
@@ -978,10 +1175,25 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	fmt.Fprintf(stdout, "gateway: role=%s holder=%s listening on %s://%s\n", cfg.Role, bundle.Identity.HolderID, scheme, cfg.Addr)
 
 	// /internal/* is the operator/control-plane surface: never forwarded at the
-	// hosted edge, token- or loopback-gated
-	// here. Inserted at this seam — shared by every role — rather
+	// hosted edge (cloudctl RenderRules pins that), token- or loopback-gated
+	// here (spec §7.1). Inserted at this seam — shared by every role — rather
 	// than the per-role engine mux.
 	checksRunner := checks.NewRunner(checkTargets(cfg), client, clock)
+	// Endpoint evidence: feed each completed checks cycle's PAYER_DAVINCI_WELL_KNOWN
+	// (davinci-config probe) evidence into the native responder — the REAL
+	// app-wiring hook (checks.Runner.OnResults, checks.go) from a live
+	// checks cycle into evidenceSink.SetEndpointEvidence
+	// (TestProbeEvidenceReachesResponder). nil evidenceSink (no native
+	// responder configured) makes this a no-op.
+	if evidenceSink != nil {
+		checksRunner.OnResults = func(results []checks.Result) {
+			for _, res := range results {
+				if res.ID == "PAYER_DAVINCI_WELL_KNOWN" && res.Capability != nil {
+					evidenceSink.SetEndpointEvidence(res.Capability.EndpointURLs)
+				}
+			}
+		}
+	}
 	checksH := checks.Handler(checksRunner, cfg.ChecksToken)
 	inner := health.Wrap(hreg, engine.New(gwCfg).Handler())
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1003,6 +1215,7 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		observerHandler: obsHandler,
 		healthCell:      feedCell,
 		checksRunner:    checksRunner,
+		nativeResponder: evidenceSink,
 	}
 	return b, nil
 }
@@ -1047,7 +1260,7 @@ func Run(ctx context.Context, getenv func(string) string, stdout io.Writer) erro
 	if b.registrarURL != "" {
 		go pollFeed(ctx, b.client, b.registrarURL, b.reg, 3*time.Second, b.healthCell)
 	}
-	// Boot-time connectivity check: after the listener is up, not
+	// Boot-time connectivity check (spec §7.1): after the listener is up, not
 	// blocking it — build() must return without waiting on partner endpoints.
 	go b.checksRunner.Run(ctx) //nolint:errcheck — results land in Last()
 	errc := make(chan error, 2)
@@ -1096,6 +1309,114 @@ func Handler(ctx context.Context, getenv func(string) string, stdout io.Writer) 
 	return b.handler, nil
 }
 
+// validatorLanesForDeclared builds the per-LINE $validate lane map (spec
+// 2026-08-11, F7) and FAILS CLOSED when a declared line has no lane.
+//
+// The rule, and why it is fail-closed: a HAPI instance can host exactly one
+// version of an IG, so validating a 2.2 payload against a 2.0 lane does not
+// "mostly work" — it reports errors (or passes) for reasons unrelated to the
+// payload. A deployment that DECLARES a line is telling peers it can produce and
+// answer at that line; FR-36 says everything it produces is validated. Without a
+// lane those two promises cannot both hold, so the gateway refuses to start
+// rather than quietly validate against the wrong IG (FR-36/FR-G29).
+//
+// canonical is the already-resolved canonical-lane validator (selectValidator's
+// result). Under SHN_FAKE_VALIDATOR=1 the fake serves EVERY line — the harness,
+// e2e and every hermetic test keep working unchanged, at every line.
+// Scope: only MULTI-LINE contracts (pa.crd/pa.dtr/pa.pas — those whose native set
+// carries more than one line) can produce line-varying payloads and therefore need
+// per-line lanes. A single-line contract (pa.pdex, native at 2.1 only) has nothing
+// to choose between and rides the canonical lane, exactly as it did before this
+// slice. That scoping is DERIVED from NativeContractVersions(), not hardcoded, so a
+// contract that gains a second line automatically starts demanding lanes.
+func validatorLanesForDeclared(getenv func(string) string, declared []string, canonical shnsdk.Validator, cfg config) (map[string]shnsdk.Validator, error) {
+	fake := getenv("SHN_FAKE_VALIDATOR") == "1"
+	// The canonical line — the one FHIR_VALIDATE_URL has always served — is the line
+	// this build DEFAULT-declares for its multi-line contracts.
+	canonicalLine := shnsdk.LineOf(shnsdk.ContractPAPAS20)
+	urlForLine := map[string]string{"2.1": cfg.FHIRValidateURL21, "2.2": cfg.FHIRValidateURL22}
+
+	linesPerContract := map[string]map[string]bool{}
+	for _, tok := range shnsdk.NativeContractVersions() {
+		contract, line, ok := strings.Cut(tok, "@")
+		if !ok {
+			continue
+		}
+		if linesPerContract[contract] == nil {
+			linesPerContract[contract] = map[string]bool{}
+		}
+		linesPerContract[contract][line] = true
+	}
+
+	lanes := map[string]shnsdk.Validator{}
+	for _, tok := range declared {
+		contract, line, ok := strings.Cut(tok, "@")
+		if !ok || line == "" || len(linesPerContract[contract]) < 2 {
+			continue // malformed (already rejected upstream) or a single-line contract
+		}
+		if lanes[line] != nil {
+			continue
+		}
+		switch {
+		case fake:
+			lanes[line] = canonical // the fake validates any line — harness/e2e unchanged
+		case line == canonicalLine:
+			lanes[line] = canonical
+		case urlForLine[line] != "":
+			lanes[line] = shnsdk.NewOperationValidator(urlForLine[line])
+		default:
+			// The refusal names the env to SET, never a way to turn validation OFF:
+			// SHN_FAKE_VALIDATOR is a hermetic-test opt-in, and an operator reading a
+			// production boot failure must not be handed "disable FR-36" as a remedy.
+			envName := "FHIR_VALIDATE_URL_" + strings.ReplaceAll(line, ".", "_")
+			return nil, fmt.Errorf("gateway: SHN_CONTRACT_VERSIONS declares %s but no FHIR validator lane is configured for line %s: set %s to a $validate endpoint hosting that line's IG packages (one HAPI hosts exactly one version of an IG) — refusing to declare a line this gateway cannot validate (FR-36/FR-G29)", tok, line, envName)
+		}
+	}
+	// Lane map: widen beyond DECLARED — any NATIVE line of a multi-line contract with
+	// a configured lane (FHIR_VALIDATE_URL_<line>, the canonical line, or
+	// fake-mode) enters the map even when this deployment doesn't DECLARE it.
+	// This is the exact widening the recorded route-selection deviation names:
+	// arm (2) native-reach needs the lane map to cover more than the declared
+	// set, and the request-frame native∩laned INBOUND-honor predicate reads this
+	// SAME map — so the opt-in is bidirectional (CONFIGURATION.md states both
+	// consequences). This block only ADDS lines; the declared-without-
+	// lane fail-closed check above is unaffected — a declared line with no
+	// configured lane still refuses boot.
+	for _, lines := range linesPerContract {
+		if len(lines) < 2 {
+			continue // single-line contract: rides the canonical lane, unchanged
+		}
+		for line := range lines {
+			if lanes[line] != nil {
+				continue
+			}
+			switch {
+			case fake:
+				lanes[line] = canonical
+			case line == canonicalLine:
+				lanes[line] = canonical
+			case urlForLine[line] != "":
+				lanes[line] = shnsdk.NewOperationValidator(urlForLine[line])
+			default:
+				// No env configured for this undeclared native line — stays
+				// absent from the map (validatorForLine resolves it to
+				// unlaned, exactly as before D1a). This is an OPT-IN, never a
+				// requirement to lane every native line.
+			}
+		}
+	}
+	// A single-line contract's line may be absent from lanes (pa.pdex@2.1 when 2.1 is
+	// not otherwise declared). engine.validatorForLine treats an ABSENT line in a
+	// non-empty lane map as unlaned, so map it to the canonical lane explicitly.
+	for _, tok := range declared {
+		contract, line, ok := strings.Cut(tok, "@")
+		if ok && line != "" && len(linesPerContract[contract]) < 2 && lanes[line] == nil {
+			lanes[line] = canonical
+		}
+	}
+	return lanes, nil
+}
+
 // selectValidator is the FAIL-CLOSED validator decision (pure, unit-tested
 // directly): explicit fake opt-in → fake; else a resolved URL → real $validate;
 // else ERROR (never a silent fake fallback — FR-36).
@@ -1131,7 +1452,7 @@ func convergeRegistry(ctx context.Context, c *http.Client, registrarURL string, 
 		if raw, derr := base64.StdEncoding.DecodeString(h.SignPub); derr == nil && len(raw) == ed25519.PublicKeySize {
 			signPub = ed25519.PublicKey(raw)
 		}
-		reg.Set(h.ID, shnsdk.RegistryEntry{ID: h.ID, Role: h.Role, EncPub: encPub, SignPub: signPub, BaseURL: h.BaseURL, PayerIDs: h.PayerIDs, MessageFrames: h.MessageFrames})
+		reg.Set(h.ID, shnsdk.RegistryEntry{ID: h.ID, Role: h.Role, EncPub: encPub, SignPub: signPub, BaseURL: h.BaseURL, PayerIDs: h.PayerIDs, MessageFrames: h.MessageFrames, ContractVersions: h.ContractVersions, RequestFrames: h.RequestFrames})
 		n++
 	}
 	return n, nil

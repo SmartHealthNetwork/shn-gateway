@@ -8,8 +8,10 @@ package engine
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 	"time"
 
@@ -172,6 +174,62 @@ func TestObserver_ValidateEvents(t *testing.T) {
 		}
 		if e.Direction != "validate" {
 			t.Fatalf("validate event direction = %q, want validate", e.Direction)
+		}
+	}
+}
+
+// TestObserver_ValidateEventsFromPerLineLanes is the rejection test for the
+// per-line lane observer gap: once ValidatorsByLine is
+// non-empty, validatorForLine resolves EVERY line-scoped $validate through that
+// map and never through cfg.Validator — so a New that decorated only
+// cfg.Validator emitted NO validate.result for any version-bearing leg while
+// still emitting them for the line-less calls, i.e. the observer stream
+// silently under-reported validation. The mutation this fences: drop the lane
+// half of New's observer decoration and the two laned rows below go to zero
+// while the line-less row keeps passing.
+//
+// It also pins that New copies the lane map rather than decorating the caller's
+// (gateway/app builds one per boot; a test may share one across gateways).
+func TestObserver_ValidateEventsFromPerLineLanes(t *testing.T) {
+	fake := shnsdk.NewFakeValidator()
+	lanes := map[string]shnsdk.Validator{"2.0": fake, "2.2": fake}
+	_, signPriv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("sign keypair: %v", err)
+	}
+	stub := NewStubHolderData()
+	var seen []ObserverEvent
+	g := New(Config{
+		Role:             "provider",
+		HolderID:         "provider",
+		Identity:         shnsdk.Identity{HolderID: "provider", SignPriv: signPriv},
+		SoR:              stub,
+		Store:            stub,
+		Validator:        fake,
+		ValidatorsByLine: lanes,
+		Clock:            func() time.Time { return time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC) },
+		Observer:         func(e ObserverEvent) { seen = append(seen, e) },
+	})
+
+	body := []byte(`{"resourceType":"Patient"}`)
+	for _, line := range []string{"2.0", "2.2", ""} {
+		if status, msg := g.validateFHIR(context.Background(), body, "egress", line); status != 0 {
+			t.Fatalf("validateFHIR(line=%q) = (%d,%q), want ok", line, status, msg)
+		}
+	}
+	if len(seen) != 3 {
+		t.Fatalf("%d validate.result events for 2 laned + 1 line-less $validate, want 3: %+v", len(seen), seen)
+	}
+	for _, e := range seen {
+		if e.Kind != "validate.result" || e.Detail != "valid" {
+			t.Fatalf("event = kind %q detail %q, want a valid validate.result", e.Kind, e.Detail)
+		}
+	}
+
+	// The caller's map is untouched — still the RAW validators it passed in.
+	for line, v := range lanes {
+		if _, wrapped := v.(observingValidator); wrapped {
+			t.Errorf("New decorated the CALLER's lane map in place (line %s)", line)
 		}
 	}
 }
@@ -541,5 +599,78 @@ func TestObservingSoR_NotFoundDetail(t *testing.T) {
 		if len(e.Payload) != 0 {
 			t.Fatalf("%s: payload on a miss", e.Op)
 		}
+	}
+}
+
+// TestRouteInfoForWalksDownDirection: fix-round finding 1 (task-3 review) —
+// routeInfoFor must render each ChainStep's From/To/Module in WALK order
+// (mirroring applyChain's curLine-vs-step.From/To switch, transform.go), not
+// the manifest row's stored ascending order. A down-walking route (own build
+// line HIGHER than the routed target — an ordinary reachable shape, not
+// hypothetical: e.g. SHN_CONTRACT_VERSIONS declaring only an older line while
+// this binary natively builds a newer one) must read "2.1->2.0" here exactly
+// as LossReport.Module reads inside the transformed payload — never the
+// manifest's stored "2.0->2.1".
+func TestRouteInfoForWalksDownDirection(t *testing.T) {
+	route := legRoute{
+		Token: "pa.pas@2.0", BuildLine: "2.1",
+		Chain: []CompatStep{{Contract: "pa.pas", From: "2.0", To: "2.1", Class: StepFull}},
+	}
+	ri := routeInfoFor(route)
+	want := []ChainStep{{Module: "pa.pas 2.1->2.0", From: "2.1", To: "2.0", Class: "full"}}
+	if !reflect.DeepEqual(ri.Chain, want) {
+		t.Fatalf("Chain = %+v, want %+v", ri.Chain, want)
+	}
+}
+
+// TestRouteInfoForWalksUpDirection is the up-walking control (own build line
+// LOWER than the routed target — the shape every existing arm-3 fixture in
+// this codebase exercises) — must stay green alongside the down-direction fix.
+func TestRouteInfoForWalksUpDirection(t *testing.T) {
+	route := legRoute{
+		Token: "pa.pas@2.2", BuildLine: "2.0",
+		Chain: []CompatStep{
+			{Contract: "pa.pas", From: "2.0", To: "2.1", Class: StepFull},
+			{Contract: "pa.pas", From: "2.1", To: "2.2", Class: StepCarry},
+		},
+	}
+	ri := routeInfoFor(route)
+	want := []ChainStep{
+		{Module: "pa.pas 2.0->2.1", From: "2.0", To: "2.1", Class: "full"},
+		{Module: "pa.pas 2.1->2.2", From: "2.1", To: "2.2", Class: "carry"},
+	}
+	if !reflect.DeepEqual(ri.Chain, want) {
+		t.Fatalf("Chain = %+v, want %+v", ri.Chain, want)
+	}
+}
+
+// TestRefusalRouteInfoNilWhenUnstructured: fix-round finding 2 (task-3
+// review) — a catalog/library mismatch refuses via versionroute.go's
+// `refusal("")` shape with Own/Peer/BridgeIssue all empty (this build
+// doesn't speak Contract at all, and the peer is undeclared too).
+// refusalRouteInfo must return nil there, matching RouteInfo's own doc
+// ("nil wherever routing played no part") — an empty &RouteInfo{} would
+// marshal "route":{} and misreport a refusal story that isn't there.
+func TestRefusalRouteInfoNilWhenUnstructured(t *testing.T) {
+	e := &RouteRefusalError{Contract: "pa.crd", LegType: "crd-order-select", Recipient: "payer"}
+	if got := refusalRouteInfo(e); got != nil {
+		t.Fatalf("refusalRouteInfo = %+v, want nil for an all-empty refusal", got)
+	}
+}
+
+// TestRefusalRouteInfoCarriesStructuredFields is the control: a refusal with
+// real Own/Peer/BridgeIssue content renders it verbatim (non-nil).
+func TestRefusalRouteInfoCarriesStructuredFields(t *testing.T) {
+	e := &RouteRefusalError{
+		Contract: "pa.crd", LegType: "crd-order-select", Recipient: "payer",
+		Own: []string{"pa.crd@2.0"}, Peer: []string{"pa.crd@2.2"},
+		BridgeIssue: "no transform chain bridges to line 2.2",
+	}
+	got := refusalRouteInfo(e)
+	if got == nil {
+		t.Fatal("refusalRouteInfo = nil, want the structured refusal")
+	}
+	if !reflect.DeepEqual(got.Own, e.Own) || !reflect.DeepEqual(got.Peer, e.Peer) || got.BridgeIssue != e.BridgeIssue {
+		t.Fatalf("refusalRouteInfo = %+v, want Own=%v Peer=%v BridgeIssue=%q", got, e.Own, e.Peer, e.BridgeIssue)
 	}
 }

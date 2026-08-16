@@ -168,7 +168,7 @@ func serviceRequestSubmitBundle(t *testing.T, infoChanged bool) []byte {
 	t.Helper()
 	sr := []byte(`{"resourceType":"ServiceRequest","id":"sr-x","status":"active","intent":"order","subject":{"reference":"Patient/MBR-COVERED"},"code":{"coding":[{"system":"http://www.ama-assn.org/go/cpt","code":"72148","display":"MRI lumbar spine w/o contrast"}]}}`)
 	b, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
-		SR: sr, PatientRef: "Patient/MBR-COVERED", CoverageRef: "Coverage/MBR-COVERED",
+		SR: sr, PatientRef: "Patient/MBR-COVERED", CoverageRef: "Coverage/MBR-COVERED", MemberID: "MBR-COVERED",
 		Corr: "corr-sr-submit", Created: fixedClock(), InfoChanged: infoChanged,
 		Payer: shnsdk.CMSPayerIdentity,
 	})
@@ -355,7 +355,8 @@ func TestNativeUpdate_ApprovedFinalizes(t *testing.T) {
 	})
 
 	// Superseded assertion (pre-relay-recipient-response): a post-Begin partner non-2xx no
-	// longer collapses to a generic 502 — its REAL status + body relay verbatim. The Rollback guard (no strand) is unchanged and still the point of this case.
+	// longer collapses to a generic 502 — its REAL status + body relay verbatim
+	// (2026-07-15). The Rollback guard (no strand) is unchanged and still the point of this case.
 	t.Run("partner 500 AFTER Begin -> relayed verbatim WITH Rollback (no strand)", func(t *testing.T) {
 		srv := stubPartnerSrv(t, http.StatusInternalServerError, []byte(`boom`))
 		s := seedPended()

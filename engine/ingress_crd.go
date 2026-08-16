@@ -254,8 +254,11 @@ func (g *Gateway) resolvePrefetchFromSoR(key, member, patientRef string) (json.R
 		if _, _, found := g.cfg.SoR.ResolvePatient(member); !found {
 			return nil, false
 		}
-		coverageRef := "Coverage/" + member + "-cov"
-		covJSON, err := shnsdk.BuildCoverage(patientRef, coverageRef)
+		// urn:shn:coverage carries the BARE member id (a member number, not a
+		// reference). The old "-cov"-suffixed value existed only to fabricate a
+		// reference-shaped string; the MB identifier IS the member id, and this
+		// prefetch Coverage feeds no DTR fetch leg that would read a reference off it.
+		covJSON, err := shnsdk.BuildCoverage(patientRef, member)
 		if err != nil {
 			return nil, false
 		}

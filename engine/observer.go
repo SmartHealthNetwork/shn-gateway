@@ -28,12 +28,33 @@ import (
 
 // ObserverEvent is one structured observation at the gateway edge. Kinds:
 //
-//	leg.originated    an origination leg is about to be sent (Payload = request cleartext)
+//	leg.originated    an origination leg is about to be sent (Payload = request cleartext;
+//	                  Route = the routed line + build story on the select-before-build path,
+//	                  nil on the legacy OriginateLeg fallback — nothing was selected to report)
 //	leg.response      the origination leg's verified, decrypted response (Payload = response
 //	                  cleartext; Status set when the recipient's app-level answer was a
 //	                  relayed non-2xx, omitted for an ordinary 2xx response)
 //	leg.failed        the origination leg errored for a reason OTHER than a relayed
-//	                  recipient response (Detail = error text)
+//	                  recipient response (Detail = error text). Route is present for
+//	                  TWO refusal variants sharing this seam: egressAdapt's
+//	                  transform-chain refusal and guardPendCarry's
+//	                  carry-integrity refusal on the pinned resume legs —
+//	                  each carries the routed line/chain via routeInfoFor, same
+//	                  rendering as leg.originated's Route; nil for roundTrip's
+//	                  other leg.failed causes (auth denial, Hub unreachable, …),
+//	                  which carry no route story to report
+//	leg.refused       version-matched routing found no shared contract line for the leg
+//	                  and refused before anything was sent (Detail = refusal message;
+//	                  Route.Own/Peer/BridgeIssue = the structured refusal, nil when the
+//	                  refusal wasn't a *RouteRefusalError, e.g. a catalog error)
+//	leg.downgrade     the recipient advertises frame v1 but answered bare; processed as
+//	                  legacy (stale-feed downgrade) (Detail = downgrade message)
+//	leg.transformed   a cross-version transform chain bridged the leg to the peer's
+//	                  contract line before it was sent (Detail = comma-joined module
+//	                  chain summary, e.g. "pa.pas 2.0->2.1, pa.pas 2.1->2.2"). Note: the
+//	                  Provenance + LossReport this describes ride INSIDE the transformed
+//	                  payload itself (or observer-only where the target profile can't
+//	                  tolerate the extra resource) — never the envelope, never Hub-visible.
 //	ingress.received  a Da Vinci ingress call arrived (LegType = route tag, Payload = request body)
 //	ingress.responded the ingress call was answered (Detail = HTTP status, Payload = response body)
 //	validate.result   a $validate ran (Detail = "valid" | "invalid" | "validator unavailable")
@@ -52,6 +73,83 @@ type ObserverEvent struct {
 	Status         int             `json:"status,omitempty"` // relayed recipient app-status (non-2xx relay)
 	Payload        json.RawMessage `json:"payload,omitempty"`
 	Detail         string          `json:"detail,omitempty"`
+	Route          *RouteInfo      `json:"route,omitempty"`
+}
+
+// RouteInfo is the structured routing story attached to leg-scoped observer
+// events (additive; nil wherever routing played no part). On leg.originated
+// it carries the selected Token/BuildLine and, on an arm-(3) transform-chain
+// route, the Chain the payload was bridged through; on leg.refused it
+// carries the *RouteRefusalError's own/peer declarations and bridge issue
+// instead (Token/BuildLine/Chain empty — nothing was selected).
+type RouteInfo struct {
+	Token       string      `json:"token,omitempty"`
+	BuildLine   string      `json:"buildLine,omitempty"`
+	Chain       []ChainStep `json:"chain,omitempty"`
+	Own         []string    `json:"own,omitempty"`         // refusals only
+	Peer        []string    `json:"peer,omitempty"`        // refusals only
+	BridgeIssue string      `json:"bridgeIssue,omitempty"` // refusals only
+}
+
+// ChainStep is one hop of a RouteInfo.Chain, mirroring one CompatStep of the
+// selected transform chain. Module matches LossReport.Module's own format
+// ("pa.pas 2.1->2.2") so the same string reads identically whether it comes
+// from the routed story (observer-only) or the LossReport riding inside a
+// transformed payload.
+type ChainStep struct {
+	Module string `json:"module"` // "pa.dtr 2.1->2.2"
+	From   string `json:"from"`
+	To     string `json:"to"`
+	Class  string `json:"class"` // "full" | "carry" | "gated"
+}
+
+// routeInfoFor renders a resolved legRoute (select-before-build's Token +
+// BuildLine + Chain) as the observer-facing RouteInfo. Chain is nil-through:
+// an arm (1)/(2) route (route.Chain == nil) produces a RouteInfo with a nil
+// Chain, never a speculative empty one.
+//
+// Each hop's From/To (and Module, built from them) is rendered in WALK
+// order, not the manifest row's stored ascending order — mirroring
+// applyChain's own curLine-vs-step.From/To direction switch (transform.go)
+// exactly, so a down-walking chain (own build line HIGHER than the routed
+// target — an ordinary SHN_CONTRACT_VERSIONS shape, not just a theoretical
+// one) renders "2.1->2.0" here as faithfully as the LossReport riding inside
+// the transformed payload itself. CompatStep.Class is direction-invariant
+// (declared per row, not per walk), so it passes through unchanged.
+func routeInfoFor(route legRoute) *RouteInfo {
+	ri := &RouteInfo{Token: route.Token, BuildLine: route.BuildLine}
+	curLine := route.BuildLine
+	for _, s := range route.Chain {
+		from, to := s.From, s.To
+		if curLine == s.To {
+			from, to = s.To, s.From
+		}
+		// curLine == s.From (or an unreached/disconnected row, which egressAdapt's
+		// applyChain would already have refused before any caller reaches this
+		// point with bytes to build a Content from) keeps the manifest's own
+		// ascending From/To.
+		ri.Chain = append(ri.Chain, ChainStep{
+			Module: s.Contract + " " + from + "->" + to,
+			From:   from, To: to, Class: string(s.Class),
+		})
+		curLine = to
+	}
+	return ri
+}
+
+// refusalRouteInfo renders a *RouteRefusalError as the observer-facing
+// RouteInfo's refusal shape (Own/Peer/BridgeIssue; Token/BuildLine/Chain
+// stay empty — nothing was selected to report). nil when the error carries
+// NO refusal detail at all (Own/Peer/BridgeIssue all empty — a catalog/
+// library mismatch that never even attempted arms (2)/(3), spec
+// versionroute.go's `refusal("")` sites): RouteInfo's own doc says "nil
+// wherever routing played no part", and an empty {} would misreport a
+// refusal story that isn't there.
+func refusalRouteInfo(e *RouteRefusalError) *RouteInfo {
+	if len(e.Own) == 0 && len(e.Peer) == 0 && e.BridgeIssue == "" {
+		return nil
+	}
+	return &RouteInfo{Own: e.Own, Peer: e.Peer, BridgeIssue: e.BridgeIssue}
 }
 
 // observe emits e to the configured Observer, stamping Time from the gateway

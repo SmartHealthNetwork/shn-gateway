@@ -33,22 +33,23 @@ func pasTailServiceRequest() []byte {
 // This proves the extraction did not move HomeOxygen's wire bytes (the live gate is the final proof).
 func TestBuildPASSubmitBundle_ByteParity(t *testing.T) {
 	const (
-		patientRef  = "Patient/MBR-OX"
-		coverageRef = "Coverage/MBR-OX"
+		member      = "MBR-OX"
+		patientRef  = "Patient/" + member
+		coverageRef = "Coverage/" + member
 		corr        = "corr-pas-tail"
 	)
 	qr := []byte(`{"resourceType":"QuestionnaireResponse","id":"qr-x","status":"completed","subject":{"reference":"` + patientRef + `"}}`)
 
 	t.Run("DeviceRequest (HomeOxygen) -> InfoChanged:false, byte-identical", func(t *testing.T) {
 		order := pasTailDeviceRequest()
-		got, err := buildPASSubmitBundle(true, order, qr, patientRef, coverageRef, corr, pasTailClock(), shnsdk.CMSPayerIdentity)
+		got, err := buildPASSubmitBundle("2.0", true, order, qr, patientRef, coverageRef, member, corr, pasTailClock(), shnsdk.CMSPayerIdentity)
 		if err != nil {
 			t.Fatalf("buildPASSubmitBundle: %v", err)
 		}
 		// The existing HomeOxygen path builds this EXACT call (targetsBrPayer(provider-data)=true,
 		// no InfoChanged set → default false).
 		want, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
-			QR: qr, SR: order, PatientRef: patientRef, CoverageRef: coverageRef,
+			QR: qr, SR: order, PatientRef: patientRef, CoverageRef: coverageRef, MemberID: member,
 			Corr: corr, Created: pasTailClock(),
 			ContainedInsurer: true, AbsoluteRefs: true, PayerOrgEntry: true,
 			Payer: shnsdk.CMSPayerIdentity,
@@ -66,12 +67,12 @@ func TestBuildPASSubmitBundle_ByteParity(t *testing.T) {
 
 	t.Run("ServiceRequest single-shot -> InfoChanged:true (poll discriminator present)", func(t *testing.T) {
 		order := pasTailServiceRequest()
-		got, err := buildPASSubmitBundle(true, order, qr, patientRef, coverageRef, corr, pasTailClock(), shnsdk.CMSPayerIdentity)
+		got, err := buildPASSubmitBundle("2.0", true, order, qr, patientRef, coverageRef, member, corr, pasTailClock(), shnsdk.CMSPayerIdentity)
 		if err != nil {
 			t.Fatalf("buildPASSubmitBundle: %v", err)
 		}
 		want, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
-			QR: qr, SR: order, PatientRef: patientRef, CoverageRef: coverageRef,
+			QR: qr, SR: order, PatientRef: patientRef, CoverageRef: coverageRef, MemberID: member,
 			Corr: corr, Created: pasTailClock(),
 			ContainedInsurer: true, AbsoluteRefs: true, PayerOrgEntry: true, InfoChanged: true,
 			Payer: shnsdk.CMSPayerIdentity,
@@ -91,12 +92,12 @@ func TestBuildPASSubmitBundle_ByteParity(t *testing.T) {
 		// The sandbox/managed lane (targetsBrPayer=false) keeps the byte-identical sandbox path AND
 		// never sets the poll discriminator regardless of order type.
 		order := pasTailServiceRequest()
-		got, err := buildPASSubmitBundle(false, order, qr, patientRef, coverageRef, corr, pasTailClock(), shnsdk.CMSPayerIdentity)
+		got, err := buildPASSubmitBundle("2.0", false, order, qr, patientRef, coverageRef, member, corr, pasTailClock(), shnsdk.CMSPayerIdentity)
 		if err != nil {
 			t.Fatalf("buildPASSubmitBundle: %v", err)
 		}
 		want, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
-			QR: qr, SR: order, PatientRef: patientRef, CoverageRef: coverageRef,
+			QR: qr, SR: order, PatientRef: patientRef, CoverageRef: coverageRef, MemberID: member,
 			Corr: corr, Created: pasTailClock(),
 			Payer: shnsdk.CMSPayerIdentity,
 		})

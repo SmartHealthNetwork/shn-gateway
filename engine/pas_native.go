@@ -184,7 +184,7 @@ func (g *Gateway) ingressPASNativeSubjectPCI(bundleJSON []byte) (string, int, st
 // (the load-bearing pend→update handoff depends on it) and the FR-28/FR-34 EOB on approve/deny
 // (both the native and sandbox paths). "Pure relay" is now a WIRE property only — the EOB
 // is an ORTHOGONAL Store side-effect, so the native forward is no longer side-effect-free. This
-// handler mirrors handlePASInbound's build-response-BEFORE-Commit ordering (review-fixes-6 #1): build
+// handler mirrors handlePASInbound's build-response-BEFORE-Commit ordering: build
 // the response leg, egress-$validate the SHN-PRODUCED EOB side-effects, run the Commit, THEN write —
 // so a response-leg failure can never orphan the pended/EOB ledger. (A best-effort-CPT native submit
 // with no AMA CPT returns Commit==nil/no side-effects — soft EOB — and the Commit-nil/empty
@@ -213,12 +213,7 @@ func (g *Gateway) ingressPASNativeSubjectPCI(bundleJSON []byte) (string, int, st
 // $validated UNCONDITIONALLY — always built from the bound member, always an SHN resource (FR-36). A
 // verbatim relay produces no EOB side-effect, so that loop is sandbox-only. This mirrors the DTR
 // near-relay, CRD-native, and the minimized pas-claim case.
-func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token) {
-	bundleJSON, err := shnsdk.Open(env, g.cfg.Identity.EncPub, g.cfg.Identity.EncPriv)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "decryption failed"})
-		return
-	}
+func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token, bundleJSON []byte, answerTok string) {
 	boundPatientRef, status, msg := g.conformantPASBind(bundleJSON, tok.Subject)
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
@@ -239,7 +234,7 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 	}()
 	if result.Status != 0 {
 		g.respondLegError(w, r, "payer-coverage", "pas-response", "pas-claim",
-			env.Metadata.CorrelationID, result, tok.Subject, env.Metadata.Sender, "")
+			env.Metadata.CorrelationID, result, tok.Subject, env.Metadata.Sender, "", answerTok)
 		return
 	}
 	// (C) outbound fence — two-predicate, namespace-aware: member-fence
@@ -258,7 +253,9 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 	// minimized pas-claim handler's response egress-$validate. The SHN-produced EOB side-effects are
 	// $validated unconditionally in the loop below.
 	if !result.ResponseRelayed {
-		if status, msg := g.validateFHIR(r.Context(), result.ResponseFHIR, "egress"); status != 0 {
+		// Validated at the ANSWER LINE's lane (F7): a 2.2 ClaimResponse must meet a 2.2
+		// validator, not whichever IG the canonical lane happens to host.
+		if status, msg := g.validateFHIR(r.Context(), result.ResponseFHIR, "egress", shnsdk.LineOf(answerTok)); status != 0 {
 			writeJSON(w, status, map[string]string{"error": msg})
 			return
 		}
@@ -266,15 +263,27 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 	// Egress-$validate the SHN-PRODUCED EOB side-effects before the Store write (FR-36). The relay
 	// RESPONSE itself is NOT $validated (R-8 — it may be a foreign RI's Da Vinci payload); a verbatim
 	// relay carries no side-effect, so this loop is sandbox-only (matches the minimized pas-claim case).
+	// The EOB is PDex, not pa.pas: its shape does not vary with the PAS line, so it validates on the
+	// canonical lane (line "") — passing the PAS answer line here would demand a PAS lane for a
+	// resource that lane does not govern.
 	for _, b := range result.SideEffectFHIR {
-		if status, msg := g.validateFHIR(r.Context(), b, "egress"); status != 0 {
+		if status, msg := g.validateFHIR(r.Context(), b, "egress", ""); status != 0 {
 			writeJSON(w, status, map[string]string{"error": msg})
 			return
 		}
 	}
-	// Build the response leg BEFORE committing payer state (review-fixes-6 #1) so a response-leg
+	// Build the response leg BEFORE committing payer state so a response-leg
 	// failure (unknown requester, seal, encode) cannot orphan the EOB / pended-claim ledger.
-	respBytes, status, msg := g.buildResponseLeg(r, "payer-coverage", "pas-response", "pas-claim", env.Metadata.CorrelationID, g.framePayload(env.Metadata.Sender, http.StatusOK, "application/fhir+json", result.ResponseFHIR), tok.Subject, env.Metadata.Sender, "")
+	//
+	// Stamp honesty: the stamp is
+	// content-descriptive, so a VERBATIM FOREIGN RELAY is now left UNSTAMPED. With multiple
+	// native lines, stamping SHN's own line onto a partner's bytes would assert something
+	// about a payload this build did not produce and cannot vouch for — and the originator's
+	// stamp-verify would then reject a perfectly good relay whose partner answered at another
+	// line. Absence of a stamp is tolerated by design (the frames-absent precedent), so
+	// omission is the honest answer. An SHN-produced answer is stamped at its BUILT line.
+	stampTok := stampForBuiltAnswer(result, answerTok)
+	respBytes, status, msg := g.buildResponseLeg(r, "payer-coverage", "pas-response", "pas-claim", env.Metadata.CorrelationID, g.framePayload(env.Metadata.Sender, http.StatusOK, "application/fhir+json", stampTok, result.ResponseFHIR), tok.Subject, env.Metadata.Sender, "")
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
@@ -295,7 +304,7 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 // (conformantPASUpdateBind — authority + the supplemental-data Provenance attribution), forward the
 // bundle to the responder, and relay the response. It is the UPDATE-family mirror of
 // handlePASNativeInbound (the conformant SUBMIT leg): same Rollback-on-any-pre-commit-early-return +
-// build-response-BEFORE-Commit ordering (review-fixes-6 #1) — the update responder DOES carry a
+// build-response-BEFORE-Commit ordering — the update responder DOES carry a
 // Rollback (it acquires a claim via BeginClaimUpdate, like the minimized pas-claim-update leg).
 //
 // F-PB-R8 — NO ingress-$validate of the REQUEST bundle: the conformant Da Vinci amended re-POST is
@@ -313,12 +322,7 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 // the SHN-produced-side-effect fence/$validate is a no-op here (F-PB-R8 above) — the flags exist to
 // keep this leg symmetric with submit so the native relay stands the response fence/$validate down.
 // (The minimized pas-claim-update leg's (C) fence stays LIVE on its own leg until that leg is deleted.)
-func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token) {
-	bundleJSON, err := shnsdk.Open(env, g.cfg.Identity.EncPub, g.cfg.Identity.EncPriv)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "decryption failed"})
-		return
-	}
+func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token, bundleJSON []byte, answerTok string) {
 	boundPatientRef, status, msg := g.conformantPASUpdateBind(bundleJSON, tok.Subject)
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
@@ -341,7 +345,7 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 	}
 	if result.Status != 0 {
 		g.respondLegError(w, r, "payer-coverage", "pas-update-response", "pas-claim-update",
-			env.Metadata.CorrelationID, result, tok.Subject, env.Metadata.Sender, "")
+			env.Metadata.CorrelationID, result, tok.Subject, env.Metadata.Sender, "", answerTok)
 		return
 	}
 	// (C) outbound fence — two-predicate, namespace-aware: member-fence
@@ -358,7 +362,7 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 	// (ResponseRelayed true) is preserved bytes-only (US-Core validator can't resolve its Da Vinci
 	// profiles).
 	if !result.ResponseRelayed {
-		if status, msg := g.validateFHIR(r.Context(), result.ResponseFHIR, "egress"); status != 0 {
+		if status, msg := g.validateFHIR(r.Context(), result.ResponseFHIR, "egress", shnsdk.LineOf(answerTok)); status != 0 {
 			writeJSON(w, status, map[string]string{"error": msg})
 			return
 		}
@@ -367,14 +371,17 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 	// builds NO EOB, so SideEffectFHIR is empty and this loop is a structural no-op (F-PB-R8); the
 	// relay RESPONSE itself is NOT $validated (it may be a foreign RI's Da Vinci payload, R-8).
 	for _, b := range result.SideEffectFHIR {
-		if status, msg := g.validateFHIR(r.Context(), b, "egress"); status != 0 {
+		if status, msg := g.validateFHIR(r.Context(), b, "egress", ""); status != 0 {
 			writeJSON(w, status, map[string]string{"error": msg})
 			return
 		}
 	}
-	// Build the response leg BEFORE committing payer state (review-fixes-6 #1) so a response-leg
+	// Build the response leg BEFORE committing payer state so a response-leg
 	// failure cannot orphan the claim acquired in BeginClaimUpdate (the deferred Rollback releases it).
-	respBytes, status, msg := g.buildResponseLeg(r, "payer-coverage", "pas-update-response", "pas-claim-update", env.Metadata.CorrelationID, g.framePayload(env.Metadata.Sender, http.StatusOK, "application/fhir+json", result.ResponseFHIR), tok.Subject, env.Metadata.Sender, "")
+	// Stamp honesty, mirror of the submit leg above: a VERBATIM FOREIGN RELAY is left UNSTAMPED (the stamp
+	// describes bytes THIS build produced); an SHN-produced answer is stamped at its BUILT line.
+	stampTok := stampForBuiltAnswer(result, answerTok)
+	respBytes, status, msg := g.buildResponseLeg(r, "payer-coverage", "pas-update-response", "pas-claim-update", env.Metadata.CorrelationID, g.framePayload(env.Metadata.Sender, http.StatusOK, "application/fhir+json", stampTok, result.ResponseFHIR), tok.Subject, env.Metadata.Sender, "")
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
@@ -584,4 +591,23 @@ func (g *Gateway) conformantPASUpdateBind(bundleJSON []byte, tokSubject string) 
 		}
 	}
 	return "", http.StatusForbidden, "ClaimUpdate Provenance does not target the supplemental data"
+}
+
+// stampForBuiltAnswer resolves the contractVersion frame stamp for an answer
+// (the stamp-honesty rule). A verbatim foreign relay is UNSTAMPED: the stamp
+// is content-descriptive, and this build neither produced the partner's bytes nor
+// can vouch for the line they were built at — absence is tolerated by design, a
+// wrong claim is not. Anything SHN produced is stamped at answerTok, the line the
+// responder built it at.
+//
+// The rule is NOT PAS-specific — it holds for every leg that can relay foreign
+// bytes. The two PAS legs call it directly because they build their response frame
+// inline (they must seal BEFORE Commit); every other leg gets the same decision
+// through respondLeg's `relayed` parameter, which the DTR native-forward leg
+// exercises (native.go's dtr-questionnaire-fetch case sets ResponseRelayed).
+func stampForBuiltAnswer(result LegResult, answerTok string) string {
+	if result.ResponseRelayed {
+		return ""
+	}
+	return answerTok
 }

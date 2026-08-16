@@ -104,7 +104,7 @@ func TestConformantSeedBundle_Members(t *testing.T) {
 	}
 	want := map[string]bool{
 		"MBR-COVERED": true, "MBR-NOTCOVERED": true, "MBR-UC06": true,
-		"MBR-UC07HCPCS": true, "MBR-UC08": true,
+		"MBR-UC07HCPCS": true, "MBR-UC08": true, "MBR-BRIDGE-DEMO": true,
 	}
 	got := map[string]bool{}
 	for _, e := range parsed.Entry {
@@ -170,8 +170,8 @@ func TestSeedBundles_Disjoint(t *testing.T) {
 	if len(pm) < 12 {
 		t.Fatalf("provider member set = %d, want >= 12", len(pm))
 	}
-	if len(cm) != 5 {
-		t.Fatalf("conformant member set = %d, want 5", len(cm))
+	if len(cm) != 6 {
+		t.Fatalf("conformant member set = %d, want 6", len(cm))
 	}
 	for id := range cm {
 		if pm[id] {

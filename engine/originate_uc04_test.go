@@ -27,7 +27,7 @@ func TestHandleUC04_ProviderDataAttestsAndLeanTail(t *testing.T) {
 	for _, want := range []string{
 		"uc04AttestationAnswers(res.srJSON)",       // build the attestation map FROM the seeded order
 		"FillQuestionnaireFromAnswers",             // attest the questionnaire (re-fill, $populate auto-pops nothing)
-		"g.submitClaimAndResolve(ctx, r, res.pci,", // the lean single-shot PAS tail (no member param)
+		"g.submitClaimAndResolve(ctx, r, res.pci,", // the lean single-shot PAS tail (no amendment leg)
 		"attestedAnswerValues(answers)",            // surface the traces-to-seed evidence
 	} {
 		if !strings.Contains(fn, want) {

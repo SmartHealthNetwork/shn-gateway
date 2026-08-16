@@ -15,7 +15,7 @@ import (
 // UDAP B2B direct-bearer: the ingress accepts a config-registered client's self-signed
 // private_key_jwt presented DIRECTLY as the Authorization bearer (the form br-provider's
 // BFF sends), verified per-call against the registered key. Design:
-// docs/superpowers/specs/2026-06-22-udap-b2b-ingress-auth-design.md.
+// the UDAP B2B ingress-auth design.
 
 func rsaTestClientKey(t *testing.T) (*rsa.PrivateKey, []byte) {
 	t.Helper()

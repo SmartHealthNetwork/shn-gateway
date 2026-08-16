@@ -114,7 +114,7 @@ func NewSandboxResponder(adj shnsdk.Adjudicator, sor SystemOfRecord, store Store
 
 // crdCardsForCode runs the shared CRD adjudication tail: procedure code → coverage decision → rendered cards.
 // Only caller: sandboxResponder.Handle, case `crd-order-select`.
-func (s *sandboxResponder) crdCardsForCode(code string) (LegResult, error) {
+func (s *sandboxResponder) crdCardsForCode(line, code string) (LegResult, error) {
 	paRequired, canonical := s.adj.OrderSelect(code)
 	cov := shnsdk.CardCoverage{Covered: "covered"}
 	if paRequired {
@@ -122,7 +122,7 @@ func (s *sandboxResponder) crdCardsForCode(code string) (LegResult, error) {
 	} else {
 		cov.PANeeded = "no-auth"
 	}
-	cardsJSON, err := shnsdk.BuildCards(cov)
+	cardsJSON, err := shnsdk.BuildCardsAtLine(line, cov)
 	if err != nil {
 		return LegResult{}, fmt.Errorf("build cards: %w", err)
 	}
@@ -130,6 +130,16 @@ func (s *sandboxResponder) crdCardsForCode(code string) (LegResult, error) {
 }
 
 func (s *sandboxResponder) Handle(ctx context.Context, leg, corrID, subjectPCI string, requestFHIR []byte) (LegResult, error) {
+	// Request framing: the ANSWER LINE for this leg — the line the
+	// originator's request claimed (honored by the inbound dispatch) or the
+	// symmetric recomputation. It rides the context rather than Handle's signature
+	// because LegResponder is a public, partner-implementable seam; a responder
+	// that ignores it keeps building at the build-constant line, exactly as before.
+	contract, cerr := legContract(leg) // ok-guarded: an unknown leg fails closed here, not at a zero legSpec
+	if cerr != nil {
+		return LegResult{}, cerr
+	}
+	line := answerLineOr(ctx, contract)
 	switch leg {
 	case "coverage-eligibility":
 		member, err := shnsdk.ParseEligibilityRequestMember(requestFHIR)
@@ -154,7 +164,7 @@ func (s *sandboxResponder) Handle(ctx context.Context, leg, corrID, subjectPCI s
 		if err != nil {
 			return LegResult{Status: http.StatusBadRequest, Message: "parse procedure coding failed"}, nil
 		}
-		return s.crdCardsForCode(code)
+		return s.crdCardsForCode(line, code)
 	case "dtr-questionnaire-fetch":
 		var fetch shnsdk.QuestionnaireFetchRequest
 		if err := json.Unmarshal(requestFHIR, &fetch); err != nil {
@@ -167,10 +177,43 @@ func (s *sandboxResponder) Handle(ctx context.Context, leg, corrID, subjectPCI s
 		if !ok {
 			return LegResult{Status: http.StatusBadRequest, Message: "unknown questionnaire canonical"}, nil
 		}
-		// Uniform leg shape — wrap the bare Questionnaire into a one-entry
-		// $questionnaire-package collection Bundle (honestly deps-free; the sandbox
-		// has none). The consumer extracts the bare Questionnaire on the far side.
-		pkg, err := buildQuestionnairePackage(questionnaireJSON)
+		dtrDef, ok := shnsdk.DTRLineDef(line)
+		if !ok {
+			return LegResult{}, fmt.Errorf("dtr-questionnaire-fetch: unknown DTR line %q", line)
+		}
+		// DTR-QPackageBundle's QuestionnaireResponse entry becomes MANDATORY at 2.2
+		// (QuestionnairePackageReturnShape=="qr-required"). The sandbox has no
+		// PCI->member reverse resolution and never fabricates clinical/coverage
+		// attribution (FR-36) — the CONFIGURATION.md-recorded gap this closes
+		// is closed HONESTLY: build a zero-answer, in-progress shell whose
+		// subject/coverage facts come from the REQUESTER's OWN Coverage resource (the
+		// fetch leg's `coverage` parameter — the SAME resource
+		// buildQuestionnairePackageRequestAtLine now requires at this line), never
+		// invented here. Absent coverage at this line is a client fault → 400 (the
+		// sandbox demo/harness callers now always attach it at 2.2 — originate.go).
+		var qrShell []byte
+		if dtrDef.QuestionnairePackageReturnShape == "qr-required" {
+			if len(fetch.Coverage) == 0 {
+				return LegResult{Status: http.StatusBadRequest, Message: "questionnaire fetch at DTR line " + line +
+					" requires the coverage parameter (DTR-QPackageBundle's QuestionnaireResponse entry needs a coverage reference)"}, nil
+			}
+			patientRef, coverageRef, cerr := dtrPackageCoverageSubject(fetch.Coverage)
+			if cerr != nil {
+				return LegResult{Status: http.StatusBadRequest, Message: cerr.Error()}, nil
+			}
+			shell, serr := buildDTRPackageQRShellAtLine(line, "qr-package-"+corrID, fetch.Canonical, patientRef, coverageRef, s.clock())
+			if serr != nil {
+				return LegResult{}, fmt.Errorf("build DTR %s QR shell: %w", line, serr)
+			}
+			qrShell = shell
+		}
+		// Uniform leg shape — wrap the bare Questionnaire (+ the QR shell, when this
+		// line requires one) into a $questionnaire-package collection Bundle (honestly
+		// deps-free; the sandbox has none). The consumer extracts the bare
+		// Questionnaire on the far side and never reads a QR shell entry (it is
+		// discarded — the auto-filled/authored QR the provider builds separately is
+		// what actually crosses into the PAS submission).
+		pkg, err := buildQuestionnairePackageAtLine(line, questionnaireJSON, qrShell)
 		if err != nil {
 			return LegResult{}, fmt.Errorf("wrap questionnaire package: %w", err)
 		}
@@ -219,7 +262,7 @@ func (s *sandboxResponder) Handle(ctx context.Context, leg, corrID, subjectPCI s
 		coverageRef := "Coverage/" + s2.member
 		switch dec.Outcome {
 		case shnsdk.PASPended:
-			pendedJSON, err := shnsdk.BuildPendedResponse(patientRef, corrID, dec.NeededItems, s.clock())
+			pendedJSON, err := shnsdk.BuildPendedResponseAtLine(line, patientRef, corrID, dec.NeededItems, s.clock())
 			if err != nil {
 				return LegResult{}, fmt.Errorf("build pended: %w", err)
 			}
@@ -231,7 +274,7 @@ func (s *sandboxResponder) Handle(ctx context.Context, leg, corrID, subjectPCI s
 				Commit:       func() error { return s.store.RecordPendedClaim(subjectPCI, corrID) },
 			}, nil
 		case shnsdk.PASApproved:
-			crJSON, err := shnsdk.BuildClaimResponse(dec.PreAuthRef, dec.ValidUntil, patientRef, corrID, s.clock())
+			crJSON, err := shnsdk.BuildClaimResponseAtLine(line, dec.PreAuthRef, dec.ValidUntil, patientRef, corrID, s.clock())
 			if err != nil {
 				return LegResult{}, fmt.Errorf("build claim response: %w", err)
 			}
@@ -262,7 +305,7 @@ func (s *sandboxResponder) Handle(ctx context.Context, leg, corrID, subjectPCI s
 			if rationale == "" {
 				rationale = sandboxDenyRationale
 			}
-			denJSON, err := shnsdk.BuildDeniedResponse(patientRef, corrID, rationale, s.clock())
+			denJSON, err := shnsdk.BuildDeniedResponseAtLine(line, patientRef, corrID, rationale, s.clock())
 			if err != nil {
 				return LegResult{}, fmt.Errorf("build denied: %w", err)
 			}
@@ -331,7 +374,7 @@ func (s *sandboxResponder) Handle(ctx context.Context, leg, corrID, subjectPCI s
 		}
 		// Approved: build the ClaimResponse. The update leg builds NO EOB (only submit does).
 		patientRef := "Patient/" + s2.member
-		crJSON, err := shnsdk.BuildClaimResponse(dec.PreAuthRef, dec.ValidUntil, patientRef, corrID, s.clock())
+		crJSON, err := shnsdk.BuildClaimResponseAtLine(line, dec.PreAuthRef, dec.ValidUntil, patientRef, corrID, s.clock())
 		if err != nil {
 			return LegResult{Rollback: release}, fmt.Errorf("build claim response: %w", err)
 		}
@@ -355,7 +398,7 @@ func (s *sandboxResponder) Handle(ctx context.Context, leg, corrID, subjectPCI s
 		if err != nil {
 			return LegResult{Status: http.StatusBadRequest, Message: "parse order product coding failed"}, nil
 		}
-		return s.crdDispatchCardsForCode(code)
+		return s.crdDispatchCardsForCode(line, code)
 	default:
 		return LegResult{}, fmt.Errorf("sandboxResponder: unhandled leg %q", leg)
 	}
@@ -366,7 +409,7 @@ func (s *sandboxResponder) Handle(ctx context.Context, leg, corrID, subjectPCI s
 // deliberately gates on cov.NeedsDTR(), not cov.PARequired(), because the real verdict for this
 // leg is the downstream conditional-coverage A4-pended->A1 PAS resolution, not the CRD card
 // itself. DEF-4 holds (deterministic sandbox policy, not real medical-necessity adjudication).
-func (s *sandboxResponder) crdDispatchCardsForCode(code string) (LegResult, error) {
+func (s *sandboxResponder) crdDispatchCardsForCode(line, code string) (LegResult, error) {
 	needsDTR, canonical := s.adj.OrderSelect(code)
 	cov := shnsdk.CardCoverage{Covered: shnsdk.CoveredConditional}
 	if needsDTR {
@@ -374,7 +417,7 @@ func (s *sandboxResponder) crdDispatchCardsForCode(code string) (LegResult, erro
 	} else {
 		cov.PANeeded = shnsdk.PANeededNoAuth
 	}
-	cardsJSON, err := shnsdk.BuildCards(cov)
+	cardsJSON, err := shnsdk.BuildCardsAtLine(line, cov)
 	if err != nil {
 		return LegResult{}, fmt.Errorf("build dispatch cards: %w", err)
 	}

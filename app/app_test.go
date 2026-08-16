@@ -343,6 +343,118 @@ func TestLoadConfig_PayerDavinciBaseOnlyIsOK(t *testing.T) {
 	}
 }
 
+// TestLoadConfig_PayerDavinciContractVersions: the per-peer declared-versions
+// block (spec 2026-08-10 §3 path 2, "seeded by config"). Tokens follow the
+// registrar admission grammar; malformed or base-less declarations are BOOT
+// failures, not runtime surprises.
+func TestLoadConfig_PayerDavinciContractVersions(t *testing.T) {
+	// happy: parsed, split, whitespace-trimmed
+	env := map[string]string{
+		"ROLE": "payer", "SHN_SECRETS": "/x", "SHN_DISCOVERY_URL": "https://d",
+		"PAYER_DAVINCI_BASE_URL":          "https://payer.example",
+		"PAYER_DAVINCI_CONTRACT_VERSIONS": "pa.pas@2.0, pa.crd@2.0",
+	}
+	cfg, err := loadConfig(func(k string) string { return env[k] })
+	if err != nil {
+		t.Fatalf("happy path should load: %v", err)
+	}
+	if len(cfg.PayerDavinciContractVersions) != 2 || cfg.PayerDavinciContractVersions[0] != "pa.pas@2.0" || cfg.PayerDavinciContractVersions[1] != "pa.crd@2.0" {
+		t.Fatalf("parsed = %v", cfg.PayerDavinciContractVersions)
+	}
+
+	// malformed token → boot error
+	env = map[string]string{
+		"ROLE": "payer", "SHN_SECRETS": "/x", "SHN_DISCOVERY_URL": "https://d",
+		"PAYER_DAVINCI_BASE_URL":          "https://payer.example",
+		"PAYER_DAVINCI_CONTRACT_VERSIONS": "PA.PAS@2.0",
+	}
+	if _, err := loadConfig(func(k string) string { return env[k] }); err == nil || !strings.Contains(err.Error(), "PAYER_DAVINCI_CONTRACT_VERSIONS") {
+		t.Fatalf("want malformed-token error, got %v", err)
+	}
+
+	// declared without a base URL → boot error (nothing to verify against)
+	env = map[string]string{
+		"ROLE": "payer", "SHN_SECRETS": "/x", "SHN_DISCOVERY_URL": "https://d",
+		"PAYER_DAVINCI_CONTRACT_VERSIONS": "pa.pas@2.0",
+	}
+	if _, err := loadConfig(func(k string) string { return env[k] }); err == nil || !strings.Contains(err.Error(), "PAYER_DAVINCI_CONTRACT_VERSIONS") {
+		t.Fatalf("want base-URL-required error, got %v", err)
+	}
+}
+
+// SHN_DEMO_EGRESS_NATIVE_LINES: empty = unset (SHN_CONTRACT_VERSIONS parser
+// precedent — a copycat parse must handle this deliberately); unknown line =
+// boot refusal; valid lines land on engine Config.EgressNativeLines (via
+// config.DemoEgressNativeLines, wired in build()). The boot log build() emits
+// when the knob is set is NOT asserted here: build() fails before reaching
+// gwCfg construction with this test file's minimal env (no live discovery),
+// and no stdout-capturing build() harness exists yet elsewhere in this file —
+// per the task brief, the config-field assertion below stands in for it
+// rather than growing new harness machinery for one log line.
+func TestDemoEgressNativeLinesEnv(t *testing.T) {
+	baseEnv := map[string]string{
+		"ROLE": "provider", "SHN_SECRETS": "/x", "SHN_DISCOVERY_URL": "https://d",
+	}
+
+	t.Run("empty is unset", func(t *testing.T) {
+		env := map[string]string{}
+		for k, v := range baseEnv {
+			env[k] = v
+		}
+		env["SHN_DEMO_EGRESS_NATIVE_LINES"] = ""
+		cfg, err := loadConfig(func(k string) string { return env[k] })
+		if err != nil {
+			t.Fatalf("empty env should load: %v", err)
+		}
+		if cfg.DemoEgressNativeLines != nil {
+			t.Fatalf("DemoEgressNativeLines = %v, want nil (unset)", cfg.DemoEgressNativeLines)
+		}
+	})
+
+	t.Run("unknown line refuses boot", func(t *testing.T) {
+		env := map[string]string{}
+		for k, v := range baseEnv {
+			env[k] = v
+		}
+		env["SHN_DEMO_EGRESS_NATIVE_LINES"] = "9.9"
+		_, err := loadConfig(func(k string) string { return env[k] })
+		if err == nil || !strings.Contains(err.Error(), "SHN_DEMO_EGRESS_NATIVE_LINES") {
+			t.Fatalf("want an SHN_DEMO_EGRESS_NATIVE_LINES-naming refusal, got %v", err)
+		}
+	})
+
+	t.Run("set but no parseable line refuses boot", func(t *testing.T) {
+		// "," (or any all-separator value) must never be a silent no-op: the
+		// knob's whole premise is loudness, and a set-but-empty parse leaving
+		// DemoEgressNativeLines nil would run un-narrowed while the operator
+		// believes the demo narrowing is on.
+		env := map[string]string{}
+		for k, v := range baseEnv {
+			env[k] = v
+		}
+		env["SHN_DEMO_EGRESS_NATIVE_LINES"] = ","
+		_, err := loadConfig(func(k string) string { return env[k] })
+		if err == nil || !strings.Contains(err.Error(), "SHN_DEMO_EGRESS_NATIVE_LINES") {
+			t.Fatalf("want an SHN_DEMO_EGRESS_NATIVE_LINES-naming refusal for a no-line value, got %v", err)
+		}
+	})
+
+	t.Run("valid narrows", func(t *testing.T) {
+		env := map[string]string{}
+		for k, v := range baseEnv {
+			env[k] = v
+		}
+		env["SHN_DEMO_EGRESS_NATIVE_LINES"] = "2.0"
+		cfg, err := loadConfig(func(k string) string { return env[k] })
+		if err != nil {
+			t.Fatalf("valid line should load: %v", err)
+		}
+		if len(cfg.DemoEgressNativeLines) != 1 || cfg.DemoEgressNativeLines[0] != "2.0" {
+			t.Fatalf("DemoEgressNativeLines = %v, want [\"2.0\"]", cfg.DemoEgressNativeLines)
+		}
+	})
+}
+
 func TestLoadConfig_ProviderDTRNativeRequiresPopulateURL(t *testing.T) {
 	env := map[string]string{
 		"ROLE": "provider", "SHN_SECRETS": "/x", "SHN_DISCOVERY_URL": "https://d",
@@ -616,7 +728,7 @@ func TestConvergeRegistry_CarriesPayerIDs(t *testing.T) {
 // fed holder's MessageFrames onto the resulting RegistryEntry — the peer cache
 // must thread the feed's self-declared frame capability so the responder-side
 // reader (Gateway.frameNegotiated, which looks the requester's entry up in this
-// registry) can negotiate on it (opaque-payload frame). This test proves
+// registry) can negotiate on it (opaque-payload frame spec §4). This test proves
 // the field survives the /holders → Registry snapshot that reader depends on.
 func TestConvergeRegistry_CarriesMessageFrames(t *testing.T) {
 	var enc [32]byte
@@ -646,6 +758,41 @@ func TestConvergeRegistry_CarriesMessageFrames(t *testing.T) {
 	}
 	if !shnsdk.SupportsMessageFrameV1(entry.MessageFrames) {
 		t.Fatalf("MessageFrames not converged: want v1 support, got %v", entry.MessageFrames)
+	}
+}
+
+// TestConvergeRegistry_CarriesContractVersions verifies convergeRegistry copies
+// a fed holder's ContractVersions onto the resulting RegistryEntry — the peer
+// cache must thread the feed's self-declared contract lines so the
+// version-aware recipient filter can read them (spec 2026-08-10 §4).
+func TestConvergeRegistry_CarriesContractVersions(t *testing.T) {
+	var enc [32]byte
+	enc[0], enc[31] = 7, 9
+	var signPub [ed25519.PublicKeySize]byte
+	signPub[0] = 3
+	holder := shnsdk.Holder{
+		ID:               "payer-b",
+		Role:             "payer",
+		EncPub:           base64.StdEncoding.EncodeToString(enc[:]),
+		SignPub:          base64.StdEncoding.EncodeToString(signPub[:]),
+		BaseURL:          "https://payer-b.example",
+		ContractVersions: []string{"pa.pas@2.0"},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode([]shnsdk.Holder{holder})
+	}))
+	defer srv.Close()
+
+	reg := shnsdk.NewRegistry()
+	if _, err := convergeRegistry(context.Background(), http.DefaultClient, srv.URL, reg); err != nil {
+		t.Fatalf("convergeRegistry: %v", err)
+	}
+	entry, ok := reg.Lookup("payer-b")
+	if !ok {
+		t.Fatal("payer-b missing from converged registry")
+	}
+	if len(entry.ContractVersions) != 1 || entry.ContractVersions[0] != "pa.pas@2.0" {
+		t.Fatalf("ContractVersions not converged: got %v", entry.ContractVersions)
 	}
 }
 
@@ -1052,6 +1199,99 @@ func TestApp_ChecksEndpoint_TokenGatedAndHealthUnaffected(t *testing.T) {
 	}
 }
 
+// TestProbeEvidenceReachesResponder (per-line endpoint evidence): the REAL
+// app-wiring hook, end to end — build() wires checksRunner.OnResults into
+// the native responder's SetEndpointEvidence (gateway/app/app.go, right
+// after checksRunner is constructed, since the responder is built earlier at
+// the PAYER_DAVINCI_BASE_URL block above it); a genuine POST /internal/checks
+// (the SAME live path an operator or cloudctl drives) runs the probes for
+// real against a fake payer serving davinci-configuration, and the evidence
+// must land on the built native responder — read back via
+// EndpointEvidenceForTest, never injected through a second, test-only route.
+func TestProbeEvidenceReachesResponder(t *testing.T) {
+	var payerURL string
+	payer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/.well-known/davinci-configuration" {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"endpoints":{"davinci_dtr_qpackage_endpoint#2.2":%q}}`,
+				payerURL+"/Questionnaire/$questionnaire-package-v22")
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer payer.Close()
+	payerURL = payer.URL
+
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	keyBody := fmt.Sprintf(`{"pubkey":%q}`, base64.StdEncoding.EncodeToString(pub))
+	keys := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(keyBody))
+	}))
+	defer keys.Close()
+	disc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"endpoints":{},"authzPublicKeyURL":%q,"hubTransportKeyURL":%q}`, keys.URL, keys.URL)
+	}))
+	defer disc.Close()
+
+	dir := t.TempDir()
+	id, err := shnsdk.GenerateIdentity("h-test-payer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := shnsdk.WriteBundle(dir, id, "payer", "https://holder.example"); err != nil {
+		t.Fatal(err)
+	}
+
+	env := map[string]string{
+		"ROLE":                         "payer",
+		"SHN_SECRETS":                  dir,
+		"SHN_DISCOVERY_URL":            disc.URL,
+		"SHN_FAKE_VALIDATOR":           "1",
+		"PAYER_DAVINCI_BASE_URL":       payer.URL,
+		"PAYER_DAVINCI_CRD_SERVICE_ID": "svc", // override: skip live /cds-services discovery
+		"CHECKS_TOKEN":                 "t",
+	}
+	getenv := func(k string) string { return env[k] }
+
+	b, err := build(context.Background(), getenv, io.Discard, nil)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if b.nativeResponder == nil {
+		t.Fatal("built.nativeResponder is nil — expected native-forward mode to build one (PAYER_DAVINCI_BASE_URL set)")
+	}
+	reader, ok := b.nativeResponder.(interface{ EndpointEvidenceForTest() map[string]string })
+	if !ok {
+		t.Fatalf("nativeResponder %T does not expose EndpointEvidenceForTest", b.nativeResponder)
+	}
+	if got := reader.EndpointEvidenceForTest(); len(got) != 0 {
+		t.Fatalf("evidence before any checks cycle = %v, want empty", got)
+	}
+
+	srv := httptest.NewServer(b.handler)
+	defer srv.Close()
+
+	postReq, err := http.NewRequest(http.MethodPost, srv.URL+"/internal/checks", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	postReq.Header.Set("Authorization", "Bearer t")
+	resp, err := http.DefaultClient.Do(postReq)
+	if err != nil {
+		t.Fatalf("POST /internal/checks: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /internal/checks status = %d, want 200", resp.StatusCode)
+	}
+
+	want := payerURL + "/Questionnaire/$questionnaire-package-v22"
+	got := reader.EndpointEvidenceForTest()
+	if got["pa.dtr@2.2"] != want {
+		t.Fatalf("evidence after the checks cycle = %v, want pa.dtr@2.2 -> %q", got, want)
+	}
+}
+
 // TestFhirTokenFetch_MintsFreshTokenPerInvocation pins the fix for
 // IMPORTANT-1 (task-18 review): the /internal/checks credential-check
 // closure must construct a FRESH *smartauth.TokenSource on every invocation,
@@ -1166,4 +1406,66 @@ func TestServerFor_RealTLSHandshake(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
+}
+
+// TestCheckTargets_PayerDavinciWellKnown: checkTargets derives the
+// PAYER_DAVINCI_WELL_KNOWN companion target from PAYER_DAVINCI_BASE_URL —
+// same URL, same DeclaredVersions, KindDavinciConfig — alongside the base
+// target itself (KindFHIRMetadata). Neither target's URL is independently
+// configured (app.go's one-table invariant).
+func TestCheckTargets_PayerDavinciWellKnown(t *testing.T) {
+	find := func(targets []checks.Target, id string) (checks.Target, bool) {
+		for _, tgt := range targets {
+			if tgt.ID == id {
+				return tgt, true
+			}
+		}
+		return checks.Target{}, false
+	}
+
+	t.Run("base set", func(t *testing.T) {
+		cfg := config{
+			PayerDavinciBaseURL:          "https://payer.example/fhir",
+			PayerDavinciContractVersions: []string{"pa.pas@2.2", "pa.dtr@2.0"},
+		}
+		targets := checkTargets(cfg)
+
+		base, ok := find(targets, "PAYER_DAVINCI_BASE_URL")
+		if !ok {
+			t.Fatal("PAYER_DAVINCI_BASE_URL target missing")
+		}
+		if base.Kind != checks.KindFHIRMetadata {
+			t.Fatalf("base Kind = %q, want %q", base.Kind, checks.KindFHIRMetadata)
+		}
+		if base.URL != cfg.PayerDavinciBaseURL {
+			t.Fatalf("base URL = %q, want %q", base.URL, cfg.PayerDavinciBaseURL)
+		}
+		if strings.Join(base.DeclaredVersions, ",") != strings.Join(cfg.PayerDavinciContractVersions, ",") {
+			t.Fatalf("base DeclaredVersions = %v, want %v", base.DeclaredVersions, cfg.PayerDavinciContractVersions)
+		}
+
+		wellKnown, ok := find(targets, "PAYER_DAVINCI_WELL_KNOWN")
+		if !ok {
+			t.Fatal("PAYER_DAVINCI_WELL_KNOWN target missing")
+		}
+		if wellKnown.Kind != checks.KindDavinciConfig {
+			t.Fatalf("well-known Kind = %q, want %q", wellKnown.Kind, checks.KindDavinciConfig)
+		}
+		if wellKnown.URL != cfg.PayerDavinciBaseURL {
+			t.Fatalf("well-known URL = %q, want %q (same base URL)", wellKnown.URL, cfg.PayerDavinciBaseURL)
+		}
+		if strings.Join(wellKnown.DeclaredVersions, ",") != strings.Join(cfg.PayerDavinciContractVersions, ",") {
+			t.Fatalf("well-known DeclaredVersions = %v, want %v", wellKnown.DeclaredVersions, cfg.PayerDavinciContractVersions)
+		}
+	})
+
+	t.Run("base unset", func(t *testing.T) {
+		targets := checkTargets(config{})
+		if _, ok := find(targets, "PAYER_DAVINCI_BASE_URL"); ok {
+			t.Fatal("PAYER_DAVINCI_BASE_URL target present with no base URL configured")
+		}
+		if _, ok := find(targets, "PAYER_DAVINCI_WELL_KNOWN"); ok {
+			t.Fatal("PAYER_DAVINCI_WELL_KNOWN target present with no base URL configured")
+		}
+	})
 }

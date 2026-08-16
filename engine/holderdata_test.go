@@ -5,6 +5,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
 // TestStubHolderData_Personas proves the two UC-01 personas in isolation.
@@ -375,6 +377,76 @@ func TestEOBReaders_ReturnDefensiveCopies(t *testing.T) {
 	}
 	if after[0][0] == 'Y' {
 		t.Fatal("EOBsForPatient returned mutable references to stored bytes")
+	}
+}
+
+// TestStubHolderData_BridgeDemoPersonas proves the bridging-demo personas: both resolve, are in force,
+// carry the SAME approve-worthy clinical shape as MBR-COVERED, and — the load-bearing part —
+// each member's stub Coverage read (OpenCoverage) parses to its OWN exported demo payer
+// identity rather than the default CMSPayerIdentity every un-overridden persona shares.
+func TestStubHolderData_BridgeDemoPersonas(t *testing.T) {
+	d := NewStubHolderData()
+
+	for _, tc := range []struct {
+		member    string
+		birthDate string
+		family    string
+		wantPayer shnsdk.PayerIdentifier
+	}{
+		{"MBR-BRIDGE-DEMO", "1983-03-11", "Solberg-BridgeDemo", BridgeDemoPayerID},
+		{"MBR-BRIDGE-REFUSE", "1986-09-27", "Amara-BridgeRefuse", BridgeRefusePayerID},
+	} {
+		t.Run(tc.member, func(t *testing.T) {
+			pci, demo, found := d.ResolvePatient(tc.member)
+			if !found {
+				t.Fatalf("expected found=true for %s", tc.member)
+			}
+			if !strings.HasPrefix(pci, "pci:") || pci == "pci:" {
+				t.Errorf("pci must be a non-empty 'pci:'-prefixed hash, got %q", pci)
+			}
+			if demo.BirthDate != tc.birthDate || demo.FamilyName != tc.family {
+				t.Errorf("demo = %+v, want {%q %q}", demo, tc.birthDate, tc.family)
+			}
+
+			inforce, reason := d.CoverageInforce(tc.member)
+			if !inforce || reason != "" {
+				t.Errorf("CoverageInforce = (%v,%q), want (true,\"\")", inforce, reason)
+			}
+
+			cc, ccFound := d.ClinicalContext(tc.member)
+			if !ccFound {
+				t.Fatal("expected ClinicalContext found=true")
+			}
+			if cc.ConditionCode != "M51.16" || cc.ConservativeTherapyWeeks != 6 || cc.NeuroDeficit || !cc.PriorImaging {
+				t.Errorf("ClinicalContext = %+v, want the MBR-COVERED-shaped approve-worthy facts", cc)
+			}
+
+			covJSON, covFound := d.OpenCoverage(tc.member)
+			if !covFound {
+				t.Fatal("expected OpenCoverage found=true")
+			}
+			gotPayer, ok := shnsdk.ParsePayerIdentifier(covJSON, nil)
+			if !ok {
+				t.Fatalf("ParsePayerIdentifier: ok=false for %s", covJSON)
+			}
+			if gotPayer != tc.wantPayer {
+				t.Errorf("OpenCoverage(%s) payer = %+v, want %+v", tc.member, gotPayer, tc.wantPayer)
+			}
+		})
+	}
+
+	// The two demo personas must never collide on payer identity or PCI (attribution).
+	demoCov, _ := d.OpenCoverage("MBR-BRIDGE-DEMO")
+	refuseCov, _ := d.OpenCoverage("MBR-BRIDGE-REFUSE")
+	demoPayer, _ := shnsdk.ParsePayerIdentifier(demoCov, nil)
+	refusePayer, _ := shnsdk.ParsePayerIdentifier(refuseCov, nil)
+	if demoPayer == refusePayer {
+		t.Fatalf("MBR-BRIDGE-DEMO and MBR-BRIDGE-REFUSE must resolve to DIFFERENT payer identities, both got %+v", demoPayer)
+	}
+	demoPCI, _, _ := d.ResolvePatient("MBR-BRIDGE-DEMO")
+	refusePCI, _, _ := d.ResolvePatient("MBR-BRIDGE-REFUSE")
+	if demoPCI == refusePCI {
+		t.Fatalf("MBR-BRIDGE-DEMO and MBR-BRIDGE-REFUSE must have different PCIs, both got %q", demoPCI)
 	}
 }
 

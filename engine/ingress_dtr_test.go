@@ -6,7 +6,7 @@ import (
 )
 
 // TestDTRFromPackageParams_OrderOrCanonical proves the $questionnaire-package ingress accepts
-// EITHER a `questionnaire` canonical (br-payer / SDC path) OR an `order` (the external-payer lane, whose
+// EITHER a `questionnaire` canonical (br-payer / SDC path) OR an `order` (the Cambia lane, whose
 // operation keys off the CRD-updated order and has no `questionnaire` param), extracts the order
 // verbatim, and derives the patient reference for authz from the coverage beneficiary or, absent
 // coverage, from the order subject.

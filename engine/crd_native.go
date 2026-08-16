@@ -108,24 +108,19 @@ func (g *Gateway) conformantCRDBind(reqJSON []byte, tokSubject string) (srJSON, 
 // ingress-validate the SR + coverage, then forward the VERBATIM conformant bytes to the responder
 // (sandbox adjudicates / native forwards to the real RI). Mirrors handleCRDInbound's structure for
 // the conformant shape; the existing minimized handler is untouched.
-func (g *Gateway) handleCRDNativeInbound(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token) {
+func (g *Gateway) handleCRDNativeInbound(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token, reqJSON []byte, answerTok string) {
 	ctx := r.Context()
-	reqJSON, err := shnsdk.Open(env, g.cfg.Identity.EncPub, g.cfg.Identity.EncPriv)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "decryption failed"})
-		return
-	}
 	srJSON, covJSON, status, msg := g.conformantCRDBind(reqJSON, tok.Subject)
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
-	if status, msg := g.validateFHIR(ctx, srJSON, "ingress"); status != 0 {
+	if status, msg := g.validateFHIR(ctx, srJSON, "ingress", ""); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
 	if len(covJSON) > 0 {
-		if status, msg := g.validateFHIR(ctx, covJSON, "ingress"); status != 0 {
+		if status, msg := g.validateFHIR(ctx, covJSON, "ingress", ""); status != 0 {
 			writeJSON(w, status, map[string]string{"error": msg})
 			return
 		}
@@ -137,8 +132,8 @@ func (g *Gateway) handleCRDNativeInbound(w http.ResponseWriter, r *http.Request,
 	}
 	if result.Status != 0 {
 		g.respondLegError(w, r, "payer-coverage", "crd-cards", "crd-order-select",
-			env.Metadata.CorrelationID, result, tok.Subject, env.Metadata.Sender, "")
+			env.Metadata.CorrelationID, result, tok.Subject, env.Metadata.Sender, "", answerTok)
 		return
 	}
-	g.respondLeg(w, r, "payer-coverage", "crd-cards", "crd-order-select", env.Metadata.CorrelationID, result.ResponseFHIR, tok.Subject, env.Metadata.Sender, "")
+	g.respondLeg(w, r, "payer-coverage", "crd-cards", "crd-order-select", env.Metadata.CorrelationID, result.ResponseFHIR, tok.Subject, env.Metadata.Sender, "", answerTok, result.ResponseRelayed)
 }

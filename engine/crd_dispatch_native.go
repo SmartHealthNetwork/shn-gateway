@@ -160,13 +160,8 @@ func firstDispatchedOrder(reqJSON []byte) ([]byte, bool) {
 // handleCRDDispatchInbound serves the conformant crd-order-dispatch leg. Mirrors handleCRDNativeInbound:
 // subject-bind, ingress-validate the resolved DeviceRequest + coverage (validateFHIR respects A4's R-8
 // skip on br-payer-targeting lanes), then forward the verbatim request to the responder.
-func (g *Gateway) handleCRDDispatchInbound(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token) {
+func (g *Gateway) handleCRDDispatchInbound(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token, reqJSON []byte, answerTok string) {
 	ctx := r.Context()
-	reqJSON, err := shnsdk.Open(env, g.cfg.Identity.EncPub, g.cfg.Identity.EncPriv)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "decryption failed"})
-		return
-	}
 	orderJSON, _, status, msg := g.conformantCRDDispatchBind(reqJSON, tok.Subject)
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
@@ -180,7 +175,7 @@ func (g *Gateway) handleCRDDispatchInbound(w http.ResponseWriter, r *http.Reques
 	// OWN Org (R-8: SHN doesn't $validate relayed foreign bytes), and the AI-11 bind already
 	// subject-fenced the coverage beneficiary. (The bare-Coverage order-select path still validates
 	// its coverage — that one is not a bundle.)
-	if status, msg := g.validateFHIR(ctx, orderJSON, "ingress"); status != 0 {
+	if status, msg := g.validateFHIR(ctx, orderJSON, "ingress", ""); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
@@ -191,8 +186,8 @@ func (g *Gateway) handleCRDDispatchInbound(w http.ResponseWriter, r *http.Reques
 	}
 	if result.Status != 0 {
 		g.respondLegError(w, r, "payer-coverage", "crd-dispatch-cards", "crd-order-dispatch",
-			env.Metadata.CorrelationID, result, tok.Subject, env.Metadata.Sender, "")
+			env.Metadata.CorrelationID, result, tok.Subject, env.Metadata.Sender, "", answerTok)
 		return
 	}
-	g.respondLeg(w, r, "payer-coverage", "crd-dispatch-cards", "crd-order-dispatch", env.Metadata.CorrelationID, result.ResponseFHIR, tok.Subject, env.Metadata.Sender, "")
+	g.respondLeg(w, r, "payer-coverage", "crd-dispatch-cards", "crd-order-dispatch", env.Metadata.CorrelationID, result.ResponseFHIR, tok.Subject, env.Metadata.Sender, "", answerTok, result.ResponseRelayed)
 }

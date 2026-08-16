@@ -347,13 +347,59 @@ var stubPersonas = map[string]persona{
 		},
 		hasClinical: true,
 	},
+	// MBR-BRIDGE-DEMO / MBR-BRIDGE-REFUSE — the bridging-demo personas. Both
+	// drive UC-03 (CRD order-select → DTR fetch/auto-fill → PAS submit, CPT 72148/M51.16,
+	// handleUC03's g.scenarioMember seam) and carry the SAME approve-worthy clinical shape as
+	// MBR-COVERED (weeks=6, no neuro deficit, prior imaging, no prior surgery — mirrors
+	// shnsdk.SandboxUC03Context) so neither persona's OWN clinical facts ever deny the PA; the
+	// "refuse" run's failure comes from the demo's gated egress-native-lines mechanism (D-6),
+	// never from a clinical verdict. What DOES differ is the payer identity their OpenCoverage
+	// answers with (see stubPayerOverrides below): MBR-BRIDGE-DEMO routes to the bridge-demo-
+	// payer holder, MBR-BRIDGE-REFUSE to bridge-demo-refuse, instead of the sandbox
+	// CMS conformance payer. Distinct demographics from MBR-COVERED so their PCI (and every
+	// audit/observer surface keyed on it) is attributable. Demo values are copied VERBATIM into
+	// internal/fhirseed/fhirseed.go's demographics table (cross-partition PCI — the MBR-OX
+	// precedent's rule, applied here too).
+	"MBR-BRIDGE-DEMO": {
+		demo:    Demo{BirthDate: "1983-03-11", FamilyName: "Solberg-BridgeDemo"},
+		inforce: true,
+		clinical: shnsdk.ClinicalContext{
+			ConditionCode:            "M51.16",
+			ConditionRef:             "Condition/cond-m5116",
+			ConservativeTherapyWeeks: 6,
+			ConservativeTherapyRef:   "Observation/obs-pt-weeks",
+			ConservativeDate:         "2026-05-20",
+			NeuroDeficit:             false,
+			NeuroDeficitRef:          "Observation/obs-neuro",
+			PriorImaging:             true,
+			PriorImagingRef:          "DiagnosticReport/dr-xray",
+		},
+		hasClinical: true,
+	},
+	"MBR-BRIDGE-REFUSE": {
+		demo:    Demo{BirthDate: "1986-09-27", FamilyName: "Amara-BridgeRefuse"},
+		inforce: true,
+		clinical: shnsdk.ClinicalContext{
+			ConditionCode:            "M51.16",
+			ConditionRef:             "Condition/cond-m5116",
+			ConservativeTherapyWeeks: 6,
+			ConservativeTherapyRef:   "Observation/obs-pt-weeks",
+			ConservativeDate:         "2026-05-20",
+			NeuroDeficit:             false,
+			NeuroDeficitRef:          "Observation/obs-neuro",
+			PriorImaging:             true,
+			PriorImagingRef:          "DiagnosticReport/dr-xray",
+		},
+		hasClinical: true,
+	},
 	// MBR-PAYERB / MBR-PAYERUNKNOWN are HERMETIC-TEST-ONLY personas (FR-G40): they exist
 	// solely so gateway/engine/payerrouting_test.go (and test/adversarial) can prove/disprove
 	// coverage-derived payer routing without standing up a real multi-payer FHIR SoR. They carry
 	// no clinical context (routing tests never reach CRD/DTR content). Deliberately NOT in
 	// PersonaRefs (personas.go): never live-seeded, never console-exposed, never driven by any UC
-	// scenario handler's sceneMember — see stubPayerOverrides below, which is what actually gives
-	// them a non-default payer identity.
+	// scenario handler's sceneMember (unlike MBR-BRIDGE-DEMO/MBR-BRIDGE-REFUSE above, which the
+	// Kit's runner now drives) — see stubPayerOverrides below, which is what actually
+	// gives them a non-default payer identity.
 	"MBR-PAYERB": {
 		demo:    Demo{BirthDate: "1972-01-01", FamilyName: "Routingtest-PayerB"},
 		inforce: true,
@@ -405,6 +451,29 @@ func init() {
 	}
 }
 
+// bridgeDemoPayerSystem namespaces the bridging-demo payer identities distinctly
+// from the shared NAIC-style payer-id OID (urn:oid:2.16.840.1.113883.6.300)
+// every other holder identity in this file claims a numeric code under (00001/00078/00099/…).
+// The bridge-demo payers are a visualization fixture, not a real-world-registered payer, so
+// they get their own obviously-synthetic namespace rather than squatting on the next unclaimed
+// NAIC-style number.
+const bridgeDemoPayerSystem = "urn:shn:demo-payer"
+
+// BridgeDemoPayerID / BridgeRefusePayerID are the payer identities MBR-BRIDGE-DEMO's and
+// MBR-BRIDGE-REFUSE's Coverage.payor name: coverage-derived routing
+// (FeedPayerRouter) sends their legs to the bridge-demo-payer / bridge-demo-refuse holders
+// never the sandbox CMS conformance payer. Exported — unlike stubPayerOverrides'
+// unexported map — so internal/fhirseed (the deployed-stack seed source of truth, a SEPARATE
+// Go module) and the SHN Kit surfaces (runner branches, the live bridging fixture) can name the exact
+// identity rather than duplicating the literal. Defined beside stubPayerOverrides following
+// the sdk/payer.go CMSPayerIdentity idiom (a plain shnsdk.PayerIdentifier value); sdk
+// promotion is optional at a later publish — for now these stay engine-local, like every
+// other stubPayerOverrides entry.
+var (
+	BridgeDemoPayerID   = shnsdk.PayerIdentifier{System: bridgeDemoPayerSystem, Value: "SHN-BRIDGE-DEMO"}
+	BridgeRefusePayerID = shnsdk.PayerIdentifier{System: bridgeDemoPayerSystem, Value: "SHN-BRIDGE-REFUSE"}
+)
+
 // stubPayerOverrides names members whose OpenCoverage payor is DELIBERATELY DISTINCT from the
 // default CMSPayerIdentity (FR-G40: the hermetic two/three-payer routing proof). Every
 // member ABSENT from this map — i.e. every pre-existing persona — keeps resolving to
@@ -412,8 +481,10 @@ func init() {
 // MBR-PAYERUNKNOWN's value (00099) is deliberately never registered in any PayerRouter used by
 // tests/harness — it exists to drive the "no registered payer" fail-closed path (AI-G11 / OWD-G10).
 var stubPayerOverrides = map[string]shnsdk.PayerIdentifier{
-	"MBR-PAYERB":       {System: shnsdk.CMSPayerIdentity.System, Value: "00078"},
-	"MBR-PAYERUNKNOWN": {System: shnsdk.CMSPayerIdentity.System, Value: "00099"},
+	"MBR-PAYERB":        {System: shnsdk.CMSPayerIdentity.System, Value: "00078"},
+	"MBR-PAYERUNKNOWN":  {System: shnsdk.CMSPayerIdentity.System, Value: "00099"},
+	"MBR-BRIDGE-DEMO":   BridgeDemoPayerID,
+	"MBR-BRIDGE-REFUSE": BridgeRefusePayerID,
 }
 
 // ResolvePatient returns the member's PCI and demographics. Unknown members yield
@@ -506,7 +577,7 @@ func (d *StubHolderData) OpenCoverage(memberID string) ([]byte, bool) {
 	if p, ok := stubPayerOverrides[memberID]; ok {
 		payer = p
 	}
-	cov, err := shnsdk.BuildCoverageWithPayer("Patient/"+memberID, "Coverage/"+memberID, payer)
+	cov, err := shnsdk.BuildCoverageWithPayer("Patient/"+memberID, memberID, payer)
 	if err != nil {
 		return nil, false
 	}

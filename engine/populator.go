@@ -35,6 +35,16 @@ type PopulateContext struct {
 	CoverageRef    string
 	OrderRef       string
 	Authored       time.Time
+	// Line is the DTR contract line ("2.0"/"2.1"/"2.2") the fetched
+	// $questionnaire-package was pulled at — selected once at the DTR-fetch leg
+	// (originate.go's select-before-build, F7) and threaded here so the QR the
+	// Populator builds matches the wire shape the fetch already committed to
+	// (closes an earlier KNOWN GAP where every authored QR was frozen
+	// at 2.0 regardless of the selected line). Empty delegates to "2.0" — the
+	// pre-line-threading default — so this stays an ADDITIVE field: a kit/custom
+	// Populator implementation that never sets it keeps building at 2.0 exactly
+	// as before, never a required-but-forgotten wiring hole.
+	Line string
 }
 
 // errNoClinicalContext is a sentinel so the consumer maps "no clinical data for member"
@@ -72,7 +82,16 @@ func (m *managedPopulator) Populate(ctx context.Context, packageJSON []byte, pc 
 	if !ok {
 		return nil, nil, errNoClinicalContext
 	}
-	qr, err := shnsdk.FillQuestionnaire(q, cc, shnsdk.QRContext{
+	// Thread the selected DTR line (closes an earlier KNOWN GAP: every authored
+	// QR used to be frozen at the 2.0 shape regardless of the selected line — the 2.2
+	// two-RI run showed wrong-line QR bytes could pass SILENTLY, the UC-03 auto-fill site
+	// this closes). "" (the pre-line-threading caller shape) delegates to "2.0" — PopulateContext.Line's
+	// documented additive default.
+	line := pc.Line
+	if line == "" {
+		line = "2.0"
+	}
+	qr, err := shnsdk.FillQuestionnaireAtLine(line, q, cc, shnsdk.QRContext{
 		PatientRef:  pc.PatientRef,
 		CoverageRef: pc.CoverageRef,
 		OrderRef:    pc.OrderRef,

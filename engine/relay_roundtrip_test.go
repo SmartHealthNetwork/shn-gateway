@@ -44,9 +44,17 @@ type relaySubstrate struct {
 	providerEncPub *[32]byte
 	clock          func() time.Time
 
-	mu     sync.Mutex
-	result LegResult // seal target for /route; meaningful only when set==true
-	set    bool      // false until the test calls setResult (falls back to default success cards)
+	// recipientEnc lets the stub OPEN the sealed REQUEST payload, so a test can
+	// assert what actually crossed the wire (framed vs bare request bytes).
+	// A real Hub could not do this — the stub stands in for the RECIPIENT here.
+	recipientEncPub  *[32]byte
+	recipientEncPriv *[32]byte
+
+	mu        sync.Mutex
+	lastReq   []byte    // the last decrypted REQUEST payload (raw: framed or bare)
+	result    LegResult // seal target for /route; meaningful only when set==true
+	set       bool      // false until the test calls setResult (falls back to default success cards)
+	routeHits int       // count of handleRoute calls — the version-filter refusal test asserts this stays 0 (fail-closed BEFORE any Hub round-trip)
 
 	// mutateResp, if set, transforms the sealed response-leg wire bytes AFTER
 	// sealForProvider succeeds and BEFORE they're wrapped into the stub's HTTP
@@ -115,9 +123,20 @@ func (s *relaySubstrate) handleAuthorize(body []byte) (*http.Response, error) {
 // tests inject a pre-built frame or a bare stale-feed payload), or a canned
 // success-cards payload if ResponseFHIR is also unset.
 func (s *relaySubstrate) handleRoute(body []byte) (*http.Response, error) {
+	s.mu.Lock()
+	s.routeHits++
+	s.mu.Unlock()
+
 	env, err := shnsdk.DecodeEnvelope(body)
 	if err != nil {
 		return errResp("stub: decode envelope: " + err.Error()), nil
+	}
+	if s.recipientEncPub != nil && s.recipientEncPriv != nil {
+		if plain, oerr := shnsdk.Open(env, s.recipientEncPub, s.recipientEncPriv); oerr == nil {
+			s.mu.Lock()
+			s.lastReq = plain
+			s.mu.Unlock()
+		}
 	}
 	var reqTok shnsdk.Token
 	_ = json.Unmarshal([]byte(env.Metadata.AuthzToken), &reqTok)
@@ -195,6 +214,24 @@ func (e *inProcessExchange) payerReturns(lr LegResult) {
 	e.substrate.setResult(lr)
 }
 
+// lastRequestPayload returns the DECRYPTED request payload of the most recent
+// /route call — the raw inner bytes, framed or bare, exactly as the recipient
+// would see them after Open. The request-frame fence tests read it to prove a
+// non-declaring peer's request is byte-identical to the pre-framing bare payload.
+func (e *inProcessExchange) lastRequestPayload() []byte {
+	e.substrate.mu.Lock()
+	defer e.substrate.mu.Unlock()
+	return e.substrate.lastReq
+}
+
+// routeHitCount reads the fake Hub's /route call counter — used by the version-filter
+// refusal test to prove a refused leg never reaches the Hub round-trip at all.
+func (e *inProcessExchange) routeHitCount() int {
+	e.substrate.mu.Lock()
+	defer e.substrate.mu.Unlock()
+	return e.substrate.routeHits
+}
+
 // corruptResponseToken arms the fake Hub's response leg with a MUTATED
 // authz token: it decodes the sealed envelope sealForProvider just produced,
 // re-signs the response-leg Token with a FRESH ed25519 key the originator's
@@ -236,7 +273,7 @@ func (e *inProcessExchange) corruptResponseToken(t *testing.T) {
 // (payerrouting_test.go) but with a test-configurable response leg instead of
 // an always-success canned card. Both holders advertise message-frame v1
 // (SupportedMessageFrames), so the originator's roundTripInner decodes the frame
-// the substrate seals — negotiation is registry-driven, keyed
+// the substrate seals — negotiation is registry-driven (spec 2026-07-17), keyed
 // on the RECIPIENT's advertised frames.
 //
 // PayerRouter + EnableIngressForTest are added for the CRD ingress drive (which
@@ -249,16 +286,17 @@ func newInProcessExchange(t *testing.T) *inProcessExchange {
 	authzPub, authzPriv := genED25519(t)
 	provEncPub, provEncPriv := genKeyPair(t)
 	_, provSignPriv := genED25519(t)
-	payerEncPub, _ := genKeyPair(t)
+	payerEncPub, payerEncPriv := genKeyPair(t)
 	payerSignPub, _ := genED25519(t)
 
 	clock := func() time.Time { return time.Unix(1700000000, 0).UTC() }
-	stub := &relaySubstrate{authzPriv: authzPriv, providerEncPub: provEncPub, clock: clock}
+	stub := &relaySubstrate{authzPriv: authzPriv, providerEncPub: provEncPub, clock: clock,
+		recipientEncPub: payerEncPub, recipientEncPriv: payerEncPriv}
 
 	reg := shnsdk.NewRegistry()
 	reg.Set("provider", shnsdk.RegistryEntry{ID: "provider", Role: "provider", EncPub: provEncPub, SignPub: authzPub, MessageFrames: shnsdk.SupportedMessageFrames()})
 	// The recipient advertises message-frame v1 so roundTripInner decodes the frame
-	// handleRoute seals; frame_originate_test.go re-asserts this per
+	// handleRoute seals (spec 2026-07-17); frame_originate_test.go re-asserts this per
 	// case via advertiseRecipientFrameV1 (idempotent) and its stale-feed row seals a
 	// bare payload against this same v1-advertising entry.
 	reg.Set("payer", shnsdk.RegistryEntry{ID: "payer", Role: "payer", EncPub: payerEncPub, SignPub: payerSignPub, MessageFrames: shnsdk.SupportedMessageFrames()})

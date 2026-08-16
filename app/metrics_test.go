@@ -29,7 +29,7 @@ func decodeEMFLines(t *testing.T, buf *bytes.Buffer) []map[string]any {
 
 // TestLegMetricHook_EmitsLegOutcomeAndErrorRollup: every outcome emits one
 // LegOutcome line with dims {Env, Service, outcome, role}; failed and
-// unreachable ALSO emit the single-stream LegError rollup the per-service
+// unreachable ALSO emit the single-stream LegError rollup the #16 per-service
 // alarms watch (denied deliberately does not — a policy decision, not an error).
 func TestLegMetricHook_EmitsLegOutcomeAndErrorRollup(t *testing.T) {
 	var buf bytes.Buffer

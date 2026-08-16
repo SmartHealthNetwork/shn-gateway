@@ -76,7 +76,7 @@ func (s *inboundAuthzStub) RoundTrip(req *http.Request) (*http.Response, error) 
 // ("requester", role provider) — everything respondLegError's buildResponseLeg call
 // needs to mint a token and seal a response leg to that requester. When frameCapable
 // is true the requester's registry entry advertises MessageFrames:["v1"] (the
-// negotiation switch): the responder frames its answers only to a
+// negotiation switch, spec 2026-07-17): the responder frames its answers only to a
 // peer that declared it can decode; a non-capable requester gets the pre-v0.27.0 bare
 // contract. Returns the gateway plus the requester's id + key pair (the test needs the
 // private half to Open the seal — a real Registry never carries it).
@@ -155,7 +155,7 @@ func TestRespondLegErrorFramesForCapableRequester(t *testing.T) {
 	rec := httptest.NewRecorder()
 	r := newSignedInboundRequest(t, g, requester.ID)
 	g.respondLegError(rec, r, "payer-coverage", "crd-cards", "crd-order-select",
-		"corr-1", LegResult{Status: 422, ResponseFHIR: oo}, "pci-1", requester.ID, "")
+		"corr-1", LegResult{Status: 422, ResponseFHIR: oo}, "pci-1", requester.ID, "", "")
 	if rec.Code != 200 {
 		t.Fatalf("to-Hub status = %d, want 200 (framed app answer is 200-to-Hub)", rec.Code)
 	}
@@ -186,7 +186,7 @@ func TestRespondLegErrorConnectorMisuse2xxRoutesToSuccess(t *testing.T) {
 	rec := httptest.NewRecorder()
 	r := newSignedInboundRequest(t, g, requester.ID)
 	g.respondLegError(rec, r, "payer-coverage", "crd-cards", "crd-order-select",
-		"corr-1", LegResult{Status: 200, ResponseFHIR: fhir}, "pci-1", requester.ID, "")
+		"corr-1", LegResult{Status: 200, ResponseFHIR: fhir}, "pci-1", requester.ID, "", "")
 	if rec.Code != 200 {
 		t.Fatalf("to-Hub status = %d, want 200", rec.Code)
 	}
@@ -216,7 +216,7 @@ func TestRespondLegErrorFramesSynthesizedErrorForCapableRequester(t *testing.T) 
 	rec := httptest.NewRecorder()
 	r := newSignedInboundRequest(t, g, requester.ID)
 	g.respondLegError(rec, r, "payer-coverage", "crd-cards", "crd-order-select",
-		"corr-1", LegResult{Status: 409, Message: msg}, "pci-1", requester.ID, "")
+		"corr-1", LegResult{Status: 409, Message: msg}, "pci-1", requester.ID, "", "")
 	if rec.Code != 200 {
 		t.Fatalf("to-Hub status = %d, want 200 (framed app answer is 200-to-Hub)", rec.Code)
 	}
@@ -249,7 +249,7 @@ func TestRespondLegErrorBareForLegacyRequester(t *testing.T) {
 	rec := httptest.NewRecorder()
 	r := newSignedInboundRequest(t, g, requester.ID)
 	g.respondLegError(rec, r, "payer-coverage", "crd-cards", "crd-order-select",
-		"corr-1", LegResult{Status: 502, Message: msg}, "pci-1", requester.ID, "")
+		"corr-1", LegResult{Status: 502, Message: msg}, "pci-1", requester.ID, "", "")
 	if rec.Code != 502 {
 		t.Fatalf("legacy requester: to-Hub status = %d, want 502 (bare non-2xx)", rec.Code)
 	}
@@ -270,7 +270,7 @@ func TestRespondLegFramesSuccessForCapableRequester(t *testing.T) {
 	rec := httptest.NewRecorder()
 	r := newSignedInboundRequest(t, g, requester.ID)
 	g.respondLeg(rec, r, "payer-coverage", "crd-cards", "crd-order-select",
-		"corr-1", fhir, "pci-1", requester.ID, "")
+		"corr-1", fhir, "pci-1", requester.ID, "", "", false)
 	if rec.Code != 200 {
 		t.Fatalf("to-Hub status = %d, want 200", rec.Code)
 	}
@@ -296,7 +296,7 @@ func TestRespondLegBareSuccessForLegacyRequester(t *testing.T) {
 	rec := httptest.NewRecorder()
 	r := newSignedInboundRequest(t, g, requester.ID)
 	g.respondLeg(rec, r, "payer-coverage", "crd-cards", "crd-order-select",
-		"corr-1", fhir, "pci-1", requester.ID, "")
+		"corr-1", fhir, "pci-1", requester.ID, "", "", false)
 	if rec.Code != 200 {
 		t.Fatalf("to-Hub status = %d, want 200", rec.Code)
 	}
@@ -309,11 +309,56 @@ func TestRespondLegBareSuccessForLegacyRequester(t *testing.T) {
 	}
 }
 
+// mustToken is the test-side shorthand for g.contractTokenForLeg, failing the test
+// on the ok-guard error (an unknown legType) rather than swallowing it.
+func mustToken(t *testing.T, g *Gateway, legType, builtToken string) string {
+	t.Helper()
+	tok, err := g.contractTokenForLeg(legType, builtToken)
+	if err != nil {
+		t.Fatalf("contractTokenForLeg(%q): %v", legType, err)
+	}
+	return tok
+}
+
+// TestFramePayloadStampsContractVersion: a framed success answer to a
+// v1-negotiated requester carries the contractVersion header — the token of
+// the line this build actually produced (content-descriptive; spec 2026-08-10
+// §4). Legacy requesters stay bare; version-neutral legs stay unstamped.
+func TestFramePayloadStampsContractVersion(t *testing.T) {
+	reg := shnsdk.NewRegistry()
+	reg.Set("prov-1", shnsdk.RegistryEntry{ID: "prov-1", Role: "provider", MessageFrames: shnsdk.SupportedMessageFrames()})
+	reg.Set("legacy-prov", shnsdk.RegistryEntry{ID: "legacy-prov", Role: "provider"})
+	g := &Gateway{cfg: Config{Reg: reg}}
+
+	framed := g.framePayload("prov-1", 200, "application/fhir+json", mustToken(t, g, "pas-claim", ""), []byte(`{}`))
+	hdr, _, err := shnsdk.DecodeHTTPFrame(framed)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if hdr.Headers[shnsdk.FrameHeaderContractVersion] != "pa.pas@2.0" {
+		t.Fatalf("stamp = %q, want pa.pas@2.0", hdr.Headers[shnsdk.FrameHeaderContractVersion])
+	}
+
+	// Version-neutral leg: framed but unstamped.
+	neutral := g.framePayload("prov-1", 200, "application/fhir+json", mustToken(t, g, "federated-query", ""), []byte(`{}`))
+	nh, _, _ := shnsdk.DecodeHTTPFrame(neutral)
+	if _, has := nh.Headers[shnsdk.FrameHeaderContractVersion]; has {
+		t.Fatal("version-neutral leg must not be stamped")
+	}
+
+	// Legacy (non-negotiated) requester: bare payload, byte-unchanged.
+	bare := g.framePayload("legacy-prov", 200, "application/fhir+json", mustToken(t, g, "pas-claim", ""), []byte(`{}`))
+	if shnsdk.IsFramed(bare) {
+		t.Fatal("legacy requester must stay bare")
+	}
+}
+
 // TestPASNativeSuccessFramedForCapableRequester drives the conformant PAS submit
 // handler (handlePASNativeInbound) — whose response leg is built at the direct
 // buildResponseLeg site (pas_native.go:277) — end to end for a frame-capable
 // requester, and proves that direct site frames too: the sealed response leg decodes
-// to frame(200, application/fhir+json, ClaimResponse).
+// to frame(200, application/fhir+json, ClaimResponse) — stamped pa.pas@2.0 (this
+// build's own native line), the content-descriptive frame stamp.
 func TestPASNativeSuccessFramedForCapableRequester(t *testing.T) {
 	g, requester := newInboundTestGateway(t, true)
 	pci, _, ok := g.cfg.SoR.ResolvePatient("MBR-COVERED")
@@ -337,7 +382,7 @@ func TestPASNativeSuccessFramedForCapableRequester(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	r := newSignedInboundRequest(t, g, requester.ID)
-	g.handlePASNativeInbound(rec, r, env, tok)
+	g.handlePASNativeInbound(rec, r, env, tok, bundle, "pa.pas@2.0")
 	if rec.Code != 200 {
 		t.Fatalf("to-Hub status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -351,6 +396,9 @@ func TestPASNativeSuccessFramedForCapableRequester(t *testing.T) {
 	}
 	if hdr.Status != 200 || hdr.Headers["Content-Type"] != "application/fhir+json" {
 		t.Fatalf("framed PAS answer = %d/%q, want 200 + application/fhir+json", hdr.Status, hdr.Headers["Content-Type"])
+	}
+	if hdr.Headers[shnsdk.FrameHeaderContractVersion] != "pa.pas@2.0" {
+		t.Fatalf("framed PAS stamp = %q, want pa.pas@2.0", hdr.Headers[shnsdk.FrameHeaderContractVersion])
 	}
 	if parsed, perr := shnsdk.ParseClaimResponse(body); perr != nil || parsed.Outcome != "approved" {
 		t.Fatalf("framed PAS body not an approved ClaimResponse: %+v err=%v", parsed, perr)

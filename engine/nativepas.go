@@ -46,7 +46,10 @@ func (n *nativeResponder) handlePASClaimUpdateNative(ctx context.Context, corrID
 	}
 	release := func() { _ = n.store.ReleaseClaimUpdate(subjectPCI, related) }
 
-	body, bad, err := n.post(ctx, n.baseURL, "/Claim/$submit", requestFHIR, "PAS update")
+	// Endpoint evidence: prefer the probe-retained, same-origin-validated #<line> $submit
+	// endpoint for THIS routed pa.pas line (evidence absent ⇒ n.baseURL, byte-identical).
+	submitURL := n.resolvedURL(ctx, "pa.pas", n.baseURL, "/Claim/$submit")
+	body, bad, err := n.post(ctx, submitURL, "", requestFHIR, "PAS update")
 	if err != nil {
 		return LegResult{Rollback: release}, err // post-Begin fault MUST still release the claim
 	}
@@ -141,7 +144,10 @@ func (n *nativeResponder) handlePASClaimNative(ctx context.Context, corrID, subj
 	// ParseOrderProductCoding handles BOTH a ServiceRequest order and a DeviceRequest order (the
 	// HomeOxygen provider-data lane), so a DME DeviceRequest still yields its HCPCS EOB.
 	procSystem, cpt, cptDisplay, _ := shnsdk.ParseOrderProductCoding(s.srJSON) // best-effort; empty cpt → no EOB built below
-	body, bad, err := n.post(ctx, n.baseURL, "/Claim/$submit", requestFHIR, "PAS submit")
+	// Endpoint evidence: prefer the probe-retained, same-origin-validated #<line> $submit
+	// endpoint for THIS routed pa.pas line (evidence absent ⇒ n.baseURL, byte-identical).
+	submitURL := n.resolvedURL(ctx, "pa.pas", n.baseURL, "/Claim/$submit")
+	body, bad, err := n.post(ctx, submitURL, "", requestFHIR, "PAS submit")
 	if err != nil {
 		return LegResult{}, err // no-response fault → engine 500 → "hub routing failed"
 	}

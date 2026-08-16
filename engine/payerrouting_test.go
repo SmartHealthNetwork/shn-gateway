@@ -22,14 +22,14 @@ func TestRecipientForResolvesAndFailsClosed(t *testing.T) {
 	})
 	g := &Gateway{cfg: Config{PayerRouter: router, SoR: nil}}
 
-	cov, _ := shnsdk.BuildCoverageWithPayer("Patient/m", "Coverage/m",
+	cov, _ := shnsdk.BuildCoverageWithPayer("Patient/m", "m",
 		shnsdk.PayerIdentifier{System: "urn:oid:2.16.840.1.113883.6.300", Value: "00078"})
 	h, status, _ := g.recipientFor(cov)
 	if status != 0 || h != "acme-health" {
 		t.Fatalf("resolve: got (%q,%d)", h, status)
 	}
 
-	miss, _ := shnsdk.BuildCoverageWithPayer("Patient/m", "Coverage/m",
+	miss, _ := shnsdk.BuildCoverageWithPayer("Patient/m", "m",
 		shnsdk.PayerIdentifier{System: "urn:oid:2.16.840.1.113883.6.300", Value: "99999"})
 	_, status, msg := g.recipientFor(miss)
 	if status != http.StatusUnprocessableEntity || msg == "" {

@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-// Handler serves GET/POST /internal/checks. Gate: when token !=
+// Handler serves GET/POST /internal/checks (spec §7.1). Gate: when token !=
 // "", require an exact "Authorization: Bearer <token>" header; when token ==
 // "", accept loopback RemoteAddr only — behind any reverse proxy RemoteAddr
 // is the proxy's, so an unset token means host-local access only (documented

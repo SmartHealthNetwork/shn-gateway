@@ -8,8 +8,10 @@ package engine
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -23,12 +25,404 @@ import (
 // uniform-A3 bug OR $validate foreign relayed bytes (R-8). The sandbox lane is SHN-produced.
 func targetsBrPayer(profile string) bool { return profile == "provider-data" }
 
+// legRoute is the resolved reachability decision for one leg:
+// which contract-version TOKEN this leg is routed at (the wire-truth line —
+// Content.ProfileID, the request-frame stamp, and the pend pin all read Token
+// verbatim) and which line the payload is actually BUILT at before any
+// adaptation (BuildLine). BuildLine == LineOf(Token) on arm (1) shared-
+// declared and arm (2) native-reach (no adaptation needed — the payload is
+// built NATIVELY at the target line). On arm (3) transform-chain, BuildLine
+// is the chain's own source line (drawn from this build's DECLARED set)
+// and Chain carries the ranked steps g.egressAdapt walks to bridge
+// BuildLine -> LineOf(Token). Chain is nil on arms (1)/(2) — never
+// speculatively populated (transform-iff).
+type legRoute struct {
+	Token, BuildLine string
+	Chain            []CompatStep
+}
+
+// selectLegLine is the SELECT-BEFORE-BUILD primitive (widened by the
+// reachability arms): it resolves this leg's route
+// BEFORE the payload is built, so the builder can be handed BuildLine rather
+// than the line being re-derived after the bytes already exist. A
+// *RouteRefusalError is the fail-closed no-bridge outcome, already observed
+// on the leg.refused seam (the observation used to live inline at each
+// hoisted call site).
+//
+// Why it moved: until payloads began to differ per line they were identical, so
+// selecting inside OriginateLeg was harmless. Now the line CHOOSES THE BUILDER —
+// a 2.2 Claim carries item extensions a 2.0 Claim must not — so selection has to
+// precede the build or the wire bytes and the routed token disagree.
+func (g *Gateway) selectLegLine(recipient, legType, corrID string) (legRoute, error) {
+	route, terr := g.selectLegRoute(recipient, legType)
+	if terr != nil {
+		var rre *RouteRefusalError
+		var ri *RouteInfo
+		if errors.As(terr, &rre) {
+			ri = refusalRouteInfo(rre)
+		}
+		g.observe(ObserverEvent{
+			Kind: "leg.refused", Direction: "originate", LegType: legType,
+			CorrelationID: corrID, Counterpart: recipient, Detail: terr.Error(),
+			Route: ri,
+		})
+		return legRoute{}, terr
+	}
+	return route, nil
+}
+
+// selectLegLineOrFail is selectLegLine for the scenario handlers, which own the
+// ResponseWriter: on refusal it writes the legible 422 (relayOriginationError) or
+// the 502 fallback and returns ok=false.
+func (g *Gateway) selectLegLineOrFail(w http.ResponseWriter, recipient, legType, corrID string) (legRoute, bool) {
+	route, err := g.selectLegLine(recipient, legType, corrID)
+	if err != nil {
+		if g.relayOriginationError(w, err) {
+			return legRoute{}, false
+		}
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return legRoute{}, false
+	}
+	return route, true
+}
+
+// selectLegRoute is the reachability predicate: arm (1) shared declared
+// line (selectContractToken, untouched — intersection-only) -> arm (2)
+// native reach -> arm (3) transform chain -> refusal naming the missing
+// bridge ingredient. A catalog/library mismatch (this build does not speak
+// Contract at all — ownLines empty) fails closed WITHOUT attempting arms
+// (2)/(3): a build that doesn't know its own contract cannot be rescued by
+// reaching further.
+func (g *Gateway) selectLegRoute(recipient, legType string) (legRoute, error) {
+	contract, err := legContract(legType)
+	if err != nil {
+		return legRoute{}, err
+	}
+	if contract == "" {
+		return legRoute{}, nil // version-neutral leg
+	}
+	own := g.declaredContractVersions()
+	var peer []string
+	declaredAtAll := false
+	if entry, ok := g.cfg.Reg.Lookup(recipient); ok {
+		peer = entry.ContractVersions
+		declaredAtAll = len(peer) > 0
+	}
+	ownLines := contractLineSet(own, contract)
+	refusal := func(issue string) error {
+		return &RouteRefusalError{
+			Contract: contract, LegType: legType, Recipient: recipient,
+			Own:         sortedTokens(contract, ownLines),
+			Peer:        sortedTokens(contract, contractLineSet(peer, contract)),
+			BridgeIssue: issue,
+		}
+	}
+	if len(ownLines) == 0 {
+		return legRoute{}, refusal("")
+	}
+	// Arm (1): shared declared line, or the silent-peer default — unchanged,
+	// selectContractToken stays intersection-only.
+	if tok, refused := selectContractToken(own, peer, declaredAtAll, contract); !refused {
+		return legRoute{Token: tok, BuildLine: shnsdk.LineOf(tok), Chain: nil}, nil
+	}
+	// No shared declared line (a silent peer never reaches here — arm (1)
+	// always succeeds for one). The reachability arms widen exactly this outcome.
+	peerLines := contractLineSet(peer, contract)
+	if route, ok := g.selectNativeReachRoute(contract, peerLines); ok {
+		return route, nil
+	}
+	strict := g.strictPeer(recipient)
+	laned := func(line string) bool { return g.validatorForLine(line) != nil }
+	route, issue, ok := selectChainRoute(contract, ownLines, peerLines, strict, laned)
+	if ok {
+		return route, nil
+	}
+	return legRoute{}, refusal(issue)
+}
+
+// selectNativeReachRoute is arm (2): some peer-declared line t native to
+// this build's binary AND laned wins, highest t first. Deliberately
+// independent of own's DECLARED set — native reach is the
+// sanctioned exception to "declared is the egress statement", gated only by
+// the lane map and, when narrowed (tests or SHN_DEMO_EGRESS_NATIVE_LINES),
+// EgressNativeLines.
+func (g *Gateway) selectNativeReachRoute(contract string, peerLines map[string]bool) (legRoute, bool) {
+	best := ""
+	for _, t := range g.nativeLinesView(contract) {
+		if !peerLines[t] || g.validatorForLine(t) == nil {
+			continue
+		}
+		if best == "" || compareLines(t, best) > 0 {
+			best = t
+		}
+	}
+	if best == "" {
+		return legRoute{}, false
+	}
+	return legRoute{Token: contract + "@" + best, BuildLine: best, Chain: nil}, true
+}
+
+// nativeLinesView is arm (2)'s (and selectResumeRoute's) view of
+// NativeContractVersions() for contract: the real set in production,
+// RESTRICTED to Config.EgressNativeLines when set (nil is the
+// PRODUCTION default; non-nil comes from the cross-line pair test suite or
+// the loudly-named SHN_DEMO_EGRESS_NATIVE_LINES demo env, gateway/app) so
+// arm (3)'s transform chain fires even though the target line IS native.
+func (g *Gateway) nativeLinesView(contract string) []string {
+	lines := nativeLinesForContract(contract)
+	if g.cfg.EgressNativeLines == nil {
+		return lines
+	}
+	allowed := map[string]bool{}
+	for _, l := range g.cfg.EgressNativeLines {
+		allowed[l] = true
+	}
+	var out []string
+	for _, l := range lines {
+		if allowed[l] {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// strictPeer is the per-peer gated-overlay input to arm (3)'s chain
+// evaluation (FR-G52). Production-dormant BY DESIGN: this consult always
+// answers false for every real
+// call site — SHN-registry peers get NO overlay field today ("SHN builds
+// tolerate unknown extensions by construction"), and PAYER_DAVINCI_STRICT_EXTENSIONS
+// (env → config → WithStrictExtensions → nativeResponder.strictExtensions,
+// gateway/app/app.go + native.go) stays dormant plumbing on the native
+// responder ONLY — it is not read here. Two future extension points, both
+// explicitly deferred, not implemented now: (1) a per-registry-entry
+// overlay field on shnsdk.RegistryEntry, live the day a non-SHN build
+// registers; (2) reading the SAME PAYER_DAVINCI_STRICT_EXTENSIONS flag here
+// too, going live together with transform-at-the-native-forward-edge (the
+// deferral native.go's strictExtensions field comment records) — until that
+// ships, native.go's arm-1-only pin (TestNativeForwardStaysArm1) means the
+// one peer the flag is meant for could never reach this consult anyway.
+// StrictPeerForTest (Config, the EgressNativeLines seam's shape) is the SELECTION-level test
+// override — never set outside a test.
+func (g *Gateway) strictPeer(recipient string) bool { return g.cfg.StrictPeerForTest }
+
+// selectChainRoute is arm (3): some peer-declared target t with a
+// manifest-complete chain from an own-declared source s, target lane
+// configured, no step refused for this peer (strict — FR-G52). Several
+// bridgeable targets: highest target wins; several chains to one target:
+// chain ranking (full beats carry beats gated, by the chain's WORST step;
+// fewer steps beat more; ties broken by highest source line). Returns
+// (route, "", true) on success or (zero, issue, false) on refusal — issue
+// names the HIGHEST-declared target's specific missing ingredient (the
+// RouteRefusalError bridge-ingredient grammar), using bare LINES (never a full
+// "contract@line" token) so it cannot duplicate a token already named
+// elsewhere in the refusal message (regression fence:
+// TestSelectLegToken_RefusalIsLegible's duplicate-collapse assertion).
+func selectChainRoute(contract string, ownLines, peerLines map[string]bool, strict bool, laned func(string) bool) (legRoute, string, bool) {
+	var targets []string
+	for l := range peerLines {
+		targets = append(targets, l)
+	}
+	sort.Slice(targets, func(i, j int) bool { return compareLines(targets[i], targets[j]) > 0 })
+
+	var sources []string
+	for l := range ownLines {
+		sources = append(sources, l)
+	}
+
+	issue := ""
+	for _, t := range targets {
+		if !laned(t) {
+			if issue == "" {
+				issue = "no configured validator lane for line " + t
+			}
+			continue
+		}
+		var candidates []legRoute
+		for _, s := range sources {
+			if s == t {
+				continue
+			}
+			steps := chainFor(contract, s, t)
+			if len(steps) == 0 {
+				continue
+			}
+			if strict && chainWorstClass(steps) != StepFull {
+				continue
+			}
+			candidates = append(candidates, legRoute{Token: contract + "@" + t, BuildLine: s, Chain: steps})
+		}
+		if len(candidates) > 0 {
+			return bestChain(candidates), "", true
+		}
+		if issue != "" {
+			continue
+		}
+		if strict && anyChainExists(contract, sources, t) {
+			issue = "chain to line " + t + " refused for this peer (gated overlay: chain contains a lossy step)"
+		} else {
+			issue = "no transform chain bridges to line " + t
+		}
+	}
+	return legRoute{}, issue, false
+}
+
+// anyChainExists reports whether ANY manifest-complete chain bridges some
+// own-declared source to t, ignoring strictness — used only to distinguish
+// selectChainRoute's two "no candidates" refusal messages (a chain exists
+// but every candidate was strict-excluded, vs. no chain exists at all).
+func anyChainExists(contract string, sources []string, t string) bool {
+	for _, s := range sources {
+		if s == t {
+			continue
+		}
+		if len(chainFor(contract, s, t)) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// classRank orders StepClass best-to-worst for D1b ranking: full(0) <
+// carry(1) < gated(2).
+func classRank(c StepClass) int {
+	switch c {
+	case StepFull:
+		return 0
+	case StepCarry:
+		return 1
+	default:
+		return 2 // StepGated
+	}
+}
+
+// chainWorstClass is the worst (highest-rank) StepClass among a chain's
+// steps — D1b ranks a candidate chain by its worst step, not its best.
+func chainWorstClass(steps []CompatStep) StepClass {
+	worst := StepFull
+	for _, s := range steps {
+		if classRank(s.Class) > classRank(worst) {
+			worst = s.Class
+		}
+	}
+	return worst
+}
+
+// bestChain picks the D1b-best candidate among several chains to the SAME
+// target line. candidates must be non-empty.
+func bestChain(candidates []legRoute) legRoute {
+	best := candidates[0]
+	for _, c := range candidates[1:] {
+		if chainBetter(c, best) {
+			best = c
+		}
+	}
+	return best
+}
+
+// chainBetter reports whether a ranks ABOVE b per D1b: full beats carry
+// beats gated (by worst step), fewer steps beat more, ties broken by
+// highest source line.
+func chainBetter(a, b legRoute) bool {
+	ra, rb := classRank(chainWorstClass(a.Chain)), classRank(chainWorstClass(b.Chain))
+	if ra != rb {
+		return ra < rb
+	}
+	if len(a.Chain) != len(b.Chain) {
+		return len(a.Chain) < len(b.Chain)
+	}
+	return compareLines(a.BuildLine, b.BuildLine) > 0
+}
+
+// SelectChainRouteForTest is a thin exported wrapper around arm (3)'s
+// transform-chain evaluation (chain ranking + the strict-peer input) for
+// package adversarial and other cross-module tests, which cannot see
+// unexported engine symbols — the same cross-module-boundary rationale as
+// TransformPASForTest/TransformDTRForTest. own/peerDeclared are this
+// contract's declared LINE lists (not tokens); lanedLines are the lines
+// treated as having a configured validator lane.
+func SelectChainRouteForTest(contract string, own, peerDeclared, lanedLines []string, strict bool) (token, buildLine string, chainLen int, ok bool, refusalDetail string) {
+	toSet := func(lines []string) map[string]bool {
+		out := map[string]bool{}
+		for _, l := range lines {
+			out[l] = true
+		}
+		return out
+	}
+	lanedSet := toSet(lanedLines)
+	laned := func(l string) bool { return lanedSet[l] }
+	route, issue, ok := selectChainRoute(contract, toSet(own), toSet(peerDeclared), strict, laned)
+	if !ok {
+		return "", "", 0, false, issue
+	}
+	return route.Token, route.BuildLine, len(route.Chain), true, ""
+}
+
+// selectResumeRoute re-runs arm selection for a PENDED-LINE PIN resume
+// leg with the TARGET FIXED to the pin (never re-negotiated — AI-1: the
+// amendment must answer the pend it references). The declared/lane sets may
+// have GROWN since origination (the lane map is grow-only), so a line that
+// needed a chain at origination time may now be natively buildable — arm 1/2
+// native reach still beats a chain at resume.
+// pinnedToken is trusted well-formed ("contract@line") — it was produced by
+// a prior successful selectLegRoute call and stored verbatim in pendState.
+func (g *Gateway) selectResumeRoute(pinnedToken, recipient string) (legRoute, error) {
+	contract, target, ok := strings.Cut(pinnedToken, "@")
+	if !ok || contract == "" || target == "" {
+		return legRoute{}, fmt.Errorf("engine: selectResumeRoute: malformed pin token %q", pinnedToken)
+	}
+	// Arm 1/2 equivalent: is the pinned target line buildable natively RIGHT
+	// NOW (own declared may have grown to include it, or it may simply be
+	// laned)? Either way, native beats a chain at resume too.
+	for _, t := range g.nativeLinesView(contract) {
+		if t == target && g.validatorForLine(t) != nil {
+			return legRoute{Token: pinnedToken, BuildLine: target, Chain: nil}, nil
+		}
+	}
+	// Arm 3: re-derive a chain from a CURRENT own-declared source to the
+	// pinned target.
+	ownLines := contractLineSet(g.declaredContractVersions(), contract)
+	if g.validatorForLine(target) != nil {
+		strict := g.strictPeer(recipient)
+		var candidates []legRoute
+		for s := range ownLines {
+			if s == target {
+				continue
+			}
+			steps := chainFor(contract, s, target)
+			if len(steps) == 0 {
+				continue
+			}
+			if strict && chainWorstClass(steps) != StepFull {
+				continue
+			}
+			candidates = append(candidates, legRoute{Token: pinnedToken, BuildLine: s, Chain: steps})
+		}
+		if len(candidates) > 0 {
+			return bestChain(candidates), nil
+		}
+	}
+	return legRoute{}, &RouteRefusalError{
+		Contract: contract, LegType: "pas-claim-update", Recipient: recipient,
+		Own:         sortedTokens(contract, ownLines),
+		Peer:        []string{pinnedToken},
+		BridgeIssue: "no bridge to the pinned line " + target + " remains available",
+	}
+}
+
 // relayOriginationError surfaces a recipient's framed non-2xx application answer
 // (a *RelayError from OriginateLeg, unwrapped through any %w chain) to the origination
 // caller byte-identically — the same verbatim relay the Da Vinci ingress handlers do,
 // for the bespoke /scenario* origination API. Returns true iff it wrote the response;
 // callers keep their existing writeJSON fallback for every other (non-relay) error.
+// Also writes a *RouteRefusalError (the version-routing legible refusal, spec
+// 2026-08-10 §4) as its 422 — one chokepoint covers every scenario and ingress
+// origination site.
 func (g *Gateway) relayOriginationError(w http.ResponseWriter, err error) bool {
+	var rre *RouteRefusalError
+	if errors.As(err, &rre) {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": rre.Error()})
+		return true
+	}
 	var re *RelayError
 	if !errors.As(err, &re) {
 		return false
@@ -216,7 +610,16 @@ func (g *Gateway) handleScenario(w http.ResponseWriter, r *http.Request) {
 
 	// Egress validation is load-bearing: an invalid resource must never reach the
 	// substrate. Empty profile = base-R4 + meta.profile pinning (see roundTrip).
-	res, err := g.cfg.Validator.Validate(ctx, cerJSON, "")
+	// F7: lane-selected per line like every other validate, but deliberately
+	// NOT g.validateFHIR — this site echoes res.Issues in its 422 body, which
+	// validateFHIR's (status,msg) contract cannot carry. coverage-eligibility is
+	// version-neutral, so the line is "" (the canonical lane).
+	cerValidator := g.validatorForLine("")
+	if cerValidator == nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "no FHIR validator lane configured (FR-36/FR-G29)"})
+		return
+	}
+	res, err := cerValidator.Validate(ctx, cerJSON, "")
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "validator unavailable"})
 		return
@@ -252,7 +655,15 @@ func (g *Gateway) handleScenario(w http.ResponseWriter, r *http.Request) {
 	// invalid CRR is an UPSTREAM failure → 502 (preserves the UC-01 contract; only
 	// the response-leg token verification was folded into roundTrip (via OriginateLeg),
 	// not the validation-status semantics).
-	ingress, err := g.cfg.Validator.Validate(ctx, crrJSON, "")
+	// F7: lane-selected, still NOT g.validateFHIR — an invalid payer answer is a 502
+	// here (an UPSTREAM failure), not validateFHIR's 500/422. Version-neutral leg ⇒
+	// line "" ⇒ the canonical lane; a missing lane keeps THIS site's 502.
+	crrValidator := g.validatorForLine("")
+	if crrValidator == nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "no FHIR validator lane configured (FR-36/FR-G29)"})
+		return
+	}
+	ingress, err := crrValidator.Validate(ctx, crrJSON, "")
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "validator unavailable"})
 		return
@@ -309,8 +720,15 @@ type crdDtrResult struct {
 	// operated $populate auto-pops nothing (the adaptive HomeHealthAssessment has 0 CQL items).
 	questionnaireJSON       []byte
 	patientRef, coverageRef string
-	pci                     string
-	filled                  []FilledItem
+	// member is the BARE member id this exchange originated for — the value every PAS-lane
+	// producer stamps as the Coverage's urn:shn:coverage MB identifier (that identifier is a
+	// member number, not a reference) AND as the value of the conformant Claim's
+	// insurance[0].coverage LOGICAL reference — the same bare value in both roles. It rides
+	// beside coverageRef, which stays the Reference-shaped value the QR-context / native-lane
+	// roles need.
+	member string
+	pci    string
+	filled []FilledItem
 	// payer is the member's REAL payer identity, parsed from the member's open Coverage
 	// (OpenCoverage → ParsePayerIdentifier) at the fresh origination site (FR-G40). It threads
 	// to the payer-org-emitting PAS builders so the payload's payer derives from the patient's
@@ -321,6 +739,16 @@ type crdDtrResult struct {
 	// default — a miss fails closed before any leg (AI-G11 / OWD-G10). It replaced the deleted
 	// Config.CounterpartID at the PAS-tail / resume sites (res.recipient).
 	recipient string
+	// dtrLine is the contract-version line selected at the DTR-fetch leg
+	// (select-before-build, F7) — "" on the no-DTR path. Threaded to every authored-QR build
+	// site downstream (the managed Populator call, and the provider-data attestation refills
+	// at handleUC04 / scenarioToPend) so the QR they build matches the line the fetch already
+	// committed to (closes an earlier KNOWN GAP where every authored QR was frozen at
+	// the 2.0 shape regardless of the selected line). The sibling contract-version TOKEN
+	// (route.Token) selected at the same leg is not separately retained — no downstream
+	// consumer reads it; re-derive it from dtrLine
+	// (shnsdk contract "pa.dtr@"+dtrLine) if a future caller needs the full token.
+	dtrLine string
 }
 
 // orderSource returns the origination order bytes for the active profile. Under
@@ -433,30 +861,61 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 		writeJSON(w, status, map[string]string{"error": msg})
 		return crdDtrResult{}, false
 	}
-	if status, msg := g.validateFHIR(ctx, srJSON, "egress"); status != 0 {
+	if status, msg := g.validateFHIR(ctx, srJSON, "egress", ""); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return crdDtrResult{}, false
 	}
 
 	// crd-order-select keeps the CONTAINED-payor egress form (BuildCoverageWithPayer); only the
-	// payer IDENTITY now derives from realCov (no synthetic CMS payer).
-	coverageJSON, err := shnsdk.BuildCoverageWithPayer(patientRef, coverageRef, payer)
+	// payer IDENTITY now derives from realCov (no synthetic CMS payer). The urn:shn:coverage MB
+	// identifier carries the BARE member id (a member number, not a reference) — coverageRef
+	// stays the reference-shaped value the QRContext / native-lane roles carried on
+	// crdDtrResult need (the conformant PAS
+	// Claim's insurance[0].coverage is a logical reference built from `member`, not from it).
+	coverageJSON, err := shnsdk.BuildCoverageWithPayer(patientRef, member, payer)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build coverage failed"})
 		return crdDtrResult{}, false
 	}
-	if status, msg := g.validateFHIR(ctx, coverageJSON, "egress"); status != 0 {
+	if status, msg := g.validateFHIR(ctx, coverageJSON, "egress", ""); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return crdDtrResult{}, false
 	}
 
 	// --- CRD round-trip: must come back PA-required with a canonical. ---
+	// Select-before-build. The CRD builder is LINE-INERT — pa.crd
+	// is identity across 2.0/2.1/2.2 (compat.go's live-derived rows), so
+	// route.BuildLine changes not one byte below — but the ROUTING axis is real
+	// and was never adjudicated: sitting on OriginateLeg's arm-1-only
+	// empty-ProfileID backfill meant a pa.crd@2.2-only peer (legitimate:
+	// new-from-birth or foreign holders) was REFUSED by a binary that serves it
+	// byte-identically. Selecting here puts the leg on the same reachability
+	// arms (native reach, then transform chain) every other contract-mapped leg
+	// already uses. crdCorr is hoisted so selection, adaptation and the leg
+	// itself all share one correlation.
+	crdCorr := g.cfg.CorrelationGen()
+	crdRoute, ok := g.selectLegLineOrFail(w, recipient, "crd-order-select", crdCorr)
+	if !ok {
+		return crdDtrResult{}, false
+	}
 	crdReq, err := shnsdk.BuildConformantOrderSelectRequest(srJSON, coverageJSON, patientRef)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build order-select failed"})
 		return crdDtrResult{}, false
 	}
-	crdRespJSON, err := g.OriginateLeg(ctx, r, recipient, "crd-order-select", pci, g.cfg.CorrelationGen(), "", Content{WorkstreamType: workstreamPA, Bytes: crdReq})
+	// Validation posture is UNCHANGED by the promotion (D-7 is routing-only):
+	// there is deliberately NO validateFHIR enforcement point after egressAdapt
+	// on this leg. crdReq is CDS Hooks JSON — a transport ENVELOPE, not itself a
+	// FHIR resource the pa.crd compat-manifest rows model. The FHIR resources it
+	// carries (srJSON, coverageJSON) are each $validated above, before assembly,
+	// exactly as before. Same rationale as the DTR-fetch sites below.
+	adaptedCRDReq, _, err := g.egressAdapt(crdRoute, crdReq, ExchangeIdentity{CorrelationID: crdCorr, LegType: "crd-order-select", Counterpart: recipient})
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return crdDtrResult{}, false
+	}
+	crdRespJSON, err := g.OriginateLeg(ctx, r, recipient, "crd-order-select", pci, crdCorr, "",
+		Content{WorkstreamType: workstreamPA, ProfileID: crdRoute.Token, Route: routeInfoFor(crdRoute), Bytes: adaptedCRDReq})
 	if err != nil {
 		if g.relayOriginationError(w, err) {
 			return crdDtrResult{}, false
@@ -485,7 +944,7 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 			// handleUC08 asserts the PAS result is DENIED (502 on any approval), so a
 			// not-covered order can never yield an auth. Not-covered carries no questionnaire
 			// (NeedsDTR=false) → return the built order straight for the PAS submit.
-			return crdDtrResult{srJSON: srJSON, patientRef: patientRef, coverageRef: coverageRef, pci: pci, payer: payer, recipient: recipient}, true
+			return crdDtrResult{srJSON: srJSON, patientRef: patientRef, coverageRef: coverageRef, member: member, pci: pci, payer: payer, recipient: recipient}, true
 		}
 		// AI-1: a coverage denial STOPS — never routes DTR/PAS. (adversarial Row 1)
 		// Explicit terminal stop; patient-facing denial UX is deferred.
@@ -509,19 +968,42 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 	// DTR questionnaire is fetched is decided by the doc-needed axis (NeedsDTR),
 	// independently: no-doc (br-payer L8000) skips DTR straight to PAS; clinical
 	// (br-payer G0151) routes DTR.
-	res := crdDtrResult{srJSON: srJSON, patientRef: patientRef, coverageRef: coverageRef, pci: pci, payer: payer, recipient: recipient}
+	res := crdDtrResult{srJSON: srJSON, patientRef: patientRef, coverageRef: coverageRef, member: member, pci: pci, payer: payer, recipient: recipient}
 	if cov.NeedsDTR() {
 		canonical := shnsdk.StripCanonicalVersion(cov.Questionnaires[0])
 
+		// SELECT-BEFORE-BUILD (spec 2026-08-11): the token/line is resolved
+		// BEFORE the DTR fetch REQUEST is built, not just before the PACKAGE that comes
+		// back — a DTR line whose $questionnaire-package input profile makes `coverage`
+		// 1..1 (2.2 — DTRDef.QuestionnairePackageCoverageRequired, verified live
+		// 2026-08-12) needs the line to gate whether Coverage is attached below, so the
+		// request is no longer fully line-invariant the way it once was (only
+		// the br-payer-targeting profile varied it). This is still the line the answer
+		// is $validate-checked against (F7).
+		dtrCorr := g.cfg.CorrelationGen()
+		route, ok := g.selectLegLineOrFail(w, recipient, "dtr-questionnaire-fetch", dtrCorr)
+		if !ok {
+			return crdDtrResult{}, false
+		}
+		res.dtrLine = shnsdk.LineOf(route.Token)
+
 		// --- DTR round-trip: fetch Questionnaire, validate, auto-fill locally. ---
 		// In the br-payer-targeting lane (provider-data), carry the Coverage so the
-		// native-forward re-emits the
-		// payer-required coverage param on $questionnaire-package — a real Da Vinci payer
-		// (br-payer) 400s without it (the v0.11.0 QuestionnaireFetchRequest.Coverage
-		// seam). The sandbox responder doesn't need it, so gate on the profile to keep the
-		// sandbox dtr-questionnaire-fetch leg byte-identical (C1 discipline).
+		// native-forward re-emits the payer-required coverage param on
+		// $questionnaire-package — a real Da Vinci payer (br-payer) 400s without it (the
+		// v0.11.0 QuestionnaireFetchRequest.Coverage seam). At 2.0/2.1 the sandbox
+		// responder doesn't need it, so gate on the profile to keep that leg
+		// byte-identical (C1 discipline) — but at a line whose DTRDef requires it
+		// (2.2), Coverage is ALWAYS attached, honest (the SAME SoR-derived resource
+		// built above), regardless of profile: the sandbox responder's own 2.2 QR
+		// shell (adjudicator.go) reads it too, to close the DTR-at-2.2 sandbox gap
+		// honestly rather than fabricating a subject/coverage reference.
 		fetch := shnsdk.QuestionnaireFetchRequest{Canonical: canonical}
-		if targetsBrPayer(g.cfg.OriginationProfile) {
+		coverageRequired := false
+		if def, ok := shnsdk.DTRLineDef(res.dtrLine); ok {
+			coverageRequired = def.QuestionnairePackageCoverageRequired
+		}
+		if targetsBrPayer(g.cfg.OriginationProfile) || coverageRequired {
 			fetch.Coverage = coverageJSON
 		}
 		dtrReq, err := json.Marshal(fetch)
@@ -529,7 +1011,27 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build dtr request failed"})
 			return crdDtrResult{}, false
 		}
-		packageJSON, err := g.OriginateLeg(ctx, r, recipient, "dtr-questionnaire-fetch", pci, g.cfg.CorrelationGen(), "", Content{WorkstreamType: workstreamPA, Bytes: dtrReq})
+		// egressAdapt runs here per the select-before-build pipeline, but there is
+		// deliberately NO validateFHIR enforcement point after it on THIS leg: dtrReq
+		// is QuestionnaireFetchRequest JSON, a transport ENVELOPE (canonical +
+		// optional Coverage), not itself a FHIR resource the pa.dtr compat-manifest
+		// rows model — every other select-before-build site validates its ADAPTED
+		// bytes at the target lane immediately after this call; this one cannot,
+		// because there is no FHIR shape to validate. OBLIGATION DISCHARGED (the
+		// multi-version spec's recorded DTR-fetch known-gap
+		// entry): egressAdapt's envelopeEgressLegs carve-out routes
+		// "dtr-questionnaire-fetch" through a byte-identical pass-through instead of
+		// applyChain, safe BY CONSTRUCTION (the step funcs never see the envelope
+		// bytes, so they can never re-marshal them) — proven by
+		// TestEnvelopeLegChainIsByteIdenticalPassThrough, the enforcement fence
+		// standing in for the impossible envelope $validate.
+		adaptedDTRReq, _, err := g.egressAdapt(route, dtrReq, ExchangeIdentity{CorrelationID: dtrCorr, LegType: "dtr-questionnaire-fetch", Counterpart: recipient})
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			return crdDtrResult{}, false
+		}
+		packageJSON, err := g.OriginateLeg(ctx, r, recipient, "dtr-questionnaire-fetch", pci, dtrCorr, "",
+			Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Bytes: adaptedDTRReq})
 		if err != nil {
 			if g.relayOriginationError(w, err) {
 				return crdDtrResult{}, false
@@ -537,7 +1039,7 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 			return crdDtrResult{}, false
 		}
-		if status, msg := g.validateFHIR(ctx, packageJSON, "ingress"); status != 0 {
+		if status, msg := g.validateFHIR(ctx, packageJSON, "ingress", res.dtrLine); status != 0 {
 			writeJSON(w, status, map[string]string{"error": msg})
 			return crdDtrResult{}, false
 		}
@@ -581,6 +1083,7 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 			CoverageRef:    coverageRef,
 			OrderRef:       "ServiceRequest/sr-" + member,
 			Authored:       g.cfg.Clock(),
+			Line:           res.dtrLine,
 		})
 		if err != nil {
 			writeJSON(w, statusForPopulateErr(err), map[string]string{"error": err.Error()})
@@ -605,7 +1108,7 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 			return crdDtrResult{}, false
 		}
 
-		if status, msg := g.validateFHIR(ctx, qrJSON, "egress"); status != 0 {
+		if status, msg := g.validateFHIR(ctx, qrJSON, "egress", res.dtrLine); status != 0 {
 			writeJSON(w, status, map[string]string{"error": msg})
 			return crdDtrResult{}, false
 		}
@@ -806,7 +1309,7 @@ func (g *Gateway) originateNoPACRD(w http.ResponseWriter, r *http.Request, membe
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
-	if status, msg := g.validateFHIR(ctx, srJSON, "egress"); status != 0 {
+	if status, msg := g.validateFHIR(ctx, srJSON, "egress", ""); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
@@ -828,26 +1331,45 @@ func (g *Gateway) originateNoPACRD(w http.ResponseWriter, r *http.Request, membe
 		return
 	}
 
-	coverageJSON, err := shnsdk.BuildCoverageWithPayer(patientRef, "Coverage/"+member, payer)
+	// urn:shn:coverage carries the BARE member id (a member number, not a reference).
+	coverageJSON, err := shnsdk.BuildCoverageWithPayer(patientRef, member, payer)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build coverage failed"})
 		return
 	}
 	// Every FHIR resource crossing the substrate is validated — the Coverage in
 	// the CRD prefetch included.
-	if status, msg := g.validateFHIR(ctx, coverageJSON, "egress"); status != 0 {
+	if status, msg := g.validateFHIR(ctx, coverageJSON, "egress", ""); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
 
+	// Select-before-build — see runCRDThenDTROrder's site for the
+	// full rationale: the CRD builder is line-inert, but the routing axis is
+	// real, and the arm-1-only backfill refused peers this build serves
+	// byte-identically. correlationID was already a named var; its assignment
+	// moved up above the builder so selection, adaptation and the leg all share
+	// the one correlation.
+	correlationID := g.cfg.CorrelationGen()
+	crdRoute, ok := g.selectLegLineOrFail(w, recipient, "crd-order-select", correlationID)
+	if !ok {
+		return
+	}
 	reqJSON, err := shnsdk.BuildConformantOrderSelectRequest(srJSON, coverageJSON, patientRef)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build order-select failed"})
 		return
 	}
-
-	correlationID := g.cfg.CorrelationGen()
-	respJSON, err := g.OriginateLeg(ctx, r, recipient, "crd-order-select", pci, correlationID, "", Content{WorkstreamType: workstreamPA, Bytes: reqJSON})
+	// Validation posture UNCHANGED (routing-only promotion): reqJSON is a CDS
+	// Hooks envelope, not a FHIR resource; its carried resources are $validated
+	// above. No enforcement point is added or removed after egressAdapt.
+	adaptedReqJSON, _, err := g.egressAdapt(crdRoute, reqJSON, ExchangeIdentity{CorrelationID: correlationID, LegType: "crd-order-select", Counterpart: recipient})
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	respJSON, err := g.OriginateLeg(ctx, r, recipient, "crd-order-select", pci, correlationID, "",
+		Content{WorkstreamType: workstreamPA, ProfileID: crdRoute.Token, Route: routeInfoFor(crdRoute), Bytes: adaptedReqJSON})
 	if err != nil {
 		if g.relayOriginationError(w, err) {
 			return
@@ -891,7 +1413,11 @@ func (g *Gateway) originateNoPACRD(w http.ResponseWriter, r *http.Request, membe
 
 // handleUC03 runs the full PA-required path: CRD (must require PA) → DTR fetch +
 // local auto-fill → PAS submit → approval. On approval the provider stores the
-// auth number for the SR (FR-23) and answers paRequired=true.
+// auth number for the SR (FR-23) and answers paRequired=true. Off provider-data,
+// the request body selects the member the same way handleScenario's uc01 does
+// (scenarioReq.Branch): "" (or an absent body) is MBR-COVERED, byte-identical
+// to before this switch existed; "bridge-refuse" is the kit-bridging-visualization
+// demo persona MBR-BRIDGE-REFUSE; any other value 400s.
 func (g *Gateway) handleUC03(w http.ResponseWriter, r *http.Request) {
 	if g.cfg.OriginationProfile == "provider-data" {
 		// UC-03 off provider data = the HomeOxygenDispatch path (the only br-payer family that PA-requires
@@ -910,7 +1436,46 @@ func (g *Gateway) handleUC03(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	const srRef = "ServiceRequest/sr-uc03"
 
-	member, ok := g.scenarioMember(w, r, "MBR-COVERED", "MBR-COVERED")
+	// The UC-03 branch selection rides a dedicated req.Branch switch rather
+	// than the persona set (personaSet=canary cannot carry it), mirroring
+	// handleScenario's UC-01 shape and decoded/validated the same way (an empty
+	// or absent body decodes to the zero Branch "", handleScenario's own
+	// idiom — DecodeJSONBody on nil/empty body returns io.EOF, tolerated
+	// below so every existing nil-body uc03 caller in this package's test
+	// suite, and any live client that never sent a body, keeps behaving
+	// byte-identically).
+	var req scenarioReq
+	if tooLarge, err := shnsdk.DecodeJSONBody(w, r, &req); err != nil && !errors.Is(err, io.EOF) {
+		if tooLarge {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+		} else {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request"})
+		}
+		return
+	}
+
+	var member string
+	var ok bool
+	switch req.Branch {
+	case "":
+		member, ok = g.scenarioMember(w, r, "MBR-COVERED", "MBR-COVERED")
+	case "bridge-refuse":
+		// Both scenarioMember args are the demo refuse persona (mirrors the
+		// ""-branch literal above: this path never runs under
+		// OriginationProfile=="provider-data" — that profile early-returns
+		// above — so providerDataMember is dead here exactly like it was for
+		// the literal it replaces). ?personaSet=canary is NOT special-cased:
+		// scenarioMember's CanaryTwins lookup naturally 400s ("no canary
+		// twin for member MBR-BRIDGE-REFUSE") since no twin is registered —
+		// deliberately not adding one (reviewer ruling: a canary twin for a
+		// demo-only persona would be semantic abuse of the canary
+		// mechanism, which exists for observability's shared scenario
+		// members, not visualization fixtures).
+		member, ok = g.scenarioMember(w, r, "MBR-BRIDGE-REFUSE", "MBR-BRIDGE-REFUSE")
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown branch"})
+		return
+	}
 	if !ok {
 		return
 	}
@@ -922,8 +1487,17 @@ func (g *Gateway) handleUC03(w http.ResponseWriter, r *http.Request) {
 
 	// --- PAS round-trip: submit the preauth bundle, expect an approval. ---
 	pasCorr := g.cfg.CorrelationGen()
-	bundleJSON, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
-		QR: res.qrJSON, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef,
+	// Select-before-build: the routed line CHOOSES the builder, so it is
+	// resolved BEFORE the bundle exists. Also the pended-line pin for any
+	// pas-claim-update leg downstream — pas-claim and pas-claim-update share the
+	// pa.pas contract, so one selection is contract-correct for both.
+	route, ok := g.selectLegLineOrFail(w, res.recipient, "pas-claim", pasCorr)
+	if !ok {
+		return
+	}
+	targetLine := shnsdk.LineOf(route.Token)
+	bundleJSON, err := shnsdk.BuildConformantClaimBundleAtLine(route.BuildLine, shnsdk.ConformantClaimInputs{
+		QR: res.qrJSON, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef, MemberID: res.member,
 		Corr: pasCorr, Created: g.cfg.Clock(),
 		ContainedInsurer: targetsBrPayer(g.cfg.OriginationProfile),
 		AbsoluteRefs:     targetsBrPayer(g.cfg.OriginationProfile),
@@ -934,11 +1508,17 @@ func (g *Gateway) handleUC03(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build bundle failed"})
 		return
 	}
-	if status, msg := g.validateFHIR(ctx, bundleJSON, "egress"); status != 0 {
+	bundleJSON, _, err = g.egressAdapt(route, bundleJSON, ExchangeIdentity{CorrelationID: pasCorr, LegType: "pas-claim", Counterpart: res.recipient})
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	if status, msg := g.validateFHIR(ctx, bundleJSON, "egress", targetLine); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
-	claimRespJSON, err := g.OriginateLeg(ctx, r, res.recipient, "pas-claim", res.pci, pasCorr, "", Content{WorkstreamType: workstreamPA, Bytes: bundleJSON})
+	claimRespJSON, err := g.OriginateLeg(ctx, r, res.recipient, "pas-claim", res.pci, pasCorr, "",
+		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Bytes: bundleJSON})
 	if err != nil {
 		if g.relayOriginationError(w, err) {
 			return
@@ -946,7 +1526,7 @@ func (g *Gateway) handleUC03(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
-	if status, msg := g.validateFHIR(ctx, claimRespJSON, "ingress"); status != 0 {
+	if status, msg := g.validateFHIR(ctx, claimRespJSON, "ingress", targetLine); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
@@ -994,8 +1574,17 @@ func (g *Gateway) handleUC07HCPCS(w http.ResponseWriter, r *http.Request) {
 
 	// --- PAS round-trip: submit the preauth bundle, expect an approval. ---
 	pasCorr := g.cfg.CorrelationGen()
-	bundleJSON, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
-		QR: res.qrJSON, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef,
+	// Select-before-build: the routed line CHOOSES the builder, so it is
+	// resolved BEFORE the bundle exists. Also the pended-line pin for any
+	// pas-claim-update leg downstream — pas-claim and pas-claim-update share the
+	// pa.pas contract, so one selection is contract-correct for both.
+	route, ok := g.selectLegLineOrFail(w, res.recipient, "pas-claim", pasCorr)
+	if !ok {
+		return
+	}
+	targetLine := shnsdk.LineOf(route.Token)
+	bundleJSON, err := shnsdk.BuildConformantClaimBundleAtLine(route.BuildLine, shnsdk.ConformantClaimInputs{
+		QR: res.qrJSON, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef, MemberID: res.member,
 		Corr: pasCorr, Created: g.cfg.Clock(),
 		ContainedInsurer: targetsBrPayer(g.cfg.OriginationProfile),
 		AbsoluteRefs:     targetsBrPayer(g.cfg.OriginationProfile),
@@ -1006,11 +1595,17 @@ func (g *Gateway) handleUC07HCPCS(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build bundle failed"})
 		return
 	}
-	if status, msg := g.validateFHIR(ctx, bundleJSON, "egress"); status != 0 {
+	bundleJSON, _, err = g.egressAdapt(route, bundleJSON, ExchangeIdentity{CorrelationID: pasCorr, LegType: "pas-claim", Counterpart: res.recipient})
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	if status, msg := g.validateFHIR(ctx, bundleJSON, "egress", targetLine); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
-	claimRespJSON, err := g.OriginateLeg(ctx, r, res.recipient, "pas-claim", res.pci, pasCorr, "", Content{WorkstreamType: workstreamPA, Bytes: bundleJSON})
+	claimRespJSON, err := g.OriginateLeg(ctx, r, res.recipient, "pas-claim", res.pci, pasCorr, "",
+		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Bytes: bundleJSON})
 	if err != nil {
 		if g.relayOriginationError(w, err) {
 			return
@@ -1018,7 +1613,7 @@ func (g *Gateway) handleUC07HCPCS(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
-	if status, msg := g.validateFHIR(ctx, claimRespJSON, "ingress"); status != 0 {
+	if status, msg := g.validateFHIR(ctx, claimRespJSON, "ingress", targetLine); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
@@ -1096,18 +1691,22 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "order missing id"})
 			return
 		}
-		attestedQR, err := shnsdk.FillQuestionnaireFromAnswers(res.questionnaireJSON, answers,
+		// Attest at the selected DTR line (closes an earlier KNOWN GAP: this QR
+		// used to be built at the frozen 2.0 shape regardless of the selected line — the
+		// 2.2 two-RI run showed wrong-line QR bytes could pass SILENTLY, the UC-03 auto-fill
+		// site this closes).
+		attestedQR, err := shnsdk.FillQuestionnaireFromAnswersAtLine(res.dtrLine, res.questionnaireJSON, answers,
 			"Organization/"+g.cfg.HolderID,
 			shnsdk.QRContext{PatientRef: res.patientRef, CoverageRef: res.coverageRef, OrderRef: orderRef, Authored: g.cfg.Clock()})
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "attest questionnaire failed"})
 			return
 		}
-		if status, msg := g.validateFHIR(ctx, attestedQR, "egress"); status != 0 {
+		if status, msg := g.validateFHIR(ctx, attestedQR, "egress", res.dtrLine); status != 0 {
 			writeJSON(w, status, map[string]string{"error": msg})
 			return
 		}
-		parsed, _, status, msg, err := g.submitClaimAndResolve(ctx, r, res.pci, res.srJSON, attestedQR, res.patientRef, res.coverageRef, res.payer, res.recipient)
+		parsed, _, status, msg, err := g.submitClaimAndResolve(ctx, r, res.pci, res.srJSON, attestedQR, res.patientRef, res.coverageRef, res.member, res.payer, res.recipient)
 		if status != 0 {
 			if g.relayOriginationError(w, err) {
 				return
@@ -1128,8 +1727,17 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 	// sandbox: the operative-DiagnosticReport amendment tail (UNCHANGED below).
 	// PAS submit — expect PENDED (no operative DiagnosticReport yet).
 	pasCorr := g.cfg.CorrelationGen()
-	bundleJSON, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
-		QR: res.qrJSON, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef,
+	// Select-before-build: the routed line CHOOSES the builder, so it is
+	// resolved BEFORE the bundle exists. Also the pended-line pin for any
+	// pas-claim-update leg downstream — pas-claim and pas-claim-update share the
+	// pa.pas contract, so one selection is contract-correct for both.
+	route, ok := g.selectLegLineOrFail(w, res.recipient, "pas-claim", pasCorr)
+	if !ok {
+		return
+	}
+	targetLine := shnsdk.LineOf(route.Token)
+	bundleJSON, err := shnsdk.BuildConformantClaimBundleAtLine(route.BuildLine, shnsdk.ConformantClaimInputs{
+		QR: res.qrJSON, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef, MemberID: res.member,
 		Corr: pasCorr, Created: g.cfg.Clock(),
 		ContainedInsurer: targetsBrPayer(g.cfg.OriginationProfile),
 		AbsoluteRefs:     targetsBrPayer(g.cfg.OriginationProfile),
@@ -1140,11 +1748,17 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build bundle failed"})
 		return
 	}
-	if status, msg := g.validateFHIR(ctx, bundleJSON, "egress"); status != 0 {
+	bundleJSON, _, err = g.egressAdapt(route, bundleJSON, ExchangeIdentity{CorrelationID: pasCorr, LegType: "pas-claim", Counterpart: res.recipient})
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	if status, msg := g.validateFHIR(ctx, bundleJSON, "egress", targetLine); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
-	pendedResp, err := g.OriginateLeg(ctx, r, res.recipient, "pas-claim", res.pci, pasCorr, "", Content{WorkstreamType: workstreamPA, Bytes: bundleJSON})
+	pendedResp, err := g.OriginateLeg(ctx, r, res.recipient, "pas-claim", res.pci, pasCorr, "",
+		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Bytes: bundleJSON})
 	if err != nil {
 		if g.relayOriginationError(w, err) {
 			return
@@ -1152,7 +1766,7 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
-	if status, msg := g.validateFHIR(ctx, pendedResp, "ingress"); status != 0 {
+	if status, msg := g.validateFHIR(ctx, pendedResp, "ingress", targetLine); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
@@ -1175,7 +1789,7 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "no supplemental report"})
 		return
 	}
-	if status, msg := g.validateFHIR(ctx, drJSON, "egress"); status != 0 {
+	if status, msg := g.validateFHIR(ctx, drJSON, "egress", ""); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
@@ -1189,13 +1803,17 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build provenance failed"})
 		return
 	}
-	if status, msg := g.validateFHIR(ctx, provJSON, "egress"); status != 0 {
+	if status, msg := g.validateFHIR(ctx, provJSON, "egress", ""); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
 	updateCorr := g.cfg.CorrelationGen()
-	updateBundle, err := shnsdk.BuildConformantClaimUpdateBundle(shnsdk.ConformantClaimUpdateInputs{
-		QR: res.qrJSON, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef,
+	// Built at the PINNED route (never re-selected: the amendment must answer
+	// the pend it references, and the pended-pin rule says a resume leg never
+	// re-negotiates) — route.BuildLine/route.Token are the SAME captured route
+	// the initial pas-claim submit selected above.
+	updateBundle, err := shnsdk.BuildConformantClaimUpdateBundleAtLine(route.BuildLine, shnsdk.ConformantClaimUpdateInputs{
+		QR: res.qrJSON, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef, MemberID: res.member,
 		Provenance: provJSON, DiagnosticReport: drJSON, Corr: updateCorr, OriginalCorr: pasCorr, Created: g.cfg.Clock(),
 		ContainedInsurer: targetsBrPayer(g.cfg.OriginationProfile),
 		AbsoluteRefs:     targetsBrPayer(g.cfg.OriginationProfile),
@@ -1206,13 +1824,19 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build update bundle failed"})
 		return
 	}
-	if status, msg := g.validateFHIR(ctx, updateBundle, "egress"); status != 0 {
+	updateBundle, _, err = g.egressAdapt(route, updateBundle, ExchangeIdentity{CorrelationID: updateCorr, LegType: "pas-claim-update", Counterpart: res.recipient})
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	if status, msg := g.validateFHIR(ctx, updateBundle, "egress", targetLine); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
 
 	// ClaimUpdate exchange — expect APPROVED.
-	updateResp, err := g.OriginateLeg(ctx, r, res.recipient, "pas-claim-update", res.pci, updateCorr, "", Content{WorkstreamType: workstreamPA, Bytes: updateBundle})
+	updateResp, err := g.OriginateLeg(ctx, r, res.recipient, "pas-claim-update", res.pci, updateCorr, "",
+		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Bytes: updateBundle})
 	if err != nil {
 		if g.relayOriginationError(w, err) {
 			return
@@ -1220,7 +1844,7 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
-	if status, msg := g.validateFHIR(ctx, updateResp, "ingress"); status != 0 {
+	if status, msg := g.validateFHIR(ctx, updateResp, "ingress", targetLine); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
@@ -1322,8 +1946,17 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 
 	// PAS submit — expect PENDED (no operative DiagnosticReport yet).
 	pasCorr := g.cfg.CorrelationGen()
-	bundleJSON, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
-		QR: res.qrJSON, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef,
+	// Select-before-build: the routed line CHOOSES the builder, so it is
+	// resolved BEFORE the bundle exists. Also the pended-line pin for any
+	// pas-claim-update leg downstream — pas-claim and pas-claim-update share the
+	// pa.pas contract, so one selection is contract-correct for both.
+	route, ok := g.selectLegLineOrFail(w, res.recipient, "pas-claim", pasCorr)
+	if !ok {
+		return
+	}
+	targetLine := shnsdk.LineOf(route.Token)
+	bundleJSON, err := shnsdk.BuildConformantClaimBundleAtLine(route.BuildLine, shnsdk.ConformantClaimInputs{
+		QR: res.qrJSON, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef, MemberID: res.member,
 		Corr: pasCorr, Created: g.cfg.Clock(),
 		ContainedInsurer: targetsBrPayer(g.cfg.OriginationProfile),
 		AbsoluteRefs:     targetsBrPayer(g.cfg.OriginationProfile),
@@ -1334,11 +1967,17 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build bundle failed"})
 		return
 	}
-	if status, msg := g.validateFHIR(ctx, bundleJSON, "egress"); status != 0 {
+	bundleJSON, _, err = g.egressAdapt(route, bundleJSON, ExchangeIdentity{CorrelationID: pasCorr, LegType: "pas-claim", Counterpart: res.recipient})
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	if status, msg := g.validateFHIR(ctx, bundleJSON, "egress", targetLine); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
-	pendedResp, err := g.OriginateLeg(ctx, r, res.recipient, "pas-claim", res.pci, pasCorr, "", Content{WorkstreamType: workstreamPA, Bytes: bundleJSON})
+	pendedResp, err := g.OriginateLeg(ctx, r, res.recipient, "pas-claim", res.pci, pasCorr, "",
+		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Bytes: bundleJSON})
 	if err != nil {
 		if g.relayOriginationError(w, err) {
 			return
@@ -1346,7 +1985,7 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
-	if status, msg := g.validateFHIR(ctx, pendedResp, "ingress"); status != 0 {
+	if status, msg := g.validateFHIR(ctx, pendedResp, "ingress", targetLine); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
@@ -1397,7 +2036,7 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 		}
 		// Ingress-validate the facility's searchset BEFORE trusting/extracting its
 		// resources (defense in depth — every resource crossing the substrate is validated).
-		if status, msg := g.validateFHIR(ctx, recordsJSON, "ingress"); status != 0 {
+		if status, msg := g.validateFHIR(ctx, recordsJSON, "ingress", ""); status != 0 {
 			writeJSON(w, status, map[string]string{"error": msg})
 			return
 		}
@@ -1414,8 +2053,12 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 
 	// --- ClaimUpdate with the externally-retrieved DiagnosticReport + Provenance. ---
 	updateCorr := g.cfg.CorrelationGen()
-	updateBundle, err := shnsdk.BuildConformantClaimUpdateBundle(shnsdk.ConformantClaimUpdateInputs{
-		QR: res.qrJSON, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef,
+	// Built at the PINNED route (never re-selected: the amendment must answer
+	// the pend it references, and the pended-pin rule says a resume leg never
+	// re-negotiates) — route.BuildLine/route.Token are the SAME captured route
+	// the initial pas-claim submit selected above.
+	updateBundle, err := shnsdk.BuildConformantClaimUpdateBundleAtLine(route.BuildLine, shnsdk.ConformantClaimUpdateInputs{
+		QR: res.qrJSON, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef, MemberID: res.member,
 		Provenance: provJSON, DiagnosticReport: drJSON, Corr: updateCorr, OriginalCorr: pasCorr, Created: g.cfg.Clock(),
 		ContainedInsurer: targetsBrPayer(g.cfg.OriginationProfile),
 		AbsoluteRefs:     targetsBrPayer(g.cfg.OriginationProfile),
@@ -1426,11 +2069,17 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build update bundle failed"})
 		return
 	}
-	if status, msg := g.validateFHIR(ctx, updateBundle, "egress"); status != 0 {
+	updateBundle, _, err = g.egressAdapt(route, updateBundle, ExchangeIdentity{CorrelationID: updateCorr, LegType: "pas-claim-update", Counterpart: res.recipient})
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	if status, msg := g.validateFHIR(ctx, updateBundle, "egress", targetLine); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
-	updateResp, err := g.OriginateLeg(ctx, r, res.recipient, "pas-claim-update", res.pci, updateCorr, "", Content{WorkstreamType: workstreamPA, Bytes: updateBundle})
+	updateResp, err := g.OriginateLeg(ctx, r, res.recipient, "pas-claim-update", res.pci, updateCorr, "",
+		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Bytes: updateBundle})
 	if err != nil {
 		if g.relayOriginationError(w, err) {
 			return
@@ -1438,7 +2087,7 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
-	if status, msg := g.validateFHIR(ctx, updateResp, "ingress"); status != 0 {
+	if status, msg := g.validateFHIR(ctx, updateResp, "ingress", targetLine); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
@@ -1494,8 +2143,17 @@ func (g *Gateway) handleUC08(w http.ResponseWriter, r *http.Request) {
 	// PAS submit — expect DENIED (4 weeks conservative therapy < 6, no prior surgery,
 	// not high-disability → Adjudicate returns Denied).
 	pasCorr := g.cfg.CorrelationGen()
-	bundleJSON, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
-		QR: res.qrJSON, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef,
+	// Select-before-build: the routed line CHOOSES the builder, so it is
+	// resolved BEFORE the bundle exists. Also the pended-line pin for any
+	// pas-claim-update leg downstream — pas-claim and pas-claim-update share the
+	// pa.pas contract, so one selection is contract-correct for both.
+	route, ok := g.selectLegLineOrFail(w, res.recipient, "pas-claim", pasCorr)
+	if !ok {
+		return
+	}
+	targetLine := shnsdk.LineOf(route.Token)
+	bundleJSON, err := shnsdk.BuildConformantClaimBundleAtLine(route.BuildLine, shnsdk.ConformantClaimInputs{
+		QR: res.qrJSON, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef, MemberID: res.member,
 		Corr: pasCorr, Created: g.cfg.Clock(),
 		ContainedInsurer: targetsBrPayer(g.cfg.OriginationProfile),
 		AbsoluteRefs:     targetsBrPayer(g.cfg.OriginationProfile),
@@ -1506,12 +2164,18 @@ func (g *Gateway) handleUC08(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build bundle failed"})
 		return
 	}
-	if status, msg := g.validateFHIR(ctx, bundleJSON, "egress"); status != 0 {
+	bundleJSON, _, err = g.egressAdapt(route, bundleJSON, ExchangeIdentity{CorrelationID: pasCorr, LegType: "pas-claim", Counterpart: res.recipient})
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	if status, msg := g.validateFHIR(ctx, bundleJSON, "egress", targetLine); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
 
-	claimRespJSON, err := g.OriginateLeg(ctx, r, res.recipient, "pas-claim", res.pci, pasCorr, "", Content{WorkstreamType: workstreamPA, Bytes: bundleJSON})
+	claimRespJSON, err := g.OriginateLeg(ctx, r, res.recipient, "pas-claim", res.pci, pasCorr, "",
+		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Bytes: bundleJSON})
 	if err != nil {
 		if g.relayOriginationError(w, err) {
 			return
@@ -1519,7 +2183,7 @@ func (g *Gateway) handleUC08(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
-	if status, msg := g.validateFHIR(ctx, claimRespJSON, "ingress"); status != 0 {
+	if status, msg := g.validateFHIR(ctx, claimRespJSON, "ingress", targetLine); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}

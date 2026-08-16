@@ -22,6 +22,13 @@ type legSpec struct {
 	RespOp    string
 	Scope     string
 	Physics   LegPhysics
+	// Contract is the contract-version family this legType's payload belongs to
+	// ("pa.pas" — spec 2026-08-10 §4), consumed by the OriginateLeg version
+	// filter and the response-frame stamp. "" = version-neutral: the leg's
+	// payload is not governed by any declared contract line (base-R4 CER, CDex,
+	// bespoke patient-dtr JSON) and is never filtered or stamped. Every catalog
+	// row states it explicitly (pinned by TestPACatalog_Contracts).
+	Contract string
 }
 
 // paCatalog is the PA workstream's leg catalog, keyed by legType (= envelope
@@ -34,27 +41,32 @@ var paCatalog = map[string]legSpec{
 	"coverage-eligibility": {
 		ReqFrame: "provider-tpo", RespFrame: "payer-coverage",
 		Op: "eligibility-inquiry", RespOp: "eligibility-response", Scope: "eligibility-scope",
-		Physics: LegPhysics{Kind: KindRequestResponse, Effect: EffectReadOnly, Timing: TimingSync, Locality: LocalitySubstrate},
+		Physics:  LegPhysics{Kind: KindRequestResponse, Effect: EffectReadOnly, Timing: TimingSync, Locality: LocalitySubstrate},
+		Contract: "",
 	},
 	"dtr-questionnaire-fetch": {
 		ReqFrame: "provider-tpo", RespFrame: "payer-coverage",
 		Op: "dtr-questionnaire-fetch", RespOp: "dtr-questionnaire", Scope: "questionnaire-only",
-		Physics: LegPhysics{Kind: KindRequestResponse, Effect: EffectReadOnly, Timing: TimingSync, Locality: LocalitySubstrate},
+		Physics:  LegPhysics{Kind: KindRequestResponse, Effect: EffectReadOnly, Timing: TimingSync, Locality: LocalitySubstrate},
+		Contract: "pa.dtr",
 	},
 	"federated-query": {
 		ReqFrame: "provider-tpo", RespFrame: "facility-disclosure",
 		Op: "federated-query-submit", RespOp: "federated-query-response", Scope: "named-docs-only",
-		Physics: LegPhysics{Kind: KindRequestResponse, Effect: EffectReadOnly, Timing: TimingSync, Locality: LocalitySubstrate},
+		Physics:  LegPhysics{Kind: KindRequestResponse, Effect: EffectReadOnly, Timing: TimingSync, Locality: LocalitySubstrate},
+		Contract: "",
 	},
 	"patient-dtr": {
 		ReqFrame: "provider-tpo", RespFrame: "patient-authorship",
 		Op: "patient-dtr-request", RespOp: "patient-dtr-response", Scope: "patient-authorship-only",
-		Physics: LegPhysics{Kind: KindRequestResponse, Effect: EffectReadOnly, Timing: TimingSync, Locality: LocalitySubstrate},
+		Physics:  LegPhysics{Kind: KindRequestResponse, Effect: EffectReadOnly, Timing: TimingSync, Locality: LocalitySubstrate},
+		Contract: "",
 	},
 	"crd-order-select": {
 		ReqFrame: "provider-tpo", RespFrame: "payer-coverage",
 		Op: "crd-order-select", RespOp: "crd-cards", Scope: "crd-context",
-		Physics: LegPhysics{Kind: KindRequestResponse, Effect: EffectReadOnly, Timing: TimingSync, Locality: LocalitySubstrate},
+		Physics:  LegPhysics{Kind: KindRequestResponse, Effect: EffectReadOnly, Timing: TimingSync, Locality: LocalitySubstrate},
+		Contract: "pa.crd",
 	},
 	// crd-order-dispatch: the order-dispatch sibling of crd-order-select.
 	// A DISTINCT Op is load-bearing: handleInbound pins spec.Op per TransactionType into
@@ -63,12 +75,14 @@ var paCatalog = map[string]legSpec{
 	"crd-order-dispatch": {
 		ReqFrame: "provider-tpo", RespFrame: "payer-coverage",
 		Op: "crd-order-dispatch", RespOp: "crd-dispatch-cards", Scope: "crd-context",
-		Physics: LegPhysics{Kind: KindRequestResponse, Effect: EffectReadOnly, Timing: TimingSync, Locality: LocalitySubstrate},
+		Physics:  LegPhysics{Kind: KindRequestResponse, Effect: EffectReadOnly, Timing: TimingSync, Locality: LocalitySubstrate},
+		Contract: "pa.crd",
 	},
 	"pas-claim": {
 		ReqFrame: "provider-tpo", RespFrame: "payer-coverage",
 		Op: "pas-submit", RespOp: "pas-response", Scope: "pas-bundle",
-		Physics: LegPhysics{Kind: KindRequestResponse, Effect: EffectMutating, Timing: TimingSync, Locality: LocalitySubstrate},
+		Physics:  LegPhysics{Kind: KindRequestResponse, Effect: EffectMutating, Timing: TimingSync, Locality: LocalitySubstrate},
+		Contract: "pa.pas",
 	},
 	// F-B1: the conformant amended re-POST leg — the UPDATE-family analog of pas-claim
 	// (which is the conformant SUBMIT leg). It carries the update op-family (Op
@@ -79,6 +93,7 @@ var paCatalog = map[string]legSpec{
 	"pas-claim-update": {
 		ReqFrame: "provider-tpo", RespFrame: "payer-coverage",
 		Op: "pas-update-submit", RespOp: "pas-update-response", Scope: "pas-update-bundle",
-		Physics: LegPhysics{Kind: KindRequestResponse, Effect: EffectMutating, Timing: TimingSync, Locality: LocalitySubstrate},
+		Physics:  LegPhysics{Kind: KindRequestResponse, Effect: EffectMutating, Timing: TimingSync, Locality: LocalitySubstrate},
+		Contract: "pa.pas",
 	},
 }

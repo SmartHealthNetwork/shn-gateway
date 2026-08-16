@@ -1,6 +1,100 @@
 {
   "entry": [
     {
+      "fullUrl": "Condition/cond-m5116-mbrbridgedemo-provider",
+      "resource": {
+        "id": "cond-m5116-mbrbridgedemo-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-condition-problems-health-concerns"
+          ]
+        },
+        "clinicalStatus": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/condition-clinical",
+              "code": "active",
+              "display": "Active"
+            }
+          ]
+        },
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/condition-category",
+                "code": "problem-list-item",
+                "display": "Problem List Item"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://hl7.org/fhir/sid/icd-10-cm",
+              "code": "M51.16"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbrbridgedemo-provider"
+        },
+        "resourceType": "Condition"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Condition/cond-m5116-mbrbridgedemo-provider"
+      }
+    },
+    {
+      "fullUrl": "Condition/cond-m5116-mbrbridgerefuse-provider",
+      "resource": {
+        "id": "cond-m5116-mbrbridgerefuse-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-condition-problems-health-concerns"
+          ]
+        },
+        "clinicalStatus": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/condition-clinical",
+              "code": "active",
+              "display": "Active"
+            }
+          ]
+        },
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/condition-category",
+                "code": "problem-list-item",
+                "display": "Problem List Item"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://hl7.org/fhir/sid/icd-10-cm",
+              "code": "M51.16"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbrbridgerefuse-provider"
+        },
+        "resourceType": "Condition"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Condition/cond-m5116-mbrbridgerefuse-provider"
+      }
+    },
+    {
       "fullUrl": "Condition/cond-m5116-mbrcanarycovered-provider",
       "resource": {
         "id": "cond-m5116-mbrcanarycovered-provider",
@@ -753,10 +847,130 @@
       }
     },
     {
-      "fullUrl": "Coverage/cov-mbrextpayer-provider",
+      "fullUrl": "Coverage/cov-mbrbridgedemo-provider",
       "resource": {
         "beneficiary": {
-          "reference": "Patient/pat-mbrextpayer-provider"
+          "reference": "Patient/pat-mbrbridgedemo-provider"
+        },
+        "contained": [
+          {
+            "id": "bridge-demo-payer-org",
+            "identifier": [
+              {
+                "system": "urn:shn:demo-payer",
+                "value": "SHN-BRIDGE-DEMO"
+              }
+            ],
+            "name": "SHN Bridge Demo Payer",
+            "resourceType": "Organization"
+          }
+        ],
+        "id": "cov-mbrbridgedemo-provider",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:coverage",
+            "value": "MBR-BRIDGE-DEMO"
+          }
+        ],
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage"
+          ]
+        },
+        "payor": [
+          {
+            "reference": "#bridge-demo-payer-org"
+          }
+        ],
+        "relationship": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+              "code": "self"
+            }
+          ]
+        },
+        "resourceType": "Coverage",
+        "status": "active"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Coverage/cov-mbrbridgedemo-provider"
+      }
+    },
+    {
+      "fullUrl": "Coverage/cov-mbrbridgerefuse-provider",
+      "resource": {
+        "beneficiary": {
+          "reference": "Patient/pat-mbrbridgerefuse-provider"
+        },
+        "contained": [
+          {
+            "id": "bridge-refuse-payer-org",
+            "identifier": [
+              {
+                "system": "urn:shn:demo-payer",
+                "value": "SHN-BRIDGE-REFUSE"
+              }
+            ],
+            "name": "SHN Bridge Refuse Demo Payer",
+            "resourceType": "Organization"
+          }
+        ],
+        "id": "cov-mbrbridgerefuse-provider",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:coverage",
+            "value": "MBR-BRIDGE-REFUSE"
+          }
+        ],
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage"
+          ]
+        },
+        "payor": [
+          {
+            "reference": "#bridge-refuse-payer-org"
+          }
+        ],
+        "relationship": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+              "code": "self"
+            }
+          ]
+        },
+        "resourceType": "Coverage",
+        "status": "active"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Coverage/cov-mbrbridgerefuse-provider"
+      }
+    },
+    {
+      "fullUrl": "Coverage/cov-mbrcambiaabby-provider",
+      "resource": {
+        "beneficiary": {
+          "reference": "Patient/pat-mbrcambiaabby-provider"
         },
         "class": [
           {
@@ -773,7 +987,7 @@
         ],
         "contained": [
           {
-            "id": "external-payer-org",
+            "id": "cambia-payer-org",
             "identifier": [
               {
                 "system": "urn:oid:2.16.840.1.113883.6.300",
@@ -784,7 +998,7 @@
             "resourceType": "Organization"
           }
         ],
-        "id": "cov-mbrextpayer-provider",
+        "id": "cov-mbrcambiaabby-provider",
         "identifier": [
           {
             "type": {
@@ -806,7 +1020,7 @@
         },
         "payor": [
           {
-            "reference": "#external-payer-org"
+            "reference": "#cambia-payer-org"
           }
         ],
         "relationship": {
@@ -822,7 +1036,7 @@
       },
       "request": {
         "method": "PUT",
-        "url": "Coverage/cov-mbrextpayer-provider"
+        "url": "Coverage/cov-mbrcambiaabby-provider"
       }
     },
     {
@@ -1988,6 +2202,88 @@
       }
     },
     {
+      "fullUrl": "DiagnosticReport/dr-xray-mbrbridgedemo-provider",
+      "resource": {
+        "id": "dr-xray-mbrbridgedemo-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-diagnosticreport-note"
+          ]
+        },
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/v2-0074",
+                "code": "RAD",
+                "display": "Radiology"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.ama-assn.org/go/cpt",
+              "code": "72148",
+              "display": "Lumbar MRI"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbrbridgedemo-provider"
+        },
+        "effectiveDateTime": "2026-05-15",
+        "resourceType": "DiagnosticReport"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "DiagnosticReport/dr-xray-mbrbridgedemo-provider"
+      }
+    },
+    {
+      "fullUrl": "DiagnosticReport/dr-xray-mbrbridgerefuse-provider",
+      "resource": {
+        "id": "dr-xray-mbrbridgerefuse-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-diagnosticreport-note"
+          ]
+        },
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/v2-0074",
+                "code": "RAD",
+                "display": "Radiology"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.ama-assn.org/go/cpt",
+              "code": "72148",
+              "display": "Lumbar MRI"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbrbridgerefuse-provider"
+        },
+        "effectiveDateTime": "2026-05-15",
+        "resourceType": "DiagnosticReport"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "DiagnosticReport/dr-xray-mbrbridgerefuse-provider"
+      }
+    },
+    {
       "fullUrl": "DiagnosticReport/dr-xray-mbrcanarycovered-provider",
       "resource": {
         "id": "dr-xray-mbrcanarycovered-provider",
@@ -2641,6 +2937,86 @@
       "request": {
         "method": "PUT",
         "url": "DiagnosticReport/dr-xray-mbruc08-provider"
+      }
+    },
+    {
+      "fullUrl": "Observation/obs-neuro-mbrbridgedemo-provider",
+      "resource": {
+        "id": "obs-neuro-mbrbridgedemo-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-clinical-result"
+          ]
+        },
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "exam",
+                "display": "Exam"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "urn:shn:clinical-context",
+              "code": "neuro-deficit"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbrbridgedemo-provider"
+        },
+        "valueBoolean": false,
+        "resourceType": "Observation"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Observation/obs-neuro-mbrbridgedemo-provider"
+      }
+    },
+    {
+      "fullUrl": "Observation/obs-neuro-mbrbridgerefuse-provider",
+      "resource": {
+        "id": "obs-neuro-mbrbridgerefuse-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-clinical-result"
+          ]
+        },
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "exam",
+                "display": "Exam"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "urn:shn:clinical-context",
+              "code": "neuro-deficit"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbrbridgerefuse-provider"
+        },
+        "valueBoolean": false,
+        "resourceType": "Observation"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Observation/obs-neuro-mbrbridgerefuse-provider"
       }
     },
     {
@@ -3371,6 +3747,98 @@
       "request": {
         "method": "PUT",
         "url": "Observation/obs-pr-mbruc07-provider"
+      }
+    },
+    {
+      "fullUrl": "Observation/obs-ptw-mbrbridgedemo-provider",
+      "resource": {
+        "id": "obs-ptw-mbrbridgedemo-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-clinical-result"
+          ]
+        },
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "exam",
+                "display": "Exam"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "urn:shn:clinical-context",
+              "code": "conservative-therapy-weeks"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbrbridgedemo-provider"
+        },
+        "effectiveDateTime": "2026-05-20",
+        "valueQuantity": {
+          "value": 6,
+          "unit": "wk",
+          "system": "http://unitsofmeasure.org",
+          "code": "wk"
+        },
+        "resourceType": "Observation"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Observation/obs-ptw-mbrbridgedemo-provider"
+      }
+    },
+    {
+      "fullUrl": "Observation/obs-ptw-mbrbridgerefuse-provider",
+      "resource": {
+        "id": "obs-ptw-mbrbridgerefuse-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-clinical-result"
+          ]
+        },
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "exam",
+                "display": "Exam"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "urn:shn:clinical-context",
+              "code": "conservative-therapy-weeks"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbrbridgerefuse-provider"
+        },
+        "effectiveDateTime": "2026-05-20",
+        "valueQuantity": {
+          "value": 6,
+          "unit": "wk",
+          "system": "http://unitsofmeasure.org",
+          "code": "wk"
+        },
+        "resourceType": "Observation"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Observation/obs-ptw-mbrbridgerefuse-provider"
       }
     },
     {
@@ -4108,9 +4576,9 @@
       }
     },
     {
-      "fullUrl": "Patient/pat-mbrextpayer-provider",
+      "fullUrl": "Patient/pat-mbrbridgedemo-provider",
       "resource": {
-        "id": "pat-mbrextpayer-provider",
+        "id": "pat-mbrbridgedemo-provider",
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
@@ -4119,7 +4587,65 @@
         "identifier": [
           {
             "system": "urn:shn:member",
-            "value": "MBR-EXTPAYER-ABBY"
+            "value": "MBR-BRIDGE-DEMO"
+          }
+        ],
+        "name": [
+          {
+            "family": "Solberg-BridgeDemo"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1983-03-11",
+        "resourceType": "Patient"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/pat-mbrbridgedemo-provider"
+      }
+    },
+    {
+      "fullUrl": "Patient/pat-mbrbridgerefuse-provider",
+      "resource": {
+        "id": "pat-mbrbridgerefuse-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "value": "MBR-BRIDGE-REFUSE"
+          }
+        ],
+        "name": [
+          {
+            "family": "Amara-BridgeRefuse"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1986-09-27",
+        "resourceType": "Patient"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/pat-mbrbridgerefuse-provider"
+      }
+    },
+    {
+      "fullUrl": "Patient/pat-mbrcambiaabby-provider",
+      "resource": {
+        "id": "pat-mbrcambiaabby-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "value": "MBR-CAMBIA-ABBY"
           }
         ],
         "name": [
@@ -4133,7 +4659,7 @@
       },
       "request": {
         "method": "PUT",
-        "url": "Patient/pat-mbrextpayer-provider"
+        "url": "Patient/pat-mbrcambiaabby-provider"
       }
     },
     {

@@ -407,6 +407,43 @@ func TestCooldown(t *testing.T) {
 	}
 }
 
+// TestRunner_OnResultsFires (endpoint-evidence wiring hook): OnResults fires exactly once
+// per freshly-completed run, with that run's results — and does NOT fire on
+// a cooldown-cached short-circuit (no new evidence that cycle).
+func TestRunner_OnResultsFires(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	clock := newFakeClock(time.Unix(2_000_000, 0))
+	rn := NewRunner([]Target{{ID: "svc", Kind: KindReachable, URL: srv.URL}}, srv.Client(), clock.Now)
+	var calls int
+	var lastSeen []Result
+	rn.OnResults = func(results []Result) {
+		calls++
+		lastSeen = results
+	}
+
+	if _, err := rn.Run(context.Background()); err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("calls = %d, want 1 after the first completed run", calls)
+	}
+	if len(lastSeen) != 1 || lastSeen[0].ID != "svc" {
+		t.Fatalf("OnResults saw %+v, want the run's own results", lastSeen)
+	}
+
+	clock.Advance(10 * time.Second) // still within cooldown
+	if _, err := rn.Run(context.Background()); err != nil {
+		t.Fatalf("cooldown Run: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("calls = %d after a cooldown-cached Run, want still 1 (no new evidence)", calls)
+	}
+}
+
 // 8. Last before any run.
 func TestLastBeforeAnyRun(t *testing.T) {
 	rn := NewRunner(nil, http.DefaultClient, time.Now)
@@ -531,22 +568,22 @@ func TestGlobalDeadline(t *testing.T) {
 	}
 }
 
-// wantFailure asserts a failing result's machine classification:
-// present, exact code, exact hint.
+// wantFailure asserts a failing result's machine classification (spec
+// 2026-08-09 §1/§2): present, exact code, exact hint.
 func wantFailure(t *testing.T, res Result, code, hint string) {
 	t.Helper()
 	if res.OK {
 		t.Fatalf("result %q ok=true, want a failing result", res.ID)
 	}
 	if res.Failure == nil {
-		t.Fatalf("result %q Failure=nil, want {code:%q hint:%q} (invariant: ok:false ⇒ failure present)", res.ID, code, hint)
+		t.Fatalf("result %q Failure=nil, want {code:%q hint:%q} (spec §1 invariant: ok:false ⇒ failure present)", res.ID, code, hint)
 	}
 	if res.Failure.Code != code || res.Failure.Hint != hint {
 		t.Fatalf("result %q failure = {%q %q}, want {%q %q}", res.ID, res.Failure.Code, res.Failure.Hint, code, hint)
 	}
 }
 
-// 11. failure classification: one row per minting site
+// 11. failure classification (spec 2026-08-09 §2): one row per minting site
 // reachable through a live Runner, including a closed-port transport row.
 // The fhir-metadata transport row lives in test 3b's extension (hint
 // redaction needs the credential-bearing URL) and the deadline row in
@@ -631,7 +668,7 @@ func TestFailureClassification(t *testing.T) {
 					t.Fatalf("ok=false (%s), want ok", res.Detail)
 				}
 				if res.Failure != nil {
-					t.Fatalf("Failure=%+v on an ok result, want nil (invariant: ok:true ⇒ failure nil)", res.Failure)
+					t.Fatalf("Failure=%+v on an ok result, want nil (spec §1 invariant)", res.Failure)
 				}
 				return
 			}
@@ -646,7 +683,7 @@ func TestFailureClassification(t *testing.T) {
 	}
 }
 
-// 12. wire shape: an ok result marshals with NO
+// 12. wire shape (spec 2026-08-09 §1): an ok result marshals with NO
 // failure key — byte-additive over the v0.32.0 shape — and a failing
 // result's failure object omits an empty hint.
 func TestResultJSONFailureShape(t *testing.T) {
@@ -693,5 +730,238 @@ func TestFHIRMetadataLargeCapabilityStatement(t *testing.T) {
 	}
 	if res.Detail != "CapabilityStatement (FHIR 4.0.1)" {
 		t.Fatalf("Detail = %q, want the parsed CapabilityStatement detail", res.Detail)
+	}
+}
+
+// 14. TestFHIRMetadataProbeRetainsCapability: the prober stops discarding
+// what it parses (spec 2026-08-10 §3 path 2 "probe retention"): fhirVersion,
+// implementationGuide, versioned supportedProfile — plus the contract tokens
+// derived from them — ride the Result so the control plane retains them.
+func TestFHIRMetadataProbeRetainsCapability(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"resourceType": "CapabilityStatement",
+			"fhirVersion": "4.0.1",
+			"implementationGuide": ["http://hl7.org/fhir/us/davinci-pas/ImplementationGuide/hl7.fhir.us.davinci-pas|2.0.1"],
+			"rest": [{"mode":"server","resource":[{"type":"Claim","supportedProfile":["http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claim|2.0.1"]}]}]
+		}`))
+	}))
+	defer srv.Close()
+	r := NewRunner([]Target{{ID: "PAYER_DAVINCI_BASE_URL", Kind: KindFHIRMetadata, URL: srv.URL}}, srv.Client(), nil)
+	results, err := r.Run(context.Background())
+	if err != nil || len(results) != 1 {
+		t.Fatalf("Run: %v / %d results", err, len(results))
+	}
+	res := results[0]
+	if !res.OK || res.Capability == nil {
+		t.Fatalf("want OK with capability, got %+v", res)
+	}
+	if res.Capability.FHIRVersion != "4.0.1" {
+		t.Fatalf("FHIRVersion = %q", res.Capability.FHIRVersion)
+	}
+	if len(res.Capability.ImplementationGuides) != 1 || len(res.Capability.SupportedProfiles) != 1 {
+		t.Fatalf("raw evidence not retained: %+v", res.Capability)
+	}
+	if len(res.Capability.ContractVersions) != 1 || res.Capability.ContractVersions[0] != "pa.pas@2.0" {
+		t.Fatalf("derived tokens = %v, want [pa.pas@2.0]", res.Capability.ContractVersions)
+	}
+}
+
+// 15. TestContractTokenFromCanonical: the Da Vinci canonical → token
+// derivation (FHIR-domain knowledge, mirrored inverse of engine's
+// hrexCodeForContract).
+func TestContractTokenFromCanonical(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+		ok   bool
+	}{
+		{"http://hl7.org/fhir/us/davinci-pas/ImplementationGuide/hl7.fhir.us.davinci-pas|2.0.1", "pa.pas@2.0", true},
+		{"http://hl7.org/fhir/us/davinci-crd/ImplementationGuide/hl7.fhir.us.davinci-crd|2.2.0", "pa.crd@2.2", true},
+		// The provider-ingress CS genuinely emits davinci-crd|2.1.0 and
+		// |2.2.1 canonicals (manifest-pinned package versions, sdk/linedef.go's
+		// CRDLineDef) when those lines are declared — exercise the reverse map
+		// against the REAL canonicals it will now see in the wild, not just the
+		// generic 2.2.0 row above.
+		{"http://hl7.org/fhir/us/davinci-crd/ImplementationGuide/hl7.fhir.us.davinci-crd|2.1.0", "pa.crd@2.1", true},
+		{"http://hl7.org/fhir/us/davinci-crd/ImplementationGuide/hl7.fhir.us.davinci-crd|2.2.1", "pa.crd@2.2", true},
+		{"http://hl7.org/fhir/us/davinci-pdex/StructureDefinition/pdex-priorauthorization|2.1.0", "pa.pdex@2.1", true},
+		{"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claim", "", false},  // unversioned: contract known, line unknowable — no token
+		{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient|3.1.1", "", false}, // not a contract-bearing IG
+		{"garbage", "", false},
+	}
+	for _, tc := range cases {
+		got, ok := contractTokenFromCanonical(tc.in)
+		if got != tc.want || ok != tc.ok {
+			t.Errorf("contractTokenFromCanonical(%q) = %q,%v; want %q,%v", tc.in, got, ok, tc.want, tc.ok)
+		}
+	}
+}
+
+// 16. TestResultJSONCapabilityShape: byte-additivity (the v0.33.0
+// failure-key precedent, TestResultJSONFailureShape): a result WITHOUT
+// capability marshals with no "capability" key at all — pre-capability-evidence
+// consumers see byte-identical JSON.
+func TestResultJSONCapabilityShape(t *testing.T) {
+	b, err := json.Marshal(Result{ID: "x", OK: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "capability") {
+		t.Fatalf("empty capability must be omitted: %s", b)
+	}
+}
+
+// TestVersionDriftClassification: probe-vs-declared drift (spec 2026-08-10 §3
+// path 2 — trust-but-verify; declared capability in the wild is unreliable).
+// Drift rule: for every contract BOTH sides know, the line sets must
+// intersect; evidence-absent contracts are tolerated (a peer that publishes
+// nothing is not accused). One mutation per row.
+func TestVersionDriftClassification(t *testing.T) {
+	metadataWith := func(ig string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"resourceType":"CapabilityStatement","fhirVersion":"4.0.1","implementationGuide":["` + ig + `"]}`))
+		}
+	}
+	pas20 := "http://hl7.org/fhir/us/davinci-pas/ImplementationGuide/hl7.fhir.us.davinci-pas|2.0.1"
+	pas22 := "http://hl7.org/fhir/us/davinci-pas/ImplementationGuide/hl7.fhir.us.davinci-pas|2.2.1"
+	cases := []struct {
+		name     string
+		handler  http.HandlerFunc
+		declared []string
+		wantOK   bool
+		wantCode string
+	}{
+		{"declared matches evidence", metadataWith(pas20), []string{"pa.pas@2.0"}, true, ""},
+		{"declared line differs from published line", metadataWith(pas22), []string{"pa.pas@2.0"}, false, FailVersionDrift},
+		{"no declaration → no drift possible", metadataWith(pas22), nil, true, ""},
+		{"declared contract absent from evidence → tolerated", metadataWith(pas20), []string{"pa.crd@2.0"}, true, ""},
+		{"evidence contract absent from declaration → tolerated", metadataWith(pas20), []string{"pa.dtr@2.0"}, true, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(tc.handler)
+			defer srv.Close()
+			r := NewRunner([]Target{{ID: "PAYER_DAVINCI_BASE_URL", Kind: KindFHIRMetadata, URL: srv.URL, DeclaredVersions: tc.declared}}, srv.Client(), nil)
+			results, err := r.Run(context.Background())
+			if err != nil || len(results) != 1 {
+				t.Fatalf("Run: %v", err)
+			}
+			res := results[0]
+			if res.OK != tc.wantOK {
+				t.Fatalf("OK = %v, want %v (%s)", res.OK, tc.wantOK, res.Detail)
+			}
+			if tc.wantCode == "" && res.Failure != nil {
+				t.Fatalf("unexpected failure %+v", res.Failure)
+			}
+			if tc.wantCode != "" {
+				if res.Failure == nil || res.Failure.Code != tc.wantCode {
+					t.Fatalf("failure = %+v, want code %q", res.Failure, tc.wantCode)
+				}
+				if res.Capability == nil {
+					t.Fatal("drift result must still retain the capability evidence")
+				}
+			}
+		})
+	}
+}
+
+// TestProbeRetainsEndpointURLs: the
+// davinci-config probe must retain the per-token endpoint URL alongside the
+// contract-version token it already derives (previously the loop ranged
+// over doc.Endpoints' keys only and discarded the value). A malformed code
+// (no "#line") or an unknown HRex code is discarded from BOTH
+// ContractVersions and EndpointURLs, exactly as before this change.
+func TestProbeRetainsEndpointURLs(t *testing.T) {
+	wellKnown := `{"endpoints":{
+		"davinci_pas_submission_endpoint#2.2":"https://p.example/fhir/Claim/$submit",
+		"malformed_no_hash":"https://p.example/ignored",
+		"something_else#2.0":"https://p.example/ignored-unknown-code"}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(wellKnown))
+	}))
+	defer srv.Close()
+
+	r := NewRunner([]Target{{ID: "PAYER_DAVINCI_WELL_KNOWN", Kind: KindDavinciConfig, URL: srv.URL}}, srv.Client(), nil)
+	results, err := r.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	res := results[0]
+	if res.Capability == nil {
+		t.Fatal("want Capability evidence, got nil")
+	}
+	want := map[string]string{"pa.pas@2.2": "https://p.example/fhir/Claim/$submit"}
+	if len(res.Capability.EndpointURLs) != len(want) || res.Capability.EndpointURLs["pa.pas@2.2"] != want["pa.pas@2.2"] {
+		t.Fatalf("EndpointURLs = %+v, want %+v (malformed/unknown codes must be discarded)", res.Capability.EndpointURLs, want)
+	}
+	if len(res.Capability.ContractVersions) != 1 || res.Capability.ContractVersions[0] != "pa.pas@2.2" {
+		t.Fatalf("ContractVersions = %v, want [pa.pas@2.2] unchanged", res.Capability.ContractVersions)
+	}
+}
+
+// TestDavinciConfigProbe: the HRex well-known probe (spec 2026-08-10 §3
+// path 2). ABSENCE IS TOLERATED — .well-known/davinci-configuration is an
+// HRex 1.2.0 optional; a 404 peer is OK ("not published"), never a failure.
+// A PUBLISHED document is parsed (endpoint codes → tokens), retained, and
+// drift-checked against the declared set.
+func TestDavinciConfigProbe(t *testing.T) {
+	wellKnown := `{"identifier":{"system":"urn:x:p","value":"payer-x"},"endpoints":{
+		"davinci_pas_submission_endpoint#2.2":"https://p.example/pas",
+		"davinci_dtr_qpackage_endpoint#2.0":"https://p.example/dtr",
+		"something_else":"https://p.example/other"}}`
+	cases := []struct {
+		name          string
+		status        int
+		body          string
+		declared      []string
+		wantOK        bool
+		wantCode      string
+		wantTok       []string
+		wantDetailSub string
+	}{
+		{"absent (404) is tolerated", 404, "nope", []string{"pa.pas@2.0"}, true, "", nil, ""},
+		{"published, no declaration", 200, wellKnown, nil, true, "", []string{"pa.dtr@2.0", "pa.pas@2.2"}, ""},
+		{"published agreeing", 200, wellKnown, []string{"pa.dtr@2.0"}, true, "", []string{"pa.dtr@2.0", "pa.pas@2.2"}, ""},
+		{"published drifting", 200, wellKnown, []string{"pa.pas@2.0"}, false, FailVersionDrift, []string{"pa.dtr@2.0", "pa.pas@2.2"}, ""},
+		{"malformed document", 200, "{not json", nil, false, FailInvalidDavinciConfiguration, nil, ""},
+		{"auth-gated (401) tolerated as unpublished", 401, "denied", []string{"pa.pas@2.0"}, true, "", nil, "HRex"},
+		{"auth-gated (403) tolerated as unpublished", 403, "denied", []string{"pa.pas@2.0"}, true, "", nil, "HRex"},
+		{"server error (500) stays a failure", 500, "boom", nil, false, FailHTTPStatus, nil, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/.well-known/davinci-configuration" {
+					t.Errorf("probed path %q", r.URL.Path)
+				}
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			r := NewRunner([]Target{{ID: "PAYER_DAVINCI_WELL_KNOWN", Kind: KindDavinciConfig, URL: srv.URL, DeclaredVersions: tc.declared}}, srv.Client(), nil)
+			results, _ := r.Run(context.Background())
+			res := results[0]
+			if res.OK != tc.wantOK {
+				t.Fatalf("OK = %v want %v (%s)", res.OK, tc.wantOK, res.Detail)
+			}
+			if tc.wantCode != "" && (res.Failure == nil || res.Failure.Code != tc.wantCode) {
+				t.Fatalf("failure = %+v, want %q", res.Failure, tc.wantCode)
+			}
+			if tc.wantCode == "" && !tc.wantOK {
+				t.Fatal("impossible case")
+			}
+			if tc.wantDetailSub != "" && !strings.Contains(res.Detail, tc.wantDetailSub) {
+				t.Fatalf("Detail = %q, want substring %q", res.Detail, tc.wantDetailSub)
+			}
+			var got []string
+			if res.Capability != nil {
+				got = res.Capability.ContractVersions
+			}
+			if strings.Join(got, ",") != strings.Join(tc.wantTok, ",") {
+				t.Fatalf("tokens = %v, want %v", got, tc.wantTok)
+			}
+		})
 	}
 }

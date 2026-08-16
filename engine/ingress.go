@@ -69,6 +69,22 @@ func prefetchResources(prefetch map[string]json.RawMessage) [][]byte {
 	return out
 }
 
+// handleIngressMetadata serves the provider ingress CapabilityStatement
+// (FR-37 per-role; spec 2026-08-10 §3 path 3). Public like the payer's
+// /metadata — a conformance statement is discovery surface, not PHI.
+func (g *Gateway) handleIngressMetadata(w http.ResponseWriter, _ *http.Request) {
+	// D1a: the published conformance surface names THE DECLARED SET, single-sourced
+	// through the same accessor selection and the registry stamp read — a gateway
+	// cannot advertise one set and route on another.
+	b, err := shnsdk.BuildProviderIngressCapabilityStatement(g.cfg.Clock(), g.declaredContractVersions())
+	if err != nil {
+		http.Error(w, "capability statement build failed", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/fhir+json")
+	_, _ = w.Write(b)
+}
+
 func (g *Gateway) handleCDSDiscovery(w http.ResponseWriter, r *http.Request) {
 	if !g.ingressAuthOK(r) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "ingress authentication required"})
@@ -130,13 +146,40 @@ func (g *Gateway) handleCRDIngress(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
+	// Route selection (select-before-build promotion, site census 2026-08-14). This site
+	// relays bytes the PARTNER built, so OriginateLeg's arm-1-only backfill would
+	// normally be the honest posture (its own comment: an arm-2/3 token would
+	// mis-stamp already-built bytes). For pa.crd that rationale is VACUOUS: pa.crd
+	// bytes are LINE-INERT by verified derivation — compat.go's 2.0->2.1 and
+	// 2.1->2.2 rows are identity, live-re-derived against the real CRD
+	// StructureDefinitions — so stamping the routed line is exactly as truthful
+	// for partner-built CDS Hooks JSON as for our own. RE-ADJUDICATION TRIGGER —
+	// this promotion must be re-opened, not silently carried, if EITHER (a) a
+	// future CRD delta makes a line behaviorally distinguishable, OR (b) this
+	// site starts relaying partner content outside the derivation's scope: the
+	// line-inertness claim is PRODUCE-IFF, established over the four
+	// sub-extensions sdk/crd.go's own producer/consumer touch, and a partner's
+	// bytes are broader than that — a partner exercising CRD fields SHN neither
+	// builds nor reads is not covered by it. Selection precedes the exchange so a
+	// refusal costs no Exchange record.
+	child := g.cfg.CorrelationGen()
+	route, ok := g.selectLegLineOrFail(w, recipient, "crd-order-select", child)
+	if !ok {
+		return
+	}
+	// Validation posture UNCHANGED: this driver $validates nothing on egress (it
+	// relays a partner's envelope), and the promotion adds no enforcement point.
+	sealed, _, aerr := g.egressAdapt(route, sealed, ExchangeIdentity{CorrelationID: child, LegType: "crd-order-select", Counterpart: recipient})
+	if aerr != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": aerr.Error()})
+		return
+	}
 	// One Exchange, one leg (the EHR owns grouping in pure pass-through).
 	ex := g.exchanges.Begin(workstreamPA)
-	child := g.cfg.CorrelationGen()
 	respJSON, err := g.OriginateLeg(r.Context(), r, recipient, "crd-order-select", pci, child, "",
-		Content{WorkstreamType: workstreamPA, Bytes: sealed})
+		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Bytes: sealed})
 	leg := Leg{Type: "crd-order-select", Physics: paCatalog["crd-order-select"].Physics,
-		Content: Content{WorkstreamType: workstreamPA, Bytes: sealed}, Subjects: []string{pci}}
+		Content: Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Bytes: sealed}, Subjects: []string{pci}}
 	if err != nil {
 		_ = g.exchanges.AppendLeg(ex.ID, leg.Project(child, "error"))
 		// The recipient answered non-2xx — relay its framed answer verbatim (Content-Type
@@ -208,6 +251,29 @@ func (g *Gateway) handleDTRIngress(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
+	// SELECT-BEFORE-BUILD on the ingress read leg (select-before-build promotion,
+	// site census 2026-08-14). Unlike this driver's CRD and PAS sites, the bytes
+	// here are OUR OWN build: the dtrLegRequest envelope below is marshalled by
+	// this gateway, carrying the partner's coverage/order components verbatim.
+	// That is why it joins the reachability arms rather than the arm-1-only
+	// backfill — and why selection must PRECEDE the marshal, exactly as at the
+	// two promoted DTR-fetch sites (originate.go's runCRDThenDTROrder and
+	// originate_homeoxygen.go). The pa.dtr fetch envelope is LINE-DEPENDENT at
+	// those sites (2.2's DTRDef makes `coverage` 1..1, so they gate
+	// fetch.Coverage on DTRLineDef(line).QuestionnairePackageCoverageRequired),
+	// so a DTR-fetch site that builds before it selects is building blind. This
+	// site needs no such gate — it attaches the partner's CARRIED coverage
+	// unconditionally, and its own recipient derivation (recipientForWith, above)
+	// already fails closed without one, so coverage is always present at every
+	// line. The ordering is fixed regardless: it is the invariant that keeps this
+	// site honest if a future line makes any other envelope field line-dependent.
+	// All of the builder's inputs (canonical, coverage, order) are resolved above,
+	// so selection moves up freely.
+	child := g.cfg.CorrelationGen()
+	route, ok := g.selectLegLineOrFail(w, recipient, "dtr-questionnaire-fetch", child)
+	if !ok {
+		return
+	}
 	// Carry the provider's inbound Coverage (and, for the order-driven lane, the CRD-updated `order`)
 	// VERBATIM through the leg (FR-G28): the native-forward rebuild re-emits them as the
 	// payer-required `coverage` / `order` parameters. nil coverage/order marshal away (omitempty),
@@ -223,12 +289,24 @@ func (g *Gateway) handleDTRIngress(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build dtr fetch failed"})
 		return
 	}
+	// Validation posture UNCHANGED (routing-only promotion): no egress
+	// validateFHIR here before or after — `fetch` is a QuestionnaireFetchRequest
+	// transport ENVELOPE, not FHIR content the pa.dtr compat-manifest rows model
+	// (the same carve-out recorded verbatim at originate.go's DTR-fetch site,
+	// including its OBLIGATION DISCHARGED note — the multi-version spec's
+	// recorded DTR-fetch known-gap entry;
+	// envelopeEgressLegs pass-through). No response-validate is added either —
+	// this driver relays the payer's package to the partner.
+	fetch, _, aerr := g.egressAdapt(route, fetch, ExchangeIdentity{CorrelationID: child, LegType: "dtr-questionnaire-fetch", Counterpart: recipient})
+	if aerr != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": aerr.Error()})
+		return
+	}
 	ex := g.exchanges.Begin(workstreamPA)
-	child := g.cfg.CorrelationGen()
 	pkgJSON, err := g.OriginateLeg(r.Context(), r, recipient, "dtr-questionnaire-fetch", pci, child, "",
-		Content{WorkstreamType: workstreamPA, Bytes: fetch})
+		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Bytes: fetch})
 	leg := Leg{Type: "dtr-questionnaire-fetch", Physics: paCatalog["dtr-questionnaire-fetch"].Physics,
-		Content: Content{WorkstreamType: workstreamPA, Bytes: fetch}, Subjects: subjectsOf(pci)}
+		Content: Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Bytes: fetch}, Subjects: subjectsOf(pci)}
 	if err != nil {
 		_ = g.exchanges.AppendLeg(ex.ID, leg.Project(child, "error"))
 		// The recipient answered non-2xx — relay its framed answer verbatim (Content-Type
@@ -314,6 +392,19 @@ func (g *Gateway) handlePASIngress(w http.ResponseWriter, r *http.Request) {
 	if fstatus == 0 && f.claimCorrelation != "" {
 		child = f.claimCorrelation
 	}
+	// D-7 census, adjudicated 2026-08-14 — this site DELIBERATELY STAYS on
+	// OriginateLeg's arm-1-only empty-ProfileID backfill while its CRD and
+	// DTR-fetch siblings in this same driver were promoted to select-before-build.
+	// The reason is contract-specific, not driver-specific: `body` is the
+	// partner's PAS Bundle relayed VERBATIM, and pa.pas is LINE-SENSITIVE (a 2.2
+	// Claim carries item extensions a 2.0 Claim must not — the very reason
+	// selection had to precede the build for our own PAS legs). Routing these
+	// bytes at an arm-2/3 line would either mis-stamp a payload built elsewhere
+	// or transform a counterparty's content at the forward edge — the
+	// transform-at-the-forward-edge deferral class, whose current posture is
+	// native.go's arm-1 pin and which goes live with the strict-extensions work, not
+	// here. pa.crd could be promoted precisely because it is line-INERT; pa.pas
+	// cannot. Do not "finish the sweep" without re-adjudicating that deferral.
 	crJSON, err := g.OriginateLeg(r.Context(), r, recipient, leg, pci, child, "",
 		Content{WorkstreamType: workstreamPA, Bytes: body})
 	legProj := Leg{Type: leg, Physics: paCatalog[leg].Physics,

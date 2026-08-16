@@ -14,7 +14,7 @@ A published version tag is **never re-tagged** with different content. The Go
 module proxy caches a tag's tree permanently; always bump to a new version
 rather than moving an existing tag.
 
-This gateway currently requires `shn-sdk v0.31.0` (see `go.mod`).
+This gateway requires `shn-sdk` — see `go.mod` for the pinned version.
 
 ## Supported seams
 
@@ -52,6 +52,14 @@ expected to change shape as their consumer matures:
 
   **v0.26.0** adds the `sor.read` event kind (the gateway's `SystemOfRecord` reads, one event
   per call) — an event-kind addition, covered by the evolving-contract clause above.
+
+  **v0.34.0** adds `POST /demo/transform` on the same observer listener (`engine.RunTransformChain`
+  exported for it) — a loopback-only JSON shim over the real compat-chain machinery, not itself
+  part of the SSE stream (a run through it never appears on `/events`). `shnkitd`'s
+  `POST /api/bridging/exhibit` is now this endpoint's first real consumer, proxying it
+  over embedded reference content so the Kit's engine exhibit provably runs "the same modules
+  your live legs route through" — same binary, same manifest. Same evolving posture as the rest
+  of this surface: consumers pin exact gateway versions.
 
 - **`scenariodriver`** (`Config`, `Driver`, transport methods, builders, `Cards`/`ParseCards`):
   the UC-01…08 scenario-driving package. New in this release and **evolving** — signatures and

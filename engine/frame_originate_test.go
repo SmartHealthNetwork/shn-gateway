@@ -1,6 +1,6 @@
 // gateway/engine/frame_originate_test.go
 //
-// Opaque-payload message frame: the engine originator
+// Opaque-payload message frame (spec 2026-07-17): the engine originator
 // (roundTripInner) decodes a v1 sealed message frame from a frame-capable
 // recipient. Drives the SAME in-process exchange harness relay_roundtrip_test.go
 // builds (a real originator Gateway wired to a fake Hub+Authz relaySubstrate),
@@ -16,10 +16,13 @@ package engine
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"strings"
 	"testing"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
@@ -271,6 +274,179 @@ func TestPASTailRelaysFramedRecipientError(t *testing.T) {
 	}
 }
 
+// declareRecipientVersions re-registers the harness recipient with the given
+// contract tokens (the advertiseRecipientFrameV1 pattern).
+func declareRecipientVersions(t *testing.T, e *inProcessExchange, tokens []string) {
+	t.Helper()
+	entry, ok := e.originator.cfg.Reg.Lookup(e.payerID)
+	if !ok {
+		t.Fatalf("recipient %q not in registry", e.payerID)
+	}
+	entry.ContractVersions = tokens
+	e.originator.cfg.Reg.Set(e.payerID, entry)
+}
+
+// TestOriginateRefusesUnsharedLine: rejection row for the version filter —
+// valid exchange − shared line → typed refusal BEFORE any leg is routed
+// (no seal, no authorize, no Hub round-trip).
+func TestOriginateRefusesUnsharedLine(t *testing.T) {
+	env := newInProcessExchange(t)
+	declareRecipientVersions(t, env, []string{"pa.crd@2.2"})
+
+	var events []ObserverEvent
+	env.originator.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
+
+	_, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "", Content{WorkstreamType: workstreamPA, Bytes: env.crdReq})
+	var rre *RouteRefusalError
+	if !errors.As(err, &rre) {
+		t.Fatalf("want *RouteRefusalError, got %v", err)
+	}
+	if got := env.routeHitCount(); got != 0 {
+		t.Fatalf("fake Hub /route was called %d times — refusal must happen BEFORE any leg routes", got)
+	}
+
+	// The refusal must also emit a structured leg.refused observer event (the seam
+	// the Kit's flow map consumes) — the same discipline TestOriginateStaleFeedFallback
+	// pins for leg.downgrade.
+	var refused *ObserverEvent
+	for i := range events {
+		if events[i].Kind == "leg.refused" {
+			refused = &events[i]
+		}
+	}
+	if refused == nil {
+		t.Fatalf("refusal did not emit a leg.refused observer event (events: %+v)", events)
+	}
+	if refused.CorrelationID != "corr-1" || refused.Counterpart != env.payerID || refused.LegType != "crd-order-select" {
+		t.Fatalf("leg.refused event fields = %+v, want corr-1/%s/crd-order-select", refused, env.payerID)
+	}
+	if refused.Detail == "" {
+		t.Fatalf("leg.refused event has empty Detail, want the refusal message")
+	}
+}
+
+// TestOriginatePinnedProfileIDSkipsSelection: a non-empty Content.ProfileID is
+// the PENDED-LINE PIN (spec §4) — honored verbatim, no re-selection, even when
+// the registry has since changed to an incompatible declaration.
+func TestOriginatePinnedProfileIDSkipsSelection(t *testing.T) {
+	env := newInProcessExchange(t)
+	declareRecipientVersions(t, env, []string{"pa.crd@2.2"}) // would refuse if re-selected
+	env.payerReturns(LegResult{Status: 0, ResponseFHIR: []byte(`{"resourceType":"Bundle","type":"collection"}`)})
+	if _, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "",
+		Content{WorkstreamType: workstreamPA, ProfileID: "pa.crd@2.0", Bytes: env.crdReq}); err != nil {
+		t.Fatalf("pinned leg must not re-select: %v", err)
+	}
+}
+
+// TestScenarioRefusalWrites422: the refusal reaches the origination caller as
+// a legible 422 body via relayOriginationError — the same chokepoint every
+// scenario + ingress OriginateLeg error path already calls.
+func TestScenarioRefusalWrites422(t *testing.T) {
+	rre := &RouteRefusalError{
+		Contract: "pa.pas", LegType: "pas-claim", Recipient: "payer-x",
+		Own: []string{"pa.pas@2.0"}, Peer: []string{"pa.pas@2.2"},
+	}
+	rec := httptest.NewRecorder()
+	g := &Gateway{} // relayOriginationError touches no gateway state
+	if !g.relayOriginationError(rec, rre) {
+		t.Fatal("RouteRefusalError not relayed as a 422")
+	}
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422", rec.Code)
+	}
+	var body struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("body not JSON: %v (%q)", err, rec.Body.String())
+	}
+	for _, must := range []string{"pa.pas@2.0", "pa.pas@2.2"} {
+		if !strings.Contains(body.Error, must) {
+			t.Fatalf("422 body %q missing %q", body.Error, must)
+		}
+	}
+}
+
+// TestOriginateRejectsStampMismatch: mutation row — valid framed 2xx answer
+// − contractVersion stamped with a DIFFERENT line than the originator routed
+// → rejected before the body reaches any parser (spec 2026-08-10 §4; the
+// in-seal tamper case the wire mutator table cannot express).
+func TestOriginateRejectsStampMismatch(t *testing.T) {
+	env := newInProcessExchange(t)
+	advertiseRecipientFrameV1(t, env)
+	body := []byte(`{"resourceType":"Bundle","type":"collection"}`) // any valid JSON — OriginateLeg returns the raw body to direct callers; there is no crdCards fixture field (cards are built inline in the fake substrate)
+	frame, err := shnsdk.EncodeHTTPFrameHeaders(200, map[string]string{
+		"Content-Type":                    "application/fhir+json",
+		shnsdk.FrameHeaderContractVersion: "pa.crd@2.2",
+	}, body)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	sealBare(env, frame)
+	_, err = env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "", Content{WorkstreamType: workstreamPA, Bytes: env.crdReq})
+	if err == nil || !strings.Contains(err.Error(), "contract version mismatch") {
+		t.Fatalf("want contract-version-mismatch rejection, got %v", err)
+	}
+}
+
+// TestOriginateRejectsStampMismatchAcrossLines is the line-aware sibling of the row
+// above: the same CONTRACT, a genuinely DIFFERENT LINE (pa.crd@2.2 answering a
+// pa.crd@2.0 leg). The 2026-08-10 row used a token whose contract differed too;
+// now that both lines are natively buildable, this is a real, plausible payload of
+// the WRONG SHAPE — and it must still be rejected before any parser or validator
+// touches it. The leg is pinned via Content.ProfileID (the pended-pin form) so the
+// routed line is unambiguous.
+func TestOriginateRejectsStampMismatchAcrossLines(t *testing.T) {
+	env := newInProcessExchange(t)
+	advertiseRecipientFrameV1(t, env)
+	frame, err := shnsdk.EncodeHTTPFrameHeaders(200, map[string]string{
+		"Content-Type":                    "application/fhir+json",
+		shnsdk.FrameHeaderContractVersion: "pa.crd@2.2",
+	}, []byte(`{"resourceType":"Bundle","type":"collection"}`))
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	sealBare(env, frame)
+	_, err = env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "",
+		Content{WorkstreamType: workstreamPA, ProfileID: "pa.crd@2.0", Bytes: env.crdReq})
+	if err == nil || !strings.Contains(err.Error(), "contract version mismatch") {
+		t.Fatalf("want contract-version-mismatch rejection for pa.crd@2.2 on a pa.crd@2.0 leg, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "pa.crd@2.2") || !strings.Contains(err.Error(), "pa.crd@2.0") {
+		t.Fatalf("rejection must name BOTH lines, got %v", err)
+	}
+}
+
+// TestOriginateAcceptsMatchingStamp: the same exchange with the CORRECT stamp
+// succeeds — the guard rejects mismatches, not stamps.
+func TestOriginateAcceptsMatchingStamp(t *testing.T) {
+	env := newInProcessExchange(t)
+	advertiseRecipientFrameV1(t, env)
+	body := []byte(`{"resourceType":"Bundle","type":"collection"}`)
+	frame, _ := shnsdk.EncodeHTTPFrameHeaders(200, map[string]string{
+		"Content-Type":                    "application/fhir+json",
+		shnsdk.FrameHeaderContractVersion: "pa.crd@2.0",
+	}, body)
+	sealBare(env, frame)
+	if _, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "", Content{WorkstreamType: workstreamPA, Bytes: env.crdReq}); err != nil {
+		t.Fatalf("matching stamp must pass: %v", err)
+	}
+}
+
+// TestOriginateToleratesAbsentStamp: an unstamped frame is a pre-version
+// responder — tolerated (absence means pre-version contract). This is the
+// existing TestOriginateDecodesFramedSuccess behavior; assert it explicitly
+// under the new guard so the tolerance is pinned, not incidental.
+func TestOriginateToleratesAbsentStamp(t *testing.T) {
+	env := newInProcessExchange(t)
+	advertiseRecipientFrameV1(t, env)
+	frame, _ := shnsdk.EncodeHTTPFrame(200, "application/fhir+json", []byte(`{"resourceType":"Bundle","type":"collection"}`))
+	sealBare(env, frame)
+	if _, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "", Content{WorkstreamType: workstreamPA, Bytes: env.crdReq}); err != nil {
+		t.Fatalf("absent stamp must be tolerated: %v", err)
+	}
+}
+
 // TestRelayErrorSurvivesHelperWrapping is the %w audit guard: a *RelayError wrapped through the
 // deepest helper chain still relays (a %v wrap or error re-synthesis anywhere on the path would drop
 // the sentinel and fail this).
@@ -289,5 +465,265 @@ func TestRelayErrorSurvivesHelperWrapping(t *testing.T) {
 	}
 	if g.relayOriginationError(httptest.NewRecorder(), fmt.Errorf("plain failure")) {
 		t.Fatal("non-relay error must fall through to the existing writeJSON fallback")
+	}
+}
+
+// TestLegOriginatedCarriesRoute: on the select-before-build path (arm 1: a
+// real selectLegLine token+build line, empty Chain) the leg.originated
+// observer event carries the SAME route story the caller threaded onto
+// Content.Route via routeInfoFor(route) — the Kit's flow map reads this off
+// leg.originated, not off a re-derivation. Drives selectLegLine directly for
+// "crd-order-select" (selectLegLine is a general per-legType primitive; the
+// harness's fake Hub answers every leg with a crd-cards/payer-coverage
+// response leg, so this legType is what lets the drive actually complete —
+// production's promotion of the CRD legs onto this primitive is covered separately).
+func TestLegOriginatedCarriesRoute(t *testing.T) {
+	env := newInProcessExchange(t)
+	env.payerReturns(LegResult{Status: 0, ResponseFHIR: []byte(`{"resourceType":"Bundle","type":"collection"}`)})
+
+	var events []ObserverEvent
+	env.originator.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
+
+	route, err := env.originator.selectLegLine(env.payerID, "crd-order-select", "corr-1")
+	if err != nil {
+		t.Fatalf("selectLegLine: %v", err)
+	}
+	if route.Chain != nil {
+		t.Fatalf("want an arm-1 route (nil Chain) — got %+v", route)
+	}
+
+	content := Content{
+		WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route),
+		Bytes: env.crdReq,
+	}
+	if _, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "", content); err != nil {
+		t.Fatalf("OriginateLeg: %v", err)
+	}
+
+	var originated *ObserverEvent
+	for i := range events {
+		if events[i].Kind == "leg.originated" {
+			originated = &events[i]
+		}
+	}
+	if originated == nil {
+		t.Fatalf("no leg.originated event (events: %+v)", events)
+	}
+	if originated.Route == nil {
+		t.Fatal("leg.originated.Route is nil, want the select-before-build route story")
+	}
+	if originated.Route.Token != route.Token || originated.Route.BuildLine != route.BuildLine {
+		t.Fatalf("Route = %+v, want Token=%s BuildLine=%s", originated.Route, route.Token, route.BuildLine)
+	}
+	if originated.Route.Chain != nil {
+		t.Fatalf("arm-1 Route.Chain must stay nil, got %+v", originated.Route.Chain)
+	}
+}
+
+// TestOriginateLegFallbackOmitsRoute: the legacy OriginateLeg fallback
+// (empty Content.ProfileID -> selectLegToken, arm-1-only) never runs
+// select-before-build, so it has no route story to synthesize after the
+// fact — leg.originated carries Route: nil on this path (never a
+// speculative/re-derived one).
+func TestOriginateLegFallbackOmitsRoute(t *testing.T) {
+	env := newInProcessExchange(t)
+	env.payerReturns(LegResult{Status: 0, ResponseFHIR: []byte(`{"resourceType":"Parameters"}`)})
+
+	var events []ObserverEvent
+	env.originator.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
+
+	if _, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "",
+		Content{WorkstreamType: workstreamPA, Bytes: env.crdReq}); err != nil {
+		t.Fatalf("OriginateLeg: %v", err)
+	}
+
+	var originated *ObserverEvent
+	for i := range events {
+		if events[i].Kind == "leg.originated" {
+			originated = &events[i]
+		}
+	}
+	if originated == nil {
+		t.Fatalf("no leg.originated event (events: %+v)", events)
+	}
+	if originated.Route != nil {
+		t.Fatalf("legacy OriginateLeg fallback must carry Route: nil, got %+v", originated.Route)
+	}
+}
+
+// TestLegRefusedCarriesStructuredRoute: a version-routing refusal's
+// leg.refused event carries the *RouteRefusalError's Own/Peer/BridgeIssue
+// structured (Route.Token/BuildLine/Chain empty — nothing was selected),
+// while Detail stays the exact Error() string byte-unchanged (the existing
+// wire-contract pin TestOriginateRefusesUnsharedLine already covers).
+func TestLegRefusedCarriesStructuredRoute(t *testing.T) {
+	env := newInProcessExchange(t)
+	declareRecipientVersions(t, env, []string{"pa.crd@2.2"})
+
+	var events []ObserverEvent
+	env.originator.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
+
+	_, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "",
+		Content{WorkstreamType: workstreamPA, Bytes: env.crdReq})
+	var rre *RouteRefusalError
+	if !errors.As(err, &rre) {
+		t.Fatalf("want *RouteRefusalError, got %v", err)
+	}
+
+	var refused *ObserverEvent
+	for i := range events {
+		if events[i].Kind == "leg.refused" {
+			refused = &events[i]
+		}
+	}
+	if refused == nil {
+		t.Fatalf("no leg.refused event (events: %+v)", events)
+	}
+	if refused.Detail != rre.Error() {
+		t.Fatalf("Detail = %q, want the exact Error() string %q (byte-unchanged wire pin)", refused.Detail, rre.Error())
+	}
+	if refused.Route == nil {
+		t.Fatal("leg.refused.Route is nil, want the structured refusal")
+	}
+	if !reflect.DeepEqual(refused.Route.Own, rre.Own) || !reflect.DeepEqual(refused.Route.Peer, rre.Peer) || refused.Route.BridgeIssue != rre.BridgeIssue {
+		t.Fatalf("Route = %+v, want Own=%v Peer=%v BridgeIssue=%q", refused.Route, rre.Own, rre.Peer, rre.BridgeIssue)
+	}
+	if refused.Route.Token != "" || refused.Route.BuildLine != "" || refused.Route.Chain != nil {
+		t.Fatalf("a refusal Route must carry no selection fields, got %+v", refused.Route)
+	}
+}
+
+// TestLegOriginatedRouteChainOnArm3: on an arm-3 transform-chain route, the
+// leg.originated event's Route.Chain mirrors the selected chain step-for-
+// step (module/from/to/class), each ChainStep.Module matching
+// LossReport.Module's own format ("<contract> <from>-><to>", transform.go).
+// A hand-built legRoute (arm-3 selection itself is versionroute_test.go's
+// concern) driven through "crd-order-select" — see
+// TestLegOriginatedCarriesRoute for why that legType, not "pas-claim".
+func TestLegOriginatedRouteChainOnArm3(t *testing.T) {
+	env := newInProcessExchange(t)
+	env.payerReturns(LegResult{Status: 0, ResponseFHIR: []byte(`{"resourceType":"Bundle","type":"collection"}`)})
+
+	var events []ObserverEvent
+	env.originator.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
+
+	route := legRoute{
+		Token: "pa.crd@2.2", BuildLine: "2.0",
+		Chain: []CompatStep{
+			{Contract: "pa.crd", From: "2.0", To: "2.1", Class: StepFull},
+			{Contract: "pa.crd", From: "2.1", To: "2.2", Class: StepCarry},
+		},
+	}
+	content := Content{
+		WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route),
+		Bytes: env.crdReq,
+	}
+	if _, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "", content); err != nil {
+		t.Fatalf("OriginateLeg: %v", err)
+	}
+
+	var originated *ObserverEvent
+	for i := range events {
+		if events[i].Kind == "leg.originated" {
+			originated = &events[i]
+		}
+	}
+	if originated == nil || originated.Route == nil {
+		t.Fatalf("no leg.originated Route (events: %+v)", events)
+	}
+	want := []ChainStep{
+		{Module: "pa.crd 2.0->2.1", From: "2.0", To: "2.1", Class: "full"},
+		{Module: "pa.crd 2.1->2.2", From: "2.1", To: "2.2", Class: "carry"},
+	}
+	if !reflect.DeepEqual(originated.Route.Chain, want) {
+		t.Fatalf("Route.Chain = %+v, want %+v", originated.Route.Chain, want)
+	}
+}
+
+// TestTransformRefusalZeroBytes: the end-to-end zero-bytes pin — a
+// full origination whose route resolves to a gated transform chain must
+// refuse at egressAdapt BEFORE ever reaching the Hub (routeHitCount stays 0,
+// refuse-before-forward), observing exactly the leg.failed event this task
+// adds. Forces arm (3): own narrows its DeclaredContractVersions to
+// pa.pas@2.0 only, the peer declares pa.pas@2.2 only (declareRecipientVersions),
+// and D1c's EgressNativeLines={"2.0"} holds arm (2)'s native-reach view away
+// from 2.1/2.2 — so selectLegRoute has no arm-1/2 escape and must pick
+// chainFor("pa.pas","2.0","2.2"), the same gated,carry chain
+// TestEgressAdaptRefusalEmitsLegFailed pins directly. Drives the REAL
+// pas_tail.go submitClaimAndResolve (build the conformant Claim Bundle at
+// route.BuildLine -> egressAdapt -> [refuses here; OriginateLeg/roundTrip,
+// the only path that ever calls the fake Hub's /route, is never reached])
+// rather than a hand-rolled site call, so the zero-bytes property is
+// asserted against the genuine origination path, not a stub.
+func TestTransformRefusalZeroBytes(t *testing.T) {
+	env := newInProcessExchange(t)
+	declareRecipientVersions(t, env, []string{"pa.pas@2.2"})
+	env.originator.cfg.DeclaredContractVersions = []string{"pa.pas@2.0"}
+	env.originator.cfg.EgressNativeLines = []string{"2.0"}
+	env.originator.cfg.ValidatorsByLine = map[string]shnsdk.Validator{
+		"2.0": shnsdk.NewFakeValidator(), "2.1": shnsdk.NewFakeValidator(), "2.2": shnsdk.NewFakeValidator(),
+	}
+
+	var events []ObserverEvent
+	env.originator.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
+
+	const (
+		member      = "MBR-T4"
+		patientRef  = "Patient/" + member
+		coverageRef = "Coverage/" + member
+	)
+	order := pasTailServiceRequest()
+	qr := []byte(`{"resourceType":"QuestionnaireResponse","id":"qr-t4","status":"completed","subject":{"reference":"` + patientRef + `"}}`)
+
+	_, respJSON, status, msg, err := env.originator.submitClaimAndResolve(env.ctx, env.req, "pci-1", order, qr, patientRef, coverageRef, member, shnsdk.CMSPayerIdentity, env.payerID)
+	if err == nil {
+		t.Fatal("want an error — the gated chain must refuse before any leg is routed")
+	}
+	var sce *SemanticChangeError
+	if !errors.As(err, &sce) {
+		t.Fatalf("want a *SemanticChangeError, got %T: %v", err, err)
+	}
+	if status != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d", status, http.StatusBadGateway)
+	}
+	if msg == "" {
+		t.Fatal("want a non-empty refusal message")
+	}
+	if respJSON != nil {
+		t.Fatalf("respJSON must be nil (no leg was ever routed), got %q", respJSON)
+	}
+
+	// THE ROW: the fake Hub's /route was never hit — the refusal happened
+	// strictly before the Hub round-trip, not after a wasted send.
+	if got := env.routeHitCount(); got != 0 {
+		t.Fatalf("fake Hub /route was called %d times — a transform refusal must never reach the Hub", got)
+	}
+
+	var failed int
+	var ev ObserverEvent
+	for _, e := range events {
+		if e.Kind == "leg.failed" {
+			failed++
+			ev = e
+		}
+	}
+	if failed != 1 {
+		t.Fatalf("want exactly one leg.failed event, got %d (events: %+v)", failed, events)
+	}
+	if ev.LegType != "pas-claim" || ev.Counterpart != env.payerID {
+		t.Fatalf("leg.failed fields = %+v, want LegType=pas-claim Counterpart=%s", ev, env.payerID)
+	}
+	if !strings.Contains(ev.Detail, "semantic-change refusal") {
+		t.Fatalf("leg.failed Detail = %q, want it to contain %q", ev.Detail, "semantic-change refusal")
+	}
+	if ev.Route == nil || len(ev.Route.Chain) != 2 {
+		t.Fatalf("leg.failed Route = %+v, want the attempted 2-step chain", ev.Route)
+	}
+	wantSteps := []ChainStep{
+		{Module: "pa.pas 2.0->2.1", From: "2.0", To: "2.1", Class: "gated"},
+		{Module: "pa.pas 2.1->2.2", From: "2.1", To: "2.2", Class: "carry"},
+	}
+	if !reflect.DeepEqual(ev.Route.Chain, wantSteps) {
+		t.Fatalf("leg.failed Route.Chain = %+v, want %+v", ev.Route.Chain, wantSteps)
 	}
 }

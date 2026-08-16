@@ -1,6 +1,35 @@
 {
   "entry": [
     {
+      "fullUrl": "Patient/MBR-BRIDGE-DEMO",
+      "resource": {
+        "id": "MBR-BRIDGE-DEMO",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "value": "MBR-BRIDGE-DEMO"
+          }
+        ],
+        "name": [
+          {
+            "family": "Solberg-BridgeDemo"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1983-03-11",
+        "resourceType": "Patient"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/MBR-BRIDGE-DEMO"
+      }
+    },
+    {
       "fullUrl": "Patient/MBR-COVERED",
       "resource": {
         "id": "MBR-COVERED",

@@ -4,28 +4,28 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
-	"io/fs"
 	"net/http"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
-// readConformantGolden reads a conformant request golden from the monorepo
-// (../../testdata/golden/conformant). The byte-match against these goldens is a
-// monorepo gate; the published standalone gateway module has no ../../testdata, so the
-// reads skip there (mirrors the SDK's readConformantGolden helper). ErrNotExist → t.Skip.
+// readConformantGolden reads a conformant request golden from this package's
+// own vendored copies (testdata/golden/conformant/, see that directory's
+// README.md). It used to reach into the surrounding monorepo and t.Skip when
+// the reach failed, which meant the byte-match ran only in the monorepo and
+// silently vanished from the published standalone module; vendoring makes it a
+// real gate in both. The copies are pinned byte-for-byte against their
+// originals by the root module's
+// test/conformance/gateway_vendored_golden_drift_test.go.
 func readConformantGolden(t *testing.T, name string) []byte {
 	t.Helper()
-	b, err := os.ReadFile("../../testdata/golden/conformant/" + name)
-	if errors.Is(err, fs.ErrNotExist) {
-		t.Skipf("conformant golden %q lives in the monorepo (../../testdata); skipped in the standalone gateway module", name)
-	}
+	b, err := os.ReadFile(filepath.Join("testdata", "golden", "conformant", name))
 	if err != nil {
-		t.Fatalf("read conformant golden %q: %v", name, err)
+		t.Fatalf("read vendored conformant golden %q: %v", name, err)
 	}
 	return b
 }
@@ -135,6 +135,7 @@ func originatorBuiltConformantBundle(t *testing.T, member string) []byte {
 		SR:          srJSON,
 		PatientRef:  ref,
 		CoverageRef: "Coverage/convergence-coverage",
+		MemberID:    member,
 		Corr:        "convergence-pas-submit-0001",
 		Created:     created,
 		Payer:       shnsdk.CMSPayerIdentity,
@@ -187,6 +188,7 @@ func TestParseConformantPASSubjects_AbsoluteRefs(t *testing.T) {
 		SR:               srJSON,
 		PatientRef:       ref,
 		CoverageRef:      "Coverage/convergence-coverage",
+		MemberID:         member,
 		Corr:             "convergence-pas-submit-0001",
 		Created:          created,
 		ContainedInsurer: true,
@@ -265,6 +267,7 @@ func nonLumbarConformantBundle(t *testing.T, member string) []byte {
 		SR:          srJSON,
 		PatientRef:  ref,
 		CoverageRef: "Coverage/convergence-coverage",
+		MemberID:    member,
 		Corr:        "followups-knee-0001",
 		Created:     created,
 		Payer:       shnsdk.CMSPayerIdentity,
@@ -756,6 +759,7 @@ func conformantPASBundlePended(t *testing.T, member string) []byte {
 		SR:          srJSON,
 		PatientRef:  ref,
 		CoverageRef: "Coverage/convergence-coverage",
+		MemberID:    member,
 		Corr:        "convergence-pas-pend-0001",
 		Created:     created,
 		Payer:       shnsdk.CMSPayerIdentity,
@@ -891,6 +895,7 @@ func originatorBuiltConformantUpdateBundleProfile(t *testing.T, brPayer bool) []
 		SR:               srJSON,
 		PatientRef:       ref,
 		CoverageRef:      "Coverage/convergence-coverage",
+		MemberID:         member,
 		Provenance:       provJSON,
 		DiagnosticReport: drJSON,
 		Corr:             "convergence-pas-update-0001",

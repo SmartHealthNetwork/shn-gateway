@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -68,6 +69,50 @@ func TestScenario_PersonaSetRejections(t *testing.T) {
 	resp := post("/scenario/uc03", `{}`)
 	if resp.StatusCode == http.StatusBadRequest {
 		t.Fatalf("control uc03 without personaSet unexpectedly 400")
+	}
+}
+
+// TestScenario_UC03BridgeRefuseBranch pins the sanctioned
+// handleUC03 branch switch: "" (or an absent body) keeps working exactly like
+// before; "bridge-refuse" is a KNOWN branch (never 400 on the branch itself);
+// an unrecognized branch 400s (uc01's idiom); and ?personaSet=canary combined
+// with branch=bridge-refuse fails closed 400 naming MBR-BRIDGE-REFUSE —
+// deliberately NOT via a new CanaryTwins entry (the reviewer's ruling: a
+// canary twin for a demo-only persona would be semantic abuse of the
+// mechanism) but because scenarioMember's existing no-twin guard already
+// fails closed for any member without one, and bridge personas never get one.
+func TestScenario_UC03BridgeRefuseBranch(t *testing.T) {
+	g := newTestProviderGateway(t)
+	srv := httptest.NewServer(g.Handler())
+	defer srv.Close()
+
+	post := func(path, body string) *http.Response {
+		resp, err := http.Post(srv.URL+path, "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	if resp := post("/scenario/uc03", `{"branch":"bogus"}`); resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("unknown branch: got %d, want 400", resp.StatusCode)
+	}
+	// bridge-refuse is a KNOWN branch: it must not 400 on the branch check
+	// itself (this fixture has no PayerRouter at all, so it 422s downstream
+	// for every member — the point here is ruling OUT a 400 from the switch).
+	if resp := post("/scenario/uc03", `{"branch":"bridge-refuse"}`); resp.StatusCode == http.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("known branch bridge-refuse unexpectedly 400: %s", body)
+	}
+	// canary + bridge-refuse: scenarioMember's existing no-twin guard fires
+	// (CanaryTwins deliberately carries no MBR-BRIDGE-REFUSE entry).
+	resp := post("/scenario/uc03?personaSet=canary", `{"branch":"bridge-refuse"}`)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("canary + bridge-refuse: got %d, want 400 (no twin)", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "MBR-BRIDGE-REFUSE") {
+		t.Errorf("canary + bridge-refuse body = %s, want it to name MBR-BRIDGE-REFUSE", body)
 	}
 }
 

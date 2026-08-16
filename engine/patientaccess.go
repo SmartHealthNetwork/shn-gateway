@@ -24,7 +24,8 @@ import (
 // (like any FHIR /metadata); the EOB reads it describes are per-operation
 // patient-access-token gated.
 func (g *Gateway) handlePatientAccessMetadata(w http.ResponseWriter, _ *http.Request) {
-	cs, err := shnsdk.BuildPatientAccessCapabilityStatement(g.cfg.Clock())
+	// D1a: declared-set-driven, through the single accessor (see handleIngressMetadata).
+	cs, err := shnsdk.BuildPatientAccessCapabilityStatement(g.cfg.Clock(), g.declaredContractVersions())
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build capabilitystatement failed"})
 		return
@@ -121,7 +122,7 @@ func (g *Gateway) serveEOB(w http.ResponseWriter, r *http.Request, subjectPCI st
 	// FR-28 / two-gate posture: validate the served searchset (US-Core/base — NOT
 	// Da Vinci) BEFORE auditing, so the audit outcome reflects whether the read
 	// actually succeeded.
-	status, msg := g.validateFHIR(r.Context(), out, "egress")
+	status, msg := g.validateFHIR(r.Context(), out, "egress", "")
 	outcome := "answered"
 	if status != 0 {
 		outcome = "rejected"

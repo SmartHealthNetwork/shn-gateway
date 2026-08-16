@@ -9,15 +9,25 @@ package engine
 // Content is a typed-opaque handle on a workstream payload. The IR validates it at
 // the edge (FR-36/FR-G29) and binds its subject for authority, but never reads its
 // clinical semantics. WorkstreamType identifies the owning module (read live by
-// OriginateLeg's selection-seam guard). ProfileID is a RESERVED routing hint —
-// validation is meta.profile-driven (every call site leaves ProfileID unset), so
-// ProfileID is never the validation key; it is kept as the committed Content shape
-// for future per-call profile pinning (PH-G3) and has no current reader (a reserved
-// seam, not dead code). Bytes is the FHIR/payload bytes that reach the wire.
+// OriginateLeg's selection-seam guard). ProfileID carries the routed/pinned
+// contract-version token (spec 2026-08-10 §4). The origination sites now
+// SELECT it BEFORE building, so the builder that produced Bytes and the token in
+// this field name the same line by construction; a resume leg still pins it verbatim
+// as the pended-line pin. It now has THREE readers: the response-frame stamp
+// verification in roundTripInner, the REQUEST frame roundTripInner emits toward a
+// requestFrames-declaring recipient, and the per-line $validate lane the origination
+// sites pick — validation is LINE-AWARE now, no longer meta.profile-driven alone.
+// Bytes is the FHIR/payload bytes that reach the wire. Route is the observer-
+// facing routing story: the select-before-build sites set it from
+// routeInfoFor(route) alongside ProfileID; it rides through roundTrip's
+// leg.originated emission (Content.Route -> ObserverEvent.Route) and is nil
+// wherever ProfileID was set by the legacy OriginateLeg fallback (nothing was
+// selected to report) or by a contract-unmapped leg.
 type Content struct {
 	WorkstreamType string
 	ProfileID      string
 	Bytes          []byte
+	Route          *RouteInfo
 }
 
 // workstreamPA is the WorkstreamType tag for the Prior-Authorization module.

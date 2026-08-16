@@ -101,7 +101,7 @@ func (s *homeOxygenSoR) OpenCoverage(memberID string) ([]byte, bool) {
 	if memberID != s.member {
 		return nil, false
 	}
-	cov, err := shnsdk.BuildCoverageWithPayer("Patient/"+s.member, "Coverage/"+s.member, shnsdk.CMSPayerIdentity)
+	cov, err := shnsdk.BuildCoverageWithPayer("Patient/"+s.member, s.member, shnsdk.CMSPayerIdentity)
 	if err != nil {
 		return nil, false
 	}
@@ -157,7 +157,7 @@ type homeOxygenSubstrate struct {
 
 	legTypes []string
 
-	// frameErrLeg, when non-empty, puts the substrate into v1-frame mode:
+	// frameErrLeg, when non-empty, puts the substrate into v1-frame mode (spec 2026-07-17):
 	// the named leg answers a FRAMED non-2xx (frameErrStatus/frameErrBody/frameErrCT) while
 	// every OTHER leg answers its canned success wrapped in a v1 200 frame — modelling a
 	// frame-capable recipient that frames every answer. Requires the payer registry entry to
