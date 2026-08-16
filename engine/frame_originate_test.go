@@ -1,6 +1,6 @@
 // gateway/engine/frame_originate_test.go
 //
-// Opaque-payload message frame (spec 2026-07-17): the engine originator
+// Opaque-payload message frame: the engine originator
 // (roundTripInner) decodes a v1 sealed message frame from a frame-capable
 // recipient. Drives the SAME in-process exchange harness relay_roundtrip_test.go
 // builds (a real originator Gateway wired to a fake Hub+Authz relaySubstrate),
@@ -326,7 +326,7 @@ func TestOriginateRefusesUnsharedLine(t *testing.T) {
 }
 
 // TestOriginatePinnedProfileIDSkipsSelection: a non-empty Content.ProfileID is
-// the PENDED-LINE PIN (spec §4) — honored verbatim, no re-selection, even when
+// the PENDED-LINE PIN — honored verbatim, no re-selection, even when
 // the registry has since changed to an incompatible declaration.
 func TestOriginatePinnedProfileIDSkipsSelection(t *testing.T) {
 	env := newInProcessExchange(t)
@@ -369,7 +369,7 @@ func TestScenarioRefusalWrites422(t *testing.T) {
 
 // TestOriginateRejectsStampMismatch: mutation row — valid framed 2xx answer
 // − contractVersion stamped with a DIFFERENT line than the originator routed
-// → rejected before the body reaches any parser (spec 2026-08-10 §4; the
+// → rejected before the body reaches any parser (the
 // in-seal tamper case the wire mutator table cannot express).
 func TestOriginateRejectsStampMismatch(t *testing.T) {
 	env := newInProcessExchange(t)

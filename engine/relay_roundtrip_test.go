@@ -273,7 +273,7 @@ func (e *inProcessExchange) corruptResponseToken(t *testing.T) {
 // (payerrouting_test.go) but with a test-configurable response leg instead of
 // an always-success canned card. Both holders advertise message-frame v1
 // (SupportedMessageFrames), so the originator's roundTripInner decodes the frame
-// the substrate seals — negotiation is registry-driven (spec 2026-07-17), keyed
+// the substrate seals — negotiation is registry-driven, keyed
 // on the RECIPIENT's advertised frames.
 //
 // PayerRouter + EnableIngressForTest are added for the CRD ingress drive (which
@@ -296,7 +296,7 @@ func newInProcessExchange(t *testing.T) *inProcessExchange {
 	reg := shnsdk.NewRegistry()
 	reg.Set("provider", shnsdk.RegistryEntry{ID: "provider", Role: "provider", EncPub: provEncPub, SignPub: authzPub, MessageFrames: shnsdk.SupportedMessageFrames()})
 	// The recipient advertises message-frame v1 so roundTripInner decodes the frame
-	// handleRoute seals (spec 2026-07-17); frame_originate_test.go re-asserts this per
+	// handleRoute seals; frame_originate_test.go re-asserts this per
 	// case via advertiseRecipientFrameV1 (idempotent) and its stale-feed row seals a
 	// bare payload against this same v1-advertising entry.
 	reg.Set("payer", shnsdk.RegistryEntry{ID: "payer", Role: "payer", EncPub: payerEncPub, SignPub: payerSignPub, MessageFrames: shnsdk.SupportedMessageFrames()})

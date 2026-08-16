@@ -141,7 +141,7 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 		qrAnswers:   baseTrace,
 		payer:       res.payer,     // thread the REAL payer identity to the resume ClaimUpdate builders (FR-G40)
 		recipient:   res.recipient, // thread the coverage-derived payer HOLDER so the resume update legs route to it (FR-G40; no default)
-		pasToken:    route.Token,   // the pended-line pin — selected once, resumed verbatim (spec 2026-08-10 §4)
+		pasToken:    route.Token,   // the pended-line pin — selected once, resumed verbatim
 		// The pended leg's declared CARRY record, pinned beside the routed token:
 		// what THIS exchange's down-leg moved into shn-carried-content,
 		// so the resume leg can refuse a payload that no longer bears it. Empty

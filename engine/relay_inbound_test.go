@@ -76,7 +76,7 @@ func (s *inboundAuthzStub) RoundTrip(req *http.Request) (*http.Response, error) 
 // ("requester", role provider) — everything respondLegError's buildResponseLeg call
 // needs to mint a token and seal a response leg to that requester. When frameCapable
 // is true the requester's registry entry advertises MessageFrames:["v1"] (the
-// negotiation switch, spec 2026-07-17): the responder frames its answers only to a
+// negotiation switch): the responder frames its answers only to a
 // peer that declared it can decode; a non-capable requester gets the pre-v0.27.0 bare
 // contract. Returns the gateway plus the requester's id + key pair (the test needs the
 // private half to Open the seal — a real Registry never carries it).
@@ -322,8 +322,8 @@ func mustToken(t *testing.T, g *Gateway, legType, builtToken string) string {
 
 // TestFramePayloadStampsContractVersion: a framed success answer to a
 // v1-negotiated requester carries the contractVersion header — the token of
-// the line this build actually produced (content-descriptive; spec 2026-08-10
-// §4). Legacy requesters stay bare; version-neutral legs stay unstamped.
+// the line this build actually produced (content-descriptive).
+// Legacy requesters stay bare; version-neutral legs stay unstamped.
 func TestFramePayloadStampsContractVersion(t *testing.T) {
 	reg := shnsdk.NewRegistry()
 	reg.Set("prov-1", shnsdk.RegistryEntry{ID: "prov-1", Role: "provider", MessageFrames: shnsdk.SupportedMessageFrames()})

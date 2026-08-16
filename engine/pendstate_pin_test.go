@@ -1,5 +1,5 @@
 // pendstate_pin_test.go — behavioral proof that the pended-line pin
-// (spec 2026-08-10 §4) actually threads through REAL scenarios, not just a
+// actually threads through REAL scenarios, not just a
 // hand-built pendState. TestPendStatePinsContractLine (versionroute_test.go)
 // proves the pendState CARRIES the pin across store/load; this file proves the
 // four production pin sites SELECT it once and HONOR it verbatim on the resume

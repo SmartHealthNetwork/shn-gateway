@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// TestApplyChainDeterministic pins the determinism invariant (spec §5): the
+// TestApplyChainDeterministic pins the determinism invariant: the
 // same steps + same inputs run twice produce byte-identical outputs AND
 // byte-identical (structurally equal) LossReports. A stub step exercises both
 // Carried and Synthesized entries so the whole LossReport shape is covered, not

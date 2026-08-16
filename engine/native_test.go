@@ -271,10 +271,10 @@ func TestNativeResponder_DTRForwardsCoverageWhenCarried(t *testing.T) {
 	}
 }
 
-// TestNativeResponder_DTRForwardsOrderWhenCarried proves the order-driven DTR path (the Cambia
+// TestNativeResponder_DTRForwardsOrderWhenCarried proves the order-driven DTR path (the external-payer
 // lane): a dtr-questionnaire-fetch leg request carrying an `order` (the CRD-updated ServiceRequest
 // with its coverage-assertion-id) yields a forwarded $questionnaire-package with an `order`
-// parameter (NOT `questionnaire`) plus the carried `coverage` — Cambia 501s "ServiceRequest
+// parameter (NOT `questionnaire`) plus the carried `coverage` — that payer 501s "ServiceRequest
 // without a Coverage Assertion Id extension is not supported" / 500s without both.
 func TestNativeResponder_DTRForwardsOrderWhenCarried(t *testing.T) {
 	p := newStubPartner(t)
@@ -315,7 +315,7 @@ func TestNativeResponder_DTRForwardsOrderWhenCarried(t *testing.T) {
 	}
 }
 
-// TestNativeResponder_CRDMergesSystemActions proves the Cambia-lane CRD passthrough: with
+// TestNativeResponder_CRDMergesSystemActions proves the external-payer-lane CRD passthrough: with
 // WithCRDCoverageBundle on, the partner's CRD systemActions (the coverage-annotated order the
 // provider needs to drive DTR) are relayed alongside the normalized SHN cards; with it OFF the
 // response is cards-only (br-payer byte-unchanged).
@@ -338,7 +338,7 @@ func TestNativeResponder_CRDMergesSystemActions(t *testing.T) {
 	}
 	on := run(t, true)
 	if !bytes.Contains(on, []byte(`"systemActions"`)) || !bytes.Contains(on, []byte(`"coverage-assertion-id"`)) {
-		t.Fatalf("Cambia-lane CRD response must relay systemActions with the annotated order: %s", on)
+		t.Fatalf("external-payer-lane CRD response must relay systemActions with the annotated order: %s", on)
 	}
 	if !bytes.Contains(on, []byte(`"cards"`)) {
 		t.Fatalf("CRD response must still carry the SHN cards: %s", on)
@@ -478,11 +478,11 @@ func TestNativeResponder_RewritesCRDHook(t *testing.T) {
 }
 
 // TestNativeResponder_WrapsCRDCoverageBundle proves WithCRDCoverageBundle rewrites the
-// CRD request's bare prefetch.coverage into a searchset Bundle on egress — Cambia's
+// CRD request's bare prefetch.coverage into a searchset Bundle on egress — that payer's
 // order-sign `coverage` prefetch is a SEARCH template (Coverage?beneficiary=…) demanding a
 // searchset Bundle (bare Coverage → 412 "Missing Coverage"), while the SHN spine carries a
 // BARE Coverage (provider routing + the payer-side bind both read bare, crd_native.go). The
-// wrap runs AFTER the bind, gated Cambia-scoped so br-payer conformance is untouched.
+// wrap runs AFTER the bind, gated peer-scoped so br-payer conformance is untouched.
 func TestNativeResponder_WrapsCRDCoverageBundle(t *testing.T) {
 	p := newStubPartner(t)
 	p.respByPath["/cds-services/order-sign"] = []byte(`{"cards":[],"systemActions":[]}`)
@@ -533,7 +533,7 @@ func TestNativeResponder_CoverageBundleScopedAndIdempotent(t *testing.T) {
 	}
 	bareCov := `"coverage":{"resourceType":"Coverage","id":"cov","beneficiary":{"reference":"Patient/MBR"}}`
 
-	// OFF: bare stays bare (no wrap without the Cambia-scoped option).
+	// OFF: bare stays bare (no wrap without the peer-scoped option).
 	pOff := newStubPartner(t)
 	pOff.respByPath["/cds-services/order-sign"] = []byte(`{"cards":[],"systemActions":[]}`)
 	nOff := NewNativeResponder(pOff.srv.Client(), pOff.srv.URL, "order-sign", nil, nil)
@@ -582,7 +582,7 @@ func TestNativeResponder_CRDDispatchForwardsVerbatim(t *testing.T) {
 
 // TestNativeForwardVersionFilter: the operator-declared foreign-peer token set
 // (PAYER_DAVINCI_CONTRACT_VERSIONS) gates forwarding exactly like a registry
-// declaration gates substrate routing (spec 2026-08-10 §4 "foreign endpoints
+// declaration gates substrate routing ("foreign endpoints
 // route by the same filter"): no shared line → legible 422 LegResult, ZERO
 // bytes forwarded; shared or silent → forward as before.
 func TestNativeForwardVersionFilter(t *testing.T) {

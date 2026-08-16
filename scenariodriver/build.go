@@ -210,7 +210,7 @@ func AddRoutablePayor(bundleJSON []byte) ([]byte, error) {
 // BuildPASBundle fences on member: if payorOrgFor(member) resolves to anything other than
 // cmsPayorOrg (e.g. the bridge-demo personas, whose OWN Coverage names a different payer),
 // stamping the CMS identifier anyway would silently misroute the PAS submission to the wrong
-// payer holder. Fail closed instead (ledger item 5 / spec §3): reject loudly rather than stamp
+// payer holder. Fail closed instead: reject loudly rather than stamp
 // silently.
 func BuildPASBundle(golden []byte, member string) ([]byte, error) {
 	if org := payorOrgFor(member); org != cmsPayorOrg {

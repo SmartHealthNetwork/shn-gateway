@@ -11,7 +11,7 @@ import (
 )
 
 // TestBuildDavinciConfiguration pins the HRex 1.2.0 well-known document
-// (spec 2026-08-10 §3 path 3; shape verified against HL7/davinci-ehrx:
+// (shape verified against HL7/davinci-ehrx:
 // Binary-Wellknown.json + HRexWellknownDefinition — identifier is REQUIRED,
 // endpoints is a code→uri map, version-specific codes are <code>#<major.minor>).
 // Codes derive from SupportedContractVersions, so a future line ships here

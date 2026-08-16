@@ -409,7 +409,7 @@ func TestPASChain_2020To22ThroughBothSteps(t *testing.T) {
 }
 
 // TestPasStep2021Up_Determinism / TestPasStep2122Down_Determinism pin the
-// framework-wide determinism invariant (spec §5) at the step level: same
+// framework-wide determinism invariant at the step level: same
 // input run twice produces byte-identical output and structurally-equal
 // reports.
 func TestPasStep2021Up_Determinism(t *testing.T) {

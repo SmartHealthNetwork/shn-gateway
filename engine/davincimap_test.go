@@ -413,7 +413,7 @@ func TestBuildQuestionnairePackageAtLine_QRMissingIDErrors(t *testing.T) {
 
 func TestDTRPackageCoverageSubjectDerivesFromCoverageID(t *testing.T) {
 	// A conformant external client's plain US Core Coverage: id + beneficiary,
-	// NO urn:shn:coverage identifier — must now SUCCEED (spec §2: the
+	// NO urn:shn:coverage identifier — must now SUCCEED (the
 	// external-client-works property; the private-system coupling is removed).
 	cov := []byte(`{"resourceType":"Coverage","id":"c1","status":"active","beneficiary":{"reference":"Patient/p1"}}`)
 	patientRef, coverageRef, err := dtrPackageCoverageSubject(cov)

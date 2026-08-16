@@ -90,8 +90,8 @@ type Config struct {
 	// Validator is the CANONICAL-lane FHIR $validate client (FR-36). It stays the
 	// only required validator: a deployment that speaks one line needs one lane.
 	Validator shnsdk.Validator
-	// ValidatorsByLine are the per-contract-LINE $validate lanes (spec 2026-08-11
-	// F7): "2.0"/"2.1"/"2.2" → the validator that resolves THAT line's IG
+	// ValidatorsByLine are the per-contract-LINE $validate lanes:
+	// "2.0"/"2.1"/"2.2" → the validator that resolves THAT line's IG
 	// packages. A HAPI instance can host exactly one version of an IG, so a tri-line
 	// deployment runs one validator per line; gateway/app wires FHIR_VALIDATE_URL
 	// (canonical) plus FHIR_VALIDATE_URL_2_1 / _2_2, or maps every native line to
@@ -444,7 +444,7 @@ type pendState struct {
 	qrAnswers map[string]string      // provider-data UC-06: the org-attested base answer trace (1.1/3.1), surfaced in the response as FR-17 mixed-provenance evidence
 	payer     shnsdk.PayerIdentifier // the member's REAL payer identity (parsed from OpenCoverage at run-to-PENDED) — threads to the resume ClaimUpdate builders so the payload's payer derives from the patient's real Coverage (FR-G40)
 	recipient string                 // the payer HOLDER id the resume legs route to, resolved from the member's real Coverage at run-to-PENDED (recipientFor) — no default (FR-G40 / AI-G11 / OWD-G10)
-	pasToken  string                 // the pa.pas contract token selected at run-to-PENDED (spec 2026-08-10 §4) — the PENDED-LINE PIN. Threads to the resume pas-claim-update legs as Content.ProfileID so a pended exchange finishes on the line it started on, regardless of registry drift. Lives HERE by settled decision (AI-1: never ExchangeStore); in-memory/Reset-cleared like the recipient pin beside it — a durable pend store inherits it.
+	pasToken  string                 // the pa.pas contract token selected at run-to-PENDED — the PENDED-LINE PIN. Threads to the resume pas-claim-update legs as Content.ProfileID so a pended exchange finishes on the line it started on, regardless of registry drift. Lives HERE by settled decision (AI-1: never ExchangeStore); in-memory/Reset-cleared like the recipient pin beside it — a durable pend store inherits it.
 	// carriedEntries is the pended pas-claim leg's own declared CARRY record
 	// (the multi-version spec's verifyCarryPresent obligation) — the
 	// Carried LossEntries the pend's transform chain reported, pinned beside
@@ -600,7 +600,7 @@ func (g *Gateway) Handler() http.Handler {
 				mux.HandleFunc("GET /.well-known/smart-configuration", g.ingressAuth.handleSmartConfig)
 			}
 			if g.cfg.IngressBaseURL != "" {
-				// HRex 1.2.0 endpoint discovery (spec 2026-08-10 §3 path 3):
+				// HRex 1.2.0 endpoint discovery:
 				// version-specific endpoint codes for the Da Vinci-facing edge.
 				mux.HandleFunc("GET /.well-known/davinci-configuration", g.handleDavinciConfiguration)
 			}
@@ -712,7 +712,7 @@ type authorizeResp struct {
 // they never report a facility outage or a tampered response as "consent denied".
 var errAuthorizationDenied = errors.New("authorization denied")
 
-// LegOutcome values passed to Config.LegMetric (spec §7 #16): "routed" when an
+// LegOutcome values passed to Config.LegMetric: "routed" when an
 // origination leg is attempted, then exactly one terminal outcome.
 const (
 	LegOutcomeRouted      = "routed"
@@ -974,7 +974,7 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 	if err != nil {
 		return nil, fmt.Errorf("response decryption failed")
 	}
-	// A frame-negotiated recipient (registry messageFrames, spec 2026-07-17) seals
+	// A frame-negotiated recipient (registry messageFrames) seals
 	// EVERY application answer — any status — as a v1 message frame; surface non-2xx
 	// as the typed *RelayError sentinel so every OriginateLeg caller's `if err != nil`
 	// aborts the exchange and handlers can relay the verbatim answer.
@@ -996,7 +996,7 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 		if hdr.Status/100 != 2 {
 			return nil, &RelayError{Status: hdr.Status, Body: body, ContentType: hdr.Headers["Content-Type"]}
 		}
-		// Version-stamp verification (spec 2026-08-10 §4): a 2xx framed answer
+		// Version-stamp verification: a 2xx framed answer
 		// declaring a DIFFERENT contract line than this leg routed is rejected
 		// before the body reaches any parser or validator — tamper or skew,
 		// either way not the payload we negotiated. Absent stamp = pre-version
@@ -1048,7 +1048,7 @@ func (g *Gateway) OriginateLeg(ctx context.Context, r *http.Request, recipient, 
 	if !ok {
 		return nil, fmt.Errorf("OriginateLeg: unknown legType %q", legType)
 	}
-	// Version filter (spec 2026-08-10 §4): select the highest common contract
+	// Version filter: select the highest common contract
 	// line for this leg, fail-closed and legible when none is shared. A
 	// non-empty ProfileID is the PENDED-LINE PIN (set at run-to-PENDED, stored
 	// in pendState — AI-1 keeps it out of ExchangeStore) and is honored
@@ -1209,7 +1209,7 @@ func (g *Gateway) egressAdapt(route legRoute, payload []byte, x ExchangeIdentity
 		// Observer honesty: a transform-chain refusal used to be observer-SILENT (every
 		// egressAdapt call site precedes roundTrip, at the time the only
 		// other leg.failed producer; guardPendCarry now emits on this same
-		// seam too — observer.go's kinds table names all three) — a §6-grade
+		// seam too — observer.go's kinds table names all three) — an
 		// honesty gap the observer stream must not have. Route carries the
 		// attempted chain (routeInfoFor) so the refusal is legible on the
 		// SAME seam leg.transformed/leg.originated use, not just a bare
@@ -1565,7 +1565,7 @@ func VerifyPendCarryIntactForTest(declared []shnsdk.LossEntry, contract, buildLi
 //   - laned (validatorForLine resolves) — we can actually VALIDATE at that line.
 //
 // Anything else is a legible 422 naming what is missing. The predicate is
-// native∩laned rather than spec §4's "declared" — a RECORDED deviation: it
+// native∩laned rather than the routing rule's "declared" — a RECORDED deviation: it
 // is what makes the declaration-change window benign, because legs routed off a
 // peer's stale (smaller) view of our declaration still complete.
 //
@@ -1797,7 +1797,7 @@ func writeLeg(w http.ResponseWriter, out []byte) {
 }
 
 // frameNegotiated reports whether requester's registry entry advertises frame v1
-// (spec 2026-07-17): capability is two-sided — the responder only frames to a peer
+// capability is two-sided — the responder only frames to a peer
 // that declared it can decode. Absent ⇒ the pre-v0.27.0 bare-payload contract.
 func (g *Gateway) frameNegotiated(requester string) bool {
 	h, ok := g.cfg.Reg.Lookup(requester)
@@ -1807,7 +1807,7 @@ func (g *Gateway) frameNegotiated(requester string) bool {
 // framePayload wraps an application answer in the v1 HTTP frame when requester
 // negotiates it; legacy requesters get the payload bare (pre-v0.27.0 contract).
 // contractToken, when non-empty, is stamped as the frame's contractVersion
-// header (spec 2026-08-10 §4) — SUCCESS frames only; respondLegError's non-2xx
+// header — SUCCESS frames only; respondLegError's non-2xx
 // frames are relayed verbatim and deliberately unstamped. An encode error
 // means an out-of-range status literal (caller bug) — fall back to bare so the
 // exchange still answers.
@@ -1830,7 +1830,7 @@ func (g *Gateway) framePayload(requester string, status int, contentType, contra
 // federated query). The PAS legs call buildResponseLeg/writeLeg explicitly so
 // they can commit state ONLY after a successful build. The
 // success payload is sealed as a v1 frame(200, application/fhir+json) for a
-// frame-negotiated requester (spec 2026-07-17), bare legacy otherwise.
+// frame-negotiated requester, bare legacy otherwise.
 //
 // builtToken is the contract-version token this answer's payload was BUILT at —
 // the honored/recomputed answer line — and becomes the frame's contractVersion
@@ -1881,8 +1881,8 @@ func (g *Gateway) respondLeg(w http.ResponseWriter, r *http.Request, respFrame, 
 // defer-rollback must still fire.
 //
 // builtToken is deliberately UNUSED on the genuine error path: non-2xx frames are
-// relayed verbatim and never carry a contractVersion stamp (spec 2026-08-10 §4 —
-// stamping is a SUCCESS-frame property, and a relayed application error may not even
+// relayed verbatim and never carry a contractVersion stamp (stamping is
+// a SUCCESS-frame property, and a relayed application error may not even
 // be this build's bytes). It exists only to be forwarded on the 2xx-misuse reroute
 // below, so the success seal still stamps correctly. Do not "fix" the unused
 // parameter by stamping error frames.

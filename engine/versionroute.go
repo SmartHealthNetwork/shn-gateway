@@ -1,4 +1,4 @@
-// versionroute.go — version-aware routing (spec 2026-08-10 §4): pure
+// versionroute.go — version-aware routing: pure
 // line-set/selection helpers over contract-version tokens ("<contract>@<line>").
 // Selection happens at the ORIGINATING gateway (OriginateLeg); the Hub is
 // untouched. The functions are pure so the same filter serves substrate
@@ -80,7 +80,7 @@ func sortedTokens(contract string, lines map[string]bool) []string {
 	return out
 }
 
-// selectContractToken applies the spec §4 routing rule for one contract:
+// selectContractToken applies the routing rule for one contract:
 //   - contract == ""            → version-neutral leg: no token, never refused.
 //   - !declaredAtAll            → pre-contract peer (declared NOTHING): route at
 //     this build's own highest line. Silence is not incompatibility — every
@@ -127,8 +127,8 @@ func selectContractToken(own, peer []string, declaredAtAll bool, contract string
 	return contract + "@" + highestLine(common), false
 }
 
-// RouteRefusalError is the legible version-routing refusal (spec 2026-08-10 §4;
-// the AI-G11 422 grammar sibling of "no registered payer for identifier …"):
+// RouteRefusalError is the legible version-routing refusal (the AI-G11
+// 422 grammar sibling of "no registered payer for identifier …"):
 // no shared contract line and no bridge. It names the failing contract, the
 // leg, and both parties' declared tokens so the refusal is actionable without
 // log access. relayOriginationError writes it as the HTTP 422.
@@ -164,7 +164,7 @@ func (e *RouteRefusalError) Error() string {
 }
 
 // selectLegToken resolves the contract-version token for one leg to one
-// recipient off the live registry (spec 2026-08-10 §4). "" with nil error =
+// recipient off the live registry. "" with nil error =
 // version-neutral leg or the token for a silent (pre-contract) peer per
 // selectContractToken's rules; a *RouteRefusalError is the fail-closed no-
 // shared-line outcome. An unregistered recipient is NOT this function's
@@ -200,8 +200,8 @@ func (g *Gateway) selectLegToken(recipient, legType string) (string, error) {
 // unchecked map index it replaces returned the zero legSpec — whose empty
 // Contract is indistinguishable from a genuinely version-neutral leg. That
 // fail-OPEN seed would have silently skipped the version filter and the frame
-// stamp for a typo'd or future legType; it now closes loudly (spec 2026-08-11,
-// ok-guards). "" with nil error = a genuinely version-neutral leg.
+// stamp for a typo'd or future legType; it now closes loudly (the
+// catalog ok-guards). "" with nil error = a genuinely version-neutral leg.
 func legContract(legType string) (string, error) {
 	spec, ok := paCatalog[legType]
 	if !ok {
@@ -211,7 +211,7 @@ func legContract(legType string) (string, error) {
 }
 
 // declaredContractVersions is the SINGLE accessor for this deployment's declared
-// exchange-contract token set (spec 2026-08-11). Config's
+// exchange-contract token set. Config's
 // DeclaredContractVersions carries the operator's SHN_CONTRACT_VERSIONS override
 // (boot-validated in gateway/app: grammar + ⊆ NativeContractVersions); empty ⇒
 // this build's default declaration.
@@ -228,8 +228,8 @@ func (g *Gateway) declaredContractVersions() []string {
 	return shnsdk.SupportedContractVersions()
 }
 
-// contractTokenForLeg is the responder-side frame stamp for a legType (spec
-// 2026-08-10 §4): "" for a version-neutral leg, else the contract-version token
+// contractTokenForLeg is the responder-side frame stamp for a legType:
+// "" for a version-neutral leg, else the contract-version token
 // the answer's payload was BUILT at. Content-descriptive, not a negotiation echo.
 //
 // builtToken is the token the responder actually built at — the honored/recomputed

@@ -1,4 +1,4 @@
-// compat.go — the compatibility manifest (spec 2026-08-10 §5): a Go table
+// compat.go — the compatibility manifest: a Go table
 // consulted at runtime inside a deployed binary, NEVER JSON. This is
 // deliberately NOT tools/contracts/manifest.json — that file is IG package-pin
 // text consumed by contractsgen's KV/curl-site machinery (a repo-file read

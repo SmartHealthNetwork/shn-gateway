@@ -296,7 +296,7 @@ func TestEnvelopeLegChainIsByteIdenticalPassThrough(t *testing.T) {
 	}
 
 	// leg.transformed still fires — the live machinery story stays honest
-	// (spec §4b) even though the bytes never moved.
+	// even though the bytes never moved.
 	if len(observed) != 1 || observed[0].Kind != legTransformedKind {
 		t.Fatalf("observed = %+v, want exactly one leg.transformed event", observed)
 	}
@@ -327,7 +327,7 @@ func TestCRDLegsNeverJoinEnvelopeCarveOut(t *testing.T) {
 
 // TestEgressAdaptRefusalEmitsLegFailed: today an egressAdapt refusal
 // is observer-SILENT (all 14 call sites precede roundTrip, the only
-// leg.failed choke point) — spec §1a names this a §6-grade honesty gap. This
+// leg.failed choke point) — an honesty gap of the same grade. This
 // emission is NEW, tested in the same change. Drives a REAL gated chain
 // (chainFor("pa.pas","2.0","2.2")) on a Claim-shaped payload — pasStep2021Up's
 // unconditional refusal (transform_pas.go) — and asserts exactly one

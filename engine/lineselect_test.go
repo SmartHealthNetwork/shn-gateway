@@ -1,4 +1,4 @@
-// lineselect_test.go — build-at-the-selected-line (spec 2026-08-11):
+// lineselect_test.go — build-at-the-selected-line:
 // the declared-set accessor, the paCatalog ok-guards, the line-aware
 // validator seam (F7), and the request-frame rules on BOTH sides.
 package engine

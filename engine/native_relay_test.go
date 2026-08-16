@@ -48,7 +48,7 @@ func TestNativePost_Unreachable_IsErrorReturn(t *testing.T) {
 }
 
 // TestNativePost_OverCapNon2xxBody_DegradesToError covers the relayBodyCap headroom check
-// (spec §4): an upstream non-2xx body too large to relay is NOT a relayable LegResult — it
+// an upstream non-2xx body too large to relay is NOT a relayable LegResult — it
 // degrades to a no-response-shaped fault (error return), same as build/dial/read.
 func TestNativePost_OverCapNon2xxBody_DegradesToError(t *testing.T) {
 	oversized := bytes.Repeat([]byte("a"), relayBodyCap+1)

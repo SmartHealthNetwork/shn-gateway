@@ -344,7 +344,7 @@ func TestLoadConfig_PayerDavinciBaseOnlyIsOK(t *testing.T) {
 }
 
 // TestLoadConfig_PayerDavinciContractVersions: the per-peer declared-versions
-// block (spec 2026-08-10 §3 path 2, "seeded by config"). Tokens follow the
+// block (the "seeded by config" evidence path). Tokens follow the
 // registrar admission grammar; malformed or base-less declarations are BOOT
 // failures, not runtime surprises.
 func TestLoadConfig_PayerDavinciContractVersions(t *testing.T) {
@@ -728,7 +728,7 @@ func TestConvergeRegistry_CarriesPayerIDs(t *testing.T) {
 // fed holder's MessageFrames onto the resulting RegistryEntry — the peer cache
 // must thread the feed's self-declared frame capability so the responder-side
 // reader (Gateway.frameNegotiated, which looks the requester's entry up in this
-// registry) can negotiate on it (opaque-payload frame spec §4). This test proves
+// registry) can negotiate on it (the opaque-payload frame contract). This test proves
 // the field survives the /holders → Registry snapshot that reader depends on.
 func TestConvergeRegistry_CarriesMessageFrames(t *testing.T) {
 	var enc [32]byte
@@ -764,7 +764,7 @@ func TestConvergeRegistry_CarriesMessageFrames(t *testing.T) {
 // TestConvergeRegistry_CarriesContractVersions verifies convergeRegistry copies
 // a fed holder's ContractVersions onto the resulting RegistryEntry — the peer
 // cache must thread the feed's self-declared contract lines so the
-// version-aware recipient filter can read them (spec 2026-08-10 §4).
+// version-aware recipient filter can read them.
 func TestConvergeRegistry_CarriesContractVersions(t *testing.T) {
 	var enc [32]byte
 	enc[0], enc[31] = 7, 9
@@ -1204,7 +1204,7 @@ func TestApp_ChecksEndpoint_TokenGatedAndHealthUnaffected(t *testing.T) {
 // the native responder's SetEndpointEvidence (gateway/app/app.go, right
 // after checksRunner is constructed, since the responder is built earlier at
 // the PAYER_DAVINCI_BASE_URL block above it); a genuine POST /internal/checks
-// (the SAME live path an operator or cloudctl drives) runs the probes for
+// (the SAME live path an operator or the hosted control plane drives) runs the probes for
 // real against a fake payer serving davinci-configuration, and the evidence
 // must land on the built native responder — read back via
 // EndpointEvidenceForTest, never injected through a second, test-only route.

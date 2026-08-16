@@ -1,4 +1,4 @@
-// transform.go — the cross-version transform framework (spec 2026-08-10 §5):
+// transform.go — the cross-version transform framework:
 // pure, deterministic per-adjacent-line step functions and the chain
 // executor that composes them. This is engine-internal machinery, not
 // published-SDK surface — no sdk twin, no sdkparity row.
@@ -15,7 +15,7 @@ package engine
 import "strings"
 
 // TransformFunc is one direction of one adjacent step: pure, deterministic,
-// no I/O, no clock (spec §5). x carries only exchange identity already known
+// no I/O, no clock. x carries only exchange identity already known
 // to the leg (correlation id, leg type, counterpart) so upcast synthesis
 // stays deterministic; TransformFuncs read only CorrelationID today — LegType
 // and Counterpart exist for egressAdapt's own leg.transformed stamping,

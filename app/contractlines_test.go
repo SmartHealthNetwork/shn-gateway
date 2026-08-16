@@ -1,4 +1,4 @@
-// contractlines_test.go — contract-line boot gates (spec 2026-08-11): the declared-set
+// contractlines_test.go — contract-line boot gates: the declared-set
 // env (D1a) and the per-line validator lanes (F7). Both are FAIL-CLOSED at boot:
 // a deployment must not advertise a contract line it cannot build or validate.
 package app
@@ -131,7 +131,7 @@ func TestValidatorLaneFailClosed(t *testing.T) {
 // TestValidatorLaneSingleLineDeclaration: a contract declared at
 // exactly ONE line must fail-close identically to the 2+-line case when that
 // line is non-canonical, undeclared elsewhere, and has no configured lane —
-// the demo/refuse holders (kit-bridging-visualization spec §3) declare each
+// the demo/refuse holders (the bridging-demo topology) declare each
 // of pa.crd/pa.dtr/pa.pas at a single line each, so the guard must not treat
 // "declared once" as "nothing to validate". This is the rejection-test half
 // of the guard: linesPerContract is keyed by NativeContractVersions() (a

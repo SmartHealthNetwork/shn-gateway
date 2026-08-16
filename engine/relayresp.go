@@ -6,7 +6,7 @@ import "fmt"
 // RelayError carries a recipient's non-2xx application answer back up the
 // origination call chain as a typed sentinel — mirroring errAuthorizationDenied
 // (gateway.go). It is fed by roundTripInner decoding a frame-negotiated recipient's
-// v1 message frame (spec 2026-07-17): a non-2xx frame status becomes this sentinel.
+// v1 message frame: a non-2xx frame status becomes this sentinel.
 // Signatures stay ([]byte, error); every OriginateLeg caller's existing
 // `if err != nil` guard aborts the exchange correctly, and the ingress handlers
 // unwrap it (errors.As) to surface the recipient's real status + body.

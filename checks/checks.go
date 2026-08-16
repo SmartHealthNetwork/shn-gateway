@@ -1,5 +1,5 @@
-// Package checks implements the gateway's connectivity probe runner (spec
-// §7.1) — an ops-surface health check independent of the request-serving
+// Package checks implements the gateway's connectivity probe runner —
+// an ops-surface health check independent of the request-serving
 // path. It has no substrate awareness of its own: the app layer builds the
 // Target list (see gateway/app/app.go's checkOptionalURL table) and, for
 // KindToken, supplies a closure over its own configured credentials so this
@@ -25,7 +25,7 @@ import (
 	"time"
 )
 
-// Result is one probe outcome (spec §7.1 — extends the kit's
+// Result is one probe outcome (extends the kit's
 // bootstrap.Probe {name,ok,detail} with target/timing).
 //
 // REDACTION RULE: Target and Detail render verbatim in operator UIs — they
@@ -37,14 +37,14 @@ type Result struct {
 	Detail    string    `json:"detail"`
 	CheckedAt time.Time `json:"checkedAt"`
 	LatencyMS int64     `json:"latencyMs"`
-	// Failure classifies a failing probe for machine consumption (spec
-	// 2026-08-09: the console maps Code to operator copy; Hint carries the
+	// Failure classifies a failing probe for machine consumption (the
+	// console maps Code to operator copy; Hint carries the
 	// redaction-safe specifics the code cannot). Present exactly when OK is
 	// false. Hint obeys the REDACTION RULE above: it only ever carries
 	// fragments Detail already ships.
 	Failure *Failure `json:"failure,omitempty"`
-	// Capability is probe-retained capability evidence (spec 2026-08-10 §3
-	// path 2: the prober used to parse fhirVersion and discard it — now it
+	// Capability is probe-retained capability evidence (the prober used
+	// to parse fhirVersion and discard it — now it
 	// keeps it). Present only when a probe parsed something. ADDITIVE on the
 	// wire (the Failure-key precedent): absent ⇒ byte-identical to the
 	// pre-capability-evidence shape. Values are peer-published canonical URLs / version
@@ -91,7 +91,7 @@ type Capability struct {
 const capabilityListCap = 32
 
 // davinciContractByIG maps a Da Vinci IG canonical-path fragment to the SHN
-// contract name (spec 2026-08-10 §3). FHIR-domain knowledge, not substrate
+// contract name. FHIR-domain knowledge, not substrate
 // awareness — this package already parses CapabilityStatements. Mirrored
 // inverse of gateway/engine's hrexCodeForContract; extend BOTH sides together
 // for any new contract. Deliberately asymmetric on pa.pdex: this reverse/
@@ -210,7 +210,7 @@ const (
 	FailInternal = "internal"
 	// FailVersionDrift: the endpoint's PUBLISHED contract versions disagree
 	// with the operator-declared per-peer versions for a contract both sides
-	// know (spec 2026-08-10 §3 path 2). Evidence-absent contracts never
+	// know. Evidence-absent contracts never
 	// drift — silence is not disagreement.
 	FailVersionDrift = "version-drift"
 	// FailInvalidDavinciConfiguration: the peer PUBLISHED a
@@ -264,13 +264,13 @@ func (e *StatusError) Error() string {
 const (
 	// cooldown caps how often a Run actually re-probes: within cooldown of
 	// the last completed run, Run returns the cached results instead
-	// (spec §7.1 — auth probes hit partner IdPs; repeated failures can trip
+	// (auth probes hit partner IdPs; repeated failures can trip
 	// partner-side lockouts).
 	cooldown = 30 * time.Second
 
 	// runDeadline caps a WHOLE run: probes execute serially, so N slow
 	// targets at the per-probe cap would otherwise exceed the callers'
-	// budgets — cloudctl's ChecksClient POSTs with a 15s client timeout and
+	// budgets — the hosted control plane's ChecksClient POSTs with a 15s client timeout and
 	// kitd's verify precedent is 15s. 12s keeps the full run inside both.
 	runDeadline = 12 * time.Second
 
@@ -338,10 +338,10 @@ func NewRunner(targets []Target, client *http.Client, now func() time.Time) *Run
 }
 
 // Run executes all probes serially under one runDeadline-bounded context;
-// single-flight (ErrBusy while one runs) and cooldown-capped (spec §7.1:
+// single-flight (ErrBusy while one runs) and cooldown-capped:
 // within 30s of the last completed run it returns the cached results —
 // auth probes hit partner IdPs and repeated failures can trip partner-side
-// lockouts). Probes that don't get to run before the deadline are reported
+// lockouts. Probes that don't get to run before the deadline are reported
 // !OK with detail "not checked — run deadline exceeded".
 func (r *Runner) Run(ctx context.Context) ([]Result, error) {
 	r.mu.Lock()
@@ -460,7 +460,7 @@ func (r *Runner) probeFHIRMetadata(ctx context.Context, t Target) (bool, string,
 	u, err := url.Parse(base)
 	if err != nil {
 		// A boot-validated URL failing to parse is a bug, not a network
-		// condition (spec §2) — internal, not unreachable.
+		// condition — internal, not unreachable.
 		return false, fmt.Sprintf("GET %s/metadata: %v", redacted, redactErr(err)),
 			&Failure{Code: FailInternal, Hint: redactErr(err).Error()}, nil
 	}

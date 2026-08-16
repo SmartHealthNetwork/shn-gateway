@@ -70,7 +70,7 @@ func prefetchResources(prefetch map[string]json.RawMessage) [][]byte {
 }
 
 // handleIngressMetadata serves the provider ingress CapabilityStatement
-// (FR-37 per-role; spec 2026-08-10 §3 path 3). Public like the payer's
+// (FR-37 per-role). Public like the payer's
 // /metadata — a conformance statement is discovery surface, not PHI.
 func (g *Gateway) handleIngressMetadata(w http.ResponseWriter, _ *http.Request) {
 	// D1a: the published conformance surface names THE DECLARED SET, single-sourced

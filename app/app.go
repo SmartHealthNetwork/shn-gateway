@@ -69,7 +69,7 @@ type config struct {
 	TLSKeyFile  string
 
 	// MetricsService enables CloudWatch EMF metric emission (LegOutcome /
-	// LegError, spec §7 #16) and names this gateway's Service dimension.
+	// LegError) and names this gateway's Service dimension.
 	// Empty = off — the published-binary default; the preview deployment sets
 	// it per ECS service. Namespace/env dims follow the monitor's conventions.
 	MetricsService   string
@@ -85,7 +85,7 @@ type config struct {
 	RegistrarURL    string
 	FHIRValidateURL string
 	// FHIRValidateURL21 / FHIRValidateURL22 are the per-LINE $validate lanes
-	// (FHIR_VALIDATE_URL_2_1 / FHIR_VALIDATE_URL_2_2, spec 2026-08-11 F7).
+	// (FHIR_VALIDATE_URL_2_1 / FHIR_VALIDATE_URL_2_2).
 	// A HAPI instance can host exactly ONE version of an IG, so a deployment that
 	// DECLARES a 2.1 or 2.2 contract line must run a validator for that line;
 	// FHIR_VALIDATE_URL remains the canonical (2.0) lane. Boot fails closed when a
@@ -171,8 +171,8 @@ type config struct {
 
 	// PayerDavinciContractVersions is the operator-declared per-peer contract
 	// token set ("<contract>@<line>", comma-separated) the payer FHIR-metadata
-	// probe verifies published evidence against (checks.FailVersionDrift, spec
-	// 2026-08-10 §3 path 2). PAYER_DAVINCI_CONTRACT_VERSIONS. Requires
+	// probe verifies published evidence against (checks.FailVersionDrift).
+	// PAYER_DAVINCI_CONTRACT_VERSIONS. Requires
 	// PayerDavinciBaseURL — there is nothing to verify against otherwise.
 	PayerDavinciContractVersions []string
 
@@ -218,7 +218,7 @@ type config struct {
 	IngressClients map[string]engine.IngressClientRegistration
 
 	// ChecksToken gates the operator connectivity-probe surface at
-	// /internal/checks (spec §7.1). Set by CHECKS_TOKEN. Empty (the default)
+	// /internal/checks. Set by CHECKS_TOKEN. Empty (the default)
 	// falls back to loopback-only access — see checks.Handler.
 	ChecksToken string
 }
@@ -573,7 +573,7 @@ func checkOptionalURL(name, v string) error {
 // its env var name — SHN_DISCOVERY_URL included (it's required, but its
 // well-formedness still rides this same check). loadConfig's boot-time
 // well-formedness loop and checkTargets (the /internal/checks probe target
-// list, spec §7.1) BOTH walk this exact table so the two can never diverge:
+// list) BOTH walk this exact table so the two can never diverge:
 // a URL added here is automatically both boot-validated and, when non-empty,
 // probed. No entry is hand-kept in a second place. The single sanctioned
 // exception is checkTargets' PAYER_DAVINCI_WELL_KNOWN companion target: it
@@ -603,7 +603,7 @@ func optionalURLs(cfg config) [][2]string {
 	}
 }
 
-// checkTargets derives the /internal/checks probe targets (spec §7.1) from
+// checkTargets derives the /internal/checks probe targets from
 // optionalURLs(cfg) — the exact table checkOptionalURL walks at boot, so a
 // target can never be added or dropped independently of that well-formedness
 // gate. Skips unset pairs. Kind overlay: the two FHIR-facing base URLs probe
@@ -648,8 +648,8 @@ func checkTargets(cfg config) []checks.Target {
 
 	// Derived companion probe (not a new table entry — same boot-validated
 	// base URL as PAYER_DAVINCI_BASE_URL, different path): the HRex
-	// .well-known/davinci-configuration, absence-tolerant (spec 2026-08-10 §3
-	// path 2). Kept out of optionalURLs so the "one table" rule still holds:
+	// .well-known/davinci-configuration, absence-tolerant (an evidence
+	// path). Kept out of optionalURLs so the "one table" rule still holds:
 	// this URL is never independently configured.
 	if cfg.PayerDavinciBaseURL != "" {
 		out = append(out, checks.Target{
@@ -880,7 +880,7 @@ type built struct {
 	// Record* calls are nil-safe, so a nil cell here is a no-op, not a crash.
 	healthCell *health.PollerCell
 
-	// checksRunner drives /internal/checks (spec §7.1) — the operator
+	// checksRunner drives /internal/checks — the operator
 	// connectivity-probe surface. Run starts its boot-time probe in a
 	// goroutine (never build: the listener must open without waiting on
 	// partner endpoints), and it is never registered as a health.Check —
@@ -1102,8 +1102,8 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		if discErr != nil {
 			return b, fmt.Errorf("gateway: CRD service-id discovery: %w", discErr)
 		}
-		// WithDeclaredContractVersions is scoped to the NATIVE responder only (spec
-		// 2026-08-10 §4 foreign-endpoint filter): NewCompositeResponder routes read-only
+		// WithDeclaredContractVersions is scoped to the NATIVE responder only (the
+		// foreign-endpoint filter): NewCompositeResponder routes read-only
 		// legs to native and PAS to the sandbox fallback unless PayerDavinciPASNative
 		// (composite.go), so a sandbox-fallback PAS leg is correctly NOT filtered by
 		// this foreign declaration — the sandbox payer is not the foreign peer.
@@ -1155,7 +1155,7 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		obsHandler = composeObserverHandler(hub.Handler())
 	}
 
-	// EMF leg metrics (spec §7 #16): opt-in via METRICS_SERVICE. EMF rides
+	// EMF leg metrics: opt-in via METRICS_SERVICE. EMF rides
 	// stdout → awslogs → CloudWatch; sdk/metrics is fire-and-forget and
 	// conformance-neutral (TestLegMetric_ConformanceNeutral).
 	if cfg.MetricsService != "" {
@@ -1175,8 +1175,8 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	fmt.Fprintf(stdout, "gateway: role=%s holder=%s listening on %s://%s\n", cfg.Role, bundle.Identity.HolderID, scheme, cfg.Addr)
 
 	// /internal/* is the operator/control-plane surface: never forwarded at the
-	// hosted edge (cloudctl RenderRules pins that), token- or loopback-gated
-	// here (spec §7.1). Inserted at this seam — shared by every role — rather
+	// hosted edge (the hosted control plane pins that), token- or loopback-gated
+	// here. Inserted at this seam — shared by every role — rather
 	// than the per-role engine mux.
 	checksRunner := checks.NewRunner(checkTargets(cfg), client, clock)
 	// Endpoint evidence: feed each completed checks cycle's PAYER_DAVINCI_WELL_KNOWN
@@ -1260,7 +1260,7 @@ func Run(ctx context.Context, getenv func(string) string, stdout io.Writer) erro
 	if b.registrarURL != "" {
 		go pollFeed(ctx, b.client, b.registrarURL, b.reg, 3*time.Second, b.healthCell)
 	}
-	// Boot-time connectivity check (spec §7.1): after the listener is up, not
+	// Boot-time connectivity check: after the listener is up, not
 	// blocking it — build() must return without waiting on partner endpoints.
 	go b.checksRunner.Run(ctx) //nolint:errcheck — results land in Last()
 	errc := make(chan error, 2)

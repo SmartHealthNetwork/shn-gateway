@@ -23,7 +23,7 @@ type legSpec struct {
 	Scope     string
 	Physics   LegPhysics
 	// Contract is the contract-version family this legType's payload belongs to
-	// ("pa.pas" — spec 2026-08-10 §4), consumed by the OriginateLeg version
+	// ("pa.pas"), consumed by the OriginateLeg version
 	// filter and the response-frame stamp. "" = version-neutral: the leg's
 	// payload is not governed by any declared contract line (base-R4 CER, CDex,
 	// bespoke patient-dtr JSON) and is never filtered or stamped. Every catalog

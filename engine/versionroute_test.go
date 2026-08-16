@@ -40,7 +40,7 @@ func TestCompareLines_Numeric(t *testing.T) {
 	}
 }
 
-// TestSelectContractToken pins the routing rule (spec 2026-08-10 §4): highest
+// TestSelectContractToken pins the routing rule: highest
 // common line wins deterministically; a silent peer (declared NOTHING) routes
 // at own line (pre-contract build — rollout safety); a peer with a non-empty
 // declaration missing the contract, or sharing no line, is REFUSED (both-sides-
@@ -99,7 +99,7 @@ func TestPACatalog_Contracts(t *testing.T) {
 
 // TestSelectLegToken_RefusalIsLegible: the refusal names the failing contract,
 // the leg, and BOTH parties' declared tokens (AI-G11's legible-422 grammar,
-// spec 2026-08-10 §4 "no match, no bridge → legible refusal").
+// "no match, no bridge → legible refusal").
 func TestSelectLegToken_RefusalIsLegible(t *testing.T) {
 	reg := shnsdk.NewRegistry()
 	reg.Set("payer-x", shnsdk.RegistryEntry{ID: "payer-x", Role: "payer",
@@ -138,8 +138,7 @@ func TestSelectLegToken_RefusalIsLegible(t *testing.T) {
 	}
 }
 
-// TestPendStatePinsContractLine: the pended-line pin (spec 2026-08-10 §4;
-// SETTLED: the pin lives in pendState, NEVER ExchangeStore — AI-1). The pin is
+// TestPendStatePinsContractLine: the pended-line pin (SETTLED: the pin lives in pendState, NEVER ExchangeStore — AI-1). The pin is
 // selected once at run-to-PENDED and honored by the resume leg even if the
 // recipient's declaration changes to an incompatible line mid-pend — a pended
 // exchange finishes on the line it started on.
@@ -542,7 +541,7 @@ func TestOriginateLegFallbackStaysIntersectionOnly(t *testing.T) {
 }
 
 // The knob must never affect a shared-declared-line leg: arm 1 consults
-// declared sets only (spec §1b "demo mode doesn't break normal runs").
+// declared sets only ("demo mode doesn't break normal runs").
 func TestEgressNativeLinesDoesNotAffectSharedDeclaredLine(t *testing.T) {
 	reg := shnsdk.NewRegistry()
 	reg.Set("payer-20", shnsdk.RegistryEntry{ID: "payer-20", Role: "payer", ContractVersions: []string{"pa.pas@2.0"}})
@@ -559,7 +558,7 @@ func TestEgressNativeLinesDoesNotAffectSharedDeclaredLine(t *testing.T) {
 	}
 }
 
-// Resume containment, both directions (spec §1b): selectResumeRoute IS
+// Resume containment, both directions: selectResumeRoute IS
 // knob-affected (reads nativeLinesView, never declared).
 func TestSelectResumeRouteUnderNarrowing(t *testing.T) {
 	fake := shnsdk.NewFakeValidator()

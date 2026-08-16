@@ -568,22 +568,22 @@ func TestGlobalDeadline(t *testing.T) {
 	}
 }
 
-// wantFailure asserts a failing result's machine classification (spec
-// 2026-08-09 §1/§2): present, exact code, exact hint.
+// wantFailure asserts a failing result's machine classification:
+// present, exact code, exact hint.
 func wantFailure(t *testing.T, res Result, code, hint string) {
 	t.Helper()
 	if res.OK {
 		t.Fatalf("result %q ok=true, want a failing result", res.ID)
 	}
 	if res.Failure == nil {
-		t.Fatalf("result %q Failure=nil, want {code:%q hint:%q} (spec §1 invariant: ok:false ⇒ failure present)", res.ID, code, hint)
+		t.Fatalf("result %q Failure=nil, want {code:%q hint:%q} (invariant: ok:false ⇒ failure present)", res.ID, code, hint)
 	}
 	if res.Failure.Code != code || res.Failure.Hint != hint {
 		t.Fatalf("result %q failure = {%q %q}, want {%q %q}", res.ID, res.Failure.Code, res.Failure.Hint, code, hint)
 	}
 }
 
-// 11. failure classification (spec 2026-08-09 §2): one row per minting site
+// 11. failure classification: one row per minting site
 // reachable through a live Runner, including a closed-port transport row.
 // The fhir-metadata transport row lives in test 3b's extension (hint
 // redaction needs the credential-bearing URL) and the deadline row in
@@ -668,7 +668,7 @@ func TestFailureClassification(t *testing.T) {
 					t.Fatalf("ok=false (%s), want ok", res.Detail)
 				}
 				if res.Failure != nil {
-					t.Fatalf("Failure=%+v on an ok result, want nil (spec §1 invariant)", res.Failure)
+					t.Fatalf("Failure=%+v on an ok result, want nil (invariant)", res.Failure)
 				}
 				return
 			}
@@ -683,7 +683,7 @@ func TestFailureClassification(t *testing.T) {
 	}
 }
 
-// 12. wire shape (spec 2026-08-09 §1): an ok result marshals with NO
+// 12. wire shape: an ok result marshals with NO
 // failure key — byte-additive over the v0.32.0 shape — and a failing
 // result's failure object omits an empty hint.
 func TestResultJSONFailureShape(t *testing.T) {
@@ -734,7 +734,7 @@ func TestFHIRMetadataLargeCapabilityStatement(t *testing.T) {
 }
 
 // 14. TestFHIRMetadataProbeRetainsCapability: the prober stops discarding
-// what it parses (spec 2026-08-10 §3 path 2 "probe retention"): fhirVersion,
+// what it parses ("probe retention"): fhirVersion,
 // implementationGuide, versioned supportedProfile — plus the contract tokens
 // derived from them — ride the Result so the control plane retains them.
 func TestFHIRMetadataProbeRetainsCapability(t *testing.T) {
@@ -812,8 +812,8 @@ func TestResultJSONCapabilityShape(t *testing.T) {
 	}
 }
 
-// TestVersionDriftClassification: probe-vs-declared drift (spec 2026-08-10 §3
-// path 2 — trust-but-verify; declared capability in the wild is unreliable).
+// TestVersionDriftClassification: probe-vs-declared drift
+// (trust-but-verify; declared capability in the wild is unreliable).
 // Drift rule: for every contract BOTH sides know, the line sets must
 // intersect; evidence-absent contracts are tolerated (a peer that publishes
 // nothing is not accused). One mutation per row.
@@ -901,8 +901,8 @@ func TestProbeRetainsEndpointURLs(t *testing.T) {
 	}
 }
 
-// TestDavinciConfigProbe: the HRex well-known probe (spec 2026-08-10 §3
-// path 2). ABSENCE IS TOLERATED — .well-known/davinci-configuration is an
+// TestDavinciConfigProbe: the HRex well-known probe (an evidence
+// path). ABSENCE IS TOLERATED — .well-known/davinci-configuration is an
 // HRex 1.2.0 optional; a 404 peer is OK ("not published"), never a failure.
 // A PUBLISHED document is parsed (endpoint codes → tokens), retained, and
 // drift-checked against the declared set.

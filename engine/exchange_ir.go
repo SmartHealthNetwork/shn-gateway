@@ -10,7 +10,7 @@ package engine
 // the edge (FR-36/FR-G29) and binds its subject for authority, but never reads its
 // clinical semantics. WorkstreamType identifies the owning module (read live by
 // OriginateLeg's selection-seam guard). ProfileID carries the routed/pinned
-// contract-version token (spec 2026-08-10 §4). The origination sites now
+// contract-version token. The origination sites now
 // SELECT it BEFORE building, so the builder that produced Bytes and the token in
 // this field name the same line by construction; a resume leg still pins it verbatim
 // as the pended-line pin. It now has THREE readers: the response-frame stamp

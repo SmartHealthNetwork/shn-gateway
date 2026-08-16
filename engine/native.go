@@ -32,7 +32,7 @@ const crdHook = "order-select"
 
 const maxPartnerBody = 8 << 20 // 8 MiB cap on a partner response body
 
-const relayBodyCap = 6 << 20 // 6 MiB — headroom under the 8 MiB MaxResponseBytes for seal + wrapper (spec §4)
+const relayBodyCap = 6 << 20 // 6 MiB — headroom under the 8 MiB MaxResponseBytes for seal + wrapper
 
 type nativeResponder struct {
 	client               *http.Client
@@ -62,7 +62,7 @@ type nativeResponder struct {
 	pendReQueryInterval time.Duration
 	// declaredContractVersions is the operator-declared token set for the
 	// foreign partner (PAYER_DAVINCI_CONTRACT_VERSIONS) — the peer-config
-	// source of spec 2026-08-10 §4's routing filter. Empty = silent peer:
+	// source of the routing filter. Empty = silent peer:
 	// forward at own line, never refuse (the same pre-contract tolerance the
 	// substrate filter applies).
 	declaredContractVersions []string
@@ -180,13 +180,13 @@ func WithPendReQuery(timeout, interval time.Duration) NativeOption {
 
 // WithDeclaredContractVersions supplies the operator-declared contract tokens
 // for the partner endpoint; legs whose contract shares no line refuse legibly
-// instead of forwarding (spec 2026-08-10 §4 foreign-endpoint filter).
+// instead of forwarding (the foreign-endpoint filter).
 func WithDeclaredContractVersions(tokens []string) NativeOption {
 	return func(n *nativeResponder) { n.declaredContractVersions = tokens }
 }
 
 // WithOwnContractVersions supplies THIS deployment's declared contract tokens —
-// the "own" half of the foreign-peer filter (spec 2026-08-11), and the
+// the "own" half of the foreign-peer filter, and the
 // sibling of WithDeclaredContractVersions, which supplies the PEER's half. Without
 // it the filter fell back to the library build constant, so a deployment that
 // declared 2.2 routed substrate legs at 2.2 yet refused to forward to a 2.2-only
@@ -461,7 +461,7 @@ func markForeignRelay(r LegResult) LegResult {
 }
 
 func (n *nativeResponder) Handle(ctx context.Context, leg, corrID, subjectPCI string, requestFHIR []byte) (LegResult, error) {
-	// Foreign-peer version filter (spec 2026-08-10 §4): same rule as the
+	// Foreign-peer version filter: same rule as the
 	// substrate OriginateLeg filter, sourced from the operator's per-peer
 	// declaration instead of the registry. Refuse-before-forward: a refused
 	// leg sends ZERO bytes to the partner.
@@ -656,7 +656,7 @@ func (n *nativeResponder) Handle(ctx context.Context, leg, corrID, subjectPCI st
 // status — is the recipient's answer: 2xx → (body, LegResult{}, nil); non-2xx →
 // (nil, LegResult{Status:<code>, ResponseFHIR:<upstream body>}, nil) for verbatim
 // relay. A NO-RESPONSE fault (build/dial/read) is (nil, LegResult{}, error) → the
-// engine maps it to 500 → "hub routing failed". (Relay design 2026-07-15.)
+// engine maps it to 500 → "hub routing failed".
 func (n *nativeResponder) post(ctx context.Context, base, path string, body []byte, label string) ([]byte, LegResult, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+path, bytes.NewReader(body))
 	if err != nil {
@@ -674,7 +674,7 @@ func (n *nativeResponder) post(ctx context.Context, base, path string, body []by
 		return nil, LegResult{}, fmt.Errorf("upstream payer %s read failed: %w", label, err)
 	}
 	if resp.StatusCode/100 != 2 {
-		if len(rb) > relayBodyCap { // headroom under MaxResponseBytes for seal + wrapper (spec §4)
+		if len(rb) > relayBodyCap { // headroom under MaxResponseBytes for seal + wrapper
 			return nil, LegResult{}, fmt.Errorf("upstream payer %s body too large to relay (%d bytes)", label, len(rb))
 		}
 		return nil, LegResult{Status: resp.StatusCode, ResponseFHIR: rb}, nil
@@ -700,7 +700,7 @@ func (n *nativeResponder) get(ctx context.Context, base, path, label string) ([]
 		return nil, LegResult{}, fmt.Errorf("upstream payer %s read failed: %w", label, err)
 	}
 	if resp.StatusCode/100 != 2 {
-		if len(rb) > relayBodyCap { // headroom under MaxResponseBytes for seal + wrapper (spec §4)
+		if len(rb) > relayBodyCap { // headroom under MaxResponseBytes for seal + wrapper
 			return nil, LegResult{}, fmt.Errorf("upstream payer %s body too large to relay (%d bytes)", label, len(rb))
 		}
 		return nil, LegResult{Status: resp.StatusCode, ResponseFHIR: rb}, nil
