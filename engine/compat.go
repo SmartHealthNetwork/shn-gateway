@@ -81,7 +81,7 @@ var compatManifest = []CompatStep{
 	//     plus the def-driven intendedUse-system and origin-code moves.
 	//   Up (2.1->2.2), QR content, MULTI-coverage source (>=2
 	//     Coverage-referencing qr-context entries):  GATED — semantic-change
-	//     refusal (the spec's canonical example), typed SemanticChangeError;
+	//     refusal (the canonical multi-coverage example), typed SemanticChangeError;
 	//     rejection-tested (TestDTRStep2122Up_MultiCoverageGated).
 	//   Up (2.1->2.2), QR content, ZERO-coverage source (no
 	//     Coverage-referencing qr-context entry): GATED — same typed error,
@@ -136,7 +136,7 @@ var compatManifest = []CompatStep{
 	//     stripped (2.1's profile has no constraint on it at all).
 	//   Down (2.2->2.1), request+response sub-cases: CARRY — top-level
 	//     2.2-only extensions (authorizationNumber and siblings, verified
-	//     live against the 2.2.1 SD — the spec's own carry example) have no
+	//     live against the 2.2.1 SD — the canonical carry example) have no
 	//     2.1 slot.
 	//   Row worst-of-four = CARRY (matches the row Class below).
 	{Contract: "pa.pas", From: "2.1", To: "2.2", Class: StepCarry, Up: pasStep2122Up, Down: pasStep2122Down},

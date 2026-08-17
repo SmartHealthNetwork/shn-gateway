@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
@@ -72,7 +73,7 @@ type Config struct {
 	// OriginationProfile selects the per-UC behavior lane: "" / "sandbox" = the sandbox
 	// shape (default, SHN-produced, byte-unchanged); "provider-data" = originate every UC off
 	// the provider's seeded SoR and drive real br-payer verdicts (Mode A). targetsBrPayer keys
-	// the contained-insurer / absolute-refs / R-8 ingress-skip handling on it. Spec 2B-bis/2C.
+	// the contained-insurer / absolute-refs / R-8 ingress-skip handling on it.
 	OriginationProfile string
 	// Identity is the gateway's substrate identity: its holder signing key (used to
 	// sign holder assertions and patient-access audit records) plus its envelope-
@@ -221,6 +222,16 @@ type Config struct {
 	// path. Additive instrumentation only: emission must not change exchange
 	// behavior (TestLegMetric_ConformanceNeutral). Carries NO payloads.
 	LegMetric func(outcome string)
+	// DemoEdgeCapture (SHN_DEMO_EDGE_CAPTURE) turns on the bounded pre-seal
+	// edge-capture store (edgecapture.go): egressAdapt records each
+	// transformed leg's own before/after payload pair for local inspection,
+	// retrievable by correlation id via EdgeCaptureFor. false (the
+	// production default) = no store is ever built and egressAdapt's capture
+	// hook is skipped entirely — conformance-neutral by construction (see
+	// TestEgressAdapt_EdgeCaptureOffIsConformanceNeutral). Loud by name: this
+	// is a local demonstration/inspection surface, never the wire, the audit
+	// record, or any conformance surface.
+	DemoEdgeCapture bool
 }
 
 // Gateway is a constructed holder gateway.
@@ -248,6 +259,20 @@ type Gateway struct {
 	// bearer verifier for the DaVinciIngress. nil when the ingress is disabled OR
 	// running under the test-only bypass; ingressAuthOK is nil-safe.
 	ingressAuth *ingressAuthServer
+
+	// edgeCapture is the bounded pre-seal edge-capture store (nil unless
+	// Config.DemoEdgeCapture is set — zero allocation in the production
+	// default). An atomic.Pointer, not a bare field: egressAdapt's
+	// lazy-build-on-first-capture and edgeCaptureLookup's read both run on
+	// the concurrent request path (a request capturing while an inspector
+	// reads), and a bare pointer field read with no synchronization would be
+	// a data race under the Go memory model — sync.Once alone does not fix
+	// this, since it only orders OTHER Do callers against each other, not an
+	// unrelated bare read outside Do. Lazily built via CompareAndSwap on
+	// first capture, so a Gateway assembled directly (bypassing New, a
+	// common test pattern in this package) still works without a separate
+	// construction step.
+	edgeCapture atomic.Pointer[edgeCaptureStore]
 }
 
 // New constructs a Gateway. The clock defaults to time.Now and the client to
@@ -1272,7 +1297,79 @@ func (g *Gateway) egressAdapt(route legRoute, payload []byte, x ExchangeIdentity
 	}
 	g.observe(ev)
 
+	// Local demonstration/inspection only (SHN_DEMO_EDGE_CAPTURE /
+	// Config.DemoEdgeCapture, default off): record this leg's own pre-seal
+	// before/after payload pair. Covers both branches above (applyChain and
+	// the envelope carve-out) since they share this single return — never
+	// the refusal path above, which returns before reaching here (nothing
+	// was sent). See edgecapture.go's doc comments for the store's bounds,
+	// the deep-copy-on-Record aliasing guard (out may be the SAME slice as
+	// payload on the carve-out path), and the single-writer-per-id
+	// assumption.
+	if g.cfg.DemoEdgeCapture {
+		g.edgeCaptureStoreForWrite().Record(EdgeCapture{
+			CorrelationID: x.CorrelationID,
+			LegType:       x.LegType,
+			Contract:      contract,
+			From:          route.BuildLine,
+			To:            targetLine,
+			Chain:         chainStepsFrom(route.BuildLine, route.Chain),
+			LossReports:   reports,
+			Before:        payload,
+			After:         out,
+			CapturedAt:    g.cfg.Clock(),
+		})
+	}
+
 	return out, reports, nil
+}
+
+// edgeCaptureStoreForWrite returns g.edgeCapture, building it on first use.
+// Safe under concurrent callers: g.edgeCapture is an atomic.Pointer, and a
+// CompareAndSwap loss (another goroutine won the race to build it first)
+// falls back to the winner's store rather than the caller's own discarded
+// one — there is never more than one live store per Gateway.
+func (g *Gateway) edgeCaptureStoreForWrite() *edgeCaptureStore {
+	if s := g.edgeCapture.Load(); s != nil {
+		return s
+	}
+	fresh := newEdgeCaptureStore(edgeCaptureCap)
+	if g.edgeCapture.CompareAndSwap(nil, fresh) {
+		return fresh
+	}
+	return g.edgeCapture.Load()
+}
+
+// edgeCaptureLookup reads back one leg's captured pre-seal before/after
+// payload pair by correlation id. Reports a miss when the flag was never on
+// for this Gateway (no store was ever built) or when no leg has recorded
+// under that id. Safe to call concurrently with in-flight captures (the
+// store pointer is read atomically). The one lookup implementation behind
+// EdgeCaptureFor; engine package tests call it directly (unexported, same
+// package) rather than through a separate exported test seam.
+func (g *Gateway) edgeCaptureLookup(id string) (EdgeCapture, bool) {
+	s := g.edgeCapture.Load()
+	if s == nil {
+		return EdgeCapture{}, false
+	}
+	return s.Get(id)
+}
+
+// EdgeCaptureFor is the production read seam over the bounded edge-capture
+// store (SHN_DEMO_EDGE_CAPTURE / Config.DemoEdgeCapture): the gateway's own
+// loopback demo capture-fetch endpoint
+// (gateway/app/demo_endpoint.go's handleDemoCapture) reads through this.
+func (g *Gateway) EdgeCaptureFor(id string) (EdgeCapture, bool) {
+	return g.edgeCaptureLookup(id)
+}
+
+// RecordEdgeCaptureForTest seeds the bounded edge-capture store directly
+// with e, bypassing egressAdapt's own capture hook — a test-only seam for
+// exercising a reader (e.g. the demo capture-fetch endpoint) against a
+// known entry without driving a full leg through the engine. Builds the
+// store on first use, exactly like the real egressAdapt capture hook.
+func (g *Gateway) RecordEdgeCaptureForTest(e EdgeCapture) {
+	g.edgeCaptureStoreForWrite().Record(e)
 }
 
 // provenanceTolerated reports whether contract's target profile has
@@ -1297,7 +1394,12 @@ func provenanceTolerated(contract string) bool {
 // schema) — a type conversion, not a re-derivation, so the two
 // encodings can never drift (TestLossReportSDKSchemaParity pins the schema
 // match; this is the one place the conversion actually happens, the seam
-// sdk/provenance.go's own layering note describes).
+// sdk/provenance.go's own layering note describes). Unexported: the demo
+// capture-fetch endpoint (gateway/app/demo_endpoint.go's handleDemoCapture)
+// does NOT use this — engine.LossReport already carries the same json tags
+// as shnsdk.LossReport (TestLossReportSDKSchemaParity again), so that
+// endpoint marshals the engine type directly, exactly like its
+// /demo/transform sibling — there is no outside caller for this conversion.
 func toSDKLossReports(reports []LossReport) []shnsdk.LossReport {
 	if reports == nil {
 		return nil

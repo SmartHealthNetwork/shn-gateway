@@ -455,6 +455,92 @@ func TestDemoEgressNativeLinesEnv(t *testing.T) {
 	})
 }
 
+// SHN_DEMO_EDGE_CAPTURE: unset ⇒ false; "true" WITH OBSERVER_ADDR set ⇒
+// true; any other value ⇒ false — the ordinary loadConfig bool idiom
+// (`== "true"`), matching every other config bool (PayerDavinciPASNative et
+// al.); unlike SHN_FAKE_VALIDATOR (build()-only, "1"), this one is a
+// loadConfig-literal field like the rest. "true" WITHOUT OBSERVER_ADDR
+// gates the EFFECTIVE field back to false — the capture store is only ever
+// readable through the observer loopback listener, so capturing with no
+// observer configured would silently burn memory on payloads nothing could
+// ever retrieve. The boot log build() emits when the flag is set (enabled,
+// or requested-but-disabled) is NOT asserted here, for the same reason
+// TestDemoEgressNativeLinesEnv's doesn't: build() fails before reaching
+// gwCfg construction with this test file's minimal env, and no
+// stdout-capturing build() harness exists yet elsewhere in this file — the
+// config-field assertion below stands in for it.
+func TestDemoEdgeCaptureEnv(t *testing.T) {
+	baseEnv := map[string]string{
+		"ROLE": "provider", "SHN_SECRETS": "/x", "SHN_DISCOVERY_URL": "https://d",
+	}
+
+	t.Run("unset is false", func(t *testing.T) {
+		env := map[string]string{}
+		for k, v := range baseEnv {
+			env[k] = v
+		}
+		cfg, err := loadConfig(func(k string) string { return env[k] })
+		if err != nil {
+			t.Fatalf("unset env should load: %v", err)
+		}
+		if cfg.DemoEdgeCapture {
+			t.Fatal("DemoEdgeCapture = true, want false (unset)")
+		}
+	})
+
+	t.Run("true with OBSERVER_ADDR enables", func(t *testing.T) {
+		env := map[string]string{}
+		for k, v := range baseEnv {
+			env[k] = v
+		}
+		env["SHN_DEMO_EDGE_CAPTURE"] = "true"
+		env["OBSERVER_ADDR"] = "127.0.0.1:9411"
+		cfg, err := loadConfig(func(k string) string { return env[k] })
+		if err != nil {
+			t.Fatalf("true env should load: %v", err)
+		}
+		if !cfg.DemoEdgeCapture {
+			t.Fatal("DemoEdgeCapture = false, want true (OBSERVER_ADDR is set, so a capture would be readable)")
+		}
+	})
+
+	// Without OBSERVER_ADDR, a captured payload could never be read
+	// back (GET /demo/capture/{correlationId} only exists on the observer
+	// listener) — the flag must not take effect, and this must be a quiet
+	// downgrade (no error), not a boot refusal, so an operator who forgot
+	// OBSERVER_ADDR still gets a working (if capture-less) gateway.
+	t.Run("true without OBSERVER_ADDR disables (nothing could read it)", func(t *testing.T) {
+		env := map[string]string{}
+		for k, v := range baseEnv {
+			env[k] = v
+		}
+		env["SHN_DEMO_EDGE_CAPTURE"] = "true"
+		cfg, err := loadConfig(func(k string) string { return env[k] })
+		if err != nil {
+			t.Fatalf("env should load (a quiet downgrade, not a boot refusal): %v", err)
+		}
+		if cfg.DemoEdgeCapture {
+			t.Fatal("DemoEdgeCapture = true, want false (OBSERVER_ADDR unset — nothing could ever read a capture)")
+		}
+	})
+
+	t.Run("any other value is false", func(t *testing.T) {
+		env := map[string]string{}
+		for k, v := range baseEnv {
+			env[k] = v
+		}
+		env["SHN_DEMO_EDGE_CAPTURE"] = "1" // not the SHN_FAKE_VALIDATOR-only idiom
+		env["OBSERVER_ADDR"] = "127.0.0.1:9411"
+		cfg, err := loadConfig(func(k string) string { return env[k] })
+		if err != nil {
+			t.Fatalf("env should load: %v", err)
+		}
+		if cfg.DemoEdgeCapture {
+			t.Fatal("DemoEdgeCapture = true, want false (only the literal \"true\" enables)")
+		}
+	})
+}
+
 func TestLoadConfig_ProviderDTRNativeRequiresPopulateURL(t *testing.T) {
 	env := map[string]string{
 		"ROLE": "provider", "SHN_SECRETS": "/x", "SHN_DISCOVERY_URL": "https://d",

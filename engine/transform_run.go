@@ -25,3 +25,15 @@ func RunTransformChain(contract, from, to string, payload []byte, x ExchangeIden
 	}
 	return applyChain(steps, from, payload, x)
 }
+
+// ChainSteps reports the compatibility chain that RunTransformChain would
+// walk for contract from->to, in the same wire shape observer events carry
+// (ChainStep), including the direction-aware hop rendering. nil when no
+// chain exists. Read-only: no step function runs.
+func ChainSteps(contract, from, to string) []ChainStep {
+	steps := chainFor(contract, from, to)
+	if steps == nil {
+		return nil
+	}
+	return chainStepsFrom(from, steps)
+}

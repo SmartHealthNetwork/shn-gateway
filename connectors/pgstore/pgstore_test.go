@@ -163,7 +163,7 @@ func TestEOB_RecordReadDedupe(t *testing.T) {
 	if b, ok := s.EOBByID("eob-1"); !ok || string(b) != `{"a":1}` {
 		t.Fatalf("EOBByID(eob-1) = %q,%v", b, ok)
 	}
-	// replayed same eob_id → still ONE row for the patient (dedupe; the spec's
+	// replayed same eob_id → still ONE row for the patient (dedupe; a
 	// deliberate more-correct divergence from the stub's duplicate-append).
 	if err := s.RecordEOB("pciX", "eob-1", []byte(`{"a":1}`)); err != nil {
 		t.Fatal(err)

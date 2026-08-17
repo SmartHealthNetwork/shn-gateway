@@ -37,12 +37,17 @@ import (
 // ruling" spelling, and the ASCII arm requires a word boundary so an ordinary
 // possessive ("HIPAA's") cannot trip it.
 //
+// `\b[SM]F[0-9]+\b` catches review-finding shorthand (`SF5`, `SM4`) that an
+// internal review pass leaves in comments — like the decision-shorthand
+// class above, the fix is always to say what the finding established, not to
+// cite its id.
+//
 // Published spec ids are DELIBERATELY not in this pattern: FR-G*, AI-G*,
 // OWD-G* and UC-0X are partner-facing vocabulary (they appear in the published
 // participant protocol and conformance docs) and must keep appearing here.
 const internalTokenPattern = `S5b|Task[ -][0-9]|per the plan|Material-|infra/|goldengen|shn-platform|\bE[0-9][a-z][0-9]?\b|\bD[0-9]\b` +
 	`|\bK1\b|PR #[0-9]+|#[0-9]{3}\b|docs/superpowers|(?i:\bslice[ -][0-9]\b)|\bBo\b|review-fixes|\bround-[0-9]\b` +
-	`|ledger[ -][0-9]|option[ -][A-Z] ruling|A′|\bA'[ .,)]|\bT-[0-9]\b`
+	`|ledger[ -][0-9]|option[ -][A-Z] ruling|A′|\bA'[ .,)]|\bT-[0-9]\b|\b[SM]F[0-9]+\b`
 
 // sweepSkipFiles are the two module-root test files excluded from the sweep.
 //

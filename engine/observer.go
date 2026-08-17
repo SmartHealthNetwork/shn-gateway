@@ -106,20 +106,35 @@ type ChainStep struct {
 // routeInfoFor renders a resolved legRoute (select-before-build's Token +
 // BuildLine + Chain) as the observer-facing RouteInfo. Chain is nil-through:
 // an arm (1)/(2) route (route.Chain == nil) produces a RouteInfo with a nil
-// Chain, never a speculative empty one.
+// Chain, never a speculative empty one — chainStepsFrom's own nil-in/nil-out
+// shape (ranging over a nil slice appends nothing) carries that through.
+func routeInfoFor(route legRoute) *RouteInfo {
+	return &RouteInfo{
+		Token:     route.Token,
+		BuildLine: route.BuildLine,
+		Chain:     chainStepsFrom(route.BuildLine, route.Chain),
+	}
+}
+
+// chainStepsFrom renders chain (canonical manifest steps, one CompatStep per
+// adjacent line pair, ascending From/To) as the observer-facing ChainStep
+// slice walked from buildLine — the shared walk behind both routeInfoFor's
+// leg-scoped Chain and ChainSteps' read-only report, so the two can never
+// drift apart.
 //
 // Each hop's From/To (and Module, built from them) is rendered in WALK
 // order, not the manifest row's stored ascending order — mirroring
 // applyChain's own curLine-vs-step.From/To direction switch (transform.go)
-// exactly, so a down-walking chain (own build line HIGHER than the routed
-// target — an ordinary SHN_CONTRACT_VERSIONS shape, not just a theoretical
-// one) renders "2.1->2.0" here as faithfully as the LossReport riding inside
-// the transformed payload itself. CompatStep.Class is direction-invariant
-// (declared per row, not per walk), so it passes through unchanged.
-func routeInfoFor(route legRoute) *RouteInfo {
-	ri := &RouteInfo{Token: route.Token, BuildLine: route.BuildLine}
-	curLine := route.BuildLine
-	for _, s := range route.Chain {
+// exactly, so a down-walking chain (buildLine HIGHER than the walk's
+// eventual target — an ordinary SHN_CONTRACT_VERSIONS shape, not just a
+// theoretical one) renders "2.1->2.0" here as faithfully as the LossReport
+// riding inside the transformed payload itself. CompatStep.Class is
+// direction-invariant (declared per row, not per walk), so it passes through
+// unchanged.
+func chainStepsFrom(buildLine string, chain []CompatStep) []ChainStep {
+	var out []ChainStep
+	curLine := buildLine
+	for _, s := range chain {
 		from, to := s.From, s.To
 		if curLine == s.To {
 			from, to = s.To, s.From
@@ -128,13 +143,13 @@ func routeInfoFor(route legRoute) *RouteInfo {
 		// applyChain would already have refused before any caller reaches this
 		// point with bytes to build a Content from) keeps the manifest's own
 		// ascending From/To.
-		ri.Chain = append(ri.Chain, ChainStep{
+		out = append(out, ChainStep{
 			Module: s.Contract + " " + from + "->" + to,
 			From:   from, To: to, Class: string(s.Class),
 		})
 		curLine = to
 	}
-	return ri
+	return out
 }
 
 // refusalRouteInfo renders a *RouteRefusalError as the observer-facing

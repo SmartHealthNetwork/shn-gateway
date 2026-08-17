@@ -61,6 +61,33 @@ expected to change shape as their consumer matures:
   your live legs route through" — same binary, same manifest. Same evolving posture as the rest
   of this surface: consumers pin exact gateway versions.
 
+  **v0.35.0** adds `GET /demo/capture/{correlationId}` on the same observer listener: a
+  loopback-only read-back of this gateway's own bounded, in-memory record of one transformed
+  egress leg's pre-seal before/after payload pair — never a wire exchange, never audited, and
+  never checked by any conformance surface (see `docs/CONFIGURATION.md`, "Demo-only pre-seal
+  edge capture"). It is populated only when the new env `SHN_DEMO_EDGE_CAPTURE`
+  (`engine.Config.DemoEdgeCapture`) is set, which as of this release also requires
+  `OBSERVER_ADDR` to be set — otherwise the flag is gated off at config load rather than
+  capturing into a store nothing could ever read. `POST /demo/transform`'s existing 200 and
+  422 response bodies also gain an additive `chain` field on this same release — the
+  compatibility-chain hops the run walked (or attempted), in the same shape already published
+  on observer events; every existing field on both responses is unchanged. New exported engine
+  surface backing this release, each its own release-notes bullet:
+
+  - `engine.ChainSteps(contract, from, to string) []ChainStep` — a read-only accessor reporting
+    the compatibility chain `RunTransformChain` would walk, without running any step function.
+  - `engine.EdgeCapture` — the pre-seal before/after payload-pair type the capture store holds
+    (`CorrelationID`, `LegType`, `Contract`, `From`, `To`, `Chain`, `LossReports`, `Before`,
+    `After`, `CapturedAt`).
+  - `(*Gateway) EdgeCaptureFor(id string) (EdgeCapture, bool)` — the production read seam the
+    capture-fetch endpoint reads through.
+  - `(*Gateway) RecordEdgeCaptureForTest(e EdgeCapture)` — a test seam over the same store for
+    cross-package tests that need to seed a known capture entry without driving a full leg
+    through the engine.
+  - `Config.DemoEdgeCapture bool` — the config field `SHN_DEMO_EDGE_CAPTURE` parses into.
+
+  Same evolving posture as the rest of this surface: consumers pin exact gateway versions.
+
 - **`scenariodriver`** (`Config`, `Driver`, transport methods, builders, `Cards`/`ParseCards`):
   the UC-01…08 scenario-driving package. New in this release and **evolving** — signatures and
   return shapes may change in minor releases as the SHN Kit's daemon and the live conformance

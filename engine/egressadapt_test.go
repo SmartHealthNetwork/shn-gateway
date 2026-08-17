@@ -8,7 +8,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -413,4 +415,235 @@ func TestEgressAdaptRefusalEmitsLegFailed(t *testing.T) {
 			t.Fatalf("ev.Route.Chain[%d] = %+v, want %+v", i, ev.Route.Chain[i], want)
 		}
 	}
+}
+
+// TestEgressAdapt_EdgeCaptureRecordsPreSealPair: with DemoEdgeCapture on, a
+// chain-invoking leg's pre-seal input/output pair is retrievable by
+// correlation id, with the chain and loss reports filled in alongside it.
+func TestEgressAdapt_EdgeCaptureRecordsPreSealPair(t *testing.T) {
+	steps := chainFor("pa.crd", "2.0", "2.2")
+	if len(steps) != 2 {
+		t.Fatalf("want a 2-hop pa.crd 2.0->2.2 chain, got %d steps: %+v", len(steps), steps)
+	}
+	route := legRoute{Token: "pa.crd@2.2", BuildLine: "2.0", Chain: steps}
+	in := []byte(`{"hook":"order-select","hookInstance":"hi-1","context":{"patientId":"MBR-COVERED"}}`)
+
+	g := &Gateway{cfg: Config{
+		HolderID: "test-holder", Clock: fixedEgressClock,
+		DemoEdgeCapture: true,
+	}}
+	x := ExchangeIdentity{CorrelationID: newCorrelationID(), LegType: "crd-order-select", Counterpart: "payer-crd22"}
+	out, reports, err := g.egressAdapt(route, in, x)
+	if err != nil {
+		t.Fatalf("egressAdapt: unexpected error: %v", err)
+	}
+
+	got, ok := g.edgeCaptureLookup(x.CorrelationID)
+	if !ok {
+		t.Fatalf("want a captured entry for %q", x.CorrelationID)
+	}
+	if !bytes.Equal(got.Before, in) {
+		t.Fatalf("got.Before = %s, want the chain input %s", got.Before, in)
+	}
+	if !bytes.Equal(got.After, out) {
+		t.Fatalf("got.After = %s, want the chain output %s", got.After, out)
+	}
+	if got.CorrelationID != x.CorrelationID || got.LegType != x.LegType {
+		t.Fatalf("got identity = %+v, want CorrelationID/LegType from x (%+v)", got, x)
+	}
+	if got.Contract != "pa.crd" || got.From != "2.0" || got.To != "2.2" {
+		t.Fatalf("got Contract/From/To = %q/%q/%q, want pa.crd/2.0/2.2", got.Contract, got.From, got.To)
+	}
+	if len(got.Chain) != 2 {
+		t.Fatalf("got.Chain has %d steps, want 2: %+v", len(got.Chain), got.Chain)
+	}
+	if len(got.LossReports) != len(reports) {
+		t.Fatalf("got.LossReports = %+v, want %+v", got.LossReports, reports)
+	}
+	if got.CapturedAt.IsZero() {
+		t.Fatal("got.CapturedAt must be set")
+	}
+}
+
+// TestEgressAdapt_EdgeCaptureOffIsConformanceNeutral: the same chain-invoking
+// leg run with DemoEdgeCapture off vs on must produce byte-identical
+// egressAdapt output — the additive-instrumentation, no-behavior-change
+// promise, mirroring TestObserver_ConformanceNeutral's run-twice-and-compare
+// shape. Each run mints its OWN fresh correlation id via newCorrelationID
+// (the production CorrelationGen default) rather than sharing one: the
+// store's single-writer-per-id assumption (edgecapture.go) means a shared id
+// would fold both runs into one entry and hide the very miss this test needs
+// to prove.
+func TestEgressAdapt_EdgeCaptureOffIsConformanceNeutral(t *testing.T) {
+	steps := chainFor("pa.crd", "2.0", "2.2")
+	if len(steps) != 2 {
+		t.Fatalf("want a 2-hop pa.crd 2.0->2.2 chain, got %d steps: %+v", len(steps), steps)
+	}
+	route := legRoute{Token: "pa.crd@2.2", BuildLine: "2.0", Chain: steps}
+	in := []byte(`{"hook":"order-select","hookInstance":"hi-1","context":{"patientId":"MBR-COVERED"}}`)
+
+	run := func(withCapture bool) (out []byte, id string, g *Gateway) {
+		g = &Gateway{cfg: Config{
+			HolderID: "test-holder", Clock: fixedEgressClock,
+			DemoEdgeCapture: withCapture,
+		}}
+		id = newCorrelationID()
+		x := ExchangeIdentity{CorrelationID: id, LegType: "crd-order-select", Counterpart: "payer-crd22"}
+		out, _, err := g.egressAdapt(route, in, x)
+		if err != nil {
+			t.Fatalf("egressAdapt: unexpected error: %v", err)
+		}
+		return out, id, g
+	}
+
+	offOut, offID, offGW := run(false)
+	onOut, onID, onGW := run(true)
+
+	if !bytes.Equal(offOut, onOut) {
+		t.Fatalf("edge-capture off/on must be byte-identical: off=%s on=%s", offOut, onOut)
+	}
+	if _, ok := offGW.edgeCaptureLookup(offID); ok {
+		t.Fatalf("flag off must capture nothing, got a hit for %q", offID)
+	}
+	if _, ok := onGW.edgeCaptureLookup(onID); !ok {
+		t.Fatalf("flag on must capture the leg, got a miss for %q", onID)
+	}
+}
+
+// TestEgressAdapt_EnvelopeLegCaptureIsByteIdentical: the dtr-questionnaire-fetch
+// envelope carve-out leg captures Before == After byte-for-byte — and,
+// because out aliases payload on this pass-through path (gateway.go's
+// egressAdapt comment), mutating the caller's own buffer AFTER the call must
+// NOT reach the stored entry: Record deep-copies (edgecapture.go).
+func TestEgressAdapt_EnvelopeLegCaptureIsByteIdentical(t *testing.T) {
+	steps := chainFor("pa.dtr", "2.0", "2.2")
+	if len(steps) != 2 {
+		t.Fatalf("want a 2-hop pa.dtr 2.0->2.2 chain, got %d steps: %+v", len(steps), steps)
+	}
+	route := legRoute{Token: "pa.dtr@2.2", BuildLine: "2.0", Chain: steps}
+	golden := pasGolden(t, "2.1/questionnaireresponse-autofill.json")
+	in := append([]byte(nil), golden...)
+	orig := append([]byte(nil), golden...)
+
+	g := &Gateway{cfg: Config{
+		HolderID: "test-holder", Clock: fixedEgressClock,
+		DemoEdgeCapture: true,
+	}}
+	x := ExchangeIdentity{CorrelationID: newCorrelationID(), LegType: "dtr-questionnaire-fetch", Counterpart: "payer"}
+	out, _, err := g.egressAdapt(route, in, x)
+	if err != nil {
+		t.Fatalf("egressAdapt: unexpected error: %v", err)
+	}
+	if !bytes.Equal(out, in) {
+		t.Fatalf("envelope leg must be byte-identical pass-through: got %s, want %s", out, in)
+	}
+
+	// Mutate the caller's own slice AFTER the call — out aliases in on this
+	// path, so a Record that did not copy would let this corrupt the stored
+	// entry.
+	for i := range in {
+		in[i] = 'X'
+	}
+
+	got, ok := g.edgeCaptureLookup(x.CorrelationID)
+	if !ok {
+		t.Fatal("want a captured entry")
+	}
+	if !bytes.Equal(got.Before, orig) {
+		t.Fatalf("got.Before was corrupted by the caller's later write — Record did not copy: got %s, want %s", got.Before, orig)
+	}
+	if !bytes.Equal(got.After, orig) {
+		t.Fatalf("got.After was corrupted by the caller's later write — Record did not copy: got %s, want %s", got.After, orig)
+	}
+	if !bytes.Equal(got.Before, got.After) {
+		t.Fatalf("envelope leg capture must be Before == After byte-for-byte: %s vs %s", got.Before, got.After)
+	}
+}
+
+// TestEgressAdapt_RefusedLegCapturesNothing: a chain refusal captures
+// nothing — nothing was ever sent, so there is nothing to inspect.
+func TestEgressAdapt_RefusedLegCapturesNothing(t *testing.T) {
+	steps := chainFor("pa.pas", "2.0", "2.2")
+	if len(steps) != 2 {
+		t.Fatalf("want a 2-hop pa.pas 2.0->2.2 chain, got %d steps: %+v", len(steps), steps)
+	}
+	route := legRoute{Token: "pa.pas@2.2", BuildLine: "2.0", Chain: steps}
+	in := []byte(`{"resourceType":"Claim","id":"c1"}`) // pasStep2021Up refuses unconditionally
+
+	g := &Gateway{cfg: Config{
+		HolderID: "test-holder", Clock: fixedEgressClock,
+		DemoEdgeCapture: true,
+	}}
+	x := ExchangeIdentity{CorrelationID: newCorrelationID(), LegType: "pas-claim", Counterpart: "payer-x"}
+	if _, _, err := g.egressAdapt(route, in, x); err == nil {
+		t.Fatal("want a refusal error (gated chain must refuse)")
+	}
+	if _, ok := g.edgeCaptureLookup(x.CorrelationID); ok {
+		t.Fatalf("refused leg must capture nothing, got a hit for %q", x.CorrelationID)
+	}
+}
+
+// TestEgressAdapt_ChainlessRouteCapturesNothing: route.Chain==nil (or
+// empty) is the early-return pass-through path EVERY production
+// (non-bridged) leg takes today (TestEgressAdaptNilChainIsPassthrough pins
+// the byte/observer half of this same branch) — egressAdapt returns before
+// ever reaching the capture hook. With DemoEdgeCapture on, driving a
+// chainless route must still capture nothing: the flag being on is not
+// enough on its own to produce an entry.
+func TestEgressAdapt_ChainlessRouteCapturesNothing(t *testing.T) {
+	g := &Gateway{cfg: Config{
+		HolderID: "test-holder", Clock: fixedEgressClock,
+		DemoEdgeCapture: true,
+	}}
+	route := legRoute{Token: "pa.pas@2.0", BuildLine: "2.0", Chain: nil}
+	in := []byte(`{"resourceType":"Bundle"}`)
+	x := ExchangeIdentity{CorrelationID: newCorrelationID(), LegType: "pas-claim", Counterpart: "payer-x"}
+	if _, _, err := g.egressAdapt(route, in, x); err != nil {
+		t.Fatalf("egressAdapt: unexpected error: %v", err)
+	}
+	if _, ok := g.edgeCaptureLookup(x.CorrelationID); ok {
+		t.Fatalf("a chainless (len(route.Chain)==0) leg must capture nothing, got a hit for %q", x.CorrelationID)
+	}
+}
+
+// TestEgressAdapt_EdgeCaptureConcurrentRecordAndRead: egressAdapt's
+// lazy-build-on-first-capture and edgeCaptureLookup's read run on the same
+// Gateway concurrently — one goroutine originating legs (each building the
+// store on demand the first time), another reading captures — with no
+// external synchronization between them. Under `go test -race` this catches
+// a bare (non-atomic) edgeCapture pointer field: one goroutine's write to
+// the field racing another's read is exactly the class of bug this store
+// must never reintroduce.
+func TestEgressAdapt_EdgeCaptureConcurrentRecordAndRead(t *testing.T) {
+	steps := chainFor("pa.crd", "2.0", "2.2")
+	if len(steps) != 2 {
+		t.Fatalf("want a 2-hop pa.crd 2.0->2.2 chain, got %d steps: %+v", len(steps), steps)
+	}
+	route := legRoute{Token: "pa.crd@2.2", BuildLine: "2.0", Chain: steps}
+	in := []byte(`{"hook":"order-select","hookInstance":"hi-1","context":{"patientId":"MBR-COVERED"}}`)
+
+	g := &Gateway{cfg: Config{
+		HolderID: "test-holder", Clock: fixedEgressClock,
+		DemoEdgeCapture: true,
+	}}
+
+	const iterations = 50
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			x := ExchangeIdentity{CorrelationID: newCorrelationID(), LegType: "crd-order-select", Counterpart: "payer-crd22"}
+			if _, _, err := g.egressAdapt(route, in, x); err != nil {
+				t.Errorf("egressAdapt: unexpected error: %v", err)
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			g.edgeCaptureLookup(fmt.Sprintf("probe-%d", i)) // result unused: only the race matters here
+		}
+	}()
+	wg.Wait()
 }

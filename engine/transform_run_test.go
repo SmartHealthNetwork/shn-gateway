@@ -10,6 +10,7 @@ package engine
 import (
 	"encoding/json"
 	"errors"
+	"reflect"
 	"testing"
 )
 
@@ -164,6 +165,28 @@ func injectItemWeight(t *testing.T, qrJSON []byte, linkID string) []byte {
 		t.Fatalf("marshal: %v", err)
 	}
 	return out
+}
+
+// ChainSteps mirrors the chain the demonstration endpoint runs so its
+// callers can report the hop list from the engine that executed it —
+// never a hardcoded copy that drifts when the compatibility manifest
+// gains an intermediate line.
+func TestChainSteps(t *testing.T) {
+	got := ChainSteps("pa.dtr", "2.1", "2.2")
+	want := []ChainStep{{Module: "pa.dtr 2.1->2.2", From: "2.1", To: "2.2", Class: "carry"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ChainSteps(pa.dtr,2.1,2.2) = %+v, want %+v", got, want)
+	}
+	// Down direction: chainFor returns canonical manifest steps either way;
+	// the walk must direction-swap, never emit a degenerate 2.2->2.2 hop.
+	down := ChainSteps("pa.dtr", "2.2", "2.1")
+	wantDown := []ChainStep{{Module: "pa.dtr 2.2->2.1", From: "2.2", To: "2.1", Class: "carry"}}
+	if !reflect.DeepEqual(down, wantDown) {
+		t.Fatalf("ChainSteps(pa.dtr,2.2,2.1) = %+v, want %+v", down, wantDown)
+	}
+	if ChainSteps("pa.dtr", "2.1", "9.9") != nil {
+		t.Fatalf("unknown target line must yield nil, not a guess")
+	}
 }
 
 // anyCarried reports whether any LossReport in reports carries a LossEntry

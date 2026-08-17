@@ -111,6 +111,16 @@ type config struct {
 	// boot log — never set in any shipped deploy config.
 	DemoEgressNativeLines []string
 
+	// DemoEdgeCapture (SHN_DEMO_EDGE_CAPTURE, demonstration/inspection only)
+	// turns on engine.Config.DemoEdgeCapture: the bounded pre-seal
+	// edge-capture store that lets this gateway retrieve each transformed
+	// leg's own before/after payload pair by correlation id. false (unset,
+	// the production default) ⇒ no store is ever built. Ordinary loadConfig
+	// bool idiom (`== "true"`) — never "1", which is the SHN_FAKE_VALIDATOR-
+	// only spelling inside build(). Loud by name and by boot log — never set
+	// in any shipped deploy config.
+	DemoEdgeCapture bool
+
 	// Trust-anchor key-fetch URL overrides (first-class operator config):
 	// override the discovery-advertised key URL when the gateway runs in the same
 	// network as the substrate. firstNonEmpty(env, discovery); discovery is the default.
@@ -400,6 +410,10 @@ func loadConfig(getenv func(string) string) (config, error) {
 		}
 	}
 
+	// Demo-only edge capture (bounded pre-seal payload inspection): the
+	// ordinary loadConfig bool idiom, matching every other config bool.
+	cfg.DemoEdgeCapture = getenv("SHN_DEMO_EDGE_CAPTURE") == "true"
+
 	if cfg.FHIRTokenURL != "" {
 		if cfg.FHIRDataURL == "" {
 			return config{}, fmt.Errorf("gateway: FHIR_TOKEN_URL set requires FHIR_DATA_URL (auth needs a FHIR server to authenticate to)")
@@ -479,6 +493,18 @@ func loadConfig(getenv func(string) string) (config, error) {
 			return config{}, fmt.Errorf("gateway: OBSERVER_ADDR %q is not loopback; the observer stream binds loopback only", addr)
 		}
 		cfg.ObserverAddr = addr
+	}
+
+	// SHN_DEMO_EDGE_CAPTURE is only ever readable back through
+	// GET /demo/capture/{correlationId} on the observer loopback listener
+	// (demo_endpoint.go) — with OBSERVER_ADDR unset there is no way to ever
+	// read a captured entry, so leaving the store on would silently burn
+	// memory recording payloads nothing can retrieve. A quiet downgrade
+	// (never a boot refusal): an operator who forgot OBSERVER_ADDR still
+	// gets a working, just capture-less, gateway; build() logs the
+	// requested-but-disabled line so it isn't silent.
+	if cfg.DemoEdgeCapture && cfg.ObserverAddr == "" {
+		cfg.DemoEdgeCapture = false
 	}
 
 	// In-container TLS: opt-in, both-or-neither. A half-configured pair is a boot
@@ -1044,15 +1070,18 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		// EgressNativeLines (D1c): nil in every shipped deploy; the kit-bridging
 		// demo's SHN_DEMO_EGRESS_NATIVE_LINES is the sole non-test way to set it.
 		EgressNativeLines: cfg.DemoEgressNativeLines,
-		SoR:               sor,
-		Store:             store,
-		Adjudicator:       engine.NewSandboxAdjudicator(sor, clock),
-		Clock:             clock, // production: time.Now; hermetic tests: the harness's injected clock (HandlerWithClock)
-		Client:            client,
-		NPI:               cfg.NPI,
-		ConsentURL:        firstNonEmpty(cfg.ConsentURL, endpoints.Consent),
-		AuditURL:          firstNonEmpty(cfg.AuditURL, endpoints.Audit),
-		PHGURL:            firstNonEmpty(cfg.PHGURL, endpoints.PHG),
+		// DemoEdgeCapture: false in every shipped deploy; SHN_DEMO_EDGE_CAPTURE
+		// is the sole non-test way to set it.
+		DemoEdgeCapture: cfg.DemoEdgeCapture,
+		SoR:             sor,
+		Store:           store,
+		Adjudicator:     engine.NewSandboxAdjudicator(sor, clock),
+		Clock:           clock, // production: time.Now; hermetic tests: the harness's injected clock (HandlerWithClock)
+		Client:          client,
+		NPI:             cfg.NPI,
+		ConsentURL:      firstNonEmpty(cfg.ConsentURL, endpoints.Consent),
+		AuditURL:        firstNonEmpty(cfg.AuditURL, endpoints.Audit),
+		PHGURL:          firstNonEmpty(cfg.PHGURL, endpoints.PHG),
 
 		OriginationProfile: cfg.OriginationProfile,
 		// Strict extensions (FR-G52): g.strictPeer is production-dormant BY DESIGN (always false —
@@ -1061,6 +1090,14 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	}
 	if len(cfg.DemoEgressNativeLines) > 0 {
 		fmt.Fprintf(stdout, "gateway: demo: egress-native lines narrowed to %v — arm-2 native reach restricted; transform chains may fire (SHN_DEMO_EGRESS_NATIVE_LINES)\n", cfg.DemoEgressNativeLines)
+	}
+	if cfg.DemoEdgeCapture {
+		fmt.Fprintln(stdout, "gateway: demo: edge capture enabled — bounded in-memory inspection of this gateway's own pre-seal egress payloads (SHN_DEMO_EDGE_CAPTURE)")
+	} else if getenv("SHN_DEMO_EDGE_CAPTURE") == "true" {
+		// The flag was requested but loadConfig gated it off because
+		// OBSERVER_ADDR is unset — say so loudly rather than silently
+		// running without it.
+		fmt.Fprintln(stdout, "gateway: demo: edge capture requested but OBSERVER_ADDR is unset — capture disabled (nothing could read it) (SHN_DEMO_EDGE_CAPTURE)")
 	}
 	// evidenceSink is set below iff native-forward mode is on — the
 	// checks-runner→responder endpoint-evidence wiring target (nil-safe: no native responder,
@@ -1144,15 +1181,18 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	gwCfg.IngressClients = cfg.IngressClients
 
 	// Observer stream: hub + engine callback, only when configured. The demo
-	// endpoint (POST /demo/transform) rides the SAME mux via
-	// composeObserverHandler — it inherits this branch's OBSERVER_ADDR gate
-	// and the loopback-only bind validation already enforced at config load,
-	// so there is no separate opt-in or listener for it.
-	var obsHandler http.Handler
+	// endpoints (POST /demo/transform, GET /demo/capture/{correlationId})
+	// ride the SAME mux via composeObserverHandler — they inherit this
+	// branch's OBSERVER_ADDR gate and the loopback-only bind validation
+	// already enforced at config load, so there is no separate opt-in or
+	// listener for either. The hub itself is created here (gwCfg.Observer
+	// must be set before engine.New below), but the mux composition waits
+	// until the *engine.Gateway exists, since the capture-fetch endpoint
+	// reads that gateway's own edge-capture store.
+	var hub *observer.Hub
 	if cfg.ObserverAddr != "" {
-		hub := observer.NewHub()
+		hub = observer.NewHub()
 		gwCfg.Observer = hub.Emit
-		obsHandler = composeObserverHandler(hub.Handler())
 	}
 
 	// EMF leg metrics: opt-in via METRICS_SERVICE. EMF rides
@@ -1161,6 +1201,17 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	if cfg.MetricsService != "" {
 		em := metrics.New(stdout, cfg.MetricsNamespace, map[string]string{"Env": cfg.MetricsEnv}, nil)
 		gwCfg.LegMetric = legMetricHook(em, cfg.MetricsService, cfg.Role)
+	}
+
+	// gw is held as a named variable (rather than the previous inline
+	// engine.New(gwCfg).Handler()) so the observer mux composed just below
+	// can wire the demo capture-fetch endpoint against this SAME gateway
+	// instance's own edge-capture store.
+	gw := engine.New(gwCfg)
+
+	var obsHandler http.Handler
+	if hub != nil {
+		obsHandler = composeObserverHandler(hub.Handler(), gw, cfg.DemoEdgeCapture)
 	}
 
 	tlsCert, err := loadTLSCert(cfg.TLSCertFile, cfg.TLSKeyFile)
@@ -1195,7 +1246,7 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		}
 	}
 	checksH := checks.Handler(checksRunner, cfg.ChecksToken)
-	inner := health.Wrap(hreg, engine.New(gwCfg).Handler())
+	inner := health.Wrap(hreg, gw.Handler())
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/internal/checks" {
 			checksH.ServeHTTP(w, r)
@@ -1309,8 +1360,8 @@ func Handler(ctx context.Context, getenv func(string) string, stdout io.Writer) 
 	return b.handler, nil
 }
 
-// validatorLanesForDeclared builds the per-LINE $validate lane map (spec
-// 2026-08-11, F7) and FAILS CLOSED when a declared line has no lane.
+// validatorLanesForDeclared builds the per-LINE $validate lane map and
+// FAILS CLOSED when a declared line has no lane.
 //
 // The rule, and why it is fail-closed: a HAPI instance can host exactly one
 // version of an IG, so validating a 2.2 payload against a 2.0 lane does not

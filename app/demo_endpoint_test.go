@@ -11,7 +11,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine"
 	"github.com/SmartHealthNetwork/shn-gateway/observer"
@@ -36,7 +39,7 @@ func demoGolden(t *testing.T, relPath string) []byte {
 
 func TestDemoTransformEndpoint_HappyPath(t *testing.T) {
 	hub := observer.NewHub()
-	h := composeObserverHandler(hub.Handler())
+	h := composeObserverHandler(hub.Handler(), &engine.Gateway{}, false)
 
 	in21 := demoGolden(t, "2.1/questionnaireresponse-autofill.json")
 	want22 := demoGolden(t, "2.2/questionnaireresponse-autofill.json")
@@ -61,6 +64,7 @@ func TestDemoTransformEndpoint_HappyPath(t *testing.T) {
 	var resp struct {
 		Output      json.RawMessage     `json:"output"`
 		LossReports []engine.LossReport `json:"lossReports"`
+		Chain       []engine.ChainStep  `json:"chain"`
 	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode response: %v (body=%s)", err, rr.Body.String())
@@ -85,11 +89,16 @@ func TestDemoTransformEndpoint_HappyPath(t *testing.T) {
 	if resp.LossReports[0].Module != "pa.dtr 2.1->2.2" {
 		t.Fatalf("lossReports[0].Module = %q, want %q", resp.LossReports[0].Module, "pa.dtr 2.1->2.2")
 	}
+
+	wantChain := []engine.ChainStep{{Module: "pa.dtr 2.1->2.2", From: "2.1", To: "2.2", Class: "carry"}}
+	if !reflect.DeepEqual(resp.Chain, wantChain) {
+		t.Fatalf("chain = %+v, want %+v", resp.Chain, wantChain)
+	}
 }
 
 func TestDemoTransformEndpoint_RefusalSemanticChange(t *testing.T) {
 	hub := observer.NewHub()
-	h := composeObserverHandler(hub.Handler())
+	h := composeObserverHandler(hub.Handler(), &engine.Gateway{}, false)
 
 	multiCoverageQR := []byte(`{
 		"resourceType":"QuestionnaireResponse","id":"qr-multi","status":"completed",
@@ -123,8 +132,9 @@ func TestDemoTransformEndpoint_RefusalSemanticChange(t *testing.T) {
 		t.Fatalf("status = %d, want 422; body=%s", rr.Code, rr.Body.String())
 	}
 	var resp struct {
-		Refusal        string `json:"refusal"`
-		SemanticChange bool   `json:"semanticChange"`
+		Refusal        string             `json:"refusal"`
+		SemanticChange bool               `json:"semanticChange"`
+		Chain          []engine.ChainStep `json:"chain"`
 	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode response: %v (body=%s)", err, rr.Body.String())
@@ -135,6 +145,11 @@ func TestDemoTransformEndpoint_RefusalSemanticChange(t *testing.T) {
 	if resp.Refusal == "" {
 		t.Fatalf("refusal is empty, want the error text")
 	}
+
+	wantChain := []engine.ChainStep{{Module: "pa.dtr 2.1->2.2", From: "2.1", To: "2.2", Class: "carry"}}
+	if !reflect.DeepEqual(resp.Chain, wantChain) {
+		t.Fatalf("chain = %+v, want %+v (the attempted chain, even though the run refused)", resp.Chain, wantChain)
+	}
 }
 
 // TestDemoTransformEndpoint_UnknownChainRefusal proves an unrecognized
@@ -143,7 +158,7 @@ func TestDemoTransformEndpoint_RefusalSemanticChange(t *testing.T) {
 // naming the chain that has no manifest row.
 func TestDemoTransformEndpoint_UnknownChainRefusal(t *testing.T) {
 	hub := observer.NewHub()
-	h := composeObserverHandler(hub.Handler())
+	h := composeObserverHandler(hub.Handler(), &engine.Gateway{}, false)
 
 	reqBody, err := json.Marshal(map[string]any{
 		"contract": "pa.dtr",
@@ -186,7 +201,7 @@ func TestDemoTransformEndpoint_UnknownChainRefusal(t *testing.T) {
 // whose string value alone exceeds MaxRequestBytes.
 func TestDemoTransformEndpoint_OverLimitBodyRejected(t *testing.T) {
 	hub := observer.NewHub()
-	h := composeObserverHandler(hub.Handler())
+	h := composeObserverHandler(hub.Handler(), &engine.Gateway{}, false)
 
 	val := bytes.Repeat([]byte("a"), shnsdk.MaxRequestBytes+1)
 	body := append([]byte(`{"contract":"pa.dtr","from":"2.1","to":"2.2","payload":{},"pad":"`), val...)
@@ -210,7 +225,7 @@ func TestDemoTransformEndpoint_OverLimitBodyRejected(t *testing.T) {
 
 func TestDemoTransformEndpoint_MalformedJSON(t *testing.T) {
 	hub := observer.NewHub()
-	h := composeObserverHandler(hub.Handler())
+	h := composeObserverHandler(hub.Handler(), &engine.Gateway{}, false)
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/demo/transform", bytes.NewReader([]byte(`{not valid json`)))
@@ -230,7 +245,7 @@ func TestDemoTransformEndpoint_MalformedJSON(t *testing.T) {
 // decoder would silently absorb can't hide a regression.
 func TestDemoTransformEndpoint_IdentityFromEqualsTo(t *testing.T) {
 	hub := observer.NewHub()
-	h := composeObserverHandler(hub.Handler())
+	h := composeObserverHandler(hub.Handler(), &engine.Gateway{}, false)
 
 	in21 := demoGolden(t, "2.1/questionnaireresponse-autofill.json")
 	reqBody, err := json.Marshal(map[string]any{
@@ -289,5 +304,304 @@ func TestDemoTransformEndpoint_AbsentWhenUnregistered(t *testing.T) {
 
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404 (endpoint absent without composeObserverHandler)", rr.Code)
+	}
+}
+
+// TestDemoCaptureEndpoint_FlagOff404 proves the endpoint 404s with the
+// distinct "edge capture is not enabled" body whenever edgeCaptureEnabled is
+// false — the flag-off case, regardless of what (if anything) the store
+// holds.
+func TestDemoCaptureEndpoint_FlagOff404(t *testing.T) {
+	hub := observer.NewHub()
+	h := composeObserverHandler(hub.Handler(), &engine.Gateway{}, false)
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/demo/capture/demo-1", nil)
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body=%s", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v (body=%s)", err, rr.Body.String())
+	}
+	if resp.Error != "edge capture is not enabled" {
+		t.Fatalf("error = %q, want %q", resp.Error, "edge capture is not enabled")
+	}
+}
+
+// TestDemoCaptureEndpoint_FlagOnMissingID404 proves the endpoint 404s with
+// the distinct "no capture for this leg" body when the flag is on but no
+// leg has ever recorded under the requested id — a different body from the
+// flag-off case, so a caller can tell the two apart.
+func TestDemoCaptureEndpoint_FlagOnMissingID404(t *testing.T) {
+	hub := observer.NewHub()
+	h := composeObserverHandler(hub.Handler(), &engine.Gateway{}, true)
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/demo/capture/never-recorded", nil)
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body=%s", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v (body=%s)", err, rr.Body.String())
+	}
+	if resp.Error != "no capture for this leg" {
+		t.Fatalf("error = %q, want %q", resp.Error, "no capture for this leg")
+	}
+}
+
+// TestDemoCaptureEndpoint_FlagOnPresentID200 drives a transformed leg
+// through the SAME fixture path TestDemoTransformEndpoint_HappyPath uses
+// (engine.RunTransformChain over the vendored 2.1/2.2 golden pair), seeds
+// the gateway's edge-capture store with the result via
+// RecordEdgeCaptureForTest, then proves every field round-trips through the
+// real HTTP endpoint.
+func TestDemoCaptureEndpoint_FlagOnPresentID200(t *testing.T) {
+	hub := observer.NewHub()
+	gw := &engine.Gateway{}
+
+	in21 := demoGolden(t, "2.1/questionnaireresponse-autofill.json")
+	want22 := demoGolden(t, "2.2/questionnaireresponse-autofill.json")
+
+	const correlationID = "demo-capture-test-1"
+	const legType = "pa.dtr:2.1->2.2"
+	x := engine.ExchangeIdentity{CorrelationID: correlationID, LegType: legType}
+	out, reports, err := engine.RunTransformChain("pa.dtr", "2.1", "2.2", in21, x)
+	if err != nil {
+		t.Fatalf("RunTransformChain: %v", err)
+	}
+	chain := engine.ChainSteps("pa.dtr", "2.1", "2.2")
+	capturedAt := time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)
+	gw.RecordEdgeCaptureForTest(engine.EdgeCapture{
+		CorrelationID: correlationID,
+		LegType:       legType,
+		Contract:      "pa.dtr",
+		From:          "2.1",
+		To:            "2.2",
+		Chain:         chain,
+		LossReports:   reports,
+		Before:        in21,
+		After:         out,
+		CapturedAt:    capturedAt,
+	})
+
+	h := composeObserverHandler(hub.Handler(), gw, true)
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/demo/capture/"+correlationID, nil)
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		CorrelationID string              `json:"correlationId"`
+		LegType       string              `json:"legType"`
+		Contract      string              `json:"contract"`
+		From          string              `json:"from"`
+		To            string              `json:"to"`
+		Chain         []engine.ChainStep  `json:"chain"`
+		LossReports   []shnsdk.LossReport `json:"lossReports"`
+		Before        json.RawMessage     `json:"before"`
+		After         json.RawMessage     `json:"after"`
+		CapturedAt    time.Time           `json:"capturedAt"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v (body=%s)", err, rr.Body.String())
+	}
+
+	if resp.CorrelationID != correlationID {
+		t.Fatalf("correlationId = %q, want %q", resp.CorrelationID, correlationID)
+	}
+	if resp.LegType != legType {
+		t.Fatalf("legType = %q, want %q", resp.LegType, legType)
+	}
+	if resp.Contract != "pa.dtr" || resp.From != "2.1" || resp.To != "2.2" {
+		t.Fatalf("contract/from/to = %q/%q/%q, want pa.dtr/2.1/2.2", resp.Contract, resp.From, resp.To)
+	}
+	wantChain := []engine.ChainStep{{Module: "pa.dtr 2.1->2.2", From: "2.1", To: "2.2", Class: "carry"}}
+	if !reflect.DeepEqual(resp.Chain, wantChain) {
+		t.Fatalf("chain = %+v, want %+v", resp.Chain, wantChain)
+	}
+	if len(resp.LossReports) != 1 || resp.LossReports[0].Module != "pa.dtr 2.1->2.2" {
+		t.Fatalf("lossReports = %+v, want exactly 1 round-tripped report for pa.dtr 2.1->2.2", resp.LossReports)
+	}
+	if !resp.CapturedAt.Equal(capturedAt) {
+		t.Fatalf("capturedAt = %v, want %v", resp.CapturedAt, capturedAt)
+	}
+
+	var gotBefore, wantBefore any
+	if err := json.Unmarshal(resp.Before, &gotBefore); err != nil {
+		t.Fatalf("decode before: %v", err)
+	}
+	if err := json.Unmarshal(in21, &wantBefore); err != nil {
+		t.Fatalf("decode want before: %v", err)
+	}
+	gotBeforeJSON, _ := json.Marshal(gotBefore)
+	wantBeforeJSON, _ := json.Marshal(wantBefore)
+	if string(gotBeforeJSON) != string(wantBeforeJSON) {
+		t.Fatalf("before mismatch:\ngot:  %s\nwant: %s", gotBeforeJSON, wantBeforeJSON)
+	}
+
+	var gotAfter, wantAfter any
+	if err := json.Unmarshal(resp.After, &gotAfter); err != nil {
+		t.Fatalf("decode after: %v", err)
+	}
+	if err := json.Unmarshal(want22, &wantAfter); err != nil {
+		t.Fatalf("decode want after: %v", err)
+	}
+	gotAfterJSON, _ := json.Marshal(gotAfter)
+	wantAfterJSON, _ := json.Marshal(wantAfter)
+	if string(gotAfterJSON) != string(wantAfterJSON) {
+		t.Fatalf("after mismatch:\ngot:  %s\nwant: %s", gotAfterJSON, wantAfterJSON)
+	}
+}
+
+// TestDemoCaptureEndpoint_NilLossReportsAndChainNormalizeToEmptyArray proves
+// a captured leg with nil LossReports AND a nil Chain (a real, if uncommon,
+// shape — e.g. a carve-out leg the store still recorded) serializes BOTH as
+// `[]`, never JSON `null`: the wire contract's `lossReports` and `chain`
+// fields are always arrays a caller can range over without a nil check
+// (`chain` rides the same normalization `lossReports` already had, and the
+// ui's BridgingCapture type consumes both).
+func TestDemoCaptureEndpoint_NilLossReportsAndChainNormalizeToEmptyArray(t *testing.T) {
+	hub := observer.NewHub()
+	gw := &engine.Gateway{}
+
+	const correlationID = "demo-capture-nil-loss"
+	gw.RecordEdgeCaptureForTest(engine.EdgeCapture{
+		CorrelationID: correlationID,
+		LegType:       "dtr-questionnaire-fetch",
+		Contract:      "pa.dtr",
+		From:          "2.0",
+		To:            "2.0",
+		Chain:         nil,
+		LossReports:   nil,
+		Before:        []byte(`{"a":1}`),
+		After:         []byte(`{"a":1}`),
+		CapturedAt:    time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC),
+	})
+
+	h := composeObserverHandler(hub.Handler(), gw, true)
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/demo/capture/"+correlationID, nil)
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(rr.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode response: %v (body=%s)", err, rr.Body.String())
+	}
+	if got := string(raw["lossReports"]); got != "[]" {
+		t.Fatalf("lossReports = %s, want the empty array literal `[]`, never `null`", got)
+	}
+	if got := string(raw["chain"]); got != "[]" {
+		t.Fatalf("chain = %s, want the empty array literal `[]`, never `null`", got)
+	}
+}
+
+// TestDemoCaptureEndpoint_NilPayloadsMarshalAsNull proves a captured
+// leg with a nil Before/After — a real captured shape, not just a
+// theoretical one — round-trips through the wire endpoint as a well-formed
+// body with `before`/`after` as the JSON literal `null`, never a broken or
+// truncated response. Before this fix, edgeCaptureStore.Record's deep copy
+// turned a nil json.RawMessage into a non-nil EMPTY one on the way in, which
+// encoding/json refuses to marshal — and since writeDemoJSON has already
+// written the 200 status header by the time Encode fails, the client got a
+// 200 with an empty/truncated body instead of an error.
+func TestDemoCaptureEndpoint_NilPayloadsMarshalAsNull(t *testing.T) {
+	hub := observer.NewHub()
+	gw := &engine.Gateway{}
+
+	const correlationID = "demo-capture-nil-payload"
+	gw.RecordEdgeCaptureForTest(engine.EdgeCapture{
+		CorrelationID: correlationID,
+		LegType:       "dtr-questionnaire-fetch",
+		Contract:      "pa.dtr",
+		From:          "2.0",
+		To:            "2.0",
+		Before:        nil,
+		After:         nil,
+		CapturedAt:    time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC),
+	})
+
+	h := composeObserverHandler(hub.Handler(), gw, true)
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/demo/capture/"+correlationID, nil)
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(rr.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("response body is not valid JSON (want a well-formed body even for nil payloads): %v (body=%s)", err, rr.Body.String())
+	}
+	if got := string(raw["before"]); got != "null" {
+		t.Fatalf(`before = %s, want the JSON literal "null"`, got)
+	}
+	if got := string(raw["after"]); got != "null" {
+		t.Fatalf(`after = %s, want the JSON literal "null"`, got)
+	}
+}
+
+// TestDemoCaptureEndpoint_POSTMethodNotAllowed proves POST against
+// /demo/capture/{correlationId} 405s. The mux pattern is registered
+// WITHOUT a method (composeObserverHandler's own doc comment explains why:
+// a method-restricted "GET ..." pattern here would lose to the mux's
+// method-less "/" catch-all for a POST request — "/" still matches, so
+// ServeMux never reaches its own 405 logic, and the request would 404
+// through the hub instead). The 405 this test asserts comes ENTIRELY from
+// handleDemoCapture's own explicit r.Method guard — there is no mux-level
+// safety net here. This test is that guard's only regression coverage:
+// deleting the guard silently turns POST from 405 into 404, and nothing
+// else in this suite would catch it.
+func TestDemoCaptureEndpoint_POSTMethodNotAllowed(t *testing.T) {
+	hub := observer.NewHub()
+	h := composeObserverHandler(hub.Handler(), &engine.Gateway{}, true)
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/demo/capture/demo-1", nil)
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405; body=%s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("Allow"); got != http.MethodGet {
+		t.Fatalf("Allow header = %q, want %q", got, http.MethodGet)
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "method not allowed") {
+		t.Fatalf("body = %q, want it to mention %q", body, "method not allowed")
+	}
+}
+
+// TestDemoCaptureEndpoint_EmptyID404 proves a request with no correlation id
+// segment at all 404s (the registered pattern requires a path segment
+// there, so ServeMux falls through to the catch-all "/" — never reaching
+// the handler with an empty id).
+func TestDemoCaptureEndpoint_EmptyID404(t *testing.T) {
+	hub := observer.NewHub()
+	h := composeObserverHandler(hub.Handler(), &engine.Gateway{}, true)
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/demo/capture/", nil)
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body=%s", rr.Code, rr.Body.String())
 	}
 }

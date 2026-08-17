@@ -19,6 +19,7 @@ through wiring your own systems, see [INTEGRATION.md](INTEGRATION.md).
 - [Sealed message frames (v1)](#sealed-message-frames-v1)
 - [Exchange contract lines (`SHN_CONTRACT_VERSIONS`)](#exchange-contract-lines-shn_contract_versions)
 - [Demo-only egress narrowing (`SHN_DEMO_EGRESS_NATIVE_LINES`)](#demo-only-egress-narrowing-shn_demo_egress_native_lines)
+- [Demo-only pre-seal edge capture (`SHN_DEMO_EDGE_CAPTURE`)](#demo-only-pre-seal-edge-capture-shn_demo_edge_capture)
 
 ---
 
@@ -563,6 +564,44 @@ loud wherever it's set — in the boot log:
 ```
 gateway: demo: egress-native lines narrowed to [2.0] — arm-2 native reach restricted;
 transform chains may fire (SHN_DEMO_EGRESS_NATIVE_LINES)
+```
+
+— and in the name itself: a `SHN_DEMO_*` variable set anywhere but a demo is a
+misconfiguration, not a supported deployment posture.
+
+## Demo-only pre-seal edge capture (`SHN_DEMO_EDGE_CAPTURE`)
+
+| Env var | Description |
+|---|---|
+| `SHN_DEMO_EDGE_CAPTURE` | `"true"` turns on a bounded, in-memory store of each transformed egress leg's own pre-seal before/after payload pair, readable back at `GET /demo/capture/{correlationId}` on the observer loopback listener. **Requires `OBSERVER_ADDR` to also be set** — that endpoint is the only way a capture is ever read back, so with `OBSERVER_ADDR` unset the flag is gated off at config load (a quiet downgrade, not a boot refusal — the boot log names the reason). Any other value, or unset (the default), leaves it off: no store is built, the capture hook never runs, and the endpoint answers `404`. Bounded to the 32 most recently transformed legs; an entry whose combined before/after payload exceeds 2 MiB is not stored. |
+
+This is a local inspection surface over a gateway's own outgoing traffic, never a second
+wire path: the capture happens at the same internal point the leg's payload is already
+being built for sending, after loss reporting but before the leg leaves — nothing about
+what actually goes out changes, on or off. With the knob off (the production default) no
+store is ever allocated and the capture site is skipped entirely, so the leg's bytes are
+byte-identical to a run with the knob on. Captured pairs are never written to the wire,
+never added to the audit record, and never checked by any conformance surface — they exist
+only to be read back by the participant that produced them, from their own loopback
+listener.
+
+**Never set this in a shipped deployment config.** Like `SHN_DEMO_EGRESS_NATIVE_LINES`
+above, it exists for exactly one consumer: the SHN Kit's bridging demonstration, which
+turns this on alongside the egress-narrowing knob (and sets `OBSERVER_ADDR`) so a
+transformed leg's own edge capture is available for the demonstration's before/after view.
+It is loud wherever it's set — in the boot log, when `OBSERVER_ADDR` is also set:
+
+```
+gateway: demo: edge capture enabled — bounded in-memory inspection of this gateway's own
+pre-seal egress payloads (SHN_DEMO_EDGE_CAPTURE)
+```
+
+— or, when `OBSERVER_ADDR` is NOT set (the flag is gated off rather than silently running
+into a store nothing can read):
+
+```
+gateway: demo: edge capture requested but OBSERVER_ADDR is unset — capture disabled
+(nothing could read it) (SHN_DEMO_EDGE_CAPTURE)
 ```
 
 — and in the name itself: a `SHN_DEMO_*` variable set anywhere but a demo is a
