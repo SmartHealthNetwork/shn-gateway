@@ -967,10 +967,10 @@
       }
     },
     {
-      "fullUrl": "Coverage/cov-mbrcambiaabby-provider",
+      "fullUrl": "Coverage/cov-mbrextpayer-provider",
       "resource": {
         "beneficiary": {
-          "reference": "Patient/pat-mbrcambiaabby-provider"
+          "reference": "Patient/pat-mbrextpayer-provider"
         },
         "class": [
           {
@@ -987,7 +987,7 @@
         ],
         "contained": [
           {
-            "id": "cambia-payer-org",
+            "id": "external-payer-org",
             "identifier": [
               {
                 "system": "urn:oid:2.16.840.1.113883.6.300",
@@ -998,7 +998,7 @@
             "resourceType": "Organization"
           }
         ],
-        "id": "cov-mbrcambiaabby-provider",
+        "id": "cov-mbrextpayer-provider",
         "identifier": [
           {
             "type": {
@@ -1020,7 +1020,7 @@
         },
         "payor": [
           {
-            "reference": "#cambia-payer-org"
+            "reference": "#external-payer-org"
           }
         ],
         "relationship": {
@@ -1036,7 +1036,7 @@
       },
       "request": {
         "method": "PUT",
-        "url": "Coverage/cov-mbrcambiaabby-provider"
+        "url": "Coverage/cov-mbrextpayer-provider"
       }
     },
     {
@@ -4634,9 +4634,9 @@
       }
     },
     {
-      "fullUrl": "Patient/pat-mbrcambiaabby-provider",
+      "fullUrl": "Patient/pat-mbrextpayer-provider",
       "resource": {
-        "id": "pat-mbrcambiaabby-provider",
+        "id": "pat-mbrextpayer-provider",
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
@@ -4645,7 +4645,7 @@
         "identifier": [
           {
             "system": "urn:shn:member",
-            "value": "MBR-CAMBIA-ABBY"
+            "value": "MBR-EXTPAYER-ABBY"
           }
         ],
         "name": [
@@ -4659,7 +4659,7 @@
       },
       "request": {
         "method": "PUT",
-        "url": "Patient/pat-mbrcambiaabby-provider"
+        "url": "Patient/pat-mbrextpayer-provider"
       }
     },
     {

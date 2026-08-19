@@ -972,7 +972,7 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 	if cov.NeedsDTR() {
 		canonical := shnsdk.StripCanonicalVersion(cov.Questionnaires[0])
 
-		// SELECT-BEFORE-BUILD (spec 2026-08-11): the token/line is resolved
+		// SELECT-BEFORE-BUILD: the token/line is resolved
 		// BEFORE the DTR fetch REQUEST is built, not just before the PACKAGE that comes
 		// back — a DTR line whose $questionnaire-package input profile makes `coverage`
 		// 1..1 (2.2 — DTRDef.QuestionnairePackageCoverageRequired, verified live

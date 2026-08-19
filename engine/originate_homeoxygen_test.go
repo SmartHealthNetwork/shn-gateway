@@ -157,7 +157,7 @@ type homeOxygenSubstrate struct {
 
 	legTypes []string
 
-	// frameErrLeg, when non-empty, puts the substrate into v1-frame mode (spec 2026-07-17):
+	// frameErrLeg, when non-empty, puts the substrate into v1-frame mode:
 	// the named leg answers a FRAMED non-2xx (frameErrStatus/frameErrBody/frameErrCT) while
 	// every OTHER leg answers its canned success wrapped in a v1 200 frame — modelling a
 	// frame-capable recipient that frames every answer. Requires the payer registry entry to

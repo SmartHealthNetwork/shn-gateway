@@ -1,5 +1,5 @@
-// transform_pas.go — the pa.pas cross-version step modules (spec 2026-08-10
-// §5): the two adjacent-line bridges (2.0<->2.1,
+// transform_pas.go — the pa.pas cross-version step modules: the two
+// adjacent-line bridges (2.0<->2.1,
 // 2.1<->2.2) compat.go's manifest rows wire up. Every delta modeled here is
 // verified from sdk/linedef.go's PASDef fields first (ClaimResponseRequestRequired,
 // PendedResponseOutcome, ResponseBundleIdentifierRequired, ClaimItemLineDetailRequired,
