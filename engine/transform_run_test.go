@@ -43,11 +43,11 @@ func TestRunTransformChain_DTR2122AutofillGoldenBothDirections(t *testing.T) {
 
 // TestRunTransformChain_DTRItemWeightCarryDown pins the loss-policy carry
 // mechanism through the exported entry point: a real 2.2 autofill golden with
-// a synthetic-but-realistic item.answer.extension:itemWeight injected (the
+// a synthetic-but-realistic item.answer.value.extension:itemWeight injected (the
 // exact idiom test/conformance/dtr_transform_live_test.go's
 // injectAnswerExtension establishes — SHN's own builder never stamps
 // itemWeight, so no real golden carries one) downcasts to 2.1 with a Carried
-// LossEntry naming item.answer.extension:itemWeight, never silently dropped.
+// LossEntry naming item.answer.value.extension:itemWeight, never silently dropped.
 func TestRunTransformChain_DTRItemWeightCarryDown(t *testing.T) {
 	in22 := pasGolden(t, "2.2/questionnaireresponse-autofill.json")
 	withWeight := injectItemWeight(t, in22, "conservative-therapy-weeks")
@@ -56,8 +56,8 @@ func TestRunTransformChain_DTRItemWeightCarryDown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("2.2->2.1 with itemWeight: unexpected error: %v", err)
 	}
-	if !anyCarried(reports, "QuestionnaireResponse.item.answer.extension:itemWeight") {
-		t.Fatalf("want a Carried LossEntry naming QuestionnaireResponse.item.answer.extension:itemWeight, got %+v", reports)
+	if !anyCarried(reports, dtrItemWeightLocus) {
+		t.Fatalf("want a Carried LossEntry naming %s, got %+v", dtrItemWeightLocus, reports)
 	}
 }
 
@@ -149,8 +149,18 @@ func injectItemWeight(t *testing.T, qrJSON []byte, linkID string) []byte {
 			t.Fatalf("item %q has no answer to attach itemWeight to", linkID)
 		}
 		am := answers[0].(map[string]any)
-		exts, _ := am["extension"].([]any)
-		am["extension"] = append(exts, map[string]any{
+		// Inject at the answer's VALUE, the only locus the itemWeight SD's
+		// context permits. The autofill golden's answers are primitive
+		// (valueInteger), so the extension goes on the sibling "_valueInteger"
+		// object, created here when absent — this helper is an injector, not the
+		// engine's read-side walker.
+		under, ok := am["_valueInteger"].(map[string]any)
+		if !ok {
+			under = map[string]any{}
+			am["_valueInteger"] = under
+		}
+		exts, _ := under["extension"].([]any)
+		under["extension"] = append(exts, map[string]any{
 			"url":          dtrItemWeightExt,
 			"valueDecimal": 0.5,
 		})

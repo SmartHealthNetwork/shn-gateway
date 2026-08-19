@@ -1,5 +1,5 @@
-// transform_dtr.go — the pa.dtr cross-version step modules: the two
-// adjacent-line bridges (2.0<->2.1,
+// transform_dtr.go — the pa.dtr cross-version step modules (spec 2026-08-10
+// §5): the two adjacent-line bridges (2.0<->2.1,
 // 2.1<->2.2) compat.go's manifest rows wire up. Every delta modeled here is
 // verified from sdk/linedef.go's DTRDef fields first
 // (QuestionnairePackageReturnShape, SingleCoverageConstraint,
@@ -13,6 +13,7 @@ package engine
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
@@ -29,7 +30,14 @@ const (
 	dtrIntendedUseExt       = "http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/intendedUse"
 	dtrInformationOriginExt = "http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/information-origin"
 
-	// dtrItemWeightExt is DTR 2.2's item.answer.extension:itemWeight slice
+	// dtrItemWeightExt is the core-FHIR itemWeight extension DTR 2.2 references.
+	// DTR 2.2.0's dtr-questionnaireresponse differential declares a slice at
+	// item.answer.extension:itemWeight, but the extension's own SD contexts it
+	// to item.answer.VALUE (and Coding) — see dtrItemWeightLocus. The engine
+	// reads the SD, not the differential: a profile cannot widen an extension's
+	// context, so the differential's answer-level slice is unsatisfiable on the
+	// wire and no conformant payload can use it.
+	//
 	// (StructureDefinition-dtr-questionnaireresponse.json's differential,
 	// package 2.2.0, sliceName "itemWeight" — verified live 2026-08-12) —
 	// genuinely ABSENT from the 2.1.0 differential (2.1's item.answer slot at
@@ -46,6 +54,19 @@ const (
 	// content SHN doesn't itself produce, exactly like PAS's
 	// authorizationNumber (transform_pas.go's pas22OnlyClaimExtensions).
 	dtrItemWeightExt = "http://hl7.org/fhir/StructureDefinition/itemWeight"
+
+	// dtrItemWeightLocus is the class-level locus every itemWeight LossEntry,
+	// carry wrapper path, and error string in this file names — one constant so
+	// they cannot drift apart. It is answer.VALUE, not answer: the itemWeight
+	// extension is core FHIR and its SD contexts it to Coding /
+	// Questionnaire.item.answerOption / QuestionnaireResponse.item.answer.value.
+	// A profile cannot widen an extension's context and the validator enforces
+	// the context, so DTR 2.2.0's answer-level slice is unsatisfiable on the
+	// wire — an upstream IG defect — and the engine reads the SD, not the
+	// differential. Verified against the pinned validator: an itemWeight at
+	// item.answer.extension is a context ERROR at the 2.2 line, and the same
+	// element under the answer's value validates clean.
+	dtrItemWeightLocus = "QuestionnaireResponse.item.answer.value.extension:itemWeight"
 )
 
 // TransformDTRForTest is a thin exported wrapper around the pa.dtr compat
@@ -153,7 +174,7 @@ func TransformDTRForTest(from, to string, payload []byte, x ExchangeIdentity) ([
 //     functional-status-oswestry item keeps source="manual" unchanged
 //     across both lines while the auto items move auto->auto-client).
 //   - restores any shn-carried-content wrapper a prior 2.2->2.1 Down step
-//     carried (item.answer.extension:itemWeight — the other half of the
+//     carried (item.answer.value.extension:itemWeight — the other half of the
 //     carry mechanism, sdk/carry.go's Restore(Carry(x))==x contract).
 func dtrStep2122Up(payload []byte, x ExchangeIdentity) ([]byte, LossReport, error) {
 	top, err := dtrParseTop(payload)
@@ -186,7 +207,7 @@ func dtrStep2122Up(payload []byte, x ExchangeIdentity) ([]byte, LossReport, erro
 
 	for _, qr := range resources["QuestionnaireResponse"] {
 		if err := dtrRestoreItemWeight(qr); err != nil {
-			return nil, LossReport{}, fmt.Errorf("engine: dtrStep2122Up: restore item.answer.extension:itemWeight: %w", err)
+			return nil, LossReport{}, fmt.Errorf("engine: dtrStep2122Up: restore %s: %w", dtrItemWeightLocus, err)
 		}
 		if err := dtrRelocateCoverageUp(qr, "2.1", "2.2"); err != nil {
 			return nil, LossReport{}, err
@@ -207,7 +228,7 @@ func dtrStep2122Up(payload []byte, x ExchangeIdentity) ([]byte, LossReport, erro
 // tolerates a QR entry present in a package Bundle even though its own
 // profile only requires min=0, and its qr-context slice's cardinality,
 // min=2 unbounded max, tolerates one or more relocated coverage entries), and
-// any 2.2-only item.answer.extension:itemWeight carried into
+// any 2.2-only item.answer.value.extension:itemWeight carried into
 // shn-carried-content (no 2.1 slot — dtrItemWeightExt's doc comment).
 func dtrStep2122Down(payload []byte, x ExchangeIdentity) ([]byte, LossReport, error) {
 	top, err := dtrParseTop(payload)
@@ -232,7 +253,7 @@ func dtrStep2122Down(payload []byte, x ExchangeIdentity) ([]byte, LossReport, er
 		dtrRemapOriginCode(qr, def22.AutoOriginSourceCode, def21.AutoOriginSourceCode)
 		entries, err := dtrCarryItemWeight(qr)
 		if err != nil {
-			return nil, LossReport{}, fmt.Errorf("engine: dtrStep2122Down: carry item.answer.extension:itemWeight: %w", err)
+			return nil, LossReport{}, fmt.Errorf("engine: dtrStep2122Down: carry %s: %w", dtrItemWeightLocus, err)
 		}
 		carried = append(carried, entries...)
 	}
@@ -350,6 +371,47 @@ func dtrRemapIntendedUseSystem(qr map[string]any, from, to string) {
 	}
 }
 
+// dtrWalkAnswers calls fn for every answer in the subtree under node, at every
+// nesting depth. node may be a QuestionnaireResponse, an item, or an answer —
+// all three can hold an "item" array, which is why one function covers both of
+// FHIR's recursion axes:
+//
+//	item.item        — a group item's child questions
+//	item.answer.item — an answer's child questions
+//
+// Both carry contentReference back to QuestionnaireResponse.item, so a nested
+// item's answer is the SAME element as a top-level one and every rule that
+// applies to one applies to the other.
+//
+// SHARED by all three QR walkers for the reason dtrAnswerValueContainers is
+// shared by carry and restore: they must not be able to disagree about where an
+// answer is, or a round trip can lose an element by restoring somewhere the
+// carry never looked.
+//
+// Deliberately NOT depth-capped. A cap would silently stop carrying below it,
+// which is the exact silent-loss shape this walker exists to close; recursion
+// depth is bounded by the document, which the caller has already fully decoded
+// into maps before the walk begins.
+func dtrWalkAnswers(node map[string]any, fn func(answer map[string]any)) {
+	items, _ := node["item"].([]any)
+	for _, it := range items {
+		im, ok := it.(map[string]any)
+		if !ok {
+			continue
+		}
+		answers, _ := im["answer"].([]any)
+		for _, a := range answers {
+			am, ok := a.(map[string]any)
+			if !ok {
+				continue
+			}
+			fn(am)
+			dtrWalkAnswers(am, fn)
+		}
+		dtrWalkAnswers(im, fn)
+	}
+}
+
 // dtrRemapOriginCode rewrites the source sub-extension's valueCode from
 // "from" to "to" on every QuestionnaireResponse.item.answer information-
 // origin extension, but ONLY where the current code equals "from" —
@@ -357,149 +419,256 @@ func dtrRemapIntendedUseSystem(qr map[string]any, from, to string) {
 // items) are line-invariant and left untouched (verified on the
 // questionnaireresponse-attested.json golden pair: the auto items move,
 // the manual-sourced functional-status-oswestry item does not).
+//
+// Walks every answer at every nesting depth (dtrWalkAnswers): FHIR nests
+// QuestionnaireResponse.item on two axes and a nested item's answer is the same
+// element as a top-level one.
 func dtrRemapOriginCode(qr map[string]any, from, to string) {
-	items, _ := qr["item"].([]any)
-	for _, it := range items {
-		im, ok := it.(map[string]any)
-		if !ok {
-			continue
-		}
-		answers, _ := im["answer"].([]any)
-		for _, a := range answers {
-			am, ok := a.(map[string]any)
-			if !ok {
+	dtrWalkAnswers(qr, func(am map[string]any) {
+		extAny, _ := am["extension"].([]any)
+		for _, e := range extAny {
+			em, ok := e.(map[string]any)
+			if !ok || em["url"] != dtrInformationOriginExt {
 				continue
 			}
-			extAny, _ := am["extension"].([]any)
-			for _, e := range extAny {
-				em, ok := e.(map[string]any)
-				if !ok || em["url"] != dtrInformationOriginExt {
+			subAny, _ := em["extension"].([]any)
+			for _, s := range subAny {
+				sm, ok := s.(map[string]any)
+				if !ok || sm["url"] != "source" {
 					continue
 				}
-				subAny, _ := em["extension"].([]any)
-				for _, s := range subAny {
-					sm, ok := s.(map[string]any)
-					if !ok || sm["url"] != "source" {
-						continue
-					}
-					if sm["valueCode"] == from {
-						sm["valueCode"] = to
-					}
+				if sm["valueCode"] == from {
+					sm["valueCode"] = to
 				}
 			}
 		}
-	}
+	})
 }
 
-// dtrCarryItemWeight scans qr.item[].answer[].extension[] for
-// dtrItemWeightExt entries, replacing each with an shn-carried-content
-// wrapper (sdk/carry.go's CarryElement) and returning one LossEntry per
-// element carried. A no-op (nil, nil) when none are found — most QRs never
-// carry one (SHN's own FillQuestionnaire never stamps it, dtrItemWeightExt's
-// doc comment).
-func dtrCarryItemWeight(qr map[string]any) ([]LossEntry, error) {
-	items, _ := qr["item"].([]any)
-	if len(items) == 0 {
-		return nil, nil
+// dtrAnswerValueContainers returns the extension-bearing containers for an
+// answer's value[x] — the locus an extension contexted to
+// QuestionnaireResponse.item.answer.value must occupy.
+//
+// FHIR encodes that one locus two ways, and both are real itemWeight contexts
+// (the SD names Coding explicitly alongside the answer.value expression):
+//
+//   - complex value[x] (valueCoding, valueQuantity, …): extensions live on the
+//     value object itself.
+//   - primitive value[x] (valueInteger, valueDecimal, …): a JSON primitive
+//     cannot carry children, so FHIR puts them on the sibling "_value[x]".
+//
+// SHARED by carry and restore on purpose: the two must agree exactly about what
+// "the answer's value" means, or a round trip can lose an element by restoring
+// somewhere the carry never looks — which is what makes restore strict rather
+// than relocating (see dtrRestoreItemWeight).
+//
+// NEVER CREATES a missing container — this is a read-side walker for both
+// directions. (tools/xmatrix/inject.go's valueOf, which models the same locus,
+// does create one; it is an injector, not a walker.)
+//
+// The key set is SORTED before use: Go map iteration order is randomized, and a
+// conformant answer has exactly one value[x], but a malformed one with two must
+// still walk deterministically — flake is a bug, not something to retry.
+func dtrAnswerValueContainers(answer map[string]any) []map[string]any {
+	seen := map[string]bool{}
+	var names []string
+	note := func(n string) {
+		if !seen[n] {
+			seen[n] = true
+			names = append(names, n)
+		}
 	}
+	for k, v := range answer {
+		switch {
+		case dtrIsValueChoiceKey(k):
+			if _, isObj := v.(map[string]any); isObj {
+				note(k) // complex value[x]: extensions on the value object
+			} else {
+				note("_" + k) // primitive value[x]: extensions on the sibling
+			}
+		case strings.HasPrefix(k, "_") && dtrIsValueChoiceKey(k[1:]):
+			// A "_value[x]" with no value[x] beside it is legal FHIR (an absent
+			// value that still carries extensions), so it is reachable without
+			// the sibling lookup above.
+			note(k)
+		}
+	}
+	sort.Strings(names)
+	out := make([]map[string]any, 0, len(names))
+	for _, n := range names {
+		if m, ok := answer[n].(map[string]any); ok {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// dtrIsValueChoiceKey reports whether k is a FHIR value[x] choice key —
+// "value" followed by an uppercase-led type name. The uppercase requirement is
+// load-bearing: it keeps real field names that merely begin with "value" out.
+// (Mirrored, with the same rationale, by tools/xmatrix/locus.go's
+// valueChoiceKey regexp, which folds the same keys onto the grid's "value"
+// segment.)
+func dtrIsValueChoiceKey(k string) bool {
+	// Spelled as an explicit set rather than a byte-range comparison so the
+	// ASCII bound is visible: FHIR datatype names are ASCII by definition, and
+	// the xmatrix mirror's [A-Z] means exactly these 26 bytes.
+	const asciiUpper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	const prefix = "value"
+	if !strings.HasPrefix(k, prefix) || len(k) == len(prefix) {
+		return false
+	}
+	return strings.IndexByte(asciiUpper, k[len(prefix)]) >= 0
+}
+
+// dtrCarryItemWeight scans every answer's VALUE container(s)
+// (dtrAnswerValueContainers) for dtrItemWeightExt entries, replacing each with
+// an shn-carried-content wrapper (sdk/carry.go's CarryElement) IN PLACE and
+// returning one LossEntry per element carried. A no-op (nil, nil) when none are
+// found — most QRs never carry one (SHN's own FillQuestionnaire never stamps
+// it, dtrItemWeightExt's doc comment).
+//
+// In place is the design, not an implementation detail: the wrapper's position
+// is what tells dtrRestoreItemWeight which JSON encoding of answer.value the
+// element came from, so the class-level LossEntry.Path never has to.
+//
+// answer.extension is deliberately NOT scanned. DTR 2.2.0's profile declares a
+// slice there, but the itemWeight SD's context forbids it, so no conformant
+// payload can use it — see dtrItemWeightLocus.
+//
+// Walks every answer at every nesting depth (dtrWalkAnswers): FHIR nests
+// QuestionnaireResponse.item on two axes and a nested item's answer is the same
+// element as a top-level one.
+func dtrCarryItemWeight(qr map[string]any) ([]LossEntry, error) {
 	var carried []LossEntry
-	for _, it := range items {
-		im, ok := it.(map[string]any)
-		if !ok {
-			continue
+	var walkErr error
+	dtrWalkAnswers(qr, func(am map[string]any) {
+		if walkErr != nil {
+			return
 		}
-		answers, _ := im["answer"].([]any)
-		for _, a := range answers {
-			am, ok := a.(map[string]any)
-			if !ok {
-				continue
+		for _, container := range dtrAnswerValueContainers(am) {
+			entries, err := dtrCarryItemWeightIn(container)
+			if err != nil {
+				walkErr = err
+				return
 			}
-			extAny, _ := am["extension"].([]any)
-			if len(extAny) == 0 {
-				continue
-			}
-			kept := make([]any, 0, len(extAny))
-			for _, e := range extAny {
-				em, ok := e.(map[string]any)
-				if !ok {
-					kept = append(kept, e)
-					continue
-				}
-				if url, _ := em["url"].(string); url != dtrItemWeightExt {
-					kept = append(kept, e)
-					continue
-				}
-				raw, err := json.Marshal(em)
-				if err != nil {
-					return nil, fmt.Errorf("marshal QuestionnaireResponse.item.answer.extension:itemWeight: %w", err)
-				}
-				carriedExt, err := shnsdk.CarryElement("QuestionnaireResponse.item.answer.extension:itemWeight", raw, "2.2")
-				if err != nil {
-					return nil, fmt.Errorf("carry QuestionnaireResponse.item.answer.extension:itemWeight: %w", err)
-				}
-				var carriedExtAny any
-				if err := json.Unmarshal(carriedExt, &carriedExtAny); err != nil {
-					return nil, fmt.Errorf("decode carried QuestionnaireResponse.item.answer.extension:itemWeight: %w", err)
-				}
-				kept = append(kept, carriedExtAny)
-				carried = append(carried, LossEntry{
-					Path:   "QuestionnaireResponse.item.answer.extension:itemWeight",
-					Detail: "carried; source line 2.2 (no 2.1 slot)",
-				})
-			}
-			am["extension"] = kept
+			carried = append(carried, entries...)
 		}
+	})
+	if walkErr != nil {
+		return nil, walkErr
 	}
 	return carried, nil
 }
 
-// dtrRestoreItemWeight is dtrCarryItemWeight's inverse — dtrCarryItemWeight's
-// nested-walk mirror of transform_pas.go's pasRestoreCarriedExtensions,
-// including the SAME byte-fidelity discipline: the restored element is
-// pushed back as json.RawMessage (never decoded-then-Go-value), so
-// Restore(Carry(x))==x holds even nested inside a larger re-marshaled
-// document (transform_pas.go:501-511's comment explains why this matters).
-func dtrRestoreItemWeight(qr map[string]any) error {
-	items, _ := qr["item"].([]any)
-	for _, it := range items {
-		im, ok := it.(map[string]any)
+// dtrCarryItemWeightIn is dtrCarryItemWeight's per-container half: it rewrites
+// one extension array, swapping each itemWeight entry for its wrapper at the
+// SAME index and leaving every other entry untouched.
+func dtrCarryItemWeightIn(container map[string]any) ([]LossEntry, error) {
+	extAny, _ := container["extension"].([]any)
+	if len(extAny) == 0 {
+		return nil, nil
+	}
+	var carried []LossEntry
+	kept := make([]any, 0, len(extAny))
+	for _, e := range extAny {
+		em, ok := e.(map[string]any)
 		if !ok {
+			kept = append(kept, e)
 			continue
 		}
-		answers, _ := im["answer"].([]any)
-		for _, a := range answers {
-			am, ok := a.(map[string]any)
-			if !ok {
-				continue
-			}
-			extAny, _ := am["extension"].([]any)
-			if len(extAny) == 0 {
-				continue
-			}
-			kept := make([]any, 0, len(extAny))
-			for _, e := range extAny {
-				em, ok := e.(map[string]any)
-				if !ok {
-					kept = append(kept, e)
-					continue
-				}
-				if url, _ := em["url"].(string); url != shnsdk.CarriedContentExtURL {
-					kept = append(kept, e)
-					continue
-				}
-				raw, err := json.Marshal(em)
-				if err != nil {
-					return fmt.Errorf("marshal carried-content wrapper: %w", err)
-				}
-				_, element, _, err := shnsdk.RestoreCarried(raw)
-				if err != nil {
-					return fmt.Errorf("restore carried-content wrapper: %w", err)
-				}
-				kept = append(kept, json.RawMessage(element))
-			}
-			am["extension"] = kept
+		if url, _ := em["url"].(string); url != dtrItemWeightExt {
+			kept = append(kept, e)
+			continue
 		}
+		raw, err := json.Marshal(em)
+		if err != nil {
+			return nil, fmt.Errorf("marshal %s: %w", dtrItemWeightLocus, err)
+		}
+		carriedExt, err := shnsdk.CarryElement(dtrItemWeightLocus, raw, "2.2")
+		if err != nil {
+			return nil, fmt.Errorf("carry %s: %w", dtrItemWeightLocus, err)
+		}
+		var carriedExtAny any
+		if err := json.Unmarshal(carriedExt, &carriedExtAny); err != nil {
+			return nil, fmt.Errorf("decode carried %s: %w", dtrItemWeightLocus, err)
+		}
+		kept = append(kept, carriedExtAny)
+		carried = append(carried, LossEntry{
+			Path:   dtrItemWeightLocus,
+			Detail: "carried; source line 2.2 (no 2.1 slot)",
+		})
 	}
+	container["extension"] = kept
+	return carried, nil
+}
+
+// dtrRestoreItemWeight is dtrCarryItemWeight's inverse, walking the SAME
+// containers (dtrAnswerValueContainers) so the two cannot disagree about where
+// a carried element lives. Each wrapper is replaced by its element at the same
+// array index, which is why neither side needs to record or recover the JSON
+// encoding of answer.value.
+//
+// Includes dtrCarryItemWeight's byte-fidelity discipline: the restored element
+// is pushed back as json.RawMessage (never decoded-then-Go-value), so
+// Restore(Carry(x))==x holds even nested inside a larger re-marshaled document
+// (transform_pas.go:501-511's comment explains why this matters).
+//
+// STRICT: a wrapper sitting at answer.extension — what an engine that read the
+// profile differential instead of the extension's SD produced, reachable only
+// in a split-version round trip across a rolling upgrade — is left wrapped
+// rather than unwrapped there (which would emit a payload the 2.2 line rejects
+// on the extension's context) or relocated (which would silently move content
+// relative to what was carried). Leaving it wrapped loses nothing:
+// shn-carried-content's own context is Element, so it validates where it sits.
+//
+// Walks every answer at every nesting depth (dtrWalkAnswers): FHIR nests
+// QuestionnaireResponse.item on two axes and a nested item's answer is the same
+// element as a top-level one.
+func dtrRestoreItemWeight(qr map[string]any) error {
+	var walkErr error
+	dtrWalkAnswers(qr, func(am map[string]any) {
+		if walkErr != nil {
+			return
+		}
+		for _, container := range dtrAnswerValueContainers(am) {
+			if err := dtrRestoreItemWeightIn(container); err != nil {
+				walkErr = err
+				return
+			}
+		}
+	})
+	return walkErr
+}
+
+// dtrRestoreItemWeightIn is dtrRestoreItemWeight's per-container half.
+func dtrRestoreItemWeightIn(container map[string]any) error {
+	extAny, _ := container["extension"].([]any)
+	if len(extAny) == 0 {
+		return nil
+	}
+	kept := make([]any, 0, len(extAny))
+	for _, e := range extAny {
+		em, ok := e.(map[string]any)
+		if !ok {
+			kept = append(kept, e)
+			continue
+		}
+		if url, _ := em["url"].(string); url != shnsdk.CarriedContentExtURL {
+			kept = append(kept, e)
+			continue
+		}
+		raw, err := json.Marshal(em)
+		if err != nil {
+			return fmt.Errorf("marshal carried-content wrapper: %w", err)
+		}
+		_, element, _, err := shnsdk.RestoreCarried(raw)
+		if err != nil {
+			return fmt.Errorf("restore carried-content wrapper: %w", err)
+		}
+		kept = append(kept, json.RawMessage(element))
+	}
+	container["extension"] = kept
 	return nil
 }
 

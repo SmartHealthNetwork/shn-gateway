@@ -114,7 +114,7 @@ func TestBuildQuestionnairePackageRequest_PayorFollowsMember(t *testing.T) {
 	}
 }
 
-// TestBuildPASBundle_MemberPayorFence is the rejection test for the silent-misroute defect:
+// TestBuildPASBundle_MemberPayorFence is the rejection test for ledger item 5's first defect:
 // BuildPASBundle used to route EVERY member's Claim $submit through AddRoutablePayor's hardcoded
 // CMS payor, regardless of what payorOrgFor(member) actually resolves to — so a bridge-demo
 // member's PAS submission would silently be stamped with the CMS payer identifier and routed to

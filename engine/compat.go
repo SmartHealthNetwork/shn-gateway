@@ -1,4 +1,4 @@
-// compat.go — the compatibility manifest: a Go table
+// compat.go — the compatibility manifest (spec 2026-08-10 §5): a Go table
 // consulted at runtime inside a deployed binary, NEVER JSON. This is
 // deliberately NOT tools/contracts/manifest.json — that file is IG package-pin
 // text consumed by contractsgen's KV/curl-site machinery (a repo-file read
@@ -81,7 +81,7 @@ var compatManifest = []CompatStep{
 	//     plus the def-driven intendedUse-system and origin-code moves.
 	//   Up (2.1->2.2), QR content, MULTI-coverage source (>=2
 	//     Coverage-referencing qr-context entries):  GATED — semantic-change
-	//     refusal (the canonical multi-coverage example), typed SemanticChangeError;
+	//     refusal (the spec's canonical example), typed SemanticChangeError;
 	//     rejection-tested (TestDTRStep2122Up_MultiCoverageGated).
 	//   Up (2.1->2.2), QR content, ZERO-coverage source (no
 	//     Coverage-referencing qr-context entry): GATED — same typed error,
@@ -94,10 +94,15 @@ var compatManifest = []CompatStep{
 	//   Down (2.2->2.1):  FULL for QR content (moves reversed — 2.1's
 	//     qr-context slice, min=2 unbounded max, tolerates one or more
 	//     relocated entries) + CARRY for the one genuine 2.2-only element
-	//     with no 2.1 slot (item.answer.extension:itemWeight —
-	//     StructureDefinition-dtr-questionnaireresponse.json's 2.2.0
-	//     differential; ABSENT at 2.1.0, whose same slot is the never-built
-	//     "ordinalValue") into shn-carried-content.
+	//     with no 2.1 slot (item.answer.VALUE.extension:itemWeight — the
+	//     locus the core itemWeight extension's own SD contexts it to;
+	//     2.2.0's dtr-questionnaireresponse differential declares the slice one
+	//     level up, at item.answer.extension, which the extension's context
+	//     forbids and no conformant payload can use. At 2.1.0 there
+	//     is no itemWeight definition AT ALL — that slot holds the never-built
+	//     "ordinalValue", R4's predecessor — so the element arrives
+	//     unresolvable and droppable, which is the no-slot condition carry
+	//     exists for) into shn-carried-content.
 	//   Row worst-of = CARRY (matches the row Class below) — confirmed at
 	//   wiring time.
 	{Contract: "pa.dtr", From: "2.1", To: "2.2", Class: StepCarry, Up: dtrStep2122Up, Down: dtrStep2122Down},
@@ -136,7 +141,7 @@ var compatManifest = []CompatStep{
 	//     stripped (2.1's profile has no constraint on it at all).
 	//   Down (2.2->2.1), request+response sub-cases: CARRY — top-level
 	//     2.2-only extensions (authorizationNumber and siblings, verified
-	//     live against the 2.2.1 SD — the canonical carry example) have no
+	//     live against the 2.2.1 SD — the spec's own carry example) have no
 	//     2.1 slot.
 	//   Row worst-of-four = CARRY (matches the row Class below).
 	{Contract: "pa.pas", From: "2.1", To: "2.2", Class: StepCarry, Up: pasStep2122Up, Down: pasStep2122Down},

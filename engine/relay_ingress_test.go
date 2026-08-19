@@ -17,10 +17,10 @@ func TestCRDIngress_RecipientNon2xx_SurfacesVerbatim(t *testing.T) {
 	rec := httptest.NewRecorder()
 	env.originator.handleCRDIngress(rec, env.crdIngressRequest(t)) // the real ingress handler (ingress.go:96)
 	if rec.Code != 502 {
-		t.Fatalf("ingress status = %d, want 502 (the payer's real status)", rec.Code)
+		t.Fatalf("ingress status = %d, want 502 (Cambia's real status)", rec.Code)
 	}
 	if b := rec.Body.String(); b == "" || strings.Contains(b, "hub routing failed") {
-		t.Fatalf("ingress body must be the payer's OperationOutcome, got %q", b)
+		t.Fatalf("ingress body must be Cambia's OperationOutcome, got %q", b)
 	}
 	if !strings.Contains(rec.Body.String(), "OperationOutcome") {
 		t.Fatalf("ingress body not the relayed OperationOutcome: %s", rec.Body.String())

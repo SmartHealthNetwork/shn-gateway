@@ -8,7 +8,7 @@ import (
 // legMetricHook returns the engine.Config.LegMetric callback: one LegOutcome
 // count per origination-leg event (dims Service/role/outcome on top of the
 // emitter's base Env), plus a LegError rollup on failed|unreachable so the
-// per-service leg-error alarm watches a single stream ({Env, Service} dim map —
+// per-service #16 alarm watches a single stream ({Env, Service} dim map —
 // no metric math). denied is a policy decision and deliberately NOT an error.
 // Split from build() for testability.
 func legMetricHook(em *metrics.Emitter, service, role string) func(string) {

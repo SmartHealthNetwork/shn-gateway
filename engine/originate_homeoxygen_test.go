@@ -157,7 +157,7 @@ type homeOxygenSubstrate struct {
 
 	legTypes []string
 
-	// frameErrLeg, when non-empty, puts the substrate into v1-frame mode:
+	// frameErrLeg, when non-empty, puts the substrate into v1-frame mode (spec 2026-07-17):
 	// the named leg answers a FRAMED non-2xx (frameErrStatus/frameErrBody/frameErrCT) while
 	// every OTHER leg answers its canned success wrapped in a v1 200 frame — modelling a
 	// frame-capable recipient that frames every answer. Requires the payer registry entry to
@@ -535,5 +535,35 @@ func TestHandler_HomeOxygenRouteRegistered(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code == http.StatusNotFound || rec.Code == http.StatusMethodNotAllowed {
 		t.Fatalf("POST /scenario/homeoxygen not registered in provider Handler(): got %d", rec.Code)
+	}
+}
+
+// TestQuestionnaireResponseNumericAnswers_AnswerItemAxis pins the second FHIR
+// recursion axis. QuestionnaireResponse.item.answer.item contentReferences back
+// to QuestionnaireResponse.item exactly as item.item does; reading only the
+// latter drops every answer nested under another answer.
+func TestQuestionnaireResponseNumericAnswers_AnswerItemAxis(t *testing.T) {
+	qr := []byte(`{"resourceType":"QuestionnaireResponse","item":[
+		{"linkId":"parent","answer":[{"valueBoolean":true,"item":[
+			{"linkId":"nested-flow-rate","answer":[{"valueDecimal":2.5}]}
+		]}]}
+	]}`)
+
+	got := questionnaireResponseNumericAnswers(qr)
+	if got["nested-flow-rate"] != "2.5" {
+		t.Fatalf("nested-flow-rate = %q, want %q (full map %v)", got["nested-flow-rate"], "2.5", got)
+	}
+}
+
+// TestQuestionnaireResponseNumericAnswers_GroupAxisStillWorks is the
+// non-vacuity control for the change above.
+func TestQuestionnaireResponseNumericAnswers_GroupAxisStillWorks(t *testing.T) {
+	qr := []byte(`{"resourceType":"QuestionnaireResponse","item":[
+		{"linkId":"grp","item":[{"linkId":"flow-rate","answer":[{"valueDecimal":4}]}]}
+	]}`)
+
+	got := questionnaireResponseNumericAnswers(qr)
+	if got["flow-rate"] != "4" {
+		t.Fatalf("flow-rate = %q, want %q (full map %v)", got["flow-rate"], "4", got)
 	}
 }

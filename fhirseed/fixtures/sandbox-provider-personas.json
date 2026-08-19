@@ -967,10 +967,10 @@
       }
     },
     {
-      "fullUrl": "Coverage/cov-mbrextpayer-provider",
+      "fullUrl": "Coverage/cov-mbrcambiaabby-provider",
       "resource": {
         "beneficiary": {
-          "reference": "Patient/pat-mbrextpayer-provider"
+          "reference": "Patient/pat-mbrcambiaabby-provider"
         },
         "class": [
           {
@@ -987,7 +987,7 @@
         ],
         "contained": [
           {
-            "id": "external-payer-org",
+            "id": "cambia-payer-org",
             "identifier": [
               {
                 "system": "urn:oid:2.16.840.1.113883.6.300",
@@ -998,7 +998,7 @@
             "resourceType": "Organization"
           }
         ],
-        "id": "cov-mbrextpayer-provider",
+        "id": "cov-mbrcambiaabby-provider",
         "identifier": [
           {
             "type": {
@@ -1020,7 +1020,7 @@
         },
         "payor": [
           {
-            "reference": "#external-payer-org"
+            "reference": "#cambia-payer-org"
           }
         ],
         "relationship": {
@@ -1036,7 +1036,7 @@
       },
       "request": {
         "method": "PUT",
-        "url": "Coverage/cov-mbrextpayer-provider"
+        "url": "Coverage/cov-mbrcambiaabby-provider"
       }
     },
     {
@@ -4634,9 +4634,9 @@
       }
     },
     {
-      "fullUrl": "Patient/pat-mbrextpayer-provider",
+      "fullUrl": "Patient/pat-mbrcambiaabby-provider",
       "resource": {
-        "id": "pat-mbrextpayer-provider",
+        "id": "pat-mbrcambiaabby-provider",
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
@@ -4645,7 +4645,7 @@
         "identifier": [
           {
             "system": "urn:shn:member",
-            "value": "MBR-EXTPAYER-ABBY"
+            "value": "MBR-CAMBIA-ABBY"
           }
         ],
         "name": [
@@ -4659,7 +4659,7 @@
       },
       "request": {
         "method": "PUT",
-        "url": "Patient/pat-mbrextpayer-provider"
+        "url": "Patient/pat-mbrcambiaabby-provider"
       }
     },
     {

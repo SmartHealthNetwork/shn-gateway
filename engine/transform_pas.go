@@ -1,5 +1,5 @@
-// transform_pas.go — the pa.pas cross-version step modules: the two
-// adjacent-line bridges (2.0<->2.1,
+// transform_pas.go — the pa.pas cross-version step modules (spec 2026-08-10
+// §5): the two adjacent-line bridges (2.0<->2.1,
 // 2.1<->2.2) compat.go's manifest rows wire up. Every delta modeled here is
 // verified from sdk/linedef.go's PASDef fields first (ClaimResponseRequestRequired,
 // PendedResponseOutcome, ResponseBundleIdentifierRequired, ClaimItemLineDetailRequired,
@@ -180,12 +180,22 @@ func pasStep2021Down(payload []byte, x ExchangeIdentity) ([]byte, LossReport, er
 // 2.2.1 package differentials for profile-claim-base.json /
 // profile-claimresponse-base.json (2026-08-12): every slice below is min=0 at
 // 2.2.1 and ABSENT from the 2.1.0 differential entirely (not merely
-// optional-and-present — genuinely new). authorizationNumber is the plan's
-// own worked example (Claim.extension:authorizationNumber, mustSupport=true,
-// min=0 max=1 at 2.2.1 — distinct from the item-level
-// Claim.item.extension:authorizationNumber that already existed unchanged at
-// every line); the other four are the same shape of delta, verified the same
-// way, so the same carry mechanism covers them.
+// optional-and-present — genuinely new).
+//
+// Membership is BOTH-CONDITIONS: the 2.2.1 profile must declare the top-level
+// slice AND the extension's own SD context[] must permit that host. PAS 2.2.1
+// declares three slices that fail the second test —
+// Claim.extension:{authorizationNumber,administrationReferenceNumber} and
+// ClaimResponse.extension:authorizedProvider — whose extension SDs are
+// contexted to Claim.item / ClaimResponse.item / ClaimResponse.addItem /
+// ExplanationOfBenefit(.item). A profile cannot widen an extension's context
+// and the validator enforces context, so those slices cannot appear on a
+// conformant wire. At their only legal (item) locus they are present
+// identically at 2.1.0 and 2.2.1 — line-invariant, nothing to bridge, nothing
+// to carry. Verified live against the 2.2 lane and by reading both packages
+// This is an upstream IG self-contradiction, not an SHN modelling
+// choice; re-add only if a future PAS release makes the top-level slice
+// context-legal AND absent at the lower line.
 //
 // Map values are the FHIR StructureDefinition slice NAME (for LossEntry.Path
 // / CarryElement's path locator), NOT the canonical URL (the map key).
@@ -200,12 +210,9 @@ func pasStep2021Down(payload []byte, x ExchangeIdentity) ([]byte, LossReport, er
 // carrying them would be untested, unverified-by-use scope creep. Re-add
 // iff a real (native or forwarded) payload exercises one.
 var pas22OnlyClaimExtensions = map[string]string{
-	"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-authorizationNumber":           "authorizationNumber",
-	"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-administrationReferenceNumber": "administrationReferenceNumber",
-	"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-TransmissionIdentifiers":       "transmissionIdentifiers",
+	"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-TransmissionIdentifiers": "transmissionIdentifiers",
 }
 var pas22OnlyClaimResponseExtensions = map[string]string{
-	"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-itemAuthorizedProvider":  "authorizedProvider", // slice name "authorizedProvider" targets extension-itemAuthorizedProvider — verified in the differential's type.profile
 	"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-claimResponseReviewer":   "claimResponseReviewer",
 	"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-TransmissionIdentifiers": "transmissionIdentifiers",
 }

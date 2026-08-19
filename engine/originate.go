@@ -414,8 +414,8 @@ func (g *Gateway) selectResumeRoute(pinnedToken, recipient string) (legRoute, er
 // caller byte-identically — the same verbatim relay the Da Vinci ingress handlers do,
 // for the bespoke /scenario* origination API. Returns true iff it wrote the response;
 // callers keep their existing writeJSON fallback for every other (non-relay) error.
-// Also writes a *RouteRefusalError (the version-routing legible
-// refusal) as its 422 — one chokepoint covers every scenario and ingress
+// Also writes a *RouteRefusalError (the version-routing legible refusal, spec
+// 2026-08-10 §4) as its 422 — one chokepoint covers every scenario and ingress
 // origination site.
 func (g *Gateway) relayOriginationError(w http.ResponseWriter, err error) bool {
 	var rre *RouteRefusalError
@@ -972,7 +972,7 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 	if cov.NeedsDTR() {
 		canonical := shnsdk.StripCanonicalVersion(cov.Questionnaires[0])
 
-		// SELECT-BEFORE-BUILD: the token/line is resolved
+		// SELECT-BEFORE-BUILD (spec 2026-08-11): the token/line is resolved
 		// BEFORE the DTR fetch REQUEST is built, not just before the PACKAGE that comes
 		// back — a DTR line whose $questionnaire-package input profile makes `coverage`
 		// 1..1 (2.2 — DTRDef.QuestionnairePackageCoverageRequired, verified live
@@ -1201,6 +1201,7 @@ func questionnaireResponseNumericAnswers(qrJSON []byte) map[string]string {
 				case a.ValueQuantity != nil && a.ValueQuantity.Value != nil:
 					out[it.LinkID] = strconv.FormatFloat(*a.ValueQuantity.Value, 'f', -1, 64)
 				}
+				walk(a.Item)
 			}
 			walk(it.Item)
 		}
@@ -1214,6 +1215,11 @@ func questionnaireResponseNumericAnswers(qrJSON []byte) map[string]string {
 
 // qrItemNode is the recursive QR item shape questionnaireResponseNumericAnswers reads (only the
 // fields it needs: linkId, numeric answers — decimal or quantity — and nested items).
+//
+// Items nest on BOTH of FHIR's axes: under item.item and under item.answer.item,
+// each contentReferencing back to QuestionnaireResponse.item. Answer.Item is
+// what makes the second axis reachable; without it those items are discarded at
+// unmarshal and the walk below cannot see them however it recurses.
 type qrItemNode struct {
 	LinkID string `json:"linkId"`
 	Answer []struct {
@@ -1221,6 +1227,7 @@ type qrItemNode struct {
 		ValueQuantity *struct {
 			Value *float64 `json:"value"`
 		} `json:"valueQuantity"`
+		Item []qrItemNode `json:"item"`
 	} `json:"answer"`
 	Item []qrItemNode `json:"item"`
 }
