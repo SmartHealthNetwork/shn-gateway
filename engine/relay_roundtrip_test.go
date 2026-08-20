@@ -1,7 +1,7 @@
 // gateway/engine/relay_roundtrip_test.go
 //
-// Shared in-process exchange harness for the opaque-payload message-frame spec
-// (2026-07-17): a provider (originator) Gateway wired to a fake Hub+Authz
+// Shared in-process exchange harness for the opaque-payload message-frame
+// contract: a provider (originator) Gateway wired to a fake Hub+Authz
 // RoundTripper (relaySubstrate) that seals back a TEST-CONFIGURABLE LegResult
 // on the response leg. Mirrors twoPayerTestSystem/twoPayerSubstrate
 // (payerrouting_test.go) — same seal/authz crypto helpers from

@@ -33,8 +33,8 @@ import (
 //
 // On the sandbox/managed lane (brPayer=false) InfoChanged is never set, keeping the byte-identical
 // sandbox path. Pulled out as a standalone func so the byte-parity guard can unit-test it directly.
-// line is the routed contract line the bundle is BUILT at (select-before-build, slice
-// 4) — resolved by submitClaimAndResolve before this call, so the wire bytes and the
+// line is the routed contract line the bundle is BUILT at (select before build) —
+// resolved by submitClaimAndResolve before this call, so the wire bytes and the
 // routed token cannot disagree.
 func buildPASSubmitBundle(line string, brPayer bool, orderJSON, qrJSON []byte, patientRef, coverageRef, member, corr string, created time.Time, payer shnsdk.PayerIdentifier) ([]byte, error) {
 	return shnsdk.BuildConformantClaimBundleAtLine(line, shnsdk.ConformantClaimInputs{

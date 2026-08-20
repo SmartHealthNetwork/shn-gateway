@@ -302,9 +302,9 @@ func TestObserver_ConformanceNeutral(t *testing.T) {
 }
 
 // TestObserver_IngressConformanceNeutral: the same CRD ingress call with
-// observer OFF and ON must produce byte-identical HTTP status + body. Task
-// 4's review flagged the ingress tee (recordingWriter) as the highest-risk
-// code for the on/off byte-identity constraint — TestObserver_ConformanceNeutral
+// observer OFF and ON must produce byte-identical HTTP status + body. The
+// ingress tee (recordingWriter) is the highest-risk code for the on/off
+// byte-identity constraint — TestObserver_ConformanceNeutral
 // only drives the origination path (roundTrip + validator decorator), so this
 // test gives the ingress middleware its own gate. Each run builds its own
 // crdTestSystem so stubSubstrate.legCount cannot leak between the off/on
@@ -602,7 +602,7 @@ func TestObservingSoR_NotFoundDetail(t *testing.T) {
 	}
 }
 
-// TestRouteInfoForWalksDownDirection: fix-round finding 1 (task-3 review) —
+// TestRouteInfoForWalksDownDirection:
 // routeInfoFor must render each ChainStep's From/To/Module in WALK order
 // (mirroring applyChain's curLine-vs-step.From/To switch, transform.go), not
 // the manifest row's stored ascending order. A down-walking route (own build
@@ -644,8 +644,8 @@ func TestRouteInfoForWalksUpDirection(t *testing.T) {
 	}
 }
 
-// TestRefusalRouteInfoNilWhenUnstructured: fix-round finding 2 (task-3
-// review) — a catalog/library mismatch refuses via versionroute.go's
+// TestRefusalRouteInfoNilWhenUnstructured:
+// a catalog/library mismatch refuses via versionroute.go's
 // `refusal("")` shape with Own/Peer/BridgeIssue all empty (this build
 // doesn't speak Contract at all, and the peer is undeclared too).
 // refusalRouteInfo must return nil there, matching RouteInfo's own doc

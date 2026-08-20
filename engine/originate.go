@@ -414,8 +414,9 @@ func (g *Gateway) selectResumeRoute(pinnedToken, recipient string) (legRoute, er
 // caller byte-identically — the same verbatim relay the Da Vinci ingress handlers do,
 // for the bespoke /scenario* origination API. Returns true iff it wrote the response;
 // callers keep their existing writeJSON fallback for every other (non-relay) error.
-// Also writes a *RouteRefusalError (the version-routing legible refusal, spec
-// 2026-08-10 §4) as its 422 — one chokepoint covers every scenario and ingress
+// Also writes a *RouteRefusalError (the version-routing legible refusal: no
+// shared contract line ⇒ refuse legibly, never forward) as its 422 — one
+// chokepoint covers every scenario and ingress
 // origination site.
 func (g *Gateway) relayOriginationError(w http.ResponseWriter, err error) bool {
 	var rre *RouteRefusalError

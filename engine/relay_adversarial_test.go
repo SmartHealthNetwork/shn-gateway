@@ -1,6 +1,6 @@
 // gateway/engine/relay_adversarial_test.go
 //
-// Adversarial row for the opaque-payload message-frame spec (2026-07-17):
+// Adversarial row for the opaque-payload message-frame contract:
 // valid exchange − one mutation (the response-leg authz token) → reject.
 //
 // A frame-capable responder (payer) seals its application answer — any status —

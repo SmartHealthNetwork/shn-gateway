@@ -1378,8 +1378,8 @@ func TestProbeEvidenceReachesResponder(t *testing.T) {
 	}
 }
 
-// TestFhirTokenFetch_MintsFreshTokenPerInvocation pins the fix for
-// IMPORTANT-1 (task-18 review): the /internal/checks credential-check
+// TestFhirTokenFetch_MintsFreshTokenPerInvocation pins the fix for a
+// credential-caching defect: the /internal/checks credential-check
 // closure must construct a FRESH *smartauth.TokenSource on every invocation,
 // never a shared one hoisted outside the closure — a shared TokenSource
 // would serve its cached (still-valid) token instead of re-authenticating,

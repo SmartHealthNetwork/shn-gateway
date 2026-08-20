@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // internalTokenPattern is the publish-runbook's internal-vocabulary sweep. It
@@ -42,12 +43,49 @@ import (
 // class above, the fix is always to say what the finding established, not to
 // cite its id.
 //
+// The last arm is the internal-design-document class: pointers into private
+// design notes, either by section (`spec §4`) or by the note's date
+// (`spec 2026-08-10 §4`, or a bare `spec 2026-08-10`). It was added AFTER
+// v0.36.0 shipped 16 of these across 7 files and had to be DELETED, tag and
+// Release both. That cut's scrub was a hand-run grep spelled `spec §N` and
+// `spec <date> F7`, which does not match `spec <date> §N` or a bare
+// `spec <date>` — so it returned empty while the references went out.
+// The lesson is not "widen the grep": A PATTERN CANNOT FIND WHAT ITS OWN
+// PATTERN DOES NOT DESCRIBE. This arm is a backstop. The net is diffing a new
+// snapshot against the PREVIOUS PUBLISHED TAG and accounting for every
+// differing file, which is what actually caught this class and stays in the
+// publish runbook. The fix for a match is the same as every class above:
+// state what the design note DECIDED, since a partner cannot read it.
+//
+// The final arm is the PARTNER NAME. It is here so the publish runbook can stop
+// carrying `grep -riI cambia` as a per-cut manual step — the last one it had.
+// A hand-run name grep is what let this module's seed fixture ship that payer's
+// NAIC-registry id and UAT subscriber id while returning zero hits: it matched
+// the NAME, and the fixture disclosed the IDENTITY. The identity half is closed
+// in the generator (internal/fhirseed's publication guard, which fails the bake
+// rather than the review); this arm closes the name half, over test files
+// included — they ship in the snapshot, and all three occurrences that used to
+// live in them were reworded in the same change that added this.
+//
+// ⚠️ KNOWN TRADE-OFF, stated rather than glossed: this file ships too, and it
+// must state its own pattern literally (that is why it is in sweepSkipFiles), so
+// the partner name appears HERE — in a list of tokens the project scrubs. The
+// same is already true of `\bBo\b`, a maintainer's first name. So
+// `grep -riI cambia gateway/` returns this file, and nothing else. Splitting the
+// literal to dodge the grep would be the exact evasion this whole sweep exists
+// to catch, so it is not done. If the judgement is that ZERO partner-name bytes
+// may ship, the answer is to drop this arm and rely on the identity guard in
+// internal/fhirseed plus the previous-published-tag diff — NOT to obfuscate the
+// token here. That is an owner call about partner naming, not a code decision.
+//
 // Published spec ids are DELIBERATELY not in this pattern: FR-G*, AI-G*,
 // OWD-G* and UC-0X are partner-facing vocabulary (they appear in the published
 // participant protocol and conformance docs) and must keep appearing here.
-const internalTokenPattern = `S5b|Task[ -][0-9]|per the plan|Material-|infra/|goldengen|shn-platform|\bE[0-9][a-z][0-9]?\b|\bD[0-9]\b` +
-	`|\bK1\b|PR #[0-9]+|#[0-9]{3}\b|docs/superpowers|(?i:\bslice[ -][0-9]\b)|\bBo\b|review-fixes|\bround-[0-9]\b` +
-	`|ledger[ -][0-9]|option[ -][A-Z] ruling|A′|\bA'[ .,)]|\bT-[0-9]\b|\b[SM]F[0-9]+\b`
+const internalTokenPattern = `S5b|Task[ -][0-9]|(?i:\btask-[0-9])|per the plan|Material-|infra/|goldengen|shn-platform|\bE[0-9][a-z][0-9]?\b|\bD[0-9]\b` +
+	`|\bK1\b|PR #[0-9]+|#[0-9]{2,}\b|docs/superpowers|(?i:\bslice[ -][0-9]\b)|\bBo\b|review-fixes|\bround-[0-9]\b` +
+	`|ledger[ -][0-9]|(?i:ledger[ -]item[ -][0-9])|option[ -][A-Z] ruling|A′|\bA'[ .,)]|\bT-[0-9]\b|\b[SM]F[0-9]+\b` +
+	`|(?i:spec §|spec[ (]*[0-9]{4}-[0-9]{2}-[0-9]{2})` +
+	`|(?i:cambia)`
 
 // sweepSkipFiles are the two module-root test files excluded from the sweep.
 //
@@ -79,6 +117,140 @@ var sweepSkipFiles = map[string]bool{
 // collide with real partner-facing vocabulary (X12/EDI qualifiers, for one),
 // and the reviewable place to record that judgement is here.
 var sweepAllowlist = map[string][]string{}
+
+// TestInternalTokenPattern_DesignDocRefForms is the rejection test for the
+// design-document-reference arm, and it exists because TestNoInternalTokens
+// ALONE CAN PASS FOR THE WRONG REASON: it asserts only that the tree holds no
+// match, so a pattern that describes nothing is indistinguishable from a tree
+// that is clean. That is not hypothetical — it is exactly how v0.36.0 shipped
+// 16 references under a green sweep and had to be deleted.
+//
+// So the pattern itself is the thing under test here. Every "must match" row is
+// a form that actually leaked (or the near-twin the deleted cut's narrower grep
+// missed); every "must not match" row pins the boundary so a later widening
+// cannot quietly swallow ordinary prose about a published specification, which
+// is legitimate partner-facing vocabulary.
+func TestInternalTokenPattern_DesignDocRefForms(t *testing.T) {
+	re := regexp.MustCompile(internalTokenPattern)
+
+	mustMatch := []string{
+		// Section-only — the one form the deleted cut's grep did describe.
+		`// (spec §1 invariant: ok:false ⇒ failure present)`,
+		// Date + section: the form that slipped past it and forced the delete.
+		`// machine classification (spec 2026-08-09 §1/§2): present, exact code`,
+		`// derived from them (spec 2026-08-10 §3 path 2 "probe retention")`,
+		`// routing (spec 2026-08-10 §4 "foreign endpoints route by the filter")`,
+		// Bare date, no section — the other form it could not see.
+		`// the drift rule this encodes was settled in spec 2026-08-10`,
+		// Sentence-initial capital. This one SURVIVED the #448 back-port in
+		// both the branch and published v0.36.1: the arm was case-sensitive,
+		// and `Spec <date>, F7` is the near-twin of `spec <date> F7` — the
+		// exact spelling v0.36.0's hand-grep was written for. It got past on
+		// capitalization alone.
+		`// Spec 2026-08-11, F7 — a HAPI instance hosts exactly ONE version`,
+		// The SAME case blind spot on a pre-existing arm: `Task[ -][0-9]` was
+		// case-sensitive, so three lowercase `task-N review` pointers sat in
+		// the tree — and in published v0.36.1 — while the sweep read green.
+		// Found by the de-wrapped, case-insensitive scan that also exposed the
+		// rows above, which is why that scan, not this pattern, is the net.
+		`// fix-round finding 1 (task-3 review) — routeInfoFor must render`,
+		`// pins the fix for IMPORTANT-1 (task-18 review): the credential check`,
+		// Punctuation between the word and the date defeats a `spec ` + digits
+		// spelling. This one also sat in v0.36.1. Same lesson a third time:
+		// each near-miss looked like the whole class until the next one.
+		`// Adversarial row for the opaque-payload message-frame spec (2026-07-17):`,
+		// Added while the tree held ZERO instances of either — the cheapest
+		// moment an arm ever gets, since there is nothing to reword and no
+		// false-positive triage against live hits. The alternative is adding
+		// the pattern AND fixing hits during a release, which is backwards.
+		// Both forms shipped in v0.36.1 and were removed by the back-port's
+		// copy, so without an arm the next one would leak again unseen.
+		`// the per-service #16 alarm watches a single stream`,
+		`// resolved per ledger item 5 — the member fence stays`,
+		// The partner name, in the casings it actually appeared in before this
+		// change reworded all three test-file sites.
+		`// the Cambia lane, whose order-sign prefetch is a SEARCH template`,
+		`t.Fatalf("ingress status = %d, want 502 (cambia's real status)", rec.Code)`,
+	}
+	for _, line := range mustMatch {
+		if m := re.FindString(line); m == "" {
+			t.Errorf("pattern does not describe a form that has ALREADY leaked — a green sweep would be meaningless against it:\n\t%s", line)
+		}
+	}
+
+	// A citation that wraps across a comment break holds no single line with
+	// the token, so it is unreachable by the pattern no matter how the pattern
+	// is spelled. sweepUnits is what closes that, and these rows are its
+	// rejection test — without them the suite still cannot fail for the two
+	// wrapped references that survived into the published tag.
+	mustMatchWrapped := []string{
+		"\t// frame carrying the app status and relays it 200-to-Hub (verbatim; spec\n\t// 2026-07-17) — the error-branch sibling of respondLeg.",
+		"// Also writes a *RouteRefusalError (the version-routing legible refusal, spec\n// 2026-08-10 §4) as its 422 — one chokepoint covers every origination site.",
+	}
+	for _, block := range mustMatchWrapped {
+		var joined string
+		for _, u := range sweepUnits(block) {
+			if u.joined {
+				joined = u.text
+			}
+		}
+		if joined == "" {
+			t.Errorf("sweepUnits produced no joined unit for a wrapped comment — wrapped citations would stay unreachable:\n\t%q", block)
+			continue
+		}
+		if m := re.FindString(joined); m == "" {
+			t.Errorf("pattern does not describe a WRAPPED form that has already leaked (joined: %q):\n\t%s", joined, block)
+		}
+	}
+
+	// Each widening below shipped with a must-match row above; these are the
+	// matching boundary rows, one per widening. Without them a widening is a
+	// one-way ratchet — nothing states where it is supposed to STOP, and the
+	// next person to broaden the pattern cannot tell prose from jargon.
+	mustNotMatch := []string{
+		// Prose about a PUBLISHED spec is partner-facing and must survive.
+		`// the FHIR specification requires a searchset Bundle here`,
+		`// see the spec for the full profile list`,
+		`// US Core §3.1.1 pins the identifier slice`,
+		// A bare date is not a reference to a private design note.
+		`// last reviewed 2026-08-10 against the published IG`,
+		// Boundary for `spec[ (]*<date>`: a comma is ordinary prose about a
+		// dated edition of a PUBLISHED spec, not a pointer into a design note.
+		// This is why the arm allows only space/paren between word and date.
+		`// built against the FHIR spec, 2026-08-10 edition, per the IG`,
+		// Boundary for the case-insensitive task arm: lowercase `task <n>` with
+		// a SPACE is ordinary English ("task 1 before task 2"). Only the
+		// hyphenated `task-<n>` id form is jargon, so the arm is
+		// `Task[ -][0-9]` (as before) plus `(?i:\btask-[0-9])` — NOT a blanket
+		// case-insensitive widening, which would have swallowed this row.
+		`// the operator runs task 1 before task 2 during a cut`,
+	}
+	for _, line := range mustNotMatch {
+		if m := re.FindString(line); m != "" {
+			t.Errorf("pattern is too broad — it flags ordinary prose about published vocabulary as internal (matched %q):\n\t%s", m, line)
+		}
+	}
+
+	// Boundary rows for the JOINING widening. Joining makes wrapped citations
+	// reachable, but it can also MANUFACTURE a reference that exists in neither
+	// line — so these rows pin that it does not. The markdown case is the one
+	// that actually bit: `*` was briefly treated as a comment marker, and two
+	// adjacent bullets joined into a `spec <date>` that nobody wrote.
+	mustNotMatchWrapped := []string{
+		"* Validated against the published FHIR spec\n* 2026-08-10 was the cut date for this line",
+		"// The FHIR specification lists the profile set; the cut\n// date 2026-08-10 is recorded in the published release notes.",
+	}
+	for _, block := range mustNotMatchWrapped {
+		for _, u := range sweepUnits(block) {
+			if !u.joined {
+				continue
+			}
+			if m := re.FindString(u.text); m != "" {
+				t.Errorf("joining MANUFACTURED an internal reference that is in neither source line (matched %q, joined: %q):\n\t%s", m, u.text, block)
+			}
+		}
+	}
+}
 
 // TestNoInternalTokens keeps the published gateway snapshot free of internal
 // planning vocabulary BY CONSTRUCTION, rather than by a manual grep at publish
@@ -118,16 +290,24 @@ func TestNoInternalTokens(t *testing.T) {
 			return nil // binary
 		}
 		allowed := sweepAllowlist[rel]
-		for i, line := range strings.Split(string(b), "\n") {
-			m := re.FindString(line)
-			if m == "" {
+		// Keyed by line AND token: an operator scrubbing a cut has to see
+		// EVERY offense, so one token must never suppress the report of a
+		// different token that happens to share its comment run.
+		reported := map[reportKey]bool{}
+		for _, u := range sweepUnits(string(b)) {
+			if sweepLineAllowed(u.text, allowed) {
 				continue
 			}
-			if sweepLineAllowed(line, allowed) {
-				continue
+			for _, m := range dedupe(re.FindAllString(u.text, -1)) {
+				// A joined run re-reports what its own lines already named.
+				// Suppress only THAT token, not the whole unit.
+				if u.joined && anyReported(reported, u.start, u.end, m) {
+					continue
+				}
+				reported[reportKey{u.start, m}] = true
+				t.Errorf("%s:%d: internal-vocabulary token %q leaks into the published module — reword to public vocabulary (published spec ids FR-G*/AI-G*/OWD-G*/UC-0X are fine), or add the line to sweepAllowlist with a WHY comment.\n\t%s",
+					rel, u.start, m, sweepExcerpt(u.text, m))
 			}
-			t.Errorf("%s:%d: internal-vocabulary token %q leaks into the published module — reword to public vocabulary (published spec ids FR-G*/AI-G*/OWD-G*/UC-0X are fine), or add the line to sweepAllowlist with a WHY comment.\n\t%s",
-				rel, i+1, m, strings.TrimSpace(line))
 		}
 		return nil
 	})
@@ -239,6 +419,132 @@ func worstReachOnLine(re *regexp.Regexp, line string) string {
 // two levels up, `../../..` is three.
 func escapeSegments(match string) int {
 	return strings.Count(match, "..")
+}
+
+// sweepCommentPrefix matches the comment marker that opens a continuation line
+// in the file types this sweep walks: Go/JS `//` and shell/Dockerfile/YAML `#`.
+//
+// `*` (a block-comment body) is DELIBERATELY absent. This module has no `/* */`
+// comments at all, so including it bought nothing — while markdown uses `*` for
+// bullets, and joining two adjacent bullets manufactures a reference that is in
+// neither one:
+//
+//   - Validated against the published FHIR spec
+//   - 2026-08-10 was the cut date for this line
+//
+// `gateway/` ships real markdown, so that false positive would have landed on
+// whoever next wrote release notes with adjacent bullets.
+var sweepCommentPrefix = regexp.MustCompile(`^\s*(?://+|#+)[ \t]?`)
+
+// sweepUnit is one chunk of a file the sweep matches against: either a raw
+// line, or a run of consecutive comment lines joined into one logical line.
+type sweepUnit struct {
+	start, end int // 1-indexed, inclusive; start == end for a raw line
+	text       string
+	joined     bool
+}
+
+// sweepUnits returns every raw line, PLUS each run of consecutive comment lines
+// joined into a single logical line reported at the run's first line.
+//
+// The joined form exists because a citation that WRAPS across a comment break is
+// otherwise structurally unreachable by EVERY arm of the pattern: the sweep
+// splits on "\n", so `(verbatim; spec` / `// 2026-07-17)` contains no single
+// line holding `spec <date>`. That is not hypothetical — two of the three
+// references that survived the #448 back-port were exactly this shape, and they
+// survived in the PUBLISHED v0.36.1 tag too, which is why that tag read as a
+// clean reference when it was not. A parenthetical citation at the end of a
+// sentence is precisely what wraps, so this class is the one most exposed to it.
+func sweepUnits(content string) []sweepUnit {
+	lines := strings.Split(content, "\n")
+	units := make([]sweepUnit, 0, len(lines)+8)
+	for i, line := range lines {
+		units = append(units, sweepUnit{start: i + 1, end: i + 1, text: line})
+	}
+	for i := 0; i < len(lines); {
+		prefix := sweepCommentPrefix.FindString(lines[i])
+		if prefix == "" {
+			i++
+			continue
+		}
+		j, parts := i, []string(nil)
+		for j < len(lines) {
+			p := sweepCommentPrefix.FindString(lines[j])
+			if p == "" {
+				break
+			}
+			parts = append(parts, strings.TrimSpace(lines[j][len(p):]))
+			j++
+		}
+		if len(parts) > 1 {
+			units = append(units, sweepUnit{
+				start: i + 1, end: j, text: strings.Join(parts, " "), joined: true,
+			})
+		}
+		i = j
+	}
+	return units
+}
+
+// sweepExcerpt trims the reported text to a window around the match. A joined
+// comment run can be an entire doc comment, and dumping all of it buries the
+// token the operator has to go and reword.
+func sweepExcerpt(text, match string) string {
+	text = strings.TrimSpace(text)
+	i := strings.Index(text, match)
+	if i < 0 {
+		return text
+	}
+	start, end := i-60, i+len(match)+60
+	prefix, suffix := "…", "…"
+	if start < 0 {
+		start, prefix = 0, ""
+	}
+	if end > len(text) {
+		end, suffix = len(text), ""
+	}
+	// These comments carry §, — and ⇒, so a byte offset can land mid-rune.
+	for start > 0 && !utf8.RuneStart(text[start]) {
+		start--
+	}
+	for end < len(text) && !utf8.RuneStart(text[end]) {
+		end++
+	}
+	return prefix + strings.TrimSpace(text[start:end]) + suffix
+}
+
+// reportKey identifies one reported offense: the line it was named at, and the
+// token that was named. Both, because a comment run can hold several distinct
+// tokens and each has to be reported on its own.
+type reportKey struct {
+	line  int
+	token string
+}
+
+// anyReported reports whether THIS token was already named on any line in
+// [start,end].
+func anyReported(reported map[reportKey]bool, start, end int, token string) bool {
+	for i := start; i <= end; i++ {
+		if reported[reportKey{i, token}] {
+			return true
+		}
+	}
+	return false
+}
+
+// dedupe removes repeated matches, preserving order: one line naming the same
+// token twice is one offense to reword.
+func dedupe(matches []string) []string {
+	seen := make(map[string]bool, len(matches))
+	out := matches[:0:0]
+	for _, m := range matches {
+		if seen[m] {
+			continue
+		}
+		seen[m] = true
+		out = append(out, m)
+	}
+	return out
 }
 
 func sweepLineAllowed(line string, allowed []string) bool {

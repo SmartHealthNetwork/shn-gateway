@@ -1114,8 +1114,8 @@ func (g *Gateway) OriginateLeg(ctx context.Context, r *http.Request, recipient, 
 
 // validatorForLine resolves the $validate lane for a contract LINE ("2.0", "2.1",
 // "2.2"; "" = no line in play — a version-neutral leg or a non-contract resource).
-// Spec 2026-08-11, F7 — a HAPI instance hosts exactly ONE version of an
-// IG, so per-line validation needs per-line lanes, never one lane reused.
+// A HAPI instance hosts exactly ONE version of an IG, so per-line validation
+// needs per-line lanes, never one lane reused.
 //
 // Resolution order, and why:
 //   - an explicitly configured lane for the line always wins;
@@ -1973,8 +1973,9 @@ func (g *Gateway) respondLeg(w http.ResponseWriter, r *http.Request, respFrame, 
 }
 
 // respondLegError seals a recipient's application NON-2xx answer as a v1 message
-// frame carrying the app status and relays it 200-to-Hub (verbatim; spec
-// 2026-07-17) — the error-branch sibling of respondLeg. buildResponseLeg is reused
+// frame carrying the app status and relays it 200-to-Hub (verbatim — the
+// payload-blind Hub never reinterprets an application answer), the
+// error-branch sibling of respondLeg. buildResponseLeg is reused
 // unchanged: the frame is just its payload. A non-negotiated (legacy) requester
 // gets the pre-v0.27.0 bare non-2xx (which the payload-blind Hub reports as its
 // generic mechanical 502). Callers MUST invoke this in the leg handler's
