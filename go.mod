@@ -9,15 +9,18 @@ go 1.26
 // retract is the only mechanism that reaches a consumer: `go get` warns, and the
 // version drops out of version selection. It is honored from the go.mod of a
 // LATER release, which is why these land in v0.36.2.
+// A `go get` warning shows only the FIRST LINE of the comment below each entry,
+// so each one leads with the whole reason in one sentence.
 retract (
-	// Returned 422 on attestation resumes (its shn-sdk v0.43.0 pin duplicated an
-	// amended QuestionnaireResponse answer), and shipped internal
-	// design-document references in comments. Superseded by v0.36.1.
+	// Withdrawn: shipped internal process vocabulary in source comments. Same
+	// code as v0.34.1 — move to v0.34.1 or later.
+	v0.34.0
+	// Withdrawn: returned 422 on attestation resumes, and shipped internal
+	// process vocabulary in source comments. Superseded by v0.36.1.
 	v0.36.0
-	// Carried internal design-document references in comments — none a secret,
-	// none affecting behavior — that a line-based, case-sensitive sweep could
-	// not see. Superseded by v0.36.2, which also replaces a partner's real payer
-	// and subscriber identifiers in the bundled seed fixture with synthetic ones.
+	// Withdrawn: bundled seed fixture carried a real payer's registry and
+	// subscriber identifiers, and source comments carried internal process
+	// vocabulary. Superseded by v0.36.2 — no behavior change between them.
 	v0.36.1
 )
 

@@ -8,7 +8,10 @@ import (
 
 // retractedVersions are the published versions withdrawn from version selection.
 // Adding one here without adding it to go.mod fails this test, and vice versa.
-var retractedVersions = []string{"v0.36.0", "v0.36.1"}
+// Every release that was DELETED for cause belongs here: deleting a tag removes
+// discoverability, it does not withdraw the module. See go.mod for the
+// measurement.
+var retractedVersions = []string{"v0.34.0", "v0.36.0", "v0.36.1"}
 
 // TestGoModRetainsRetractions: `retract` directives are only honored from the
 // HIGHEST released version's go.mod. Drop them in a later cut and both
