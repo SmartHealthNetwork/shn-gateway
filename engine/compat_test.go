@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"sort"
 	"testing"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
@@ -118,6 +119,81 @@ func TestNativeContractVersionsSanity(t *testing.T) {
 	for _, tok := range toks {
 		if shnsdk.LineOf(tok) == "" {
 			t.Fatalf("token %q has no line component (contract@line grammar violated)", tok)
+		}
+	}
+}
+
+// TestDEFG15_ChainArmDormantWhileEveryPublishedLineIsNative is the tripwire for
+// deferral DEF-G15 (partner onboarding requirements §8): the carry round-trip
+// probe in the partner self-conformance harness is deferred because no downcast
+// can leave this build today — route selection's chain arm (3) is shadowed by
+// native reach (arm (2)) whenever every line a peer can declare is one this
+// build constructs natively. FR-G53 (peers must preserve unrecognised
+// extensions — carry survivability) is therefore a latent obligation that the
+// transform boundary cannot verify and nobody has yet had to.
+//
+// Two checks, structural then behavioural:
+//  1. every line any compat-manifest row bridges is in the native set for its
+//     contract — a manifest row reaching a non-native line is the exact event
+//     that makes a downcast reachable;
+//  2. for every contract-bearing leg in the PA catalog and every published line
+//     of its contract, a peer declaring ONLY that line (this build declaring its
+//     default native set, every line laned) routes with an EMPTY chain.
+//
+// When this fails, do not loosen it: pull DEF-G15 in (ship the probe) and
+// retire this test in the same change. It names the deferral on purpose.
+func TestDEFG15_ChainArmDormantWhileEveryPublishedLineIsNative(t *testing.T) {
+	const pullIn = "DEF-G15: a downcast is now reachable — ship the carry round-trip probe (FR-G30) and retire this tripwire"
+
+	for _, contract := range nativeContracts() {
+		native := map[string]bool{}
+		for _, l := range nativeLinesForContract(contract) {
+			native[l] = true
+		}
+		for _, l := range manifestLinesForContract(contract) {
+			if !native[l] {
+				t.Errorf("%s manifest bridges line %s, which this build does not construct natively. %s", contract, l, pullIn)
+			}
+		}
+	}
+
+	fake := shnsdk.NewFakeValidator()
+	lanes := map[string]shnsdk.Validator{}
+	for _, contract := range nativeContracts() {
+		for _, l := range nativeLinesForContract(contract) {
+			lanes[l] = fake
+		}
+	}
+	legs := make([]string, 0, len(paCatalog))
+	for legType, spec := range paCatalog {
+		if spec.Contract != "" {
+			legs = append(legs, legType)
+		}
+	}
+	sort.Strings(legs)
+	if len(legs) == 0 {
+		t.Fatal("no contract-bearing legs in paCatalog — the behavioural half would be vacuous")
+	}
+	for _, legType := range legs {
+		contract := paCatalog[legType].Contract
+		lines := nativeLinesForContract(contract)
+		if len(lines) == 0 {
+			t.Errorf("%s names contract %q, which has no native lines — the behavioural check would pass vacuously for it", legType, contract)
+			continue
+		}
+		for _, line := range lines {
+			reg := shnsdk.NewRegistry()
+			reg.Set("peer", shnsdk.RegistryEntry{ID: "peer", Role: "payer",
+				ContractVersions: []string{contract + "@" + line}})
+			g := &Gateway{cfg: Config{Reg: reg, ValidatorsByLine: lanes}}
+			route, err := g.selectLegRoute("peer", legType)
+			if err != nil {
+				t.Errorf("%s to a peer declaring only %s@%s: refused (%v) — every published line must route natively", legType, contract, line, err)
+				continue
+			}
+			if len(route.Chain) != 0 {
+				t.Errorf("%s to a peer declaring only %s@%s selected a %d-step transform chain (route %+v). %s", legType, contract, line, len(route.Chain), route, pullIn)
+			}
 		}
 	}
 }

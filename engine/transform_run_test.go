@@ -128,18 +128,41 @@ func TestRunTransformChain_MultiCoverageSemanticChange(t *testing.T) {
 
 // injectItemWeight returns qrJSON (a bare QuestionnaireResponse) with a
 // dtrItemWeightExt extension appended to the first answer of the item
-// matching linkID — mirrors test/conformance/dtr_transform_live_test.go's
-// injectAnswerExtension (same rationale: a synthetic-but-realistic fixture
-// for the live-lane carry check without touching any checked-in golden).
+// matching linkID — at whatever depth it sits, on either QR nesting axis (the
+// sandbox questionnaire groups its leaves) — mirrors
+// test/conformance/dtr_transform_live_test.go's injectAnswerExtension (same
+// rationale: a synthetic-but-realistic fixture for the live-lane carry check
+// without touching any checked-in golden).
 func injectItemWeight(t *testing.T, qrJSON []byte, linkID string) []byte {
 	t.Helper()
 	var doc map[string]any
 	if err := json.Unmarshal(qrJSON, &doc); err != nil {
 		t.Fatalf("decode QR: %v", err)
 	}
+	var flatten func(items []any) []any
+	flatten = func(items []any) []any {
+		var out []any
+		for _, it := range items {
+			im, ok := it.(map[string]any)
+			if !ok {
+				continue
+			}
+			out = append(out, im)
+			sub, _ := im["item"].([]any)
+			out = append(out, flatten(sub)...)
+			answers, _ := im["answer"].([]any)
+			for _, a := range answers {
+				if am, ok := a.(map[string]any); ok {
+					asub, _ := am["item"].([]any)
+					out = append(out, flatten(asub)...)
+				}
+			}
+		}
+		return out
+	}
 	items, _ := doc["item"].([]any)
 	found := false
-	for _, it := range items {
+	for _, it := range flatten(items) {
 		im, ok := it.(map[string]any)
 		if !ok || im["linkId"] != linkID {
 			continue

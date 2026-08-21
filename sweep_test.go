@@ -57,26 +57,19 @@ import (
 // publish runbook. The fix for a match is the same as every class above:
 // state what the design note DECIDED, since a partner cannot read it.
 //
-// The final arm is the PARTNER NAME. It is here so the publish runbook can stop
-// carrying `grep -riI cambia` as a per-cut manual step — the last one it had.
-// A hand-run name grep is what let this module's seed fixture ship that payer's
-// NAIC-registry id and UAT subscriber id while returning zero hits: it matched
-// the NAME, and the fixture disclosed the IDENTITY. The identity half is closed
-// in the generator (internal/fhirseed's publication guard, which fails the bake
-// rather than the review); this arm closes the name half, over test files
-// included — they ship in the snapshot, and all three occurrences that used to
-// live in them were reworded in the same change that added this.
+// PARTNER NAMES are deliberately NOT an arm here, and the reason generalises to
+// anything you might be tempted to add: every token in this pattern is published,
+// because this file ships inside the module and must state its own pattern
+// literally. That is harmless for planning vocabulary — `S5b` and `ledger item 5`
+// mean nothing to an outsider — but for a partner's name the LIST ENTRY IS THE
+// DISCLOSURE. An arm here put five occurrences into every release.
 //
-// ⚠️ KNOWN TRADE-OFF, stated rather than glossed: this file ships too, and it
-// must state its own pattern literally (that is why it is in sweepSkipFiles), so
-// the partner name appears HERE — in a list of tokens the project scrubs. The
-// same is already true of `\bBo\b`, a maintainer's first name. So
-// `grep -riI cambia gateway/` returns this file, and nothing else. Splitting the
-// literal to dodge the grep would be the exact evasion this whole sweep exists
-// to catch, so it is not done. If the judgement is that ZERO partner-name bytes
-// may ship, the answer is to drop this arm and rely on the identity guard in
-// internal/fhirseed plus the previous-published-tag diff — NOT to obfuscate the
-// token here. That is an owner call about partner naming, not a code decision.
+// So that class is enforced from the root module instead, where the list does not
+// ship: test/conformance/gateway_partner_name_test.go walks this whole module and
+// runs in `make check`. Do not re-add it here, and do NOT split or obfuscate a
+// literal to satisfy a grep — that is the exact evasion these sweeps exist to
+// catch. The test decides where a future entry belongs: publishable if naming the
+// token discloses nothing, root-side if the name is itself the secret.
 //
 // Published spec ids are DELIBERATELY not in this pattern: FR-G*, AI-G*,
 // OWD-G* and UC-0X are partner-facing vocabulary (they appear in the published
@@ -84,8 +77,7 @@ import (
 const internalTokenPattern = `S5b|Task[ -][0-9]|(?i:\btask-[0-9])|per the plan|Material-|infra/|goldengen|shn-platform|\bE[0-9][a-z][0-9]?\b|\bD[0-9]\b` +
 	`|\bK1\b|PR #[0-9]+|#[0-9]{2,}\b|docs/superpowers|(?i:\bslice[ -][0-9]\b)|\bBo\b|review-fixes|\bround-[0-9]\b` +
 	`|ledger[ -][0-9]|(?i:ledger[ -]item[ -][0-9])|option[ -][A-Z] ruling|A′|\bA'[ .,)]|\bT-[0-9]\b|\b[SM]F[0-9]+\b` +
-	`|(?i:spec §|spec[ (]*[0-9]{4}-[0-9]{2}-[0-9]{2})` +
-	`|(?i:cambia)`
+	`|(?i:spec §|spec[ (]*[0-9]{4}-[0-9]{2}-[0-9]{2})`
 
 // sweepSkipFiles are the two module-root test files excluded from the sweep.
 //
@@ -167,10 +159,6 @@ func TestInternalTokenPattern_DesignDocRefForms(t *testing.T) {
 		// copy, so without an arm the next one would leak again unseen.
 		`// the per-service #16 alarm watches a single stream`,
 		`// resolved per ledger item 5 — the member fence stays`,
-		// The partner name, in the casings it actually appeared in before this
-		// change reworded all three test-file sites.
-		`// the Cambia lane, whose order-sign prefetch is a SEARCH template`,
-		`t.Fatalf("ingress status = %d, want 502 (cambia's real status)", rec.Code)`,
 	}
 	for _, line := range mustMatch {
 		if m := re.FindString(line); m == "" {

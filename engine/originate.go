@@ -451,10 +451,10 @@ type FilledItem struct {
 }
 
 // fillSummary reconstructs the []FilledItem summary from the ClinicalContext —
-// the same items AutoFill would have populated, in the same order. Called after
-// shnsdk.FillQuestionnaire (which drops FilledItem) to preserve the console surface.
-// Items with a negative/absent flag (prior-surgery=false, etc.) are omitted, matching
-// AutoFill's behaviour. functional-status-oswestry is intentionally absent (no local source).
+// the same leaves shnsdk.FillQuestionnaire answers, in the same order (the fill
+// carries no per-item summary, so the console surface is rebuilt here). Items with
+// a negative/absent flag (prior-surgery=false, etc.) are omitted, matching the
+// fill. functional-status-oswestry is intentionally absent (no local source).
 func fillSummary(cc shnsdk.ClinicalContext) []FilledItem {
 	var out []FilledItem
 	out = append(out, FilledItem{

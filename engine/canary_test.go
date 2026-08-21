@@ -43,8 +43,8 @@ func TestStubPersonas_CanaryClones(t *testing.T) {
 	}
 }
 
-// Rejection rows (valid request − one mutation → reject; CLAUDE.md guard
-// discipline): unknown personaSet and twin-less member must 400, never
+// Rejection rows (valid request − one mutation → reject; every guard ships its
+// rejection test): unknown personaSet and twin-less member must 400, never
 // silently fall through to the shared demo personas.
 func TestScenario_PersonaSetRejections(t *testing.T) {
 	g := newTestProviderGateway(t) // reuse the package's existing constructor helper

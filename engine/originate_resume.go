@@ -128,20 +128,21 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 	}
 	needed := neededItemCodes(neededItems)
 	return pendState{
-		scenario:    scenario,
-		qrJSON:      qrForSubmit,
-		srJSON:      res.srJSON,
-		patientRef:  res.patientRef,
-		coverageRef: res.coverageRef,
-		member:      res.member,
-		pci:         res.pci,
-		pasCorr:     pasCorr,
-		filled:      res.filled,
-		needed:      needed,
-		qrAnswers:   baseTrace,
-		payer:       res.payer,     // thread the REAL payer identity to the resume ClaimUpdate builders (FR-G40)
-		recipient:   res.recipient, // thread the coverage-derived payer HOLDER so the resume update legs route to it (FR-G40; no default)
-		pasToken:    route.Token,   // the pended-line pin — selected once, resumed verbatim
+		scenario:          scenario,
+		qrJSON:            qrForSubmit,
+		questionnaireJSON: res.questionnaireJSON,
+		srJSON:            res.srJSON,
+		patientRef:        res.patientRef,
+		coverageRef:       res.coverageRef,
+		member:            res.member,
+		pci:               res.pci,
+		pasCorr:           pasCorr,
+		filled:            res.filled,
+		needed:            needed,
+		qrAnswers:         baseTrace,
+		payer:             res.payer,     // thread the REAL payer identity to the resume ClaimUpdate builders (FR-G40)
+		recipient:         res.recipient, // thread the coverage-derived payer HOLDER so the resume update legs route to it (FR-G40; no default)
+		pasToken:          route.Token,   // the pended-line pin — selected once, resumed verbatim
 		// The pended leg's declared CARRY record, pinned beside the routed token:
 		// what THIS exchange's down-leg moved into shn-carried-content,
 		// so the resume leg can refuse a payload that no longer bears it. Empty
@@ -265,7 +266,7 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build manual item failed"})
 		return false
 	}
-	amendedQR, err := shnsdk.AmendQRWithItem(st.qrJSON, itemJSON)
+	amendedQR, err := shnsdk.AmendQRWithItemIn(st.qrJSON, st.questionnaireJSON, itemJSON)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "amend qr failed"})
 		return false
@@ -461,7 +462,7 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 	}
 
 	// Amend the QR with the patient-authored attested item (FR-21).
-	amendedQR, err := shnsdk.AmendQRWithItem(st.qrJSON, pdResp.AttestedItem)
+	amendedQR, err := shnsdk.AmendQRWithItemIn(st.qrJSON, st.questionnaireJSON, pdResp.AttestedItem)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "amend qr failed"})
 		return false

@@ -450,11 +450,18 @@ func (g *Gateway) recipientFor(coverageJSON []byte) (holderID string, status int
 // opaque token. The store is in-memory, Reset-cleared, no TTL — a documented
 // single-operator demo simplification (a production EHR would persist + expire).
 type pendState struct {
-	scenario    string // "uc06" or "uc07"
-	qrJSON      []byte
-	srJSON      []byte
-	patientRef  string
-	coverageRef string
+	scenario string // "uc06" or "uc07"
+	qrJSON   []byte
+	// questionnaireJSON is the bare Questionnaire the pended QR answers (extracted
+	// from the fetched $questionnaire-package at origination). The resume legs amend
+	// qrJSON with the attested item through shnsdk.AmendQRWithItemIn, which needs it
+	// to place that item where the questionnaire puts it — inside its group, or
+	// under its parent question's answer — rather than at the top level. In-memory
+	// like the rest of pendState.
+	questionnaireJSON []byte
+	srJSON            []byte
+	patientRef        string
+	coverageRef       string
 	// member is the BARE member id the pended submit stamped as the Coverage's
 	// urn:shn:coverage MB identifier value (that identifier is a member number, not a
 	// reference) and as the Claim's insurance[0].coverage LOGICAL reference — the same
