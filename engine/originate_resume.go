@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
@@ -268,6 +269,10 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 	}
 	amendedQR, err := shnsdk.AmendQRWithItemIn(st.qrJSON, st.questionnaireJSON, itemJSON)
 	if err != nil {
+		// The cause stays server-side (the wire body is the same opaque 500 as before),
+		// but it is LOGGED: a silent "amend qr failed" cost a CloudWatch dig to learn the
+		// amend had refused an undelivered adaptive-questionnaire item.
+		log.Printf("completeClinician: amend qr failed (linkId %s): %v", linkID, err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "amend qr failed"})
 		return false
 	}
@@ -464,6 +469,7 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 	// Amend the QR with the patient-authored attested item (FR-21).
 	amendedQR, err := shnsdk.AmendQRWithItemIn(st.qrJSON, st.questionnaireJSON, pdResp.AttestedItem)
 	if err != nil {
+		log.Printf("completePatient: amend qr failed (linkId %s): %v", linkID, err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "amend qr failed"})
 		return false
 	}
