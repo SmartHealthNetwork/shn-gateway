@@ -166,6 +166,13 @@ func (s *sandboxResponder) Handle(ctx context.Context, leg, corrID, subjectPCI s
 		}
 		return s.crdCardsForCode(line, code)
 	case "dtr-questionnaire-fetch":
+		// An SDC adaptive $next-question round is REFUSED here, explicitly: the sandbox serves
+		// no adaptive questionnaire, and the published QuestionnaireFetchRequest parse below
+		// would otherwise drop the carriage and answer with a package — a wrong-shape answer
+		// the originator must never mistake for a delivered group.
+		if _, isNextQuestion := nextQuestionRequestSubject(requestFHIR); isNextQuestion {
+			return LegResult{Status: http.StatusBadRequest, Message: "adaptive $next-question is not served by the sandbox responder"}, nil
+		}
 		var fetch shnsdk.QuestionnaireFetchRequest
 		if err := json.Unmarshal(requestFHIR, &fetch); err != nil {
 			// Malformed CLIENT request body → 400 (today's handleDTRInbound returned

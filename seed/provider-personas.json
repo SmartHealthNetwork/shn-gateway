@@ -689,6 +689,56 @@
       }
     },
     {
+      "fullUrl": "ClinicalImpression/ci-mbrpduc04-pt",
+      "resource": {
+        "resourceType": "ClinicalImpression",
+        "id": "ci-mbrpduc04-pt",
+        "status": "completed",
+        "description": "Home physical therapy functional assessment",
+        "subject": {
+          "reference": "Patient/MBR-PD-UC04"
+        },
+        "problem": [
+          {
+            "reference": "Condition/cond-mbrpduc04-i639"
+          }
+        ],
+        "summary": "Post-stroke right-sided hemiparesis with impaired gait and balance; requires contact-guard assistance for ambulation and transfers; unable to negotiate stairs independently."
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ClinicalImpression/ci-mbrpduc04-pt"
+      }
+    },
+    {
+      "fullUrl": "Goal/goal-mbrpduc04-pt",
+      "resource": {
+        "resourceType": "Goal",
+        "id": "goal-mbrpduc04-pt",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-goal"
+          ]
+        },
+        "lifecycleStatus": "active",
+        "description": {
+          "text": "Restore independent household ambulation with a single-point cane and safe, independent bed and chair transfers within 8 weeks of skilled home physical therapy."
+        },
+        "subject": {
+          "reference": "Patient/MBR-PD-UC04"
+        },
+        "addresses": [
+          {
+            "reference": "Condition/cond-mbrpduc04-i639"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Goal/goal-mbrpduc04-pt"
+      }
+    },
+    {
       "fullUrl": "ServiceRequest/sr-mbrpduc04-g0151",
       "resource": {
         "resourceType": "ServiceRequest",
@@ -728,6 +778,14 @@
         "reasonReference": [
           {
             "reference": "Condition/cond-mbrpduc04-i639"
+          }
+        ],
+        "supportingInfo": [
+          {
+            "reference": "ClinicalImpression/ci-mbrpduc04-pt"
+          },
+          {
+            "reference": "Goal/goal-mbrpduc04-pt"
           }
         ]
       },
@@ -1312,6 +1370,56 @@
       }
     },
     {
+      "fullUrl": "ClinicalImpression/ci-mbrpduc06-pt",
+      "resource": {
+        "resourceType": "ClinicalImpression",
+        "id": "ci-mbrpduc06-pt",
+        "status": "completed",
+        "description": "Home physical therapy functional assessment",
+        "subject": {
+          "reference": "Patient/MBR-PD-UC06"
+        },
+        "problem": [
+          {
+            "reference": "Condition/cond-mbrpduc06-m6281"
+          }
+        ],
+        "summary": "Generalized lower-extremity weakness with reduced endurance; ambulates short household distances with a walker and standby assistance; unable to rise from a chair without arm support."
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ClinicalImpression/ci-mbrpduc06-pt"
+      }
+    },
+    {
+      "fullUrl": "Goal/goal-mbrpduc06-pt",
+      "resource": {
+        "resourceType": "Goal",
+        "id": "goal-mbrpduc06-pt",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-goal"
+          ]
+        },
+        "lifecycleStatus": "active",
+        "description": {
+          "text": "Regain independent sit-to-stand transfers and community-distance ambulation with a walker within 6 weeks of skilled home physical therapy."
+        },
+        "subject": {
+          "reference": "Patient/MBR-PD-UC06"
+        },
+        "addresses": [
+          {
+            "reference": "Condition/cond-mbrpduc06-m6281"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Goal/goal-mbrpduc06-pt"
+      }
+    },
+    {
       "fullUrl": "ServiceRequest/sr-mbrpduc06-g0151",
       "resource": {
         "resourceType": "ServiceRequest",
@@ -1351,6 +1459,14 @@
         "reasonReference": [
           {
             "reference": "Condition/cond-mbrpduc06-m6281"
+          }
+        ],
+        "supportingInfo": [
+          {
+            "reference": "ClinicalImpression/ci-mbrpduc06-pt"
+          },
+          {
+            "reference": "Goal/goal-mbrpduc06-pt"
           }
         ]
       },
@@ -1637,6 +1753,56 @@
       }
     },
     {
+      "fullUrl": "ClinicalImpression/ci-mbrpduc07-pt",
+      "resource": {
+        "resourceType": "ClinicalImpression",
+        "id": "ci-mbrpduc07-pt",
+        "status": "completed",
+        "description": "Home physical therapy functional assessment",
+        "subject": {
+          "reference": "Patient/MBR-PD-UC07"
+        },
+        "problem": [
+          {
+            "reference": "Condition/cond-mbrpduc07-m6281"
+          }
+        ],
+        "summary": "Deconditioning with generalized muscle weakness; ambulation limited to short household distances with a front-wheeled walker and supervision."
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ClinicalImpression/ci-mbrpduc07-pt"
+      }
+    },
+    {
+      "fullUrl": "Goal/goal-mbrpduc07-pt",
+      "resource": {
+        "resourceType": "Goal",
+        "id": "goal-mbrpduc07-pt",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-goal"
+          ]
+        },
+        "lifecycleStatus": "active",
+        "description": {
+          "text": "Return to independent household ambulation and stair negotiation with a handrail within 6 weeks of skilled home physical therapy."
+        },
+        "subject": {
+          "reference": "Patient/MBR-PD-UC07"
+        },
+        "addresses": [
+          {
+            "reference": "Condition/cond-mbrpduc07-m6281"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Goal/goal-mbrpduc07-pt"
+      }
+    },
+    {
       "fullUrl": "ServiceRequest/sr-mbrpduc07-g0151",
       "resource": {
         "resourceType": "ServiceRequest",
@@ -1676,6 +1842,14 @@
         "reasonReference": [
           {
             "reference": "Condition/cond-mbrpduc07-m6281"
+          }
+        ],
+        "supportingInfo": [
+          {
+            "reference": "ClinicalImpression/ci-mbrpduc07-pt"
+          },
+          {
+            "reference": "Goal/goal-mbrpduc07-pt"
           }
         ]
       },

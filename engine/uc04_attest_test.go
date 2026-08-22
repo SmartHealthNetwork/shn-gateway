@@ -18,7 +18,7 @@ func TestUC04AttestationAnswers_FromSeededOrder(t *testing.T) {
 		"reasonCode":[{"coding":[{"system":"http://hl7.org/fhir/sid/icd-10-cm","code":"I63.9","display":"Cerebral infarction, unspecified"}]}],
 		"subject":{"reference":"Patient/MBR-PD-UC04"}
 	}`)
-	answers, err := uc04AttestationAnswers(order)
+	answers, err := uc04AttestationAnswers(order, nil)
 	if err != nil {
 		t.Fatalf("uc04AttestationAnswers: unexpected error: %v", err)
 	}
@@ -53,7 +53,7 @@ func TestUC04AttestationAnswers_DxFromReasonText(t *testing.T) {
 		"reasonCode":[{"text":"Cerebral infarction"}],
 		"subject":{"reference":"Patient/MBR-PD-UC04"}
 	}`)
-	answers, err := uc04AttestationAnswers(order)
+	answers, err := uc04AttestationAnswers(order, nil)
 	if err != nil {
 		t.Fatalf("uc04AttestationAnswers: unexpected error: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestUC04AttestationAnswers_NoProductCoding_Errors(t *testing.T) {
 		"reasonCode":[{"coding":[{"display":"X"}]}],
 		"subject":{"reference":"Patient/MBR-PD-UC04"}
 	}`)
-	if _, err := uc04AttestationAnswers(order); err == nil {
+	if _, err := uc04AttestationAnswers(order, nil); err == nil {
 		t.Fatalf("expected an error for an order with no {CPT,HCPCS} product coding, got nil")
 	}
 }

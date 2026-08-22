@@ -13,6 +13,7 @@ below, see [CONFIGURATION.md](CONFIGURATION.md).
 - [Authenticating to your backend (SMART Backend Services)](#authenticating-to-your-backend-smart-backend-services)
 - [Provider-data origination](#provider-data-origination)
 - [Native Da Vinci ingress](#native-da-vinci-ingress)
+  - [Calling the ingress from your EHR](#calling-the-ingress-from-your-ehr)
 - [A non-FHIR backend (custom connector)](#a-non-fhir-backend-custom-connector)
 - [Payer decisioning](#payer-decisioning)
 - [Native-forward payer mode](#native-forward-payer-mode)
@@ -153,6 +154,106 @@ CONFIGURATION.md](CONFIGURATION.md#accept-da-vinci-requests-from-a-provider-ehr-
 for the full field reference, the SMART Backend Services inbound authentication
 model, and the private-integration rule (this ingress is never a public-internet
 surface — only the gateway↔Hub leg is).
+
+### Calling the ingress from your EHR
+
+The ingress is the one place where a system **you** run authenticates *to the
+gateway* — everywhere else in this guide, the gateway authenticates to you. Two
+things are easy to conflate here:
+
+- The **secrets bundle** (`SHN_SECRETS`: `manifest.json`, `sign.key`, `enc.key`)
+  is the gateway's own identity toward the SHN network. The gateway uses it to
+  authenticate *itself* to the Hub. It is never turned into a bearer token, and
+  your EHR or integration engine never touches it.
+- **Inbound** requests authenticate against a small **SMART Backend Services**
+  authorization server built into the gateway. It issues its own bearers at
+  `POST /oauth/token`, and the only clients it trusts are the ones you list in
+  `INGRESS_CLIENTS_FILE`. It does not accept tokens from any other issuer, and
+  nothing for this side is issued by SHN.
+
+Four steps, all on your side:
+
+1. **Generate a key pair for the calling system** — EC P-384 (`ES384`) or RSA
+   (`RS384`), exactly as in
+   [Authenticating to your backend](#authenticating-to-your-backend-smart-backend-services)
+   step 1. The private key stays with the caller.
+
+2. **Register its public key with the gateway.** Add an entry to the JSON array
+   in `INGRESS_CLIENTS_FILE` (the `client_id` is any string you choose) and
+   restart the gateway:
+
+   ```json
+   [
+     {
+       "client_id": "my-ehr",
+       "alg": "ES384",
+       "public_key_pem": "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+       "scopes": ["system/Davinci.write"]
+     }
+   ]
+   ```
+
+   `GET {PROVIDER_DAVINCI_INGRESS_BASE_URL}/.well-known/smart-configuration`
+   confirms the ingress is up and reports the exact `token_endpoint` to use.
+
+3. **Exchange a signed assertion for a bearer.** Sign a JWT with the private key
+   from step 1 — standard SMART Backend Services / RFC 7523 client
+   authentication — and POST it form-encoded to the token endpoint:
+
+   | Claim | What the gateway requires |
+   |---|---|
+   | header `alg` | the `alg` you registered (`ES384` or `RS384`); anything else is rejected |
+   | `iss`, `sub` | both your `client_id` |
+   | `aud` | exactly the `token_endpoint` from `smart-configuration`, i.e. `{PROVIDER_DAVINCI_INGRESS_BASE_URL}/oauth/token` — pinned from config, not taken from the request's `Host` |
+   | `exp` | required, and at most 5 minutes in the future |
+   | `jti` | required and unique — each assertion is accepted once |
+
+   ```sh
+   BASE=https://gateway.internal.example   # your PROVIDER_DAVINCI_INGRESS_BASE_URL
+   curl -s "$BASE/oauth/token" \
+     -d grant_type=client_credentials \
+     -d client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer \
+     -d client_assertion="$ASSERTION" \
+     -d scope=system/Davinci.write
+   # → {"access_token":"eyJ…","token_type":"bearer","expires_in":300,"scope":"system/Davinci.write"}
+   ```
+
+   `scope` is optional; if you send one it must be among the client's registered
+   `scopes`. Bearers live **5 minutes** and are signed with a key the gateway
+   generates at startup, so a restart invalidates outstanding bearers — fetch one
+   per run rather than caching across sessions.
+
+4. **Call the ingress with the bearer:**
+
+   ```sh
+   curl -s "$BASE/Claim/\$submit" \
+     -H "Authorization: Bearer $TOKEN" \
+     -H 'Content-Type: application/json' \
+     --data-binary @pas-bundle.json
+   ```
+
+   The header is exactly `Authorization: Bearer <token>` (canonical casing, one
+   space). A missing or rejected bearer returns `401` with the body
+   `{"error":"ingress authentication required"}`. If you see a different 401
+   body, something in front of the gateway is answering, not the gateway.
+
+**Alternative — present the signed JWT directly.** The ingress also accepts a
+registered client's self-signed JWT *as* the bearer, with no token call (the
+UDAP B2B form). Same key, same registration; the claims differ slightly:
+
+| Claim | What the gateway requires |
+|---|---|
+| header `alg` | the `alg` you registered (`ES384` or `RS384`) |
+| `iss` | your `client_id` |
+| `sub` | optional; if present, must equal `iss` |
+| `aud` | the endpoint you are calling (e.g. `{BASE}/Claim/$submit`) or `{BASE}` itself — any URL at or under the configured base |
+| `exp` | required, and at most 5 minutes in the future |
+| `jti` | required, but not single-use — the JWT is reusable until it expires |
+
+Token-endpoint errors are deliberately generic (`invalid_client`,
+`invalid_scope`, `unsupported_grant_type`, `invalid_request`) and never echo key
+or signature detail — check the assertion against the tables above rather than
+the response body.
 
 ## A non-FHIR backend (custom connector)
 

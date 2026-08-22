@@ -1689,7 +1689,7 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 		// order ($populate auto-pops nothing), then the lean single-shot tail (D-PD-1: no
 		// amendment). Every attested answer traces to the seeded order (res.srJSON); the attested QR
 		// is verdict-INERT — br-payer's A4→A1 is its pend-resolution timer, not a QR-driven verdict.
-		answers, err := uc04AttestationAnswers(res.srJSON)
+		answers, err := uc04AttestationAnswers(res.srJSON, g.cfg.SoR.ResolveByReference)
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 			return
@@ -1702,12 +1702,18 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 		// Attest at the selected DTR line (closes an earlier KNOWN GAP: this QR
 		// used to be built at the frozen 2.0 shape regardless of the selected line — the
 		// 2.2 two-RI run showed wrong-line QR bytes could pass SILENTLY, the UC-03 auto-fill
-		// site this closes).
-		attestedQR, err := shnsdk.FillQuestionnaireFromAnswersAtLine(res.dtrLine, res.questionnaireJSON, answers,
+		// site this closes). The HomeHealthAssessment is SDC-ADAPTIVE: the attestation
+		// drives $next-question so the group the attested answers belong to is DELIVERED
+		// before the fill (dtr_adaptive.go) — a fill over the package's group-1 tree alone
+		// drops every group-3 answer and puts 1.1 alone on the wire.
+		attestedQR, _, status, msg, err := g.attestAdaptiveQuestionnaire(ctx, r, res, answers,
 			"Organization/"+g.cfg.HolderID,
 			shnsdk.QRContext{PatientRef: res.patientRef, CoverageRef: res.coverageRef, OrderRef: orderRef, Authored: g.cfg.Clock()})
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "attest questionnaire failed"})
+		if status != 0 {
+			if g.relayOriginationError(w, err) {
+				return
+			}
+			writeJSON(w, status, map[string]string{"error": msg})
 			return
 		}
 		if status, msg := g.validateFHIR(ctx, attestedQR, "egress", res.dtrLine); status != 0 {

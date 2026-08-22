@@ -91,10 +91,18 @@ func dtrPackageRequireCoverage(line string, coverage json.RawMessage) error {
 // a partner requires as the `$questionnaire-package` `order` param (its questionnaire is
 // keyed off the order's coverage-assertion-id; it has no `questionnaire` param support). Order is
 // defined here, not in the published SDK, so the DEPLOYED payer gateway reads it without an SDK bump.
+//
+// NextQuestion turns the leg into an SDC adaptive $next-question round (dtr_adaptive.go): the
+// in-progress QuestionnaireResponse whose contained Questionnaire is the delivered-so-far tree
+// (derivedFrom the source canonical). The payer side forwards it to the partner's
+// Questionnaire/$next-question and relays the answer verbatim; the sandbox responder, which
+// serves no adaptive questionnaire, refuses it rather than answering with a package. Same
+// publish posture as Order: gateway-internal, both gateways read it without an SDK bump.
 type dtrLegRequest struct {
-	Canonical string          `json:"canonical"`
-	Coverage  json.RawMessage `json:"coverage,omitempty"`
-	Order     json.RawMessage `json:"order,omitempty"`
+	Canonical    string          `json:"canonical"`
+	Coverage     json.RawMessage `json:"coverage,omitempty"`
+	Order        json.RawMessage `json:"order,omitempty"`
+	NextQuestion json.RawMessage `json:"nextQuestion,omitempty"`
 }
 
 // buildQuestionnairePackageOrderRequest builds an order-driven $questionnaire-package Parameters

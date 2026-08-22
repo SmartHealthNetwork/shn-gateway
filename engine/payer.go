@@ -7,6 +7,7 @@ package engine
 
 import (
 	"net/http"
+	"strings"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
@@ -15,6 +16,19 @@ import (
 // up the Questionnaire fixture (unknown → 400), egress-validate it, and respond.
 func (g *Gateway) handleDTRInbound(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token, reqJSON []byte, answerTok string) {
 	ctx := r.Context()
+
+	// An SDC adaptive $next-question round carries a QuestionnaireResponse ABOUT A PATIENT
+	// (its answers so far), which a package fetch does not — so it gets the (A) bind every
+	// patient-bearing leg gets (the conformant PAS bind's rule): the carried subject must
+	// resolve to the token's subject, independently of what the responder does with it.
+	// Fails closed BEFORE the responder (and before any partner forward) sees the bytes.
+	nextQuestionSubject, isNextQuestion := nextQuestionRequestSubject(reqJSON)
+	if isNextQuestion {
+		if status, msg := g.bindNextQuestionSubject(nextQuestionSubject, tok.Subject); status != 0 {
+			writeJSON(w, status, map[string]string{"error": msg})
+			return
+		}
+	}
 
 	result, err := g.cfg.Responder.Handle(ctx, "dtr-questionnaire-fetch", env.Metadata.CorrelationID, tok.Subject, reqJSON)
 	if err != nil {
@@ -28,7 +42,14 @@ func (g *Gateway) handleDTRInbound(w http.ResponseWriter, r *http.Request, env s
 			env.Metadata.CorrelationID, result, tok.Subject, env.Metadata.Sender, "", answerTok)
 		return
 	}
-	if status, msg := g.fenceResponseSubject("dtr-questionnaire-fetch", "", result); status != 0 {
+	if isNextQuestion {
+		// (C) for the adaptive round: the answered QuestionnaireResponse must be about the
+		// SAME patient the request carried — a partner (or a relay) must not swap the subject.
+		if status, msg := fenceNextQuestionSubject(nextQuestionSubject, result); status != 0 {
+			writeJSON(w, status, map[string]string{"error": msg})
+			return
+		}
+	} else if status, msg := g.fenceResponseSubject("dtr-questionnaire-fetch", "", result); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
@@ -60,6 +81,44 @@ func (g *Gateway) handleDTRInbound(w http.ResponseWriter, r *http.Request, env s
 	// Stamp honesty: a verbatim foreign package is relayed UNSTAMPED (the same rule as the PAS
 	// relay); an SHN-produced package is stamped at the line it was built at.
 	g.respondLeg(w, r, "payer-coverage", "dtr-questionnaire", "dtr-questionnaire-fetch", env.Metadata.CorrelationID, result.ResponseFHIR, tok.Subject, env.Metadata.Sender, "", answerTok, result.ResponseRelayed)
+}
+
+// bindNextQuestionSubject is the (A) inbound bind for an adaptive $next-question round:
+// the carried QuestionnaireResponse's subject ("Patient/<member>", the member namespace) must
+// resolve — via this holder's OWN SystemOfRecord, never the payload — to the token's subject
+// PCI. Mirrors conformantPASBind: unknown member → 400, mismatch → 403.
+func (g *Gateway) bindNextQuestionSubject(subject, tokenSubject string) (int, string) {
+	member := strings.TrimPrefix(subject, "Patient/")
+	if member == "" || member == subject {
+		return http.StatusBadRequest, "next-question request carries no patient subject"
+	}
+	pci, _, found := g.cfg.SoR.ResolvePatient(member)
+	if !found {
+		return http.StatusBadRequest, "unknown member"
+	}
+	if pci != tokenSubject {
+		return http.StatusForbidden, "token subject does not match request patient"
+	}
+	return 0, ""
+}
+
+// fenceNextQuestionSubject is the (C) outbound fence for an adaptive $next-question round:
+// the answered questionnaire-response must name the patient the request carried. A
+// non-2xx relay (result.Status set) carries no QuestionnaireResponse and passes through to
+// respondLegError untouched; an unparseable 2xx is refused (502) rather than relayed blind.
+func fenceNextQuestionSubject(requestSubject string, res LegResult) (int, string) {
+	if res.Status != 0 {
+		return 0, ""
+	}
+	qr, _, err := parseNextQuestionResponse(res.ResponseFHIR)
+	if err != nil {
+		return http.StatusBadGateway, "next-question response is not a questionnaire-response"
+	}
+	subj, serr := questionnaireResponseSubject(qr)
+	if serr != nil || subj != requestSubject {
+		return http.StatusForbidden, "response patient does not match request patient"
+	}
+	return 0, ""
 }
 
 // fenceResponseSubject is the (C) outbound fence: a connector must not swap the

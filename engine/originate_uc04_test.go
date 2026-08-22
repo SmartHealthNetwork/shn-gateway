@@ -25,10 +25,10 @@ func TestHandleUC04_ProviderDataAttestsAndLeanTail(t *testing.T) {
 
 	// provider-data lane: attest off the seeded order, then the lean tail.
 	for _, want := range []string{
-		"uc04AttestationAnswers(res.srJSON)",       // build the attestation map FROM the seeded order
-		"FillQuestionnaireFromAnswers",             // attest the questionnaire (re-fill, $populate auto-pops nothing)
-		"g.submitClaimAndResolve(ctx, r, res.pci,", // the lean single-shot PAS tail (no amendment leg)
-		"attestedAnswerValues(answers)",            // surface the traces-to-seed evidence
+		"uc04AttestationAnswers(res.srJSON, g.cfg.SoR.ResolveByReference)", // build the attestation map FROM the seeded order (+ its supportingInfo)
+		"g.attestAdaptiveQuestionnaire(ctx, r, res, answers,",              // attest the questionnaire — adaptive-aware ($next-question first), re-fill ($populate auto-pops nothing)
+		"g.submitClaimAndResolve(ctx, r, res.pci,",                         // the lean single-shot PAS tail (no amendment leg)
+		"attestedAnswerValues(answers)",                                    // surface the traces-to-seed evidence
 	} {
 		if !strings.Contains(fn, want) {
 			t.Fatalf("handleUC04 provider-data branch missing %q", want)

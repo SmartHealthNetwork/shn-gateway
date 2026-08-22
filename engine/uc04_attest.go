@@ -14,6 +14,14 @@
 //   - linkId 3.1 (primary diagnosis, a text answer): the dx display read from the order's reasonCode
 //     (coding.display, falling back to the CodeableConcept text). Read FROM the order — never
 //     hardcoded.
+//   - linkId 3.2 (functional limitations, text) and 3.3 (treatment goals, text): the rest of the
+//     HomeHealthAssessment's Physical Therapy group, which the questionnaire REQUIRES. A home
+//     physical-therapy referral in an EHR carries the clinician's functional assessment and the
+//     plan-of-care goals beside the order; the persona seeds them as a ClinicalImpression (its
+//     summary = the functional limitations) and a Goal (its description = the treatment goals),
+//     both referenced from ServiceRequest.supportingInfo, and the attestation READS them through
+//     the provider's own SystemOfRecord (ResolveByReference). Absent from the record ⇒ omitted,
+//     and the fill's honesty guard then refuses the delivered group rather than fabricate.
 //
 // HONESTY FENCE: every attested answer traces to the seeded order; we never hardcode a value to
 // match the payer; the QR is VERDICT-INERT — br-payer's verdict is a code-keyed CQL constant on
@@ -35,8 +43,9 @@ const snomedSystem = "http://snomed.info/sct"
 // product coding (we cannot attest a service category we cannot derive from the order). The dx
 // (3.1) is best-effort: when the order has no reasonCode display/text, 3.1 is omitted (3.1 is
 // optional on the questionnaire; only 1.1 + a present 3.1 are the load-bearing traces-to-seed
-// evidence).
-func uc04AttestationAnswers(orderJSON []byte) (map[string]shnsdk.Answer, error) {
+// evidence). resolve is the provider's SystemOfRecord reference resolver (ResolveByReference)
+// for the order's supportingInfo (3.2 / 3.3); nil, or a record that does not resolve, omits them.
+func uc04AttestationAnswers(orderJSON []byte, resolve func(ref string) ([]byte, bool)) (map[string]shnsdk.Answer, error) {
 	// 1.1 — service category, derived from the order's product code. Fail closed if absent: this
 	// fence also enforces the orderSource product-coding contract for the provider-data UC-04 lane.
 	if _, _, _, err := shnsdk.ParseOrderProductCoding(orderJSON); err != nil {
@@ -61,7 +70,70 @@ func uc04AttestationAnswers(orderJSON []byte) (map[string]shnsdk.Answer, error) 
 		answers["3.1"] = shnsdk.Answer{String: &dx}
 	}
 
+	// 3.2 / 3.3 — the PT assessment and goals the order's supportingInfo references, read
+	// through the SoR (traces to seed; absent ⇒ omitted, never invented).
+	if resolve != nil {
+		limitations, goals := orderSupportingAssessment(orderJSON, resolve)
+		if limitations != "" {
+			answers["3.2"] = shnsdk.Answer{String: &limitations}
+		}
+		if goals != "" {
+			answers["3.3"] = shnsdk.Answer{String: &goals}
+		}
+	}
+
 	return answers, nil
+}
+
+// orderSupportingAssessment resolves the order's supportingInfo references and reads the first
+// ClinicalImpression's summary (the functional limitations, 3.2) and the first Goal's
+// description text (the treatment goals, 3.3). Unresolvable or other-typed references are
+// skipped; "" means the record holds no such fact.
+func orderSupportingAssessment(orderJSON []byte, resolve func(ref string) ([]byte, bool)) (limitations, goals string) {
+	var probe struct {
+		SupportingInfo []struct {
+			Reference string `json:"reference"`
+		} `json:"supportingInfo"`
+	}
+	if err := json.Unmarshal(orderJSON, &probe); err != nil {
+		return "", ""
+	}
+	for _, si := range probe.SupportingInfo {
+		if si.Reference == "" {
+			continue
+		}
+		raw, ok := resolve(si.Reference)
+		if !ok {
+			continue
+		}
+		var rt struct {
+			ResourceType string `json:"resourceType"`
+		}
+		if err := json.Unmarshal(raw, &rt); err != nil {
+			continue
+		}
+		// Parsed per type: ClinicalImpression.description is a string, Goal.description a
+		// CodeableConcept — one shared probe would fail to unmarshal one of them.
+		switch rt.ResourceType {
+		case "ClinicalImpression":
+			var ci struct {
+				Summary string `json:"summary"`
+			}
+			if err := json.Unmarshal(raw, &ci); err == nil && limitations == "" {
+				limitations = ci.Summary
+			}
+		case "Goal":
+			var goal struct {
+				Description struct {
+					Text string `json:"text"`
+				} `json:"description"`
+			}
+			if err := json.Unmarshal(raw, &goal); err == nil && goals == "" {
+				goals = goal.Description.Text
+			}
+		}
+	}
+	return limitations, goals
 }
 
 // orderReasonDisplay reads the human-readable primary diagnosis from a FHIR order's first

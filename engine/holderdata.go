@@ -434,6 +434,30 @@ var stubPersonas = map[string]persona{
 		demo:    Demo{BirthDate: "1956-04-09", FamilyName: "Diallo-OxygenConcentrator"},
 		inforce: true,
 	},
+	// MBR-PD-UC04 / MBR-PD-UC06 / MBR-PD-UC07 — the provider-data ORDER-SELECT attestation
+	// personas (the HomeHealthAssessment G0151 lane: UC-04 single-shot, UC-06 clinician
+	// attestation, UC-07 patient attestation). Same rule as MBR-OX/MBR-PD-UC03 above: their
+	// provider-side facts (Patient/ServiceRequest/Coverage/ClinicalImpression/Goal) come from the
+	// published provider-data persona bundle loaded into a real FHIR SoR, but the PAYER-side
+	// inbound binds (the conformant PAS bind and the adaptive $next-question bind) resolve the
+	// member against THIS stub when the payer gateway boots on the memstub default — the
+	// hermetic provider-data harness. Demo values are copied VERBATIM from
+	// internal/fhirseed/fhirseed.go's demographics table (the single seed source of truth) —
+	// they MUST match exactly, or the payer-computed PCI diverges from the provider-computed
+	// one and the bind 403s "token subject does not match". No clinical context: the HHA lane
+	// attests from the seeded order, never from ClinicalContext.
+	"MBR-PD-UC04": {
+		demo:    Demo{BirthDate: "1949-03-22", FamilyName: "Castellano-HomeHealth"},
+		inforce: true,
+	},
+	"MBR-PD-UC06": {
+		demo:    Demo{BirthDate: "1957-11-03", FamilyName: "Okonkwo-HomeHealth"},
+		inforce: true,
+	},
+	"MBR-PD-UC07": {
+		demo:    Demo{BirthDate: "1960-08-14", FamilyName: "Nwosu-PatientAttest"},
+		inforce: true,
+	},
 }
 
 // Canary twins are generated, never hand-copied: each clones its original's

@@ -44,9 +44,14 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 	// mixed provenance). Verdict-INERT — HHA is 0-CQL and br-payer's A4→A1 is its pend-resolution
 	// timer. sandbox and UC-07 keep res.qrJSON byte-unchanged.
 	qrForSubmit := res.qrJSON
+	// questionnaireJSON is the tree the pended QR was filled against — for an SDC-adaptive
+	// questionnaire the tree GROWN by the $next-question rounds (dtr_adaptive.go), not the
+	// package's first group(s). It is pinned into pendState so the resume leg's amendment
+	// places its item where THAT tree puts it (3.2 inside group 3), never at the top level.
+	questionnaireJSON := res.questionnaireJSON
 	var baseTrace map[string]string
 	if g.cfg.OriginationProfile == "provider-data" && (scenario == "uc06" || scenario == "uc07") {
-		answers, err := uc04AttestationAnswers(res.srJSON)
+		answers, err := uc04AttestationAnswers(res.srJSON, g.cfg.SoR.ResolveByReference)
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 			return pendState{}, false
@@ -59,12 +64,17 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 		// Attest at the selected DTR line (closes an earlier KNOWN GAP: this QR
 		// used to be built at the frozen 2.0 shape regardless of the selected line — the
 		// 2.2 two-RI run showed wrong-line QR bytes could pass SILENTLY, the UC-03 auto-fill
-		// site this closes).
-		qrForSubmit, err = shnsdk.FillQuestionnaireFromAnswersAtLine(res.dtrLine, res.questionnaireJSON, answers,
+		// site this closes). Adaptive: drive $next-question first (see handleUC04).
+		var status int
+		var msg string
+		qrForSubmit, questionnaireJSON, status, msg, err = g.attestAdaptiveQuestionnaire(ctx, r, res, answers,
 			"Organization/"+g.cfg.HolderID,
 			shnsdk.QRContext{PatientRef: res.patientRef, CoverageRef: res.coverageRef, OrderRef: orderRef, Authored: g.cfg.Clock()})
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "attest base questionnaire failed"})
+		if status != 0 {
+			if g.relayOriginationError(w, err) {
+				return pendState{}, false
+			}
+			writeJSON(w, status, map[string]string{"error": msg})
 			return pendState{}, false
 		}
 		if status, msg := g.validateFHIR(ctx, qrForSubmit, "egress", res.dtrLine); status != 0 {
@@ -131,7 +141,7 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 	return pendState{
 		scenario:          scenario,
 		qrJSON:            qrForSubmit,
-		questionnaireJSON: res.questionnaireJSON,
+		questionnaireJSON: questionnaireJSON,
 		srJSON:            res.srJSON,
 		patientRef:        res.patientRef,
 		coverageRef:       res.coverageRef,

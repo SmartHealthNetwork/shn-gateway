@@ -565,6 +565,27 @@ func (n *nativeResponder) Handle(ctx context.Context, leg, corrID, subjectPCI st
 		if err := json.Unmarshal(requestFHIR, &fetch); err != nil || (fetch.Canonical == "" && len(fetch.Order) == 0) {
 			return LegResult{Status: http.StatusBadRequest, Message: "parse questionnaire fetch failed"}, nil
 		}
+		if len(fetch.NextQuestion) > 0 {
+			// An SDC adaptive $next-question round (dtr_adaptive.go): forward the carried
+			// QuestionnaireResponse as the op's questionnaire-response input and relay the
+			// partner's answer VERBATIM — the same stamp-honesty posture as the package relay
+			// below (bytes this build did not produce: egress $validate stands down, the
+			// frame stays unstamped). The answer's subject is fenced on the payer side
+			// (payer.go) against the request's, and on the provider side against the patient.
+			params, err := buildNextQuestionParameters(fetch.NextQuestion)
+			if err != nil {
+				return LegResult{}, err // marshal fault → 500 (gateway fault)
+			}
+			nqURL := n.resolvedURL(ctx, contract, n.baseURL, "/Questionnaire/$next-question")
+			body, bad, err := n.post(ctx, nqURL, "", params, "DTR next-question")
+			if err != nil {
+				return LegResult{}, err // no-response fault → engine 500 → "hub routing failed"
+			}
+			if bad.Status != 0 {
+				return bad, nil // upstream non-2xx → relayable LegResult (ResponseFHIR carries the body)
+			}
+			return LegResult{ResponseFHIR: body, ResponseRelayed: true}, nil
+		}
 		// Two shapes: an ORDER-driven request (the CRD-updated order carries the
 		// coverage-assertion-id the partner keys the questionnaire off; it has no `questionnaire` param)
 		// or the canonical request (br-payer / sandbox). The provider's coverage is carried through

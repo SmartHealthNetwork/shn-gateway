@@ -242,7 +242,9 @@ no callback to the provider), and forwards conformant requests through to the Hu
 Inbound requests authenticate via **SMART Backend Services**: the gateway hosts its
 own `POST /oauth/token` and `GET /.well-known/smart-configuration`, verifies a
 registered client's signed JWT assertion (`private_key_jwt`, ES384/RS384), issues a
-short-lived bearer, and verifies it on every ingress call.
+short-lived bearer, and verifies it on every ingress call. The client-side procedure
+(key pair, registration entry, assertion claims, `curl`) is in
+[INTEGRATION.md → Calling the ingress from your EHR](INTEGRATION.md#calling-the-ingress-from-your-ehr).
 
 | Env var | Description |
 |---|---|
