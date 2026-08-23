@@ -439,6 +439,17 @@ type conformantUpdateFacts struct {
 // like parseConformantPASSubjects) and reads Claim.related[prior], the supplemental DiagnosticReport id,
 // the amended QR id, and the Provenance agents/targets/policies. Returns (facts, 0, "") on a parseable
 // Bundle; (_, 400, msg) on malformed. Engine-local (no SDK symbol).
+//
+// WHICH Claim entry the facts come from: a bundle can carry MORE THAN ONE Claim. On the composite
+// (PayerOrgEntry) lane the sdk appends the ORIGINAL SUBMIT's Claim as a resolvable bundle ENTRY
+// after the operative update Claim (shnsdk buildPriorClaimEntry — so the update Claim's
+// related[].claim.reference resolves for a real Da Vinci payer), and that prior entry's only
+// identifier is urn:shn:correlation|<original submit corr>. So relatedClaim and claimCorrelation
+// are read from THE OPERATIVE UPDATE CLAIM — the (first) Claim entry carrying related[] — and, when
+// no Claim carries related[] (a plain initial submit), from the FIRST Claim entry. A later Claim
+// entry never overwrites either: letting the prior-Claim entry win threaded the SUBMIT's
+// correlation onto the AMEND's envelope in handlePASIngress, which the Hub's replay guard rejected
+// as a duplicate — the partner saw 502 {"error":"hub routing failed"} on every amendment.
 func parseConformantPASUpdateFacts(bundleJSON []byte) (conformantUpdateFacts, int, string) {
 	var probe struct {
 		ResourceType string `json:"resourceType"`
@@ -453,6 +464,15 @@ func parseConformantPASUpdateFacts(bundleJSON []byte) (conformantUpdateFacts, in
 		return conformantUpdateFacts{}, http.StatusBadRequest, "PAS update request is not a Bundle"
 	}
 	var f conformantUpdateFacts
+	// Claim-entry selection state (see the doc comment): the first Claim entry's own correlation,
+	// and the operative update Claim's — the first Claim entry carrying related[]. Resolved after
+	// the pass so a LATER Claim entry (the sdk's prior-Claim entry) can never overwrite either.
+	var (
+		firstClaimCorr     string
+		sawClaim           bool
+		operativeClaimCorr string
+		sawOperativeClaim  bool
+	)
 	for _, e := range probe.Entry {
 		var rt struct {
 			ResourceType string `json:"resourceType"`
@@ -478,16 +498,23 @@ func parseConformantPASUpdateFacts(bundleJSON []byte) (conformantUpdateFacts, in
 			if err := json.Unmarshal(e.Resource, &c); err != nil {
 				return conformantUpdateFacts{}, http.StatusBadRequest, "parse update Claim entry failed"
 			}
-			if len(c.Related) > 0 {
-				f.relatedClaim = c.Related[0].Claim.Identifier.Value
-			}
 			// Finding A: surface the Claim's own urn:shn:correlation so handlePASIngress can key
 			// the pend on the partner-supplied identifier, enabling the submit→amend corr handoff.
+			corr := ""
 			for _, id := range c.Identifier {
 				if id.System == "urn:shn:correlation" && id.Value != "" {
-					f.claimCorrelation = id.Value
+					corr = id.Value
 					break
 				}
+			}
+			if !sawClaim {
+				sawClaim, firstClaimCorr = true, corr
+			}
+			// The operative update Claim is the one carrying related[prior]; the sdk's prior-Claim
+			// entry carries none, so it can never claim this slot.
+			if len(c.Related) > 0 && !sawOperativeClaim {
+				sawOperativeClaim, operativeClaimCorr = true, corr
+				f.relatedClaim = c.Related[0].Claim.Identifier.Value
 			}
 		case "QuestionnaireResponse":
 			var qr struct {
@@ -541,6 +568,11 @@ func parseConformantPASUpdateFacts(bundleJSON []byte) (conformantUpdateFacts, in
 			// Patient / Coverage / ServiceRequest / Organization / Practitioner / PractitionerRole —
 			// tolerated (parseConformantPASSubjects already binds their subjects).
 		}
+	}
+	if sawOperativeClaim {
+		f.claimCorrelation = operativeClaimCorr
+	} else {
+		f.claimCorrelation = firstClaimCorr
 	}
 	return f, 0, ""
 }

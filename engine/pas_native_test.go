@@ -852,6 +852,16 @@ func originatorBuiltConformantUpdateBundle(t *testing.T) []byte {
 // absolutized exactly as the provider-data lane produces them for a real Da Vinci payer.
 func originatorBuiltConformantUpdateBundleProfile(t *testing.T, brPayer bool) []byte {
 	t.Helper()
+	return originatorBuiltConformantUpdateBundleCorrs(t, brPayer, "convergence-pas-update-0001", "convergence-pas-submit-0001")
+}
+
+// originatorBuiltConformantUpdateBundleCorrs is originatorBuiltConformantUpdateBundleProfile with
+// caller-chosen correlations: corr is THIS amendment's own correlation (the operative update
+// Claim's urn:shn:correlation identifier) and originalCorr is the original submit's — Claim.related
+// [prior], and, on the PayerOrgEntry lane, the sole identifier of the prior-Claim bundle ENTRY the
+// sdk appends AFTER the operative Claim. Distinct values let a test tell the two apart on the wire.
+func originatorBuiltConformantUpdateBundleCorrs(t *testing.T, brPayer bool, corr, originalCorr string) []byte {
+	t.Helper()
 	const member = "MBR-COVERED"
 	created := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
 
@@ -898,8 +908,8 @@ func originatorBuiltConformantUpdateBundleProfile(t *testing.T, brPayer bool) []
 		MemberID:         member,
 		Provenance:       provJSON,
 		DiagnosticReport: drJSON,
-		Corr:             "convergence-pas-update-0001",
-		OriginalCorr:     "convergence-pas-submit-0001",
+		Corr:             corr,
+		OriginalCorr:     originalCorr,
 		Created:          created,
 		ContainedInsurer: brPayer,
 		AbsoluteRefs:     brPayer,
@@ -995,5 +1005,65 @@ func TestSandbox_PASClaimNative_DeviceRequestNoCodingIs400(t *testing.T) {
 	const wantMsg = "claim order missing CPT/HCPCS coding"
 	if res.Message != wantMsg {
 		t.Fatalf("message = %q, want %q (order-type-agnostic wording)", res.Message, wantMsg)
+	}
+}
+
+// --- Finding A corr threading: the amend's OWN correlation must win -------
+
+// TestParseConformantPASUpdateFacts_AmendCorrWinsOverPriorClaimEntry is the rejection test for the
+// ingress amendment 502. On the composite (PayerOrgEntry) lane the sdk appends the original
+// submit's Claim as a resolvable bundle ENTRY *after* the operative update Claim, and that prior
+// entry's ONLY identifier is urn:shn:correlation|<original submit corr>. While
+// parseConformantPASUpdateFacts took claimCorrelation from every Claim entry it met (last Claim
+// wins), the SUBMIT's correlation was threaded onto the AMEND's envelope by handlePASIngress
+// (child = f.claimCorrelation); the Hub's replay guard then rejected the child leg and the partner
+// saw 502 {"error":"hub routing failed"}. The operative update Claim — the one carrying related[]
+// — is the only Claim whose correlation may be threaded.
+func TestParseConformantPASUpdateFacts_AmendCorrWinsOverPriorClaimEntry(t *testing.T) {
+	bundle := originatorBuiltConformantUpdateBundleCorrs(t, true, "AMEND-CORR", "SUBMIT-CORR")
+	f, status, msg := parseConformantPASUpdateFacts(bundle)
+	if status != 0 {
+		t.Fatalf("PayerOrgEntry update bundle rejected: status=%d (%s), want 0", status, msg)
+	}
+	if f.relatedClaim != "SUBMIT-CORR" {
+		t.Fatalf("relatedClaim = %q, want the original submit corr SUBMIT-CORR (FR-21)", f.relatedClaim)
+	}
+	if f.claimCorrelation != "AMEND-CORR" {
+		t.Fatalf("claimCorrelation = %q, want the AMEND's own corr AMEND-CORR — the prior-Claim ENTRY's "+
+			"correlation must not win, or the ingress threads the submit's corr and the Hub replay guard 502s",
+			f.claimCorrelation)
+	}
+}
+
+// TestParseConformantPASUpdateFacts_SingleClaimShapeUnchanged pins the no-PayerOrgEntry shape (one
+// Claim, which carries related[]): its own correlation still threads, exactly as before.
+func TestParseConformantPASUpdateFacts_SingleClaimShapeUnchanged(t *testing.T) {
+	bundle := originatorBuiltConformantUpdateBundleCorrs(t, false, "AMEND-CORR", "SUBMIT-CORR")
+	f, status, msg := parseConformantPASUpdateFacts(bundle)
+	if status != 0 {
+		t.Fatalf("single-Claim update bundle rejected: status=%d (%s), want 0", status, msg)
+	}
+	if f.relatedClaim != "SUBMIT-CORR" {
+		t.Fatalf("relatedClaim = %q, want SUBMIT-CORR", f.relatedClaim)
+	}
+	if f.claimCorrelation != "AMEND-CORR" {
+		t.Fatalf("claimCorrelation = %q, want AMEND-CORR", f.claimCorrelation)
+	}
+}
+
+// TestParseConformantPASUpdateFacts_InitialSubmitUnchanged pins the plain initial-submit shape (one
+// Claim, NO related[]): no prior claim, and the Claim's own correlation still threads — the
+// "else the first Claim" arm of the rule.
+func TestParseConformantPASUpdateFacts_InitialSubmitUnchanged(t *testing.T) {
+	bundle := conformantPASBundlePended(t, "MBR-COVERED")
+	f, status, msg := parseConformantPASUpdateFacts(bundle)
+	if status != 0 {
+		t.Fatalf("initial submit bundle rejected: status=%d (%s), want 0", status, msg)
+	}
+	if f.relatedClaim != "" {
+		t.Fatalf("relatedClaim = %q, want \"\" (an initial submit has no prior claim)", f.relatedClaim)
+	}
+	if f.claimCorrelation != "convergence-pas-pend-0001" {
+		t.Fatalf("claimCorrelation = %q, want the submit's own corr convergence-pas-pend-0001", f.claimCorrelation)
 	}
 }
