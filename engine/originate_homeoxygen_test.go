@@ -30,7 +30,7 @@ import (
 
 // ---- HomeOxygen fake SoR ----
 
-// homeOxygenSoR wraps StubHolderData (for ResolvePatient/PatientFHIRRef) and adds the
+// homeOxygenSoR wraps censusSoR (for ResolvePatient/PatientFHIRRef) and adds the
 // member's open order + supplier resolution the in-memory stub lacks. It also SPIES on
 // OpenOrder / ResolveByReference so the test can assert the handler sourced the order
 // code + supplier from the SoR (not literals).
@@ -40,7 +40,7 @@ import (
 // (originate_dispatch_test.go's TestHandleDispatch_ArbitraryMember, MBR-PD-UC03/E1390) —
 // proving /scenario/dispatch is genuinely member-parameterized, not hardcoded to MBR-OX.
 type homeOxygenSoR struct {
-	*StubHolderData
+	*censusSoR
 	member       string
 	demo         Demo
 	pci          string
@@ -56,20 +56,20 @@ type homeOxygenSoR struct {
 // facts the provider-data lane actually reads from (mirroring OpenOrder/ResolveByReference
 // below, which the base stub can never serve — permanent provider-data-lane no-ops). This is no
 // longer the ONLY way to resolve MBR-OX/MBR-PD-UC03 at all: commit 8408638 also added both to the
-// engine's stubPersonas census (with the same demo values), so StubHolderData's own
+// engine's censusPersonas census (with the same demo values), so censusSoR's own
 // ResolvePatient/PatientFHIRRef now answer for them too — that addition was for the PAYER-side
 // crd-order-dispatch inbound bind (conformantCRDDispatchBind), a separate concern from this
-// fixture's provider-side origination path. The embedded StubHolderData supplies everything else.
+// fixture's provider-side origination path. The embedded censusSoR supplies everything else.
 func (s *homeOxygenSoR) ResolvePatient(memberID string) (string, Demo, bool) {
 	if memberID != s.member {
-		return s.StubHolderData.ResolvePatient(memberID)
+		return s.censusSoR.ResolvePatient(memberID)
 	}
 	return s.pci, s.demo, true
 }
 
 func (s *homeOxygenSoR) PatientFHIRRef(memberID string) (string, bool) {
 	if memberID != s.member {
-		return s.StubHolderData.PatientFHIRRef(memberID)
+		return s.censusSoR.PatientFHIRRef(memberID)
 	}
 	return "Patient/" + s.member, true
 }
@@ -92,7 +92,7 @@ func (s *homeOxygenSoR) ResolveByReference(ref string) ([]byte, bool) {
 
 // OpenCoverage returns a parseable contained-payor Coverage for the fixture's member, the
 // routing/identity SOURCE the origination handler now reads (FR-G40). Since 8408638 added
-// MBR-OX/MBR-PD-UC03 to stubPersonas too, the embedded StubHolderData.OpenCoverage would in fact
+// MBR-OX/MBR-PD-UC03 to censusPersonas too, the embedded censusSoR.OpenCoverage would in fact
 // resolve the member and produce the same contained 00001 Coverage this override does — this is
 // kept anyway for shape-symmetry with the OpenOrder/ResolveByReference provider-facts above (a
 // single fixture pinning the exact Patient/Coverage reference shape origination reads) rather
@@ -236,7 +236,7 @@ func (s *homeOxygenSubstrate) handleRoute(body []byte) (*http.Response, error) {
 		}
 		respOp, respFrame = "crd-dispatch-cards", "payer-coverage"
 	case "dtr-questionnaire-fetch":
-		pkg, perr := buildQuestionnairePackage(homeOxygenQuestionnaire(s.canonical))
+		pkg, perr := testQuestionnairePackage(homeOxygenQuestionnaire(s.canonical))
 		if perr != nil {
 			return errResp("stub: package: " + perr.Error()), nil
 		}
@@ -335,9 +335,9 @@ func TestHandleHomeOxygen(t *testing.T) {
 
 	clock := func() time.Time { return time.Unix(1700000000, 0).UTC() }
 
-	base := NewStubHolderData()
+	base := newCensusSoR()
 	// MBR-OX is a FHIR-store seed persona (internal/fhirseed) and, as of 8408638, also lives in
-	// the engine's stubPersonas census (payer-side crd-order-dispatch bind) with the same demo
+	// the engine's censusPersonas census (payer-side crd-order-dispatch bind) with the same demo
 	// values — either source yields the same PCI. Derive it the same way the SoR does (member +
 	// birthDate + familyName).
 	pci := shnsdk.ResolvePCI("MBR-OX", "1958-07-14", "Okafor-Oxygen")
@@ -354,13 +354,13 @@ func TestHandleHomeOxygen(t *testing.T) {
 		t.Fatalf("build supplier: %v", err)
 	}
 	sor := &homeOxygenSoR{
-		StubHolderData: base,
-		member:         "MBR-OX",
-		demo:           Demo{BirthDate: "1958-07-14", FamilyName: "Okafor-Oxygen"},
-		pci:            pci,
-		orderJSON:      orderJSON,
-		performerRef:   performerRef,
-		supplierJSON:   supplierJSON,
+		censusSoR:    base,
+		member:       "MBR-OX",
+		demo:         Demo{BirthDate: "1958-07-14", FamilyName: "Okafor-Oxygen"},
+		pci:          pci,
+		orderJSON:    orderJSON,
+		performerRef: performerRef,
+		supplierJSON: supplierJSON,
 	}
 
 	const canonical = "http://smarthealth.network/fhir/Questionnaire/home-oxygen"
@@ -377,7 +377,7 @@ func TestHandleHomeOxygen(t *testing.T) {
 	reg.Set("payer", shnsdk.RegistryEntry{ID: "payer", Role: "payer", EncPub: payerEncPub, SignPub: payerSignPub})
 
 	const fakeBase = "http://stub.test"
-	gw := New(Config{
+	gw := mustNew(t, Config{
 		Role:        "provider",
 		HolderID:    "provider",
 		PayerRouter: payerRouterFor(t, "payer"),
@@ -515,8 +515,8 @@ func buildHomeOxygenSupplier(id string) ([]byte, error) {
 func TestHandler_HomeOxygenRouteRegistered(t *testing.T) {
 	_, signPriv := genED25519(t)
 	encPub, encPriv := genKeyPair(t)
-	stub := NewStubHolderData()
-	gw := New(Config{
+	stub := newCensusSoR()
+	gw := mustNew(t, Config{
 		Role:     "provider",
 		HolderID: "provider",
 		Identity: shnsdk.Identity{

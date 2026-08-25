@@ -42,8 +42,7 @@ var cmsPayorOrg = payorOrg{id: shnsdk.CMSPayerIdentity, containedID: "cms-payer"
 // payorOrgs overrides that default for members whose OWN Coverage names a
 // different payer — today, the two bridging-demo personas, whose seeded
 // Coverage payor is gateway/engine's BridgeDemoPayerID / BridgeRefusePayerID
-// (holderdata.go's stubPayerOverrides; internal/fhirseed's origination-Coverage
-// block).
+// (seeded by internal/fhirseed's origination-Coverage block).
 //
 // Why the DRIVER has to know this: the conformant lane routes payload-FIRST
 // (AI-G13) — the gateway derives the payer holder from the Coverage carried in
@@ -51,7 +50,7 @@ var cmsPayorOrg = payorOrg{id: shnsdk.CMSPayerIdentity, containedID: "cms-payer"
 // Coverage that always named CMS would send every conformant run to the CMS
 // payer holder no matter which member it claimed to be about, silently. That
 // is exactly what the mixed-version gate caught: a bridge-demo run that
-// passed while quietly talking to the ordinary sandbox payer.
+// passed while quietly talking to the ordinary demo payer holder.
 //
 // The identities are duplicated as LITERALS rather than imported: this package
 // is the lightweight partner-facing conformant driver and must not pull the
@@ -273,9 +272,9 @@ func BuildQuestionnairePackageRequest(canonical, member string) ([]byte, error) 
 					// shnsdk.BuildCoverageWithPayer stamps (sdk/crd.go): the MB member
 					// number, bare — not a reference. Nothing derives a reference from
 					// it — a payer answering $questionnaire-package at DTR 2.2 must return a
-					// QuestionnaireResponse shell, and the engine derives that shell's
-					// coverageRef from Coverage.id (dtrPackageCoverageSubject), which is
-					// "coverage-1" here, failing closed rather than inventing one. The id
+					// QuestionnaireResponse shell whose coverage reference comes from this
+					// resource's own Coverage.id ("coverage-1" here), so a payer that cannot
+					// read one fails closed rather than inventing a reference. The id
 					// (and this whole prefetch Coverage) is what makes the conformant lane
 					// 2.2-capable rather than silently 2.0-only — found live by the mixed-version
 					// mixed-version gate against a 2.2-declaring peer. The "type" v2-0203 MB

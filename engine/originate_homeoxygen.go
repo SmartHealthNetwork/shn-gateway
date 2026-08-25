@@ -31,11 +31,294 @@ const homeOxygenMember = "MBR-OX"
 
 // handleHomeOxygen originates the HomeOxygen PA off the member's seeded DeviceRequest.
 func (g *Gateway) handleHomeOxygen(w http.ResponseWriter, r *http.Request) {
-	member, ok := g.scenarioMember(w, r, homeOxygenMember, homeOxygenMember) // homeOxygenMember = "MBR-OX"
+	member, ok := g.scenarioMember(w, r, homeOxygenMember, homeOxygenMember, homeOxygenMember) // homeOxygenMember = "MBR-OX"
 	if !ok {
 		return
 	}
 	g.originateDispatch(w, r, member)
+}
+
+// dispatchOrder is how an order-dispatch scenario obtains its DeviceRequest + supplier
+// Organization: read from the member's seeded SoR (originateDispatch's OWN members, whose
+// order-code/dx/supplier ALL come from the data — no answer book), or built from a literal
+// HCPCS/dx tuple (UC-03's demo arm, matching every OTHER demo-lane scenario's literal-code
+// convention, §4.3 — the demo lane never reads a seeded SoR order). Either shape feeds the
+// SAME crd-order-dispatch → DTR → populate prefix (runCRDDispatch) so there is one dispatch
+// implementation, not two.
+type dispatchOrder struct {
+	orderJSON, supplierJSON []byte
+	orderRef, performerRef  string
+}
+
+// dispatchResult carries everything a runCRDDispatch caller needs past the populate step:
+// the PAS tail inputs (originateDispatch's existing shape) plus the fetched bare
+// Questionnaire and its canonical (needed by a caller that must ATTEST a required item
+// into the populated QR before submitting, which originateDispatch's own callers do not).
+type dispatchResult struct {
+	pci, patientRef, coverageRef, orderRef string
+	orderJSON, qrJSON, questionnaireJSON   []byte
+	qrAnswers                              map[string]string
+	member                                 string
+	payer                                  shnsdk.PayerIdentifier
+	recipient                              string
+	canonical                              string
+}
+
+// runCRDDispatch is the shared order-dispatch prefix: CRD(order-dispatch) → DIVERGENCE-3
+// advisory-card gate (NeedsDTR, not PARequired) → DTR fetch → operated $populate → the QR
+// fences. Extracted from originateDispatch (behavior-preserving) so UC-03's demo arm — which
+// needs to ATTEST a required item into the populated QR before the PAS tail, unlike
+// originateDispatch's own callers — rides the identical CRD/DTR/populate plumbing instead of
+// a second hand-rolled copy. On any failure it writes the HTTP error and returns ok=false.
+func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member string, order dispatchOrder) (dispatchResult, bool) {
+	ctx := r.Context()
+
+	pci, _, found := g.cfg.SoR.ResolvePatient(member)
+	if !found {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown member"})
+		return dispatchResult{}, false
+	}
+	patientRef := "Patient/" + member
+	coverageRef := "Coverage/" + member
+
+	orderJSON := order.orderJSON
+	// The order's product coding comes from the DATA (DeviceRequest.codeCodeableConcept),
+	// never a literal — fail closed if it carries no {CPT,HCPCS} coding.
+	if _, _, _, err := shnsdk.ParseOrderProductCoding(orderJSON); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "open order has no recognized product coding"})
+		return dispatchResult{}, false
+	}
+	orderRef := order.orderRef
+	performerRef := order.performerRef
+	supplierJSON := order.supplierJSON
+
+	// Read the member's OWN open Coverage as the routing/identity SOURCE (FR-G40): the dispatch leg's
+	// payer identity derives from the patient's real Coverage, not a synthetic CMS literal. realCov
+	// stays a LOCAL (the recipient is resolved from it); the per-leg emit shapes are unchanged.
+	realCov, hasCov := g.cfg.SoR.OpenCoverage(member)
+	if !hasCov {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "no coverage on file for member"})
+		return dispatchResult{}, false
+	}
+	// Resolve the payer HOLDER every dispatch/DTR/PAS leg routes to AND the parsed payer identity in
+	// ONE parse of the member's own Coverage (FR-G40): no default — a miss fails closed HERE before
+	// any leg (AI-G11 / OWD-G10). `payer` threads to the dispatch/coverage/PAS builders, so
+	// routed-payer and payload-payer cannot diverge (one payer fact, read once).
+	recipient, payer, status, msg := g.recipientForWith(realCov, g.cfg.SoR.ResolveByReference)
+	if status != 0 {
+		writeJSON(w, status, map[string]string{"error": msg})
+		return dispatchResult{}, false
+	}
+
+	// urn:shn:coverage carries the BARE member id — that identifier is a member number, not a
+	// reference, and the same bare value becomes the conformant Claim's insurance[0].coverage
+	// logical reference; coverageRef stays the reference-shaped value the QRContext roles below need.
+	coverageJSON, err := shnsdk.BuildCoverageWithPayer(patientRef, member, payer)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build coverage failed"})
+		return dispatchResult{}, false
+	}
+	if status, msg := g.validateFHIR(ctx, coverageJSON, "egress", ""); status != 0 {
+		writeJSON(w, status, map[string]string{"error": msg})
+		return dispatchResult{}, false
+	}
+
+	// DIVERGENCE 2 — build + originate the ORDER-DISPATCH leg (not order-select).
+	// Select-before-build — same rationale as the two
+	// crd-order-select sites (originate.go): the pa.crd builder is line-inert, so
+	// BuildLine changes no byte, but the routing axis is real and the arm-1-only
+	// backfill refused pa.crd@2.2-only peers this build serves byte-identically.
+	// crdCorr is hoisted so selection, adaptation and the leg share one correlation.
+	crdCorr := g.cfg.CorrelationGen()
+	crdRoute, ok := g.selectLegLineOrFail(w, recipient, "crd-order-dispatch", crdCorr)
+	if !ok {
+		return dispatchResult{}, false
+	}
+	crdReq, err := shnsdk.BuildConformantOrderDispatchRequest(shnsdk.OrderDispatchInputs{
+		PatientID:     member,
+		PatientRef:    patientRef,
+		OrderRef:      orderRef,
+		PerformerRef:  performerRef,
+		DeviceRequest: orderJSON,
+		Supplier:      supplierJSON,
+		Coverage:      coverageJSON,
+		Payer:         payer,
+	})
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build order-dispatch failed"})
+		return dispatchResult{}, false
+	}
+	// Validation posture UNCHANGED (routing-only promotion): crdReq is a CDS
+	// Hooks envelope, not a FHIR resource; coverageJSON is $validated above. No
+	// enforcement point is added or removed after egressAdapt.
+	adaptedCRDReq, _, err := g.egressAdapt(crdRoute, crdReq, ExchangeIdentity{CorrelationID: crdCorr, LegType: "crd-order-dispatch", Counterpart: recipient})
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return dispatchResult{}, false
+	}
+	crdRespJSON, err := g.OriginateLeg(ctx, r, recipient, "crd-order-dispatch", pci, crdCorr, "",
+		Content{WorkstreamType: workstreamPA, ProfileID: crdRoute.Token, Route: routeInfoFor(crdRoute), Bytes: adaptedCRDReq})
+	if err != nil {
+		if g.relayOriginationError(w, err) {
+			return dispatchResult{}, false
+		}
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return dispatchResult{}, false
+	}
+	cov, err := shnsdk.ParseCards(crdRespJSON)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "card parse failed"})
+		return dispatchResult{}, false
+	}
+
+	// AI-1: a coverage denial STOPS — never routes DTR/PAS. Discovered missing here (R3,
+	// while re-keying UC-03 onto this shared prefix): runCRDThenDTROrder's sibling gate
+	// (originate.go) has always checked cov.Covered FIRST regardless of the doc-needed
+	// axis, but this order-dispatch prefix never did — DIVERGENCE 3 below gates on
+	// NeedsDTR alone, which does not imply covered. Every mirrored oxygen family
+	// (E0431/E1390) is unconditionally Covered=true (brpayerfamilies.go), so this never
+	// changes any of the 8 UCs' live-pinned behavior; it closes a real gap a not-covered
+	// order-dispatch card would have silently proceeded through.
+	if cov.Covered == shnsdk.CoveredNotCovered {
+		writeJSON(w, http.StatusOK, map[string]any{"paRequired": false, "covered": false, "outcome": "not-covered"})
+		return dispatchResult{}, false
+	}
+
+	// DIVERGENCE 3 — the order-dispatch card is ADVISORY ("Supplier Status Unknown",
+	// conditional), NOT PA-required. Do NOT gate on cov.PARequired() (false here). The card's
+	// job is to advertise the HomeOxygen questionnaire; gate on NeedsDTR / a questionnaire
+	// being present.
+	if !cov.NeedsDTR() || len(cov.Questionnaires) == 0 {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "expected an advisory card advertising the HomeOxygen questionnaire"})
+		return dispatchResult{}, false
+	}
+	canonical := shnsdk.StripCanonicalVersion(cov.Questionnaires[0])
+
+	// --- DTR — operated $populate (the crux). ---
+	// SELECT-BEFORE-BUILD on the fetch envelope too, not just the package
+	// answer: the fetch is LINE-DEPENDENT (2.2's DTRDef makes `coverage` 1..1),
+	// so the routed line must exist BEFORE the literal below is marshalled —
+	// exactly the runCRDThenDTROrder sibling's ordering (originate.go). The
+	// selected line also picks the validator lane the package answer is checked
+	// against (F7).
+	dtrCorr := g.cfg.CorrelationGen()
+	route, ok := g.selectLegLineOrFail(w, recipient, "dtr-questionnaire-fetch", dtrCorr)
+	if !ok {
+		return dispatchResult{}, false
+	}
+	dtrLine := shnsdk.LineOf(route.Token)
+	// Carry the Coverage when targeting br-payer (a real Da Vinci payer 400s
+	// $questionnaire-package without it) AND whenever the SELECTED line requires
+	// it (DTRDef.QuestionnairePackageCoverageRequired — 2.2's 1..1), regardless
+	// of profile: same gate as the sibling site, pinned by
+	// TestDispatch_DTRFetchCoverageGateFollowsSelectedLine.
+	fetch := shnsdk.QuestionnaireFetchRequest{Canonical: canonical}
+	coverageRequired := false
+	if def, ok := shnsdk.DTRLineDef(dtrLine); ok {
+		coverageRequired = def.QuestionnairePackageCoverageRequired
+	}
+	if targetsBrPayer(g.cfg.OriginationProfile) || coverageRequired {
+		fetch.Coverage = coverageJSON
+	}
+	dtrReq, err := json.Marshal(fetch)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build dtr request failed"})
+		return dispatchResult{}, false
+	}
+	// egressAdapt runs here per the select-before-build pipeline, but there is
+	// deliberately NO validateFHIR enforcement point after it on THIS leg: dtrReq
+	// is QuestionnaireFetchRequest JSON, a transport ENVELOPE, not itself FHIR
+	// content the pa.dtr compat-manifest rows model — see originate.go's DTR-fetch
+	// site (runCRDThenDTROrder) for the full rationale, which applies verbatim
+	// here. OBLIGATION DISCHARGED (the multi-version spec's recorded
+	// DTR-fetch known-gap entry) — see originate.go's site for the
+	// discharge mechanism (envelopeEgressLegs pass-through), which applies
+	// verbatim here.
+	adaptedDTRReq, _, err := g.egressAdapt(route, dtrReq, ExchangeIdentity{CorrelationID: dtrCorr, LegType: "dtr-questionnaire-fetch", Counterpart: recipient})
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return dispatchResult{}, false
+	}
+	packageJSON, err := g.OriginateLeg(ctx, r, recipient, "dtr-questionnaire-fetch", pci, dtrCorr, "",
+		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Bytes: adaptedDTRReq})
+	if err != nil {
+		if g.relayOriginationError(w, err) {
+			return dispatchResult{}, false
+		}
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return dispatchResult{}, false
+	}
+	if status, msg := g.validateFHIRPayerIngress(ctx, packageJSON, dtrLine); status != 0 {
+		writeJSON(w, status, map[string]string{"error": msg})
+		return dispatchResult{}, false
+	}
+
+	questionnaireJSON, err := extractQuestionnaireFromPackage(packageJSON)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "fetched questionnaire package has no Questionnaire"})
+		return dispatchResult{}, false
+	}
+
+	// F5: verify the fetched Questionnaire's url matches the canonical the payer advertised
+	// in the CRD card. A mismatch means the payer returned a different questionnaire than
+	// the card claimed — reject to prevent canonical substitution. Discovered missing here
+	// (R3, alongside the AI-1 gap above): runCRDThenDTROrder's sibling site has always had
+	// this fence; this order-dispatch prefix never did.
+	fetchedURL, err := shnsdk.ParseQuestionnaireURL(questionnaireJSON)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "fetched questionnaire url parse failed"})
+		return dispatchResult{}, false
+	}
+	if fetchedURL != canonical {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "fetched questionnaire does not match advertised canonical"})
+		return dispatchResult{}, false
+	}
+
+	// The operated $populate engine reads the FHIR store directly, so its subject must be
+	// the store-resolvable Patient ref. Resolve it via the SoR (falls back to the logical
+	// ref when the SoR can't resolve it — the managed/hermetic path is unchanged).
+	subjectFHIRRef := patientRef
+	if ref, ok := g.cfg.SoR.PatientFHIRRef(member); ok && ref != "" {
+		subjectFHIRRef = ref
+	}
+	qrJSON, _, err := g.cfg.Populator.Populate(ctx, packageJSON, PopulateContext{
+		Member:         member,
+		PatientRef:     patientRef,
+		SubjectFHIRRef: subjectFHIRRef,
+		CoverageRef:    coverageRef,
+		OrderRef:       orderRef,
+		Authored:       g.cfg.Clock(),
+	})
+	if err != nil {
+		writeJSON(w, statusForPopulateErr(err), map[string]string{"error": err.Error()})
+		return dispatchResult{}, false
+	}
+	// QR-SUBJECT FENCE — the populated QR must be about the bound patient (logical ref).
+	if subj, serr := questionnaireResponseSubject(qrJSON); serr != nil || subj != patientRef {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "populated QR subject does not match patient"})
+		return dispatchResult{}, false
+	}
+	// QR-QUESTIONNAIRE FENCE — the QR must self-declare the canonical the card advertised.
+	if qq, qerr := questionnaireResponseCanonical(qrJSON); qerr != nil || qq != canonical {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "populated QR questionnaire does not match canonical"})
+		return dispatchResult{}, false
+	}
+	// CRUX EVIDENCE (C1) — capture the operated-$populate computed quantity answers off the QR
+	// (linkIds 2.2 = O₂-sat / 2.3 = PaO₂). The native populator drops per-item FilledItem
+	// attribution, so these are read straight from the returned QR. Surfaced in the response so the
+	// live gate can prove the $populate ran br-payer's real prepop CQL against the seeded
+	// observations (NOT an answer book). Empty when nothing populated (e.g. aged-out obs).
+	qrAnswers := questionnaireResponseNumericAnswers(qrJSON)
+	if status, msg := g.validateFHIR(ctx, qrJSON, "egress", ""); status != 0 {
+		writeJSON(w, status, map[string]string{"error": msg})
+		return dispatchResult{}, false
+	}
+
+	return dispatchResult{
+		pci: pci, patientRef: patientRef, coverageRef: coverageRef, orderRef: orderRef,
+		orderJSON: orderJSON, qrJSON: qrJSON, questionnaireJSON: questionnaireJSON, qrAnswers: qrAnswers,
+		member: member, payer: payer, recipient: recipient, canonical: canonical,
+	}, true
 }
 
 // handleDispatch originates the order-dispatch PA for a caller-named member — the SHN Kit's
@@ -63,27 +346,19 @@ func (g *Gateway) handleDispatch(w http.ResponseWriter, r *http.Request) {
 }
 
 // originateDispatch originates an order-dispatch PA off the given member's seeded DeviceRequest.
+// DIVERGENCE 1 (unique to this caller of runCRDDispatch): the order + supplier come from the
+// SoR (no literal code, no answer book) — the order code, the diagnosis, and the supplier ALL
+// come from the data.
 func (g *Gateway) originateDispatch(w http.ResponseWriter, r *http.Request, member string) {
-	ctx := r.Context()
-
-	pci, _, found := g.cfg.SoR.ResolvePatient(member)
-	if !found {
+	// Ordering preserved from before the runCRDDispatch extraction: an unknown member 400s
+	// HERE (before the OpenOrder read), not as a 502 further down.
+	if _, _, found := g.cfg.SoR.ResolvePatient(member); !found {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown member"})
 		return
 	}
-	patientRef := "Patient/" + member
-	coverageRef := "Coverage/" + member
-
-	// DIVERGENCE 1 — read the ORDER from the SoR (no literal code, no BuildServiceRequestCoded).
 	orderJSON, ok := g.cfg.SoR.OpenOrder(member)
 	if !ok {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "no open order for member in SoR"})
-		return
-	}
-	// The order's product coding comes from the DATA (DeviceRequest.codeCodeableConcept),
-	// never a literal — fail closed if it carries no {CPT,HCPCS} coding.
-	if _, _, _, err := shnsdk.ParseOrderProductCoding(orderJSON); err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "open order has no recognized product coding"})
 		return
 	}
 	orderID, performerRef, ok := parseOrderIDAndPerformer(orderJSON)
@@ -91,8 +366,6 @@ func (g *Gateway) originateDispatch(w http.ResponseWriter, r *http.Request, memb
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "open order missing id or performer"})
 		return
 	}
-	orderRef := "DeviceRequest/" + orderID
-
 	// The supplier (performer) is resolved from the order's performer ref via a SoR read —
 	// not a literal. Fail closed if the supplier Organization is absent.
 	supplierJSON, ok := g.cfg.SoR.ResolveByReference(performerRef)
@@ -101,191 +374,11 @@ func (g *Gateway) originateDispatch(w http.ResponseWriter, r *http.Request, memb
 		return
 	}
 
-	// Read the member's OWN open Coverage as the routing/identity SOURCE (FR-G40): the dispatch leg's
-	// payer identity derives from the patient's real Coverage, not a synthetic CMS literal. realCov
-	// stays a LOCAL (the recipient is resolved from it); the per-leg emit shapes are unchanged.
-	realCov, hasCov := g.cfg.SoR.OpenCoverage(member)
-	if !hasCov {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "no coverage on file for member"})
-		return
-	}
-	// Resolve the payer HOLDER every dispatch/DTR/PAS leg routes to AND the parsed payer identity in
-	// ONE parse of the member's own Coverage (FR-G40): no default — a miss fails closed HERE before
-	// any leg (AI-G11 / OWD-G10). `payer` threads to the dispatch/coverage/PAS builders, so
-	// routed-payer and payload-payer cannot diverge (one payer fact, read once).
-	recipient, payer, status, msg := g.recipientForWith(realCov, g.cfg.SoR.ResolveByReference)
-	if status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
-		return
-	}
-
-	// urn:shn:coverage carries the BARE member id — that identifier is a member number, not a
-	// reference, and the same bare value becomes the conformant Claim's insurance[0].coverage
-	// logical reference; coverageRef stays the reference-shaped value the QRContext roles below need.
-	coverageJSON, err := shnsdk.BuildCoverageWithPayer(patientRef, member, payer)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build coverage failed"})
-		return
-	}
-	if status, msg := g.validateFHIR(ctx, coverageJSON, "egress", ""); status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
-		return
-	}
-
-	// DIVERGENCE 2 — build + originate the ORDER-DISPATCH leg (not order-select).
-	// Select-before-build — same rationale as the two
-	// crd-order-select sites (originate.go): the pa.crd builder is line-inert, so
-	// BuildLine changes no byte, but the routing axis is real and the arm-1-only
-	// backfill refused pa.crd@2.2-only peers this build serves byte-identically.
-	// crdCorr is hoisted so selection, adaptation and the leg share one correlation.
-	crdCorr := g.cfg.CorrelationGen()
-	crdRoute, ok := g.selectLegLineOrFail(w, recipient, "crd-order-dispatch", crdCorr)
-	if !ok {
-		return
-	}
-	crdReq, err := shnsdk.BuildConformantOrderDispatchRequest(shnsdk.OrderDispatchInputs{
-		PatientID:     member,
-		PatientRef:    patientRef,
-		OrderRef:      orderRef,
-		PerformerRef:  performerRef,
-		DeviceRequest: orderJSON,
-		Supplier:      supplierJSON,
-		Coverage:      coverageJSON,
-		Payer:         payer,
+	res, ok := g.runCRDDispatch(w, r, member, dispatchOrder{
+		orderJSON: orderJSON, supplierJSON: supplierJSON,
+		orderRef: "DeviceRequest/" + orderID, performerRef: performerRef,
 	})
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build order-dispatch failed"})
-		return
-	}
-	// Validation posture UNCHANGED (routing-only promotion): crdReq is a CDS
-	// Hooks envelope, not a FHIR resource; coverageJSON is $validated above. No
-	// enforcement point is added or removed after egressAdapt.
-	adaptedCRDReq, _, err := g.egressAdapt(crdRoute, crdReq, ExchangeIdentity{CorrelationID: crdCorr, LegType: "crd-order-dispatch", Counterpart: recipient})
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
-		return
-	}
-	crdRespJSON, err := g.OriginateLeg(ctx, r, recipient, "crd-order-dispatch", pci, crdCorr, "",
-		Content{WorkstreamType: workstreamPA, ProfileID: crdRoute.Token, Route: routeInfoFor(crdRoute), Bytes: adaptedCRDReq})
-	if err != nil {
-		if g.relayOriginationError(w, err) {
-			return
-		}
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
-		return
-	}
-	cov, err := shnsdk.ParseCards(crdRespJSON)
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "card parse failed"})
-		return
-	}
-
-	// DIVERGENCE 3 — the order-dispatch card is ADVISORY ("Supplier Status Unknown",
-	// conditional), NOT PA-required. Do NOT gate on cov.PARequired() (false here). The card's
-	// job is to advertise the HomeOxygen questionnaire; gate on NeedsDTR / a questionnaire
-	// being present.
-	if !cov.NeedsDTR() || len(cov.Questionnaires) == 0 {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "expected an advisory card advertising the HomeOxygen questionnaire"})
-		return
-	}
-	canonical := shnsdk.StripCanonicalVersion(cov.Questionnaires[0])
-
-	// --- DTR — operated $populate (the crux). ---
-	// SELECT-BEFORE-BUILD on the fetch envelope too, not just the package
-	// answer: the fetch is LINE-DEPENDENT (2.2's DTRDef makes `coverage` 1..1),
-	// so the routed line must exist BEFORE the literal below is marshalled —
-	// exactly the runCRDThenDTROrder sibling's ordering (originate.go). The
-	// selected line also picks the validator lane the package answer is checked
-	// against (F7).
-	dtrCorr := g.cfg.CorrelationGen()
-	route, ok := g.selectLegLineOrFail(w, recipient, "dtr-questionnaire-fetch", dtrCorr)
 	if !ok {
-		return
-	}
-	dtrLine := shnsdk.LineOf(route.Token)
-	// Carry the Coverage when targeting br-payer (a real Da Vinci payer 400s
-	// $questionnaire-package without it) AND whenever the SELECTED line requires
-	// it (DTRDef.QuestionnairePackageCoverageRequired — 2.2's 1..1), regardless
-	// of profile: same gate as the sibling site, pinned by
-	// TestDispatch_DTRFetchCoverageGateFollowsSelectedLine.
-	fetch := shnsdk.QuestionnaireFetchRequest{Canonical: canonical}
-	coverageRequired := false
-	if def, ok := shnsdk.DTRLineDef(dtrLine); ok {
-		coverageRequired = def.QuestionnairePackageCoverageRequired
-	}
-	if targetsBrPayer(g.cfg.OriginationProfile) || coverageRequired {
-		fetch.Coverage = coverageJSON
-	}
-	dtrReq, err := json.Marshal(fetch)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build dtr request failed"})
-		return
-	}
-	// egressAdapt runs here per the select-before-build pipeline, but there is
-	// deliberately NO validateFHIR enforcement point after it on THIS leg: dtrReq
-	// is QuestionnaireFetchRequest JSON, a transport ENVELOPE, not itself FHIR
-	// content the pa.dtr compat-manifest rows model — see originate.go's DTR-fetch
-	// site (runCRDThenDTROrder) for the full rationale, which applies verbatim
-	// here. OBLIGATION DISCHARGED (the multi-version spec's recorded
-	// DTR-fetch known-gap entry) — see originate.go's site for the
-	// discharge mechanism (envelopeEgressLegs pass-through), which applies
-	// verbatim here.
-	adaptedDTRReq, _, err := g.egressAdapt(route, dtrReq, ExchangeIdentity{CorrelationID: dtrCorr, LegType: "dtr-questionnaire-fetch", Counterpart: recipient})
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
-		return
-	}
-	packageJSON, err := g.OriginateLeg(ctx, r, recipient, "dtr-questionnaire-fetch", pci, dtrCorr, "",
-		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Bytes: adaptedDTRReq})
-	if err != nil {
-		if g.relayOriginationError(w, err) {
-			return
-		}
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
-		return
-	}
-	if status, msg := g.validateFHIR(ctx, packageJSON, "ingress", dtrLine); status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
-		return
-	}
-
-	// The operated $populate engine reads the FHIR store directly, so its subject must be
-	// the store-resolvable Patient ref. Resolve it via the SoR (falls back to the logical
-	// ref when the SoR can't resolve it — the managed/hermetic path is unchanged).
-	subjectFHIRRef := patientRef
-	if ref, ok := g.cfg.SoR.PatientFHIRRef(member); ok && ref != "" {
-		subjectFHIRRef = ref
-	}
-	qrJSON, _, err := g.cfg.Populator.Populate(ctx, packageJSON, PopulateContext{
-		Member:         member,
-		PatientRef:     patientRef,
-		SubjectFHIRRef: subjectFHIRRef,
-		CoverageRef:    coverageRef,
-		OrderRef:       orderRef,
-		Authored:       g.cfg.Clock(),
-	})
-	if err != nil {
-		writeJSON(w, statusForPopulateErr(err), map[string]string{"error": err.Error()})
-		return
-	}
-	// QR-SUBJECT FENCE — the populated QR must be about the bound patient (logical ref).
-	if subj, serr := questionnaireResponseSubject(qrJSON); serr != nil || subj != patientRef {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "populated QR subject does not match patient"})
-		return
-	}
-	// QR-QUESTIONNAIRE FENCE — the QR must self-declare the canonical the card advertised.
-	if qq, qerr := questionnaireResponseCanonical(qrJSON); qerr != nil || qq != canonical {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "populated QR questionnaire does not match canonical"})
-		return
-	}
-	// CRUX EVIDENCE (C1) — capture the operated-$populate computed quantity answers off the QR
-	// (linkIds 2.2 = O₂-sat / 2.3 = PaO₂). The native populator drops per-item FilledItem
-	// attribution, so these are read straight from the returned QR. Surfaced in the response so the
-	// live gate can prove the $populate ran br-payer's real prepop CQL against the seeded
-	// observations (NOT an answer book). Empty when nothing populated (e.g. aged-out obs).
-	qrAnswers := questionnaireResponseNumericAnswers(qrJSON)
-	if status, msg := g.validateFHIR(ctx, qrJSON, "egress", ""); status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
 
@@ -294,7 +387,7 @@ func (g *Gateway) originateDispatch(w http.ResponseWriter, r *http.Request, memb
 	// the payer gate to poll the timer-resolved A1. The genuine outcome is conditional-coverage
 	// A4-pended → A1; the payer responder's pend re-query resolves A4→A1, so the FINAL observed
 	// Outcome is "approved" (A1). ---
-	parsed, _, status, msg, err := g.submitClaimAndResolve(ctx, r, pci, orderJSON, qrJSON, patientRef, coverageRef, member, payer, recipient)
+	parsed, _, status, msg, err := g.submitClaimAndResolve(r.Context(), r, res.pci, res.orderJSON, res.qrJSON, res.patientRef, res.coverageRef, res.member, res.payer, res.recipient)
 	if status != 0 {
 		if g.relayOriginationError(w, err) {
 			return
@@ -304,7 +397,7 @@ func (g *Gateway) originateDispatch(w http.ResponseWriter, r *http.Request, memb
 	}
 
 	// FR-23: persist the payer-issued auth number against the order reference.
-	if err := g.cfg.Store.StoreAuthNumber(orderRef, parsed.PreAuthRef); err != nil {
+	if err := g.cfg.Store.StoreAuthNumber(res.orderRef, parsed.PreAuthRef); err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "holder write failed (auth number)"})
 		return
 	}
@@ -313,7 +406,7 @@ func (g *Gateway) originateDispatch(w http.ResponseWriter, r *http.Request, memb
 		PARequired: true,
 		AuthNumber: parsed.PreAuthRef,
 		ValidUntil: parsed.ValidUntil,
-		QRAnswers:  qrAnswers,
+		QRAnswers:  res.qrAnswers,
 	})
 }
 

@@ -130,8 +130,8 @@ func TestFreshenObservations(t *testing.T) {
 	}
 }
 
-func TestSandboxProviderPersonasBundle(t *testing.T) {
-	b := SandboxProviderPersonasBundle()
+func TestDemoProviderPersonasBundle(t *testing.T) {
+	b := DemoProviderPersonasBundle()
 	var bundle struct {
 		Type  string           `json:"type"`
 		Entry []map[string]any `json:"entry"`
@@ -143,7 +143,7 @@ func TestSandboxProviderPersonasBundle(t *testing.T) {
 		t.Fatalf("embedded persona bundle: type=%q entries=%d", bundle.Type, len(bundle.Entry))
 	}
 	b[0] = 'X'
-	if SandboxProviderPersonasBundle()[0] == 'X' {
+	if DemoProviderPersonasBundle()[0] == 'X' {
 		t.Fatal("accessor must return a copy")
 	}
 }

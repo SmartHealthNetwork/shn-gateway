@@ -97,8 +97,8 @@ func newInboundTestGateway(t *testing.T, frameCapable bool) (*Gateway, inboundTe
 	}
 	reg.Set("requester", reqEntry)
 
-	sor := NewStubHolderData()
-	gw := New(Config{
+	sor := newCensusSoR()
+	gw := mustNew(t, Config{
 		Role:            "payer",
 		HolderID:        "payer",
 		Identity:        shnsdk.Identity{HolderID: "payer", SignPriv: paySignPriv, EncPub: payEncPub, EncPriv: payEncPriv},
@@ -109,7 +109,7 @@ func newInboundTestGateway(t *testing.T, frameCapable bool) (*Gateway, inboundTe
 		Validator:       shnsdk.NewFakeValidator(),
 		SoR:             sor,
 		Store:           sor,
-		Adjudicator:     NewSandboxAdjudicator(sor, clock), // payer role requires a Responder; this derives the default one
+		Responder:       unusedResponder{}, // payer role requires a content occupant; this suite drives none
 		Clock:           clock,
 		Client:          &http.Client{Transport: &inboundAuthzStub{authzPriv: authzPriv, clock: clock}},
 	})
@@ -262,6 +262,65 @@ func TestRespondLegErrorBareForLegacyRequester(t *testing.T) {
 	}
 }
 
+// TestRespondLegErrorNeverEmptyMessage_Framed is the fail-closed guard's pin, frame-capable
+// side: a connector/responder answering non-2xx
+// with an EMPTY Message and no ResponseFHIR -- internal/brpayermirror's loopback mirror
+// does exactly this on every one of its own rejection paths (a truly empty body); this is
+// the class the smoke-caught `pas-submit: ... 422: {"error":""}` belongs to -- must NOT
+// synthesize a bare `{"error":""}`. legibleLegErrorMessage's fallback names the leg
+// (txType) and status instead.
+func TestRespondLegErrorNeverEmptyMessage_Framed(t *testing.T) {
+	g, requester := newInboundTestGateway(t, true)
+	rec := httptest.NewRecorder()
+	r := newSignedInboundRequest(t, g, requester.ID)
+	g.respondLegError(rec, r, "payer-coverage", "pas-response", "pas-claim",
+		"corr-1", LegResult{Status: 422}, "pci-1", requester.ID, "", "")
+	if rec.Code != 200 {
+		t.Fatalf("to-Hub status = %d, want 200 (framed app answer is 200-to-Hub)", rec.Code)
+	}
+	hdr, body, err := shnsdk.DecodeHTTPFrame(openResponseLeg(t, requester, rec.Body.Bytes()))
+	if err != nil {
+		t.Fatalf("decode frame: %v", err)
+	}
+	if hdr.Status != 422 {
+		t.Fatalf("framed status = %d, want 422", hdr.Status)
+	}
+	var synth map[string]string
+	if err := json.Unmarshal(body, &synth); err != nil {
+		t.Fatalf("synthesized body not valid JSON: %v (%s)", err, body)
+	}
+	if synth["error"] == "" {
+		t.Fatalf("synthesized body error is EMPTY -- the exact smoke-caught defect; body=%s", body)
+	}
+	if !strings.Contains(synth["error"], "pas-claim") || !strings.Contains(synth["error"], "422") {
+		t.Fatalf("synthesized body error = %q, want it to name the leg (pas-claim) and status (422)", synth["error"])
+	}
+}
+
+// TestRespondLegErrorNeverEmptyMessage_Legacy is the same guard's pin, legacy-requester
+// side (the bare non-2xx contract) -- same empty-Message input, same non-empty/legible
+// requirement on the bare {"error": ...} body.
+func TestRespondLegErrorNeverEmptyMessage_Legacy(t *testing.T) {
+	g, requester := newInboundTestGateway(t, false)
+	rec := httptest.NewRecorder()
+	r := newSignedInboundRequest(t, g, requester.ID)
+	g.respondLegError(rec, r, "payer-coverage", "pas-response", "pas-claim",
+		"corr-1", LegResult{Status: 422}, "pci-1", requester.ID, "", "")
+	if rec.Code != 422 {
+		t.Fatalf("legacy requester: to-Hub status = %d, want 422 (bare non-2xx)", rec.Code)
+	}
+	var got map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("legacy body not valid JSON: %v (%s)", err, rec.Body.String())
+	}
+	if got["error"] == "" {
+		t.Fatalf("legacy body error is EMPTY -- the exact smoke-caught defect; body=%s", rec.Body.String())
+	}
+	if !strings.Contains(got["error"], "pas-claim") || !strings.Contains(got["error"], "422") {
+		t.Fatalf("legacy body error = %q, want it to name the leg (pas-claim) and status (422)", got["error"])
+	}
+}
+
 // TestRespondLegFramesSuccessForCapableRequester (success framing): a 2xx answer to a
 // frame-capable requester is sealed as a v1 frame(200, application/fhir+json, body).
 func TestRespondLegFramesSuccessForCapableRequester(t *testing.T) {
@@ -363,9 +422,11 @@ func TestPASNativeSuccessFramedForCapableRequester(t *testing.T) {
 	g, requester := newInboundTestGateway(t, true)
 	pci, _, ok := g.cfg.SoR.ResolvePatient("MBR-COVERED")
 	if !ok {
-		t.Fatal("MBR-COVERED not resolvable in StubHolderData")
+		t.Fatal("MBR-COVERED not resolvable in censusSoR")
 	}
 	bundle := conformantPASBundleWithQR(t, "MBR-COVERED")
+	// The subject is the FRAMING of a payer answer, so any real occupant will do.
+	g.cfg.Responder = approvingPASResponder{clock: g.cfg.Clock}
 
 	env, err := shnsdk.Seal(shnsdk.Metadata{
 		Sender:          requester.ID,

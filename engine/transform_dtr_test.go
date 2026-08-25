@@ -159,10 +159,19 @@ func TestDTRStep2122Down_AttestedGolden(t *testing.T) {
 
 // TestDTRStep2122Up_PackageGolden proves the Up direction transforms a full
 // $questionnaire-package response Bundle (Questionnaire + QR entries) end
-// to end, matching the 2.2 package golden exactly.
+// to end, matching the frozen transform-golden-corpus output exactly.
+//
+// "want" reads testdata/golden/transform/2.1-to-2.2/… (the frozen transform-
+// golden corpus, computed via this SAME TransformDTRForTest step over the 2.1
+// golden — verified byte-for-byte at authoring time), NOT the direct
+// 2.2/questionnaire-package-pa-lumbar-mri.json per-line golden: that file's
+// embedded Questionnaire was re-keyed onto the captured-live L8000 tree, so
+// it is independently authored from the 2.1 package (per-line goldens are
+// not chained derivations of one another) and is no longer this step's
+// transform of it.
 func TestDTRStep2122Up_PackageGolden(t *testing.T) {
 	in := pasGolden(t, "2.1/questionnaire-package-pa-lumbar-mri.json")
-	want := pasGolden(t, "2.2/questionnaire-package-pa-lumbar-mri.json")
+	want := pasGolden(t, "transform/2.1-to-2.2/questionnaire-package-pa-lumbar-mri.json")
 
 	out, _, err := dtrStep2122Up(in, corr)
 	if err != nil {
@@ -171,10 +180,13 @@ func TestDTRStep2122Up_PackageGolden(t *testing.T) {
 	assertJSONEqual(t, out, want, "2.1->2.2 package bundle")
 }
 
-// TestDTRStep2122Down_PackageGolden is the Down mirror.
+// TestDTRStep2122Down_PackageGolden is the Down mirror — see
+// TestDTRStep2122Up_PackageGolden's doc comment for why "want" reads the
+// frozen transform-golden-corpus output rather than the direct 2.1 per-line
+// golden.
 func TestDTRStep2122Down_PackageGolden(t *testing.T) {
 	in := pasGolden(t, "2.2/questionnaire-package-pa-lumbar-mri.json")
-	want := pasGolden(t, "2.1/questionnaire-package-pa-lumbar-mri.json")
+	want := pasGolden(t, "transform/2.2-to-2.1/questionnaire-package-pa-lumbar-mri.json")
 
 	out, _, err := dtrStep2122Down(in, corr)
 	if err != nil {

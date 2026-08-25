@@ -2,9 +2,8 @@
 // FHIR server through the seed sequence a partner (or the desktop Kit's shnkitd) needs before
 // running scenarios — wait for readiness, create tenant partitions, install the operated-CQL
 // prepop Library fixtures, warm the $populate engine, load provider-data persona bundles, and
-// write/poll the seed-complete marker. It is deliberately thin: the heavy sandbox persona
-// builders (full PersonaSet seeding, CQL Library construction) stay in the private canonical
-// seeder; this package only carries the wire-level steps that are safe to publish.
+// write/poll the seed-complete marker. It is deliberately thin: the heavy persona builders
+// (full PersonaSet seeding, CQL Library construction) stay in the private canonical seeder; this package only carries the wire-level steps that are safe to publish.
 package fhirseed
 
 import (

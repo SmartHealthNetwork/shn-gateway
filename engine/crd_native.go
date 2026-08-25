@@ -13,23 +13,6 @@ import (
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
-// extractConformantOrder pulls the order JSON from a conformant CDS Hooks request's draftOrders
-// Bundle (the first entry whose resource is a CDS order — a ServiceRequest OR a DeviceRequest).
-//
-// NOTE: this returns the FIRST order only. The payer-side bind below is defense-in-depth, NOT the
-// comprehensive guard: the INGRESS (ingressCRDSubjectPCI, ingress_crd.go) already enforces that
-// EVERY draftOrders entry + prefetch resource resolves to the bound PCI before the request is
-// sealed, and the ingress is the sole origin of this leg's sealed bytes. A multi-entry Bundle with
-// a rogue second order is rejected at the ingress.
-func extractConformantOrder(reqJSON []byte) ([]byte, bool) {
-	var req ingressCDSRequest
-	if err := json.Unmarshal(reqJSON, &req); err != nil {
-		return nil, false
-	}
-	order := firstOrder(req)
-	return order, order != nil
-}
-
 // firstOrder returns the first draftOrders entry whose resource is a CDS order — a ServiceRequest
 // OR a DeviceRequest. The order-select hook legitimately carries either (UC-04 a G0151 PT
 // ServiceRequest; UC-02 an E0250 hospital-bed DeviceRequest — br-payer's CdsResourceExtractor
@@ -106,7 +89,7 @@ func (g *Gateway) conformantCRDBind(reqJSON []byte, tokSubject string) (srJSON, 
 
 // handleCRDNativeInbound serves the conformant CRD leg: subject-bind on the conformant shape,
 // ingress-validate the SR + coverage, then forward the VERBATIM conformant bytes to the responder
-// (sandbox adjudicates / native forwards to the real RI). Mirrors handleCRDInbound's structure for
+// (an injected Adjudicator decides / native forwards to the real RI). Mirrors handleCRDInbound's structure for
 // the conformant shape; the existing minimized handler is untouched.
 func (g *Gateway) handleCRDNativeInbound(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token, reqJSON []byte, answerTok string) {
 	ctx := r.Context()

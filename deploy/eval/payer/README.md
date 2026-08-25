@@ -32,10 +32,19 @@ Three containers:
 | `validator` | A FHIR server pre-loaded with the US Core + Da Vinci PAS implementation guides, used only for runtime `$validate` of outbound resources — it holds no data. |
 
 There is no Store and no Postgres in this bundle. A PAS-native payer holds
-no durable state of its own between requests; the gateway boots on its
-in-memory stub (`gateway/app/app.go`, the same code path production runs
-when `FHIR_DATA_URL` is unset). If your own adjudication system needs
-durable state, that lives in *it*, not in the gateway.
+no durable state of its own between requests, so the gateway runs on its
+in-memory Store. If your own adjudication system needs durable state, that
+lives in *it*, not in the gateway.
+
+> **This bundle's boot wiring is being re-cut and does not run as written.**
+> The gateway now requires a FHIR system of record on every role
+> (`FHIR_DATA_URL`) — the in-memory persona stub it used to fall back on when
+> that variable was unset has been removed, so a `ROLE=payer` container with no
+> `FHIR_DATA_URL` refuses to start rather than answering out of a built-in
+> roster. The compose file in this directory has not yet been updated to point
+> the payer at its own tenant. Until it is, use the
+> [Kit](https://github.com/SmartHealthNetwork/shn-kit) or a hosted evaluation
+> lane. This note will be removed when the bundle is re-cut.
 
 ## Prerequisite: an SHN developer account
 

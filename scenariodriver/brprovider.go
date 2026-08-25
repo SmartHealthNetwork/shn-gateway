@@ -140,15 +140,11 @@ func (d *Driver) FetchDTRPackage(r BRPResult) (DTRPackage, error) {
 // packagebundle, not the Parameters wrapper), and POSTs Parameters{subject, questionnaire,
 // packagebundle}.
 func (d *Driver) PopulateViaBRProvider(p DTRPackage) ([]byte, error) {
-	var pkg map[string]any
-	if err := json.Unmarshal(p.Body, &pkg); err != nil {
-		return nil, fmt.Errorf("scenariodriver: parse $questionnaire-package Bundle: %w body=%s", err, p.Body)
-	}
-	q, err := questionnaireFromPackage(pkg, p.Canonical)
+	q, err := questionnaireFromPackage(p.Body, p.Canonical)
 	if err != nil {
 		return nil, err
 	}
-	bundle, err := packageBundleResource(pkg)
+	bundle, err := packageBundleBytes(p.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -157,8 +153,8 @@ func (d *Driver) PopulateViaBRProvider(p DTRPackage) ([]byte, error) {
 		"resourceType": "Parameters",
 		"parameter": []any{
 			map[string]any{"name": "subject", "valueReference": map[string]any{"reference": "Patient/" + p.Member}},
-			map[string]any{"name": "questionnaire", "resource": q},
-			map[string]any{"name": "packagebundle", "resource": bundle},
+			map[string]any{"name": "questionnaire", "resource": json.RawMessage(q)},
+			map[string]any{"name": "packagebundle", "resource": json.RawMessage(bundle)},
 		},
 	}
 	body, err := json.Marshal(params)
@@ -189,72 +185,91 @@ func (d *Driver) PopulateViaBRProvider(p DTRPackage) ([]byte, error) {
 	return respBody, nil
 }
 
+// PackageEntries returns the entry list of a $questionnaire-package response — this package's
+// SINGLE unwrap of that response shape, used by every internal caller so there is never a second
+// copy. body may be EITHER a bare collection Bundle (resourceType=="Bundle") OR a
+// Parameters resource profiled on dtr-qpackage-output-parameters, whose inner collection Bundle
+// lives at parameter[name=="packagebundle"].resource (a conformant Da Vinci payer's
+// $questionnaire-package response shape, which the gateway relays VERBATIM on ingress). A
+// Parameters wrapper carrying no packagebundle parameter errors rather than silently yielding no
+// entries. Mirrors gateway/engine/davincimap.go's unwrapQuestionnairePackage and
+// sdk's ExtractQuestionnaireFromPackage/unwrapPackageParameters — same shape, no fourth variant.
+func PackageEntries(body []byte) ([]json.RawMessage, error) {
+	bundle, err := packageBundleBytes(body)
+	if err != nil {
+		return nil, err
+	}
+	var b struct {
+		Entry []json.RawMessage `json:"entry"`
+	}
+	if err := json.Unmarshal(bundle, &b); err != nil {
+		return nil, fmt.Errorf("scenariodriver: parse $questionnaire-package Bundle: %w", err)
+	}
+	return b.Entry, nil
+}
+
+// packageBundleBytes returns the raw $questionnaire-package Bundle bytes, unwrapping a
+// Parameters{packagebundle: Bundle} wrapper — br-provider's /api/dtr/populate requires
+// packagebundle to be a bare Bundle, not the Parameters wrapper.
+func packageBundleBytes(body []byte) ([]byte, error) {
+	var top struct {
+		ResourceType string `json:"resourceType"`
+		Parameter    []struct {
+			Name     string          `json:"name"`
+			Resource json.RawMessage `json:"resource"`
+		} `json:"parameter"`
+	}
+	if err := json.Unmarshal(body, &top); err != nil {
+		return nil, fmt.Errorf("scenariodriver: parse $questionnaire-package response: %w", err)
+	}
+	if top.ResourceType == "Bundle" {
+		return body, nil
+	}
+	if top.ResourceType == "Parameters" {
+		for _, p := range top.Parameter {
+			if p.Name == "packagebundle" && len(p.Resource) > 0 {
+				return p.Resource, nil
+			}
+		}
+		return nil, fmt.Errorf("scenariodriver: Parameters carries no packagebundle Bundle")
+	}
+	return nil, fmt.Errorf("scenariodriver: $questionnaire-package response has no Bundle to use as packagebundle (resourceType=%q)", top.ResourceType)
+}
+
 // questionnaireFromPackage pulls the Questionnaire resource matching canonical out of a
-// $questionnaire-package Bundle, falling back to the first Questionnaire entry if none matches
-// exactly (the package may carry it un-versioned).
-func questionnaireFromPackage(pkg map[string]any, canonical string) (map[string]any, error) {
-	var first map[string]any
-	for _, e := range bundleEntries(pkg) {
-		res, _ := e.(map[string]any)["resource"].(map[string]any)
-		if res == nil || res["resourceType"] != "Questionnaire" {
+// $questionnaire-package response (via PackageEntries), falling back to the first Questionnaire
+// entry if none matches exactly (the package may carry it un-versioned).
+func questionnaireFromPackage(body []byte, canonical string) (json.RawMessage, error) {
+	entries, err := PackageEntries(body)
+	if err != nil {
+		return nil, err
+	}
+	var first json.RawMessage
+	for _, e := range entries {
+		var entry struct {
+			Resource json.RawMessage `json:"resource"`
+		}
+		if err := json.Unmarshal(e, &entry); err != nil || entry.Resource == nil {
+			continue
+		}
+		var probe struct {
+			ResourceType string `json:"resourceType"`
+			URL          string `json:"url"`
+		}
+		if err := json.Unmarshal(entry.Resource, &probe); err != nil || probe.ResourceType != "Questionnaire" {
 			continue
 		}
 		if first == nil {
-			first = res
+			first = entry.Resource
 		}
-		if u, _ := res["url"].(string); u == canonical {
-			return res, nil
+		if probe.URL == canonical {
+			return entry.Resource, nil
 		}
 	}
 	if first != nil {
 		return first, nil
 	}
 	return nil, fmt.Errorf("scenariodriver: no Questionnaire resource in the $questionnaire-package Bundle (canonical=%q)", canonical)
-}
-
-// bundleEntries returns the entry list from a Bundle, or from a `return` Bundle nested in a
-// Parameters (a $questionnaire-package response may be wrapped either way).
-func bundleEntries(res map[string]any) []any {
-	if res["resourceType"] == "Bundle" {
-		entries, _ := res["entry"].([]any)
-		return entries
-	}
-	if res["resourceType"] == "Parameters" {
-		for _, p := range asList(res["parameter"]) {
-			pm, _ := p.(map[string]any)
-			if pm == nil {
-				continue
-			}
-			if inner, _ := pm["resource"].(map[string]any); inner != nil && inner["resourceType"] == "Bundle" {
-				entries, _ := inner["entry"].([]any)
-				return entries
-			}
-		}
-	}
-	return nil
-}
-
-func asList(v any) []any { l, _ := v.([]any); return l }
-
-// packageBundleResource returns the $questionnaire-package Bundle resource, unwrapping a
-// Parameters{return: Bundle} wrapper — br-provider's /api/dtr/populate requires packagebundle to
-// be a bare Bundle, not the Parameters wrapper.
-func packageBundleResource(res map[string]any) (map[string]any, error) {
-	if res["resourceType"] == "Bundle" {
-		return res, nil
-	}
-	if res["resourceType"] == "Parameters" {
-		for _, p := range asList(res["parameter"]) {
-			pm, _ := p.(map[string]any)
-			if pm == nil {
-				continue
-			}
-			if inner, _ := pm["resource"].(map[string]any); inner != nil && inner["resourceType"] == "Bundle" {
-				return inner, nil
-			}
-		}
-	}
-	return nil, fmt.Errorf("scenariodriver: $questionnaire-package response has no Bundle to use as packagebundle (resourceType=%v)", res["resourceType"])
 }
 
 // BuildGoldenPASBundleWithQR builds the PAS $submit Claim envelope from the committed prior-auth-

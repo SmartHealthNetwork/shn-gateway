@@ -107,7 +107,7 @@ func (n *nativeResponder) handlePASClaimUpdateNative(ctx context.Context, corrID
 	}
 	if parsed.Outcome != "approved" {
 		// Non-approved (incl. a terminal A3 denial) on the update leg → 422 + release:
-		// defensive sandbox parity (adjudicator.go:278-282); terminal-denial-on-update is
+		// defensive in-process parity; terminal-denial-on-update is
 		// out of scope.
 		return LegResult{Status: http.StatusUnprocessableEntity, Message: "amendment still insufficient", Rollback: release}, nil
 	}
@@ -174,7 +174,7 @@ func (n *nativeResponder) handlePASClaimNative(ctx context.Context, corrID, subj
 		// purely SHN's POLL DISCRIMINATOR, NOT a verdict input: on a fresh submit (no Claim.related[prior])
 		// it is benign on br-payer (its re-evaluation is gated on a prior claim), so the verdict is still
 		// br-payer's code-keyed CQL constant and the A4→A1 is still the timer. A ServiceRequest WITHOUT
-		// infoChanged keeps the prior behavior — return the A4 pend so the sandbox UC-04/06 amendment
+		// infoChanged keeps the prior behavior — return the A4 pend so the UC-04/06 amendment
 		// leg can bind to it — so this does NOT regress the amendment lanes.
 		if orderIsDeviceRequest(s.srJSON) || requestClaimHasInfoChanged(requestFHIR) {
 			crID := claimResponseIDFromPASResponse(norm)

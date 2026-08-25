@@ -254,7 +254,10 @@ func TestRelayedForeignBodyUnstamped(t *testing.T) {
 			t.Fatal("MBR-COVERED not resolvable")
 		}
 		bundle := conformantPASBundleWithQR(t, "MBR-COVERED")
-		inner := g.cfg.Responder
+		// A real content occupant behind the relay flag: the SUBJECT here is whether the
+		// engine stamps the answer, so the occupant only has to produce a genuine
+		// ClaimResponse. (Before §3.2 this was the derived in-process responder.)
+		inner := LegResponder(approvingPASResponder{clock: g.cfg.Clock})
 		g.cfg.Responder = relayFlagResponder{inner: inner, relayed: relayed}
 
 		env, err := shnsdk.Seal(shnsdk.Metadata{
@@ -442,7 +445,7 @@ func TestNativeForwardFilterUsesDeclaredSet(t *testing.T) {
 			opts = append(opts, WithOwnContractVersions(own))
 		}
 		return NewNativeResponder(&http.Client{Transport: errTransport{}}, "http://partner.invalid",
-			"svc", NewStubHolderData(), func() time.Time { return time.Unix(1700000000, 0).UTC() }, opts...)
+			"svc", newCensusSoR(), func() time.Time { return time.Unix(1700000000, 0).UTC() }, opts...)
 	}
 	t.Run("build constant alone refuses", func(t *testing.T) {
 		res, err := newResponder(nil).Handle(context.Background(), "crd-order-select", "corr", "pci", nil)

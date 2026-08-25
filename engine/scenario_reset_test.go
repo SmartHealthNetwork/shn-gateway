@@ -6,11 +6,11 @@ import (
 	"testing"
 )
 
-// TestScenarioResetRoute is the regression guard for the cloud Mode A composite reset
+// TestScenarioResetRoute is the regression guard for the cloud Mode A reset
 // (separated-reset-clears-gateway-state): the separated/cloud console resets BOTH the provider
-// gateway and the native-forward (composite) payer gateway via POST /scenario/reset. The route
+// gateway and the native-forward payer gateway via POST /scenario/reset. The route
 // must therefore be registered for the provider role AND for the native-forward payer — but NOT
-// for the built-in sandbox payer, whose payer-gw is PUBLIC (fhir.<apex>) and must never expose an
+// for a payer gateway running a partner's own injected LegResponder, whose payer-gw is PUBLIC (fhir.<apex>) and must never expose an
 // unauthenticated state-clearing endpoint. handleScenarioReset is generic g.Reset() (clears
 // pending+exchanges), so a zero-value Gateway exercises the routing without any substrate.
 func TestScenarioResetRoute(t *testing.T) {
@@ -21,8 +21,8 @@ func TestScenarioResetRoute(t *testing.T) {
 		wantStatus  int
 	}{
 		{"provider (internal harness)", "provider", false, http.StatusOK},
-		{"composite payer (native-forward, internal)", "payer", true, http.StatusOK},
-		{"sandbox payer (built-in, PUBLIC)", "payer", false, http.StatusNotFound},
+		{"native-forward payer (internal harness)", "payer", true, http.StatusOK},
+		{"non-native payer (PUBLIC)", "payer", false, http.StatusNotFound},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

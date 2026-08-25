@@ -13,18 +13,18 @@ go 1.26
 // entry, so each reason is ONE physical line, however long — a wrapped reason clips
 // mid-clause in the warning a consumer actually sees.
 retract (
-	// Withdrawn: shipped internal process vocabulary in source comments. Same code as v0.34.1 — move to v0.34.1 or later.
-	v0.34.0
-	// Withdrawn: returned 422 on attestation resumes, and shipped internal process vocabulary in source comments. Superseded by v0.36.1.
-	v0.36.0
-	// Withdrawn: bundled seed fixture carried a real payer's registry and subscriber identifiers, and source comments carried internal process vocabulary. Superseded by v0.36.2 — no behavior change between them.
-	v0.36.1
 	// Withdrawn: returned 500 on clinician/patient attestation resumes against an SDC adaptive questionnaire (the amend refused an item whose group had not been delivered yet). Superseded by v0.37.1.
 	v0.37.0
+	// Withdrawn: bundled seed fixture carried a real payer's registry and subscriber identifiers, and source comments carried internal process vocabulary. Superseded by v0.36.2 — no behavior change between them.
+	v0.36.1
+	// Withdrawn: returned 422 on attestation resumes, and shipped internal process vocabulary in source comments. Superseded by v0.36.1.
+	v0.36.0
+	// Withdrawn: shipped internal process vocabulary in source comments. Same code as v0.34.1 — move to v0.34.1 or later.
+	v0.34.0
 )
 
 require (
-	github.com/SmartHealthNetwork/shn-sdk v0.44.1
+	github.com/SmartHealthNetwork/shn-sdk v0.46.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/samply/golang-fhir-models/fhir-models v0.3.2

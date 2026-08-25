@@ -25,9 +25,9 @@ func TestObserve_NilObserverIsNoop(t *testing.T) {
 	_, provSignPriv := genED25519(t)
 	provEncPub, provEncPriv := genKeyPair(t)
 
-	sor := NewStubHolderData()
+	sor := newCensusSoR()
 
-	gw := New(Config{
+	gw := mustNew(t, Config{
 		Role:        "provider",
 		HolderID:    "provider",
 		PayerRouter: payerRouterFor(t, "payer"),
@@ -54,10 +54,10 @@ func TestObserve_StampsClockTime(t *testing.T) {
 	_, provSignPriv := genED25519(t)
 	provEncPub, provEncPriv := genKeyPair(t)
 
-	sor := NewStubHolderData()
+	sor := newCensusSoR()
 
 	var got []ObserverEvent
-	gw := New(Config{
+	gw := mustNew(t, Config{
 		Role:        "provider",
 		HolderID:    "provider",
 		PayerRouter: payerRouterFor(t, "payer"),
@@ -104,8 +104,10 @@ func TestObserver_OriginationLegEvents(t *testing.T) {
 		}
 	}
 	want := []string{
-		"leg.originated/crd-order-select",
-		"leg.response/crd-order-select",
+		// R3: handleUC03's "" branch re-keys onto the oxygen family's order-DISPATCH hook
+		// (register §11 ruling (b)) — crd-order-select was the L8000/order-select shape.
+		"leg.originated/crd-order-dispatch",
+		"leg.response/crd-order-dispatch",
 		"leg.originated/dtr-questionnaire-fetch",
 		"leg.failed/dtr-questionnaire-fetch",
 	}
@@ -122,10 +124,10 @@ func TestObserver_OriginationLegEvents(t *testing.T) {
 	var orig, resp *ObserverEvent
 	for i := range events {
 		e := &events[i]
-		if e.LegType == "crd-order-select" && e.Kind == "leg.originated" {
+		if e.LegType == "crd-order-dispatch" && e.Kind == "leg.originated" {
 			orig = e
 		}
-		if e.LegType == "crd-order-select" && e.Kind == "leg.response" {
+		if e.LegType == "crd-order-dispatch" && e.Kind == "leg.response" {
 			resp = e
 		}
 	}
@@ -161,7 +163,7 @@ func TestObserver_ValidateEvents(t *testing.T) {
 	// validator wasn't wrapped. Rebuilding through New with the observer set is
 	// what production does; mirror it.
 	cfg := gw.cfg
-	gw2 := New(cfg)
+	gw2 := mustNew(t, cfg)
 
 	callUC03(t, gw2)
 
@@ -197,9 +199,9 @@ func TestObserver_ValidateEventsFromPerLineLanes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sign keypair: %v", err)
 	}
-	stub := NewStubHolderData()
+	stub := newCensusSoR()
 	var seen []ObserverEvent
-	g := New(Config{
+	g := mustNew(t, Config{
 		Role:             "provider",
 		HolderID:         "provider",
 		Identity:         shnsdk.Identity{HolderID: "provider", SignPriv: signPriv},
@@ -244,7 +246,7 @@ func TestObserver_IngressEvents(t *testing.T) {
 	EnableIngressForTest(&cfg) // bypassed auth ⇒ IngressBaseURL/IngressClients not required
 	var events []ObserverEvent
 	cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
-	gw2 := New(cfg)
+	gw2 := mustNew(t, cfg)
 
 	ref := "Patient/MBR-COVERED"
 	req := httptest.NewRequest(http.MethodPost, "/cds-services/order-select-crd",
@@ -286,7 +288,7 @@ func TestObserver_ConformanceNeutral(t *testing.T) {
 		gw.cfg.CorrelationGen = func() string { return "corr-fixed-0001" }
 		if withObserver {
 			gw.cfg.Observer = func(ObserverEvent) {}
-			gw = New(gw.cfg) // re-run New so the validator decoration path is active
+			gw = mustNew(t, gw.cfg) // re-run New so the validator decoration path is active
 			// Re-pin AFTER New — New re-applies defaults (CorrelationGen would
 			// revert to crypto-random). Order-sensitive; do not "simplify".
 			gw.cfg.CorrelationGen = func() string { return "corr-fixed-0001" }
@@ -320,7 +322,7 @@ func TestObserver_IngressConformanceNeutral(t *testing.T) {
 		if withObserver {
 			cfg.Observer = func(ObserverEvent) {}
 		}
-		gw2 := New(cfg)
+		gw2 := mustNew(t, cfg)
 
 		req := httptest.NewRequest(http.MethodPost, "/cds-services/order-select-crd",
 			bytes.NewReader(crdReqJSON("MBR-COVERED", ref, ref)))
@@ -355,9 +357,9 @@ func TestRecordingWriter_Unwrap(t *testing.T) {
 func TestObservingSoR_EmitsPerMethod(t *testing.T) {
 	fixed := time.Unix(1700000000, 0).UTC()
 	var events []ObserverEvent
-	bare := NewStubHolderData()
+	bare := newCensusSoR()
 	sor := observingSoR{
-		inner:    NewStubHolderData(),
+		inner:    newCensusSoR(),
 		observer: func(e ObserverEvent) { events = append(events, e) },
 		clock:    func() time.Time { return fixed },
 	}
@@ -423,7 +425,7 @@ func TestObservingSoR_EmitsPerMethod(t *testing.T) {
 func TestObservingSoR_CoverageInforceDetail(t *testing.T) {
 	var events []ObserverEvent
 	sor := observingSoR{
-		inner:    NewStubHolderData(),
+		inner:    newCensusSoR(),
 		observer: func(e ObserverEvent) { events = append(events, e) },
 		clock:    time.Now,
 	}
@@ -446,21 +448,21 @@ func TestObservingSoR_CoverageInforceDetail(t *testing.T) {
 	}
 }
 
-// TestObserver_SoRDecorationPrecedesDerivations pins the spec's review
-// finding: the derived sandbox Responder and managed Populator must hold the
-// DECORATED SoR. If the decoration moves below the gateway.go:240/251
-// derivations, this fails.
+// TestObserver_SoRDecorationPrecedesDerivations pins the spec's review finding: the
+// managed Populator must hold the DECORATED SoR. If the decoration moves below the
+// Populator derivation, this fails. (Its sibling half — the derived in-process Responder,
+// which also captured the SoR at construction — went with the in-process payer stub, §3.2:
+// a payer's content occupant is injected fully built and never reads cfg.SoR through the
+// engine's derivation.)
 func TestObserver_SoRDecorationPrecedesDerivations(t *testing.T) {
 	gw, _, _ := crdTestSystem(t, shnsdk.CardCoverage{Covered: shnsdk.CoveredCovered, PANeeded: shnsdk.PANeededAuthNeeded, Questionnaires: []string{"http://example.org/q"}})
 	cfg := gw.cfg
-	// The first New() (observer off) already derived Responder/Populator over
-	// the RAW SoR — nil them so this New() re-derives, as a fresh production
-	// construction with an Observer would.
-	cfg.Responder = nil
+	// The first New() (observer off) already derived the Populator over the RAW SoR —
+	// nil it so this New() re-derives, as a fresh production construction with an
+	// Observer would.
 	cfg.Populator = nil
-	cfg.Adjudicator = NewSandboxAdjudicator(cfg.SoR, cfg.Clock)
 	cfg.Observer = func(ObserverEvent) {}
-	g2 := New(cfg)
+	g2 := mustNew(t, cfg)
 
 	if _, ok := g2.cfg.SoR.(observingSoR); !ok {
 		t.Fatalf("cfg.SoR not decorated: %T", g2.cfg.SoR)
@@ -470,14 +472,7 @@ func TestObserver_SoRDecorationPrecedesDerivations(t *testing.T) {
 		t.Fatalf("unexpected populator type %T", g2.cfg.Populator)
 	}
 	if _, ok := mp.sor.(observingSoR); !ok {
-		t.Fatal("managed Populator captured the raw SoR — decoration must precede the gateway.go:251 derivation")
-	}
-	sr, ok := g2.cfg.Responder.(*sandboxResponder)
-	if !ok {
-		t.Fatalf("unexpected responder type %T", g2.cfg.Responder)
-	}
-	if _, ok := sr.sor.(observingSoR); !ok {
-		t.Fatal("sandbox Responder captured the raw SoR — decoration must precede the gateway.go:240 derivation")
+		t.Fatal("managed Populator captured the raw SoR — decoration must precede the Populator derivation")
 	}
 }
 
@@ -488,9 +483,9 @@ func TestObserver_SoRDecorationIdempotent(t *testing.T) {
 	gw, _, _ := crdTestSystem(t, shnsdk.CardCoverage{Covered: shnsdk.CoveredCovered, PANeeded: shnsdk.PANeededAuthNeeded, Questionnaires: []string{"http://example.org/q"}})
 	cfg := gw.cfg
 	cfg.Observer = func(ObserverEvent) {}
-	g2 := New(cfg) // decorates
+	g2 := mustNew(t, cfg) // decorates
 	cfg2 := g2.cfg
-	g3 := New(cfg2) // must NOT re-wrap
+	g3 := mustNew(t, cfg2) // must NOT re-wrap
 	inner, ok := g3.cfg.SoR.(observingSoR)
 	if !ok {
 		t.Fatalf("cfg.SoR not decorated: %T", g3.cfg.SoR)
@@ -518,7 +513,7 @@ func TestObserver_SoRDecorationIdempotent(t *testing.T) {
 // al., originate.go:352). The non-negotiable half of the capture-site pin —
 // a populator-driven read emits through the decorated SoR — is then asserted
 // directly: g2.cfg.Populator is in-package, so its Populate entry point is
-// invoked with a stub persona + the sandbox $questionnaire-package, and the
+// invoked with a stub persona + the demo lumbar $questionnaire-package, and the
 // resulting ClinicalContext sor.read is required.
 func TestObserver_SoREventsInUC03(t *testing.T) {
 	gw, _, _ := crdTestSystem(t, shnsdk.CardCoverage{Covered: shnsdk.CoveredCovered, PANeeded: shnsdk.PANeededAuthNeeded, Questionnaires: []string{"http://example.org/q"}})
@@ -527,7 +522,7 @@ func TestObserver_SoREventsInUC03(t *testing.T) {
 	cfg.Populator = nil
 	var events []ObserverEvent
 	cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
-	g2 := New(cfg)
+	g2 := mustNew(t, cfg)
 
 	callUC03(t, g2)
 
@@ -555,7 +550,7 @@ func TestObserver_SoREventsInUC03(t *testing.T) {
 		t.Fatalf("unexpected populator type %T", g2.cfg.Populator)
 	}
 	const member = "MBR-COVERED"
-	_, _, err := mp.Populate(context.Background(), wrapSandboxPackage(t), PopulateContext{
+	_, _, err := mp.Populate(context.Background(), wrapDemoLumbarPackage(t), PopulateContext{
 		Member:      member,
 		PatientRef:  "Patient/" + member,
 		CoverageRef: "Coverage/" + member,
@@ -583,7 +578,7 @@ func TestObserver_SoREventsInUC03(t *testing.T) {
 func TestObservingSoR_NotFoundDetail(t *testing.T) {
 	var events []ObserverEvent
 	sor := observingSoR{
-		inner:    NewStubHolderData(),
+		inner:    newCensusSoR(),
 		observer: func(e ObserverEvent) { events = append(events, e) },
 		clock:    time.Now,
 	}

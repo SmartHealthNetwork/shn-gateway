@@ -6,7 +6,7 @@ import (
 )
 
 func TestConformantCRDDispatchBind_FencesAllDispatchedOrders(t *testing.T) {
-	g := &Gateway{cfg: Config{SoR: NewStubHolderData()}}
+	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
 	pci, _, _ := g.cfg.SoR.ResolvePatient("MBR-COVERED")
 	// Two orders: dr1 subject MBR-COVERED (ok), dr2 subject MBR-NOTCOVERED (wrong patient).
 	req := []byte(`{"hook":"order-dispatch","context":{"patientId":"MBR-COVERED","dispatchedOrders":["DeviceRequest/dr1","DeviceRequest/dr2"],"performer":"Organization/dme1"},"prefetch":{"deviceHistory":{"resourceType":"Bundle","entry":[{"fullUrl":"DeviceRequest/dr1","resource":{"resourceType":"DeviceRequest","id":"dr1","subject":{"reference":"Patient/MBR-COVERED"}}},{"fullUrl":"DeviceRequest/dr2","resource":{"resourceType":"DeviceRequest","id":"dr2","subject":{"reference":"Patient/MBR-NOTCOVERED"}}}]},"coverage":{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"Coverage","beneficiary":{"reference":"Patient/MBR-COVERED"}}}]}}}`)
@@ -16,7 +16,7 @@ func TestConformantCRDDispatchBind_FencesAllDispatchedOrders(t *testing.T) {
 }
 
 func TestConformantCRDDispatchBind_RejectsWrongSubject(t *testing.T) {
-	g := &Gateway{cfg: Config{SoR: NewStubHolderData()}}
+	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
 	pci, _, _ := g.cfg.SoR.ResolvePatient("MBR-COVERED") // the token subject
 	// dispatchedOrders → DeviceRequest whose subject is MBR-NOTCOVERED, but patientId/token = MBR-COVERED.
 	req := []byte(`{"hook":"order-dispatch","context":{"patientId":"MBR-COVERED","dispatchedOrders":["DeviceRequest/dr1"],"performer":"Organization/dme1"},"prefetch":{"deviceHistory":{"resourceType":"Bundle","entry":[{"fullUrl":"DeviceRequest/dr1","resource":{"resourceType":"DeviceRequest","id":"dr1","subject":{"reference":"Patient/MBR-NOTCOVERED"}}}]},"coverage":{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"Coverage","beneficiary":{"reference":"Patient/MBR-COVERED"}}}]}}}`)

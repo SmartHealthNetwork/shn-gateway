@@ -14,10 +14,10 @@ import (
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
-func TestSandboxLumbarLibrary(t *testing.T) {
-	lib, err := SandboxLumbarLibrary()
+func TestDemoLumbarLibrary(t *testing.T) {
+	lib, err := DemoLumbarLibrary()
 	if err != nil {
-		t.Fatalf("SandboxLumbarLibrary: %v", err)
+		t.Fatalf("DemoLumbarLibrary: %v", err)
 	}
 	var l struct {
 		ResourceType string `json:"resourceType"`
@@ -77,7 +77,7 @@ func TestPutGlobalArtifact(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
-	lib, err := SandboxLumbarLibrary()
+	lib, err := DemoLumbarLibrary()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +99,7 @@ func TestPutGlobalArtifact_InvalidRejected(t *testing.T) {
 	defer srv.Close()
 	v := shnsdk.NewFakeValidator()
 	v.RejectIfContains = "LumbarMRICQL" // force invalid
-	lib, _ := SandboxLumbarLibrary()
+	lib, _ := DemoLumbarLibrary()
 	err := PutGlobalArtifact(context.Background(), srv.URL+"/fhir/DEFAULT", v, "Library", "LumbarMRICQL", lib)
 	if err == nil {
 		t.Fatal("invalid artifact must not be PUT")

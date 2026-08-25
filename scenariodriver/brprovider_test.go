@@ -8,10 +8,25 @@ import (
 	"testing"
 )
 
-// pkgFixture is a br-payer-shaped Parameters{return: Bundle{Questionnaire}} package.
-const pkgFixture = `{"resourceType":"Parameters","parameter":[{"name":"return","resource":{
+// pkgFixture is a br-payer-shaped Parameters{packagebundle: Bundle{Questionnaire}} package,
+// profiled on dtr-qpackage-output-parameters.
+const pkgFixture = `{"resourceType":"Parameters","parameter":[{"name":"packagebundle","resource":{
   "resourceType":"Bundle","type":"collection","entry":[
     {"resource":{"resourceType":"Questionnaire","id":"q1","url":"http://example.org/Questionnaire/home-oxygen"}}]}}]}`
+
+func TestPackageEntries_BothShapes(t *testing.T) {
+	bare := []byte(`{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"Questionnaire","id":"q"}}]}`)
+	wrapped := []byte(`{"resourceType":"Parameters","parameter":[{"name":"packagebundle","resource":{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"Questionnaire","id":"q"}}]}}]}`)
+	for name, body := range map[string][]byte{"bare": bare, "wrapped": wrapped} {
+		es, err := PackageEntries(body)
+		if err != nil || len(es) != 1 {
+			t.Fatalf("%s: entries=%d err=%v", name, len(es), err)
+		}
+	}
+	if _, err := PackageEntries([]byte(`{"resourceType":"Parameters","parameter":[]}`)); err == nil {
+		t.Fatal("no packagebundle must error")
+	}
+}
 
 func TestOriginateThroughBRProvider(t *testing.T) {
 	var bffPath, bffServer, bypass string

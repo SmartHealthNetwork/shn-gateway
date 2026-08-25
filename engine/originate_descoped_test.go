@@ -8,15 +8,15 @@ import (
 )
 
 // noOrderSoR resolves the provider-data UC-02 member as a Patient (the member exists in the
-// provider tenant) but has NO open order in the SoR — the embedded StubHolderData's OpenOrder
+// provider tenant) but has NO open order in the SoR — the embedded censusSoR's OpenOrder
 // returns (nil,false). It mirrors the real provider-data lane: MBR-PD-UC02 lives in the FHIR-store
-// seed (internal/fhirseed), not the engine's in-memory stubPersonas map, so ResolvePatient is
+// seed (internal/fhirseed), not the engine's in-memory censusPersonas map, so ResolvePatient is
 // overridden here exactly as the HomeOxygen fake does for MBR-OX.
-type noOrderSoR struct{ *StubHolderData }
+type noOrderSoR struct{ *censusSoR }
 
 func (s *noOrderSoR) ResolvePatient(memberID string) (string, Demo, bool) {
 	if memberID != "MBR-PD-UC02" {
-		return s.StubHolderData.ResolvePatient(memberID)
+		return s.censusSoR.ResolvePatient(memberID)
 	}
 	return "pci-uc02", Demo{BirthDate: "1953-09-17", FamilyName: "Bergstrom-HospitalBed"}, true
 }
@@ -26,10 +26,10 @@ func (s *noOrderSoR) ResolvePatient(memberID string) (string, Demo, bool) {
 // orderSource-routed scenarios, the provider-data lane reads the order via OpenOrder(member),
 // so a mis-seeded member with NO open order in the SoR must fail closed at OpenOrder — never
 // originate a literal order. That is the provider-data honesty boundary: every origination
-// traces to the provider's seeded SoR. The sandbox lane keeps the no-PA origination off the
+// traces to the provider's seeded SoR. Every other lane keeps the no-PA origination off the
 // per-UC tuple, so this guard is provider-data-only.
 func TestHandleUC02_ProviderData_NoSeededOrder_FailsClosed(t *testing.T) {
-	g := &Gateway{cfg: Config{OriginationProfile: "provider-data", SoR: &noOrderSoR{NewStubHolderData()}}}
+	g := &Gateway{cfg: Config{OriginationProfile: "provider-data", SoR: &noOrderSoR{newCensusSoR()}}}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/scenario/uc02", strings.NewReader("{}"))
 	g.handleUC02(rec, req)

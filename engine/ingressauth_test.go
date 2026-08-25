@@ -230,8 +230,8 @@ func TestIngressTokenEndpoint_RS384Client(t *testing.T) {
 func gatewayWithAuth(t *testing.T, clientID string, pubPEM []byte) *Gateway {
 	t.Helper()
 	_, signPriv := genED25519(t) // existing helper: (ed25519.PublicKey, ed25519.PrivateKey)
-	sor := NewStubHolderData()   // existing engine stub; satisfies both SoR and Store
-	g := New(Config{
+	sor := newCensusSoR()        // existing engine stub; satisfies both SoR and Store
+	g := mustNew(t, Config{
 		Role:           "provider",
 		HolderID:       "provider",
 		PayerRouter:    payerRouterFor(t, "payer"),

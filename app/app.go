@@ -2,7 +2,7 @@
 // config-only, loads its `shn register` bundle (shnsdk.LoadBundle), resolves
 // trust anchors + endpoints + the FHIR validator URL from /discovery, populates
 // the peer Registry from the registrar /holders feed (the federation core),
-// defaults SoR/Store to the in-memory memstub, and defaults the validator to the
+// requires a FHIR system of record (FHIR_DATA_URL) with an in-memory Store default, and defaults the validator to the
 // REAL operation-level validator FAIL-CLOSED. It reuses shn-sdk for all
 // participation and NEVER imports the private substrate's internal packages — the
 // gateway boundary fence (gateway/boundary_test.go) enforces this structurally (AI-11).
@@ -127,9 +127,10 @@ type config struct {
 	AuthzPubkeyURL     string
 	HubTransportKeyURL string
 
-	StoreDatabaseURL string // Postgres DSN for the durable pgstore Store (else memstub).
+	StoreDatabaseURL string // Postgres DSN for the durable pgstore Store (else the in-memory Store).
 
-	// Optional FHIR connector block (else memstub SoR/Store).
+	// FHIR connector block. FHIRDataURL is REQUIRED on every role (there is no in-process
+	// persona stub to fall back on); the credential fields below are optional.
 	FHIRDataURL      string
 	FHIRTokenURL     string
 	FHIRClientID     string
@@ -195,9 +196,9 @@ type config struct {
 	// today). PAS_NATIVE's bool-flag precedent.
 	PayerDavinciStrictExtensions bool
 
-	// OriginationProfile selects the per-UC origination lane: "" / "sandbox"
-	// keep the CPT/lumbar order shape; "provider-data" originates every UC off the
-	// provider's seeded SoR and drives real br-payer verdicts. ORIGINATION_PROFILE.
+	// OriginationProfile selects the per-UC origination lane: "" and "demo" keep the
+	// self-contained demo order shape; "provider-data" originates every UC off the
+	// provider's seeded SoR and drives real reference-payer verdicts. ORIGINATION_PROFILE.
 	OriginationProfile string
 
 	// Optional native DTR population (provider-local). PROVIDER_DTR_NATIVE switches DTR
@@ -368,6 +369,27 @@ func loadConfig(getenv func(string) string) (config, error) {
 		HubTransportKeyURL: getenv("HUB_TRANSPORT_KEY_URL"),
 	}
 
+	// Normalize the lane identity ONCE, here, at the config boundary, rather than letting
+	// every downstream predicate special-case the unset default. OriginationProfile's own
+	// doc comment above already declares the contract: "\"\" and \"demo\" keep the
+	// self-contained demo order shape" — they are the SAME lane, so they should be the SAME
+	// value from this point on. Before this, an unset ORIGINATION_PROFILE reached the
+	// engine as a THIRD, undeclared value that individual predicates (isDemoProfile,
+	// targetsBrPayer, and their ad-hoc callers) had to separately remember to treat as demo
+	// — and twice didn't, independently, at two different call sites (the ingress-$validate
+	// skip, then the UC-08 not-covered→deny proceed). Normalizing here closes the whole
+	// trap class instead of patching its next instance.
+	//
+	// Scoped to ROLE=provider: OriginationProfile is a PROVIDER-origination concept only
+	// (it selects which order set /scenario/* handlers build from) — payer/facility/phg
+	// roles never read it. Normalizing unconditionally would make every OTHER role's
+	// unset-by-construction OriginationProfile ALSO read as "demo", which would then
+	// wrongly trip the operatedPopulateProfile PROVIDER_DTR_POPULATE_URL requirement below
+	// for deployments that have no DTR/populate concept at all.
+	if cfg.Role == "provider" && cfg.OriginationProfile == "" {
+		cfg.OriginationProfile = "demo"
+	}
+
 	for _, pair := range optionalURLs(cfg) {
 		if err := checkOptionalURL(pair[0], pair[1]); err != nil {
 			return config{}, fmt.Errorf("gateway: %w", err)
@@ -455,8 +477,12 @@ func loadConfig(getenv func(string) string) (config, error) {
 	if cfg.ProviderDTRNative && cfg.ProviderDTRPopulateURL == "" {
 		return config{}, fmt.Errorf("gateway: PROVIDER_DTR_NATIVE=true requires PROVIDER_DTR_POPULATE_URL")
 	}
-	if cfg.OriginationProfile == "provider-data" && cfg.ProviderDTRPopulateURL == "" {
-		return config{}, fmt.Errorf("gateway: ORIGINATION_PROFILE=provider-data requires PROVIDER_DTR_POPULATE_URL (the operated $populate endpoint)")
+	// Every origination lane that talks to a REAL payer needs an OPERATED $populate: the
+	// questionnaires a real payer advertises are its own resources, and the managed filler
+	// only ever knew the retired in-process questionnaire tree. So "demo" carries the same
+	// requirement "provider-data" always did.
+	if operatedPopulateProfile(cfg.OriginationProfile) && cfg.ProviderDTRPopulateURL == "" {
+		return config{}, fmt.Errorf("gateway: ORIGINATION_PROFILE=%s requires PROVIDER_DTR_POPULATE_URL (the operated $populate endpoint)", cfg.OriginationProfile)
 	}
 
 	// All-or-nothing ingress registration (FR-G13): PROVIDER_DAVINCI_INGRESS
@@ -985,23 +1011,26 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		}
 	}
 
-	// SoR/Store: memstub data-default; FHIR connector is the opt-in override.
-	var sor engine.SystemOfRecord
-	var store engine.Store
+	// SoR: the holder's own FHIR system of record. FAIL-CLOSED — there is no in-process
+	// persona census to fall back on any more (§4.1): a gateway with no FHIR_DATA_URL
+	// could only have answered out of a hardcoded demo roster, so an unset FHIR_DATA_URL is
+	// a boot error naming the env rather than a silent stub.
 	if cfg.FHIRDataURL == "" {
-		stub := engine.NewStubHolderData()
-		sor, store = stub, stub
-	} else {
-		hc, herr := fhirHTTPClient(cfg) // smartauth.NewHTTPClient when the SMART credential block is set, else nil (unauthenticated)
-		if herr != nil {
-			return b, herr
-		}
-		sor = fhirsor.NewFromURL(cfg.FHIRDataURL, hc)
-		store = engine.NewStubHolderData() // default Store; the SHN_STORE_DATABASE_URL override below swaps in pgstore
+		return b, fmt.Errorf("gateway: FHIR_DATA_URL is required — the gateway reads its members, coverage and " +
+			"clinical facts from the holder's own FHIR system of record (the in-process persona stub is gone). " +
+			"Point it at your US Core server (e.g. http://hapi:8080/fhir), or at your tenant partition")
 	}
+	hc, herr := fhirHTTPClient(cfg) // smartauth.NewHTTPClient when the SMART credential block is set, else nil (unauthenticated)
+	if herr != nil {
+		return b, herr
+	}
+	var sor engine.SystemOfRecord = fhirsor.NewFromURL(cfg.FHIRDataURL, hc)
+	// Store: the gateway's OWN business state (auth numbers, pended-claim ledger, EOBs).
+	// In-memory by default; the SHN_STORE_DATABASE_URL override below swaps in pgstore.
+	var store engine.Store = engine.NewMemStore()
 
 	// Durable Store override: pgstore when SHN_STORE_DATABASE_URL is set, else the
-	// memstub selected above. pgxpool.New is lazy; NewPgStore's advisory-locked
+	// in-memory Store selected above. pgxpool.New is lazy; NewPgStore's advisory-locked
 	// EnsureSchema is the fail-fast (and the 4-gateways-one-DB race guard). Holder-
 	// scoped by construction: NewPgStore captures the bundle's HolderID.
 	// pool is hoisted out of the if so the /health wiring below can register a
@@ -1075,7 +1104,6 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		DemoEdgeCapture: cfg.DemoEdgeCapture,
 		SoR:             sor,
 		Store:           store,
-		Adjudicator:     engine.NewSandboxAdjudicator(sor, clock),
 		Clock:           clock, // production: time.Now; hermetic tests: the harness's injected clock (HandlerWithClock)
 		Client:          client,
 		NPI:             cfg.NPI,
@@ -1103,9 +1131,10 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	// checks-runner→responder endpoint-evidence wiring target (nil-safe: no native responder,
 	// no sink to feed).
 	var evidenceSink engine.EndpointEvidenceSetter
-	// Native-forward payer mode: the read-only legs forward to a partner
-	// Da Vinci endpoint; PAS stays on the sandbox fallback. Setting Responder here means
-	// engine.New uses it directly (it only derives from Adjudicator when Responder==nil).
+	// Native-forward payer mode: EVERY Da Vinci leg forwards to the payer's own endpoint.
+	// This block is the payer role's ONLY content occupant in the published binary — with
+	// no PAYER_DAVINCI_BASE_URL a ROLE=payer boot fails closed in engine.New (§3.2),
+	// because the in-process stand-in responder it used to fall back to is deleted.
 	if cfg.PayerDavinciBaseURL != "" {
 		if cfg.PayerDavinciTokenURL == "" {
 			fmt.Fprintf(stdout, "gateway: WARNING PAYER_DAVINCI_BASE_URL set without PAYER_DAVINCI_TOKEN_URL — forwarding to the payer UNAUTHENTICATED\n")
@@ -1117,12 +1146,12 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		if pdc == nil {
 			pdc = client // the substrate HTTP client; unauthenticated forward
 		}
-		// Fail loud: a PAS-native gateway MUST have a real payer Store for the shadow
-		// ledger + EOB (mirrors the payer-role derive-then-guard at
-		// gateway/engine/gateway.go:163-171). Without it a PAS leg would dispatch into
-		// a nil store and panic at runtime.
-		if cfg.PayerDavinciPASNative && store == nil {
-			return b, fmt.Errorf("gateway: PAYER_DAVINCI_PAS_NATIVE=true requires a payer Store")
+		// PAS forwarding is no longer a switch: the split counterparty that used to keep the
+		// PAS pair on an in-process fallback is deleted (§3.2), so EVERY Da Vinci leg —
+		// PAS included — reaches PAYER_DAVINCI_BASE_URL. Say so loudly for a stack that
+		// still sets the old flag false, whose PAS legs just changed destination.
+		if !cfg.PayerDavinciPASNative {
+			fmt.Fprintln(stdout, "gateway: PAYER_DAVINCI_PAS_NATIVE is no longer a switch — every Da Vinci leg, PAS included, forwards to PAYER_DAVINCI_BASE_URL (the in-process payer is retired)")
 		}
 		// FR-G26: discover the partner's CDS Hooks order-select service id at boot.
 		// If PAYER_DAVINCI_CRD_SERVICE_ID is set it wins (escape hatch — needed for
@@ -1139,11 +1168,10 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		if discErr != nil {
 			return b, fmt.Errorf("gateway: CRD service-id discovery: %w", discErr)
 		}
-		// WithDeclaredContractVersions is scoped to the NATIVE responder only (the
-		// foreign-endpoint filter): NewCompositeResponder routes read-only
-		// legs to native and PAS to the sandbox fallback unless PayerDavinciPASNative
-		// (composite.go), so a sandbox-fallback PAS leg is correctly NOT filtered by
-		// this foreign declaration — the sandbox payer is not the foreign peer.
+		// WithDeclaredContractVersions is the foreign-endpoint filter: every leg this
+		// responder answers goes to the partner endpoint, so the partner's declared set
+		// gates all of them (the split counterparty that used to route some legs to a native
+		// arm and the rest to an in-process fallback is deleted — §3.2).
 		native := engine.NewNativeResponder(pdc, cfg.PayerDavinciBaseURL, crdSvcID, store, clock,
 			engine.WithCDSBaseURL(cfg.PayerDavinciCDSBaseURL),
 			engine.WithCRDHook(cfg.PayerDavinciCRDHook),
@@ -1163,17 +1191,15 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 			// stdout precedent (e.g. the unauthenticated-forward warning above).
 			engine.WithEndpointEvidenceObserver(func(note string) { fmt.Fprintf(stdout, "gateway: %s\n", note) }))
 		evidenceSink = native
-		fallback := engine.NewSandboxResponder(gwCfg.Adjudicator, sor, store, clock)
-		gwCfg.Responder = engine.NewCompositeResponder(native, fallback, cfg.PayerDavinciPASNative)
+		gwCfg.Responder = native
 		// The native-forward DTR response is a foreign Da Vinci package SHN can't $validate
 		// (R-8 near-relay): tell the engine to skip the DTR egress foreign-$validate (FR-G28).
 		gwCfg.PayerDavinciNative = true
 	}
-	if cfg.ProviderDTRNative {
-		gwCfg.Populator = engine.NewNativePopulator(client, cfg.ProviderDTRPopulateURL)
-	} else if cfg.OriginationProfile == "provider-data" {
-		// Operated-CQL $populate against the provider tenant (the crux of the
-		// provider-data lane). PROVIDER_DTR_POPULATE_URL is validated at loadConfig.
+	if cfg.ProviderDTRNative || operatedPopulateProfile(cfg.OriginationProfile) {
+		// Operated-CQL $populate against the provider tenant (the crux of the provider-data
+		// and demo lanes — both answer a REAL payer's questionnaire, which the managed
+		// filler cannot fill). PROVIDER_DTR_POPULATE_URL is validated at loadConfig.
 		gwCfg.Populator = engine.NewNativePopulator(client, cfg.ProviderDTRPopulateURL)
 	}
 	gwCfg.IngressEnabled = cfg.ProviderDavinciIngress
@@ -1207,7 +1233,10 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	// engine.New(gwCfg).Handler()) so the observer mux composed just below
 	// can wire the demo capture-fetch endpoint against this SAME gateway
 	// instance's own edge-capture store.
-	gw := engine.New(gwCfg)
+	gw, err := engine.New(gwCfg)
+	if err != nil {
+		return b, err
+	}
 
 	var obsHandler http.Handler
 	if hub != nil {
@@ -1538,10 +1567,10 @@ func pollFeed(ctx context.Context, c *http.Client, registrarURL string, reg shns
 // credential block (FHIR_TOKEN_URL + FHIR_CLIENT_ID + ...) is set it authenticates
 // per the configured mode: RFC 7523 signed-JWT client-credentials (private_key_jwt,
 // preferred) or client_secret_post when FHIR_CLIENT_SECRET is set; else nil ⇒
-// unauthenticated (sandbox default). Mirrors cmd/gateway/main.go's connector branch.
+// unauthenticated (the zero-config default). Mirrors cmd/gateway/main.go's connector branch.
 func fhirHTTPClient(cfg config) (*http.Client, error) {
 	if cfg.FHIRTokenURL == "" {
-		return nil, nil // unauthenticated (sandbox default)
+		return nil, nil // unauthenticated (the zero-config default)
 	}
 	sc := smartauth.Config{
 		TokenURL: cfg.FHIRTokenURL, ClientID: cfg.FHIRClientID, Scope: cfg.FHIRClientScope,
@@ -1566,7 +1595,7 @@ func fhirHTTPClient(cfg config) (*http.Client, error) {
 // the partner Da Vinci payer. When the PAYER_DAVINCI SMART credential block is set it
 // authenticates per the configured mode: RFC 7523 signed-JWT client-credentials
 // (private_key_jwt, preferred) or client_secret_post when PAYER_DAVINCI_CLIENT_SECRET
-// is set; else nil ⇒ unauthenticated (deliberate sandbox mode).
+// is set; else nil ⇒ unauthenticated (a deliberate zero-config demo posture).
 func payerDavinciHTTPClient(cfg config) (*http.Client, error) {
 	if cfg.PayerDavinciTokenURL == "" {
 		return nil, nil // unauthenticated (deliberate; warned at build)
@@ -1605,4 +1634,11 @@ func loadSmartKey(path, alg string) (crypto.PrivateKey, error) {
 	default:
 		return nil, fmt.Errorf("unsupported alg %q", alg)
 	}
+}
+
+// operatedPopulateProfile reports whether an origination profile REQUIRES the operated
+// $populate endpoint. Both real-payer lanes do: the questionnaire on the wire is the
+// payer's own resource, and the managed filler only knew the retired in-process tree.
+func operatedPopulateProfile(profile string) bool {
+	return profile == "provider-data" || profile == "demo"
 }

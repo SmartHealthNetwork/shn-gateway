@@ -40,6 +40,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SmartHealthNetwork/shn-gateway/fhirseed"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -81,6 +82,13 @@ type pendResumeSubstrate struct {
 	// claimed records, per legType, the contract version each request frame
 	// declared ("" when the request crossed bare).
 	claimed map[string][]string
+	// overrideResponse, when set, runs on the built respPayload for EVERY leg
+	// AFTER the switch below constructs it and BEFORE sealForProvider seals it —
+	// the seam a test uses to corrupt one specific leg's PLAINTEXT bytes (e.g. the
+	// federated-query facility disclosure) while every other leg's canned answer
+	// stays untouched. nil is the default and changes nothing (every existing
+	// caller is unaffected).
+	overrideResponse func(legType string, payload []byte) []byte
 }
 
 func (s *pendResumeSubstrate) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -173,11 +181,11 @@ func (s *pendResumeSubstrate) handleRoute(body []byte) (*http.Response, error) {
 	switch txType {
 	case "crd-order-select":
 		cov := shnsdk.CardCoverage{Covered: shnsdk.CoveredCovered, PANeeded: shnsdk.PANeededAuthNeeded,
-			Questionnaires: []string{shnsdk.QuestionnaireCanonicalLumbarMRI}}
+			Questionnaires: []string{fhirseed.LumbarMRIQuestionnaireCanonical}}
 		respPayload, err = shnsdk.BuildCards(cov)
 		respOp, respFrame = "crd-cards", "payer-coverage"
 	case "dtr-questionnaire-fetch":
-		respPayload, err = buildQuestionnairePackage(shnsdk.SandboxLumbarQuestionnaire())
+		respPayload, err = testQuestionnairePackage(fhirseed.DemoLumbarQuestionnaire())
 		respOp, respFrame = "dtr-questionnaire", "payer-coverage"
 	case "pas-claim":
 		respPayload, err = shnsdk.BuildPendedResponse(s.patientRef, "corr-pend", []string{s.pendedItem}, s.clock())
@@ -205,6 +213,9 @@ func (s *pendResumeSubstrate) handleRoute(body []byte) (*http.Response, error) {
 	}
 	if err != nil {
 		return errResp("stub: build " + txType + " response: " + err.Error()), nil
+	}
+	if s.overrideResponse != nil {
+		respPayload = s.overrideResponse(txType, respPayload)
 	}
 
 	meta := shnsdk.Metadata{
@@ -283,9 +294,9 @@ type pendFixtureOpts struct {
 	declared []string
 }
 
-// newPendResumeFixture wires a real provider Gateway (sandbox lane —
-// OriginationProfile unset, the member resolved off NewStubHolderData's built-in
-// census, same as every other hermetic sandbox test) against pendResumeSubstrate.
+// newPendResumeFixture wires a real provider Gateway (default lane —
+// OriginationProfile unset, the member resolved off this package's own census
+// fixture, same as every other hermetic engine test) against pendResumeSubstrate.
 // Every registry entry advertises requestFrames v1, exactly as internal/provision
 // stamps it in production, so REQUEST legs carry the contract-version claim the
 // pin tests read.
@@ -298,7 +309,7 @@ func newPendResumeFixture(t *testing.T, opts pendFixtureOpts) (*Gateway, *pendRe
 	payerSignPub, _ := genED25519(t)
 
 	clock := func() time.Time { return time.Unix(1700000000, 0).UTC() }
-	base := NewStubHolderData()
+	base := newCensusSoR()
 	pci := shnsdk.ResolvePCI(opts.member, opts.birthDate, opts.familyName) // must match holderdata.go's census
 
 	stub := &pendResumeSubstrate{
@@ -328,7 +339,7 @@ func newPendResumeFixture(t *testing.T, opts pendFixtureOpts) (*Gateway, *pendRe
 		stub.encKeys[id] = encPair{pub: encPub, priv: encPriv}
 	}
 
-	gw := New(Config{
+	gw := mustNew(t, Config{
 		Role:        "provider",
 		HolderID:    "provider",
 		PayerRouter: payerRouterFor(t, "payer"),
@@ -349,7 +360,7 @@ func newPendResumeFixture(t *testing.T, opts pendFixtureOpts) (*Gateway, *pendRe
 		Store:                    base,
 		Clock:                    clock,
 		NPI:                      "1234567890",
-		Populator:                fakePopulator{canonical: shnsdk.QuestionnaireCanonicalLumbarMRI},
+		Populator:                fakePopulator{canonical: fhirseed.LumbarMRIQuestionnaireCanonical},
 		Client:                   &http.Client{Transport: stub},
 	})
 	return gw, stub
@@ -674,6 +685,69 @@ func TestHandleUC05_PinsBothLegsAcrossMidRequestDrift(t *testing.T) {
 	// The federated-query leg is version-NEUTRAL (paCatalog Contract ""): both
 	// type-legs must cross with no contract claim.
 	assertClaimedVersions(t, stub, "federated-query", "", "")
+}
+
+// federatedQueryIngressMutationMarker is a substring the FakeValidator below is
+// told to reject on. It appears ONLY in a corrupted federated-query response — no
+// other leg's canned payload in this fixture ever contains it — so a rejection can
+// only mean the federated-query ingress-validate call actually ran the validator
+// over these exact bytes.
+const federatedQueryIngressMutationMarker = "UC05_FQ_INGRESS_MUTATION_MARKER"
+
+// TestHandleUC05_FederatedQueryIngressValidatesOnDemoLane is NEW-2's call-site
+// guard: Finding 1's original defect (originate.go's UC-05 facility federated-query
+// leg calling validateFHIRPayerIngress instead of plain validateFHIR) was only
+// caught by gateway.go-level unit tests exercising the two validate functions
+// directly — go test ./engine/ stayed green if that ONE call site regressed back to
+// the wrong function, because nothing drove the regression through the actual leg.
+// This test does: it runs a live OriginationProfile="demo" lane (the lane whose
+// skip wrongly swallowed this exact leg before the R-8 scope fix) through the real
+// handleUC05 HTTP handler, with metro-spine's federated-query answer corrupted in a
+// way a validator would reject, and asserts the request fails. If the call site
+// ever regresses to validateFHIRPayerIngress, this lane is squarely inside
+// relaysReferencePayerBytes's demo-lane skip and the corrupted bytes would sail
+// through — this test's assertion on rec.Code == http.StatusOK is what makes that
+// regression visible (a passing status where a rejection was expected).
+func TestHandleUC05_FederatedQueryIngressValidatesOnDemoLane(t *testing.T) {
+	gw, stub := newPendResumeFixture(t, pendFixtureOpts{
+		// MBR-D-UC05, not MBR-UC05: sceneMember only resolves to the demo persona once
+		// OriginationProfile (set below) reads "demo" — driving this leg through the
+		// actual demo lane, not the default arm, is the whole point of this guard.
+		member: "MBR-D-UC05", birthDate: "1968-03-12", familyName: "Johansson-Demo",
+		pendedItem: "operative-diagnostic-report",
+		extraRoles: map[string]string{"facility": "metro-spine"},
+	})
+	// The lane relaysReferencePayerBytes recognizes as skip-eligible — the SAME
+	// lane the R-8 scope fix (Finding 1) had to stop leaking the skip into this
+	// exact leg on.
+	gw.cfg.OriginationProfile = "demo"
+	// A validator that rejects only the corrupted marker: every OTHER leg's
+	// bytes in this run (CRD SR/Coverage, DTR QR, PAS bundles) must still pass,
+	// so a false rejection elsewhere would misattribute the failure.
+	gw.cfg.Validator = &shnsdk.FakeValidator{RejectIfContains: federatedQueryIngressMutationMarker}
+	stub.overrideResponse = func(legType string, payload []byte) []byte {
+		if legType != "federated-query" {
+			return payload
+		}
+		// Stay valid JSON (a top-level object): inject one more key so the
+		// marker is real content the validator's ingress call actually reads,
+		// not a syntax break OriginateLeg's own decode would catch first
+		// (which would prove nothing about validateFHIR specifically).
+		return bytes.Replace(payload, []byte(`{`),
+			[]byte(`{"`+federatedQueryIngressMutationMarker+`":true,`), 1)
+	}
+
+	rec := httptest.NewRecorder()
+	gw.handleUC05(rec, httptest.NewRequest(http.MethodPost, "/scenario/uc05", nil))
+
+	if !legAttempted(stub.legTypes, "federated-query") {
+		t.Fatalf("federated-query leg never ran (legs: %v); status=%d body=%s", stub.legTypes, rec.Code, rec.Body.String())
+	}
+	if rec.Code == http.StatusOK {
+		t.Fatalf("handleUC05 accepted a federated-query response the validator flags as invalid "+
+			"(demo lane) — the facility ingress leg must never share the R-8 payer-ingress skip; "+
+			"status=%d body=%s", rec.Code, rec.Body.String())
+	}
 }
 
 // driftOnPASClaim installs the MID-REQUEST drift: the instant the substrate sees

@@ -139,6 +139,14 @@ type stubSubstrate struct {
 	// opaque "authorization failed" path (outcome "failed").
 	denyAuthorize bool
 	failAuthorize bool
+	// pasDenialRationale, when set, makes leg 1 (the PAS-submit response, only
+	// reached by a caller that proceeds past a not-covered CRD verdict — D-S2-2)
+	// return a DENIED ClaimResponse carrying this rationale, built at pasLine.
+	// Used by TestHandleUC08_DemoLane_ProceedsPastNotCoveredToDeny — the only test
+	// that reaches leg 1 today (every other crdTestSystem-based test returns
+	// before DTR/PAS).
+	pasDenialRationale string
+	pasLine            string
 }
 
 func (s *stubSubstrate) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -227,7 +235,27 @@ func (s *stubSubstrate) handleRoute(_ *http.Request, body []byte) (*http.Respons
 		if err != nil {
 			return errResp("stub: BuildCards: " + err.Error()), nil
 		}
-		respOp = "crd-cards"
+		// R3: the response Operation is contract-keyed per leg TYPE (workstream_pa.go's
+		// pa.crd manifest rows) — "crd-cards" for order-select, "crd-dispatch-cards" for
+		// order-dispatch (handleUC03Oxygen's re-key onto the oxygen family). A mismatched
+		// Operation fails the response-leg contract check ("response leg authorization
+		// failed"), so this must echo the REQUEST leg's own expected response op, not a
+		// literal frozen to order-select's shape.
+		if env.Metadata.TransactionType == "crd-order-dispatch" {
+			respOp = "crd-dispatch-cards"
+		} else {
+			respOp = "crd-cards"
+		}
+		respFrame = "payer-coverage"
+	case 1: // PAS-submit leg — only reached via the not-covered proceed opt-in (D-S2-2).
+		if s.pasDenialRationale == "" {
+			return errResp("stub: unexpected leg 1 (no pasDenialRationale configured)"), nil
+		}
+		respPayload, err = shnsdk.BuildDeniedResponseAtLine(s.pasLine, "Patient/"+s.pci, corrID, s.pasDenialRationale, s.clock())
+		if err != nil {
+			return errResp("stub: BuildDeniedResponseAtLine: " + err.Error()), nil
+		}
+		respOp = "pas-response"
 		respFrame = "payer-coverage"
 	default:
 		// Should not be reached in the branch tests (all branches return before DTR).
@@ -278,7 +306,7 @@ func crdTestSystem(t *testing.T, cov shnsdk.CardCoverage) (*Gateway, *stubSubstr
 
 	clock := func() time.Time { return time.Unix(1700000000, 0).UTC() }
 
-	sor := NewStubHolderData()
+	sor := newCensusSoR()
 	pci, _, _ := sor.ResolvePatient("MBR-COVERED")
 
 	stub := &stubSubstrate{
@@ -296,7 +324,7 @@ func crdTestSystem(t *testing.T, cov shnsdk.CardCoverage) (*Gateway, *stubSubstr
 	// Fake authz + hub URLs — the stub transport intercepts at the path suffix.
 	const fakeBase = "http://stub.test"
 
-	gw := New(Config{
+	gw := mustNew(t, Config{
 		Role:        "provider",
 		HolderID:    "provider",
 		PayerRouter: payerRouterFor(t, "payer"),
@@ -392,13 +420,41 @@ func TestHandleUC03_BridgeRefuseSelectsMember(t *testing.T) {
 	t.Run(`"" is the literal-default branch: clears the routing gate exactly like callUC03's nil body`, func(t *testing.T) {
 		gw, stub, _ := crdTestSystem(t, shnsdk.CardCoverage{Covered: shnsdk.CoveredCovered, PANeeded: shnsdk.PANeededAuthNeeded})
 		_ = callUC03Branch(t, gw, "")
-		if !legAttempted(stub.legTypes, "crd-order-select") {
-			t.Errorf("legTypes = %v, want crd-order-select attempted — MBR-COVERED must still clear routing", stub.legTypes)
+		// R3: the "" branch re-keys onto the oxygen family's order-DISPATCH hook (register
+		// §11 ruling (b)) — crd-order-select was the L8000/order-select shape this branch
+		// carried before.
+		if !legAttempted(stub.legTypes, "crd-order-dispatch") {
+			t.Errorf("legTypes = %v, want crd-order-dispatch attempted — MBR-COVERED must still clear routing", stub.legTypes)
 		}
 	})
 }
 
 // ---- behavior-branch tests (FR-G25, Finding 1 + Finding 2) ----
+
+// runCRDThenDTROrderTestTuple is an arbitrary, stable order-select tuple these tests drive
+// runCRDThenDTROrder with directly. R3 re-keyed handleUC03's own "" branch onto the
+// oxygen family's DIFFERENT gate (order-dispatch, NeedsDTR-based — runCRDDispatch), so the
+// tests below — which are about runCRDThenDTROrder's OWN generic verdict switch
+// (FR-G25/Finding 1+2), not about UC-03's business content — call it DIRECTLY (mirroring
+// TestRunCRDThenDTROrder_NotCovered_ProceedFlag's existing pattern) instead of routing
+// through an HTTP handler that no longer carries this shape.
+const (
+	runCRDThenDTROrderTestSystem  = "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
+	runCRDThenDTROrderTestCode    = "L8000"
+	runCRDThenDTROrderTestDisplay = "Breast prosthesis, mastectomy bra"
+	runCRDThenDTROrderTestDx      = "Z90.10"
+)
+
+// callRunCRDThenDTROrder drives runCRDThenDTROrder directly for MBR-COVERED with the
+// tuple above and returns the recorded response — the order-select analog of callUC03,
+// now that handleUC03's own HTTP surface no longer rides this function for its "" branch.
+func callRunCRDThenDTROrder(t *testing.T, gw *Gateway) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/scenario/uc03", nil)
+	rec := httptest.NewRecorder()
+	gw.runCRDThenDTROrder(rec, req, "MBR-COVERED", runCRDThenDTROrderTestSystem, runCRDThenDTROrderTestCode, runCRDThenDTROrderTestDisplay, runCRDThenDTROrderTestDx, false)
+	return rec
+}
 
 // TestRunCRDThenDTR_NotCovered verifies the explicit terminal stop for
 // Covered==not-covered (AI-1: a coverage denial never silently proceeds).
@@ -408,7 +464,7 @@ func TestRunCRDThenDTR_NotCovered(t *testing.T) {
 		Covered:  shnsdk.CoveredNotCovered,
 		PANeeded: shnsdk.PANeededNoAuth,
 	})
-	rec := callUC03(t, gw)
+	rec := callRunCRDThenDTROrder(t, gw)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("not-covered: want 200 (terminal stop), got %d body=%s", rec.Code, rec.Body.String())
@@ -436,7 +492,7 @@ func TestRunCRDThenDTROrder_NotCovered_ProceedFlag(t *testing.T) {
 	notCovered := shnsdk.CardCoverage{Covered: shnsdk.CoveredNotCovered, PANeeded: shnsdk.PANeededNoAuth}
 
 	// DEFAULT (false): a coverage denial STOPS — 200 not-covered, ok=false (FR-G25 preserved
-	// for every non-opt-in caller; the adversarial Row 1 drives this on uc03/sandbox).
+	// for every non-opt-in caller; the adversarial Row 1 drives this on uc03).
 	t.Run("default-stops", func(t *testing.T) {
 		gw, _, _ := crdTestSystem(t, notCovered)
 		req := httptest.NewRequest(http.MethodPost, "/scenario/uc08", nil)
@@ -468,6 +524,62 @@ func TestRunCRDThenDTROrder_NotCovered_ProceedFlag(t *testing.T) {
 	})
 }
 
+// TestHandleUC08_DemoLane_ProceedsPastNotCoveredToDeny is the behavioral guard for the
+// EXACT bug live `make smoke` caught: with
+// OriginationProfile == "demo" — what an unset ORIGINATION_PROFILE now normalizes to at
+// the config boundary, gateway/app.go's loadConfig — a not-covered CRD verdict for
+// UC-08's J3490 family must NOT terminally stop at the CRD leg (the generic FR-G25
+// STOP). It must proceed to PAS and come back DENIED with a rationale, matching what
+// internal/scenariodrive.DemoChecks()'s UC08 check asserts
+// (All(Has(`"denied":true`), Has(`"rationale"`))). Before this fix, an empty profile
+// hit the CRD not-covered stop and UC-08 returned
+// {"covered":false,"outcome":"not-covered","paRequired":false} instead — precisely the
+// live smoke failure this test locks down.
+func TestHandleUC08_DemoLane_ProceedsPastNotCoveredToDeny(t *testing.T) {
+	notCovered := shnsdk.CardCoverage{Covered: shnsdk.CoveredNotCovered, PANeeded: shnsdk.PANeededNoAuth}
+	gw, stub, _ := crdTestSystem(t, notCovered)
+	gw.cfg.OriginationProfile = "demo" // the normalized value every real boot produces now
+
+	// crdTestSystem hardcodes stub.pci to MBR-COVERED's PCI, but the demo profile's
+	// sceneMember resolves UC-08 to MBR-D-UC08 (censusfixture_test.go) instead — a
+	// DIFFERENT PCI. The stub's sealed response-leg token must carry the subject the
+	// request actually resolved, or the response-leg subject-bind verification
+	// (H1/AI-11) rejects it as a genuine cross-patient mismatch, not a test bug.
+	pci := shnsdk.ResolvePCI("MBR-D-UC08", "1968-12-21", "Adeyemi")
+	stub.pci = pci
+
+	const rationale = "not medically necessary; conservative therapy under 6 weeks"
+	stub.pasDenialRationale = rationale
+	stub.pasLine = highestLine(contractLineSet(gw.declaredContractVersions(), "pa.pas"))
+
+	req := httptest.NewRequest(http.MethodPost, "/scenario/uc08", nil)
+	rec := httptest.NewRecorder()
+	gw.handleUC08(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("demo not-covered UC08: want 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal response: %v; body=%s", err, rec.Body.String())
+	}
+	if v, ok := body["denied"].(bool); !ok || !v {
+		t.Fatalf("demo not-covered UC08: want denied=true (proceeded past the CRD not-covered stop to a real PAS deny), got body=%s", rec.Body.String())
+	}
+	if r, _ := body["rationale"].(string); r == "" {
+		t.Fatalf("demo not-covered UC08: want a non-empty rationale, got body=%s", rec.Body.String())
+	}
+	// Pin the ABSENCE of the CRD-leg terminal-stop shape — the exact regression: a
+	// demo-lane UC08 that stopped at the not-covered CRD verdict (the bug) writes
+	// {"covered":false,"outcome":"not-covered",...} instead of ever reaching PAS.
+	if _, has := body["outcome"]; has {
+		t.Fatalf(`demo not-covered UC08: response carries "outcome" (the CRD-leg terminal-stop shape) — did NOT proceed to PAS; body=%s`, rec.Body.String())
+	}
+	if len(stub.legTypes) < 2 || stub.legTypes[1] != "pas-claim" {
+		t.Fatalf("demo not-covered UC08: want leg 1 to be pas-claim (proceeded to PAS submit), got legTypes=%v", stub.legTypes)
+	}
+}
+
 // TestRunCRDThenDTR_Satisfied verifies the fail-closed response when the payer
 // signals PA already satisfied (PANeeded==satisfied). The short-circuit path is
 // deferred this slice; expect HTTP 502 with a message containing "satisfied".
@@ -477,7 +589,7 @@ func TestRunCRDThenDTR_Satisfied(t *testing.T) {
 		PANeeded:      shnsdk.PANeededSatisfied,
 		SatisfiedPaID: "PA-PREV-001",
 	})
-	rec := callUC03(t, gw)
+	rec := callRunCRDThenDTROrder(t, gw)
 
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("satisfied: want 502, got %d body=%s", rec.Code, rec.Body.String())
@@ -510,7 +622,7 @@ func TestRunCRDThenDTR_ConditionalPANeeded(t *testing.T) {
 		Covered:  shnsdk.CoveredCovered,
 		PANeeded: shnsdk.PANeededConditional,
 	})
-	rec := callUC03(t, gw)
+	rec := callRunCRDThenDTROrder(t, gw)
 
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("conditional PA: want 502 (not PA-required), got %d body=%s", rec.Code, rec.Body.String())
@@ -557,7 +669,18 @@ func TestRunCRDThenDTR_NoDocSkipsDTR(t *testing.T) {
 		PANeeded: shnsdk.PANeededAuthNeeded,
 		// no Questionnaires → no-doc
 	})
-	rec := callUC03(t, gw)
+	// This one needs the PAS leg actually attempted (not just runCRDThenDTROrder's own
+	// return), so it drives the tail itself — the direct-call analog of what handleUC03's
+	// (pre-R3) HTTP handler used to do after the prefix returned ok.
+	req := httptest.NewRequest(http.MethodPost, "/scenario/uc03", nil)
+	rec := httptest.NewRecorder()
+	res, ok := gw.runCRDThenDTROrder(rec, req, "MBR-COVERED", runCRDThenDTROrderTestSystem, runCRDThenDTROrderTestCode, runCRDThenDTROrderTestDisplay, runCRDThenDTROrderTestDx, false)
+	if ok {
+		_, _, status, msg, _ := gw.submitClaimAndResolve(req.Context(), req, res.pci, res.srJSON, res.qrJSON, res.patientRef, res.coverageRef, res.member, res.payer, res.recipient)
+		if status != 0 {
+			writeJSON(rec, status, map[string]string{"error": msg})
+		}
+	}
 
 	if legAttempted(stub.legTypes, "dtr-questionnaire-fetch") {
 		t.Errorf("no-doc: DTR must be SKIPPED (no dtr-questionnaire-fetch leg), legTypes=%v body=%s", stub.legTypes, rec.Body.String())
@@ -592,8 +715,8 @@ func classifyTestGateway(t *testing.T, profile string) *Gateway {
 	t.Helper()
 	_, provSignPriv := genED25519(t)
 	provEncPub, provEncPriv := genKeyPair(t)
-	sor := NewStubHolderData()
-	return New(Config{
+	sor := newCensusSoR()
+	return mustNew(t, Config{
 		Role:               "provider",
 		HolderID:           "provider",
 		OriginationProfile: profile,
@@ -613,7 +736,7 @@ func classifyTestGateway(t *testing.T, profile string) *Gateway {
 // real A1 at the payer-gw responder (it polls br-payer's timer A4→A1), so a resolution site sees
 // approved | denied | unresolved-pend here — and everything not approved → caller 502s (a pend can
 // never mask a denial or be a silent pass — C1). Profile-independent now (the per-profile terminal
-// pend is gone); both the provider-data and sandbox profiles asserted so no assertion is vacuous.
+// pend is gone); both the provider-data and default-arm profiles asserted so no assertion is vacuous.
 func TestClassifyResolution(t *testing.T) {
 	// approved: bare ClaimResponse, outcome complete + preAuthRef present.
 	approved := []byte(`{"resourceType":"ClaimResponse","outcome":"complete","use":"preauthorization","preAuthRef":"PA-0123456789ab","preAuthPeriod":{"end":"2026-09-02"}}`)
@@ -633,13 +756,13 @@ func TestClassifyResolution(t *testing.T) {
 		wantApproved bool
 	}{
 		{"approved/provider-data", "provider-data", approved, true},
-		{"approved/sandbox", "", approved, true},
+		{"approved/default", "", approved, true},
 		{"denied/provider-data", "provider-data", denied, false},   // denial → 502 (C1)
-		{"denied/sandbox", "", denied, false},                      // denial → 502 (C1)
+		{"denied/default", "", denied, false},                      // denial → 502 (C1)
 		{"pend/provider-data", "provider-data", pend, false},       // unresolved pend → 502 (no silent pass)
-		{"pend/sandbox", "", pend, false},                          // unresolved pend → 502 (no silent pass)
+		{"pend/default", "", pend, false},                          // unresolved pend → 502 (no silent pass)
 		{"garbage/provider-data", "provider-data", garbage, false}, // unparseable → fail closed
-		{"garbage/sandbox", "", garbage, false},                    // unparseable → fail closed
+		{"garbage/default", "", garbage, false},                    // unparseable → fail closed
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -687,18 +810,173 @@ func TestTargetsBrPayer(t *testing.T) {
 	if !targetsBrPayer("provider-data") {
 		t.Fatal("provider-data should target br-payer")
 	}
-	// "", "sandbox" are SHN-produced (not br-payer); "composite" is removed (no longer a lane).
-	for _, p := range []string{"", "sandbox", "composite"} {
+	// "" and any unrecognized lane are SHN-produced, never br-payer.
+	for _, p := range []string{"", "unknown-lane", "provider"} {
 		if targetsBrPayer(p) {
 			t.Fatalf("%q must not target br-payer", p)
 		}
 	}
 }
 
-// R-8: provider-data relays br-payer's foreign DTR/PAS bytes → ingress $validate MUST be skipped.
+// R-8: provider-data relays br-payer's foreign DTR/PAS bytes → ingress $validate MUST be
+// skipped for a PAYER-DIRECTED leg. The skip lives only in validateFHIRPayerIngress, never
+// in plain validateFHIR.
 func TestValidateFHIR_IngressSkip_ProviderData(t *testing.T) {
 	g := &Gateway{cfg: Config{OriginationProfile: "provider-data", Validator: failIfCalledValidator{t}}}
-	if status, _ := g.validateFHIR(context.Background(), []byte(`{}`), "ingress", ""); status != 0 {
-		t.Fatalf("provider-data ingress must skip $validate (R-8); got status=%d", status)
+	if status, _ := g.validateFHIRPayerIngress(context.Background(), []byte(`{}`), ""); status != 0 {
+		t.Fatalf("provider-data payer-ingress must skip $validate (R-8); got status=%d", status)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// relaysReferencePayerBytes / R-8 ingress-$validate scope: the skip is a property of the
+// COUNTERPARTY (reference-payer bytes, relayed verbatim), not of any one origination-profile
+// string.
+// ---------------------------------------------------------------------------
+
+// recordingValidator is a shnsdk.Validator test double that RECORDS every resourceJSON it was
+// asked to validate (so a test can assert real content actually flowed through the call, not
+// merely that Validate returned a canned answer) and returns a configurable Valid result.
+type recordingValidator struct {
+	calls [][]byte
+	valid bool
+}
+
+func (v *recordingValidator) Validate(_ context.Context, resourceJSON []byte, _ string) (shnsdk.Result, error) {
+	v.calls = append(v.calls, resourceJSON)
+	return shnsdk.Result{Valid: v.valid}, nil
+}
+
+// TestRelaysReferencePayerBytes pins the predicate's exact membership: provider-data (live
+// br-payer) and demo (the in-process mirror of it) relay reference-payer bytes. "" is NOT in
+// that list any more: an unset ORIGINATION_PROFILE is normalized to "demo" ONCE, at the
+// gateway/app.go config
+// boundary, before the engine — or this predicate — ever sees it. A raw "" reaching this
+// predicate directly (as this hermetic test does, bypassing gateway/app entirely) is no
+// longer a case any real deployment produces, so it correctly falls into the same
+// fail-closed-to-validating bucket as every other unrecognized value — same as the dead,
+// no-longer-configured profile literals TestTargetsBrPayer's own unrecognized-lane list
+// pins.
+//
+// This predicate answers only "does this LANE relay reference-payer bytes at all" — it is
+// the lane half of the R-8 skip decision, not the whole thing. The counterparty half (is
+// THIS leg's response actually from the
+// reference payer) lives entirely in which function a call site uses: validateFHIRPayerIngress
+// (payer-directed legs only) versus plain validateFHIR (everything else, including the UC-05
+// facility searchset — always validates regardless of what this predicate says about the
+// lane).
+func TestRelaysReferencePayerBytes(t *testing.T) {
+	for _, p := range []string{"provider-data", "demo"} {
+		if !relaysReferencePayerBytes(p) {
+			t.Errorf("%q should relay reference-payer bytes (R-8 skip expected)", p)
+		}
+	}
+	for _, p := range []string{"", "provider", "unknown-lane"} {
+		if relaysReferencePayerBytes(p) {
+			t.Errorf("%q must not relay reference-payer bytes", p)
+		}
+	}
+}
+
+// (a) THE LIVE BUG: a demo-lane PAYER-DIRECTED ingress leg carrying reference-payer bytes
+// must NOT be $validate-refused. failIfCalledValidator proves the SKIP itself happened (it
+// fails the test the instant Validate is called at all) rather than proving a validator
+// merely happened to answer "valid" — the exact "test passes for the wrong reason" failure
+// mode this fix closes. Pinned for the literal "demo" profile — the ONLY value this
+// predicate itself treats specially: an unset ORIGINATION_PROFILE is now normalized to
+// "demo" upstream, at the gateway/app.go config boundary
+// (TestLoadConfig_UnsetOriginationProfileNormalizesToDemo pins that), so by the time any
+// real Gateway's validateFHIR runs, OriginationProfile is never "" — this test's Gateway is
+// constructed directly with the ALREADY-NORMALIZED value, exactly as a real boot hands it
+// in. Calls validateFHIRPayerIngress — the skip is only ever reachable through that
+// function now, never plain validateFHIR.
+func TestValidateFHIR_IngressSkip_Demo(t *testing.T) {
+	g := &Gateway{cfg: Config{OriginationProfile: "demo", Validator: failIfCalledValidator{t}}}
+	if status, msg := g.validateFHIRPayerIngress(context.Background(), []byte(`{"resourceType":"Parameters"}`), ""); status != 0 {
+		t.Fatalf("demo-lane payer-ingress must skip $validate (R-8, post-retirement); got status=%d msg=%q", status, msg)
+	}
+}
+
+// (a2) THE REGRESSION THIS SPLIT CLOSES, pinned directly: a demo-lane ingress leg whose
+// counterparty is NOT the reference payer — the shape handleUC05's facility CDex
+// federated-query searchset takes — must still $validate and fail closed on invalid bytes,
+// even though the LANE (demo) is one that relays reference-payer bytes for its
+// payer-directed legs. Before this split, plain validateFHIR shared the skip with every
+// ingress call on the demo lane; a facility leg on the demo lane silently went unvalidated.
+// Calling plain
+// validateFHIR (never validateFHIRPayerIngress) is what every non-payer-directed ingress
+// call site (originate.go's UC-05 federated-query read) now does.
+func TestValidateFHIR_FacilityIngressStillFailsClosed_Demo(t *testing.T) {
+	v := &recordingValidator{valid: false}
+	g := &Gateway{cfg: Config{OriginationProfile: "demo", Validator: v}}
+	status, msg := g.validateFHIR(context.Background(), []byte(`{"resourceType":"Bundle"}`), "ingress", "")
+	if status != http.StatusUnprocessableEntity {
+		t.Fatalf("demo-lane facility ingress with an invalid resource: status=%d, want %d; msg=%q — the R-8 payer skip must never leak to a non-payer-directed leg", status, http.StatusUnprocessableEntity, msg)
+	}
+	if len(v.calls) != 1 {
+		t.Fatalf("facility ingress validator called %d times, want exactly 1 — it must genuinely run, not be vacuously skipped", len(v.calls))
+	}
+}
+
+// (a3) THE OTHER HALF OF FINDING 1, pinned directly: a demo-lane PAYER-DIRECTED ingress leg
+// (the shape every CRD/DTR/PAS response-from-the-payer call site takes) still skips
+// $validate — the fix scopes the carve-out to payer-directed legs, it does not remove it.
+func TestValidateFHIR_PayerIngressStillSkips_Demo(t *testing.T) {
+	g := &Gateway{cfg: Config{OriginationProfile: "demo", Validator: failIfCalledValidator{t}}}
+	if status, msg := g.validateFHIRPayerIngress(context.Background(), []byte(`{"resourceType":"Bundle"}`), ""); status != 0 {
+		t.Fatalf("demo-lane payer-directed ingress must still skip $validate after the Finding-1 scope fix; got status=%d msg=%q", status, msg)
+	}
+}
+
+// (b) MUTATION-VERIFY: egress (always SHN-produced, every lane) must still $validate and fail
+// closed on the demo lane — the R-8 skip is ingress-only, never a blanket "this lane never
+// validates" bypass. recordingValidator's valid:false IS the mutation (an invalid resource);
+// the call-count assertion proves the validator genuinely ran (not vacuously skipped) before
+// rejecting it.
+func TestValidateFHIR_EgressStillFailsClosed_Demo(t *testing.T) {
+	v := &recordingValidator{valid: false}
+	g := &Gateway{cfg: Config{OriginationProfile: "demo", Validator: v}}
+	status, msg := g.validateFHIR(context.Background(), []byte(`{"resourceType":"Bundle"}`), "egress", "")
+	if status != http.StatusUnprocessableEntity {
+		t.Fatalf("demo egress with an invalid resource: status=%d, want %d; msg=%q", status, http.StatusUnprocessableEntity, msg)
+	}
+	if len(v.calls) != 1 {
+		t.Fatalf("egress validator called %d times, want exactly 1 — the ingress skip must not leak into egress", len(v.calls))
+	}
+}
+
+// (c) MUTATION-VERIFY: a lane that is neither demo/"" nor provider-data (a dead profile
+// literal no compose service sets any more) still $validates ingress and rejects invalid
+// bytes even on a PAYER-DIRECTED leg (validateFHIRPayerIngress) — the skip is scoped exactly
+// to the lanes whose counterparty is the reference payer, never a blanket ingress bypass for
+// anything unrecognized.
+func TestValidateFHIR_IngressStillFailsClosed_OtherLane(t *testing.T) {
+	v := &recordingValidator{valid: false}
+	g := &Gateway{cfg: Config{OriginationProfile: "unknown-lane", Validator: v}}
+	status, msg := g.validateFHIRPayerIngress(context.Background(), []byte(`{"resourceType":"Bundle"}`), "")
+	if status != http.StatusUnprocessableEntity {
+		t.Fatalf("non-reference-payer-lane payer-ingress with an invalid resource: status=%d, want %d; msg=%q", status, http.StatusUnprocessableEntity, msg)
+	}
+	if len(v.calls) != 1 {
+		t.Fatalf("ingress validator called %d times, want exactly 1", len(v.calls))
+	}
+}
+
+// (d) MUTATION-VERIFY: plain validateFHIR (dir=="ingress") never skips, on ANY lane —
+// including demo/provider-data, the two lanes that DO relay reference-payer bytes for
+// their payer-directed legs. This is the structural guarantee the validateFHIR /
+// validateFHIRPayerIngress split rests on: the skip is reachable ONLY through
+// validateFHIRPayerIngress, never as a side effect of the lane value alone.
+func TestValidateFHIR_PlainIngressNeverSkips_AnyLane(t *testing.T) {
+	for _, profile := range []string{"", "demo", "provider-data", "unknown-lane"} {
+		v := &recordingValidator{valid: false}
+		g := &Gateway{cfg: Config{OriginationProfile: profile, Validator: v}}
+		status, msg := g.validateFHIR(context.Background(), []byte(`{"resourceType":"Bundle"}`), "ingress", "")
+		if status != http.StatusUnprocessableEntity {
+			t.Errorf("profile %q: plain validateFHIR ingress with an invalid resource: status=%d, want %d; msg=%q", profile, status, http.StatusUnprocessableEntity, msg)
+		}
+		if len(v.calls) != 1 {
+			t.Errorf("profile %q: ingress validator called %d times, want exactly 1", profile, len(v.calls))
+		}
 	}
 }

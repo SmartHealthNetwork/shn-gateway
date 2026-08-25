@@ -497,17 +497,13 @@ func (n *nativeResponder) Handle(ctx context.Context, leg, corrID, subjectPCI st
 			}, nil
 		}
 	}
+	// NOTE: there is deliberately NO "coverage-eligibility" arm here. Eligibility is a
+	// first-class engine handler (R11): handleEligibilityInbound answers it directly off
+	// the member's own Coverage in the payer's SoR and never routes it through a
+	// LegResponder, so a native arm for it was unreachable and retired with the in-process
+	// payer stub (§3.1/§3.2). A payer that wants a partner to decide eligibility deploys the
+	// standalone SDK Responder, whose Eligibility method is untouched.
 	switch leg {
-	case "coverage-eligibility":
-		body, bad, err := n.post(ctx, n.baseURL, "/CoverageEligibilityRequest", requestFHIR, "eligibility")
-		if err != nil {
-			return LegResult{}, err // no-response fault → engine 500 → "hub routing failed"
-		}
-		if bad.Status != 0 {
-			return bad, nil // upstream non-2xx → relayable LegResult (ResponseFHIR carries the body)
-		}
-		return LegResult{ResponseFHIR: body}, nil
-
 	case "crd-order-select":
 		// The request is ALREADY a conformant CDS Hooks request (br-provider's bytes via
 		// the ingress); forward it VERBATIM — no augmentCRDHook minimized shaping.
@@ -560,7 +556,7 @@ func (n *nativeResponder) Handle(ctx context.Context, leg, corrID, subjectPCI st
 		// Parse the published leg request: canonical (required) + an OPTIONAL coverage
 		// resource carried verbatim from the inbound $questionnaire-package (FR-G28).
 		// Fail-closed posture: malformed JSON or a missing/empty canonical → 400 (parity
-		// with the sandbox's 400, not 500).
+		// with a malformed-request 400, not a 500).
 		var fetch dtrLegRequest
 		if err := json.Unmarshal(requestFHIR, &fetch); err != nil || (fetch.Canonical == "" && len(fetch.Order) == 0) {
 			return LegResult{Status: http.StatusBadRequest, Message: "parse questionnaire fetch failed"}, nil
@@ -588,7 +584,7 @@ func (n *nativeResponder) Handle(ctx context.Context, leg, corrID, subjectPCI st
 		}
 		// Two shapes: an ORDER-driven request (the CRD-updated order carries the
 		// coverage-assertion-id the partner keys the questionnaire off; it has no `questionnaire` param)
-		// or the canonical request (br-payer / sandbox). The provider's coverage is carried through
+		// or the canonical request (br-payer). The provider's coverage is carried through
 		// in both so the partner's required `coverage` parameter is satisfied (FR-G28) — coverage is
 		// already ALWAYS present at this call site (originate.go attaches it for every br-payer-targeting
 		// leg, and now also whenever the selected DTR line requires it — DTRDef.QuestionnairePackageCoverageRequired),

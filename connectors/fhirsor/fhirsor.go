@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
@@ -146,6 +147,17 @@ func (s *SoR) CoverageInforce(memberID string) (bool, string) {
 // requirement signal is FHIR-sourced. The SHN-local code is a workflow convention, not a
 // canonical DTR pre-fill code (no canonical code exists; same pattern as conservative-therapy-
 // weeks / neuro-deficit).
+//
+// OxygenSaturationPct/ArterialPaO2mmHg (task-B, register §4/FR-17) — the HomeOxygen-family
+// facts UC-03's re-key (R3) reads: real Observation searches by LOINC 59408-5 (pulse-ox
+// O₂-sat) and 2703-7 (arterial PaO₂), mirroring internal/fixturesor's hermetic equivalent
+// field-for-field. Before this, this live connector never read them at all, so
+// gateway/engine's homeOxygenAutoFillEvidence cross-check was structurally DEAD against any
+// real FHIR server: cc.OxygenSaturationRef/ArterialPaO2Ref were always "" here, so no QR
+// answer could ever be attributed Origin="auto" outside the hermetic fixture SoR — the
+// stand-in was MORE capable than the real thing. Absent Observation (or search failure) =>
+// the honest zero value ("", ""), never fabricated; the caller's cross-check then falls back
+// to unattributed (neither auto nor a forced manual answer), exactly the fixture's contract.
 func (s *SoR) ClinicalContext(memberID string) (shnsdk.ClinicalContext, bool) {
 	_, pid, ok := s.resolvePatient(memberID)
 	if !ok {
@@ -177,6 +189,15 @@ func (s *SoR) ClinicalContext(memberID string) (shnsdk.ClinicalContext, bool) {
 	}
 	if val, _, found := s.obsBool(pid, shnsdk.SystemSHNClinical, shnsdk.PatientReportedCode); found && val {
 		cc.PatientReported = true
+	}
+	// R3 — HomeOxygen-family facts (UC-03's re-key), read the SAME way as the fields above:
+	// a code-token Observation search, first match, quantity value + reference. See the doc
+	// comment above for why this closes the live-fidelity gap.
+	if val, _, r, found := s.obsQuantity(pid, shnsdk.SystemLOINC, shnsdk.OxygenSaturationLOINC); found {
+		cc.OxygenSaturationPct, cc.OxygenSaturationRef = strconv.Itoa(val), r
+	}
+	if val, _, r, found := s.obsQuantity(pid, shnsdk.SystemLOINC, shnsdk.ArterialPaO2LOINC); found {
+		cc.ArterialPaO2mmHg, cc.ArterialPaO2Ref = strconv.Itoa(val), r
 	}
 	return cc, true
 }

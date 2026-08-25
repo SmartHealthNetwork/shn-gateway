@@ -23,7 +23,7 @@ type dtrPackageParams struct {
 // coverage beneficiary, if present, for per-patient authz), the raw Coverage resource bytes, and
 // the raw `order` resource bytes from a $questionnaire-package request. The Coverage + order are
 // carried VERBATIM through the dtr-questionnaire-fetch leg so the native-forward rebuild can
-// re-emit them (FR-G28); coverage/order are nil when absent (the sandbox / 8-UC-demo path carries
+// re-emit them (FR-G28); coverage/order are nil when absent (a canonical-only fetch carries
 // neither). A request is valid when it carries EITHER a `questionnaire` canonical (the SDC /
 // br-payer path) OR an `order` (a partner whose $questionnaire-package keys off the
 // CRD-updated order's coverage-assertion-id and has no `questionnaire` param support).

@@ -175,8 +175,17 @@ func (s *relaySubstrate) handleRoute(body []byte) (*http.Response, error) {
 		Timestamp:       s.clock().UTC().Format(time.RFC3339),
 		CorrelationID:   env.Metadata.CorrelationID,
 	}
+	// R3: the response Operation is contract-keyed per leg TYPE (workstream_pa.go's
+	// paCatalog) — echo the REQUEST leg's own expected RespOp (e.g. "crd-dispatch-cards"
+	// for crd-order-dispatch) rather than the literal frozen to crd-order-select's shape;
+	// a mismatched Operation fails the response-leg contract check before a framed error
+	// ever gets a chance to relay.
+	respOp := "crd-cards"
+	if spec, ok := paCatalog[env.Metadata.TransactionType]; ok {
+		respOp = spec.RespOp
+	}
 	out, err := sealForProvider(meta, respPayload, s.providerEncPub, s.authzPriv,
-		env.Metadata.CorrelationID, "crd-cards", "payer-coverage", env.Metadata.Recipient, reqTok.Subject, s.clock())
+		env.Metadata.CorrelationID, respOp, "payer-coverage", env.Metadata.Recipient, reqTok.Subject, s.clock())
 	if err != nil {
 		return errResp("stub: sealForProvider: " + err.Error()), nil
 	}
@@ -312,15 +321,15 @@ func newInProcessExchange(t *testing.T) *inProcessExchange {
 		HubURL:          fakeBase,
 		Reg:             reg,
 		Validator:       shnsdk.NewFakeValidator(),
-		SoR:             NewStubHolderData(),
-		Store:           NewStubHolderData(),
+		SoR:             newCensusSoR(),
+		Store:           newCensusSoR(),
 		Clock:           clock,
 		NPI:             "1234567890",
 		Client:          &http.Client{Transport: stub},
 		PayerRouter:     payerRouterFor(t, "payer"),
 	}
 	EnableIngressForTest(&cfg) // bypassed auth ⇒ IngressBaseURL/IngressClients not required
-	gw := New(cfg)
+	gw := mustNew(t, cfg)
 
 	ctx := context.Background()
 	req := httptest.NewRequest(http.MethodPost, "/", nil).WithContext(ctx)
@@ -362,7 +371,7 @@ func conformantCRDRequest(member string) []byte {
 // crdIngressRequest returns a conformant CDS Hooks order-select POST for
 // MBR-COVERED: the fixture's coverage carries CMSPayerIdentity/00001,
 // which payerRouterFor maps to the harness's "payer" holder, and MBR-COVERED
-// is seeded in NewStubHolderData, so handleCRDIngress's subject-PCI bind,
+// is in the census fixture, so handleCRDIngress's subject-PCI bind,
 // self-containment, and payer routing all resolve and the call reaches
 // OriginateLeg.
 func (e *inProcessExchange) crdIngressRequest(t *testing.T) *http.Request {

@@ -34,6 +34,42 @@ changes will be noted in the changelog):
 decisioning. It is stable across minor versions. Do not depend on
 `engine.LegResponder` — it is an internal 0.x seam (see below).
 
+**Breaking in this release** (payer wiring):
+
+- `engine.New` returns `(*Gateway, error)`. It errors — rather than starting — for the two
+  conditions a deployment can hit with otherwise-valid config: a `role=payer` gateway with
+  no content occupant, and an unusable ingress client registration.
+- A `role=payer` gateway REQUIRES `engine.Config.Responder` (from the published binary:
+  `PAYER_DAVINCI_BASE_URL`). The engine no longer synthesizes an in-process payer from
+  `Config.Adjudicator`; a payer with no occupant fails closed at boot rather than answering
+  Da Vinci legs out of the gateway itself.
+- Every role REQUIRES a `SystemOfRecord` (from the published binary: `FHIR_DATA_URL`). The
+  in-process persona stub (`engine.StubHolderData`) is gone. Its Store half survives as
+  `engine.NewMemStore` — the in-memory `Store` default, carrying no persona content.
+
+**Breaking in this release** (wire behaviour — new refusal class):
+
+- **The gateway now enforces the FR-16 / FR-27 attestation requirements at the inbound
+  gate, before dispatch, and answers `403`.** This runs on all three PAS entrances — the
+  payer inbound `pas-claim` and `pas-claim-update` legs, and the provider-facing Da Vinci
+  ingress. No earlier gateway inspected attestations on the wire, so **every refusal in this
+  class is new**: traffic a v0.38.x gateway forwarded to the occupant can now be stopped at
+  the door, and the occupant never sees it.
+
+  A `QuestionnaireResponse` item that declares itself manually entered (the DTR
+  information-origin extension with `source="manual"`) and names a `Practitioner` author
+  must carry a complete clinician attestation: `npi`, `text`, and `date`, each present and
+  non-empty. One naming a `Patient` author must carry a complete
+  `questionnaireresponse-signature`: a signature `type` code, `when`, a `who` carrying a
+  non-empty `reference` OR an `identifier` with a non-empty `value` (`system` optional —
+  both of FHIR R4's legal `Signature.who` forms are accepted), and `data`. Whitespace-only
+  counts as empty. A system-sourced item — one with no manual-source
+  marker at all — is untouched and requires no attestation. The refusal names the failing
+  requirement, the item's `linkId`, and the specific field that is absent or empty.
+
+  `Config.Adjudicator` is unaffected in shape; what changes is that a nonconformant item is
+  refused before any adjudication runs, rather than being handed to it.
+
 ## Evolving surfaces
 
 These surfaces are new and intentionally **not yet pinned to a stability tier**
@@ -103,12 +139,18 @@ expected to change shape as their consumer matures:
   names and the set of registered checks may change in minor releases; the JSON
   field shape follows the `shn-sdk/health` package's compatibility.
 
-- **`fhirseed`** (`Client` and its methods, `CRPrepopLibraries`, `SandboxProviderPersonasBundle`,
-  `SandboxLumbarLibrary`, `PutGlobalArtifact`, `ProviderDataSeedBundle`, `ConformantSeedBundle`):
+- **`fhirseed`** (`Client` and its methods, `CRPrepopLibraries`, `DemoProviderPersonasBundle`,
+  `DemoLumbarLibrary`, `PutGlobalArtifact`, `ProviderDataSeedBundle`, `ConformantSeedBundle`):
   the partner/Kit FHIR seed loader, baked persona fixture, and the two downloadable seed-bundle
-  getters (embedded baked artifacts). New in this release and **evolving** — the seed sequence, fixture contents, and
+  getters (embedded baked artifacts). **Evolving** — the seed sequence, fixture contents, and
   bundle bytes may change in minor releases as the Kit stabilizes its seeding needs. Consumers pin
   exact gateway versions.
+
+  **BREAKING in v0.39.0** (evolving tier — announced, not guarded): `SandboxProviderPersonasBundle`
+  is renamed `DemoProviderPersonasBundle` and `SandboxLumbarLibrary` is renamed
+  `DemoLumbarLibrary`. The bytes each returns are unchanged; only the names are. The sandbox payer
+  no longer exists anywhere in this platform, and no surface it named survives with it. A consumer
+  on the old names updates the two call sites and re-pins.
 
 - **`LegMetric`** (`engine.Config.LegMetric func(outcome string)`, consts
   `engine.LegOutcomeRouted/Answered/Denied/Unreachable/Failed`): new in this release and

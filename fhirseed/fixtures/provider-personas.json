@@ -1984,6 +1984,56 @@
       }
     },
     {
+      "fullUrl": "ClinicalImpression/ci-mbrpduc05-pt",
+      "resource": {
+        "resourceType": "ClinicalImpression",
+        "id": "ci-mbrpduc05-pt",
+        "status": "completed",
+        "description": "Home physical therapy functional assessment",
+        "subject": {
+          "reference": "Patient/MBR-PD-UC05"
+        },
+        "problem": [
+          {
+            "reference": "Condition/cond-mbrpduc05-m6281"
+          }
+        ],
+        "summary": "Generalized deconditioning with diffuse bilateral lower-extremity weakness; requires standby assistance for ambulation and for sit-to-stand transfers; unable to complete a 6-minute walk test without a seated rest break; increased fall risk on uneven or unfamiliar surfaces."
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ClinicalImpression/ci-mbrpduc05-pt"
+      }
+    },
+    {
+      "fullUrl": "Goal/goal-mbrpduc05-pt",
+      "resource": {
+        "resourceType": "Goal",
+        "id": "goal-mbrpduc05-pt",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-goal"
+          ]
+        },
+        "lifecycleStatus": "active",
+        "description": {
+          "text": "Improve lower-extremity strength and endurance to achieve independent, unassisted ambulation of 150 feet on level surfaces and safe sit-to-stand transfers within 6 weeks of skilled home physical therapy."
+        },
+        "subject": {
+          "reference": "Patient/MBR-PD-UC05"
+        },
+        "addresses": [
+          {
+            "reference": "Condition/cond-mbrpduc05-m6281"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Goal/goal-mbrpduc05-pt"
+      }
+    },
+    {
       "fullUrl": "ServiceRequest/sr-mbrpduc05-g0151",
       "resource": {
         "resourceType": "ServiceRequest",
@@ -2023,6 +2073,14 @@
         "reasonReference": [
           {
             "reference": "Condition/cond-mbrpduc05-m6281"
+          }
+        ],
+        "supportingInfo": [
+          {
+            "reference": "ClinicalImpression/ci-mbrpduc05-pt"
+          },
+          {
+            "reference": "Goal/goal-mbrpduc05-pt"
           }
         ]
       },
@@ -2157,6 +2215,56 @@
       }
     },
     {
+      "fullUrl": "ClinicalImpression/ci-mbrpduc05nc-pt",
+      "resource": {
+        "resourceType": "ClinicalImpression",
+        "id": "ci-mbrpduc05nc-pt",
+        "status": "completed",
+        "description": "Home physical therapy functional assessment",
+        "subject": {
+          "reference": "Patient/MBR-PD-UC05-NC"
+        },
+        "problem": [
+          {
+            "reference": "Condition/cond-mbrpduc05nc-m6281"
+          }
+        ],
+        "summary": "Generalized deconditioning with diffuse bilateral lower-extremity weakness; requires standby assistance for ambulation and for sit-to-stand transfers; unable to complete a 6-minute walk test without a seated rest break; increased fall risk on uneven or unfamiliar surfaces."
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ClinicalImpression/ci-mbrpduc05nc-pt"
+      }
+    },
+    {
+      "fullUrl": "Goal/goal-mbrpduc05nc-pt",
+      "resource": {
+        "resourceType": "Goal",
+        "id": "goal-mbrpduc05nc-pt",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-goal"
+          ]
+        },
+        "lifecycleStatus": "active",
+        "description": {
+          "text": "Improve lower-extremity strength and endurance to achieve independent, unassisted ambulation of 150 feet on level surfaces and safe sit-to-stand transfers within 6 weeks of skilled home physical therapy."
+        },
+        "subject": {
+          "reference": "Patient/MBR-PD-UC05-NC"
+        },
+        "addresses": [
+          {
+            "reference": "Condition/cond-mbrpduc05nc-m6281"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Goal/goal-mbrpduc05nc-pt"
+      }
+    },
+    {
       "fullUrl": "ServiceRequest/sr-mbrpduc05nc-g0151",
       "resource": {
         "resourceType": "ServiceRequest",
@@ -2196,6 +2304,14 @@
         "reasonReference": [
           {
             "reference": "Condition/cond-mbrpduc05nc-m6281"
+          }
+        ],
+        "supportingInfo": [
+          {
+            "reference": "ClinicalImpression/ci-mbrpduc05nc-pt"
+          },
+          {
+            "reference": "Goal/goal-mbrpduc05nc-pt"
           }
         ]
       },

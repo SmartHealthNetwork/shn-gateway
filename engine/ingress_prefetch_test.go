@@ -17,7 +17,7 @@ func boundPCI(t *testing.T, g *Gateway, member string) string {
 }
 
 func TestEnsureSelfContained_KeepsInlinedAndStripsCallback(t *testing.T) {
-	g := &Gateway{cfg: Config{SoR: NewStubHolderData()}}
+	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
 	pci := boundPCI(t, g, "MBR-COVERED")
 	ref := "Patient/MBR-COVERED"
 	out, status, msg := g.ingressEnsureSelfContained(crdReqJSON("MBR-COVERED", ref, ref), "MBR-COVERED", pci)
@@ -46,7 +46,7 @@ func TestEnsureSelfContained_KeepsInlinedAndStripsCallback(t *testing.T) {
 }
 
 func TestEnsureSelfContained_ResolvesAbsentCoverageFromSoR(t *testing.T) {
-	g := &Gateway{cfg: Config{SoR: NewStubHolderData()}}
+	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
 	pci := boundPCI(t, g, "MBR-COVERED")
 	ref := "Patient/MBR-COVERED"
 	body := crdReqJSON("MBR-COVERED", ref, ref)
@@ -72,7 +72,7 @@ func TestEnsureSelfContained_ResolvesAbsentCoverageFromSoR(t *testing.T) {
 }
 
 func TestEnsureSelfContained_UnresolvableFailsClosed(t *testing.T) {
-	g := &Gateway{cfg: Config{SoR: NewStubHolderData()}}
+	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
 	// Unknown member: coverage cannot be resolved → 422 fail-closed (never a live callback).
 	body := []byte(`{"hook":"order-select","context":{"patientId":"MBR-UNKNOWN"},"prefetch":{}}`)
 	_, status, _ := g.ingressEnsureSelfContained(body, "MBR-UNKNOWN", "no-such-pci")
@@ -85,7 +85,7 @@ func TestEnsureSelfContained_UnresolvableFailsClosed(t *testing.T) {
 // entry references a DIFFERENT patient must fail closed (403) — a crafted history Bundle must
 // not smuggle wrong-patient resources into the sealed request.
 func TestEnsureSelfContained_KeptBundleWrongPatientFailsClosed(t *testing.T) {
-	g := &Gateway{cfg: Config{SoR: NewStubHolderData()}}
+	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
 	pci := boundPCI(t, g, "MBR-COVERED")
 	ref := "Patient/MBR-COVERED"
 	body := crdReqJSON("MBR-COVERED", ref, ref)

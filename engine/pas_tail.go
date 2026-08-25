@@ -4,7 +4,7 @@
 //
 // submitClaimAndResolve is the SINGLE-SHOT submit tail: build the conformant Claim Bundle →
 // egress-$validate → originate the pas-claim leg → ingress-$validate → classify the resolved
-// ClaimResponse. There is NO amendment leg on this tail (that is the sandbox UC-04/06 path).
+// ClaimResponse. There is NO amendment leg on this tail (that is the UC-04/06 path).
 // A single-shot ServiceRequest sets the Da Vinci PAS infoChanged item extension so the payer
 // gate POLLS the timer-resolved terminal A1 (handlePASClaimNative); a single-shot DeviceRequest
 // (HomeOxygen) does NOT — its order type alone routes it to the same poll. infoChanged is the
@@ -31,8 +31,8 @@ import (
 //   - a ServiceRequest single-shot (order-select, D-PD-1) → InfoChanged TRUE → the bundle carries
 //     the infoChanged poll discriminator so the payer gate polls the timer-resolved A1.
 //
-// On the sandbox/managed lane (brPayer=false) InfoChanged is never set, keeping the byte-identical
-// sandbox path. Pulled out as a standalone func so the byte-parity guard can unit-test it directly.
+// On the managed lane (brPayer=false) InfoChanged is never set, keeping the byte-identical
+// pre-existing path. Pulled out as a standalone func so the byte-parity guard can unit-test it directly.
 // line is the routed contract line the bundle is BUILT at (select before build) —
 // resolved by submitClaimAndResolve before this call, so the wire bytes and the
 // routed token cannot disagree.
@@ -46,7 +46,7 @@ func buildPASSubmitBundle(line string, brPayer bool, orderJSON, qrJSON []byte, p
 		// Single-shot resolve discriminator: a ServiceRequest single-shot signals "resolve to
 		// terminal" via the infoChanged item extension so the payer gate polls the timer-resolved A1;
 		// a DeviceRequest (HomeOxygen) stays false (its order type alone routes it to the same poll),
-		// so HomeOxygen's wire bytes are unchanged. Only on a br-payer-targeting lane (the sandbox
+		// so HomeOxygen's wire bytes are unchanged. Only on a br-payer-targeting lane (the managed
 		// lane keeps the byte-identical no-infoChanged path).
 		InfoChanged: brPayer && !orderIsDeviceRequest(orderJSON),
 		// The payer identity derives from the member's REAL Coverage (threaded in from the fresh
@@ -98,7 +98,7 @@ func (g *Gateway) submitClaimAndResolve(ctx context.Context, r *http.Request, pc
 		// *RelayError verbatim; msg stays for the non-relay writeJSON fallback (byte-identical).
 		return shnsdk.PriorAuthResult{}, nil, http.StatusBadGateway, err.Error(), err
 	}
-	if status, msg := g.validateFHIR(ctx, respJSON, "ingress", targetLine); status != 0 {
+	if status, msg := g.validateFHIRPayerIngress(ctx, respJSON, targetLine); status != 0 {
 		return shnsdk.PriorAuthResult{}, respJSON, status, msg, nil
 	}
 	// classifyResolution returns approved only for a genuine terminal A1 (the payer gate has already

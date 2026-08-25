@@ -8,24 +8,24 @@ import (
 
 func TestScaffold_ResolvesWiredPersona(t *testing.T) {
 	s := New()
-	pci, demo, found := s.ResolvePatient("MBR-COVERED")
+	pci, demo, found := s.ResolvePatient("MBR-D-UC03")
 	if !found {
-		t.Fatal("MBR-COVERED not resolved by scaffold")
+		t.Fatal("MBR-D-UC03 not resolved by scaffold")
 	}
-	wantPCI := shnsdk.ResolvePCI("MBR-COVERED", "1975-04-02", "Johansson")
+	wantPCI := shnsdk.ResolvePCI("MBR-D-UC03", "1979-09-02", "Whitfield")
 	if pci != wantPCI {
 		t.Errorf("PCI = %q; want %q (Demo must match stub so the leg correlates)", pci, wantPCI)
 	}
-	if demo.FamilyName != "Johansson" || demo.BirthDate != "1975-04-02" {
-		t.Errorf("Demo = %+v; want {1975-04-02 Johansson}", demo)
+	if demo.FamilyName != "Whitfield" || demo.BirthDate != "1979-09-02" {
+		t.Errorf("Demo = %+v; want {1979-09-02 Whitfield}", demo)
 	}
 }
 
 func TestScaffold_DistinctClinicalMarker(t *testing.T) {
 	s := New()
-	cc, ok := s.ClinicalContext("MBR-COVERED")
+	cc, ok := s.ClinicalContext("MBR-D-UC03")
 	if !ok {
-		t.Fatal("no ClinicalContext for MBR-COVERED")
+		t.Fatal("no ClinicalContext for MBR-D-UC03")
 	}
 	if cc.ConservativeTherapyWeeks != 9 {
 		t.Errorf("ConservativeTherapyWeeks = %d; want 9 (the override marker)", cc.ConservativeTherapyWeeks)

@@ -2,9 +2,14 @@
 //
 // br-payer's UC-04 questionnaire (HomeHealthAssessment) is an ADAPTIVE questionnaire with 0 CQL
 // expression items, so the operated $populate auto-pops nothing — the spine's
-// DTR step produces an empty QR. UC-04's DTR is ATTESTATION: the answers are filled from the
-// provider's seeded clinical data (manual entry), NOT auto-populated. uc04AttestationAnswers builds
-// that answer map FROM the seeded order so every answer TRACES TO SEED:
+// DTR step produces an empty QR. UC-04's DTR is ATTESTATION: the gateway itself derives the
+// answers from the provider's seeded clinical data and fills the delivered tree in the
+// $populate step's place. Every value here traces to the seeded record, not to a human typing
+// an answer in, so the fill is stamped source="auto" (FR-17's auto class,
+// shnsdk.FillQuestionnaireFromAutoAnswersAtLine) — register §15(a): stamping this
+// source="manual" (as an earlier build did, authored "Organization/<holder>") would be a false
+// human-authorship claim; nobody attested anything here. uc04AttestationAnswers builds that
+// answer map FROM the seeded order so every answer TRACES TO SEED:
 //
 //   - linkId 1.1 (service category, a coded answer): SNOMED 91251008 (Physical therapy) — derived
 //     from the order's clinical nature. The seeded order carries HCPCS G0151 ("services of a

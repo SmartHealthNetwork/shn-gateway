@@ -17,7 +17,7 @@ import (
 func FacilityCDexEvidence(member string, now time.Time) (drJSON, provJSON []byte, err error) {
 	patientRef := "Patient/" + member
 
-	// The two named records the facility holds for the member (mirrors StubHolderData.FacilityRecords).
+	// The two named records the facility holds for the member.
 	dr, err := shnsdk.BuildDiagnosticReport("dr-uc05-operative", patientRef, "72148",
 		"Operative report — lumbar microdiscectomy")
 	if err != nil {

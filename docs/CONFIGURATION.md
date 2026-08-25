@@ -92,9 +92,11 @@ lands in the registrar (`UNIQUE(system,value)` globally). Only then does a provi
 `FeedPayerRouter` route to it.
 
 Responder roles (`payer`/`facility`/`phg`) need no `PAYER_DIRECTORY`: they receive
-at `POST /substrate/inbound` and reply to whoever the Hub delivers from. A payer
-adjudicates with a built-in default decision policy out of the box — plug in your
-own via [INTEGRATION.md](INTEGRATION.md#payer-decisioning).
+at `POST /substrate/inbound` and reply to whoever the Hub delivers from. A payer has no
+built-in decision policy — it answers Da Vinci legs by native-forwarding to your own
+Da Vinci endpoint (`PAYER_DAVINCI_BASE_URL`, required); see
+[INTEGRATION.md](INTEGRATION.md#payer-decisioning) for the config and the (advanced,
+Go-only) in-process alternative.
 
 ## Networking
 
@@ -216,8 +218,8 @@ See [INTEGRATION.md](INTEGRATION.md) for how these fit together.
 
 | Env var | Description |
 |---|---|
-| `ORIGINATION_PROFILE` | provider. Set to `provider-data` to originate every prior-auth UC off your seeded FHIR system of record and drive real payer verdicts — the config-only provider lane, no custom code. When set to `provider-data`, `PROVIDER_DTR_POPULATE_URL` is required (validated at boot). |
-| `FHIR_DATA_URL` | FHIR R4 base URL for your system of record. **Omit to use the built-in synthetic stub** (seeded with example personas, so you can run end to end with no backend). |
+| `ORIGINATION_PROFILE` | provider. Set to `provider-data` to originate every prior-auth UC off your seeded FHIR system of record and drive real payer verdicts — the config-only provider lane, no custom code. `demo` originates the shipped demo order set instead. Both lanes answer a REAL payer's questionnaire, so both require `PROVIDER_DTR_POPULATE_URL` (the operated `$populate` endpoint, validated at boot). |
+| `FHIR_DATA_URL` | FHIR R4 base URL for your system of record. **Required on every role.** The gateway reads its members, coverage and clinical facts from your own FHIR server; there is no built-in persona stub any more, so an unset value is a boot error naming this variable. |
 | `FHIR_TOKEN_URL` | SMART Backend Services token endpoint, if your FHIR server requires authenticated access. Requires the client credential block below. |
 | `FHIR_CLIENT_ID` | SMART client id. |
 | `FHIR_CLIENT_KEY` | Path to the SMART client's private-key PEM file (the value is a path, not the key text — mount the file into the container). Required for `private_key_jwt` mode (i.e. when `FHIR_CLIENT_SECRET` is unset). |
@@ -284,16 +286,16 @@ shared secrets).
 
 | Env var | Description |
 |---|---|
-| `PAYER_DAVINCI_BASE_URL` | Base URL of the partner Da Vinci payer (e.g. `https://api.payer.example/davinci`). Setting this enables native-forward mode. |
+| `PAYER_DAVINCI_BASE_URL` | Base URL of the payer's own Da Vinci endpoint (e.g. `https://api.payer.example/davinci`). **Required for `ROLE=payer`.** Every Da Vinci leg — CRD, DTR and PAS — is answered there; the gateway has no in-process payer of its own, so a `role=payer` gateway without this refuses to boot with an error naming it. |
 | `PAYER_DAVINCI_CDS_BASE_URL` | Base URL for the partner's CDS Hooks (CRD) posts when they are **not** co-located with the FHIR base — e.g. a payer that serves `/cds-services` at the root but FHIR ops under `/fhir`. Empty ⇒ CDS uses `PAYER_DAVINCI_BASE_URL`. |
 | `PAYER_DAVINCI_TOKEN_URL` | SMART Backend Services token endpoint for the partner. Required if the partner requires authentication. |
 | `PAYER_DAVINCI_CLIENT_ID` | SMART client id for the partner. Required when `PAYER_DAVINCI_TOKEN_URL` is set. |
 | `PAYER_DAVINCI_CLIENT_KEY` | Path to the SMART client's private-key PEM file (the value is a path, not the key text — mount the file into the container). Required for `private_key_jwt` mode (i.e. when `PAYER_DAVINCI_CLIENT_SECRET` is unset). |
 | `PAYER_DAVINCI_CLIENT_ALG` | `ES384` or `RS384`. Required for `private_key_jwt` mode (i.e. when `PAYER_DAVINCI_CLIENT_SECRET` is unset). |
-| `PAYER_DAVINCI_SCOPE` | Requested scope the gateway asks your token endpoint for. Default `system/*.read` (covers the read-only legs). Must be a scope your authorization server grants this client; widen it if you enable `PAYER_DAVINCI_PAS_NATIVE`. |
+| `PAYER_DAVINCI_SCOPE` | Requested scope the gateway asks your token endpoint for. Default `system/*.read` (covers the read-only legs). Must be a scope your authorization server grants this client; it must cover `/Claim/$submit` as well as the read-only legs, since every leg forwards. |
 | `PAYER_DAVINCI_CLIENT_KID` | Key id for the client assertion JWK, if the partner requires it. |
 | `PAYER_DAVINCI_CLIENT_SECRET` | OAuth2 client secret for the `client_secret_post` `client_credentials` grant — for authorization servers that cannot issue asymmetric credentials. The value is the secret **itself, not a path** (unlike `PAYER_DAVINCI_CLIENT_KEY`). Mutually exclusive with `PAYER_DAVINCI_CLIENT_KEY`/`_ALG`/`_KID`; prefer `private_key_jwt` when your server supports it. |
-| `PAYER_DAVINCI_PAS_NATIVE` | `true` to forward PAS submit/update legs to the partner's `/Claim/$submit`. Default `false` (built-in PAS fallback). Requires a payer Store. |
+| `PAYER_DAVINCI_PAS_NATIVE` | **No longer a switch.** PAS submit/update always forward to the payer's `/Claim/$submit` along with every other leg; there is no in-process PAS fallback to select. Setting it `false` logs a notice at boot and changes nothing. |
 | `PAYER_DAVINCI_CRD_SERVICE_ID` | Escape-hatch override for the partner's order-select CDS service id. Empty ⇒ the gateway fetches `{base}/cds-services` at boot and auto-selects the single order-select service (fails closed if none, or ambiguous). Set it when the partner's CRD service isn't uniquely discoverable. |
 | `PAYER_DAVINCI_CRD_HOOK` | CDS Hooks hook value to stamp on the CRD request before forwarding (e.g. a partner whose service expects `order-sign`). Empty ⇒ forward the originator's hook verbatim. |
 | `PAYER_DAVINCI_DISPATCH_SERVICE_ID` | The partner's CDS service id for the `crd-order-dispatch` leg. **Empty ⇒ the dispatch leg fails closed (502)** — set it if your flow uses order-dispatch. |
@@ -456,17 +458,19 @@ as the pend can still be amended. Do not remove a `FHIR_VALIDATE_URL_<line>` env
 pend may still be pinned to that line, declared or not. A single-line contract (`pa.pdex`) has
 nothing to opt into — it has only one native line and always rides the canonical lane.
 
-### CLOSED — DTR at line 2.2 on the built-in sandbox responder
+### CLOSED — DTR at line 2.2 on the built-in payer responder
 
-Previously recorded here: the sandbox payer responder that ships with this repo could not
-answer `dtr-questionnaire-fetch` at line 2.2. DTR 2.2's `DTR-QPackageBundle` profile
-requires a `QuestionnaireResponse` entry in the returned package, and its
-`QuestionnaireResponse` profile in turn requires a Coverage reference — but the sandbox DTR
-request carried only the questionnaire canonical, and the sandbox responder had no way to
-resolve a member from it. It held no honest source for either value, and fabricating
-clinical or coverage attribution on the payer side is exactly what per-message validation
-exists to prevent. A deployment that declared `pa.dtr@2.2` while running the sandbox
-responder therefore failed that leg closed (`TestDTRAt22_UnansweredGap`, now deleted).
+Previously recorded here: the in-process payer responder that used to ship with this repo
+(since removed — every `role=payer` deployment now forwards to a real Da Vinci payer
+endpoint, `PAYER_DAVINCI_BASE_URL`) could not answer `dtr-questionnaire-fetch` at line 2.2.
+DTR 2.2's `DTR-QPackageBundle` profile requires a `QuestionnaireResponse` entry in the
+returned package, and its `QuestionnaireResponse` profile in turn requires a Coverage
+reference — but that old responder's DTR request carried only the questionnaire canonical,
+and it had no way to resolve a member from it. It held no honest source for either value,
+and fabricating clinical or coverage attribution on the payer side is exactly what
+per-message validation exists to prevent. A deployment that declared `pa.dtr@2.2` while
+running that old in-process responder therefore failed that leg closed
+(`TestDTRAt22_UnansweredGap`, now deleted).
 
 This is now closed **honestly**, on both sides of the wire:
 
@@ -477,19 +481,17 @@ This is now closed **honestly**, on both sides of the wire:
   `buildQuestionnairePackageOrderRequestAtLine` refuse an empty coverage **before the wire**
   at that line — a legible local error naming the line and the cardinality, replacing what
   would otherwise be a real partner's opaque 400. The provider-side fetch (`originate.go`)
-  now always attaches the requester's own (SoR-derived) Coverage at 2.2, not only on the
-  br-payer-targeting profile as before.
-- **Responder side:** the sandbox responder answers a 2.2 package with an **honest,
-  in-progress, zero-answer** `QuestionnaireResponse` shell (`buildDTRPackageQRShellAtLine`).
-  It never fabricates a subject or coverage reference — both are read straight off the
-  Coverage resource the requester just sent on the same leg
-  (`dtrPackageCoverageSubject`: `Coverage.beneficiary` for the patient, `Coverage.id` for
-  the coverage reference — the requester's own logical id, not a private identifier
-  system). The responder **fails the shell closed** if the requester's Coverage carries
-  no `id`, rather than inventing one. The shell carries zero `item` answers; the
-  auto-filled/authored `QuestionnaireResponse` that actually crosses into the PAS
-  submission is built separately and is unaffected by this entry (the consumer discards
-  it — `extractQuestionnaireFromPackage` only ever reads the bare `Questionnaire` entry).
+  now always attaches the requester's own (SoR-derived) Coverage at 2.2, not only when
+  targeting the reference payer as before.
+- **Responder side:** the payer's answer is its OWN Da Vinci endpoint's
+  `$questionnaire-package`, relayed verbatim — the gateway builds no package itself. (It
+  used to, for the in-process payer that has since been removed; a 2.2 package's mandatory
+  `QuestionnaireResponse` entry is now the payer's to produce.) The requester's Coverage is
+  still attached on the fetch leg at 2.2, which is what lets a conformant payer derive that
+  entry's subject and coverage reference from a real resource instead of inventing them.
+  Whatever shell comes back is discarded by the consumer — `extractQuestionnaireFromPackage`
+  only ever reads the bare `Questionnaire` entry, and the auto-filled/authored
+  `QuestionnaireResponse` that crosses into the PAS submission is built separately.
 
 Verified live against the pinned DTR 2.2.0 package (`shn-hapi-validate-ig22`, 2026-08-12):
 a hand-built shell of this exact shape validates against `dtr-questionnaireresponse|2.2.0`
@@ -498,9 +500,11 @@ with zero error-severity issues. `pa.dtr@2.2` is now included in the whole-line 
 `pa.pas@2.2`.
 
 A **separate, pre-existing, unrelated** gap surfaced during this verification and is
-recorded here rather than fixed (out of scope for that fix — it concerns the Questionnaire the
-sandbox payer *asks*, not the QuestionnaireResponse it *answers with*): the sandbox lumbar
-Questionnaire (`shnsdk.SandboxLumbarQuestionnaire`) does not itself conform to DTR 2.2's
+recorded here rather than fixed (out of scope for that fix — it concerns the Questionnaire a
+worked-example payer responder *asks*, not the QuestionnaireResponse it *answers with*): the
+worked-example lumbar Questionnaire (content unchanged; the SDK's public `DemoLumbarQuestionnaire`
+export was retired — register open-items §8, 2026-08-25 — and this fixture now lives in
+`internal/dtr`/`gateway/fhirseed`) does not itself conform to DTR 2.2's
 `dtr-base-questionnaire` profile (`Questionnaire.subjectType` min=1 unmet, an unmet
 `sdc-2` versionAlgorithm constraint, and item-extension slices this build's pinned package
 set cannot resolve). This was already true of the existing `testdata/golden/2.2/

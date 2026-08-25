@@ -5,9 +5,10 @@ import shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 // SystemOfRecord is the read seam over the holder's backing system of record (FR-1).
 // The provider side resolves members and reads provider-LOCAL clinical context; the
 // payer side reads coverage status; the facility side serves targeted records; the PHG
-// side reads patient demographics for the patient surface. Edge slice E2 implements this
-// as a FHIR/SMART-Backend-Services client; today it is the stub personas (demo) or the
-// holdersim network client (separated stack).
+// side reads patient demographics for the patient surface. EVERY deployment supplies one:
+// gateway/connectors/fhirsor (a FHIR/SMART-Backend-Services client over the holder's own
+// US Core server) or a partner implementation. The engine ships none — the in-process
+// persona census retired with the in-process payer stub (§4.1).
 type SystemOfRecord interface {
 	ResolvePatient(memberID string) (pci string, demo Demo, found bool)
 	// PatientFHIRRef returns the FHIR Patient reference ("Patient/<id>") as known to the
@@ -21,7 +22,7 @@ type SystemOfRecord interface {
 	// FHIR record on the Patient/Provider Access APIs). The eligibility
 	// DETERMINATION is the payer's decision — made by Adjudicator.Eligibility,
 	// which consults this record (the record-vs-determination split:
-	// the sandbox Adjudicator delegates straight here, so behavior is unchanged).
+	// an Adjudicator that has no verdict of its own for a member delegates straight here).
 	CoverageInforce(memberID string) (inforce bool, reason string)
 	ClinicalContext(memberID string) (shnsdk.ClinicalContext, bool)
 	SupplementalReport(memberID string) ([]byte, bool)
@@ -59,9 +60,8 @@ type Store interface {
 	EOBByID(eobID string) ([]byte, bool)
 }
 
-// The demo/stub implementation satisfies both seams; a real partner supplies a
-// FHIR-backed SystemOfRecord and (later) a gateway-owned Store.
-var (
-	_ SystemOfRecord = (*StubHolderData)(nil)
-	_ Store          = (*StubHolderData)(nil)
-)
+// The in-memory Store is the shipped default behind the Store seam; every
+// SystemOfRecord is supplied by the deployment (gateway/connectors/fhirsor against a
+// real US Core server, or a partner's own implementation) — the gateway ships no
+// persona census of its own (§4.1).
+var _ Store = (*MemStore)(nil)

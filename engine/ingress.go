@@ -278,7 +278,7 @@ func (g *Gateway) handleDTRIngress(w http.ResponseWriter, r *http.Request) {
 	// VERBATIM through the leg (FR-G28): the native-forward rebuild re-emits them as the
 	// payer-required `coverage` / `order` parameters. nil coverage/order marshal away (omitempty),
 	// so with only a canonical the bytes are IDENTICAL to the SDK QuestionnaireFetchRequest marshal
-	// — the sandbox / br-payer / 8-UC demo path is byte-unchanged. Non-aggregation: the payer-gw
+	// — the br-payer / 8-UC demo path is byte-unchanged. Non-aggregation: the payer-gw
 	// never fabricates coverage or an order; both are provider-originated and carried through.
 	fetch, err := json.Marshal(dtrLegRequest{
 		Canonical: shnsdk.StripCanonicalVersion(canonical),
@@ -375,6 +375,15 @@ func (g *Gateway) handlePASIngress(w http.ResponseWriter, r *http.Request) {
 	leg := "pas-claim"
 	if fstatus == 0 && f.relatedClaim != "" {
 		leg = "pas-claim-update"
+	}
+	// R8 re-home (FR-16/FR-27): fence at the provider-facing edge too, before this
+	// gateway ever originates the bundle onward — a nonconformant clinician/patient
+	// QR item is rejected here regardless of which leg it routes as (the property
+	// belongs to any QR item, not only to amends; mirrors the payer-side fence in
+	// inbound.go).
+	if reason, ok := fenceAttestedItems(body); !ok {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": reason})
+		return
 	}
 	ex := g.exchanges.Begin(workstreamPA)
 	// Finding A (OWD-G6 corr-threading): when the bundle carries a Claim.identifier with

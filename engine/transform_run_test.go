@@ -129,7 +129,7 @@ func TestRunTransformChain_MultiCoverageSemanticChange(t *testing.T) {
 // injectItemWeight returns qrJSON (a bare QuestionnaireResponse) with a
 // dtrItemWeightExt extension appended to the first answer of the item
 // matching linkID — at whatever depth it sits, on either QR nesting axis (the
-// sandbox questionnaire groups its leaves) — mirrors
+// demo lumbar questionnaire groups its leaves) — mirrors
 // test/conformance/dtr_transform_live_test.go's injectAnswerExtension (same
 // rationale: a synthetic-but-realistic fixture for the live-lane carry check
 // without touching any checked-in golden).

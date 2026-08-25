@@ -37,16 +37,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SmartHealthNetwork/shn-gateway/fhirseed"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
-// authoredQRSoR is a minimal provider-data SoR: it embeds StubHolderData (for the
+// authoredQRSoR is a minimal provider-data SoR: it embeds censusSoR (for the
 // members already in its census, e.g. MBR-UC06) and layers in per-fixture open
 // orders + "extra" personas (demographics for members the base census doesn't
 // carry, e.g. the scene-member-mapped MBR-PD-UC04) — the same
 // embed-and-override shape as originate_homeoxygen_test.go's homeOxygenSoR.
 type authoredQRSoR struct {
-	*StubHolderData
+	*censusSoR
 	orders        map[string][]byte
 	extraPersonas map[string]Demo
 }
@@ -55,14 +56,14 @@ func (s *authoredQRSoR) ResolvePatient(memberID string) (string, Demo, bool) {
 	if d, ok := s.extraPersonas[memberID]; ok {
 		return shnsdk.ResolvePCI(memberID, d.BirthDate, d.FamilyName), d, true
 	}
-	return s.StubHolderData.ResolvePatient(memberID)
+	return s.censusSoR.ResolvePatient(memberID)
 }
 
 func (s *authoredQRSoR) PatientFHIRRef(memberID string) (string, bool) {
 	if _, ok := s.extraPersonas[memberID]; ok {
 		return "Patient/" + memberID, true
 	}
-	return s.StubHolderData.PatientFHIRRef(memberID)
+	return s.censusSoR.PatientFHIRRef(memberID)
 }
 
 // ClinicalContext: the provider-data attestation sites this fixture drives
@@ -75,9 +76,9 @@ func (s *authoredQRSoR) PatientFHIRRef(memberID string) (string, bool) {
 // that follows, so only "found=true" matters here.
 func (s *authoredQRSoR) ClinicalContext(memberID string) (shnsdk.ClinicalContext, bool) {
 	if _, ok := s.extraPersonas[memberID]; ok {
-		return s.StubHolderData.ClinicalContext("MBR-COVERED")
+		return s.censusSoR.ClinicalContext("MBR-COVERED")
 	}
-	return s.StubHolderData.ClinicalContext(memberID)
+	return s.censusSoR.ClinicalContext(memberID)
 }
 
 func (s *authoredQRSoR) OpenCoverage(memberID string) ([]byte, bool) {
@@ -88,11 +89,11 @@ func (s *authoredQRSoR) OpenCoverage(memberID string) ([]byte, bool) {
 		}
 		return cov, true
 	}
-	return s.StubHolderData.OpenCoverage(memberID)
+	return s.censusSoR.OpenCoverage(memberID)
 }
 
 // OpenOrder: the provider-data lane's order source (orderSource reads this directly,
-// ignoring the sandbox order tuple). found=false for any member not seeded here.
+// ignoring the built-order tuple). found=false for any member not seeded here.
 func (s *authoredQRSoR) OpenOrder(memberID string) ([]byte, bool) {
 	o, ok := s.orders[memberID]
 	return o, ok
@@ -147,7 +148,7 @@ func (c *capturingTransport) get(legType string) [][]byte {
 // buildAuthoredQROrderWithID is BuildServiceRequestCoded plus a server-assigned id —
 // both handleUC04 and scenarioToPend's provider-data branch persist/attest against the
 // order's OWN id (resourceRef(res.srJSON), Bug-2 discipline), which the plain builder
-// (used by the sandbox lane, where the order is never re-referenced this way) omits.
+// (used by the tuple lanes, where the order is never re-referenced this way) omits.
 func buildAuthoredQROrderWithID(t *testing.T, id, patientRef, code, display, dxCode string) []byte {
 	t.Helper()
 	raw, err := BuildServiceRequestCoded(systemCPTBuild, code, display, dxCode, patientRef)
@@ -217,7 +218,7 @@ func newAuthoredQRRegistry(keys authoredQRKeys) shnsdk.Registry {
 // file drives — sor/transport/clock are the only per-scenario knobs.
 func newAuthoredQRGateway(t *testing.T, keys authoredQRKeys, sor SystemOfRecord, transport http.RoundTripper, clock func() time.Time) *Gateway {
 	t.Helper()
-	return New(Config{
+	return mustNew(t, Config{
 		Role:        "provider",
 		HolderID:    "provider",
 		PayerRouter: payerRouterFor(t, "payer"),
@@ -235,7 +236,7 @@ func newAuthoredQRGateway(t *testing.T, keys authoredQRKeys, sor SystemOfRecord,
 		DeclaredContractVersions: declaredLine22(),
 		Validator:                shnsdk.NewFakeValidator(),
 		SoR:                      sor,
-		Store:                    NewStubHolderData(),
+		Store:                    newCensusSoR(),
 		Clock:                    clock,
 		NPI:                      "1234567890",
 		OriginationProfile:       "provider-data",
@@ -245,9 +246,9 @@ func newAuthoredQRGateway(t *testing.T, keys authoredQRKeys, sor SystemOfRecord,
 
 func newAuthoredQRSoR(member string, demo Demo, orderJSON []byte) *authoredQRSoR {
 	return &authoredQRSoR{
-		StubHolderData: NewStubHolderData(),
-		orders:         map[string][]byte{member: orderJSON},
-		extraPersonas:  map[string]Demo{member: demo},
+		censusSoR:     newCensusSoR(),
+		orders:        map[string][]byte{member: orderJSON},
+		extraPersonas: map[string]Demo{member: demo},
 	}
 }
 
@@ -371,10 +372,10 @@ func (s *uc04SingleShotSubstrate) handleRoute(body []byte) (*http.Response, erro
 	switch txType {
 	case "crd-order-select":
 		respPayload, err = shnsdk.BuildCards(shnsdk.CardCoverage{Covered: shnsdk.CoveredCovered, PANeeded: shnsdk.PANeededAuthNeeded,
-			Questionnaires: []string{shnsdk.QuestionnaireCanonicalLumbarMRI}})
+			Questionnaires: []string{fhirseed.LumbarMRIQuestionnaireCanonical}})
 		respOp, respFrame = "crd-cards", "payer-coverage"
 	case "dtr-questionnaire-fetch":
-		respPayload, err = buildQuestionnairePackage(shnsdk.SandboxLumbarQuestionnaire())
+		respPayload, err = testQuestionnairePackage(fhirseed.DemoLumbarQuestionnaire())
 		respOp, respFrame = "dtr-questionnaire", "payer-coverage"
 	case "pas-claim":
 		respPayload = homeOxygenApprovedClaimResponse()
@@ -437,7 +438,7 @@ func assert22WireMarkers(t *testing.T, label string, payload []byte) {
 func TestAuthoredQRBuiltAtSelectedLine(t *testing.T) {
 	t.Run("scenarioToPend (UC-06)", func(t *testing.T) {
 		const member = "MBR-UC06"
-		demo := Demo{BirthDate: "1969-07-21", FamilyName: "Reyes"} // matches stubPersonas' MBR-UC06 exactly
+		demo := Demo{BirthDate: "1969-07-21", FamilyName: "Reyes"} // matches censusPersonas' MBR-UC06 exactly
 		orderJSON := buildAuthoredQROrderWithID(t, "sr-uc06-authoredqr", "Patient/"+member, "72148", "MRI lumbar spine w/o contrast", "M51.16")
 		gw, stub, capture := newAuthoredQRPendFixture(t, member, demo, orderJSON, "functional-status")
 
@@ -459,7 +460,7 @@ func TestAuthoredQRBuiltAtSelectedLine(t *testing.T) {
 	t.Run("handleUC04", func(t *testing.T) {
 		// handleUC04's provider-data branch resolves the scene member via
 		// scenarioMember(w, r, "MBR-UC04", "MBR-PD-UC04") — under provider-data that is
-		// the SECOND (provider-data) name, which is NOT in stubPersonas' base census, so
+		// the SECOND (provider-data) name, which is NOT in censusPersonas' base census, so
 		// this member is seeded purely via extraPersonas (newAuthoredQRSoR).
 		const member = "MBR-PD-UC04"
 		demo := Demo{BirthDate: "1982-11-03", FamilyName: "Chen-ProviderData"}
@@ -493,9 +494,9 @@ func TestAuthoredQRBuiltAtSelectedLine(t *testing.T) {
 // share this fail-closed behavior verbatim (Step 3: none special-cases an
 // unknown line), so proving it once at the seam covers all three.
 func TestRunCRDThenDTROrder_UnknownLineFailsAtAuthoredQRSite(t *testing.T) {
-	sor := NewStubHolderData()
+	sor := newCensusSoR()
 	mp := newManagedPopulator(sor)
-	pkg := wrapSandboxPackage(t)
+	pkg := wrapDemoLumbarPackage(t)
 	_, _, err := mp.Populate(context.Background(), pkg, PopulateContext{
 		Member: "MBR-COVERED", PatientRef: "Patient/MBR-COVERED", CoverageRef: "Coverage/MBR-COVERED",
 		OrderRef: "ServiceRequest/sr-MBR-COVERED", Authored: time.Unix(1700000000, 0).UTC(), Line: "9.9",

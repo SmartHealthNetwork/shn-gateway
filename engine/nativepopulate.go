@@ -83,7 +83,7 @@ func (n *nativePopulator) post(ctx context.Context, body []byte) ([]byte, error)
 
 // buildPopulateParameters builds the SDC $populate Parameters: the inline questionnaire + the
 // `subject`. Subject alone is sufficient — the engine binds the CQL `context Patient` from it
-// (validated against HAPI CR). The sandbox questionnaire declares no launchContext (the SDC
+// (validated against HAPI CR). The questionnaires SHN originates against declare no launchContext (the SDC
 // launchContext CodeSystem is unresolvable by the US-Core egress validator), so sending a
 // `context` param would be unmatched; subject is the clean, sufficient binding.
 func buildPopulateParameters(questionnaire []byte, pc PopulateContext) ([]byte, error) {

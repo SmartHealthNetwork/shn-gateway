@@ -668,7 +668,7 @@ func TestTransformRefusalZeroBytes(t *testing.T) {
 	env.originator.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
 
 	const (
-		member      = "MBR-T4"
+		member      = "MBR-PASTAIL"
 		patientRef  = "Patient/" + member
 		coverageRef = "Coverage/" + member
 	)

@@ -23,7 +23,7 @@ import (
 // pendState carries everything completeClinician/completePatient needs to resume.
 func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenario, member string) (pendState, bool) {
 	ctx := r.Context()
-	codes := originationCodes(g.cfg.OriginationProfile)
+	codes := originationCodes()
 	var o orderTuple
 	switch scenario {
 	case "uc06":
@@ -42,7 +42,7 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 	// BEFORE the pended submit. The pended QR then carries org-sourced base provenance (1.1/3.1),
 	// against which completeClinician's clinician-entered functional-status item contrasts (FR-17
 	// mixed provenance). Verdict-INERT — HHA is 0-CQL and br-payer's A4→A1 is its pend-resolution
-	// timer. sandbox and UC-07 keep res.qrJSON byte-unchanged.
+	// timer. The demo lane and UC-07 keep res.qrJSON byte-unchanged.
 	qrForSubmit := res.qrJSON
 	// questionnaireJSON is the tree the pended QR was filled against — for an SDC-adaptive
 	// questionnaire the tree GROWN by the $next-question rounds (dtr_adaptive.go), not the
@@ -68,7 +68,6 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 		var status int
 		var msg string
 		qrForSubmit, questionnaireJSON, status, msg, err = g.attestAdaptiveQuestionnaire(ctx, r, res, answers,
-			"Organization/"+g.cfg.HolderID,
 			shnsdk.QRContext{PatientRef: res.patientRef, CoverageRef: res.coverageRef, OrderRef: orderRef, Authored: g.cfg.Clock()})
 		if status != 0 {
 			if g.relayOriginationError(w, err) {
@@ -128,7 +127,7 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return pendState{}, false
 	}
-	if status, msg := g.validateFHIR(ctx, pendedResp, "ingress", targetLine); status != 0 {
+	if status, msg := g.validateFHIRPayerIngress(ctx, pendedResp, targetLine); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return pendState{}, false
 	}
@@ -223,7 +222,7 @@ func (g *Gateway) handleUC06(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request"})
 		return
 	}
-	member, ok := g.scenarioMember(w, r, "MBR-UC06", "MBR-PD-UC06")
+	member, ok := g.scenarioMember(w, r, "MBR-UC06", "MBR-PD-UC06", "MBR-D-UC06")
 	if !ok {
 		return
 	}
@@ -243,10 +242,10 @@ func (g *Gateway) handleUC06(w http.ResponseWriter, r *http.Request) {
 // single-call path byte-identical.
 func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st pendState, score, npi string) bool {
 	ctx := r.Context()
-	srRef := "ServiceRequest/sr-uc06" // sandbox literal
+	srRef := "ServiceRequest/sr-uc06" // built-order literal
 	linkID := oswestryLinkID
 	const uc06QRID = "qr-uc06"
-	// provider-data UC-06: bind to the REAL seeded order ref (not the sandbox literal) and attest
+	// provider-data UC-06: bind to the REAL seeded order ref (not the built-order literal) and attest
 	// the HHA's free-text functional-status item (clinician-entered manual entry), NOT the
 	// 72148/lumbar oswestry item. The attested value is operator-supplied (D-2RI-1); verdict-inert
 	// (the A4→A1 is the pend-resolution timer).
@@ -257,13 +256,21 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 			return false
 		}
 		srRef = ref
+	}
+	// Every lane whose UC-06 order is G0151 attests the HomeHealthAssessment's OWN
+	// free-text functional-status item — provider-data (a seeded order) and demo (the
+	// §4.3 family tuple) alike. The lumbar Oswestry linkId is NOT an item of that
+	// questionnaire: the HHA is SDC-adaptive, so AmendQRWithItemIn would place a
+	// foreign linkId at the top level as an "undelivered group" rather than refuse it,
+	// and the amendment would carry an answer to a question the payer never asked.
+	if g.attestsOnHHA() {
 		linkID = hhaFunctionalStatusLinkID
 		if score == "" {
 			score = defaultHHAFunctionalLimitations
 		}
 	}
 	if score == "" {
-		score = "42" // preserved sandbox default (Oswestry score)
+		score = "42" // preserved default (Oswestry score)
 	}
 	if npi == "" {
 		npi = g.cfg.NPI
@@ -357,7 +364,7 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return false
 	}
-	if status, msg := g.validateFHIR(ctx, updateResp, "ingress", targetLine); status != 0 {
+	if status, msg := g.validateFHIRPayerIngress(ctx, updateResp, targetLine); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return false
 	}
@@ -375,7 +382,7 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 	}
 	resp := uc03Resp{PARequired: true, AuthNumber: parsed.PreAuthRef, ValidUntil: parsed.ValidUntil, AmendmentCorr: updateCorr, QRItems: st.filled, PendedItems: st.needed, Attested: true}
 	// The org-attested base trace (1.1/3.1 from the seeded order) is a provider-data-only field;
-	// sandbox st.qrAnswers is nil (omitempty) so this gate is byte-identical, but it keeps
+	// On the demo lane st.qrAnswers is nil (omitempty) so this gate is byte-identical, but it keeps
 	// the "every provider-data path gates on OriginationProfile" invariant explicit (review note).
 	if g.cfg.OriginationProfile == "provider-data" {
 		resp.QRAnswers = st.qrAnswers
@@ -400,7 +407,7 @@ func (g *Gateway) handleUC07(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request"})
 		return
 	}
-	member, ok := g.scenarioMember(w, r, "MBR-UC07", "MBR-PD-UC07")
+	member, ok := g.scenarioMember(w, r, "MBR-UC07", "MBR-PD-UC07", "MBR-D-UC07")
 	if !ok {
 		return
 	}
@@ -419,10 +426,10 @@ func (g *Gateway) handleUC07(w http.ResponseWriter, r *http.Request) {
 // score defaults to "42", keeping the single-call path byte-identical.
 func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pendState, score string) bool {
 	ctx := r.Context()
-	srRef := "ServiceRequest/sr-uc07" // sandbox literal
+	srRef := "ServiceRequest/sr-uc07" // built-order literal
 	linkID := oswestryLinkID
 	const uc07QRID = "qr-uc07"
-	// provider-data UC-07: bind to the REAL seeded order ref (not the sandbox literal) and attest
+	// provider-data UC-07: bind to the REAL seeded order ref (not the built-order literal) and attest
 	// the HHA's free-text functional-status item (patient-entered), NOT the 72148/lumbar oswestry
 	// item. The attested value is operator-supplied (D-2RI-1); verdict-inert (the A4→A1 is the
 	// pend-resolution timer). Patient analog of completeClinician's provider-data branch.
@@ -433,17 +440,23 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 			return false
 		}
 		srRef = ref
+	}
+	// Patient analog of completeClinician's HHA branch: every G0151 lane attests the
+	// HomeHealthAssessment's own free-text item, never the lumbar Oswestry linkId (see
+	// that function's note). ValidatePatientAnswer is Oswestry-SCORE validation (a 0-100
+	// integer) and is deliberately NOT applied to the free-text narrative.
+	if g.attestsOnHHA() {
 		linkID = hhaFunctionalStatusLinkID
 		if score == "" {
 			score = defaultHHAFunctionalLimitationsPatient
 		}
 	} else {
 		if score == "" {
-			score = "42" // default Oswestry score for the demo/harness
+			score = "42" // preserved default (Oswestry score)
 		}
 		// #5: fail fast on an invalid provided score before burning the sealed
 		// patient-dtr leg — a clean 400 for the console rather than an opaque round-trip
-		// error. The empty→"42" demo default above is validated here too (it passes).
+		// error. The empty→"42" default above is validated here too (it passes).
 		if err := shnsdk.ValidatePatientAnswer(oswestryLinkID, score); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid patient answer: " + err.Error()})
 			return false
@@ -553,11 +566,11 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return false
 	}
-	if status, msg := g.validateFHIR(ctx, updateResp, "ingress", targetLine); status != 0 {
+	if status, msg := g.validateFHIRPayerIngress(ctx, updateResp, targetLine); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return false
 	}
-	// UC-07 is patient attestation → Attested. Composite UC-07 (L8000) → A1 approve
+	// UC-07 is patient attestation → Attested. Reference-payer UC-07 (L8000) → A1 approve
 	// directly (no pend); the amendment-resolution path is shared with UC-04/06. AmendmentCorr is
 	// the evidence the attestation re-POST leg ran.
 	parsed, approved := g.classifyResolution(updateResp)
@@ -571,7 +584,7 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 	}
 	resp := uc03Resp{PARequired: true, AuthNumber: parsed.PreAuthRef, ValidUntil: parsed.ValidUntil, AmendmentCorr: updateCorr, QRItems: st.filled, PendedItems: st.needed, Attested: true}
 	// The org-attested base trace (1.1/3.1 from the seeded order) is a provider-data-only field;
-	// sandbox st.qrAnswers is nil (omitempty) so this gate is byte-identical, but it keeps
+	// On the demo lane st.qrAnswers is nil (omitempty) so this gate is byte-identical, but it keeps
 	// the "every provider-data path gates on OriginationProfile" invariant explicit (review note).
 	if g.cfg.OriginationProfile == "provider-data" {
 		resp.QRAnswers = st.qrAnswers
@@ -590,7 +603,7 @@ type startResp struct {
 
 // handleUC06Start runs UC-06 to PENDED and parks it under a resume token.
 func (g *Gateway) handleUC06Start(w http.ResponseWriter, r *http.Request) {
-	member, ok := g.scenarioMember(w, r, "MBR-UC06", "MBR-PD-UC06")
+	member, ok := g.scenarioMember(w, r, "MBR-UC06", "MBR-PD-UC06", "MBR-D-UC06")
 	if !ok {
 		return
 	}
@@ -604,7 +617,7 @@ func (g *Gateway) handleUC06Start(w http.ResponseWriter, r *http.Request) {
 
 // handleUC07Start runs UC-07 to PENDED and parks it under a resume token.
 func (g *Gateway) handleUC07Start(w http.ResponseWriter, r *http.Request) {
-	member, ok := g.scenarioMember(w, r, "MBR-UC07", "MBR-PD-UC07")
+	member, ok := g.scenarioMember(w, r, "MBR-UC07", "MBR-PD-UC07", "MBR-D-UC07")
 	if !ok {
 		return
 	}

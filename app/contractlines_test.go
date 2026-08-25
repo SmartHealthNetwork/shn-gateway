@@ -15,6 +15,9 @@ func baseEnv(extra map[string]string) map[string]string {
 		"ROLE":              "provider",
 		"SHN_SECRETS":       "/etc/shn/bundles/provider",
 		"SHN_DISCOVERY_URL": "http://accounts:8088/discovery",
+		// ROLE=provider with an unset ORIGINATION_PROFILE now normalizes to "demo" at
+		// load, which requires the operated $populate endpoint.
+		"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate",
 	}
 	for k, v := range extra {
 		m[k] = v

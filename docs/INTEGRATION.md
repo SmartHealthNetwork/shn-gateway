@@ -1,10 +1,12 @@
 # Integration guide
 
-By default the gateway uses a built-in **synthetic stub** for its system of
-record — which is why a first run works with no backend at all. To carry
-**your** data, point the gateway at your systems through connectors. This
-applies to both sides: a provider reads the clinical and coverage data it
-originates from; a payer reads the records its decisioning evaluates.
+Every gateway role requires a real system of record — `FHIR_DATA_URL` is required at
+boot; there is no built-in in-process persona stub to fall back on for a no-backend
+first run any more. To carry **your** data, point the gateway at your systems through
+connectors. This applies to both sides: a provider reads the clinical and coverage data
+it originates from; a payer's Da Vinci legs forward to the payer's own system by default
+(see [Payer decisioning](#payer-decisioning) — there is no built-in decision policy, and
+in-process decisioning is an advanced Go-integration path, not a config-only one).
 
 For the field-by-field reference of every environment variable mentioned
 below, see [CONFIGURATION.md](CONFIGURATION.md).
@@ -266,30 +268,37 @@ connector through the already-public `engine.Config.SoR` seam.
 
 ## Payer decisioning
 
-A payer gateway decides eligibility and prior authorization via an **Adjudicator**.
-The default reads coverage and clinical facts from its system of record (the
-stub, or your `FHIR_DATA_URL`) and applies a built-in decision policy. To run
-**your own** coverage and medical-necessity policy, inject a custom
-`shnsdk.Adjudicator` through the `engine.Config.Adjudicator` seam — the same
-interface the SDK responder uses, so one implementation works in both. See
+A payer gateway answers Da Vinci legs (CRD, DTR, PAS) out of a **content occupant** —
+there is no built-in/default decision policy any more, and a `role=payer` gateway with no
+occupant configured **refuses to boot**. The published binary's occupant is
+**native-forward** (`PAYER_DAVINCI_BASE_URL`, below): every Da Vinci leg forwards to your
+own real payer endpoint. There is no config-only way to plug in custom in-process
+decisioning — coverage eligibility is answered separately, by the engine itself reading
+the member's Coverage record, not by any occupant.
+
+If you want the engine to answer PA legs from your own decision logic instead of
+forwarding to a separate Da Vinci endpoint, build a custom binary against the gateway
+module and implement `engine.LegResponder` yourself
+(`Handle(ctx, leg, corrID, subjectPCI, requestFHIR) (LegResult, error)`), then set it on
+`Config.Responder` — this is an in-process Go integration, not something the published
+binary's environment variables expose. `Config.Adjudicator` (`shnsdk.Adjudicator` — the
+same interface the standalone SDK `shnsdk.Responder` uses) is declared for source
+compatibility but is **no longer read by anything**: setting it alone does nothing;
+wrap it in your own `LegResponder` implementation if you want the engine to call it. See
 [`STABILITY.md`](../STABILITY.md) for the supported `engine` seams.
 
 > **Note:** The `engine.LegResponder` interface is an **internal, unstable 0.x
 > seam** — it may change in any minor version. Do not depend on it directly.
-> `engine.Config.Adjudicator` is the **supported** partner injection point and
-> will remain stable across minor versions.
 
 ## Native-forward payer mode
 
-Setting `PAYER_DAVINCI_BASE_URL` switches the payer gateway into **native-forward
-mode**: the three read-only Da Vinci legs (coverage eligibility, CRD order-select,
-and DTR questionnaire fetch) are forwarded to a real partner Da Vinci endpoint
-instead of being adjudicated by the built-in fallback. PAS (the claim submission
-legs) also forward when `PAYER_DAVINCI_PAS_NATIVE=true` is set; without it, PAS
-falls back to the built-in adjudicator. A gateway with `PAYER_DAVINCI_BASE_URL` set
-and `PAYER_DAVINCI_PAS_NATIVE=true` is **fully native**: all five payer legs
-forward to your partner. A payer Store (`SHN_STORE_DATABASE_URL` or holdersim) is
-required when `PAYER_DAVINCI_PAS_NATIVE=true` — `build()` fails at startup otherwise.
+`PAYER_DAVINCI_BASE_URL` is **required** for `role=payer` — with it unset, boot fails
+closed (there is no in-process occupant to fall back to). With it set, **all five** Da
+Vinci payer legs (eligibility, CRD, DTR, PAS submit, PAS update) forward to your real
+partner Da Vinci endpoint over a SMART-authenticated client. `PAYER_DAVINCI_PAS_NATIVE`
+still parses (back-compat) but is a no-op: PAS forwarding was never independently
+optional-off, since the in-process fallback it used to gate is deleted; setting it
+`false` only prints a warning that PAS forwards regardless.
 
 See [CONFIGURATION.md](CONFIGURATION.md#native-forward-payer-mode-payer_davinci_)
 for the full field reference, including the exactly-one-mode credential rule, and
@@ -308,8 +317,9 @@ different patient than the request, the engine rejects it before sealing (a
 
 On the **provider** side, the DTR leg fills the payer's questionnaire from the
 member's clinical data. By default the gateway uses a **managed** populator that
-fills a built-in questionnaire from the system of record (the stub, or your
-`FHIR_DATA_URL`). To populate **arbitrary** DTR questionnaires — the real Da
+fills a built-in questionnaire from your `FHIR_DATA_URL` system of record (there is
+no stub fallback — `FHIR_DATA_URL` is required for every role). To populate
+**arbitrary** DTR questionnaires — the real Da
 Vinci DTR case, where questionnaires carry CQL expressions the gateway does not
 itself evaluate — forward population to an SDC `Questionnaire/$populate` engine
 (see [CONFIGURATION.md](CONFIGURATION.md#provider-dtr-population-provider_dtr_)

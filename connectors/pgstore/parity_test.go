@@ -81,5 +81,5 @@ func parityChecks(t *testing.T, s storeUnderTest) {
 	}
 }
 
-func TestParity_Stub(t *testing.T) { parityChecks(t, engine.NewStubHolderData()) }
-func TestParity_Pg(t *testing.T)   { parityChecks(t, pgStore(t)) }
+func TestParity_Mem(t *testing.T) { parityChecks(t, engine.NewMemStore()) }
+func TestParity_Pg(t *testing.T)  { parityChecks(t, pgStore(t)) }

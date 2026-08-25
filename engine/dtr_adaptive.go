@@ -61,17 +61,28 @@ func questionnaireIsAdaptive(questionnaireJSON []byte) bool {
 }
 
 // attestAdaptiveQuestionnaire builds the attested QuestionnaireResponse for res's fetched
-// questionnaire from answers (author = the attesting Organization) at the DTR line the
-// package was fetched at, driving $next-question first when the questionnaire is adaptive.
-// It returns the attested QR AND the questionnaire tree it was filled against (the
-// delivered tree, grown by every $next-question round) — the tree a later amendment must
-// place its item by. On failure status/msg are set (the caller writes them) and err, when
-// non-nil, is the RAW origination error for relayOriginationError (the submitClaimAndResolve
-// convention).
-func (g *Gateway) attestAdaptiveQuestionnaire(ctx context.Context, r *http.Request, res crdDtrResult, answers map[string]shnsdk.Answer, author string, qc shnsdk.QRContext) (qrJSON, questionnaireJSON []byte, status int, msg string, err error) {
+// questionnaire from answers at the DTR line the package was fetched at, driving
+// $next-question first when the questionnaire is adaptive. It returns the attested QR AND
+// the questionnaire tree it was filled against (the delivered tree, grown by every
+// $next-question round) — the tree a later amendment must place its item by. On failure
+// status/msg are set (the caller writes them) and err, when non-nil, is the RAW origination
+// error for relayOriginationError (the submitClaimAndResolve convention).
+//
+// answers is filled with shnsdk.FillQuestionnaireFromAutoAnswersAtLine, NOT the manual
+// variant: every caller (handleUC04/UC05/scenarioToPend, via uc04AttestationAnswers) derives
+// every answer from the seeded order's own data (product coding, reasonCode, SoR-resolved
+// supportingInfo) — FR-17's auto class, never a human operator typing a value in. Register
+// §15(a): stamping these source="manual" authored "Organization/<holder>" would be a
+// knowingly false provenance claim (no human entered anything, and "Organization/…" is not
+// even a form the FR-16 fence recognizes as an attestable author) — so this fill carries no
+// author at all and needs none. A genuinely clinician/patient-entered answer (e.g. UC-06/07's
+// functional-status amendment) takes a SEPARATE, already-attested path
+// (shnsdk.BuildManualAttestedItem, the model originate_uc03_oxygen.go's 6.1 item uses) and
+// never goes through this function.
+func (g *Gateway) attestAdaptiveQuestionnaire(ctx context.Context, r *http.Request, res crdDtrResult, answers map[string]shnsdk.Answer, qc shnsdk.QRContext) (qrJSON, questionnaireJSON []byte, status int, msg string, err error) {
 	tree := res.questionnaireJSON
 	if !questionnaireIsAdaptive(tree) {
-		qr, ferr := shnsdk.FillQuestionnaireFromAnswersAtLine(res.dtrLine, tree, answers, author, qc)
+		qr, ferr := shnsdk.FillQuestionnaireFromAutoAnswersAtLine(res.dtrLine, tree, answers, qc)
 		if ferr != nil {
 			return nil, nil, http.StatusInternalServerError, "attest questionnaire failed", nil
 		}
@@ -88,7 +99,7 @@ func (g *Gateway) attestAdaptiveQuestionnaire(ctx context.Context, r *http.Reque
 		// Fill the tree delivered SO FAR. Every required item the payer has delivered must be
 		// answerable from the attestation — a required item the provider's record cannot
 		// source is a data fault of the seeded order (422), never a fabricated answer.
-		partial, ferr := shnsdk.FillQuestionnaireFromAnswersAtLine(res.dtrLine, tree, answers, author, qc)
+		partial, ferr := shnsdk.FillQuestionnaireFromAutoAnswersAtLine(res.dtrLine, tree, answers, qc)
 		if ferr != nil {
 			return nil, nil, http.StatusUnprocessableEntity, "attestation cannot answer the delivered questionnaire: " + ferr.Error(), nil
 		}
@@ -144,7 +155,7 @@ func (g *Gateway) nextQuestionLeg(ctx context.Context, r *http.Request, res crdD
 	if oerr != nil {
 		return nil, http.StatusBadGateway, oerr.Error(), oerr
 	}
-	if vstatus, vmsg := g.validateFHIR(ctx, body, "ingress", res.dtrLine); vstatus != 0 {
+	if vstatus, vmsg := g.validateFHIRPayerIngress(ctx, body, res.dtrLine); vstatus != 0 {
 		return nil, vstatus, vmsg, nil
 	}
 	qr, items, perr := parseNextQuestionResponse(body)

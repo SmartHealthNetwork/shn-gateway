@@ -77,7 +77,23 @@ import (
 const internalTokenPattern = `S5b|Task[ -][0-9]|(?i:\btask-[0-9])|per the plan|Material-|infra/|goldengen|shn-platform|\bE[0-9][a-z][0-9]?\b|\bD[0-9]\b` +
 	`|\bK1\b|PR #[0-9]+|#[0-9]{2,}\b|docs/superpowers|(?i:\bslice[ -][0-9]\b)|\bBo\b|review-fixes|\bround-[0-9]\b` +
 	`|ledger[ -][0-9]|(?i:ledger[ -]item[ -][0-9])|option[ -][A-Z] ruling|A′|\bA'[ .,)]|\bT-[0-9]\b|\b[SM]F[0-9]+\b` +
-	`|(?i:spec §|spec[ (]*[0-9]{4}-[0-9]{2}-[0-9]{2})`
+	`|(?i:spec §|spec[ (]*[0-9]{4}-[0-9]{2}-[0-9]{2})` +
+	// Un-hyphenated spellings that slipped through the original pattern (this task's own
+	// Finding 3): a bare task id (\bT[0-9]{1,2}\b — "T14"), "fix round N" without the
+	// hyphen "round-N" already catches, and "ruling YYYY-MM-DD" as its own citation form
+	// distinct from "spec YYYY-MM-DD" above.
+	`|\bT[0-9]{1,2}\b|(?i:fix round [0-9])|(?i:ruling [0-9]{4}-[0-9]{2}-[0-9]{2})` +
+	// R9: the bare form of the single ruling number this whole task implements (round-11
+	// review NEW-3) — a leaked "R9" carries no "T14"/"ruling <date>" alongside it to catch
+	// it via the arms above. Deliberately NOT a general \bR[0-9]{1,2}\b: this codebase's
+	// FHIR release name IS "R4" ("base R4", "FHIR R4") on every published edge (gateway.go,
+	// compat.go, transform_pas.go, …) — a blanket digit-class widening here would flag that
+	// PUBLIC vocabulary wholesale, unlike \bT[0-9]{1,2}\b and \bD[0-9]\b, which collide with
+	// nothing live in this tree today. R9 alone has zero live occurrences outside this
+	// file's own rejection-test fixture (verified before adding), so it costs nothing to add
+	// narrowly; widen to another specific ruling number only when THAT number is confirmed
+	// collision-free the same way.
+	`|\bR9\b`
 
 // sweepSkipFiles are the two module-root test files excluded from the sweep.
 //
@@ -159,6 +175,17 @@ func TestInternalTokenPattern_DesignDocRefForms(t *testing.T) {
 		// copy, so without an arm the next one would leak again unseen.
 		`// the per-service #16 alarm watches a single stream`,
 		`// resolved per ledger item 5 — the member fence stays`,
+		// Un-hyphenated task ids and un-hyphenated "fix round"/"ruling <date>" citations
+		// (this task's own Finding 3 — these exact forms shipped in gateway/ and passed
+		// the pre-widening sweep, because \bT-[0-9]\b needed the hyphen and
+		// \bround-[0-9]\b needed the hyphen too; "ruling 2026-08-24" alone matched
+		// nothing at all, only "spec <date>" did).
+		`// R9/T14 (ruling 2026-08-24): normalize the lane identity ONCE, here`,
+		`// caught the ingress-$validate skip missing it in fix round 3, then the UC-08`,
+		`// T14 (R-8 scope review, 2026-08-24): unconditional on purpose, not an oversight`,
+		// Bare R9, no accompanying T-id or "ruling <date>" on the same line (round-11
+		// review NEW-3): the form the arms above cannot see on their own.
+		`// R9 retires the in-process payer identity; every holder converges on one`,
 	}
 	for _, line := range mustMatch {
 		if m := re.FindString(line); m == "" {
@@ -212,6 +239,21 @@ func TestInternalTokenPattern_DesignDocRefForms(t *testing.T) {
 		// `Task[ -][0-9]` (as before) plus `(?i:\btask-[0-9])` — NOT a blanket
 		// case-insensitive widening, which would have swallowed this row.
 		`// the operator runs task 1 before task 2 during a cut`,
+		// Boundary for the widened bare-task-id arm (\bT[0-9]{1,2}\b): published UC-0X
+		// scenario ids and FR-G*/AI-G*/OWD-G* requirement ids are partner-facing and must
+		// survive — none of them is a bare "T" followed only by digits.
+		`// UC-05 federated-query evidence and FR-G40's coverage-derived routing`,
+		// Boundary for "fix round <digit>": ordinary prose that happens to contain the
+		// word "round" followed later by a digit, with no "fix" immediately before it,
+		// must survive.
+		`// the pend-resolution timer runs one round trip per amendment, 2 legs total`,
+		// Boundary for "ruling <date>": a bare date with no "ruling" immediately before
+		// it is ordinary prose about a published spec, not a design-note citation.
+		`// last reviewed 2026-08-24 against the published IG`,
+		// Boundary for \bR9\b (round-11 review NEW-3): "R4" is this codebase's own name
+		// for the published FHIR release, not an internal ruling id — the whole reason
+		// the widening above stayed R9-specific instead of a general \bR[0-9]{1,2}\b.
+		`// Validate call passes an EMPTY profile = base-R4 validation via $validate`,
 	}
 	for _, line := range mustNotMatch {
 		if m := re.FindString(line); m != "" {

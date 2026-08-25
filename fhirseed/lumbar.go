@@ -20,11 +20,12 @@ import (
 // than the zero-value default.
 var putClient = &http.Client{Timeout: 30 * time.Second}
 
-// SandboxLumbarLibrary builds the operated-$populate prepop CQL Library the sandbox
-// DTR questionnaire's cqf-library canonical points at
-// (http://smarthealth.network/fhir/Library/LumbarMRICQL — see the SDK's sandbox
-// questionnaire). Deployments running native DTR (PROVIDER_DTR_NATIVE) against the
-// sandbox questionnaire world must install it into the engine's DEFAULT partition
+// DemoLumbarLibrary builds the operated-$populate prepop CQL Library the demo
+// lumbar-MRI DTR questionnaire's cqf-library canonical points at
+// (http://smarthealth.network/fhir/Library/LumbarMRICQL — see
+// DemoLumbarQuestionnaire in lumbar_questionnaire.go). Deployments running native DTR
+// (PROVIDER_DTR_NATIVE) against that questionnaire must install it into the engine's
+// DEFAULT partition
 // (a Library is a non-partitionable knowledge artifact) or $populate fails with
 // "Could not load source for library LumbarMRICQL". The name/version/canonical tail
 // MUST equal the CQL header `library LumbarMRICQL version '1.0.0'` or the
@@ -40,7 +41,7 @@ var putClient = &http.Client{Timeout: 30 * time.Second}
 // avoided everywhere. PriorSurgery covers every code in shnsdk.ProcedureValueSet by
 // iteration, so a future additional SNOMED code is automatically included without a
 // manual CQL edit.
-func SandboxLumbarLibrary() ([]byte, error) {
+func DemoLumbarLibrary() ([]byte, error) {
 	// PriorSurgery is built from ProcedureValueSet using named code aliases — the
 	// retrieve form HAPI's CQL translator accepts (`exists [Procedure: "ProcSurgeryN"]`).
 	// The inline `Code 'x' from "SNOMED"` retrieve-terminology form does not translate
@@ -110,7 +111,7 @@ define "PatientReportedRequired": First([Observation: "PatientReported"]).value 
 // PutGlobalArtifact $validates (FR-36; warnings OK — Valid counts only error/fatal)
 // then PUTs a non-partitionable knowledge artifact (e.g. Library) to the given base,
 // typically …/fhir/DEFAULT. Sibling of (*Client).InstallCRLibraries for artifacts
-// callers build themselves, such as SandboxLumbarLibrary. No scoped id: DEFAULT is
+// callers build themselves, such as DemoLumbarLibrary. No scoped id: DEFAULT is
 // not partitioned, so the usual cross-partition id-uniqueness concern does not apply.
 func PutGlobalArtifact(ctx context.Context, base string, v shnsdk.Validator, rtype, id string, body []byte) error {
 	res, verr := v.Validate(ctx, body, "")

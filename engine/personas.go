@@ -1,38 +1,34 @@
 package engine
 
-// PersonaRef maps a console/UI state key to the demo persona member ID it
-// resolves to. It is the single enumeration of the demo personas consumed by
-// both internal/devstack (to seed the in-process Stack's PCI fields) and
-// internal/holdersim (to serve GET /admin/state). The persona DATA lives in
-// stubPersonas; this is only the ordered key↔member mapping, so the PCI is
-// always derived via (SystemOfRecord).ResolvePatient — never a duplicated literal.
-type PersonaRef struct {
-	Key      string // the JSON state key the UI reads (e.g. "coveredPci")
-	MemberID string // the persona member ID (e.g. "MBR-COVERED")
-}
-
-// PersonaRefs is the canonical ordered persona enumeration. Treat it as
-// read-only — it is shared by multiple consumers (devstack, holdersim) and must
-// not be mutated.
-var PersonaRefs = []PersonaRef{
-	{"coveredPci", "MBR-COVERED"},
-	{"notCoveredPci", "MBR-NOTCOVERED"},
-	{"uc04Pci", "MBR-UC04"},
-	{"uc05Pci", "MBR-UC05"},
-	{"uc06Pci", "MBR-UC06"},
-	{"uc07Pci", "MBR-UC07"},
-	{"uc08Pci", "MBR-UC08"},
-	{"uc07HcpcsPci", "MBR-UC07HCPCS"},
-}
-
-// CanaryTwins maps each sandbox scenario member to its dedicated canary twin
+// CanaryTwins maps each scenario member to its dedicated canary twin
 // (observability Phase 3, settled decision #1): the monitor's scenario canary
 // drives ONLY these members, so continuous canary runs never mutate the shared
 // demo personas' state (EOB accumulation, auth-number overwrites) and canary
 // audit records are attributable by PCI. Twins share the original's birthDate
 // and take family "<orig>-Canary" — the member id alone makes the PCI distinct.
-// internal/fhirseed mirrors this table (census-pinned by its canary_test.go).
+// internal/fhirseed mirrors this table (census-pinned by its canary_test.go) and
+// seeds the twins into the deployed stack's FHIR tenants.
+//
+// The table must cover every member scenarioMember can resolve ON A LANE A
+// CANARY RUNS AGAINST — one roster is not enough. sceneMember has three arms,
+// and which one a deployment lands in is a configuration fact, not a build fact:
+// a provider gateway that declares no origination profile is the family-keyed
+// demo lane (gateway/app normalizes the unset value once, at the config
+// boundary), so its scenario routes resolve the MBR-D-UC0N roster and a canary
+// request asks for THOSE members' twins. A member missing here does not fall
+// back to the shared persona — scenarioMember fails the request closed with a
+// 400, which is the correct refusal but a dead canary. canary_test.go's
+// TestCanaryTwins_CoverEveryLaneScenarioMember derives the required set from the
+// scenarioMember call sites themselves, so this table cannot fall behind the
+// members the handlers actually resolve.
+//
+// It stays engine-side (unlike the persona census, which lives in
+// internal/fhirseed) because originate.go's canary scenario route resolves the
+// twin from it on every canary origination — a gateway-internal read no
+// substrate package can serve.
 var CanaryTwins = map[string]string{
+	// Conformance roster — sceneMember's default arm, plus MBR-UC07HCPCS, whose
+	// scenario resolves the same member on every arm.
 	"MBR-COVERED":        "MBR-CANARY-COVERED",
 	"MBR-NOTCOVERED":     "MBR-CANARY-NOTCOVERED",
 	"MBR-UC04":           "MBR-CANARY-UC04",
@@ -42,4 +38,18 @@ var CanaryTwins = map[string]string{
 	"MBR-UC07":           "MBR-CANARY-UC07",
 	"MBR-UC07HCPCS":      "MBR-CANARY-UC07HCPCS",
 	"MBR-UC08":           "MBR-CANARY-UC08",
+
+	// Demo roster — sceneMember's demo arm, which is the lane every deployed
+	// provider gateway that declares no origination profile runs, and therefore
+	// the lane the deployed canary actually drives.
+	"MBR-D-UC01":    "MBR-CANARY-D-UC01",
+	"MBR-D-UC01-NC": "MBR-CANARY-D-UC01-NC",
+	"MBR-D-UC02":    "MBR-CANARY-D-UC02",
+	"MBR-D-UC03":    "MBR-CANARY-D-UC03",
+	"MBR-D-UC04":    "MBR-CANARY-D-UC04",
+	"MBR-D-UC05":    "MBR-CANARY-D-UC05",
+	"MBR-D-UC05-NC": "MBR-CANARY-D-UC05-NC",
+	"MBR-D-UC06":    "MBR-CANARY-D-UC06",
+	"MBR-D-UC07":    "MBR-CANARY-D-UC07",
+	"MBR-D-UC08":    "MBR-CANARY-D-UC08",
 }

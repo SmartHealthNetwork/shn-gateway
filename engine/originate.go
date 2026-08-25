@@ -18,12 +18,66 @@ import (
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
-// targetsBrPayer reports whether the origination profile targets a real Da Vinci PAS payer
-// (br-payer), which needs the contained-insurer / absolute-refs / payer-org-entry / DTR-coverage
-// handling AND the R-8 ingress-$validate skip for br-payer's relayed foreign bytes. provider-data
-// is the sole br-payer-targeting origination lane — it must not regress the contained-payor →
-// uniform-A3 bug OR $validate foreign relayed bytes (R-8). The sandbox lane is SHN-produced.
+// targetsBrPayer reports whether the origination profile talks to a real Da Vinci PAS payer
+// (br-payer) DIRECTLY over HTTP, which needs the contained-insurer / absolute-refs /
+// payer-org-entry / DTR-coverage handling every br-payer-shaped request/response requires.
+// provider-data is the sole origination lane that dials br-payer's own HTTP surface — it must
+// not regress the contained-payor → uniform-A3 bug. This predicate does NOT decide the R-8
+// ingress-$validate skip — see relaysReferencePayerBytes below: that concern is about WHOSE
+// bytes are being relayed, not about which lane makes the HTTP call. The demo lane relays the
+// SAME reference-payer bytes
+// (via the in-process mirror, internal/brpayermirror) without ever dialing br-payer itself, and
+// needs the skip too — a distinction this predicate alone can no longer express.
 func targetsBrPayer(profile string) bool { return profile == "provider-data" }
+
+// isDemoProfile reports whether the origination profile is the family-keyed demo lane
+// (§4.3): br-payer-mirrored code families (E0250/L8000/G0151/J3490 — originationCodes)
+// driven off the MBR-D-UC0N persona roster, in-process against internal/brpayermirror
+// rather than the live br-payer HTTP surface provider-data targets. Distinct from
+// targetsBrPayer in HOW it reaches the reference payer (in-process mirror vs. a live HTTP
+// dial) — but NOT distinct on WHOSE bytes come back: since the in-process payer stub retired the
+// mirror relays the reference payer's OWN pinned bytes verbatim
+// (internal/brpayermirror/loopback.go), so this lane gets the SAME R-8 ingress-$validate skip
+// provider-data gets, for its payer-directed legs — see relaysReferencePayerBytes and
+// validateFHIRPayerIngress. The superseded claim that demo "does NOT get the skip" was true
+// only while the demo lane's payer content was still SHN's own in-process stub; it
+// no longer is.
+func isDemoProfile(profile string) bool { return profile == "demo" }
+
+// relaysReferencePayerBytes reports whether THIS lane's payer counterparty answers with the
+// reference payer's own bytes, relayed VERBATIM — never SHN-produced content — which is what
+// R-8 (FR-36) actually protects: SHN $validates only what it PRODUCES and hosts US Core
+// profiles only, so a real Da Vinci payer's own DTR $questionnaire-package / PAS ClaimResponse
+// bytes fail a US-Core-only validator by construction (foreign profiles, e.g.
+// dtr-std-questionnaire, are never fetchable — HAPI-0992 on a relayed Parameters wrapper is the
+// SAME class of failure, not a different one). Two origination lanes reach the reference payer
+// today: provider-data over a live HTTP dial to br-payer (targetsBrPayer), and demo through the
+// in-process mirror of it (isDemoProfile). NO profile == "" special case here any more:
+// gateway/app.go's loadConfig normalizes an unset ORIGINATION_PROFILE to "demo" ONCE, at the
+// config boundary, before this predicate — or any other reader of cfg.OriginationProfile —
+// ever sees it, so isDemoProfile alone is now sufficient. Adding profile == "" back here would
+// re-establish the exact "every predicate special-cases the unset default separately"
+// pattern that was retired: the empty-string trap independently bit two call sites (the
+// ingress-$validate skip, then the UC-08 not-covered→deny gate) before the fix moved to the
+// config boundary. This predicate answers only "does the LANE relay reference-payer bytes at
+// all" — the counterparty half (is THIS leg actually one of the payer-directed leg types) is
+// enforced by which validate function a call site uses; see validateFHIR's doc comment.
+// Egress (always SHN-produced, on every lane, at every call site) is UNAFFECTED — it keeps
+// validating unconditionally; a lane whose counterparty is genuinely SHN-produced (none exist
+// among provider-data/demo today, but a future one could) would keep validating ingress too.
+func relaysReferencePayerBytes(profile string) bool {
+	return targetsBrPayer(profile) || isDemoProfile(profile)
+}
+
+// attestsOnHHA reports whether this deployment's UC-04/05/06/07 order is the G0151
+// home-health family — and therefore whether an attested QR item must name the
+// HomeHealthAssessment questionnaire's own linkId rather than the lumbar Oswestry one.
+// True for the provider-data lane (a seeded G0151 ServiceRequest) and for the demo lane
+// (§4.3's G0151 family tuple) — i.e. for every lane a provider gateway can be configured
+// into today; false only for a lane whose order rides the lumbar questionnaire.
+func (g *Gateway) attestsOnHHA() bool {
+	return g.cfg.OriginationProfile == "provider-data" || isDemoProfile(g.cfg.OriginationProfile)
+}
 
 // legRoute is the resolved reachability decision for one leg:
 // which contract-version TOKEN this leg is routed at (the wire-truth line —
@@ -559,16 +613,17 @@ func (g *Gateway) handleScenario(w http.ResponseWriter, r *http.Request) {
 	// A participant-facing gateway rejects unknown branches rather than silently
 	// treating anything non-"covered" as not-covered.
 	// provider-data lane uses distinct UC-01 personas (MBR-PD-UC01/MBR-PD-UC01-NC) so
-	// each scenario reads its OWN seeded Coverage; the sandbox lane keeps the shared
-	// MBR-COVERED/MBR-NOTCOVERED defaults (byte-identical — sceneMember returns the
-	// default literal for non-provider-data OriginationProfile).
+	// each scenario reads its OWN seeded Coverage; the demo lane uses its own distinct
+	// pair (MBR-D-UC01/MBR-D-UC01-NC, §4.3) for the same reason; any other lane
+	// keeps the shared MBR-COVERED/MBR-NOTCOVERED conformant-roster defaults
+	// (sceneMember returns the default literal for neither provider-data nor demo).
 	var memberID string
 	var ok bool
 	switch req.Branch {
 	case "covered":
-		memberID, ok = g.scenarioMember(w, r, "MBR-COVERED", "MBR-PD-UC01")
+		memberID, ok = g.scenarioMember(w, r, "MBR-COVERED", "MBR-PD-UC01", "MBR-D-UC01")
 	case "notcovered":
-		memberID, ok = g.scenarioMember(w, r, "MBR-NOTCOVERED", "MBR-PD-UC01-NC")
+		memberID, ok = g.scenarioMember(w, r, "MBR-NOTCOVERED", "MBR-PD-UC01-NC", "MBR-D-UC01-NC")
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown branch"})
 		return
@@ -615,6 +670,13 @@ func (g *Gateway) handleScenario(w http.ResponseWriter, r *http.Request) {
 	// NOT g.validateFHIR — this site echoes res.Issues in its 422 body, which
 	// validateFHIR's (status,msg) contract cannot carry. coverage-eligibility is
 	// version-neutral, so the line is "" (the canonical lane).
+	// Unconditional on purpose, not an oversight — relaysReferencePayerBytes does not apply
+	// here. cerJSON is a request THIS
+	// engine builds (shnsdk.BuildEligibilityRequest), never a relay of anyone else's bytes,
+	// on every origination lane. Only the ingress/egress legs a LegResponder (the payer
+	// content occupant — CRD/DTR/PAS) actually touches can carry reference-payer bytes;
+	// eligibility bypasses that occupant entirely (R11 — see gateway/engine/native.go's "NO
+	// coverage-eligibility arm" comment).
 	cerValidator := g.validatorForLine("")
 	if cerValidator == nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "no FHIR validator lane configured (FR-36/FR-G29)"})
@@ -659,6 +721,11 @@ func (g *Gateway) handleScenario(w http.ResponseWriter, r *http.Request) {
 	// F7: lane-selected, still NOT g.validateFHIR — an invalid payer answer is a 502
 	// here (an UPSTREAM failure), not validateFHIR's 500/422. Version-neutral leg ⇒
 	// line "" ⇒ the canonical lane; a missing lane keeps THIS site's 502.
+	// Unconditional on purpose here too — crrJSON is the CoverageEligibilityResponse the
+	// PAYER's own handleEligibilityInbound built directly off
+	// its SoR's Coverage read (R11), on every lane, including provider-data/demo against the
+	// reference payer's own conformance-payer holder — it is SHN-produced content, never a
+	// relay of br-payer's/the mirror's foreign DTR/PAS bytes, so it always validates.
 	crrValidator := g.validatorForLine("")
 	if crrValidator == nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "no FHIR validator lane configured (FR-36/FR-G29)"})
@@ -755,8 +822,8 @@ type crdDtrResult struct {
 // orderSource returns the origination order bytes for the active profile. Under
 // provider-data it reads the member's open order from the SoR (the order code/dx
 // trace to the provider's seeded data, never a literal); otherwise it builds the order
-// from the per-UC tuple (the self-contained sandbox demo). The else branch
-// keeps the exact BuildServiceRequestCoded call verbatim so sandbox stays byte-identical.
+// from the per-UC tuple (the self-contained demo). The else branch
+// keeps the exact BuildServiceRequestCoded call verbatim so those lanes stay byte-identical.
 // Returns (orderJSON, httpStatus, msg); status 0 == ok.
 func (g *Gateway) orderSource(member, patientRef, system, code, display, dx string) ([]byte, int, string) {
 	if g.cfg.OriginationProfile == "provider-data" {
@@ -778,16 +845,25 @@ func (g *Gateway) orderSource(member, patientRef, system, code, display, dx stri
 	return sr, 0, ""
 }
 
-// sceneMember returns the distinct provider-data persona member for a scenario, or the
-// sandbox default otherwise. Distinct members are REQUIRED in the provider-data lane:
-// the order is read via OpenOrder(member) (keyed on member ONLY), so two scenarios sharing a
-// member would read the same order. The sandbox lane keeps its default member (the order is
-// built from the per-UC tuple there, so a shared member is harmless and byte-identical).
-func (g *Gateway) sceneMember(defaultMember, providerDataMember string) string {
-	if g.cfg.OriginationProfile == "provider-data" {
+// sceneMember returns the distinct provider-data persona member for a scenario under
+// provider-data, the distinct demo persona (MBR-D-UC0N, §4.3) under demo, or the
+// conformant-roster default otherwise. Distinct members are REQUIRED in the provider-data
+// lane: the order is read via OpenOrder(member) (keyed on member ONLY), so two scenarios
+// sharing a member would read the same order. The demo lane does not read SoR orders (it
+// builds from the originationCodes tuple), but still needs its OWN member so each scenario
+// resolves its own seeded Coverage and doesn't collide with another demo scenario's canary
+// twin. Any other lane keeps the default member. A caller for which demo carries no
+// distinct persona (edge-case routing proofs, the visualization-only bridge persona)
+// passes the same literal for all three.
+func (g *Gateway) sceneMember(defaultMember, providerDataMember, demoMember string) string {
+	switch {
+	case g.cfg.OriginationProfile == "provider-data":
 		return providerDataMember
+	case isDemoProfile(g.cfg.OriginationProfile):
+		return demoMember
+	default:
+		return defaultMember
 	}
-	return defaultMember
 }
 
 // scenarioMember resolves the effective member for a /scenario/* request: the
@@ -797,8 +873,8 @@ func (g *Gateway) sceneMember(defaultMember, providerDataMember string) string {
 // closed 400 on an unknown personaSet value or a member with no twin: a typo
 // silently running the demo personas is exactly the collision the twins exist
 // to prevent. ok=false means the response is already written.
-func (g *Gateway) scenarioMember(w http.ResponseWriter, r *http.Request, defaultMember, providerDataMember string) (string, bool) {
-	member := g.sceneMember(defaultMember, providerDataMember)
+func (g *Gateway) scenarioMember(w http.ResponseWriter, r *http.Request, defaultMember, providerDataMember, demoMember string) (string, bool) {
+	member := g.sceneMember(defaultMember, providerDataMember, demoMember)
 	switch ps := r.URL.Query().Get("personaSet"); ps {
 	case "":
 		return member, true
@@ -819,12 +895,16 @@ func (g *Gateway) scenarioMember(w http.ResponseWriter, r *http.Request, default
 // The order's {system, code, display, dx} are explicit so a HCPCS scenario can
 // originate an L8000 order; existing callers delegate with the CPT lumbar order (byte-unchanged).
 // On any failure it writes the HTTP error and returns ok=false.
-// proceedOnNotCovered (the provider-data handleUC08 caller): when true, a not-covered CRD
-// verdict does NOT terminally stop — the order is returned so the caller can carry it to PAS for
-// br-payer's formal A2 "Not Certified" ClaimResponse (D-S2-2). handleUC08 passes
-// targetsBrPayer(profile), which is true only for provider-data (the live br-payer lane); the
-// sandbox lane keeps the generic FR-G25/AI-1 STOP (false). The generic STOP is the DEFAULT
-// (false) for every other caller and is unchanged. The opt-in never yields an auth on a denial:
+// proceedOnNotCovered (the handleUC08 caller): when true, a not-covered CRD verdict does NOT
+// terminally stop — the order is returned so the caller can carry it to PAS for br-payer's
+// formal A2 "Not Certified" ClaimResponse (D-S2-2). handleUC08 passes targetsBrPayer(profile)
+// || isDemoProfile(profile) — true for provider-data (the live br-payer lane) AND demo (the
+// in-process mirror of the SAME br-payer family), since both target br-payer's J3490
+// NOT-COVERED family. The generic FR-G25/AI-1 STOP (false) is the DEFAULT for every other
+// caller, and — after gateway/app.go's loadConfig normalization — for every profile that
+// is neither provider-data nor demo (an unset
+// ORIGINATION_PROFILE is normalized to "demo" before the engine ever sees it, so it no longer
+// reaches this STOP path in a real deployment). The opt-in never yields an auth on a denial:
 // handleUC08 asserts the PAS result is DENIED (its approved→502 guard), so a not-covered order
 // routed to PAS can only deny, never approve.
 func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, member, system, code, display, dx string, proceedOnNotCovered bool) (crdDtrResult, bool) {
@@ -931,7 +1011,7 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 	}
 	// Generic verdict-driven switch on the CRD card result (FR-G25). A
 	// config-only gateway must handle ANY conformant CRD verdict it observes, not just
-	// the sandbox shape (always covered + PA + DTR). The PA decision keys on the
+	// one fixed shape (always covered + PA + DTR). The PA decision keys on the
 	// pa-needed axis ONLY (PARequired); whether a DTR questionnaire is fetched is decided
 	// separately by the doc-needed axis (NeedsDTR), below. Every non-proceeding value is
 	// handled fail-closed with no silent fall-through. AI-1: a coverage denial STOPS,
@@ -966,9 +1046,11 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 		return crdDtrResult{}, false
 	}
 	// PA is required (covered OR conditional coverage both proceed). Whether a
-	// DTR questionnaire is fetched is decided by the doc-needed axis (NeedsDTR),
-	// independently: no-doc (br-payer L8000) skips DTR straight to PAS; clinical
-	// (br-payer G0151) routes DTR.
+	// DTR questionnaire is fetched is decided by the doc-needed axis (NeedsDTR) —
+	// whether the CARD advertised a questionnaire — independently of the PA axis.
+	// Both are live: the reference payer advertises one on the L8000 and G0151
+	// families (so both route DTR) and none on E0424, which is PA-decided off the
+	// request alone and goes straight to PAS.
 	res := crdDtrResult{srJSON: srJSON, patientRef: patientRef, coverageRef: coverageRef, member: member, pci: pci, payer: payer, recipient: recipient}
 	if cov.NeedsDTR() {
 		canonical := shnsdk.StripCanonicalVersion(cov.Questionnaires[0])
@@ -992,13 +1074,13 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 		// In the br-payer-targeting lane (provider-data), carry the Coverage so the
 		// native-forward re-emits the payer-required coverage param on
 		// $questionnaire-package — a real Da Vinci payer (br-payer) 400s without it (the
-		// v0.11.0 QuestionnaireFetchRequest.Coverage seam). At 2.0/2.1 the sandbox
+		// v0.11.0 QuestionnaireFetchRequest.Coverage seam). At 2.0/2.1 an in-process
 		// responder doesn't need it, so gate on the profile to keep that leg
 		// byte-identical (C1 discipline) — but at a line whose DTRDef requires it
 		// (2.2), Coverage is ALWAYS attached, honest (the SAME SoR-derived resource
-		// built above), regardless of profile: the sandbox responder's own 2.2 QR
-		// shell (adjudicator.go) reads it too, to close the DTR-at-2.2 sandbox gap
-		// honestly rather than fabricating a subject/coverage reference.
+		// built above), regardless of profile: a 2.2 QR shell reads it too, so the
+		// DTR-at-2.2 gap closes honestly rather than by fabricating a
+		// subject/coverage reference.
 		fetch := shnsdk.QuestionnaireFetchRequest{Canonical: canonical}
 		coverageRequired := false
 		if def, ok := shnsdk.DTRLineDef(res.dtrLine); ok {
@@ -1040,7 +1122,7 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 			return crdDtrResult{}, false
 		}
-		if status, msg := g.validateFHIR(ctx, packageJSON, "ingress", res.dtrLine); status != 0 {
+		if status, msg := g.validateFHIRPayerIngress(ctx, packageJSON, res.dtrLine); status != 0 {
 			writeJSON(w, status, map[string]string{"error": msg})
 			return crdDtrResult{}, false
 		}
@@ -1127,7 +1209,7 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 // statusForPopulateErr maps a Populator error to an HTTP status. A managed
 // FillQuestionnaire marshal/unsupported error is the gateway's own fault → 500
 // (behavior-preserving: the inline path returned 500 here, and this never trips on the
-// 8 sandbox scenarios). errNoClinicalContext (a data fault) and errPopulateUpstream
+// 8 scenarios). errNoClinicalContext (a data fault) and errPopulateUpstream
 // (a native $populate fault) are partner/data faults → 502.
 func statusForPopulateErr(err error) int {
 	switch {
@@ -1252,32 +1334,37 @@ func questionnaireResponseCanonical(qrJSON []byte) (string, error) {
 
 // handleUC02 runs the no-PA CRD round-trip: a covered member's order is CRD-checked and comes
 // back covered with no prior-auth required. provider-data originates a seeded E0250 hospital-bed
-// DeviceRequest (HospitalBeds → covered/no-PA/no-DTR); the sandbox lane originates the per-UC
-// tuple (an X-ray order). Surfaces the covered/no-PA/no-DTR triple (NeedsDTR is the
+// DeviceRequest (HospitalBeds → covered/no-PA/no-DTR); every other lane originates the per-UC
+// tuple. Surfaces the covered/no-PA/no-DTR triple (NeedsDTR is the
 // reasonCode discriminator, asserted by the live gate).
 func (g *Gateway) handleUC02(w http.ResponseWriter, r *http.Request) {
 	// UC-02 (no-PA) originates the seeded E0250 hospital-bed DeviceRequest off provider data
 	// (the MBR-PD-UC02 persona) — D-PD-2 is dropped. The order is read via orderSource → OpenOrder
 	// in the provider-data lane (it traces to the provider's seeded SoR, never a literal); a
-	// mis-seeded member with no open order fails closed at OpenOrder. The sandbox lane originates
+	// mis-seeded member with no open order fails closed at OpenOrder. Every other lane originates
 	// the no-PA order off the per-UC tuple (byte-unchanged).
-	member, ok := g.scenarioMember(w, r, "MBR-COVERED", "MBR-PD-UC02")
+	member, ok := g.scenarioMember(w, r, "MBR-COVERED", "MBR-PD-UC02", "MBR-D-UC02")
 	if !ok {
 		return
 	}
 	g.originateNoPACRD(w, r, member)
 }
 
-// handleUC02PayerB is the LIVE second-payer self-discovery proof (FR-G41): the MBR-PD-UC02-PB
-// persona's own Coverage names a DISTINCT payer identity (urn:oid:…300|00078) which the provider
-// gateway's FeedPayerRouter resolves to holder `payer-b` off the /holders feed — while the persona-A
-// scenarios (MBR-COVERED / 00001) resolve to `payer`. Both are self-discovered off the SAME feed with
-// no static per-provider directory (the many-to-many drop-in property). MBR-PD-UC02-PB is seeded into
-// the provider tenant by cmd/fhirseed (shnsdk provider-data persona "uc02-payerb"). This proves
-// ROUTING (both members seal to DIFFERENT holders), not a distinct verdict — differential adjudication
-// is a Connectathon-day property.
+// handleUC02PayerB drives the SECOND-PAYER routing lane (FR-G41): the MBR-PD-UC02-PB persona's own
+// Coverage names a DISTINCT payer identity (urn:oid:…300|00078) rather than the reference payer's
+// 00001, so the provider gateway's FeedPayerRouter must resolve it off the /holders feed with no
+// static per-provider directory — the many-to-many drop-in property. MBR-PD-UC02-PB is seeded into
+// the provider tenant by cmd/fhirseed (shnsdk provider-data persona "uc02-payerb").
+//
+// WHAT IT PROVES DEPENDS ON THE DEPLOYMENT, and right now that is less than the name suggests: the
+// second payer holder that claimed 00078 retired alongside the payer it was the counterpart to, so
+// unless a deployment publishes a holder claiming 00078, this lane resolves nothing and fails closed
+// 422 — the same answer handleUC02UnknownPayer asserts. It is kept because the persona, its seeded
+// Coverage and the resolution path are all real: point 00078 at a live payer holder and the lane is a
+// routing proof again, with no code change. It was never a proof of a distinct VERDICT — differential
+// adjudication is a separate property.
 func (g *Gateway) handleUC02PayerB(w http.ResponseWriter, r *http.Request) {
-	member, ok := g.scenarioMember(w, r, "MBR-PD-UC02-PB", "MBR-PD-UC02-PB")
+	member, ok := g.scenarioMember(w, r, "MBR-PD-UC02-PB", "MBR-PD-UC02-PB", "MBR-PD-UC02-PB")
 	if !ok {
 		return
 	}
@@ -1290,7 +1377,7 @@ func (g *Gateway) handleUC02PayerB(w http.ResponseWriter, r *http.Request) {
 // registered payer for identifier …|00099") — never a default payer. Seeded into the provider tenant
 // by cmd/fhirseed (a smoke-only negative persona, not an SDK partner-onboarding fixture).
 func (g *Gateway) handleUC02UnknownPayer(w http.ResponseWriter, r *http.Request) {
-	member, ok := g.scenarioMember(w, r, "MBR-UNKNOWN-PAYER", "MBR-UNKNOWN-PAYER")
+	member, ok := g.scenarioMember(w, r, "MBR-UNKNOWN-PAYER", "MBR-UNKNOWN-PAYER", "MBR-UNKNOWN-PAYER")
 	if !ok {
 		return
 	}
@@ -1311,7 +1398,7 @@ func (g *Gateway) originateNoPACRD(w http.ResponseWriter, r *http.Request, membe
 	}
 	patientRef := "Patient/" + member
 
-	o := originationCodes(g.cfg.OriginationProfile).uc02
+	o := originationCodes().uc02
 	srJSON, status, msg := g.orderSource(member, patientRef, o.system, o.code, o.display, o.dx)
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
@@ -1419,13 +1506,16 @@ func (g *Gateway) originateNoPACRD(w http.ResponseWriter, r *http.Request, membe
 	})
 }
 
-// handleUC03 runs the full PA-required path: CRD (must require PA) → DTR fetch +
-// local auto-fill → PAS submit → approval. On approval the provider stores the
-// auth number for the SR (FR-23) and answers paRequired=true. Off provider-data,
-// the request body selects the member the same way handleScenario's uc01 does
-// (scenarioReq.Branch): "" (or an absent body) is MBR-COVERED, byte-identical
-// to before this switch existed; "bridge-refuse" is the kit-bridging-visualization
-// demo persona MBR-BRIDGE-REFUSE; any other value 400s.
+// handleUC03 runs the full PA-required path off the HomeOxygen family — CRD
+// (order-dispatch, advisory card) → DTR fetch + operated $populate → the item-6.1
+// requester attestation → PAS submit → approval. On approval the provider stores the
+// auth number for the order reference (FR-23) and answers paRequired=true. Off
+// provider-data, the request body selects the member the same way handleScenario's uc01
+// does (scenarioReq.Branch): "" (or an absent body) is the demo-lane oxygen origination
+// (§4.3/register §11 ruling (b)); "bridge-refuse" is the kit-bridging-visualization demo
+// persona MBR-BRIDGE-REFUSE, unchanged (its OWN literal L8000/order-select exhibit,
+// decoupled from this arm — it demonstrates a bridging peer's REFUSAL, which fires before
+// any family/hook content would matter); any other value 400s.
 func (g *Gateway) handleUC03(w http.ResponseWriter, r *http.Request) {
 	if g.cfg.OriginationProfile == "provider-data" {
 		// UC-03 off provider data = the HomeOxygenDispatch path (the only br-payer family that PA-requires
@@ -1433,16 +1523,13 @@ func (g *Gateway) handleUC03(w http.ResponseWriter, r *http.Request) {
 		// the approval is br-payer's pend-resolution timer (D-2RI-3), and the genuine auto-fill (the $populate
 		// runs the real prepop CQL against the seeded O2 obs) is UC-03's distinctive. The implicit fail-closed
 		// at OpenOrder is preserved (a mis-seeded MBR-PD-UC03 with no E1390 order fails closed there).
-		member, ok := g.scenarioMember(w, r, "MBR-PD-UC03", "MBR-PD-UC03")
+		member, ok := g.scenarioMember(w, r, "MBR-PD-UC03", "MBR-PD-UC03", "MBR-D-UC03")
 		if !ok {
 			return
 		}
 		g.originateDispatch(w, r, member)
 		return
 	}
-
-	ctx := r.Context()
-	const srRef = "ServiceRequest/sr-uc03"
 
 	// The UC-03 branch selection rides a dedicated req.Branch switch rather
 	// than the persona set (personaSet=canary cannot carry it), mirroring
@@ -1462,32 +1549,128 @@ func (g *Gateway) handleUC03(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var member string
-	var ok bool
 	switch req.Branch {
 	case "":
-		member, ok = g.scenarioMember(w, r, "MBR-COVERED", "MBR-COVERED")
+		g.handleUC03Oxygen(w, r)
 	case "bridge-refuse":
-		// Both scenarioMember args are the demo refuse persona (mirrors the
-		// ""-branch literal above: this path never runs under
-		// OriginationProfile=="provider-data" — that profile early-returns
-		// above — so providerDataMember is dead here exactly like it was for
-		// the literal it replaces). ?personaSet=canary is NOT special-cased:
-		// scenarioMember's CanaryTwins lookup naturally 400s ("no canary
-		// twin for member MBR-BRIDGE-REFUSE") since no twin is registered —
-		// deliberately not adding one (reviewer ruling: a canary twin for a
-		// demo-only persona would be semantic abuse of the canary
-		// mechanism, which exists for observability's shared scenario
-		// members, not visualization fixtures).
-		member, ok = g.scenarioMember(w, r, "MBR-BRIDGE-REFUSE", "MBR-BRIDGE-REFUSE")
+		g.handleUC03BridgeRefuse(w, r)
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown branch"})
-		return
 	}
+}
+
+// handleUC03Oxygen is UC-03's re-keyed non-provider-data arm (register §11 ruling (b)):
+// the oxygen family (E1390) via order-DISPATCH — the CRD hook shape genuinely proven live
+// against the reference payer for this family (originate_homeoxygen.go's DIVERGENCE 2/3),
+// not order-select's PA-required assertion, which no live pin covers for this family. Rides
+// runCRDDispatch (shared with originateDispatch) so the CRD/DTR/populate plumbing is ONE
+// implementation. UC-03's distinctive over originateDispatch's own callers: it must
+// ANSWER the tree's one required item (6.1) before submitting — attestOxygenNecessity
+// merges that answer into the populated QR without disturbing the genuine 2.2/2.3 auto
+// answers — and it surfaces the hermetic FR-17 source=auto attribution
+// (homeOxygenAutoFillEvidence) that register §9 row 4 asked for.
+func (g *Gateway) handleUC03Oxygen(w http.ResponseWriter, r *http.Request) {
+	member, ok := g.scenarioMember(w, r, "MBR-COVERED", "MBR-COVERED", "MBR-D-UC03")
 	if !ok {
 		return
 	}
-	o := originationCodes(g.cfg.OriginationProfile).uc03
+	o := originationCodes().uc03
+	order, err := literalOxygenDispatchOrder("Patient/"+member, o.code, o.display, o.dx)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build literal order failed"})
+		return
+	}
+	res, ok := g.runCRDDispatch(w, r, member, order)
+	if !ok {
+		return
+	}
+
+	// The hermetic FR-17 source=auto proof (register §9 row 4 / §11): independently
+	// cross-checked against the member's OWN seeded Observation, never trusting the
+	// populate engine's own claim (the anti-pattern this slice exists to rule out).
+	filled := g.homeOxygenAutoFillEvidence(member, res.qrJSON)
+
+	// §3 ruling: 6.1 (the one required item) is answered honestly through the requester's
+	// OWN attestation — source="manual", never "auto", never fabricated as clinical fact —
+	// merged into the ALREADY-populated QR so the genuine auto answers survive.
+	npi := g.cfg.NPI
+	if npi == "" {
+		npi = "1999999999" // the same fallback the sibling attestation sites use (originate_resume.go)
+	}
+	attestedQR, err := attestOxygenNecessity(res.qrJSON, res.questionnaireJSON, npi, o.display, o.dx, g.cfg.Clock().Format("2006-01-02"))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if status, msg := g.validateFHIR(r.Context(), attestedQR, "egress", ""); status != 0 {
+		writeJSON(w, status, map[string]string{"error": msg})
+		return
+	}
+
+	// --- PAS — the shared lean single-shot tail (submitClaimAndResolve): the order
+	// resource is the DeviceRequest, so InfoChanged stays false (orderIsDeviceRequest) —
+	// its order type alone routes the payer gate to poll the timer-resolved A1. The
+	// genuine outcome is conditional-coverage A4-pended → A1 (D-2RI-3). ---
+	parsed, _, status, msg, err := g.submitClaimAndResolve(r.Context(), r, res.pci, res.orderJSON, attestedQR, res.patientRef, res.coverageRef, res.member, res.payer, res.recipient)
+	if status != 0 {
+		if g.relayOriginationError(w, err) {
+			return
+		}
+		writeJSON(w, status, map[string]string{"error": msg})
+		return
+	}
+
+	// FR-23: persist the payer-issued auth number against the order reference.
+	if err := g.cfg.Store.StoreAuthNumber(res.orderRef, parsed.PreAuthRef); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "holder write failed (auth number)"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, uc03Resp{
+		PARequired: true,
+		AuthNumber: parsed.PreAuthRef,
+		ValidUntil: parsed.ValidUntil,
+		QRItems:    filled,
+		QRAnswers:  res.qrAnswers,
+		// Attested is computed by INDEPENDENTLY inspecting the actual attestedQR bytes just
+		// submitted (questionnaireResponseAnswered), never self-reported from "did the
+		// attestation code path run" — a self-reported flag would stay true even if a future
+		// edit accidentally submitted the pre-attestation shell (register §11 ruling,
+		// criterion 2; see uc02_uc03_test.go's mutation evidence).
+		Attested: questionnaireResponseAnswered(attestedQR, "6.1"),
+	})
+}
+
+// uc03BridgeRefuseCode is the kit-bridging-visualization demo's OWN literal order tuple —
+// decoupled from originationCodes().uc03 (R3): this branch demonstrates a bridging peer's
+// REFUSAL, which (per TestHandleUC03_BridgeRefuseSelectsMember) fires at the ROUTING gate
+// before any leg is ever attempted, so the family/code carried has never mattered to its
+// outcome. Kept literally UNCHANGED (L8000, order-select) rather than following UC-03's
+// oxygen re-key, so this demo-only exhibit stays byte-identical to before R3.
+var uc03BridgeRefuseCode = orderTuple{systemHCPCSBuild, "L8000", DemoDisplayL8000, DemoDxL8000}
+
+// handleUC03BridgeRefuse is UC-03's "bridge-refuse" branch, UNCHANGED by R3 (it is not the
+// scenario register §11 ruled on — see handleUC03's doc comment). Byte-identical to the
+// pre-R3 handleUC03 body: order-select + a straight (non-polling) PAS submit expecting an
+// immediate "approved" outcome, which the bridging peer never reaches (it refuses at
+// routing).
+func (g *Gateway) handleUC03BridgeRefuse(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	const srRef = "ServiceRequest/sr-uc03"
+
+	// Both scenarioMember args are the demo refuse persona (this path never runs under
+	// OriginationProfile=="provider-data" — that profile early-returns above — so
+	// providerDataMember is dead here). ?personaSet=canary is NOT special-cased:
+	// scenarioMember's CanaryTwins lookup naturally 400s ("no canary twin for member
+	// MBR-BRIDGE-REFUSE") since no twin is registered — deliberately not adding one
+	// (reviewer ruling: a canary twin for a demo-only persona would be semantic abuse of
+	// the canary mechanism, which exists for observability's shared scenario members, not
+	// visualization fixtures).
+	member, ok := g.scenarioMember(w, r, "MBR-BRIDGE-REFUSE", "MBR-BRIDGE-REFUSE", "MBR-BRIDGE-REFUSE")
+	if !ok {
+		return
+	}
+	o := uc03BridgeRefuseCode
 	res, ok := g.runCRDThenDTROrder(w, r, member, o.system, o.code, o.display, o.dx, false)
 	if !ok {
 		return
@@ -1534,7 +1717,7 @@ func (g *Gateway) handleUC03(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
-	if status, msg := g.validateFHIR(ctx, claimRespJSON, "ingress", targetLine); status != 0 {
+	if status, msg := g.validateFHIRPayerIngress(ctx, claimRespJSON, targetLine); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
@@ -1570,11 +1753,11 @@ func (g *Gateway) handleUC07HCPCS(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	const srRef = "ServiceRequest/sr-uc07hcpcs"
 
-	member, ok := g.scenarioMember(w, r, "MBR-UC07HCPCS", "MBR-UC07HCPCS")
+	member, ok := g.scenarioMember(w, r, "MBR-UC07HCPCS", "MBR-UC07HCPCS", "MBR-UC07HCPCS")
 	if !ok {
 		return
 	}
-	o := originationCodes(g.cfg.OriginationProfile).uc07hcpcs
+	o := originationCodes().uc07hcpcs
 	res, ok := g.runCRDThenDTROrder(w, r, member, o.system, o.code, o.display, o.dx, false)
 	if !ok {
 		return
@@ -1621,7 +1804,7 @@ func (g *Gateway) handleUC07HCPCS(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
-	if status, msg := g.validateFHIR(ctx, claimRespJSON, "ingress", targetLine); status != 0 {
+	if status, msg := g.validateFHIRPayerIngress(ctx, claimRespJSON, targetLine); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
@@ -1664,7 +1847,7 @@ func (g *Gateway) classifyResolution(respJSON []byte) (parsed shnsdk.PriorAuthRe
 }
 
 // handleUC04 runs the pended-then-approved PA path. Two profile lanes share the CRD+DTR prefix:
-//   - sandbox: CRD+DTR → PAS submit → PENDED (no operative DiagnosticReport yet) →
+//   - demo (and any non-provider-data lane): CRD+DTR → PAS submit → PENDED (no operative DiagnosticReport yet) →
 //     ClaimUpdate with the provider-LOCAL operative report + Provenance → approved (FR-20/21).
 //   - provider-data (L1): ATTEST the adaptive HomeHealthAssessment off the seeded order (the
 //     operated $populate auto-pops nothing), then the lean single-shot PAS tail with NO
@@ -1674,8 +1857,8 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	const srRef = "ServiceRequest/sr-uc04"
 
-	o := originationCodes(g.cfg.OriginationProfile).uc04
-	member, ok := g.scenarioMember(w, r, "MBR-UC04", "MBR-PD-UC04")
+	o := originationCodes().uc04
+	member, ok := g.scenarioMember(w, r, "MBR-UC04", "MBR-PD-UC04", "MBR-D-UC04")
 	if !ok {
 		return
 	}
@@ -1694,7 +1877,7 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 			return
 		}
-		orderRef, ok := resourceRef(res.srJSON) // Bug-2: persist against the REAL seeded order ref, not the sandbox literal.
+		orderRef, ok := resourceRef(res.srJSON) // Bug-2: persist against the REAL seeded order ref, not the built-order literal.
 		if !ok {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "order missing id"})
 			return
@@ -1707,7 +1890,6 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 		// before the fill (dtr_adaptive.go) — a fill over the package's group-1 tree alone
 		// drops every group-3 answer and puts 1.1 alone on the wire.
 		attestedQR, _, status, msg, err := g.attestAdaptiveQuestionnaire(ctx, r, res, answers,
-			"Organization/"+g.cfg.HolderID,
 			shnsdk.QRContext{PatientRef: res.patientRef, CoverageRef: res.coverageRef, OrderRef: orderRef, Authored: g.cfg.Clock()})
 		if status != 0 {
 			if g.relayOriginationError(w, err) {
@@ -1738,7 +1920,7 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// sandbox: the operative-DiagnosticReport amendment tail (UNCHANGED below).
+	// demo (and any non-provider-data lane): the operative-DiagnosticReport amendment tail.
 	// PAS submit — expect PENDED (no operative DiagnosticReport yet).
 	pasCorr := g.cfg.CorrelationGen()
 	// Select-before-build: the routed line CHOOSES the builder, so it is
@@ -1780,7 +1962,7 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
-	if status, msg := g.validateFHIR(ctx, pendedResp, "ingress", targetLine); status != 0 {
+	if status, msg := g.validateFHIRPayerIngress(ctx, pendedResp, targetLine); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
@@ -1858,7 +2040,7 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
-	if status, msg := g.validateFHIR(ctx, updateResp, "ingress", targetLine); status != 0 {
+	if status, msg := g.validateFHIRPayerIngress(ctx, updateResp, targetLine); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
@@ -1926,27 +2108,27 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown branch"})
 		return
 	}
-	member, ok := g.scenarioMember(w, r, "MBR-UC05", "MBR-PD-UC05")
+	member, ok := g.scenarioMember(w, r, "MBR-UC05", "MBR-PD-UC05", "MBR-D-UC05")
 	if !ok {
 		return
 	}
 	srRef := "ServiceRequest/sr-uc05"
 	if req.Branch == "noconsent" {
-		member, ok = g.scenarioMember(w, r, "MBR-UC05-NOCONSENT", "MBR-PD-UC05-NC")
+		member, ok = g.scenarioMember(w, r, "MBR-UC05-NOCONSENT", "MBR-PD-UC05-NC", "MBR-D-UC05-NC")
 		if !ok {
 			return
 		}
 		srRef = "ServiceRequest/sr-uc05-noconsent"
 	}
 
-	o := originationCodes(g.cfg.OriginationProfile).uc05
+	o := originationCodes().uc05
 	res, ok := g.runCRDThenDTROrder(w, r, member, o.system, o.code, o.display, o.dx, false)
 	if !ok {
 		return
 	}
 
 	// provider-data (L1): persist the auth against the REAL seeded order ref, not the
-	// sandbox literal — Bug-2 pattern from handleUC04. The noconsent branch never
+	// built-order literal — Bug-2 pattern from handleUC04. The noconsent branch never
 	// reaches StoreAuthNumber (returns consentDenied earlier), so the re-assigned srRef
 	// is moot there but harmless.
 	if g.cfg.OriginationProfile == "provider-data" {
@@ -1956,6 +2138,37 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		srRef = ref
+
+		// UC-05 carries the SAME seeded G0151 order (and so the SAME adaptive
+		// HomeHealthAssessment) as UC-04: ATTEST it exactly as handleUC04 does — the
+		// operated $populate auto-pops nothing on the 0-CQL HHA, so the fill must drive
+		// $next-question until group 3 is delivered before it can answer 3.1/3.2/3.3.
+		// Every attested answer traces to the seeded order (res.srJSON), same as UC-04.
+		// Unlike UC-04/06/07, UC-05 never re-attests on the amendment: the
+		// pas-claim-update leg below carries the federated-query DiagnosticReport
+		// evidence, not a new/superseding QR — it reuses res.qrJSON UNCHANGED, so
+		// overwriting res.qrJSON here (before either leg is built) is enough; there is
+		// no pend-then-amend attestation lane for UC-05 (no scenarioToPend call site),
+		// so the grown tree never needs to be carried forward past this point.
+		answers, err := uc04AttestationAnswers(res.srJSON, g.cfg.SoR.ResolveByReference)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			return
+		}
+		attestedQR, _, status, msg, err := g.attestAdaptiveQuestionnaire(ctx, r, res, answers,
+			shnsdk.QRContext{PatientRef: res.patientRef, CoverageRef: res.coverageRef, OrderRef: ref, Authored: g.cfg.Clock()})
+		if status != 0 {
+			if g.relayOriginationError(w, err) {
+				return
+			}
+			writeJSON(w, status, map[string]string{"error": msg})
+			return
+		}
+		if status, msg := g.validateFHIR(ctx, attestedQR, "egress", res.dtrLine); status != 0 {
+			writeJSON(w, status, map[string]string{"error": msg})
+			return
+		}
+		res.qrJSON = attestedQR
 	}
 
 	// PAS submit — expect PENDED (no operative DiagnosticReport yet).
@@ -1999,7 +2212,7 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
-	if status, msg := g.validateFHIR(ctx, pendedResp, "ingress", targetLine); status != 0 {
+	if status, msg := g.validateFHIRPayerIngress(ctx, pendedResp, targetLine); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
@@ -2050,6 +2263,11 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 		}
 		// Ingress-validate the facility's searchset BEFORE trusting/extracting its
 		// resources (defense in depth — every resource crossing the substrate is validated).
+		// MUST stay plain validateFHIR, never validateFHIRPayerIngress: the facility is not
+		// the reference payer, so this leg's bytes are never eligible for the R-8 skip
+		// regardless of lane — this exact call site is the one that was once wrongly
+		// exempted, sharing the payer-directed skip with every other ingress leg on the
+		// same lane.
 		if status, msg := g.validateFHIR(ctx, recordsJSON, "ingress", ""); status != 0 {
 			writeJSON(w, status, map[string]string{"error": msg})
 			return
@@ -2101,7 +2319,7 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
-	if status, msg := g.validateFHIR(ctx, updateResp, "ingress", targetLine); status != 0 {
+	if status, msg := g.validateFHIRPayerIngress(ctx, updateResp, targetLine); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
@@ -2141,15 +2359,17 @@ type uc08Resp struct {
 func (g *Gateway) handleUC08(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	o := originationCodes(g.cfg.OriginationProfile).uc08
-	// provider-data (Mode A): br-payer's J3490 CRD verdict is NOT-COVERED, so opt in to carry the
+	o := originationCodes().uc08
+	// provider-data (Mode A) and demo (§4.3, the in-process br-payer mirror) both target
+	// br-payer's J3490 family, whose CRD verdict is NOT-COVERED — opt in to carry the
 	// order past the FR-G25 stop to PAS → the formal A2 "Not Certified" ClaimResponse
-	// (D-S2-2). Sandbox keeps the covered+PA→PAS-deny path (proceedOnNotCovered stays false).
-	member, ok := g.scenarioMember(w, r, "MBR-UC08", "MBR-PD-UC08")
+	// (D-S2-2). Any other lane keeps the covered+PA→PAS-deny path (proceedOnNotCovered stays false).
+	member, ok := g.scenarioMember(w, r, "MBR-UC08", "MBR-PD-UC08", "MBR-D-UC08")
 	if !ok {
 		return
 	}
-	res, ok := g.runCRDThenDTROrder(w, r, member, o.system, o.code, o.display, o.dx, targetsBrPayer(g.cfg.OriginationProfile))
+	proceedOnNotCovered := targetsBrPayer(g.cfg.OriginationProfile) || isDemoProfile(g.cfg.OriginationProfile)
+	res, ok := g.runCRDThenDTROrder(w, r, member, o.system, o.code, o.display, o.dx, proceedOnNotCovered)
 	if !ok {
 		return
 	}
@@ -2197,7 +2417,7 @@ func (g *Gateway) handleUC08(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
-	if status, msg := g.validateFHIR(ctx, claimRespJSON, "ingress", targetLine); status != 0 {
+	if status, msg := g.validateFHIRPayerIngress(ctx, claimRespJSON, targetLine); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}

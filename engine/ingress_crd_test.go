@@ -27,7 +27,7 @@ func crdReqJSON(patientID, orderSubjectRef, coverageBeneficiaryRef string) []byt
 }
 
 func TestIngressSubjectPCI_AllReferencesAgree(t *testing.T) {
-	g := &Gateway{cfg: Config{SoR: NewStubHolderData()}}
+	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
 	ref := "Patient/MBR-COVERED"
 	pci, status, _ := g.ingressCRDSubjectPCI(crdReqJSON("MBR-COVERED", ref, ref))
 	if status != 0 {
@@ -41,7 +41,7 @@ func TestIngressSubjectPCI_AllReferencesAgree(t *testing.T) {
 // A KNOWN different member in the order subject must fail closed (403): both resolve, but to
 // DIFFERENT pcis — this exercises the rp != pci branch (not the unknown-member branch).
 func TestIngressSubjectPCI_DivergentKnownPatientFailsClosed(t *testing.T) {
-	g := &Gateway{cfg: Config{SoR: NewStubHolderData()}}
+	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
 	good := "Patient/MBR-COVERED"
 	_, status, _ := g.ingressCRDSubjectPCI(crdReqJSON("MBR-COVERED", "Patient/MBR-NOTCOVERED", good))
 	if status != 403 {
@@ -51,7 +51,7 @@ func TestIngressSubjectPCI_DivergentKnownPatientFailsClosed(t *testing.T) {
 
 // An UNKNOWN patient reference (cannot resolve) must also fail closed.
 func TestIngressSubjectPCI_UnknownReferenceFailsClosed(t *testing.T) {
-	g := &Gateway{cfg: Config{SoR: NewStubHolderData()}}
+	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
 	good := "Patient/MBR-COVERED"
 	_, status, _ := g.ingressCRDSubjectPCI(crdReqJSON("MBR-COVERED", "Patient/MBR-UNKNOWN", good))
 	if status == 0 {
@@ -62,7 +62,7 @@ func TestIngressSubjectPCI_UnknownReferenceFailsClosed(t *testing.T) {
 // A draft order with NO recognizable patient subject is rejected (not skipped): an order with
 // no patient must never ride into the sealed request behind the bound subject's authority.
 func TestIngressSubjectPCI_DraftOrderMissingSubjectFailsClosed(t *testing.T) {
-	g := &Gateway{cfg: Config{SoR: NewStubHolderData()}}
+	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
 	body := []byte(`{
       "hook":"order-select",
       "context":{
@@ -81,7 +81,7 @@ func TestIngressSubjectPCI_DraftOrderMissingSubjectFailsClosed(t *testing.T) {
 
 // A missing context.patientId fails closed (400).
 func TestIngressSubjectPCI_MissingPatientId(t *testing.T) {
-	g := &Gateway{cfg: Config{SoR: NewStubHolderData()}}
+	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
 	_, status, _ := g.ingressCRDSubjectPCI([]byte(`{"hook":"order-select","context":{}}`))
 	if status != 400 {
 		t.Fatalf("missing patientId: status = %d, want 400", status)
@@ -93,7 +93,7 @@ func TestIngressSubjectPCI_MissingPatientId(t *testing.T) {
 // dedicated fence for the prefetch Patient (a different person's demographics must not ride into
 // the bound patient's sealed exchange).
 func TestIngressSubjectPCI_DivergentPrefetchPatientFailsClosed(t *testing.T) {
-	g := &Gateway{cfg: Config{SoR: NewStubHolderData()}}
+	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
 	body := []byte(`{
       "hook":"order-select","context":{"patientId":"MBR-COVERED",
         "draftOrders":{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"ServiceRequest","subject":{"reference":"Patient/MBR-COVERED"}}}]}},

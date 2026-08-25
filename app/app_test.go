@@ -101,10 +101,11 @@ func TestLoadConfig_ObserverAddrLoopbackOnly(t *testing.T) {
 	}
 	for _, c := range cases {
 		env := map[string]string{
-			"ROLE":              "provider",
-			"SHN_SECRETS":       "/etc/shn/bundles/provider",
-			"SHN_DISCOVERY_URL": "http://accounts:8088/discovery",
-			"OBSERVER_ADDR":     c.addr,
+			"ROLE":                      "provider",
+			"SHN_SECRETS":               "/etc/shn/bundles/provider",
+			"SHN_DISCOVERY_URL":         "http://accounts:8088/discovery",
+			"OBSERVER_ADDR":             c.addr,
+			"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate",
 		}
 		cfg, err := loadConfig(func(k string) string { return env[k] })
 		if c.wantErr && err == nil {
@@ -137,11 +138,12 @@ func TestLoadConfig_TLSPairOrNeither(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			env := map[string]string{
-				"ROLE":              "provider",
-				"SHN_SECRETS":       "/etc/shn/bundles/provider",
-				"SHN_DISCOVERY_URL": "http://accounts:8088/discovery",
-				"TLS_CERT_FILE":     c.cert,
-				"TLS_KEY_FILE":      c.key,
+				"ROLE":                      "provider",
+				"SHN_SECRETS":               "/etc/shn/bundles/provider",
+				"SHN_DISCOVERY_URL":         "http://accounts:8088/discovery",
+				"TLS_CERT_FILE":             c.cert,
+				"TLS_KEY_FILE":              c.key,
+				"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate",
 			}
 			cfg, err := loadConfig(func(k string) string { return env[k] })
 			if c.wantErr {
@@ -166,9 +168,10 @@ func TestLoadConfig_TLSPairOrNeither(t *testing.T) {
 // so an operator only has to set METRICS_SERVICE to opt in.
 func TestLoadConfig_MetricsDefaults(t *testing.T) {
 	env := map[string]string{
-		"ROLE":              "provider",
-		"SHN_SECRETS":       "/etc/shn/bundles/provider",
-		"SHN_DISCOVERY_URL": "http://accounts:8088/discovery",
+		"ROLE":                      "provider",
+		"SHN_SECRETS":               "/etc/shn/bundles/provider",
+		"SHN_DISCOVERY_URL":         "http://accounts:8088/discovery",
+		"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate",
 	}
 	cfg, err := loadConfig(func(k string) string { return env[k] })
 	if err != nil {
@@ -186,12 +189,13 @@ func TestLoadConfig_MetricsDefaults(t *testing.T) {
 // METRICS_ENV are all read through verbatim when set.
 func TestLoadConfig_MetricsServiceReadThrough(t *testing.T) {
 	env := map[string]string{
-		"ROLE":              "provider",
-		"SHN_SECRETS":       "/etc/shn/bundles/provider",
-		"SHN_DISCOVERY_URL": "http://accounts:8088/discovery",
-		"METRICS_SERVICE":   "provider-data-gw",
-		"METRICS_NAMESPACE": "X",
-		"METRICS_ENV":       "Y",
+		"ROLE":                      "provider",
+		"SHN_SECRETS":               "/etc/shn/bundles/provider",
+		"SHN_DISCOVERY_URL":         "http://accounts:8088/discovery",
+		"METRICS_SERVICE":           "provider-data-gw",
+		"METRICS_NAMESPACE":         "X",
+		"METRICS_ENV":               "Y",
+		"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate",
 	}
 	cfg, err := loadConfig(func(k string) string { return env[k] })
 	if err != nil {
@@ -394,6 +398,9 @@ func TestLoadConfig_PayerDavinciContractVersions(t *testing.T) {
 func TestDemoEgressNativeLinesEnv(t *testing.T) {
 	baseEnv := map[string]string{
 		"ROLE": "provider", "SHN_SECRETS": "/x", "SHN_DISCOVERY_URL": "https://d",
+		// ROLE=provider with an unset ORIGINATION_PROFILE now normalizes to "demo" at
+		// load, which requires the operated $populate endpoint.
+		"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate",
 	}
 
 	t.Run("empty is unset", func(t *testing.T) {
@@ -472,6 +479,9 @@ func TestDemoEgressNativeLinesEnv(t *testing.T) {
 func TestDemoEdgeCaptureEnv(t *testing.T) {
 	baseEnv := map[string]string{
 		"ROLE": "provider", "SHN_SECRETS": "/x", "SHN_DISCOVERY_URL": "https://d",
+		// ROLE=provider with an unset ORIGINATION_PROFILE now normalizes to "demo" at
+		// load, which requires the operated $populate endpoint.
+		"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate",
 	}
 
 	t.Run("unset is false", func(t *testing.T) {
@@ -579,6 +589,10 @@ func baseProviderEnv() map[string]string {
 		"SHN_SECRETS":              "/etc/shn",
 		"SHN_DISCOVERY_URL":        "https://disc.test",
 		"PROVIDER_DAVINCI_INGRESS": "1",
+		// ROLE=provider with an unset ORIGINATION_PROFILE now normalizes to "demo" at
+		// load, which requires the operated $populate endpoint like any other
+		// demo/provider-data config.
+		"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate",
 	}
 }
 
@@ -749,6 +763,31 @@ func TestLoadConfig_ProviderDataWithPopulateURLIsOK(t *testing.T) {
 	}
 	if cfg.ProviderDTRPopulateURL != "https://populate.test/fhir/Questionnaire/$populate" {
 		t.Fatalf("ProviderDTRPopulateURL = %q, want full URL", cfg.ProviderDTRPopulateURL)
+	}
+}
+
+// TestLoadConfig_UnsetOriginationProfileNormalizesToDemo: an absent ORIGINATION_PROFILE
+// must normalize to the canonical "demo" at
+// the config boundary — this package's own OriginationProfile doc comment already
+// declares "" and "demo" the SAME lane, so every downstream predicate (isDemoProfile,
+// targetsBrPayer's callers, relaysReferencePayerBytes) must see exactly one value for
+// it, never a third undeclared one. PROVIDER_DTR_POPULATE_URL is required here BECAUSE
+// of the normalization: operatedPopulateProfile("demo") is true, exactly as an explicit
+// ORIGINATION_PROFILE=demo would require — this is itself part of what the test pins.
+func TestLoadConfig_UnsetOriginationProfileNormalizesToDemo(t *testing.T) {
+	e := map[string]string{
+		"ROLE":                      "provider",
+		"SHN_SECRETS":               "/x",
+		"SHN_DISCOVERY_URL":         "https://d",
+		"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate",
+		// ORIGINATION_PROFILE deliberately unset — the case this test pins.
+	}
+	cfg, err := loadConfig(func(k string) string { return e[k] })
+	if err != nil {
+		t.Fatalf("valid config with unset ORIGINATION_PROFILE: %v", err)
+	}
+	if cfg.OriginationProfile != "demo" {
+		t.Fatalf("OriginationProfile = %q, want %q (the normalized default)", cfg.OriginationProfile, "demo")
 	}
 }
 
@@ -1014,10 +1053,11 @@ func TestLoadConfig_PayerDavinciAlgAlongsideSecretIsError(t *testing.T) {
 func TestLoadConfig_FHIRSecretOnlyIsOK(t *testing.T) {
 	env := map[string]string{
 		"ROLE": "provider", "SHN_SECRETS": "/x", "SHN_DISCOVERY_URL": "https://d",
-		"FHIR_DATA_URL":      "https://sor.example/fhir",
-		"FHIR_TOKEN_URL":     "https://sor.example/token",
-		"FHIR_CLIENT_ID":     "gw",
-		"FHIR_CLIENT_SECRET": "s3cret",
+		"FHIR_DATA_URL":             "https://sor.example/fhir",
+		"FHIR_TOKEN_URL":            "https://sor.example/token",
+		"FHIR_CLIENT_ID":            "gw",
+		"FHIR_CLIENT_SECRET":        "s3cret",
+		"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate",
 	}
 	cfg, err := loadConfig(func(k string) string { return env[k] })
 	if err != nil {
@@ -1060,6 +1100,13 @@ func buildEnvWithBundle(t *testing.T, bundleRole, envRole string) map[string]str
 	}
 	return map[string]string{
 		"ROLE": envRole, "SHN_SECRETS": dir, "SHN_DISCOVERY_URL": "http://127.0.0.1:1",
+		// ROLE=provider with an unset ORIGINATION_PROFILE now normalizes to "demo" at
+		// load, which requires the operated $populate endpoint — set unconditionally
+		// here so a non-provider
+		// envRole (payer/facility/phg) is unaffected (normalization is ROLE=provider
+		// scoped) and every provider-role caller of this helper still reaches the
+		// check it actually wants to test, past loadConfig's populate-URL gate.
+		"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate",
 	}
 }
 
@@ -1207,13 +1254,14 @@ func TestApp_ChecksEndpoint_TokenGatedAndHealthUnaffected(t *testing.T) {
 	}
 
 	env := map[string]string{
-		"ROLE":               "provider",
-		"SHN_SECRETS":        dir,
-		"SHN_DISCOVERY_URL":  disc.URL,
-		"SHN_FAKE_VALIDATOR": "1",
-		"FHIR_DATA_URL":      fhirSrv.URL,
-		"CHECKS_TOKEN":       "t",
-		"AUDIT_URL":          "http://127.0.0.1:1", // well-formed, unreachable
+		"ROLE":                      "provider",
+		"SHN_SECRETS":               dir,
+		"SHN_DISCOVERY_URL":         disc.URL,
+		"SHN_FAKE_VALIDATOR":        "1",
+		"FHIR_DATA_URL":             fhirSrv.URL,
+		"CHECKS_TOKEN":              "t",
+		"AUDIT_URL":                 "http://127.0.0.1:1", // well-formed, unreachable
+		"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate",
 	}
 	getenv := func(k string) string { return env[k] }
 
@@ -1333,6 +1381,7 @@ func TestProbeEvidenceReachesResponder(t *testing.T) {
 		"SHN_SECRETS":                  dir,
 		"SHN_DISCOVERY_URL":            disc.URL,
 		"SHN_FAKE_VALIDATOR":           "1",
+		"FHIR_DATA_URL":                "https://sor.example/fhir", // required on every role: the holder's own SoR
 		"PAYER_DAVINCI_BASE_URL":       payer.URL,
 		"PAYER_DAVINCI_CRD_SERVICE_ID": "svc", // override: skip live /cds-services discovery
 		"CHECKS_TOKEN":                 "t",

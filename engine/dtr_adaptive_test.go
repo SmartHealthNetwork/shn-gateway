@@ -1,14 +1,12 @@
 package engine
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
-	"time"
 
-	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
+	"github.com/SmartHealthNetwork/shn-gateway/fhirseed"
 )
 
 const testAdaptiveCanonical = "http://example.org/fhir/Questionnaire/Adaptive"
@@ -72,8 +70,8 @@ func TestQuestionnaireIsAdaptive(t *testing.T) {
 	if !questionnaireIsAdaptive(adaptiveTree(t, "1")) {
 		t.Fatal("a questionnaire carrying the SDC questionnaireAdaptive extension must read adaptive")
 	}
-	if questionnaireIsAdaptive(shnsdk.SandboxLumbarQuestionnaire()) {
-		t.Fatal("the sandbox lumbar questionnaire must NOT read adaptive (it would drive $next-question on the sandbox lane)")
+	if questionnaireIsAdaptive(fhirseed.DemoLumbarQuestionnaire()) {
+		t.Fatal("the demo lumbar questionnaire must NOT read adaptive (it would drive $next-question on a lane that serves no adaptive tree)")
 	}
 	if questionnaireIsAdaptive([]byte(`not json`)) {
 		t.Fatal("malformed bytes must not read adaptive")
@@ -176,39 +174,11 @@ func TestMergeDeliveredGroups(t *testing.T) {
 	}
 }
 
-// TestSandboxResponder_RefusesNextQuestion: the sandbox serves no adaptive questionnaire, so
-// a $next-question round is REFUSED (400, named) — never answered with a package the
-// originator could mistake for a delivered group. The plain fetch on the same leg still
-// serves the package (control).
-func TestSandboxResponder_RefusesNextQuestion(t *testing.T) {
-	stub := NewStubHolderData()
-	clock := func() time.Time { return time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC) }
-	responder := NewSandboxResponder(NewSandboxAdjudicator(stub, clock), stub, stub, clock)
-
-	round, err := json.Marshal(dtrLegRequest{Canonical: shnsdk.QuestionnaireCanonicalLumbarMRI, NextQuestion: json.RawMessage(`{"resourceType":"QuestionnaireResponse","status":"in-progress","subject":{"reference":"Patient/MBR-COVERED"}}`)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	res, err := responder.Handle(context.Background(), "dtr-questionnaire-fetch", "corr", "pci", round)
-	if err != nil || res.Status != http.StatusBadRequest || !strings.Contains(res.Message, "$next-question") {
-		t.Fatalf("next-question round: err=%v status=%d msg=%q, want 400 naming $next-question", err, res.Status, res.Message)
-	}
-
-	fetch, err := json.Marshal(dtrLegRequest{Canonical: shnsdk.QuestionnaireCanonicalLumbarMRI})
-	if err != nil {
-		t.Fatal(err)
-	}
-	res, err = responder.Handle(context.Background(), "dtr-questionnaire-fetch", "corr", "pci", fetch)
-	if err != nil || res.Status != 0 || len(res.ResponseFHIR) == 0 {
-		t.Fatalf("plain fetch (control): err=%v status=%d, want the package", err, res.Status)
-	}
-}
-
 // TestNextQuestionSubjectBindAndFence pins the payer side's two fences on an adaptive round:
 // (A) the carried subject resolves to the token subject via the payer's OWN record; (C) the
 // answer is about the patient the request carried.
 func TestNextQuestionSubjectBindAndFence(t *testing.T) {
-	stub := NewStubHolderData()
+	stub := newCensusSoR()
 	g := &Gateway{cfg: Config{SoR: stub}}
 	coveredPCI, _, _ := stub.ResolvePatient("MBR-COVERED")
 	uc04PCI, _, _ := stub.ResolvePatient("MBR-UC04")

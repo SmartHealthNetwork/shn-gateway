@@ -11,7 +11,7 @@ import (
 // Populator produces a populated QuestionnaireResponse for a DTR leg. It is a
 // PROVIDER-LOCAL connector seam (runs inside the holder's trust domain against the
 // provider's data — NOT across a sealed Hub leg), selected by config. Backends:
-//   - managedPopulator — in-house FillQuestionnaire (sandbox/demo green-keeper; default)
+//   - managedPopulator — in-house FillQuestionnaire (demo green-keeper; default)
 //   - nativePopulator  — forward to an SDC Questionnaire/$populate endpoint (pass-through)
 //   - (future) operated CQL engine — same interface, config-only drop-in
 //
@@ -62,8 +62,8 @@ var errPopulateUpstream = errors.New("engine: $populate upstream failed")
 var errPopulateForeignSubject = errors.New("engine: populated QR subject does not match patient")
 
 // managedPopulator is the in-house backend: today's ClinicalContext + FillQuestionnaire,
-// byte-preserved behind the seam. The sandbox/demo GREEN-KEEPER — FillQuestionnaire fails
-// loud on any non-sandbox questionnaire, so this is NOT a general legacy fallback (the
+// byte-preserved behind the seam. The demo GREEN-KEEPER — FillQuestionnaire fails
+// loud on any questionnaire it does not recognize, so this is NOT a general legacy fallback (the
 // genuine legacy answer is an operated $populate, backend #3).
 type managedPopulator struct {
 	sor SystemOfRecord

@@ -146,27 +146,6 @@ func newStubPartner(t *testing.T) *stubPartner {
 	return s
 }
 
-func TestNativeResponder_EligibilityForwardsVerbatim(t *testing.T) {
-	p := newStubPartner(t)
-	cer := []byte(`{"resourceType":"CoverageEligibilityResponse","patient":{"reference":"Patient/p1"}}`)
-	p.respByPath["/CoverageEligibilityRequest"] = cer
-	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", nil, nil)
-
-	res, err := n.Handle(context.Background(), "coverage-eligibility", "corr", "pci",
-		[]byte(`{"resourceType":"CoverageEligibilityRequest","patient":{"reference":"Patient/p1"}}`))
-	if err != nil {
-		t.Fatalf("Handle: %v", err)
-	}
-	if res.Status != 0 {
-		t.Fatalf("Status = %d, want 0", res.Status)
-	}
-	if string(res.ResponseFHIR) != string(cer) {
-		t.Errorf("ResponseFHIR = %s, want partner bytes verbatim", res.ResponseFHIR)
-	}
-	if p.lastPath != "/CoverageEligibilityRequest" {
-		t.Errorf("forwarded to %q", p.lastPath)
-	}
-}
 func TestNativeResponder_DTRForwardsPackageVerbatim(t *testing.T) {
 	p := newStubPartner(t)
 	// A deps-RICH package — the native path must forward it byte-for-byte (deps preserved).
@@ -199,8 +178,11 @@ func TestNativeResponder_PartnerNon2xxIsRelayedVerbatim(t *testing.T) {
 	p := newStubPartner(t)
 	p.status = 500
 	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", nil, nil)
-	res, err := n.Handle(context.Background(), "coverage-eligibility", "corr", "pci",
-		[]byte(`{"resourceType":"CoverageEligibilityRequest"}`))
+	// Driven on the DTR leg: it is a read-only forward like the retired eligibility arm
+	// (§3.2 deleted that arm — eligibility never reaches a responder any more), and the
+	// non-2xx relay under test is leg-independent post() behaviour.
+	res, err := n.Handle(context.Background(), "dtr-questionnaire-fetch", "corr", "pci",
+		[]byte(`{"canonical":"http://x/q"}`))
 	if err != nil {
 		t.Fatalf("Handle returned error (want a relayable Status, not error): %v", err)
 	}
@@ -352,7 +334,7 @@ func TestNativeResponder_CRDMergesSystemActions(t *testing.T) {
 // TestNativeResponder_DTRRejectsMalformedFetch locks the fail-closed posture preserved
 // across the coverage-carry switch from jsonUnmarshalStrictCanonical to unmarshaling the published
 // QuestionnaireFetchRequest: a malformed body OR a missing/empty canonical → 400 (parity
-// with the sandbox's 400, never a 500), and the partner is never called.
+// with a malformed-request 400, never a 500), and the partner is never called.
 func TestNativeResponder_DTRRejectsMalformedFetch(t *testing.T) {
 	for name, body := range map[string]string{
 		"not-json":          `{not json`,
@@ -379,12 +361,14 @@ func TestNativeResponder_DTRRejectsMalformedFetch(t *testing.T) {
 func TestNativeResponder_NilStoreOKForReadOnly(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"resourceType":"CoverageEligibilityResponse"}`))
+		_, _ = w.Write([]byte(`{"resourceType":"Bundle","type":"collection","entry":[]}`))
 	}))
 	defer srv.Close()
 	n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", nil, nil) // store=nil, clock=nil
-	res, err := n.Handle(context.Background(), "coverage-eligibility", "corr-1", "PCI-1",
-		[]byte(`{"resourceType":"CoverageEligibilityRequest"}`))
+	// DTR is the read-only leg here: the eligibility arm this row used to drive was
+	// deleted with the split counterparty (§3.2 — eligibility is engine-side, R11).
+	res, err := n.Handle(context.Background(), "dtr-questionnaire-fetch", "corr-1", "PCI-1",
+		[]byte(`{"canonical":"http://x/q"}`))
 	if err != nil || res.Status != 0 {
 		t.Fatalf("read-only leg with nil store must succeed: err=%v status=%d", err, res.Status)
 	}
@@ -942,7 +926,8 @@ func TestEndpointEvidenceRaceClean(t *testing.T) {
 func TestNativeStrictExtensionsFieldIsDormant(t *testing.T) {
 	mk := func(strict bool) (*nativeResponder, *stubPartner) {
 		p := newStubPartner(t)
-		p.respByPath["/CoverageEligibilityRequest"] = []byte(`{"resourceType":"CoverageEligibilityResponse","patient":{"reference":"Patient/p1"}}`)
+		p.respByPath["/Questionnaire/$questionnaire-package"] = []byte(`{"resourceType":"Bundle","type":"collection","entry":[` +
+			`{"resource":{"resourceType":"Questionnaire","id":"q1","url":"http://x/q"}}]}`)
 		var opts []NativeOption
 		if strict {
 			opts = append(opts, WithStrictExtensions(true))
@@ -951,10 +936,13 @@ func TestNativeStrictExtensionsFieldIsDormant(t *testing.T) {
 	}
 	off, _ := mk(false)
 	on, _ := mk(true)
-	req := []byte(`{"resourceType":"CoverageEligibilityRequest","patient":{"reference":"Patient/p1"}}`)
+	// Driven on DTR: the eligibility leg this row used to drive is gone from the native
+	// responder (§3.2). The dormancy claim is leg-independent — no Handle arm consults
+	// the flag — so any forwarded leg is a faithful witness.
+	req := []byte(`{"canonical":"http://x/q"}`)
 
-	resOff, errOff := off.Handle(context.Background(), "coverage-eligibility", "corr", "pci", req)
-	resOn, errOn := on.Handle(context.Background(), "coverage-eligibility", "corr", "pci", req)
+	resOff, errOff := off.Handle(context.Background(), "dtr-questionnaire-fetch", "corr", "pci", req)
+	resOn, errOn := on.Handle(context.Background(), "dtr-questionnaire-fetch", "corr", "pci", req)
 	if errOff != nil || errOn != nil {
 		t.Fatalf("Handle errors: strict=false -> %v, strict=true -> %v", errOff, errOn)
 	}

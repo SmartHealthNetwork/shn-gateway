@@ -40,7 +40,7 @@ const hhaFunctionalStatusLinkID = "3.2"
 
 // defaultHHAFunctionalLimitations is the operator-supplied free-text functional-status narrative for
 // the provider-data UC-06 clinician attestation when none is provided (the free-text analog of the
-// sandbox Oswestry "42"; D-2RI-1 — operator-supplied, NOT derived from a clinical SoR fact).
+// retired stub's Oswestry "42"; D-2RI-1 — operator-supplied, NOT derived from a clinical SoR fact).
 const defaultHHAFunctionalLimitations = "Impaired ambulation and reduced lower-extremity strength limiting independent mobility; skilled physical therapy indicated."
 
 // defaultHHAFunctionalLimitationsPatient is the operator-supplied free-text functional-status narrative
@@ -70,10 +70,11 @@ type Config struct {
 	// route. Replaced the deleted CounterpartID. The payer side does not use it — it replies to
 	// the inbound envelope's Sender.
 	PayerRouter PayerRouter
-	// OriginationProfile selects the per-UC behavior lane: "" / "sandbox" = the sandbox
-	// shape (default, SHN-produced, byte-unchanged); "provider-data" = originate every UC off
-	// the provider's seeded SoR and drive real br-payer verdicts (Mode A). targetsBrPayer keys
-	// the contained-insurer / absolute-refs / R-8 ingress-skip handling on it. Spec 2B-bis/2C.
+	// OriginationProfile selects the per-UC behavior lane: "demo" = originate the
+	// family-keyed order tuples (E0250/L8000/G0151/J3490) off the MBR-D-UC0N roster;
+	// "provider-data" = originate every UC off the provider's seeded SoR and drive real
+	// br-payer verdicts (Mode A). targetsBrPayer keys the contained-insurer /
+	// absolute-refs / R-8 ingress-skip handling on it. Spec 2B-bis/2C, §4.3.
 	OriginationProfile string
 	// Identity is the gateway's substrate identity: its holder signing key (used to
 	// sign holder assertions and patient-access audit records) plus its envelope-
@@ -134,15 +135,16 @@ type Config struct {
 	// Store is the gateway's own business state (auth numbers, pended-claim ledger,
 	// issued EOBs). Demo: in-memory stub; separated: holdersim; later: gateway Postgres.
 	Store Store
-	// Adjudicator is the payer's decision surface (eligibility/order-select/
-	// questionnaire/prior-auth). REQUIRED for the payer role; New panics without
-	// it. The default is NewSandboxAdjudicator (the same sandbox decisions the
-	// gateway made inline before); a partner injects their own. The same interface backs the public SDK
-	// Responder, so one Adjudicator works against both surfaces (Edge premise).
+	// Adjudicator is the partner's decision surface (order-select/questionnaire/
+	// prior-auth; Eligibility is served by the standalone SDK Responder only — R11 makes
+	// eligibility an engine-side Coverage read). It no longer DERIVES a Responder: a
+	// partner that wants the engine to answer PA legs from its own decisions builds a
+	// LegResponder around this interface and sets Responder. Optional.
 	Adjudicator shnsdk.Adjudicator
-	// Responder is the payer content seam. Normally left nil and DERIVED from
-	// Adjudicator in NewGateway (keeping the STABILITY-supported Adjudicator
-	// injection seam working). A test/partner MAY inject a custom LegResponder.
+	// Responder is the payer content OCCUPANT and the only source of Da Vinci leg
+	// answers. REQUIRED for the payer role — New returns an error without it (§3.2's
+	// fail-closed payer boot). Normally a native-forward responder over the payer's own
+	// Da Vinci endpoint (NewNativeResponder); a partner MAY inject any LegResponder.
 	Responder LegResponder
 	// PayerDavinciNative reports that the payer Responder native-forwards the read-only
 	// legs to a REAL partner Da Vinci endpoint (PAYER_DAVINCI_BASE_URL set). When true the
@@ -150,8 +152,8 @@ type Config struct {
 	// dtr-questionnaireresponse profiles) that SHN — which hosts US Core only — cannot
 	// $validate; like the conformant crd-order-select / pas-claim legs (R-8),
 	// the DTR response is a NEAR-RELAY: the trust-critical subject fence still runs, but the
-	// engine does NOT foreign-$validate it. false ⇒ the sandbox path (SHN's own
-	// US-Core-resolvable package), which still egress-$validates byte-identically. FR-G28.
+	// engine does NOT foreign-$validate it. false ⇒ an SHN-produced, US-Core-resolvable
+	// package, which still egress-$validates byte-identically. FR-G28.
 	PayerDavinciNative bool
 	// Populator is the DTR population seam (provider-local). Normally left nil and
 	// DEFAULTED to the managed backend (today's FillQuestionnaire) in New; the native
@@ -251,7 +253,7 @@ type Gateway struct {
 
 	// hubJTI enforces one-time-use on the Hub's X-Hub-Assertion jti at
 	// /substrate/inbound. In-memory per-replica; cross-replica replay
-	// is bounded by the 2-minute assertion TTL (single-task sandbox today; a shared
+	// is bounded by the 2-minute assertion TTL (a single task today; a shared
 	// store is the additive revisit if gateways ever scale horizontally).
 	hubJTI *shnsdk.ReplayGuard
 
@@ -278,6 +280,12 @@ type Gateway struct {
 // New constructs a Gateway. The clock defaults to time.Now and the client to
 // http.DefaultClient when unset.
 //
+// It returns an ERROR (never a panic) for the two conditions a DEPLOYMENT can hit with
+// otherwise-valid config: a payer role with no content occupant (§3.2 — the
+// fail-closed payer boot) and an unusable ingress client registration. The remaining
+// checks stay panics: they fire only on a caller that omitted a required field, which is
+// a programming error, not a deployment one.
+//
 // Caveat: the observer decoration below (Config.Validator/ValidatorsByLine ->
 // observingValidator) only wraps whatever the two fields hold AT construction
 // time. A handful of test sites assign to g.cfg.ValidatorsByLine directly
@@ -287,7 +295,7 @@ type Gateway struct {
 // validate.result even with Observer set. Harmless where it happens (those
 // tests don't assert on the observer stream for that lane), but worth
 // knowing before adding a new one that does.
-func New(cfg Config) *Gateway {
+func New(cfg Config) (*Gateway, error) {
 	if cfg.Clock == nil {
 		cfg.Clock = time.Now
 	}
@@ -319,9 +327,8 @@ func New(cfg Config) *Gateway {
 			panic("gateway: HubTransportPub required for role " + cfg.Role + " (mounts /substrate/inbound; hop-auth has no off state)")
 		}
 	}
-	// Observer seam: decorate the SoR BEFORE the Responder/Populator
-	// derivations below — both capture cfg.SoR at construction
-	// (NewSandboxResponder / newManagedPopulator), and decorating at the
+	// Observer seam: decorate the SoR BEFORE the Populator derivation below — it
+	// captures cfg.SoR at construction (newManagedPopulator), and decorating at the
 	// validator's later site would leave them reading the raw SoR forever.
 	// g does not exist yet here, so the decorator closes over Observer +
 	// Clock (already defaulted above).
@@ -332,21 +339,17 @@ func New(cfg Config) *Gateway {
 			cfg.SoR = observingSoR{inner: cfg.SoR, observer: cfg.Observer, clock: cfg.Clock}
 		}
 	}
-	// Derive the default content seam from the injected Adjudicator (the
-	// partner-facing field), so a partner constructing the engine directly with an
-	// Adjudicator still works (STABILITY seam). EVERY payer leg now routes through
-	// Responder — no leg calls cfg.Adjudicator directly — so the derived Responder
-	// is the sole content surface and Adjudicator's only role is to derive it.
-	if cfg.Responder == nil && cfg.Adjudicator != nil {
-		cfg.Responder = NewSandboxResponder(cfg.Adjudicator, cfg.SoR, cfg.Store, cfg.Clock)
-	}
-	// A payer REQUIRES a content Responder. Adjudicator is the SUPPORTED partner
-	// decision seam: setting it auto-derives the default Responder above (every
-	// existing caller takes this path). A test/partner MAY instead inject a custom
-	// LegResponder directly (the native-forward case) with no Adjudicator. Either
-	// way the Responder must be non-nil, so the guard is now Responder-nil.
+	// FAIL-CLOSED PAYER BOOT (§3.2). A payer gateway answers Da Vinci legs out of a
+	// content OCCUPANT and nothing else: either a native-forward Responder built against a
+	// real Da Vinci endpoint (PAYER_DAVINCI_BASE_URL) or a LegResponder a partner injects
+	// directly. There is NO derived in-process fallback any more — the in-process responder
+	// that used to be synthesized here from Config.Adjudicator is deleted, so a payer with
+	// no occupant refuses to boot instead of quietly serving invented verdicts.
 	if cfg.Role == "payer" && cfg.Responder == nil {
-		panic("gateway: the payer role requires a content Responder — set Config.Adjudicator (the supported decision seam; it derives the Responder) or inject Config.Responder")
+		return nil, errors.New("gateway: a payer gateway has no content occupant — set Config.Responder " +
+			"(a native-forward responder over the payer's own Da Vinci endpoint, or your own LegResponder). " +
+			"From the published binary: set PAYER_DAVINCI_BASE_URL (plus PAYER_DAVINCI_TOKEN_URL/PAYER_DAVINCI_CLIENT_ID/" +
+			"PAYER_DAVINCI_CLIENT_SECRET for an authenticated forward). Config.Adjudicator no longer derives a responder")
 	}
 	if cfg.Populator == nil {
 		cfg.Populator = newManagedPopulator(cfg.SoR)
@@ -398,11 +401,11 @@ func New(cfg Config) *Gateway {
 	if cfg.IngressEnabled && !cfg.ingressAuthBypass {
 		ia, err := newIngressAuthServer(cfg.IngressBaseURL, cfg.IngressClients, cfg.Clock)
 		if err != nil {
-			panic("gateway: " + err.Error())
+			return nil, fmt.Errorf("gateway: ingress auth: %w", err)
 		}
 		g.ingressAuth = ia
 	}
-	return g
+	return g, nil
 }
 
 // recipientForWith resolves the payer holder for an exchange from a Coverage (FR-G40). resolveRef
@@ -593,9 +596,10 @@ func (g *Gateway) Handler() http.Handler {
 	case "provider":
 		mux.HandleFunc("POST /scenario/uc01", g.handleScenario)
 		mux.HandleFunc("POST /scenario/uc02", g.handleUC02)
-		// FR-G41 live routing proofs off the /holders feed: uc02-payerb self-discovers a
-		// SECOND payer holder (MBR-PD-UC02-PB / 00078 → `payer-b`); uc02-unknownpayer fails closed 422
-		// (MBR-UNKNOWN-PAYER / 00099 → no registered payer). Both share the handleUC02 no-PA CRD body.
+		// FR-G41 live routing lanes off the /holders feed: uc02-payerb resolves a SECOND payer
+		// identity (MBR-PD-UC02-PB / 00078); uc02-unknownpayer fails closed 422 (MBR-UNKNOWN-PAYER /
+		// 00099 → no registered payer). Both share the handleUC02 no-PA CRD body. Whether 00078
+		// resolves is a deployment fact — see handleUC02PayerB.
 		mux.HandleFunc("POST /scenario/uc02-payerb", g.handleUC02PayerB)
 		mux.HandleFunc("POST /scenario/uc02-unknownpayer", g.handleUC02UnknownPayer)
 		mux.HandleFunc("POST /scenario/uc03", g.handleUC03)
@@ -639,11 +643,12 @@ func (g *Gateway) Handler() http.Handler {
 		}
 	case "payer":
 		mux.HandleFunc("POST /substrate/inbound", g.handleInbound)
-		// The native-forward (composite) payer is an INTERNAL conformance-harness participant
-		// that holds in-memory pending/exchanges across runs; the separated/cloud console reset
-		// clears them too (separated-reset-clears-gateway-state). Gated on PayerDavinciNative so
-		// the PUBLIC built-in sandbox payer-gw never exposes an unauthenticated state-clearing
-		// route. Generic g.Reset() (clears pending+exchanges), same handler as the provider lane.
+		// The native-forward payer is an INTERNAL conformance-harness participant that holds
+		// in-memory pending/exchanges across runs; the separated/cloud console reset clears them
+		// too (separated-reset-clears-gateway-state). Gated on PayerDavinciNative so a payer
+		// gateway running a partner's OWN injected LegResponder never exposes an unauthenticated
+		// state-clearing route. Generic g.Reset() (clears pending+exchanges), same handler as the
+		// provider lane.
 		if g.cfg.PayerDavinciNative {
 			mux.HandleFunc("POST /scenario/reset", g.handleScenarioReset)
 		}
@@ -1151,15 +1156,20 @@ func (g *Gateway) validatorForLine(line string) shnsdk.Validator {
 // line is the contract line the resource was BUILT at ("" = no line in play);
 // an unlaned line fails closed with a 500 naming it (FR-36/FR-G29 — never a
 // silent fallback to the canonical lane).
+//
+// This function NEVER skips — every call always validates. The R-8 ingress-$validate
+// carve-out (SHN never certifies bytes it did not produce) lives ONLY in
+// validateFHIRPayerIngress below, and only for the leg types whose counterparty is
+// genuinely the reference payer. The carve-out used to live HERE, gated on
+// cfg.OriginationProfile alone — a gateway-WIDE, lane-keyed condition — which meant every
+// "ingress"-dir call on the demo lane skipped, including
+// handleUC05's facility CDex federated-query searchset (originate.go), which is
+// SHN-PRODUCED and was never meant to be exempt (the R-8/FR-36 property this carve-out
+// protects is about the REFERENCE PAYER's bytes specifically, never about "whichever lane
+// happens to be active"). Splitting the skip into its own function makes the whitelist of
+// skip-eligible legs a grep (call sites of validateFHIRPayerIngress), not an inference a
+// future ingress site could accidentally inherit by using this function's old behavior.
 func (g *Gateway) validateFHIR(ctx context.Context, resourceJSON []byte, dir, line string) (int, string) {
-	// the br-payer-targeting lane (provider-data) relays the counterparty's FOREIGN bytes
-	// on ingress — SHN does not $validate foreign bundles (R-8/FR-36: SHN certifies only what it
-	// PRODUCES and hosts US Core only; the br-payer's responses stay relayed:true). The sandbox
-	// lane (SHN-produced responses) still validates ingress; egress (always SHN-produced) always
-	// validates. br-payer's Da Vinci DTR/PAS bytes fail a US-Core-only validator.
-	if dir == "ingress" && targetsBrPayer(g.cfg.OriginationProfile) {
-		return 0, ""
-	}
 	v := g.validatorForLine(line)
 	if v == nil {
 		return http.StatusInternalServerError, "no FHIR validator lane configured for contract line " + line + " (FR-36/FR-G29)"
@@ -1172,6 +1182,31 @@ func (g *Gateway) validateFHIR(ctx context.Context, resourceJSON []byte, dir, li
 		return http.StatusUnprocessableEntity, dir + " validation failed"
 	}
 	return 0, ""
+}
+
+// validateFHIRPayerIngress is validateFHIR("ingress", …), scoped to legs whose
+// counterparty is the reference payer — the payer-directed leg types
+// (crd-order-select, crd-order-dispatch, dtr-questionnaire-fetch, pas-claim,
+// pas-claim-update): the only ones whose response bytes are the reference payer's OWN
+// content, relayed VERBATIM, live over HTTP (provider-data) or through the in-process
+// mirror of it (demo). R-8/FR-36: SHN certifies only what it PRODUCES and hosts US Core
+// profiles only; a real Da Vinci payer's DTR/PAS bytes fail a US-Core-only validator by
+// construction (foreign or mirrored), so validating them is a category error, not a
+// defense — the skip fires when relaysReferencePayerBytes(profile) says this LANE relays
+// reference-payer bytes at all.
+//
+// Every OTHER ingress leg — federated-query (UC-05, the facility), patient-dtr (UC-07,
+// the PHG), and any inbound leg the PAYER role itself validates from a provider — is
+// SHN-produced-or-foreign-but-not-the-reference-payer and MUST call plain validateFHIR,
+// which always validates. Do not add a new call site here without confirming the leg's
+// counterparty really is the reference payer — this split exists because a facility leg
+// (UC-05's federated-query searchset) was wrongly exempted before it, sharing the skip
+// with every other ingress call on the same lane.
+func (g *Gateway) validateFHIRPayerIngress(ctx context.Context, resourceJSON []byte, line string) (int, string) {
+	if relaysReferencePayerBytes(g.cfg.OriginationProfile) {
+		return 0, ""
+	}
+	return g.validateFHIR(ctx, resourceJSON, "ingress", line)
 }
 
 // envelopeEgressLegs is the DTR-fetch-ONLY non-FHIR carve-out (the
@@ -1979,6 +2014,17 @@ func (g *Gateway) respondLeg(w http.ResponseWriter, r *http.Request, respFrame, 
 	writeLeg(w, out)
 }
 
+// legibleLegErrorMessage returns msg unchanged when it is non-empty; otherwise it
+// substitutes a fallback naming the leg and status, so respondLegError can never ship a
+// requester a bare `{"error":""}` — the fail-closed guard for any connector/responder that
+// answers non-2xx with no message of its own.
+func legibleLegErrorMessage(txType string, status int, msg string) string {
+	if msg != "" {
+		return msg
+	}
+	return fmt.Sprintf("%s: recipient answered %d with no error detail", txType, status)
+}
+
 // respondLegError seals a recipient's application NON-2xx answer as a v1 message
 // frame carrying the app status and relays it 200-to-Hub (verbatim — the
 // payload-blind Hub never reinterprets an application answer), the
@@ -2001,16 +2047,29 @@ func (g *Gateway) respondLegError(w http.ResponseWriter, r *http.Request, respFr
 		g.respondLeg(w, r, respFrame, respOp, txType, corrID, result.ResponseFHIR, subjectPCI, requester, consentRef, builtToken, result.ResponseRelayed)
 		return
 	}
+	// A connector/responder can answer non-2xx with NO body and NO LegResult.Message at
+	// all — internal/brpayermirror's loopback mirror
+	// does this on every one of its own rejection paths (a truly empty response body),
+	// and gateway/engine/native.go's upstream-relay path only ever sets LegResult.Status +
+	// ResponseFHIR (never Message) for a relayed non-2xx. Both of those are pre-existing,
+	// separately-owned surfaces (a demo/test fixture and a verbatim-relay responder that
+	// legitimately may not know the upstream's own error shape) — this is the ONE choke
+	// point every leg's non-2xx answer passes through before a requester ever sees it, so
+	// this is where the fail-closed guard belongs: an empty result.Message never reaches
+	// the requester as a bare `{"error":""}`, which tells a partner nothing and is
+	// indistinguishable from "the field was simply omitted". legibleLegErrorMessage names
+	// the leg and status instead. Pinned by TestRespondLegError_NeverEmptyMessage.
+	msg := legibleLegErrorMessage(txType, result.Status, result.Message)
 	if !g.frameNegotiated(requester) {
 		// Legacy peer: the pre-v0.27.0 contract — bare non-2xx, which the
 		// payload-blind Hub reports as its generic mechanical 502.
-		writeJSON(w, result.Status, map[string]string{"error": result.Message})
+		writeJSON(w, result.Status, map[string]string{"error": msg})
 		return
 	}
 	body := result.ResponseFHIR
 	ct := "application/fhir+json"
 	if len(body) == 0 {
-		body, _ = json.Marshal(map[string]string{"error": result.Message})
+		body, _ = json.Marshal(map[string]string{"error": msg})
 		ct = "application/json"
 	}
 	framed, err := shnsdk.EncodeHTTPFrame(result.Status, ct, body)

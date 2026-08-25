@@ -81,17 +81,17 @@ func newDispatchFixtureWith(t *testing.T, member string, demo Demo, orderJSON []
 
 	clock := func() time.Time { return time.Unix(1700000000, 0).UTC() }
 
-	base := NewStubHolderData()
+	base := newCensusSoR()
 	pci := shnsdk.ResolvePCI(member, demo.BirthDate, demo.FamilyName)
 
 	sor := &homeOxygenSoR{
-		StubHolderData: base,
-		member:         member,
-		demo:           demo,
-		pci:            pci,
-		orderJSON:      orderJSON,
-		performerRef:   performerRef,
-		supplierJSON:   supplierJSON,
+		censusSoR:    base,
+		member:       member,
+		demo:         demo,
+		pci:          pci,
+		orderJSON:    orderJSON,
+		performerRef: performerRef,
+		supplierJSON: supplierJSON,
 	}
 
 	const canonical = "http://smarthealth.network/fhir/Questionnaire/home-oxygen"
@@ -134,7 +134,7 @@ func newDispatchFixtureWith(t *testing.T, member string, demo Demo, orderJSON []
 	if mutate != nil {
 		mutate(&cfg)
 	}
-	gw := New(cfg)
+	gw := mustNew(t, cfg)
 
 	return &dispatchFixture{gw: gw, sor: sor, stub: stub, canonical: canonical}
 }
@@ -483,8 +483,8 @@ func TestDispatch_DTRFetchCoverageGate20Control(t *testing.T) {
 func TestHandler_DispatchRouteRegistered(t *testing.T) {
 	_, signPriv := genED25519(t)
 	encPub, encPriv := genKeyPair(t)
-	stub := NewStubHolderData()
-	gw := New(Config{
+	stub := newCensusSoR()
+	gw := mustNew(t, Config{
 		Role:     "provider",
 		HolderID: "provider",
 		Identity: shnsdk.Identity{

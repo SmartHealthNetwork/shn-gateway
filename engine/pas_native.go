@@ -15,7 +15,7 @@ import (
 )
 
 // conformantPASSubjects holds what the conformant PAS bind extracted: the bound member and the QR/
-// DiagnosticReport facts the sandbox adjudicator needs (the live relay leaves adjudication to the RI).
+// DiagnosticReport facts an in-process adjudicator needs (the live relay leaves adjudication to the RI).
 type conformantPASSubjects struct {
 	member string // the bound member id (Claim.patient, sans "Patient/")
 	qrJSON []byte // the QuestionnaireResponse resource, or nil (R-5: optional on this leg)
@@ -105,7 +105,7 @@ func parseConformantPASSubjects(bundleJSON []byte) (conformantPASSubjects, int, 
 	}
 	// Extract the member id tolerantly: the br-payer-targeting lane (provider-data) ABSOLUTIZES
 	// bundle refs so a real Da Vinci payer (br-payer) resolves them ("https://shn.example/fhir/
-	// Patient/MBR" not "Patient/MBR"); the sandbox keeps relative refs. pasMemberFromRef
+	// Patient/MBR" not "Patient/MBR"); the mirrored demo lane keeps relative refs. pasMemberFromRef
 	// reads the bare id from either form, so SHN's member bind works regardless of base
 	// while the patient-consistency fence below still compares the SAME member identity.
 	member := pasMemberFromRef(claimPat)
@@ -176,13 +176,13 @@ func (g *Gateway) ingressPASNativeSubjectPCI(bundleJSON []byte) (string, int, st
 // handlePASNativeInbound serves the conformant PAS leg payer-side: decrypt, subject-bind the
 // conformant request to the token (authority), forward the bundle to the responder (native relays the
 // bundle byte-verbatim to the real RI's /Claim/$submit AND projects the submit-cell Store
-// side-effects; sandbox adjudicates in-process AND records the same side-effects),
+// side-effects; an injected LegResponder adjudicates in-process AND records the same side-effects),
 // and relay the response. The response member-fence (R-7) and response egress-$validate (R-8) are
 // namespace-aware: on by default, standing down only for a foreign/relayed result; explained below.
 //
 // Store side-effects: BOTH responder paths return Commit/SideEffectFHIR — RecordPendedClaim on pend
 // (the load-bearing pend→update handoff depends on it) and the FR-28/FR-34 EOB on approve/deny
-// (both the native and sandbox paths). "Pure relay" is now a WIRE property only — the EOB
+// (both the relaying and non-relaying responder paths). "Pure relay" is now a WIRE property only — the EOB
 // is an ORTHOGONAL Store side-effect, so the native forward is no longer side-effect-free. This
 // handler mirrors handlePASInbound's build-response-BEFORE-Commit ordering: build
 // the response leg, egress-$validate the SHN-PRODUCED EOB side-effects, run the Commit, THEN write —
@@ -191,7 +191,7 @@ func (g *Gateway) ingressPASNativeSubjectPCI(bundleJSON []byte) (string, int, st
 // branches simply relay.)
 //
 // Response member-fence (R-7) + response egress-$validate (R-8) are now NAMESPACE-AWARE:
-// both run BY DEFAULT (the sandbox responder answers in SHN's OWN member namespace and
+// both run BY DEFAULT (a non-relaying LegResponder answers in SHN's OWN member namespace and
 // produces SHN-shaped output — both flags false) and stand DOWN only when the responder declares the
 // result foreign/relayed via markForeignRelay (native-forward path). The bound REQUEST above + the
 // substrate's correlation-binding (the response reaches only this exchange's originator) remain the
@@ -200,18 +200,18 @@ func (g *Gateway) ingressPASNativeSubjectPCI(bundleJSON []byte) (string, int, st
 // R-7 (fence iff !ResponseSubjectForeign): a real RI responds in its OWN patient namespace (br-payer
 // returns Patient/SubscriberExample, not the request's member), so a ClaimResponse.patient ==
 // bound-member check is a category error for a verbatim relay and would 403 every valid response —
-// hence the member-match stands down there; the sandbox response IS member-fenced strict.
+// hence the member-match stands down there; a non-relayed response IS member-fenced strict.
 // (handleCRDNativeInbound has no response fence at all — but the reason differs: CRD cards carry no
 // patient ref, whereas a ClaimResponse does.)
 //
 // R-8 (egress-$validate iff !ResponseRelayed): a verbatim foreign RI's Da Vinci PAS output declares
 // Da Vinci PAS profiles SHN's US-Core-only validator can't resolve ("Failed to retrieve profile"),
 // so $validating it would 422 a valid response — the relay stands down (br-payer validates its own
-// output). The sandbox response IS egress-$validated.
+// output). A non-relayed response IS egress-$validated.
 //
-// The SHN-PRODUCED EOB side-effect (sandbox BuildPADecisionEOB) is, by contrast, fenced + egress-
+// The SHN-PRODUCED EOB side-effect (BuildPADecisionEOB) is, by contrast, fenced + egress-
 // $validated UNCONDITIONALLY — always built from the bound member, always an SHN resource (FR-36). A
-// verbatim relay produces no EOB side-effect, so that loop is sandbox-only. This mirrors the DTR
+// verbatim relay produces no EOB side-effect, so that loop runs only for a non-relaying responder. This mirrors the DTR
 // near-relay, CRD-native, and the minimized pas-claim case.
 func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token, bundleJSON []byte, answerTok string) {
 	boundPatientRef, status, msg := g.conformantPASBind(bundleJSON, tok.Subject)
@@ -239,7 +239,7 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 	}
 	// (C) outbound fence — two-predicate, namespace-aware: member-fence
 	// the ClaimResponse iff !ResponseSubjectForeign (R-7 — a real br-payer answers in its OWN namespace,
-	// so the member-match stands down for a verbatim relay; the sandbox responder answers in SHN's
+	// so the member-match stands down for a verbatim relay; a non-relaying LegResponder answers in SHN's
 	// member namespace, both flags false, so it fences strict). The SHN-produced EOB side-effect is
 	// fenced UNCONDITIONALLY (always built from the bound member). Re-adds the (C) fence the minimized
 	// pas-claim leg carries, before that leg is deleted (OWD-G6 prove-first).
@@ -249,7 +249,7 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 	}
 	// Egress-$validate the RESPONSE iff !ResponseRelayed (R-8: a verbatim foreign relay carries Da
 	// Vinci PAS profiles SHN's US-Core-only validator can't resolve, so a valid relay would 422). The
-	// sandbox responder produces SHN-shaped output (ResponseRelayed false) → $validated, matching the
+	// non-relaying LegResponder produces SHN-shaped output (ResponseRelayed false) → $validated, matching the
 	// minimized pas-claim handler's response egress-$validate. The SHN-produced EOB side-effects are
 	// $validated unconditionally in the loop below.
 	if !result.ResponseRelayed {
@@ -262,7 +262,7 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 	}
 	// Egress-$validate the SHN-PRODUCED EOB side-effects before the Store write (FR-36). The relay
 	// RESPONSE itself is NOT $validated (R-8 — it may be a foreign RI's Da Vinci payload); a verbatim
-	// relay carries no side-effect, so this loop is sandbox-only (matches the minimized pas-claim case).
+	// relay carries no side-effect, so this loop runs only for a non-relaying responder (matches the minimized pas-claim case).
 	// The EOB is PDex, not pa.pas: its shape does not vary with the PAS line, so it validates on the
 	// canonical lane (line "") — passing the PAS answer line here would demand a PAS lane for a
 	// resource that lane does not govern.
@@ -315,7 +315,7 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 // carried for symmetry with the submit handler, NOT a place to "restore parity" with an ingress-$validate.
 //
 // Response member-fence (R-7) + response egress-$validate (R-8) are NAMESPACE-AWARE,
-// mirror of the conformant submit leg: both run BY DEFAULT (sandbox responder, both flags
+// mirror of the conformant submit leg: both run BY DEFAULT (a non-relaying LegResponder, both flags
 // false) and stand DOWN only when the result is declared foreign/relayed via markForeignRelay (a real
 // RI responds in its OWN patient namespace, so a response-subject == bound-member check / $validating
 // its Da Vinci profiles is a category error for a verbatim relay). The update leg builds NO EOB, so
@@ -358,7 +358,7 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 		return
 	}
 	// Egress-$validate the RESPONSE iff !ResponseRelayed (R-8), mirror of the conformant submit
-	// handler: the sandbox responder produces SHN-shaped output (validated); a foreign verbatim relay
+	// handler: a non-relaying LegResponder produces SHN-shaped output (validated); a foreign verbatim relay
 	// (ResponseRelayed true) is preserved bytes-only (US-Core validator can't resolve its Da Vinci
 	// profiles).
 	if !result.ResponseRelayed {
@@ -440,7 +440,7 @@ type conformantUpdateFacts struct {
 // the amended QR id, and the Provenance agents/targets/policies. Returns (facts, 0, "") on a parseable
 // Bundle; (_, 400, msg) on malformed. Engine-local (no SDK symbol).
 //
-// WHICH Claim entry the facts come from: a bundle can carry MORE THAN ONE Claim. On the composite
+// WHICH Claim entry the facts come from: a bundle can carry MORE THAN ONE Claim. On the reference-payer
 // (PayerOrgEntry) lane the sdk appends the ORIGINAL SUBMIT's Claim as a resolvable bundle ENTRY
 // after the operative update Claim (shnsdk buildPriorClaimEntry — so the update Claim's
 // related[].claim.reference resolves for a real Da Vinci payer), and that prior entry's only

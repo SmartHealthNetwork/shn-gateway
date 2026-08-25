@@ -250,7 +250,7 @@ func twoPayerTestSystem(t *testing.T) (*Gateway, *twoPayerSubstrate) {
 	}
 
 	const fakeBase = "http://stub.test"
-	gw := New(Config{
+	gw := mustNew(t, Config{
 		Role:            "provider",
 		HolderID:        "provider",
 		PayerRouter:     router,
@@ -261,8 +261,8 @@ func twoPayerTestSystem(t *testing.T) (*Gateway, *twoPayerSubstrate) {
 		HubURL:          fakeBase,
 		Reg:             reg,
 		Validator:       shnsdk.NewFakeValidator(),
-		SoR:             NewStubHolderData(),
-		Store:           NewStubHolderData(),
+		SoR:             newCensusSoR(),
+		Store:           newCensusSoR(),
 		Clock:           clock,
 		NPI:             "1234567890",
 		Client:          &http.Client{Transport: stub},
@@ -302,7 +302,7 @@ func TestRoutesToPayerNamedByCoverage(t *testing.T) {
 	}
 
 	// Persona B: MBR-PAYERB's stub Coverage names a DIFFERENT payer (00078, via
-	// stubPayerOverrides) → the SAME router resolves the DIFFERENT holder "payer-b".
+	// censusPayerOverrides) → the SAME router resolves the DIFFERENT holder "payer-b".
 	pciB, _, foundB := gw.cfg.SoR.ResolvePatient("MBR-PAYERB")
 	if !foundB {
 		t.Fatal("persona B: MBR-PAYERB did not resolve")

@@ -59,19 +59,21 @@ func (g *Gateway) handleDTRInbound(w http.ResponseWriter, r *http.Request, env s
 	// Core only — cannot resolve, so a foreign-$validate would 422 a conformant payer
 	// response. The trust-critical subject fence above still runs (no Questionnaire may carry
 	// a subject); we skip ONLY the profile-resolution $validate the conformant crd/pas native
-	// legs also skip. An SHN-PRODUCED package (the sandbox responder) is egress-$validated.
+	// legs also skip. An SHN-PRODUCED package (a non-relaying LegResponder) is egress-$validated.
 	//
 	// The predicate is result.ResponseRelayed — the per-RESULT truth the native DTR case
 	// sets — rather than the deployment-wide PayerDavinciNative flag it replaces. The two
-	// coincide today (the composite always routes dtr-questionnaire-fetch to native, and
-	// app.go sets PayerDavinciNative exactly when that composite is wired), so this is a
-	// precision change, not a behavior change: it just stops a hypothetical sandbox-answered
+	// coincide today (a native-forward payer always routes dtr-questionnaire-fetch to native,
+	// and app.go sets PayerDavinciNative exactly when that forward is wired), so this is a
+	// precision change, not a behavior change: it just stops a hypothetical SHN-produced
 	// DTR leg on a native deployment from skipping validation it should get.
 	//
-	// F7: an SHN-produced package is built at the ANSWER LINE (adjudicator.go's
-	// buildQuestionnairePackageAtLine), so it must be validated on THAT line's lane — DTR 2.2
-	// requires a QuestionnaireResponse entry that the 2.0 IG does not, and checking 2.2 bytes
-	// against a 2.0 lane is exactly the wrong-lane failure the seam exists to prevent.
+	// F7: an SHN-produced package would be built at the ANSWER LINE, so it must be validated
+	// on THAT line's lane — DTR 2.2 requires a QuestionnaireResponse entry that the 2.0 IG
+	// does not, and checking 2.2 bytes against a 2.0 lane is exactly the wrong-lane failure
+	// the seam exists to prevent. Today a payer's DTR answer is always its partner's bytes
+	// (ResponseRelayed), so this branch is the guard for a partner-injected occupant that
+	// produces its own package rather than relaying one.
 	if !result.ResponseRelayed {
 		if status, msg := g.validateFHIR(ctx, result.ResponseFHIR, "egress", shnsdk.LineOf(answerTok)); status != 0 {
 			writeJSON(w, status, map[string]string{"error": msg})
@@ -145,7 +147,7 @@ func (g *Gateway) fenceResponseSubject(leg, boundPatientRef string, res LegResul
 			return http.StatusForbidden, "questionnaire response unexpectedly carries a subject"
 		}
 	case "pas-claim", "pas-claim-update":
-		// Converged conformant PAS leg, served by either the sandbox responder (in-process,
+		// Converged conformant PAS leg, served by either an injected LegResponder (in-process,
 		// SHN member namespace → fence strict) or the native-forward responder (verbatim relay
 		// of a real RI answering in its OWN namespace → stand down, R-7). The responder declares
 		// which via res.ResponseSubjectForeign; the SHN-produced EOB side-effect is ALWAYS fenced.

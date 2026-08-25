@@ -23,7 +23,7 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 	// before the body is read or the envelope decoded — an unauthenticated caller
 	// never reaches the decoder. Sig + issuer pin ("hub") + audience (this holder)
 	// + bounds + jti one-time-use. The jti guard is in-memory ⇒ PER-REPLICA;
-	// cross-replica replay is dominated by the 2-minute TTL (single-task sandbox
+	// cross-replica replay is dominated by the 2-minute TTL (single-task
 	// services today; a shared store is the additive revisit if gateways ever
 	// scale horizontally).
 	if !g.verifyHubAssertion(r) {
@@ -130,8 +130,21 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 	case "dtr-questionnaire-fetch":
 		g.handleDTRInbound(w, r, env, tok, body, answerTok)
 	case "pas-claim":
+		// R8 re-home (FR-16/FR-27): fence BEFORE dispatch — an unattested
+		// clinician/patient QR item is nonconformant regardless of which handler
+		// would otherwise run.
+		if reason, ok := fenceAttestedItems(body); !ok {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": reason})
+			return
+		}
 		g.handlePASNativeInbound(w, r, env, tok, body, answerTok)
 	case "pas-claim-update":
+		// R8 re-home (FR-16/FR-27): same fence as pas-claim above — the property
+		// belongs to any QR item, not only to amends.
+		if reason, ok := fenceAttestedItems(body); !ok {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": reason})
+			return
+		}
 		g.handlePASUpdateNativeInbound(w, r, env, tok, body, answerTok)
 	case "federated-query":
 		g.handleFederatedQueryInbound(w, r, env, tok, body, answerTok)
@@ -181,6 +194,11 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 	// here — and it evaluates to "" (the canonical lane) because coverage-eligibility
 	// is version-neutral (paCatalog Contract ""), so answerTok itself is always "".
 	// A nil lane keeps THIS site's 500 rather than borrowing another's.
+	// Unconditional on purpose, not an oversight — this is the PAYER'S side of the SAME
+	// eligibility exchange originate.go's two UC-01 sites
+	// cover; cerJSON here is the REQUEST the requesting gateway's own engine built
+	// (shnsdk.BuildEligibilityRequest — never a foreign relay, since only SHN gateways ever
+	// originate a substrate leg), so it is SHN-produced on every lane and always validates.
 	ingressValidator := g.validatorForLine(shnsdk.LineOf(answerTok))
 	if ingressValidator == nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "no FHIR validator lane configured for this leg (FR-36/FR-G29)"})
@@ -200,20 +218,63 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 	}
 
 	boundPatientRef := "Patient/" + member
-	result, err := g.cfg.Responder.Handle(ctx, "coverage-eligibility", env.Metadata.CorrelationID, tok.Subject, cerJSON)
+
+	// Coverage-derived direct read (R11): eligibility is a data-plane
+	// read of the payer's OWN SoR, not adjudication, so it is answered directly —
+	// NEVER through the injected Adjudicator/Responder occupant (which is consulted
+	// only for the PA legs: OrderSelect/Questionnaire/PriorAuth). One Coverage read
+	// feeds both facts, the payer twin of FR-G40's "one payer fact, read once":
+	// CoverageInforce is the verdict, OpenCoverage's payor (parsed the SAME way the
+	// origination-side machinery does, gateway.go's recipientForWith /
+	// shnsdk.ParsePayerIdentifier) is the insurer identity — replacing the
+	// hardcoded Organization/payer literal BuildEligibilityResponse used to stamp.
+	inforce, reason := g.cfg.SoR.CoverageInforce(member)
+	coverageJSON, hasCoverage := g.cfg.SoR.OpenCoverage(member)
+	var insurer shnsdk.PayerIdentifier
+	switch {
+	case hasCoverage:
+		// The member HAS a Coverage record: its own payor is the insurer. An
+		// unresolvable payor on an EXISTING Coverage fails closed (R4:
+		// CoverageEligibilityResponse.insurer is 1..1) — a hollow or
+		// stale-literal response is never built.
+		var ok bool
+		insurer, ok = shnsdk.ParsePayerIdentifier(coverageJSON, g.cfg.SoR.ResolveByReference)
+		if !ok {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "no payer identifier on member coverage"})
+			return
+		}
+	default:
+		// No Coverage row at all (a genuinely unenrolled member, or the
+		// MBR-UC04/MBR-UC08-class fixture gap — the member itself already resolved,
+		// via ResolvePatient above, so this is a Coverage absence, not an unknown
+		// member) is the PRE-EXISTING business answer: a valid not-covered response
+		// (CoverageInforce already returns (false,"") for this case — no disposition
+		// text, matching the pre-promotion behavior), never a 422. There is no
+		// member Coverage to name an insurer from, so this reads the payer's OWN
+		// well-known Organization instead (Organization/payer — the same literal
+		// every other payor reference in this codebase already resolves against,
+		// seeded with an identifier by internal/fhirseed) — one self-read, not a
+		// fabricated identity.
+		orgJSON, orgFound := g.cfg.SoR.ResolveByReference("Organization/payer")
+		if !orgFound {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "payer's own well-known Organization is not on file"})
+			return
+		}
+		var ok bool
+		insurer, ok = shnsdk.ParseOrganizationIdentifier(orgJSON)
+		if !ok {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "payer's own well-known Organization has no identifier"})
+			return
+		}
+	}
+	crrJSON, err := shnsdk.BuildEligibilityResponse(env.Metadata.CorrelationID, boundPatientRef, inforce, reason, insurer, g.cfg.Clock())
 	if err != nil {
-		// Handle's error return is a build/marshal fault (gateway's own) → 500, parity
-		// with today's StatusInternalServerError build-failure paths. NOT 502.
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "responder failed"})
+		// Build/marshal fault (gateway's own) → 500, parity with today's
+		// StatusInternalServerError build-failure paths. NOT 502.
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build eligibility response failed"})
 		return
 	}
-	// result.Status carries a connector-signalled HTTP outcome (e.g. PAS 409/422);
-	// the eligibility leg never sets it today, but the shared pipeline shape checks it.
-	if result.Status != 0 {
-		g.respondLegError(w, r, "payer-coverage", "eligibility-response", "coverage-eligibility",
-			env.Metadata.CorrelationID, result, tok.Subject, env.Metadata.Sender, "", answerTok)
-		return
-	}
+	result := LegResult{ResponseFHIR: crrJSON}
 	if status, msg := g.fenceResponseSubject("coverage-eligibility", boundPatientRef, result); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
@@ -225,6 +286,9 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 	// F7: per-line lane selection, same "" (version-neutral) line as the ingress site
 	// above — and, as the note says, deliberately NOT g.validateFHIR: this site's
 	// !Valid answer is a 500, not a 422, and that distinction is the contract.
+	// Egress is unconditional by definition (R-8 is an ingress-only carve-out) — crrJSON
+	// here is always SHN-produced
+	// (shnsdk.BuildEligibilityResponse), so this was never in scope for the skip either way.
 	egressValidator := g.validatorForLine(shnsdk.LineOf(answerTok))
 	if egressValidator == nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "no FHIR validator lane configured for this leg (FR-36/FR-G29)"})

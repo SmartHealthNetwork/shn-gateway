@@ -27,18 +27,19 @@ type Scaffold struct{}
 // (DB pool, SOAP/X12 client, FHIR base URL) — see the README.
 func New() *Scaffold { return &Scaffold{} }
 
-// scaffoldMember is the one wired demo persona (UC-01/UC-03 subject MBR-COVERED).
-// Demographics are IDENTICAL to the substrate stub (gateway/engine/holderdata.go:181)
-// so the derived PCI matches and the provider→payer leg correlates. The ClinicalContext
-// is identical EXCEPT ConservativeTherapyWeeks (9, not stub's 6) — the deliberate,
-// observable marker the Tier-3 override test asserts surfaces in the DTR/PAS exchange.
-// The marker is non-gating: weeks flows into the DTR QR/PAS Claim as documentation only
-// (never an adjudication threshold — approval is driven by CoverageInforce), so its value
-// is freely observable without changing the outcome.
+// scaffoldMember is the one wired demo persona: MBR-D-UC03, the demo roster's PA subject.
+// Demographics are IDENTICAL to the seeded persona (internal/fhirseed's demo roster) so the
+// derived PCI matches and the provider→payer leg correlates.
+//
+// ConservativeTherapyWeeks is deliberately 9 — a value no other source produces, so a
+// Tier-3 connector override is OBSERVABLE end to end in the DTR QR / PAS Claim. It is not
+// a verdict lever and never was one to a real payer: eligibility is a Coverage read of the
+// payer's own system of record and prior-auth is the payer's decision on the ORDER, so
+// this marker can be watched on the wire without moving any outcome.
 const (
-	scaffoldMember    = "MBR-COVERED"
-	scaffoldBirthDate = "1975-04-02"
-	scaffoldFamily    = "Johansson"
+	scaffoldMember    = "MBR-D-UC03"
+	scaffoldBirthDate = "1979-09-02"
+	scaffoldFamily    = "Whitfield"
 )
 
 func scaffoldClinical() shnsdk.ClinicalContext {

@@ -88,8 +88,8 @@ func TestBuildPASSubmitBundle_ByteParity(t *testing.T) {
 		}
 	})
 
-	t.Run("non-br-payer profile -> never sets InfoChanged (sandbox byte-identical)", func(t *testing.T) {
-		// The sandbox/managed lane (targetsBrPayer=false) keeps the byte-identical sandbox path AND
+	t.Run("non-br-payer profile -> never sets InfoChanged (byte-identical)", func(t *testing.T) {
+		// The managed lane (targetsBrPayer=false) keeps the byte-identical pre-existing path AND
 		// never sets the poll discriminator regardless of order type.
 		order := pasTailServiceRequest()
 		got, err := buildPASSubmitBundle("2.0", false, order, qr, patientRef, coverageRef, member, corr, pasTailClock(), shnsdk.CMSPayerIdentity)
@@ -105,7 +105,7 @@ func TestBuildPASSubmitBundle_ByteParity(t *testing.T) {
 			t.Fatalf("want bundle: %v", err)
 		}
 		if !bytes.Equal(got, want) {
-			t.Fatalf("sandbox lane bundle NOT byte-identical to the plain SDK build:\n got=%s\nwant=%s", got, want)
+			t.Fatalf("managed lane bundle NOT byte-identical to the plain SDK build:\n got=%s\nwant=%s", got, want)
 		}
 	})
 }

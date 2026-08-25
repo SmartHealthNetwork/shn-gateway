@@ -212,7 +212,7 @@ ON CONFLICT (holder_id, eob_id) DO UPDATE SET eob_json = EXCLUDED.eob_json`,
 
 func (s *PgStore) EOBsForPatient(subjectPCI string) ([][]byte, bool) {
 	// Ordered by created_at, eob_id — chronological, not the stub's slice-insertion order
-	// (a second, benign divergence from StubHolderData: no caller asserts EOB order; the
+	// (a second, benign divergence from MemStore: no caller asserts EOB order; the
 	// Patient Access response is a searchset and the _id filter is order-independent).
 	// eob_id is the deterministic tiebreaker when two EOBs share a created_at (same-
 	// transaction inserts tie on now()).

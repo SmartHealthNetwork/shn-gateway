@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SmartHealthNetwork/shn-gateway/fhirseed"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -19,7 +20,7 @@ func TestParseCoverageEligibilityResponsePatient(t *testing.T) {
 	t0 := time.Date(2026, 6, 3, 12, 0, 0, 0, time.UTC)
 
 	// Round-trip: builder-produced response → parse → full patient ref.
-	b, err := shnsdk.BuildEligibilityResponse("corr-1", "Patient/MBR-COVERED", true, "", t0)
+	b, err := shnsdk.BuildEligibilityResponse("corr-1", "Patient/MBR-COVERED", true, "", shnsdk.PayerIdentifier{}, t0)
 	if err != nil {
 		t.Fatalf("BuildEligibilityResponse: %v", err)
 	}
@@ -103,7 +104,7 @@ func TestParsePASResponsePatients(t *testing.T) {
 
 // TestQuestionnaireHasSubject checks the (C) fence helper: a Questionnaire with
 // a subject element returns true; a patient-agnostic Questionnaire (the DTR
-// sandbox fixture) returns false; and malformed JSON returns false.
+// demo fixture) returns false; and malformed JSON returns false.
 func TestQuestionnaireHasSubject(t *testing.T) {
 	// POSITIVE: subject element present → true.
 	withSubject := []byte(`{"resourceType":"Questionnaire","subject":{"reference":"Patient/X"}}`)
@@ -111,10 +112,10 @@ func TestQuestionnaireHasSubject(t *testing.T) {
 		t.Error("questionnaireHasSubject: subject-bearing Questionnaire should return true")
 	}
 
-	// NEGATIVE: SandboxLumbarQuestionnaire is patient-agnostic → false.
-	clean := shnsdk.SandboxLumbarQuestionnaire()
+	// NEGATIVE: the demo lumbar-MRI questionnaire fixture is patient-agnostic → false.
+	clean := fhirseed.DemoLumbarQuestionnaire()
 	if questionnaireHasSubject(clean) {
-		t.Error("questionnaireHasSubject: SandboxLumbarQuestionnaire should return false (no subject)")
+		t.Error("questionnaireHasSubject: demo lumbar questionnaire should return false (no subject)")
 	}
 
 	// MALFORMED: returns false (no valid subject; egress-$validate catches shape).

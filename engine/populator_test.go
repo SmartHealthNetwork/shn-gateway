@@ -6,22 +6,23 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SmartHealthNetwork/shn-gateway/fhirseed"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
 // managedPopulator.Populate must produce EXACTLY the QR the inline path produced:
 // extract the Questionnaire from the package, read ClinicalContext, FillQuestionnaire.
 func TestManagedPopulator_ByteParityWithInlineFill(t *testing.T) {
-	sor := NewStubHolderData() // the demo SoR personas
+	sor := newCensusSoR() // the demo SoR personas
 	member := "MBR-COVERED"
-	pkg := wrapSandboxPackage(t) // one-entry package around the sandbox Questionnaire
+	pkg := wrapDemoLumbarPackage(t) // one-entry package around the demo lumbar Questionnaire
 
 	cc, ok := sor.ClinicalContext(member)
 	if !ok {
 		t.Fatal("no clinical context for member")
 	}
 	clock := func() time.Time { return time.Unix(1700000000, 0).UTC() }
-	want, err := shnsdk.FillQuestionnaire(shnsdk.SandboxLumbarQuestionnaire(), cc, shnsdk.QRContext{
+	want, err := shnsdk.FillQuestionnaire(fhirseed.DemoLumbarQuestionnaire(), cc, shnsdk.QRContext{
 		PatientRef: "Patient/" + member, CoverageRef: "Coverage/" + member,
 		OrderRef: "ServiceRequest/sr-" + member, Authored: clock(),
 	})
@@ -58,9 +59,9 @@ func TestManagedPopulator_ByteParityWithInlineFill(t *testing.T) {
 // (FillQuestionnaireAtLine/FillQuestionnaireFromAnswersAtLine), never a silent
 // 2.0 fallback.
 func TestManagedPopulatorBuildsAtLine(t *testing.T) {
-	sor := NewStubHolderData()
+	sor := newCensusSoR()
 	member := "MBR-COVERED"
-	pkg := wrapSandboxPackage(t)
+	pkg := wrapDemoLumbarPackage(t)
 	clock := func() time.Time { return time.Unix(1700000000, 0).UTC() }
 	mp := newManagedPopulator(sor)
 
@@ -112,12 +113,12 @@ func TestManagedPopulatorBuildsAtLine(t *testing.T) {
 	})
 }
 
-// wrapSandboxPackage builds the one-entry $questionnaire-package around the
-// sandbox Questionnaire (the shape originate.go receives on the DTR-fetch leg).
-func wrapSandboxPackage(t *testing.T) []byte {
+// wrapDemoLumbarPackage builds the one-entry $questionnaire-package around the
+// demo lumbar Questionnaire (the shape originate.go receives on the DTR-fetch leg).
+func wrapDemoLumbarPackage(t *testing.T) []byte {
 	t.Helper()
-	q := shnsdk.SandboxLumbarQuestionnaire()
-	pkg, err := buildQuestionnairePackage(q) // engine helper in davincimap.go
+	q := fhirseed.DemoLumbarQuestionnaire()
+	pkg, err := testQuestionnairePackage(q) // the test-only package builder (censusfixture_test.go)
 	if err != nil {
 		t.Fatalf("wrap: %v", err)
 	}

@@ -2,7 +2,6 @@ package engine
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"net/http"
 	"os"
@@ -10,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SmartHealthNetwork/shn-gateway/fhirseed"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -77,10 +77,10 @@ func rebindPASPatient(t *testing.T, bundleJSON []byte, newID string) []byte {
 // nothing downstream can. (The SECOND oracle — make validate on the SHN-produced resources — is run
 // out-of-band.)
 func TestTask0_ConformantGoldensBind(t *testing.T) {
-	g := &Gateway{cfg: Config{SoR: NewStubHolderData()}}
+	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
 	pci, _, found := g.cfg.SoR.ResolvePatient("MBR-COVERED")
 	if !found {
-		t.Fatal("MBR-COVERED not resolvable in StubHolderData")
+		t.Fatal("MBR-COVERED not resolvable in censusSoR")
 	}
 
 	// --- CRD order-select golden binds (the shape the Originator reproduces at the CRD legs). ---
@@ -121,7 +121,7 @@ func originatorBuiltConformantBundle(t *testing.T, member string) []byte {
 	if err != nil {
 		t.Fatalf("BuildServiceRequest: %v", err)
 	}
-	qrJSON, err := shnsdk.FillQuestionnaire(shnsdk.SandboxLumbarQuestionnaire(), shnsdk.SandboxUC03Context(), shnsdk.QRContext{
+	qrJSON, err := shnsdk.FillQuestionnaire(fhirseed.DemoLumbarQuestionnaire(), shnsdk.DemoLumbarContext(), shnsdk.QRContext{
 		PatientRef:  ref,
 		CoverageRef: "Coverage/convergence-coverage",
 		OrderRef:    "ServiceRequest/convergence-sr",
@@ -174,7 +174,7 @@ func TestParseConformantPASSubjects_AbsoluteRefs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildServiceRequest: %v", err)
 	}
-	qrJSON, err := shnsdk.FillQuestionnaire(shnsdk.SandboxLumbarQuestionnaire(), shnsdk.SandboxUC03Context(), shnsdk.QRContext{
+	qrJSON, err := shnsdk.FillQuestionnaire(fhirseed.DemoLumbarQuestionnaire(), shnsdk.DemoLumbarContext(), shnsdk.QRContext{
 		PatientRef:  ref,
 		CoverageRef: "Coverage/convergence-coverage",
 		OrderRef:    "ServiceRequest/convergence-sr",
@@ -208,7 +208,7 @@ func TestParseConformantPASSubjects_AbsoluteRefs(t *testing.T) {
 // LEAN conformant $submit bundle the Originator builds (shnsdk.BuildConformantClaimBundle)
 // — it three-way subject-binds to the member, exactly like the golden. This is the
 // builder↔parser contract: if the Originator-built bytes don't bind here, nothing
-// downstream (the sandbox / a real br-payer) sees them.
+// downstream (an in-process responder / a real br-payer) sees them.
 func TestParseConformantPASSubjects_AcceptsOriginatorBuilt(t *testing.T) {
 	got := originatorBuiltConformantBundle(t, "MBR-COVERED")
 	s, status, msg := parseConformantPASSubjects(got)
@@ -217,110 +217,6 @@ func TestParseConformantPASSubjects_AcceptsOriginatorBuilt(t *testing.T) {
 	}
 	if s.qrJSON == nil {
 		t.Fatal("Originator-built conformant bundle should carry an answered QuestionnaireResponse")
-	}
-}
-
-// TestSandbox_PASClaimNative_ApprovesOriginatorBuilt: the LEAN Originator-built bundle
-// also ADJUDICATES through the sandbox pas-claim responder (the QR drives an
-// approval), proving the lean shape is end-to-end usable, not just bind-acceptable.
-func TestSandbox_PASClaimNative_ApprovesOriginatorBuilt(t *testing.T) {
-	s := newSandboxResponderForTest(t)
-	res, err := s.Handle(context.Background(), "pas-claim", "corr-orig", "pci-covered",
-		originatorBuiltConformantBundle(t, "MBR-COVERED"))
-	if err != nil {
-		t.Fatalf("sandbox pas-claim: %v", err)
-	}
-	if res.Status != 0 {
-		t.Fatalf("status=%d msg=%s", res.Status, res.Message)
-	}
-	parsed, err := shnsdk.ParseClaimResponse(res.ResponseFHIR)
-	if err != nil || parsed.Outcome != "approved" || parsed.PreAuthRef == "" {
-		t.Fatalf("want approved + ref, got %+v err=%v", parsed, err)
-	}
-}
-
-// nonLumbarConformantBundle builds a LEAN conformant $submit bundle IDENTICAL to
-// originatorBuiltConformantBundle EXCEPT the ServiceRequest carries a NON-lumbar
-// procedure (CPT 29881, knee arthroscopy). The QR is still the lumbar approval QR,
-// so the sandbox (which adjudicates on the QR, never the SR's CPT) still APPROVES —
-// which is the whole point: the resulting EOB's productOrService display MUST flow
-// from THIS ServiceRequest, not the hardcoded lumbar persona (DEF-14, FR-28).
-func nonLumbarConformantBundle(t *testing.T, member string) []byte {
-	t.Helper()
-	ref := "Patient/" + member
-	created := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	srJSON, err := shnsdk.BuildServiceRequest("29881", "Arthroscopy, knee, surgical, with meniscectomy", "M23.2", ref)
-	if err != nil {
-		t.Fatalf("BuildServiceRequest: %v", err)
-	}
-	qrJSON, err := shnsdk.FillQuestionnaire(shnsdk.SandboxLumbarQuestionnaire(), shnsdk.SandboxUC03Context(), shnsdk.QRContext{
-		PatientRef:  ref,
-		CoverageRef: "Coverage/convergence-coverage",
-		OrderRef:    "ServiceRequest/convergence-sr",
-		Authored:    created,
-	})
-	if err != nil {
-		t.Fatalf("FillQuestionnaire: %v", err)
-	}
-	got, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
-		QR:          qrJSON,
-		SR:          srJSON,
-		PatientRef:  ref,
-		CoverageRef: "Coverage/convergence-coverage",
-		MemberID:    member,
-		Corr:        "followups-knee-0001",
-		Created:     created,
-		Payer:       shnsdk.CMSPayerIdentity,
-	})
-	if err != nil {
-		t.Fatalf("BuildConformantClaimBundle: %v", err)
-	}
-	return got
-}
-
-// TestSandbox_PASClaim_EOBDisplayFromServiceRequest (DEF-14, FR-28): the approved-path
-// EOB's item[0].productOrService.coding[0].display must be SOURCED from the request's
-// ServiceRequest, not the hardcoded "MRI lumbar spine w/o contrast" persona string.
-// The sandbox adjudicates on the QR (lumbar approval), so a knee SR (29881) + the
-// lumbar QR still APPROVES — the EOB then carries the knee CPT AND the knee display.
-// This is the load-bearing proof of the de-personalization: all live personas are 72148
-// lumbar, so only a non-lumbar SR can distinguish "display flows from the SR" from
-// "display is the hardcoded lumbar literal".
-func TestSandbox_PASClaim_EOBDisplayFromServiceRequest(t *testing.T) {
-	s := newSandboxResponderForTest(t)
-	res, err := s.Handle(context.Background(), "pas-claim", "corr-knee", "pci-covered",
-		nonLumbarConformantBundle(t, "MBR-COVERED"))
-	if err != nil {
-		t.Fatalf("sandbox pas-claim: %v", err)
-	}
-	if res.Status != 0 {
-		t.Fatalf("status=%d msg=%s", res.Status, res.Message)
-	}
-	if len(res.SideEffectFHIR) == 0 {
-		t.Fatal("approved pas-claim must emit the EOB side-effect")
-	}
-	var eob struct {
-		Item []struct {
-			ProductOrService struct {
-				Coding []struct {
-					Code    string `json:"code"`
-					Display string `json:"display"`
-				} `json:"coding"`
-			} `json:"productOrService"`
-		} `json:"item"`
-	}
-	if err := json.Unmarshal(res.SideEffectFHIR[0], &eob); err != nil {
-		t.Fatalf("parse EOB: %v", err)
-	}
-	got := eob.Item[0].ProductOrService.Coding[0]
-	if got.Code != "29881" {
-		t.Fatalf("EOB CPT = %q, want 29881", got.Code)
-	}
-	if got.Display == "MRI lumbar spine w/o contrast" {
-		t.Fatal("DEF-14 regression: EOB display is the hardcoded lumbar persona, not the actual service")
-	}
-	if got.Display != "Arthroscopy, knee, surgical, with meniscectomy" {
-		t.Fatalf("EOB display = %q, want the knee service display", got.Display)
 	}
 }
 
@@ -391,10 +287,10 @@ func TestTask0B_ConformantUpdateGoldenBinds(t *testing.T) {
 // personas), enough to drive conformantPASUpdateBind's subject-bind + FR-32 arms.
 func updateGatewayForTest(t *testing.T) (*Gateway, string) {
 	t.Helper()
-	g := &Gateway{cfg: Config{SoR: NewStubHolderData()}}
+	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
 	pci, _, found := g.cfg.SoR.ResolvePatient("MBR-COVERED")
 	if !found {
-		t.Fatal("MBR-COVERED not resolvable in StubHolderData")
+		t.Fatal("MBR-COVERED not resolvable in censusSoR")
 	}
 	return g, pci
 }
@@ -564,7 +460,7 @@ func TestParseConformantPASSubjects_CoverageDivergence(t *testing.T) {
 }
 
 // conformantPASBundleWithQR builds a minimal CONFORMANT PAS bundle (Claim + SR + Coverage + Patient
-// + a real answered QR) for the given member — the hermetic-test shape (the sandbox needs the QR).
+// + a real answered QR) for the given member — the hermetic-test shape (the responder needs the QR).
 func conformantPASBundleWithQR(t *testing.T, member string) []byte {
 	t.Helper()
 	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
@@ -573,8 +469,8 @@ func conformantPASBundleWithQR(t *testing.T, member string) []byte {
 	if err != nil {
 		t.Fatalf("BuildServiceRequest: %v", err)
 	}
-	q := shnsdk.SandboxLumbarQuestionnaire()
-	qrJSON, err := shnsdk.FillQuestionnaire(q, shnsdk.SandboxUC03Context(), shnsdk.QRContext{
+	q := fhirseed.DemoLumbarQuestionnaire()
+	qrJSON, err := shnsdk.FillQuestionnaire(q, shnsdk.DemoLumbarContext(), shnsdk.QRContext{
 		PatientRef: ref, CoverageRef: "Coverage/" + member, OrderRef: "ServiceRequest/sr1", Authored: now,
 	})
 	if err != nil {
@@ -591,149 +487,8 @@ func conformantPASBundleWithQR(t *testing.T, member string) []byte {
 	return b
 }
 
-func TestSandbox_PASClaimNative_Approves(t *testing.T) {
-	s := newSandboxResponderForTest(t) // reuse the existing test helper
-	res, err := s.Handle(context.Background(), "pas-claim", "corr1", "pci-covered",
-		conformantPASBundleWithQR(t, "MBR-COVERED"))
-	if err != nil {
-		t.Fatalf("sandbox pas-claim: %v", err)
-	}
-	if res.Status != 0 {
-		t.Fatalf("status=%d msg=%s", res.Status, res.Message)
-	}
-	parsed, err := shnsdk.ParseClaimResponse(res.ResponseFHIR)
-	if err != nil || parsed.Outcome != "approved" || parsed.PreAuthRef == "" {
-		t.Fatalf("want approved + ref, got %+v err=%v", parsed, err)
-	}
-	// Submit cell: the SANDBOX conformant case now records the FR-34
-	// Patient-Access EOB side-effect on approve (NO LONGER pure relay — the native
-	// FORWARD path stays pure-relay). The minimized pas-claim case keeps
-	// its own EOB until it is removed; both coexist (rekey-is-net).
-	if len(res.SideEffectFHIR) != 1 {
-		t.Fatalf("approved sandbox pas-claim must emit 1 EOB side-effect; got side-effects=%d", len(res.SideEffectFHIR))
-	}
-	if res.Commit == nil {
-		t.Fatal("approved sandbox pas-claim must arm a RecordEOB Commit")
-	}
-}
-
-// conformantPASBundleWithDeviceRequestOrder builds a minimal CONFORMANT PAS bundle whose order
-// entry is a DeviceRequest (DME home-oxygen persona shape — E1390, MBR-PD-UC03's
-// HomeOxygenDispatch code, same fixture shape as crd_dispatch_responder_test.go's
-// dispatchReqE1390) rather than a ServiceRequest. This is the genuine-verdict fixture:
-// structurally mirrors conformantPASBundleWithQR (the sandbox needs the QR to adjudicate).
-func conformantPASBundleWithDeviceRequestOrder(t *testing.T, member string) []byte {
-	t.Helper()
-	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	ref := "Patient/" + member
-	drJSON := []byte(`{"resourceType":"DeviceRequest","id":"convergence-dr","status":"active","intent":"order","subject":{"reference":"` + ref + `"},"codeCodeableConcept":{"coding":[{"system":"http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets","code":"E1390","display":"Stationary Oxygen Concentrator"}]}}`)
-	q := shnsdk.SandboxLumbarQuestionnaire()
-	qrJSON, err := shnsdk.FillQuestionnaire(q, shnsdk.SandboxUC03Context(), shnsdk.QRContext{
-		PatientRef: ref, CoverageRef: "Coverage/" + member, OrderRef: "DeviceRequest/convergence-dr", Authored: now,
-	})
-	if err != nil {
-		t.Fatalf("FillQuestionnaire: %v", err)
-	}
-	entries := []map[string]any{
-		{"resource": map[string]any{"resourceType": "Patient", "id": member}},
-		{"resource": map[string]any{"resourceType": "Coverage", "id": "cov1", "beneficiary": map[string]any{"reference": ref}}},
-		{"resource": json.RawMessage(drJSON)},
-		{"resource": map[string]any{"resourceType": "Claim", "patient": map[string]any{"reference": ref}}},
-		{"resource": json.RawMessage(qrJSON)},
-	}
-	b, _ := json.Marshal(map[string]any{"resourceType": "Bundle", "type": "collection", "entry": entries})
-	return b
-}
-
-// TestSandbox_PASClaimNative_DeviceRequestOrder_GenuineVerdict is the RED->GREEN pin:
-// before the fix, the sandbox "pas-claim" case parsed the claim's order via the STRICT
-// shnsdk.ParseServiceRequestProductCoding (ServiceRequest-only), so a DeviceRequest-backed
-// conformant claim (the HomeOxygen/UC-03 dispatch personas' own PAS submission) 400'd with
-// "claim service request missing CPT/HCPCS coding" — even though the order genuinely carries a
-// {HCPCS} product coding, just on codeCodeableConcept rather than code. After the fix (swapping
-// to the order-type-agnostic shnsdk.ParseOrderProductCoding, the same function the native-forward
-// PAS path (nativepas.go:139) and the crd-order-dispatch sandbox case already use), this bundle
-// must resolve to a GENUINE verdict via the SAME QR-driven adjudication + EOB-build tail every
-// other pas-claim row exercises — not a parse-shape 400.
-func TestSandbox_PASClaimNative_DeviceRequestOrder_GenuineVerdict(t *testing.T) {
-	s := newSandboxResponderForTest(t)
-	res, err := s.Handle(context.Background(), "pas-claim", "corr-dr", "pci-dr",
-		conformantPASBundleWithDeviceRequestOrder(t, "MBR-PD-UC03"))
-	if err != nil {
-		t.Fatalf("sandbox pas-claim (DeviceRequest order): unexpected error (want Status, not err): %v", err)
-	}
-	if res.Status != 0 {
-		t.Fatalf("status=%d msg=%s — want a genuine verdict for a DeviceRequest-backed claim, not a parse-shape rejection", res.Status, res.Message)
-	}
-	parsed, err := shnsdk.ParseClaimResponse(res.ResponseFHIR)
-	if err != nil || parsed.Outcome != "approved" || parsed.PreAuthRef == "" {
-		t.Fatalf("want approved + ref, got %+v err=%v", parsed, err)
-	}
-	// Submit cell: same FR-34 EOB side-effect every other approved pas-claim row records —
-	// sourced from the DeviceRequest's HCPCS coding (order-type-agnostic parse), not a ServiceRequest.
-	if len(res.SideEffectFHIR) != 1 {
-		t.Fatalf("approved DeviceRequest-backed pas-claim must emit 1 EOB side-effect; got side-effects=%d", len(res.SideEffectFHIR))
-	}
-	if !bytes.Contains(res.SideEffectFHIR[0], []byte("E1390")) {
-		t.Fatalf("EOB not sourced from the DeviceRequest's HCPCS code E1390:\n%s", res.SideEffectFHIR[0])
-	}
-	if !bytes.Contains(res.SideEffectFHIR[0], []byte("http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets")) {
-		t.Fatalf("EOB procedure system must be HCPCS (order-type-agnostic parse), got:\n%s", res.SideEffectFHIR[0])
-	}
-	if res.Commit == nil {
-		t.Fatal("approved DeviceRequest-backed pas-claim must arm a RecordEOB Commit")
-	}
-}
-
-// TestSandbox_PASClaimNative_RecordsEOB (approved path): the sandbox conformant
-// pas-claim case records the FR-34 Patient-Access EOB as a Store side-effect
-// + Commit (the submit cell). Running the Commit makes the EOB readable via the
-// Patient Access surface (EOBsForPatient). The CPT is sourced from the bundle's
-// ServiceRequest (CPT 72148), mirroring the minimized pas-claim case.
-func TestSandbox_PASClaimNative_RecordsEOB(t *testing.T) {
-	const subjectPCI = "pci-covered"
-	data := NewStubHolderData()
-	clock := func() time.Time { return adjTestClock }
-	adj := NewSandboxAdjudicator(data, clock)
-	s := NewSandboxResponder(adj, data, data, clock)
-
-	res, err := s.Handle(context.Background(), "pas-claim", "corr-eob", subjectPCI,
-		originatorBuiltConformantBundle(t, "MBR-COVERED"))
-	if err != nil {
-		t.Fatalf("sandbox pas-claim: %v", err)
-	}
-	if res.Status != 0 {
-		t.Fatalf("status=%d msg=%s", res.Status, res.Message)
-	}
-	parsed, err := shnsdk.ParseClaimResponse(res.ResponseFHIR)
-	if err != nil || parsed.Outcome != "approved" {
-		t.Fatalf("want approved, got %+v err=%v", parsed, err)
-	}
-	if len(res.SideEffectFHIR) != 1 {
-		t.Fatalf("want 1 EOB side-effect, got %d", len(res.SideEffectFHIR))
-	}
-	// The EOB carries the Claim's ServiceRequest CPT (72148), not a hardcoded constant.
-	if !bytes.Contains(res.SideEffectFHIR[0], []byte(adjTestCPT)) {
-		t.Fatalf("EOB did not carry the SR CPT %s:\n%s", adjTestCPT, res.SideEffectFHIR[0])
-	}
-	if res.Commit == nil {
-		t.Fatal("approved path must arm a RecordEOB Commit")
-	}
-	// Before Commit: no EOB readable. After Commit: exactly one.
-	if eobs, ok := data.EOBsForPatient(subjectPCI); ok && len(eobs) != 0 {
-		t.Fatalf("EOB recorded before Commit ran: got %d", len(eobs))
-	}
-	if err := res.Commit(); err != nil {
-		t.Fatalf("Commit: %v", err)
-	}
-	eobs, ok := data.EOBsForPatient(subjectPCI)
-	if !ok || len(eobs) != 1 {
-		t.Fatalf("after Commit want 1 EOB for %s, ok=%v got %d", subjectPCI, ok, len(eobs))
-	}
-}
-
 // conformantPASBundlePended builds a CONFORMANT $submit bundle that PENDS: a UC-04
-// context QR (prior-surgery=true) with NO DiagnosticReport in the bundle → the sandbox
+// context QR (prior-surgery=true) with NO DiagnosticReport in the bundle → the responder
 // adjudicator returns PASPended (priorSurgery && !hasDR). Built via the same lean
 // Originator builder the approve test uses (BuildConformantClaimBundle emits no DR).
 func conformantPASBundlePended(t *testing.T, member string) []byte {
@@ -745,7 +500,7 @@ func conformantPASBundlePended(t *testing.T, member string) []byte {
 		t.Fatalf("BuildServiceRequest: %v", err)
 	}
 	// UC-04 context: PriorSurgery=true → the payer pends awaiting an operative DiagnosticReport.
-	qrJSON, err := shnsdk.FillQuestionnaire(shnsdk.SandboxLumbarQuestionnaire(), shnsdk.SandboxUC04Context(), shnsdk.QRContext{
+	qrJSON, err := shnsdk.FillQuestionnaire(fhirseed.DemoLumbarQuestionnaire(), shnsdk.DemoLumbarContextPriorSurgery(), shnsdk.QRContext{
 		PatientRef:  ref,
 		CoverageRef: "Coverage/convergence-coverage",
 		OrderRef:    "ServiceRequest/convergence-sr",
@@ -768,74 +523,6 @@ func conformantPASBundlePended(t *testing.T, member string) []byte {
 		t.Fatalf("BuildConformantClaimBundle: %v", err)
 	}
 	return got
-}
-
-// TestSandbox_PASClaimNative_RecordsPendedClaim (pended path — THE PEND→UPDATE PREREQUISITE):
-// the sandbox conformant pas-claim case records the pended claim via Commit
-// (RecordPendedClaim, keyed by subject PCI + corrID). This is the load-bearing handoff:
-// the later (still-minimized) pas-claim-update leg's BeginClaimUpdate(subjectPCI, related)
-// can only claim a pended claim the submit actually recorded. The test PROVES the handoff
-// genuinely: after running the submit's Commit, a BeginClaimUpdate against the SAME
-// (subjectPCI, corrID) succeeds — exactly the bind UC-04/05/07's update leg performs.
-func TestSandbox_PASClaimNative_RecordsPendedClaim(t *testing.T) {
-	const (
-		subjectPCI = "pci-uc04"
-		corrID     = "corr-pend"
-	)
-	data := NewStubHolderData()
-	clock := func() time.Time { return adjTestClock }
-	adj := NewSandboxAdjudicator(data, clock)
-	s := NewSandboxResponder(adj, data, data, clock)
-
-	res, err := s.Handle(context.Background(), "pas-claim", corrID, subjectPCI,
-		conformantPASBundlePended(t, "MBR-UC04"))
-	if err != nil {
-		t.Fatalf("sandbox pas-claim: %v", err)
-	}
-	if res.Status != 0 {
-		t.Fatalf("status=%d msg=%s", res.Status, res.Message)
-	}
-	// The response is a pended Bundle (ClaimResponse outcome "queued" + Task).
-	pended, _, err := shnsdk.ParsePendedResponse(res.ResponseFHIR)
-	if err != nil {
-		t.Fatalf("parse pended response: %v", err)
-	}
-	if !pended {
-		t.Fatal("want a pended response from the UC-04 (prior-surgery, no DR) bundle")
-	}
-	if res.Commit == nil {
-		t.Fatal("pended path must arm a RecordPendedClaim Commit (the pend→update handoff)")
-	}
-	// Before Commit: no pended claim recorded → BeginClaimUpdate finds nothing.
-	if claimed, _ := data.BeginClaimUpdate(subjectPCI, corrID); claimed {
-		t.Fatal("BeginClaimUpdate succeeded before the submit Commit ran — handoff broken")
-	}
-	if err := res.Commit(); err != nil {
-		t.Fatalf("Commit: %v", err)
-	}
-	// After Commit: the EXACT bind the pas-claim-update leg performs
-	// (BeginClaimUpdate(subjectPCI, related)) finds and claims the recorded pend.
-	claimed, err := data.BeginClaimUpdate(subjectPCI, corrID)
-	if err != nil {
-		t.Fatalf("BeginClaimUpdate after Commit: %v", err)
-	}
-	if !claimed {
-		t.Fatal("BeginClaimUpdate did not find the pended claim the submit recorded — pend→update handoff would 409")
-	}
-}
-
-func TestSandbox_PASClaimNative_NoQR_400(t *testing.T) {
-	s := newSandboxResponderForTest(t)
-	// A conformant bundle the BIND accepts (no QR) but the SANDBOX can't adjudicate → 400.
-	bundle := []byte(`{"resourceType":"Bundle","entry":[
-		{"resource":{"resourceType":"Claim","patient":{"reference":"Patient/MBR-COVERED"}}},
-		{"resource":{"resourceType":"ServiceRequest","subject":{"reference":"Patient/MBR-COVERED"}}},
-		{"resource":{"resourceType":"Coverage","beneficiary":{"reference":"Patient/MBR-COVERED"}}}
-	]}`)
-	res, _ := s.Handle(context.Background(), "pas-claim", "corr2", "pci-covered", bundle)
-	if res.Status != 400 {
-		t.Fatalf("no-QR sandbox status=%d, want 400", res.Status)
-	}
 }
 
 // originatorBuiltConformantUpdateBundle builds a LEAN conformant amended re-POST bundle via
@@ -941,7 +628,7 @@ func TestConformantPASUpdateBind_AcceptsAbsolutizedBrPayer(t *testing.T) {
 // TestParseConformantPASUpdate_AcceptsOriginatorBuilt: the payer-side conformant parser accepts the
 // Originator-built amended re-POST bundle (shnsdk.BuildConformantClaimUpdateBundle). This is the
 // builder↔parser contract for the update leg: if the Originator-built bytes don't bind here,
-// nothing downstream (the sandbox / a real br-payer) sees them. Mirrors
+// nothing downstream (an in-process responder / a real br-payer) sees them. Mirrors
 // TestParseConformantPASSubjects_AcceptsOriginatorBuilt for the submit leg.
 func TestParseConformantPASUpdate_AcceptsOriginatorBuilt(t *testing.T) {
 	got := originatorBuiltConformantUpdateBundle(t)
@@ -954,64 +641,10 @@ func TestParseConformantPASUpdate_AcceptsOriginatorBuilt(t *testing.T) {
 	}
 }
 
-// TestSandbox_PASClaimNative_CPTlessServiceRequestIs400 is the rejection test for the conformant
-// submit cell's CPT guard (adjudicator.go ~:202): a bundle the bind accepts AND that carries a QR
-// (so it passes the QR check) but whose ServiceRequest has NO CPT code → the EOB's CPT source
-// (ParseOrderProductCoding) errors → 400 via Status (NOT a 500 via the error return). Mirrors the
-// minimized TestSandboxPAS_CPTlessServiceRequestIs400 (every guard ships its rejection test).
-// The guard's message text and behavior stay intact for a ServiceRequest with no
-// product coding even after the call site widened to the order-type-agnostic parser (a
-// ServiceRequest still routes through ParseServiceRequestProductCoding underneath).
-func TestSandbox_PASClaimNative_CPTlessServiceRequestIs400(t *testing.T) {
-	s := newSandboxResponderForTest(t)
-	bundle := []byte(`{"resourceType":"Bundle","entry":[
-		{"resource":{"resourceType":"Claim","patient":{"reference":"Patient/MBR-COVERED"}}},
-		{"resource":{"resourceType":"ServiceRequest","subject":{"reference":"Patient/MBR-COVERED"}}},
-		{"resource":{"resourceType":"Coverage","beneficiary":{"reference":"Patient/MBR-COVERED"}}},
-		{"resource":{"resourceType":"QuestionnaireResponse","subject":{"reference":"Patient/MBR-COVERED"}}}
-	]}`)
-	res, err := s.Handle(context.Background(), "pas-claim", "corr-cptless", "pci-covered", bundle)
-	if err != nil {
-		t.Fatalf("unexpected error return (must be Status 400, not 500): %v", err)
-	}
-	if res.Status != 400 {
-		t.Fatalf("want 400 (CPT-less ServiceRequest), got %d (%s)", res.Status, res.Message)
-	}
-	const wantMsg = "claim order missing CPT/HCPCS coding"
-	if res.Message != wantMsg {
-		t.Fatalf("message = %q, want %q (order-type-agnostic wording)", res.Message, wantMsg)
-	}
-}
-
-// TestSandbox_PASClaimNative_DeviceRequestNoCodingIs400 is the companion rejection row:
-// the SAME guard, exercised on the OTHER order type the widened parser now accepts. A
-// DeviceRequest with no codeCodeableConcept.coding must still 400 with the identical message —
-// the fix widens WHICH order types are accepted, never HOW STRICTLY a coding-less order is judged.
-func TestSandbox_PASClaimNative_DeviceRequestNoCodingIs400(t *testing.T) {
-	s := newSandboxResponderForTest(t)
-	bundle := []byte(`{"resourceType":"Bundle","entry":[
-		{"resource":{"resourceType":"Claim","patient":{"reference":"Patient/MBR-COVERED"}}},
-		{"resource":{"resourceType":"DeviceRequest","subject":{"reference":"Patient/MBR-COVERED"}}},
-		{"resource":{"resourceType":"Coverage","beneficiary":{"reference":"Patient/MBR-COVERED"}}},
-		{"resource":{"resourceType":"QuestionnaireResponse","subject":{"reference":"Patient/MBR-COVERED"}}}
-	]}`)
-	res, err := s.Handle(context.Background(), "pas-claim", "corr-dr-nocoding", "pci-covered", bundle)
-	if err != nil {
-		t.Fatalf("unexpected error return (must be Status 400, not 500): %v", err)
-	}
-	if res.Status != 400 {
-		t.Fatalf("want 400 (coding-less DeviceRequest), got %d (%s)", res.Status, res.Message)
-	}
-	const wantMsg = "claim order missing CPT/HCPCS coding"
-	if res.Message != wantMsg {
-		t.Fatalf("message = %q, want %q (order-type-agnostic wording)", res.Message, wantMsg)
-	}
-}
-
 // --- Finding A corr threading: the amend's OWN correlation must win -------
 
 // TestParseConformantPASUpdateFacts_AmendCorrWinsOverPriorClaimEntry is the rejection test for the
-// ingress amendment 502. On the composite (PayerOrgEntry) lane the sdk appends the original
+// ingress amendment 502. On the reference-payer (PayerOrgEntry) lane the sdk appends the original
 // submit's Claim as a resolvable bundle ENTRY *after* the operative update Claim, and that prior
 // entry's ONLY identifier is urn:shn:correlation|<original submit corr>. While
 // parseConformantPASUpdateFacts took claimCorrelation from every Claim entry it met (last Claim

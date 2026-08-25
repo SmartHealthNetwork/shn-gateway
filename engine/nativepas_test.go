@@ -65,7 +65,7 @@ func TestNativeSubmit_ConformantRecordsEOB(t *testing.T) {
 		const partnerRef = "PARTNER-REF-CONF"
 		body := []byte(`{"resourceType":"ClaimResponse","outcome":"complete","preAuthRef":"` + partnerRef + `","preAuthPeriod":{"end":"2030-01-01"}}`)
 		srv := stubPartnerSrv(t, http.StatusOK, body)
-		store := NewStubHolderData()
+		store := newCensusSoR()
 		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", store, fixedClock)
 		res, err := n.Handle(context.Background(), "pas-claim", "corr-conf", "PCI-1", conformant)
 		if err != nil || res.Status != 0 {
@@ -91,7 +91,7 @@ func TestNativeSubmit_ConformantRecordsEOB(t *testing.T) {
 	t.Run("pended: verbatim Bundle + RecordPendedClaim, no EOB", func(t *testing.T) {
 		body := []byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"ClaimResponse","outcome":"queued"}},{"resource":{"resourceType":"Task","status":"requested"}}]}`)
 		srv := stubPartnerSrv(t, http.StatusOK, body)
-		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", NewStubHolderData(), fixedClock)
+		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", newCensusSoR(), fixedClock)
 		res, err := n.Handle(context.Background(), "pas-claim", "corr-conf", "PCI-1", conformant)
 		if err != nil || res.Status != 0 {
 			t.Fatalf("pended conformant submit: err=%v status=%d", err, res.Status)
@@ -117,7 +117,7 @@ func TestNativeSubmit_ConformantRecordsEOB(t *testing.T) {
 		]}`)
 		body := []byte(`{"resourceType":"ClaimResponse","outcome":"complete","preAuthRef":"P-HCPCS"}`)
 		srv := stubPartnerSrv(t, http.StatusOK, body)
-		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", NewStubHolderData(), fixedClock)
+		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", newCensusSoR(), fixedClock)
 		res, err := n.Handle(context.Background(), "pas-claim", "corr-hcpcs", "PCI-1", hcpcs)
 		if err != nil {
 			t.Fatalf("HCPCS conformant submit: unexpected error: %v", err)
@@ -147,7 +147,7 @@ func TestNativeSubmit_ConformantRecordsEOB(t *testing.T) {
 		]}`)
 		body := []byte(`{"resourceType":"ClaimResponse","outcome":"complete","preAuthRef":"P-OTHER"}`)
 		srv := stubPartnerSrv(t, http.StatusOK, body)
-		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", NewStubHolderData(), fixedClock)
+		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", newCensusSoR(), fixedClock)
 		res, err := n.Handle(context.Background(), "pas-claim", "corr-other", "PCI-1", other)
 		if err != nil {
 			t.Fatalf("unrecognized-system submit: unexpected error: %v", err)
@@ -181,14 +181,14 @@ func serviceRequestSubmitBundle(t *testing.T, infoChanged bool) []byte {
 // TestRequestClaimHasInfoChanged_OnBuiltSubmitBundle is the focused predicate proof: the gateway's
 // requestClaimHasInfoChanged poll discriminator fires true on an SDK-built InfoChanged:true submit
 // bundle and false on a default one. This is what flips the single-shot ServiceRequest into the
-// timer-poll lane while a sandbox UC-04 submit (default, no InfoChanged) stays in the pend lane.
+// timer-poll lane while a default UC-04 submit (no InfoChanged) stays in the pend lane.
 // infoChanged is the poll discriminator, NOT a verdict input.
 func TestRequestClaimHasInfoChanged_OnBuiltSubmitBundle(t *testing.T) {
 	if !requestClaimHasInfoChanged(serviceRequestSubmitBundle(t, true)) {
 		t.Fatalf("requestClaimHasInfoChanged must be TRUE on an InfoChanged:true submit bundle")
 	}
 	if requestClaimHasInfoChanged(serviceRequestSubmitBundle(t, false)) {
-		t.Fatalf("requestClaimHasInfoChanged must be FALSE on a default submit bundle (sandbox UC-04 stays in the pend lane)")
+		t.Fatalf("requestClaimHasInfoChanged must be FALSE on a default submit bundle (UC-04 stays in the pend lane)")
 	}
 }
 
@@ -196,7 +196,7 @@ func TestRequestClaimHasInfoChanged_OnBuiltSubmitBundle(t *testing.T) {
 // (handlePASClaimNative): a SINGLE-SHOT ServiceRequest whose submit bundle carries infoChanged now
 // POLLS the timer-resolved A1 (the SAME GET ClaimResponse/{id} machinery the DeviceRequest single-shot
 // + the ClaimUpdate amendment use) — while a ServiceRequest WITHOUT infoChanged keeps the prior
-// behavior (return the A4 pend so the sandbox amendment leg can run). No regression to the
+// behavior (return the A4 pend so the amendment leg can run). No regression to the
 // amendment lanes.
 func TestNativeSubmit_SingleShotServiceRequestInfoChanged(t *testing.T) {
 	// A4-on-$submit then A1-on-GET partner (the real br-payer timer shape: A4 at submit, the
@@ -227,7 +227,7 @@ func TestNativeSubmit_SingleShotServiceRequestInfoChanged(t *testing.T) {
 	t.Run("infoChanged single-shot SR -> poll resolves to A1 (approved)", func(t *testing.T) {
 		bundle := serviceRequestSubmitBundle(t, true)
 		srv, getCount := a4thenA1(t)
-		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", NewStubHolderData(), fixedClock,
+		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", newCensusSoR(), fixedClock,
 			WithPendReQuery(2*time.Second, 5*time.Millisecond))
 		res, err := n.Handle(context.Background(), "pas-claim", "corr-ss", "PCI-1", bundle)
 		if err != nil || res.Status != 0 {
@@ -242,7 +242,7 @@ func TestNativeSubmit_SingleShotServiceRequestInfoChanged(t *testing.T) {
 		}
 	})
 
-	t.Run("no-infoChanged SR -> keeps the A4 pend (RecordPendedClaim, no poll) — sandbox amendment lane", func(t *testing.T) {
+	t.Run("no-infoChanged SR -> keeps the A4 pend (RecordPendedClaim, no poll) — amendment lane", func(t *testing.T) {
 		bundle := serviceRequestSubmitBundle(t, false)
 		var getCount int
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -254,14 +254,14 @@ func TestNativeSubmit_SingleShotServiceRequestInfoChanged(t *testing.T) {
 			_, _ = w.Write([]byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"ClaimResponse","id":"cr-cf","status":"active","outcome":"queued"}}]}`))
 		}))
 		defer srv.Close()
-		store := NewStubHolderData()
+		store := newCensusSoR()
 		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", store, fixedClock,
 			WithPendReQuery(2*time.Second, 5*time.Millisecond))
 		res, err := n.Handle(context.Background(), "pas-claim", "corr-cf", "PCI-1", bundle)
 		if err != nil || res.Status != 0 {
 			t.Fatalf("no-infoChanged SR: err=%v status=%d msg=%s", err, res.Status, res.Message)
 		}
-		// The pend is surfaced as-is (verbatim Bundle) + RecordPendedClaim, NO EOB — the sandbox
+		// The pend is surfaced as-is (verbatim Bundle) + RecordPendedClaim, NO EOB — the amendment
 		// amendment leg binds to this prior pend.
 		if res.Commit == nil || len(res.SideEffectFHIR) != 0 {
 			t.Fatalf("no-infoChanged SR submit must RecordPendedClaim + emit NO EOB; commit=%v sideeffects=%d", res.Commit != nil, len(res.SideEffectFHIR))
@@ -293,7 +293,7 @@ func TestNativePAS_EOBSystemTracksOrder(t *testing.T) {
 			]}`)
 			body := []byte(`{"resourceType":"ClaimResponse","outcome":"complete","preAuthRef":"P-1"}`)
 			srv := stubPartnerSrv(t, http.StatusOK, body)
-			n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", NewStubHolderData(), fixedClock)
+			n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", newCensusSoR(), fixedClock)
 			res, err := n.Handle(context.Background(), "pas-claim", "corr-"+tc.name, "PCI-1", bundle)
 			if err != nil || res.Status != 0 || len(res.SideEffectFHIR) != 1 {
 				t.Fatalf("%s: want forward + 1 EOB; err=%v status=%d sideeffects=%d", tc.name, err, res.Status, len(res.SideEffectFHIR))
@@ -303,6 +303,41 @@ func TestNativePAS_EOBSystemTracksOrder(t *testing.T) {
 			}
 		})
 	}
+}
+
+// stripInfoChangedExtension removes the Da Vinci PAS infoChanged item extension from every
+// Claim.item[*] of a built update bundle — used to reconstruct a genuinely non-conformant
+// carry-forward amendment now that BuildConformantClaimUpdateBundle emits infoChanged
+// unconditionally and can no longer produce one itself. Reuses
+// mutateBundleEntries (pas_native_test.go) for the JSON surgery.
+func stripInfoChangedExtension(t *testing.T, bundleJSON []byte) []byte {
+	t.Helper()
+	return mutateBundleEntries(t, bundleJSON, func(res map[string]any) {
+		if res["resourceType"] != "Claim" {
+			return
+		}
+		items, _ := res["item"].([]any)
+		for _, it := range items {
+			item, _ := it.(map[string]any)
+			if item == nil {
+				continue
+			}
+			ext, _ := item["extension"].([]any)
+			kept := make([]any, 0, len(ext))
+			for _, e := range ext {
+				em, _ := e.(map[string]any)
+				if em != nil && em["url"] == pasInfoChangedExtURL {
+					continue
+				}
+				kept = append(kept, e)
+			}
+			if len(kept) == 0 {
+				delete(item, "extension")
+			} else {
+				item["extension"] = kept
+			}
+		}
+	})
 }
 
 // loadDeniedClaimResponseBytes builds a bare ClaimResponse with a terminal A3
@@ -331,8 +366,8 @@ func TestNativeUpdate_ApprovedFinalizes(t *testing.T) {
 	const origCorr = "convergence-pas-submit-0001"
 	const pci = "PCI-CONF-UPD"
 
-	seedPended := func() *StubHolderData {
-		s := NewStubHolderData()
+	seedPended := func() *censusSoR {
+		s := newCensusSoR()
 		_ = s.RecordPendedClaim(pci, origCorr)
 		return s
 	}
@@ -393,7 +428,7 @@ func TestNativeUpdate_ApprovedFinalizes(t *testing.T) {
 
 	t.Run("no prior pend -> 409 (derived-ledger fail-safe)", func(t *testing.T) {
 		srv := stubPartnerSrv(t, http.StatusOK, []byte(`{"resourceType":"ClaimResponse","outcome":"complete","preAuthRef":"P-1"}`))
-		s := NewStubHolderData() // NOT seeded
+		s := newCensusSoR() // NOT seeded
 		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", s, fixedClock)
 		res, _ := n.Handle(context.Background(), "pas-claim-update", "corr-1", pci, bundle)
 		if res.Status != http.StatusConflict {
@@ -417,7 +452,7 @@ func TestNativeUpdate_ApprovedFinalizes(t *testing.T) {
 	// until A1 — NOT 422 on the re-pend — then relay the resolved A1 + Finalize. The timer flips
 	// the SAME id (in-place), so the re-query target is parsed from the re-pend response.
 	t.Run("re-pend (A4) -> poll resolves to A1 -> approved + Finalize", func(t *testing.T) {
-		// Composite bundle carries infoChanged → the re-pend POLLS for the timer-resolved A1
+		// A bundle carrying infoChanged → the re-pend POLLS for the timer-resolved A1
 		// (a carry-forward amendment without infoChanged would surface the re-pend as 422).
 		bundle := originatorBuiltConformantUpdateBundleProfile(t, true)
 		var getCount int
@@ -483,7 +518,16 @@ func TestNativeUpdate_ApprovedFinalizes(t *testing.T) {
 	// decision, does NOT re-evaluate) must NOT poll — it surfaces the re-pend as 422 "amendment still
 	// insufficient" (the two-RI carry+adjudicate observation, D-2RI-6). Proves the poll is scoped to
 	// re-evaluation-requesting (infoChanged) amendments, so it cannot silently change that lane.
+	//
+	// Since the demo lane converged onto infoChanged too (sdk/pas.go
+	// buildConformantClaimUpdateBundle), the SDK's own update builder can no longer produce a
+	// no-infoChanged bundle by default (infoChanged is unconditional, every lane) — the shared
+	// `bundle` var above always carries it now. This gate is defense-in-depth for a genuinely
+	// non-conformant wire bundle (a malformed/adversarial partner amendment), so the row is kept
+	// alive by hand-mutating a built bundle to STRIP the marker back out, rather than relying on
+	// the builder to omit it.
 	t.Run("re-pend WITHOUT infoChanged -> 422, never polled (carry-forward)", func(t *testing.T) {
+		noInfoChanged := stripInfoChangedExtension(t, bundle)
 		var getCount int
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
@@ -496,7 +540,7 @@ func TestNativeUpdate_ApprovedFinalizes(t *testing.T) {
 		s := seedPended()
 		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", s, fixedClock,
 			WithPendReQuery(2*time.Second, 5*time.Millisecond))
-		res, _ := n.Handle(context.Background(), "pas-claim-update", "corr-1", pci, bundle) // sandbox bundle = no infoChanged
+		res, _ := n.Handle(context.Background(), "pas-claim-update", "corr-1", pci, noInfoChanged)
 		if res.Status != http.StatusUnprocessableEntity || res.Rollback == nil {
 			t.Fatalf("carry-forward (no infoChanged) re-pend must be 422 + Rollback, got status=%d rollback=%v", res.Status, res.Rollback != nil)
 		}
