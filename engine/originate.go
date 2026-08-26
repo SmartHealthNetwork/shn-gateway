@@ -1071,22 +1071,24 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 		res.dtrLine = shnsdk.LineOf(route.Token)
 
 		// --- DTR round-trip: fetch Questionnaire, validate, auto-fill locally. ---
-		// In the br-payer-targeting lane (provider-data), carry the Coverage so the
-		// native-forward re-emits the payer-required coverage param on
-		// $questionnaire-package — a real Da Vinci payer (br-payer) 400s without it (the
-		// v0.11.0 QuestionnaireFetchRequest.Coverage seam). At 2.0/2.1 an in-process
-		// responder doesn't need it, so gate on the profile to keep that leg
-		// byte-identical (C1 discipline) — but at a line whose DTRDef requires it
-		// (2.2), Coverage is ALWAYS attached, honest (the SAME SoR-derived resource
-		// built above), regardless of profile: a 2.2 QR shell reads it too, so the
-		// DTR-at-2.2 gap closes honestly rather than by fabricating a
-		// subject/coverage reference.
+		// Both lanes that reach the reference payer's own $questionnaire-package
+		// implementation — provider-data over a live HTTP dial to br-payer, and demo
+		// through internal/brpayermirror's in-process relay of br-payer's own bytes —
+		// carry the Coverage: br-payer's DtrPackageService validates `coverage` (min=1)
+		// BEFORE looking at anything else (live 400 "The 'coverage' parameter is
+		// required (min=1)." captured 2026-08-25 driving the demo lane's uc03 scenario
+		// in cloud), and the mirror now fences the same requirement hermetically
+		// (internal/brpayermirror/loopback.go) — there is no in-process responder left
+		// that tolerates its absence, on either lane. At a line whose DTRDef requires
+		// it (2.2), Coverage is ALWAYS attached regardless of profile (the SAME
+		// SoR-derived resource built above), so the DTR-at-2.2 gap closes honestly
+		// rather than by fabricating a subject/coverage reference.
 		fetch := shnsdk.QuestionnaireFetchRequest{Canonical: canonical}
 		coverageRequired := false
 		if def, ok := shnsdk.DTRLineDef(res.dtrLine); ok {
 			coverageRequired = def.QuestionnairePackageCoverageRequired
 		}
-		if targetsBrPayer(g.cfg.OriginationProfile) || coverageRequired {
+		if relaysReferencePayerBytes(g.cfg.OriginationProfile) || coverageRequired {
 			fetch.Coverage = coverageJSON
 		}
 		dtrReq, err := json.Marshal(fetch)
@@ -1690,9 +1692,9 @@ func (g *Gateway) handleUC03BridgeRefuse(w http.ResponseWriter, r *http.Request)
 	bundleJSON, err := shnsdk.BuildConformantClaimBundleAtLine(route.BuildLine, shnsdk.ConformantClaimInputs{
 		QR: res.qrJSON, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef, MemberID: res.member,
 		Corr: pasCorr, Created: g.cfg.Clock(),
-		ContainedInsurer: targetsBrPayer(g.cfg.OriginationProfile),
-		AbsoluteRefs:     targetsBrPayer(g.cfg.OriginationProfile),
-		PayerOrgEntry:    targetsBrPayer(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
+		ContainedInsurer: relaysReferencePayerBytes(g.cfg.OriginationProfile),
+		AbsoluteRefs:     relaysReferencePayerBytes(g.cfg.OriginationProfile),
+		PayerOrgEntry:    relaysReferencePayerBytes(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
 		Payer:            res.payer,
 	})
 	if err != nil {
@@ -1777,9 +1779,9 @@ func (g *Gateway) handleUC07HCPCS(w http.ResponseWriter, r *http.Request) {
 	bundleJSON, err := shnsdk.BuildConformantClaimBundleAtLine(route.BuildLine, shnsdk.ConformantClaimInputs{
 		QR: res.qrJSON, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef, MemberID: res.member,
 		Corr: pasCorr, Created: g.cfg.Clock(),
-		ContainedInsurer: targetsBrPayer(g.cfg.OriginationProfile),
-		AbsoluteRefs:     targetsBrPayer(g.cfg.OriginationProfile),
-		PayerOrgEntry:    targetsBrPayer(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
+		ContainedInsurer: relaysReferencePayerBytes(g.cfg.OriginationProfile),
+		AbsoluteRefs:     relaysReferencePayerBytes(g.cfg.OriginationProfile),
+		PayerOrgEntry:    relaysReferencePayerBytes(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
 		Payer:            res.payer,
 	})
 	if err != nil {
@@ -1935,9 +1937,9 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 	bundleJSON, err := shnsdk.BuildConformantClaimBundleAtLine(route.BuildLine, shnsdk.ConformantClaimInputs{
 		QR: res.qrJSON, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef, MemberID: res.member,
 		Corr: pasCorr, Created: g.cfg.Clock(),
-		ContainedInsurer: targetsBrPayer(g.cfg.OriginationProfile),
-		AbsoluteRefs:     targetsBrPayer(g.cfg.OriginationProfile),
-		PayerOrgEntry:    targetsBrPayer(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
+		ContainedInsurer: relaysReferencePayerBytes(g.cfg.OriginationProfile),
+		AbsoluteRefs:     relaysReferencePayerBytes(g.cfg.OriginationProfile),
+		PayerOrgEntry:    relaysReferencePayerBytes(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
 		Payer:            res.payer,
 	})
 	if err != nil {
@@ -2011,9 +2013,9 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 	updateBundle, err := shnsdk.BuildConformantClaimUpdateBundleAtLine(route.BuildLine, shnsdk.ConformantClaimUpdateInputs{
 		QR: res.qrJSON, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef, MemberID: res.member,
 		Provenance: provJSON, DiagnosticReport: drJSON, Corr: updateCorr, OriginalCorr: pasCorr, Created: g.cfg.Clock(),
-		ContainedInsurer: targetsBrPayer(g.cfg.OriginationProfile),
-		AbsoluteRefs:     targetsBrPayer(g.cfg.OriginationProfile),
-		PayerOrgEntry:    targetsBrPayer(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
+		ContainedInsurer: relaysReferencePayerBytes(g.cfg.OriginationProfile),
+		AbsoluteRefs:     relaysReferencePayerBytes(g.cfg.OriginationProfile),
+		PayerOrgEntry:    relaysReferencePayerBytes(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
 		Payer:            res.payer,
 	})
 	if err != nil {
@@ -2185,9 +2187,9 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 	bundleJSON, err := shnsdk.BuildConformantClaimBundleAtLine(route.BuildLine, shnsdk.ConformantClaimInputs{
 		QR: res.qrJSON, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef, MemberID: res.member,
 		Corr: pasCorr, Created: g.cfg.Clock(),
-		ContainedInsurer: targetsBrPayer(g.cfg.OriginationProfile),
-		AbsoluteRefs:     targetsBrPayer(g.cfg.OriginationProfile),
-		PayerOrgEntry:    targetsBrPayer(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
+		ContainedInsurer: relaysReferencePayerBytes(g.cfg.OriginationProfile),
+		AbsoluteRefs:     relaysReferencePayerBytes(g.cfg.OriginationProfile),
+		PayerOrgEntry:    relaysReferencePayerBytes(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
 		Payer:            res.payer,
 	})
 	if err != nil {
@@ -2292,9 +2294,9 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 	updateBundle, err := shnsdk.BuildConformantClaimUpdateBundleAtLine(route.BuildLine, shnsdk.ConformantClaimUpdateInputs{
 		QR: res.qrJSON, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef, MemberID: res.member,
 		Provenance: provJSON, DiagnosticReport: drJSON, Corr: updateCorr, OriginalCorr: pasCorr, Created: g.cfg.Clock(),
-		ContainedInsurer: targetsBrPayer(g.cfg.OriginationProfile),
-		AbsoluteRefs:     targetsBrPayer(g.cfg.OriginationProfile),
-		PayerOrgEntry:    targetsBrPayer(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
+		ContainedInsurer: relaysReferencePayerBytes(g.cfg.OriginationProfile),
+		AbsoluteRefs:     relaysReferencePayerBytes(g.cfg.OriginationProfile),
+		PayerOrgEntry:    relaysReferencePayerBytes(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
 		Payer:            res.payer,
 	})
 	if err != nil {
@@ -2389,9 +2391,9 @@ func (g *Gateway) handleUC08(w http.ResponseWriter, r *http.Request) {
 	bundleJSON, err := shnsdk.BuildConformantClaimBundleAtLine(route.BuildLine, shnsdk.ConformantClaimInputs{
 		QR: res.qrJSON, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef, MemberID: res.member,
 		Corr: pasCorr, Created: g.cfg.Clock(),
-		ContainedInsurer: targetsBrPayer(g.cfg.OriginationProfile),
-		AbsoluteRefs:     targetsBrPayer(g.cfg.OriginationProfile),
-		PayerOrgEntry:    targetsBrPayer(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
+		ContainedInsurer: relaysReferencePayerBytes(g.cfg.OriginationProfile),
+		AbsoluteRefs:     relaysReferencePayerBytes(g.cfg.OriginationProfile),
+		PayerOrgEntry:    relaysReferencePayerBytes(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
 		Payer:            res.payer,
 	})
 	if err != nil {

@@ -207,17 +207,23 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member 
 		return dispatchResult{}, false
 	}
 	dtrLine := shnsdk.LineOf(route.Token)
-	// Carry the Coverage when targeting br-payer (a real Da Vinci payer 400s
-	// $questionnaire-package without it) AND whenever the SELECTED line requires
-	// it (DTRDef.QuestionnairePackageCoverageRequired — 2.2's 1..1), regardless
-	// of profile: same gate as the sibling site, pinned by
-	// TestDispatch_DTRFetchCoverageGateFollowsSelectedLine.
+	// Carry the Coverage on both lanes that reach the reference payer's own
+	// $questionnaire-package implementation (provider-data over a live HTTP dial to
+	// br-payer, demo through internal/brpayermirror's in-process relay of br-payer's
+	// own bytes — br-payer's DtrPackageService validates `coverage` min=1 before
+	// looking at anything else, live capture 2026-08-25) AND whenever the SELECTED
+	// line requires it (DTRDef.QuestionnairePackageCoverageRequired — 2.2's 1..1),
+	// regardless of profile: same gate as the sibling site, pinned by
+	// TestDispatch_DTRFetchCoverageGateFollowsSelectedLine. This is the ACTUAL
+	// runtime path UC-03 (the family-keyed oxygen dispatch) takes in the demo lane —
+	// runCRDDispatch, not runCRDThenDTROrder's fetch build — so it needs the identical
+	// fix, not just its sibling.
 	fetch := shnsdk.QuestionnaireFetchRequest{Canonical: canonical}
 	coverageRequired := false
 	if def, ok := shnsdk.DTRLineDef(dtrLine); ok {
 		coverageRequired = def.QuestionnairePackageCoverageRequired
 	}
-	if targetsBrPayer(g.cfg.OriginationProfile) || coverageRequired {
+	if relaysReferencePayerBytes(g.cfg.OriginationProfile) || coverageRequired {
 		fetch.Coverage = coverageJSON
 	}
 	dtrReq, err := json.Marshal(fetch)

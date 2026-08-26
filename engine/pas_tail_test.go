@@ -46,7 +46,7 @@ func TestBuildPASSubmitBundle_ByteParity(t *testing.T) {
 		if err != nil {
 			t.Fatalf("buildPASSubmitBundle: %v", err)
 		}
-		// The existing HomeOxygen path builds this EXACT call (targetsBrPayer(provider-data)=true,
+		// The existing HomeOxygen path builds this EXACT call (relaysReferencePayerBytes(provider-data)=true,
 		// no InfoChanged set → default false).
 		want, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
 			QR: qr, SR: order, PatientRef: patientRef, CoverageRef: coverageRef, MemberID: member,
@@ -89,7 +89,12 @@ func TestBuildPASSubmitBundle_ByteParity(t *testing.T) {
 	})
 
 	t.Run("non-br-payer profile -> never sets InfoChanged (byte-identical)", func(t *testing.T) {
-		// The managed lane (targetsBrPayer=false) keeps the byte-identical pre-existing path AND
+		// This row exercises buildPASSubmitBundle's brPayer=false ARM directly with a literal
+		// (no real caller passes false any more: relaysReferencePayerBytes(g.cfg.OriginationProfile)
+		// is unconditionally true for any real role=provider deployment, since gateway/app.go's
+		// loadConfig normalizes an unset ORIGINATION_PROFILE to "demo"). The arm itself stays —
+		// it is what keeps a lane that does NOT relay reference-payer bytes byte-identical — this
+		// row pins that the SHN-native shape it would produce keeps its pre-existing bytes AND
 		// never sets the poll discriminator regardless of order type.
 		order := pasTailServiceRequest()
 		got, err := buildPASSubmitBundle("2.0", false, order, qr, patientRef, coverageRef, member, corr, pasTailClock(), shnsdk.CMSPayerIdentity)

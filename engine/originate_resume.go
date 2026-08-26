@@ -96,9 +96,9 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 	bundleJSON, err := shnsdk.BuildConformantClaimBundleAtLine(route.BuildLine, shnsdk.ConformantClaimInputs{
 		QR: qrForSubmit, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef, MemberID: res.member,
 		Corr: pasCorr, Created: g.cfg.Clock(),
-		ContainedInsurer: targetsBrPayer(g.cfg.OriginationProfile),
-		AbsoluteRefs:     targetsBrPayer(g.cfg.OriginationProfile),
-		PayerOrgEntry:    targetsBrPayer(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
+		ContainedInsurer: relaysReferencePayerBytes(g.cfg.OriginationProfile),
+		AbsoluteRefs:     relaysReferencePayerBytes(g.cfg.OriginationProfile),
+		PayerOrgEntry:    relaysReferencePayerBytes(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
 		Payer:            res.payer,
 	})
 	if err != nil {
@@ -330,9 +330,9 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 	updateBundle, err := shnsdk.BuildConformantClaimUpdateBundleAtLine(route.BuildLine, shnsdk.ConformantClaimUpdateInputs{
 		QR: amendedQR, SR: st.srJSON, PatientRef: st.patientRef, CoverageRef: st.coverageRef, MemberID: st.member,
 		Provenance: provJSON, DiagnosticReport: nil, Corr: updateCorr, OriginalCorr: st.pasCorr, Created: g.cfg.Clock(),
-		ContainedInsurer: targetsBrPayer(g.cfg.OriginationProfile),
-		AbsoluteRefs:     targetsBrPayer(g.cfg.OriginationProfile),
-		PayerOrgEntry:    targetsBrPayer(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
+		ContainedInsurer: relaysReferencePayerBytes(g.cfg.OriginationProfile),
+		AbsoluteRefs:     relaysReferencePayerBytes(g.cfg.OriginationProfile),
+		PayerOrgEntry:    relaysReferencePayerBytes(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
 		Payer:            st.payer,
 	})
 	if err != nil {
@@ -533,9 +533,9 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 	updateBundle, err := shnsdk.BuildConformantClaimUpdateBundleAtLine(route.BuildLine, shnsdk.ConformantClaimUpdateInputs{
 		QR: amendedQR, SR: st.srJSON, PatientRef: st.patientRef, CoverageRef: st.coverageRef, MemberID: st.member,
 		Provenance: provJSON, DiagnosticReport: nil, Corr: updateCorr, OriginalCorr: st.pasCorr, Created: g.cfg.Clock(),
-		ContainedInsurer: targetsBrPayer(g.cfg.OriginationProfile),
-		AbsoluteRefs:     targetsBrPayer(g.cfg.OriginationProfile),
-		PayerOrgEntry:    targetsBrPayer(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
+		ContainedInsurer: relaysReferencePayerBytes(g.cfg.OriginationProfile),
+		AbsoluteRefs:     relaysReferencePayerBytes(g.cfg.OriginationProfile),
+		PayerOrgEntry:    relaysReferencePayerBytes(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
 		Payer:            st.payer,
 	})
 	if err != nil {

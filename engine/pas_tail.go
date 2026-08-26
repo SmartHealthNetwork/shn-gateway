@@ -21,18 +21,22 @@ import (
 )
 
 // buildPASSubmitBundle assembles the single-shot conformant $submit Claim Bundle for the lean PAS
-// tail. brPayer mirrors targetsBrPayer(OriginationProfile): when true the bundle carries the
+// tail. brPayer mirrors relaysReferencePayerBytes(OriginationProfile) (NOT the narrower
+// targetsBrPayer — both provider-data over a live HTTP dial to br-payer AND demo through the
+// in-process mirror of the SAME reference-payer bytes need the br-payer-resolvable wire shape;
+// see relaysReferencePayerBytes's doc, gateway/engine/originate.go): when true the bundle carries the
 // br-payer-resolvable forms (ContainedInsurer/AbsoluteRefs/PayerOrgEntry), exactly as the existing
 // HomeOxygen path built them. InfoChanged is set to !orderIsDeviceRequest(order) AND only on a
-// br-payer-targeting lane:
+// reference-payer-relaying lane:
 //   - a DeviceRequest single-shot (HomeOxygen) → InfoChanged stays FALSE → the bundle is
 //     byte-IDENTICAL to HomeOxygen's prior BuildConformantClaimBundle call (the order type alone
 //     routes it to the payer poll); and
 //   - a ServiceRequest single-shot (order-select, D-PD-1) → InfoChanged TRUE → the bundle carries
 //     the infoChanged poll discriminator so the payer gate polls the timer-resolved A1.
 //
-// On the managed lane (brPayer=false) InfoChanged is never set, keeping the byte-identical
-// pre-existing path. Pulled out as a standalone func so the byte-parity guard can unit-test it directly.
+// On a lane that does NOT relay reference-payer bytes (brPayer=false) InfoChanged is never set,
+// keeping the byte-identical pre-existing path. Pulled out as a standalone func so the
+// byte-parity guard can unit-test it directly.
 // line is the routed contract line the bundle is BUILT at (select before build) —
 // resolved by submitClaimAndResolve before this call, so the wire bytes and the
 // routed token cannot disagree.
@@ -46,8 +50,8 @@ func buildPASSubmitBundle(line string, brPayer bool, orderJSON, qrJSON []byte, p
 		// Single-shot resolve discriminator: a ServiceRequest single-shot signals "resolve to
 		// terminal" via the infoChanged item extension so the payer gate polls the timer-resolved A1;
 		// a DeviceRequest (HomeOxygen) stays false (its order type alone routes it to the same poll),
-		// so HomeOxygen's wire bytes are unchanged. Only on a br-payer-targeting lane (the managed
-		// lane keeps the byte-identical no-infoChanged path).
+		// so HomeOxygen's wire bytes are unchanged. Only on a reference-payer-relaying lane (a lane
+		// that does not relay reference-payer bytes keeps the byte-identical no-infoChanged path).
 		InfoChanged: brPayer && !orderIsDeviceRequest(orderJSON),
 		// The payer identity derives from the member's REAL Coverage (threaded in from the fresh
 		// origination site), not a synthetic CMS literal (FR-G40).
@@ -78,7 +82,7 @@ func (g *Gateway) submitClaimAndResolve(ctx context.Context, r *http.Request, pc
 		return shnsdk.PriorAuthResult{}, nil, http.StatusBadGateway, terr.Error(), terr
 	}
 	targetLine := shnsdk.LineOf(route.Token)
-	bundleJSON, err := buildPASSubmitBundle(route.BuildLine, targetsBrPayer(g.cfg.OriginationProfile), orderJSON, qrJSON, patientRef, coverageRef, member, pasCorr, g.cfg.Clock(), payer)
+	bundleJSON, err := buildPASSubmitBundle(route.BuildLine, relaysReferencePayerBytes(g.cfg.OriginationProfile), orderJSON, qrJSON, patientRef, coverageRef, member, pasCorr, g.cfg.Clock(), payer)
 	if err != nil {
 		return shnsdk.PriorAuthResult{}, nil, http.StatusInternalServerError, "build bundle failed", nil
 	}
