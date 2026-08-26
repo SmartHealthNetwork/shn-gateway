@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"testing"
+
+	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
 func TestGoldens_Embedded(t *testing.T) {
@@ -67,6 +69,72 @@ func TestBuildPASBundle_RebindsAndRoutes(t *testing.T) {
 	}
 	if !bytes.Contains(out, []byte(`Organization/InsurerExample`)) {
 		t.Fatalf("original payor reference dropped (must stay additive): %.400s", out)
+	}
+}
+
+// coveragePayorIdentifier extracts the inline Coverage.payor[0].identifier a bundle
+// carries, failing the test if there is no Coverage entry or no identifier.
+func coveragePayorIdentifier(t *testing.T, bundleJSON []byte) shnsdk.PayerIdentifier {
+	t.Helper()
+	var b map[string]any
+	if err := json.Unmarshal(bundleJSON, &b); err != nil {
+		t.Fatalf("unmarshal bundle: %v", err)
+	}
+	entries, _ := b["entry"].([]any)
+	for _, e := range entries {
+		res, _ := e.(map[string]any)["resource"].(map[string]any)
+		if res == nil || res["resourceType"] != "Coverage" {
+			continue
+		}
+		payors, _ := res["payor"].([]any)
+		if len(payors) == 0 {
+			t.Fatal("Coverage has no payor entries")
+		}
+		p0, _ := payors[0].(map[string]any)
+		ident, _ := p0["identifier"].(map[string]any)
+		if ident == nil {
+			t.Fatal("Coverage.payor[0] has no inline identifier")
+		}
+		sys, _ := ident["system"].(string)
+		val, _ := ident["value"].(string)
+		return shnsdk.PayerIdentifier{System: sys, Value: val}
+	}
+	t.Fatal("bundle has no Coverage entry")
+	return shnsdk.PayerIdentifier{}
+}
+
+// TestAddRoutablePayorFor_StampsGivenPayer: a non-CMS payer stamps THAT payer inline on
+// Coverage.payor[0].identifier — the misroute rejection test for AddRoutablePayorFor
+// (the parameterized form the bridging-demo submit row now uses instead of the
+// always-CMS AddRoutablePayor).
+func TestAddRoutablePayorFor_StampsGivenPayer(t *testing.T) {
+	bridgePayor := shnsdk.PayerIdentifier{System: "urn:shn:demo-payer", Value: "SHN-BRIDGE-DEMO"}
+	out, err := AddRoutablePayorFor(PASApproveGolden(), bridgePayor)
+	if err != nil {
+		t.Fatalf("AddRoutablePayorFor: %v", err)
+	}
+	if got := coveragePayorIdentifier(t, out); got != bridgePayor {
+		t.Fatalf("Coverage.payor[0].identifier = %+v, want %+v", got, bridgePayor)
+	}
+}
+
+// TestAddRoutablePayor_StillStampsCMS: AddRoutablePayor keeps its historical
+// always-CMS behavior — it must be byte-identical to AddRoutablePayorFor(b,
+// shnsdk.CMSPayerIdentity), i.e. a pure delegation.
+func TestAddRoutablePayor_StillStampsCMS(t *testing.T) {
+	got, err := AddRoutablePayor(PASApproveGolden())
+	if err != nil {
+		t.Fatalf("AddRoutablePayor: %v", err)
+	}
+	want, err := AddRoutablePayorFor(PASApproveGolden(), shnsdk.CMSPayerIdentity)
+	if err != nil {
+		t.Fatalf("AddRoutablePayorFor: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("AddRoutablePayor must delegate to AddRoutablePayorFor(CMSPayerIdentity):\ngot:  %s\nwant: %s", got, want)
+	}
+	if gotID := coveragePayorIdentifier(t, got); gotID != shnsdk.CMSPayerIdentity {
+		t.Fatalf("AddRoutablePayor stamped %+v, want CMSPayerIdentity %+v", gotID, shnsdk.CMSPayerIdentity)
 	}
 }
 

@@ -39,6 +39,42 @@ var memberConstRe = regexp.MustCompile(`(?m)^\s*(?:const\s+)?([A-Za-z_][A-Za-z0-
 // so a failure says WHICH lane resolves the twin-less member.
 var sceneArms = [3]string{"default", "provider-data", "demo"}
 
+// funcHeaderRe matches a top-level Gateway-method definition line, e.g.
+// `func (g *Gateway) handleUC03Bridge(w http.ResponseWriter, r *http.Request, member string) {`.
+// Used to chunk a source file into per-function bodies (so a scenarioMember call site can be
+// attributed to its enclosing function) and to find CALL SITES of a parameterized scenario
+// handler by name.
+var funcHeaderRe = regexp.MustCompile(`(?m)^func \(g \*Gateway\) (\w+)\(`)
+
+// handlerCallSiteRe(name) matches a call site of a Gateway method shaped
+// `g.NAME(w, r, ARG)` — the shape a parameterized scenario handler's own dispatcher uses
+// (task2 brief's handleUC03Bridge: handleUC03's branch switch calls it once per branch with
+// a literal member id). Built per-name rather than one generic regex so the capture stays
+// anchored to the SPECIFIC function scenarioMemberLiterals is resolving.
+func handlerCallSiteRe(name string) *regexp.Regexp {
+	return regexp.MustCompile(`g\.` + regexp.QuoteMeta(name) + `\(w, r, ([^,)]+)\)`)
+}
+
+// funcChunks splits src into (name, body) pairs at each top-level `func (g *Gateway) NAME(`
+// header — an approximation (no real Go parsing) that is exact for this package's actual
+// style (one such header per line, never nested). Text before the first header (imports,
+// package-level vars/consts) is not attributed to any function; scenarioMember is never
+// called from package scope, so nothing of interest lives there.
+func funcChunks(src string) map[string]string {
+	idx := funcHeaderRe.FindAllStringSubmatchIndex(src, -1)
+	chunks := map[string]string{}
+	for i, m := range idx {
+		start := m[0]
+		end := len(src)
+		if i+1 < len(idx) {
+			end = idx[i+1][0]
+		}
+		name := src[m[2]:m[3]]
+		chunks[name] = src[start:end]
+	}
+	return chunks
+}
+
 // canaryTwinlessMembers are the scenario members that deliberately carry NO canary
 // twin, each with the reason it is exempt. scenarioMember's fail-closed 400 is the
 // correct answer for these — the point of the guard below is that everything NOT
@@ -53,6 +89,11 @@ var canaryTwinlessMembers = map[string]string{
 	"MBR-BRIDGE-REFUSE": "a visualization-only persona whose whole purpose is a refused leg — " +
 		"a canary twin for it would be an abuse of a mechanism that exists to keep " +
 		"continuous checks off the shared scenario personas",
+	"MBR-BRIDGE-DEMO": "the bridging-demo SUCCESS persona (task2 brief A3a) — same exemption " +
+		"as MBR-BRIDGE-REFUSE: a canary twin for a demo-only visualization persona would be " +
+		"an abuse of a mechanism that exists to keep continuous checks off the shared " +
+		"scenario personas; scenariodrive.BridgeChecks() drives it directly with " +
+		"PinnedPersonas instead",
 	"MBR-UNKNOWN-PAYER": "the deliberately unroutable member behind the no-registered-payer " +
 		"fail-closed proof; a canary run of it would assert nothing",
 }
@@ -91,6 +132,21 @@ func scenarioMemberLiterals(t *testing.T) map[string][]string {
 		}
 	}
 
+	// resolveArg resolves one scenarioMember argument to a member literal — a quoted
+	// literal or a named package-level constant. "" (not ok) for anything else, including
+	// a bare handler-parameter identifier (resolved separately, below).
+	resolveArg := func(arg string) (string, bool) {
+		arg = strings.TrimSpace(arg)
+		switch {
+		case strings.HasPrefix(arg, `"`) && strings.HasSuffix(arg, `"`):
+			return strings.Trim(arg, `"`), true
+		case memberConsts[arg] != "":
+			return memberConsts[arg], true
+		default:
+			return "", false
+		}
+	}
+
 	byMember := map[string][]string{}
 	calls, read := 0, 0
 	for _, text := range sources {
@@ -99,26 +155,61 @@ func scenarioMemberLiterals(t *testing.T) map[string][]string {
 		// this guard's input silently, which is the exact failure mode it exists
 		// to prevent.
 		calls += strings.Count(text, "g.scenarioMember(w, r,")
+		chunks := funcChunks(text)
 		for _, m := range scenarioMemberCallRe.FindAllStringSubmatch(text, -1) {
 			args := [3]string{}
 			ok := true
 			for i := range args {
-				arg := strings.TrimSpace(m[i+1])
-				switch {
-				case strings.HasPrefix(arg, `"`) && strings.HasSuffix(arg, `"`):
-					args[i] = strings.Trim(arg, `"`)
-				case memberConsts[arg] != "":
-					args[i] = memberConsts[arg]
-				default:
+				v, resolved := resolveArg(m[i+1])
+				if !resolved {
 					ok = false
+					continue
 				}
+				args[i] = v
 			}
-			if !ok {
+			if ok {
+				read++
+				for i, arm := range sceneArms {
+					byMember[args[i]] = appendUnique(byMember[args[i]], arm)
+				}
 				continue
 			}
+			// Indirect (shared-body) case: task2 brief's handleUC03Bridge pattern — all
+			// three arguments are the SAME bare identifier, a handler parameter rather
+			// than a literal/const. Find the enclosing function (funcChunks) and, from
+			// its OWN name, every call site elsewhere that passes it a literal/const
+			// member id (g.NAME(w, r, ARG)) — each such caller feeds all three arms,
+			// exactly as if it had called scenarioMember directly.
+			raw0 := strings.TrimSpace(m[1])
+			if raw0 == "" || raw0 != strings.TrimSpace(m[2]) || raw0 != strings.TrimSpace(m[3]) {
+				continue // genuinely unresolvable — leaves read < calls, failing loudly below
+			}
+			enclosing := ""
+			for name, body := range chunks {
+				if strings.Contains(body, m[0]) {
+					enclosing = name
+					break
+				}
+			}
+			if enclosing == "" {
+				continue
+			}
+			var callerMembers []string
+			for _, other := range sources {
+				for _, cm := range handlerCallSiteRe(enclosing).FindAllStringSubmatch(other, -1) {
+					if v, resolved := resolveArg(cm[1]); resolved {
+						callerMembers = appendUnique(callerMembers, v)
+					}
+				}
+			}
+			if len(callerMembers) == 0 {
+				continue // no resolvable caller found — leaves read < calls, failing loudly below
+			}
 			read++
-			for i, arm := range sceneArms {
-				byMember[args[i]] = appendUnique(byMember[args[i]], arm)
+			for _, member := range callerMembers {
+				for _, arm := range sceneArms {
+					byMember[member] = appendUnique(byMember[member], arm)
+				}
 			}
 		}
 	}
@@ -297,16 +388,17 @@ func TestScenario_PersonaSetRejections(t *testing.T) {
 	}
 }
 
-// TestScenario_UC03BridgeRefuseBranch pins the sanctioned
-// handleUC03 branch switch: "" (or an absent body) keeps working exactly like
-// before; "bridge-refuse" is a KNOWN branch (never 400 on the branch itself);
-// an unrecognized branch 400s (uc01's idiom); and ?personaSet=canary combined
-// with branch=bridge-refuse fails closed 400 naming MBR-BRIDGE-REFUSE —
-// deliberately NOT via a new CanaryTwins entry (the reviewer's ruling: a
-// canary twin for a demo-only persona would be semantic abuse of the
-// mechanism) but because scenarioMember's existing no-twin guard already
-// fails closed for any member without one, and bridge personas never get one.
-func TestScenario_UC03BridgeRefuseBranch(t *testing.T) {
+// TestScenario_UC03BridgeBranches pins the sanctioned handleUC03 branch switch for BOTH
+// bridge arms (task2 brief A3a added "bridge-demo" alongside the pre-existing
+// "bridge-refuse"): "" (or an absent body) keeps working exactly like before;
+// "bridge-demo"/"bridge-refuse" are each a KNOWN branch (never 400 on the branch
+// itself); an unrecognized branch 400s (uc01's idiom); and ?personaSet=canary combined
+// with either bridge branch fails closed 400 naming the branch's own member —
+// deliberately NOT via a new CanaryTwins entry (the reviewer's ruling: a canary twin for
+// a demo-only persona would be semantic abuse of the mechanism) but because
+// scenarioMember's existing no-twin guard already fails closed for any member without
+// one, and bridge personas never get one.
+func TestScenario_UC03BridgeBranches(t *testing.T) {
 	g := newTestProviderGateway(t)
 	srv := httptest.NewServer(g.Handler())
 	defer srv.Close()
@@ -322,22 +414,28 @@ func TestScenario_UC03BridgeRefuseBranch(t *testing.T) {
 	if resp := post("/scenario/uc03", `{"branch":"bogus"}`); resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("unknown branch: got %d, want 400", resp.StatusCode)
 	}
-	// bridge-refuse is a KNOWN branch: it must not 400 on the branch check
-	// itself (this fixture has no PayerRouter at all, so it 422s downstream
-	// for every member — the point here is ruling OUT a 400 from the switch).
-	if resp := post("/scenario/uc03", `{"branch":"bridge-refuse"}`); resp.StatusCode == http.StatusBadRequest {
+
+	for _, tc := range []struct{ branch, member string }{
+		{"bridge-demo", "MBR-BRIDGE-DEMO"},
+		{"bridge-refuse", "MBR-BRIDGE-REFUSE"},
+	} {
+		// The branch is KNOWN: it must not 400 on the branch check itself (this
+		// fixture has no PayerRouter at all, so it 422s downstream for every member —
+		// the point here is ruling OUT a 400 from the switch).
+		if resp := post("/scenario/uc03", `{"branch":"`+tc.branch+`"}`); resp.StatusCode == http.StatusBadRequest {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("known branch %s unexpectedly 400: %s", tc.branch, body)
+		}
+		// canary + the bridge branch: scenarioMember's existing no-twin guard fires
+		// (CanaryTwins deliberately carries no entry for either bridge persona).
+		resp := post("/scenario/uc03?personaSet=canary", `{"branch":"`+tc.branch+`"}`)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("canary + %s: got %d, want 400 (no twin)", tc.branch, resp.StatusCode)
+		}
 		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("known branch bridge-refuse unexpectedly 400: %s", body)
-	}
-	// canary + bridge-refuse: scenarioMember's existing no-twin guard fires
-	// (CanaryTwins deliberately carries no MBR-BRIDGE-REFUSE entry).
-	resp := post("/scenario/uc03?personaSet=canary", `{"branch":"bridge-refuse"}`)
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("canary + bridge-refuse: got %d, want 400 (no twin)", resp.StatusCode)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(body), "MBR-BRIDGE-REFUSE") {
-		t.Errorf("canary + bridge-refuse body = %s, want it to name MBR-BRIDGE-REFUSE", body)
+		if !strings.Contains(string(body), tc.member) {
+			t.Errorf("canary + %s body = %s, want it to name %s", tc.branch, body, tc.member)
+		}
 	}
 }
 

@@ -140,6 +140,86 @@ func (g *Gateway) selectLegLineOrFail(w http.ResponseWriter, recipient, legType,
 	return route, true
 }
 
+// bridgeRefusalText extracts the reshapable refusal text from err, if err's cause is one
+// of the TWO shapes the kit-bridging-visualization demo's designed refusal can legitimately
+// take (fix-round finding, 2026-08-26 second live run):
+//
+//   - *RouteRefusalError — the SELECTION-time refusal: arm(1)/(2)/(3) all fail closed
+//     before any bundle is ever built (e.g. this build has no $validate lane at all for the
+//     peer's declared line, so neither native reach nor a transform chain can even be
+//     attempted). This was the ONLY shape the refuse row's matcher pinned pre-fix-round —
+//     it was also, unknowingly, the ONLY shape reachable at the time, because provider-gw
+//     had no lane for line 2.2 at all (the FIRST live run: both bridge rows dead at
+//     selection).
+//   - *SemanticChangeError — the APPLY-time refusal: arm(3)'s chain IS selected (a real
+//     bridging chain exists and gets picked), but a gated step inside it refuses to
+//     fabricate a field it has no honest byte-level source for (transform_pas.go — pa.pas's
+//     2.0->2.1 up-step is gated for every Claim payload). This is the shape the SECOND live
+//     run's fix (setting SHN_DEMO_EGRESS_NATIVE_LINES=2.0 on the deployment) produces:
+//     narrowing arm(2)'s native reach is what forces arm(3)'s chain to be the path taken at
+//     all — without the knob, this build's native pa.pas@2.2 reach wins first and the
+//     exchange is silently APPROVED (the run-2 regression this fix closes).
+//
+// Route callers match this with errors.As (transform_pas.go's own doc comment for
+// *SemanticChangeError says exactly this) to distinguish either designed-refusal shape
+// from any other applyChain/selectLegLine failure (a plain I/O/parse error, a
+// chainDisconnectedError, an unknown legType) — those are genuine faults and must NOT be
+// reshaped into "designed" refusal, or a real bug would silently read as the exhibit.
+func bridgeRefusalText(err error) (string, bool) {
+	var rre *RouteRefusalError
+	if errors.As(err, &rre) {
+		return rre.Error(), true
+	}
+	var sce *SemanticChangeError
+	if errors.As(err, &sce) {
+		return sce.Error(), true
+	}
+	return "", false
+}
+
+// writeBridgeRefusal writes the demo lane's structured 200 refusal body (task2 brief A3a):
+// {"refused":true,"refusedAt":legType,"refusal":"<the designed refusal's own error text>"}
+// instead of the ordinary non-2xx relayOriginationError/502 path. This is deliberately NOT
+// how any other surface answers: internal/scenariodrive's Client.Post/RunCheck treats ANY
+// non-2xx status as a transport failure and never hands the response body to a Check's
+// Want matcher, so the only way the canary/cloudsmoke UC03-bridge-refuse row can pin WHERE
+// and WHY the refusal happened is a 200 body carrying the refusal text verbatim. This is
+// the demo lane's own surface, not an external contract — the published Kit pins its own
+// gateway child via kit/runner's independent bridge-demo driver (rows_conformant.go), so
+// nothing outside this lane is affected.
+func writeBridgeRefusal(w http.ResponseWriter, legType, refusal string) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"refused":   true,
+		"refusedAt": legType,
+		"refusal":   refusal,
+	})
+}
+
+// selectLegLineOrBridgeRefuse is selectLegLineOrFail specialized for the
+// kit-bridging-visualization demo's own /scenario/uc03 surface (handleUC03Bridge, task2
+// brief A3a): on the SELECTION-time designed refusal (see bridgeRefusalText) it writes
+// writeBridgeRefusal's 200 body instead of relayOriginationError's ordinary 422. Any error
+// OTHER than a reshapable one (a genuine transport/relay fault) still goes through the
+// ordinary relayOriginationError/502 path unchanged — this function reshapes only the
+// designed outcome, never masks a real fault as "designed". The APPLY-time sibling
+// (a *SemanticChangeError from egressAdapt) is reshaped at handleUC03Bridge's own
+// egressAdapt call site instead — selectLegLine itself never returns that error type.
+func (g *Gateway) selectLegLineOrBridgeRefuse(w http.ResponseWriter, recipient, legType, corrID string) (legRoute, bool) {
+	route, err := g.selectLegLine(recipient, legType, corrID)
+	if err == nil {
+		return route, true
+	}
+	if text, ok := bridgeRefusalText(err); ok {
+		writeBridgeRefusal(w, legType, text)
+		return legRoute{}, false
+	}
+	if g.relayOriginationError(w, err) {
+		return legRoute{}, false
+	}
+	writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+	return legRoute{}, false
+}
+
 // selectLegRoute is the reachability predicate: arm (1) shared declared
 // line (selectContractToken, untouched — intersection-only) -> arm (2)
 // native reach -> arm (3) transform chain -> refusal naming the missing
@@ -1514,10 +1594,15 @@ func (g *Gateway) originateNoPACRD(w http.ResponseWriter, r *http.Request, membe
 // auth number for the order reference (FR-23) and answers paRequired=true. Off
 // provider-data, the request body selects the member the same way handleScenario's uc01
 // does (scenarioReq.Branch): "" (or an absent body) is the demo-lane oxygen origination
-// (§4.3/register §11 ruling (b)); "bridge-refuse" is the kit-bridging-visualization demo
-// persona MBR-BRIDGE-REFUSE, unchanged (its OWN literal L8000/order-select exhibit,
-// decoupled from this arm — it demonstrates a bridging peer's REFUSAL, which fires before
-// any family/hook content would matter); any other value 400s.
+// (§4.3/register §11 ruling (b)); "bridge-demo" and "bridge-refuse" are the
+// kit-bridging-visualization demo's two arms (task2 brief A3a), sharing one body
+// (handleUC03Bridge) — their OWN literal L8000/order-select exhibit, decoupled from this
+// arm. "bridge-demo" drives MBR-BRIDGE-DEMO for the full bridged SUCCESS (CRD/DTR cross
+// the version boundary via the transform chains, PAS lands on the shared line, a real
+// payer-issued authNumber); "bridge-refuse" drives MBR-BRIDGE-REFUSE for the DESIGNED
+// refusal (the peer's skewed PAS declaration refuses the pas-claim leg's contract-version
+// line-select before any bundle is ever built) — see selectLegLineOrBridgeRefuse for how
+// that refusal is surfaced; any other value 400s.
 func (g *Gateway) handleUC03(w http.ResponseWriter, r *http.Request) {
 	if g.cfg.OriginationProfile == "provider-data" {
 		// UC-03 off provider data = the HomeOxygenDispatch path (the only br-payer family that PA-requires
@@ -1554,8 +1639,10 @@ func (g *Gateway) handleUC03(w http.ResponseWriter, r *http.Request) {
 	switch req.Branch {
 	case "":
 		g.handleUC03Oxygen(w, r)
+	case "bridge-demo":
+		g.handleUC03Bridge(w, r, "MBR-BRIDGE-DEMO")
 	case "bridge-refuse":
-		g.handleUC03BridgeRefuse(w, r)
+		g.handleUC03Bridge(w, r, "MBR-BRIDGE-REFUSE")
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown branch"})
 	}
@@ -1643,48 +1730,61 @@ func (g *Gateway) handleUC03Oxygen(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// uc03BridgeRefuseCode is the kit-bridging-visualization demo's OWN literal order tuple —
-// decoupled from originationCodes().uc03 (R3): this branch demonstrates a bridging peer's
-// REFUSAL, which (per TestHandleUC03_BridgeRefuseSelectsMember) fires at the ROUTING gate
-// before any leg is ever attempted, so the family/code carried has never mattered to its
-// outcome. Kept literally UNCHANGED (L8000, order-select) rather than following UC-03's
-// oxygen re-key, so this demo-only exhibit stays byte-identical to before R3.
-var uc03BridgeRefuseCode = orderTuple{systemHCPCSBuild, "L8000", DemoDisplayL8000, DemoDxL8000}
+// uc03BridgeCode is the kit-bridging-visualization demo's OWN literal order tuple —
+// decoupled from originationCodes().uc03 (R3): the bridge-refuse arm demonstrates a
+// bridging peer's REFUSAL, which (per TestHandleUC03Bridge_SelectsMember) fires at the
+// ROUTING gate before any leg is ever attempted, so the family/code carried has never
+// mattered to that arm's outcome; the bridge-demo arm reuses the SAME literal (task2
+// brief) since both arms share one body. Kept literally UNCHANGED (L8000, order-select)
+// rather than following UC-03's oxygen re-key, so this demo-only exhibit stays
+// byte-identical to before R3.
+var uc03BridgeCode = orderTuple{systemHCPCSBuild, "L8000", DemoDisplayL8000, DemoDxL8000}
 
-// handleUC03BridgeRefuse is UC-03's "bridge-refuse" branch, UNCHANGED by R3 (it is not the
-// scenario register §11 ruled on — see handleUC03's doc comment). Byte-identical to the
-// pre-R3 handleUC03 body: order-select + a straight (non-polling) PAS submit expecting an
-// immediate "approved" outcome, which the bridging peer never reaches (it refuses at
-// routing).
-func (g *Gateway) handleUC03BridgeRefuse(w http.ResponseWriter, r *http.Request) {
+// handleUC03Bridge is the kit-bridging-visualization demo's shared body for both
+// "bridge-demo" (MBR-BRIDGE-DEMO, engine.BridgeDemoPayerID — the full bridged SUCCESS:
+// CRD/DTR cross the version boundary via the transform chains, PAS lands on the shared
+// line, approval with a payer-issued authNumber) and "bridge-refuse" (MBR-BRIDGE-REFUSE,
+// engine.BridgeRefusePayerID — the DESIGNED refusal: the peer's PAS declaration is
+// skewed against this build's own, so selectLegLineOrBridgeRefuse's pas-claim
+// contract-version line-select refuses BEFORE any bundle is ever built). The two arms
+// differ ONLY in which member/persona they drive — which coverage-derived routing
+// (FeedPayerRouter) sends to which deployed bridge-peer holder — everything else,
+// including the CRD+DTR order-select flow and the PAS submit attempt, is byte-identical.
+// UNCHANGED by R3 (it is not the scenario register §11 ruled on — see handleUC03's doc
+// comment): this is the kit-bridging-visualization demo's OWN literal L8000/order-select
+// exhibit, decoupled from handleUC03Oxygen's oxygen re-key.
+func (g *Gateway) handleUC03Bridge(w http.ResponseWriter, r *http.Request, member string) {
 	ctx := r.Context()
 	const srRef = "ServiceRequest/sr-uc03"
 
-	// Both scenarioMember args are the demo refuse persona (this path never runs under
+	// Both scenarioMember args are the bridge persona (this path never runs under
 	// OriginationProfile=="provider-data" — that profile early-returns above — so
 	// providerDataMember is dead here). ?personaSet=canary is NOT special-cased:
 	// scenarioMember's CanaryTwins lookup naturally 400s ("no canary twin for member
-	// MBR-BRIDGE-REFUSE") since no twin is registered — deliberately not adding one
-	// (reviewer ruling: a canary twin for a demo-only persona would be semantic abuse of
-	// the canary mechanism, which exists for observability's shared scenario members, not
+	// ...") since no twin is registered — deliberately not adding one (reviewer ruling:
+	// a canary twin for a demo-only persona would be semantic abuse of the canary
+	// mechanism, which exists for observability's shared scenario members, not
 	// visualization fixtures).
-	member, ok := g.scenarioMember(w, r, "MBR-BRIDGE-REFUSE", "MBR-BRIDGE-REFUSE", "MBR-BRIDGE-REFUSE")
+	m, ok := g.scenarioMember(w, r, member, member, member)
 	if !ok {
 		return
 	}
-	o := uc03BridgeRefuseCode
-	res, ok := g.runCRDThenDTROrder(w, r, member, o.system, o.code, o.display, o.dx, false)
+	o := uc03BridgeCode
+	res, ok := g.runCRDThenDTROrder(w, r, m, o.system, o.code, o.display, o.dx, false)
 	if !ok {
 		return
 	}
 
-	// --- PAS round-trip: submit the preauth bundle, expect an approval. ---
+	// --- PAS round-trip: submit the preauth bundle, expect an approval — UNLESS the
+	// peer's PAS declaration is skewed against this build's own (bridge-refuse), in
+	// which case selectLegLineOrBridgeRefuse writes the demo lane's structured 200
+	// refusal itself and we return here without ever building a bundle. ---
 	pasCorr := g.cfg.CorrelationGen()
 	// Select-before-build: the routed line CHOOSES the builder, so it is
 	// resolved BEFORE the bundle exists. Also the pended-line pin for any
 	// pas-claim-update leg downstream — pas-claim and pas-claim-update share the
 	// pa.pas contract, so one selection is contract-correct for both.
-	route, ok := g.selectLegLineOrFail(w, res.recipient, "pas-claim", pasCorr)
+	route, ok := g.selectLegLineOrBridgeRefuse(w, res.recipient, "pas-claim", pasCorr)
 	if !ok {
 		return
 	}
@@ -1701,8 +1801,19 @@ func (g *Gateway) handleUC03BridgeRefuse(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build bundle failed"})
 		return
 	}
+	// APPLY-time designed refusal (fix-round finding, second live run): with
+	// SHN_DEMO_EGRESS_NATIVE_LINES narrowing arm(2), the bridge-refuse arm's own chain IS
+	// selected above (a real bridging chain to the peer's declared line exists) but refuses
+	// HERE, inside the chain's gated up-step, as a *SemanticChangeError — see
+	// bridgeRefusalText's doc comment for why this and the selection-time
+	// *RouteRefusalError are the ONLY two shapes reshaped; every other egressAdapt error
+	// (a genuine fault) still falls through to the ordinary 502 below unchanged.
 	bundleJSON, _, err = g.egressAdapt(route, bundleJSON, ExchangeIdentity{CorrelationID: pasCorr, LegType: "pas-claim", Counterpart: res.recipient})
 	if err != nil {
+		if text, ok := bridgeRefusalText(err); ok {
+			writeBridgeRefusal(w, "pas-claim", text)
+			return
+		}
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}

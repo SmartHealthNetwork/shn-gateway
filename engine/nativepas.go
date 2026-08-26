@@ -34,6 +34,19 @@ func (n *nativeResponder) handlePASClaimUpdateNative(ctx context.Context, corrID
 	if status != 0 {
 		return LegResult{}, fmt.Errorf("engine: nativePAS parse conformant update bundle: status %d", status) // our fault → 500
 	}
+	// Payer-edge identity mapping seam (A1/A2, payoredge.go): re-stamp the bundle's
+	// Coverage.payor + Claim.insurer BEFORE any store write, so a refusal never leaves a
+	// claim pended with no way to release it. Off (the default) ⇒ no-op, byte-identical.
+	if n.payorEdgeOwn != nil {
+		restamped, got, gotOK, matched, rerr := restampPASBundlePayor(requestFHIR, *n.payorEdgeOwn, *n.payorEdgeBackend)
+		if rerr != nil {
+			return LegResult{}, rerr
+		}
+		if !matched {
+			return payorEdgeRefusal(*n.payorEdgeOwn, got, gotOK), nil
+		}
+		requestFHIR = restamped
+	}
 	related := f.relatedClaim
 	claimed, err := n.store.BeginClaimUpdate(subjectPCI, related)
 	if err != nil {
@@ -137,6 +150,19 @@ func (n *nativeResponder) handlePASClaimNative(ctx context.Context, corrID, subj
 	s, status, msg := parseConformantPASSubjects(requestFHIR)
 	if status != 0 {
 		return LegResult{Status: status, Message: msg}, nil
+	}
+	// Payer-edge identity mapping seam (A1/A2, payoredge.go): re-stamp the bundle's
+	// Coverage.payor + Claim.insurer before it is posted (and before any store
+	// side-effect below). Off (the default) ⇒ no-op, byte-identical.
+	if n.payorEdgeOwn != nil {
+		restamped, got, gotOK, matched, rerr := restampPASBundlePayor(requestFHIR, *n.payorEdgeOwn, *n.payorEdgeBackend)
+		if rerr != nil {
+			return LegResult{}, rerr
+		}
+		if !matched {
+			return payorEdgeRefusal(*n.payorEdgeOwn, got, gotOK), nil
+		}
+		requestFHIR = restamped
 	}
 	// Source the order's procedure {system, code, display} (CPT or HCPCS) for the EOB side-effect.
 	// system flows from the order so a HCPCS order yields a HCPCS-system EOB (FR-28) — threaded as

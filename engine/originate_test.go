@@ -371,40 +371,47 @@ func callUC03Branch(t *testing.T, gw *Gateway, branch string) *httptest.Response
 	return rec
 }
 
-// TestHandleUC03_BridgeRefuseSelectsMember pins the member half of the
-// sanctioned handleUC03 branch switch, observed the way this file's
-// existing tests observe row behavior (legAttempted/stub.legTypes) — a fresh
-// crdTestSystem fixture per branch, matching the file's one-test-one-fixture
-// idiom (stub.legTypes accumulates for the fixture's lifetime, so branches
-// must not share one). crdTestSystem's PayerRouter (payerRouterFor) is
-// registered ONLY for shnsdk.CMSPayerIdentity — the identity MBR-COVERED's
-// Coverage carries. MBR-BRIDGE-REFUSE's Coverage carries the distinct demo
-// identity engine.BridgeRefusePayerID (urn:shn:demo-payer|SHN-BRIDGE-REFUSE,
-// holderdata.go), which this fixture never registers. recipientForWith
-// (gateway.go) fails closed 422 on an unregistered payer identifier BEFORE
-// any leg is attempted (FR-G40/AI-G11/OWD-G10) — so reaching THAT specific
-// 422, naming THAT specific identifier, with NO leg attempted, proves the
-// branch switch resolved MBR-BRIDGE-REFUSE and not MBR-COVERED (which DOES
-// clear this same gate — see the "" case below and every unbranched
-// callUC03 test in this file). This is deliberately NOT a full run: the
-// demo's PAS-leg refusal only fires against the real
-// narrowed/pas-skewed peer, which this hermetic unit fixture does not stand
-// up — driving further would just hit the SAME unregistered-payer wall for a
-// different reason.
-func TestHandleUC03_BridgeRefuseSelectsMember(t *testing.T) {
-	t.Run("bridge-refuse: fails closed at routing, no leg attempted", func(t *testing.T) {
-		gw, stub, _ := crdTestSystem(t, shnsdk.CardCoverage{Covered: shnsdk.CoveredCovered, PANeeded: shnsdk.PANeededAuthNeeded})
-		rec := callUC03Branch(t, gw, "bridge-refuse")
-		if rec.Code != http.StatusUnprocessableEntity {
-			t.Fatalf("want 422 (unregistered demo payer — proves member selection ran), got %d body=%s", rec.Code, rec.Body.String())
-		}
-		if !strings.Contains(rec.Body.String(), "SHN-BRIDGE-REFUSE") {
-			t.Errorf("body = %s, want it to name the bridge-refuse payer identifier", rec.Body.String())
-		}
-		if len(stub.legTypes) != 0 {
-			t.Errorf("legTypes = %v, want none — the routing gate must fail BEFORE any leg", stub.legTypes)
-		}
-	})
+// TestHandleUC03Bridge_SelectsMember pins the member half of the sanctioned handleUC03
+// branch switch for BOTH bridge arms (task2 brief A3a added "bridge-demo" alongside the
+// pre-existing "bridge-refuse", both now sharing handleUC03Bridge's one body), observed
+// the way this file's existing tests observe row behavior (legAttempted/stub.legTypes) —
+// a fresh crdTestSystem fixture per branch, matching the file's one-test-one-fixture idiom
+// (stub.legTypes accumulates for the fixture's lifetime, so branches must not share one).
+// crdTestSystem's PayerRouter (payerRouterFor) is registered ONLY for
+// shnsdk.CMSPayerIdentity — the identity MBR-COVERED's Coverage carries.
+// MBR-BRIDGE-DEMO/MBR-BRIDGE-REFUSE's Coverage each carry a distinct demo identity
+// (engine.BridgeDemoPayerID / engine.BridgeRefusePayerID, urn:shn:demo-payer|SHN-BRIDGE-*,
+// demoids.go), neither of which this fixture registers. recipientForWith (gateway.go)
+// fails closed 422 on an unregistered payer identifier BEFORE any leg is attempted
+// (FR-G40/AI-G11/OWD-G10) — so reaching THAT specific 422, naming THAT specific
+// identifier, with NO leg attempted, proves the branch switch resolved the RIGHT member
+// for each branch (and not MBR-COVERED, which DOES clear this same gate — see the ""
+// case below and every unbranched callUC03 test in this file). This is deliberately NOT a
+// full run: bridge-demo's approval and bridge-refuse's PAS-leg refusal only fire against
+// the real deployed bridge-peer holders, which this hermetic unit fixture does not stand
+// up — driving further would just hit the SAME unregistered-payer wall for a different
+// reason.
+func TestHandleUC03Bridge_SelectsMember(t *testing.T) {
+	for _, tc := range []struct {
+		branch, member string
+	}{
+		{"bridge-demo", "SHN-BRIDGE-DEMO"},
+		{"bridge-refuse", "SHN-BRIDGE-REFUSE"},
+	} {
+		t.Run(tc.branch+": fails closed at routing, no leg attempted", func(t *testing.T) {
+			gw, stub, _ := crdTestSystem(t, shnsdk.CardCoverage{Covered: shnsdk.CoveredCovered, PANeeded: shnsdk.PANeededAuthNeeded})
+			rec := callUC03Branch(t, gw, tc.branch)
+			if rec.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("want 422 (unregistered demo payer — proves member selection ran), got %d body=%s", rec.Code, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), tc.member) {
+				t.Errorf("body = %s, want it to name the %s payer identifier", rec.Body.String(), tc.member)
+			}
+			if len(stub.legTypes) != 0 {
+				t.Errorf("legTypes = %v, want none — the routing gate must fail BEFORE any leg", stub.legTypes)
+			}
+		})
+	}
 
 	t.Run("unknown branch: 400, uc01's idiom", func(t *testing.T) {
 		gw, stub, _ := crdTestSystem(t, shnsdk.CardCoverage{Covered: shnsdk.CoveredCovered, PANeeded: shnsdk.PANeededAuthNeeded})

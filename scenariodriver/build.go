@@ -160,12 +160,12 @@ func RebindPASPatient(bundleJSON []byte, newID string) ([]byte, error) {
 	return bytes.ReplaceAll(out, []byte("Patient/"+oldID), []byte("Patient/"+newID)), nil
 }
 
-// AddRoutablePayor adds an inline payor identifier (CMSPayerIdentity, urn:oid:…300|00001) to the
-// PAS bundle's Coverage.payor[0] so the PAS ingress can route it off the bundle's Coverage (FR-G40).
-// The existing payor REFERENCE (Organization/InsurerExample) is PRESERVED — the identifier is purely
-// ADDITIVE and the PAS ingress's ParsePayerIdentifier reads the inline form first. Returns error on
+// AddRoutablePayorFor stamps payer as the INLINE Coverage.payor[0].identifier — the
+// payload-first routing key the PAS ingress reads (FR-G40). The existing payor REFERENCE
+// (e.g. Organization/InsurerExample) is PRESERVED — the identifier is purely ADDITIVE and
+// the PAS ingress's ParsePayerIdentifier reads the inline form first. Returns error on
 // unparseable JSON or if the bundle has no Coverage entry.
-func AddRoutablePayor(bundleJSON []byte) ([]byte, error) {
+func AddRoutablePayorFor(bundleJSON []byte, payer shnsdk.PayerIdentifier) ([]byte, error) {
 	var b map[string]any
 	if err := json.Unmarshal(bundleJSON, &b); err != nil {
 		return nil, fmt.Errorf("parse bundle: %w", err)
@@ -185,7 +185,7 @@ func AddRoutablePayor(bundleJSON []byte) ([]byte, error) {
 		if p0 == nil {
 			p0 = map[string]any{}
 		}
-		p0["identifier"] = map[string]any{"system": shnsdk.CMSPayerIdentity.System, "value": shnsdk.CMSPayerIdentity.Value}
+		p0["identifier"] = map[string]any{"system": payer.System, "value": payer.Value}
 		payors[0] = p0
 		res["payor"] = payors
 		found = true
@@ -200,17 +200,23 @@ func AddRoutablePayor(bundleJSON []byte) ([]byte, error) {
 	return out, nil
 }
 
+// AddRoutablePayor keeps the historical always-CMS behavior for the paths that route
+// only to the reference payer's holder (CMSPayerIdentity, urn:oid:…300|00001).
+func AddRoutablePayor(bundleJSON []byte) ([]byte, error) {
+	return AddRoutablePayorFor(bundleJSON, shnsdk.CMSPayerIdentity)
+}
+
 // BuildPASBundle loads a committed br-payer $submit golden, rebinds it onto member, and makes its
 // Coverage routable (AddRoutablePayor) so the PAS ingress can derive the payer holder from the
 // bundle's Coverage (FR-G40).
 //
-// AddRoutablePayor unconditionally stamps the CMS payor identifier (shnsdk.CMSPayerIdentity) —
-// there is no non-CMS $submit routing implemented in this path. So before touching the golden,
-// BuildPASBundle fences on member: if payorOrgFor(member) resolves to anything other than
-// cmsPayorOrg (e.g. the bridge-demo personas, whose OWN Coverage names a different payer),
-// stamping the CMS identifier anyway would silently misroute the PAS submission to the wrong
-// payer holder. Fail closed instead: reject loudly rather than stamp
-// silently.
+// BuildPASBundle calls the always-CMS AddRoutablePayor, not the payer-parameterized
+// AddRoutablePayorFor — there is no non-CMS $submit routing implemented in this path.
+// So before touching the golden, BuildPASBundle fences on member: if payorOrgFor(member)
+// resolves to anything other than cmsPayorOrg (e.g. the bridge-demo personas, whose OWN
+// Coverage names a different payer), stamping the CMS identifier anyway would silently
+// misroute the PAS submission to the wrong payer holder. Fail closed instead: reject
+// loudly rather than stamp silently.
 func BuildPASBundle(golden []byte, member string) ([]byte, error) {
 	if org := payorOrgFor(member); org != cmsPayorOrg {
 		return nil, fmt.Errorf("scenariodriver: BuildPASBundle routes via AddRoutablePayor's CMS payor; member %q resolves to %q — non-CMS PAS routing is not implemented (fail-closed fence)", member, org.name)

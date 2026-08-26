@@ -113,6 +113,16 @@ type nativeResponder struct {
 	// posture as this file's existing "gateway: WARNING ..." stdout
 	// precedent (gateway/app/app.go).
 	endpointEvidenceObserver func(note string)
+
+	// payorEdgeOwn / payorEdgeBackend implement the payer-edge identity mapping seam
+	// (payoredge.go, PAYER_DAVINCI_PAYOR_OWN / PAYER_DAVINCI_PAYOR_BACKEND): when both
+	// set, the CRD/DTR/PAS legs re-stamp the inbound Coverage's payor identity from
+	// payorEdgeOwn to payorEdgeBackend — ONLY when the inbound identity IS
+	// payorEdgeOwn (A1); anything else refuses loudly (fail-closed). nil (the default)
+	// ⇒ seam off, every leg forwards its Coverage payor verbatim — byte-identical to
+	// every deployment that does not set the two env vars.
+	payorEdgeOwn     *shnsdk.PayerIdentifier
+	payorEdgeBackend *shnsdk.PayerIdentifier
 }
 
 const (
@@ -208,6 +218,20 @@ func WithStrictExtensions(on bool) NativeOption {
 // dropped — this only affects observability, never the trust decision).
 func WithEndpointEvidenceObserver(f func(note string)) NativeOption {
 	return func(n *nativeResponder) { n.endpointEvidenceObserver = f }
+}
+
+// WithPayorEdgeIdentity turns on the payer-edge identity mapping seam (payoredge.go):
+// own is this deployment's registered payer identity (the assertion side — A1), backend
+// is the identifier this responder's backend leg knows itself by (the re-stamp target).
+// Unset (the zero-value NativeOption slice) ⇒ seam off, every CRD/DTR/PAS leg forwards
+// its Coverage payor verbatim (the prior behavior). Config loading enforces the
+// all-or-nothing rule (PAYER_DAVINCI_PAYOR_OWN / _BACKEND); this option itself has no
+// partial form.
+func WithPayorEdgeIdentity(own, backend shnsdk.PayerIdentifier) NativeOption {
+	return func(n *nativeResponder) {
+		o, b := own, backend
+		n.payorEdgeOwn, n.payorEdgeBackend = &o, &b
+	}
 }
 
 // ownDeclared is this responder's declared-set accessor — the nativeResponder mirror
@@ -520,6 +544,20 @@ func (n *nativeResponder) Handle(ctx context.Context, leg, corrID, subjectPCI st
 			}
 			fwd = rewritten
 		}
+		// Payer-edge identity mapping seam (A1/A2, payoredge.go): re-stamp
+		// prefetch.coverage's payor identity BEFORE any partner-scoped egress shaping
+		// below, while the coverage is still the bare shape the seam reads. Off (the
+		// default) ⇒ no-op, byte-identical.
+		if n.payorEdgeOwn != nil {
+			restamped, lr, perr := n.applyPayorEdgeToCRDRequest(fwd)
+			if perr != nil {
+				return LegResult{}, perr
+			}
+			if lr.Status != 0 {
+				return lr, nil
+			}
+			fwd = restamped
+		}
 		// Per-partner egress shaping (AFTER the payer-side bind + ingress-$validate read the
 		// bare Coverage, crd_native.go): wrap prefetch.coverage bare→searchset-Bundle so the partner's
 		// order-sign search-template `coverage` prefetch is satisfied (bare → 412 "Missing Coverage").
@@ -560,6 +598,20 @@ func (n *nativeResponder) Handle(ctx context.Context, leg, corrID, subjectPCI st
 		var fetch dtrLegRequest
 		if err := json.Unmarshal(requestFHIR, &fetch); err != nil || (fetch.Canonical == "" && len(fetch.Order) == 0) {
 			return LegResult{Status: http.StatusBadRequest, Message: "parse questionnaire fetch failed"}, nil
+		}
+		// Payer-edge identity mapping seam (A1/A2, payoredge.go): same bare-Coverage
+		// shape as the CRD leg's prefetch.coverage. Only applies when Coverage is
+		// actually carried — a DTR line that legitimately carries none (2.0/2.1 with no
+		// coverage supplied) has nothing to assert about and stays a benign pass-through.
+		if n.payorEdgeOwn != nil && len(fetch.Coverage) > 0 {
+			restamped, got, gotOK, matched, rerr := restampBareCoveragePayor(fetch.Coverage, *n.payorEdgeOwn, *n.payorEdgeBackend)
+			if rerr != nil {
+				return LegResult{}, rerr
+			}
+			if !matched {
+				return payorEdgeRefusal(*n.payorEdgeOwn, got, gotOK), nil
+			}
+			fetch.Coverage = restamped
 		}
 		if len(fetch.NextQuestion) > 0 {
 			// An SDC adaptive $next-question round (dtr_adaptive.go): forward the carried
@@ -826,4 +878,46 @@ func wrapCRDCoverageSearchset(reqJSON []byte) ([]byte, error) {
 	}
 	m["prefetch"] = pfJSON
 	return json.Marshal(m)
+}
+
+// applyPayorEdgeToCRDRequest is the crd-order-select leg's payer-edge identity mapping
+// seam (A1/A2, payoredge.go): re-stamps the CDS Hooks request's prefetch.coverage payor
+// from n.payorEdgeOwn to n.payorEdgeBackend, ONLY when the inbound identity IS
+// n.payorEdgeOwn. Called only when the seam is configured (n.payorEdgeOwn != nil). A
+// request with no prefetch.coverage at all refuses too — the crd-order-select leg
+// always carries a Coverage prefetch (crd_native.go/originate.go bind it), so an absent
+// one is itself the "no resolvable payor identifier" case (A1), not a benign skip.
+func (n *nativeResponder) applyPayorEdgeToCRDRequest(reqJSON []byte) ([]byte, LegResult, error) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(reqJSON, &m); err != nil {
+		return nil, LegResult{}, fmt.Errorf("engine: payor edge: parse CRD request: %w", err)
+	}
+	var pf map[string]json.RawMessage
+	if raw, ok := m["prefetch"]; ok {
+		if err := json.Unmarshal(raw, &pf); err != nil {
+			return nil, LegResult{}, fmt.Errorf("engine: payor edge: parse CRD request prefetch: %w", err)
+		}
+	}
+	cov, ok := pf["coverage"]
+	if !ok || len(cov) == 0 {
+		return nil, payorEdgeRefusal(*n.payorEdgeOwn, shnsdk.PayerIdentifier{}, false), nil
+	}
+	restamped, got, gotOK, matched, err := restampBareCoveragePayor(cov, *n.payorEdgeOwn, *n.payorEdgeBackend)
+	if err != nil {
+		return nil, LegResult{}, err
+	}
+	if !matched {
+		return nil, payorEdgeRefusal(*n.payorEdgeOwn, got, gotOK), nil
+	}
+	pf["coverage"] = restamped
+	pfJSON, err := json.Marshal(pf)
+	if err != nil {
+		return nil, LegResult{}, err
+	}
+	m["prefetch"] = pfJSON
+	out, err := json.Marshal(m)
+	if err != nil {
+		return nil, LegResult{}, err
+	}
+	return out, LegResult{}, nil
 }

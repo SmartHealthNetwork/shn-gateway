@@ -386,6 +386,87 @@ func TestLoadConfig_PayerDavinciContractVersions(t *testing.T) {
 	}
 }
 
+// TestLoadConfig_PayorEdgeIdentity covers the payer-edge identity mapping seam's
+// config surface (gateway/engine/payoredge.go): both unset ⇒ seam off; either alone ⇒
+// boot error (all-or-nothing); both set with a malformed "system|value" ⇒ boot error;
+// both set and well-formed ⇒ parsed onto cfg.PayerDavinciPayor{Own,Backend} and
+// cfg.PayerDavinciPayorEdge=true.
+func TestLoadConfig_PayorEdgeIdentity(t *testing.T) {
+	baseEnv := map[string]string{
+		"ROLE": "payer", "SHN_SECRETS": "/x", "SHN_DISCOVERY_URL": "https://d",
+		"PAYER_DAVINCI_BASE_URL": "https://payer.example",
+	}
+
+	t.Run("both unset: seam off", func(t *testing.T) {
+		cfg, err := loadConfig(func(k string) string { return baseEnv[k] })
+		if err != nil {
+			t.Fatalf("both-unset should load: %v", err)
+		}
+		if cfg.PayerDavinciPayorEdge {
+			t.Errorf("PayerDavinciPayorEdge should be false with both env vars unset")
+		}
+	})
+
+	t.Run("own only: boot error", func(t *testing.T) {
+		env := map[string]string{"PAYER_DAVINCI_PAYOR_OWN": "urn:shn:demo-payer|SHN-BRIDGE-DEMO"}
+		for k, v := range baseEnv {
+			env[k] = v
+		}
+		_, err := loadConfig(func(k string) string { return env[k] })
+		if err == nil || !strings.Contains(err.Error(), "PAYER_DAVINCI_PAYOR_OWN and PAYER_DAVINCI_PAYOR_BACKEND must be set together") {
+			t.Fatalf("want an all-or-nothing error, got %v", err)
+		}
+	})
+
+	t.Run("backend only: boot error", func(t *testing.T) {
+		env := map[string]string{"PAYER_DAVINCI_PAYOR_BACKEND": "urn:oid:2.16.840.1.113883.6.300|00001"}
+		for k, v := range baseEnv {
+			env[k] = v
+		}
+		_, err := loadConfig(func(k string) string { return env[k] })
+		if err == nil || !strings.Contains(err.Error(), "PAYER_DAVINCI_PAYOR_OWN and PAYER_DAVINCI_PAYOR_BACKEND must be set together") {
+			t.Fatalf("want an all-or-nothing error, got %v", err)
+		}
+	})
+
+	t.Run("malformed value: boot error", func(t *testing.T) {
+		env := map[string]string{
+			"PAYER_DAVINCI_PAYOR_OWN":     "not-a-pipe-pair",
+			"PAYER_DAVINCI_PAYOR_BACKEND": "urn:oid:2.16.840.1.113883.6.300|00001",
+		}
+		for k, v := range baseEnv {
+			env[k] = v
+		}
+		_, err := loadConfig(func(k string) string { return env[k] })
+		if err == nil || !strings.Contains(err.Error(), "PAYER_DAVINCI_PAYOR_OWN") {
+			t.Fatalf("want a malformed-value error naming PAYER_DAVINCI_PAYOR_OWN, got %v", err)
+		}
+	})
+
+	t.Run("both set, well-formed: parsed onto cfg", func(t *testing.T) {
+		env := map[string]string{
+			"PAYER_DAVINCI_PAYOR_OWN":     "urn:shn:demo-payer|SHN-BRIDGE-DEMO",
+			"PAYER_DAVINCI_PAYOR_BACKEND": "urn:oid:2.16.840.1.113883.6.300|00001",
+		}
+		for k, v := range baseEnv {
+			env[k] = v
+		}
+		cfg, err := loadConfig(func(k string) string { return env[k] })
+		if err != nil {
+			t.Fatalf("happy path should load: %v", err)
+		}
+		if !cfg.PayerDavinciPayorEdge {
+			t.Fatalf("PayerDavinciPayorEdge should be true")
+		}
+		if cfg.PayerDavinciPayorOwn.System != "urn:shn:demo-payer" || cfg.PayerDavinciPayorOwn.Value != "SHN-BRIDGE-DEMO" {
+			t.Errorf("PayerDavinciPayorOwn = %+v", cfg.PayerDavinciPayorOwn)
+		}
+		if cfg.PayerDavinciPayorBackend.System != "urn:oid:2.16.840.1.113883.6.300" || cfg.PayerDavinciPayorBackend.Value != "00001" {
+			t.Errorf("PayerDavinciPayorBackend = %+v", cfg.PayerDavinciPayorBackend)
+		}
+	})
+}
+
 // SHN_DEMO_EGRESS_NATIVE_LINES: empty = unset (SHN_CONTRACT_VERSIONS parser
 // precedent — a copycat parse must handle this deliberately); unknown line =
 // boot refusal; valid lines land on engine Config.EgressNativeLines (via

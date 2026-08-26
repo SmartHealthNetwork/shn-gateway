@@ -313,6 +313,36 @@ mixed credential block is a hard startup error (a likely misconfig). Setting
 partner **unauthenticated** — the gateway logs a warning on startup to make this
 mode visible.
 
+### Payer backend identity mapping
+
+A common shape for a payer operator: the network-facing identity your gateway is
+registered under is not the same identifier your own backend (a utilization-management
+or CRD engine you run or buy off the shelf) knows itself by. Some engines select their
+coverage-determination logic by the payer identifier carried on the inbound `Coverage`
+resource, and will reject a request whose identifier they don't recognize — even though
+it is genuinely theirs to answer, just addressed under your network identity instead of
+your engine's own.
+
+| Env var | Description |
+|---|---|
+| `PAYER_DAVINCI_PAYOR_OWN` | `"system\|value"` of this deployment's registered payer identity — the identity your gateway is known by on the network. |
+| `PAYER_DAVINCI_PAYOR_BACKEND` | `"system\|value"` your own backend expects instead — the identity to re-stamp onto outbound requests before they reach it. |
+
+When both are set, every CRD, DTR, and PAS request this gateway forwards to
+`PAYER_DAVINCI_BASE_URL` has its `Coverage` payor identifier re-stamped from
+`PAYER_DAVINCI_PAYOR_OWN` to `PAYER_DAVINCI_PAYOR_BACKEND` — but **only** when the
+inbound identifier is genuinely your own. A request addressed to a different payer
+identifier, or one that carries no resolvable payor identifier at all, is refused with a
+clear error naming the mismatch, never silently forwarded — this is an ownership check,
+not a blind rewrite: forwarding a misdirected request under your own backend's identity
+would have your engine adjudicate someone else's request. Only the payor's identifier
+(`system`/`value`) is changed; nothing else in the request — including the payer
+organization's name — is touched, and every response is relayed back unchanged.
+
+Both env vars are **all-or-nothing**: setting one without the other is a startup error.
+Leaving both unset (the default) disables this mapping entirely — requests forward with
+their payor identifier untouched, the behavior for every deployment that doesn't need it.
+
 ## Provider DTR population (`PROVIDER_DTR_*`)
 
 See [INTEGRATION.md](INTEGRATION.md#provider-dtr-population) for the managed-vs-native

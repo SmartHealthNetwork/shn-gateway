@@ -196,6 +196,18 @@ type config struct {
 	// today). PAS_NATIVE's bool-flag precedent.
 	PayerDavinciStrictExtensions bool
 
+	// PayerDavinciPayorOwnRaw / PayerDavinciPayorBackendRaw are the raw
+	// PAYER_DAVINCI_PAYOR_OWN / PAYER_DAVINCI_PAYOR_BACKEND env values ("system|value"),
+	// parsed + validated by loadConfig into PayerDavinciPayorOwn/Backend below. Feeds
+	// engine.WithPayorEdgeIdentity (gateway/engine/payoredge.go). All-or-nothing:
+	// loadConfig refuses boot on a partial set; both empty ⇒ the payer-edge identity
+	// mapping seam is off (verbatim relay, the prior behavior).
+	PayerDavinciPayorOwnRaw     string
+	PayerDavinciPayorBackendRaw string
+	PayerDavinciPayorOwn        shnsdk.PayerIdentifier
+	PayerDavinciPayorBackend    shnsdk.PayerIdentifier
+	PayerDavinciPayorEdge       bool // true iff both env vars were set and parsed clean
+
 	// OriginationProfile selects the per-UC origination lane: "" and "demo" keep the
 	// self-contained demo order shape; "provider-data" originates every UC off the
 	// provider's seeded SoR and drives real reference-payer verdicts. ORIGINATION_PROFILE.
@@ -265,6 +277,17 @@ func splitTrimmed(v string) []string {
 // checkClientAuthMode enforces exactly one outbound client-auth mode per
 // credential block: private_key_jwt (KEY+ALG, preferred) or client_secret_post
 // (SECRET). prefix is the env family, "FHIR" or "PAYER_DAVINCI".
+// parsePayerIdentifier parses a "system|value" env value into a shnsdk.PayerIdentifier
+// (PAYER_DAVINCI_PAYOR_OWN / PAYER_DAVINCI_PAYOR_BACKEND) — fail-closed on anything
+// else (no "|", or an empty system/value either side of it).
+func parsePayerIdentifier(envName, raw string) (shnsdk.PayerIdentifier, error) {
+	system, value, ok := strings.Cut(raw, "|")
+	if !ok || system == "" || value == "" {
+		return shnsdk.PayerIdentifier{}, fmt.Errorf("gateway: %s must be \"system|value\" (both non-empty), got %q", envName, raw)
+	}
+	return shnsdk.PayerIdentifier{System: system, Value: value}, nil
+}
+
 func checkClientAuthMode(prefix, key, alg, kid, secret string) error {
 	hasJWT := key != "" || alg != "" || kid != ""
 	switch {
@@ -356,6 +379,8 @@ func loadConfig(getenv func(string) string) (config, error) {
 		PayerDavinciCRDCoverageBundle: getenv("PAYER_DAVINCI_CRD_COVERAGE_BUNDLE") == "true",
 		PayerDavinciContractVersions:  splitTrimmed(getenv("PAYER_DAVINCI_CONTRACT_VERSIONS")),
 		PayerDavinciStrictExtensions:  getenv("PAYER_DAVINCI_STRICT_EXTENSIONS") == "true",
+		PayerDavinciPayorOwnRaw:       getenv("PAYER_DAVINCI_PAYOR_OWN"),
+		PayerDavinciPayorBackendRaw:   getenv("PAYER_DAVINCI_PAYOR_BACKEND"),
 		OriginationProfile:            getenv("ORIGINATION_PROFILE"),
 
 		ProviderDTRNative:      getenv("PROVIDER_DTR_NATIVE") == "true",
@@ -472,6 +497,30 @@ func loadConfig(getenv func(string) string) (config, error) {
 				return config{}, fmt.Errorf("gateway: PAYER_DAVINCI_CONTRACT_VERSIONS token %q must match <contract>@<line> (e.g. pa.pas@2.0)", tok)
 			}
 		}
+	}
+
+	// Payer-edge identity mapping seam (gateway/engine/payoredge.go): all-or-nothing —
+	// a partial set (one env var fat-fingered, the other forgotten) is a hard startup
+	// error, mirroring the exactly-one-mode credential-block precedent above. Both
+	// unset ⇒ the seam stays off (verbatim relay — every existing deployment's
+	// behavior is unaffected).
+	switch ownRaw, backendRaw := cfg.PayerDavinciPayorOwnRaw, cfg.PayerDavinciPayorBackendRaw; {
+	case ownRaw == "" && backendRaw == "":
+		// seam off
+	case ownRaw == "" || backendRaw == "":
+		return config{}, fmt.Errorf("gateway: PAYER_DAVINCI_PAYOR_OWN and PAYER_DAVINCI_PAYOR_BACKEND must be set together (both or neither)")
+	default:
+		own, oerr := parsePayerIdentifier("PAYER_DAVINCI_PAYOR_OWN", ownRaw)
+		if oerr != nil {
+			return config{}, oerr
+		}
+		backend, berr := parsePayerIdentifier("PAYER_DAVINCI_PAYOR_BACKEND", backendRaw)
+		if berr != nil {
+			return config{}, berr
+		}
+		cfg.PayerDavinciPayorOwn = own
+		cfg.PayerDavinciPayorBackend = backend
+		cfg.PayerDavinciPayorEdge = true
 	}
 
 	if cfg.ProviderDTRNative && cfg.ProviderDTRPopulateURL == "" {
@@ -1172,7 +1221,7 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		// responder answers goes to the partner endpoint, so the partner's declared set
 		// gates all of them (the split counterparty that used to route some legs to a native
 		// arm and the rest to an in-process fallback is deleted — §3.2).
-		native := engine.NewNativeResponder(pdc, cfg.PayerDavinciBaseURL, crdSvcID, store, clock,
+		nativeOpts := []engine.NativeOption{
 			engine.WithCDSBaseURL(cfg.PayerDavinciCDSBaseURL),
 			engine.WithCRDHook(cfg.PayerDavinciCRDHook),
 			engine.WithCRDDispatchService(cfg.PayerDavinciDispatchServiceID, cfg.PayerDavinciDispatchHook),
@@ -1189,7 +1238,17 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 			engine.WithStrictExtensions(cfg.PayerDavinciStrictExtensions),
 			// Endpoint evidence: same-origin-drop notes ride the file's existing WARNING-line
 			// stdout precedent (e.g. the unauthenticated-forward warning above).
-			engine.WithEndpointEvidenceObserver(func(note string) { fmt.Fprintf(stdout, "gateway: %s\n", note) }))
+			engine.WithEndpointEvidenceObserver(func(note string) { fmt.Fprintf(stdout, "gateway: %s\n", note) }),
+		}
+		// Payer-edge identity mapping seam (gateway/engine/payoredge.go): both env vars
+		// set (loadConfig's all-or-nothing rule) ⇒ CRD/DTR/PAS re-stamp the Coverage
+		// payor from PayerDavinciPayorOwn to PayerDavinciPayorBackend. Unset (the
+		// default) ⇒ no option appended, seam off, byte-identical to every existing
+		// deployment.
+		if cfg.PayerDavinciPayorEdge {
+			nativeOpts = append(nativeOpts, engine.WithPayorEdgeIdentity(cfg.PayerDavinciPayorOwn, cfg.PayerDavinciPayorBackend))
+		}
+		native := engine.NewNativeResponder(pdc, cfg.PayerDavinciBaseURL, crdSvcID, store, clock, nativeOpts...)
 		evidenceSink = native
 		gwCfg.Responder = native
 		// The native-forward DTR response is a foreign Da Vinci package SHN can't $validate
