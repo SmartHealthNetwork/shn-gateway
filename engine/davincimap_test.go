@@ -501,3 +501,134 @@ func TestNormalizePASResponse_RealRI_brpayer(t *testing.T) {
 		t.Errorf("preAuthRef = %q, want AUTH-0001", parsed.PreAuthRef)
 	}
 }
+
+// TestNormalizePASResponse_BrPayerAmendAfterResolution pins the relay's classification of the
+// SECOND re-pend wire shape the real reference payer answers a ClaimUpdate with (live-captured 2026-08-30 against br-payer a8bece4 with PAS_PENDED_RESOLUTION_DELAY_SECONDS=5):
+// an infoChanged amendment that lands AFTER PasPendedResolutionService already flipped the
+// authorization to A1. persistUpdatePath re-evaluates the item (A4), re-tags it pended-resolution
+// and reschedules the timer — but never resets ClaimResponse.outcome, which resolveAuthorization
+// had set to "complete" — so the answer is Bundle{ClaimResponse(outcome complete, reviewAction A4,
+// no "number") + Organization}, with no Task (addDocumentationRequestTasks runs only on the create
+// path). Before this pin the normalizer unwrapped it as a COMPLETE ClaimResponse, ParsePendedResponse
+// read the bare resource as not-pended, ParseClaimResponse found neither an auth number nor a
+// denial code, and the update leg answered 502 "upstream payer PAS update response untranslatable".
+// The pended tag on the wire is the truth: the item is A4 and the timer WILL resolve it, so the
+// shape must classify as pended (pass through) exactly like the pre-timer "queued" twin.
+func TestNormalizePASResponse_BrPayerAmendAfterResolution(t *testing.T) {
+	load := func(name string) []byte {
+		t.Helper()
+		b, err := os.ReadFile(filepath.Join("testdata", "br-payer", name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		return b
+	}
+	for _, tc := range []struct {
+		name, fixture, wantID string
+	}{
+		// The pre-timer twin is the control: outcome "queued" + A4, already classified pended.
+		{"amend before the timer (queued + A4)", "pas-update-response-amend-before-resolution.json", "1768"},
+		// The amend-after-resolution shape: outcome "complete" + A4 + pended-resolution tag, no Task.
+		{"amend after the timer (complete + A4)", "pas-update-response-amend-after-resolution.json", "1765"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := load(tc.fixture)
+			norm, lr := normalizePASResponse(body)
+			if lr.Status != 0 {
+				t.Fatalf("re-pend must pass through as pended, got %d: %s", lr.Status, lr.Message)
+			}
+			pended, _, perr := shnsdk.ParsePendedResponse(norm)
+			if perr != nil || !pended {
+				t.Fatalf("re-pend must read as pended via ParsePendedResponse; pended=%v err=%v", pended, perr)
+			}
+			if id := claimResponseIDFromPASResponse(norm); id != tc.wantID {
+				t.Fatalf("re-query target: got ClaimResponse id %q, want %q (br-payer re-pends IN PLACE on the same id)", id, tc.wantID)
+			}
+		})
+	}
+
+	// The poll's view during the re-pend window: a BARE ClaimResponse (GET ClaimResponse/{id})
+	// carrying outcome "complete" + A4 and NO auth number. It must NOT parse as approved — the
+	// poll keeps waiting for the timer — and must not fail closed either (pass-through).
+	t.Run("re-pend window GET is neither approved nor fail-closed", func(t *testing.T) {
+		norm, lr := normalizePASResponse(load("pas-claimresponse-amend-repend-window.json"))
+		if lr.Status != 0 {
+			t.Fatalf("bare re-pended ClaimResponse must pass through, got %d: %s", lr.Status, lr.Message)
+		}
+		if res, err := shnsdk.ParseClaimResponse(norm); err == nil && res.Outcome == "approved" {
+			t.Fatalf("a re-pended (A4, no number) ClaimResponse must never parse as approved: %+v", res)
+		}
+	})
+
+	// After the rescheduled timer: the SAME id resolves to A1 with a fresh number (AUTH-0002 live).
+	t.Run("rescheduled timer resolves the same id to A1", func(t *testing.T) {
+		norm, lr := normalizePASResponse(load("pas-claimresponse-amend-resolved.json"))
+		if lr.Status != 0 {
+			t.Fatalf("resolved ClaimResponse must pass through, got %d: %s", lr.Status, lr.Message)
+		}
+		res, err := shnsdk.ParseClaimResponse(norm)
+		if err != nil || res.Outcome != "approved" || res.PreAuthRef != "AUTH-0002" {
+			t.Fatalf("resolved re-pend must parse approved AUTH-0002, got outcome=%q ref=%q err=%v", res.Outcome, res.PreAuthRef, err)
+		}
+	})
+
+	// Rejection row (valid shape − one mutation): strip the A4 reviewAction off the after-timer
+	// answer. What remains is a "complete" ClaimResponse with neither a pend marker nor an auth
+	// number nor a denial code — it must NOT be classified pended (that would poll a claim the
+	// payer never re-pended); it unwraps as before and the parser fails loud (the update leg's
+	// 502 "untranslatable"), never a silent pass in either direction.
+	t.Run("mutation: complete without the A4 reviewAction is not a pend", func(t *testing.T) {
+		var b map[string]any
+		if err := json.Unmarshal(load("pas-update-response-amend-after-resolution.json"), &b); err != nil {
+			t.Fatal(err)
+		}
+		stripped := false
+		for _, e := range b["entry"].([]any) {
+			res := e.(map[string]any)["resource"].(map[string]any)
+			if res["resourceType"] != "ClaimResponse" {
+				continue
+			}
+			for _, it := range res["item"].([]any) {
+				for _, adj := range it.(map[string]any)["adjudication"].([]any) {
+					delete(adj.(map[string]any), "extension")
+					stripped = true
+				}
+			}
+		}
+		if !stripped {
+			t.Fatal("mutation did not strip any adjudication extension")
+		}
+		mutated, _ := json.Marshal(b)
+		norm, lr := normalizePASResponse(mutated)
+		if lr.Status != 0 {
+			t.Fatalf("a complete ClaimResponse Bundle still unwraps (status 0), got %d: %s", lr.Status, lr.Message)
+		}
+		if pended, _, _ := shnsdk.ParsePendedResponse(norm); pended {
+			t.Fatal("without the A4 reviewAction the answer must NOT classify as pended")
+		}
+		if _, err := shnsdk.ParseClaimResponse(norm); err == nil {
+			t.Fatal("a complete ClaimResponse with no number and no denial must fail loud, not parse")
+		}
+	})
+
+	// Second mutation row, narrower: keep the reviewAction extension and its URLs intact and flip
+	// only the code A4 → A1 (still no "number"). Pins the classification on the CODE, not on the
+	// mere presence of a reviewAction extension.
+	t.Run("mutation: reviewAction code A1 instead of A4 is not a pend", func(t *testing.T) {
+		body := load("pas-update-response-amend-after-resolution.json")
+		mutated := bytes.Replace(body, []byte(`"code": "A4"`), []byte(`"code": "A1"`), 1)
+		if bytes.Equal(mutated, body) {
+			t.Fatal("mutation did not flip the A4 code")
+		}
+		norm, lr := normalizePASResponse(mutated)
+		if lr.Status != 0 {
+			t.Fatalf("still a complete ClaimResponse Bundle (status 0), got %d: %s", lr.Status, lr.Message)
+		}
+		if pended, _, _ := shnsdk.ParsePendedResponse(norm); pended {
+			t.Fatal("an A1 review action must NOT classify as pended")
+		}
+		if _, err := shnsdk.ParseClaimResponse(norm); err == nil {
+			t.Fatal("A1 with no number and no denial must fail loud, not parse")
+		}
+	})
+}

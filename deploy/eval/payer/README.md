@@ -150,10 +150,11 @@ answer CRD hooks and PAS submissions:
    PAS services instead of `br-payer`, and drop the `br-payer` service
    entirely.
 3. **A custom Adjudicator.** If your decisioning doesn't speak Da Vinci CRD
-   hooks or PAS natively, implement `engine.Config.Adjudicator` in a
-   gateway build of your own and wire it in place of the native-forward
-   path. See the main [gateway README](../../../README.md) for the
-   interface.
+   hooks or PAS natively, implement `shnsdk.Adjudicator` and run it behind
+   the standalone SDK responder in place of this gateway's payer side (an
+   in-gateway wiring exists only through an internal, unstable seam;
+   `crd-order-dispatch` is not yet served by the standalone responder). See
+   the main [gateway README](../../../README.md) for the interface.
 
 ## Production cutover
 
@@ -164,8 +165,8 @@ systems you already have. Moving to production means:
    that's the actual production install unit (the gateway plus your own
    co-located validator, nothing else).
 2. Point `PAYER_DAVINCI_BASE_URL` / `PAYER_DAVINCI_CDS_BASE_URL` at **your
-   own** Da Vinci endpoint (decisioning option 2 above), or wire a custom
-   `engine.Config.Adjudicator` (option 3).
+   own** Da Vinci endpoint (decisioning option 2 above), or run a custom
+   `shnsdk.Adjudicator` behind the standalone SDK responder (option 3).
 3. Drop `br-payer` and `validator` entirely — they don't exist in
    `gateway/deploy/bundle/`, and nothing in the gateway depends on them.
 4. Everything else about how the gateway is configured and how it

@@ -1,0 +1,114 @@
+{
+  "resourceType": "ClaimResponse",
+  "id": "1765",
+  "meta": {
+    "versionId": "4",
+    "lastUpdated": "2026-08-30T13:31:58.649+00:00",
+    "profile": [
+      "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claimresponse"
+    ]
+  },
+  "extension": [
+    {
+      "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-TransmissionIdentifiers",
+      "extension": [
+        {
+          "url": "applicationSenderCode",
+          "valueString": "1234567893"
+        },
+        {
+          "url": "applicationReceiverCode",
+          "valueString": "8189991234"
+        }
+      ]
+    }
+  ],
+  "identifier": [
+    {
+      "system": "http://example.org/PATIENT_EVENT_TRACE_NUMBER",
+      "value": "14c2a266-5cb8-448e-832c-df19dad16e95"
+    }
+  ],
+  "status": "active",
+  "type": {
+    "coding": [
+      {
+        "system": "http://terminology.hl7.org/CodeSystem/claim-type",
+        "code": "professional",
+        "display": "Professional"
+      }
+    ]
+  },
+  "use": "preauthorization",
+  "patient": {
+    "reference": "Patient/SubscriberExample"
+  },
+  "created": "2026-08-30T13:31:45+00:00",
+  "insurer": {
+    "reference": "Organization/example"
+  },
+  "requestor": {
+    "reference": "Organization/UMOExample"
+  },
+  "request": {
+    "reference": "Claim/1764"
+  },
+  "outcome": "complete",
+  "item": [
+    {
+      "extension": [
+        {
+          "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-itemTraceNumber",
+          "valueIdentifier": {
+            "system": "http://example.org/ITEM_TRACE_NUMBER",
+            "value": "home-oxygen-therapy-trace"
+          }
+        },
+        {
+          "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-itemPreAuthPeriod",
+          "valuePeriod": {
+            "start": "2026-08-30T13:31:58+00:00",
+            "end": "2026-09-30T13:31:58+00:00"
+          }
+        }
+      ],
+      "itemSequence": 1,
+      "adjudication": [
+        {
+          "extension": [
+            {
+              "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewAction",
+              "extension": [
+                {
+                  "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewActionCode",
+                  "valueCodeableConcept": {
+                    "coding": [
+                      {
+                        "system": "https://codesystem.x12.org/005010/306",
+                        "code": "A1",
+                        "display": "Certified in total"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "url": "number",
+                  "valueString": "AUTH-0002"
+                }
+              ]
+            }
+          ],
+          "category": {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/adjudication",
+                "code": "submitted",
+                "display": "Submitted Amount"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

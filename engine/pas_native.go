@@ -113,6 +113,14 @@ func parseConformantPASSubjects(bundleJSON []byte) (conformantPASSubjects, int, 
 		pasMemberFromRef(covBene) != member {
 		return conformantPASSubjects{}, http.StatusForbidden, "inconsistent patient in PAS bundle"
 	}
+	// A QR with no subject could carry answers adjudicated for a different
+	// patient, so when a QR is present its subject is REQUIRED. Identical to the
+	// published SDK Responder's fence (sdk bindConformantClaimSubject), which
+	// enforced this first — this twin had been left behind (twin-fence corpus:
+	// upd-qr-missing-subject).
+	if s.qrJSON != nil && qrSubject == "" {
+		return conformantPASSubjects{}, http.StatusForbidden, "PAS bundle QuestionnaireResponse missing subject"
+	}
 	if qrSubject != "" && pasMemberFromRef(qrSubject) != member {
 		return conformantPASSubjects{}, http.StatusForbidden, "inconsistent patient in PAS bundle"
 	}

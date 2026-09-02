@@ -1,0 +1,333 @@
+{
+  "name": "upd-accept-qr-variant",
+  "family": "update-bind",
+  "description": "The QR-targeted variant (no DiagnosticReport; the Provenance targets the amended QuestionnaireResponse) binds clean.",
+  "expect": "accept",
+  "tokenMember": "MBR-COVERED",
+  "originalCorr": "twinfence-sub-0001",
+  "bundle": {
+    "entry": [
+      {
+        "fullUrl": "https://shn.example/fhir/Claim/convergence-claim-update",
+        "resource": {
+          "created": "2026-06-04T00:00:00Z",
+          "id": "convergence-claim-update",
+          "identifier": [
+            {
+              "system": "urn:shn:correlation",
+              "value": "twinfence-upd-0001"
+            }
+          ],
+          "insurance": [
+            {
+              "sequence": 1,
+              "focal": true,
+              "coverage": {
+                "identifier": {
+                  "system": "urn:shn:coverage",
+                  "value": "MBR-COVERED"
+                }
+              }
+            }
+          ],
+          "insurer": {
+            "reference": "Organization/payer"
+          },
+          "item": [
+            {
+              "category": {
+                "coding": [
+                  {
+                    "code": "1",
+                    "display": "Medical Care",
+                    "system": "https://codesystem.x12.org/005010/1365"
+                  }
+                ]
+              },
+              "extension": [
+                {
+                  "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService",
+                  "valueReference": {
+                    "reference": "ServiceRequest/convergence-sr"
+                  }
+                },
+                {
+                  "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-infoChanged",
+                  "valueCode": "changed"
+                }
+              ],
+              "productOrService": {
+                "coding": [
+                  {
+                    "code": "72148",
+                    "display": "MRI lumbar spine w/o contrast",
+                    "system": "http://www.ama-assn.org/go/cpt"
+                  }
+                ]
+              },
+              "sequence": 1
+            }
+          ],
+          "patient": {
+            "reference": "Patient/MBR-COVERED"
+          },
+          "priority": {
+            "coding": [
+              {
+                "code": "normal"
+              }
+            ]
+          },
+          "provider": {
+            "display": "provider"
+          },
+          "related": [
+            {
+              "claim": {
+                "identifier": {
+                  "system": "urn:shn:correlation",
+                  "value": "twinfence-sub-0001"
+                }
+              }
+            }
+          ],
+          "resourceType": "Claim",
+          "status": "active",
+          "type": {
+            "coding": [
+              {
+                "code": "professional",
+                "system": "http://terminology.hl7.org/CodeSystem/claim-type"
+              }
+            ]
+          },
+          "use": "preauthorization"
+        }
+      },
+      {
+        "fullUrl": "https://shn.example/fhir/Patient/MBR-COVERED",
+        "resource": {
+          "id": "MBR-COVERED",
+          "resourceType": "Patient"
+        }
+      },
+      {
+        "fullUrl": "https://shn.example/fhir/Coverage/convergence-coverage",
+        "resource": {
+          "beneficiary": {
+            "reference": "Patient/MBR-COVERED"
+          },
+          "contained": [
+            {
+              "id": "cms-payer",
+              "identifier": [
+                {
+                  "system": "urn:oid:2.16.840.1.113883.6.300",
+                  "value": "00001"
+                }
+              ],
+              "name": "Centers for Medicare and Medicaid Services",
+              "resourceType": "Organization"
+            }
+          ],
+          "id": "convergence-coverage",
+          "identifier": [
+            {
+              "type": {
+                "coding": [
+                  {
+                    "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                    "code": "MB"
+                  }
+                ]
+              },
+              "system": "urn:shn:coverage",
+              "value": "MBR-COVERED"
+            }
+          ],
+          "payor": [
+            {
+              "reference": "#cms-payer"
+            }
+          ],
+          "relationship": {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+                "code": "self"
+              }
+            ]
+          },
+          "resourceType": "Coverage",
+          "status": "active"
+        }
+      },
+      {
+        "fullUrl": "https://shn.example/fhir/ServiceRequest/convergence-sr",
+        "resource": {
+          "code": {
+            "coding": [
+              {
+                "system": "http://www.ama-assn.org/go/cpt",
+                "code": "72148",
+                "display": "MRI lumbar spine w/o contrast"
+              }
+            ]
+          },
+          "id": "convergence-sr",
+          "intent": "order",
+          "reasonCode": [
+            {
+              "coding": [
+                {
+                  "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                  "code": "M51.16"
+                }
+              ]
+            }
+          ],
+          "resourceType": "ServiceRequest",
+          "status": "draft",
+          "subject": {
+            "reference": "Patient/MBR-COVERED"
+          }
+        }
+      },
+      {
+        "fullUrl": "https://shn.example/fhir/QuestionnaireResponse/convergence-qr-amended",
+        "resource": {
+          "authored": "2026-06-04T00:00:00Z",
+          "extension": [
+            {
+              "url": "http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/qr-context",
+              "valueReference": {
+                "reference": "Coverage/convergence-coverage"
+              }
+            },
+            {
+              "url": "http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/qr-context",
+              "valueReference": {
+                "reference": "ServiceRequest/convergence-sr"
+              }
+            },
+            {
+              "url": "http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/intendedUse",
+              "valueCodeableConcept": {
+                "coding": [
+                  {
+                    "system": "http://hl7.org/fhir/us/davinci-crd/CodeSystem/temp",
+                    "code": "withpa",
+                    "display": "Information needed for a prior authorization"
+                  }
+                ]
+              }
+            }
+          ],
+          "id": "convergence-qr-amended",
+          "item": [
+            {
+              "linkId": "clinical-history",
+              "item": [
+                {
+                  "linkId": "conservative-therapy-weeks",
+                  "answer": [
+                    {
+                      "extension": [
+                        {
+                          "extension": [
+                            {
+                              "url": "source",
+                              "valueCode": "auto"
+                            }
+                          ],
+                          "url": "http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/information-origin"
+                        }
+                      ],
+                      "valueInteger": 6
+                    }
+                  ]
+                },
+                {
+                  "linkId": "neuro-deficit",
+                  "answer": [
+                    {
+                      "extension": [
+                        {
+                          "extension": [
+                            {
+                              "url": "source",
+                              "valueCode": "auto"
+                            }
+                          ],
+                          "url": "http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/information-origin"
+                        }
+                      ],
+                      "valueBoolean": false
+                    }
+                  ]
+                },
+                {
+                  "linkId": "prior-treatment",
+                  "item": [
+                    {
+                      "linkId": "prior-imaging",
+                      "answer": [
+                        {
+                          "extension": [
+                            {
+                              "extension": [
+                                {
+                                  "url": "source",
+                                  "valueCode": "auto"
+                                }
+                              ],
+                              "url": "http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/information-origin"
+                            }
+                          ],
+                          "valueBoolean": true
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "questionnaire": "http://smarthealth.network/fhir/Questionnaire/pa-lumbar-mri|1.0.0",
+          "resourceType": "QuestionnaireResponse",
+          "status": "completed",
+          "subject": {
+            "reference": "Patient/MBR-COVERED"
+          }
+        }
+      },
+      {
+        "fullUrl": "https://shn.example/fhir/Provenance/convergence-prov",
+        "resource": {
+          "agent": [
+            {
+              "who": {
+                "reference": "Organization/provider"
+              }
+            }
+          ],
+          "id": "convergence-prov",
+          "recorded": "2026-06-04T00:00:00Z",
+          "resourceType": "Provenance",
+          "target": [
+            {
+              "reference": "QuestionnaireResponse/convergence-qr-amended"
+            }
+          ]
+        }
+      }
+    ],
+    "identifier": {
+      "system": "urn:shn:pas:bundle",
+      "value": "twinfence-upd-0001"
+    },
+    "resourceType": "Bundle",
+    "timestamp": "2026-06-04T00:00:00Z",
+    "type": "collection"
+  }
+}

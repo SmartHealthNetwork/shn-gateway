@@ -140,6 +140,12 @@ type Config struct {
 	// eligibility an engine-side Coverage read). It no longer DERIVES a Responder: a
 	// partner that wants the engine to answer PA legs from its own decisions builds a
 	// LegResponder around this interface and sets Responder. Optional.
+	//
+	// Deprecated: the engine no longer consumes this field (the payer retirement
+	// removed the derived in-process responder), so setting it alone does nothing.
+	// It is kept for source compatibility until the seam-promotion decision lands;
+	// implement shnsdk.Adjudicator behind the standalone SDK Responder, or set
+	// Config.Responder, instead.
 	Adjudicator shnsdk.Adjudicator
 	// Responder is the payer content OCCUPANT and the only source of Da Vinci leg
 	// answers. REQUIRED for the payer role — New returns an error without it (§3.2's

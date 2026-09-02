@@ -89,7 +89,7 @@ func (g *Gateway) conformantCRDBind(reqJSON []byte, tokSubject string) (srJSON, 
 
 // handleCRDNativeInbound serves the conformant CRD leg: subject-bind on the conformant shape,
 // ingress-validate the SR + coverage, then forward the VERBATIM conformant bytes to the responder
-// (an injected Adjudicator decides / native forwards to the real RI). Mirrors handleCRDInbound's structure for
+// (an injected LegResponder decides / native forwards to the real RI). Mirrors handleCRDInbound's structure for
 // the conformant shape; the existing minimized handler is untouched.
 func (g *Gateway) handleCRDNativeInbound(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token, reqJSON []byte, answerTok string) {
 	ctx := r.Context()

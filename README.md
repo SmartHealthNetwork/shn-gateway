@@ -259,9 +259,11 @@ exchanges respectively.)
    gateway forwards CRD/DTR/PAS to a Da Vinci-conformant service you already
    run, authenticating to it as a SMART Backend Services client (see
    [Authenticating to your backend](docs/INTEGRATION.md#authenticating-to-your-backend-smart-backend-services)).
-3. **A custom `engine.Config.Adjudicator`** — the stable seam for your own
-   coverage and medical-necessity policy, for decisioning that doesn't speak
-   Da Vinci natively. See [`STABILITY.md`](STABILITY.md).
+3. **A custom `shnsdk.Adjudicator` behind the standalone SDK responder** — the
+   stable path for your own coverage and medical-necessity policy when your
+   decisioning doesn't speak Da Vinci natively; the responder runs in place
+   of the gateway on the payer side (`crd-order-dispatch` not yet served —
+   see [`STABILITY.md`](STABILITY.md)).
 
 **Proving it works is deploy-and-test, not a laptop loopback.** A payer is
 dialed, not dialing: the Hub `POST`s to your registered
@@ -351,8 +353,8 @@ role-specific — is [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md).
   to end: FHIR system of record, provider-data origination, native Da Vinci
   ingress, payer decisioning, custom connectors.
 - [`STABILITY.md`](STABILITY.md) — versioning policy and which seams
-  (`engine.Config.Adjudicator`, `engine.Config.SoR`, …) are safe to depend on
-  across versions.
+  (`engine.Config.SoR`, `engine.Config.Store`, `shnsdk.Adjudicator` behind the
+  standalone responder, …) are safe to depend on across versions.
 - [`SECURITY.md`](SECURITY.md) — vulnerability reporting.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — how this snapshot relates to the
   internal platform repo, and how to reach us.

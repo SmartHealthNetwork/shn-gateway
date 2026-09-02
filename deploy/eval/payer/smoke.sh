@@ -12,7 +12,11 @@ set -euo pipefail
 : "${PAYER_HOLDER_ID:?set PAYER_HOLDER_ID to your DEPLOYED+registered payer holder id (shn clients)}"
 
 prov="docker compose -p evalprov -f gateway/deploy/eval/compose.eval.yml"
-trap '$prov down -v >/dev/null 2>&1 || true' EXIT
+# The teardown must carry SHN_SECRETS too: compose.eval.yml interpolates it as a required
+# variable on EVERY compose invocation (down included, not just up), so a bare `down -v`
+# here would die on interpolation before removing anything — and a silenced trap would
+# leave the whole eval stack running after a green run. Same value the `up` below uses.
+trap 'SHN_SECRETS="$SHN_SECRETS_PROVIDER" $prov down -v' EXIT
 
 # compose.eval.yml references br-provider:43a4806 as an `image:` (not a build:) service, and that
 # reference RI is never published — so `up --build` would try to PULL it and abort unless it's

@@ -1,0 +1,66 @@
+{
+  "name": "att-patient-no-type-code",
+  "family": "attestation",
+  "description": "An FR-27 signature whose type carries no coding code asserts nothing.",
+  "expect": "reject",
+  "rejectContains": "\"type\" names no signature code",
+  "bundle": {
+    "entry": [
+      {
+        "resource": {
+          "item": [
+            {
+              "answer": [
+                {
+                  "extension": [
+                    {
+                      "extension": [
+                        {
+                          "url": "source",
+                          "valueCode": "manual"
+                        },
+                        {
+                          "extension": [
+                            {
+                              "url": "reference",
+                              "valueString": "Patient/MBR-COVERED"
+                            }
+                          ],
+                          "url": "author"
+                        }
+                      ],
+                      "url": "http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/information-origin"
+                    }
+                  ],
+                  "valueString": "independent"
+                }
+              ],
+              "extension": [
+                {
+                  "url": "http://hl7.org/fhir/StructureDefinition/questionnaireresponse-signature",
+                  "valueSignature": {
+                    "data": "cGF0aWVudC1hdHRlc3Q=",
+                    "type": [
+                      {
+                        "system": "urn:iso-astm:E1762-95:2013"
+                      }
+                    ],
+                    "when": "2026-06-04T00:00:00Z",
+                    "who": {
+                      "reference": "Patient/MBR-COVERED"
+                    }
+                  }
+                }
+              ],
+              "linkId": "functional-status"
+            }
+          ],
+          "resourceType": "QuestionnaireResponse",
+          "status": "completed"
+        }
+      }
+    ],
+    "resourceType": "Bundle",
+    "type": "collection"
+  }
+}

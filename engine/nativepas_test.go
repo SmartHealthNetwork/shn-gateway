@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -546,6 +548,135 @@ func TestNativeUpdate_ApprovedFinalizes(t *testing.T) {
 		}
 		if getCount != 0 {
 			t.Fatalf("carry-forward amendment must NOT poll ClaimResponse, but GET fired %d time(s)", getCount)
+		}
+	})
+}
+
+// TestNativeUpdate_AmendAfterResolution is the update leg's row for the UC05-class
+// amendment that lands AFTER br-payer's pend-resolution timer already flipped the prior pend to
+// A1. The real payer's answer (live-captured, testdata/br-payer/pas-update-response-amend-after-
+// resolution.json) is a re-pend on the SAME ClaimResponse id with outcome "complete" (never
+// reset by persistUpdatePath) + reviewAction A4 + the pended-resolution tag, and no Task. The
+// leg must treat it exactly like the pre-timer "queued" re-pend: poll GET ClaimResponse/{id}
+// until the RESCHEDULED timer resolves it to A1, then relay the resolved A1 + Finalize. Before
+// the fix this answered 502 "upstream payer PAS update response untranslatable".
+func TestNativeUpdate_AmendAfterResolution(t *testing.T) {
+	load := func(name string) []byte {
+		t.Helper()
+		b, err := os.ReadFile(filepath.Join("testdata", "br-payer", name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		return b
+	}
+	const origCorr = "convergence-pas-submit-0001"
+	const pci = "PCI-CONF-UPD"
+	seedPended := func() *censusSoR {
+		s := newCensusSoR()
+		_ = s.RecordPendedClaim(pci, origCorr)
+		return s
+	}
+	afterTimer := load("pas-update-response-amend-after-resolution.json")
+	rependWindow := load("pas-claimresponse-amend-repend-window.json")
+	resolved := load("pas-claimresponse-amend-resolved.json")
+
+	t.Run("complete+A4 re-pend -> poll the rescheduled timer -> A1 + Finalize", func(t *testing.T) {
+		bundle := originatorBuiltConformantUpdateBundleProfile(t, true) // infoChanged → polls
+		var getCount int
+		var getPaths []string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/fhir+json")
+			switch r.Method {
+			case http.MethodPost: // /Claim/$submit → the amend-after-resolution shape
+				_, _ = w.Write(afterTimer)
+			case http.MethodGet: // GET /ClaimResponse/1765 → still re-pended, then the timer's A1
+				getCount++
+				getPaths = append(getPaths, r.URL.Path)
+				if getCount >= 2 {
+					_, _ = w.Write(resolved)
+					return
+				}
+				_, _ = w.Write(rependWindow)
+			default:
+				http.Error(w, "unexpected", http.StatusNotFound)
+			}
+		}))
+		defer srv.Close()
+		s := seedPended()
+		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", s, fixedClock,
+			WithPendReQuery(2*time.Second, 5*time.Millisecond))
+		res, err := n.Handle(context.Background(), "pas-claim-update", "corr-1", pci, bundle)
+		if err != nil || res.Status != 0 {
+			t.Fatalf("amend-after-resolution: err=%v status=%d msg=%s", err, res.Status, res.Message)
+		}
+		if getCount < 2 {
+			t.Fatalf("expected the leg to RE-QUERY the rescheduled timer (getCount>=2), got %d", getCount)
+		}
+		for _, p := range getPaths {
+			if p != "/ClaimResponse/1765" {
+				t.Fatalf("re-query must address the SAME id the payer re-pended in place, got %s", p)
+			}
+		}
+		parsed, perr := shnsdk.ParseClaimResponse(res.ResponseFHIR)
+		if perr != nil || parsed.Outcome != "approved" || parsed.PreAuthRef != "AUTH-0002" {
+			t.Fatalf("resolved response must be approved AUTH-0002, got outcome=%q ref=%q err=%v", parsed.Outcome, parsed.PreAuthRef, perr)
+		}
+		if res.Commit == nil || res.Rollback == nil {
+			t.Fatalf("resolved update must Finalize (Commit) + keep Rollback armed")
+		}
+		if len(res.SideEffectFHIR) != 0 {
+			t.Fatalf("update leg must emit NO EOB; got %d", len(res.SideEffectFHIR))
+		}
+	})
+
+	// Gate rejection arm: the SAME after-timer shape on a CARRY-FORWARD amendment (no infoChanged)
+	// must not poll — it surfaces as 422 "amendment still insufficient" + Rollback, like the
+	// pre-timer twin. The new classification must not widen the poll beyond re-evaluation-
+	// requesting amendments.
+	t.Run("complete+A4 re-pend WITHOUT infoChanged -> 422, never polled", func(t *testing.T) {
+		noInfoChanged := stripInfoChangedExtension(t, originatorBuiltConformantUpdateBundleProfile(t, true))
+		var getCount int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/fhir+json")
+			if r.Method == http.MethodGet {
+				getCount++
+				_, _ = w.Write(resolved)
+				return
+			}
+			_, _ = w.Write(afterTimer)
+		}))
+		defer srv.Close()
+		s := seedPended()
+		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", s, fixedClock,
+			WithPendReQuery(2*time.Second, 5*time.Millisecond))
+		res, _ := n.Handle(context.Background(), "pas-claim-update", "corr-1", pci, noInfoChanged)
+		if res.Status != http.StatusUnprocessableEntity || res.Rollback == nil {
+			t.Fatalf("carry-forward re-pend must be 422 + Rollback, got status=%d rollback=%v", res.Status, res.Rollback != nil)
+		}
+		if getCount != 0 {
+			t.Fatalf("carry-forward amendment must NOT poll, but GET fired %d time(s)", getCount)
+		}
+	})
+
+	// The bound still holds through the new shape: a re-pend whose rescheduled timer never
+	// fires within the poll deadline is 422 + Rollback, never a silent pass.
+	t.Run("complete+A4 re-pend that never resolves -> 422 + Rollback", func(t *testing.T) {
+		bundle := originatorBuiltConformantUpdateBundleProfile(t, true)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/fhir+json")
+			if r.Method == http.MethodPost {
+				_, _ = w.Write(afterTimer)
+				return
+			}
+			_, _ = w.Write(rependWindow) // never A1
+		}))
+		defer srv.Close()
+		s := seedPended()
+		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", s, fixedClock,
+			WithPendReQuery(15*time.Millisecond, 5*time.Millisecond))
+		res, _ := n.Handle(context.Background(), "pas-claim-update", "corr-1", pci, bundle)
+		if res.Status != http.StatusUnprocessableEntity || res.Rollback == nil {
+			t.Fatalf("an unresolved re-pend must be 422 + Rollback, got status=%d rollback=%v", res.Status, res.Rollback != nil)
 		}
 	})
 }

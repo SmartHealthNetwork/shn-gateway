@@ -41,8 +41,11 @@ import (
 )
 
 // config is the collapsed PUBLIC config surface. Required:
-// SHN_DISCOVERY_URL (the single anchor), ROLE, SHN_SECRETS (the bundle dir).
-// Everything else is discovery-resolved or an optional override. The seed /
+// SHN_DISCOVERY_URL (the single anchor), ROLE, SHN_SECRETS (the bundle dir), and
+// FHIR_DATA_URL (the holder's own FHIR system of record — every role; see build()).
+// A payer additionally requires its content occupant (PAYER_DAVINCI_BASE_URL, or an
+// injected Config.Responder). Everything else is discovery-resolved or an optional
+// override. The seed /
 // SHN_MANIFEST path of the substrate cmd/gateway is intentionally dropped — the
 // public binary is partner-path only.
 type config struct {

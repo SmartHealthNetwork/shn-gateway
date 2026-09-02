@@ -23,16 +23,22 @@ changes will be noted in the changelog):
 
 | Package | Description |
 |---|---|
-| `engine` | Leg-processing core — the `Config`, `Engine`, and `Handler` types; `SystemOfRecord`, `Store`, and `Adjudicator` connector interfaces |
+| `engine` | Leg-processing core — the `Config`, `Engine`, and `Handler` types; `SystemOfRecord` and `Store` connector interfaces (`shnsdk.Adjudicator` is the SDK-level decision interface — see below) |
 | `app` | Config-only gateway runner — `app.Run` and `app.Handler`/`app.HandlerWithClock` for embedding |
 | `connectors/fhirsor` | FHIR-backed `SystemOfRecord` connector |
 | `connectors/pgstore` | Postgres-backed `Store` connector |
 | `connectors/scaffold` | Runnable `SystemOfRecord` skeleton for custom / legacy backends |
 | `connectors/smartauth` | SMART Backend Services HTTP client for FHIR SoR authentication |
 
-`engine.Config.Adjudicator` is the **supported partner injection point** for payer
-decisioning. It is stable across minor versions. Do not depend on
-`engine.LegResponder` — it is an internal 0.x seam (see below).
+`engine.Config.Adjudicator` (`shnsdk.Adjudicator`) is **declared for source
+compatibility but no longer consumed by the engine** since the v0.39.0 payer
+retirement (its breaking entry below); setting it alone does nothing. The
+supported custom-adjudication paths are (1) the **standalone `shnsdk.Responder`**,
+which drives the same `shnsdk.Adjudicator` interface outside the gateway (see the
+SDK's PREVIEW guide §3c; `crd-order-dispatch` is not currently served), and
+(2) **native-forward** to your own Da Vinci endpoint (`PAYER_DAVINCI_*`).
+In-gateway injection — a `LegResponder` on `Config.Responder` — remains an
+internal 0.x seam: do not depend on it (see below).
 
 **Breaking in this release** (payer wiring):
 
@@ -177,8 +183,9 @@ helper functions and types — is gateway-internal and **unstable**: it may chan
 in any 0.x minor version without notice, and none of it is a published `shn-sdk`
 contract. Partners should not import or depend on these directly.
 
-To customize partner behavior, use the stable public seams instead: inject a
-custom `engine.Config.Adjudicator` to control payer decisions, and build against
+To customize partner behavior, use the stable public paths instead: implement
+`shnsdk.Adjudicator` and run it behind the standalone `shnsdk.Responder` (or
+native-forward to your own Da Vinci endpoint) to control payer decisions, and build against
 the published `shnsdk` types for wire data — never the internal `engine.*`
 equivalents. Internal seams are promoted to `shnsdk` once their shape has proven
 stable; until then, treat them as an implementation detail that may disappear or

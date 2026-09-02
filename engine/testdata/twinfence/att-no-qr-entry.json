@@ -1,0 +1,18 @@
+{
+  "name": "att-no-qr-entry",
+  "family": "attestation",
+  "description": "A bundle carrying no QuestionnaireResponse entry passes the attestation fence (the QR is optional on the submit leg).",
+  "expect": "accept",
+  "bundle": {
+    "entry": [
+      {
+        "resource": {
+          "id": "MBR-COVERED",
+          "resourceType": "Patient"
+        }
+      }
+    ],
+    "resourceType": "Bundle",
+    "type": "collection"
+  }
+}

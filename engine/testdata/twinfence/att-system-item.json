@@ -1,0 +1,28 @@
+{
+  "name": "att-system-item",
+  "family": "attestation",
+  "description": "A system-sourced item (no manual-source marker) needs no attestation.",
+  "expect": "accept",
+  "bundle": {
+    "entry": [
+      {
+        "resource": {
+          "item": [
+            {
+              "answer": [
+                {
+                  "valueBoolean": false
+                }
+              ],
+              "linkId": "neuro-deficit"
+            }
+          ],
+          "resourceType": "QuestionnaireResponse",
+          "status": "completed"
+        }
+      }
+    ],
+    "resourceType": "Bundle",
+    "type": "collection"
+  }
+}

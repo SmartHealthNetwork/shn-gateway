@@ -91,6 +91,10 @@ func (n *nativeResponder) handlePASClaimUpdateNative(ctx context.Context, corrID
 		// A real Da Vinci payer (br-payer) RE-PENDS an infoChanged amendment — persistUpdatePath
 		// re-evaluates the item (G0151 conditional → A4) and reschedules — and resolves A4→A1 ONLY on its
 		// own timer (PasPendedResolutionService.resolveAuthorization flips A4→A1 IN PLACE on the same id).
+		// The re-pend has TWO wire shapes, both classified pended by normalizePASResponse: outcome
+		// "queued" (the amendment landed before the timer) and outcome "complete" + A4 item (it landed
+		// AFTER the timer already approved the prior pend — the outcome is stale, the A4 is the truth).
+		// Either way the rescheduled timer is what approves it, so both poll below.
 		// The amendment genuinely ran (br-payer accepted + re-evaluated it); the TIMER is what approves it.
 		// Poll GET ClaimResponse/{id} until the timer flips it to A1. The deadline starts HERE — after
 		// the ClaimUpdate $submit rescheduled the timer (user note: poll the rescheduled timer).

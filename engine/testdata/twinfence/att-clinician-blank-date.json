@@ -1,0 +1,68 @@
+{
+  "name": "att-clinician-blank-date",
+  "family": "attestation",
+  "description": "An FR-16 attestation with an empty date is incomplete.",
+  "expect": "reject",
+  "rejectContains": "FR-16 attestation extension whose \"date\" is absent or empty",
+  "bundle": {
+    "entry": [
+      {
+        "resource": {
+          "item": [
+            {
+              "answer": [
+                {
+                  "extension": [
+                    {
+                      "extension": [
+                        {
+                          "url": "source",
+                          "valueCode": "manual"
+                        },
+                        {
+                          "extension": [
+                            {
+                              "url": "reference",
+                              "valueString": "Practitioner/1234567890"
+                            }
+                          ],
+                          "url": "author"
+                        }
+                      ],
+                      "url": "http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/information-origin"
+                    }
+                  ],
+                  "valueString": "8"
+                }
+              ],
+              "extension": [
+                {
+                  "extension": [
+                    {
+                      "url": "npi",
+                      "valueString": "1234567890"
+                    },
+                    {
+                      "url": "text",
+                      "valueString": "Reviewed and confirmed by the ordering clinician"
+                    },
+                    {
+                      "url": "date",
+                      "valueDate": ""
+                    }
+                  ],
+                  "url": "http://smarthealth.network/fhir/StructureDefinition/clinician-attestation"
+                }
+              ],
+              "linkId": "conservative-therapy-weeks"
+            }
+          ],
+          "resourceType": "QuestionnaireResponse",
+          "status": "completed"
+        }
+      }
+    ],
+    "resourceType": "Bundle",
+    "type": "collection"
+  }
+}
