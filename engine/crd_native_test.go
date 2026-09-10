@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"testing"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
@@ -28,7 +29,7 @@ func conformantCRD(member, cpt string) []byte {
 func TestConformantCRDBind_AllAgree(t *testing.T) {
 	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
 	pci, _, _ := g.cfg.SoR.ResolvePatient("MBR-COVERED")
-	srJSON, covJSON, status, msg := g.conformantCRDBind(conformantCRD("MBR-COVERED", "72148"), pci)
+	srJSON, covJSON, status, msg := g.conformantCRDBindContext(context.Background(), conformantCRD("MBR-COVERED", "72148"), pci)
 	if status != 0 {
 		t.Fatalf("all-agree: status=%d (%s), want 0", status, msg)
 	}
@@ -42,7 +43,7 @@ func TestConformantCRDBind_AllAgree(t *testing.T) {
 
 func TestConformantCRDBind_WrongTokenSubject(t *testing.T) {
 	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
-	_, _, status, _ := g.conformantCRDBind(conformantCRD("MBR-COVERED", "72148"), "some-other-pci")
+	_, _, status, _ := g.conformantCRDBindContext(context.Background(), conformantCRD("MBR-COVERED", "72148"), "some-other-pci")
 	if status != 403 {
 		t.Fatalf("wrong token subject: status=%d, want 403", status)
 	}
@@ -53,7 +54,7 @@ func TestConformantCRDBind_DivergentSubject(t *testing.T) {
 	pci, _, _ := g.cfg.SoR.ResolvePatient("MBR-COVERED")
 	// SR subject MBR-NOTCOVERED, coverage+context MBR-COVERED → inconsistent → 400.
 	body := []byte(`{"hook":"order-select","context":{"patientId":"MBR-COVERED","draftOrders":{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"ServiceRequest","subject":{"reference":"Patient/MBR-NOTCOVERED"},"code":{"coding":[{"system":"http://www.ama-assn.org/go/cpt","code":"72148"}]}}}]}},"prefetch":{"coverage":{"resourceType":"Coverage","beneficiary":{"reference":"Patient/MBR-COVERED"}}}}`)
-	_, _, status, _ := g.conformantCRDBind(body, pci)
+	_, _, status, _ := g.conformantCRDBindContext(context.Background(), body, pci)
 	if status != 400 {
 		t.Fatalf("divergent SR subject: status=%d, want 400", status)
 	}
@@ -69,7 +70,7 @@ func TestConformantCRDBind_RejectsNoOrder(t *testing.T) {
 	pci, _, _ := g.cfg.SoR.ResolvePatient("MBR-COVERED")
 	// draftOrders carries only a Patient — no ServiceRequest, no DeviceRequest.
 	body := []byte(`{"hook":"order-select","context":{"patientId":"MBR-COVERED","draftOrders":{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"Patient","id":"MBR-COVERED"}}]}},"prefetch":{"coverage":{"resourceType":"Coverage","beneficiary":{"reference":"Patient/MBR-COVERED"}}}}`)
-	_, _, status, msg := g.conformantCRDBind(body, pci)
+	_, _, status, msg := g.conformantCRDBindContext(context.Background(), body, pci)
 	if status != 400 {
 		t.Fatalf("no-order draftOrders: status=%d (%s), want 400 (no ServiceRequest or DeviceRequest → fail closed)", status, msg)
 	}
@@ -85,7 +86,7 @@ func TestConformantCRDBind_AcceptsDeviceRequest(t *testing.T) {
 	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
 	pci, _, _ := g.cfg.SoR.ResolvePatient("MBR-COVERED")
 	body := []byte(`{"hook":"order-select","context":{"patientId":"MBR-COVERED","draftOrders":{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"DeviceRequest","id":"dr1","status":"draft","intent":"order","subject":{"reference":"Patient/MBR-COVERED"},"reasonCode":[{"coding":[{"system":"http://hl7.org/fhir/sid/icd-10-cm","code":"M62.81"}]}],"codeCodeableConcept":{"coding":[{"system":"http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets","code":"E0250"}]}}}]},"selections":["DeviceRequest/dr1"]},"prefetch":{"coverage":{"resourceType":"Coverage","beneficiary":{"reference":"Patient/MBR-COVERED"}}}}`)
-	orderJSON, covJSON, status, msg := g.conformantCRDBind(body, pci)
+	orderJSON, covJSON, status, msg := g.conformantCRDBindContext(context.Background(), body, pci)
 	if status != 0 {
 		t.Fatalf("DeviceRequest order-select: status=%d (%s), want 0 (HospitalBeds E0250 DeviceRequest is a valid order-select order)", status, msg)
 	}
@@ -95,7 +96,7 @@ func TestConformantCRDBind_AcceptsDeviceRequest(t *testing.T) {
 	// The divergent-subject security property still holds for a DeviceRequest: a DR whose subject
 	// disagrees with the coverage/context is rejected (the subject-bind is order-type-agnostic).
 	divergent := []byte(`{"hook":"order-select","context":{"patientId":"MBR-COVERED","draftOrders":{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"DeviceRequest","subject":{"reference":"Patient/MBR-NOTCOVERED"},"codeCodeableConcept":{"coding":[{"system":"http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets","code":"E0250"}]}}}]}},"prefetch":{"coverage":{"resourceType":"Coverage","beneficiary":{"reference":"Patient/MBR-COVERED"}}}}`)
-	if _, _, status, _ := g.conformantCRDBind(divergent, pci); status != 400 {
+	if _, _, status, _ := g.conformantCRDBindContext(context.Background(), divergent, pci); status != 400 {
 		t.Fatalf("divergent DeviceRequest subject: status=%d, want 400 (subject-bind holds for DeviceRequest)", status)
 	}
 }
@@ -120,7 +121,7 @@ func TestConformantCRDBind_AcceptsOriginatorBuilt(t *testing.T) {
 	}
 	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
 	pci, _, _ := g.cfg.SoR.ResolvePatient("MBR-COVERED")
-	if _, _, status, msg := g.conformantCRDBind(reqJSON, pci); status != 0 {
+	if _, _, status, msg := g.conformantCRDBindContext(context.Background(), reqJSON, pci); status != 0 {
 		t.Fatalf("conformantCRDBind rejected Originator-built request: %d %s", status, msg)
 	}
 }

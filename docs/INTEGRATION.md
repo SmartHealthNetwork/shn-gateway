@@ -62,8 +62,9 @@ need the static override.
 ## Authenticating to your backend (SMART Backend Services)
 
 Wherever the gateway connects **out to a server you run** — your FHIR system of
-record (`FHIR_CLIENT_*`, above) or a Da Vinci payer endpoint in
-[native-forward mode](#native-forward-payer-mode) (`PAYER_DAVINCI_*`) — it
+record (`FHIR_CLIENT_*`, above), a Da Vinci payer endpoint in
+[native-forward mode](#native-forward-payer-mode) (`PAYER_DAVINCI_*`) or the SDC
+`$populate` engine behind `PROVIDER_DTR_POPULATE_URL` (`PROVIDER_DTR_POPULATE_*`) — it
 authenticates the same way, as an OAuth2 `client_credentials` client — by default a
 **SMART Backend Services** signed JWT assertion (`private_key_jwt`).
 
@@ -221,9 +222,19 @@ Four steps, all on your side:
    ```
 
    `scope` is optional; if you send one it must be among the client's registered
-   `scopes`. Bearers live **5 minutes** and are signed with a key the gateway
-   generates at startup, so a restart invalidates outstanding bearers — fetch one
-   per run rather than caching across sessions.
+   `scopes`. Bearers live **5 minutes**. Without `SHN_STORE_DATABASE_URL` they are
+   signed with a key the gateway generates at startup, so a restart invalidates
+   outstanding bearers — fetch one per run rather than caching across sessions; with
+   the store DSN set the signing key is shared and outlives a restart.
+
+   A `503` from the token endpoint means the gateway could not complete the issuance —
+   not that your credential was refused. It never returns a token, so **retry with a
+   newly minted `client_assertion`**. Mint one per request (the `private_key_jwt` norm)
+   and a `503` costs you nothing. Re-sending the same assertion may be refused `401` as
+   replayed: the gateway cannot always tell whether the one-time-use record for that `jti`
+   was written before the failure, so it will not promise you that one back. An
+   `invalid_scope` `400` is different — it is decided before the `jti` is recorded, so fix
+   the `scope` and retry with the assertion you already hold.
 
 4. **Call the ingress with the bearer:**
 
@@ -236,8 +247,16 @@ Four steps, all on your side:
 
    The header is exactly `Authorization: Bearer <token>` (canonical casing, one
    space). A missing or rejected bearer returns `401` with the body
-   `{"error":"ingress authentication required"}`. If you see a different 401
-   body, something in front of the gateway is answering, not the gateway.
+   FHIR `OperationOutcome`, whose issue diagnostic is
+   `ingress authentication required`.
+
+   `$submit` and `$questionnaire-package` return `application/fhir+json` for
+   successful FHIR resources and locally generated errors. Local errors carry an
+   `OperationOutcome` with `issue[].severity`, `code`, and `diagnostics`; status
+   codes retain their authentication, subject, routing, and availability meanings.
+   A framed upstream refusal keeps the upstream status, body, and media type.
+   CDS Hooks routes retain JSON responses, and the token endpoint retains OAuth
+   error responses.
 
 **Alternative — present the signed JWT directly.** The ingress also accepts a
 registered client's self-signed JWT *as* the bearer, with no token call (the
@@ -265,6 +284,41 @@ For a legacy or non-FHIR system of record (HL7v2, X12, SQL, SOAP), implement the
 step-by-step: copy `scaffold.go`, fill the read methods against your backend
 (deriving the patient identifier via `shnsdk.ResolvePCI`), and wire your
 connector through the already-public `engine.Config.SoR` seam.
+
+## System-of-record read failures
+
+The built-in FHIR connector distinguishes absent records from failed reads. A valid
+empty Patient search keeps the existing unknown-member result. A failed token request,
+unreachable server or invalid FHIR response is a backend failure, not evidence that the
+patient is missing.
+
+| Backend result | Local HTTP status | Safe message |
+|---|---|---|
+| Authentication or credential refusal | 502 | `system of record authentication failed` |
+| Transport failure, timeout, rate limit or upstream server outage | 503 | `system of record unavailable` |
+| Malformed or unusable required response data | 502 | `system of record returned an invalid response` |
+
+FHIR operation endpoints carry these errors in an `OperationOutcome`; ordinary JSON
+and CDS Hooks endpoints keep their existing response families. A recipient failure
+relayed through the Hub keeps the Hub's generic failure response. Raw backend responses,
+URLs, member identifiers and token details are not exposed in these new error messages.
+Check backend credentials and service health before changing a patient's identifier.
+A 503 does not promise an automatic retry or make repeating a clinical write safe.
+
+Custom connectors can additionally implement `engine.ContextSystemOfRecord`. Its nine
+`Context`-suffixed read methods accept the request context and return an error as their
+last result. Return a nil error for actual absence and an `engine.SoRReadError` with
+`SoRAuthenticationFailed`, `SoRUnavailable` or `SoRInvalidResponse` for a failed read.
+Do not include protected backend details in errors. The engine selects this optional
+interface automatically, including through its observer wrapper, and stops before
+using missing-data defaults or starting further exchange work when a read fails.
+
+The original `engine.SystemOfRecord` interface is unchanged. Existing implementations
+remain source compatible; the adapter cannot reconstruct an error that a legacy
+connector discarded, or cancel a legacy call already in progress. Implement the optional
+interface to obtain accurate failure classification and request cancellation. Valid
+absence of optional clinical facts retains its prior behavior; a failed subsidiary read
+does not produce a partial successful clinical context.
 
 ## Payer decisioning
 
@@ -323,7 +377,10 @@ no stub fallback — `FHIR_DATA_URL` is required for every role). To populate
 Vinci DTR case, where questionnaires carry CQL expressions the gateway does not
 itself evaluate — forward population to an SDC `Questionnaire/$populate` engine
 (see [CONFIGURATION.md](CONFIGURATION.md#provider-dtr-population-provider_dtr_)
-for the two variables that control this).
+for the variables that control this). The connector authenticates to that engine
+with its own SMART Backend Services credential block (`PROVIDER_DTR_POPULATE_*`),
+the same `private_key_jwt` / `client_secret_post` shape as the SoR and payer
+connectors, and fails the leg closed if the token endpoint refuses.
 
 A **CMS-0057-conformant** provider runs its own DTR client and points
 `PROVIDER_DTR_POPULATE_URL` at it. A provider without a DTR client yet can point it
@@ -338,6 +395,9 @@ it can reach PAS — then sealed and audited like any other leg.
 Set `SHN_STORE_DATABASE_URL` to a Postgres DSN to persist in-flight
 (pended/resumable) claim state across restarts and replicas, instead of the
 default in-memory store.
+
+The same database also shares the ingress signing key and one-time-use records
+across replicas (see [DEPLOYMENT.md](DEPLOYMENT.md), "Running more than one replica").
 
 ## Seed your own FHIR server
 

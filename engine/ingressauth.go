@@ -8,10 +8,12 @@
 // OWN identity and never reads the inbound Authorization header (AI-11/OWD-6; same
 // boundary as gateway/connectors/smartauth, inbound twin).
 //
-// Bearers are signed with an EPHEMERAL in-process ES384 key (5-min TTL; a restart makes
-// clients re-fetch). That is sound ONLY while the ingress is single-reachable-instance:
-// cloud public exposure is a planned future enhancement, and the shared-key/JWKS +
-// shared-jti requirement rides that future public-ingress slice.
+// Bearers are ES384, 5-min TTL, signed with the key the IngressKeyStore hands out and
+// carrying its kid so any replica behind the same store can resolve the verification
+// key. The no-DSN default store is one process-local key (a restart makes clients
+// re-fetch), which is correct only at a single reachable instance — New says so once
+// in the log at boot. The client_assertion jti is one-time-use through the ReplayStore,
+// so the guard holds across replicas behind a shared store as well.
 //
 // These routes are PUBLIC once cloud exposure lands — no debug surface,
 // return generic errors — never raw JWT/crypto detail in a response body.
@@ -19,23 +21,21 @@ package engine
 
 import (
 	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
-	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 	"github.com/golang-jwt/jwt/v5"
 )
 
 const (
 	ingressTokenPath = "/oauth/token"
-	ingressBearerTTL = 5 * time.Minute
+	// IngressBearerTTL is the lifetime of an issued ingress bearer. Exported so a
+	// shared key store can size a key's verification life from it.
+	IngressBearerTTL = 5 * time.Minute
 	ingressJTIWindow = 5 * time.Minute
-	ingressJTIMax    = 4096
 	ingressScope     = "system/Davinci.write"
 	assertionType    = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
 
@@ -56,35 +56,45 @@ type IngressClientRegistration struct {
 }
 
 type ingressAuthServer struct {
-	baseURL   string                               // config-pinned; aud (never request-derived)
-	clients   map[string]IngressClientRegistration // client_id → registration
-	pubKeys   map[string]any                       // client_id → *ecdsa/*rsa PublicKey
-	bearerKey *ecdsa.PrivateKey                    // ephemeral ES384, self-signed bearers
-	jti       *shnsdk.ReplayGuard                  // one-time-use on the ASSERTION jti
-	now       func() time.Time
+	baseURL string                               // config-pinned; aud (never request-derived)
+	clients map[string]IngressClientRegistration // client_id → registration
+	pubKeys map[string]any                       // client_id → *ecdsa/*rsa PublicKey
+	keys    IngressKeyStore                      // signs issued bearers; resolves kid → public key
+	replay  ReplayStore                          // one-time-use on the ASSERTION jti (ReplayScopeIngressJTI)
+	now     func() time.Time
+	// storeErr counts a shared-state store failure (Config.StoreErrorMetric, via
+	// Gateway.noteStoreError). Set by New; nil in a bare-constructed server, and
+	// every call site is nil-guarded.
+	storeErr func(store string)
 }
 
-func newIngressAuthServer(baseURL string, clients map[string]IngressClientRegistration, now func() time.Time) (*ingressAuthServer, error) {
+// noteStoreError counts one store failure on the token endpoint. Nil-safe.
+func (s *ingressAuthServer) noteStoreError(store string) {
+	if s.storeErr != nil {
+		s.storeErr(store)
+	}
+}
+
+func newIngressAuthServer(baseURL string, clients map[string]IngressClientRegistration, now func() time.Time, keys IngressKeyStore, replay ReplayStore) (*ingressAuthServer, error) {
 	if baseURL == "" {
 		return nil, fmt.Errorf("ingress auth: baseURL (aud) required")
 	}
 	if len(clients) == 0 {
 		return nil, fmt.Errorf("ingress auth: at least one registered client required")
 	}
+	if keys == nil || replay == nil {
+		return nil, fmt.Errorf("ingress auth: key store and replay store required")
+	}
 	if now == nil {
 		now = time.Now
 	}
-	bk, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
-	if err != nil {
-		return nil, fmt.Errorf("ingress auth: bearer key: %w", err)
-	}
 	s := &ingressAuthServer{
-		baseURL:   strings.TrimRight(baseURL, "/"),
-		clients:   clients,
-		pubKeys:   map[string]any{},
-		bearerKey: bk,
-		jti:       shnsdk.NewReplayGuard(ingressJTIWindow, ingressJTIMax),
-		now:       now,
+		baseURL: strings.TrimRight(baseURL, "/"),
+		clients: clients,
+		pubKeys: map[string]any{},
+		keys:    keys,
+		replay:  replay,
+		now:     now,
 	}
 	for id, reg := range clients {
 		var (
@@ -117,6 +127,21 @@ func oauthErr(w http.ResponseWriter, status int, code, desc string) {
 	w.Header().Set("Pragma", "no-cache")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": code, "error_description": desc})
+}
+
+// oauthUnavailable is the token endpoint's 503: a shared-store dependency could not be
+// reached, so this replica cannot complete an issuance it would otherwise complete. 503
+// (not 500) tells the client to retry, and the retry carries a FRESH client_assertion:
+// a 503 never returns a token, but the one that follows a failed one-time-use record
+// write cannot prove the record was not written (the write can commit and its
+// acknowledgment be lost), so re-presenting the same assertion may be refused as
+// replayed. Every refusal decided before that write leaves the assertion unspent, which
+// is why the record is the endpoint's last step. no-store keeps a cache from pinning the
+// outage (oauthErr sets it too; stated here so the header is not an accident of the
+// helper).
+func oauthUnavailable(w http.ResponseWriter, desc string) {
+	w.Header().Set("Cache-Control", "no-store")
+	oauthErr(w, http.StatusServiceUnavailable, "server_error", desc)
 }
 
 func (s *ingressAuthServer) handleToken(w http.ResponseWriter, r *http.Request) {
@@ -176,21 +201,81 @@ func (s *ingressAuthServer) handleToken(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	jtiVal, _ := claims["jti"].(string)
-	// One-time-use on the ASSERTION jti (NOT the issued bearer — the bearer is
-	// reusable within its lifetime). replay==true ⇒ reject.
-	if jtiVal == "" || s.jti.CheckAndRecord(jtiVal, s.now()) {
+	// One-time-use on the ASSERTION jti, per client_id (RFC 7523 §3), through the
+	// shared record — so the guard holds across replicas, not just in this process.
+	// NOT the issued bearer: that stays reusable within its lifetime.
+	// replay==true ⇒ reject.
+	now := s.now()
+	if jtiVal == "" {
 		oauthErr(w, http.StatusUnauthorized, "invalid_client", "missing or replayed jti")
+		return
+	}
+	if len(jtiVal) > MaxReplayKeyBytes {
+		// Refused as a bad credential, BEFORE the record is consulted: an oversized jti is
+		// the client's own field, and letting it reach the store would turn it into a 503
+		// (and a counted store error) on a perfectly healthy database.
+		oauthErr(w, http.StatusUnauthorized, "invalid_client", "invalid jti")
+		return
+	}
+	// ORDER IS LOAD-BEARING: EVERYTHING that can refuse this request runs before the
+	// one-time-use record is written, and the record is the last step before the response.
+	// A refusal raised after the record would answer on a credential already spent, so
+	// the endpoint resolves the signing key, checks the scope and produces the signature
+	// FIRST, into a local, and only then spends the jti — every refusal this endpoint can
+	// decide for itself therefore leaves the assertion untouched. The record's own write is the one step
+	// that cannot be moved earlier, and a failure THERE is ambiguous by nature (see
+	// below): that is why the client's rule is one fresh assertion per request rather
+	// than a retry of the one it already sent. Nothing is on the wire until the record has
+	// been written, so CheckAndRecord remains the single atomic gate against a concurrent
+	// replica: a replayed assertion costs one wasted signature and is still refused here.
+	kid, key, kerr := s.keys.SigningKey(now)
+	if kerr != nil {
+		// The signing key lives in the shared store; without it no replica can issue.
+		// Nothing has been recorded here, so this same assertion is still valid — but the
+		// client's rule on ANY 503 from this endpoint is the same one rule: retry with a
+		// FRESH client_assertion (one per request, the private_key_jwt norm). Re-sending
+		// this one merely also happens to work.
+		s.noteStoreError(storeErrIngressKey)
+		oauthUnavailable(w, "signing key unavailable")
 		return
 	}
 	scope := r.FormValue("scope")
 	if scope != "" && !scopeAllowed(scope, reg.Scopes) {
+		// A bad request, not a spent credential: the client fixes the scope and retries
+		// with the assertion it already holds.
 		oauthErr(w, http.StatusBadRequest, "invalid_scope", "scope not allowed")
 		return
 	}
-
-	bearer, err := s.issueBearer(clientID, scope)
-	if err != nil {
-		oauthErr(w, http.StatusInternalServerError, "server_error", "issue bearer")
+	bearer, serr := signBearer(kid, key, clientID, scope, s.baseURL, now)
+	if serr != nil {
+		// Signing failed with a key already in hand — a key row this build cannot sign
+		// with, not an unreachable store, so nothing is counted against a store. Reachable
+		// on a shared key table with more than one writer, which is exactly why it runs
+		// before the record: nothing is spent here. As above, the client's rule is still a
+		// FRESH assertion on any 503; the one it already holds also still works here.
+		oauthUnavailable(w, "token could not be signed")
+		return
+	}
+	replayed, rerr := s.replay.CheckAndRecord(ReplayScopeIngressJTI, clientID, jtiVal, now, now.Add(ingressJTIWindow))
+	if rerr != nil {
+		// The record could not be CONFIRMED — which is not the same as "not written". The
+		// statement may have committed and only its acknowledgment been lost (a dropped
+		// connection, a deadline fired while the commit was on its way back), so this jti
+		// may or may not be spent; a store error never proves it was not.
+		//
+		// The assertion is not known to be replayed, so 401 would accuse an honest client
+		// of a bad credential; answer the same retryable 503 the signing key answers. NO
+		// token goes out: the bearer signed above is discarded. The client's retry carries
+		// a FRESH client_assertion — a retry that re-sends THIS one may be refused as
+		// replayed, and that refusal is correct, not a broken promise. Rows:
+		// TestIngressToken_AckLostRecordWrite_FreshAssertionIsTheRetry (here) and the
+		// Postgres twin in connectors/pgstore.
+		s.noteStoreError(storeErrReplay)
+		oauthUnavailable(w, "one-time-use record unavailable")
+		return
+	}
+	if replayed {
+		oauthErr(w, http.StatusUnauthorized, "invalid_client", "missing or replayed jti")
 		return
 	}
 	// RFC 6749: successful token responses MUST carry Cache-Control: no-store.
@@ -199,16 +284,22 @@ func (s *ingressAuthServer) handleToken(w http.ResponseWriter, r *http.Request) 
 	w.Header().Set("Pragma", "no-cache")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"access_token": bearer, "token_type": "bearer",
-		"expires_in": int(ingressBearerTTL.Seconds()), "scope": scope,
+		"expires_in": int(IngressBearerTTL.Seconds()), "scope": scope,
 	})
 }
 
-func (s *ingressAuthServer) issueBearer(clientID, scope string) (string, error) {
-	now := s.now()
-	return jwt.NewWithClaims(jwt.SigningMethodES384, jwt.MapClaims{
-		"client_id": clientID, "scope": scope, "aud": s.baseURL,
-		"iat": now.Unix(), "exp": now.Add(ingressBearerTTL).Unix(),
-	}).SignedString(s.bearerKey)
+// signBearer signs a bearer with an ALREADY-RESOLVED signing key and stamps its kid in
+// the header, so a sibling replica behind the same store can resolve the verification key
+// for it. Pure CPU: the key is passed in and the result is returned to the caller, which
+// signs into a local BEFORE it writes the one-time-use record — so neither a key-store
+// outage nor a key this build cannot sign with can consume the client's assertion.
+func signBearer(kid string, key *ecdsa.PrivateKey, clientID, scope, aud string, now time.Time) (string, error) {
+	tok := jwt.NewWithClaims(jwt.SigningMethodES384, jwt.MapClaims{
+		"client_id": clientID, "scope": scope, "aud": aud,
+		"iat": now.Unix(), "exp": now.Add(IngressBearerTTL).Unix(),
+	})
+	tok.Header["kid"] = kid
+	return tok.SignedString(key)
 }
 
 func scopeAllowed(requested string, allowed []string) bool {
@@ -220,24 +311,61 @@ func scopeAllowed(requested string, allowed []string) bool {
 	return false
 }
 
-// verifyBearer checks the Authorization bearer against the server's own (ephemeral)
-// signing key, ES384-pinned, config-pinned aud. No one-time-use: a bearer is reusable
-// within its 5-min lifetime (standard SMART Backend Services).
-func (s *ingressAuthServer) verifyBearer(r *http.Request) bool {
+// verifyBearer checks the Authorization bearer against the key store's public key
+// for the bearer's kid, ES384-pinned, config-pinned aud. The alg and kid shape are
+// checked BEFORE the store is consulted so a forged header cannot drive lookups;
+// an unknown kid, a store error or a timeout rejects. No one-time-use: a bearer is
+// reusable within its lifetime (standard SMART Backend Services).
+//
+// The second return says WHY a false refused (the shape verifyHubAssertion uses):
+// unavailable=true means the KEY STORE could not tell — its backing store errored or
+// timed out — so the route owes a retryable 503 rather than the 401 that reads as a bad
+// credential. The refusal itself is the same either way: a bearer whose kid cannot be
+// resolved is never admitted. The outage is counted here, at the one place that knows a
+// store call failed.
+func (s *ingressAuthServer) verifyBearer(r *http.Request) (ok bool, unavailable bool) {
 	h := r.Header.Get("Authorization")
 	// Strict canonical casing is intentional: SMART Backend Services clients send
 	// canonical "Bearer "; the case-insensitive variant isn't worth the cost (mirrors
 	// the smartauthproxy sister).
 	if !strings.HasPrefix(h, "Bearer ") {
-		return false
+		return false, false
 	}
 	raw := strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
-	_, err := jwt.Parse(raw, func(*jwt.Token) (any, error) { return s.bearerKey.Public(), nil },
+	storeDown := false
+	_, err := jwt.Parse(raw, func(tok *jwt.Token) (any, error) {
+		if tok.Method.Alg() != jwt.SigningMethodES384.Alg() {
+			return nil, fmt.Errorf("alg")
+		}
+		kid, _ := tok.Header["kid"].(string)
+		if !validKID(kid) {
+			return nil, fmt.Errorf("kid")
+		}
+		pub, found, kerr := s.keys.VerificationKey(kid, s.now())
+		if kerr != nil {
+			// A well-formed kid the store could not look up. Distinguished from an
+			// unknown kid: this one is an outage, and only the caller of the store can
+			// say so. (A malformed kid never gets here, so this cannot be driven by a
+			// forged header.)
+			storeDown = true
+			return nil, fmt.Errorf("key store unavailable: %w", kerr)
+		}
+		// IngressKeyStore is a public seam: a third-party store answering
+		// (nil, true) must reject like an unknown kid, never reach ecdsa.Verify.
+		if !found || pub == nil {
+			return nil, fmt.Errorf("unknown kid")
+		}
+		return pub, nil
+	},
 		jwt.WithValidMethods([]string{"ES384"}),
 		jwt.WithExpirationRequired(),
 		jwt.WithAudience(s.baseURL),
 		jwt.WithTimeFunc(s.now))
-	return err == nil
+	if err != nil && storeDown {
+		s.noteStoreError(storeErrIngressKey)
+		return false, true
+	}
+	return err == nil, false
 }
 
 // audUnder reports whether aud is the config base itself or a path strictly under it.
@@ -255,6 +383,7 @@ func audUnder(aud, base string) bool {
 // form br-provider's BFF sends), verified per-call against the registered key. Distinct
 // from verifyBearer (the gateway's OWN ephemeral ES384 bearer); the two are token-shape
 // DISJOINT (an issued bearer carries no iss), so the OR in ingressAuthOK cannot fail open.
+// It touches no shared store, so it keeps answering through a key-store outage.
 // Authority is edge-only (never reaches authorize()); org-level TPO; scope is advisory and
 // NOT enforced on either path. A registered client implicitly gains both auth modes.
 func (s *ingressAuthServer) verifyDirectBearer(r *http.Request) bool {

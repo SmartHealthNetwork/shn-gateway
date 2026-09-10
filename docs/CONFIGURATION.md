@@ -205,7 +205,7 @@ after startup, so the first `GET` after boot typically already has results.
 
 What gets probed is derived from what you've configured — no separate list to
 maintain. `FHIR_DATA_URL` and `PAYER_DAVINCI_BASE_URL` are checked with a live
-FHIR `$metadata` fetch; `FHIR_TOKEN_URL` and `PAYER_DAVINCI_TOKEN_URL` are
+FHIR `$metadata` fetch; `FHIR_TOKEN_URL`, `PAYER_DAVINCI_TOKEN_URL` and `PROVIDER_DTR_POPULATE_TOKEN_URL` are
 checked with a live credential fetch against your configured client; every
 other endpoint URL you've set — including the [advanced
 overrides](#advanced-overrides-rarely-needed) — is checked with a plain
@@ -227,7 +227,9 @@ See [INTEGRATION.md](INTEGRATION.md) for how these fit together.
 | `FHIR_CLIENT_SCOPE` | Requested scope. Default `system/*.read` — must be a scope your server grants this client. |
 | `FHIR_CLIENT_KID` | Key id for the client assertion JWK, if your server requires it. |
 | `FHIR_CLIENT_SECRET` | OAuth2 client secret for the `client_secret_post` `client_credentials` grant — for authorization servers that cannot issue asymmetric credentials. The value is the secret **itself, not a path** (unlike `FHIR_CLIENT_KEY`). Mutually exclusive with `FHIR_CLIENT_KEY`/`_ALG`/`_KID`; prefer `private_key_jwt` when your server supports it. |
-| `SHN_STORE_DATABASE_URL` | Postgres DSN for durable claim-state storage. Omit for in-memory (non-durable across restarts). |
+| `SHN_STORE_DATABASE_URL` | Postgres DSN for durable claim-state storage **and the shared replica state: ingress signing key (where the Da Vinci ingress is enabled), one-time-use records, exchange correlation**. Omit for in-memory (non-durable across restarts; single instance only — see [DEPLOYMENT.md](DEPLOYMENT.md), "Running more than one replica"). **The database behind this DSN holds the ingress bearer signing key in the clear, so the role in the DSN is the signing authority for this holder's ingress bearers** — protect both as you would a private key file; see [DEPLOYMENT.md](DEPLOYMENT.md), "The signing key's trust boundary". |
+| `SHN_STORE_MAX_CONNS` | Maximum connections in the shared-state pool (default `8`; a `MinConns` floor of 2 is kept warm). Four consumers share this one pool — claim state, one-time-use records, ingress signing key, exchange correlation — and an exchange append holds a connection for its transaction, so the default is sized for concurrency rather than for the host's CPU count. Size it against your database's connection limit divided by the number of gateways sharing the DSN: the fleet's ceiling is this value multiplied by that count, and it has to stay under the limit. Count replicas, not deployments: the draw is replicas × gateways sharing the DSN × this value, and that product is what has to stay under the limit (each replica also holds the warm floor open whether or not it is serving). Overrides any `pool_max_conns` in the DSN. Must be an integer in `[1, 2147483647]` (the pool field's own width); anything else is a boot error naming the variable. |
+| `EXCHANGE_TTL` | Lifetime of an exchange correlation record as a Go duration (default `168h`). Applies to exchanges begun after the change — existing records keep the expiry they were written with. Must be positive; an unparsable or non-positive value is a boot error naming the variable. |
 
 ## Accept Da Vinci requests from a provider EHR (provider, optional)
 
@@ -351,7 +353,28 @@ tradeoff.
 | Env var | Description |
 |---|---|
 | `PROVIDER_DTR_NATIVE` | `true` to forward DTR population to an SDC `$populate` engine instead of the managed populator. Default `false`. |
-| `PROVIDER_DTR_POPULATE_URL` | The SDC `Questionnaire/$populate` endpoint. Required when `PROVIDER_DTR_NATIVE=true`. |
+| `PROVIDER_DTR_POPULATE_URL` | The SDC `Questionnaire/$populate` endpoint. Required when `PROVIDER_DTR_NATIVE=true`, and for `ORIGINATION_PROFILE=demo` / `provider-data` (the operated engine those lanes require). |
+| `PROVIDER_DTR_POPULATE_TOKEN_URL` | SMART Backend Services token endpoint the gateway authenticates to the `$populate` engine with. Sets the connector's **own** credential block — the engine may be your SoR under the same registration, or a separate server with its own; either way the connector mints its own bearer and never reuses the `FHIR_*` client's. Requires `PROVIDER_DTR_POPULATE_URL`. |
+| `PROVIDER_DTR_POPULATE_CLIENT_ID` | Client id the token endpoint knows the connector by. Required with `PROVIDER_DTR_POPULATE_TOKEN_URL`. |
+| `PROVIDER_DTR_POPULATE_CLIENT_KEY` | Path to the PEM private key for `private_key_jwt`. |
+| `PROVIDER_DTR_POPULATE_CLIENT_ALG` | `ES384` or `RS384`; must match the key. |
+| `PROVIDER_DTR_POPULATE_CLIENT_KID` | Optional `kid` header for the client assertion. |
+| `PROVIDER_DTR_POPULATE_CLIENT_SECRET` | Client secret for `client_secret_post` (the value, not a path). |
+| `PROVIDER_DTR_POPULATE_SCOPE` | Scope requested from the token endpoint. Default `system/*.read`. |
+
+**Exactly-one-mode rule:** if `PROVIDER_DTR_POPULATE_TOKEN_URL` is set, then
+`PROVIDER_DTR_POPULATE_URL` and `PROVIDER_DTR_POPULATE_CLIENT_ID` must also be set,
+plus exactly one credential mode — `PROVIDER_DTR_POPULATE_CLIENT_KEY` +
+`PROVIDER_DTR_POPULATE_CLIENT_ALG` (`private_key_jwt`, preferred) or
+`PROVIDER_DTR_POPULATE_CLIENT_SECRET` (`client_secret_post`). A partial or mixed
+credential block is a hard startup error (a likely misconfig). Setting
+`PROVIDER_DTR_POPULATE_URL` alone (no token URL) is valid and posts to the engine
+**unauthenticated** — the gateway logs a warning on startup to make this mode
+visible. A token refusal fails the DTR leg closed (the request that needed the
+population answers `502`); the gateway never retries without credentials. The
+token endpoint also joins `/internal/checks` as a credential check, so a rotated
+or revoked credential is reported there (`credential-rejected`, with the HTTP
+status) rather than discovered on the next prior authorization.
 
 ## Sealed message frames (v1)
 

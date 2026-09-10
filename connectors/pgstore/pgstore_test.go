@@ -29,11 +29,7 @@ func freshStore(t *testing.T, holderID string) *PgStore {
 	t.Helper()
 	pool := openTestPool(t)
 	ctx := context.Background()
-	for _, tbl := range []string{"gw_auth_number", "gw_pended_claim", "gw_eob"} {
-		if _, err := pool.Exec(ctx, "DROP TABLE IF EXISTS "+tbl+" CASCADE"); err != nil {
-			t.Fatalf("drop %s: %v", tbl, err)
-		}
-	}
+	dropGWTables(t, pool)
 	s, err := NewPgStore(ctx, pool, holderID)
 	if err != nil {
 		t.Fatalf("NewPgStore: %v", err)
@@ -119,9 +115,7 @@ func TestLedger_ConcurrentBeginExactlyOne(t *testing.T) {
 func TestHolderIsolation(t *testing.T) {
 	pool := openTestPool(t)
 	ctx := context.Background()
-	for _, tbl := range []string{"gw_auth_number", "gw_pended_claim", "gw_eob"} {
-		_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS "+tbl+" CASCADE")
-	}
+	dropGWTables(t, pool)
 	payer, err := NewPgStore(ctx, pool, "payer")
 	if err != nil {
 		t.Fatal(err)
@@ -192,11 +186,7 @@ func TestEnsureSchema_Idempotent(t *testing.T) {
 func TestEnsureSchema_Concurrent(t *testing.T) {
 	pool := openTestPool(t)
 	ctx := context.Background()
-	for _, tbl := range []string{"gw_auth_number", "gw_pended_claim", "gw_eob"} {
-		if _, err := pool.Exec(ctx, "DROP TABLE IF EXISTS "+tbl+" CASCADE"); err != nil {
-			t.Fatalf("drop %s: %v", tbl, err)
-		}
-	}
+	dropGWTables(t, pool)
 	var wg sync.WaitGroup
 	errs := make(chan error, 8)
 	for i := 0; i < 8; i++ {
@@ -209,5 +199,43 @@ func TestEnsureSchema_Concurrent(t *testing.T) {
 		if err != nil {
 			t.Fatalf("concurrent EnsureSchema failed (CREATE TABLE race): %v", err)
 		}
+	}
+}
+
+// gwTables lists every table EnsureSchema owns, dependents first so DROP … CASCADE
+// order never matters.
+var gwTables = []string{"gw_exchange_leg", "gw_exchange", "gw_replay", "gw_ingress_key", "gw_auth_number", "gw_pended_claim", "gw_eob"}
+
+func dropGWTables(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	for _, tbl := range gwTables {
+		if _, err := pool.Exec(context.Background(), "DROP TABLE IF EXISTS "+tbl+" CASCADE"); err != nil {
+			t.Fatalf("drop %s: %v", tbl, err)
+		}
+	}
+}
+
+// testPool returns a pool over a freshly created schema (pg-gated).
+func testPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	pool := openTestPool(t)
+	dropGWTables(t, pool)
+	if err := EnsureSchema(context.Background(), pool); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+	return pool
+}
+
+func TestEnsureSchema_CreatesStateTables(t *testing.T) {
+	pool := testPool(t)
+	for _, tbl := range gwTables {
+		var n int
+		if err := pool.QueryRow(context.Background(), "SELECT count(*) FROM "+tbl).Scan(&n); err != nil {
+			t.Fatalf("%s: %v", tbl, err)
+		}
+	}
+	// Re-running is a no-op (idempotent DDL under the advisory lock).
+	if err := EnsureSchema(context.Background(), pool); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -7,6 +7,7 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 
@@ -91,10 +92,13 @@ func literalOxygenDispatchOrder(patientRef, code, display, dx string) (dispatchO
 // something the seed does not back — is silently UNATTRIBUTED, never claimed as sourced).
 // Returns nil (not an empty slice) when the member has no ClinicalContext at all, or when
 // neither item cross-checks.
-func (g *Gateway) homeOxygenAutoFillEvidence(member string, qrJSON []byte) []FilledItem {
-	cc, ok := g.cfg.SoR.ClinicalContext(member)
+func (g *Gateway) homeOxygenAutoFillEvidenceContext(ctx context.Context, member string, qrJSON []byte) ([]FilledItem, error) {
+	cc, ok, readErr := ReadSystemOfRecord(g.cfg.SoR).ClinicalContextContext(ctx, member)
+	if readErr != nil {
+		return nil, safeSoRError(readErr)
+	}
 	if !ok {
-		return nil
+		return nil, nil
 	}
 	qrAnswers := questionnaireResponseNumericAnswers(qrJSON)
 	var out []FilledItem
@@ -104,7 +108,7 @@ func (g *Gateway) homeOxygenAutoFillEvidence(member string, qrJSON []byte) []Fil
 	if cc.ArterialPaO2Ref != "" && qrAnswers["2.3"] != "" && qrAnswers["2.3"] == cc.ArterialPaO2mmHg {
 		out = append(out, FilledItem{LinkID: "2.3", Answer: qrAnswers["2.3"], Origin: "auto", SourceRef: cc.ArterialPaO2Ref})
 	}
-	return out
+	return out, nil
 }
 
 // attestOxygenNecessity answers HomeOxygenDispatch's ONE required leaf — 6.1, "Medical

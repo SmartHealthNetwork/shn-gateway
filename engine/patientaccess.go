@@ -10,6 +10,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -44,8 +45,12 @@ func (g *Gateway) handlePatientAccessMetadata(w http.ResponseWriter, _ *http.Req
 // patient) and audits the read. The patient surface (PHG) holds nothing; the payer
 // is the authoritative source of its own decisions (AI-1/AI-3, FR-33).
 func (g *Gateway) handlePatientAccessEOB(w http.ResponseWriter, r *http.Request) {
-	tok, ok := g.patientAccessToken(r)
+	tok, ok, unavailable := g.patientAccessToken(r)
 	if !ok {
+		if unavailable {
+			writeStoreUnavailable(w, "one-time-use record unavailable")
+			return
+		}
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "missing or invalid patient-access token"})
 		return
 	}
@@ -87,8 +92,12 @@ func (g *Gateway) handlePatientAccessEOB(w http.ResponseWriter, r *http.Request)
 // patient-access token gate + subject binding as search; the EOB must belong to
 // the token subject.
 func (g *Gateway) handlePatientAccessEOBByID(w http.ResponseWriter, r *http.Request) {
-	tok, ok := g.patientAccessToken(r)
+	tok, ok, unavailable := g.patientAccessToken(r)
 	if !ok {
+		if unavailable {
+			writeStoreUnavailable(w, "one-time-use record unavailable")
+			return
+		}
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "missing or invalid patient-access token"})
 		return
 	}
@@ -145,19 +154,24 @@ func (g *Gateway) serveEOB(w http.ResponseWriter, r *http.Request, subjectPCI st
 // patientAccessToken extracts + verifies a patient-access token from the
 // Authorization: Bearer <base64(token-json)> header. Returns ok=false on any
 // failure (missing header, decode, signature/expiry, wrong frame/op).
-func (g *Gateway) patientAccessToken(r *http.Request) (shnsdk.Token, bool) {
+//
+// The third return says WHY a false refused: unavailable=true means the one-time-use
+// record could not be consulted, and the route answers 503 instead of the 401 that would
+// tell an honest patient surface its token is bad. The read is refused either way; the
+// 503 only says the cause was this holder's store.
+func (g *Gateway) patientAccessToken(r *http.Request) (shnsdk.Token, bool, bool) {
 	h := r.Header.Get("Authorization")
 	const prefix = "Bearer "
 	if !strings.HasPrefix(h, prefix) {
-		return shnsdk.Token{}, false
+		return shnsdk.Token{}, false, false
 	}
 	raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(h, prefix))
 	if err != nil {
-		return shnsdk.Token{}, false
+		return shnsdk.Token{}, false, false
 	}
 	var tok shnsdk.Token
 	if err := json.Unmarshal(raw, &tok); err != nil {
-		return shnsdk.Token{}, false
+		return shnsdk.Token{}, false, false
 	}
 	// Pin the authenticated holder to the PHG (the only role OPA permits for
 	// patient-access-read) and require a non-empty subject — the subject is bound
@@ -167,22 +181,40 @@ func (g *Gateway) patientAccessToken(r *http.Request) (shnsdk.Token, bool) {
 	// envelope-bound token can't be replayed onto this bearer read path — AI-2).
 	if err := shnsdk.VerifyBoundNoPayload(tok, g.cfg.AuthzPub, g.cfg.Clock(),
 		"patient-access", "patient-access-read", "", "phg", ""); err != nil {
-		return shnsdk.Token{}, false
+		return shnsdk.Token{}, false, false
 	}
 	if tok.Subject == "" {
-		return shnsdk.Token{}, false
+		return shnsdk.Token{}, false, false
 	}
 	// #4: bind the token to one read. Require a correlation (the PHG always mints
 	// one) and consume it once — a captured/replayed bearer token re-presents a
 	// seen correlation and is rejected (the Hub's replay guard does not cover this
 	// direct REST read). AI-11 per-leg/correlation binding at the patient surface.
 	if tok.CorrelationID == "" {
-		return shnsdk.Token{}, false
+		return shnsdk.Token{}, false, false
 	}
-	if g.paReplay.CheckAndRecord(tok.CorrelationID, g.cfg.Clock()) {
-		return shnsdk.Token{}, false
+	// Bounded before the record is consulted: an oversized correlationId is a
+	// caller-supplied value, and on the durable record it would overflow the index row —
+	// a denial reported as a store outage on a healthy database (see MaxReplayKeyBytes).
+	if len(tok.CorrelationID) > MaxReplayKeyBytes {
+		return shnsdk.Token{}, false, false
 	}
-	return tok, true
+	now := g.cfg.Clock()
+	// Fail closed on a record that could not be consulted, exactly as on a replay —
+	// the correlation binding is what makes a captured bearer single-use, so an outage
+	// must not turn it back into a reusable one — but report it as an outage, so the
+	// read answers 503 rather than "bad token". The correlation is spent for this read
+	// either way: a caller that retries needs a freshly minted one.
+	replayed, err := g.replay.CheckAndRecord(ReplayScopePatientAccess, "", tok.CorrelationID, now, now.Add(paReplayWindow))
+	if err != nil {
+		log.Printf("gateway: patient-access one-time-use record unavailable: %v (refusing)", err)
+		g.noteStoreError(storeErrReplay)
+		return shnsdk.Token{}, false, true
+	}
+	if replayed {
+		return shnsdk.Token{}, false, false
+	}
+	return tok, true, false
 }
 
 // eobResourceID parses an ExplanationOfBenefit's resource id for the FHIR _id
@@ -200,10 +232,10 @@ func eobResourceID(eobJSON []byte) string {
 // paReplayWindow is how long a patient-access correlationId is remembered for
 // replay rejection on the direct read. It equals the token TTL so a captured token
 // cannot be replayed for the life of its token (a token older than the window has
-// already failed the expiry check). paReplayMaxEntries bounds the set so a chatty
-// caller cannot grow it without bound.
+// already failed the expiry check). The window is all this call site owns: it is passed
+// to the store as expiresAt, and both stores expire the record from it (the in-memory
+// mirror's own bound is memReplayMaxEntries, a safety ceiling, not a window).
 const paReplayWindow = time.Hour
-const paReplayMaxEntries = 1 << 16 // 65536
 
 // containsBytes returns true if set contains an entry with identical bytes to b.
 func containsBytes(set [][]byte, b []byte) bool {

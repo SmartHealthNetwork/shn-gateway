@@ -7,6 +7,7 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -169,12 +170,16 @@ func pasMemberFromRef(ref string) string {
 
 // ingressPASNativeSubjectPCI resolves the bound member of a conformant PAS bundle to a pci
 // (origination side). Mirrors ingressCRDSubjectPCI.
-func (g *Gateway) ingressPASNativeSubjectPCI(bundleJSON []byte) (string, int, string) {
+func (g *Gateway) ingressPASNativeSubjectPCIContext(ctx context.Context, bundleJSON []byte) (string, int, string) {
 	s, status, msg := parseConformantPASSubjects(bundleJSON)
 	if status != 0 {
 		return "", status, msg
 	}
-	pci, _, found := g.cfg.SoR.ResolvePatient(s.member)
+	pci, _, found, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(ctx, s.member)
+	if readErr != nil {
+		status, msg := SoRFailureResponse(readErr)
+		return "", status, msg
+	}
 	if !found {
 		return "", http.StatusBadRequest, "unknown member"
 	}
@@ -222,7 +227,7 @@ func (g *Gateway) ingressPASNativeSubjectPCI(bundleJSON []byte) (string, int, st
 // verbatim relay produces no EOB side-effect, so that loop runs only for a non-relaying responder. This mirrors the DTR
 // near-relay, CRD-native, and the minimized pas-claim case.
 func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token, bundleJSON []byte, answerTok string) {
-	boundPatientRef, status, msg := g.conformantPASBind(bundleJSON, tok.Subject)
+	boundPatientRef, status, msg := g.conformantPASBindContext(r.Context(), bundleJSON, tok.Subject)
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
@@ -331,7 +336,7 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 // keep this leg symmetric with submit so the native relay stands the response fence/$validate down.
 // (The minimized pas-claim-update leg's (C) fence stays LIVE on its own leg until that leg is deleted.)
 func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token, bundleJSON []byte, answerTok string) {
-	boundPatientRef, status, msg := g.conformantPASUpdateBind(bundleJSON, tok.Subject)
+	boundPatientRef, status, msg := g.conformantPASUpdateBindContext(r.Context(), bundleJSON, tok.Subject)
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
@@ -410,12 +415,16 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 // the bound member ref ("Patient/<member>") as the first value on accept (the (C) fence's
 // boundPatientRef — a namespace-aware response member-fence applies on this
 // leg, fenceResponseSubject("pas-claim", …)); "" on every reject. Status 0 = accept.
-func (g *Gateway) conformantPASBind(bundleJSON []byte, tokSubject string) (memberRef string, status int, msg string) {
+func (g *Gateway) conformantPASBindContext(ctx context.Context, bundleJSON []byte, tokSubject string) (memberRef string, status int, msg string) {
 	s, status, msg := parseConformantPASSubjects(bundleJSON)
 	if status != 0 {
 		return "", status, msg
 	}
-	pci, _, found := g.cfg.SoR.ResolvePatient(s.member)
+	pci, _, found, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(ctx, s.member)
+	if readErr != nil {
+		status, msg := SoRFailureResponse(readErr)
+		return "", status, msg
+	}
 	if !found {
 		return "", http.StatusBadRequest, "unknown member"
 	}
@@ -594,8 +603,8 @@ func parseConformantPASUpdateFacts(bundleJSON []byte) (conformantUpdateFacts, in
 // rejected. Returns the bound member ref ("Patient/<member>", from conformantPASBind) as the first
 // value on accept (the (C) fence's boundPatientRef — a namespace-aware response
 // member-fence applies on this leg too); "" on every reject. Status 0 = accept.
-func (g *Gateway) conformantPASUpdateBind(bundleJSON []byte, tokSubject string) (memberRef string, status int, msg string) {
-	memberRef, status, msg = g.conformantPASBind(bundleJSON, tokSubject)
+func (g *Gateway) conformantPASUpdateBindContext(ctx context.Context, bundleJSON []byte, tokSubject string) (memberRef string, status int, msg string) {
+	memberRef, status, msg = g.conformantPASBindContext(ctx, bundleJSON, tokSubject)
 	if status != 0 {
 		return "", status, msg
 	}

@@ -16,11 +16,14 @@
 # the 2.2 image; the final `FROM hapi-${SHN_IG_LINE}` picks the matching stage.
 ARG SHN_IG_LINE=2.0
 
-# Stage: distroless-safe healthcheck binary (HAPI base has no shell/curl).
+# Stage: distroless-safe healthcheck binary (HAPI base has no shell/curl). Readiness
+# is "can validate": PID 1 owns one sequential warm-up worker; ordinary probes
+# only observe its marker and metadata. SHN_IG_LINE selects the embedded fixtures.
 FROM golang:1.23-alpine AS hc
 WORKDIR /src
-COPY go.mod healthcheck.go healthcheck_test.go ./
-RUN go test ./... && CGO_ENABLED=0 go build -o /healthcheck healthcheck.go
+COPY go.mod *.go ./
+COPY testdata ./testdata
+RUN go test ./... && CGO_ENABLED=0 go build -o /healthcheck .
 
 # Stage: download the 2.0-line IG packages (network at BUILD time only).
 FROM alpine:3 AS igs-2.0
@@ -74,8 +77,11 @@ COPY shnig/shn.fhir.carry-1.0.0.tgz /packages/shn.fhir.carry-1.0.0.tgz
 # Stage: 2.0-line HAPI validator with its IGs baked + loaded from file:// (offline at runtime).
 FROM hapiproject/hapi@sha256:1be4d7ffe7a35a9fb46151851e5a20b25c5016f16c8ef8b59b0c807ad06a40c1 AS hapi-2.0
 COPY --from=hc /healthcheck /healthcheck
+# Preserve the pinned base image's literal Java argv, inherited env/user/workdir.
+ENTRYPOINT ["/healthcheck", "supervise", "java", "--class-path", "/app/main.war", "-Dloader.path=main.war!/WEB-INF/classes/,main.war!/WEB-INF/,/app/extra-classes", "org.springframework.boot.loader.PropertiesLauncher"]
 COPY --from=igs-2.0 /packages /packages
-ENV hapi.fhir.implementationguides.uscore.packageUrl=file:///packages/hl7.fhir.us.core-6.1.0.tgz \
+ENV SHN_IG_LINE=2.0 \
+    hapi.fhir.implementationguides.uscore.packageUrl=file:///packages/hl7.fhir.us.core-6.1.0.tgz \
     hapi.fhir.implementationguides.uscore.name=hl7.fhir.us.core \
     hapi.fhir.implementationguides.uscore.version=6.1.0 \
     hapi.fhir.implementationguides.crd.packageUrl=file:///packages/hl7.fhir.us.davinci-crd-2.0.1.tgz \
@@ -106,8 +112,11 @@ ENV hapi.fhir.implementationguides.uscore.packageUrl=file:///packages/hl7.fhir.u
 # Stage: 2.1-line HAPI validator with its IGs baked + loaded from file:// (offline at runtime).
 FROM hapiproject/hapi@sha256:1be4d7ffe7a35a9fb46151851e5a20b25c5016f16c8ef8b59b0c807ad06a40c1 AS hapi-2.1
 COPY --from=hc /healthcheck /healthcheck
+# Preserve the pinned base image's literal Java argv, inherited env/user/workdir.
+ENTRYPOINT ["/healthcheck", "supervise", "java", "--class-path", "/app/main.war", "-Dloader.path=main.war!/WEB-INF/classes/,main.war!/WEB-INF/,/app/extra-classes", "org.springframework.boot.loader.PropertiesLauncher"]
 COPY --from=igs-2.1 /packages /packages
-ENV hapi.fhir.implementationguides.uscore.packageUrl=file:///packages/hl7.fhir.us.core-7.0.0.tgz \
+ENV SHN_IG_LINE=2.1 \
+    hapi.fhir.implementationguides.uscore.packageUrl=file:///packages/hl7.fhir.us.core-7.0.0.tgz \
     hapi.fhir.implementationguides.uscore.name=hl7.fhir.us.core \
     hapi.fhir.implementationguides.uscore.version=7.0.0 \
     hapi.fhir.implementationguides.crd.packageUrl=file:///packages/hl7.fhir.us.davinci-crd-2.1.0.tgz \
@@ -138,8 +147,11 @@ ENV hapi.fhir.implementationguides.uscore.packageUrl=file:///packages/hl7.fhir.u
 # Stage: 2.2-line HAPI validator with its IGs baked + loaded from file:// (offline at runtime).
 FROM hapiproject/hapi@sha256:1be4d7ffe7a35a9fb46151851e5a20b25c5016f16c8ef8b59b0c807ad06a40c1 AS hapi-2.2
 COPY --from=hc /healthcheck /healthcheck
+# Preserve the pinned base image's literal Java argv, inherited env/user/workdir.
+ENTRYPOINT ["/healthcheck", "supervise", "java", "--class-path", "/app/main.war", "-Dloader.path=main.war!/WEB-INF/classes/,main.war!/WEB-INF/,/app/extra-classes", "org.springframework.boot.loader.PropertiesLauncher"]
 COPY --from=igs-2.2 /packages /packages
-ENV hapi.fhir.implementationguides.uscore.packageUrl=file:///packages/hl7.fhir.us.core-7.0.0.tgz \
+ENV SHN_IG_LINE=2.2 \
+    hapi.fhir.implementationguides.uscore.packageUrl=file:///packages/hl7.fhir.us.core-7.0.0.tgz \
     hapi.fhir.implementationguides.uscore.name=hl7.fhir.us.core \
     hapi.fhir.implementationguides.uscore.version=7.0.0 \
     hapi.fhir.implementationguides.crd.packageUrl=file:///packages/hl7.fhir.us.davinci-crd-2.2.1.tgz \

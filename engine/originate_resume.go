@@ -51,7 +51,11 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 	questionnaireJSON := res.questionnaireJSON
 	var baseTrace map[string]string
 	if g.cfg.OriginationProfile == "provider-data" && (scenario == "uc06" || scenario == "uc07") {
-		answers, err := uc04AttestationAnswers(res.srJSON, g.cfg.SoR.ResolveByReference)
+		resolve, readErr := sorReferenceCallback(ctx, g.cfg.SoR)
+		answers, err := uc04AttestationAnswers(res.srJSON, resolve)
+		if writeSoRFailure(w, *readErr) {
+			return pendState{}, false
+		}
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 			return pendState{}, false

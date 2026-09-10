@@ -86,8 +86,7 @@ func (g *Gateway) handleIngressMetadata(w http.ResponseWriter, _ *http.Request) 
 }
 
 func (g *Gateway) handleCDSDiscovery(w http.ResponseWriter, r *http.Request) {
-	if !g.ingressAuthOK(r) {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "ingress authentication required"})
+	if g.ingressAuthRefused(w, r) {
 		return
 	}
 	body, err := cdsDiscoveryJSON()
@@ -110,8 +109,7 @@ func (g *Gateway) handleCDSDiscovery(w http.ResponseWriter, r *http.Request) {
 // normalizes to the single crd-order-select leg. The CDS service id matters only at the
 // payer egress (DiscoverCRDServiceID), not here.
 func (g *Gateway) handleCRDIngress(w http.ResponseWriter, r *http.Request) {
-	if !g.ingressAuthOK(r) {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "ingress authentication required"})
+	if g.ingressAuthRefused(w, r) {
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, shnsdk.MaxRequestBytes))
@@ -120,14 +118,14 @@ func (g *Gateway) handleCRDIngress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Bind the subject — every patient reference must resolve to one pci.
-	pci, status, msg := g.ingressCRDSubjectPCI(body)
+	pci, status, msg := g.ingressCRDSubjectPCIContext(r.Context(), body)
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
 	member := g.memberForPCI(body)
 	// Ensure self-contained + neutralize the callback.
-	sealed, status, msg := g.ingressEnsureSelfContained(body, member, pci)
+	sealed, status, msg := g.ingressEnsureSelfContainedContext(r.Context(), body, member, pci)
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
@@ -181,7 +179,7 @@ func (g *Gateway) handleCRDIngress(w http.ResponseWriter, r *http.Request) {
 	leg := Leg{Type: "crd-order-select", Physics: paCatalog["crd-order-select"].Physics,
 		Content: Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Bytes: sealed}, Subjects: []string{pci}}
 	if err != nil {
-		_ = g.exchanges.AppendLeg(ex.ID, leg.Project(child, "error"))
+		g.recordLeg(ex.ID, leg.Project(child, "error"))
 		// The recipient answered non-2xx — relay its framed answer verbatim (Content-Type
 		// from the frame, default application/fhir+json) via the shared origination helper.
 		if g.relayOriginationError(w, err) {
@@ -195,11 +193,11 @@ func (g *Gateway) handleCRDIngress(w http.ResponseWriter, r *http.Request) {
 	// fields only (metadata; never store clinical content).
 	cardsEnvelope, outcome, status, msg := wrapCards(respJSON)
 	if status != 0 {
-		_ = g.exchanges.AppendLeg(ex.ID, leg.Project(child, "error"))
+		g.recordLeg(ex.ID, leg.Project(child, "error"))
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
-	_ = g.exchanges.AppendLeg(ex.ID, leg.Project(child, outcome))
+	g.recordLeg(ex.ID, leg.Project(child, outcome))
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(cardsEnvelope)
@@ -211,8 +209,8 @@ func (g *Gateway) handleCRDIngress(w http.ResponseWriter, r *http.Request) {
 // Exchange, and relays the package Bundle response verbatim (near-relay). The ingress does NOT
 // invoke the Populator — br-provider's own DTR app populates locally.
 func (g *Gateway) handleDTRIngress(w http.ResponseWriter, r *http.Request) {
-	if !g.ingressAuthOK(r) {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "ingress authentication required"})
+	w = &fhirOperationWriter{w}
+	if g.ingressAuthRefused(w, r) {
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, shnsdk.MaxRequestBytes))
@@ -232,7 +230,10 @@ func (g *Gateway) handleDTRIngress(w http.ResponseWriter, r *http.Request) {
 	var pci string
 	if patientRef != "" {
 		member := strings.TrimPrefix(patientRef, "Patient/")
-		p, _, found := g.cfg.SoR.ResolvePatient(member)
+		p, _, found, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(r.Context(), member)
+		if writeSoRFailure(w, readErr) {
+			return
+		}
 		if !found {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "carried coverage patient does not resolve"})
 			return
@@ -308,7 +309,7 @@ func (g *Gateway) handleDTRIngress(w http.ResponseWriter, r *http.Request) {
 	leg := Leg{Type: "dtr-questionnaire-fetch", Physics: paCatalog["dtr-questionnaire-fetch"].Physics,
 		Content: Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Bytes: fetch}, Subjects: subjectsOf(pci)}
 	if err != nil {
-		_ = g.exchanges.AppendLeg(ex.ID, leg.Project(child, "error"))
+		g.recordLeg(ex.ID, leg.Project(child, "error"))
 		// The recipient answered non-2xx — relay its framed answer verbatim (Content-Type
 		// from the frame, default application/fhir+json) via the shared origination helper.
 		if g.relayOriginationError(w, err) {
@@ -317,9 +318,9 @@ func (g *Gateway) handleDTRIngress(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
-	_ = g.exchanges.AppendLeg(ex.ID, leg.Project(child, "ok"))
+	g.recordLeg(ex.ID, leg.Project(child, "ok"))
 	// Near-relay: the package Bundle is the payer's response shape; return verbatim.
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Type", "application/fhir+json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(pkgJSON)
 }
@@ -333,8 +334,8 @@ func subjectsOf(pci string) []string {
 }
 
 func (g *Gateway) handlePASIngress(w http.ResponseWriter, r *http.Request) {
-	if !g.ingressAuthOK(r) {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "ingress authentication required"})
+	w = &fhirOperationWriter{w}
+	if g.ingressAuthRefused(w, r) {
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, shnsdk.MaxRequestBytes))
@@ -346,7 +347,7 @@ func (g *Gateway) handlePASIngress(w http.ResponseWriter, r *http.Request) {
 	// minimized ParseClaimBundle path is retired here — a real Da Vinci partner sends the full
 	// conformant bundle (Patient + Coverage + payor Org + …), which ParseClaimBundle rejects. The
 	// minimized pas-claim leg stays for the SDK / 8-scenario origination path (originate.go).
-	pci, status, msg := g.ingressPASNativeSubjectPCI(body)
+	pci, status, msg := g.ingressPASNativeSubjectPCIContext(r.Context(), body)
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
@@ -419,7 +420,7 @@ func (g *Gateway) handlePASIngress(w http.ResponseWriter, r *http.Request) {
 	legProj := Leg{Type: leg, Physics: paCatalog[leg].Physics,
 		Content: Content{WorkstreamType: workstreamPA, Bytes: body}, Subjects: []string{pci}}
 	if err != nil {
-		_ = g.exchanges.AppendLeg(ex.ID, legProj.Project(child, "error"))
+		g.recordLeg(ex.ID, legProj.Project(child, "error"))
 		// The recipient answered non-2xx — relay its framed answer verbatim (Content-Type
 		// from the frame, default application/fhir+json) via the shared origination helper.
 		if g.relayOriginationError(w, err) {
@@ -437,9 +438,9 @@ func (g *Gateway) handlePASIngress(w http.ResponseWriter, r *http.Request) {
 	} else if res, perr := shnsdk.ParseClaimResponse(crJSON); perr == nil && res.Outcome != "" {
 		outcome = res.Outcome // approved | denied
 	}
-	_ = g.exchanges.AppendLeg(ex.ID, legProj.Project(child, outcome))
+	g.recordLeg(ex.ID, legProj.Project(child, outcome))
 	// Near-relay: the ClaimResponse is the payer's response shape; return verbatim.
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Type", "application/fhir+json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(crJSON)
 }

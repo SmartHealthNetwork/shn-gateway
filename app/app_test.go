@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/ed25519"
@@ -14,6 +15,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"log"
 	"math/big"
 	"net"
 	"net/http"
@@ -1684,4 +1686,173 @@ func TestCheckTargets_PayerDavinciWellKnown(t *testing.T) {
 			t.Fatal("PAYER_DAVINCI_WELL_KNOWN target present with no base URL configured")
 		}
 	})
+}
+
+// ---- Shared-state (multi-replica) wiring ----
+
+// TestLoadConfig_ExchangeTTL: EXCHANGE_TTL defaults to 168h, accepts any positive
+// Go duration, and is a hard boot error (naming the variable) when it is zero,
+// negative or unparsable — a silently-zero TTL would expire every exchange record
+// the moment it was written.
+func TestLoadConfig_ExchangeTTL(t *testing.T) {
+	cases := []struct {
+		raw     string
+		want    time.Duration
+		wantErr bool
+	}{
+		{"", 168 * time.Hour, false},
+		{"24h", 24 * time.Hour, false},
+		{"0", 0, true},
+		{"-1h", 0, true},
+		{"seven days", 0, true},
+	}
+	for _, c := range cases {
+		e := baseProviderEnv()
+		// The ingress block is unrelated to EXCHANGE_TTL and its all-or-nothing
+		// validation would error first on baseProviderEnv's bare opt-in.
+		delete(e, "PROVIDER_DAVINCI_INGRESS")
+		e["EXCHANGE_TTL"] = c.raw
+		cfg, err := loadConfig(func(k string) string { return e[k] })
+		if c.wantErr {
+			if err == nil || !strings.Contains(err.Error(), "EXCHANGE_TTL") {
+				t.Errorf("EXCHANGE_TTL=%q: want an error naming the variable, got %v", c.raw, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("EXCHANGE_TTL=%q: %v", c.raw, err)
+			continue
+		}
+		if cfg.ExchangeTTL != c.want {
+			t.Errorf("EXCHANGE_TTL=%q: got %v want %v", c.raw, cfg.ExchangeTTL, c.want)
+		}
+	}
+}
+
+// TestLoadConfig_StoreMaxConns: SHN_STORE_MAX_CONNS defaults to 8, accepts any
+// positive integer up to math.MaxInt32, and is a hard boot error (naming the variable)
+// when it is zero, negative, unparsable or past that bound. The default is explicit for a reason: pgx's own default is
+// max(4, NumCPU), which on a 0.25-vCPU task floors at 4 connections for four
+// consumers — and AppendLeg pins one for the length of its transaction, so modest
+// ingress concurrency queues replay checks behind it until the store context expires.
+// 8 rather than more: every gateway sharing one database multiplies this number, and
+// the fleet's burst ceiling has to stay under the instance's own connection limit.
+func TestLoadConfig_StoreMaxConns(t *testing.T) {
+	cases := []struct {
+		raw     string
+		want    int32
+		wantErr bool
+	}{
+		{"", 8, false},
+		{"4", 4, false},
+		{"64", 64, false},
+		{"0", 0, true},
+		{"-2", 0, true},
+		{"lots", 0, true},
+		{"8.5", 0, true},
+		// The pool field is an int32. A value past its range must be a boot error
+		// naming the variable, never a silent wrap: 2147483648 truncates to -2147483648,
+		// which pgxpool rejects at connect time with an error that says nothing about
+		// this variable — and 2147483649 would wrap to 1, a one-connection pool that
+		// looks like it booted fine.
+		{"2147483648", 0, true},
+		{"2147483647", 2147483647, false},
+	}
+	for _, c := range cases {
+		e := baseProviderEnv()
+		delete(e, "PROVIDER_DAVINCI_INGRESS") // unrelated all-or-nothing block; it would error first
+		e["SHN_STORE_MAX_CONNS"] = c.raw
+		cfg, err := loadConfig(func(k string) string { return e[k] })
+		if c.wantErr {
+			if err == nil || !strings.Contains(err.Error(), "SHN_STORE_MAX_CONNS") {
+				t.Errorf("SHN_STORE_MAX_CONNS=%q: want an error naming the variable, got %v", c.raw, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("SHN_STORE_MAX_CONNS=%q: %v", c.raw, err)
+			continue
+		}
+		if cfg.StoreMaxConns != c.want {
+			t.Errorf("SHN_STORE_MAX_CONNS=%q: got %d want %d", c.raw, cfg.StoreMaxConns, c.want)
+		}
+	}
+}
+
+// TestBuild_NoDSN_StatesInProcessStateAndNoRefresh: without a DSN, build starts no
+// refresh loop (there is nothing shared to refresh) and states the single-instance
+// posture on the boot log, so an operator who scales to two replicas can see why
+// the second one hands out bearers the first will not accept.
+func TestBuild_NoDSN_StatesInProcessStateAndNoRefresh(t *testing.T) {
+	dir := t.TempDir()
+	id, err := shnsdk.GenerateIdentity("h-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := shnsdk.WriteBundle(dir, id, "provider", "https://holder.example"); err != nil {
+		t.Fatal(err)
+	}
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	keyBody := fmt.Sprintf(`{"pubkey":%q}`, base64.StdEncoding.EncodeToString(pub))
+	keys := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(keyBody)) }))
+	defer keys.Close()
+	disc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"endpoints":{},"authzPublicKeyURL":%q,"hubTransportKeyURL":%q}`, keys.URL, keys.URL)
+	}))
+	defer disc.Close()
+	env := map[string]string{
+		"ROLE": "provider", "SHN_SECRETS": dir, "SHN_DISCOVERY_URL": disc.URL, "SHN_FAKE_VALIDATOR": "1",
+		"FHIR_DATA_URL":             "https://fhir.test",
+		"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate",
+	}
+	// Swaps the process-global logger: relies on gateway/app having no t.Parallel()
+	// test (true today) — a parallel test in this package would race this buffer.
+	var logBuf bytes.Buffer
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(os.Stderr)
+	b, err := build(context.Background(), func(k string) string { return env[k] }, io.Discard, nil)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if b.keyRefresh != nil {
+		t.Fatal("no DSN: keyRefresh must be nil (nothing to refresh)")
+	}
+	if !strings.Contains(logBuf.String(), "gateway: shared state: in-process (ephemeral ingress key; single-instance only") {
+		t.Fatalf("boot line missing the in-process posture:\n%s", logBuf.String())
+	}
+}
+
+// TestStorePoolConfig_SizingAndConnectBound: the shared-state pool's posture, asserted on
+// the parsed config (ParseConfig opens nothing, so this needs no database). The connect
+// bound is the load-bearing half: each store call bounds its QUERY with storeTimeout, but
+// an acquire that has to open a connection first waits for pgx's default — which is the
+// operating system's TCP timeout — so a database that accepts packets and never completes
+// a handshake blows every request-path budget the seams believe they have. MinConns never
+// exceeds MaxConns: an operator who pins the pool to one connection gets one.
+func TestStorePoolConfig_SizingAndConnectBound(t *testing.T) {
+	const dsn = "postgres://u:p@db.example:5432/shn_gateway?sslmode=disable"
+	cfg, err := storePoolConfig(dsn, defaultStoreMaxConns)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MaxConns != defaultStoreMaxConns {
+		t.Errorf("MaxConns = %d, want %d", cfg.MaxConns, defaultStoreMaxConns)
+	}
+	if cfg.MinConns != storeMinConns {
+		t.Errorf("MinConns = %d, want %d", cfg.MinConns, storeMinConns)
+	}
+	if cfg.ConnConfig.ConnectTimeout != storeConnectTimeout {
+		t.Errorf("ConnConfig.ConnectTimeout = %v, want %v — an unbounded connect outlives every store call's own timeout", cfg.ConnConfig.ConnectTimeout, storeConnectTimeout)
+	}
+	one, err := storePoolConfig(dsn, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if one.MaxConns != 1 || one.MinConns != 1 {
+		t.Errorf("MaxConns/MinConns at a pinned pool of 1 = %d/%d, want 1/1", one.MaxConns, one.MinConns)
+	}
+	// A DSN the pool cannot parse is a boot error naming the variable, not a silent default.
+	if _, err := storePoolConfig("://not a dsn", defaultStoreMaxConns); err == nil || !strings.Contains(err.Error(), "SHN_STORE_DATABASE_URL") {
+		t.Errorf("unparsable DSN error = %v, want one naming SHN_STORE_DATABASE_URL", err)
+	}
 }

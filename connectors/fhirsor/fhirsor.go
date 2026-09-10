@@ -1,13 +1,11 @@
 // Package fhirsor implements engine.SystemOfRecord by reading a US Core FHIR server
-// (via internal/fhirclient). All five SystemOfRecord methods are implemented:
-// ResolvePatient + CoverageInforce + ClinicalContext + SupplementalReport +
-// FacilityRecords. The SoR is fully wired for demo gateways.
+// (via internal/fhirclient). Contextual reads preserve backend errors; legacy
+// SystemOfRecord methods discard them only for compatibility.
 package fhirsor
 
 import (
 	"context"
 	"encoding/json"
-	"log"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -48,90 +46,107 @@ func NewFromURL(baseURL string, hc *http.Client) *SoR {
 // Searches by shnsdk.MemberSystem identifier; partition locality is enforced by the
 // base URL in s.fc.
 //
-// Uses context.Background because SystemOfRecord does not thread a ctx (threading
-// request context/deadline into the FHIR reads is a tracked concern;
-// holdersim.Client makes uncontexted calls today too). No caching: a caller that
-// invokes both ResolvePatient and CoverageInforce on the same member pays two Patient
-// searches — acceptable for single-request flows; revisit later if warranted.
-func (s *SoR) resolvePatient(memberID string) (p fhir.Patient, id string, ok bool) {
-	b, err := s.fc.Search(context.Background(), "Patient", url.Values{
+// Request context reaches each nested read. Reads are not cached.
+func (s *SoR) resolvePatient(ctx context.Context, memberID string) (p fhir.Patient, id string, ok bool, readErr error) {
+	b, err := s.fc.Search(ctx, "Patient", url.Values{
 		"identifier": {shnsdk.MemberSystem + "|" + memberID},
 	})
 	if err != nil {
-		log.Printf("fhirsor: Patient search for %q: %v", memberID, err)
-		return fhir.Patient{}, "", false
+		return fhir.Patient{}, "", false, safeReadError(err)
+	}
+	if b != nil {
+		if len(b.Entry) > 1 || (b.Total != nil && int(*b.Total) != len(b.Entry)) {
+			return fhir.Patient{}, "", false, invalidResponse()
+		}
+		for _, link := range b.Link {
+			if link.Relation == "next" {
+				return fhir.Patient{}, "", false, invalidResponse()
+			}
+		}
 	}
 	if b == nil || len(b.Entry) == 0 {
-		return fhir.Patient{}, "", false
+		return fhir.Patient{}, "", false, nil
 	}
 	if err := json.Unmarshal(b.Entry[0].Resource, &p); err != nil {
-		log.Printf("fhirsor: decode Patient: %v", err)
-		return fhir.Patient{}, "", false
+		return fhir.Patient{}, "", false, invalidResponse()
 	}
-	if p.Id == nil {
-		return fhir.Patient{}, "", false
+	if p.Id == nil || *p.Id == "" {
+		return fhir.Patient{}, "", false, invalidResponse()
 	}
-	return p, *p.Id, true
+	return p, *p.Id, true, nil
 }
 
 // ResolvePatient turns a member id into a substrate PCI via the SAME shnsdk.ResolvePCI
 // the stub uses, reading birthDate + family from the US Core Patient.
-func (s *SoR) ResolvePatient(memberID string) (string, engine.Demo, bool) {
-	p, _, ok := s.resolvePatient(memberID)
-	if !ok {
-		return "", engine.Demo{}, false
+func (s *SoR) ResolvePatientContext(ctx context.Context, memberID string) (string, engine.Demo, bool, error) {
+	p, _, ok, err := s.resolvePatient(ctx, memberID)
+	if err != nil {
+		return "", engine.Demo{}, false, safeReadError(err)
 	}
-	if p.BirthDate == nil || len(p.Name) == 0 || p.Name[0].Family == nil {
-		log.Printf("fhirsor: Patient for %q missing birthDate/family", memberID)
-		return "", engine.Demo{}, false
+	if !ok {
+		return "", engine.Demo{}, false, nil
+	}
+	if p.BirthDate == nil || len(p.Name) == 0 || p.Name[0].Family == nil || *p.BirthDate == "" || *p.Name[0].Family == "" {
+		return "", engine.Demo{}, false, invalidResponse()
 	}
 	birth, family := *p.BirthDate, *p.Name[0].Family
 	pci := shnsdk.ResolvePCI(memberID, birth, family)
-	return pci, engine.Demo{BirthDate: birth, FamilyName: family}, true
+	return pci, engine.Demo{BirthDate: birth, FamilyName: family}, true, nil
 }
 
 // PatientFHIRRef returns "Patient/<store-id>" — the FHIR store's resource id for the member
 // (resolved by identifier; the id may be partition-scoped). This is the resolvable subject for an
 // operated $populate (which reads the store directly; the logical member ref and identifier-based
 // subjects don't resolve).
-func (s *SoR) PatientFHIRRef(memberID string) (string, bool) {
-	_, id, ok := s.resolvePatient(memberID)
-	if !ok {
-		return "", false
+func (s *SoR) PatientFHIRRefContext(ctx context.Context, memberID string) (string, bool, error) {
+	_, id, ok, err := s.resolvePatient(ctx, memberID)
+	if err != nil {
+		return "", false, safeReadError(err)
 	}
-	return "Patient/" + id, true
+	if !ok {
+		return "", false, nil
+	}
+	return "Patient/" + id, true, nil
 }
 
 // CoverageInforce reports whether the member's coverage is active. active → (true,"");
 // any other status → (false,"coverage-terminated"); no coverage / unknown → (false,"").
-func (s *SoR) CoverageInforce(memberID string) (bool, string) {
-	_, pid, ok := s.resolvePatient(memberID)
-	if !ok {
-		return false, ""
+func (s *SoR) CoverageInforceContext(ctx context.Context, memberID string) (bool, string, error) {
+	_, pid, ok, err := s.resolvePatient(ctx, memberID)
+	if err != nil {
+		return false, "", safeReadError(err)
 	}
-	b, err := s.fc.Search(context.Background(), "Coverage", url.Values{
+	if !ok {
+		return false, "", nil
+	}
+	b, err := s.fc.Search(ctx, "Coverage", url.Values{
 		"beneficiary": {"Patient/" + pid},
 	})
 	if err != nil {
-		log.Printf("fhirsor: Coverage search for %q: %v", memberID, err)
-		return false, ""
+		return false, "", safeReadError(err)
 	}
 	if b == nil || len(b.Entry) == 0 {
-		return false, ""
+		return false, "", nil
+	}
+	// The model's zero enum is active, so absence must be checked before decoding.
+	var status struct {
+		Status *string `json:"status"`
+	}
+	if json.Unmarshal(b.Entry[0].Resource, &status) != nil || status.Status == nil || *status.Status == "" {
+		return false, "", invalidResponse()
 	}
 	var cov fhir.Coverage
 	if err := json.Unmarshal(b.Entry[0].Resource, &cov); err != nil {
-		log.Printf("fhirsor: decode Coverage: %v", err)
-		return false, ""
+		return false, "", invalidResponse()
 	}
 	if cov.Status == fhir.FinancialResourceStatusCodesActive {
-		return true, ""
+		return true, "", nil
 	}
 	// Single non-active default: cancelled/draft/entered-in-error all map to
 	// "coverage-terminated" (the stub's only not-in-force reason string, so equivalence
 	// holds). Finer per-status reasons are out of scope at this layer; a later refinement
 	// could split them — do not tighten this without updating the stub-equivalence contract.
-	return false, "coverage-terminated"
+	return false, "coverage-terminated", nil
 }
 
 // ClinicalContext reads the provider-LOCAL DTR-prefill facts from the holder's US Core FHIR
@@ -155,137 +170,182 @@ func (s *SoR) CoverageInforce(memberID string) (bool, string) {
 // gateway/engine's homeOxygenAutoFillEvidence cross-check was structurally DEAD against any
 // real FHIR server: cc.OxygenSaturationRef/ArterialPaO2Ref were always "" here, so no QR
 // answer could ever be attributed Origin="auto" outside the hermetic fixture SoR — the
-// stand-in was MORE capable than the real thing. Absent Observation (or search failure) =>
+// stand-in was MORE capable than the real thing. Absent Observation yields
 // the honest zero value ("", ""), never fabricated; the caller's cross-check then falls back
 // to unattributed (neither auto nor a forced manual answer), exactly the fixture's contract.
-func (s *SoR) ClinicalContext(memberID string) (shnsdk.ClinicalContext, bool) {
-	_, pid, ok := s.resolvePatient(memberID)
-	if !ok {
-		return shnsdk.ClinicalContext{}, false
+// A subsidiary read error returns no clinical context.
+func (s *SoR) ClinicalContextContext(ctx context.Context, memberID string) (shnsdk.ClinicalContext, bool, error) {
+	_, pid, ok, err := s.resolvePatient(ctx, memberID)
+	if err != nil {
+		return shnsdk.ClinicalContext{}, false, safeReadError(err)
 	}
-	code, ref, hasCond := s.conditionCode(pid)
+	if !ok {
+		return shnsdk.ClinicalContext{}, false, nil
+	}
+	code, ref, hasCond, err := s.conditionCode(ctx, pid)
+	if err != nil {
+		return shnsdk.ClinicalContext{}, false, safeReadError(err)
+	}
 	if !hasCond {
-		return shnsdk.ClinicalContext{}, false
+		return shnsdk.ClinicalContext{}, false, nil
 	}
 	cc := shnsdk.ClinicalContext{ConditionCode: code, ConditionRef: ref}
-	if weeks, date, r, found := s.obsQuantity(pid, shnsdk.SystemSHNClinical, shnsdk.ConservativeTherapyWeeksCode); found {
+	weeks, date, r, found, err := s.obsQuantity(ctx, pid, shnsdk.SystemSHNClinical, shnsdk.ConservativeTherapyWeeksCode)
+	if err != nil {
+		return shnsdk.ClinicalContext{}, false, safeReadError(err)
+	}
+	if found {
 		cc.ConservativeTherapyWeeks, cc.ConservativeDate, cc.ConservativeTherapyRef = weeks, date, r
 	}
-	if val, r, found := s.obsBool(pid, shnsdk.SystemSHNClinical, shnsdk.NeuroDeficitCode); found {
+	val, r, found, err := s.obsBool(ctx, pid, shnsdk.SystemSHNClinical, shnsdk.NeuroDeficitCode)
+	if err != nil {
+		return shnsdk.ClinicalContext{}, false, safeReadError(err)
+	}
+	if found {
 		cc.NeuroDeficit, cc.NeuroDeficitRef = val, r
 	}
-	if r, found := s.firstRef(pid, "DiagnosticReport", url.Values{"code": {shnsdk.SystemCPT + "|" + shnsdk.ImagingCPT}}); found {
+	r, found, err = s.firstRef(ctx, pid, "DiagnosticReport", url.Values{"code": {shnsdk.SystemCPT + "|" + shnsdk.ImagingCPT}})
+	if err != nil {
+		return shnsdk.ClinicalContext{}, false, safeReadError(err)
+	}
+	if found {
 		cc.PriorImaging, cc.PriorImagingRef = true, r
 	}
 	procTokens := make([]string, len(shnsdk.ProcedureValueSet))
 	for i, c := range shnsdk.ProcedureValueSet {
 		procTokens[i] = shnsdk.SystemSNOMED + "|" + c
 	}
-	if r, found := s.firstRef(pid, "Procedure", url.Values{"code": {strings.Join(procTokens, ",")}}); found {
+	r, found, err = s.firstRef(ctx, pid, "Procedure", url.Values{"code": {strings.Join(procTokens, ",")}})
+	if err != nil {
+		return shnsdk.ClinicalContext{}, false, safeReadError(err)
+	}
+	if found {
 		cc.PriorSurgery, cc.PriorSurgeryRef = true, r
 	}
-	if r, found := s.firstRef(pid, "Observation", url.Values{"code": {shnsdk.SystemLOINC + "|" + shnsdk.ODICode}}); found {
+	r, found, err = s.firstRef(ctx, pid, "Observation", url.Values{"code": {shnsdk.SystemLOINC + "|" + shnsdk.ODICode}})
+	if err != nil {
+		return shnsdk.ClinicalContext{}, false, safeReadError(err)
+	}
+	if found {
 		cc.HighDisability, cc.HighDisabilityRef = true, r
 	}
-	if val, _, found := s.obsBool(pid, shnsdk.SystemSHNClinical, shnsdk.PatientReportedCode); found && val {
+	val, _, found, err = s.obsBool(ctx, pid, shnsdk.SystemSHNClinical, shnsdk.PatientReportedCode)
+	if err != nil {
+		return shnsdk.ClinicalContext{}, false, safeReadError(err)
+	}
+	if found && val {
 		cc.PatientReported = true
 	}
 	// R3 — HomeOxygen-family facts (UC-03's re-key), read the SAME way as the fields above:
 	// a code-token Observation search, first match, quantity value + reference. See the doc
 	// comment above for why this closes the live-fidelity gap.
-	if val, _, r, found := s.obsQuantity(pid, shnsdk.SystemLOINC, shnsdk.OxygenSaturationLOINC); found {
-		cc.OxygenSaturationPct, cc.OxygenSaturationRef = strconv.Itoa(val), r
+	quantity, _, r, found, err := s.obsQuantity(ctx, pid, shnsdk.SystemLOINC, shnsdk.OxygenSaturationLOINC)
+	if err != nil {
+		return shnsdk.ClinicalContext{}, false, safeReadError(err)
 	}
-	if val, _, r, found := s.obsQuantity(pid, shnsdk.SystemLOINC, shnsdk.ArterialPaO2LOINC); found {
-		cc.ArterialPaO2mmHg, cc.ArterialPaO2Ref = strconv.Itoa(val), r
+	if found {
+		cc.OxygenSaturationPct, cc.OxygenSaturationRef = strconv.Itoa(quantity), r
 	}
-	return cc, true
+	quantity, _, r, found, err = s.obsQuantity(ctx, pid, shnsdk.SystemLOINC, shnsdk.ArterialPaO2LOINC)
+	if err != nil {
+		return shnsdk.ClinicalContext{}, false, safeReadError(err)
+	}
+	if found {
+		cc.ArterialPaO2mmHg, cc.ArterialPaO2Ref = strconv.Itoa(quantity), r
+	}
+	return cc, true, nil
 }
 
 // firstRef returns "Type/id" of the first entry of a patient-scoped search, or ok=false.
-func (s *SoR) firstRef(patientID, resourceType string, extra url.Values) (string, bool) {
+func (s *SoR) firstRef(ctx context.Context, patientID, resourceType string, extra url.Values) (string, bool, error) {
 	q := url.Values{"patient": {patientID}}
 	for k, vs := range extra {
 		q[k] = vs
 	}
-	b, err := s.fc.Search(context.Background(), resourceType, q)
+	b, err := s.fc.Search(ctx, resourceType, q)
 	if err != nil {
-		log.Printf("fhirsor: %s search for %q: %v", resourceType, patientID, err)
-		return "", false
+		return "", false, safeReadError(err)
 	}
 	if b == nil || len(b.Entry) == 0 {
-		return "", false
+		return "", false, nil
 	}
 	var probe struct {
 		ResourceType string `json:"resourceType"`
 		Id           string `json:"id"`
 	}
 	if json.Unmarshal(b.Entry[0].Resource, &probe) != nil || probe.Id == "" || probe.ResourceType == "" {
-		return "", false
+		return "", false, invalidResponse()
 	}
-	return probe.ResourceType + "/" + probe.Id, true
+	return probe.ResourceType + "/" + probe.Id, true, nil
 }
 
-func (s *SoR) conditionCode(patientID string) (code, ref string, ok bool) {
-	b, err := s.fc.Search(context.Background(), "Condition", url.Values{"patient": {patientID}})
+func (s *SoR) conditionCode(ctx context.Context, patientID string) (code, ref string, ok bool, readErr error) {
+	b, err := s.fc.Search(ctx, "Condition", url.Values{"patient": {patientID}})
 	if err != nil {
-		log.Printf("fhirsor: Condition search for %q: %v", patientID, err)
-		return "", "", false
+		return "", "", false, safeReadError(err)
 	}
 	if b == nil || len(b.Entry) == 0 {
-		return "", "", false
+		return "", "", false, nil
 	}
 	var c fhir.Condition
-	if json.Unmarshal(b.Entry[0].Resource, &c) != nil || c.Id == nil || c.Code == nil {
-		return "", "", false
+	if json.Unmarshal(b.Entry[0].Resource, &c) != nil || c.Id == nil {
+		return "", "", false, invalidResponse()
+	}
+	if c.Code == nil {
+		return "", "", false, nil
 	}
 	for _, cd := range c.Code.Coding {
 		if cd.System != nil && *cd.System == shnsdk.SystemICD10CM && cd.Code != nil {
-			return *cd.Code, "Condition/" + *c.Id, true
+			return *cd.Code, "Condition/" + *c.Id, true, nil
 		}
 	}
-	return "", "", false
+	return "", "", false, nil
 }
 
-func (s *SoR) obsByCode(patientID, system, code string) (fhir.Observation, string, bool) {
-	b, err := s.fc.Search(context.Background(), "Observation", url.Values{
+func (s *SoR) obsByCode(ctx context.Context, patientID, system, code string) (fhir.Observation, string, bool, error) {
+	b, err := s.fc.Search(ctx, "Observation", url.Values{
 		"patient": {patientID}, "code": {system + "|" + code},
 	})
 	if err != nil {
-		log.Printf("fhirsor: Observation(%s) search for %q: %v", code, patientID, err)
-		return fhir.Observation{}, "", false
+		return fhir.Observation{}, "", false, safeReadError(err)
 	}
 	if b == nil || len(b.Entry) == 0 {
-		return fhir.Observation{}, "", false
+		return fhir.Observation{}, "", false, nil
 	}
 	var o fhir.Observation
 	if json.Unmarshal(b.Entry[0].Resource, &o) != nil || o.Id == nil {
-		return fhir.Observation{}, "", false
+		return fhir.Observation{}, "", false, invalidResponse()
 	}
-	return o, "Observation/" + *o.Id, true
+	return o, "Observation/" + *o.Id, true, nil
 }
 
-func (s *SoR) obsQuantity(patientID, system, code string) (weeks int, date, ref string, ok bool) {
-	o, r, found := s.obsByCode(patientID, system, code)
+func (s *SoR) obsQuantity(ctx context.Context, patientID, system, code string) (weeks int, date, ref string, ok bool, readErr error) {
+	o, r, found, err := s.obsByCode(ctx, patientID, system, code)
+	if err != nil {
+		return 0, "", "", false, safeReadError(err)
+	}
 	if !found || o.ValueQuantity == nil || o.ValueQuantity.Value == nil {
-		return 0, "", "", false
+		return 0, "", "", false, nil
 	}
 	f, err := o.ValueQuantity.Value.Float64()
 	if err != nil {
-		return 0, "", "", false
+		return 0, "", "", false, safeReadError(err)
 	}
 	if o.EffectiveDateTime != nil {
 		date = *o.EffectiveDateTime
 	}
-	return int(f), date, r, true
+	return int(f), date, r, true, nil
 }
 
-func (s *SoR) obsBool(patientID, system, code string) (val bool, ref string, ok bool) {
-	o, r, found := s.obsByCode(patientID, system, code)
-	if !found || o.ValueBoolean == nil {
-		return false, "", false
+func (s *SoR) obsBool(ctx context.Context, patientID, system, code string) (val bool, ref string, ok bool, readErr error) {
+	o, r, found, err := s.obsByCode(ctx, patientID, system, code)
+	if err != nil {
+		return false, "", false, safeReadError(err)
 	}
-	return *o.ValueBoolean, r, true
+	if !found || o.ValueBoolean == nil {
+		return false, "", false, nil
+	}
+	return *o.ValueBoolean, r, true, nil
 }
 
 // SupplementalReport returns the provider-LOCAL supplemental report DiagnosticReport for the
@@ -297,22 +357,28 @@ func (s *SoR) obsBool(patientID, system, code string) (val bool, ref string, ok 
 // reference, which always uses the canonical member ID form. HAPI stores resources with
 // client-assigned scoped IDs (e.g. "Patient/pat-mbruc04-provider") that differ from the
 // member ID used throughout the substrate protocol layer.
-func (s *SoR) SupplementalReport(memberID string) ([]byte, bool) {
-	_, pid, ok := s.resolvePatient(memberID)
+func (s *SoR) SupplementalReportContext(ctx context.Context, memberID string) ([]byte, bool, error) {
+	_, pid, ok, err := s.resolvePatient(ctx, memberID)
+	if err != nil {
+		return nil, false, safeReadError(err)
+	}
 	if !ok {
-		return nil, false
+		return nil, false, nil
 	}
 	tokens := make([]string, len(shnsdk.ReportValueSet))
 	for i, c := range shnsdk.ReportValueSet {
 		tokens[i] = shnsdk.SystemLOINC + "|" + c
 	}
-	raw, found := s.firstResourceBytes("DiagnosticReport", url.Values{
+	raw, found, err := s.firstResourceBytes(ctx, "DiagnosticReport", url.Values{
 		"patient": {pid}, "code": {strings.Join(tokens, ",")},
 	})
-	if !found {
-		return nil, false
+	if err != nil {
+		return nil, false, safeReadError(err)
 	}
-	return rewriteSubject(raw, "Patient/"+memberID), true
+	if !found {
+		return nil, false, nil
+	}
+	return rewriteSubject(raw, "Patient/"+memberID), true, nil
 }
 
 // FacilityRecords returns the external facility's records for the member, keyed by FHIR resource
@@ -321,21 +387,28 @@ func (s *SoR) SupplementalReport(memberID string) ([]byte, bool) {
 //
 // Each resource's subject.reference is rewritten to "Patient/<memberID>" (same rationale as
 // SupplementalReport: HAPI-scoped IDs differ from the canonical member ID).
-func (s *SoR) FacilityRecords(memberID string) (map[string][]byte, bool) {
-	_, pid, ok := s.resolvePatient(memberID)
+func (s *SoR) FacilityRecordsContext(ctx context.Context, memberID string) (map[string][]byte, bool, error) {
+	_, pid, ok, err := s.resolvePatient(ctx, memberID)
+	if err != nil {
+		return nil, false, safeReadError(err)
+	}
 	if !ok {
-		return nil, false
+		return nil, false, nil
 	}
 	out := map[string][]byte{}
 	for _, rtype := range []string{"DiagnosticReport", "DocumentReference"} {
-		if raw, found := s.firstResourceBytes(rtype, url.Values{"patient": {pid}}); found {
+		raw, found, err := s.firstResourceBytes(ctx, rtype, url.Values{"patient": {pid}})
+		if err != nil {
+			return nil, false, safeReadError(err)
+		}
+		if found {
 			out[rtype] = rewriteSubject(raw, "Patient/"+memberID)
 		}
 	}
 	if len(out) == 0 {
-		return nil, false
+		return nil, false, nil
 	}
-	return out, true
+	return out, true, nil
 }
 
 // rewriteSubject returns resourceJSON with "subject":{"reference":"<ref>"} overwritten.
@@ -381,72 +454,125 @@ func rewriteSubject(resourceJSON []byte, ref string) []byte {
 // conformantCRDDispatchBind cannot resolve the dispatched order's subject → 403 "inconsistent
 // patient in order-dispatch". The order's id + performer are preserved (the handler reads them
 // to build the dispatchedOrders ref + resolve the supplier).
-func (s *SoR) OpenOrder(memberID string) ([]byte, bool) {
-	_, pid, ok := s.resolvePatient(memberID)
+func (s *SoR) OpenOrderContext(ctx context.Context, memberID string) ([]byte, bool, error) {
+	_, pid, ok, err := s.resolvePatient(ctx, memberID)
+	if err != nil {
+		return nil, false, safeReadError(err)
+	}
 	if !ok {
-		return nil, false
+		return nil, false, nil
 	}
 	for _, rtype := range []string{"DeviceRequest", "ServiceRequest"} {
-		if raw, found := s.firstResourceBytes(rtype, url.Values{
+		raw, found, err := s.firstResourceBytes(ctx, rtype, url.Values{
 			"patient": {pid}, "status": {"active"},
-		}); found {
-			return rewriteSubject(raw, "Patient/"+memberID), true
+		})
+		if err != nil {
+			return nil, false, safeReadError(err)
+		}
+		if found {
+			return rewriteSubject(raw, "Patient/"+memberID), true, nil
 		}
 	}
-	return nil, false
+	return nil, false, nil
 }
 
 // OpenCoverage returns the member's Coverage record bytes (FR-G40 routing + payload source):
 // the same beneficiary-scoped Coverage search as CoverageInforce, but returning the raw
 // resource bytes rather than the in-force determination. found=false when the patient cannot
 // be resolved or no Coverage is on file.
-func (s *SoR) OpenCoverage(memberID string) ([]byte, bool) {
-	_, pid, ok := s.resolvePatient(memberID)
-	if !ok {
-		return nil, false
+func (s *SoR) OpenCoverageContext(ctx context.Context, memberID string) ([]byte, bool, error) {
+	_, pid, ok, err := s.resolvePatient(ctx, memberID)
+	if err != nil {
+		return nil, false, safeReadError(err)
 	}
-	b, err := s.fc.Search(context.Background(), "Coverage", url.Values{
+	if !ok {
+		return nil, false, nil
+	}
+	b, err := s.fc.Search(ctx, "Coverage", url.Values{
 		"beneficiary": {"Patient/" + pid},
 	})
 	if err != nil {
-		log.Printf("fhirsor: Coverage search for %q: %v", memberID, err)
-		return nil, false
+		return nil, false, safeReadError(err)
 	}
 	if b == nil || len(b.Entry) == 0 {
-		return nil, false
+		return nil, false, nil
 	}
-	return b.Entry[0].Resource, true
+	return b.Entry[0].Resource, true, nil
 }
 
 // ResolveByReference returns the raw bytes of a resource named by a relative reference
 // (e.g. "Organization/dme-1") via a direct FHIR read (GET {type}/{id}).
-// found=false when the resource is absent (404) or a transport/parse error occurs (logged).
+// A direct 404 is absence; transport and malformed-response errors remain errors.
 // Used to resolve an order's performer (the DME supplier Organization) for headless
 // order-dispatch origination.
-func (s *SoR) ResolveByReference(ref string) ([]byte, bool) {
+func (s *SoR) ResolveByReferenceContext(ctx context.Context, ref string) ([]byte, bool, error) {
 	parts := strings.SplitN(ref, "/", 2)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		log.Printf("fhirsor: ResolveByReference: invalid ref %q (want Type/id)", ref)
-		return nil, false
+		return nil, false, nil
 	}
-	body, found, err := s.fc.Read(context.Background(), parts[0], parts[1])
+	body, found, err := s.fc.Read(ctx, parts[0], parts[1])
 	if err != nil {
-		log.Printf("fhirsor: ResolveByReference %q: %v", ref, err)
-		return nil, false
+		return nil, false, safeReadError(err)
 	}
-	return body, found
+	return body, found, nil
 }
 
 // firstResourceBytes returns the raw bytes of the first entry of a patient-scoped search, or
-// ok=false (no match / transport error, logged — fail-safe per the SystemOfRecord contract).
-func (s *SoR) firstResourceBytes(resourceType string, q url.Values) ([]byte, bool) {
-	b, err := s.fc.Search(context.Background(), resourceType, q)
+// ok=false for a true empty result; backend failures return an error.
+func (s *SoR) firstResourceBytes(ctx context.Context, resourceType string, q url.Values) ([]byte, bool, error) {
+	b, err := s.fc.Search(ctx, resourceType, q)
 	if err != nil {
-		log.Printf("fhirsor: %s search: %v", resourceType, err)
-		return nil, false
+		return nil, false, safeReadError(err)
 	}
 	if b == nil || len(b.Entry) == 0 {
-		return nil, false
+		return nil, false, nil
 	}
-	return []byte(b.Entry[0].Resource), true
+	return []byte(b.Entry[0].Resource), true, nil
+}
+
+var _ engine.ContextSystemOfRecord = (*SoR)(nil)
+
+func (s *SoR) ResolvePatient(memberID string) (string, engine.Demo, bool) {
+	v0, v1, v2, _ := s.ResolvePatientContext(context.Background(), memberID)
+	return v0, v1, v2
+}
+
+func (s *SoR) PatientFHIRRef(memberID string) (string, bool) {
+	v0, v1, _ := s.PatientFHIRRefContext(context.Background(), memberID)
+	return v0, v1
+}
+
+func (s *SoR) CoverageInforce(memberID string) (bool, string) {
+	v0, v1, _ := s.CoverageInforceContext(context.Background(), memberID)
+	return v0, v1
+}
+
+func (s *SoR) ClinicalContext(memberID string) (shnsdk.ClinicalContext, bool) {
+	v0, v1, _ := s.ClinicalContextContext(context.Background(), memberID)
+	return v0, v1
+}
+
+func (s *SoR) SupplementalReport(memberID string) ([]byte, bool) {
+	v0, v1, _ := s.SupplementalReportContext(context.Background(), memberID)
+	return v0, v1
+}
+
+func (s *SoR) FacilityRecords(memberID string) (map[string][]byte, bool) {
+	v0, v1, _ := s.FacilityRecordsContext(context.Background(), memberID)
+	return v0, v1
+}
+
+func (s *SoR) OpenOrder(memberID string) ([]byte, bool) {
+	v0, v1, _ := s.OpenOrderContext(context.Background(), memberID)
+	return v0, v1
+}
+
+func (s *SoR) OpenCoverage(memberID string) ([]byte, bool) {
+	v0, v1, _ := s.OpenCoverageContext(context.Background(), memberID)
+	return v0, v1
+}
+
+func (s *SoR) ResolveByReference(ref string) ([]byte, bool) {
+	v0, v1, _ := s.ResolveByReferenceContext(context.Background(), ref)
+	return v0, v1
 }

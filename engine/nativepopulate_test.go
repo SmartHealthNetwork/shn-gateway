@@ -1,7 +1,12 @@
 package engine
 
 import (
+	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -43,3 +48,54 @@ func TestSetQuestionnaireResponseSubject(t *testing.T) {
 		}
 	}
 }
+
+// TestNativePopulator_UpstreamRefusalFailsClosed: a non-2xx from the $populate endpoint — a 401
+// from the auth gate in front of it is the case that matters — is errPopulateUpstream after
+// exactly one attempt. The populator never retries (unauthenticated or otherwise); an
+// authenticated client's token refusal takes the same path (transport error → one attempt).
+func TestNativePopulator_UpstreamRefusalFailsClosed(t *testing.T) {
+	pkg := []byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"Questionnaire","url":"http://example.org/q"}}]}`)
+	pc := PopulateContext{PatientRef: "Patient/MBR-COVERED", SubjectFHIRRef: "Patient/pat-mbrcovered-provider"}
+
+	t.Run("401 from the gate", func(t *testing.T) {
+		var hits int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			atomic.AddInt32(&hits, 1)
+			w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token"`)
+			http.Error(w, `{"resourceType":"OperationOutcome"}`, http.StatusUnauthorized)
+		}))
+		defer srv.Close()
+		_, _, err := NewNativePopulator(srv.Client(), srv.URL+"/Questionnaire/$populate").Populate(context.Background(), pkg, pc)
+		if !errors.Is(err, errPopulateUpstream) {
+			t.Fatalf("err = %v, want errPopulateUpstream", err)
+		}
+		if got := atomic.LoadInt32(&hits); got != 1 {
+			t.Fatalf("endpoint hit %d times, want exactly 1 (no retry)", got)
+		}
+	})
+
+	t.Run("token refusal before the request leaves", func(t *testing.T) {
+		var hits int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			atomic.AddInt32(&hits, 1)
+			w.Write([]byte(`{"resourceType":"QuestionnaireResponse","subject":{"reference":"Patient/pat-mbrcovered-provider"}}`))
+		}))
+		defer srv.Close()
+		// An authenticated client whose token fetch fails surfaces a transport error from Do;
+		// the populator must map it to errPopulateUpstream without falling back to a plain client.
+		refusing := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("smartauth: token endpoint status 401: invalid_client")
+		})}
+		_, _, err := NewNativePopulator(refusing, srv.URL+"/Questionnaire/$populate").Populate(context.Background(), pkg, pc)
+		if !errors.Is(err, errPopulateUpstream) {
+			t.Fatalf("err = %v, want errPopulateUpstream", err)
+		}
+		if got := atomic.LoadInt32(&hits); got != 0 {
+			t.Fatalf("endpoint hit %d times after a token refusal, want 0", got)
+		}
+	})
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

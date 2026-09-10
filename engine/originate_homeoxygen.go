@@ -73,7 +73,10 @@ type dispatchResult struct {
 func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member string, order dispatchOrder) (dispatchResult, bool) {
 	ctx := r.Context()
 
-	pci, _, found := g.cfg.SoR.ResolvePatient(member)
+	pci, _, found, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(r.Context(), member)
+	if writeSoRFailure(w, readErr) {
+		return dispatchResult{}, false
+	}
 	if !found {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown member"})
 		return dispatchResult{}, false
@@ -95,7 +98,10 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member 
 	// Read the member's OWN open Coverage as the routing/identity SOURCE (FR-G40): the dispatch leg's
 	// payer identity derives from the patient's real Coverage, not a synthetic CMS literal. realCov
 	// stays a LOCAL (the recipient is resolved from it); the per-leg emit shapes are unchanged.
-	realCov, hasCov := g.cfg.SoR.OpenCoverage(member)
+	realCov, hasCov, readErr := ReadSystemOfRecord(g.cfg.SoR).OpenCoverageContext(r.Context(), member)
+	if writeSoRFailure(w, readErr) {
+		return dispatchResult{}, false
+	}
 	if !hasCov {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "no coverage on file for member"})
 		return dispatchResult{}, false
@@ -104,7 +110,7 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member 
 	// ONE parse of the member's own Coverage (FR-G40): no default — a miss fails closed HERE before
 	// any leg (AI-G11 / OWD-G10). `payer` threads to the dispatch/coverage/PAS builders, so
 	// routed-payer and payload-payer cannot diverge (one payer fact, read once).
-	recipient, payer, status, msg := g.recipientForWith(realCov, g.cfg.SoR.ResolveByReference)
+	recipient, payer, status, msg := g.recipientForSoR(ctx, realCov)
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return dispatchResult{}, false
@@ -284,7 +290,11 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member 
 	// the store-resolvable Patient ref. Resolve it via the SoR (falls back to the logical
 	// ref when the SoR can't resolve it — the managed/hermetic path is unchanged).
 	subjectFHIRRef := patientRef
-	if ref, ok := g.cfg.SoR.PatientFHIRRef(member); ok && ref != "" {
+	ref, ok, readErr := ReadSystemOfRecord(g.cfg.SoR).PatientFHIRRefContext(r.Context(), member)
+	if writeSoRFailure(w, readErr) {
+		return dispatchResult{}, false
+	}
+	if ok && ref != "" {
 		subjectFHIRRef = ref
 	}
 	qrJSON, _, err := g.cfg.Populator.Populate(ctx, packageJSON, PopulateContext{
@@ -296,7 +306,7 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member 
 		Authored:       g.cfg.Clock(),
 	})
 	if err != nil {
-		writeJSON(w, statusForPopulateErr(err), map[string]string{"error": err.Error()})
+		writeJSON(w, statusForPopulateErr(err), map[string]string{"error": messageForPopulateErr(err)})
 		return dispatchResult{}, false
 	}
 	// QR-SUBJECT FENCE — the populated QR must be about the bound patient (logical ref).
@@ -358,11 +368,18 @@ func (g *Gateway) handleDispatch(w http.ResponseWriter, r *http.Request) {
 func (g *Gateway) originateDispatch(w http.ResponseWriter, r *http.Request, member string) {
 	// Ordering preserved from before the runCRDDispatch extraction: an unknown member 400s
 	// HERE (before the OpenOrder read), not as a 502 further down.
-	if _, _, found := g.cfg.SoR.ResolvePatient(member); !found {
+	_, _, found, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(r.Context(), member)
+	if writeSoRFailure(w, readErr) {
+		return
+	}
+	if !found {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown member"})
 		return
 	}
-	orderJSON, ok := g.cfg.SoR.OpenOrder(member)
+	orderJSON, ok, readErr := ReadSystemOfRecord(g.cfg.SoR).OpenOrderContext(r.Context(), member)
+	if writeSoRFailure(w, readErr) {
+		return
+	}
 	if !ok {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "no open order for member in SoR"})
 		return
@@ -374,7 +391,10 @@ func (g *Gateway) originateDispatch(w http.ResponseWriter, r *http.Request, memb
 	}
 	// The supplier (performer) is resolved from the order's performer ref via a SoR read —
 	// not a literal. Fail closed if the supplier Organization is absent.
-	supplierJSON, ok := g.cfg.SoR.ResolveByReference(performerRef)
+	supplierJSON, ok, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolveByReferenceContext(r.Context(), performerRef)
+	if writeSoRFailure(w, readErr) {
+		return
+	}
 	if !ok {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "order performer (supplier) not resolvable from SoR"})
 		return

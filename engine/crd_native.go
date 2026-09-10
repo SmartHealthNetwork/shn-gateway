@@ -6,6 +6,7 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -53,7 +54,7 @@ func orderSubjectRef(orderJSON []byte) (string, bool) {
 // for downstream validation (so the caller need not re-parse the request), or (nil, nil, status,
 // msg). The conformant sibling of handleCRDInbound's minimized bind (payer.go) and
 // bindBundleSubject (payer.go:149).
-func (g *Gateway) conformantCRDBind(reqJSON []byte, tokSubject string) (srJSON, covJSON []byte, status int, msg string) {
+func (g *Gateway) conformantCRDBindContext(ctx context.Context, reqJSON []byte, tokSubject string) (srJSON, covJSON []byte, status int, msg string) {
 	var req ingressCDSRequest
 	if err := json.Unmarshal(reqJSON, &req); err != nil {
 		return nil, nil, http.StatusBadRequest, "parse cds request failed"
@@ -77,7 +78,11 @@ func (g *Gateway) conformantCRDBind(reqJSON []byte, tokSubject string) (srJSON, 
 	if srMember != covMember || srMember != ctxMember {
 		return nil, nil, http.StatusBadRequest, "inconsistent patient in order-select"
 	}
-	pci, _, found := g.cfg.SoR.ResolvePatient(srMember)
+	pci, _, found, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(ctx, srMember)
+	if readErr != nil {
+		status, msg := SoRFailureResponse(readErr)
+		return nil, nil, status, msg
+	}
 	if !found {
 		return nil, nil, http.StatusBadRequest, "unknown member"
 	}
@@ -93,7 +98,7 @@ func (g *Gateway) conformantCRDBind(reqJSON []byte, tokSubject string) (srJSON, 
 // the conformant shape; the existing minimized handler is untouched.
 func (g *Gateway) handleCRDNativeInbound(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token, reqJSON []byte, answerTok string) {
 	ctx := r.Context()
-	srJSON, covJSON, status, msg := g.conformantCRDBind(reqJSON, tok.Subject)
+	srJSON, covJSON, status, msg := g.conformantCRDBindContext(ctx, reqJSON, tok.Subject)
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return

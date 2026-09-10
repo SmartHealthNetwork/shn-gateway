@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"os"
@@ -85,7 +86,7 @@ func TestTask0_ConformantGoldensBind(t *testing.T) {
 
 	// --- CRD order-select golden binds (the shape the Originator reproduces at the CRD legs). ---
 	crdGolden := readConformantGolden(t, "crd-order-select-request.json")
-	srJSON, covJSON, status, msg := g.conformantCRDBind(crdGolden, pci)
+	srJSON, covJSON, status, msg := g.conformantCRDBindContext(context.Background(), crdGolden, pci)
 	if status != 0 {
 		t.Fatalf("conformant CRD golden rejected: status=%d (%s), want 0", status, msg)
 	}
@@ -403,7 +404,7 @@ func TestConformantPASUpdateBind_FR32RejectionSet(t *testing.T) {
 			if tc.tokSubject != nil {
 				tokSubject = tc.tokSubject(g, pci)
 			}
-			_, status, msg := g.conformantPASUpdateBind(tc.mutate(t, append([]byte(nil), good...)), tokSubject)
+			_, status, msg := g.conformantPASUpdateBindContext(context.Background(), tc.mutate(t, append([]byte(nil), good...)), tokSubject)
 			if status != tc.wantStatus {
 				t.Fatalf("%s: got %d (%s), want %d", tc.name, status, msg, tc.wantStatus)
 			}
@@ -414,7 +415,7 @@ func TestConformantPASUpdateBind_FR32RejectionSet(t *testing.T) {
 	// everything would pass the rejection set vacuously.
 	t.Run("control-binds", func(t *testing.T) {
 		g, pci := updateGatewayForTest(t)
-		if _, status, msg := g.conformantPASUpdateBind(append([]byte(nil), good...), pci); status != 0 {
+		if _, status, msg := g.conformantPASUpdateBindContext(context.Background(), append([]byte(nil), good...), pci); status != 0 {
 			t.Fatalf("unmutated conformant update golden rejected: status=%d (%s), want 0", status, msg)
 		}
 	})
@@ -620,7 +621,7 @@ func originatorBuiltConformantUpdateBundleCorrs(t *testing.T, brPayer bool, corr
 func TestConformantPASUpdateBind_AcceptsAbsolutizedBrPayer(t *testing.T) {
 	g, pci := updateGatewayForTest(t)
 	brPayerBundle := originatorBuiltConformantUpdateBundleProfile(t, true)
-	if _, status, msg := g.conformantPASUpdateBind(brPayerBundle, pci); status != 0 {
+	if _, status, msg := g.conformantPASUpdateBindContext(context.Background(), brPayerBundle, pci); status != 0 {
 		t.Fatalf("br-payer (absolutized) update bundle rejected: status=%d (%s), want 0", status, msg)
 	}
 }

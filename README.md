@@ -191,7 +191,11 @@ docker run --rm \
   -e SHN_DISCOVERY_URL=https://accounts.shn-preview.org/discovery \
   -e ROLE=provider -e ORIGINATION_PROFILE=provider-data \
   -e FHIR_DATA_URL=https://fhir.your-org.example.com/r4 \
-  -e PROVIDER_DTR_POPULATE_URL=https://your-populate-engine.example.com/fhir \
+  -e PROVIDER_DTR_POPULATE_URL=https://your-populate-engine.example.com/fhir/Questionnaire/\$populate \
+  -e PROVIDER_DTR_POPULATE_TOKEN_URL=https://your-populate-engine.example.com/oauth/token \
+  -e PROVIDER_DTR_POPULATE_CLIENT_ID=your-populate-client-id \
+  -e PROVIDER_DTR_POPULATE_CLIENT_KEY=/etc/shn/bundle/populate.pem \
+  -e PROVIDER_DTR_POPULATE_CLIENT_ALG=ES384 \
   -e FHIR_VALIDATE_URL=http://validator:8080/fhir \
   -e SHN_SECRETS=/etc/shn/bundle \
   -v "$PWD/your-bundle:/etc/shn/bundle:ro" \
@@ -332,14 +336,47 @@ role-specific — is [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md).
 | `fetch discovery: …` / `fetch hub transport key: …` at startup | `SHN_DISCOVERY_URL` unreachable, or the gateway can't reach the hosts discovery resolves (Hub, Authorization Framework, registrar, …). Confirm `curl $SHN_DISCOVERY_URL` works from the gateway's network. |
 | Provider originate returns `recipient "…" not in registry` | The payer holder resolved from the member's Coverage (feed `payerIds`, or your `PAYER_DIRECTORY` override) isn't a registered holder, or the registrar feed hasn't propagated yet. Confirm the counterpart appears in `shn clients` / the `/holders` feed. |
 | Provider originate returns `422 no payer identifier on member coverage` / `no registered payer for identifier …` | Coverage-derived routing found no route (FR-G41; no default): the member's Coverage carries no parseable payor identity, or no `role=payer` holder in the feed claims that identity (and no `PAYER_DIRECTORY` override maps it). Ensure the target payer holder published that `{system,value}` in its feed `payerIds` (payer-onboarding path), or set a `PAYER_DIRECTORY` override row. An identity claimed by **two** holders also fails closed (ambiguous — `AI-G12`). |
+| Provider originate returns `502 {"error":"engine: $populate upstream failed"}` | Inspect the holder-local `gateway: populate_failure` record below to distinguish the failing population boundary. |
 | Provider originate returns `502` (routing / response sender mismatch) | The counterpart isn't reachable or didn't respond as itself. Check the payer gateway is running and its registered `--base-url` resolves publicly to it. |
 | Provider originate returns `502 {"error":"authorization denied"}` | Wrong bundle for the role. This gateway is `ROLE=provider` and *originates* the request, so its `SHN_SECRETS` must be a `--role provider` bundle — authority binds to the caller's **registered role**, and a payer bundle can't originate a provider leg (the Authorization Framework denies it). Register a provider client and mount that bundle. A payer self-test needs two registrations — see [Point it at your own payer](deploy/eval/README.md#point-it-at-your-own-payer-payer-self-test). |
 | Payer never receives a delivery | The Hub can't reach the payer's `--base-url`. It must be a public https endpoint fronting the gateway (see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)) and must not redirect on `/substrate/inbound`. Re-check the tunnel/load balancer. |
 | Payer returns `403 missing or invalid hub assertion` | The request didn't come from the Hub (e.g. a direct curl to `/substrate/inbound`). Only the Hub can deliver; originate from a provider instead. |
-| Scenario call returns `400 unknown branch` / `unknown member` | The originate body must be `{"branch":"covered"}` or `{"branch":"notcovered"}`; the member must exist in the active system of record (the built-in stub carries example personas). |
+| Scenario call returns `400 unknown branch` / `unknown member` | The originate body must be `{"branch":"covered"}` or `{"branch":"notcovered"}`; the member must exist in the active system of record. A backend read failure is distinct from absence; see [read failures](docs/INTEGRATION.md#system-of-record-read-failures). |
 | Permission-denied reading the bundle (Docker) | The mounted bundle isn't readable by gid 65532. Apply `chgrp -R 65532` + `0750`/`0640` (§6). |
 | Registration rejected with `invalid baseURL: …` | `--base-url` must be a publicly resolvable https URL — not private/loopback/link-local. See [§3](#3-request-access) and [§5 Payer](#payer). |
+| `system of record authentication failed` / `unavailable` / `returned an invalid response` (502/503) | Check the backend credentials, availability or returned FHIR data. Do not change the patient identifier to work around a backend failure. See [read failures](docs/INTEGRATION.md#system-of-record-read-failures). |
 | `egress validation failed` (422) on originate | The resource your connector produced doesn't conform to its IG profile. Check the `issues` array in the response; fix the data your `SystemOfRecord` returns. |
+
+For configured native population, the app writes one fixed-field diagnostic on its
+existing output stream for each upstream failure. For example:
+
+```text
+gateway: populate_failure {"version":1,"stage":"http_status","reason":"non_2xx","status":503}
+```
+
+| Stage | Reasons | Interpretation |
+|---|---|---|
+| `request_build` | `canceled`, `deadline`, `other` | The population request could not be constructed. |
+| `token_acquisition` | `canceled`, `deadline`, `other` | The SMART client could not acquire a token; no population request was sent. |
+| `transport` | `canceled`, `deadline`, `other` | The population HTTP client returned an error, including a refused redirect. |
+| `body_read` | `canceled`, `deadline`, `other` | Reading the population response failed, even if its status was also non-2xx. |
+| `http_status` | `non_2xx` | The population response body was read, but its HTTP status was not successful. |
+| `qr_extract` | `invalid_json`, `wrong_resource_type` | The successful HTTP response could not be extracted as a QuestionnaireResponse. |
+
+`status` is the observed **population** response status (100–599), or `0` when
+unavailable; token endpoint statuses are not carried here. Cancellation/deadline
+reasons follow typed error causes. Request-local acquisition evidence survives an
+outer client timeout replacing the wrapped error chain. These records contain no URLs, headers,
+credentials, payloads, identifiers, or upstream error text. Success and distinct
+subject/canonical refusals emit no upstream-failure record. The caller's response,
+authority checks, validation, and request count are unchanged; there is no retry
+or unauthenticated fallback.
+
+These diagnostics describe a holder-local failure boundary, not its root cause
+or an AuditEvent. Service/time-window alignment is approximate: records carry no
+request correlation key and cannot identify an exact request across concurrent
+processes. The payload-free guarantee covers these diagnostic records, not other
+existing logs.
 
 ---
 

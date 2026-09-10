@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"testing"
@@ -20,7 +21,7 @@ func TestEnsureSelfContained_KeepsInlinedAndStripsCallback(t *testing.T) {
 	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
 	pci := boundPCI(t, g, "MBR-COVERED")
 	ref := "Patient/MBR-COVERED"
-	out, status, msg := g.ingressEnsureSelfContained(crdReqJSON("MBR-COVERED", ref, ref), "MBR-COVERED", pci)
+	out, status, msg := g.ingressEnsureSelfContainedContext(context.Background(), crdReqJSON("MBR-COVERED", ref, ref), "MBR-COVERED", pci)
 	if status != 0 {
 		t.Fatalf("fully-inlined request: status = %d (%s), want 0", status, msg)
 	}
@@ -58,7 +59,7 @@ func TestEnsureSelfContained_ResolvesAbsentCoverageFromSoR(t *testing.T) {
 	req["prefetch"], _ = json.Marshal(prefetch)
 	body, _ = json.Marshal(req)
 
-	out, status, msg := g.ingressEnsureSelfContained(body, "MBR-COVERED", pci)
+	out, status, msg := g.ingressEnsureSelfContainedContext(context.Background(), body, "MBR-COVERED", pci)
 	if status != 0 {
 		t.Fatalf("resolvable absent coverage: status = %d (%s), want 0", status, msg)
 	}
@@ -75,7 +76,7 @@ func TestEnsureSelfContained_UnresolvableFailsClosed(t *testing.T) {
 	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
 	// Unknown member: coverage cannot be resolved → 422 fail-closed (never a live callback).
 	body := []byte(`{"hook":"order-select","context":{"patientId":"MBR-UNKNOWN"},"prefetch":{}}`)
-	_, status, _ := g.ingressEnsureSelfContained(body, "MBR-UNKNOWN", "no-such-pci")
+	_, status, _ := g.ingressEnsureSelfContainedContext(context.Background(), body, "MBR-UNKNOWN", "no-such-pci")
 	if status != http.StatusUnprocessableEntity {
 		t.Fatalf("unresolvable prefetch: status = %d, want 422", status)
 	}
@@ -100,7 +101,7 @@ func TestEnsureSelfContained_KeptBundleWrongPatientFailsClosed(t *testing.T) {
 	req["prefetch"], _ = json.Marshal(prefetch)
 	body, _ = json.Marshal(req)
 
-	_, status, _ := g.ingressEnsureSelfContained(body, "MBR-COVERED", pci)
+	_, status, _ := g.ingressEnsureSelfContainedContext(context.Background(), body, "MBR-COVERED", pci)
 	if status != http.StatusForbidden {
 		t.Fatalf("kept wrong-patient bundle entry: status = %d, want 403", status)
 	}

@@ -1,6 +1,9 @@
 package engine
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 // fakeOrderSoR returns a fixed open order regardless of member.
 type fakeOrderSoR struct {
@@ -18,7 +21,7 @@ func (f fakeOrderSoR) OpenOrder(string) ([]byte, bool) { return f.order, true }
 func TestOrderSource_RejectsOrderWithoutProductCoding(t *testing.T) {
 	noCoding := []byte(`{"resourceType":"ServiceRequest","id":"sr-x","status":"active"}`) // no code.coding
 	g := &Gateway{cfg: Config{OriginationProfile: "provider-data", SoR: fakeOrderSoR{censusSoR: newCensusSoR(), order: noCoding}}}
-	_, status, _ := g.orderSource("MBR-X", "Patient/MBR-X", "", "", "", "")
+	_, status, _ := g.orderSourceContext(context.Background(), "MBR-X", "Patient/MBR-X", "", "", "", "")
 	if status != 502 {
 		t.Fatalf("no-coding order status=%d, want 502 (fail closed)", status)
 	}
@@ -34,7 +37,7 @@ func TestOrderSource_RejectsOrderWithoutProductCoding(t *testing.T) {
 func TestOrderSource_DemoBuildsFromTuple_NeverReadsSoR(t *testing.T) {
 	noCoding := []byte(`{"resourceType":"ServiceRequest","id":"sr-x","status":"active"}`)
 	g := &Gateway{cfg: Config{OriginationProfile: "demo", SoR: fakeOrderSoR{censusSoR: newCensusSoR(), order: noCoding}}}
-	srJSON, status, msg := g.orderSource("MBR-D-UC03", "Patient/MBR-D-UC03", systemHCPCSBuild, "L8000", DemoDisplayL8000, DemoDxL8000)
+	srJSON, status, msg := g.orderSourceContext(context.Background(), "MBR-D-UC03", "Patient/MBR-D-UC03", systemHCPCSBuild, "L8000", DemoDisplayL8000, DemoDxL8000)
 	if status != 0 {
 		t.Fatalf("demo orderSource must build from the tuple (never touch the fake SoR's bad order): status=%d msg=%q", status, msg)
 	}

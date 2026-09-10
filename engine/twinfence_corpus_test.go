@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -111,7 +112,7 @@ func TestTwinFenceCorpus(t *testing.T) {
 				if !found {
 					t.Fatalf("tokenMember %q not resolvable in the census fixture", v.TokenMember)
 				}
-				_, status, msg := g.conformantPASUpdateBind(v.Bundle, pci)
+				_, status, msg := g.conformantPASUpdateBindContext(context.Background(), v.Bundle, pci)
 				switch v.Expect {
 				case "accept":
 					if status != 0 {

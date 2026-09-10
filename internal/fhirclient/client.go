@@ -1,106 +1,162 @@
-// Package fhirclient is a small read-only FHIR R4 HTTP client (Search and Read).
-// It depends only on
-// the stdlib and samply FHIR models — no substrate-internal imports.
+// Package fhirclient is a bounded read-only FHIR R4 HTTP client.
 package fhirclient
 
 import (
 	"context"
 	"encoding/json"
-	"fmt"
+	fhir "github.com/samply/golang-fhir-models/fhir-models/fhir"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
-
-	fhir "github.com/samply/golang-fhir-models/fhir-models/fhir"
 )
 
-// maxBodyBytes caps a response body so a misbehaving/adversarial FHIR server cannot
-// exhaust memory (8 MiB, matching internal/wire.MaxResponseBytes; kept as a local const
-// so this package stays free of substrate-internal imports — see the package doc).
 const maxBodyBytes = 8 << 20
 
-// Client reads from a FHIR R4 server base URL (e.g. https://ehr.example/fhir).
-// Unauthenticated by default; an injected token source supplies auth.
+// HTTPError carries status evidence without upstream response content.
+type HTTPError struct{ StatusCode int }
+
+func (*HTTPError) Error() string { return "FHIR endpoint rejected request" }
+
+// TransportError distinguishes connection and body-read failures from invalid content.
+type TransportError struct{ Cause error }
+
+func (*TransportError) Error() string   { return "FHIR endpoint unavailable" }
+func (e *TransportError) Unwrap() error { return e.Cause }
+
+// InvalidResponseError indicates malformed or oversized FHIR content.
+type InvalidResponseError struct{}
+
+func (*InvalidResponseError) Error() string { return "invalid FHIR response" }
+
 type Client struct {
 	base string
 	hc   *http.Client
 }
 
-// New returns a Client for baseURL. A nil hc uses http.DefaultClient. Trailing
-// slashes on baseURL are trimmed so path joining is unambiguous.
 func New(baseURL string, hc *http.Client) *Client {
 	if hc == nil {
 		hc = http.DefaultClient
 	}
-	return &Client{base: strings.TrimRight(baseURL, "/"), hc: hc}
+	return &Client{strings.TrimRight(baseURL, "/"), hc}
 }
-
-// Search issues GET {base}/{resourceType}?{query} and returns the parsed Bundle.
-// Non-2xx or a decode failure is an error (callers decide how to degrade).
-func (c *Client) Search(ctx context.Context, resourceType string, query url.Values) (*fhir.Bundle, error) {
-	u := c.base + "/" + resourceType
-	if len(query) > 0 {
-		u += "?" + query.Encode()
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+func (c *Client) get(ctx context.Context, path string) ([]byte, int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/"+path, nil)
 	if err != nil {
-		return nil, fmt.Errorf("fhirclient: new request: %w", err)
+		return nil, 0, &InvalidResponseError{}
 	}
 	req.Header.Set("Accept", "application/fhir+json")
 	resp, err := c.hc.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("fhirclient: GET %s: %w", resourceType, err)
+		return nil, 0, &TransportError{err}
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
-	if err != nil {
-		return nil, fmt.Errorf("fhirclient: read body: %w", err)
-	}
 	if resp.StatusCode/100 != 2 {
-		return nil, fmt.Errorf("fhirclient: GET %s: status %d: %s", resourceType, resp.StatusCode, truncate(body))
+		return nil, resp.StatusCode, &HTTPError{resp.StatusCode}
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes+1))
+	if err != nil {
+		return nil, 0, &TransportError{err}
+	}
+	if len(body) > maxBodyBytes {
+		return nil, 0, &InvalidResponseError{}
+	}
+	return body, resp.StatusCode, nil
+}
+
+// ValidateResource checks identity and JSON shape; it does not certify a FHIR profile.
+func ValidateResource(body []byte, resourceType string) error {
+	var head struct {
+		ResourceType string `json:"resourceType"`
+		ID           string `json:"id"`
+	}
+	if json.Unmarshal(body, &head) != nil || head.ResourceType != resourceType || strings.TrimSpace(head.ID) == "" {
+		return &InvalidResponseError{}
+	}
+	var resource any
+	switch resourceType {
+	case "Patient":
+		resource = &fhir.Patient{}
+	case "Coverage":
+		resource = &fhir.Coverage{}
+	case "Condition":
+		resource = &fhir.Condition{}
+	case "Observation":
+		// The model uses json.Number, which also accepts quoted numbers. Check
+		// the consumed quantity's wire type before it can become clinical evidence.
+		var observation struct {
+			ValueQuantity *struct {
+				Value json.RawMessage `json:"value"`
+			} `json:"valueQuantity"`
+		}
+		if json.Unmarshal(body, &observation) != nil {
+			return &InvalidResponseError{}
+		}
+		if observation.ValueQuantity != nil {
+			value := strings.TrimSpace(string(observation.ValueQuantity.Value))
+			if value != "" && value != "null" && value[0] != '-' && (value[0] < '0' || value[0] > '9') {
+				return &InvalidResponseError{}
+			}
+		}
+		resource = &fhir.Observation{}
+	case "DiagnosticReport":
+		resource = &fhir.DiagnosticReport{}
+	case "DocumentReference":
+		resource = &fhir.DocumentReference{}
+	case "Procedure":
+		resource = &fhir.Procedure{}
+	case "DeviceRequest":
+		resource = &fhir.DeviceRequest{}
+	case "ServiceRequest":
+		resource = &fhir.ServiceRequest{}
+	case "Organization":
+		resource = &fhir.Organization{}
+	}
+	if resource != nil && json.Unmarshal(body, resource) != nil {
+		return &InvalidResponseError{}
+	}
+	return nil
+}
+func (c *Client) Search(ctx context.Context, resourceType string, q url.Values) (*fhir.Bundle, error) {
+	path := resourceType
+	if len(q) > 0 {
+		path += "?" + q.Encode()
+	}
+	body, _, err := c.get(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	var head struct {
+		ResourceType string `json:"resourceType"`
+		Type         string `json:"type"`
 	}
 	var b fhir.Bundle
-	if err := json.Unmarshal(body, &b); err != nil {
-		return nil, fmt.Errorf("fhirclient: decode bundle: %w", err)
+	if json.Unmarshal(body, &head) != nil || head.ResourceType != "Bundle" || head.Type != "searchset" || json.Unmarshal(body, &b) != nil {
+		return nil, &InvalidResponseError{}
 	}
+	entries := b.Entry[:0]
+	for _, e := range b.Entry {
+		if e.Search != nil && e.Search.Mode != nil && e.Search.Mode.String() != "match" {
+			continue
+		}
+		if err := ValidateResource(e.Resource, resourceType); err != nil {
+			return nil, err
+		}
+		entries = append(entries, e)
+	}
+	b.Entry = entries
 	return &b, nil
 }
-
-// Read issues GET {base}/{resourceType}/{id} and returns the raw response bytes.
-// Non-2xx or a read failure is an error; 404 returns an error (callers inspect the
-// status via errors.Is or by treating the error as absence).
-// found=false is returned for 404 specifically (resource absent); other errors are
-// returned as (nil, false, err) — callers that want fail-safe semantics ignore err.
-func (c *Client) Read(ctx context.Context, resourceType, id string) (body []byte, found bool, err error) {
-	u := c.base + "/" + resourceType + "/" + id
-	req, rerr := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
-	if rerr != nil {
-		return nil, false, fmt.Errorf("fhirclient: new request: %w", rerr)
-	}
-	req.Header.Set("Accept", "application/fhir+json")
-	resp, rerr := c.hc.Do(req)
-	if rerr != nil {
-		return nil, false, fmt.Errorf("fhirclient: GET %s/%s: %w", resourceType, id, rerr)
-	}
-	defer resp.Body.Close()
-	body, rerr = io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
-	if rerr != nil {
-		return nil, false, fmt.Errorf("fhirclient: read body: %w", rerr)
-	}
-	if resp.StatusCode == http.StatusNotFound {
+func (c *Client) Read(ctx context.Context, resourceType, id string) ([]byte, bool, error) {
+	body, status, err := c.get(ctx, resourceType+"/"+id)
+	if status == 404 {
 		return nil, false, nil
 	}
-	if resp.StatusCode/100 != 2 {
-		return nil, false, fmt.Errorf("fhirclient: GET %s/%s: status %d: %s", resourceType, id, resp.StatusCode, truncate(body))
+	if err != nil {
+		return nil, false, err
+	}
+	if err = ValidateResource(body, resourceType); err != nil {
+		return nil, false, err
 	}
 	return body, true, nil
-}
-
-func truncate(b []byte) string {
-	const max = 200
-	if len(b) > max {
-		return string(b[:max])
-	}
-	return string(b)
 }

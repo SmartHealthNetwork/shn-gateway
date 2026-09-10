@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -14,7 +15,7 @@ func TestOrderSource_DefaultBuildsFromTuple(t *testing.T) {
 	if err != nil {
 		t.Fatalf("baseline build: %v", err)
 	}
-	got, status, msg := g.orderSource("MBR-COVERED", patientRef, systemCPTBuild, "72148", "MRI lumbar spine w/o contrast", "M51.16")
+	got, status, msg := g.orderSourceContext(context.Background(), "MBR-COVERED", patientRef, systemCPTBuild, "72148", "MRI lumbar spine w/o contrast", "M51.16")
 	if status != 0 {
 		t.Fatalf("orderSource status=%d msg=%q, want 0", status, msg)
 	}
@@ -26,7 +27,7 @@ func TestOrderSource_DefaultBuildsFromTuple(t *testing.T) {
 // provider-data orderSource reads the SoR open order; fail-closed when there is no order.
 func TestOrderSource_ProviderDataNoOrder(t *testing.T) {
 	g := &Gateway{cfg: Config{OriginationProfile: "provider-data", SoR: newCensusSoR()}}
-	_, status, _ := g.orderSource("MBR-X", "Patient/MBR-X", "", "", "", "")
+	_, status, _ := g.orderSourceContext(context.Background(), "MBR-X", "Patient/MBR-X", "", "", "", "")
 	if status != 502 {
 		t.Fatalf("orderSource(provider-data, no order) status=%d, want 502", status)
 	}
@@ -50,7 +51,7 @@ func (s *noCodingSoR) OpenOrder(memberID string) ([]byte, bool) {
 
 func TestOrderSource_ProviderDataOrderNoRecognizedCoding(t *testing.T) {
 	g := &Gateway{cfg: Config{OriginationProfile: "provider-data", SoR: &noCodingSoR{newCensusSoR()}}}
-	_, status, msg := g.orderSource("MBR-X", "Patient/MBR-X", "", "", "", "")
+	_, status, msg := g.orderSourceContext(context.Background(), "MBR-X", "Patient/MBR-X", "", "", "", "")
 	if status != 502 {
 		t.Fatalf("orderSource(provider-data, order w/ no recognized coding) status=%d msg=%q, want 502", status, msg)
 	}

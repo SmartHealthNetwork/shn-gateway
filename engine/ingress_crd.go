@@ -6,6 +6,7 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -90,7 +91,7 @@ func wrapCards(respJSON []byte) ([]byte, string, int, string) {
 // reference present (context.patientId, each draftOrders entry subject, each prefetch
 // resource's subject/beneficiary/patient) MUST resolve to the SAME pci; any divergence fails
 // closed (403). Returns (pci, 0, "") on success or ("", status, msg) to write.
-func (g *Gateway) ingressCRDSubjectPCI(body []byte) (string, int, string) {
+func (g *Gateway) ingressCRDSubjectPCIContext(ctx context.Context, body []byte) (string, int, string) {
 	var req ingressCDSRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		return "", http.StatusBadRequest, "parse cds request failed"
@@ -99,7 +100,11 @@ func (g *Gateway) ingressCRDSubjectPCI(body []byte) (string, int, string) {
 		return "", http.StatusBadRequest, "missing context.patientId"
 	}
 	member := strings.TrimPrefix(req.Context.PatientID, "Patient/")
-	pci, _, found := g.cfg.SoR.ResolvePatient(member)
+	pci, _, found, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(ctx, member)
+	if readErr != nil {
+		status, msg := SoRFailureResponse(readErr)
+		return "", status, msg
+	}
 	if !found {
 		return "", http.StatusBadRequest, "unknown member"
 	}
@@ -139,7 +144,11 @@ func (g *Gateway) ingressCRDSubjectPCI(body []byte) (string, int, string) {
 	}
 	for _, ref := range refs {
 		m := strings.TrimPrefix(ref, "Patient/")
-		rp, _, ok := g.cfg.SoR.ResolvePatient(m)
+		rp, _, ok, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(ctx, m)
+		if readErr != nil {
+			status, msg := SoRFailureResponse(readErr)
+			return "", status, msg
+		}
 		if !ok || rp != pci {
 			return "", http.StatusForbidden, "inconsistent patient reference in ingress payload"
 		}
@@ -167,7 +176,7 @@ func patientResourceID(resource json.RawMessage) string {
 // fhirAuthorization are unconditionally stripped (non-aggregation floor). A KEPT searchset
 // Bundle's entries are validated against the bound pci (closes DEF-INGRESS-BUNDLE from the
 // subject fence). Returns (rewritten bytes, 0, "") or (nil, status, msg).
-func (g *Gateway) ingressEnsureSelfContained(body []byte, member, pci string) ([]byte, int, string) {
+func (g *Gateway) ingressEnsureSelfContainedContext(ctx context.Context, body []byte, member, pci string) ([]byte, int, string) {
 	var doc map[string]json.RawMessage
 	if err := json.Unmarshal(body, &doc); err != nil {
 		return nil, http.StatusBadRequest, "parse cds request failed"
@@ -183,12 +192,16 @@ func (g *Gateway) ingressEnsureSelfContained(body []byte, member, pci string) ([
 	for _, key := range pinnedPrefetchKeys {
 		if present, ok := prefetch[key]; ok {
 			// KEEP path — but a kept searchset Bundle's entries must each bind to the bound pci.
-			if status, msg := g.fenceKeptBundle(present, pci); status != 0 {
+			if status, msg := g.fenceKeptBundleContext(ctx, present, pci); status != 0 {
 				return nil, status, msg
 			}
 			continue
 		}
-		resolved, ok := g.resolvePrefetchFromSoR(key, member, patientRef)
+		resolved, ok, readErr := g.resolvePrefetchFromSoRContext(ctx, key, member, patientRef)
+		if readErr != nil {
+			status, msg := SoRFailureResponse(readErr)
+			return nil, status, msg
+		}
 		if !ok {
 			return nil, http.StatusUnprocessableEntity, "prefetch " + key + " not inlined and not resolvable from SoR"
 		}
@@ -210,7 +223,7 @@ func (g *Gateway) ingressEnsureSelfContained(body []byte, member, pci string) ([
 // that is a searchset Bundle must have every entry's patient subject resolve to the bound pci,
 // else a crafted history Bundle could smuggle wrong-patient resources into the sealed request.
 // Non-Bundle values are covered by the single-resource fence; this returns ok for them.
-func (g *Gateway) fenceKeptBundle(value json.RawMessage, pci string) (int, string) {
+func (g *Gateway) fenceKeptBundleContext(ctx context.Context, value json.RawMessage, pci string) (int, string) {
 	var probe struct {
 		ResourceType string `json:"resourceType"`
 		Entry        []struct {
@@ -226,7 +239,12 @@ func (g *Gateway) fenceKeptBundle(value json.RawMessage, pci string) (int, strin
 			continue
 		}
 		m := strings.TrimPrefix(ref, "Patient/")
-		if rp, _, ok := g.cfg.SoR.ResolvePatient(m); !ok || rp != pci {
+		rp, _, ok, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(ctx, m)
+		if readErr != nil {
+			status, msg := SoRFailureResponse(readErr)
+			return status, msg
+		}
+		if !ok || rp != pci {
 			return http.StatusForbidden, "prefetch bundle entry patient mismatch"
 		}
 	}
@@ -237,22 +255,29 @@ func (g *Gateway) fenceKeptBundle(value json.RawMessage, pci string) (int, strin
 // coverage reuses BuildCoverage; the histories project into an empty (self-containing)
 // searchset Bundle; an unknown member fails (→ caller returns 422). A generalized
 // FHIR-read seam (arbitrary types) is a planned future enhancement.
-func (g *Gateway) resolvePrefetchFromSoR(key, member, patientRef string) (json.RawMessage, bool) {
+func (g *Gateway) resolvePrefetchFromSoRContext(ctx context.Context, key, member, patientRef string) (json.RawMessage, bool, error) {
 	switch key {
 	case "patient":
-		ref, _ := g.cfg.SoR.PatientFHIRRef(member)
+		ref, _, readErr := ReadSystemOfRecord(g.cfg.SoR).PatientFHIRRefContext(ctx, member)
+		if readErr != nil {
+			return nil, false, readErr
+		}
 		if ref == "" {
 			ref = patientRef
 		}
 		id := strings.TrimPrefix(ref, "Patient/")
 		b, err := json.Marshal(map[string]string{"resourceType": "Patient", "id": id})
 		if err != nil {
-			return nil, false
+			return nil, false, nil
 		}
-		return json.RawMessage(b), true
+		return json.RawMessage(b), true, nil
 	case "coverage":
-		if _, _, found := g.cfg.SoR.ResolvePatient(member); !found {
-			return nil, false
+		_, _, found, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(ctx, member)
+		if readErr != nil {
+			return nil, false, readErr
+		}
+		if !found {
+			return nil, false, nil
 		}
 		// urn:shn:coverage carries the BARE member id (a member number, not a
 		// reference). The old "-cov"-suffixed value existed only to fabricate a
@@ -260,11 +285,11 @@ func (g *Gateway) resolvePrefetchFromSoR(key, member, patientRef string) (json.R
 		// prefetch Coverage feeds no DTR fetch leg that would read a reference off it.
 		covJSON, err := shnsdk.BuildCoverage(patientRef, member)
 		if err != nil {
-			return nil, false
+			return nil, false, nil
 		}
-		return json.RawMessage(covJSON), true
+		return json.RawMessage(covJSON), true, nil
 	case "serviceHistory", "deviceHistory", "medicationHistory", "questionnaireResponses":
-		return json.RawMessage(`{"resourceType":"Bundle","type":"searchset","entry":[]}`), true
+		return json.RawMessage(`{"resourceType":"Bundle","type":"searchset","entry":[]}`), true, nil
 	}
-	return nil, false
+	return nil, false, nil
 }

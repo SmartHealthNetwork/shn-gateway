@@ -59,7 +59,8 @@ import (
 //	ingress.responded the ingress call was answered (Detail = HTTP status, Payload = response body)
 //	validate.result   a $validate ran (Detail = "valid" | "invalid" | "validator unavailable")
 //	sor.read          the gateway read its data source (Op = SystemOfRecord method,
-//	                  Detail = "found"/"not found"/coverage status, Payload = the
+//	                  Detail = "found"/"not found"/coverage status or a safe failure category,
+//	                  Payload = the
 //	                  resource bytes for byte-returning reads)
 type ObserverEvent struct {
 	Time           time.Time       `json:"time"`
@@ -284,65 +285,135 @@ func sorFoundDetail(found bool) string {
 	return "not found"
 }
 
-func (o observingSoR) ResolvePatient(memberID string) (string, Demo, bool) {
-	pci, demo, found := o.inner.ResolvePatient(memberID)
-	o.emit("ResolvePatient", sorFoundDetail(found), nil)
-	return pci, demo, found
+func (o observingSoR) ResolvePatient(key string) (string, Demo, bool) {
+	a, b, found, _ := o.ResolvePatientContext(context.Background(), key)
+	return a, b, found
 }
-
-func (o observingSoR) PatientFHIRRef(memberID string) (string, bool) {
-	ref, found := o.inner.PatientFHIRRef(memberID)
-	o.emit("PatientFHIRRef", sorFoundDetail(found), nil)
-	return ref, found
-}
-
-func (o observingSoR) CoverageInforce(memberID string) (bool, string) {
-	inforce, reason := o.inner.CoverageInforce(memberID)
-	detail := "inforce"
-	if !inforce {
-		detail = reason
-		if detail == "" {
-			detail = "not inforce"
-		}
+func (o observingSoR) ResolvePatientContext(ctx context.Context, key string) (string, Demo, bool, error) {
+	a, b, found, err := ReadSystemOfRecord(o.inner).ResolvePatientContext(ctx, key)
+	if err != nil {
+		o.emit("ResolvePatient", string(safeSoRError(err).Kind), nil)
+	} else {
+		o.emit("ResolvePatient", sorFoundDetail(found), nil)
 	}
-	o.emit("CoverageInforce", detail, nil)
-	return inforce, reason
+	return a, b, found, err
 }
 
-func (o observingSoR) ClinicalContext(memberID string) (shnsdk.ClinicalContext, bool) {
-	cc, found := o.inner.ClinicalContext(memberID)
-	o.emit("ClinicalContext", sorFoundDetail(found), nil)
-	return cc, found
+func (o observingSoR) PatientFHIRRef(key string) (string, bool) {
+	a, found, _ := o.PatientFHIRRefContext(context.Background(), key)
+	return a, found
+}
+func (o observingSoR) PatientFHIRRefContext(ctx context.Context, key string) (string, bool, error) {
+	a, found, err := ReadSystemOfRecord(o.inner).PatientFHIRRefContext(ctx, key)
+	if err != nil {
+		o.emit("PatientFHIRRef", string(safeSoRError(err).Kind), nil)
+	} else {
+		o.emit("PatientFHIRRef", sorFoundDetail(found), nil)
+	}
+	return a, found, err
 }
 
-func (o observingSoR) SupplementalReport(memberID string) ([]byte, bool) {
-	report, found := o.inner.SupplementalReport(memberID)
-	o.emit("SupplementalReport", sorFoundDetail(found), report)
-	return report, found
+func (o observingSoR) CoverageInforce(key string) (bool, string) {
+	found, a, _ := o.CoverageInforceContext(context.Background(), key)
+	return found, a
+}
+func (o observingSoR) CoverageInforceContext(ctx context.Context, key string) (bool, string, error) {
+	found, a, err := ReadSystemOfRecord(o.inner).CoverageInforceContext(ctx, key)
+	if err != nil {
+		o.emit("CoverageInforce", string(safeSoRError(err).Kind), nil)
+	} else {
+		detail := "inforce"
+		if !found {
+			detail = a
+			if detail == "" {
+				detail = "not inforce"
+			}
+		}
+		o.emit("CoverageInforce", detail, nil)
+	}
+	return found, a, err
 }
 
-func (o observingSoR) FacilityRecords(memberID string) (map[string][]byte, bool) {
-	records, found := o.inner.FacilityRecords(memberID)
-	// No payload: a multi-resource map is not one FHIR resource snapshot
-	// (accepted gap — additive later if the inspector needs it).
-	o.emit("FacilityRecords", sorFoundDetail(found), nil)
-	return records, found
+func (o observingSoR) ClinicalContext(key string) (shnsdk.ClinicalContext, bool) {
+	a, found, _ := o.ClinicalContextContext(context.Background(), key)
+	return a, found
+}
+func (o observingSoR) ClinicalContextContext(ctx context.Context, key string) (shnsdk.ClinicalContext, bool, error) {
+	a, found, err := ReadSystemOfRecord(o.inner).ClinicalContextContext(ctx, key)
+	if err != nil {
+		o.emit("ClinicalContext", string(safeSoRError(err).Kind), nil)
+	} else {
+		o.emit("ClinicalContext", sorFoundDetail(found), nil)
+	}
+	return a, found, err
 }
 
-func (o observingSoR) OpenOrder(memberID string) ([]byte, bool) {
-	orderJSON, found := o.inner.OpenOrder(memberID)
-	o.emit("OpenOrder", sorFoundDetail(found), orderJSON)
-	return orderJSON, found
+func (o observingSoR) SupplementalReport(key string) ([]byte, bool) {
+	a, found, _ := o.SupplementalReportContext(context.Background(), key)
+	return a, found
+}
+func (o observingSoR) SupplementalReportContext(ctx context.Context, key string) ([]byte, bool, error) {
+	a, found, err := ReadSystemOfRecord(o.inner).SupplementalReportContext(ctx, key)
+	if err != nil {
+		o.emit("SupplementalReport", string(safeSoRError(err).Kind), nil)
+	} else {
+		o.emit("SupplementalReport", sorFoundDetail(found), a)
+	}
+	return a, found, err
 }
 
-func (o observingSoR) OpenCoverage(memberID string) ([]byte, bool) {
-	coverageJSON, found := o.inner.OpenCoverage(memberID)
-	o.emit("OpenCoverage", sorFoundDetail(found), coverageJSON)
-	return coverageJSON, found
+func (o observingSoR) FacilityRecords(key string) (map[string][]byte, bool) {
+	a, found, _ := o.FacilityRecordsContext(context.Background(), key)
+	return a, found
+}
+func (o observingSoR) FacilityRecordsContext(ctx context.Context, key string) (map[string][]byte, bool, error) {
+	a, found, err := ReadSystemOfRecord(o.inner).FacilityRecordsContext(ctx, key)
+	if err != nil {
+		o.emit("FacilityRecords", string(safeSoRError(err).Kind), nil)
+	} else {
+		o.emit("FacilityRecords", sorFoundDetail(found), nil)
+	}
+	return a, found, err
 }
 
-func (o observingSoR) ResolveByReference(ref string) ([]byte, bool) {
-	resourceJSON, found := o.inner.ResolveByReference(ref)
-	o.emit("ResolveByReference", sorFoundDetail(found), resourceJSON)
-	return resourceJSON, found
+func (o observingSoR) OpenOrder(key string) ([]byte, bool) {
+	a, found, _ := o.OpenOrderContext(context.Background(), key)
+	return a, found
+}
+func (o observingSoR) OpenOrderContext(ctx context.Context, key string) ([]byte, bool, error) {
+	a, found, err := ReadSystemOfRecord(o.inner).OpenOrderContext(ctx, key)
+	if err != nil {
+		o.emit("OpenOrder", string(safeSoRError(err).Kind), nil)
+	} else {
+		o.emit("OpenOrder", sorFoundDetail(found), a)
+	}
+	return a, found, err
+}
+
+func (o observingSoR) OpenCoverage(key string) ([]byte, bool) {
+	a, found, _ := o.OpenCoverageContext(context.Background(), key)
+	return a, found
+}
+func (o observingSoR) OpenCoverageContext(ctx context.Context, key string) ([]byte, bool, error) {
+	a, found, err := ReadSystemOfRecord(o.inner).OpenCoverageContext(ctx, key)
+	if err != nil {
+		o.emit("OpenCoverage", string(safeSoRError(err).Kind), nil)
+	} else {
+		o.emit("OpenCoverage", sorFoundDetail(found), a)
+	}
+	return a, found, err
+}
+
+func (o observingSoR) ResolveByReference(key string) ([]byte, bool) {
+	a, found, _ := o.ResolveByReferenceContext(context.Background(), key)
+	return a, found
+}
+func (o observingSoR) ResolveByReferenceContext(ctx context.Context, key string) ([]byte, bool, error) {
+	a, found, err := ReadSystemOfRecord(o.inner).ResolveByReferenceContext(ctx, key)
+	if err != nil {
+		o.emit("ResolveByReference", string(safeSoRError(err).Kind), nil)
+	} else {
+		o.emit("ResolveByReference", sorFoundDetail(found), a)
+	}
+	return a, found, err
 }

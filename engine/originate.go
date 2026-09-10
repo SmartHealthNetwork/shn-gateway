@@ -6,6 +6,7 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -712,7 +713,10 @@ func (g *Gateway) handleScenario(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pci, _, found := g.cfg.SoR.ResolvePatient(memberID)
+	pci, _, found, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(ctx, memberID)
+	if writeSoRFailure(w, readErr) {
+		return
+	}
 	if !found {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown member"})
 		return
@@ -723,7 +727,10 @@ func (g *Gateway) handleScenario(w http.ResponseWriter, r *http.Request) {
 	// stays bare-insurer (BuildEligibilityRequest unchanged — insurer-coherence deferred this slice),
 	// so this read does not change the payload bytes; it only fails closed when the member has no
 	// coverage / no parseable payer on file (AI-G11 / OWD-G10).
-	realCov, hasCov := g.cfg.SoR.OpenCoverage(memberID)
+	realCov, hasCov, readErr := ReadSystemOfRecord(g.cfg.SoR).OpenCoverageContext(ctx, memberID)
+	if writeSoRFailure(w, readErr) {
+		return
+	}
 	if !hasCov {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "no coverage on file for member"})
 		return
@@ -732,7 +739,7 @@ func (g *Gateway) handleScenario(w http.ResponseWriter, r *http.Request) {
 	// (FR-G40): no default — a miss (no parseable payer / no directory mapping) fails closed HERE
 	// before any leg (AI-G11 / OWD-G10). The eligibility REQUEST stays bare-insurer (unchanged), so
 	// UC-01 discards the parsed payer identity — it only routes.
-	recipient, _, status, msg := g.recipientForWith(realCov, g.cfg.SoR.ResolveByReference)
+	recipient, _, status, msg := g.recipientForSoR(ctx, realCov)
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
@@ -905,9 +912,13 @@ type crdDtrResult struct {
 // from the per-UC tuple (the self-contained demo). The else branch
 // keeps the exact BuildServiceRequestCoded call verbatim so those lanes stay byte-identical.
 // Returns (orderJSON, httpStatus, msg); status 0 == ok.
-func (g *Gateway) orderSource(member, patientRef, system, code, display, dx string) ([]byte, int, string) {
+func (g *Gateway) orderSourceContext(ctx context.Context, member, patientRef, system, code, display, dx string) ([]byte, int, string) {
 	if g.cfg.OriginationProfile == "provider-data" {
-		order, ok := g.cfg.SoR.OpenOrder(member)
+		order, ok, readErr := ReadSystemOfRecord(g.cfg.SoR).OpenOrderContext(ctx, member)
+		if readErr != nil {
+			status, msg := SoRFailureResponse(readErr)
+			return nil, status, msg
+		}
 		if !ok {
 			return nil, http.StatusBadGateway, "no open order for member in SoR"
 		}
@@ -990,7 +1001,10 @@ func (g *Gateway) scenarioMember(w http.ResponseWriter, r *http.Request, default
 func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, member, system, code, display, dx string, proceedOnNotCovered bool) (crdDtrResult, bool) {
 	ctx := r.Context()
 
-	pci, _, found := g.cfg.SoR.ResolvePatient(member)
+	pci, _, found, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(ctx, member)
+	if writeSoRFailure(w, readErr) {
+		return crdDtrResult{}, false
+	}
 	if !found {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown member"})
 		return crdDtrResult{}, false
@@ -1002,7 +1016,10 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 	// payer identity feeds the egress builders so the payload's payer derives from the patient's
 	// real Coverage, not a synthetic CMS literal. realCov stays a LOCAL (never an egress payload,
 	// never stored on crdDtrResult); the recipient is resolved from it inline at this site.
-	realCov, found := g.cfg.SoR.OpenCoverage(member)
+	realCov, found, readErr := ReadSystemOfRecord(g.cfg.SoR).OpenCoverageContext(ctx, member)
+	if writeSoRFailure(w, readErr) {
+		return crdDtrResult{}, false
+	}
 	if !found {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "no coverage on file for member"})
 		return crdDtrResult{}, false
@@ -1011,13 +1028,13 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 	// ONE parse of the member's own Coverage (FR-G40): no default — a miss fails closed HERE before
 	// any leg (AI-G11 / OWD-G10). `payer` (the parsed identity) threads to the PAS builders below, so
 	// routed-payer and payload-payer cannot diverge (one payer fact, read once).
-	recipient, payer, status, msg := g.recipientForWith(realCov, g.cfg.SoR.ResolveByReference)
+	recipient, payer, status, msg := g.recipientForSoR(ctx, realCov)
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return crdDtrResult{}, false
 	}
 
-	srJSON, status, msg := g.orderSource(member, patientRef, system, code, display, dx)
+	srJSON, status, msg := g.orderSourceContext(ctx, member, patientRef, system, code, display, dx)
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return crdDtrResult{}, false
@@ -1238,7 +1255,11 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 		// (the stub returns the logical ref, so the managed/hermetic path is unchanged). Falls back to
 		// the logical ref when the SoR can't resolve it.
 		subjectFHIRRef := patientRef
-		if ref, ok := g.cfg.SoR.PatientFHIRRef(member); ok && ref != "" {
+		ref, ok, readErr := ReadSystemOfRecord(g.cfg.SoR).PatientFHIRRefContext(r.Context(), member)
+		if writeSoRFailure(w, readErr) {
+			return crdDtrResult{}, false
+		}
+		if ok && ref != "" {
 			subjectFHIRRef = ref
 		}
 		qrJSON, fill, err := g.cfg.Populator.Populate(ctx, packageJSON, PopulateContext{
@@ -1251,7 +1272,7 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 			Line:           res.dtrLine,
 		})
 		if err != nil {
-			writeJSON(w, statusForPopulateErr(err), map[string]string{"error": err.Error()})
+			writeJSON(w, statusForPopulateErr(err), map[string]string{"error": messageForPopulateErr(err)})
 			return crdDtrResult{}, false
 		}
 		// QR-SUBJECT FENCE — uniform across backends, compared against the LOGICAL PatientRef. Managed
@@ -1288,12 +1309,29 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 	return res, true
 }
 
+func isSoRPopulateError(err error) bool {
+	var readErr *SoRReadError
+	return errors.As(err, &readErr) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+func messageForPopulateErr(err error) string {
+	if isSoRPopulateError(err) {
+		_, msg := SoRFailureResponse(err)
+		return msg
+	}
+	return err.Error()
+}
+
 // statusForPopulateErr maps a Populator error to an HTTP status. A managed
 // FillQuestionnaire marshal/unsupported error is the gateway's own fault → 500
 // (behavior-preserving: the inline path returned 500 here, and this never trips on the
 // 8 scenarios). errNoClinicalContext (a data fault) and errPopulateUpstream
 // (a native $populate fault) are partner/data faults → 502.
 func statusForPopulateErr(err error) int {
+	if isSoRPopulateError(err) {
+		status, _ := SoRFailureResponse(err)
+		return status
+	}
 	switch {
 	case errors.Is(err, errNoClinicalContext):
 		return http.StatusBadGateway
@@ -1473,7 +1511,10 @@ func (g *Gateway) handleUC02UnknownPayer(w http.ResponseWriter, r *http.Request)
 func (g *Gateway) originateNoPACRD(w http.ResponseWriter, r *http.Request, member string) {
 	ctx := r.Context()
 
-	pci, _, found := g.cfg.SoR.ResolvePatient(member)
+	pci, _, found, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(ctx, member)
+	if writeSoRFailure(w, readErr) {
+		return
+	}
 	if !found {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown member"})
 		return
@@ -1481,7 +1522,7 @@ func (g *Gateway) originateNoPACRD(w http.ResponseWriter, r *http.Request, membe
 	patientRef := "Patient/" + member
 
 	o := originationCodes().uc02
-	srJSON, status, msg := g.orderSource(member, patientRef, o.system, o.code, o.display, o.dx)
+	srJSON, status, msg := g.orderSourceContext(ctx, member, patientRef, o.system, o.code, o.display, o.dx)
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
@@ -1494,7 +1535,10 @@ func (g *Gateway) originateNoPACRD(w http.ResponseWriter, r *http.Request, membe
 	// Read the member's OWN open Coverage as the routing/identity SOURCE (FR-G40); the egress
 	// CRD coverage keeps the contained-payor form, now carrying the REAL payer identity (no
 	// synthetic CMS literal). realCov stays a LOCAL (the recipient is resolved from it).
-	realCov, hasCov := g.cfg.SoR.OpenCoverage(member)
+	realCov, hasCov, readErr := ReadSystemOfRecord(g.cfg.SoR).OpenCoverageContext(ctx, member)
+	if writeSoRFailure(w, readErr) {
+		return
+	}
 	if !hasCov {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "no coverage on file for member"})
 		return
@@ -1502,7 +1546,7 @@ func (g *Gateway) originateNoPACRD(w http.ResponseWriter, r *http.Request, membe
 	// Resolve the CRD leg's payer HOLDER AND the parsed payer identity in ONE parse of the member's
 	// own Coverage (FR-G40): no default — a miss fails closed HERE before the leg (AI-G11 / OWD-G10).
 	// `payer` threads to the CRD coverage builder, so routed-payer and payload-payer cannot diverge.
-	recipient, payer, status, msg := g.recipientForWith(realCov, g.cfg.SoR.ResolveByReference)
+	recipient, payer, status, msg := g.recipientForSoR(ctx, realCov)
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
@@ -1677,7 +1721,10 @@ func (g *Gateway) handleUC03Oxygen(w http.ResponseWriter, r *http.Request) {
 	// The hermetic FR-17 source=auto proof (register §9 row 4 / §11): independently
 	// cross-checked against the member's OWN seeded Observation, never trusting the
 	// populate engine's own claim (the anti-pattern this slice exists to rule out).
-	filled := g.homeOxygenAutoFillEvidence(member, res.qrJSON)
+	filled, readErr := g.homeOxygenAutoFillEvidenceContext(r.Context(), member, res.qrJSON)
+	if writeSoRFailure(w, readErr) {
+		return
+	}
 
 	// §3 ruling: 6.1 (the one required item) is answered honestly through the requester's
 	// OWN attestation — source="manual", never "auto", never fabricated as clinical fact —
@@ -1985,7 +2032,11 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 		// order ($populate auto-pops nothing), then the lean single-shot tail (D-PD-1: no
 		// amendment). Every attested answer traces to the seeded order (res.srJSON); the attested QR
 		// is verdict-INERT — br-payer's A4→A1 is its pend-resolution timer, not a QR-driven verdict.
-		answers, err := uc04AttestationAnswers(res.srJSON, g.cfg.SoR.ResolveByReference)
+		resolve, readErr := sorReferenceCallback(ctx, g.cfg.SoR)
+		answers, err := uc04AttestationAnswers(res.srJSON, resolve)
+		if writeSoRFailure(w, *readErr) {
+			return
+		}
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 			return
@@ -2093,7 +2144,10 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 	needed := neededItemCodes(neededItems)
 
 	// Amend: attach the provider-LOCAL operative DiagnosticReport + Provenance.
-	drJSON, drOK := g.cfg.SoR.SupplementalReport(member)
+	drJSON, drOK, readErr := ReadSystemOfRecord(g.cfg.SoR).SupplementalReportContext(ctx, member)
+	if writeSoRFailure(w, readErr) {
+		return
+	}
 	if !drOK {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "no supplemental report"})
 		return
@@ -2263,7 +2317,11 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 		// overwriting res.qrJSON here (before either leg is built) is enough; there is
 		// no pend-then-amend attestation lane for UC-05 (no scenarioToPend call site),
 		// so the grown tree never needs to be carried forward past this point.
-		answers, err := uc04AttestationAnswers(res.srJSON, g.cfg.SoR.ResolveByReference)
+		resolve, readErr := sorReferenceCallback(ctx, g.cfg.SoR)
+		answers, err := uc04AttestationAnswers(res.srJSON, resolve)
+		if writeSoRFailure(w, *readErr) {
+			return
+		}
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 			return

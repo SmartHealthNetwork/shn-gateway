@@ -35,7 +35,12 @@ type bearerTransport struct {
 func (t *bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	tok, err := t.ts.Token(req.Context())
 	if err != nil {
-		return nil, fmt.Errorf("smartauth: acquire token: %w", err)
+		// Record the actual boundary before net/http can replace the returned error
+		// with its non-unwrapping outer-client timeout error.
+		if observation, ok := req.Context().Value(tokenAcquisitionObservationKey{}).(*TokenAcquisitionObservation); ok {
+			observation.failed.Store(true)
+		}
+		return nil, &tokenAcquisitionError{cause: err}
 	}
 	// Clone before mutating headers (RoundTripper contract: must not modify the input).
 	r2 := req.Clone(req.Context())

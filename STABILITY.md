@@ -40,6 +40,40 @@ SDK's PREVIEW guide §3c; `crd-order-dispatch` is not currently served), and
 In-gateway injection — a `LegResponder` on `Config.Responder` — remains an
 internal 0.x seam: do not depend on it (see below).
 
+**Additive native population diagnostics (FR-G23).**
+`engine.NewNativePopulator(client, url)` retains its exact two-argument function
+type and behavior. `engine.NewNativePopulatorWithFailureObserver(client, url,
+observer)` adds an optional immutable callback; the old constructor delegates with
+nil. `engine.PopulateFailure` has only `Stage`, `Reason`, and `Status` with JSON
+names `stage`, `reason`, and `status`. The app adds `version: 1` when formatting
+its fixed-field output record (see the README troubleshooting table).
+
+Callbacks run synchronously, once per upstream failure, and may run concurrently
+for separate calls. They must return promptly and be safe for concurrent use.
+There is no mutable setter, background delivery, payload retention, or callback
+error return. A nil callback disables diagnostic delivery and formatting. Subject
+and canonical refusals keep their distinct behavior and produce no upstream record.
+
+`connectors/smartauth.IsTokenAcquisitionError(err)` recognizes only failures
+marked at the bearer transport's token acquisition boundary, through wrapped
+errors. Existing error text and the immediate unwrap target are preserved;
+resource-request errors with similar text remain unmarked. This does not change
+token cache, refresh, credentials, timeout, or retry behavior.
+
+`connectors/smartauth.WithTokenAcquisitionObservation(ctx)` returns a derived
+context and a `*TokenAcquisitionObservation` with a read-only `Failed()` method.
+Use one fresh handle per `http.Client.Do`; its zero value is unmarked and it must
+not be copied after use. The handle records only an actual token acquisition
+failure returned by the bearer transport, never an acquisition in progress or a
+timeout alone. It retains no error or payload and can be read concurrently.
+
+Native population creates fresh evidence for every request, even with a nil
+callback, and shadows any inherited caller observation. The derived context
+preserves values, cancellation and deadlines. This request-local evidence keeps
+the acquisition boundary available when an outer client timeout replaces the
+returned error chain; resource timeouts remain transport failures. No client-wide
+or global failure state is introduced.
+
 **Breaking in this release** (payer wiring):
 
 - `engine.New` returns `(*Gateway, error)`. It errors — rather than starting — for the two
@@ -164,7 +198,9 @@ expected to change shape as their consumer matures:
   the roundTrip choke point. Nil (the published-binary default) means no emission; the hook
   carries no payloads and is conformance-neutral (`TestLegMetric_ConformanceNeutral` — responses
   are byte-identical hook-on vs hook-off). `gateway/app` wires it to CloudWatch EMF behind the
-  `METRICS_SERVICE` opt-in (see `docs/CONFIGURATION.md`). Requires `shn-sdk` ≥ v0.31.0.
+  `METRICS_SERVICE` opt-in (see `docs/CONFIGURATION.md`). `Unreachable` means the Hub leg did not
+  complete; it also covers a Hub refusal after an unverifiable recipient response envelope and
+  does not prove the responder itself was unreachable. Requires `shn-sdk` ≥ v0.31.0.
 
 - **`GET`/`POST /internal/checks` results** (evolving surface, since v0.32.0; structured
   `failure` since v0.33.0). Each result is `{id, target, ok, detail, checkedAt,

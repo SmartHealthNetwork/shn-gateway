@@ -24,14 +24,14 @@ func TestRecipientForResolvesAndFailsClosed(t *testing.T) {
 
 	cov, _ := shnsdk.BuildCoverageWithPayer("Patient/m", "m",
 		shnsdk.PayerIdentifier{System: "urn:oid:2.16.840.1.113883.6.300", Value: "00078"})
-	h, status, _ := g.recipientFor(cov)
+	h, status, _ := g.recipientFor(context.Background(), cov)
 	if status != 0 || h != "acme-health" {
 		t.Fatalf("resolve: got (%q,%d)", h, status)
 	}
 
 	miss, _ := shnsdk.BuildCoverageWithPayer("Patient/m", "m",
 		shnsdk.PayerIdentifier{System: "urn:oid:2.16.840.1.113883.6.300", Value: "99999"})
-	_, status, msg := g.recipientFor(miss)
+	_, status, msg := g.recipientFor(context.Background(), miss)
 	if status != http.StatusUnprocessableEntity || msg == "" {
 		t.Fatalf("miss must be 422 + legible: got (%d,%q)", status, msg)
 	}
@@ -289,7 +289,7 @@ func TestRoutesToPayerNamedByCoverage(t *testing.T) {
 	if !ok {
 		t.Fatal("persona A: OpenCoverage(MBR-COVERED) = false")
 	}
-	recipientA, status, msg := gw.recipientFor(covA)
+	recipientA, status, msg := gw.recipientFor(context.Background(), covA)
 	if status != 0 {
 		t.Fatalf("persona A: recipientFor failed: (%d,%q)", status, msg)
 	}
@@ -311,7 +311,7 @@ func TestRoutesToPayerNamedByCoverage(t *testing.T) {
 	if !ok {
 		t.Fatal("persona B: OpenCoverage(MBR-PAYERB) = false")
 	}
-	recipientB, status, msg := gw.recipientFor(covB)
+	recipientB, status, msg := gw.recipientFor(context.Background(), covB)
 	if status != 0 {
 		t.Fatalf("persona B: recipientFor failed: (%d,%q)", status, msg)
 	}
@@ -350,7 +350,7 @@ func TestUnknownPayerFailsClosed(t *testing.T) {
 		t.Fatal("OpenCoverage(MBR-PAYERUNKNOWN) = false")
 	}
 
-	recipient, status, msg := gw.recipientFor(cov)
+	recipient, status, msg := gw.recipientFor(context.Background(), cov)
 	if status != http.StatusUnprocessableEntity {
 		t.Fatalf("status = %d, want 422: msg=%q", status, msg)
 	}

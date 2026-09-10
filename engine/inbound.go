@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 
@@ -22,11 +23,22 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 	// Per-hop transport auth: verify the Hub's X-Hub-Assertion FIRST, header only,
 	// before the body is read or the envelope decoded — an unauthenticated caller
 	// never reaches the decoder. Sig + issuer pin ("hub") + audience (this holder)
-	// + bounds + jti one-time-use. The jti guard is in-memory ⇒ PER-REPLICA;
-	// cross-replica replay is dominated by the 2-minute TTL (single-task
-	// services today; a shared store is the additive revisit if gateways ever
-	// scale horizontally).
-	if !g.verifyHubAssertion(r) {
+	// + bounds + jti one-time-use. The jti guard runs on Config.Replay: in-memory
+	// (per-replica) by default, shared across every replica of the holder under
+	// SHN_STORE_DATABASE_URL.
+	ok, unavailable := g.verifyHubAssertion(r)
+	if !ok {
+		if unavailable {
+			// The record could not be consulted, so this is not a failed assertion:
+			// answer 503 (unavailable) rather than the 403 that would accuse the Hub of a
+			// bad assertion. Being honest about WHICH refusal it is does not make the
+			// delivery survive: the Hub has no retry, so it turns any non-2xx here into
+			// its own 502 "forward to recipient failed" and audits the leg failed. The
+			// delivery is lost either way — 503 says the cause was this holder's store,
+			// not the sender's credential. Hub-side retry is a separate, tracked change.
+			writeStoreUnavailable(w, "one-time-use record unavailable")
+			return
+		}
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "missing or invalid hub assertion"})
 		return
 	}
@@ -173,7 +185,10 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 	// H2a: bind the token's subject to the payload's patient. The token authorizes
 	// a specific PCI; resolving the CER's member must yield that same PCI. This
 	// stops a token authorizing patient A being paired with a payload for patient B.
-	pci, _, found := g.cfg.SoR.ResolvePatient(member)
+	pci, _, found, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(r.Context(), member)
+	if writeSoRFailure(w, readErr) {
+		return
+	}
 	if !found {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown member"})
 		return
@@ -228,8 +243,14 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 	// origination-side machinery does, gateway.go's recipientForWith /
 	// shnsdk.ParsePayerIdentifier) is the insurer identity — replacing the
 	// hardcoded Organization/payer literal BuildEligibilityResponse used to stamp.
-	inforce, reason := g.cfg.SoR.CoverageInforce(member)
-	coverageJSON, hasCoverage := g.cfg.SoR.OpenCoverage(member)
+	inforce, reason, readErr := ReadSystemOfRecord(g.cfg.SoR).CoverageInforceContext(r.Context(), member)
+	if writeSoRFailure(w, readErr) {
+		return
+	}
+	coverageJSON, hasCoverage, readErr := ReadSystemOfRecord(g.cfg.SoR).OpenCoverageContext(r.Context(), member)
+	if writeSoRFailure(w, readErr) {
+		return
+	}
 	var insurer shnsdk.PayerIdentifier
 	switch {
 	case hasCoverage:
@@ -238,7 +259,11 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 		// CoverageEligibilityResponse.insurer is 1..1) — a hollow or
 		// stale-literal response is never built.
 		var ok bool
-		insurer, ok = shnsdk.ParsePayerIdentifier(coverageJSON, g.cfg.SoR.ResolveByReference)
+		resolve, readErr := sorReferenceCallback(ctx, g.cfg.SoR)
+		insurer, ok = shnsdk.ParsePayerIdentifier(coverageJSON, resolve)
+		if writeSoRFailure(w, *readErr) {
+			return
+		}
 		if !ok {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "no payer identifier on member coverage"})
 			return
@@ -255,7 +280,10 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 		// every other payor reference in this codebase already resolves against,
 		// seeded with an identifier by internal/fhirseed) — one self-read, not a
 		// fabricated identity.
-		orgJSON, orgFound := g.cfg.SoR.ResolveByReference("Organization/payer")
+		orgJSON, orgFound, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolveByReferenceContext(r.Context(), "Organization/payer")
+		if writeSoRFailure(w, readErr) {
+			return
+		}
 		if !orgFound {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "payer's own well-known Organization is not on file"})
 			return
@@ -339,7 +367,10 @@ func (g *Gateway) handleFederatedQueryInbound(w http.ResponseWriter, r *http.Req
 
 	// (3) Bind the token subject to the queried patient.
 	member := strings.TrimPrefix(parsed.PatientRef, "Patient/")
-	pci, _, found := g.cfg.SoR.ResolvePatient(member)
+	pci, _, found, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(r.Context(), member)
+	if writeSoRFailure(w, readErr) {
+		return
+	}
 	if !found {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown member"})
 		return
@@ -367,7 +398,10 @@ func (g *Gateway) handleFederatedQueryInbound(w http.ResponseWriter, r *http.Req
 	}
 
 	// Disclose ONLY the named records for THIS member (minimum-necessary).
-	held, ok := g.cfg.SoR.FacilityRecords(member)
+	held, ok, readErr := ReadSystemOfRecord(g.cfg.SoR).FacilityRecordsContext(r.Context(), member)
+	if writeSoRFailure(w, readErr) {
+		return
+	}
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no records for member"})
 		return
@@ -514,7 +548,10 @@ func (g *Gateway) handlePatientDTRInbound(w http.ResponseWriter, r *http.Request
 	// H2: bind the token subject to the patient the request names (the patient whose
 	// authorship the Trust surface is exercising).
 	member := strings.TrimPrefix(req.PatientRef, "Patient/")
-	pci, _, found := g.cfg.SoR.ResolvePatient(member)
+	pci, _, found, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(r.Context(), member)
+	if writeSoRFailure(w, readErr) {
+		return
+	}
 	if !found {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown member"})
 		return
@@ -549,24 +586,47 @@ func (g *Gateway) handlePatientDTRInbound(w http.ResponseWriter, r *http.Request
 // signed by the Hub's transport key with HolderID "hub" (issuer pin — a second
 // Hub would join the verified contract here) and Audience == this holder, within
 // bounds, jti unused. Fails closed on every malformed input.
-func (g *Gateway) verifyHubAssertion(r *http.Request) bool {
+//
+// The second return says WHY a false refused: unavailable=true means the one-time-use
+// record could not be consulted (the caller answers 503), false means the assertion
+// itself was rejected (403). The refusal is the same either way — an unrecorded jti is
+// never admitted — and the delivery is lost either way, since the Hub does not retry a
+// failed forward. What the distinction buys is a truthful cause: a database outage is
+// not reported to the Hub as a bad assertion.
+func (g *Gateway) verifyHubAssertion(r *http.Request) (ok bool, unavailable bool) {
 	hdr := r.Header.Get("X-Hub-Assertion")
 	if hdr == "" {
-		return false
+		return false, false
 	}
 	raw, err := base64.StdEncoding.DecodeString(hdr)
 	if err != nil {
-		return false
+		return false, false
 	}
 	var a shnsdk.Assertion
 	if err := json.Unmarshal(raw, &a); err != nil {
-		return false
+		return false, false
 	}
 	if a.HolderID != "hub" {
-		return false
+		return false, false
 	}
 	if shnsdk.VerifyAssertion(a, g.cfg.HolderID, g.cfg.HubTransportPub, g.cfg.Clock()) != nil {
-		return false
+		return false, false
 	}
-	return !g.hubJTI.CheckAndRecord(a.JTI, g.cfg.Clock())
+	if len(a.JTI) > MaxReplayKeyBytes {
+		// The Hub's own jti, refused with the ordinary denial before the record is
+		// consulted: an oversized key would otherwise be reported as a store outage on a
+		// healthy database (see MaxReplayKeyBytes).
+		return false, false
+	}
+	now := g.cfg.Clock()
+	// A record that could not be consulted refuses exactly as a replay does (fail
+	// closed — an unrecorded jti is never admitted), but it is reported as an outage so
+	// the cause is legible: the Hub audits the forward failed either way.
+	replayed, err := g.replay.CheckAndRecord(ReplayScopeHubJTI, "", a.JTI, now, now.Add(shnsdk.MaxAssertionTTL))
+	if err != nil {
+		log.Printf("gateway: hub assertion one-time-use record unavailable: %v (refusing)", err)
+		g.noteStoreError(storeErrReplay)
+		return false, true
+	}
+	return !replayed, false
 }

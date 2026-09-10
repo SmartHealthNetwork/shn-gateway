@@ -6,6 +6,7 @@
 package engine
 
 import (
+	"context"
 	"net/http"
 	"strings"
 
@@ -24,7 +25,7 @@ func (g *Gateway) handleDTRInbound(w http.ResponseWriter, r *http.Request, env s
 	// Fails closed BEFORE the responder (and before any partner forward) sees the bytes.
 	nextQuestionSubject, isNextQuestion := nextQuestionRequestSubject(reqJSON)
 	if isNextQuestion {
-		if status, msg := g.bindNextQuestionSubject(nextQuestionSubject, tok.Subject); status != 0 {
+		if status, msg := g.bindNextQuestionSubjectContext(ctx, nextQuestionSubject, tok.Subject); status != 0 {
 			writeJSON(w, status, map[string]string{"error": msg})
 			return
 		}
@@ -89,12 +90,16 @@ func (g *Gateway) handleDTRInbound(w http.ResponseWriter, r *http.Request, env s
 // the carried QuestionnaireResponse's subject ("Patient/<member>", the member namespace) must
 // resolve — via this holder's OWN SystemOfRecord, never the payload — to the token's subject
 // PCI. Mirrors conformantPASBind: unknown member → 400, mismatch → 403.
-func (g *Gateway) bindNextQuestionSubject(subject, tokenSubject string) (int, string) {
+func (g *Gateway) bindNextQuestionSubjectContext(ctx context.Context, subject, tokenSubject string) (int, string) {
 	member := strings.TrimPrefix(subject, "Patient/")
 	if member == "" || member == subject {
 		return http.StatusBadRequest, "next-question request carries no patient subject"
 	}
-	pci, _, found := g.cfg.SoR.ResolvePatient(member)
+	pci, _, found, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(ctx, member)
+	if readErr != nil {
+		status, msg := SoRFailureResponse(readErr)
+		return status, msg
+	}
 	if !found {
 		return http.StatusBadRequest, "unknown member"
 	}

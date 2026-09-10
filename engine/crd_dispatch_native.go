@@ -6,6 +6,7 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -84,7 +85,7 @@ func coverageBeneficiaryFromPrefetch(cov json.RawMessage) string {
 // ONE member == the token subject. performer (the supplier Organization) is non-patient — required-
 // present but not subject-fenced. Returns the resolved order + coverage JSON for the caller's
 // ingress-$validate, or (nil,nil,status,msg).
-func (g *Gateway) conformantCRDDispatchBind(reqJSON []byte, tokSubject string) (orderJSON, covJSON []byte, status int, msg string) {
+func (g *Gateway) conformantCRDDispatchBindContext(ctx context.Context, reqJSON []byte, tokSubject string) (orderJSON, covJSON []byte, status int, msg string) {
 	var req dispatchCDSRequest
 	if err := json.Unmarshal(reqJSON, &req); err != nil {
 		return nil, nil, http.StatusBadRequest, "parse cds request failed"
@@ -100,7 +101,11 @@ func (g *Gateway) conformantCRDDispatchBind(reqJSON []byte, tokSubject string) (
 	}
 	covJSON = req.Prefetch["coverage"]
 	member := strings.TrimPrefix(req.Context.PatientID, "Patient/")
-	pci, _, ok := g.cfg.SoR.ResolvePatient(member)
+	pci, _, ok, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(ctx, member)
+	if readErr != nil {
+		status, msg := SoRFailureResponse(readErr)
+		return nil, nil, status, msg
+	}
 	if !ok {
 		return nil, nil, http.StatusBadRequest, "unknown member"
 	}
@@ -124,7 +129,11 @@ func (g *Gateway) conformantCRDDispatchBind(reqJSON []byte, tokSubject string) (
 			return nil, nil, http.StatusForbidden, "dispatched order missing patient subject"
 		}
 		m := strings.TrimPrefix(subj, "Patient/")
-		rp, _, ok := g.cfg.SoR.ResolvePatient(m)
+		rp, _, ok, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(ctx, m)
+		if readErr != nil {
+			status, msg := SoRFailureResponse(readErr)
+			return nil, nil, status, msg
+		}
 		if !ok || rp != pci {
 			return nil, nil, http.StatusForbidden, "inconsistent patient in order-dispatch"
 		}
@@ -132,7 +141,12 @@ func (g *Gateway) conformantCRDDispatchBind(reqJSON []byte, tokSubject string) (
 	// Coverage beneficiary (when present) must bind to the same pci.
 	if ben := coverageBeneficiaryFromPrefetch(covJSON); ben != "" {
 		m := strings.TrimPrefix(ben, "Patient/")
-		if rp, _, ok := g.cfg.SoR.ResolvePatient(m); !ok || rp != pci {
+		rp, _, ok, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(ctx, m)
+		if readErr != nil {
+			status, msg := SoRFailureResponse(readErr)
+			return nil, nil, status, msg
+		}
+		if !ok || rp != pci {
 			return nil, nil, http.StatusForbidden, "inconsistent patient in order-dispatch"
 		}
 	}
@@ -144,7 +158,7 @@ func (g *Gateway) conformantCRDDispatchBind(reqJSON []byte, tokSubject string) (
 // skip on br-payer-targeting lanes), then forward the verbatim request to the responder.
 func (g *Gateway) handleCRDDispatchInbound(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token, reqJSON []byte, answerTok string) {
 	ctx := r.Context()
-	orderJSON, _, status, msg := g.conformantCRDDispatchBind(reqJSON, tok.Subject)
+	orderJSON, _, status, msg := g.conformantCRDDispatchBindContext(ctx, reqJSON, tok.Subject)
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return

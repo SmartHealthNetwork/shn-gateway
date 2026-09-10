@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+
+	"github.com/SmartHealthNetwork/shn-gateway/connectors/smartauth"
 )
 
 // (errPopulateUpstream is defined in populator.go, alongside errNoClinicalContext.)
@@ -13,15 +15,29 @@ import (
 // nativePopulator forwards population to an SDC Questionnaire/$populate endpoint (the
 // provider's own DTR/CQL server, or — later — one we operate). Holds *http.Client +
 // a post helper (the nativeResponder precedent, native.go) so the loopback is a real
-// httptest server, not a mock interface. Unauthenticated this slice.
+// httptest server, not a mock interface. A non-2xx from the endpoint — including a 401
+// from the auth gate in front of it, or a token refusal surfaced by an authenticated
+// client — is errPopulateUpstream: the populator never retries unauthenticated.
 type nativePopulator struct {
-	client *http.Client
-	url    string // PROVIDER_DTR_POPULATE_URL, the Questionnaire/$populate endpoint
+	client   *http.Client
+	url      string // PROVIDER_DTR_POPULATE_URL, the Questionnaire/$populate endpoint
+	observer func(PopulateFailure)
 }
 
-// NewNativePopulator builds the pass-through backend. client is the substrate HTTP client.
+// NewNativePopulator builds the pass-through backend. client is the populate client
+// (SMART-authenticated when the PROVIDER_DTR_POPULATE_* block is set; else the
+// substrate client).
 func NewNativePopulator(client *http.Client, url string) *nativePopulator {
-	return &nativePopulator{client: client, url: url}
+	return NewNativePopulatorWithFailureObserver(client, url, nil)
+}
+
+// NewNativePopulatorWithFailureObserver builds the pass-through backend with an
+// optional synchronous failure observer. The observer receives one payload-free
+// record per upstream failure, never a success or subject/canonical refusal. It
+// must return promptly and support concurrent calls. A nil observer is disabled;
+// the old constructor is equivalent to passing nil here.
+func NewNativePopulatorWithFailureObserver(client *http.Client, url string, observer func(PopulateFailure)) *nativePopulator {
+	return &nativePopulator{client: client, url: url, observer: observer}
 }
 
 func (n *nativePopulator) Populate(ctx context.Context, packageJSON []byte, pc PopulateContext) ([]byte, []FilledItem, error) {
@@ -33,12 +49,18 @@ func (n *nativePopulator) Populate(ctx context.Context, packageJSON []byte, pc P
 	if err != nil {
 		return nil, nil, err
 	}
-	body, err := n.post(ctx, params)
-	if err != nil {
+	body, status, failure := n.post(ctx, params)
+	if failure != nil {
+		n.observeFailure(*failure)
 		return nil, nil, errPopulateUpstream
 	}
 	qr, err := extractQuestionnaireResponse(body)
 	if err != nil {
+		reason := populateReasonInvalidJSON
+		if err == errPopulateUpstream {
+			reason = populateReasonWrongResourceType
+		}
+		n.observeFailure(PopulateFailure{Stage: populateStageQRExtract, Reason: reason, Status: status})
 		return nil, nil, errPopulateUpstream
 	}
 	// FOREIGN-SUBJECT FENCE (native owns it — it knows the store-resolvable ref it sent): the
@@ -59,26 +81,41 @@ func (n *nativePopulator) Populate(ctx context.Context, packageJSON []byte, pc P
 	return qr, nil, nil
 }
 
-func (n *nativePopulator) post(ctx context.Context, body []byte) ([]byte, error) {
+func (n *nativePopulator) post(ctx context.Context, body []byte) ([]byte, int, *PopulateFailure) {
+	// Each Do owns fresh evidence, including when the callback is disabled. Never
+	// reuse caller evidence: its prior acquisition may belong to another request.
+	var acquisition *smartauth.TokenAcquisitionObservation
+	if ctx != nil { // Preserve NewRequestWithContext's existing nil-context error.
+		ctx, acquisition = smartauth.WithTokenAcquisitionObservation(ctx)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, n.url, bytes.NewReader(body))
 	if err != nil {
-		return nil, err
+		return nil, 0, populateBoundaryFailure(populateStageRequestBuild, 0, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	resp, err := n.client.Do(req)
 	if err != nil {
-		return nil, err
+		stage := populateStageTransport
+		if smartauth.IsTokenAcquisitionError(err) || (acquisition != nil && acquisition.Failed()) {
+			stage = populateStageTokenAcquisition
+		}
+		status := 0
+		if resp != nil {
+			status = populateObservedStatus(resp.StatusCode)
+		}
+		return nil, status, populateBoundaryFailure(stage, status, err)
 	}
 	defer resp.Body.Close()
-	rb, err := io.ReadAll(io.LimitReader(resp.Body, maxPartnerBody)) // reuse the native.go cap
+	status := populateObservedStatus(resp.StatusCode)
+	rb, err := io.ReadAll(io.LimitReader(resp.Body, maxPartnerBody))
 	if err != nil {
-		return nil, err
+		return nil, status, populateBoundaryFailure(populateStageBodyRead, status, err)
 	}
 	if resp.StatusCode/100 != 2 {
-		return nil, errPopulateUpstream
+		return nil, status, &PopulateFailure{Stage: populateStageHTTPStatus, Reason: populateReasonNon2xx, Status: status}
 	}
-	return rb, nil
+	return rb, status, nil
 }
 
 // buildPopulateParameters builds the SDC $populate Parameters: the inline questionnaire + the

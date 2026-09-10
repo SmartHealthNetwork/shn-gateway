@@ -50,7 +50,7 @@ func TestHandleUC04_ThreadsSceneMember(t *testing.T) {
 	// resolved member MBR-CANARY-UC04) gets the original member's operative
 	// DiagnosticReport attached, and the payer's member fence rejects the ClaimUpdate
 	// bundle as an inconsistent-patient 403.
-	if !strings.Contains(fn, `g.cfg.SoR.SupplementalReport(member)`) {
+	if !strings.Contains(fn, `ReadSystemOfRecord(g.cfg.SoR).SupplementalReportContext(ctx, member)`) {
 		t.Fatalf("handleUC04 does not pass the resolved member to SoR.SupplementalReport")
 	}
 	if strings.Contains(fn, `SupplementalReport("MBR-UC04")`) {

@@ -7,6 +7,7 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"strconv"
 	"testing"
@@ -94,7 +95,10 @@ func TestUC03_AutoFillMutations(t *testing.T) {
 			OxygenSaturationPct: "89", OxygenSaturationRef: "Observation/o2sat-1",
 			ArterialPaO2mmHg: "56", ArterialPaO2Ref: "Observation/pao2-1",
 		}}}}
-		got := g.homeOxygenAutoFillEvidence(member, oxygenQRJSON(t, "89", "56"))
+		got, err := g.homeOxygenAutoFillEvidenceContext(context.Background(), member, oxygenQRJSON(t, "89", "56"))
+		if err != nil {
+			t.Fatal(err)
+		}
 		if len(got) != 2 {
 			t.Fatalf("want 2 auto-filled items, got %d: %+v", len(got), got)
 		}
@@ -108,7 +112,10 @@ func TestUC03_AutoFillMutations(t *testing.T) {
 			OxygenSaturationPct: "89", OxygenSaturationRef: "Observation/o2sat-1",
 			ArterialPaO2mmHg: "56", ArterialPaO2Ref: "Observation/pao2-1",
 		}}}}
-		got := g.homeOxygenAutoFillEvidence(member, oxygenQRJSON(t, "77", "56"))
+		got, err := g.homeOxygenAutoFillEvidenceContext(context.Background(), member, oxygenQRJSON(t, "77", "56"))
+		if err != nil {
+			t.Fatal(err)
+		}
 		if len(got) != 1 || got[0].LinkID != "2.3" {
 			t.Fatalf("want exactly [2.3], got %+v", got)
 		}
@@ -121,7 +128,10 @@ func TestUC03_AutoFillMutations(t *testing.T) {
 			OxygenSaturationPct: "89", OxygenSaturationRef: "Observation/o2sat-1",
 			ArterialPaO2mmHg: "56", ArterialPaO2Ref: "Observation/pao2-1",
 		}}}}
-		got := g.homeOxygenAutoFillEvidence(member, oxygenQRJSON(t, "89", "99"))
+		got, err := g.homeOxygenAutoFillEvidenceContext(context.Background(), member, oxygenQRJSON(t, "89", "99"))
+		if err != nil {
+			t.Fatal(err)
+		}
 		if len(got) != 1 || got[0].LinkID != "2.2" {
 			t.Fatalf("want exactly [2.2], got %+v", got)
 		}
@@ -135,7 +145,10 @@ func TestUC03_AutoFillMutations(t *testing.T) {
 			OxygenSaturationPct: "89", OxygenSaturationRef: "",
 			ArterialPaO2mmHg: "56", ArterialPaO2Ref: "Observation/pao2-1",
 		}}}}
-		got := g.homeOxygenAutoFillEvidence(member, oxygenQRJSON(t, "89", "56"))
+		got, err := g.homeOxygenAutoFillEvidenceContext(context.Background(), member, oxygenQRJSON(t, "89", "56"))
+		if err != nil {
+			t.Fatal(err)
+		}
 		if len(got) != 1 || got[0].LinkID != "2.3" {
 			t.Fatalf("want exactly [2.3] (2.2 has no SourceRef), got %+v", got)
 		}
@@ -145,7 +158,10 @@ func TestUC03_AutoFillMutations(t *testing.T) {
 	// has nothing to check against.
 	t.Run("no-clinical-context-returns-nil", func(t *testing.T) {
 		g := &Gateway{cfg: Config{SoR: clinicalOnlySoR{found: false}}}
-		got := g.homeOxygenAutoFillEvidence(member, oxygenQRJSON(t, "89", "56"))
+		got, err := g.homeOxygenAutoFillEvidenceContext(context.Background(), member, oxygenQRJSON(t, "89", "56"))
+		if err != nil {
+			t.Fatal(err)
+		}
 		if got != nil {
 			t.Fatalf("want nil, got %+v", got)
 		}
@@ -157,7 +173,10 @@ func TestUC03_AutoFillMutations(t *testing.T) {
 			OxygenSaturationPct: "89", OxygenSaturationRef: "Observation/o2sat-1",
 			ArterialPaO2mmHg: "56", ArterialPaO2Ref: "Observation/pao2-1",
 		}}}}
-		got := g.homeOxygenAutoFillEvidence(member, oxygenQRJSON(t, "", ""))
+		got, err := g.homeOxygenAutoFillEvidenceContext(context.Background(), member, oxygenQRJSON(t, "", ""))
+		if err != nil {
+			t.Fatal(err)
+		}
 		if got != nil {
 			t.Fatalf("want nil, got %+v", got)
 		}

@@ -87,7 +87,13 @@ func TestDirectBearer_Disjoint(t *testing.T) {
 	s := newTestAuthServer(t, "br-provider", pub, "ES384")
 	now := ingressFixedClock()()
 
-	issued, err := s.issueBearer("br-provider", ingressScope)
+	// The issued form, minted the way handleToken mints it: the signing key is resolved
+	// from the store first, then the bearer is signed with it.
+	kid, signKey, err := s.keys.SigningKey(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issued, err := signBearer(kid, signKey, "br-provider", ingressScope, s.baseURL, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,8 +105,8 @@ func TestDirectBearer_Disjoint(t *testing.T) {
 
 	aud := testIngressBaseURL + "/cds-services/order-sign-crd"
 	direct := signJWT(t, jwt.SigningMethodES384, key, directClaims("br-provider", aud, now))
-	if s.verifyBearer(directBearerReq(direct)) {
-		t.Error("direct bearer wrongly accepted by verifyBearer (foreign key)")
+	if ok, unavailable := s.verifyBearer(directBearerReq(direct)); ok || unavailable {
+		t.Errorf("direct bearer through verifyBearer = ok:%v unavailable:%v; want a plain refusal (foreign key, not a store outage)", ok, unavailable)
 	}
 }
 

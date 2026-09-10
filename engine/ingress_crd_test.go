@@ -1,6 +1,9 @@
 package engine
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 // A conformant inbound CDS Hooks order-select request (pinned conformant shape, trimmed to the
 // patient-bearing fields the cross-field fence inspects). patientId + every prefetch/order
@@ -29,7 +32,7 @@ func crdReqJSON(patientID, orderSubjectRef, coverageBeneficiaryRef string) []byt
 func TestIngressSubjectPCI_AllReferencesAgree(t *testing.T) {
 	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
 	ref := "Patient/MBR-COVERED"
-	pci, status, _ := g.ingressCRDSubjectPCI(crdReqJSON("MBR-COVERED", ref, ref))
+	pci, status, _ := g.ingressCRDSubjectPCIContext(context.Background(), crdReqJSON("MBR-COVERED", ref, ref))
 	if status != 0 {
 		t.Fatalf("all-agree request: status = %d, want 0", status)
 	}
@@ -43,7 +46,7 @@ func TestIngressSubjectPCI_AllReferencesAgree(t *testing.T) {
 func TestIngressSubjectPCI_DivergentKnownPatientFailsClosed(t *testing.T) {
 	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
 	good := "Patient/MBR-COVERED"
-	_, status, _ := g.ingressCRDSubjectPCI(crdReqJSON("MBR-COVERED", "Patient/MBR-NOTCOVERED", good))
+	_, status, _ := g.ingressCRDSubjectPCIContext(context.Background(), crdReqJSON("MBR-COVERED", "Patient/MBR-NOTCOVERED", good))
 	if status != 403 {
 		t.Fatalf("divergent KNOWN patient: status = %d, want 403", status)
 	}
@@ -53,7 +56,7 @@ func TestIngressSubjectPCI_DivergentKnownPatientFailsClosed(t *testing.T) {
 func TestIngressSubjectPCI_UnknownReferenceFailsClosed(t *testing.T) {
 	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
 	good := "Patient/MBR-COVERED"
-	_, status, _ := g.ingressCRDSubjectPCI(crdReqJSON("MBR-COVERED", "Patient/MBR-UNKNOWN", good))
+	_, status, _ := g.ingressCRDSubjectPCIContext(context.Background(), crdReqJSON("MBR-COVERED", "Patient/MBR-UNKNOWN", good))
 	if status == 0 {
 		t.Fatal("unknown patient reference: want fail-closed, got 0")
 	}
@@ -73,7 +76,7 @@ func TestIngressSubjectPCI_DraftOrderMissingSubjectFailsClosed(t *testing.T) {
       },
       "prefetch":{"patient":{"resourceType":"Patient","id":"MBR-COVERED"}}
     }`)
-	_, status, _ := g.ingressCRDSubjectPCI(body)
+	_, status, _ := g.ingressCRDSubjectPCIContext(context.Background(), body)
 	if status != 403 {
 		t.Fatalf("draft order missing subject: status = %d, want 403", status)
 	}
@@ -82,7 +85,7 @@ func TestIngressSubjectPCI_DraftOrderMissingSubjectFailsClosed(t *testing.T) {
 // A missing context.patientId fails closed (400).
 func TestIngressSubjectPCI_MissingPatientId(t *testing.T) {
 	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
-	_, status, _ := g.ingressCRDSubjectPCI([]byte(`{"hook":"order-select","context":{}}`))
+	_, status, _ := g.ingressCRDSubjectPCIContext(context.Background(), []byte(`{"hook":"order-select","context":{}}`))
 	if status != 400 {
 		t.Fatalf("missing patientId: status = %d, want 400", status)
 	}
@@ -101,7 +104,7 @@ func TestIngressSubjectPCI_DivergentPrefetchPatientFailsClosed(t *testing.T) {
         "patient":{"resourceType":"Patient","id":"MBR-NOTCOVERED"},
         "coverage":{"resourceType":"Coverage","beneficiary":{"reference":"Patient/MBR-COVERED"}}}
     }`)
-	_, status, _ := g.ingressCRDSubjectPCI(body)
+	_, status, _ := g.ingressCRDSubjectPCIContext(context.Background(), body)
 	if status != 403 {
 		t.Fatalf("divergent prefetch.patient id: status = %d, want 403", status)
 	}

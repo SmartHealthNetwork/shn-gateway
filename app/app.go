@@ -17,6 +17,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -24,6 +26,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -132,6 +135,24 @@ type config struct {
 
 	StoreDatabaseURL string // Postgres DSN for the durable pgstore Store (else the in-memory Store).
 
+	// StoreMaxConns (SHN_STORE_MAX_CONNS, default 8) is the shared-state pool's
+	// MaxConns. Sized explicitly rather than left to pgx's max(4, NumCPU): on a
+	// 0.25-vCPU task that default floors at four connections for the four consumers
+	// behind one DSN (business state, replay, ingress key, exchange), and AppendLeg
+	// pins one for the length of its transaction — so modest ingress concurrency
+	// queues replay checks behind it until the store context expires. 8 is twice that
+	// floor and still leaves the fleet's burst ceiling (this value × the number of
+	// gateways sharing the database) under a small instance's connection limit — size
+	// it against that product, not against one task. Positive by boot validation. It
+	// overrides any pool_max_conns carried in the DSN itself.
+	StoreMaxConns int32
+
+	// ExchangeTTL (EXCHANGE_TTL, default 168h) is how long an exchange correlation
+	// record is retained on whichever exchange store is selected. Positive by boot
+	// validation: a zero or negative TTL would expire every record the instant it
+	// was written, silently breaking response correlation.
+	ExchangeTTL time.Duration
+
 	// FHIR connector block. FHIRDataURL is REQUIRED on every role (there is no in-process
 	// persona stub to fall back on); the credential fields below are optional.
 	FHIRDataURL      string
@@ -218,9 +239,21 @@ type config struct {
 
 	// Optional native DTR population (provider-local). PROVIDER_DTR_NATIVE switches DTR
 	// population from the in-house managed backend to forwarding the provider's own SDC
-	// Questionnaire/$populate endpoint. Unauthenticated this slice.
+	// Questionnaire/$populate endpoint.
 	ProviderDTRNative      bool
 	ProviderDTRPopulateURL string
+	// PROVIDER_DTR_POPULATE_* SMART Backend Services credential block for the
+	// $populate endpoint — the same exactly-one-mode shape as PAYER_DAVINCI_* /
+	// FHIR_* (private_key_jwt via CLIENT_KEY+CLIENT_ALG[+CLIENT_KID], or
+	// client_secret_post via CLIENT_SECRET). Unset TOKEN_URL ⇒ unauthenticated
+	// (warned at build where the populator is wired).
+	ProviderDTRPopulateTokenURL     string
+	ProviderDTRPopulateClientID     string
+	ProviderDTRPopulateClientKey    string
+	ProviderDTRPopulateClientAlg    string
+	ProviderDTRPopulateScope        string
+	ProviderDTRPopulateClientKID    string
+	ProviderDTRPopulateClientSecret string // value, not a path (unlike *ClientKey)
 
 	// ProviderDavinciIngress mounts the Da Vinci ingress routes (CRD /cds-services,
 	// DTR $questionnaire-package, PAS $submit) on the provider role. Set by
@@ -277,9 +310,6 @@ func splitTrimmed(v string) []string {
 	return out
 }
 
-// checkClientAuthMode enforces exactly one outbound client-auth mode per
-// credential block: private_key_jwt (KEY+ALG, preferred) or client_secret_post
-// (SECRET). prefix is the env family, "FHIR" or "PAYER_DAVINCI".
 // parsePayerIdentifier parses a "system|value" env value into a shnsdk.PayerIdentifier
 // (PAYER_DAVINCI_PAYOR_OWN / PAYER_DAVINCI_PAYOR_BACKEND) — fail-closed on anything
 // else (no "|", or an empty system/value either side of it).
@@ -291,6 +321,10 @@ func parsePayerIdentifier(envName, raw string) (shnsdk.PayerIdentifier, error) {
 	return shnsdk.PayerIdentifier{System: system, Value: value}, nil
 }
 
+// checkClientAuthMode enforces exactly one outbound client-auth mode per
+// credential block: private_key_jwt (KEY+ALG, preferred) or client_secret_post
+// (SECRET). prefix is the env family: "FHIR", "PAYER_DAVINCI" or
+// "PROVIDER_DTR_POPULATE".
 func checkClientAuthMode(prefix, key, alg, kid, secret string) error {
 	hasJWT := key != "" || alg != "" || kid != ""
 	switch {
@@ -388,6 +422,15 @@ func loadConfig(getenv func(string) string) (config, error) {
 
 		ProviderDTRNative:      getenv("PROVIDER_DTR_NATIVE") == "true",
 		ProviderDTRPopulateURL: getenv("PROVIDER_DTR_POPULATE_URL"),
+
+		ProviderDTRPopulateTokenURL:     getenv("PROVIDER_DTR_POPULATE_TOKEN_URL"),
+		ProviderDTRPopulateClientID:     getenv("PROVIDER_DTR_POPULATE_CLIENT_ID"),
+		ProviderDTRPopulateClientKey:    getenv("PROVIDER_DTR_POPULATE_CLIENT_KEY"),
+		ProviderDTRPopulateClientAlg:    getenv("PROVIDER_DTR_POPULATE_CLIENT_ALG"),
+		ProviderDTRPopulateScope:        def("PROVIDER_DTR_POPULATE_SCOPE", "system/*.read"),
+		ProviderDTRPopulateClientKID:    getenv("PROVIDER_DTR_POPULATE_CLIENT_KID"),
+		ProviderDTRPopulateClientSecret: getenv("PROVIDER_DTR_POPULATE_CLIENT_SECRET"),
+
 		ProviderDavinciIngress: getenv("PROVIDER_DAVINCI_INGRESS") != "",
 
 		ProviderDavinciIngressBaseURL:     getenv("PROVIDER_DAVINCI_INGRESS_BASE_URL"),
@@ -487,6 +530,21 @@ func loadConfig(getenv func(string) string) (config, error) {
 			return config{}, fmt.Errorf("gateway: PAYER_DAVINCI_TOKEN_URL requires PAYER_DAVINCI_CLIENT_ID")
 		}
 		if err := checkClientAuthMode("PAYER_DAVINCI", cfg.PayerDavinciClientKey, cfg.PayerDavinciClientAlg, cfg.PayerDavinciClientKID, cfg.PayerDavinciClientSecret); err != nil {
+			return config{}, err
+		}
+	}
+
+	// The operated $populate connector's credential block: same exactly-one-mode
+	// rule, same partial-block-is-a-misconfig posture. Zero creds is the
+	// deliberate-unauthenticated mode (warned where the populator is wired).
+	if cfg.ProviderDTRPopulateTokenURL != "" {
+		if cfg.ProviderDTRPopulateURL == "" {
+			return config{}, fmt.Errorf("gateway: PROVIDER_DTR_POPULATE_TOKEN_URL set requires PROVIDER_DTR_POPULATE_URL")
+		}
+		if cfg.ProviderDTRPopulateClientID == "" {
+			return config{}, fmt.Errorf("gateway: PROVIDER_DTR_POPULATE_TOKEN_URL requires PROVIDER_DTR_POPULATE_CLIENT_ID")
+		}
+		if err := checkClientAuthMode("PROVIDER_DTR_POPULATE", cfg.ProviderDTRPopulateClientKey, cfg.ProviderDTRPopulateClientAlg, cfg.ProviderDTRPopulateClientKID, cfg.ProviderDTRPopulateClientSecret); err != nil {
 			return config{}, err
 		}
 	}
@@ -591,6 +649,34 @@ func loadConfig(getenv func(string) string) (config, error) {
 	cfg.TLSKeyFile = getenv("TLS_KEY_FILE")
 	if (cfg.TLSCertFile == "") != (cfg.TLSKeyFile == "") {
 		return config{}, fmt.Errorf("gateway: TLS_CERT_FILE and TLS_KEY_FILE must be set together (got cert=%q key=%q)", cfg.TLSCertFile, cfg.TLSKeyFile)
+	}
+
+	// Exchange correlation-record lifetime. Unset ⇒ the 168h default; set-but-
+	// unparsable or non-positive is a hard boot error naming the variable (an
+	// operator who meant "no expiry" and typed 0 would otherwise get the exact
+	// opposite — every record expired on write).
+	cfg.ExchangeTTL = 168 * time.Hour
+	if raw := getenv("EXCHANGE_TTL"); raw != "" {
+		d, derr := time.ParseDuration(raw)
+		if derr != nil || d <= 0 {
+			return config{}, fmt.Errorf("gateway: EXCHANGE_TTL must be a positive Go duration (e.g. 168h), got %q", raw)
+		}
+		cfg.ExchangeTTL = d
+	}
+
+	// Shared-state pool size. Unset ⇒ the default above; set-but-unparsable, non-positive
+	// or past math.MaxInt32 is a hard boot error naming the variable. Zero would leave the
+	// gateway unable to open a single connection, and the upper bound is the pool field's
+	// own width: pgxpool's MaxConns is an int32, so a larger value would WRAP — 2147483648
+	// to a negative pool pgxpool rejects with an error naming nothing the operator set,
+	// 2147483649 to a one-connection pool that boots looking healthy.
+	cfg.StoreMaxConns = defaultStoreMaxConns
+	if raw := getenv("SHN_STORE_MAX_CONNS"); raw != "" {
+		n, cerr := strconv.Atoi(raw)
+		if cerr != nil || n <= 0 || n > math.MaxInt32 {
+			return config{}, fmt.Errorf("gateway: SHN_STORE_MAX_CONNS must be an integer in [1, %d], got %q", math.MaxInt32, raw)
+		}
+		cfg.StoreMaxConns = int32(n)
 	}
 
 	// EMF metrics opt-in: off unless METRICS_SERVICE names this gateway's
@@ -700,6 +786,7 @@ func optionalURLs(cfg config) [][2]string {
 		{"PAYER_DAVINCI_BASE_URL", cfg.PayerDavinciBaseURL},
 		{"PAYER_DAVINCI_TOKEN_URL", cfg.PayerDavinciTokenURL},
 		{"PROVIDER_DTR_POPULATE_URL", cfg.ProviderDTRPopulateURL},
+		{"PROVIDER_DTR_POPULATE_TOKEN_URL", cfg.ProviderDTRPopulateTokenURL},
 		{"PROVIDER_DAVINCI_INGRESS_BASE_URL", cfg.ProviderDavinciIngressBaseURL},
 		{"SHN_DISCOVERY_URL", cfg.DiscoveryURL},
 		{"AUTHZ_PUBKEY_URL", cfg.AuthzPubkeyURL},
@@ -744,6 +831,9 @@ func checkTargets(cfg config) []checks.Target {
 		case "PAYER_DAVINCI_TOKEN_URL":
 			t.Kind = checks.KindToken
 			t.TokenFetch = payerDavinciTokenFetch(cfg)
+		case "PROVIDER_DTR_POPULATE_TOKEN_URL":
+			t.Kind = checks.KindToken
+			t.TokenFetch = providerDTRPopulateTokenFetch(cfg)
 		default:
 			t.Kind = checks.KindReachable
 		}
@@ -837,6 +927,25 @@ func payerDavinciTokenFetch(cfg config) func(context.Context) error {
 			return func(context.Context) error { return err }
 		}
 		sc.Alg, sc.Key, sc.KID = cfg.PayerDavinciClientAlg, key, cfg.PayerDavinciClientKID
+	}
+	return func(ctx context.Context) error {
+		return classifyTokenErr(errFromToken(&smartauth.TokenSource{Config: sc}, ctx))
+	}
+}
+
+// providerDTRPopulateTokenFetch is fhirTokenFetch's PROVIDER_DTR_POPULATE_*
+// counterpart, mirroring providerDTRPopulateHTTPClient's Config construction.
+// Same fresh-TokenSource-per-invocation rule applies (see fhirTokenFetch's doc).
+func providerDTRPopulateTokenFetch(cfg config) func(context.Context) error {
+	sc := smartauth.Config{TokenURL: cfg.ProviderDTRPopulateTokenURL, ClientID: cfg.ProviderDTRPopulateClientID, Scope: cfg.ProviderDTRPopulateScope}
+	if cfg.ProviderDTRPopulateClientSecret != "" {
+		sc.ClientSecret = cfg.ProviderDTRPopulateClientSecret
+	} else {
+		key, err := loadSmartKey(cfg.ProviderDTRPopulateClientKey, cfg.ProviderDTRPopulateClientAlg)
+		if err != nil {
+			return func(context.Context) error { return err }
+		}
+		sc.Alg, sc.Key, sc.KID = cfg.ProviderDTRPopulateClientAlg, key, cfg.ProviderDTRPopulateClientKID
 	}
 	return func(ctx context.Context) error {
 		return classifyTokenErr(errFromToken(&smartauth.TokenSource{Config: sc}, ctx))
@@ -999,6 +1108,64 @@ type built struct {
 	// landed here; the WRITE path under test is exactly this field's
 	// production wiring, never a second, test-only injection route.
 	nativeResponder engine.EndpointEvidenceSetter
+
+	// closeStore closes the shared-state pool. Non-nil only under
+	// SHN_STORE_DATABASE_URL. Run never calls it — the process owns the pool for its
+	// lifetime and exits with it — so this is a TEST seam: it is how the pg-gated
+	// outage rows make a BUILT gateway's database unreachable (pg_multi_test.go
+	// TestPgMulti_StoreOutageTokenIs503) instead of testing a pool the gateway does
+	// not use. built is unexported, so it is not a partner-visible surface.
+	closeStore func()
+
+	// keyRefresh is the shared ingress-key background reload
+	// ((*pgstore.IngressKeyStore).RunRefresh), non-nil only when
+	// SHN_STORE_DATABASE_URL selected the shared stores. Only Run starts it —
+	// build starts no goroutines (the same rule as the registrar poller).
+	keyRefresh func(context.Context)
+
+	// poolStats samples the shared-state pool into EMF every
+	// storePoolMetricInterval. Non-nil only when BOTH a store DSN and
+	// METRICS_SERVICE are set. Only Run starts it, for the same reason as keyRefresh.
+	poolStats func(context.Context)
+}
+
+// Shared-state pool sizing (see config.StoreMaxConns).
+const (
+	defaultStoreMaxConns int32 = 8
+	storeMinConns        int32 = 2
+	// storeConnectTimeout bounds ONE attempt to open a connection to the shared-state
+	// database. pgx leaves this unset, so a database that accepts packets but never
+	// completes a handshake (a failed-over instance, a security group that started
+	// dropping) makes every acquire wait for the operating system's own TCP timeout —
+	// far past the storeTimeout each store call thinks it is bounded by, since that
+	// bound covers the query and not the connect underneath it. One second: a healthy
+	// in-VPC connect is a few milliseconds, and the whole point is to fail fast enough
+	// that the request-path seams stay inside their own budget.
+	storeConnectTimeout = time.Second
+	// storePoolMetricInterval is how often Run samples the pool's stats when
+	// METRICS_SERVICE opts in. Long enough to be free, short enough that a
+	// saturation that starts expiring store contexts is visible within a minute.
+	storePoolMetricInterval = 30 * time.Second
+)
+
+// storePoolConfig parses the shared-state DSN and applies the fleet's own pool posture:
+// explicit sizing (see config.StoreMaxConns), a warm MinConns floor so the first request
+// after an idle period does not pay a connect (never above MaxConns — an operator who
+// pins the pool to one connection gets one), and a bounded connect
+// (storeConnectTimeout). Split out of build so the posture is assertable without a
+// database: ParseConfig opens nothing.
+func storePoolConfig(dsn string, maxConns int32) (*pgxpool.Config, error) {
+	poolCfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("gateway: SHN_STORE_DATABASE_URL is not a usable Postgres DSN: %w", err)
+	}
+	poolCfg.MaxConns = maxConns
+	poolCfg.MinConns = storeMinConns
+	if poolCfg.MinConns > poolCfg.MaxConns {
+		poolCfg.MinConns = poolCfg.MaxConns
+	}
+	poolCfg.ConnConfig.ConnectTimeout = storeConnectTimeout
+	return poolCfg, nil
 }
 
 func build(ctx context.Context, getenv func(string) string, stdout io.Writer, clock func() time.Time) (built, error) {
@@ -1087,9 +1254,34 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	// scoped by construction: NewPgStore captures the bundle's HolderID.
 	// pool is hoisted out of the if so the /health wiring below can register a
 	// DBPing check when (and only when) this branch ran.
-	var pool *pgxpool.Pool
+	//
+	// The same DSN also selects the SHARED state seams — the ingress bearer signing
+	// key, the one-time-use replay records and the exchange correlation records.
+	// Nil leaves each engine default in place (in-process, correct at exactly one
+	// replica), so the posture is stated on the boot log either way.
+	var (
+		pool        *pgxpool.Pool
+		ingressKeys engine.IngressKeyStore
+		replay      engine.ReplayStore
+		exchanges   engine.ExchangeStore
+		keyRefresh  func(context.Context)
+		closeStore  func()
+		poolStats   func(context.Context)
+		// storeErrHooks are the pgstore seams' own error hooks, wired to the same EMF
+		// counter as the engine's once the emitter exists (below). They exist for the
+		// failures a store ABSORBS rather than returns — the exchange seam's best-effort
+		// insert, and the ingress key store's BACKGROUND refresh loop — so an outage that
+		// no request-path error reports is not a log line no alarm watches. The key store's
+		// request-path errors are NOT wired here: they reach the engine
+		// (VerificationKey's third return, SigningKey's error), which counts them once.
+		storeErrHooks []func(func(store string))
+	)
 	if cfg.StoreDatabaseURL != "" {
-		p, perr := pgxpool.New(ctx, cfg.StoreDatabaseURL)
+		poolCfg, perr := storePoolConfig(cfg.StoreDatabaseURL, cfg.StoreMaxConns)
+		if perr != nil {
+			return b, perr
+		}
+		p, perr := pgxpool.NewWithConfig(ctx, poolCfg)
 		if perr != nil {
 			return b, fmt.Errorf("gateway: pgxpool.New(store): %w", perr)
 		}
@@ -1099,6 +1291,38 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		}
 		store = pg
 		pool = p
+
+		replay = pgstore.NewReplayStore(p, bundle.Identity.HolderID, clock)
+		exs := pgstore.NewExchangeStore(p, bundle.Identity.HolderID, cfg.ExchangeTTL, clock)
+		exchanges = exs
+		storeErrHooks = append(storeErrHooks, exs.SetErrorHook)
+		closeStore = p.Close
+		// The shared ingress bearer key is only meaningful where the ingress runs: with
+		// PROVIDER_DAVINCI_INGRESS unset no /oauth/token and no ingress route is mounted,
+		// so persisting (and rotating daily, and reloading every 30 s) a signing key for
+		// this holder would be key material and database traffic no request can use.
+		// Replay and exchange stay unconditional — the Hub-assertion and patient-access
+		// guards and the exchange seam run on every role.
+		ingressKey := "off"
+		if cfg.ProviderDavinciIngress {
+			ks := pgstore.NewIngressKeyStore(p, bundle.Identity.HolderID, clock)
+			ingressKeys = ks
+			// The refresh loop's own error hook — the only key-store failure the engine
+			// never sees (nothing is waiting on a background reload, so nothing is
+			// returned). It is set below, with the emitter, and stays nil when metrics are
+			// off; Run starts the loop after build returns, so the write is ordered before
+			// the read by the goroutine's own start.
+			var refreshErr func(store string)
+			storeErrHooks = append(storeErrHooks, func(h func(store string)) { refreshErr = h })
+			// Carried out on the built value below; only Run starts it — build
+			// starts no goroutines.
+			keyRefresh = func(ctx context.Context) { ks.RunRefresh(ctx, refreshErr) }
+			ingressKey = "on"
+		}
+		log.Printf("gateway: shared state: postgres (replay, exchange; ingress key %s; exchange TTL %v)", ingressKey, cfg.ExchangeTTL)
+	}
+	if pool == nil {
+		log.Printf("gateway: shared state: in-process (ephemeral ingress key; single-instance only; exchange TTL %v)", cfg.ExchangeTTL)
 	}
 
 	// /health: holder id as the service name — holder ids
@@ -1168,6 +1392,13 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		// see its comment, gateway/engine/originate.go) — there is
 		// deliberately no engine.Config field here feeding it from env.
 	}
+	// Shared-state seams: nil on every field unless the store DSN selected the
+	// Postgres stores above; the engine substitutes its in-process defaults.
+	gwCfg.IngressKeys = ingressKeys
+	gwCfg.Replay = replay
+	gwCfg.Exchanges = exchanges
+	gwCfg.ExchangeTTL = cfg.ExchangeTTL
+
 	if len(cfg.DemoEgressNativeLines) > 0 {
 		fmt.Fprintf(stdout, "gateway: demo: egress-native lines narrowed to %v — arm-2 native reach restricted; transform chains may fire (SHN_DEMO_EGRESS_NATIVE_LINES)\n", cfg.DemoEgressNativeLines)
 	}
@@ -1262,7 +1493,20 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		// Operated-CQL $populate against the provider tenant (the crux of the provider-data
 		// and demo lanes — both answer a REAL payer's questionnaire, which the managed
 		// filler cannot fill). PROVIDER_DTR_POPULATE_URL is validated at loadConfig.
-		gwCfg.Populator = engine.NewNativePopulator(client, cfg.ProviderDTRPopulateURL)
+		// The connector authenticates with its OWN SMART Backend Services block
+		// (PROVIDER_DTR_POPULATE_*), never the SoR's; with no block it forwards
+		// unauthenticated and says so — the payer block's posture, mirrored.
+		if cfg.ProviderDTRPopulateTokenURL == "" {
+			fmt.Fprintf(stdout, "gateway: WARNING PROVIDER_DTR_POPULATE_URL set without PROVIDER_DTR_POPULATE_TOKEN_URL — populating UNAUTHENTICATED\n")
+		}
+		ppc, perr := providerDTRPopulateHTTPClient(cfg)
+		if perr != nil {
+			return b, perr
+		}
+		if ppc == nil {
+			ppc = client // the substrate HTTP client; unauthenticated forward
+		}
+		gwCfg.Populator = engine.NewNativePopulatorWithFailureObserver(ppc, cfg.ProviderDTRPopulateURL, populateFailureObserver(stdout))
 	}
 	gwCfg.IngressEnabled = cfg.ProviderDavinciIngress
 	gwCfg.IngressBaseURL = cfg.IngressBaseURL
@@ -1289,6 +1533,26 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	if cfg.MetricsService != "" {
 		em := metrics.New(stdout, cfg.MetricsNamespace, map[string]string{"Env": cfg.MetricsEnv}, nil)
 		gwCfg.LegMetric = legMetricHook(em, cfg.MetricsService, cfg.Role)
+		storeErr := storeErrorMetricHook(em, cfg.MetricsService)
+		gwCfg.StoreErrorMetric = storeErr
+		// One counter, one `store` dimension, whichever layer noticed the failure.
+		for _, wire := range storeErrHooks {
+			wire(storeErr)
+		}
+		if pool != nil {
+			// Saturation of the one pool every seam shares is what turns a healthy
+			// database into expiring store contexts; it is invisible without this.
+			p := pool
+			poolStats = storePoolMetricLoop(em, cfg.MetricsService, func() storePoolStat {
+				st := p.Stat()
+				return storePoolStat{
+					TotalConns:        st.TotalConns(),
+					AcquiredConns:     st.AcquiredConns(),
+					IdleConns:         st.IdleConns(),
+					EmptyAcquireCount: st.EmptyAcquireCount(),
+				}
+			}, storePoolMetricInterval)
+		}
 	}
 
 	// gw is held as a named variable (rather than the previous inline
@@ -1358,6 +1622,9 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		healthCell:      feedCell,
 		checksRunner:    checksRunner,
 		nativeResponder: evidenceSink,
+		keyRefresh:      keyRefresh,
+		closeStore:      closeStore,
+		poolStats:       poolStats,
 	}
 	return b, nil
 }
@@ -1401,6 +1668,17 @@ func Run(ctx context.Context, getenv func(string) string, stdout io.Writer) erro
 	}
 	if b.registrarURL != "" {
 		go pollFeed(ctx, b.client, b.registrarURL, b.reg, 3*time.Second, b.healthCell)
+	}
+	// Shared ingress-key reload: non-nil only under SHN_STORE_DATABASE_URL, and
+	// started here rather than in build for the same reason as the poller above —
+	// the boot gate drives build() and must not inherit a ticker.
+	if b.keyRefresh != nil {
+		go b.keyRefresh(ctx)
+	}
+	// Shared-state pool stats: non-nil only with both a store DSN and METRICS_SERVICE,
+	// started here and not in build for the same reason.
+	if b.poolStats != nil {
+		go b.poolStats(ctx)
 	}
 	// Boot-time connectivity check: after the listener is up, not
 	// blocking it — build() must return without waiting on partner endpoints.
@@ -1681,6 +1959,37 @@ func payerDavinciHTTPClient(cfg config) (*http.Client, error) {
 	return hc, nil
 }
 
+// providerDTRPopulateHTTPClient returns the client the operated $populate connector
+// posts with. When the PROVIDER_DTR_POPULATE SMART credential block is set it
+// authenticates per the configured mode (private_key_jwt or client_secret_post),
+// through the SAME smartauth client the SoR and payer connectors use — this package
+// never hand-rolls a second OAuth client; else nil ⇒ unauthenticated (warned at
+// the populator wiring site). A token refusal surfaces as the populate request's
+// error, which the engine maps to its upstream failure (consumer 502): there is no
+// unauthenticated fallback.
+func providerDTRPopulateHTTPClient(cfg config) (*http.Client, error) {
+	if cfg.ProviderDTRPopulateTokenURL == "" {
+		return nil, nil // unauthenticated (deliberate; warned at build)
+	}
+	sc := smartauth.Config{
+		TokenURL: cfg.ProviderDTRPopulateTokenURL, ClientID: cfg.ProviderDTRPopulateClientID, Scope: cfg.ProviderDTRPopulateScope,
+	}
+	if cfg.ProviderDTRPopulateClientSecret != "" {
+		sc.ClientSecret = cfg.ProviderDTRPopulateClientSecret // client_secret_post; no key material
+	} else {
+		key, err := loadSmartKey(cfg.ProviderDTRPopulateClientKey, cfg.ProviderDTRPopulateClientAlg)
+		if err != nil {
+			return nil, fmt.Errorf("load populate client key: %w", err)
+		}
+		sc.Alg, sc.Key, sc.KID = cfg.ProviderDTRPopulateClientAlg, key, cfg.ProviderDTRPopulateClientKID
+	}
+	hc, err := smartauth.NewHTTPClient(sc)
+	if err != nil {
+		return nil, fmt.Errorf("populate smartauth client: %w", err)
+	}
+	return hc, nil
+}
+
 // loadSmartKey reads a PEM-encoded EC or RSA private key from path. Only ES384
 // and RS384 are supported (AI-11 / OWD-6: no shared-secret algorithms).
 func loadSmartKey(path, alg string) (crypto.PrivateKey, error) {
@@ -1703,4 +2012,31 @@ func loadSmartKey(path, alg string) (crypto.PrivateKey, error) {
 // payer's own resource, and the managed filler only knew the retired in-process tree.
 func operatedPopulateProfile(profile string) bool {
 	return profile == "provider-data" || profile == "demo"
+}
+
+func populateFailureObserver(stdout io.Writer) func(engine.PopulateFailure) {
+	// Serialize concurrent population records.
+	var mu sync.Mutex
+	return func(note engine.PopulateFailure) {
+		if note.Status != 0 && (note.Status < 100 || note.Status > 599) {
+			return
+		}
+		valid := false
+		switch note.Stage {
+		case "request_build", "token_acquisition", "transport", "body_read":
+			valid = note.Reason == "canceled" || note.Reason == "deadline" || note.Reason == "other"
+		case "http_status":
+			valid = note.Reason == "non_2xx"
+		case "qr_extract":
+			valid = note.Reason == "invalid_json" || note.Reason == "wrong_resource_type"
+		}
+		if !valid {
+			return
+		}
+		// Every interpolated string is allowlisted above; no caller text or payload
+		// can enter this versioned JSON line. Writer errors do not alter HTTP results.
+		mu.Lock()
+		defer mu.Unlock()
+		fmt.Fprintf(stdout, "gateway: populate_failure {\"version\":1,\"stage\":%q,\"reason\":%q,\"status\":%d}\n", note.Stage, note.Reason, note.Status)
+	}
 }

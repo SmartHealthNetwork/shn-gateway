@@ -92,16 +92,34 @@ func (c Config) validateMode() error {
 // never a stale/empty token.
 type TokenSource struct {
 	Config
-	mu     sync.Mutex
-	cached string
-	exp    time.Time
+	mu        sync.Mutex
+	acquiring chan struct{}
+	cached    string
+	exp       time.Time
 }
 
 // Token returns a bearer valid for at least RefreshSkew, minting a fresh one if
 // the cache is empty or near expiry.
 func (s *TokenSource) Token(ctx context.Context) (string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	for {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		s.mu.Lock()
+		if s.acquiring == nil {
+			s.acquiring = make(chan struct{})
+			s.mu.Unlock()
+			break
+		}
+		done := s.acquiring
+		s.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-done:
+		}
+	}
+	defer func() { s.mu.Lock(); close(s.acquiring); s.acquiring = nil; s.mu.Unlock() }()
 	skew := s.RefreshSkew
 	if skew == 0 {
 		skew = defaultRefreshSkew
@@ -155,15 +173,18 @@ func (s *TokenSource) fetch(ctx context.Context) (token string, ttl time.Duratio
 	}
 	resp, err := hc.Do(req)
 	if err != nil {
-		return "", 0, fmt.Errorf("smartauth: token endpoint: %w", err)
+		return "", 0, &TokenTransportError{Cause: err}
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxTokenBody))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxTokenBody+1))
 	if err != nil {
-		return "", 0, fmt.Errorf("smartauth: read token response body: %w", err)
+		return "", 0, &TokenTransportError{Cause: err}
 	}
 	if resp.StatusCode/100 != 2 {
-		return "", 0, fmt.Errorf("smartauth: token endpoint status %d: %s", resp.StatusCode, string(body))
+		return "", 0, &TokenEndpointError{StatusCode: resp.StatusCode}
+	}
+	if len(body) > maxTokenBody {
+		return "", 0, fmt.Errorf("smartauth: oversized token response")
 	}
 	var tr struct {
 		AccessToken string `json:"access_token"`

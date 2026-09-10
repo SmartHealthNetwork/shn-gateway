@@ -29,6 +29,19 @@ The gateway waits for the validator to report healthy (first boot indexes the IG
 can take several minutes), then serves its role surface and joins the network. To point
 at production later, change only `SHN_DISCOVERY_URL`.
 
+The validator starts one Java process and warms its synthetic validation profiles sequentially
+before reporting ready. Health probes only observe readiness; they do not submit work.
+A failed or uncertain warm-up remains unhealthy until you restart the validator. Capture its
+logs first, then restart it with the same Compose project settings:
+
+```bash
+docker compose -f compose.yml logs validator
+docker compose -f compose.yml restart validator
+```
+
+The new process must complete fresh warm-up even if its temporary marker survived the restart.
+Compose does not automatically replace an unhealthy validator.
+
 ## What runs
 - **validator** — `hapiproject/hapi` with US Core 6.1.0 + Da Vinci CRD/DTR/PAS 2.0.1 +
   PDex 2.1.0 + CDex 2.1.0 + HRex 1.1.0 + SDC 3.0.0 loaded; serves fail-closed per-message

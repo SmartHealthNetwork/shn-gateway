@@ -2,10 +2,7 @@ package pgstore_test
 
 import (
 	"context"
-	"os"
 	"testing"
-
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/SmartHealthNetwork/shn-gateway/connectors/pgstore"
 	engine "github.com/SmartHealthNetwork/shn-gateway/engine"
@@ -16,20 +13,10 @@ type storeUnderTest = engine.Store
 
 func pgStore(t *testing.T) storeUnderTest {
 	t.Helper()
-	url := os.Getenv("SHN_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("set SHN_TEST_DATABASE_URL to run Postgres parity tests")
-	}
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, url)
-	if err != nil {
-		t.Fatalf("pgxpool.New: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	for _, tbl := range []string{"gw_auth_number", "gw_pended_claim", "gw_eob"} {
-		_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS "+tbl+" CASCADE")
-	}
-	s, err := pgstore.NewPgStore(ctx, pool, "payer")
+	// Skips when SHN_TEST_DATABASE_URL is unset; drops every gw_* table and
+	// recreates the schema (one shared table list — see pgstore.gwTables).
+	pool := pgstore.TestPool(t)
+	s, err := pgstore.NewPgStore(context.Background(), pool, "payer")
 	if err != nil {
 		t.Fatalf("NewPgStore: %v", err)
 	}

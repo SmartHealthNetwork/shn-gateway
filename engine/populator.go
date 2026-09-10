@@ -78,7 +78,10 @@ func (m *managedPopulator) Populate(ctx context.Context, packageJSON []byte, pc 
 	if err != nil {
 		return nil, nil, err // no-Questionnaire → consumer maps to 502
 	}
-	cc, ok := m.sor.ClinicalContext(pc.Member)
+	cc, ok, readErr := ReadSystemOfRecord(m.sor).ClinicalContextContext(ctx, pc.Member)
+	if readErr != nil {
+		return nil, nil, safeSoRError(readErr)
+	}
 	if !ok {
 		return nil, nil, errNoClinicalContext
 	}

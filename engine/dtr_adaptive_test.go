@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -194,7 +195,7 @@ func TestNextQuestionSubjectBindAndFence(t *testing.T) {
 		{"not-a-patient-ref", "Practitioner/1", uc04PCI, http.StatusBadRequest},
 	} {
 		t.Run("bind/"+tc.name, func(t *testing.T) {
-			if status, _ := g.bindNextQuestionSubject(tc.subject, tc.token); status != tc.wantStatus {
+			if status, _ := g.bindNextQuestionSubjectContext(context.Background(), tc.subject, tc.token); status != tc.wantStatus {
 				t.Fatalf("bind(%q) status=%d, want %d", tc.subject, status, tc.wantStatus)
 			}
 		})

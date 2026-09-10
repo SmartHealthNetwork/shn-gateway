@@ -223,13 +223,46 @@ type Config struct {
 	// attempted, then exactly one terminal outcome — Answered (the counterpart
 	// responded: 2xx or relayed app non-2xx), Denied (the Authorization
 	// Framework denied the leg — a policy decision, not an error), Unreachable
-	// (the Hub could not be reached / did not route), or Failed (anything
-	// else). nil (the default, and the published-gateway posture) = no
+	// (the Hub leg did not complete, including a Hub refusal after an invalid
+	// recipient response envelope; it does not prove the responder itself was
+	// unreachable), or Failed (anything else). nil (the default, and the
+	// published-gateway posture) = no
 	// emission. MAY BE CALLED CONCURRENTLY; implementations must be
 	// goroutine-safe and must never block — the callback sits on the request
 	// path. Additive instrumentation only: emission must not change exchange
 	// behavior (TestLegMetric_ConformanceNeutral). Carries NO payloads.
 	LegMetric func(outcome string)
+	// Replay is the one-time-use record behind the Hub-assertion jti, ingress
+	// client_assertion jti and patient-access correlationId guards. Nil selects a
+	// process-local record, correct only at one replica; a shared store makes the
+	// guards hold across replicas.
+	Replay ReplayStore
+	// IngressKeys signs issued ingress bearers and resolves their kid. Nil selects
+	// one process-local key (correct only at one replica). "Nil" here means a nil
+	// interface value: a typed-nil pointer stored in the interface is a configured
+	// store, not "unset", and the ephemeral fallback will not be selected for it.
+	IngressKeys IngressKeyStore
+	// Exchanges is the correlation seam. Nil selects an in-memory store bounded by
+	// ExchangeTTL (correct only at one replica; lost on restart).
+	Exchanges ExchangeStore
+	// ExchangeTTL bounds how long an exchange is retained on either backend. Zero
+	// selects 168h. The application layer validates the operator's value.
+	ExchangeTTL time.Duration
+	// StoreErrorMetric, when set, is called once per shared-state store failure with
+	// the failing store's name. It is how a database outage becomes visible to an
+	// operator, so EVERY path that refuses or degrades on a store error reports here:
+	//   "replay"     — the one-time-use record could not be consulted, on all three
+	//                  scopes: the ingress client_assertion jti (/oauth/token answers
+	//                  503), the Hub assertion (/substrate/inbound answers 503) and the
+	//                  patient-access correlation (the read answers 503).
+	//   "ingresskey" — the signing key could not be resolved, so no bearer can be
+	//                  issued (/oauth/token answers 503).
+	//   "exchange"   — the best-effort correlation seam failed (the request itself is
+	//                  unaffected).
+	// The store implementations report their own internal failures — an ingress key
+	// RELOAD error behind a verification miss, a failed exchange insert — through the
+	// same counter via their own error hook, wired at the application layer.
+	StoreErrorMetric func(store string)
 	// DemoEdgeCapture (SHN_DEMO_EDGE_CAPTURE) turns on the bounded pre-seal
 	// edge-capture store (edgecapture.go): egressAdapt records each
 	// transformed leg's own before/after payload pair for local inspection,
@@ -249,19 +282,18 @@ type Gateway struct {
 	pending map[string]pendState
 
 	// exchanges is the Layer-2 Exchange-correlation seam (the DaVinciIngress origination
-	// driver groups each ingress call's legs under one Exchange.ID). In-memory default;
-	// a durable/expiring/shared impl is a planned future drop-in behind ExchangeStore.
+	// driver groups each ingress call's legs under one Exchange.ID). In-memory default
+	// (bounded by ExchangeTTL, correct at exactly one replica); Config.Exchanges swaps in
+	// a durable, shared backend — the application layer selects the Postgres one under
+	// SHN_STORE_DATABASE_URL.
 	exchanges ExchangeStore
 
-	// paReplay rejects a patient-access correlationId re-presented within
-	// paReplayWindow (consume-once replay binding on the direct Patient Access read).
-	paReplay *shnsdk.ReplayGuard
-
-	// hubJTI enforces one-time-use on the Hub's X-Hub-Assertion jti at
-	// /substrate/inbound. In-memory per-replica; cross-replica replay
-	// is bounded by the 2-minute assertion TTL (a single task today; a shared
-	// store is the additive revisit if gateways ever scale horizontally).
-	hubJTI *shnsdk.ReplayGuard
+	// replay is the shared one-time-use record for every replay guard: the
+	// patient-access correlationId (paReplayWindow, consume-once on the direct
+	// Patient Access read), the Hub's X-Hub-Assertion jti (window
+	// shnsdk.MaxAssertionTTL, the assertion's maximum lifetime) and the ingress
+	// client_assertion jti (ingressJTIWindow).
+	replay ReplayStore
 
 	// ingressAuth is the gateway-hosted SMART Backend Services authorization server +
 	// bearer verifier for the DaVinciIngress. nil when the ingress is disabled OR
@@ -361,11 +393,16 @@ func New(cfg Config) (*Gateway, error) {
 		cfg.Populator = newManagedPopulator(cfg.SoR)
 	}
 	g := &Gateway{
-		cfg:       cfg,
-		pending:   map[string]pendState{},
-		exchanges: NewInMemoryExchangeStore(),
-		paReplay:  shnsdk.NewReplayGuard(paReplayWindow, paReplayMaxEntries),
-		hubJTI:    shnsdk.NewReplayGuard(shnsdk.MaxAssertionTTL, 1<<16),
+		cfg:     cfg,
+		pending: map[string]pendState{},
+	}
+	g.exchanges = cfg.Exchanges
+	if g.exchanges == nil {
+		g.exchanges = NewInMemoryExchangeStore(cfg.ExchangeTTL, cfg.Clock)
+	}
+	g.replay = cfg.Replay
+	if g.replay == nil {
+		g.replay = NewInMemoryReplayStore()
 	}
 	// Observer seam: decorate the validator so every $validate emits
 	// validate.result. Only when observing — the nil path keeps the
@@ -405,10 +442,24 @@ func New(cfg Config) (*Gateway, error) {
 	// test bypass — body-conformance tests don't register clients). app.go has
 	// already validated registrations; a failure here is a config invariant.
 	if cfg.IngressEnabled && !cfg.ingressAuthBypass {
-		ia, err := newIngressAuthServer(cfg.IngressBaseURL, cfg.IngressClients, cfg.Clock)
+		keys := cfg.IngressKeys
+		if keys == nil {
+			ek, err := newEphemeralKeyStore()
+			if err != nil {
+				return nil, fmt.Errorf("gateway: ingress auth: %w", err)
+			}
+			keys = ek
+			// INFO, not a fault: this is the normal posture of every gateway booted
+			// without a shared store. Said once, at boot, because the consequence is
+			// invisible at one replica and total at two — a sibling replica rejects
+			// this one's bearers, since the signing key never left this process.
+			log.Print("ingress bearer key is ephemeral (no SHN_STORE_DATABASE_URL): run a single reachable instance")
+		}
+		ia, err := newIngressAuthServer(cfg.IngressBaseURL, cfg.IngressClients, cfg.Clock, keys, g.replay)
 		if err != nil {
 			return nil, fmt.Errorf("gateway: ingress auth: %w", err)
 		}
+		ia.storeErr = g.noteStoreError
 		g.ingressAuth = ia
 	}
 	return g, nil
@@ -443,12 +494,8 @@ func (g *Gateway) recipientForWith(coverageJSON []byte, resolveRef func(string) 
 // recipientFor resolves the payer holder from the patient's own Coverage (FR-G40) using the provider
 // SoR as the external-payor resolver — the origination default. Thin wrapper over recipientForWith
 // that discards the parsed identity, kept for callers that only route (payerrouting_test.go).
-func (g *Gateway) recipientFor(coverageJSON []byte) (holderID string, status int, msg string) {
-	var resolveRef func(string) ([]byte, bool)
-	if g.cfg.SoR != nil {
-		resolveRef = g.cfg.SoR.ResolveByReference
-	}
-	holder, _, status, msg := g.recipientForWith(coverageJSON, resolveRef)
+func (g *Gateway) recipientFor(ctx context.Context, coverageJSON []byte) (holderID string, status int, msg string) {
+	holder, _, status, msg := g.recipientForSoR(ctx, coverageJSON)
 	return holder, status, msg
 }
 
@@ -528,13 +575,75 @@ func (g *Gateway) dropPending(token string) {
 
 // Reset clears the pending-scenario store (called by the devstack admin reset so
 // a fresh demo run starts with no stale in-flight PAs).
-func (g *Gateway) Reset() {
+//
+// The two halves have different reach, by design. The pending map is per-process demo
+// session state (the two-phase /scenario/* routes), so a reset clears it at the replica
+// that received the call and at no other; the exchange Reset below is holder-wide on a
+// shared store, so it clears the holder's records everywhere.
+//
+// That asymmetry is acceptable because of WHERE this is reachable from. The route that
+// calls it, POST /scenario/reset, is mounted on the provider role only — beside the rest
+// of the /scenario/* demo surface, on a gateway that is never given a public host — and
+// the demo session is meant to be driven against one instance anyway (DEPLOYMENT.md says
+// so). It is deliberately NOT mounted on the payer role: that mux is the public FHIR
+// front door, and an unauthenticated route whose store half is holder-wide has no
+// business there. Nothing on the substrate exchange path reads the pending map.
+//
+// Reset returns the store half's error. A reset that could not clear the holder's
+// exchange records is a FAILED reset: reporting success while they are still there is
+// how a fresh demo run starts on stale state with nobody told. The caller answers 503.
+// The pending map is cleared first and stays cleared either way — clearing it cannot
+// fail, it is what the demo session needs, and leaving it stale would add a second
+// failure to the one being reported; a retry re-runs both halves.
+func (g *Gateway) Reset() error {
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	g.pending = map[string]pendState{}
+	g.mu.Unlock()
+	// The store reset runs OUTSIDE g.mu: g.mu guards only the pending map, g.exchanges is
+	// write-once in New, and a durable store's Reset is a bounded DB round trip — holding
+	// the mutex across it would stall every in-flight pend/resolve for its duration.
+	//
 	// A fresh demo run starts with no stale exchanges, consistent with the pending map.
-	// The Exchange store holds only metadata-only LegRecords.
-	g.exchanges = NewInMemoryExchangeStore()
+	// The Exchange store holds only metadata-only LegRecords. Reset the CONFIGURED
+	// store in place — never reassign it, or a shared/durable store silently reverts
+	// to a process-local one for the rest of the process's life.
+	rs, ok := g.exchanges.(resettableStore)
+	if !ok {
+		log.Printf("gateway: exchange store: configured store has no Reset; exchanges retained")
+		return nil
+	}
+	if err := rs.Reset(); err != nil {
+		log.Printf("gateway: exchange store: reset: %v", err)
+		g.noteStoreError(storeErrExchange)
+		return fmt.Errorf("exchange store reset: %w", err)
+	}
+	return nil
+}
+
+// The store names StoreErrorMetric is called with (see Config.StoreErrorMetric).
+const (
+	storeErrExchange   = "exchange"
+	storeErrReplay     = "replay"
+	storeErrIngressKey = "ingresskey"
+)
+
+// noteStoreError counts one shared-state store failure. Nil-safe: a gateway with no
+// metric hook configured (every hermetic test, and any deployment without
+// METRICS_SERVICE) is unaffected.
+func (g *Gateway) noteStoreError(store string) {
+	if g.cfg.StoreErrorMetric != nil {
+		g.cfg.StoreErrorMetric(store)
+	}
+}
+
+// recordLeg appends a leg to the correlation seam. The seam is best-effort:
+// a failure is logged with the exchange id and counted, never returned — a store
+// outage must never change what the ingress caller sees.
+func (g *Gateway) recordLeg(exchangeID string, rec LegRecord) {
+	if err := g.exchanges.AppendLeg(exchangeID, rec); err != nil {
+		log.Printf("gateway: exchange store: append leg %s to %s: %v", rec.Type, exchangeID, err)
+		g.noteStoreError(storeErrExchange)
+	}
 }
 
 // ExchangeSnapshot returns a copy of the gateway's current Exchanges (test observability of the
@@ -588,10 +697,34 @@ func (g *Gateway) handleUC07Pending(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleScenarioReset clears the provider's in-memory pended-scenario store so a
-// fresh demo run starts with no stale in-flight PAs. Idempotent.
+// handleScenarioReset clears the provider's in-memory pended-scenario store and the
+// holder's exchange records so a fresh demo run starts with no stale in-flight PAs.
+// Idempotent. A store half that failed answers 503: the caller (the console's reset
+// fan-out) shows a failed reset instead of starting a run on records that are still
+// there. The body names the store and nothing else — never the database's own error.
 func (g *Gateway) handleScenarioReset(w http.ResponseWriter, r *http.Request) {
-	g.Reset()
+	if err := g.Reset(); err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "exchange store reset failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// handlePayerResetNoOp answers the payer role's POST /scenario/reset with 200 and
+// touches nothing.
+//
+// The route used to clear the holder's exchange records store-wide, unauthenticated, on
+// the gateway that IS the public FHIR front door; that is why it was removed from this
+// role. What remains is a compatibility shim for ONE release: the deploy rolls the payer
+// gateway before the console, so between those two steps an older console's reset fan-out
+// still posts here, and a 404 would turn a healthy reset into a reported failure for the
+// length of the rollout. The current console does not call it.
+//
+// Kept in v0.42.0; REMOVE it in v0.43.0, by which point no console that dials it is
+// deployed (docs/gateway-publish-runbook.md carries the same note). A root-module fence
+// fails the v0.43.0 pin bump while this is still mounted, so the bump and the removal
+// land together rather than this outliving its release.
+func (g *Gateway) handlePayerResetNoOp(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
@@ -649,15 +782,18 @@ func (g *Gateway) Handler() http.Handler {
 		}
 	case "payer":
 		mux.HandleFunc("POST /substrate/inbound", g.handleInbound)
-		// The native-forward payer is an INTERNAL conformance-harness participant that holds
-		// in-memory pending/exchanges across runs; the separated/cloud console reset clears them
-		// too (separated-reset-clears-gateway-state). Gated on PayerDavinciNative so a payer
-		// gateway running a partner's OWN injected LegResponder never exposes an unauthenticated
-		// state-clearing route. Generic g.Reset() (clears pending+exchanges), same handler as the
-		// provider lane.
-		if g.cfg.PayerDavinciNative {
-			mux.HandleFunc("POST /scenario/reset", g.handleScenarioReset)
-		}
+		// /scenario/reset here is a 200 NO-OP, native-forward or not, and is removed in
+		// v0.43.0. This role's mux is the payer's PUBLIC FHIR front door — a deployed
+		// reference payer is exactly the gateway fhir.<apex> routes to, on a host-header
+		// rule with no path scoping — and the route carried no credential while clearing
+		// the holder's exchange records store-wide, so the CLEARING is gone for good.
+		// Nothing is lost by that: the payer role writes neither pended-scenario state
+		// (only /scenario/uc06|07/start do, and those are provider routes) nor exchange
+		// records (only the Da Vinci ingress handlers do, likewise provider), so the call
+		// was already clearing nothing of this role's. The console resets through the
+		// provider route alone; the shim exists only for the rolling-deploy window in
+		// which an older console is still fanning out to a payer that has already rolled.
+		mux.HandleFunc("POST /scenario/reset", g.handlePayerResetNoOp)
 		// FR-28: CMS-0057 Patient Access API — conformant FHIR search + instance read
 		// over the PDex PA EOB, gated by a patient-access authority token. Distinct
 		// from the sealed substrate legs. FR-37: the CapabilityStatement for this
@@ -685,28 +821,87 @@ func EnableIngressForTest(cfg *Config) {
 // verification at the gateway edge; the test-only bypass is the only other path to
 // true (build-time-absent). Nil-safe: a Gateway with no auth server (zero value, or
 // ingress disabled) fails closed WITHOUT panicking.
-func (g *Gateway) ingressAuthOK(r *http.Request) bool {
+//
+// unavailable says the refusal is a shared-store OUTAGE (the key store could not resolve
+// a well-formed kid), which the route answers with 503 instead of a 401 — see
+// ingressAuthRefused.
+func (g *Gateway) ingressAuthOK(r *http.Request) (ok bool, unavailable bool) {
 	if g.cfg.ingressAuthBypass {
-		return true
+		return true, false
 	}
 	if g.ingressAuth == nil {
-		return false // fail-closed: no inbound auth configured
+		return false, false // fail-closed: no inbound auth configured
 	}
 	// SMART Backend Services issued bearer (token-exchange) OR a UDAP B2B direct bearer
 	// (a registered client's self-signed private_key_jwt, the form br-provider sends).
 	// Token-shape disjoint, so the OR cannot fail open (FR-G28 UDAP B2B).
-	return g.ingressAuth.verifyBearer(r) || g.ingressAuth.verifyDirectBearer(r)
+	//
+	// ORDER IS LOAD-BEARING: verifyBearer is the only arm that touches the ingress key
+	// store, and the direct-bearer arm keeps answering through a key-store outage — so a
+	// store outage is reported only when NEITHER arm admitted the caller.
+	if ok, unavailable := g.ingressAuth.verifyBearer(r); ok {
+		return true, false
+	} else if g.ingressAuth.verifyDirectBearer(r) {
+		return true, false
+	} else {
+		return false, unavailable
+	}
+}
+
+// ingressAuthRefused writes the refusal an ingress route owes when the caller is not
+// admitted, and reports whether it wrote one (the handler must then stop). A key-store
+// outage answers the 503 every other shared-state refusal answers — the same shape the
+// token endpoint's oauthUnavailable uses — never the 401 that tells an honest partner its
+// credential is bad. The ingress client is the one that decides to retry; this call is
+// refused.
+func (g *Gateway) ingressAuthRefused(w http.ResponseWriter, r *http.Request) bool {
+	ok, unavailable := g.ingressAuthOK(r)
+	if ok {
+		return false
+	}
+	if unavailable {
+		writeStoreUnavailable(w, "ingress key store unavailable")
+		return true
+	}
+	writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "ingress authentication required"})
+	return true
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
+	if fw, ok := w.(*fhirOperationWriter); ok {
+		fw.writeJSON(status, v)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// writeStoreUnavailable is the refusal a route answers when a shared-state record could
+// not be consulted: 503 (not a 401/403 denial, which would accuse an honest caller of a
+// bad credential), uncacheable so nothing pins the outage answer past the outage.
+//
+// 503 states the CAUSE; it does not promise the request survives. Whether anything
+// retries is the caller's business, and it differs per route: a partner client calling
+// the token endpoint or an ingress route can retry (with a fresh client_assertion at the
+// token endpoint — see oauthUnavailable), while a Hub-forwarded delivery cannot, because
+// the Hub has no retry and turns any non-2xx from /substrate/inbound into its own 502
+// "forward to recipient failed". The envelope shape is this package's
+// ordinary {"error": …}, or OperationOutcome on a FHIR operation; the token
+// endpoint's OAuth2 twin is oauthUnavailable.
+func writeStoreUnavailable(w http.ResponseWriter, msg string) {
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": msg})
+}
+
+// randRead is crypto/rand.Read, indirected so a test can drive the failure branch
+// below (the in-memory exchange store's Begin and the pg mirror's must refuse
+// identically). Never reassigned outside tests.
+var randRead = rand.Read
+
 func newCorrelationID() string {
 	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
+	if _, err := randRead(b[:]); err != nil {
 		// crypto/rand failing is unrecoverable; fail closed (never emit a weak or
 		// empty correlation id that would undermine per-leg binding/replay defenses).
 		panic(fmt.Sprintf("gateway: crypto/rand failed generating correlation id: %v", err))

@@ -18,7 +18,7 @@ resolved from `SHN_DISCOVERY_URL`. No clone, no build.
 ## Path 2 — Clone & customize (only if no built-in connector fits)
 
 For a legacy/non-FHIR backend (HL7v2, X12, SQL, SOAP), implement the
-`engine.SystemOfRecord` interface (6 read methods) starting from `scaffold.go`:
+`engine.SystemOfRecord` interface (9 read methods) starting from `scaffold.go`:
 
 1. Copy `scaffold.go`, give your type a backend handle (DB pool, SOAP/X12 client).
 2. Replace each `// TODO(partner):` body with a read against your system of record.
@@ -40,3 +40,13 @@ image's connector switch — a template must never be selectable in production. 
 connectors are the opposite: they are meant to ship in the image and be selected by config
 (the planned connector-registry track). This scaffold exists to make the seam they plug into
 easy to start from and proven to work.
+
+## Distinguish absence from read failure
+
+The original interface remains compatible. For a backend that can fail, also implement
+`engine.ContextSystemOfRecord`: its nine `Context`-suffixed methods accept a request
+context and return an error separately from absence. The engine prefers that optional
+interface. Return safe `engine.SoRReadError` categories, propagate cancellation through
+backend reads, and never return missing-data defaults after an error. See the
+[integration guide](../../docs/INTEGRATION.md#system-of-record-read-failures) for the
+502/503 policy and legacy cancellation limits.

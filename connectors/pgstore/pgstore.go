@@ -70,16 +70,10 @@ func NewPgStore(ctx context.Context, pool *pgxpool.Pool, holderID string) (*PgSt
 // schema-inits, never corrupt anything.
 const schemaLockKey int64 = 0x676174657761795F // arbitrary distinct key ("gateway_" bytes)
 
-// EnsureSchema creates the three tables if absent (idempotent; plain DDL, no
-// CREATE ROLE — least-privilege-friendly). Safe to call repeatedly AND concurrently:
-// `CREATE TABLE/INDEX IF NOT EXISTS` is NOT concurrency-safe on its own (concurrent
-// callers race in pg_type/pg_class and one fails with SQLSTATE 23505), and the four
-// gateways share one shn_gateway DB and all run EnsureSchema at startup — so the DDL
-// runs inside a transaction holding a transaction-scoped advisory lock (the
-// auditstore pattern). The first holder creates the tables; the rest then find them
-// already present (no-op).
-func EnsureSchema(ctx context.Context, pool *pgxpool.Pool) error {
-	const ddl = `
+// ddl is the gateway schema, executed verbatim by EnsureSchema. It lives at
+// package scope so the hermetic DDL fence (ddl_fence_test.go) parses the very
+// text that runs against Postgres, not a copy of it.
+const ddl = `
 CREATE TABLE IF NOT EXISTS gw_auth_number (
     holder_id           TEXT NOT NULL,
     service_request_ref TEXT NOT NULL,
@@ -102,7 +96,66 @@ CREATE TABLE IF NOT EXISTS gw_eob (
     PRIMARY KEY (holder_id, eob_id)
 );
 CREATE INDEX IF NOT EXISTS gw_eob_by_patient ON gw_eob (holder_id, subject_pci, created_at);
+CREATE TABLE IF NOT EXISTS gw_ingress_key (
+    holder_id       TEXT NOT NULL,
+    kid             TEXT NOT NULL,
+    private_key_pem TEXT NOT NULL,      -- PKCS#8 PEM, P-384
+    created_at      TIMESTAMPTZ NOT NULL,
+    not_after       TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (holder_id, kid)
+);
+CREATE TABLE IF NOT EXISTS gw_replay (
+    holder_id  TEXT NOT NULL,
+    scope      TEXT NOT NULL,
+    client_id  TEXT NOT NULL,             -- '' for single-issuer scopes
+    key        TEXT NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (holder_id, scope, client_id, key),
+    -- engine.MaxReplayKeyBytes: the key is caller-supplied (a jti / correlationId) and part
+    -- of the primary key, so an oversized value overflows the btree index row on a healthy
+    -- database. Callers and both stores reject it first; this is the backstop. No migration:
+    -- this table has never shipped in a release, so the constraint arrives with the table.
+    CHECK (octet_length(key) <= 512)
+);
+CREATE INDEX IF NOT EXISTS gw_replay_expiry ON gw_replay (holder_id, expires_at);
+CREATE TABLE IF NOT EXISTS gw_exchange (
+    holder_id   TEXT NOT NULL,
+    exchange_id TEXT NOT NULL,
+    workstream  TEXT NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL,
+    expires_at  TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (holder_id, exchange_id)
+);
+CREATE INDEX IF NOT EXISTS gw_exchange_expiry ON gw_exchange (holder_id, expires_at);
+CREATE TABLE IF NOT EXISTS gw_exchange_leg (
+    holder_id      TEXT NOT NULL,
+    exchange_id    TEXT NOT NULL,
+    seq            INTEGER NOT NULL,
+    leg_type       TEXT NOT NULL,
+    correlation_id TEXT NOT NULL,
+    subjects       TEXT[] NOT NULL DEFAULT '{}', -- a patient-agnostic leg has no subjects; never NULL (see AppendLeg)
+    kind           TEXT NOT NULL,
+    effect         TEXT NOT NULL,
+    timing         TEXT NOT NULL,
+    locality       TEXT NOT NULL,
+    outcome        TEXT NOT NULL,
+    PRIMARY KEY (holder_id, exchange_id, seq),
+    FOREIGN KEY (holder_id, exchange_id) REFERENCES gw_exchange (holder_id, exchange_id)
+        ON DELETE CASCADE
+);
 `
+
+// EnsureSchema creates the gateway tables (business Store: gw_auth_number,
+// gw_pended_claim, gw_eob; shared replica state: gw_ingress_key, gw_replay,
+// gw_exchange, gw_exchange_leg) if absent (idempotent; plain DDL, no
+// CREATE ROLE — least-privilege-friendly). Safe to call repeatedly AND concurrently:
+// `CREATE TABLE/INDEX IF NOT EXISTS` is NOT concurrency-safe on its own (concurrent
+// callers race in pg_type/pg_class and one fails with SQLSTATE 23505), and the four
+// gateways share one shn_gateway DB and all run EnsureSchema at startup — so the DDL
+// runs inside a transaction holding a transaction-scoped advisory lock (the
+// auditstore pattern). The first holder creates the tables; the rest then find them
+// already present (no-op).
+func EnsureSchema(ctx context.Context, pool *pgxpool.Pool) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("pgstore: begin schema tx: %w", err)
