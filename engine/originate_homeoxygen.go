@@ -55,13 +55,13 @@ type dispatchOrder struct {
 // Questionnaire and its canonical (needed by a caller that must ATTEST a required item
 // into the populated QR before submitting, which originateDispatch's own callers do not).
 type dispatchResult struct {
-	pci, patientRef, coverageRef, orderRef string
-	orderJSON, qrJSON, questionnaireJSON   []byte
-	qrAnswers                              map[string]string
-	member                                 string
-	payer                                  shnsdk.PayerIdentifier
-	recipient                              string
-	canonical                              string
+	pci, patientRef, coverageRef, orderRef             string
+	orderJSON, supplierJSON, qrJSON, questionnaireJSON []byte
+	qrAnswers                                          map[string]string
+	member                                             string
+	payer                                              shnsdk.PayerIdentifier
+	recipient                                          string
+	canonical                                          string
 }
 
 // runCRDDispatch is the shared order-dispatch prefix: CRD(order-dispatch) → DIVERGENCE-3
@@ -332,7 +332,7 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member 
 
 	return dispatchResult{
 		pci: pci, patientRef: patientRef, coverageRef: coverageRef, orderRef: orderRef,
-		orderJSON: orderJSON, qrJSON: qrJSON, questionnaireJSON: questionnaireJSON, qrAnswers: qrAnswers,
+		orderJSON: orderJSON, supplierJSON: supplierJSON, qrJSON: qrJSON, questionnaireJSON: questionnaireJSON, qrAnswers: qrAnswers,
 		member: member, payer: payer, recipient: recipient, canonical: canonical,
 	}, true
 }
@@ -413,7 +413,7 @@ func (g *Gateway) originateDispatch(w http.ResponseWriter, r *http.Request, memb
 	// the payer gate to poll the timer-resolved A1. The genuine outcome is conditional-coverage
 	// A4-pended → A1; the payer responder's pend re-query resolves A4→A1, so the FINAL observed
 	// Outcome is "approved" (A1). ---
-	parsed, _, status, msg, err := g.submitClaimAndResolve(r.Context(), r, res.pci, res.orderJSON, res.qrJSON, res.patientRef, res.coverageRef, res.member, res.payer, res.recipient)
+	parsed, _, status, msg, err := g.submitClaimAndResolve(r.Context(), r, res.pci, res.orderJSON, res.supplierJSON, res.qrJSON, res.patientRef, res.coverageRef, res.member, res.payer, res.recipient)
 	if status != 0 {
 		if g.relayOriginationError(w, err) {
 			return

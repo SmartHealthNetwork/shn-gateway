@@ -266,11 +266,7 @@ If the shared exchange records cannot be cleared — the database is unreachable
 `/scenario/reset` answers `503` with `{"error":"exchange store reset failed"}` rather than
 `200`. A reset that cleared nothing must not read as a clean slate.
 
-On the **payer** role `/scenario/reset` answers `200 {"ok":true}` and changes nothing at
-all. It is a compatibility shim, kept for one release so that a rolling deploy (the payer
-gateway rolls before the console) does not turn a healthy reset into a reported failure
-while an older console is still fanning out to it. It is **removed in v0.43.0**; nothing
-should be written against it. The `facility` and `phg` roles answer `404`.
+The payer role exposes no `/scenario/reset` route; requests return `404`.
 
 A key row deleted from the database keeps verifying at any replica that has already
 cached it, until the key's own `not_after` (its 24-hour rotation life plus a bearer

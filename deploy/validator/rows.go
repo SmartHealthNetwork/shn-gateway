@@ -9,12 +9,14 @@ var fixtures embed.FS
 
 // warmup is one $validate the supervisor issues before a lane may call itself ready.
 type warmup struct {
-	identity     string // stable progress identity; unique across the readiness corpus
-	file         string // embedded fixture path
-	resourceType string // $validate route: {base}/{resourceType}/$validate
-	profile      string // ?profile= canonical (unversioned — resolves to the line's baked package)
-	mode         verdictMode
-	line         string
+	expectedOutcome string // pinned targeted errors for a support rejection row
+	mutation        string // one mutation of the complete response fixture
+	identity        string // stable progress identity; unique across the readiness corpus
+	file            string // embedded fixture path
+	resourceType    string // $validate route: {base}/{resourceType}/$validate
+	profile         string // ?profile= canonical (unversioned — resolves to the line's baked package)
+	mode            verdictMode
+	line            string
 }
 
 // warmups returns the original four profile-resolution rows. Its legacy helper

@@ -77,6 +77,10 @@ func (n *nativePopulator) Populate(ctx context.Context, packageJSON []byte, pc P
 		return nil, nil, errPopulateForeignSubject
 	}
 	qr = setQuestionnaireResponseSubject(qr, pc.PatientRef)
+	qr, err = identifyCQLSoftwareAuthor(qr)
+	if err != nil {
+		return nil, nil, errPopulateUpstream
+	}
 	// fill summary nil — the REMOTE engine filled; the gateway has no per-item attribution.
 	return qr, nil, nil
 }

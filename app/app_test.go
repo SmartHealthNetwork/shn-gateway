@@ -1042,6 +1042,8 @@ func TestConvergeRegistry_ReturnsCount(t *testing.T) {
 // PollerCell sees BOTH the transient error (this path's first-ever error
 // visibility) and the eventual success.
 func TestPollFeed_RecordsCell(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	allowSuccess := make(chan struct{})
 	var calls int32
 	var enc [32]byte
 	enc[0] = 1
@@ -1051,22 +1053,36 @@ func TestPollFeed_RecordsCell(t *testing.T) {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
+		// Keep the error observable until the test acknowledges it. A scheduler
+		// delay must not let the next success erase the state under inspection.
+		select {
+		case <-allowSuccess:
+		case <-r.Context().Done():
+			return
+		}
 		_ = json.NewEncoder(w).Encode([]shnsdk.Holder{holder})
 	}))
-	defer srv.Close()
 
 	cell := health.NewPollerCell("registrar-poller", time.Minute)
 	reg := shnsdk.NewRegistry()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go pollFeed(ctx, srv.Client(), srv.URL, reg, 5*time.Millisecond, cell)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		pollFeed(ctx, srv.Client(), srv.URL, reg, 5*time.Millisecond, cell)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+		srv.Close()
+	})
 
 	var sawError bool
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		c := cell.Check(context.Background())
-		if c.Status == health.StatusDegraded && c.LastError != "" {
+		if !sawError && c.Status == health.StatusDegraded && c.LastError != "" {
 			sawError = true
+			close(allowSuccess)
 		}
 		if c.LastSuccess != "" && c.HolderCount == 1 {
 			break

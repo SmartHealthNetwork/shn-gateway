@@ -55,6 +55,10 @@ import (
 //	                  Provenance + LossReport this describes ride INSIDE the transformed
 //	                  payload itself (or observer-only where the target profile can't
 //	                  tolerate the extra resource) — never the envelope, never Hub-visible.
+//	leg.assembled     a terminal PAS response was assembled and committed (Direction = ingress;
+//	                  Op = pas-terminal-response-assembly; CorrelationID identifies the exchange;
+//	                  Payload = holder-local Provenance targeting the retained ClaimResponse
+//	                  fullUrl). This record stays outside the Bundle and the Hub.
 //	ingress.received  a Da Vinci ingress call arrived (LegType = route tag, Payload = request body)
 //	ingress.responded the ingress call was answered (Detail = HTTP status, Payload = response body)
 //	validate.result   a $validate ran (Detail = "valid" | "invalid" | "validator unavailable")

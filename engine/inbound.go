@@ -445,7 +445,7 @@ func (g *Gateway) handleFederatedQueryInbound(w http.ResponseWriter, r *http.Req
 	if provTarget == "" {
 		provTarget = fallbackRef
 	}
-	provJSON, err := shnsdk.BuildProvenanceWithPolicy(provTarget, "Organization/"+g.cfg.HolderID,
+	provJSON, err := buildEvidenceProvenance(provTarget, "http://smarthealth.network/ids/holder", g.cfg.HolderID,
 		consentRef, shnsdk.PurposeTreatment, g.cfg.Clock())
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build provenance failed"})

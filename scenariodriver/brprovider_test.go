@@ -118,6 +118,22 @@ func TestBuildGoldenPASBundleWithQR(t *testing.T) {
 			t.Fatalf("golden+QR bundle missing %s", want)
 		}
 	}
+	var graph struct {
+		Entry []struct {
+			FullURL  string `json:"fullUrl"`
+			Resource struct {
+				ResourceType string `json:"resourceType"`
+			} `json:"resource"`
+		} `json:"entry"`
+	}
+	if err := json.Unmarshal(out, &graph); err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range graph.Entry {
+		if entry.Resource.ResourceType == "QuestionnaireResponse" && entry.FullURL != "http://example.org/fhir/QuestionnaireResponse/qr-x" {
+			t.Fatalf("QR must share the Claim REST base so relative supporting and subject references resolve; got %s", entry.FullURL)
+		}
+	}
 	// QR-less fallback (R-5): returns the plain rebound golden.
 	plain, err := BuildGoldenPASBundleWithQR("MBR-COVERED", nil)
 	if err != nil {
@@ -132,5 +148,20 @@ func TestFetchDTRPackage_RequiresCanonical(t *testing.T) {
 	d := New(Config{})
 	if _, err := d.FetchDTRPackage(BRPResult{Member: "M"}); err == nil {
 		t.Fatal("want error when the CRD card carried no questionnaire canonical")
+	}
+}
+
+func TestPopulateViaBRProviderPreservesCQLAttribution(t *testing.T) {
+	const uri = "http://cqframework.org/fhir/Device/clinical-quality-language"
+	const qr = `{"resourceType":"QuestionnaireResponse","subject":{"reference":"Patient/m"},"item":[{"linkId":"oxygen","extension":[{"url":"http://hl7.org/fhir/StructureDefinition/questionnaireresponse-author","valueReference":{"reference":"` + uri + `"}}],"answer":[{"valueDecimal":86}]}]}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(qr)) }))
+	defer srv.Close()
+	d := New(Config{BFFURL: srv.URL, HTTP: srv.Client()})
+	got, err := d.PopulateViaBRProvider(DTRPackage{Body: []byte(pkgFixture), Member: "m"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(got, []byte(`"reference":"`+uri)) || !bytes.Contains(got, []byte(`"identifier":{"system":"urn:ietf:rfc:3986","value":"`+uri+`"}`)) || !bytes.Contains(got, []byte(`"valueDecimal":86`)) {
+		t.Fatalf("software identity/answer not retained: %s", got)
 	}
 }

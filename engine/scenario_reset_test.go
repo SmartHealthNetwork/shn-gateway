@@ -17,13 +17,7 @@ import (
 // where the whole /scenario/* demo surface is: the provider gateway, which is internal
 // (never given a public host).
 //
-// The payer role no longer CLEARS anything through it. A native-forward payer is exactly
-// the deployed reference payer, and that gateway IS the public FHIR front door
-// (fhir.<apex> routes to it on a host-header rule, with no path scoping), so a route that
-// cleared holder-wide state there put an anonymous state clear on the public internet.
-// What the payer role mounts is a 200 NO-OP, kept for one release so an older console's
-// fan-out survives a rolling deploy (see handlePayerResetNoOp). facility and phg mount
-// nothing, and the gateway hides an unmounted route the way its mux does: 404.
+// Payer, facility and PHG expose no reset route and return 404.
 func TestScenarioResetRoute(t *testing.T) {
 	cases := []struct {
 		name        string
@@ -32,8 +26,8 @@ func TestScenarioResetRoute(t *testing.T) {
 		wantStatus  int
 	}{
 		{"provider (internal, the whole /scenario/* surface lives here)", "provider", false, http.StatusOK},
-		{"native-forward payer (the PUBLIC fhir.<apex> front door): 200 no-op", "payer", true, http.StatusOK},
-		{"payer running a partner's own responder (also public): 200 no-op", "payer", false, http.StatusOK},
+		{"native-forward payer (the PUBLIC fhir.<apex> front door): removed", "payer", true, http.StatusNotFound},
+		{"payer running a partner's own responder (also public): removed", "payer", false, http.StatusNotFound},
 		{"facility", "facility", false, http.StatusNotFound},
 		{"phg", "phg", false, http.StatusNotFound},
 	}
@@ -50,28 +44,18 @@ func TestScenarioResetRoute(t *testing.T) {
 	}
 }
 
-// The payer role's route touches NOTHING. It exists only so that, during a rolling deploy
-// (brpayer-gw rolls before console), an older console's reset fan-out does not turn a
-// healthy reset into a failure against a payer that has already rolled. It must therefore
-// answer 200 without clearing the demo session or the holder's exchange records — a payer
-// that cleared them would be the public anonymous state clear this route was removed for.
-func TestScenarioReset_PayerRouteIsANoOp(t *testing.T) {
+// A refused payer reset must leave both shared exchange and local session state intact.
+func TestScenarioReset_PayerRefusalPreservesState(t *testing.T) {
 	fake := &fakeExchangeStore{mem: NewInMemoryExchangeStore(time.Hour, time.Now)}
 	g := &Gateway{cfg: Config{Role: "payer", PayerDavinciNative: true}, exchanges: fake}
 	g.pending = map[string]pendState{"tok": {scenario: "uc06"}}
 	rec := httptest.NewRecorder()
 	g.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/scenario/reset", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("payer /scenario/reset: got %d, want 200", rec.Code)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("payer reset: got %d, want 404", rec.Code)
 	}
-	if !strings.Contains(rec.Body.String(), `"ok":true`) {
-		t.Fatalf("payer /scenario/reset body = %s, want the same {\"ok\":true} an older console expects", rec.Body.String())
-	}
-	if fake.resets != 0 {
-		t.Fatalf("the payer no-op called the exchange store's Reset %d times: it must touch no state", fake.resets)
-	}
-	if len(g.pending) != 1 {
-		t.Fatal("the payer no-op cleared the demo session state")
+	if fake.resets != 0 || len(g.pending) != 1 {
+		t.Fatal("refused payer reset changed state")
 	}
 }
 

@@ -24,7 +24,7 @@ ARCH="$(docker image inspect -f '{{.Architecture}}' "${IMAGE}")"
 chmod 755 "${TMP}" "${TMP}/child"
 start() {
   C="${PREFIX}-$1"; shift
-  docker create --name "${C}" --network none -v "${TMP}/child:/process-child:ro" \
+  docker create --name "${C}" --network none -v "${TMP}/child:/process-child:ro" -v "${DIR}/testdata:/process-fixtures:ro" \
     -e 'PROCESS_LITERAL=value with spaces;$literal' "$@" --entrypoint /healthcheck "${IMAGE}" \
     supervise /process-child 'argument with spaces' '$literal;unchanged' >/dev/null
   OWNED+=("${C}")
@@ -100,7 +100,7 @@ LINE="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "${C}" | s
 request marker >"${TMP}/ready.json"
 python3 "${DIR}/verify-state.py" ready "${LINE}" <"${TMP}/ready.json"
 for _ in $(seq 1 6); do docker exec "${C}" /healthcheck; done
-request status | python3 -c 'import json,sys;s=json.load(sys.stdin);assert s["posts"]==["Bundle","QuestionnaireResponse","ExplanationOfBenefit","Task"]+["ClaimResponse"]*30 and s["maximum"]==1'
+request status | python3 -c 'import json,sys;s=json.load(sys.stdin);assert s["posts"]==["Bundle","QuestionnaireResponse","ExplanationOfBenefit","Task"]+["ClaimResponse"]*30+["Bundle"]*4 and s["maximum"]==1'
 # An actual restart retains the writable container layer, including /tmp.
 docker restart -t 25 "${C}" >/dev/null
 await_status

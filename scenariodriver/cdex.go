@@ -2,6 +2,7 @@ package scenariodriver
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -9,7 +10,7 @@ import (
 )
 
 // FacilityCDexEvidence builds the facility CDex Data Source pipeline using the same shnsdk
-// calls (BuildDiagnosticReport / BuildDocumentReference / BuildProvenanceWithPolicy →
+// calls (BuildDiagnosticReport / BuildDocumentReference / BuildProvenanceWithIdentifier →
 // BuildRecordsBundle → BuildCDexQueryResult → ExtractCDexEvidence) to produce the federated
 // evidence that UC-05 retrieves and the orchestration carries onto the amended ClaimUpdate
 // (CXL-D11: CDex middle bracketed by SHN gateways, not real external CDex actors).
@@ -39,11 +40,26 @@ func FacilityCDexEvidence(member string, now time.Time) (drJSON, provJSON []byte
 	}
 
 	// Source Provenance: targets the disclosed DiagnosticReport, agent = the facility, .policy
-	// cites a consent ref, reason = TREAT — exactly the inbound.go's BuildProvenanceWithPolicy call.
-	prov, err := shnsdk.BuildProvenanceWithPolicy("DiagnosticReport/dr-uc05-operative",
-		"Organization/metro-spine", "Consent/uc05-treat", shnsdk.PurposeTreatment, now)
+	// cites a consent ref, reason = TREAT. The known holder identity is logical,
+	// matching the facility responder; no Organization resource is invented.
+	prov, err := shnsdk.BuildProvenanceWithIdentifier("DiagnosticReport/dr-uc05-operative",
+		shnsdk.ProvenanceIdentifier{System: "http://smarthealth.network/ids/holder", Value: "metro-spine"}, now)
 	if err != nil {
 		return nil, nil, fmt.Errorf("build facility Provenance: %w", err)
+	}
+
+	// Policy and purpose remain the original CDex disclosure context (FR-32).
+	var source map[string]json.RawMessage
+	if err = json.Unmarshal(prov, &source); err != nil {
+		return nil, nil, err
+	}
+	source["policy"], _ = json.Marshal([]string{"Consent/uc05-treat"})
+	source["reason"], _ = json.Marshal([]any{map[string]any{"coding": []any{map[string]string{
+		"system": "http://terminology.hl7.org/CodeSystem/v3-ActReason", "code": shnsdk.PurposeTreatment,
+	}}}})
+	prov, err = json.Marshal(source)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	inner, err := shnsdk.BuildRecordsBundle([][]byte{dr, docref, prov})

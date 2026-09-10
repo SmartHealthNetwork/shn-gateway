@@ -1,0 +1,37 @@
+{
+  "resourceType": "OperationOutcome",
+  "issue": [
+    {
+      "severity": "error",
+      "code": "processing",
+      "details": {
+        "coding": [
+          {
+            "system": "http://hl7.org/fhir/java-core-messageId",
+            "code": "Extension_EXT_Type"
+          }
+        ]
+      },
+      "diagnostics": "The Extension 'http://hl7.org/fhir/5.0/StructureDefinition/extension-Claim.encounter' definition allows for the types [Reference] but found type string",
+      "expression": [
+        "Bundle.entry[4].resource/*Claim/1762*/.extension[1]"
+      ]
+    },
+    {
+      "severity": "error",
+      "code": "processing",
+      "details": {
+        "coding": [
+          {
+            "system": "http://hl7.org/fhir/java-core-messageId",
+            "code": "Extension_PROF_Type"
+          }
+        ]
+      },
+      "diagnostics": "The Profile 'http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claim|2.0.1' definition allows for the type Reference but found type string",
+      "expression": [
+        "Bundle.entry[4].resource/*Claim/1762*/.extension[1].value.ofType(string)"
+      ]
+    }
+  ]
+}

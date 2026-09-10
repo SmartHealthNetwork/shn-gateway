@@ -16,6 +16,22 @@ rather than moving an existing tag.
 
 This gateway requires `shn-sdk` — see `go.mod` for the pinned version.
 
+## Native PAS response contract
+
+PAS operation responses must be complete Bundles containing exactly one
+ClaimResponse and a closed set of referenced resources. Bare ClaimResponses are
+accepted only as polling resources. Direct native responses retain their bytes.
+When polling completes, the gateway replaces the retained decision, validates the
+assembled Bundle against the selected PAS profile and stamps that contract line.
+A signed Bundle cannot be assembled because replacing its content would invalidate
+the retained signature.
+
+An optional `leg.assembled` observer event records holder-local Provenance after
+successful commit. Its direction is `ingress`, operation is
+`pas-terminal-response-assembly`, and correlation ID identifies the exchange. The
+Provenance targets the retained ClaimResponse fullUrl and stays outside the Bundle
+and Hub.
+
 ## Supported seams
 
 Partners may depend on the following packages across minor versions (breaking

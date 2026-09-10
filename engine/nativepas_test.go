@@ -66,6 +66,7 @@ func TestNativeSubmit_ConformantRecordsEOB(t *testing.T) {
 	t.Run("approved: verbatim + EOB carries partner preAuthRef and claim CPT", func(t *testing.T) {
 		const partnerRef = "PARTNER-REF-CONF"
 		body := []byte(`{"resourceType":"ClaimResponse","outcome":"complete","preAuthRef":"` + partnerRef + `","preAuthPeriod":{"end":"2030-01-01"}}`)
+		body = fixturePASResponse(t, body, true)
 		srv := stubPartnerSrv(t, http.StatusOK, body)
 		store := newCensusSoR()
 		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", store, fixedClock)
@@ -92,6 +93,7 @@ func TestNativeSubmit_ConformantRecordsEOB(t *testing.T) {
 
 	t.Run("pended: verbatim Bundle + RecordPendedClaim, no EOB", func(t *testing.T) {
 		body := []byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"ClaimResponse","outcome":"queued"}},{"resource":{"resourceType":"Task","status":"requested"}}]}`)
+		body = fixturePASResponse(t, body, true)
 		srv := stubPartnerSrv(t, http.StatusOK, body)
 		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", newCensusSoR(), fixedClock)
 		res, err := n.Handle(context.Background(), "pas-claim", "corr-conf", "PCI-1", conformant)
@@ -118,6 +120,7 @@ func TestNativeSubmit_ConformantRecordsEOB(t *testing.T) {
 			{"resource":{"resourceType":"QuestionnaireResponse","subject":{"reference":"Patient/MBR-COVERED"}}}
 		]}`)
 		body := []byte(`{"resourceType":"ClaimResponse","outcome":"complete","preAuthRef":"P-HCPCS"}`)
+		body = fixturePASResponse(t, body, true)
 		srv := stubPartnerSrv(t, http.StatusOK, body)
 		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", newCensusSoR(), fixedClock)
 		res, err := n.Handle(context.Background(), "pas-claim", "corr-hcpcs", "PCI-1", hcpcs)
@@ -148,6 +151,7 @@ func TestNativeSubmit_ConformantRecordsEOB(t *testing.T) {
 			{"resource":{"resourceType":"QuestionnaireResponse","subject":{"reference":"Patient/MBR-COVERED"}}}
 		]}`)
 		body := []byte(`{"resourceType":"ClaimResponse","outcome":"complete","preAuthRef":"P-OTHER"}`)
+		body = fixturePASResponse(t, body, true)
 		srv := stubPartnerSrv(t, http.StatusOK, body)
 		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", newCensusSoR(), fixedClock)
 		res, err := n.Handle(context.Background(), "pas-claim", "corr-other", "PCI-1", other)
@@ -210,14 +214,14 @@ func TestNativeSubmit_SingleShotServiceRequestInfoChanged(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			switch r.Method {
 			case http.MethodPost: // /Claim/$submit → A4 pend (queued ClaimResponse Bundle, id cr-ss)
-				_, _ = w.Write([]byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"ClaimResponse","id":"cr-ss","status":"active","outcome":"queued"}}]}`))
+				_, _ = w.Write(fixturePASResponse(t, []byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"ClaimResponse","id":"cr-ss","status":"active","outcome":"queued"}}]}`), r.Method == http.MethodPost))
 			case http.MethodGet: // GET /ClaimResponse/cr-ss → A4 first, A1 (the timer) second
 				getCount++
 				if getCount >= 2 {
-					_, _ = w.Write([]byte(`{"resourceType":"ClaimResponse","id":"cr-ss","status":"active","outcome":"complete","preAuthRef":"AUTH-SS-1","preAuthPeriod":{"end":"2030-01-01"}}`))
+					_, _ = w.Write(fixturePASResponse(t, []byte(`{"resourceType":"ClaimResponse","id":"cr-ss","status":"active","outcome":"complete","preAuthRef":"AUTH-SS-1","preAuthPeriod":{"end":"2030-01-01"}}`), r.Method == http.MethodPost))
 					return
 				}
-				_, _ = w.Write([]byte(`{"resourceType":"ClaimResponse","id":"cr-ss","status":"active","outcome":"queued"}`))
+				_, _ = w.Write(fixturePASResponse(t, []byte(`{"resourceType":"ClaimResponse","id":"cr-ss","status":"active","outcome":"queued"}`), r.Method == http.MethodPost))
 			default:
 				http.Error(w, "unexpected", http.StatusNotFound)
 			}
@@ -253,7 +257,7 @@ func TestNativeSubmit_SingleShotServiceRequestInfoChanged(t *testing.T) {
 				getCount++
 			}
 			// A4 pend on $submit; a GET (if it ever fired — it must not) would stay queued.
-			_, _ = w.Write([]byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"ClaimResponse","id":"cr-cf","status":"active","outcome":"queued"}}]}`))
+			_, _ = w.Write(fixturePASResponse(t, []byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"ClaimResponse","id":"cr-cf","status":"active","outcome":"queued"}}]}`), r.Method == http.MethodPost))
 		}))
 		defer srv.Close()
 		store := newCensusSoR()
@@ -294,6 +298,7 @@ func TestNativePAS_EOBSystemTracksOrder(t *testing.T) {
 				{"resource":{"resourceType":"QuestionnaireResponse","subject":{"reference":"Patient/MBR-COVERED"}}}
 			]}`)
 			body := []byte(`{"resourceType":"ClaimResponse","outcome":"complete","preAuthRef":"P-1"}`)
+			body = fixturePASResponse(t, body, true)
 			srv := stubPartnerSrv(t, http.StatusOK, body)
 			n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", newCensusSoR(), fixedClock)
 			res, err := n.Handle(context.Background(), "pas-claim", "corr-"+tc.name, "PCI-1", bundle)
@@ -376,6 +381,7 @@ func TestNativeUpdate_ApprovedFinalizes(t *testing.T) {
 
 	t.Run("approved -> verbatim + Finalize, Rollback armed, no EOB", func(t *testing.T) {
 		body := []byte(`{"resourceType":"ClaimResponse","outcome":"complete","preAuthRef":"P-1","preAuthPeriod":{"end":"2030-01-01"}}`)
+		body = fixturePASResponse(t, body, true)
 		srv := stubPartnerSrv(t, http.StatusOK, body)
 		s := seedPended()
 		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", s, fixedClock)
@@ -429,7 +435,7 @@ func TestNativeUpdate_ApprovedFinalizes(t *testing.T) {
 	})
 
 	t.Run("no prior pend -> 409 (derived-ledger fail-safe)", func(t *testing.T) {
-		srv := stubPartnerSrv(t, http.StatusOK, []byte(`{"resourceType":"ClaimResponse","outcome":"complete","preAuthRef":"P-1"}`))
+		srv := stubPartnerSrv(t, http.StatusOK, fixturePASResponse(t, []byte(`{"resourceType":"ClaimResponse","outcome":"complete","preAuthRef":"P-1"}`), true))
 		s := newCensusSoR() // NOT seeded
 		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", s, fixedClock)
 		res, _ := n.Handle(context.Background(), "pas-claim-update", "corr-1", pci, bundle)
@@ -439,7 +445,7 @@ func TestNativeUpdate_ApprovedFinalizes(t *testing.T) {
 	})
 
 	t.Run("still insufficient (denied A3) -> 422 + Rollback", func(t *testing.T) {
-		denied := loadDeniedClaimResponseBytes(t)
+		denied := fixturePASResponse(t, loadDeniedClaimResponseBytes(t), true)
 		srv := stubPartnerSrv(t, http.StatusOK, denied)
 		s := seedPended()
 		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", s, fixedClock)
@@ -462,14 +468,14 @@ func TestNativeUpdate_ApprovedFinalizes(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			switch r.Method {
 			case http.MethodPost: // /Claim/$submit → A4 re-pend (queued ClaimResponse Bundle, id cr-9)
-				_, _ = w.Write([]byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"ClaimResponse","id":"cr-9","status":"active","outcome":"queued"}}]}`))
+				_, _ = w.Write(fixturePASResponse(t, []byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"ClaimResponse","id":"cr-9","status":"active","outcome":"queued"}}]}`), r.Method == http.MethodPost))
 			case http.MethodGet: // GET /ClaimResponse/cr-9 → A4 first, A1 (the timer) second
 				getCount++
 				if getCount >= 2 {
-					_, _ = w.Write([]byte(`{"resourceType":"ClaimResponse","id":"cr-9","status":"active","outcome":"complete","preAuthRef":"AUTH-0042","preAuthPeriod":{"end":"2030-01-01"}}`))
+					_, _ = w.Write(fixturePASResponse(t, []byte(`{"resourceType":"ClaimResponse","id":"cr-9","status":"active","outcome":"complete","preAuthRef":"AUTH-0042","preAuthPeriod":{"end":"2030-01-01"}}`), r.Method == http.MethodPost))
 					return
 				}
-				_, _ = w.Write([]byte(`{"resourceType":"ClaimResponse","id":"cr-9","status":"active","outcome":"queued"}`))
+				_, _ = w.Write(fixturePASResponse(t, []byte(`{"resourceType":"ClaimResponse","id":"cr-9","status":"active","outcome":"queued"}`), r.Method == http.MethodPost))
 			default:
 				http.Error(w, "unexpected", http.StatusNotFound)
 			}
@@ -501,10 +507,10 @@ func TestNativeUpdate_ApprovedFinalizes(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			if r.Method == http.MethodPost {
-				_, _ = w.Write([]byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"ClaimResponse","id":"cr-stuck","status":"active","outcome":"queued"}}]}`))
+				_, _ = w.Write(fixturePASResponse(t, []byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"ClaimResponse","id":"cr-stuck","status":"active","outcome":"queued"}}]}`), r.Method == http.MethodPost))
 				return
 			}
-			_, _ = w.Write([]byte(`{"resourceType":"ClaimResponse","id":"cr-stuck","status":"active","outcome":"queued"}`)) // never A1
+			_, _ = w.Write(fixturePASResponse(t, []byte(`{"resourceType":"ClaimResponse","id":"cr-stuck","status":"active","outcome":"queued"}`), r.Method == http.MethodPost)) // never A1
 		}))
 		defer srv.Close()
 		s := seedPended()
@@ -536,7 +542,7 @@ func TestNativeUpdate_ApprovedFinalizes(t *testing.T) {
 			if r.Method == http.MethodGet {
 				getCount++
 			}
-			_, _ = w.Write([]byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"ClaimResponse","id":"cr-cf","status":"active","outcome":"queued"}}]}`))
+			_, _ = w.Write(fixturePASResponse(t, []byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"ClaimResponse","id":"cr-cf","status":"active","outcome":"queued"}}]}`), r.Method == http.MethodPost))
 		}))
 		defer srv.Close()
 		s := seedPended()
@@ -576,9 +582,11 @@ func TestNativeUpdate_AmendAfterResolution(t *testing.T) {
 		_ = s.RecordPendedClaim(pci, origCorr)
 		return s
 	}
-	afterTimer := load("pas-update-response-amend-after-resolution.json")
-	rependWindow := load("pas-claimresponse-amend-repend-window.json")
-	resolved := load("pas-claimresponse-amend-resolved.json")
+	// Retain historical decision content in explicitly synthetic closed graphs.
+	// These fixtures are not evidence of historical payer graph conformance.
+	afterTimer := fixturePASResponse(t, load("pas-update-response-amend-after-resolution.json"), true)
+	rependWindow := fixturePASResponse(t, load("pas-claimresponse-amend-repend-window.json"), false)
+	resolved := fixturePASResponse(t, load("pas-claimresponse-amend-resolved.json"), false)
 
 	t.Run("complete+A4 re-pend -> poll the rescheduled timer -> A1 + Finalize", func(t *testing.T) {
 		bundle := originatorBuiltConformantUpdateBundleProfile(t, true) // infoChanged → polls

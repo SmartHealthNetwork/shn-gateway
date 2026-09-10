@@ -48,6 +48,7 @@ func verdictCommand(args []string, getenv func(string) string) int {
 		rows = append(rows, qualificationRows(*line, "verify")...)
 	}
 	rows = append(rows, negativeRows(*line)...)
+	rows = append(rows, fullResponseRows(*line)...)
 	prepared := make([][]byte, len(rows))
 	for i, row := range rows {
 		prepared[i], err = fixtureBody(row)

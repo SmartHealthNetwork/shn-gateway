@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
@@ -206,7 +207,7 @@ func (g *Gateway) ingressPASNativeSubjectPCIContext(ctx context.Context, bundleJ
 // Response member-fence (R-7) + response egress-$validate (R-8) are now NAMESPACE-AWARE:
 // both run BY DEFAULT (a non-relaying LegResponder answers in SHN's OWN member namespace and
 // produces SHN-shaped output — both flags false) and stand DOWN only when the responder declares the
-// result foreign/relayed via markForeignRelay (native-forward path). The bound REQUEST above + the
+// result foreign/relayed by its per-result flags (native-forward path). The bound REQUEST above + the
 // substrate's correlation-binding (the response reaches only this exchange's originator) remain the
 // backstop on the relay path. OWD-G6 / FR-36.
 //
@@ -218,7 +219,7 @@ func (g *Gateway) ingressPASNativeSubjectPCIContext(ctx context.Context, bundleJ
 // patient ref, whereas a ClaimResponse does.)
 //
 // R-8 (egress-$validate iff !ResponseRelayed): a verbatim foreign RI's Da Vinci PAS output declares
-// Da Vinci PAS profiles SHN's US-Core-only validator can't resolve ("Failed to retrieve profile"),
+// its source contract. SHN does not stamp or certify unchanged foreign bytes,
 // so $validating it would 422 a valid response — the relay stands down (br-payer validates its own
 // output). A non-relayed response IS egress-$validated.
 //
@@ -233,10 +234,7 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	result, err := g.cfg.Responder.Handle(r.Context(), "pas-claim", env.Metadata.CorrelationID, tok.Subject, bundleJSON)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "responder failed"})
-		return
-	}
+
 	// Rollback on any pre-commit early return (the seam carries it for the update leg; submit
 	// acquires no claim, so Rollback is nil today). Mirrors handlePASInbound.
 	committed := false
@@ -245,9 +243,19 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 			result.Rollback()
 		}
 	}()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "responder failed"})
+		return
+	}
 	if result.Status != 0 {
 		g.respondLegError(w, r, "payer-coverage", "pas-response", "pas-claim",
 			env.Metadata.CorrelationID, result, tok.Subject, env.Metadata.Sender, "", answerTok)
+		return
+	}
+	// Native operation success is always a complete Bundle, regardless of the
+	// responder implementation. Resource-level builders and polling stay separate.
+	if _, bad := validateNativePASResponse(result.ResponseFHIR); bad.Status != 0 {
+		writeJSON(w, bad.Status, map[string]string{"error": bad.Message})
 		return
 	}
 	// (C) outbound fence — two-predicate, namespace-aware: member-fence
@@ -261,17 +269,14 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	// Egress-$validate the RESPONSE iff !ResponseRelayed (R-8: a verbatim foreign relay carries Da
-	// Vinci PAS profiles SHN's US-Core-only validator can't resolve, so a valid relay would 422). The
+	// Vinci PAS content which this gateway did not assemble). The
 	// non-relaying LegResponder produces SHN-shaped output (ResponseRelayed false) → $validated, matching the
 	// minimized pas-claim handler's response egress-$validate. The SHN-produced EOB side-effects are
 	// $validated unconditionally in the loop below.
-	if !result.ResponseRelayed {
-		// Validated at the ANSWER LINE's lane (F7): a 2.2 ClaimResponse must meet a 2.2
-		// validator, not whichever IG the canonical lane happens to host.
-		if status, msg := g.validateFHIR(r.Context(), result.ResponseFHIR, "egress", shnsdk.LineOf(answerTok)); status != 0 {
-			writeJSON(w, status, map[string]string{"error": msg})
-			return
-		}
+	assemblyObservation, status, msg := g.validatePASResult(r.Context(), result, answerTok, env.Metadata.CorrelationID, "pas-claim")
+	if status != 0 {
+		writeJSON(w, status, map[string]string{"error": msg})
+		return
 	}
 	// Egress-$validate the SHN-PRODUCED EOB side-effects before the Store write (FR-36). The relay
 	// RESPONSE itself is NOT $validated (R-8 — it may be a foreign RI's Da Vinci payload); a verbatim
@@ -309,6 +314,9 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 		}
 	}
 	committed = true
+	if assemblyObservation != nil {
+		g.observe(*assemblyObservation)
+	}
 	writeLeg(w, respBytes)
 }
 
@@ -321,7 +329,7 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 // Rollback (it acquires a claim via BeginClaimUpdate, like the minimized pas-claim-update leg).
 //
 // F-PB-R8 — NO ingress-$validate of the REQUEST bundle: the conformant Da Vinci amended re-POST is
-// foreign-shaped (declares Da Vinci PAS profiles SHN's US-Core-only validator cannot resolve), so
+// foreign-shaped and preserved unchanged, so
 // SHN preserves bytes + enforces authority/FR-32 here, exactly as handlePASNativeInbound and the DTR
 // near-relay do. The egress-$validate loop below covers only SHN-PRODUCED SideEffectFHIR; the update
 // leg builds NO EOB (only submit does), so that egress set is empty — the loop is a structural no-op
@@ -329,7 +337,7 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 //
 // Response member-fence (R-7) + response egress-$validate (R-8) are NAMESPACE-AWARE,
 // mirror of the conformant submit leg: both run BY DEFAULT (a non-relaying LegResponder, both flags
-// false) and stand DOWN only when the result is declared foreign/relayed via markForeignRelay (a real
+// false) and stand DOWN only when the result is declared foreign/relayed by its per-result flags (a real
 // RI responds in its OWN patient namespace, so a response-subject == bound-member check / $validating
 // its Da Vinci profiles is a category error for a verbatim relay). The update leg builds NO EOB, so
 // the SHN-produced-side-effect fence/$validate is a no-op here (F-PB-R8 above) — the flags exist to
@@ -361,6 +369,12 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 			env.Metadata.CorrelationID, result, tok.Subject, env.Metadata.Sender, "", answerTok)
 		return
 	}
+	// Native operation success is always a complete Bundle, regardless of the
+	// responder implementation. Resource-level builders and polling stay separate.
+	if _, bad := validateNativePASResponse(result.ResponseFHIR); bad.Status != 0 {
+		writeJSON(w, bad.Status, map[string]string{"error": bad.Message})
+		return
+	}
 	// (C) outbound fence — two-predicate, namespace-aware: member-fence
 	// the ClaimResponse iff !ResponseSubjectForeign (R-7), mirror of the conformant submit handler.
 	// The update leg builds no EOB, so the SHN-produced-side-effect fence is a no-op here; the flag
@@ -371,14 +385,12 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 		return
 	}
 	// Egress-$validate the RESPONSE iff !ResponseRelayed (R-8), mirror of the conformant submit
-	// handler: a non-relaying LegResponder produces SHN-shaped output (validated); a foreign verbatim relay
-	// (ResponseRelayed true) is preserved bytes-only (US-Core validator can't resolve its Da Vinci
-	// profiles).
-	if !result.ResponseRelayed {
-		if status, msg := g.validateFHIR(r.Context(), result.ResponseFHIR, "egress", shnsdk.LineOf(answerTok)); status != 0 {
-			writeJSON(w, status, map[string]string{"error": msg})
-			return
-		}
+	// handler: a non-relaying LegResponder produces locally assembled output (validated); a foreign verbatim relay
+	// (ResponseRelayed true) is preserved bytes-only. Assembly is certified explicitly against PAS.
+	assemblyObservation, status, msg := g.validatePASResult(r.Context(), result, answerTok, env.Metadata.CorrelationID, "pas-claim-update")
+	if status != 0 {
+		writeJSON(w, status, map[string]string{"error": msg})
+		return
 	}
 	// Egress-$validate the SHN-PRODUCED side-effects before the Store write (FR-36). The update leg
 	// builds NO EOB, so SideEffectFHIR is empty and this loop is a structural no-op (F-PB-R8); the
@@ -407,6 +419,9 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 		}
 	}
 	committed = true
+	if assemblyObservation != nil {
+		g.observe(*assemblyObservation)
+	}
 	writeLeg(w, respBytes)
 }
 
@@ -440,7 +455,7 @@ func (g *Gateway) conformantPASBindContext(ctx context.Context, bundleJSON []byt
 // update gate enforces against (the FR-32 arms mirror payer.go:393-424).
 type conformantUpdateFacts struct {
 	provenanceJSON     []byte   // the Provenance resource bytes, or nil (FR-32: REQUIRED on the update leg)
-	provenanceAgents   []string // Provenance.agent[].who.reference
+	provenanceAgents   []string // Provenance.agent[].who reference or qualified business identifier
 	provenanceTargets  []string // Provenance.target[].reference
 	provenancePolicies []string // Provenance.policy[] (UC-05 consent cite — surfaced, not yet enforced)
 	hasDR              bool     // a DiagnosticReport entry is present (DR-variant supplemental data)
@@ -558,7 +573,11 @@ func parseConformantPASUpdateFacts(bundleJSON []byte) (conformantUpdateFacts, in
 				} `json:"target"`
 				Agent []struct {
 					Who struct {
-						Reference string `json:"reference"`
+						Reference  string `json:"reference"`
+						Identifier struct {
+							System string `json:"system"`
+							Value  string `json:"value"`
+						} `json:"identifier"`
 					} `json:"who"`
 				} `json:"agent"`
 				Policy []string `json:"policy"`
@@ -574,6 +593,8 @@ func parseConformantPASUpdateFacts(bundleJSON []byte) (conformantUpdateFacts, in
 			for _, a := range prov.Agent {
 				if a.Who.Reference != "" {
 					f.provenanceAgents = append(f.provenanceAgents, a.Who.Reference)
+				} else if id := a.Who.Identifier; strings.TrimSpace(id.Value) != "" && (id.System == "http://hl7.org/fhir/sid/us-npi" || id.System == "http://smarthealth.network/ids/holder") {
+					f.provenanceAgents = append(f.provenanceAgents, id.System+"|"+id.Value)
 				}
 			}
 			for _, p := range prov.Policy {
@@ -659,4 +680,52 @@ func stampForBuiltAnswer(result LegResult, answerTok string) string {
 		return ""
 	}
 	return answerTok
+}
+
+// validatePASResult certifies locally assembled output against the exact PAS
+// response profile. Its Provenance describes assembly only, never conversion.
+func (g *Gateway) validatePASResult(ctx context.Context, result LegResult, answerTok, corrID, leg string) (*ObserverEvent, int, string) {
+	if !result.ResponseAssembled {
+		if result.ResponseRelayed {
+			return nil, 0, ""
+		}
+		status, msg := g.validateFHIR(ctx, result.ResponseFHIR, "egress", shnsdk.LineOf(answerTok))
+		return nil, status, msg
+	}
+	if result.ResponseRelayed || !result.ResponseSubjectForeign || len(corrID) == 0 || len(corrID) > 256 || len(g.cfg.HolderID) == 0 || len(g.cfg.HolderID) > 256 {
+		return nil, http.StatusInternalServerError, "invalid PAS assembly provenance"
+	}
+	line := shnsdk.LineOf(answerTok)
+	def, ok := shnsdk.PASLineDef(line)
+	if !ok {
+		return nil, http.StatusInternalServerError, "unknown PAS assembly contract line"
+	}
+	v := g.validatorForLine(line)
+	if v == nil {
+		return nil, http.StatusInternalServerError, "PAS assembly validator unavailable"
+	}
+	profile := "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-pas-response-bundle|" + def.PackageVersion
+	verdict, err := v.Validate(ctx, result.ResponseFHIR, profile)
+	if err != nil {
+		return nil, http.StatusInternalServerError, "PAS assembly validator unavailable"
+	}
+	if !verdict.Valid {
+		return nil, http.StatusUnprocessableEntity, "PAS assembly validation failed"
+	}
+	graph, err := readPASGraph(result.ResponseFHIR)
+	if err != nil {
+		return nil, http.StatusInternalServerError, "invalid PAS assembly provenance"
+	}
+	provenance := map[string]any{
+		"resourceType": "Provenance",
+		"target":       []any{map[string]any{"reference": graph.response.fullURL}},
+		"recorded":     g.cfg.Clock().UTC().Format(time.RFC3339Nano),
+		"activity":     map[string]any{"text": "PAS terminal response assembly"},
+		"agent":        []any{map[string]any{"who": map[string]any{"reference": "Organization/" + g.cfg.HolderID}}},
+	}
+	raw, err := json.Marshal(provenance)
+	if err != nil || len(raw) > 4096 {
+		return nil, http.StatusInternalServerError, "invalid PAS assembly provenance"
+	}
+	return &ObserverEvent{Kind: "leg.assembled", Direction: "ingress", LegType: leg, CorrelationID: corrID, Op: "pas-terminal-response-assembly", Payload: raw}, 0, ""
 }

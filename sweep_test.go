@@ -124,7 +124,32 @@ var sweepSkipFiles = map[string]bool{
 // token classes — a bare `D<digit>` or `E<digit><letter>` — will eventually
 // collide with real partner-facing vocabulary (X12/EDI qualifiers, for one),
 // and the reviewable place to record that judgement is here.
-var sweepAllowlist = map[string][]string{}
+var sweepAllowlist = map[string][]string{
+	// Unmodified official CMS HTML: public EDI vocabulary and an HTML character entity.
+	"deploy/validator/support/inputs/cms-pos-2024-05-02.html": {
+		"<a href=\"/medicare/coding-billing/medicare-fee-service-5010-d0\" class=\"menu-item-element\" aria-current=\"false\" tracking-data=\"a39716ab-8feb-4e68-ae06-15796975c7d8\" data-drupal-link-system-path=\"node/171736\">Medicare Fee-for-Service 5010 - D0</a>",
+		"<a href=\"/medicare/coordination-benefits-recovery/workers-comp-set-aside-arrangements\" class=\"menu-item-element\" aria-current=\"false\" tracking-data=\"88fc6d69-79bf-4221-bc9e-ca8b14657204\" data-drupal-link-system-path=\"node/176641\">Workers&#039; comp Medicare set aside arrangements</a>",
+	},
+	// Exact HAPI diagnostic identifies POS code 98, not an issue number.
+	"deploy/validator/testdata/pas-response-pos-errors.json": {
+		"\"diagnostics\": \"Unknown code 'https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set#98'\",",
+		"\"diagnostics\": \"None of the codings provided are in the value set 'X12 278 Health Care Service Location Type Value Set' (http://hl7.org/fhir/us/davinci-pas/ValueSet/X12278LocationType|2.0.1), and a coding from this value set is required) (codes = https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set#98)\",",
+	},
+	// Exact HAPI diagnostic identifies POS code 98, not an issue number.
+	"deploy/validator/testdata/2.1/pas-response-pos-errors.json": {
+		"\"diagnostics\": \"Unknown code 'https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set#98'\",",
+		"\"diagnostics\": \"None of the codings provided are in the value set 'X12 278 Health Care Service Location Type Value Set' (http://hl7.org/fhir/us/davinci-pas/ValueSet/X12278LocationType|2.1.0), and a coding from this value set is required) (codes = https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set#98)\",",
+	},
+	// Exact HAPI diagnostic identifies POS code 98, not an issue number.
+	"deploy/validator/testdata/2.2/pas-response-pos-errors.json": {
+		"\"diagnostics\": \"Unknown code 'https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set#98'\",",
+		"\"diagnostics\": \"None of the codings provided are in the value set 'X12 278 Health Care Service Location Type Value Set' (http://hl7.org/fhir/us/davinci-pas/ValueSet/X12278LocationType|2.2.1), and a coding from this value set is required) (codes = https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set#98)\",",
+	},
+	// ASCII uppercase range is Go syntax, not a decision label.
+	"engine/pasassembly.go": {
+		"if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '.') {",
+	},
+}
 
 // TestInternalTokenPattern_DesignDocRefForms is the rejection test for the
 // design-document-reference arm, and it exists because TestNoInternalTokens

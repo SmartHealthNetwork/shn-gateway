@@ -21,8 +21,8 @@ const primeSlicingOutcome22 = `{"resourceType":"OperationOutcome","issue":[{"sev
 
 func TestReadinessRowsAreUniqueOrderedCorpus(t *testing.T) {
 	rows := readinessRows("2.2")
-	if len(rows) != 34 {
-		t.Fatalf("rows=%d want 34", len(rows))
+	if len(rows) != 38 {
+		t.Fatalf("rows=%d want 38", len(rows))
 	}
 	wantPrefix := []string{"init-pas-request-bundle", "init-dtr-questionnaireresponse", "init-pdex-explanationofbenefit", "init-cdex-task"}
 	for i, want := range wantPrefix {
@@ -38,7 +38,7 @@ func TestReadinessRowsAreUniqueOrderedCorpus(t *testing.T) {
 			want = append(want, pass+"-"+form)
 		}
 	}
-	want = append(want, "negative-versioned", "negative-unversioned", "negative-meta")
+	want = append(want, "negative-versioned", "negative-unversioned", "negative-meta", "full-response-positive", "full-response-negative-hcpcs", "full-response-negative-pos", "full-response-negative-encounter")
 	seen := map[string]bool{}
 	for i, row := range rows {
 		if row.identity != want[i] {
@@ -293,5 +293,181 @@ func TestSubmitValidationFailureCarriesTheWholeAnswerOnOneLine(t *testing.T) {
 	}
 	if strings.ContainsAny(oe.excerpt, "\n\r\t") {
 		t.Fatal("excerpt must be single-line")
+	}
+}
+
+// Complete response graphs must qualify independently of bare decisions.
+func TestFullResponseCorpus(t *testing.T) {
+	for _, line := range []string{"2.0", "2.1", "2.2"} {
+		rows := fullResponseRows(line)
+		if len(rows) != 4 {
+			t.Fatalf("%s full rows=%d", line, len(rows))
+		}
+		for i, row := range rows {
+			body, err := fixtureBody(row)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var bundle map[string]any
+			if err := json.Unmarshal(body, &bundle); err != nil || bundle["resourceType"] != "Bundle" || len(bundle["entry"].([]any)) != 9 {
+				t.Fatalf("incomplete response: %s", row.identity)
+			}
+			if i == 0 {
+				if err := assertVerdict(row, 200, []byte(cleanOutcome)); err != nil {
+					t.Fatal(err)
+				}
+				continue
+			}
+			expected, err := fixtures.ReadFile(row.expectedOutcome)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := assertVerdict(row, 200, expected); err != nil {
+				t.Fatalf("%s: %v", row.identity, err)
+			}
+			for name, bad := range map[string][]byte{
+				"accepted invalid":   []byte(cleanOutcome),
+				"wrong code":         bytes.ReplaceAll(expected, []byte("processing"), []byte("invalid")),
+				"wrong path":         bytes.ReplaceAll(expected, []byte("Bundle.entry[4]"), []byte("Bundle.entry[5]")),
+				"unknown definition": []byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"processing","diagnostics":"Unknown extension"}]}`),
+			} {
+				if assertVerdict(row, 200, bad) == nil {
+					t.Fatalf("%s accepted %s", row.identity, name)
+				}
+			}
+		}
+	}
+	if fullResponseRows("wrong") != nil {
+		t.Fatal("unknown lane admitted")
+	}
+}
+
+func supportTestOutcome(body []byte, profile string) string {
+	line := "2.2"
+	for candidate, version := range pasVersions {
+		if strings.HasSuffix(profile, "|"+version) {
+			line = candidate
+		}
+	}
+	for _, row := range fullResponseRows(line)[1:] {
+		mutated, _ := fixtureBody(row)
+		if bytes.Equal(body, mutated) {
+			raw, _ := fixtures.ReadFile(row.expectedOutcome)
+			return string(raw)
+		}
+	}
+	return ""
+}
+
+func TestFullResponseMutationsAreIsolated(t *testing.T) {
+	for _, line := range []string{"2.0", "2.1", "2.2"} {
+		rows := fullResponseRows(line)
+		raw, err := fixtureBody(rows[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		var original map[string]any
+		_ = json.Unmarshal(raw, &original)
+		for _, row := range rows[1:] {
+			body, err := fixtureBody(row)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var mutated map[string]any
+			_ = json.Unmarshal(body, &mutated)
+			claim := mutated["entry"].([]any)[4].(map[string]any)["resource"].(map[string]any)
+			before := original["entry"].([]any)[4].(map[string]any)["resource"].(map[string]any)
+			switch row.mutation {
+			case "hcpcs", "pos":
+				key, want := "productOrService", "L9999"
+				if row.mutation == "pos" {
+					key, want = "locationCodeableConcept", "98"
+				}
+				item := claim["item"].([]any)[0].(map[string]any)
+				coding := item[key].(map[string]any)["coding"].([]any)[0].(map[string]any)
+				if coding["code"] != want {
+					t.Fatal("wrong mutation")
+				}
+				claim["item"] = before["item"]
+			case "encounter":
+				ext := claim["extension"].([]any)
+				if len(ext) != len(before["extension"].([]any))+1 || ext[len(ext)-1].(map[string]any)["valueString"] != "invalid-reference-type" {
+					t.Fatal("wrong extension mutation")
+				}
+				claim["extension"] = before["extension"]
+			}
+			if !reflect.DeepEqual(original, mutated) {
+				t.Fatalf("%s changed unrelated data", row.identity)
+			}
+		}
+	}
+}
+
+func TestFullResponseBodyRejectsMalformedMutationInputs(t *testing.T) {
+	cases := map[string]string{
+		"invalid JSON": "{", "wrong type": `{"resourceType":"Claim"}`,
+		"no Claim":         `{"resourceType":"Bundle","entry":[]}`,
+		"duplicate Claim":  `{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"Claim"}},{"resource":{"resourceType":"Claim"}}]}`,
+		"no items":         `{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"Claim"}}]}`,
+		"missing concept":  `{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"Claim","item":[{}]}}]}`,
+		"nonobject coding": `{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"Claim","item":[{"productOrService":{"coding":[false]}}]}}]}`,
+	}
+	for name, raw := range cases {
+		if _, err := fullResponseBody([]byte(raw), "hcpcs"); err == nil {
+			t.Fatalf("accepted %s", name)
+		}
+	}
+	raw, _ := fixtures.ReadFile(fullResponseRows("2.0")[0].file)
+	if _, err := fullResponseBody(raw, "wrong"); err == nil {
+		t.Fatal("unknown mutation accepted")
+	}
+}
+
+func TestSupportNegativeRequiresExactErrorMultiset(t *testing.T) {
+	for _, line := range []string{"2.0", "2.1", "2.2"} {
+		for _, row := range fullResponseRows(line)[1:] {
+			raw, _ := fixtures.ReadFile(row.expectedOutcome)
+			expected, _ := decodeOperationOutcome(raw)
+			changed := func(mutate func(*operationOutcome)) []byte {
+				var out operationOutcome
+				_ = json.Unmarshal(raw, &out)
+				mutate(&out)
+				body, _ := json.Marshal(out)
+				return body
+			}
+			cases := map[string][]byte{
+				"missing one":            changed(func(o *operationOutcome) { o.Issue = o.Issue[:1] }),
+				"duplicate":              changed(func(o *operationOutcome) { o.Issue = append(o.Issue, o.Issue[0]) }),
+				"wrong severity":         changed(func(o *operationOutcome) { o.Issue[0].Severity = "warning" }),
+				"wrong diagnostic":       changed(func(o *operationOutcome) { o.Issue[0].Diagnostics += " changed" }),
+				"wrong message identity": changed(func(o *operationOutcome) { o.Issue[0].Details.Coding[0].Code = "wrong" }),
+				"wrong message system":   changed(func(o *operationOutcome) { o.Issue[0].Details.Coding[0].System = "wrong" }),
+				"extra error": changed(func(o *operationOutcome) {
+					o.Issue = append(o.Issue, outcomeIssue{Severity: "error", Code: "processing", Diagnostics: "unrelated"})
+				}),
+				"unknown profile warning": changed(func(o *operationOutcome) {
+					o.Issue = append(o.Issue, outcomeIssue{Severity: "warning", Code: "processing", Diagnostics: "Failed to retrieve profile"})
+				}),
+			}
+			for name, bad := range cases {
+				if assertVerdict(row, 200, bad) == nil {
+					t.Fatalf("%s %s admitted %s", line, row.identity, name)
+				}
+			}
+			expected.Issue[0], expected.Issue[1] = expected.Issue[1], expected.Issue[0]
+			reversed, _ := json.Marshal(expected)
+			if err := assertVerdict(row, 200, reversed); err != nil {
+				t.Fatal("error order should not change verdict", err)
+			}
+			positive := fullResponseRows(line)[0]
+			if err := assertVerdict(positive, 200, raw); err == nil {
+				t.Fatal("complete positive accepted missing/invalid support errors")
+			}
+		}
+	}
+	row := fullResponseRows("2.0")[1]
+	row.expectedOutcome = "missing.json"
+	if assertVerdict(row, 200, []byte(cleanOutcome)) == nil {
+		t.Fatal("missing expectation admitted")
 	}
 }

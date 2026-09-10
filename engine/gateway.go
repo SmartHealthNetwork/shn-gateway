@@ -710,24 +710,6 @@ func (g *Gateway) handleScenarioReset(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
-// handlePayerResetNoOp answers the payer role's POST /scenario/reset with 200 and
-// touches nothing.
-//
-// The route used to clear the holder's exchange records store-wide, unauthenticated, on
-// the gateway that IS the public FHIR front door; that is why it was removed from this
-// role. What remains is a compatibility shim for ONE release: the deploy rolls the payer
-// gateway before the console, so between those two steps an older console's reset fan-out
-// still posts here, and a 404 would turn a healthy reset into a reported failure for the
-// length of the rollout. The current console does not call it.
-//
-// Kept in v0.42.0; REMOVE it in v0.43.0, by which point no console that dials it is
-// deployed (docs/gateway-publish-runbook.md carries the same note). A root-module fence
-// fails the v0.43.0 pin bump while this is still mounted, so the bump and the removal
-// land together rather than this outliving its release.
-func (g *Gateway) handlePayerResetNoOp(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
-}
-
 // Handler returns the role-appropriate HTTP routes.
 func (g *Gateway) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -782,18 +764,6 @@ func (g *Gateway) Handler() http.Handler {
 		}
 	case "payer":
 		mux.HandleFunc("POST /substrate/inbound", g.handleInbound)
-		// /scenario/reset here is a 200 NO-OP, native-forward or not, and is removed in
-		// v0.43.0. This role's mux is the payer's PUBLIC FHIR front door — a deployed
-		// reference payer is exactly the gateway fhir.<apex> routes to, on a host-header
-		// rule with no path scoping — and the route carried no credential while clearing
-		// the holder's exchange records store-wide, so the CLEARING is gone for good.
-		// Nothing is lost by that: the payer role writes neither pended-scenario state
-		// (only /scenario/uc06|07/start do, and those are provider routes) nor exchange
-		// records (only the Da Vinci ingress handlers do, likewise provider), so the call
-		// was already clearing nothing of this role's. The console resets through the
-		// provider route alone; the shim exists only for the rolling-deploy window in
-		// which an older console is still fanning out to a payer that has already rolled.
-		mux.HandleFunc("POST /scenario/reset", g.handlePayerResetNoOp)
 		// FR-28: CMS-0057 Patient Access API — conformant FHIR search + instance read
 		// over the PDex PA EOB, gated by a patient-access authority token. Distinct
 		// from the sealed substrate legs. FR-37: the CapabilityStatement for this

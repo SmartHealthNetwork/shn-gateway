@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"strings"
 )
 
@@ -24,6 +25,7 @@ const (
 	verdictPrime
 	verdictPositive
 	verdictNegative
+	verdictSupportNegative
 )
 
 var pasVersions = map[string]string{"2.0": "2.0.1", "2.1": "2.1.0", "2.2": "2.2.1"}
@@ -42,6 +44,7 @@ func readinessRows(line string) []warmup {
 	rows = append(rows, qualificationRows(line, "qualify-1")...)
 	rows = append(rows, qualificationRows(line, "qualify-2")...)
 	rows = append(rows, negativeRows(line)...)
+	rows = append(rows, fullResponseRows(line)...)
 	return rows
 }
 
@@ -107,6 +110,9 @@ func fixtureBody(row warmup) ([]byte, error) {
 	}
 	if row.mode == verdictInitialize {
 		return raw, nil
+	}
+	if row.resourceType == "Bundle" {
+		return fullResponseBody(raw, row.mutation)
 	}
 	resource, extracted, err := claimResponseFixture(raw)
 	if err != nil {
@@ -380,6 +386,8 @@ func assertVerdict(row warmup, status int, raw []byte) error {
 			}
 		}
 		return nil
+	case verdictSupportNegative:
+		return assertSupportNegative(row, outcome)
 	case verdictNegative:
 		matched := 0
 		for _, issue := range outcome.Issue {
@@ -437,4 +445,118 @@ func targetedNegative(issue outcomeIssue) bool {
 	return issue.Severity == "error" && issue.Code == "processing" &&
 		len(issue.Details.Coding) == 1 && issue.Details.Coding[0].System == messageIDSystem && issue.Details.Coding[0].Code == "Extension_EXT_Type" &&
 		issue.Diagnostics == wantDiagnostic && len(issue.Expression) == 1 && issue.Expression[0] == negativeExpression
+}
+
+// fullResponseRows binds readiness to the complete graph and its offline support
+// definitions. The unchanged 2.0 reference-payer response is synthetic;
+// 2.1 adds the subscriber member-identifier type required by that PAS version.
+func fullResponseRows(line string) []warmup {
+	version, ok := pasVersion(line)
+	if !ok {
+		return nil
+	}
+	dir := "testdata"
+	if line != "2.0" {
+		dir += "/" + line
+	}
+	base := warmup{identity: "full-response-positive", file: dir + "/pas-response-complete.json", resourceType: "Bundle", profile: "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-pas-response-bundle|" + version, mode: verdictPositive, line: line}
+	rows := []warmup{base}
+	for _, mutation := range []string{"hcpcs", "pos", "encounter"} {
+		row := base
+		row.identity = "full-response-negative-" + mutation
+		row.mode = verdictSupportNegative
+		row.mutation = mutation
+		row.expectedOutcome = dir + "/pas-response-" + mutation + "-errors.json"
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+func fullResponseBody(raw []byte, mutation string) ([]byte, error) {
+	var resource map[string]any
+	if err := json.Unmarshal(raw, &resource); err != nil || resource["resourceType"] != "Bundle" {
+		return nil, errors.New("fixture unavailable")
+	}
+	if mutation == "" {
+		return raw, nil
+	}
+	// The fixture is committed and pinned by the corpus tests. Mutation paths
+	// deliberately select the original Claim, never the response decision.
+	entries, _ := resource["entry"].([]any)
+	var claim map[string]any
+	for _, value := range entries {
+		entry, _ := value.(map[string]any)
+		candidate, _ := entry["resource"].(map[string]any)
+		if candidate["resourceType"] == "Claim" {
+			if claim != nil {
+				return nil, errors.New("fixture unavailable")
+			}
+			claim = candidate
+		}
+	}
+	if claim == nil {
+		return nil, errors.New("fixture unavailable")
+	}
+	if mutation == "encounter" {
+		extensions, _ := claim["extension"].([]any)
+		claim["extension"] = append(extensions, map[string]any{"url": "http://hl7.org/fhir/5.0/StructureDefinition/extension-Claim.encounter", "valueString": "invalid-reference-type"})
+	} else {
+		key, code := "productOrService", "L9999"
+		if mutation == "pos" {
+			key, code = "locationCodeableConcept", "98"
+		} else if mutation != "hcpcs" {
+			return nil, errors.New("fixture unavailable")
+		}
+		items, _ := claim["item"].([]any)
+		if len(items) != 1 {
+			return nil, errors.New("fixture unavailable")
+		}
+		item, _ := items[0].(map[string]any)
+		concept, _ := item[key].(map[string]any)
+		codings, _ := concept["coding"].([]any)
+		if len(codings) != 1 {
+			return nil, errors.New("fixture unavailable")
+		}
+		coding, _ := codings[0].(map[string]any)
+		if coding == nil {
+			return nil, errors.New("fixture unavailable")
+		}
+		coding["code"] = code
+	}
+	return json.Marshal(resource)
+}
+
+func assertSupportNegative(row warmup, outcome operationOutcome) error {
+	raw, err := fixtures.ReadFile(row.expectedOutcome)
+	if err != nil {
+		return errors.New("fixture unavailable")
+	}
+	expected, err := decodeOperationOutcome(raw)
+	if err != nil || expected.ResourceType != "OperationOutcome" || len(expected.Issue) != 2 {
+		return errors.New("fixture unavailable")
+	}
+	remaining := append([]outcomeIssue(nil), expected.Issue...)
+	for _, issue := range outcome.Issue {
+		if suspiciousProfileIssue(issue) {
+			return errors.New("unexpected verdict")
+		}
+		if issue.Severity != "error" && issue.Severity != "fatal" {
+			continue
+		}
+		match := -1
+		for i, want := range remaining {
+			if reflect.DeepEqual(issue, want) {
+				match = i
+				break
+			}
+		}
+		if match < 0 {
+			return errors.New("unexpected verdict")
+		}
+		remaining = append(remaining[:match], remaining[match+1:]...)
+	}
+	if len(remaining) != 0 {
+		return errors.New("unexpected verdict")
+	}
+	return nil
 }

@@ -1,6 +1,6 @@
 // nativepas.go — the native PAS legs of the native-forward Responder.
-// They forward pas-claim / pas-claim-update to the partner's /Claim/$submit, normalize
-// the partner's Bundle response into SHN's canonical shape (normalizePASResponse,
+// They forward pas-claim / pas-claim-update to the partner's /Claim/$submit, retain
+// the partner's native response Bundle (validateNativePASResponse,
 // FR-G28), and drive the gateway-owned shadow ledger + locally-projected PDex EOB
 // (ownership #1). This file owns the shnsdk imports; native.go's read-only legs stay
 // shnsdk-free. The PAS response is parsed with the SAME exported parsers the originator
@@ -70,13 +70,13 @@ func (n *nativeResponder) handlePASClaimUpdateNative(ctx context.Context, corrID
 		bad.Rollback = release // a post-Begin partner non-2xx MUST release the claim (relay path)
 		return bad, nil
 	}
-	// FR-G28: normalize the partner's Bundle into SHN canonical shape before parsing.
-	norm, lr := normalizePASResponse(body)
+	// FR-G28: validate the complete partner Bundle without changing its bytes.
+	response, lr := validateNativePASResponse(body)
 	if lr.Status != 0 {
 		lr.Rollback = release
 		return lr, nil
 	}
-	pended, _, err := shnsdk.ParsePendedResponse(norm)
+	pended, _, err := shnsdk.ParsePendedResponse(response)
 	if err != nil {
 		return LegResult{Status: http.StatusBadGateway, Message: "upstream payer PAS update response unparseable", Rollback: release}, nil
 	}
@@ -91,14 +91,14 @@ func (n *nativeResponder) handlePASClaimUpdateNative(ctx context.Context, corrID
 		// A real Da Vinci payer (br-payer) RE-PENDS an infoChanged amendment — persistUpdatePath
 		// re-evaluates the item (G0151 conditional → A4) and reschedules — and resolves A4→A1 ONLY on its
 		// own timer (PasPendedResolutionService.resolveAuthorization flips A4→A1 IN PLACE on the same id).
-		// The re-pend has TWO wire shapes, both classified pended by normalizePASResponse: outcome
+		// The re-pend has TWO wire shapes, both classified pended by validateNativePASResponse: outcome
 		// "queued" (the amendment landed before the timer) and outcome "complete" + A4 item (it landed
 		// AFTER the timer already approved the prior pend — the outcome is stale, the A4 is the truth).
 		// Either way the rescheduled timer is what approves it, so both poll below.
 		// The amendment genuinely ran (br-payer accepted + re-evaluated it); the TIMER is what approves it.
 		// Poll GET ClaimResponse/{id} until the timer flips it to A1. The deadline starts HERE — after
 		// the ClaimUpdate $submit rescheduled the timer (user note: poll the rescheduled timer).
-		crID := claimResponseIDFromPASResponse(norm)
+		crID := claimResponseIDFromPASResponse(response)
 		if crID == "" {
 			return LegResult{Status: http.StatusBadGateway, Message: "re-pended PAS update response has no ClaimResponse id to re-query", Rollback: release}, nil
 		}
@@ -110,15 +110,21 @@ func (n *nativeResponder) handlePASClaimUpdateNative(ctx context.Context, corrID
 			// Never resolved within the bound → genuine non-resolution, never a silent pass.
 			return LegResult{Status: http.StatusUnprocessableEntity, Message: "amendment still pended after re-query", Rollback: release}, nil
 		}
-		// Resolved to A1: relay the resolved ClaimResponse + Finalize the shadow ledger (same as the
+		// Resolved to A1: assemble the retained Bundle and finalize the shadow ledger (same as the
 		// directly-approved path below). No EOB on the update leg. Rollback stays armed.
+		assembled, aerr := assembleTerminalPASBundle(response, resolved, n.clock())
+		if aerr != nil {
+			return LegResult{Status: http.StatusBadGateway, Message: "invalid PAS terminal assembly", Rollback: release}, nil
+		}
 		return LegResult{
-			ResponseFHIR: resolved,
-			Commit:       func() error { return n.store.FinalizeClaimUpdate(subjectPCI, related) },
-			Rollback:     release,
+			ResponseAssembled:      true,
+			ResponseSubjectForeign: true,
+			ResponseFHIR:           assembled,
+			Commit:                 func() error { return n.store.FinalizeClaimUpdate(subjectPCI, related) },
+			Rollback:               release,
 		}, nil
 	}
-	parsed, err := shnsdk.ParseClaimResponse(norm)
+	parsed, err := shnsdk.ParseClaimResponse(response)
 	if err != nil {
 		return LegResult{Status: http.StatusBadGateway, Message: "upstream payer PAS update response untranslatable", Rollback: release}, nil
 	}
@@ -128,18 +134,20 @@ func (n *nativeResponder) handlePASClaimUpdateNative(ctx context.Context, corrID
 		// out of scope.
 		return LegResult{Status: http.StatusUnprocessableEntity, Message: "amendment still insufficient", Rollback: release}, nil
 	}
-	// Approved: forward normalized; Finalize completes pended→approved AFTER the write leg.
+	// Approved: forward the complete original Bundle; Finalize follows response sealing.
 	// No EOB on the update leg. Rollback stays armed so a post-Begin write/
 	// egress-$validate failure still releases.
 	return LegResult{
-		ResponseFHIR: norm,
-		Commit:       func() error { return n.store.FinalizeClaimUpdate(subjectPCI, related) },
-		Rollback:     release,
+		ResponseRelayed:        true,
+		ResponseSubjectForeign: true,
+		ResponseFHIR:           response,
+		Commit:                 func() error { return n.store.FinalizeClaimUpdate(subjectPCI, related) },
+		Rollback:               release,
 	}, nil
 }
 
 // handlePASClaimNative is the CONFORMANT PAS submit leg's native-forward: post the verbatim
-// conformant bundle to the partner's /Claim/$submit, normalize the Bundle response to SHN canonical,
+// conformant bundle to the partner's /Claim/$submit, retain the native response Bundle,
 // relay it AND project the Store side-effects. The wire is byte-verbatim to br-payer (the
 // FR-G25 fidelity asymmetry, same as crd-order-select); the EOB + pended-ledger writes are
 // ORTHOGONAL Store side-effects derived from the response (the governing principle). The conformant
@@ -184,11 +192,12 @@ func (n *nativeResponder) handlePASClaimNative(ctx context.Context, corrID, subj
 	if bad.Status != 0 {
 		return bad, nil // upstream non-2xx → relayable LegResult (ResponseFHIR carries the body)
 	}
-	norm, lr := normalizePASResponse(body)
+	response, lr := validateNativePASResponse(body)
 	if lr.Status != 0 {
 		return lr, nil
 	}
-	pended, _, err := shnsdk.ParsePendedResponse(norm)
+	assembled := false
+	pended, _, err := shnsdk.ParsePendedResponse(response)
 	if err != nil {
 		return LegResult{Status: http.StatusBadGateway, Message: "upstream payer PAS submit response unparseable"}, nil
 	}
@@ -207,7 +216,7 @@ func (n *nativeResponder) handlePASClaimNative(ctx context.Context, corrID, subj
 		// infoChanged keeps the prior behavior — return the A4 pend so the UC-04/06 amendment
 		// leg can bind to it — so this does NOT regress the amendment lanes.
 		if orderIsDeviceRequest(s.srJSON) || requestClaimHasInfoChanged(requestFHIR) {
-			crID := claimResponseIDFromPASResponse(norm)
+			crID := claimResponseIDFromPASResponse(response)
 			if crID == "" {
 				return LegResult{Status: http.StatusBadGateway, Message: "pended PAS submit response has no ClaimResponse id to re-query"}, nil
 			}
@@ -219,24 +228,30 @@ func (n *nativeResponder) handlePASClaimNative(ctx context.Context, corrID, subj
 				// Never resolved within the bound → genuine non-resolution, never a silent pass.
 				return LegResult{Status: http.StatusUnprocessableEntity, Message: "single-shot PAS still pended after re-query"}, nil
 			}
-			norm = resolved // fall through to the approved EOB-projection path below
+			response, err = assembleTerminalPASBundle(response, resolved, n.clock())
+			if err != nil {
+				return LegResult{Status: http.StatusBadGateway, Message: "invalid PAS terminal assembly"}, nil
+			}
+			assembled = true
 		} else {
 			// FR-21/FR-6: record the pend (payer-local, metadata-only) so the follow-up conformant
 			// ClaimUpdate (pas-claim-update) BeginClaimUpdate can bind to a REAL prior pend.
 			return LegResult{
-				ResponseFHIR: norm,
-				Commit:       func() error { return n.store.RecordPendedClaim(subjectPCI, corrID) },
+				ResponseRelayed:        true,
+				ResponseSubjectForeign: true,
+				ResponseFHIR:           response,
+				Commit:                 func() error { return n.store.RecordPendedClaim(subjectPCI, corrID) },
 			}, nil
 		}
 	}
-	parsed, err := shnsdk.ParseClaimResponse(norm)
+	parsed, err := shnsdk.ParseClaimResponse(response)
 	if err != nil {
 		// A 2xx we cannot translate is an upstream problem, not ours → 502.
 		return LegResult{Status: http.StatusBadGateway, Message: "upstream payer PAS submit response untranslatable"}, nil
 	}
 	if cpt == "" {
 		// No recognized {CPT,HCPCS} product coding → no EOB side-effect (soft — relay complete, no Store write).
-		return LegResult{ResponseFHIR: norm}, nil
+		return LegResult{ResponseFHIR: response, ResponseRelayed: !assembled, ResponseSubjectForeign: true, ResponseAssembled: assembled}, nil
 	}
 	eobJSON, err := n.projectDecisionEOB(corrID, "Patient/"+s.member, procSystem, cpt, cptDisplay, parsed)
 	if err != nil {
@@ -244,9 +259,12 @@ func (n *nativeResponder) handlePASClaimNative(ctx context.Context, corrID, subj
 	}
 	eobID := "eob-" + corrID
 	return LegResult{
-		ResponseFHIR:   norm,
-		SideEffectFHIR: [][]byte{eobJSON},
-		Commit:         func() error { return n.store.RecordEOB(subjectPCI, eobID, eobJSON) },
+		ResponseRelayed:        !assembled,
+		ResponseSubjectForeign: true,
+		ResponseAssembled:      assembled,
+		ResponseFHIR:           response,
+		SideEffectFHIR:         [][]byte{eobJSON},
+		Commit:                 func() error { return n.store.RecordEOB(subjectPCI, eobID, eobJSON) },
 	}, nil
 }
 
@@ -292,7 +310,7 @@ func orderIsDeviceRequest(orderJSON []byte) bool {
 // approved (A1) ClaimResponse, or the bound (pendReQueryTimeout/Interval) is exhausted. br-payer
 // auto-approves a pended (A4) item after pas.pended-resolution-delay-seconds
 // (PasPendedResolutionService → PasResponseBuilder.finalizePendedItems flips A4→A1 IN PLACE on the
-// same id). Returns the resolved A1 response bytes (canonical, via normalizePASResponse), or
+// same id). Returns the bare terminal A1 resource for retained-Bundle assembly, or
 // (nil,nil) if it never resolved within the bound — a non-error so the caller 422s (no silent pass).
 // Count-bounded (no clock dependency); the deadline starts at the call (post-ClaimUpdate, the
 // rescheduled timer).
@@ -308,15 +326,26 @@ func (n *nativeResponder) pollClaimResponseUntilApproved(ctx context.Context, cl
 	for i := 0; i < attempts; i++ {
 		body, bad, err := n.get(ctx, n.baseURL, "/ClaimResponse/"+claimResponseID, "PAS re-query")
 		if err != nil {
-			return nil, fmt.Errorf("PAS re-query ClaimResponse/%s: %w", claimResponseID, err)
+			return nil, fmt.Errorf("PAS re-query failed")
 		}
 		if bad.Status != 0 {
-			return nil, fmt.Errorf("PAS re-query ClaimResponse/%s: upstream status %d", claimResponseID, bad.Status)
+			return nil, fmt.Errorf("PAS re-query upstream status %d", bad.Status)
 		}
-		norm, lr := normalizePASResponse(body)
-		if lr.Status == 0 {
-			if res, perr := shnsdk.ParseClaimResponse(norm); perr == nil && res.Outcome == "approved" {
-				return norm, nil
+		var resource map[string]any
+		if decodePASObject(body, &resource) != nil || resource["resourceType"] != "ClaimResponse" || resource["id"] != claimResponseID {
+			return nil, fmt.Errorf("invalid PAS polling response identity")
+		}
+		pending, _, perr := shnsdk.ParsePendedResponse(body)
+		if perr != nil {
+			return nil, fmt.Errorf("invalid PAS polling decision")
+		}
+		if !pending {
+			res, perr := shnsdk.ParseClaimResponse(body)
+			if perr != nil {
+				return nil, fmt.Errorf("invalid PAS polling decision")
+			}
+			if res.Outcome == "approved" {
+				return body, nil
 			}
 		}
 		if i < attempts-1 {
@@ -372,38 +401,12 @@ func requestClaimHasInfoChanged(requestFHIR []byte) bool {
 	return false
 }
 
-// claimResponseIDFromPASResponse extracts the (server-assigned) ClaimResponse id from a normalized
-// PAS response. br-payer re-pends the SAME ClaimResponse in place (persistUpdatePath wraps the
-// existing CR), so its id is the GET re-query target. Reads ClaimResponse.id, falling back to the
-// entry fullUrl's last segment. Empty when none found.
-func claimResponseIDFromPASResponse(norm []byte) string {
-	var probe struct {
-		ResourceType string `json:"resourceType"`
-		ID           string `json:"id"`
-		Entry        []struct {
-			FullURL  string `json:"fullUrl"`
-			Resource struct {
-				ResourceType string `json:"resourceType"`
-				ID           string `json:"id"`
-			} `json:"resource"`
-		} `json:"entry"`
-	}
-	if err := json.Unmarshal(norm, &probe); err != nil {
+// claimResponseIDFromPASResponse reads only the graph-validated resource id.
+// No fullUrl fallback may create an arbitrary polling request path.
+func claimResponseIDFromPASResponse(body []byte) string {
+	g, err := readPASGraph(body)
+	if err != nil {
 		return ""
 	}
-	if probe.ResourceType == "ClaimResponse" && probe.ID != "" {
-		return probe.ID
-	}
-	for _, e := range probe.Entry {
-		if e.Resource.ResourceType != "ClaimResponse" {
-			continue
-		}
-		if e.Resource.ID != "" {
-			return e.Resource.ID
-		}
-		if i := strings.LastIndex(e.FullURL, "ClaimResponse/"); i >= 0 {
-			return e.FullURL[i+len("ClaimResponse/"):]
-		}
-	}
-	return ""
+	return g.response.resource["id"].(string)
 }

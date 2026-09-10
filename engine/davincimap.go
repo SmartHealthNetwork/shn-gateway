@@ -354,175 +354,29 @@ func mapCoverageInformation(subs []subExtension) (shnsdk.CardCoverage, LegResult
 	}, LegResult{}
 }
 
-// normalizePASResponse is the PAS-response Bundle discriminator (FR-G28). A real Da Vinci
-// $submit endpoint ALWAYS returns a Bundle, but SHN's canonical wire convention is:
-//
-//   - bare ClaimResponse → approved or denied (originator calls shnsdk.ParseClaimResponse).
-//   - Bundle{ClaimResponse(queued) + Task} → pended (originator calls shnsdk.ParsePendedResponse).
-//
-// Without normalization shnsdk.ParsePendedResponse (sdk/pas.go:431) misclassifies any
-// top-level Bundle — including a real approved response — as "pended". This function
-// discriminates on CONTENT, never on Bundle shape alone:
-//
-//   - bare ClaimResponse → pass through (already canonical).
-//   - Bundle with a ClaimResponse whose outcome=="complete" → unwrap that ClaimResponse
-//     (covers both approve A1 and deny A3 — a denial is also outcome:complete; the
-//     originator's ParseClaimResponse reads the reviewAction code to distinguish them).
-//   - Bundle with a Task entry → SHN pended shape → pass through unchanged.
-//   - Bundle with a ClaimResponse whose outcome=="queued" (real-RI pended shape, no SHN Task) →
-//     DEF-G1 lifted: pass through unchanged so ParsePendedResponse identifies it as pended.
-//     br-payer's amended re-POST response is exactly this shape (A4, queued, no Task).
-//   - Bundle with a ClaimResponse whose outcome=="complete" but whose item adjudication still
-//     carries reviewAction A4 (claimResponseHasPendedItem) → ALSO the real-RI pended shape:
-//     br-payer's persistUpdatePath re-pends an amendment that lands AFTER its resolution timer
-//     already flipped the authorization to A1 (A4 item + pended-resolution tag + rescheduled
-//     timer) but never resets the "complete" outcome resolveAuthorization set (live-captured 2026-08-30, testdata/br-payer/pas-update-response-amend-after-resolution.json).
-//     The A4 review action is the pend truth; the outcome code is stale. Pass through unchanged
-//     so the update leg polls the rescheduled timer exactly as it does for the "queued" twin.
-//   - any other Bundle (no complete/queued ClaimResponse, no Task) → 502 fail-closed.
-//   - unparseable or unknown top-level resourceType → 502 fail-closed.
-//
-// A zero-Status LegResult means "proceed" (caller should use the returned bytes).
-// A non-zero Status means "return this error to the caller now" (bytes are nil).
-func normalizePASResponse(body []byte) ([]byte, LegResult) {
-	var top struct {
-		ResourceType string `json:"resourceType"`
-		Entry        []struct {
-			Resource json.RawMessage `json:"resource"`
-		} `json:"entry"`
+// validateNativePASResponse checks the complete native submit graph and the
+// shared SDK decision contract (FR-G28), retaining the payer's exact bytes.
+// A bare ClaimResponse is supported only by the separate polling read path.
+func validateNativePASResponse(body []byte) ([]byte, LegResult) {
+	if err := validatePASBundleGraph(body); err != nil {
+		return nil, fail502("invalid native PAS response Bundle")
 	}
-	if err := json.Unmarshal(body, &top); err != nil {
-		return nil, fail502("PAS response is not valid JSON")
+	pended, _, err := shnsdk.ParsePendedResponse(body)
+	if err != nil {
+		return nil, fail502("invalid native PAS response decision")
 	}
-
-	switch top.ResourceType {
-	case "ClaimResponse":
-		// Already canonical — pass through.
-		return body, LegResult{}
-
-	case "Bundle":
-		// Walk entries: find a ClaimResponse(complete) to unwrap, or a Task (SHN pended),
-		// or a ClaimResponse(queued) (real-RI pended, DEF-G1 lifted).
-		hasTask := false
-		hasCompleteClaimResponse := false
-		hasQueuedClaimResponse := false
-		var completeClaimResponseBytes json.RawMessage
-		for _, e := range top.Entry {
-			var rt struct {
-				ResourceType string `json:"resourceType"`
-				Outcome      string `json:"outcome"`
-			}
-			if err := json.Unmarshal(e.Resource, &rt); err != nil {
-				continue
-			}
-			switch {
-			case rt.ResourceType == "Task":
-				hasTask = true
-			case rt.ResourceType == "ClaimResponse" && rt.Outcome == "queued":
-				hasQueuedClaimResponse = true
-			case rt.ResourceType == "ClaimResponse" && claimResponseHasPendedItem(e.Resource):
-				// A4 on the wire with a stale "complete" outcome — the amend-after-resolution
-				// re-pend. Classified by the review action, not the outcome code.
-				hasQueuedClaimResponse = true
-			case rt.ResourceType == "ClaimResponse" && rt.Outcome == "complete":
-				hasCompleteClaimResponse = true
-				completeClaimResponseBytes = e.Resource
-			}
+	if !pended {
+		if _, err := shnsdk.ParseClaimResponse(body); err != nil {
+			return nil, fail502("invalid native PAS response decision")
 		}
-		if hasTask {
-			// SHN pended Bundle (ClaimResponse + Task) — pass through unchanged.
-			return body, LegResult{}
-		}
-		if hasCompleteClaimResponse {
-			// Unwrap the complete ClaimResponse (A1 approve or A3 deny).
-			return []byte(completeClaimResponseBytes), LegResult{}
-		}
-		if hasQueuedClaimResponse {
-			// Real-RI pended Bundle (queued ClaimResponse, no SHN Task) — DEF-G1 lifted.
-			// br-payer's amended re-POST response is exactly this shape (A4 queued, no Task);
-			// pass through so ParsePendedResponse identifies it as pended. The update
-			// responder (handlePASClaimUpdateNative) polls the payer's timer for an
-			// infoChanged amendment and answers 422 for a carry-forward one.
-			return body, LegResult{}
-		}
-		// Bundle with no complete/queued ClaimResponse and no Task → 502 fail-closed.
-		return nil, fail502("PAS response Bundle is neither SHN-pended (no Task) nor a complete or queued ClaimResponse")
-
-	default:
-		return nil, fail502("PAS response has unexpected resourceType: " + top.ResourceType)
 	}
+	return body, LegResult{}
 }
 
-// pasReviewActionPendedCode is the X12 306 review-action code br-payer stamps on a pended item
-// (PasResponseBuilder: REVIEW_CODE_A4, display "Pending"); the SDK's ParseClaimResponse never
-// reads A4 (it fails loud on it, by design), so the pend classification lives here at the edge.
-const pasReviewActionPendedCode = "A4"
-
-// Da Vinci PAS reviewAction extension URLs (the engine-local twins of the SDK's unexported
-// reviewActionExtURL / reviewActionCodeExtURL — different modules).
-const (
-	pasReviewActionExtURL     = "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewAction"
-	pasReviewActionCodeExtURL = "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewActionCode"
-)
-
-// claimResponseHasPendedItem reports whether a ClaimResponse's item adjudication carries the Da
-// Vinci PAS reviewAction extension with reviewActionCode A4 — the review-action truth of a pend,
-// independent of ClaimResponse.outcome. It exists for the ONE real-payer shape where the two
-// disagree: br-payer's re-pend of an amendment that arrived after its resolution timer had
-// already approved the claim keeps outcome "complete" (resolveAuthorization set it; persistUpdatePath
-// never resets it) while the item is back to A4. Walks the same
-// item[].adjudication[].extension[reviewAction].extension[reviewActionCode] path
-// shnsdk.ParseClaimResponse walks for A2/A3. Unparseable ⇒ false (the caller's existing
-// fail-closed branches decide).
-func claimResponseHasPendedItem(raw json.RawMessage) bool {
-	var probe struct {
-		Item []struct {
-			Adjudication []struct {
-				Extension []struct {
-					URL       string `json:"url"`
-					Extension []struct {
-						URL                  string `json:"url"`
-						ValueCodeableConcept *struct {
-							Coding []struct {
-								Code string `json:"code"`
-							} `json:"coding"`
-						} `json:"valueCodeableConcept"`
-					} `json:"extension"`
-				} `json:"extension"`
-			} `json:"adjudication"`
-		} `json:"item"`
-	}
-	if err := json.Unmarshal(raw, &probe); err != nil {
-		return false
-	}
-	for _, it := range probe.Item {
-		for _, adj := range it.Adjudication {
-			for _, ext := range adj.Extension {
-				if ext.URL != pasReviewActionExtURL {
-					continue
-				}
-				for _, sub := range ext.Extension {
-					if sub.URL != pasReviewActionCodeExtURL || sub.ValueCodeableConcept == nil {
-						continue
-					}
-					for _, c := range sub.ValueCodeableConcept.Coding {
-						if c.Code == pasReviewActionPendedCode {
-							return true
-						}
-					}
-				}
-			}
-		}
-	}
-	return false
-}
-
-// NormalizePASResponseForTest is a thin exported wrapper around normalizePASResponse
-// for the test/adversarial package, which cannot access unexported engine symbols.
-// Production code must always call normalizePASResponse directly (nativepas.go).
-// Named *ForTest to signal it is a test seam, not a public API.
-func NormalizePASResponseForTest(body []byte) ([]byte, LegResult) {
-	return normalizePASResponse(body)
+// ValidateNativePASResponseForTest exposes the native response contract to the
+// cross-module adversarial harness. It never normalizes or repairs payer bytes.
+func ValidateNativePASResponseForTest(body []byte) ([]byte, LegResult) {
+	return validateNativePASResponse(body)
 }
 
 // fail502 builds the fail-closed LegResult (502) the CRD normalizer returns when no

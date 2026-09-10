@@ -44,3 +44,41 @@ func TestBuildAmendedRePOST(t *testing.T) {
 		}
 	}
 }
+
+// Source attribution is a holder business identity, not a missing Organization resource.
+func TestAmendmentSourceAttribution(t *testing.T) {
+	dr := []byte(`{"resourceType":"DiagnosticReport","id":"report","subject":{"reference":"Patient/MBR-COVERED"}}`)
+	for _, build := range []func() ([]byte, error){
+		func() ([]byte, error) { return BuildAmendedRePOST("MBR-COVERED", "s", "a") },
+		func() ([]byte, error) { return BuildFederatedAmendedRePOST("MBR-COVERED", "s", "a", dr) },
+	} {
+		raw, err := build()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var b struct {
+			Entry []struct{ Resource map[string]any }
+		}
+		if err := json.Unmarshal(raw, &b); err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, e := range b.Entry {
+			if e.Resource["resourceType"] != "Provenance" {
+				continue
+			}
+			found = true
+			who := e.Resource["agent"].([]any)[0].(map[string]any)["who"].(map[string]any)
+			if _, exists := who["reference"]; exists {
+				t.Fatalf("dangling source reference: %v", who)
+			}
+			id, _ := who["identifier"].(map[string]any)
+			if id["system"] != "http://smarthealth.network/ids/holder" || id["value"] != "provider" {
+				t.Fatalf("incorrect holder attribution: %v", who)
+			}
+		}
+		if !found {
+			t.Fatal("missing source provenance")
+		}
+	}
+}

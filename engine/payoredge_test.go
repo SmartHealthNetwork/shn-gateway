@@ -423,6 +423,7 @@ func mustExtractDTRCoverageParam(t *testing.T, reqJSON []byte) json.RawMessage {
 // Handle()-level proof exercises the real posted wire bytes.
 func TestNativeSubmit_PayorEdge_SeamOffAndRestamp(t *testing.T) {
 	approvedBody := []byte(`{"resourceType":"ClaimResponse","outcome":"complete","preAuthRef":"P-1"}`)
+	approvedBody = fixturePASResponse(t, approvedBody, true)
 
 	t.Run("seam off forwards verbatim", func(t *testing.T) {
 		p := newStubPartner(t)
@@ -536,6 +537,7 @@ func conformantUpdateBundle(t *testing.T, payer shnsdk.PayerIdentifier, payerOrg
 // BeginClaimUpdate, per nativepas.go's ordering comment).
 func TestNativeUpdate_PayorEdge_SeamOffAndRestamp(t *testing.T) {
 	approvedBody := []byte(`{"resourceType":"ClaimResponse","outcome":"complete","preAuthRef":"P-1","preAuthPeriod":{"end":"2030-01-01"}}`)
+	approvedBody = fixturePASResponse(t, approvedBody, true)
 	const pci = "PCI-PAYOREDGE-UPDATE"
 	const origCorr = "corr-payoredge-submit"
 

@@ -39,6 +39,10 @@ ROWS = [
     "negative-versioned",
     "negative-unversioned",
     "negative-meta",
+    "full-response-positive",
+    "full-response-negative-hcpcs",
+    "full-response-negative-pos",
+    "full-response-negative-encounter",
 ]
 JAVA = ["java", "--class-path", "/app/main.war", "-Dloader.path=main.war!/WEB-INF/classes/,main.war!/WEB-INF/,/app/extra-classes", "org.springframework.boot.loader.PropertiesLauncher"]
 PAS_VERSIONS = {"2.0": "2.0.1", "2.1": "2.1.0", "2.2": "2.2.1"}

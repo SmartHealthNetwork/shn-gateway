@@ -33,6 +33,9 @@ type recordedPost struct {
 }
 
 func testOutcome(body []byte) string {
+	if outcome := supportTestOutcome(body, ""); outcome != "" {
+		return outcome
+	}
 	if strings.Contains(string(body), `"valueBoolean":true`) {
 		return targetedNegativeOutcome
 	}
@@ -58,7 +61,11 @@ func newFakeLane(t *testing.T) *fakeLane {
 		}
 		w.Header().Set("Content-Type", "application/fhir+json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(testOutcome(body)))
+		if outcome := supportTestOutcome(body, r.URL.Query().Get("profile")); outcome != "" {
+			_, _ = w.Write([]byte(outcome))
+		} else {
+			_, _ = w.Write([]byte(testOutcome(body)))
+		}
 	})
 	l.srv = httptest.NewServer(mux)
 	t.Cleanup(l.srv.Close)

@@ -429,9 +429,20 @@ func (g *Gateway) handlePASIngress(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
-	// R-3: label the Exchange projection by SHAPE — a top-level Bundle is a PENDED (A4) response;
-	// ParseClaimResponse ERRORS on a pended Bundle (pas.go:574), so calling it alone would mislabel
-	// an A4 as the default "complete". Non-clinical label only (the Hub stays payload-blind, AI-2).
+	// Every native operation response, including an external SDK holder's,
+	// must satisfy the complete Bundle contract before reaching the caller.
+	// Validate without rewriting the payer's bytes or repairing missing evidence.
+	if _, bad := validateNativePASResponse(crJSON); bad.Status != 0 {
+		g.recordLeg(ex.ID, legProj.Project(child, "error"))
+		writeJSON(w, bad.Status, map[string]string{"error": bad.Message})
+		return
+	}
+	if !consistentPASResponseSubjects(crJSON) {
+		g.recordLeg(ex.ID, legProj.Project(child, "error"))
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "PAS response has inconsistent patient linkage"})
+		return
+	}
+	// Decision fields distinguish pending and terminal responses; both are Bundles.
 	outcome := "complete"
 	if pended, _, perr := shnsdk.ParsePendedResponse(crJSON); perr == nil && pended {
 		outcome = "pended"
@@ -439,7 +450,7 @@ func (g *Gateway) handlePASIngress(w http.ResponseWriter, r *http.Request) {
 		outcome = res.Outcome // approved | denied
 	}
 	g.recordLeg(ex.ID, legProj.Project(child, outcome))
-	// Near-relay: the ClaimResponse is the payer's response shape; return verbatim.
+	// Near-relay: return the validated payer Bundle verbatim.
 	w.Header().Set("Content-Type", "application/fhir+json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(crJSON)

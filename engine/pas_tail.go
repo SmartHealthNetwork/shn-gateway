@@ -14,7 +14,11 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
@@ -63,14 +67,14 @@ func buildPASSubmitBundle(line string, brPayer bool, orderJSON, qrJSON []byte, p
 // conformant Claim Bundle, originates the pas-claim leg, ingress-validates the response, and
 // classifies the resolved ClaimResponse via the EXISTING g.classifyResolution. On approval it
 // returns (parsed, respJSON, 0, "", nil); otherwise (PriorAuthResult{}, respJSON, status, msg, err)
-// with the SAME statuses/messages handleHomeOxygen produced inline (so its behavior is
-// byte-preserved). The trailing err carries the RAW OriginateLeg error (with its %w chain intact) on
+// with the existing resolution statuses/messages. A dispatched DeviceRequest carries its
+// actual supplier Organization before validation. The trailing err carries the raw error on
 // the leg-failure path and is nil on every other path — it exists SOLELY so the caller can attempt
 // relayOriginationError before the writeJSON(status,msg) fallback; a bare (status,msg) return would
 // re-synthesize the error to a string and DROP the *RelayError sentinel (the %w audit). The caller
 // does the FR-23 StoreAuthNumber + writes the response surface. respJSON is returned on every path
 // (incl. failures) for diagnosis; it is nil only when the failure precedes the leg call.
-func (g *Gateway) submitClaimAndResolve(ctx context.Context, r *http.Request, pci string, orderJSON, qrJSON []byte, patientRef, coverageRef, member string, payer shnsdk.PayerIdentifier, recipient string) (shnsdk.PriorAuthResult, []byte, int, string, error) {
+func (g *Gateway) submitClaimAndResolve(ctx context.Context, r *http.Request, pci string, orderJSON, supplierJSON, qrJSON []byte, patientRef, coverageRef, member string, payer shnsdk.PayerIdentifier, recipient string) (shnsdk.PriorAuthResult, []byte, int, string, error) {
 	pasCorr := g.cfg.CorrelationGen()
 	// Select-before-build: this tail used to let OriginateLeg select
 	// INTERNALLY off an empty Content.ProfileID, which put the choice AFTER the bundle
@@ -85,6 +89,14 @@ func (g *Gateway) submitClaimAndResolve(ctx context.Context, r *http.Request, pc
 	bundleJSON, err := buildPASSubmitBundle(route.BuildLine, relaysReferencePayerBytes(g.cfg.OriginationProfile), orderJSON, qrJSON, patientRef, coverageRef, member, pasCorr, g.cfg.Clock(), payer)
 	if err != nil {
 		return shnsdk.PriorAuthResult{}, nil, http.StatusInternalServerError, "build bundle failed", nil
+	}
+	bundleJSON, err = retainPASSubmitSupplier(bundleJSON, supplierJSON)
+	if err != nil {
+		return shnsdk.PriorAuthResult{}, nil, http.StatusInternalServerError, "PAS supplier linkage failed", err
+	}
+	bundleJSON, err = g.completePASRequest(ctx, bundleJSON)
+	if err != nil {
+		return shnsdk.PriorAuthResult{}, nil, http.StatusBadGateway, "PAS evidence linkage failed", err
 	}
 	bundleJSON, _, aerr := g.egressAdapt(route, bundleJSON, ExchangeIdentity{CorrelationID: pasCorr, LegType: "pas-claim", Counterpart: recipient})
 	if aerr != nil {
@@ -118,4 +130,95 @@ func (g *Gateway) submitClaimAndResolve(ctx context.Context, r *http.Request, pc
 		return shnsdk.PriorAuthResult{}, respJSON, http.StatusBadGateway, "preauthorization not approved", nil
 	}
 	return parsed, respJSON, 0, "", nil
+}
+
+// retainPASSubmitSupplier carries the actual dispatched supplier into the PAS
+// request (FR-G28). Its identity must match the order; it is never synthesized.
+func retainPASSubmitSupplier(body, supplier []byte) ([]byte, error) {
+	var bundle map[string]json.RawMessage
+	if err := json.Unmarshal(body, &bundle); err != nil {
+		return nil, err
+	}
+	var entries []map[string]json.RawMessage
+	if err := json.Unmarshal(bundle["entry"], &entries); err != nil {
+		return nil, err
+	}
+	type identity struct {
+		ResourceType string `json:"resourceType"`
+		ID           string `json:"id"`
+		Performer    struct {
+			Reference string `json:"reference"`
+		} `json:"performer"`
+	}
+	var order *identity
+	var orderURL string
+	for _, entry := range entries {
+		var resource identity
+		if err := json.Unmarshal(entry["resource"], &resource); err != nil {
+			return nil, err
+		}
+		if resource.ResourceType == "DeviceRequest" {
+			if order != nil {
+				return nil, fmt.Errorf("multiple dispatched orders")
+			}
+			order = &resource
+			if err := json.Unmarshal(entry["fullUrl"], &orderURL); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if order == nil {
+		if len(supplier) != 0 {
+			return nil, fmt.Errorf("supplier without a dispatched order")
+		}
+		return body, nil
+	}
+	var org identity
+	if err := json.Unmarshal(supplier, &org); err != nil {
+		return nil, fmt.Errorf("missing or invalid supplier: %w", err)
+	}
+	if org.ResourceType != "Organization" || org.ID == "" {
+		return nil, fmt.Errorf("supplier must identify an Organization")
+	}
+	relative := "Organization/" + org.ID
+	ref := order.Performer.Reference
+	parsed, err := url.Parse(ref)
+	if err != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.RawPath != "" {
+		return nil, fmt.Errorf("invalid supplier reference")
+	}
+	fullURL := ref
+	if !parsed.IsAbs() {
+		if ref != relative || order.ID == "" || !strings.HasSuffix(orderURL, "/DeviceRequest/"+order.ID) {
+			return nil, fmt.Errorf("supplier identity does not match dispatched performer")
+		}
+		fullURL = strings.TrimSuffix(orderURL, "DeviceRequest/"+order.ID) + relative
+	} else if (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" || parsed.User != nil || !strings.HasSuffix(parsed.Path, "/"+relative) {
+		return nil, fmt.Errorf("supplier identity does not match dispatched performer")
+	}
+	target, err := url.Parse(fullURL)
+	if err != nil || (target.Scheme != "https" && target.Scheme != "http") || target.Host == "" || target.User != nil || target.RawQuery != "" || target.ForceQuery || target.Fragment != "" {
+		return nil, fmt.Errorf("invalid supplier fullUrl")
+	}
+	for _, entry := range entries {
+		var resource identity
+		if err := json.Unmarshal(entry["resource"], &resource); err != nil {
+			return nil, err
+		}
+		var existingURL string
+		if raw, ok := entry["fullUrl"]; ok {
+			if err := json.Unmarshal(raw, &existingURL); err != nil {
+				return nil, err
+			}
+		}
+		if existingURL == fullURL || (resource.ResourceType == org.ResourceType && resource.ID == org.ID) {
+			return nil, fmt.Errorf("conflicting supplier entry")
+		}
+	}
+	encodedURL, _ := json.Marshal(fullURL)
+	entries = append(entries, map[string]json.RawMessage{"fullUrl": encodedURL, "resource": supplier})
+	bundle["entry"], err = json.Marshal(entries)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(bundle)
 }

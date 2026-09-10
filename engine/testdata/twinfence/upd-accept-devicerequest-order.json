@@ -48,7 +48,7 @@
                 {
                   "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService",
                   "valueReference": {
-                    "reference": "ServiceRequest/convergence-sr"
+                    "reference": "DeviceRequest/convergence-sr"
                   }
                 },
                 {
@@ -163,9 +163,9 @@
         }
       },
       {
-        "fullUrl": "https://shn.example/fhir/ServiceRequest/convergence-sr",
+        "fullUrl": "https://shn.example/fhir/DeviceRequest/convergence-sr",
         "resource": {
-          "code": {
+          "codeCodeableConcept": {
             "coding": [
               {
                 "code": "72148",
@@ -207,7 +207,7 @@
             {
               "url": "http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/qr-context",
               "valueReference": {
-                "reference": "ServiceRequest/convergence-sr"
+                "reference": "DeviceRequest/convergence-sr"
               }
             },
             {
@@ -351,6 +351,32 @@
               "reference": "DiagnosticReport/convergence-dr-operative"
             }
           ]
+        }
+      },
+      {
+        "fullUrl": "https://shn.example/fhir/Organization/provider",
+        "resource": {
+          "id": "provider",
+          "identifier": [
+            {
+              "system": "http://smarthealth.network/ids/holder",
+              "value": "provider"
+            }
+          ],
+          "resourceType": "Organization"
+        }
+      },
+      {
+        "fullUrl": "https://shn.example/fhir/Organization/payer",
+        "resource": {
+          "id": "payer",
+          "identifier": [
+            {
+              "system": "http://smarthealth.network/ids/holder",
+              "value": "payer"
+            }
+          ],
+          "resourceType": "Organization"
         }
       }
     ],

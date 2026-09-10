@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/SmartHealthNetwork/shn-gateway/internal/cqfattribution"
 	"io"
 	"net/http"
 	"net/url"
@@ -133,8 +134,8 @@ func (d *Driver) FetchDTRPackage(r BRPResult) (DTRPackage, error) {
 }
 
 // PopulateViaBRProvider drives br-provider's real /api/dtr/populate (auth path 3 above) with a
-// fetched DTR package, returning the populated QuestionnaireResponse exactly as br-provider's
-// cqf-fhir SDC populator produced it. It extracts the Questionnaire resource matching p.Canonical
+// fetched DTR package, returning the populated QuestionnaireResponse with its known CQL software author
+// represented by its URI identifier. Clinical answers and diagnostics are preserved. It extracts the Questionnaire resource matching p.Canonical
 // out of the package Bundle (falling back to the first Questionnaire entry), unwraps a
 // Parameters{return: Bundle} package to its inner Bundle (populate requires a bare Bundle for
 // packagebundle, not the Parameters wrapper), and POSTs Parameters{subject, questionnaire,
@@ -175,14 +176,14 @@ func (d *Driver) PopulateViaBRProvider(p DTRPackage) ([]byte, error) {
 		return nil, fmt.Errorf("scenariodriver: br-provider /api/dtr/populate: %w", err)
 	}
 	defer resp.Body.Close()
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, cqfattribution.MaxBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("scenariodriver: read populate response body: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("scenariodriver: br-provider /api/dtr/populate status=%d, want 200; body=%s", resp.StatusCode, respBody)
 	}
-	return respBody, nil
+	return cqfattribution.Normalize(respBody)
 }
 
 // PackageEntries returns the entry list of a $questionnaire-package response — this package's
@@ -316,7 +317,7 @@ func BuildGoldenPASBundleWithQR(member string, qr []byte) ([]byte, error) {
 		}}
 	}
 	entries = append(entries, map[string]any{
-		"fullUrl":  "urn:uuid:QuestionnaireResponse-" + qrID,
+		"fullUrl":  "http://example.org/fhir/QuestionnaireResponse/" + qrID,
 		"resource": qrRes,
 	})
 	b["entry"] = entries

@@ -403,6 +403,19 @@
             }
           ]
         }
+      },
+      {
+        "fullUrl": "https://shn.example/fhir/Organization/provider",
+        "resource": {
+          "id": "provider",
+          "identifier": [
+            {
+              "system": "http://smarthealth.network/ids/holder",
+              "value": "provider"
+            }
+          ],
+          "resourceType": "Organization"
+        }
       }
     ],
     "identifier": {

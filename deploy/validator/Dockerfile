@@ -44,6 +44,7 @@ RUN curl --retry 5 --retry-delay 5 --retry-all-errors -fLSso hl7.fhir.us.core-6.
 # Committed rather than staged at build time so this context — which the
 # published deploy/bundle/ install unit builds directly — is self-sufficient.
 COPY shnig/shn.fhir.carry-1.0.0.tgz /packages/shn.fhir.carry-1.0.0.tgz
+COPY support/shn.fhir.validation-support-1.0.0.tgz /packages/shn.fhir.validation-support-1.0.0.tgz
 
 # Stage: download the 2.1-line IG packages (network at BUILD time only).
 FROM alpine:3 AS igs-2.1
@@ -58,6 +59,7 @@ RUN curl --retry 5 --retry-delay 5 --retry-all-errors -fLSso hl7.fhir.us.core-7.
  && curl --retry 5 --retry-delay 5 --retry-all-errors -fLSso hl7.fhir.us.davinci-cdex-2.1.0.tgz https://packages.simplifier.net/hl7.fhir.us.davinci-cdex/2.1.0 \
  && curl --retry 5 --retry-delay 5 --retry-all-errors -fLSso hl7.fhir.us.davinci-hrex-1.1.0.tgz https://packages.simplifier.net/hl7.fhir.us.davinci-hrex/1.1.0
 COPY shnig/shn.fhir.carry-1.0.0.tgz /packages/shn.fhir.carry-1.0.0.tgz
+COPY support/shn.fhir.validation-support-1.0.0.tgz /packages/shn.fhir.validation-support-1.0.0.tgz
 
 # Stage: download the 2.2-line IG packages (network at BUILD time only).
 FROM alpine:3 AS igs-2.2
@@ -73,6 +75,7 @@ RUN curl --retry 5 --retry-delay 5 --retry-all-errors -fLSso hl7.fhir.us.core-7.
  && curl --retry 5 --retry-delay 5 --retry-all-errors -fLSso hl7.fhir.us.davinci-hrex-1.2.0.tgz https://packages.simplifier.net/hl7.fhir.us.davinci-hrex/1.2.0 \
  && curl --retry 5 --retry-delay 5 --retry-all-errors -fLSso hl7.fhir.uv.extensions.r4-5.3.0-ballot-tc1.tgz https://packages.simplifier.net/hl7.fhir.uv.extensions.r4/5.3.0-ballot-tc1
 COPY shnig/shn.fhir.carry-1.0.0.tgz /packages/shn.fhir.carry-1.0.0.tgz
+COPY support/shn.fhir.validation-support-1.0.0.tgz /packages/shn.fhir.validation-support-1.0.0.tgz
 
 # Stage: 2.0-line HAPI validator with its IGs baked + loaded from file:// (offline at runtime).
 FROM hapiproject/hapi@sha256:1be4d7ffe7a35a9fb46151851e5a20b25c5016f16c8ef8b59b0c807ad06a40c1 AS hapi-2.0
@@ -107,7 +110,10 @@ ENV SHN_IG_LINE=2.0 \
     hapi.fhir.implementationguides.hrex.version=1.1.0 \
     hapi.fhir.implementationguides.shnig.packageUrl=file:///packages/shn.fhir.carry-1.0.0.tgz \
     hapi.fhir.implementationguides.shnig.name=shn.fhir.carry \
-    hapi.fhir.implementationguides.shnig.version=1.0.0
+    hapi.fhir.implementationguides.shnig.version=1.0.0 \
+    hapi.fhir.implementationguides.validationsupport.packageUrl=file:///packages/shn.fhir.validation-support-1.0.0.tgz \
+    hapi.fhir.implementationguides.validationsupport.name=shn.fhir.validation-support \
+    hapi.fhir.implementationguides.validationsupport.version=1.0.0
 
 # Stage: 2.1-line HAPI validator with its IGs baked + loaded from file:// (offline at runtime).
 FROM hapiproject/hapi@sha256:1be4d7ffe7a35a9fb46151851e5a20b25c5016f16c8ef8b59b0c807ad06a40c1 AS hapi-2.1
@@ -142,7 +148,10 @@ ENV SHN_IG_LINE=2.1 \
     hapi.fhir.implementationguides.hrex.version=1.1.0 \
     hapi.fhir.implementationguides.shnig.packageUrl=file:///packages/shn.fhir.carry-1.0.0.tgz \
     hapi.fhir.implementationguides.shnig.name=shn.fhir.carry \
-    hapi.fhir.implementationguides.shnig.version=1.0.0
+    hapi.fhir.implementationguides.shnig.version=1.0.0 \
+    hapi.fhir.implementationguides.validationsupport.packageUrl=file:///packages/shn.fhir.validation-support-1.0.0.tgz \
+    hapi.fhir.implementationguides.validationsupport.name=shn.fhir.validation-support \
+    hapi.fhir.implementationguides.validationsupport.version=1.0.0
 
 # Stage: 2.2-line HAPI validator with its IGs baked + loaded from file:// (offline at runtime).
 FROM hapiproject/hapi@sha256:1be4d7ffe7a35a9fb46151851e5a20b25c5016f16c8ef8b59b0c807ad06a40c1 AS hapi-2.2
@@ -180,7 +189,10 @@ ENV SHN_IG_LINE=2.2 \
     hapi.fhir.implementationguides.extensions.version=5.3.0-ballot-tc1 \
     hapi.fhir.implementationguides.shnig.packageUrl=file:///packages/shn.fhir.carry-1.0.0.tgz \
     hapi.fhir.implementationguides.shnig.name=shn.fhir.carry \
-    hapi.fhir.implementationguides.shnig.version=1.0.0
+    hapi.fhir.implementationguides.shnig.version=1.0.0 \
+    hapi.fhir.implementationguides.validationsupport.packageUrl=file:///packages/shn.fhir.validation-support-1.0.0.tgz \
+    hapi.fhir.implementationguides.validationsupport.name=shn.fhir.validation-support \
+    hapi.fhir.implementationguides.validationsupport.version=1.0.0
 
 # Final stage selection: ARG SHN_IG_LINE (declared above, before the first FROM)
 # picks which of the three fully-baked hapi-<line> stages above becomes the image.

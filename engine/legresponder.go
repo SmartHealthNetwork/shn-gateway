@@ -23,19 +23,14 @@ type LegResult struct {
 	Message        string       // body for a non-zero Status
 	Commit         func() error // NON-FHIR durable state (Store writes); fired after buildResponseLeg, before writeLeg; error => 502
 	Rollback       func()       // undo a claim acquired in Handle; engine arms defer-rollback-unless-committed
-	// ResponseRelayed reports that ResponseFHIR is a verbatim relay of a foreign holder's bytes
-	// (SHN did not produce it). When true the engine SKIPS the response egress-$validate (R-8:
-	// foreign Da Vinci profiles are unresolvable in SHN's US-Core-only validator). SHN-produced
-	// side-effects (the EOB) are $validated unconditionally. Zero value = strict. Only the
-	// native-forward responder sets this.
+	// ResponseRelayed reports a verbatim foreign response. Its bytes are not
+	// certified or stamped by this gateway; locally produced side-effects are.
 	ResponseRelayed bool
-	// ResponseSubjectForeign reports that ResponseFHIR's patient subject is in a foreign
-	// (non-SHN-member) namespace (a real br-payer answers Patient/SubscriberExample), so a
-	// member-match against the bound request patient is a category error. When true the engine
-	// SKIPS the (C) ClaimResponse member-fence (R-7). The SHN-produced EOB side-effect is
-	// member-fenced unconditionally. Zero value = strict. Only the native-forward responder sets
-	// this. (Two flags, not one: the conformant-mock north star is SHN-produced-yet-foreign-
-	// namespace — $validate must stay ON while the member-fence stands down; a fused bool would
-	// skip $validate on an SHN-produced resource, an FR-36 violation.)
+	// ResponseAssembled identifies a local terminal PAS replacement. It requires
+	// PAS-profile certification and holder-local assembly Provenance before Commit.
+	ResponseAssembled bool
+	// ResponseSubjectForeign identifies the payer's patient namespace. The full
+	// graph must remain internally subject-consistent; it is not compared with
+	// the request's SHN member id. Locally produced EOBs remain member-fenced.
 	ResponseSubjectForeign bool
 }

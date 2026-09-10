@@ -3,13 +3,12 @@ package engine
 import (
 	"bytes"
 	"encoding/json"
+	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-
-	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
 func TestBuildQuestionnairePackageRequest(t *testing.T) {
@@ -352,283 +351,29 @@ func TestNormalizeCRDCoverage_MalformedBody(t *testing.T) {
 	}
 }
 
-// TestNormalizePASResponse_BareClaimResponse verifies that a bare ClaimResponse
-// (already in SHN canonical shape) passes through unchanged.
-func TestNormalizePASResponse_BareClaimResponse(t *testing.T) {
-	input := []byte(`{"resourceType":"ClaimResponse","outcome":"complete","preAuthRef":"PA-abc123","status":"active","use":"preauthorization"}`)
-	out, lr := normalizePASResponse(input)
-	if lr.Status != 0 {
-		t.Fatalf("bare ClaimResponse must pass through; got 502: %s", lr.Message)
-	}
-	if string(out) != string(input) {
-		t.Errorf("bare ClaimResponse output differs from input:\n got: %s\nwant: %s", out, input)
-	}
-}
-
-// TestNormalizePASResponse_SHNPendedBundle verifies that an SHN pended Bundle
-// (ClaimResponse + Task) passes through unchanged — the Task-pass-through branch.
-func TestNormalizePASResponse_SHNPendedBundle(t *testing.T) {
-	input := []byte(`{"resourceType":"Bundle","type":"collection","entry":[` +
-		`{"resource":{"resourceType":"ClaimResponse","outcome":"queued"}},` +
-		`{"resource":{"resourceType":"Task","status":"requested"}}]}`)
-	out, lr := normalizePASResponse(input)
-	if lr.Status != 0 {
-		t.Fatalf("SHN pended Bundle must pass through; got 502: %s", lr.Message)
-	}
-	if string(out) != string(input) {
-		t.Errorf("SHN pended Bundle output differs from input:\n got: %s\nwant: %s", out, input)
-	}
-}
-
-// TestNormalizePASResponse_BundleCompleteUnwrap verifies that a Bundle containing a
-// ClaimResponse with outcome=="complete" (the real Da Vinci approve/deny shape) is
-// unwrapped to just the bare ClaimResponse.
-func TestNormalizePASResponse_BundleCompleteUnwrap(t *testing.T) {
-	crJSON := `{"resourceType":"ClaimResponse","outcome":"complete","preAuthRef":"PA-xyz"}`
-	input := []byte(`{"resourceType":"Bundle","type":"collection","entry":[` +
-		`{"resource":` + crJSON + `},` +
-		`{"resource":{"resourceType":"Organization","id":"org1"}}]}`)
-	out, lr := normalizePASResponse(input)
-	if lr.Status != 0 {
-		t.Fatalf("Bundle(complete ClaimResponse) must unwrap; got 502: %s", lr.Message)
-	}
-	// Output must be the bare ClaimResponse, not the Bundle.
-	var probe struct {
-		ResourceType string `json:"resourceType"`
-		Outcome      string `json:"outcome"`
-		PreAuthRef   string `json:"preAuthRef"`
-	}
-	if err := json.Unmarshal(out, &probe); err != nil {
-		t.Fatalf("unwrapped output not valid JSON: %v", err)
-	}
-	if probe.ResourceType != "ClaimResponse" || probe.Outcome != "complete" || probe.PreAuthRef != "PA-xyz" {
-		t.Errorf("unwrapped = %+v, want ClaimResponse/complete/PA-xyz", probe)
-	}
-}
-
-// TestNormalizePASResponse_QueuedBundle_PassThrough verifies that a Bundle with a queued
-// ClaimResponse (real-RI pended shape, no SHN Task) passes through unchanged — DEF-G1 lifted.
-// br-payer's amended re-POST response is exactly this shape (A4 queued, no Task).
-func TestNormalizePASResponse_QueuedBundle_PassThrough(t *testing.T) {
-	input := []byte(`{"resourceType":"Bundle","type":"collection","entry":[` +
-		`{"resource":{"resourceType":"ClaimResponse","outcome":"queued"}}]}`)
-	out, lr := normalizePASResponse(input)
-	if lr.Status != 0 {
-		t.Fatalf("queued Bundle must pass through (DEF-G1 lifted), got status=%d msg=%s", lr.Status, lr.Message)
-	}
-	if !bytes.Equal(out, input) {
-		t.Fatalf("queued Bundle pass-through must be verbatim")
-	}
-}
-
-// TestNormalizePASResponse_UnknownBundle_FailClosed verifies that a Bundle with no Task,
-// no complete ClaimResponse, and no queued ClaimResponse fails closed with 502.
-func TestNormalizePASResponse_UnknownBundle_FailClosed(t *testing.T) {
-	input := []byte(`{"resourceType":"Bundle","type":"collection","entry":[` +
-		`{"resource":{"resourceType":"Claim","outcome":"active"}}]}`)
-	_, lr := normalizePASResponse(input)
-	if lr.Status != http.StatusBadGateway {
-		t.Fatalf("unknown Bundle must 502 fail-closed, got %d", lr.Status)
-	}
-}
-
-// TestNormalizePASResponse_Unparseable_FailClosed verifies that unparseable input
-// fails closed with 502.
-func TestNormalizePASResponse_Unparseable_FailClosed(t *testing.T) {
-	_, lr := normalizePASResponse([]byte(`{not json`))
-	if lr.Status != http.StatusBadGateway {
-		t.Fatalf("unparseable must 502 fail-closed, got %d", lr.Status)
-	}
-}
-
-// TestNormalizePASResponse_BrPayerPended pins the relay's A4 path against the REAL captured br-payer
-// home-oxygen $submit response. Converts the R-2(b) "discover live" risk into a
-// hermetic guard. Verified live: br-payer's A4 Bundle{ClaimResponse(queued,A4)+Org+Task}
-// carries a Task, so normalizePASResponse's Task branch passes it through verbatim (Status 0, no
-// 502 — DEF-G1 does not bite), and ParsePendedResponse reads it as pended.
-func TestNormalizePASResponse_BrPayerPended(t *testing.T) {
-	body, err := os.ReadFile(filepath.Join("testdata", "br-payer", "pas-submit-response-pended.json"))
+// Native submit retains the complete payer graph; bare resources belong to polling.
+func TestValidateNativePASResponse(t *testing.T) {
+	approved, err := assembleTerminalPASBundle([]byte(assemblyRealPending), []byte(assemblyRealTerminal), fixedClock())
 	if err != nil {
-		t.Fatalf("read pended golden: %v", err)
+		t.Fatal(err)
 	}
-	norm, lr := normalizePASResponse(body)
-	if lr.Status != 0 {
-		t.Fatalf("br-payer A4 must pass through (it has a Task), got %d: %s", lr.Status, lr.Message)
+	for _, body := range [][]byte{approved, []byte(assemblyRealPending)} {
+		out, lr := validateNativePASResponse(body)
+		if lr.Status != 0 || !bytes.Equal(out, body) {
+			t.Fatalf("native retention: %d %s", lr.Status, lr.Message)
+		}
 	}
-	pended, _, perr := shnsdk.ParsePendedResponse(norm)
-	if perr != nil || !pended {
-		t.Fatalf("br-payer A4 must read as pended via ParsePendedResponse; pended=%v err=%v", pended, perr)
+	for _, body := range [][]byte{[]byte(assemblyRealTerminal), []byte("null"), []byte("{"), []byte(`{"resourceType":"Bundle","type":"collection","entry":[]}`)} {
+		if _, lr := validateNativePASResponse(body); lr.Status != http.StatusBadGateway {
+			t.Fatal("accepted invalid native response")
+		}
 	}
-}
-
-// TestNormalizePASResponse_RealRI_brpayer is the LIVE real-RI proof: it loads the
-// committed br-payer $submit approve response (a Bundle wrapping a ClaimResponse with
-// outcome:complete + reviewAction A1 + preAuthRef in the "number" sub-extension), runs
-// it through normalizePASResponse, and asserts the unwrapped bare ClaimResponse is
-// readable by shnsdk.ParseClaimResponse as approved with preAuthRef=="AUTH-0001" (FR-G28).
-func TestNormalizePASResponse_RealRI_brpayer(t *testing.T) {
+	// The historical capture is genuinely incomplete, and cannot certify success.
 	raw, err := os.ReadFile(filepath.Join("testdata", "br-payer", "pas-submit-response.json"))
 	if err != nil {
-		t.Fatalf("read br-payer fixture: %v", err)
+		t.Fatal(err)
 	}
-	// The br-payer fixture is a Bundle with a ClaimResponse(complete) + an Organization
-	// entry — no Task present. Discriminator must unwrap to the bare ClaimResponse.
-	out, lr := normalizePASResponse(raw)
-	if lr.Status != 0 {
-		t.Fatalf("normalizePASResponse rejected real br-payer approve Bundle: %d %s", lr.Status, lr.Message)
+	if _, lr := validateNativePASResponse(raw); lr.Status != http.StatusBadGateway {
+		t.Fatal("accepted historical missing references")
 	}
-	// The output must be a bare ClaimResponse (not a Bundle).
-	var top struct {
-		ResourceType string `json:"resourceType"`
-	}
-	if err := json.Unmarshal(out, &top); err != nil {
-		t.Fatalf("unwrapped output not valid JSON: %v", err)
-	}
-	if top.ResourceType != "ClaimResponse" {
-		t.Fatalf("unwrapped resourceType = %q, want ClaimResponse", top.ResourceType)
-	}
-	// ParseClaimResponse must read it as approved with preAuthRef AUTH-0001.
-	// The auth number lives in item[0].adjudication[0].extension[reviewAction].extension[number]
-	// (real Da Vinci RI convention) — not in a top-level preAuthRef field.
-	parsed, err := shnsdk.ParseClaimResponse(out)
-	if err != nil {
-		t.Fatalf("ParseClaimResponse on unwrapped br-payer ClaimResponse: %v", err)
-	}
-	if parsed.Outcome != "approved" {
-		t.Errorf("outcome = %q, want approved", parsed.Outcome)
-	}
-	if parsed.PreAuthRef != "AUTH-0001" {
-		t.Errorf("preAuthRef = %q, want AUTH-0001", parsed.PreAuthRef)
-	}
-}
-
-// TestNormalizePASResponse_BrPayerAmendAfterResolution pins the relay's classification of the
-// SECOND re-pend wire shape the real reference payer answers a ClaimUpdate with (live-captured 2026-08-30 against br-payer a8bece4 with PAS_PENDED_RESOLUTION_DELAY_SECONDS=5):
-// an infoChanged amendment that lands AFTER PasPendedResolutionService already flipped the
-// authorization to A1. persistUpdatePath re-evaluates the item (A4), re-tags it pended-resolution
-// and reschedules the timer — but never resets ClaimResponse.outcome, which resolveAuthorization
-// had set to "complete" — so the answer is Bundle{ClaimResponse(outcome complete, reviewAction A4,
-// no "number") + Organization}, with no Task (addDocumentationRequestTasks runs only on the create
-// path). Before this pin the normalizer unwrapped it as a COMPLETE ClaimResponse, ParsePendedResponse
-// read the bare resource as not-pended, ParseClaimResponse found neither an auth number nor a
-// denial code, and the update leg answered 502 "upstream payer PAS update response untranslatable".
-// The pended tag on the wire is the truth: the item is A4 and the timer WILL resolve it, so the
-// shape must classify as pended (pass through) exactly like the pre-timer "queued" twin.
-func TestNormalizePASResponse_BrPayerAmendAfterResolution(t *testing.T) {
-	load := func(name string) []byte {
-		t.Helper()
-		b, err := os.ReadFile(filepath.Join("testdata", "br-payer", name))
-		if err != nil {
-			t.Fatalf("read %s: %v", name, err)
-		}
-		return b
-	}
-	for _, tc := range []struct {
-		name, fixture, wantID string
-	}{
-		// The pre-timer twin is the control: outcome "queued" + A4, already classified pended.
-		{"amend before the timer (queued + A4)", "pas-update-response-amend-before-resolution.json", "1768"},
-		// The amend-after-resolution shape: outcome "complete" + A4 + pended-resolution tag, no Task.
-		{"amend after the timer (complete + A4)", "pas-update-response-amend-after-resolution.json", "1765"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			body := load(tc.fixture)
-			norm, lr := normalizePASResponse(body)
-			if lr.Status != 0 {
-				t.Fatalf("re-pend must pass through as pended, got %d: %s", lr.Status, lr.Message)
-			}
-			pended, _, perr := shnsdk.ParsePendedResponse(norm)
-			if perr != nil || !pended {
-				t.Fatalf("re-pend must read as pended via ParsePendedResponse; pended=%v err=%v", pended, perr)
-			}
-			if id := claimResponseIDFromPASResponse(norm); id != tc.wantID {
-				t.Fatalf("re-query target: got ClaimResponse id %q, want %q (br-payer re-pends IN PLACE on the same id)", id, tc.wantID)
-			}
-		})
-	}
-
-	// The poll's view during the re-pend window: a BARE ClaimResponse (GET ClaimResponse/{id})
-	// carrying outcome "complete" + A4 and NO auth number. It must NOT parse as approved — the
-	// poll keeps waiting for the timer — and must not fail closed either (pass-through).
-	t.Run("re-pend window GET is neither approved nor fail-closed", func(t *testing.T) {
-		norm, lr := normalizePASResponse(load("pas-claimresponse-amend-repend-window.json"))
-		if lr.Status != 0 {
-			t.Fatalf("bare re-pended ClaimResponse must pass through, got %d: %s", lr.Status, lr.Message)
-		}
-		if res, err := shnsdk.ParseClaimResponse(norm); err == nil && res.Outcome == "approved" {
-			t.Fatalf("a re-pended (A4, no number) ClaimResponse must never parse as approved: %+v", res)
-		}
-	})
-
-	// After the rescheduled timer: the SAME id resolves to A1 with a fresh number (AUTH-0002 live).
-	t.Run("rescheduled timer resolves the same id to A1", func(t *testing.T) {
-		norm, lr := normalizePASResponse(load("pas-claimresponse-amend-resolved.json"))
-		if lr.Status != 0 {
-			t.Fatalf("resolved ClaimResponse must pass through, got %d: %s", lr.Status, lr.Message)
-		}
-		res, err := shnsdk.ParseClaimResponse(norm)
-		if err != nil || res.Outcome != "approved" || res.PreAuthRef != "AUTH-0002" {
-			t.Fatalf("resolved re-pend must parse approved AUTH-0002, got outcome=%q ref=%q err=%v", res.Outcome, res.PreAuthRef, err)
-		}
-	})
-
-	// Rejection row (valid shape − one mutation): strip the A4 reviewAction off the after-timer
-	// answer. What remains is a "complete" ClaimResponse with neither a pend marker nor an auth
-	// number nor a denial code — it must NOT be classified pended (that would poll a claim the
-	// payer never re-pended); it unwraps as before and the parser fails loud (the update leg's
-	// 502 "untranslatable"), never a silent pass in either direction.
-	t.Run("mutation: complete without the A4 reviewAction is not a pend", func(t *testing.T) {
-		var b map[string]any
-		if err := json.Unmarshal(load("pas-update-response-amend-after-resolution.json"), &b); err != nil {
-			t.Fatal(err)
-		}
-		stripped := false
-		for _, e := range b["entry"].([]any) {
-			res := e.(map[string]any)["resource"].(map[string]any)
-			if res["resourceType"] != "ClaimResponse" {
-				continue
-			}
-			for _, it := range res["item"].([]any) {
-				for _, adj := range it.(map[string]any)["adjudication"].([]any) {
-					delete(adj.(map[string]any), "extension")
-					stripped = true
-				}
-			}
-		}
-		if !stripped {
-			t.Fatal("mutation did not strip any adjudication extension")
-		}
-		mutated, _ := json.Marshal(b)
-		norm, lr := normalizePASResponse(mutated)
-		if lr.Status != 0 {
-			t.Fatalf("a complete ClaimResponse Bundle still unwraps (status 0), got %d: %s", lr.Status, lr.Message)
-		}
-		if pended, _, _ := shnsdk.ParsePendedResponse(norm); pended {
-			t.Fatal("without the A4 reviewAction the answer must NOT classify as pended")
-		}
-		if _, err := shnsdk.ParseClaimResponse(norm); err == nil {
-			t.Fatal("a complete ClaimResponse with no number and no denial must fail loud, not parse")
-		}
-	})
-
-	// Second mutation row, narrower: keep the reviewAction extension and its URLs intact and flip
-	// only the code A4 → A1 (still no "number"). Pins the classification on the CODE, not on the
-	// mere presence of a reviewAction extension.
-	t.Run("mutation: reviewAction code A1 instead of A4 is not a pend", func(t *testing.T) {
-		body := load("pas-update-response-amend-after-resolution.json")
-		mutated := bytes.Replace(body, []byte(`"code": "A4"`), []byte(`"code": "A1"`), 1)
-		if bytes.Equal(mutated, body) {
-			t.Fatal("mutation did not flip the A4 code")
-		}
-		norm, lr := normalizePASResponse(mutated)
-		if lr.Status != 0 {
-			t.Fatalf("still a complete ClaimResponse Bundle (status 0), got %d: %s", lr.Status, lr.Message)
-		}
-		if pended, _, _ := shnsdk.ParsePendedResponse(norm); pended {
-			t.Fatal("an A1 review action must NOT classify as pended")
-		}
-		if _, err := shnsdk.ParseClaimResponse(norm); err == nil {
-			t.Fatal("A1 with no number and no denial must fail loud, not parse")
-		}
-	})
 }

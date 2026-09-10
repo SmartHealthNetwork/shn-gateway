@@ -675,7 +675,7 @@ func TestTransformRefusalZeroBytes(t *testing.T) {
 	order := pasTailServiceRequest()
 	qr := []byte(`{"resourceType":"QuestionnaireResponse","id":"qr-t4","status":"completed","subject":{"reference":"` + patientRef + `"}}`)
 
-	_, respJSON, status, msg, err := env.originator.submitClaimAndResolve(env.ctx, env.req, "pci-1", order, qr, patientRef, coverageRef, member, shnsdk.CMSPayerIdentity, env.payerID)
+	_, respJSON, status, msg, err := env.originator.submitClaimAndResolve(env.ctx, env.req, "pci-1", order, nil, qr, patientRef, coverageRef, member, shnsdk.CMSPayerIdentity, env.payerID)
 	if err == nil {
 		t.Fatal("want an error — the gated chain must refuse before any leg is routed")
 	}

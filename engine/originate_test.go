@@ -683,7 +683,7 @@ func TestRunCRDThenDTR_NoDocSkipsDTR(t *testing.T) {
 	rec := httptest.NewRecorder()
 	res, ok := gw.runCRDThenDTROrder(rec, req, "MBR-COVERED", runCRDThenDTROrderTestSystem, runCRDThenDTROrderTestCode, runCRDThenDTROrderTestDisplay, runCRDThenDTROrderTestDx, false)
 	if ok {
-		_, _, status, msg, _ := gw.submitClaimAndResolve(req.Context(), req, res.pci, res.srJSON, res.qrJSON, res.patientRef, res.coverageRef, res.member, res.payer, res.recipient)
+		_, _, status, msg, _ := gw.submitClaimAndResolve(req.Context(), req, res.pci, res.srJSON, nil, res.qrJSON, res.patientRef, res.coverageRef, res.member, res.payer, res.recipient)
 		if status != 0 {
 			writeJSON(rec, status, map[string]string{"error": msg})
 		}

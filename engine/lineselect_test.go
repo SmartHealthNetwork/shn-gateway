@@ -241,8 +241,7 @@ func TestTamperedRequestFrameRefused(t *testing.T) {
 // ---- (5) stamp honesty: a verbatim foreign relay is UNSTAMPED. ----
 
 // TestRelayedForeignBodyUnstamped drives the conformant PAS submit handler with a
-// responder that declares its answer a verbatim foreign relay (markForeignRelay,
-// the native-forward path) and asserts the sealed frame carries NO contractVersion
+// responder that declares its answer a verbatim foreign relay (the native-forward path) and asserts the sealed frame carries NO contractVersion
 // header — SHN must not vouch for the line of bytes it did not produce. The
 // non-relayed sibling IS stamped, at the line it was built at.
 func TestRelayedForeignBodyUnstamped(t *testing.T) {
@@ -257,7 +256,7 @@ func TestRelayedForeignBodyUnstamped(t *testing.T) {
 		// A real content occupant behind the relay flag: the SUBJECT here is whether the
 		// engine stamps the answer, so the occupant only has to produce a genuine
 		// ClaimResponse. (Before §3.2 this was the derived in-process responder.)
-		inner := LegResponder(approvingPASResponder{clock: g.cfg.Clock})
+		inner := LegResponder(approvingPASResponder{clock: g.cfg.Clock, line: shnsdk.LineOf(answerTok)})
 		g.cfg.Responder = relayFlagResponder{inner: inner, relayed: relayed}
 
 		env, err := shnsdk.Seal(shnsdk.Metadata{
@@ -313,7 +312,10 @@ func (r relayFlagResponder) Handle(ctx context.Context, leg, corrID, subjectPCI 
 	if err != nil || !r.relayed {
 		return res, err
 	}
-	return markForeignRelay(res), nil
+	res.ResponseFHIR = []byte(assemblyRealPending) // complete foreign graph for the relay stamp test
+	res.ResponseRelayed = true
+	res.ResponseSubjectForeign = true
+	return res, nil
 }
 
 // dtrRelayResponder answers the DTR leg the way the NATIVE forward does: a verbatim

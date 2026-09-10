@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -119,7 +120,29 @@ func main() {
 			}
 			return
 		}
-		if strings.Contains(string(body), `"valueBoolean":true`) {
+		var resource struct {
+			ResourceType string `json:"resourceType"`
+		}
+		if json.Unmarshal(body, &resource) == nil && resource.ResourceType == "Bundle" {
+			// Lifecycle instrumentation returns the committed rejection fixtures;
+			// real HAPI verdicts are certified separately by verify.sh.
+			for token, mutation := range map[string]string{`"L9999"`: "hcpcs", `"98"`: "pos", `"invalid-reference-type"`: "encounter"} {
+				if !strings.Contains(string(body), token) {
+					continue
+				}
+				dir := "/process-fixtures"
+				if line := os.Getenv("SHN_IG_LINE"); line == "2.1" || line == "2.2" {
+					dir = filepath.Join(dir, line)
+				}
+				raw, err := os.ReadFile(filepath.Join(dir, "pas-response-"+mutation+"-errors.json"))
+				if err != nil {
+					http.Error(w, "controlled fixture unavailable", 500)
+					return
+				}
+				w.Write(raw)
+				return
+			}
+		} else if strings.Contains(string(body), `"valueBoolean":true`) {
 			io.WriteString(w, `{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"processing","details":{"coding":[{"system":"http://hl7.org/fhir/java-core-messageId","code":"Extension_EXT_Type"}]},"diagnostics":"The Extension 'http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewActionCode' definition allows for the types [CodeableConcept] but found type boolean","expression":["ClaimResponse.item[0].adjudication[0].extension[0].extension[0]"]}]}`)
 			return
 		}

@@ -1747,7 +1747,7 @@ func (g *Gateway) handleUC03Oxygen(w http.ResponseWriter, r *http.Request) {
 	// resource is the DeviceRequest, so InfoChanged stays false (orderIsDeviceRequest) —
 	// its order type alone routes the payer gate to poll the timer-resolved A1. The
 	// genuine outcome is conditional-coverage A4-pended → A1 (D-2RI-3). ---
-	parsed, _, status, msg, err := g.submitClaimAndResolve(r.Context(), r, res.pci, res.orderJSON, attestedQR, res.patientRef, res.coverageRef, res.member, res.payer, res.recipient)
+	parsed, _, status, msg, err := g.submitClaimAndResolve(r.Context(), r, res.pci, res.orderJSON, res.supplierJSON, attestedQR, res.patientRef, res.coverageRef, res.member, res.payer, res.recipient)
 	if status != 0 {
 		if g.relayOriginationError(w, err) {
 			return
@@ -1855,6 +1855,11 @@ func (g *Gateway) handleUC03Bridge(w http.ResponseWriter, r *http.Request, membe
 	// bridgeRefusalText's doc comment for why this and the selection-time
 	// *RouteRefusalError are the ONLY two shapes reshaped; every other egressAdapt error
 	// (a genuine fault) still falls through to the ordinary 502 below unchanged.
+	bundleJSON, err = g.completePASRequest(ctx, bundleJSON)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "PAS evidence linkage failed"})
+		return
+	}
 	bundleJSON, _, err = g.egressAdapt(route, bundleJSON, ExchangeIdentity{CorrelationID: pasCorr, LegType: "pas-claim", Counterpart: res.recipient})
 	if err != nil {
 		if text, ok := bridgeRefusalText(err); ok {
@@ -1944,6 +1949,11 @@ func (g *Gateway) handleUC07HCPCS(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build bundle failed"})
+		return
+	}
+	bundleJSON, err = g.completePASRequest(ctx, bundleJSON)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "PAS evidence linkage failed"})
 		return
 	}
 	bundleJSON, _, err = g.egressAdapt(route, bundleJSON, ExchangeIdentity{CorrelationID: pasCorr, LegType: "pas-claim", Counterpart: res.recipient})
@@ -2066,7 +2076,7 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, status, map[string]string{"error": msg})
 			return
 		}
-		parsed, _, status, msg, err := g.submitClaimAndResolve(ctx, r, res.pci, res.srJSON, attestedQR, res.patientRef, res.coverageRef, res.member, res.payer, res.recipient)
+		parsed, _, status, msg, err := g.submitClaimAndResolve(ctx, r, res.pci, res.srJSON, nil, attestedQR, res.patientRef, res.coverageRef, res.member, res.payer, res.recipient)
 		if status != 0 {
 			if g.relayOriginationError(w, err) {
 				return
@@ -2106,6 +2116,11 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build bundle failed"})
+		return
+	}
+	bundleJSON, err = g.completePASRequest(ctx, bundleJSON)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "PAS evidence linkage failed"})
 		return
 	}
 	bundleJSON, _, err = g.egressAdapt(route, bundleJSON, ExchangeIdentity{CorrelationID: pasCorr, LegType: "pas-claim", Counterpart: res.recipient})
@@ -2161,7 +2176,7 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "supplemental report missing id"})
 		return
 	}
-	provJSON, err := shnsdk.BuildProvenance(drRef, "Organization/"+g.cfg.HolderID, g.cfg.Clock())
+	provJSON, err := buildEvidenceProvenance(drRef, "http://smarthealth.network/ids/holder", g.cfg.HolderID, "", "", g.cfg.Clock())
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build provenance failed"})
 		return
@@ -2185,6 +2200,11 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build update bundle failed"})
+		return
+	}
+	updateBundle, err = g.completePASRequest(ctx, updateBundle)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "PAS evidence linkage failed"})
 		return
 	}
 	updateBundle, _, err = g.egressAdapt(route, updateBundle, ExchangeIdentity{CorrelationID: updateCorr, LegType: "pas-claim-update", Counterpart: res.recipient})
@@ -2365,6 +2385,11 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build bundle failed"})
 		return
 	}
+	bundleJSON, err = g.completePASRequest(ctx, bundleJSON)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "PAS evidence linkage failed"})
+		return
+	}
 	bundleJSON, _, err = g.egressAdapt(route, bundleJSON, ExchangeIdentity{CorrelationID: pasCorr, LegType: "pas-claim", Counterpart: res.recipient})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
@@ -2472,6 +2497,11 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build update bundle failed"})
 		return
 	}
+	updateBundle, err = g.completePASRequest(ctx, updateBundle)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "PAS evidence linkage failed"})
+		return
+	}
 	updateBundle, _, err = g.egressAdapt(route, updateBundle, ExchangeIdentity{CorrelationID: updateCorr, LegType: "pas-claim-update", Counterpart: res.recipient})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
@@ -2567,6 +2597,11 @@ func (g *Gateway) handleUC08(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build bundle failed"})
+		return
+	}
+	bundleJSON, err = g.completePASRequest(ctx, bundleJSON)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "PAS evidence linkage failed"})
 		return
 	}
 	bundleJSON, _, err = g.egressAdapt(route, bundleJSON, ExchangeIdentity{CorrelationID: pasCorr, LegType: "pas-claim", Counterpart: res.recipient})

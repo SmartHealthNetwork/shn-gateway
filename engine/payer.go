@@ -7,6 +7,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 
@@ -156,6 +157,13 @@ func (g *Gateway) fenceResponseSubject(leg, boundPatientRef string, res LegResul
 		// SHN member namespace → fence strict) or the native-forward responder (verbatim relay
 		// of a real RI answering in its OWN namespace → stand down, R-7). The responder declares
 		// which via res.ResponseSubjectForeign; the SHN-produced EOB side-effect is ALWAYS fenced.
+		var responseShape struct {
+			ResourceType string `json:"resourceType"`
+		}
+		_ = json.Unmarshal(res.ResponseFHIR, &responseShape)
+		if (res.ResponseSubjectForeign || responseShape.ResourceType == "Bundle") && !consistentPASResponseSubjects(res.ResponseFHIR) {
+			return http.StatusForbidden, "PAS response has inconsistent patient linkage"
+		}
 		if !res.ResponseSubjectForeign {
 			refs, err := ParsePASResponsePatients(res.ResponseFHIR)
 			if err != nil {

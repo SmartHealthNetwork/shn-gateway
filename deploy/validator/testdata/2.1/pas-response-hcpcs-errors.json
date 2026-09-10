@@ -1,0 +1,37 @@
+{
+  "resourceType": "OperationOutcome",
+  "issue": [
+    {
+      "severity": "error",
+      "code": "processing",
+      "details": {
+        "coding": [
+          {
+            "system": "http://hl7.org/fhir/java-core-messageId",
+            "code": "Terminology_PassThrough_TX_Message"
+          }
+        ]
+      },
+      "diagnostics": "Unknown code 'http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets#L9999'",
+      "expression": [
+        "Bundle.entry[4].resource/*Claim/1762*/.item[0].productOrService"
+      ]
+    },
+    {
+      "severity": "error",
+      "code": "processing",
+      "details": {
+        "coding": [
+          {
+            "system": "http://hl7.org/fhir/java-core-messageId",
+            "code": "Terminology_TX_NoValid_1_CC"
+          }
+        ]
+      },
+      "diagnostics": "None of the codings provided are in the value set 'X12 278 Requested Service Type' (http://hl7.org/fhir/us/davinci-pas/ValueSet/X12278RequestedServiceType|2.1.0), and a coding from this value set is required) (codes = http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets#L9999)",
+      "expression": [
+        "Bundle.entry[4].resource/*Claim/1762*/.item[0].productOrService"
+      ]
+    }
+  ]
+}

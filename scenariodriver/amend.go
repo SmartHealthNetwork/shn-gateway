@@ -14,7 +14,7 @@ import (
 //   - The prior Claim resource (a clone of the golden Claim with id="…-prior") physically
 //     included in the bundle (br-payer PAS bundle validator requires the prior Claim be included)
 //   - A minimal QuestionnaireResponse (subject→Patient/member) as supplemental data (FR-32)
-//   - A Provenance targeting the QR (agent→Organization/provider) (FR-32 QR-variant)
+//   - A Provenance targeting the QR (agent identified by provider holder identity) (FR-32 QR-variant)
 //
 // The home-oxygen golden has NO QR and NO DiagnosticReport. We inject a minimal QR because
 // parseConformantPASSubjects tolerates a QR-less conformant bundle (R-5: optional), but the
@@ -112,7 +112,7 @@ func BuildAmendedRePOST(member, submitCorr, amendCorr string) ([]byte, error) {
 			"subject":      map[string]any{"reference": "Patient/" + member},
 		},
 	}
-	// Inject a Provenance targeting the QR (agent→Organization/provider). FR-32 (QR-variant):
+	// Inject a Provenance targeting the QR (agent identified by provider holder identity). FR-32 (QR-variant):
 	// qrID != "" && hasDR=false → wantTarget="QuestionnaireResponse/"+qrID.
 	// fullUrl required by the Da Vinci PAS Bundle spec (br-payer validates it).
 	const provID = "amend-prov-1"
@@ -122,7 +122,7 @@ func BuildAmendedRePOST(member, submitCorr, amendCorr string) ([]byte, error) {
 			"resourceType": "Provenance",
 			"id":           provID,
 			"target":       []any{map[string]any{"reference": "QuestionnaireResponse/" + qrID}},
-			"agent":        []any{map[string]any{"who": map[string]any{"reference": "Organization/provider"}}},
+			"agent":        []any{map[string]any{"who": map[string]any{"identifier": map[string]any{"system": "http://smarthealth.network/ids/holder", "value": "provider"}}}},
 		},
 	}
 	b["entry"] = append(entries, priorClaimEntry, qrEntry, provEntry)
@@ -233,7 +233,7 @@ func BuildFederatedAmendedRePOST(member, submitCorr, amendCorr string, drJSON []
 			"resourceType": "Provenance",
 			"id":           provID,
 			"target":       []any{map[string]any{"reference": "DiagnosticReport/" + drID}},
-			"agent":        []any{map[string]any{"who": map[string]any{"reference": "Organization/provider"}}},
+			"agent":        []any{map[string]any{"who": map[string]any{"identifier": map[string]any{"system": "http://smarthealth.network/ids/holder", "value": "provider"}}}},
 		},
 	}
 

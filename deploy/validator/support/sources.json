@@ -1,0 +1,20 @@
+{
+  "inputs": [
+    {
+      "file": "cms-hcpcs-2026-07.zip",
+      "url": "https://www.cms.gov/files/zip/july-2026-alpha-numeric-hcpcs-file.zip",
+      "sha256": "5591fed257e4d2307c1d2dc9c66abc8e346b1f4c076e9e48559799e2de14b70a"
+    },
+    {
+      "file": "cms-pos-2024-05-02.html",
+      "url": "https://www.cms.gov/medicare/coding-billing/place-of-service-codes/code-sets",
+      "sha256": "491efe1dadf8c8ea120deaf6973e8936c8624847190aa0d484f37e9dfa81cce4"
+    },
+    {
+      "file": "StructureDefinition-ext-R5-Claim.encounter.json",
+      "url": "https://packages.simplifier.net/hl7.fhir.uv.xver-r5.r4/0.1.0",
+      "sha256": "ffe82ada343dc66d0a6987de22d021994856f054ec1172d8b2792131e4b0c410"
+    }
+  ],
+  "xverPackageSHA256": "7ee6f04d78ced803dd567559a0d178bafbd2d3b71db61bbbf6b15c796a1a664d"
+}

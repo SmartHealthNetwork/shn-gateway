@@ -470,20 +470,6 @@ func DiscoverCRDServiceID(ctx context.Context, client *http.Client, base, overri
 	}
 }
 
-// markForeignRelay marks a LegResult as a verbatim foreign-far-end relay: ResponseFHIR (when
-// present) is the real RI's bytes in the RI's OWN patient namespace. The engine then skips the
-// response member-fence (R-7) and the response egress-$validate (R-8) for this result, while
-// fencing+validating the SHN-produced side-effects (EOB) unconditionally. Both flags are set
-// together here (native = produced-by-foreign AND foreign-namespace); the conformant-mock north
-// star is the only producer that would set them apart. Single declaration site per leg
-// (covers every internal return of handlePASClaim*Native) — fail-closed if ever missed (zero value
-// = strict fence + $validate).
-func markForeignRelay(r LegResult) LegResult {
-	r.ResponseRelayed = true
-	r.ResponseSubjectForeign = true
-	return r
-}
-
 func (n *nativeResponder) Handle(ctx context.Context, leg, corrID, subjectPCI string, requestFHIR []byte) (LegResult, error) {
 	// Foreign-peer version filter: same rule as the
 	// substrate OriginateLeg filter, sourced from the operator's per-peer
@@ -679,8 +665,8 @@ func (n *nativeResponder) Handle(ctx context.Context, leg, corrID, subjectPCI st
 		// the response frame is left UNSTAMPED — SHN asserts nothing about the contract
 		// line of a partner's bytes.
 		//
-		// Deliberately NOT markForeignRelay: that also sets ResponseSubjectForeign,
-		// which would stand down the trust-critical "no Questionnaire may carry a
+		// ResponseSubjectForeign stays false: setting it would
+		// stand down the trust-critical "no Questionnaire may carry a
 		// subject" fence (payer.go's fenceResponseSubject). Only the relay flag applies
 		// here.
 		return LegResult{ResponseFHIR: body, ResponseRelayed: true}, nil
@@ -708,11 +694,11 @@ func (n *nativeResponder) Handle(ctx context.Context, leg, corrID, subjectPCI st
 
 	case "pas-claim":
 		res, err := n.handlePASClaimNative(ctx, corrID, subjectPCI, requestFHIR)
-		return markForeignRelay(res), err
+		return res, err
 
 	case "pas-claim-update":
 		res, err := n.handlePASClaimUpdateNative(ctx, corrID, subjectPCI, requestFHIR)
-		return markForeignRelay(res), err
+		return res, err
 
 	default:
 		// The br-payer-targeting lane routes the read-only + PAS legs here; this is defensive

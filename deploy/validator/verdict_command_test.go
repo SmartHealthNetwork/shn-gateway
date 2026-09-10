@@ -22,6 +22,10 @@ func verdictServer(t *testing.T) (*httptest.Server, *[]recordedPost) {
 		mu.Lock()
 		posts = append(posts, recordedPost{path: r.URL.Path, profile: r.URL.Query().Get("profile"), rawQuery: r.URL.RawQuery, body: body})
 		mu.Unlock()
+		if outcome := supportTestOutcome(body, r.URL.Query().Get("profile")); outcome != "" {
+			fmt.Fprint(w, outcome)
+			return
+		}
 		var resource map[string]any
 		_ = json.Unmarshal(body, &resource)
 		if strings.Contains(string(body), `"valueBoolean":true`) {
@@ -37,7 +41,7 @@ func verdictServer(t *testing.T) (*httptest.Server, *[]recordedPost) {
 func emptyEnv(string) string { return "" }
 
 func TestVerdictCommandsRunExactSerialCorpora(t *testing.T) {
-	for command, wantCount := range map[string]int{"qualify": 30, "verify-verdicts": 12} {
+	for command, wantCount := range map[string]int{"qualify": 34, "verify-verdicts": 16} {
 		t.Run(command, func(t *testing.T) {
 			s, posts := verdictServer(t)
 			args := []string{command, "--base", s.URL + "/fhir", "--line", "2.2", "--pas-version", "2.2.1", "--budget", "5s"}
@@ -48,7 +52,11 @@ func TestVerdictCommandsRunExactSerialCorpora(t *testing.T) {
 				t.Fatalf("posts=%d want %d", len(*posts), wantCount)
 			}
 			for i, post := range *posts {
-				if post.path != "/fhir/ClaimResponse/$validate" {
+				wantPath := "/fhir/ClaimResponse/$validate"
+				if i >= wantCount-4 {
+					wantPath = "/fhir/Bundle/$validate"
+				}
+				if post.path != wantPath {
 					t.Fatalf("post[%d] path=%q", i, post.path)
 				}
 			}
@@ -72,7 +80,7 @@ func TestVerdictCommandDefaultsFromImageConfiguration(t *testing.T) {
 		}
 		return ""
 	}
-	if got := verdictCommand([]string{"verify-verdicts", "--budget", "5s"}, getenv); got != 0 || len(*posts) != 12 {
+	if got := verdictCommand([]string{"verify-verdicts", "--budget", "5s"}, getenv); got != 0 || len(*posts) != 16 {
 		t.Fatalf("exit=%d posts=%d", got, len(*posts))
 	}
 }

@@ -113,6 +113,11 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 	// pinned into the pendState below so the resume leg's restoring
 	// chain has an independent record to verify against. Everything else about
 	// this call is unchanged.
+	bundleJSON, err = g.completePASRequest(ctx, bundleJSON)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "PAS evidence linkage failed"})
+		return pendState{}, false
+	}
 	bundleJSON, pasReports, err := g.egressAdapt(route, bundleJSON, ExchangeIdentity{CorrelationID: pasCorr, LegType: "pas-claim", Counterpart: res.recipient})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
@@ -306,7 +311,7 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 		writeJSON(w, status, map[string]string{"error": msg})
 		return false
 	}
-	provJSON, err := shnsdk.BuildProvenance("QuestionnaireResponse/"+uc06QRID, "Practitioner/"+npi, g.cfg.Clock())
+	provJSON, err := buildEvidenceProvenance("QuestionnaireResponse/"+uc06QRID, "http://hl7.org/fhir/sid/us-npi", npi, "", "", g.cfg.Clock())
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build provenance failed"})
 		return false
@@ -348,6 +353,11 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 	// longer bears content THIS pend's own loss record declares carried.
 	pasUpdateID := ExchangeIdentity{CorrelationID: updateCorr, LegType: "pas-claim-update", Counterpart: st.recipient}
 	if !g.guardPendCarry(w, st, route, updateBundle, pasUpdateID) {
+		return false
+	}
+	updateBundle, err = g.completePASRequest(ctx, updateBundle)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "PAS evidence linkage failed"})
 		return false
 	}
 	updateBundle, _, err = g.egressAdapt(route, updateBundle, pasUpdateID)
@@ -550,6 +560,11 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 	// leg runs — both resume sites, or the guard is only half wired.
 	pasUpdateID := ExchangeIdentity{CorrelationID: updateCorr, LegType: "pas-claim-update", Counterpart: st.recipient}
 	if !g.guardPendCarry(w, st, route, updateBundle, pasUpdateID) {
+		return false
+	}
+	updateBundle, err = g.completePASRequest(ctx, updateBundle)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "PAS evidence linkage failed"})
 		return false
 	}
 	updateBundle, _, err = g.egressAdapt(route, updateBundle, pasUpdateID)

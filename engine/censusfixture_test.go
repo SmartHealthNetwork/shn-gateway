@@ -55,10 +55,14 @@ var _ LegResponder = unusedResponder{}
 
 // approvingPASResponder is a minimal payer content occupant for tests whose subject is
 // the ENGINE's own framing/fencing behaviour, not payer policy: it answers pas-claim with
-// a conformant ClaimResponse approval for whatever member the submitted bundle names. The
+// a closed synthetic response Bundle for the member the submitted bundle names.
+// It establishes framing and graph behavior, not live IG qualification. The
 // verdict is FIXED on purpose — a framing test wants content held constant — and it is
 // not a policy: nothing here reads the QuestionnaireResponse.
-type approvingPASResponder struct{ clock func() time.Time }
+type approvingPASResponder struct {
+	clock func() time.Time
+	line  string
+}
 
 func (r approvingPASResponder) Handle(_ context.Context, leg, corrID, _ string, requestFHIR []byte) (LegResult, error) {
 	if leg != "pas-claim" {
@@ -69,11 +73,38 @@ func (r approvingPASResponder) Handle(_ context.Context, leg, corrID, _ string, 
 		return LegResult{Status: status, Message: msg}, nil
 	}
 	now := r.clock()
-	crJSON, err := shnsdk.BuildClaimResponseAtLine("2.0", "AUTH-0001", now.Add(24*time.Hour).Format(time.RFC3339), "Patient/"+s.member, corrID, now)
+	line := r.line
+	if line == "" {
+		line = "2.0"
+	}
+	crJSON, err := shnsdk.BuildClaimResponseAtLine(line, "AUTH-0001", now.Add(24*time.Hour).Format(time.RFC3339), "Patient/"+s.member, corrID, now)
 	if err != nil {
 		return LegResult{}, err
 	}
-	return LegResult{ResponseFHIR: crJSON}, nil
+	var cr map[string]any
+	if err := json.Unmarshal(crJSON, &cr); err != nil {
+		return LegResult{}, err
+	}
+	cr["id"] = "fixture-response"
+	cr["request"] = map[string]any{"reference": "Claim/fixture-request"}
+	resources := []map[string]any{
+		cr,
+		{"resourceType": "Patient", "id": s.member},
+		{"resourceType": "Claim", "id": "fixture-request", "patient": map[string]any{"reference": "Patient/" + s.member}},
+		{"resourceType": "Organization", "id": "payer"},
+	}
+	entries := []any{}
+	for _, resource := range resources {
+		entries = append(entries, map[string]any{"fullUrl": "https://fixture.test/fhir/" + resource["resourceType"].(string) + "/" + resource["id"].(string), "resource": resource})
+	}
+	response, err := json.Marshal(map[string]any{"resourceType": "Bundle", "type": "collection", "timestamp": now.Format(time.RFC3339Nano), "entry": entries})
+	if err != nil {
+		return LegResult{}, err
+	}
+	if err := validatePASBundleGraph(response); err != nil {
+		return LegResult{}, err
+	}
+	return LegResult{ResponseFHIR: response}, nil
 }
 
 var _ LegResponder = approvingPASResponder{}

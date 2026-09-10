@@ -1,0 +1,600 @@
+{
+  "resourceType": "Bundle",
+  "meta": {
+    "profile": [
+      "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-pas-response-bundle"
+    ]
+  },
+  "identifier": {
+    "system": "http://example.org/SUBMITTER_TRANSACTION_IDENTIFIER",
+    "value": "41593487-f41d-456c-910c-613850410dd0"
+  },
+  "type": "collection",
+  "timestamp": "2026-09-10T15:57:26.805+00:00",
+  "entry": [
+    {
+      "fullUrl": "http://localhost:8081/fhir/ClaimResponse/1764",
+      "resource": {
+        "resourceType": "ClaimResponse",
+        "id": "1764",
+        "meta": {
+          "versionId": "1",
+          "lastUpdated": "2026-09-10T15:57:26.805+00:00",
+          "profile": [
+            "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claimresponse"
+          ]
+        },
+        "extension": [
+          {
+            "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-TransmissionIdentifiers",
+            "extension": [
+              {
+                "url": "applicationSenderCode",
+                "valueString": "1234567893"
+              },
+              {
+                "url": "applicationReceiverCode",
+                "valueString": "8189991234"
+              }
+            ]
+          }
+        ],
+        "identifier": [
+          {
+            "system": "http://example.org/PATIENT_EVENT_TRACE_NUMBER",
+            "value": "9d4d856c-1049-4584-ade2-6df37d311d0f"
+          }
+        ],
+        "status": "active",
+        "type": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/claim-type",
+              "code": "professional",
+              "display": "Professional"
+            }
+          ]
+        },
+        "use": "preauthorization",
+        "patient": {
+          "reference": "Patient/SubscriberExample"
+        },
+        "created": "2026-09-10T15:57:26+00:00",
+        "insurer": {
+          "reference": "Organization/example"
+        },
+        "requestor": {
+          "reference": "Organization/UMOExample"
+        },
+        "request": {
+          "reference": "Claim/1762"
+        },
+        "outcome": "complete",
+        "item": [
+          {
+            "extension": [
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-itemTraceNumber",
+                "valueIdentifier": {
+                  "system": "http://example.org/ITEM_TRACE_NUMBER",
+                  "value": "prior-auth-required-trace"
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-itemPreAuthPeriod",
+                "valuePeriod": {
+                  "start": "2026-09-10T15:57:26+00:00",
+                  "end": "2026-10-10T15:57:26+00:00"
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-itemPreAuthIssueDate",
+                "valueDate": "2026-09-10"
+              }
+            ],
+            "itemSequence": 1,
+            "adjudication": [
+              {
+                "extension": [
+                  {
+                    "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewAction",
+                    "extension": [
+                      {
+                        "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewActionCode",
+                        "valueCodeableConcept": {
+                          "coding": [
+                            {
+                              "system": "https://codesystem.x12.org/005010/306",
+                              "code": "A1",
+                              "display": "Certified in total"
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "url": "number",
+                        "valueString": "AUTH-0001"
+                      }
+                    ]
+                  }
+                ],
+                "category": {
+                  "coding": [
+                    {
+                      "system": "http://terminology.hl7.org/CodeSystem/adjudication",
+                      "code": "submitted",
+                      "display": "Submitted Amount"
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "fullUrl": "http://localhost:8081/fhir/Patient/SubscriberExample",
+      "resource": {
+        "resourceType": "Patient",
+        "id": "SubscriberExample",
+        "meta": {
+          "versionId": "1",
+          "lastUpdated": "2026-09-10T15:57:18.872+00:00",
+          "profile": [
+            "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-subscriber"
+          ]
+        },
+        "language": "en",
+        "text": {
+          "status": "generated",
+          "div": "<div xml:lang=\"en\" xmlns=\"http://www.w3.org/1999/xhtml\" lang=\"en\"><p class=\"res-header-id\"><b>Generated Narrative: Patient SubscriberExample</b></p><a name=\"SubscriberExample\"> </a><a name=\"hcSubscriberExample\"> </a><div style=\"display: inline-block; background-color: #d9e0e7; padding: 6px; margin: 4px; border: 1px solid #8da1b4; border-radius: 5px; line-height: 60%\"><p style=\"margin-bottom: 0px\">Language: en</p><p style=\"margin-bottom: 0px\">Profile: <a href=\"StructureDefinition-profile-subscriber.html\">PAS Subscriber Patient</a></p></div><p style=\"border: 1px #661aff solid; background-color: #e6e6ff; padding: 10px;\">JOE SMITH  Male, DoB Unknown ( http://example.org/MIN: 12345678901)</p><hr/><table class=\"grid\"><tr><td style=\"background-color: #f3f5da\" title=\"A patient's military status.\"><a href=\"StructureDefinition-extension-militaryStatus.html\">Military Status</a></td><td colspan=\"3\"><span title=\"Codes:{https://codesystem.x12.org/005010/584 RU}\">RU</span></td></tr></table></div>"
+        },
+        "extension": [
+          {
+            "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-militaryStatus",
+            "valueCodeableConcept": {
+              "coding": [
+                {
+                  "system": "https://codesystem.x12.org/005010/584",
+                  "code": "RU"
+                }
+              ]
+            }
+          }
+        ],
+        "identifier": [
+          {
+            "system": "http://example.org/MIN",
+            "value": "12345678901"
+          }
+        ],
+        "name": [
+          {
+            "family": "SMITH",
+            "given": [
+              "JOE"
+            ]
+          }
+        ],
+        "gender": "male"
+      }
+    },
+    {
+      "fullUrl": "http://localhost:8081/fhir/Organization/example",
+      "resource": {
+        "resourceType": "Organization",
+        "id": "example",
+        "meta": {
+          "versionId": "1",
+          "lastUpdated": "2026-09-10T15:57:18.616+00:00"
+        },
+        "language": "en",
+        "text": {
+          "status": "generated",
+          "div": "<div xml:lang=\"en\" xmlns=\"http://www.w3.org/1999/xhtml\" lang=\"en\"><p class=\"res-header-id\"><b>Generated Narrative: Organization example</b></p><a name=\"example\"> </a><a name=\"hcexample\"> </a><div style=\"display: inline-block; background-color: #d9e0e7; padding: 6px; margin: 4px; border: 1px solid #8da1b4; border-radius: 5px; line-height: 60%\"><p style=\"margin-bottom: 0px\">Language: en</p></div><p><b>identifier</b>: <a href=\"http://terminology.hl7.org/6.2.0/NamingSystem-npi.html\" title=\"National Provider Identifier\">United States National Provider Identifier</a>/1234567893</p><p><b>active</b>: true</p><p><b>name</b>: University Medical Center</p><p><b>telecom</b>: <a href=\"tel:+15552343523\">+1 555 234 3523</a>, <a href=\"mailto:info@acme.org\">info@acme.org</a></p><p><b>address</b>: Galapagosweg 91 San Francisco CA 94107 US (work)</p></div>"
+        },
+        "identifier": [
+          {
+            "system": "http://hl7.org/fhir/sid/us-npi",
+            "value": "1234567893"
+          }
+        ],
+        "active": true,
+        "name": "University Medical Center",
+        "telecom": [
+          {
+            "system": "phone",
+            "value": "+1 555 234 3523",
+            "use": "work"
+          },
+          {
+            "system": "email",
+            "value": "info@acme.org",
+            "use": "work"
+          }
+        ],
+        "address": [
+          {
+            "use": "work",
+            "line": [
+              "Galapagosweg 91"
+            ],
+            "city": "San Francisco",
+            "state": "CA",
+            "postalCode": "94107",
+            "country": "US"
+          }
+        ]
+      }
+    },
+    {
+      "fullUrl": "http://localhost:8081/fhir/Organization/UMOExample",
+      "resource": {
+        "resourceType": "Organization",
+        "id": "UMOExample",
+        "meta": {
+          "versionId": "1",
+          "lastUpdated": "2026-09-10T15:57:18.865+00:00",
+          "profile": [
+            "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-requestor"
+          ]
+        },
+        "language": "en",
+        "text": {
+          "status": "generated",
+          "div": "<div xml:lang=\"en\" xmlns=\"http://www.w3.org/1999/xhtml\" lang=\"en\"><p class=\"res-header-id\"><b>Generated Narrative: Organization UMOExample</b></p><a name=\"UMOExample\"> </a><a name=\"hcUMOExample\"> </a><div style=\"display: inline-block; background-color: #d9e0e7; padding: 6px; margin: 4px; border: 1px solid #8da1b4; border-radius: 5px; line-height: 60%\"><p style=\"margin-bottom: 0px\">Language: en</p><p style=\"margin-bottom: 0px\">Profile: <a href=\"StructureDefinition-profile-requestor.html\">PAS Requestor Organization</a></p></div><p><b>identifier</b>: <a href=\"http://terminology.hl7.org/5.3.0/NamingSystem-npi.html\" title=\"National Provider Identifier\">United States National Provider Identifier</a>/8189991234</p><p><b>active</b>: true</p><p><b>type</b>: <span title=\"Codes:{https://codesystem.x12.org/005010/98 X3}\">X3</span></p><p><b>name</b>: DR. JOE SMITH CORPORATION</p><p><b>address</b>: 111 1ST STREET SAN DIEGO CA 92101 US </p></div>"
+        },
+        "identifier": [
+          {
+            "system": "http://hl7.org/fhir/sid/us-npi",
+            "value": "8189991234"
+          }
+        ],
+        "active": true,
+        "type": [
+          {
+            "coding": [
+              {
+                "system": "https://codesystem.x12.org/005010/98",
+                "code": "X3"
+              }
+            ]
+          }
+        ],
+        "name": "DR. JOE SMITH CORPORATION",
+        "address": [
+          {
+            "line": [
+              "111 1ST STREET"
+            ],
+            "city": "SAN DIEGO",
+            "state": "CA",
+            "postalCode": "92101",
+            "country": "US"
+          }
+        ]
+      }
+    },
+    {
+      "fullUrl": "http://localhost:8081/fhir/Claim/1762",
+      "resource": {
+        "resourceType": "Claim",
+        "id": "1762",
+        "meta": {
+          "versionId": "1",
+          "lastUpdated": "2026-09-10T15:57:26.794+00:00",
+          "profile": [
+            "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claim"
+          ]
+        },
+        "extension": [
+          {
+            "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-TransmissionIdentifiers",
+            "extension": [
+              {
+                "url": "applicationSenderCode",
+                "valueString": "8189991234"
+              },
+              {
+                "url": "applicationReceiverCode",
+                "valueString": "1234567893"
+              }
+            ]
+          }
+        ],
+        "identifier": [
+          {
+            "system": "http://example.org/PATIENT_EVENT_TRACE_NUMBER",
+            "value": "51e7a2b6-8353-4fd7-a113-1202fbc1a121"
+          }
+        ],
+        "status": "active",
+        "type": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/claim-type",
+              "code": "professional",
+              "display": "Professional"
+            }
+          ]
+        },
+        "use": "preauthorization",
+        "patient": {
+          "reference": "Patient/SubscriberExample"
+        },
+        "created": "2026-06-19T21:54:38+00:00",
+        "insurer": {
+          "reference": "Organization/example"
+        },
+        "provider": {
+          "reference": "Organization/UMOExample"
+        },
+        "priority": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/processpriority",
+              "code": "normal",
+              "display": "Normal"
+            }
+          ]
+        },
+        "careTeam": [
+          {
+            "extension": [
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-careTeamClaimScope",
+                "valueBoolean": true
+              }
+            ],
+            "sequence": 1,
+            "provider": {
+              "reference": "http://example.org/fhir/PractitionerRole/ReferralPractitionerRoleExample"
+            }
+          }
+        ],
+        "insurance": [
+          {
+            "sequence": 1,
+            "focal": true,
+            "coverage": {
+              "reference": "http://example.org/fhir/Coverage/InsuranceExample"
+            }
+          }
+        ],
+        "item": [
+          {
+            "extension": [
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-certificationType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "system": "https://codesystem.x12.org/005010/1322",
+                      "code": "I",
+                      "display": "Initial"
+                    }
+                  ]
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceItemRequestType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "system": "https://codesystem.x12.org/005010/1525",
+                      "code": "HS",
+                      "display": "Health Services Review"
+                    }
+                  ]
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-itemTraceNumber",
+                "valueIdentifier": {
+                  "system": "http://example.org/ITEM_TRACE_NUMBER",
+                  "value": "prior-auth-required-trace"
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService",
+                "valueReference": {
+                  "reference": "http://example.org/fhir/ServiceRequest/prior-auth-required-service-request"
+                }
+              }
+            ],
+            "sequence": 1,
+            "careTeamSequence": [
+              1
+            ],
+            "category": {
+              "coding": [
+                {
+                  "system": "https://codesystem.x12.org/005010/1365",
+                  "code": "3",
+                  "display": "Consultation"
+                }
+              ]
+            },
+            "productOrService": {
+              "coding": [
+                {
+                  "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+                  "code": "L8000"
+                }
+              ]
+            },
+            "locationCodeableConcept": {
+              "coding": [
+                {
+                  "system": "https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set",
+                  "code": "11",
+                  "display": "Office"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "fullUrl": "http://example.org/fhir/PractitionerRole/ReferralPractitionerRoleExample",
+      "resource": {
+        "resourceType": "PractitionerRole",
+        "id": "ReferralPractitionerRoleExample",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-practitionerrole"
+          ]
+        },
+        "practitioner": {
+          "reference": "http://example.org/fhir/Practitioner/ReferralPractitionerExample"
+        },
+        "telecom": [
+          {
+            "system": "phone",
+            "value": "4029993456"
+          }
+        ]
+      }
+    },
+    {
+      "fullUrl": "http://example.org/fhir/Coverage/InsuranceExample",
+      "resource": {
+        "resourceType": "Coverage",
+        "id": "InsuranceExample",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-coverage"
+          ]
+        },
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB",
+                  "display": "Member Number"
+                },
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MR",
+                  "display": "Medical record number"
+                }
+              ]
+            },
+            "system": "http://example.org/MIN",
+            "value": "1122334455"
+          }
+        ],
+        "status": "active",
+        "subscriber": {
+          "reference": "http://localhost:8081/fhir/Patient/SubscriberExample"
+        },
+        "subscriberId": "1122334455",
+        "beneficiary": {
+          "reference": "http://localhost:8081/fhir/Patient/SubscriberExample"
+        },
+        "relationship": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+              "code": "self",
+              "display": "Self"
+            }
+          ]
+        },
+        "period": {
+          "start": "2026-06-19T21:54:38+00:00"
+        },
+        "payor": [
+          {
+            "reference": "http://localhost:8081/fhir/Organization/example",
+            "identifier": {
+              "system": "urn:oid:2.16.840.1.113883.6.300",
+              "value": "00001"
+            }
+          }
+        ],
+        "class": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/coverage-class",
+                  "code": "group",
+                  "display": "Group"
+                }
+              ]
+            },
+            "value": "GRP-001"
+          },
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/coverage-class",
+                  "code": "plan",
+                  "display": "Plan"
+                }
+              ]
+            },
+            "value": "PLAN-001"
+          }
+        ]
+      }
+    },
+    {
+      "fullUrl": "http://example.org/fhir/ServiceRequest/prior-auth-required-service-request",
+      "resource": {
+        "resourceType": "ServiceRequest",
+        "id": "prior-auth-required-service-request",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-servicerequest"
+          ]
+        },
+        "status": "active",
+        "intent": "order",
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "L8000"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "http://localhost:8081/fhir/Patient/SubscriberExample"
+        }
+      }
+    },
+    {
+      "fullUrl": "http://example.org/fhir/Practitioner/ReferralPractitionerExample",
+      "resource": {
+        "resourceType": "Practitioner",
+        "id": "ReferralPractitionerExample",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-practitioner"
+          ]
+        },
+        "identifier": [
+          {
+            "system": "http://hl7.org/fhir/sid/us-npi",
+            "value": "1234567893"
+          }
+        ],
+        "name": [
+          {
+            "family": "WATSON",
+            "given": [
+              "SUSAN"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}
