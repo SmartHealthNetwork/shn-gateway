@@ -8,7 +8,8 @@
 # Mechanism — ported from gateway/scenariodriver/brprovider.go's OriginateThroughBRProvider,
 # the same call SHN uses to prove this exact leg against a real HL7-DaVinci/br-provider RI:
 #
-#   POST {BFF}/api/cds-services/order-select-crd?server=<url-escaped {INGRESS_BASE}/cds-services>
+#   POST {BFF}/api/cds-services/shn-order-sign?server=<url-escaped {INGRESS_BASE}/cds-services>
+#   (shn-order-sign is the gateway ingress's service for the request's order-sign hook)
 #   Header: X-Bypass-Auth: true   (br-provider's org.hl7.davinci.security.AuthInterceptor /
 #     SecurityProperties.bypassHeader — skips the BFF's OWN inbound-request auth check on
 #     THIS call only; it does NOT touch the outbound CDS-client JWT br-provider's
@@ -107,7 +108,7 @@ req_body=$(jq -n \
   }')
 
 server_param=$(jq -rn --arg s "${INGRESS_BASE_URL}/cds-services" '$s|@uri')
-endpoint="${BRPROVIDER_BFF_URL}/api/cds-services/order-select-crd?server=${server_param}"
+endpoint="${BRPROVIDER_BFF_URL}/api/cds-services/shn-order-sign?server=${server_param}"
 
 # Guard the command substitution: a connection error to br-provider's BFF (still booting,
 # or wrong port) makes curl exit non-zero, which under `set -e` would abort this script

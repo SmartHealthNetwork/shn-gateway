@@ -3,7 +3,6 @@ package engine
 import (
 	"bytes"
 	"encoding/json"
-	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -277,80 +276,6 @@ func TestExtractQuestionnaireFromPackage_ParametersWrapper_NoPackagebundle(t *te
 	}
 }
 
-// TestNormalizeCRDCoverage_RealRI_brpayer replays a LIVE captured br-payer CRD response
-// through the normalizer. The br-payer RI (CRD STU 2.2.1) places the split
-// coverage-information at systemActions[].resource.extension[] — the primary walk path.
-// Asserts: covered=covered, pa-needed=auth-needed (PARequired true), questionnaire present
-// (NeedsDTR true). FR-G25.
-func TestNormalizeCRDCoverage_RealRI_brpayer(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join("testdata", "br-payer", "crd-response.json"))
-	if err != nil {
-		t.Fatal(err) // fixture IS committed
-	}
-	cov, lr := normalizeCRDCoverage(raw)
-	if lr.Status != 0 {
-		t.Fatalf("rejected real br-payer card: %d %s", lr.Status, lr.Message)
-	}
-	if cov.Covered != shnsdk.CoveredCovered {
-		t.Fatalf("covered=%q, want %q", cov.Covered, shnsdk.CoveredCovered)
-	}
-	if !cov.PARequired() {
-		t.Fatalf("pa-needed=auth-needed must be PARequired; got PANeeded=%q", cov.PANeeded)
-	}
-	// The br-payer response carries questionnaire=http://example.org/fhir/Questionnaire/PriorAuthRequired.
-	if !cov.NeedsDTR() {
-		t.Fatalf("questionnaire sub-extension present; NeedsDTR must be true; got Questionnaires=%v", cov.Questionnaires)
-	}
-}
-
-// TestNormalizeCRDCoverage_STU21_split reads the forward-target STU-2.1 split shape
-// (covered + pa-needed + questionnaire sub-extensions) 1:1 onto CardCoverage.
-func TestNormalizeCRDCoverage_STU21_split(t *testing.T) {
-	// synthetic 2.1 split-shape fixture (inline) with covered+auth-needed+questionnaire.
-	body := []byte(`{"cards":[{"suggestions":[{"actions":[{"resource":{"extension":[{"url":"http://hl7.org/fhir/us/davinci-crd/StructureDefinition/ext-coverage-information","extension":[{"url":"covered","valueCode":"covered"},{"url":"pa-needed","valueCode":"auth-needed"},{"url":"questionnaire","valueCanonical":"http://example/Q|1.0.0"}]}]}}]}]}]}`)
-	cov, lr := normalizeCRDCoverage(body)
-	if lr.Status != 0 {
-		t.Fatal(lr.Message)
-	}
-	if !cov.PARequired() || !cov.NeedsDTR() {
-		t.Fatalf("2.1 split: %+v", cov)
-	}
-	if cov.Questionnaires[0] != "http://example/Q|1.0.0" {
-		t.Fatalf("questionnaire canonical = %q", cov.Questionnaires[0])
-	}
-}
-
-// TestNormalizeCRDCoverage_STU21_CardExtensionFallback proves the defensive fallback:
-// some RIs put coverage-information on cards[].extension[] (a bare card extension) rather
-// than the suggestion's update-action resource. The normalizer must find it there too.
-func TestNormalizeCRDCoverage_STU21_CardExtensionFallback(t *testing.T) {
-	body := []byte(`{"cards":[{"extension":[{"url":"http://hl7.org/fhir/us/davinci-crd/StructureDefinition/ext-coverage-information","extension":[{"url":"covered","valueCode":"covered"},{"url":"pa-needed","valueCode":"no-auth"}]}]}]}`)
-	cov, lr := normalizeCRDCoverage(body)
-	if lr.Status != 0 {
-		t.Fatalf("card.extension fallback rejected: %d %s", lr.Status, lr.Message)
-	}
-	if cov.Covered != shnsdk.CoveredCovered || cov.PARequired() {
-		t.Fatalf("fallback → %+v, want covered+no-auth", cov)
-	}
-}
-
-// TestNormalizeCRDCoverage_Unmappable fails closed when no coverage-information signal is
-// resolvable in the response (502, since the CRD leg has no $validate net).
-func TestNormalizeCRDCoverage_Unmappable(t *testing.T) {
-	_, lr := normalizeCRDCoverage([]byte(`{"cards":[{"summary":"x"}]}`))
-	if lr.Status != http.StatusBadGateway {
-		t.Fatalf("un-mappable must 502, got %d", lr.Status)
-	}
-}
-
-// TestNormalizeCRDCoverage_MalformedBody fails closed on a non-JSON partner body.
-func TestNormalizeCRDCoverage_MalformedBody(t *testing.T) {
-	_, lr := normalizeCRDCoverage([]byte(`{not json`))
-	if lr.Status != http.StatusBadGateway {
-		t.Fatalf("malformed body must 502, got %d", lr.Status)
-	}
-}
-
 // Native submit retains the complete payer graph; bare resources belong to polling.
 func TestValidateNativePASResponse(t *testing.T) {
 	approved, err := assembleTerminalPASBundle([]byte(assemblyRealPending), []byte(assemblyRealTerminal), fixedClock())
@@ -375,5 +300,28 @@ func TestValidateNativePASResponse(t *testing.T) {
 	}
 	if _, lr := validateNativePASResponse(raw); lr.Status != http.StatusBadGateway {
 		t.Fatal("accepted historical missing references")
+	}
+}
+
+// TestExtractQuestionnaireFromPackage_EveryPublishedBundleName: the package
+// Bundle parameter is read under each name a published DTR line gives it
+// (return at 2.0.1's operation, PackageBundle at the 2.0.1/2.1.0 output
+// profile, packagebundle at 2.2.0), and under no other.
+func TestExtractQuestionnaireFromPackage_EveryPublishedBundleName(t *testing.T) {
+	wrapped := func(name string) []byte {
+		return []byte(`{"resourceType":"Parameters","parameter":[{"name":"operationOutcome","resource":{"resourceType":"OperationOutcome"}},` +
+			`{"name":"` + name + `","resource":{"resourceType":"Bundle","type":"collection","entry":[` +
+			`{"resource":{"resourceType":"Questionnaire","id":"q-` + name + `","url":"http://example.org/Q/q"}}]}}]}`)
+	}
+	for _, name := range []string{"return", "PackageBundle", "packagebundle"} {
+		q, err := extractQuestionnaireFromPackage(wrapped(name))
+		if err != nil || !strings.Contains(string(q), `"q-`+name+`"`) {
+			t.Errorf("%s: %s %v", name, q, err)
+		}
+	}
+	for _, name := range []string{"Packagebundle", "bundle", "outcome"} {
+		if _, err := extractQuestionnaireFromPackage(wrapped(name)); err == nil {
+			t.Errorf("%s read as the package Bundle", name)
+		}
 	}
 }

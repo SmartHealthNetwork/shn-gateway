@@ -6,18 +6,20 @@
 // gateway-INTERNAL, never a neutral wire format.
 package engine
 
+import "github.com/SmartHealthNetwork/shn-gateway/engine/relay"
+
 // Content is a typed-opaque handle on a workstream payload. The IR validates it at
 // the edge (FR-36/FR-G29) and binds its subject for authority, but never reads its
 // clinical semantics. WorkstreamType identifies the owning module (read live by
 // OriginateLeg's selection-seam guard). ProfileID carries the routed/pinned
 // contract-version token. The origination sites now
-// SELECT it BEFORE building, so the builder that produced Bytes and the token in
+// SELECT it BEFORE building, so the builder that produced Payload and the token in
 // this field name the same line by construction; a resume leg still pins it verbatim
 // as the pended-line pin. It now has THREE readers: the response-frame stamp
 // verification in roundTripInner, the REQUEST frame roundTripInner emits toward a
 // requestFrames-declaring recipient, and the per-line $validate lane the origination
 // sites pick — validation is LINE-AWARE now, no longer meta.profile-driven alone.
-// Bytes is the FHIR/payload bytes that reach the wire. Route is the observer-
+// Payload holds the FHIR/payload bytes that reach the wire. Route is the observer-
 // facing routing story: the select-before-build sites set it from
 // routeInfoFor(route) alongside ProfileID; it rides through roundTrip's
 // leg.originated emission (Content.Route -> ObserverEvent.Route) and is nil
@@ -26,8 +28,23 @@ package engine
 type Content struct {
 	WorkstreamType string
 	ProfileID      string
-	Bytes          []byte
-	Route          *RouteInfo
+	// Payload is the request. It is checked against the leg's ownership row
+	// before it is sent: a request this gateway's own workflow builds is
+	// relay.Authored by a registered builder; a request carried from the
+	// participant's system (Carried) is that system's message.
+	Payload relay.Payload
+	// Carried marks a request the participant's own system sent to this
+	// gateway, carried on to the network (the Da Vinci ingress).
+	Carried bool
+	Route   *RouteInfo
+	// Operation names the DTR operation whose own input Payload is
+	// (shnsdk.FrameOperationQuestionnairePackage or
+	// shnsdk.FrameOperationNextQuestion); "" for every other request. A
+	// request that names one is always sent in a request frame carrying the
+	// operation header, and only to a recipient that declares
+	// shnsdk.RequestFrameV1Op; any other recipient is refused before
+	// anything is sent (framedDTRRefusal).
+	Operation string
 }
 
 // workstreamPA is the WorkstreamType tag for the Prior-Authorization module.

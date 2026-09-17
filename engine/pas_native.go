@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -39,7 +40,7 @@ func parseConformantPASSubjects(bundleJSON []byte) (conformantPASSubjects, int, 
 			Resource json.RawMessage `json:"resource"`
 		} `json:"entry"`
 	}
-	if err := json.Unmarshal(bundleJSON, &probe); err != nil {
+	if err := decodeMessage(bundleJSON, &probe); err != nil {
 		return conformantPASSubjects{}, http.StatusBadRequest, "parse claim bundle failed"
 	}
 	if probe.ResourceType != "Bundle" {
@@ -55,19 +56,24 @@ func parseConformantPASSubjects(bundleJSON []byte) (conformantPASSubjects, int, 
 		haveClaim, haveSR, haveCov bool
 	)
 	for _, e := range probe.Entry {
+		// The patient-bearing members are read by their exact names: a member
+		// that matches one only when case is ignored is refused, because the
+		// recipient would not read it.
 		var rt struct {
-			ResourceType string `json:"resourceType"`
+			ResourceType string          `json:"resourceType"`
+			Patient      json.RawMessage `json:"patient"`
+			Subject      json.RawMessage `json:"subject"`
+			Beneficiary  json.RawMessage `json:"beneficiary"`
 		}
-		if err := json.Unmarshal(e.Resource, &rt); err != nil {
+		if err := decodeMessage(e.Resource, &rt); err != nil {
 			return conformantPASSubjects{}, http.StatusBadRequest, "parse bundle entry failed"
 		}
 		ref := func(field string) string {
-			var r map[string]json.RawMessage
-			_ = json.Unmarshal(e.Resource, &r)
+			raw := map[string]json.RawMessage{"patient": rt.Patient, "subject": rt.Subject, "beneficiary": rt.Beneficiary}[field]
 			var v struct {
 				Reference string `json:"reference"`
 			}
-			_ = json.Unmarshal(r[field], &v)
+			_ = decodeMessage(raw, &v)
 			return v.Reference
 		}
 		switch rt.ResourceType {
@@ -142,14 +148,14 @@ func pasBundleCoverage(bundleJSON []byte) []byte {
 			Resource json.RawMessage `json:"resource"`
 		} `json:"entry"`
 	}
-	if err := json.Unmarshal(bundleJSON, &probe); err != nil {
+	if err := decodeMessage(bundleJSON, &probe); err != nil {
 		return nil
 	}
 	for _, e := range probe.Entry {
 		var rt struct {
 			ResourceType string `json:"resourceType"`
 		}
-		if json.Unmarshal(e.Resource, &rt) == nil && rt.ResourceType == "Coverage" {
+		if decodeMessage(e.Resource, &rt) == nil && rt.ResourceType == "Coverage" {
 			return e.Resource
 		}
 	}
@@ -218,7 +224,7 @@ func (g *Gateway) ingressPASNativeSubjectPCIContext(ctx context.Context, bundleJ
 // (handleCRDNativeInbound has no response fence at all — but the reason differs: CRD cards carry no
 // patient ref, whereas a ClaimResponse does.)
 //
-// R-8 (egress-$validate iff !ResponseRelayed): a verbatim foreign RI's Da Vinci PAS output declares
+// R-8 (egress-$validate iff !ResponseRelayed()): a verbatim foreign RI's Da Vinci PAS output declares
 // its source contract. SHN does not stamp or certify unchanged foreign bytes,
 // so $validating it would 422 a valid response — the relay stands down (br-payer validates its own
 // output). A non-relayed response IS egress-$validated.
@@ -233,7 +239,14 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
-	result, err := g.cfg.Responder.Handle(r.Context(), "pas-claim", env.Metadata.CorrelationID, tok.Subject, bundleJSON)
+	capture := &nativeCertificationCapture{}
+	defer func() {
+		if capture.attempted {
+			g.certificationPair("pas-claim", "payer-native", env.Metadata.CorrelationID, shnsdk.LineOf(answerTok), capture.request, capture.response)
+		}
+	}()
+	observationContext := context.WithValue(r.Context(), nativeCertificationKey{}, capture)
+	result, err := g.cfg.Responder.Handle(observationContext, "pas-claim", env.Metadata.CorrelationID, tok.Subject, bundleJSON)
 
 	// Rollback on any pre-commit early return (the seam carries it for the update leg; submit
 	// acquires no claim, so Rollback is nil today). Mirrors handlePASInbound.
@@ -244,7 +257,7 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 		}
 	}()
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "responder failed"})
+		g.responderFailed(w, "pas-claim", err)
 		return
 	}
 	if result.Status != 0 {
@@ -252,9 +265,14 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 			env.Metadata.CorrelationID, result, tok.Subject, env.Metadata.Sender, "", answerTok)
 		return
 	}
+	responseFHIR, err := g.admit(result.Response, answerKey("pas-claim", relay.OutcomeAnswered))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": errOwnershipFault})
+		return
+	}
 	// Native operation success is always a complete Bundle, regardless of the
 	// responder implementation. Resource-level builders and polling stay separate.
-	if _, bad := validateNativePASResponse(result.ResponseFHIR); bad.Status != 0 {
+	if _, bad := validateNativePASResponse(responseFHIR); bad.Status != 0 {
 		writeJSON(w, bad.Status, map[string]string{"error": bad.Message})
 		return
 	}
@@ -268,9 +286,9 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
-	// Egress-$validate the RESPONSE iff !ResponseRelayed (R-8: a verbatim foreign relay carries Da
+	// Egress-$validate the RESPONSE iff !ResponseRelayed() (R-8: a verbatim foreign relay carries Da
 	// Vinci PAS content which this gateway did not assemble). The
-	// non-relaying LegResponder produces SHN-shaped output (ResponseRelayed false) → $validated, matching the
+	// non-relaying LegResponder produces SHN-shaped output (an authored Response) → $validated, matching the
 	// minimized pas-claim handler's response egress-$validate. The SHN-produced EOB side-effects are
 	// $validated unconditionally in the loop below.
 	assemblyObservation, status, msg := g.validatePASResult(r.Context(), result, answerTok, env.Metadata.CorrelationID, "pas-claim")
@@ -301,7 +319,9 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 	// line. Absence of a stamp is tolerated by design (the frames-absent precedent), so
 	// omission is the honest answer. An SHN-produced answer is stamped at its BUILT line.
 	stampTok := stampForBuiltAnswer(result, answerTok)
-	respBytes, status, msg := g.buildResponseLeg(r, "payer-coverage", "pas-response", "pas-claim", env.Metadata.CorrelationID, g.framePayload(env.Metadata.Sender, http.StatusOK, "application/fhir+json", stampTok, result.ResponseFHIR), tok.Subject, env.Metadata.Sender, "")
+	respBytes, status, msg := g.buildResponseLeg(r, "payer-coverage", "pas-response", "pas-claim", env.Metadata.CorrelationID,
+		result.Response, answerKey("pas-claim", relay.OutcomeAnswered), g.successFrame(env.Metadata.Sender, "application/fhir+json", stampTok),
+		tok.Subject, env.Metadata.Sender, "")
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
@@ -349,7 +369,14 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
-	result, err := g.cfg.Responder.Handle(r.Context(), "pas-claim-update", env.Metadata.CorrelationID, tok.Subject, bundleJSON)
+	capture := &nativeCertificationCapture{}
+	defer func() {
+		if capture.attempted {
+			g.certificationPair("pas-claim-update", "payer-native", env.Metadata.CorrelationID, shnsdk.LineOf(answerTok), capture.request, capture.response)
+		}
+	}()
+	observationContext := context.WithValue(r.Context(), nativeCertificationKey{}, capture)
+	result, err := g.cfg.Responder.Handle(observationContext, "pas-claim-update", env.Metadata.CorrelationID, tok.Subject, bundleJSON)
 	// Arm defer-rollback-unless-committed on the returned result BEFORE checking err: the update
 	// responder acquires a claim in BeginClaimUpdate and returns LegResult{Rollback: release} even
 	// alongside a build error, so the claim is still released by this defer. Mirrors handlePASInbound
@@ -361,7 +388,7 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 		}
 	}()
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "responder failed"})
+		g.responderFailed(w, "pas-claim-update", err)
 		return
 	}
 	if result.Status != 0 {
@@ -369,9 +396,14 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 			env.Metadata.CorrelationID, result, tok.Subject, env.Metadata.Sender, "", answerTok)
 		return
 	}
+	responseFHIR, err := g.admit(result.Response, answerKey("pas-claim-update", relay.OutcomeAnswered))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": errOwnershipFault})
+		return
+	}
 	// Native operation success is always a complete Bundle, regardless of the
 	// responder implementation. Resource-level builders and polling stay separate.
-	if _, bad := validateNativePASResponse(result.ResponseFHIR); bad.Status != 0 {
+	if _, bad := validateNativePASResponse(responseFHIR); bad.Status != 0 {
 		writeJSON(w, bad.Status, map[string]string{"error": bad.Message})
 		return
 	}
@@ -384,9 +416,9 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
-	// Egress-$validate the RESPONSE iff !ResponseRelayed (R-8), mirror of the conformant submit
+	// Egress-$validate the RESPONSE iff !ResponseRelayed() (R-8), mirror of the conformant submit
 	// handler: a non-relaying LegResponder produces locally assembled output (validated); a foreign verbatim relay
-	// (ResponseRelayed true) is preserved bytes-only. Assembly is certified explicitly against PAS.
+	// (a relayed Response) is preserved bytes-only. Assembly is certified explicitly against PAS.
 	assemblyObservation, status, msg := g.validatePASResult(r.Context(), result, answerTok, env.Metadata.CorrelationID, "pas-claim-update")
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
@@ -406,7 +438,9 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 	// Stamp honesty, mirror of the submit leg above: a VERBATIM FOREIGN RELAY is left UNSTAMPED (the stamp
 	// describes bytes THIS build produced); an SHN-produced answer is stamped at its BUILT line.
 	stampTok := stampForBuiltAnswer(result, answerTok)
-	respBytes, status, msg := g.buildResponseLeg(r, "payer-coverage", "pas-update-response", "pas-claim-update", env.Metadata.CorrelationID, g.framePayload(env.Metadata.Sender, http.StatusOK, "application/fhir+json", stampTok, result.ResponseFHIR), tok.Subject, env.Metadata.Sender, "")
+	respBytes, status, msg := g.buildResponseLeg(r, "payer-coverage", "pas-update-response", "pas-claim-update", env.Metadata.CorrelationID,
+		result.Response, answerKey("pas-claim-update", relay.OutcomeAnswered), g.successFrame(env.Metadata.Sender, "application/fhir+json", stampTok),
+		tok.Subject, env.Metadata.Sender, "")
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
@@ -489,7 +523,7 @@ func parseConformantPASUpdateFacts(bundleJSON []byte) (conformantUpdateFacts, in
 			Resource json.RawMessage `json:"resource"`
 		} `json:"entry"`
 	}
-	if err := json.Unmarshal(bundleJSON, &probe); err != nil {
+	if err := decodeMessage(bundleJSON, &probe); err != nil {
 		return conformantUpdateFacts{}, http.StatusBadRequest, "parse claim update bundle failed"
 	}
 	if probe.ResourceType != "Bundle" {
@@ -509,7 +543,7 @@ func parseConformantPASUpdateFacts(bundleJSON []byte) (conformantUpdateFacts, in
 		var rt struct {
 			ResourceType string `json:"resourceType"`
 		}
-		if err := json.Unmarshal(e.Resource, &rt); err != nil {
+		if err := decodeMessage(e.Resource, &rt); err != nil {
 			return conformantUpdateFacts{}, http.StatusBadRequest, "parse update bundle entry failed"
 		}
 		switch rt.ResourceType {
@@ -527,7 +561,7 @@ func parseConformantPASUpdateFacts(bundleJSON []byte) (conformantUpdateFacts, in
 					} `json:"claim"`
 				} `json:"related"`
 			}
-			if err := json.Unmarshal(e.Resource, &c); err != nil {
+			if err := decodeMessage(e.Resource, &c); err != nil {
 				return conformantUpdateFacts{}, http.StatusBadRequest, "parse update Claim entry failed"
 			}
 			// Finding A: surface the Claim's own urn:shn:correlation so handlePASIngress can key
@@ -552,7 +586,7 @@ func parseConformantPASUpdateFacts(bundleJSON []byte) (conformantUpdateFacts, in
 			var qr struct {
 				Id string `json:"id"`
 			}
-			if err := json.Unmarshal(e.Resource, &qr); err != nil {
+			if err := decodeMessage(e.Resource, &qr); err != nil {
 				return conformantUpdateFacts{}, http.StatusBadRequest, "parse update QR entry failed"
 			}
 			f.qrID = qr.Id
@@ -560,7 +594,7 @@ func parseConformantPASUpdateFacts(bundleJSON []byte) (conformantUpdateFacts, in
 			var dr struct {
 				Id string `json:"id"`
 			}
-			if err := json.Unmarshal(e.Resource, &dr); err != nil {
+			if err := decodeMessage(e.Resource, &dr); err != nil {
 				return conformantUpdateFacts{}, http.StatusBadRequest, "parse update DiagnosticReport entry failed"
 			}
 			f.hasDR = true
@@ -582,7 +616,7 @@ func parseConformantPASUpdateFacts(bundleJSON []byte) (conformantUpdateFacts, in
 				} `json:"agent"`
 				Policy []string `json:"policy"`
 			}
-			if err := json.Unmarshal(e.Resource, &prov); err != nil {
+			if err := decodeMessage(e.Resource, &prov); err != nil {
 				return conformantUpdateFacts{}, http.StatusBadRequest, "parse update Provenance entry failed"
 			}
 			for _, tgt := range prov.Target {
@@ -673,10 +707,10 @@ func (g *Gateway) conformantPASUpdateBindContext(ctx context.Context, bundleJSON
 // The rule is NOT PAS-specific — it holds for every leg that can relay foreign
 // bytes. The two PAS legs call it directly because they build their response frame
 // inline (they must seal BEFORE Commit); every other leg gets the same decision
-// through respondLeg's `relayed` parameter, which the DTR native-forward leg
-// exercises (native.go's dtr-questionnaire-fetch case sets ResponseRelayed).
+// through respondLeg, which the DTR native-forward leg exercises (native.go's
+// dtr-questionnaire-fetch case relays its Response).
 func stampForBuiltAnswer(result LegResult, answerTok string) string {
-	if result.ResponseRelayed {
+	if result.ResponseRelayed() {
 		return ""
 	}
 	return answerTok
@@ -684,15 +718,20 @@ func stampForBuiltAnswer(result LegResult, answerTok string) string {
 
 // validatePASResult certifies locally assembled output against the exact PAS
 // response profile. Its Provenance describes assembly only, never conversion.
+// The response is read after the same ownership check its transmit applies.
 func (g *Gateway) validatePASResult(ctx context.Context, result LegResult, answerTok, corrID, leg string) (*ObserverEvent, int, string) {
+	responseFHIR, err := g.admit(result.Response, answerKey(leg, relay.OutcomeAnswered))
+	if err != nil {
+		return nil, http.StatusInternalServerError, errOwnershipFault
+	}
 	if !result.ResponseAssembled {
-		if result.ResponseRelayed {
+		if result.ResponseRelayed() {
 			return nil, 0, ""
 		}
-		status, msg := g.validateFHIR(ctx, result.ResponseFHIR, "egress", shnsdk.LineOf(answerTok))
+		status, msg := g.validateFHIRForContract(ctx, responseFHIR, "egress", "pa.pas", shnsdk.LineOf(answerTok), "")
 		return nil, status, msg
 	}
-	if result.ResponseRelayed || !result.ResponseSubjectForeign || len(corrID) == 0 || len(corrID) > 256 || len(g.cfg.HolderID) == 0 || len(g.cfg.HolderID) > 256 {
+	if result.ResponseRelayed() || !result.ResponseSubjectForeign || len(corrID) == 0 || len(corrID) > 256 || len(g.cfg.HolderID) == 0 || len(g.cfg.HolderID) > 256 {
 		return nil, http.StatusInternalServerError, "invalid PAS assembly provenance"
 	}
 	line := shnsdk.LineOf(answerTok)
@@ -700,19 +739,19 @@ func (g *Gateway) validatePASResult(ctx context.Context, result LegResult, answe
 	if !ok {
 		return nil, http.StatusInternalServerError, "unknown PAS assembly contract line"
 	}
-	v := g.validatorForLine(line)
+	v := g.validatorForContractLine("pa.pas", line)
 	if v == nil {
 		return nil, http.StatusInternalServerError, "PAS assembly validator unavailable"
 	}
 	profile := "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-pas-response-bundle|" + def.PackageVersion
-	verdict, err := v.Validate(ctx, result.ResponseFHIR, profile)
+	verdict, err := v.Validate(ctx, responseFHIR, profile)
 	if err != nil {
 		return nil, http.StatusInternalServerError, "PAS assembly validator unavailable"
 	}
 	if !verdict.Valid {
 		return nil, http.StatusUnprocessableEntity, "PAS assembly validation failed"
 	}
-	graph, err := readPASGraph(result.ResponseFHIR)
+	graph, err := readPASGraph(responseFHIR)
 	if err != nil {
 		return nil, http.StatusInternalServerError, "invalid PAS assembly provenance"
 	}

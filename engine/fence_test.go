@@ -2,6 +2,7 @@ package engine
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,7 +19,7 @@ func TestFenceResponseSubject_DTR(t *testing.T) {
 	withSubject := []byte(`{"resourceType":"Bundle","type":"collection","entry":[` +
 		`{"resource":{"resourceType":"Library","id":"l1"}},` +
 		`{"resource":{"resourceType":"Questionnaire","subject":{"reference":"Patient/X"}}}]}`)
-	if status, _ := g.fenceResponseSubject("dtr-questionnaire-fetch", "", LegResult{ResponseFHIR: withSubject}); status != http.StatusForbidden {
+	if status, _ := g.fenceResponseSubject("dtr-questionnaire-fetch", "", LegResult{Response: testResponse(withSubject)}); status != http.StatusForbidden {
 		t.Fatalf("subject-bearing Questionnaire entry: got status %d, want 403", status)
 	}
 	// A package whose Questionnaire entry is subjectless passes (0). The Questionnaire is
@@ -29,7 +30,7 @@ func TestFenceResponseSubject_DTR(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wrap clean questionnaire: %v", err)
 	}
-	if status, _ := g.fenceResponseSubject("dtr-questionnaire-fetch", "", LegResult{ResponseFHIR: clean}); status != 0 {
+	if status, _ := g.fenceResponseSubject("dtr-questionnaire-fetch", "", LegResult{Response: testResponse(clean)}); status != 0 {
 		t.Fatalf("subjectless package: got status %d, want 0", status)
 	}
 }
@@ -57,7 +58,7 @@ func eobFor(t *testing.T, ref string) []byte {
 func TestFenceConformantPAS_SubjectSwap_Rejected(t *testing.T) {
 	g := &Gateway{} // fenceResponseSubject reads no Gateway state for the PAS arm
 	// SHN-produced posture: both flags false (zero value). A response naming a DIFFERENT member must 403.
-	res := LegResult{ResponseFHIR: claimResponseFor(t, "Patient/MBR-OTHER")}
+	res := LegResult{Response: testResponse(claimResponseFor(t, "Patient/MBR-OTHER"))}
 	if status, _ := g.fenceResponseSubject("pas-claim", "Patient/MBR-COVERED", res); status != http.StatusForbidden {
 		t.Fatalf("subject swap: status=%d, want 403", status)
 	}
@@ -66,7 +67,7 @@ func TestFenceConformantPAS_SubjectSwap_Rejected(t *testing.T) {
 func TestFenceConformantPAS_ForeignRelay_StandsDown(t *testing.T) {
 	g := &Gateway{}
 	// native posture: ResponseSubjectForeign=true. A foreign-namespace ClaimResponse must PASS (R-7).
-	res := LegResult{ResponseFHIR: []byte(assemblyRealPending), ResponseSubjectForeign: true, ResponseRelayed: true}
+	res := LegResult{Response: relayedResponse([]byte(assemblyRealPending)), ResponseSubjectForeign: true}
 	if status, msg := g.fenceResponseSubject("pas-claim", "Patient/MBR-COVERED", res); status != 0 {
 		t.Fatalf("foreign relay stand-down: status=%d msg=%q, want 0", status, msg)
 	}
@@ -76,9 +77,9 @@ func TestFenceConformantPAS_ForeignRelay_WrongEOB_Rejected(t *testing.T) {
 	g := &Gateway{}
 	// Even under a foreign relay, the SHN-produced EOB side-effect is fenced UNCONDITIONALLY.
 	res := LegResult{
-		ResponseFHIR:           []byte(assemblyRealPending),
+		Response:               relayedResponse([]byte(assemblyRealPending)),
 		SideEffectFHIR:         [][]byte{eobFor(t, "Patient/MBR-OTHER")},
-		ResponseSubjectForeign: true, ResponseRelayed: true,
+		ResponseSubjectForeign: true,
 	}
 	if status, _ := g.fenceResponseSubject("pas-claim", "Patient/MBR-COVERED", res); status != http.StatusForbidden {
 		t.Fatalf("wrong-member EOB under relay: status=%d, want 403", status)
@@ -87,7 +88,7 @@ func TestFenceConformantPAS_ForeignRelay_WrongEOB_Rejected(t *testing.T) {
 
 func TestFenceConformantPASUpdate_SubjectSwap_Rejected(t *testing.T) {
 	g := &Gateway{}
-	res := LegResult{ResponseFHIR: claimResponseFor(t, "Patient/MBR-OTHER")}
+	res := LegResult{Response: testResponse(claimResponseFor(t, "Patient/MBR-OTHER"))}
 	if status, _ := g.fenceResponseSubject("pas-claim-update", "Patient/MBR-COVERED", res); status != http.StatusForbidden {
 		t.Fatalf("update subject swap: status=%d, want 403", status)
 	}
@@ -110,7 +111,7 @@ func TestFenceResponseSubject_Eligibility(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildEligibilityResponse: %v", err)
 	}
-	if status, msg := g.fenceResponseSubject("coverage-eligibility", "Patient/X", LegResult{ResponseFHIR: crrForY}); status != http.StatusForbidden {
+	if status, msg := g.fenceResponseSubject("coverage-eligibility", "Patient/X", LegResult{Response: testResponse(crrForY)}); status != http.StatusForbidden {
 		t.Fatalf("foreign-patient CRR: status=%d msg=%q, want 403", status, msg)
 	}
 
@@ -119,7 +120,57 @@ func TestFenceResponseSubject_Eligibility(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildEligibilityResponse: %v", err)
 	}
-	if status, msg := g.fenceResponseSubject("coverage-eligibility", "Patient/X", LegResult{ResponseFHIR: crrForX}); status != 0 {
+	if status, msg := g.fenceResponseSubject("coverage-eligibility", "Patient/X", LegResult{Response: testResponse(crrForX)}); status != 0 {
 		t.Fatalf("matching-patient CRR: status=%d msg=%q, want 0", status, msg)
+	}
+}
+
+// TestFenceResponseSubject_RepeatedMemberRefused: an answer that repeats a
+// member name — exactly, or under case folding — can be read two ways, so the
+// fence cannot judge it: 403, before any subject is compared. (A request that
+// repeats a member is refused 400 instead: there the request is malformed; here
+// the answering side sent something this gateway will not vouch for.) Each row
+// changes one member of an answer the fence otherwise passes.
+func TestFenceResponseSubject_RepeatedMemberRefused(t *testing.T) {
+	g := &Gateway{}
+	const member = "Patient/MBR-COVERED"
+	eligibility := `{"resourceType":"CoverageEligibilityResponse","patient":{"reference":"` + member + `"}}`
+	dtrPackage := `{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"Questionnaire","id":"q","status":"active"}}]}`
+	pas := string(claimResponseFor(t, member))
+	rows := []struct {
+		leg, bound, valid, find, exact, folded string
+		foreign                                bool
+	}{
+		{"coverage-eligibility", member, eligibility, `"patient":`, `"patient":{"reference":"Patient/MBR-OTHER"},"patient":`, `"Patient":{"reference":"Patient/MBR-OTHER"},"patient":`, false},
+		{"dtr-questionnaire-fetch", "", dtrPackage, `"status":"active"`, `"status":"active","status":"draft"`, `"status":"active","Status":"draft"`, false},
+		{"pas-claim", member, pas, `"patient":`, `"patient":{"reference":"Patient/MBR-OTHER"},"patient":`, `"Patient":{"reference":"Patient/MBR-OTHER"},"patient":`, false},
+		{"pas-claim-update", member, pas, `"patient":`, `"patient":{"reference":"Patient/MBR-OTHER"},"patient":`, `"PATIENT":{"reference":"Patient/MBR-OTHER"},"patient":`, true},
+	}
+	for _, r := range rows {
+		res := func(body string) LegResult {
+			if r.foreign && body != r.valid {
+				// The payer's own answer, relayed: the repeated member is caught
+				// before the relayed-graph check would run.
+				return LegResult{Response: relayedResponse([]byte(body)), ResponseSubjectForeign: true}
+			}
+			return LegResult{Response: testResponse([]byte(body))}
+		}
+		t.Run(r.leg+"/control", func(t *testing.T) {
+			if status, msg := g.fenceResponseSubject(r.leg, r.bound, res(r.valid)); status != 0 {
+				t.Fatalf("valid answer refused: %d %s", status, msg)
+			}
+		})
+		for name, repl := range map[string]string{"exact": r.exact, "case-folded": r.folded} {
+			t.Run(r.leg+"/"+name, func(t *testing.T) {
+				body := strings.Replace(r.valid, r.find, repl, 1)
+				if body == r.valid {
+					t.Fatal("mutation did not apply")
+				}
+				status, msg := g.fenceResponseSubject(r.leg, r.bound, res(body))
+				if status != http.StatusForbidden || msg != "response repeats a member name" {
+					t.Fatalf("got %d %q, want 403 repeated member", status, msg)
+				}
+			})
+		}
 	}
 }

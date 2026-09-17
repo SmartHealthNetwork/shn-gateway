@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"encoding/json"
 	"net/http"
 )
 
@@ -10,7 +9,13 @@ import (
 // Only the FHIR operation handlers opt in, leaving CDS Hooks and OAuth alone.
 type fhirOperationWriter struct{ http.ResponseWriter }
 
-func (w *fhirOperationWriter) writeJSON(status int, value any) {
+// Unwrap exposes the underlying writer (http.ResponseController, scopeOf).
+func (w *fhirOperationWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// fhirOperationValue is the value a FHIR operation route answers for a
+// locally generated JSON answer: an {"error": …} refusal becomes an
+// OperationOutcome; anything else is unchanged.
+func fhirOperationValue(status int, value any) any {
 	if failure, ok := value.(map[string]string); ok && status >= 400 {
 		if message, exists := failure["error"]; exists {
 			code := "processing"
@@ -26,10 +31,8 @@ func (w *fhirOperationWriter) writeJSON(status int, value any) {
 			case http.StatusServiceUnavailable:
 				code = "transient"
 			}
-			value = map[string]any{"resourceType": "OperationOutcome", "issue": []map[string]string{{"severity": "error", "code": code, "diagnostics": message}}}
+			return map[string]any{"resourceType": "OperationOutcome", "issue": []map[string]string{{"severity": "error", "code": code, "diagnostics": message}}}
 		}
 	}
-	w.Header().Set("Content-Type", "application/fhir+json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(value)
+	return value
 }

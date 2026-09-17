@@ -11,11 +11,10 @@
 // (UC-04) and the pend-then-amend (UC-06/UC-07) provider-data lanes: fill what is
 // delivered, ask the payer for the next groups those answers unlock, repeat until a round
 // delivers nothing new, then fill the complete tree. The round trip rides the EXISTING
-// dtr-questionnaire-fetch substrate leg (holder ↔ Hub ↔ holder, captured, audited, per-leg
-// authority) with the gateway-internal dtrLegRequest widened by a NextQuestion field — the
-// same precedent the Order field set: no new leg type, no new authority op, nothing the
-// published SDK has to know about. A non-adaptive questionnaire takes the unchanged
-// single-fill path, byte-identical.
+// dtr-questionnaire-fetch leg (holder ↔ Hub ↔ holder, captured, audited, per-leg
+// authority): its body is the SDC $next-question input Parameters and the request frame
+// names the operation (next-question), so no new leg type or authority op exists. A
+// non-adaptive questionnaire takes the unchanged single-fill path, byte-identical.
 package engine
 
 import (
@@ -24,6 +23,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -141,7 +141,13 @@ func (g *Gateway) nextQuestionLeg(ctx context.Context, r *http.Request, res crdD
 	if line := shnsdk.LineOf(route.Token); line != res.dtrLine {
 		return nil, http.StatusBadGateway, fmt.Sprintf("next-question routed at DTR line %q, the package was fetched at %q", line, res.dtrLine), nil
 	}
-	reqBytes, merr := json.Marshal(dtrLegRequest{Canonical: canonical, NextQuestion: reqQR})
+	// The round is the SDC $next-question operation's own input, named in the
+	// request frame; a payer that has not declared framed DTR operations is
+	// refused before anything is sent.
+	if status, msg := g.framedDTRRefusal(res.recipient); status != 0 {
+		return nil, status, msg, nil
+	}
+	reqBytes, merr := buildNextQuestionParameters(reqQR)
 	if merr != nil {
 		return nil, http.StatusInternalServerError, "build next-question leg failed", nil
 	}
@@ -151,11 +157,13 @@ func (g *Gateway) nextQuestionLeg(ctx context.Context, r *http.Request, res crdD
 		return nil, http.StatusBadGateway, aerr.Error(), aerr
 	}
 	body, oerr := g.OriginateLeg(ctx, r, res.recipient, "dtr-questionnaire-fetch", res.pci, corr, "",
-		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Bytes: adapted})
+		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route),
+			Payload:   sealRequest(relay.BuilderDTRNextQuestion, adapted, "application/fhir+json"),
+			Operation: shnsdk.FrameOperationNextQuestion})
 	if oerr != nil {
 		return nil, http.StatusBadGateway, oerr.Error(), oerr
 	}
-	if vstatus, vmsg := g.validateFHIRPayerIngress(ctx, body, res.dtrLine); vstatus != 0 {
+	if vstatus, vmsg := g.validateFHIRPayerIngress(ctx, body, res.dtrLine, "pa.dtr"); vstatus != 0 {
 		return nil, vstatus, vmsg, nil
 	}
 	qr, items, perr := parseNextQuestionResponse(body)
@@ -216,7 +224,7 @@ func parseNextQuestionResponse(body []byte) (qrJSON []byte, deliveredItems []jso
 			Resource json.RawMessage `json:"resource"`
 		} `json:"parameter"`
 	}
-	if err := json.Unmarshal(body, &top); err != nil {
+	if err := decodeMessage(body, &top); err != nil {
 		return nil, nil, fmt.Errorf("parse: %w", err)
 	}
 	if top.ResourceType != "Parameters" {
@@ -230,7 +238,7 @@ func parseNextQuestionResponse(body []byte) (qrJSON []byte, deliveredItems []jso
 			ResourceType string            `json:"resourceType"`
 			Contained    []json.RawMessage `json:"contained"`
 		}
-		if err := json.Unmarshal(p.Resource, &qr); err != nil || qr.ResourceType != "QuestionnaireResponse" {
+		if err := decodeMessage(p.Resource, &qr); err != nil || qr.ResourceType != "QuestionnaireResponse" {
 			return nil, nil, fmt.Errorf("questionnaire-response parameter is not a QuestionnaireResponse")
 		}
 		for _, c := range qr.Contained {
@@ -308,13 +316,54 @@ func mergeDeliveredGroups(tree []byte, delivered []json.RawMessage) (merged []by
 // nextQuestionRequestSubject reads the dtr-questionnaire-fetch leg's NextQuestion carriage:
 // ok=false when the request is an ordinary package fetch; otherwise the carried
 // QuestionnaireResponse's subject (the (A)-bind input on the payer side — "" when absent,
-// which the bind refuses).
+// which the bind refuses). It reads the older request envelope only; a framed
+// $next-question is read by framedNextQuestionSubject.
 func nextQuestionRequestSubject(reqJSON []byte) (subject string, ok bool) {
 	var fetch dtrLegRequest
-	if err := json.Unmarshal(reqJSON, &fetch); err != nil || len(fetch.NextQuestion) == 0 {
+	if err := decodeMessage(reqJSON, &fetch); err != nil || len(fetch.NextQuestion) == 0 {
 		return "", false
 	}
 	subject, _ = questionnaireResponseSubject(fetch.NextQuestion)
+	return subject, true
+}
+
+// framedNextQuestionSubject reads the subject of a framed $next-question
+// input, the SDC operation's own body: a bare QuestionnaireResponse, or a
+// Parameters with exactly one questionnaire-response parameter whose resource
+// is a QuestionnaireResponse. ok is false for any other body. The subject is
+// "" when the QuestionnaireResponse names none, which the bind refuses.
+func framedNextQuestionSubject(body []byte) (subject string, ok bool) {
+	d, err := relay.Doc(relay.NewBody(body, relay.OriginPeerFrame))
+	if err != nil || d.Kind(d.Root()) != relay.KindObject {
+		return "", false
+	}
+	qr := d.Root()
+	switch docText(d, qr, "resourceType") {
+	case "QuestionnaireResponse":
+	case "Parameters":
+		params, ok := d.Member(qr, "parameter")
+		if !ok || d.Kind(params) != relay.KindArray {
+			return "", false
+		}
+		found := 0
+		for _, p := range d.Elems(params) {
+			if docText(d, p, "name") != "questionnaire-response" {
+				continue
+			}
+			found++
+			if res, ok := d.Member(p, "resource"); ok {
+				qr = res
+			}
+		}
+		if found != 1 || qr == d.Root() || docText(d, qr, "resourceType") != "QuestionnaireResponse" {
+			return "", false
+		}
+	default:
+		return "", false
+	}
+	if s, ok := d.Member(qr, "subject"); ok {
+		subject = docText(d, s, "reference")
+	}
 	return subject, true
 }
 

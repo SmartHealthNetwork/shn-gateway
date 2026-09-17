@@ -52,7 +52,7 @@ func TestLegProject_DropsContent(t *testing.T) {
 	leg := Leg{
 		Type:     "crd-order-select",
 		Physics:  paCatalog["crd-order-select"].Physics,
-		Content:  Content{WorkstreamType: workstreamPA, Bytes: []byte(`{"clinical":"secret"}`)},
+		Content:  Content{WorkstreamType: workstreamPA, Payload: testRequest([]byte(`{"clinical":"secret"}`))},
 		Subjects: []string{"pci-1"},
 	}
 	rec := leg.Project("corr-child-1", "approved")
@@ -257,7 +257,7 @@ func TestRecordLeg_StoreFailureIsLoggedCountedNotFatal(t *testing.T) {
 	log.SetOutput(&logBuf)
 	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 
-	req := httptest.NewRequest(http.MethodPost, "/cds-services/order-select-crd", bytes.NewReader(routableCRDReqJSON()))
+	req := httptest.NewRequest(http.MethodPost, "/cds-services/shn-order-select", bytes.NewReader(routableCRDReqJSON()))
 	rec := httptest.NewRecorder()
 	gw2.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {

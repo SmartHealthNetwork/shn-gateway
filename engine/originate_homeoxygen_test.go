@@ -48,6 +48,9 @@ type homeOxygenSoR struct {
 	performerRef string
 	supplierJSON []byte
 
+	// coverages, when set, answer the member's Coverage search.
+	coverages [][]byte
+
 	openOrderCalls   []string
 	resolveByRefCall []string
 }
@@ -82,10 +85,37 @@ func (s *homeOxygenSoR) OpenOrder(memberID string) ([]byte, bool) {
 	return s.orderJSON, true
 }
 
+// SearchPatientContext answers the member's DeviceRequest search with the open order
+// (the device history an order-dispatch request carries); other searches are the
+// census's.
+func (s *homeOxygenSoR) SearchPatientContext(ctx context.Context, resourceType, id string, dates ...SearchDateRange) (SearchResult, error) {
+	if resourceType == "Coverage" && id == s.member && s.coverages != nil {
+		entries := make([]string, 0, len(s.coverages))
+		for _, c := range s.coverages {
+			entries = append(entries, `{"resource":`+string(c)+`,"search":{"mode":"match"}}`)
+		}
+		page := []byte(`{"resourceType":"Bundle","type":"searchset","entry":[` + strings.Join(entries, ",") + `]}`)
+		parsed, err := ParseSearchPage(page, resourceType)
+		if err != nil {
+			return SearchResult{}, err
+		}
+		return SearchResult{Pages: [][]byte{page}, Entries: parsed.Entries, Total: len(parsed.Entries)}, nil
+	}
+	if resourceType != "DeviceRequest" || id != s.member || s.orderJSON == nil {
+		return s.censusSoR.SearchPatientContext(ctx, resourceType, id, dates...)
+	}
+	page := []byte(`{"resourceType":"Bundle","type":"searchset","entry":[{"resource":` + string(s.orderJSON) + `,"search":{"mode":"match"}}]}`)
+	parsed, err := ParseSearchPage(page, resourceType)
+	if err != nil {
+		return SearchResult{}, err
+	}
+	return SearchResult{Pages: [][]byte{page}, Entries: parsed.Entries, Total: len(parsed.Entries)}, nil
+}
+
 func (s *homeOxygenSoR) ResolveByReference(ref string) ([]byte, bool) {
 	s.resolveByRefCall = append(s.resolveByRefCall, ref)
 	if ref != s.performerRef {
-		return nil, false
+		return s.censusSoR.ResolveByReference(ref)
 	}
 	return s.supplierJSON, true
 }
@@ -226,14 +256,11 @@ func (s *homeOxygenSubstrate) handleRoute(body []byte) (*http.Response, error) {
 		// ADVISORY card: conditional coverage + NOT auth-needed (the order-dispatch card
 		// does not require PA; its job is to advertise the HomeOxygen questionnaire). The
 		// handler must gate on NeedsDTR, NOT PARequired.
-		respPayload, err = shnsdk.BuildCards(shnsdk.CardCoverage{
+		respPayload = crdAnswerFor(shnsdk.CardCoverage{
 			Covered:        shnsdk.CoveredConditional,
 			PANeeded:       shnsdk.PANeededNoAuth,
 			Questionnaires: []string{s.canonical},
 		})
-		if err != nil {
-			return errResp("stub: BuildCards: " + err.Error()), nil
-		}
 		respOp, respFrame = "crd-dispatch-cards", "payer-coverage"
 	case "dtr-questionnaire-fetch":
 		pkg, perr := testQuestionnairePackage(homeOxygenQuestionnaire(s.canonical))
@@ -374,7 +401,7 @@ func TestHandleHomeOxygen(t *testing.T) {
 
 	reg := shnsdk.NewRegistry()
 	reg.Set("provider", shnsdk.RegistryEntry{ID: "provider", Role: "provider", EncPub: provEncPub, SignPub: authzPub})
-	reg.Set("payer", shnsdk.RegistryEntry{ID: "payer", Role: "payer", EncPub: payerEncPub, SignPub: payerSignPub})
+	reg.Set("payer", shnsdk.RegistryEntry{ID: "payer", Role: "payer", EncPub: payerEncPub, SignPub: payerSignPub, RequestFrames: dtrOperationFrames})
 
 	const fakeBase = "http://stub.test"
 	gw := mustNew(t, Config{

@@ -10,8 +10,8 @@ func TestRoundTrip_RelayError_EmitsLegResponseWithStatus(t *testing.T) {
 	env := newInProcessExchange(t)
 	var events []ObserverEvent
 	env.originator.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
-	env.payerReturns(LegResult{Status: 502, ResponseFHIR: []byte(`{"resourceType":"OperationOutcome"}`)})
-	_, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "", Content{WorkstreamType: workstreamPA, Bytes: env.crdReq})
+	env.payerReturns(LegResult{Status: 502, Response: testResponse([]byte(`{"resourceType":"OperationOutcome"}`))})
+	_, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "", Content{WorkstreamType: workstreamPA, Payload: testRequest(env.crdReq)})
 	var re *RelayError
 	if !errors.As(err, &re) {
 		t.Fatalf("want *RelayError, got %v", err)

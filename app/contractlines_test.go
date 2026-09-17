@@ -1,9 +1,13 @@
 // contractlines_test.go — contract-line boot gates: the declared-set
-// env (D1a) and the per-line validator lanes (F7). Both are FAIL-CLOSED at boot:
-// a deployment must not advertise a contract line it cannot build or validate.
+// env (D1a) and the per-line validator lanes (F7). Declared defaults qualify at
+// boot; explicit endpoints preserve URL-only startup. Configured-map tests
+// separately retain the legacy pure helper contract.
 package app
 
 import (
+	"context"
+	"errors"
+	"github.com/SmartHealthNetwork/shn-gateway/engine"
 	"strings"
 	"testing"
 
@@ -68,7 +72,7 @@ func TestDeclaredSetEnv(t *testing.T) {
 // without its FHIR_VALIDATE_URL_* lane (and with the fake validator off) must
 // refuse to boot — validating 2.2 bytes against a 2.0 IG is not a degraded mode,
 // it is a wrong answer (FR-36/FR-G29).
-func TestValidatorLaneFailClosed(t *testing.T) {
+func TestConfiguredValidatorLaneFailClosed(t *testing.T) {
 	canonical := shnsdk.NewFakeValidator()
 
 	t.Run("declared 2.2 with no lane refuses", func(t *testing.T) {
@@ -110,8 +114,11 @@ func TestValidatorLaneFailClosed(t *testing.T) {
 			t.Fatalf("SHN_FAKE_VALIDATOR must keep every line laned (harness/e2e): %v", err)
 		}
 		for _, line := range []string{"2.0", "2.1", "2.2"} {
-			if lanes[line] == nil {
-				t.Fatalf("fake validator lane missing for %s", line)
+			assertLineFake(t, lanes[line], line)
+			for _, other := range []string{"2.0", "2.1", "2.2"} {
+				if line != other && lanes[line] == lanes[other] {
+					t.Fatalf("lines %s and %s share a validator", line, other)
+				}
 			}
 		}
 	})
@@ -142,7 +149,7 @@ func TestValidatorLaneFailClosed(t *testing.T) {
 // each natively tri-line — were never actually skippable by the len(...)<2
 // check; only a GENUINELY single-native-line contract (pa.pdex, one native
 // token) is. These cases lock that guarantee down with an explicit test.
-func TestValidatorLaneSingleLineDeclaration(t *testing.T) {
+func TestConfiguredValidatorLaneSingleLineDeclaration(t *testing.T) {
 	canonical := shnsdk.NewFakeValidator()
 
 	t.Run("declared pa.crd@2.2 alone, no lane, refuses", func(t *testing.T) {
@@ -168,9 +175,7 @@ func TestValidatorLaneSingleLineDeclaration(t *testing.T) {
 		if err != nil {
 			t.Fatalf("SHN_FAKE_VALIDATOR must still serve a single-line declaration: %v", err)
 		}
-		if lanes["2.2"] != canonical {
-			t.Fatalf("lanes = %v, want 2.2 served by the fake", lanes)
-		}
+		assertLineFake(t, lanes["2.2"], "2.2")
 	})
 
 	t.Run("declared pa.crd@2.2 alone, with its lane, boots", func(t *testing.T) {
@@ -215,7 +220,7 @@ func TestValidatorLaneSingleLineDeclaration(t *testing.T) {
 // than the declared set). Paired with the rejection row: a DECLARED line
 // with no configured lane still refuses boot — the widening only ADDS lanes,
 // it never rescues a declared-but-unlaned line.
-func TestLaneMapIncludesConfiguredUndeclaredLine(t *testing.T) {
+func TestConfiguredLaneMapIncludesConfiguredUndeclaredLine(t *testing.T) {
 	canonical := shnsdk.NewFakeValidator()
 
 	t.Run("undeclared line with a configured lane enters the map", func(t *testing.T) {
@@ -249,4 +254,103 @@ func TestLaneMapIncludesConfiguredUndeclaredLine(t *testing.T) {
 			t.Fatal("declared 2.2 with no configured lane must still refuse boot — D1a only ADDS undeclared lanes, never rescues a declared-but-unlaned line")
 		}
 	})
+}
+
+// assertLineFake verifies both the selected line and its structural discrimination.
+func assertLineFake(t *testing.T, validator shnsdk.Validator, line string) {
+	t.Helper()
+	fake, ok := validator.(*engine.LineFakeValidator)
+	if !ok || fake.Line != line {
+		t.Fatalf("validator = %T (%v), want structural fake for %s", validator, validator, line)
+	}
+	result, err := fake.Validate(context.Background(), []byte(`{"resourceType":"Claim","type":{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/claim-type","code":"professional"}]},"item":[{"sequence":1}]}`), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Valid != (line == "2.0") {
+		t.Fatalf("line %s accepted a Claim without later-line item details: valid=%v issues=%v", line, result.Valid, result.Issues)
+	}
+}
+
+func TestSelectValidatorCanonicalLineFake(t *testing.T) {
+	validator, err := selectValidator(func(k string) string {
+		if k == "SHN_FAKE_VALIDATOR" {
+			return "1"
+		}
+		return ""
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertLineFake(t, validator, "2.0")
+}
+
+// The named declaration gates exercise discovery and retain its cleanup owner;
+// TestConfigured* above independently preserves configured-map compatibility.
+func TestValidatorLaneFailClosed(t *testing.T) {
+	for _, line := range []string{"2.1", "2.2"} {
+		t.Run(line, func(t *testing.T) {
+			for _, fail := range []bool{false, true} {
+				lanes, m, err := discoverValidatorLanes(context.Background(), func(string) string { return "" }, []string{"pa.pas@" + line}, shnsdk.NewFakeValidator(), config{}, engine.DefaultLaneURL, func(ctx context.Context, base, l string) error {
+					if l != line {
+						<-ctx.Done()
+						return ctx.Err()
+					}
+					if fail {
+						return errors.New("finite qualifier refused")
+					}
+					return nil
+				})
+				if m != nil {
+					defer m.Close()
+				}
+				if (err != nil) != fail {
+					t.Fatalf("fail=%v err=%v", fail, err)
+				}
+				if fail {
+					if !strings.Contains(err.Error(), line) || !strings.Contains(err.Error(), "finite qualifier refused") {
+						t.Fatal(err)
+					}
+					continue
+				}
+				if lanes[line] != nil || !m.defaults[line].Ready() {
+					t.Fatal("declared default was not independently qualified")
+				}
+			}
+		})
+	}
+}
+func TestValidatorLaneSingleLineDeclaration(t *testing.T) {
+	for _, token := range []string{"pa.crd@2.2", "pa.dtr@2.1", "pa.pas@2.1"} {
+		t.Run(token, func(t *testing.T) {
+			line := shnsdk.LineOf(token)
+			_, m, err := discoverValidatorLanes(context.Background(), func(string) string { return "" }, []string{token}, shnsdk.NewFakeValidator(), config{}, engine.DefaultLaneURL, func(ctx context.Context, base, l string) error {
+				if l == line {
+					return errors.New("unqualified declared default")
+				}
+				<-ctx.Done()
+				return ctx.Err()
+			})
+			if m != nil {
+				m.Close()
+			}
+			if err == nil {
+				t.Fatal("single declaration bypassed native multiplicity qualification")
+			}
+		})
+	}
+}
+func TestLaneMapIncludesConfiguredUndeclaredLine(t *testing.T) {
+	canonical := shnsdk.NewFakeValidator()
+	lanes, m, err := discoverValidatorLanes(context.Background(), func(string) string { return "" }, []string{"pa.pdex@2.1"}, canonical, config{FHIRValidateURL22: "http://configured.test/fhir"}, engine.DefaultLaneURL, func(ctx context.Context, _, _ string) error { <-ctx.Done(); return ctx.Err() })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	if lanes["2.2"] == nil || m.defaults["2.2"] != nil {
+		t.Fatal("explicit undeclared lane lost precedence")
+	}
+	if lanes["2.1"] != canonical || !m.fallbacks["2.1"] || m.defaults["2.1"].Ready() {
+		t.Fatal("PDex fallback and unavailable default were conflated")
+	}
 }

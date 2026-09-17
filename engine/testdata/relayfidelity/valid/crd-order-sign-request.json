@@ -1,0 +1,214 @@
+{
+  "hookInstance" : "8ea9a925-119f-47b4-9cf5-dc36b40e273d",
+  "fhirServer" : "http://localhost:8081/fhir",
+  "hook" : "order-sign",
+  "fhirAuthorization" : {
+    "access_token" : "example-token",
+    "token_type" : "Bearer",
+    "expires_in" : 300,
+    "scope" : "patient/Patient.read patient/Coverage.read",
+    "subject" : "cds-service4"
+  },
+  "extension" : {
+	"org.example.relay-fidelity" : {
+		"weights" : [ 1.50, 9007199254740993, 1e2, -0.0 ],
+		"nested" : [ [ 1, [ 2, [ ] ] ], { } ],
+		"note" : "unknown members are allowed only inside the CDS Hooks extension object"
+	}
+  },
+  "context" : {
+    "userId" : "Practitioner/PractitionerExample",
+    "patientId" : "example",
+    "draftOrders" : {
+      "resourceType" : "Bundle",
+      "type" : "collection",
+      "entry" : [ {
+        "fullUrl" : "urn:uuid:fb592b6d-ac6b-4d27-87b8-666e9b8ded73",
+        "resource" : {
+          "resourceType" : "DeviceRequest",
+          "id" : "prior-auth-required-device-request",
+          "meta" : {
+            "profile" : [ "http://hl7.org/fhir/us/davinci-crd/StructureDefinition/profile-devicerequest" ]
+          },
+          "text" : {
+            "status" : "generated",
+            "div" : "<div xmlns=\"http://www.w3.org/1999/xhtml\"><p>Synthetic relay fixture: 1 &lt; 2 &amp;&amp; 3 &gt; 2</p></div>"
+          },
+          "extension" : [ {
+            "url" : "http://example.org/fhir/StructureDefinition/relay-fidelity-unknown",
+            "extension" : [ {
+              "url" : "decimal-a",
+              "valueDecimal" : 1.50
+            }, {
+              "url" : "decimal-b",
+              "valueDecimal" : 9007199254740993
+            }, {
+              "url" : "decimal-c",
+              "valueDecimal" : 1e2
+            } ]
+          } ],
+          "status" : "draft",
+          "intent" : "original-order",
+          "codeCodeableConcept" : {
+            "coding" : [ {
+              "system" : "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code" : "L8000"
+            } ]
+          },
+          "subject" : {
+            "reference" : "Patient/example"
+          },
+          "authoredOn" : "2026-06-19T21:53:54+00:00",
+          "requester" : {
+            "reference" : "Practitioner/PractitionerExample"
+          },
+          "insurance" : [ {
+            "reference" : "Coverage/coverage-1"
+          } ]
+        }
+      }, {
+        "fullUrl" : "urn:uuid:3c1f0a52-6f0e-4a55-9d51-2f8b0c9a7e14",
+        "resource" : {
+          "resourceType" : "DeviceRequest",
+          "id" : "second-draft-device-request",
+          "meta" : {
+            "profile" : [ "http://hl7.org/fhir/us/davinci-crd/StructureDefinition/profile-devicerequest" ]
+          },
+          "status" : "draft",
+          "intent" : "original-order",
+          "codeCodeableConcept" : {
+            "coding" : [ {
+              "system" : "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code" : "E0250"
+            } ]
+          },
+          "subject" : {
+            "reference" : "Patient/example"
+          },
+          "authoredOn" : "2026-06-19T21:53:54+00:00",
+          "requester" : {
+            "reference" : "Practitioner/PractitionerExample"
+          },
+          "insurance" : [ {
+            "reference" : "Coverage/coverage-1"
+          } ]
+        }
+      } ]
+    }
+  },
+  "prefetch" : {
+    "patient" : {
+      "resourceType" : "Patient",
+      "id" : "example",
+      "meta" : {
+        "profile" : [ "http://hl7.org/fhir/us/davinci-crd/StructureDefinition/profile-patient" ]
+      },
+      "identifier" : [ {
+        "type" : {
+          "coding" : [ {
+            "system" : "http://terminology.hl7.org/CodeSystem/v2-0203",
+            "code" : "MR"
+          } ]
+        },
+        "system" : "http://example.org/fhir/mrn",
+        "value" : "MRN-EXAMPLE-0001"
+      } ],
+      "name" : [ {
+        "family" : "Test",
+        "given" : [ "Patient" ]
+      } ],
+      "gender" : "male",
+      "birthDate" : "1960-01-01"
+    },
+    "coverage" : {
+      "resourceType" : "Bundle",
+      "type" : "collection",
+      "entry" : [ {
+        "fullUrl" : "http://localhost:8081/fhir/Coverage/coverage-1",
+        "resource" : {
+          "resourceType" : "Coverage",
+          "id" : "coverage-1",
+          "meta" : {
+            "profile" : [ "http://hl7.org/fhir/us/davinci-crd/StructureDefinition/profile-coverage" ]
+          },
+          "status" : "active",
+          "subscriberId" : "10A3D58WH456",
+          "beneficiary" : {
+            "reference" : "Patient/example"
+          },
+          "relationship" : {
+            "coding" : [ {
+              "system" : "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+              "code" : "self",
+              "display" : "Self"
+            } ]
+          },
+          "payor" : [ {
+            "reference" : "Organization/cms-payer"
+          } ]
+        }
+      }, {
+        "fullUrl" : "http://localhost:8081/fhir/Organization/cms-payer",
+        "resource" : {
+          "resourceType" : "Organization",
+          "id" : "cms-payer",
+          "meta" : {
+            "profile" : [ "http://hl7.org/fhir/us/davinci-crd/StructureDefinition/profile-organization" ]
+          },
+          "identifier" : [ {
+            "system" : "urn:oid:2.16.840.1.113883.6.300",
+            "value" : "00001"
+          } ],
+          "active" : true,
+          "name" : "Centers for Medicare and Medicaid Services"
+        }
+      } ],
+      "signature" : {
+        "type" : [ {
+          "system" : "urn:iso-astm:E1762-95:2013",
+          "code" : "1.2.840.10065.1.12.1.1",
+          "display" : "Author's Signature"
+        } ],
+        "when" : "2026-06-19T21:53:54+00:00",
+        "who" : {
+          "reference" : "Practitioner/PractitionerExample"
+        },
+        "sigFormat" : "image/png",
+        "data" : "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+      }
+    },
+    "serviceHistory" : null,
+    "deviceHistory" : {
+      "resourceType" : "Bundle",
+      "type" : "searchset",
+      "total" : 1,
+      "link" : [ {
+        "relation" : "self",
+        "url" : "http://localhost:8081/fhir/DeviceRequest?patient=Patient/example"
+      } ],
+      "entry" : [ {
+        "fullUrl" : "http://localhost:8081/fhir/DeviceRequest/prior-device-request",
+        "resource" : {
+          "resourceType" : "DeviceRequest",
+          "id" : "prior-device-request",
+          "status" : "completed",
+          "intent" : "order",
+          "codeCodeableConcept" : {
+            "coding" : [ {
+              "system" : "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code" : "E0431"
+            } ]
+          },
+          "subject" : {
+            "reference" : "Patient/example"
+          },
+          "authoredOn" : "2025-11-02T09:00:00+00:00"
+        },
+        "search" : {
+          "mode" : "match",
+          "score" : 1.50
+        }
+      } ]
+    }
+  }
+}

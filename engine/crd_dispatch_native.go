@@ -34,7 +34,7 @@ func findInPrefetchByRef(prefetch map[string]json.RawMessage, ref string) ([]byt
 			ResourceType string `json:"resourceType"`
 			ID           string `json:"id"`
 		}
-		if json.Unmarshal(raw, &probe) == nil && probe.ResourceType != "Bundle" && probe.ID == id {
+		if decodeMessage(raw, &probe) == nil && probe.ResourceType != "Bundle" && probe.ID == id {
 			return raw, true
 		}
 		var b struct {
@@ -44,12 +44,12 @@ func findInPrefetchByRef(prefetch map[string]json.RawMessage, ref string) ([]byt
 				Resource json.RawMessage `json:"resource"`
 			} `json:"entry"`
 		}
-		if json.Unmarshal(raw, &b) == nil && b.ResourceType == "Bundle" {
+		if decodeMessage(raw, &b) == nil && b.ResourceType == "Bundle" {
 			for _, e := range b.Entry {
 				var rp struct {
 					ID string `json:"id"`
 				}
-				_ = json.Unmarshal(e.Resource, &rp)
+				_ = decodeMessage(e.Resource, &rp)
 				if rp.ID == id || e.FullURL == ref || strings.HasSuffix(e.FullURL, "/"+id) {
 					return e.Resource, true
 				}
@@ -70,7 +70,7 @@ func coverageBeneficiaryFromPrefetch(cov json.RawMessage) string {
 			Resource json.RawMessage `json:"resource"`
 		} `json:"entry"`
 	}
-	if json.Unmarshal(cov, &b) == nil {
+	if decodeMessage(cov, &b) == nil {
 		for _, e := range b.Entry {
 			if ref := patientRefOf(e.Resource); ref != "" {
 				return ref
@@ -87,7 +87,7 @@ func coverageBeneficiaryFromPrefetch(cov json.RawMessage) string {
 // ingress-$validate, or (nil,nil,status,msg).
 func (g *Gateway) conformantCRDDispatchBindContext(ctx context.Context, reqJSON []byte, tokSubject string) (orderJSON, covJSON []byte, status int, msg string) {
 	var req dispatchCDSRequest
-	if err := json.Unmarshal(reqJSON, &req); err != nil {
+	if err := decodeMessage(reqJSON, &req); err != nil {
 		return nil, nil, http.StatusBadRequest, "parse cds request failed"
 	}
 	if req.Context.PatientID == "" {
@@ -177,7 +177,7 @@ func (g *Gateway) handleCRDDispatchInbound(w http.ResponseWriter, r *http.Reques
 	}
 	result, err := g.cfg.Responder.Handle(ctx, "crd-order-dispatch", env.Metadata.CorrelationID, tok.Subject, reqJSON)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "responder failed"})
+		g.responderFailed(w, "crd-order-dispatch", err)
 		return
 	}
 	if result.Status != 0 {
@@ -185,5 +185,6 @@ func (g *Gateway) handleCRDDispatchInbound(w http.ResponseWriter, r *http.Reques
 			env.Metadata.CorrelationID, result, tok.Subject, env.Metadata.Sender, "", answerTok)
 		return
 	}
-	g.respondLeg(w, r, "payer-coverage", "crd-dispatch-cards", "crd-order-dispatch", env.Metadata.CorrelationID, result.ResponseFHIR, tok.Subject, env.Metadata.Sender, "", answerTok, result.ResponseRelayed)
+	g.observeCRDEmbedded(ctx, "crd-order-dispatch", env.Metadata.CorrelationID, result.Response)
+	g.respondLeg(w, r, "payer-coverage", "crd-dispatch-cards", "crd-order-dispatch", env.Metadata.CorrelationID, result.Response, tok.Subject, env.Metadata.Sender, "", answerTok)
 }

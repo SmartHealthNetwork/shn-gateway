@@ -110,7 +110,7 @@
       "resource": {
         "resourceType": "DeviceRequest",
         "id": "dr-mbrpduc02-e0250",
-        "status": "active",
+        "status": "draft",
         "intent": "order",
         "codeCodeableConcept": {
           "coding": [
@@ -253,7 +253,7 @@
       "resource": {
         "resourceType": "DeviceRequest",
         "id": "dr-mbrpduc02pb-e0250",
-        "status": "active",
+        "status": "draft",
         "intent": "order",
         "codeCodeableConcept": {
           "coding": [

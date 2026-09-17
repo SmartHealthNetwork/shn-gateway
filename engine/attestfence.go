@@ -62,7 +62,7 @@ func fenceAttestedItems(bundleJSON []byte) (string, bool) {
 	}
 	for _, qrJSON := range qrEntries {
 		var qr map[string]any
-		if err := json.Unmarshal(qrJSON, &qr); err != nil {
+		if err := decodeMessage(qrJSON, &qr); err != nil {
 			// A malformed QR is the concern of the existing bundle-parse
 			// gates, not this fence — skip it and keep fencing the rest.
 			continue
@@ -105,14 +105,14 @@ func allQuestionnaireResponseEntries(bundleJSON []byte) (resources [][]byte, fou
 			Resource json.RawMessage `json:"resource"`
 		} `json:"entry"`
 	}
-	if err := json.Unmarshal(bundleJSON, &probe); err != nil {
+	if err := decodeMessage(bundleJSON, &probe); err != nil {
 		return nil, false
 	}
 	for _, e := range probe.Entry {
 		var rt struct {
 			ResourceType string `json:"resourceType"`
 		}
-		if json.Unmarshal(e.Resource, &rt) == nil && rt.ResourceType == "QuestionnaireResponse" {
+		if decodeMessage(e.Resource, &rt) == nil && rt.ResourceType == "QuestionnaireResponse" {
 			resources = append(resources, e.Resource)
 		}
 	}

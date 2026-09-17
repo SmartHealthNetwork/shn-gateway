@@ -95,7 +95,10 @@ func TestSecondaryFailure(t *testing.T) {
 			f, _, e := s.CoverageInforceContext(context.Background(), "m")
 			return f, e
 		}},
-		{"open-coverage", "/Coverage", func(s *SoR) (bool, error) { _, f, e := s.OpenCoverageContext(context.Background(), "m"); return f, e }},
+		{"open-coverage", "/Coverage", func(s *SoR) (bool, error) {
+			covs, e := s.OpenCoverageContext(context.Background(), "m")
+			return len(covs) > 0, e
+		}},
 		{"order", "/DeviceRequest", func(s *SoR) (bool, error) { _, f, e := s.OpenOrderContext(context.Background(), "m"); return f, e }},
 		{"report", "/DiagnosticReport", func(s *SoR) (bool, error) {
 			_, f, e := s.SupplementalReportContext(context.Background(), "m")

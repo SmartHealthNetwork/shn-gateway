@@ -1071,6 +1071,28 @@ func (d *staleDB) Query(ctx context.Context, sql string, args ...any) (pgx.Rows,
 
 func (d *staleDB) release() { d.onceRelease.Do(func() { close(d.gate) }) }
 
+// adoptionBarrierDB parks before the real Begin so refresh has elected to adopt,
+// but cannot publish the sibling key before the cold caller's younger reload.
+type adoptionBarrierDB struct {
+	keyDB
+	entered     chan struct{}
+	gate        chan struct{}
+	onceEntered sync.Once
+	onceRelease sync.Once
+}
+
+func (d *adoptionBarrierDB) Begin(ctx context.Context) (pgx.Tx, error) {
+	d.onceEntered.Do(func() { close(d.entered) })
+	select {
+	case <-d.gate:
+		return d.keyDB.Begin(ctx)
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (d *adoptionBarrierDB) release() { d.onceRelease.Do(func() { close(d.gate) }) }
+
 // A cold caller answers only from a reload that STARTED AFTER IT ARRIVED. The boot
 // reload's SELECT can run before a sibling mints the holder's key and land after the
 // bearer carrying that key has arrived — a snapshot older than the request. Answering
@@ -1084,18 +1106,27 @@ func (d *staleDB) release() { d.onceRelease.Do(func() { close(d.gate) }) }
 // announces itself through onColdWait, whose SECOND firing (the caller woke, found the
 // boot snapshot too old and is about to park for the throttle slot) proves the snapshot
 // really was empty and then advances the injected clock past the throttle, so the caller
-// runs its own reload at once rather than after a real second.
+// runs its own reload at once rather than after a real second. The refresh's real
+// adoption transaction waits at Begin until that younger reload resolves the caller;
+// otherwise adoption itself can legitimately supply the key without a second reload.
 func TestIngressKeyPg_ColdReplicaDoesNotAnswerFromASnapshotOlderThanTheRequest(t *testing.T) {
 	pool := testPool(t)
 	clk := newLockedClock(time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC))
 	stale := &staleDB{keyDB: pool, blocked: make(chan struct{}), gate: make(chan struct{})}
 	t.Cleanup(stale.release)
-	counted := &countingDB{keyDB: stale}
+	adoption := &adoptionBarrierDB{keyDB: stale, entered: make(chan struct{}), gate: make(chan struct{})}
+	t.Cleanup(adoption.release)
+	counted := &countingDB{keyDB: adoption}
 	b := NewIngressKeyStore(counted, "holder", clk.now)
 	b.coldWaitBound = 30 * time.Second // the "has not answered" assertion must not rest on the shipped 2 s
 	stale.arm.Store(true)
-	bootDone := make(chan struct{})
-	go func() { b.refreshOnce(clk.now()); close(bootDone) }() // what RunRefresh does before the first tick
+	bootDone := make(chan error, 1)
+	bootExited := make(chan struct{})
+	go func() {
+		defer close(bootExited)
+		bootDone <- b.refreshOnce(clk.now()) // what RunRefresh does before the first tick
+	}()
+	t.Cleanup(func() { stale.release(); adoption.release(); <-bootExited })
 	mustSignal(t, stale.blocked, "the boot reload's SELECT (executed, rows not yet returned)")
 
 	// A mints the holder's first key AFTER that SELECT ran, and issues a bearer with it.
@@ -1109,6 +1140,14 @@ func TestIngressKeyPg_ColdReplicaDoesNotAnswerFromASnapshotOlderThanTheRequest(t
 	var waits atomic.Int32
 	b.onColdWait = func() {
 		if waits.Add(1) == 2 {
+			// Begin proves refresh released reloadMu and elected to transact before
+			// the caller's younger reload fills the cache. Adoption stays parked.
+			select {
+			case <-adoption.entered:
+			case <-time.After(5 * time.Second):
+				t.Error("refresh did not enter sibling adoption before the younger reload")
+				return
+			}
 			// The caller woke from the boot reload and is about to park for the
 			// throttle slot: the snapshot it declined to answer from must really be
 			// the stale one (no key), or the row proves nothing.
@@ -1122,7 +1161,25 @@ func TestIngressKeyPg_ColdReplicaDoesNotAnswerFromASnapshotOlderThanTheRequest(t
 		}
 		parked <- struct{}{}
 	}
-	got := verifyAsync(b, kid, clk.now())
+	got := make(chan coldAnswer, 1)
+	verified := make(chan struct{})
+	go func() {
+		defer close(verified)
+		pub, ok, err := b.VerificationKey(kid, clk.now())
+		got <- coldAnswer{pub, ok, err}
+	}()
+	t.Cleanup(func() {
+		stale.release()
+		adoption.release()
+		<-bootExited
+		select {
+		case <-verified:
+		default:
+			// Failure cleanup only: wake and join before closing the test pool.
+			_ = b.reload(clk.now())
+			<-verified
+		}
+	})
 	mustSignal(t, parked, "the cold caller's wait on the boot reload")
 	select {
 	case ans := <-got:
@@ -1130,7 +1187,6 @@ func TestIngressKeyPg_ColdReplicaDoesNotAnswerFromASnapshotOlderThanTheRequest(t
 	default:
 	}
 	stale.release()
-	<-bootDone
 	ans := <-got
 	if !ans.ok || ans.err != nil {
 		t.Fatalf("a live bearer at a cold replica whose boot snapshot predates the key = ok:%v err:%v; want the key (a 401 here refuses a live bearer on the evidence of a snapshot older than the request)", ans.ok, ans.err)
@@ -1140,6 +1196,10 @@ func TestIngressKeyPg_ColdReplicaDoesNotAnswerFromASnapshotOlderThanTheRequest(t
 	}
 	if got := atomic.LoadInt32(&counted.reloads); got != 2 {
 		t.Fatalf("reload queries = %d, want 2 (the stale boot reload, then the one younger than the request)", got)
+	}
+	adoption.release()
+	if err := <-bootDone; err != nil {
+		t.Fatalf("refreshOnce: %v", err)
 	}
 	// The refresh also adopts the sibling's committed row: Begin, isolation,
 	// advisory lock, SELECT, Commit and the deferred Rollback call (already closed).
@@ -1789,6 +1849,93 @@ func TestIngressKeyPg_ColdReplicaParksWhileAReloadHoldsTheLockBeforeItStamps(t *
 	}
 	if n := waits.Load(); n != 1 {
 		t.Fatalf("the caller parked %d times; want exactly 1 (one park, one wakeup by the completion)", n)
+	}
+}
+
+// A request classified cold before an empty reload installs its snapshot can enter
+// resolveCold after that reload has completed but before its wrapper releases reloadMu.
+// Completion must not strand the caller on a new epoch behind a lock with no future
+// completion. This forced interleaving exercises the real classification, locked reload
+// and cold resolver; it is not a reproduction of a particular scheduler trace.
+func TestIngressKeyPg_ColdCallerWakesWhenACompletedReloadReleasesItsLock(t *testing.T) {
+	pool := testPool(t)
+	clk := newLockedClock(time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC))
+	stale := &staleDB{keyDB: pool, blocked: make(chan struct{}), gate: make(chan struct{})}
+	t.Cleanup(stale.release)
+	counted := &countingDB{keyDB: stale}
+	b := NewIngressKeyStore(counted, "holder", clk.now)
+	b.coldWaitBound = 30 * time.Second
+	stale.arm.Store(true)
+	b.reloadMu.Lock()
+	var unlock sync.Once
+	t.Cleanup(func() { unlock.Do(b.releaseReload) })
+	reloaded := make(chan error, 1)
+	reloadExited := make(chan struct{})
+	go func() {
+		defer close(reloadExited)
+		reloaded <- b.reloadLocked(clk.now())
+	}()
+	t.Cleanup(func() { stale.release(); <-reloadExited })
+	mustSignal(t, stale.blocked, "the stale empty reload's SELECT")
+
+	a := NewIngressKeyStore(pool, "holder", clk.now)
+	kid, key, err := a.SigningKey(clk.now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Split VerificationKey at its existing classify/resolveCold boundary to force
+	// a caller descheduled after classification until the reload has completed.
+	pub, ok, action, cold, empty := b.classify(kid, clk.now())
+	if pub != nil || ok || action == missReject || !cold || !empty {
+		t.Fatal("the request did not classify as a cold miss before the stale install")
+	}
+	stale.release()
+	if err := <-reloaded; err != nil {
+		t.Fatal(err)
+	}
+	if b.inFlight() != nil || b.cold() || !b.cacheEmpty() {
+		t.Fatal("the completed reload must leave a warm empty cache and no in-flight latch")
+	}
+	clk.advance(reloadThrottle)
+	parked := make(chan struct{}, 4)
+	var waits atomic.Int32
+	b.onColdWait = func() { waits.Add(1); parked <- struct{}{} }
+	var ans coldAnswer
+	done := make(chan struct{})
+	go func() {
+		ans.pub, ans.ok, ans.err = b.resolveCold(kid, clk.now())
+		close(done)
+	}()
+	// On failure only, release the waiter through a real reload before pool cleanup.
+	// This runs after the assertion, so it cannot rescue the behavior under test.
+	t.Cleanup(func() {
+		unlock.Do(b.releaseReload)
+		select {
+		case <-done:
+		default:
+			_ = b.reload(clk.now())
+			<-done
+		}
+	})
+	mustSignal(t, parked, "the cold caller's park after reload completion but before unlock")
+	select {
+	case <-done:
+		t.Fatalf("answered ok:%v err:%v while the completed reload still held its lock", ans.ok, ans.err)
+	default:
+	}
+	unlock.Do(b.releaseReload)
+	mustSignal(t, done, "the lock release waking the caller without another reload or adoption")
+	if !ans.ok || ans.err != nil {
+		t.Fatalf("live sibling bearer after lock release = ok:%v err:%v; want the key without a premature 401 or 503", ans.ok, ans.err)
+	}
+	if !ans.pub.Equal(&key.PublicKey) {
+		t.Fatal("resolved the wrong public key")
+	}
+	if got := atomic.LoadInt32(&counted.reloads); got != 2 {
+		t.Fatalf("reload queries = %d, want 2 (stale empty reload, then the caller's younger reload)", got)
+	}
+	if n := waits.Load(); n != 1 {
+		t.Fatalf("the caller parked %d times; want exactly 1, with no spin behind the completed reload", n)
 	}
 }
 

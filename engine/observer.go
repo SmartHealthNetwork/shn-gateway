@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
@@ -59,9 +60,22 @@ import (
 //	                  Op = pas-terminal-response-assembly; CorrelationID identifies the exchange;
 //	                  Payload = holder-local Provenance targeting the retained ClaimResponse
 //	                  fullUrl). This record stays outside the Bundle and the Hub.
+//	leg.certified    completed observational source certification (Detail = metadata-only JSON;
+//	                  stored before callback delivery; callbacks must return promptly)
+//	relay.ownership.refused
+//	                  a payload was not sent because the leg ownership table does not
+//	                  permit it at that transmit (relay.RefusedEvent; LegType = the leg,
+//	                  empty before one is established; Direction = the side and
+//	                  direction, e.g. "recipient-response"; Detail = the refusal). The
+//	                  caller answered a 500 local fault.
 //	ingress.received  a Da Vinci ingress call arrived (LegType = route tag, Payload = request body)
 //	ingress.responded the ingress call was answered (Detail = HTTP status, Payload = response body)
 //	validate.result   a $validate ran (Detail = "valid" | "invalid" | "validator unavailable")
+//	prefetch.obtained the provider ingress tried to obtain a CDS Hooks prefetch value the
+//	                  request left out from the participant's system of record
+//	                  (LegType = the leg, Direction = "sor", Op = the prefetch key,
+//	                  Detail = metadata-only JSON: key, source, query, outcome, reason,
+//	                  count, pages, retrievedAt — never a value or a resource)
 //	sor.read          the gateway read its data source (Op = SystemOfRecord method,
 //	                  Detail = "found"/"not found"/coverage status or a safe failure category,
 //	                  Payload = the
@@ -190,6 +204,14 @@ func (g *Gateway) observe(e ObserverEvent) {
 type observingValidator struct {
 	inner shnsdk.Validator
 	g     *Gateway
+}
+
+// Ready delegates the qualification snapshot without starting any work.
+func (v observingValidator) Ready() bool {
+	if r, ok := v.inner.(interface{ Ready() bool }); ok {
+		return r.Ready()
+	}
+	return true
 }
 
 func (v observingValidator) Validate(ctx context.Context, resourceJSON []byte, profile string) (shnsdk.Result, error) {
@@ -394,18 +416,59 @@ func (o observingSoR) OpenOrderContext(ctx context.Context, key string) ([]byte,
 	return a, found, err
 }
 
+// OpenCoverage is the single-record read: it answers only when the system of
+// record holds exactly one Coverage, and never chooses one of several.
 func (o observingSoR) OpenCoverage(key string) ([]byte, bool) {
-	a, found, _ := o.OpenCoverageContext(context.Background(), key)
-	return a, found
-}
-func (o observingSoR) OpenCoverageContext(ctx context.Context, key string) ([]byte, bool, error) {
-	a, found, err := ReadSystemOfRecord(o.inner).OpenCoverageContext(ctx, key)
-	if err != nil {
-		o.emit("OpenCoverage", string(safeSoRError(err).Kind), nil)
-	} else {
-		o.emit("OpenCoverage", sorFoundDetail(found), a)
+	covs, _ := o.OpenCoverageContext(context.Background(), key)
+	if len(covs) != 1 {
+		return nil, false
 	}
-	return a, found, err
+	return covs[0], true
+}
+func (o observingSoR) OpenCoverageContext(ctx context.Context, key string) ([][]byte, error) {
+	covs, err := ReadSystemOfRecord(o.inner).OpenCoverageContext(ctx, key)
+	switch {
+	case err != nil:
+		o.emit("OpenCoverage", string(safeSoRError(err).Kind), nil)
+	case len(covs) <= 1:
+		var one []byte
+		if len(covs) == 1 {
+			one = covs[0]
+		}
+		o.emit("OpenCoverage", sorFoundDetail(len(covs) == 1), one)
+	default:
+		all := []byte{'['}
+		for i, c := range covs {
+			if i > 0 {
+				all = append(all, ',')
+			}
+			all = append(all, c...)
+		}
+		o.emit("OpenCoverage", "found "+strconv.Itoa(len(covs))+" records", append(all, ']'))
+	}
+	return covs, err
+}
+
+// SearchPatientContext passes a system-of-record search through when the
+// configured connector can search, and reports the outcome.
+func (o observingSoR) SearchPatientContext(ctx context.Context, resourceType, sorPatientID string, dates ...SearchDateRange) (SearchResult, error) {
+	searcher, ok := o.inner.(SearchSystemOfRecord)
+	if !ok {
+		err := &SearchError{Outcome: SearchUnsupported, Reason: "connector does not search"}
+		o.emit("SearchPatient", string(err.Outcome), nil)
+		return SearchResult{}, err
+	}
+	res, err := searcher.SearchPatientContext(ctx, resourceType, sorPatientID, dates...)
+	var se *SearchError
+	switch {
+	case errors.As(err, &se):
+		o.emit("SearchPatient", string(se.Outcome), nil)
+	case err != nil:
+		o.emit("SearchPatient", string(SearchUnavailable), nil)
+	default:
+		o.emit("SearchPatient", "found "+strconv.Itoa(res.Total)+" entries in "+strconv.Itoa(len(res.Pages))+" pages", nil)
+	}
+	return res, err
 }
 
 func (o observingSoR) ResolveByReference(key string) ([]byte, bool) {

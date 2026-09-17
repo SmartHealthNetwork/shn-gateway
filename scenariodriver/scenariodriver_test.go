@@ -74,11 +74,11 @@ func TestPostCRD_BearerAndAud(t *testing.T) {
 	}))
 	defer srv.Close()
 	d, key := testDriver(t, srv)
-	res, err := d.PostCRD([]byte(`{}`))
+	res, err := d.PostCRD([]byte(`{"hook":"order-dispatch"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Status != http.StatusOK || gotPath != "/cds-services/order-select-crd" || gotCT != "application/json" {
+	if res.Status != http.StatusOK || gotPath != "/cds-services/shn-order-dispatch" || gotCT != "application/json" {
 		t.Fatalf("status=%d path=%q ct=%q", res.Status, gotPath, gotCT)
 	}
 	tok, err := jwt.Parse(gotAuth[len("Bearer "):], func(tk *jwt.Token) (any, error) { return &key.PublicKey, nil },
@@ -88,7 +88,7 @@ func TestPostCRD_BearerAndAud(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Authorization did not carry a verifiable bearer: %v", err)
 	}
-	if aud := tok.Claims.(jwt.MapClaims)["aud"]; aud != "http://provider-gw:8080/cds-services/order-select-crd" {
+	if aud := tok.Claims.(jwt.MapClaims)["aud"]; aud != "http://provider-gw:8080/cds-services/shn-order-dispatch" {
 		t.Fatalf("aud = %v — must be the called endpoint under IngressBase", aud)
 	}
 	if c, err := ParseCards(res.Body); err != nil || c.Covered() != "covered" {
@@ -170,5 +170,23 @@ func TestScenarioClients(t *testing.T) {
 	}
 	if gotPath != "/api/run" || gotBody == "" {
 		t.Fatalf("console path=%s body=%q", gotPath, gotBody)
+	}
+}
+
+// TestCRDServiceID: a request goes to the ingress service advertised for its
+// hook; any other request goes to the order-sign service, which refuses it.
+func TestCRDServiceID(t *testing.T) {
+	for body, want := range map[string]string{
+		`{"hook":"order-sign"}`:       "shn-order-sign",
+		`{"hook":"order-select"}`:     "shn-order-select",
+		`{"hook":"order-dispatch"}`:   "shn-order-dispatch",
+		`{"hook":"appointment-book"}`: "shn-order-sign",
+		`{"hook":"../admin"}`:         "shn-order-sign",
+		`{}`:                          "shn-order-sign",
+		`not json`:                    "shn-order-sign",
+	} {
+		if got := CRDServiceID([]byte(body)); got != want {
+			t.Errorf("CRDServiceID(%s) = %q, want %q", body, got, want)
+		}
 	}
 }

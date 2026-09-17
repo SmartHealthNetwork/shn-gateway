@@ -1,6 +1,6 @@
 module github.com/SmartHealthNetwork/shn-gateway
 
-go 1.26
+go 1.26.0
 
 // Deleting a tag does NOT withdraw a Go module. Measured against the deleted
 // v0.36.0: the GitHub tag 404s while proxy.golang.org still serves its .info
@@ -26,11 +26,11 @@ retract (
 )
 
 require (
-	github.com/SmartHealthNetwork/shn-sdk v0.49.0
+	github.com/SmartHealthNetwork/shn-sdk v0.50.1
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/samply/golang-fhir-models/fhir-models v0.3.2
-	golang.org/x/crypto v0.55.0
+	golang.org/x/crypto v0.56.0
 )
 
 require (

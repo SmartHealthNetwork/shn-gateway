@@ -5,11 +5,17 @@
 package engine
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
-	"strings"
+	"slices"
+	"strconv"
 
+	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -26,7 +32,7 @@ func resolverFromResources(resources [][]byte) func(ref string) ([]byte, bool) {
 				ResourceType string `json:"resourceType"`
 				ID           string `json:"id"`
 			}
-			if json.Unmarshal(res, &rt) != nil || rt.ResourceType == "" || rt.ID == "" {
+			if decodeMessage(res, &rt) != nil || rt.ResourceType == "" || rt.ID == "" {
 				continue
 			}
 			if rt.ResourceType+"/"+rt.ID == ref {
@@ -45,7 +51,7 @@ func bundleRefResolver(bundleJSON []byte) func(ref string) ([]byte, bool) {
 			Resource json.RawMessage `json:"resource"`
 		} `json:"entry"`
 	}
-	if err := json.Unmarshal(bundleJSON, &b); err != nil {
+	if err := decodeMessage(bundleJSON, &b); err != nil {
 		return func(string) ([]byte, bool) { return nil, false }
 	}
 	resources := make([][]byte, 0, len(b.Entry))
@@ -57,16 +63,74 @@ func bundleRefResolver(bundleJSON []byte) func(ref string) ([]byte, bool) {
 	return resolverFromResources(resources)
 }
 
-// prefetchResources flattens a CDS Hooks prefetch map's values into a resource list — an external
-// payor Organization arrives as another prefetch entry, so the CRD ingress resolves against it.
-func prefetchResources(prefetch map[string]json.RawMessage) [][]byte {
+// prefetchResources flattens a CDS Hooks request's prefetch values into a
+// resource list — an external payor Organization arrives as another prefetch
+// value (a resource, or an entry of a Bundle value), so the CRD ingress
+// resolves against it. Every value is read, whatever its key, in key order;
+// null values are skipped.
+func prefetchResources(prefetch map[string][]byte) [][]byte {
+	keys := make([]string, 0, len(prefetch))
+	for k := range prefetch {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
 	out := make([][]byte, 0, len(prefetch))
-	for _, v := range prefetch {
-		if len(v) > 0 {
-			out = append(out, v)
+	for _, key := range keys {
+		v := bytes.TrimSpace(prefetch[key])
+		if len(v) == 0 || string(v) == "null" {
+			continue
+		}
+		out = append(out, v)
+		var b struct {
+			ResourceType string `json:"resourceType"`
+			Entry        []struct {
+				Resource json.RawMessage `json:"resource"`
+			} `json:"entry"`
+		}
+		if decodeMessage(v, &b) != nil || b.ResourceType != "Bundle" {
+			continue
+		}
+		for _, e := range b.Entry {
+			if len(e.Resource) > 0 {
+				out = append(out, e.Resource)
+			}
 		}
 	}
 	return out
+}
+
+// crdIngressRecipient routes a prepared CDS Hooks request by the coverage it
+// carries (FR-G40; no default): a bare Coverage or a Bundle of Coverages that
+// name one payer. The payer's Organization is looked up among the request's
+// own prefetch values and, for a coverage read from the system of record, in
+// that system.
+func (g *Gateway) crdIngressRecipient(ctx context.Context, prepared crdIngressRequest) (string, int, string) {
+	coverage, carried := prepared.values["coverage"]
+	switch {
+	case !carried && prepared.coverageStatus != 0:
+		return "", prepared.coverageStatus, prepared.coverageMsg
+	case !carried || string(bytes.TrimSpace(coverage)) == "null":
+		return "", http.StatusUnprocessableEntity, "no coverage in request or system of record"
+	}
+	local := resolverFromResources(prefetchResources(prepared.values))
+	resolve := local
+	readErr := new(error)
+	if prepared.coverageFromSoR {
+		var fromSoR func(string) ([]byte, bool)
+		fromSoR, readErr = sorReferenceCallback(ctx, g.cfg.SoR)
+		resolve = func(ref string) ([]byte, bool) {
+			if b, ok := local(ref); ok {
+				return b, true
+			}
+			return fromSoR(ref)
+		}
+	}
+	recipient, _, status, msg := g.recipientForWith(coverage, resolve)
+	if *readErr != nil {
+		status, msg := SoRFailureResponse(*readErr)
+		return "", status, msg
+	}
+	return recipient, status, msg
 }
 
 // handleIngressMetadata serves the provider ingress CapabilityStatement
@@ -99,22 +163,41 @@ func (g *Gateway) handleCDSDiscovery(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(body)
 }
 
-// handleCRDIngress terminates a conformant CDS Hooks order-select request from br-provider,
-// subject-binds it, makes it self-contained + neutralizes the callback, originates a conformant
-// crd-order-select leg through the substrate, threads a metadata-only Exchange, and
-// relays the rendered cards envelope back to the EHR.
-//
-// The route's {id} path value is deliberately NOT validated against crdIngressServiceID: any CDS
-// service id the EHR was configured to call (the advertised order-select-crd, or a partner's own)
-// normalizes to the single crd-order-select leg. The CDS service id matters only at the
-// payer egress (DiscoverCRDServiceID), not here.
+// handleCRDIngress terminates a CDS Hooks request from the EHR at
+// POST /cds-services/{id}: {id} must be an advertised service (404 otherwise)
+// and the request's hook must be that service's hook (400 otherwise). The hook
+// picks the leg (order-sign and order-select ride crd-order-select;
+// order-dispatch rides crd-order-dispatch). The handler subject-binds the
+// request, carries the EHR's own bytes (with the callback removed and absent
+// prefetch obtained from the participant's system of record), threads a
+// metadata-only Exchange, and relays the payer's answer back to the EHR exactly
+// once it meets the CDS Hooks response rules.
 func (g *Gateway) handleCRDIngress(w http.ResponseWriter, r *http.Request) {
+	w, scope := g.withScope(w, relay.RoleRequester)
 	if g.ingressAuthRefused(w, r) {
 		return
 	}
+	svc, known := cdsIngressServiceByID(r.PathValue("id"))
+	if !known {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown CDS service " + strconv.Quote(r.PathValue("id"))})
+		return
+	}
+	legType := svc.Leg
+	scope.leg = legType
 	body, err := io.ReadAll(io.LimitReader(r.Body, shnsdk.MaxRequestBytes))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "read body failed"})
+		return
+	}
+	var head struct {
+		Hook string `json:"hook"`
+	}
+	if err := decodeMessage(body, &head); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "parse cds request failed"})
+		return
+	}
+	if head.Hook != svc.Hook {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("CDS service %s is for hook %s, not %s", svc.ID, svc.Hook, strconv.Quote(head.Hook))})
 		return
 	}
 	// Bind the subject — every patient reference must resolve to one pci.
@@ -124,22 +207,14 @@ func (g *Gateway) handleCRDIngress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	member := g.memberForPCI(body)
-	// Ensure self-contained + neutralize the callback.
-	sealed, status, msg := g.ingressEnsureSelfContainedContext(r.Context(), body, member, pci)
+	// Keep the EHR's bytes; remove the callback and add the prefetch values
+	// it left out, from this participant's own system of record.
+	prepared, status, msg := g.ingressEnsureSelfContainedContext(r.Context(), legType, body, member)
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
-	// Route off the INBOUND Coverage the partner sent (Case 2): the ingress has no member to
-	// OpenCoverage, so recipientFor reads the request's prefetch.coverage. NO default — a CRD hook
-	// with no coverage in prefetch (or a coverage with no parseable payer) FAILS CLOSED with 422
-	// rather than routing to a former default (FR-G40 / AI-G11 / OWD-G10).
-	var cdsReq ingressCDSRequest
-	_ = json.Unmarshal(body, &cdsReq)
-	// Resolve an EXTERNAL Coverage.payor Organization against the request's OWN prefetch resources
-	// (Finding 1) — the partner's payor Org rides in prefetch, not the provider SoR. Contained /
-	// inline payor forms still route without ever hitting resolveRef.
-	recipient, _, status, msg := g.recipientForWith(cdsReq.Prefetch["coverage"], resolverFromResources(prefetchResources(cdsReq.Prefetch)))
+	recipient, status, msg := g.crdIngressRecipient(r.Context(), prepared)
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
@@ -161,23 +236,39 @@ func (g *Gateway) handleCRDIngress(w http.ResponseWriter, r *http.Request) {
 	// builds nor reads is not covered by it. Selection precedes the exchange so a
 	// refusal costs no Exchange record.
 	child := g.cfg.CorrelationGen()
-	route, ok := g.selectLegLineOrFail(w, recipient, "crd-order-select", child)
+	route, ok := g.selectLegLineOrFail(w, recipient, legType, child)
 	if !ok {
 		return
 	}
 	// Validation posture UNCHANGED: this driver $validates nothing on egress (it
 	// relays a partner's envelope), and the promotion adds no enforcement point.
-	sealed, _, aerr := g.egressAdapt(route, sealed, ExchangeIdentity{CorrelationID: child, LegType: "crd-order-select", Counterpart: recipient})
+	// The CDS Hooks request is the same at every line, so the walk changes no
+	// byte; a walk that would change one is refused rather than sent. The walk
+	// reads the bytes this gateway sends (the callback removed, obtained
+	// prefetch added), never the EHR's raw request.
+	requestKey := relay.Key{Leg: legType, Role: relay.RoleRequester, Direction: relay.DirectionRequest, Outcome: relay.OutcomeCarried}
+	sent, terr := relay.Transmit(prepared.request, relay.Check(requestKey))
+	if terr != nil {
+		g.ownershipRefused(requestKey, terr)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": errOwnershipFault})
+		return
+	}
+	adapted, _, aerr := g.egressAdapt(route, sent, ExchangeIdentity{CorrelationID: child, LegType: legType, Counterpart: recipient})
 	if aerr != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": aerr.Error()})
 		return
 	}
+	if !bytes.Equal(adapted, sent) {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "the CDS Hooks request cannot be carried to the payer's line unchanged"})
+		return
+	}
 	// One Exchange, one leg (the EHR owns grouping in pure pass-through).
 	ex := g.exchanges.Begin(workstreamPA)
-	respJSON, err := g.OriginateLeg(r.Context(), r, recipient, "crd-order-select", pci, child, "",
-		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Bytes: sealed})
-	leg := Leg{Type: "crd-order-select", Physics: paCatalog["crd-order-select"].Physics,
-		Content: Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Bytes: sealed}, Subjects: []string{pci}}
+	request := prepared.request
+	respJSON, err := g.OriginateLeg(r.Context(), r, recipient, legType, pci, child, "",
+		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Payload: request, Carried: true})
+	leg := Leg{Type: legType, Physics: paCatalog[legType].Physics,
+		Content: Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Payload: request, Carried: true}, Subjects: []string{pci}}
 	if err != nil {
 		g.recordLeg(ex.ID, leg.Project(child, "error"))
 		// The recipient answered non-2xx — relay its framed answer verbatim (Content-Type
@@ -188,27 +279,34 @@ func (g *Gateway) handleCRDIngress(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
-	// The substrate response is already a rendered conformant cards envelope (BuildCards);
-	// wrap/relay it into the CDS Hooks {cards:[…]} response. Derive the outcome from machine
-	// fields only (metadata; never store clinical content).
-	cardsEnvelope, outcome, status, msg := wrapCards(respJSON)
+	// The payer's answer is relayed exactly once it meets the CDS Hooks response
+	// rules at the routed line; the outcome label is read from its coverage
+	// information (metadata; never clinical content).
+	outcome, status, msg := crdAnswerOutcome(respJSON, shnsdk.LineOf(route.Token))
 	if status != 0 {
 		g.recordLeg(ex.ID, leg.Project(child, "error"))
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
 	g.recordLeg(ex.ID, leg.Project(child, outcome))
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(cardsEnvelope)
+	g.writePayload(w, http.StatusOK, "application/json", relay.Exact(relay.NewBody(respJSON, relay.OriginPeerFrame), "application/json"),
+		relay.Key{Leg: legType, Role: relay.RoleRequester, Direction: relay.DirectionResponse, Outcome: relay.OutcomeAnswered})
 }
 
-// handleDTRIngress terminates a conformant SDC $questionnaire-package request from br-provider,
-// extracts the questionnaire canonical (and, for per-patient authz, the coverage beneficiary),
-// originates the EXISTING dtr-questionnaire-fetch substrate leg, threads a metadata-only
-// Exchange, and relays the package Bundle response verbatim (near-relay). The ingress does NOT
-// invoke the Populator — br-provider's own DTR app populates locally.
+// handleDTRIngress terminates an EHR's $questionnaire-package request and
+// carries the EHR's own Parameters to the payer on the
+// dtr-questionnaire-fetch leg, naming the operation in the request frame:
+// exactly as sent, or with the patient's Coverage added from this
+// participant's system of record when the request carries none
+// (prepareDTRPackageRequest). Every resource is bound to one patient, the
+// request is routed by every coverage it carries, a payer that does not
+// accept framed DTR operations is refused before anything is sent, and the
+// payer's answer is relayed to the EHR exactly. The ingress does not invoke
+// the Populator: the EHR's own DTR application populates.
 func (g *Gateway) handleDTRIngress(w http.ResponseWriter, r *http.Request) {
+	const legType = "dtr-questionnaire-fetch"
+	w, scope := g.withScope(w, relay.RoleRequester)
+	scope.leg = legType
 	w = &fhirOperationWriter{w}
 	if g.ingressAuthRefused(w, r) {
 		return
@@ -218,96 +316,54 @@ func (g *Gateway) handleDTRIngress(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "read body failed"})
 		return
 	}
-	canonical, patientRef, coverage, order, ok := dtrFromPackageParams(body)
-	if !ok {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing questionnaire canonical or order"})
-		return
-	}
-	// Per-patient authz binding when the package carries a patient (the connectathon case); the
-	// DTR fetch is otherwise patient-agnostic (the payer DTR handler does not subject-bind). A
-	// CARRIED subject must AGREE — a present-but-unresolvable coverage patient fails closed rather
-	// than degrading to an unbound (patient-agnostic) leg.
-	var pci string
-	if patientRef != "" {
-		member := strings.TrimPrefix(patientRef, "Patient/")
-		p, _, found, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(r.Context(), member)
-		if writeSoRFailure(w, readErr) {
-			return
-		}
-		if !found {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "carried coverage patient does not resolve"})
-			return
-		}
-		pci = p
-	}
-	// Route off the INBOUND Coverage the partner carried (Case 2): the DTR ingress has no member to
-	// OpenCoverage, so recipientFor reads the carried coverage param. NO default — a patient-agnostic
-	// $questionnaire-package (coverage == nil) or a coverage with no parseable payer FAILS CLOSED
-	// with 422 rather than routing to a former default (FR-G40 / AI-G11 / OWD-G10).
-	// Resolve an EXTERNAL Coverage.payor Organization against the request's OWN parameter resources
-	// (Finding 1) — the partner's payor Org, if present, rides alongside the coverage parameter, not
-	// in the provider SoR. Contained / inline payor forms still route without hitting resolveRef.
-	recipient, _, status, msg := g.recipientForWith(coverage, resolverFromResources(dtrParamResources(body)))
+	prepared, status, msg := g.prepareDTRPackageRequest(r.Context(), body)
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
-	// SELECT-BEFORE-BUILD on the ingress read leg (select-before-build promotion,
-	// site census 2026-08-14). Unlike this driver's CRD and PAS sites, the bytes
-	// here are OUR OWN build: the dtrLegRequest envelope below is marshalled by
-	// this gateway, carrying the partner's coverage/order components verbatim.
-	// That is why it joins the reachability arms rather than the arm-1-only
-	// backfill — and why selection must PRECEDE the marshal, exactly as at the
-	// two promoted DTR-fetch sites (originate.go's runCRDThenDTROrder and
-	// originate_homeoxygen.go). The pa.dtr fetch envelope is LINE-DEPENDENT at
-	// those sites (2.2's DTRDef makes `coverage` 1..1, so they gate
-	// fetch.Coverage on DTRLineDef(line).QuestionnairePackageCoverageRequired),
-	// so a DTR-fetch site that builds before it selects is building blind. This
-	// site needs no such gate — it attaches the partner's CARRIED coverage
-	// unconditionally, and its own recipient derivation (recipientForWith, above)
-	// already fails closed without one, so coverage is always present at every
-	// line. The ordering is fixed regardless: it is the invariant that keeps this
-	// site honest if a future line makes any other envelope field line-dependent.
-	// All of the builder's inputs (canonical, coverage, order) are resolved above,
-	// so selection moves up freely.
+	// Route by every coverage the request carries (FR-G40; no default).
+	recipient, status, msg := g.dtrIngressRecipient(r.Context(), prepared)
+	if status != 0 {
+		writeJSON(w, status, map[string]string{"error": msg})
+		return
+	}
+	// A payer that has not declared framed DTR operations would drop the
+	// operation header: refused before anything is sent.
+	if status, msg := g.framedDTRRefusal(recipient); status != 0 {
+		writeJSON(w, status, map[string]string{"error": msg})
+		return
+	}
+	// Select-before-send: the routed line is stamped on the request frame and
+	// picks nothing in the EHR's bytes, which are carried as they are at every
+	// line. The walk to the payer's line changes no byte of a questionnaire
+	// request (envelopeEgressLegs); a walk that would change one is refused
+	// rather than sent.
 	child := g.cfg.CorrelationGen()
-	route, ok := g.selectLegLineOrFail(w, recipient, "dtr-questionnaire-fetch", child)
+	route, ok := g.selectLegLineOrFail(w, recipient, legType, child)
 	if !ok {
 		return
 	}
-	// Carry the provider's inbound Coverage (and, for the order-driven lane, the CRD-updated `order`)
-	// VERBATIM through the leg (FR-G28): the native-forward rebuild re-emits them as the
-	// payer-required `coverage` / `order` parameters. nil coverage/order marshal away (omitempty),
-	// so with only a canonical the bytes are IDENTICAL to the SDK QuestionnaireFetchRequest marshal
-	// — the br-payer / 8-UC demo path is byte-unchanged. Non-aggregation: the payer-gw
-	// never fabricates coverage or an order; both are provider-originated and carried through.
-	fetch, err := json.Marshal(dtrLegRequest{
-		Canonical: shnsdk.StripCanonicalVersion(canonical),
-		Coverage:  coverage,
-		Order:     order,
-	})
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build dtr fetch failed"})
+	requestKey := relay.Key{Leg: legType, Role: relay.RoleRequester, Direction: relay.DirectionRequest, Outcome: relay.OutcomeCarried}
+	sent, terr := relay.Transmit(prepared.request, relay.Check(requestKey))
+	if terr != nil {
+		g.ownershipRefused(requestKey, terr)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": errOwnershipFault})
 		return
 	}
-	// Validation posture UNCHANGED (routing-only promotion): no egress
-	// validateFHIR here before or after — `fetch` is a QuestionnaireFetchRequest
-	// transport ENVELOPE, not FHIR content the pa.dtr compat-manifest rows model
-	// (the same carve-out recorded verbatim at originate.go's DTR-fetch site,
-	// including its OBLIGATION DISCHARGED note — the multi-version spec's
-	// recorded DTR-fetch known-gap entry;
-	// envelopeEgressLegs pass-through). No response-validate is added either —
-	// this driver relays the payer's package to the partner.
-	fetch, _, aerr := g.egressAdapt(route, fetch, ExchangeIdentity{CorrelationID: child, LegType: "dtr-questionnaire-fetch", Counterpart: recipient})
+	adapted, _, aerr := g.egressAdapt(route, sent, ExchangeIdentity{CorrelationID: child, LegType: legType, Counterpart: recipient})
 	if aerr != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": aerr.Error()})
 		return
 	}
+	if !bytes.Equal(adapted, sent) {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "the questionnaire-package request cannot be carried to the payer's line unchanged"})
+		return
+	}
 	ex := g.exchanges.Begin(workstreamPA)
-	pkgJSON, err := g.OriginateLeg(r.Context(), r, recipient, "dtr-questionnaire-fetch", pci, child, "",
-		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Bytes: fetch})
-	leg := Leg{Type: "dtr-questionnaire-fetch", Physics: paCatalog["dtr-questionnaire-fetch"].Physics,
-		Content: Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Bytes: fetch}, Subjects: subjectsOf(pci)}
+	content := Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route),
+		Payload: prepared.request, Carried: true, Operation: shnsdk.FrameOperationQuestionnairePackage}
+	pkgJSON, err := g.OriginateLeg(r.Context(), r, recipient, legType, prepared.pci, child, "", content)
+	leg := Leg{Type: legType, Physics: paCatalog[legType].Physics, Content: content, Subjects: subjectsOf(prepared.pci)}
 	if err != nil {
 		g.recordLeg(ex.ID, leg.Project(child, "error"))
 		// The recipient answered non-2xx — relay its framed answer verbatim (Content-Type
@@ -319,10 +375,9 @@ func (g *Gateway) handleDTRIngress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	g.recordLeg(ex.ID, leg.Project(child, "ok"))
-	// Near-relay: the package Bundle is the payer's response shape; return verbatim.
-	w.Header().Set("Content-Type", "application/fhir+json")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(pkgJSON)
+	g.writePayload(w, http.StatusOK, "application/fhir+json",
+		relay.Exact(relay.NewBody(pkgJSON, relay.OriginPeerFrame), "application/fhir+json"),
+		relay.Key{Leg: legType, Role: relay.RoleRequester, Direction: relay.DirectionResponse, Outcome: relay.OutcomeAnswered})
 }
 
 // subjectsOf returns a 1-element subjects slice for a non-empty pci, else nil.
@@ -334,6 +389,7 @@ func subjectsOf(pci string) []string {
 }
 
 func (g *Gateway) handlePASIngress(w http.ResponseWriter, r *http.Request) {
+	w, scope := g.withScope(w, relay.RoleRequester)
 	w = &fhirOperationWriter{w}
 	if g.ingressAuthRefused(w, r) {
 		return
@@ -377,6 +433,7 @@ func (g *Gateway) handlePASIngress(w http.ResponseWriter, r *http.Request) {
 	if fstatus == 0 && f.relatedClaim != "" {
 		leg = "pas-claim-update"
 	}
+	scope.leg = leg
 	// R8 re-home (FR-16/FR-27): fence at the provider-facing edge too, before this
 	// gateway ever originates the bundle onward — a nonconformant clinician/patient
 	// QR item is rejected here regardless of which leg it routes as (the property
@@ -415,10 +472,24 @@ func (g *Gateway) handlePASIngress(w http.ResponseWriter, r *http.Request) {
 	// native.go's arm-1 pin and which goes live with the strict-extensions work, not
 	// here. pa.crd could be promoted precisely because it is line-INERT; pa.pas
 	// cannot. Do not "finish the sweep" without re-adjudicating that deferral.
-	crJSON, err := g.OriginateLeg(r.Context(), r, recipient, leg, pci, child, "",
-		Content{WorkstreamType: workstreamPA, Bytes: body})
+	requestObservation := append([]byte(nil), body...)
+	var responseObservation []byte
+	var observedTarget string
+	defer func() {
+		g.certificationPair(leg, "provider-ingress", child, shnsdk.LineOf(observedTarget), requestObservation, responseObservation)
+	}()
+	observationContext := context.WithValue(r.Context(), certificationTargetKey{}, &observedTarget)
+	// The participant's Bundle is carried exactly as it arrived.
+	request := relay.Exact(relay.NewBody(body, relay.OriginIngressRequest), "application/fhir+json")
+	crJSON, err := g.OriginateLeg(observationContext, r, recipient, leg, pci, child, "",
+		Content{WorkstreamType: workstreamPA, Payload: request, Carried: true})
+	responseObservation = append([]byte(nil), crJSON...)
+	var relayed *RelayError
+	if errors.As(err, &relayed) {
+		responseObservation = append([]byte(nil), relayed.Body...)
+	}
 	legProj := Leg{Type: leg, Physics: paCatalog[leg].Physics,
-		Content: Content{WorkstreamType: workstreamPA, Bytes: body}, Subjects: []string{pci}}
+		Content: Content{WorkstreamType: workstreamPA, Payload: request, Carried: true}, Subjects: []string{pci}}
 	if err != nil {
 		g.recordLeg(ex.ID, legProj.Project(child, "error"))
 		// The recipient answered non-2xx — relay its framed answer verbatim (Content-Type
@@ -451,7 +522,7 @@ func (g *Gateway) handlePASIngress(w http.ResponseWriter, r *http.Request) {
 	}
 	g.recordLeg(ex.ID, legProj.Project(child, outcome))
 	// Near-relay: return the validated payer Bundle verbatim.
-	w.Header().Set("Content-Type", "application/fhir+json")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(crJSON)
+	g.writePayload(w, http.StatusOK, "application/fhir+json",
+		relay.Exact(relay.NewBody(crJSON, relay.OriginPeerFrame), "application/fhir+json"),
+		relay.Key{Leg: leg, Role: relay.RoleRequester, Direction: relay.DirectionResponse, Outcome: relay.OutcomeAnswered})
 }

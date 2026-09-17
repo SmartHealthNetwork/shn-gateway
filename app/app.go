@@ -181,28 +181,15 @@ type config struct {
 	PayerDavinciClientKID    string
 	PayerDavinciClientSecret string // value, not a path (unlike *ClientKey)
 	PayerDavinciPASNative    bool
-	// PayerDavinciCRDServiceID is the escape-hatch override for the partner's CDS
-	// Hooks order-select service id. When empty, DiscoverCRDServiceID fetches
-	// {PAYER_DAVINCI_BASE_URL}/cds-services at boot and selects the single
-	// "order-select" service (FR-G26). Set explicitly when the partner's CRD service
-	// uses a different hook name — e.g. br-payer's "order-sign-crd" (hook:order-sign).
+	// PayerDavinciCRDServiceID optionally names the partner's CDS service for the
+	// order-select leg (hooks order-select and order-sign). Empty ⇒ each request goes to
+	// the one service the partner's {CDS base}/cds-services listing offers for the
+	// request's hook (FR-G26). Either way the named service must be listed for the
+	// request's hook. PAYER_DAVINCI_CRD_SERVICE_ID.
 	PayerDavinciCRDServiceID string
-	// PayerDavinciCRDHook is the CDS Hooks hook value to stamp on the CRD request before
-	// forwarding, matching the partner's CRD service (br-payer's order-sign-crd ⇒ order-sign).
-	// Empty ⇒ forward the originator's hook verbatim. PAYER_DAVINCI_CRD_HOOK.
-	PayerDavinciCRDHook string
-	// PayerDavinciDispatchServiceID is the partner's CDS service id for the
-	// crd-order-dispatch leg. Empty ⇒ dispatch leg fails closed (502). PAYER_DAVINCI_DISPATCH_SERVICE_ID.
+	// PayerDavinciDispatchServiceID optionally names the partner's CDS service for the
+	// crd-order-dispatch leg, with the same rules. PAYER_DAVINCI_DISPATCH_SERVICE_ID.
 	PayerDavinciDispatchServiceID string
-	// PayerDavinciDispatchHook is the CDS Hooks hook value to stamp on the order-dispatch
-	// request before forwarding. Empty ⇒ forward the originator's hook verbatim. PAYER_DAVINCI_DISPATCH_HOOK.
-	PayerDavinciDispatchHook string
-	// PayerDavinciCRDCoverageBundle wraps the CRD request's bare prefetch.coverage into a
-	// searchset Bundle on egress — for a partner whose order-sign `coverage` prefetch
-	// is a SEARCH template demanding a Bundle (bare → 412). The SHN spine carries a bare
-	// Coverage, so this is a partner-scoped egress transform run after the bind. Off ⇒ verbatim
-	// (br-payer untouched). PAYER_DAVINCI_CRD_COVERAGE_BUNDLE=true.
-	PayerDavinciCRDCoverageBundle bool
 
 	// PayerDavinciContractVersions is the operator-declared per-peer contract
 	// token set ("<contract>@<line>", comma-separated) the payer FHIR-metadata
@@ -342,10 +329,42 @@ func checkClientAuthMode(prefix, key, alg, kid, secret string) error {
 	return nil
 }
 
-// loadConfig reads the collapsed PUBLIC surface from getenv. Mirrors the
-// substrate cmd/gateway loadConfig validation (collapsed-surface URL checks,
-// ROLE/PORT bounds, the FHIR/SMART credential block guards) MINUS the seed/SHN_MANIFEST
-// path — the public binary requires SHN_DISCOVERY_URL.
+// reportCDSServices logs which hook each configured CDS service answers, and
+// warns about a configured service the payer does not list.
+func reportCDSServices(stdout io.Writer, services []engine.CDSService, cfg config) {
+	for _, configured := range []struct{ key, id string }{
+		{"PAYER_DAVINCI_CRD_SERVICE_ID", cfg.PayerDavinciCRDServiceID},
+		{"PAYER_DAVINCI_DISPATCH_SERVICE_ID", cfg.PayerDavinciDispatchServiceID},
+	} {
+		if configured.id == "" {
+			continue
+		}
+		hook := ""
+		for _, s := range services {
+			if s.ID == configured.id {
+				hook = s.Hook
+				break
+			}
+		}
+		if hook == "" {
+			fmt.Fprintf(stdout, "gateway: WARNING %s=%s is not in the payer's CDS service listing; its CRD requests are refused\n", configured.key, configured.id)
+			continue
+		}
+		fmt.Fprintf(stdout, "gateway: %s=%s is the payer's CDS service for hook %s; requests with another hook are refused\n", configured.key, configured.id, hook)
+	}
+}
+
+// removedSettings are settings this gateway no longer reads. A deployment that
+// still sets one does not start, so the change in behavior is never silent.
+var removedSettings = []struct{ key, replacedBy string }{
+	{"PAYER_DAVINCI_CRD_COVERAGE_BUNDLE", "the payer receives the CDS Hooks request as the provider's system sent it; a coverage prefetch template that is a search is answered with a searchset Bundle"},
+	{"PAYER_DAVINCI_CRD_HOOK", "the request's hook is never changed; the payer's CDS service is chosen by the request's hook (PAYER_DAVINCI_CRD_SERVICE_ID still names one)"},
+	{"PAYER_DAVINCI_DISPATCH_HOOK", "the request's hook is never changed; the payer's CDS service is chosen by the request's hook (PAYER_DAVINCI_DISPATCH_SERVICE_ID still names one)"},
+}
+
+// loadConfig reads the gateway's public configuration from getenv: the URL
+// checks, the ROLE/PORT bounds and the FHIR/SMART credential guards. The
+// public binary requires SHN_DISCOVERY_URL; it has no seed-manifest path.
 func loadConfig(getenv func(string) string) (config, error) {
 	def := func(k, d string) string {
 		if v := getenv(k); v != "" {
@@ -364,6 +383,12 @@ func loadConfig(getenv func(string) string) (config, error) {
 		return config{}, fmt.Errorf("gateway: invalid PORT %q", port)
 	}
 	host := def("HOST", "0.0.0.0")
+
+	for _, removed := range removedSettings {
+		if getenv(removed.key) != "" {
+			return config{}, fmt.Errorf("gateway: %s was removed and must be unset: %s", removed.key, removed.replacedBy)
+		}
+	}
 
 	secretsDir := getenv("SHN_SECRETS")
 	if secretsDir == "" {
@@ -410,10 +435,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 		PayerDavinciClientSecret:      getenv("PAYER_DAVINCI_CLIENT_SECRET"),
 		PayerDavinciPASNative:         getenv("PAYER_DAVINCI_PAS_NATIVE") == "true",
 		PayerDavinciCRDServiceID:      getenv("PAYER_DAVINCI_CRD_SERVICE_ID"),
-		PayerDavinciCRDHook:           getenv("PAYER_DAVINCI_CRD_HOOK"),
 		PayerDavinciDispatchServiceID: getenv("PAYER_DAVINCI_DISPATCH_SERVICE_ID"),
-		PayerDavinciDispatchHook:      getenv("PAYER_DAVINCI_DISPATCH_HOOK"),
-		PayerDavinciCRDCoverageBundle: getenv("PAYER_DAVINCI_CRD_COVERAGE_BUNDLE") == "true",
 		PayerDavinciContractVersions:  splitTrimmed(getenv("PAYER_DAVINCI_CONTRACT_VERSIONS")),
 		PayerDavinciStrictExtensions:  getenv("PAYER_DAVINCI_STRICT_EXTENSIONS") == "true",
 		PayerDavinciPayorOwnRaw:       getenv("PAYER_DAVINCI_PAYOR_OWN"),
@@ -1071,6 +1093,7 @@ func firstNonEmpty(vals ...string) string {
 // boot-time registry SNAPSHOT, and returns the handler WITHOUT serving, so the
 // boot gate can drive it.
 type built struct {
+	gateway      *engine.Gateway
 	addr         string
 	handler      http.Handler
 	reg          shnsdk.Registry // shared-reference value type; the poller mutates the same state the engine reads
@@ -1110,17 +1133,18 @@ type built struct {
 	nativeResponder engine.EndpointEvidenceSetter
 
 	// closeStore closes the shared-state pool. Non-nil only under
-	// SHN_STORE_DATABASE_URL. Run never calls it — the process owns the pool for its
-	// lifetime and exits with it — so this is a TEST seam: it is how the pg-gated
+	// SHN_STORE_DATABASE_URL. Run and managed-handler cleanup close it. Tests also
+	// use it directly: it is how the pg-gated
 	// outage rows make a BUILT gateway's database unreachable (pg_multi_test.go
 	// TestPgMulti_StoreOutageTokenIs503) instead of testing a pool the gateway does
 	// not use. built is unexported, so it is not a partner-visible surface.
 	closeStore func()
+	lanes      *laneManager
 
 	// keyRefresh is the shared ingress-key background reload
 	// ((*pgstore.IngressKeyStore).RunRefresh), non-nil only when
 	// SHN_STORE_DATABASE_URL selected the shared stores. Only Run starts it —
-	// build starts no goroutines (the same rule as the registrar poller).
+	// build starts only bounded default-lane qualification workers, not pollers.
 	keyRefresh func(context.Context)
 
 	// poolStats samples the shared-state pool into EMF every
@@ -1208,13 +1232,20 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	if err != nil {
 		return b, err
 	}
-	// Per-LINE lanes (F7): fail-closed when a DECLARED multi-line contract line has
-	// no validator to answer for it. Runs here, at boot, so the refusal is a startup
-	// error naming the missing env — never a surprise 500 mid-exchange.
-	validatorLanes, err := validatorLanesForDeclared(getenv, cfg.ContractVersions, validator, cfg)
+	// Default declared lanes qualify before traffic admission. Explicit per-line
+	// URLs retain their existing startup semantics; undeclared defaults qualify
+	// in bounded background workers owned by this app lifecycle.
+	validatorLanes, lanes, err := discoverValidatorLanes(ctx, getenv, cfg.ContractVersions, validator, cfg, engine.DefaultLaneURL, qualifyDefaultLane)
 	if err != nil {
 		return b, err
 	}
+
+	admitted := false
+	defer func() {
+		if !admitted {
+			lanes.Close()
+		}
+	}()
 
 	// FEDERATION CORE: populate the peer registry from the live /holders feed (boot-time
 	// SNAPSHOT). The engine resolves recipient EncPub via cfg.Reg.Lookup, so Reg MUST be
@@ -1357,23 +1388,26 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	}
 
 	gwCfg := engine.Config{
-		Role:             cfg.Role,
-		HolderID:         bundle.Identity.HolderID,
-		PayerRouter:      payerRouter,
-		Identity:         bundle.Identity,
-		AuthzURL:         firstNonEmpty(cfg.AuthzURL, endpoints.Authz),
-		AuthzPub:         trust.AuthzPub,
-		HubTransportPub:  trust.HubTransportPub,
-		HubURL:           firstNonEmpty(cfg.HubURL, endpoints.Hub),
-		Reg:              reg, // populated by the snapshot above
-		Validator:        validator,
-		ValidatorsByLine: validatorLanes,
+		Role:                    cfg.Role,
+		HolderID:                bundle.Identity.HolderID,
+		PayerRouter:             payerRouter,
+		Identity:                bundle.Identity,
+		AuthzURL:                firstNonEmpty(cfg.AuthzURL, endpoints.Authz),
+		AuthzPub:                trust.AuthzPub,
+		HubTransportPub:         trust.HubTransportPub,
+		HubURL:                  firstNonEmpty(cfg.HubURL, endpoints.Hub),
+		Reg:                     reg, // populated by the snapshot above
+		Validator:               validator,
+		ValidatorsByLine:        validatorLanes,
+		DefaultValidatorsByLine: lanes.defaults,
+		CanonicalFallbackLines:  lanes.fallbacks,
 		// D1a: the boot-validated declared set — read by leg selection, the published
 		// CapabilityStatements / davinci-configuration, and (through the registrar
 		// registration) the declaration peers select this holder against.
 		DeclaredContractVersions: cfg.ContractVersions,
-		// EgressNativeLines (D1c): nil in every shipped deploy; the kit-bridging
-		// demo's SHN_DEMO_EGRESS_NATIVE_LINES is the sole non-test way to set it.
+		// EgressNativeLines is set by SHN_DEMO_EGRESS_NATIVE_LINES. The hosted
+		// preview, reference-participant composition and desktop gateway child
+		// use "2.0" for the existing bridging exhibits.
 		EgressNativeLines: cfg.DemoEgressNativeLines,
 		// DemoEdgeCapture: false in every shipped deploy; SHN_DEMO_EDGE_CAPTURE
 		// is the sole non-test way to set it.
@@ -1436,20 +1470,21 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		if !cfg.PayerDavinciPASNative {
 			fmt.Fprintln(stdout, "gateway: PAYER_DAVINCI_PAS_NATIVE is no longer a switch — every Da Vinci leg, PAS included, forwards to PAYER_DAVINCI_BASE_URL (the in-process payer is retired)")
 		}
-		// FR-G26: discover the partner's CDS Hooks order-select service id at boot.
-		// If PAYER_DAVINCI_CRD_SERVICE_ID is set it wins (escape hatch — needed for
-		// partners whose CRD service uses a different hook name, e.g. br-payer's
-		// "order-sign-crd" which registers hook:order-sign rather than order-select).
-		// Fail-closed: an ambiguous or absent order-select service aborts boot.
-		// CDS Hooks may live on a different base than the FHIR ops (e.g. br-payer: CDS at
-		// root, FHIR under /fhir). cdsBase defaults to the FHIR base when unset (FR-G28).
+		// FR-G26: the partner's CDS services are chosen per request by the request's hook
+		// (engine/crdservice.go). The listing is read here once, best effort, to report which
+		// hook each configured service answers; a listing that cannot be read yet does not
+		// stop boot — CRD requests are refused (502) until it can be read. CDS Hooks may
+		// live on a different base than the FHIR ops (e.g. br-payer: CDS at root, FHIR
+		// under /fhir); cdsBase defaults to the FHIR base when unset (FR-G28).
 		cdsBase := cfg.PayerDavinciBaseURL
 		if cfg.PayerDavinciCDSBaseURL != "" {
 			cdsBase = cfg.PayerDavinciCDSBaseURL
 		}
-		crdSvcID, discErr := engine.DiscoverCRDServiceID(ctx, pdc, cdsBase, cfg.PayerDavinciCRDServiceID)
+		cdsServices, discErr := engine.DiscoverCDSServices(ctx, pdc, cdsBase)
 		if discErr != nil {
-			return b, fmt.Errorf("gateway: CRD service-id discovery: %w", discErr)
+			fmt.Fprintf(stdout, "gateway: WARNING the payer's CDS service listing is not readable yet (%v); CRD requests are refused until it is\n", discErr)
+		} else {
+			reportCDSServices(stdout, cdsServices, cfg)
 		}
 		// WithDeclaredContractVersions is the foreign-endpoint filter: every leg this
 		// responder answers goes to the partner endpoint, so the partner's declared set
@@ -1457,9 +1492,7 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		// arm and the rest to an in-process fallback is deleted — §3.2).
 		nativeOpts := []engine.NativeOption{
 			engine.WithCDSBaseURL(cfg.PayerDavinciCDSBaseURL),
-			engine.WithCRDHook(cfg.PayerDavinciCRDHook),
-			engine.WithCRDDispatchService(cfg.PayerDavinciDispatchServiceID, cfg.PayerDavinciDispatchHook),
-			engine.WithCRDCoverageBundle(cfg.PayerDavinciCRDCoverageBundle),
+			engine.WithCRDDispatchService(cfg.PayerDavinciDispatchServiceID),
 			engine.WithDeclaredContractVersions(cfg.PayerDavinciContractVersions),
 			// The foreign-peer filter's OWN half is this deployment's declared
 			// set — the same accessor selection, the CapabilityStatements and the
@@ -1482,7 +1515,10 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		if cfg.PayerDavinciPayorEdge {
 			nativeOpts = append(nativeOpts, engine.WithPayorEdgeIdentity(cfg.PayerDavinciPayorOwn, cfg.PayerDavinciPayorBackend))
 		}
-		native := engine.NewNativeResponder(pdc, cfg.PayerDavinciBaseURL, crdSvcID, store, clock, nativeOpts...)
+		native := engine.NewNativeResponder(pdc, cfg.PayerDavinciBaseURL, cfg.PayerDavinciCRDServiceID, store, clock, nativeOpts...)
+		if discErr == nil {
+			native.PrimeCDSServices(cdsServices)
+		}
 		evidenceSink = native
 		gwCfg.Responder = native
 		// The native-forward DTR response is a foreign Da Vinci package SHN can't $validate
@@ -1559,14 +1595,20 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	// engine.New(gwCfg).Handler()) so the observer mux composed just below
 	// can wire the demo capture-fetch endpoint against this SAME gateway
 	// instance's own edge-capture store.
+	gwCfg.CertificationValidatorsByLine = certificationValidators(getenv, cfg, firstNonEmpty(cfg.FHIRValidateURL, endpoints.FHIRValidate))
 	gw, err := engine.New(gwCfg)
 	if err != nil {
 		return b, err
 	}
 
+	defer func() {
+		if !admitted {
+			_ = gw.Close()
+		}
+	}()
 	var obsHandler http.Handler
 	if hub != nil {
-		obsHandler = composeObserverHandler(hub.Handler(), gw, cfg.DemoEdgeCapture)
+		obsHandler = composeObserverHandler(hub.HandlerWithBarrier(gw.WaitObserverCompletion), gw, cfg.DemoEdgeCapture)
 	}
 
 	tlsCert, err := loadTLSCert(cfg.TLSCertFile, cfg.TLSKeyFile)
@@ -1611,6 +1653,7 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	})
 
 	b = built{
+		gateway:         gw,
 		addr:            cfg.Addr,
 		handler:         handler,
 		reg:             reg,
@@ -1624,8 +1667,10 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		nativeResponder: evidenceSink,
 		keyRefresh:      keyRefresh,
 		closeStore:      closeStore,
+		lanes:           lanes,
 		poolStats:       poolStats,
 	}
+	admitted = true
 	return b, nil
 }
 
@@ -1666,25 +1711,21 @@ func Run(ctx context.Context, getenv func(string) string, stdout io.Writer) erro
 	if err != nil {
 		return err
 	}
-	if b.registrarURL != "" {
-		go pollFeed(ctx, b.client, b.registrarURL, b.reg, 3*time.Second, b.healthCell)
-	}
-	// Shared ingress-key reload: non-nil only under SHN_STORE_DATABASE_URL, and
-	// started here rather than in build for the same reason as the poller above —
-	// the boot gate drives build() and must not inherit a ticker.
-	if b.keyRefresh != nil {
-		go b.keyRefresh(ctx)
-	}
-	// Shared-state pool stats: non-nil only with both a store DSN and METRICS_SERVICE,
-	// started here and not in build for the same reason.
-	if b.poolStats != nil {
-		go b.poolStats(ctx)
-	}
-	// Boot-time connectivity check: after the listener is up, not
-	// blocking it — build() must return without waiting on partner endpoints.
-	go b.checksRunner.Run(ctx) //nolint:errcheck — results land in Last()
+	defer func() {
+		_ = b.gateway.Close()
+		b.lanes.Close()
+		if b.closeStore != nil {
+			b.closeStore()
+		}
+	}()
+
+	// Stop and join Run-owned workers on every exit, including listener errors,
+	// before the deferred gateway/lane/store cleanup releases their dependencies.
+	stopWorkers := b.startWorkers(ctx)
+	defer stopWorkers()
 	errc := make(chan error, 2)
 	main := serverFor(b.addr, b.handler, b.tlsCert)
+	defer main.Close()
 	go func() {
 		if b.tlsCert != nil {
 			// Cert/key already loaded into TLSConfig at build time.
@@ -1698,35 +1739,107 @@ func Run(ctx context.Context, getenv func(string) string, stdout io.Writer) erro
 		// intent: OBSERVER_ADDR is explicit opt-in (the Kit supervisor sets it), and
 		// a silently-missing inspector stream is worse than a dead child the
 		// supervisor detects and restarts.
-		go func() { errc <- http.ListenAndServe(b.observerAddr, b.observerHandler) }()
+		observer := &http.Server{Addr: b.observerAddr, Handler: b.observerHandler}
+		defer observer.Close()
+		go func() { errc <- observer.ListenAndServe() }()
 	}
-	return <-errc
+	select {
+	case err := <-errc:
+		return err
+	case <-ctx.Done():
+		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return main.Shutdown(shutdown)
+	}
+}
+
+// startWorkers owns the goroutines that exist only while Run serves. Its
+// cleanup cancels even when the caller's context remains live (a listener error)
+// and joins in-flight requests before their dependencies can be released.
+func (b built) startWorkers(parent context.Context) func() {
+	ctx, cancel := context.WithCancel(parent)
+	var workers sync.WaitGroup
+	start := func(run func(context.Context)) {
+		workers.Go(func() { run(ctx) })
+	}
+	if b.registrarURL != "" {
+		start(func(ctx context.Context) { pollFeed(ctx, b.client, b.registrarURL, b.reg, 3*time.Second, b.healthCell) })
+	}
+	// Shared ingress-key reload: non-nil only under SHN_STORE_DATABASE_URL, and
+	// started here rather than in build for the same reason as the poller above —
+	// the boot gate drives build() and must not inherit a ticker.
+	if b.keyRefresh != nil {
+		start(b.keyRefresh)
+	}
+	// Shared-state pool stats: non-nil only with both a store DSN and METRICS_SERVICE,
+	// started here and not in build for the same reason.
+	if b.poolStats != nil {
+		start(b.poolStats)
+	}
+	// Boot-time connectivity checks run without blocking listener startup;
+	// build() must return without waiting on partner endpoints.
+	start(func(ctx context.Context) { _, _ = b.checksRunner.Run(ctx) }) // results land in Last()
+	return func() {
+		cancel()
+		workers.Wait()
+	}
+}
+
+// managedHandler retains the complete runtime's cleanup without changing the
+// public constructors' http.Handler return type. Close is idempotent and joins
+// qualification workers before releasing the shared-state pool.
+type managedHandler struct {
+	http.Handler
+	once  sync.Once
+	close func()
+}
+
+func (h *managedHandler) Close() error {
+	h.once.Do(h.close)
+	return nil
+}
+
+// HandlerForTest builds the complete runtime and returns a cleanup that cancels
+// and joins default-lane workers. Call cleanup before closing test dependencies.
+func HandlerForTest(ctx context.Context, getenv func(string) string, stdout io.Writer) (http.Handler, func(), error) {
+	return HandlerForTestWithClock(ctx, getenv, stdout, time.Now)
+}
+
+// HandlerForTestWithClock adds deterministic time to HandlerForTest while retaining
+// its explicit cleanup barrier. Cleanup is safe to call more than once.
+func HandlerForTestWithClock(ctx context.Context, getenv func(string) string, stdout io.Writer, clock func() time.Time) (http.Handler, func(), error) {
+	h, err := HandlerWithClock(ctx, getenv, stdout, clock)
+	if err != nil {
+		return nil, nil, err
+	}
+	return h, func() { _ = h.(io.Closer).Close() }, nil
 }
 
 // HandlerWithClock is Handler with an injected clock. The engine's per-op/per-hop
 // authority (assertion issuance + expiry, VerifyBound) is time-sensitive, so a
-// HERMETIC test driving the gateway against a fixed-clock substrate must align the
-// gateway to that same clock. This surfaces gateway/engine's already-public
-// Config.Clock at the app layer for tests/embedders; production uses Run (time.Now).
+// hermetic test must align the gateway with its peers' clock. The returned handler
+// implements io.Closer: the caller must Close it after stopping HTTP service and
+// before releasing dependencies, to cancel and join default-lane workers.
 func HandlerWithClock(ctx context.Context, getenv func(string) string, stdout io.Writer, clock func() time.Time) (http.Handler, error) {
 	b, err := build(ctx, getenv, stdout, clock)
 	if err != nil {
 		return nil, err
 	}
-	return b.handler, nil
+	return &managedHandler{Handler: b.handler, close: func() {
+		_ = b.gateway.Close()
+		b.lanes.Close()
+		if b.closeStore != nil {
+			b.closeStore()
+		}
+	}}, nil
 }
 
-// Handler is the EXPORTED test seam: it runs the full build (config/identity/
-// discovery/validator/registry-snapshot/wiring) and returns the configured
-// gateway http.Handler WITHOUT serving — so a cross-module test (the substrate
-// boot gate) can drive the public runtime hermetically via httptest. main() uses
-// Run (which serves); the gate uses Handler/HandlerWithClock.
+// Handler builds the full public runtime without serving. The returned handler
+// implements io.Closer; embedders must close it after stopping HTTP service.
+// Tests may instead use HandlerForTest's explicit cleanup callback. Run owns its
+// own lifecycle and serves the production process.
 func Handler(ctx context.Context, getenv func(string) string, stdout io.Writer) (http.Handler, error) {
-	b, err := build(ctx, getenv, stdout, time.Now)
-	if err != nil {
-		return nil, err
-	}
-	return b.handler, nil
+	return HandlerWithClock(ctx, getenv, stdout, time.Now)
 }
 
 // validatorLanesForDeclared builds the per-LINE $validate lane map and
@@ -1741,8 +1854,8 @@ func Handler(ctx context.Context, getenv func(string) string, stdout io.Writer) 
 // rather than quietly validate against the wrong IG (FR-36/FR-G29).
 //
 // canonical is the already-resolved canonical-lane validator (selectValidator's
-// result). Under SHN_FAKE_VALIDATOR=1 the fake serves EVERY line — the harness,
-// e2e and every hermetic test keep working unchanged, at every line.
+// result). Under SHN_FAKE_VALIDATOR=1 each line gets its own structural fake
+// validator with the line-specific cardinality and binding checks.
 // Scope: only MULTI-LINE contracts (pa.crd/pa.dtr/pa.pas — those whose native set
 // carries more than one line) can produce line-varying payloads and therefore need
 // per-line lanes. A single-line contract (pa.pdex, native at 2.1 only) has nothing
@@ -1779,7 +1892,7 @@ func validatorLanesForDeclared(getenv func(string) string, declared []string, ca
 		}
 		switch {
 		case fake:
-			lanes[line] = canonical // the fake validates any line — harness/e2e unchanged
+			lanes[line] = engine.NewLineFakeValidator(line)
 		case line == canonicalLine:
 			lanes[line] = canonical
 		case urlForLine[line] != "":
@@ -1812,7 +1925,7 @@ func validatorLanesForDeclared(getenv func(string) string, declared []string, ca
 			}
 			switch {
 			case fake:
-				lanes[line] = canonical
+				lanes[line] = engine.NewLineFakeValidator(line)
 			case line == canonicalLine:
 				lanes[line] = canonical
 			case urlForLine[line] != "":
@@ -1843,7 +1956,7 @@ func validatorLanesForDeclared(getenv func(string) string, declared []string, ca
 func selectValidator(getenv func(string) string, validatorURL string) (shnsdk.Validator, error) {
 	switch {
 	case getenv("SHN_FAKE_VALIDATOR") == "1":
-		return shnsdk.NewFakeValidator(), nil
+		return engine.NewLineFakeValidator(shnsdk.LineOf(shnsdk.ContractPAPAS20)), nil
 	case validatorURL != "":
 		return shnsdk.NewOperationValidator(validatorURL), nil // $validate wrapper (NOT a thin HTTP validator)
 	default:
@@ -2039,4 +2152,22 @@ func populateFailureObserver(stdout io.Writer) func(engine.PopulateFailure) {
 		defer mu.Unlock()
 		fmt.Fprintf(stdout, "gateway: populate_failure {\"version\":1,\"stage\":%q,\"reason\":%q,\"status\":%d}\n", note.Stage, note.Reason, note.Status)
 	}
+}
+
+// certificationValidators constructs read-only clients with independent pools
+// for every supported line, including the resolved canonical endpoint.
+func certificationValidators(getenv func(string) string, cfg config, canonical string) map[string]shnsdk.Validator {
+	endpoints := map[string]string{"2.0": canonical, "2.1": cfg.FHIRValidateURL21, "2.2": cfg.FHIRValidateURL22}
+	out := make(map[string]shnsdk.Validator, len(endpoints))
+	for line, endpoint := range endpoints {
+		if getenv("SHN_FAKE_VALIDATOR") == "1" {
+			out[line] = engine.NewLineFakeValidator(line)
+			continue
+		}
+		if endpoint == "" {
+			endpoint = engine.DefaultLaneURL(line)
+		}
+		out[line] = engine.NewCertificationOperationValidator(endpoint)
+	}
+	return out
 }

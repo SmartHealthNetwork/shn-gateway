@@ -112,11 +112,11 @@ var sweepSkipFiles = map[string]bool{
 }
 
 // sweepAllowlist pins the individual lines that legitimately match the broad
-// pattern above. Key = module-relative slash path; value = exact substrings of
+// pattern above. Key = module-relative slash path; value = exact trimmed text of
 // the offending line. An entry means "this match is a false positive or is
 // genuinely partner-facing" — every entry carries a WHY comment. Adding one is
-// a review decision, not a way to silence the sweep: the substring must be
-// specific enough that unrelated prose on the same line cannot hide behind it.
+// a review decision, not a way to silence the sweep: the whole line must
+// match, so unrelated prose on the same line cannot hide behind it.
 //
 // Empty is the goal state and is a stronger claim than any entry: it says the
 // shipped module contains no line that even LOOKS like internal vocabulary. The
@@ -145,10 +145,45 @@ var sweepAllowlist = map[string][]string{
 		"\"diagnostics\": \"Unknown code 'https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set#98'\",",
 		"\"diagnostics\": \"None of the codings provided are in the value set 'X12 278 Health Care Service Location Type Value Set' (http://hl7.org/fhir/us/davinci-pas/ValueSet/X12278LocationType|2.2.1), and a coding from this value set is required) (codes = https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set#98)\",",
 	},
+	// Exact HAPI diagnostic identifies POS code 98, not an issue number.
+	"internal/lanequalify/testdata/pas-response-pos-errors.json": {
+		"\"diagnostics\": \"Unknown code 'https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set#98'\",",
+		"\"diagnostics\": \"None of the codings provided are in the value set 'X12 278 Health Care Service Location Type Value Set' (http://hl7.org/fhir/us/davinci-pas/ValueSet/X12278LocationType|2.0.1), and a coding from this value set is required) (codes = https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set#98)\",",
+	},
+	// Exact HAPI diagnostic identifies POS code 98, not an issue number.
+	"internal/lanequalify/testdata/2.1/pas-response-pos-errors.json": {
+		"\"diagnostics\": \"Unknown code 'https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set#98'\",",
+		"\"diagnostics\": \"None of the codings provided are in the value set 'X12 278 Health Care Service Location Type Value Set' (http://hl7.org/fhir/us/davinci-pas/ValueSet/X12278LocationType|2.1.0), and a coding from this value set is required) (codes = https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set#98)\",",
+	},
+	// Exact HAPI diagnostic identifies POS code 98, not an issue number.
+	"internal/lanequalify/testdata/2.2/pas-response-pos-errors.json": {
+		"\"diagnostics\": \"Unknown code 'https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set#98'\",",
+		"\"diagnostics\": \"None of the codings provided are in the value set 'X12 278 Health Care Service Location Type Value Set' (http://hl7.org/fhir/us/davinci-pas/ValueSet/X12278LocationType|2.2.1), and a coding from this value set is required) (codes = https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set#98)\",",
+	},
+	// The admission transcript repeats the same exact public CMS diagnostic.
+	"app/testdata/qualification-2.1.json": {
+		"\"diagnostics\": \"Unknown code 'https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set#98'\",",
+		"\"diagnostics\": \"None of the codings provided are in the value set 'X12 278 Health Care Service Location Type Value Set' (http://hl7.org/fhir/us/davinci-pas/ValueSet/X12278LocationType|2.1.0), and a coding from this value set is required) (codes = https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set#98)\",",
+	},
+
 	// ASCII uppercase range is Go syntax, not a decision label.
 	"engine/pasassembly.go": {
 		"if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '.') {",
 	},
+}
+
+func TestSweepAllowanceRequiresExactDiagnosticLine(t *testing.T) {
+	allowed := sweepAllowlist["deploy/validator/testdata/2.1/pas-response-pos-errors.json"]
+	for _, line := range allowed {
+		if !sweepLineAllowed("  "+line+"  ", allowed) {
+			t.Fatal("exact diagnostic with indentation refused")
+		}
+		for _, bad := range []string{strings.ReplaceAll(line, "#98", "#99"), strings.ReplaceAll(line, "Unknown code", "Changed diagnostic"), line + " internal issue #758", "issue #758 " + line} {
+			if bad != line && sweepLineAllowed(bad, allowed) {
+				t.Fatalf("allowance admitted changed or appended content: %s", bad)
+			}
+		}
+	}
 }
 
 // TestInternalTokenPattern_DesignDocRefForms is the rejection test for the
@@ -604,7 +639,7 @@ func dedupe(matches []string) []string {
 
 func sweepLineAllowed(line string, allowed []string) bool {
 	for _, sub := range allowed {
-		if strings.Contains(line, sub) {
+		if strings.TrimSpace(line) == strings.TrimSpace(sub) {
 			return true
 		}
 	}

@@ -206,7 +206,9 @@ func declaredLine22() []string {
 func newAuthoredQRRegistry(keys authoredQRKeys) shnsdk.Registry {
 	declared := declaredLine22()
 	reg := shnsdk.NewRegistry()
-	requestFrames := shnsdk.SupportedRequestFrames()
+	// A manifest peer declares the base request frame and framed DTR
+	// operations.
+	requestFrames := []string{shnsdk.RequestFrameV1, shnsdk.RequestFrameV1Op}
 	reg.Set("provider", shnsdk.RegistryEntry{ID: "provider", Role: "provider", EncPub: keys.provEncPub, SignPub: keys.authzPub,
 		RequestFrames: requestFrames, ContractVersions: declared})
 	reg.Set("payer", shnsdk.RegistryEntry{ID: "payer", Role: "payer", EncPub: keys.payerEncPub, SignPub: keys.payerSignPub,
@@ -371,7 +373,7 @@ func (s *uc04SingleShotSubstrate) handleRoute(body []byte) (*http.Response, erro
 	respOp, respFrame := "pas-response", "payer-coverage"
 	switch txType {
 	case "crd-order-select":
-		respPayload, err = shnsdk.BuildCards(shnsdk.CardCoverage{Covered: shnsdk.CoveredCovered, PANeeded: shnsdk.PANeededAuthNeeded,
+		respPayload = crdAnswerFor(shnsdk.CardCoverage{Covered: shnsdk.CoveredCovered, PANeeded: shnsdk.PANeededAuthNeeded,
 			Questionnaires: []string{fhirseed.LumbarMRIQuestionnaireCanonical}})
 		respOp, respFrame = "crd-cards", "payer-coverage"
 	case "dtr-questionnaire-fetch":

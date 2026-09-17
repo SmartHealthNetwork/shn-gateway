@@ -11,8 +11,10 @@
 package engine
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
@@ -75,16 +77,15 @@ func TransformPASForTest(from, to string, payload []byte, x ExchangeIdentity) ([
 //     profile-claim.json/profile-claim-update.json differential makes
 //     Claim.item.extension:certificationType, :requestType, and
 //     Claim.item.location[x] min=1 (PASDef.ClaimItemLineDetailRequired, verified
-//     unchanged 2.1.0->2.2.1, absent/unconstrained at 2.0.1), and
+//     unchanged 2.1.0->2.2.1, 0..1 MustSupport at 2.0.1, 1..1 from 2.1.0), and
 //     profile-claim-update.json additionally makes Claim.related.relationship
-//     min=1 (PASDef.ClaimRelatedRelationshipRequired, absent at 2.0.1). A
-//     2.0-native Claim (PASDef "2.0": both flags false — the 2.0 builder never
-//     populates them) has NO honest byte-level value to mint for any of the
-//     four: certificationType/requestType are X12-coded medical-necessity
-//     classifications, location[x] is a CMS place-of-service code, and
-//     relationship links to a prior claim — none derivable from what a 2.0
-//     payload carries. This direction UNCONDITIONALLY refuses (gated) — the
-//     native 2.1 builders (sdk/pas.go) remain the honest 2.1 producers.
+//     min=1 (PASDef.ClaimRelatedRelationshipRequired, 0..1 at 2.0.1, 1..1 from
+//     2.1.0 on the update profile).
+//     A 2.0 Claim MAY carry all four (they are optional MustSupport at 2.0.1);
+//     when it does not, this step has no source for them TODAY and refuses.
+//     The current step refuses every 2.0 Claim today, including one that
+//     already carries all four, because it has no per-item fact resolver and
+//     refuses when the requested transformation cannot preserve the required meaning.
 //   - response-direction (a ClaimResponse, bare or Bundle-embedded next to a
 //     Task for the pended shape): PAS 2.1 makes ClaimResponse.request min=1
 //     (PASDef.ClaimResponseRequestRequired). The response builders already
@@ -165,6 +166,12 @@ func pasStep2021Up(payload []byte, x ExchangeIdentity) ([]byte, LossReport, erro
 // min=0 (never min=0-forbidding-max=0), so leaving a 2.1-synthesized request
 // field in place downcasting to 2.0 is likewise tolerated, not dropped.
 // Nothing to drop, nothing to carry — pure pass-through (full).
+//
+// A pended response's PAS Task passes through as the source line wrote it
+// (declared profile included): its questionnaire need changes form between
+// 2.0.1 and 2.1.0 (questionnaires-needed Identifier vs questionnaire-context
+// string) and its attachment codes are bound to different value sets, and
+// this step translates neither (see pasAdaptPendedTasks).
 func pasStep2021Down(payload []byte, x ExchangeIdentity) ([]byte, LossReport, error) {
 	out := append([]byte(nil), payload...)
 	return out, LossReport{Module: "pa.pas 2.1->2.0", Source: "2.1", Target: "2.0"}, nil
@@ -261,6 +268,9 @@ func pasStep2122Up(payload []byte, x ExchangeIdentity) ([]byte, LossReport, erro
 	}
 	resources := pasCollectResources(top)
 
+	if err := pasAdaptPendedTasks(resources, "2.1", "2.2"); err != nil {
+		return nil, LossReport{}, err
+	}
 	if _, hasTask := resources["Task"]; hasTask {
 		def, ok := shnsdk.PASLineDef("2.2")
 		if !ok {
@@ -342,6 +352,9 @@ func pasStep2122Down(payload []byte, x ExchangeIdentity) ([]byte, LossReport, er
 	}
 	resources := pasCollectResources(top)
 
+	if err := pasAdaptPendedTasks(resources, "2.2", "2.1"); err != nil {
+		return nil, LossReport{}, err
+	}
 	if _, hasTask := resources["Task"]; hasTask {
 		def, ok := shnsdk.PASLineDef("2.1")
 		if !ok {
@@ -387,8 +400,16 @@ func pasStep2122Down(payload []byte, x ExchangeIdentity) ([]byte, LossReport, er
 // or a Bundle) into a mutable map. Fails loudly on invalid JSON — never
 // returns a zero-value success.
 func pasParseTop(payload []byte) (map[string]any, error) {
+	dec := json.NewDecoder(bytes.NewReader(payload))
+	dec.UseNumber()
 	var top map[string]any
-	if err := json.Unmarshal(payload, &top); err != nil {
+	if err := dec.Decode(&top); err != nil {
+		return nil, fmt.Errorf("engine: pas transform: invalid JSON: %w", err)
+	}
+	if err := dec.Decode(new(any)); err != io.EOF {
+		if err == nil {
+			err = fmt.Errorf("multiple top-level JSON values")
+		}
 		return nil, fmt.Errorf("engine: pas transform: invalid JSON: %w", err)
 	}
 	return top, nil
@@ -520,4 +541,129 @@ func pasRestoreCarriedExtensions(res map[string]any) error {
 	}
 	res["extension"] = kept
 	return nil
+}
+
+// PAS pended-response Task (profile-task) line deltas, from the pinned PAS
+// 2.0.1/2.1.0/2.2.1 packages: a Task declaring the profile with a package
+// version names its line, and each need's line number rides
+// extension-paLineNumber (valueInteger) at 2.0.1 and 2.1.0 but
+// extension-serviceLineNumber (valuePositiveInt) at 2.2.1.
+const (
+	pasTaskProfile          = "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-task"
+	pasTempCodes            = "http://hl7.org/fhir/us/davinci-pas/CodeSystem/PASTempCodes"
+	pasExtPALineNumber      = "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-paLineNumber"
+	pasExtServiceLineNumber = "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceLineNumber"
+)
+
+// pasAdaptPendedTasks re-states each PAS pended-response Task for the target
+// line of the 2.1<->2.2 steps, where the two lines differ only in
+// representation (a 1:1 rewrite,
+// recoverable in either direction, so not a LossEntry — the same exemption as
+// the pended outcome rebinding):
+//
+//   - meta.profile "profile-task|<source package>" becomes "|<target
+//     package>" (an unversioned declaration is left alone; a Task declaring
+//     another line's package is left entirely as it is);
+//   - each need's line number moves between extension-paLineNumber
+//     (valueInteger) and extension-serviceLineNumber (valuePositiveInt); a
+//     line number below 1 has no 2.2.1 form and is refused.
+//
+// NOT translated (open: cross-line adaptation of need values): the need values
+// themselves. They have the same form at 2.1.0 and 2.2.1 (the attachment value
+// sets differ and are carried unchanged). Between 2.0.1 and 2.1.0 the
+// questionnaire need changes form (questionnaires-needed, an Identifier, vs
+// questionnaire-context, a string), so the 2.0<->2.1 steps leave the Task as
+// the source line wrote it rather than re-state half of it.
+func pasAdaptPendedTasks(resources map[string][]map[string]any, from, to string) error {
+	fromDef, ok1 := shnsdk.PASLineDef(from)
+	toDef, ok2 := shnsdk.PASLineDef(to)
+	if !ok1 || !ok2 {
+		return fmt.Errorf("engine: pas transform: no PASLineDef for %s or %s", from, to)
+	}
+	for _, t := range resources["Task"] {
+		if code, ok := t["code"].(map[string]any); ok {
+			codings, _ := code["coding"].([]any)
+			pas := false
+			for _, c := range codings {
+				if cm, _ := c.(map[string]any); cm != nil && cm["system"] == pasTempCodes {
+					pas = true
+				}
+			}
+			if !pas {
+				continue // another contract's Task (for example a CDex request)
+			}
+		}
+		if pasTaskDeclaresOtherLine(t, fromDef.PackageVersion) {
+			// A Task another line wrote (for example a 2.0.1 Task an earlier
+			// step kept) is left exactly as it is.
+			continue
+		}
+		if meta, ok := t["meta"].(map[string]any); ok {
+			profiles, _ := meta["profile"].([]any)
+			for i, p := range profiles {
+				if p == pasTaskProfile+"|"+fromDef.PackageVersion {
+					profiles[i] = pasTaskProfile + "|" + toDef.PackageVersion
+				}
+			}
+		}
+		inputs, _ := t["input"].([]any)
+		for _, in := range inputs {
+			im, _ := in.(map[string]any)
+			exts, _ := im["extension"].([]any)
+			for _, e := range exts {
+				em, _ := e.(map[string]any)
+				if em == nil {
+					continue
+				}
+				url, _ := em["url"].(string)
+				var n json.Number
+				switch {
+				case url == pasExtPALineNumber:
+					n, _ = em["valueInteger"].(json.Number)
+				case url == pasExtServiceLineNumber:
+					n, _ = em["valuePositiveInt"].(json.Number)
+				default:
+					continue
+				}
+				v, err := n.Int64()
+				if err != nil {
+					return fmt.Errorf("engine: pas transform: Task input line number %q: %w", n, err)
+				}
+				delete(em, "valueInteger")
+				delete(em, "valuePositiveInt")
+				if to == "2.2" {
+					if v < 1 {
+						return &SemanticChangeError{Contract: "pa.pas", From: from, To: to, Direction: pasDirection(from, to),
+							MissingElements: []string{"Task.input.extension:serviceLineNumber (line number below 1)"}}
+					}
+					em["url"], em["valuePositiveInt"] = pasExtServiceLineNumber, n
+				} else {
+					em["url"], em["valueInteger"] = pasExtPALineNumber, n
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// pasTaskDeclaresOtherLine reports whether the Task declares profile-task
+// with a package version other than version.
+func pasTaskDeclaresOtherLine(t map[string]any, version string) bool {
+	meta, _ := t["meta"].(map[string]any)
+	profiles, _ := meta["profile"].([]any)
+	for _, p := range profiles {
+		ps, _ := p.(string)
+		if v, ok := strings.CutPrefix(ps, pasTaskProfile+"|"); ok && v != version {
+			return true
+		}
+	}
+	return false
+}
+
+// pasDirection names a step direction for an adjacent pair.
+func pasDirection(from, to string) string {
+	if from < to {
+		return "up"
+	}
+	return "down"
 }

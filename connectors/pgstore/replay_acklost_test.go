@@ -89,6 +89,11 @@ func ackLostReplica(t *testing.T, pool *pgxpool.Pool, holderID string, clientPub
 		IngressKeys: NewIngressKeyStore(pool, holderID, time.Now),
 		Replay:      replay,
 	})
+	t.Cleanup(func() {
+		if g != nil {
+			_ = g.Close()
+		}
+	})
 	if err != nil {
 		t.Fatalf("engine.New: %v", err)
 	}

@@ -1,0 +1,2 @@
+# Content-addressed backport inputs require exact blob bytes in every checkout.
+/backport/** -text

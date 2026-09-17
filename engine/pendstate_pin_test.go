@@ -182,13 +182,13 @@ func (s *pendResumeSubstrate) handleRoute(body []byte) (*http.Response, error) {
 	case "crd-order-select":
 		cov := shnsdk.CardCoverage{Covered: shnsdk.CoveredCovered, PANeeded: shnsdk.PANeededAuthNeeded,
 			Questionnaires: []string{fhirseed.LumbarMRIQuestionnaireCanonical}}
-		respPayload, err = shnsdk.BuildCards(cov)
+		respPayload = crdAnswerFor(cov)
 		respOp, respFrame = "crd-cards", "payer-coverage"
 	case "dtr-questionnaire-fetch":
 		respPayload, err = testQuestionnairePackage(fhirseed.DemoLumbarQuestionnaire())
 		respOp, respFrame = "dtr-questionnaire", "payer-coverage"
 	case "pas-claim":
-		respPayload, err = shnsdk.BuildPendedResponse(s.patientRef, "corr-pend", []string{s.pendedItem}, s.clock())
+		respPayload, err = testPendedResponse(s.patientRef, "corr-pend", s.pendedItem, s.clock())
 	case "patient-dtr":
 		// The Trust-operated PHG's answer (UC-07): the patient-authored, signature-
 		// attested item. RespOp/RespFrame are the patient-authorship pair from
@@ -324,7 +324,9 @@ func newPendResumeFixture(t *testing.T, opts pendFixtureOpts) (*Gateway, *pendRe
 	}
 
 	reg := shnsdk.NewRegistry()
-	requestFrames := shnsdk.SupportedRequestFrames()
+	// A manifest peer declares the base request frame and framed DTR
+	// operations.
+	requestFrames := []string{shnsdk.RequestFrameV1, shnsdk.RequestFrameV1Op}
 	reg.Set("provider", shnsdk.RegistryEntry{ID: "provider", Role: "provider", EncPub: provEncPub, SignPub: authzPub,
 		RequestFrames: requestFrames, ContractVersions: opts.declared})
 	// The payer declares opts.declared; nil ⇒ a SILENT peer, which selects this
@@ -1162,8 +1164,8 @@ func assertBuildsAfterLineSelection(t *testing.T, fn, fnName string) {
 		t.Fatalf("%s does not pre-select the pas-claim line via g.selectLegLineOrFail before its pas-claim leg", fnName)
 	}
 	for _, build := range []string{
-		"shnsdk.BuildConformantClaimBundleAtLine(route.BuildLine,",
-		"shnsdk.BuildConformantClaimUpdateBundleAtLine(route.BuildLine,",
+		"buildAuthoredPASSubmit(route.BuildLine,",
+		"buildAuthoredPASUpdate(route.BuildLine,",
 	} {
 		at := strings.Index(fn, build)
 		if at < 0 {
@@ -1189,4 +1191,40 @@ func TestHandleUC05_SelectsLineBeforeBuilding(t *testing.T) {
 		t.Fatalf("read source: %v", err)
 	}
 	assertBuildsAfterLineSelection(t, extractFunc(t, string(src), "handleUC05"), "handleUC05")
+}
+
+// TestHandleUC05_RequesterRefusesAnotherPatientsRecord: a facility answer
+// that crosses the Hub carrying a report about another patient is refused by
+// the requester before any of it is used — no ClaimUpdate is sent.
+func TestHandleUC05_RequesterRefusesAnotherPatientsRecord(t *testing.T) {
+	gw, stub := newPendResumeFixture(t, pendFixtureOpts{
+		member: "MBR-UC05", birthDate: "1968-03-12", familyName: "Johansson",
+		pendedItem: "operative-diagnostic-report",
+		extraRoles: map[string]string{"facility": "metro-spine"},
+	})
+	replaced := 0
+	stub.overrideResponse = func(legType string, payload []byte) []byte {
+		if legType != "federated-query" {
+			return payload
+		}
+		out := bytes.Replace(payload, []byte(`"subject":{"reference":"Patient/MBR-UC05"}`), []byte(`"subject":{"reference":"Patient/someone-else"}`), -1)
+		if !bytes.Equal(out, payload) {
+			replaced++
+		}
+		return out
+	}
+	rec := httptest.NewRecorder()
+	gw.handleUC05(rec, httptest.NewRequest(http.MethodPost, "/scenario/uc05", nil))
+	if replaced == 0 {
+		t.Fatal("the facility answer carried no report subject to replace")
+	}
+	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "federated response refused") {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "someone-else") {
+		t.Fatalf("the refusal names a patient: %s", rec.Body.String())
+	}
+	if legAttempted(stub.legTypes, "pas-claim-update") {
+		t.Fatalf("a ClaimUpdate was sent after the refused answer (legs: %v)", stub.legTypes)
+	}
 }

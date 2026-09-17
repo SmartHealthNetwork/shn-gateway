@@ -63,9 +63,12 @@ func TestSoRLegacyResults(t *testing.T) {
 			}
 		})
 		t.Run("OpenCoverage/"+member, func(t *testing.T) {
-			a, b, err := reader.OpenCoverageContext(context.Background(), member)
-			wanta, wantb := legacy.OpenCoverage(member)
-			if err != nil || !reflect.DeepEqual([]any{a, b}, []any{wanta, wantb}) {
+			covs, err := reader.OpenCoverageContext(context.Background(), member)
+			var wantCovs [][]byte
+			if wanta, wantb := legacy.OpenCoverage(member); wantb {
+				wantCovs = [][]byte{wanta}
+			}
+			if err != nil || !reflect.DeepEqual(covs, wantCovs) {
 				t.Fatalf("legacy result changed: %v", err)
 			}
 		})
@@ -128,7 +131,7 @@ func TestSoRCanceledLegacyNeverCalled(t *testing.T) {
 		}
 	})
 	t.Run("OpenCoverage", func(t *testing.T) {
-		_, _, err := reader.OpenCoverageContext(ctx, "member")
+		_, err := reader.OpenCoverageContext(ctx, "member")
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("error = %v", err)
 		}

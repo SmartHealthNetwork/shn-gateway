@@ -57,7 +57,7 @@ func TestHandleUC04_ProviderDataAttestsAndLeanTail(t *testing.T) {
 	for _, want := range []string{
 		`"pas-claim-update"`,
 		`ReadSystemOfRecord(g.cfg.SoR).SupplementalReportContext(ctx, member)`,
-		"BuildConformantClaimUpdateBundle",
+		"buildAuthoredPASUpdate",
 	} {
 		if !strings.Contains(fn, want) {
 			t.Fatalf("handleUC04 amendment tail missing %q", want)

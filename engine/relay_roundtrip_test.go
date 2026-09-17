@@ -22,6 +22,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -119,9 +121,9 @@ func (s *relaySubstrate) handleAuthorize(body []byte) (*http.Response, error) {
 // shnsdk.EncodeHTTPFrame — byte-identical to the wire form a frame-capable payer's
 // respondLegError produces — so this drives roundTripInner's frame decode faithfully
 // (the harness recipient advertises v1, see newInProcessExchange). A zero/2xx Status
-// (or no setResult call at all) seals ResponseFHIR VERBATIM (letting the frame_originate
+// (or no setResult call at all) seals Response VERBATIM (letting the frame_originate
 // tests inject a pre-built frame or a bare stale-feed payload), or a canned
-// success-cards payload if ResponseFHIR is also unset.
+// success-cards payload if Response is also unset.
 func (s *relaySubstrate) handleRoute(body []byte) (*http.Response, error) {
 	s.mu.Lock()
 	s.routeHits++
@@ -148,16 +150,17 @@ func (s *relaySubstrate) handleRoute(body []byte) (*http.Response, error) {
 	var respPayload []byte
 	switch {
 	case !set || lr.Status == 0 || lr.Status/100 == 2:
-		if lr.ResponseFHIR != nil {
-			respPayload = lr.ResponseFHIR
+		if responseBytes(lr) != nil {
+			respPayload = responseBytes(lr)
 		} else {
-			respPayload, err = shnsdk.BuildCards(shnsdk.CardCoverage{Covered: shnsdk.CoveredCovered, PANeeded: shnsdk.PANeededNoAuth})
+			// The reference payer's recorded CRD answer.
+			respPayload, err = os.ReadFile(filepath.Join("testdata", "br-payer", "crd-response.json"))
 			if err != nil {
-				return errResp("stub: BuildCards: " + err.Error()), nil
+				return errResp("stub: read the recorded answer: " + err.Error()), nil
 			}
 		}
 	default:
-		body := lr.ResponseFHIR
+		body := responseBytes(lr)
 		if len(body) == 0 {
 			body, _ = json.Marshal(map[string]string{"error": lr.Message})
 		}
@@ -217,8 +220,8 @@ type inProcessExchange struct {
 
 // payerReturns configures the fake Hub's response leg: a non-2xx lr.Status is
 // sealed as a v1 message frame (the wire form a frame-capable payer's
-// respondLegError produces); a zero/2xx Status seals lr.ResponseFHIR verbatim (or
-// the harness's default success cards if ResponseFHIR is also unset).
+// respondLegError produces); a zero/2xx Status seals responseBytes(lr) verbatim (or
+// the harness's default success cards if Response is also unset).
 func (e *inProcessExchange) payerReturns(lr LegResult) {
 	e.substrate.setResult(lr)
 }
@@ -376,7 +379,19 @@ func conformantCRDRequest(member string) []byte {
 // OriginateLeg.
 func (e *inProcessExchange) crdIngressRequest(t *testing.T) *http.Request {
 	t.Helper()
-	return httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(conformantCRDRequest("MBR-COVERED")))
+	return crdIngressPost(conformantCRDRequest("MBR-COVERED"))
+}
+
+// crdIngressPost is the EHR's POST of body to the provider ingress service
+// for body's hook (shn-<hook>).
+func crdIngressPost(body []byte) *http.Request {
+	var head struct {
+		Hook string `json:"hook"`
+	}
+	_ = json.Unmarshal(body, &head)
+	req := httptest.NewRequest(http.MethodPost, "/cds-services/shn-"+head.Hook, bytes.NewReader(body))
+	req.SetPathValue("id", "shn-"+head.Hook)
+	return req
 }
 
 // End-to-end in-process: a responder whose leg returns LegResult{502, OperationOutcome}
@@ -386,8 +401,8 @@ func (e *inProcessExchange) crdIngressRequest(t *testing.T) *http.Request {
 func TestRoundTrip_RecipientNon2xx_SurfacesRelayError(t *testing.T) {
 	env := newInProcessExchange(t)
 	oo := []byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"error"}]}`)
-	env.payerReturns(LegResult{Status: 502, ResponseFHIR: oo})
-	_, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "", Content{WorkstreamType: workstreamPA, Bytes: env.crdReq})
+	env.payerReturns(LegResult{Status: 502, Response: testResponse(oo)})
+	_, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "", Content{WorkstreamType: workstreamPA, Payload: testRequest(env.crdReq)})
 	var re *RelayError
 	if !errors.As(err, &re) {
 		t.Fatalf("want *RelayError, got %v", err)

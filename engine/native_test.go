@@ -15,109 +15,13 @@ import (
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
-// cdsServicesJSON returns a /cds-services listing with the given services.
-// Each entry is {"id":"<id>","hook":"<hook>"}.
-func cdsServicesJSON(services ...struct{ id, hook string }) []byte {
-	type svc struct {
-		ID   string `json:"id"`
-		Hook string `json:"hook"`
-	}
-	svcs := make([]svc, len(services))
-	for i, s := range services {
-		svcs[i] = svc{ID: s.id, Hook: s.hook}
-	}
-	out, _ := json.Marshal(map[string]any{"services": svcs})
-	return out
-}
-
-// TestDiscoverCRDServiceID covers: override wins, single match, zero matches → error,
-// ambiguous → error. Uses br-payer's real cds-services shape (services[].id/hook).
-func TestDiscoverCRDServiceID_OverrideWins(t *testing.T) {
-	// The server is never called when override is set.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Errorf("server was called despite override being set")
-	}))
-	defer srv.Close()
-
-	got, err := DiscoverCRDServiceID(context.Background(), srv.Client(), srv.URL, "my-override-id")
-	if err != nil {
-		t.Fatalf("DiscoverCRDServiceID with override: %v", err)
-	}
-	if got != "my-override-id" {
-		t.Errorf("got %q, want override", got)
-	}
-}
-
-// TestDiscoverCRDServiceID_SingleMatch tests discovery against a realistic /cds-services
-// listing containing one order-select service and one order-sign service (br-payer shape).
-// The function must select the single order-select service and return its id.
-func TestDiscoverCRDServiceID_SingleMatch(t *testing.T) {
-	listing := cdsServicesJSON(
-		struct{ id, hook string }{"order-sign-crd", "order-sign"},     // br-payer's real service (order-sign — not matched)
-		struct{ id, hook string }{"order-select-svc", "order-select"}, // hypothetical order-select service (matched)
-	)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/cds-services" || r.Method != http.MethodGet {
-			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write(listing)
-	}))
-	defer srv.Close()
-
-	got, err := DiscoverCRDServiceID(context.Background(), srv.Client(), srv.URL, "")
-	if err != nil {
-		t.Fatalf("DiscoverCRDServiceID: %v", err)
-	}
-	if got != "order-select-svc" {
-		t.Errorf("got %q, want %q", got, "order-select-svc")
-	}
-}
-
-// TestDiscoverCRDServiceID_ZeroMatchError proves fail-closed when no order-select
-// service exists (e.g. only an order-sign service like br-payer's order-sign-crd).
-// This is the expected result for br-payer without the override — callers must set
-// PAYER_DAVINCI_CRD_SERVICE_ID=order-sign-crd for br-payer.
-func TestDiscoverCRDServiceID_ZeroMatchError(t *testing.T) {
-	// Realistic br-payer /cds-services listing: one order-sign service, no order-select.
-	listing := cdsServicesJSON(
-		struct{ id, hook string }{"order-sign-crd", "order-sign"},
-	)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write(listing)
-	}))
-	defer srv.Close()
-
-	_, err := DiscoverCRDServiceID(context.Background(), srv.Client(), srv.URL, "")
-	if err == nil {
-		t.Fatal("expected error for zero order-select services, got nil")
-	}
-	if !strings.Contains(err.Error(), "no") || !strings.Contains(err.Error(), "order-select") {
-		t.Errorf("error message should mention missing order-select service, got: %v", err)
-	}
-}
-
-// TestDiscoverCRDServiceID_AmbiguousError proves fail-closed when multiple
-// order-select services exist (operator must set the override to resolve).
-func TestDiscoverCRDServiceID_AmbiguousError(t *testing.T) {
-	listing := cdsServicesJSON(
-		struct{ id, hook string }{"order-select-a", "order-select"},
-		struct{ id, hook string }{"order-select-b", "order-select"},
-	)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write(listing)
-	}))
-	defer srv.Close()
-
-	_, err := DiscoverCRDServiceID(context.Background(), srv.Client(), srv.URL, "")
-	if err == nil {
-		t.Fatal("expected error for ambiguous order-select services, got nil")
-	}
-	if !strings.Contains(err.Error(), "ambiguous") {
-		t.Errorf("error message should mention ambiguous, got: %v", err)
-	}
+// stubCDSServices is the stub partner's CDS service listing.
+var stubCDSServices = []CDSService{
+	{ID: "shn-order-select", Hook: "order-select"},
+	{ID: "svc", Hook: "order-select"},
+	{ID: "order-sign", Hook: "order-sign"},
+	{ID: "order-sign-crd", Hook: "order-sign"},
+	{ID: "order-dispatch-crd", Hook: "order-dispatch"},
 }
 
 // stubPartner records the last request path/body and returns a programmed response.
@@ -133,6 +37,12 @@ func newStubPartner(t *testing.T) *stubPartner {
 	t.Helper()
 	s := &stubPartner{status: 200, respByPath: map[string][]byte{}}
 	s.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/cds-services" {
+			// The CDS service listing the CRD legs read; the tests name the service.
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"services": stubCDSServices})
+			return
+		}
 		s.lastPath = r.URL.Path
 		s.lastBody, _ = io.ReadAll(r.Body)
 		if s.status/100 != 2 {
@@ -161,8 +71,8 @@ func TestNativeResponder_DTRForwardsPackageVerbatim(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-	if string(res.ResponseFHIR) != string(pkg) {
-		t.Errorf("ResponseFHIR = %s, want partner package verbatim", res.ResponseFHIR)
+	if string(responseBytes(res)) != string(pkg) {
+		t.Errorf("Response = %s, want partner package verbatim", responseBytes(res))
 	}
 	if !strings.Contains(string(p.lastBody), `"resourceType":"Parameters"`) {
 		t.Errorf("forwarded body = %s, want Parameters", p.lastBody)
@@ -203,8 +113,8 @@ func TestNativeResponder_DTRForwardsQuestionnaireLessPackageVerbatim(t *testing.
 	if res.Status != 0 {
 		t.Errorf("Status = %d, want 0 (verbatim forward, no producer-side 502)", res.Status)
 	}
-	if string(res.ResponseFHIR) != string(pkg) {
-		t.Errorf("ResponseFHIR = %s, want verbatim", res.ResponseFHIR)
+	if string(responseBytes(res)) != string(pkg) {
+		t.Errorf("Response = %s, want verbatim", responseBytes(res))
 	}
 }
 
@@ -297,40 +207,6 @@ func TestNativeResponder_DTRForwardsOrderWhenCarried(t *testing.T) {
 	}
 }
 
-// TestNativeResponder_CRDMergesSystemActions proves the external-payer-lane CRD passthrough: with
-// WithCRDCoverageBundle on, the partner's CRD systemActions (the coverage-annotated order the
-// provider needs to drive DTR) are relayed alongside the normalized SHN cards; with it OFF the
-// response is cards-only (br-payer byte-unchanged).
-func TestNativeResponder_CRDMergesSystemActions(t *testing.T) {
-	partnerCRD := []byte(`{"cards":[],"systemActions":[{"type":"update","resource":{"resourceType":"ServiceRequest","id":"sr-81162","extension":[{"url":"http://hl7.org/fhir/us/davinci-crd/StructureDefinition/ext-coverage-information","extension":[{"url":"coverage-assertion-id","valueString":"assert-1"},{"url":"covered","valueCode":"covered"},{"url":"pa-needed","valueCode":"auth-needed"}]}]}}]}`)
-	run := func(t *testing.T, bundle bool) []byte {
-		p := newStubPartner(t)
-		p.respByPath["/cds-services/order-sign"] = partnerCRD
-		opts := []NativeOption{}
-		if bundle {
-			opts = append(opts, WithCRDCoverageBundle(true))
-		}
-		n := NewNativeResponder(p.srv.Client(), p.srv.URL, "order-sign", nil, nil, opts...)
-		req := []byte(`{"hook":"order-sign","context":{"draftOrders":{"resourceType":"Bundle","entry":[]}},"prefetch":{"coverage":{"resourceType":"Coverage","beneficiary":{"reference":"Patient/p1"}}}}`)
-		res, err := n.Handle(context.Background(), "crd-order-select", "corr", "pci", req)
-		if err != nil {
-			t.Fatalf("Handle: %v", err)
-		}
-		return res.ResponseFHIR
-	}
-	on := run(t, true)
-	if !bytes.Contains(on, []byte(`"systemActions"`)) || !bytes.Contains(on, []byte(`"coverage-assertion-id"`)) {
-		t.Fatalf("external-payer-lane CRD response must relay systemActions with the annotated order: %s", on)
-	}
-	if !bytes.Contains(on, []byte(`"cards"`)) {
-		t.Fatalf("CRD response must still carry the SHN cards: %s", on)
-	}
-	off := run(t, false)
-	if bytes.Contains(off, []byte(`"systemActions"`)) {
-		t.Fatalf("flag OFF (br-payer) must be cards-only, no systemActions: %s", off)
-	}
-}
-
 // TestNativeResponder_DTRRejectsMalformedFetch locks the fail-closed posture preserved
 // across the coverage-carry switch from jsonUnmarshalStrictCanonical to unmarshaling the published
 // QuestionnaireFetchRequest: a malformed body OR a missing/empty canonical → 400 (parity
@@ -374,196 +250,6 @@ func TestNativeResponder_NilStoreOKForReadOnly(t *testing.T) {
 	}
 }
 
-// TestNativeResponder_CRDNativeForwardsVerbatim proves crd-order-select forwards
-// the conformant CDS Hooks request VERBATIM (no augmentCRDHook minimized re-shaping),
-// then normalizes the partner response identically to the minimized CRD leg (FR-G25,
-// rung-1 faithful pass-through).
-func TestNativeResponder_CRDNativeForwardsVerbatim(t *testing.T) {
-	p := newStubPartner(t)
-	// The partner returns a split-shape coverage-information (same fixture as the minimized leg test).
-	partnerCard := []byte(`{"cards":[{"suggestions":[{"actions":[{"resource":{"extension":[` +
-		`{"url":"http://hl7.org/fhir/us/davinci-crd/StructureDefinition/ext-coverage-information",` +
-		`"extension":[{"url":"covered","valueCode":"covered"},{"url":"pa-needed","valueCode":"no-auth"}]}]}}]}]}]}`)
-	p.respByPath["/cds-services/shn-order-select"] = partnerCard
-	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", nil, nil)
-
-	// A conformant CDS Hooks request: hookInstance already present, draftOrders is a Bundle.
-	conformant := []byte(`{"hook":"order-select","hookInstance":"hi-1","context":{"userId":"Practitioner/p1","patientId":"MBR-COVERED","draftOrders":{"resourceType":"Bundle","type":"collection","entry":[{"fullUrl":"urn:uuid:sr1","resource":{"resourceType":"ServiceRequest","id":"sr1","subject":{"reference":"Patient/MBR-COVERED"}}}]},"selections":["ServiceRequest/sr1"]},"prefetch":{"coverage":{"resourceType":"Coverage","beneficiary":{"reference":"Patient/MBR-COVERED"}}}}`)
-	res, err := n.Handle(context.Background(), "crd-order-select", "corr", "pci", conformant)
-	if err != nil {
-		t.Fatalf("native conformant CRD: %v", err)
-	}
-	if res.Status != 0 {
-		t.Fatalf("native conformant CRD: status=%d msg=%q", res.Status, res.Message)
-	}
-	// Response is normalized to canonical SHN cards (FR-G25), same as the minimized leg.
-	if _, perr := shnsdk.ParseCards(res.ResponseFHIR); perr != nil {
-		t.Fatalf("response not normalized to cards: %v", perr)
-	}
-	// Verbatim: the partner received the conformant Bundle draftOrders (NOT minimized shaping).
-	// p.lastBody is the raw bytes the stub partner received.
-	if !bytes.Contains(p.lastBody, []byte(`"resourceType":"Bundle"`)) {
-		t.Fatalf("partner did not receive the conformant Bundle draftOrders verbatim: %s", p.lastBody)
-	}
-	// Verbatim also means hookInstance was NOT regenerated — the original "hi-1" survives.
-	if !bytes.Contains(p.lastBody, []byte(`"hookInstance":"hi-1"`)) {
-		t.Fatalf("partner did not receive the original hookInstance verbatim: %s", p.lastBody)
-	}
-	// Complement: the partner must NOT have received the MINIMIZED scalar draftOrders shape
-	// (an array of bare resources, `"draftOrders":[{`) — only the conformant Bundle.
-	if bytes.Contains(p.lastBody, []byte(`"draftOrders":[{`)) {
-		t.Fatalf("partner received minimized scalar draftOrders — reshaping leaked: %s", p.lastBody)
-	}
-}
-
-// TestNativeResponder_CRDNativeUnmappablePartnerIs502 is the per-leg fail-closed rejection row for
-// the conformant leg: an unmappable partner CRD response (no resolvable coverage-information) → 502,
-// never silent empty cards. The minimized leg has the same guard; this pins it for crd-order-select-
-// native independently so a future de-sharing of normalizeCRDResponse cannot silently regress it.
-func TestNativeResponder_CRDNativeUnmappablePartnerIs502(t *testing.T) {
-	p := newStubPartner(t)
-	p.respByPath["/cds-services/shn-order-select"] = []byte(`{"cards":[{"summary":"x"}]}`)
-	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", nil, nil)
-	res, err := n.Handle(context.Background(), "crd-order-select", "corr", "pci",
-		[]byte(`{"hook":"order-select","hookInstance":"hi-1","context":{"patientId":"MBR-COVERED","draftOrders":{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"ServiceRequest"}}]}}}`))
-	if err != nil {
-		t.Fatalf("Handle returned error (want Status 502, not error): %v", err)
-	}
-	if res.Status != http.StatusBadGateway {
-		t.Errorf("Status = %d, want 502 (un-mappable partner CRD card)", res.Status)
-	}
-}
-
-// TestNativeResponder_RewritesCRDHook proves the native-forward rewrites the request
-// hook to the configured CRD service's hook before forwarding — SHN originates
-// hook:order-select but br-payer's order-sign-crd demands hook:order-sign (400 otherwise).
-func TestNativeResponder_RewritesCRDHook(t *testing.T) {
-	var gotHook string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var body struct {
-			Hook string `json:"hook"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		gotHook = body.Hook
-		// minimal valid cards response so normalizeCRDResponse succeeds
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"cards":[],"systemActions":[]}`))
-	}))
-	defer srv.Close()
-
-	n := NewNativeResponder(srv.Client(), srv.URL, "order-sign-crd", nil, nil, WithCRDHook("order-sign"))
-	reqJSON := []byte(`{"hook":"order-select","hookInstance":"hi","context":{"draftOrders":{"resourceType":"Bundle","entry":[]}},"prefetch":{}}`)
-	if _, err := n.Handle(context.Background(), "crd-order-select", "corr", "pci", reqJSON); err != nil {
-		t.Fatalf("Handle: %v", err)
-	}
-	if gotHook != "order-sign" {
-		t.Fatalf("forwarded hook = %q, want order-sign (rewritten)", gotHook)
-	}
-}
-
-// TestNativeResponder_WrapsCRDCoverageBundle proves WithCRDCoverageBundle rewrites the
-// CRD request's bare prefetch.coverage into a searchset Bundle on egress — that payer's
-// order-sign `coverage` prefetch is a SEARCH template (Coverage?beneficiary=…) demanding a
-// searchset Bundle (bare Coverage → 412 "Missing Coverage"), while the SHN spine carries a
-// BARE Coverage (provider routing + the payer-side bind both read bare, crd_native.go). The
-// wrap runs AFTER the bind, gated peer-scoped so br-payer conformance is untouched.
-func TestNativeResponder_WrapsCRDCoverageBundle(t *testing.T) {
-	p := newStubPartner(t)
-	p.respByPath["/cds-services/order-sign"] = []byte(`{"cards":[],"systemActions":[]}`)
-	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "order-sign", nil, nil, WithCRDCoverageBundle(true))
-	reqJSON := []byte(`{"hook":"order-sign","context":{"userId":"Practitioner/p1","draftOrders":{"resourceType":"Bundle","entry":[]}},` +
-		`"prefetch":{"patient":{"resourceType":"Patient","id":"MBR"},"coverage":{"resourceType":"Coverage","id":"cov","beneficiary":{"reference":"Patient/MBR"}}}}`)
-	if _, err := n.Handle(context.Background(), "crd-order-select", "corr", "pci", reqJSON); err != nil {
-		t.Fatalf("Handle: %v", err)
-	}
-	var fwd struct {
-		Prefetch struct {
-			Coverage struct {
-				ResourceType string `json:"resourceType"`
-				Type         string `json:"type"`
-				Entry        []struct {
-					Resource struct {
-						ResourceType string `json:"resourceType"`
-						ID           string `json:"id"`
-					} `json:"resource"`
-				} `json:"entry"`
-			} `json:"coverage"`
-			Patient struct {
-				ResourceType string `json:"resourceType"`
-			} `json:"patient"`
-		} `json:"prefetch"`
-	}
-	if err := json.Unmarshal(p.lastBody, &fwd); err != nil {
-		t.Fatalf("parse forwarded body: %v (%s)", err, p.lastBody)
-	}
-	cov := fwd.Prefetch.Coverage
-	if cov.ResourceType != "Bundle" || cov.Type != "searchset" {
-		t.Fatalf("forwarded prefetch.coverage = %s/%s, want Bundle/searchset: %s", cov.ResourceType, cov.Type, p.lastBody)
-	}
-	if len(cov.Entry) != 1 || cov.Entry[0].Resource.ResourceType != "Coverage" || cov.Entry[0].Resource.ID != "cov" {
-		t.Fatalf("searchset must wrap the bare Coverage verbatim: %s", p.lastBody)
-	}
-	if fwd.Prefetch.Patient.ResourceType != "Patient" {
-		t.Fatalf("prefetch.patient dropped on wrap: %s", p.lastBody)
-	}
-}
-
-// TestNativeResponder_CoverageBundleScopedAndIdempotent proves the wrap is scoped and safe:
-// with the option OFF a bare Coverage forwards verbatim (br-payer's shape, untouched); with it
-// ON an already-searchset coverage is left as-is (idempotent — never a Bundle-in-a-Bundle).
-func TestNativeResponder_CoverageBundleScopedAndIdempotent(t *testing.T) {
-	mkReq := func(covJSON string) []byte {
-		return []byte(`{"hook":"order-sign","context":{"draftOrders":{"resourceType":"Bundle","entry":[]}},"prefetch":{` + covJSON + `}}`)
-	}
-	bareCov := `"coverage":{"resourceType":"Coverage","id":"cov","beneficiary":{"reference":"Patient/MBR"}}`
-
-	// OFF: bare stays bare (no wrap without the peer-scoped option).
-	pOff := newStubPartner(t)
-	pOff.respByPath["/cds-services/order-sign"] = []byte(`{"cards":[],"systemActions":[]}`)
-	nOff := NewNativeResponder(pOff.srv.Client(), pOff.srv.URL, "order-sign", nil, nil)
-	if _, err := nOff.Handle(context.Background(), "crd-order-select", "c", "p", mkReq(bareCov)); err != nil {
-		t.Fatal(err)
-	}
-	if bytes.Contains(pOff.lastBody, []byte(`"searchset"`)) {
-		t.Fatalf("option OFF must forward bare coverage verbatim: %s", pOff.lastBody)
-	}
-
-	// ON + already a searchset: not re-wrapped (exactly one searchset wrapper survives).
-	pOn := newStubPartner(t)
-	pOn.respByPath["/cds-services/order-sign"] = []byte(`{"cards":[],"systemActions":[]}`)
-	nOn := NewNativeResponder(pOn.srv.Client(), pOn.srv.URL, "order-sign", nil, nil, WithCRDCoverageBundle(true))
-	alreadyBundle := `"coverage":{"resourceType":"Bundle","type":"searchset","entry":[{"resource":{"resourceType":"Coverage","id":"cov"}}]}`
-	if _, err := nOn.Handle(context.Background(), "crd-order-select", "c", "p", mkReq(alreadyBundle)); err != nil {
-		t.Fatal(err)
-	}
-	if got := bytes.Count(pOn.lastBody, []byte(`"searchset"`)); got != 1 {
-		t.Fatalf("already-searchset coverage must not be re-wrapped (searchset count=%d): %s", got, pOn.lastBody)
-	}
-}
-
-// TestNativeResponder_CRDDispatchForwardsVerbatim proves crd-order-dispatch forwards
-// the verbatim CDS Hooks request to the partner's dispatch CDS service, preserving
-// the order-dispatch hook + the dispatchedOrders + performer fields.
-func TestNativeResponder_CRDDispatchForwardsVerbatim(t *testing.T) {
-	p := newStubPartner(t)
-	partnerCard := []byte(`{"cards":[{"suggestions":[{"actions":[{"resource":{"extension":[` +
-		`{"url":"http://hl7.org/fhir/us/davinci-crd/StructureDefinition/ext-coverage-information",` +
-		`"extension":[{"url":"covered","valueCode":"conditional"},{"url":"pa-needed","valueCode":"auth-needed"}]}]}}]}]}]}`)
-	p.respByPath["/cds-services/order-dispatch-crd"] = partnerCard
-	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", nil, nil,
-		WithCRDDispatchService("order-dispatch-crd", "order-dispatch"))
-	req := []byte(`{"hook":"order-dispatch","context":{"patientId":"MBR-OX","dispatchedOrders":["DeviceRequest/dr1"],"performer":"Organization/dme1"},"prefetch":{}}`)
-	if _, err := n.Handle(context.Background(), "crd-order-dispatch", "corr", "pci", req); err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Contains(p.lastBody, []byte(`"dispatchedOrders"`)) || !bytes.Contains(p.lastBody, []byte(`"performer"`)) {
-		t.Fatalf("dispatch context dropped on forward: %s", p.lastBody)
-	}
-	if !bytes.Contains(p.lastBody, []byte(`"hook":"order-dispatch"`)) {
-		t.Fatalf("hook not preserved/rewritten: %s", p.lastBody)
-	}
-}
-
 // TestNativeForwardVersionFilter: the operator-declared foreign-peer token set
 // (PAYER_DAVINCI_CONTRACT_VERSIONS) gates forwarding exactly like a registry
 // declaration gates substrate routing ("foreign endpoints
@@ -571,20 +257,21 @@ func TestNativeResponder_CRDDispatchForwardsVerbatim(t *testing.T) {
 // bytes forwarded; shared or silent → forward as before.
 func TestNativeForwardVersionFilter(t *testing.T) {
 	hits := 0
-	partnerCard := []byte(`{"cards":[{"suggestions":[{"actions":[{"resource":{"extension":[` +
-		`{"url":"http://hl7.org/fhir/us/davinci-crd/StructureDefinition/ext-coverage-information",` +
-		`"extension":[{"url":"covered","valueCode":"covered"},{"url":"pa-needed","valueCode":"no-auth"}]}]}}]}]}]}`)
 	partner := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits++
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write(partnerCard)
+		if r.Method == http.MethodGet {
+			_ = json.NewEncoder(w).Encode(map[string]any{"services": stubCDSServices})
+			return
+		}
+		hits++
+		_, _ = w.Write(crdPartnerCoverageCard)
 	}))
 	defer partner.Close()
 
 	// Declared 2.2-only: the CRD leg (pa.crd, own 2.0) refuses without forwarding.
 	n := NewNativeResponder(partner.Client(), partner.URL, "svc", nil, nil,
 		WithDeclaredContractVersions([]string{"pa.crd@2.2", "pa.crd@2.2"})) // duplicate on purpose
-	res, err := n.Handle(context.Background(), "crd-order-select", "corr", "pci", []byte(`{}`))
+	res, err := n.Handle(context.Background(), "crd-order-select", "corr", "pci", cdsRequest("order-select"))
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -602,7 +289,7 @@ func TestNativeForwardVersionFilter(t *testing.T) {
 
 	// Silent (no declaration): forwards.
 	n2 := NewNativeResponder(partner.Client(), partner.URL, "svc", nil, nil)
-	if res, err := n2.Handle(context.Background(), "crd-order-select", "corr", "pci", []byte(`{}`)); err != nil || res.Status == http.StatusUnprocessableEntity {
+	if res, err := n2.Handle(context.Background(), "crd-order-select", "corr", "pci", cdsRequest("order-select")); err != nil || res.Status != 0 {
 		t.Fatalf("silent peer must forward: %+v / %v", res, err)
 	}
 	if hits != 1 {
@@ -686,6 +373,10 @@ func TestNativeForwardStaysArm1(t *testing.T) {
 func TestNativeResponder_SplitBaseURLs(t *testing.T) {
 	var cdsPath, fhirPath string
 	cds := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			_ = json.NewEncoder(w).Encode(map[string]any{"services": stubCDSServices})
+			return
+		}
 		cdsPath = r.URL.Path
 		w.Write([]byte(`{"cards":[],"systemActions":[]}`))
 	}))
@@ -946,7 +637,7 @@ func TestNativeStrictExtensionsFieldIsDormant(t *testing.T) {
 	if errOff != nil || errOn != nil {
 		t.Fatalf("Handle errors: strict=false -> %v, strict=true -> %v", errOff, errOn)
 	}
-	if resOff.Status != resOn.Status || string(resOff.ResponseFHIR) != string(resOn.ResponseFHIR) {
+	if resOff.Status != resOn.Status || string(responseBytes(resOff)) != string(responseBytes(resOn)) {
 		t.Fatalf("WithStrictExtensions must be dormant (byte-identical): off=%+v on=%+v", resOff, resOn)
 	}
 }

@@ -104,7 +104,7 @@ func (r approvingPASResponder) Handle(_ context.Context, leg, corrID, _ string, 
 	if err := validatePASBundleGraph(response); err != nil {
 		return LegResult{}, err
 	}
-	return LegResult{ResponseFHIR: response}, nil
+	return LegResult{Response: testResponse(response)}, nil
 }
 
 var _ LegResponder = approvingPASResponder{}
@@ -146,6 +146,7 @@ func mustNew(t *testing.T, cfg Config) *Gateway {
 	if err != nil {
 		t.Fatalf("engine.New: %v", err)
 	}
+	t.Cleanup(func() { _ = g.Close() })
 	return g
 }
 
@@ -648,9 +649,44 @@ func (d *censusSoR) OpenCoverage(memberID string) ([]byte, bool) {
 	return cov, true
 }
 
-// ResolveByReference: the in-memory stub does not resolve FHIR references; the
-// provider-data lane requires a real FHIR SoR (FHIR_DATA_URL). Returns found=false.
-func (d *censusSoR) ResolveByReference(_ string) ([]byte, bool) { return nil, false }
+// ResolveByReference reads a census member's Patient ("Patient/<member>": the stub names
+// patients by the member id). Other references are not held (the provider-data lane
+// requires a real FHIR SoR, FHIR_DATA_URL).
+func (d *censusSoR) ResolveByReference(ref string) ([]byte, bool) {
+	member, ok := strings.CutPrefix(ref, "Patient/")
+	if !ok {
+		return nil, false
+	}
+	p, ok := censusPersonas[member]
+	if !ok {
+		return nil, false
+	}
+	b, err := json.Marshal(map[string]any{
+		"resourceType": "Patient",
+		"id":           member,
+		"identifier":   []map[string]string{{"system": shnsdk.MemberSystem, "value": member}},
+		"name":         []map[string]string{{"family": p.demo.FamilyName}},
+		"birthDate":    p.demo.BirthDate,
+	})
+	return b, err == nil
+}
+
+// SearchPatientContext answers the stub's patient searches: a Coverage search is the
+// member's Coverage (OpenCoverage) as one match; every other search finds nothing.
+func (d *censusSoR) SearchPatientContext(_ context.Context, resourceType, id string, _ ...SearchDateRange) (SearchResult, error) {
+	page := []byte(`{"resourceType":"Bundle","type":"searchset","entry":[`)
+	if cov, ok := d.OpenCoverage(id); ok && resourceType == "Coverage" {
+		page = append(page, `{"fullUrl":"https://census.invalid/fhir/Coverage/`+id+`","resource":`...)
+		page = append(page, cov...)
+		page = append(page, `,"search":{"mode":"match"}}`...)
+	}
+	page = append(page, "]}"...)
+	parsed, err := ParseSearchPage(page, resourceType)
+	if err != nil {
+		return SearchResult{}, err
+	}
+	return SearchResult{Pages: [][]byte{page}, Entries: parsed.Entries, Total: len(parsed.Entries)}, nil
+}
 
 // FacilityRecords returns metro-spine's held records for MBR-UC05 (UC-05): the
 // operative DiagnosticReport and its DocumentReference. All other members yield

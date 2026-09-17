@@ -11,8 +11,10 @@
 package engine
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 
@@ -236,6 +238,28 @@ func dtrStep2122Down(payload []byte, x ExchangeIdentity) ([]byte, LossReport, er
 		return nil, LossReport{}, err
 	}
 	resources := dtrCollectResources(top)
+
+	// The declared standard profile requires resource narrative at 2.1 (and
+	// 2.0), but permits its absence at 2.2. Foreign narrative cannot be
+	// authored here. Refuse this unmet target prerequisite before any edits;
+	// other Questionnaire profiles remain outside this narrow predicate.
+	for _, q := range resources["Questionnaire"] {
+		if q["text"] != nil {
+			continue
+		}
+		meta, _ := q["meta"].(map[string]any)
+		profiles, _ := meta["profile"].([]any)
+		for _, p := range profiles {
+			profile, _ := p.(string)
+			canonical, _, _ := strings.Cut(profile, "|")
+			if canonical == "http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/dtr-std-questionnaire" {
+				return nil, LossReport{}, &SemanticChangeError{
+					Contract: "pa.dtr", From: "2.2", To: "2.1", Direction: "down",
+					MissingElements: []string{"Questionnaire.text"},
+				}
+			}
+		}
+	}
 
 	def21, ok := shnsdk.DTRLineDef("2.1")
 	if !ok {
@@ -682,8 +706,16 @@ func dtrRestoreItemWeightIn(container map[string]any) error {
 // or a $questionnaire-package response Bundle) into a mutable map. Fails
 // loudly on invalid JSON — never returns a zero-value success.
 func dtrParseTop(payload []byte) (map[string]any, error) {
+	dec := json.NewDecoder(bytes.NewReader(payload))
+	dec.UseNumber()
 	var top map[string]any
-	if err := json.Unmarshal(payload, &top); err != nil {
+	if err := dec.Decode(&top); err != nil {
+		return nil, fmt.Errorf("engine: dtr transform: invalid JSON: %w", err)
+	}
+	if err := dec.Decode(new(any)); err != io.EOF {
+		if err == nil {
+			err = fmt.Errorf("multiple top-level JSON values")
+		}
 		return nil, fmt.Errorf("engine: dtr transform: invalid JSON: %w", err)
 	}
 	return top, nil

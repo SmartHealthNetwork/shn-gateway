@@ -923,7 +923,7 @@ func TestIngressBearer_KeyStoreUnavailableIs503(t *testing.T) {
 		g := gatewayWithAuthStores(t, "br-provider", pub, keys, nil, func(c *Config) {
 			c.StoreErrorMetric = func(s string) { stores = append(stores, s) }
 		})
-		req := httptest.NewRequest(http.MethodPost, testIngressBaseURL+"/cds-services/order-select-crd", strings.NewReader(body))
+		req := httptest.NewRequest(http.MethodPost, testIngressBaseURL+"/cds-services/shn-order-select", strings.NewReader(body))
 		req.Header.Set("Authorization", "Bearer "+bearer)
 		rec := httptest.NewRecorder()
 		g.Handler().ServeHTTP(rec, req)

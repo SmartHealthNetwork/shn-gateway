@@ -874,16 +874,14 @@ func TestLoadConfig_UnsetOriginationProfileNormalizesToDemo(t *testing.T) {
 	}
 }
 
-// TestLoadConfig_DispatchEnvVars: PAYER_DAVINCI_DISPATCH_SERVICE_ID and
-// PAYER_DAVINCI_DISPATCH_HOOK are carried into the config fields used by
-// WithCRDDispatchService (the crd-order-dispatch leg).
+// TestLoadConfig_DispatchEnvVars: PAYER_DAVINCI_DISPATCH_SERVICE_ID is carried
+// into the config field WithCRDDispatchService reads (the crd-order-dispatch leg).
 func TestLoadConfig_DispatchEnvVars(t *testing.T) {
 	e := map[string]string{
 		"ROLE":                              "payer",
 		"SHN_SECRETS":                       "/x",
 		"SHN_DISCOVERY_URL":                 "https://d",
 		"PAYER_DAVINCI_DISPATCH_SERVICE_ID": "order-dispatch-crd",
-		"PAYER_DAVINCI_DISPATCH_HOOK":       "order-dispatch",
 	}
 	cfg, err := loadConfig(func(k string) string { return e[k] })
 	if err != nil {
@@ -892,9 +890,55 @@ func TestLoadConfig_DispatchEnvVars(t *testing.T) {
 	if cfg.PayerDavinciDispatchServiceID != "order-dispatch-crd" {
 		t.Fatalf("PayerDavinciDispatchServiceID = %q; want %q", cfg.PayerDavinciDispatchServiceID, "order-dispatch-crd")
 	}
-	if cfg.PayerDavinciDispatchHook != "order-dispatch" {
-		t.Fatalf("PayerDavinciDispatchHook = %q; want %q", cfg.PayerDavinciDispatchHook, "order-dispatch")
+}
+
+// TestBootRefusesRemovedSetting: a deployment that still sets a removed
+// setting does not start, and the refusal names the setting and what replaced
+// it, so the change is never silent.
+func TestBootRefusesRemovedSetting(t *testing.T) {
+	base := map[string]string{
+		"ROLE":                              "payer",
+		"SHN_SECRETS":                       "/x",
+		"SHN_DISCOVERY_URL":                 "https://d",
+		"PAYER_DAVINCI_CRD_SERVICE_ID":      "order-sign-crd",
+		"PAYER_DAVINCI_DISPATCH_SERVICE_ID": "order-dispatch-crd",
 	}
+	if _, err := loadConfig(env(base)); err != nil {
+		t.Fatalf("control: %v", err)
+	}
+	for key, want := range map[string]string{
+		"PAYER_DAVINCI_CRD_COVERAGE_BUNDLE": "gateway: PAYER_DAVINCI_CRD_COVERAGE_BUNDLE was removed and must be unset: the payer receives the CDS Hooks request as the provider's system sent it; a coverage prefetch template that is a search is answered with a searchset Bundle",
+		"PAYER_DAVINCI_CRD_HOOK":            "gateway: PAYER_DAVINCI_CRD_HOOK was removed and must be unset: the request's hook is never changed; the payer's CDS service is chosen by the request's hook (PAYER_DAVINCI_CRD_SERVICE_ID still names one)",
+		"PAYER_DAVINCI_DISPATCH_HOOK":       "gateway: PAYER_DAVINCI_DISPATCH_HOOK was removed and must be unset: the request's hook is never changed; the payer's CDS service is chosen by the request's hook (PAYER_DAVINCI_DISPATCH_SERVICE_ID still names one)",
+	} {
+		for _, value := range []string{"true", "order-sign", "false"} {
+			t.Run(key+"="+value, func(t *testing.T) {
+				e := map[string]string{key: value}
+				for k, v := range base {
+					e[k] = v
+				}
+				_, err := loadConfig(env(e))
+				if err == nil || err.Error() != want {
+					t.Fatalf("got %v\nwant %s", err, want)
+				}
+			})
+		}
+		t.Run(key+" on every role", func(t *testing.T) {
+			e := map[string]string{"ROLE": "provider", "SHN_SECRETS": "/x", "SHN_DISCOVERY_URL": "https://d", key: "x"}
+			if _, err := loadConfig(env(e)); err == nil || err.Error() != want {
+				t.Fatalf("got %v", err)
+			}
+		})
+	}
+	t.Run("several removed settings name the first in order", func(t *testing.T) {
+		e := map[string]string{"PAYER_DAVINCI_DISPATCH_HOOK": "x", "PAYER_DAVINCI_CRD_HOOK": "x"}
+		for k, v := range base {
+			e[k] = v
+		}
+		if _, err := loadConfig(env(e)); err == nil || !strings.HasPrefix(err.Error(), "gateway: PAYER_DAVINCI_CRD_HOOK was removed") {
+			t.Fatalf("got %v", err)
+		}
+	})
 }
 
 // TestConvergeRegistry_CarriesPayerIDs verifies convergeRegistry copies a fed
@@ -1365,6 +1409,11 @@ func TestApp_ChecksEndpoint_TokenGatedAndHealthUnaffected(t *testing.T) {
 	getenv := func(k string) string { return env[k] }
 
 	b, err := build(context.Background(), getenv, io.Discard, nil)
+	t.Cleanup(func() {
+		if b.gateway != nil {
+			_ = b.gateway.Close()
+		}
+	})
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -1482,12 +1531,17 @@ func TestProbeEvidenceReachesResponder(t *testing.T) {
 		"SHN_FAKE_VALIDATOR":           "1",
 		"FHIR_DATA_URL":                "https://sor.example/fhir", // required on every role: the holder's own SoR
 		"PAYER_DAVINCI_BASE_URL":       payer.URL,
-		"PAYER_DAVINCI_CRD_SERVICE_ID": "svc", // override: skip live /cds-services discovery
+		"PAYER_DAVINCI_CRD_SERVICE_ID": "svc", // names the payer's CDS service (the listing is read at boot, best effort)
 		"CHECKS_TOKEN":                 "t",
 	}
 	getenv := func(k string) string { return env[k] }
 
 	b, err := build(context.Background(), getenv, io.Discard, nil)
+	t.Cleanup(func() {
+		if b.gateway != nil {
+			_ = b.gateway.Close()
+		}
+	})
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -1827,6 +1881,11 @@ func TestBuild_NoDSN_StatesInProcessStateAndNoRefresh(t *testing.T) {
 	log.SetOutput(&logBuf)
 	defer log.SetOutput(os.Stderr)
 	b, err := build(context.Background(), func(k string) string { return env[k] }, io.Discard, nil)
+	t.Cleanup(func() {
+		if b.gateway != nil {
+			_ = b.gateway.Close()
+		}
+	})
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}

@@ -16,6 +16,7 @@ const (
 	reviewActionCode        = "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewActionCode"
 	negativeExpression      = "ClaimResponse.item[0].adjudication[0].extension[0].extension[0]"
 	messageIDSystem         = "http://hl7.org/fhir/java-core-messageId"
+	encounterExtension      = "http://hl7.org/fhir/5.0/StructureDefinition/extension-Claim.encounter"
 )
 
 type verdictMode uint8
@@ -26,6 +27,7 @@ const (
 	verdictPositive
 	verdictNegative
 	verdictSupportNegative
+	verdictExplicitProfileNegative
 )
 
 var pasVersions = map[string]string{"2.0": "2.0.1", "2.1": "2.1.0", "2.2": "2.2.1"}
@@ -45,7 +47,25 @@ func readinessRows(line string) []warmup {
 	rows = append(rows, qualificationRows(line, "qualify-2")...)
 	rows = append(rows, negativeRows(line)...)
 	rows = append(rows, fullResponseRows(line)...)
+	rows = append(rows, encounterRows(line)...)
+	rows = append(rows, explicitProfileRows(line)...)
 	return rows
+}
+
+// explicitProfileRows keep the valid in-band assertion while requiring the
+// independently requested canonical or version to be unavailable.
+func explicitProfileRows(line string) []warmup {
+	if _, ok := pasVersion(line); !ok {
+		return nil
+	}
+	dir := "testdata"
+	if line != "2.0" {
+		dir += "/" + line
+	}
+	return []warmup{
+		{identity: "explicit-profile-missing-version", file: dir + "/claimresponse-approved.json", resourceType: "ClaimResponse", profile: pasClaimResponseProfile + "|9.9.9", mode: verdictExplicitProfileNegative, line: line},
+		{identity: "explicit-profile-missing-canonical", file: dir + "/claimresponse-approved.json", resourceType: "ClaimResponse", profile: "https://example.org/fhir/StructureDefinition/unavailable-profile", mode: verdictExplicitProfileNegative, line: line},
+	}
 }
 
 func qualificationRows(line string, pass string) []warmup {
@@ -113,6 +133,9 @@ func fixtureBody(row warmup) ([]byte, error) {
 	}
 	if row.resourceType == "Bundle" {
 		return fullResponseBody(raw, row.mutation)
+	}
+	if row.resourceType == "Claim" {
+		return claimEncounterBody(raw, row.mutation)
 	}
 	resource, extracted, err := claimResponseFixture(raw)
 	if err != nil {
@@ -386,6 +409,21 @@ func assertVerdict(row warmup, status int, raw []byte) error {
 			}
 		}
 		return nil
+	case verdictExplicitProfileNegative:
+		matched := 0
+		for _, issue := range outcome.Issue {
+			if issue.Severity == "error" && issue.Code == "processing" && len(issue.Details.Coding) == 1 &&
+				issue.Details.Coding[0].System == messageIDSystem && issue.Details.Coding[0].Code == "Validation_VAL_Profile_Unknown" &&
+				issue.Diagnostics == "Invalid profile. Failed to retrieve explicitly requested profile with url="+row.profile {
+				matched++
+			} else if issue.Severity == "error" || issue.Severity == "fatal" || suspiciousProfileIssue(issue) {
+				return errors.New("unexpected verdict")
+			}
+		}
+		if matched != 1 {
+			return errors.New("unexpected verdict")
+		}
+		return nil
 	case verdictSupportNegative:
 		return assertSupportNegative(row, outcome)
 	case verdictNegative:
@@ -412,14 +450,14 @@ func assertVerdict(row warmup, status int, raw []byte) error {
 
 func suspiciousProfileIssue(issue outcomeIssue) bool {
 	text := strings.ToLower(issue.Diagnostics)
-	if strings.Contains(text, "slicing cannot be evaluated") || strings.Contains(text, "failed to retrieve profile") {
+	if strings.Contains(text, "slicing cannot be evaluated") || strings.Contains(text, "failed to retrieve profile") || strings.Contains(text, "failed to retrieve explicitly requested profile") {
 		return true
 	}
 	if strings.Contains(issue.Diagnostics, pasClaimResponseProfile) && (strings.Contains(text, "could not") || strings.Contains(text, "unable to resolve") || strings.Contains(text, "invalid profile")) {
 		return true
 	}
 	for _, coding := range issue.Details.Coding {
-		if coding.System == messageIDSystem && coding.Code == "SLICING_CANNOT_BE_EVALUATED" {
+		if coding.System == messageIDSystem && (coding.Code == "SLICING_CANNOT_BE_EVALUATED" || coding.Code == "Validation_VAL_Profile_Unknown") {
 			return true
 		}
 	}
@@ -472,6 +510,65 @@ func fullResponseRows(line string) []warmup {
 	return rows
 }
 
+// encounterRows bind readiness to the encounter extension the dependency
+// closure resolves: a core Claim whose R5 backport Claim.encounter extension
+// references a contained R4 Encounter validates clean (the extension, its
+// target profile and everything they reference come from the support package's
+// derived closure, copied unchanged from the pinned cross-version and
+// extensions packages), and the same Claim with a Patient in
+// the Encounter's place is refused for the target type.
+func encounterRows(line string) []warmup {
+	if _, ok := pasVersion(line); !ok {
+		return nil
+	}
+	dir := "testdata"
+	if line != "2.0" {
+		dir += "/" + line
+	}
+	positive := warmup{identity: "encounter-positive", file: dir + "/claim-encounter.json", resourceType: "Claim", profile: "http://hl7.org/fhir/StructureDefinition/Claim", mode: verdictPositive, line: line}
+	negative := positive
+	negative.identity = "encounter-target-type"
+	negative.mode = verdictSupportNegative
+	negative.mutation = "target-patient"
+	negative.expectedOutcome = dir + "/claim-encounter-target-errors.json"
+	return []warmup{positive, negative}
+}
+
+// claimEncounterBody serves the encounter rows: the committed Claim unchanged
+// for the positive row, or with its contained Encounter replaced by a Patient
+// of the same id for the target-type control.
+func claimEncounterBody(raw []byte, mutation string) ([]byte, error) {
+	var resource map[string]any
+	if err := json.Unmarshal(raw, &resource); err != nil || resource["resourceType"] != "Claim" {
+		return nil, errors.New("fixture unavailable")
+	}
+	extensions, _ := resource["extension"].([]any)
+	carries := false
+	for _, value := range extensions {
+		extension, _ := value.(map[string]any)
+		if extension["url"] == encounterExtension {
+			carries = true
+		}
+	}
+	contained, _ := resource["contained"].([]any)
+	if !carries || len(contained) != 1 {
+		return nil, errors.New("fixture unavailable")
+	}
+	encounter, _ := contained[0].(map[string]any)
+	id, _ := encounter["id"].(string)
+	if encounter["resourceType"] != "Encounter" || id == "" {
+		return nil, errors.New("fixture unavailable")
+	}
+	switch mutation {
+	case "":
+		return raw, nil
+	case "target-patient":
+		resource["contained"] = []any{map[string]any{"resourceType": "Patient", "id": id, "name": []any{map[string]any{"family": "Probe"}}}}
+		return json.Marshal(resource)
+	}
+	return nil, errors.New("fixture unavailable")
+}
+
 func fullResponseBody(raw []byte, mutation string) ([]byte, error) {
 	var resource map[string]any
 	if err := json.Unmarshal(raw, &resource); err != nil || resource["resourceType"] != "Bundle" {
@@ -499,7 +596,7 @@ func fullResponseBody(raw []byte, mutation string) ([]byte, error) {
 	}
 	if mutation == "encounter" {
 		extensions, _ := claim["extension"].([]any)
-		claim["extension"] = append(extensions, map[string]any{"url": "http://hl7.org/fhir/5.0/StructureDefinition/extension-Claim.encounter", "valueString": "invalid-reference-type"})
+		claim["extension"] = append(extensions, map[string]any{"url": encounterExtension, "valueString": "invalid-reference-type"})
 	} else {
 		key, code := "productOrService", "L9999"
 		if mutation == "pos" {
@@ -532,7 +629,7 @@ func assertSupportNegative(row warmup, outcome operationOutcome) error {
 		return errors.New("fixture unavailable")
 	}
 	expected, err := decodeOperationOutcome(raw)
-	if err != nil || expected.ResourceType != "OperationOutcome" || len(expected.Issue) != 2 {
+	if err != nil || expected.ResourceType != "OperationOutcome" || len(expected.Issue) == 0 {
 		return errors.New("fixture unavailable")
 	}
 	remaining := append([]outcomeIssue(nil), expected.Issue...)

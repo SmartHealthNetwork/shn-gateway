@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -48,6 +49,9 @@ func (g *Gateway) handleHomeOxygen(w http.ResponseWriter, r *http.Request) {
 type dispatchOrder struct {
 	orderJSON, supplierJSON []byte
 	orderRef, performerRef  string
+	// authored is true for an order this gateway built (the demo lane's literal
+	// order), which the system of record does not hold.
+	authored bool
 }
 
 // dispatchResult carries everything a runCRDDispatch caller needs past the populate step:
@@ -55,6 +59,8 @@ type dispatchOrder struct {
 // Questionnaire and its canonical (needed by a caller that must ATTEST a required item
 // into the populated QR before submitting, which originateDispatch's own callers do not).
 type dispatchResult struct {
+	qrSource                                           *dtrBuildSource
+	dtrLine                                            string
 	pci, patientRef, coverageRef, orderRef             string
 	orderJSON, supplierJSON, qrJSON, questionnaireJSON []byte
 	qrAnswers                                          map[string]string
@@ -98,8 +104,9 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member 
 	// Read the member's OWN open Coverage as the routing/identity SOURCE (FR-G40): the dispatch leg's
 	// payer identity derives from the patient's real Coverage, not a synthetic CMS literal. realCov
 	// stays a LOCAL (the recipient is resolved from it); the per-leg emit shapes are unchanged.
-	realCov, hasCov, readErr := ReadSystemOfRecord(g.cfg.SoR).OpenCoverageContext(r.Context(), member)
-	if writeSoRFailure(w, readErr) {
+	realCov, hasCov, status, msg := g.memberCoverage(r.Context(), member)
+	if status != 0 {
+		writeJSON(w, status, map[string]string{"error": msg})
 		return dispatchResult{}, false
 	}
 	if !hasCov {
@@ -116,16 +123,19 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member 
 		return dispatchResult{}, false
 	}
 
-	// urn:shn:coverage carries the BARE member id — that identifier is a member number, not a
-	// reference, and the same bare value becomes the conformant Claim's insurance[0].coverage
-	// logical reference; coverageRef stays the reference-shaped value the QRContext roles below need.
-	coverageJSON, err := shnsdk.BuildCoverageWithPayer(patientRef, member, payer)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build coverage failed"})
+	// The order-dispatch request carries the participant's own Patient, Coverage
+	// search result and history (originate_crd.go); the order names the patient
+	// the same way. The Coverage is read twice — above for routing (memberCoverage),
+	// here as the search result the request carries — so each read keeps its own
+	// refusal rules.
+	recs, status, msg := g.originCRDRecords(ctx, "crd-order-dispatch", member)
+	if status != 0 {
+		writeJSON(w, status, map[string]string{"error": msg})
 		return dispatchResult{}, false
 	}
-	if status, msg := g.validateFHIR(ctx, coverageJSON, "egress", ""); status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
+	orderJSON, err := originOrder(recs, orderJSON)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "name the patient in the open order: " + err.Error()})
 		return dispatchResult{}, false
 	}
 
@@ -140,30 +150,27 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member 
 	if !ok {
 		return dispatchResult{}, false
 	}
-	crdReq, err := shnsdk.BuildConformantOrderDispatchRequest(shnsdk.OrderDispatchInputs{
-		PatientID:     member,
-		PatientRef:    patientRef,
-		OrderRef:      orderRef,
-		PerformerRef:  performerRef,
-		DeviceRequest: orderJSON,
-		Supplier:      supplierJSON,
-		Coverage:      coverageJSON,
-		Payer:         payer,
-	})
+	// The dispatched order is resolved by the payer from the request's device history;
+	// the supplier is named as the performer, and the system of record's device search
+	// includes it (DeviceRequest:performer). An order this gateway authored (the demo
+	// lane) is carried as a collection Bundle holding that one order: the system of
+	// record does not hold it, and no supplier record is added.
+	crdReq, err := g.originatedDispatchRequest(crdCorr, recs, orderJSON, performerRef, order.authored)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build order-dispatch failed"})
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "build order-dispatch request failed: " + err.Error()})
 		return dispatchResult{}, false
 	}
 	// Validation posture UNCHANGED (routing-only promotion): crdReq is a CDS
-	// Hooks envelope, not a FHIR resource; coverageJSON is $validated above. No
-	// enforcement point is added or removed after egressAdapt.
+	// Hooks envelope, not a FHIR resource; the Patient, Coverage and history are the
+	// participant's own records. No enforcement point is added or removed after
+	// egressAdapt.
 	adaptedCRDReq, _, err := g.egressAdapt(crdRoute, crdReq, ExchangeIdentity{CorrelationID: crdCorr, LegType: "crd-order-dispatch", Counterpart: recipient})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return dispatchResult{}, false
 	}
 	crdRespJSON, err := g.OriginateLeg(ctx, r, recipient, "crd-order-dispatch", pci, crdCorr, "",
-		Content{WorkstreamType: workstreamPA, ProfileID: crdRoute.Token, Route: routeInfoFor(crdRoute), Bytes: adaptedCRDReq})
+		Content{WorkstreamType: workstreamPA, ProfileID: crdRoute.Token, Route: routeInfoFor(crdRoute), Payload: sealRequest(relay.BuilderSDKCRDRequest, adaptedCRDReq, "application/json")})
 	if err != nil {
 		if g.relayOriginationError(w, err) {
 			return dispatchResult{}, false
@@ -171,11 +178,12 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member 
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return dispatchResult{}, false
 	}
-	cov, err := shnsdk.ParseCards(crdRespJSON)
+	answer, err := readOriginatedAnswer(crdRespJSON, orderJSON)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "card parse failed"})
 		return dispatchResult{}, false
 	}
+	cov := answer.coverage
 
 	// AI-1: a coverage denial STOPS — never routes DTR/PAS. Discovered missing here (R3,
 	// while re-keying UC-03 onto this shared prefix): runCRDThenDTROrder's sibling gate
@@ -213,46 +221,28 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member 
 		return dispatchResult{}, false
 	}
 	dtrLine := shnsdk.LineOf(route.Token)
-	// Carry the Coverage on both lanes that reach the reference payer's own
-	// $questionnaire-package implementation (provider-data over a live HTTP dial to
-	// br-payer, demo through internal/brpayermirror's in-process relay of br-payer's
-	// own bytes — br-payer's DtrPackageService validates `coverage` min=1 before
-	// looking at anything else, live capture 2026-08-25) AND whenever the SELECTED
-	// line requires it (DTRDef.QuestionnairePackageCoverageRequired — 2.2's 1..1),
-	// regardless of profile: same gate as the sibling site, pinned by
-	// TestDispatch_DTRFetchCoverageGateFollowsSelectedLine. This is the ACTUAL
-	// runtime path UC-03 (the family-keyed oxygen dispatch) takes in the demo lane —
-	// runCRDDispatch, not runCRDThenDTROrder's fetch build — so it needs the identical
-	// fix, not just its sibling.
-	fetch := shnsdk.QuestionnaireFetchRequest{Canonical: canonical}
-	coverageRequired := false
-	if def, ok := shnsdk.DTRLineDef(dtrLine); ok {
-		coverageRequired = def.QuestionnairePackageCoverageRequired
-	}
-	if relaysReferencePayerBytes(g.cfg.OriginationProfile) || coverageRequired {
-		fetch.Coverage = coverageJSON
-	}
-	dtrReq, err := json.Marshal(fetch)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build dtr request failed"})
+	// The request is the $questionnaire-package operation's own input
+	// (originatedPackageRequest, as the sibling site in originate.go): the
+	// system of record's Coverage search result, the dispatched order as the
+	// payer returned it, the canonical as the payer stated it and the payer's
+	// coverage-assertion-id as context, framed with the operation and sent only
+	// to a payer that declares framed DTR operations.
+	if status, msg := g.framedDTRRefusal(recipient); status != 0 {
+		writeJSON(w, status, map[string]string{"error": msg})
 		return dispatchResult{}, false
 	}
-	// egressAdapt runs here per the select-before-build pipeline, but there is
-	// deliberately NO validateFHIR enforcement point after it on THIS leg: dtrReq
-	// is QuestionnaireFetchRequest JSON, a transport ENVELOPE, not itself FHIR
-	// content the pa.dtr compat-manifest rows model — see originate.go's DTR-fetch
-	// site (runCRDThenDTROrder) for the full rationale, which applies verbatim
-	// here. OBLIGATION DISCHARGED (the multi-version spec's recorded
-	// DTR-fetch known-gap entry) — see originate.go's site for the
-	// discharge mechanism (envelopeEgressLegs pass-through), which applies
-	// verbatim here.
-	adaptedDTRReq, _, err := g.egressAdapt(route, dtrReq, ExchangeIdentity{CorrelationID: dtrCorr, LegType: "dtr-questionnaire-fetch", Counterpart: recipient})
+	dtrReq, dtrPayload, err := originatedPackageRequest(dtrLine, recs, dispatchQuestionnaireOrder(answer, orderJSON), cov.Questionnaires[0], answer.assertionID)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "build questionnaire-package request failed: " + err.Error()})
+		return dispatchResult{}, false
+	}
+	if status, msg := g.carryUnchanged(route, dtrReq, dtrCorr, recipient); status != 0 {
+		writeJSON(w, status, map[string]string{"error": msg})
 		return dispatchResult{}, false
 	}
 	packageJSON, err := g.OriginateLeg(ctx, r, recipient, "dtr-questionnaire-fetch", pci, dtrCorr, "",
-		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Bytes: adaptedDTRReq})
+		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Payload: dtrPayload,
+			Operation: shnsdk.FrameOperationQuestionnairePackage})
 	if err != nil {
 		if g.relayOriginationError(w, err) {
 			return dispatchResult{}, false
@@ -260,7 +250,7 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member 
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return dispatchResult{}, false
 	}
-	if status, msg := g.validateFHIRPayerIngress(ctx, packageJSON, dtrLine); status != 0 {
+	if status, msg := g.validateFHIRPayerIngress(ctx, packageJSON, dtrLine, "pa.dtr"); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return dispatchResult{}, false
 	}
@@ -287,23 +277,18 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member 
 	}
 
 	// The operated $populate engine reads the FHIR store directly, so its subject must be
-	// the store-resolvable Patient ref. Resolve it via the SoR (falls back to the logical
-	// ref when the SoR can't resolve it — the managed/hermetic path is unchanged).
-	subjectFHIRRef := patientRef
-	ref, ok, readErr := ReadSystemOfRecord(g.cfg.SoR).PatientFHIRRefContext(r.Context(), member)
-	if writeSoRFailure(w, readErr) {
-		return dispatchResult{}, false
-	}
-	if ok && ref != "" {
-		subjectFHIRRef = ref
-	}
+	// the store-resolvable Patient ref: the system of record's, read for the CRD request.
+	subjectFHIRRef := "Patient/" + recs.sorID
+	authored := g.cfg.Clock()
 	qrJSON, _, err := g.cfg.Populator.Populate(ctx, packageJSON, PopulateContext{
 		Member:         member,
 		PatientRef:     patientRef,
 		SubjectFHIRRef: subjectFHIRRef,
 		CoverageRef:    coverageRef,
 		OrderRef:       orderRef,
-		Authored:       g.cfg.Clock(),
+		Order:          dispatchQuestionnaireOrder(answer, orderJSON),
+		Line:           dtrLine,
+		Authored:       authored,
 	})
 	if err != nil {
 		writeJSON(w, statusForPopulateErr(err), map[string]string{"error": messageForPopulateErr(err)})
@@ -325,13 +310,21 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member 
 	// live gate can prove the $populate ran br-payer's real prepop CQL against the seeded
 	// observations (NOT an answer book). Empty when nothing populated (e.g. aged-out obs).
 	qrAnswers := questionnaireResponseNumericAnswers(qrJSON)
-	if status, msg := g.validateFHIR(ctx, qrJSON, "egress", ""); status != 0 {
+	if status, msg := g.validateFHIRForContract(ctx, qrJSON, "egress", "pa.dtr", dtrLine, baseQRProfile); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return dispatchResult{}, false
 	}
 
+	source := newRawDTRBuildSource(qrJSON, questionnaireJSON, shnsdk.QRContext{PatientRef: patientRef, CoverageRef: coverageRef, OrderRef: orderRef, Authored: authored})
+	qrJSON, status, msg = g.completeDTRContext(ctx, qrJSON, dtrLine, shnsdk.QRContext{PatientRef: patientRef, CoverageRef: coverageRef, OrderRef: orderRef})
+	if status != 0 {
+		writeJSON(w, status, map[string]string{"error": msg})
+		return dispatchResult{}, false
+	}
 	return dispatchResult{
-		pci: pci, patientRef: patientRef, coverageRef: coverageRef, orderRef: orderRef,
+		qrSource: source,
+		dtrLine:  dtrLine,
+		pci:      pci, patientRef: patientRef, coverageRef: coverageRef, orderRef: orderRef,
 		orderJSON: orderJSON, supplierJSON: supplierJSON, qrJSON: qrJSON, questionnaireJSON: questionnaireJSON, qrAnswers: qrAnswers,
 		member: member, payer: payer, recipient: recipient, canonical: canonical,
 	}, true
@@ -413,7 +406,7 @@ func (g *Gateway) originateDispatch(w http.ResponseWriter, r *http.Request, memb
 	// the payer gate to poll the timer-resolved A1. The genuine outcome is conditional-coverage
 	// A4-pended → A1; the payer responder's pend re-query resolves A4→A1, so the FINAL observed
 	// Outcome is "approved" (A1). ---
-	parsed, _, status, msg, err := g.submitClaimAndResolve(r.Context(), r, res.pci, res.orderJSON, res.supplierJSON, res.qrJSON, res.patientRef, res.coverageRef, res.member, res.payer, res.recipient)
+	parsed, _, status, msg, err := g.submitClaimAndResolve(r.Context(), r, res.pci, res.orderJSON, res.supplierJSON, res.qrSource, res.patientRef, res.coverageRef, res.member, res.payer, res.recipient)
 	if status != 0 {
 		if g.relayOriginationError(w, err) {
 			return
@@ -453,4 +446,13 @@ func parseOrderIDAndPerformer(orderJSON []byte) (id, performerRef string, ok boo
 		return "", "", false
 	}
 	return probe.ID, probe.Performer.Reference, true
+}
+
+// dispatchQuestionnaireOrder is the order the questionnaire step works from:
+// the payer's updated order when its answer returned one, else the order sent.
+func dispatchQuestionnaireOrder(answer crdOriginated, sent []byte) []byte {
+	if len(answer.updatedOrder) > 0 {
+		return answer.updatedOrder
+	}
+	return sent
 }

@@ -13,6 +13,7 @@ import (
 	"log"
 	"net/http"
 
+	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -71,8 +72,8 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 		// site this closes). Adaptive: drive $next-question first (see handleUC04).
 		var status int
 		var msg string
-		qrForSubmit, questionnaireJSON, status, msg, err = g.attestAdaptiveQuestionnaire(ctx, r, res, answers,
-			shnsdk.QRContext{PatientRef: res.patientRef, CoverageRef: res.coverageRef, OrderRef: orderRef, Authored: g.cfg.Clock()})
+		qc := shnsdk.QRContext{PatientRef: res.patientRef, CoverageRef: res.coverageRef, OrderRef: orderRef, Authored: g.cfg.Clock()}
+		qrForSubmit, questionnaireJSON, status, msg, err = g.attestAdaptiveQuestionnaire(ctx, r, res, answers, qc)
 		if status != 0 {
 			if g.relayOriginationError(w, err) {
 				return pendState{}, false
@@ -80,10 +81,12 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 			writeJSON(w, status, map[string]string{"error": msg})
 			return pendState{}, false
 		}
-		if status, msg := g.validateFHIR(ctx, qrForSubmit, "egress", res.dtrLine); status != 0 {
+		qrForSubmit, status, msg = g.completeDTRContext(ctx, qrForSubmit, res.dtrLine, shnsdk.QRContext{PatientRef: res.patientRef, CoverageRef: res.coverageRef, OrderRef: orderRef})
+		if status != 0 {
 			writeJSON(w, status, map[string]string{"error": msg})
 			return pendState{}, false
 		}
+		res.qrSource = newAutomaticDTRBuildSource(questionnaireJSON, answers, qc)
 		baseTrace = attestedAnswerValues(answers)
 	}
 	pasCorr := g.cfg.CorrelationGen()
@@ -97,8 +100,18 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 		return pendState{}, false
 	}
 	targetLine := shnsdk.LineOf(route.Token)
-	bundleJSON, err := shnsdk.BuildConformantClaimBundleAtLine(route.BuildLine, shnsdk.ConformantClaimInputs{
-		QR: qrForSubmit, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef, MemberID: res.member,
+	pasDTRLine, err := pairedDTRLine(targetLine)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return pendState{}, false
+	}
+	pasQR, err := buildPASAttachment(res.qrSource, targetLine)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return pendState{}, false
+	}
+	bundleJSON, err := buildAuthoredPASSubmit(route.BuildLine, shnsdk.ConformantClaimInputs{
+		QR: pasQR, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef, MemberID: res.member,
 		Corr: pasCorr, Created: g.cfg.Clock(),
 		ContainedInsurer: relaysReferencePayerBytes(g.cfg.OriginationProfile),
 		AbsoluteRefs:     relaysReferencePayerBytes(g.cfg.OriginationProfile),
@@ -113,7 +126,7 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 	// pinned into the pendState below so the resume leg's restoring
 	// chain has an independent record to verify against. Everything else about
 	// this call is unchanged.
-	bundleJSON, err = g.completePASRequest(ctx, bundleJSON)
+	bundleJSON, err = g.completeAuthoredPASRequest(ctx, bundleJSON, pasQR, res.srJSON, res.coverageRef, relaysReferencePayerBytes(g.cfg.OriginationProfile))
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "PAS evidence linkage failed"})
 		return pendState{}, false
@@ -123,12 +136,16 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return pendState{}, false
 	}
-	if status, msg := g.validateFHIR(ctx, bundleJSON, "egress", targetLine); status != 0 {
+	if status, msg := g.validatePASAttachments(ctx, bundleJSON, pasDTRLine, res.qrSource != nil); status != 0 {
+		writeJSON(w, status, map[string]string{"error": msg})
+		return pendState{}, false
+	}
+	if status, msg := g.validateFHIRForContract(ctx, bundleJSON, "egress", "pa.pas", targetLine, ""); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return pendState{}, false
 	}
 	pendedResp, err := g.OriginateLeg(ctx, r, res.recipient, "pas-claim", res.pci, pasCorr, "",
-		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Bytes: bundleJSON})
+		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Payload: sealRequest(relay.BuilderSDKPASSubmit, bundleJSON, "application/fhir+json")})
 	if err != nil {
 		if g.relayOriginationError(w, err) {
 			return pendState{}, false
@@ -136,7 +153,7 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return pendState{}, false
 	}
-	if status, msg := g.validateFHIRPayerIngress(ctx, pendedResp, targetLine); status != 0 {
+	if status, msg := g.validateFHIRPayerIngress(ctx, pendedResp, targetLine, "pa.pas"); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return pendState{}, false
 	}
@@ -148,6 +165,8 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 	needed := neededItemCodes(neededItems)
 	return pendState{
 		scenario:          scenario,
+		qrSource:          res.qrSource,
+		pasDTRLine:        pasDTRLine,
 		qrJSON:            qrForSubmit,
 		questionnaireJSON: questionnaireJSON,
 		srJSON:            res.srJSON,
@@ -161,7 +180,8 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 		qrAnswers:         baseTrace,
 		payer:             res.payer,     // thread the REAL payer identity to the resume ClaimUpdate builders (FR-G40)
 		recipient:         res.recipient, // thread the coverage-derived payer HOLDER so the resume update legs route to it (FR-G40; no default)
-		pasToken:          route.Token,   // the pended-line pin — selected once, resumed verbatim
+		dtrLine:           res.dtrLine,
+		pasToken:          route.Token, // the pended-line pin — selected once, resumed verbatim
 		// The pended leg's declared CARRY record, pinned beside the routed token:
 		// what THIS exchange's down-leg moved into shn-carried-content,
 		// so the resume leg can refuse a payload that no longer bears it. Empty
@@ -246,9 +266,9 @@ func (g *Gateway) handleUC06(w http.ResponseWriter, r *http.Request) {
 // clinician-attested functional-status item (score + NPI), builds the Provenance
 // (FR-32) and ClaimUpdate, exchanges it, and asserts APPROVED — writing the
 // approval on success. On failure it writes the HTTP error and returns false so
-// the caller keeps the resume token (the operator can retry). An empty score/NPI
-// defaults to the preserved demo values ("42" / g.cfg.NPI), keeping the
-// single-call path byte-identical.
+// the caller keeps the resume token (the operator can retry). An empty score
+// defaults to the preserved demo value ("42"); an empty NPI is the attesting
+// clinician's (attestingNPI: the configured NPI, else the order's requester).
 func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st pendState, score, npi string) bool {
 	ctx := r.Context()
 	srRef := "ServiceRequest/sr-uc06" // built-order literal
@@ -281,11 +301,10 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 	if score == "" {
 		score = "42" // preserved default (Oswestry score)
 	}
-	if npi == "" {
-		npi = g.cfg.NPI
-	}
-	if npi == "" {
-		npi = "1999999999"
+	npi, status, msg := g.attestingNPI(ctx, st.srJSON, npi)
+	if status != 0 {
+		writeJSON(w, status, map[string]string{"error": msg})
+		return false
 	}
 	itemJSON, err := shnsdk.BuildManualAttestedItem(linkID, score,
 		shnsdk.Attestation{NPI: npi, Text: "I attest these are my clinical findings.", When: g.cfg.Clock().Format("2006-01-02")})
@@ -293,7 +312,8 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build manual item failed"})
 		return false
 	}
-	amendedQR, err := shnsdk.AmendQRWithItemIn(st.qrJSON, st.questionnaireJSON, itemJSON)
+	amendedSource := st.qrSource.withAmendment(itemJSON, "").withQRID(uc06QRID)
+	amendedQR, err := amendedSource.buildAtLine(st.dtrLine)
 	if err != nil {
 		// The cause stays server-side (the wire body is the same opaque 500 as before),
 		// but it is LOGGED: a silent "amend qr failed" cost a CloudWatch dig to learn the
@@ -302,12 +322,7 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "amend qr failed"})
 		return false
 	}
-	amendedQR, err = shnsdk.SetQuestionnaireResponseID(amendedQR, uc06QRID)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "set qr id failed"})
-		return false
-	}
-	if status, msg := g.validateFHIR(ctx, amendedQR, "egress", ""); status != 0 {
+	if status, msg := g.validateDTRQuestionnaireResponse(ctx, amendedQR, st.dtrLine); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return false
 	}
@@ -316,7 +331,7 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build provenance failed"})
 		return false
 	}
-	if status, msg := g.validateFHIR(ctx, provJSON, "egress", ""); status != 0 {
+	if status, msg := g.validateFHIRForContract(ctx, provJSON, "egress", "pa.dtr", st.dtrLine, ""); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return false
 	}
@@ -336,8 +351,13 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 		return false
 	}
 	targetLine := shnsdk.LineOf(route.Token)
-	updateBundle, err := shnsdk.BuildConformantClaimUpdateBundleAtLine(route.BuildLine, shnsdk.ConformantClaimUpdateInputs{
-		QR: amendedQR, SR: st.srJSON, PatientRef: st.patientRef, CoverageRef: st.coverageRef, MemberID: st.member,
+	pasQR, err := amendedSource.buildAtLine(st.pasDTRLine)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return false
+	}
+	updateBundle, err := buildAuthoredPASUpdate(route.BuildLine, shnsdk.ConformantClaimUpdateInputs{
+		QR: pasQR, SR: st.srJSON, PatientRef: st.patientRef, CoverageRef: st.coverageRef, MemberID: st.member,
 		Provenance: provJSON, DiagnosticReport: nil, Corr: updateCorr, OriginalCorr: st.pasCorr, Created: g.cfg.Clock(),
 		ContainedInsurer: relaysReferencePayerBytes(g.cfg.OriginationProfile),
 		AbsoluteRefs:     relaysReferencePayerBytes(g.cfg.OriginationProfile),
@@ -355,7 +375,7 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 	if !g.guardPendCarry(w, st, route, updateBundle, pasUpdateID) {
 		return false
 	}
-	updateBundle, err = g.completePASRequest(ctx, updateBundle)
+	updateBundle, err = g.completeAuthoredPASRequest(ctx, updateBundle, pasQR, st.srJSON, st.coverageRef, relaysReferencePayerBytes(g.cfg.OriginationProfile))
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "PAS evidence linkage failed"})
 		return false
@@ -365,12 +385,16 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return false
 	}
-	if status, msg := g.validateFHIR(ctx, updateBundle, "egress", targetLine); status != 0 {
+	if status, msg := g.validatePASAttachments(ctx, updateBundle, st.pasDTRLine, true); status != 0 {
+		writeJSON(w, status, map[string]string{"error": msg})
+		return false
+	}
+	if status, msg := g.validateFHIRForContract(ctx, updateBundle, "egress", "pa.pas", targetLine, ""); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return false
 	}
 	updateResp, err := g.OriginateLeg(ctx, r, st.recipient, "pas-claim-update", st.pci, updateCorr, "",
-		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Bytes: updateBundle})
+		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Payload: sealRequest(relay.BuilderSDKPASUpdate, updateBundle, "application/fhir+json")})
 	if err != nil {
 		if g.relayOriginationError(w, err) {
 			return false
@@ -378,7 +402,7 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return false
 	}
-	if status, msg := g.validateFHIRPayerIngress(ctx, updateResp, targetLine); status != 0 {
+	if status, msg := g.validateFHIRPayerIngress(ctx, updateResp, targetLine, "pa.pas"); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return false
 	}
@@ -489,7 +513,7 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 		return false
 	}
 	pdCorr := g.cfg.CorrelationGen()
-	pdRespJSON, err := g.OriginateLeg(ctx, r, phg.ID, "patient-dtr", st.pci, pdCorr, "", Content{WorkstreamType: workstreamPA, Bytes: pdReq})
+	pdRespJSON, err := g.OriginateLeg(ctx, r, phg.ID, "patient-dtr", st.pci, pdCorr, "", Content{WorkstreamType: workstreamPA, Payload: sealRequest(relay.BuilderSDKPatientDTR, pdReq, "application/json")})
 	if err != nil {
 		if g.relayOriginationError(w, err) {
 			return false
@@ -504,18 +528,14 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 	}
 
 	// Amend the QR with the patient-authored attested item (FR-21).
-	amendedQR, err := shnsdk.AmendQRWithItemIn(st.qrJSON, st.questionnaireJSON, pdResp.AttestedItem)
+	amendedSource := st.qrSource.withAmendment(pdResp.AttestedItem, "").withQRID(uc07QRID)
+	amendedQR, err := amendedSource.buildAtLine(st.dtrLine)
 	if err != nil {
 		log.Printf("completePatient: amend qr failed (linkId %s): %v", linkID, err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "amend qr failed"})
 		return false
 	}
-	amendedQR, err = shnsdk.SetQuestionnaireResponseID(amendedQR, uc07QRID)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "set qr id failed"})
-		return false
-	}
-	if status, msg := g.validateFHIR(ctx, amendedQR, "egress", ""); status != 0 {
+	if status, msg := g.validateDTRQuestionnaireResponse(ctx, amendedQR, st.dtrLine); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return false
 	}
@@ -525,7 +545,7 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build provenance failed"})
 		return false
 	}
-	if status, msg := g.validateFHIR(ctx, provJSON, "egress", ""); status != 0 {
+	if status, msg := g.validateFHIRForContract(ctx, provJSON, "egress", "pa.dtr", st.dtrLine, ""); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return false
 	}
@@ -544,8 +564,13 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 		return false
 	}
 	targetLine := shnsdk.LineOf(route.Token)
-	updateBundle, err := shnsdk.BuildConformantClaimUpdateBundleAtLine(route.BuildLine, shnsdk.ConformantClaimUpdateInputs{
-		QR: amendedQR, SR: st.srJSON, PatientRef: st.patientRef, CoverageRef: st.coverageRef, MemberID: st.member,
+	pasQR, err := amendedSource.buildAtLine(st.pasDTRLine)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return false
+	}
+	updateBundle, err := buildAuthoredPASUpdate(route.BuildLine, shnsdk.ConformantClaimUpdateInputs{
+		QR: pasQR, SR: st.srJSON, PatientRef: st.patientRef, CoverageRef: st.coverageRef, MemberID: st.member,
 		Provenance: provJSON, DiagnosticReport: nil, Corr: updateCorr, OriginalCorr: st.pasCorr, Created: g.cfg.Clock(),
 		ContainedInsurer: relaysReferencePayerBytes(g.cfg.OriginationProfile),
 		AbsoluteRefs:     relaysReferencePayerBytes(g.cfg.OriginationProfile),
@@ -562,7 +587,7 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 	if !g.guardPendCarry(w, st, route, updateBundle, pasUpdateID) {
 		return false
 	}
-	updateBundle, err = g.completePASRequest(ctx, updateBundle)
+	updateBundle, err = g.completeAuthoredPASRequest(ctx, updateBundle, pasQR, st.srJSON, st.coverageRef, relaysReferencePayerBytes(g.cfg.OriginationProfile))
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "PAS evidence linkage failed"})
 		return false
@@ -572,12 +597,16 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return false
 	}
-	if status, msg := g.validateFHIR(ctx, updateBundle, "egress", targetLine); status != 0 {
+	if status, msg := g.validatePASAttachments(ctx, updateBundle, st.pasDTRLine, true); status != 0 {
+		writeJSON(w, status, map[string]string{"error": msg})
+		return false
+	}
+	if status, msg := g.validateFHIRForContract(ctx, updateBundle, "egress", "pa.pas", targetLine, ""); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return false
 	}
 	updateResp, err := g.OriginateLeg(ctx, r, st.recipient, "pas-claim-update", st.pci, updateCorr, "",
-		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Bytes: updateBundle})
+		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Payload: sealRequest(relay.BuilderSDKPASUpdate, updateBundle, "application/fhir+json")})
 	if err != nil {
 		if g.relayOriginationError(w, err) {
 			return false
@@ -585,7 +614,7 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return false
 	}
-	if status, msg := g.validateFHIRPayerIngress(ctx, updateResp, targetLine); status != 0 {
+	if status, msg := g.validateFHIRPayerIngress(ctx, updateResp, targetLine, "pa.pas"); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return false
 	}

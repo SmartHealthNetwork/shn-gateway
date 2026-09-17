@@ -47,7 +47,7 @@ func TestOriginateLeg_UnknownLegTypeFailsClosed(t *testing.T) {
 	g := &Gateway{} // never reaches roundTrip: the catalog miss returns first
 	// workstreamPA passes the selection-seam guard, so this exercises the legType-miss
 	// path specifically (an unknown legType WITHIN the served workstream).
-	_, err := g.OriginateLeg(context.Background(), nil, "payer", "no-such-leg", "pci", "corr", "", Content{WorkstreamType: workstreamPA, Bytes: []byte("{}")})
+	_, err := g.OriginateLeg(context.Background(), nil, "payer", "no-such-leg", "pci", "corr", "", Content{WorkstreamType: workstreamPA, Payload: testRequest([]byte("{}"))})
 	if err == nil {
 		t.Fatal("OriginateLeg with unknown legType: want error, got nil")
 	}
@@ -61,7 +61,7 @@ func TestOriginateLeg_UnknownLegTypeFailsClosed(t *testing.T) {
 // would reach roundTrip and panic on the nil registry, failing the test differently.
 func TestOriginateLeg_WrongWorkstreamFailsClosed(t *testing.T) {
 	g := &Gateway{}
-	_, err := g.OriginateLeg(context.Background(), nil, "payer", "crd-order-select", "pci", "corr", "", Content{WorkstreamType: "x12-278", Bytes: []byte("{}")})
+	_, err := g.OriginateLeg(context.Background(), nil, "payer", "crd-order-select", "pci", "corr", "", Content{WorkstreamType: "x12-278", Payload: testRequest([]byte("{}"))})
 	if err == nil {
 		t.Fatal("OriginateLeg with foreign WorkstreamType: want error, got nil")
 	}
@@ -77,9 +77,9 @@ func TestOriginateLeg_WrongWorkstreamFailsClosed(t *testing.T) {
 func TestExchangeIR_Composes(t *testing.T) {
 	legs := []Leg{
 		{Type: "crd-order-select", Physics: paCatalog["crd-order-select"].Physics,
-			Content: Content{WorkstreamType: workstreamPA, Bytes: []byte("{}")}, Subjects: []string{"pci-1"}},
+			Content: Content{WorkstreamType: workstreamPA, Payload: testRequest([]byte("{}"))}, Subjects: []string{"pci-1"}},
 		{Type: "pas-claim", Physics: paCatalog["pas-claim"].Physics,
-			Content: Content{WorkstreamType: workstreamPA, Bytes: []byte("{}")}, Subjects: []string{"pci-1"}},
+			Content: Content{WorkstreamType: workstreamPA, Payload: testRequest([]byte("{}"))}, Subjects: []string{"pci-1"}},
 	}
 	ex := Exchange{ID: "exch-1", Workstream: workstreamPA}
 	for _, l := range legs {

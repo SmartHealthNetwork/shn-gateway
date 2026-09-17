@@ -5,8 +5,9 @@
 Please report suspected vulnerabilities **privately** — do not open a public
 issue. Use GitHub's private vulnerability reporting for this repository:
 [github.com/SmartHealthNetwork/shn-gateway/security/advisories/new](https://github.com/SmartHealthNetwork/shn-gateway/security/advisories/new).
-If that isn't available to you, open a regular issue asking to be pointed to a
-private channel and we'll follow up without discussing details in the open.
+If that isn't available to you, open a regular issue that says only that you
+have a security report to make — no details — and a maintainer will open a
+private advisory on your behalf and continue there.
 
 Include what you'd normally include in a report: the affected version, a
 description of the issue, and — if you have one — a minimal reproduction. We'll
@@ -17,10 +18,10 @@ with you.
 
 This policy covers the code in this repository: the published `shn-gateway`
 snapshot (a byte-for-byte copy of the gateway as it runs in the Smart Health
-Network). It does not cover the Smart Health Network's hosted services (the
-Hub, Authorization Framework, registrar, and related trust-plane
-infrastructure) — those have their own reporting channel; use the advisory
-link above and we'll route it correctly if you're unsure.
+Network). Reports about the Smart Health Network's hosted services (the Hub,
+Authorization Framework, registrar, and related trust-plane infrastructure) are
+welcome through the same advisory link — there is no separate public channel
+for them — and are routed to the right people internally.
 
 ## Our posture in one line
 

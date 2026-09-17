@@ -76,7 +76,7 @@ func childCommand(t *testing.T, mode string) (*exec.Cmd, *bufio.Reader) {
 	return cmd, bufio.NewReader(pipe)
 }
 func supervisorTestConfig(t *testing.T, base string) supervisorConfig {
-	return supervisorConfig{base: base, marker: markerPath(t), line: "2.2", pasVersion: "2.2.1", key: sameJVM(), startupBudget: time.Second, stopBudget: 100 * time.Millisecond}
+	return supervisorConfig{base: base, public: "127.0.0.1:0", marker: markerPath(t), line: "2.2", pasVersion: "2.2.1", key: sameJVM(), startupBudget: time.Second, stopBudget: 100 * time.Millisecond}
 }
 func runChild(t *testing.T, ctx context.Context, cmd *exec.Cmd, cfg supervisorConfig, signals <-chan os.Signal) <-chan int {
 	t.Helper()
@@ -324,5 +324,31 @@ func TestSupervisorReplacesSurvivingMarkerBeforeChildStarts(t *testing.T) {
 	}
 	if len(lane.recorded()) != 0 {
 		t.Fatal("POST before metadata")
+	}
+}
+
+func TestLifecycleVerifierKeepsExactCorpusAndChildTests(t *testing.T) {
+	raw, err := os.ReadFile("verify-process.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(raw)
+	if !strings.Contains(script, `python3 "${DIR}/test_verify_state.py"`) {
+		t.Fatal("observation CLI rejection tests must run in lifecycle verifier")
+	}
+	childTests := strings.Index(script, "GOWORK=off go test ./testdata/process-child -count=1")
+	build := strings.Index(script, "go build -trimpath")
+	if childTests < 0 || build < 0 || childTests > build {
+		t.Fatal("controlled child tests must run before cross-build")
+	}
+	const vector = `s["posts"]==["Bundle","QuestionnaireResponse","ExplanationOfBenefit","Task"]+["ClaimResponse"]*30+["Bundle"]*4+["Claim"]*2+["ClaimResponse"]*2`
+	const profiles = `s["profiles"][-2:]==["http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claimresponse|9.9.9","https://example.org/fhir/StructureDefinition/unavailable-profile"]`
+	for _, guard := range []string{vector, profiles, `len(s["profiles"])==len(s["posts"])`, `s["maximum"]==1`} {
+		if !strings.Contains(script, guard) {
+			t.Fatalf("missing exact lifecycle guard %s", guard)
+		}
+	}
+	if strings.Count(script, "\nassert_complete_posts\n") != 2 {
+		t.Fatal("full corpus must be checked both initially and after restart")
 	}
 }

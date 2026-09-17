@@ -1,0 +1,80 @@
+{
+  "versionFallbacks": [
+    {
+      "reference": "http://hl7.org/fhir/StructureDefinition/alternate-reference|5.2.0",
+      "from_url": "http://hl7.org/fhir/5.0/StructureDefinition/profile-Encounter",
+      "element": "Encounter.basedOn.extension:basedOn",
+      "kind": "type.profile",
+      "loaded": [
+        "5.3.0-ballot-tc1"
+      ],
+      "fallback": true
+    },
+    {
+      "reference": "http://hl7.org/fhir/StructureDefinition/alternate-reference|5.2.0",
+      "from_url": "http://hl7.org/fhir/5.0/StructureDefinition/profile-Encounter",
+      "element": "Encounter.participant.individual.extension:actor",
+      "kind": "type.profile",
+      "loaded": [
+        "5.3.0-ballot-tc1"
+      ],
+      "fallback": true
+    }
+  ],
+  "cutReferenceTargets": [
+    {
+      "reference": "http://hl7.org/fhir/5.0/StructureDefinition/profile-CareTeam|0.1.0",
+      "from_url": "http://hl7.org/fhir/5.0/StructureDefinition/extension-Encounter.careTeam",
+      "element": "Extension.value[x]"
+    },
+    {
+      "reference": "http://hl7.org/fhir/5.0/StructureDefinition/profile-Condition|0.1.0",
+      "from_url": "http://hl7.org/fhir/5.0/StructureDefinition/extension-Encounter.reason.value",
+      "element": "Extension.extension:reference.value[x]"
+    },
+    {
+      "reference": "http://hl7.org/fhir/5.0/StructureDefinition/profile-DiagnosticReport|0.1.0",
+      "from_url": "http://hl7.org/fhir/5.0/StructureDefinition/extension-Encounter.reason.value",
+      "element": "Extension.extension:reference.value[x]"
+    },
+    {
+      "reference": "http://hl7.org/fhir/5.0/StructureDefinition/profile-HealthcareService|0.1.0",
+      "from_url": "http://hl7.org/fhir/5.0/StructureDefinition/extension-Encounter.serviceType",
+      "element": "Extension.value[x]"
+    },
+    {
+      "reference": "http://hl7.org/fhir/5.0/StructureDefinition/profile-ImmunizationRecommendation|0.1.0",
+      "from_url": "http://hl7.org/fhir/5.0/StructureDefinition/extension-Encounter.reason.value",
+      "element": "Extension.extension:reference.value[x]"
+    },
+    {
+      "reference": "http://hl7.org/fhir/5.0/StructureDefinition/profile-Observation|0.1.0",
+      "from_url": "http://hl7.org/fhir/5.0/StructureDefinition/extension-Encounter.reason.value",
+      "element": "Extension.extension:reference.value[x]"
+    },
+    {
+      "reference": "http://hl7.org/fhir/5.0/StructureDefinition/profile-Organization|0.1.0",
+      "from_url": "http://hl7.org/fhir/5.0/StructureDefinition/extension-Encounter.virtualService",
+      "element": "Extension.extension:address.extension:organization.value[x]"
+    },
+    {
+      "reference": "http://hl7.org/fhir/5.0/StructureDefinition/profile-Procedure|0.1.0",
+      "from_url": "http://hl7.org/fhir/5.0/StructureDefinition/extension-Encounter.reason.value",
+      "element": "Extension.extension:reference.value[x]"
+    }
+  ],
+  "unresolved": [
+    {
+      "reference": "http://hl7.org/fhir/ValueSet/virtual-service-type",
+      "from_url": "http://hl7.org/fhir/virtual-service-type",
+      "element": "",
+      "kind": "valueSet"
+    },
+    {
+      "reference": "http://terminology.hl7.org/ValueSet/encounter-subject-status|1.0.1",
+      "from_url": "http://terminology.hl7.org/CodeSystem/encounter-subject-status",
+      "element": "",
+      "kind": "valueSet"
+    }
+  ]
+}

@@ -437,9 +437,26 @@ func decodeExactAny(t *testing.T, raw []byte) any {
 // through chainFor/applyChain (via the exported test seam) exactly as a real
 // 2.0->2.2 leg would: a 2.0 pended response walks Up through BOTH adjacent
 // steps and lands on the 2.2 pended golden's shape.
+//
+// The pended Task is carried as the 2.0 line wrote it: the 2.0 golden's
+// questionnaires-needed Identifier, 2.0.1 profile and paLineNumber arrive
+// where the 2.2 golden holds its own Task (the Task is not translated
+// across 2.0/2.1). The expectation is therefore the 2.2 golden with the 2.0
+// Task's need and line markers.
 func TestPASChain_2020To22ThroughBothSteps(t *testing.T) {
 	in := pasGolden(t, "claimresponse-pended.json")
-	want := pasGolden(t, "2.2/claimresponse-pended.json")
+	golden22 := pasGolden(t, "2.2/claimresponse-pended.json")
+	ctxNeed := []byte(`"type":{"coding":[{"system":"http://hl7.org/fhir/us/davinci-pas/CodeSystem/PASTempCodes","code":"questionnaire-context"}]},"valueString":"operative-diagnostic-report"`)
+	idNeed := []byte(`"type":{"coding":[{"system":"http://hl7.org/fhir/us/davinci-pas/CodeSystem/PASTempCodes","code":"questionnaires-needed"}]},"valueIdentifier":{"system":"urn:shn:example:payer-questionnaire","value":"operative-diagnostic-report"}`)
+	if !bytes.Contains(golden22, ctxNeed) || !bytes.Contains(in, idNeed) {
+		t.Fatal("the pended goldens no longer carry the expected questionnaire needs")
+	}
+	// The 2.0 Task is kept whole: its need and its declared line (profile and
+	// line-number extension) are the 2.0 golden's.
+	want := bytes.Replace(golden22, ctxNeed, idNeed, 1)
+	want = bytes.Replace(want, []byte(`profile-task|2.2.1`), []byte(`profile-task|2.0.1`), 1)
+	want = bytes.Replace(want, []byte(`"url":"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceLineNumber","valuePositiveInt":1`),
+		[]byte(`"url":"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-paLineNumber","valueInteger":1`), 1)
 
 	out, reports, err := TransformPASForTest("2.0", "2.2", in, corr)
 	if err != nil {

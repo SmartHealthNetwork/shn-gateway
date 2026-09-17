@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -8,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/SmartHealthNetwork/shn-gateway/fhirseed"
+	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
 const testAdaptiveCanonical = "http://example.org/fhir/Questionnaire/Adaptive"
@@ -202,13 +204,13 @@ func TestNextQuestionSubjectBindAndFence(t *testing.T) {
 	}
 
 	items := rawItems(t, adaptiveTree(t, "1", "3"))
-	if status, _ := fenceNextQuestionSubject("Patient/MBR-COVERED", LegResult{ResponseFHIR: nextQuestionAnswer(t, "Patient/MBR-COVERED", items)}); status != 0 {
+	if status, _ := fenceNextQuestionSubject("Patient/MBR-COVERED", LegResult{Response: testResponse(nextQuestionAnswer(t, "Patient/MBR-COVERED", items))}); status != 0 {
 		t.Fatalf("fence(same patient) status=%d, want pass", status)
 	}
-	if status, msg := fenceNextQuestionSubject("Patient/MBR-COVERED", LegResult{ResponseFHIR: nextQuestionAnswer(t, "Patient/MBR-COVERED-FOREIGN", items)}); status != http.StatusForbidden || !strings.Contains(msg, "response patient") {
+	if status, msg := fenceNextQuestionSubject("Patient/MBR-COVERED", LegResult{Response: testResponse(nextQuestionAnswer(t, "Patient/MBR-COVERED-FOREIGN", items))}); status != http.StatusForbidden || !strings.Contains(msg, "response patient") {
 		t.Fatalf("fence(foreign patient) status=%d msg=%q, want 403", status, msg)
 	}
-	if status, msg := fenceNextQuestionSubject("Patient/MBR-COVERED", LegResult{ResponseFHIR: []byte(`{"resourceType":"Bundle"}`)}); status != http.StatusBadGateway || !strings.Contains(msg, "questionnaire-response") {
+	if status, msg := fenceNextQuestionSubject("Patient/MBR-COVERED", LegResult{Response: testResponse([]byte(`{"resourceType":"Bundle"}`))}); status != http.StatusBadGateway || !strings.Contains(msg, "questionnaire-response") {
 		t.Fatalf("fence(package-shaped) status=%d msg=%q, want 502", status, msg)
 	}
 	if status, _ := fenceNextQuestionSubject("Patient/MBR-COVERED", LegResult{Status: http.StatusBadRequest, Message: "upstream refused"}); status != 0 {
@@ -272,4 +274,48 @@ func TestUC04AttestationAnswers_SupportingInfo(t *testing.T) {
 			t.Fatalf("%s resolver: 3.3 present, want omitted", name)
 		}
 	}
+}
+
+// TestNextQuestion_FramedWhenCapable: an adaptive round is the SDC
+// $next-question operation's own input, named in the request frame, sent
+// only to a payer that declares framed DTR operations.
+func TestNextQuestion_FramedWhenCapable(t *testing.T) {
+	const subject = "Patient/MBR-COVERED"
+	reqQR := []byte(`{"resourceType":"QuestionnaireResponse","status":"in-progress","subject":{"reference":"` + subject + `"}}`)
+	round := func(t *testing.T, capable bool) (*inProcessExchange, []json.RawMessage, int, string) {
+		t.Helper()
+		env := newInProcessExchange(t)
+		declareFramedDTR(t, env, capable)
+		route, err := env.originator.selectLegLine(env.payerID, "dtr-questionnaire-fetch", "corr-0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		env.payerReturns(LegResult{Response: testResponse(nextQuestionAnswer(t, subject, rawItems(t, adaptiveTree(t, "1", "3"))))})
+		res := crdDtrResult{recipient: env.payerID, pci: "pci-covered", patientRef: subject, dtrLine: shnsdk.LineOf(route.Token)}
+		items, status, msg, _ := env.originator.nextQuestionLeg(context.Background(), env.req, res, testAdaptiveCanonical, reqQR)
+		return env, items, status, msg
+	}
+	t.Run("a capable payer", func(t *testing.T) {
+		env, items, status, msg := round(t, true)
+		if status != 0 || len(items) != 2 {
+			t.Fatalf("%d %s: %d items", status, msg, len(items))
+		}
+		op, sent := sentOperation(t, env)
+		if op != shnsdk.FrameOperationNextQuestion {
+			t.Fatalf("operation header %q", op)
+		}
+		want := `{"parameter":[{"name":"questionnaire-response","resource":` + string(reqQR) + `}],"resourceType":"Parameters"}`
+		if string(sent) != want {
+			t.Fatalf("sent %s\nwant %s", sent, want)
+		}
+		if bytes.Contains(sent, []byte(`"canonical"`)) || bytes.Contains(sent, []byte(`"nextQuestion"`)) {
+			t.Fatalf("the older envelope was sent: %s", sent)
+		}
+	})
+	t.Run("a payer that does not declare framed operations", func(t *testing.T) {
+		env, _, status, msg := round(t, false)
+		if status != http.StatusBadGateway || msg != shnsdk.ErrFramedDTRUnsupported.Error() || env.routeHitCount() != 0 {
+			t.Fatalf("%d %s, route hits %d", status, msg, env.routeHitCount())
+		}
+	})
 }

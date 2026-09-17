@@ -120,8 +120,9 @@ var (
 //
 // The mechanism is a pair of generation counters under mu (reloadStarted, incremented as
 // a reload is about to issue its SELECT; reloadDone, incremented as it completes, success
-// or failure) and a broadcast channel (reloadEpoch) that every completion closes and
-// replaces. Reloads are serialized by reloadMu, so reloadDone completes in order. A cold
+// or failure) and a broadcast channel (reloadEpoch) closed and replaced when reloadMu
+// is released, including a throttled decline. Only actual completions advance reloadDone;
+// reloadMu serializes them so they complete in order. A cold
 // miss records arrival := reloadStarted and loops, bounded by ONE deadline of storeTimeout
 // from entry (resolveCold):
 //
@@ -207,10 +208,11 @@ type IngressKeyStore struct {
 	// miss trusts a snapshot only when reloadDone has passed the reloadStarted it arrived
 	// at: that reload's SELECT ran after the request did.
 	reloadStarted, reloadDone uint64
-	// reloadEpoch is closed and replaced by every reload completion, under mu, in the same
-	// section that advances reloadDone. A cold miss reads it together with the counters
-	// and parks on it, so a completion that lands between its read and its park still
-	// wakes it (the channel it holds is the one that was closed).
+	// reloadEpoch is closed and replaced whenever a reload wrapper releases reloadMu,
+	// including a throttled decline. Release and replacement share mu so a cold miss
+	// cannot read a new epoch while the completed reload still holds reloadMu. It
+	// reads this channel with the counters and parks on it; a release between the
+	// read and park still wakes it. Only a real completion advances reloadDone.
 	reloadEpoch chan struct{}
 
 	// negRing is the negative cache's insertion order: a fixed ring of negCacheMax slots
@@ -803,7 +805,7 @@ func (s *IngressKeyStore) rotateIfDue(now time.Time) error {
 // goes through reloadIfDueNoWait.
 func (s *IngressKeyStore) reload(now time.Time) error {
 	s.reloadMu.Lock()
-	defer s.reloadMu.Unlock()
+	defer s.releaseReload()
 	return s.reloadLocked(now)
 }
 
@@ -833,7 +835,7 @@ func (s *IngressKeyStore) reloadIfDue(now time.Time) (bool, error) {
 		return false, errReloadThrottled
 	}
 	s.reloadMu.Lock()
-	defer s.reloadMu.Unlock()
+	defer s.releaseReload()
 	// Under reloadMu no other reload can be in flight (a reload clears the latch before
 	// releasing this lock), so the throttle is the only thing left to re-check: a caller
 	// that queued behind one finds lastReload freshly stamped, and its own caller
@@ -872,7 +874,7 @@ func (s *IngressKeyStore) reloadIfDueNoWaitWithin(now time.Time, timeout time.Du
 		// Held by a reload that has not published its latch yet (or by refreshOnce).
 		return false, errReloadInFlight
 	}
-	defer s.reloadMu.Unlock()
+	defer s.releaseReload()
 	// Under reloadMu no other reload can be in flight, so the throttle is the only thing
 	// left to re-check: a caller that arrived just behind one finds lastReload freshly
 	// stamped, and its own caller re-reads the cache that reload just filled.
@@ -880,6 +882,20 @@ func (s *IngressKeyStore) reloadIfDueNoWaitWithin(now time.Time, timeout time.Du
 		return false, errReloadThrottled
 	}
 	return true, s.reloadLockedWithin(now, timeout)
+}
+
+// releaseReload releases reloadMu and broadcasts as one cache-lock section. A cold
+// caller can mistake a held lock after completion (or before a throttled decline) for
+// future work, so every release must wake it. Publishing a new epoch before unlocking
+// would let that caller park on a channel no future completion is obliged to close.
+// The wrappers defer this helper, including on panic; a decline never advances reloadDone.
+func (s *IngressKeyStore) releaseReload() {
+	s.mu.Lock()
+	s.reloadMu.Unlock()
+	epoch := s.reloadEpoch
+	s.reloadEpoch = make(chan struct{})
+	s.mu.Unlock()
+	close(epoch)
 }
 
 func (s *IngressKeyStore) throttled(now time.Time) bool {
@@ -891,8 +907,8 @@ func (s *IngressKeyStore) throttled(now time.Time) bool {
 // reloadLocked requires reloadMu. It takes mu only to stamp the attempt, publish the
 // in-flight latch, advance reloadStarted and swap the caches; the DB round trip runs with
 // no cache lock held. The completion — the latch's result and close, lastReloadErr,
-// reloadDone and the epoch broadcast — runs under defer, so a panicking round trip can
-// never leave a waiter parked forever or the throttle pinned open.
+// reloadDone — runs under defer; the wrapper then releases and broadcasts under its
+// own defer, so a panicking round trip cannot strand waiters or pin the throttle open.
 func (s *IngressKeyStore) reloadLocked(now time.Time) error {
 	return s.reloadLockedWithin(now, storeTimeout)
 }
@@ -920,10 +936,7 @@ func (s *IngressKeyStore) reloadLockedWithin(now time.Time, timeout time.Duratio
 		s.lastReloadErr = err // what a throttled miss inside this window must answer from
 		s.inflight = nil
 		s.reloadDone++
-		epoch := s.reloadEpoch
-		s.reloadEpoch = make(chan struct{})
 		s.mu.Unlock()
-		close(epoch)
 		close(l.done)
 	}()
 	return s.reloadQuery(now, timeout)

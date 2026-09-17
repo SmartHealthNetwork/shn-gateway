@@ -1,16 +1,20 @@
-// ingress_crd.go — CRD (CDS Hooks order-select) ingress: parse the conformant inbound request
-// and prove every patient reference resolves to ONE pci before any leg. This is the origination
-// mirror of the inbound H2a fence / bindBundleSubject: on the ingress the payload is EXTERNAL
-// (br-provider), so cross-field patient consistency is not automatic the way it is for the
-// /scenario Originator.
+// ingress_crd.go — CRD (CDS Hooks order-select) ingress: parse the conformant inbound request,
+// prove every patient reference resolves to ONE pci before any leg, and prepare the EHR's own
+// bytes for the network (the callback removed, absent prefetch obtained from the participant's
+// system of record). On the ingress the payload is EXTERNAL (the EHR), so cross-field patient
+// consistency is not automatic the way it is for the /scenario Originator.
 package engine
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"log"
 	"net/http"
 	"strings"
+	"time"
 
+	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -45,7 +49,7 @@ func patientRefOf(resource json.RawMessage) string {
 			Reference string `json:"reference"`
 		} `json:"patient"`
 	}
-	_ = json.Unmarshal(resource, &r)
+	_ = decodeMessage(resource, &r)
 	switch {
 	case r.Subject.Reference != "":
 		return r.Subject.Reference
@@ -60,40 +64,44 @@ func patientRefOf(resource json.RawMessage) string {
 // memberForPCI re-reads the bare context.patientId member (already validated by the subject fence).
 func (g *Gateway) memberForPCI(body []byte) string {
 	var req ingressCDSRequest
-	_ = json.Unmarshal(body, &req)
+	_ = decodeMessage(body, &req)
 	return strings.TrimPrefix(req.Context.PatientID, "Patient/")
 }
 
-// wrapCards relays the substrate crd-cards response (already a rendered conformant cards envelope
-// from BuildCards — near-relay) and derives a metadata-only outcome. It must NOT
-// rebuild a card from CardCoverage (that would re-synthesize the summary). Returns
-// (cardsEnvelope, outcome, 0, "") or (nil, "", status, msg).
-func wrapCards(respJSON []byte) ([]byte, string, int, string) {
-	var inner struct {
-		Cards []json.RawMessage `json:"cards"`
+// crdAnswerOutcome certifies the payer's CDS Hooks answer at line (the same
+// rules the payer's gateway applies: a broken rule is a 502 naming it) and
+// labels the exchange from the answer's coverage information, read without
+// changing a byte: denied (not covered), pa-required, approved (covered or
+// conditional without prior authorization), or answered (no coverage
+// information). Returns (outcome, 0, "") or ("", status, msg).
+func crdAnswerOutcome(respJSON []byte, line string) (string, int, string) {
+	if refused := certifyCDSHooksAnswer(respJSON, line, "payer"); refused.Status != 0 {
+		return "", refused.Status, refused.Message
 	}
-	if err := json.Unmarshal(respJSON, &inner); err != nil || len(inner.Cards) == 0 {
-		return nil, "", http.StatusBadGateway, "crd response is not a cards envelope"
+	obs, err := shnsdk.ParseCRDResponse(respJSON)
+	if err != nil {
+		return "", http.StatusBadGateway, "payer CRD response is not a valid CDS Hooks response: response.json"
 	}
-	outcome := "approved"
-	if cov, err := shnsdk.ParseCards(respJSON); err == nil {
-		switch {
-		case cov.Covered == shnsdk.CoveredNotCovered:
-			outcome = "denied"
-		case cov.PARequired():
-			outcome = "pa-required"
-		}
+	cov, ok := obs.Primary()
+	switch {
+	case !ok:
+		return "answered", 0, ""
+	case cov.Covered == shnsdk.CoveredNotCovered:
+		return "denied", 0, ""
+	case cov.PARequired():
+		return "pa-required", 0, ""
 	}
-	return respJSON, outcome, 0, ""
+	return "approved", 0, ""
 }
 
 // ingressCRDSubjectPCI parses the request and returns the single bound pci. Every patient
 // reference present (context.patientId, each draftOrders entry subject, each prefetch
 // resource's subject/beneficiary/patient) MUST resolve to the SAME pci; any divergence fails
-// closed (403). Returns (pci, 0, "") on success or ("", status, msg) to write.
+// closed (403). A reference is relative (Patient/<id>) or absolute on the request's own
+// fhirServer. Returns (pci, 0, "") on success or ("", status, msg) to write.
 func (g *Gateway) ingressCRDSubjectPCIContext(ctx context.Context, body []byte) (string, int, string) {
 	var req ingressCDSRequest
-	if err := json.Unmarshal(body, &req); err != nil {
+	if err := decodeMessage(body, &req); err != nil {
 		return "", http.StatusBadRequest, "parse cds request failed"
 	}
 	if req.Context.PatientID == "" {
@@ -120,14 +128,9 @@ func (g *Gateway) ingressCRDSubjectPCIContext(ctx context.Context, body []byte) 
 		}
 		refs = append(refs, ref)
 	}
-	// DEF-INGRESS-BUNDLE: a prefetch value that is a searchset Bundle (the history prefetches —
-	// serviceHistory/deviceHistory/medicationHistory/questionnaireResponses) is NOT deeply
-	// inspected here: patientRefOf sees no top-level subject on a Bundle and skips it. Per-entry
-	// subject validation of a KEPT prefetch Bundle is closed by ingressEnsureSelfContained
-	// (which owns prefetch) — a kept Bundle's entries are validated against the bound PCI or
-	// re-resolved from the SoR. ingressEnsureSelfContained closes this gap: a KEPT Bundle's
-	// entries are validated against the bound PCI in fenceKeptBundle, so a crafted prefetch
-	// Bundle cannot carry wrong-patient resources into the sealed request.
+	// A prefetch value that is a Bundle has no top-level patient reference, so
+	// it is not read here: every prefetch value, Bundle or not, is fenced
+	// entry by entry by ingressEnsureSelfContainedContext before it is sent.
 	for _, res := range req.Prefetch {
 		// A bare Patient resource's identity is its `id`, NOT a subject/beneficiary/patient
 		// reference, so patientRefOf can't see it. The prefetch Patient is therefore a
@@ -142,7 +145,16 @@ func (g *Gateway) ingressCRDSubjectPCIContext(ctx context.Context, body []byte) 
 			refs = append(refs, ref)
 		}
 	}
+	base := strings.TrimRight(req.FHIRServer, "/")
 	for _, ref := range refs {
+		// An absolute reference on the EHR's own server names the EHR's
+		// patient, as a relative one does (the prefetch fence reads it the
+		// same way).
+		if base != "" && strings.Contains(base, "://") {
+			if rest, ok := strings.CutPrefix(ref, base+"/"); ok && strings.HasPrefix(rest, "Patient/") {
+				ref = rest
+			}
+		}
 		m := strings.TrimPrefix(ref, "Patient/")
 		rp, _, ok, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(ctx, m)
 		if readErr != nil {
@@ -163,133 +175,319 @@ func patientResourceID(resource json.RawMessage) string {
 		ResourceType string `json:"resourceType"`
 		ID           string `json:"id"`
 	}
-	_ = json.Unmarshal(resource, &r)
+	_ = decodeMessage(resource, &r)
 	if r.ResourceType == "Patient" {
 		return r.ID
 	}
 	return ""
 }
 
-// ingressEnsureSelfContained makes the request self-contained before sealing: per
-// advertised prefetch key — keep if the caller inlined it; else resolve+inline from the
-// provider SoR; else FAIL CLOSED (422), never relaying a live callback. fhirServer /
-// fhirAuthorization are unconditionally stripped (non-aggregation floor). A KEPT searchset
-// Bundle's entries are validated against the bound pci (closes DEF-INGRESS-BUNDLE from the
-// subject fence). Returns (rewritten bytes, 0, "") or (nil, status, msg).
-func (g *Gateway) ingressEnsureSelfContainedContext(ctx context.Context, body []byte, member, pci string) ([]byte, int, string) {
-	var doc map[string]json.RawMessage
-	if err := json.Unmarshal(body, &doc); err != nil {
-		return nil, http.StatusBadRequest, "parse cds request failed"
-	}
-	delete(doc, "fhirServer")
-	delete(doc, "fhirAuthorization")
+// crdIngressRequest is a CDS Hooks request ready to leave the provider: the
+// EHR's bytes, relayed exactly or with the registered edits, and the prefetch
+// values it carries.
+type crdIngressRequest struct {
+	// request is the EHR's request, exact or with the registered edits:
+	// the callback removed and absent prefetch values added.
+	request relay.Payload
+	// values holds every prefetch value the request carries onward, kept or
+	// obtained, by key; a null value is the JSON literal null.
+	values map[string][]byte
+	// coverageFromSoR is true when the coverage value was read from the
+	// system of record rather than sent by the EHR.
+	coverageFromSoR bool
+	// coverageStatus and coverageMsg are set when the coverage value was
+	// left out because the system of record could not provide it.
+	coverageStatus int
+	coverageMsg    string
+}
 
-	prefetch := map[string]json.RawMessage{}
-	if raw, ok := doc["prefetch"]; ok {
-		_ = json.Unmarshal(raw, &prefetch)
+// PrefetchObtainedEvent is the observer event kind for a prefetch value the
+// gateway tried to obtain from the participant's system of record.
+const PrefetchObtainedEvent = "prefetch.obtained"
+
+// prefetchObtained is the metadata a PrefetchObtainedEvent carries: never a
+// value, a resource or a response. Query is the read or search exactly as it
+// is sent to the system of record, query values URL-encoded
+// ("ServiceRequest?patient=Patient%2Fp1"); the advertised prefetch template
+// shows the same search unencoded.
+type prefetchObtained struct {
+	Key string `json:"key"`
+	// Operation names the DTR operation the value was obtained for
+	// (questionnaire-package); "" for a CDS Hooks prefetch value.
+	Operation   string        `json:"operation,omitempty"`
+	Source      string        `json:"source"`
+	Query       string        `json:"query"`
+	Outcome     SearchOutcome `json:"outcome"`
+	Reason      string        `json:"reason,omitempty"`
+	Count       int           `json:"count"`
+	Pages       int           `json:"pages"`
+	RetrievedAt time.Time     `json:"retrievedAt"`
+}
+
+// ingressEnsureSelfContainedContext prepares the EHR's CDS Hooks request for
+// the network without re-encoding it.
+//
+//   - fhirServer and fhirAuthorization are removed (the callback-strip
+//     edit): the payer never receives a route or a credential into the
+//     provider's system, and the gateway never calls fhirServer.
+//   - Every prefetch member the request carries (a resource, a Bundle or
+//     null), advertised or not, is kept exactly, after the patient fence.
+//     All of them are fenced before anything is obtained.
+//   - Each advertised key the request leaves out is obtained from the
+//     participant's own system of record and inserted (the prefetch-obtain
+//     edit): the patient is read; the others are searched. A search with no
+//     match inserts null. A search the system cannot answer leaves the key
+//     out; for coverage, the request is then refused (coverageStatus).
+//     When the system of record's Patient id is not context.patientId,
+//     nothing is obtained: an absent patient or coverage refuses the request
+//     with 422 before any read, and an absent history key is left out (the
+//     reason is recorded).
+//
+// Every value, kept or obtained, must be about the bound patient: a kept
+// value that is not is refused with 403, an obtained one with 502.
+func (g *Gateway) ingressEnsureSelfContainedContext(ctx context.Context, leg string, raw []byte, member string) (crdIngressRequest, int, string) {
+	var out crdIngressRequest
+	body := relay.NewBody(raw, relay.OriginIngressRequest)
+	doc, err := relay.Doc(body)
+	if err != nil || doc.Kind(doc.Root()) != relay.KindObject {
+		return out, http.StatusBadRequest, "parse cds request failed"
 	}
-	patientRef := "Patient/" + member
+	root := doc.Root()
+
+	var strip []relay.Op
+	var bases []string
+	for _, key := range []string{"fhirServer", "fhirAuthorization"} {
+		n, ok := doc.Member(root, key)
+		if !ok {
+			continue
+		}
+		if key == "fhirServer" && doc.Kind(n) == relay.KindString {
+			// The EHR's own server: absolute references on it are the
+			// EHR's records, resolved like relative ones.
+			if s, err := doc.StringValue(n); err == nil {
+				bases = append(bases, s)
+			}
+		}
+		strip = append(strip, doc.RemoveMember(root, key))
+	}
+	prefetch, hasPrefetch := doc.Member(root, "prefetch")
+	if hasPrefetch && doc.Kind(prefetch) != relay.KindObject {
+		return out, http.StatusBadRequest, "prefetch is not an object"
+	}
+
+	sor := ReadSystemOfRecord(g.cfg.SoR)
+	ref, found, err := sor.PatientFHIRRefContext(ctx, member)
+	if err != nil {
+		status, msg := SoRFailureResponse(err)
+		return out, status, msg
+	}
+	sorID := ""
+	if found {
+		id, ok := strings.CutPrefix(ref, "Patient/")
+		if !ok || !fhirIDRE.MatchString(id) {
+			status, msg := SoRFailureResponse(&SoRReadError{Kind: SoRInvalidResponse})
+			return out, status, msg
+		}
+		sorID = id
+	}
+	fence := newPatientFence(shnsdk.MemberSystem, member, bases, sorID, member).forPrefetch()
+
+	// Every member the request carries under prefetch — advertised or not,
+	// whatever its name — goes to the payer, so every one is fenced, and all
+	// of them before anything is obtained: a refused request searches nothing.
+	out.values = map[string][]byte{}
+	if hasPrefetch {
+		for _, m := range doc.Members(prefetch) {
+			start, end := doc.Span(m.Value)
+			value := raw[start:end]
+			if err := fence.check(value); err != nil {
+				return out, http.StatusForbidden, "prefetch " + m.Name + " refused: " + err.Error()
+			}
+			out.values[m.Name] = value
+		}
+	}
+
+	type insert struct {
+		key   string
+		value []byte
+	}
+	var inserts []insert
 	for _, key := range pinnedPrefetchKeys {
-		if present, ok := prefetch[key]; ok {
-			// KEEP path — but a kept searchset Bundle's entries must each bind to the bound pci.
-			if status, msg := g.fenceKeptBundleContext(ctx, present, pci); status != 0 {
-				return nil, status, msg
+		if hasPrefetch {
+			if _, ok := doc.Member(prefetch, key); ok {
+				continue
+			}
+		}
+		if sorID == "" {
+			return out, http.StatusUnprocessableEntity, "patient not found in system of record"
+		}
+		if sorID != member {
+			// Values from the system of record would name the patient by an id
+			// the request does not use. The payer ties the patient and the
+			// coverage to the request's patient, so without them the request is
+			// refused before anything is read; a history value is left out.
+			if key == prefetchPatientKey || key == "coverage" {
+				return out, http.StatusUnprocessableEntity, patientNamedDifferently
+			}
+			query, _ := SoRSearchQuery(prefetchSearchTypes[key], sorID)
+			g.recordPrefetch(leg, prefetchObtained{Key: key, Query: query, Outcome: SearchNotRun, Reason: historyNamedDifferently})
+			continue
+		}
+		value, outcome, status, msg := g.obtainPrefetch(ctx, leg, key, sorID, fence)
+		if status != 0 {
+			return out, status, msg
+		}
+		if value == nil {
+			if key == "coverage" {
+				out.coverageStatus, out.coverageMsg = coverageOmitted(outcome)
 			}
 			continue
 		}
-		resolved, ok, readErr := g.resolvePrefetchFromSoRContext(ctx, key, member, patientRef)
-		if readErr != nil {
-			status, msg := SoRFailureResponse(readErr)
-			return nil, status, msg
+		inserts = append(inserts, insert{key, value})
+		out.values[key] = value
+		if key == "coverage" {
+			out.coverageFromSoR = true
 		}
-		if !ok {
-			return nil, http.StatusUnprocessableEntity, "prefetch " + key + " not inlined and not resolvable from SoR"
+	}
+	var changes []relay.Change
+	if len(strip) > 0 {
+		changes = append(changes, relay.Change{Edit: relay.EditCDSCallbackStrip, Ops: strip})
+	}
+	if len(inserts) > 0 {
+		var ops []relay.Op
+		target := prefetch
+		if !hasPrefetch {
+			op, h := doc.EnsureObjectMember(root, "prefetch")
+			ops = append(ops, op)
+			target = relay.NodeID(h)
 		}
-		prefetch[key] = resolved
+		for _, in := range inserts {
+			ops = append(ops, doc.InsertMember(target, in.key, in.value))
+		}
+		changes = append(changes, relay.Change{Edit: relay.EditCDSPrefetchObtain, Ops: ops})
 	}
-	pfBytes, err := json.Marshal(prefetch)
-	if err != nil {
-		return nil, http.StatusInternalServerError, "marshal prefetch failed"
+	if len(changes) == 0 {
+		out.request = relay.Exact(body, "application/json")
+		return out, 0, ""
 	}
-	doc["prefetch"] = pfBytes
-	out, err := json.Marshal(doc)
-	if err != nil {
-		return nil, http.StatusInternalServerError, "marshal request failed"
+	out.request, err = relay.ApplyChanges(body, "application/json", changes...)
+	var signed *relay.SignedContentError
+	switch {
+	case errors.As(err, &signed):
+		return out, http.StatusUnprocessableEntity, signed.Error()
+	case err != nil:
+		return out, http.StatusInternalServerError, "prepare cds request failed"
 	}
 	return out, 0, ""
 }
 
-// fenceKeptBundle closes DEF-INGRESS-BUNDLE (the subject fence's deferred gap): a KEPT prefetch value
-// that is a searchset Bundle must have every entry's patient subject resolve to the bound pci,
-// else a crafted history Bundle could smuggle wrong-patient resources into the sealed request.
-// Non-Bundle values are covered by the single-resource fence; this returns ok for them.
-func (g *Gateway) fenceKeptBundleContext(ctx context.Context, value json.RawMessage, pci string) (int, string) {
-	var probe struct {
-		ResourceType string `json:"resourceType"`
-		Entry        []struct {
-			Resource json.RawMessage `json:"resource"`
-		} `json:"entry"`
+// patientNamedDifferently refuses a request whose absent patient or coverage
+// would have to come from a system of record that names the patient by an id
+// other than context.patientId.
+const patientNamedDifferently = "system of record names the patient differently from context.patientId; supply patient and coverage prefetch in the request"
+
+// historyNamedDifferently is the recorded reason a history key is left out
+// for the same cause.
+const historyNamedDifferently = "patient named differently in the system of record"
+
+// coverageOmitted is the refusal for a request whose coverage the system of
+// record could not provide.
+func coverageOmitted(o SearchOutcome) (int, string) {
+	switch o {
+	case SearchUnavailable:
+		return http.StatusServiceUnavailable, "coverage unavailable from system of record"
+	case SearchUnsupported:
+		return http.StatusUnprocessableEntity, "coverage not in request, and the system of record cannot search for it"
 	}
-	if err := json.Unmarshal(value, &probe); err != nil || probe.ResourceType != "Bundle" {
-		return 0, ""
-	}
-	for _, e := range probe.Entry {
-		ref := patientRefOf(e.Resource)
-		if ref == "" {
-			continue
-		}
-		m := strings.TrimPrefix(ref, "Patient/")
-		rp, _, ok, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(ctx, m)
-		if readErr != nil {
-			status, msg := SoRFailureResponse(readErr)
-			return status, msg
-		}
-		if !ok || rp != pci {
-			return http.StatusForbidden, "prefetch bundle entry patient mismatch"
-		}
-	}
-	return 0, ""
+	return http.StatusUnprocessableEntity, "coverage unreadable from system of record"
 }
 
-// resolvePrefetchFromSoR maps a pinned prefetch key to a typed SoR read + thin project.
-// coverage reuses BuildCoverage; the histories project into an empty (self-containing)
-// searchset Bundle; an unknown member fails (→ caller returns 422). A generalized
-// FHIR-read seam (arbitrary types) is a planned future enhancement.
-func (g *Gateway) resolvePrefetchFromSoRContext(ctx context.Context, key, member, patientRef string) (json.RawMessage, bool, error) {
-	switch key {
-	case "patient":
-		ref, _, readErr := ReadSystemOfRecord(g.cfg.SoR).PatientFHIRRefContext(ctx, member)
-		if readErr != nil {
-			return nil, false, readErr
+// obtainPrefetch reads the value of an advertised prefetch key from the
+// system of record for the patient sorID, fences it, and records the
+// attempt (PrefetchObtainedEvent and a log line). It returns the value to
+// insert (the JSON literal null for a search with no match), or nil with the
+// search outcome when the key is left out; a non-zero status refuses the
+// request.
+func (g *Gateway) obtainPrefetch(ctx context.Context, leg, key, sorID string, fence patientFence) ([]byte, SearchOutcome, int, string) {
+	refused := func(err error) ([]byte, SearchOutcome, int, string) {
+		var ce *CompartmentError
+		if errors.As(err, &ce) && ce.Reason == opaqueContentReason {
+			return nil, "", http.StatusBadGateway, "system of record returned a Binary resource"
 		}
-		if ref == "" {
-			ref = patientRef
-		}
-		id := strings.TrimPrefix(ref, "Patient/")
-		b, err := json.Marshal(map[string]string{"resourceType": "Patient", "id": id})
+		return nil, "", http.StatusBadGateway, "system of record returned another patient's resource"
+	}
+	if key == prefetchPatientKey {
+		query := "Patient/" + sorID
+		patient, found, err := ReadSystemOfRecord(g.cfg.SoR).ResolveByReferenceContext(ctx, query)
 		if err != nil {
-			return nil, false, nil
-		}
-		return json.RawMessage(b), true, nil
-	case "coverage":
-		_, _, found, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(ctx, member)
-		if readErr != nil {
-			return nil, false, readErr
+			status, msg := SoRFailureResponse(err)
+			outcome := SearchMalformed
+			if status == http.StatusServiceUnavailable {
+				outcome = SearchUnavailable
+			}
+			g.recordPrefetch(leg, prefetchObtained{Key: key, Query: query, Outcome: outcome, Reason: string(safeSoRError(err).Kind)})
+			return nil, "", status, msg
 		}
 		if !found {
-			return nil, false, nil
+			g.recordPrefetch(leg, prefetchObtained{Key: key, Query: query, Outcome: SearchZero})
+			return nil, "", http.StatusUnprocessableEntity, "patient not found in system of record"
 		}
-		// urn:shn:coverage carries the BARE member id (a member number, not a
-		// reference). The old "-cov"-suffixed value existed only to fabricate a
-		// reference-shaped string; the MB identifier IS the member id, and this
-		// prefetch Coverage feeds no DTR fetch leg that would read a reference off it.
-		covJSON, err := shnsdk.BuildCoverage(patientRef, member)
-		if err != nil {
-			return nil, false, nil
+		var head struct {
+			ResourceType string `json:"resourceType"`
 		}
-		return json.RawMessage(covJSON), true, nil
-	case "serviceHistory", "deviceHistory", "medicationHistory", "questionnaireResponses":
-		return json.RawMessage(`{"resourceType":"Bundle","type":"searchset","entry":[]}`), true, nil
+		if decodeMessage(patient, &head) != nil || head.ResourceType != "Patient" {
+			g.recordPrefetch(leg, prefetchObtained{Key: key, Query: query, Outcome: SearchMalformed, Reason: "not a Patient"})
+			status, msg := SoRFailureResponse(&SoRReadError{Kind: SoRInvalidResponse})
+			return nil, "", status, msg
+		}
+		g.recordPrefetch(leg, prefetchObtained{Key: key, Query: query, Outcome: SearchOK, Count: 1})
+		if err := fence.check(patient); err != nil {
+			return refused(err)
+		}
+		return patient, SearchOK, 0, ""
 	}
-	return nil, false, nil
+	resourceType, ok := prefetchSearchTypes[key]
+	if !ok {
+		return nil, SearchUnsupported, 0, ""
+	}
+	s := searchSystemOfRecord(ctx, g.cfg.SoR, resourceType, sorID)
+	g.recordPrefetch(leg, prefetchObtained{Key: key, Query: s.Query, Outcome: s.Outcome, Reason: s.Reason, Count: s.Count, Pages: s.Pages})
+	switch s.Outcome {
+	case SearchOK:
+		if err := fence.check(s.Value); err != nil {
+			return refused(err)
+		}
+		return s.Value, SearchOK, 0, ""
+	case SearchZero:
+		return []byte("null"), SearchZero, 0, ""
+	}
+	return nil, s.Outcome, 0, ""
+}
+
+// recordPrefetch reports one prefetch attempt on the observer seam and in
+// the holder log. Neither carries a value, a resource or an identifier
+// beyond the search the gateway ran.
+func (g *Gateway) recordPrefetch(leg string, p prefetchObtained) {
+	p.Source = "system-of-record"
+	clock := g.cfg.Clock
+	if clock == nil {
+		clock = time.Now
+	}
+	p.RetrievedAt = clock().UTC()
+	switch p.Outcome {
+	case SearchNotRun:
+		log.Printf("gateway: prefetch %s left out: %s", p.Key, p.Reason)
+	case SearchOK, SearchZero:
+		log.Printf("gateway: prefetch %s from the system of record: %s, %d matches in %d pages", p.Key, p.Outcome, p.Count, p.Pages)
+	default:
+		log.Printf("gateway: prefetch %s not obtained from the system of record: %s (%s)", p.Key, p.Outcome, p.Reason)
+	}
+	if g.cfg.Observer == nil {
+		return
+	}
+	detail, err := json.Marshal(p)
+	if err != nil {
+		return
+	}
+	g.observe(ObserverEvent{Kind: PrefetchObtainedEvent, LegType: leg, Direction: "sor", Op: p.Key, Detail: string(detail)})
 }

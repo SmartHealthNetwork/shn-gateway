@@ -1,14 +1,44 @@
 # Offline validation support
 
-`shn.fhir.validation-support-1.0.0.tgz` supplies the official Claim encounter
-extension definition and CMS terminology required when validating the complete PAS
-response graph. It does not replace PAS profiles or change their required bindings.
-The validator image loads this committed package from `file://` on all three lines.
+`shn.fhir.validation-support-1.2.0.tgz` supplies two things the validator lines load from
+`file://` beside their IG packages:
+
+- the CMS terminology required when validating the complete PAS response graph (it does not
+  replace PAS profiles or change their required bindings);
+- the validation closure of the cross-version canonicals SHN-built resources carry — today
+  the R5 `Claim.encounter` extension — copied unchanged from the pinned
+  `hl7.fhir.uv.xver-r5.r4` 0.1.0 and `hl7.fhir.uv.extensions.r4` 5.3.0-ballot-tc1 packages
+  (25 resources: 16 StructureDefinitions, 6 ValueSets, 3 CodeSystems), so that a Claim
+  carrying the extension validates against the extension's own definition, the R5 Encounter
+  profile it targets and everything those two reference, without loading either package
+  whole.
+
 The standalone published gateway build context includes every input.
+
+## The closure and how it is derived
+
+`closure.py` is the rule, not prose. From each seed in `sources.json` (`closure.seeds`) it
+follows `baseDefinition`, `type.profile`, `binding.valueSet`, element and resource extension
+URLs, `ValueSet.compose` systems and included value sets, `CodeSystem.supplements` and
+`CodeSystem.valueSet`, and `type.targetProfile` one level deep (the seed's own value type and
+that profile's direct reference targets), inside the two archives; it stops at any canonical the
+engine core provides. It is version-aware: a `url|version` reference resolves only to an archive
+member whose own `version` matches; a pinned version no archive carries is recorded in
+`closure-tolerances.json` under `versionFallbacks` (the engine's versioned-URL fallback resolves
+such a core-namespace canonical to the loaded definition) and the loaded member is followed; a
+reference target the depth cut leaves is recorded under `cutReferenceTargets`; a canonical no
+archive carries under `unresolved`. The tolerance record is part of the committed output and
+the per-line closure inventories (`tools/contracts/closure/<line>.json`) declare the same holes.
+
+Each member is written to `inputs/closure/` byte-for-byte from the archive entry;
+`closure-members.json` lists them (url, version, resource type, file) and `sources.json`
+records, per member, the archive, the member path and the SHA-256 of the bytes, beside both
+archive digests. `generate.py` refuses a member whose bytes differ from the recorded digest,
+and `closure.py` refuses to walk an archive whose digest differs from the recorded one.
 
 ## Sources and scope
 
-`sources.json` pins the downloaded inputs by SHA-256 and records their source URLs.
+`sources.json` pins every downloaded input by SHA-256 and records its source URL.
 
 - CMS July 2026 alpha-numeric HCPCS release, updated June 17, 2026: the full public
   use archive, including its record layout and notices. CMS describes releases from
@@ -26,31 +56,29 @@ The standalone published gateway build context includes every input.
   codes/ranges are not valid concepts. The generator verifies coverage of all
   positions 01 through 99, including the explicitly unassigned positions, so an
   accidentally truncated table cannot be called complete.
-- `hl7.fhir.uv.xver-r5.r4#0.1.0`,
-  `package/StructureDefinition-ext-R5-Claim.encounter.json`: the resource is copied
-  byte-for-byte, including canonical URL, version, snapshot, constraints and
-  target-profile alternatives. The original archive digest is also recorded.
-  This supports the exact definition required during PAS slicing for the
-  qualified response graph, which does not carry this extension. It does not
-  claim support for the entire xver profile family. A separate reference-valued
-  extension probe encountered an unresolved optional xver Encounter profile even
-  with a core R4 Encounter target, so actual use of that extension remains outside
-  this scoped support; that unresolved-profile error is not suppressed. Recursively importing every optional xver target alternative
-  reaches hundreds of unrelated definitions and changes dependency versions; those
-  alternatives are not silently rewritten or suppressed here.
+- `hl7.fhir.uv.xver-r5.r4` 0.1.0 and `hl7.fhir.uv.extensions.r4` 5.3.0-ballot-tc1 from
+  packages.simplifier.net: the two archives the closure is derived from. The archives are
+  not committed; the 25 copied members are, with their digests.
 
 CMS publishes the HCPCS archive as a public use file. Its original record-layout
 copyright notices are retained in the archive. No CPT or CDT dataset is synthesized
-or included. The official HL7 resource retains its original metadata; its source
-package declares CC0-1.0. These generated FHIR representations preserve the source
-code identities and descriptions; they do not determine coverage or payment.
+or included. These generated FHIR representations preserve the source code identities
+and descriptions; they do not determine coverage or payment. The HL7 sources declare
+CC0-1.0.
 
 ## Reproduction
 
-From this directory, run `python3 generate.py` followed by
-`python3 test_generate.py`. Python's standard library is sufficient. Input digest
-mismatches, unknown record shapes, duplicate codes and incomplete tables fail.
-The tar entries are sorted with fixed metadata and the gzip timestamp is zero.
-The tests compare regenerated bytes with the committed package and verify known
-valid and absent codes. Live positive and negative verdict controls remain
+From this directory, run `python3 generate.py` followed by `python3 test_generate.py`.
+Python's standard library is sufficient. Input digest mismatches, unknown record shapes,
+duplicate codes and incomplete tables fail. The tar entries are sorted with fixed metadata
+and the gzip timestamp is zero. The tests compare regenerated bytes with the committed
+package, verify known valid and absent codes, verify every closure member against its
+recorded digest, and assert the archive holds exactly the two CodeSystems, the 25 closure
+members and the manifest.
+
+To re-derive the closure, place the two archives (digests as recorded) in a directory and run
+`SHN_IG_ARCHIVES=<that directory> python3 closure.py`, then `python3 generate.py`. With the
+archives present, `test_generate.py` also re-runs the walk and proves every committed member
+byte-identical to its archive entry and the tolerance record unchanged; without them that
+test skips and the digest checks stand. Live positive and negative verdict controls remain
 necessary: generation tests do not certify HAPI behavior.

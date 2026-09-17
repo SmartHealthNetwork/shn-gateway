@@ -12,7 +12,7 @@
 # └──────────────────────────────────────────────────────────────────────────┘
 services:
   validator:
-    build: { context: ../hapi }   # reuse the eval-hapi image (US Core + Da Vinci incl PAS 2.0.1)
+    build: { context: ../.., dockerfile: eval/hapi/Dockerfile }   # reuse the eval-hapi image (US Core + Da Vinci incl PAS 2.0.1)
     environment:
       hapi.fhir.tenant_identification_strategy: URL_BASED
       hapi.fhir.partitioning.partitioning_include_in_search_hashes: "false"
@@ -45,10 +45,6 @@ services:
       # Native-forward decisioning to the co-bundled br-payer (unauthenticated loopback).
       PAYER_DAVINCI_BASE_URL: http://br-payer:8081/fhir
       PAYER_DAVINCI_CDS_BASE_URL: http://br-payer:8081
-      PAYER_DAVINCI_CRD_SERVICE_ID: order-sign-crd
-      PAYER_DAVINCI_CRD_HOOK: order-sign
-      PAYER_DAVINCI_DISPATCH_SERVICE_ID: order-dispatch-crd
-      PAYER_DAVINCI_DISPATCH_HOOK: order-dispatch
       PAYER_DAVINCI_PAS_NATIVE: "true"
     volumes:
       - ${SHN_SECRETS:?set SHN_SECRETS to your shn register --role payer bundle dir}:/etc/shn:ro

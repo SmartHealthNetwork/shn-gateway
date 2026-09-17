@@ -349,6 +349,11 @@ func buildProviderForPopulate(t *testing.T, populate map[string]string) (built, 
 	}
 	var out bytes.Buffer
 	b, err := build(context.Background(), func(k string) string { return env[k] }, &out, nil)
+	t.Cleanup(func() {
+		if b.gateway != nil {
+			_ = b.gateway.Close()
+		}
+	})
 	return b, out.String(), err
 }
 

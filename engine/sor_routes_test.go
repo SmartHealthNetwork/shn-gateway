@@ -34,8 +34,8 @@ func (s routeFailureSoR) ResolvePatientContext(ctx context.Context, m string) (s
 	}
 	return "pci", Demo{}, true, nil
 }
-func (s routeFailureSoR) OpenCoverageContext(ctx context.Context, m string) ([]byte, bool, error) {
-	return nil, false, &SoRReadError{Kind: SoRUnavailable}
+func (s routeFailureSoR) OpenCoverageContext(ctx context.Context, m string) ([][]byte, error) {
+	return nil, &SoRReadError{Kind: SoRUnavailable}
 }
 func TestRouteSoRFailure(t *testing.T) {
 	for _, observed := range []bool{false, true} {
@@ -74,6 +74,18 @@ type scriptedReadSoR struct {
 	t      *testing.T
 	base   ContextSystemOfRecord
 	before func(context.Context, string, string) error
+	// search, when set, answers searches (after before, with op "Search").
+	search SearchSystemOfRecord
+}
+
+// searchingScriptedSoR is scriptedReadSoR with its search.
+type searchingScriptedSoR struct{ scriptedReadSoR }
+
+func (s searchingScriptedSoR) SearchPatientContext(ctx context.Context, resourceType, id string, dates ...SearchDateRange) (SearchResult, error) {
+	if err := s.before(ctx, "Search", resourceType); err != nil {
+		return SearchResult{}, err
+	}
+	return s.search.SearchPatientContext(ctx, resourceType, id, dates...)
 }
 
 func (s scriptedReadSoR) ResolvePatient(key string) (string, Demo, bool) {
@@ -150,9 +162,9 @@ func (s scriptedReadSoR) OpenCoverage(key string) ([]byte, bool) {
 	s.t.Error("legacy OpenCoverage selected")
 	return nil, false
 }
-func (s scriptedReadSoR) OpenCoverageContext(ctx context.Context, key string) ([]byte, bool, error) {
+func (s scriptedReadSoR) OpenCoverageContext(ctx context.Context, key string) ([][]byte, error) {
 	if err := s.before(ctx, "OpenCoverage", key); err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	return s.base.OpenCoverageContext(ctx, key)
 }
@@ -173,7 +185,7 @@ func TestSoRSubjectRouteFamilies(t *testing.T) {
 	crd := conformantCRD("MBR-COVERED", "72148")
 	dispatch := []byte(`{"hook":"order-dispatch","context":{"patientId":"MBR-COVERED","dispatchedOrders":["DeviceRequest/dr1"],"performer":"Organization/dme1"},"prefetch":{"deviceHistory":{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"DeviceRequest","id":"dr1","subject":{"reference":"Patient/MBR-COVERED"}}}]}}}`)
 	for _, observed := range []bool{false, true} {
-		for _, route := range []string{"crd-ingress", "crd-native", "dispatch-native", "pas-ingress", "pas-native", "pas-update", "next-question", "kept-bundle"} {
+		for _, route := range []string{"crd-ingress", "crd-native", "dispatch-native", "pas-ingress", "pas-native", "pas-update", "next-question", "crd-prefetch"} {
 			t.Run(route+map[bool]string{false: "/bare", true: "/observed"}[observed], func(t *testing.T) {
 				s := scriptedReadSoR{t: t, base: ReadSystemOfRecord(newCensusSoR()), before: func(got context.Context, op, key string) error {
 					if got != ctx {
@@ -207,8 +219,8 @@ func TestSoRSubjectRouteFamilies(t *testing.T) {
 					_, status, msg = g.conformantPASUpdateBindContext(ctx, pas, "pci")
 				case "next-question":
 					status, msg = g.bindNextQuestionSubjectContext(ctx, "Patient/MBR-COVERED", "pci")
-				case "kept-bundle":
-					status, msg = g.fenceKeptBundleContext(ctx, []byte(`{"resourceType":"Bundle","entry":[{"resource":{"subject":{"reference":"Patient/MBR-COVERED"}}}]}`), "pci")
+				case "crd-prefetch":
+					_, status, msg = g.ingressEnsureSelfContainedContext(ctx, "crd-order-select", crd, "MBR-COVERED")
 				}
 				if status != 503 || strings.Contains(msg, "sentinel") {
 					t.Fatalf("status/message %d %s", status, msg)
@@ -270,9 +282,10 @@ func TestSoRManagedAndEvidenceFailures(t *testing.T) {
 		if got == nil || evidence != nil {
 			t.Fatalf("evidence failure became absence: %v %+v", got, evidence)
 		}
-		_, _, got = g.resolvePrefetchFromSoRContext(context.Background(), "patient", "MBR-COVERED", "Patient/logical")
-		if got == nil {
-			t.Fatal("patient reference failure used logical fallback")
+		fence := newPatientFence(shnsdk.MemberSystem, "MBR-COVERED", nil, "MBR-COVERED")
+		value, _, status, _ := g.obtainPrefetch(context.Background(), "crd-order-select", "patient", "MBR-COVERED", fence)
+		if value != nil || status != want {
+			t.Fatalf("patient read failure became %d with a value %v", status, value != nil)
 		}
 	}
 }
@@ -332,16 +345,16 @@ func TestSoRNativeHandlersStopBeforeResponder(t *testing.T) {
 	}
 }
 
-func TestSoRLateDispatchRefFailureNoPopulateOrPAS(t *testing.T) {
+func TestSoRDispatchRefFailureNoLegs(t *testing.T) {
 	for _, observed := range []bool{false, true} {
 		t.Run(map[bool]string{false: "bare", true: "observed"}[observed], func(t *testing.T) {
 			fixture := newMBROXDispatchFixture(t)
-			s := scriptedReadSoR{t: t, base: ReadSystemOfRecord(fixture.sor), before: func(ctx context.Context, op, key string) error {
+			s := searchingScriptedSoR{scriptedReadSoR{t: t, base: ReadSystemOfRecord(fixture.sor), search: fixture.sor, before: func(ctx context.Context, op, key string) error {
 				if op == "PatientFHIRRef" {
 					return &SoRReadError{Kind: SoRUnavailable}
 				}
 				return nil
-			}}
+			}}}
 			var sor SystemOfRecord = s
 			if observed {
 				sor = observingSoR{inner: s, clock: fixture.gw.cfg.Clock, observer: func(e ObserverEvent) {
@@ -356,9 +369,11 @@ func TestSoRLateDispatchRefFailureNoPopulateOrPAS(t *testing.T) {
 			r := httptest.NewRequest("POST", "/scenario/dispatch", strings.NewReader(`{"member":"MBR-OX"}`))
 			fixture.gw.handleDispatch(w, r)
 			if w.Code != 503 {
-				t.Fatalf("late read status %d %s", w.Code, w.Body.String())
+				t.Fatalf("status %d %s", w.Code, w.Body.String())
 			}
-			if !legAttempted(fixture.stub.legTypes, "dtr-questionnaire-fetch") || legAttempted(fixture.stub.legTypes, "pas-claim") {
+			// The patient reference is read for the order-dispatch request's records,
+			// before any leg: nothing is sent.
+			if len(fixture.stub.legTypes) != 0 {
 				t.Fatalf("unexpected legs %+v", fixture.stub.legTypes)
 			}
 		})
@@ -397,7 +412,7 @@ func TestSoRObserverEveryReadFailure(t *testing.T) {
 		func() error { _, _, e := reader.SupplementalReportContext(ctx, "member"); return e },
 		func() error { _, _, e := reader.FacilityRecordsContext(ctx, "member"); return e },
 		func() error { _, _, e := reader.OpenOrderContext(ctx, "member"); return e },
-		func() error { _, _, e := reader.OpenCoverageContext(ctx, "member"); return e },
+		func() error { _, e := reader.OpenCoverageContext(ctx, "member"); return e },
 		func() error { _, _, e := reader.ResolveByReferenceContext(ctx, "ref"); return e },
 	}
 	for _, read := range reads {

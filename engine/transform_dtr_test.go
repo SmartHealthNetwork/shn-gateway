@@ -185,8 +185,8 @@ func TestDTRStep2122Up_PackageGolden(t *testing.T) {
 // frozen transform-golden-corpus output rather than the direct 2.1 per-line
 // golden.
 func TestDTRStep2122Down_PackageGolden(t *testing.T) {
-	in := pasGolden(t, "2.2/questionnaire-package-pa-lumbar-mri.json")
-	want := pasGolden(t, "transform/2.2-to-2.1/questionnaire-package-pa-lumbar-mri.json")
+	in := pasGolden(t, "2.2/questionnaire-package-synthetic-fixture-availability.json")
+	want := pasGolden(t, "transform/2.2-to-2.1/questionnaire-package-synthetic-fixture-availability.json")
 
 	out, _, err := dtrStep2122Down(in, corr)
 	if err != nil {
@@ -1087,13 +1087,14 @@ func TestDTRStep2122_AnswerlessNestedItemIsNoOp(t *testing.T) {
 	}
 }
 
-// TestDTRStep2122_CapturedRIPackageTraverses walks a REAL captured Da Vinci RI
+// TestDTRStep2122_CapturedRIRefusalAndQRTraverses walks a REAL captured Da Vinci RI
 // questionnaire package — a Parameters document holding a Questionnaire and a
 // QuestionnaireResponse nested two levels deep through a group item. It was in
 // this repo, read by no test, for its whole life: captured evidence with no
 // guard behind it.
 //
-// TRAVERSAL ONLY, and deliberately so. Every nested item in that capture carries
+// The package now refuses its missing standard-Questionnaire narrative. The
+// extracted QR retains a TRAVERSAL ONLY check, deliberately so. Every nested item in that capture carries
 // a linkId and nothing else — zero answers at every node — so the carry could be
 // completely broken and this test would still pass. Because the capture is
 // answerless at every node and dtrWalkAnswers' recursive call is unconditional,
@@ -1102,7 +1103,7 @@ func TestDTRStep2122_AnswerlessNestedItemIsNoOp(t *testing.T) {
 // they do not ERROR on it. It proves nothing else. The carry claim belongs to
 // the registry's nested entries, which inject an answer-bearing item; this must
 // never stand in for them.
-func TestDTRStep2122_CapturedRIPackageTraverses(t *testing.T) {
+func TestDTRStep2122_CapturedRIRefusalAndQRTraverses(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("testdata", "br-payer", "questionnaire-package.json"))
 	if err != nil {
 		t.Fatalf("read captured RI package: %v", err)
@@ -1135,7 +1136,18 @@ func TestDTRStep2122_CapturedRIPackageTraverses(t *testing.T) {
 		t.Fatalf("captured RI package's QuestionnaireResponse nests only %d level(s) — this guard no longer guards anything", depth)
 	}
 
-	down, report, err := dtrStep2122Down(bundle, corr)
+	// The captured package lacks standard-profile narrative and must refuse.
+	out, _, err := dtrStep2122Down(bundle, corr)
+	var sc *SemanticChangeError
+	if !errors.As(err, &sc) || len(sc.MissingElements) != 1 || sc.MissingElements[0] != "Questionnaire.text" || out != nil {
+		t.Fatalf("captured package must refuse without output: %v", err)
+	}
+	// Preserve the independent QR traversal obligation on the exact captured QR.
+	qrOnly, err := json.Marshal(qrs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	down, report, err := dtrStep2122Down(qrOnly, corr)
 	if err != nil {
 		t.Fatalf("downcast of the captured RI package: %v", err)
 	}

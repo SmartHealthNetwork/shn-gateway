@@ -3,6 +3,8 @@ package scenariodriver
 import (
 	"encoding/json"
 	"fmt"
+
+	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
 // CardExtension is the SHN CardCoverage projection in a CDS Hooks card response,
@@ -21,48 +23,61 @@ type Card struct {
 	Extension CardExtension `json:"extension"`
 }
 
-// Cards is a CDS Hooks cards response (cards[] array). It provides normalized
-// accessors over the first card's coverage determination and all cards' questionnaire canonicals.
+// Cards is a CDS Hooks CRD answer: its cards, and the coverage information it
+// carries wherever the payer put it — in an update or create system action, in
+// a card suggestion's action, or in the card extension object earlier versions
+// of this package's builders wrote. The accessors read the coverage
+// information.
 type Cards struct {
 	Cards []Card `json:"cards"`
+
+	coverage []shnsdk.CoverageInformation
 }
 
-// ParseCards unmarshals a CDS Hooks cards response and returns an error if the JSON is
-// invalid or the response contains zero cards. Zero-value Cards accessors are safe and
-// return empty strings / nil, never panic.
+// ParseCards reads a CDS Hooks CRD answer without changing it. It returns an
+// error if the body is not one JSON object with unique member names, or if the
+// answer carries no coverage information. Zero-value Cards accessors are safe
+// and return empty strings / nil, never panic.
 func ParseCards(body []byte) (Cards, error) {
+	obs, err := shnsdk.ParseCRDResponse(body)
+	if err != nil {
+		return Cards{}, fmt.Errorf("parse CRD answer: %w", err)
+	}
 	var c Cards
 	if err := json.Unmarshal(body, &c); err != nil {
 		return Cards{}, fmt.Errorf("unmarshal cards: %w", err)
 	}
-	if len(c.Cards) == 0 {
-		return Cards{}, fmt.Errorf("cards response contains zero cards")
+	for _, o := range obs.Orders {
+		c.coverage = append(c.coverage, o.Coverage...)
+	}
+	if len(c.coverage) == 0 {
+		return Cards{}, fmt.Errorf("CRD answer carries no coverage information")
 	}
 	return c, nil
 }
 
-// Covered returns the first card's Extension.Covered ("" if no cards).
+// Covered returns the first coverage information's covered value ("" if none).
 func (c Cards) Covered() string {
-	if len(c.Cards) == 0 {
+	if len(c.coverage) == 0 {
 		return ""
 	}
-	return c.Cards[0].Extension.Covered
+	return c.coverage[0].Covered
 }
 
-// PANeeded returns the first card's Extension.PANeeded ("" if no cards).
+// PANeeded returns the first coverage information's pa-needed value ("" if none).
 func (c Cards) PANeeded() string {
-	if len(c.Cards) == 0 {
+	if len(c.coverage) == 0 {
 		return ""
 	}
-	return c.Cards[0].Extension.PANeeded
+	return c.coverage[0].PANeeded
 }
 
-// Questionnaires returns all cards' Extension.Questionnaires in order,
-// concatenating the questionnaire canonicals across all cards (nil if no cards).
+// Questionnaires returns every coverage information's questionnaire canonicals,
+// in answer order (nil if none).
 func (c Cards) Questionnaires() []string {
 	var out []string
-	for _, card := range c.Cards {
-		out = append(out, card.Extension.Questionnaires...)
+	for _, ci := range c.coverage {
+		out = append(out, ci.Questionnaires...)
 	}
 	return out
 }

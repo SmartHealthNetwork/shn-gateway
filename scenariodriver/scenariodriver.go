@@ -131,9 +131,33 @@ func (d *Driver) postJSON(base, path, jsonBody string) (HTTPResult, error) {
 	return HTTPResult{Status: resp.StatusCode, Body: body}, nil
 }
 
-// PostCRD mints a bearer and POSTs a CRD order-select request to the ingress.
+// PostCRD mints a bearer and POSTs a CDS Hooks request to the ingress service
+// for the request's hook (CRDServicePath).
 func (d *Driver) PostCRD(reqBody []byte) (HTTPResult, error) {
-	return d.postBearer("/cds-services/order-select-crd", reqBody)
+	return d.postBearer(CRDServicePath(reqBody), reqBody)
+}
+
+// CRDServicePath is the gateway ingress path for a CDS Hooks request:
+// /cds-services/shn-<hook>, the service the ingress advertises for the
+// request's hook (order-sign, order-select or order-dispatch). Any other
+// request goes to the order-sign service, whose ingress refuses it.
+func CRDServicePath(reqBody []byte) string {
+	return "/cds-services/" + CRDServiceID(reqBody)
+}
+
+// CRDServiceID is the gateway ingress's CDS service id for a CDS Hooks
+// request's hook: shn-order-sign, shn-order-select or shn-order-dispatch. A
+// request without one of those hooks gets shn-order-sign.
+func CRDServiceID(reqBody []byte) string {
+	var head struct {
+		Hook string `json:"hook"`
+	}
+	_ = json.Unmarshal(reqBody, &head)
+	switch head.Hook {
+	case "order-select", "order-dispatch":
+		return "shn-" + head.Hook
+	}
+	return "shn-order-sign"
 }
 
 // PostQuestionnairePackage builds a DTR $questionnaire-package request for the given

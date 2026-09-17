@@ -21,8 +21,11 @@ const primeSlicingOutcome22 = `{"resourceType":"OperationOutcome","issue":[{"sev
 
 func TestReadinessRowsAreUniqueOrderedCorpus(t *testing.T) {
 	rows := readinessRows("2.2")
-	if len(rows) != 38 {
-		t.Fatalf("rows=%d want 38", len(rows))
+	if len(rows) != 42 {
+		t.Fatalf("rows=%d want 42", len(rows))
+	}
+	if rows[38].identity != "encounter-positive" || rows[39].identity != "encounter-target-type" {
+		t.Fatalf("the encounter rows must retain their positions: %q %q", rows[38].identity, rows[39].identity)
 	}
 	wantPrefix := []string{"init-pas-request-bundle", "init-dtr-questionnaireresponse", "init-pdex-explanationofbenefit", "init-cdex-task"}
 	for i, want := range wantPrefix {
@@ -38,7 +41,7 @@ func TestReadinessRowsAreUniqueOrderedCorpus(t *testing.T) {
 			want = append(want, pass+"-"+form)
 		}
 	}
-	want = append(want, "negative-versioned", "negative-unversioned", "negative-meta", "full-response-positive", "full-response-negative-hcpcs", "full-response-negative-pos", "full-response-negative-encounter")
+	want = append(want, "negative-versioned", "negative-unversioned", "negative-meta", "full-response-positive", "full-response-negative-hcpcs", "full-response-negative-pos", "full-response-negative-encounter", "encounter-positive", "encounter-target-type", "explicit-profile-missing-version", "explicit-profile-missing-canonical")
 	seen := map[string]bool{}
 	for i, row := range rows {
 		if row.identity != want[i] {
@@ -349,7 +352,8 @@ func supportTestOutcome(body []byte, profile string) string {
 			line = candidate
 		}
 	}
-	for _, row := range fullResponseRows(line)[1:] {
+	controls := append(fullResponseRows(line)[1:], encounterRows(line)[1:]...)
+	for _, row := range controls {
 		mutated, _ := fixtureBody(row)
 		if bytes.Equal(body, mutated) {
 			raw, _ := fixtures.ReadFile(row.expectedOutcome)
@@ -470,4 +474,119 @@ func TestSupportNegativeRequiresExactErrorMultiset(t *testing.T) {
 	if assertVerdict(row, 200, []byte(cleanOutcome)) == nil {
 		t.Fatal("missing expectation admitted")
 	}
+}
+
+// TestEncounterRows: the positive row posts the committed Claim unchanged; the
+// target-type control swaps the contained Encounter for a Patient of the same
+// id; any other mutation is a fixture error. The pinned outcome carries exactly
+// the target-type error; an outcome with that error passes, one with an extra
+// error or a different error is refused, and so is one with no error.
+func TestEncounterRows(t *testing.T) {
+	for _, line := range []string{"2.0", "2.1", "2.2"} {
+		rows := encounterRows(line)
+		if len(rows) != 2 || rows[0].resourceType != "Claim" || rows[0].profile != "http://hl7.org/fhir/StructureDefinition/Claim" {
+			t.Fatalf("%s: rows=%+v", line, rows)
+		}
+		raw, err := fixtures.ReadFile(rows[0].file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := fixtureBody(rows[0])
+		if err != nil || !bytes.Equal(body, raw) {
+			t.Fatalf("%s: positive body must be the committed Claim: %v", line, err)
+		}
+		mutated, err := fixtureBody(rows[1])
+		if err != nil {
+			t.Fatal(err)
+		}
+		var claim map[string]any
+		if err := json.Unmarshal(mutated, &claim); err != nil {
+			t.Fatal(err)
+		}
+		contained := claim["contained"].([]any)
+		patient := contained[0].(map[string]any)
+		if len(contained) != 1 || patient["resourceType"] != "Patient" || patient["id"] != "probe-encounter" {
+			t.Fatalf("%s: target-type mutation did not swap the contained Encounter: %v", line, contained)
+		}
+		if _, err := claimEncounterBody(raw, "other"); err == nil {
+			t.Fatalf("%s: unknown mutation accepted", line)
+		}
+		expected, err := fixtures.ReadFile(rows[1].expectedOutcome)
+		if err != nil {
+			t.Fatal(err)
+		}
+		outcome, err := decodeOperationOutcome(expected)
+		if err != nil || len(outcome.Issue) != 1 || outcome.Issue[0].Details.Coding[0].Code != "Reference_REF_BadTargetType" {
+			t.Fatalf("%s: pinned outcome = %+v (%v)", line, outcome, err)
+		}
+		if err := assertVerdict(rows[1], 200, expected); err != nil {
+			t.Fatalf("%s: exact target-type error refused: %v", line, err)
+		}
+		target := `{"severity":"error","code":"processing","details":{"coding":[{"system":"http://hl7.org/fhir/java-core-messageId","code":"Reference_REF_BadTargetType"}]},"diagnostics":"Invalid Resource target type. Found Patient, but expected one of ([Encounter])","expression":["Claim.extension[0].value.ofType(Reference)"]}`
+		unrelated := `{"severity":"error","code":"processing","details":{"coding":[{"system":"http://hl7.org/fhir/java-core-messageId","code":"Other"}]},"diagnostics":"unrelated","expression":["Claim"]}`
+		clean := `{"resourceType":"OperationOutcome","issue":[{"severity":"information","code":"informational","diagnostics":"All OK"}]}`
+		if err := assertVerdict(rows[1], 200, []byte(`{"resourceType":"OperationOutcome","issue":[`+target+`,`+unrelated+`]}`)); err == nil {
+			t.Fatalf("%s: an extra error was accepted", line)
+		}
+		if err := assertVerdict(rows[1], 200, []byte(clean)); err == nil {
+			t.Fatalf("%s: a clean outcome was accepted for the target-type control", line)
+		}
+		if err := assertVerdict(rows[1], 200, []byte(`{"resourceType":"OperationOutcome","issue":[`+unrelated+`]}`)); err == nil {
+			t.Fatalf("%s: a different error was accepted", line)
+		}
+		if err := assertVerdict(rows[0], 200, []byte(clean)); err != nil {
+			t.Fatalf("%s: clean positive refused: %v", line, err)
+		}
+		if err := assertVerdict(rows[0], 200, []byte(`{"resourceType":"OperationOutcome","issue":[`+target+`]}`)); err == nil {
+			t.Fatalf("%s: an error was accepted for the positive row", line)
+		}
+	}
+}
+
+func TestExplicitProfileRefusalRows(t *testing.T) {
+	for _, line := range []string{"2.0", "2.1", "2.2"} {
+		rows := explicitProfileRows(line)
+		if len(rows) != 2 {
+			t.Fatalf("%s explicit profile rows=%d", line, len(rows))
+		}
+		for _, row := range rows {
+			body, err := fixtureBody(row)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var resource map[string]any
+			if err := json.Unmarshal(body, &resource); err != nil || !hasExactProfile(resource, pasClaimResponseProfile) {
+				t.Fatal("explicit refusal must retain valid in-band profile")
+			}
+			outcome := fmt.Sprintf(`{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"processing","details":{"coding":[{"system":"%s","code":"Validation_VAL_Profile_Unknown"}]},"diagnostics":%q}]}`, messageIDSystem, "Invalid profile. Failed to retrieve explicitly requested profile with url="+row.profile)
+			if err := assertVerdict(row, 200, []byte(outcome)); err != nil {
+				t.Fatalf("%s intended absence refused: %v", row.identity, err)
+			}
+			for _, invalid := range []string{
+				cleanOutcome,
+				strings.Replace(outcome, `"severity":"error"`, `"severity":"warning"`, 1),
+				strings.Replace(outcome, row.profile, "https://example.org/different", 1),
+				strings.Replace(outcome, "Validation_VAL_Profile_Unknown", "unrelated", 1),
+				strings.Replace(outcome, `"code":"processing"`, `"code":"exception"`, 1),
+				strings.Replace(outcome, "Invalid profile. Failed to retrieve explicitly requested profile with url=", "Resolver unavailable: ", 1),
+			} {
+				if err := assertVerdict(row, 200, []byte(invalid)); err == nil {
+					t.Fatalf("%s accepted missing or unrelated refusal: %s", row.identity, invalid)
+				}
+			}
+			if err := assertVerdict(row, 500, []byte(outcome)); err == nil {
+				t.Fatal("execution failure qualified as profile absence")
+			}
+		}
+	}
+	if explicitProfileRows("unknown") != nil {
+		t.Fatal("unknown lane accepted")
+	}
+}
+
+func explicitProfileTestOutcome(profile string) string {
+	if profile != pasClaimResponseProfile+"|9.9.9" && profile != "https://example.org/fhir/StructureDefinition/unavailable-profile" {
+		return ""
+	}
+	return fmt.Sprintf(`{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"processing","details":{"coding":[{"system":"%s","code":"Validation_VAL_Profile_Unknown"}]},"diagnostics":%q}]}`, messageIDSystem, "Invalid profile. Failed to retrieve explicitly requested profile with url="+profile)
 }

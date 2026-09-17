@@ -16,6 +16,8 @@ type RelayError struct {
 	// ContentType is the framed answer's allowlisted Content-Type (empty when the
 	// frame carried none); origination/ingress relay writers use it verbatim.
 	ContentType string
+	// leg is the leg the answer came back on.
+	leg string
 }
 
 func (e *RelayError) Error() string {

@@ -145,12 +145,24 @@ at an engine you operate.
 ## Native Da Vinci ingress
 
 If your EHR or reference implementation is **already** Da Vinci-conformant —
-speaking CDS Hooks order-select (CRD), `Questionnaire/$questionnaire-package`
-(DTR), and `Claim/$submit` (PAS) natively — point it at the gateway's own
+speaking CDS Hooks `order-sign`, `order-select` and `order-dispatch` (CRD),
+`Questionnaire/$questionnaire-package` (DTR), and `Claim/$submit` (PAS) natively —
+point it at the gateway's own
 ingress instead of `provider-data` origination. Your systems call the gateway
-directly, inside your own boundary; the gateway resolves and inlines the
-payer's prefetch from your system of record (non-aggregating; no callback to
-your systems) and forwards the conformant request through to the Hub.
+directly, inside your own boundary; the gateway forwards your EHR's own request
+bytes through to the Hub. It removes `fhirServer` and `fhirAuthorization` (the
+payer never gets a route or a credential into your systems, and the gateway
+never calls `fhirServer`), and adds only the prefetch values the request leaves
+out, read from your own system of record — never made up. See
+[CDS Hooks prefetch](CONFIGURATION.md#cds-hooks-prefetch) for the rules. The
+gateway's `GET /cds-services` lists one service per hook (`shn-order-sign`,
+`shn-order-select`, `shn-order-dispatch`); post each CDS Hooks request to the service
+for its hook. The payer's answer comes back exactly as the payer sent it.
+A `$questionnaire-package` request is carried as your EHR sent it, with your Coverage
+appended only when it carries none. A signature inside a message travels untouched;
+HTTP-level signatures are not carried, so sign inside the payload when you need an
+end-to-end signature. The request's patient must be named by the network member id; see
+the member id limitation in [CDS Hooks prefetch](CONFIGURATION.md#cds-hooks-prefetch).
 
 See [`PROVIDER_DAVINCI_INGRESS` and related variables in
 CONFIGURATION.md](CONFIGURATION.md#accept-da-vinci-requests-from-a-provider-ehr-provider-optional)
@@ -312,6 +324,60 @@ last result. Return a nil error for actual absence and an `engine.SoRReadError` 
 Do not include protected backend details in errors. The engine selects this optional
 interface automatically, including through its observer wrapper, and stops before
 using missing-data defaults or starting further exchange work when a read fails.
+
+`OpenCoverageContext` returns every Coverage record the member has, exactly as your
+system returned it (an empty result means none). The gateway decides what several
+records mean: when they do not all name one payer, the exchange is refused with
+`422 ambiguous coverage for routing` rather than routed on whichever record came
+first. The single-record `OpenCoverage` of the built-in FHIR connector answers only when
+exactly one record exists. The built-in FHIR connector reads the Coverages with its bounded
+patient search (below): every page, within the search bounds; a search over the bounds is a
+failed read (`SoRInvalidResponse`), never a partial answer.
+
+This is a change from earlier releases, where `OpenCoverageContext` returned
+`([]byte, bool, error)`. A connector that still has the earlier method no longer satisfies
+`engine.ContextSystemOfRecord`, so `engine.New` refuses it with
+`engine.ErrSystemOfRecordSignature` rather than silently treating its read failures as
+absence. To migrate, return every matching Coverage as `[][]byte` (nil or empty for none)
+and the error as before.
+
+A connector can also implement `engine.SearchSystemOfRecord` to let the gateway search
+your FHIR server for one patient's records (`<type>?patient=Patient/<id>`, exactly as a
+CDS Hooks prefetch template asks). The built-in FHIR connector does: it refuses
+redirects, follows `next` links only on the configured server and under its base path,
+stops on a repeated page, and stops at fixed bounds (10 pages, 200 entries, 4 MiB,
+5 seconds). It returns each page's bytes unchanged. The gateway sends the result as a
+searchset it writes, however many pages there were: each matching and included record is a
+byte-for-byte copy of your server's record, under an entry `fullUrl` the gateway assigns;
+your server's links, entry addresses, search messages and `Bundle.total` are not used.
+
+A provider gateway uses the same search to obtain a CDS Hooks prefetch value (`coverage`
+and the history keys) the EHR's request leaves out; a connector without it cannot
+obtain them (see [CDS Hooks prefetch](CONFIGURATION.md#cds-hooks-prefetch)).
+
+A facility gateway answers a clinical data request (CDex) from the same search:
+- **Records.** Every record of each requested type whose own date falls within the
+  requested dates, exactly as your server returned it (`DiagnosticReport` by
+  `effectiveDateTime`, else the end, else the start of `effectivePeriod`;
+  `DocumentReference` by `date`). The search is narrowed with the type's `date` search
+  parameter (`date=ge<start>&date=le<end>`, each widened by one day so a server comparing
+  instants never drops an edge-day record); the gateway still selects each record by its
+  own date. Both record types a request may name have that parameter.
+- **Bounds.** Each type's search is held to the bounds above (10 pages, 200 entries,
+  4 MiB, 5 seconds). More records than that is answered `422 records exceed the per-answer
+  bound for <type>`, never a partial answer; a search that runs out of time is `503`.
+- **Identity binding.** The gateway reads the member's `Patient` (`PatientFHIRRef`, then
+  `ResolveByReference`) to confirm it exists and is that member, but does not send it. It
+  sends only a `Patient` it writes itself, with your server's Patient id and the
+  `urn:shn:member` identifier, so the requester can resolve your records' patient
+  reference. No `Patient` for the member is `404`; a `Patient` your server does not return
+  is `502`.
+- **Checks.** Each record must name that patient; a record about anyone else, or the same
+  record returned twice, stops the answer with `502`.
+- **Connectors without search.** A connector without `SearchSystemOfRecord` is read through
+  `FacilityRecordsContext` (one record per type, sent as returned).
+
+Return records as your system holds them; do not rewrite their `subject`.
 
 The original `engine.SystemOfRecord` interface is unchanged. Existing implementations
 remain source compatible; the adapter cannot reconstruct an error that a legacy

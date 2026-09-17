@@ -32,7 +32,10 @@ type recordedPost struct {
 	body                    []byte
 }
 
-func testOutcome(body []byte) string {
+func testOutcome(body []byte, profile string) string {
+	if outcome := explicitProfileTestOutcome(profile); outcome != "" {
+		return outcome
+	}
 	if outcome := supportTestOutcome(body, ""); outcome != "" {
 		return outcome
 	}
@@ -64,7 +67,7 @@ func newFakeLane(t *testing.T) *fakeLane {
 		if outcome := supportTestOutcome(body, r.URL.Query().Get("profile")); outcome != "" {
 			_, _ = w.Write([]byte(outcome))
 		} else {
-			_, _ = w.Write([]byte(testOutcome(body)))
+			_, _ = w.Write([]byte(testOutcome(body, r.URL.Query().Get("profile"))))
 		}
 	})
 	l.srv = httptest.NewServer(mux)

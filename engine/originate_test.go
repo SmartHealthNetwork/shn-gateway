@@ -212,7 +212,8 @@ func (s *stubSubstrate) handleAuthorize(_ *http.Request, body []byte) (*http.Res
 
 // handleRoute decodes the sealed incoming envelope to extract the corrID, then
 // seals and returns the appropriate canned response:
-//   - leg 0 (CRD): returns BuildCards(s.covResp) wrapped in a sealed envelope.
+//   - leg 0 (CRD): returns a payer's CRD answer carrying s.covResp (crdAnswerFor)
+//     wrapped in a sealed envelope.
 //   - leg 1+ (DTR and beyond, only reached on the happy-path which these tests
 //     do not exercise): returns a canned questionnaire package.
 func (s *stubSubstrate) handleRoute(_ *http.Request, body []byte) (*http.Response, error) {
@@ -231,10 +232,7 @@ func (s *stubSubstrate) handleRoute(_ *http.Request, body []byte) (*http.Respons
 
 	switch leg {
 	case 0: // CRD leg
-		respPayload, err = shnsdk.BuildCards(s.covResp)
-		if err != nil {
-			return errResp("stub: BuildCards: " + err.Error()), nil
-		}
+		respPayload = crdAnswerFor(s.covResp)
 		// R3: the response Operation is contract-keyed per leg TYPE (workstream_pa.go's
 		// pa.crd manifest rows) — "crd-cards" for order-select, "crd-dispatch-cards" for
 		// order-dispatch (handleUC03Oxygen's re-key onto the oxygen family). A mismatched
@@ -319,7 +317,7 @@ func crdTestSystem(t *testing.T, cov shnsdk.CardCoverage) (*Gateway, *stubSubstr
 
 	reg := shnsdk.NewRegistry()
 	reg.Set("provider", shnsdk.RegistryEntry{ID: "provider", Role: "provider", EncPub: provEncPub, SignPub: authzPub})
-	reg.Set("payer", shnsdk.RegistryEntry{ID: "payer", Role: "payer", EncPub: payerEncPub, SignPub: payerSignPub})
+	reg.Set("payer", shnsdk.RegistryEntry{ID: "payer", Role: "payer", EncPub: payerEncPub, SignPub: payerSignPub, RequestFrames: dtrOperationFrames})
 
 	// Fake authz + hub URLs — the stub transport intercepts at the path suffix.
 	const fakeBase = "http://stub.test"
@@ -683,7 +681,7 @@ func TestRunCRDThenDTR_NoDocSkipsDTR(t *testing.T) {
 	rec := httptest.NewRecorder()
 	res, ok := gw.runCRDThenDTROrder(rec, req, "MBR-COVERED", runCRDThenDTROrderTestSystem, runCRDThenDTROrderTestCode, runCRDThenDTROrderTestDisplay, runCRDThenDTROrderTestDx, false)
 	if ok {
-		_, _, status, msg, _ := gw.submitClaimAndResolve(req.Context(), req, res.pci, res.srJSON, nil, res.qrJSON, res.patientRef, res.coverageRef, res.member, res.payer, res.recipient)
+		_, _, status, msg, _ := gw.submitClaimAndResolve(req.Context(), req, res.pci, res.srJSON, nil, res.qrSource, res.patientRef, res.coverageRef, res.member, res.payer, res.recipient)
 		if status != 0 {
 			writeJSON(rec, status, map[string]string{"error": msg})
 		}
@@ -830,7 +828,7 @@ func TestTargetsBrPayer(t *testing.T) {
 // in plain validateFHIR.
 func TestValidateFHIR_IngressSkip_ProviderData(t *testing.T) {
 	g := &Gateway{cfg: Config{OriginationProfile: "provider-data", Validator: failIfCalledValidator{t}}}
-	if status, _ := g.validateFHIRPayerIngress(context.Background(), []byte(`{}`), ""); status != 0 {
+	if status, _ := g.validateFHIRPayerIngress(context.Background(), []byte(`{}`), "", "pa.dtr"); status != 0 {
 		t.Fatalf("provider-data payer-ingress must skip $validate (R-8); got status=%d", status)
 	}
 }
@@ -899,7 +897,7 @@ func TestRelaysReferencePayerBytes(t *testing.T) {
 // function now, never plain validateFHIR.
 func TestValidateFHIR_IngressSkip_Demo(t *testing.T) {
 	g := &Gateway{cfg: Config{OriginationProfile: "demo", Validator: failIfCalledValidator{t}}}
-	if status, msg := g.validateFHIRPayerIngress(context.Background(), []byte(`{"resourceType":"Parameters"}`), ""); status != 0 {
+	if status, msg := g.validateFHIRPayerIngress(context.Background(), []byte(`{"resourceType":"Parameters"}`), "", "pa.dtr"); status != 0 {
 		t.Fatalf("demo-lane payer-ingress must skip $validate (R-8, post-retirement); got status=%d msg=%q", status, msg)
 	}
 }
@@ -930,7 +928,7 @@ func TestValidateFHIR_FacilityIngressStillFailsClosed_Demo(t *testing.T) {
 // $validate — the fix scopes the carve-out to payer-directed legs, it does not remove it.
 func TestValidateFHIR_PayerIngressStillSkips_Demo(t *testing.T) {
 	g := &Gateway{cfg: Config{OriginationProfile: "demo", Validator: failIfCalledValidator{t}}}
-	if status, msg := g.validateFHIRPayerIngress(context.Background(), []byte(`{"resourceType":"Bundle"}`), ""); status != 0 {
+	if status, msg := g.validateFHIRPayerIngress(context.Background(), []byte(`{"resourceType":"Bundle"}`), "", "pa.dtr"); status != 0 {
 		t.Fatalf("demo-lane payer-directed ingress must still skip $validate after the Finding-1 scope fix; got status=%d msg=%q", status, msg)
 	}
 }
@@ -960,7 +958,7 @@ func TestValidateFHIR_EgressStillFailsClosed_Demo(t *testing.T) {
 func TestValidateFHIR_IngressStillFailsClosed_OtherLane(t *testing.T) {
 	v := &recordingValidator{valid: false}
 	g := &Gateway{cfg: Config{OriginationProfile: "unknown-lane", Validator: v}}
-	status, msg := g.validateFHIRPayerIngress(context.Background(), []byte(`{"resourceType":"Bundle"}`), "")
+	status, msg := g.validateFHIRPayerIngress(context.Background(), []byte(`{"resourceType":"Bundle"}`), "", "pa.dtr")
 	if status != http.StatusUnprocessableEntity {
 		t.Fatalf("non-reference-payer-lane payer-ingress with an invalid resource: status=%d, want %d; msg=%q", status, http.StatusUnprocessableEntity, msg)
 	}

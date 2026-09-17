@@ -238,10 +238,56 @@ instead of `provider-data` origination.
 
 Set `PROVIDER_DAVINCI_INGRESS=1` to mount the provider-side Da Vinci ingress: the
 gateway accepts a provider EHR / reference-implementation's **native Da Vinci
-requests** — CDS Hooks order-select (Coverage Requirements Discovery),
-`Questionnaire/$questionnaire-package` (DTR), and `Claim/$submit` (PAS) — resolves
-and inlines the payer's prefetch from **your own system of record** (non-aggregating;
-no callback to the provider), and forwards conformant requests through to the Hub.
+requests** — CDS Hooks `order-sign`, `order-select` and `order-dispatch` (Coverage
+Requirements Discovery), `Questionnaire/$questionnaire-package` (DTR), and `Claim/$submit`
+(PAS) — and forwards them through to the Hub. A CDS Hooks request is forwarded as your EHR
+sent it, with `fhirServer` and `fhirAuthorization` removed and any prefetch value it left
+out added from **your own system of record** (see [CDS Hooks prefetch](#cds-hooks-prefetch));
+there is never a callback into your systems.
+
+A `$questionnaire-package` request is forwarded as your EHR sent it: every parameter, in
+order and repeated as sent, a questionnaire canonical's `|version`, `context`, `meta` and any
+parameter the gateway does not know. Every resource in it (each `coverage`, each `order`,
+everything in `referenced` and in parameter parts) must be about one patient, the one its
+coverages and orders name (a request naming none is refused with 422, one naming another
+patient anywhere with 403), and all of its coverages must name one payer (422 otherwise).
+Name the patient with a relative reference (`Patient/<member id>`): a questionnaire request
+has no `fhirServer`, so an absolute Patient reference cannot be read as your EHR's and is
+refused (403). A `coverage` parameter is always your EHR's own: the gateway never adds one
+beside it, and a `coverage` parameter that carries no resource (only a reference, or
+nothing) is refused with `400 coverage parameter carries no resource`.
+When the request carries no `coverage` parameter, the gateway appends one parameter holding
+the patient's Coverage exactly as **your own system of record** returns it for a Coverage
+search (recorded as a `prefetch.obtained` event with `operation` `questionnaire-package`,
+also when the search finds nothing or cannot run). When that system holds several Coverages
+that name one payer, the first is appended. It refuses instead when that system names the
+patient by another id (422), holds no Coverage (422), holds Coverages naming different payers
+(422), cannot search (422) or is unavailable (503). The appended Coverage is sent alone, not
+with the payor Organization it may reference (see
+[Payer backend identity mapping](#payer-backend-identity-mapping) for what that means for a
+payer that maps its identity). The request is sent to the payer's gateway naming the operation, which a payer
+gateway accepts only when it declares the framed-operation capability (`v1op`); a payer that
+does not is refused before anything is sent with 502 `payer gateway does not support framed
+DTR operations (upgrade required)`. The payer's answer is returned to your EHR exactly.
+
+`GET /cds-services` lists one CDS service per hook: `shn-order-sign` (`order-sign`),
+`shn-order-select` (`order-select`) and `shn-order-dispatch` (`order-dispatch`). Post each
+request to the service for its hook (`POST /cds-services/shn-order-sign`): an id that is not
+listed is `404`, and a request whose `hook` is not the service's hook is `400`. The hook is
+never changed on the way to the payer. The payer's answer is returned to your EHR exactly as
+the payer sent it once it meets the CDS Hooks response rules (see
+[CDS Hooks answers](#cds-hooks-answers)); `cards` may be empty, with the coverage information
+in `systemActions`. A payer that offers no service for your hook answers `422` with the hooks
+it offers.
+
+What the gateway changes on these requests is only the callback removal and the prefetch and
+coverage additions above. A signature inside a message (`Bundle.signature`,
+`Provenance.signature`, a `Signature` element) travels untouched. HTTP-level signatures
+(signed header fields, a detached JWS) are not carried: each gateway terminates HTTP, and the
+network carries only the message's media type, contract line and operation name with it. A
+participant that needs an end-to-end signature signs inside the payload. The answer's body
+reaches your EHR exactly; its media type is the gateway's own (`application/json` for CDS
+Hooks, `application/fhir+json` for DTR and PAS).
 
 Inbound requests authenticate via **SMART Backend Services**: the gateway hosts its
 own `POST /oauth/token` and `GET /.well-known/smart-configuration`, verifies a
@@ -267,15 +313,130 @@ of the clients pre-registered in `INGRESS_CLIENTS_FILE`. There is no plan to exp
 this ingress on the public internet. Dynamic client registration (as opposed to the
 static file above) remains a tracked enhancement.
 
+### CDS Hooks prefetch
+
+The gateway advertises six prefetch keys: `patient` (`Patient/{{context.patientId}}`),
+`coverage` (`Coverage?patient=Patient/{{context.patientId}}&_include=Coverage:payor`: the payer
+resolves each Coverage's payor from the request, since it has no route into your system),
+`deviceHistory` (`DeviceRequest?patient=Patient/{{context.patientId}}&_include=DeviceRequest:performer`:
+the payer resolves a dispatched order's supplier the same way), and `serviceHistory`,
+`medicationHistory` and `questionnaireResponses` (each
+`<type>?patient=Patient/{{context.patientId}}`). For each:
+
+- **Your EHR sent it** (a resource, a Bundle, or `null`): it is sent unchanged.
+- **Your EHR left it out:** the gateway obtains it from your system of record, for the
+  Patient your connector names for the member, and adds it to the request's `prefetch`
+  (nothing else in the request changes):
+  - `patient` is read (`Patient/<id>`) and sent exactly as your server returned it. No such
+    Patient is a `422 patient not found in system of record`. (See the member id limitation
+    below for when nothing is obtained.)
+  - `coverage` and the history keys are searched (`<type>?patient=Patient/<id>`, the coverage
+    search with `_include=Coverage:payor` and the device search with
+    `_include=DeviceRequest:performer`, within the connector's search bounds). The value
+    sent is a searchset the gateway writes: each matching record, and each record the search
+    included (a Coverage's payor Organization, an order's performer, as `search.mode`
+    `include`), exactly as your
+    server returned it, under an entry `fullUrl` the gateway assigns (`urn:uuid:`). Nothing
+    else of your server's answer is sent — not its links, its entry addresses or its messages
+    about the search (`OperationOutcome` entries) — so the payer is never given an address in
+    your system. (A record that refers to another record by your server's absolute URL keeps
+    that reference; the payer cannot resolve it within the request.) FHIR defines no
+    resolution of a relative reference against entries whose `fullUrl` is a `urn:uuid:`, so
+    a record's relative reference to another record in the searchset (a Coverage's
+    `payor`, an order's `performer`) resolves only for a payer that matches entries by
+    their resource type and id. A search with no match sends `null`.
+  - A search your system of record cannot answer (unavailable, not supported, not a
+    searchset, or over the bounds) leaves the key out. Without a coverage the request cannot
+    be routed, so it is refused: `503 coverage unavailable from system of record` when your
+    server is unavailable, otherwise a `422`. A missing history key is left for the payer to
+    decide on. A connector that does not implement search (the built-in FHIR connector
+    does) can obtain only `patient`.
+- **Every value must be about the request's patient.** Each resource is checked against
+  the patient by its FHIR Patient-compartment reference (for example
+  `Coverage.beneficiary`, `ServiceRequest.subject`); a value holding another patient's
+  record is refused — `403` for a value your EHR sent, `502 system of record returned
+  another patient's resource` for one your system of record returned — and nothing is
+  sent. Absolute references on your EHR's `fhirServer` are read like relative ones, both here
+  and when the request's patient references (`context.patientId`, each draft order's subject,
+  each prefetch resource's patient) are bound to one patient.
+- **No opaque content.** A `Binary` resource (a value, a Bundle entry or a contained
+  resource) is never sent in a prefetch value: `403` when your EHR sent it, `502 system of
+  record returned a Binary resource` when your system of record returned it.
+- **The payer is found from the request.** A coverage your EHR sent that references its payor
+  Organization is resolved against every prefetch value the request carries (a resource, or
+  the entries of a Bundle value), whatever its key; your system of record is read for it only
+  when the coverage itself came from there.
+- **Signed content is never edited.** A value your EHR sent, signed or not, is sent byte
+  for byte; added keys sit beside it.
+
+Each key the gateway tried to obtain is recorded: a log line, and, when an observer is
+configured, a `prefetch.obtained` event carrying the key, the search it ran, its outcome,
+the match and page counts and the time — never the value. Nothing about where a value came
+from is added to the request.
+
+**Member id limitation.** `context.patientId` must be the patient's network member id, and
+the request's own patient references (the order's subject, the coverage's beneficiary) must
+use it. Values from your system of record name the patient by your server's own Patient id,
+so the gateway obtains values only when that id is the member id. When your server (as your
+connector reports it) names the patient differently:
+
+- a request that leaves out `patient` or `coverage` is refused before anything is read or
+  sent: `422 system of record names the patient differently from context.patientId; supply
+  patient and coverage prefetch in the request`;
+- a history key the request leaves out is left out; nothing is searched, and the
+  `prefetch.obtained` event records the outcome `not-run` with the reason `patient named
+  differently in the system of record`. The request is sent.
+
+Values your EHR sends are not affected. To have the gateway fill in prefetch, identify the
+patient on your server by the member id; otherwise send `patient` and `coverage` (and any
+history your EHR has) in the request.
+
+**Requests the gateway originates (`ORIGINATION_PROFILE`).** The order such a request carries
+is your system of record's order, with its own status — the gateway never changes it. The
+`order-select` coverage check (`provider-data`) carries your member's one **draft** order
+(`DeviceRequest` or `ServiceRequest` with `status` `draft`, found with the patient search
+above): no draft order is `502 no draft order for member in system of record`, several are
+`422 several draft orders for member in system of record`, and a connector that cannot search
+is `422`. `order-sign` (a signed order going to prior authorization) and `order-dispatch`
+carry your member's **active** order as your system holds it. CRD 2.1 and 2.2 accept an active
+order on those hooks; the CRD 2.0 profiles for them require `draft`, so a CRD 2.0 payer that
+enforces that profile refuses such a request (a known limitation).
+
+A CDS Hooks request the gateway
+builds for your own workflow names the patient by the member id too. When your server names
+the patient differently, the gateway — as the author of that request — names the patient by
+the member id in the records it carries, and changes nothing else: the Patient's `id`, and the
+relative Patient reference on each record's patient path (the order's `subject`, the Coverage's
+`beneficiary`), in the record and in its contained resources (a contained Patient's local `id`
+stays). Every other byte of those records is your server's, and that is checked byte
+for byte before the request is sent; other references to the patient (for example a
+Coverage's `subscriber`) are left as your server holds them. History values are left out of
+such a request, as above.
+
+After the payer's CDS Hooks answer, the gateway's own `$questionnaire-package` request carries
+your system of record's Coverage search matches (each record exactly), the order as the payer
+returned it, the payer's `coverage-assertion-id` as `context` when the answer gives one, and
+**one** questionnaire: the first the payer's answer names, exactly as stated (a `|version`
+kept). A payer answer naming several questionnaires for the order has only the first
+requested (a known limitation). At DTR 2.2, where `coverage` is 1..1, a system of record
+holding several Coverages for the member refuses the request (422).
+
 ## Advanced overrides (rarely needed)
 
 Each network endpoint and trust-anchor key URL is resolved from discovery by
 default; set the matching variable only to override (e.g. when the gateway runs
 inside the SHN-operated network itself): `AUTHZ_URL`, `HUB_URL`, `CONSENT_URL`,
 `AUDIT_URL`, `PHG_URL`, `REGISTRAR_URL`, `FHIR_VALIDATE_URL`, `AUTHZ_PUBKEY_URL`,
-`HUB_TRANSPORT_KEY_URL`. Explicit env always wins over discovery. `NPI` overrides
-the organization NPI stamped into a provider's originated requests (defaults to a
-synthetic placeholder).
+`HUB_TRANSPORT_KEY_URL`. Explicit env always wins over discovery.
+
+`NPI` is the ordering clinician's NPI for requests a provider gateway originates
+(`ORIGINATION_PROFILE`); it defaults to a synthetic placeholder. A CDS Hooks request's `userId`
+is your order's `requester` when it names a `Practitioner` or `PractitionerRole`, and
+`Practitioner/<NPI>` otherwise. `NPI` also signs attestations that name no clinician and names
+the provider of eligibility requests. (A gateway built on the engine with no NPI refuses a
+CDS Hooks request whose order names no requester — `422 order names no requester; configure
+NPI` — and an attestation with no clinician NPI, unless the order's requester `Practitioner`
+carries one, and its eligibility requests name no provider.)
 
 ## Native-forward payer mode (`PAYER_DAVINCI_*`)
 
@@ -298,13 +459,55 @@ shared secrets).
 | `PAYER_DAVINCI_CLIENT_KID` | Key id for the client assertion JWK, if the partner requires it. |
 | `PAYER_DAVINCI_CLIENT_SECRET` | OAuth2 client secret for the `client_secret_post` `client_credentials` grant — for authorization servers that cannot issue asymmetric credentials. The value is the secret **itself, not a path** (unlike `PAYER_DAVINCI_CLIENT_KEY`). Mutually exclusive with `PAYER_DAVINCI_CLIENT_KEY`/`_ALG`/`_KID`; prefer `private_key_jwt` when your server supports it. |
 | `PAYER_DAVINCI_PAS_NATIVE` | **No longer a switch.** PAS submit/update always forward to the payer's `/Claim/$submit` along with every other leg; there is no in-process PAS fallback to select. Setting it `false` logs a notice at boot and changes nothing. |
-| `PAYER_DAVINCI_CRD_SERVICE_ID` | Escape-hatch override for the partner's order-select CDS service id. Empty ⇒ the gateway fetches `{base}/cds-services` at boot and auto-selects the single order-select service (fails closed if none, or ambiguous). Set it when the partner's CRD service isn't uniquely discoverable. |
-| `PAYER_DAVINCI_CRD_HOOK` | CDS Hooks hook value to stamp on the CRD request before forwarding (e.g. a partner whose service expects `order-sign`). Empty ⇒ forward the originator's hook verbatim. |
-| `PAYER_DAVINCI_DISPATCH_SERVICE_ID` | The partner's CDS service id for the `crd-order-dispatch` leg. **Empty ⇒ the dispatch leg fails closed (502)** — set it if your flow uses order-dispatch. |
-| `PAYER_DAVINCI_DISPATCH_HOOK` | CDS Hooks hook value to stamp on the order-dispatch request before forwarding. Empty ⇒ forward the originator's hook verbatim. |
-| `PAYER_DAVINCI_CRD_COVERAGE_BUNDLE` | `true` to wrap the CRD request's bare `prefetch.coverage` in a searchset `Bundle` on egress — for a partner whose `order-sign` `coverage` prefetch is a search template that requires a Bundle (a bare `Coverage` returns 412). Default off ⇒ forwarded verbatim. |
+| `PAYER_DAVINCI_CRD_SERVICE_ID` | Optional: names your CDS service for `order-select` and `order-sign` requests. Empty (the default) ⇒ each request goes to the one service your CDS service listing offers for the request's hook (see [CDS service selection](#cds-service-selection)). The named service must be in your listing and answer the request's hook; any other request is refused. |
+| `PAYER_DAVINCI_DISPATCH_SERVICE_ID` | Optional: names your CDS service for `order-dispatch` requests, with the same rules. Empty ⇒ the service your listing offers for `order-dispatch`. |
 | `PAYER_DAVINCI_CONTRACT_VERSIONS` | Declared Da Vinci contract versions for the partner payer, comma-separated `<contract>@<line>` tokens (e.g. `pa.pas@2.0, pa.crd@2.0`). Two things read this: the connectivity checks verify the partner's published capability against it (`version-drift` on disagreement, FR-G46), and native-forward routing refuses (before forwarding) any leg whose contract shares no line with it (FR-G48). Requires `PAYER_DAVINCI_BASE_URL`. Unset ⇒ native-forward legs are unfiltered (today's default) and the checks skip the drift comparison. |
 | `PAYER_DAVINCI_STRICT_EXTENSIONS` | `true` to reserve the per-peer gated overlay (FR-G52) for this partner — a peer flagged this way would refuse a cross-version transform chain carrying or dropping its extensions instead of forwarding stripped or lossy content. **Currently DORMANT: setting it has no routing effect on this deployment.** The strict *consult* itself is already live where transforms are actually selected (route-layer chain selection, exercised by test-only seams), but the one peer this flag targets — the foreign Da Vinci partner reached through native-forward mode — is filtered through arm-1-only forwarding this slice (never through the chain-selection path), so the flag has nothing to gate yet. It goes live together with transform-at-the-native-forward-edge (not yet shipped; re-labeling another gateway's build product as a translated payload needs its own stamp/Provenance semantics worked out first). Default `false`. |
+
+**Removed settings.** `PAYER_DAVINCI_CRD_HOOK`, `PAYER_DAVINCI_DISPATCH_HOOK` and
+`PAYER_DAVINCI_CRD_COVERAGE_BUNDLE` no longer exist. The request's hook is never changed, and
+the CDS Hooks request reaches your system as the provider's system sent it (a `coverage`
+prefetch template that is a search is answered with a searchset `Bundle`, by the provider's
+system or by its gateway). A gateway that still sets one of them refuses to start, naming it.
+
+### CDS service selection
+
+Your gateway reads your CDS service listing (`GET {PAYER_DAVINCI_CDS_BASE_URL}/cds-services`)
+and sends each CDS Hooks request to the service whose `hook` is the request's hook. It never
+changes the hook. The listing is read at startup (to log which hook each configured service
+answers; an unreadable listing is a warning, not a startup failure) and again when the last
+reading is more than five minutes old. One read runs at a time; requests arriving meanwhile use
+the listing already read, or wait for the read when there is none. When the listing cannot be
+read again, requests keep using the last listing read for up to one hour after it was read (the
+gateway logs each failed read); a failed read is not repeated for five seconds. Nothing is sent to
+your system when:
+
+- your listing offers no service for the request's hook — 422
+  `{"error":"payer offers no CDS service for hook order-select","offered":["order-sign","order-dispatch"]}`,
+  naming the hooks you do offer; a configured service that is not in your listing is refused
+  the same way (`payer offers no CDS service <id>`);
+- a configured service is listed for another hook — 422 `payer CDS service <id> is for hook
+  <hook>, not <request hook>`, with `"offered"` naming the service's hook;
+- your listing offers several services for the hook and none is configured — 422
+  `payer offers several CDS services for hook <hook>`;
+- your listing cannot be read and no listing read in the last hour is held — 502
+  `payer CDS service listing unavailable`;
+- the request names no hook, or a hook its leg does not carry (`order-select` and
+  `order-sign` travel on one leg, `order-dispatch` on another) — 400.
+
+### CDS Hooks answers
+
+Your CDS Hooks answer is relayed to the provider exactly as your system sent it once it meets the CDS Hooks 2.0 response rules and, at a CRD line, the CRD card
+rules (for example: `cards` is an array and may be empty; every card has a `summary` under 140
+characters, an `indicator`, and a `source` with a `label` and, at a CRD line, a `topic`; every
+action has a `type` and a `description`). An answer that breaks one is refused with 502
+`payer CRD response is not a valid CDS Hooks response: <rule> at <path>` rather than repaired,
+and the provider's gateway applies the same rules. Your gateway carries the answer with the
+media type your system sent (`application/json` when it sent none); the provider's gateway
+returns it to the EHR as `application/json`, the CDS Hooks media type. Coverage information belongs in a system
+action that updates the order; each FHIR resource your answer embeds is also validated at the
+routed CRD line, but only to record the outcome (the `crd.embedded.validated` observation):
+it never changes or refuses your answer. A non-2xx answer is relayed as your system's error.
 
 **Exactly-one-mode rule:** if `PAYER_DAVINCI_TOKEN_URL` is set, then
 `PAYER_DAVINCI_CLIENT_ID` must also be set, plus exactly one credential mode —
@@ -330,16 +533,50 @@ your engine's own.
 | `PAYER_DAVINCI_PAYOR_OWN` | `"system\|value"` of this deployment's registered payer identity — the identity your gateway is known by on the network. |
 | `PAYER_DAVINCI_PAYOR_BACKEND` | `"system\|value"` your own backend expects instead — the identity to re-stamp onto outbound requests before they reach it. |
 
-When both are set, every CRD, DTR, and PAS request this gateway forwards to
-`PAYER_DAVINCI_BASE_URL` has its `Coverage` payor identifier re-stamped from
-`PAYER_DAVINCI_PAYOR_OWN` to `PAYER_DAVINCI_PAYOR_BACKEND` — but **only** when the
-inbound identifier is genuinely your own. A request addressed to a different payer
-identifier, or one that carries no resolvable payor identifier at all, is refused with a
-clear error naming the mismatch, never silently forwarded — this is an ownership check,
-not a blind rewrite: forwarding a misdirected request under your own backend's identity
-would have your engine adjudicate someone else's request. Only the payor's identifier
-(`system`/`value`) is changed; nothing else in the request — including the payer
-organization's name — is touched, and every response is relayed back unchanged.
+When both are set, every CDS Hooks (`order-select`, `order-sign` and `order-dispatch`), DTR,
+and PAS request this gateway forwards to your system has the payor identifier of **every**
+`Coverage` it carries re-stamped from `PAYER_DAVINCI_PAYOR_OWN` to
+`PAYER_DAVINCI_PAYOR_BACKEND` — but **only** when the inbound identifier is genuinely your
+own. The identifier is the `Coverage.payor` identifier itself, or the first identifier
+with a system and value on the payer `Organization` it references (contained in the
+Coverage, or another resource of the same Bundle or prefetch). Each Coverage is read by its
+first `payor`, the one the network routes on. A PAS Claim's `insurer` is resolved the same
+way and re-stamped too when it names your identity; an insurer that names you under
+another identifier (for example your NPI) is left as sent.
+
+A request is refused with a clear error, never silently forwarded, when:
+
+- a Coverage names a different payer identifier, or no resolvable payor identifier at all
+  (400) — this is an ownership check, not a blind rewrite: forwarding a misdirected
+  request under your own backend's identity would have your engine adjudicate someone
+  else's request;
+- its Coverages name more than one payer, or a Coverage payor or Claim insurer reference
+  resolves to no resource or to more than one (422, naming the reference). References are
+  matched exactly (a `fullUrl`, `Type/id`, or `#id` for a contained resource); a
+  version-specific (`_history`) reference is not resolved and is refused;
+- the identifier to re-stamp is covered by a signature inside the message (a
+  `Bundle.signature`, a `Provenance` signature, or a `Signature` element) — 422
+  `signed content cannot be edited (E-03, <signature>)`. The gateway never strips a
+  signature and never forwards a stale one.
+
+Only the identifier's `system` and `value` strings are changed. For a PAS Bundle and a CDS
+Hooks request, every other byte of the request — the payer organization's name, entry
+members, layout, numbers — is forwarded exactly as it arrived, and so is a DTR
+`$questionnaire-package` or `$next-question` input a requester sends naming the operation.
+(A questionnaire request a requester sends in the older envelope, without naming the
+operation, is still assembled by the gateway from the carried canonical, order and Coverage.) When your backend identity equals your network identity nothing is
+changed at all. The mapping never touches your answers: CDS Hooks and questionnaire answers
+are relayed back exactly as your system sent them.
+
+A known limitation of the mapping: a questionnaire request can carry a Coverage that names its
+payer only by a reference to an Organization the request does not carry — the Coverage a
+provider's gateway adds from its system of record when the EHR sent none, and the
+questionnaire requests a provider's gateway builds for its own workflow, carry the Coverage
+alone. With the mapping set, such a request is refused (422, the payor reference resolves to
+no resource), because the identity cannot be read from the request. Requests that carry the
+payor identifier on the Coverage, or the Organization beside it, are mapped as described. A PAS submission your system pends is
+currently followed up by the gateway, which returns an answer assembled from your system's
+later decision instead of the pended response.
 
 Both env vars are **all-or-nothing**: setting one without the other is a startup error.
 Leaving both unset (the default) disables this mapping entirely — requests forward with
@@ -427,40 +664,63 @@ version-neutral and is never framed.
 The gateway BUILDS every prior-authorization contract at three Da Vinci generations —
 CRD/DTR/PAS at `2.0.x`, `2.1.x`, and `2.2.x` (plus PDex `2.1.x`). That is its **native**
 capability. What it **declares** to the network is a separate, operator-chosen subset, and
-only the declared set routes.
+the declared set is the starting point for routing; qualified native lanes also
+support the native-reach and inbound-honor rules below.
 
 | Env var | Description |
 |---|---|
 | `SHN_CONTRACT_VERSIONS` | This gateway's own **declared** exchange-contract versions: comma-separated `<contract>@<line>` tokens, e.g. `pa.crd@2.2, pa.dtr@2.2, pa.pas@2.2`. Drives leg selection, the published `CapabilityStatement`s and `.well-known/davinci-configuration`, and the declaration peers route against. Must be a **subset of the native set** (`pa.crd@{2.0,2.1,2.2}`, `pa.dtr@{2.0,2.1,2.2}`, `pa.pas@{2.0,2.1,2.2}`, `pa.pdex@2.1`) — a token outside it is a boot error, not a routing outcome. Unset ⇒ the build default, the canonical `2.0` line (`pa.crd@2.0`, `pa.dtr@2.0`, `pa.pas@2.0`, `pa.pdex@2.1`). |
-| `FHIR_VALIDATE_URL_2_1` | The `$validate` endpoint hosting the **2.1** line's IG packages. **Required** whenever `SHN_CONTRACT_VERSIONS` declares any `@2.1` line. |
-| `FHIR_VALIDATE_URL_2_2` | The `$validate` endpoint hosting the **2.2** line's IG packages. **Required** whenever `SHN_CONTRACT_VERSIONS` declares any `@2.2` line. |
+| `FHIR_VALIDATE_URL_2_1` | Optional **2.1** `$validate` address override. Compose default: `http://shn-validator-2-1:8080/fhir`. |
+| `FHIR_VALIDATE_URL_2_2` | Optional **2.2** `$validate` address override. Compose default: `http://shn-validator-2-2:8080/fhir`. |
 
 **One validator per line — this is not optional.** A FHIR server loads exactly **one**
 version of a given IG package, so a single HAPI cannot host CRD 2.0.1 and CRD 2.2.1 at the
 same time; a 2.2 payload validated against a 2.0-loaded server is not validated, it is
 mis-validated. Each declared non-canonical line therefore needs its own `$validate` lane.
-`FHIR_VALIDATE_URL` (the base variable, above) remains the `2.0` lane. A gateway that
-declares a line with no lane configured for it **refuses to start**:
+`FHIR_VALIDATE_URL` (the base variable, above) remains the canonical `2.0` lane.
+The gateway resolves explicit per-line override first, then the existing canonical
+endpoint, then the Compose default. Kit child ports and hosted service addresses
+continue to come from their existing launcher wiring; they need not use Compose DNS.
+Malformed override URLs refuse startup. Explicit endpoints keep their existing
+startup behavior; setting an override does not trigger synthetic qualification.
 
-```
-gateway: SHN_CONTRACT_VERSIONS declares pa.pas@2.2 but no FHIR validator lane is
-configured for line 2.2: set FHIR_VALIDATE_URL_2_2 to a $validate endpoint hosting
-that line's IG packages (one HAPI hosts exactly one version of an IG) — refusing to
-declare a line this gateway cannot validate (FR-36/FR-G29)
-```
+A newly defaulted declared CRD, DTR or PAS line must pass the complete finite
+synthetic qualification before the gateway serves traffic, even when it is the
+only declared line. Metadata availability only permits that corpus to begin;
+a metadata 200 alone is insufficient. Failure returns a boot error naming the
+line, endpoint and qualification reason. The total startup bound is 600 seconds.
+The image's `/healthcheck` is an executable observing a qualification marker,
+not an HTTP readiness endpoint.
+The supplied validator image withholds public metadata and validation until its own
+finite worker succeeds, then each gateway performs the corpus above. Its external
+`8080/fhir` address stays the same; no extra readiness flag or operator sequence is
+required. A terminal image qualification failure remains unavailable until restart
+and is reported by the image's `/healthcheck`.
 
-That is deliberate: advertising a line you cannot certify would put unvalidated payloads
-on the wire (FR-36).
+Undeclared defaults qualify in the background without delaying configured `2.0`
+startup. Until qualification succeeds they cannot satisfy routing or inbound
+frame admission. Each default receives one finite attempt per gateway lifecycle;
+a complete failed attempt is terminal until restart. Shutdown cancels and joins
+workers. Embedders using `Handler` or `HandlerWithClock` must close the returned
+`io.Closer` after stopping HTTP service; tests can use `HandlerForTest` or
+`HandlerForTestWithClock` and invoke their cleanup before releasing dependencies.
+Ordinary validation verdicts do not change synthetic readiness.
+
+PDex has one native line and retains its canonical/configured compatibility.
+That canonical alias cannot satisfy a CRD, DTR or PAS `2.1` request. A qualified
+`2.1` default can serve those contracts while PDex still uses its canonical endpoint.
 
 ### Opting a line in
 
 1. **Stand up the line's validator** — an IG-loaded `$validate` for that line's package
    set. The shipped sidecar image builds per line:
-   `docker build --build-arg SHN_IG_LINE=2.2 deploy/validator/`. Point
-   `FHIR_VALIDATE_URL_2_2` at it.
+   `docker build --build-arg SHN_IG_LINE=2.2 deploy/validator/`. Use its default
+   Compose address, or point `FHIR_VALIDATE_URL_2_2` at a different address.
 2. **Widen `SHN_CONTRACT_VERSIONS`** to include the new tokens *alongside* the ones you
-   already declare (see the grow-only rule below), and restart the gateway. It will refuse
-   to boot if step 1 is incomplete — that check is your safety net.
+   already declare (see the grow-only rule below), and restart the gateway. A default
+   endpoint must complete synthetic qualification before boot succeeds. An explicit
+   well-formed URL retains URL-only startup and can boot while unreachable; verify
+   that endpoint operationally before advertising its line.
 3. **Re-register or rotate** (`shn rotate`) so the new declaration reaches the registrar.
    Declaration tracks the current build/config, and it is published at
    registration/rotation — not continuously.
@@ -471,11 +731,10 @@ on the wire (FR-36).
 that peer routes legs at your *old* line. Those legs still complete: a gateway **honors**
 an inbound request's declared line whenever it can both natively build and validate at
 it — a wider predicate than its own declared set — so in-flight and stale-routed legs are
-answered correctly rather than refused. That predicate is narrower than it sounds on a real
-deployment, though: your validator lanes are themselves built from your declared set, so
-`laned` ⊆ declared and the honor window collapses to ≈ your declared set — it buys no
-cross-line width against a stale-routed peer, only cross-contract width within a line you
-already declare, which matters most mid-roll across a multi-instance fleet.
+answered correctly rather than refused. Configured explicit lanes and successfully
+qualified default lanes can cover undeclared native lines, widening this honor window.
+An unavailable default never grants admission, and the PDex canonical compatibility
+alias cannot satisfy a CRD, DTR or PAS request at the same numeric line.
 
 **Declared-set changes must grow, never swap or shrink.** Adding a line is safe in either
 rollout order. **Removing** one is a breaking operation: a pended prior-authorization pins
@@ -489,21 +748,19 @@ half strands pends.
 
 You can point `FHIR_VALIDATE_URL_2_1`/`FHIR_VALIDATE_URL_2_2` at a line's validator **without**
 adding that line's tokens to `SHN_CONTRACT_VERSIONS`. A configured-but-undeclared lane, for any
-line this build natively speaks, still enters the lane map — this is deliberate opt-in headroom
-for cross-version translation (FR-G52), and it has **two consequences, both grow-only, both
-worth understanding before you flip it**:
+line this build natively speaks, enters the lane map. A default lane enters after
+qualification. Both make the line available in these two directions:
 
 1. **Egress:** a peer that declares that line becomes reachable by **native reach** (routing
    arm 2 — this build constructs a genuine native payload at that line, zero transform loss)
-   even though this deployment never advertises the line itself. Without the lane configured,
+   even though this deployment never advertises the line itself. Without an explicit or qualified default lane,
    the same peer would only be reachable, if at all, through a transform chain (arm 3) or a
    legible refusal.
 2. **Inbound:** the SAME lane map backs what this gateway **honors** on an inbound request-frame
    `contractVersion` claim (`docs/PARTICIPANT_PROTOCOL.md` §8.6's *native ∩ laned* rule, wider
    than the declared set by design) — so configuring an undeclared lane widens what you'll
    silently accept from a stale-routed peer too, not only what you can build for one. This is
-   the bidirectional nature of the opt-in: there is one lane map, read by both routing
-   directions.
+   the bidirectional lane-admission rule, read by both routing directions.
 
 Lanes obey the same grow-only discipline as declared lines, for the identical pend-stranding
 reason: a resumed pended exchange needs its pinned line's lane to remain configured for as long
@@ -530,18 +787,18 @@ This is now closed **honestly**, on both sides of the wire:
 - **Request side:** DTR's `$questionnaire-package` input profile makes `coverage` **1..1**
   at every line (min=1 everywhere; 2.2 additionally tightens `max` from `*` to `1` —
   verified live against the pinned 2.2.0 package). `DTRDef.QuestionnairePackageCoverageRequired`
-  is `true` only at 2.2: `buildQuestionnairePackageRequestAtLine` /
-  `buildQuestionnairePackageOrderRequestAtLine` refuse an empty coverage **before the wire**
-  at that line — a legible local error naming the line and the cardinality, replacing what
-  would otherwise be a real partner's opaque 400. The provider-side fetch (`originate.go`)
-  now always attaches the requester's own (SoR-derived) Coverage at 2.2, not only when
-  targeting the reference payer as before.
+  is `true` only at 2.2. The questionnaire requests the gateway originates are built with
+  the SDK's `BuildQuestionnairePackageParameters` at the selected line: they always carry
+  the Coverage records your system of record returns for the patient (at every line), and
+  at 2.2 a system of record holding more than one Coverage for the patient is refused
+  **before the wire** (422) — a legible local error naming the line and the cardinality,
+  replacing what would otherwise be a real partner's opaque 400.
 - **Responder side:** the payer's answer is its OWN Da Vinci endpoint's
   `$questionnaire-package`, relayed verbatim — the gateway builds no package itself. (It
   used to, for the in-process payer that has since been removed; a 2.2 package's mandatory
   `QuestionnaireResponse` entry is now the payer's to produce.) The requester's Coverage is
-  still attached on the fetch leg at 2.2, which is what lets a conformant payer derive that
-  entry's subject and coverage reference from a real resource instead of inventing them.
+  carried on the questionnaire request at every line, which is what lets a conformant payer
+  derive that entry's subject and coverage reference from a real resource instead of inventing them.
   Whatever shell comes back is discarded by the consumer — `extractQuestionnaireFromPackage`
   only ever reads the bare `Questionnaire` entry, and the auto-filled/authored
   `QuestionnaireResponse` that crosses into the PAS submission is built separately.

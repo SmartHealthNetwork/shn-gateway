@@ -34,7 +34,11 @@ type PopulateContext struct {
 	SubjectFHIRRef string
 	CoverageRef    string
 	OrderRef       string
-	Authored       time.Time
+	// Order is the order the questionnaire is for, as the payer returned it with its
+	// coverage information in the coverage requirements answer (the order sent when the
+	// payer returned none). OrderRef names it.
+	Order    []byte
+	Authored time.Time
 	// Line is the DTR contract line ("2.0"/"2.1"/"2.2") the fetched
 	// $questionnaire-package was pulled at — selected once at the DTR-fetch leg
 	// (originate.go's select-before-build, F7) and threaded here so the QR the

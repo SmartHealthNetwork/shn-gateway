@@ -6,7 +6,7 @@ import "testing"
 func TestSeedStepsAreProviderDataOnly(t *testing.T) {
 	got := seedStepNames()
 	want := []string{
-		"WaitReady", "CreatePartitions(provider)", "InstallCRLibraries",
+		"WaitReady", "WarmValidate(DEFAULT)", "CreatePartitions(provider)", "InstallCRLibraries",
 		"WarmUpPopulate", "LoadProviderDataBundles(provider)", "WriteSeedMarker(provider)",
 	}
 	if len(got) != len(want) {

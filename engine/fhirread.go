@@ -61,7 +61,7 @@ func ParsePASResponsePatients(b []byte) ([]string, error) {
 			} `json:"resource"`
 		} `json:"entry"`
 	}
-	if err := json.Unmarshal(b, &probe); err != nil {
+	if err := decodeMessage(b, &probe); err != nil {
 		return nil, fmt.Errorf("engine: parse PAS response: %w", err)
 	}
 	var refs []string

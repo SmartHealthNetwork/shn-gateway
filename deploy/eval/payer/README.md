@@ -145,9 +145,10 @@ answer CRD hooks and PAS submissions:
    co-bundled reference implementation — useful to see conformant
    Da Vinci decisioning behavior without standing up anything of your own.
 2. **Native-forward to your own Da Vinci endpoint.** Point
-   `PAYER_DAVINCI_BASE_URL` / `PAYER_DAVINCI_CDS_BASE_URL` (and the
-   `PAYER_DAVINCI_*_SERVICE_ID` / `*_HOOK` pair) at your production CRD and
-   PAS services instead of `br-payer`, and drop the `br-payer` service
+   `PAYER_DAVINCI_BASE_URL` / `PAYER_DAVINCI_CDS_BASE_URL` at your production CRD and
+   PAS services (the gateway sends each CDS Hooks request to the service your
+   `/cds-services` listing names for its hook; `PAYER_DAVINCI_CRD_SERVICE_ID` /
+   `PAYER_DAVINCI_DISPATCH_SERVICE_ID` name one only when your listing offers several) instead of `br-payer`, and drop the `br-payer` service
    entirely.
 3. **A custom Adjudicator.** If your decisioning doesn't speak Da Vinci CRD
    hooks or PAS natively, implement `shnsdk.Adjudicator` and run it behind

@@ -133,9 +133,9 @@ func TestClassifyResolution_RealA1(t *testing.T) {
 	}
 
 	// Control: a pended (queued) Bundle is NOT approved (a non-resolution is never a silent pass).
-	pended, err := shnsdk.BuildPendedResponse("Patient/MBR-OX", "corr-p", []string{"operative-report"}, pasTailClock())
+	pended, err := testPendedResponse("Patient/MBR-OX", "corr-p", "operative-report", pasTailClock())
 	if err != nil {
-		t.Fatalf("BuildPendedResponse: %v", err)
+		t.Fatalf("testPendedResponse: %v", err)
 	}
 	if _, ok := g.classifyResolution(pended); ok {
 		t.Fatalf("classifyResolution must NOT read a pended response as approved")

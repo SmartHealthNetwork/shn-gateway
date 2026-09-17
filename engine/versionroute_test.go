@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
@@ -68,6 +69,29 @@ func TestSelectContractToken(t *testing.T) {
 			tok, refused := selectContractToken(own, tc.peer, len(tc.peer) > 0, tc.contract)
 			if tok != tc.wantToken || refused != tc.wantRefused {
 				t.Fatalf("selectContractToken = (%q,%v), want (%q,%v)", tok, refused, tc.wantToken, tc.wantRefused)
+			}
+		})
+	}
+}
+
+// TestSilentPeerRoutesAtHighestDeclared: a silent peer routes at
+// the originator's highest DECLARED line, not its highest native line. The
+// build is tri-line native; the declaration decides.
+func TestSilentPeerRoutesAtHighestDeclared(t *testing.T) {
+	cases := []struct {
+		name string
+		own  []string
+		want string
+	}{
+		{"declares 2.0 only, native reaches 2.2", []string{"pa.pas@2.0", "pa.crd@2.0"}, "pa.pas@2.0"},
+		{"declares 2.0 and 2.2", []string{"pa.pas@2.0", "pa.pas@2.2"}, "pa.pas@2.2"},
+		{"declares 2.1 only", []string{"pa.pas@2.1"}, "pa.pas@2.1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tok, refused := selectContractToken(tc.own, nil, false, "pa.pas")
+			if refused || tok != tc.want {
+				t.Fatalf("silent peer: got (%q, refused=%v), want %q", tok, refused, tc.want)
 			}
 		})
 	}
@@ -525,7 +549,7 @@ func TestOriginateLegFallbackStaysIntersectionOnly(t *testing.T) {
 	}, pending: map[string]pendState{}}
 
 	_, err := g.OriginateLeg(context.Background(), nil, "payer-22", "pas-claim", "pci-1", "corr-1", "",
-		Content{WorkstreamType: workstreamPA, ProfileID: "", Bytes: []byte(`{}`)})
+		Content{WorkstreamType: workstreamPA, ProfileID: "", Payload: testRequest([]byte(`{}`))})
 	if err == nil {
 		t.Fatal("want refusal — the fallback must never route via native reach or a transform chain")
 	}
@@ -1000,6 +1024,73 @@ func TestD7CRDIngressArm3IdentityChainKeepsEgressBytes(t *testing.T) {
 	}
 }
 
+// TestD7CRDIngressRefusesAWalkThatChangesBytes is the rejection row for the
+// ingress's walk-equality guard: the CDS Hooks request is carried unchanged
+// to the payer's line, so a translation step on the route that changes any
+// byte (here one byte of the request, or trailing whitespace) makes the
+// ingress refuse (502) before anything reaches the Hub. The pa.crd row is
+// swapped for the length of the test only.
+func TestD7CRDIngressRefusesAWalkThatChangesBytes(t *testing.T) {
+	for _, row := range []struct {
+		name   string
+		change func([]byte) []byte
+	}{
+		{"one byte of the request changed", func(in []byte) []byte {
+			out := bytes.Clone(in)
+			i := bytes.Index(out, []byte(`"hookInstance":"`))
+			if i < 0 {
+				return append(out, ' ')
+			}
+			j := i + len(`"hookInstance":"`)
+			out[j] ^= 0x01
+			return out
+		}},
+		{"whitespace appended", func(in []byte) []byte { return append(bytes.Clone(in), '\n') }},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			idx := -1
+			for i, s := range compatManifest {
+				if s.Contract == "pa.crd" && s.From == "2.0" && s.To == "2.1" {
+					idx = i
+				}
+			}
+			if idx < 0 {
+				t.Fatal("no pa.crd 2.0->2.1 row")
+			}
+			saved := compatManifest[idx]
+			t.Cleanup(func() { compatManifest[idx] = saved })
+			var walked int
+			compatManifest[idx].Up = func(p []byte, x ExchangeIdentity) ([]byte, LossReport, error) {
+				walked++
+				return row.change(p), LossReport{Module: "pa.crd 2.0->2.1", Source: "2.0", Target: "2.1"}, nil
+			}
+
+			env := newInProcessExchange(t)
+			d7SetPeerContractVersions(t, env, "pa.crd@2.2")
+			fake := shnsdk.NewFakeValidator()
+			env.originator.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"2.0": fake, "2.1": fake, "2.2": fake}
+			env.originator.cfg.EgressNativeLines = []string{"2.0"} // D1c: force arm 3 through the swapped row
+			evs := d7CaptureEvents(env)
+
+			rec := httptest.NewRecorder()
+			env.originator.handleCRDIngress(rec, env.crdIngressRequest(t))
+
+			if walked != 1 {
+				t.Fatalf("the swapped step ran %d times, want 1 — the row did not exercise the arm-3 walk", walked)
+			}
+			if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "the CDS Hooks request cannot be carried to the payer's line unchanged") {
+				t.Fatalf("ingress = %d %s, want 502 naming the unchanged-carry refusal", rec.Code, rec.Body.String())
+			}
+			if n := len(d7EventsOfKind(*evs, "leg.originated")); n != 0 {
+				t.Fatalf("got %d leg.originated events, want 0", n)
+			}
+			if env.routeHitCount() != 0 {
+				t.Fatalf("route hits = %d, want 0 — a refused request never reaches the Hub", env.routeHitCount())
+			}
+		})
+	}
+}
+
 // TestD7CRDIngressRefusalNamesMissingLane is pin (d): a pa.crd@2.2-only peer
 // with NO 2.2 validator lane has no honest bridge — arm 2 cannot reach an
 // unlaned line and arm 3 cannot land on one — so the ingress refuses with the
@@ -1031,5 +1122,45 @@ func TestD7CRDIngressRefusalNamesMissingLane(t *testing.T) {
 	}
 	if env.routeHitCount() != 0 {
 		t.Fatalf("route hits = %d, want 0 — a refused leg never reaches the Hub", env.routeHitCount())
+	}
+}
+
+// TestD7CRDIngressArm3EdgeCaptureHoldsSentBytes: with the edge capture on, the
+// forced identity walk at the ingress runs over the request this gateway
+// sends — the callback removed, obtained prefetch added — so what the capture
+// holds is exactly what the payer's side received, and never the EHR's
+// credential.
+func TestD7CRDIngressArm3EdgeCaptureHoldsSentBytes(t *testing.T) {
+	env := newInProcessExchange(t)
+	d7SetPeerContractVersions(t, env, "pa.crd@2.2")
+	fake := shnsdk.NewFakeValidator()
+	env.originator.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"2.0": fake, "2.1": fake, "2.2": fake}
+	env.originator.cfg.EgressNativeLines = []string{"2.0"} // D1c: force arm 3
+	env.originator.cfg.DemoEdgeCapture = true
+	s := newPrefetchSoR()
+	s.answer(t, "ServiceRequest", searchPage(sorRequest("h1", "Patient/"+prefetchSoRID)))
+	env.originator.cfg.SoR = s.sor()
+	evs := d7CaptureEvents(env)
+	rec := httptest.NewRecorder()
+	env.originator.handleCRDIngress(rec, crdIngressPost(ehrRequest(supported)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("ingress status = %d (%s), want 200", rec.Code, rec.Body.String())
+	}
+	transformed := d7OneEventOfKind(t, *evs, legTransformedKind)
+	c, ok := env.originator.edgeCaptureLookup(transformed.CorrelationID)
+	if !ok {
+		t.Fatal("no edge capture for the transformed leg")
+	}
+	sent := sentRequest(t, env)
+	if !bytes.Equal(c.Before, sent) || !bytes.Equal(c.After, sent) {
+		t.Fatalf("capture does not hold the sent bytes:\nbefore = %s\nafter  = %s\nsent   = %s", c.Before, c.After, sent)
+	}
+	for _, s := range []string{"fhirAuthorization", "ehr-secret-token", "fhirServer"} {
+		if bytes.Contains(c.Before, []byte(s)) {
+			t.Fatalf("capture holds %s: %s", s, c.Before)
+		}
+	}
+	if v, ok := valueOf(t, c.After, "prefetch", "serviceHistory"); !ok || !strings.Contains(v, `"h1"`) {
+		t.Fatalf("capture lacks the obtained serviceHistory: %s", c.After)
 	}
 }

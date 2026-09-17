@@ -8,9 +8,13 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"log"
 	"net/http"
 	"strings"
+	"time"
 
+	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -24,7 +28,7 @@ func firstOrder(req ingressCDSRequest) []byte {
 		var probe struct {
 			ResourceType string `json:"resourceType"`
 		}
-		_ = json.Unmarshal(e.Resource, &probe)
+		_ = decodeMessage(e.Resource, &probe)
 		if probe.ResourceType == "ServiceRequest" || probe.ResourceType == "DeviceRequest" {
 			return e.Resource
 		}
@@ -42,7 +46,7 @@ func orderSubjectRef(orderJSON []byte) (string, bool) {
 			Reference string `json:"reference"`
 		} `json:"subject"`
 	}
-	if err := json.Unmarshal(orderJSON, &probe); err != nil || probe.Subject.Reference == "" {
+	if err := decodeMessage(orderJSON, &probe); err != nil || probe.Subject.Reference == "" {
 		return "", false
 	}
 	return probe.Subject.Reference, true
@@ -56,7 +60,7 @@ func orderSubjectRef(orderJSON []byte) (string, bool) {
 // bindBundleSubject (payer.go:149).
 func (g *Gateway) conformantCRDBindContext(ctx context.Context, reqJSON []byte, tokSubject string) (srJSON, covJSON []byte, status int, msg string) {
 	var req ingressCDSRequest
-	if err := json.Unmarshal(reqJSON, &req); err != nil {
+	if err := decodeMessage(reqJSON, &req); err != nil {
 		return nil, nil, http.StatusBadRequest, "parse cds request failed"
 	}
 	srJSON = firstOrder(req)
@@ -92,6 +96,107 @@ func (g *Gateway) conformantCRDBindContext(ctx context.Context, reqJSON []byte, 
 	return srJSON, covJSON, 0, ""
 }
 
+// CRDEmbeddedValidatedEvent is the observer event kind for a FHIR resource
+// embedded in a payer's CDS Hooks answer that was validated at the served CRD
+// line. The validation only observes: its outcome never changes the answer.
+const CRDEmbeddedValidatedEvent = "crd.embedded.validated"
+
+// crdEmbeddedValidation is the metadata a CRDEmbeddedValidatedEvent carries.
+type crdEmbeddedValidation struct {
+	Path         string `json:"path"`
+	ResourceType string `json:"resourceType"`
+	Line         string `json:"line"`
+	Outcome      string `json:"outcome"` // valid | invalid | unavailable
+}
+
+// Bounds of the embedded validation one answer gets.
+const (
+	crdEmbeddedValidationMax     = 16
+	crdEmbeddedValidationTimeout = 5 * time.Second
+)
+
+// observeCRDEmbedded validates each resource a CDS Hooks answer embeds (in a
+// system action, or in a card suggestion's action) at the served CRD line, and
+// records each outcome as a CRDEmbeddedValidatedEvent and a log line. Nothing
+// is refused: a payer's content that does not validate is the payer's to fix,
+// and the answer is relayed as it is.
+func (g *Gateway) observeCRDEmbedded(ctx context.Context, leg, corr string, answer relay.Payload) {
+	raw, err := relay.Transmit(answer, relay.Check(answerKey(leg, relay.OutcomeAnswered)))
+	if err != nil {
+		return // the response transmit refuses it too
+	}
+	type action struct {
+		Resource json.RawMessage `json:"resource"`
+	}
+	var doc struct {
+		SystemActions []action `json:"systemActions"`
+		Cards         []struct {
+			Suggestions []struct {
+				Actions []action `json:"actions"`
+			} `json:"suggestions"`
+		} `json:"cards"`
+	}
+	if decodeMessage(raw, &doc) != nil {
+		return
+	}
+	type embedded struct {
+		path     string
+		resource json.RawMessage
+	}
+	var found []embedded
+	for i, a := range doc.SystemActions {
+		found = append(found, embedded{fmt.Sprintf("systemActions[%d].resource", i), a.Resource})
+	}
+	for i, c := range doc.Cards {
+		for j, s := range c.Suggestions {
+			for k, a := range s.Actions {
+				found = append(found, embedded{fmt.Sprintf("cards[%d].suggestions[%d].actions[%d].resource", i, j, k), a.Resource})
+			}
+		}
+	}
+	line := answerLineOr(ctx, "pa.crd")
+	validator := g.validatorForContractLine("pa.crd", line)
+	ctx, cancel := context.WithTimeout(ctx, crdEmbeddedValidationTimeout)
+	defer cancel()
+	if len(found) > crdEmbeddedValidationMax {
+		log.Printf("gateway: %s answer embeds %d resources; the first %d are validated", leg, len(found), crdEmbeddedValidationMax)
+		found = found[:crdEmbeddedValidationMax]
+	}
+	for _, e := range found {
+		if len(e.resource) == 0 || string(e.resource) == "null" {
+			continue
+		}
+		var head struct {
+			ResourceType string `json:"resourceType"`
+		}
+		_ = json.Unmarshal(e.resource, &head)
+		v := crdEmbeddedValidation{Path: e.path, ResourceType: head.ResourceType, Line: line}
+		switch {
+		case validator == nil:
+			v.Outcome = "unavailable"
+		default:
+			res, err := validator.Validate(ctx, e.resource, "")
+			switch {
+			case err != nil:
+				v.Outcome = "unavailable"
+			case res.Valid:
+				v.Outcome = "valid"
+			default:
+				v.Outcome = "invalid"
+			}
+		}
+		log.Printf("gateway: %s answer %s (%s) at CRD %s: %s (observed, not enforced)", leg, v.Path, v.ResourceType, v.Line, v.Outcome)
+		if g.cfg.Observer == nil {
+			continue
+		}
+		detail, err := json.Marshal(v)
+		if err != nil {
+			continue
+		}
+		g.observe(ObserverEvent{Kind: CRDEmbeddedValidatedEvent, Direction: "validate", LegType: leg, CorrelationID: corr, Op: v.Path, Detail: string(detail)})
+	}
+}
+
 // handleCRDNativeInbound serves the conformant CRD leg: subject-bind on the conformant shape,
 // ingress-validate the SR + coverage, then forward the VERBATIM conformant bytes to the responder
 // (an injected LegResponder decides / native forwards to the real RI). Mirrors handleCRDInbound's structure for
@@ -115,7 +220,7 @@ func (g *Gateway) handleCRDNativeInbound(w http.ResponseWriter, r *http.Request,
 	}
 	result, err := g.cfg.Responder.Handle(ctx, "crd-order-select", env.Metadata.CorrelationID, tok.Subject, reqJSON)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "responder failed"})
+		g.responderFailed(w, "crd-order-select", err)
 		return
 	}
 	if result.Status != 0 {
@@ -123,5 +228,6 @@ func (g *Gateway) handleCRDNativeInbound(w http.ResponseWriter, r *http.Request,
 			env.Metadata.CorrelationID, result, tok.Subject, env.Metadata.Sender, "", answerTok)
 		return
 	}
-	g.respondLeg(w, r, "payer-coverage", "crd-cards", "crd-order-select", env.Metadata.CorrelationID, result.ResponseFHIR, tok.Subject, env.Metadata.Sender, "", answerTok, result.ResponseRelayed)
+	g.observeCRDEmbedded(ctx, "crd-order-select", env.Metadata.CorrelationID, result.Response)
+	g.respondLeg(w, r, "payer-coverage", "crd-cards", "crd-order-select", env.Metadata.CorrelationID, result.Response, tok.Subject, env.Metadata.Sender, "", answerTok)
 }

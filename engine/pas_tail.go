@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -45,7 +46,7 @@ import (
 // resolved by submitClaimAndResolve before this call, so the wire bytes and the
 // routed token cannot disagree.
 func buildPASSubmitBundle(line string, brPayer bool, orderJSON, qrJSON []byte, patientRef, coverageRef, member, corr string, created time.Time, payer shnsdk.PayerIdentifier) ([]byte, error) {
-	return shnsdk.BuildConformantClaimBundleAtLine(line, shnsdk.ConformantClaimInputs{
+	return buildAuthoredPASSubmit(line, shnsdk.ConformantClaimInputs{
 		QR: qrJSON, SR: orderJSON, PatientRef: patientRef, CoverageRef: coverageRef, MemberID: member,
 		Corr: corr, Created: created,
 		ContainedInsurer: brPayer,
@@ -74,7 +75,7 @@ func buildPASSubmitBundle(line string, brPayer bool, orderJSON, qrJSON []byte, p
 // re-synthesize the error to a string and DROP the *RelayError sentinel (the %w audit). The caller
 // does the FR-23 StoreAuthNumber + writes the response surface. respJSON is returned on every path
 // (incl. failures) for diagnosis; it is nil only when the failure precedes the leg call.
-func (g *Gateway) submitClaimAndResolve(ctx context.Context, r *http.Request, pci string, orderJSON, supplierJSON, qrJSON []byte, patientRef, coverageRef, member string, payer shnsdk.PayerIdentifier, recipient string) (shnsdk.PriorAuthResult, []byte, int, string, error) {
+func (g *Gateway) submitClaimAndResolve(ctx context.Context, r *http.Request, pci string, orderJSON, supplierJSON []byte, source *dtrBuildSource, patientRef, coverageRef, member string, payer shnsdk.PayerIdentifier, recipient string) (shnsdk.PriorAuthResult, []byte, int, string, error) {
 	pasCorr := g.cfg.CorrelationGen()
 	// Select-before-build: this tail used to let OriginateLeg select
 	// INTERNALLY off an empty Content.ProfileID, which put the choice AFTER the bundle
@@ -86,6 +87,10 @@ func (g *Gateway) submitClaimAndResolve(ctx context.Context, r *http.Request, pc
 		return shnsdk.PriorAuthResult{}, nil, http.StatusBadGateway, terr.Error(), terr
 	}
 	targetLine := shnsdk.LineOf(route.Token)
+	qrJSON, err := buildPASAttachment(source, targetLine)
+	if err != nil {
+		return shnsdk.PriorAuthResult{}, nil, http.StatusBadGateway, "build PAS attachment failed", err
+	}
 	bundleJSON, err := buildPASSubmitBundle(route.BuildLine, relaysReferencePayerBytes(g.cfg.OriginationProfile), orderJSON, qrJSON, patientRef, coverageRef, member, pasCorr, g.cfg.Clock(), payer)
 	if err != nil {
 		return shnsdk.PriorAuthResult{}, nil, http.StatusInternalServerError, "build bundle failed", nil
@@ -94,7 +99,7 @@ func (g *Gateway) submitClaimAndResolve(ctx context.Context, r *http.Request, pc
 	if err != nil {
 		return shnsdk.PriorAuthResult{}, nil, http.StatusInternalServerError, "PAS supplier linkage failed", err
 	}
-	bundleJSON, err = g.completePASRequest(ctx, bundleJSON)
+	bundleJSON, err = g.completeAuthoredPASRequest(ctx, bundleJSON, qrJSON, orderJSON, coverageRef, relaysReferencePayerBytes(g.cfg.OriginationProfile))
 	if err != nil {
 		return shnsdk.PriorAuthResult{}, nil, http.StatusBadGateway, "PAS evidence linkage failed", err
 	}
@@ -102,19 +107,22 @@ func (g *Gateway) submitClaimAndResolve(ctx context.Context, r *http.Request, pc
 	if aerr != nil {
 		return shnsdk.PriorAuthResult{}, nil, http.StatusBadGateway, aerr.Error(), aerr
 	}
-	if status, msg := g.validateFHIR(ctx, bundleJSON, "egress", targetLine); status != 0 {
+	if status, msg := g.validatePASAttachments(ctx, bundleJSON, targetLine, source != nil); status != 0 {
+		return shnsdk.PriorAuthResult{}, nil, status, msg, nil
+	}
+	if status, msg := g.validateFHIRForContract(ctx, bundleJSON, "egress", "pa.pas", targetLine, ""); status != 0 {
 		return shnsdk.PriorAuthResult{}, nil, status, msg, nil
 	}
 	// recipient is the payer HOLDER resolved from the member's real Coverage at the fresh origination
 	// site (FR-G40) — no default; it replaced the deleted Config.CounterpartID here.
 	respJSON, err := g.OriginateLeg(ctx, r, recipient, "pas-claim", pci, pasCorr, "",
-		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Bytes: bundleJSON})
+		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Payload: sealRequest(relay.BuilderSDKPASSubmit, bundleJSON, "application/fhir+json")})
 	if err != nil {
 		// Return the RAW err (not just err.Error()) so the caller can relayOriginationError a framed
 		// *RelayError verbatim; msg stays for the non-relay writeJSON fallback (byte-identical).
 		return shnsdk.PriorAuthResult{}, nil, http.StatusBadGateway, err.Error(), err
 	}
-	if status, msg := g.validateFHIRPayerIngress(ctx, respJSON, targetLine); status != 0 {
+	if status, msg := g.validateFHIRPayerIngress(ctx, respJSON, targetLine, "pa.pas"); status != 0 {
 		return shnsdk.PriorAuthResult{}, respJSON, status, msg, nil
 	}
 	// classifyResolution returns approved only for a genuine terminal A1 (the payer gate has already

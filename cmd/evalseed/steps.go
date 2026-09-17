@@ -19,6 +19,12 @@ type step struct {
 func seedSteps() []step {
 	return []step{
 		{"WaitReady", func(ctx context.Context, c *fhirseed.Client) error { return c.WaitReady(ctx, 20*time.Minute) }},
+		// The cold first $validate is paid here, under the warm-up's own deadline, before any
+		// seed request and before the marker the eval smoke waits on.
+		{"WarmValidate(DEFAULT)", func(ctx context.Context, c *fhirseed.Client) error {
+			_, err := c.WarmValidate(ctx, "DEFAULT")
+			return err
+		}},
 		{"CreatePartitions(provider)", func(ctx context.Context, c *fhirseed.Client) error {
 			return c.CreatePartitions(ctx, []string{"provider"})
 		}},

@@ -6,10 +6,12 @@ package fhirsor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 	fhir "github.com/samply/golang-fhir-models/fhir-models/fhir"
@@ -24,12 +26,13 @@ var _ engine.SystemOfRecord = (*SoR)(nil)
 // enforced by the partition URL passed to New; a single per-role SoR instance handles one
 // partition (WithMemberSystem is no longer needed).
 type SoR struct {
-	fc *fhirclient.Client
+	fc  *fhirclient.Client
+	now func() time.Time
 }
 
 // New returns a SoR over fc. The FHIR base URL embedded in fc determines partition locality.
 func New(fc *fhirclient.Client) *SoR {
-	return &SoR{fc: fc}
+	return &SoR{fc: fc, now: time.Now}
 }
 
 // NewFromURL builds a SoR over a FHIR base URL, constructing the FHIR client
@@ -381,12 +384,11 @@ func (s *SoR) SupplementalReportContext(ctx context.Context, memberID string) ([
 	return rewriteSubject(raw, "Patient/"+memberID), true, nil
 }
 
-// FacilityRecords returns the external facility's records for the member, keyed by FHIR resource
-// type (FR-24, UC-05). Searched by TYPE (no code filter) — production-faithful; served by the
-// facility holder's fhirsor over its own base. Unknown member / no records => false.
-//
-// Each resource's subject.reference is rewritten to "Patient/<memberID>" (same rationale as
-// SupplementalReport: HAPI-scoped IDs differ from the canonical member ID).
+// FacilityRecordsContext returns the external facility's first record of each type for the member,
+// keyed by FHIR resource type (FR-24, UC-05), exactly as the server returned it. Unknown member /
+// no records => false. The gateway reads a facility's records through SearchPatientContext
+// instead, which returns every matching record; this read remains for callers of the
+// SystemOfRecord interface.
 func (s *SoR) FacilityRecordsContext(ctx context.Context, memberID string) (map[string][]byte, bool, error) {
 	_, pid, ok, err := s.resolvePatient(ctx, memberID)
 	if err != nil {
@@ -402,7 +404,7 @@ func (s *SoR) FacilityRecordsContext(ctx context.Context, memberID string) (map[
 			return nil, false, safeReadError(err)
 		}
 		if found {
-			out[rtype] = rewriteSubject(raw, "Patient/"+memberID)
+			out[rtype] = raw
 		}
 	}
 	if len(out) == 0 {
@@ -413,7 +415,7 @@ func (s *SoR) FacilityRecordsContext(ctx context.Context, memberID string) (map[
 
 // rewriteSubject returns resourceJSON with "subject":{"reference":"<ref>"} overwritten.
 // Used to normalize HAPI-internal patient IDs to the canonical "Patient/<memberID>" form
-// that the substrate protocol layer uses for bundle-internal patient consistency checks
+// that the gateway uses for bundle-internal patient consistency checks
 // (the payer's bindBundleSubject, H2/H3).
 //
 // NOTE — two refs, two rules (do NOT "simplify" this away): only the SUBJECT is canonicalized.
@@ -447,13 +449,10 @@ func rewriteSubject(resourceJSON []byte, ref string) []byte {
 // result or the patient cannot be resolved. The caller parses the product coding via
 // shnsdk.ParseOrderProductCoding — the gateway never synthesizes the order.
 //
-// The returned order's subject.reference is rewritten to "Patient/<memberID>" (same rationale as
-// SupplementalReport/FacilityRecords): HAPI stores the order with a partition-scoped subject
-// (e.g. "Patient/pat-mbrox-provider"), but the substrate protocol layer + the payer-side AI-11
-// order-dispatch bind resolve the patient by the canonical MEMBER id. Without this the payer-gw's
-// conformantCRDDispatchBind cannot resolve the dispatched order's subject → 403 "inconsistent
-// patient in order-dispatch". The order's id + performer are preserved (the handler reads them
-// to build the dispatchedOrders ref + resolve the supplier).
+// The order is returned exactly as the server holds it, its subject included. The gateway
+// names the patient for the network itself when it builds a request from the order; the
+// connector never rewrites a record. The order's id and performer are read by the caller (the
+// dispatched order reference and the supplier).
 func (s *SoR) OpenOrderContext(ctx context.Context, memberID string) ([]byte, bool, error) {
 	_, pid, ok, err := s.resolvePatient(ctx, memberID)
 	if err != nil {
@@ -470,34 +469,49 @@ func (s *SoR) OpenOrderContext(ctx context.Context, memberID string) ([]byte, bo
 			return nil, false, safeReadError(err)
 		}
 		if found {
-			return rewriteSubject(raw, "Patient/"+memberID), true, nil
+			return raw, true, nil
 		}
 	}
 	return nil, false, nil
 }
 
-// OpenCoverage returns the member's Coverage record bytes (FR-G40 routing + payload source):
-// the same beneficiary-scoped Coverage search as CoverageInforce, but returning the raw
-// resource bytes rather than the in-force determination. found=false when the patient cannot
-// be resolved or no Coverage is on file.
-func (s *SoR) OpenCoverageContext(ctx context.Context, memberID string) ([]byte, bool, error) {
+// OpenCoverageContext returns every Coverage record the member has (FR-G40 routing + payload
+// source): the bounded patient search (SearchPatientContext: every page, within the search
+// bounds), returning each matched Coverage's bytes exactly as the server sent them, in the
+// server's order. The result is empty when the patient cannot be resolved or no Coverage is
+// on file. The gateway decides what several records mean; the connector never picks one. A
+// search the server cannot answer is SoRUnavailable; any other failed search (over the
+// bounds, not a searchset, paging outside the server) is SoRInvalidResponse — never a
+// partial answer.
+func (s *SoR) OpenCoverageContext(ctx context.Context, memberID string) ([][]byte, error) {
 	_, pid, ok, err := s.resolvePatient(ctx, memberID)
 	if err != nil {
-		return nil, false, safeReadError(err)
+		return nil, safeReadError(err)
 	}
 	if !ok {
-		return nil, false, nil
+		return nil, nil
 	}
-	b, err := s.fc.Search(ctx, "Coverage", url.Values{
-		"beneficiary": {"Patient/" + pid},
-	})
+	res, err := s.SearchPatientContext(ctx, "Coverage", pid)
 	if err != nil {
-		return nil, false, safeReadError(err)
+		var se *engine.SearchError
+		if errors.As(err, &se) && se.Outcome == engine.SearchUnavailable {
+			return nil, &engine.SoRReadError{Kind: engine.SoRUnavailable}
+		}
+		return nil, &engine.SoRReadError{Kind: engine.SoRInvalidResponse}
 	}
-	if b == nil || len(b.Entry) == 0 {
-		return nil, false, nil
+	var out [][]byte
+	for i, page := range res.Pages {
+		parsed, err := engine.ParseSearchPage(page, "Coverage")
+		if err != nil {
+			return nil, &engine.SoRReadError{Kind: engine.SoRInvalidResponse}
+		}
+		for j, r := range parsed.Resources {
+			if parsed.Match[j] {
+				out = append(out, res.Pages[i][r.Start:r.End])
+			}
+		}
 	}
-	return b.Entry[0].Resource, true, nil
+	return out, nil
 }
 
 // ResolveByReference returns the raw bytes of a resource named by a relative reference
@@ -567,9 +581,14 @@ func (s *SoR) OpenOrder(memberID string) ([]byte, bool) {
 	return v0, v1
 }
 
+// OpenCoverage is the single-record read: it answers only when the member has exactly one
+// Coverage record, and never chooses one of several.
 func (s *SoR) OpenCoverage(memberID string) ([]byte, bool) {
-	v0, v1, _ := s.OpenCoverageContext(context.Background(), memberID)
-	return v0, v1
+	covs, _ := s.OpenCoverageContext(context.Background(), memberID)
+	if len(covs) != 1 {
+		return nil, false
+	}
+	return covs[0], true
 }
 
 func (s *SoR) ResolveByReference(ref string) ([]byte, bool) {

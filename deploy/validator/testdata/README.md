@@ -45,6 +45,17 @@ in this top-level directory and are reused for every line — PDex/CDex are
 line-neutral (a single native line each; see the manifest's `shared` block),
 so there is no per-line variant to vendor.
 
+## Encounter rows
+
+`claim-encounter.json` (top level and per line, identical bytes) is a core Claim
+carrying the R5 backport `Claim.encounter` extension whose value references a
+contained R4 Encounter — the dependency-probe payload that the pre-closure lanes
+refused with `Reference_REF_CantResolveProfile`. The positive readiness row posts
+it unchanged against the core Claim profile; the target-type control replaces the
+contained Encounter with a Patient of the same id and requires exactly the pinned
+`claim-encounter-target-errors.json` outcome (`Reference_REF_BadTargetType`,
+captured from a lane that resolves the extension and its target profile).
+
 ## Controlled Linux child
 
 `process-child/` is a test-only executable used by `verify-process.sh` to control metadata,

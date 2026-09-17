@@ -617,6 +617,11 @@ func adoptionReplica(t *testing.T, pool *pgxpool.Pool, keys *IngressKeyStore, pu
 		},
 		IngressKeys: keys, Replay: NewReplayStore(pool, keys.holderID, now),
 	})
+	t.Cleanup(func() {
+		if g != nil {
+			_ = g.Close()
+		}
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -685,8 +690,8 @@ func adoptionDiscovery(t *testing.T, srv *httptest.Server, bearer string) int {
 	}
 	if resp.StatusCode == http.StatusOK {
 		var doc struct{ Services []struct{ ID, Hook string } }
-		if err := json.Unmarshal(body, &doc); err != nil || len(doc.Services) != 1 || doc.Services[0].ID != "order-select-crd" || doc.Services[0].Hook != "order-select" {
-			t.Fatalf("authenticated discovery did not return the advertised service: %s (%v)", body, err)
+		if err := json.Unmarshal(body, &doc); err != nil || len(doc.Services) != 3 || doc.Services[0].ID != "shn-order-sign" || doc.Services[0].Hook != "order-sign" {
+			t.Fatalf("authenticated discovery did not return the advertised services: %s (%v)", body, err)
 		}
 	}
 	return resp.StatusCode

@@ -40,6 +40,13 @@ func New(baseURL string, hc *http.Client) *Client {
 	}
 	return &Client{strings.TrimRight(baseURL, "/"), hc}
 }
+
+// BaseURL returns the FHIR base URL the client reads, without a trailing slash.
+func (c *Client) BaseURL() string { return c.base }
+
+// HTTPClient returns the HTTP client the client reads with.
+func (c *Client) HTTPClient() *http.Client { return c.hc }
+
 func (c *Client) get(ctx context.Context, path string) ([]byte, int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/"+path, nil)
 	if err != nil {

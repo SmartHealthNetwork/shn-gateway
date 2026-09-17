@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -99,3 +100,45 @@ func TestNativePopulator_UpstreamRefusalFailsClosed(t *testing.T) {
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// TestPopulate_QuestionnaireBytesExact: the payer's Questionnaire reaches the
+// participant's own $populate service byte for byte — its layout, member
+// order, markup, escapes and number lexemes — inside the Parameters the
+// gateway writes around it, whichever name the payer's package gives the
+// package Bundle.
+func TestPopulate_QuestionnaireBytesExact(t *testing.T) {
+	esc := string(rune(92))
+	questionnaire := "{\n    \"url\" : \"http://example.org/q\",\n    \"resourceType\" : \"Questionnaire\",\n" +
+		"    \"text\" : { \"status\" : \"generated\", \"div\" : \"<div xmlns=" + esc + "\"http://www.w3.org/1999/xhtml" + esc + "\">1 &lt; 2 & 3 > 2</div>\" },\n" +
+		"    \"title\" : \"caf" + esc + "u00e9 " + esc + "u2028\",\n" +
+		"    \"item\" : [ { \"linkId\" : \"1\", \"type\" : \"decimal\", \"initial\" : [ { \"valueDecimal\" : 1.50 } ], \"maxValue\" : 9007199254740993 } ]\n  }"
+	var sent []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sent, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/fhir+json")
+		_, _ = w.Write([]byte(`{"resourceType":"QuestionnaireResponse","questionnaire":"http://example.org/q","status":"in-progress","subject":{"reference":"Patient/pat-1"}}`))
+	}))
+	defer srv.Close()
+	pc := PopulateContext{PatientRef: "Patient/MBR-COVERED", SubjectFHIRRef: "Patient/pat-1"}
+	for _, pkg := range []string{
+		"{ \"resourceType\" : \"Bundle\", \"type\" : \"collection\", \"entry\" : [ { \"resource\" : " + questionnaire + " } ] }",
+		"{ \"resourceType\" : \"Parameters\", \"parameter\" : [ { \"name\" : \"PackageBundle\", \"resource\" : { \"resourceType\" : \"Bundle\", \"type\" : \"collection\", \"entry\" : [ { \"resource\" : " + questionnaire + " } ] } } ] }",
+	} {
+		sent = nil
+		if _, _, err := NewNativePopulator(srv.Client(), srv.URL).Populate(context.Background(), []byte(pkg), pc); err != nil {
+			t.Fatalf("populate: %v", err)
+		}
+		want := `{"resourceType":"Parameters","parameter":[{"name":"questionnaire","resource":` + questionnaire +
+			`},{"name":"subject","valueReference":{"reference":"Patient/pat-1"}}]}`
+		if string(sent) != want {
+			t.Fatalf("the $populate request\n%s\nwant\n%s", sent, want)
+		}
+	}
+	t.Run("a questionnaire that is not one JSON object is refused", func(t *testing.T) {
+		for _, q := range []string{`[1]`, `{"a":1}{"b":2}`, `{"a":1,"a":2}`, ``} {
+			if _, err := buildPopulateParameters([]byte(q), pc); err == nil {
+				t.Errorf("%q accepted", q)
+			}
+		}
+	})
+}

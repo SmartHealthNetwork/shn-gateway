@@ -9,12 +9,175 @@
       "file": "cms-pos-2024-05-02.html",
       "url": "https://www.cms.gov/medicare/coding-billing/place-of-service-codes/code-sets",
       "sha256": "491efe1dadf8c8ea120deaf6973e8936c8624847190aa0d484f37e9dfa81cce4"
-    },
-    {
-      "file": "StructureDefinition-ext-R5-Claim.encounter.json",
-      "url": "https://packages.simplifier.net/hl7.fhir.uv.xver-r5.r4/0.1.0",
-      "sha256": "ffe82ada343dc66d0a6987de22d021994856f054ec1172d8b2792131e4b0c410"
     }
   ],
-  "xverPackageSHA256": "7ee6f04d78ced803dd567559a0d178bafbd2d3b71db61bbbf6b15c796a1a664d"
+  "closure": {
+    "seeds": [
+      "http://hl7.org/fhir/5.0/StructureDefinition/extension-Claim.encounter"
+    ],
+    "archives": [
+      {
+        "file": "hl7.fhir.uv.xver-r5.r4-0.1.0.tgz",
+        "url": "https://packages.simplifier.net/hl7.fhir.uv.xver-r5.r4/0.1.0",
+        "sha256": "7ee6f04d78ced803dd567559a0d178bafbd2d3b71db61bbbf6b15c796a1a664d"
+      },
+      {
+        "file": "hl7.fhir.uv.extensions.r4-5.3.0-ballot-tc1.tgz",
+        "url": "https://packages.simplifier.net/hl7.fhir.uv.extensions.r4/5.3.0-ballot-tc1",
+        "sha256": "5f5d1e88052d615453e6b7a1eb4f885df36590f14b52974e5860485d16819bd9"
+      }
+    ],
+    "members": [
+      {
+        "file": "StructureDefinition-ext-R5-Claim.encounter.json",
+        "archive": "hl7.fhir.uv.xver-r5.r4-0.1.0.tgz",
+        "member": "package/StructureDefinition-ext-R5-Claim.encounter.json",
+        "sha256": "ffe82ada343dc66d0a6987de22d021994856f054ec1172d8b2792131e4b0c410"
+      },
+      {
+        "file": "StructureDefinition-ext-R5-Encounter.careTeam.json",
+        "archive": "hl7.fhir.uv.xver-r5.r4-0.1.0.tgz",
+        "member": "package/StructureDefinition-ext-R5-Encounter.careTeam.json",
+        "sha256": "ba973f99d80d86827371afd6a9e403bbda331607b4b212ab475f806acdfe6fc5"
+      },
+      {
+        "file": "StructureDefinition-ext-R5-Encounter.class.json",
+        "archive": "hl7.fhir.uv.xver-r5.r4-0.1.0.tgz",
+        "member": "package/StructureDefinition-ext-R5-Encounter.class.json",
+        "sha256": "1e767624d2eba581bcef9f5ddfaaaca0c1aeedd32e2fc8d24d577f5919b6b4ab"
+      },
+      {
+        "file": "StructureDefinition-ext-R5-Encounter.dia.condition.json",
+        "archive": "hl7.fhir.uv.xver-r5.r4-0.1.0.tgz",
+        "member": "package/StructureDefinition-ext-R5-Encounter.dia.condition.json",
+        "sha256": "b38d571e932b81e3c0416bbf489b231c3ba11a58a6e1f3a2da203b638b073069"
+      },
+      {
+        "file": "StructureDefinition-ext-R5-Encounter.plannedEndDate.json",
+        "archive": "hl7.fhir.uv.xver-r5.r4-0.1.0.tgz",
+        "member": "package/StructureDefinition-ext-R5-Encounter.plannedEndDate.json",
+        "sha256": "f0e1be573ce874af2bac45acf3e98b1de59af5e94af0847051801ecd459fe225"
+      },
+      {
+        "file": "StructureDefinition-ext-R5-Encounter.plannedStartDate.json",
+        "archive": "hl7.fhir.uv.xver-r5.r4-0.1.0.tgz",
+        "member": "package/StructureDefinition-ext-R5-Encounter.plannedStartDate.json",
+        "sha256": "5a24bca9f57c6131d75192ef4e2b9cbe265f77fe21b25b583b7ba786c65ace28"
+      },
+      {
+        "file": "StructureDefinition-ext-R5-Encounter.rea.value.json",
+        "archive": "hl7.fhir.uv.xver-r5.r4-0.1.0.tgz",
+        "member": "package/StructureDefinition-ext-R5-Encounter.rea.value.json",
+        "sha256": "eb1afe00b2557c129103f0eca8f7c3dfb00b97c41ce3f75ce2c5bb74708512d7"
+      },
+      {
+        "file": "StructureDefinition-ext-R5-Encounter.serviceType.json",
+        "archive": "hl7.fhir.uv.xver-r5.r4-0.1.0.tgz",
+        "member": "package/StructureDefinition-ext-R5-Encounter.serviceType.json",
+        "sha256": "374603f3c50f6670c1e9b7fbd3a366b4e4d83e27d111d803382077f455fd58b4"
+      },
+      {
+        "file": "StructureDefinition-ext-R5-Encounter.status.json",
+        "archive": "hl7.fhir.uv.xver-r5.r4-0.1.0.tgz",
+        "member": "package/StructureDefinition-ext-R5-Encounter.status.json",
+        "sha256": "9ce9a248f9400d944934fa4ce07024b852d1215ffb85eed62974bfa9a39eb536"
+      },
+      {
+        "file": "StructureDefinition-ext-R5-Encounter.subjectStatus.json",
+        "archive": "hl7.fhir.uv.xver-r5.r4-0.1.0.tgz",
+        "member": "package/StructureDefinition-ext-R5-Encounter.subjectStatus.json",
+        "sha256": "0ae8eb4f0ee9ac54c1d75bc2b121ecb9543ba6dd6540a37b6de311dad172ed77"
+      },
+      {
+        "file": "StructureDefinition-ext-R5-Encounter.virtualService.json",
+        "archive": "hl7.fhir.uv.xver-r5.r4-0.1.0.tgz",
+        "member": "package/StructureDefinition-ext-R5-Encounter.virtualService.json",
+        "sha256": "de2c4831282cf472e412b4f78b952427cef0bd9abeafc24219f79c6ecb7bc489"
+      },
+      {
+        "file": "StructureDefinition-profile-Encounter.json",
+        "archive": "hl7.fhir.uv.xver-r5.r4-0.1.0.tgz",
+        "member": "package/StructureDefinition-profile-Encounter.json",
+        "sha256": "9111670e80816a5fe4d5dabb80f96e15929611bfea5c6b7679097fefc26cc0c6"
+      },
+      {
+        "file": "StructureDefinition-alternate-reference.json",
+        "archive": "hl7.fhir.uv.extensions.r4-5.3.0-ballot-tc1.tgz",
+        "member": "package/StructureDefinition-alternate-reference.json",
+        "sha256": "1b57206b5ab17deabba92268b0bcddaea4bfc926d4f4bb430b7d60a824ffdeac"
+      },
+      {
+        "file": "StructureDefinition-package-source.json",
+        "archive": "hl7.fhir.uv.extensions.r4-5.3.0-ballot-tc1.tgz",
+        "member": "package/StructureDefinition-package-source.json",
+        "sha256": "d96a24bf5bdb6fe34bdeb61d090cde318aee55f9f3d23493d78d87e2f587660c"
+      },
+      {
+        "file": "StructureDefinition-structuredefinition-type-characteristics.json",
+        "archive": "hl7.fhir.uv.extensions.r4-5.3.0-ballot-tc1.tgz",
+        "member": "package/StructureDefinition-structuredefinition-type-characteristics.json",
+        "sha256": "bc40def174392da67d41d4e588a93333623fb649e5470a3db242d51c1ca0236b"
+      },
+      {
+        "file": "StructureDefinition-version-specific-use.json",
+        "archive": "hl7.fhir.uv.extensions.r4-5.3.0-ballot-tc1.tgz",
+        "member": "package/StructureDefinition-version-specific-use.json",
+        "sha256": "f15b72ffdd0beaef296044eb32c8235c31735fca9f6144dc5dc89840947ff062"
+      },
+      {
+        "file": "ValueSet-major-fhir-version.json",
+        "archive": "hl7.fhir.uv.extensions.r4-5.3.0-ballot-tc1.tgz",
+        "member": "package/ValueSet-major-fhir-version.json",
+        "sha256": "331df6f2766ea70a1a415c9a630b3bda75078a9d17fe38ff6b674ba5969407b6"
+      },
+      {
+        "file": "ValueSet-type-characteristics-code.json",
+        "archive": "hl7.fhir.uv.extensions.r4-5.3.0-ballot-tc1.tgz",
+        "member": "package/ValueSet-type-characteristics-code.json",
+        "sha256": "aaef88689c6714692c9e2aa5d7b6a6c0217c256943b5ddf55e77e9ed47ab7753"
+      },
+      {
+        "file": "CodeSystem-type-characteristics-code.json",
+        "archive": "hl7.fhir.uv.extensions.r4-5.3.0-ballot-tc1.tgz",
+        "member": "package/CodeSystem-type-characteristics-code.json",
+        "sha256": "9afcc3052d5c13477215671397f824148ac1a2b81afbc182f55d7deb20cef4a6"
+      },
+      {
+        "file": "ValueSet-R5-encounter-class-for-R4.json",
+        "archive": "hl7.fhir.uv.xver-r5.r4-0.1.0.tgz",
+        "member": "package/ValueSet-R5-encounter-class-for-R4.json",
+        "sha256": "21b7e0e3019636e5f97375fb51583ce3618b879c3791616ff403b428fc7e5506"
+      },
+      {
+        "file": "ValueSet-R5-encounter-status-for-R4.json",
+        "archive": "hl7.fhir.uv.xver-r5.r4-0.1.0.tgz",
+        "member": "package/ValueSet-R5-encounter-status-for-R4.json",
+        "sha256": "8a7f6fe0ca2466cd6f8d26283311755931214cd14086f2acc8ace0e778b6c688"
+      },
+      {
+        "file": "ValueSet-R5-encounter-subject-status-for-R4.json",
+        "archive": "hl7.fhir.uv.xver-r5.r4-0.1.0.tgz",
+        "member": "package/ValueSet-R5-encounter-subject-status-for-R4.json",
+        "sha256": "145df49a70e780a03a0ee72d40935ce8dd9f041f0662c9f6dcda6f7a9755e595"
+      },
+      {
+        "file": "ValueSet-R5-virtual-service-type-for-R4.json",
+        "archive": "hl7.fhir.uv.xver-r5.r4-0.1.0.tgz",
+        "member": "package/ValueSet-R5-virtual-service-type-for-R4.json",
+        "sha256": "f6c2a4dcb44e175dda2a43950c4679e55b1bf3ca7615928c4aa0d3d9671eaa21"
+      },
+      {
+        "file": "CodeSystem-virtual-service-type.json",
+        "archive": "hl7.fhir.uv.xver-r5.r4-0.1.0.tgz",
+        "member": "package/CodeSystem-virtual-service-type.json",
+        "sha256": "bb091823fb6a4e88bca4f6da16a1b3d3b5f10fac53267c0f70ec308bcf1054d7"
+      },
+      {
+        "file": "CodeSystem-encounter-subject-status.json",
+        "archive": "hl7.fhir.uv.xver-r5.r4-0.1.0.tgz",
+        "member": "package/CodeSystem-encounter-subject-status.json",
+        "sha256": "28decba712587797ad7ceace6002918b794edf76357b25510586d3c017211924"
+      }
+    ]
+  }
 }

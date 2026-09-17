@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -152,23 +153,33 @@ func TestObserver_OriginationLegEvents(t *testing.T) {
 // emits validate.result — decorating the validator (not each call site) means
 // no call site can be missed.
 func TestObserver_ValidateEvents(t *testing.T) {
-	gw, _, _ := crdTestSystem(t, shnsdk.CardCoverage{Covered: shnsdk.CoveredCovered, PANeeded: shnsdk.PANeededAuthNeeded, Questionnaires: []string{"http://example.org/q"}})
 	var validates []ObserverEvent
-	gw.cfg.Observer = func(e ObserverEvent) {
-		if e.Kind == "validate.result" {
-			validates = append(validates, e)
-		}
+	// The dispatch flow validates the payer's questionnaire package and the
+	// populated QuestionnaireResponse; the observer is set before New, as
+	// production does, so the validator is decorated.
+	orderJSON, err := buildHomeOxygenDeviceRequest("dr-ox", "Patient/MBR-OX", "Organization/org-dme-ox")
+	if err != nil {
+		t.Fatal(err)
 	}
-	// Re-decorate: crdTestSystem constructed via New with Observer nil, so the
-	// validator wasn't wrapped. Rebuilding through New with the observer set is
-	// what production does; mirror it.
-	cfg := gw.cfg
-	gw2 := mustNew(t, cfg)
-
-	callUC03(t, gw2)
+	supplierJSON, err := buildHomeOxygenSupplier("org-dme-ox")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fix := newDispatchFixtureWith(t, "MBR-OX", Demo{BirthDate: "1958-07-14", FamilyName: "Okafor-Oxygen"}, orderJSON, "Organization/org-dme-ox", supplierJSON, func(cfg *Config) {
+		cfg.Observer = func(e ObserverEvent) {
+			if e.Kind == "validate.result" {
+				validates = append(validates, e)
+			}
+		}
+	})
+	rec := httptest.NewRecorder()
+	fix.gw.handleDispatch(rec, httptest.NewRequest(http.MethodPost, "/scenario/dispatch", strings.NewReader(`{"member":"MBR-OX"}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("dispatch %d %s", rec.Code, rec.Body.String())
+	}
 
 	if len(validates) == 0 {
-		t.Fatal("no validate.result events observed for a UC-03 run")
+		t.Fatal("no validate.result events observed for a dispatch run")
 	}
 	for _, e := range validates {
 		if e.Detail != "valid" && e.Detail != "invalid" && e.Detail != "validator unavailable" {
@@ -249,7 +260,7 @@ func TestObserver_IngressEvents(t *testing.T) {
 	gw2 := mustNew(t, cfg)
 
 	ref := "Patient/MBR-COVERED"
-	req := httptest.NewRequest(http.MethodPost, "/cds-services/order-select-crd",
+	req := httptest.NewRequest(http.MethodPost, "/cds-services/shn-order-select",
 		bytes.NewReader(crdReqJSON("MBR-COVERED", ref, ref)))
 	rec := httptest.NewRecorder()
 	gw2.Handler().ServeHTTP(rec, req)
@@ -324,7 +335,7 @@ func TestObserver_IngressConformanceNeutral(t *testing.T) {
 		}
 		gw2 := mustNew(t, cfg)
 
-		req := httptest.NewRequest(http.MethodPost, "/cds-services/order-select-crd",
+		req := httptest.NewRequest(http.MethodPost, "/cds-services/shn-order-select",
 			bytes.NewReader(crdReqJSON("MBR-COVERED", ref, ref)))
 		rec := httptest.NewRecorder()
 		gw2.Handler().ServeHTTP(rec, req)

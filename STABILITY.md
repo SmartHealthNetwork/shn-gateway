@@ -32,6 +32,72 @@ successful commit. Its direction is `ingress`, operation is
 Provenance targets the retained ClaimResponse fullUrl and stays outside the Bundle
 and Hub.
 
+## Observational source certification
+
+PAS ingress and native POST forwarding collect source-profile evidence after dispatch.
+Each supported payload is checked independently at all three PAS/DTR lines; the
+certified set and nearest source line are observations only. They do not change
+routing, authority, payload bytes, acceptance, response stamps or lane readiness.
+The native record describes the final POST attempt, before any polling or terminal
+assembly. The provider ingress record describes the bytes dispatched and relayed.
+
+The app creates separate clients at each resolved validator endpoint. Embedders may
+supply independent clients through `Config.CertificationValidatorsByLine`; they must
+not share routing validators or qualification wrappers. Missing clients are recorded
+as unavailable. HTTP server execution failures are unavailable rather than conclusive
+invalidity. Logs beginning `certify: ` and `leg.certified` observer details contain
+JSON metadata, hashes and verdicts, without payload snapshots. External validator
+issues and errors are represented only by bounded counts, byte lengths and
+SHA-256 digests; diagnostic text is never retained or broadcast in evidence.
+
+Each gateway owns one worker, a 32-payload queue and a 256-record evidence ring.
+Candidates have a two-second limit, collection has a six-second limit, and queued
+work expires after thirty seconds. Overflow records retain metadata only; bounded
+observer notifications report drops explicitly. Callbacks must return promptly and
+support concurrent invocation. Completion is stored before callback delivery.
+
+Call `Gateway.Close()` after stopping service and before releasing dependencies.
+It cancels observation HTTP work, closes idle connections and joins the worker.
+It waits for cooperative callbacks; it cannot forcibly cancel a blocked callback.
+The app runner and managed app handlers own this cleanup. Tests may use
+`FlushCertificationForTest` as a context-bounded completion barrier, and
+`DisableCertificationForTest` for evidence-off comparison runs.
+
+## Observer source completion
+
+The existing opt-in, loopback-only `OBSERVER_ADDR` listener also serves
+`POST /barrier`. Success is HTTP 200 with `Content-Type: application/json`,
+`Cache-Control: no-store`, and
+`{"protocol":1,"incarnation":"<opaque>","events":N}`. The server waits for at
+most five seconds, bounded further by request cancellation. A failed or canceled
+wait returns a diagnostic non-2xx response without a successful event count;
+deadline failures return 504 and other completion failures return 503. Wrong
+methods return 405.
+
+`GET /health` remains immediate and adds `protocol:1` and the same nonempty
+`incarnation` to its existing `events` count. It never waits or submits validation.
+`GET /events` includes `X-SHN-Observer-Incarnation` before sending frames; SSE
+IDs and data bytes retain their representation. Each Hub construction gets a fresh
+random identity, so counts from different source instances are not interchangeable.
+
+`Gateway.WaitObserverCompletion(ctx)` snapshots HTTP operations already entered
+through `Gateway.Handler()`, awaits their return (including deferred evidence
+enqueue), then snapshots accepted certification work and awaits its observer
+callbacks. Operations admitted after the first snapshot do not hold that operation
+cutoff; certification accepted before the second snapshot is included. Direct
+`OriginateLeg` calls outside Handler and requests not yet entered are outside this
+protocol. Simultaneous external traffic is not a causal attribution guarantee.
+Completion proves diagnostic delivery through the source callback, not receipt by
+an SSE client; clients must separately catch up to `events` in the same incarnation.
+
+This accounting is diagnostic only: clinical responses, asynchronous certification,
+routing, authority, payload bytes and readiness remain unchanged. The ordinary
+app health wrapper bypasses operation tracking. `FlushCertificationForTest` retains
+its accepted-queue-only semantics. `observer.Hub.HandlerWithBarrier(wait)` enables
+the capability with a context-cooperative completion waiter; nil and the existing
+`Handler()` retain count-only health and do not expose `/barrier`. Both forms serve
+the SSE incarnation header. No observer listener is created by default.
+
 ## Supported seams
 
 Partners may depend on the following packages across minor versions (breaking
@@ -204,9 +270,9 @@ expected to change shape as their consumer matures:
 
   **BREAKING in v0.39.0** (evolving tier — announced, not guarded): `SandboxProviderPersonasBundle`
   is renamed `DemoProviderPersonasBundle` and `SandboxLumbarLibrary` is renamed
-  `DemoLumbarLibrary`. The bytes each returns are unchanged; only the names are. The sandbox payer
-  no longer exists anywhere in this platform, and no surface it named survives with it. A consumer
-  on the old names updates the two call sites and re-pins.
+  `DemoLumbarLibrary`. The bytes each returns are unchanged; only the names are: the old prefix
+  named the retired preview-era demo world and describes nothing in the platform today. A
+  consumer on the old names updates the two call sites and re-pins.
 
 - **`LegMetric`** (`engine.Config.LegMetric func(outcome string)`, consts
   `engine.LegOutcomeRouted/Answered/Denied/Unreachable/Failed`): new in this release and

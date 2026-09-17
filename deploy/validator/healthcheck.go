@@ -50,6 +50,13 @@ func main() {
 func check(base string, getenv func(string) string, marker string, budget time.Duration, key func() string) int {
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
+	// A failed worker deliberately leaves the public boundary closed. Report
+	// its valid terminal row before probing that unavailable endpoint. This is
+	// diagnostic only: the success path rereads state after the public probe.
+	if st, err := readState(marker, lineFromEnv(getenv), key()); err == nil && st.State == "failed" {
+		fmt.Fprintf(os.Stderr, "healthcheck: warm-up failed: %s %s; restart validator\n", st.Row, st.Failure)
+		return 1
+	}
 	if err := metadata(ctx, httpClient(), base+"/metadata"); err != nil {
 		fmt.Fprintln(os.Stderr, "healthcheck: metadata unavailable")
 		return 1

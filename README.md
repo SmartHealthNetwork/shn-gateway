@@ -392,6 +392,7 @@ existing logs.
 - [`STABILITY.md`](STABILITY.md) — versioning policy and which seams
   (`engine.Config.SoR`, `engine.Config.Store`, `shnsdk.Adjudicator` behind the
   standalone responder, …) are safe to depend on across versions.
+- [`SUPPORT.md`](SUPPORT.md) — where to ask, and what to include.
 - [`SECURITY.md`](SECURITY.md) — vulnerability reporting.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — how this snapshot relates to the
   internal platform repo, and how to reach us.

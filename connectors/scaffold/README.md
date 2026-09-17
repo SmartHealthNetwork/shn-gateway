@@ -47,6 +47,8 @@ The original interface remains compatible. For a backend that can fail, also imp
 `engine.ContextSystemOfRecord`: its nine `Context`-suffixed methods accept a request
 context and return an error separately from absence. The engine prefers that optional
 interface. Return safe `engine.SoRReadError` categories, propagate cancellation through
-backend reads, and never return missing-data defaults after an error. See the
+backend reads, and never return missing-data defaults after an error.
+`OpenCoverageContext` returns every Coverage record the member has; the gateway, not
+the connector, decides what several records mean. See the
 [integration guide](../../docs/INTEGRATION.md#system-of-record-read-failures) for the
 502/503 policy and legacy cancellation limits.

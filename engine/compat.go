@@ -83,6 +83,7 @@ var compatManifest = []CompatStep{
 	//     Coverage-referencing qr-context entries):  GATED — semantic-change
 	//     refusal (the spec's canonical example), typed SemanticChangeError;
 	//     rejection-tested (TestDTRStep2122Up_MultiCoverageGated).
+	// The published qr-coverage cardinality is 1..* at DTR 2.2.0; this transform currently refuses multiple Coverage entries, a remaining implementation limitation.
 	//   Up (2.1->2.2), QR content, ZERO-coverage source (no
 	//     Coverage-referencing qr-context entry): GATED — same typed error,
 	//     symmetric defensive case (no honest source for the now-required
@@ -91,6 +92,10 @@ var compatManifest = []CompatStep{
 	//     qr-required shape (DTRDef.QuestionnairePackageReturnShape) has no
 	//     honest QR to mint; the responder's zero-answer QR shell is the
 	//     native fix, this module never fabricates.
+	//   Down (2.2->2.1), declared standard Questionnaire without resource
+	//     narrative: GATED — older standard profiles require Questionnaire.text;
+	//     typed refusal, also preserved through composition to 2.0. Narrative
+	//     presence alone does not certify the remaining target constraints.
 	//   Down (2.2->2.1):  FULL for QR content (moves reversed — 2.1's
 	//     qr-context slice, min=2 unbounded max, tolerates one or more
 	//     relocated entries) + CARRY for the one genuine 2.2-only element
@@ -116,8 +121,10 @@ var compatManifest = []CompatStep{
 	// per the chain ranking — verified SAFE, not just conservative, for this row:
 	// neither sub-case the collapse hides is itself a mandatory-refusal that
 	// full/carry would wrongly let through):
-	//   Up (2.0->2.1), request sub-case (Claim payload):  GATED — no honest
-	//     source for certificationType/requestType/location[x]/relationship.
+	//   Up (2.0->2.1), request sub-case (Claim payload):  GATED today — the
+	//     four elements are optional (MS) at 2.0.1 and mandatory at 2.1.0; the
+	//     current transform cannot supply omitted values from the participant's
+	//     own facts.
 	//   Up (2.0->2.1), response sub-case (ClaimResponse):  FULL — request
 	//     synthesized from correlation identity.
 	//   Down (2.1->2.0):                                    FULL — drop

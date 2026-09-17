@@ -312,14 +312,13 @@ func (r relayFlagResponder) Handle(ctx context.Context, leg, corrID, subjectPCI 
 	if err != nil || !r.relayed {
 		return res, err
 	}
-	res.ResponseFHIR = []byte(assemblyRealPending) // complete foreign graph for the relay stamp test
-	res.ResponseRelayed = true
+	res.Response = relayedResponse([]byte(assemblyRealPending)) // complete foreign graph for the relay stamp test
 	res.ResponseSubjectForeign = true
 	return res, nil
 }
 
 // dtrRelayResponder answers the DTR leg the way the NATIVE forward does: a verbatim
-// foreign $questionnaire-package Bundle, flagged ResponseRelayed but NOT
+// foreign $questionnaire-package Bundle, relayed but NOT
 // ResponseSubjectForeign (the subject fence must stay live on this leg).
 type dtrRelayResponder struct {
 	body    []byte
@@ -327,7 +326,10 @@ type dtrRelayResponder struct {
 }
 
 func (d dtrRelayResponder) Handle(_ context.Context, _, _, _ string, _ []byte) (LegResult, error) {
-	return LegResult{ResponseFHIR: d.body, ResponseRelayed: d.relayed}, nil
+	if d.relayed {
+		return LegResult{Response: relayedResponse(d.body)}, nil
+	}
+	return LegResult{Response: testResponse(d.body)}, nil
 }
 
 // TestDTRRelayedPackageUnstamped is the DTR sibling of
@@ -438,9 +440,9 @@ func (errTransport) RoundTrip(*http.Request) (*http.Response, error) {
 // moved the outcome).
 func TestNativeForwardFilterUsesDeclaredSet(t *testing.T) {
 	peer := []string{"pa.crd@2.2"} // partner speaks 2.2 only
-	// A client whose transport always errors: once the filter PASSES, the forward
-	// itself fails as a transport fault — a clearly different outcome from the 422
-	// refuse-before-forward, and it sends zero bytes anywhere.
+	// A client whose transport always errors: once the filter PASSES, the leg
+	// cannot read the partner's CDS service listing — a clearly different outcome
+	// from the 422 refuse-before-forward, and it sends zero bytes anywhere.
 	newResponder := func(own []string) LegResponder {
 		opts := []NativeOption{WithDeclaredContractVersions(peer)}
 		if own != nil {
@@ -459,12 +461,12 @@ func TestNativeForwardFilterUsesDeclaredSet(t *testing.T) {
 		}
 	})
 	t.Run("declared override forwards", func(t *testing.T) {
-		res, err := newResponder([]string{"pa.crd@2.0", "pa.crd@2.2"}).Handle(context.Background(), "crd-order-select", "corr", "pci", nil)
+		res, err := newResponder([]string{"pa.crd@2.0", "pa.crd@2.2"}).Handle(context.Background(), "crd-order-select", "corr", "pci", cdsRequest("order-select"))
 		if res.Status == http.StatusUnprocessableEntity {
 			t.Fatalf("declared override must clear the version filter, still refused: %s", res.Message)
 		}
-		if err == nil {
-			t.Fatal("fixture bug: the forward should have failed as a transport fault once the filter passed")
+		if err != nil || res.Status != http.StatusBadGateway || res.Message != "payer CDS service listing unavailable" {
+			t.Fatalf("fixture bug: the leg should have reached the partner's service listing once the filter passed: %v %+v", err, res)
 		}
 	})
 	t.Run("accessor mirrors the gateway's empty-means-default rule", func(t *testing.T) {
@@ -503,7 +505,7 @@ func declareRecipientRequestFrames(t *testing.T, e *inProcessExchange) {
 	if !ok {
 		t.Fatalf("recipient %q not in registry", e.payerID)
 	}
-	entry.RequestFrames = shnsdk.SupportedRequestFrames()
+	entry.RequestFrames = []string{shnsdk.RequestFrameV1}
 	e.originator.cfg.Reg.Set(e.payerID, entry)
 }
 
@@ -515,7 +517,7 @@ func TestRequestNotFramedToNonDeclaringPeer(t *testing.T) {
 	env := newInProcessExchange(t)
 	advertiseRecipientFrameV1(t, env) // messageFrames v1 (responses) — deliberately NOT requestFrames
 	if _, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "",
-		Content{WorkstreamType: workstreamPA, Bytes: env.crdReq}); err != nil {
+		Content{WorkstreamType: workstreamPA, Payload: testRequest(env.crdReq)}); err != nil {
 		t.Fatalf("exchange failed: %v", err)
 	}
 	got := env.lastRequestPayload()
@@ -534,7 +536,7 @@ func TestRequestFramedToDeclaringPeer(t *testing.T) {
 	advertiseRecipientFrameV1(t, env)
 	declareRecipientRequestFrames(t, env)
 	if _, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "",
-		Content{WorkstreamType: workstreamPA, Bytes: env.crdReq}); err != nil {
+		Content{WorkstreamType: workstreamPA, Payload: testRequest(env.crdReq)}); err != nil {
 		t.Fatalf("exchange failed: %v", err)
 	}
 	got := env.lastRequestPayload()
@@ -561,7 +563,7 @@ func TestVersionNeutralRequestNeverFramed(t *testing.T) {
 	declareRecipientRequestFrames(t, env)
 	// coverage-eligibility is version-neutral (paCatalog Contract "").
 	_, _ = env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "coverage-eligibility", "pci-1", "corr-vn", "",
-		Content{WorkstreamType: workstreamPA, Bytes: env.crdReq})
+		Content{WorkstreamType: workstreamPA, Payload: testRequest(env.crdReq)})
 	if got := env.lastRequestPayload(); shnsdk.IsFramed(got) {
 		t.Fatalf("version-neutral leg must never be framed, got %q", got)
 	}

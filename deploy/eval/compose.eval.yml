@@ -11,7 +11,7 @@
 volumes: { certs: {}, config: {} }
 services:
   hapi:
-    build: { context: ./hapi }
+    build: { context: .., dockerfile: eval/hapi/Dockerfile }
     environment:
       hapi.fhir.implementationguides.uscore.packageUrl: file:///packages/hl7.fhir.us.core-6.1.0.tgz
       hapi.fhir.implementationguides.uscore.name: hl7.fhir.us.core

@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
@@ -11,6 +12,10 @@ import (
 // ContextSystemOfRecord optionally extends SystemOfRecord with request cancellation
 // and read failures. An absent record has a nil error; a failed read returns zero
 // results and an error. Implementations must not expose protected backend details.
+//
+// OpenCoverageContext returns every Coverage the system of record holds for the
+// member (none is an empty result), in the order the system returned them; the
+// gateway, not the connector, decides what several of them mean.
 type ContextSystemOfRecord interface {
 	ResolvePatientContext(context.Context, string) (string, Demo, bool, error)
 	PatientFHIRRefContext(context.Context, string) (string, bool, error)
@@ -19,8 +24,29 @@ type ContextSystemOfRecord interface {
 	SupplementalReportContext(context.Context, string) ([]byte, bool, error)
 	FacilityRecordsContext(context.Context, string) (map[string][]byte, bool, error)
 	OpenOrderContext(context.Context, string) ([]byte, bool, error)
-	OpenCoverageContext(context.Context, string) ([]byte, bool, error)
+	OpenCoverageContext(context.Context, string) ([][]byte, error)
 	ResolveByReferenceContext(context.Context, string) ([]byte, bool, error)
+}
+
+// ErrSystemOfRecordSignature: the configured connector has a method whose
+// signature an earlier gateway release used. Such a connector no longer
+// satisfies ContextSystemOfRecord, and the gateway would silently fall back
+// to reads that cannot report failures, so New refuses it.
+var ErrSystemOfRecordSignature = errors.New("system of record connector uses an earlier method signature")
+
+// earlierCoverageReader is the OpenCoverageContext of earlier releases, which
+// returned a single record.
+type earlierCoverageReader interface {
+	OpenCoverageContext(context.Context, string) ([]byte, bool, error)
+}
+
+// checkSystemOfRecordSignatures refuses a connector written against an
+// earlier ContextSystemOfRecord.
+func checkSystemOfRecordSignatures(sor SystemOfRecord) error {
+	if _, earlier := sor.(earlierCoverageReader); earlier {
+		return fmt.Errorf("%w: OpenCoverageContext must now return ([][]byte, error), every Coverage record the member has (an empty result for none), and the gateway decides what several records mean", ErrSystemOfRecordSignature)
+	}
+	return nil
 }
 
 // ReadSystemOfRecord prefers contextual reads while retaining source compatibility
@@ -91,12 +117,14 @@ func (r legacySoRReader) OpenOrderContext(ctx context.Context, key string) ([]by
 	return a, b, nil
 }
 
-func (r legacySoRReader) OpenCoverageContext(ctx context.Context, key string) ([]byte, bool, error) {
+func (r legacySoRReader) OpenCoverageContext(ctx context.Context, key string) ([][]byte, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, false, err
+		return nil, err
 	}
-	a, b := r.sor.OpenCoverage(key)
-	return a, b, nil
+	if a, found := r.sor.OpenCoverage(key); found {
+		return [][]byte{a}, nil
+	}
+	return nil, nil
 }
 
 func (r legacySoRReader) ResolveByReferenceContext(ctx context.Context, key string) ([]byte, bool, error) {

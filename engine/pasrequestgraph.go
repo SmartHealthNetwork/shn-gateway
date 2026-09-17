@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -23,6 +24,24 @@ func (g *Gateway) completePASRequest(ctx context.Context, body []byte) ([]byte, 
 }
 
 func retainPASRequestEvidence(ctx context.Context, body []byte, read func(context.Context, string) ([]byte, bool, error)) ([]byte, error) {
+	return retainPASRequestEvidenceWithPolicy(ctx, body, read, nil)
+}
+
+func (g *Gateway) completeAuthoredPASRequest(ctx context.Context, body, sourceQR, sourceOrder []byte, coverageRef string, absolute bool) ([]byte, error) {
+	if len(sourceQR) == 0 || g.cfg.OriginationProfile != "provider-data" {
+		return g.completePASRequest(ctx, body)
+	}
+	if g.cfg.SoR == nil {
+		return nil, errors.New("PAS evidence unavailable")
+	}
+	policy, err := authoredPASReferencePolicyFor(body, sourceQR, sourceOrder, coverageRef, absolute)
+	if err != nil {
+		return nil, err
+	}
+	return retainPASRequestEvidenceWithPolicy(ctx, body, ReadSystemOfRecord(g.cfg.SoR).ResolveByReferenceContext, policy)
+}
+
+func retainPASRequestEvidenceWithPolicy(ctx context.Context, body []byte, read func(context.Context, string) ([]byte, bool, error), policy *authoredPASReferencePolicy) ([]byte, error) {
 	fail := func() ([]byte, error) { return nil, errors.New("invalid or incomplete PAS request evidence") }
 	if len(body) > pasGraphMaxBytes {
 		return fail()
@@ -70,7 +89,7 @@ func retainPASRequestEvidence(ctx context.Context, body []byte, read func(contex
 			return fail()
 		}
 	}
-	if patient == "" {
+	if patient == "" || !policy.matches(graph) {
 		return fail()
 	}
 	refs := 0
@@ -79,8 +98,8 @@ func retainPASRequestEvidence(ctx context.Context, body []byte, read func(contex
 		entry := entries[i].(map[string]any)
 		owner := graph.byURL[entry["fullUrl"].(string)]
 		var selected []string
-		var walk func(any, int) bool
-		walk = func(v any, depth int) bool {
+		var walk func(any, int, string) bool
+		walk = func(v any, depth int, path string) bool {
 			if depth > pasGraphMaxDepth {
 				return false
 			}
@@ -92,7 +111,9 @@ func retainPASRequestEvidence(ctx context.Context, body []byte, read func(contex
 					if !ok || refs > pasGraphMaxReferences {
 						return false
 					}
-					selected = append(selected, s)
+					if !policy.allows(owner, path, x) {
+						selected = append(selected, s)
+					}
 				}
 				keys := make([]string, 0, len(x))
 				for k := range x {
@@ -100,20 +121,20 @@ func retainPASRequestEvidence(ctx context.Context, body []byte, read func(contex
 				}
 				sort.Strings(keys)
 				for _, k := range keys {
-					if !walk(x[k], depth+1) {
+					if !walk(x[k], depth+1, pasReferencePath(path, k)) {
 						return false
 					}
 				}
 			case []any:
-				for _, c := range x {
-					if !walk(c, depth+1) {
+				for n, c := range x {
+					if !walk(c, depth+1, pasReferencePath(path, strconv.Itoa(n))) {
 						return false
 					}
 				}
 			}
 			return true
 		}
-		if !walk(owner.resource, 0) {
+		if !walk(owner.resource, 0, "") {
 			return fail()
 		}
 		for _, ref := range selected {
@@ -174,7 +195,7 @@ func retainPASRequestEvidence(ctx context.Context, body []byte, read func(contex
 	}
 	graph.entries = entries
 	bundle["entry"] = entries
-	if graph.validate() != nil || !consistentPASGraphSubjects(graph, patient) {
+	if graph.validateWithReferencePolicy(policy) != nil || !consistentPASGraphSubjects(graph, patient) {
 		return fail()
 	}
 	result, err := json.Marshal(bundle)

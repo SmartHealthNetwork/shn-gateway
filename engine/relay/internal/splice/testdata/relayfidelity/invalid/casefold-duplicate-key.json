@@ -1,0 +1,40 @@
+{
+  "resourceType": "Bundle",
+  "id": "casefold-duplicate-key",
+  "type": "collection",
+  "timestamp": "2026-06-19T21:54:38.534+00:00",
+  "entry": [
+    {
+      "fullUrl": "http://example.org/fhir/Claim/casefold-claim",
+      "resource": {
+        "resourceType": "Claim",
+        "id": "casefold-claim",
+        "status": "active",
+        "type": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/claim-type",
+              "code": "professional"
+            }
+          ]
+        },
+        "use": "preauthorization",
+        "patient": {
+          "reference": "Patient/SubscriberExample"
+        },
+        "created": "2026-06-19T21:54:38+00:00",
+        "Patient": {
+          "reference": "Patient/OtherPatientExample"
+        },
+        "priority": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/processpriority",
+              "code": "normal"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

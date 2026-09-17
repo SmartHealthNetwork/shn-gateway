@@ -16,9 +16,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -105,7 +108,7 @@ func newDispatchFixtureWith(t *testing.T, member string, demo Demo, orderJSON []
 
 	reg := shnsdk.NewRegistry()
 	reg.Set("provider", shnsdk.RegistryEntry{ID: "provider", Role: "provider", EncPub: provEncPub, SignPub: authzPub})
-	reg.Set("payer", shnsdk.RegistryEntry{ID: "payer", Role: "payer", EncPub: payerEncPub, SignPub: payerSignPub})
+	reg.Set("payer", shnsdk.RegistryEntry{ID: "payer", Role: "payer", EncPub: payerEncPub, SignPub: payerSignPub, RequestFrames: dtrOperationFrames})
 
 	cfg := Config{
 		Role:        "provider",
@@ -328,17 +331,14 @@ func TestHandleDispatch_UnknownMember(t *testing.T) {
 	}
 }
 
-// TestDispatch_DTRFetchCoverageGateFollowsSelectedLine — the dispatch DTR-fetch
-// envelope is LINE-DEPENDENT (2.2's DTRDef makes `coverage` 1..1), so
-// originateDispatch must SELECT the dtr line BEFORE marshalling the fetch and
-// gate fetch.Coverage on DTRLineDef(line).QuestionnairePackageCoverageRequired,
-// exactly like originate.go's runCRDThenDTROrder sibling (a review finding,
-// required fix 2 — the site previously marshalled first, gated only on
-// targetsBrPayer, so a 2.2-routed dispatch leg went out without the required
-// coverage; the envelope carve-out makes the chain unable to ever add it).
-// Peer declares pa.dtr@2.2; the observed dtr-questionnaire-fetch
-// leg.originated payload must route at 2.2 AND carry the member's Coverage.
-func TestDispatch_DTRFetchCoverageGateFollowsSelectedLine(t *testing.T) {
+// TestDispatch_DTRPackageRequestFollowsSelectedLine: the dispatch flow's
+// questionnaire request is the $questionnaire-package input built at the DTR
+// line selected for the payer, before anything is built. It always carries
+// the system of record's Coverage search result, the order and the payer's
+// canonical and assertion id; the line's input profile decides only the
+// cardinality, so at 2.2 (coverage 1..1) a system of record holding two
+// Coverages is refused before anything is sent, while at 2.0 both are carried.
+func TestDispatch_DTRPackageRequestFollowsSelectedLine(t *testing.T) {
 	const performerRef = "Organization/org-dme-ox"
 	orderJSON, err := buildHomeOxygenDeviceRequest("dr-ox", "Patient/MBR-OX", performerRef)
 	if err != nil {
@@ -349,132 +349,111 @@ func TestDispatch_DTRFetchCoverageGateFollowsSelectedLine(t *testing.T) {
 		t.Fatalf("build supplier: %v", err)
 	}
 	demo := Demo{BirthDate: "1958-07-14", FamilyName: "Okafor-Oxygen"}
-
-	var events []ObserverEvent
-	fix := newDispatchFixtureWith(t, "MBR-OX", demo, orderJSON, performerRef, supplierJSON, func(cfg *Config) {
-		cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
-		// NOT the br-payer-targeting profile: targetsBrPayer already attaches
-		// coverage unconditionally there, which would mask the line gate this
-		// test exists to pin — the 2.2 requirement must hold on EVERY profile.
-		cfg.OriginationProfile = ""
-		// Own declares dtr at both 2.0 and 2.2; the peer's registry entry
-		// declares dtr ONLY at 2.2 — so arm-2 selection lands the fetch leg at
-		// 2.2 (the coverage-1..1 line) while crd/pas stay at the 2.0 baseline.
-		cfg.DeclaredContractVersions = []string{
-			shnsdk.ContractPACRD20, shnsdk.ContractPADTR20, shnsdk.ContractPADTR22, shnsdk.ContractPAPAS20,
-		}
-		entry, ok := cfg.Reg.Lookup("payer")
-		if !ok {
-			t.Fatal("fixture registry has no payer entry")
-		}
-		entry.ContractVersions = []string{shnsdk.ContractPACRD20, shnsdk.ContractPADTR22, shnsdk.ContractPAPAS20}
-		cfg.Reg.Set("payer", entry)
-	})
-
-	req := httptest.NewRequest(http.MethodPost, "/scenario/dispatch", bytes.NewBufferString(`{"member":"MBR-OX"}`))
-	rec := httptest.NewRecorder()
-	fix.gw.handleDispatch(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("want 200, got %d body=%s", rec.Code, rec.Body.String())
+	coverage := func(id string) []byte {
+		return []byte(`{"resourceType":"Coverage","id":"` + id + `","status":"active","beneficiary":{"reference":"Patient/MBR-OX"},"payor":[{"identifier":{"system":"` +
+			shnsdk.CMSPayerIdentity.System + `","value":"` + shnsdk.CMSPayerIdentity.Value + `"}}],"costToBeneficiary":[{"valueMoney":{"value":10.50}}]}`)
 	}
-
-	found := false
-	for _, e := range events {
-		if e.Kind != "leg.originated" || e.LegType != "dtr-questionnaire-fetch" {
-			continue
-		}
-		found = true
-		if e.Route == nil || shnsdk.LineOf(e.Route.Token) != "2.2" {
-			t.Fatalf("dtr fetch route = %+v, want token at line 2.2", e.Route)
-		}
-		var fetch shnsdk.QuestionnaireFetchRequest
-		if err := json.Unmarshal(e.Payload, &fetch); err != nil {
-			t.Fatalf("unmarshal observed fetch envelope: %v (payload=%s)", err, e.Payload)
-		}
-		if len(fetch.Coverage) == 0 {
-			t.Fatal("dtr-questionnaire-fetch envelope routed at line 2.2 carries no coverage — the 1..1 gate must follow the SELECTED line, not just the origination profile")
-		}
-	}
-	if !found {
-		t.Fatal("no dtr-questionnaire-fetch leg.originated observed")
+	for _, row := range []struct {
+		name      string
+		line      string
+		coverages [][]byte
+		status    int
+	}{
+		{"one coverage at 2.2", "2.2", [][]byte{coverage("c1")}, http.StatusOK},
+		{"one coverage at 2.0", "2.0", [][]byte{coverage("c1")}, http.StatusOK},
+		{"two coverages at 2.0", "2.0", [][]byte{coverage("c1"), coverage("c2")}, http.StatusOK},
+		{"two coverages at 2.2", "2.2", [][]byte{coverage("c1"), coverage("c2")}, http.StatusUnprocessableEntity},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			dtr := shnsdk.ContractPADTR20
+			if row.line == "2.2" {
+				dtr = shnsdk.ContractPADTR22
+			}
+			var events []ObserverEvent
+			fix := newDispatchFixtureWith(t, "MBR-OX", demo, orderJSON, performerRef, supplierJSON, func(cfg *Config) {
+				cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
+				cfg.OriginationProfile = ""
+				// Own declares dtr at 2.0 and 2.2; the payer declares dtr only
+				// at the row's line, so selection lands the leg there.
+				cfg.DeclaredContractVersions = []string{
+					shnsdk.ContractPACRD20, shnsdk.ContractPADTR20, shnsdk.ContractPADTR22, shnsdk.ContractPAPAS20,
+				}
+				cfg.SoR.(*homeOxygenSoR).coverages = row.coverages
+				entry, ok := cfg.Reg.Lookup("payer")
+				if !ok {
+					t.Fatal("fixture registry has no payer entry")
+				}
+				entry.ContractVersions = []string{shnsdk.ContractPACRD20, dtr, shnsdk.ContractPAPAS20}
+				cfg.Reg.Set("payer", entry)
+			})
+			rec := httptest.NewRecorder()
+			fix.gw.handleDispatch(rec, httptest.NewRequest(http.MethodPost, "/scenario/dispatch", bytes.NewBufferString(`{"member":"MBR-OX"}`)))
+			if rec.Code != row.status {
+				t.Fatalf("want %d, got %d body=%s", row.status, rec.Code, rec.Body.String())
+			}
+			var sent []ObserverEvent
+			for _, e := range events {
+				if e.Kind == "leg.originated" && e.LegType == "dtr-questionnaire-fetch" {
+					sent = append(sent, e)
+				}
+			}
+			if row.status != http.StatusOK {
+				if len(sent) != 0 || !strings.Contains(rec.Body.String(), "requires exactly one coverage") {
+					t.Fatalf("refused request sent %d questionnaire requests: %s", len(sent), rec.Body.String())
+				}
+				return
+			}
+			if len(sent) != 1 {
+				t.Fatalf("%d questionnaire requests observed", len(sent))
+			}
+			e := sent[0]
+			if e.Route == nil || shnsdk.LineOf(e.Route.Token) != row.line {
+				t.Fatalf("dtr route = %+v, want line %s", e.Route, row.line)
+			}
+			var got []string
+			for _, p := range packageParams(t, e.Payload) {
+				got = append(got, p.name)
+				if p.name == "coverage" && !slices.ContainsFunc(row.coverages, func(c []byte) bool { return string(c) == p.value }) {
+					t.Fatalf("coverage %s is not the system of record's", p.value)
+				}
+			}
+			want := []string{}
+			for range row.coverages {
+				want = append(want, "coverage")
+			}
+			want = append(want, "order", "questionnaire")
+			if !slices.Equal(got[:len(want)], want) {
+				t.Fatalf("parameters %v, want %v then context when the payer gave one", got, want)
+			}
+		})
 	}
 }
 
-// TestDispatch_DTRFetchCoverageGate20Control is the CONTROL row for
-// TestDispatch_DTRFetchCoverageGateFollowsSelectedLine: own+peer both declare pa.dtr@2.0
-// ONLY, so arm-2 selection has no 2.2 option on either side and the dtr-questionnaire-fetch
-// leg lands at 2.0 — the line DTRLineDef reports QuestionnairePackageCoverageRequired=false
-// for. The fetch envelope's Coverage field is therefore legitimately absent, and dispatch
-// still SUCCEEDS. This is what discriminates "the gate follows the SELECTED line" from "the
-// gate is unconditional": the 2.2 sibling test alone can't rule out an unconditional
-// always-attach-coverage implementation, since it never exercises a line where omitting
-// coverage is correct — a gate that ALWAYS sets fetch.Coverage would still pass the sibling.
-// The selected line is asserted explicitly (2.0) so this row can't silently pass on a
-// 2.2 selection landing here by accident (PR-407 rider a).
-func TestDispatch_DTRFetchCoverageGate20Control(t *testing.T) {
-	t.Run("2.0-control", func(t *testing.T) {
-		const performerRef = "Organization/org-dme-ox"
-		orderJSON, err := buildHomeOxygenDeviceRequest("dr-ox", "Patient/MBR-OX", performerRef)
-		if err != nil {
-			t.Fatalf("build DeviceRequest: %v", err)
-		}
-		supplierJSON, err := buildHomeOxygenSupplier("org-dme-ox")
-		if err != nil {
-			t.Fatalf("build supplier: %v", err)
-		}
-		demo := Demo{BirthDate: "1958-07-14", FamilyName: "Okafor-Oxygen"}
+// packageParam is one parameter of a $questionnaire-package input: its name
+// and the exact bytes of its value.
+type packageParam struct{ name, value string }
 
-		var events []ObserverEvent
-		fix := newDispatchFixtureWith(t, "MBR-OX", demo, orderJSON, performerRef, supplierJSON, func(cfg *Config) {
-			cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
-			// NOT the br-payer-targeting profile: targetsBrPayer already attaches
-			// coverage unconditionally there, which would mask what this control row
-			// is proving — that an absent Coverage on a 2.0-selected leg is fine.
-			cfg.OriginationProfile = ""
-			// Own declares dtr ONLY at 2.0; the peer's registry entry also declares
-			// dtr ONLY at 2.0 — arm-2 selection has no 2.2 option on either side, so
-			// the fetch leg lands at 2.0 (unlike the sibling test's 2.2-only peer).
-			cfg.DeclaredContractVersions = []string{
-				shnsdk.ContractPACRD20, shnsdk.ContractPADTR20, shnsdk.ContractPAPAS20,
-			}
-			entry, ok := cfg.Reg.Lookup("payer")
-			if !ok {
-				t.Fatal("fixture registry has no payer entry")
-			}
-			entry.ContractVersions = []string{shnsdk.ContractPACRD20, shnsdk.ContractPADTR20, shnsdk.ContractPAPAS20}
-			cfg.Reg.Set("payer", entry)
-		})
-
-		req := httptest.NewRequest(http.MethodPost, "/scenario/dispatch", bytes.NewBufferString(`{"member":"MBR-OX"}`))
-		rec := httptest.NewRecorder()
-		fix.gw.handleDispatch(rec, req)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("want 200, got %d body=%s", rec.Code, rec.Body.String())
-		}
-
-		found := false
-		for _, e := range events {
-			if e.Kind != "leg.originated" || e.LegType != "dtr-questionnaire-fetch" {
+func packageParams(t *testing.T, body []byte) []packageParam {
+	t.Helper()
+	doc, err := relay.Doc(relay.NewBody(body, relay.OriginPeerFrame))
+	if err != nil {
+		t.Fatalf("questionnaire request: %v (%s)", err, body)
+	}
+	if docText(doc, doc.Root(), "resourceType") != "Parameters" {
+		t.Fatalf("questionnaire request is not a Parameters: %s", body)
+	}
+	arr, _ := doc.Member(doc.Root(), "parameter")
+	var out []packageParam
+	for _, p := range doc.Elems(arr) {
+		for _, m := range doc.Members(p) {
+			if m.Name == "name" {
 				continue
 			}
-			found = true
-			// Anti-vacuity: fail this row outright if selection silently landed on
-			// 2.2 instead of 2.0 — the whole discrimination this control depends on.
-			if e.Route == nil || shnsdk.LineOf(e.Route.Token) != "2.0" {
-				t.Fatalf("dtr fetch route = %+v, want token at line 2.0", e.Route)
-			}
-			var fetch shnsdk.QuestionnaireFetchRequest
-			if err := json.Unmarshal(e.Payload, &fetch); err != nil {
-				t.Fatalf("unmarshal observed fetch envelope: %v (payload=%s)", err, e.Payload)
-			}
-			if len(fetch.Coverage) != 0 {
-				t.Fatalf("dtr-questionnaire-fetch envelope routed at line 2.0 carries coverage — want it legitimately absent (2.0 does not require it), got %s", fetch.Coverage)
-			}
+			s, e := doc.Span(m.Value)
+			out = append(out, packageParam{docText(doc, p, "name"), string(body[s:e])})
 		}
-		if !found {
-			t.Fatal("no dtr-questionnaire-fetch leg.originated observed")
-		}
-	})
+	}
+	return out
 }
 
 // TestHandler_DispatchRouteRegistered asserts that the provider-role Handler() mux routes

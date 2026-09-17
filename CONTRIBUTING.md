@@ -9,7 +9,8 @@ of reviewing a diff.
 
 ## How to reach us
 
-- **Bugs and feature requests:** open a GitHub issue on this repository.
+- **Bugs and feature requests:** open a GitHub issue on this repository. See
+  [`SUPPORT.md`](SUPPORT.md) for what to include.
 - **Security issues:** do **not** open a public issue — see
   [`SECURITY.md`](SECURITY.md) for private reporting.
 - **Partner integration questions:** open an issue, or use the same channel you

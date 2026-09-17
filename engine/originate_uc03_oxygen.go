@@ -77,6 +77,7 @@ func literalOxygenDispatchOrder(patientRef, code, display, dx string) (dispatchO
 		return dispatchOrder{}, fmt.Errorf("build literal supplier Organization: %w", err)
 	}
 	return dispatchOrder{
+		authored:  true,
 		orderJSON: orderJSON, supplierJSON: supplierJSON,
 		orderRef: "DeviceRequest/" + uc03OxygenOrderID, performerRef: "Organization/" + uc03OxygenSupplierID,
 	}, nil
@@ -109,31 +110,6 @@ func (g *Gateway) homeOxygenAutoFillEvidenceContext(ctx context.Context, member 
 		out = append(out, FilledItem{LinkID: "2.3", Answer: qrAnswers["2.3"], Origin: "auto", SourceRef: cc.ArterialPaO2Ref})
 	}
 	return out, nil
-}
-
-// attestOxygenNecessity answers HomeOxygenDispatch's ONE required leaf — 6.1, "Medical
-// Necessity Statement" (text) — the way its sibling UCs answer clinician/requester-supplied
-// content (register §11 ruling, §3): through the requester's OWN attestation, source=
-// "manual" (never "auto", never fabricated as clinical fact), merged into the ALREADY
-// operated-$populate-computed QR via shnsdk.AmendQRWithItemIn so the genuine auto-origin
-// items (2.2/2.3) survive byte-unchanged — unlike attestAdaptiveQuestionnaire's
-// answers-map rebuild (fine for UC-04/05/06/07's 0-CQL trees, which have nothing to
-// preserve; wrong here, where it would discard the real auto answers). dx/display name the
-// order this attestation accompanies — administrative attribution, not an invented
-// clinical finding.
-func attestOxygenNecessity(qrJSON, questionnaireJSON []byte, npi, display, dx, when string) ([]byte, error) {
-	statement := fmt.Sprintf("The ordering provider attests that %s (diagnosis %s) is medically necessary.", display, dx)
-	itemJSON, err := shnsdk.BuildManualAttestedItem("6.1", statement, shnsdk.Attestation{
-		NPI: npi, Text: "I attest this order is medically necessary.", When: when,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("build manual attested item 6.1: %w", err)
-	}
-	amended, err := shnsdk.AmendQRWithItemIn(qrJSON, questionnaireJSON, itemJSON)
-	if err != nil {
-		return nil, fmt.Errorf("amend qr with item 6.1: %w", err)
-	}
-	return amended, nil
 }
 
 // questionnaireResponseAnswered reports whether qrJSON's item tree carries a NON-EMPTY
@@ -178,4 +154,16 @@ type qrAnyItemNode struct {
 		Item []qrAnyItemNode `json:"item"`
 	} `json:"answer"`
 	Item []qrAnyItemNode `json:"item"`
+}
+
+// buildOxygenNecessityItem captures the existing single manual attestation event.
+func buildOxygenNecessityItem(npi, display, dx, when string) ([]byte, error) {
+	statement := fmt.Sprintf("The ordering provider attests that %s (diagnosis %s) is medically necessary.", display, dx)
+	itemJSON, err := shnsdk.BuildManualAttestedItem("6.1", statement, shnsdk.Attestation{
+		NPI: npi, Text: "I attest this order is medically necessary.", When: when,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("build manual attested item 6.1: %w", err)
+	}
+	return itemJSON, nil
 }

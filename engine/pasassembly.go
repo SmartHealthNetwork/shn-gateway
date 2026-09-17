@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -150,12 +151,17 @@ func readPASGraph(raw []byte) (*pasGraph, error) {
 	return g, nil
 }
 
-func (g *pasGraph) validate() error {
+func (g *pasGraph) validate() error { return g.validateWithReferencePolicy(nil) }
+
+func (g *pasGraph) validateWithReferencePolicy(policy *authoredPASReferencePolicy) error {
+	if !policy.matches(g) {
+		return pasAssemblyError()
+	}
 	// Bundle and entry metadata have no RESTful containing resource fullUrl.
 	// Their references must therefore be explicit absolute identities.
 	for key, value := range g.bundle {
 		if key != "entry" && key != "resourceType" {
-			if err := g.walk(value, nil, nil, 0, false); err != nil {
+			if err := g.walkWithReferencePolicy(value, nil, nil, 0, false, "", policy); err != nil {
 				return err
 			}
 		}
@@ -163,7 +169,7 @@ func (g *pasGraph) validate() error {
 	for _, entry := range g.entries {
 		for key, value := range entry.(map[string]any) {
 			if key != "resource" {
-				if err := g.walk(value, nil, nil, 0, false); err != nil {
+				if err := g.walkWithReferencePolicy(value, nil, nil, 0, false, "", policy); err != nil {
 					return err
 				}
 			}
@@ -191,7 +197,7 @@ func (g *pasGraph) validate() error {
 				contained[id] = r
 			}
 		}
-		if err := g.walk(e.resource, e, contained, 0, false); err != nil {
+		if err := g.walkWithReferencePolicy(e.resource, e, contained, 0, false, "", policy); err != nil {
 			return err
 		}
 	}
@@ -199,6 +205,10 @@ func (g *pasGraph) validate() error {
 }
 
 func (g *pasGraph) walk(v any, owner *pasGraphEntry, contained map[string]map[string]any, depth int, inContained bool) error {
+	return g.walkWithReferencePolicy(v, owner, contained, depth, inContained, "", nil)
+}
+
+func (g *pasGraph) walkWithReferencePolicy(v any, owner *pasGraphEntry, contained map[string]map[string]any, depth int, inContained bool, path string, policy *authoredPASReferencePolicy) error {
 	if depth > pasGraphMaxDepth {
 		return pasAssemblyError()
 	}
@@ -219,18 +229,18 @@ func (g *pasGraph) walk(v any, owner *pasGraphEntry, contained map[string]map[st
 		if ref, exists := x["reference"]; exists {
 			s, ok := ref.(string)
 			g.refs++
-			if !ok || s == "" || g.refs > pasGraphMaxReferences || !g.resolve(s, owner, contained, inContained) {
+			if !ok || s == "" || g.refs > pasGraphMaxReferences || (!g.resolve(s, owner, contained, inContained) && !policy.allows(owner, path, x)) {
 				return pasAssemblyError()
 			}
 		}
-		for _, child := range x {
-			if err := g.walk(child, owner, contained, depth+1, inContained); err != nil {
+		for key, child := range x {
+			if err := g.walkWithReferencePolicy(child, owner, contained, depth+1, inContained, pasReferencePath(path, key), policy); err != nil {
 				return err
 			}
 		}
 	case []any:
-		for _, child := range x {
-			if err := g.walk(child, owner, contained, depth+1, inContained); err != nil {
+		for index, child := range x {
+			if err := g.walkWithReferencePolicy(child, owner, contained, depth+1, inContained, pasReferencePath(path, strconv.Itoa(index)), policy); err != nil {
 				return err
 			}
 		}

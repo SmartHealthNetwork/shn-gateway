@@ -1,0 +1,39 @@
+{
+  "behavior": "Explicit profile absence always produces a canonical-specific error; resolver execution failures propagate unchanged. In-band profile policy is unchanged.",
+  "changed_class": "org/hl7/fhir/common/hapi/validation/validator/ValidatorWrapper.class",
+  "compiler_image": "eclipse-temurin:21.0.11_10-jdk-jammy@sha256:dbfd085220ae632a0830166e443747d1ee89e9038d92e3b48c3e5e9d8292b9a7",
+  "format": "explicit-profile-backport-v1",
+  "hapi_sources": {
+    "linux/amd64": {
+      "hapi_source_child": "sha256:f4aa83b7102a52f19a42c4c27c5f63fa3d1ded4f393c7083e53a39dc37b2a4c5",
+      "input_war_sha256": "378be32e09f643db6c01c703851e5a639d9ea17ebf7a0aafeeefaa66a0452009",
+      "input_war_size": "378563063"
+    },
+    "linux/arm64": {
+      "hapi_source_child": "sha256:ac871f44ee311bdd4d3533f7ea9e81b3a744ca709726b74d5a97d29663a7916c",
+      "input_war_sha256": "94a8a650d470060025ef8c1c404b5451a9b91efa860a118e69bbdcda3c8221e4",
+      "input_war_size": "378563064"
+    }
+  },
+  "java_release": 17,
+  "license": "Apache-2.0",
+  "license_sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+  "outputs": {
+    "linux/amd64": {
+      "output_class_sha256": "51c76b59364b8927a40efb29232945289974ff540b53b623adc9031886bb47f5",
+      "output_jar_sha256": "847023fdacf82c019da19f4b3feaca2697cd6c6a3ee2abc76513fe31695f8e80",
+      "output_war_sha256": "578e6f42a1645a3d5a90c53f70e7d9b9c93da287ce1f1bba095ebab1f635c97a"
+    },
+    "linux/arm64": {
+      "output_class_sha256": "51c76b59364b8927a40efb29232945289974ff540b53b623adc9031886bb47f5",
+      "output_jar_sha256": "847023fdacf82c019da19f4b3feaca2697cd6c6a3ee2abc76513fe31695f8e80",
+      "output_war_sha256": "12068828f38ca5c0c05c6ffa1b8c7c0a827c1cef0be6f6dae391f789e930316f"
+    }
+  },
+  "patched_source_sha256": "d8914aa341cd9ebe2414ec8a06b48fe975780b0fc9c1355d1451f3fc1f7fccd9",
+  "upstream_commit": "96ac50f89455eb4cbef57fa858854e58b6dac4a5",
+  "upstream_path": "hapi-fhir-validation/src/main/java/org/hl7/fhir/common/hapi/validation/validator/ValidatorWrapper.java",
+  "upstream_repository": "https://github.com/hapifhir/hapi-fhir",
+  "upstream_source_sha256": "5050c7693096e31a9f26c9fbd68c60780bd16db7fc51b404a2095e9b95568be0",
+  "upstream_tag": "v8.10.0"
+}

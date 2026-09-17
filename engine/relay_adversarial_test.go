@@ -33,10 +33,10 @@ import (
 func TestAdversarial_RelayResponseTokenMutated_Rejected(t *testing.T) {
 	env := newInProcessExchange(t)
 	oo := []byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"error"}]}`)
-	env.payerReturns(LegResult{Status: 502, ResponseFHIR: oo})
+	env.payerReturns(LegResult{Status: 502, Response: testResponse(oo)})
 	env.corruptResponseToken(t) // THE one mutation
 
-	_, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "", Content{WorkstreamType: workstreamPA, Bytes: env.crdReq})
+	_, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "", Content{WorkstreamType: workstreamPA, Payload: testRequest(env.crdReq)})
 
 	var re *RelayError
 	if errors.As(err, &re) {

@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -21,90 +23,96 @@ var (
 	foreignIdentity = shnsdk.PayerIdentifier{System: "urn:oid:2.16.840.1.113883.6.300", Value: "99999"}
 )
 
-// crdPartnerCoverageCard is a minimal, mappable CRD partner response (a real
-// coverage-information split-shape extension, same fixture shape as
-// TestNativeResponder_CRDNativeForwardsVerbatim) — normalizeCRDResponse 502s on an
-// unmappable card, so every payor-edge CRD Handle() test needs this, not an empty
-// `{"cards":[]}`.
-var crdPartnerCoverageCard = []byte(`{"cards":[{"suggestions":[{"actions":[{"resource":{"extension":[` +
+// crdPartnerCoverageCard is a minimal valid CRD answer in the reference payer's
+// shape: no card, and the order returned with its coverage information in an
+// update system action. The payer gateway relays a valid CDS Hooks answer
+// exactly and refuses one that is not, so every payor-edge CRD Handle() test
+// answers with this.
+var crdPartnerCoverageCard = []byte(`{"cards":[],"systemActions":[{"type":"update","description":"Add coverage information",` +
+	`"resource":{"resourceType":"ServiceRequest","id":"sr1","extension":[` +
 	`{"url":"http://hl7.org/fhir/us/davinci-crd/StructureDefinition/ext-coverage-information",` +
-	`"extension":[{"url":"covered","valueCode":"covered"},{"url":"pa-needed","valueCode":"no-auth"}]}]}}]}]}]}`)
+	`"extension":[{"url":"covered","valueCode":"covered"},{"url":"pa-needed","valueCode":"no-auth"}]}]}}]}`)
 
-// --- restampBareCoveragePayor (CRD/DTR bare-Coverage shape) ---
+// --- the mapping over a bare Coverage (the questionnaire request's coverage) ---
 
-func TestRestampBareCoveragePayor_ContainedShape_Restamps(t *testing.T) {
+// mapBareCoverage runs the mapping over a questionnaire request envelope carrying cov,
+// returning the mapped Coverage bytes (nil on a refusal) and the refusal.
+func mapBareCoverage(t *testing.T, cov []byte, own, backend shnsdk.PayerIdentifier) ([]byte, LegResult) {
+	t.Helper()
+	req, err := json.Marshal(shnsdk.QuestionnaireFetchRequest{Canonical: "http://x/q", Coverage: cov})
+	if err != nil {
+		t.Fatalf("marshal fetch request: %v", err)
+	}
+	n := NewNativeResponder(nil, "", "order-sign", nil, nil, WithPayorEdgeIdentity(own, backend))
+	p, lr, err := n.payorEdgeRequest(peerBody(req), payorEdgeDTRFetch, "application/json")
+	if err != nil {
+		t.Fatalf("payorEdgeRequest: %v", err)
+	}
+	if lr.Status != 0 {
+		return nil, lr
+	}
+	var out dtrLegRequest
+	if err := json.Unmarshal(relay.BytesForTest(p), &out); err != nil {
+		t.Fatalf("mapped request: %v", err)
+	}
+	return out.Coverage, lr
+}
+
+func TestPayorEdgeBareCoverage_ContainedShape_Maps(t *testing.T) {
 	cov, err := shnsdk.BuildCoverageWithPayer("Patient/p1", "MBR-1", ownIdentity)
 	if err != nil {
 		t.Fatalf("BuildCoverageWithPayer: %v", err)
 	}
-	out, got, gotOK, matched, err := restampBareCoveragePayor(cov, ownIdentity, backendIdentity)
-	if err != nil {
-		t.Fatalf("restampBareCoveragePayor: %v", err)
-	}
-	if !matched || !gotOK || got != ownIdentity {
-		t.Fatalf("want matched=true got=%v gotOK=true, got matched=%v got=%v gotOK=%v", ownIdentity, matched, got, gotOK)
+	out, lr := mapBareCoverage(t, cov, ownIdentity, backendIdentity)
+	if lr.Status != 0 {
+		t.Fatalf("refused: %d %s", lr.Status, lr.Message)
 	}
 	newGot, newOK := shnsdk.ParsePayerIdentifier(out, nil)
 	if !newOK || newGot != backendIdentity {
-		t.Fatalf("restamped coverage payor = %v (ok=%v), want %v", newGot, newOK, backendIdentity)
+		t.Fatalf("mapped coverage payor = %v (ok=%v), want %v", newGot, newOK, backendIdentity)
 	}
-	// A2: nothing else touched — the contained Organization's name must survive.
+	// Nothing else touched — the contained Organization's name must survive.
 	if !bytes.Contains(out, []byte(`"Centers for Medicare and Medicaid Services"`)) {
-		t.Errorf("restamp touched the payer Organization's name (A2 violation): %s", out)
+		t.Errorf("the mapping touched the payer Organization's name: %s", out)
 	}
 }
 
-func TestRestampBareCoveragePayor_InlineShape_Restamps(t *testing.T) {
+func TestPayorEdgeBareCoverage_InlineShape_Maps(t *testing.T) {
 	cov := []byte(`{"resourceType":"Coverage","id":"c1","status":"active","beneficiary":{"reference":"Patient/p1"},"payor":[{"identifier":{"system":"` + ownIdentity.System + `","value":"` + ownIdentity.Value + `"}}]}`)
-	out, got, gotOK, matched, err := restampBareCoveragePayor(cov, ownIdentity, backendIdentity)
-	if err != nil {
-		t.Fatalf("restampBareCoveragePayor: %v", err)
-	}
-	if !matched || got != ownIdentity || !gotOK {
-		t.Fatalf("want a match on the inline identity, got matched=%v got=%v gotOK=%v", matched, got, gotOK)
+	out, lr := mapBareCoverage(t, cov, ownIdentity, backendIdentity)
+	if lr.Status != 0 {
+		t.Fatalf("refused: %d %s", lr.Status, lr.Message)
 	}
 	newGot, newOK := shnsdk.ParsePayerIdentifier(out, nil)
 	if !newOK || newGot != backendIdentity {
-		t.Fatalf("restamped inline payor = %v (ok=%v), want %v", newGot, newOK, backendIdentity)
+		t.Fatalf("mapped inline payor = %v (ok=%v), want %v", newGot, newOK, backendIdentity)
 	}
 }
 
-func TestRestampBareCoveragePayor_MismatchRefuses(t *testing.T) {
+func TestPayorEdgeBareCoverage_MismatchRefuses(t *testing.T) {
 	cov, err := shnsdk.BuildCoverageWithPayer("Patient/p1", "MBR-1", foreignIdentity)
 	if err != nil {
 		t.Fatalf("BuildCoverageWithPayer: %v", err)
 	}
-	out, got, gotOK, matched, err := restampBareCoveragePayor(cov, ownIdentity, backendIdentity)
-	if err != nil {
-		t.Fatalf("restampBareCoveragePayor: %v", err)
-	}
-	if matched {
-		t.Fatalf("a foreign payor identity must NOT match own")
-	}
-	if !gotOK || got != foreignIdentity {
-		t.Fatalf("got=%v gotOK=%v, want the resolved foreign identity %v", got, gotOK, foreignIdentity)
-	}
-	if !bytes.Equal(out, cov) {
-		t.Errorf("a refused restamp must return the ORIGINAL bytes unchanged")
+	_, lr := mapBareCoverage(t, cov, ownIdentity, backendIdentity)
+	if lr.Status != 400 || !strings.Contains(lr.Message, foreignIdentity.Value) {
+		t.Fatalf("a foreign payor identity must be refused naming it, got %d %q", lr.Status, lr.Message)
 	}
 }
 
-func TestRestampBareCoveragePayor_NoResolvablePayorRefuses(t *testing.T) {
+func TestPayorEdgeBareCoverage_NoResolvablePayorRefuses(t *testing.T) {
 	cov := []byte(`{"resourceType":"Coverage","id":"c1","status":"active","beneficiary":{"reference":"Patient/p1"}}`)
-	_, got, gotOK, matched, err := restampBareCoveragePayor(cov, ownIdentity, backendIdentity)
-	if err != nil {
-		t.Fatalf("restampBareCoveragePayor: %v", err)
-	}
-	if matched || gotOK {
-		t.Fatalf("a Coverage with no payor at all must resolve to gotOK=false, matched=false; got gotOK=%v matched=%v got=%v", gotOK, matched, got)
+	_, lr := mapBareCoverage(t, cov, ownIdentity, backendIdentity)
+	if lr.Status != 400 || !strings.Contains(lr.Message, "no resolvable payor identifier") {
+		t.Fatalf("a Coverage with no payor must be refused, got %d %q", lr.Status, lr.Message)
 	}
 }
 
-// --- restampPASBundlePayor (PAS $submit Bundle shape) ---
+// --- the mapping over a PAS $submit Bundle ---
 
 // conformantSubmitBundle builds a $submit Bundle via the SAME SDK builder the
-// originator uses, in either the SHN-native default shape (contained payor Org, generic
-// unresolvable Claim.insurer) or the demo/kit conformant PayerOrgEntry shape (a
+// originator uses, in either the SDK's default shape (contained payor Org, a Claim.insurer
+// that resolves to nothing in the Bundle) or the conformant PayerOrgEntry shape (a
 // resolvable Organization bundle entry shared by Coverage.payor AND Claim.insurer).
 func conformantSubmitBundle(t *testing.T, payer shnsdk.PayerIdentifier, payerOrgEntry bool) []byte {
 	t.Helper()
@@ -121,95 +129,193 @@ func conformantSubmitBundle(t *testing.T, payer shnsdk.PayerIdentifier, payerOrg
 	return b
 }
 
+// bundleResources returns the Bundle's entry resources and a resolver for a reference
+// to one of them (by fullUrl or relative Type/id).
+func bundleResources(t *testing.T, bundleJSON []byte) ([]json.RawMessage, func(ref string) ([]byte, bool)) {
+	t.Helper()
+	var b struct {
+		Entry []struct {
+			FullURL  string          `json:"fullUrl"`
+			Resource json.RawMessage `json:"resource"`
+		} `json:"entry"`
+	}
+	if err := json.Unmarshal(bundleJSON, &b); err != nil {
+		t.Fatalf("parse bundle: %v", err)
+	}
+	var out []json.RawMessage
+	for _, e := range b.Entry {
+		out = append(out, e.Resource)
+	}
+	resolve := func(ref string) ([]byte, bool) {
+		for _, e := range b.Entry {
+			rt, id := resourceHead(e.Resource)
+			if (e.FullURL != "" && ref == e.FullURL) || (rt != "" && id != "" && ref == rt+"/"+id) {
+				return e.Resource, true
+			}
+		}
+		return nil, false
+	}
+	return out, resolve
+}
+
+func resourceHead(raw json.RawMessage) (string, string) {
+	var p struct {
+		ResourceType string `json:"resourceType"`
+		ID           string `json:"id"`
+	}
+	_ = json.Unmarshal(raw, &p)
+	return p.ResourceType, p.ID
+}
+
+func bundleResource(t *testing.T, bundleJSON []byte, resourceType string) json.RawMessage {
+	t.Helper()
+	resources, _ := bundleResources(t, bundleJSON)
+	for _, r := range resources {
+		if rt, _ := resourceHead(r); rt == resourceType {
+			return r
+		}
+	}
+	t.Fatalf("bundle has no %s entry: %s", resourceType, bundleJSON)
+	return nil
+}
+
 func bundleCoveragePayor(t *testing.T, bundleJSON []byte) (shnsdk.PayerIdentifier, bool) {
 	t.Helper()
-	b, err := parsePayorEdgeBundle(bundleJSON)
-	if err != nil {
-		t.Fatalf("parsePayorEdgeBundle: %v", err)
-	}
-	idx := b.findIndex("Coverage")
-	if idx < 0 {
-		t.Fatalf("bundle has no Coverage entry: %s", bundleJSON)
-	}
-	return shnsdk.ParsePayerIdentifier(b.entries[idx].Resource, b.resolveRef)
+	_, resolve := bundleResources(t, bundleJSON)
+	return shnsdk.ParsePayerIdentifier(bundleResource(t, bundleJSON, "Coverage"), resolve)
 }
 
 func bundleClaimInsurerOrg(t *testing.T, bundleJSON []byte) (shnsdk.PayerIdentifier, bool) {
 	t.Helper()
-	b, err := parsePayorEdgeBundle(bundleJSON)
-	if err != nil {
-		t.Fatalf("parsePayorEdgeBundle: %v", err)
-	}
-	idx := b.findIndex("Claim")
-	if idx < 0 {
-		t.Fatalf("bundle has no Claim entry: %s", bundleJSON)
-	}
+	_, resolve := bundleResources(t, bundleJSON)
 	var claim struct {
 		Insurer struct {
 			Reference string `json:"reference"`
 		} `json:"insurer"`
 	}
-	if err := json.Unmarshal(b.entries[idx].Resource, &claim); err != nil {
+	if err := json.Unmarshal(bundleResource(t, bundleJSON, "Claim"), &claim); err != nil {
 		t.Fatalf("parse claim: %v", err)
 	}
-	if orgJSON, ok := b.resolveRef(claim.Insurer.Reference); ok {
+	if orgJSON, ok := resolve(claim.Insurer.Reference); ok {
 		return shnsdk.ParseOrganizationIdentifier(orgJSON)
 	}
 	return shnsdk.PayerIdentifier{}, false
 }
 
-func TestRestampPASBundlePayor_ContainedShape_Restamps(t *testing.T) {
-	bundle := conformantSubmitBundle(t, ownIdentity, false)
-	out, got, gotOK, matched, err := restampPASBundlePayor(bundle, ownIdentity, backendIdentity)
+// mapPASBundle runs the mapping over a $submit Bundle.
+func mapPASBundle(t *testing.T, bundle []byte, own, backend shnsdk.PayerIdentifier) ([]byte, LegResult) {
+	t.Helper()
+	n := NewNativeResponder(nil, "", "order-sign", nil, nil, WithPayorEdgeIdentity(own, backend))
+	p, lr, err := n.payorEdgeRequest(peerBody(bundle), payorEdgePASBundle, "application/fhir+json")
 	if err != nil {
-		t.Fatalf("restampPASBundlePayor: %v", err)
+		t.Fatalf("payorEdgeRequest: %v", err)
 	}
-	if !matched || !gotOK || got != ownIdentity {
-		t.Fatalf("want a match on own identity, got matched=%v got=%v gotOK=%v", matched, got, gotOK)
+	if lr.Status != 0 {
+		return nil, lr
+	}
+	return relay.BytesForTest(p), lr
+}
+
+// The SDK's default shape: the Claim.insurer reference ("Organization/payer") resolves to
+// nothing in the Bundle, so the request is refused naming it rather than mapped around it.
+func TestPayorEdgePASBundle_UnresolvedInsurerRefused(t *testing.T) {
+	bundle := conformantSubmitBundle(t, ownIdentity, false)
+	_, lr := mapPASBundle(t, bundle, ownIdentity, backendIdentity)
+	if lr.Status != 422 || !strings.Contains(lr.Message, `"Organization/payer"`) {
+		t.Fatalf("an unresolved insurer reference must be refused naming it, got %d %q", lr.Status, lr.Message)
+	}
+}
+
+// The contained shape: the Coverage and the Claim each contain the payer Organization, so
+// both contained identifiers are mapped.
+func TestPayorEdgePASBundle_ContainedShape_Maps(t *testing.T) {
+	sr := []byte(`{"resourceType":"ServiceRequest","id":"sr-x","status":"active","intent":"order","subject":{"reference":"Patient/MBR-1"},"code":{"coding":[{"system":"http://www.ama-assn.org/go/cpt","code":"72148","display":"MRI lumbar spine w/o contrast"}]}}`)
+	bundle, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
+		SR: sr, PatientRef: "Patient/MBR-1", CoverageRef: "Coverage/MBR-1", MemberID: "MBR-1",
+		Corr: "corr-payoredge", Created: time.Unix(1700000000, 0).UTC(),
+		ContainedInsurer: true, Payer: ownIdentity,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, lr := mapPASBundle(t, bundle, ownIdentity, backendIdentity)
+	if lr.Status != 0 {
+		t.Fatalf("refused: %d %s", lr.Status, lr.Message)
 	}
 	newGot, newOK := bundleCoveragePayor(t, out)
 	if !newOK || newGot != backendIdentity {
-		t.Fatalf("restamped Coverage.payor = %v (ok=%v), want %v", newGot, newOK, backendIdentity)
+		t.Fatalf("mapped Coverage.payor = %v (ok=%v), want %v", newGot, newOK, backendIdentity)
+	}
+	if bytes.Contains(out, []byte(ownIdentity.Value)) {
+		t.Fatalf("an identifier naming this payer was left unmapped: %s", out)
 	}
 }
 
-func TestRestampPASBundlePayor_PayerOrgEntryShape_RestampsCoverageAndInsurer(t *testing.T) {
+func TestPayorEdgePASBundle_PayerOrgEntryShape_MapsCoverageAndInsurer(t *testing.T) {
 	bundle := conformantSubmitBundle(t, ownIdentity, true)
-	out, got, gotOK, matched, err := restampPASBundlePayor(bundle, ownIdentity, backendIdentity)
-	if err != nil {
-		t.Fatalf("restampPASBundlePayor: %v", err)
-	}
-	if !matched || !gotOK || got != ownIdentity {
-		t.Fatalf("want a match on own identity, got matched=%v got=%v gotOK=%v", matched, got, gotOK)
+	out, lr := mapPASBundle(t, bundle, ownIdentity, backendIdentity)
+	if lr.Status != 0 {
+		t.Fatalf("refused: %d %s", lr.Status, lr.Message)
 	}
 	newCov, ok := bundleCoveragePayor(t, out)
 	if !ok || newCov != backendIdentity {
-		t.Fatalf("restamped Coverage.payor = %v (ok=%v), want %v", newCov, ok, backendIdentity)
+		t.Fatalf("mapped Coverage.payor = %v (ok=%v), want %v", newCov, ok, backendIdentity)
 	}
 	newInsurer, ok := bundleClaimInsurerOrg(t, out)
 	if !ok || newInsurer != backendIdentity {
-		t.Fatalf("restamped Claim.insurer org = %v (ok=%v), want %v (the PayerOrgEntry shape shares ONE entry between Coverage.payor and Claim.insurer)", newInsurer, ok, backendIdentity)
+		t.Fatalf("mapped Claim.insurer org = %v (ok=%v), want %v (the PayerOrgEntry shape shares ONE entry between Coverage.payor and Claim.insurer)", newInsurer, ok, backendIdentity)
 	}
-	// A2: the payer Organization's name must survive the restamp untouched.
+	// The payer Organization's name must survive the mapping untouched.
 	if !bytes.Contains(out, []byte(`"Centers for Medicare and Medicaid Services"`)) {
-		t.Errorf("restamp touched the payer Organization's name (A2 violation): %s", out)
+		t.Errorf("the mapping touched the payer Organization's name: %s", out)
 	}
 }
 
-func TestRestampPASBundlePayor_MismatchRefuses(t *testing.T) {
+func TestPayorEdgePASBundle_MismatchRefuses(t *testing.T) {
 	bundle := conformantSubmitBundle(t, foreignIdentity, true)
-	out, got, gotOK, matched, err := restampPASBundlePayor(bundle, ownIdentity, backendIdentity)
+	_, lr := mapPASBundle(t, bundle, ownIdentity, backendIdentity)
+	if lr.Status != 400 || !strings.Contains(lr.Message, foreignIdentity.Value) {
+		t.Fatalf("a foreign bundle payor must be refused naming it, got %d %q", lr.Status, lr.Message)
+	}
+}
+
+// The Claim's insurer is mapped only when it names this payer: an insurer naming
+// another identity is not rewritten to this payer's backend identity.
+func TestPayorEdgePASBundle_InsurerNamingAnotherIdentityLeftAsSent(t *testing.T) {
+	bundle := conformantSubmitBundle(t, ownIdentity, true)
+	// Split the shared entry: the insurer points at a second Organization entry that
+	// names a different payer.
+	var b map[string]any
+	if err := json.Unmarshal(bundle, &b); err != nil {
+		t.Fatal(err)
+	}
+	entries := b["entry"].([]any)
+	var claim map[string]any
+	for _, e := range entries {
+		r := e.(map[string]any)["resource"].(map[string]any)
+		if r["resourceType"] == "Claim" {
+			claim = r
+		}
+	}
+	claim["insurer"] = map[string]any{"reference": "Organization/other-insurer"}
+	b["entry"] = append(entries, map[string]any{
+		"fullUrl": "urn:uuid:5b0f2a54-1b8e-4d8e-9d0a-3c1f0b7c1a11",
+		"resource": map[string]any{"resourceType": "Organization", "id": "other-insurer",
+			"identifier": []any{map[string]any{"system": foreignIdentity.System, "value": foreignIdentity.Value}}},
+	})
+	split, err := json.Marshal(b)
 	if err != nil {
-		t.Fatalf("restampPASBundlePayor: %v", err)
+		t.Fatal(err)
 	}
-	if matched {
-		t.Fatalf("a foreign bundle payor must NOT match own")
+	out, lr := mapPASBundle(t, split, ownIdentity, backendIdentity)
+	if lr.Status != 0 {
+		t.Fatalf("refused: %d %s", lr.Status, lr.Message)
 	}
-	if !gotOK || got != foreignIdentity {
-		t.Fatalf("got=%v gotOK=%v, want the resolved foreign identity %v", got, gotOK, foreignIdentity)
+	if got, ok := bundleClaimInsurerOrg(t, out); !ok || got != foreignIdentity {
+		t.Fatalf("insurer org = %v (ok=%v), want it left as %v", got, ok, foreignIdentity)
 	}
-	if !bytes.Equal(out, bundle) {
-		t.Errorf("a refused restamp must return the ORIGINAL bundle bytes unchanged")
+	if got, ok := bundleCoveragePayor(t, out); !ok || got != backendIdentity {
+		t.Fatalf("Coverage.payor = %v (ok=%v), want %v", got, ok, backendIdentity)
 	}
 }
 

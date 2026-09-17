@@ -46,7 +46,7 @@ func advertiseRecipientFrameV1(t *testing.T, e *inProcessExchange) {
 // payload rides here: the frame's INNER status carries the app status, so
 // the outer LegResult stays 0/2xx (sealed bare, not legacy-wrapped).
 func sealBare(e *inProcessExchange, payload []byte) {
-	e.payerReturns(LegResult{Status: 0, ResponseFHIR: payload})
+	e.payerReturns(LegResult{Status: 0, Response: testResponse(payload)})
 }
 
 func TestOriginateDecodesFramedError(t *testing.T) {
@@ -59,7 +59,7 @@ func TestOriginateDecodesFramedError(t *testing.T) {
 	}
 	sealBare(env, frame)
 
-	body, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "", Content{WorkstreamType: workstreamPA, Bytes: env.crdReq})
+	body, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "", Content{WorkstreamType: workstreamPA, Payload: testRequest(env.crdReq)})
 	if body != nil {
 		t.Fatalf("framed non-2xx must return nil body, got %q", body)
 	}
@@ -88,7 +88,7 @@ func TestOriginateDecodesFramedSuccess(t *testing.T) {
 	}
 	sealBare(env, frame)
 
-	body, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "", Content{WorkstreamType: workstreamPA, Bytes: env.crdReq})
+	body, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "", Content{WorkstreamType: workstreamPA, Payload: testRequest(env.crdReq)})
 	if err != nil {
 		t.Fatalf("framed 2xx must succeed, got err %v", err)
 	}
@@ -113,7 +113,7 @@ func TestOriginateDecodesFramedErrorFromUnadvertisedRecipient(t *testing.T) {
 	}
 	sealBare(env, frame)
 
-	body, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "", Content{WorkstreamType: workstreamPA, Bytes: env.crdReq})
+	body, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "", Content{WorkstreamType: workstreamPA, Payload: testRequest(env.crdReq)})
 	if body != nil {
 		t.Fatalf("framed non-2xx must return nil body, got %q", body)
 	}
@@ -135,7 +135,7 @@ func TestOriginateStaleFeedFallback(t *testing.T) {
 	var events []ObserverEvent
 	env.originator.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
 
-	body, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "", Content{WorkstreamType: workstreamPA, Bytes: env.crdReq})
+	body, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "", Content{WorkstreamType: workstreamPA, Payload: testRequest(env.crdReq)})
 	if err != nil {
 		t.Fatalf("stale-feed bare payload must be processed as legacy success, got err %v", err)
 	}
@@ -167,7 +167,7 @@ func TestOriginateRejectsCorruptFrame(t *testing.T) {
 	corrupt := []byte{0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
 	sealBare(env, corrupt)
 
-	body, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "", Content{WorkstreamType: workstreamPA, Bytes: env.crdReq})
+	body, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "", Content{WorkstreamType: workstreamPA, Payload: testRequest(env.crdReq)})
 	if err == nil {
 		t.Fatalf("corrupt frame must be rejected, got body %q", body)
 	}
@@ -242,7 +242,7 @@ func TestDispatchRelaysFramedRecipientError(t *testing.T) {
 func TestScenarioRelaysFramedRecipientError(t *testing.T) {
 	env := newInProcessExchange(t)
 	status, ct, body := framedErrorFixture()
-	env.payerReturns(LegResult{Status: status, ResponseFHIR: body})
+	env.payerReturns(LegResult{Status: status, Response: testResponse(body)})
 
 	req := httptest.NewRequest(http.MethodPost, "/scenario/uc03", nil)
 	rec := httptest.NewRecorder()
@@ -296,7 +296,7 @@ func TestOriginateRefusesUnsharedLine(t *testing.T) {
 	var events []ObserverEvent
 	env.originator.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
 
-	_, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "", Content{WorkstreamType: workstreamPA, Bytes: env.crdReq})
+	_, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "", Content{WorkstreamType: workstreamPA, Payload: testRequest(env.crdReq)})
 	var rre *RouteRefusalError
 	if !errors.As(err, &rre) {
 		t.Fatalf("want *RouteRefusalError, got %v", err)
@@ -331,9 +331,9 @@ func TestOriginateRefusesUnsharedLine(t *testing.T) {
 func TestOriginatePinnedProfileIDSkipsSelection(t *testing.T) {
 	env := newInProcessExchange(t)
 	declareRecipientVersions(t, env, []string{"pa.crd@2.2"}) // would refuse if re-selected
-	env.payerReturns(LegResult{Status: 0, ResponseFHIR: []byte(`{"resourceType":"Bundle","type":"collection"}`)})
+	env.payerReturns(LegResult{Status: 0, Response: testResponse([]byte(`{"resourceType":"Bundle","type":"collection"}`))})
 	if _, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "",
-		Content{WorkstreamType: workstreamPA, ProfileID: "pa.crd@2.0", Bytes: env.crdReq}); err != nil {
+		Content{WorkstreamType: workstreamPA, ProfileID: "pa.crd@2.0", Payload: testRequest(env.crdReq)}); err != nil {
 		t.Fatalf("pinned leg must not re-select: %v", err)
 	}
 }
@@ -383,7 +383,7 @@ func TestOriginateRejectsStampMismatch(t *testing.T) {
 		t.Fatalf("encode: %v", err)
 	}
 	sealBare(env, frame)
-	_, err = env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "", Content{WorkstreamType: workstreamPA, Bytes: env.crdReq})
+	_, err = env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "", Content{WorkstreamType: workstreamPA, Payload: testRequest(env.crdReq)})
 	if err == nil || !strings.Contains(err.Error(), "contract version mismatch") {
 		t.Fatalf("want contract-version-mismatch rejection, got %v", err)
 	}
@@ -408,7 +408,7 @@ func TestOriginateRejectsStampMismatchAcrossLines(t *testing.T) {
 	}
 	sealBare(env, frame)
 	_, err = env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "",
-		Content{WorkstreamType: workstreamPA, ProfileID: "pa.crd@2.0", Bytes: env.crdReq})
+		Content{WorkstreamType: workstreamPA, ProfileID: "pa.crd@2.0", Payload: testRequest(env.crdReq)})
 	if err == nil || !strings.Contains(err.Error(), "contract version mismatch") {
 		t.Fatalf("want contract-version-mismatch rejection for pa.crd@2.2 on a pa.crd@2.0 leg, got %v", err)
 	}
@@ -428,7 +428,7 @@ func TestOriginateAcceptsMatchingStamp(t *testing.T) {
 		shnsdk.FrameHeaderContractVersion: "pa.crd@2.0",
 	}, body)
 	sealBare(env, frame)
-	if _, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "", Content{WorkstreamType: workstreamPA, Bytes: env.crdReq}); err != nil {
+	if _, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "", Content{WorkstreamType: workstreamPA, Payload: testRequest(env.crdReq)}); err != nil {
 		t.Fatalf("matching stamp must pass: %v", err)
 	}
 }
@@ -442,7 +442,7 @@ func TestOriginateToleratesAbsentStamp(t *testing.T) {
 	advertiseRecipientFrameV1(t, env)
 	frame, _ := shnsdk.EncodeHTTPFrame(200, "application/fhir+json", []byte(`{"resourceType":"Bundle","type":"collection"}`))
 	sealBare(env, frame)
-	if _, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "", Content{WorkstreamType: workstreamPA, Bytes: env.crdReq}); err != nil {
+	if _, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "", Content{WorkstreamType: workstreamPA, Payload: testRequest(env.crdReq)}); err != nil {
 		t.Fatalf("absent stamp must be tolerated: %v", err)
 	}
 }
@@ -451,7 +451,7 @@ func TestOriginateToleratesAbsentStamp(t *testing.T) {
 // deepest helper chain still relays (a %v wrap or error re-synthesis anywhere on the path would drop
 // the sentinel and fail this).
 func TestRelayErrorSurvivesHelperWrapping(t *testing.T) {
-	inner := &RelayError{Status: 422, Body: []byte(`{"x":1}`), ContentType: "application/json"}
+	inner := &RelayError{Status: 422, Body: []byte(`{"x":1}`), ContentType: "application/json", leg: "pas-claim-update"}
 	wrapped := fmt.Errorf("resume pended claim: %w", fmt.Errorf("originate leg: %w", inner))
 	rec := httptest.NewRecorder()
 	g := &Gateway{} // relayOriginationError touches no gateway state
@@ -479,7 +479,7 @@ func TestRelayErrorSurvivesHelperWrapping(t *testing.T) {
 // production's promotion of the CRD legs onto this primitive is covered separately).
 func TestLegOriginatedCarriesRoute(t *testing.T) {
 	env := newInProcessExchange(t)
-	env.payerReturns(LegResult{Status: 0, ResponseFHIR: []byte(`{"resourceType":"Bundle","type":"collection"}`)})
+	env.payerReturns(LegResult{Status: 0, Response: testResponse([]byte(`{"resourceType":"Bundle","type":"collection"}`))})
 
 	var events []ObserverEvent
 	env.originator.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
@@ -494,7 +494,7 @@ func TestLegOriginatedCarriesRoute(t *testing.T) {
 
 	content := Content{
 		WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route),
-		Bytes: env.crdReq,
+		Payload: testRequest(env.crdReq),
 	}
 	if _, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "", content); err != nil {
 		t.Fatalf("OriginateLeg: %v", err)
@@ -527,13 +527,13 @@ func TestLegOriginatedCarriesRoute(t *testing.T) {
 // speculative/re-derived one).
 func TestOriginateLegFallbackOmitsRoute(t *testing.T) {
 	env := newInProcessExchange(t)
-	env.payerReturns(LegResult{Status: 0, ResponseFHIR: []byte(`{"resourceType":"Parameters"}`)})
+	env.payerReturns(LegResult{Status: 0, Response: testResponse([]byte(`{"resourceType":"Parameters"}`))})
 
 	var events []ObserverEvent
 	env.originator.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
 
 	if _, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "",
-		Content{WorkstreamType: workstreamPA, Bytes: env.crdReq}); err != nil {
+		Content{WorkstreamType: workstreamPA, Payload: testRequest(env.crdReq)}); err != nil {
 		t.Fatalf("OriginateLeg: %v", err)
 	}
 
@@ -564,7 +564,7 @@ func TestLegRefusedCarriesStructuredRoute(t *testing.T) {
 	env.originator.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
 
 	_, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "",
-		Content{WorkstreamType: workstreamPA, Bytes: env.crdReq})
+		Content{WorkstreamType: workstreamPA, Payload: testRequest(env.crdReq)})
 	var rre *RouteRefusalError
 	if !errors.As(err, &rre) {
 		t.Fatalf("want *RouteRefusalError, got %v", err)
@@ -602,7 +602,7 @@ func TestLegRefusedCarriesStructuredRoute(t *testing.T) {
 // TestLegOriginatedCarriesRoute for why that legType, not "pas-claim".
 func TestLegOriginatedRouteChainOnArm3(t *testing.T) {
 	env := newInProcessExchange(t)
-	env.payerReturns(LegResult{Status: 0, ResponseFHIR: []byte(`{"resourceType":"Bundle","type":"collection"}`)})
+	env.payerReturns(LegResult{Status: 0, Response: testResponse([]byte(`{"resourceType":"Bundle","type":"collection"}`))})
 
 	var events []ObserverEvent
 	env.originator.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
@@ -616,7 +616,7 @@ func TestLegOriginatedRouteChainOnArm3(t *testing.T) {
 	}
 	content := Content{
 		WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route),
-		Bytes: env.crdReq,
+		Payload: testRequest(env.crdReq),
 	}
 	if _, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "", content); err != nil {
 		t.Fatalf("OriginateLeg: %v", err)
@@ -675,7 +675,9 @@ func TestTransformRefusalZeroBytes(t *testing.T) {
 	order := pasTailServiceRequest()
 	qr := []byte(`{"resourceType":"QuestionnaireResponse","id":"qr-t4","status":"completed","subject":{"reference":"` + patientRef + `"}}`)
 
-	_, respJSON, status, msg, err := env.originator.submitClaimAndResolve(env.ctx, env.req, "pci-1", order, nil, qr, patientRef, coverageRef, member, shnsdk.CMSPayerIdentity, env.payerID)
+	orderRef, _ := resourceRef(order)
+	source := newRawDTRBuildSource(qr, nil, shnsdk.QRContext{PatientRef: patientRef, CoverageRef: coverageRef, OrderRef: orderRef})
+	_, respJSON, status, msg, err := env.originator.submitClaimAndResolve(env.ctx, env.req, "pci-1", order, nil, source, patientRef, coverageRef, member, shnsdk.CMSPayerIdentity, env.payerID)
 	if err == nil {
 		t.Fatal("want an error — the gated chain must refuse before any leg is routed")
 	}

@@ -24,7 +24,7 @@ func TestNativePASRetainsApprovedBundle(t *testing.T) {
 	if err != nil || result.Status != 0 {
 		t.Fatalf("status=%d err=%v", result.Status, err)
 	}
-	if !bytes.Equal(body, result.ResponseFHIR) || !result.ResponseRelayed || !result.ResponseSubjectForeign {
+	if !bytes.Equal(body, responseBytes(result)) || !result.ResponseRelayed() || !result.ResponseSubjectForeign {
 		t.Fatal("native Bundle or provenance lost")
 	}
 }
@@ -78,18 +78,18 @@ func TestNativePASPollAssemblesRetainedGraph(t *testing.T) {
 			if err != nil || result.Status != 0 {
 				t.Fatalf("status=%d err=%v message=%s", result.Status, err, result.Message)
 			}
-			if result.ResponseRelayed || !result.ResponseSubjectForeign {
+			if result.ResponseRelayed() || !result.ResponseSubjectForeign {
 				t.Fatal("assembly misrepresented as relay")
 			}
-			if err := validatePASBundleGraph(result.ResponseFHIR); err != nil {
+			if err := validatePASBundleGraph(responseBytes(result)); err != nil {
 				t.Fatal(err)
 			}
 			var got map[string]any
-			json.Unmarshal(result.ResponseFHIR, &got)
+			json.Unmarshal(responseBytes(result), &got)
 			if got["resourceType"] != "Bundle" {
 				t.Fatal("lost native response")
 			}
-			if !bytes.Contains(result.ResponseFHIR, []byte(`"resourceType":"Task"`)) {
+			if !bytes.Contains(responseBytes(result), []byte(`"resourceType":"Task"`)) {
 				t.Fatal("retained Task lost")
 			}
 		})
@@ -120,14 +120,14 @@ func TestPASForeignGraphSubjectFence(t *testing.T) {
 			}
 			raw, _ := json.Marshal(b)
 			g := &Gateway{}
-			status, _ := g.fenceResponseSubject("pas-claim", "Patient/MBR-COVERED", LegResult{ResponseFHIR: raw, ResponseSubjectForeign: true})
+			status, _ := g.fenceResponseSubject("pas-claim", "Patient/MBR-COVERED", LegResult{Response: testResponse(raw), ResponseSubjectForeign: true})
 			if status != http.StatusForbidden {
 				t.Fatalf("foreign sibling conflict status=%d", status)
 			}
 		})
 	}
 	g := &Gateway{}
-	status, msg := g.fenceResponseSubject("pas-claim", "Patient/MBR-COVERED", LegResult{ResponseFHIR: []byte(assemblyRealPending), ResponseSubjectForeign: true})
+	status, msg := g.fenceResponseSubject("pas-claim", "Patient/MBR-COVERED", LegResult{Response: testResponse([]byte(assemblyRealPending)), ResponseSubjectForeign: true})
 	if status != 0 {
 		t.Fatalf("foreign namespace incorrectly compared with bound member: %d %s", status, msg)
 	}
@@ -155,7 +155,7 @@ func TestPASAssemblyCertificationAndProvenance(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			validator := &pasAssemblyValidator{valid: true}
 			g := &Gateway{cfg: Config{HolderID: "payer", Clock: fixedClock, ValidatorsByLine: map[string]shnsdk.Validator{"2.0": validator}}}
-			result := LegResult{ResponseFHIR: raw, ResponseAssembled: true, ResponseSubjectForeign: true}
+			result := LegResult{Response: testResponse(raw), ResponseAssembled: true, ResponseSubjectForeign: true}
 			ctx := context.Background()
 			token := "pa.pas@2.0"
 			correlation := "corr-assembly"
@@ -173,7 +173,7 @@ func TestPASAssemblyCertificationAndProvenance(t *testing.T) {
 			case "unknown line":
 				token = "pa.pas@9.9"
 			case "invalid flags":
-				result.ResponseRelayed = true
+				result.Response = relayedResponse(raw)
 			case "long correlation":
 				correlation = strings.Repeat("a", 257)
 			}
@@ -289,7 +289,7 @@ func TestPASAssemblyInboundCommitOrdering(t *testing.T) {
 					request = originatorBuiltConformantUpdateBundle(t)
 				}
 				commits, rollbacks, observed := 0, 0, 0
-				result := LegResult{ResponseFHIR: assembled, ResponseAssembled: true, ResponseSubjectForeign: true, Commit: func() error {
+				result := LegResult{Response: testResponse(assembled), ResponseAssembled: true, ResponseSubjectForeign: true, Commit: func() error {
 					commits++
 					if mode == "store failure" {
 						return fmt.Errorf("store unavailable")
@@ -297,7 +297,7 @@ func TestPASAssemblyInboundCommitOrdering(t *testing.T) {
 					return nil
 				}, Rollback: func() { rollbacks++ }}
 				if mode == "bare operation" {
-					result.ResponseFHIR = claimResponseFor(t, "Patient/MBR-COVERED")
+					result.Response = testResponse(claimResponseFor(t, "Patient/MBR-COVERED"))
 					result.ResponseAssembled = false
 					result.ResponseSubjectForeign = false
 				}
@@ -364,13 +364,13 @@ func TestPASSHNProducedGraphSubjectFence(t *testing.T) {
 	b := assemblySmallGraph()
 	raw, _ := json.Marshal(b)
 	g := &Gateway{}
-	if status, msg := g.fenceResponseSubject("pas-claim", "Patient/p", LegResult{ResponseFHIR: raw}); status != 0 {
+	if status, msg := g.fenceResponseSubject("pas-claim", "Patient/p", LegResult{Response: testResponse(raw)}); status != 0 {
 		t.Fatalf("bound graph rejected: %d %s", status, msg)
 	}
 	b["entry"] = append(b["entry"].([]any), map[string]any{"fullUrl": "https://payer.test/fhir/Patient/other", "resource": map[string]any{"resourceType": "Patient", "id": "other"}})
 	b["entry"].([]any)[2].(map[string]any)["resource"].(map[string]any)["patient"] = map[string]any{"reference": "Patient/other"}
 	raw, _ = json.Marshal(b)
-	if status, _ := g.fenceResponseSubject("pas-claim", "Patient/p", LegResult{ResponseFHIR: raw}); status != http.StatusForbidden {
+	if status, _ := g.fenceResponseSubject("pas-claim", "Patient/p", LegResult{Response: testResponse(raw)}); status != http.StatusForbidden {
 		t.Fatal("accepted SHN sibling subject conflict")
 	}
 }

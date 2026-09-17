@@ -26,6 +26,14 @@ func TestPackageEntries_BothShapes(t *testing.T) {
 	if _, err := PackageEntries([]byte(`{"resourceType":"Parameters","parameter":[]}`)); err == nil {
 		t.Fatal("no packagebundle must error")
 	}
+	// Every published name of the package Bundle parameter, and no other.
+	for _, name := range []string{"return", "PackageBundle", "packagebundle", "bundle"} {
+		body := []byte(`{"resourceType":"Parameters","parameter":[{"name":"` + name + `","resource":{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"Questionnaire","id":"q"}}]}}]}`)
+		es, err := PackageEntries(body)
+		if published := name != "bundle"; published != (err == nil && len(es) == 1) {
+			t.Errorf("%s: entries=%d err=%v", name, len(es), err)
+		}
+	}
 }
 
 func TestOriginateThroughBRProvider(t *testing.T) {
@@ -34,7 +42,7 @@ func TestOriginateThroughBRProvider(t *testing.T) {
 		switch {
 		case r.URL.Path == "/fhir/metadata":
 			w.WriteHeader(http.StatusOK)
-		case r.URL.Path == "/api/cds-services/order-select-crd":
+		case r.URL.Path == "/api/cds-services/shn-order-sign":
 			bffPath, bffServer, bypass = r.URL.Path, r.URL.Query().Get("server"), r.Header.Get("X-Bypass-Auth")
 			var req map[string]any
 			json.NewDecoder(r.Body).Decode(&req)

@@ -66,7 +66,8 @@ func (r BRPResult) Questionnaires() []string { return r.Cards.Questionnaires() }
 // OriginateThroughBRProvider builds a conformant CDS Hooks order-sign request for the scenario's
 // persona-selected code (PersonaOrders) on the given member, and POSTs it through br-provider's
 // real BFF so the request carries br-provider's own CDS-client JWT (auth path 1 above). The BFF
-// endpoint is POST {BFFURL}/api/cds-services/order-select-crd?server=<URL-escaped {IngressBase}/cds-services>;
+// endpoint is POST {BFFURL}/api/cds-services/{service}?server=<URL-escaped {IngressBase}/cds-services>, where
+// {service} is the ingress's service for the request's hook (CRDServiceID);
 // the BFF forwards the body to that server and injects its signed JWT before relaying to the SHN
 // ingress. Cards are parsed onto the result only when the response is a 200 cards envelope — a
 // non-card response (auth failure, error) is left for the caller to inspect via Status/Body.
@@ -80,7 +81,7 @@ func (d *Driver) OriginateThroughBRProvider(scenario, member string) (BRPResult,
 		return BRPResult{}, err
 	}
 
-	endpoint := d.cfg.BFFURL + "/api/cds-services/order-select-crd?server=" + url.QueryEscape(d.cfg.IngressBase+"/cds-services")
+	endpoint := d.cfg.BFFURL + "/api/cds-services/" + CRDServiceID(reqBody) + "?server=" + url.QueryEscape(d.cfg.IngressBase+"/cds-services")
 	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(reqBody))
 	if err != nil {
 		return BRPResult{}, fmt.Errorf("scenariodriver: build BFF CRD request: %w", err)
@@ -228,7 +229,10 @@ func packageBundleBytes(body []byte) ([]byte, error) {
 	}
 	if top.ResourceType == "Parameters" {
 		for _, p := range top.Parameter {
-			if p.Name == "packagebundle" && len(p.Resource) > 0 {
+			// The package Bundle parameter's published names: "return"
+			// (DTR 2.0.1 operation), "PackageBundle" (2.0.1/2.1.0 output
+			// profile), "packagebundle" (2.2.0).
+			if (p.Name == "return" || p.Name == "PackageBundle" || p.Name == "packagebundle") && len(p.Resource) > 0 {
 				return p.Resource, nil
 			}
 		}

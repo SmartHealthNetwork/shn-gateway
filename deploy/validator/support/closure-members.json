@@ -1,0 +1,152 @@
+[
+  {
+    "url": "http://hl7.org/fhir/5.0/StructureDefinition/extension-Claim.encounter",
+    "version": "0.1.0",
+    "resourceType": "StructureDefinition",
+    "file": "StructureDefinition-ext-R5-Claim.encounter.json"
+  },
+  {
+    "url": "http://hl7.org/fhir/5.0/StructureDefinition/extension-Encounter.careTeam",
+    "version": "0.1.0",
+    "resourceType": "StructureDefinition",
+    "file": "StructureDefinition-ext-R5-Encounter.careTeam.json"
+  },
+  {
+    "url": "http://hl7.org/fhir/5.0/StructureDefinition/extension-Encounter.class",
+    "version": "0.1.0",
+    "resourceType": "StructureDefinition",
+    "file": "StructureDefinition-ext-R5-Encounter.class.json"
+  },
+  {
+    "url": "http://hl7.org/fhir/5.0/StructureDefinition/extension-Encounter.diagnosis.condition",
+    "version": "0.1.0",
+    "resourceType": "StructureDefinition",
+    "file": "StructureDefinition-ext-R5-Encounter.dia.condition.json"
+  },
+  {
+    "url": "http://hl7.org/fhir/5.0/StructureDefinition/extension-Encounter.plannedEndDate",
+    "version": "0.1.0",
+    "resourceType": "StructureDefinition",
+    "file": "StructureDefinition-ext-R5-Encounter.plannedEndDate.json"
+  },
+  {
+    "url": "http://hl7.org/fhir/5.0/StructureDefinition/extension-Encounter.plannedStartDate",
+    "version": "0.1.0",
+    "resourceType": "StructureDefinition",
+    "file": "StructureDefinition-ext-R5-Encounter.plannedStartDate.json"
+  },
+  {
+    "url": "http://hl7.org/fhir/5.0/StructureDefinition/extension-Encounter.reason.value",
+    "version": "0.1.0",
+    "resourceType": "StructureDefinition",
+    "file": "StructureDefinition-ext-R5-Encounter.rea.value.json"
+  },
+  {
+    "url": "http://hl7.org/fhir/5.0/StructureDefinition/extension-Encounter.serviceType",
+    "version": "0.1.0",
+    "resourceType": "StructureDefinition",
+    "file": "StructureDefinition-ext-R5-Encounter.serviceType.json"
+  },
+  {
+    "url": "http://hl7.org/fhir/5.0/StructureDefinition/extension-Encounter.status",
+    "version": "0.1.0",
+    "resourceType": "StructureDefinition",
+    "file": "StructureDefinition-ext-R5-Encounter.status.json"
+  },
+  {
+    "url": "http://hl7.org/fhir/5.0/StructureDefinition/extension-Encounter.subjectStatus",
+    "version": "0.1.0",
+    "resourceType": "StructureDefinition",
+    "file": "StructureDefinition-ext-R5-Encounter.subjectStatus.json"
+  },
+  {
+    "url": "http://hl7.org/fhir/5.0/StructureDefinition/extension-Encounter.virtualService",
+    "version": "0.1.0",
+    "resourceType": "StructureDefinition",
+    "file": "StructureDefinition-ext-R5-Encounter.virtualService.json"
+  },
+  {
+    "url": "http://hl7.org/fhir/5.0/StructureDefinition/profile-Encounter",
+    "version": "0.1.0",
+    "resourceType": "StructureDefinition",
+    "file": "StructureDefinition-profile-Encounter.json"
+  },
+  {
+    "url": "http://hl7.org/fhir/StructureDefinition/alternate-reference",
+    "version": "5.3.0-ballot-tc1",
+    "resourceType": "StructureDefinition",
+    "file": "StructureDefinition-alternate-reference.json"
+  },
+  {
+    "url": "http://hl7.org/fhir/StructureDefinition/package-source",
+    "version": "5.3.0-ballot-tc1",
+    "resourceType": "StructureDefinition",
+    "file": "StructureDefinition-package-source.json"
+  },
+  {
+    "url": "http://hl7.org/fhir/StructureDefinition/structuredefinition-type-characteristics",
+    "version": "5.3.0-ballot-tc1",
+    "resourceType": "StructureDefinition",
+    "file": "StructureDefinition-structuredefinition-type-characteristics.json"
+  },
+  {
+    "url": "http://hl7.org/fhir/StructureDefinition/version-specific-use",
+    "version": "5.3.0-ballot-tc1",
+    "resourceType": "StructureDefinition",
+    "file": "StructureDefinition-version-specific-use.json"
+  },
+  {
+    "url": "http://hl7.org/fhir/ValueSet/major-fhir-version",
+    "version": "5.3.0-ballot-tc1",
+    "resourceType": "ValueSet",
+    "file": "ValueSet-major-fhir-version.json"
+  },
+  {
+    "url": "http://hl7.org/fhir/ValueSet/type-characteristics-code",
+    "version": "5.3.0-ballot-tc1",
+    "resourceType": "ValueSet",
+    "file": "ValueSet-type-characteristics-code.json"
+  },
+  {
+    "url": "http://hl7.org/fhir/type-characteristics-code",
+    "version": "5.3.0-ballot-tc1",
+    "resourceType": "CodeSystem",
+    "file": "CodeSystem-type-characteristics-code.json"
+  },
+  {
+    "url": "http://hl7.org/fhir/uv/xver/ValueSet/R5-encounter-class-for-R4",
+    "version": "0.1.0",
+    "resourceType": "ValueSet",
+    "file": "ValueSet-R5-encounter-class-for-R4.json"
+  },
+  {
+    "url": "http://hl7.org/fhir/uv/xver/ValueSet/R5-encounter-status-for-R4",
+    "version": "0.1.0",
+    "resourceType": "ValueSet",
+    "file": "ValueSet-R5-encounter-status-for-R4.json"
+  },
+  {
+    "url": "http://hl7.org/fhir/uv/xver/ValueSet/R5-encounter-subject-status-for-R4",
+    "version": "0.1.0",
+    "resourceType": "ValueSet",
+    "file": "ValueSet-R5-encounter-subject-status-for-R4.json"
+  },
+  {
+    "url": "http://hl7.org/fhir/uv/xver/ValueSet/R5-virtual-service-type-for-R4",
+    "version": "0.1.0",
+    "resourceType": "ValueSet",
+    "file": "ValueSet-R5-virtual-service-type-for-R4.json"
+  },
+  {
+    "url": "http://hl7.org/fhir/virtual-service-type",
+    "version": "5.0.0",
+    "resourceType": "CodeSystem",
+    "file": "CodeSystem-virtual-service-type.json"
+  },
+  {
+    "url": "http://terminology.hl7.org/CodeSystem/encounter-subject-status",
+    "version": "1.0.0",
+    "resourceType": "CodeSystem",
+    "file": "CodeSystem-encounter-subject-status.json"
+  }
+]

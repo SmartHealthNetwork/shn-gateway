@@ -141,7 +141,7 @@ func TestFHIRIngressPreservesFramedUpstreamFailure(t *testing.T) {
 		t.Run(contentType, func(t *testing.T) {
 			const body = "{\"resourceType\":\"OperationOutcome\",\"issue\":[{\"severity\":\"error\",\"code\":\"business-rule\",\"diagnostics\":\"payer refusal\"}]}\n"
 			w := httptest.NewRecorder()
-			if !(&Gateway{}).relayOriginationError(&fhirOperationWriter{w}, &RelayError{Status: 409, Body: []byte(body), ContentType: contentType}) {
+			if !(&Gateway{}).relayOriginationError(&fhirOperationWriter{w}, &RelayError{Status: 409, Body: []byte(body), ContentType: contentType, leg: "pas-claim"}) {
 				t.Fatal("framed failure not handled")
 			}
 			wantType := contentType
@@ -179,9 +179,12 @@ func TestFHIRIngressExchangeFailures(t *testing.T) {
 		for _, failure := range failures {
 			t.Run(protocol+"/"+failure, func(t *testing.T) {
 				env := newInProcessExchange(t)
+				if protocol == "dtr" {
+					declareFramedDTR(t, env, true)
+				}
 				requestBody := body
 				const upstream = `{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"business-rule","diagnostics":"payer refusal"}]}`
-				env.payerReturns(LegResult{Status: 409, ResponseFHIR: []byte(upstream)})
+				env.payerReturns(LegResult{Status: 409, Response: testResponse([]byte(upstream))})
 				switch failure {
 				case "unframed transport":
 					env.substrate.mutateResp = func([]byte) []byte { return []byte(`{`) }

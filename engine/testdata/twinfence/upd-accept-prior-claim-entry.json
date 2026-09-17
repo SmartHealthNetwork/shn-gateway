@@ -54,6 +54,13 @@
                 {
                   "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-infoChanged",
                   "valueCode": "changed"
+                },
+                {
+                  "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-itemTraceNumber",
+                  "valueIdentifier": {
+                    "system": "urn:shn:pas:item-trace",
+                    "value": "twinfence-upd-0001.1"
+                  }
                 }
               ],
               "productOrService": {

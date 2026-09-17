@@ -183,10 +183,20 @@ func pgMultiPair(t *testing.T) (a, b *httptest.Server, key *ecdsa.PrivateKey, po
 	t.Cleanup(pool.Close)
 	getenv := func(k string) string { return env[k] }
 	ba, err := build(context.Background(), getenv, io.Discard, nil)
+	t.Cleanup(func() {
+		if ba.gateway != nil {
+			_ = ba.gateway.Close()
+		}
+	})
 	if err != nil {
 		t.Fatalf("build A: %v", err)
 	}
 	bb, err := build(context.Background(), getenv, io.Discard, nil)
+	t.Cleanup(func() {
+		if bb.gateway != nil {
+			_ = bb.gateway.Close()
+		}
+	})
 	if err != nil {
 		t.Fatalf("build B: %v", err)
 	}
@@ -301,7 +311,7 @@ func TestPgMulti_TokenFromAAcceptedAtB(t *testing.T) {
 	}
 	// A second route on the same bearer, pinned exactly: 400 is the CRD handler's own
 	// "missing context.patientId" — past the bearer gate, refused on content.
-	if got := postIngress(t, b, bearer, "/cds-services/order-select-crd", "{}"); got != http.StatusBadRequest {
+	if got := postIngress(t, b, bearer, "/cds-services/shn-order-select", "{}"); got != http.StatusBadRequest {
 		t.Fatalf("CRD at B on A's bearer = %d, want 400 (past the bearer gate, refused on content)", got)
 	}
 }
@@ -403,6 +413,11 @@ func TestPgMulti_ExchangeRowsVisibleAcrossInstances(t *testing.T) {
 func TestPgMulti_BuildUnderDSNStartsKeyRefresh(t *testing.T) {
 	env, key, _, _ := pgMultiSetup(t)
 	b, err := build(context.Background(), func(k string) string { return env[k] }, io.Discard, nil)
+	t.Cleanup(func() {
+		if b.gateway != nil {
+			_ = b.gateway.Close()
+		}
+	})
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -432,6 +447,11 @@ func TestPgMulti_BuildUnderDSNStartsKeyRefresh(t *testing.T) {
 	}
 	delete(noIngress, "PROVIDER_DAVINCI_INGRESS")
 	ib, err := build(context.Background(), func(k string) string { return noIngress[k] }, io.Discard, nil)
+	t.Cleanup(func() {
+		if ib.gateway != nil {
+			_ = ib.gateway.Close()
+		}
+	})
 	if err != nil {
 		t.Fatalf("build with the ingress disabled: %v", err)
 	}
@@ -453,6 +473,11 @@ func TestPgMulti_BuildUnderDSNStartsKeyRefresh(t *testing.T) {
 	}
 	delete(noDSN, "SHN_STORE_DATABASE_URL")
 	nb, err := build(context.Background(), func(k string) string { return noDSN[k] }, io.Discard, nil)
+	t.Cleanup(func() {
+		if nb.gateway != nil {
+			_ = nb.gateway.Close()
+		}
+	})
 	if err != nil {
 		t.Fatalf("build without the store DSN: %v", err)
 	}
@@ -470,6 +495,11 @@ func TestPgMulti_BuildUnderDSNStartsKeyRefresh(t *testing.T) {
 func TestPgMulti_StoreOutageTokenIs503(t *testing.T) {
 	env, key, _, _ := pgMultiSetup(t)
 	b, err := build(context.Background(), func(k string) string { return env[k] }, io.Discard, nil)
+	t.Cleanup(func() {
+		if b.gateway != nil {
+			_ = b.gateway.Close()
+		}
+	})
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -492,11 +522,11 @@ func TestPgMulti_StoreOutageTokenIs503(t *testing.T) {
 	}
 	// The bearer minted before the outage still verifies: 400 is the CRD handler's own
 	// "missing context.patientId", i.e. past the bearer gate and refused on content.
-	if got := postIngress(t, srv, bearer, "/cds-services/order-select-crd", "{}"); got != http.StatusBadRequest {
+	if got := postIngress(t, srv, bearer, "/cds-services/shn-order-select", "{}"); got != http.StatusBadRequest {
 		t.Fatalf("CRD on the pre-outage bearer = %d, want 400 (the issued bearer must keep verifying from the replica cache)", got)
 	}
 	// …and the gate is still on: no bearer is still 401, so the 400 above is acceptance.
-	if got := postIngress(t, srv, "", "/cds-services/order-select-crd", "{}"); got != http.StatusUnauthorized {
+	if got := postIngress(t, srv, "", "/cds-services/shn-order-select", "{}"); got != http.StatusUnauthorized {
 		t.Fatalf("no-bearer CRD during the outage = %d, want 401", got)
 	}
 }
@@ -510,6 +540,11 @@ func TestPgMulti_StoreOutageTokenIs503(t *testing.T) {
 func TestPgMulti_ResetOverAnUnreachableStoreIs503(t *testing.T) {
 	env, _, _, _ := pgMultiSetup(t)
 	b, err := build(context.Background(), func(k string) string { return env[k] }, io.Discard, nil)
+	t.Cleanup(func() {
+		if b.gateway != nil {
+			_ = b.gateway.Close()
+		}
+	})
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -565,6 +600,11 @@ func TestPgMulti_StoreOutageCountsEveryRefusingPath(t *testing.T) {
 	env["METRICS_SERVICE"] = "pg-multi-gw"
 	var out bytes.Buffer
 	b, err := build(context.Background(), func(k string) string { return env[k] }, &out, nil)
+	t.Cleanup(func() {
+		if b.gateway != nil {
+			_ = b.gateway.Close()
+		}
+	})
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -597,6 +637,11 @@ func TestPgMulti_StoreOutageCountsEveryRefusingPath(t *testing.T) {
 	// replica has nothing stamped.
 	var out2 bytes.Buffer
 	b2, err := build(context.Background(), func(k string) string { return env[k] }, &out2, nil)
+	t.Cleanup(func() {
+		if b2.gateway != nil {
+			_ = b2.gateway.Close()
+		}
+	})
 	if err != nil {
 		t.Fatalf("build second instance: %v", err)
 	}
@@ -619,7 +664,7 @@ func TestPgMulti_StoreOutageCountsEveryRefusingPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := postIngress(t, srv2, signed, "/cds-services/order-select-crd", "{}"); got != http.StatusServiceUnavailable {
+	if got := postIngress(t, srv2, signed, "/cds-services/shn-order-select", "{}"); got != http.StatusServiceUnavailable {
 		t.Fatalf("unknown-kid bearer during the outage = %d, want 503 — an unreadable key store is an outage, not a bad credential", got)
 	}
 	if got := storeErrorDims(t, &out2); len(got) != 1 || got[0] != "ingresskey" {
@@ -676,6 +721,11 @@ func TestPgMulti_PoolStatsCarriedOnlyWithMetricsOptIn(t *testing.T) {
 	env, _, _, _ := pgMultiSetup(t)
 	// No METRICS_SERVICE: nothing to emit to, so nothing is carried.
 	off, err := build(context.Background(), func(k string) string { return env[k] }, io.Discard, nil)
+	t.Cleanup(func() {
+		if off.gateway != nil {
+			_ = off.gateway.Close()
+		}
+	})
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -688,6 +738,11 @@ func TestPgMulti_PoolStatsCarriedOnlyWithMetricsOptIn(t *testing.T) {
 	// not safe for that — a plain buffer here is a data race, not a flake to live with.
 	var out syncBuffer
 	on, err := build(context.Background(), func(k string) string { return env[k] }, &out, nil)
+	t.Cleanup(func() {
+		if on.gateway != nil {
+			_ = on.gateway.Close()
+		}
+	})
 	if err != nil {
 		t.Fatalf("build with metrics: %v", err)
 	}

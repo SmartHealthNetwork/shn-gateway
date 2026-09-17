@@ -9,17 +9,22 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net/http"
 	"strings"
 
+	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
 // ---- Payer role ----
 
 func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
+	// Every answer written below is this gateway's answer as the leg's
+	// recipient; refusals before the leg is known are checked as such.
+	w, scope := g.withScope(w, relay.RoleRecipient)
 	// Per-hop transport auth: verify the Hub's X-Hub-Assertion FIRST, header only,
 	// before the body is read or the envelope decoded — an unauthenticated caller
 	// never reaches the decoder. Sig + issuer pin ("hub") + audience (this holder)
@@ -88,6 +93,7 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown transaction type"})
 		return
 	}
+	scope.leg = env.Metadata.TransactionType
 
 	// Per-hop transport auth: the Hub's X-Hub-Assertion was verified at the top of
 	// this handler; the bound authz token below is the AUTHORITY check (AI-11) —
@@ -131,6 +137,14 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 	// builder that must fall back falls back to what this deployment declares, not
 	// to the library build constant (D1a).
 	r = r.WithContext(withDeclaredContractVersions(withAnswerLine(r.Context(), answerTok), g.declaredContractVersions()))
+	// A request frame may name the DTR operation its body is the input of. It
+	// rides the context too, for the same reason as the answer line.
+	operation, status, msg := inboundFrameOperation(env.Metadata.TransactionType, payload)
+	if status != 0 {
+		writeJSON(w, status, map[string]string{"error": msg})
+		return
+	}
+	r = r.WithContext(withRequestFrameOperation(r.Context(), operation))
 
 	switch env.Metadata.TransactionType {
 	case "coverage-eligibility":
@@ -214,7 +228,7 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 	// cover; cerJSON here is the REQUEST the requesting gateway's own engine built
 	// (shnsdk.BuildEligibilityRequest — never a foreign relay, since only SHN gateways ever
 	// originate a substrate leg), so it is SHN-produced on every lane and always validates.
-	ingressValidator := g.validatorForLine(shnsdk.LineOf(answerTok))
+	ingressValidator := g.validatorForContractLine(strings.SplitN(answerTok, "@", 2)[0], shnsdk.LineOf(answerTok))
 	if ingressValidator == nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "no FHIR validator lane configured for this leg (FR-36/FR-G29)"})
 		return
@@ -247,8 +261,9 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 	if writeSoRFailure(w, readErr) {
 		return
 	}
-	coverageJSON, hasCoverage, readErr := ReadSystemOfRecord(g.cfg.SoR).OpenCoverageContext(r.Context(), member)
-	if writeSoRFailure(w, readErr) {
+	coverageJSON, hasCoverage, status, msg := g.memberCoverage(r.Context(), member)
+	if status != 0 {
+		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
 	var insurer shnsdk.PayerIdentifier
@@ -302,7 +317,17 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build eligibility response failed"})
 		return
 	}
-	result := LegResult{ResponseFHIR: crrJSON}
+	answer, err := relay.Authored(relay.BuilderSDKEligibility, crrJSON, "application/fhir+json")
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build eligibility response failed"})
+		return
+	}
+	result := LegResult{Response: answer}
+	responseFHIR, err := g.admit(result.Response, answerKey("coverage-eligibility", relay.OutcomeAnswered))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": errOwnershipFault})
+		return
+	}
 	if status, msg := g.fenceResponseSubject("coverage-eligibility", boundPatientRef, result); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
@@ -317,12 +342,12 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 	// Egress is unconditional by definition (R-8 is an ingress-only carve-out) — crrJSON
 	// here is always SHN-produced
 	// (shnsdk.BuildEligibilityResponse), so this was never in scope for the skip either way.
-	egressValidator := g.validatorForLine(shnsdk.LineOf(answerTok))
+	egressValidator := g.validatorForContractLine(strings.SplitN(answerTok, "@", 2)[0], shnsdk.LineOf(answerTok))
 	if egressValidator == nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "no FHIR validator lane configured for this leg (FR-36/FR-G29)"})
 		return
 	}
-	egress, err := egressValidator.Validate(ctx, result.ResponseFHIR, "")
+	egress, err := egressValidator.Validate(ctx, responseFHIR, "")
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "validator unavailable"})
 		return
@@ -332,7 +357,7 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	g.respondLeg(w, r, "payer-coverage", "eligibility-response", "coverage-eligibility", env.Metadata.CorrelationID, result.ResponseFHIR, tok.Subject, env.Metadata.Sender, "", answerTok, result.ResponseRelayed)
+	g.respondLeg(w, r, "payer-coverage", "eligibility-response", "coverage-eligibility", env.Metadata.CorrelationID, result.Response, tok.Subject, env.Metadata.Sender, "", answerTok)
 }
 
 // handleFederatedQueryInbound is the facility source-side handler (UC-05, consent
@@ -397,94 +422,128 @@ func (g *Gateway) handleFederatedQueryInbound(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// Disclose ONLY the named records for THIS member (minimum-necessary).
-	held, ok, readErr := ReadSystemOfRecord(g.cfg.SoR).FacilityRecordsContext(r.Context(), member)
-	if writeSoRFailure(w, readErr) {
-		return
-	}
-	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no records for member"})
-		return
-	}
-	resources := make([][]byte, 0, len(parsed.Queries)+1)
-	var drRef, fallbackRef string
-	for _, query := range parsed.Queries {
-		res, present := held[query.ResourceType]
-		if !present {
-			continue // named type the facility happens not to hold; skip (min-necessary)
-		}
-		if !query.InRange(recordClinicalDate(res)) {
-			continue // FR-24: only disclose named records within the stated date range
-		}
-		if status, msg := g.validateFHIR(ctx, res, "egress", ""); status != 0 {
-			writeJSON(w, status, map[string]string{"error": msg})
-			return
-		}
-		resources = append(resources, res)
-		ref, ok := resourceRef(res)
-		if !ok {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "disclosed record missing id"})
-			return
-		}
-		if fallbackRef == "" {
-			fallbackRef = ref
-		}
-		if query.ResourceType == "DiagnosticReport" {
-			drRef = ref
-		}
-	}
-	if len(resources) == 0 {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "named records not held"})
-		return
-	}
-
-	// Source Provenance: targets the disclosed DiagnosticReport, agent = this
-	// facility, .policy cites the AUTHENTICATED consent ref (from the backstop, not
-	// the wire field), reason = TREAT (FR-32/C11).
-	provTarget := drRef
-	if provTarget == "" {
-		provTarget = fallbackRef
-	}
-	provJSON, err := buildEvidenceProvenance(provTarget, "http://smarthealth.network/ids/holder", g.cfg.HolderID,
-		consentRef, shnsdk.PurposeTreatment, g.cfg.Clock())
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build provenance failed"})
-		return
-	}
-	if status, msg := g.validateFHIR(ctx, provJSON, "egress", ""); status != 0 {
+	// Disclose ONLY the named records for THIS member (minimum-necessary): every
+	// record of each named type within the stated dates, exactly as the system
+	// of record holds them, with the member's Patient and a source Provenance
+	// per record citing the AUTHENTICATED consent ref (FR-24/FR-32/C11).
+	inner, _, status, msg := g.facilityRecordsBundle(ctx, member, parsed.Queries, consentRef)
+	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
-	resources = append(resources, provJSON)
-
-	inner, err := shnsdk.BuildRecordsBundle(resources)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build records bundle failed"})
+	// The answer extends the payer's own request Task and embeds the records
+	// Bundle exactly; every copied span is declared and verified when sealed.
+	answer, fulfilled, err := sealCDexFulfillment(queryJSON, inner)
+	var refused *cdexRequestRefused
+	if errors.As(err, &refused) {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": refused.reason})
 		return
 	}
-	bundleJSON, err := shnsdk.BuildCDexQueryResult(queryJSON, inner)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build cdex result failed"})
 		return
 	}
-	if status, msg := g.validateFHIR(ctx, bundleJSON, "egress", ""); status != 0 {
+	if status, msg := g.validateFHIR(ctx, fulfilled, "egress", ""); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
-
-	g.respondLeg(w, r, "facility-disclosure", "federated-query-response", "federated-query", env.Metadata.CorrelationID, bundleJSON, tok.Subject, env.Metadata.Sender, consentRef, answerTok, false)
+	g.respondLeg(w, r, "facility-disclosure", "federated-query-response", "federated-query", env.Metadata.CorrelationID, answer, tok.Subject, env.Metadata.Sender, consentRef, answerTok)
 }
 
-// recordClinicalDate pulls the date a facility record is filtered on for FR-24:
-// DiagnosticReport.effectiveDateTime or DocumentReference.date. "" if absent.
+// sealCDexFulfillment fulfills the payer's CDex request Task with the
+// facility's records Bundle and seals the result as the registered
+// cdex-fulfillment answer. Every part the fulfillment copies from the request
+// or the records is declared as an embed, so sealing verifies it is
+// byte-identical to its source. It returns the answer and its bytes (for the
+// egress validation the gateway runs before sending).
+//
+// A request Task the fulfillment cannot extend (not one well-formed Task,
+// signed, or in a status that does not allow fulfillment) is the requester's
+// and is returned as a *cdexRequestRefused; any other error is a fault in the
+// facility's own build.
+func sealCDexFulfillment(requestTask, records []byte) (relay.Payload, []byte, error) {
+	var none relay.Payload
+	task := relay.NewBody(requestTask, relay.OriginPeerFrame)
+	if !cdexRequestShapeOK(task) {
+		return none, nil, &cdexRequestRefused{reason: "federated query refused: the request is not one well-formed Task"}
+	}
+	f, err := shnsdk.BuildCDexFulfillment(requestTask, records)
+	switch {
+	case errors.Is(err, shnsdk.ErrCDexSignedContent):
+		return none, nil, &cdexRequestRefused{reason: "federated query refused: the request Task carries signed content, which a fulfillment cannot extend", err: err}
+	case errors.Is(err, shnsdk.ErrCDexTaskStatus):
+		return none, nil, &cdexRequestRefused{reason: "federated query refused: the request Task's status does not allow fulfillment", err: err}
+	case err != nil:
+		return none, nil, err
+	}
+	held := relay.NewBody(records, relay.OriginUpstreamResponse)
+	embeds := make([]relay.Embed, 0, len(f.Copied))
+	for _, c := range f.Copied {
+		src := task
+		if c.FromRecords {
+			src = held
+		}
+		embeds = append(embeds, relay.Embed{Source: src, Start: c.Start, End: c.End, At: c.At})
+	}
+	p, err := relay.Authored(relay.BuilderCDexFulfillment, f.Task, "application/fhir+json", embeds...)
+	if err != nil {
+		return none, nil, err
+	}
+	return p, f.Task, nil
+}
+
+// cdexRequestRefused is a request Task the facility cannot fulfil because of
+// the Task itself; reason names the refusal without echoing the Task.
+type cdexRequestRefused struct {
+	reason string
+	err    error
+}
+
+func (e *cdexRequestRefused) Error() string { return e.reason }
+
+func (e *cdexRequestRefused) Unwrap() error { return e.err }
+
+// cdexRequestShapeOK reports whether task is one well-formed JSON document
+// (no repeated member names) that is a Task whose contained and output, when
+// present, are arrays: the shape a fulfillment extends.
+func cdexRequestShapeOK(task relay.Body) bool {
+	d, err := relay.Doc(task)
+	if err != nil || d.Kind(d.Root()) != relay.KindObject {
+		return false
+	}
+	rt, ok := d.Member(d.Root(), "resourceType")
+	if !ok || d.Kind(rt) != relay.KindString {
+		return false
+	}
+	if v, err := d.StringValue(rt); err != nil || v != "Task" {
+		return false
+	}
+	for _, key := range []string{"contained", "output"} {
+		if v, ok := d.Member(d.Root(), key); ok && d.Kind(v) != relay.KindArray {
+			return false
+		}
+	}
+	return true
+}
+
+// recordClinicalDate pulls the date a facility record is selected on for FR-24
+// (and ordered by as evidence): DiagnosticReport.effectiveDateTime, else the
+// end of DiagnosticReport.effectivePeriod, else its start; or
+// DocumentReference.date. "" if absent.
 func recordClinicalDate(resJSON []byte) string {
 	var r struct {
 		EffectiveDateTime string `json:"effectiveDateTime"`
-		Date              string `json:"date"`
+		EffectivePeriod   struct {
+			Start string `json:"start"`
+			End   string `json:"end"`
+		} `json:"effectivePeriod"`
+		Date string `json:"date"`
 	}
 	_ = json.Unmarshal(resJSON, &r)
-	if r.EffectiveDateTime != "" {
-		return r.EffectiveDateTime
+	for _, d := range []string{r.EffectiveDateTime, r.EffectivePeriod.End, r.EffectivePeriod.Start} {
+		if d != "" {
+			return d
+		}
 	}
 	return r.Date
 }
@@ -541,7 +600,7 @@ type patientDTRResponse struct {
 // answer arrives in the request and the attested item leaves in the response.
 func (g *Gateway) handlePatientDTRInbound(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token, reqJSON []byte, answerTok string) {
 	var req patientDTRRequest
-	if err := json.Unmarshal(reqJSON, &req); err != nil {
+	if err := decodeMessage(reqJSON, &req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "parse patient-dtr request failed"})
 		return
 	}
@@ -579,7 +638,12 @@ func (g *Gateway) handlePatientDTRInbound(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "marshal response failed"})
 		return
 	}
-	g.respondLeg(w, r, "patient-authorship", "patient-dtr-response", "patient-dtr", env.Metadata.CorrelationID, respJSON, tok.Subject, env.Metadata.Sender, "", answerTok, false)
+	answer, err := relay.Authored(relay.BuilderSDKPatientDTR, respJSON, "application/json")
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "marshal response failed"})
+		return
+	}
+	g.respondLeg(w, r, "patient-authorship", "patient-dtr-response", "patient-dtr", env.Metadata.CorrelationID, answer, tok.Subject, env.Metadata.Sender, "", answerTok)
 }
 
 // verifyHubAssertion checks the X-Hub-Assertion header: a shnsdk.Assertion

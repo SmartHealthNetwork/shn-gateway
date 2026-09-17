@@ -13,7 +13,7 @@ import (
 func TestCRDIngress_RecipientNon2xx_SurfacesVerbatim(t *testing.T) {
 	env := newInProcessExchange(t)
 	oo := `{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"processing"}]}`
-	env.payerReturns(LegResult{Status: 502, ResponseFHIR: []byte(oo)})
+	env.payerReturns(LegResult{Status: 502, Response: testResponse([]byte(oo))})
 	rec := httptest.NewRecorder()
 	env.originator.handleCRDIngress(rec, env.crdIngressRequest(t)) // the real ingress handler (ingress.go:96)
 	if rec.Code != 502 {

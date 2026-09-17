@@ -8,6 +8,7 @@
 package observer
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -30,14 +31,21 @@ type sequenced struct {
 // Hub fan-outs observer events to SSE subscribers. Zero value is not usable;
 // call NewHub.
 type Hub struct {
-	mu   sync.Mutex
-	seq  uint64
-	buf  [][]byte // marshaled sequenced events, oldest first, len<=bufSize
-	subs map[chan []byte]struct{}
+	incarnation string
+	mu          sync.Mutex
+	seq         uint64
+	buf         [][]byte // marshaled sequenced events, oldest first, len<=bufSize
+	subs        map[chan []byte]struct{}
 }
 
+// NewHub assigns a fresh identity. rand.Text terminates on entropy failure;
+// no empty or reused fallback identity can advertise successful completion.
 func NewHub() *Hub {
-	return &Hub{subs: make(map[chan []byte]struct{})}
+	return newHub(rand.Text())
+}
+
+func newHub(incarnation string) *Hub {
+	return &Hub{incarnation: incarnation, subs: make(map[chan []byte]struct{})}
 }
 
 // Emit assigns the next seq, buffers, and fans out. Assign to
@@ -97,20 +105,6 @@ func (h *Hub) subscribe(after uint64) ([][]byte, chan []byte, func()) {
 	}
 }
 
-// Handler serves GET /events (SSE) and GET /health.
-func (h *Hub) Handler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /events", h.handleEvents)
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
-		h.mu.Lock()
-		n := h.seq
-		h.mu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"events":%d}`, n)
-	})
-	return mux
-}
-
 func (h *Hub) handleEvents(w http.ResponseWriter, r *http.Request) {
 	fl, ok := w.(http.Flusher)
 	if !ok {
@@ -121,6 +115,7 @@ func (h *Hub) handleEvents(w http.ResponseWriter, r *http.Request) {
 	if v := r.Header.Get("Last-Event-ID"); v != "" {
 		after, _ = strconv.ParseUint(v, 10, 64)
 	}
+	w.Header().Set("X-SHN-Observer-Incarnation", h.incarnation)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)

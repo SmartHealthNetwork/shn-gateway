@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"time"
@@ -126,6 +127,10 @@ func safeFailure(s string) bool {
 // a dispatched row, even when an observer deletes state or the HTTP server keeps
 // processing after client cancellation. A fresh JVM is the recovery boundary.
 func runWarmup(ctx context.Context, base, path string, st markerState) error {
+	return runWarmupWithClient(ctx, base, path, st, httpClient())
+}
+
+func runWarmupWithClient(ctx context.Context, base, path string, st markerState, client *http.Client) error {
 	if st.Key == "" || !validState(st, st.Line, st.Key) || st.State != "waiting-for-metadata" {
 		return errors.New("identity unavailable")
 	}
@@ -142,7 +147,6 @@ func runWarmup(ctx context.Context, base, path string, st markerState) error {
 		fmt.Fprintf(os.Stderr, "warmup: line=%s row=%s elapsed=%s outcome=failed reason=%s\n", st.Line, st.Row, elapsed, reason)
 		return errors.New(reason)
 	}
-	client := httpClient()
 	for {
 		attempt, cancel := context.WithTimeout(ctx, probeBudget)
 		err := metadata(attempt, client, base+"/metadata")

@@ -65,9 +65,9 @@ func TestParsePASResponsePatients(t *testing.T) {
 	}
 
 	// pended: Bundle (ClaimResponse + Task). Only the ClaimResponse carries a patient.
-	pended, err := shnsdk.BuildPendedResponse("Patient/MBR-UC04", "corr-2", []string{"operative-diagnostic-report"}, created)
+	pended, err := testPendedResponse("Patient/MBR-UC04", "corr-2", "operative-diagnostic-report", created)
 	if err != nil {
-		t.Fatalf("BuildPendedResponse: %v", err)
+		t.Fatalf("testPendedResponse: %v", err)
 	}
 	refs, err = ParsePASResponsePatients(pended)
 	if err != nil {

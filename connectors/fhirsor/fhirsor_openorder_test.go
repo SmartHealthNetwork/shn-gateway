@@ -2,6 +2,7 @@ package fhirsor_test
 
 import (
 	"bytes"
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -49,13 +50,41 @@ func TestSoR_OpenOrder_DeviceRequest(t *testing.T) {
 	if code != "E0431" {
 		t.Errorf("code = %q, want E0431 (sys=%q)", code, sys)
 	}
-	// The order's subject must be rewritten to the canonical member ref (Patient/MBR-OX), NOT the
-	// HAPI-scoped store id (Patient/p1) — the payer-side order-dispatch AI-11 bind resolves the
-	// subject by MEMBER id, so a scoped id 403s "inconsistent patient in order-dispatch".
-	if !bytes.Contains(raw, []byte(`"reference":"Patient/MBR-OX"`)) {
-		t.Errorf("OpenOrder must rewrite subject to Patient/MBR-OX (canonical member ref); got: %s", raw)
+	// The order comes back exactly as the server holds it, subject included:
+	// naming the patient for the network is the gateway's job, not the
+	// connector's.
+	if !bytes.Contains(raw, []byte(`"reference":"Patient/p1"`)) {
+		t.Errorf("OpenOrder must keep the server's subject Patient/p1; got: %s", raw)
 	}
-	if bytes.Contains(raw, []byte(`"reference":"Patient/p1"`)) {
-		t.Errorf("OpenOrder leaked the HAPI-scoped subject Patient/p1: %s", raw)
+}
+
+// TestOpenOrder_KeepsSystemOfRecordBytes: the open order is the server's
+// record byte for byte — layout, member order, escapes, number lexemes and
+// the subject the server holds all survive.
+func TestOpenOrder_KeepsSystemOfRecordBytes(t *testing.T) {
+	const patient = `{"resourceType":"Patient","id":"pat-7","identifier":[{"system":"urn:shn:member","value":"MBR-7"}],"name":[{"family":"Seven"}],"birthDate":"1960-01-01"}`
+	bs := string(rune(92))
+	order := "{ \"subject\" : {\"reference\":\"Patient/pat-7\", \"display\":\"A " + bs + "u00e9 " + bs + "u003c\"},\n" +
+		"  \"resourceType\":\"ServiceRequest\",\"id\":\"sr-7\",\"status\":\"active\",\"intent\":\"order\"," +
+		"\"quantityQuantity\":{\"value\":1.50E+0},\"code\":{\"coding\":[{\"system\":\"http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets\",\"code\":\"G0151\"}]} }"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/fhir+json")
+		switch r.URL.Path {
+		case "/Patient":
+			w.Write([]byte(`{"resourceType":"Bundle","type":"searchset","entry":[{"resource":` + patient + `}]}`))
+		case "/ServiceRequest":
+			w.Write([]byte(`{"resourceType":"Bundle","type":"searchset","entry":[ {"fullUrl":"x","resource":` + order + ` } ]}`))
+		default:
+			w.Write([]byte(`{"resourceType":"Bundle","type":"searchset"}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	s := fhirsor.New(fhirclient.New(srv.URL, nil))
+	raw, found, err := s.OpenOrderContext(context.Background(), "MBR-7")
+	if err != nil || !found {
+		t.Fatalf("OpenOrderContext = found %v, err %v; want the order", found, err)
+	}
+	if string(raw) != order {
+		t.Fatalf("open order changed:\n got %s\nwant %s", raw, order)
 	}
 }

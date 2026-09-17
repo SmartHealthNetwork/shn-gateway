@@ -12,13 +12,23 @@ import zipfile
 
 ROOT = Path(__file__).parent
 NAME = 'shn.fhir.validation-support'
-VERSION = '1.0.0'
+VERSION = '1.2.0'
 
-def verify_input(source):
-    data = (ROOT / 'inputs' / source['file']).read_bytes()
+def verify_input(source, subdir=''):
+    data = (ROOT / 'inputs' / subdir / source['file']).read_bytes()
     if hashlib.sha256(data).hexdigest() != source['sha256']:
         raise ValueError('input digest mismatch: ' + source['file'])
     return data
+
+def closure_members():
+    """The derived validation closure (closure.py): every member's bytes, verified against the
+    SHA-256 sources.json records for it. The bytes are copies of archive entries; the archive
+    digests and member paths sit beside them in sources.json and closure.py re-proves the copy
+    against the archives wherever they are present."""
+    sources = json.loads((ROOT / 'sources.json').read_text())['closure']
+    if not sources['members']:
+        raise ValueError('closure members missing: run closure.py')
+    return {m['file']: verify_input(m, 'closure') for m in sources['members']}
 
 class Table(HTMLParser):
     def __init__(self):
@@ -102,10 +112,13 @@ def resources():
 
 def package_bytes():
     data = {name: (json.dumps(resource, indent=2, ensure_ascii=False) + '\n').encode() for name, resource in resources().items()}
-    sd = 'StructureDefinition-ext-R5-Claim.encounter.json'
-    data[sd] = (ROOT / 'inputs' / sd).read_bytes()
+    for name, content in closure_members().items():
+        if name in data:
+            raise ValueError('closure member collides with a generated resource: ' + name)
+        data[name] = content
     data['package.json'] = (json.dumps(dict(name=NAME, version=VERSION, type='fhir.ig',
-        fhirVersions=['4.0.1'], description='Offline CMS terminology and scoped official cross-version definition support',
+        fhirVersions=['4.0.1'],
+        description='Offline CMS terminology and the validation closure of the R5 Claim.encounter extension, copied unchanged from the pinned cross-version and extensions packages',
         dependencies={'hl7.fhir.r4.core': '4.0.1'}), indent=2) + '\n').encode()
     output = io.BytesIO()
     with gzip.GzipFile(fileobj=output, mode='wb', filename='', mtime=0) as gz:

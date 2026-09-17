@@ -134,6 +134,10 @@ func populateFailureApp(t *testing.T, populate map[string]string, out io.Writer)
 		case "/metadata":
 			_, _ = io.WriteString(w, `{"resourceType":"CapabilityStatement","fhirVersion":"4.0.1"}`)
 			return
+		case "/Patient/CANARY-STORE":
+			// The originated CRD request reads the member's Patient by id.
+			_, _ = io.WriteString(w, `{"resourceType":"Patient","id":"CANARY-STORE","birthDate":"1980-01-01","name":[{"family":"CANARY-FAMILY"}]}`)
+			return
 		case "/Patient":
 			resource = `{"resourceType":"Patient","id":"CANARY-STORE","birthDate":"1980-01-01","name":[{"family":"CANARY-FAMILY"}]}`
 		case "/Coverage":
@@ -194,7 +198,13 @@ func populateFailureApp(t *testing.T, populate map[string]string, out io.Writer)
 		var op string
 		switch env.Metadata.TransactionType {
 		case "crd-order-select":
-			payload, e = shnsdk.BuildCards(shnsdk.CardCoverage{Covered: shnsdk.CoveredCovered, PANeeded: shnsdk.PANeededAuthNeeded, Questionnaires: []string{"https://example.test/CANARY-CANONICAL"}})
+			payload, e = shnsdk.BuildCRDResponse("2.0", shnsdk.CRDResponseInputs{Orders: []shnsdk.CRDOrderCoverage{{
+				Order:       []byte(`{"resourceType":"ServiceRequest","id":"sr1"}`),
+				Description: "Add coverage information",
+				Coverage: []shnsdk.CoverageInformationInput{{Coverage: "Coverage/c1", Covered: shnsdk.CoveredCovered,
+					PANeeded: shnsdk.PANeededAuthNeeded, DocNeeded: []string{"clinical"},
+					Questionnaires: []string{"https://example.test/CANARY-CANONICAL"}, Date: "2026-09-17", CoverageAssertionID: "ca-1"}},
+			}}})
 			op = "crd-cards"
 		case "dtr-questionnaire-fetch":
 			payload = []byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"Questionnaire","status":"active","url":"https://example.test/CANARY-CANONICAL"}}]}`)
@@ -258,10 +268,17 @@ func populateFailureApp(t *testing.T, populate map[string]string, out io.Writer)
 		env[k] = v
 	}
 	b, e := build(context.Background(), func(k string) string { return env[k] }, out, func() time.Time { return now })
+	t.Cleanup(func() {
+		if b.gateway != nil {
+			_ = b.gateway.Close()
+		}
+	})
 	if e != nil {
 		t.Fatal(e)
 	}
-	b.reg.Set("payer", shnsdk.RegistryEntry{ID: "payer", Role: "payer", EncPub: payer.EncPub, SignPub: payer.SignPub, BaseURL: peer.URL, PayerIDs: []shnsdk.PayerIdentifier{shnsdk.CMSPayerIdentity}})
+	b.reg.Set("payer", shnsdk.RegistryEntry{ID: "payer", Role: "payer", EncPub: payer.EncPub, SignPub: payer.SignPub, BaseURL: peer.URL, PayerIDs: []shnsdk.PayerIdentifier{shnsdk.CMSPayerIdentity},
+		// A manifest payer accepts framed DTR operations.
+		RequestFrames: []string{shnsdk.RequestFrameV1Op}})
 	return b.handler
 }
 

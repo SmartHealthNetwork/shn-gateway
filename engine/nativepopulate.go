@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 
 	"github.com/SmartHealthNetwork/shn-gateway/connectors/smartauth"
+	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 )
 
 // (errPopulateUpstream is defined in populator.go, alongside errNoClinicalContext.)
@@ -122,11 +124,17 @@ func (n *nativePopulator) post(ctx context.Context, body []byte) ([]byte, int, *
 	return rb, status, nil
 }
 
-// buildPopulateParameters builds the SDC $populate Parameters: the inline questionnaire + the
-// `subject`. Subject alone is sufficient — the engine binds the CQL `context Patient` from it
-// (validated against HAPI CR). The questionnaires SHN originates against declare no launchContext (the SDC
-// launchContext CodeSystem is unresolvable by the US-Core egress validator), so sending a
-// `context` param would be unmatched; subject is the clean, sufficient binding.
+// buildPopulateParameters builds the SDC $populate Parameters: the payer's
+// Questionnaire, carried byte for byte, and the `subject`. Subject alone is
+// sufficient — the engine binds the CQL `context Patient` from it (validated
+// against HAPI CR). The questionnaires SHN originates against declare no
+// launchContext (the SDC launchContext CodeSystem is unresolvable by the
+// US-Core egress validator), so sending a `context` param would be unmatched;
+// subject is the clean, sufficient binding.
+//
+// The Parameters are written around the Questionnaire's own bytes, and the
+// result is read back independently: the questionnaire parameter's resource
+// must be exactly the payer's bytes, or the request is not sent.
 func buildPopulateParameters(questionnaire []byte, pc PopulateContext) ([]byte, error) {
 	// The subject must be the FHIR-store-resolvable Patient ref (a scoped id) so the engine's CQL
 	// retrieves hit the right compartment; the logical SHN ref does not resolve. SubjectFHIRRef
@@ -135,14 +143,40 @@ func buildPopulateParameters(questionnaire []byte, pc PopulateContext) ([]byte, 
 	if subject == "" {
 		subject = pc.PatientRef
 	}
-	params := map[string]any{
-		"resourceType": "Parameters",
-		"parameter": []map[string]any{
-			{"name": "questionnaire", "resource": json.RawMessage(questionnaire)},
-			{"name": "subject", "valueReference": map[string]any{"reference": subject}},
-		},
+	q := bytes.TrimSpace(questionnaire)
+	qd, err := relay.Doc(relay.NewBody(q, relay.OriginPeerFrame))
+	if err != nil || qd.Kind(qd.Root()) != relay.KindObject {
+		return nil, fmt.Errorf("engine: $populate: the questionnaire is not one JSON object")
 	}
-	return json.Marshal(params)
+	ref, err := json.Marshal(subject)
+	if err != nil {
+		return nil, err
+	}
+	const head = `{"resourceType":"Parameters","parameter":[{"name":"questionnaire","resource":`
+	out := make([]byte, 0, len(head)+len(q)+len(ref)+64)
+	out = append(out, head...)
+	out = append(out, q...)
+	out = append(out, `},{"name":"subject","valueReference":{"reference":`...)
+	out = append(out, ref...)
+	out = append(out, "}}]}"...)
+
+	d, err := relay.Doc(relay.NewBody(out, relay.OriginPeerFrame))
+	if err != nil {
+		return nil, fmt.Errorf("engine: $populate: parameters: %w", err)
+	}
+	params, _ := d.Member(d.Root(), "parameter")
+	elems := d.Elems(params)
+	if len(elems) != 2 {
+		return nil, fmt.Errorf("engine: $populate: parameters do not hold the questionnaire and subject")
+	}
+	res, ok := d.Member(elems[0], "resource")
+	if !ok {
+		return nil, fmt.Errorf("engine: $populate: parameters do not hold the questionnaire")
+	}
+	if s, e := d.Span(res); !bytes.Equal(out[s:e], q) {
+		return nil, fmt.Errorf("engine: $populate: the questionnaire was not carried unchanged")
+	}
+	return out, nil
 }
 
 // extractQuestionnaireResponse returns the QuestionnaireResponse from a $populate response

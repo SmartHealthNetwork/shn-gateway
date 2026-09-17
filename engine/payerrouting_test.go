@@ -194,10 +194,7 @@ func (s *twoPayerSubstrate) handleRoute(body []byte) (*http.Response, error) {
 	var reqTok shnsdk.Token
 	_ = json.Unmarshal([]byte(env.Metadata.AuthzToken), &reqTok)
 
-	respPayload, err := shnsdk.BuildCards(shnsdk.CardCoverage{Covered: shnsdk.CoveredCovered, PANeeded: shnsdk.PANeededNoAuth})
-	if err != nil {
-		return errResp("stub: BuildCards: " + err.Error()), nil
-	}
+	respPayload := crdAnswerFor(shnsdk.CardCoverage{Covered: shnsdk.CoveredCovered, PANeeded: shnsdk.PANeededNoAuth})
 	meta := shnsdk.Metadata{
 		Sender:          env.Metadata.Recipient, // echo the resolved holder back as Sender
 		Recipient:       "provider",
@@ -297,7 +294,7 @@ func TestRoutesToPayerNamedByCoverage(t *testing.T) {
 		t.Fatalf("persona A: recipientFor = %q, want payer-a", recipientA)
 	}
 	if _, err := gw.OriginateLeg(ctx, req, recipientA, "crd-order-select", pciA, "corr-persona-a", "",
-		Content{WorkstreamType: workstreamPA, Bytes: []byte(`{"resourceType":"Parameters"}`)}); err != nil {
+		Content{WorkstreamType: workstreamPA, Payload: testRequest([]byte(`{"resourceType":"Parameters"}`))}); err != nil {
 		t.Fatalf("persona A: OriginateLeg failed: %v", err)
 	}
 
@@ -319,7 +316,7 @@ func TestRoutesToPayerNamedByCoverage(t *testing.T) {
 		t.Fatalf("persona B: recipientFor = %q, want payer-b", recipientB)
 	}
 	if _, err := gw.OriginateLeg(ctx, req, recipientB, "crd-order-select", pciB, "corr-persona-b", "",
-		Content{WorkstreamType: workstreamPA, Bytes: []byte(`{"resourceType":"Parameters"}`)}); err != nil {
+		Content{WorkstreamType: workstreamPA, Payload: testRequest([]byte(`{"resourceType":"Parameters"}`))}); err != nil {
 		t.Fatalf("persona B: OriginateLeg failed: %v", err)
 	}
 

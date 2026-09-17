@@ -74,8 +74,8 @@ func TestNativeSubmit_ConformantRecordsEOB(t *testing.T) {
 		if err != nil || res.Status != 0 {
 			t.Fatalf("approved conformant submit: err=%v status=%d msg=%s", err, res.Status, res.Message)
 		}
-		if !bytes.Equal(res.ResponseFHIR, body) {
-			t.Fatalf("ResponseFHIR not forwarded verbatim")
+		if !bytes.Equal(responseBytes(res), body) {
+			t.Fatalf("Response not forwarded verbatim")
 		}
 		if len(res.SideEffectFHIR) != 1 {
 			t.Fatalf("want 1 EOB side-effect, got %d", len(res.SideEffectFHIR))
@@ -100,7 +100,7 @@ func TestNativeSubmit_ConformantRecordsEOB(t *testing.T) {
 		if err != nil || res.Status != 0 {
 			t.Fatalf("pended conformant submit: err=%v status=%d", err, res.Status)
 		}
-		if !bytes.Equal(res.ResponseFHIR, body) {
+		if !bytes.Equal(responseBytes(res), body) {
 			t.Fatalf("pended Bundle not forwarded verbatim")
 		}
 		if res.Commit == nil || len(res.SideEffectFHIR) != 0 {
@@ -130,7 +130,7 @@ func TestNativeSubmit_ConformantRecordsEOB(t *testing.T) {
 		if res.Status != 0 {
 			t.Fatalf("HCPCS submit must FORWARD (status 0), got %d msg=%s", res.Status, res.Message)
 		}
-		if !bytes.Equal(res.ResponseFHIR, body) {
+		if !bytes.Equal(responseBytes(res), body) {
 			t.Fatalf("HCPCS submit response not relayed verbatim")
 		}
 		if len(res.SideEffectFHIR) != 1 || res.Commit == nil {
@@ -158,7 +158,7 @@ func TestNativeSubmit_ConformantRecordsEOB(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unrecognized-system submit: unexpected error: %v", err)
 		}
-		if res.Status != 0 || !bytes.Equal(res.ResponseFHIR, body) {
+		if res.Status != 0 || !bytes.Equal(responseBytes(res), body) {
 			t.Fatalf("unrecognized-system submit must forward verbatim; status=%d", res.Status)
 		}
 		if len(res.SideEffectFHIR) != 0 || res.Commit != nil {
@@ -242,7 +242,7 @@ func TestNativeSubmit_SingleShotServiceRequestInfoChanged(t *testing.T) {
 		if *getCount < 2 {
 			t.Fatalf("expected the submit leg to POLL ClaimResponse (getCount>=2), got %d", *getCount)
 		}
-		parsed, perr := shnsdk.ParseClaimResponse(res.ResponseFHIR)
+		parsed, perr := shnsdk.ParseClaimResponse(responseBytes(res))
 		if perr != nil || parsed.Outcome != "approved" || parsed.PreAuthRef != "AUTH-SS-1" {
 			t.Fatalf("resolved response must be approved AUTH-SS-1, got outcome=%q ref=%q err=%v", parsed.Outcome, parsed.PreAuthRef, perr)
 		}
@@ -272,7 +272,7 @@ func TestNativeSubmit_SingleShotServiceRequestInfoChanged(t *testing.T) {
 		if res.Commit == nil || len(res.SideEffectFHIR) != 0 {
 			t.Fatalf("no-infoChanged SR submit must RecordPendedClaim + emit NO EOB; commit=%v sideeffects=%d", res.Commit != nil, len(res.SideEffectFHIR))
 		}
-		if pended, _, perr := shnsdk.ParsePendedResponse(res.ResponseFHIR); perr != nil || !pended {
+		if pended, _, perr := shnsdk.ParsePendedResponse(responseBytes(res)); perr != nil || !pended {
 			t.Fatalf("no-infoChanged SR must surface the pend as-is; pended=%v err=%v", pended, perr)
 		}
 		if getCount != 0 {
@@ -389,7 +389,7 @@ func TestNativeUpdate_ApprovedFinalizes(t *testing.T) {
 		if err != nil || res.Status != 0 {
 			t.Fatalf("approved conformant update: err=%v status=%d msg=%s", err, res.Status, res.Message)
 		}
-		if !bytes.Equal(res.ResponseFHIR, body) || res.Commit == nil || res.Rollback == nil {
+		if !bytes.Equal(responseBytes(res), body) || res.Commit == nil || res.Rollback == nil {
 			t.Fatalf("approved conformant update must forward verbatim + Finalize Commit + armed Rollback")
 		}
 		if len(res.SideEffectFHIR) != 0 {
@@ -408,8 +408,8 @@ func TestNativeUpdate_ApprovedFinalizes(t *testing.T) {
 		if err != nil || res.Status != http.StatusInternalServerError {
 			t.Fatalf("want 500 (relayed verbatim), got status=%d err=%v", res.Status, err)
 		}
-		if string(res.ResponseFHIR) != "boom" {
-			t.Fatalf("want the partner's body relayed verbatim, got %q", res.ResponseFHIR)
+		if string(responseBytes(res)) != "boom" {
+			t.Fatalf("want the partner's body relayed verbatim, got %q", responseBytes(res))
 		}
 		if res.Rollback == nil {
 			t.Fatalf("CRITICAL: a post-Begin partner failure MUST carry Rollback or the claim strands")
@@ -491,7 +491,7 @@ func TestNativeUpdate_ApprovedFinalizes(t *testing.T) {
 		if getCount < 2 {
 			t.Fatalf("expected the leg to RE-QUERY ClaimResponse (getCount>=2), got %d", getCount)
 		}
-		parsed, perr := shnsdk.ParseClaimResponse(res.ResponseFHIR)
+		parsed, perr := shnsdk.ParseClaimResponse(responseBytes(res))
 		if perr != nil || parsed.Outcome != "approved" || parsed.PreAuthRef != "AUTH-0042" {
 			t.Fatalf("resolved response must be approved AUTH-0042, got outcome=%q ref=%q err=%v", parsed.Outcome, parsed.PreAuthRef, perr)
 		}
@@ -625,7 +625,7 @@ func TestNativeUpdate_AmendAfterResolution(t *testing.T) {
 				t.Fatalf("re-query must address the SAME id the payer re-pended in place, got %s", p)
 			}
 		}
-		parsed, perr := shnsdk.ParseClaimResponse(res.ResponseFHIR)
+		parsed, perr := shnsdk.ParseClaimResponse(responseBytes(res))
 		if perr != nil || parsed.Outcome != "approved" || parsed.PreAuthRef != "AUTH-0002" {
 			t.Fatalf("resolved response must be approved AUTH-0002, got outcome=%q ref=%q err=%v", parsed.Outcome, parsed.PreAuthRef, perr)
 		}

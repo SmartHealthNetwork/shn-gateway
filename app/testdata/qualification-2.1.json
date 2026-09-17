@@ -1,0 +1,820 @@
+[
+  {
+    "Path": "/fhir/Bundle/$validate",
+    "Profile": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-pas-request-bundle",
+    "SHA256": "3662d5ce7270247dcab1603c9056fd1ced29f820be53e1437344486bc80ba105",
+    "Outcome": {
+      "resourceType": "OperationOutcome",
+      "issue": [
+        {
+          "severity": "error",
+          "code": "processing",
+          "details": {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/java-core-messageId",
+                "code": "Extension_EXT_Type"
+              }
+            ]
+          },
+          "diagnostics": "The Extension 'http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewActionCode' definition allows for the types [CodeableConcept] but found type boolean",
+          "expression": [
+            "ClaimResponse.item[0].adjudication[0].extension[0].extension[0]"
+          ]
+        },
+        {
+          "severity": "warning",
+          "code": "processing",
+          "diagnostics": "licensed terminology unavailable"
+        }
+      ]
+    }
+  },
+  {
+    "Path": "/fhir/QuestionnaireResponse/$validate",
+    "Profile": "http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/dtr-questionnaireresponse",
+    "SHA256": "99723d46c6534497cc6bfc0e20f012af173edd29e497378f9de927202b8cc5b2",
+    "Outcome": {
+      "resourceType": "OperationOutcome",
+      "issue": [
+        {
+          "severity": "error",
+          "code": "processing",
+          "details": {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/java-core-messageId",
+                "code": "Extension_EXT_Type"
+              }
+            ]
+          },
+          "diagnostics": "The Extension 'http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewActionCode' definition allows for the types [CodeableConcept] but found type boolean",
+          "expression": [
+            "ClaimResponse.item[0].adjudication[0].extension[0].extension[0]"
+          ]
+        },
+        {
+          "severity": "warning",
+          "code": "processing",
+          "diagnostics": "licensed terminology unavailable"
+        }
+      ]
+    }
+  },
+  {
+    "Path": "/fhir/ExplanationOfBenefit/$validate",
+    "Profile": "http://hl7.org/fhir/us/davinci-pdex/StructureDefinition/pdex-priorauthorization",
+    "SHA256": "6308936179b07c44954482c2d2b14cfe09bebbf4f5627e2e639eee6e62096499",
+    "Outcome": {
+      "resourceType": "OperationOutcome",
+      "issue": [
+        {
+          "severity": "information",
+          "code": "informational",
+          "diagnostics": "Validation successful"
+        }
+      ]
+    }
+  },
+  {
+    "Path": "/fhir/Task/$validate",
+    "Profile": "http://hl7.org/fhir/us/davinci-cdex/StructureDefinition/cdex-task-data-request",
+    "SHA256": "03bc7d7ccbd1fa86a0bee54bcc4c666fa0bcc3b302876eb1872e73690c6e5ccd",
+    "Outcome": {
+      "resourceType": "OperationOutcome",
+      "issue": [
+        {
+          "severity": "information",
+          "code": "informational",
+          "diagnostics": "Validation successful"
+        }
+      ]
+    }
+  },
+  {
+    "Path": "/fhir/ClaimResponse/$validate",
+    "Profile": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claimresponse|2.1.0",
+    "SHA256": "47c7cb5bd44342c3cad5a868a14f667aceab90a3e3a6542aff17be20e2a9d9ef",
+    "Outcome": {
+      "resourceType": "OperationOutcome",
+      "issue": [
+        {
+          "severity": "information",
+          "code": "informational",
+          "diagnostics": "Validation successful"
+        }
+      ]
+    }
+  },
+  {
+    "Path": "/fhir/ClaimResponse/$validate",
+    "Profile": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claimresponse|2.1.0",
+    "SHA256": "d0f2b264b6206f5789e23e56804216572082167f050c7362793bc9a4e6d07ab4",
+    "Outcome": {
+      "resourceType": "OperationOutcome",
+      "issue": [
+        {
+          "severity": "information",
+          "code": "informational",
+          "diagnostics": "Validation successful"
+        }
+      ]
+    }
+  },
+  {
+    "Path": "/fhir/ClaimResponse/$validate",
+    "Profile": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claimresponse|2.1.0",
+    "SHA256": "19060585098d55102667236e18e9de730e60668db8c67c2ae3ab30aeea8d1c47",
+    "Outcome": {
+      "resourceType": "OperationOutcome",
+      "issue": [
+        {
+          "severity": "information",
+          "code": "informational",
+          "diagnostics": "Validation successful"
+        }
+      ]
+    }
+  },
+  {
+    "Path": "/fhir/ClaimResponse/$validate",
+    "Profile": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claimresponse",
+    "SHA256": "47c7cb5bd44342c3cad5a868a14f667aceab90a3e3a6542aff17be20e2a9d9ef",
+    "Outcome": {
+      "resourceType": "OperationOutcome",
+      "issue": [
+        {
+          "severity": "information",
+          "code": "informational",
+          "diagnostics": "Validation successful"
+        }
+      ]
+    }
+  },
+  {
+    "Path": "/fhir/ClaimResponse/$validate",
+    "Profile": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claimresponse",
+    "SHA256": "d0f2b264b6206f5789e23e56804216572082167f050c7362793bc9a4e6d07ab4",
+    "Outcome": {
+      "resourceType": "OperationOutcome",
+      "issue": [
+        {
+          "severity": "information",
+          "code": "informational",
+          "diagnostics": "Validation successful"
+        }
+      ]
+    }
+  },
+  {
+    "Path": "/fhir/ClaimResponse/$validate",
+    "Profile": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claimresponse",
+    "SHA256": "19060585098d55102667236e18e9de730e60668db8c67c2ae3ab30aeea8d1c47",
+    "Outcome": {
+      "resourceType": "OperationOutcome",
+      "issue": [
+        {
+          "severity": "information",
+          "code": "informational",
+          "diagnostics": "Validation successful"
+        }
+      ]
+    }
+  },
+  {
+    "Path": "/fhir/ClaimResponse/$validate",
+    "Profile": "",
+    "SHA256": "47c7cb5bd44342c3cad5a868a14f667aceab90a3e3a6542aff17be20e2a9d9ef",
+    "Outcome": {
+      "resourceType": "OperationOutcome",
+      "issue": [
+        {
+          "severity": "information",
+          "code": "informational",
+          "diagnostics": "Validation successful"
+        }
+      ]
+    }
+  },
+  {
+    "Path": "/fhir/ClaimResponse/$validate",
+    "Profile": "",
+    "SHA256": "d0f2b264b6206f5789e23e56804216572082167f050c7362793bc9a4e6d07ab4",
+    "Outcome": {
+      "resourceType": "OperationOutcome",
+      "issue": [
+        {
+          "severity": "information",
+          "code": "informational",
+          "diagnostics": "Validation successful"
+        }
+      ]
+    }
+  },
+  {
+    "Path": "/fhir/ClaimResponse/$validate",
+    "Profile": "",
+    "SHA256": "19060585098d55102667236e18e9de730e60668db8c67c2ae3ab30aeea8d1c47",
+    "Outcome": {
+      "resourceType": "OperationOutcome",
+      "issue": [
+        {
+          "severity": "information",
+          "code": "informational",
+          "diagnostics": "Validation successful"
+        }
+      ]
+    }
+  },
+  {
+    "Path": "/fhir/ClaimResponse/$validate",
+    "Profile": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claimresponse|2.1.0",
+    "SHA256": "47c7cb5bd44342c3cad5a868a14f667aceab90a3e3a6542aff17be20e2a9d9ef",
+    "Outcome": {
+      "resourceType": "OperationOutcome",
+      "issue": [
+        {
+          "severity": "information",
+          "code": "informational",
+          "diagnostics": "Validation successful"
+        }
+      ]
+    }
+  },
+  {
+    "Path": "/fhir/ClaimResponse/$validate",
+    "Profile": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claimresponse|2.1.0",
+    "SHA256": "d0f2b264b6206f5789e23e56804216572082167f050c7362793bc9a4e6d07ab4",
+    "Outcome": {
+      "resourceType": "OperationOutcome",
+      "issue": [
+        {
+          "severity": "information",
+          "code": "informational",
+          "diagnostics": "Validation successful"
+        }
+      ]
+    }
+  },
+  {
+    "Path": "/fhir/ClaimResponse/$validate",
+    "Profile": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claimresponse|2.1.0",
+    "SHA256": "19060585098d55102667236e18e9de730e60668db8c67c2ae3ab30aeea8d1c47",
+    "Outcome": {
+      "resourceType": "OperationOutcome",
+      "issue": [
+        {
+          "severity": "information",
+          "code": "informational",
+          "diagnostics": "Validation successful"
+        }
+      ]
+    }
+  },
+  {
+    "Path": "/fhir/ClaimResponse/$validate",
+    "Profile": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claimresponse",
+    "SHA256": "47c7cb5bd44342c3cad5a868a14f667aceab90a3e3a6542aff17be20e2a9d9ef",
+    "Outcome": {
+      "resourceType": "OperationOutcome",
+      "issue": [
+        {
+          "severity": "information",
+          "code": "informational",
+          "diagnostics": "Validation successful"
+        }
+      ]
+    }
+  },
+  {
+    "Path": "/fhir/ClaimResponse/$validate",
+    "Profile": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claimresponse",
+    "SHA256": "d0f2b264b6206f5789e23e56804216572082167f050c7362793bc9a4e6d07ab4",
+    "Outcome": {
+      "resourceType": "OperationOutcome",
+      "issue": [
+        {
+          "severity": "information",
+          "code": "informational",
+          "diagnostics": "Validation successful"
+        }
+      ]
+    }
+  },
+  {
+    "Path": "/fhir/ClaimResponse/$validate",
+    "Profile": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claimresponse",
+    "SHA256": "19060585098d55102667236e18e9de730e60668db8c67c2ae3ab30aeea8d1c47",
+    "Outcome": {
+      "resourceType": "OperationOutcome",
+      "issue": [
+        {
+          "severity": "information",
+          "code": "informational",
+          "diagnostics": "Validation successful"
+        }
+      ]
+    }
+  },
+  {
+    "Path": "/fhir/ClaimResponse/$validate",
+    "Profile": "",
+    "SHA256": "47c7cb5bd44342c3cad5a868a14f667aceab90a3e3a6542aff17be20e2a9d9ef",
+    "Outcome": {
+      "resourceType": "OperationOutcome",
+      "issue": [
+        {
+          "severity": "information",
+          "code": "informational",
+          "diagnostics": "Validation successful"
+        }
+      ]
+    }
+  },
+  {
+    "Path": "/fhir/ClaimResponse/$validate",
+    "Profile": "",
+    "SHA256": "d0f2b264b6206f5789e23e56804216572082167f050c7362793bc9a4e6d07ab4",
+    "Outcome": {
+      "resourceType": "OperationOutcome",
+      "issue": [
+        {
+          "severity": "information",
+          "code": "informational",
+          "diagnostics": "Validation successful"
+        }
+      ]
+    }
+  },
+  {
+    "Path": "/fhir/ClaimResponse/$validate",
+    "Profile": "",
+    "SHA256": "19060585098d55102667236e18e9de730e60668db8c67c2ae3ab30aeea8d1c47",
+    "Outcome": {
+      "resourceType": "OperationOutcome",
+      "issue": [
+        {
+          "severity": "information",
+          "code": "informational",
+          "diagnostics": "Validation successful"
+        }
+      ]
+    }
+  },
+  {
+    "Path": "/fhir/ClaimResponse/$validate",
+    "Profile": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claimresponse|2.1.0",
+    "SHA256": "47c7cb5bd44342c3cad5a868a14f667aceab90a3e3a6542aff17be20e2a9d9ef",
+    "Outcome": {
+      "resourceType": "OperationOutcome",
+      "issue": [
+        {
+          "severity": "information",
+          "code": "informational",
+          "diagnostics": "Validation successful"
+        }
+      ]
+    }
+  },
+  {
+    "Path": "/fhir/ClaimResponse/$validate",
+    "Profile": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claimresponse|2.1.0",
+    "SHA256": "d0f2b264b6206f5789e23e56804216572082167f050c7362793bc9a4e6d07ab4",
+    "Outcome": {
+      "resourceType": "OperationOutcome",
+      "issue": [
+        {
+          "severity": "information",
+          "code": "informational",
+          "diagnostics": "Validation successful"
+        }
+      ]
+    }
+  },
+  {
+    "Path": "/fhir/ClaimResponse/$validate",
+    "Profile": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claimresponse|2.1.0",
+    "SHA256": "19060585098d55102667236e18e9de730e60668db8c67c2ae3ab30aeea8d1c47",
+    "Outcome": {
+      "resourceType": "OperationOutcome",
+      "issue": [
+        {
+          "severity": "information",
+          "code": "informational",
+          "diagnostics": "Validation successful"
+        }
+      ]
+    }
+  },
+  {
+    "Path": "/fhir/ClaimResponse/$validate",
+    "Profile": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claimresponse",
+    "SHA256": "47c7cb5bd44342c3cad5a868a14f667aceab90a3e3a6542aff17be20e2a9d9ef",
+    "Outcome": {
+      "resourceType": "OperationOutcome",
+      "issue": [
+        {
+          "severity": "information",
+          "code": "informational",
+          "diagnostics": "Validation successful"
+        }
+      ]
+    }
+  },
+  {
+    "Path": "/fhir/ClaimResponse/$validate",
+    "Profile": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claimresponse",
+    "SHA256": "d0f2b264b6206f5789e23e56804216572082167f050c7362793bc9a4e6d07ab4",
+    "Outcome": {
+      "resourceType": "OperationOutcome",
+      "issue": [
+        {
+          "severity": "information",
+          "code": "informational",
+          "diagnostics": "Validation successful"
+        }
+      ]
+    }
+  },
+  {
+    "Path": "/fhir/ClaimResponse/$validate",
+    "Profile": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claimresponse",
+    "SHA256": "19060585098d55102667236e18e9de730e60668db8c67c2ae3ab30aeea8d1c47",
+    "Outcome": {
+      "resourceType": "OperationOutcome",
+      "issue": [
+        {
+          "severity": "information",
+          "code": "informational",
+          "diagnostics": "Validation successful"
+        }
+      ]
+    }
+  },
+  {
+    "Path": "/fhir/ClaimResponse/$validate",
+    "Profile": "",
+    "SHA256": "47c7cb5bd44342c3cad5a868a14f667aceab90a3e3a6542aff17be20e2a9d9ef",
+    "Outcome": {
+      "resourceType": "OperationOutcome",
+      "issue": [
+        {
+          "severity": "information",
+          "code": "informational",
+          "diagnostics": "Validation successful"
+        }
+      ]
+    }
+  },
+  {
+    "Path": "/fhir/ClaimResponse/$validate",
+    "Profile": "",
+    "SHA256": "d0f2b264b6206f5789e23e56804216572082167f050c7362793bc9a4e6d07ab4",
+    "Outcome": {
+      "resourceType": "OperationOutcome",
+      "issue": [
+        {
+          "severity": "information",
+          "code": "informational",
+          "diagnostics": "Validation successful"
+        }
+      ]
+    }
+  },
+  {
+    "Path": "/fhir/ClaimResponse/$validate",
+    "Profile": "",
+    "SHA256": "19060585098d55102667236e18e9de730e60668db8c67c2ae3ab30aeea8d1c47",
+    "Outcome": {
+      "resourceType": "OperationOutcome",
+      "issue": [
+        {
+          "severity": "information",
+          "code": "informational",
+          "diagnostics": "Validation successful"
+        }
+      ]
+    }
+  },
+  {
+    "Path": "/fhir/ClaimResponse/$validate",
+    "Profile": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claimresponse|2.1.0",
+    "SHA256": "2e6d99ac116f8e5139977ee5f687857af820ff9fc744767eb7958bef99de62e3",
+    "Outcome": {
+      "resourceType": "OperationOutcome",
+      "issue": [
+        {
+          "severity": "error",
+          "code": "processing",
+          "details": {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/java-core-messageId",
+                "code": "Extension_EXT_Type"
+              }
+            ]
+          },
+          "diagnostics": "The Extension 'http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewActionCode' definition allows for the types [CodeableConcept] but found type boolean",
+          "expression": [
+            "ClaimResponse.item[0].adjudication[0].extension[0].extension[0]"
+          ]
+        },
+        {
+          "severity": "warning",
+          "code": "processing",
+          "diagnostics": "licensed terminology unavailable"
+        }
+      ]
+    }
+  },
+  {
+    "Path": "/fhir/ClaimResponse/$validate",
+    "Profile": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claimresponse",
+    "SHA256": "2e6d99ac116f8e5139977ee5f687857af820ff9fc744767eb7958bef99de62e3",
+    "Outcome": {
+      "resourceType": "OperationOutcome",
+      "issue": [
+        {
+          "severity": "error",
+          "code": "processing",
+          "details": {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/java-core-messageId",
+                "code": "Extension_EXT_Type"
+              }
+            ]
+          },
+          "diagnostics": "The Extension 'http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewActionCode' definition allows for the types [CodeableConcept] but found type boolean",
+          "expression": [
+            "ClaimResponse.item[0].adjudication[0].extension[0].extension[0]"
+          ]
+        },
+        {
+          "severity": "warning",
+          "code": "processing",
+          "diagnostics": "licensed terminology unavailable"
+        }
+      ]
+    }
+  },
+  {
+    "Path": "/fhir/ClaimResponse/$validate",
+    "Profile": "",
+    "SHA256": "2e6d99ac116f8e5139977ee5f687857af820ff9fc744767eb7958bef99de62e3",
+    "Outcome": {
+      "resourceType": "OperationOutcome",
+      "issue": [
+        {
+          "severity": "error",
+          "code": "processing",
+          "details": {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/java-core-messageId",
+                "code": "Extension_EXT_Type"
+              }
+            ]
+          },
+          "diagnostics": "The Extension 'http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewActionCode' definition allows for the types [CodeableConcept] but found type boolean",
+          "expression": [
+            "ClaimResponse.item[0].adjudication[0].extension[0].extension[0]"
+          ]
+        },
+        {
+          "severity": "warning",
+          "code": "processing",
+          "diagnostics": "licensed terminology unavailable"
+        }
+      ]
+    }
+  },
+  {
+    "Path": "/fhir/Bundle/$validate",
+    "Profile": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-pas-response-bundle|2.1.0",
+    "SHA256": "3d2a0f8128424d1017f42ed053f73c60b0b42f223412bbc03f01aed761ef1710",
+    "Outcome": {
+      "resourceType": "OperationOutcome",
+      "issue": [
+        {
+          "severity": "information",
+          "code": "informational",
+          "diagnostics": "Validation successful"
+        }
+      ]
+    }
+  },
+  {
+    "Path": "/fhir/Bundle/$validate",
+    "Profile": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-pas-response-bundle|2.1.0",
+    "SHA256": "e866d13d2c9687fe1b79a2656fa643289857cb006d5cc23235b5b234b6e92347",
+    "Outcome": {
+      "resourceType": "OperationOutcome",
+      "issue": [
+        {
+          "severity": "error",
+          "code": "processing",
+          "details": {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/java-core-messageId",
+                "code": "Terminology_PassThrough_TX_Message"
+              }
+            ]
+          },
+          "diagnostics": "Unknown code 'http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets#L9999'",
+          "expression": [
+            "Bundle.entry[4].resource/*Claim/1762*/.item[0].productOrService"
+          ]
+        },
+        {
+          "severity": "error",
+          "code": "processing",
+          "details": {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/java-core-messageId",
+                "code": "Terminology_TX_NoValid_1_CC"
+              }
+            ]
+          },
+          "diagnostics": "None of the codings provided are in the value set 'X12 278 Requested Service Type' (http://hl7.org/fhir/us/davinci-pas/ValueSet/X12278RequestedServiceType|2.1.0), and a coding from this value set is required) (codes = http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets#L9999)",
+          "expression": [
+            "Bundle.entry[4].resource/*Claim/1762*/.item[0].productOrService"
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "Path": "/fhir/Bundle/$validate",
+    "Profile": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-pas-response-bundle|2.1.0",
+    "SHA256": "dc2d7cca4aa84e11dba616ee5ec5c3668fd64bc8b5c9f7f760f3b1581df17b90",
+    "Outcome": {
+      "resourceType": "OperationOutcome",
+      "issue": [
+        {
+          "severity": "error",
+          "code": "processing",
+          "details": {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/java-core-messageId",
+                "code": "Terminology_PassThrough_TX_Message"
+              }
+            ]
+          },
+          "diagnostics": "Unknown code 'https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set#98'",
+          "expression": [
+            "Bundle.entry[4].resource/*Claim/1762*/.item[0].location.ofType(CodeableConcept)"
+          ]
+        },
+        {
+          "severity": "error",
+          "code": "processing",
+          "details": {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/java-core-messageId",
+                "code": "Terminology_TX_NoValid_1_CC"
+              }
+            ]
+          },
+          "diagnostics": "None of the codings provided are in the value set 'X12 278 Health Care Service Location Type Value Set' (http://hl7.org/fhir/us/davinci-pas/ValueSet/X12278LocationType|2.1.0), and a coding from this value set is required) (codes = https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set#98)",
+          "expression": [
+            "Bundle.entry[4].resource/*Claim/1762*/.item[0].location.ofType(CodeableConcept)"
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "Path": "/fhir/Bundle/$validate",
+    "Profile": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-pas-response-bundle|2.1.0",
+    "SHA256": "af0f888bc91ab7c56320422c2938cccad3661cc8b9ab16107844953d0705c078",
+    "Outcome": {
+      "resourceType": "OperationOutcome",
+      "issue": [
+        {
+          "severity": "error",
+          "code": "processing",
+          "details": {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/java-core-messageId",
+                "code": "Extension_EXT_Type"
+              }
+            ]
+          },
+          "diagnostics": "The Extension 'http://hl7.org/fhir/5.0/StructureDefinition/extension-Claim.encounter' definition allows for the types [Reference] but found type string",
+          "expression": [
+            "Bundle.entry[4].resource/*Claim/1762*/.extension[1]"
+          ]
+        },
+        {
+          "severity": "error",
+          "code": "processing",
+          "details": {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/java-core-messageId",
+                "code": "Extension_PROF_Type"
+              }
+            ]
+          },
+          "diagnostics": "The Profile 'http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claim|2.1.0' definition allows for the type Reference but found type string",
+          "expression": [
+            "Bundle.entry[4].resource/*Claim/1762*/.extension[1].value.ofType(string)"
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "Path": "/fhir/Claim/$validate",
+    "Profile": "http://hl7.org/fhir/StructureDefinition/Claim",
+    "SHA256": "ff9c490c6b4adaebf64613bef8312030a7efbde5f6423fd1dd81a86030b413a7",
+    "Outcome": {
+      "resourceType": "OperationOutcome",
+      "issue": [
+        {
+          "severity": "information",
+          "code": "informational",
+          "diagnostics": "Validation successful"
+        }
+      ]
+    }
+  },
+  {
+    "Path": "/fhir/Claim/$validate",
+    "Profile": "http://hl7.org/fhir/StructureDefinition/Claim",
+    "SHA256": "309b3fecb350d4c1ccbeaa9bd3df24d68f4e9dcddf6eb6f91a3745d27c95f118",
+    "Outcome": {
+      "resourceType": "OperationOutcome",
+      "issue": [
+        {
+          "severity": "error",
+          "code": "processing",
+          "details": {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/java-core-messageId",
+                "code": "Reference_REF_BadTargetType"
+              }
+            ]
+          },
+          "diagnostics": "Invalid Resource target type. Found Patient, but expected one of ([Encounter])",
+          "expression": [
+            "Claim.extension[0].value.ofType(Reference)"
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "Path": "/fhir/ClaimResponse/$validate",
+    "Profile": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claimresponse|9.9.9",
+    "SHA256": "47c7cb5bd44342c3cad5a868a14f667aceab90a3e3a6542aff17be20e2a9d9ef",
+    "Outcome": {
+      "resourceType": "OperationOutcome",
+      "issue": [
+        {
+          "severity": "error",
+          "code": "processing",
+          "details": {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/java-core-messageId",
+                "code": "Validation_VAL_Profile_Unknown"
+              }
+            ]
+          },
+          "diagnostics": "Invalid profile. Failed to retrieve explicitly requested profile with url=http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claimresponse|9.9.9"
+        }
+      ]
+    }
+  },
+  {
+    "Path": "/fhir/ClaimResponse/$validate",
+    "Profile": "https://example.org/fhir/StructureDefinition/unavailable-profile",
+    "SHA256": "47c7cb5bd44342c3cad5a868a14f667aceab90a3e3a6542aff17be20e2a9d9ef",
+    "Outcome": {
+      "resourceType": "OperationOutcome",
+      "issue": [
+        {
+          "severity": "error",
+          "code": "processing",
+          "details": {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/java-core-messageId",
+                "code": "Validation_VAL_Profile_Unknown"
+              }
+            ]
+          },
+          "diagnostics": "Invalid profile. Failed to retrieve explicitly requested profile with url=https://example.org/fhir/StructureDefinition/unavailable-profile"
+        }
+      ]
+    }
+  }
+]

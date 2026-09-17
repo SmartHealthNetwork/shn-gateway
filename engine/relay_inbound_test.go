@@ -155,7 +155,7 @@ func TestRespondLegErrorFramesForCapableRequester(t *testing.T) {
 	rec := httptest.NewRecorder()
 	r := newSignedInboundRequest(t, g, requester.ID)
 	g.respondLegError(rec, r, "payer-coverage", "crd-cards", "crd-order-select",
-		"corr-1", LegResult{Status: 422, ResponseFHIR: oo}, "pci-1", requester.ID, "", "")
+		"corr-1", LegResult{Status: 422, Response: testResponse(oo)}, "pci-1", requester.ID, "", "")
 	if rec.Code != 200 {
 		t.Fatalf("to-Hub status = %d, want 200 (framed app answer is 200-to-Hub)", rec.Code)
 	}
@@ -186,7 +186,7 @@ func TestRespondLegErrorConnectorMisuse2xxRoutesToSuccess(t *testing.T) {
 	rec := httptest.NewRecorder()
 	r := newSignedInboundRequest(t, g, requester.ID)
 	g.respondLegError(rec, r, "payer-coverage", "crd-cards", "crd-order-select",
-		"corr-1", LegResult{Status: 200, ResponseFHIR: fhir}, "pci-1", requester.ID, "", "")
+		"corr-1", LegResult{Status: 200, Response: testResponse(fhir)}, "pci-1", requester.ID, "", "")
 	if rec.Code != 200 {
 		t.Fatalf("to-Hub status = %d, want 200", rec.Code)
 	}
@@ -207,7 +207,7 @@ func TestRespondLegErrorConnectorMisuse2xxRoutesToSuccess(t *testing.T) {
 }
 
 // TestRespondLegErrorFramesSynthesizedErrorForCapableRequester: a NON-2xx answer with an
-// EMPTY ResponseFHIR (the shape most internal-rejection call sites carry — a DTR 400
+// EMPTY Response (the shape most internal-rejection call sites carry — a DTR 400
 // "unknown questionnaire canonical" or a PAS 409 that sets only Message) frames a
 // synthesized {"error": Message} body as application/json, not an empty one.
 func TestRespondLegErrorFramesSynthesizedErrorForCapableRequester(t *testing.T) {
@@ -264,9 +264,9 @@ func TestRespondLegErrorBareForLegacyRequester(t *testing.T) {
 
 // TestRespondLegErrorNeverEmptyMessage_Framed is the fail-closed guard's pin, frame-capable
 // side: a connector/responder answering non-2xx
-// with an EMPTY Message and no ResponseFHIR -- internal/brpayermirror's loopback mirror
-// does exactly this on every one of its own rejection paths (a truly empty body); this is
-// the class the smoke-caught `pas-submit: ... 422: {"error":""}` belongs to -- must NOT
+// with an EMPTY Message and no Response -- a loopback payer answering from its own
+// process does exactly this on every one of its rejection paths (a truly empty body); this is
+// the class the observed `pas-submit: ... 422: {"error":""}` belongs to -- must NOT
 // synthesize a bare `{"error":""}`. legibleLegErrorMessage's fallback names the leg
 // (txType) and status instead.
 func TestRespondLegErrorNeverEmptyMessage_Framed(t *testing.T) {
@@ -329,7 +329,7 @@ func TestRespondLegFramesSuccessForCapableRequester(t *testing.T) {
 	rec := httptest.NewRecorder()
 	r := newSignedInboundRequest(t, g, requester.ID)
 	g.respondLeg(rec, r, "payer-coverage", "crd-cards", "crd-order-select",
-		"corr-1", fhir, "pci-1", requester.ID, "", "", false)
+		"corr-1", testResponse(fhir), "pci-1", requester.ID, "", "")
 	if rec.Code != 200 {
 		t.Fatalf("to-Hub status = %d, want 200", rec.Code)
 	}
@@ -355,7 +355,7 @@ func TestRespondLegBareSuccessForLegacyRequester(t *testing.T) {
 	rec := httptest.NewRecorder()
 	r := newSignedInboundRequest(t, g, requester.ID)
 	g.respondLeg(rec, r, "payer-coverage", "crd-cards", "crd-order-select",
-		"corr-1", fhir, "pci-1", requester.ID, "", "", false)
+		"corr-1", testResponse(fhir), "pci-1", requester.ID, "", "")
 	if rec.Code != 200 {
 		t.Fatalf("to-Hub status = %d, want 200", rec.Code)
 	}

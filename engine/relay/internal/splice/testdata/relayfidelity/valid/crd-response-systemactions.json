@@ -1,0 +1,175 @@
+{
+  "cards": [],
+  "systemActions": [
+    {
+      "type": "update",
+      "description": "Add coverage information to DeviceRequest <prior-auth-required> & keep \"exact\" bytes",
+      "resource": {
+        "resourceType": "DeviceRequest",
+        "id": "prior-auth-required-device-request",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/davinci-crd/StructureDefinition/profile-devicerequest"
+          ]
+        },
+        "text": {
+          "status": "generated",
+          "div": "<div xmlns=\"http://www.w3.org/1999/xhtml\"><p>Synthetic relay fixture: 1 &lt; 2 &amp;&amp; 3 &gt; 2</p></div>"
+        },
+        "extension": [
+          {
+            "url": "http://hl7.org/fhir/us/davinci-crd/StructureDefinition/ext-coverage-information",
+            "extension": [
+              {
+                "url": "coverage",
+                "valueReference": {
+                  "reference": "Coverage/coverage-1"
+                }
+              },
+              {
+                "url": "covered",
+                "valueCode": "covered"
+              },
+              {
+                "url": "pa-needed",
+                "valueCode": "auth-needed"
+              },
+              {
+                "url": "doc-needed",
+                "valueCode": "clinical"
+              },
+              {
+                "url": "questionnaire",
+                "valueCanonical": "http://example.org/fhir/Questionnaire/PriorAuthRequired|1.0.0"
+              },
+              {
+                "url": "questionnaire",
+                "valueCanonical": "http://example.org/fhir/Questionnaire/HomeOxygen"
+              },
+              {
+                "url": "billingCode",
+                "valueCoding": {
+                  "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+                  "code": "L8000"
+                }
+              },
+              {
+                "url": "detail",
+                "extension": [
+                  {
+                    "url": "code",
+                    "valueCodeableConcept": {
+                      "coding": [
+                        {
+                          "system": "http://hl7.org/fhir/us/davinci-crd/CodeSystem/temp",
+                          "code": "allowed-quantity"
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "url": "value",
+                    "valueQuantity": {
+                      "value": 1.50,
+                      "unit": "units"
+                    }
+                  }
+                ]
+              },
+              {
+		"url": "detail",
+		"extension": [
+			{
+				"url": "code",
+				"valueCodeableConcept": {
+					"coding": [
+						{
+							"system": "http://hl7.org/fhir/us/davinci-crd/CodeSystem/temp",
+							"code": "in-network-copay"
+						}
+					]
+				}
+			},
+			{
+				"url": "value",
+				"valueQuantity": {
+					"value": 9007199254740993,
+					"unit": "USD",
+					"system": "urn:iso:std:iso:4217",
+					"code": "USD"
+				}
+			}
+		]
+              },
+              {
+                "url": "detail",
+                "extension": [
+                  {
+                    "url": "code",
+                    "valueCodeableConcept": {
+                      "coding": [
+                        {
+                          "system": "http://hl7.org/fhir/us/davinci-crd/CodeSystem/temp",
+                          "code": "out-network-copay"
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "url": "value",
+                    "valueQuantity": {
+                      "value": 1e2,
+                      "unit": "USD",
+                      "system": "urn:iso:std:iso:4217",
+                      "code": "USD"
+                    }
+                  }
+                ]
+              },
+              {
+                "url": "date",
+                "valueDate": "2026-06-19"
+              },
+              {
+                "url": "coverage-assertion-id",
+                "valueString": "prior-auth-2026-06-19-coverage-1"
+              }
+            ]
+          },
+          {
+            "url": "http://example.org/fhir/StructureDefinition/relay-fidelity-unknown",
+            "valueString": "a payer extension the network does not know"
+          }
+        ],
+        "status": "draft",
+        "intent": "original-order",
+        "codeCodeableConcept": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "L8000"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/example"
+        },
+        "authoredOn": "2026-06-19T21:53:54+00:00",
+        "requester": {
+          "reference": "Practitioner/PractitionerExample"
+        },
+        "insurance": [
+          {
+            "reference": "Coverage/coverage-1"
+          }
+        ]
+      }
+    }
+  ],
+  "extension": {
+    "org.example.relay-fidelity": {
+      "echo": [1.50, 9007199254740993, 1e2],
+      "nested": [[], [[{}]]]
+    }
+  }
+}
