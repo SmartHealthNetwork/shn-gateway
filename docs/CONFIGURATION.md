@@ -207,8 +207,9 @@ What gets probed is derived from what you've configured — no separate list to
 maintain. `FHIR_DATA_URL` and `PAYER_DAVINCI_BASE_URL` are checked with a live
 FHIR `$metadata` fetch; `FHIR_TOKEN_URL`, `PAYER_DAVINCI_TOKEN_URL` and `PROVIDER_DTR_POPULATE_TOKEN_URL` are
 checked with a live credential fetch against your configured client; every
-other endpoint URL you've set — including the [advanced
-overrides](#advanced-overrides-rarely-needed) — is checked with a plain
+other endpoint URL you've set — the per-operation `PAYER_DAVINCI_DTR_BASE_URL` /
+`PAYER_DAVINCI_PAS_BASE_URL` and the [advanced
+overrides](#advanced-overrides-rarely-needed) included — is checked with a plain
 reachability request. `PAYER_DIRECTORY` is a local file path, not a network
 endpoint, and is never probed.
 
@@ -451,6 +452,13 @@ shared secrets).
 |---|---|
 | `PAYER_DAVINCI_BASE_URL` | Base URL of the payer's own Da Vinci endpoint (e.g. `https://api.payer.example/davinci`). **Required for `ROLE=payer`.** Every Da Vinci leg — CRD, DTR and PAS — is answered there; the gateway has no in-process payer of its own, so a `role=payer` gateway without this refuses to boot with an error naming it. |
 | `PAYER_DAVINCI_CDS_BASE_URL` | Base URL for the partner's CDS Hooks (CRD) posts when they are **not** co-located with the FHIR base — e.g. a payer that serves `/cds-services` at the root but FHIR ops under `/fhir`. Empty ⇒ CDS uses `PAYER_DAVINCI_BASE_URL`. |
+| `PAYER_DAVINCI_DTR_BASE_URL` | Base URL for the partner's DTR operations (`/Questionnaire/$questionnaire-package`, `/Questionnaire/$next-question`) when they are **not** co-located with the PAS base — e.g. a payer that serves DTR under `/dtr` and PAS under `/pas`. Empty ⇒ DTR uses `PAYER_DAVINCI_BASE_URL`. Requires `PAYER_DAVINCI_BASE_URL`. |
+| `PAYER_DAVINCI_PAS_BASE_URL` | Base URL for the partner's PAS operations (`/Claim/$submit` for submit and update) when they are **not** co-located with the DTR base. Empty ⇒ PAS uses `PAYER_DAVINCI_BASE_URL`. Requires `PAYER_DAVINCI_BASE_URL`. |
+
+**Where each operation goes.** For every forward the gateway resolves the URL in this order: the endpoint your partner publishes for that contract line in its `.well-known/davinci-configuration` (the partner's own published rule, honored only when it is same-origin with the base that contract uses), then the per-operation base if you set one, then `PAYER_DAVINCI_BASE_URL`. The per-operation bases exist for partners that split DTR and PAS across bases and publish no `.well-known/davinci-configuration`; where the partner publishes one, its endpoints win and the bases are only the fallback.
+
+| Env var | Description |
+|---|---|
 | `PAYER_DAVINCI_TOKEN_URL` | SMART Backend Services token endpoint for the partner. Required if the partner requires authentication. |
 | `PAYER_DAVINCI_CLIENT_ID` | SMART client id for the partner. Required when `PAYER_DAVINCI_TOKEN_URL` is set. |
 | `PAYER_DAVINCI_CLIENT_KEY` | Path to the SMART client's private-key PEM file (the value is a path, not the key text — mount the file into the container). Required for `private_key_jwt` mode (i.e. when `PAYER_DAVINCI_CLIENT_SECRET` is unset). |

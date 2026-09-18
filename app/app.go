@@ -172,7 +172,14 @@ type config struct {
 	// is NOT co-located with the FHIR base — e.g. br-payer serves CDS Hooks at root
 	// /cds-services but FHIR ops under /fhir. Empty ⇒ CDS uses PayerDavinciBaseURL
 	// (co-located default). FR-G28 / OWD-G8.
-	PayerDavinciCDSBaseURL   string
+	PayerDavinciCDSBaseURL string
+	// PayerDavinciDTRBaseURL / PayerDavinciPASBaseURL are the per-operation FHIR bases
+	// (PAYER_DAVINCI_DTR_BASE_URL / PAYER_DAVINCI_PAS_BASE_URL) for a partner that
+	// serves DTR and PAS from different bases. Empty ⇒ that operation uses
+	// PayerDavinciBaseURL (co-located default). Either set without the shared base is
+	// a boot error: the fallback must always exist.
+	PayerDavinciDTRBaseURL   string
+	PayerDavinciPASBaseURL   string
 	PayerDavinciTokenURL     string
 	PayerDavinciClientID     string
 	PayerDavinciClientKey    string
@@ -426,6 +433,8 @@ func loadConfig(getenv func(string) string) (config, error) {
 
 		PayerDavinciBaseURL:           getenv("PAYER_DAVINCI_BASE_URL"),
 		PayerDavinciCDSBaseURL:        getenv("PAYER_DAVINCI_CDS_BASE_URL"),
+		PayerDavinciDTRBaseURL:        getenv("PAYER_DAVINCI_DTR_BASE_URL"),
+		PayerDavinciPASBaseURL:        getenv("PAYER_DAVINCI_PAS_BASE_URL"),
 		PayerDavinciTokenURL:          getenv("PAYER_DAVINCI_TOKEN_URL"),
 		PayerDavinciClientID:          getenv("PAYER_DAVINCI_CLIENT_ID"),
 		PayerDavinciClientKey:         getenv("PAYER_DAVINCI_CLIENT_KEY"),
@@ -579,6 +588,18 @@ func loadConfig(getenv func(string) string) (config, error) {
 			if len(tok) < 3 || len(tok) > 48 || !contractVersionTokenRe.MatchString(tok) {
 				return config{}, fmt.Errorf("gateway: PAYER_DAVINCI_CONTRACT_VERSIONS token %q must match <contract>@<line> (e.g. pa.pas@2.0)", tok)
 			}
+		}
+	}
+
+	// Per-operation bases are overrides of PAYER_DAVINCI_BASE_URL, never a
+	// replacement for it: the shared base is the fallback every other forward and the
+	// well-known probe use, so a per-operation base without it is a boot error.
+	for _, pair := range [][2]string{
+		{"PAYER_DAVINCI_DTR_BASE_URL", cfg.PayerDavinciDTRBaseURL},
+		{"PAYER_DAVINCI_PAS_BASE_URL", cfg.PayerDavinciPASBaseURL},
+	} {
+		if pair[1] != "" && cfg.PayerDavinciBaseURL == "" {
+			return config{}, fmt.Errorf("gateway: %s set requires PAYER_DAVINCI_BASE_URL", pair[0])
 		}
 	}
 
@@ -806,6 +827,8 @@ func optionalURLs(cfg config) [][2]string {
 		{"REGISTRAR_URL", cfg.RegistrarURL},
 		{"FHIR_TOKEN_URL", cfg.FHIRTokenURL},
 		{"PAYER_DAVINCI_BASE_URL", cfg.PayerDavinciBaseURL},
+		{"PAYER_DAVINCI_DTR_BASE_URL", cfg.PayerDavinciDTRBaseURL},
+		{"PAYER_DAVINCI_PAS_BASE_URL", cfg.PayerDavinciPASBaseURL},
 		{"PAYER_DAVINCI_TOKEN_URL", cfg.PayerDavinciTokenURL},
 		{"PROVIDER_DTR_POPULATE_URL", cfg.ProviderDTRPopulateURL},
 		{"PROVIDER_DTR_POPULATE_TOKEN_URL", cfg.ProviderDTRPopulateTokenURL},
@@ -1492,6 +1515,8 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		// arm and the rest to an in-process fallback is deleted — §3.2).
 		nativeOpts := []engine.NativeOption{
 			engine.WithCDSBaseURL(cfg.PayerDavinciCDSBaseURL),
+			engine.WithDTRBaseURL(cfg.PayerDavinciDTRBaseURL),
+			engine.WithPASBaseURL(cfg.PayerDavinciPASBaseURL),
 			engine.WithCRDDispatchService(cfg.PayerDavinciDispatchServiceID),
 			engine.WithDeclaredContractVersions(cfg.PayerDavinciContractVersions),
 			// The foreign-peer filter's OWN half is this deployment's declared

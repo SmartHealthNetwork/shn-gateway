@@ -36,6 +36,14 @@ type nativeResponder struct {
 	client     *http.Client
 	baseURL    string // FHIR base ($questionnaire-package, $submit, CoverageEligibilityRequest)
 	cdsBaseURL string // CDS Hooks base (/cds-services/{id}); defaults to baseURL when co-located
+	// dtrBaseURL / pasBaseURL are the per-operation FHIR bases for a partner
+	// that serves DTR (/Questionnaire/$questionnaire-package, $next-question)
+	// and PAS (/Claim/$submit) from different bases. Empty ⇒ that operation uses
+	// baseURL (dtrBase/pasBase apply the fallback) — the byte-identical fallback
+	// every deployment that sets neither relies on. Published endpoint
+	// evidence (resolvedURL) still takes precedence over either.
+	dtrBaseURL string
+	pasBaseURL string
 	// crdServiceID and crdDispatchServiceID optionally name the partner's CDS service
 	// for the order-select and order-dispatch legs; empty selects the listed service
 	// whose hook is the request's hook (crdservice.go). Either way the service must be
@@ -135,6 +143,30 @@ func WithCDSBaseURL(cdsBaseURL string) NativeOption {
 	return func(n *nativeResponder) {
 		if cdsBaseURL != "" {
 			n.cdsBaseURL = cdsBaseURL
+		}
+	}
+}
+
+// WithDTRBaseURL overrides the base used for the DTR forwards
+// (/Questionnaire/$questionnaire-package and $next-question), for partners whose DTR
+// endpoint is NOT co-located with their PAS/FHIR base. Unset ⇒ DTR posts use
+// the FHIR baseURL (co-located default, the prior behavior).
+func WithDTRBaseURL(dtrBaseURL string) NativeOption {
+	return func(n *nativeResponder) {
+		if dtrBaseURL != "" {
+			n.dtrBaseURL = dtrBaseURL
+		}
+	}
+}
+
+// WithPASBaseURL overrides the base used for the PAS forwards (/Claim/$submit for
+// submit and update; a later PAS operation belongs here too), for partners whose PAS
+// endpoint is NOT co-located with their DTR/FHIR base. Unset ⇒ PAS posts use
+// the FHIR baseURL (co-located default, the prior behavior).
+func WithPASBaseURL(pasBaseURL string) NativeOption {
+	return func(n *nativeResponder) {
+		if pasBaseURL != "" {
+			n.pasBaseURL = pasBaseURL
 		}
 	}
 }
@@ -267,7 +299,13 @@ func NewNativeResponder(client *http.Client, baseURL, crdServiceID string, store
 // base.
 //
 // SAME-ORIGIN TRUST RULE (binding project ruling): an entry is honored IFF its
-// scheme+host+port equal n.baseURL's. A probe-published cross-origin
+// scheme+host+port equal those of the base ITS CONTRACT forwards to
+// (contractBase: the DTR base for pa.dtr, the PAS base for pa.pas, the
+// shared base otherwise — each of which IS the shared base unless a
+// per-operation base is configured). Judged per contract base, never
+// the shared base alone: a split-base partner must not be fenced out of its
+// own published DTR endpoint (TestEndpointEvidenceFenceJudgedPerContractBase).
+// A probe-published cross-origin
 // endpoint is NEVER a target a PHI-bearing submission follows — a
 // misconfigured or compromised davinci-configuration document must not be
 // able to redirect traffic off the operator-configured partner.
@@ -276,9 +314,10 @@ func NewNativeResponder(client *http.Client, baseURL, crdServiceID string, store
 // endpointEvidenceObserver (TestEndpointEvidenceSameOriginEnforced is the
 // rejection test).
 func (n *nativeResponder) SetEndpointEvidence(evidence map[string]string) {
-	baseOrigin, baseOK := originOf(n.baseURL)
 	kept := make(map[string]string, len(evidence))
 	for tok, u := range evidence {
+		contract, _, _ := strings.Cut(tok, "@")
+		baseOrigin, baseOK := originOf(n.contractBase(contract))
 		entryOrigin, ok := originOf(u)
 		if !baseOK || !ok || entryOrigin != baseOrigin {
 			if n.endpointEvidenceObserver != nil {
@@ -360,6 +399,40 @@ func redactURLForLog(raw string) string {
 		return origin
 	}
 	return "(unparseable)"
+}
+
+// dtrBase / pasBase are the per-operation bases with their fallback applied:
+// the configured DTR/PAS base when set, the shared base otherwise. Every DTR
+// and PAS forward reads through these (never the raw fields), so a responder
+// built without the constructor defaults still forwards to the shared base.
+func (n *nativeResponder) dtrBase() string {
+	if n.dtrBaseURL != "" {
+		return n.dtrBaseURL
+	}
+	return n.baseURL
+}
+
+func (n *nativeResponder) pasBase() string {
+	if n.pasBaseURL != "" {
+		return n.pasBaseURL
+	}
+	return n.baseURL
+}
+
+// contractBase is the configured base a contract's operations forward to: the
+// DTR base for pa.dtr, the PAS base for pa.pas, the shared base for everything
+// else. Each per-operation base defaults to the shared base, so a
+// deployment that sets neither resolves every contract to baseURL exactly as
+// before. It is the base the same-origin fence judges evidence against AND the
+// fallback resolvedURL appends the operation path to.
+func (n *nativeResponder) contractBase(contract string) string {
+	switch contract {
+	case "pa.dtr":
+		return n.dtrBase()
+	case "pa.pas":
+		return n.pasBase()
+	}
+	return n.baseURL
 }
 
 // resolvedURL is the per-line endpoint resolution: the post URL for a leg
@@ -496,7 +569,7 @@ func (n *nativeResponder) Handle(ctx context.Context, leg, corrID, subjectPCI st
 			if err != nil {
 				return LegResult{}, err // marshal fault → 500 (gateway fault)
 			}
-			nqURL := n.resolvedURL(ctx, contract, n.baseURL, "/Questionnaire/$next-question")
+			nqURL := n.resolvedURL(ctx, contract, n.dtrBase(), "/Questionnaire/$next-question")
 			up, bad, err := n.post(ctx, nqURL, "", sealRequest(relay.BuilderInterimDTRProjection, params, "application/fhir+json"), leg, "DTR next-question")
 			if err != nil {
 				return LegResult{}, err // no-response fault → engine 500 → "hub routing failed"
@@ -530,7 +603,7 @@ func (n *nativeResponder) Handle(ctx context.Context, leg, corrID, subjectPCI st
 		// Endpoint evidence: prefer the probe-retained, same-origin-validated
 		// #<line> endpoint for THIS routed line over the configured base+path (evidence absent
 		// ⇒ unchanged base+path, the fence).
-		dtrURL := n.resolvedURL(ctx, contract, n.baseURL, "/Questionnaire/$questionnaire-package")
+		dtrURL := n.resolvedURL(ctx, contract, n.dtrBase(), "/Questionnaire/$questionnaire-package")
 		up, bad, err := n.post(ctx, dtrURL, "", sealRequest(relay.BuilderInterimDTRProjection, params, "application/fhir+json"), leg, "DTR")
 		if err != nil {
 			return LegResult{}, err // no-response fault → engine 500 → "hub routing failed"
@@ -598,7 +671,7 @@ func (n *nativeResponder) forwardDTROperation(ctx context.Context, contract stri
 		}
 		request = mapped
 	}
-	up, bad, err := n.post(ctx, n.resolvedURL(ctx, contract, n.baseURL, path), "", request, leg, label)
+	up, bad, err := n.post(ctx, n.resolvedURL(ctx, contract, n.dtrBase(), path), "", request, leg, label)
 	if err != nil {
 		return LegResult{}, err // no-response fault → engine 500 → "hub routing failed"
 	}

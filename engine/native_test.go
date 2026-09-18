@@ -641,3 +641,137 @@ func TestNativeStrictExtensionsFieldIsDormant(t *testing.T) {
 		t.Fatalf("WithStrictExtensions must be dormant (byte-identical): off=%+v on=%+v", resOff, resOn)
 	}
 }
+
+// TestNativeResponder_PerOperationBases: a partner that serves CRD,
+// DTR and PAS from three different bases is addressed natively — CRD posts
+// to the CDS base, DTR to the DTR base, PAS to the PAS base — and a partner
+// that sets neither per-operation base keeps every FHIR operation on the
+// shared base (the byte-identical fallback every existing deployment relies
+// on). Four httptest servers stand in for the four bases.
+func TestNativeResponder_PerOperationBases(t *testing.T) {
+	newBase := func(t *testing.T, body string) (*httptest.Server, *string) {
+		t.Helper()
+		var path string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodGet && r.URL.Path == "/cds-services" {
+				_ = json.NewEncoder(w).Encode(map[string]any{"services": stubCDSServices})
+				return
+			}
+			path = r.URL.Path
+			w.Header().Set("Content-Type", "application/fhir+json")
+			_, _ = w.Write([]byte(body))
+		}))
+		t.Cleanup(srv.Close)
+		return srv, &path
+	}
+	const pkg = `{"resourceType":"Bundle","type":"collection","entry":[]}`
+	conformant := originatorBuiltConformantBundle(t, "MBR-COVERED")
+	pasAnswer := string(fixturePASResponse(t, []byte(`{"resourceType":"ClaimResponse","outcome":"complete","preAuthRef":"REF-1","preAuthPeriod":{"end":"2030-01-01"}}`), true))
+
+	t.Run("three bases: each operation lands on its own", func(t *testing.T) {
+		shared, sharedPath := newBase(t, pkg)
+		cds, cdsPath := newBase(t, `{"cards":[],"systemActions":[]}`)
+		dtr, dtrPath := newBase(t, pkg)
+		pas, pasPath := newBase(t, pasAnswer)
+		n := NewNativeResponder(shared.Client(), shared.URL, "order-sign-crd", newCensusSoR(), fixedClock,
+			WithCDSBaseURL(cds.URL), WithDTRBaseURL(dtr.URL), WithPASBaseURL(pas.URL))
+
+		_, _ = n.Handle(context.Background(), "crd-order-select", "c", "p",
+			[]byte(`{"hook":"order-sign","context":{"patientId":"x"}}`))
+		if *cdsPath != "/cds-services/order-sign-crd" {
+			t.Errorf("CRD path on the CDS base = %q, want /cds-services/order-sign-crd", *cdsPath)
+		}
+		if _, err := n.Handle(context.Background(), "dtr-questionnaire-fetch", "c", "p", dtrFetchReq); err != nil {
+			t.Fatalf("DTR Handle: %v", err)
+		}
+		if *dtrPath != "/Questionnaire/$questionnaire-package" {
+			t.Errorf("DTR path on the DTR base = %q, want /Questionnaire/$questionnaire-package", *dtrPath)
+		}
+		res, err := n.Handle(context.Background(), "pas-claim", "c", "PCI-1", conformant)
+		if err != nil || res.Status != 0 {
+			t.Fatalf("PAS Handle: err=%v status=%d msg=%s", err, res.Status, res.Message)
+		}
+		if *pasPath != "/Claim/$submit" {
+			t.Errorf("PAS path on the PAS base = %q, want /Claim/$submit", *pasPath)
+		}
+		if *sharedPath != "" {
+			t.Errorf("the shared base received %q; with all three bases set it must receive nothing", *sharedPath)
+		}
+	})
+
+	t.Run("neither per-operation base set: DTR and PAS stay on the shared base", func(t *testing.T) {
+		shared, sharedPath := newBase(t, pkg)
+		n := NewNativeResponder(shared.Client(), shared.URL, "order-sign-crd", newCensusSoR(), fixedClock,
+			WithDTRBaseURL(""), WithPASBaseURL(""))
+		if _, err := n.Handle(context.Background(), "dtr-questionnaire-fetch", "c", "p", dtrFetchReq); err != nil {
+			t.Fatalf("DTR Handle: %v", err)
+		}
+		if *sharedPath != "/Questionnaire/$questionnaire-package" {
+			t.Errorf("DTR path on the shared base = %q, want /Questionnaire/$questionnaire-package", *sharedPath)
+		}
+	})
+}
+
+// TestEndpointEvidenceFenceJudgedPerContractBase (the rejection row
+// for the per-operation bases): the same-origin trust rule fences each
+// published endpoint against the base ITS contract forwards to, never
+// against the shared base alone. Otherwise a split-base partner's own DTR
+// endpoint (same origin as the DTR base, a different origin from the shared
+// base) would be dropped as "cross-origin" and the partner fenced out of its
+// own published rule — while an entry on the shared base's origin, which the
+// DTR forward never uses, would be honored for DTR.
+func TestEndpointEvidenceFenceJudgedPerContractBase(t *testing.T) {
+	pkg := []byte(`{"resourceType":"Bundle","type":"collection","entry":[]}`)
+	shared := newStubPartner(t) // the shared base: PAS lives here
+	dtr := newStubPartner(t)    // the DTR base: a different origin
+	dtr.respByPath["/Questionnaire/$questionnaire-package-v22"] = pkg
+	dtr.respByPath["/Questionnaire/$questionnaire-package"] = pkg
+	shared.respByPath["/Questionnaire/$questionnaire-package-v22"] = pkg
+
+	var notes []string
+	n := NewNativeResponder(shared.srv.Client(), shared.srv.URL, "shn-order-select", nil, nil,
+		WithDTRBaseURL(dtr.srv.URL),
+		WithEndpointEvidenceObserver(func(note string) { notes = append(notes, note) }))
+
+	t.Run("a DTR entry on the DTR base's origin is kept, and the published endpoint beats the configured base+path", func(t *testing.T) {
+		notes = nil
+		n.SetEndpointEvidence(map[string]string{"pa.dtr@2.2": dtr.srv.URL + "/Questionnaire/$questionnaire-package-v22"})
+		if len(notes) != 0 {
+			t.Fatalf("the partner's own DTR endpoint was dropped: %v", notes)
+		}
+		ctx := withAnswerLine(context.Background(), "pa.dtr@2.2")
+		if _, err := n.Handle(ctx, "dtr-questionnaire-fetch", "corr", "pci", dtrFetchReq); err != nil {
+			t.Fatalf("Handle: %v", err)
+		}
+		if dtr.lastPath != "/Questionnaire/$questionnaire-package-v22" {
+			t.Fatalf("DTR base lastPath = %q, want the published #2.2 endpoint", dtr.lastPath)
+		}
+	})
+
+	t.Run("a DTR entry on the shared base's origin is dropped: the DTR forward never goes there", func(t *testing.T) {
+		notes = nil
+		dtr.lastPath, shared.lastPath = "", ""
+		n.SetEndpointEvidence(map[string]string{"pa.dtr@2.2": shared.srv.URL + "/Questionnaire/$questionnaire-package-v22"})
+		if len(notes) != 1 {
+			t.Fatalf("want exactly one drop note, got %d: %v", len(notes), notes)
+		}
+		ctx := withAnswerLine(context.Background(), "pa.dtr@2.2")
+		if _, err := n.Handle(ctx, "dtr-questionnaire-fetch", "corr", "pci", dtrFetchReq); err != nil {
+			t.Fatalf("Handle: %v", err)
+		}
+		if shared.lastPath != "" {
+			t.Fatalf("the shared base received a DTR forward at %q — the dropped entry was selected", shared.lastPath)
+		}
+		if dtr.lastPath != "/Questionnaire/$questionnaire-package" {
+			t.Fatalf("DTR base lastPath = %q, want the configured DTR base+path fallback", dtr.lastPath)
+		}
+	})
+
+	t.Run("a PAS entry on the shared base's origin is still kept (PAS base unset ⇒ shared)", func(t *testing.T) {
+		notes = nil
+		n.SetEndpointEvidence(map[string]string{"pa.pas@2.2": shared.srv.URL + "/Claim/$submit-v22"})
+		if len(notes) != 0 {
+			t.Fatalf("a PAS entry on the shared base was dropped: %v", notes)
+		}
+	})
+}

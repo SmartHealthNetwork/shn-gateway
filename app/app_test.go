@@ -1931,3 +1931,92 @@ func TestStorePoolConfig_SizingAndConnectBound(t *testing.T) {
 		t.Errorf("unparsable DSN error = %v, want one naming SHN_STORE_DATABASE_URL", err)
 	}
 }
+
+// TestLoadConfig_PayerDavinciPerOperationBases: the per-operation
+// DTR/PAS bases are OVERRIDES of PAYER_DAVINCI_BASE_URL — parsed when set,
+// empty by default (the responder falls back to the shared base), and a boot
+// error when either is set without the shared base they fall back to. A
+// malformed value fails the same well-formedness loop every URL field rides.
+func TestLoadConfig_PayerDavinciPerOperationBases(t *testing.T) {
+	base := map[string]string{
+		"ROLE": "payer", "SHN_SECRETS": "/x", "SHN_DISCOVERY_URL": "https://d",
+		"PAYER_DAVINCI_BASE_URL": "https://payer.example/pas",
+	}
+	load := func(extra map[string]string) (config, error) {
+		env := map[string]string{}
+		for k, v := range base {
+			env[k] = v
+		}
+		for k, v := range extra {
+			env[k] = v
+		}
+		return loadConfig(func(k string) string { return env[k] })
+	}
+
+	cfg, err := load(map[string]string{
+		"PAYER_DAVINCI_DTR_BASE_URL": "https://payer.example/dtr",
+		"PAYER_DAVINCI_PAS_BASE_URL": "https://payer.example/pas/v2",
+	})
+	if err != nil {
+		t.Fatalf("both set: %v", err)
+	}
+	if cfg.PayerDavinciDTRBaseURL != "https://payer.example/dtr" || cfg.PayerDavinciPASBaseURL != "https://payer.example/pas/v2" {
+		t.Fatalf("parsed = %q / %q", cfg.PayerDavinciDTRBaseURL, cfg.PayerDavinciPASBaseURL)
+	}
+
+	cfg, err = load(nil)
+	if err != nil {
+		t.Fatalf("neither set: %v", err)
+	}
+	if cfg.PayerDavinciDTRBaseURL != "" || cfg.PayerDavinciPASBaseURL != "" {
+		t.Fatalf("unset bases must stay empty (the responder owns the fallback), got %q / %q", cfg.PayerDavinciDTRBaseURL, cfg.PayerDavinciPASBaseURL)
+	}
+
+	for _, key := range []string{"PAYER_DAVINCI_DTR_BASE_URL", "PAYER_DAVINCI_PAS_BASE_URL"} {
+		env := map[string]string{
+			"ROLE": "provider", "SHN_SECRETS": "/x", "SHN_DISCOVERY_URL": "https://d",
+			key: "https://payer.example/split",
+		}
+		if _, err := loadConfig(func(k string) string { return env[k] }); err == nil || !strings.Contains(err.Error(), key+" set requires PAYER_DAVINCI_BASE_URL") {
+			t.Fatalf("%s without the shared base: want base-required boot error, got %v", key, err)
+		}
+		if _, err := load(map[string]string{key: "not a url"}); err == nil || !strings.Contains(err.Error(), key) {
+			t.Fatalf("%s malformed: want well-formedness boot error naming it, got %v", key, err)
+		}
+	}
+}
+
+// TestCheckTargets_PayerDavinciPerOperationBases: a configured
+// per-operation base is probed as a plain reachability target (the one-table
+// rule: it rides optionalURLs, so it is boot-validated AND probed), and an
+// unset one is not a target at all. The well-known probe stays derived from
+// the shared base only.
+func TestCheckTargets_PayerDavinciPerOperationBases(t *testing.T) {
+	find := func(targets []checks.Target, id string) (checks.Target, bool) {
+		for _, tgt := range targets {
+			if tgt.ID == id {
+				return tgt, true
+			}
+		}
+		return checks.Target{}, false
+	}
+	cfg := config{
+		PayerDavinciBaseURL:    "https://payer.example/pas",
+		PayerDavinciDTRBaseURL: "https://payer.example/dtr",
+	}
+	targets := checkTargets(cfg)
+	dtr, ok := find(targets, "PAYER_DAVINCI_DTR_BASE_URL")
+	if !ok {
+		t.Fatal("PAYER_DAVINCI_DTR_BASE_URL target missing")
+	}
+	if dtr.Kind != checks.KindReachable || dtr.URL != cfg.PayerDavinciDTRBaseURL {
+		t.Fatalf("DTR base target = %+v, want reachable probe of %s", dtr, cfg.PayerDavinciDTRBaseURL)
+	}
+	if _, ok := find(targets, "PAYER_DAVINCI_PAS_BASE_URL"); ok {
+		t.Fatal("PAYER_DAVINCI_PAS_BASE_URL target present while unset")
+	}
+	wellKnown, ok := find(targets, "PAYER_DAVINCI_WELL_KNOWN")
+	if !ok || wellKnown.URL != cfg.PayerDavinciBaseURL {
+		t.Fatalf("well-known target = %+v, want derived from the shared base only", wellKnown)
+	}
+}
