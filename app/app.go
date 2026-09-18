@@ -52,6 +52,12 @@ import (
 // SHN_MANIFEST path of the substrate cmd/gateway is intentionally dropped — the
 // public binary is partner-path only.
 type config struct {
+	// tokenNotes receives the outbound token clients' departure notes
+	// (smartauth.Config.Observer: a partner authorization server read as sent
+	// but out of specification). Set by build() to the operator-visible
+	// "gateway: ..." stdout line; nil (tests, loadConfig alone) ⇒ silent.
+	tokenNotes func(note string)
+
 	Role         string
 	Addr         string
 	SecretsDir   string
@@ -944,7 +950,7 @@ func classifyTokenErr(err error) error {
 // against the partner IdP — it, not caching here, is the partner-lockout
 // guard.
 func fhirTokenFetch(cfg config) func(context.Context) error {
-	sc := smartauth.Config{TokenURL: cfg.FHIRTokenURL, ClientID: cfg.FHIRClientID, Scope: cfg.FHIRClientScope}
+	sc := smartauth.Config{TokenURL: cfg.FHIRTokenURL, ClientID: cfg.FHIRClientID, Scope: cfg.FHIRClientScope, Observer: cfg.tokenNotes}
 	if cfg.FHIRClientSecret != "" {
 		sc.ClientSecret = cfg.FHIRClientSecret
 	} else {
@@ -963,7 +969,7 @@ func fhirTokenFetch(cfg config) func(context.Context) error {
 // mirroring payerDavinciHTTPClient's Config construction. Same fresh-
 // TokenSource-per-invocation rule applies (see fhirTokenFetch's doc).
 func payerDavinciTokenFetch(cfg config) func(context.Context) error {
-	sc := smartauth.Config{TokenURL: cfg.PayerDavinciTokenURL, ClientID: cfg.PayerDavinciClientID, Scope: cfg.PayerDavinciScope}
+	sc := smartauth.Config{TokenURL: cfg.PayerDavinciTokenURL, ClientID: cfg.PayerDavinciClientID, Scope: cfg.PayerDavinciScope, Observer: cfg.tokenNotes}
 	if cfg.PayerDavinciClientSecret != "" {
 		sc.ClientSecret = cfg.PayerDavinciClientSecret
 	} else {
@@ -982,7 +988,7 @@ func payerDavinciTokenFetch(cfg config) func(context.Context) error {
 // counterpart, mirroring providerDTRPopulateHTTPClient's Config construction.
 // Same fresh-TokenSource-per-invocation rule applies (see fhirTokenFetch's doc).
 func providerDTRPopulateTokenFetch(cfg config) func(context.Context) error {
-	sc := smartauth.Config{TokenURL: cfg.ProviderDTRPopulateTokenURL, ClientID: cfg.ProviderDTRPopulateClientID, Scope: cfg.ProviderDTRPopulateScope}
+	sc := smartauth.Config{TokenURL: cfg.ProviderDTRPopulateTokenURL, ClientID: cfg.ProviderDTRPopulateClientID, Scope: cfg.ProviderDTRPopulateScope, Observer: cfg.tokenNotes}
 	if cfg.ProviderDTRPopulateClientSecret != "" {
 		sc.ClientSecret = cfg.ProviderDTRPopulateClientSecret
 	} else {
@@ -1224,6 +1230,7 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	if err != nil {
 		return b, err
 	}
+	cfg.tokenNotes = func(note string) { fmt.Fprintf(stdout, "gateway: %s\n", note) }
 
 	// Identity bundle (shn register / Init output) — recovers HolderID from manifest.json.
 	bundle, err := shnsdk.LoadBundle(cfg.SecretsDir)
@@ -2052,6 +2059,7 @@ func fhirHTTPClient(cfg config) (*http.Client, error) {
 	}
 	sc := smartauth.Config{
 		TokenURL: cfg.FHIRTokenURL, ClientID: cfg.FHIRClientID, Scope: cfg.FHIRClientScope,
+		Observer: cfg.tokenNotes,
 	}
 	if cfg.FHIRClientSecret != "" {
 		sc.ClientSecret = cfg.FHIRClientSecret // client_secret_post; no key material
@@ -2080,6 +2088,7 @@ func payerDavinciHTTPClient(cfg config) (*http.Client, error) {
 	}
 	sc := smartauth.Config{
 		TokenURL: cfg.PayerDavinciTokenURL, ClientID: cfg.PayerDavinciClientID, Scope: cfg.PayerDavinciScope,
+		Observer: cfg.tokenNotes,
 	}
 	if cfg.PayerDavinciClientSecret != "" {
 		sc.ClientSecret = cfg.PayerDavinciClientSecret // client_secret_post; no key material
@@ -2111,6 +2120,7 @@ func providerDTRPopulateHTTPClient(cfg config) (*http.Client, error) {
 	}
 	sc := smartauth.Config{
 		TokenURL: cfg.ProviderDTRPopulateTokenURL, ClientID: cfg.ProviderDTRPopulateClientID, Scope: cfg.ProviderDTRPopulateScope,
+		Observer: cfg.tokenNotes,
 	}
 	if cfg.ProviderDTRPopulateClientSecret != "" {
 		sc.ClientSecret = cfg.ProviderDTRPopulateClientSecret // client_secret_post; no key material

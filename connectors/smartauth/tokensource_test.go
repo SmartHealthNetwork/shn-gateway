@@ -6,6 +6,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -205,4 +206,78 @@ func TestNewHTTPClient_ModeExclusion(t *testing.T) {
 		ClientSecret: "s"}); err != nil {
 		t.Fatalf("secret-only should construct: %v", err)
 	}
+}
+
+// TestTokenSource_ExpiresInAsString: a real partner token endpoint (Azure AD's
+// v1 issuer behind a payer's proxy) answers `"expires_in":"3599"` as a JSON
+// string. RFC 6749 says number, but the partner's bytes are what they are and
+// the gateway must read them: the value is accepted and used as the TTL. A
+// string that is not a number is still a decode error naming the field (the
+// rejection row), and a missing/zero value still falls back to the default TTL.
+func TestTokenSource_ExpiresInAsString(t *testing.T) {
+	now := time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)
+	serve := func(t *testing.T, body string) *TokenSource {
+		t.Helper()
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, body)
+		}))
+		t.Cleanup(srv.Close)
+		return &TokenSource{Config: Config{
+			TokenURL: srv.URL, ClientID: "gw-payer", ClientSecret: "s3cret",
+			Clock: testClock(now), HTTPClient: srv.Client(),
+		}}
+	}
+
+	t.Run("numeric string is accepted as the TTL and the departure is reported once", func(t *testing.T) {
+		ts := serve(t, `{"token_type":"Bearer","expires_in":"3599","access_token":"AT-STR"}`)
+		var notes []string
+		ts.Observer = func(note string) { notes = append(notes, note) }
+		for i := 0; i < 2; i++ {
+			tok, ttl, err := ts.fetch(context.Background())
+			if err != nil {
+				t.Fatalf("fetch: %v", err)
+			}
+			if tok != "AT-STR" || ttl != 3599*time.Second {
+				t.Fatalf("token=%q ttl=%s, want AT-STR / 3599s", tok, ttl)
+			}
+		}
+		if len(notes) != 1 {
+			t.Fatalf("want exactly one departure note across two fetches, got %d: %v", len(notes), notes)
+		}
+		if !strings.Contains(notes[0], "expires_in") || !strings.Contains(notes[0], "JSON string") || strings.Contains(notes[0], "s3cret") || strings.Contains(notes[0], "AT-STR") {
+			t.Fatalf("note must name the departure and carry no secret or token: %q", notes[0])
+		}
+	})
+
+	t.Run("a numeric expires_in reports nothing", func(t *testing.T) {
+		ts := serve(t, `{"access_token":"AT-NUM","expires_in":300}`)
+		ts.Observer = func(note string) { t.Errorf("unexpected note for a conformant response: %q", note) }
+		if _, _, err := ts.fetch(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("number still works", func(t *testing.T) {
+		ts := serve(t, `{"access_token":"AT-NUM","expires_in":300}`)
+		_, ttl, err := ts.fetch(context.Background())
+		if err != nil || ttl != 300*time.Second {
+			t.Fatalf("ttl=%s err=%v, want 300s", ttl, err)
+		}
+	})
+
+	t.Run("absent falls back to the default TTL", func(t *testing.T) {
+		ts := serve(t, `{"access_token":"AT-NONE"}`)
+		_, ttl, err := ts.fetch(context.Background())
+		if err != nil || ttl != defaultAssertionTTL {
+			t.Fatalf("ttl=%s err=%v, want default", ttl, err)
+		}
+	})
+
+	t.Run("non-numeric string is refused, naming expires_in", func(t *testing.T) {
+		ts := serve(t, `{"access_token":"AT-BAD","expires_in":"soon"}`)
+		if _, _, err := ts.fetch(context.Background()); err == nil || !strings.Contains(err.Error(), "expires_in") {
+			t.Fatalf("want decode error naming expires_in, got %v", err)
+		}
+	})
 }

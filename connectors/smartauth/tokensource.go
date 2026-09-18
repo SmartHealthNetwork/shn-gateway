@@ -20,6 +20,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -50,6 +51,13 @@ type Config struct {
 	RefreshSkew  time.Duration    // re-mint when within this of expiry; default 60s
 	Clock        func() time.Time // default time.Now
 	HTTPClient   *http.Client     // default a 10s-timeout client
+	// Observer, when set, receives one redaction-safe note per TokenSource the
+	// first time the authorization server departs from RFC 6749 in a way the
+	// client absorbs (today: expires_in sent as a JSON string). The departure is
+	// read as sent either way; the note is how an operator learns the peer is
+	// out of specification instead of that being silently absorbed forever.
+	// nil ⇒ silent.
+	Observer func(note string)
 }
 
 func (c Config) clock() time.Time {
@@ -96,6 +104,7 @@ type TokenSource struct {
 	acquiring chan struct{}
 	cached    string
 	exp       time.Time
+	noted     sync.Once // Observer fires once per TokenSource, not per refresh
 }
 
 // Token returns a bearer valid for at least RefreshSkew, minting a fresh one if
@@ -187,8 +196,8 @@ func (s *TokenSource) fetch(ctx context.Context) (token string, ttl time.Duratio
 		return "", 0, fmt.Errorf("smartauth: oversized token response")
 	}
 	var tr struct {
-		AccessToken string `json:"access_token"`
-		ExpiresIn   int    `json:"expires_in"`
+		AccessToken string    `json:"access_token"`
+		ExpiresIn   expiresIn `json:"expires_in"`
 	}
 	if err := json.Unmarshal(body, &tr); err != nil {
 		return "", 0, fmt.Errorf("smartauth: decode token response: %w", err)
@@ -196,11 +205,56 @@ func (s *TokenSource) fetch(ctx context.Context) (token string, ttl time.Duratio
 	if tr.AccessToken == "" {
 		return "", 0, fmt.Errorf("smartauth: empty access_token")
 	}
-	ttl = time.Duration(tr.ExpiresIn) * time.Second
+	if tr.ExpiresIn.fromString && s.Observer != nil {
+		s.noted.Do(func() {
+			s.Observer(fmt.Sprintf("smartauth: token endpoint %s returned expires_in as a JSON string; RFC 6749 §5.1 defines it as a number (read as sent)", redactTokenURL(s.TokenURL)))
+		})
+	}
+	ttl = time.Duration(tr.ExpiresIn.seconds) * time.Second
 	if ttl <= 0 {
 		ttl = defaultAssertionTTL // conservative when the server omits expires_in
 	}
 	return tr.AccessToken, ttl, nil
+}
+
+// expiresIn is the token response's expires_in lifetime in seconds. RFC 6749
+// defines it as a number, but real authorization servers answer it as a JSON
+// string too (Azure AD's v1 issuer, met behind a payer's token proxy, sends
+// "expires_in":"3599"); the partner's bytes are read as sent and the departure
+// is reported once through Config.Observer. A number or a numeric string is
+// the lifetime; absent or null is zero (the caller applies the default TTL);
+// anything else is a decode error naming the field.
+type expiresIn struct {
+	seconds    float64
+	fromString bool
+}
+
+func (e *expiresIn) UnmarshalJSON(b []byte) error {
+	raw := strings.TrimSpace(string(b))
+	if raw == "null" {
+		*e = expiresIn{}
+		return nil
+	}
+	quoted := len(raw) >= 2 && raw[0] == '"' && raw[len(raw)-1] == '"'
+	if quoted {
+		raw = strings.TrimSpace(raw[1 : len(raw)-1])
+	}
+	n, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return fmt.Errorf("expires_in: not a number of seconds: %q", string(b))
+	}
+	*e = expiresIn{seconds: n, fromString: quoted}
+	return nil
+}
+
+// redactTokenURL keeps scheme and host of the token endpoint for a note and
+// drops path, query and userinfo (a token URL can carry a tenant id in its path).
+func redactTokenURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "(unparseable)"
+	}
+	return u.Scheme + "://" + u.Host
 }
 
 func (s *TokenSource) assertion() (string, error) {
