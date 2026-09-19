@@ -110,8 +110,18 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return pendState{}, false
 	}
+	_, pasProviderJSON, pstatus, pmsg := g.pasProvider(ctx, res.srJSON)
+	if pstatus != 0 {
+		writeJSON(w, pstatus, map[string]string{"error": pmsg})
+		return pendState{}, false
+	}
+	pasMemberSystem, pstatus, pmsg := g.pasMemberSystem(res.memberSystem, res.member)
+	if pstatus != 0 {
+		writeJSON(w, pstatus, map[string]string{"error": pmsg})
+		return pendState{}, false
+	}
 	bundleJSON, err := buildAuthoredPASSubmit(route.BuildLine, shnsdk.ConformantClaimInputs{
-		QR: pasQR, SR: res.srJSON, PatientRef: res.patientRef, CoverageRef: res.coverageRef, MemberID: res.member,
+		QR: pasQR, SR: res.srJSON, Provider: pasProviderJSON, Coverage: res.coverage, Insurer: res.insurer, PatientRef: res.patientRef, CoverageRef: res.coverageRef, MemberID: res.member, MemberIDSystem: pasMemberSystem,
 		Corr: pasCorr, Created: g.cfg.Clock(),
 		ContainedInsurer: relaysReferencePayerBytes(g.cfg.OriginationProfile),
 		AbsoluteRefs:     relaysReferencePayerBytes(g.cfg.OriginationProfile),
@@ -119,7 +129,7 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 		Payer:            res.payer,
 	})
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build bundle failed"})
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build bundle failed: " + err.Error()})
 		return pendState{}, false
 	}
 	// pasReports is the pended leg's own loss record: its Carried entries are
@@ -136,11 +146,17 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return pendState{}, false
 	}
+	// This helper owns the pas-claim submit leg wholesale, on the correlation it
+	// minted above — retag rather than inherit, since every caller's own entry tag
+	// is either this same value or a different leg's (see the fix-round audit).
+	ctx = withFindingContext(ctx, findingContext{
+		LegType: "pas-claim", CorrelationID: pasCorr, Seam: "originate", Whose: "own",
+	})
 	if status, msg := g.validatePASAttachments(ctx, bundleJSON, pasDTRLine, res.qrSource != nil); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return pendState{}, false
 	}
-	if status, msg := g.validateFHIRForContract(ctx, bundleJSON, "egress", "pa.pas", targetLine, ""); status != 0 {
+	if status, msg := g.validateFHIREgressOrBridged(ctx, bundleJSON, "pa.pas", targetLine, len(route.Chain) > 0); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return pendState{}, false
 	}
@@ -153,6 +169,9 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return pendState{}, false
 	}
+	ctx = withFindingContext(ctx, findingContext{
+		LegType: "pas-claim", CorrelationID: pasCorr, Seam: "originate", Whose: "peer",
+	})
 	if status, msg := g.validateFHIRPayerIngress(ctx, pendedResp, targetLine, "pa.pas"); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return pendState{}, false
@@ -172,7 +191,10 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 		srJSON:            res.srJSON,
 		patientRef:        res.patientRef,
 		coverageRef:       res.coverageRef,
+		coverage:          res.coverage,
+		insurer:           res.insurer,
 		member:            res.member,
+		memberSystem:      res.memberSystem,
 		pci:               res.pci,
 		pasCorr:           pasCorr,
 		filled:            res.filled,
@@ -255,6 +277,9 @@ func (g *Gateway) handleUC06(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	r = r.WithContext(withFindingContext(r.Context(), findingContext{
+		LegType: "pas-claim", Seam: "originate", Whose: "own",
+	}))
 	st, ok := g.scenarioToPend(w, r, "uc06", member)
 	if !ok {
 		return
@@ -271,21 +296,28 @@ func (g *Gateway) handleUC06(w http.ResponseWriter, r *http.Request) {
 // clinician's (attestingNPI: the configured NPI, else the order's requester).
 func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st pendState, score, npi string) bool {
 	ctx := r.Context()
-	srRef := "ServiceRequest/sr-uc06" // built-order literal
+	// This helper always resumes to the pas-claim-update leg, whichever caller
+	// reached it (the single-call handleUC06 tags its own headline leg, pas-claim,
+	// at entry; handleUC06Complete already tags pas-claim-update) — retag rather
+	// than inherit, so a finding from a check below never carries the wrong leg.
+	ctx = withFindingContext(ctx, findingContext{
+		LegType: "pas-claim-update", Seam: "originate", Whose: "own",
+	})
+	// The order this authorization is about, as the participant's own system
+	// names it — the reference the approval is filed under and the one the
+	// continuation re-reads the order by. It was a per-scenario literal naming an
+	// order no system held.
+	srRef, refOK := resourceRef(st.srJSON)
+	if !refOK {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "the member's open order carries no identity in the system of record"})
+		return false
+	}
 	linkID := oswestryLinkID
 	const uc06QRID = "qr-uc06"
-	// provider-data UC-06: bind to the REAL seeded order ref (not the built-order literal) and attest
-	// the HHA's free-text functional-status item (clinician-entered manual entry), NOT the
-	// 72148/lumbar oswestry item. The attested value is operator-supplied (D-2RI-1); verdict-inert
-	// (the A4→A1 is the pend-resolution timer).
-	if g.cfg.OriginationProfile == "provider-data" {
-		ref, ok := resourceRef(st.srJSON)
-		if !ok {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "order missing id"})
-			return false
-		}
-		srRef = ref
-	}
+	// UC-06 attests the HHA's free-text functional-status item (clinician-entered
+	// manual entry), NOT the 72148/lumbar oswestry item. The attested value is
+	// operator-supplied (D-2RI-1); verdict-inert (the A4→A1 is the
+	// pend-resolution timer).
 	// Every lane whose UC-06 order is G0151 attests the HomeHealthAssessment's OWN
 	// free-text functional-status item — provider-data (a seeded order) and demo (the
 	// §4.3 family tuple) alike. The lumbar Oswestry linkId is NOT an item of that
@@ -336,13 +368,16 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 		return false
 	}
 	updateCorr := g.cfg.CorrelationGen()
+	ctx = withFindingContext(ctx, findingContext{
+		LegType: "pas-claim-update", CorrelationID: updateCorr, Seam: "originate", Whose: "own",
+	})
 	// UC-06: diagnosticReport=nil; the amended QR is the supplemental data.
 	// Resume RE-RUNS arm selection with the TARGET FIXED to the pin
 	// (selectResumeRoute): the amendment must answer
 	// the pend it references (the pended-pin rule), but the declared/lane
 	// sets may have grown since origination, so native reach can now beat a
 	// chain even at resume.
-	route, rerr := g.selectResumeRoute(st.pasToken, st.recipient)
+	route, rerr := g.selectResumeRoute(st.pasToken, st.recipient, "pas-claim-update")
 	if rerr != nil {
 		if g.relayOriginationError(w, rerr) {
 			return false
@@ -356,8 +391,18 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return false
 	}
+	_, pasProviderJSON, pstatus, pmsg := g.pasProvider(r.Context(), st.srJSON)
+	if pstatus != 0 {
+		writeJSON(w, pstatus, map[string]string{"error": pmsg})
+		return false
+	}
+	pasMemberSystem, pstatus, pmsg := g.pasMemberSystem(st.memberSystem, st.member)
+	if pstatus != 0 {
+		writeJSON(w, pstatus, map[string]string{"error": pmsg})
+		return false
+	}
 	updateBundle, err := buildAuthoredPASUpdate(route.BuildLine, shnsdk.ConformantClaimUpdateInputs{
-		QR: pasQR, SR: st.srJSON, PatientRef: st.patientRef, CoverageRef: st.coverageRef, MemberID: st.member,
+		QR: pasQR, SR: st.srJSON, Provider: pasProviderJSON, Coverage: st.coverage, Insurer: st.insurer, PatientRef: st.patientRef, CoverageRef: st.coverageRef, MemberID: st.member, MemberIDSystem: pasMemberSystem,
 		Provenance: provJSON, DiagnosticReport: nil, Corr: updateCorr, OriginalCorr: st.pasCorr, Created: g.cfg.Clock(),
 		ContainedInsurer: relaysReferencePayerBytes(g.cfg.OriginationProfile),
 		AbsoluteRefs:     relaysReferencePayerBytes(g.cfg.OriginationProfile),
@@ -389,7 +434,7 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 		writeJSON(w, status, map[string]string{"error": msg})
 		return false
 	}
-	if status, msg := g.validateFHIRForContract(ctx, updateBundle, "egress", "pa.pas", targetLine, ""); status != 0 {
+	if status, msg := g.validateFHIREgressOrBridged(ctx, updateBundle, "pa.pas", targetLine, len(route.Chain) > 0); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return false
 	}
@@ -402,23 +447,40 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return false
 	}
+	ctx = withFindingContext(ctx, findingContext{
+		LegType: "pas-claim-update", CorrelationID: updateCorr, Seam: "originate", Whose: "peer",
+	})
 	if status, msg := g.validateFHIRPayerIngress(ctx, updateResp, targetLine, "pa.pas"); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return false
 	}
-	// The amendment resolves to a genuine terminal A1 (the payer-gw polled
-	// br-payer's timer A4→A1). UC-06's distinctive is DTR fill + clinician attestation → Attested.
-	// AmendmentCorr is the evidence the attestation re-POST leg ran.
-	parsed, approved := g.classifyResolution(updateResp)
-	if !approved {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "preauthorization not approved after amendment"})
+	// The payer's answer to the amendment is reported as the payer gave it. UC-06's
+	// distinctive is DTR fill + clinician attestation → Attested. AmendmentCorr is the
+	// evidence the attestation re-POST leg ran. A re-pend is answered with its
+	// continuation, which the caller continues rather than being told the request failed.
+	wait, waitOK := pasWaitOf(r)
+	if !waitOK {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "wait must be a whole number of seconds"})
 		return false
 	}
-	if err := g.cfg.Store.StoreAuthNumber(srRef, parsed.PreAuthRef); err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "holder write failed (auth number)"})
+	decision, status, msg, err := g.followDecision(ctx, r,
+		pasSubmission{corr: updateCorr, route: route, bundleJSON: updateBundle, respJSON: updateResp},
+		pasFollowInputs{pci: st.pci, patientRef: st.patientRef, member: st.member,
+			recipient: st.recipient, orderRef: srRef, orderJSON: st.srJSON, wait: wait})
+	if status != 0 {
+		if g.relayOriginationError(w, err) {
+			return false
+		}
+		writeJSON(w, status, map[string]string{"error": msg})
 		return false
 	}
-	resp := uc03Resp{PARequired: true, AuthNumber: parsed.PreAuthRef, ValidUntil: parsed.ValidUntil, AmendmentCorr: updateCorr, QRItems: st.filled, PendedItems: st.needed, Attested: true}
+	if decision.Decision == PASDecisionApproved {
+		if err := g.cfg.Store.StoreAuthNumber(srRef, decision.Parsed.PreAuthRef); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "holder write failed (auth number)"})
+			return false
+		}
+	}
+	resp := decision.applyTo(uc03Resp{PARequired: true, AmendmentCorr: updateCorr, QRItems: st.filled, PendedItems: st.needed, Attested: true})
 	// The org-attested base trace (1.1/3.1 from the seeded order) is a provider-data-only field;
 	// On the demo lane st.qrAnswers is nil (omitempty) so this gate is byte-identical, but it keeps
 	// the "every provider-data path gates on OriginationProfile" invariant explicit (review note).
@@ -449,6 +511,9 @@ func (g *Gateway) handleUC07(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	r = r.WithContext(withFindingContext(r.Context(), findingContext{
+		LegType: "pas-claim", Seam: "originate", Whose: "own",
+	}))
 	st, ok := g.scenarioToPend(w, r, "uc07", member)
 	if !ok {
 		return
@@ -464,21 +529,28 @@ func (g *Gateway) handleUC07(w http.ResponseWriter, r *http.Request) {
 // score defaults to "42", keeping the single-call path byte-identical.
 func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pendState, score string) bool {
 	ctx := r.Context()
-	srRef := "ServiceRequest/sr-uc07" // built-order literal
+	// This helper always resumes to the pas-claim-update leg, whichever caller
+	// reached it (the single-call handleUC07 tags its own headline leg, pas-claim,
+	// at entry; handleUC07Complete already tags pas-claim-update) — retag rather
+	// than inherit, so a finding from a check below never carries the wrong leg.
+	ctx = withFindingContext(ctx, findingContext{
+		LegType: "pas-claim-update", Seam: "originate", Whose: "own",
+	})
+	// The order this authorization is about, as the participant's own system
+	// names it — the reference the approval is filed under and the one the
+	// continuation re-reads the order by. It was a per-scenario literal naming an
+	// order no system held.
+	srRef, refOK := resourceRef(st.srJSON)
+	if !refOK {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "the member's open order carries no identity in the system of record"})
+		return false
+	}
 	linkID := oswestryLinkID
 	const uc07QRID = "qr-uc07"
-	// provider-data UC-07: bind to the REAL seeded order ref (not the built-order literal) and attest
-	// the HHA's free-text functional-status item (patient-entered), NOT the 72148/lumbar oswestry
-	// item. The attested value is operator-supplied (D-2RI-1); verdict-inert (the A4→A1 is the
-	// pend-resolution timer). Patient analog of completeClinician's provider-data branch.
-	if g.cfg.OriginationProfile == "provider-data" {
-		ref, ok := resourceRef(st.srJSON)
-		if !ok {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "order missing id"})
-			return false
-		}
-		srRef = ref
-	}
+	// UC-07 attests the HHA's free-text functional-status item (patient-entered),
+	// NOT the 72148/lumbar oswestry item. The attested value is operator-supplied
+	// (D-2RI-1); verdict-inert (the A4→A1 is the pend-resolution timer). Patient
+	// analog of completeClinician's own attestation branch.
 	// Patient analog of completeClinician's HHA branch: every G0151 lane attests the
 	// HomeHealthAssessment's own free-text item, never the lumbar Oswestry linkId (see
 	// that function's note). ValidatePatientAnswer is Oswestry-SCORE validation (a 0-100
@@ -550,12 +622,15 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 		return false
 	}
 	updateCorr := g.cfg.CorrelationGen()
+	ctx = withFindingContext(ctx, findingContext{
+		LegType: "pas-claim-update", CorrelationID: updateCorr, Seam: "originate", Whose: "own",
+	})
 	// Resume RE-RUNS arm selection with the TARGET FIXED to the pin
 	// (selectResumeRoute): the amendment must answer
 	// the pend it references (the pended-pin rule), but the declared/lane
 	// sets may have grown since origination, so native reach can now beat a
 	// chain even at resume.
-	route, rerr := g.selectResumeRoute(st.pasToken, st.recipient)
+	route, rerr := g.selectResumeRoute(st.pasToken, st.recipient, "pas-claim-update")
 	if rerr != nil {
 		if g.relayOriginationError(w, rerr) {
 			return false
@@ -569,8 +644,18 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return false
 	}
+	_, pasProviderJSON, pstatus, pmsg := g.pasProvider(r.Context(), st.srJSON)
+	if pstatus != 0 {
+		writeJSON(w, pstatus, map[string]string{"error": pmsg})
+		return false
+	}
+	pasMemberSystem, pstatus, pmsg := g.pasMemberSystem(st.memberSystem, st.member)
+	if pstatus != 0 {
+		writeJSON(w, pstatus, map[string]string{"error": pmsg})
+		return false
+	}
 	updateBundle, err := buildAuthoredPASUpdate(route.BuildLine, shnsdk.ConformantClaimUpdateInputs{
-		QR: pasQR, SR: st.srJSON, PatientRef: st.patientRef, CoverageRef: st.coverageRef, MemberID: st.member,
+		QR: pasQR, SR: st.srJSON, Provider: pasProviderJSON, Coverage: st.coverage, Insurer: st.insurer, PatientRef: st.patientRef, CoverageRef: st.coverageRef, MemberID: st.member, MemberIDSystem: pasMemberSystem,
 		Provenance: provJSON, DiagnosticReport: nil, Corr: updateCorr, OriginalCorr: st.pasCorr, Created: g.cfg.Clock(),
 		ContainedInsurer: relaysReferencePayerBytes(g.cfg.OriginationProfile),
 		AbsoluteRefs:     relaysReferencePayerBytes(g.cfg.OriginationProfile),
@@ -601,7 +686,7 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 		writeJSON(w, status, map[string]string{"error": msg})
 		return false
 	}
-	if status, msg := g.validateFHIRForContract(ctx, updateBundle, "egress", "pa.pas", targetLine, ""); status != 0 {
+	if status, msg := g.validateFHIREgressOrBridged(ctx, updateBundle, "pa.pas", targetLine, len(route.Chain) > 0); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return false
 	}
@@ -614,23 +699,40 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return false
 	}
+	ctx = withFindingContext(ctx, findingContext{
+		LegType: "pas-claim-update", CorrelationID: updateCorr, Seam: "originate", Whose: "peer",
+	})
 	if status, msg := g.validateFHIRPayerIngress(ctx, updateResp, targetLine, "pa.pas"); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return false
 	}
 	// UC-07 is patient attestation → Attested. Reference-payer UC-07 (L8000) → A1 approve
 	// directly (no pend); the amendment-resolution path is shared with UC-04/06. AmendmentCorr is
-	// the evidence the attestation re-POST leg ran.
-	parsed, approved := g.classifyResolution(updateResp)
-	if !approved {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "preauthorization not approved after patient attestation"})
+	// the evidence the attestation re-POST leg ran. A payer that re-pends is answered with its
+	// continuation.
+	wait, waitOK := pasWaitOf(r)
+	if !waitOK {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "wait must be a whole number of seconds"})
 		return false
 	}
-	if err := g.cfg.Store.StoreAuthNumber(srRef, parsed.PreAuthRef); err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "holder write failed (auth number)"})
+	decision, status, msg, err := g.followDecision(ctx, r,
+		pasSubmission{corr: updateCorr, route: route, bundleJSON: updateBundle, respJSON: updateResp},
+		pasFollowInputs{pci: st.pci, patientRef: st.patientRef, member: st.member,
+			recipient: st.recipient, orderRef: srRef, orderJSON: st.srJSON, wait: wait})
+	if status != 0 {
+		if g.relayOriginationError(w, err) {
+			return false
+		}
+		writeJSON(w, status, map[string]string{"error": msg})
 		return false
 	}
-	resp := uc03Resp{PARequired: true, AuthNumber: parsed.PreAuthRef, ValidUntil: parsed.ValidUntil, AmendmentCorr: updateCorr, QRItems: st.filled, PendedItems: st.needed, Attested: true}
+	if decision.Decision == PASDecisionApproved {
+		if err := g.cfg.Store.StoreAuthNumber(srRef, decision.Parsed.PreAuthRef); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "holder write failed (auth number)"})
+			return false
+		}
+	}
+	resp := decision.applyTo(uc03Resp{PARequired: true, AmendmentCorr: updateCorr, QRItems: st.filled, PendedItems: st.needed, Attested: true})
 	// The org-attested base trace (1.1/3.1 from the seeded order) is a provider-data-only field;
 	// On the demo lane st.qrAnswers is nil (omitempty) so this gate is byte-identical, but it keeps
 	// the "every provider-data path gates on OriginationProfile" invariant explicit (review note).
@@ -655,6 +757,9 @@ func (g *Gateway) handleUC06Start(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	r = r.WithContext(withFindingContext(r.Context(), findingContext{
+		LegType: "pas-claim", Seam: "originate", Whose: "own",
+	}))
 	st, ok := g.scenarioToPend(w, r, "uc06", member)
 	if !ok {
 		return
@@ -669,6 +774,9 @@ func (g *Gateway) handleUC07Start(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	r = r.WithContext(withFindingContext(r.Context(), findingContext{
+		LegType: "pas-claim", Seam: "originate", Whose: "own",
+	}))
 	st, ok := g.scenarioToPend(w, r, "uc07", member)
 	if !ok {
 		return
@@ -698,6 +806,9 @@ func (g *Gateway) handleUC06Complete(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no such pending scenario"})
 		return
 	}
+	r = r.WithContext(withFindingContext(r.Context(), findingContext{
+		LegType: "pas-claim-update", Seam: "originate", Whose: "own",
+	}))
 	if g.completeClinician(w, r, st, body.Answer, body.NPI) {
 		g.dropPending(body.ResumeToken)
 	}
@@ -715,6 +826,9 @@ func (g *Gateway) handleUC07Complete(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no such pending scenario"})
 		return
 	}
+	r = r.WithContext(withFindingContext(r.Context(), findingContext{
+		LegType: "pas-claim-update", Seam: "originate", Whose: "own",
+	}))
 	if g.completePatient(w, r, st, body.Answer) {
 		g.dropPending(body.ResumeToken)
 	}

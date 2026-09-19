@@ -110,6 +110,7 @@ func TestPACatalog_Contracts(t *testing.T) {
 		"patient-dtr":             "",
 		"pas-claim":               "pa.pas",
 		"pas-claim-update":        "pa.pas",
+		"pas-claim-inquire":       "pa.pas",
 	}
 	if len(paCatalog) != len(want) {
 		t.Fatalf("catalog has %d legs, pin has %d — update BOTH", len(paCatalog), len(want))
@@ -582,8 +583,10 @@ func TestEgressNativeLinesDoesNotAffectSharedDeclaredLine(t *testing.T) {
 	}
 }
 
-// Resume containment, both directions: selectResumeRoute IS
-// knob-affected (reads nativeLinesView, never declared).
+// Resume containment, three ways: the pinned line is taken as DECLARED first
+// (the same rule fresh selection's arm (1) applies, which the knob does not
+// touch), then as natively reachable under the knob, then by chain — and a pin
+// none of the three can reach is refused.
 func TestSelectResumeRouteUnderNarrowing(t *testing.T) {
 	fake := shnsdk.NewFakeValidator()
 
@@ -593,12 +596,47 @@ func TestSelectResumeRouteUnderNarrowing(t *testing.T) {
 			ValidatorsByLine:         map[string]shnsdk.Validator{"2.0": fake},
 			EgressNativeLines:        []string{"2.0"},
 		}}
-		route, err := g.selectResumeRoute("pa.pas@2.0", "payer-20")
+		route, err := g.selectResumeRoute("pa.pas@2.0", "payer-20", "pas-claim-update")
 		if err != nil {
 			t.Fatalf("want a route, got refusal: %v", err)
 		}
 		if route.Token != "pa.pas@2.0" || route.BuildLine != "2.0" || route.Chain != nil {
 			t.Fatalf("route = %+v, want native resume @2.0 (nil Chain)", route)
+		}
+	})
+
+	// The pin records the line the SUBMISSION was sent at, and fresh selection
+	// sends at a shared DECLARED line without consulting EgressNativeLines at
+	// all. A resume that ignored the declared set refused the very line the
+	// submission had just used — an authorization that could be created and
+	// then not continued.
+	t.Run("the knob excludes the pinned line but it is still declared: native resume", func(t *testing.T) {
+		g := &Gateway{cfg: Config{
+			DeclaredContractVersions: []string{"pa.pas@2.0"},
+			ValidatorsByLine:         map[string]shnsdk.Validator{"2.0": fake, "2.2": fake},
+			EgressNativeLines:        []string{"2.2"}, // 2.0 (the pin) is NOT in the native-reach view
+		}}
+		route, err := g.selectResumeRoute("pa.pas@2.0", "payer-20", "pas-claim-inquire")
+		if err != nil {
+			t.Fatalf("want the declared pinned line, got refusal: %v", err)
+		}
+		if route.Token != "pa.pas@2.0" || route.BuildLine != "2.0" || route.Chain != nil {
+			t.Fatalf("route = %+v, want a native resume @2.0 (nil Chain) on the declared line", route)
+		}
+	})
+
+	// REJECTION: the widening above is scoped to a pinned line this gateway
+	// still declares AND still has a lane for. Neither holding, and with no
+	// chain to it, the resume is refused — it does not fall back to some other
+	// line and call it the same authorization.
+	t.Run("a pinned line this gateway neither declares nor can reach is refused", func(t *testing.T) {
+		g := &Gateway{cfg: Config{
+			DeclaredContractVersions: []string{"pa.pas@2.0"},
+			ValidatorsByLine:         map[string]shnsdk.Validator{"2.0": fake},
+			EgressNativeLines:        []string{"2.0"},
+		}}
+		if route, err := g.selectResumeRoute("pa.dtr@2.2", "payer-20", "pas-claim-inquire"); err == nil {
+			t.Fatalf("want a refusal for a pin this gateway cannot reach, got route %+v", route)
 		}
 	})
 
@@ -608,7 +646,7 @@ func TestSelectResumeRouteUnderNarrowing(t *testing.T) {
 			ValidatorsByLine:         map[string]shnsdk.Validator{"2.0": fake, "2.1": fake},
 			EgressNativeLines:        []string{"2.1"}, // 2.0 (the pin) is NOT in view
 		}}
-		route, err := g.selectResumeRoute("pa.pas@2.0", "payer-20")
+		route, err := g.selectResumeRoute("pa.pas@2.0", "payer-20", "pas-claim-update")
 		if err != nil {
 			t.Fatalf("want a chained route, got refusal: %v", err)
 		}

@@ -26,6 +26,7 @@ func pinnedOwnership() map[Key]Rule {
 		{"crd-order-select", rq, req, OutcomeCarried}:        {Allowed: own(R, E), Edits: []EditID{"E-01", "E-02"}},
 		{"dtr-questionnaire-fetch", rq, req, OutcomeCarried}: {Allowed: own(R, E), Edits: []EditID{"E-04"}},
 		{"pas-claim", rq, req, OutcomeCarried}:               relayOnly,
+		{"pas-claim-inquire", rq, req, OutcomeCarried}:       relayOnly,
 		{"pas-claim-update", rq, req, OutcomeCarried}:        relayOnly,
 
 		{"coverage-eligibility", rq, req, OutcomeOriginated}:    {Allowed: own(A), Builders: b("sdk-eligibility")},
@@ -35,12 +36,14 @@ func pinnedOwnership() map[Key]Rule {
 		{"federated-query", rq, req, OutcomeOriginated}:         {Allowed: own(A), Builders: b("sdk-federated-query")},
 		{"patient-dtr", rq, req, OutcomeOriginated}:             {Allowed: own(A), Builders: b("sdk-patient-dtr")},
 		{"pas-claim", rq, req, OutcomeOriginated}:               {Allowed: own(A), Builders: b("sdk-pas-submit")},
+		{"pas-claim-inquire", rq, req, OutcomeOriginated}:       {Allowed: own(A), Builders: b("sdk-pas-inquiry")},
 		{"pas-claim-update", rq, req, OutcomeOriginated}:        {Allowed: own(A), Builders: b("sdk-pas-update")},
 
 		{"crd-order-dispatch", rq, resp, OutcomeAnswered}:      relayOnly,
 		{"crd-order-select", rq, resp, OutcomeAnswered}:        relayOnly,
 		{"dtr-questionnaire-fetch", rq, resp, OutcomeAnswered}: relayOnly,
 		{"pas-claim", rq, resp, OutcomeAnswered}:               relayOnly,
+		{"pas-claim-inquire", rq, resp, OutcomeAnswered}:       relayOnly,
 		{"pas-claim-update", rq, resp, OutcomeAnswered}:        relayOnly,
 
 		{"coverage-eligibility", rq, resp, OutcomeUpstreamError}:    relayOnly,
@@ -50,12 +53,14 @@ func pinnedOwnership() map[Key]Rule {
 		{"federated-query", rq, resp, OutcomeUpstreamError}:         relayOnly,
 		{"patient-dtr", rq, resp, OutcomeUpstreamError}:             relayOnly,
 		{"pas-claim", rq, resp, OutcomeUpstreamError}:               relayOnly,
+		{"pas-claim-inquire", rq, resp, OutcomeUpstreamError}:       relayOnly,
 		{"pas-claim-update", rq, resp, OutcomeUpstreamError}:        relayOnly,
 
 		{"crd-order-dispatch", rc, req, OutcomeCarried}:      {Allowed: own(R, E), Edits: []EditID{"E-03"}},
 		{"crd-order-select", rc, req, OutcomeCarried}:        {Allowed: own(R, E), Edits: []EditID{"E-03"}},
 		{"dtr-questionnaire-fetch", rc, req, OutcomeCarried}: {Allowed: own(R, E, A), Edits: []EditID{"E-03"}, Builders: b("defect-dtr-projection")},
 		{"pas-claim", rc, req, OutcomeCarried}:               {Allowed: own(R, E), Edits: []EditID{"E-03"}},
+		{"pas-claim-inquire", rc, req, OutcomeCarried}:       {Allowed: own(R, E), Edits: []EditID{"E-03"}},
 		{"pas-claim-update", rc, req, OutcomeCarried}:        {Allowed: own(R, E), Edits: []EditID{"E-03"}},
 
 		{"coverage-eligibility", rc, resp, OutcomeAnswered}:    {Allowed: own(A), Builders: b("sdk-eligibility")},
@@ -64,17 +69,19 @@ func pinnedOwnership() map[Key]Rule {
 		{"dtr-questionnaire-fetch", rc, resp, OutcomeAnswered}: relayOnly,
 		{"federated-query", rc, resp, OutcomeAnswered}:         {Allowed: own(A), Builders: b("cdex-fulfillment")},
 		{"patient-dtr", rc, resp, OutcomeAnswered}:             {Allowed: own(A), Builders: b("sdk-patient-dtr")},
-		{"pas-claim", rc, resp, OutcomeAnswered}:               {Allowed: own(R, A), Builders: b("defect-pas-assembly")},
-		{"pas-claim-update", rc, resp, OutcomeAnswered}:        {Allowed: own(R, A), Builders: b("defect-pas-assembly")},
+		{"pas-claim", rc, resp, OutcomeAnswered}:               {Allowed: own(R)},
+		{"pas-claim-inquire", rc, resp, OutcomeAnswered}:       relayOnly,
+		{"pas-claim-update", rc, resp, OutcomeAnswered}:        {Allowed: own(R)},
 
 		{"crd-order-dispatch", rc, resp, OutcomeUpstreamError}:      {Allowed: own(R, A), Builders: b("defect-empty-error-substitution")},
 		{"crd-order-select", rc, resp, OutcomeUpstreamError}:        {Allowed: own(R, A), Builders: b("defect-empty-error-substitution")},
 		{"dtr-questionnaire-fetch", rc, resp, OutcomeUpstreamError}: {Allowed: own(R, A), Builders: b("defect-empty-error-substitution")},
 		{"pas-claim", rc, resp, OutcomeUpstreamError}:               {Allowed: own(R, A), Builders: b("defect-empty-error-substitution")},
+		{"pas-claim-inquire", rc, resp, OutcomeUpstreamError}:       {Allowed: own(R, A), Builders: b("defect-empty-error-substitution")},
 		{"pas-claim-update", rc, resp, OutcomeUpstreamError}:        {Allowed: own(R, A), Builders: b("defect-empty-error-substitution")},
 	}
 	for _, leg := range []string{"", "coverage-eligibility", "crd-order-dispatch", "crd-order-select",
-		"dtr-questionnaire-fetch", "federated-query", "patient-dtr", "pas-claim", "pas-claim-update"} {
+		"dtr-questionnaire-fetch", "federated-query", "patient-dtr", "pas-claim", "pas-claim-inquire", "pas-claim-update"} {
 		m[Key{leg, rq, resp, OutcomeRefused}] = refusal
 		m[Key{leg, rc, resp, OutcomeRefused}] = refusal
 	}
@@ -236,7 +243,7 @@ func TestCheckRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	interim, err := Authored(BuilderInterimPASAssembly, []byte(`{}`), fhirJSON)
+	interim, err := Authored(BuilderInterimDTRProjection, []byte(`{}`), fhirJSON)
 	if err != nil {
 		t.Fatal(err)
 	}

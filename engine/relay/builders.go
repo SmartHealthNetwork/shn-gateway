@@ -59,7 +59,6 @@ const (
 // negotiated no frame receives.
 const (
 	BuilderInterimDTRProjection          BuilderID = "defect-dtr-projection"
-	BuilderInterimPASAssembly            BuilderID = "defect-pas-assembly"
 	BuilderInterimEmptyErrorSubstitution BuilderID = "defect-empty-error-substitution"
 )
 
@@ -86,7 +85,6 @@ var registeredBuilders = []BuilderID{
 
 var interimBuilders = []BuilderID{
 	BuilderInterimDTRProjection,
-	BuilderInterimPASAssembly,
 	BuilderInterimEmptyErrorSubstitution,
 }
 

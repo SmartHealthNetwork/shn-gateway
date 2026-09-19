@@ -79,6 +79,17 @@ services:
       PROVIDER_DAVINCI_INGRESS: "1"
       PROVIDER_DAVINCI_INGRESS_BASE_URL: http://gateway:8080
       INGRESS_CLIENTS_FILE: /secrets/ingress-clients.json
+      # Supplied by whoever runs this file, because this file has two audiences
+      # and they want opposite answers. It is SHN's own Definition-of-Done gate
+      # (../eval/smoke.sh, which exports strict below) AND the bundle a partner
+      # downloads and runs (README "docker compose -f compose.eval.yml up") AND
+      # the provider half of the partner's own payer self-test
+      # (payer/smoke.sh). Hardcoding `strict` served the first audience by
+      # getting the other two wrong: a partner would meet a refusal produced by
+      # a value WE put in a bundle THEY operate, and read it as a verdict on
+      # their own conformance. Absent means none, matching the sibling payer
+      # bundle and the production install unit (../bundle/compose.yml).
+      CONFORMANCE_ENFORCEMENT: ${CONFORMANCE_ENFORCEMENT:-}
     volumes:
       - ${SHN_SECRETS:?set SHN_SECRETS to your shn register bundle dir}:/etc/shn:ro
       # payer-directory.json is no longer bind-mounted directly (see the committed

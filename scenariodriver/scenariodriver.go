@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -206,10 +207,62 @@ func (d *Driver) SubmitPAS(bundle []byte) (PASOutcome, error) {
 	return out, nil
 }
 
+// InquirePAS posts a Da Vinci PAS inquiry (Claim/$inquire) to the provider
+// ingress under the same direct bearer SubmitPAS uses, and returns the payer's
+// answer as sent. The answer is the payer's own bytes; nothing here interprets
+// them.
+func (d *Driver) InquirePAS(bundle []byte) (HTTPResult, error) {
+	return d.postBearer("/Claim/$inquire", bundle)
+}
+
+// ScenarioWaitSeconds is the patience this driver states when it runs a scenario.
+//
+// An originator route waits for NOTHING unless its caller says otherwise: a
+// payer's pend is the payer's answer, and turning it into a decision is not
+// something a gateway does on its own initiative. A driver running a scenario is
+// a caller that wants a result inside its own call, so it says how long it will
+// hold that call open. When the payer still has not decided by then, the run
+// comes back pended WITH its continuation, and the caller asks again
+// (POST /scenario/pa/inquire) whenever it likes.
+//
+// The value is the gateway's own maximum for a single wait.
+const ScenarioWaitSeconds = 30
+
 // RunProviderDataScenario POSTs to a provider-data origination gateway's /scenario/*
 // route (an internal, un-auth'd surface — no direct bearer involved).
+//
+// It states this driver's wait (ScenarioWaitSeconds) unless the caller's path
+// already states one of its own — a row that wants the payer's first answer
+// untouched passes "?wait=0" and keeps it.
 func (d *Driver) RunProviderDataScenario(path, jsonBody string) (HTTPResult, error) {
-	return d.postJSON(d.cfg.ProviderDataURL, path, jsonBody)
+	return d.postJSON(d.cfg.ProviderDataURL, withScenarioWait(path), jsonBody)
+}
+
+// withScenarioWait adds this driver's stated wait to a /scenario/* path that does
+// not already state one. Any other path is returned unchanged: the wait is an
+// originator-route parameter, and adding it elsewhere would only be noise on the
+// wire.
+func withScenarioWait(path string) string {
+	if !strings.HasPrefix(path, "/scenario/") || strings.Contains(path, "wait=") {
+		return path
+	}
+	sep := "?"
+	if strings.Contains(path, "?") {
+		sep = "&"
+	}
+	return path + sep + "wait=" + strconv.Itoa(ScenarioWaitSeconds)
+}
+
+// ContinuePA POSTs to an origination gateway's POST /scenario/pa/inquire — the
+// route that continues a prior-authorization decision the payer had not made when
+// it answered.
+//
+// It states no wait of its own: the body says how long this caller is willing to
+// keep asking, because that is the caller's to state and nobody else's. The route
+// is on the same internal, un-auth'd /scenario/* surface as the origination
+// routes, so no bearer is involved.
+func (d *Driver) ContinuePA(jsonBody string) (HTTPResult, error) {
+	return d.postJSON(d.cfg.ProviderDataURL, "/scenario/pa/inquire", jsonBody)
 }
 
 // RunConsoleScenario POSTs a scenario request to the ops console's /api/run route.

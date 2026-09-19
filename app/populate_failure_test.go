@@ -142,6 +142,26 @@ func populateFailureApp(t *testing.T, populate map[string]string, out io.Writer)
 			resource = `{"resourceType":"Patient","id":"CANARY-STORE","birthDate":"1980-01-01","name":[{"family":"CANARY-FAMILY"}]}`
 		case "/Coverage":
 			resource = `{"resourceType":"Coverage","id":"CANARY-COVERAGE","status":"active","beneficiary":{"reference":"Patient/CANARY-STORE"},"payor":[{"identifier":{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00001"}}]}`
+		case "/DeviceRequest":
+			// The member's open order is a ServiceRequest, so the device search
+			// finds nothing — the order reader tries both types.
+			_, _ = io.WriteString(w, `{"resourceType":"Bundle","type":"searchset","entry":[]}`)
+			return
+		case "/ServiceRequest":
+			// EVERY origination lane reads the member's open order out of the
+			// participant's own system now, so this stand-in has to hold one:
+			// UC-08's product, active, requested under the participant's own
+			// provider group. A stand-in with no order would refuse the request
+			// before it ever reached the $populate failure these rows are about.
+			resource = `{"resourceType":"ServiceRequest","id":"CANARY-ORDER","status":"active","intent":"order",` +
+				`"subject":{"reference":"Patient/CANARY-STORE"},` +
+				`"performer":[{"reference":"Organization/` + strings.TrimPrefix(engine.OrderingProviderRef, "Organization/") + `"}],` +
+				`"code":{"coding":[{"system":"http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets","code":"J3490","display":"` + engine.DemoDisplayJ3490 + `"}]},` +
+				`"reasonCode":[{"coding":[{"system":"http://hl7.org/fhir/sid/icd-10-cm","code":"` + engine.DemoDxJ3490 + `"}]}]}`
+		case "/Organization/" + strings.TrimPrefix(engine.OrderingProviderRef, "Organization/"):
+			// The party the order is requested under, read from the same system.
+			_, _ = io.WriteString(w, `{"resourceType":"Organization","id":"`+strings.TrimPrefix(engine.OrderingProviderRef, "Organization/")+`","identifier":[{"system":"http://hl7.org/fhir/sid/us-npi","value":"1295837462"}],"name":"Test Provider Group"}`)
+			return
 		default:
 			t.Errorf("unexpected FHIR path: %s", r.URL.Path)
 			w.WriteHeader(500)

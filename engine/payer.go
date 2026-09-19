@@ -86,6 +86,12 @@ func (g *Gateway) handleDTRInbound(w http.ResponseWriter, r *http.Request, env s
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": errOwnershipFault})
 		return
 	}
+	// The direction flips here: the $questionnaire-package answer validated below is
+	// THIS participant's own build, not the peer's request handleInbound tagged the
+	// context with.
+	fc := findingContextFrom(ctx)
+	fc.Whose = "own"
+	ctx = withFindingContext(ctx, fc)
 	if isNextQuestion {
 		// (C) for the adaptive round: the answered QuestionnaireResponse must be about the
 		// SAME patient the request carried — a partner (or a relay) must not swap the subject.
@@ -350,7 +356,7 @@ func (g *Gateway) bindNextQuestionSubjectContext(ctx context.Context, subject, t
 	if !ok {
 		return http.StatusBadRequest, "next-question request carries no patient subject"
 	}
-	pci, _, found, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(ctx, member)
+	pci, found, readErr := g.resolveSubjectPCI(ctx, member)
 	if readErr != nil {
 		status, msg := SoRFailureResponse(readErr)
 		return status, msg
@@ -447,14 +453,62 @@ func (g *Gateway) fenceResponseSubject(leg, boundPatientRef string, res LegResul
 			}
 		}
 		// EOB Store side-effect: SHN-produced from the bound member, both paths — fence unconditionally.
-		for _, se := range res.SideEffectFHIR {
-			ref, err := parseEOBPatient(se)
-			if err != nil {
-				return http.StatusInternalServerError, "parse side-effect subject failed"
+		return fencePASSideEffects(boundPatientRef, res)
+	case "pas-claim-inquire":
+		// An inquiry's answer takes two shapes by IG line (inquire.go), and a
+		// legitimate answer may name NO authorization at all — "nothing matched" is
+		// an answer, not a subject violation. So the rule here is about the patients
+		// the answer DOES name, and it reads ALL of them, as deep as the submit
+		// legs' response check: every subject-bearing field of every entry of every
+		// `return` Bundle, contained resources included. An answer whose Coverage
+		// beneficiary or Patient entry names a different member than its
+		// ClaimResponses is refused — one inquiry asks about one member.
+		if !consistentPASInquiryAnswerSubjects(responseFHIR) {
+			return http.StatusForbidden, "PAS inquiry answer has inconsistent patient linkage"
+		}
+		// The payer answers in its own patient namespace, so the bound-member
+		// comparison applies only where the answer is this gateway's own.
+		//
+		// A parse failure is a REFUSAL here, exactly as on the submit legs above.
+		// It used to be swallowed, which made the fence fail open: an answer this
+		// reader could not read was treated as an answer naming nobody, so nothing
+		// was compared and the answer went out. The one error that is not a
+		// failure is "this answer names no authorization at all" — an inquiry that
+		// matched nothing is a legitimate answer, and it names no patient to
+		// compare.
+		if !res.ResponseSubjectForeign {
+			refs, err := ParsePASResponsePatients(responseFHIR)
+			switch {
+			case errors.Is(err, ErrNoPASResponsePatient):
+				// nothing matched; no patient to compare
+			case err != nil:
+				return http.StatusInternalServerError, "parse response subject failed"
 			}
-			if ref != boundPatientRef {
-				return http.StatusForbidden, "side-effect patient does not match request patient"
+			for _, ref := range refs {
+				if ref != boundPatientRef {
+					return http.StatusForbidden, "response patient does not match request patient"
+				}
 			}
+		}
+		// The decision EOBs an inquiry records are this gateway's own, built from
+		// the bound member — fenced unconditionally, like the submit leg's.
+		return fencePASSideEffects(boundPatientRef, res)
+	}
+	return 0, ""
+}
+
+// fencePASSideEffects member-fences the prior-authorization side-effects this
+// gateway produced itself. They are always built from the bound member, on every
+// responder path, so they are fenced unconditionally — a relayed answer stands the
+// RESPONSE fence down, never this one.
+func fencePASSideEffects(boundPatientRef string, res LegResult) (int, string) {
+	for _, se := range res.SideEffectFHIR {
+		ref, err := parseEOBPatient(se)
+		if err != nil {
+			return http.StatusInternalServerError, "parse side-effect subject failed"
+		}
+		if ref != boundPatientRef {
+			return http.StatusForbidden, "side-effect patient does not match request patient"
 		}
 	}
 	return 0, ""

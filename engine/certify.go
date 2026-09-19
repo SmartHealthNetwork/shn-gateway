@@ -51,6 +51,12 @@ type CertificationEvidence struct {
 	Certified     []string      `json:"certified"`
 	SourceLine    string        `json:"sourceLine"`
 	TargetLine    string        `json:"targetLine"`
+	// Nonconformance states where a peer's message departs from what the
+	// operation it answers declares, in the peer's own terms — what it sent and
+	// what the definition names. It is evidence, not a verdict: the message was
+	// still read and still relayed, and nothing here changed a byte of it. A
+	// conformant message carries none.
+	Nonconformance []string `json:"nonconformance,omitempty"`
 }
 
 type certificationJob struct {
@@ -415,13 +421,18 @@ func (t certificationTransport) RoundTrip(r *http.Request) (*http.Response, erro
 // through the existing dispatch; the collector never supplies a routing input.
 type certificationTargetKey struct{}
 
-func (g *Gateway) certificationPair(leg, seam, corr, target string, request, response []byte) {
+// certificationPair certifies both halves of one exchange. responseNonconformance,
+// when non-empty, is carried on the RESPONSE half's evidence: it describes the
+// answer that was received, so it belongs with that answer's record and nowhere
+// else.
+func (g *Gateway) certificationPair(leg, seam, corr, target string, request, response []byte, responseNonconformance ...string) {
 	for _, part := range []struct {
-		direction string
-		payload   []byte
-	}{{"request", request}, {"response", response}} {
+		direction      string
+		payload        []byte
+		nonconformance []string
+	}{{"request", request, nil}, {"response", response, responseNonconformance}} {
 		if len(part.payload) > 0 {
-			g.enqueueCertification(certificationJob{evidence: CertificationEvidence{LegType: leg, Seam: seam, CorrelationID: corr, TargetLine: target, Direction: part.direction}, payload: part.payload})
+			g.enqueueCertification(certificationJob{evidence: CertificationEvidence{LegType: leg, Seam: seam, CorrelationID: corr, TargetLine: target, Direction: part.direction, Nonconformance: part.nonconformance}, payload: part.payload})
 		}
 	}
 }

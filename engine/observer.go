@@ -56,10 +56,6 @@ import (
 //	                  Provenance + LossReport this describes ride INSIDE the transformed
 //	                  payload itself (or observer-only where the target profile can't
 //	                  tolerate the extra resource) — never the envelope, never Hub-visible.
-//	leg.assembled     a terminal PAS response was assembled and committed (Direction = ingress;
-//	                  Op = pas-terminal-response-assembly; CorrelationID identifies the exchange;
-//	                  Payload = holder-local Provenance targeting the retained ClaimResponse
-//	                  fullUrl). This record stays outside the Bundle and the Hub.
 //	leg.certified    completed observational source certification (Detail = metadata-only JSON;
 //	                  stored before callback delivery; callbacks must return promptly)
 //	relay.ownership.refused
@@ -76,6 +72,13 @@ import (
 //	                  (LegType = the leg, Direction = "sor", Op = the prefetch key,
 //	                  Detail = metadata-only JSON: key, source, query, outcome, reason,
 //	                  count, pages, retrievedAt — never a value or a resource)
+//	peer.nonconformant
+//	                  a peer's message departed from what the operation it answers
+//	                  declares, and was read anyway (Op = the operation's answer,
+//	                  Counterpart = the peer, Detail = what the peer sent and what
+//	                  the definition names). Evidence only: the message was relayed
+//	                  unchanged and no decision reads this. The same sentence rides
+//	                  the answer's CertificationEvidence.Nonconformance.
 //	sor.read          the gateway read its data source (Op = SystemOfRecord method,
 //	                  Detail = "found"/"not found"/coverage status or a safe failure category,
 //	                  Payload = the

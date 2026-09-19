@@ -6,7 +6,7 @@ variables. This document is the complete reference; for a task-oriented walk
 through wiring your own systems, see [INTEGRATION.md](INTEGRATION.md).
 
 - [Required (every role)](#required-every-role)
-- [Validation (required to boot — FR-36)](#validation-required-to-boot--fr-36)
+- [Validation (required to boot — FR-36) and conformance enforcement](#validation-required-to-boot--fr-36-and-conformance-enforcement)
 - [Per-role](#per-role)
 - [Networking](#networking)
 - [Observer stream (optional — local tooling)](#observer-stream-optional--local-tooling)
@@ -31,19 +31,23 @@ through wiring your own systems, see [INTEGRATION.md](INTEGRATION.md).
 | `ROLE` | `provider`, `payer`, `facility`, or `phg`. Must match the role you registered. |
 | `SHN_SECRETS` | Path to the bundle directory written by `shn register -out`. |
 
-## Validation (required to boot — FR-36)
+## Validation (required to boot — FR-36) and conformance enforcement
 
 The gateway **refuses to start without a FHIR validator** — every resource is
-validated at your gateway's own edge before the leg proceeds. The published
-discovery descriptor does not advertise a validator, so you must supply one:
+validated at your gateway's own edge before the leg proceeds, at every
+enforcement level. The published discovery descriptor does not advertise a
+validator, so you must supply one. What the gateway does with an invalid
+result is your choice:
 
 | Env var | Description |
 |---|---|
 | `FHIR_VALIDATE_URL` | A FHIR `$validate` endpoint (a HAPI server with the Da Vinci CRD/DTR/PAS + US Core IGs loaded). The production path. |
 | `SHN_FAKE_VALIDATOR` | Set to `1` to use a no-op validator. **Dev only** — skips real profile validation. Use for a first wiring smoke test; never in production. |
+| `CONFORMANCE_ENFORCEMENT` | `strict` or `none` (the default when unset). At `strict` an invalid result refuses the message, and the refusal names the rule and the issues it was based on. At `none` every check still runs and every invalid result is recorded as a finding in your gateway's log and observer stream, and the message is relayed as sent — except an answer this gateway cannot read at all, and a payload this gateway itself translated between IG lines, which refuse at every level. Any other value refuses to boot. |
 
-If neither is set (and discovery advertises none), the gateway exits with
-`refusing to run without per-message validation (FR-36)`.
+If neither `FHIR_VALIDATE_URL` nor `SHN_FAKE_VALIDATOR` is set (and discovery
+advertises none), the gateway exits with `refusing to run without per-message
+validation (FR-36)` — at every `CONFORMANCE_ENFORCEMENT` level.
 
 `FHIR_VALIDATE_URL` is the **`2.0` contract line's** lane. If you declare a `2.1` or `2.2`
 line, each needs its own `$validate` endpoint — see
@@ -232,6 +236,106 @@ See [INTEGRATION.md](INTEGRATION.md) for how these fit together.
 | `SHN_STORE_MAX_CONNS` | Maximum connections in the shared-state pool (default `8`; a `MinConns` floor of 2 is kept warm). Four consumers share this one pool — claim state, one-time-use records, ingress signing key, exchange correlation — and an exchange append holds a connection for its transaction, so the default is sized for concurrency rather than for the host's CPU count. Size it against your database's connection limit divided by the number of gateways sharing the DSN: the fleet's ceiling is this value multiplied by that count, and it has to stay under the limit. Count replicas, not deployments: the draw is replicas × gateways sharing the DSN × this value, and that product is what has to stay under the limit (each replica also holds the warm floor open whether or not it is serving). Overrides any `pool_max_conns` in the DSN. Must be an integer in `[1, 2147483647]` (the pool field's own width); anything else is a boot error naming the variable. |
 | `EXCHANGE_TTL` | Lifetime of an exchange correlation record as a Go duration (default `168h`). Applies to exchanges begun after the change — existing records keep the expiry they were written with. Must be positive; an unparsable or non-positive value is a boot error naming the variable. |
 
+### How long a prior authorization stays answerable
+
+A payer gateway keeps a ledger row for every prior authorization it pends or
+decides, so a later `Claim/$inquire` or amendment about that authorization resolves
+to the right one. The row holds decision metadata only — the state, the outcome, the
+date the payer gave it, the requester, and the identifiers the authorization can be
+named by. No clinical content is stored.
+
+- **Retention is six months from the last change to the authorization**, and it is
+  not configurable: Prior Authorization requires a pended authorization to stay
+  answerable for at least that long, so the period is fixed rather than left to an
+  operator to shorten. Expired rows are removed in the background, a bounded number
+  at a time, so the sweep never competes with live traffic.
+- **A decision is final.** Once the payer has approved or denied an authorization,
+  amending it is refused (`409`); the provider submits a new request instead. If the
+  payer itself later pends that authorization again, the payer's newer answer wins
+  and the authorization reopens.
+- **Without `SHN_STORE_DATABASE_URL` the ledger is in memory**, so it does not
+  survive a restart: after one, a follow-up about an authorization pended before the
+  restart cannot be resolved, and the requester submits again. Set the DSN for any
+  deployment that needs authorizations to outlive a restart or to be shared between
+  replicas.
+
+### Continuing a decision the payer has not made yet
+
+A payer answers a submission with its own determination, and "pended" is one of
+those answers: the payer has not decided yet. Nothing polls for a later decision —
+a later decision comes only from an explicit `Claim/$inquire`, which the requester
+performs when it chooses to.
+
+Who keeps what is needed to ask again depends on who is asking.
+
+- **A participant's own system keeps its own record.** It submitted the request, it
+  has the patient, the coverage and the order, and it inquires through its own
+  gateway's `POST /Claim/$inquire`. No state on this gateway is involved, and
+  nothing here can be lost.
+- **This gateway's own originator flows** — the operator console, the `/scenario/*`
+  routes and the headless provider-data runs — have no such system behind them, so
+  the gateway keeps a **continuation** for them: an opaque id, and the metadata an
+  inquiry is built from. It stores identity, routing, the member, the identifiers
+  the payer answered with, and the sequence, product code and service date of each
+  submitted line. It stores **no clinical content**: at inquiry time the order is
+  re-read from your own system of record, and a request that has since become a
+  different one is reported (`409 order changed since submission`) rather than
+  followed.
+
+The continuation id **is** the capability, and it is bound to this holder. An id
+this gateway did not mint answers `404` and says nothing further.
+
+- **Retention is six months from the last change**, the same period the ledger
+  keeps the authorization itself, and for the same reason: a capability that
+  outlived the authorization it names would resolve to nothing.
+- **Without `SHN_STORE_DATABASE_URL` continuations are in memory**, so a restart
+  loses them. A continuation minted by a gateway in that shape, presented after
+  the restart, answers
+  `410 continuation lost (gateway restarted; submit again or inquire from your own
+  system)` — it says the record is gone from a store that could not have kept it,
+  rather than reporting the id as unknown. (It establishes that the id came from a
+  non-durable store other than the one answering; an in-memory gateway keeps no
+  register of its own past runs, so it cannot distinguish its own earlier restart
+  from another such gateway's id. The answer and the way forward are the same
+  either way.) Set the DSN for any deployment where an operator must be able to
+  continue a decision after a restart, or from whichever replica the next request
+  reaches.
+- **What survives what, by deployment shape.** The answer states it per pend
+  (`continuationDurable`), so a surface never has to infer it:
+
+  | Shape | Continuations survive a restart | Continuations shared between replicas |
+  |---|---|---|
+  | One gateway, no `SHN_STORE_DATABASE_URL` (the desktop and single-container installs) | no — the id is refused `410` afterwards | n/a |
+  | One or more gateways with `SHN_STORE_DATABASE_URL` | yes, for the retention period below | yes — any replica on that DSN continues it |
+
+  Within a durable shape the retention above applies. Neither shape changes what a
+  participant's OWN system can do: it holds its own record of the request and can
+  inquire through `POST /Claim/$inquire` at any time, with no state on this gateway
+  involved.
+- **The originator routes accept a bounded wait, and take none by default.** A route
+  answers with the payer's own answer — a pend included — unless its caller asks it to
+  follow the decision: `?wait=<seconds>` states how long that caller is willing to
+  hold its own request open, and the answer comes back as soon as the payer decides.
+  The maximum is 30 seconds, which is the inquiry schedule's own reach rather than a
+  round number: the first inquiry falls due 2 seconds after the pend, later ones back
+  off to 5-second steps, at most six are made, and the sixth falls due at 26 seconds —
+  so a longer bound would hold the connection open with no inquiry left to make.
+  Reaching the bound is not an error: the answer is the
+  pend and its continuation, which
+  `POST /scenario/pa/inquire {"continuation": "…"}` continues later (with an optional
+  `"waitSeconds"` of its own, under the same bounds).
+- **Waiting is an opt-in stand-in, not the mechanism the guide names.** Prior
+  Authorization makes Subscription the way a requester learns a decision made later
+  and states it as a `SHALL`; this gateway does not offer Subscription, and the
+  bounded wait stands in for it. The inquiry itself is the manual status check the
+  guide permits. For a payer that decides in seconds the wait is a convenience; for
+  one that decides in hours or days, keep the continuation and continue it when you
+  are ready.
+- **`/scenario/*` is an unauthenticated local operator surface and is never
+  publicly routed.** The public ingress and the hosted door admit the participant's
+  own `POST /Claim/$inquire` and refuse everything under `/scenario/`. Do not give
+  that surface a public host.
+
 ## Accept Da Vinci requests from a provider EHR (provider, optional)
 
 See [INTEGRATION.md](INTEGRATION.md#native-da-vinci-ingress) for when to use this
@@ -240,8 +344,9 @@ instead of `provider-data` origination.
 Set `PROVIDER_DAVINCI_INGRESS=1` to mount the provider-side Da Vinci ingress: the
 gateway accepts a provider EHR / reference-implementation's **native Da Vinci
 requests** — CDS Hooks `order-sign`, `order-select` and `order-dispatch` (Coverage
-Requirements Discovery), `Questionnaire/$questionnaire-package` (DTR), and `Claim/$submit`
-(PAS) — and forwards them through to the Hub. A CDS Hooks request is forwarded as your EHR
+Requirements Discovery), `Questionnaire/$questionnaire-package` (DTR), `Claim/$submit`
+(PAS) and `Claim/$inquire` (the follow-up that asks a payer for the decision on an
+authorization it pended) — and forwards them through to the Hub. A CDS Hooks request is forwarded as your EHR
 sent it, with `fhirServer` and `fhirAuthorization` removed and any prefetch value it left
 out added from **your own system of record** (see [CDS Hooks prefetch](#cds-hooks-prefetch));
 there is never a callback into your systems.
@@ -281,6 +386,24 @@ the payer sent it once it meets the CDS Hooks response rules (see
 in `systemActions`. A payer that offers no service for your hook answers `422` with the hooks
 it offers.
 
+`POST /Claim/$inquire` asks the payer for the decision on an authorization it pended.
+The inquiry is carried to the payer as your EHR sent it, bound to the one member every
+patient reference in it names (a Bundle naming two members is refused with 403) and
+routed by the Coverage it carries (a Coverage naming no payer the gateway can resolve
+is refused with 422, never defaulted). The payer's answer reaches your EHR exactly, in
+whichever shape the payer's prior-authorization line defines: the response Bundle
+itself, or a `Parameters` whose `return` parameters are those Bundles. The gateway
+holds no state for this: the inquiry names the authorization, so your EHR is the only
+thing that has to remember it.
+
+The gateway does not profile-validate your inquiry, and does not profile-validate
+the payer's answer — your bytes and the payer's are carried as written. The payer's
+own system certifies the inquiry it receives, so a request that does not meet the
+prior-authorization profile for the line it is routed at comes back as that payer's
+own refusal rather than the gateway's. Note that the earliest line requires the
+inquiry to name at least one item and the later ones do not, so an inquiry by
+authorization number alone is accepted here and answered by the payer.
+
 What the gateway changes on these requests is only the callback removal and the prefetch and
 coverage additions above. A signature inside a message (`Bundle.signature`,
 `Provenance.signature`, a `Signature` element) travels untouched. HTTP-level signatures
@@ -305,6 +428,10 @@ short-lived bearer, and verifies it on every ingress call. The client-side proce
 
 Enabling the ingress without a base URL or at least one valid registered client is a
 hard startup error.
+
+| Test-lane only | Description |
+|---|---|
+| `SHN_ACCEPT_UNKNOWN_MEMBERS` | Off by default. When set, a CRD, DTR or PAS subject your system of record does not hold binds by member id alone instead of being refused with `unknown member`. It exists for a shared test lane whose roster cannot hold every partner's own test patients; a production gateway resolves every subject through its own system of record and must not set it. The gateway logs a warning at boot when it is on. |
 
 **This ingress is a private, within-boundary surface, not a public endpoint.** The
 gateway's only public-internet leg is the gateway↔Hub connection; every connection to
@@ -463,7 +590,7 @@ shared secrets).
 | `PAYER_DAVINCI_CLIENT_ID` | SMART client id for the partner. Required when `PAYER_DAVINCI_TOKEN_URL` is set. |
 | `PAYER_DAVINCI_CLIENT_KEY` | Path to the SMART client's private-key PEM file (the value is a path, not the key text — mount the file into the container). Required for `private_key_jwt` mode (i.e. when `PAYER_DAVINCI_CLIENT_SECRET` is unset). |
 | `PAYER_DAVINCI_CLIENT_ALG` | `ES384` or `RS384`. Required for `private_key_jwt` mode (i.e. when `PAYER_DAVINCI_CLIENT_SECRET` is unset). |
-| `PAYER_DAVINCI_SCOPE` | Requested scope the gateway asks your token endpoint for. Default `system/*.read` (covers the read-only legs). Must be a scope your authorization server grants this client; it must cover `/Claim/$submit` as well as the read-only legs, since every leg forwards. |
+| `PAYER_DAVINCI_SCOPE` | Requested scope the gateway asks your token endpoint for. Default `system/*.read` (covers the read-only legs). Must be a scope your authorization server grants this client; it must cover `/Claim/$submit` and `/Claim/$inquire` as well as the read-only legs, since every leg forwards. |
 | `PAYER_DAVINCI_CLIENT_KID` | Key id for the client assertion JWK, if the partner requires it. |
 | `PAYER_DAVINCI_CLIENT_SECRET` | OAuth2 client secret for the `client_secret_post` `client_credentials` grant — for authorization servers that cannot issue asymmetric credentials. The value is the secret **itself, not a path** (unlike `PAYER_DAVINCI_CLIENT_KEY`). Mutually exclusive with `PAYER_DAVINCI_CLIENT_KEY`/`_ALG`/`_KID`; prefer `private_key_jwt` when your server supports it. |
 | `PAYER_DAVINCI_PAS_NATIVE` | **No longer a switch.** PAS submit/update always forward to the payer's `/Claim/$submit` along with every other leg; there is no in-process PAS fallback to select. Setting it `false` logs a notice at boot and changes nothing. |

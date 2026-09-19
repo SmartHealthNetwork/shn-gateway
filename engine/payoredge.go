@@ -22,8 +22,9 @@
 // Coverage carriage spans the legs this mapping covers: both CRD legs,
 // crd-order-select and crd-order-dispatch (prefetch.coverage, a bare Coverage or a
 // Bundle), dtr-questionnaire-fetch (the request's coverage), and
-// pas-claim/pas-claim-update (every Coverage entry of the $submit Bundle, and each
-// Claim.insurer).
+// pas-claim/pas-claim-update/pas-claim-inquire (every Coverage entry of the
+// request Bundle, and each Claim.insurer — an inquiry Bundle carries both, so it
+// maps on the same carrier as a submission).
 package engine
 
 import (

@@ -10,6 +10,15 @@ set -euo pipefail
 : "${SHN_KIT_EVAL_LIVE:?set SHN_KIT_EVAL_LIVE=1 to run the live eval smoke}"
 : "${SHN_SECRETS:?set SHN_SECRETS to a provisioned provider bundle}"
 bash gateway/deploy/eval/brprovider/build.sh build            # image:, must exist before up
+# THIS script is SHN's own gate, so it runs the gateway strict: a defect in the bundle we
+# ship must fail here rather than be recorded and relayed past us. compose.eval.yml leaves
+# the value to its operator precisely so this export can exist without imposing strict on
+# the other two things that boot that same file — a partner's `docker compose up` (README)
+# and the partner's own payer self-test (payer/smoke.sh) — which take the published default
+# of none and see a partner's defect recorded, not refused. Both halves are pinned by
+# test/invariants' TestInvariant_EveryGateRunsStrict; do not move this export into the
+# compose, and do not add one to payer/smoke.sh.
+export CONFORMANCE_ENFORCEMENT=strict
 compose="docker compose -f gateway/deploy/eval/compose.eval.yml"
 # Register teardown BEFORE `up` so a failing build/up (which set -e aborts on) still tears
 # down any containers that did start — otherwise leaked containers wedge the next run's ports.

@@ -272,3 +272,41 @@ func TestCRDIngress_UnknownService404(t *testing.T) {
 		}
 	})
 }
+
+// TestCRDIngress_RelaysAtNoneWithFinding is the observable-behaviour proof
+// that crdAnswerOutcome's use of g.policy() — not a hardcoded strict
+// policy — is what the wire actually does: at ConformanceEnforcement=none, a
+// payer answer that breaks a non-structural CDS Hooks rule (an action with no
+// description) still reaches the EHR byte-identical, and the violation is
+// recorded on the observer stream as a cds-envelope finding, whose="peer"
+// (this is a peer's answer, received over the network) and decision="relayed".
+func TestCRDIngress_RelaysAtNoneWithFinding(t *testing.T) {
+	env := newInProcessExchange(t)
+	env.originator.cfg.ConformanceEnforcement = EnforcementNone
+	var events []ObserverEvent
+	env.originator.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
+	env.payerReturns(LegResult{Response: testResponse([]byte(externalPayerDescriptionlessAnswer))})
+
+	rec := ingressAt(t, env, "shn-order-select", conformantCRDRequest("MBR-COVERED"))
+	if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), []byte(externalPayerDescriptionlessAnswer)) {
+		t.Fatalf("at none the payer's answer must relay exactly: got %d %q, want 200 %q", rec.Code, rec.Body.Bytes(), externalPayerDescriptionlessAnswer)
+	}
+	var found bool
+	for _, e := range events {
+		if e.Kind != ConformanceObservedEvent {
+			continue
+		}
+		if strings.Contains(e.Detail, `"rule":"action.description"`) {
+			found = true
+			if !strings.Contains(e.Detail, `"whose":"peer"`) {
+				t.Fatalf("the provider ingress's finding must say whose=peer (a peer's answer), got: %s", e.Detail)
+			}
+			if !strings.Contains(e.Detail, `"decision":"relayed"`) || !strings.Contains(e.Detail, `"level":"none"`) {
+				t.Fatalf("finding must record relayed/none, got: %s", e.Detail)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no cds-envelope finding observed for action.description — a hardcoded-strict policy at crdAnswerOutcome would refuse instead of reaching here")
+	}
+}

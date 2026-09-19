@@ -36,6 +36,9 @@ func (g *Gateway) handleHomeOxygen(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	r = r.WithContext(withFindingContext(r.Context(), findingContext{
+		LegType: "crd-order-dispatch", Seam: "originate", Whose: "own",
+	}))
 	g.originateDispatch(w, r, member)
 }
 
@@ -49,9 +52,6 @@ func (g *Gateway) handleHomeOxygen(w http.ResponseWriter, r *http.Request) {
 type dispatchOrder struct {
 	orderJSON, supplierJSON []byte
 	orderRef, performerRef  string
-	// authored is true for an order this gateway built (the demo lane's literal
-	// order), which the system of record does not hold.
-	authored bool
 }
 
 // dispatchResult carries everything a runCRDDispatch caller needs past the populate step:
@@ -59,15 +59,24 @@ type dispatchOrder struct {
 // Questionnaire and its canonical (needed by a caller that must ATTEST a required item
 // into the populated QR before submitting, which originateDispatch's own callers do not).
 type dispatchResult struct {
-	qrSource                                           *dtrBuildSource
-	dtrLine                                            string
-	pci, patientRef, coverageRef, orderRef             string
+	qrSource                               *dtrBuildSource
+	dtrLine                                string
+	pci, patientRef, coverageRef, orderRef string
+	// coverage is the member's own Coverage record — the same single read that
+	// resolved the payer identity and the route — which the PAS request carries as
+	// the resolvable entry the Claim names.
+	coverage []byte
+	// insurer is the payer's own Organization record — see crdDtrResult.insurer.
+	insurer                                            []byte
 	orderJSON, supplierJSON, qrJSON, questionnaireJSON []byte
 	qrAnswers                                          map[string]string
 	member                                             string
-	payer                                              shnsdk.PayerIdentifier
-	recipient                                          string
-	canonical                                          string
+	// memberSystem is the namespace the participant's own system names that
+	// member under, carried from the one reading of their Patient (crdOriginRecords).
+	memberSystem string
+	payer        shnsdk.PayerIdentifier
+	recipient    string
+	canonical    string
 }
 
 // runCRDDispatch is the shared order-dispatch prefix: CRD(order-dispatch) → DIVERGENCE-3
@@ -122,6 +131,13 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member 
 		writeJSON(w, status, map[string]string{"error": msg})
 		return dispatchResult{}, false
 	}
+	// And that payer's own Organization record, from the same system: the
+	// submission names it, and so does every inquiry about the submission.
+	realPayerOrg, status, msg := g.memberPayerOrganization(ctx, realCov)
+	if status != 0 {
+		writeJSON(w, status, map[string]string{"error": msg})
+		return dispatchResult{}, false
+	}
 
 	// The order-dispatch request carries the participant's own Patient, Coverage
 	// search result and history (originate_crd.go); the order names the patient
@@ -155,7 +171,7 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member 
 	// includes it (DeviceRequest:performer). An order this gateway authored (the demo
 	// lane) is carried as a collection Bundle holding that one order: the system of
 	// record does not hold it, and no supplier record is added.
-	crdReq, err := g.originatedDispatchRequest(crdCorr, recs, orderJSON, performerRef, order.authored)
+	crdReq, err := g.originatedDispatchRequest(crdCorr, recs, orderJSON, performerRef)
 	if err != nil {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "build order-dispatch request failed: " + err.Error()})
 		return dispatchResult{}, false
@@ -250,6 +266,12 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member 
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return dispatchResult{}, false
 	}
+	// This helper owns the dtr-questionnaire-fetch leg (and, above, crd-order-dispatch)
+	// regardless of which caller's headline leg dispatched here — retag rather than
+	// inherit, so a finding from this check never borrows the caller's leg name.
+	ctx = withFindingContext(ctx, findingContext{
+		LegType: "dtr-questionnaire-fetch", CorrelationID: dtrCorr, Seam: "originate", Whose: "peer",
+	})
 	if status, msg := g.validateFHIRPayerIngress(ctx, packageJSON, dtrLine, "pa.dtr"); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return dispatchResult{}, false
@@ -310,6 +332,9 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member 
 	// live gate can prove the $populate ran br-payer's real prepop CQL against the seeded
 	// observations (NOT an answer book). Empty when nothing populated (e.g. aged-out obs).
 	qrAnswers := questionnaireResponseNumericAnswers(qrJSON)
+	ctx = withFindingContext(ctx, findingContext{
+		LegType: "dtr-questionnaire-fetch", CorrelationID: dtrCorr, Seam: "originate", Whose: "own",
+	})
 	if status, msg := g.validateFHIRForContract(ctx, qrJSON, "egress", "pa.dtr", dtrLine, baseQRProfile); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return dispatchResult{}, false
@@ -324,9 +349,10 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member 
 	return dispatchResult{
 		qrSource: source,
 		dtrLine:  dtrLine,
-		pci:      pci, patientRef: patientRef, coverageRef: coverageRef, orderRef: orderRef,
+		pci:      pci, patientRef: patientRef, coverageRef: coverageRef, coverage: realCov, insurer: realPayerOrg, orderRef: orderRef,
 		orderJSON: orderJSON, supplierJSON: supplierJSON, qrJSON: qrJSON, questionnaireJSON: questionnaireJSON, qrAnswers: qrAnswers,
-		member: member, payer: payer, recipient: recipient, canonical: canonical,
+		memberSystem: recs.memberSystem,
+		member:       member, payer: payer, recipient: recipient, canonical: canonical,
 	}, true
 }
 
@@ -351,7 +377,45 @@ func (g *Gateway) handleDispatch(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "member is required"})
 		return
 	}
+	r = r.WithContext(withFindingContext(r.Context(), findingContext{
+		LegType: "crd-order-dispatch", Seam: "originate", Whose: "own",
+	}))
 	g.originateDispatch(w, r, req.Member)
+}
+
+// dispatchOrderOfRecord reads the member's open order-DISPATCH order, and the
+// supplier it was dispatched to, out of the participant's OWN system of record.
+// Both ARE the participant's records: the order code, the diagnosis and the
+// supplier all come from the data, never from a literal. ok=false means the
+// response is already written.
+func (g *Gateway) dispatchOrderOfRecord(w http.ResponseWriter, r *http.Request, member string) (dispatchOrder, bool) {
+	orderJSON, ok, readErr := ReadSystemOfRecord(g.cfg.SoR).OpenOrderContext(r.Context(), member)
+	if writeSoRFailure(w, readErr) {
+		return dispatchOrder{}, false
+	}
+	if !ok {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "no open order for member in SoR"})
+		return dispatchOrder{}, false
+	}
+	orderID, performerRef, ok := parseOrderIDAndPerformer(orderJSON)
+	if !ok {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "open order missing id or performer"})
+		return dispatchOrder{}, false
+	}
+	// The supplier (performer) is resolved from the order's performer ref via a SoR read —
+	// not a literal. Fail closed if the supplier Organization is absent.
+	supplierJSON, ok, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolveByReferenceContext(r.Context(), performerRef)
+	if writeSoRFailure(w, readErr) {
+		return dispatchOrder{}, false
+	}
+	if !ok {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "order performer (supplier) not resolvable from SoR"})
+		return dispatchOrder{}, false
+	}
+	return dispatchOrder{
+		orderJSON: orderJSON, supplierJSON: supplierJSON,
+		orderRef: "DeviceRequest/" + orderID, performerRef: performerRef,
+	}, true
 }
 
 // originateDispatch originates an order-dispatch PA off the given member's seeded DeviceRequest.
@@ -369,44 +433,31 @@ func (g *Gateway) originateDispatch(w http.ResponseWriter, r *http.Request, memb
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown member"})
 		return
 	}
-	orderJSON, ok, readErr := ReadSystemOfRecord(g.cfg.SoR).OpenOrderContext(r.Context(), member)
-	if writeSoRFailure(w, readErr) {
-		return
-	}
+	order, ok := g.dispatchOrderOfRecord(w, r, member)
 	if !ok {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "no open order for member in SoR"})
-		return
-	}
-	orderID, performerRef, ok := parseOrderIDAndPerformer(orderJSON)
-	if !ok {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "open order missing id or performer"})
-		return
-	}
-	// The supplier (performer) is resolved from the order's performer ref via a SoR read —
-	// not a literal. Fail closed if the supplier Organization is absent.
-	supplierJSON, ok, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolveByReferenceContext(r.Context(), performerRef)
-	if writeSoRFailure(w, readErr) {
-		return
-	}
-	if !ok {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "order performer (supplier) not resolvable from SoR"})
 		return
 	}
 
-	res, ok := g.runCRDDispatch(w, r, member, dispatchOrder{
-		orderJSON: orderJSON, supplierJSON: supplierJSON,
-		orderRef: "DeviceRequest/" + orderID, performerRef: performerRef,
+	res, ok := g.runCRDDispatch(w, r, member, order)
+	if !ok {
+		return
+	}
+
+	// --- PAS — the shared lean single-shot tail (submitClaimAndFollow). The genuine
+	// outcome is conditional-coverage A4-pended → A1, and the A1 comes from the payer's
+	// answer to the follow-up inquiry, never from anything this gateway does to the pend.
+	// A payer that pends and does NOT resolve is answered with the pend and its
+	// continuation, which the caller continues; it is not reported as a failed request. ---
+	wait, ok := pasWaitOf(r)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "wait must be a whole number of seconds"})
+		return
+	}
+	decision, status, msg, err := g.submitClaimAndFollow(r.Context(), r, pasFollowInputs{
+		pci: res.pci, patientRef: res.patientRef, coverageRef: res.coverageRef, coverage: res.coverage, insurer: res.insurer, member: res.member, memberSystem: res.memberSystem,
+		recipient: res.recipient, orderRef: res.orderRef, orderJSON: res.orderJSON,
+		supplierJSON: res.supplierJSON, source: res.qrSource, payer: res.payer, wait: wait,
 	})
-	if !ok {
-		return
-	}
-
-	// --- PAS — the shared lean single-shot tail (submitClaimAndResolve). The order resource is the
-	// DeviceRequest, so InfoChanged stays false (orderIsDeviceRequest) — its order type alone routes
-	// the payer gate to poll the timer-resolved A1. The genuine outcome is conditional-coverage
-	// A4-pended → A1; the payer responder's pend re-query resolves A4→A1, so the FINAL observed
-	// Outcome is "approved" (A1). ---
-	parsed, _, status, msg, err := g.submitClaimAndResolve(r.Context(), r, res.pci, res.orderJSON, res.supplierJSON, res.qrSource, res.patientRef, res.coverageRef, res.member, res.payer, res.recipient)
 	if status != 0 {
 		if g.relayOriginationError(w, err) {
 			return
@@ -415,18 +466,20 @@ func (g *Gateway) originateDispatch(w http.ResponseWriter, r *http.Request, memb
 		return
 	}
 
-	// FR-23: persist the payer-issued auth number against the order reference.
-	if err := g.cfg.Store.StoreAuthNumber(res.orderRef, parsed.PreAuthRef); err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "holder write failed (auth number)"})
-		return
+	// FR-23: persist the payer-issued auth number against the order reference. Only an
+	// approval has one; a denial and a pend have nothing to persist, and writing an
+	// empty authorization number against the order would look like an authorization.
+	if decision.Decision == PASDecisionApproved {
+		if err := g.cfg.Store.StoreAuthNumber(res.orderRef, decision.Parsed.PreAuthRef); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "holder write failed (auth number)"})
+			return
+		}
 	}
 
-	writeJSON(w, http.StatusOK, uc03Resp{
+	writeJSON(w, http.StatusOK, decision.applyTo(uc03Resp{
 		PARequired: true,
-		AuthNumber: parsed.PreAuthRef,
-		ValidUntil: parsed.ValidUntil,
 		QRAnswers:  res.qrAnswers,
-	})
+	}))
 }
 
 // parseOrderIDAndPerformer extracts the order's id and performer.reference from a

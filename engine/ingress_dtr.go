@@ -156,8 +156,7 @@ func (g *Gateway) prepareDTRPackageRequest(ctx context.Context, raw []byte) (dtr
 	for m := range patients {
 		out.member = m
 	}
-	sor := ReadSystemOfRecord(g.cfg.SoR)
-	pci, _, found, err := sor.ResolvePatientContext(ctx, out.member)
+	pci, found, err := g.resolveSubjectPCI(ctx, out.member)
 	if err != nil {
 		status, msg := SoRFailureResponse(err)
 		return out, status, msg

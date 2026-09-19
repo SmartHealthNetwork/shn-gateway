@@ -78,7 +78,7 @@ func TestEligibilityInbound_CoverageDerivedInsurer(t *testing.T) {
 	if !hasCov {
 		t.Fatalf("fixture bug: %s has no OpenCoverage", member)
 	}
-	payer, ok := shnsdk.ParsePayerIdentifier(covJSON, nil)
+	payer, ok := shnsdk.ParsePayerIdentifier(covJSON, g.cfg.SoR.ResolveByReference)
 	if !ok || payer.Value != "00078" {
 		t.Fatalf("fixture bug: %s's OpenCoverage payor = %+v (ok=%v), want value 00078", member, payer, ok)
 	}

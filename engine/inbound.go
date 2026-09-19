@@ -95,6 +95,15 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 	}
 	scope.leg = env.Metadata.TransactionType
 
+	// Every governed check this leg makes is reported as this leg: an inbound
+	// request's bytes are the peer's, at the seam certify.go already names.
+	r = r.WithContext(withFindingContext(r.Context(), findingContext{
+		LegType:       env.Metadata.TransactionType,
+		CorrelationID: env.Metadata.CorrelationID,
+		Seam:          inboundSeamFor(env.Metadata.TransactionType),
+		Whose:         "peer",
+	}))
+
 	// Per-hop transport auth: the Hub's X-Hub-Assertion was verified at the top of
 	// this handler; the bound authz token below is the AUTHORITY check (AI-11) —
 	// both are required, neither substitutes for the other.
@@ -172,10 +181,35 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		g.handlePASUpdateNativeInbound(w, r, env, tok, body, answerTok)
+	case "pas-claim-inquire":
+		// R8 re-home (FR-16/FR-27): the same fence as the two legs above. An
+		// inquiry's profile gives it no QuestionnaireResponse, so the fence is
+		// expected to pass — but the property belongs to any QR item wherever it
+		// arrives, and a fence that runs on two of three PAS legs is a gap waiting
+		// for the third to carry one.
+		if reason, ok := fenceAttestedItems(body); !ok {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": reason})
+			return
+		}
+		g.handlePASInquireInbound(w, r, env, tok, body, answerTok)
 	case "federated-query":
 		g.handleFederatedQueryInbound(w, r, env, tok, body, answerTok)
 	case "patient-dtr":
 		g.handlePatientDTRInbound(w, r, env, tok, body, answerTok)
+	}
+}
+
+// inboundSeamFor names the seam a finding belongs to, matching the seam
+// strings certificationPair already records ("payer-native",
+// "provider-ingress").
+func inboundSeamFor(legType string) string {
+	switch legType {
+	case "federated-query":
+		return "facility-inbound"
+	case "patient-dtr":
+		return "phg-inbound"
+	default:
+		return "payer-native"
 	}
 }
 
@@ -217,8 +251,9 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 	//
 	// F7: the lane is selected per LINE like every other validate, but this
 	// site deliberately does NOT route through g.validateFHIR — its failure contract
-	// (422 on !Valid, with the issues echoed) differs from validateFHIR's, and
-	// unifying them would change the wire. The line comes from the same
+	// (422 on !Valid, with the choke point's bounded govResult.Issues echoed)
+	// differs from validateFHIR's, and unifying them would change the wire.
+	// The line comes from the same
 	// shnsdk.LineOf(answerTok) call every other site uses — it is not special-cased
 	// here — and it evaluates to "" (the canonical lane) because coverage-eligibility
 	// is version-neutral (paCatalog Contract ""), so answerTok itself is always "".
@@ -233,15 +268,20 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "no FHIR validator lane configured for this leg (FR-36/FR-G29)"})
 		return
 	}
-	ingress, err := ingressValidator.Validate(ctx, cerJSON, "")
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "validator unavailable"})
-		return
-	}
-	if !ingress.Valid {
+	// Routed through the choke point so an invalid inbound request emits its
+	// conformance finding. handleInbound already tagged this leg's context
+	// (Whose "peer" — these are the requester's own bytes), so it is read as-is.
+	// This site's own status/message contract is preserved explicitly below.
+	if gr := g.validateGoverned(ctx, findingContextFrom(ctx), ingressValidator, cerJSON, "ingress", shnsdk.LineOf(answerTok), "", false); gr.Status != 0 {
+		if gr.Status == http.StatusInternalServerError {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "validator unavailable"})
+			return
+		}
+		// The issues echo is now BOUNDED (findingIssuesShown + "and N more"),
+		// where it was unbounded before the migration — see the PR body.
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
 			"error":  "ingress validation failed",
-			"issues": ingress.Issues,
+			"issues": gr.Issues,
 		})
 		return
 	}
@@ -347,13 +387,17 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "no FHIR validator lane configured for this leg (FR-36/FR-G29)"})
 		return
 	}
-	egress, err := egressValidator.Validate(ctx, responseFHIR, "")
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "validator unavailable"})
-		return
-	}
-	if !egress.Valid {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "egress validation failed"})
+	// Routed through the choke point so an invalid egress response still emits
+	// its conformance finding. responseFHIR is THIS gateway's own built answer,
+	// not the inbound request's bytes, so Whose is overridden to "own" (the
+	// context the handler entry tagged names the peer's inbound leg). Both
+	// outcomes here answer 500 (unchanged from before the migration) — the
+	// choke point's own message already matches this site's literals
+	// byte-for-byte in both cases, so it is relayed directly.
+	fc := findingContextFrom(ctx)
+	fc.Whose = "own"
+	if gr := g.validateGoverned(ctx, fc, egressValidator, responseFHIR, "egress", shnsdk.LineOf(answerTok), "", false); gr.Status != 0 {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": gr.Msg})
 		return
 	}
 
@@ -422,6 +466,15 @@ func (g *Gateway) handleFederatedQueryInbound(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	// The direction flips here: everything validated from this point on — the
+	// facility's own held records, its authored Patient identity binding, its
+	// authored Provenance, and the sealed fulfillment answer below — is THIS
+	// participant's own build, not the peer's request handleInbound tagged the
+	// context with. facilityRecordsBundle takes ctx directly, so this one retag
+	// covers all of its internal checks too.
+	fc := findingContextFrom(ctx)
+	fc.Whose = "own"
+	ctx = withFindingContext(ctx, fc)
 	// Disclose ONLY the named records for THIS member (minimum-necessary): every
 	// record of each named type within the stated dates, exactly as the system
 	// of record holds them, with the member's Patient and a source Provenance

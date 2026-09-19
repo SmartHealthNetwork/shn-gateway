@@ -1,0 +1,89 @@
+Messages recorded from the Da Vinci reference payer.
+
+Every file here is a real message, captured from a running reference payer. Nothing in
+this directory is hand-written and no value is edited after capture: these are the shapes
+a real payer sends, which is the only reason they are worth keeping. The JSON is
+re-indented for review, token for token — whitespace is the only difference between a file
+here and the bytes that came off the wire.
+
+## pas-inquire-response.json — the reference payer's answer to Claim/$inquire
+
+Recorded 2026-09-18 from the pinned reference payer image `br-payer:a8bece4-pasgraph5-l8000p2`
+(upstream commit a8bece458cb31f151845db9ea5a892e398deef56 plus this repository's reviewed
+response-graph and questionnaire-version corrections), running under the opt-in two-reference-
+implementation compose stack, with the payer's own pended-resolution delay set to 3 seconds.
+
+It is the payer's answer about the FIRST authorization a FRESH payer held — the case that used
+to be unmatchable (below) — and the recorder refuses to write this file unless the payer really
+holds none, so a later authorization cannot be mistaken for that proof.
+
+How it was captured, against that stack's payer FHIR base:
+
+1. `POST Claim/$submit` with this repository's committed pended prior-authorization request
+   golden (the home-oxygen E0424 order) — the payer answered A4 "Pending" with its own
+   ClaimResponse id;
+2. `GET ClaimResponse/{id}` until the payer's own resolution timer flipped that claim to A1
+   and minted its authorization number;
+3. `POST Claim/$inquire` with a prior-authorization inquiry request Bundle built from the
+   submitted bundle's own Patient, Coverage, Organizations and provider: an inquiry Claim
+   naming the same member, coverage, requested service and item trace number, plus the
+   payer's authorization number on the item, where PAS 2.0.1 and 2.1.0 place it;
+4. the answer, exactly as received and then re-indented, is this file. The payer answered
+   HTTP 200 with `application/fhir+json;charset=UTF-8`.
+
+The reference-payer mirror's own `Claim/$inquire` answer, and the synthetic inquiry
+fixtures the hermetic rows read, are compared against this recording by the mirror-shape
+tests.
+
+### What this recording establishes, including where it differs from the published IG
+
+* **The output parameter is named `responseBundle`.** The published `Claim-inquiry`
+  operation definitions name it `return` at every line (1..1 Bundle at 2.0.1 and 2.1.0,
+  0..* at 2.2.1). This payer answers a `Parameters` whose parameter is `responseBundle`.
+  A consumer that reads only `return` finds no response bundle in this answer. The
+  unpatched upstream commit answers the same way, so this is the reference payer's own
+  choice, not something the corrections here introduced.
+* **The ClaimResponse declares `profile-claimresponse`**, not the
+  `profile-claiminquiryresponse` the IG's own inquiry example declares.
+* **The response bundle carries the payer's whole retained response graph** — the
+  ClaimResponse beside the Patient, both Organizations, the stored Claim, the Coverage,
+  the PractitionerRole, the Practitioner and the ServiceRequest — with the response
+  bundle's `meta.profile` set to `profile-pas-inquiry-response-bundle`.
+* **The authorization number is on the item**, in the review-action extension's `number`
+  sub-extension; this payer sets no `ClaimResponse.preAuthRef` on an inquiry answer.
+* **An inquiry that matches nothing is answered 200 with an empty `Parameters`** (no output
+  parameter at all), which is conformant only where `return` is 0..*. That answer is recorded
+  too, as `pas-inquire-no-match.json`, from the same run: a conformant inquiry naming a
+  provider this payer holds no authorization for. It is two tokens long, and it is a
+  recording rather than a literal in a test for the same reason as the rest of this
+  directory — a literal cannot notice the payer changing its mind.
+
+### Two matching behaviours of this payer that a follow-up has to know about
+
+Both were observed while recording, and neither is a rule of the operation:
+
+1. **The inquiry must name the coverage as the payer stored it.** The payer resolves both the
+   inquiry's and the stored Claim's `insurance.coverage` to its own local identities before
+   comparing them, but the comparison itself is a string comparison of the two references.
+
+   *This is where a defect of our own was found and fixed.* Through `pasgraph4`, the reviewed
+   correction series projected a relative reference to an absolute one whenever the entry's
+   own base resolved inside the request — `Claim.insurance.coverage` included. On the FIRST
+   authorization a fresh payer stores there is no payer-local Coverage to resolve onto yet, so
+   that Claim kept the requester's absolute reference while every conformant inquiry resolves
+   to the payer-local relative one: the first authorization could never be matched by any
+   inquiry, and every later one matched normally, which is why it read as intermittent. The
+   unpatched upstream commit does not behave this way. From `pasgraph5` the projection leaves
+   that one reference to the payer's own coverage resolver, and this recording is the proof —
+   it is the first authorization on a fresh payer, and the payer matched it.
+2. **An inquiry narrows by the reference numbers, the item trace numbers and the requested
+   service**, each only when the inquiry states one, and always by the member, the insurer
+   and the requesting provider. It reads the authorization and administration reference
+   numbers from the Claim and from its items, so either line's placement is found.
+
+## The other files
+
+The coverage-requirements, documentation-templates and prior-authorization submit and
+update messages here were captured earlier, from the same pinned image, by the
+two-reference-implementation gate and the demonstration lanes that drive it; each is
+referenced from the test that reads it.

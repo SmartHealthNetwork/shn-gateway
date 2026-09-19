@@ -46,6 +46,15 @@ services:
       PAYER_DAVINCI_BASE_URL: http://br-payer:8081/fhir
       PAYER_DAVINCI_CDS_BASE_URL: http://br-payer:8081
       PAYER_DAVINCI_PAS_NATIVE: "true"
+      # CONFORMANCE_ENFORCEMENT is deliberately ABSENT, exactly as in the partner
+      # install unit (../../bundle/compose.yml): YOU register and run this gateway, at
+      # your own endpoint with your own secrets, so the level is your choice. Absent
+      # means none — every check still runs and an invalid result is recorded as a
+      # finding and the message relayed as sent, rather than refused. Set
+      # CONFORMANCE_ENFORCEMENT: strict here if you want your self-test to refuse.
+      # (The provider bundle ../compose.eval.yml interpolates the value from its
+      # operator's environment for the same reason: SHN's own gate exports strict
+      # before booting it, and a partner running it supplies nothing and gets none.)
     volumes:
       - ${SHN_SECRETS:?set SHN_SECRETS to your shn register --role payer bundle dir}:/etc/shn:ro
     ports: ["127.0.0.1:8085:8080"]

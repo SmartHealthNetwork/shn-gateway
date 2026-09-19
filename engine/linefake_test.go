@@ -436,3 +436,66 @@ func TestLineFakeMixedBundleProfilePrecedence(t *testing.T) {
 		})
 	}
 }
+
+// An INQUIRY's Claim is not held to the SUBMIT profile's Claim.item line-detail
+// minima, and the same bytes under the submit profile still are.
+//
+// The pair is the point: the rule is not switched off, it is scoped to the
+// profiles it was verified against (profile-claim / profile-claim-update). An
+// inquiry Claim names the lines it asks about; it does not re-request them, and
+// profile-claim-inquiry states none of that detail.
+func TestLineFake_InquiryClaimNotHeldToSubmitItemDetail(t *testing.T) {
+	const line = "2.2"
+	// One Claim, stated the way the inquiry builder states it: an item with a
+	// trace number and a product, and none of the submit-only line detail.
+	claim := lfObject{
+		"resourceType": "Claim",
+		"id":           "inq-1",
+		"status":       "active",
+		"use":          "preauthorization",
+		"type":         lfConcept(lfTypeSystem, "professional"),
+		"item": []any{lfObject{
+			"sequence":         1,
+			"productOrService": lfConcept("http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets", "G0151"),
+		}},
+	}
+	bundle := lfBytes(t, lfObject{
+		"resourceType": "Bundle",
+		"type":         "collection",
+		"identifier":   lfObject{"system": "urn:shn:pas:inquiry", "value": "i-1"},
+		"entry":        []any{lfObject{"resource": claim}},
+	})
+
+	v := NewLineFakeValidator(line)
+	res, err := v.Validate(context.Background(), bundle, lfPAS+"profile-pas-inquiry-request-bundle")
+	if err != nil {
+		t.Fatalf("validate as an inquiry: %v", err)
+	}
+	if !res.Valid {
+		t.Fatalf("an inquiry request Bundle must not be held to the submit profile's item minima: %v", res.Issues)
+	}
+
+	// …and the SAME bytes, certified as a SUBMISSION, still fail on all three.
+	res, err = v.Validate(context.Background(), bundle, lfPAS+"profile-pas-request-bundle")
+	if err != nil {
+		t.Fatalf("validate as a submission: %v", err)
+	}
+	if res.Valid {
+		t.Fatal("a submitted Claim with no item line-detail must fail at 2.2 — the rule was switched off, not scoped")
+	}
+	for _, want := range []string{
+		"Claim.item[0].extension:certificationType",
+		"Claim.item[0].extension:requestType",
+		"Claim.item[0].location[x]",
+	} {
+		found := false
+		for _, got := range res.Issues {
+			if len(got) >= len(want) && got[len(got)-len(want):] == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("submission issues %v do not report %s", res.Issues, want)
+		}
+	}
+}

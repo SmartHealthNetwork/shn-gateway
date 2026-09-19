@@ -240,6 +240,9 @@ func (g *Gateway) handleCRDIngress(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	r = r.WithContext(withFindingContext(r.Context(), findingContext{
+		LegType: legType, CorrelationID: child, Seam: "provider-ingress", Whose: "own",
+	}))
 	// Validation posture UNCHANGED: this driver $validates nothing on egress (it
 	// relays a partner's envelope), and the promotion adds no enforcement point.
 	// The CDS Hooks request is the same at every line, so the walk changes no
@@ -282,7 +285,7 @@ func (g *Gateway) handleCRDIngress(w http.ResponseWriter, r *http.Request) {
 	// The payer's answer is relayed exactly once it meets the CDS Hooks response
 	// rules at the routed line; the outcome label is read from its coverage
 	// information (metadata; never clinical content).
-	outcome, status, msg := crdAnswerOutcome(respJSON, shnsdk.LineOf(route.Token))
+	outcome, status, msg := g.crdAnswerOutcome(r.Context(), respJSON, shnsdk.LineOf(route.Token))
 	if status != 0 {
 		g.recordLeg(ex.ID, leg.Project(child, "error"))
 		writeJSON(w, status, map[string]string{"error": msg})
@@ -343,6 +346,9 @@ func (g *Gateway) handleDTRIngress(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	r = r.WithContext(withFindingContext(r.Context(), findingContext{
+		LegType: legType, CorrelationID: child, Seam: "provider-ingress", Whose: "own",
+	}))
 	requestKey := relay.Key{Leg: legType, Role: relay.RoleRequester, Direction: relay.DirectionRequest, Outcome: relay.OutcomeCarried}
 	sent, terr := relay.Transmit(prepared.request, relay.Check(requestKey))
 	if terr != nil {
@@ -459,6 +465,9 @@ func (g *Gateway) handlePASIngress(w http.ResponseWriter, r *http.Request) {
 	if fstatus == 0 && f.claimCorrelation != "" {
 		child = f.claimCorrelation
 	}
+	r = r.WithContext(withFindingContext(r.Context(), findingContext{
+		LegType: leg, CorrelationID: child, Seam: "provider-ingress", Whose: "own",
+	}))
 	// D-7 census, adjudicated 2026-08-14 — this site DELIBERATELY STAYS on
 	// OriginateLeg's arm-1-only empty-ProfileID backfill while its CRD and
 	// DTR-fetch siblings in this same driver were promoted to select-before-build.

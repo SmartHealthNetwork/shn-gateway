@@ -8,16 +8,12 @@ import (
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 )
 
 func TestNativePASRetainsApprovedBundle(t *testing.T) {
-	body, err := assembleTerminalPASBundle([]byte(assemblyRealPending), []byte(assemblyRealTerminal), fixedClock())
-	if err != nil {
-		t.Fatal(err)
-	}
+	body := pasBundleWithResponse(t, []byte(assemblyRealPending), []byte(assemblyRealTerminal))
 	srv := stubPartnerSrv(t, 200, body)
 	n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", newCensusSoR(), fixedClock)
 	result, err := n.Handle(context.Background(), "pas-claim", "corr-native", "PCI-1", originatorBuiltConformantBundle(t, "MBR-COVERED"))
@@ -29,70 +25,36 @@ func TestNativePASRetainsApprovedBundle(t *testing.T) {
 	}
 }
 
-func TestNativePASPollAssemblesRetainedGraph(t *testing.T) {
-	for _, mutation := range []string{"valid", "id", "patient", "request", "new reference"} {
-		t.Run(mutation, func(t *testing.T) {
-			terminal := []byte(assemblyRealTerminal)
-			if mutation != "valid" {
-				var obj map[string]any
-				json.Unmarshal(terminal, &obj)
-				switch mutation {
-				case "id":
-					obj["id"] = "changed"
-				case "patient", "request":
-					obj[mutation] = map[string]any{"reference": "Patient/foreign"}
-				default:
-					obj["insurer"] = map[string]any{"reference": "Organization/new"}
-				}
-				terminal, _ = json.Marshal(obj)
-			}
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method == "GET" {
-					w.Write(terminal)
-				} else {
-					w.Write([]byte(assemblyRealPending))
-				}
-			}))
-			defer srv.Close()
-			n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", newCensusSoR(), fixedClock, WithPendReQuery(time.Second, time.Millisecond))
-			request := originatorBuiltConformantBundle(t, "MBR-COVERED")
-			var req map[string]any
-			json.Unmarshal(request, &req)
-			for _, v := range req["entry"].([]any) {
-				r := v.(map[string]any)["resource"].(map[string]any)
-				if r["resourceType"] == "Claim" {
-					r["item"] = []any{map[string]any{"extension": []any{map[string]any{"url": pasInfoChangedExtURL, "valueBoolean": true}}}}
-				}
-			}
-			request, _ = json.Marshal(req)
-			result, err := n.Handle(context.Background(), "pas-claim", "corr-poll", "PCI-1", request)
-			if mutation != "valid" {
-				if err == nil && result.Status == 0 {
-					t.Fatal("accepted changed terminal graph")
-				}
-				if result.Commit != nil {
-					t.Fatal("invalid assembly has commit")
-				}
-				return
-			}
-			if err != nil || result.Status != 0 {
-				t.Fatalf("status=%d err=%v message=%s", result.Status, err, result.Message)
-			}
-			if result.ResponseRelayed() || !result.ResponseSubjectForeign {
-				t.Fatal("assembly misrepresented as relay")
-			}
-			if err := validatePASBundleGraph(responseBytes(result)); err != nil {
-				t.Fatal(err)
-			}
-			var got map[string]any
-			json.Unmarshal(responseBytes(result), &got)
-			if got["resourceType"] != "Bundle" {
-				t.Fatal("lost native response")
-			}
-			if !bytes.Contains(responseBytes(result), []byte(`"resourceType":"Task"`)) {
-				t.Fatal("retained Task lost")
-			}
-		})
+// TestNativePAS_UnclosedPayerGraphRefusedNoCommit: an answer naming records it
+// does not carry is refused (502) and writes nothing. The refusal is the
+// reference-closure rule's, applied to the payer's own bytes — this gateway
+// neither repairs the graph nor records a claim it could not read.
+func TestNativePAS_UnclosedPayerGraphRefusedNoCommit(t *testing.T) {
+	var b map[string]any
+	if err := json.Unmarshal([]byte(assemblyRealPending), &b); err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range b["entry"].([]any) {
+		r := v.(map[string]any)["resource"].(map[string]any)
+		if r["resourceType"] == "ClaimResponse" {
+			r["insurer"] = map[string]any{"reference": "Organization/nothing-carries-this"}
+		}
+	}
+	unclosed, err := json.Marshal(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := stubPartnerSrv(t, 200, unclosed)
+	n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", newCensusSoR(), fixedClock)
+	result, err := n.Handle(context.Background(), "pas-claim", "corr-unclosed", "PCI-1", originatorBuiltConformantBundle(t, "MBR-COVERED"))
+	if err != nil {
+		t.Fatalf("an unreadable payer answer is a refusal, not an error: %v", err)
+	}
+	if result.Status != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", result.Status)
+	}
+	if result.Commit != nil {
+		t.Fatal("a refused answer must write nothing")
 	}
 }
 
@@ -145,59 +107,6 @@ func (v *pasAssemblyValidator) Validate(ctx context.Context, b []byte, profile s
 		return shnsdk.Result{}, ctx.Err()
 	}
 	return shnsdk.Result{Valid: v.valid}, v.err
-}
-func TestPASAssemblyCertificationAndProvenance(t *testing.T) {
-	raw, err := assembleTerminalPASBundle([]byte(assemblyRealPending), []byte(assemblyRealTerminal), fixedClock())
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, mode := range []string{"valid", "invalid", "unavailable", "missing lane", "cancelled", "unknown line", "invalid flags", "long correlation"} {
-		t.Run(mode, func(t *testing.T) {
-			validator := &pasAssemblyValidator{valid: true}
-			g := &Gateway{cfg: Config{HolderID: "payer", Clock: fixedClock, ValidatorsByLine: map[string]shnsdk.Validator{"2.0": validator}}}
-			result := LegResult{Response: testResponse(raw), ResponseAssembled: true, ResponseSubjectForeign: true}
-			ctx := context.Background()
-			token := "pa.pas@2.0"
-			correlation := "corr-assembly"
-			switch mode {
-			case "invalid":
-				validator.valid = false
-			case "unavailable":
-				validator.err = fmt.Errorf("unavailable")
-			case "missing lane":
-				g.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"2.1": validator}
-			case "cancelled":
-				c, cancel := context.WithCancel(ctx)
-				cancel()
-				ctx = c
-			case "unknown line":
-				token = "pa.pas@9.9"
-			case "invalid flags":
-				result.Response = relayedResponse(raw)
-			case "long correlation":
-				correlation = strings.Repeat("a", 257)
-			}
-			event, status, _ := g.validatePASResult(ctx, result, token, correlation, "pas-claim")
-			if mode != "valid" {
-				if status == 0 || event != nil {
-					t.Fatal("accepted uncertified assembly")
-				}
-				return
-			}
-			if status != 0 || event == nil {
-				t.Fatal("missing successful provenance")
-			}
-			if validator.profile != "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-pas-response-bundle|2.0.1" {
-				t.Fatalf("wrong profile %s", validator.profile)
-			}
-			if event.Kind != "leg.assembled" || event.CorrelationID != correlation || !bytes.Contains(event.Payload, []byte(`"resourceType":"Provenance"`)) || !bytes.Contains(event.Payload, []byte("Organization/payer")) {
-				t.Fatal("incomplete assembly provenance")
-			}
-			if bytes.Contains(event.Payload, []byte("SubscriberExample")) || bytes.Contains(event.Payload, []byte("AUTH-")) || bytes.Contains(event.Payload, []byte("LossReport")) {
-				t.Fatal("clinical content or invented transform in provenance")
-			}
-		})
-	}
 }
 
 // fixturePASResponse constructs a closed SYNTHETIC test graph from decision
@@ -274,11 +183,56 @@ func (r pasResultResponder) Handle(context.Context, string, string, string, []by
 	}
 	return r.result, r.err
 }
-func TestPASAssemblyInboundCommitOrdering(t *testing.T) {
-	assembled, err := assembleTerminalPASBundle([]byte(assemblyRealPending), []byte(assemblyRealTerminal), fixedClock())
-	if err != nil {
-		t.Fatal(err)
+
+// TestPASResultCertification: this gateway certifies what it PRODUCED and stands
+// down for what it RELAYED. A relayed payer answer never reaches the validator —
+// the case that used to fail an entire exchange because a payer's own extension
+// made SHN's validator refuse SHN's copy of the payer's decision.
+func TestPASResultCertification(t *testing.T) {
+	raw := pasBundleWithResponse(t, []byte(assemblyRealPending), []byte(assemblyRealTerminal))
+	for _, mode := range []string{"relayed", "produced", "produced invalid", "produced unavailable", "missing lane"} {
+		t.Run(mode, func(t *testing.T) {
+			validator := &pasAssemblyValidator{valid: true}
+			g := &Gateway{cfg: Config{HolderID: "payer", Clock: fixedClock, ValidatorsByLine: map[string]shnsdk.Validator{"2.0": validator}}}
+			result := LegResult{Response: testResponse(raw), ResponseSubjectForeign: true}
+			switch mode {
+			case "relayed":
+				result.Response = relayedResponse(raw)
+			case "produced invalid":
+				validator.valid = false
+			case "produced unavailable":
+				validator.err = fmt.Errorf("unavailable")
+			case "missing lane":
+				g.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"2.1": validator}
+			}
+			status, _ := g.validatePASResult(context.Background(), result, "pa.pas@2.0", "pas-claim")
+			switch mode {
+			case "relayed":
+				if status != 0 {
+					t.Fatalf("a relayed payer answer must not be certified by this gateway (status=%d)", status)
+				}
+				if validator.profile != "" {
+					t.Fatal("the validator was handed a payer's own bytes")
+				}
+			case "produced":
+				if status != 0 {
+					t.Fatalf("a valid produced answer was refused (status=%d)", status)
+				}
+			default:
+				if status == 0 {
+					t.Fatal("accepted an uncertified produced answer")
+				}
+			}
+		})
 	}
+}
+
+// TestPASInboundCommitOrdering pins the ordering both PAS inbound handlers keep:
+// the response leg is sealed BEFORE any payer state is committed, and every
+// pre-commit exit rolls back. It drives an answer the gateway PRODUCED (a test
+// payload), because that is the arm where certification can still refuse.
+func TestPASInboundCommitOrdering(t *testing.T) {
+	assembled := pasBundleWithResponse(t, []byte(assemblyRealPending), []byte(assemblyRealTerminal))
 	for _, leg := range []string{"pas-claim", "pas-claim-update"} {
 		for _, mode := range []string{"valid", "validator reject", "validator unavailable", "cancelled", "seal failure", "store failure", "responder error", "bare operation"} {
 			t.Run(leg+"/"+mode, func(t *testing.T) {
@@ -288,8 +242,8 @@ func TestPASAssemblyInboundCommitOrdering(t *testing.T) {
 				if leg == "pas-claim-update" {
 					request = originatorBuiltConformantUpdateBundle(t)
 				}
-				commits, rollbacks, observed := 0, 0, 0
-				result := LegResult{Response: testResponse(assembled), ResponseAssembled: true, ResponseSubjectForeign: true, Commit: func() error {
+				commits, rollbacks, observed, findings := 0, 0, 0, 0
+				result := LegResult{Response: testResponse(assembled), ResponseSubjectForeign: true, Commit: func() error {
 					commits++
 					if mode == "store failure" {
 						return fmt.Errorf("store unavailable")
@@ -298,7 +252,6 @@ func TestPASAssemblyInboundCommitOrdering(t *testing.T) {
 				}, Rollback: func() { rollbacks++ }}
 				if mode == "bare operation" {
 					result.Response = testResponse(claimResponseFor(t, "Patient/MBR-COVERED"))
-					result.ResponseAssembled = false
 					result.ResponseSubjectForeign = false
 				}
 				responder := pasResultResponder{result: result}
@@ -312,11 +265,19 @@ func TestPASAssemblyInboundCommitOrdering(t *testing.T) {
 				}
 				g.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"2.0": validator}
 				g.cfg.Observer = func(e ObserverEvent) {
-					if e.Kind == "leg.assembled" {
-						observed++
-						if commits != 1 {
-							t.Error("assembly event before Commit")
-						}
+					// A conformance finding is not a leg note. validateGoverned
+					// emits it AT the invalid verdict — necessarily before any
+					// Commit, since the refusal is what stops the commit — and
+					// that record is the whole point of the governed check.
+					// Counting it separately keeps the ordering rule below about
+					// leg notes, and findings is asserted on its own after.
+					if e.Kind == ConformanceObservedEvent {
+						findings++
+						return
+					}
+					observed++
+					if commits != 1 {
+						t.Error("a leg note was observed before Commit")
 					}
 				}
 				env := shnsdk.Envelope{Metadata: shnsdk.Metadata{Sender: requester.ID, Recipient: "payer", TransactionType: leg, AuthorityFrame: "payer-coverage", CorrelationID: "corr-assembly-inbound"}}
@@ -338,13 +299,13 @@ func TestPASAssemblyInboundCommitOrdering(t *testing.T) {
 					g.handlePASUpdateNativeInbound(rec, r, env, tok, request, "pa.pas@2.0")
 				}
 				if mode == "valid" {
-					if rec.Code != 200 || commits != 1 || rollbacks != 0 || observed != 1 {
-						t.Fatalf("status=%d commits=%d releases=%d events=%d body=%s", rec.Code, commits, rollbacks, observed, rec.Body.String())
+					if rec.Code != 200 || commits != 1 || rollbacks != 0 {
+						t.Fatalf("status=%d commits=%d releases=%d body=%s", rec.Code, commits, rollbacks, rec.Body.String())
 					}
 					payload := openResponseLeg(t, requester, rec.Body.Bytes())
 					hdr, body, err := shnsdk.DecodeHTTPFrame(payload)
 					if err != nil || hdr.Headers[shnsdk.FrameHeaderContractVersion] != "pa.pas@2.0" || !bytes.Equal(body, assembled) {
-						t.Fatal("assembled response or certified stamp changed")
+						t.Fatal("the produced response or its certified stamp changed")
 					}
 					return
 				}
@@ -354,6 +315,17 @@ func TestPASAssemblyInboundCommitOrdering(t *testing.T) {
 				}
 				if rec.Code == 200 || commits != wantCommits || rollbacks != 1 || observed != 0 {
 					t.Fatalf("status=%d commits=%d releases=%d events=%d", rec.Code, commits, rollbacks, observed)
+				}
+				// Only an invalid VERDICT is a conformance finding: an outage
+				// ("validator unavailable") is identical at every enforcement
+				// level and records nothing, and every other refusal here never
+				// reaches a check at all.
+				wantFindings := 0
+				if mode == "validator reject" {
+					wantFindings = 1
+				}
+				if findings != wantFindings {
+					t.Fatalf("conformance findings = %d, want %d — the refusal must leave exactly its own record", findings, wantFindings)
 				}
 			})
 		}

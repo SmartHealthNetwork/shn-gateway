@@ -82,7 +82,7 @@ func (g *Gateway) conformantCRDBindContext(ctx context.Context, reqJSON []byte, 
 	if srMember != covMember || srMember != ctxMember {
 		return nil, nil, http.StatusBadRequest, "inconsistent patient in order-select"
 	}
-	pci, _, found, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(ctx, srMember)
+	pci, found, readErr := g.resolveSubjectPCI(ctx, srMember)
 	if readErr != nil {
 		status, msg := SoRFailureResponse(readErr)
 		return nil, nil, status, msg

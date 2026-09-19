@@ -54,14 +54,6 @@ type nativeResponder struct {
 	cds   cdsServiceListing
 	store Store // gateway-owned shadow ledger + EOB Store for the PAS legs (nil ⇒ read-only only)
 	clock func() time.Time
-	// PAS pend re-query: a real Da Vinci payer (br-payer) re-pends a conformant
-	// amendment (persistUpdatePath keeps a conditional item A4 + reschedules) and auto-resolves
-	// A4→A1 only on its own timer (PasPendedResolutionService, pas.pended-resolution-delay-seconds).
-	// On a re-pended ClaimUpdate the responder polls GET ClaimResponse/{id} until A1 (or timeout →
-	// 422, no silent pass). Timeout MUST exceed the payer's resolution delay (E4 lowers it to 3s for
-	// the harness) and stay under the originator's 30s Hub-client timeout.
-	pendReQueryTimeout  time.Duration
-	pendReQueryInterval time.Duration
 	// declaredContractVersions is the operator-declared token set for the
 	// foreign partner (PAYER_DAVINCI_CONTRACT_VERSIONS) — the peer-config
 	// source of the routing filter. Empty = silent peer:
@@ -125,12 +117,16 @@ type nativeResponder struct {
 	// every deployment that does not set the two env vars.
 	payorEdgeOwn     *shnsdk.PayerIdentifier
 	payorEdgeBackend *shnsdk.PayerIdentifier
-}
 
-const (
-	defaultPendReQueryTimeout  = 12 * time.Second
-	defaultPendReQueryInterval = 1 * time.Second
-)
+	// conformance is the policy of the gateway this responder runs in, passed
+	// as an option because NewNativeResponder runs before engine.New. The zero
+	// value is strict, so a responder built without the option is today's
+	// behavior.
+	conformance ConformancePolicy
+	// emitFinding is bound by engine.New (bindFindingEmitter) because no
+	// gateway exists when this responder is constructed. nil is safe.
+	emitFinding func(ConformanceFinding)
+}
 
 // NativeOption configures optional nativeResponder behavior.
 type NativeOption func(*nativeResponder)
@@ -146,6 +142,26 @@ func WithCDSBaseURL(cdsBaseURL string) NativeOption {
 		}
 	}
 }
+
+// WithConformancePolicy gives the responder the enforcement policy of the
+// gateway it runs in. Unset ⇒ the zero value, strict.
+func WithConformancePolicy(p ConformancePolicy) NativeOption {
+	return func(n *nativeResponder) { n.conformance = p }
+}
+
+// ConformanceLevelForTest exposes this responder's own configured enforcement
+// level — test-only introspection (the EndpointEvidenceForTest pattern)
+// proving a WithConformancePolicy option (or its absence, which leaves the
+// zero value, strict) actually reached this responder, not just whatever
+// engine.Config a caller assembled.
+func (n *nativeResponder) ConformanceLevelForTest() ConformanceEnforcement {
+	return n.conformance.Level()
+}
+
+// bindFindingEmitter receives the engine's finding emitter after engine.New
+// builds the gateway. It cannot be a NativeOption: NewNativeResponder runs
+// before engine.New, so no gateway exists when the options are applied.
+func (n *nativeResponder) bindFindingEmitter(emit func(ConformanceFinding)) { n.emitFinding = emit }
 
 // WithDTRBaseURL overrides the base used for the DTR forwards
 // (/Questionnaire/$questionnaire-package and $next-question), for partners whose DTR
@@ -175,20 +191,6 @@ func WithPASBaseURL(pasBaseURL string) NativeOption {
 // leg. Empty (the default) selects the listed service for the order-dispatch hook.
 func WithCRDDispatchService(serviceID string) NativeOption {
 	return func(n *nativeResponder) { n.crdDispatchServiceID = serviceID }
-}
-
-// WithPendReQuery overrides the PAS pend re-query poll timeout + interval (E2). Zero values keep
-// the defaults. Used to make the hermetic nativeResponder tests fast (short interval) and to let
-// the harness tune the bound relative to the payer's resolution delay (E4).
-func WithPendReQuery(timeout, interval time.Duration) NativeOption {
-	return func(n *nativeResponder) {
-		if timeout > 0 {
-			n.pendReQueryTimeout = timeout
-		}
-		if interval > 0 {
-			n.pendReQueryInterval = interval
-		}
-	}
 }
 
 // WithDeclaredContractVersions supplies the operator-declared contract tokens
@@ -281,7 +283,6 @@ func NewNativeResponder(client *http.Client, baseURL, crdServiceID string, store
 	}
 	n := &nativeResponder{
 		client: client, baseURL: baseURL, cdsBaseURL: baseURL, crdServiceID: crdServiceID, store: store, clock: clock,
-		pendReQueryTimeout: defaultPendReQueryTimeout, pendReQueryInterval: defaultPendReQueryInterval,
 	}
 	for _, o := range opts {
 		o(n)
@@ -638,6 +639,12 @@ func (n *nativeResponder) Handle(ctx context.Context, leg, corrID, subjectPCI st
 		res, err := n.handlePASClaimUpdateNative(ctx, corrID, subjectPCI, in, requestFHIR)
 		return res, err
 
+	case "pas-claim-inquire":
+		// A read of the payer's own record about an authorization it pended
+		// (inquire.go). It acquires no claim and writes nothing here: the ledger
+		// effect is derived by the payer gateway from the answer.
+		return n.handlePASInquireNative(ctx, contract, in)
+
 	default:
 		// The br-payer-targeting lane routes the read-only + PAS legs here; this is defensive
 		// for an unrouted leg.
@@ -741,31 +748,6 @@ func upstreamAnswer(resp *http.Response, rb []byte, label string) (upstreamReply
 	return reply, LegResult{}, nil
 }
 
-// get reads base+path (the read sibling of post), reusing the same authed client. Used by the PAS
-// pend re-query (GET ClaimResponse/{id}); it sends no body. Same relay-non-2xx /
-// error-on-no-response contract as post.
-func (n *nativeResponder) get(ctx context.Context, base, path, label string) ([]byte, LegResult, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+path, nil)
-	if err != nil {
-		return nil, LegResult{}, fmt.Errorf("upstream payer %s request build failed: %w", label, err)
-	}
-	req.Header.Set("Accept", "application/json")
-	resp, err := n.client.Do(req)
-	if err != nil {
-		return nil, LegResult{}, fmt.Errorf("upstream payer %s unreachable: %w", label, err)
-	}
-	defer resp.Body.Close()
-	rb, err := io.ReadAll(io.LimitReader(resp.Body, maxPartnerBody))
-	if err != nil {
-		return nil, LegResult{}, fmt.Errorf("upstream payer %s read failed: %w", label, err)
-	}
-	reply, bad, err := upstreamAnswer(resp, rb, label)
-	if err != nil || bad.Status != 0 {
-		return nil, bad, err
-	}
-	return reply.raw, LegResult{}, nil
-}
-
 // forwardCRD sends a CDS Hooks request to the partner service chosen by its hook:
 // exactly as the network carried it, or with only the payer identity of its
 // prefetch coverage mapped (when that mapping is configured). The hook and every
@@ -789,7 +771,7 @@ func (n *nativeResponder) forwardCRD(ctx context.Context, contract, leg string, 
 	if bad.Status != 0 {
 		return bad, nil // upstream non-2xx → relayable LegResult (Response carries the body)
 	}
-	if refused := certifyCDSHooksAnswer(up.raw, answerLineOr(ctx, contract), "payer"); refused.Status != 0 {
+	if refused := certifyCDSHooksAnswer(ctx, n.conformance, n.emitFinding, up.raw, answerLineOr(ctx, contract), "own"); refused.Status != 0 {
 		return refused, nil
 	}
 	// A CDS Hooks answer is JSON: one sent without a media type is carried as
@@ -801,32 +783,73 @@ func (n *nativeResponder) forwardCRD(ctx context.Context, contract, leg string, 
 	return LegResult{Response: relay.Exact(up.body, ct)}, nil
 }
 
-// certifyCDSHooksAnswer applies the CDS Hooks response rules (and, at a CRD line,
-// the CRD card rules) to a participant's answer. It never changes the answer: a
-// broken rule refuses it with 502 naming each rule and where it is broken; a
-// SHOULD-level finding is logged and the answer passes. whose names the
-// participant in the refusal ("payer").
-func certifyCDSHooksAnswer(body []byte, line, whose string) LegResult {
+// certifyCDSHooksAnswer applies the CDS Hooks response rules (and, at a CRD
+// line, the CRD card rules) to a participant's answer. It never changes the
+// answer. Every violation is recorded as a finding at both levels; whether a
+// refusing violation actually refuses is the receiving participant's choice,
+// which the policy holds. A SHOULD-level finding is logged and the answer
+// passes, as before.
+//
+// whose classifies WHOSE SYSTEM the certified bytes came from, for the
+// finding: "own" when the bytes are this gateway's own backend answering
+// (forwardCRD, certifying before it ever relays to a peer) or "peer" when
+// they are a peer's answer received over the network (crdAnswerOutcome).
+// This is independent of the refusal MESSAGE, which always names the
+// participant the requester asked ("payer") regardless of which side is
+// doing the certifying — a requester reading a refusal never sees "own".
+//
+// emit may be nil: a responder the engine never wired still certifies and
+// still refuses at strict, it simply records nothing.
+func certifyCDSHooksAnswer(ctx context.Context, policy ConformancePolicy, emit func(ConformanceFinding), body []byte, line, whose string) LegResult {
 	violations := shnsdk.CheckCDSHooksResponse(body, line)
 	if len(violations) == 0 {
 		return LegResult{}
 	}
+	fc := findingContextFrom(ctx)
 	var refusing, advisory []string
+	var refuse bool
 	for _, v := range violations {
 		desc := v.Rule
 		if v.Path != "" {
 			desc += " at " + v.Path
 		}
-		if v.Severity == shnsdk.SeverityError {
-			refusing = append(refusing, desc)
-		} else {
+		if v.Severity != shnsdk.SeverityError {
+			// One finding per violation (§5), advisory included: a SHOULD-level
+			// finding never refuses, but it is still something the participant
+			// should be able to read back.
 			advisory = append(advisory, desc)
+			if emit != nil {
+				emit(ConformanceFinding{
+					Kind: string(KindCDSEnvelope), Direction: "validate",
+					LegType: fc.LegType, CorrelationID: fc.CorrelationID, Seam: fc.Seam,
+					Whose: whose, Line: line,
+					Level: policy.Level().String(), Decision: Record.String(),
+					Rule: v.Rule, Path: v.Path,
+					PayloadSHA256: sha256hex(body),
+				})
+			}
+			continue
+		}
+		decision := policy.Decide(KindCDSEnvelope, v.Rule, VerdictInvalid)
+		if decision == Refuse {
+			refuse = true
+			refusing = append(refusing, desc)
+		}
+		if emit != nil {
+			emit(ConformanceFinding{
+				Kind: string(KindCDSEnvelope), Direction: "validate",
+				LegType: fc.LegType, CorrelationID: fc.CorrelationID, Seam: fc.Seam,
+				Whose: whose, Line: line,
+				Level: policy.Level().String(), Decision: decision.String(),
+				Rule: v.Rule, Path: v.Path,
+				PayloadSHA256: sha256hex(body),
+			})
 		}
 	}
 	if len(advisory) > 0 {
-		log.Printf("gateway: %s CRD response: CDS Hooks recommendations not met: %s", whose, strings.Join(advisory, "; "))
+		log.Printf("gateway: payer CRD response: CDS Hooks recommendations not met: %s", strings.Join(advisory, "; "))
 	}
-	if !shnsdk.CDSHooksViolationsRefuse(violations) {
+	if !refuse {
 		return LegResult{}
 	}
 	const shown = 5
@@ -835,7 +858,7 @@ func certifyCDSHooksAnswer(body []byte, line, whose string) LegResult {
 	}
 	return LegResult{
 		Status:  http.StatusBadGateway,
-		Message: whose + " CRD response is not a valid CDS Hooks response: " + strings.Join(refusing, "; "),
+		Message: "payer CRD response is not a valid CDS Hooks response: " + strings.Join(refusing, "; "),
 	}
 }
 

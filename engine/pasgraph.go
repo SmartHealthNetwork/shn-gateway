@@ -1,3 +1,23 @@
+// pasgraph.go — the PAS response-graph REFERENCE-CLOSURE RULE (FR-G28).
+//
+// A payer's answer must CARRY EVERY RESOURCE IT NAMES. This reads a PAS response
+// Bundle as a graph — one ClaimResponse, every entry identified by an absolute
+// fullUrl, every Reference resolving to an entry, a contained resource of its own
+// owner, or a version the graph actually holds — and refuses anything else. It
+// changes not one byte: the rule decides whether a payer's bytes are relayed or
+// refused, never what they say.
+//
+// It is a PRODUCT GUARD, not a helper of the terminal-response assembly that used
+// to live beside it. That assembly is gone (a relayed decision is the payer's own
+// message); the rule stayed, because a receiver that accepts an answer naming
+// records it does not carry has accepted a message it cannot read. It is held to
+// answers a REAL reference payer emitted, unpatched and corrected, by
+// test/adversarial/payer_graph_capture_test.go — every raw capture refused, every
+// corrected one accepted byte for byte.
+//
+// The bounded decoder below is part of the rule: a duplicate JSON member, a
+// number reshaped by float conversion or a trailing document would each make
+// "what this answer says" ambiguous before any reference was walked.
 package engine
 
 import (
@@ -8,7 +28,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"time"
 )
 
 const pasGraphMaxBytes = 8 << 20
@@ -16,61 +35,7 @@ const pasGraphMaxResources = 256
 const pasGraphMaxReferences = 4096
 const pasGraphMaxDepth = 64
 
-func pasAssemblyError() error { return errors.New("engine: invalid or incomplete PAS response graph") }
-
-// assembleTerminalPASBundle preserves the payer graph and entry
-// identity while replacing only its ClaimResponse. Certification and authority
-// remain the caller's responsibility; this helper performs no external reads.
-func assembleTerminalPASBundle(original, terminal []byte, assembledAt time.Time) ([]byte, error) {
-	g, err := readPASGraph(original)
-	if err != nil {
-		return nil, err
-	}
-	if err = g.validate(); err != nil {
-		return nil, err
-	}
-	// The original Bundle signature cannot certify changed content. Preserve
-	// signed direct relays, but never carry that signature into an assembly.
-	if _, signed := g.bundle["signature"]; signed {
-		return nil, pasAssemblyError()
-	}
-	if len(terminal) > pasGraphMaxBytes {
-		return nil, pasAssemblyError()
-	}
-	var replacement map[string]any
-	if decodePASObject(terminal, &replacement) != nil || replacement["resourceType"] != "ClaimResponse" {
-		return nil, pasAssemblyError()
-	}
-	old := g.response.resource
-	if replacement["id"] != old["id"] {
-		return nil, pasAssemblyError()
-	}
-	for _, field := range []string{"patient", "request"} {
-		before, ok := old[field].(map[string]any)
-		if !ok {
-			return nil, pasAssemblyError()
-		}
-		after, ok := replacement[field].(map[string]any)
-		if !ok {
-			return nil, pasAssemblyError()
-		}
-		a, aok := before["reference"].(string)
-		b, bok := after["reference"].(string)
-		if !aok || !bok || a == "" || a != b {
-			return nil, pasAssemblyError()
-		}
-	}
-	g.entries[g.response.index].(map[string]any)["resource"] = replacement
-	g.bundle["timestamp"] = assembledAt.UTC().Format(time.RFC3339Nano)
-	result, err := json.Marshal(g.bundle)
-	if err != nil {
-		return nil, pasAssemblyError()
-	}
-	if err = validatePASBundleGraph(result); err != nil {
-		return nil, err
-	}
-	return result, nil
-}
+func pasGraphError() error { return errors.New("engine: invalid or incomplete PAS response graph") }
 
 func validatePASBundleGraph(raw []byte) error {
 	g, err := readPASGraph(raw)
@@ -95,58 +60,58 @@ type pasGraph struct {
 
 func readPASGraph(raw []byte) (*pasGraph, error) {
 	if len(raw) > pasGraphMaxBytes {
-		return nil, pasAssemblyError()
+		return nil, pasGraphError()
 	}
 	g := &pasGraph{byURL: make(map[string]*pasGraphEntry)}
 	if decodePASObject(raw, &g.bundle) != nil || g.bundle["resourceType"] != "Bundle" || g.bundle["type"] != "collection" {
-		return nil, pasAssemblyError()
+		return nil, pasGraphError()
 	}
 	var ok bool
 	g.entries, ok = g.bundle["entry"].([]any)
 	if !ok || len(g.entries) == 0 || len(g.entries) > pasGraphMaxResources {
-		return nil, pasAssemblyError()
+		return nil, pasGraphError()
 	}
 	for i, v := range g.entries {
 		e, ok := v.(map[string]any)
 		if !ok {
-			return nil, pasAssemblyError()
+			return nil, pasGraphError()
 		}
 		full, ok := e["fullUrl"].(string)
 		if !ok || full == "" {
-			return nil, pasAssemblyError()
+			return nil, pasGraphError()
 		}
 		u, err := url.Parse(full)
 		if err != nil || !u.IsAbs() || u.Fragment != "" || u.RawQuery != "" || u.ForceQuery || strings.Contains(full, "/_history/") {
-			return nil, pasAssemblyError()
+			return nil, pasGraphError()
 		}
 		r, ok := e["resource"].(map[string]any)
 		if !ok {
-			return nil, pasAssemblyError()
+			return nil, pasGraphError()
 		}
 		typ, tok := r["resourceType"].(string)
 		id, iok := r["id"].(string)
 		if !tok || !iok || typ == "" || !pasSafeResourceID(id) {
-			return nil, pasAssemblyError()
+			return nil, pasGraphError()
 		}
 		if u.Scheme == "http" || u.Scheme == "https" {
 			if u.Host == "" || !strings.HasSuffix(u.Path, "/"+typ+"/"+id) {
-				return nil, pasAssemblyError()
+				return nil, pasGraphError()
 			}
 		}
 		if _, exists := g.byURL[full]; exists {
-			return nil, pasAssemblyError()
+			return nil, pasGraphError()
 		}
 		entry := &pasGraphEntry{full, r, i}
 		g.byURL[full] = entry
 		if typ == "ClaimResponse" {
 			if g.response != nil {
-				return nil, pasAssemblyError()
+				return nil, pasGraphError()
 			}
 			g.response = entry
 		}
 	}
 	if g.response == nil {
-		return nil, pasAssemblyError()
+		return nil, pasGraphError()
 	}
 	return g, nil
 }
@@ -155,7 +120,7 @@ func (g *pasGraph) validate() error { return g.validateWithReferencePolicy(nil) 
 
 func (g *pasGraph) validateWithReferencePolicy(policy *authoredPASReferencePolicy) error {
 	if !policy.matches(g) {
-		return pasAssemblyError()
+		return pasGraphError()
 	}
 	// Bundle and entry metadata have no RESTful containing resource fullUrl.
 	// Their references must therefore be explicit absolute identities.
@@ -182,17 +147,17 @@ func (g *pasGraph) validateWithReferencePolicy(policy *authoredPASReferencePolic
 		if list, exists := e.resource["contained"]; exists {
 			arr, ok := list.([]any)
 			if !ok {
-				return pasAssemblyError()
+				return pasGraphError()
 			}
 			for _, v := range arr {
 				r, ok := v.(map[string]any)
 				if !ok {
-					return pasAssemblyError()
+					return pasGraphError()
 				}
 				typ, tok := r["resourceType"].(string)
 				id, ok := r["id"].(string)
 				if !tok || typ == "" || !ok || !pasSafeResourceID(id) || contained[id] != nil {
-					return pasAssemblyError()
+					return pasGraphError()
 				}
 				contained[id] = r
 			}
@@ -210,19 +175,19 @@ func (g *pasGraph) walk(v any, owner *pasGraphEntry, contained map[string]map[st
 
 func (g *pasGraph) walkWithReferencePolicy(v any, owner *pasGraphEntry, contained map[string]map[string]any, depth int, inContained bool, path string, policy *authoredPASReferencePolicy) error {
 	if depth > pasGraphMaxDepth {
-		return pasAssemblyError()
+		return pasGraphError()
 	}
 	switch x := v.(type) {
 	case map[string]any:
 		if typ, ok := x["resourceType"].(string); ok {
 			g.resources++
 			if g.resources > pasGraphMaxResources || typ == "Bundle" || typ == "Parameters" {
-				return pasAssemblyError()
+				return pasGraphError()
 			}
 			if depth > 0 {
 				inContained = true
 				if _, exists := x["contained"]; exists {
-					return pasAssemblyError()
+					return pasGraphError()
 				}
 			}
 		}
@@ -230,7 +195,7 @@ func (g *pasGraph) walkWithReferencePolicy(v any, owner *pasGraphEntry, containe
 			s, ok := ref.(string)
 			g.refs++
 			if !ok || s == "" || g.refs > pasGraphMaxReferences || (!g.resolve(s, owner, contained, inContained) && !policy.allows(owner, path, x)) {
-				return pasAssemblyError()
+				return pasGraphError()
 			}
 		}
 		for key, child := range x {
@@ -304,21 +269,21 @@ func decodePASObject(raw []byte, dst *map[string]any) error {
 	d.UseNumber()
 	v, err := decodePASValue(d, 0)
 	if err != nil {
-		return pasAssemblyError()
+		return pasGraphError()
 	}
 	obj, ok := v.(map[string]any)
 	if !ok {
-		return pasAssemblyError()
+		return pasGraphError()
 	}
 	if _, err = d.Token(); err != io.EOF {
-		return pasAssemblyError()
+		return pasGraphError()
 	}
 	*dst = obj
 	return nil
 }
 func decodePASValue(d *json.Decoder, depth int) (any, error) {
 	if depth > pasGraphMaxDepth {
-		return nil, pasAssemblyError()
+		return nil, pasGraphError()
 	}
 	t, err := d.Token()
 	if err != nil {
@@ -334,10 +299,10 @@ func decodePASValue(d *json.Decoder, depth int) (any, error) {
 			}
 			s, ok := key.(string)
 			if !ok {
-				return nil, pasAssemblyError()
+				return nil, pasGraphError()
 			}
 			if _, exists := obj[s]; exists {
-				return nil, pasAssemblyError()
+				return nil, pasGraphError()
 			}
 			child, err := decodePASValue(d, depth+1)
 			if err != nil {
@@ -347,7 +312,7 @@ func decodePASValue(d *json.Decoder, depth int) (any, error) {
 		}
 		end, err := d.Token()
 		if err != nil || end != json.Delim('}') {
-			return nil, pasAssemblyError()
+			return nil, pasGraphError()
 		}
 		return obj, nil
 	case json.Delim('['):
@@ -361,12 +326,12 @@ func decodePASValue(d *json.Decoder, depth int) (any, error) {
 		}
 		end, err := d.Token()
 		if err != nil || end != json.Delim(']') {
-			return nil, pasAssemblyError()
+			return nil, pasGraphError()
 		}
 		return arr, nil
 	default:
 		if _, ok := t.(json.Delim); ok {
-			return nil, pasAssemblyError()
+			return nil, pasGraphError()
 		}
 		return t, nil
 	}

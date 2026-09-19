@@ -131,20 +131,58 @@ func originatorBuiltConformantBundle(t *testing.T, member string) []byte {
 	if err != nil {
 		t.Fatalf("FillQuestionnaire: %v", err)
 	}
-	got, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
-		QR:          qrJSON,
-		SR:          srJSON,
-		PatientRef:  ref,
-		CoverageRef: "Coverage/convergence-coverage",
-		MemberID:    member,
-		Corr:        "convergence-pas-submit-0001",
-		Created:     created,
-		Payer:       shnsdk.CMSPayerIdentity,
+	got, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{Coverage: testMemberCoverage(member),
+		Provider:       testRequestingProvider(),
+		MemberIDSystem: shnsdk.MemberSystem,
+		QR:             qrJSON,
+		SR:             srJSON,
+		PatientRef:     ref,
+		CoverageRef:    "Coverage/convergence-coverage",
+		MemberID:       member,
+		Corr:           "convergence-pas-submit-0001",
+		Created:        created,
+		Payer:          shnsdk.CMSPayerIdentity,
 	})
 	if err != nil {
 		t.Fatalf("BuildConformantClaimBundle: %v", err)
 	}
 	return got
+}
+
+// originatorBuiltInquiryBundle builds the conformant PAS inquiry a requester sends
+// about a request it made — the same builder the published client uses, from the
+// same records the submission above names.
+func originatorBuiltInquiryBundle(t *testing.T, member string) []byte {
+	t.Helper()
+	created := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	// The member's own record, carrying the member identifier typed MB: the
+	// inquiry builder refuses anything less, because that is what a payer matches
+	// an inquiry on.
+	patient := []byte(`{"resourceType":"Patient","id":"` + member + `",` +
+		`"identifier":[{"type":{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/v2-0203","code":"MB"}]},` +
+		`"system":"` + shnsdk.MemberSystem + `","value":"` + member + `"}]}`)
+	inquiry, err := shnsdk.BuildPASInquiryBundle("2.0", shnsdk.PASInquiryInputs{
+		ID:              "inq-native",
+		Identifier:      shnsdk.PASIdentifier{System: shnsdk.PASInquiryIdentifierSystem, Value: "inq-native"},
+		ClaimIdentifier: shnsdk.PASIdentifier{System: shnsdk.PASInquiryIdentifierSystem, Value: "inq-native"},
+		Timestamp:       created,
+		ClaimType:       shnsdk.PASCoding{System: "http://terminology.hl7.org/CodeSystem/claim-type", Code: "professional"},
+		Priority:        shnsdk.PASCoding{Code: "normal"},
+		MemberID:        member,
+		Patient:         patient,
+		Coverage:        testMemberCoverage(member),
+		Provider:        testRequestingProvider(),
+		Insurer:         testPayerOrganization(shnsdk.CMSPayerIdentity),
+		Items: []shnsdk.PASInquiryItem{{
+			Sequence:         1,
+			ProductOrService: shnsdk.PASCoding{System: "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets", Code: "E0424"},
+			TraceNumber:      shnsdk.PASIdentifier{System: shnsdk.PASItemTraceSystem, Value: "trace-1"},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("BuildPASInquiryBundle: %v", err)
+	}
+	return inquiry.Body
 }
 
 // TestPasMemberFromRef covers the tolerant member extractor used by the payer-side bind:
@@ -184,7 +222,9 @@ func TestParseConformantPASSubjects_AbsoluteRefs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FillQuestionnaire: %v", err)
 	}
-	got, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
+	got, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{Coverage: testMemberCoverage(member),
+		Provider:         testRequestingProvider(),
+		MemberIDSystem:   shnsdk.MemberSystem,
 		QR:               qrJSON,
 		SR:               srJSON,
 		PatientRef:       ref,
@@ -510,15 +550,17 @@ func conformantPASBundlePended(t *testing.T, member string) []byte {
 	if err != nil {
 		t.Fatalf("FillQuestionnaire: %v", err)
 	}
-	got, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
-		QR:          qrJSON,
-		SR:          srJSON,
-		PatientRef:  ref,
-		CoverageRef: "Coverage/convergence-coverage",
-		MemberID:    member,
-		Corr:        "convergence-pas-pend-0001",
-		Created:     created,
-		Payer:       shnsdk.CMSPayerIdentity,
+	got, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{Coverage: testMemberCoverage(member),
+		Provider:       testRequestingProvider(),
+		MemberIDSystem: shnsdk.MemberSystem,
+		QR:             qrJSON,
+		SR:             srJSON,
+		PatientRef:     ref,
+		CoverageRef:    "Coverage/convergence-coverage",
+		MemberID:       member,
+		Corr:           "convergence-pas-pend-0001",
+		Created:        created,
+		Payer:          shnsdk.CMSPayerIdentity,
 	})
 	if err != nil {
 		t.Fatalf("BuildConformantClaimBundle: %v", err)
@@ -588,7 +630,9 @@ func originatorBuiltConformantUpdateBundleCorrs(t *testing.T, brPayer bool, corr
 	if err != nil {
 		t.Fatalf("BuildServiceRequest: %v", err)
 	}
-	got, err := shnsdk.BuildConformantClaimUpdateBundle(shnsdk.ConformantClaimUpdateInputs{
+	got, err := shnsdk.BuildConformantClaimUpdateBundle(shnsdk.ConformantClaimUpdateInputs{Coverage: testMemberCoverage(member),
+		Provider:         testRequestingProvider(),
+		MemberIDSystem:   shnsdk.MemberSystem,
 		QR:               qrJSON,
 		SR:               srJSON,
 		PatientRef:       ref,
@@ -602,6 +646,7 @@ func originatorBuiltConformantUpdateBundleCorrs(t *testing.T, brPayer bool, corr
 		ContainedInsurer: brPayer,
 		AbsoluteRefs:     brPayer,
 		PayerOrgEntry:    brPayer,
+		Insurer:          testPayerOrganization(shnsdk.CMSPayerIdentity),
 		Payer:            shnsdk.CMSPayerIdentity,
 	})
 	if err != nil {

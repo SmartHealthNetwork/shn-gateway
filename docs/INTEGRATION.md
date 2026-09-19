@@ -465,6 +465,30 @@ default in-memory store.
 The same database also shares the ingress signing key and one-time-use records
 across replicas (see [DEPLOYMENT.md](DEPLOYMENT.md), "Running more than one replica").
 
+## Conformance enforcement
+
+Every message your gateway sends or receives is checked against its FHIR profile —
+and, for a payer's CDS Hooks answer, against the CDS Hooks response rules. That
+check always runs. What happens when a check fails is `CONFORMANCE_ENFORCEMENT`, a
+setting on your own gateway:
+
+- `strict`: an invalid result refuses the message. A FHIR profile refusal names the
+  validator issues it was based on; a CDS Hooks response-rules refusal names the
+  rule (and the violating path) as well.
+- `none` (the default when the variable is unset): every check still runs and every invalid result is still recorded as a
+  finding — it does not stop the message. The message relays as sent, except an
+  answer this gateway cannot read at all, and a payload this gateway itself
+  translated between IG lines, both of which refuse at every level regardless of
+  the setting.
+
+Any other value refuses to boot.
+
+**Reading a finding.** If you run the gateway yourself — through the SHN Kit or a
+self-hosted deployment — findings appear in your own gateway log and observer
+stream: look for the `conformance:` log line, or the `conformance.observed` event
+if you're watching the observer stream. If SHN hosts your gateway, ask your SHN
+contact for a finding until partner login ships a self-serve view.
+
 ## Seed your own FHIR server
 
 To exercise the gateway against your own FHIR server, seed it with the same

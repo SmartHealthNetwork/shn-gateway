@@ -276,12 +276,10 @@ func TestExtractQuestionnaireFromPackage_ParametersWrapper_NoPackagebundle(t *te
 	}
 }
 
-// Native submit retains the complete payer graph; bare resources belong to polling.
+// A PAS answer is a complete payer graph. A bare ClaimResponse is not one, and
+// neither is a Bundle that names records it does not carry.
 func TestValidateNativePASResponse(t *testing.T) {
-	approved, err := assembleTerminalPASBundle([]byte(assemblyRealPending), []byte(assemblyRealTerminal), fixedClock())
-	if err != nil {
-		t.Fatal(err)
-	}
+	approved := pasBundleWithResponse(t, []byte(assemblyRealPending), []byte(assemblyRealTerminal))
 	for _, body := range [][]byte{approved, []byte(assemblyRealPending)} {
 		out, lr := validateNativePASResponse(body)
 		if lr.Status != 0 || !bytes.Equal(out, body) {

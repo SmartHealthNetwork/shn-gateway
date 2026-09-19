@@ -204,6 +204,7 @@ var legs = []string{
 	"dtr-questionnaire-fetch",
 	"federated-query",
 	"pas-claim",
+	"pas-claim-inquire",
 	"pas-claim-update",
 	"patient-dtr",
 }
@@ -237,8 +238,9 @@ var legOwnership = func() map[Key]Rule {
 		{"dtr-questionnaire-fetch", RoleRequester, DirectionRequest, OutcomeCarried}: {
 			Allowed: []Ownership{OwnershipRelayed, OwnershipEdited}, Edits: []EditID{EditDTRCoverageObtain},
 		},
-		{"pas-claim", RoleRequester, DirectionRequest, OutcomeCarried}:        {Allowed: relayed},
-		{"pas-claim-update", RoleRequester, DirectionRequest, OutcomeCarried}: {Allowed: relayed},
+		{"pas-claim", RoleRequester, DirectionRequest, OutcomeCarried}:         {Allowed: relayed},
+		{"pas-claim-inquire", RoleRequester, DirectionRequest, OutcomeCarried}: {Allowed: relayed},
+		{"pas-claim-update", RoleRequester, DirectionRequest, OutcomeCarried}:  {Allowed: relayed},
 
 		// Requester to the network, with a request its own workflow makes.
 		{"coverage-eligibility", RoleRequester, DirectionRequest, OutcomeOriginated}:    {Allowed: authored, Builders: []BuilderID{BuilderSDKEligibility}},
@@ -248,7 +250,12 @@ var legOwnership = func() map[Key]Rule {
 		{"federated-query", RoleRequester, DirectionRequest, OutcomeOriginated}:         {Allowed: authored, Builders: []BuilderID{BuilderSDKFederatedQuery}},
 		{"patient-dtr", RoleRequester, DirectionRequest, OutcomeOriginated}:             {Allowed: authored, Builders: []BuilderID{BuilderSDKPatientDTR}},
 		{"pas-claim", RoleRequester, DirectionRequest, OutcomeOriginated}:               {Allowed: authored, Builders: []BuilderID{BuilderSDKPASSubmit}},
-		{"pas-claim-update", RoleRequester, DirectionRequest, OutcomeOriginated}:        {Allowed: authored, Builders: []BuilderID{BuilderSDKPASUpdate}},
+		// An inquiry the requester's own workflow makes: the gateway asks a payer
+		// about an authorization it pended, on behalf of a participant whose
+		// system is not the one asking. The participant's own inquiry is carried,
+		// not authored, and has its own row above.
+		{"pas-claim-inquire", RoleRequester, DirectionRequest, OutcomeOriginated}: {Allowed: authored, Builders: []BuilderID{BuilderSDKPASInquiry}},
+		{"pas-claim-update", RoleRequester, DirectionRequest, OutcomeOriginated}:  {Allowed: authored, Builders: []BuilderID{BuilderSDKPASUpdate}},
 
 		// Requester to its participant's system: the recipient's answer,
 		// exactly as it arrived.
@@ -256,6 +263,7 @@ var legOwnership = func() map[Key]Rule {
 		{"crd-order-select", RoleRequester, DirectionResponse, OutcomeAnswered}:        {Allowed: relayed},
 		{"dtr-questionnaire-fetch", RoleRequester, DirectionResponse, OutcomeAnswered}: {Allowed: relayed},
 		{"pas-claim", RoleRequester, DirectionResponse, OutcomeAnswered}:               {Allowed: relayed},
+		{"pas-claim-inquire", RoleRequester, DirectionResponse, OutcomeAnswered}:       {Allowed: relayed},
 		{"pas-claim-update", RoleRequester, DirectionResponse, OutcomeAnswered}:        {Allowed: relayed},
 
 		// Recipient to its participant's system, carrying the network's
@@ -280,6 +288,11 @@ var legOwnership = func() map[Key]Rule {
 		{"pas-claim-update", RoleRecipient, DirectionRequest, OutcomeCarried}: {
 			Allowed: []Ownership{OwnershipRelayed, OwnershipEdited}, Edits: payerIdentityMapped,
 		},
+		// An inquiry names an authorization; it is sent to the payer's own
+		// system exactly, or with only the payer identity mapped.
+		{"pas-claim-inquire", RoleRecipient, DirectionRequest, OutcomeCarried}: {
+			Allowed: []Ownership{OwnershipRelayed, OwnershipEdited}, Edits: payerIdentityMapped,
+		},
 
 		// Recipient to the network, answering. Eligibility, patient-authored
 		// answers and data-request answers are the gateway's own messages;
@@ -291,13 +304,16 @@ var legOwnership = func() map[Key]Rule {
 		{"dtr-questionnaire-fetch", RoleRecipient, DirectionResponse, OutcomeAnswered}: {Allowed: relayed},
 		{"federated-query", RoleRecipient, DirectionResponse, OutcomeAnswered}:         {Allowed: authored, Builders: []BuilderID{BuilderCDexFulfillment}},
 		{"patient-dtr", RoleRecipient, DirectionResponse, OutcomeAnswered}:             {Allowed: authored, Builders: []BuilderID{BuilderSDKPatientDTR}},
-		{"pas-claim", RoleRecipient, DirectionResponse, OutcomeAnswered}:               {Allowed: either, Builders: []BuilderID{BuilderInterimPASAssembly}},
-		{"pas-claim-update", RoleRecipient, DirectionResponse, OutcomeAnswered}:        {Allowed: either, Builders: []BuilderID{BuilderInterimPASAssembly}},
+		{"pas-claim", RoleRecipient, DirectionResponse, OutcomeAnswered}:               {Allowed: relayed},
+		{"pas-claim-update", RoleRecipient, DirectionResponse, OutcomeAnswered}:        {Allowed: relayed},
+		// An inquiry's answer is the payer's own message, relayed. No builder is
+		// listed: this leg has never rebuilt an answer, so nothing may author one.
+		{"pas-claim-inquire", RoleRecipient, DirectionResponse, OutcomeAnswered}: {Allowed: relayed},
 	}
 	// An application error from the participant's system is relayed. On
 	// the recipient an interim builder still replaces an empty error body,
 	// and the bare error a requester that negotiated no frame receives.
-	for _, leg := range []string{"crd-order-dispatch", "crd-order-select", "dtr-questionnaire-fetch", "pas-claim", "pas-claim-update"} {
+	for _, leg := range []string{"crd-order-dispatch", "crd-order-select", "dtr-questionnaire-fetch", "pas-claim", "pas-claim-inquire", "pas-claim-update"} {
 		m[Key{leg, RoleRecipient, DirectionResponse, OutcomeUpstreamError}] = Rule{
 			Allowed: either, Builders: []BuilderID{BuilderInterimEmptyErrorSubstitution},
 		}

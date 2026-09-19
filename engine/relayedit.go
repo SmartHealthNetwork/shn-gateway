@@ -71,7 +71,7 @@ var relayEdits = []relayEdit{
 		ID:   relay.EditPayorEdgeRestamp,
 		Name: "payor-edge-restamp",
 		Legs: []string{"crd-order-dispatch", "crd-order-select", "dtr-questionnaire-fetch",
-			"pas-claim", "pas-claim-update"},
+			"pas-claim", "pas-claim-inquire", "pas-claim-update"},
 		Role:      relay.RoleRecipient,
 		Direction: relay.DirectionRequest,
 		Paths: []string{

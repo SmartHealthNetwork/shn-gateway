@@ -668,7 +668,7 @@ func TestTransformRefusalZeroBytes(t *testing.T) {
 	env.originator.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
 
 	const (
-		member      = "MBR-PASTAIL"
+		member      = "MBR-COVERED"
 		patientRef  = "Patient/" + member
 		coverageRef = "Coverage/" + member
 	)
@@ -677,7 +677,11 @@ func TestTransformRefusalZeroBytes(t *testing.T) {
 
 	orderRef, _ := resourceRef(order)
 	source := newRawDTRBuildSource(qr, nil, shnsdk.QRContext{PatientRef: patientRef, CoverageRef: coverageRef, OrderRef: orderRef})
-	_, respJSON, status, msg, err := env.originator.submitClaimAndResolve(env.ctx, env.req, "pci-1", order, nil, source, patientRef, coverageRef, member, shnsdk.CMSPayerIdentity, env.payerID)
+	decision, status, msg, err := env.originator.submitClaimAndFollow(env.ctx, env.req, pasFollowInputs{
+		pci: "pci-1", orderJSON: order, source: source, patientRef: patientRef, memberSystem: shnsdk.MemberSystem,
+		coverageRef: coverageRef, coverage: testMemberCoverage(member), member: member, payer: shnsdk.CMSPayerIdentity, recipient: env.payerID,
+	})
+	respJSON := decision.PayerResponse
 	if err == nil {
 		t.Fatal("want an error — the gated chain must refuse before any leg is routed")
 	}

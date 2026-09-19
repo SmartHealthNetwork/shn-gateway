@@ -21,27 +21,26 @@ func (f fakeOrderSoR) OpenOrder(string) ([]byte, bool) { return f.order, true }
 func TestOrderSource_RejectsOrderWithoutProductCoding(t *testing.T) {
 	noCoding := []byte(`{"resourceType":"ServiceRequest","id":"sr-x","status":"active"}`) // no code.coding
 	g := &Gateway{cfg: Config{OriginationProfile: "provider-data", SoR: fakeOrderSoR{censusSoR: newCensusSoR(), order: noCoding}}}
-	_, status, _ := g.orderSourceContext(context.Background(), "MBR-X", "Patient/MBR-X", "", "", "", "")
+	_, status, _ := g.orderSourceContext(context.Background(), "MBR-X", "", "")
 	if status != 502 {
 		t.Fatalf("no-coding order status=%d, want 502 (fail closed)", status)
 	}
 }
 
-// REJECTION (one-way-door guard): demo must NOT fall into provider-data's SoR-read
-// branch. orderSource's ONLY profile check is the literal "provider-data" — a mutation
-// that widened it (e.g. to "anything but provider-data") would silently route the demo lane
-// through OpenOrder, which the demo persona roster does not seed orders for (it builds its
-// order from the originationCodes tuple — §4.3). Prove it by
-// wiring a SoR whose OpenOrder always fails the honesty fence above (no product coding)
-// and asserting demo still succeeds — it must never reach OpenOrder at all.
-func TestOrderSource_DemoBuildsFromTuple_NeverReadsSoR(t *testing.T) {
+// REJECTION (one-way-door guard): the honesty fence is NOT lane-scoped. orderSource
+// used to read the system of record only under "provider-data" and BUILD the order
+// from the tuple on every other lane — an order held in no participant's system, which
+// no later inquiry could re-read. Every lane reads the order now, so the fence that
+// refuses an order with no recognized {CPT,HCPCS} product coding must bite on every
+// lane too: a mutation that re-narrowed the read to one profile would let another lane
+// originate an order nobody holds again, and this row is what catches it.
+func TestOrderSource_HonestyFenceAppliesToEveryLane(t *testing.T) {
 	noCoding := []byte(`{"resourceType":"ServiceRequest","id":"sr-x","status":"active"}`)
-	g := &Gateway{cfg: Config{OriginationProfile: "demo", SoR: fakeOrderSoR{censusSoR: newCensusSoR(), order: noCoding}}}
-	srJSON, status, msg := g.orderSourceContext(context.Background(), "MBR-D-UC03", "Patient/MBR-D-UC03", systemHCPCSBuild, "L8000", DemoDisplayL8000, DemoDxL8000)
-	if status != 0 {
-		t.Fatalf("demo orderSource must build from the tuple (never touch the fake SoR's bad order): status=%d msg=%q", status, msg)
-	}
-	if len(srJSON) == 0 {
-		t.Fatal("demo orderSource returned no bytes")
+	for _, profile := range []string{"demo", "provider-data", "some-other-lane"} {
+		g := &Gateway{cfg: Config{OriginationProfile: profile, SoR: fakeOrderSoR{censusSoR: newCensusSoR(), order: noCoding}}}
+		_, status, msg := g.orderSourceContext(context.Background(), "MBR-D-UC03", "", "")
+		if status != 502 {
+			t.Fatalf("%s: no-coding order status=%d msg=%q, want 502 (fail closed on every lane)", profile, status, msg)
+		}
 	}
 }

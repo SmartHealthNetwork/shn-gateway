@@ -81,6 +81,12 @@ type DemoOrderTuple struct {
 // scenario the demo lane originates.
 type DemoOrderSet struct {
 	UC02, UC03, UC04, UC05, UC06, UC07, UC07HCPCS, UC08 DemoOrderTuple
+	// UC03Bridge is the kit-bridging-visualization demo's own order tuple
+	// (uc03BridgeCode), deliberately DECOUPLED from UC03 — see uc03BridgeCode's
+	// comment. It is exported for the same reason the rest of this set is: the
+	// bridge personas' orders are seeded into the participant's own system, and
+	// the seed must derive from this one table rather than re-state the tuple.
+	UC03Bridge DemoOrderTuple
 }
 
 // DemoOrderCodes returns the demo lane's per-UC order tuples for callers outside this
@@ -102,5 +108,7 @@ func DemoOrderCodes() DemoOrderSet {
 		UC07:      conv(c.uc07),
 		UC07HCPCS: conv(c.uc07hcpcs),
 		UC08:      conv(c.uc08),
+
+		UC03Bridge: conv(uc03BridgeCode),
 	}
 }

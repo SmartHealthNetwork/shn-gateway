@@ -31,6 +31,7 @@ var responderRoutedLegs = []string{
 	"dtr-questionnaire-fetch",
 	"pas-claim",
 	"pas-claim-update",
+	"pas-claim-inquire",
 }
 
 // catalogResponder builds a native responder whose partner endpoint is unreachable. Garbage

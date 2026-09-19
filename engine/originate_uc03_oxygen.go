@@ -1,9 +1,10 @@
 // originate_uc03_oxygen.go — support for handleUC03's non-provider-data (demo) arm,
-// re-keyed onto the HomeOxygen family (register §11 ruling (b), R3): a literal-code
-// order-DISPATCH origination (mirroring originateDispatch's mechanics, but building its
-// DeviceRequest + supplier Organization from the demo lane's own literal-tuple convention
-// — §4.3, originate_codes.go's file comment — rather than reading a seeded SoR order),
-// the hermetic FR-17 auto-fill evidence cross-check, and the item-6.1 manual attestation.
+// re-keyed onto the HomeOxygen family (register §11 ruling (b), R3): the hermetic FR-17
+// auto-fill evidence cross-check and the item-6.1 manual attestation. The order itself
+// is the member's own seeded DeviceRequest, read through dispatchOrderOfRecord like
+// every other order-DISPATCH origination — this arm used to BUILD its DeviceRequest and
+// supplier from a literal tuple, which left the authorization it produced naming an
+// order no participant's system held.
 package engine
 
 import (
@@ -13,75 +14,6 @@ import (
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
-
-// uc03OxygenOrderID / uc03OxygenSupplierID are the literal ids the demo-lane UC-03
-// DeviceRequest + supplier Organization carry. Stable literals (not member-scoped): this
-// arm serves exactly one member per profile (MBR-COVERED default-profile / MBR-D-UC03
-// demo-profile / the demo-roster's canary twin), and the resources exist only within one
-// request's build — never persisted, never resolved by a second request.
-const (
-	uc03OxygenOrderID    = "dr-uc03-demo"
-	uc03OxygenSupplierID = "org-uc03-demo-supplier"
-	// uc03OxygenSupplierNPI is a syntactically-valid placeholder — the supplier NPI is
-	// verdict-IRRELEVANT to the mirrored family's outcome (originate_homeoxygen.go's own
-	// comment on the provider-data twin), so no live/contracted NPI meaning is implied.
-	uc03OxygenSupplierNPI = "1999999999"
-)
-
-// literalOxygenDispatchOrder builds UC-03's demo-lane DeviceRequest + supplier
-// Organization LITERALLY from the given HCPCS tuple — the demo lane's own convention
-// (originationCodes, §4.3): no SoR order needed, only a seeded Patient/Coverage per
-// member. Mirrors orderSource's non-provider-data ServiceRequest-literal branch, for the
-// order-DISPATCH shape originateDispatch's OWN callers get from the SoR instead. Built as
-// a plain map (not shnsdk.BuildDeviceRequest/BuildOrganizationWithNPI): gateway/engine is
-// a SEPARATE Go module from internal/fhirmap and cannot import it (same constraint
-// originate_homeoxygen_test.go's buildHomeOxygenDeviceRequest/buildHomeOxygenSupplier
-// document); the wire shape mirrors those functions.
-func literalOxygenDispatchOrder(patientRef, code, display, dx string) (dispatchOrder, error) {
-	dr := map[string]any{
-		"resourceType": "DeviceRequest",
-		"id":           uc03OxygenOrderID,
-		"status":       "active",
-		"intent":       "order",
-		"subject":      map[string]string{"reference": patientRef},
-		"performer":    map[string]string{"reference": "Organization/" + uc03OxygenSupplierID},
-		"codeCodeableConcept": map[string]any{
-			"coding": []map[string]string{{
-				"system":  systemHCPCSBuild,
-				"code":    code,
-				"display": display,
-			}},
-		},
-		"reasonCode": []map[string]any{{
-			"coding": []map[string]string{{
-				"system": systemICD10Build,
-				"code":   dx,
-			}},
-		}},
-	}
-	orderJSON, err := json.Marshal(dr)
-	if err != nil {
-		return dispatchOrder{}, fmt.Errorf("build literal DeviceRequest: %w", err)
-	}
-	org := map[string]any{
-		"resourceType": "Organization",
-		"id":           uc03OxygenSupplierID,
-		"name":         "Demo DME Supplier",
-		"identifier": []map[string]string{{
-			"system": "http://hl7.org/fhir/sid/us-npi",
-			"value":  uc03OxygenSupplierNPI,
-		}},
-	}
-	supplierJSON, err := json.Marshal(org)
-	if err != nil {
-		return dispatchOrder{}, fmt.Errorf("build literal supplier Organization: %w", err)
-	}
-	return dispatchOrder{
-		authored:  true,
-		orderJSON: orderJSON, supplierJSON: supplierJSON,
-		orderRef: "DeviceRequest/" + uc03OxygenOrderID, performerRef: "Organization/" + uc03OxygenSupplierID,
-	}, nil
-}
 
 // homeOxygenAutoFillEvidence is the hermetic FR-17 source=auto attribution proof (register
 // §9 row 4 / §11): it independently cross-checks the operated-$populate-computed QR's

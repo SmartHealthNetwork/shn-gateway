@@ -27,7 +27,7 @@ func TestRelayEditRegistryPinned(t *testing.T) {
 		{"E-02", "cds-prefetch-obtain", crd, relay.RoleRequester, relay.DirectionRequest,
 			[]string{"$.prefetch", "$.prefetch.<key>"}, "insert-member"},
 		{"E-03", "payor-edge-restamp",
-			[]string{"crd-order-dispatch", "crd-order-select", "dtr-questionnaire-fetch", "pas-claim", "pas-claim-update"},
+			[]string{"crd-order-dispatch", "crd-order-select", "dtr-questionnaire-fetch", "pas-claim", "pas-claim-inquire", "pas-claim-update"},
 			relay.RoleRecipient, relay.DirectionRequest,
 			[]string{
 				"Coverage.payor[i].identifier.system",

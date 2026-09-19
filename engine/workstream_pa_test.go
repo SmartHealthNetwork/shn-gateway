@@ -15,6 +15,7 @@ func TestPACatalog_Ops(t *testing.T) {
 		"patient-dtr":             "patient-dtr-request",
 		"pas-claim":               "pas-submit",
 		"pas-claim-update":        "pas-update-submit",
+		"pas-claim-inquire":       "pas-inquire",
 	}
 	if len(paCatalog) != len(want) {
 		t.Fatalf("paCatalog has %d entries, want %d", len(paCatalog), len(want))

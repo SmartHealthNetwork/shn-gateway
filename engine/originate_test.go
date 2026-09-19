@@ -443,21 +443,44 @@ func TestHandleUC03Bridge_SelectsMember(t *testing.T) {
 // (FR-G25/Finding 1+2), not about UC-03's business content — call it DIRECTLY (mirroring
 // TestRunCRDThenDTROrder_NotCovered_ProceedFlag's existing pattern) instead of routing
 // through an HTTP handler that no longer carries this shape.
+//
+// The tuple is no longer arbitrary. Every lane reads its order out of the
+// participant's own system now, and orderSource refuses an origination whose
+// stated product disagrees with the order on file — so these tests state the
+// product MBR-COVERED's own open order carries, which is exactly the agreement
+// that check exists to keep.
 const (
+	runCRDThenDTROrderTestMember  = "MBR-UC07HCPCS"
 	runCRDThenDTROrderTestSystem  = "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
 	runCRDThenDTROrderTestCode    = "L8000"
-	runCRDThenDTROrderTestDisplay = "Breast prosthesis, mastectomy bra"
-	runCRDThenDTROrderTestDx      = "Z90.10"
+	runCRDThenDTROrderTestDisplay = DemoDisplayL8000
+	runCRDThenDTROrderTestDx      = DemoDxL8000
 )
 
-// callRunCRDThenDTROrder drives runCRDThenDTROrder directly for MBR-COVERED with the
-// tuple above and returns the recorded response — the order-select analog of callUC03,
-// now that handleUC03's own HTTP surface no longer rides this function for its "" branch.
-func callRunCRDThenDTROrder(t *testing.T, gw *Gateway) *httptest.ResponseRecorder {
+// aimStubAt points the stub substrate's sealed response-leg subject at the member
+// the request under test actually resolves. crdTestSystem seals for MBR-COVERED (the
+// member handleUC03's own default arm drives); a test that drives a different member
+// must re-aim it, or the response-leg subject bind (H1/AI-11) rejects the answer as a
+// genuine cross-patient mismatch rather than a test artefact.
+func aimStubAt(t *testing.T, stub *stubSubstrate, member string) {
 	t.Helper()
+	pci, _, ok := newCensusSoR().ResolvePatient(member)
+	if !ok {
+		t.Fatalf("aimStubAt: the fixture system of record does not resolve %s", member)
+	}
+	stub.pci = pci
+}
+
+// callRunCRDThenDTROrder drives runCRDThenDTROrder directly for the test member with
+// the tuple above and returns the recorded response — the order-select analog of
+// callUC03, now that handleUC03's own HTTP surface no longer rides this function for
+// its "" branch.
+func callRunCRDThenDTROrder(t *testing.T, gw *Gateway, stub *stubSubstrate) *httptest.ResponseRecorder {
+	t.Helper()
+	aimStubAt(t, stub, runCRDThenDTROrderTestMember)
 	req := httptest.NewRequest(http.MethodPost, "/scenario/uc03", nil)
 	rec := httptest.NewRecorder()
-	gw.runCRDThenDTROrder(rec, req, "MBR-COVERED", runCRDThenDTROrderTestSystem, runCRDThenDTROrderTestCode, runCRDThenDTROrderTestDisplay, runCRDThenDTROrderTestDx, false)
+	gw.runCRDThenDTROrder(rec, req, runCRDThenDTROrderTestMember, runCRDThenDTROrderTestSystem, runCRDThenDTROrderTestCode, runCRDThenDTROrderTestDisplay, runCRDThenDTROrderTestDx, false)
 	return rec
 }
 
@@ -465,11 +488,11 @@ func callRunCRDThenDTROrder(t *testing.T, gw *Gateway) *httptest.ResponseRecorde
 // Covered==not-covered (AI-1: a coverage denial never silently proceeds).
 // Expects HTTP 200 with outcome:"not-covered" (NOT a 502 "did not proceed").
 func TestRunCRDThenDTR_NotCovered(t *testing.T) {
-	gw, _, _ := crdTestSystem(t, shnsdk.CardCoverage{
+	gw, stub, _ := crdTestSystem(t, shnsdk.CardCoverage{
 		Covered:  shnsdk.CoveredNotCovered,
 		PANeeded: shnsdk.PANeededNoAuth,
 	})
-	rec := callRunCRDThenDTROrder(t, gw)
+	rec := callRunCRDThenDTROrder(t, gw, stub)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("not-covered: want 200 (terminal stop), got %d body=%s", rec.Code, rec.Body.String())
@@ -493,16 +516,22 @@ func TestRunCRDThenDTR_NotCovered(t *testing.T) {
 // proceeds past it with the order built. The opt-in never yields an auth on a denial:
 // handleUC08 still asserts the PAS result is DENIED (the existing approved→502 guard).
 func TestRunCRDThenDTROrder_NotCovered_ProceedFlag(t *testing.T) {
-	const sys, code, disp, dx = "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets", "J3490", "Unclassified drugs", "D57.1"
+	// The member is the one whose own open order IS the J3490 product this test states
+	// (MBR-UC08). It used to be MBR-COVERED with a literal tuple; the order comes from
+	// the participant's own system now, and orderSource refuses an origination whose
+	// stated product disagrees with the order on file.
+	const member = "MBR-UC08"
+	sys, code, disp, dx := DemoOrderCodes().UC08.System, DemoOrderCodes().UC08.Code, DemoOrderCodes().UC08.Display, DemoOrderCodes().UC08.Dx
 	notCovered := shnsdk.CardCoverage{Covered: shnsdk.CoveredNotCovered, PANeeded: shnsdk.PANeededNoAuth}
 
 	// DEFAULT (false): a coverage denial STOPS — 200 not-covered, ok=false (FR-G25 preserved
 	// for every non-opt-in caller; the adversarial Row 1 drives this on uc03).
 	t.Run("default-stops", func(t *testing.T) {
-		gw, _, _ := crdTestSystem(t, notCovered)
+		gw, stub, _ := crdTestSystem(t, notCovered)
+		aimStubAt(t, stub, member)
 		req := httptest.NewRequest(http.MethodPost, "/scenario/uc08", nil)
 		rec := httptest.NewRecorder()
-		_, ok := gw.runCRDThenDTROrder(rec, req, "MBR-COVERED", sys, code, disp, dx, false)
+		_, ok := gw.runCRDThenDTROrder(rec, req, member, sys, code, disp, dx, false)
 		if ok {
 			t.Fatal("default: ok=true on a not-covered card — the FR-G25 STOP was bypassed without opt-in")
 		}
@@ -513,10 +542,11 @@ func TestRunCRDThenDTROrder_NotCovered_ProceedFlag(t *testing.T) {
 
 	// OPT-IN (true): PROCEED — ok=true, the order built (for the PAS A2 submit), nothing terminal written.
 	t.Run("optin-proceeds", func(t *testing.T) {
-		gw, _, _ := crdTestSystem(t, notCovered)
+		gw, stub, _ := crdTestSystem(t, notCovered)
+		aimStubAt(t, stub, member)
 		req := httptest.NewRequest(http.MethodPost, "/scenario/uc08", nil)
 		rec := httptest.NewRecorder()
-		res, ok := gw.runCRDThenDTROrder(rec, req, "MBR-COVERED", sys, code, disp, dx, true)
+		res, ok := gw.runCRDThenDTROrder(rec, req, member, sys, code, disp, dx, true)
 		if !ok {
 			t.Fatalf("opt-in: ok=false on a not-covered card — the proceed flag did not let UC-08 reach PAS; body=%s", rec.Body.String())
 		}
@@ -589,12 +619,12 @@ func TestHandleUC08_DemoLane_ProceedsPastNotCoveredToDeny(t *testing.T) {
 // signals PA already satisfied (PANeeded==satisfied). The short-circuit path is
 // deferred this slice; expect HTTP 502 with a message containing "satisfied".
 func TestRunCRDThenDTR_Satisfied(t *testing.T) {
-	gw, _, _ := crdTestSystem(t, shnsdk.CardCoverage{
+	gw, stub, _ := crdTestSystem(t, shnsdk.CardCoverage{
 		Covered:       shnsdk.CoveredCovered,
 		PANeeded:      shnsdk.PANeededSatisfied,
 		SatisfiedPaID: "PA-PREV-001",
 	})
-	rec := callRunCRDThenDTROrder(t, gw)
+	rec := callRunCRDThenDTROrder(t, gw, stub)
 
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("satisfied: want 502, got %d body=%s", rec.Code, rec.Body.String())
@@ -623,11 +653,11 @@ func legAttempted(legTypes []string, txType string) bool {
 // 502 "expected PA-required card" (NOT the old "conditional unsupported" — that message
 // is gone). Distinct from Covered==conditional, which DOES proceed (see below).
 func TestRunCRDThenDTR_ConditionalPANeeded(t *testing.T) {
-	gw, _, _ := crdTestSystem(t, shnsdk.CardCoverage{
+	gw, stub, _ := crdTestSystem(t, shnsdk.CardCoverage{
 		Covered:  shnsdk.CoveredCovered,
 		PANeeded: shnsdk.PANeededConditional,
 	})
-	rec := callRunCRDThenDTROrder(t, gw)
+	rec := callRunCRDThenDTROrder(t, gw, stub)
 
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("conditional PA: want 502 (not PA-required), got %d body=%s", rec.Code, rec.Body.String())
@@ -679,9 +709,13 @@ func TestRunCRDThenDTR_NoDocSkipsDTR(t *testing.T) {
 	// (pre-R3) HTTP handler used to do after the prefix returned ok.
 	req := httptest.NewRequest(http.MethodPost, "/scenario/uc03", nil)
 	rec := httptest.NewRecorder()
-	res, ok := gw.runCRDThenDTROrder(rec, req, "MBR-COVERED", runCRDThenDTROrderTestSystem, runCRDThenDTROrderTestCode, runCRDThenDTROrderTestDisplay, runCRDThenDTROrderTestDx, false)
+	aimStubAt(t, stub, runCRDThenDTROrderTestMember)
+	res, ok := gw.runCRDThenDTROrder(rec, req, runCRDThenDTROrderTestMember, runCRDThenDTROrderTestSystem, runCRDThenDTROrderTestCode, runCRDThenDTROrderTestDisplay, runCRDThenDTROrderTestDx, false)
 	if ok {
-		_, _, status, msg, _ := gw.submitClaimAndResolve(req.Context(), req, res.pci, res.srJSON, nil, res.qrSource, res.patientRef, res.coverageRef, res.member, res.payer, res.recipient)
+		_, status, msg, _ := gw.submitClaimAndFollow(req.Context(), req, pasFollowInputs{
+			pci: res.pci, orderJSON: res.srJSON, source: res.qrSource, patientRef: res.patientRef, memberSystem: shnsdk.MemberSystem,
+			coverageRef: res.coverageRef, coverage: res.coverage, member: res.member, payer: res.payer, recipient: res.recipient,
+		})
 		if status != 0 {
 			writeJSON(rec, status, map[string]string{"error": msg})
 		}
@@ -737,11 +771,14 @@ func classifyTestGateway(t *testing.T, profile string) *Gateway {
 }
 
 // TestClassifyResolution is the C4 rejection discipline for the PAS-resolution decision:
-// ONLY a genuine A1 approval is approved. An amendment now resolves to a
-// real A1 at the payer-gw responder (it polls br-payer's timer A4→A1), so a resolution site sees
-// approved | denied | unresolved-pend here — and everything not approved → caller 502s (a pend can
-// never mask a denial or be a silent pass — C1). Profile-independent now (the per-profile terminal
-// pend is gone); both the provider-data and default-arm profiles asserted so no assertion is vacuous.
+// the payer's determination is read as exactly what it is — approved, denied or pended —
+// and nothing else is read as any of the three. A pend can never mask a denial, and an
+// answer this gateway cannot read reports NO determination rather than a default one.
+//
+// The row that used to assert "a pend is not approved" now asserts the stronger fact: a
+// pend is a PEND. A boolean could only say what the answer was not, which is why a
+// re-pend used to reach an operator as a failed request. Profile-independent (the
+// per-profile terminal pend is gone); both profiles are asserted so no row is vacuous.
 func TestClassifyResolution(t *testing.T) {
 	// approved: bare ClaimResponse, outcome complete + preAuthRef present.
 	approved := []byte(`{"resourceType":"ClaimResponse","outcome":"complete","use":"preauthorization","preAuthRef":"PA-0123456789ab","preAuthPeriod":{"end":"2026-09-02"}}`)
@@ -758,23 +795,34 @@ func TestClassifyResolution(t *testing.T) {
 		name         string
 		profile      string
 		in           []byte
-		wantApproved bool
+		wantDecision string
 	}{
-		{"approved/provider-data", "provider-data", approved, true},
-		{"approved/default", "", approved, true},
-		{"denied/provider-data", "provider-data", denied, false},   // denial → 502 (C1)
-		{"denied/default", "", denied, false},                      // denial → 502 (C1)
-		{"pend/provider-data", "provider-data", pend, false},       // unresolved pend → 502 (no silent pass)
-		{"pend/default", "", pend, false},                          // unresolved pend → 502 (no silent pass)
-		{"garbage/provider-data", "provider-data", garbage, false}, // unparseable → fail closed
-		{"garbage/default", "", garbage, false},                    // unparseable → fail closed
+		{"approved/provider-data", "provider-data", approved, "approved"},
+		{"approved/default", "", approved, "approved"},
+		{"denied/provider-data", "provider-data", denied, "denied"},
+		{"denied/default", "", denied, "denied"},
+		// A pend is the payer's own answer, reported as a pend. It is what the
+		// continuation is minted for.
+		{"pend/provider-data", "provider-data", pend, "pended"},
+		{"pend/default", "", pend, "pended"},
+		// An answer this gateway cannot read reports NO determination. It must not
+		// fall through to any of the three, least of all the one that would let a
+		// caller act on it.
+		{"garbage/provider-data", "provider-data", garbage, ""},
+		{"garbage/default", "", garbage, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			gw := classifyTestGateway(t, tc.profile)
-			_, approvedGot := gw.classifyResolution(tc.in)
-			if approvedGot != tc.wantApproved {
-				t.Errorf("approved = %v, want %v", approvedGot, tc.wantApproved)
+			parsed, got := gw.classifyResolution(tc.in)
+			if got != tc.wantDecision {
+				t.Errorf("decision = %q, want %q", got, tc.wantDecision)
+			}
+			if tc.wantDecision == "approved" && parsed.PreAuthRef == "" {
+				t.Error("an approval must carry the payer's own authorization number")
+			}
+			if tc.wantDecision == "" && parsed.Outcome != "" {
+				t.Errorf("an unreadable answer must carry no determination, got %q", parsed.Outcome)
 			}
 		})
 	}

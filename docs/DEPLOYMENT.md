@@ -53,6 +53,7 @@ On success the startup line names the scheme:
 
 ```
 gateway: role=provider holder=<id> listening on https://0.0.0.0:8443
+gateway: conformance enforcement=none
 ```
 
 ## Your registered address must be https

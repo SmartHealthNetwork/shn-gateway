@@ -21,10 +21,7 @@
           "insurance": [
             {
               "coverage": {
-                "identifier": {
-                  "system": "urn:shn:coverage",
-                  "value": "MBR-COVERED"
-                }
+                "reference": "Coverage/cov-twinfence"
               },
               "focal": true,
               "sequence": 1
@@ -59,7 +56,7 @@
                   "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-itemTraceNumber",
                   "valueIdentifier": {
                     "system": "urn:shn:pas:item-trace",
-                    "value": "twinfence-upd-0001.1"
+                    "value": "twinfence-sub-0001.1"
                   }
                 }
               ],
@@ -86,7 +83,7 @@
             ]
           },
           "provider": {
-            "display": "provider"
+            "reference": "Organization/provider"
           },
           "related": [
             {
@@ -115,11 +112,25 @@
         "fullUrl": "https://shn.example/fhir/Patient/MBR-COVERED",
         "resource": {
           "id": "MBR-COVERED",
+          "identifier": [
+            {
+              "system": "urn:shn:member",
+              "type": {
+                "coding": [
+                  {
+                    "code": "MB",
+                    "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                  }
+                ]
+              },
+              "value": "MBR-COVERED"
+            }
+          ],
           "resourceType": "Patient"
         }
       },
       {
-        "fullUrl": "https://shn.example/fhir/Coverage/convergence-coverage",
+        "fullUrl": "https://shn.example/fhir/Coverage/cov-twinfence",
         "resource": {
           "beneficiary": {
             "reference": "Patient/MBR-COVERED"
@@ -137,7 +148,7 @@
               "resourceType": "Organization"
             }
           ],
-          "id": "convergence-coverage",
+          "id": "cov-twinfence",
           "identifier": [
             {
               "system": "urn:shn:coverage",
@@ -208,7 +219,7 @@
             {
               "url": "http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/qr-context",
               "valueReference": {
-                "reference": "Coverage/convergence-coverage"
+                "reference": "Coverage/cov-twinfence"
               }
             },
             {
@@ -309,6 +320,19 @@
         }
       },
       {
+        "fullUrl": "https://shn.example/fhir/Organization/provider",
+        "resource": {
+          "id": "provider",
+          "identifier": [
+            {
+              "system": "http://smarthealth.network/ids/holder",
+              "value": "provider"
+            }
+          ],
+          "resourceType": "Organization"
+        }
+      },
+      {
         "fullUrl": "https://shn.example/fhir/DiagnosticReport/convergence-dr-operative",
         "resource": {
           "category": [
@@ -358,19 +382,6 @@
               "reference": "DiagnosticReport/convergence-dr-operative"
             }
           ]
-        }
-      },
-      {
-        "fullUrl": "https://shn.example/fhir/Organization/provider",
-        "resource": {
-          "id": "provider",
-          "identifier": [
-            {
-              "system": "http://smarthealth.network/ids/holder",
-              "value": "provider"
-            }
-          ],
-          "resourceType": "Organization"
         }
       },
       {

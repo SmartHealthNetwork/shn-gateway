@@ -54,6 +54,9 @@ func (g *Gateway) handlePatientAccessEOB(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "missing or invalid patient-access token"})
 		return
 	}
+	r = r.WithContext(withFindingContext(r.Context(), findingContext{
+		LegType: "patient-access-read", CorrelationID: tok.CorrelationID, Seam: "originate", Whose: "own",
+	}))
 	// FHIR search: GET /ExplanationOfBenefit?patient={pci}. Subject binding — the
 	// token authorizes exactly one PCI, so the requested patient must equal it.
 	patient := r.URL.Query().Get("patient")
@@ -101,6 +104,9 @@ func (g *Gateway) handlePatientAccessEOBByID(w http.ResponseWriter, r *http.Requ
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "missing or invalid patient-access token"})
 		return
 	}
+	r = r.WithContext(withFindingContext(r.Context(), findingContext{
+		LegType: "patient-access-read", CorrelationID: tok.CorrelationID, Seam: "originate", Whose: "own",
+	}))
 	eob, found := g.cfg.Store.EOBByID(r.PathValue("id"))
 	if !found {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no such ExplanationOfBenefit"})

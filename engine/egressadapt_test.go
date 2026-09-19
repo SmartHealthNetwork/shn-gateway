@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -78,12 +79,46 @@ func TestEgressAdaptValidatesAtTargetLane(t *testing.T) {
 	if err != nil {
 		t.Fatalf("egressAdapt itself must not error on a structurally-valid (if semantically corrupted) stub output: %v", err)
 	}
-	status, msg := g.validateFHIR(context.Background(), adapted, "egress", shnsdk.LineOf(route.Token))
-	if status == 0 {
-		t.Fatal("corrupted chain output must fail the TARGET-lane egress validate — nothing may seal")
+	// These bytes are this participant's own registered edit, so the check
+	// refuses at every level — which is why one row covers both rather than
+	// a strict row plus a relaxed twin.
+	for _, level := range []ConformanceEnforcement{EnforcementStrict, EnforcementNone} {
+		g.cfg.ConformanceEnforcement = level
+		status, msg := g.validateFHIREgressOrBridged(context.Background(), adapted, "pa.pas", shnsdk.LineOf(route.Token), true)
+		if status == 0 {
+			t.Fatalf("at %s a corrupted chain output must still fail the target-lane validate — nothing may seal", level)
+		}
+		if msg == "" {
+			t.Fatalf("at %s the refusal must say why", level)
+		}
 	}
-	if msg == "" {
-		t.Fatal("want a non-empty validation failure message")
+}
+
+// The same call with bridged=false is an ordinary egress check, governed by
+// the level: strict refuses it (422) and none records and relays it (0) —
+// asserting the exact status at each level, not just "non-zero", is what
+// proves the LEVEL is the thing governing the outcome here, not some
+// unrelated always-invalid shortcut.
+func TestEgressUnbridgedIsGovernedByTheLevel(t *testing.T) {
+	const marker = "CORRUPTED-BY-STUB-STEP"
+	for _, tc := range []struct {
+		level ConformanceEnforcement
+		want  int
+	}{
+		{EnforcementStrict, http.StatusUnprocessableEntity},
+		{EnforcementNone, 0},
+	} {
+		g := &Gateway{cfg: Config{
+			HolderID: "test-holder", Clock: fixedEgressClock,
+			ConformanceEnforcement: tc.level,
+			Validator:              shnsdk.NewFakeValidator(),
+			ValidatorsByLine:       map[string]shnsdk.Validator{"2.1": &shnsdk.FakeValidator{RejectIfContains: marker}},
+		}}
+		status, _ := g.validateFHIREgressOrBridged(context.Background(),
+			[]byte(`{"resourceType":"Bundle","`+marker+`":true}`), "pa.pas", "2.1", false)
+		if status != tc.want {
+			t.Fatalf("at %s an unbridged egress defect got status %d, want %d", tc.level, status, tc.want)
+		}
 	}
 }
 

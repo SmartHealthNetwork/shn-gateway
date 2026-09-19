@@ -178,7 +178,14 @@ func lineFakeResourceIssues(line string, resource map[string]any, profile string
 				walk(lineFakeObject(e["resource"]), p)
 			}
 		case "Claim":
-			if pas.ClaimItemLineDetailRequired {
+			// The PAS 2.1+ Claim.item line-detail minima were verified against
+			// profile-claim.json and profile-claim-update.json — the SUBMIT and
+			// AMENDMENT profiles (sdk/linedef.go's own provenance note). An
+			// INQUIRY's Claim is profile-claim-inquiry, a third profile that
+			// states none of them: an inquiry names the lines it asks about, it
+			// does not re-request them. Holding it to the submit minima would
+			// make this stand-in stricter than the IG it models.
+			if pas.ClaimItemLineDetailRequired && !lineFakeInquiryProfile(p) {
 				for i, item := range lineFakeObjects(r["item"]) {
 					path := fmt.Sprintf("Claim.item[%d]", i)
 					if len(lineFakeExtensions(item, lineFakePAS+"extension-certificationType")) == 0 {
@@ -301,4 +308,14 @@ func lineFakeExtensions(resource map[string]any, url string) []map[string]any {
 		}
 	}
 	return found
+}
+
+// lineFakeInquiryProfile reports whether p names one of the PAS INQUIRY profiles
+// — its request Bundle or its Claim. See the Claim.item note above.
+func lineFakeInquiryProfile(p string) bool {
+	switch p {
+	case lineFakePAS + "profile-pas-inquiry-request-bundle", lineFakePAS + "profile-claim-inquiry":
+		return true
+	}
+	return false
 }

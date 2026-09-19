@@ -75,7 +75,7 @@ import (
 // OWD-G* and UC-0X are partner-facing vocabulary (they appear in the published
 // participant protocol and conformance docs) and must keep appearing here.
 const internalTokenPattern = `S5b|Task[ -][0-9]|(?i:\btask-[0-9])|per the plan|Material-|infra/|goldengen|shn-platform|\bE[0-9][a-z][0-9]?\b|\bD[0-9]\b` +
-	`|\bK1\b|PR #[0-9]+|#[0-9]{2,}\b|docs/superpowers|(?i:\bslice[ -][0-9]\b)|\bBo\b|review-fixes|\bround-[0-9]\b` +
+	`|\bK1\b|PR #[0-9]+|#[0-9]{2,}\b|docs/superpowers|(?i:\bslice[ -][0-9][a-z]?\b)|\bBo\b|review-fixes|\bround-[0-9]\b` +
 	`|ledger[ -][0-9]|(?i:ledger[ -]item[ -][0-9])|option[ -][A-Z] ruling|A′|\bA'[ .,)]|\bT-[0-9]\b|\b[SM]F[0-9]+\b` +
 	`|(?i:spec §|spec[ (]*[0-9]{4}-[0-9]{2}-[0-9]{2})` +
 	// Un-hyphenated spellings that slipped through the original pattern (this task's own
@@ -166,8 +166,16 @@ var sweepAllowlist = map[string][]string{
 		"\"diagnostics\": \"None of the codings provided are in the value set 'X12 278 Health Care Service Location Type Value Set' (http://hl7.org/fhir/us/davinci-pas/ValueSet/X12278LocationType|2.1.0), and a coding from this value set is required) (codes = https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set#98)\",",
 	},
 
+	// The reference payer's own recorded Claim/$inquire answer: this is the
+	// generated narrative it sent, in which "#" separates a Patient identifier's
+	// system from its value. A recorded message is kept as the payer wrote it, so
+	// the line is allowed rather than reworded.
+	"engine/testdata/br-payer/pas-inquire-response.json": {
+		"\"div\": \"<div xml:lang=\\\"en\\\" xmlns=\\\"http://www.w3.org/1999/xhtml\\\" lang=\\\"en\\\"><p class=\\\"res-header-id\\\"><b>Generated Narrative: Patient SubscriberExample</b></p><a name=\\\"SubscriberExample\\\"> </a><a name=\\\"hcSubscriberExample\\\"> </a><div style=\\\"display: inline-block; background-color: #d9e0e7; padding: 6px; margin: 4px; border: 1px solid #8da1b4; border-radius: 5px; line-height: 60%\\\"><p style=\\\"margin-bottom: 0px\\\">Language: en</p><p style=\\\"margin-bottom: 0px\\\">Profile: <a href=\\\"StructureDefinition-profile-subscriber.html\\\">PAS Subscriber Patient</a></p></div><p style=\\\"border: 1px #661aff solid; background-color: #e6e6ff; padding: 10px;\\\">JOE SMITH  Male, DoB Unknown ( http://example.org/MIN#12345678901)</p><hr/><table class=\\\"grid\\\"><tr><td style=\\\"background-color: #f3f5da\\\" title=\\\"A patient's military status.\\\"><a href=\\\"StructureDefinition-extension-militaryStatus.html\\\">Military Status</a></td><td colspan=\\\"3\\\"><span title=\\\"Codes:{https://codesystem.x12.org/005010/584 RU}\\\">RU</span></td></tr></table></div>\"",
+	},
+
 	// ASCII uppercase range is Go syntax, not a decision label.
-	"engine/pasassembly.go": {
+	"engine/pasgraph.go": {
 		"if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '.') {",
 	},
 }
@@ -202,6 +210,10 @@ func TestInternalTokenPattern_DesignDocRefForms(t *testing.T) {
 	re := regexp.MustCompile(internalTokenPattern)
 
 	mustMatch := []string{
+		// A slice id with a letter suffix. `slice 1a` reached a new shipped file's comment
+		// because the arm ended in \b and the letter defeated the boundary.
+		`// slice 1a emits findings before any policy exists`,
+		`// Slice-2b owns the boundary migration`,
 		// Section-only — the one form the deleted cut's grep did describe.
 		`// (spec §1 invariant: ok:false ⇒ failure present)`,
 		// Date + section: the form that slipped past it and forced the delete.

@@ -11,6 +11,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-BRIDGE-DEMO"
           }
@@ -40,6 +48,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-COVERED"
           }
@@ -69,6 +85,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-NOTCOVERED"
           }
@@ -98,6 +122,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-UC06"
           }
@@ -127,6 +159,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-UC07HCPCS"
           }
@@ -156,6 +196,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-UC08"
           }

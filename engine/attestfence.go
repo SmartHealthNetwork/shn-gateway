@@ -18,10 +18,26 @@
 //
 // This re-homes the retired in-process payer stub's "unattested item stays pended" policy fiction
 // (DEF-4) into a real wire guard: FR-16/FR-27 are properties of any QR item, not
-// only of amends, so the fence runs on BOTH the pas-claim and pas-claim-update
-// entrances — the engine's inbound dispatch (inbound.go) and the provider-facing
-// ingress (ingress.go) — and the standalone SDK Responder applies the identical
-// check (sdk/responder.go, parity). It checks the SAME extension URLs the SDK
+// only of amends, so the fence runs on EVERY prior-authorization entrance —
+// pas-claim, pas-claim-update and pas-claim-inquire, at the engine's inbound
+// dispatch (inbound.go) and the provider-facing ingress (ingress.go). An
+// inquiry's own profile gives it no QuestionnaireResponse, so the fence is
+// expected to pass there; running it anyway is what keeps the property attached
+// to the QR item rather than to the leg that happens to carry one today.
+//
+// PARITY WITH THE PUBLISHED RESPONDER, EXACTLY: the standalone SDK Responder
+// applies the identical CHECK (sdk/responder.go), from the same vector corpus,
+// on the two legs it fences — pas-claim and pas-claim-update. It does NOT fence
+// its inquiry handler, so on the inquiry leg the two sides DIVERGE, and this
+// engine is the stricter one. That is the safe direction (an unattested QR item
+// reaching a payer is the hazard; a fence that passes an inquiry carrying none
+// costs nothing), so the engine is not loosened to match. It is recorded here
+// rather than left to be discovered because the shared corpus cannot catch it:
+// the corpus pins what each fence DECIDES about a bundle, and this is a
+// difference in WHICH LEGS each side dispatches the fence on — a property of the
+// two dispatch switches, which no vector can reach.
+//
+// It checks the SAME extension URLs the SDK
 // builders (shnsdk.BuildManualAttestedItem / BuildPatientAttestedItem) write —
 // dtrInformationOriginExt is the engine's own existing mirror of the SDK's
 // unexported information-origin constant (already used by transform_dtr.go's

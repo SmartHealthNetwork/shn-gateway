@@ -140,6 +140,13 @@ type Config struct {
 	// SoR reads the holder's backing system of record (resolve/coverage/clinical/
 	// supplemental/facility-records). E2 swaps in a FHIR client; demo uses the stub.
 	SoR SystemOfRecord
+	// AcceptUnknownMembers is the connectathon test-lane seam: on the Da Vinci
+	// CRD/DTR/PAS legs, a subject the system of record does not hold binds by member id
+	// alone (resolveSubjectPCI) instead of being refused. PRODUCTION default (false, the
+	// zero value): every subject must resolve through SoR. Set only from
+	// SHN_ACCEPT_UNKNOWN_MEMBERS (gateway/app) on the preview test lane; never read
+	// outside resolveSubjectPCI.
+	AcceptUnknownMembers bool
 	// Store is the gateway's own business state (auth numbers, pended-claim ledger,
 	// issued EOBs). Demo: in-memory stub; separated: holdersim; later: gateway Postgres.
 	Store Store
@@ -281,6 +288,16 @@ type Config struct {
 	// is a local demonstration/inspection surface, never the wire, the audit
 	// record, or any conformance surface.
 	DemoEdgeCapture bool
+	// ConformanceEnforcement is this participant's conformance enforcement
+	// level (§3 of the conformance-enforcement-levels design). The ZERO VALUE
+	// IS STRICT, and it stays strict for every in-process construction here or
+	// in any test harness that does not say otherwise. A DEPLOYED gateway is
+	// different: the gateway/app env loader maps an ABSENT
+	// CONFORMANCE_ENFORCEMENT to EnforcementNone, which is the one and only
+	// place a non-strict level comes from an omission. Every gate, reference
+	// participant and hosted gate therefore pins its level explicitly
+	// (test/invariants' TestInvariant_EveryGateRunsStrict).
+	ConformanceEnforcement ConformanceEnforcement
 }
 
 // Gateway is a constructed holder gateway.
@@ -323,6 +340,19 @@ type Gateway struct {
 	edgeCapture   atomic.Pointer[edgeCaptureStore]
 	certification *certificationWorker
 	operations    operationTracker
+
+	// fallbackContinuations is the in-memory prior-authorization continuation
+	// store used when the configured Store does not ship one (continuation.go).
+	// Every Store this repository ships does, so this is the seam for a
+	// participant's own Store written before continuations existed — it keeps
+	// such a deployment working, and it reports itself as non-durable, which is
+	// the fact the Kit's notice and CONFIGURATION state.
+	//
+	// An atomic.Pointer built lazily by CompareAndSwap, for the same reason
+	// edgeCapture above is: a Gateway assembled directly (bypassing New, a common
+	// test pattern in this package) must still have one, and two requests may
+	// reach for it at once.
+	fallbackContinuations atomic.Pointer[MemContinuations]
 }
 
 // New constructs a Gateway. The clock defaults to time.Now and the client to
@@ -475,6 +505,11 @@ func New(cfg Config) (*Gateway, error) {
 		ia.storeErr = g.noteStoreError
 		g.ingressAuth = ia
 	}
+	// A responder that can take the finding emitter gets it now: it could not
+	// be an option, because no gateway existed when the responder was built.
+	if binder, ok := cfg.Responder.(findingEmitterBinder); ok {
+		binder.bindFindingEmitter(g.emitFinding)
+	}
 	g.startCertification()
 	return g, nil
 }
@@ -538,21 +573,33 @@ type pendState struct {
 	srJSON            []byte
 	patientRef        string
 	coverageRef       string
-	// member is the BARE member id the pended submit stamped as the Coverage's
-	// urn:shn:coverage MB identifier value (that identifier is a member number, not a
-	// reference) and as the Claim's insurance[0].coverage LOGICAL reference — the same
-	// bare value in both roles; the resume ClaimUpdate must stamp the SAME value
-	// in both places, so it is pinned here beside coverageRef (which stays the Reference-shaped
-	// value the QR-context / native-lane roles need). In-memory like the rest of pendState.
-	member    string
-	pci       string
-	pasCorr   string
-	filled    []FilledItem
-	needed    []string
-	qrAnswers map[string]string      // provider-data UC-06: the org-attested base answer trace (1.1/3.1), surfaced in the response as FR-17 mixed-provenance evidence
-	payer     shnsdk.PayerIdentifier // the member's REAL payer identity (parsed from OpenCoverage at run-to-PENDED) — threads to the resume ClaimUpdate builders so the payload's payer derives from the patient's real Coverage (FR-G40)
-	recipient string                 // the payer HOLDER id the resume legs route to, resolved from the member's real Coverage at run-to-PENDED (recipientFor) — no default (FR-G40 / AI-G11 / OWD-G10)
-	pasToken  string                 // the pa.pas contract token selected at run-to-PENDED — the PENDED-LINE PIN. Threads to the resume pas-claim-update legs as Content.ProfileID so a pended exchange finishes on the line it started on, regardless of registry drift. Lives HERE by settled decision (AI-1: never ExchangeStore); in-memory/Reset-cleared like the recipient pin beside it — a durable pend store inherits it.
+	// coverage is the member's OWN Coverage record the pended submit named, pinned
+	// at run-to-PENDED: the resume ClaimUpdate is made under the SAME policy, and a
+	// payer that stored the authorization under one coverage and is amended under
+	// another has two requests rather than one. In-memory like the rest of pendState.
+	coverage []byte
+	// insurer is the payer's own Organization record the pended submit named, pinned
+	// for the same reason the coverage is: the resume ClaimUpdate names the payer the
+	// submission named, and the payer scopes an inquiry's search by the insurer.
+	insurer []byte
+	// member is the BARE member id the pended submit named; the resume ClaimUpdate
+	// names the SAME member, so it is pinned here beside coverageRef (which stays
+	// the Reference-shaped value the QR-context / native-lane roles need).
+	// In-memory like the rest of pendState.
+	member string
+	// memberSystem is the namespace the participant's own system names that
+	// member under, pinned at run-to-PENDED beside member itself: the resume
+	// ClaimUpdate names the member exactly as the submission did, so the payer
+	// matching an inquiry finds one authorization rather than none.
+	memberSystem string
+	pci          string
+	pasCorr      string
+	filled       []FilledItem
+	needed       []string
+	qrAnswers    map[string]string      // provider-data UC-06: the org-attested base answer trace (1.1/3.1), surfaced in the response as FR-17 mixed-provenance evidence
+	payer        shnsdk.PayerIdentifier // the member's REAL payer identity (parsed from OpenCoverage at run-to-PENDED) — threads to the resume ClaimUpdate builders so the payload's payer derives from the patient's real Coverage (FR-G40)
+	recipient    string                 // the payer HOLDER id the resume legs route to, resolved from the member's real Coverage at run-to-PENDED (recipientFor) — no default (FR-G40 / AI-G11 / OWD-G10)
+	pasToken     string                 // the pa.pas contract token selected at run-to-PENDED — the PENDED-LINE PIN. Threads to the resume pas-claim-update legs as Content.ProfileID so a pended exchange finishes on the line it started on, regardless of registry drift. Lives HERE by settled decision (AI-1: never ExchangeStore); in-memory/Reset-cleared like the recipient pin beside it — a durable pend store inherits it.
 	// carriedEntries is the pended pas-claim leg's own declared CARRY record
 	// (the multi-version spec's verifyCarryPresent obligation) — the
 	// Carried LossEntries the pend's transform chain reported, pinned beside
@@ -645,6 +692,7 @@ const (
 	storeErrExchange   = "exchange"
 	storeErrReplay     = "replay"
 	storeErrIngressKey = "ingresskey"
+	storeErrPended     = "pended"
 )
 
 // noteStoreError counts one shared-state store failure. Nil-safe: a gateway with no
@@ -759,6 +807,13 @@ func (g *Gateway) Handler() http.Handler {
 		mux.HandleFunc("POST /scenario/uc07/complete", g.handleUC07Complete)
 		mux.HandleFunc("POST /scenario/uc07/cancel", g.handleScenarioCancel)
 		mux.HandleFunc("GET /scenario/uc07/pending", g.handleUC07Pending)
+		// Continue a prior-authorization decision this gateway pended earlier
+		// (originate_wait.go). It belongs on this surface and nowhere else: the
+		// continuation is server-held state for the gateway's OWN originator
+		// flows, and a participant's own system inquires through its own
+		// `POST /Claim/$inquire` ingress instead, with no SHN state involved.
+		// Like the rest of /scenario/*, it is never publicly routed.
+		mux.HandleFunc("POST /scenario/pa/inquire", g.handlePAInquire)
 		// Admin reset of the in-memory pended-scenario store. The in-process devstack
 		// calls g.Reset() directly; in the SEPARATED deployment the console reset hits
 		// this route so a pended UC-06/07 does not survive as an orphaned questionnaire
@@ -769,6 +824,7 @@ func (g *Gateway) Handler() http.Handler {
 			mux.HandleFunc("POST /cds-services/{id}", g.observeIngress("crd-ingress", g.handleCRDIngress))
 			mux.HandleFunc("POST /Questionnaire/$questionnaire-package", g.observeIngress("dtr-ingress", g.handleDTRIngress))
 			mux.HandleFunc("POST /Claim/$submit", g.observeIngress("pas-ingress", g.handlePASIngress))
+			mux.HandleFunc("POST /Claim/$inquire", g.observeIngress("pas-inquire-ingress", g.handlePASInquireIngress))
 			// FR-37: the ingress edge's own CapabilityStatement (per-role
 			// statements — the payer's /metadata precedent at gateway.go:517).
 			mux.HandleFunc("GET /metadata", g.handleIngressMetadata)
@@ -1408,25 +1464,128 @@ func (g *Gateway) validateFHIR(ctx context.Context, resourceJSON []byte, dir, li
 
 // validateFHIRAtProfile preserves the selected lane and all validation refusals.
 func (g *Gateway) validateFHIRAtProfile(ctx context.Context, resourceJSON []byte, dir, line, profile string) (int, string) {
-	return validateWithValidator(ctx, g.validatorForLine(line), resourceJSON, dir, line, profile)
+	return g.validateGoverned(ctx, findingContextFrom(ctx), g.validatorForLine(line), resourceJSON, dir, line, profile, false).refusal()
 }
 
 func (g *Gateway) validateFHIRForContract(ctx context.Context, resourceJSON []byte, dir, contract, line, profile string) (int, string) {
-	return validateWithValidator(ctx, g.validatorForContractLine(contract, line), resourceJSON, dir, line, profile)
+	return g.validateGoverned(ctx, findingContextFrom(ctx), g.validatorForContractLine(contract, line), resourceJSON, dir, line, profile, false).refusal()
 }
 
-func validateWithValidator(ctx context.Context, v shnsdk.Validator, resourceJSON []byte, dir, line, profile string) (int, string) {
+// validateFHIREgressOrBridged is the target-line egress check that follows
+// egressAdapt. bridged says whether the payload actually went through a
+// transform chain (len(route.Chain) > 0 at the call site): if it did, these
+// bytes are SHN's own registered edit and the check refuses at every level;
+// if it did not, they are the participant's own and the level governs.
+//
+// This is the ONE exception to "the validateFHIR* call lines keep their
+// signatures": the eleven PAS-bundle sites each pass the flag, and
+// conformance_sources_test.go lists exactly those eleven. The adaptive-DTR
+// site is deliberately NOT among them: its leg is an envelope leg, so
+// egressAdapt transforms nothing there, and a check that cannot see an SHN
+// edit has nothing to verify.
+func (g *Gateway) validateFHIREgressOrBridged(ctx context.Context, resourceJSON []byte, contract, targetLine string, bridged bool) (int, string) {
+	return g.validateGoverned(ctx, findingContextFrom(ctx), g.validatorForContractLine(contract, targetLine),
+		resourceJSON, "egress", targetLine, "", bridged).refusal()
+}
+
+// govResult is what one governed check produced: the refusal (zero Status when
+// the message proceeds) and, for a refusal only, the bounded validator issues
+// the body may echo. Issues is empty at every other outcome.
+type govResult struct {
+	Status int
+	Msg    string
+	Issues []string
+}
+
+// refusal flattens a govResult for the 42 wrapper call lines that write
+// {"error": msg}: the bounded issues are appended to the message, so a refused
+// sender learns WHAT was wrong without any call line changing.
+func (r govResult) refusal() (int, string) {
+	if r.Status == 0 || len(r.Issues) == 0 {
+		return r.Status, r.Msg
+	}
+	return r.Status, r.Msg + ": " + strings.Join(r.Issues, "; ")
+}
+
+// policy is the gateway's conformance policy, built from the configured level.
+// It is configuration, never request-scoped.
+func (g *Gateway) policy() ConformancePolicy {
+	return NewConformancePolicy(g.cfg.ConformanceEnforcement)
+}
+
+// ConformanceLevelForTest exposes this Gateway's own effective conformance
+// enforcement level — test-only introspection (the ValidatorReadinessForTest/
+// RecordEdgeCaptureForTest pattern) proving that a level set through
+// Config.ConformanceEnforcement actually reached the constructed Gateway,
+// not just whatever struct a caller assembled.
+func (g *Gateway) ConformanceLevelForTest() ConformanceEnforcement {
+	return g.policy().Level()
+}
+
+// ResponderForTest exposes this Gateway's own configured Responder (a payer's
+// content occupant) — test-only introspection letting a caller outside this
+// package reach the SAME responder value Handle dispatches to, e.g. to type-
+// assert for a *nativeResponder's own ConformanceLevelForTest and prove its
+// enforcement policy is the one the deployment actually configured, not just
+// whatever engine.Config a caller assembled.
+func (g *Gateway) ResponderForTest() LegResponder {
+	return g.cfg.Responder
+}
+
+// kindForDirection names the governed check kind. A bridged payload — one this
+// gateway transformed between IG lines — is SHN's own registered edit, never
+// the participant's data, and is refused at every level (§2).
+func kindForDirection(dir string, bridged bool) CheckKind {
+	switch {
+	case bridged:
+		return KindFHIRBridged
+	case dir == "egress":
+		return KindFHIREgress
+	default:
+		return KindFHIRIngress
+	}
+}
+
+// validateGoverned is the ONE place a runtime FHIR $validate verdict becomes a
+// refusal or a record. Every invalid verdict emits its finding first, at both
+// levels, and only then is the decision acted on. A validator outage or an
+// unlaned contract line is not a conformance verdict: those errors are
+// identical at every level and emit nothing.
+func (g *Gateway) validateGoverned(ctx context.Context, fc findingContext, v shnsdk.Validator, resourceJSON []byte, dir, line, profile string, bridged bool) govResult {
 	if v == nil {
-		return http.StatusInternalServerError, "no FHIR validator lane configured for contract line " + line + " (FR-36/FR-G29)"
+		return govResult{Status: http.StatusInternalServerError, Msg: "no FHIR validator lane configured for contract line " + line + " (FR-36/FR-G29)"}
 	}
 	res, err := v.Validate(ctx, resourceJSON, profile)
 	if err != nil {
-		return http.StatusInternalServerError, "validator unavailable"
+		return govResult{Status: http.StatusInternalServerError, Msg: "validator unavailable"}
 	}
-	if !res.Valid {
-		return http.StatusUnprocessableEntity, dir + " validation failed"
+	if res.Valid {
+		return govResult{}
 	}
-	return 0, ""
+	kind := kindForDirection(dir, bridged)
+	decision := g.policy().Decide(kind, "", VerdictInvalid)
+	whose := fc.Whose
+	if bridged {
+		whose = "network"
+	}
+	g.emitFinding(ConformanceFinding{
+		Kind:          string(kind),
+		Direction:     dir,
+		LegType:       fc.LegType,
+		CorrelationID: fc.CorrelationID,
+		Seam:          fc.Seam,
+		Whose:         whose,
+		Line:          line,
+		Profile:       profile,
+		Level:         g.policy().Level().String(),
+		Decision:      decision.String(),
+		PayloadSHA256: sha256hex(resourceJSON),
+		Issues:        res.Issues,
+	})
+	if decision == Record {
+		return govResult{}
+	}
+	return govResult{Status: http.StatusUnprocessableEntity, Msg: dir + " validation failed", Issues: boundIssues(res.Issues)}
 }
 
 // validateFHIRPayerIngress is validateFHIR("ingress", …), scoped to legs whose
@@ -1480,6 +1639,32 @@ func (g *Gateway) validateFHIRPayerIngress(ctx context.Context, resourceJSON []b
 // enforces byte-identity by construction, not a production code path.
 var envelopeEgressLegs = map[string]bool{"dtr-questionnaire-fetch": true}
 
+// verbatimChainLegs are legs whose payload the compat chain WALKS — so the
+// routing and observer story stays honest — and never rewrites.
+//
+// pas-claim-inquire is one, for two reasons that both have to hold.
+//
+// FIRST, the chain has nothing to do to it. Every pa.pas step models a
+// difference between the SUBMIT/AMENDMENT profiles (profile-claim,
+// profile-claim-update) or the response profile: the Claim.item line detail and
+// the related-claim relationship, and ClaimResponse.request. An inquiry's Claim
+// is profile-claim-inquiry, a third profile that states none of them — the same
+// distinction the certification layer draws (species.go) and the validator lane
+// scopes (linefake.go). Measured: running the chain over an inquiry changed not
+// one fact, only the key order of the re-marshalled JSON.
+//
+// SECOND, that re-marshal is exactly what an inquiry must not suffer. Its
+// payload CARRIES the participant's own Patient, Coverage, provider and payer
+// records as verbatim spans, sealed as embeds — that is what makes the bytes on
+// the wire provably the participant's records rather than a rendering of them.
+// A step that re-serialized them would reorder their keys and leave the seal
+// describing a message that no longer exists.
+//
+// inquireContinuation keeps the runtime byte-equality check that refuses to send
+// under a broken seal, so a future inquiry-aware step that DID change the bytes
+// is refused rather than waved through.
+var verbatimChainLegs = map[string]bool{"pas-claim-inquire": true}
+
 // egressAdapt applies route's transform chain (if any) to payload before it
 // is sent, builds the transform Provenance from the
 // chain's LossReports, and emits leg.transformed. Arms (1)/(2) carry
@@ -1499,7 +1684,7 @@ func (g *Gateway) egressAdapt(route legRoute, payload []byte, x ExchangeIdentity
 	var out []byte
 	var reports []LossReport
 	var err error
-	if envelopeEgressLegs[x.LegType] {
+	if envelopeEgressLegs[x.LegType] || verbatimChainLegs[x.LegType] {
 		// Non-FHIR carve-out (obligation discharged — see
 		// envelopeEgressLegs's own doc comment and the multi-version spec's
 		// recorded DTR-fetch known-gap entry): envelope legs are

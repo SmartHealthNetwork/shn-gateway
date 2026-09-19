@@ -26,7 +26,7 @@ retract (
 )
 
 require (
-	github.com/SmartHealthNetwork/shn-sdk v0.50.1
+	github.com/SmartHealthNetwork/shn-sdk v0.51.1
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/samply/golang-fhir-models/fhir-models v0.3.2

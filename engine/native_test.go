@@ -694,6 +694,17 @@ func TestNativeResponder_PerOperationBases(t *testing.T) {
 		if *pasPath != "/Claim/$submit" {
 			t.Errorf("PAS path on the PAS base = %q, want /Claim/$submit", *pasPath)
 		}
+		// And the INQUIRY, which is a PAS operation like the submit. A payer that
+		// serves its PAS operations from their own base serves this one there too,
+		// and a requester that reached only $submit would reach the payer to ask
+		// and not to hear the answer — on the one leg a decision made later ever
+		// arrives by.
+		if _, err := n.Handle(context.Background(), "pas-claim-inquire", "c", "PCI-1", originatorBuiltInquiryBundle(t, "MBR-COVERED")); err != nil {
+			t.Fatalf("PAS inquiry Handle: %v", err)
+		}
+		if *pasPath != "/Claim/$inquire" {
+			t.Errorf("PAS inquiry path on the PAS base = %q, want /Claim/$inquire", *pasPath)
+		}
 		if *sharedPath != "" {
 			t.Errorf("the shared base received %q; with all three bases set it must receive nothing", *sharedPath)
 		}

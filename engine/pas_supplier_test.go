@@ -46,7 +46,20 @@ func TestPASSubmitSupplierRetention(t *testing.T) {
 					}
 				})
 			}
-			if _, err := retainPASSubmitSupplier(got, supplier); err == nil {
+			// The SAME supplier already at that entry is the shape a dispatched
+			// request has once the Claim names its performer as the requesting
+			// provider: one party, carried once. Retaining it again changes
+			// nothing — it does not add a second entry and it does not refuse.
+			again, err := retainPASSubmitSupplier(got, supplier)
+			if err != nil || !bytes.Equal(again, got) {
+				t.Fatalf("carrying the supplier the request already holds must leave it unchanged: %s %v", again, err)
+			}
+			// A DIFFERENT record under that same identity is still a conflict,
+			// and the CONTENT is what says so: without comparing it, a second
+			// supplier would be swallowed by the entry already there and the
+			// request would name a party this call never put in it.
+			other := []byte(strings.Replace(string(supplier), `"Actual supplier"`, `"A different supplier"`, 1))
+			if _, err := retainPASSubmitSupplier(got, other); err == nil {
 				t.Fatal("conflicting entry accepted")
 			}
 		})

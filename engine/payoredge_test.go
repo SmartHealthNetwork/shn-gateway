@@ -117,11 +117,14 @@ func TestPayorEdgeBareCoverage_NoResolvablePayorRefuses(t *testing.T) {
 func conformantSubmitBundle(t *testing.T, payer shnsdk.PayerIdentifier, payerOrgEntry bool) []byte {
 	t.Helper()
 	sr := []byte(`{"resourceType":"ServiceRequest","id":"sr-x","status":"active","intent":"order","subject":{"reference":"Patient/MBR-1"},"code":{"coding":[{"system":"http://www.ama-assn.org/go/cpt","code":"72148","display":"MRI lumbar spine w/o contrast"}]}}`)
-	b, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
-		SR: sr, PatientRef: "Patient/MBR-1", CoverageRef: "Coverage/MBR-1", MemberID: "MBR-1",
+	b, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{Coverage: testMemberCoverage("MBR-1"),
+		Provider:       testRequestingProvider(),
+		MemberIDSystem: shnsdk.MemberSystem,
+		SR:             sr, PatientRef: "Patient/MBR-1", CoverageRef: "Coverage/MBR-1", MemberID: "MBR-1",
 		Corr: "corr-payoredge", Created: time.Unix(1700000000, 0).UTC(),
 		ContainedInsurer: payerOrgEntry, AbsoluteRefs: payerOrgEntry, PayerOrgEntry: payerOrgEntry,
-		Payer: payer,
+		Insurer: testPayerOrganization(payer),
+		Payer:   payer,
 	})
 	if err != nil {
 		t.Fatalf("conformantSubmitBundle: %v", err)
@@ -230,8 +233,10 @@ func TestPayorEdgePASBundle_UnresolvedInsurerRefused(t *testing.T) {
 // both contained identifiers are mapped.
 func TestPayorEdgePASBundle_ContainedShape_Maps(t *testing.T) {
 	sr := []byte(`{"resourceType":"ServiceRequest","id":"sr-x","status":"active","intent":"order","subject":{"reference":"Patient/MBR-1"},"code":{"coding":[{"system":"http://www.ama-assn.org/go/cpt","code":"72148","display":"MRI lumbar spine w/o contrast"}]}}`)
-	bundle, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
-		SR: sr, PatientRef: "Patient/MBR-1", CoverageRef: "Coverage/MBR-1", MemberID: "MBR-1",
+	bundle, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{Coverage: testMemberCoverage("MBR-1"),
+		Provider:       testRequestingProvider(),
+		MemberIDSystem: shnsdk.MemberSystem,
+		SR:             sr, PatientRef: "Patient/MBR-1", CoverageRef: "Coverage/MBR-1", MemberID: "MBR-1",
 		Corr: "corr-payoredge", Created: time.Unix(1700000000, 0).UTC(),
 		ContainedInsurer: true, Payer: ownIdentity,
 	})
@@ -579,6 +584,90 @@ func TestNativeSubmit_PayorEdge_SeamOffAndRestamp(t *testing.T) {
 	})
 }
 
+// inquiryBundleWithPayor builds a prior-authorization inquiry Bundle whose Coverage
+// names payer inline — the shape the payer-identity seam maps on this leg. The
+// inquiry rides the SAME carrier as a submission (its Bundle carries the Coverage
+// entries and, where present, the Claim insurer), so this exercises the registered
+// edit on the inquiry leg rather than re-deriving it.
+func inquiryBundleWithPayor(payer shnsdk.PayerIdentifier) []byte {
+	return []byte(`{"resourceType":"Bundle","type":"collection",
+		"identifier":{"system":"http://provider.example/inq","value":"INQ-PE-1"},
+		"timestamp":"2026-09-18T00:00:00Z",
+		"entry":[
+		  {"fullUrl":"urn:uuid:claim","resource":{"resourceType":"Claim","use":"preauthorization",
+		    "identifier":[{"system":"http://provider.example/inq","value":"INQUIRY-TRN"}],
+		    "patient":{"reference":"Patient/MBR-1"},
+		    "item":[{"sequence":1,
+		      "productOrService":{"coding":[{"system":"http://www.ama-assn.org/go/cpt","code":"72148","display":"MRI lumbar spine"}]},
+		      "extension":[{"url":"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-itemTraceNumber",
+		        "valueIdentifier":{"system":"http://provider.example/trn","value":"TRN-PE-1"}}]}]}},
+		  {"fullUrl":"urn:uuid:patient","resource":{"resourceType":"Patient","id":"MBR-1"}},
+		  {"fullUrl":"urn:uuid:coverage","resource":{"resourceType":"Coverage",
+		    "beneficiary":{"reference":"Patient/MBR-1"},
+		    "payor":[{"identifier":{"system":"` + payer.System + `","value":"` + payer.Value + `"}}]}}]}`)
+}
+
+// TestNativeInquire_PayorEdge_SeamOffAndRestamp is the inquiry leg's own
+// payer-identity-seam proof, affirmative on all three arms: seam off forwards the
+// payor verbatim, this payer's own identity is restamped to its backend's, and a
+// Coverage naming ANOTHER payer refuses before a byte is forwarded. The behaviour
+// is inherited — the inquiry rides the same registered edit and the same carrier
+// as a submission — but inheritance is not evidence, and the other legs each have
+// these rows.
+func TestNativeInquire_PayorEdge_SeamOffAndRestamp(t *testing.T) {
+	answer := []byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"ClaimResponse","outcome":"complete","patient":{"reference":"Patient/SubscriberExample"}}}]}`)
+
+	t.Run("seam off forwards verbatim", func(t *testing.T) {
+		p := newStubPartner(t)
+		p.respByPath["/Claim/$inquire"] = answer
+		n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", newCensusSoR(), fixedClock)
+		res, err := n.Handle(context.Background(), "pas-claim-inquire", "corr", "MBR-1", inquiryBundleWithPayor(ownIdentity))
+		if err != nil || res.Status != 0 {
+			t.Fatalf("Handle: err=%v status=%d msg=%s", err, res.Status, res.Message)
+		}
+		if p.lastPath != "/Claim/$inquire" {
+			t.Fatalf("posted to %q, want /Claim/$inquire", p.lastPath)
+		}
+		got, ok := bundleCoveragePayor(t, p.lastBody)
+		if !ok || got != ownIdentity {
+			t.Fatalf("seam off must forward the payor VERBATIM; sent=%v ok=%v, want %v", got, ok, ownIdentity)
+		}
+	})
+
+	t.Run("own identity restamps to backend", func(t *testing.T) {
+		p := newStubPartner(t)
+		p.respByPath["/Claim/$inquire"] = answer
+		n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", newCensusSoR(), fixedClock, WithPayorEdgeIdentity(ownIdentity, backendIdentity))
+		res, err := n.Handle(context.Background(), "pas-claim-inquire", "corr", "MBR-1", inquiryBundleWithPayor(ownIdentity))
+		if err != nil || res.Status != 0 {
+			t.Fatalf("Handle: err=%v status=%d msg=%s", err, res.Status, res.Message)
+		}
+		got, ok := bundleCoveragePayor(t, p.lastBody)
+		if !ok || got != backendIdentity {
+			t.Fatalf("the bytes the payer's system received must carry the BACKEND identity; sent=%v ok=%v, want %v", got, ok, backendIdentity)
+		}
+		if bytes.Contains(p.lastBody, []byte(ownIdentity.Value)) {
+			t.Fatalf("an identifier naming this payer was left unmapped: %s", p.lastBody)
+		}
+	})
+
+	t.Run("mismatch refuses before forwarding", func(t *testing.T) {
+		p := newStubPartner(t)
+		p.respByPath["/Claim/$inquire"] = answer
+		n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", newCensusSoR(), fixedClock, WithPayorEdgeIdentity(ownIdentity, backendIdentity))
+		res, err := n.Handle(context.Background(), "pas-claim-inquire", "corr", "MBR-1", inquiryBundleWithPayor(foreignIdentity))
+		if err != nil {
+			t.Fatalf("Handle must return a LegResult refusal, not a bare error: %v", err)
+		}
+		if res.Status != 400 {
+			t.Fatalf("a Coverage naming another payer must refuse with a 400-class LegResult, got status=%d", res.Status)
+		}
+		if p.lastBody != nil {
+			t.Fatalf("it must refuse BEFORE forwarding any bytes; the payer's system received: %s", p.lastBody)
+		}
+	})
+}
+
 // conformantUpdateBundle builds a $submit-amendment (pas-claim-update) Bundle via the SAME
 // SDK builder the originator uses, with a caller-chosen payer identity — the
 // pas-claim-update sibling of conformantSubmitBundle (Finding 1, task1-review.md: the
@@ -621,13 +710,16 @@ func conformantUpdateBundle(t *testing.T, payer shnsdk.PayerIdentifier, payerOrg
 	}
 	ref := "Patient/" + member
 	sr := []byte(`{"resourceType":"ServiceRequest","id":"sr-x","status":"active","intent":"order","subject":{"reference":"` + ref + `"},"code":{"coding":[{"system":"http://www.ama-assn.org/go/cpt","code":"72148","display":"MRI lumbar spine w/o contrast"}]}}`)
-	b, err := shnsdk.BuildConformantClaimUpdateBundle(shnsdk.ConformantClaimUpdateInputs{
-		QR: qrJSON, SR: sr, PatientRef: ref, CoverageRef: "Coverage/" + member, MemberID: member,
+	b, err := shnsdk.BuildConformantClaimUpdateBundle(shnsdk.ConformantClaimUpdateInputs{Coverage: testMemberCoverage(member),
+		Provider:       testRequestingProvider(),
+		MemberIDSystem: shnsdk.MemberSystem,
+		QR:             qrJSON, SR: sr, PatientRef: ref, CoverageRef: "Coverage/" + member, MemberID: member,
 		Provenance: provJSON, DiagnosticReport: drJSON,
 		Corr: corr, OriginalCorr: originalCorr,
 		Created:          created,
 		ContainedInsurer: payerOrgEntry, AbsoluteRefs: payerOrgEntry, PayerOrgEntry: payerOrgEntry,
-		Payer: payer,
+		Insurer: testPayerOrganization(payer),
+		Payer:   payer,
 	})
 	if err != nil {
 		t.Fatalf("conformantUpdateBundle: %v", err)

@@ -34,7 +34,7 @@ func attachmentQRFixture(orderType, line string) []byte {
 	if line == "2.2" {
 		coverageURL = attachmentCoverageURL
 	}
-	return []byte(fmt.Sprintf(`{"resourceType":"QuestionnaireResponse","status":"completed","subject":{"reference":"Patient/MBR-OX","display":"Synthetic patient"},"questionnaire":"https://example.test/Questionnaire/synthetic","opaqueDecimal":9007199254740993.2300,"item":[{"linkId":"1","answer":[{"valueDecimal":9007199254740993.2300},{"valueDecimal":1.2300},{"valueDecimal":1.20e+03},{"valueDecimal":-0.0}]}],"extension":[{"url":%q,"valueReference":{"reference":"Coverage/source-coverage","type":"Coverage","display":"Coverage source","identifier":{"system":"urn:synthetic","value":"coverage"},"extension":[{"url":"https://example.test/precision","valueDecimal":9007199254740993.2300}],"opaque":{"preserve":true}}},{"url":%q,"valueReference":{"reference":%q,"type":%q,"display":"Order source","identifier":{"system":"urn:synthetic","value":"order"},"opaque":{"preserve":true}}},{"url":%q,"valueReference":{"reference":"Coverage/unrelated","display":"Unrelated coverage"}},{"url":%q,"valueReference":{"reference":%q,"display":"Unrelated order"}}],"otherReferences":[{"reference":"#contained"},{"reference":"Observation/outside"},{"reference":"https://elsewhere.test/Patient/MBR-OX"},{"reference":"Organization/cms-payer"}],"contained":[{"resourceType":"Coverage","id":"contained-coverage","beneficiary":{"reference":"Patient/MBR-OX","extension":[{"url":"https://example.test/nested","valueReference":{"reference":"Patient/MBR-OX"}}]}},{"resourceType":"ServiceRequest","id":"contained-sr","subject":{"reference":"Patient/MBR-OX"}},{"resourceType":"DeviceRequest","id":"contained-dr","subject":{"reference":"Patient/MBR-OX"}}]}`, coverageURL, attachmentContextURL, orderType+"/source-order", orderType, attachmentContextURL, attachmentContextURL, orderType+"/unrelated"))
+	return []byte(fmt.Sprintf(`{"resourceType":"QuestionnaireResponse","status":"completed","subject":{"reference":"Patient/MBR-OX","display":"Synthetic patient"},"questionnaire":"https://example.test/Questionnaire/synthetic","opaqueDecimal":9007199254740993.2300,"item":[{"linkId":"1","answer":[{"valueDecimal":9007199254740993.2300},{"valueDecimal":1.2300},{"valueDecimal":1.20e+03},{"valueDecimal":-0.0}]}],"extension":[{"url":%q,"valueReference":{"reference":"Coverage/source-coverage","type":"Coverage","display":"Coverage source","identifier":{"system":"urn:synthetic","value":"coverage"},"extension":[{"url":"https://example.test/precision","valueDecimal":9007199254740993.2300}],"opaque":{"preserve":true}}},{"url":%q,"valueReference":{"reference":%q,"type":%q,"display":"Order source","identifier":{"system":"urn:synthetic","value":"order"},"opaque":{"preserve":true}}},{"url":%q,"valueReference":{"reference":"Coverage/unrelated","display":"Unrelated coverage"}},{"url":%q,"valueReference":{"reference":%q,"display":"Unrelated order"}}],"otherReferences":[{"reference":"#contained"},{"reference":"Observation/outside"},{"reference":"https://elsewhere.test/Patient/MBR-OX"},{"reference":"Organization/org-cms-payer"}],"contained":[{"resourceType":"Coverage","id":"contained-coverage","beneficiary":{"reference":"Patient/MBR-OX","extension":[{"url":"https://example.test/nested","valueReference":{"reference":"Patient/MBR-OX"}}]}},{"resourceType":"ServiceRequest","id":"contained-sr","subject":{"reference":"Patient/MBR-OX"}},{"resourceType":"DeviceRequest","id":"contained-dr","subject":{"reference":"Patient/MBR-OX"}}]}`, coverageURL, attachmentContextURL, orderType+"/source-order", orderType, attachmentContextURL, attachmentContextURL, orderType+"/unrelated"))
 }
 
 func attachmentInputs(orderType, line string, absolute bool) shnsdk.ConformantClaimInputs {
@@ -45,14 +45,14 @@ func attachmentInputs(orderType, line string, absolute bool) shnsdk.ConformantCl
 		oldID = "dr-ox"
 	}
 	order = bytes.Replace(order, []byte(oldID), []byte("source-order"), 1)
-	return shnsdk.ConformantClaimInputs{QR: attachmentQRFixture(orderType, line), SR: order,
+	return shnsdk.ConformantClaimInputs{Insurer: testPayerOrganization(shnsdk.CMSPayerIdentity), Coverage: testMemberCoverage("MBR-OX"), QR: attachmentQRFixture(orderType, line), SR: order, Provider: testRequestingProvider(), MemberIDSystem: shnsdk.MemberSystem,
 		PatientRef: "Patient/MBR-OX", CoverageRef: "Coverage/source-coverage", MemberID: "MBR-OX",
 		Corr: "synthetic-submit", Created: pasTailClock(), AbsoluteRefs: absolute, PayerOrgEntry: true, Payer: shnsdk.CMSPayerIdentity}
 }
 
 func attachmentUpdateInputs(line string, absolute, diagnostic bool) shnsdk.ConformantClaimUpdateInputs {
 	in := attachmentInputs("ServiceRequest", line, absolute)
-	out := shnsdk.ConformantClaimUpdateInputs{QR: in.QR, SR: in.SR, PatientRef: in.PatientRef, CoverageRef: in.CoverageRef,
+	out := shnsdk.ConformantClaimUpdateInputs{Insurer: testPayerOrganization(in.Payer), Coverage: testMemberCoverage(in.MemberID), QR: in.QR, SR: in.SR, Provider: in.Provider, MemberIDSystem: in.MemberIDSystem, PatientRef: in.PatientRef, CoverageRef: in.CoverageRef,
 		MemberID: in.MemberID, Corr: "synthetic-update", OriginalCorr: in.Corr, Created: in.Created,
 		AbsoluteRefs: absolute, PayerOrgEntry: true, Payer: in.Payer,
 		Provenance: []byte(`{"resourceType":"Provenance","id":"source-prov","recorded":"2023-11-14T22:13:20Z","target":[{"reference":"QuestionnaireResponse/source-qr"}],"agent":[{"who":{"identifier":{"system":"http://hl7.org/fhir/sid/us-npi","value":"1234567890"}}}],"opaque":{"preserve":"attribution"}}`)}
@@ -105,6 +105,22 @@ func attachmentResource(t *testing.T, entries []attachmentTestEntry, typ string)
 		t.Fatalf("%s entries=%d", typ, len(matches))
 	}
 	return matches[0]
+}
+
+// attachmentResourceByID selects one entry by type AND id. A prior-authorization
+// request now carries TWO Organizations — the payer it is addressed to and the
+// requesting provider it comes from — so "the Organization entry" no longer
+// names one resource.
+func attachmentResourceByID(t *testing.T, entries []attachmentTestEntry, typ, id string) attachmentTestEntry {
+	t.Helper()
+	for _, e := range entries {
+		m := attachmentObject(t, e.Resource)
+		if attachmentString(t, m["resourceType"]) == typ && attachmentString(t, m["id"]) == id {
+			return e
+		}
+	}
+	t.Fatalf("no %s/%s entry", typ, id)
+	return attachmentTestEntry{}
 }
 func attachmentRef(t *testing.T, e attachmentTestEntry, absolute bool) string {
 	t.Helper()
@@ -187,7 +203,7 @@ func assertAttachmentPreservation(t *testing.T, source, body, sdkBody []byte, or
 	if err := json.Unmarshal(got["otherReferences"], &refs); err != nil {
 		t.Fatal(err)
 	}
-	wants := []string{"#contained", "Observation/outside", "https://elsewhere.test/Patient/MBR-OX", attachmentRef(t, attachmentResource(t, entries, "Organization"), absolute)}
+	wants := []string{"#contained", "Observation/outside", "https://elsewhere.test/Patient/MBR-OX", attachmentRef(t, attachmentResourceByID(t, entries, "Organization", "org-cms-payer"), absolute)}
 	for i, want := range wants {
 		if refs[i]["reference"] != want {
 			t.Errorf("other ref[%d]=%s want %s", i, refs[i]["reference"], want)

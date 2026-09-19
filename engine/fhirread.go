@@ -9,6 +9,7 @@ package engine
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -40,13 +41,57 @@ func ParseCoverageEligibilityResponsePatient(data []byte) (string, error) {
 	return probe.Patient.Reference, nil
 }
 
+// ErrNoPASResponsePatient is what ParsePASResponsePatients returns for a response
+// that carries NO ClaimResponse at all — the shape an inquiry that matched nothing
+// legitimately answers with. It exists so that caller can tell "there is nothing to
+// compare" apart from "I could not read this", and treat only the first as ordinary.
+//
+// It is deliberately NOT raised for a ClaimResponse that carries no patient. That
+// resource is malformed — PAS puts ClaimResponse.patient at 1..1 — and an answer
+// carrying one is an answer whose subject cannot be established. Widening the
+// sentinel to cover it would hand the fence a decision by ABSENCE: the very shape
+// that answer takes would be its exemption from being compared.
+var ErrNoPASResponsePatient = errors.New("engine: PAS response carries no ClaimResponse")
+
 // ParsePASResponsePatients returns every patient reference in a PAS response: a
-// bare polling ClaimResponse carries one; a native response Bundle carries a
+// bare polling ClaimResponse carries one; a response Bundle carries a
 // ClaimResponse (+ possibly other resources) — collect every ClaimResponse's
-// .patient.reference. Errors if none found. json-level, no FHIR lib. Used by
-// the (C) outbound fence (pas-claim/pas-claim-update legs) and by
-// test/adversarial. Exported because test/adversarial uses it directly.
+// .patient.reference. A prior-authorization inquiry's answer takes one more
+// shape: at PAS 2.2.1 the operation returns a Parameters whose output parameters
+// are 0..* response Bundles, so every one of THOSE Bundles' ClaimResponses is
+// collected too. Reading only the first would leave the other answers' patients
+// unfenced.
+//
+// The output parameter names it reads are the leg's own closed pair
+// (pasInquiryOutputCarries) — the name the operation declares AND the name the
+// Da Vinci reference payer sends. That pair is shared deliberately: this fence
+// and the leg's ledger reader must see the SAME Bundles, or an answer could be
+// read for a decision while its patients went uncompared. The Parameters shape
+// arises only for the inquiry operation, which is why the inquiry leg's rule is
+// the right one here.
+//
+// Errors with ErrNoPASResponsePatient if none found. json-level, no FHIR lib.
+// Used by the (C) outbound fence (the PAS legs) and by test/adversarial.
+// Exported because test/adversarial uses it directly.
 func ParsePASResponsePatients(b []byte) ([]string, error) {
+	refs, sawResponse, err := parsePASResponsePatients(b)
+	switch {
+	case err != nil:
+		return nil, err
+	case !sawResponse:
+		return nil, ErrNoPASResponsePatient
+	case len(refs) == 0:
+		// A ClaimResponse is here and states no patient. PAS puts that element at
+		// 1..1, so this is a malformed answer, and saying so is what keeps the
+		// fence from treating an unreadable subject as no subject.
+		return nil, fmt.Errorf("engine: PAS response ClaimResponse states no patient reference")
+	}
+	return refs, nil
+}
+
+// parsePASResponsePatients reports the patient references AND whether the response
+// carried a ClaimResponse at all, which is what separates the two failures above.
+func parsePASResponsePatients(b []byte) (refs []string, sawResponse bool, err error) {
 	var probe struct {
 		ResourceType string `json:"resourceType"`
 		Patient      struct {
@@ -60,27 +105,45 @@ func ParsePASResponsePatients(b []byte) ([]string, error) {
 				} `json:"patient"`
 			} `json:"resource"`
 		} `json:"entry"`
+		Parameter []struct {
+			Name     string          `json:"name"`
+			Resource json.RawMessage `json:"resource"`
+		} `json:"parameter"`
 	}
 	if err := decodeMessage(b, &probe); err != nil {
-		return nil, fmt.Errorf("engine: parse PAS response: %w", err)
+		return nil, false, fmt.Errorf("engine: parse PAS response: %w", err)
 	}
-	var refs []string
 	switch probe.ResourceType {
 	case "ClaimResponse":
+		sawResponse = true
 		if probe.Patient.Reference != "" {
 			refs = append(refs, probe.Patient.Reference)
 		}
 	case "Bundle":
 		for _, e := range probe.Entry {
-			if e.Resource.ResourceType == "ClaimResponse" && e.Resource.Patient.Reference != "" {
+			if e.Resource.ResourceType != "ClaimResponse" {
+				continue
+			}
+			sawResponse = true
+			if e.Resource.Patient.Reference != "" {
 				refs = append(refs, e.Resource.Patient.Reference)
 			}
 		}
+	case "Parameters":
+		for _, p := range probe.Parameter {
+			carries, _ := pasInquiryOutputCarries(p.Name)
+			if !carries || len(p.Resource) == 0 {
+				continue
+			}
+			inner, innerSaw, err := parsePASResponsePatients(p.Resource)
+			if err != nil {
+				return nil, sawResponse, err
+			}
+			sawResponse = sawResponse || innerSaw
+			refs = append(refs, inner...)
+		}
 	}
-	if len(refs) == 0 {
-		return nil, fmt.Errorf("engine: PAS response has no ClaimResponse patient reference (resourceType %q)", probe.ResourceType)
-	}
-	return refs, nil
+	return refs, sawResponse, nil
 }
 
 // questionnaireHasSubject reports whether a Questionnaire JSON carries any

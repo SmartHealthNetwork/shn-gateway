@@ -67,12 +67,13 @@ var transmitBoundaries = map[string]boundaryRule{
 	// Answers to the network.
 	"Gateway.buildResponseLeg": {kind: transmits, noSink: true},
 	"writeLeg": {kind: excluded,
-		callers: []string{"Gateway.respondLeg", "Gateway.respondLegError", "Gateway.handlePASNativeInbound", "Gateway.handlePASUpdateNativeInbound"},
+		callers: []string{"Gateway.respondLeg", "Gateway.respondLegError", "Gateway.handlePASNativeInbound", "Gateway.handlePASUpdateNativeInbound", "Gateway.handlePASInquireInbound"},
 		reason:  "writes the sealed envelope buildResponseLeg built from its checked answer"},
 	"Gateway.respondLeg":                   {kind: sealsVia, via: "Gateway.buildResponseLeg"},
 	"Gateway.respondLegError":              {kind: sealsVia, via: "Gateway.buildResponseLeg"},
 	"Gateway.handlePASNativeInbound":       {kind: sealsVia, via: "Gateway.buildResponseLeg"},
 	"Gateway.handlePASUpdateNativeInbound": {kind: sealsVia, via: "Gateway.buildResponseLeg"},
+	"Gateway.handlePASInquireInbound":      {kind: sealsVia, via: "Gateway.buildResponseLeg"},
 	// Answers to the participant's own system (the ingress writers, the
 	// relayed application errors) and every refusal.
 	"Gateway.writePayload": {kind: transmits},
@@ -91,8 +92,6 @@ var transmitBoundaries = map[string]boundaryRule{
 		reason: "the consent check request: subject, purpose, custodian and recipient, never the payload"},
 	"DiscoverCDSServices": {kind: excluded,
 		reason: "a CDS Services discovery read that sends no body"},
-	"nativeResponder.get": {kind: excluded,
-		reason: "a follow-up read of a pending decision that sends no body"},
 	"nativePopulator.post": {kind: excluded,
 		reason: "a call to the participant's own pre-population service with a request this gateway builds; no peer is on the wire"},
 	"Gateway.handleUC08": {kind: excluded,

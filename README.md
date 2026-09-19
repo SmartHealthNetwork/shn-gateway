@@ -63,8 +63,18 @@ and neither does your counterpart's gateway.
 
 ## 2. See it work — or deploy it
 
-Two ways to encounter a real Smart Gateway, both gated by the same developer
-account (§3):
+Three ways to encounter the network. The first needs no account at all; the
+other two are gated by the same developer account (§3):
+
+**Door 0 — send it a request right now: the provider test endpoint.** No
+account, no deployment, nothing to install. `https://pa-test.shn-preview.org`
+is a hosted Da Vinci prior-authorization endpoint — CRD, DTR and PAS — with two
+reference payers behind it, one on the **2.2** IG line and one on the **2.0**
+line, so the same request pattern runs against both. You register your own
+client and send real Da Vinci requests; the quickstart is
+[PROVIDER_TEST_ENDPOINT.md](https://github.com/SmartHealthNetwork/shn-sdk/blob/main/docs/PROVIDER_TEST_ENDPOINT.md).
+This is a test lane for exercising your client against the wire — it is not a
+gateway you operate, and it reaches no production payer.
 
 **Door 1 — see it work: the SHN Kit.**
 [`shn-kit`](https://github.com/SmartHealthNetwork/shn-kit) is a signed,
@@ -82,7 +92,8 @@ provider or payer — that stays part of the network. Start with
 to a real green run, then [§5 Choose your path](#5-choose-your-path) to
 connect your own systems.
 
-Both doors require an **approved SHN developer account** first — see below.
+Doors 1 and 2 require an **approved SHN developer account** first — see below.
+Door 0 does not.
 
 ---
 
@@ -215,8 +226,9 @@ See [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md#per-role).
 
 **Already Da Vinci-conformant? Point your EHR at the gateway's own ingress
 instead.** Set `PROVIDER_DAVINCI_INGRESS=1` and the gateway accepts native CDS
-Hooks order-select (CRD), `Questionnaire/$questionnaire-package` (DTR), and
-`Claim/$submit` (PAS) directly from your EHR or reference implementation,
+Hooks order-select (CRD), `Questionnaire/$questionnaire-package` (DTR),
+`Claim/$submit` (PAS) and `Claim/$inquire` (the follow-up that asks a payer for
+the decision on an authorization it pended) directly from your EHR or reference implementation,
 authenticated via SMART Backend Services from a set of clients you
 pre-register in `INGRESS_CLIENTS_FILE`. This is an equally supported,
 goal-state path — not a fallback. **This ingress is a private,

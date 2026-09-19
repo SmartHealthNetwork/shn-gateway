@@ -153,7 +153,10 @@ func originSystem(t *testing.T, sorID string) (originSoR, []byte) {
 	patient, coverage, order := originRecords(sorID)
 	s := newPrefetchSoR()
 	s.sorID = sorID
-	s.reads = map[string][]byte{"Patient/" + sorID: patient}
+	// The payer organization the Coverage names is readable too: the origination
+	// carries the participant's own record for the payer as the request's insurer
+	// entry, and a system that could not serve it could not originate at all.
+	s.reads = map[string][]byte{"Patient/" + sorID: patient, "Organization/pay-1": []byte(payerOrganization)}
 	page := []byte(`{"resourceType":"Bundle","type":"searchset","entry":[{"fullUrl":"https://sor.example/fhir/Coverage/cov-1","resource":` +
 		string(coverage) + `,"search":{"mode":"match"}},{"fullUrl":"https://sor.example/fhir/Organization/pay-1","resource":` +
 		payerOrganization + `,"search":{"mode":"include"}}]}`)

@@ -60,6 +60,12 @@ type crdOriginRecords struct {
 	sorID string
 	// patient is the system of record's Patient.
 	patient []byte
+	// memberSystem is the namespace that Patient names the member under — read
+	// off the record above, NOT re-read. A payer matches a prior authorization
+	// on the member id, so this travels to the PAS builders; reading it a second
+	// time would be a second reading of one identity, which is the thing the
+	// single-read invariant exists to stop.
+	memberSystem string
 	// coverage is the Coverage search result: a searchset Bundle, or the
 	// JSON literal null when the system holds no Coverage.
 	coverage []byte
@@ -121,6 +127,13 @@ func (g *Gateway) originCRDRecords(ctx context.Context, leg, member string) (crd
 		}
 	}
 	out.patient, out.coverage = patient, coverage
+	// The namespace this participant's own system names the member under, read
+	// off the record just obtained. A request whose Patient identifies nobody is
+	// stored by a payer under a member it cannot key on, so this is carried
+	// forward rather than assumed — and a system that names the member under no
+	// identifier at all is refused by the builder that needs it, not here, where
+	// the CRD legs do not depend on it.
+	out.memberSystem = memberIdentifierSystemOfRecord(patient, member)
 
 	for _, key := range pinnedPrefetchKeys {
 		if key == prefetchPatientKey || key == "coverage" {
@@ -339,21 +352,25 @@ func (g *Gateway) originatedOrderingRequest(hook, correlationID string, recs crd
 
 // originatedDispatchRequest builds an order-dispatch request for order,
 // dispatched to performer. The payer resolves the dispatched order from the
-// request's device history. For an order the system of record holds, that
-// history is the system's search result and must hold the order (or, when the
-// search was left out, the order itself in a collection Bundle). For an order
-// this gateway authored (authored), the device history is that order in a
-// collection Bundle: the system of record does not hold it.
-func (g *Gateway) originatedDispatchRequest(correlationID string, recs crdOriginRecords, order []byte, performer string, authored bool) ([]byte, error) {
+// request's device history. That history is the participant's own search
+// result and must HOLD the order; when the search was left out (the system
+// names the patient differently, so no history was run), the order itself
+// travels as a collection Bundle.
+//
+// There is no longer an "this gateway authored the order" arm: every
+// order-dispatch origination reads its order from the participant's own system,
+// so the "the history does not hold it" refusal now applies to all of them
+// rather than being skipped for the one lane that minted its order.
+func (g *Gateway) originatedDispatchRequest(correlationID string, recs crdOriginRecords, order []byte, performer string) ([]byte, error) {
 	rt, id, err := resourceTypeAndID(order)
 	if err != nil {
 		return nil, fmt.Errorf("order: %w", err)
 	}
 	prefetch := cloneValues(recs.history)
 	switch history, obtained := prefetch["deviceHistory"]; {
-	case obtained && !authored && !bundleHolds(history, rt, id):
+	case obtained && !bundleHolds(history, rt, id):
 		return nil, fmt.Errorf("the system of record's device history does not hold the dispatched order %s/%s", rt, id)
-	case !obtained || authored:
+	case !obtained:
 		history, err := collectionBundle(order)
 		if err != nil {
 			return nil, err

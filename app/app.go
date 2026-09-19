@@ -133,6 +133,18 @@ type config struct {
 	// in any shipped deploy config.
 	DemoEdgeCapture bool
 
+	// ConformanceEnforcement (CONFORMANCE_ENFORCEMENT) is this participant's
+	// choice about what its gateway does with a conformance defect it finds:
+	// "strict" (an invalid verdict refuses the message) or "none" (every
+	// crossing still validates and records a finding, nothing is refused for
+	// conformance and the message is relayed as sent). Absent means "none":
+	// loadConfig remaps it, and that remap is the ONLY place in the tree
+	// where a level that is not strict comes from an omission —
+	// engine.ConformanceEnforcement's zero value is strict everywhere else.
+	// Two classes refuse at every level regardless: a payload this gateway
+	// itself translated between IG lines, and an answer it cannot read at all.
+	ConformanceEnforcement engine.ConformanceEnforcement
+
 	// Trust-anchor key-fetch URL overrides (first-class operator config):
 	// override the discovery-advertised key URL when the gateway runs in the same
 	// network as the substrate. firstNonEmpty(env, discovery); discovery is the default.
@@ -270,6 +282,12 @@ type config struct {
 	// ([{client_id, alg, public_key_pem, scopes}]). Set by INGRESS_CLIENTS_FILE.
 	// Required when ProviderDavinciIngress is set.
 	ProviderDavinciIngressClientsFile string
+
+	// AcceptUnknownMembers is the connectathon test-lane seam: on the Da Vinci
+	// CRD/DTR/PAS legs, a subject the system of record does not hold binds by member id
+	// alone instead of being refused. Set by SHN_ACCEPT_UNKNOWN_MEMBERS (any non-empty
+	// value). Default off; never set on a production gateway — the boot log says so.
+	AcceptUnknownMembers bool
 
 	// IngressBaseURL and IngressClients are resolved from ProviderDavinciIngressBaseURL
 	// + IngressClientsFile by loadConfig and passed directly into engine.Config.
@@ -473,6 +491,8 @@ func loadConfig(getenv func(string) string) (config, error) {
 		ProviderDavinciIngressBaseURL:     getenv("PROVIDER_DAVINCI_INGRESS_BASE_URL"),
 		ProviderDavinciIngressClientsFile: getenv("INGRESS_CLIENTS_FILE"),
 
+		AcceptUnknownMembers: getenv("SHN_ACCEPT_UNKNOWN_MEMBERS") != "",
+
 		AuthzPubkeyURL:     getenv("AUTHZ_PUBKEY_URL"),
 		HubTransportKeyURL: getenv("HUB_TRANSPORT_KEY_URL"),
 	}
@@ -543,6 +563,24 @@ func loadConfig(getenv func(string) string) (config, error) {
 	// Demo-only edge capture (bounded pre-seal payload inspection): the
 	// ordinary loadConfig bool idiom, matching every other config bool.
 	cfg.DemoEdgeCapture = getenv("SHN_DEMO_EDGE_CAPTURE") == "true"
+
+	// THE default: an absent CONFORMANCE_ENFORCEMENT means none. This is the
+	// ONLY place it happens. Everything else in the tree is strict by
+	// engine.ConformanceEnforcement's zero value, and every gate pins its
+	// level explicitly. A DEPLOYED gateway states its level explicitly too,
+	// but not always to strict: a lane a partner's bytes can reach runs none,
+	// so the partner sees their defect recorded rather than meeting a refusal
+	// produced by our configuration. Which lanes those are, and the evidence
+	// for each, is in test/invariants' TestInvariant_EveryGateRunsStrict.
+	if raw := getenv("CONFORMANCE_ENFORCEMENT"); raw != "" {
+		level, err := engine.ParseConformanceEnforcement(raw)
+		if err != nil {
+			return config{}, fmt.Errorf("gateway: %w", err)
+		}
+		cfg.ConformanceEnforcement = level
+	} else {
+		cfg.ConformanceEnforcement = engine.EnforcementNone
+	}
 
 	if cfg.FHIRTokenURL != "" {
 		if cfg.FHIRDataURL == "" {
@@ -1442,14 +1480,17 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		// DemoEdgeCapture: false in every shipped deploy; SHN_DEMO_EDGE_CAPTURE
 		// is the sole non-test way to set it.
 		DemoEdgeCapture: cfg.DemoEdgeCapture,
-		SoR:             sor,
-		Store:           store,
-		Clock:           clock, // production: time.Now; hermetic tests: the harness's injected clock (HandlerWithClock)
-		Client:          client,
-		NPI:             cfg.NPI,
-		ConsentURL:      firstNonEmpty(cfg.ConsentURL, endpoints.Consent),
-		AuditURL:        firstNonEmpty(cfg.AuditURL, endpoints.Audit),
-		PHGURL:          firstNonEmpty(cfg.PHGURL, endpoints.PHG),
+		// ConformanceEnforcement: none unless CONFORMANCE_ENFORCEMENT=strict
+		// (loadConfig above is what makes an absent value none).
+		ConformanceEnforcement: cfg.ConformanceEnforcement,
+		SoR:                    sor,
+		Store:                  store,
+		Clock:                  clock, // production: time.Now; hermetic tests: the harness's injected clock (HandlerWithClock)
+		Client:                 client,
+		NPI:                    cfg.NPI,
+		ConsentURL:             firstNonEmpty(cfg.ConsentURL, endpoints.Consent),
+		AuditURL:               firstNonEmpty(cfg.AuditURL, endpoints.Audit),
+		PHGURL:                 firstNonEmpty(cfg.PHGURL, endpoints.PHG),
 
 		OriginationProfile: cfg.OriginationProfile,
 		// Strict extensions (FR-G52): g.strictPeer is production-dormant BY DESIGN (always false —
@@ -1538,6 +1579,10 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 			// Endpoint evidence: same-origin-drop notes ride the file's existing WARNING-line
 			// stdout precedent (e.g. the unauthenticated-forward warning above).
 			engine.WithEndpointEvidenceObserver(func(note string) { fmt.Fprintf(stdout, "gateway: %s\n", note) }),
+			// The native CRD responder gets the same enforcement policy as the
+			// rest of the gateway — a deployed gateway with CONFORMANCE_ENFORCEMENT=none
+			// must reach none on this path too, not just the in-process Gateway.
+			engine.WithConformancePolicy(engine.NewConformancePolicy(cfg.ConformanceEnforcement)),
 		}
 		// Payer-edge identity mapping seam (gateway/engine/payoredge.go): both env vars
 		// set (loadConfig's all-or-nothing rule) ⇒ CRD/DTR/PAS re-stamp the Coverage
@@ -1579,6 +1624,10 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	gwCfg.IngressEnabled = cfg.ProviderDavinciIngress
 	gwCfg.IngressBaseURL = cfg.IngressBaseURL
 	gwCfg.IngressClients = cfg.IngressClients
+	gwCfg.AcceptUnknownMembers = cfg.AcceptUnknownMembers
+	if cfg.AcceptUnknownMembers {
+		log.Printf("gateway: WARNING: SHN_ACCEPT_UNKNOWN_MEMBERS is set — a Da Vinci CRD/DTR/PAS subject the system of record does not hold binds by member id alone (test-lane seam); never set this on a production gateway")
+	}
 
 	// Observer stream: hub + engine callback, only when configured. The demo
 	// endpoints (POST /demo/transform, GET /demo/capture/{correlationId})
@@ -1653,6 +1702,10 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	}
 
 	fmt.Fprintf(stdout, "gateway: role=%s holder=%s listening on %s://%s\n", cfg.Role, bundle.Identity.HolderID, scheme, cfg.Addr)
+	// The resolved level, on the operator log at boot: a fleet check reads it here
+	// rather than from the task definition, where an absent value and a delivered
+	// value the binary ignored would look the same.
+	fmt.Fprintf(stdout, "gateway: conformance enforcement=%s\n", cfg.ConformanceEnforcement)
 
 	// /internal/* is the operator/control-plane surface: never forwarded at the
 	// hosted edge (the hosted control plane pins that), token- or loopback-gated

@@ -74,8 +74,8 @@ func (g *Gateway) memberForPCI(body []byte) string {
 // changing a byte: denied (not covered), pa-required, approved (covered or
 // conditional without prior authorization), or answered (no coverage
 // information). Returns (outcome, 0, "") or ("", status, msg).
-func crdAnswerOutcome(respJSON []byte, line string) (string, int, string) {
-	if refused := certifyCDSHooksAnswer(respJSON, line, "payer"); refused.Status != 0 {
+func (g *Gateway) crdAnswerOutcome(ctx context.Context, respJSON []byte, line string) (string, int, string) {
+	if refused := certifyCDSHooksAnswer(ctx, g.policy(), g.emitFinding, respJSON, line, "peer"); refused.Status != 0 {
 		return "", refused.Status, refused.Message
 	}
 	obs, err := shnsdk.ParseCRDResponse(respJSON)
@@ -108,7 +108,7 @@ func (g *Gateway) ingressCRDSubjectPCIContext(ctx context.Context, body []byte) 
 		return "", http.StatusBadRequest, "missing context.patientId"
 	}
 	member := strings.TrimPrefix(req.Context.PatientID, "Patient/")
-	pci, _, found, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(ctx, member)
+	pci, found, readErr := g.resolveSubjectPCI(ctx, member)
 	if readErr != nil {
 		status, msg := SoRFailureResponse(readErr)
 		return "", status, msg
@@ -156,7 +156,7 @@ func (g *Gateway) ingressCRDSubjectPCIContext(ctx context.Context, body []byte) 
 			}
 		}
 		m := strings.TrimPrefix(ref, "Patient/")
-		rp, _, ok, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(ctx, m)
+		rp, ok, readErr := g.resolveSubjectPCI(ctx, m)
 		if readErr != nil {
 			status, msg := SoRFailureResponse(readErr)
 			return "", status, msg
@@ -319,7 +319,18 @@ func (g *Gateway) ingressEnsureSelfContainedContext(ctx context.Context, leg str
 			}
 		}
 		if sorID == "" {
-			return out, http.StatusUnprocessableEntity, "patient not found in system of record"
+			// A member the system of record does not hold — bound by member id
+			// alone under Config.AcceptUnknownMembers — has nothing to read: the
+			// patient and the coverage must come with the request, and a history
+			// key is left out with the reason recorded, as when the system names
+			// the patient differently. Without the seam a bound member the system
+			// cannot name is an inconsistent system of record, refused as before.
+			if key == prefetchPatientKey || key == "coverage" || !g.cfg.AcceptUnknownMembers {
+				return out, http.StatusUnprocessableEntity, "patient not found in system of record"
+			}
+			query, _ := SoRSearchQuery(prefetchSearchTypes[key], member)
+			g.recordPrefetch(leg, prefetchObtained{Key: key, Query: query, Outcome: SearchNotRun, Reason: historyMemberNotHeld})
+			continue
 		}
 		if sorID != member {
 			// Values from the system of record would name the patient by an id
@@ -389,6 +400,11 @@ const patientNamedDifferently = "system of record names the patient differently 
 // historyNamedDifferently is the recorded reason a history key is left out
 // for the same cause.
 const historyNamedDifferently = "patient named differently in the system of record"
+
+// historyMemberNotHeld is the recorded reason a history key is left out for a
+// member the system of record does not hold (bound by member id alone under
+// Config.AcceptUnknownMembers).
+const historyMemberNotHeld = "member not held by the system of record"
 
 // coverageOmitted is the refusal for a request whose coverage the system of
 // record could not provide.

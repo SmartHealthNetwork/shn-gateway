@@ -105,6 +105,33 @@ is denied before it ever reaches your payer:
   registered under a public `baseURL` and running before you originate, or the Hub has nothing
   to dial. Run it with the payer evaluation bundle — see [`payer/README.md`](payer/README.md).
 
+## Conformance enforcement in this bundle
+
+The bundle passes `CONFORMANCE_ENFORCEMENT` through from your own environment, and sets
+nothing itself — so with nothing set the gateway runs the published default, `none`. Every
+message it sends or receives is still checked against its FHIR profile — and a
+payer's CDS Hooks answer against the CDS Hooks response rules — and every invalid result is
+still recorded as a finding in the gateway's log and observer stream. The message relays as
+sent rather than being refused. Two things refuse at every level regardless: an answer this
+gateway cannot read at all, and a payload this gateway itself translated between IG lines.
+
+That default is deliberate. This is your evaluation, run on your machine, against your own
+systems and — with `PAYER_HOLDER_ID` above — your own payer. A refusal produced by a value we
+shipped inside a bundle you operate would read as a verdict on your conformance when all it
+states is how we configured the bundle. The findings tell you the same thing without stopping
+the run.
+
+If you want your evaluation to refuse instead, set the level yourself:
+
+```sh
+SHN_SECRETS=/abs/path/to/my-provider-bundle CONFORMANCE_ENFORCEMENT=strict \
+  docker compose -f compose.eval.yml up --build
+```
+
+`strict` and `none` are the only accepted values; any other refuses to boot. It is the same
+setting on the gateway you run in production — see
+[CONFIGURATION.md](../../docs/CONFIGURATION.md).
+
 ## Production cutover
 
 Everything in this bundle other than the gateway itself — `hapi`,

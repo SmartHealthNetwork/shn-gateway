@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
@@ -182,7 +181,7 @@ func (g *Gateway) ingressPASNativeSubjectPCIContext(ctx context.Context, bundleJ
 	if status != 0 {
 		return "", status, msg
 	}
-	pci, _, found, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(ctx, s.member)
+	pci, found, readErr := g.resolveSubjectPCI(ctx, s.member)
 	if readErr != nil {
 		status, msg := SoRFailureResponse(readErr)
 		return "", status, msg
@@ -246,6 +245,11 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 		}
 	}()
 	observationContext := context.WithValue(r.Context(), nativeCertificationKey{}, capture)
+	// The verified requester this exchange came from, and the notes the leg raises
+	// for the operator, travel beside it (pasleg.go): the pend ledger namespaces
+	// every lookup key by the requester that submitted the claim, and that is the
+	// engine's fact, never the content seam's.
+	observationContext, pasLeg := withPASLeg(observationContext, env.Metadata.Sender)
 	result, err := g.cfg.Responder.Handle(observationContext, "pas-claim", env.Metadata.CorrelationID, tok.Subject, bundleJSON)
 
 	// Rollback on any pre-commit early return (the seam carries it for the update leg; submit
@@ -270,6 +274,12 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": errOwnershipFault})
 		return
 	}
+	// The direction flips here: everything validated below is THIS participant's own
+	// answer (the payer's ClaimResponse and its own side-effect FHIR), not the
+	// peer's request handleInbound tagged the context with.
+	fc := findingContextFrom(r.Context())
+	fc.Whose = "own"
+	r = r.WithContext(withFindingContext(r.Context(), fc))
 	// Native operation success is always a complete Bundle, regardless of the
 	// responder implementation. Resource-level builders and polling stay separate.
 	if _, bad := validateNativePASResponse(responseFHIR); bad.Status != 0 {
@@ -291,7 +301,7 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 	// non-relaying LegResponder produces SHN-shaped output (an authored Response) → $validated, matching the
 	// minimized pas-claim handler's response egress-$validate. The SHN-produced EOB side-effects are
 	// $validated unconditionally in the loop below.
-	assemblyObservation, status, msg := g.validatePASResult(r.Context(), result, answerTok, env.Metadata.CorrelationID, "pas-claim")
+	status, msg = g.validatePASResult(r.Context(), result, answerTok, "pas-claim")
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
@@ -334,8 +344,9 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 		}
 	}
 	committed = true
-	if assemblyObservation != nil {
-		g.observe(*assemblyObservation)
+	for _, kind := range pasLeg.notes {
+		g.observe(ObserverEvent{Kind: kind, Direction: "ingress", LegType: "pas-claim",
+			CorrelationID: env.Metadata.CorrelationID, Counterpart: env.Metadata.Sender})
 	}
 	writeLeg(w, respBytes)
 }
@@ -376,6 +387,11 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 		}
 	}()
 	observationContext := context.WithValue(r.Context(), nativeCertificationKey{}, capture)
+	// The verified requester this exchange came from, and the notes the leg raises
+	// for the operator, travel beside it (pasleg.go): the pend ledger namespaces
+	// every lookup key by the requester that submitted the claim, and that is the
+	// engine's fact, never the content seam's.
+	observationContext, pasLeg := withPASLeg(observationContext, env.Metadata.Sender)
 	result, err := g.cfg.Responder.Handle(observationContext, "pas-claim-update", env.Metadata.CorrelationID, tok.Subject, bundleJSON)
 	// Arm defer-rollback-unless-committed on the returned result BEFORE checking err: the update
 	// responder acquires a claim in BeginClaimUpdate and returns LegResult{Rollback: release} even
@@ -401,6 +417,12 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": errOwnershipFault})
 		return
 	}
+	// The direction flips here: everything validated below is THIS participant's own
+	// answer (the payer's ClaimResponse and its own side-effect FHIR), not the
+	// peer's request handleInbound tagged the context with.
+	fc := findingContextFrom(r.Context())
+	fc.Whose = "own"
+	r = r.WithContext(withFindingContext(r.Context(), fc))
 	// Native operation success is always a complete Bundle, regardless of the
 	// responder implementation. Resource-level builders and polling stay separate.
 	if _, bad := validateNativePASResponse(responseFHIR); bad.Status != 0 {
@@ -419,7 +441,7 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 	// Egress-$validate the RESPONSE iff !ResponseRelayed() (R-8), mirror of the conformant submit
 	// handler: a non-relaying LegResponder produces locally assembled output (validated); a foreign verbatim relay
 	// (a relayed Response) is preserved bytes-only. Assembly is certified explicitly against PAS.
-	assemblyObservation, status, msg := g.validatePASResult(r.Context(), result, answerTok, env.Metadata.CorrelationID, "pas-claim-update")
+	status, msg = g.validatePASResult(r.Context(), result, answerTok, "pas-claim-update")
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
@@ -453,8 +475,9 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 		}
 	}
 	committed = true
-	if assemblyObservation != nil {
-		g.observe(*assemblyObservation)
+	for _, kind := range pasLeg.notes {
+		g.observe(ObserverEvent{Kind: kind, Direction: "ingress", LegType: "pas-claim-update",
+			CorrelationID: env.Metadata.CorrelationID, Counterpart: env.Metadata.Sender})
 	}
 	writeLeg(w, respBytes)
 }
@@ -469,7 +492,7 @@ func (g *Gateway) conformantPASBindContext(ctx context.Context, bundleJSON []byt
 	if status != 0 {
 		return "", status, msg
 	}
-	pci, _, found, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(ctx, s.member)
+	pci, found, readErr := g.resolveSubjectPCI(ctx, s.member)
 	if readErr != nil {
 		status, msg := SoRFailureResponse(readErr)
 		return "", status, msg
@@ -716,55 +739,23 @@ func stampForBuiltAnswer(result LegResult, answerTok string) string {
 	return answerTok
 }
 
-// validatePASResult certifies locally assembled output against the exact PAS
-// response profile. Its Provenance describes assembly only, never conversion.
-// The response is read after the same ownership check its transmit applies.
-func (g *Gateway) validatePASResult(ctx context.Context, result LegResult, answerTok, corrID, leg string) (*ObserverEvent, int, string) {
+// validatePASResult certifies an answer THIS GATEWAY PRODUCED against the exact
+// PAS response profile for the line it was built at. A RELAYED answer is the
+// participant's own message: this gateway neither wrote it nor can vouch for the
+// line it was written at, so it is not certified here — the reference-closure rule
+// (validateNativePASResponse) is what every PAS answer passes, relayed or not.
+//
+// There is no third case. The terminal-response assembly that used to sit between
+// them — a payer's pend replaced by a later polled approval, certified as SHN's
+// own — is gone, and with it the whole class of failure where a payer's own
+// extension made SHN's validator refuse SHN's copy of the payer's decision.
+func (g *Gateway) validatePASResult(ctx context.Context, result LegResult, answerTok, leg string) (int, string) {
 	responseFHIR, err := g.admit(result.Response, answerKey(leg, relay.OutcomeAnswered))
 	if err != nil {
-		return nil, http.StatusInternalServerError, errOwnershipFault
+		return http.StatusInternalServerError, errOwnershipFault
 	}
-	if !result.ResponseAssembled {
-		if result.ResponseRelayed() {
-			return nil, 0, ""
-		}
-		status, msg := g.validateFHIRForContract(ctx, responseFHIR, "egress", "pa.pas", shnsdk.LineOf(answerTok), "")
-		return nil, status, msg
+	if result.ResponseRelayed() {
+		return 0, ""
 	}
-	if result.ResponseRelayed() || !result.ResponseSubjectForeign || len(corrID) == 0 || len(corrID) > 256 || len(g.cfg.HolderID) == 0 || len(g.cfg.HolderID) > 256 {
-		return nil, http.StatusInternalServerError, "invalid PAS assembly provenance"
-	}
-	line := shnsdk.LineOf(answerTok)
-	def, ok := shnsdk.PASLineDef(line)
-	if !ok {
-		return nil, http.StatusInternalServerError, "unknown PAS assembly contract line"
-	}
-	v := g.validatorForContractLine("pa.pas", line)
-	if v == nil {
-		return nil, http.StatusInternalServerError, "PAS assembly validator unavailable"
-	}
-	profile := "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-pas-response-bundle|" + def.PackageVersion
-	verdict, err := v.Validate(ctx, responseFHIR, profile)
-	if err != nil {
-		return nil, http.StatusInternalServerError, "PAS assembly validator unavailable"
-	}
-	if !verdict.Valid {
-		return nil, http.StatusUnprocessableEntity, "PAS assembly validation failed"
-	}
-	graph, err := readPASGraph(responseFHIR)
-	if err != nil {
-		return nil, http.StatusInternalServerError, "invalid PAS assembly provenance"
-	}
-	provenance := map[string]any{
-		"resourceType": "Provenance",
-		"target":       []any{map[string]any{"reference": graph.response.fullURL}},
-		"recorded":     g.cfg.Clock().UTC().Format(time.RFC3339Nano),
-		"activity":     map[string]any{"text": "PAS terminal response assembly"},
-		"agent":        []any{map[string]any{"who": map[string]any{"reference": "Organization/" + g.cfg.HolderID}}},
-	}
-	raw, err := json.Marshal(provenance)
-	if err != nil || len(raw) > 4096 {
-		return nil, http.StatusInternalServerError, "invalid PAS assembly provenance"
-	}
-	return &ObserverEvent{Kind: "leg.assembled", Direction: "ingress", LegType: leg, CorrelationID: corrID, Op: "pas-terminal-response-assembly", Payload: raw}, 0, ""
+	return g.validateFHIRForContract(ctx, responseFHIR, "egress", "pa.pas", shnsdk.LineOf(answerTok), "")
 }

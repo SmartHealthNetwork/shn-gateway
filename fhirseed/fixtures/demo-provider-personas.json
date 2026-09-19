@@ -4302,6 +4302,158 @@
       }
     },
     {
+      "fullUrl": "DeviceRequest/dr-order-mbrcanarycovered-provider",
+      "resource": {
+        "codeCodeableConcept": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "E1390",
+              "display": "Oxygen concentrator, single delivery port, capable of delivering 85 percent or greater oxygen concentration"
+            }
+          ]
+        },
+        "id": "dr-order-mbrcanarycovered-provider",
+        "intent": "order",
+        "performer": {
+          "reference": "Organization/org-uc03-demo-supplier"
+        },
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "J44.9"
+              }
+            ]
+          }
+        ],
+        "resourceType": "DeviceRequest",
+        "status": "active",
+        "subject": {
+          "reference": "Patient/pat-mbrcanarycovered-provider"
+        }
+      },
+      "request": {
+        "method": "PUT",
+        "url": "DeviceRequest/dr-order-mbrcanarycovered-provider"
+      }
+    },
+    {
+      "fullUrl": "DeviceRequest/dr-order-mbrcanaryduc03-provider",
+      "resource": {
+        "codeCodeableConcept": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "E1390",
+              "display": "Oxygen concentrator, single delivery port, capable of delivering 85 percent or greater oxygen concentration"
+            }
+          ]
+        },
+        "id": "dr-order-mbrcanaryduc03-provider",
+        "intent": "order",
+        "performer": {
+          "reference": "Organization/org-uc03-demo-supplier"
+        },
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "J44.9"
+              }
+            ]
+          }
+        ],
+        "resourceType": "DeviceRequest",
+        "status": "active",
+        "subject": {
+          "reference": "Patient/pat-mbrcanaryduc03-provider"
+        }
+      },
+      "request": {
+        "method": "PUT",
+        "url": "DeviceRequest/dr-order-mbrcanaryduc03-provider"
+      }
+    },
+    {
+      "fullUrl": "DeviceRequest/dr-order-mbrcovered-provider",
+      "resource": {
+        "codeCodeableConcept": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "E1390",
+              "display": "Oxygen concentrator, single delivery port, capable of delivering 85 percent or greater oxygen concentration"
+            }
+          ]
+        },
+        "id": "dr-order-mbrcovered-provider",
+        "intent": "order",
+        "performer": {
+          "reference": "Organization/org-uc03-demo-supplier"
+        },
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "J44.9"
+              }
+            ]
+          }
+        ],
+        "resourceType": "DeviceRequest",
+        "status": "active",
+        "subject": {
+          "reference": "Patient/pat-mbrcovered-provider"
+        }
+      },
+      "request": {
+        "method": "PUT",
+        "url": "DeviceRequest/dr-order-mbrcovered-provider"
+      }
+    },
+    {
+      "fullUrl": "DeviceRequest/dr-order-mbrduc03-provider",
+      "resource": {
+        "codeCodeableConcept": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "E1390",
+              "display": "Oxygen concentrator, single delivery port, capable of delivering 85 percent or greater oxygen concentration"
+            }
+          ]
+        },
+        "id": "dr-order-mbrduc03-provider",
+        "intent": "order",
+        "performer": {
+          "reference": "Organization/org-uc03-demo-supplier"
+        },
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "J44.9"
+              }
+            ]
+          }
+        ],
+        "resourceType": "DeviceRequest",
+        "status": "active",
+        "subject": {
+          "reference": "Patient/pat-mbrduc03-provider"
+        }
+      },
+      "request": {
+        "method": "PUT",
+        "url": "DeviceRequest/dr-order-mbrduc03-provider"
+      }
+    },
+    {
       "fullUrl": "DiagnosticReport/dr-supp-mbrcanaryduc04-provider",
       "resource": {
         "id": "dr-supp-mbrcanaryduc04-provider",
@@ -7298,6 +7450,42 @@
       }
     },
     {
+      "fullUrl": "Organization/org-ordering-provider",
+      "resource": {
+        "id": "org-ordering-provider",
+        "identifier": [
+          {
+            "system": "http://hl7.org/fhir/sid/us-npi",
+            "value": "1295837462"
+          }
+        ],
+        "name": "Test Provider Group",
+        "resourceType": "Organization"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Organization/org-ordering-provider"
+      }
+    },
+    {
+      "fullUrl": "Organization/org-uc03-demo-supplier",
+      "resource": {
+        "id": "org-uc03-demo-supplier",
+        "identifier": [
+          {
+            "system": "http://hl7.org/fhir/sid/us-npi",
+            "value": "1999999999"
+          }
+        ],
+        "name": "Demo DME Supplier",
+        "resourceType": "Organization"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Organization/org-uc03-demo-supplier"
+      }
+    },
+    {
       "fullUrl": "Patient/pat-mbrbridgedemo-provider",
       "resource": {
         "id": "pat-mbrbridgedemo-provider",
@@ -7308,6 +7496,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-BRIDGE-DEMO"
           }
@@ -7337,6 +7533,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-BRIDGE-REFUSE"
           }
@@ -7366,6 +7570,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-CANARY-COVERED"
           }
@@ -7395,6 +7607,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-CANARY-D-UC01"
           }
@@ -7424,6 +7644,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-CANARY-D-UC01-NC"
           }
@@ -7453,6 +7681,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-CANARY-D-UC02"
           }
@@ -7482,6 +7718,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-CANARY-D-UC03"
           }
@@ -7511,6 +7755,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-CANARY-D-UC04"
           }
@@ -7540,6 +7792,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-CANARY-D-UC05"
           }
@@ -7569,6 +7829,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-CANARY-D-UC05-NC"
           }
@@ -7598,6 +7866,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-CANARY-D-UC06"
           }
@@ -7627,6 +7903,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-CANARY-D-UC07"
           }
@@ -7656,6 +7940,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-CANARY-D-UC08"
           }
@@ -7685,6 +7977,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-CANARY-NOTCOVERED"
           }
@@ -7714,6 +8014,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-CANARY-UC04"
           }
@@ -7743,6 +8051,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-CANARY-UC05"
           }
@@ -7772,6 +8088,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-CANARY-UC05-NOCONSENT"
           }
@@ -7801,6 +8125,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-CANARY-UC06"
           }
@@ -7830,6 +8162,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-CANARY-UC07"
           }
@@ -7859,6 +8199,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-CANARY-UC07HCPCS"
           }
@@ -7888,6 +8236,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-CANARY-UC08"
           }
@@ -7917,6 +8273,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-COVERED"
           }
@@ -7946,6 +8310,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-D-UC01"
           }
@@ -7975,6 +8347,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-D-UC01-NC"
           }
@@ -8004,6 +8384,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-D-UC02"
           }
@@ -8033,6 +8421,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-D-UC03"
           }
@@ -8062,6 +8458,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-D-UC04"
           }
@@ -8091,6 +8495,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-D-UC05"
           }
@@ -8120,6 +8532,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-D-UC05-NC"
           }
@@ -8149,6 +8569,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-D-UC06"
           }
@@ -8178,6 +8606,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-D-UC07"
           }
@@ -8207,6 +8643,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-D-UC08"
           }
@@ -8236,6 +8680,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-EXTPAYER-ABBY"
           }
@@ -8265,6 +8717,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-NOTCOVERED"
           }
@@ -8294,6 +8754,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-UC04"
           }
@@ -8323,6 +8791,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-UC05"
           }
@@ -8352,6 +8828,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-UC05-NOCONSENT"
           }
@@ -8381,6 +8865,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-UC06"
           }
@@ -8410,6 +8902,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-UC07"
           }
@@ -8439,6 +8939,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-UC07HCPCS"
           }
@@ -8468,6 +8976,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-UC08"
           }
@@ -8664,6 +9180,1356 @@
       "request": {
         "method": "PUT",
         "url": "Procedure/proc-mbruc05noconsent-provider"
+      }
+    },
+    {
+      "fullUrl": "ServiceRequest/sr-order-mbrbridgedemo-provider",
+      "resource": {
+        "id": "sr-order-mbrbridgedemo-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-servicerequest"
+          ]
+        },
+        "status": "active",
+        "intent": "order",
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "L8000",
+              "display": "Breast prosthesis, mastectomy bra"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbrbridgedemo-provider"
+        },
+        "performer": [
+          {
+            "reference": "Organization/org-ordering-provider"
+          }
+        ],
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "Z90.10"
+              }
+            ]
+          }
+        ],
+        "resourceType": "ServiceRequest"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ServiceRequest/sr-order-mbrbridgedemo-provider"
+      }
+    },
+    {
+      "fullUrl": "ServiceRequest/sr-order-mbrbridgerefuse-provider",
+      "resource": {
+        "id": "sr-order-mbrbridgerefuse-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-servicerequest"
+          ]
+        },
+        "status": "active",
+        "intent": "order",
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "L8000",
+              "display": "Breast prosthesis, mastectomy bra"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbrbridgerefuse-provider"
+        },
+        "performer": [
+          {
+            "reference": "Organization/org-ordering-provider"
+          }
+        ],
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "Z90.10"
+              }
+            ]
+          }
+        ],
+        "resourceType": "ServiceRequest"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ServiceRequest/sr-order-mbrbridgerefuse-provider"
+      }
+    },
+    {
+      "fullUrl": "ServiceRequest/sr-order-mbrcanaryduc02-provider",
+      "resource": {
+        "id": "sr-order-mbrcanaryduc02-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-servicerequest"
+          ]
+        },
+        "status": "active",
+        "intent": "order",
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "E0250",
+              "display": "Hospital bed fixed height with side rails and mattress"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbrcanaryduc02-provider"
+        },
+        "performer": [
+          {
+            "reference": "Organization/org-ordering-provider"
+          }
+        ],
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "M62.81"
+              }
+            ]
+          }
+        ],
+        "resourceType": "ServiceRequest"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ServiceRequest/sr-order-mbrcanaryduc02-provider"
+      }
+    },
+    {
+      "fullUrl": "ServiceRequest/sr-order-mbrcanaryduc04-provider",
+      "resource": {
+        "id": "sr-order-mbrcanaryduc04-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-servicerequest"
+          ]
+        },
+        "status": "active",
+        "intent": "order",
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "G0151",
+              "display": "Services of a qualified physical therapist in the home health setting, each 15 minutes"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbrcanaryduc04-provider"
+        },
+        "performer": [
+          {
+            "reference": "Organization/org-ordering-provider"
+          }
+        ],
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "I63.9"
+              }
+            ]
+          }
+        ],
+        "resourceType": "ServiceRequest"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ServiceRequest/sr-order-mbrcanaryduc04-provider"
+      }
+    },
+    {
+      "fullUrl": "ServiceRequest/sr-order-mbrcanaryduc05-provider",
+      "resource": {
+        "id": "sr-order-mbrcanaryduc05-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-servicerequest"
+          ]
+        },
+        "status": "active",
+        "intent": "order",
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "G0151",
+              "display": "Services of a qualified physical therapist in the home health setting, each 15 minutes"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbrcanaryduc05-provider"
+        },
+        "performer": [
+          {
+            "reference": "Organization/org-ordering-provider"
+          }
+        ],
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "I63.9"
+              }
+            ]
+          }
+        ],
+        "resourceType": "ServiceRequest"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ServiceRequest/sr-order-mbrcanaryduc05-provider"
+      }
+    },
+    {
+      "fullUrl": "ServiceRequest/sr-order-mbrcanaryduc05nc-provider",
+      "resource": {
+        "id": "sr-order-mbrcanaryduc05nc-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-servicerequest"
+          ]
+        },
+        "status": "active",
+        "intent": "order",
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "G0151",
+              "display": "Services of a qualified physical therapist in the home health setting, each 15 minutes"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbrcanaryduc05nc-provider"
+        },
+        "performer": [
+          {
+            "reference": "Organization/org-ordering-provider"
+          }
+        ],
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "I63.9"
+              }
+            ]
+          }
+        ],
+        "resourceType": "ServiceRequest"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ServiceRequest/sr-order-mbrcanaryduc05nc-provider"
+      }
+    },
+    {
+      "fullUrl": "ServiceRequest/sr-order-mbrcanaryduc06-provider",
+      "resource": {
+        "id": "sr-order-mbrcanaryduc06-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-servicerequest"
+          ]
+        },
+        "status": "active",
+        "intent": "order",
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "G0151",
+              "display": "Services of a qualified physical therapist in the home health setting, each 15 minutes"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbrcanaryduc06-provider"
+        },
+        "performer": [
+          {
+            "reference": "Organization/org-ordering-provider"
+          }
+        ],
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "I63.9"
+              }
+            ]
+          }
+        ],
+        "resourceType": "ServiceRequest"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ServiceRequest/sr-order-mbrcanaryduc06-provider"
+      }
+    },
+    {
+      "fullUrl": "ServiceRequest/sr-order-mbrcanaryduc07-provider",
+      "resource": {
+        "id": "sr-order-mbrcanaryduc07-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-servicerequest"
+          ]
+        },
+        "status": "active",
+        "intent": "order",
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "G0151",
+              "display": "Services of a qualified physical therapist in the home health setting, each 15 minutes"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbrcanaryduc07-provider"
+        },
+        "performer": [
+          {
+            "reference": "Organization/org-ordering-provider"
+          }
+        ],
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "I63.9"
+              }
+            ]
+          }
+        ],
+        "resourceType": "ServiceRequest"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ServiceRequest/sr-order-mbrcanaryduc07-provider"
+      }
+    },
+    {
+      "fullUrl": "ServiceRequest/sr-order-mbrcanaryduc08-provider",
+      "resource": {
+        "id": "sr-order-mbrcanaryduc08-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-servicerequest"
+          ]
+        },
+        "status": "active",
+        "intent": "order",
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "J3490",
+              "display": "Unclassified drugs - investigational gene therapy agent"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbrcanaryduc08-provider"
+        },
+        "performer": [
+          {
+            "reference": "Organization/org-ordering-provider"
+          }
+        ],
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "D57.1"
+              }
+            ]
+          }
+        ],
+        "resourceType": "ServiceRequest"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ServiceRequest/sr-order-mbrcanaryduc08-provider"
+      }
+    },
+    {
+      "fullUrl": "ServiceRequest/sr-order-mbrcanaryuc04-provider",
+      "resource": {
+        "id": "sr-order-mbrcanaryuc04-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-servicerequest"
+          ]
+        },
+        "status": "active",
+        "intent": "order",
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "G0151",
+              "display": "Services of a qualified physical therapist in the home health setting, each 15 minutes"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbrcanaryuc04-provider"
+        },
+        "performer": [
+          {
+            "reference": "Organization/org-ordering-provider"
+          }
+        ],
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "I63.9"
+              }
+            ]
+          }
+        ],
+        "resourceType": "ServiceRequest"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ServiceRequest/sr-order-mbrcanaryuc04-provider"
+      }
+    },
+    {
+      "fullUrl": "ServiceRequest/sr-order-mbrcanaryuc05-provider",
+      "resource": {
+        "id": "sr-order-mbrcanaryuc05-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-servicerequest"
+          ]
+        },
+        "status": "active",
+        "intent": "order",
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "G0151",
+              "display": "Services of a qualified physical therapist in the home health setting, each 15 minutes"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbrcanaryuc05-provider"
+        },
+        "performer": [
+          {
+            "reference": "Organization/org-ordering-provider"
+          }
+        ],
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "I63.9"
+              }
+            ]
+          }
+        ],
+        "resourceType": "ServiceRequest"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ServiceRequest/sr-order-mbrcanaryuc05-provider"
+      }
+    },
+    {
+      "fullUrl": "ServiceRequest/sr-order-mbrcanaryuc05noconsent-provider",
+      "resource": {
+        "id": "sr-order-mbrcanaryuc05noconsent-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-servicerequest"
+          ]
+        },
+        "status": "active",
+        "intent": "order",
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "G0151",
+              "display": "Services of a qualified physical therapist in the home health setting, each 15 minutes"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbrcanaryuc05noconsent-provider"
+        },
+        "performer": [
+          {
+            "reference": "Organization/org-ordering-provider"
+          }
+        ],
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "I63.9"
+              }
+            ]
+          }
+        ],
+        "resourceType": "ServiceRequest"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ServiceRequest/sr-order-mbrcanaryuc05noconsent-provider"
+      }
+    },
+    {
+      "fullUrl": "ServiceRequest/sr-order-mbrcanaryuc06-provider",
+      "resource": {
+        "id": "sr-order-mbrcanaryuc06-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-servicerequest"
+          ]
+        },
+        "status": "active",
+        "intent": "order",
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "G0151",
+              "display": "Services of a qualified physical therapist in the home health setting, each 15 minutes"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbrcanaryuc06-provider"
+        },
+        "performer": [
+          {
+            "reference": "Organization/org-ordering-provider"
+          }
+        ],
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "I63.9"
+              }
+            ]
+          }
+        ],
+        "resourceType": "ServiceRequest"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ServiceRequest/sr-order-mbrcanaryuc06-provider"
+      }
+    },
+    {
+      "fullUrl": "ServiceRequest/sr-order-mbrcanaryuc07-provider",
+      "resource": {
+        "id": "sr-order-mbrcanaryuc07-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-servicerequest"
+          ]
+        },
+        "status": "active",
+        "intent": "order",
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "G0151",
+              "display": "Services of a qualified physical therapist in the home health setting, each 15 minutes"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbrcanaryuc07-provider"
+        },
+        "performer": [
+          {
+            "reference": "Organization/org-ordering-provider"
+          }
+        ],
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "I63.9"
+              }
+            ]
+          }
+        ],
+        "resourceType": "ServiceRequest"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ServiceRequest/sr-order-mbrcanaryuc07-provider"
+      }
+    },
+    {
+      "fullUrl": "ServiceRequest/sr-order-mbrcanaryuc07hcpcs-provider",
+      "resource": {
+        "id": "sr-order-mbrcanaryuc07hcpcs-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-servicerequest"
+          ]
+        },
+        "status": "active",
+        "intent": "order",
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "L8000",
+              "display": "Breast prosthesis, mastectomy bra"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbrcanaryuc07hcpcs-provider"
+        },
+        "performer": [
+          {
+            "reference": "Organization/org-ordering-provider"
+          }
+        ],
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "Z90.10"
+              }
+            ]
+          }
+        ],
+        "resourceType": "ServiceRequest"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ServiceRequest/sr-order-mbrcanaryuc07hcpcs-provider"
+      }
+    },
+    {
+      "fullUrl": "ServiceRequest/sr-order-mbrcanaryuc08-provider",
+      "resource": {
+        "id": "sr-order-mbrcanaryuc08-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-servicerequest"
+          ]
+        },
+        "status": "active",
+        "intent": "order",
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "J3490",
+              "display": "Unclassified drugs - investigational gene therapy agent"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbrcanaryuc08-provider"
+        },
+        "performer": [
+          {
+            "reference": "Organization/org-ordering-provider"
+          }
+        ],
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "D57.1"
+              }
+            ]
+          }
+        ],
+        "resourceType": "ServiceRequest"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ServiceRequest/sr-order-mbrcanaryuc08-provider"
+      }
+    },
+    {
+      "fullUrl": "ServiceRequest/sr-order-mbrduc02-provider",
+      "resource": {
+        "id": "sr-order-mbrduc02-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-servicerequest"
+          ]
+        },
+        "status": "active",
+        "intent": "order",
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "E0250",
+              "display": "Hospital bed fixed height with side rails and mattress"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbrduc02-provider"
+        },
+        "performer": [
+          {
+            "reference": "Organization/org-ordering-provider"
+          }
+        ],
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "M62.81"
+              }
+            ]
+          }
+        ],
+        "resourceType": "ServiceRequest"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ServiceRequest/sr-order-mbrduc02-provider"
+      }
+    },
+    {
+      "fullUrl": "ServiceRequest/sr-order-mbrduc04-provider",
+      "resource": {
+        "id": "sr-order-mbrduc04-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-servicerequest"
+          ]
+        },
+        "status": "active",
+        "intent": "order",
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "G0151",
+              "display": "Services of a qualified physical therapist in the home health setting, each 15 minutes"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbrduc04-provider"
+        },
+        "performer": [
+          {
+            "reference": "Organization/org-ordering-provider"
+          }
+        ],
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "I63.9"
+              }
+            ]
+          }
+        ],
+        "resourceType": "ServiceRequest"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ServiceRequest/sr-order-mbrduc04-provider"
+      }
+    },
+    {
+      "fullUrl": "ServiceRequest/sr-order-mbrduc05-provider",
+      "resource": {
+        "id": "sr-order-mbrduc05-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-servicerequest"
+          ]
+        },
+        "status": "active",
+        "intent": "order",
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "G0151",
+              "display": "Services of a qualified physical therapist in the home health setting, each 15 minutes"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbrduc05-provider"
+        },
+        "performer": [
+          {
+            "reference": "Organization/org-ordering-provider"
+          }
+        ],
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "I63.9"
+              }
+            ]
+          }
+        ],
+        "resourceType": "ServiceRequest"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ServiceRequest/sr-order-mbrduc05-provider"
+      }
+    },
+    {
+      "fullUrl": "ServiceRequest/sr-order-mbrduc05nc-provider",
+      "resource": {
+        "id": "sr-order-mbrduc05nc-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-servicerequest"
+          ]
+        },
+        "status": "active",
+        "intent": "order",
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "G0151",
+              "display": "Services of a qualified physical therapist in the home health setting, each 15 minutes"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbrduc05nc-provider"
+        },
+        "performer": [
+          {
+            "reference": "Organization/org-ordering-provider"
+          }
+        ],
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "I63.9"
+              }
+            ]
+          }
+        ],
+        "resourceType": "ServiceRequest"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ServiceRequest/sr-order-mbrduc05nc-provider"
+      }
+    },
+    {
+      "fullUrl": "ServiceRequest/sr-order-mbrduc06-provider",
+      "resource": {
+        "id": "sr-order-mbrduc06-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-servicerequest"
+          ]
+        },
+        "status": "active",
+        "intent": "order",
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "G0151",
+              "display": "Services of a qualified physical therapist in the home health setting, each 15 minutes"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbrduc06-provider"
+        },
+        "performer": [
+          {
+            "reference": "Organization/org-ordering-provider"
+          }
+        ],
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "I63.9"
+              }
+            ]
+          }
+        ],
+        "resourceType": "ServiceRequest"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ServiceRequest/sr-order-mbrduc06-provider"
+      }
+    },
+    {
+      "fullUrl": "ServiceRequest/sr-order-mbrduc07-provider",
+      "resource": {
+        "id": "sr-order-mbrduc07-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-servicerequest"
+          ]
+        },
+        "status": "active",
+        "intent": "order",
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "G0151",
+              "display": "Services of a qualified physical therapist in the home health setting, each 15 minutes"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbrduc07-provider"
+        },
+        "performer": [
+          {
+            "reference": "Organization/org-ordering-provider"
+          }
+        ],
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "I63.9"
+              }
+            ]
+          }
+        ],
+        "resourceType": "ServiceRequest"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ServiceRequest/sr-order-mbrduc07-provider"
+      }
+    },
+    {
+      "fullUrl": "ServiceRequest/sr-order-mbrduc08-provider",
+      "resource": {
+        "id": "sr-order-mbrduc08-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-servicerequest"
+          ]
+        },
+        "status": "active",
+        "intent": "order",
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "J3490",
+              "display": "Unclassified drugs - investigational gene therapy agent"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbrduc08-provider"
+        },
+        "performer": [
+          {
+            "reference": "Organization/org-ordering-provider"
+          }
+        ],
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "D57.1"
+              }
+            ]
+          }
+        ],
+        "resourceType": "ServiceRequest"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ServiceRequest/sr-order-mbrduc08-provider"
+      }
+    },
+    {
+      "fullUrl": "ServiceRequest/sr-order-mbruc04-provider",
+      "resource": {
+        "id": "sr-order-mbruc04-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-servicerequest"
+          ]
+        },
+        "status": "active",
+        "intent": "order",
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "G0151",
+              "display": "Services of a qualified physical therapist in the home health setting, each 15 minutes"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbruc04-provider"
+        },
+        "performer": [
+          {
+            "reference": "Organization/org-ordering-provider"
+          }
+        ],
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "I63.9"
+              }
+            ]
+          }
+        ],
+        "resourceType": "ServiceRequest"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ServiceRequest/sr-order-mbruc04-provider"
+      }
+    },
+    {
+      "fullUrl": "ServiceRequest/sr-order-mbruc05-provider",
+      "resource": {
+        "id": "sr-order-mbruc05-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-servicerequest"
+          ]
+        },
+        "status": "active",
+        "intent": "order",
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "G0151",
+              "display": "Services of a qualified physical therapist in the home health setting, each 15 minutes"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbruc05-provider"
+        },
+        "performer": [
+          {
+            "reference": "Organization/org-ordering-provider"
+          }
+        ],
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "I63.9"
+              }
+            ]
+          }
+        ],
+        "resourceType": "ServiceRequest"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ServiceRequest/sr-order-mbruc05-provider"
+      }
+    },
+    {
+      "fullUrl": "ServiceRequest/sr-order-mbruc05noconsent-provider",
+      "resource": {
+        "id": "sr-order-mbruc05noconsent-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-servicerequest"
+          ]
+        },
+        "status": "active",
+        "intent": "order",
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "G0151",
+              "display": "Services of a qualified physical therapist in the home health setting, each 15 minutes"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbruc05noconsent-provider"
+        },
+        "performer": [
+          {
+            "reference": "Organization/org-ordering-provider"
+          }
+        ],
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "I63.9"
+              }
+            ]
+          }
+        ],
+        "resourceType": "ServiceRequest"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ServiceRequest/sr-order-mbruc05noconsent-provider"
+      }
+    },
+    {
+      "fullUrl": "ServiceRequest/sr-order-mbruc06-provider",
+      "resource": {
+        "id": "sr-order-mbruc06-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-servicerequest"
+          ]
+        },
+        "status": "active",
+        "intent": "order",
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "G0151",
+              "display": "Services of a qualified physical therapist in the home health setting, each 15 minutes"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbruc06-provider"
+        },
+        "performer": [
+          {
+            "reference": "Organization/org-ordering-provider"
+          }
+        ],
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "I63.9"
+              }
+            ]
+          }
+        ],
+        "resourceType": "ServiceRequest"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ServiceRequest/sr-order-mbruc06-provider"
+      }
+    },
+    {
+      "fullUrl": "ServiceRequest/sr-order-mbruc07-provider",
+      "resource": {
+        "id": "sr-order-mbruc07-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-servicerequest"
+          ]
+        },
+        "status": "active",
+        "intent": "order",
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "G0151",
+              "display": "Services of a qualified physical therapist in the home health setting, each 15 minutes"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbruc07-provider"
+        },
+        "performer": [
+          {
+            "reference": "Organization/org-ordering-provider"
+          }
+        ],
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "I63.9"
+              }
+            ]
+          }
+        ],
+        "resourceType": "ServiceRequest"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ServiceRequest/sr-order-mbruc07-provider"
+      }
+    },
+    {
+      "fullUrl": "ServiceRequest/sr-order-mbruc07hcpcs-provider",
+      "resource": {
+        "id": "sr-order-mbruc07hcpcs-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-servicerequest"
+          ]
+        },
+        "status": "active",
+        "intent": "order",
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "L8000",
+              "display": "Breast prosthesis, mastectomy bra"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbruc07hcpcs-provider"
+        },
+        "performer": [
+          {
+            "reference": "Organization/org-ordering-provider"
+          }
+        ],
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "Z90.10"
+              }
+            ]
+          }
+        ],
+        "resourceType": "ServiceRequest"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ServiceRequest/sr-order-mbruc07hcpcs-provider"
+      }
+    },
+    {
+      "fullUrl": "ServiceRequest/sr-order-mbruc08-provider",
+      "resource": {
+        "id": "sr-order-mbruc08-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-servicerequest"
+          ]
+        },
+        "status": "active",
+        "intent": "order",
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "J3490",
+              "display": "Unclassified drugs - investigational gene therapy agent"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbruc08-provider"
+        },
+        "performer": [
+          {
+            "reference": "Organization/org-ordering-provider"
+          }
+        ],
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "D57.1"
+              }
+            ]
+          }
+        ],
+        "resourceType": "ServiceRequest"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ServiceRequest/sr-order-mbruc08-provider"
       }
     }
   ],

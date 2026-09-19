@@ -23,13 +23,14 @@ func TestCompletePatient_ProviderData_RejectsOrderWithoutID(t *testing.T) {
 	if ok := g.completePatient(w, r, st, ""); ok {
 		t.Fatalf("completePatient returned ok=true for an order without an id; want fail-closed")
 	}
-	if w.Code != http.StatusBadGateway || !strings.Contains(w.Body.String(), "order missing id") {
-		t.Fatalf("status=%d body=%q, want 502 + 'order missing id'", w.Code, w.Body.String())
+	if w.Code != http.StatusBadGateway || !strings.Contains(w.Body.String(), "carries no identity in the system of record") {
+		t.Fatalf("status=%d body=%q, want 502 + the no-identity refusal", w.Code, w.Body.String())
 	}
 }
 
-// TestCompleteClinician_ProviderData_RejectsOrderWithoutID proves the provider-data UC-06 amendment
-// fails CLOSED when the parked order has no resolvable id — the amendment must bind to the REAL seeded
+// TestCompleteClinician_ProviderData_RejectsOrderWithoutID proves the UC-06 amendment
+// fails CLOSED when the parked order has no resolvable id — on EVERY lane, now that every
+// lane's order comes from the participant's own system. The amendment must bind to the real
 // order ref (resourceRef), never a built-order literal. Hermetic: resourceRef is checked BEFORE any leg
 // or validator call, so no network/validator is needed.
 func TestCompleteClinician_ProviderData_RejectsOrderWithoutID(t *testing.T) {
@@ -45,9 +46,9 @@ func TestCompleteClinician_ProviderData_RejectsOrderWithoutID(t *testing.T) {
 		t.Fatalf("completeClinician returned ok=true for an order without an id; want fail-closed")
 	}
 	if w.Code != http.StatusBadGateway {
-		t.Fatalf("status=%d, want 502 (order missing id)", w.Code)
+		t.Fatalf("status=%d, want 502 (the order carries no identity)", w.Code)
 	}
-	if !strings.Contains(w.Body.String(), "order missing id") {
-		t.Fatalf("body=%q, want to contain 'order missing id'", w.Body.String())
+	if !strings.Contains(w.Body.String(), "carries no identity in the system of record") {
+		t.Fatalf("body=%q, want to contain the no-identity refusal", w.Body.String())
 	}
 }

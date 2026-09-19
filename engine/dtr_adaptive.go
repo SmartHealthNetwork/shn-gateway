@@ -163,7 +163,15 @@ func (g *Gateway) nextQuestionLeg(ctx context.Context, r *http.Request, res crdD
 	if oerr != nil {
 		return nil, http.StatusBadGateway, oerr.Error(), oerr
 	}
-	if vstatus, vmsg := g.validateFHIRPayerIngress(ctx, body, res.dtrLine, "pa.dtr"); vstatus != 0 {
+	// This is the payer's answer to the $next-question round, on this round's own
+	// correlation — never the caller's headline leg/correlation, whichever attestation
+	// path (single-shot or pend-then-amend) reached this helper. Retagging here only
+	// names the leg this PRE-EXISTING ingress check already runs; it adds no check and
+	// removes none — this file's egress leg is a carve-out no check may be added to.
+	nqCtx := withFindingContext(ctx, findingContext{
+		LegType: "dtr-questionnaire-fetch", CorrelationID: corr, Seam: "originate", Whose: "peer",
+	})
+	if vstatus, vmsg := g.validateFHIRPayerIngress(nqCtx, body, res.dtrLine, "pa.dtr"); vstatus != 0 {
 		return nil, vstatus, vmsg, nil
 	}
 	qr, items, perr := parseNextQuestionResponse(body)

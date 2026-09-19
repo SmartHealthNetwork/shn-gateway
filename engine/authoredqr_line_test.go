@@ -149,9 +149,9 @@ func (c *capturingTransport) get(legType string) [][]byte {
 // both handleUC04 and scenarioToPend's provider-data branch persist/attest against the
 // order's OWN id (resourceRef(res.srJSON), Bug-2 discipline), which the plain builder
 // (used by the tuple lanes, where the order is never re-referenced this way) omits.
-func buildAuthoredQROrderWithID(t *testing.T, id, patientRef, code, display, dxCode string) []byte {
+func buildAuthoredQROrderWithID(t *testing.T, id, patientRef, system, code, display, dxCode string) []byte {
 	t.Helper()
-	raw, err := BuildServiceRequestCoded(systemCPTBuild, code, display, dxCode, patientRef)
+	raw, err := BuildServiceRequestCoded(system, code, display, dxCode, patientRef)
 	if err != nil {
 		t.Fatalf("build order: %v", err)
 	}
@@ -160,6 +160,10 @@ func buildAuthoredQROrderWithID(t *testing.T, id, patientRef, code, display, dxC
 		t.Fatalf("unmarshal built order: %v", err)
 	}
 	m["id"] = id
+	// The order names the party requesting the service, as every order this
+	// gateway authors does — a prior authorization for an order that names
+	// nobody is one no inquiry can find again.
+	m["performer"] = []any{map[string]string{"reference": OrderingProviderRef}}
 	out, err := json.Marshal(m)
 	if err != nil {
 		t.Fatalf("remarshal order with id: %v", err)
@@ -441,7 +445,10 @@ func TestAuthoredQRBuiltAtSelectedLine(t *testing.T) {
 	t.Run("scenarioToPend (UC-06)", func(t *testing.T) {
 		const member = "MBR-UC06"
 		demo := Demo{BirthDate: "1969-07-21", FamilyName: "Reyes"} // matches censusPersonas' MBR-UC06 exactly
-		orderJSON := buildAuthoredQROrderWithID(t, "sr-uc06-authoredqr", "Patient/"+member, "72148", "MRI lumbar spine w/o contrast", "M51.16")
+		// The order carries the product UC-06 originates — the flow reads it from
+		// the system of record now and refuses one about a different product.
+		uc06 := DemoOrderCodes().UC06
+		orderJSON := buildAuthoredQROrderWithID(t, "sr-uc06-authoredqr", "Patient/"+member, uc06.System, uc06.Code, uc06.Display, uc06.Dx)
 		gw, stub, capture := newAuthoredQRPendFixture(t, member, demo, orderJSON, "functional-status")
 
 		req := httptest.NewRequest(http.MethodPost, "/scenario/uc06", nil)
@@ -466,7 +473,8 @@ func TestAuthoredQRBuiltAtSelectedLine(t *testing.T) {
 		// this member is seeded purely via extraPersonas (newAuthoredQRSoR).
 		const member = "MBR-PD-UC04"
 		demo := Demo{BirthDate: "1982-11-03", FamilyName: "Chen-ProviderData"}
-		orderJSON := buildAuthoredQROrderWithID(t, "sr-uc04-authoredqr", "Patient/"+member, "72148", "MRI lumbar spine w/o contrast", "M51.16")
+		uc04 := DemoOrderCodes().UC04
+		orderJSON := buildAuthoredQROrderWithID(t, "sr-uc04-authoredqr", "Patient/"+member, uc04.System, uc04.Code, uc04.Display, uc04.Dx)
 		gw, stub, capture := newAuthoredQRSingleShotFixture(t, member, demo, orderJSON)
 
 		req := httptest.NewRequest(http.MethodPost, "/scenario/uc04", nil)

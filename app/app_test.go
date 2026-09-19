@@ -28,6 +28,7 @@ import (
 	"time"
 
 	checks "github.com/SmartHealthNetwork/shn-gateway/checks"
+	engine "github.com/SmartHealthNetwork/shn-gateway/engine"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 	"github.com/SmartHealthNetwork/shn-sdk/health"
 )
@@ -205,6 +206,170 @@ func TestLoadConfig_MetricsServiceReadThrough(t *testing.T) {
 	}
 	if cfg.MetricsService != "provider-data-gw" || cfg.MetricsNamespace != "X" || cfg.MetricsEnv != "Y" {
 		t.Fatalf("metrics read-through wrong: service=%q ns=%q env=%q", cfg.MetricsService, cfg.MetricsNamespace, cfg.MetricsEnv)
+	}
+}
+
+// TestLoadConfigConformanceEnforcement: absent means NONE — this is the ONE
+// place in the tree where a non-strict level comes from an omission. Every
+// other construction of engine.Config is strict by the zero value.
+func TestLoadConfigConformanceEnforcement(t *testing.T) {
+	base := map[string]string{
+		"ROLE":                      "provider",
+		"SHN_SECRETS":               "/etc/shn/bundles/provider",
+		"SHN_DISCOVERY_URL":         "http://accounts:8088/discovery",
+		"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate",
+	}
+	for _, tc := range []struct {
+		env  string
+		want engine.ConformanceEnforcement
+	}{
+		// THE default: absent means none. This row is the whole behavioural
+		// diff of the flip — every gate pins its level explicitly instead
+		// (test/invariants' TestInvariant_EveryGateRunsStrict).
+		{"", engine.EnforcementNone},
+		{"none", engine.EnforcementNone},
+		{"strict", engine.EnforcementStrict},
+	} {
+		m := map[string]string{}
+		for k, v := range base {
+			m[k] = v
+		}
+		m["CONFORMANCE_ENFORCEMENT"] = tc.env
+		cfg, err := loadConfig(env(m))
+		if err != nil {
+			t.Fatalf("CONFORMANCE_ENFORCEMENT=%q: %v", tc.env, err)
+		}
+		if cfg.ConformanceEnforcement != tc.want {
+			t.Errorf("CONFORMANCE_ENFORCEMENT=%q loaded as %v, want %v", tc.env, cfg.ConformanceEnforcement, tc.want)
+		}
+	}
+}
+
+func TestLoadConfigConformanceEnforcementUnknownValueRefusesBoot(t *testing.T) {
+	m := map[string]string{
+		"ROLE":                      "provider",
+		"SHN_SECRETS":               "/etc/shn/bundles/provider",
+		"SHN_DISCOVERY_URL":         "http://accounts:8088/discovery",
+		"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate",
+		"CONFORMANCE_ENFORCEMENT":   "middle",
+	}
+	_, err := loadConfig(env(m))
+	if err == nil {
+		t.Fatal("an unknown level must refuse to boot")
+	}
+	if !strings.Contains(err.Error(), "none") || !strings.Contains(err.Error(), "strict") {
+		t.Fatalf("the boot error must name the two accepted values, got %v", err)
+	}
+}
+
+// TestBuildWiresConformanceEnforcementToGateway proves build()'s
+// engine.Config literal actually carries CONFORMANCE_ENFORCEMENT through to
+// the constructed Gateway — not just to loadConfig's own config struct.
+// Deleting the "ConformanceEnforcement: cfg.ConformanceEnforcement," line in
+// build() leaves this red: ConformanceLevelForTest would report strict at
+// every row, since the Gateway's own field would stay at its zero value
+// regardless of what loadConfig parsed.
+func TestBuildWiresConformanceEnforcementToGateway(t *testing.T) {
+	for _, tc := range []struct {
+		env  string
+		want engine.ConformanceEnforcement
+	}{
+		{"", engine.EnforcementNone},
+		{"none", engine.EnforcementNone},
+		{"strict", engine.EnforcementStrict},
+	} {
+		extra := map[string]string{"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate"}
+		if tc.env != "" {
+			extra["CONFORMANCE_ENFORCEMENT"] = tc.env
+		}
+		b, _, err := buildProviderForPopulate(t, extra)
+		if err != nil {
+			t.Fatalf("CONFORMANCE_ENFORCEMENT=%q: build: %v", tc.env, err)
+		}
+		if got := b.gateway.ConformanceLevelForTest(); got != tc.want {
+			t.Errorf("CONFORMANCE_ENFORCEMENT=%q: Gateway's own conformance level = %v, want %v", tc.env, got, tc.want)
+		}
+	}
+}
+
+// TestBuildWiresConformanceEnforcementToNativeResponder proves build()'s
+// NativeOption list actually gives the native CRD responder the SAME
+// enforcement policy as the rest of the gateway (WithConformancePolicy,
+// beside WithEndpointEvidenceObserver in the nativeOpts literal). Deleting
+// that line leaves this red: the responder's own conformance level would stay
+// strict regardless of CONFORMANCE_ENFORCEMENT — the responder's own
+// CDS-answer certification would keep refusing under
+// CONFORMANCE_ENFORCEMENT=none even though the rest of the gateway records
+// and relays.
+func TestBuildWiresConformanceEnforcementToNativeResponder(t *testing.T) {
+	payer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer payer.Close()
+
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	keyBody := fmt.Sprintf(`{"pubkey":%q}`, base64.StdEncoding.EncodeToString(pub))
+	keys := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(keyBody))
+	}))
+	defer keys.Close()
+	disc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"endpoints":{},"authzPublicKeyURL":%q,"hubTransportKeyURL":%q}`, keys.URL, keys.URL)
+	}))
+	defer disc.Close()
+
+	for _, tc := range []struct {
+		env  string
+		want engine.ConformanceEnforcement
+	}{
+		{"", engine.EnforcementNone},
+		{"none", engine.EnforcementNone},
+		// The strict row is what keeps this a two-directional fence now that
+		// the absent row wants none: without it, hardcoding the responder's
+		// policy to none would pass.
+		{"strict", engine.EnforcementStrict},
+	} {
+		dir := t.TempDir()
+		id, err := shnsdk.GenerateIdentity("h-test-payer-conformance-" + tc.env)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := shnsdk.WriteBundle(dir, id, "payer", "https://holder.example"); err != nil {
+			t.Fatal(err)
+		}
+		env := map[string]string{
+			"ROLE":                         "payer",
+			"SHN_SECRETS":                  dir,
+			"SHN_DISCOVERY_URL":            disc.URL,
+			"SHN_FAKE_VALIDATOR":           "1",
+			"FHIR_DATA_URL":                "https://sor.example/fhir", // required on every role: the holder's own SoR
+			"PAYER_DAVINCI_BASE_URL":       payer.URL,
+			"PAYER_DAVINCI_CRD_SERVICE_ID": "svc",
+		}
+		if tc.env != "" {
+			env["CONFORMANCE_ENFORCEMENT"] = tc.env
+		}
+		b, err := build(context.Background(), func(k string) string { return env[k] }, io.Discard, nil)
+		if err != nil {
+			t.Fatalf("CONFORMANCE_ENFORCEMENT=%q: build: %v", tc.env, err)
+		}
+		t.Cleanup(func() {
+			if b.gateway != nil {
+				_ = b.gateway.Close()
+			}
+		})
+		if b.nativeResponder == nil {
+			t.Fatalf("CONFORMANCE_ENFORCEMENT=%q: built.nativeResponder is nil — expected native-forward mode to build one (PAYER_DAVINCI_BASE_URL set)", tc.env)
+		}
+		reader, ok := b.nativeResponder.(interface {
+			ConformanceLevelForTest() engine.ConformanceEnforcement
+		})
+		if !ok {
+			t.Fatalf("CONFORMANCE_ENFORCEMENT=%q: nativeResponder %T does not expose ConformanceLevelForTest", tc.env, b.nativeResponder)
+		}
+		if got := reader.ConformanceLevelForTest(); got != tc.want {
+			t.Errorf("CONFORMANCE_ENFORCEMENT=%q: native responder's conformance level = %v, want %v", tc.env, got, tc.want)
+		}
 	}
 }
 

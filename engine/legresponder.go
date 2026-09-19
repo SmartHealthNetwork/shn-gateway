@@ -36,9 +36,6 @@ type LegResult struct {
 	Message        string       // body for a non-zero Status
 	Commit         func() error // NON-FHIR durable state (Store writes); fired after buildResponseLeg, before writeLeg; error => 502
 	Rollback       func()       // undo a claim acquired in Handle; engine arms defer-rollback-unless-committed
-	// ResponseAssembled identifies a local terminal PAS replacement. It requires
-	// PAS-profile certification and holder-local assembly Provenance before Commit.
-	ResponseAssembled bool
 	// ResponseSubjectForeign identifies the payer's patient namespace. The full
 	// graph must remain internally subject-consistent; it is not compared with
 	// the request's SHN member id. Locally produced EOBs remain member-fenced.

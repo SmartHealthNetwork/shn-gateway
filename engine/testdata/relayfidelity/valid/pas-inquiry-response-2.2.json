@@ -1,0 +1,635 @@
+{
+  "resourceType": "Parameters",
+  "parameter": [
+    {
+      "name": "return",
+      "resource": {
+        "resourceType": "Bundle",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-pas-inquiry-response-bundle"
+          ]
+        },
+        "language": "en",
+        "identifier": {
+          "system": "http://example.org/SUBMITTER_TRANSACTION_IDENTIFIER",
+          "value": "5269367"
+        },
+        "type": "collection",
+        "timestamp": "2005-05-02T11:01:00+05:00",
+        "entry": [
+          {
+            "fullUrl": "http://example.org/fhir/ClaimResponse/PASClaimInquiryResponseExample",
+            "resource": {
+              "resourceType": "ClaimResponse",
+              "id": "PASClaimInquiryResponseExample",
+              "meta": {
+                "profile": [
+                  "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claiminquiryresponse"
+                ]
+              },
+							"text": {
+								"status": "generated",
+								"div": "<div xmlns=\"http://www.w3.org/1999/xhtml\"><p>Synthetic relay fixture: 1 &lt; 2 &amp;&amp; 3 &gt; 2</p></div>"
+							},
+							"identifier": [
+								{
+									"system": "http://example.org/PATIENT_EVENT_TRACE_NUMBER",
+									"value": "111099",
+									"assigner": {
+										"identifier": {
+											"system": "http://example.org/USER_ASSIGNED",
+											"value": "9012345678"
+										}
+									}
+								}
+							],
+							"status": "active",
+							"type": {
+								"coding": [
+									{
+										"system": "http://terminology.hl7.org/CodeSystem/claim-type",
+										"code": "professional"
+									}
+								]
+							},
+							"use": "preauthorization",
+							"patient": {
+								"reference": "Patient/SubscriberExample"
+							},
+							"created": "2019-07-20T11:01:00+05:00",
+							"insurer": {
+								"reference": "Organization/InsurerExample"
+							},
+							"request": {
+								"reference": "Claim/ReferralAuthorizationExample"
+							},
+							"outcome": "complete",
+							"item": [
+								{
+									"extension": [
+										{
+											"url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-itemRequestedServiceDate",
+											"valuePeriod": {
+												"start": "2005-05-02",
+												"end": "2005-06-02"
+											}
+										}
+									],
+									"itemSequence": 1,
+									"adjudication": [
+										{
+											"extension": [
+												{
+													"extension": [
+														{
+															"url": "number",
+															"valueString": "AUTH0001"
+														},
+														{
+															"url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewActionCode",
+                              "valueCodeableConcept": {
+                                "coding": [
+                                  {
+                                    "system": "https://codesystem.x12.org/005010/306",
+                                    "code": "A1",
+                                    "display": "Certified in total"
+                                  }
+                                ]
+                              }
+                            }
+                          ],
+                          "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewAction"
+                        }
+                      ],
+                      "category": {
+                        "coding": [
+                          {
+                            "system": "http://terminology.hl7.org/CodeSystem/adjudication",
+                            "code": "submitted"
+                          }
+                        ]
+                      },
+                      "amount": {
+                        "value": 1.50,
+                        "currency": "USD"
+                      },
+                      "value": 1e2
+                    }
+                  ]
+                }
+              ],
+              "insurance": [
+                {
+                  "sequence": 1,
+                  "focal": true,
+                  "coverage": {
+                    "reference": "Coverage/InsuranceExample"
+                  }
+                }
+              ],
+              "extension": [
+                {
+                  "url": "http://example.org/fhir/StructureDefinition/relay-fidelity-unknown",
+                  "extension": [
+                    {
+                      "url": "decimal-a",
+                      "valueDecimal": 9007199254740993
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "fullUrl": "http://example.org/fhir/Organization/UMOExample",
+            "resource": {
+              "resourceType": "Organization",
+              "id": "UMOExample",
+              "meta": {
+                "profile": [
+                  "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-requestor"
+                ]
+              },
+              "identifier": [
+                {
+                  "system": "http://hl7.org/fhir/sid/us-npi",
+                  "value": "8189991234"
+                }
+              ],
+              "active": true,
+              "type": [
+                {
+                  "coding": [
+                    {
+                      "system": "https://codesystem.x12.org/005010/98",
+                      "code": "X3"
+                    }
+                  ]
+                }
+              ],
+              "name": "DR. JOE SMITH CORPORATION",
+              "address": [
+                {
+                  "line": [
+                    "111 1ST STREET"
+                  ],
+                  "city": "SAN DIEGO",
+                  "state": "CA",
+                  "postalCode": "92101",
+                  "country": "US"
+                }
+              ]
+            }
+          },
+          {
+            "fullUrl": "http://example.org/fhir/Organization/InsurerExample",
+            "resource": {
+              "resourceType": "Organization",
+              "id": "InsurerExample",
+              "meta": {
+                "profile": [
+                  "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-insurer"
+                ]
+              },
+              "identifier": [
+                {
+                  "system": "http://hl7.org/fhir/sid/us-npi",
+                  "value": "1234567893"
+                }
+              ],
+              "active": true,
+              "type": [
+                {
+                  "coding": [
+                    {
+                      "system": "https://codesystem.x12.org/005010/98",
+                      "code": "PR"
+                    }
+                  ]
+                }
+              ],
+              "name": "MARYLAND CAPITAL INSURANCE COMPANY"
+            }
+          },
+          {
+            "fullUrl": "http://example.org/fhir/Coverage/InsuranceExample",
+            "resource": {
+              "resourceType": "Coverage",
+              "id": "InsuranceExample",
+              "meta": {
+                "profile": [
+                  "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-coverage"
+                ]
+              },
+              "identifier": [
+                {
+                  "type": {
+                    "coding": [
+                      {
+                        "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                        "code": "MB"
+                      }
+                    ]
+                  }
+                }
+              ],
+              "status": "active",
+              "subscriberId": "1122334455",
+              "beneficiary": {
+                "reference": "Patient/SubscriberExample"
+              },
+              "relationship": {
+                "coding": [
+                  {
+                    "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+                    "code": "self"
+                  },
+                  {
+                    "system": "https://codesystem.x12.org/005010/1069",
+                    "code": "18"
+                  }
+                ]
+              },
+              "payor": [
+                {
+                  "reference": "Organization/InsurerExample"
+                }
+              ]
+            }
+          },
+          {
+            "fullUrl": "http://example.org/fhir/Patient/SubscriberExample",
+            "resource": {
+              "resourceType": "Patient",
+              "id": "SubscriberExample",
+              "meta": {
+                "profile": [
+                  "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-subscriber"
+                ]
+              },
+              "extension": [
+                {
+                  "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-militaryStatus",
+                  "valueCodeableConcept": {
+                    "coding": [
+                      {
+                        "system": "https://codesystem.x12.org/005010/584",
+                        "code": "RU"
+                      }
+                    ]
+                  }
+                }
+              ],
+              "identifier": [
+                {
+                  "system": "http://example.org/MIN",
+                  "value": "12345678901"
+                }
+              ],
+              "name": [
+                {
+                  "family": "SMITH",
+                  "given": [
+                    "JOE"
+                  ]
+                }
+              ],
+              "gender": "male"
+            }
+          }
+        ],
+        "signature": {
+          "type": [
+            {
+              "system": "urn:iso-astm:E1762-95:2013",
+              "code": "1.2.840.10065.1.12.1.1",
+              "display": "Author's Signature"
+            }
+          ],
+          "when": "2026-06-22T14:00:05+00:00",
+          "who": {
+            "reference": "http://example.org/fhir/Organization/InsurerExample"
+          },
+          "sigFormat": "image/png",
+          "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+        }
+      }
+    },
+    {
+      "name": "return",
+      "resource": {
+        "resourceType": "Bundle",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-pas-inquiry-response-bundle"
+          ]
+        },
+        "language": "en",
+        "identifier": {
+          "system": "http://example.org/SUBMITTER_TRANSACTION_IDENTIFIER",
+          "value": "5269368"
+        },
+        "type": "collection",
+        "timestamp": "2005-05-02T11:01:00+05:00",
+        "entry": [
+          {
+            "fullUrl": "http://example.org/fhir/ClaimResponse/PASClaimInquiryResponseExample-2",
+            "resource": {
+              "resourceType": "ClaimResponse",
+              "id": "PASClaimInquiryResponseExample-2",
+              "meta": {
+                "profile": [
+                  "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claiminquiryresponse"
+                ]
+              },
+              "text": {
+                "status": "generated",
+                "div": "<div xmlns=\"http://www.w3.org/1999/xhtml\"><p>Synthetic relay fixture: 1 &lt; 2 &amp;&amp; 3 &gt; 2</p></div>"
+              },
+              "identifier": [
+                {
+                  "system": "http://example.org/PATIENT_EVENT_TRACE_NUMBER",
+                  "value": "111100",
+                  "assigner": {
+                    "identifier": {
+                      "system": "http://example.org/USER_ASSIGNED",
+                      "value": "9012345678"
+                    }
+                  }
+                }
+              ],
+              "status": "active",
+              "type": {
+                "coding": [
+                  {
+                    "system": "http://terminology.hl7.org/CodeSystem/claim-type",
+                    "code": "professional"
+                  }
+                ]
+              },
+              "use": "preauthorization",
+              "patient": {
+                "reference": "Patient/SubscriberExample"
+              },
+              "created": "2019-07-20T11:01:00+05:00",
+              "insurer": {
+                "reference": "Organization/InsurerExample"
+              },
+              "request": {
+                "reference": "Claim/ReferralAuthorizationExample"
+              },
+              "outcome": "complete",
+              "item": [
+                {
+                  "extension": [
+                    {
+                      "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-itemRequestedServiceDate",
+                      "valuePeriod": {
+                        "start": "2005-05-02",
+                        "end": "2005-06-02"
+                      }
+                    }
+                  ],
+                  "itemSequence": 1,
+                  "adjudication": [
+                    {
+                      "extension": [
+                        {
+                          "extension": [
+                            {
+                              "url": "number",
+                              "valueString": "AUTH0001"
+                            },
+                            {
+                              "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewActionCode",
+                              "valueCodeableConcept": {
+                                "coding": [
+                                  {
+                                    "system": "https://codesystem.x12.org/005010/306",
+                                    "code": "A1",
+                                    "display": "Certified in total"
+                                  }
+                                ]
+                              }
+                            }
+                          ],
+                          "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewAction"
+                        }
+                      ],
+                      "category": {
+                        "coding": [
+                          {
+                            "system": "http://terminology.hl7.org/CodeSystem/adjudication",
+                            "code": "submitted"
+                          }
+                        ]
+                      },
+                      "amount": {
+                        "value": 1.50,
+                        "currency": "USD"
+                      },
+                      "value": 1e2
+                    }
+                  ]
+                }
+              ],
+              "insurance": [
+                {
+                  "sequence": 1,
+                  "focal": true,
+                  "coverage": {
+                    "reference": "Coverage/InsuranceExample"
+                  }
+                }
+              ],
+              "extension": [
+                {
+                  "url": "http://example.org/fhir/StructureDefinition/relay-fidelity-unknown",
+                  "extension": [
+                    {
+                      "url": "decimal-a",
+                      "valueDecimal": 9007199254740993
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "fullUrl": "http://example.org/fhir/Organization/UMOExample",
+            "resource": {
+              "resourceType": "Organization",
+              "id": "UMOExample",
+              "meta": {
+                "profile": [
+                  "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-requestor"
+                ]
+              },
+              "identifier": [
+                {
+                  "system": "http://hl7.org/fhir/sid/us-npi",
+                  "value": "8189991234"
+                }
+              ],
+              "active": true,
+              "type": [
+                {
+                  "coding": [
+                    {
+                      "system": "https://codesystem.x12.org/005010/98",
+                      "code": "X3"
+                    }
+                  ]
+                }
+              ],
+              "name": "DR. JOE SMITH CORPORATION",
+              "address": [
+                {
+                  "line": [
+                    "111 1ST STREET"
+                  ],
+                  "city": "SAN DIEGO",
+                  "state": "CA",
+                  "postalCode": "92101",
+                  "country": "US"
+                }
+              ]
+            }
+          },
+          {
+            "fullUrl": "http://example.org/fhir/Organization/InsurerExample",
+            "resource": {
+              "resourceType": "Organization",
+              "id": "InsurerExample",
+              "meta": {
+                "profile": [
+                  "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-insurer"
+                ]
+              },
+              "identifier": [
+                {
+                  "system": "http://hl7.org/fhir/sid/us-npi",
+                  "value": "1234567893"
+                }
+              ],
+              "active": true,
+              "type": [
+                {
+                  "coding": [
+                    {
+                      "system": "https://codesystem.x12.org/005010/98",
+                      "code": "PR"
+                    }
+                  ]
+                }
+              ],
+              "name": "MARYLAND CAPITAL INSURANCE COMPANY"
+            }
+          },
+          {
+            "fullUrl": "http://example.org/fhir/Coverage/InsuranceExample",
+            "resource": {
+              "resourceType": "Coverage",
+              "id": "InsuranceExample",
+              "meta": {
+                "profile": [
+                  "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-coverage"
+                ]
+              },
+              "identifier": [
+                {
+                  "type": {
+                    "coding": [
+                      {
+                        "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                        "code": "MB"
+                      }
+                    ]
+                  }
+                }
+              ],
+              "status": "active",
+              "subscriberId": "1122334455",
+              "beneficiary": {
+                "reference": "Patient/SubscriberExample"
+              },
+              "relationship": {
+                "coding": [
+                  {
+                    "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+                    "code": "self"
+                  },
+                  {
+                    "system": "https://codesystem.x12.org/005010/1069",
+                    "code": "18"
+                  }
+                ]
+              },
+              "payor": [
+                {
+                  "reference": "Organization/InsurerExample"
+                }
+              ]
+            }
+          },
+          {
+            "fullUrl": "http://example.org/fhir/Patient/SubscriberExample",
+            "resource": {
+              "resourceType": "Patient",
+              "id": "SubscriberExample",
+              "meta": {
+                "profile": [
+                  "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-subscriber"
+                ]
+              },
+              "extension": [
+                {
+                  "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-militaryStatus",
+                  "valueCodeableConcept": {
+                    "coding": [
+                      {
+                        "system": "https://codesystem.x12.org/005010/584",
+                        "code": "RU"
+                      }
+                    ]
+                  }
+                }
+              ],
+              "identifier": [
+                {
+                  "system": "http://example.org/MIN",
+                  "value": "12345678901"
+                }
+              ],
+              "name": [
+                {
+                  "family": "SMITH",
+                  "given": [
+                    "JOE"
+                  ]
+                }
+              ],
+              "gender": "male"
+            }
+          }
+        ],
+        "signature": {
+          "type": [
+            {
+              "system": "urn:iso-astm:E1762-95:2013",
+              "code": "1.2.840.10065.1.12.1.1",
+              "display": "Author's Signature"
+            }
+          ],
+          "when": "2026-06-22T14:00:05+00:00",
+          "who": {
+            "reference": "http://example.org/fhir/Organization/InsurerExample"
+          },
+          "sigFormat": "image/png",
+          "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+        }
+      }
+    }
+  ]
+}

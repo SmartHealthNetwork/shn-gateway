@@ -101,7 +101,7 @@ func (g *Gateway) conformantCRDDispatchBindContext(ctx context.Context, reqJSON 
 	}
 	covJSON = req.Prefetch["coverage"]
 	member := strings.TrimPrefix(req.Context.PatientID, "Patient/")
-	pci, _, ok, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(ctx, member)
+	pci, ok, readErr := g.resolveSubjectPCI(ctx, member)
 	if readErr != nil {
 		status, msg := SoRFailureResponse(readErr)
 		return nil, nil, status, msg
@@ -129,7 +129,7 @@ func (g *Gateway) conformantCRDDispatchBindContext(ctx context.Context, reqJSON 
 			return nil, nil, http.StatusForbidden, "dispatched order missing patient subject"
 		}
 		m := strings.TrimPrefix(subj, "Patient/")
-		rp, _, ok, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(ctx, m)
+		rp, ok, readErr := g.resolveSubjectPCI(ctx, m)
 		if readErr != nil {
 			status, msg := SoRFailureResponse(readErr)
 			return nil, nil, status, msg
@@ -141,7 +141,7 @@ func (g *Gateway) conformantCRDDispatchBindContext(ctx context.Context, reqJSON 
 	// Coverage beneficiary (when present) must bind to the same pci.
 	if ben := coverageBeneficiaryFromPrefetch(covJSON); ben != "" {
 		m := strings.TrimPrefix(ben, "Patient/")
-		rp, _, ok, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(ctx, m)
+		rp, ok, readErr := g.resolveSubjectPCI(ctx, m)
 		if readErr != nil {
 			status, msg := SoRFailureResponse(readErr)
 			return nil, nil, status, msg

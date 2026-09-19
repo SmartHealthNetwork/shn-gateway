@@ -19,18 +19,32 @@ This gateway requires `shn-sdk` — see `go.mod` for the pinned version.
 ## Native PAS response contract
 
 PAS operation responses must be complete Bundles containing exactly one
-ClaimResponse and a closed set of referenced resources. Bare ClaimResponses are
-accepted only as polling resources. Direct native responses retain their bytes.
-When polling completes, the gateway replaces the retained decision, validates the
-assembled Bundle against the selected PAS profile and stamps that contract line.
-A signed Bundle cannot be assembled because replacing its content would invalidate
-the retained signature.
+ClaimResponse and a closed set of referenced resources. **Every decision a payer
+gives is relayed as the payer gave it**: the gateway does not poll its own payer
+for a later decision, does not replace a payer's answer with one it assembled,
+and stamps no contract line of its own on a message it did not produce. A payer
+that pends answers `pended`, and the requester obtains the determination by
+asking for it (`Claim/$inquire`, leg type `pas-claim-inquire`).
 
-An optional `leg.assembled` observer event records holder-local Provenance after
-successful commit. Its direction is `ingress`, operation is
-`pas-terminal-response-assembly`, and correlation ID identifies the exchange. The
-Provenance targets the retained ClaimResponse fullUrl and stays outside the Bundle
-and Hub.
+**Breaking in this release** (the assembly path is gone):
+
+- `engine.WithPendReQuery` is REMOVED. It configured the pend re-query the poll
+  performed; there is no poll.
+- `engine.LegResult.ResponseAssembled` is REMOVED. A partner `LegResponder` that
+  set it no longer compiles. It marked an answer this gateway had assembled, and
+  a relayed answer is never one — delete the assignment; nothing replaces it.
+- The `leg.assembled` observer event is REMOVED. Nothing assembles a terminal PAS
+  response, so nothing emits it. Consumers should drop the case; no event takes
+  its place (`leg.response` already records the answer that was relayed).
+- `engine.PASWaitDefault` is now `0` (was 30s). An originator route waits only when
+  its caller asks it to. A caller that relied on the default to turn a pend into a
+  determination now receives the pend and its continuation, and asks.
+- `engine.PASWaitMax` is now 30s (was 120s). These still compile, so the change is
+  silent at build time: a caller asking for more than 30s is capped rather than
+  refused. Nothing is lost by it — the inquiry schedule always finished near 26s, so
+  every wait above that was already a no-op that reported itself as a longer one.
+  The bound and the schedule are now derived from each other and held together by a
+  test, so they cannot drift apart again.
 
 ## Observational source certification
 

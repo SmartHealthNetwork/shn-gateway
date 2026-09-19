@@ -96,4 +96,20 @@ var paCatalog = map[string]legSpec{
 		Physics:  LegPhysics{Kind: KindRequestResponse, Effect: EffectMutating, Timing: TimingSync, Locality: LocalitySubstrate},
 		Contract: "pa.pas",
 	},
+	// pas-claim-inquire: the Da Vinci prior-authorization inquiry (Claim/$inquire) —
+	// how a requester asks the payer for the decision on an authorization the payer
+	// pended. It READS the payer's own record (EffectReadOnly: the inquiry itself
+	// decides nothing; the payer's answer may report a decision the payer already
+	// made), so it carries its own min-necessary scope (pas-inquire-bundle), distinct
+	// from both pas-bundle and pas-update-bundle.
+	//
+	// A DISTINCT Op is load-bearing, exactly as it is for crd-order-dispatch:
+	// handleInbound pins spec.Op per TransactionType into VerifyBound, so sharing
+	// pas-submit would let a submit token be lifted onto an inquiry envelope (AI-11).
+	"pas-claim-inquire": {
+		ReqFrame: "provider-tpo", RespFrame: "payer-coverage",
+		Op: "pas-inquire", RespOp: "pas-inquire-response", Scope: "pas-inquire-bundle",
+		Physics:  LegPhysics{Kind: KindRequestResponse, Effect: EffectReadOnly, Timing: TimingSync, Locality: LocalitySubstrate},
+		Contract: "pa.pas",
+	},
 }

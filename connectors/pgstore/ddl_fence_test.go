@@ -34,7 +34,8 @@ import (
 // silently matched nothing (an unchanged marker string, a reshaped DDL) cannot pass
 // this fence by walking an empty table set.
 var expectedDDLTables = []string{
-	"gw_auth_number", "gw_pended_claim", "gw_eob", // business Store
+	"gw_auth_number", "gw_pended_claim", "gw_pended_claim_key", "gw_eob", // business Store
+	"gw_pa_continuation", "gw_pa_continuation_item", // the continuation store
 	"gw_ingress_key", "gw_replay", "gw_exchange", "gw_exchange_leg", // shared replica state
 }
 
@@ -78,10 +79,72 @@ var legKeyColumns = map[string]bool{"holder_id": true, "exchange_id": true, "seq
 // engine.MaxReplayKeyBytes, and a const string cannot interpolate the constant — so the
 // literal is pinned here. If the engine bound moves and the DDL does not, a key the
 // callers accept would be refused by the database as a store error.
+//
+// The assertion is scoped to gw_replay's OWN block. Two tables now declare a
+// `key` column with its own bound, and a check against the whole `ddl` string would
+// pass on either table's literal — so a bound that drifted on one of them would
+// match the other's and stay green.
 func TestReplayDDL_KeyBoundMatchesTheEngineConstant(t *testing.T) {
 	want := fmt.Sprintf("CHECK (octet_length(key) <= %d)", engine.MaxReplayKeyBytes)
-	if !strings.Contains(ddl, want) {
-		t.Fatalf("gw_replay does not declare %q — the schema and engine.MaxReplayKeyBytes have drifted", want)
+	if body := ddlTableBody(t, "gw_replay"); !strings.Contains(body, want) {
+		t.Fatalf("gw_replay does not declare %q — the schema and engine.MaxReplayKeyBytes have drifted.\n%s", want, body)
+	}
+}
+
+// ddlTableBody returns the parenthesised column list of ONE CREATE TABLE block, so
+// an assertion about a table's own declaration cannot be satisfied by another
+// table's identical text.
+func ddlTableBody(t *testing.T, table string) string {
+	t.Helper()
+	const marker = "CREATE TABLE IF NOT EXISTS "
+	src := stripSQLComments(ddl)
+	at := strings.Index(src, marker+table+" ")
+	if at < 0 {
+		at = strings.Index(src, marker+table+"\n")
+	}
+	if at < 0 {
+		t.Fatalf("ddl declares no CREATE TABLE block for %s", table)
+	}
+	rest := src[at+len(marker)+len(table):]
+	open := strings.Index(rest, "(")
+	if open < 0 {
+		t.Fatalf("%s: CREATE TABLE block with no column list", table)
+	}
+	body, ok := balancedParens(rest[open:])
+	if !ok {
+		t.Fatalf("%s: unbalanced parentheses in the column list", table)
+	}
+	return body
+}
+
+// TestDDLFence_NoNewExceptions: the exception list can only SHRINK. The pend
+// ledger's tables were designed with no opaque column precisely so they would need
+// no entry here — a new exemption is how a JSON column for "just the keys" would
+// arrive, and it never gets to arrive quietly.
+func TestDDLFence_NoNewExceptions(t *testing.T) {
+	want := map[string]bool{"gw_eob.eob_json": true}
+	for qual := range ddlContentExceptions {
+		if !want[qual] {
+			t.Errorf("ddlContentExceptions gained %q. A gw_* table needing an opaque column is a DESIGN "+
+				"change (AI-1), reviewed on its own terms — not a line added to get a schema green.", qual)
+		}
+	}
+	for qual := range want {
+		if _, ok := ddlContentExceptions[qual]; !ok {
+			t.Errorf("ddlContentExceptions lost %q — if the column is gone, shrink this list too", qual)
+		}
+	}
+}
+
+// TestPendKeyDDL_BoundMatchesTheEngineConstant: gw_pended_claim_key's CHECK is the
+// backstop for engine.MaxPendKeyBytes, and a const string cannot interpolate the
+// constant — so the literal is pinned here, exactly as gw_replay's is. If the
+// engine bound moves and the DDL does not, a key every store accepts would be
+// refused by the database as a store error.
+func TestPendKeyDDL_BoundMatchesTheEngineConstant(t *testing.T) {
+	want := fmt.Sprintf("CHECK (octet_length(key) <= %d)", engine.MaxPendKeyBytes)
+	if body := ddlTableBody(t, "gw_pended_claim_key"); !strings.Contains(body, want) {
+		t.Fatalf("gw_pended_claim_key does not declare %q — the schema and engine.MaxPendKeyBytes have drifted.\n%s", want, body)
 	}
 }
 

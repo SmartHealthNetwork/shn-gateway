@@ -624,9 +624,124 @@ func (d *censusSoR) SupplementalReport(memberID string) ([]byte, bool) {
 	return raw, true
 }
 
-// OpenOrder: the in-memory stub does not hold open orders; the provider-data lane
-// requires a real FHIR SoR (FHIR_DATA_URL). Returns found=false.
-func (d *censusSoR) OpenOrder(_ string) ([]byte, bool) { return nil, false }
+// censusOrders is the open order this stub holds per member — one per member, the
+// order that member's scenario is about.
+//
+// It mirrors internal/fhirseed's seedOriginationOrders: the seeded system of record
+// this stub stands in for holds exactly these members' orders, built from the SAME
+// gwengine.DemoOrderCodes() table, so a stand-in order and a seeded order carry the
+// same product coding and the tuple check agrees in both worlds. The PROVIDER-DATA
+// members (MBR-PD-*, MBR-OX) are deliberately absent: that lane requires a real FHIR
+// SoR (FHIR_DATA_URL), and a stub that answered for them would be more capable than
+// the thing it stands in for. So are MBR-COVERED and MBR-NOTCOVERED, for the reason
+// the seed gives: they are shared across scenarios, so there is no one order they
+// are about.
+func censusOrders() map[string]struct {
+	tuple    DemoOrderTuple
+	dispatch bool
+} {
+	c := DemoOrderCodes()
+	return map[string]struct {
+		tuple    DemoOrderTuple
+		dispatch bool
+	}{
+		// MBR-COVERED's one order-bearing scenario is UC-03's oxygen arm.
+		"MBR-COVERED":        {tuple: c.UC03, dispatch: true},
+		"MBR-D-UC02":         {tuple: c.UC02},
+		"MBR-D-UC03":         {tuple: c.UC03, dispatch: true},
+		"MBR-D-UC04":         {tuple: c.UC04},
+		"MBR-D-UC05":         {tuple: c.UC05},
+		"MBR-D-UC05-NC":      {tuple: c.UC05},
+		"MBR-D-UC06":         {tuple: c.UC06},
+		"MBR-D-UC07":         {tuple: c.UC07},
+		"MBR-D-UC08":         {tuple: c.UC08},
+		"MBR-UC07HCPCS":      {tuple: c.UC07HCPCS},
+		"MBR-BRIDGE-DEMO":    {tuple: c.UC03Bridge},
+		"MBR-BRIDGE-REFUSE":  {tuple: c.UC03Bridge},
+		"MBR-UC04":           {tuple: c.UC04},
+		"MBR-UC05":           {tuple: c.UC05},
+		"MBR-UC05-NOCONSENT": {tuple: c.UC05},
+		"MBR-UC06":           {tuple: c.UC06},
+		"MBR-UC07":           {tuple: c.UC07},
+		"MBR-UC08":           {tuple: c.UC08},
+	}
+}
+
+// censusOrderID is the id the stub's order for a member carries — the seed's own
+// convention (internal/fhirseed's originationOrderID), so a reference that resolves
+// here has the shape one that resolves against a seeded stack does.
+func censusOrderID(prefix, member string) string {
+	return prefix + "-" + strings.ToLower(strings.ReplaceAll(member, "-", "")) + "-provider"
+}
+
+// censusSupplierRef is the DME supplier the stub's order-DISPATCH order names — the
+// same record internal/fhirseed seeds (DemoSupplierOrgID).
+const censusSupplierRef = "Organization/org-uc03-demo-supplier"
+
+// censusSupplierNPI is that supplier's NPI, matching the seed's own.
+const censusSupplierNPI = "1999999999"
+
+// OpenOrder returns the member's open order, as a participant's own system holds
+// it: ACTIVE, with its own id, requested under the participant's own provider
+// group (or, for the order-DISPATCH shape, dispatched to its DME supplier).
+//
+// It used to hold none, because the only lane that read an order was
+// provider-data. Every lane reads one now — an order the gateway authored at
+// request time was held in no participant's system, so the authorization it
+// produced named an order no later inquiry could re-read.
+func (d *censusSoR) OpenOrder(memberID string) ([]byte, bool) {
+	o, ok := censusOrders()[memberID]
+	if !ok {
+		return nil, false
+	}
+	patRef := "Patient/" + memberID
+	if o.dispatch {
+		raw, err := buildCensusDispatchOrder(censusOrderID("dr-order", memberID), patRef, o.tuple)
+		return raw, err == nil
+	}
+	raw, err := buildCensusServiceOrder(censusOrderID("sr-order", memberID), patRef, o.tuple)
+	return raw, err == nil
+}
+
+// buildCensusServiceOrder renders the stub's ServiceRequest order. It goes through
+// the shipped BuildServiceRequestCoded and then states the two things an order a
+// system HOLDS says for itself: that it is active, and who it is requested under.
+func buildCensusServiceOrder(id, patRef string, t DemoOrderTuple) ([]byte, error) {
+	raw, err := BuildServiceRequestCoded(t.System, t.Code, t.Display, t.Dx, patRef)
+	if err != nil {
+		return nil, err
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, err
+	}
+	m["id"] = json.RawMessage(`"` + id + `"`)
+	m["status"] = json.RawMessage(`"active"`)
+	performer, err := json.Marshal([]map[string]string{{"reference": OrderingProviderRef}})
+	if err != nil {
+		return nil, err
+	}
+	m["performer"] = performer
+	return json.Marshal(m)
+}
+
+// buildCensusDispatchOrder renders the stub's DeviceRequest order-DISPATCH order.
+func buildCensusDispatchOrder(id, patRef string, t DemoOrderTuple) ([]byte, error) {
+	return json.Marshal(map[string]any{
+		"resourceType": "DeviceRequest",
+		"id":           id,
+		"status":       "active",
+		"intent":       "order",
+		"subject":      map[string]string{"reference": patRef},
+		"performer":    map[string]string{"reference": censusSupplierRef},
+		"codeCodeableConcept": map[string]any{
+			"coding": []map[string]string{{"system": t.System, "code": t.Code, "display": t.Display}},
+		},
+		"reasonCode": []map[string]any{{
+			"coding": []map[string]string{{"system": systemICD10Build, "code": t.Dx}},
+		}},
+	})
+}
 
 // OpenCoverage returns the stub's modeled Coverage for the member (FR-G40): a US Core
 // Coverage whose payor names the CMS payer Organization (shnsdk.CMSPayerIdentity) by DEFAULT,
@@ -646,13 +761,103 @@ func (d *censusSoR) OpenCoverage(memberID string) ([]byte, bool) {
 	if err != nil {
 		return nil, false
 	}
-	return cov, true
+	// The payor names this participant's OWN Organization record for the payer, by
+	// reference — ONE of the two shapes a participant's coverage comes in, and the
+	// one this stand-in models: the origination carries that record as the request's
+	// insurer entry, and the inquiry reads it back from the same place.
+	//
+	// It is NOT the shape the deployed reference systems seed. Every Coverage
+	// internal/fhirseed writes CONTAINS its payer organization
+	// (fhirmap.BuildCoverageForMemberWithContainedPayer — the shape to use when the
+	// reader is handed only the Coverage's own bytes, which fhirsor.OpenCoverage is).
+	// Modelling only this shape is what let a submission build here that the seeded
+	// system's own egress $validate refused — hermetic green, live red, on the one
+	// member whose contained payer organization was not the minted id. The contained
+	// shape is covered against the SEEDED BYTES themselves, not against a stand-in,
+	// by TestAuthoredPASSubmit_SeededContainedPayerOrgIsNeverStranded.
+	var m map[string]json.RawMessage
+	if json.Unmarshal(cov, &m) != nil {
+		return nil, false
+	}
+	payorJSON, err := json.Marshal([]map[string]string{{"reference": censusPayerOrgRef(payer)}})
+	if err != nil {
+		return nil, false
+	}
+	m["payor"] = payorJSON
+	delete(m, "contained")
+	out, err := json.Marshal(m)
+	if err != nil {
+		return nil, false
+	}
+	return out, true
 }
 
+// censusPayerOrgRef is the reference this stub's Coverage names its payer
+// organization by, one record per payer identity (the overrides above give some
+// members a different payer).
+func censusPayerOrgRef(payer shnsdk.PayerIdentifier) string {
+	return "Organization/org-payer-" + strings.ToLower(strings.NewReplacer(".", "-", ":", "-", "|", "-", "/", "-").Replace(payer.Value))
+}
+
+// censusPayerOrganization is the stub's record for a payer, the one its Coverage
+// names as payor and a prior authorization carries as its insurer entry.
+func censusPayerOrganization(payer shnsdk.PayerIdentifier) ([]byte, bool) {
+	b, err := json.Marshal(map[string]any{
+		"resourceType": "Organization",
+		"id":           strings.TrimPrefix(censusPayerOrgRef(payer), "Organization/"),
+		"name":         "Test Payer",
+		"identifier":   []map[string]string{{"system": payer.System, "value": payer.Value}},
+	})
+	return b, err == nil
+}
+
+// censusPayers lists every payer identity this stub's members are covered by:
+// the default plus every override. It is what makes the stub's own payer
+// organization records enumerable.
+func censusPayers() []shnsdk.PayerIdentifier {
+	out := []shnsdk.PayerIdentifier{shnsdk.CMSPayerIdentity}
+	for _, p := range censusPayerOverrides {
+		out = append(out, p)
+	}
+	return out
+}
+
+// censusOrderingProviderNPI is the NPI the stub's requesting-provider
+// Organization carries. The seeded system of record this stub stands in for
+// holds the same record (internal/fhirseed's OrderingProviderOrgID); one row
+// binds the two references.
+const censusOrderingProviderNPI = "1295837462"
+
 // ResolveByReference reads a census member's Patient ("Patient/<member>": the stub names
-// patients by the member id). Other references are not held (the provider-data lane
+// patients by the member id) and this participant's OWN requesting-provider
+// Organization, which every order this gateway authors names as its performer —
+// a stand-in that did not hold it would refuse every origination the real seeded
+// system serves. Other references are not held (the provider-data lane
 // requires a real FHIR SoR, FHIR_DATA_URL).
 func (d *censusSoR) ResolveByReference(ref string) ([]byte, bool) {
+	if ref == censusSupplierRef {
+		b, err := json.Marshal(map[string]any{
+			"resourceType": "Organization",
+			"id":           strings.TrimPrefix(censusSupplierRef, "Organization/"),
+			"name":         "Demo DME Supplier",
+			"identifier":   []map[string]string{{"system": "http://hl7.org/fhir/sid/us-npi", "value": censusSupplierNPI}},
+		})
+		return b, err == nil
+	}
+	if ref == OrderingProviderRef {
+		b, err := json.Marshal(map[string]any{
+			"resourceType": "Organization",
+			"id":           strings.TrimPrefix(OrderingProviderRef, "Organization/"),
+			"name":         "Test Provider Group",
+			"identifier":   []map[string]string{{"system": "http://hl7.org/fhir/sid/us-npi", "value": censusOrderingProviderNPI}},
+		})
+		return b, err == nil
+	}
+	for _, payer := range censusPayers() {
+		if ref == censusPayerOrgRef(payer) {
+			return censusPayerOrganization(payer)
+		}
+	}
 	member, ok := strings.CutPrefix(ref, "Patient/")
 	if !ok {
 		return nil, false
@@ -672,13 +877,25 @@ func (d *censusSoR) ResolveByReference(ref string) ([]byte, bool) {
 }
 
 // SearchPatientContext answers the stub's patient searches: a Coverage search is the
-// member's Coverage (OpenCoverage) as one match; every other search finds nothing.
+// member's Coverage (OpenCoverage) as one match; an order search FINDS THE MEMBER'S
+// OPEN ORDER, because a system that holds an order returns it when asked for that
+// patient's orders — a stub whose order search found nothing while its read did would
+// let an order-dispatch request claim to dispatch an order its own history does not
+// hold, which is exactly what originatedDispatchRequest refuses. Every other search
+// finds nothing.
 func (d *censusSoR) SearchPatientContext(_ context.Context, resourceType, id string, _ ...SearchDateRange) (SearchResult, error) {
 	page := []byte(`{"resourceType":"Bundle","type":"searchset","entry":[`)
 	if cov, ok := d.OpenCoverage(id); ok && resourceType == "Coverage" {
 		page = append(page, `{"fullUrl":"https://census.invalid/fhir/Coverage/`+id+`","resource":`...)
 		page = append(page, cov...)
 		page = append(page, `,"search":{"mode":"match"}}`...)
+	}
+	if order, ok := d.OpenOrder(id); ok && (resourceType == "DeviceRequest" || resourceType == "ServiceRequest") {
+		if rt, oid, err := resourceTypeAndID(order); err == nil && rt == resourceType {
+			page = append(page, `{"fullUrl":"https://census.invalid/fhir/`+rt+`/`+oid+`","resource":`...)
+			page = append(page, order...)
+			page = append(page, `,"search":{"mode":"match"}}`...)
+		}
 	}
 	page = append(page, "]}"...)
 	parsed, err := ParseSearchPage(page, resourceType)
@@ -922,7 +1139,10 @@ func TestCensusFixture_BridgeDemoPersonas(t *testing.T) {
 			if !covFound {
 				t.Fatal("expected OpenCoverage found=true")
 			}
-			gotPayer, ok := shnsdk.ParsePayerIdentifier(covJSON, nil)
+			// Resolved through the stub's OWN records, the way the engine resolves it:
+			// this Coverage names its payer organization by reference, as the seeded
+			// system of record does.
+			gotPayer, ok := shnsdk.ParsePayerIdentifier(covJSON, d.ResolveByReference)
 			if !ok {
 				t.Fatalf("ParsePayerIdentifier: ok=false for %s", covJSON)
 			}
@@ -935,8 +1155,8 @@ func TestCensusFixture_BridgeDemoPersonas(t *testing.T) {
 	// The two demo personas must never collide on payer identity or PCI (attribution).
 	demoCov, _ := d.OpenCoverage("MBR-BRIDGE-DEMO")
 	refuseCov, _ := d.OpenCoverage("MBR-BRIDGE-REFUSE")
-	demoPayer, _ := shnsdk.ParsePayerIdentifier(demoCov, nil)
-	refusePayer, _ := shnsdk.ParsePayerIdentifier(refuseCov, nil)
+	demoPayer, _ := shnsdk.ParsePayerIdentifier(demoCov, d.ResolveByReference)
+	refusePayer, _ := shnsdk.ParsePayerIdentifier(refuseCov, d.ResolveByReference)
 	if demoPayer == refusePayer {
 		t.Fatalf("MBR-BRIDGE-DEMO and MBR-BRIDGE-REFUSE must resolve to DIFFERENT payer identities, both got %+v", demoPayer)
 	}

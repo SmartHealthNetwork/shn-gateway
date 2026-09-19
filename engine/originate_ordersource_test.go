@@ -2,34 +2,56 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 )
 
-// A non-provider-data orderSource returns exactly BuildServiceRequestCoded(tuple)
-// bytes — byte-identical to the pre-refactor call (the tuple lanes must not regress).
-func TestOrderSource_DefaultBuildsFromTuple(t *testing.T) {
-	g := &Gateway{cfg: Config{OriginationProfile: "demo"}}
-	patientRef := "Patient/MBR-COVERED"
-	want, err := BuildServiceRequestCoded(systemCPTBuild, "72148", "MRI lumbar spine w/o contrast", "M51.16", patientRef)
-	if err != nil {
-		t.Fatalf("baseline build: %v", err)
-	}
-	got, status, msg := g.orderSourceContext(context.Background(), "MBR-COVERED", patientRef, systemCPTBuild, "72148", "MRI lumbar spine w/o contrast", "M51.16")
-	if status != 0 {
-		t.Fatalf("orderSource status=%d msg=%q, want 0", status, msg)
-	}
-	if string(got) != string(want) {
-		t.Fatalf("orderSource(demo) bytes differ from BuildServiceRequestCoded — the tuple lane would regress")
+// Every lane reads the member's OPEN ORDER out of the participant's own system —
+// there is no lane left that builds one. An order this gateway authored was held
+// in no participant's system, so the Claim/$inquire that continues a pended
+// authorization (which re-reads the order first) could never resolve it.
+func TestOrderSource_ReadsTheMembersOpenOrder(t *testing.T) {
+	sor := newCensusSoR()
+	for _, profile := range []string{"demo", "provider-data", "some-other-lane"} {
+		g := &Gateway{cfg: Config{OriginationProfile: profile, SoR: sor}}
+		got, status, msg := g.orderSourceContext(context.Background(), "MBR-D-UC04", "", "")
+		if status != 0 {
+			t.Fatalf("%s: orderSource status=%d msg=%q, want 0", profile, status, msg)
+		}
+		want, ok := sor.OpenOrder("MBR-D-UC04")
+		if !ok {
+			t.Fatalf("%s: the fixture system of record holds no open order for the member", profile)
+		}
+		if string(got) != string(want) {
+			t.Fatalf("%s: orderSource did not return the system of record's own bytes\n got: %s\nwant: %s", profile, got, want)
+		}
+		var m map[string]json.RawMessage
+		if err := json.Unmarshal(got, &m); err != nil {
+			t.Fatalf("%s: unmarshal order: %v", profile, err)
+		}
+		// The two things that make it an order a system HOLDS rather than one
+		// this gateway minted: its own identity, and the party it is requested
+		// under (which is what a payer matches a later inquiry on alongside the
+		// member id).
+		if string(m["id"]) == "" || string(m["id"]) == `""` {
+			t.Fatalf("%s: the order carries no id — nothing could re-read it later", profile)
+		}
+		if string(m["performer"]) != `[{"reference":"`+OrderingProviderRef+`"}]` {
+			t.Fatalf("%s: order performer = %s, want the participant's own requesting provider", profile, m["performer"])
+		}
 	}
 }
 
-// provider-data orderSource reads the SoR open order; fail-closed when there is no order.
-func TestOrderSource_ProviderDataNoOrder(t *testing.T) {
-	g := &Gateway{cfg: Config{OriginationProfile: "provider-data", SoR: newCensusSoR()}}
-	_, status, _ := g.orderSourceContext(context.Background(), "MBR-X", "Patient/MBR-X", "", "", "", "")
-	if status != 502 {
-		t.Fatalf("orderSource(provider-data, no order) status=%d, want 502", status)
+// A member whose system of record holds no open order is REFUSED. Nothing is
+// authored to stand in for it.
+func TestOrderSource_NoOpenOrderRefused(t *testing.T) {
+	for _, profile := range []string{"demo", "provider-data"} {
+		g := &Gateway{cfg: Config{OriginationProfile: profile, SoR: newCensusSoR()}}
+		_, status, msg := g.orderSourceContext(context.Background(), "MBR-X", "", "")
+		if status != 502 {
+			t.Fatalf("%s: orderSource(no order) status=%d msg=%q, want 502", profile, status, msg)
+		}
 	}
 }
 
@@ -46,16 +68,35 @@ func (s *noCodingSoR) OpenOrder(memberID string) ([]byte, bool) {
 	return []byte(`{"resourceType":"ServiceRequest","id":"sr-nocode","status":"active","intent":"order","code":{"coding":[{"system":"http://snomed.info/sct","code":"123456","display":"not a product code"}]},"subject":{"reference":"Patient/MBR-X"}}`), true
 }
 
-// OpenCoverage is inherited from the embedded censusSoR (this test drives orderSource
-// directly, not a full origination handler, so OpenCoverage is never invoked).
-
-func TestOrderSource_ProviderDataOrderNoRecognizedCoding(t *testing.T) {
+func TestOrderSource_OrderNoRecognizedCoding(t *testing.T) {
 	g := &Gateway{cfg: Config{OriginationProfile: "provider-data", SoR: &noCodingSoR{newCensusSoR()}}}
-	_, status, msg := g.orderSourceContext(context.Background(), "MBR-X", "Patient/MBR-X", "", "", "", "")
+	_, status, msg := g.orderSourceContext(context.Background(), "MBR-X", "", "")
 	if status != 502 {
-		t.Fatalf("orderSource(provider-data, order w/ no recognized coding) status=%d msg=%q, want 502", status, msg)
+		t.Fatalf("orderSource(order w/ no recognized coding) status=%d msg=%q, want 502", status, msg)
 	}
 	if !strings.Contains(msg, "no recognized product coding") {
 		t.Fatalf("orderSource msg=%q, want it to mention 'no recognized product coding'", msg)
+	}
+}
+
+// The scenario states which product the origination is about; an order the
+// system holds for a DIFFERENT product is refused, not originated as something
+// else. This is what keeps the seeded order and the scenario's own verdict
+// expectations from drifting apart silently.
+func TestOrderSource_RefusesAnOrderForAnotherProduct(t *testing.T) {
+	g := &Gateway{cfg: Config{OriginationProfile: "demo", SoR: newCensusSoR()}}
+	c := DemoOrderCodes()
+	// MBR-D-UC04's open order is the UC-04 product; ask about UC-08's.
+	_, status, msg := g.orderSourceContext(context.Background(), "MBR-D-UC04", c.UC08.System, c.UC08.Code)
+	if status != 502 {
+		t.Fatalf("orderSource(mismatched product) status=%d msg=%q, want 502", status, msg)
+	}
+	if !strings.Contains(msg, c.UC08.Code) || !strings.Contains(msg, c.UC04.Code) {
+		t.Fatalf("orderSource msg=%q, want it to name both the product asked about and the one on file", msg)
+	}
+	// …and the matching product is accepted, so the row above is about the
+	// disagreement and not about the check refusing everything.
+	if _, status, msg = g.orderSourceContext(context.Background(), "MBR-D-UC04", c.UC04.System, c.UC04.Code); status != 0 {
+		t.Fatalf("orderSource(matching product) status=%d msg=%q, want 0", status, msg)
 	}
 }

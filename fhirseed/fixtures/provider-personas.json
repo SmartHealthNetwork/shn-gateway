@@ -12,6 +12,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-PD-UC02"
           }
@@ -155,6 +163,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-PD-UC02-PB"
           }
@@ -298,6 +314,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-PD-UC03"
           }
@@ -575,6 +599,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-PD-UC04"
           }
@@ -739,6 +771,24 @@
       }
     },
     {
+      "fullUrl": "Organization/org-hha-mbrpduc04",
+      "resource": {
+        "resourceType": "Organization",
+        "id": "org-hha-mbrpduc04",
+        "name": "Meridian Home Health Services",
+        "identifier": [
+          {
+            "system": "http://hl7.org/fhir/sid/us-npi",
+            "value": "1528374651"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Organization/org-hha-mbrpduc04"
+      }
+    },
+    {
       "fullUrl": "ServiceRequest/sr-mbrpduc04-g0151",
       "resource": {
         "resourceType": "ServiceRequest",
@@ -763,6 +813,11 @@
         "subject": {
           "reference": "Patient/MBR-PD-UC04"
         },
+        "performer": [
+          {
+            "reference": "Organization/org-hha-mbrpduc04"
+          }
+        ],
         "reasonCode": [
           {
             "coding": [
@@ -806,6 +861,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-OX"
           }
@@ -1083,6 +1146,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-PD-UC08"
           }
@@ -1197,6 +1268,24 @@
       }
     },
     {
+      "fullUrl": "Organization/org-inf-mbrpduc08",
+      "resource": {
+        "resourceType": "Organization",
+        "id": "org-inf-mbrpduc08",
+        "name": "Riverbend Infusion Pharmacy",
+        "identifier": [
+          {
+            "system": "http://hl7.org/fhir/sid/us-npi",
+            "value": "1073829106"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Organization/org-inf-mbrpduc08"
+      }
+    },
+    {
       "fullUrl": "ServiceRequest/sr-mbrpduc08-j3490",
       "resource": {
         "resourceType": "ServiceRequest",
@@ -1221,6 +1310,11 @@
         "subject": {
           "reference": "Patient/MBR-PD-UC08"
         },
+        "performer": [
+          {
+            "reference": "Organization/org-inf-mbrpduc08"
+          }
+        ],
         "reasonCode": [
           {
             "coding": [
@@ -1256,6 +1350,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-PD-UC06"
           }
@@ -1420,6 +1522,24 @@
       }
     },
     {
+      "fullUrl": "Organization/org-hha-mbrpduc06",
+      "resource": {
+        "resourceType": "Organization",
+        "id": "org-hha-mbrpduc06",
+        "name": "Lakeshore Home Health Partners",
+        "identifier": [
+          {
+            "system": "http://hl7.org/fhir/sid/us-npi",
+            "value": "1851607984"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Organization/org-hha-mbrpduc06"
+      }
+    },
+    {
       "fullUrl": "ServiceRequest/sr-mbrpduc06-g0151",
       "resource": {
         "resourceType": "ServiceRequest",
@@ -1444,6 +1564,11 @@
         "subject": {
           "reference": "Patient/MBR-PD-UC06"
         },
+        "performer": [
+          {
+            "reference": "Organization/org-hha-mbrpduc06"
+          }
+        ],
         "reasonCode": [
           {
             "coding": [
@@ -1487,6 +1612,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-PD-UC01"
           }
@@ -1563,6 +1696,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-PD-UC01-NC"
           }
@@ -1639,6 +1780,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-PD-UC07"
           }
@@ -1803,6 +1952,24 @@
       }
     },
     {
+      "fullUrl": "Organization/org-hha-mbrpduc07",
+      "resource": {
+        "resourceType": "Organization",
+        "id": "org-hha-mbrpduc07",
+        "name": "Lakeshore Home Health Partners",
+        "identifier": [
+          {
+            "system": "http://hl7.org/fhir/sid/us-npi",
+            "value": "1962718095"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Organization/org-hha-mbrpduc07"
+      }
+    },
+    {
       "fullUrl": "ServiceRequest/sr-mbrpduc07-g0151",
       "resource": {
         "resourceType": "ServiceRequest",
@@ -1827,6 +1994,11 @@
         "subject": {
           "reference": "Patient/MBR-PD-UC07"
         },
+        "performer": [
+          {
+            "reference": "Organization/org-hha-mbrpduc07"
+          }
+        ],
         "reasonCode": [
           {
             "coding": [
@@ -1870,6 +2042,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-PD-UC05"
           }
@@ -2034,6 +2214,24 @@
       }
     },
     {
+      "fullUrl": "Organization/org-hha-mbrpduc05",
+      "resource": {
+        "resourceType": "Organization",
+        "id": "org-hha-mbrpduc05",
+        "name": "Cascade Home Health Services",
+        "identifier": [
+          {
+            "system": "http://hl7.org/fhir/sid/us-npi",
+            "value": "1639485762"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Organization/org-hha-mbrpduc05"
+      }
+    },
+    {
       "fullUrl": "ServiceRequest/sr-mbrpduc05-g0151",
       "resource": {
         "resourceType": "ServiceRequest",
@@ -2058,6 +2256,11 @@
         "subject": {
           "reference": "Patient/MBR-PD-UC05"
         },
+        "performer": [
+          {
+            "reference": "Organization/org-hha-mbrpduc05"
+          }
+        ],
         "reasonCode": [
           {
             "coding": [
@@ -2101,6 +2304,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-PD-UC05-NC"
           }
@@ -2265,6 +2476,24 @@
       }
     },
     {
+      "fullUrl": "Organization/org-hha-mbrpduc05nc",
+      "resource": {
+        "resourceType": "Organization",
+        "id": "org-hha-mbrpduc05nc",
+        "name": "Cascade Home Health Services",
+        "identifier": [
+          {
+            "system": "http://hl7.org/fhir/sid/us-npi",
+            "value": "1740596873"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Organization/org-hha-mbrpduc05nc"
+      }
+    },
+    {
       "fullUrl": "ServiceRequest/sr-mbrpduc05nc-g0151",
       "resource": {
         "resourceType": "ServiceRequest",
@@ -2289,6 +2518,11 @@
         "subject": {
           "reference": "Patient/MBR-PD-UC05-NC"
         },
+        "performer": [
+          {
+            "reference": "Organization/org-hha-mbrpduc05nc"
+          }
+        ],
         "reasonCode": [
           {
             "coding": [
@@ -2318,6 +2552,326 @@
       "request": {
         "method": "PUT",
         "url": "ServiceRequest/sr-mbrpduc05nc-g0151"
+      }
+    },
+    {
+      "fullUrl": "Patient/MBR-PD-PEND",
+      "resource": {
+        "resourceType": "Patient",
+        "id": "MBR-PD-PEND",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:member",
+            "value": "MBR-PD-PEND"
+          }
+        ],
+        "name": [
+          {
+            "family": "Thorvaldsen-StationaryOxygen"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1951-10-06"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/MBR-PD-PEND"
+      }
+    },
+    {
+      "fullUrl": "Coverage/cov-mbrpdpend",
+      "resource": {
+        "resourceType": "Coverage",
+        "id": "cov-mbrpdpend",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage"
+          ]
+        },
+        "status": "active",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:coverage",
+            "value": "MBR-PD-PEND"
+          }
+        ],
+        "beneficiary": {
+          "reference": "Patient/MBR-PD-PEND"
+        },
+        "relationship": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+              "code": "self"
+            }
+          ]
+        },
+        "payor": [
+          {
+            "reference": "Organization/org-cms-payer"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Coverage/cov-mbrpdpend"
+      }
+    },
+    {
+      "fullUrl": "Condition/cond-mbrpdpend-j449",
+      "resource": {
+        "resourceType": "Condition",
+        "id": "cond-mbrpdpend-j449",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-condition-problems-health-concerns"
+          ]
+        },
+        "clinicalStatus": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/condition-clinical",
+              "code": "active",
+              "display": "Active"
+            }
+          ]
+        },
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/condition-category",
+                "code": "problem-list-item",
+                "display": "Problem List Item"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://hl7.org/fhir/sid/icd-10-cm",
+              "code": "J44.9",
+              "display": "Chronic obstructive pulmonary disease, unspecified"
+            }
+          ],
+          "text": "Chronic obstructive pulmonary disease, unspecified"
+        },
+        "subject": {
+          "reference": "Patient/MBR-PD-PEND"
+        }
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Condition/cond-mbrpdpend-j449"
+      }
+    },
+    {
+      "fullUrl": "Observation/obs-mbrpdpend-pulseox",
+      "resource": {
+        "resourceType": "Observation",
+        "id": "obs-mbrpdpend-pulseox",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-clinical-result"
+          ]
+        },
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "exam",
+                "display": "Exam"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://loinc.org",
+              "code": "59408-5",
+              "display": "Oxygen saturation in Arterial blood by Pulse oximetry"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/MBR-PD-PEND"
+        },
+        "effectiveDateTime": "2026-06-28T12:00:00Z",
+        "valueQuantity": {
+          "value": 85,
+          "unit": "%",
+          "system": "http://unitsofmeasure.org",
+          "code": "%"
+        }
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Observation/obs-mbrpdpend-pulseox"
+      }
+    },
+    {
+      "fullUrl": "Observation/obs-mbrpdpend-pao2",
+      "resource": {
+        "resourceType": "Observation",
+        "id": "obs-mbrpdpend-pao2",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-clinical-result"
+          ]
+        },
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "exam",
+                "display": "Exam"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://loinc.org",
+              "code": "2703-7",
+              "display": "Oxygen [Partial pressure] in Arterial blood"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/MBR-PD-PEND"
+        },
+        "effectiveDateTime": "2026-06-28T12:00:00Z",
+        "valueQuantity": {
+          "value": 52,
+          "unit": "mm[Hg]",
+          "system": "http://unitsofmeasure.org",
+          "code": "mm[Hg]"
+        }
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Observation/obs-mbrpdpend-pao2"
+      }
+    },
+    {
+      "fullUrl": "Practitioner/prac-mbrpdpend",
+      "resource": {
+        "resourceType": "Practitioner",
+        "id": "prac-mbrpdpend",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-practitioner"
+          ]
+        },
+        "identifier": [
+          {
+            "system": "http://hl7.org/fhir/sid/us-npi",
+            "value": "1644556676"
+          }
+        ],
+        "name": [
+          {
+            "family": "Lindqvist-Pulmonology"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Practitioner/prac-mbrpdpend"
+      }
+    },
+    {
+      "fullUrl": "Organization/org-dme-mbrpdpend",
+      "resource": {
+        "resourceType": "Organization",
+        "id": "org-dme-mbrpdpend",
+        "name": "Nordstrand Respiratory Supply",
+        "identifier": [
+          {
+            "system": "http://hl7.org/fhir/sid/us-npi",
+            "value": "1447896832"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Organization/org-dme-mbrpdpend"
+      }
+    },
+    {
+      "fullUrl": "DeviceRequest/dr-mbrpdpend-e0424",
+      "resource": {
+        "resourceType": "DeviceRequest",
+        "id": "dr-mbrpdpend-e0424",
+        "status": "active",
+        "intent": "order",
+        "codeCodeableConcept": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "E0424",
+              "display": "Stationary Oxygen System"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/MBR-PD-PEND"
+        },
+        "requester": {
+          "reference": "Practitioner/prac-mbrpdpend"
+        },
+        "performer": {
+          "reference": "Organization/org-dme-mbrpdpend"
+        },
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "J44.9",
+                "display": "Chronic obstructive pulmonary disease, unspecified"
+              }
+            ],
+            "text": "Chronic obstructive pulmonary disease, unspecified"
+          }
+        ],
+        "reasonReference": [
+          {
+            "reference": "Condition/cond-mbrpdpend-j449"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "DeviceRequest/dr-mbrpdpend-e0424"
       }
     }
   ],

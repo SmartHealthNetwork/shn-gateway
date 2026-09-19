@@ -24,6 +24,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sync"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -51,6 +53,20 @@ func notFound(method string, err error) bool {
 type PgStore struct {
 	pool     *pgxpool.Pool
 	holderID string
+	// now is the store's own clock: it stamps every ledger transition and cuts the
+	// retention window. Injected so the retention rows are deterministic; never
+	// reassigned outside tests.
+	now func() time.Time
+	// mu guards lastPurge only (the lazy retention sweep's throttle). Every other
+	// field is read-only after construction, and the ledger's mutual exclusion is
+	// the database's row lock, not this mutex.
+	mu        sync.Mutex
+	lastPurge time.Time
+	// lastContinuationPurge throttles the continuation store's own lazy sweep.
+	// It is separate from lastPurge because the two stores are swept by
+	// different call paths: one throttle would let a busy ledger starve the
+	// continuation sweep, and vice versa.
+	lastContinuationPurge time.Time
 }
 
 // NewPgStore runs EnsureSchema (the fail-fast: pgxpool.New is lazy and does not
@@ -60,7 +76,7 @@ func NewPgStore(ctx context.Context, pool *pgxpool.Pool, holderID string) (*PgSt
 	if err := EnsureSchema(ctx, pool); err != nil {
 		return nil, fmt.Errorf("pgstore: EnsureSchema: %w", err)
 	}
-	return &PgStore{pool: pool, holderID: holderID}, nil
+	return &PgStore{pool: pool, holderID: holderID, now: time.Now}, nil
 }
 
 // schemaLockKey serializes concurrent EnsureSchema calls (see below). Postgres
@@ -86,6 +102,109 @@ CREATE TABLE IF NOT EXISTS gw_pended_claim (
     correlation_id TEXT NOT NULL,
     state          TEXT NOT NULL,
     PRIMARY KEY (holder_id, subject_pci, correlation_id)
+);
+-- The pend ledger's additive columns (engine.PendLedger). This package has
+-- no migration framework: EnsureSchema runs CREATE … IF NOT EXISTS in one
+-- transaction, so the ledger arrives as ALTER … ADD COLUMN IF NOT EXISTS, which is
+-- idempotent and leaves an already-upgraded database untouched. The three ledger
+-- facts are nullable: a row written before the upgrade (or by the Store's keyless
+-- pend) simply has no decision and no requester yet.
+--
+-- last_transition_at is the store's OWN clock, and retention counts from it, so a
+-- payer's ClaimResponse.created can neither shorten nor extend how long a row
+-- survives. It is NOT NULL with a DEFAULT so the ALTER backfills the rows already
+-- in the table with the upgrade instant — an in-flight pend then keeps its full
+-- retention period from the upgrade rather than being purged or kept forever.
+ALTER TABLE gw_pended_claim ADD COLUMN IF NOT EXISTS outcome TEXT;
+ALTER TABLE gw_pended_claim ADD COLUMN IF NOT EXISTS decided_at TIMESTAMPTZ;
+ALTER TABLE gw_pended_claim ADD COLUMN IF NOT EXISTS requester_holder TEXT;
+ALTER TABLE gw_pended_claim ADD COLUMN IF NOT EXISTS last_transition_at TIMESTAMPTZ NOT NULL DEFAULT now();
+CREATE INDEX IF NOT EXISTS gw_pended_claim_retention ON gw_pended_claim (holder_id, last_transition_at);
+-- gw_pended_claim_key is the ledger's lookup index: one row per (kind, key) a
+-- follow-up can name an authorization by, in the namespace of the requester that
+-- submitted it. Scalar columns only — NO JSON (AI-1 and the ddl_fence): a key is a
+-- kind and a value, and nothing about a claim is stored here that is not one of
+-- those. ON DELETE CASCADE ties the index's lifetime to the row it indexes, so the
+-- retention purge cannot leave an entry pointing at a claim that is gone.
+--
+-- The CHECK is the backstop for engine.MaxPendKeyBytes: the key is payer-supplied
+-- and part of the primary key, so an oversized value would overflow the btree index
+-- row. Callers and every store refuse it first (see gw_replay for the same pairing).
+CREATE TABLE IF NOT EXISTS gw_pended_claim_key (
+    holder_id        TEXT NOT NULL,
+    requester_holder TEXT NOT NULL,
+    kind             TEXT NOT NULL,
+    key              TEXT NOT NULL,
+    subject_pci      TEXT NOT NULL,
+    correlation_id   TEXT NOT NULL,
+    PRIMARY KEY (holder_id, requester_holder, kind, key, subject_pci, correlation_id),
+    FOREIGN KEY (holder_id, subject_pci, correlation_id)
+        REFERENCES gw_pended_claim (holder_id, subject_pci, correlation_id) ON DELETE CASCADE,
+    CHECK (octet_length(key) <= 512)
+);
+-- gw_pa_continuation is the server-held prior-authorization continuation
+-- (engine.ContinuationStore): the metadata a provider gateway's own originator
+-- flows need to inquire again about an authorization a payer pended. Shared
+-- across the holder's replicas, and durable, which is what makes a continuation
+-- answerable from whichever replica the next request lands on.
+--
+-- SCALARS AND TEXT[] ONLY — NO OPAQUE COLUMN (AI-1, ddl_fence). No order bytes
+-- and no QuestionnaireResponse bytes are stored: the order is re-read from the
+-- participant's own system at inquiry time, and the item table below is what
+-- says whether it still matches what was submitted. The two arrays hold
+-- identifier strings ("system|value"), which is what an answer is matched back
+-- by; a JSON column "just for the keys" is exactly what the fence exists to stop.
+--
+-- Retention counts from updated_at, the store's OWN clock, for the same six
+-- months the pend ledger keeps its authorizations: a capability outliving the
+-- authorization it names, or the reverse, is a continuation that resolves to
+-- nothing.
+CREATE TABLE IF NOT EXISTS gw_pa_continuation (
+    holder_id               TEXT NOT NULL,
+    continuation_id         TEXT NOT NULL,
+    payer_holder            TEXT NOT NULL,
+    line                    TEXT NOT NULL,
+    correlation_id          TEXT NOT NULL,
+    subject_pci             TEXT NOT NULL,
+    member_id               TEXT NOT NULL,
+    sor_patient_id          TEXT NOT NULL,
+    order_ref               TEXT NOT NULL,
+    provider_npi            TEXT NOT NULL,
+    claim_identifier        TEXT NOT NULL,
+    claim_type              TEXT NOT NULL,
+    claim_priority          TEXT NOT NULL,
+    item_trace_numbers      TEXT[] NOT NULL DEFAULT '{}',
+    payer_claimresponse_ids TEXT[] NOT NULL DEFAULT '{}',
+    payer_preauth_ref       TEXT NOT NULL,
+    last_outcome            TEXT NOT NULL,
+    created_at              TIMESTAMPTZ NOT NULL,
+    updated_at              TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (holder_id, continuation_id)
+);
+CREATE INDEX IF NOT EXISTS gw_pa_continuation_retention ON gw_pa_continuation (holder_id, updated_at);
+-- gw_pa_continuation_item is the item map: one row per line the submission
+-- carried, with the sequence it was submitted under, the product it asked for,
+-- its date of service and the trace number the payer echoes. It is what a later
+-- inquiry's lines are built from, and what an order changed since submission is
+-- detected against. ON DELETE CASCADE ties its lifetime to the continuation's,
+-- so the retention sweep cannot leave a line behind with nothing to belong to.
+CREATE TABLE IF NOT EXISTS gw_pa_continuation_item (
+    holder_id       TEXT NOT NULL,
+    continuation_id TEXT NOT NULL,
+    sequence        INTEGER NOT NULL,
+    product_code    TEXT NOT NULL,
+    -- The coding's human-readable description, as the participant's own order
+    -- stated it. It identifies nothing; the decision resource renders it.
+    product_display TEXT NOT NULL DEFAULT '',
+    service_date    TEXT NOT NULL,
+    trace_number    TEXT NOT NULL,
+    -- REF-BB and REF-NT: what the payer gave this line, when it gave them. An
+    -- inquiry carries them when they are held, and a payer matches on them.
+    authorization_number            TEXT NOT NULL,
+    administration_reference_number TEXT NOT NULL,
+    PRIMARY KEY (holder_id, continuation_id, sequence),
+    FOREIGN KEY (holder_id, continuation_id)
+        REFERENCES gw_pa_continuation (holder_id, continuation_id) ON DELETE CASCADE
 );
 CREATE TABLE IF NOT EXISTS gw_eob (
     holder_id   TEXT NOT NULL,
@@ -146,7 +265,9 @@ CREATE TABLE IF NOT EXISTS gw_exchange_leg (
 `
 
 // EnsureSchema creates the gateway tables (business Store: gw_auth_number,
-// gw_pended_claim, gw_eob; shared replica state: gw_ingress_key, gw_replay,
+// gw_pended_claim with the pend ledger's gw_pended_claim_key, the continuation
+// store's gw_pa_continuation with gw_pa_continuation_item, gw_eob; shared
+// replica state: gw_ingress_key, gw_replay,
 // gw_exchange, gw_exchange_leg) if absent (idempotent; plain DDL, no
 // CREATE ROLE — least-privilege-friendly). Safe to call repeatedly AND concurrently:
 // `CREATE TABLE/INDEX IF NOT EXISTS` is NOT concurrency-safe on its own (concurrent
@@ -200,48 +321,61 @@ func (s *PgStore) AuthNumber(serviceRequestRef string) (string, bool) {
 
 // --- pended-claim ledger (payer-side state machine) ---
 
+// RecordPendedClaim records a pended claim with no lookup keys — the Store seam's
+// keyless pend. The conditional DO UPDATE is what makes `decided` absorbing here:
+// a claim the ledger already decided is left alone, and only a dated, keyed re-pend
+// (RecordPendedKeyed) can supersede a decision.
 func (s *PgStore) RecordPendedClaim(subjectPCI, correlationID string) error {
-	_, err := s.pool.Exec(context.Background(), `
-INSERT INTO gw_pended_claim (holder_id, subject_pci, correlation_id, state)
-VALUES ($1, $2, $3, 'pended')
-ON CONFLICT (holder_id, subject_pci, correlation_id) DO UPDATE SET state = 'pended'`,
-		s.holderID, subjectPCI, correlationID)
+	s.maybePurge()
+	ctx, cancel := storeCtx()
+	defer cancel()
+	_, err := s.pool.Exec(ctx, `
+INSERT INTO gw_pended_claim (holder_id, subject_pci, correlation_id, state, last_transition_at)
+VALUES ($1, $2, $3, 'pended', $4)
+ON CONFLICT (holder_id, subject_pci, correlation_id) DO UPDATE
+  SET state = 'pended', last_transition_at = $4
+  WHERE gw_pended_claim.state <> 'decided'`,
+		s.holderID, subjectPCI, correlationID, s.now())
 	if err != nil {
 		return fmt.Errorf("pgstore: RecordPendedClaim: %w", err)
 	}
 	return nil
 }
 
-// BeginClaimUpdate is the ATOMIC test-and-set: a single conditional UPDATE. Under
-// READ COMMITTED, concurrent UPDATEs on the same row serialize on the row lock and
-// the loser re-evaluates its WHERE against the post-commit row (now 'in_progress')
-// → 0 rows → false. Exactly one returns true — no app-level lock, correct across
-// connections/replicas. Mirrors the stub's mutex test-and-set.
+// BeginClaimUpdate is the ATOMIC test-and-set. It is BeginClaimUpdateReason with
+// the refusal reason dropped, so the two can never disagree about which states may
+// be claimed.
 func (s *PgStore) BeginClaimUpdate(subjectPCI, correlationID string) (bool, error) {
-	tag, err := s.pool.Exec(context.Background(), `
-UPDATE gw_pended_claim SET state = 'in_progress'
-WHERE holder_id=$1 AND subject_pci=$2 AND correlation_id=$3 AND state='pended'`,
-		s.holderID, subjectPCI, correlationID)
-	if err != nil {
-		return false, fmt.Errorf("pgstore: BeginClaimUpdate: %w", err)
-	}
-	return tag.RowsAffected() == 1, nil
+	ok, _, err := s.BeginClaimUpdateReason(subjectPCI, correlationID)
+	return ok, err
 }
 
+// ReleaseClaimUpdate returns an in-progress claim to pended. Its WHERE is also the
+// "already decided" no-op: a decided row is not in_progress, so a rollback after
+// the decision cannot revert it.
 func (s *PgStore) ReleaseClaimUpdate(subjectPCI, correlationID string) error {
-	_, err := s.pool.Exec(context.Background(), `
-UPDATE gw_pended_claim SET state = 'pended'
+	ctx, cancel := storeCtx()
+	defer cancel()
+	_, err := s.pool.Exec(ctx, `
+UPDATE gw_pended_claim SET state = 'pended', last_transition_at = $4
 WHERE holder_id=$1 AND subject_pci=$2 AND correlation_id=$3 AND state='in_progress'`,
-		s.holderID, subjectPCI, correlationID)
+		s.holderID, subjectPCI, correlationID, s.now())
 	if err != nil {
 		return fmt.Errorf("pgstore: ReleaseClaimUpdate: %w", err)
 	}
 	return nil
 }
 
+// FinalizeClaimUpdate completes the pended→approved transition on the Store-only
+// path by removing the claim (replay protection). A DECIDED row is exempt: the
+// ledger keeps it for its retention period so a follow-up still resolves to the
+// decision.
 func (s *PgStore) FinalizeClaimUpdate(subjectPCI, correlationID string) error {
-	_, err := s.pool.Exec(context.Background(),
-		`DELETE FROM gw_pended_claim WHERE holder_id=$1 AND subject_pci=$2 AND correlation_id=$3`,
+	ctx, cancel := storeCtx()
+	defer cancel()
+	_, err := s.pool.Exec(ctx,
+		`DELETE FROM gw_pended_claim
+WHERE holder_id=$1 AND subject_pci=$2 AND correlation_id=$3 AND state <> 'decided'`,
 		s.holderID, subjectPCI, correlationID)
 	if err != nil {
 		return fmt.Errorf("pgstore: FinalizeClaimUpdate: %w", err)
