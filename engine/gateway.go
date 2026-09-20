@@ -23,6 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/SmartHealthNetwork/shn-gateway/diagnostics"
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
@@ -233,6 +234,11 @@ type Config struct {
 	// supervisor always sets it, prod deployments never have it on unless the
 	// operator opts in via OBSERVER_ADDR.
 	Observer func(ObserverEvent)
+	// Diagnostic is an optional prompt, concurrency-safe, nonblocking sink.
+	// It must reserve bounded memory before retaining event bytes. Nil disables it.
+	Diagnostic func(diagnostics.Event) bool
+	// DiagnosticTraceKey verifies optional private ingress attribution, never authority.
+	DiagnosticTraceKey []byte
 	// LegMetric, when non-nil, receives one outcome string per origination-leg
 	// event at the roundTrip choke point: LegOutcomeRouted when a leg is
 	// attempted, then exactly one terminal outcome — Answered (the counterpart
@@ -827,11 +833,13 @@ func (g *Gateway) Handler() http.Handler {
 		// (which would 502 on a stale patient submit). Internal — provider-gw is not public.
 		mux.HandleFunc("POST /scenario/reset", g.handleScenarioReset)
 		if g.cfg.IngressEnabled {
-			mux.HandleFunc("GET /cds-services", g.handleCDSDiscovery)
-			mux.HandleFunc("POST /cds-services/{id}", g.observeIngress("crd-ingress", g.handleCRDIngress))
-			mux.HandleFunc("POST /Questionnaire/$questionnaire-package", g.observeIngress("dtr-ingress", g.handleDTRIngress))
-			mux.HandleFunc("POST /Claim/$submit", g.observeIngress("pas-ingress", g.handlePASIngress))
-			mux.HandleFunc("POST /Claim/$inquire", g.observeIngress("pas-inquire-ingress", g.handlePASInquireIngress))
+			// Every ingress answer carries X-Correlation-Id (correlationheader.go):
+			// the id the leg is logged under, settled before the handler runs.
+			mux.HandleFunc("GET /cds-services", g.withIngressCorrelation(g.handleCDSDiscovery))
+			mux.HandleFunc("POST /cds-services/{id}", g.observeIngress("crd-ingress", g.withIngressCorrelation(g.handleCRDIngress)))
+			mux.HandleFunc("POST /Questionnaire/$questionnaire-package", g.observeIngress("dtr-ingress", g.withIngressCorrelation(g.handleDTRIngress)))
+			mux.HandleFunc("POST /Claim/$submit", g.observeIngress("pas-ingress", g.withIngressCorrelation(g.handlePASIngress)))
+			mux.HandleFunc("POST /Claim/$inquire", g.observeIngress("pas-inquire-ingress", g.withIngressCorrelation(g.handlePASInquireIngress)))
 			// FR-37: the ingress edge's own CapabilityStatement (per-role
 			// statements — the payer's /metadata precedent at gateway.go:517).
 			mux.HandleFunc("GET /metadata", g.handleIngressMetadata)
@@ -846,7 +854,7 @@ func (g *Gateway) Handler() http.Handler {
 			}
 		}
 	case "payer":
-		mux.HandleFunc("POST /substrate/inbound", g.handleInbound)
+		mux.HandleFunc("POST /substrate/inbound", g.observeInbound(g.handleInbound))
 		// FR-28: CMS-0057 Patient Access API — conformant FHIR search + instance read
 		// over the PDex PA EOB, gated by a patient-access authority token. Distinct
 		// from the sealed substrate legs. FR-37: the CapabilityStatement for this
@@ -855,9 +863,9 @@ func (g *Gateway) Handler() http.Handler {
 		mux.HandleFunc("GET /ExplanationOfBenefit", g.handlePatientAccessEOB)
 		mux.HandleFunc("GET /ExplanationOfBenefit/{id}", g.handlePatientAccessEOBByID)
 	case "facility":
-		mux.HandleFunc("POST /substrate/inbound", g.handleInbound)
+		mux.HandleFunc("POST /substrate/inbound", g.observeInbound(g.handleInbound))
 	case "phg":
-		mux.HandleFunc("POST /substrate/inbound", g.handleInbound)
+		mux.HandleFunc("POST /substrate/inbound", g.observeInbound(g.handleInbound))
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		done := g.operations.begin()
@@ -1075,6 +1083,10 @@ func (g *Gateway) postEnvelope(ctx context.Context, url string, body []byte, ass
 		return shnsdk.Envelope{}, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if g.cfg.Diagnostic != nil {
+			headers, complete := diagnosticHeaders(resp.Header)
+			g.diagnosticEvent(ctx, diagnostics.Event{Kind: "leg.failed", Status: resp.StatusCode, Body: respBody, BodyComplete: len(respBody) < shnsdk.MaxResponseBytes, Headers: headers, HeadersComplete: complete, Detail: "Hub response"})
+		}
 		return shnsdk.Envelope{}, fmt.Errorf("gateway: hub returned %d: %s", resp.StatusCode, string(respBody))
 	}
 	return shnsdk.DecodeEnvelope(respBody)
@@ -1090,7 +1102,13 @@ func (g *Gateway) postEnvelope(ctx context.Context, url string, body []byte, ass
 // anything is observed or sent; a refused payload is returned as an error that
 // isOwnershipFault recognizes (the caller answers a 500 local fault).
 func (g *Gateway) roundTrip(ctx context.Context, r *http.Request, recipient, reqFrame, respFrame, op, respOp, txType, scope, pci, correlationID, custodian string, content Content) ([]byte, error) {
+	if g.cfg.Diagnostic != nil {
+		ctx = context.WithValue(ctx, diagnosticLegKey{}, &diagnosticLeg{sender: g.cfg.HolderID, recipient: recipient, correlation: correlationID})
+	}
 	requestBytes, err := g.admit(content.Payload, requestKey(txType, content.Carried))
+	if err != nil {
+		g.diagnosticStage(ctx, "relay.ownership-refused", txType, nil, 500, err.Error())
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1100,11 +1118,13 @@ func (g *Gateway) roundTrip(ctx context.Context, r *http.Request, recipient, req
 		AuthorityFrame: reqFrame, Op: op, Payload: json.RawMessage(requestBytes),
 		Route: content.Route,
 	})
+	g.diagnosticStage(ctx, "leg.originated", txType, requestBytes, 0, "")
 	g.legMetric(LegOutcomeRouted)
 	respPayload, err := g.roundTripInner(ctx, r, recipient, reqFrame, respFrame, op, respOp, txType, scope, pci, correlationID, custodian, content)
 	if err != nil {
 		var re *RelayError
 		if errors.As(err, &re) {
+			g.diagnosticStage(ctx, "leg.response", txType, re.Body, re.Status, "")
 			// The recipient answered non-2xx — observed as a response (with status), not a failure.
 			g.observe(ObserverEvent{
 				Kind: "leg.response", Direction: "originate", LegType: txType,
@@ -1122,6 +1142,7 @@ func (g *Gateway) roundTrip(ctx context.Context, r *http.Request, recipient, req
 		case errors.Is(err, errHubUnreachable):
 			outcome = LegOutcomeUnreachable
 		}
+		g.diagnosticStage(ctx, "leg.failed", txType, nil, 0, err.Error())
 		g.legMetric(outcome)
 		g.observe(ObserverEvent{
 			Kind: "leg.failed", Direction: "originate", LegType: txType,
@@ -1134,6 +1155,7 @@ func (g *Gateway) roundTrip(ctx context.Context, r *http.Request, recipient, req
 		CorrelationID: correlationID, Counterpart: recipient,
 		AuthorityFrame: respFrame, Op: respOp, Payload: json.RawMessage(respPayload),
 	})
+	g.diagnosticStage(ctx, "leg.response", txType, respPayload, 200, "")
 	g.legMetric(LegOutcomeAnswered)
 	return respPayload, nil
 }
@@ -1223,6 +1245,10 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 		return nil, fmt.Errorf("seal failed")
 	}
 
+	if leg, ok := ctx.Value(diagnosticLegKey{}).(*diagnosticLeg); ok {
+		leg.hash = sha256hex(env.Ciphertext)
+	}
+	g.diagnostic(diagnostics.Event{Kind: "leg.sealed", CallID: diagnostics.CallID(ctx), RequestFingerprint: diagnostics.IngressFingerprint(ctx), RequestCiphertextHash: sha256hex(env.Ciphertext), Sender: g.cfg.HolderID, Recipient: recipient, CorrelationID: correlationID, LegType: txType, ContractLine: content.ProfileID, Body: payload, BodyComplete: true})
 	tok, err := g.authorize(r, reqFrame, op, pci, correlationID, custodian, sha256hex(env.Ciphertext))
 	if err != nil {
 		// Preserve a genuine authority DENIAL as the typed sentinel (UC-05's
@@ -2403,6 +2429,7 @@ func (g *Gateway) buildResponseLeg(r *http.Request, respFrame, respOp, txType, i
 		Timestamp:       g.cfg.Clock().Format(time.RFC3339),
 		CorrelationID:   inboundCorrID,
 	}
+	g.diagnosticStage(r.Context(), "recipient.response", txType, payload, 0, "")
 	respEnv, err := shnsdk.Seal(respMeta, payload, requesterHolder.EncPub)
 	if err != nil {
 		return nil, http.StatusInternalServerError, "seal failed"
@@ -2608,7 +2635,11 @@ func (g *Gateway) respondLegError(w http.ResponseWriter, r *http.Request, respFr
 		}
 		return
 	}
-	ct := "application/fhir+json"
+	// Preserve the participant's media type with its error bytes.
+	ct := p.ContentType()
+	if ct == "" {
+		ct = "application/fhir+json"
+	}
 	if ownRefusal {
 		ct = p.ContentType()
 	} else if p.Ownership() == 0 || p.Len() == 0 {

@@ -47,10 +47,11 @@ type Config struct {
 	// authorization servers that cannot issue asymmetric credentials. Mutually
 	// exclusive with Key/Alg/KID; private_key_jwt is the preferred mode.
 	ClientSecret string
-	AssertionTTL time.Duration    // default 5m
-	RefreshSkew  time.Duration    // re-mint when within this of expiry; default 60s
-	Clock        func() time.Time // default time.Now
-	HTTPClient   *http.Client     // default a 10s-timeout client
+	AssertionTTL time.Duration     // default 5m
+	RefreshSkew  time.Duration     // re-mint when within this of expiry; default 60s
+	Clock        func() time.Time  // default time.Now
+	HTTPClient   *http.Client      // token acquisition; default a 10s-timeout client
+	Transport    http.RoundTripper // authorized operations, beneath bearer injection; default http.DefaultTransport
 	// Observer, when set, receives one redaction-safe note per TokenSource the
 	// first time the authorization server departs from RFC 6749 in a way the
 	// client absorbs (today: expires_in sent as a JSON string). The departure is

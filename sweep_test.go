@@ -2,9 +2,11 @@ package shngateway_test
 
 import (
 	"bytes"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -93,7 +95,16 @@ const internalTokenPattern = `S5b|Task[ -][0-9]|(?i:\btask-[0-9])|per the plan|M
 	// file's own rejection-test fixture (verified before adding), so it costs nothing to add
 	// narrowly; widen to another specific ruling number only when THAT number is confirmed
 	// collision-free the same way.
-	`|\bR9\b`
+	`|\bR9\b` +
+	// Review-round shorthand without the hyphen \bround-[0-9]\b needs: four public-tree
+	// test files were NAMED review_round{1,2,3}_test.go and *_review_test.go, spellings
+	// the hyphenated arm cannot see, and the same shorthand appears in content
+	// ("review_round2", "round3 finding"). No word boundary in front: an underscore is
+	// a word character, so \bround would miss review_round1. A digit must follow, so
+	// RoundTrip, roundTripFunc and "one round trip per amendment, 2 legs" do not match
+	// (boundary rows below). File names are swept too: TestNoInternalTokens matches
+	// every file's module-relative path as well as its content.
+	`|(?i:round[0-9])`
 
 // sweepSkipFiles are the two module-root test files excluded from the sweep.
 //
@@ -234,6 +245,11 @@ func TestInternalTokenPattern_DesignDocRefForms(t *testing.T) {
 		// Found by the de-wrapped, case-insensitive scan that also exposed the
 		// rows above, which is why that scan, not this pattern, is the net.
 		`// fix-round finding 1 (task-3 review) — routeInfoFor must render`,
+		// Review-round shorthand without a hyphen: the spellings four public-tree test
+		// files carried in their NAMES, and the same shorthand in content.
+		`gateway/diagnostics/review_round1_test.go`,
+		`review-round2_test.go`,
+		`// folded here from round3 of the diagnostics review`,
 		`// pins the fix for IMPORTANT-1 (task-18 review): the credential check`,
 		// Punctuation between the word and the date defeats a `spec ` + digits
 		// spelling. This one also sat in v0.36.1. Same lesson a third time:
@@ -319,6 +335,11 @@ func TestInternalTokenPattern_DesignDocRefForms(t *testing.T) {
 		// word "round" followed later by a digit, with no "fix" immediately before it,
 		// must survive.
 		`// the pend-resolution timer runs one round trip per amendment, 2 legs total`,
+		// Boundary for (?i:round[0-9]): the transport vocabulary this tree uses on every
+		// edge — no digit follows "round" in any of it.
+		`func (a asyncBodyTransport) RoundTrip(r *http.Request) (*http.Response, error) {`,
+		`	base := roundTripFunc(func(got *http.Request) (*http.Response, error) {`,
+		`// a background retry every 2 seconds, one round trip each`,
 		// Boundary for "ruling <date>": a bare date with no "ruling" immediately before
 		// it is ordinary prose about a published spec, not a design-note citation.
 		`// last reviewed 2026-08-24 against the published IG`,
@@ -361,8 +382,55 @@ func TestInternalTokenPattern_DesignDocRefForms(t *testing.T) {
 // file:line for every non-allowlisted match.
 func TestNoInternalTokens(t *testing.T) {
 	re := regexp.MustCompile(internalTokenPattern)
+	err := sweepTree(".", re, func(rel string, line int, token, excerpt string) {
+		if line == 0 {
+			t.Errorf("%s: internal-vocabulary token %q in a FILE NAME leaks into the published module — a name is published as surely as its contents; name the file for what it tests.", rel, token)
+			return
+		}
+		t.Errorf("%s:%d: internal-vocabulary token %q leaks into the published module — reword to public vocabulary (published spec ids FR-G*/AI-G*/OWD-G*/UC-0X are fine), or add the line to sweepAllowlist with a WHY comment.\n\t%s",
+			rel, line, token, excerpt)
+	})
+	if err != nil {
+		t.Fatalf("walk module tree: %v", err)
+	}
+}
 
-	err := filepath.WalkDir(".", func(path string, d fs.DirEntry, err error) error {
+// TestNoInternalTokens_FileNames is the rejection row for the file-name pass: a
+// seeded tree holding a file named the way four public-tree test files were
+// named goes red on the NAME alone, with clean content beside a clean sibling.
+// Without it the pass could match nothing and read exactly like a clean tree.
+func TestNoInternalTokens_FileNames(t *testing.T) {
+	root := t.TempDir()
+	for name, content := range map[string]string{
+		"diagnostics/review_round1_test.go": "package diagnostics\n",
+		"engine/observer_test.go":           "package engine\n",
+	} {
+		path := filepath.Join(root, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var hits []string
+	err := sweepTree(root, regexp.MustCompile(internalTokenPattern), func(rel string, line int, token, _ string) {
+		hits = append(hits, fmt.Sprintf("%s:%d:%s", rel, line, token))
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"diagnostics/review_round1_test.go:0:round1"}; !reflect.DeepEqual(hits, want) {
+		t.Fatalf("file-name pass reported %v, want exactly %v (the bad NAME, nothing else)", hits, want)
+	}
+}
+
+// sweepTree walks root and reports every internal-vocabulary match: in each
+// file's root-relative slash path (line 0 — a file name is published as surely
+// as its contents) and in its content, line by line and over joined comment
+// runs. Skip and allowlist entries are keyed by that same relative path.
+func sweepTree(root string, re *regexp.Regexp, report func(rel string, line int, token, excerpt string)) error {
+	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -373,9 +441,16 @@ func TestNoInternalTokens(t *testing.T) {
 			}
 			return nil
 		}
-		rel := filepath.ToSlash(path)
+		relPath, rerr := filepath.Rel(root, path)
+		if rerr != nil {
+			return rerr
+		}
+		rel := filepath.ToSlash(relPath)
 		if sweepSkipFiles[rel] {
 			return nil
+		}
+		for _, m := range dedupe(re.FindAllString(rel, -1)) {
+			report(rel, 0, m, rel)
 		}
 		info, ierr := d.Info()
 		if ierr != nil {
@@ -407,15 +482,11 @@ func TestNoInternalTokens(t *testing.T) {
 					continue
 				}
 				reported[reportKey{u.start, m}] = true
-				t.Errorf("%s:%d: internal-vocabulary token %q leaks into the published module — reword to public vocabulary (published spec ids FR-G*/AI-G*/OWD-G*/UC-0X are fine), or add the line to sweepAllowlist with a WHY comment.\n\t%s",
-					rel, u.start, m, sweepExcerpt(u.text, m))
+				report(rel, u.start, m, sweepExcerpt(u.text, m))
 			}
 		}
 		return nil
 	})
-	if err != nil {
-		t.Fatalf("walk module tree: %v", err)
-	}
 }
 
 // repoRootReachPattern catches the ONE failure class that has now twice made

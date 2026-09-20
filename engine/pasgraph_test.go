@@ -174,8 +174,15 @@ func TestPASGraphReferenceScopes(t *testing.T) {
 			cr["patient"] = map[string]any{"reference": "urn:uuid:10000000-0000-4000-8000-000000000001"}
 			b["entry"].([]any)[2].(map[string]any)["resource"].(map[string]any)["patient"] = cr["patient"]
 		}},
-		{"URN relative undefined", false, func(b, cr, p map[string]any) {
+		// FHIR R4 defines no base for a relative reference under a URN-identified
+		// entry; the rule reads it as the one entry whose RESTful identity ends in
+		// it, and nothing when that is not unique.
+		{"URN relative resolves by unique identity", true, func(b, cr, p map[string]any) {
 			b["entry"].([]any)[0].(map[string]any)["fullUrl"] = "urn:uuid:10000000-0000-4000-8000-000000000001"
+		}},
+		{"URN relative ambiguous", false, func(b, cr, p map[string]any) {
+			b["entry"].([]any)[0].(map[string]any)["fullUrl"] = "urn:uuid:10000000-0000-4000-8000-000000000001"
+			b["entry"] = append(b["entry"].([]any), map[string]any{"fullUrl": "https://other.test/fhir/Patient/p", "resource": map[string]any{"resourceType": "Patient", "id": "p"}})
 		}},
 		{"contained", true, func(b, cr, p map[string]any) {
 			p["contained"] = []any{map[string]any{"resourceType": "Organization", "id": "local"}}
@@ -301,6 +308,155 @@ func TestPASGraphResourceAndIdentityGuards(t *testing.T) {
 			raw, _ := json.Marshal(b)
 			if err := validatePASBundleGraph(raw); err == nil {
 				t.Fatal("accepted malformed identity")
+			}
+		})
+	}
+}
+
+// TestPASGraphIDLessEntryIdentity: an entry whose fullUrl is a URN is identified by
+// that URN and need not carry a resource id (FHIR R4 Bundle: a resource with no id
+// is placed under a urn:uuid fullUrl). The same resource under an http(s) fullUrl
+// must carry the id its RESTful address ends in. A stated-but-unusable id is
+// refused under either. Measured 2026-09-20: a hosted payer platform answers
+// Claim/$submit with its ClaimResponse under urn:uuid and no id, which the rule
+// refused as malformed and the requester received as 502.
+func TestPASGraphIDLessEntryIdentity(t *testing.T) {
+	const urn = "urn:uuid:10000000-0000-4000-8000-000000000001"
+	rows := []struct {
+		name   string
+		mutate func(b map[string]any)
+		accept bool
+		names  string // what the refusal must name, when refused
+	}{
+		{"id-less ClaimResponse under urn:uuid", func(b map[string]any) {
+			e := b["entry"].([]any)[0].(map[string]any)
+			e["fullUrl"] = urn
+			r := e["resource"].(map[string]any)
+			delete(r, "id")
+			r["patient"] = map[string]any{"reference": "https://payer.test/fhir/Patient/p"}
+			r["request"] = map[string]any{"reference": "https://payer.test/fhir/Claim/c"}
+		}, true, ""},
+		{"id-less Patient under urn:uuid named by its fullUrl", func(b map[string]any) {
+			e := b["entry"].([]any)[1].(map[string]any)
+			e["fullUrl"] = urn
+			r := e["resource"].(map[string]any)
+			delete(r, "id")
+			r["link"] = []any{map[string]any{"other": map[string]any{"reference": urn}}}
+			b["entry"].([]any)[0].(map[string]any)["resource"].(map[string]any)["patient"] = map[string]any{"reference": urn}
+			b["entry"].([]any)[2].(map[string]any)["resource"].(map[string]any)["patient"] = map[string]any{"reference": urn}
+		}, true, ""},
+		{"id-less ClaimResponse under https", func(b map[string]any) {
+			delete(b["entry"].([]any)[0].(map[string]any)["resource"].(map[string]any), "id")
+		}, false, "without a usable resourceType and id"},
+		{"empty id under urn:uuid", func(b map[string]any) {
+			e := b["entry"].([]any)[0].(map[string]any)
+			e["fullUrl"] = urn
+			r := e["resource"].(map[string]any)
+			r["id"] = ""
+			r["patient"] = map[string]any{"reference": "https://payer.test/fhir/Patient/p"}
+			r["request"] = map[string]any{"reference": "https://payer.test/fhir/Claim/c"}
+		}, false, "without a usable resourceType and id"},
+		// A [type]/[id] reference under a URN-identified entry has no RESTful base;
+		// it resolves to the one entry whose RESTful identity ends in it, and to
+		// nothing when none or more than one does.
+		{"relative references under urn:uuid resolve to the one entry ending in them", func(b map[string]any) {
+			e := b["entry"].([]any)[0].(map[string]any)
+			e["fullUrl"] = urn
+			delete(e["resource"].(map[string]any), "id")
+		}, true, ""},
+		{"relative reference under urn:uuid names no entry", func(b map[string]any) {
+			e := b["entry"].([]any)[0].(map[string]any)
+			e["fullUrl"] = urn
+			delete(e["resource"].(map[string]any), "id")
+			e["resource"].(map[string]any)["patient"] = map[string]any{"reference": "Patient/absent"}
+		}, false, "entry 0 (ClaimResponse " + urn + ") /patient references Patient \"Patient/absent\", which is relative under entry 0 (ClaimResponse " + urn + "), which is identified by a URN, and no entry of the Bundle has a RESTful identity ending in Patient/absent"},
+		{"relative reference under urn:uuid names two entries", func(b map[string]any) {
+			e := b["entry"].([]any)[0].(map[string]any)
+			e["fullUrl"] = urn
+			delete(e["resource"].(map[string]any), "id")
+			b["entry"] = append(b["entry"].([]any), map[string]any{"fullUrl": "https://other.test/fhir/Patient/p", "resource": map[string]any{"resourceType": "Patient", "id": "p"}})
+		}, false, "which is relative under entry 0 (ClaimResponse " + urn + "), which is identified by a URN, and 2 entries have a RESTful identity ending in Patient/p (https://payer.test/fhir/Patient/p, https://other.test/fhir/Patient/p)"},
+		{"relative reference under urn:uuid is not [type]/[id]", func(b map[string]any) {
+			e := b["entry"].([]any)[0].(map[string]any)
+			e["fullUrl"] = urn
+			delete(e["resource"].(map[string]any), "id")
+			e["resource"].(map[string]any)["patient"] = map[string]any{"reference": "fhir/Patient/p"}
+		}, false, "is not of the form [type]/[id]"},
+		{"versioned relative reference under urn:uuid checks the version held", func(b map[string]any) {
+			e := b["entry"].([]any)[0].(map[string]any)
+			e["fullUrl"] = urn
+			delete(e["resource"].(map[string]any), "id")
+			e["resource"].(map[string]any)["patient"] = map[string]any{"reference": "Patient/p/_history/2"}
+		}, false, "names version 2, which entry 1 (Patient/p) does not hold"},
+		{"relative reference under an http(s) owner still resolves against its base only", func(b map[string]any) {
+			b["entry"].([]any)[0].(map[string]any)["fullUrl"] = "https://elsewhere.test/fhir/ClaimResponse/cr"
+		}, false, "resolves to https://elsewhere.test/fhir/Patient/p, which is no entry of the Bundle"},
+		// The suffix match is on whole path segments: a RESTful identity ending in
+		// "RelatedPerson/p" is not one ending in "Person/p", and "Patient/112" is
+		// not "Patient/12".
+		{"type segment boundary", func(b map[string]any) {
+			e := b["entry"].([]any)[0].(map[string]any)
+			e["fullUrl"] = urn
+			delete(e["resource"].(map[string]any), "id")
+			b["entry"] = append(b["entry"].([]any), map[string]any{"fullUrl": "https://payer.test/fhir/RelatedPerson/p", "resource": map[string]any{"resourceType": "RelatedPerson", "id": "p"}})
+			e["resource"].(map[string]any)["patient"] = map[string]any{"reference": "Person/p"}
+		}, false, "no entry of the Bundle has a RESTful identity ending in Person/p"},
+		{"id segment boundary", func(b map[string]any) {
+			e := b["entry"].([]any)[0].(map[string]any)
+			e["fullUrl"] = urn
+			delete(e["resource"].(map[string]any), "id")
+			p := b["entry"].([]any)[1].(map[string]any)
+			p["fullUrl"] = "https://payer.test/fhir/Patient/112"
+			p["resource"].(map[string]any)["id"] = "112"
+			p["resource"].(map[string]any)["link"] = nil
+			b["entry"].([]any)[2].(map[string]any)["resource"].(map[string]any)["patient"] = map[string]any{"reference": "Patient/112"}
+			e["resource"].(map[string]any)["patient"] = map[string]any{"reference": "Patient/12"}
+		}, false, "no entry of the Bundle has a RESTful identity ending in Patient/12"},
+		// A resource type is letters only (FHIR resource names); one carrying a
+		// slash would let "Patient/12" resolve to a "Foo/Patient" at …/Foo/Patient/12.
+		{"resourceType with a slash", func(b map[string]any) {
+			p := b["entry"].([]any)[1].(map[string]any)
+			p["fullUrl"] = "https://payer.test/fhir/Foo/Patient/p"
+			p["resource"].(map[string]any)["resourceType"] = "Foo/Patient"
+		}, false, "without a usable resourceType and id"},
+		{"contained resourceType with a slash", func(b map[string]any) {
+			p := b["entry"].([]any)[1].(map[string]any)["resource"].(map[string]any)
+			p["contained"] = []any{map[string]any{"resourceType": "Foo/Organization", "id": "local"}}
+		}, false, "contains a resource without a unique, usable resourceType and id"},
+		// Any URN identifies an entry the same way; urn:oid is FHIR's other one.
+		{"id-less under urn:oid resolves relative references by identity too", func(b map[string]any) {
+			e := b["entry"].([]any)[0].(map[string]any)
+			e["fullUrl"] = "urn:oid:2.16.840.1.113883.19.5.99999.1"
+			delete(e["resource"].(map[string]any), "id")
+		}, true, ""},
+		// A refusal names at most 16 candidates, then how many more: an answer
+		// with hundreds of colliding identities cannot make each refusal huge.
+		{"ambiguity names at most sixteen candidates", func(b map[string]any) {
+			e := b["entry"].([]any)[0].(map[string]any)
+			e["fullUrl"] = urn
+			delete(e["resource"].(map[string]any), "id")
+			for i := 0; i < 20; i++ {
+				b["entry"] = append(b["entry"].([]any), map[string]any{"fullUrl": fmt.Sprintf("https://h%02d.test/fhir/Patient/p", i), "resource": map[string]any{"resourceType": "Patient", "id": "p"}})
+			}
+		}, false, "21 entries have a RESTful identity ending in Patient/p (https://payer.test/fhir/Patient/p, https://h00.test/fhir/Patient/p, https://h01.test/fhir/Patient/p, https://h02.test/fhir/Patient/p, https://h03.test/fhir/Patient/p, https://h04.test/fhir/Patient/p, https://h05.test/fhir/Patient/p, https://h06.test/fhir/Patient/p, https://h07.test/fhir/Patient/p, https://h08.test/fhir/Patient/p, https://h09.test/fhir/Patient/p, https://h10.test/fhir/Patient/p, https://h11.test/fhir/Patient/p, https://h12.test/fhir/Patient/p, https://h13.test/fhir/Patient/p, https://h14.test/fhir/Patient/p, +5 more)"},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			b := assemblySmallGraph()
+			row.mutate(b)
+			raw, _ := json.Marshal(b)
+			err := validatePASBundleGraph(raw)
+			if row.accept {
+				if err != nil {
+					t.Fatalf("refused: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("accepted")
+			}
+			if !strings.Contains(err.Error(), row.names) {
+				t.Fatalf("refusal %q does not name %q", err, row.names)
 			}
 		})
 	}

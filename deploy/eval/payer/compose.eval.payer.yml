@@ -27,7 +27,10 @@ services:
   br-payer:
     image: br-payer:a8bece4          # built by ../brpayer/build.sh FIRST (image:, not build:)
     environment:
-      PAS_PENDED_RESOLUTION_DELAY_SECONDS: "3"   # test-speed knob only (fast pend resolution)
+      # Test-speed setting: a pended prior authorization resolves to a decision after this
+      # many seconds. A real payer pends for hours or days. Raise it to exercise your
+      # client's "still pended, check again later" path (see ../README.md, "Pended decisions").
+      PAS_PENDED_RESOLUTION_DELAY_SECONDS: "3"
     ports: ["127.0.0.1:8081:8081"]
 
   gateway:

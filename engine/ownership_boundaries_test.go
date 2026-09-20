@@ -64,6 +64,8 @@ var transmitBoundaries = map[string]boundaryRule{
 		reason: "posts the sealed envelope roundTripInner built from its checked request"},
 	// Requests to the participant's own system.
 	"nativeResponder.post": {kind: transmits},
+	"nativeResponder.get": {kind: excluded,
+		reason: "a read of the participant's own ClaimResponse; GET sends no exchange body"},
 	// Answers to the network.
 	"Gateway.buildResponseLeg": {kind: transmits, noSink: true},
 	"writeLeg": {kind: excluded,
@@ -82,6 +84,8 @@ var transmitBoundaries = map[string]boundaryRule{
 	"Gateway.admit": {kind: transmits, noSink: true},
 
 	// Sends that are not exchange messages.
+	"Gateway.observeIngress": {kind: excluded, reason: "transparent HTTP observation delegates to the original ingress handler; no payload is authored or transmitted here"},
+	"Gateway.observeInbound": {kind: excluded, reason: "transparent HTTP observation delegates to the independently checked inbound handler; no payload is authored or transmitted here"},
 	"writeLocalJSON": {kind: excluded,
 		reason: "a successful local API answer (a scenario or console summary built from decoded values)"},
 	"Gateway.authorize": {kind: excluded,
@@ -114,8 +118,6 @@ var transmitBoundaries = map[string]boundaryRule{
 		reason: "the ingress authorization server's SMART configuration"},
 	"Gateway.serveEOB": {kind: excluded,
 		reason: "the payer's own records to a patient app on the token-gated Patient Access API; no network leg"},
-	"recordingWriter.Write": {kind: excluded,
-		reason: "an observation tee around another writer; it is not a source of bytes"},
 }
 
 // writerUsersThatSendNothing are functions of other packages that take a

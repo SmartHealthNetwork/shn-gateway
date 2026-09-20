@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/SmartHealthNetwork/shn-gateway/diagnostics"
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
@@ -123,6 +124,12 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Only verified envelope metadata may provide cross-boundary attribution.
+	if leg, ok := r.Context().Value(diagnosticLegKey{}).(*diagnosticLeg); ok {
+		leg.hash, leg.sender, leg.recipient, leg.correlation = sha256hex(env.Ciphertext), env.Metadata.Sender, env.Metadata.Recipient, env.Metadata.CorrelationID
+	}
+	r = r.WithContext(diagnostics.WithRequestIdentity(r.Context(), sha256hex(env.Ciphertext), env.Metadata.Sender, env.Metadata.Recipient, env.Metadata.CorrelationID))
+	g.diagnosticStage(r.Context(), "leg.verified", env.Metadata.TransactionType, nil, 0, "")
 	// Request framing: decrypt ONCE here, then resolve this leg's
 	// ANSWER LINE before any handler runs — a framed request states the line the
 	// originator built at (honored iff native∩laned, else a legible 422), a bare
@@ -134,6 +141,7 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "decryption failed"})
 		return
 	}
+	g.diagnosticStage(r.Context(), "recipient.opened", env.Metadata.TransactionType, payload, 0, "")
 	body, answerTok, status, msg := g.unframeRequestFrom(env.Metadata.Sender, env.Metadata.TransactionType, payload)
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
@@ -155,6 +163,7 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 	}
 	r = r.WithContext(withRequestFrameOperation(r.Context(), operation))
 
+	g.diagnosticStage(r.Context(), "recipient.request", env.Metadata.TransactionType, body, 0, "")
 	switch env.Metadata.TransactionType {
 	case "coverage-eligibility":
 		g.handleEligibilityInbound(w, r, env, tok, body, answerTok)
@@ -242,7 +251,7 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if pci != tok.Subject {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "token subject does not match request patient"})
+		g.refuseInbound(w, r, legEligibility, env, tok, answerTok, http.StatusForbidden, "token subject does not match request patient", nil)
 		return
 	}
 
@@ -366,8 +375,8 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": errOwnershipFault})
 		return
 	}
-	if status, msg := g.fenceResponseSubject("coverage-eligibility", boundPatientRef, result); status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
+	if status, msg := g.fenceResponseSubject("coverage-eligibility", boundPatientRef, env.Metadata.CorrelationID, result); status != 0 {
+		g.refuseInbound(w, r, legEligibility, env, tok, answerTok, status, msg, nil)
 		return
 	}
 	// Egress $validate, behavior-identical to the pre-seam inline path: validator

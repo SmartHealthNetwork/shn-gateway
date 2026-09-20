@@ -105,6 +105,30 @@ is denied before it ever reaches your payer:
   registered under a public `baseURL` and running before you originate, or the Hub has nothing
   to dial. Run it with the payer evaluation bundle — see [`payer/README.md`](payer/README.md).
 
+## Pended decisions in this bundle
+
+A real payer **pends** a prior-authorization request it cannot decide at once, and the pend
+lasts hours or days — the case the Da Vinci PAS pended model and the CMS turnaround rules are
+built around. The payers this bundle exercises are configured to resolve a pend after a few
+seconds instead: the hosted evaluation payer answers a pended request with a pended response
+and turns it into a decision about three seconds later, and the reference payer in the payer
+bundle does the same (`PAS_PENDED_RESOLUTION_DELAY_SECONDS: "3"` in
+`payer/compose.eval.payer.yml`). That is a test-speed setting, not a model of a payer.
+
+The consequence for your client: if every pend you ever see resolves inside one interaction,
+your "still pended, check again later" path is never exercised, and a client that waits a pend
+out will work here and fail against a real payer. To exercise that path, run the payer bundle
+with the delay raised — a pend is then held for that long, an inquiry for the claim returns the
+pended state until it resolves, and the gateway's operator console shows the exchange pended
+throughout:
+
+```yaml
+# payer/compose.eval.payer.yml — hold a pend for ten minutes instead of three seconds
+PAS_PENDED_RESOLUTION_DELAY_SECONDS: "600"
+```
+
+The hosted evaluation payer's delay is fixed by SHN; to hold a pend, use your own payer bundle.
+
 ## Conformance enforcement in this bundle
 
 The bundle passes `CONFORMANCE_ENFORCEMENT` through from your own environment, and sets

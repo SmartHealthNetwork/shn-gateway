@@ -21,9 +21,13 @@ func NewHTTPClient(cfg Config) (*http.Client, error) {
 		return nil, err
 	}
 	ts := &TokenSource{Config: cfg}
+	base := cfg.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
 	return &http.Client{
 		Timeout:   30 * time.Second,
-		Transport: &bearerTransport{ts: ts, base: http.DefaultTransport},
+		Transport: &bearerTransport{ts: ts, base: base},
 	}, nil
 }
 

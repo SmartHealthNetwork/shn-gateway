@@ -245,6 +245,39 @@ func ValidateNativePASResponseForTest(body []byte) ([]byte, LegResult) {
 	return validateNativePASResponse(body)
 }
 
+// PASResponseSubjectMismatchForTest exposes the subject-binding read of a
+// payer's answer — "" when every subject binds, else why not — to the
+// adversarial rows that pin it on captured bytes.
+func PASResponseSubjectMismatchForTest(body []byte) string {
+	if r := pasResponseSubjectMismatch(body); r != nil {
+		return r.Why
+	}
+	return ""
+}
+
+// RefusePASResponseSubjectsForTest runs the subject-binding fence over a payer's
+// answer exactly as the payer leg does (status 403), including the refusal log
+// record, for the adversarial rows that pin what the record names.
+func RefusePASResponseSubjectsForTest(corrID, leg string, body []byte) (int, string) {
+	return refusePASResponseSubjects(corrID, leg, http.StatusForbidden, body)
+}
+
+// refusePASResponseSubjects is the subject-binding fence over a payer's answer:
+// (0, "") when every subject binds to the ClaimResponse's patient, else the
+// status the caller refuses with and a message naming the cause — and the
+// refusal logged at THIS node, as closure refusals are, because the answer is
+// not relayed and the requester cannot read for itself which subject did not
+// bind.
+func refusePASResponseSubjects(corrID, leg string, status int, body []byte) (int, string) {
+	r := pasResponseSubjectMismatch(body)
+	if r == nil {
+		return 0, ""
+	}
+	msg := "PAS response has inconsistent patient linkage: " + r.Why
+	logPASResponseRefusal(pasResponseRefusal{CorrelationID: corrID, LegType: leg, Status: status, Reason: msg, Subject: r, Entries: pasEntryCount(body), Bytes: len(body)})
+	return status, msg
+}
+
 // validateRelayedPASResponse is validateNativePASResponse for a payer's answer a
 // leg is about to relay: the same check, and when it refuses, the refusal is
 // logged at THIS node with the correlation id before the framed error goes
@@ -261,13 +294,14 @@ func validateRelayedPASResponse(corrID, leg string, body []byte) ([]byte, LegRes
 
 // pasResponseRefusal is the log record of a payer answer this node refused.
 type pasResponseRefusal struct {
-	CorrelationID string           `json:"correlationId"`
-	LegType       string           `json:"legType"`
-	Status        int              `json:"status"`
-	Reason        string           `json:"reason"`
-	Reference     *pasGraphRefusal `json:"reference,omitempty"` // the first reference the graph does not resolve, when that is the reason
-	Entries       int              `json:"entries"`
-	Bytes         int              `json:"bytes"`
+	CorrelationID string             `json:"correlationId"`
+	LegType       string             `json:"legType"`
+	Status        int                `json:"status"`
+	Reason        string             `json:"reason"`
+	Reference     *pasGraphRefusal   `json:"reference,omitempty"` // the first reference the graph does not resolve, when that is the reason
+	Subject       *pasSubjectRefusal `json:"subject,omitempty"`   // the first subject that does not bind, when that is the reason
+	Entries       int                `json:"entries"`
+	Bytes         int                `json:"bytes"`
 }
 
 // logPASResponseRefused writes the refusal record. The payer's bytes are not
@@ -275,21 +309,30 @@ type pasResponseRefusal struct {
 // the payer wrote it, because it is the one fact that settles whether the payer's
 // answer is incomplete or the rule is wrong.
 func logPASResponseRefused(corrID, leg string, lr LegResult, body []byte) {
-	rec := pasResponseRefusal{CorrelationID: corrID, LegType: leg, Status: lr.Status, Reason: lr.Message, Bytes: len(body)}
+	rec := pasResponseRefusal{CorrelationID: corrID, LegType: leg, Status: lr.Status, Reason: lr.Message, Entries: pasEntryCount(body), Bytes: len(body)}
 	if err := validatePASBundleGraph(body); err != nil {
 		rec.Reference = pasGraphRefusalOf(err)
 	}
-	var shape struct {
-		Entry []json.RawMessage `json:"entry"`
-	}
-	if json.Unmarshal(body, &shape) == nil {
-		rec.Entries = len(shape.Entry)
-	}
+	logPASResponseRefusal(rec)
+}
+
+func logPASResponseRefusal(rec pasResponseRefusal) {
 	raw, err := json.Marshal(rec)
 	if err != nil {
 		return
 	}
 	log.Printf("gateway: pas response refused: %s", raw)
+}
+
+// pasEntryCount is how many entries the answer carries, for the refusal record.
+func pasEntryCount(body []byte) int {
+	var shape struct {
+		Entry []json.RawMessage `json:"entry"`
+	}
+	if json.Unmarshal(body, &shape) != nil {
+		return 0
+	}
+	return len(shape.Entry)
 }
 
 // fail502 builds the fail-closed LegResult (502) for a partner answer that does not

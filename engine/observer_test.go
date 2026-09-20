@@ -316,7 +316,7 @@ func TestObserver_ConformanceNeutral(t *testing.T) {
 
 // TestObserver_IngressConformanceNeutral: the same CRD ingress call with
 // observer OFF and ON must produce byte-identical HTTP status + body. The
-// ingress tee (recordingWriter) is the highest-risk code for the on/off
+// transparent ingress capture is the highest-risk code for the on/off
 // byte-identity constraint — TestObserver_ConformanceNeutral
 // only drives the origination path (roundTrip + validator decorator), so this
 // test gives the ingress middleware its own gate. Each run builds its own
@@ -348,15 +348,17 @@ func TestObserver_IngressConformanceNeutral(t *testing.T) {
 	}
 }
 
-// TestRecordingWriter_Unwrap: the ingress tee must expose the underlying
+// TestObserverIngress_FlushPassthrough: the ingress tee must expose the underlying
 // ResponseWriter so http.ResponseController verbs (Flush, deadlines) pass
 // through on the observed path.
-func TestRecordingWriter_Unwrap(t *testing.T) {
+func TestObserverIngress_FlushPassthrough(t *testing.T) {
 	rec := httptest.NewRecorder()
-	rw := &recordingWriter{ResponseWriter: rec, status: http.StatusOK}
-	if err := http.NewResponseController(rw).Flush(); err != nil {
-		t.Fatalf("ResponseController.Flush through the tee: %v", err)
-	}
+	g := &Gateway{cfg: Config{Clock: time.Now, Observer: func(ObserverEvent) {}}}
+	g.observeIngress("test", func(w http.ResponseWriter, r *http.Request) {
+		if err := http.NewResponseController(w).Flush(); err != nil {
+			t.Fatalf("ResponseController.Flush through the tee: %v", err)
+		}
+	})(rec, httptest.NewRequest("POST", "/", nil))
 	if !rec.Flushed {
 		t.Fatal("flush did not reach the underlying writer")
 	}

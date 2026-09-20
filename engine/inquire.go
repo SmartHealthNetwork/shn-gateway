@@ -1055,7 +1055,7 @@ func (g *Gateway) handlePASInquireInbound(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if pci != tok.Subject {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "token subject does not match request patient"})
+		g.refuseInbound(w, r, legPASClaimInquire, env, tok, answerTok, http.StatusForbidden, "token subject does not match request patient", nil)
 		return
 	}
 	boundPatientRef := "Patient/" + facts.member
@@ -1092,7 +1092,7 @@ func (g *Gateway) handlePASInquireInbound(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if bad := validatePASInquiryAnswer(responseFHIR); bad.Status != 0 {
-		writeJSON(w, bad.Status, map[string]string{"error": bad.Message})
+		g.refuseInbound(w, r, legPASClaimInquire, env, tok, answerTok, bad.Status, bad.Message, nil)
 		return
 	}
 	// Whatever the payer's answer departs from, stated before anything is derived
@@ -1104,8 +1104,8 @@ func (g *Gateway) handlePASInquireInbound(w http.ResponseWriter, r *http.Request
 	// gateway's own side-effects, so they are member-fenced and egress-$validated
 	// below exactly as the submit leg's decision EOB is.
 	ledgerCommit, events := g.inquiryLedgerEffect(env.Metadata.Sender, tok.Subject, boundPatientRef, env.Metadata.CorrelationID, facts, responseFHIR, &result)
-	if status, msg := g.fenceResponseSubject("pas-claim-inquire", boundPatientRef, result); status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
+	if status, msg := g.fenceResponseSubject("pas-claim-inquire", boundPatientRef, env.Metadata.CorrelationID, result); status != 0 {
+		g.refuseInbound(w, r, legPASClaimInquire, env, tok, answerTok, status, msg, nil)
 		return
 	}
 	// The direction flips here, as it does on every inbound leg that answers with
@@ -1120,12 +1120,12 @@ func (g *Gateway) handlePASInquireInbound(w http.ResponseWriter, r *http.Request
 	fc.Whose = "own"
 	ctx := withFindingContext(r.Context(), fc)
 	if status, msg := g.validatePASResult(ctx, result, answerTok, "pas-claim-inquire"); status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
+		g.refuseInbound(w, r, legPASClaimInquire, env, tok, answerTok, status, msg, nil)
 		return
 	}
 	for _, b := range result.SideEffectFHIR {
 		if status, msg := g.validateFHIR(ctx, b, "egress", ""); status != 0 {
-			writeJSON(w, status, map[string]string{"error": msg})
+			g.refuseInbound(w, r, legPASClaimInquire, env, tok, answerTok, status, msg, nil)
 			return
 		}
 	}
@@ -1357,7 +1357,7 @@ func (g *Gateway) handlePASInquireIngress(w http.ResponseWriter, r *http.Request
 	const leg = "pas-claim-inquire"
 	scope.leg = leg
 	ex := g.exchanges.Begin(workstreamPA)
-	child := g.cfg.CorrelationGen()
+	child := g.ingressCorrelation(w, r)
 	requestObservation := append([]byte(nil), body...)
 	var responseObservation []byte
 	var observedTarget string

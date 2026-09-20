@@ -15,7 +15,6 @@
 package engine
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -24,6 +23,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/SmartHealthNetwork/shn-gateway/diagnostics"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -94,8 +94,11 @@ type ObserverEvent struct {
 	Op             string          `json:"op,omitempty"`
 	Status         int             `json:"status,omitempty"` // relayed recipient app-status (non-2xx relay)
 	Payload        json.RawMessage `json:"payload,omitempty"`
-	Detail         string          `json:"detail,omitempty"`
-	Route          *RouteInfo      `json:"route,omitempty"`
+	// PayloadIncomplete marks ingress snapshots with unread or discarded bytes.
+	// An absent or partial Payload must not be interpreted as the complete body.
+	PayloadIncomplete bool       `json:"payloadIncomplete,omitempty"`
+	Detail            string     `json:"detail,omitempty"`
+	Route             *RouteInfo `json:"route,omitempty"`
 }
 
 // RouteInfo is the structured routing story attached to leg-scoped observer
@@ -230,57 +233,77 @@ func (v observingValidator) Validate(ctx context.Context, resourceJSON []byte, p
 	return res, err
 }
 
-// observeIngress wraps a Da Vinci ingress handler with observer emissions:
-// ingress.received (the caller's request body) and ingress.responded (HTTP
-// status + response body). The body is re-buffered so handler behavior is
-// unchanged; with a nil Observer the handler runs bare (zero overhead).
-// NOTE: ingress.received fires before the handler's own auth check — the
-// observer is a loopback-local diagnostic surface and seeing rejected calls
-// is part of its job (a 401 is inspector content too).
+// observeIngress tees only bytes consumed by the handler. Authentication and
+// read errors keep their original ordering. Rejected unread bodies remain partial.
 func (g *Gateway) observeIngress(route string, h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if g.cfg.Observer == nil {
+		if g.cfg.Observer == nil && g.cfg.Diagnostic == nil {
 			h(w, r)
 			return
 		}
-		body, err := io.ReadAll(io.LimitReader(r.Body, shnsdk.MaxRequestBytes))
-		if err != nil {
-			// Auth-ordering corollary: this 400 fires BEFORE the wrapped handler's own
-			// auth check, so on the observed path an unreadable body 400s where the
-			// unobserved path would 401 first. A read failure here is a torn connection,
-			// not a conformance surface; the neutrality gates compare complete exchanges.
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "read body failed"})
-			return
+		if g.cfg.Diagnostic != nil {
+			id := ""
+			if len(g.cfg.DiagnosticTraceKey) > 0 {
+				id, _ = diagnostics.VerifyTraceProof(g.cfg.DiagnosticTraceKey, r.Header.Get("X-SHN-Test-Trace"), r.Method, r.URL.RequestURI(), g.cfg.Clock())
+			}
+			r = r.WithContext(diagnostics.WithCallID(r.Context(), id))
 		}
-		r.Body = io.NopCloser(bytes.NewReader(body))
-		g.observe(ObserverEvent{Kind: "ingress.received", Direction: "ingress", LegType: route, Payload: json.RawMessage(body)})
-		rec := &recordingWriter{ResponseWriter: w, status: http.StatusOK}
-		h(rec, r)
-		g.observe(ObserverEvent{Kind: "ingress.responded", Direction: "ingress", LegType: route,
-			Detail: strconv.Itoa(rec.status), Payload: json.RawMessage(rec.buf.Bytes())})
+		var observerPanic any
+		defer func() {
+			if observerPanic != nil {
+				panic(observerPanic)
+			}
+		}()
+		observedHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if g.cfg.Observer == nil {
+				h(w, r)
+				return
+			}
+			body := &observerIngressBody{ReadCloser: r.Body}
+			body.emit = func() {
+				if body.emitted {
+					return
+				}
+				body.emitted = true
+				snapshot := diagnostics.IngressBody(r.Context())
+				fp := diagnostics.IngressFingerprint(r.Context())
+				g.observe(ObserverEvent{Kind: "ingress.received", Direction: "ingress", LegType: route, Payload: json.RawMessage(snapshot), PayloadIncomplete: !fp.Complete || int64(len(snapshot)) != fp.ObservedBytes})
+			}
+			body.complete = func() bool { return diagnostics.IngressFingerprint(r.Context()).Complete }
+			r.Body = body
+			defer body.emit()
+			h(w, r)
+		})
+		diagnostics.ObserveHTTP(observedHandler, func(e diagnostics.Event) bool {
+			e.LegType = route
+			if e.Kind == "ingress" {
+				e.Kind = "ingress.received"
+			} else {
+				e.Kind = "ingress.responded"
+			}
+			observed := e
+			observed.Sender = g.cfg.HolderID
+			if e.Kind == "ingress.received" {
+				observed.Kind = "provider.ingress.request"
+			} else {
+				observed.Kind = "provider.ingress.response"
+			}
+			g.diagnostic(observed)
+			if g.cfg.Observer != nil && e.Kind == "ingress.responded" {
+				detail := strconv.Itoa(e.Status)
+				func() {
+					defer func() {
+						if v := recover(); v != nil && observerPanic == nil {
+							observerPanic = v
+						}
+					}()
+					g.observe(ObserverEvent{Kind: e.Kind, Direction: "ingress", LegType: route, Detail: detail, Payload: json.RawMessage(e.Body), PayloadIncomplete: !e.BodyComplete})
+				}()
+			}
+			return true
+		}, func(*http.Request) diagnostics.HTTPInfo { return diagnostics.HTTPInfo{Kind: "ingress"} }, g.cfg.Clock, shnsdk.MaxRequestBytes, nil).ServeHTTP(w, r)
 	}
 }
-
-// recordingWriter tees status + body while writing through to the client.
-type recordingWriter struct {
-	http.ResponseWriter
-	status int
-	buf    bytes.Buffer
-}
-
-func (rw *recordingWriter) WriteHeader(code int) {
-	rw.status = code
-	rw.ResponseWriter.WriteHeader(code)
-}
-func (rw *recordingWriter) Write(p []byte) (int, error) {
-	rw.buf.Write(p)
-	return rw.ResponseWriter.Write(p)
-}
-
-// Unwrap exposes the underlying writer so http.ResponseController verbs
-// (Flush, Hijack, deadlines) pass through the tee — observing a route must
-// not disable streaming behavior its handler could otherwise use.
-func (rw *recordingWriter) Unwrap() http.ResponseWriter { return rw.ResponseWriter }
 
 // observingSoR decorates the configured SystemOfRecord so EVERY data-source
 // read — whatever the call site — emits one sor.read event. Results and
@@ -486,4 +509,21 @@ func (o observingSoR) ResolveByReferenceContext(ctx context.Context, key string)
 		o.emit("ResolveByReference", sorFoundDetail(found), a)
 	}
 	return a, found, err
+}
+
+// observerIngressBody detects the original handler's completed read. It adds no
+// buffering or read of its own, and never converts a read error into an answer.
+type observerIngressBody struct {
+	io.ReadCloser
+	complete func() bool
+	emit     func()
+	emitted  bool
+}
+
+func (b *observerIngressBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if err == io.EOF || b.complete() {
+		b.emit()
+	}
+	return n, err
 }

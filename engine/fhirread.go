@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -223,30 +224,68 @@ func parseEOBPatient(b []byte) (string, error) {
 // consistentPASResponseSubjects checks the entire retained graph against its own
 // ClaimResponse patient, independently of the authorized request's namespace.
 func consistentPASResponseSubjects(raw []byte) bool {
+	return pasResponseSubjectMismatch(raw) == nil
+}
+
+// pasSubjectRefusal is why a payer answer's subjects do not all bind to its
+// ClaimResponse's patient: which entry and element named which subject, as
+// written, what it resolved to, and what the ClaimResponse's patient is. Why is
+// the cause as the refusal states it; the fields beside it are the same facts
+// for a log record. No payer bytes beyond the reference and the identities.
+type pasSubjectRefusal struct {
+	Owner     string `json:"owner,omitempty"`     // "entry 3 (Coverage urn:uuid:…)"
+	Path      string `json:"path,omitempty"`      // "/beneficiary"
+	Reference string `json:"reference,omitempty"` // the reference, as the payer wrote it
+	Identity  string `json:"identity,omitempty"`  // what it resolves to, when it does
+	Expected  string `json:"expected,omitempty"`  // the ClaimResponse's patient identity
+	Why       string `json:"why"`
+}
+
+func (r *pasSubjectRefusal) Error() string { return r.Why }
+
+// pasResponseSubjectMismatch is why the answer's subjects do not all bind to its
+// ClaimResponse's patient — nil when they do. A graph that does not close is
+// stated with the closure walk's own wording; a ClaimResponse without a patient
+// reference (absent, or an empty string) is refused at that guard.
+func pasResponseSubjectMismatch(raw []byte) *pasSubjectRefusal {
 	g, err := readPASGraph(raw)
-	if err != nil || g.validate() != nil {
-		return false
+	if err == nil {
+		err = g.validate()
 	}
-	patient, ok := g.response.resource["patient"].(map[string]any)
-	if !ok {
-		return false
+	if err != nil {
+		r := &pasSubjectRefusal{Why: "the response graph does not close: " + strings.TrimPrefix(strings.TrimPrefix(err.Error(), "engine: "), "PAS response graph: ")}
+		if gr := pasGraphRefusalOf(err); gr != nil {
+			r.Owner, r.Path, r.Reference = gr.Owner, gr.Path, gr.Reference
+		}
+		return r
 	}
-	ref, ok := patient["reference"].(string)
-	if !ok {
-		return false
+	patient, _ := g.response.resource["patient"].(map[string]any)
+	ref, _ := patient["reference"].(string)
+	if ref == "" {
+		return &pasSubjectRefusal{Owner: g.response.label(), Path: "/patient", Why: g.response.label() + " names no patient by reference"}
 	}
-	expected := pasSubjectIdentity(g.response, ref)
-	if expected == "" {
-		return false
+	expected, why := g.subjectIdentity(g.response, ref)
+	if why != "" {
+		return &pasSubjectRefusal{Owner: g.response.label(), Path: "/patient", Reference: ref, Why: fmt.Sprintf("%s /patient %q %s", g.response.label(), ref, why)}
 	}
-	return consistentPASGraphSubjects(g, expected)
+	return g.subjectMismatch(expected)
 }
 
 // consistentPASGraphSubjects binds every primary subject in a validated graph,
 // including contained evidence, before either request or response exchange.
 func consistentPASGraphSubjects(g *pasGraph, expected string) bool {
+	return g.subjectMismatch(expected) == nil
+}
+
+// subjectMismatch is the first subject in the graph, in Bundle order, that does
+// not bind to expected — nil when every subject does and a Patient entry is that
+// patient. A subject under an entry identified by a URN is read by the same
+// identity rule as the closure walk (subjectIdentity), so a ClaimResponse that
+// names its patient "Patient/x" from under a urn:uuid binds to the Bundle's one
+// Patient whose RESTful identity ends in it.
+func (g *pasGraph) subjectMismatch(expected string) *pasSubjectRefusal {
 	if expected == "" {
-		return false
+		return &pasSubjectRefusal{Why: "no patient identity to bind to"}
 	}
 	// R4 primary subject references use these field names across resources:
 	// patient/subject, Coverage.beneficiary, Task.for, and subject[x]'s Reference choice. ResearchSubject.individual
@@ -255,109 +294,140 @@ func consistentPASGraphSubjects(g *pasGraph, expected string) bool {
 	// rule to every object, including contained resources and nested elements;
 	// an unfamiliar resource type cannot silently exempt an explicit subject.
 	subjectFields := map[string]bool{"patient": true, "subject": true, "beneficiary": true, "for": true, "subjectReference": true, "patientReference": true}
-	var boundReference func(any, *pasGraphEntry) bool
-	boundReference = func(value any, owner *pasGraphEntry) bool {
+	var boundReference func(any, *pasGraphEntry, string) *pasSubjectRefusal
+	boundReference = func(value any, owner *pasGraphEntry, path string) *pasSubjectRefusal {
 		if refs, ok := value.([]any); ok {
 			if len(refs) == 0 {
-				return false
+				return &pasSubjectRefusal{Owner: owner.label(), Path: path, Expected: expected, Why: owner.label() + " " + path + " names no subject"}
 			}
-			for _, ref := range refs {
-				if !boundReference(ref, owner) {
-					return false
+			for i, ref := range refs {
+				if r := boundReference(ref, owner, pasReferencePath(path, strconv.Itoa(i))); r != nil {
+					return r
 				}
 			}
-			return true
+			return nil
 		}
 		ref, ok := value.(map[string]any)
 		if !ok {
-			return false
+			return &pasSubjectRefusal{Owner: owner.label(), Path: path, Expected: expected, Why: owner.label() + " " + path + " is not a reference"}
 		}
 		literal, ok := ref["reference"].(string)
 		// Identifier-only subjects have no exact graph identity to bind.
-		return ok && literal != "" && pasSubjectIdentity(owner, literal) == expected
+		if !ok || literal == "" {
+			return &pasSubjectRefusal{Owner: owner.label(), Path: path, Expected: expected, Why: owner.label() + " " + path + " names a subject without a reference"}
+		}
+		identity, why := g.subjectIdentity(owner, literal)
+		if why != "" {
+			return &pasSubjectRefusal{Owner: owner.label(), Path: path, Reference: literal, Expected: expected, Why: fmt.Sprintf("%s %s names %q, which %s", owner.label(), path, literal, why)}
+		}
+		if identity != expected {
+			return &pasSubjectRefusal{Owner: owner.label(), Path: path, Reference: literal, Identity: identity, Expected: expected, Why: fmt.Sprintf("%s %s names %q (%s), which is not the ClaimResponse's patient %s", owner.label(), path, literal, identity, expected)}
+		}
+		return nil
 	}
 
 	found := false
-	var visit func(any, *pasGraphEntry, int) bool
-	visit = func(v any, owner *pasGraphEntry, depth int) bool {
+	var visit func(any, *pasGraphEntry, int, string) *pasSubjectRefusal
+	visit = func(v any, owner *pasGraphEntry, depth int, path string) *pasSubjectRefusal {
 		switch x := v.(type) {
 		case map[string]any:
-			if typ, ok := x["resourceType"].(string); ok {
-				if typ == "Patient" {
-					identity := owner.fullURL
-					if depth > 0 {
-						id, ok := x["id"].(string)
-						if !ok {
-							return false
-						}
-						identity += "#" + id
+			if typ, ok := x["resourceType"].(string); ok && typ == "Patient" {
+				identity := owner.fullURL
+				if depth > 0 {
+					id, ok := x["id"].(string)
+					if !ok {
+						return &pasSubjectRefusal{Owner: owner.label(), Path: path, Expected: expected, Why: owner.label() + " carries a Patient without an id at " + path}
 					}
-					if identity != expected {
-						return false
-					}
-					found = true
+					identity += "#" + id
 				}
-
+				if identity != expected {
+					if depth == 0 {
+						return &pasSubjectRefusal{Owner: owner.label(), Identity: identity, Expected: expected, Why: fmt.Sprintf("%s is a Patient that is not the ClaimResponse's patient %s", owner.label(), expected)}
+					}
+					return &pasSubjectRefusal{Owner: owner.label(), Path: path, Identity: identity, Expected: expected, Why: fmt.Sprintf("%s carries a Patient (%s) at %s that is not the ClaimResponse's patient %s", owner.label(), identity, path, expected)}
+				}
+				found = true
 			}
-			for field, value := range x {
+			for _, field := range pasSortedKeys(x) {
 				subjectField := subjectFields[field] || (field == "individual" && x["resourceType"] == "ResearchSubject") || (field == "candidate" && x["resourceType"] == "EnrollmentRequest")
-				if subjectField && !boundReference(value, owner) {
-					return false
+				if subjectField {
+					if r := boundReference(x[field], owner, pasReferencePath(path, field)); r != nil {
+						return r
+					}
 				}
 			}
 			// A typed Patient Reference is also subject-bearing in polymorphic
 			// paths (e.g. actor or extension.valueReference). Do not let an
 			// identifier-only form bypass binding simply because its role differs.
 			if typ, ok := x["type"].(string); ok && (typ == "Patient" || typ == "http://hl7.org/fhir/StructureDefinition/Patient") {
-				if !boundReference(x, owner) {
-					return false
+				if r := boundReference(x, owner, path); r != nil {
+					return r
 				}
 			}
-			for _, child := range x {
-				if !visit(child, owner, depth+1) {
-					return false
+			for _, field := range pasSortedKeys(x) {
+				if r := visit(x[field], owner, depth+1, pasReferencePath(path, field)); r != nil {
+					return r
 				}
 			}
 		case []any:
-			for _, child := range x {
-				if !visit(child, owner, depth+1) {
-					return false
+			for i, child := range x {
+				if r := visit(child, owner, depth+1, pasReferencePath(path, strconv.Itoa(i))); r != nil {
+					return r
 				}
 			}
 		}
-		return true
+		return nil
 	}
-	for _, entry := range g.byURL {
-		if !visit(entry.resource, entry, 0) {
-			return false
+	for _, entry := range g.ordered() {
+		if r := visit(entry.resource, entry, 0, ""); r != nil {
+			return r
 		}
 	}
-	return found
+	if !found {
+		return &pasSubjectRefusal{Expected: expected, Why: "no entry of the Bundle is the ClaimResponse's patient " + expected}
+	}
+	return nil
 }
 
-func pasSubjectIdentity(owner *pasGraphEntry, ref string) string {
+// subjectIdentity is the versionless identity a subject reference denotes when
+// written inside owner, or why it denotes none: "#" and "#id" name the owner
+// and its contained resource; a relative reference resolves against a RESTful
+// owner's base (FHIR R4) or, under an owner identified by a URN, to the one
+// entry whose RESTful identity ends in it (resolveUnderURN).
+func (g *pasGraph) subjectIdentity(owner *pasGraphEntry, ref string) (string, string) {
 	if ref == "#" {
-		return owner.fullURL
+		return owner.fullURL, ""
 	}
 	if strings.HasPrefix(ref, "#") {
-		return owner.fullURL + ref
+		return owner.fullURL + ref, ""
 	}
 	u, err := url.Parse(ref)
 	if err != nil {
-		return ""
+		return "", "is not a resolvable resource identity"
 	}
 	if !u.IsAbs() {
 		base, err := url.Parse(owner.fullURL)
-		if err != nil || (base.Scheme != "http" && base.Scheme != "https") {
-			return ""
+		if err != nil {
+			return "", "is relative, and " + owner.label() + " has no fullUrl to resolve it against"
 		}
-		typ := owner.resource["resourceType"].(string)
-		id := owner.resource["id"].(string)
-		base.Path = strings.TrimSuffix(base.Path, "/"+typ+"/"+id) + "/" + u.Path
-		ref = base.String()
+		if base.Scheme == "urn" {
+			resolved, why := g.resolveUnderURN(ref, owner)
+			if why != "" {
+				return "", why
+			}
+			ref = resolved
+		} else {
+			typ, _ := owner.resource["resourceType"].(string)
+			id, ok := owner.resource["id"].(string)
+			if !ok || (base.Scheme != "http" && base.Scheme != "https") {
+				return "", "is relative, and " + owner.label() + " has no RESTful fullUrl to resolve it against"
+			}
+			base.Path = strings.TrimSuffix(base.Path, "/"+typ+"/"+id) + "/" + u.Path
+			ref = base.String()
+		}
 	}
 	if pos := strings.Index(ref, "/_history/"); pos >= 0 {
 		ref = ref[:pos]
 	}
-	return ref
+	return ref, ""
 }

@@ -335,3 +335,45 @@ The **`shn-sdk` wire vectors** and the **SHN Participant Protocol
 specification** (published with `shn-sdk`) are the conformance contract across
 gateway versions. A gateway that passes the wire-vector suite is conformant
 with the SHN exchange protocol regardless of the gateway version it runs.
+
+## Optional diagnostic events (evolving)
+
+`engine.Config.Diagnostic func(diagnostics.Event) bool` is a separate opt-in sink
+for raw HTTP and participant-stage observations. `DiagnosticTraceKey` verifies
+optional private ingress call attribution. `engine.WithNativeDiagnostic` adds the
+same sink to native forwarding. Nil disables each hook. Sinks run synchronously,
+may be called concurrently, must return promptly without blocking, and must
+reserve bounded memory before copying read-only event bytes. Sink panics are
+contained. The app supplies the bounded `diagnostics.Queue` publisher and owns its
+shutdown in both `Run` and the closable `Handler` constructors.
+
+`diagnostics.IngressFingerprint(ctx)` snapshots the handler-consumed ingress hash;
+it never reads the body. `diagnostics.IngressBody(ctx)` exposes a synchronous read-only view of the bounded
+body for existing observer adapters. `diagnostics.RequestIdentity(ctx, event)` projects the
+verified envelope identity carried by `WithRequestIdentity`. A partial fingerprint
+cannot establish a byte link. HTTP transport events inherit that identity through
+token acquisition and native forwarding. No SDK metadata or wire field changes.
+
+`connectors/smartauth.Config.Transport` optionally selects the authorized
+operation transport beneath bearer injection; nil retains `http.DefaultTransport`.
+`Config.HTTPClient` continues to select only the token-acquisition client. Keys,
+token caching, caller-request cloning and failure behavior are unchanged.
+
+The existing observer event names and completion barrier remain available.
+Ingress observation now tees reads performed by the original handler, preserving
+authentication ordering and read failures. The legacy ingress event fires when the original
+handler finishes reading, before response commitment; unread rejected bodies are
+reported on return as incomplete. Ingress events add `payloadIncomplete: true`
+when request or response bytes were unread, truncated, failed, or unavailable due
+to capture limits. An absent payload with this flag does not assert an empty body.
+Complete events omit the flag and retain their existing JSON shape. Durable HTTP
+events finalize on return. The existing observer
+callback's panic behavior is retained, independently of the isolated diagnostic
+sink. The SSE payload representation is unchanged; durable diagnostics carry raw
+bytes directly. This source addition is not a published release or a version pin.
+
+
+Relayed non-2xx responses preserve the participant's declared `Content-Type` with
+its exact body bytes. The existing `application/fhir+json` fallback applies only
+when that media type is absent; locally authored and empty-body refusal rules are
+unchanged. This fixes a prior hardcoded media type on nonempty foreign errors.

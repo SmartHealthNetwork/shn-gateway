@@ -283,7 +283,7 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 	// Native operation success is always a complete Bundle, regardless of the
 	// responder implementation. Resource-level builders and polling stay separate.
 	if _, bad := validateNativePASResponse(responseFHIR); bad.Status != 0 {
-		writeJSON(w, bad.Status, map[string]string{"error": bad.Message})
+		g.refuseInbound(w, r, legPASClaim, env, tok, answerTok, bad.Status, bad.Message, nil)
 		return
 	}
 	// (C) outbound fence — two-predicate, namespace-aware: member-fence
@@ -292,8 +292,8 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 	// member namespace, both flags false, so it fences strict). The SHN-produced EOB side-effect is
 	// fenced UNCONDITIONALLY (always built from the bound member). Re-adds the (C) fence the minimized
 	// pas-claim leg carries, before that leg is deleted (OWD-G6 prove-first).
-	if status, msg := g.fenceResponseSubject("pas-claim", boundPatientRef, result); status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
+	if status, msg := g.fenceResponseSubject("pas-claim", boundPatientRef, env.Metadata.CorrelationID, result); status != 0 {
+		g.refuseInbound(w, r, legPASClaim, env, tok, answerTok, status, msg, nil)
 		return
 	}
 	// Egress-$validate the RESPONSE iff !ResponseRelayed() (R-8: a verbatim foreign relay carries Da
@@ -303,7 +303,7 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 	// $validated unconditionally in the loop below.
 	status, msg = g.validatePASResult(r.Context(), result, answerTok, "pas-claim")
 	if status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
+		g.refuseInbound(w, r, legPASClaim, env, tok, answerTok, status, msg, nil)
 		return
 	}
 	// Egress-$validate the SHN-PRODUCED EOB side-effects before the Store write (FR-36). The relay
@@ -314,7 +314,7 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 	// resource that lane does not govern.
 	for _, b := range result.SideEffectFHIR {
 		if status, msg := g.validateFHIR(r.Context(), b, "egress", ""); status != 0 {
-			writeJSON(w, status, map[string]string{"error": msg})
+			g.refuseInbound(w, r, legPASClaim, env, tok, answerTok, status, msg, nil)
 			return
 		}
 	}
@@ -426,7 +426,7 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 	// Native operation success is always a complete Bundle, regardless of the
 	// responder implementation. Resource-level builders and polling stay separate.
 	if _, bad := validateNativePASResponse(responseFHIR); bad.Status != 0 {
-		writeJSON(w, bad.Status, map[string]string{"error": bad.Message})
+		g.refuseInbound(w, r, legPASClaimUpdate, env, tok, answerTok, bad.Status, bad.Message, nil)
 		return
 	}
 	// (C) outbound fence — two-predicate, namespace-aware: member-fence
@@ -434,8 +434,8 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 	// The update leg builds no EOB, so the SHN-produced-side-effect fence is a no-op here; the flag
 	// keeps the leg symmetric with submit so the native relay (both flags set) stands the member-fence
 	// down. Re-adds the (C) fence before the minimized pas-claim-update leg is deleted (OWD-G6).
-	if status, msg := g.fenceResponseSubject("pas-claim-update", boundPatientRef, result); status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
+	if status, msg := g.fenceResponseSubject("pas-claim-update", boundPatientRef, env.Metadata.CorrelationID, result); status != 0 {
+		g.refuseInbound(w, r, legPASClaimUpdate, env, tok, answerTok, status, msg, nil)
 		return
 	}
 	// Egress-$validate the RESPONSE iff !ResponseRelayed() (R-8), mirror of the conformant submit
@@ -443,7 +443,7 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 	// (a relayed Response) is preserved bytes-only. Assembly is certified explicitly against PAS.
 	status, msg = g.validatePASResult(r.Context(), result, answerTok, "pas-claim-update")
 	if status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
+		g.refuseInbound(w, r, legPASClaimUpdate, env, tok, answerTok, status, msg, nil)
 		return
 	}
 	// Egress-$validate the SHN-PRODUCED side-effects before the Store write (FR-36). The update leg
@@ -451,7 +451,7 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 	// relay RESPONSE itself is NOT $validated (it may be a foreign RI's Da Vinci payload, R-8).
 	for _, b := range result.SideEffectFHIR {
 		if status, msg := g.validateFHIR(r.Context(), b, "egress", ""); status != 0 {
-			writeJSON(w, status, map[string]string{"error": msg})
+			g.refuseInbound(w, r, legPASClaimUpdate, env, tok, answerTok, status, msg, nil)
 			return
 		}
 	}

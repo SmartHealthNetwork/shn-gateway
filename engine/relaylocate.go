@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
@@ -62,8 +63,9 @@ func (r *payorEdgeRefused) legResult() LegResult {
 }
 
 // payorEdgeMismatch is the refusal for a request whose Coverages name no
-// payer this gateway can read, or a payer other than this gateway's own.
-func payorEdgeMismatch(own, got shnsdk.PayerIdentifier, gotOK bool) *payorEdgeRefused {
+// payer this gateway can read, or a payer none of this gateway's own
+// identities covers.
+func payorEdgeMismatch(own []shnsdk.PayerIdentifier, got shnsdk.PayerIdentifier, gotOK bool) *payorEdgeRefused {
 	lr := payorEdgeRefusal(own, got, gotOK)
 	return &payorEdgeRefused{status: lr.Status, message: lr.Message}
 }
@@ -313,13 +315,17 @@ func referenceRefusal(ref string, res partyResolution) *payorEdgeRefused {
 }
 
 // locatePayorEdge returns the operations that map the payer identity in the
-// request d from own to backend, or a *payorEdgeRefused.
+// request d to backend, or a *payorEdgeRefused. own is the set of identities
+// this gateway owns (payoredge.go, ownPayerIdentities) — a payer publishes
+// several on the network feed, and a request routed here on any one of them
+// is a request this payer owns.
 //
 // Every Coverage's routing payor (payor[0], the one payer routing reads)
-// must name exactly one payer identity, and it must be own: a Coverage
-// naming no readable payer, or another payer, is refused, and so is a
-// request whose Coverages name different payers. A reference that resolves
-// to no resource, or to several, is refused naming the reference.
+// must name exactly one payer identity, and it must be one of own: a
+// Coverage naming no readable payer, or a payer none of own covers, is
+// refused, and so is a request whose Coverages name different payers. A
+// reference that resolves to no resource, or to several, is refused naming
+// the reference.
 //
 // A Claim's insurer is resolved the same way, and a reference that resolves
 // to no resource or to several is refused too. It is mapped when it names
@@ -328,7 +334,7 @@ func referenceRefusal(ref string, res partyResolution) *payorEdgeRefused {
 // identity, is left as sent: which payer answers is decided on the
 // Coverages. Only string values that differ from backend are replaced, so a
 // mapping to the identity the request already carries makes no edit.
-func locatePayorEdge(d *relay.Document, carrier payorEdgeCarrier, own, backend shnsdk.PayerIdentifier) ([]relay.Op, error) {
+func locatePayorEdge(d *relay.Document, carrier payorEdgeCarrier, own []shnsdk.PayerIdentifier, backend shnsdk.PayerIdentifier) ([]relay.Op, error) {
 	l := payorLocator{d: d}
 	coverages, claims, scope := l.sites(carrier)
 	if len(coverages) == 0 {
@@ -363,7 +369,7 @@ func locatePayorEdge(d *relay.Document, carrier payorEdgeCarrier, own, backend s
 			}
 		}
 	}
-	if got := targets[0].identity; got != own {
+	if got := targets[0].identity; !slices.Contains(own, got) {
 		return nil, payorEdgeMismatch(own, got, true)
 	}
 	for _, c := range claims {
@@ -375,12 +381,9 @@ func locatePayorEdge(d *relay.Document, carrier payorEdgeCarrier, own, backend s
 		switch {
 		case res == partyNoTarget || res == partySeveralTargets:
 			return nil, referenceRefusal(ref, res)
-		case res == partyFound && t.identity == own:
+		case res == partyFound && slices.Contains(own, t.identity):
 			targets = append(targets, t)
 		}
-	}
-	if own == backend {
-		return nil, nil
 	}
 	sys, err := json.Marshal(backend.System)
 	if err != nil {

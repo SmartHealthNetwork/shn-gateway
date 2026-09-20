@@ -82,14 +82,14 @@ func TestPASForeignGraphSubjectFence(t *testing.T) {
 			}
 			raw, _ := json.Marshal(b)
 			g := &Gateway{}
-			status, _ := g.fenceResponseSubject("pas-claim", "Patient/MBR-COVERED", LegResult{Response: testResponse(raw), ResponseSubjectForeign: true})
+			status, _ := g.fenceResponseSubject("pas-claim", "Patient/MBR-COVERED", "", LegResult{Response: testResponse(raw), ResponseSubjectForeign: true})
 			if status != http.StatusForbidden {
 				t.Fatalf("foreign sibling conflict status=%d", status)
 			}
 		})
 	}
 	g := &Gateway{}
-	status, msg := g.fenceResponseSubject("pas-claim", "Patient/MBR-COVERED", LegResult{Response: testResponse([]byte(assemblyRealPending)), ResponseSubjectForeign: true})
+	status, msg := g.fenceResponseSubject("pas-claim", "Patient/MBR-COVERED", "", LegResult{Response: testResponse([]byte(assemblyRealPending)), ResponseSubjectForeign: true})
 	if status != 0 {
 		t.Fatalf("foreign namespace incorrectly compared with bound member: %d %s", status, msg)
 	}
@@ -313,8 +313,19 @@ func TestPASInboundCommitOrdering(t *testing.T) {
 				if mode == "store failure" {
 					wantCommits = 1
 				}
-				if rec.Code == 200 || commits != wantCommits || rollbacks != 1 || observed != 0 {
-					t.Fatalf("status=%d commits=%d releases=%d events=%d", rec.Code, commits, rollbacks, observed)
+				// A refusal about the produced answer is the payer's own verdict and
+				// travels framed (200 to the Hub, the refusal inside); machinery — a
+				// seal failure, a store failure, a responder fault — stays a raw non-2xx.
+				status := rec.Code
+				if rec.Code == 200 {
+					hdr, _, err := shnsdk.DecodeHTTPFrame(openResponseLeg(t, requester, rec.Body.Bytes()))
+					if err != nil {
+						t.Fatalf("decode the framed refusal: %v (body %s)", err, rec.Body.String())
+					}
+					status = hdr.Status
+				}
+				if status/100 == 2 || commits != wantCommits || rollbacks != 1 || observed != 0 {
+					t.Fatalf("status=%d commits=%d releases=%d events=%d", status, commits, rollbacks, observed)
 				}
 				// Only an invalid VERDICT is a conformance finding: an outage
 				// ("validator unavailable") is identical at every enforcement
@@ -336,13 +347,13 @@ func TestPASSHNProducedGraphSubjectFence(t *testing.T) {
 	b := assemblySmallGraph()
 	raw, _ := json.Marshal(b)
 	g := &Gateway{}
-	if status, msg := g.fenceResponseSubject("pas-claim", "Patient/p", LegResult{Response: testResponse(raw)}); status != 0 {
+	if status, msg := g.fenceResponseSubject("pas-claim", "Patient/p", "", LegResult{Response: testResponse(raw)}); status != 0 {
 		t.Fatalf("bound graph rejected: %d %s", status, msg)
 	}
 	b["entry"] = append(b["entry"].([]any), map[string]any{"fullUrl": "https://payer.test/fhir/Patient/other", "resource": map[string]any{"resourceType": "Patient", "id": "other"}})
 	b["entry"].([]any)[2].(map[string]any)["resource"].(map[string]any)["patient"] = map[string]any{"reference": "Patient/other"}
 	raw, _ = json.Marshal(b)
-	if status, _ := g.fenceResponseSubject("pas-claim", "Patient/p", LegResult{Response: testResponse(raw)}); status != http.StatusForbidden {
+	if status, _ := g.fenceResponseSubject("pas-claim", "Patient/p", "", LegResult{Response: testResponse(raw)}); status != http.StatusForbidden {
 		t.Fatal("accepted SHN sibling subject conflict")
 	}
 }

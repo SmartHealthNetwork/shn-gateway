@@ -235,7 +235,7 @@ func (g *Gateway) handleCRDIngress(w http.ResponseWriter, r *http.Request) {
 	// bytes are broader than that — a partner exercising CRD fields SHN neither
 	// builds nor reads is not covered by it. Selection precedes the exchange so a
 	// refusal costs no Exchange record.
-	child := g.cfg.CorrelationGen()
+	child := g.ingressCorrelation(w, r)
 	route, ok := g.selectLegLineOrFail(w, recipient, legType, child)
 	if !ok {
 		return
@@ -341,7 +341,7 @@ func (g *Gateway) handleDTRIngress(w http.ResponseWriter, r *http.Request) {
 	// line. The walk to the payer's line changes no byte of a questionnaire
 	// request (envelopeEgressLegs); a walk that would change one is refused
 	// rather than sent.
-	child := g.cfg.CorrelationGen()
+	child := g.ingressCorrelation(w, r)
 	route, ok := g.selectLegLineOrFail(w, recipient, legType, child)
 	if !ok {
 		return
@@ -461,9 +461,12 @@ func (g *Gateway) handlePASIngress(w http.ResponseWriter, r *http.Request) {
 	// Security: the pend is keyed by (subjectPCI, corr) where subjectPCI is bound to the
 	// authenticated token subject (ingressPASNativeSubjectPCI above). A partner can only thread
 	// a corr for their own member's pends — no cross-member hijack via a crafted identifier.
-	child := g.cfg.CorrelationGen()
+	child := g.ingressCorrelation(w, r)
 	if fstatus == 0 && f.claimCorrelation != "" {
 		child = f.claimCorrelation
+		// The Claim's own correlation is the one this leg is logged under, so it is
+		// the one the caller is told.
+		w.Header().Set(CorrelationHeader, child)
 	}
 	r = r.WithContext(withFindingContext(r.Context(), findingContext{
 		LegType: leg, CorrelationID: child, Seam: "provider-ingress", Whose: "own",
@@ -517,9 +520,9 @@ func (g *Gateway) handlePASIngress(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, bad.Status, map[string]string{"error": bad.Message})
 		return
 	}
-	if !consistentPASResponseSubjects(crJSON) {
+	if status, msg := refusePASResponseSubjects(ex.ID, "pas-claim", http.StatusBadGateway, crJSON); status != 0 {
 		g.recordLeg(ex.ID, legProj.Project(child, "error"))
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "PAS response has inconsistent patient linkage"})
+		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
 	// Decision fields distinguish pending and terminal responses; both are Bundles.

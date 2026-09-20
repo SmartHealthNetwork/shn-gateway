@@ -52,6 +52,7 @@ import (
 // SHN_MANIFEST path of the substrate cmd/gateway is intentionally dropped — the
 // public binary is partner-path only.
 type config struct {
+	diagnostic *diagnosticSource
 	// tokenNotes receives the outbound token clients' departure notes
 	// (smartauth.Config.Observer: a partner authorization server read as sent
 	// but out of specification). Set by build() to the operator-visible
@@ -1177,6 +1178,7 @@ func firstNonEmpty(vals ...string) string {
 // boot-time registry SNAPSHOT, and returns the handler WITHOUT serving, so the
 // boot gate can drive it.
 type built struct {
+	diagnostic   *diagnosticSource
 	gateway      *engine.Gateway
 	addr         string
 	handler      http.Handler
@@ -1285,6 +1287,7 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	if err != nil {
 		return b, err
 	}
+	cfg.diagnostic = newDiagnosticSource(getenv, cfg.Role, stdout, clock)
 	cfg.tokenNotes = func(note string) { fmt.Fprintf(stdout, "gateway: %s\n", note) }
 
 	// Identity bundle (shn register / Init output) — recovers HolderID from manifest.json.
@@ -1358,6 +1361,9 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	hc, herr := fhirHTTPClient(cfg) // smartauth.NewHTTPClient when the SMART credential block is set, else nil (unauthenticated)
 	if herr != nil {
 		return b, herr
+	}
+	if hc == nil && cfg.diagnostic != nil {
+		hc = cfg.diagnostic.client(http.DefaultClient)
 	}
 	var sor engine.SystemOfRecord = fhirsor.NewFromURL(cfg.FHIRDataURL, hc)
 	// Store: the gateway's OWN business state (auth numbers, pended-claim ledger, EOBs).
@@ -1550,7 +1556,7 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 			return b, perr
 		}
 		if pdc == nil {
-			pdc = client // the substrate HTTP client; unauthenticated forward
+			pdc = cfg.diagnostic.client(client) // unauthenticated forward
 		}
 		// PAS forwarding is no longer a switch: the split counterparty that used to keep the
 		// PAS pair on an in-process fallback is deleted (§3.2), so EVERY Da Vinci leg —
@@ -1602,13 +1608,29 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 			// must reach none on this path too, not just the in-process Gateway.
 			engine.WithConformancePolicy(engine.NewConformancePolicy(cfg.ConformanceEnforcement)),
 		}
+		if cfg.diagnostic != nil {
+			nativeOpts = append(nativeOpts, engine.WithNativeDiagnostic(cfg.diagnostic.emit))
+		}
 		// Payer-edge identity mapping seam (gateway/engine/payoredge.go): both env vars
 		// set (loadConfig's all-or-nothing rule) ⇒ CRD/DTR/PAS re-stamp the Coverage
-		// payor from PayerDavinciPayorOwn to PayerDavinciPayorBackend. Unset (the
+		// payor to PayerDavinciPayorBackend. Unset (the
 		// default) ⇒ no option appended, seam off, byte-identical to every existing
 		// deployment.
+		//
+		// Which requests this payer owns is decided against the identities this holder
+		// itself publishes on the converged /holders feed (reg, kept live by the
+		// registrar poller) as well as the configured one: the routing directory is
+		// many-to-many, so a provider routes here on ANY published identity and the
+		// edge must answer on any of them. Nothing is minted — the feed carries the
+		// participant's own attested claims — and the configured value remains an
+		// optional override that governs alone when this gateway cannot see its own
+		// feed entry.
 		if cfg.PayerDavinciPayorEdge {
-			nativeOpts = append(nativeOpts, engine.WithPayorEdgeIdentity(cfg.PayerDavinciPayorOwn, cfg.PayerDavinciPayorBackend))
+			nativeOpts = append(nativeOpts,
+				engine.WithPayorEdgeIdentity(cfg.PayerDavinciPayorOwn, cfg.PayerDavinciPayorBackend),
+				engine.WithPayorEdgePublishedIdentities(reg, bundle.Identity.HolderID,
+					func(note string) { fmt.Fprintf(stdout, "gateway: %s\n", note) }),
+			)
 		}
 		native := engine.NewNativeResponder(pdc, cfg.PayerDavinciBaseURL, cfg.PayerDavinciCRDServiceID, store, clock, nativeOpts...)
 		if discErr == nil {
@@ -1635,7 +1657,7 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 			return b, perr
 		}
 		if ppc == nil {
-			ppc = client // the substrate HTTP client; unauthenticated forward
+			ppc = cfg.diagnostic.client(client) // unauthenticated forward
 		}
 		gwCfg.Populator = engine.NewNativePopulatorWithFailureObserver(ppc, cfg.ProviderDTRPopulateURL, populateFailureObserver(stdout))
 	}
@@ -1647,6 +1669,10 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		log.Printf("gateway: WARNING: SHN_ACCEPT_UNKNOWN_MEMBERS is set — a Da Vinci CRD/DTR/PAS subject the system of record does not hold binds by member id plus the demographics of the Patient the request carries (test-lane seam); never set this on a production gateway")
 	}
 
+	if cfg.diagnostic != nil {
+		gwCfg.Diagnostic = cfg.diagnostic.emit
+		gwCfg.DiagnosticTraceKey = cfg.diagnostic.traceKey
+	}
 	// Observer stream: hub + engine callback, only when configured. The demo
 	// endpoints (POST /demo/transform, GET /demo/capture/{correlationId})
 	// ride the SAME mux via composeObserverHandler — they inherit this
@@ -1756,6 +1782,7 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	})
 
 	b = built{
+		diagnostic:      cfg.diagnostic,
 		gateway:         gw,
 		addr:            cfg.Addr,
 		handler:         handler,
@@ -1865,6 +1892,9 @@ func (b built) startWorkers(parent context.Context) func() {
 	start := func(run func(context.Context)) {
 		workers.Go(func() { run(ctx) })
 	}
+	if b.diagnostic != nil {
+		start(b.diagnostic.run)
+	}
 	if b.registrarURL != "" {
 		start(func(ctx context.Context) { pollFeed(ctx, b.client, b.registrarURL, b.reg, 3*time.Second, b.healthCell) })
 	}
@@ -1928,7 +1958,15 @@ func HandlerWithClock(ctx context.Context, getenv func(string) string, stdout io
 	if err != nil {
 		return nil, err
 	}
+	stopDiagnostic := func() {}
+	if b.diagnostic != nil {
+		pubctx, cancel := context.WithCancel(ctx)
+		done := make(chan struct{})
+		go func() { defer close(done); b.diagnostic.run(pubctx) }()
+		stopDiagnostic = func() { cancel(); <-done }
+	}
 	return &managedHandler{Handler: b.handler, close: func() {
+		stopDiagnostic()
 		_ = b.gateway.Close()
 		b.lanes.Close()
 		if b.closeStore != nil {
@@ -2141,6 +2179,7 @@ func fhirHTTPClient(cfg config) (*http.Client, error) {
 		}
 		sc.Alg, sc.Key, sc.KID = cfg.FHIRClientAlg, key, cfg.FHIRClientKID
 	}
+	cfg.diagnostic.smart(&sc)
 	hc, err := smartauth.NewHTTPClient(sc)
 	if err != nil {
 		return nil, fmt.Errorf("smartauth client: %w", err)
@@ -2170,6 +2209,7 @@ func payerDavinciHTTPClient(cfg config) (*http.Client, error) {
 		}
 		sc.Alg, sc.Key, sc.KID = cfg.PayerDavinciClientAlg, key, cfg.PayerDavinciClientKID
 	}
+	cfg.diagnostic.smart(&sc)
 	hc, err := smartauth.NewHTTPClient(sc)
 	if err != nil {
 		return nil, fmt.Errorf("payer-davinci smartauth client: %w", err)
@@ -2202,6 +2242,7 @@ func providerDTRPopulateHTTPClient(cfg config) (*http.Client, error) {
 		}
 		sc.Alg, sc.Key, sc.KID = cfg.ProviderDTRPopulateClientAlg, key, cfg.ProviderDTRPopulateClientKID
 	}
+	cfg.diagnostic.smart(&sc)
 	hc, err := smartauth.NewHTTPClient(sc)
 	if err != nil {
 		return nil, fmt.Errorf("populate smartauth client: %w", err)

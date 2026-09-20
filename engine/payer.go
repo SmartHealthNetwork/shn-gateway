@@ -96,11 +96,11 @@ func (g *Gateway) handleDTRInbound(w http.ResponseWriter, r *http.Request, env s
 		// (C) for the adaptive round: the answered QuestionnaireResponse must be about the
 		// SAME patient the request carried — a partner (or a relay) must not swap the subject.
 		if status, msg := fenceNextQuestionSubject(nextQuestionSubject, result); status != 0 {
-			writeJSON(w, status, map[string]string{"error": msg})
+			g.refuseInbound(w, r, legDTR, env, tok, answerTok, status, msg, nil)
 			return
 		}
-	} else if status, msg := g.fenceResponseSubject("dtr-questionnaire-fetch", "", result); status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
+	} else if status, msg := g.fenceResponseSubject("dtr-questionnaire-fetch", "", env.Metadata.CorrelationID, result); status != 0 {
+		g.refuseInbound(w, r, legDTR, env, tok, answerTok, status, msg, nil)
 		return
 	}
 	// Egress $validate is a NEAR-RELAY for a verbatim foreign package (FR-G28, R-8
@@ -126,7 +126,7 @@ func (g *Gateway) handleDTRInbound(w http.ResponseWriter, r *http.Request, env s
 	// produces its own package rather than relaying one.
 	if !result.ResponseRelayed() {
 		if status, msg := g.validateFHIRForContract(ctx, responseFHIR, "egress", "pa.dtr", shnsdk.LineOf(answerTok), ""); status != 0 {
-			writeJSON(w, status, map[string]string{"error": msg})
+			g.refuseInbound(w, r, legDTR, env, tok, answerTok, status, msg, nil)
 			return
 		}
 	}
@@ -404,7 +404,7 @@ func fenceNextQuestionSubject(requestSubject string, res LegResult) (int, string
 // The response is read after the same ownership check its transmit applies.
 // Returns (0,"") on pass or (status, msg) to write. Per-leg arms are added as
 // each leg moves behind the seam.
-func (g *Gateway) fenceResponseSubject(leg, boundPatientRef string, res LegResult) (int, string) {
+func (g *Gateway) fenceResponseSubject(leg, boundPatientRef, corrID string, res LegResult) (int, string) {
 	responseFHIR, err := g.admit(res.Response, answerKey(leg, relay.OutcomeAnswered))
 	if err != nil {
 		return http.StatusInternalServerError, errOwnershipFault
@@ -438,8 +438,10 @@ func (g *Gateway) fenceResponseSubject(leg, boundPatientRef string, res LegResul
 			ResourceType string `json:"resourceType"`
 		}
 		_ = json.Unmarshal(responseFHIR, &responseShape)
-		if (res.ResponseSubjectForeign || responseShape.ResourceType == "Bundle") && !consistentPASResponseSubjects(responseFHIR) {
-			return http.StatusForbidden, "PAS response has inconsistent patient linkage"
+		if res.ResponseSubjectForeign || responseShape.ResourceType == "Bundle" {
+			if status, msg := refusePASResponseSubjects(corrID, leg, http.StatusForbidden, responseFHIR); status != 0 {
+				return status, msg
+			}
 		}
 		if !res.ResponseSubjectForeign {
 			refs, err := ParsePASResponsePatients(responseFHIR)

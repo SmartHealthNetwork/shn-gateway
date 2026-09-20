@@ -421,6 +421,14 @@ short-lived bearer, and verifies it on every ingress call. The client-side proce
 (key pair, registration entry, assertion claims, `curl`) is in
 [INTEGRATION.md → Calling the ingress from your EHR](INTEGRATION.md#calling-the-ingress-from-your-ehr).
 
+Every answer from the ingress carries `X-Correlation-Id`: the correlation id the gateway
+logs the exchange under (its `certify:` and `leg.failed` lines), on refusals as on
+successes, so your EHR can quote one value when something needs looking into. Send your
+own `X-Correlation-Id` (up to 64 characters: letters, digits, `.`, `_`, `-`) and the
+gateway adopts it as the exchange's id and returns it; anything else is ignored and an id
+is minted. A `$submit` whose `Claim.identifier` names its correlation
+(`urn:shn:correlation`) keeps that value as the id, and the header reports it.
+
 | Env var | Description |
 |---|---|
 | `PROVIDER_DAVINCI_INGRESS` | Set to `1` to mount the ingress on the provider gateway. |
@@ -666,12 +674,12 @@ your engine's own.
 
 | Env var | Description |
 |---|---|
-| `PAYER_DAVINCI_PAYOR_OWN` | `"system\|value"` of this deployment's registered payer identity — the identity your gateway is known by on the network. |
+| `PAYER_DAVINCI_PAYOR_OWN` | `"system\|value"` of a payer identity this deployment answers for. Setting it (together with `PAYER_DAVINCI_PAYOR_BACKEND`) is what **switches the mapping on**; the feed then adds your other published identities to it. See "which identities count as yours" below. |
 | `PAYER_DAVINCI_PAYOR_BACKEND` | `"system\|value"` your own backend expects instead — the identity to re-stamp onto outbound requests before they reach it. |
 
 When both are set, every CDS Hooks (`order-select`, `order-sign` and `order-dispatch`), DTR,
 and PAS request this gateway forwards to your system has the payor identifier of **every**
-`Coverage` it carries re-stamped from `PAYER_DAVINCI_PAYOR_OWN` to
+`Coverage` it carries re-stamped to
 `PAYER_DAVINCI_PAYOR_BACKEND` — but **only** when the inbound identifier is genuinely your
 own. The identifier is the `Coverage.payor` identifier itself, or the first identifier
 with a system and value on the payer `Organization` it references (contained in the
@@ -680,12 +688,42 @@ first `payor`, the one the network routes on. A PAS Claim's `insurer` is resolve
 way and re-stamped too when it names your identity; an insurer that names you under
 another identifier (for example your NPI) is left as sent.
 
+**Which identities count as yours.** The pair above is all-or-nothing: setting
+`PAYER_DAVINCI_PAYOR_OWN` and `PAYER_DAVINCI_PAYOR_BACKEND` together turns the mapping on
+(setting one alone is a startup error), and `PAYER_DAVINCI_PAYOR_OWN` is always one of the
+identities you answer for. What the feed does is **add to that set**, never replace it.
+
+A payer may publish several identities on the network feed, and the routing directory is
+many-to-many (see "How a payer publishes its identity into the feed" above), so a requester
+may address you under any of them. Once the mapping is on, the identities this gateway
+answers for are therefore **`PAYER_DAVINCI_PAYOR_OWN` plus every identity your own holder
+publishes on the feed** — each of them is re-stamped to `PAYER_DAVINCI_PAYOR_BACKEND` on the
+way to your system. So publishing a second identity is enough on its own: no configuration
+change is needed to answer on it, and the set is re-read per request, so a newly published
+identity takes effect without a restart. Nothing is invented — the feed carries your own
+attested claims, and an identity another holder publishes is never yours.
+
+`PAYER_DAVINCI_PAYOR_OWN` decides **alone** whenever this gateway cannot see its own entry
+among the holders it has converged: you run no registrar (`SHN_REGISTRAR_URL` unset), your
+registration has not propagated to the feed yet, or your entry was skipped because its
+published encryption key would not decode. (An unreachable registrar at startup is a boot
+failure, not this case, and a feed outage after startup leaves the last converged snapshot
+in place.) The fallback is fail-closed — it narrows what this gateway will answer for,
+never widens it — and the gateway says so once:
+
+```
+gateway: payer backend identity mapping: this gateway cannot see its own payer identities on
+the network feed (holder "…"); the configured identity alone decides which requests it owns
+```
+
 A request is refused with a clear error, never silently forwarded, when:
 
-- a Coverage names a different payer identifier, or no resolvable payor identifier at all
-  (400) — this is an ownership check, not a blind rewrite: forwarding a misdirected
+- a Coverage names a payer identifier that is none of yours, or no resolvable payor identifier
+  at all (400) — this is an ownership check, not a blind rewrite: forwarding a misdirected
   request under your own backend's identity would have your engine adjudicate someone
-  else's request;
+  else's request. The refusal names the identifier that arrived and the identities this
+  gateway answers for (up to five, then a count of the rest), so a mismatch is diagnosable
+  from the error alone;
 - its Coverages name more than one payer, or a Coverage payor or Claim insurer reference
   resolves to no resource or to more than one (422, naming the reference). References are
   matched exactly (a `fullUrl`, `Type/id`, or `#id` for a contained resource); a
@@ -700,7 +738,7 @@ Hooks request, every other byte of the request — the payer organization's name
 members, layout, numbers — is forwarded exactly as it arrived, and so is a DTR
 `$questionnaire-package` or `$next-question` input a requester sends naming the operation.
 (A questionnaire request a requester sends in the older envelope, without naming the
-operation, is still assembled by the gateway from the carried canonical, order and Coverage.) When your backend identity equals your network identity nothing is
+operation, is still assembled by the gateway from the carried canonical, order and Coverage.) When the request already carries your backend identity nothing is
 changed at all. The mapping never touches your answers: CDS Hooks and questionnaire answers
 are relayed back exactly as your system sent them.
 
@@ -772,7 +810,12 @@ not hold (`400 unknown member`), a request it cannot read, no order to decide on
 that does not match the token (`403`), a consent it cannot confirm, an ingress validation
 failure at enforcement `strict` (`422 ingress validation failed`, issues echoed) — is its
 answer about the request, and a frame-capable requester receives it with that status and
-body. Only exchange machinery stays a bare non-`2xx`, which the Hub reports as `"hub
+body. So is any `4xx` it writes about **its own participant's answer** after that system
+answered: a PAS response whose patient linkage is inconsistent or that names another
+patient (`403`), a questionnaire package that carries a subject (`403`), an answer that
+repeats a member name (`403`), an answer that fails validation at enforcement `strict`
+(`422`) — the recipient's gateway will not relay it, and the requester reads why. Only
+exchange machinery stays a bare non-`2xx`, which the Hub reports as `"hub
 routing failed"`: the checks that happen before any handler runs (a bad hop assertion, an
 envelope that fails to decode, a token that fails verification, a replay, an unknown
 transaction type) and the recipient's own faults (`5xx` — a validator or consent service
@@ -1070,3 +1113,48 @@ gateway: demo: edge capture requested but OBSERVER_ADDR is unset — capture dis
 
 — and in the name itself: a `SHN_DEMO_*` variable set anywhere but a demo is a
 misconfiguration, not a supported deployment posture.
+
+## Optional diagnostic collection for test deployments
+
+Capture is disabled by default. Configure these settings only on test participant
+instances whose traffic may be retained, including credentials and raw bodies.
+This is independent of the loopback observer and does not change authorization,
+routing, readiness, or clinical responses.
+
+| Setting | Meaning |
+|---|---|
+| `DIAGNOSTIC_SINK_URL` | HTTP(S) observation endpoint. Health is posted to `health` in the same parent path. Redirects are not followed. |
+| `DIAGNOSTIC_SOURCE` | Collector-configured source identity for this test participant. |
+| `DIAGNOSTIC_KEY_FILE` | Raw shared publication key, a nonempty regular file of at most 4096 bytes. |
+| `DIAGNOSTIC_TRACE_KEY_FILE` | Optional provider-only raw key for private ingress attribution proofs (also applies when `ROLE` is unset and defaults to `provider`). It does not grant exchange authority. |
+
+The first three settings must be present together. Invalid optional settings leave
+capture disabled and emit a fixed diagnostic warning; a missing trace key leaves
+call attribution unavailable. Set these only on the specifically configured test
+participants. Other gateway deployments remain off by default.
+
+Request handlers enqueue to a bounded queue (512 observations, 64 MiB retained,
+8 MiB maximum retained body per event). Each publication attempt has a bounded
+30-second ownership window so evidence waiting for another source's prerequisite
+can arrive without holding a request open. HTTP capture separately limits concurrent
+buffering and marks unread, aborted, limited or failed bodies partial. Publishing
+runs in the background with bounded retries; overload and collector failures can
+leave gaps. The collector's retention and staff access policy governs persisted
+traffic. This is application-visible evidence, not a packet capture or a complete
+record of all attempted calls.
+
+Private ingress proofs bind method and request URI to a call identity. The live
+body fingerprint and actual sealed-request ciphertext hash supply separate byte
+bindings. Reusing a correlation or patient identifier does not establish a call
+link. Invalid or absent proof affects attribution only. Recipient stage links are
+created after independent transport and authority checks; the Hub remains blind
+to payload content. SMART operation HTTP capture runs beneath bearer injection,
+and token acquisition is observed separately. Original request objects and the
+SMART token cache retain their existing behavior.
+
+Use an independent publication key per configured test service and a separate
+provider attribution-proof key. Replicas may share a service publication key; their
+process incarnations and sequence numbers remain distinct. A hosted operator can
+supply these settings through its existing secret materialization path, without
+changing clinical routing or requiring participant configuration. Enrollment and
+retirement belong to the collector; retiring capture must preserve existing evidence.

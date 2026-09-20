@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/SmartHealthNetwork/shn-gateway/diagnostics"
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
@@ -33,6 +34,7 @@ const maxPartnerBody = 8 << 20 // 8 MiB cap on a partner response body
 const relayBodyCap = 6 << 20 // 6 MiB — headroom under the 8 MiB MaxResponseBytes for seal + wrapper
 
 type nativeResponder struct {
+	diagnostic func(diagnostics.Event) bool
 	client     *http.Client
 	baseURL    string // FHIR base ($questionnaire-package, $submit, CoverageEligibilityRequest)
 	cdsBaseURL string // CDS Hooks base (/cds-services/{id}); defaults to baseURL when co-located
@@ -111,12 +113,15 @@ type nativeResponder struct {
 	// payorEdgeOwn / payorEdgeBackend implement the payer-edge identity mapping seam
 	// (payoredge.go, PAYER_DAVINCI_PAYOR_OWN / PAYER_DAVINCI_PAYOR_BACKEND): when both
 	// set, the CRD/DTR/PAS legs re-stamp the inbound Coverage's payor identity from
-	// payorEdgeOwn to payorEdgeBackend — ONLY when the inbound identity IS
-	// payorEdgeOwn (A1); anything else refuses loudly (fail-closed). nil (the default)
-	// ⇒ seam off, every leg forwards its Coverage payor verbatim — byte-identical to
-	// every deployment that does not set the two env vars.
+	// an identity this gateway OWNS to payorEdgeBackend — anything else refuses loudly
+	// (fail-closed). nil (the default) ⇒ seam off, every leg forwards its Coverage payor
+	// verbatim — byte-identical to every deployment that does not set the two env vars.
 	payorEdgeOwn     *shnsdk.PayerIdentifier
 	payorEdgeBackend *shnsdk.PayerIdentifier
+	// payorEdgePublished reports the payer identities this holder itself publishes on
+	// the network feed — the other half of "own" (payoredge.go, ownPayerIdentities).
+	// nil, or a holder with no published identity, ⇒ payorEdgeOwn alone decides.
+	payorEdgePublished func() []shnsdk.PayerIdentifier
 
 	// conformance is the policy of the gateway this responder runs in, passed
 	// as an option because NewNativeResponder runs before engine.New. The zero
@@ -226,7 +231,9 @@ func WithEndpointEvidenceObserver(f func(note string)) NativeOption {
 }
 
 // WithPayorEdgeIdentity turns on the payer-edge identity mapping seam (payoredge.go):
-// own is this deployment's registered payer identity (the assertion side — A1), backend
+// own is the configured half of this deployment's payer identity (the assertion side —
+// WithPayorEdgePublishedIdentities supplies the other half, the identities this holder
+// publishes on the network feed), backend
 // is the identifier this responder's backend leg knows itself by (the re-stamp target).
 // Unset (the zero-value NativeOption slice) ⇒ seam off, every CRD/DTR/PAS leg forwards
 // its Coverage payor verbatim (the prior behavior). Config loading enforces the
@@ -717,12 +724,14 @@ func (n *nativeResponder) post(ctx context.Context, base, path string, p relay.P
 		capture.request = append([]byte(nil), body...)
 		capture.response = nil
 	}
+	n.emitDiagnostic(ctx, "native.request", body, 0, "", req, req.Header)
 	resp, err := n.client.Do(req)
 	if err != nil {
 		return upstreamReply{}, LegResult{}, fmt.Errorf("upstream payer %s unreachable: %w", label, err)
 	}
 	defer resp.Body.Close()
 	rb, err := io.ReadAll(io.LimitReader(resp.Body, maxPartnerBody))
+	n.emitDiagnostic(ctx, "native.response", rb, resp.StatusCode, diagnosticReadDetail(err, len(rb)), req, resp.Header)
 	if capture != nil {
 		capture.response = append([]byte(nil), rb...)
 	}
@@ -746,6 +755,33 @@ func upstreamAnswer(resp *http.Response, rb []byte, label string) (upstreamReply
 		return reply, LegResult{Status: resp.StatusCode, Response: relay.Exact(reply.body, resp.Header.Get("Content-Type"))}, nil
 	}
 	return reply, LegResult{}, nil
+}
+
+// get reads base+path (the read sibling of post), reusing the same authed client. Used by the PAS
+// pend re-query (GET ClaimResponse/{id}); it sends no body. Same relay-non-2xx /
+// error-on-no-response contract as post.
+func (n *nativeResponder) get(ctx context.Context, base, path, label string) ([]byte, LegResult, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+path, nil)
+	if err != nil {
+		return nil, LegResult{}, fmt.Errorf("upstream payer %s request build failed: %w", label, err)
+	}
+	req.Header.Set("Accept", "application/json")
+	n.emitDiagnostic(ctx, "native.request", nil, 0, "", req, req.Header)
+	resp, err := n.client.Do(req)
+	if err != nil {
+		return nil, LegResult{}, fmt.Errorf("upstream payer %s unreachable: %w", label, err)
+	}
+	defer resp.Body.Close()
+	rb, err := io.ReadAll(io.LimitReader(resp.Body, maxPartnerBody))
+	n.emitDiagnostic(ctx, "native.response", rb, resp.StatusCode, diagnosticReadDetail(err, len(rb)), req, resp.Header)
+	if err != nil {
+		return nil, LegResult{}, fmt.Errorf("upstream payer %s read failed: %w", label, err)
+	}
+	reply, bad, err := upstreamAnswer(resp, rb, label)
+	if err != nil || bad.Status != 0 {
+		return nil, bad, err
+	}
+	return reply.raw, LegResult{}, nil
 }
 
 // forwardCRD sends a CDS Hooks request to the partner service chosen by its hook:
@@ -864,8 +900,9 @@ func certifyCDSHooksAnswer(ctx context.Context, policy ConformancePolicy, emit f
 
 // applyPayorEdgeToCRDRequest is the CRD legs' payer-edge identity mapping
 // (payoredge.go): maps the payer identity of every Coverage in the CDS Hooks request's
-// prefetch.coverage (a bare Coverage or a Bundle) from n.payorEdgeOwn to
-// n.payorEdgeBackend, ONLY when they name n.payorEdgeOwn. Unconfigured, the request is
+// prefetch.coverage (a bare Coverage or a Bundle) to n.payorEdgeBackend, ONLY when they
+// name an identity this gateway owns (ownPayerIdentities: the identities this holder
+// publishes on the network feed, union the configured one). Unconfigured, the request is
 // sent exactly. Configured, a request with no prefetch.coverage at all refuses too — an
 // absent one is itself the "no resolvable payor identifier" case, not a benign skip.
 func (n *nativeResponder) applyPayorEdgeToCRDRequest(in relay.Body) (relay.Payload, LegResult, error) {
