@@ -430,12 +430,18 @@ func TestMutationBaselinesAreAdmitted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	patientAdded, err := Apply(params, fhirJSON, EditDTRPatientObtain,
+		pd.AppendElement(at(t, pd, "parameter"), []byte(`{"name":"referenced","resource":{"resourceType":"Patient","id":"p1"}}`)))
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, c := range []struct {
 		bd boundary
 		p  Payload
 	}{
 		{realProviderDTR, Exact(params, fhirJSON)},
 		{realProviderDTR, coverageAdded},
+		{realProviderDTR, patientAdded},
 		{relayOnly, Exact(body, "application/json")},
 		{payerRequest, Exact(body, "application/json")},
 		{payerRequest, restamped},

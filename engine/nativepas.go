@@ -100,8 +100,10 @@ func (n *nativeResponder) handlePASClaimUpdateNative(ctx context.Context, corrID
 		bad.Rollback = release // a post-Begin partner non-2xx MUST release the claim (relay path)
 		return bad, nil
 	}
-	// FR-G28: validate the complete partner Bundle without changing its bytes.
-	response, lr := validateNativePASResponse(up.raw)
+	// FR-G28: validate the complete partner Bundle without changing its bytes. A
+	// refusal is logged here, with the correlation id and the reference that
+	// dangled, before the framed error goes back.
+	response, lr := validateRelayedPASResponse(corrID, "pas-claim-update", up.raw)
 	if lr.Status != 0 {
 		lr.Rollback = release
 		return lr, nil
@@ -233,7 +235,10 @@ func (n *nativeResponder) handlePASClaimNative(ctx context.Context, corrID, subj
 	if bad.Status != 0 {
 		return bad, nil // upstream non-2xx → relayable LegResult (Response carries the body)
 	}
-	response, lr := validateNativePASResponse(up.raw)
+	// FR-G28: the payer's Bundle must carry every resource it names. A refusal is
+	// logged here, with the correlation id and the reference that dangled, before
+	// the framed error goes back — the bytes themselves are not relayed.
+	response, lr := validateRelayedPASResponse(corrID, "pas-claim", up.raw)
 	if lr.Status != 0 {
 		return lr, nil
 	}

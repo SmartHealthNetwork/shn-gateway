@@ -1,0 +1,226 @@
+{
+  "entry": [
+    {
+      "fullUrl": "Coverage/cov-mbredifecs01-provider",
+      "resource": {
+        "beneficiary": {
+          "reference": "Patient/pat-mbredifecs01-provider"
+        },
+        "class": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "code": "group",
+                  "system": "http://terminology.hl7.org/CodeSystem/coverage-class"
+                }
+              ]
+            },
+            "value": "GRP-EDIFECS-0001"
+          }
+        ],
+        "contained": [
+          {
+            "id": "edifecs-payer-org",
+            "identifier": [
+              {
+                "system": "urn:oid:2.16.840.1.113883.6.300",
+                "value": "00402"
+              }
+            ],
+            "name": "Edifecs / Cotiviti (SHN routing 00402)",
+            "resourceType": "Organization"
+          }
+        ],
+        "id": "cov-mbredifecs01-provider",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:coverage",
+            "value": "SUB-EDIFECS-0001"
+          }
+        ],
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage"
+          ]
+        },
+        "payor": [
+          {
+            "reference": "#edifecs-payer-org"
+          }
+        ],
+        "relationship": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+              "code": "self"
+            }
+          ]
+        },
+        "resourceType": "Coverage",
+        "status": "active"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Coverage/cov-mbredifecs01-provider"
+      }
+    },
+    {
+      "fullUrl": "Coverage/cov-mbredifecs02-provider",
+      "resource": {
+        "beneficiary": {
+          "reference": "Patient/pat-mbredifecs02-provider"
+        },
+        "class": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "code": "group",
+                  "system": "http://terminology.hl7.org/CodeSystem/coverage-class"
+                }
+              ]
+            },
+            "value": "GRP-EDIFECS-0001"
+          }
+        ],
+        "contained": [
+          {
+            "id": "edifecs-payer-org",
+            "identifier": [
+              {
+                "system": "urn:oid:2.16.840.1.113883.6.300",
+                "value": "00402"
+              }
+            ],
+            "name": "Edifecs / Cotiviti (SHN routing 00402)",
+            "resourceType": "Organization"
+          }
+        ],
+        "id": "cov-mbredifecs02-provider",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:coverage",
+            "value": "SUB-EDIFECS-0002"
+          }
+        ],
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage"
+          ]
+        },
+        "payor": [
+          {
+            "reference": "#edifecs-payer-org"
+          }
+        ],
+        "relationship": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+              "code": "self"
+            }
+          ]
+        },
+        "resourceType": "Coverage",
+        "status": "active"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Coverage/cov-mbredifecs02-provider"
+      }
+    },
+    {
+      "fullUrl": "Patient/pat-mbredifecs01-provider",
+      "resource": {
+        "id": "pat-mbredifecs01-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:member",
+            "value": "MBR-EDIFECS-01"
+          }
+        ],
+        "name": [
+          {
+            "family": "Dvorak-Edifecs"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1955-03-01",
+        "resourceType": "Patient"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/pat-mbredifecs01-provider"
+      }
+    },
+    {
+      "fullUrl": "Patient/pat-mbredifecs02-provider",
+      "resource": {
+        "id": "pat-mbredifecs02-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:member",
+            "value": "MBR-EDIFECS-02"
+          }
+        ],
+        "name": [
+          {
+            "family": "Iversen-Edifecs"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1968-09-30",
+        "resourceType": "Patient"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/pat-mbredifecs02-provider"
+      }
+    }
+  ],
+  "resourceType": "Bundle",
+  "type": "transaction"
+}

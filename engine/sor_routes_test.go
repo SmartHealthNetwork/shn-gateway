@@ -218,7 +218,7 @@ func TestSoRSubjectRouteFamilies(t *testing.T) {
 				case "pas-update":
 					_, status, msg = g.conformantPASUpdateBindContext(ctx, pas, "pci")
 				case "next-question":
-					status, msg = g.bindNextQuestionSubjectContext(ctx, "Patient/MBR-COVERED", "pci")
+					status, msg = g.bindNextQuestionSubjectContext(ctx, "Patient/MBR-COVERED", "pci", nil)
 				case "crd-prefetch":
 					_, status, msg = g.ingressEnsureSelfContainedContext(ctx, "crd-order-select", crd, "MBR-COVERED")
 				}

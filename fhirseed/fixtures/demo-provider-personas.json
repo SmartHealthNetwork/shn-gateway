@@ -3749,6 +3749,225 @@
       }
     },
     {
+      "fullUrl": "Coverage/cov-mbredifecs01-provider",
+      "resource": {
+        "beneficiary": {
+          "reference": "Patient/pat-mbredifecs01-provider"
+        },
+        "class": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "code": "group",
+                  "system": "http://terminology.hl7.org/CodeSystem/coverage-class"
+                }
+              ]
+            },
+            "value": "GRP-EDIFECS-0001"
+          }
+        ],
+        "contained": [
+          {
+            "id": "edifecs-payer-org",
+            "identifier": [
+              {
+                "system": "urn:oid:2.16.840.1.113883.6.300",
+                "value": "00402"
+              }
+            ],
+            "name": "Edifecs / Cotiviti (SHN routing 00402)",
+            "resourceType": "Organization"
+          }
+        ],
+        "id": "cov-mbredifecs01-provider",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:coverage",
+            "value": "SUB-EDIFECS-0001"
+          }
+        ],
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage"
+          ]
+        },
+        "payor": [
+          {
+            "reference": "#edifecs-payer-org"
+          }
+        ],
+        "relationship": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+              "code": "self"
+            }
+          ]
+        },
+        "resourceType": "Coverage",
+        "status": "active"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Coverage/cov-mbredifecs01-provider"
+      }
+    },
+    {
+      "fullUrl": "Coverage/cov-mbredifecs02-provider",
+      "resource": {
+        "beneficiary": {
+          "reference": "Patient/pat-mbredifecs02-provider"
+        },
+        "class": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "code": "group",
+                  "system": "http://terminology.hl7.org/CodeSystem/coverage-class"
+                }
+              ]
+            },
+            "value": "GRP-EDIFECS-0001"
+          }
+        ],
+        "contained": [
+          {
+            "id": "edifecs-payer-org",
+            "identifier": [
+              {
+                "system": "urn:oid:2.16.840.1.113883.6.300",
+                "value": "00402"
+              }
+            ],
+            "name": "Edifecs / Cotiviti (SHN routing 00402)",
+            "resourceType": "Organization"
+          }
+        ],
+        "id": "cov-mbredifecs02-provider",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:coverage",
+            "value": "SUB-EDIFECS-0002"
+          }
+        ],
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage"
+          ]
+        },
+        "payor": [
+          {
+            "reference": "#edifecs-payer-org"
+          }
+        ],
+        "relationship": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+              "code": "self"
+            }
+          ]
+        },
+        "resourceType": "Coverage",
+        "status": "active"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Coverage/cov-mbredifecs02-provider"
+      }
+    },
+    {
+      "fullUrl": "Coverage/cov-mbrevicore01-provider",
+      "resource": {
+        "beneficiary": {
+          "reference": "Patient/pat-mbrevicore01-provider"
+        },
+        "class": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "code": "group",
+                  "system": "http://terminology.hl7.org/CodeSystem/coverage-class"
+                }
+              ]
+            },
+            "value": "GRP-EVICORE-0001"
+          }
+        ],
+        "contained": [
+          {
+            "id": "evicore-payer-org",
+            "identifier": [
+              {
+                "system": "urn:oid:2.16.840.1.113883.6.300",
+                "value": "00400"
+              }
+            ],
+            "name": "eviCore (SHN routing 00400)",
+            "resourceType": "Organization"
+          }
+        ],
+        "id": "cov-mbrevicore01-provider",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:coverage",
+            "value": "SUB-EVICORE-0001"
+          }
+        ],
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage"
+          ]
+        },
+        "payor": [
+          {
+            "reference": "#evicore-payer-org"
+          }
+        ],
+        "relationship": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+              "code": "self"
+            }
+          ]
+        },
+        "resourceType": "Coverage",
+        "status": "active"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Coverage/cov-mbrevicore01-provider"
+      }
+    },
+    {
       "fullUrl": "Coverage/cov-mbrextpayerabby-provider",
       "resource": {
         "beneficiary": {
@@ -3822,6 +4041,152 @@
       }
     },
     {
+      "fullUrl": "Coverage/cov-mbrhealthlx01-provider",
+      "resource": {
+        "beneficiary": {
+          "reference": "Patient/pat-mbrhealthlx01-provider"
+        },
+        "class": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "code": "group",
+                  "system": "http://terminology.hl7.org/CodeSystem/coverage-class"
+                }
+              ]
+            },
+            "value": "GRP-HEALTHLX-0001"
+          }
+        ],
+        "contained": [
+          {
+            "id": "healthlx-payer-org",
+            "identifier": [
+              {
+                "system": "urn:oid:2.16.840.1.113883.6.300",
+                "value": "00403"
+              }
+            ],
+            "name": "HealthLX (SHN routing 00403)",
+            "resourceType": "Organization"
+          }
+        ],
+        "id": "cov-mbrhealthlx01-provider",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:coverage",
+            "value": "SUB-HEALTHLX-0001"
+          }
+        ],
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage"
+          ]
+        },
+        "payor": [
+          {
+            "reference": "#healthlx-payer-org"
+          }
+        ],
+        "relationship": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+              "code": "self"
+            }
+          ]
+        },
+        "resourceType": "Coverage",
+        "status": "active"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Coverage/cov-mbrhealthlx01-provider"
+      }
+    },
+    {
+      "fullUrl": "Coverage/cov-mbrhealthlx02-provider",
+      "resource": {
+        "beneficiary": {
+          "reference": "Patient/pat-mbrhealthlx02-provider"
+        },
+        "class": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "code": "group",
+                  "system": "http://terminology.hl7.org/CodeSystem/coverage-class"
+                }
+              ]
+            },
+            "value": "GRP-HEALTHLX-0001"
+          }
+        ],
+        "contained": [
+          {
+            "id": "healthlx-payer-org",
+            "identifier": [
+              {
+                "system": "urn:oid:2.16.840.1.113883.6.300",
+                "value": "00403"
+              }
+            ],
+            "name": "HealthLX (SHN routing 00403)",
+            "resourceType": "Organization"
+          }
+        ],
+        "id": "cov-mbrhealthlx02-provider",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:coverage",
+            "value": "SUB-HEALTHLX-0002"
+          }
+        ],
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage"
+          ]
+        },
+        "payor": [
+          {
+            "reference": "#healthlx-payer-org"
+          }
+        ],
+        "relationship": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+              "code": "self"
+            }
+          ]
+        },
+        "resourceType": "Coverage",
+        "status": "active"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Coverage/cov-mbrhealthlx02-provider"
+      }
+    },
+    {
       "fullUrl": "Coverage/cov-mbrnotcovered-provider",
       "resource": {
         "beneficiary": {
@@ -3879,6 +4244,152 @@
       "request": {
         "method": "PUT",
         "url": "Coverage/cov-mbrnotcovered-provider"
+      }
+    },
+    {
+      "fullUrl": "Coverage/cov-mbrsmile01-provider",
+      "resource": {
+        "beneficiary": {
+          "reference": "Patient/pat-mbrsmile01-provider"
+        },
+        "class": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "code": "group",
+                  "system": "http://terminology.hl7.org/CodeSystem/coverage-class"
+                }
+              ]
+            },
+            "value": "GRP-SMILE-0001"
+          }
+        ],
+        "contained": [
+          {
+            "id": "smile-payer-org",
+            "identifier": [
+              {
+                "system": "urn:oid:2.16.840.1.113883.6.300",
+                "value": "00401"
+              }
+            ],
+            "name": "Smile Digital Health (SHN routing 00401)",
+            "resourceType": "Organization"
+          }
+        ],
+        "id": "cov-mbrsmile01-provider",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:coverage",
+            "value": "SUB-SMILE-0001"
+          }
+        ],
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage"
+          ]
+        },
+        "payor": [
+          {
+            "reference": "#smile-payer-org"
+          }
+        ],
+        "relationship": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+              "code": "self"
+            }
+          ]
+        },
+        "resourceType": "Coverage",
+        "status": "active"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Coverage/cov-mbrsmile01-provider"
+      }
+    },
+    {
+      "fullUrl": "Coverage/cov-mbrsmile02-provider",
+      "resource": {
+        "beneficiary": {
+          "reference": "Patient/pat-mbrsmile02-provider"
+        },
+        "class": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "code": "group",
+                  "system": "http://terminology.hl7.org/CodeSystem/coverage-class"
+                }
+              ]
+            },
+            "value": "GRP-SMILE-0001"
+          }
+        ],
+        "contained": [
+          {
+            "id": "smile-payer-org",
+            "identifier": [
+              {
+                "system": "urn:oid:2.16.840.1.113883.6.300",
+                "value": "00401"
+              }
+            ],
+            "name": "Smile Digital Health (SHN routing 00401)",
+            "resourceType": "Organization"
+          }
+        ],
+        "id": "cov-mbrsmile02-provider",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:coverage",
+            "value": "SUB-SMILE-0002"
+          }
+        ],
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage"
+          ]
+        },
+        "payor": [
+          {
+            "reference": "#smile-payer-org"
+          }
+        ],
+        "relationship": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+              "code": "self"
+            }
+          ]
+        },
+        "resourceType": "Coverage",
+        "status": "active"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Coverage/cov-mbrsmile02-provider"
       }
     },
     {
@@ -8670,6 +9181,117 @@
       }
     },
     {
+      "fullUrl": "Patient/pat-mbredifecs01-provider",
+      "resource": {
+        "id": "pat-mbredifecs01-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:member",
+            "value": "MBR-EDIFECS-01"
+          }
+        ],
+        "name": [
+          {
+            "family": "Dvorak-Edifecs"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1955-03-01",
+        "resourceType": "Patient"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/pat-mbredifecs01-provider"
+      }
+    },
+    {
+      "fullUrl": "Patient/pat-mbredifecs02-provider",
+      "resource": {
+        "id": "pat-mbredifecs02-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:member",
+            "value": "MBR-EDIFECS-02"
+          }
+        ],
+        "name": [
+          {
+            "family": "Iversen-Edifecs"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1968-09-30",
+        "resourceType": "Patient"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/pat-mbredifecs02-provider"
+      }
+    },
+    {
+      "fullUrl": "Patient/pat-mbrevicore01-provider",
+      "resource": {
+        "id": "pat-mbrevicore01-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:member",
+            "value": "MBR-EVICORE-01"
+          }
+        ],
+        "name": [
+          {
+            "family": "Adeyemi-Evicore"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1954-06-18",
+        "resourceType": "Patient"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/pat-mbrevicore01-provider"
+      }
+    },
+    {
       "fullUrl": "Patient/pat-mbrextpayerabby-provider",
       "resource": {
         "id": "pat-mbrextpayerabby-provider",
@@ -8707,6 +9329,80 @@
       }
     },
     {
+      "fullUrl": "Patient/pat-mbrhealthlx01-provider",
+      "resource": {
+        "id": "pat-mbrhealthlx01-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:member",
+            "value": "MBR-HEALTHLX-01"
+          }
+        ],
+        "name": [
+          {
+            "family": "Batista-Healthlx"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1950-12-05",
+        "resourceType": "Patient"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/pat-mbrhealthlx01-provider"
+      }
+    },
+    {
+      "fullUrl": "Patient/pat-mbrhealthlx02-provider",
+      "resource": {
+        "id": "pat-mbrhealthlx02-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:member",
+            "value": "MBR-HEALTHLX-02"
+          }
+        ],
+        "name": [
+          {
+            "family": "Fontaine-Healthlx"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1979-04-22",
+        "resourceType": "Patient"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/pat-mbrhealthlx02-provider"
+      }
+    },
+    {
       "fullUrl": "Patient/pat-mbrnotcovered-provider",
       "resource": {
         "id": "pat-mbrnotcovered-provider",
@@ -8741,6 +9437,80 @@
       "request": {
         "method": "PUT",
         "url": "Patient/pat-mbrnotcovered-provider"
+      }
+    },
+    {
+      "fullUrl": "Patient/pat-mbrsmile01-provider",
+      "resource": {
+        "id": "pat-mbrsmile01-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:member",
+            "value": "MBR-SMILE-01"
+          }
+        ],
+        "name": [
+          {
+            "family": "Lindqvist-Smile"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1961-11-27",
+        "resourceType": "Patient"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/pat-mbrsmile01-provider"
+      }
+    },
+    {
+      "fullUrl": "Patient/pat-mbrsmile02-provider",
+      "resource": {
+        "id": "pat-mbrsmile02-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:member",
+            "value": "MBR-SMILE-02"
+          }
+        ],
+        "name": [
+          {
+            "family": "Moreau-Smile"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1973-02-14",
+        "resourceType": "Patient"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/pat-mbrsmile02-provider"
       }
     },
     {

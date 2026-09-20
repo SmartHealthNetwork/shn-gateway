@@ -1,0 +1,226 @@
+{
+  "entry": [
+    {
+      "fullUrl": "Coverage/cov-mbrsmile01-provider",
+      "resource": {
+        "beneficiary": {
+          "reference": "Patient/pat-mbrsmile01-provider"
+        },
+        "class": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "code": "group",
+                  "system": "http://terminology.hl7.org/CodeSystem/coverage-class"
+                }
+              ]
+            },
+            "value": "GRP-SMILE-0001"
+          }
+        ],
+        "contained": [
+          {
+            "id": "smile-payer-org",
+            "identifier": [
+              {
+                "system": "urn:oid:2.16.840.1.113883.6.300",
+                "value": "00401"
+              }
+            ],
+            "name": "Smile Digital Health (SHN routing 00401)",
+            "resourceType": "Organization"
+          }
+        ],
+        "id": "cov-mbrsmile01-provider",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:coverage",
+            "value": "SUB-SMILE-0001"
+          }
+        ],
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage"
+          ]
+        },
+        "payor": [
+          {
+            "reference": "#smile-payer-org"
+          }
+        ],
+        "relationship": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+              "code": "self"
+            }
+          ]
+        },
+        "resourceType": "Coverage",
+        "status": "active"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Coverage/cov-mbrsmile01-provider"
+      }
+    },
+    {
+      "fullUrl": "Coverage/cov-mbrsmile02-provider",
+      "resource": {
+        "beneficiary": {
+          "reference": "Patient/pat-mbrsmile02-provider"
+        },
+        "class": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "code": "group",
+                  "system": "http://terminology.hl7.org/CodeSystem/coverage-class"
+                }
+              ]
+            },
+            "value": "GRP-SMILE-0001"
+          }
+        ],
+        "contained": [
+          {
+            "id": "smile-payer-org",
+            "identifier": [
+              {
+                "system": "urn:oid:2.16.840.1.113883.6.300",
+                "value": "00401"
+              }
+            ],
+            "name": "Smile Digital Health (SHN routing 00401)",
+            "resourceType": "Organization"
+          }
+        ],
+        "id": "cov-mbrsmile02-provider",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:coverage",
+            "value": "SUB-SMILE-0002"
+          }
+        ],
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage"
+          ]
+        },
+        "payor": [
+          {
+            "reference": "#smile-payer-org"
+          }
+        ],
+        "relationship": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+              "code": "self"
+            }
+          ]
+        },
+        "resourceType": "Coverage",
+        "status": "active"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Coverage/cov-mbrsmile02-provider"
+      }
+    },
+    {
+      "fullUrl": "Patient/pat-mbrsmile01-provider",
+      "resource": {
+        "id": "pat-mbrsmile01-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:member",
+            "value": "MBR-SMILE-01"
+          }
+        ],
+        "name": [
+          {
+            "family": "Lindqvist-Smile"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1961-11-27",
+        "resourceType": "Patient"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/pat-mbrsmile01-provider"
+      }
+    },
+    {
+      "fullUrl": "Patient/pat-mbrsmile02-provider",
+      "resource": {
+        "id": "pat-mbrsmile02-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:member",
+            "value": "MBR-SMILE-02"
+          }
+        ],
+        "name": [
+          {
+            "family": "Moreau-Smile"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1973-02-14",
+        "resourceType": "Patient"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/pat-mbrsmile02-provider"
+      }
+    }
+  ],
+  "resourceType": "Bundle",
+  "type": "transaction"
+}

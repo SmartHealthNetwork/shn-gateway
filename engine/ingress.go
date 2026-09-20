@@ -153,7 +153,7 @@ func (g *Gateway) handleCDSDiscovery(w http.ResponseWriter, r *http.Request) {
 	if g.ingressAuthRefused(w, r) {
 		return
 	}
-	body, err := cdsDiscoveryJSON()
+	body, err := g.cdsDiscoveryJSON()
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build discovery failed"})
 		return
@@ -177,9 +177,9 @@ func (g *Gateway) handleCRDIngress(w http.ResponseWriter, r *http.Request) {
 	if g.ingressAuthRefused(w, r) {
 		return
 	}
-	svc, known := cdsIngressServiceByID(r.PathValue("id"))
+	svc, offered, known := g.advertisedCDSServiceByID(r.PathValue("id"))
 	if !known {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown CDS service " + strconv.Quote(r.PathValue("id"))})
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "unknown CDS service " + strconv.Quote(r.PathValue("id")), "offered": offered})
 		return
 	}
 	legType := svc.Leg

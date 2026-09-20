@@ -38,6 +38,8 @@ func TestRelayEditRegistryPinned(t *testing.T) {
 			}, "replace-value"},
 		{"E-04", "dtr-coverage-obtain", []string{"dtr-questionnaire-fetch"}, relay.RoleRequester, relay.DirectionRequest,
 			[]string{"$.parameter"}, "array-append"},
+		{"E-05", "dtr-patient-obtain", []string{"dtr-questionnaire-fetch"}, relay.RoleRequester, relay.DirectionRequest,
+			[]string{"$.parameter"}, "array-append"},
 	}
 	if len(relayEdits) != len(want) {
 		t.Fatalf("registry has %d edits, want %d", len(relayEdits), len(want))
@@ -56,7 +58,7 @@ func TestRelayEditRegistryPinned(t *testing.T) {
 			t.Errorf("%s: lookup failed", e.ID)
 		}
 	}
-	if _, ok := relayEditByID("E-05"); ok {
+	if _, ok := relayEditByID("E-06"); ok {
 		t.Fatal("an unregistered id resolved")
 	}
 	// The registry and the relay package agree on the closed id set.

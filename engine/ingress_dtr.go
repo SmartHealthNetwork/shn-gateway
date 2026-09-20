@@ -1,7 +1,9 @@
 // ingress_dtr.go — the DTR $questionnaire-package ingress: the EHR's own
 // operation input (its Parameters) is carried to the payer exactly, or with
-// the one registered edit that adds the patient's Coverage from this
-// participant's system of record when the request carries none. The ingress
+// the registered edits that add, from this participant's system of record,
+// the patient's Coverage when the request carries none and — under the seam
+// that carries members a gateway does not hold — the patient's own record
+// when the request carries no Patient. The ingress
 // binds every resource the request carries to one patient, routes by every
 // coverage, and names the operation in the request frame. It does not invoke
 // the Populator: the EHR's own DTR application populates.
@@ -41,7 +43,8 @@ const dtrPackageContentType = "application/fhir+json"
 // the provider.
 type dtrIngressRequest struct {
 	// request is the EHR's Parameters, exact or with the patient's Coverage
-	// appended (relay.EditDTRCoverageObtain).
+	// (relay.EditDTRCoverageObtain) and, under Config.AcceptUnknownMembers, the
+	// provider's own Patient record (relay.EditDTRPatientObtain) appended.
 	request relay.Payload
 	// member is the patient every resource names; pci is the network's
 	// identifier for that patient.
@@ -156,7 +159,7 @@ func (g *Gateway) prepareDTRPackageRequest(ctx context.Context, raw []byte) (dtr
 	for m := range patients {
 		out.member = m
 	}
-	pci, found, err := g.resolveSubjectPCI(ctx, out.member)
+	pci, found, err := g.resolveSubjectPCI(ctx, out.member, raw)
 	if err != nil {
 		status, msg := SoRFailureResponse(err)
 		return out, status, msg
@@ -201,19 +204,37 @@ func (g *Gateway) prepareDTRPackageRequest(ctx context.Context, raw []byte) (dtr
 		}
 	}
 
-	if hasCoverage {
+	var changes []relay.Change
+	element := func(name string, resource []byte) []byte {
+		e := make([]byte, 0, len(resource)+len(name)+24)
+		e = append(e, `{"name":"`...)
+		e = append(e, name...)
+		e = append(e, `","resource":`...)
+		e = append(e, resource...)
+		return append(e, '}')
+	}
+	if !hasCoverage {
+		coverage, status, msg := g.obtainDTRCoverage(ctx, &out, fence)
+		if status != 0 {
+			return out, status, msg
+		}
+		changes = append(changes, relay.Change{Edit: relay.EditDTRCoverageObtain, Ops: []relay.Op{doc.AppendElement(paramArr, element("coverage", coverage))}})
+		out.coverages = [][]byte{coverage}
+	}
+	if g.cfg.AcceptUnknownMembers && !carriesPatient(raw, out.member) {
+		patient, status, msg := g.obtainDTRPatient(ctx, out.member, fence)
+		if status != 0 {
+			return out, status, msg
+		}
+		if patient != nil {
+			changes = append(changes, relay.Change{Edit: relay.EditDTRPatientObtain, Ops: []relay.Op{doc.AppendElement(paramArr, element("referenced", patient))}})
+		}
+	}
+	if len(changes) == 0 {
 		out.request = relay.Exact(body, dtrPackageContentType)
 		return out, 0, ""
 	}
-	coverage, status, msg := g.obtainDTRCoverage(ctx, &out, fence)
-	if status != 0 {
-		return out, status, msg
-	}
-	element := make([]byte, 0, len(coverage)+32)
-	element = append(element, `{"name":"coverage","resource":`...)
-	element = append(element, coverage...)
-	element = append(element, '}')
-	out.request, err = relay.Apply(body, dtrPackageContentType, relay.EditDTRCoverageObtain, doc.AppendElement(paramArr, element))
+	out.request, err = relay.ApplyChanges(body, dtrPackageContentType, changes...)
 	var signed *relay.SignedContentError
 	switch {
 	case errors.As(err, &signed):
@@ -221,8 +242,73 @@ func (g *Gateway) prepareDTRPackageRequest(ctx context.Context, raw []byte) (dtr
 	case err != nil:
 		return out, http.StatusInternalServerError, "prepare questionnaire-package request failed"
 	}
-	out.coverages = [][]byte{coverage}
 	return out, 0, ""
+}
+
+// obtainDTRPatient reads the Patient a request carrying none is sent with
+// under Config.AcceptUnknownMembers: the system of record's own record for
+// the bound patient, by the reference the system names it by, recorded as a
+// PrefetchObtainedEvent (key patient, operation questionnaire-package). The
+// payer's side, which may not hold the member, derives the subject from
+// this record exactly as this side derives it from the same record. Nothing
+// is added when the system does not hold the patient, or names it by another
+// id (the request's references would not resolve to it): the request is sent
+// as it is and binds by member id alone on both sides. A record about another
+// patient, or not a Patient, is refused.
+func (g *Gateway) obtainDTRPatient(ctx context.Context, member string, fence patientFence) ([]byte, int, string) {
+	const leg = "dtr-questionnaire-fetch"
+	ref, found, err := ReadSystemOfRecord(g.cfg.SoR).PatientFHIRRefContext(ctx, member)
+	if err != nil {
+		status, msg := SoRFailureResponse(err)
+		return nil, status, msg
+	}
+	if !found {
+		return nil, 0, ""
+	}
+	id, ok := strings.CutPrefix(ref, "Patient/")
+	if !ok || !fhirIDRE.MatchString(id) {
+		status, msg := SoRFailureResponse(&SoRReadError{Kind: SoRInvalidResponse})
+		return nil, status, msg
+	}
+	if id != member {
+		return nil, 0, ""
+	}
+	query := "Patient/" + id
+	record := func(outcome SearchOutcome, reason string, count int) {
+		g.recordPrefetch(leg, prefetchObtained{Key: prefetchPatientKey, Operation: shnsdk.FrameOperationQuestionnairePackage,
+			Query: query, Outcome: outcome, Reason: reason, Count: count})
+	}
+	patient, found, err := ReadSystemOfRecord(g.cfg.SoR).ResolveByReferenceContext(ctx, query)
+	if err != nil {
+		status, msg := SoRFailureResponse(err)
+		outcome := SearchMalformed
+		if status == http.StatusServiceUnavailable {
+			outcome = SearchUnavailable
+		}
+		record(outcome, string(safeSoRError(err).Kind), 0)
+		return nil, status, msg
+	}
+	if !found {
+		record(SearchZero, "", 0)
+		return nil, http.StatusUnprocessableEntity, "patient not found in system of record"
+	}
+	var head struct {
+		ResourceType string `json:"resourceType"`
+	}
+	if decodeMessage(patient, &head) != nil || head.ResourceType != "Patient" {
+		record(SearchMalformed, "not a Patient", 0)
+		status, msg := SoRFailureResponse(&SoRReadError{Kind: SoRInvalidResponse})
+		return nil, status, msg
+	}
+	record(SearchOK, "", 1)
+	if err := fence.check(patient); err != nil {
+		var ce *CompartmentError
+		if errors.As(err, &ce) && ce.Reason == opaqueContentReason {
+			return nil, http.StatusBadGateway, "system of record returned a Binary resource"
+		}
+		return nil, http.StatusBadGateway, "system of record returned another patient's resource"
+	}
+	return patient, 0, ""
 }
 
 // dtrCoverageNamedDifferently refuses a request without coverage whose

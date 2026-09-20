@@ -82,7 +82,7 @@ func (g *Gateway) conformantCRDBindContext(ctx context.Context, reqJSON []byte, 
 	if srMember != covMember || srMember != ctxMember {
 		return nil, nil, http.StatusBadRequest, "inconsistent patient in order-select"
 	}
-	pci, found, readErr := g.resolveSubjectPCI(ctx, srMember)
+	pci, found, readErr := g.resolveSubjectPCI(ctx, srMember, reqJSON)
 	if readErr != nil {
 		status, msg := SoRFailureResponse(readErr)
 		return nil, nil, status, msg
@@ -205,16 +205,16 @@ func (g *Gateway) handleCRDNativeInbound(w http.ResponseWriter, r *http.Request,
 	ctx := r.Context()
 	srJSON, covJSON, status, msg := g.conformantCRDBindContext(ctx, reqJSON, tok.Subject)
 	if status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
+		g.refuseInbound(w, r, legCRDOrderSelect, env, tok, answerTok, status, msg, nil)
 		return
 	}
 	if status, msg := g.validateFHIR(ctx, srJSON, "ingress", ""); status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
+		g.refuseInbound(w, r, legCRDOrderSelect, env, tok, answerTok, status, msg, nil)
 		return
 	}
 	if len(covJSON) > 0 {
 		if status, msg := g.validateFHIR(ctx, covJSON, "ingress", ""); status != 0 {
-			writeJSON(w, status, map[string]string{"error": msg})
+			g.refuseInbound(w, r, legCRDOrderSelect, env, tok, answerTok, status, msg, nil)
 			return
 		}
 	}

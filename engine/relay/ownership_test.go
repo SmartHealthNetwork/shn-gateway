@@ -24,7 +24,7 @@ func pinnedOwnership() map[Key]Rule {
 	m := map[Key]Rule{
 		{"crd-order-dispatch", rq, req, OutcomeCarried}:      {Allowed: own(R, E), Edits: []EditID{"E-01", "E-02"}},
 		{"crd-order-select", rq, req, OutcomeCarried}:        {Allowed: own(R, E), Edits: []EditID{"E-01", "E-02"}},
-		{"dtr-questionnaire-fetch", rq, req, OutcomeCarried}: {Allowed: own(R, E), Edits: []EditID{"E-04"}},
+		{"dtr-questionnaire-fetch", rq, req, OutcomeCarried}: {Allowed: own(R, E), Edits: []EditID{"E-04", "E-05"}},
 		{"pas-claim", rq, req, OutcomeCarried}:               relayOnly,
 		{"pas-claim-inquire", rq, req, OutcomeCarried}:       relayOnly,
 		{"pas-claim-update", rq, req, OutcomeCarried}:        relayOnly,

@@ -228,7 +228,8 @@ var legOwnership = func() map[Key]Rule {
 		// A prior-authorization Bundle is relayed exactly; a CDS Hooks
 		// request is relayed exactly or with the callback removed and absent
 		// prefetch values added; a questionnaire package request is relayed
-		// exactly or with the patient's Coverage added when it carries none.
+		// exactly or with the patient's Coverage added when it carries none (and,
+		// under the unknown-member seam, the provider's own Patient record).
 		{"crd-order-dispatch", RoleRequester, DirectionRequest, OutcomeCarried}: {
 			Allowed: []Ownership{OwnershipRelayed, OwnershipEdited}, Edits: []EditID{EditCDSCallbackStrip, EditCDSPrefetchObtain},
 		},
@@ -236,7 +237,7 @@ var legOwnership = func() map[Key]Rule {
 			Allowed: []Ownership{OwnershipRelayed, OwnershipEdited}, Edits: []EditID{EditCDSCallbackStrip, EditCDSPrefetchObtain},
 		},
 		{"dtr-questionnaire-fetch", RoleRequester, DirectionRequest, OutcomeCarried}: {
-			Allowed: []Ownership{OwnershipRelayed, OwnershipEdited}, Edits: []EditID{EditDTRCoverageObtain},
+			Allowed: []Ownership{OwnershipRelayed, OwnershipEdited}, Edits: []EditID{EditDTRCoverageObtain, EditDTRPatientObtain},
 		},
 		{"pas-claim", RoleRequester, DirectionRequest, OutcomeCarried}:         {Allowed: relayed},
 		{"pas-claim-inquire", RoleRequester, DirectionRequest, OutcomeCarried}: {Allowed: relayed},

@@ -145,6 +145,14 @@ type config struct {
 	// itself translated between IG lines, and an answer it cannot read at all.
 	ConformanceEnforcement engine.ConformanceEnforcement
 
+	// AdvertisedCDSHooks (CDS_ADVERTISE_HOOKS) narrows the CDS Hooks services
+	// the provider ingress advertises and dispatches to the hooks named, a
+	// comma-separated list. Unset advertises every hook the network carries.
+	// An interim, optional override for a lane whose payers carry no
+	// order-dispatch leg; a value naming a hook the network does not carry
+	// refuses to boot.
+	AdvertisedCDSHooks []string
+
 	// Trust-anchor key-fetch URL overrides (first-class operator config):
 	// override the discovery-advertised key URL when the gateway runs in the same
 	// network as the substrate. firstNonEmpty(env, discovery); discovery is the default.
@@ -285,7 +293,8 @@ type config struct {
 
 	// AcceptUnknownMembers is the connectathon test-lane seam: on the Da Vinci
 	// CRD/DTR/PAS legs, a subject the system of record does not hold binds by member id
-	// alone instead of being refused. Set by SHN_ACCEPT_UNKNOWN_MEMBERS (any non-empty
+	// plus the demographics of the Patient the request carries (the id alone when it
+	// carries none) instead of being refused. Set by SHN_ACCEPT_UNKNOWN_MEMBERS (any non-empty
 	// value). Default off; never set on a production gateway — the boot log says so.
 	AcceptUnknownMembers bool
 
@@ -580,6 +589,14 @@ func loadConfig(getenv func(string) string) (config, error) {
 		cfg.ConformanceEnforcement = level
 	} else {
 		cfg.ConformanceEnforcement = engine.EnforcementNone
+	}
+
+	if raw := getenv("CDS_ADVERTISE_HOOKS"); raw != "" {
+		hooks, err := engine.ParseAdvertisedCDSHooks(raw)
+		if err != nil {
+			return config{}, fmt.Errorf("gateway: %w", err)
+		}
+		cfg.AdvertisedCDSHooks = hooks
 	}
 
 	if cfg.FHIRTokenURL != "" {
@@ -1483,6 +1500,7 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		// ConformanceEnforcement: none unless CONFORMANCE_ENFORCEMENT=strict
 		// (loadConfig above is what makes an absent value none).
 		ConformanceEnforcement: cfg.ConformanceEnforcement,
+		AdvertisedCDSHooks:     cfg.AdvertisedCDSHooks,
 		SoR:                    sor,
 		Store:                  store,
 		Clock:                  clock, // production: time.Now; hermetic tests: the harness's injected clock (HandlerWithClock)
@@ -1626,7 +1644,7 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	gwCfg.IngressClients = cfg.IngressClients
 	gwCfg.AcceptUnknownMembers = cfg.AcceptUnknownMembers
 	if cfg.AcceptUnknownMembers {
-		log.Printf("gateway: WARNING: SHN_ACCEPT_UNKNOWN_MEMBERS is set — a Da Vinci CRD/DTR/PAS subject the system of record does not hold binds by member id alone (test-lane seam); never set this on a production gateway")
+		log.Printf("gateway: WARNING: SHN_ACCEPT_UNKNOWN_MEMBERS is set — a Da Vinci CRD/DTR/PAS subject the system of record does not hold binds by member id plus the demographics of the Patient the request carries (test-lane seam); never set this on a production gateway")
 	}
 
 	// Observer stream: hub + engine callback, only when configured. The demo

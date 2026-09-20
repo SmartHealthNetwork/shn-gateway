@@ -1043,15 +1043,15 @@ func (n *nativeResponder) handlePASInquireNative(ctx context.Context, contract s
 func (g *Gateway) handlePASInquireInbound(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token, bundleJSON []byte, answerTok string) {
 	facts, status, msg := parsePASInquiryFacts(bundleJSON)
 	if status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
+		g.refuseInbound(w, r, legPASClaimInquire, env, tok, answerTok, status, msg, nil)
 		return
 	}
-	pci, found, readErr := g.resolveSubjectPCI(r.Context(), facts.member)
+	pci, found, readErr := g.resolveSubjectPCI(r.Context(), facts.member, bundleJSON)
 	if writeSoRFailure(w, readErr) {
 		return
 	}
 	if !found {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown member"})
+		g.refuseInbound(w, r, legPASClaimInquire, env, tok, answerTok, http.StatusBadRequest, refusalUnknownMember, nil)
 		return
 	}
 	if pci != tok.Subject {
@@ -1338,7 +1338,7 @@ func (g *Gateway) handlePASInquireIngress(w http.ResponseWriter, r *http.Request
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
-	pci, found, readErr := g.resolveSubjectPCI(r.Context(), facts.member)
+	pci, found, readErr := g.resolveSubjectPCI(r.Context(), facts.member, body)
 	if writeSoRFailure(w, readErr) {
 		return
 	}

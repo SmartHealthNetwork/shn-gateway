@@ -83,9 +83,15 @@ const (
 	// package request that carried none, read from the provider's own
 	// system.
 	EditDTRCoverageObtain EditID = "E-04"
+	// EditDTRPatientObtain adds the provider's own Patient record for the bound
+	// patient, as a referenced resource, to a questionnaire package request
+	// that carried no Patient — only under the connectathon seam that carries
+	// members a gateway does not hold, so the payer's side can bind the same
+	// subject from the request.
+	EditDTRPatientObtain EditID = "E-05"
 )
 
-var editIDs = []EditID{EditCDSCallbackStrip, EditCDSPrefetchObtain, EditPayorEdgeRestamp, EditDTRCoverageObtain}
+var editIDs = []EditID{EditCDSCallbackStrip, EditCDSPrefetchObtain, EditPayorEdgeRestamp, EditDTRCoverageObtain, EditDTRPatientObtain}
 
 // EditIDs returns every registered edit id, in order.
 func EditIDs() []EditID { return slices.Clone(editIDs) }

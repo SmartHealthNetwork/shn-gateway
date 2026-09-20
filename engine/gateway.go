@@ -298,6 +298,13 @@ type Config struct {
 	// participant and hosted gate therefore pins its level explicitly
 	// (test/invariants' TestInvariant_EveryGateRunsStrict).
 	ConformanceEnforcement ConformanceEnforcement
+	// AdvertisedCDSHooks narrows which CDS Hooks services the provider ingress
+	// advertises and dispatches (ParseAdvertisedCDSHooks). Nil advertises every
+	// hook the network carries. An interim, optional override: the registry
+	// carries no declaration of the legs a payer offers, so a lane whose payers
+	// carry no order-dispatch leg otherwise advertises a service that fails at
+	// routing. It removes a false promise; it never adds a capability.
+	AdvertisedCDSHooks []string
 }
 
 // Gateway is a constructed holder gateway.

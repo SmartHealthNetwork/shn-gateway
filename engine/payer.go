@@ -38,13 +38,13 @@ func (g *Gateway) handleDTRInbound(w http.ResponseWriter, r *http.Request, env s
 	switch RequestFrameOperation(ctx) {
 	case shnsdk.FrameOperationQuestionnairePackage:
 		if status, msg := g.bindPackageParameters(ctx, reqJSON, tok.Subject); status != 0 {
-			writeJSON(w, status, map[string]string{"error": msg})
+			g.refuseInbound(w, r, legDTR, env, tok, answerTok, status, msg, nil)
 			return
 		}
 	case shnsdk.FrameOperationNextQuestion:
 		subject, ok := framedNextQuestionSubject(reqJSON)
 		if !ok {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "parse next-question input failed"})
+			g.refuseInbound(w, r, legDTR, env, tok, answerTok, http.StatusBadRequest, "parse next-question input failed", nil)
 			return
 		}
 		nextQuestionSubject, isNextQuestion = subject, true
@@ -54,17 +54,17 @@ func (g *Gateway) handleDTRInbound(w http.ResponseWriter, r *http.Request, env s
 		nextQuestionSubject, isNextQuestion = nextQuestionRequestSubject(reqJSON)
 		if !isNextQuestion {
 			if status, msg := g.bindLegacyPackageRequest(ctx, reqJSON, tok.Subject); status != 0 {
-				writeJSON(w, status, map[string]string{"error": msg})
+				g.refuseInbound(w, r, legDTR, env, tok, answerTok, status, msg, nil)
 				return
 			}
 		}
 	default:
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unsupported DTR operation"})
+		g.refuseInbound(w, r, legDTR, env, tok, answerTok, http.StatusBadRequest, "unsupported DTR operation", nil)
 		return
 	}
 	if isNextQuestion {
-		if status, msg := g.bindNextQuestionSubjectContext(ctx, nextQuestionSubject, tok.Subject); status != 0 {
-			writeJSON(w, status, map[string]string{"error": msg})
+		if status, msg := g.bindNextQuestionSubjectContext(ctx, nextQuestionSubject, tok.Subject, reqJSON); status != 0 {
+			g.refuseInbound(w, r, legDTR, env, tok, answerTok, status, msg, nil)
 			return
 		}
 	}
@@ -287,12 +287,12 @@ func docText(d *relay.Document, obj relay.NodeID, key string) string {
 // bindPackagePatients binds the patients a questionnaire request names to
 // the token's subject: they must all be one member, whom this holder's own
 // system of record resolves to tokenSubject.
-func (g *Gateway) bindPackagePatients(ctx context.Context, members map[string]bool, tokenSubject string) (int, string) {
+func (g *Gateway) bindPackagePatients(ctx context.Context, members map[string]bool, tokenSubject string, body []byte) (int, string) {
 	if len(members) != 1 {
 		return http.StatusForbidden, "questionnaire-package request covers more than one patient"
 	}
 	for member := range members {
-		return g.bindNextQuestionSubjectContext(ctx, "Patient/"+member, tokenSubject)
+		return g.bindNextQuestionSubjectContext(ctx, "Patient/"+member, tokenSubject, body)
 	}
 	return 0, ""
 }
@@ -315,7 +315,7 @@ func (g *Gateway) bindPackageParameters(ctx context.Context, body []byte, tokenS
 	if coverages == 0 {
 		return http.StatusBadRequest, "questionnaire-package request has no coverage"
 	}
-	return g.bindPackagePatients(ctx, p.members, tokenSubject)
+	return g.bindPackagePatients(ctx, p.members, tokenSubject, body)
 }
 
 // bindLegacyPackageRequest is the (A) inbound bind for the older
@@ -344,19 +344,19 @@ func (g *Gateway) bindLegacyPackageRequest(ctx context.Context, body []byte, tok
 	if len(p.members) == 0 {
 		return 0, ""
 	}
-	return g.bindPackagePatients(ctx, p.members, tokenSubject)
+	return g.bindPackagePatients(ctx, p.members, tokenSubject, body)
 }
 
 // bindNextQuestionSubject is the (A) inbound bind for an adaptive $next-question round:
 // the carried QuestionnaireResponse's subject ("Patient/<member>", the member namespace) must
 // resolve — via this holder's OWN SystemOfRecord, never the payload — to the token's subject
 // PCI. Mirrors conformantPASBind: unknown member → 400, mismatch → 403.
-func (g *Gateway) bindNextQuestionSubjectContext(ctx context.Context, subject, tokenSubject string) (int, string) {
+func (g *Gateway) bindNextQuestionSubjectContext(ctx context.Context, subject, tokenSubject string, body []byte) (int, string) {
 	member, ok := patientMember(subject)
 	if !ok {
 		return http.StatusBadRequest, "next-question request carries no patient subject"
 	}
-	pci, found, readErr := g.resolveSubjectPCI(ctx, member)
+	pci, found, readErr := g.resolveSubjectPCI(ctx, member, body)
 	if readErr != nil {
 		status, msg := SoRFailureResponse(readErr)
 		return status, msg

@@ -56,7 +56,7 @@ func retainPASRequestEvidenceWithPolicy(ctx context.Context, body []byte, read f
 	}
 	graph := &pasGraph{bundle: bundle, entries: entries, byURL: map[string]*pasGraphEntry{}}
 	patient := ""
-	add := func(v any) bool {
+	add := func(index int, v any) bool {
 		e, ok := v.(map[string]any)
 		if !ok {
 			return false
@@ -75,7 +75,7 @@ func retainPASRequestEvidenceWithPolicy(ctx context.Context, body []byte, read f
 		if err != nil || !tok || !iok || !pasSafeResourceID(id) || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") || u.User != nil || u.RawPath != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || !strings.HasSuffix(u.Path, "/"+typ+"/"+id) || graph.byURL[full] != nil {
 			return false
 		}
-		graph.byURL[full] = &pasGraphEntry{fullURL: full, resource: r}
+		graph.byURL[full] = &pasGraphEntry{fullURL: full, resource: r, index: index}
 		if typ == "Patient" {
 			if patient != "" && patient != full {
 				return false
@@ -84,8 +84,8 @@ func retainPASRequestEvidenceWithPolicy(ctx context.Context, body []byte, read f
 		}
 		return true
 	}
-	for _, e := range entries {
-		if !add(e) {
+	for i, e := range entries {
+		if !add(i, e) {
 			return fail()
 		}
 	}
@@ -141,7 +141,7 @@ func retainPASRequestEvidenceWithPolicy(ctx context.Context, body []byte, read f
 			if strings.HasPrefix(ref, "#") {
 				continue
 			}
-			if graph.resolve(ref, owner, nil, false) {
+			if graph.resolve(ref, owner, nil, false) == "" {
 				continue
 			}
 			// Only unversioned relative clinical identities are eligible for local lookup.
@@ -187,7 +187,7 @@ func retainPASRequestEvidenceWithPolicy(ctx context.Context, body []byte, read f
 				return fail()
 			}
 			e := map[string]any{"fullUrl": full, "resource": r}
-			if !add(e) {
+			if !add(len(entries), e) {
 				return fail()
 			}
 			entries = append(entries, e)

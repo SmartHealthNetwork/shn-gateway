@@ -169,7 +169,7 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 		// clinician/patient QR item is nonconformant regardless of which handler
 		// would otherwise run.
 		if reason, ok := fenceAttestedItems(body); !ok {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": reason})
+			g.refuseInbound(w, r, legPASClaim, env, tok, answerTok, http.StatusForbidden, reason, nil)
 			return
 		}
 		g.handlePASNativeInbound(w, r, env, tok, body, answerTok)
@@ -177,7 +177,7 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 		// R8 re-home (FR-16/FR-27): same fence as pas-claim above — the property
 		// belongs to any QR item, not only to amends.
 		if reason, ok := fenceAttestedItems(body); !ok {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": reason})
+			g.refuseInbound(w, r, legPASClaimUpdate, env, tok, answerTok, http.StatusForbidden, reason, nil)
 			return
 		}
 		g.handlePASUpdateNativeInbound(w, r, env, tok, body, answerTok)
@@ -188,7 +188,7 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 		// arrives, and a fence that runs on two of three PAS legs is a gap waiting
 		// for the third to carry one.
 		if reason, ok := fenceAttestedItems(body); !ok {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": reason})
+			g.refuseInbound(w, r, legPASClaimInquire, env, tok, answerTok, http.StatusForbidden, reason, nil)
 			return
 		}
 		g.handlePASInquireInbound(w, r, env, tok, body, answerTok)
@@ -226,7 +226,7 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 	// malformed payload fails closed with 400 before $validate — nothing leaks.
 	member, err := shnsdk.ParseEligibilityRequestMember(cerJSON)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "parse member failed"})
+		g.refuseInbound(w, r, legEligibility, env, tok, answerTok, http.StatusBadRequest, "parse member failed", nil)
 		return
 	}
 
@@ -238,7 +238,7 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if !found {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown member"})
+		g.refuseInbound(w, r, legEligibility, env, tok, answerTok, http.StatusBadRequest, refusalUnknownMember, nil)
 		return
 	}
 	if pci != tok.Subject {
@@ -279,10 +279,8 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 		}
 		// The issues echo is now BOUNDED (findingIssuesShown + "and N more"),
 		// where it was unbounded before the migration — see the PR body.
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
-			"error":  "ingress validation failed",
-			"issues": gr.Issues,
-		})
+		g.refuseInbound(w, r, legEligibility, env, tok, answerTok, http.StatusUnprocessableEntity, refusalIngressValidation,
+			map[string]any{"error": refusalIngressValidation, "issues": gr.Issues})
 		return
 	}
 
@@ -422,7 +420,7 @@ func (g *Gateway) handleFederatedQueryInbound(w http.ResponseWriter, r *http.Req
 
 	// (1) The leg MUST carry a consent reference.
 	if env.Metadata.ConsentRef == "" {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "federated query missing consent reference"})
+		g.refuseInbound(w, r, legFederatedQuery, env, tok, answerTok, http.StatusForbidden, "federated query missing consent reference", nil)
 		return
 	}
 
@@ -430,7 +428,7 @@ func (g *Gateway) handleFederatedQueryInbound(w http.ResponseWriter, r *http.Req
 	// missing/disallowed type or absent patient fails here (no bulk, FR-26).
 	parsed, err := shnsdk.ParseCDexTaskDataRequest(queryJSON)
 	if err != nil {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "query rejected: " + err.Error()})
+		g.refuseInbound(w, r, legFederatedQuery, env, tok, answerTok, http.StatusForbidden, "query rejected: "+err.Error(), nil)
 		return
 	}
 
@@ -441,11 +439,11 @@ func (g *Gateway) handleFederatedQueryInbound(w http.ResponseWriter, r *http.Req
 		return
 	}
 	if !found {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown member"})
+		g.refuseInbound(w, r, legFederatedQuery, env, tok, answerTok, http.StatusBadRequest, refusalUnknownMember, nil)
 		return
 	}
 	if pci != tok.Subject {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "token subject does not match queried patient"})
+		g.refuseInbound(w, r, legFederatedQuery, env, tok, answerTok, http.StatusForbidden, "token subject does not match queried patient", nil)
 		return
 	}
 
@@ -456,13 +454,13 @@ func (g *Gateway) handleFederatedQueryInbound(w http.ResponseWriter, r *http.Req
 	// (attribution integrity, FR-32/C11).
 	consentRef, status, msg := g.consentBackstop(ctx, pci, env.Metadata.Sender)
 	if status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
+		g.refuseInbound(w, r, legFederatedQuery, env, tok, answerTok, status, msg, nil)
 		return
 	}
 	// Defense in depth: the carried wire ref must match the authenticated one, so a
 	// forged Metadata.ConsentRef cannot diverge from the permit that authorized this.
 	if env.Metadata.ConsentRef != consentRef {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "consent reference mismatch"})
+		g.refuseInbound(w, r, legFederatedQuery, env, tok, answerTok, http.StatusForbidden, "consent reference mismatch", nil)
 		return
 	}
 
@@ -654,7 +652,7 @@ type patientDTRResponse struct {
 func (g *Gateway) handlePatientDTRInbound(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token, reqJSON []byte, answerTok string) {
 	var req patientDTRRequest
 	if err := decodeMessage(reqJSON, &req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "parse patient-dtr request failed"})
+		g.refuseInbound(w, r, legPatientDTR, env, tok, answerTok, http.StatusBadRequest, "parse patient-dtr request failed", nil)
 		return
 	}
 	// H2: bind the token subject to the patient the request names (the patient whose
@@ -665,11 +663,11 @@ func (g *Gateway) handlePatientDTRInbound(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if !found {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown member"})
+		g.refuseInbound(w, r, legPatientDTR, env, tok, answerTok, http.StatusBadRequest, refusalUnknownMember, nil)
 		return
 	}
 	if pci != tok.Subject {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "token subject does not match patient"})
+		g.refuseInbound(w, r, legPatientDTR, env, tok, answerTok, http.StatusForbidden, "token subject does not match patient", nil)
 		return
 	}
 
@@ -677,7 +675,7 @@ func (g *Gateway) handlePatientDTRInbound(w http.ResponseWriter, r *http.Request
 	// before attesting — it must not sign a non-conformant patient answer. This
 	// is the authoritative, un-bypassable guard (AI-10 fiduciary surface).
 	if err := shnsdk.ValidatePatientAnswer(req.LinkID, req.Answer); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid patient answer: " + err.Error()})
+		g.refuseInbound(w, r, legPatientDTR, env, tok, answerTok, http.StatusBadRequest, "invalid patient answer: "+err.Error(), nil)
 		return
 	}
 

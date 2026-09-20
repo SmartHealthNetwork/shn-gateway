@@ -181,7 +181,7 @@ func (g *Gateway) ingressPASNativeSubjectPCIContext(ctx context.Context, bundleJ
 	if status != 0 {
 		return "", status, msg
 	}
-	pci, found, readErr := g.resolveSubjectPCI(ctx, s.member)
+	pci, found, readErr := g.resolveSubjectPCI(ctx, s.member, bundleJSON)
 	if readErr != nil {
 		status, msg := SoRFailureResponse(readErr)
 		return "", status, msg
@@ -235,7 +235,7 @@ func (g *Gateway) ingressPASNativeSubjectPCIContext(ctx context.Context, bundleJ
 func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token, bundleJSON []byte, answerTok string) {
 	boundPatientRef, status, msg := g.conformantPASBindContext(r.Context(), bundleJSON, tok.Subject)
 	if status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
+		g.refuseInbound(w, r, legPASClaim, env, tok, answerTok, status, msg, nil)
 		return
 	}
 	capture := &nativeCertificationCapture{}
@@ -377,7 +377,7 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token, bundleJSON []byte, answerTok string) {
 	boundPatientRef, status, msg := g.conformantPASUpdateBindContext(r.Context(), bundleJSON, tok.Subject)
 	if status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
+		g.refuseInbound(w, r, legPASClaimUpdate, env, tok, answerTok, status, msg, nil)
 		return
 	}
 	capture := &nativeCertificationCapture{}
@@ -492,7 +492,7 @@ func (g *Gateway) conformantPASBindContext(ctx context.Context, bundleJSON []byt
 	if status != 0 {
 		return "", status, msg
 	}
-	pci, found, readErr := g.resolveSubjectPCI(ctx, s.member)
+	pci, found, readErr := g.resolveSubjectPCI(ctx, s.member, bundleJSON)
 	if readErr != nil {
 		status, msg := SoRFailureResponse(readErr)
 		return "", status, msg

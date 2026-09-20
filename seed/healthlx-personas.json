@@ -1,0 +1,226 @@
+{
+  "entry": [
+    {
+      "fullUrl": "Coverage/cov-mbrhealthlx01-provider",
+      "resource": {
+        "beneficiary": {
+          "reference": "Patient/pat-mbrhealthlx01-provider"
+        },
+        "class": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "code": "group",
+                  "system": "http://terminology.hl7.org/CodeSystem/coverage-class"
+                }
+              ]
+            },
+            "value": "GRP-HEALTHLX-0001"
+          }
+        ],
+        "contained": [
+          {
+            "id": "healthlx-payer-org",
+            "identifier": [
+              {
+                "system": "urn:oid:2.16.840.1.113883.6.300",
+                "value": "00403"
+              }
+            ],
+            "name": "HealthLX (SHN routing 00403)",
+            "resourceType": "Organization"
+          }
+        ],
+        "id": "cov-mbrhealthlx01-provider",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:coverage",
+            "value": "SUB-HEALTHLX-0001"
+          }
+        ],
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage"
+          ]
+        },
+        "payor": [
+          {
+            "reference": "#healthlx-payer-org"
+          }
+        ],
+        "relationship": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+              "code": "self"
+            }
+          ]
+        },
+        "resourceType": "Coverage",
+        "status": "active"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Coverage/cov-mbrhealthlx01-provider"
+      }
+    },
+    {
+      "fullUrl": "Coverage/cov-mbrhealthlx02-provider",
+      "resource": {
+        "beneficiary": {
+          "reference": "Patient/pat-mbrhealthlx02-provider"
+        },
+        "class": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "code": "group",
+                  "system": "http://terminology.hl7.org/CodeSystem/coverage-class"
+                }
+              ]
+            },
+            "value": "GRP-HEALTHLX-0001"
+          }
+        ],
+        "contained": [
+          {
+            "id": "healthlx-payer-org",
+            "identifier": [
+              {
+                "system": "urn:oid:2.16.840.1.113883.6.300",
+                "value": "00403"
+              }
+            ],
+            "name": "HealthLX (SHN routing 00403)",
+            "resourceType": "Organization"
+          }
+        ],
+        "id": "cov-mbrhealthlx02-provider",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:coverage",
+            "value": "SUB-HEALTHLX-0002"
+          }
+        ],
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage"
+          ]
+        },
+        "payor": [
+          {
+            "reference": "#healthlx-payer-org"
+          }
+        ],
+        "relationship": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+              "code": "self"
+            }
+          ]
+        },
+        "resourceType": "Coverage",
+        "status": "active"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Coverage/cov-mbrhealthlx02-provider"
+      }
+    },
+    {
+      "fullUrl": "Patient/pat-mbrhealthlx01-provider",
+      "resource": {
+        "id": "pat-mbrhealthlx01-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:member",
+            "value": "MBR-HEALTHLX-01"
+          }
+        ],
+        "name": [
+          {
+            "family": "Batista-Healthlx"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1950-12-05",
+        "resourceType": "Patient"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/pat-mbrhealthlx01-provider"
+      }
+    },
+    {
+      "fullUrl": "Patient/pat-mbrhealthlx02-provider",
+      "resource": {
+        "id": "pat-mbrhealthlx02-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:member",
+            "value": "MBR-HEALTHLX-02"
+          }
+        ],
+        "name": [
+          {
+            "family": "Fontaine-Healthlx"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1979-04-22",
+        "resourceType": "Patient"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/pat-mbrhealthlx02-provider"
+      }
+    }
+  ],
+  "resourceType": "Bundle",
+  "type": "transaction"
+}

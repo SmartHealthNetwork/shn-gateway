@@ -13,6 +13,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log"
+	"net/http"
 	"strings"
 	"testing"
 )
@@ -95,6 +97,7 @@ func assemblySmallGraph() map[string]any {
 		map[string]any{"fullUrl": "https://payer.test/fhir/Claim/c", "resource": map[string]any{"resourceType": "Claim", "id": "c", "patient": map[string]any{"reference": "Patient/p"}}},
 	}}
 }
+
 // TestPASGraphRealPayerFixtureMutations drives the graph rule over the REAL
 // reference-payer answer, one mutation at a time.
 //
@@ -370,5 +373,189 @@ func TestPASGraphRejectsUnusableRESTBases(t *testing.T) {
 				t.Fatal("accepted undefined or normalized REST base")
 			}
 		})
+	}
+}
+
+// TestPASGraphRefusalNamesTheReference: the rows above prove each clause refuses;
+// these prove the refusal SAYS WHAT IT REFUSED. A payer whose answer names a record
+// it does not carry, and a rule that is wrong about a record the answer does
+// carry, produce the same 502 unless the refusal names the entry, the element,
+// the reference as written and why it does not resolve. Measured 2026-09-19:
+// three of four submissions to the 2.2 reference payer were refused with a fixed
+// text and nothing on the refusing node said which reference dangled.
+func TestPASGraphRefusalNamesTheReference(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(b, cr, p map[string]any)
+		want   pasGraphRefusal
+	}{
+		{"relative to no entry", func(b, cr, p map[string]any) {
+			cr["insurer"] = map[string]any{"reference": "Organization/new"}
+		}, pasGraphRefusal{Owner: "entry 0 (ClaimResponse/cr)", Path: "/insurer", Target: "Organization", Reference: "Organization/new", Why: "resolves to https://payer.test/fhir/Organization/new, which is no entry of the Bundle"}},
+		{"absolute foreign", func(b, cr, p map[string]any) {
+			cr["patient"] = map[string]any{"reference": "https://shn.example/fhir/Patient/MBR-COVERED"}
+		}, pasGraphRefusal{Owner: "entry 0 (ClaimResponse/cr)", Path: "/patient", Target: "Patient", Reference: "https://shn.example/fhir/Patient/MBR-COVERED", Why: "is no entry of the Bundle"}},
+		{"nested element", func(b, cr, p map[string]any) {
+			cr["item"] = []any{map[string]any{"extension": []any{map[string]any{"url": "x", "valueReference": map[string]any{"reference": "ServiceRequest/9"}}}}}
+		}, pasGraphRefusal{Owner: "entry 0 (ClaimResponse/cr)", Path: "/item/0/extension/0/valueReference", Target: "ServiceRequest", Reference: "ServiceRequest/9", Why: "resolves to https://payer.test/fhir/ServiceRequest/9, which is no entry of the Bundle"}},
+		{"missing contained", func(b, cr, p map[string]any) {
+			p["managingOrganization"] = map[string]any{"reference": "#absent"}
+		}, pasGraphRefusal{Owner: "entry 1 (Patient/p)", Path: "/managingOrganization", Target: "contained resource", Reference: "#absent", Why: "names no resource contained in entry 1 (Patient/p)"}},
+		{"wrong version", func(b, cr, p map[string]any) {
+			p["meta"] = map[string]any{"versionId": "3"}
+			cr["patient"] = map[string]any{"reference": "Patient/p/_history/2"}
+		}, pasGraphRefusal{Owner: "entry 0 (ClaimResponse/cr)", Path: "/patient", Target: "Patient", Reference: "Patient/p/_history/2", Why: "names version 2, which entry 1 (Patient/p) does not hold"}},
+		{"Bundle metadata", func(b, cr, p map[string]any) {
+			b["signature"] = map[string]any{"who": map[string]any{"reference": "Organization/signer"}, "data": "c2lnbmF0dXJl"}
+		}, pasGraphRefusal{Owner: "Bundle", Path: "/signature/who", Target: "Organization", Reference: "Organization/signer", Why: "is relative, and Bundle metadata has no base to resolve it against"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := assemblySmallGraph()
+			es := b["entry"].([]any)
+			cr := es[0].(map[string]any)["resource"].(map[string]any)
+			p := es[1].(map[string]any)["resource"].(map[string]any)
+			tc.mutate(b, cr, p)
+			raw, _ := json.Marshal(b)
+			err := validatePASBundleGraph(raw)
+			got := pasGraphRefusalOf(err)
+			if got == nil {
+				t.Fatalf("refusal names no reference: %v", err)
+			}
+			if *got != tc.want {
+				t.Fatalf("refusal\n got %+v\nwant %+v", *got, tc.want)
+			}
+			for _, part := range []string{tc.want.Owner, tc.want.Path, tc.want.Target, tc.want.Reference, tc.want.Why} {
+				if !strings.Contains(err.Error(), part) {
+					t.Fatalf("error text %q does not carry %q", err.Error(), part)
+				}
+			}
+			// The same bytes name the same reference on every run: the walk is in
+			// Bundle order over sorted members, not map order.
+			for i := 0; i < 20; i++ {
+				again := pasGraphRefusalOf(validatePASBundleGraph(raw))
+				if again == nil || *again != *got {
+					t.Fatalf("run %d named a different reference: %+v", i, again)
+				}
+			}
+		})
+	}
+}
+
+// TestPASGraphRefusalNamesTheFirstReference: with two dangling references the
+// one named is the first in the Bundle's own order — the lower entry, then the
+// earlier member — so an operator reading two refusals of the same answer reads
+// the same fact twice.
+func TestPASGraphRefusalNamesTheFirstReference(t *testing.T) {
+	b := assemblySmallGraph()
+	es := b["entry"].([]any)
+	es[0].(map[string]any)["resource"].(map[string]any)["requestor"] = map[string]any{"reference": "Organization/later-member"}
+	es[0].(map[string]any)["resource"].(map[string]any)["insurer"] = map[string]any{"reference": "Organization/earlier-member"}
+	es[2].(map[string]any)["resource"].(map[string]any)["provider"] = map[string]any{"reference": "Organization/later-entry"}
+	raw, _ := json.Marshal(b)
+	got := pasGraphRefusalOf(validatePASBundleGraph(raw))
+	if got == nil || got.Reference != "Organization/earlier-member" || got.Path != "/insurer" {
+		t.Fatalf("named %+v, want the ClaimResponse's insurer", got)
+	}
+}
+
+// TestPASGraphStructuralRefusalsSayWhatWasSeen: a refusal that names no reference
+// still says what it saw, and never the bytes.
+func TestPASGraphStructuralRefusalsSayWhatWasSeen(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(b map[string]any)
+		want   string
+	}{
+		{"no ClaimResponse", func(b map[string]any) { b["entry"] = b["entry"].([]any)[1:] }, "carries no ClaimResponse"},
+		{"two ClaimResponses", func(b map[string]any) {
+			e := b["entry"].([]any)
+			dup := map[string]any{"fullUrl": "https://payer.test/fhir/ClaimResponse/cr2", "resource": map[string]any{"resourceType": "ClaimResponse", "id": "cr2"}}
+			b["entry"] = append(e, dup)
+		}, "more than one ClaimResponse (https://payer.test/fhir/ClaimResponse/cr and https://payer.test/fhir/ClaimResponse/cr2)"},
+		{"relative fullUrl", func(b map[string]any) { b["entry"].([]any)[1].(map[string]any)["fullUrl"] = "Patient/p" }, `entry 1 fullUrl "Patient/p" is not an absolute, versionless identity`},
+		{"identity mismatch", func(b map[string]any) {
+			b["entry"].([]any)[1].(map[string]any)["resource"].(map[string]any)["id"] = "other"
+		}, "does not end in its resource's identity Patient/other"},
+		{"repeated identity", func(b map[string]any) { e := b["entry"].([]any); b["entry"] = append(e, e[1]) }, "entry 3 repeats the identity https://payer.test/fhir/Patient/p"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := assemblySmallGraph()
+			tc.mutate(b)
+			raw, _ := json.Marshal(b)
+			err := validatePASBundleGraph(raw)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("got %v, want a refusal saying %q", err, tc.want)
+			}
+			if pasGraphRefusalOf(err) != nil {
+				t.Fatalf("a structural refusal named a reference: %v", err)
+			}
+		})
+	}
+}
+
+// TestNativePASResponseRefusalIsObservable: the framed 502 a requester receives
+// names the reference, the refusing node logs it with the correlation id, a
+// closed graph passes byte for byte and logs nothing, and the log never carries
+// the payer's bytes.
+func TestNativePASResponseRefusalIsObservable(t *testing.T) {
+	// The reference payer's own pended answer, closed: relayed byte for byte.
+	closed := []byte(assemblyRealPending)
+	var b map[string]any
+	if err := json.Unmarshal(closed, &b); err != nil {
+		t.Fatal(err)
+	}
+	// The measured shape: the order the payer echoes names the requester's own
+	// Patient URL, which the payer never stored and the Bundle does not carry.
+	order := b["entry"].([]any)[8].(map[string]any)["resource"].(map[string]any)
+	if order["resourceType"] != "ServiceRequest" {
+		t.Fatalf("fixture entry 8 is a %v, not the order", order["resourceType"])
+	}
+	order["subject"] = map[string]any{"reference": "https://shn.example/fhir/Patient/MBR-COVERED"}
+	open, err := json.Marshal(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var logged bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&logged)
+	defer log.SetOutput(prev)
+
+	kept, lr := validateRelayedPASResponse("corr-closed", "pas-claim", closed)
+	if lr.Status != 0 || !bytes.Equal(kept, closed) {
+		t.Fatalf("closed graph refused or altered: %+v", lr)
+	}
+	if logged.Len() != 0 {
+		t.Fatalf("a relayed answer was logged as refused: %s", logged.String())
+	}
+
+	kept, lr = validateRelayedPASResponse("corr-open", "pas-claim", open)
+	if kept != nil || lr.Status != http.StatusBadGateway {
+		t.Fatalf("open graph relayed: %+v", lr)
+	}
+	for _, part := range []string{"invalid native PAS response Bundle", "entry 8 (ServiceRequest/prior-auth-required-service-request)", "/subject", `Patient "https://shn.example/fhir/Patient/MBR-COVERED"`, "is no entry of the Bundle"} {
+		if !strings.Contains(lr.Message, part) {
+			t.Fatalf("framed error %q does not carry %q", lr.Message, part)
+		}
+	}
+	line := logged.String()
+	if !strings.Contains(line, "gateway: pas response refused: {") {
+		t.Fatalf("refusal not logged at the refusing node: %q", line)
+	}
+	var rec pasResponseRefusal
+	if err := json.Unmarshal([]byte(line[strings.Index(line, "{"):]), &rec); err != nil {
+		t.Fatalf("refusal record is not JSON: %v: %q", err, line)
+	}
+	if rec.CorrelationID != "corr-open" || rec.LegType != "pas-claim" || rec.Status != http.StatusBadGateway || rec.Entries != 10 || rec.Bytes != len(open) {
+		t.Fatalf("refusal record misstates the exchange: %+v", rec)
+	}
+	if rec.Reference == nil || rec.Reference.Reference != "https://shn.example/fhir/Patient/MBR-COVERED" || rec.Reference.Owner != "entry 8 (ServiceRequest/prior-auth-required-service-request)" || rec.Reference.Path != "/subject" || rec.Reference.Target != "Patient" {
+		t.Fatalf("refusal record does not name the dangling reference: %+v", rec.Reference)
+	}
+	// The payer's bytes stay out of the log: the member's name, present in the
+	// answer's Patient entry, must not be.
+	if strings.Contains(line, "SMITH") || strings.Contains(line, "Generated Narrative") {
+		t.Fatalf("the payer's bytes reached the log: %q", line)
 	}
 }

@@ -43,6 +43,7 @@ result is your choice:
 |---|---|
 | `FHIR_VALIDATE_URL` | A FHIR `$validate` endpoint (a HAPI server with the Da Vinci CRD/DTR/PAS + US Core IGs loaded). The production path. |
 | `SHN_FAKE_VALIDATOR` | Set to `1` to use a no-op validator. **Dev only** — skips real profile validation. Use for a first wiring smoke test; never in production. |
+| `CDS_ADVERTISE_HOOKS` | Optional. A comma-separated list of the CDS Hooks your provider ingress advertises and dispatches, from `order-sign`, `order-select`, `order-dispatch`. Unset advertises every hook the network carries. Set it only to narrow: when no payer your gateway routes to carries a hook's leg, advertising it promises a service that can only fail at routing; a request to a service id you do not advertise is refused with `404` and the ids you offer. A hook the network does not carry refuses to boot. This is an interim override — the network does not yet carry a declaration of the hooks each payer offers, and the listing will derive from routing once it does. |
 | `CONFORMANCE_ENFORCEMENT` | `strict` or `none` (the default when unset). At `strict` an invalid result refuses the message, and the refusal names the rule and the issues it was based on. At `none` every check still runs and every invalid result is recorded as a finding in your gateway's log and observer stream, and the message is relayed as sent — except an answer this gateway cannot read at all, and a payload this gateway itself translated between IG lines, which refuse at every level. Any other value refuses to boot. |
 
 If neither `FHIR_VALIDATE_URL` nor `SHN_FAKE_VALIDATOR` is set (and discovery
@@ -431,7 +432,7 @@ hard startup error.
 
 | Test-lane only | Description |
 |---|---|
-| `SHN_ACCEPT_UNKNOWN_MEMBERS` | Off by default. When set, a CRD, DTR or PAS subject your system of record does not hold binds by member id alone instead of being refused with `unknown member`. It exists for a shared test lane whose roster cannot hold every partner's own test patients; a production gateway resolves every subject through its own system of record and must not set it. The gateway logs a warning at boot when it is on. |
+| `SHN_ACCEPT_UNKNOWN_MEMBERS` | Off by default. When set, a CRD, DTR or PAS subject your system of record does not hold binds by member id plus the birth date and family name of the Patient the request carries for it (the id alone when it carries none) instead of being refused with `unknown member`. The other side of the exchange binds the same way from the same request, so a Patient that disagrees with a record it does hold is refused there. On a `$questionnaire-package` request that carries no Patient, a gateway that holds the member appends its own Patient record as a `referenced` parameter (registered edit E-05, only while this variable is set) so the other side can bind it the same way. It exists for a shared test lane whose roster cannot hold every partner's own test patients; a production gateway resolves every subject through its own system of record and must not set it. The gateway logs a warning at boot when it is on. |
 
 **This ingress is a private, within-boundary surface, not a public endpoint.** The
 gateway's only public-internet leg is the gateway↔Hub connection; every connection to
@@ -764,6 +765,18 @@ only ever sees an opaque ciphertext and records the leg as `answered` over its h
 the status or body inside it. A true **transport fault** (the far end is unreachable, or
 the gateway's own build/dial/read fails) is not an application answer and still surfaces
 as `"hub routing failed"` — only a response the far end actually produced is relayed.
+
+The recipient gateway's **own verdict about a request** travels the same way. Once the
+leg is authenticated, any `4xx` the recipient writes about the request — a member it does
+not hold (`400 unknown member`), a request it cannot read, no order to decide on, a subject
+that does not match the token (`403`), a consent it cannot confirm, an ingress validation
+failure at enforcement `strict` (`422 ingress validation failed`, issues echoed) — is its
+answer about the request, and a frame-capable requester receives it with that status and
+body. Only exchange machinery stays a bare non-`2xx`, which the Hub reports as `"hub
+routing failed"`: the checks that happen before any handler runs (a bad hop assertion, an
+envelope that fails to decode, a token that fails verification, a replay, an unknown
+transaction type) and the recipient's own faults (`5xx` — a validator or consent service
+that did not answer, a store write that failed, a response leg it could not build).
 
 **Negotiation, not configuration.** There is no environment variable to set. Whether an
 exchange frames is decided per pair of holders from what each side has advertised to the

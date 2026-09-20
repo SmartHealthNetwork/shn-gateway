@@ -108,7 +108,7 @@ func (g *Gateway) ingressCRDSubjectPCIContext(ctx context.Context, body []byte) 
 		return "", http.StatusBadRequest, "missing context.patientId"
 	}
 	member := strings.TrimPrefix(req.Context.PatientID, "Patient/")
-	pci, found, readErr := g.resolveSubjectPCI(ctx, member)
+	pci, found, readErr := g.resolveSubjectPCI(ctx, member, body)
 	if readErr != nil {
 		status, msg := SoRFailureResponse(readErr)
 		return "", status, msg
@@ -156,7 +156,7 @@ func (g *Gateway) ingressCRDSubjectPCIContext(ctx context.Context, body []byte) 
 			}
 		}
 		m := strings.TrimPrefix(ref, "Patient/")
-		rp, ok, readErr := g.resolveSubjectPCI(ctx, m)
+		rp, ok, readErr := g.resolveSubjectPCI(ctx, m, body)
 		if readErr != nil {
 			status, msg := SoRFailureResponse(readErr)
 			return "", status, msg
@@ -402,8 +402,8 @@ const patientNamedDifferently = "system of record names the patient differently 
 const historyNamedDifferently = "patient named differently in the system of record"
 
 // historyMemberNotHeld is the recorded reason a history key is left out for a
-// member the system of record does not hold (bound by member id alone under
-// Config.AcceptUnknownMembers).
+// member the system of record does not hold (bound by the member id and the Patient the
+// request carries under Config.AcceptUnknownMembers).
 const historyMemberNotHeld = "member not held by the system of record"
 
 // coverageOmitted is the refusal for a request whose coverage the system of

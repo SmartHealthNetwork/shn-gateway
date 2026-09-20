@@ -111,6 +111,23 @@ var relayEdits = []relayEdit{
 		Disclosure: "When a questionnaire package request carries no coverage, the provider's gateway appends the " +
 			"patient's Coverage from the provider's own system; the rest of the request is sent unchanged.",
 	},
+	{
+		ID:        relay.EditDTRPatientObtain,
+		Name:      "dtr-patient-obtain",
+		Legs:      []string{"dtr-questionnaire-fetch"},
+		Role:      relay.RoleRequester,
+		Direction: relay.DirectionRequest,
+		Paths:     []string{"$.parameter"},
+		Kind:      editArrayAppend,
+		Precondition: "Only under the connectathon seam that carries members a gateway does not hold " +
+			"(SHN_ACCEPT_UNKNOWN_MEMBERS), only when the request carries no Patient resource for the bound " +
+			"patient anywhere in its parameters, and only when the provider's own system holds the patient " +
+			"under the id the request names; one {\"name\":\"referenced\",\"resource\":<Patient>} element is appended.",
+		Authority: "The provider's own system: its Patient record for the bound patient.",
+		Disclosure: "When a questionnaire package request carries no Patient and the provider's gateway is carrying " +
+			"members the payer may not hold, the provider's gateway appends the patient's own Patient record from " +
+			"the provider's system as a referenced resource; the rest of the request is sent unchanged.",
+	},
 }
 
 // relayEditByID returns the registered edit with the given id.

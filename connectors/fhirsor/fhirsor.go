@@ -50,51 +50,51 @@ func NewFromURL(baseURL string, hc *http.Client) *SoR {
 // base URL in s.fc.
 //
 // Request context reaches each nested read. Reads are not cached.
-func (s *SoR) resolvePatient(ctx context.Context, memberID string) (p fhir.Patient, id string, ok bool, readErr error) {
+func (s *SoR) resolvePatient(ctx context.Context, memberID string) (p fhir.Patient, raw json.RawMessage, id string, ok bool, readErr error) {
 	b, err := s.fc.Search(ctx, "Patient", url.Values{
 		"identifier": {shnsdk.MemberSystem + "|" + memberID},
 	})
 	if err != nil {
-		return fhir.Patient{}, "", false, safeReadError(err)
+		return fhir.Patient{}, nil, "", false, safeReadError(err)
 	}
 	if b != nil {
 		if len(b.Entry) > 1 || (b.Total != nil && int(*b.Total) != len(b.Entry)) {
-			return fhir.Patient{}, "", false, invalidResponse()
+			return fhir.Patient{}, nil, "", false, invalidResponse()
 		}
 		for _, link := range b.Link {
 			if link.Relation == "next" {
-				return fhir.Patient{}, "", false, invalidResponse()
+				return fhir.Patient{}, nil, "", false, invalidResponse()
 			}
 		}
 	}
 	if b == nil || len(b.Entry) == 0 {
-		return fhir.Patient{}, "", false, nil
+		return fhir.Patient{}, nil, "", false, nil
 	}
 	if err := json.Unmarshal(b.Entry[0].Resource, &p); err != nil {
-		return fhir.Patient{}, "", false, invalidResponse()
+		return fhir.Patient{}, nil, "", false, invalidResponse()
 	}
 	if p.Id == nil || *p.Id == "" {
-		return fhir.Patient{}, "", false, invalidResponse()
+		return fhir.Patient{}, nil, "", false, invalidResponse()
 	}
-	return p, *p.Id, true, nil
+	return p, b.Entry[0].Resource, *p.Id, true, nil
 }
 
 // ResolvePatient turns a member id into a substrate PCI via the SAME shnsdk.ResolvePCI
-// the stub uses, reading birthDate + family from the US Core Patient.
+// the stub uses, reading birthDate + family from the US Core Patient through
+// engine.PatientDemographics, the read a Patient carried in a request gets too.
 func (s *SoR) ResolvePatientContext(ctx context.Context, memberID string) (string, engine.Demo, bool, error) {
-	p, _, ok, err := s.resolvePatient(ctx, memberID)
+	_, raw, _, ok, err := s.resolvePatient(ctx, memberID)
 	if err != nil {
 		return "", engine.Demo{}, false, safeReadError(err)
 	}
 	if !ok {
 		return "", engine.Demo{}, false, nil
 	}
-	if p.BirthDate == nil || len(p.Name) == 0 || p.Name[0].Family == nil || *p.BirthDate == "" || *p.Name[0].Family == "" {
+	demo, ok := engine.PatientDemographics(raw)
+	if !ok {
 		return "", engine.Demo{}, false, invalidResponse()
 	}
-	birth, family := *p.BirthDate, *p.Name[0].Family
-	pci := shnsdk.ResolvePCI(memberID, birth, family)
-	return pci, engine.Demo{BirthDate: birth, FamilyName: family}, true, nil
+	return shnsdk.ResolvePCI(memberID, demo.BirthDate, demo.FamilyName), demo, true, nil
 }
 
 // PatientFHIRRef returns "Patient/<store-id>" — the FHIR store's resource id for the member
@@ -102,7 +102,7 @@ func (s *SoR) ResolvePatientContext(ctx context.Context, memberID string) (strin
 // operated $populate (which reads the store directly; the logical member ref and identifier-based
 // subjects don't resolve).
 func (s *SoR) PatientFHIRRefContext(ctx context.Context, memberID string) (string, bool, error) {
-	_, id, ok, err := s.resolvePatient(ctx, memberID)
+	_, _, id, ok, err := s.resolvePatient(ctx, memberID)
 	if err != nil {
 		return "", false, safeReadError(err)
 	}
@@ -115,7 +115,7 @@ func (s *SoR) PatientFHIRRefContext(ctx context.Context, memberID string) (strin
 // CoverageInforce reports whether the member's coverage is active. active → (true,"");
 // any other status → (false,"coverage-terminated"); no coverage / unknown → (false,"").
 func (s *SoR) CoverageInforceContext(ctx context.Context, memberID string) (bool, string, error) {
-	_, pid, ok, err := s.resolvePatient(ctx, memberID)
+	_, _, pid, ok, err := s.resolvePatient(ctx, memberID)
 	if err != nil {
 		return false, "", safeReadError(err)
 	}
@@ -178,7 +178,7 @@ func (s *SoR) CoverageInforceContext(ctx context.Context, memberID string) (bool
 // to unattributed (neither auto nor a forced manual answer), exactly the fixture's contract.
 // A subsidiary read error returns no clinical context.
 func (s *SoR) ClinicalContextContext(ctx context.Context, memberID string) (shnsdk.ClinicalContext, bool, error) {
-	_, pid, ok, err := s.resolvePatient(ctx, memberID)
+	_, _, pid, ok, err := s.resolvePatient(ctx, memberID)
 	if err != nil {
 		return shnsdk.ClinicalContext{}, false, safeReadError(err)
 	}
@@ -361,7 +361,7 @@ func (s *SoR) obsBool(ctx context.Context, patientID, system, code string) (val 
 // client-assigned scoped IDs (e.g. "Patient/pat-mbruc04-provider") that differ from the
 // member ID used throughout the substrate protocol layer.
 func (s *SoR) SupplementalReportContext(ctx context.Context, memberID string) ([]byte, bool, error) {
-	_, pid, ok, err := s.resolvePatient(ctx, memberID)
+	_, _, pid, ok, err := s.resolvePatient(ctx, memberID)
 	if err != nil {
 		return nil, false, safeReadError(err)
 	}
@@ -390,7 +390,7 @@ func (s *SoR) SupplementalReportContext(ctx context.Context, memberID string) ([
 // instead, which returns every matching record; this read remains for callers of the
 // SystemOfRecord interface.
 func (s *SoR) FacilityRecordsContext(ctx context.Context, memberID string) (map[string][]byte, bool, error) {
-	_, pid, ok, err := s.resolvePatient(ctx, memberID)
+	_, _, pid, ok, err := s.resolvePatient(ctx, memberID)
 	if err != nil {
 		return nil, false, safeReadError(err)
 	}
@@ -454,7 +454,7 @@ func rewriteSubject(resourceJSON []byte, ref string) []byte {
 // connector never rewrites a record. The order's id and performer are read by the caller (the
 // dispatched order reference and the supplier).
 func (s *SoR) OpenOrderContext(ctx context.Context, memberID string) ([]byte, bool, error) {
-	_, pid, ok, err := s.resolvePatient(ctx, memberID)
+	_, _, pid, ok, err := s.resolvePatient(ctx, memberID)
 	if err != nil {
 		return nil, false, safeReadError(err)
 	}
@@ -484,7 +484,7 @@ func (s *SoR) OpenOrderContext(ctx context.Context, memberID string) ([]byte, bo
 // bounds, not a searchset, paging outside the server) is SoRInvalidResponse — never a
 // partial answer.
 func (s *SoR) OpenCoverageContext(ctx context.Context, memberID string) ([][]byte, error) {
-	_, pid, ok, err := s.resolvePatient(ctx, memberID)
+	_, _, pid, ok, err := s.resolvePatient(ctx, memberID)
 	if err != nil {
 		return nil, safeReadError(err)
 	}

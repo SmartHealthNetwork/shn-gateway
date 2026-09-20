@@ -12,7 +12,9 @@ package engine
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
+	"strings"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
@@ -215,9 +217,15 @@ const (
 // validateNativePASResponse checks the complete native submit graph and the
 // shared SDK decision contract (FR-G28), retaining the payer's exact bytes.
 // A bare ClaimResponse is supported only by the separate polling read path.
+//
+// A graph refusal states its reason: the first reference the answer makes that
+// the Bundle does not carry, with the entry that made it. A receiver that only
+// said "invalid" could not tell a payer whose answer really is incomplete from
+// a rule that is wrong about it (measured 2026-09-19: three of four submissions
+// to the 2.2 reference payer refused, no record of which reference dangled).
 func validateNativePASResponse(body []byte) ([]byte, LegResult) {
 	if err := validatePASBundleGraph(body); err != nil {
-		return nil, fail502("invalid native PAS response Bundle")
+		return nil, fail502("invalid native PAS response Bundle: " + strings.TrimPrefix(err.Error(), "engine: "))
 	}
 	pended, _, err := shnsdk.ParsePendedResponse(body)
 	if err != nil {
@@ -235,6 +243,53 @@ func validateNativePASResponse(body []byte) ([]byte, LegResult) {
 // cross-module adversarial harness. It never normalizes or repairs payer bytes.
 func ValidateNativePASResponseForTest(body []byte) ([]byte, LegResult) {
 	return validateNativePASResponse(body)
+}
+
+// validateRelayedPASResponse is validateNativePASResponse for a payer's answer a
+// leg is about to relay: the same check, and when it refuses, the refusal is
+// logged at THIS node with the correlation id before the framed error goes
+// back. The payer's bytes are what a requester would have needed to read the
+// refusal, and a refused answer is not relayed — so the record of what was
+// refused, and why, has to be made here or nowhere.
+func validateRelayedPASResponse(corrID, leg string, body []byte) ([]byte, LegResult) {
+	response, lr := validateNativePASResponse(body)
+	if lr.Status != 0 {
+		logPASResponseRefused(corrID, leg, lr, body)
+	}
+	return response, lr
+}
+
+// pasResponseRefusal is the log record of a payer answer this node refused.
+type pasResponseRefusal struct {
+	CorrelationID string           `json:"correlationId"`
+	LegType       string           `json:"legType"`
+	Status        int              `json:"status"`
+	Reason        string           `json:"reason"`
+	Reference     *pasGraphRefusal `json:"reference,omitempty"` // the first reference the graph does not resolve, when that is the reason
+	Entries       int              `json:"entries"`
+	Bytes         int              `json:"bytes"`
+}
+
+// logPASResponseRefused writes the refusal record. The payer's bytes are not
+// logged (an answer can carry member data); the reference that dangled is, as
+// the payer wrote it, because it is the one fact that settles whether the payer's
+// answer is incomplete or the rule is wrong.
+func logPASResponseRefused(corrID, leg string, lr LegResult, body []byte) {
+	rec := pasResponseRefusal{CorrelationID: corrID, LegType: leg, Status: lr.Status, Reason: lr.Message, Bytes: len(body)}
+	if err := validatePASBundleGraph(body); err != nil {
+		rec.Reference = pasGraphRefusalOf(err)
+	}
+	var shape struct {
+		Entry []json.RawMessage `json:"entry"`
+	}
+	if json.Unmarshal(body, &shape) == nil {
+		rec.Entries = len(shape.Entry)
+	}
+	raw, err := json.Marshal(rec)
+	if err != nil {
+		return
+	}
+	log.Printf("gateway: pas response refused: %s", raw)
 }
 
 // fail502 builds the fail-closed LegResult (502) for a partner answer that does not

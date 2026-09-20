@@ -24,8 +24,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -36,6 +38,65 @@ const pasGraphMaxReferences = 4096
 const pasGraphMaxDepth = 64
 
 func pasGraphError() error { return errors.New("engine: invalid or incomplete PAS response graph") }
+
+// pasGraphRefusal is the reason a response graph was refused, stated so that the
+// refusal can be read: which entry held the reference, where in it, the reference
+// as the payer wrote it, the type it names and why the Bundle does not resolve it.
+// The gateway never repairs the answer; this is what it says instead.
+type pasGraphRefusal struct {
+	Owner     string `json:"owner"`     // "entry 6 (ServiceRequest/1810)", or "Bundle" for Bundle/entry metadata
+	Path      string `json:"path"`      // the element within the owner, e.g. "/subject"
+	Target    string `json:"target"`    // the resource type the reference names, or "contained resource"
+	Reference string `json:"reference"` // the reference string, exactly as the payer wrote it
+	Why       string `json:"why"`
+}
+
+func (r *pasGraphRefusal) Error() string {
+	return fmt.Sprintf("engine: PAS response graph: %s %s references %s %q, which %s", r.Owner, r.Path, r.Target, r.Reference, r.Why)
+}
+
+// pasGraphRefusalOf returns the named refusal behind err, or nil when the graph
+// was refused for a structural reason that names no reference.
+func pasGraphRefusalOf(err error) *pasGraphRefusal {
+	var r *pasGraphRefusal
+	if errors.As(err, &r) {
+		return r
+	}
+	return nil
+}
+
+// pasGraphStructural is a structural refusal (an entry without an absolute
+// fullUrl, two ClaimResponses, ...) stated with what was seen.
+func pasGraphStructural(format string, args ...any) error {
+	return fmt.Errorf("engine: PAS response graph: "+format, args...)
+}
+
+// pasReferenceTarget reads the resource type a reference names: "Patient" from
+// "Patient/p", ".../Patient/p" or "Patient/p/_history/2"; "contained resource"
+// for a local "#id".
+func pasReferenceTarget(ref string) string {
+	if strings.HasPrefix(ref, "#") {
+		return "contained resource"
+	}
+	trimmed := ref
+	if pos := strings.Index(trimmed, "/_history/"); pos >= 0 {
+		trimmed = trimmed[:pos]
+	}
+	parts := strings.Split(strings.TrimSuffix(trimmed, "/"), "/")
+	if len(parts) >= 2 && parts[len(parts)-2] != "" && !strings.Contains(parts[len(parts)-2], ":") {
+		return parts[len(parts)-2]
+	}
+	return "resource"
+}
+
+func (e *pasGraphEntry) label() string {
+	if e == nil {
+		return "Bundle"
+	}
+	typ, _ := e.resource["resourceType"].(string)
+	id, _ := e.resource["id"].(string)
+	return fmt.Sprintf("entry %d (%s/%s)", e.index, typ, id)
+}
 
 func validatePASBundleGraph(raw []byte) error {
 	g, err := readPASGraph(raw)
@@ -68,50 +129,53 @@ func readPASGraph(raw []byte) (*pasGraph, error) {
 	}
 	var ok bool
 	g.entries, ok = g.bundle["entry"].([]any)
-	if !ok || len(g.entries) == 0 || len(g.entries) > pasGraphMaxResources {
-		return nil, pasGraphError()
+	if !ok || len(g.entries) == 0 {
+		return nil, pasGraphStructural("the Bundle has no entries")
+	}
+	if len(g.entries) > pasGraphMaxResources {
+		return nil, pasGraphStructural("the Bundle has %d entries, more than the %d this rule reads", len(g.entries), pasGraphMaxResources)
 	}
 	for i, v := range g.entries {
 		e, ok := v.(map[string]any)
 		if !ok {
-			return nil, pasGraphError()
+			return nil, pasGraphStructural("entry %d is not an object", i)
 		}
 		full, ok := e["fullUrl"].(string)
 		if !ok || full == "" {
-			return nil, pasGraphError()
+			return nil, pasGraphStructural("entry %d has no fullUrl", i)
 		}
 		u, err := url.Parse(full)
 		if err != nil || !u.IsAbs() || u.Fragment != "" || u.RawQuery != "" || u.ForceQuery || strings.Contains(full, "/_history/") {
-			return nil, pasGraphError()
+			return nil, pasGraphStructural("entry %d fullUrl %q is not an absolute, versionless identity", i, full)
 		}
 		r, ok := e["resource"].(map[string]any)
 		if !ok {
-			return nil, pasGraphError()
+			return nil, pasGraphStructural("entry %d (%s) carries no resource", i, full)
 		}
 		typ, tok := r["resourceType"].(string)
 		id, iok := r["id"].(string)
 		if !tok || !iok || typ == "" || !pasSafeResourceID(id) {
-			return nil, pasGraphError()
+			return nil, pasGraphStructural("entry %d (%s) carries a resource without a usable resourceType and id", i, full)
 		}
 		if u.Scheme == "http" || u.Scheme == "https" {
 			if u.Host == "" || !strings.HasSuffix(u.Path, "/"+typ+"/"+id) {
-				return nil, pasGraphError()
+				return nil, pasGraphStructural("entry %d fullUrl %q does not end in its resource's identity %s/%s", i, full, typ, id)
 			}
 		}
 		if _, exists := g.byURL[full]; exists {
-			return nil, pasGraphError()
+			return nil, pasGraphStructural("entry %d repeats the identity %s", i, full)
 		}
 		entry := &pasGraphEntry{full, r, i}
 		g.byURL[full] = entry
 		if typ == "ClaimResponse" {
 			if g.response != nil {
-				return nil, pasGraphError()
+				return nil, pasGraphStructural("the Bundle carries more than one ClaimResponse (%s and %s)", g.response.fullURL, full)
 			}
 			g.response = entry
 		}
 	}
 	if g.response == nil {
-		return nil, pasGraphError()
+		return nil, pasGraphStructural("the Bundle carries no ClaimResponse")
 	}
 	return g, nil
 }
@@ -124,40 +188,45 @@ func (g *pasGraph) validateWithReferencePolicy(policy *authoredPASReferencePolic
 	}
 	// Bundle and entry metadata have no RESTful containing resource fullUrl.
 	// Their references must therefore be explicit absolute identities.
-	for key, value := range g.bundle {
+	for _, key := range pasSortedKeys(g.bundle) {
+		value := g.bundle[key]
 		if key != "entry" && key != "resourceType" {
-			if err := g.walkWithReferencePolicy(value, nil, nil, 0, false, "", policy); err != nil {
+			if err := g.walkWithReferencePolicy(value, nil, nil, 0, false, pasReferencePath("", key), policy); err != nil {
 				return err
 			}
 		}
 	}
-	for _, entry := range g.entries {
-		for key, value := range entry.(map[string]any) {
+	for i, entry := range g.entries {
+		fields := entry.(map[string]any)
+		for _, key := range pasSortedKeys(fields) {
+			value := fields[key]
 			if key != "resource" {
-				if err := g.walkWithReferencePolicy(value, nil, nil, 0, false, "", policy); err != nil {
+				if err := g.walkWithReferencePolicy(value, nil, nil, 0, false, pasReferencePath(pasReferencePath("/entry", strconv.Itoa(i)), key), policy); err != nil {
 					return err
 				}
 			}
 		}
 	}
-	// Each identity is traversed once, including disconnected retained siblings.
-	// Reference cycles therefore do not recurse through the referenced resource.
-	for _, e := range g.byURL {
+	// Each identity is traversed once, in Bundle order, including disconnected
+	// retained siblings. Reference cycles therefore do not recurse through the
+	// referenced resource, and the reference a refusal names is the first one in
+	// the Bundle's own order, the same on every run.
+	for _, e := range g.ordered() {
 		contained := make(map[string]map[string]any)
 		if list, exists := e.resource["contained"]; exists {
 			arr, ok := list.([]any)
 			if !ok {
-				return pasGraphError()
+				return pasGraphStructural("%s contained is not an array", e.label())
 			}
 			for _, v := range arr {
 				r, ok := v.(map[string]any)
 				if !ok {
-					return pasGraphError()
+					return pasGraphStructural("%s contains a value that is not a resource", e.label())
 				}
 				typ, tok := r["resourceType"].(string)
 				id, ok := r["id"].(string)
 				if !tok || typ == "" || !ok || !pasSafeResourceID(id) || contained[id] != nil {
-					return pasGraphError()
+					return pasGraphStructural("%s contains a resource without a unique, usable resourceType and id", e.label())
 				}
 				contained[id] = r
 			}
@@ -169,37 +238,42 @@ func (g *pasGraph) validateWithReferencePolicy(policy *authoredPASReferencePolic
 	return nil
 }
 
-func (g *pasGraph) walk(v any, owner *pasGraphEntry, contained map[string]map[string]any, depth int, inContained bool) error {
-	return g.walkWithReferencePolicy(v, owner, contained, depth, inContained, "", nil)
-}
-
 func (g *pasGraph) walkWithReferencePolicy(v any, owner *pasGraphEntry, contained map[string]map[string]any, depth int, inContained bool, path string, policy *authoredPASReferencePolicy) error {
 	if depth > pasGraphMaxDepth {
-		return pasGraphError()
+		return pasGraphStructural("%s nests deeper than %d levels", owner.label(), pasGraphMaxDepth)
 	}
 	switch x := v.(type) {
 	case map[string]any:
 		if typ, ok := x["resourceType"].(string); ok {
 			g.resources++
-			if g.resources > pasGraphMaxResources || typ == "Bundle" || typ == "Parameters" {
-				return pasGraphError()
+			if g.resources > pasGraphMaxResources {
+				return pasGraphStructural("the Bundle carries more than %d resources", pasGraphMaxResources)
+			}
+			if typ == "Bundle" || typ == "Parameters" {
+				return pasGraphStructural("%s carries a %s at %s", owner.label(), typ, path)
 			}
 			if depth > 0 {
 				inContained = true
 				if _, exists := x["contained"]; exists {
-					return pasGraphError()
+					return pasGraphStructural("%s carries a contained resource that itself contains resources at %s", owner.label(), path)
 				}
 			}
 		}
 		if ref, exists := x["reference"]; exists {
 			s, ok := ref.(string)
 			g.refs++
-			if !ok || s == "" || g.refs > pasGraphMaxReferences || (!g.resolve(s, owner, contained, inContained) && !policy.allows(owner, path, x)) {
-				return pasGraphError()
+			if !ok || s == "" {
+				return pasGraphStructural("%s carries an empty reference at %s", owner.label(), path)
+			}
+			if g.refs > pasGraphMaxReferences {
+				return pasGraphStructural("the Bundle carries more than %d references", pasGraphMaxReferences)
+			}
+			if why := g.resolve(s, owner, contained, inContained); why != "" && !policy.allows(owner, path, x) {
+				return &pasGraphRefusal{Owner: owner.label(), Path: path, Target: pasReferenceTarget(s), Reference: s, Why: why}
 			}
 		}
-		for key, child := range x {
-			if err := g.walkWithReferencePolicy(child, owner, contained, depth+1, inContained, pasReferencePath(path, key), policy); err != nil {
+		for _, key := range pasSortedKeys(x) {
+			if err := g.walkWithReferencePolicy(x[key], owner, contained, depth+1, inContained, pasReferencePath(path, key), policy); err != nil {
 				return err
 			}
 		}
@@ -213,32 +287,49 @@ func (g *pasGraph) walkWithReferencePolicy(v any, owner *pasGraphEntry, containe
 	return nil
 }
 
-func (g *pasGraph) resolve(ref string, owner *pasGraphEntry, contained map[string]map[string]any, inContained bool) bool {
+// resolve reports why ref, written inside owner, does not resolve to something
+// the Bundle carries — "" when it does. The rules are FHIR R4's: a "#id" names a
+// resource contained in its owner, a relative reference resolves only against a
+// RESTful owner fullUrl, an absolute one must be an entry's identity, and a
+// versioned one must name the version the entry actually holds.
+func (g *pasGraph) resolve(ref string, owner *pasGraphEntry, contained map[string]map[string]any, inContained bool) string {
 	if strings.HasPrefix(ref, "#") {
 		if owner == nil {
-			return false
+			return "names a contained resource, and Bundle metadata has no containing resource"
 		}
-		return (ref == "#" && inContained) || contained[strings.TrimPrefix(ref, "#")] != nil
+		if ref == "#" {
+			if inContained {
+				return ""
+			}
+			return "names its containing resource from outside any contained resource"
+		}
+		if contained[strings.TrimPrefix(ref, "#")] != nil {
+			return ""
+		}
+		return "names no resource contained in " + owner.label()
 	}
 	u, err := url.Parse(ref)
 	if err != nil || u.Fragment != "" || u.RawQuery != "" || u.ForceQuery {
-		return false
+		return "is not a resolvable resource identity"
 	}
 	full := ref
 	if !u.IsAbs() {
-		if owner == nil || u.RawPath != "" {
-			return false
+		if owner == nil {
+			return "is relative, and Bundle metadata has no base to resolve it against"
+		}
+		if u.RawPath != "" {
+			return "is not a resolvable resource identity"
 		}
 		// FHIR R4 defines relative resolution only for a RESTful owner fullUrl.
 		base, err := url.Parse(owner.fullURL)
 		if err != nil || base.Host == "" || base.RawPath != "" || (base.Scheme != "http" && base.Scheme != "https") || strings.HasPrefix(ref, "/") {
-			return false
+			return "is relative, and " + owner.label() + " has no RESTful fullUrl to resolve it against"
 		}
 		typ := owner.resource["resourceType"].(string)
 		id := owner.resource["id"].(string)
 		suffix := "/" + typ + "/" + id
 		if !strings.HasSuffix(base.Path, suffix) {
-			return false
+			return "is relative, and " + owner.label() + " has no RESTful fullUrl to resolve it against"
 		}
 		base.Path = strings.TrimSuffix(base.Path, suffix) + "/" + u.Path
 		full = base.String()
@@ -248,18 +339,23 @@ func (g *pasGraph) resolve(ref string, owner *pasGraphEntry, contained map[strin
 		version = full[pos+10:]
 		full = full[:pos]
 		if version == "" || strings.Contains(version, "/") {
-			return false
+			return "names no usable version"
 		}
 	}
 	target := g.byURL[full]
 	if target == nil {
-		return false
+		if full != ref {
+			return fmt.Sprintf("resolves to %s, which is no entry of the Bundle", full)
+		}
+		return "is no entry of the Bundle"
 	}
 	if version != "" {
 		meta, ok := target.resource["meta"].(map[string]any)
-		return ok && meta["versionId"] == version
+		if !ok || meta["versionId"] != version {
+			return fmt.Sprintf("names version %s, which %s does not hold", version, target.label())
+		}
 	}
-	return true
+	return ""
 }
 
 // Decode without float conversion or last-key-wins ambiguity. The same bounded
@@ -335,6 +431,35 @@ func decodePASValue(d *json.Decoder, depth int) (any, error) {
 		}
 		return t, nil
 	}
+}
+
+// ordered is every identity the graph holds, in Bundle order (then by fullUrl,
+// for a graph built without indexes). Derived from byURL rather than kept beside
+// it, so a graph assembled by any constructor is walked whole.
+func (g *pasGraph) ordered() []*pasGraphEntry {
+	out := make([]*pasGraphEntry, 0, len(g.byURL))
+	for _, e := range g.byURL {
+		out = append(out, e)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].index != out[j].index {
+			return out[i].index < out[j].index
+		}
+		return out[i].fullURL < out[j].fullURL
+	})
+	return out
+}
+
+// pasSortedKeys is the object's member names in a fixed order: the walk visits
+// them so, and the first refusal it reports is therefore the same for the same
+// bytes on every run.
+func pasSortedKeys(x map[string]any) []string {
+	keys := make([]string, 0, len(x))
+	for k := range x {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func pasSafeResourceID(id string) bool {

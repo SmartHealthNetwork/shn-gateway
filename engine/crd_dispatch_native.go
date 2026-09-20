@@ -101,7 +101,7 @@ func (g *Gateway) conformantCRDDispatchBindContext(ctx context.Context, reqJSON 
 	}
 	covJSON = req.Prefetch["coverage"]
 	member := strings.TrimPrefix(req.Context.PatientID, "Patient/")
-	pci, ok, readErr := g.resolveSubjectPCI(ctx, member)
+	pci, ok, readErr := g.resolveSubjectPCI(ctx, member, reqJSON)
 	if readErr != nil {
 		status, msg := SoRFailureResponse(readErr)
 		return nil, nil, status, msg
@@ -129,7 +129,7 @@ func (g *Gateway) conformantCRDDispatchBindContext(ctx context.Context, reqJSON 
 			return nil, nil, http.StatusForbidden, "dispatched order missing patient subject"
 		}
 		m := strings.TrimPrefix(subj, "Patient/")
-		rp, ok, readErr := g.resolveSubjectPCI(ctx, m)
+		rp, ok, readErr := g.resolveSubjectPCI(ctx, m, reqJSON)
 		if readErr != nil {
 			status, msg := SoRFailureResponse(readErr)
 			return nil, nil, status, msg
@@ -141,7 +141,7 @@ func (g *Gateway) conformantCRDDispatchBindContext(ctx context.Context, reqJSON 
 	// Coverage beneficiary (when present) must bind to the same pci.
 	if ben := coverageBeneficiaryFromPrefetch(covJSON); ben != "" {
 		m := strings.TrimPrefix(ben, "Patient/")
-		rp, ok, readErr := g.resolveSubjectPCI(ctx, m)
+		rp, ok, readErr := g.resolveSubjectPCI(ctx, m, reqJSON)
 		if readErr != nil {
 			status, msg := SoRFailureResponse(readErr)
 			return nil, nil, status, msg
@@ -160,7 +160,7 @@ func (g *Gateway) handleCRDDispatchInbound(w http.ResponseWriter, r *http.Reques
 	ctx := r.Context()
 	orderJSON, _, status, msg := g.conformantCRDDispatchBindContext(ctx, reqJSON, tok.Subject)
 	if status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
+		g.refuseInbound(w, r, legCRDOrderDispatch, env, tok, answerTok, status, msg, nil)
 		return
 	}
 	// Ingress-$validate the resolved DeviceRequest (SHN-shaped order; US Core warns-passes an
@@ -172,7 +172,7 @@ func (g *Gateway) handleCRDDispatchInbound(w http.ResponseWriter, r *http.Reques
 	// subject-fenced the coverage beneficiary. (The bare-Coverage order-select path still validates
 	// its coverage — that one is not a bundle.)
 	if status, msg := g.validateFHIR(ctx, orderJSON, "ingress", ""); status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
+		g.refuseInbound(w, r, legCRDOrderDispatch, env, tok, answerTok, status, msg, nil)
 		return
 	}
 	result, err := g.cfg.Responder.Handle(ctx, "crd-order-dispatch", env.Metadata.CorrelationID, tok.Subject, reqJSON)
