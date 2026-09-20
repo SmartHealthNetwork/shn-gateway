@@ -182,6 +182,21 @@ func TestFramedRequestWrongContractRefused(t *testing.T) {
 	}
 }
 
+// A certification-only client for 2.2 is evidence, not a lane: an inbound 2.2
+// frame is still refused exactly as it is with no 2.2 client at all.
+func TestFramedRequestCertifyOnlyClientStillRefused(t *testing.T) {
+	fake := shnsdk.NewFakeValidator()
+	g := d9Gateway(map[string]shnsdk.Validator{"2.0": fake}, nil)
+	g.cfg.CertificationValidatorsByLine = map[string]shnsdk.Validator{"2.0": fake, "2.2": fake}
+	_, _, status, msg := g.unframeRequest("pas-claim", framedRequest(t, "pa.pas@2.2", []byte(`{}`)))
+	if status != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422 — a certify-only client must not honour an inbound 2.2 frame", status)
+	}
+	if !strings.Contains(msg, "2.2") || !strings.Contains(strings.ToLower(msg), "validator") {
+		t.Fatalf("refusal must name the missing lane (FR-36/FR-G29): %q", msg)
+	}
+}
+
 func TestFramedRequestNativeButUnlanedRefused(t *testing.T) {
 	fake := shnsdk.NewFakeValidator()
 	// 2.2 is natively buildable but this deployment configured no 2.2 lane.
@@ -332,6 +347,23 @@ func (d dtrRelayResponder) Handle(_ context.Context, _, _, _ string, _ []byte) (
 	return LegResult{Response: testResponse(d.body)}, nil
 }
 
+// dtrFramedPackageFor is a $questionnaire-package input for the covered
+// member g's system of record holds, sent naming the operation.
+func dtrFramedPackageFor(t *testing.T, g *Gateway) []byte {
+	t.Helper()
+	return dtrParams(resourceParam("coverage", dtrCoverage("cov-1", dtrFrameMember)), `{"name":"questionnaire","valueCanonical":"http://example/Questionnaire/q"}`)
+}
+
+// coveredPCI is the network identifier of the covered member.
+func coveredPCI(t *testing.T, g *Gateway) string {
+	t.Helper()
+	pci, _, ok := g.cfg.SoR.(*censusSoR).ResolvePatient(dtrFrameMember)
+	if !ok {
+		t.Fatalf("%s is not in the test system of record", dtrFrameMember)
+	}
+	return pci
+}
+
 // TestDTRRelayedPackageUnstamped is the DTR sibling of
 // TestRelayedForeignBodyUnstamped (review finding 3): the native-forward DTR leg
 // relays a partner's $questionnaire-package VERBATIM, so the stamp-honesty rule applies
@@ -347,14 +379,15 @@ func TestDTRRelayedPackageUnstamped(t *testing.T) {
 			Sender: requester.ID, Recipient: "payer", TransactionType: "dtr-questionnaire-fetch",
 			AuthorityFrame: "payer-coverage", Timestamp: g.cfg.Clock().Format(time.RFC3339),
 			CorrelationID: "corr-dtr-1",
-		}, []byte(`{"canonical":"http://example/Questionnaire/q"}`), g.cfg.Identity.EncPub)
+		}, dtrFramedPackageFor(t, g), g.cfg.Identity.EncPub)
 		if err != nil {
 			t.Fatal(err)
 		}
 		rec := httptest.NewRecorder()
 		r := newSignedInboundRequest(t, g, requester.ID)
-		g.handleDTRInbound(rec, r, env, shnsdk.Token{Operation: "dtr-questionnaire-fetch", Subject: "pci-1", CorrelationID: "corr-dtr-1"},
-			[]byte(`{"canonical":"http://example/Questionnaire/q"}`), "pa.dtr@2.0")
+		r = r.WithContext(withRequestFrameOperation(r.Context(), shnsdk.FrameOperationQuestionnairePackage))
+		g.handleDTRInbound(rec, r, env, shnsdk.Token{Operation: "dtr-questionnaire-fetch", Subject: coveredPCI(t, g), CorrelationID: "corr-dtr-1"},
+			dtrFramedPackageFor(t, g), "pa.dtr@2.0")
 		if rec.Code != 200 {
 			t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
 		}
@@ -398,14 +431,15 @@ func TestDTREgressValidatesOnAnswerLine(t *testing.T) {
 			Sender: requester.ID, Recipient: "payer", TransactionType: "dtr-questionnaire-fetch",
 			AuthorityFrame: "payer-coverage", Timestamp: g.cfg.Clock().Format(time.RFC3339),
 			CorrelationID: "corr-dtr-2",
-		}, []byte(`{"canonical":"http://example/Questionnaire/q"}`), g.cfg.Identity.EncPub)
+		}, dtrFramedPackageFor(t, g), g.cfg.Identity.EncPub)
 		if err != nil {
 			t.Fatal(err)
 		}
 		rec := httptest.NewRecorder()
 		r := newSignedInboundRequest(t, g, requester.ID)
-		g.handleDTRInbound(rec, r, env, shnsdk.Token{Operation: "dtr-questionnaire-fetch", Subject: "pci-1", CorrelationID: "corr-dtr-2"},
-			[]byte(`{"canonical":"http://example/Questionnaire/q"}`), answerTok)
+		r = r.WithContext(withRequestFrameOperation(r.Context(), shnsdk.FrameOperationQuestionnairePackage))
+		g.handleDTRInbound(rec, r, env, shnsdk.Token{Operation: "dtr-questionnaire-fetch", Subject: coveredPCI(t, g), CorrelationID: "corr-dtr-2"},
+			dtrFramedPackageFor(t, g), answerTok)
 		return rec
 	}
 

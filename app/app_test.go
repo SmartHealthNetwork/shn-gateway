@@ -2185,3 +2185,130 @@ func TestCheckTargets_PayerDavinciPerOperationBases(t *testing.T) {
 		t.Fatalf("well-known target = %+v, want derived from the shared base only", wellKnown)
 	}
 }
+
+// PAYER_DAVINCI_BACKEND_HEADERS: fixed request headers for a partner system
+// that routes on one. Parsed at boot into the headers every partner request
+// carries; anything that is not a well-formed, non-reserved HTTP field
+// refuses the boot rather than sending a malformed or overriding header.
+func TestLoadConfig_PayerDavinciBackendHeaders(t *testing.T) {
+	baseEnv := map[string]string{
+		"ROLE": "payer", "SHN_SECRETS": "/x", "SHN_DISCOVERY_URL": "https://d",
+		"PAYER_DAVINCI_BASE_URL": "https://payer.example",
+	}
+	load := func(extra map[string]string) (config, error) {
+		env := map[string]string{}
+		for k, v := range baseEnv {
+			env[k] = v
+		}
+		for k, v := range extra {
+			env[k] = v
+		}
+		return loadConfig(func(k string) string { return env[k] })
+	}
+
+	t.Run("unset: no headers", func(t *testing.T) {
+		cfg, err := load(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(cfg.PayerDavinciBackendHeaders) != 0 {
+			t.Errorf("headers = %v, want none", cfg.PayerDavinciBackendHeaders)
+		}
+	})
+
+	t.Run("two fields, whitespace tolerated, names canonical", func(t *testing.T) {
+		cfg, err := load(map[string]string{"PAYER_DAVINCI_BACKEND_HEADERS": " x-route-key : plan-7 ,X-Tenant:t-1 "})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := cfg.PayerDavinciBackendHeaders.Get("X-Route-Key"); got != "plan-7" {
+			t.Errorf("X-Route-Key = %q", got)
+		}
+		if got := cfg.PayerDavinciBackendHeaders.Get("X-Tenant"); got != "t-1" {
+			t.Errorf("X-Tenant = %q", got)
+		}
+		if n := len(cfg.PayerDavinciBackendHeaders); n != 2 {
+			t.Errorf("%d headers, want 2: %v", n, cfg.PayerDavinciBackendHeaders)
+		}
+	})
+
+	t.Run("requires the partner base", func(t *testing.T) {
+		env := map[string]string{"ROLE": "payer", "SHN_SECRETS": "/x", "SHN_DISCOVERY_URL": "https://d", "PAYER_DAVINCI_BACKEND_HEADERS": "X-Route-Key: plan-7"}
+		_, err := loadConfig(func(k string) string { return env[k] })
+		if err == nil || !strings.Contains(err.Error(), "PAYER_DAVINCI_BACKEND_HEADERS") || !strings.Contains(err.Error(), "PAYER_DAVINCI_BASE_URL") {
+			t.Fatalf("want a requires-base error naming both, got %v", err)
+		}
+	})
+
+	for _, row := range []struct{ name, value, want string }{
+		{"no colon", "X-Route-Key plan-7", "name: value"},
+		{"empty name", ": plan-7", "empty header name"},
+		{"empty value", "X-Route-Key:", "empty header value"},
+		{"space in name", "X Route: plan-7", "not a valid HTTP field name"},
+		{"non-ascii name", "X-Ä: a", "not a valid HTTP field name"},
+		{"CR LF in value", "X-Route-Key: plan-7\r\nInjected: 1", "not a valid HTTP field value"},
+		{"authorization reserved", "Authorization: Bearer x", "reserved"},
+		{"content-type reserved", "content-type: text/plain", "reserved"},
+		{"accept reserved", "Accept: */*", "reserved"},
+		{"host reserved", "Host: other.example", "reserved"},
+		{"hop-by-hop connection", "Connection: close", "reserved"},
+		{"hop-by-hop transfer-encoding", "Transfer-Encoding: chunked", "reserved"},
+		{"hop-by-hop upgrade", "Upgrade: h2c", "reserved"},
+		{"duplicate name", "X-Route-Key: a, x-route-key: b", "repeated"},
+		{"set but empty", " , ", "names no header"},
+	} {
+		t.Run("refused: "+row.name, func(t *testing.T) {
+			_, err := load(map[string]string{"PAYER_DAVINCI_BACKEND_HEADERS": row.value})
+			if err == nil || !strings.Contains(err.Error(), "PAYER_DAVINCI_BACKEND_HEADERS") || !strings.Contains(err.Error(), row.want) {
+				t.Fatalf("want a boot error naming PAYER_DAVINCI_BACKEND_HEADERS and %q, got %v", row.want, err)
+			}
+		})
+	}
+}
+
+// The partner's fixed headers ride on every probe of the partner's bases and on
+// the derived well-known probe, and on nothing else: not the token endpoint, not
+// any target outside native-forward mode. Dropping the wiring, or attaching the
+// headers to the token target too, fails this row.
+func TestCheckTargets_PayerDavinciBackendHeaders(t *testing.T) {
+	hdr := http.Header{"X-Route-Key": {"plan-7"}}
+	cfg := config{
+		FHIRDataURL:                "https://sor.example/fhir",
+		FHIRTokenURL:               "https://sor.example/token",
+		HubURL:                     "https://hub.example",
+		PayerDavinciBaseURL:        "https://payer.example",
+		PayerDavinciDTRBaseURL:     "https://payer.example/dtr",
+		PayerDavinciPASBaseURL:     "https://payer.example/pas",
+		PayerDavinciTokenURL:       "https://payer.example/token",
+		PayerDavinciClientID:       "c1",
+		PayerDavinciClientSecret:   "s1",
+		PayerDavinciBackendHeaders: hdr,
+	}
+	withHeaders := map[string]bool{
+		"PAYER_DAVINCI_BASE_URL": true, "PAYER_DAVINCI_DTR_BASE_URL": true,
+		"PAYER_DAVINCI_PAS_BASE_URL": true, "PAYER_DAVINCI_WELL_KNOWN": true,
+	}
+	seen := map[string]bool{}
+	for _, tgt := range checkTargets(cfg) {
+		seen[tgt.ID] = true
+		if withHeaders[tgt.ID] {
+			if got := tgt.Headers.Get("X-Route-Key"); got != "plan-7" {
+				t.Errorf("%s: X-Route-Key = %q, want plan-7", tgt.ID, got)
+			}
+			continue
+		}
+		if tgt.Headers != nil {
+			t.Errorf("%s carries the partner headers %v; only the partner's bases may", tgt.ID, tgt.Headers)
+		}
+	}
+	for id := range withHeaders {
+		if !seen[id] {
+			t.Errorf("target %s missing", id)
+		}
+	}
+	for _, id := range []string{"PAYER_DAVINCI_TOKEN_URL", "FHIR_DATA_URL", "FHIR_TOKEN_URL", "HUB_URL"} {
+		if !seen[id] {
+			t.Errorf("control target %s missing", id)
+		}
+	}
+}

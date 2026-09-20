@@ -5,8 +5,8 @@ package engine
 // named operation by sending its payer's system the participant's own input
 // exactly (or with only the payer identity mapped), binds every patient the
 // input names to the authorized subject, and relays the payer's answer
-// exactly. A request without the header is the older questionnaire request,
-// still accepted.
+// exactly. A request without the header is refused: the older questionnaire
+// request is no longer read.
 
 import (
 	"bytes"
@@ -92,10 +92,11 @@ func newDTRPayer(t *testing.T, opts ...NativeOption) dtrPayer {
 }
 
 // dtrAnswer is what the requester received: the application status and body
-// of the response frame, or the refusal the payer gateway wrote.
+// of the response frame (framed), or the refusal the payer gateway wrote bare.
 type dtrAnswer struct {
 	status int
 	body   []byte
+	framed bool
 }
 
 // send delivers body on the questionnaire leg, naming operation in the
@@ -128,7 +129,7 @@ func (d dtrPayer) sendFor(t *testing.T, operation string, body []byte, subject s
 	if err != nil {
 		t.Fatalf("decode response frame: %v", err)
 	}
-	return dtrAnswer{status: hdr.Status, body: answer}
+	return dtrAnswer{status: hdr.Status, body: answer, framed: true}
 }
 
 // requireRefused checks a refusal and that nothing reached the payer's system.
@@ -194,13 +195,10 @@ func TestPayerDTR_DispatchByFrameOperation(t *testing.T) {
 
 	t.Run("answer keeps the payer's media type", func(t *testing.T) {
 		n := NewNativeResponder(d.partner.srv.Client(), d.partner.srv.URL, "shn-order-select", nil, nil)
-		for _, op := range []string{shnsdk.FrameOperationQuestionnairePackage, shnsdk.FrameOperationNextQuestion, ""} {
+		for _, op := range []string{shnsdk.FrameOperationQuestionnairePackage, shnsdk.FrameOperationNextQuestion} {
 			body := pkg
-			switch op {
-			case shnsdk.FrameOperationNextQuestion:
+			if op == shnsdk.FrameOperationNextQuestion {
 				body = nextParams
-			case "":
-				body = []byte(`{"canonical":"http://example.org/Questionnaire/q","coverage":` + dtrCoverage("cov-1", dtrFrameMember) + `}`)
 			}
 			res, err := n.Handle(withRequestFrameOperation(context.Background(), op), "dtr-questionnaire-fetch", "corr", "pci", body)
 			if err != nil || res.Status != 0 {
@@ -213,40 +211,50 @@ func TestPayerDTR_DispatchByFrameOperation(t *testing.T) {
 	})
 }
 
-// TestPayerDTR_LegacyEnvelopeStillAccepted: a questionnaire request without
-// the operation header is still answered, for both a package and an
-// adaptive round.
-func TestPayerDTR_LegacyEnvelopeStillAccepted(t *testing.T) {
+// TestPayerDTR_LegacyEnvelopeRefused400: a questionnaire request that names
+// no operation — the older request envelope, whatever it carries — is refused
+// before the payer's system sees it. The refusal is the payer's answer,
+// framed, so a requester that still sends the envelope reads its real status
+// and the operation it must name.
+func TestPayerDTR_LegacyEnvelopeRefused400(t *testing.T) {
 	d := newDTRPayer(t)
-	t.Run("package", func(t *testing.T) {
-		body := []byte(`{"canonical":"http://example.org/Questionnaire/q","coverage":` + dtrCoverage("cov-1", dtrFrameMember) + `}`)
-		got := d.send(t, "", body)
-		if got.status != http.StatusOK || d.partner.lastPath != packagePath {
-			t.Fatalf("answer = %d %s at %q, want 200 from the package operation", got.status, got.body, d.partner.lastPath)
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"canonical and coverage", `{"canonical":"http://example.org/Questionnaire/q","coverage":` + dtrCoverage("cov-1", dtrFrameMember) + `}`},
+		{"canonical, coverage and order", `{"canonical":"http://example.org/Questionnaire/q","coverage":` + dtrCoverage("cov-1", dtrFrameMember) + `,"order":` + dtrOrder(dtrFrameMember) + `}`},
+		{"adaptive round", `{"canonical":"http://example.org/Questionnaire/q","nextQuestion":` + nextQuestionQR(dtrFrameMember) + `}`},
+		{"canonical only", `{"canonical":"http://example.org/Questionnaire/q"}`},
+		{"package input without the operation header", string(dtrParams(resourceParam("coverage", dtrCoverage("cov-1", dtrFrameMember)), questionnaireParam))},
+		{"not JSON", `{not json`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := d.send(t, "", []byte(tc.body))
+			d.requireRefused(t, got, http.StatusBadRequest, refusalDTRUnframed)
+			if !got.framed {
+				t.Fatalf("the refusal was written bare: %d %s", got.status, got.body)
+			}
+		})
+	}
+
+	t.Run("responder refuses it too", func(t *testing.T) {
+		n := NewNativeResponder(d.partner.srv.Client(), d.partner.srv.URL, "shn-order-select", nil, nil)
+		d.partner.lastPath = ""
+		res, err := n.Handle(context.Background(), "dtr-questionnaire-fetch", "corr", "pci",
+			[]byte(`{"canonical":"http://example.org/Questionnaire/q","coverage":`+dtrCoverage("cov-1", dtrFrameMember)+`}`))
+		if err != nil || res.Status != http.StatusBadRequest || !strings.Contains(res.Message, refusalDTRUnframed) {
+			t.Fatalf("Handle = %+v, %v; want a 400 naming the missing operation", res, err)
 		}
-		if !bytes.Contains(d.partner.lastBody, []byte(`"name":"coverage"`)) || !bytes.Contains(d.partner.lastBody, []byte(`"valueCanonical":"http://example.org/Questionnaire/q"`)) {
-			t.Fatalf("payer's system received %s, want the package input built from the request", d.partner.lastBody)
-		}
-	})
-	t.Run("adaptive round", func(t *testing.T) {
-		body := []byte(`{"canonical":"http://example.org/Questionnaire/q","nextQuestion":` + nextQuestionQR(dtrFrameMember) + `}`)
-		got := d.send(t, "", body)
-		if got.status != http.StatusOK || d.partner.lastPath != nextPath {
-			t.Fatalf("answer = %d %s at %q, want 200 from the next-question operation", got.status, got.body, d.partner.lastPath)
-		}
-	})
-	t.Run("canonical only", func(t *testing.T) {
-		got := d.send(t, "", []byte(`{"canonical":"http://example.org/Questionnaire/q"}`))
-		if got.status != http.StatusOK || d.partner.lastPath != packagePath {
-			t.Fatalf("answer = %d %s at %q, want 200", got.status, got.body, d.partner.lastPath)
+		if d.partner.lastPath != "" {
+			t.Fatalf("an unframed request reached the payer's system at %s", d.partner.lastPath)
 		}
 	})
 }
 
 // TestPayerDTR_PackageSubjectBound: every patient a questionnaire request
-// names must be the authorized subject, on the framed operations and on the
-// older request alike. Each rejection row changes one thing in a request the
-// control answers.
+// names must be the authorized subject. Each rejection row changes one thing
+// in a request the control answers.
 func TestPayerDTR_PackageSubjectBound(t *testing.T) {
 	d := newDTRPayer(t)
 	pkg := func(params ...string) []byte {
@@ -312,29 +320,6 @@ func TestPayerDTR_PackageSubjectBound(t *testing.T) {
 		d.requireRefused(t, d.send(t, next0, []byte(other)), http.StatusForbidden, "token subject does not match request patient")
 	})
 
-	t.Run("legacy control", func(t *testing.T) {
-		body := []byte(`{"canonical":"q","coverage":` + dtrCoverage("cov-1", dtrFrameMember) + `,"order":` + dtrOrder(dtrFrameMember) + `}`)
-		if got := d.send(t, "", body); got.status != http.StatusOK {
-			t.Fatalf("answer = %d %s, want 200", got.status, got.body)
-		}
-	})
-	legacy := []struct {
-		name    string
-		body    string
-		status  int
-		message string
-	}{
-		{"coverage for another patient", `{"canonical":"q","coverage":` + dtrCoverage("cov-2", dtrOtherMember) + `}`, http.StatusForbidden, "token subject does not match request patient"},
-		{"order for another patient", `{"canonical":"q","coverage":` + dtrCoverage("cov-1", dtrFrameMember) + `,"order":` + dtrOrder(dtrOtherMember) + `}`, http.StatusForbidden, "more than one patient"},
-		{"order alone for another patient", `{"order":` + dtrOrder(dtrOtherMember) + `}`, http.StatusForbidden, "token subject does not match request patient"},
-		{"coverage that is an id-less Patient", `{"canonical":"q","coverage":{"resourceType":"Patient","name":[{"family":"Other"}]}}`, http.StatusBadRequest, "Patient resource with no id"},
-		{"duplicate coverage member", `{"canonical":"q","coverage":` + dtrCoverage("cov-1", dtrFrameMember) + `,"coverage":` + dtrCoverage("cov-2", dtrOtherMember) + `}`, http.StatusBadRequest, "parse questionnaire fetch failed"},
-	}
-	for _, tc := range legacy {
-		t.Run("legacy/"+tc.name, func(t *testing.T) {
-			d.requireRefused(t, d.send(t, "", []byte(tc.body)), tc.status, tc.message)
-		})
-	}
 }
 
 // TestPayerDTR_FramedParametersPostedExactly: the payer's system receives

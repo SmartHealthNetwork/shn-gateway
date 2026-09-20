@@ -606,6 +606,7 @@ shared secrets).
 | `PAYER_DAVINCI_CRD_SERVICE_ID` | Optional: names your CDS service for `order-select` and `order-sign` requests. Empty (the default) ⇒ each request goes to the one service your CDS service listing offers for the request's hook (see [CDS service selection](#cds-service-selection)). The named service must be in your listing and answer the request's hook; any other request is refused. |
 | `PAYER_DAVINCI_DISPATCH_SERVICE_ID` | Optional: names your CDS service for `order-dispatch` requests, with the same rules. Empty ⇒ the service your listing offers for `order-dispatch`. |
 | `PAYER_DAVINCI_CONTRACT_VERSIONS` | Declared Da Vinci contract versions for the partner payer, comma-separated `<contract>@<line>` tokens (e.g. `pa.pas@2.0, pa.crd@2.0`). Two things read this: the connectivity checks verify the partner's published capability against it (`version-drift` on disagreement, FR-G46), and native-forward routing refuses (before forwarding) any leg whose contract shares no line with it (FR-G48). Requires `PAYER_DAVINCI_BASE_URL`. Unset ⇒ native-forward legs are unfiltered (today's default) and the checks skip the drift comparison. |
+| `PAYER_DAVINCI_BACKEND_HEADERS` | Fixed request headers for a partner system that routes on one (a tenant or plan key its API gateway reads before any payload), as comma-separated `Name: value` pairs, e.g. `X-Route-Key: plan-7`. Sent on every request to the partner's bases — the CDS service listing read, each CRD post, the DTR and PAS operations (`$submit` and `$inquire`) and the connectivity probes — and **never** to `PAYER_DAVINCI_TOKEN_URL`. The message bytes are untouched: this is addressing for your own system, not a change to what the request asserts. Refused at boot: a pair that is not `name: value`, an empty name or value, a name or value that is not a valid HTTP field, a repeated name, and the names this gateway sets itself (`Authorization`, `Content-Type`, `Accept`, `Host`, `Content-Length`) or hop-by-hop names (`Connection`, `Transfer-Encoding`, `Upgrade`, …). A value cannot contain a comma. Requires `PAYER_DAVINCI_BASE_URL`. |
 | `PAYER_DAVINCI_STRICT_EXTENSIONS` | `true` to reserve the per-peer gated overlay (FR-G52) for this partner — a peer flagged this way would refuse a cross-version transform chain carrying or dropping its extensions instead of forwarding stripped or lossy content. **Currently DORMANT: setting it has no routing effect on this deployment.** The strict *consult* itself is already live where transforms are actually selected (route-layer chain selection, exercised by test-only seams), but the one peer this flag targets — the foreign Da Vinci partner reached through native-forward mode — is filtered through arm-1-only forwarding this slice (never through the chain-selection path), so the flag has nothing to gate yet. It goes live together with transform-at-the-native-forward-edge (not yet shipped; re-labeling another gateway's build product as a translated payload needs its own stamp/Provenance semantics worked out first). Default `false`. |
 
 **Removed settings.** `PAYER_DAVINCI_CRD_HOOK`, `PAYER_DAVINCI_DISPATCH_HOOK` and
@@ -847,8 +848,11 @@ independently — and, like message frames, there is **nothing to configure**: a
 codec-capable build self-declares it at registration/rotation. A peer that has not
 declared it keeps receiving byte-identical bare requests. A gateway that *has* declared it
 accepts **both** framed and bare inbound requests; declaring the capability commits only
-to being able to decode a frame, never to requiring one. `coverage-eligibility` is
-version-neutral and is never framed.
+to being able to decode a frame, never to requiring one. The one leg that requires a frame
+is the questionnaire leg: a `dtr-questionnaire-fetch` request must name its operation
+(`questionnaire-package` or `next-question`) in the frame's operation header, and one that
+names none — the older questionnaire request — is refused with `400` naming what to send.
+`coverage-eligibility` is version-neutral and is never framed.
 
 ## Exchange contract lines (`SHN_CONTRACT_VERSIONS`)
 
@@ -863,6 +867,28 @@ support the native-reach and inbound-honor rules below.
 | `SHN_CONTRACT_VERSIONS` | This gateway's own **declared** exchange-contract versions: comma-separated `<contract>@<line>` tokens, e.g. `pa.crd@2.2, pa.dtr@2.2, pa.pas@2.2`. Drives leg selection, the published `CapabilityStatement`s and `.well-known/davinci-configuration`, and the declaration peers route against. Must be a **subset of the native set** (`pa.crd@{2.0,2.1,2.2}`, `pa.dtr@{2.0,2.1,2.2}`, `pa.pas@{2.0,2.1,2.2}`, `pa.pdex@2.1`) — a token outside it is a boot error, not a routing outcome. Unset ⇒ the build default, the canonical `2.0` line (`pa.crd@2.0`, `pa.dtr@2.0`, `pa.pas@2.0`, `pa.pdex@2.1`). |
 | `FHIR_VALIDATE_URL_2_1` | Optional **2.1** `$validate` address override. Compose default: `http://shn-validator-2-1:8080/fhir`. |
 | `FHIR_VALIDATE_URL_2_2` | Optional **2.2** `$validate` address override. Compose default: `http://shn-validator-2-2:8080/fhir`. |
+| `FHIR_CERTIFY_URL_2_1` | Optional **2.1** `$validate` address for the certification evidence only. Never a routing lane. |
+| `FHIR_CERTIFY_URL_2_2` | Optional **2.2** `$validate` address for the certification evidence only. Never a routing lane. |
+
+A `FHIR_VALIDATE_URL_<line>` is a routing lane: setting it makes the line reachable in both
+directions (an inbound frame at that line is honoured, origination may target it). A
+`FHIR_CERTIFY_URL_<line>` is not: it gives the certification evidence (`certify:` lines) an
+address for that line and changes nothing about routing, so a gateway can record 2.2
+verdicts while it stays a 2.0 gateway. The evidence uses, in order, `FHIR_CERTIFY_URL_<line>`,
+then `FHIR_VALIDATE_URL_<line>`, then the Compose default once it has qualified — by
+routing's attempt at boot, or by the evidence's own: the evidence tries the default in a
+background loop of its own (first attempt 15 s after boot, then every 15 s for the first
+hour, then every 5 min, stopping at the first success from either side), so a validator that
+comes up after boot is certified against within one interval of coming up, and routing's
+lanes never change because of it. No exchange waits on that: a line whose default has not
+qualified records its verdict as `certification validator unavailable: FHIR_CERTIFY_URL_<line>
+and FHIR_VALIDATE_URL_<line> are not configured; default lane qualification pending` (or
+`… failed, retrying` after a failed attempt) and dials nothing for that exchange; routing's boot
+probe logs `validator_qualification` lines, and the evidence's loop logs a
+`certification_lane_qualification` line when an attempt's outcome changes (the first
+failure, then success), with the line, address and outcome. Where the
+default name does not resolve — any deployment that is not the Compose stack — set one of
+the two keys to get a verdict.
 
 **One validator per line — this is not optional.** A FHIR server loads exactly **one**
 version of a given IG package, so a single HAPI cannot host CRD 2.0.1 and CRD 2.2.1 at the

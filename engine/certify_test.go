@@ -42,6 +42,38 @@ func certificationFlush(t *testing.T, g *Gateway) {
 func certificationSubmit(g *Gateway, id string) {
 	g.enqueueCertification(certificationJob{evidence: CertificationEvidence{LegType: "pas-claim", Seam: "provider-ingress", Direction: "request", CorrelationID: id, TargetLine: "2.1"}, payload: []byte(`{"resourceType":"Claim"}`)})
 }
+
+// A line whose client answers CertificationLaneUnavailable is recorded
+// unavailable with that authored text as written — not the hashed form a
+// validator failure gets — so the evidence names the lane to configure.
+func TestCertificationLaneUnavailableIsStatedNotHashed(t *testing.T) {
+	v := certificationValidatorFunc(func(_ context.Context, _ []byte, profile string) (shnsdk.Result, error) {
+		if strings.Contains(profile, "|2.1.") {
+			return shnsdk.Result{}, &CertificationLaneUnavailable{Reason: "FHIR_VALIDATE_URL_2_1 is not configured and the default lane has not qualified"}
+		}
+		return shnsdk.Result{Valid: true}, nil
+	})
+	g := certificationGateway(t, v, nil)
+	certificationSubmit(g, "synthetic")
+	certificationFlush(t, g)
+	e := g.CertificationEvidenceForTest()
+	if len(e) != 1 {
+		t.Fatalf("%+v", e)
+	}
+	for _, verdict := range e[0].Verdicts {
+		switch verdict.Line {
+		case "2.1":
+			if verdict.State != "unavailable" || verdict.Error != "certification validator unavailable: FHIR_VALIDATE_URL_2_1 is not configured and the default lane has not qualified" {
+				t.Fatalf("2.1 verdict %+v", verdict)
+			}
+		default:
+			if verdict.State != "valid" {
+				t.Fatalf("%s verdict %+v", verdict.Line, verdict)
+			}
+		}
+	}
+}
+
 func TestCertificationSpeciesProfiles(t *testing.T) {
 	for _, row := range []struct{ raw, species, profile string }{
 		{`{"resourceType":"Claim"}`, "Claim", "profile-claim"},

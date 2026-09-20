@@ -58,7 +58,7 @@ func pinnedOwnership() map[Key]Rule {
 
 		{"crd-order-dispatch", rc, req, OutcomeCarried}:      {Allowed: own(R, E), Edits: []EditID{"E-03"}},
 		{"crd-order-select", rc, req, OutcomeCarried}:        {Allowed: own(R, E), Edits: []EditID{"E-03"}},
-		{"dtr-questionnaire-fetch", rc, req, OutcomeCarried}: {Allowed: own(R, E, A), Edits: []EditID{"E-03"}, Builders: b("defect-dtr-projection")},
+		{"dtr-questionnaire-fetch", rc, req, OutcomeCarried}: {Allowed: own(R, E), Edits: []EditID{"E-03"}},
 		{"pas-claim", rc, req, OutcomeCarried}:               {Allowed: own(R, E), Edits: []EditID{"E-03"}},
 		{"pas-claim-inquire", rc, req, OutcomeCarried}:       {Allowed: own(R, E), Edits: []EditID{"E-03"}},
 		{"pas-claim-update", rc, req, OutcomeCarried}:        {Allowed: own(R, E), Edits: []EditID{"E-03"}},
@@ -243,7 +243,7 @@ func TestCheckRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	interim, err := Authored(BuilderInterimDTRProjection, []byte(`{}`), fhirJSON)
+	interim, err := Authored(BuilderInterimEmptyErrorSubstitution, []byte(`{}`), fhirJSON)
 	if err != nil {
 		t.Fatal(err)
 	}

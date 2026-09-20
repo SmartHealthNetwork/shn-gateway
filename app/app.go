@@ -28,6 +28,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -106,6 +107,15 @@ type config struct {
 	// validatorLanesForDeclared.
 	FHIRValidateURL21 string
 	FHIRValidateURL22 string
+	// FHIRCertifyURL21 / FHIRCertifyURL22 (FHIR_CERTIFY_URL_2_1 / _2_2) are
+	// $validate addresses used ONLY by the certification evidence for that line.
+	// They are never routing lanes: a certify-only address does not enter
+	// ValidatorsByLine, so it neither honours an inbound frame at that line nor
+	// lets origination target it. For evidence the precedence is
+	// FHIR_CERTIFY_URL_<line>, then FHIR_VALIDATE_URL_<line>, then the default
+	// lane once routing has qualified it (certificationValidators).
+	FHIRCertifyURL21 string
+	FHIRCertifyURL22 string
 	// ContractVersions is the operator-DECLARED exchange-contract token set
 	// (SHN_CONTRACT_VERSIONS, comma-separated). Boot-validated: token grammar +
 	// membership of shnsdk.NativeContractVersions(). Empty env ⇒ this build's
@@ -247,11 +257,13 @@ type config struct {
 	// engine.WithPayorEdgeIdentity (gateway/engine/payoredge.go). All-or-nothing:
 	// loadConfig refuses boot on a partial set; both empty ⇒ the payer-edge identity
 	// mapping seam is off (verbatim relay, the prior behavior).
-	PayerDavinciPayorOwnRaw     string
-	PayerDavinciPayorBackendRaw string
-	PayerDavinciPayorOwn        shnsdk.PayerIdentifier
-	PayerDavinciPayorBackend    shnsdk.PayerIdentifier
-	PayerDavinciPayorEdge       bool // true iff both env vars were set and parsed clean
+	PayerDavinciBackendHeadersRaw string
+	PayerDavinciBackendHeaders    http.Header
+	PayerDavinciPayorOwnRaw       string
+	PayerDavinciPayorBackendRaw   string
+	PayerDavinciPayorOwn          shnsdk.PayerIdentifier
+	PayerDavinciPayorBackend      shnsdk.PayerIdentifier
+	PayerDavinciPayorEdge         bool // true iff both env vars were set and parsed clean
 
 	// OriginationProfile selects the per-UC origination lane: "" and "demo" keep the
 	// self-contained demo order shape; "provider-data" originates every UC off the
@@ -454,6 +466,8 @@ func loadConfig(getenv func(string) string) (config, error) {
 		FHIRValidateURL:   getenv("FHIR_VALIDATE_URL"),
 		FHIRValidateURL21: getenv("FHIR_VALIDATE_URL_2_1"),
 		FHIRValidateURL22: getenv("FHIR_VALIDATE_URL_2_2"),
+		FHIRCertifyURL21:  getenv("FHIR_CERTIFY_URL_2_1"),
+		FHIRCertifyURL22:  getenv("FHIR_CERTIFY_URL_2_2"),
 		StoreDatabaseURL:  getenv("SHN_STORE_DATABASE_URL"),
 		NPI:               def("NPI", "1234567890"),
 		FHIRDataURL:       getenv("FHIR_DATA_URL"),
@@ -481,6 +495,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 		PayerDavinciDispatchServiceID: getenv("PAYER_DAVINCI_DISPATCH_SERVICE_ID"),
 		PayerDavinciContractVersions:  splitTrimmed(getenv("PAYER_DAVINCI_CONTRACT_VERSIONS")),
 		PayerDavinciStrictExtensions:  getenv("PAYER_DAVINCI_STRICT_EXTENSIONS") == "true",
+		PayerDavinciBackendHeadersRaw: getenv("PAYER_DAVINCI_BACKEND_HEADERS"),
 		PayerDavinciPayorOwnRaw:       getenv("PAYER_DAVINCI_PAYOR_OWN"),
 		PayerDavinciPayorBackendRaw:   getenv("PAYER_DAVINCI_PAYOR_BACKEND"),
 		OriginationProfile:            getenv("ORIGINATION_PROFILE"),
@@ -530,6 +545,16 @@ func loadConfig(getenv func(string) string) (config, error) {
 
 	for _, pair := range optionalURLs(cfg) {
 		if err := checkOptionalURL(pair[0], pair[1]); err != nil {
+			return config{}, fmt.Errorf("gateway: %w", err)
+		}
+	}
+	// A certification address is dialed like a lane: a hostless value refuses
+	// boot here, not per exchange behind a hashed error in the evidence.
+	for _, pair := range [][2]string{{"FHIR_CERTIFY_URL_2_1", cfg.FHIRCertifyURL21}, {"FHIR_CERTIFY_URL_2_2", cfg.FHIRCertifyURL22}} {
+		if pair[1] == "" {
+			continue
+		}
+		if err := checkValidatorLaneURL(pair[0], pair[1]); err != nil {
 			return config{}, fmt.Errorf("gateway: %w", err)
 		}
 	}
@@ -625,6 +650,16 @@ func loadConfig(getenv func(string) string) (config, error) {
 		if err := checkClientAuthMode("PAYER_DAVINCI", cfg.PayerDavinciClientKey, cfg.PayerDavinciClientAlg, cfg.PayerDavinciClientKID, cfg.PayerDavinciClientSecret); err != nil {
 			return config{}, err
 		}
+	}
+	if raw := cfg.PayerDavinciBackendHeadersRaw; raw != "" {
+		if cfg.PayerDavinciBaseURL == "" {
+			return config{}, fmt.Errorf("gateway: PAYER_DAVINCI_BACKEND_HEADERS set requires PAYER_DAVINCI_BASE_URL")
+		}
+		h, err := parseBackendHeaders(raw)
+		if err != nil {
+			return config{}, fmt.Errorf("gateway: PAYER_DAVINCI_BACKEND_HEADERS: %w", err)
+		}
+		cfg.PayerDavinciBackendHeaders = h
 	}
 
 	// The operated $populate connector's credential block: same exactly-one-mode
@@ -885,6 +920,8 @@ func optionalURLs(cfg config) [][2]string {
 		{"FHIR_VALIDATE_URL", cfg.FHIRValidateURL},
 		{"FHIR_VALIDATE_URL_2_1", cfg.FHIRValidateURL21},
 		{"FHIR_VALIDATE_URL_2_2", cfg.FHIRValidateURL22},
+		{"FHIR_CERTIFY_URL_2_1", cfg.FHIRCertifyURL21},
+		{"FHIR_CERTIFY_URL_2_2", cfg.FHIRCertifyURL22},
 		{"FHIR_DATA_URL", cfg.FHIRDataURL},
 		{"REGISTRAR_URL", cfg.RegistrarURL},
 		{"FHIR_TOKEN_URL", cfg.FHIRTokenURL},
@@ -929,6 +966,11 @@ func checkTargets(cfg config) []checks.Target {
 		if name == "PAYER_DAVINCI_BASE_URL" {
 			t.DeclaredVersions = cfg.PayerDavinciContractVersions
 		}
+		if strings.HasPrefix(name, "PAYER_DAVINCI_") && name != "PAYER_DAVINCI_TOKEN_URL" {
+			// The partner's bases are probed the way they are called; the token
+			// endpoint never sees the partner's routing headers.
+			t.Headers = cfg.PayerDavinciBackendHeaders
+		}
 		switch name {
 		case "FHIR_DATA_URL", "PAYER_DAVINCI_BASE_URL":
 			t.Kind = checks.KindFHIRMetadata
@@ -958,6 +1000,7 @@ func checkTargets(cfg config) []checks.Target {
 			Kind:             checks.KindDavinciConfig,
 			URL:              cfg.PayerDavinciBaseURL,
 			DeclaredVersions: cfg.PayerDavinciContractVersions,
+			Headers:          cfg.PayerDavinciBackendHeaders,
 		})
 	}
 	return out
@@ -1575,7 +1618,7 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		if cfg.PayerDavinciCDSBaseURL != "" {
 			cdsBase = cfg.PayerDavinciCDSBaseURL
 		}
-		cdsServices, discErr := engine.DiscoverCDSServices(ctx, pdc, cdsBase)
+		cdsServices, discErr := engine.DiscoverCDSServices(ctx, pdc, cdsBase, cfg.PayerDavinciBackendHeaders)
 		if discErr != nil {
 			fmt.Fprintf(stdout, "gateway: WARNING the payer's CDS service listing is not readable yet (%v); CRD requests are refused until it is\n", discErr)
 		} else {
@@ -1607,6 +1650,10 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 			// rest of the gateway — a deployed gateway with CONFORMANCE_ENFORCEMENT=none
 			// must reach none on this path too, not just the in-process Gateway.
 			engine.WithConformancePolicy(engine.NewConformancePolicy(cfg.ConformanceEnforcement)),
+		}
+		if len(cfg.PayerDavinciBackendHeaders) > 0 {
+			nativeOpts = append(nativeOpts, engine.WithBackendHeaders(cfg.PayerDavinciBackendHeaders))
+			fmt.Fprintf(stdout, "gateway: partner requests carry %d fixed header(s) (PAYER_DAVINCI_BACKEND_HEADERS)\n", len(cfg.PayerDavinciBackendHeaders))
 		}
 		if cfg.diagnostic != nil {
 			nativeOpts = append(nativeOpts, engine.WithNativeDiagnostic(cfg.diagnostic.emit))
@@ -1720,9 +1767,12 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	// engine.New(gwCfg).Handler()) so the observer mux composed just below
 	// can wire the demo capture-fetch endpoint against this SAME gateway
 	// instance's own edge-capture store.
-	gwCfg.CertificationValidatorsByLine = certificationValidators(getenv, cfg, firstNonEmpty(cfg.FHIRValidateURL, endpoints.FHIRValidate))
+	gwCfg.CertificationValidatorsByLine = certificationValidators(getenv, cfg, firstNonEmpty(cfg.FHIRValidateURL, endpoints.FHIRValidate), lanes.defaults, qualifyDefaultLane)
 	gw, err := engine.New(gwCfg)
 	if err != nil {
+		// The gated clients' qualification loops started with the clients; no
+		// worker will ever own them.
+		engine.CloseCertificationClients(gwCfg.CertificationValidatorsByLine)
 		return b, err
 	}
 
@@ -2302,9 +2352,27 @@ func populateFailureObserver(stdout io.Writer) func(engine.PopulateFailure) {
 }
 
 // certificationValidators constructs read-only clients with independent pools
-// for every supported line, including the resolved canonical endpoint.
-func certificationValidators(getenv func(string) string, cfg config, canonical string) map[string]shnsdk.Validator {
-	endpoints := map[string]string{"2.0": canonical, "2.1": cfg.FHIRValidateURL21, "2.2": cfg.FHIRValidateURL22}
+// for every line that has an address the evidence may use, and never invents
+// one. Per line, in order: FHIR_CERTIFY_URL_<line>, an address for the evidence
+// alone; FHIR_VALIDATE_URL_<line>, the line's routing lane; and the default
+// lane routing is qualifying (defaults), gated on that qualification — until the
+// default has answered a qualification the line's evidence says no lane is
+// configured and nothing is dialed, because the default is a Compose service
+// name and in a deployment where it does not resolve every exchange would
+// otherwise record a hashed DNS failure as its verdict. A line with none of the
+// three has no client, which the collector records as unavailable. The canonical
+// line certifies on its own endpoint. Nothing here feeds routing: a
+// certify-only address is not a lane (validatorLanesForDeclared never reads it),
+// and the gated client's own late qualification never changes routing's lane.
+// The gated client runs its own background qualification loop from boot (qualify
+// is the same qualifier routing uses), so a validator that comes up after
+// routing's boot budget is certified against within one interval of coming up.
+func certificationValidators(getenv func(string) string, cfg config, canonical string, defaults map[string]*engine.DiscoveredLane, qualify engine.LaneQualifier) map[string]shnsdk.Validator {
+	endpoints := map[string]string{
+		"2.0": canonical,
+		"2.1": firstNonEmpty(cfg.FHIRCertifyURL21, cfg.FHIRValidateURL21),
+		"2.2": firstNonEmpty(cfg.FHIRCertifyURL22, cfg.FHIRValidateURL22),
+	}
 	out := make(map[string]shnsdk.Validator, len(endpoints))
 	for line, endpoint := range endpoints {
 		if getenv("SHN_FAKE_VALIDATOR") == "1" {
@@ -2312,9 +2380,96 @@ func certificationValidators(getenv func(string) string, cfg config, canonical s
 			continue
 		}
 		if endpoint == "" {
-			endpoint = engine.DefaultLaneURL(line)
+			if d := defaults[line]; d != nil {
+				suffix := strings.ReplaceAll(line, ".", "_")
+				out[line] = engine.NewGatedCertificationValidator(d, qualify, "FHIR_CERTIFY_URL_"+suffix+" and FHIR_VALIDATE_URL_"+suffix+" are not configured")
+			}
+			continue
 		}
 		out[line] = engine.NewCertificationOperationValidator(endpoint)
 	}
 	return out
+}
+
+// backendHeaderReserved are the header names PAYER_DAVINCI_BACKEND_HEADERS may
+// not set: the ones this gateway itself owns on a partner request, the
+// request-target fields, and the hop-by-hop set of RFC 9110 §7.6.1.
+var backendHeaderReserved = map[string]bool{
+	"Authorization": true, "Content-Type": true, "Accept": true, "Host": true, "Content-Length": true,
+	"Connection": true, "Keep-Alive": true, "Proxy-Authenticate": true, "Proxy-Authorization": true,
+	"Proxy-Connection": true, "Te": true, "Trailer": true, "Transfer-Encoding": true, "Upgrade": true,
+}
+
+// validHeaderFieldName reports whether name is an RFC 9110 token.
+func validHeaderFieldName(name string) bool {
+	if name == "" {
+		return false
+	}
+	const tokenPunct = "!#$%&'*+-.^_`|~"
+	for _, c := range name {
+		if c >= 0x80 || (!unicode.IsLetter(c) && !unicode.IsDigit(c) && !strings.ContainsRune(tokenPunct, c)) {
+			return false
+		}
+	}
+	return true
+}
+
+// validHeaderFieldValue reports whether value is an RFC 9110 field value:
+// visible characters, space and horizontal tab only (no CR, LF, NUL or
+// other controls, which would end or corrupt the field on the wire).
+func validHeaderFieldValue(value string) bool {
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if c == '\t' {
+			continue
+		}
+		if c < 0x20 || c == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+// parseBackendHeaders reads PAYER_DAVINCI_BACKEND_HEADERS: comma-separated
+// `Name: value` pairs, each a well-formed HTTP field that this gateway does
+// not own itself. Names are canonicalized; a name repeated, a name or value
+// that is not a valid field, or a reserved name refuses the boot — a
+// malformed or overriding header would be sent on every partner request.
+func parseBackendHeaders(raw string) (http.Header, error) {
+	h := http.Header{}
+	for _, field := range strings.Split(raw, ",") {
+		field = strings.TrimSpace(field)
+		if field == "" {
+			continue
+		}
+		name, value, ok := strings.Cut(field, ":")
+		if !ok {
+			return nil, fmt.Errorf("%q is not a `name: value` pair", field)
+		}
+		name, value = strings.TrimSpace(name), strings.TrimSpace(value)
+		if name == "" {
+			return nil, fmt.Errorf("%q: empty header name", field)
+		}
+		if value == "" {
+			return nil, fmt.Errorf("%q: empty header value", field)
+		}
+		if !validHeaderFieldName(name) {
+			return nil, fmt.Errorf("%q: not a valid HTTP field name", name)
+		}
+		if !validHeaderFieldValue(value) {
+			return nil, fmt.Errorf("%s: not a valid HTTP field value", name)
+		}
+		canon := http.CanonicalHeaderKey(name)
+		if backendHeaderReserved[canon] {
+			return nil, fmt.Errorf("%s is reserved (set by the gateway, or hop-by-hop), not a partner routing header", canon)
+		}
+		if _, dup := h[canon]; dup {
+			return nil, fmt.Errorf("%s is repeated", canon)
+		}
+		h[canon] = []string{value}
+	}
+	if len(h) == 0 {
+		return nil, fmt.Errorf("is set but names no header (got %q)", raw)
+	}
+	return h, nil
 }

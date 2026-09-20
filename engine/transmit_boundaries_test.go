@@ -279,8 +279,9 @@ func TestBoundaryQuestionnaireAnswerMustBeRelayed(t *testing.T) {
 	g.cfg.Observer = refused.observe
 	rec := httptest.NewRecorder()
 	env := shnsdk.Envelope{Metadata: shnsdk.Metadata{CorrelationID: "corr-1", Sender: requester.ID}}
-	g.handleDTRInbound(rec, newSignedInboundRequest(t, g, requester.ID), env, shnsdk.Token{Subject: "pci-1"},
-		[]byte(`{"canonical":"http://example.org/Questionnaire/q"}`), "")
+	r := newSignedInboundRequest(t, g, requester.ID)
+	r = r.WithContext(withRequestFrameOperation(r.Context(), shnsdk.FrameOperationQuestionnairePackage))
+	g.handleDTRInbound(rec, r, env, shnsdk.Token{Subject: coveredPCI(t, g)}, dtrFramedPackageFor(t, g), "")
 	assertLocalFault(t, rec)
 	if refused.count() == 0 {
 		t.Fatal("the refusal was not observed")

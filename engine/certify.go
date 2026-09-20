@@ -90,8 +90,29 @@ type certificationWorker struct {
 // collection. It is not an operator configuration or a routing-lane switch.
 func DisableCertificationForTest(c *Config) { c.certificationDisabled = true }
 
+// CloseCertificationClients releases every certification client: a gated
+// client's background qualification loop is stopped and joined, and each
+// client's connection pool is released. It is what the worker's shutdown runs,
+// and what an embedder that built clients but no worker must run.
+func CloseCertificationClients(clients map[string]shnsdk.Validator) {
+	for _, v := range clients {
+		switch c := v.(type) {
+		case *shnsdk.OperationValidator:
+			if c.Client != nil {
+				c.Client.CloseIdleConnections()
+			}
+		case interface{ Close() }:
+			c.Close() // a gated client: stops its background qualification, releases its pool
+		case interface{ CloseIdleConnections() }:
+			c.CloseIdleConnections()
+		}
+	}
+}
+
 func (g *Gateway) startCertification() {
 	if g.cfg.certificationDisabled {
+		// No worker will own the clients: stop any gated loop now.
+		CloseCertificationClients(g.cfg.CertificationValidatorsByLine)
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -195,11 +216,7 @@ func (w *certificationWorker) storeLocked(e CertificationEvidence) {
 func (g *Gateway) runCertification(w *certificationWorker) {
 	defer close(w.done)
 	defer func() {
-		for _, v := range w.validators {
-			if o, ok := v.(*shnsdk.OperationValidator); ok && o.Client != nil {
-				o.Client.CloseIdleConnections()
-			}
-		}
+		CloseCertificationClients(w.validators)
 	}()
 	for {
 		var job certificationJob
@@ -275,10 +292,16 @@ func (g *Gateway) collectCertification(w *certificationWorker, job certification
 			contextErr := candidate.Err()
 			cancel()
 			v.Issues = certificationIssueMetadata(result.Issues)
+			var noLane *CertificationLaneUnavailable
 			switch {
 			case contextErr != nil:
 				v.State = "expired"
 				v.Error = contextErr.Error()
+			case errors.As(err, &noLane):
+				// Authored text, not a server's bytes: recorded as written so the
+				// evidence says which lane is missing.
+				v.State = "unavailable"
+				v.Error = err.Error()
 			case err != nil:
 				v.State = "unavailable"
 				v.Error = certificationErrorMetadata(err)
@@ -319,6 +342,17 @@ func certificationErrorMetadata(err error) string {
 
 // CertificationEvidenceForTest returns the oldest-first bounded ring with all
 // nested slices copied; callers cannot mutate retained completion records.
+// CertificationClientForTest returns the certification client wired for line,
+// nil when the line has none.
+func (g *Gateway) CertificationClientForTest(line string) shnsdk.Validator {
+	if g.certification == nil {
+		return nil
+	}
+	g.certification.mu.Lock()
+	defer g.certification.mu.Unlock()
+	return g.certification.validators[line]
+}
+
 func (g *Gateway) CertificationEvidenceForTest() []CertificationEvidence {
 	w := g.certification
 	if w == nil {

@@ -25,6 +25,10 @@ import (
 const (
 	refusalUnknownMember     = "unknown member"
 	refusalIngressValidation = "ingress validation failed"
+	// refusalDTRUnframed refuses a questionnaire request that names no
+	// operation: the older request envelope, which carried a canonical and a
+	// coverage in place of the operation's own input, is no longer accepted.
+	refusalDTRUnframed = "questionnaire request names no operation: send the questionnaire-package or next-question operation's own input in a request frame naming it"
 )
 
 // isApplicationRefusal reports whether a refusal a handler writes after the

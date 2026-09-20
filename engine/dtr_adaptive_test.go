@@ -218,18 +218,6 @@ func TestNextQuestionSubjectBindAndFence(t *testing.T) {
 	}
 }
 
-// TestNextQuestionRequestSubject: the carriage probe reads the adaptive round's subject and
-// says false for an ordinary package fetch (so the plain leg is untouched).
-func TestNextQuestionRequestSubject(t *testing.T) {
-	if _, ok := nextQuestionRequestSubject([]byte(`{"canonical":"x"}`)); ok {
-		t.Fatal("a plain package fetch must not read as a next-question round")
-	}
-	subj, ok := nextQuestionRequestSubject([]byte(`{"canonical":"x","nextQuestion":{"resourceType":"QuestionnaireResponse","subject":{"reference":"Patient/M"}}}`))
-	if !ok || subj != "Patient/M" {
-		t.Fatalf("round: ok=%v subject=%q, want Patient/M", ok, subj)
-	}
-}
-
 // TestUC04AttestationAnswers_SupportingInfo: 3.2 / 3.3 are read from the order's
 // supportingInfo through the SoR resolver (ClinicalImpression.summary / Goal.description.text),
 // skipping unresolvable or other-typed references; absent ⇒ omitted, never invented.

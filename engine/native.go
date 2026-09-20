@@ -123,6 +123,14 @@ type nativeResponder struct {
 	// nil, or a holder with no published identity, ⇒ payorEdgeOwn alone decides.
 	payorEdgePublished func() []shnsdk.PayerIdentifier
 
+	// backendHeaders are fixed request headers a partner system routes on (a
+	// tenant or plan key its API gateway reads before any payload). They go on
+	// every request this responder sends the partner — listing read, CRD, DTR,
+	// PAS — and never on the token endpoint (the token client
+	// builds its own request). Addressing for the participant's own system,
+	// never a change to the message: the body bytes are untouched. nil ⇒ none.
+	backendHeaders http.Header
+
 	// conformance is the policy of the gateway this responder runs in, passed
 	// as an option because NewNativeResponder runs before engine.New. The zero
 	// value is strict, so a responder built without the option is today's
@@ -189,6 +197,25 @@ func WithPASBaseURL(pasBaseURL string) NativeOption {
 		if pasBaseURL != "" {
 			n.pasBaseURL = pasBaseURL
 		}
+	}
+}
+
+// WithBackendHeaders sets fixed request headers for a partner system that
+// routes on one (PAYER_DAVINCI_BACKEND_HEADERS). Every request to the partner's
+// bases carries them; the token endpoint never does. nil or empty ⇒ nothing added.
+func WithBackendHeaders(h http.Header) NativeOption {
+	return func(n *nativeResponder) {
+		if len(h) == 0 {
+			return
+		}
+		n.backendHeaders = h.Clone()
+	}
+}
+
+// applyBackendHeaders adds the partner's fixed request headers to req.
+func (n *nativeResponder) applyBackendHeaders(req *http.Request) {
+	for k, v := range n.backendHeaders {
+		req.Header[k] = append([]string(nil), v...)
 	}
 }
 
@@ -512,8 +539,7 @@ func (n *nativeResponder) Handle(ctx context.Context, leg, corrID, subjectPCI st
 	// payer stub (§3.1/§3.2). A payer that wants a partner to decide eligibility deploys the
 	// standalone SDK Responder, whose Eligibility method is untouched.
 	// The network's request, as it arrived. Each leg sends it exactly, or with only
-	// the registered payer-identity edit; the older questionnaire envelope is the one
-	// request still rebuilt (under its interim builder).
+	// the registered payer-identity edit.
 	in := relay.NewBody(requestFHIR, relay.OriginPeerFrame)
 	switch leg {
 	case "crd-order-select", "crd-order-dispatch":
@@ -522,121 +548,19 @@ func (n *nativeResponder) Handle(ctx context.Context, leg, corrID, subjectPCI st
 	case "dtr-questionnaire-fetch":
 		// A request frame that names the operation carries that operation's own input,
 		// which is sent to the payer's system exactly (or with only the payer identity
-		// mapped). A request that names none is the older envelope below.
+		// mapped). A request that names none is refused.
 		switch op := RequestFrameOperation(ctx); op {
 		case shnsdk.FrameOperationQuestionnairePackage:
 			return n.forwardDTROperation(ctx, contract, in, "/Questionnaire/$questionnaire-package", payorEdgeDTRParameters, leg, "DTR")
 		case shnsdk.FrameOperationNextQuestion:
 			return n.forwardDTROperation(ctx, contract, in, "/Questionnaire/$next-question", 0, leg, "DTR next-question")
 		case "":
+			// The older request envelope, which carried a canonical and a coverage
+			// in place of the operation's own input, is no longer read.
+			return LegResult{Status: http.StatusBadRequest, Message: refusalDTRUnframed}, nil
 		default:
 			return LegResult{Status: http.StatusBadRequest, Message: "unsupported DTR operation"}, nil
 		}
-		// The older questionnaire request envelope, still sent by requesters that do not
-		// name the operation: a canonical and/or an order, and an optional coverage. It is
-		// not the requester's own operation input, so this gateway builds a
-		// $questionnaire-package request from it (under the interim builder); the envelope
-		// is accepted only until those requesters are upgraded. Fail-closed posture:
-		// malformed JSON or neither a canonical nor an order → 400 (parity with a
-		// malformed-request 400, not a 500).
-		var fetch dtrLegRequest
-		if err := relay.Decode(in, &fetch); err != nil || (fetch.Canonical == "" && len(fetch.Order) == 0) {
-			return LegResult{Status: http.StatusBadRequest, Message: "parse questionnaire fetch failed"}, nil
-		}
-		// Payer-edge identity mapping (payoredge.go): the same bare-Coverage shape as the
-		// CRD leg's prefetch.coverage, mapped on the network's request before the package
-		// request below is built from it. Only applies when a Coverage is actually
-		// carried — a DTR line that legitimately carries none (2.0/2.1 with no coverage
-		// supplied) has nothing to assert about and stays a benign pass-through.
-		if n.payorEdgeOwn != nil && len(fetch.Coverage) > 0 {
-			mapped, lr, perr := n.payorEdgeRequest(in, payorEdgeDTRFetch, "application/json")
-			if perr != nil {
-				return LegResult{}, perr
-			}
-			if lr.Status != 0 {
-				return lr, nil
-			}
-			b, err := interimShapingInput(mapped)
-			if err != nil {
-				return LegResult{}, err
-			}
-			var edited dtrLegRequest
-			if err := decodeMessage(b, &edited); err != nil {
-				return LegResult{}, fmt.Errorf("engine: payor edge: re-read questionnaire request: %w", err)
-			}
-			fetch.Coverage = edited.Coverage
-		}
-		if len(fetch.NextQuestion) > 0 {
-			// An SDC adaptive $next-question round (dtr_adaptive.go): forward the carried
-			// QuestionnaireResponse as the op's questionnaire-response input and relay the
-			// partner's answer VERBATIM — the same stamp-honesty posture as the package relay
-			// below (bytes this build did not produce: egress $validate stands down, the
-			// frame stays unstamped). The answer's subject is fenced on the payer side
-			// (payer.go) against the request's, and on the provider side against the patient.
-			params, err := buildNextQuestionParameters(fetch.NextQuestion)
-			if err != nil {
-				return LegResult{}, err // marshal fault → 500 (gateway fault)
-			}
-			nqURL := n.resolvedURL(ctx, contract, n.dtrBase(), "/Questionnaire/$next-question")
-			up, bad, err := n.post(ctx, nqURL, "", sealRequest(relay.BuilderInterimDTRProjection, params, "application/fhir+json"), leg, "DTR next-question")
-			if err != nil {
-				return LegResult{}, err // no-response fault → engine 500 → "hub routing failed"
-			}
-			if bad.Status != 0 {
-				return bad, nil // upstream non-2xx → relayable LegResult (Response carries the body)
-			}
-			return LegResult{Response: relay.Exact(up.body, up.contentType)}, nil
-		}
-		// Two shapes: an ORDER-driven request (the CRD-updated order carries the
-		// coverage-assertion-id the partner keys the questionnaire off; it has no `questionnaire` param)
-		// or the canonical request (br-payer). The provider's coverage is carried through
-		// in both so the partner's required `coverage` parameter is satisfied (FR-G28) — coverage is
-		// already ALWAYS present at this call site (originate.go attaches it for every br-payer-targeting
-		// leg, and now also whenever the selected DTR line requires it — DTRDef.QuestionnairePackageCoverageRequired),
-		// so the AtLine coverage-1..1 gate below is a signature change here, not a behavior change.
-		line := answerLineOr(ctx, contract)
-		var params []byte
-		var err error
-		if len(fetch.Order) > 0 {
-			params, err = buildQuestionnairePackageOrderRequestAtLine(line, fetch.Order, fetch.Coverage)
-		} else {
-			params, err = buildQuestionnairePackageRequestAtLine(line, fetch.Canonical, fetch.Coverage)
-		}
-		if err != nil {
-			// A coverage-1..1 refusal (dtrPackageRequireCoverage) is a legible LOCAL
-			// refusal REPLACING the partner's opaque 400 — surface
-			// it the same way, not the generic 500 an unknown-line build fault maps to.
-			return LegResult{Status: http.StatusBadRequest, Message: err.Error()}, nil
-		}
-		// Endpoint evidence: prefer the probe-retained, same-origin-validated
-		// #<line> endpoint for THIS routed line over the configured base+path (evidence absent
-		// ⇒ unchanged base+path, the fence).
-		dtrURL := n.resolvedURL(ctx, contract, n.dtrBase(), "/Questionnaire/$questionnaire-package")
-		up, bad, err := n.post(ctx, dtrURL, "", sealRequest(relay.BuilderInterimDTRProjection, params, "application/fhir+json"), leg, "DTR")
-		if err != nil {
-			return LegResult{}, err // no-response fault → engine 500 → "hub routing failed"
-		}
-		if bad.Status != 0 {
-			return bad, nil // upstream non-2xx → relayable LegResult (Response carries the body)
-		}
-		// Forward the partner's $questionnaire-package Bundle VERBATIM (the
-		// dependent Libraries/ValueSets are preserved for Step 3). The package→
-		// Questionnaire extraction — and the no-Questionnaire 502 — is now a consumer
-		// concern (originate.go), so this leg no longer inspects the body.
-		//
-		// A relayed Response marks it as bytes THIS BUILD DID NOT PRODUCE (the
-		// stamp-honesty rule). Two consequences, both the same rule pas_native already
-		// follows: the egress $validate stands down (R-8 — a foreign Da Vinci DTR
-		// package declares profiles SHN's validator cannot resolve; this replaces
-		// payer.go's coarser PayerDavinciNative gate with the per-RESULT truth), and
-		// the response frame is left UNSTAMPED — SHN asserts nothing about the contract
-		// line of a partner's bytes.
-		//
-		// ResponseSubjectForeign stays false: setting it would
-		// stand down the trust-critical "no Questionnaire may carry a
-		// subject" fence (payer.go's fenceResponseSubject). Only the relayed
-		// ownership applies here.
-		return LegResult{Response: relay.Exact(up.body, up.contentType)}, nil
 
 	case "pas-claim":
 		res, err := n.handlePASClaimNative(ctx, corrID, subjectPCI, in, requestFHIR)
@@ -718,6 +642,7 @@ func (n *nativeResponder) post(ctx context.Context, base, path string, p relay.P
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
+	n.applyBackendHeaders(req)
 	capture, _ := ctx.Value(nativeCertificationKey{}).(*nativeCertificationCapture)
 	if capture != nil {
 		capture.attempted = true
@@ -755,33 +680,6 @@ func upstreamAnswer(resp *http.Response, rb []byte, label string) (upstreamReply
 		return reply, LegResult{Status: resp.StatusCode, Response: relay.Exact(reply.body, resp.Header.Get("Content-Type"))}, nil
 	}
 	return reply, LegResult{}, nil
-}
-
-// get reads base+path (the read sibling of post), reusing the same authed client. Used by the PAS
-// pend re-query (GET ClaimResponse/{id}); it sends no body. Same relay-non-2xx /
-// error-on-no-response contract as post.
-func (n *nativeResponder) get(ctx context.Context, base, path, label string) ([]byte, LegResult, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+path, nil)
-	if err != nil {
-		return nil, LegResult{}, fmt.Errorf("upstream payer %s request build failed: %w", label, err)
-	}
-	req.Header.Set("Accept", "application/json")
-	n.emitDiagnostic(ctx, "native.request", nil, 0, "", req, req.Header)
-	resp, err := n.client.Do(req)
-	if err != nil {
-		return nil, LegResult{}, fmt.Errorf("upstream payer %s unreachable: %w", label, err)
-	}
-	defer resp.Body.Close()
-	rb, err := io.ReadAll(io.LimitReader(resp.Body, maxPartnerBody))
-	n.emitDiagnostic(ctx, "native.response", rb, resp.StatusCode, diagnosticReadDetail(err, len(rb)), req, resp.Header)
-	if err != nil {
-		return nil, LegResult{}, fmt.Errorf("upstream payer %s read failed: %w", label, err)
-	}
-	reply, bad, err := upstreamAnswer(resp, rb, label)
-	if err != nil || bad.Status != 0 {
-		return nil, bad, err
-	}
-	return reply.raw, LegResult{}, nil
 }
 
 // forwardCRD sends a CDS Hooks request to the partner service chosen by its hook:

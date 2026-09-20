@@ -242,6 +242,9 @@ func TestSelectRoutePrefersDeclaredThenNativeReachThenChain(t *testing.T) {
 		g := &Gateway{cfg: Config{
 			Reg: reg, DeclaredContractVersions: []string{"pa.pas@2.0"},
 			ValidatorsByLine: map[string]shnsdk.Validator{"2.0": fake}, // no 2.2 lane
+			// A certification-only client for 2.2 is evidence, not a lane: it must
+			// not make 2.2 reachable.
+			CertificationValidatorsByLine: map[string]shnsdk.Validator{"2.0": fake, "2.2": fake},
 		}}
 		_, err := g.selectLegRoute("payer-22", "pas-claim")
 		if err == nil {
@@ -306,6 +309,8 @@ func TestSelectRouteNativeReachHighestAmongMultipleDeclaredPeerLines(t *testing.
 		g := &Gateway{cfg: Config{
 			Reg: reg, DeclaredContractVersions: []string{"pa.pas@2.0"},
 			ValidatorsByLine: map[string]shnsdk.Validator{"2.0": fake, "2.1": fake}, // no 2.2 lane
+			// A certification-only client for 2.2 does not make it a lane either.
+			CertificationValidatorsByLine: map[string]shnsdk.Validator{"2.0": fake, "2.1": fake, "2.2": fake},
 		}}
 		route, err := g.selectLegRoute("payer-2122", "pas-claim")
 		if err != nil {

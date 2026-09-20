@@ -9,7 +9,6 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"sync/atomic"
 	"testing"
 )
 
@@ -71,41 +70,5 @@ func TestNativePost_OverCapNon2xxBody_DegradesToError(t *testing.T) {
 	}
 	if lr.Status != 0 {
 		t.Fatalf("over-cap fault must not carry a relayable Status, got %d", lr.Status)
-	}
-}
-
-// TestNativeQuestionnaireFetchRefusesRepeatedMembers: the payer's gateway
-// reads the network's questionnaire request by exact member names before its
-// own system sees anything; a repeated or case-folded member is refused 400.
-func TestNativeQuestionnaireFetchRefusesRepeatedMembers(t *testing.T) {
-	var calls atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
-		_, _ = w.Write([]byte(`{"resourceType":"Bundle","type":"collection","entry":[]}`))
-	}))
-	defer srv.Close()
-	n := &nativeResponder{client: srv.Client(), baseURL: srv.URL}
-	for _, row := range []struct{ name, body string }{
-		{"control", `{"canonical":"http://example.org/q"}`},
-		{"duplicate", `{"canonical":"http://example.org/q","canonical":"http://example.org/other"}`},
-		{"case-folded duplicate", `{"canonical":"http://example.org/q","Canonical":"http://example.org/other"}`},
-		{"case-mismatched", `{"Canonical":"http://example.org/q"}`},
-	} {
-		t.Run(row.name, func(t *testing.T) {
-			before := calls.Load()
-			res, err := n.Handle(context.Background(), "dtr-questionnaire-fetch", "corr-1", "pci-1", []byte(row.body))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if row.name == "control" {
-				if res.Status != 0 || calls.Load() != before+1 {
-					t.Fatalf("control: status %d, calls %d", res.Status, calls.Load()-before)
-				}
-				return
-			}
-			if res.Status != http.StatusBadRequest || res.Message != "parse questionnaire fetch failed" || calls.Load() != before {
-				t.Fatalf("status %d %q, calls %d", res.Status, res.Message, calls.Load()-before)
-			}
-		})
 	}
 }

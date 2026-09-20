@@ -55,7 +55,13 @@ routing, authority, payload bytes, acceptance, response stamps or lane readiness
 The native record describes the final POST attempt, before any polling or terminal
 assembly. The provider ingress record describes the bytes dispatched and relayed.
 
-The app creates separate clients at each resolved validator endpoint. Embedders may
+The app creates separate clients at each configured validator endpoint and never
+invents one: per line it uses `FHIR_CERTIFY_URL_<line>` (an address for the evidence
+alone, never a routing lane), then the routing lane `FHIR_VALIDATE_URL_<line>`, then the
+Compose default only once it has qualified — by routing at boot or by the evidence's own
+background attempts afterwards, which never change routing's lanes; until then the line's
+verdict states that no lane is configured and the qualification's state, verbatim, and no
+exchange waits on or dials for a qualification. Embedders may
 supply independent clients through `Config.CertificationValidatorsByLine`; they must
 not share routing validators or qualification wrappers. Missing clients are recorded
 as unavailable. HTTP server execution failures are unavailable rather than conclusive
@@ -306,6 +312,12 @@ expected to change shape as their consumer matures:
   and `detail` strings are stable fallbacks; new keys may appear in 0.x minors — decode
   tolerantly, never with unknown-field rejection. See `docs/CONFIGURATION.md`
   ("Operational checks") for semantics and redaction guarantees.
+
+**Additive setting, next release: `PAYER_DAVINCI_BACKEND_HEADERS`** — fixed request headers
+for a partner system that routes on one, sent on every request to the partner's bases and never
+to its token endpoint (`docs/CONFIGURATION.md`, native-forward payer mode). Unset ⇒ every request
+is byte-identical to this release's; the option adds headers only, never changes a body, and a
+deployment that does not set it is unaffected.
 
 ## Internal seams (not for partner use)
 

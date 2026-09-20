@@ -965,3 +965,42 @@ func TestDavinciConfigProbe(t *testing.T) {
 		})
 	}
 }
+
+// A Target's Headers ride on every probe request of that target (the
+// metadata, well-known and reachability GETs), so a partner that routes on a
+// fixed header is probed the way it is called. A target without them is
+// probed exactly as before.
+func TestProbesSendTargetHeaders(t *testing.T) {
+	var seen []http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Header.Clone())
+		w.Header().Set("Content-Type", "application/fhir+json")
+		if strings.HasSuffix(r.URL.Path, "/metadata") {
+			_, _ = w.Write([]byte(`{"resourceType":"CapabilityStatement","fhirVersion":"4.0.1"}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+	hdr := http.Header{"X-Route-Key": {"plan-7"}}
+	rn := NewRunner([]Target{
+		{ID: "meta", Kind: KindFHIRMetadata, URL: srv.URL, Headers: hdr},
+		{ID: "wk", Kind: KindDavinciConfig, URL: srv.URL, Headers: hdr},
+		{ID: "reach", Kind: KindReachable, URL: srv.URL, Headers: hdr},
+		{ID: "plain", Kind: KindReachable, URL: srv.URL},
+	}, srv.Client(), time.Now)
+	if _, err := rn.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(seen) != 4 {
+		t.Fatalf("%d probe requests, want 4", len(seen))
+	}
+	for i := 0; i < 3; i++ {
+		if got := seen[i].Get("X-Route-Key"); got != "plan-7" {
+			t.Errorf("probe %d: X-Route-Key = %q, want plan-7", i, got)
+		}
+	}
+	if got := seen[3].Get("X-Route-Key"); got != "" {
+		t.Errorf("target without headers sent X-Route-Key=%q", got)
+	}
+}

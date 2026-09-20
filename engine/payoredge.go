@@ -191,20 +191,3 @@ func (n *nativeResponder) payorEdgeRequest(in relay.Body, carrier payorEdgeCarri
 	}
 	return p, LegResult{}, nil
 }
-
-// interimShapingInput reads the bytes of a request that an interim shaping step
-// rebuilds next (the step then seals its own output under its builder). Only the
-// network's request, exact or with the payer-identity edit, is accepted.
-func interimShapingInput(p relay.Payload) ([]byte, error) {
-	return relay.Transmit(p, func(p relay.Payload) error {
-		switch p.Ownership() {
-		case relay.OwnershipRelayed:
-			return nil
-		case relay.OwnershipEdited:
-			if slices.Equal(p.Edits(), []relay.EditID{relay.EditPayorEdgeRestamp}) {
-				return nil
-			}
-		}
-		return fmt.Errorf("engine: a %s payload is not an input to request shaping", p.Ownership())
-	})
-}

@@ -45,9 +45,6 @@ const (
 	// BuilderDTRNextQuestion: an adaptive questionnaire's next-question
 	// input the gateway originates.
 	BuilderDTRNextQuestion BuilderID = "dtr-next-question"
-	// BuilderLegacyDTREnvelope: the older questionnaire request envelope,
-	// kept while peers that send it remain supported.
-	BuilderLegacyDTREnvelope BuilderID = "legacy-dtr-envelope"
 )
 
 // Interim builders name existing code paths that still rebuild a
@@ -58,7 +55,6 @@ const (
 // error: for an empty error body, and for the bare error a requester that
 // negotiated no frame receives.
 const (
-	BuilderInterimDTRProjection          BuilderID = "defect-dtr-projection"
 	BuilderInterimEmptyErrorSubstitution BuilderID = "defect-empty-error-substitution"
 )
 
@@ -80,11 +76,9 @@ var registeredBuilders = []BuilderID{
 	BuilderSDKFederatedQuery,
 	BuilderSDKPatientDTR,
 	BuilderDTRNextQuestion,
-	BuilderLegacyDTREnvelope,
 }
 
 var interimBuilders = []BuilderID{
-	BuilderInterimDTRProjection,
 	BuilderInterimEmptyErrorSubstitution,
 }
 

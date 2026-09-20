@@ -64,8 +64,6 @@ var transmitBoundaries = map[string]boundaryRule{
 		reason: "posts the sealed envelope roundTripInner built from its checked request"},
 	// Requests to the participant's own system.
 	"nativeResponder.post": {kind: transmits},
-	"nativeResponder.get": {kind: excluded,
-		reason: "a read of the participant's own ClaimResponse; GET sends no exchange body"},
 	// Answers to the network.
 	"Gateway.buildResponseLeg": {kind: transmits, noSink: true},
 	"writeLeg": {kind: excluded,

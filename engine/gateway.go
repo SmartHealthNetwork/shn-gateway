@@ -1650,9 +1650,11 @@ func (g *Gateway) validateFHIRPayerIngress(ctx context.Context, resourceJSON []b
 // multi-version spec's recorded DTR-fetch known-gap obligation, discharged).
 // Membership means egressAdapt walks
 // route.Chain for the routing/observer story but never hands the bytes to a
-// step function — safe only because dtr-questionnaire-fetch's payload
-// (QuestionnaireFetchRequest) is a transport envelope, not a FHIR resource
-// any pa.dtr compat-manifest row models.
+// step function — safe only because dtr-questionnaire-fetch's payload is
+// the operation's own input, carried to the payer's line unchanged: the
+// ingress and the originator refuse a walk that would change a byte of it
+// (handleDTRIngress, carryUnchanged), so no pa.dtr compat-manifest step
+// ever rewrites it.
 //
 // CRD legs (crd-order-select, crd-order-dispatch) must NEVER join this set:
 // their arm-3 byte-identity rests on the identity chain genuinely RUNNING
@@ -2292,8 +2294,7 @@ func withRequestFrameOperation(ctx context.Context, operation string) context.Co
 // answering: shnsdk.FrameOperationQuestionnairePackage when the request body
 // is the $questionnaire-package input Parameters, and
 // shnsdk.FrameOperationNextQuestion when it is the SDC $next-question input.
-// It returns "" for a request that names no operation, including the older
-// questionnaire request.
+// It returns "" for a request that names no operation, which the leg refuses.
 func RequestFrameOperation(ctx context.Context) string {
 	op, _ := ctx.Value(frameOperationKey{}).(string)
 	return op

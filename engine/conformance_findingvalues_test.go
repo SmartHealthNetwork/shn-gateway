@@ -261,13 +261,12 @@ func TestPinnedFindingContext_PayerDTREgress(t *testing.T) {
 
 	env := shnsdk.Envelope{}
 	env.Metadata.CorrelationID, env.Metadata.Sender = "corr-dtr-egress-1", requester.ID
-	// The older (un-framed) questionnaire request, naming only a canonical —
-	// RequestFrameOperation(ctx) reads "" from a plain context, matching this
-	// shape (payer_dtr_frame_test.go's "canonical only" row drives the same
-	// body through the same branch).
-	req := []byte(`{"canonical":"http://example.org/Questionnaire/q"}`)
+	// A $questionnaire-package input sent naming the operation, for the
+	// covered member the token authorizes.
+	req := dtrFramedPackageFor(t, g)
 
 	r := newSignedInboundRequest(t, g, requester.ID)
+	r = r.WithContext(withRequestFrameOperation(r.Context(), shnsdk.FrameOperationQuestionnairePackage))
 	r = r.WithContext(withFindingContext(r.Context(), findingContext{
 		LegType: "dtr-questionnaire-fetch", CorrelationID: env.Metadata.CorrelationID,
 		Seam: inboundSeamFor("dtr-questionnaire-fetch"), Whose: "peer",

@@ -270,8 +270,7 @@ var legOwnership = func() map[Key]Rule {
 		// Recipient to its participant's system, carrying the network's
 		// request. A prior-authorization Bundle and a CDS Hooks request are
 		// relayed exactly, or with the optional payer-identity mapping. A
-		// questionnaire operation's own input is relayed the same way; the
-		// older questionnaire request envelope is still rebuilt.
+		// questionnaire operation's own input is relayed the same way.
 		{"crd-order-dispatch", RoleRecipient, DirectionRequest, OutcomeCarried}: {
 			Allowed: []Ownership{OwnershipRelayed, OwnershipEdited}, Edits: payerIdentityMapped,
 		},
@@ -279,9 +278,7 @@ var legOwnership = func() map[Key]Rule {
 			Allowed: []Ownership{OwnershipRelayed, OwnershipEdited}, Edits: payerIdentityMapped,
 		},
 		{"dtr-questionnaire-fetch", RoleRecipient, DirectionRequest, OutcomeCarried}: {
-			Allowed:  []Ownership{OwnershipRelayed, OwnershipEdited, OwnershipAuthored},
-			Edits:    payerIdentityMapped,
-			Builders: []BuilderID{BuilderInterimDTRProjection},
+			Allowed: []Ownership{OwnershipRelayed, OwnershipEdited}, Edits: payerIdentityMapped,
 		},
 		{"pas-claim", RoleRecipient, DirectionRequest, OutcomeCarried}: {
 			Allowed: []Ownership{OwnershipRelayed, OwnershipEdited}, Edits: payerIdentityMapped,

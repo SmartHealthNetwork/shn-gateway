@@ -55,8 +55,9 @@ var crdLegHooks = map[string][]string{
 
 // DiscoverCDSServices reads a CDS service listing from base + "/cds-services".
 // A non-2xx answer, an unreadable body or a listing without a services array
-// is an error; an entry without an id or a hook is an error too.
-func DiscoverCDSServices(ctx context.Context, client *http.Client, base string) ([]CDSService, error) {
+// is an error; an entry without an id or a hook is an error too. headers are
+// the partner's fixed request headers (WithBackendHeaders), nil for none.
+func DiscoverCDSServices(ctx context.Context, client *http.Client, base string, headers http.Header) ([]CDSService, error) {
 	ctx, cancel := context.WithTimeout(ctx, cdsServiceListingTimeout)
 	defer cancel()
 	url := base + "/cds-services"
@@ -65,6 +66,9 @@ func DiscoverCDSServices(ctx context.Context, client *http.Client, base string) 
 		return nil, fmt.Errorf("engine: build GET %s: %w", url, err)
 	}
 	req.Header.Set("Accept", "application/json")
+	for k, v := range headers {
+		req.Header[k] = append([]string(nil), v...)
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("engine: GET %s: %w", url, err)
@@ -171,7 +175,7 @@ func (n *nativeResponder) cdsServices(ctx context.Context) ([]CDSService, error)
 // The read is not tied to the lifetime of the request that started it: other
 // requests may be waiting for it (it is bounded by cdsServiceListingTimeout).
 func (n *nativeResponder) readCDSServices(ctx context.Context, reading chan struct{}) ([]CDSService, error) {
-	services, err := DiscoverCDSServices(context.WithoutCancel(ctx), n.client, n.cdsBaseURL)
+	services, err := DiscoverCDSServices(context.WithoutCancel(ctx), n.client, n.cdsBaseURL, n.backendHeaders)
 	n.cds.mu.Lock()
 	defer n.cds.mu.Unlock()
 	defer close(reading)

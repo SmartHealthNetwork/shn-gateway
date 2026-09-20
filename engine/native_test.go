@@ -26,11 +26,15 @@ var stubCDSServices = []CDSService{
 
 // stubPartner records the last request path/body and returns a programmed response.
 type stubPartner struct {
-	srv        *httptest.Server
-	lastPath   string
-	lastBody   []byte
-	status     int
-	respByPath map[string][]byte
+	srv      *httptest.Server
+	lastPath string
+	// lastHeader / listingHeader record the request headers of the last
+	// operation post and of the last CDS listing read.
+	lastHeader    http.Header
+	listingHeader http.Header
+	lastBody      []byte
+	status        int
+	respByPath    map[string][]byte
 }
 
 func newStubPartner(t *testing.T) *stubPartner {
@@ -39,11 +43,13 @@ func newStubPartner(t *testing.T) *stubPartner {
 	s.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && r.URL.Path == "/cds-services" {
 			// The CDS service listing the CRD legs read; the tests name the service.
+			s.listingHeader = r.Header.Clone()
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{"services": stubCDSServices})
 			return
 		}
 		s.lastPath = r.URL.Path
+		s.lastHeader = r.Header.Clone()
 		s.lastBody, _ = io.ReadAll(r.Body)
 		if s.status/100 != 2 {
 			w.WriteHeader(s.status)
@@ -66,8 +72,8 @@ func TestNativeResponder_DTRForwardsPackageVerbatim(t *testing.T) {
 	p.respByPath["/Questionnaire/$questionnaire-package"] = pkg
 	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", nil, nil)
 
-	res, err := n.Handle(context.Background(), "dtr-questionnaire-fetch", "corr", "pci",
-		[]byte(`{"canonical":"http://x/q"}`))
+	res, err := n.Handle(dtrPkgCtx(context.Background()), "dtr-questionnaire-fetch", "corr", "pci",
+		dtrFetchReq)
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -91,8 +97,8 @@ func TestNativeResponder_PartnerNon2xxIsRelayedVerbatim(t *testing.T) {
 	// Driven on the DTR leg: it is a read-only forward like the retired eligibility arm
 	// (§3.2 deleted that arm — eligibility never reaches a responder any more), and the
 	// non-2xx relay under test is leg-independent post() behaviour.
-	res, err := n.Handle(context.Background(), "dtr-questionnaire-fetch", "corr", "pci",
-		[]byte(`{"canonical":"http://x/q"}`))
+	res, err := n.Handle(dtrPkgCtx(context.Background()), "dtr-questionnaire-fetch", "corr", "pci",
+		dtrFetchReq)
 	if err != nil {
 		t.Fatalf("Handle returned error (want a relayable Status, not error): %v", err)
 	}
@@ -106,7 +112,7 @@ func TestNativeResponder_DTRForwardsQuestionnaireLessPackageVerbatim(t *testing.
 	pkg := []byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"Library"}}]}`)
 	p.respByPath["/Questionnaire/$questionnaire-package"] = pkg
 	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", nil, nil)
-	res, err := n.Handle(context.Background(), "dtr-questionnaire-fetch", "corr", "pci", []byte(`{"canonical":"http://x/q"}`))
+	res, err := n.Handle(dtrPkgCtx(context.Background()), "dtr-questionnaire-fetch", "corr", "pci", dtrFetchReq)
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -115,122 +121,6 @@ func TestNativeResponder_DTRForwardsQuestionnaireLessPackageVerbatim(t *testing.
 	}
 	if string(responseBytes(res)) != string(pkg) {
 		t.Errorf("Response = %s, want verbatim", responseBytes(res))
-	}
-}
-
-// TestNativeResponder_DTRForwardsCoverageWhenCarried is the coverage-carry end-to-end leg guard
-// (FR-G28): a dtr-questionnaire-fetch leg request carrying a Coverage resource must yield
-// a forwarded $questionnaire-package body that INCLUDES a `coverage` parameter — a real
-// Da Vinci payer (br-payer) 400s "The 'coverage' parameter is required (min=1)" otherwise.
-// The leg request is the published shnsdk.QuestionnaireFetchRequest (canonical + optional
-// coverage), so this also proves native.go reads the optional coverage off the wire.
-func TestNativeResponder_DTRForwardsCoverageWhenCarried(t *testing.T) {
-	p := newStubPartner(t)
-	p.respByPath["/Questionnaire/$questionnaire-package"] =
-		[]byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"Questionnaire","url":"http://x/q"}}]}`)
-	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", nil, nil)
-
-	coverage := json.RawMessage(`{"resourceType":"Coverage","id":"cov-1","status":"active","beneficiary":{"reference":"Patient/p1"}}`)
-	reqFHIR, err := json.Marshal(shnsdk.QuestionnaireFetchRequest{Canonical: "http://x/q", Coverage: coverage})
-	if err != nil {
-		t.Fatalf("marshal fetch request: %v", err)
-	}
-	if _, err := n.Handle(context.Background(), "dtr-questionnaire-fetch", "corr", "pci", reqFHIR); err != nil {
-		t.Fatalf("Handle: %v", err)
-	}
-
-	var got struct {
-		Parameter []struct {
-			Name     string          `json:"name"`
-			Resource json.RawMessage `json:"resource"`
-		} `json:"parameter"`
-	}
-	if err := json.Unmarshal(p.lastBody, &got); err != nil {
-		t.Fatalf("forwarded body not Parameters: %v (%s)", err, p.lastBody)
-	}
-	var covParam json.RawMessage
-	for _, pr := range got.Parameter {
-		if pr.Name == "coverage" {
-			covParam = pr.Resource
-		}
-	}
-	if covParam == nil {
-		t.Fatalf("forwarded $questionnaire-package missing coverage parameter (payer would 400): %s", p.lastBody)
-	}
-	if !bytes.Contains(covParam, []byte(`"resourceType":"Coverage"`)) ||
-		!bytes.Contains(covParam, []byte(`"id":"cov-1"`)) {
-		t.Errorf("coverage parameter resource not the carried Coverage: %s", covParam)
-	}
-}
-
-// TestNativeResponder_DTRForwardsOrderWhenCarried proves the order-driven DTR path (the external-payer
-// lane): a dtr-questionnaire-fetch leg request carrying an `order` (the CRD-updated ServiceRequest
-// with its coverage-assertion-id) yields a forwarded $questionnaire-package with an `order`
-// parameter (NOT `questionnaire`) plus the carried `coverage` — that payer 501s "ServiceRequest
-// without a Coverage Assertion Id extension is not supported" / 500s without both.
-func TestNativeResponder_DTRForwardsOrderWhenCarried(t *testing.T) {
-	p := newStubPartner(t)
-	p.respByPath["/Questionnaire/$questionnaire-package"] =
-		[]byte(`{"resourceType":"Parameters","parameter":[{"name":"packagebundle","resource":{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"Questionnaire","url":"http://x/q"}}]}}]}`)
-	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", nil, nil)
-
-	order := `{"resourceType":"ServiceRequest","id":"sr-81162","status":"draft","intent":"order","extension":[{"url":"http://hl7.org/fhir/us/davinci-crd/StructureDefinition/ext-coverage-information","extension":[{"url":"coverage-assertion-id","valueString":"assert-1"}]}]}`
-	coverage := `{"resourceType":"Coverage","id":"cov-1","status":"active","beneficiary":{"reference":"Patient/p1"}}`
-	reqFHIR := []byte(`{"coverage":` + coverage + `,"order":` + order + `}`)
-	if _, err := n.Handle(context.Background(), "dtr-questionnaire-fetch", "corr", "pci", reqFHIR); err != nil {
-		t.Fatalf("Handle: %v", err)
-	}
-	var got struct {
-		Parameter []struct {
-			Name     string          `json:"name"`
-			Resource json.RawMessage `json:"resource"`
-		} `json:"parameter"`
-	}
-	if err := json.Unmarshal(p.lastBody, &got); err != nil {
-		t.Fatalf("forwarded body not Parameters: %v (%s)", err, p.lastBody)
-	}
-	names := map[string]json.RawMessage{}
-	for _, pr := range got.Parameter {
-		names[pr.Name] = pr.Resource
-	}
-	if _, ok := names["questionnaire"]; ok {
-		t.Errorf("order-driven DTR must NOT send a questionnaire parameter: %s", p.lastBody)
-	}
-	if _, ok := names["order"]; !ok {
-		t.Fatalf("forwarded $questionnaire-package missing the order parameter: %s", p.lastBody)
-	}
-	if !bytes.Contains(names["order"], []byte(`"coverage-assertion-id"`)) {
-		t.Errorf("order parameter dropped the coverage-assertion-id extension: %s", names["order"])
-	}
-	if _, ok := names["coverage"]; !ok {
-		t.Errorf("order-driven DTR must still carry the coverage parameter: %s", p.lastBody)
-	}
-}
-
-// TestNativeResponder_DTRRejectsMalformedFetch locks the fail-closed posture preserved
-// across the coverage-carry switch from jsonUnmarshalStrictCanonical to unmarshaling the published
-// QuestionnaireFetchRequest: a malformed body OR a missing/empty canonical → 400 (parity
-// with a malformed-request 400, never a 500), and the partner is never called.
-func TestNativeResponder_DTRRejectsMalformedFetch(t *testing.T) {
-	for name, body := range map[string]string{
-		"not-json":          `{not json`,
-		"missing-canonical": `{"coverage":{"resourceType":"Coverage"}}`,
-		"empty-canonical":   `{"canonical":""}`,
-	} {
-		t.Run(name, func(t *testing.T) {
-			p := newStubPartner(t)
-			n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", nil, nil)
-			res, err := n.Handle(context.Background(), "dtr-questionnaire-fetch", "corr", "pci", []byte(body))
-			if err != nil {
-				t.Fatalf("Handle returned error (want Status 400, not error): %v", err)
-			}
-			if res.Status != http.StatusBadRequest {
-				t.Errorf("Status = %d, want 400", res.Status)
-			}
-			if p.lastBody != nil {
-				t.Errorf("partner was called on a malformed fetch: %s", p.lastBody)
-			}
-		})
 	}
 }
 
@@ -243,8 +133,8 @@ func TestNativeResponder_NilStoreOKForReadOnly(t *testing.T) {
 	n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", nil, nil) // store=nil, clock=nil
 	// DTR is the read-only leg here: the eligibility arm this row used to drive was
 	// deleted with the split counterparty (§3.2 — eligibility is engine-side, R11).
-	res, err := n.Handle(context.Background(), "dtr-questionnaire-fetch", "corr-1", "PCI-1",
-		[]byte(`{"canonical":"http://x/q"}`))
+	res, err := n.Handle(dtrPkgCtx(context.Background()), "dtr-questionnaire-fetch", "corr-1", "PCI-1",
+		dtrFetchReq)
 	if err != nil || res.Status != 0 {
 		t.Fatalf("read-only leg with nil store must succeed: err=%v status=%d", err, res.Status)
 	}
@@ -395,20 +285,23 @@ func TestNativeResponder_SplitBaseURLs(t *testing.T) {
 		t.Errorf("CRD path on CDS server = %q, want /cds-services/order-sign-crd", cdsPath)
 	}
 	// DTR → FHIR base
-	_, _ = n.Handle(context.Background(), "dtr-questionnaire-fetch", "c", "p",
-		[]byte(`{"canonical":"http://x/Questionnaire/Q"}`))
+	_, _ = n.Handle(dtrPkgCtx(context.Background()), "dtr-questionnaire-fetch", "c", "p",
+		dtrFetchReq)
 	if fhirPath != "/Questionnaire/$questionnaire-package" {
 		t.Errorf("DTR path on FHIR server = %q, want /Questionnaire/$questionnaire-package", fhirPath)
 	}
 }
 
-// dtrFetchReq is a working dtr-questionnaire-fetch leg body that clears
-// EVERY line's build gate, including 2.2's coverage-1..1 requirement
-// (DTRDef.QuestionnairePackageCoverageRequired — see
-// TestNativeResponder_DTRForwardsCoverageWhenCarried's precedent) — the
-// endpoint-evidence tests below route legs at specific lines via withAnswerLine, so the
-// fixture must not 400 regardless of which line gets picked.
-var dtrFetchReq = []byte(`{"canonical":"http://x/q","coverage":{"resourceType":"Coverage","id":"cov-1","status":"active","beneficiary":{"reference":"Patient/p1"}}}`)
+// dtrFetchReq is a $questionnaire-package input a requester sends naming the
+// operation (dtrPkgCtx): a coverage and the questionnaire canonical. The
+// responder sends it on exactly at whichever line the leg is routed at.
+var dtrFetchReq = []byte(`{"resourceType":"Parameters","parameter":[{"name":"coverage","resource":{"resourceType":"Coverage","id":"cov-1","status":"active","beneficiary":{"reference":"Patient/p1"}}},{"name":"questionnaire","valueCanonical":"http://x/q"}]}`)
+
+// dtrPkgCtx names the questionnaire-package operation on ctx, as the inbound
+// handler does for a request frame carrying the operation header.
+func dtrPkgCtx(ctx context.Context) context.Context {
+	return withRequestFrameOperation(ctx, shnsdk.FrameOperationQuestionnairePackage)
+}
 
 // TestNativeForwardSelectsLineEndpoint: the
 // per-line endpoint resolution before n.post. Evidence present AND
@@ -425,7 +318,7 @@ func TestNativeForwardSelectsLineEndpoint(t *testing.T) {
 	t.Run("evidence token-matched to the routed line: the #<line> endpoint is used", func(t *testing.T) {
 		n.SetEndpointEvidence(map[string]string{"pa.dtr@2.2": p.srv.URL + "/Questionnaire/$questionnaire-package-v22"})
 		ctx := withAnswerLine(context.Background(), "pa.dtr@2.2")
-		res, err := n.Handle(ctx, "dtr-questionnaire-fetch", "corr", "pci", dtrFetchReq)
+		res, err := n.Handle(dtrPkgCtx(ctx), "dtr-questionnaire-fetch", "corr", "pci", dtrFetchReq)
 		if err != nil {
 			t.Fatalf("Handle: %v", err)
 		}
@@ -440,7 +333,7 @@ func TestNativeForwardSelectsLineEndpoint(t *testing.T) {
 	t.Run("evidence absent: byte-identical fallback to the configured base+path", func(t *testing.T) {
 		n.SetEndpointEvidence(nil)
 		ctx := withAnswerLine(context.Background(), "pa.dtr@2.1")
-		res, err := n.Handle(ctx, "dtr-questionnaire-fetch", "corr", "pci", dtrFetchReq)
+		res, err := n.Handle(dtrPkgCtx(ctx), "dtr-questionnaire-fetch", "corr", "pci", dtrFetchReq)
 		if err != nil {
 			t.Fatalf("Handle: %v", err)
 		}
@@ -455,7 +348,7 @@ func TestNativeForwardSelectsLineEndpoint(t *testing.T) {
 	t.Run("token-mismatch rejection: evidence for a DIFFERENT line is never selected", func(t *testing.T) {
 		n.SetEndpointEvidence(map[string]string{"pa.dtr@2.1": p.srv.URL + "/Questionnaire/$questionnaire-package-v22"})
 		ctx := withAnswerLine(context.Background(), "pa.dtr@2.2") // routed at 2.2; evidence is keyed 2.1
-		res, err := n.Handle(ctx, "dtr-questionnaire-fetch", "corr", "pci", dtrFetchReq)
+		res, err := n.Handle(dtrPkgCtx(ctx), "dtr-questionnaire-fetch", "corr", "pci", dtrFetchReq)
 		if err != nil {
 			t.Fatalf("Handle: %v", err)
 		}
@@ -492,7 +385,7 @@ func TestEndpointEvidenceSameOriginEnforced(t *testing.T) {
 	}
 
 	ctx := withAnswerLine(context.Background(), "pa.dtr@2.2")
-	res, err := n.Handle(ctx, "dtr-questionnaire-fetch", "corr", "pci", dtrFetchReq)
+	res, err := n.Handle(dtrPkgCtx(ctx), "dtr-questionnaire-fetch", "corr", "pci", dtrFetchReq)
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -602,7 +495,7 @@ func TestEndpointEvidenceRaceClean(t *testing.T) {
 
 	ctx := withAnswerLine(context.Background(), "pa.dtr@2.2")
 	for i := 0; i < 200; i++ {
-		if _, err := n.Handle(ctx, "dtr-questionnaire-fetch", "corr", "pci", dtrFetchReq); err != nil {
+		if _, err := n.Handle(dtrPkgCtx(ctx), "dtr-questionnaire-fetch", "corr", "pci", dtrFetchReq); err != nil {
 			t.Fatalf("Handle: %v", err)
 		}
 	}
@@ -630,10 +523,10 @@ func TestNativeStrictExtensionsFieldIsDormant(t *testing.T) {
 	// Driven on DTR: the eligibility leg this row used to drive is gone from the native
 	// responder (§3.2). The dormancy claim is leg-independent — no Handle arm consults
 	// the flag — so any forwarded leg is a faithful witness.
-	req := []byte(`{"canonical":"http://x/q"}`)
+	req := dtrFetchReq
 
-	resOff, errOff := off.Handle(context.Background(), "dtr-questionnaire-fetch", "corr", "pci", req)
-	resOn, errOn := on.Handle(context.Background(), "dtr-questionnaire-fetch", "corr", "pci", req)
+	resOff, errOff := off.Handle(dtrPkgCtx(context.Background()), "dtr-questionnaire-fetch", "corr", "pci", req)
+	resOn, errOn := on.Handle(dtrPkgCtx(context.Background()), "dtr-questionnaire-fetch", "corr", "pci", req)
 	if errOff != nil || errOn != nil {
 		t.Fatalf("Handle errors: strict=false -> %v, strict=true -> %v", errOff, errOn)
 	}
@@ -681,7 +574,7 @@ func TestNativeResponder_PerOperationBases(t *testing.T) {
 		if *cdsPath != "/cds-services/order-sign-crd" {
 			t.Errorf("CRD path on the CDS base = %q, want /cds-services/order-sign-crd", *cdsPath)
 		}
-		if _, err := n.Handle(context.Background(), "dtr-questionnaire-fetch", "c", "p", dtrFetchReq); err != nil {
+		if _, err := n.Handle(dtrPkgCtx(context.Background()), "dtr-questionnaire-fetch", "c", "p", dtrFetchReq); err != nil {
 			t.Fatalf("DTR Handle: %v", err)
 		}
 		if *dtrPath != "/Questionnaire/$questionnaire-package" {
@@ -714,7 +607,7 @@ func TestNativeResponder_PerOperationBases(t *testing.T) {
 		shared, sharedPath := newBase(t, pkg)
 		n := NewNativeResponder(shared.Client(), shared.URL, "order-sign-crd", newCensusSoR(), fixedClock,
 			WithDTRBaseURL(""), WithPASBaseURL(""))
-		if _, err := n.Handle(context.Background(), "dtr-questionnaire-fetch", "c", "p", dtrFetchReq); err != nil {
+		if _, err := n.Handle(dtrPkgCtx(context.Background()), "dtr-questionnaire-fetch", "c", "p", dtrFetchReq); err != nil {
 			t.Fatalf("DTR Handle: %v", err)
 		}
 		if *sharedPath != "/Questionnaire/$questionnaire-package" {
@@ -751,7 +644,7 @@ func TestEndpointEvidenceFenceJudgedPerContractBase(t *testing.T) {
 			t.Fatalf("the partner's own DTR endpoint was dropped: %v", notes)
 		}
 		ctx := withAnswerLine(context.Background(), "pa.dtr@2.2")
-		if _, err := n.Handle(ctx, "dtr-questionnaire-fetch", "corr", "pci", dtrFetchReq); err != nil {
+		if _, err := n.Handle(dtrPkgCtx(ctx), "dtr-questionnaire-fetch", "corr", "pci", dtrFetchReq); err != nil {
 			t.Fatalf("Handle: %v", err)
 		}
 		if dtr.lastPath != "/Questionnaire/$questionnaire-package-v22" {
@@ -767,7 +660,7 @@ func TestEndpointEvidenceFenceJudgedPerContractBase(t *testing.T) {
 			t.Fatalf("want exactly one drop note, got %d: %v", len(notes), notes)
 		}
 		ctx := withAnswerLine(context.Background(), "pa.dtr@2.2")
-		if _, err := n.Handle(ctx, "dtr-questionnaire-fetch", "corr", "pci", dtrFetchReq); err != nil {
+		if _, err := n.Handle(dtrPkgCtx(ctx), "dtr-questionnaire-fetch", "corr", "pci", dtrFetchReq); err != nil {
 			t.Fatalf("Handle: %v", err)
 		}
 		if shared.lastPath != "" {

@@ -927,11 +927,11 @@ func TestOwnershipAndIdentifiers(t *testing.T) {
 func TestBuilderSetIsClosed(t *testing.T) {
 	want := []BuilderID{"gateway-refusal", "cdex-fulfillment", "cdex-records", "sor-searchset", "sdk-crd-request",
 		"sdk-dtr-package", "sdk-pas-submit", "sdk-pas-update", "sdk-pas-inquiry", "sdk-eligibility",
-		"sdk-federated-query", "sdk-patient-dtr", "dtr-next-question", "legacy-dtr-envelope"}
+		"sdk-federated-query", "sdk-patient-dtr", "dtr-next-question"}
 	if !slices.Equal(registeredBuilders, want) {
 		t.Fatalf("registeredBuilders = %v", registeredBuilders)
 	}
-	wantInterim := []BuilderID{"defect-dtr-projection", "defect-empty-error-substitution"}
+	wantInterim := []BuilderID{"defect-empty-error-substitution"}
 	if !slices.Equal(interimBuilders, wantInterim) {
 		t.Fatalf("interimBuilders = %v", interimBuilders)
 	}

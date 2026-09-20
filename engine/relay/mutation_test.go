@@ -179,25 +179,9 @@ func mutationRows() []mutationRow {
 			wantTransmit: errBoundaryRefused,
 		},
 		{
-			name: "the questionnaire projection at the EHR's CDS Hooks request",
-			build: func(t *testing.T) (Payload, error) {
-				return Authored(BuilderInterimDTRProjection, []byte(`{"resourceType":"Parameters"}`), fhirJSON)
-			},
-			at:           []boundary{realProviderCRD},
-			wantTransmit: errBoundaryRefused,
-		},
-		{
 			name: "a gateway-built questionnaire request in place of the EHR's",
 			build: func(t *testing.T) (Payload, error) {
 				return Authored(BuilderSDKDTRPackage, []byte(`{"resourceType":"Parameters"}`), fhirJSON)
-			},
-			at:           []boundary{realProviderDTR},
-			wantTransmit: errBoundaryRefused,
-		},
-		{
-			name: "the questionnaire projection in place of the EHR's questionnaire request",
-			build: func(t *testing.T) (Payload, error) {
-				return Authored(BuilderInterimDTRProjection, []byte(`{"canonical":"q"}`), "application/json")
 			},
 			at:           []boundary{realProviderDTR},
 			wantTransmit: errBoundaryRefused,
@@ -268,22 +252,6 @@ func mutationRows() []mutationRow {
 				return Apply(b, fhirJSON, EditCDSCallbackStrip, d.RemoveMember(d.Root(), "fhirServer"))
 			},
 			at:           []boundary{payerRequest, realPayerRequest, realQuestionnaireRequest},
-			wantTransmit: errBoundaryRefused,
-		},
-		{
-			name: "the questionnaire envelope's rebuild at a prior-authorization request to the payer",
-			build: func(t *testing.T) (Payload, error) {
-				return Authored(BuilderInterimDTRProjection, []byte(`{"resourceType":"Parameters"}`), fhirJSON)
-			},
-			at:           []boundary{payerRequest, realPayerRequest, realRelay},
-			wantTransmit: errBoundaryRefused,
-		},
-		{
-			name: "a requester's questionnaire envelope sent on to the payer",
-			build: func(t *testing.T) (Payload, error) {
-				return Authored(BuilderLegacyDTREnvelope, []byte(`{"canonical":"q"}`), "application/json")
-			},
-			at:           []boundary{realQuestionnaireRequest},
 			wantTransmit: errBoundaryRefused,
 		},
 		{
@@ -419,10 +387,6 @@ func TestMutationBaselinesAreAdmitted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	projection, err := Authored(BuilderInterimDTRProjection, []byte(`{"resourceType":"Parameters"}`), fhirJSON)
-	if err != nil {
-		t.Fatal(err)
-	}
 	params := NewBody([]byte(`{"resourceType":"Parameters","parameter":[{"name":"order","resource":{}}]}`), OriginIngressRequest)
 	pd := mustDoc(t, params)
 	coverageAdded, err := Apply(params, fhirJSON, EditDTRCoverageObtain,
@@ -453,7 +417,6 @@ func TestMutationBaselinesAreAdmitted(t *testing.T) {
 		{realPayerRequest, restamped},
 		{realQuestionnaireRequest, Exact(body, "application/json")},
 		{realQuestionnaireRequest, restamped},
-		{realQuestionnaireRequest, projection},
 		{realProviderCRD, Exact(body, "application/json")},
 		{realProviderCRD, edited},
 		{realProviderCRD, obtained},

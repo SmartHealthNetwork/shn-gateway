@@ -1,12 +1,11 @@
-// davincimap.go — readers and builders around the Da Vinci wire operations. A
-// payer's $questionnaire-package answer is relayed exactly (native.go), and
+// davincimap.go — readers around the Da Vinci wire operations. A payer's
+// $questionnaire-package answer is relayed exactly (native.go), and
 // extractQuestionnaireFromPackage (consumer-side, called from originate.go) reads
-// the bare Questionnaire out of it for F5/auto-fill. The request builders here
-// serve only the older questionnaire request envelope (dtrLegRequest), which a
-// payer gateway still accepts from requesters that do not name the operation:
-// a requester that names it sends its own $questionnaire-package Parameters, and
-// nothing here rebuilds them. A partner CRD service's answer is never projected
-// here: it is relayed exactly (native.go).
+// the bare Questionnaire out of it for F5/auto-fill. Nothing here builds a
+// request: a requester sends its own $questionnaire-package Parameters in a
+// request frame naming the operation, and the payer gateway sends them on as
+// they are. A partner CRD service's answer is never projected here: it is
+// relayed exactly (native.go).
 package engine
 
 import (
@@ -18,110 +17,6 @@ import (
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
-
-// buildQuestionnairePackageRequest translates SHN's {canonical[, coverage]} DTR fetch into
-// a Da Vinci $questionnaire-package Parameters request. It is
-// buildQuestionnairePackageRequestAtLine("2.0", canonical, coverage), byte-identical
-// (regression-fenced by davincimap_test.go) — the legacy name stays the 2.0 delegate so the
-// 8-UC demo path is unchanged.
-func buildQuestionnairePackageRequest(canonical string, coverage json.RawMessage) ([]byte, error) {
-	return buildQuestionnairePackageRequestAtLine("2.0", canonical, coverage)
-}
-
-// buildQuestionnairePackageRequestAtLine is buildQuestionnairePackageRequest
-// parameterized by DTR line ("2.0", "2.1", "2.2"). When coverage is present, it is
-// appended VERBATIM as a `coverage` parameter resource — a real Da Vinci payer (br-payer)
-// 400s "The 'coverage' parameter is required (min=1)" without it (FR-G28, every line). The
-// coverage is the PROVIDER's inbound Coverage carried through the leg; the payer-gw never
-// fabricates one (non-aggregation).
-//
-// At a line whose DTRDef sets QuestionnairePackageCoverageRequired (2.2 —
-// StructureDefinition-dtr-qpackage-input-parameters.json's `coverage` slice tightens to
-// min=1 max=1, verified live 2026-08-12), an EMPTY coverage refuses BEFORE the wire: a
-// legible local error naming the line and the 1..1 cardinality, replacing what would
-// otherwise be the partner's opaque 400. At 2.0/2.1 (coverage required but unbounded, not
-// yet gated locally — see DTRDef's doc comment) the pre-existing behavior is unchanged:
-// coverage is carried when supplied, omitted otherwise, no local refusal — so with coverage
-// nil at "2.0" the output stays canonical-only, byte-identical to the pre-fix request.
-func buildQuestionnairePackageRequestAtLine(line, canonical string, coverage json.RawMessage) ([]byte, error) {
-	if err := dtrPackageRequireCoverage(line, coverage); err != nil {
-		return nil, err
-	}
-	parameter := []map[string]any{
-		{"name": "questionnaire", "valueCanonical": canonical},
-	}
-	if len(coverage) > 0 {
-		parameter = append(parameter, map[string]any{"name": "coverage", "resource": coverage})
-	}
-	params := map[string]any{
-		"resourceType": "Parameters",
-		"parameter":    parameter,
-	}
-	return json.Marshal(params)
-}
-
-// dtrPackageRequireCoverage is the shared coverage-1..1 gate for the two
-// $questionnaire-package request builders below: at a DTR line whose
-// DTRDef sets QuestionnairePackageCoverageRequired, an empty coverage is refused before
-// any bytes are built. Unknown line -> error (fail-closed, never a silent 2.0 fallback,
-// same posture as buildQuestionnairePackageAtLine).
-func dtrPackageRequireCoverage(line string, coverage json.RawMessage) error {
-	def, ok := shnsdk.DTRLineDef(line)
-	if !ok {
-		return fmt.Errorf("engine: $questionnaire-package request: unknown DTR line %q", line)
-	}
-	if def.QuestionnairePackageCoverageRequired && len(coverage) == 0 {
-		return fmt.Errorf("engine: $questionnaire-package request at DTR line %q (profile dtr-qpackage-input-parameters) requires the coverage parameter (1..1, exactly one) but none was supplied", line)
-	}
-	return nil
-}
-
-// dtrLegRequest is the older wire shape of the dtr-questionnaire-fetch leg, accepted from
-// requesters that do not name the operation in the request frame (this gateway's own
-// requests name it and carry the operation's input instead). It is a
-// SUPERSET of shnsdk.QuestionnaireFetchRequest: Canonical + Coverage match the SDK type's JSON
-// (so the br-payer / adjudicator paths that unmarshal the SDK type are unaffected, and
-// with an empty Order the marshal is byte-identical), plus Order — the CRD-updated ServiceRequest
-// a partner requires as the `$questionnaire-package` `order` param (its questionnaire is
-// keyed off the order's coverage-assertion-id; it has no `questionnaire` param support). Order is
-// defined here, not in the published SDK, so the DEPLOYED payer gateway reads it without an SDK bump.
-//
-// NextQuestion turns the leg into an SDC adaptive $next-question round (dtr_adaptive.go): the
-// in-progress QuestionnaireResponse whose contained Questionnaire is the delivered-so-far tree
-// (derivedFrom the source canonical). The payer side forwards it to the partner's
-// Questionnaire/$next-question and relays the answer verbatim; a responder that serves no
-// adaptive questionnaire refuses it rather than answering with a package. Same
-// publish posture as Order: gateway-internal, both gateways read it without an SDK bump.
-type dtrLegRequest struct {
-	Canonical    string          `json:"canonical"`
-	Coverage     json.RawMessage `json:"coverage,omitempty"`
-	Order        json.RawMessage `json:"order,omitempty"`
-	NextQuestion json.RawMessage `json:"nextQuestion,omitempty"`
-}
-
-// buildQuestionnairePackageOrderRequest builds an order-driven $questionnaire-package Parameters
-// (the order-driven lane): the CRD-updated `order` (carrying the coverage-assertion-id) + the required
-// `coverage`. No `questionnaire` canonical — such a partner 500s without the order and has no canonical path.
-// It is buildQuestionnairePackageOrderRequestAtLine("2.0", order, coverage), byte-identical
-// (regression-fenced by davincimap_test.go).
-func buildQuestionnairePackageOrderRequest(order, coverage json.RawMessage) ([]byte, error) {
-	return buildQuestionnairePackageOrderRequestAtLine("2.0", order, coverage)
-}
-
-// buildQuestionnairePackageOrderRequestAtLine is buildQuestionnairePackageOrderRequest
-// parameterized by DTR line ("2.0", "2.1", "2.2") — same coverage-1..1 gate as
-// buildQuestionnairePackageRequestAtLine (dtrPackageRequireCoverage), for the order-driven
-// request shape.
-func buildQuestionnairePackageOrderRequestAtLine(line string, order, coverage json.RawMessage) ([]byte, error) {
-	if err := dtrPackageRequireCoverage(line, coverage); err != nil {
-		return nil, err
-	}
-	parameter := []map[string]any{{"name": "order", "resource": order}}
-	if len(coverage) > 0 {
-		parameter = append(parameter, map[string]any{"name": "coverage", "resource": coverage})
-	}
-	return json.Marshal(map[string]any{"resourceType": "Parameters", "parameter": parameter})
-}
 
 // isPackageBundleParameter reports whether name is the $questionnaire-package
 // output parameter that carries the package Bundle at one of the published DTR

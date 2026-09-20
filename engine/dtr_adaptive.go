@@ -321,20 +321,6 @@ func mergeDeliveredGroups(tree []byte, delivered []json.RawMessage) (merged []by
 	return merged, true, err
 }
 
-// nextQuestionRequestSubject reads the dtr-questionnaire-fetch leg's NextQuestion carriage:
-// ok=false when the request is an ordinary package fetch; otherwise the carried
-// QuestionnaireResponse's subject (the (A)-bind input on the payer side — "" when absent,
-// which the bind refuses). It reads the older request envelope only; a framed
-// $next-question is read by framedNextQuestionSubject.
-func nextQuestionRequestSubject(reqJSON []byte) (subject string, ok bool) {
-	var fetch dtrLegRequest
-	if err := decodeMessage(reqJSON, &fetch); err != nil || len(fetch.NextQuestion) == 0 {
-		return "", false
-	}
-	subject, _ = questionnaireResponseSubject(fetch.NextQuestion)
-	return subject, true
-}
-
 // framedNextQuestionSubject reads the subject of a framed $next-question
 // input, the SDC operation's own body: a bare QuestionnaireResponse, or a
 // Parameters with exactly one questionnaire-response parameter whose resource

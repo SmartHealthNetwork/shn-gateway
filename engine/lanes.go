@@ -35,6 +35,9 @@ func NewDiscoveredLane(line, base string, validator shnsdk.Validator) *Discovere
 // Ready is a local atomic snapshot with no network activity.
 func (d *DiscoveredLane) Ready() bool { return d.ready.Load() }
 
+// Base is the endpoint the lane qualifies.
+func (d *DiscoveredLane) Base() string { return d.base }
+
 func (d *DiscoveredLane) Qualify(ctx context.Context, q LaneQualifier) error {
 	d.once.Do(func() {
 		if d.err = ctx.Err(); d.err != nil {

@@ -33,81 +33,6 @@ var crdPartnerCoverageCard = []byte(`{"cards":[],"systemActions":[{"type":"updat
 	`{"url":"http://hl7.org/fhir/us/davinci-crd/StructureDefinition/ext-coverage-information",` +
 	`"extension":[{"url":"covered","valueCode":"covered"},{"url":"pa-needed","valueCode":"no-auth"}]}]}}]}`)
 
-// --- the mapping over a bare Coverage (the questionnaire request's coverage) ---
-
-// mapBareCoverage runs the mapping over a questionnaire request envelope carrying cov,
-// returning the mapped Coverage bytes (nil on a refusal) and the refusal.
-func mapBareCoverage(t *testing.T, cov []byte, own, backend shnsdk.PayerIdentifier) ([]byte, LegResult) {
-	t.Helper()
-	req, err := json.Marshal(shnsdk.QuestionnaireFetchRequest{Canonical: "http://x/q", Coverage: cov})
-	if err != nil {
-		t.Fatalf("marshal fetch request: %v", err)
-	}
-	n := NewNativeResponder(nil, "", "order-sign", nil, nil, WithPayorEdgeIdentity(own, backend))
-	p, lr, err := n.payorEdgeRequest(peerBody(req), payorEdgeDTRFetch, "application/json")
-	if err != nil {
-		t.Fatalf("payorEdgeRequest: %v", err)
-	}
-	if lr.Status != 0 {
-		return nil, lr
-	}
-	var out dtrLegRequest
-	if err := json.Unmarshal(relay.BytesForTest(p), &out); err != nil {
-		t.Fatalf("mapped request: %v", err)
-	}
-	return out.Coverage, lr
-}
-
-func TestPayorEdgeBareCoverage_ContainedShape_Maps(t *testing.T) {
-	cov, err := shnsdk.BuildCoverageWithPayer("Patient/p1", "MBR-1", ownIdentity)
-	if err != nil {
-		t.Fatalf("BuildCoverageWithPayer: %v", err)
-	}
-	out, lr := mapBareCoverage(t, cov, ownIdentity, backendIdentity)
-	if lr.Status != 0 {
-		t.Fatalf("refused: %d %s", lr.Status, lr.Message)
-	}
-	newGot, newOK := shnsdk.ParsePayerIdentifier(out, nil)
-	if !newOK || newGot != backendIdentity {
-		t.Fatalf("mapped coverage payor = %v (ok=%v), want %v", newGot, newOK, backendIdentity)
-	}
-	// Nothing else touched — the contained Organization's name must survive.
-	if !bytes.Contains(out, []byte(`"Centers for Medicare and Medicaid Services"`)) {
-		t.Errorf("the mapping touched the payer Organization's name: %s", out)
-	}
-}
-
-func TestPayorEdgeBareCoverage_InlineShape_Maps(t *testing.T) {
-	cov := []byte(`{"resourceType":"Coverage","id":"c1","status":"active","beneficiary":{"reference":"Patient/p1"},"payor":[{"identifier":{"system":"` + ownIdentity.System + `","value":"` + ownIdentity.Value + `"}}]}`)
-	out, lr := mapBareCoverage(t, cov, ownIdentity, backendIdentity)
-	if lr.Status != 0 {
-		t.Fatalf("refused: %d %s", lr.Status, lr.Message)
-	}
-	newGot, newOK := shnsdk.ParsePayerIdentifier(out, nil)
-	if !newOK || newGot != backendIdentity {
-		t.Fatalf("mapped inline payor = %v (ok=%v), want %v", newGot, newOK, backendIdentity)
-	}
-}
-
-func TestPayorEdgeBareCoverage_MismatchRefuses(t *testing.T) {
-	cov, err := shnsdk.BuildCoverageWithPayer("Patient/p1", "MBR-1", foreignIdentity)
-	if err != nil {
-		t.Fatalf("BuildCoverageWithPayer: %v", err)
-	}
-	_, lr := mapBareCoverage(t, cov, ownIdentity, backendIdentity)
-	if lr.Status != 400 || !strings.Contains(lr.Message, foreignIdentity.Value) {
-		t.Fatalf("a foreign payor identity must be refused naming it, got %d %q", lr.Status, lr.Message)
-	}
-}
-
-func TestPayorEdgeBareCoverage_NoResolvablePayorRefuses(t *testing.T) {
-	cov := []byte(`{"resourceType":"Coverage","id":"c1","status":"active","beneficiary":{"reference":"Patient/p1"}}`)
-	_, lr := mapBareCoverage(t, cov, ownIdentity, backendIdentity)
-	if lr.Status != 400 || !strings.Contains(lr.Message, "no resolvable payor identifier") {
-		t.Fatalf("a Coverage with no payor must be refused, got %d %q", lr.Status, lr.Message)
-	}
-}
-
 // --- the mapping over a PAS $submit Bundle ---
 
 // conformantSubmitBundle builds a $submit Bundle via the SAME SDK builder the
@@ -432,6 +357,16 @@ func mustExtractPrefetchCoverage(t *testing.T, reqJSON []byte) json.RawMessage {
 	return m.Prefetch.Coverage
 }
 
+// dtrPackageWithCoverage is a $questionnaire-package input carrying cov as its
+// coverage parameter (none when cov is nil) and a questionnaire canonical.
+func dtrPackageWithCoverage(cov []byte) []byte {
+	params := `{"name":"questionnaire","valueCanonical":"http://x/q"}`
+	if cov != nil {
+		params = `{"name":"coverage","resource":` + string(cov) + `},` + params
+	}
+	return []byte(`{"resourceType":"Parameters","parameter":[` + params + `]}`)
+}
+
 // TestNativeResponder_PayorEdge_DTR_SeamOffAndRestamp covers the DTR leg's (c) seam-off
 // and (d) own-identity-restamp rows in one table, mirroring the CRD coverage above.
 func TestNativeResponder_PayorEdge_DTR_SeamOffAndRestamp(t *testing.T) {
@@ -439,16 +374,13 @@ func TestNativeResponder_PayorEdge_DTR_SeamOffAndRestamp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildCoverageWithPayer: %v", err)
 	}
-	reqFHIR, err := json.Marshal(shnsdk.QuestionnaireFetchRequest{Canonical: "http://x/q", Coverage: cov})
-	if err != nil {
-		t.Fatalf("marshal fetch request: %v", err)
-	}
+	reqFHIR := dtrPackageWithCoverage(cov)
 
 	t.Run("seam off forwards verbatim", func(t *testing.T) {
 		p := newStubPartner(t)
 		p.respByPath["/Questionnaire/$questionnaire-package"] = []byte(`{"resourceType":"Bundle","type":"collection","entry":[]}`)
 		n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", nil, nil)
-		if _, err := n.Handle(context.Background(), "dtr-questionnaire-fetch", "corr", "pci", reqFHIR); err != nil {
+		if _, err := n.Handle(dtrPkgCtx(context.Background()), "dtr-questionnaire-fetch", "corr", "pci", reqFHIR); err != nil {
 			t.Fatalf("Handle: %v", err)
 		}
 		got, ok := shnsdk.ParsePayerIdentifier(mustExtractDTRCoverageParam(t, p.lastBody), nil)
@@ -461,7 +393,7 @@ func TestNativeResponder_PayorEdge_DTR_SeamOffAndRestamp(t *testing.T) {
 		p := newStubPartner(t)
 		p.respByPath["/Questionnaire/$questionnaire-package"] = []byte(`{"resourceType":"Bundle","type":"collection","entry":[]}`)
 		n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", nil, nil, WithPayorEdgeIdentity(ownIdentity, backendIdentity))
-		res, err := n.Handle(context.Background(), "dtr-questionnaire-fetch", "corr", "pci", reqFHIR)
+		res, err := n.Handle(dtrPkgCtx(context.Background()), "dtr-questionnaire-fetch", "corr", "pci", reqFHIR)
 		if err != nil || res.Status != 0 {
 			t.Fatalf("Handle: err=%v status=%d msg=%s", err, res.Status, res.Message)
 		}
@@ -477,12 +409,9 @@ func TestNativeResponder_PayorEdge_DTR_SeamOffAndRestamp(t *testing.T) {
 		if ferr != nil {
 			t.Fatalf("BuildCoverageWithPayer: %v", ferr)
 		}
-		foreignReq, merr := json.Marshal(shnsdk.QuestionnaireFetchRequest{Canonical: "http://x/q", Coverage: foreignCov})
-		if merr != nil {
-			t.Fatalf("marshal: %v", merr)
-		}
+		foreignReq := dtrPackageWithCoverage(foreignCov)
 		n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", nil, nil, WithPayorEdgeIdentity(ownIdentity, backendIdentity))
-		res, err := n.Handle(context.Background(), "dtr-questionnaire-fetch", "corr", "pci", foreignReq)
+		res, err := n.Handle(dtrPkgCtx(context.Background()), "dtr-questionnaire-fetch", "corr", "pci", foreignReq)
 		if err != nil {
 			t.Fatalf("Handle must return a LegResult refusal, not a bare error: %v", err)
 		}
@@ -498,11 +427,8 @@ func TestNativeResponder_PayorEdge_DTR_SeamOffAndRestamp(t *testing.T) {
 		p := newStubPartner(t)
 		p.respByPath["/Questionnaire/$questionnaire-package"] = []byte(`{"resourceType":"Bundle","type":"collection","entry":[]}`)
 		n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", nil, nil, WithPayorEdgeIdentity(ownIdentity, backendIdentity))
-		noCovReq, merr := json.Marshal(shnsdk.QuestionnaireFetchRequest{Canonical: "http://x/q"})
-		if merr != nil {
-			t.Fatalf("marshal: %v", merr)
-		}
-		res, err := n.Handle(context.Background(), "dtr-questionnaire-fetch", "corr", "pci", noCovReq)
+		noCovReq := dtrPackageWithCoverage(nil)
+		res, err := n.Handle(dtrPkgCtx(context.Background()), "dtr-questionnaire-fetch", "corr", "pci", noCovReq)
 		if err != nil || res.Status != 0 {
 			t.Fatalf("a DTR fetch legitimately carrying no coverage must still forward: err=%v status=%d msg=%s", err, res.Status, res.Message)
 		}

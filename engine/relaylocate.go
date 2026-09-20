@@ -33,9 +33,6 @@ const (
 	// payer's system a framed $questionnaire-package operation's own
 	// Parameters on this carrier.
 	payorEdgeDTRParameters
-	// payorEdgeDTRFetch: a questionnaire request envelope carrying one bare
-	// Coverage as its "coverage" member.
-	payorEdgeDTRFetch
 	// payorEdgeCRDRequest: a CDS Hooks request. prefetch.coverage is a bare
 	// Coverage (the other non-Bundle prefetch resources are its siblings) or a
 	// Bundle (every Coverage entry is mapped; only the Bundle's own entries
@@ -202,11 +199,6 @@ func (l payorLocator) sites(carrier payorEdgeCarrier) (coverages, claims []relay
 			}
 		}
 		return coverages, nil, scope
-	case payorEdgeDTRFetch:
-		if c, ok := l.objectMember(root, "coverage"); ok {
-			coverages = []relay.NodeID{c}
-		}
-		return coverages, nil, nil
 	case payorEdgeCRDRequest:
 		pf, ok := l.objectMember(root, "prefetch")
 		if !ok {

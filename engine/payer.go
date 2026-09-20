@@ -19,9 +19,9 @@ import (
 // handleDTRInbound answers a DTR questionnaire request. A request frame that
 // names an operation carries that operation's own input: the
 // $questionnaire-package Parameters, or the SDC $next-question input. A
-// request that names none is the older questionnaire request envelope. Every
-// patient the request names is bound to the token's subject before the
-// responder sees it; the answer is fenced and relayed.
+// request that names none is refused. Every patient the request names is
+// bound to the token's subject before the responder sees it; the answer is
+// fenced and relayed.
 func (g *Gateway) handleDTRInbound(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token, reqJSON []byte, answerTok string) {
 	ctx := r.Context()
 
@@ -49,15 +49,11 @@ func (g *Gateway) handleDTRInbound(w http.ResponseWriter, r *http.Request, env s
 		}
 		nextQuestionSubject, isNextQuestion = subject, true
 	case "":
-		// The older request envelope, still accepted from requesters that do not yet
-		// name the operation. A framed operation never reads it.
-		nextQuestionSubject, isNextQuestion = nextQuestionRequestSubject(reqJSON)
-		if !isNextQuestion {
-			if status, msg := g.bindLegacyPackageRequest(ctx, reqJSON, tok.Subject); status != 0 {
-				g.refuseInbound(w, r, legDTR, env, tok, answerTok, status, msg, nil)
-				return
-			}
-		}
+		// The older request envelope (a canonical and a coverage in place of the
+		// operation's own input) is no longer read: a request that names no
+		// operation is refused, and the refusal names what to send.
+		g.refuseInbound(w, r, legDTR, env, tok, answerTok, http.StatusBadRequest, refusalDTRUnframed, nil)
+		return
 	default:
 		g.refuseInbound(w, r, legDTR, env, tok, answerTok, http.StatusBadRequest, "unsupported DTR operation", nil)
 		return
@@ -314,35 +310,6 @@ func (g *Gateway) bindPackageParameters(ctx context.Context, body []byte, tokenS
 	}
 	if coverages == 0 {
 		return http.StatusBadRequest, "questionnaire-package request has no coverage"
-	}
-	return g.bindPackagePatients(ctx, p.members, tokenSubject, body)
-}
-
-// bindLegacyPackageRequest is the (A) inbound bind for the older
-// questionnaire request envelope: every patient its carried coverage and
-// order name must be the token's subject. An envelope that carries neither
-// (a request by canonical alone) names no patient and is not bound.
-func (g *Gateway) bindLegacyPackageRequest(ctx context.Context, body []byte, tokenSubject string) (int, string) {
-	parseFailed := func() (int, string) { return http.StatusBadRequest, "parse questionnaire fetch failed" }
-	d, err := relay.Doc(relay.NewBody(body, relay.OriginPeerFrame))
-	if err != nil || d.Kind(d.Root()) != relay.KindObject {
-		return parseFailed()
-	}
-	p := &packagePatients{d: d, members: map[string]bool{}}
-	for _, key := range []string{"coverage", "order"} {
-		res, ok := d.Member(d.Root(), key)
-		if !ok || d.Kind(res) == relay.KindNull {
-			continue
-		}
-		if refused := p.resource(res); refused != nil {
-			if *refused == errParseParameters {
-				return parseFailed()
-			}
-			return refused.status, refused.msg
-		}
-	}
-	if len(p.members) == 0 {
-		return 0, ""
 	}
 	return g.bindPackagePatients(ctx, p.members, tokenSubject, body)
 }

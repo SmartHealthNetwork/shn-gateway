@@ -163,6 +163,7 @@ var validateCallSites = map[string]string{
 	"crd_native.go:observeCRDEmbedded": "observational",
 	"certify.go:collectCertification":  "observational",
 	"lanes.go:Validate":                "delegating",
+	"certifylane.go:Validate":          "delegating",
 	"observer.go:Validate":             "delegating",
 	// EOBRecord.Validate (pendledger.go) checks the ledger row's own fields —
 	// an EOB id, non-empty bytes, and a subject matching the decision's — and

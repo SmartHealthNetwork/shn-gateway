@@ -244,6 +244,17 @@ type Target struct {
 	// peer (opaque to this package); probes with version evidence compare
 	// against it (FailVersionDrift).
 	DeclaredVersions []string
+	// Headers are fixed request headers the probes send this target (a
+	// partner system that routes on one is probed the way it is called).
+	// nil ⇒ none; the token probe never uses them.
+	Headers http.Header
+}
+
+// withHeaders adds t.Headers to a probe request.
+func (t Target) withHeaders(req *http.Request) {
+	for k, v := range t.Headers {
+		req.Header[k] = append([]string(nil), v...)
+	}
 }
 
 // ErrBusy is returned by Run when a previous run is still in flight.
@@ -440,7 +451,7 @@ func (r *Runner) probe(ctx context.Context, t Target) Result {
 	case KindToken:
 		res.OK, res.Detail, res.Failure = r.probeToken(pctx, t.TokenFetch)
 	case KindReachable:
-		res.OK, res.Detail, res.Failure = r.probeReachable(pctx, t.URL)
+		res.OK, res.Detail, res.Failure = r.probeReachable(pctx, t)
 	case KindDavinciConfig:
 		res.OK, res.Detail, res.Failure, res.Capability = r.probeDavinciConfig(pctx, t)
 	default:
@@ -475,6 +486,7 @@ func (r *Runner) probeFHIRMetadata(ctx context.Context, t Target) (bool, string,
 		return false, fmt.Sprintf("GET %s/metadata: %v", redacted, redactErr(err)),
 			&Failure{Code: FailInternal, Hint: redactErr(err).Error()}, nil
 	}
+	t.withHeaders(req)
 	resp, err := r.client.Do(req)
 	if err != nil {
 		return false, fmt.Sprintf("GET %s/metadata: %v", redacted, redactErr(err)),
@@ -567,6 +579,7 @@ func (r *Runner) probeDavinciConfig(ctx context.Context, t Target) (bool, string
 		return false, fmt.Sprintf("GET %s/.well-known/davinci-configuration: %v", redacted, redactErr(err)),
 			&Failure{Code: FailInternal, Hint: redactErr(err).Error()}, nil
 	}
+	t.withHeaders(req)
 	resp, err := r.client.Do(req)
 	if err != nil {
 		return false, fmt.Sprintf("GET %s/.well-known/davinci-configuration: %v", redacted, redactErr(err)),
@@ -656,7 +669,8 @@ func (r *Runner) probeToken(ctx context.Context, fetch func(context.Context) err
 
 // probeReachable GETs target; ok when the response status is below 500 (a
 // 404 still proves the edge exists and is answering).
-func (r *Runner) probeReachable(ctx context.Context, target string) (bool, string, *Failure) {
+func (r *Runner) probeReachable(ctx context.Context, t Target) (bool, string, *Failure) {
+	target := t.URL
 	redacted := targetOf(target)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
@@ -664,6 +678,7 @@ func (r *Runner) probeReachable(ctx context.Context, target string) (bool, strin
 		return false, fmt.Sprintf("GET %s: %v", redacted, redactErr(err)),
 			&Failure{Code: FailInternal, Hint: redactErr(err).Error()}
 	}
+	t.withHeaders(req)
 	resp, err := r.client.Do(req)
 	if err != nil {
 		return false, fmt.Sprintf("GET %s: %v", redacted, redactErr(err)),
