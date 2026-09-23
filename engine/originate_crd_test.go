@@ -113,7 +113,7 @@ func originGateway(t *testing.T, profile string, sor SystemOfRecord, pop Populat
 		HubTransportPub:    authzPub,
 		HubURL:             "http://origin.test",
 		Reg:                reg,
-		Validator:          shnsdk.NewFakeValidator(),
+		Validator:          syntheticFakeValidator(),
 		SoR:                sor,
 		Store:              newCensusSoR(),
 		Clock:              clock,

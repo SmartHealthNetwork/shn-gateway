@@ -2,15 +2,109 @@ package engine
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
+
+var errPASParticipantSource = errors.New("PAS participant Claim source unavailable")
+
+func authoredPASBuildStatus(err error) int {
+	if errors.Is(err, errPASParticipantSource) {
+		return http.StatusUnprocessableEntity
+	}
+	return http.StatusInternalServerError
+}
+
+// pasFactsForOrder selects exactly one participant-held Claim whose sole item
+// names this order. Other Claims from the bounded patient search are unrelated;
+// a matching but incomplete or ambiguous Claim is a refusal.
+func pasFactsForOrder(claims [][]byte, order []byte) (*shnsdk.PASLineItemFacts, error) {
+	var selected *shnsdk.PASLineItemFacts
+	for _, claim := range claims {
+		facts, err := shnsdk.PASClaimFactsFromSource(claim, order)
+		if errors.Is(err, shnsdk.ErrPASSourceMismatch) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", errPASParticipantSource, err)
+		}
+		if selected != nil {
+			return nil, fmt.Errorf("%w: more than one Claim names the order", errPASParticipantSource)
+		}
+		selected = facts
+	}
+	if selected == nil {
+		return nil, fmt.Errorf("%w: no Claim names the order", errPASParticipantSource)
+	}
+	return selected, nil
+}
+
+func (g *Gateway) pasFactsFromSource(ctx context.Context, member string, sourceOrder, order []byte) (*shnsdk.PASLineItemFacts, error) {
+	ref, found, err := ReadSystemOfRecord(g.cfg.SoR).PatientFHIRRefContext(ctx, member)
+	if err != nil {
+		return nil, fmt.Errorf("%w: patient source read failed: %v", errPASParticipantSource, err)
+	}
+	if !found || !strings.HasPrefix(ref, "Patient/") {
+		return nil, fmt.Errorf("%w: patient record absent", errPASParticipantSource)
+	}
+	// The caller carries the exact held order bytes from its one SoR acquisition,
+	// before the registered patient-name rewrite. PAS independently resolves the
+	// current patient and searches fresh Claims; it must not open a different order
+	// later and silently attach those facts to what CRD actually submitted.
+	if len(sourceOrder) == 0 {
+		return nil, fmt.Errorf("%w: held source order absent", errPASParticipantSource)
+	}
+	var held struct {
+		ResourceType string `json:"resourceType"`
+		Subject      struct {
+			Reference string `json:"reference"`
+		} `json:"subject"`
+	}
+	if json.Unmarshal(sourceOrder, &held) != nil || (held.ResourceType != "ServiceRequest" && held.ResourceType != "DeviceRequest") || held.Subject.Reference != ref {
+		return nil, fmt.Errorf("%w: source order patient differs from resolved patient", errPASParticipantSource)
+	}
+	expectedOrder := sourceOrder
+	if ref != "Patient/"+member {
+		expectedOrder, err = namePatientByMember(sourceOrder, strings.TrimPrefix(ref, "Patient/"), member)
+		if err != nil {
+			return nil, fmt.Errorf("%w: source order patient rewrite invalid", errPASParticipantSource)
+		}
+	}
+	var expected, submitted any
+	if json.Unmarshal(expectedOrder, &expected) != nil || json.Unmarshal(order, &submitted) != nil || !reflect.DeepEqual(expected, submitted) {
+		return nil, fmt.Errorf("%w: submitted order differs from held order", errPASParticipantSource)
+	}
+	result := runSoRSearch(ctx, g.cfg.SoR, "Claim", strings.TrimPrefix(ref, "Patient/"), false)
+	if result.Outcome != SearchOK && result.Outcome != SearchZero {
+		return nil, fmt.Errorf("%w: Claim search %s", errPASParticipantSource, result.Outcome)
+	}
+	claims := make([][]byte, 0, len(result.matches))
+	for _, match := range result.matches {
+		claims = append(claims, result.pages[match.page][match.start:match.end])
+	}
+	return pasFactsForOrder(claims, sourceOrder)
+}
+
+func (g *Gateway) buildAuthoredPASSubmit(ctx context.Context, line, member string, sourceOrder []byte, in shnsdk.ConformantClaimInputs) ([]byte, error) {
+	if def, ok := shnsdk.PASLineDef(line); ok && def.ClaimItemLineDetailRequired {
+		facts, err := g.pasFactsFromSource(ctx, member, sourceOrder, in.SR)
+		if err != nil {
+			return nil, err
+		}
+		in.ItemFacts = facts
+	}
+	return buildAuthoredPASSubmit(line, in)
+}
 
 // buildAuthoredPASSubmit preserves the holder-authored attachment while the
 // SDK owns the PAS envelope and its final resource identities.

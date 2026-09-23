@@ -30,6 +30,7 @@ package engine
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"encoding/json"
 	"io"
@@ -89,6 +90,9 @@ type pendResumeSubstrate struct {
 	// stays untouched. nil is the default and changes nothing (every existing
 	// caller is unaffected).
 	overrideResponse func(legType string, payload []byte) []byte
+	// responseDeclarations are the canned producer's independently known lines.
+	// A missing entry stays unstamped, regardless of the request's pin.
+	responseDeclarations map[string]string
 }
 
 func (s *pendResumeSubstrate) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -179,6 +183,9 @@ func (s *pendResumeSubstrate) handleRoute(body []byte) (*http.Response, error) {
 	sender := env.Metadata.Recipient
 	respOp, respFrame := "pas-response", "payer-coverage"
 	switch txType {
+	case "coverage-eligibility":
+		respPayload, err = shnsdk.BuildEligibilityResponse(corrID, s.patientRef, true, "", shnsdk.PayerIdentifier{}, s.clock())
+		respOp, respFrame = "eligibility-response", "payer-coverage"
 	case "crd-order-select":
 		cov := shnsdk.CardCoverage{Covered: shnsdk.CoveredCovered, PANeeded: shnsdk.PANeededAuthNeeded,
 			Questionnaires: []string{fhirseed.LumbarMRIQuestionnaireCanonical}}
@@ -207,7 +214,7 @@ func (s *pendResumeSubstrate) handleRoute(body []byte) (*http.Response, error) {
 		// not "pas-response") — VerifyBound pins spec.RespOp per TransactionType (C2/AI-11), so
 		// reusing pas-claim's default here would authz-fail this leg, not silently mis-route it.
 		respOp = "pas-update-response"
-		respPayload = homeOxygenApprovedClaimResponse() // "outcome":"complete" + preAuthRef → ParseClaimResponse reads "approved"
+		respPayload = bytes.ReplaceAll(homeOxygenApprovedClaimResponse(), []byte("Patient/MBR-OX"), []byte(s.patientRef)) // "outcome":"complete" + preAuthRef → ParseClaimResponse reads "approved"
 	default:
 		return errResp("stub: unexpected leg " + txType), nil
 	}
@@ -216,6 +223,13 @@ func (s *pendResumeSubstrate) handleRoute(body []byte) (*http.Response, error) {
 	}
 	if s.overrideResponse != nil {
 		respPayload = s.overrideResponse(txType, respPayload)
+	}
+	if line := s.responseDeclarations[txType]; line != "" {
+		respPayload, err = shnsdk.EncodeHTTPFrameHeaders(http.StatusOK,
+			map[string]string{"Content-Type": "application/fhir+json", shnsdk.FrameHeaderContractVersion: line}, respPayload)
+		if err != nil {
+			return errResp("stub: frame " + txType + " response: " + err.Error()), nil
+		}
 	}
 
 	meta := shnsdk.Metadata{
@@ -292,6 +306,10 @@ type pendFixtureOpts struct {
 	// holder's declaration. nil ⇒ both stay at the build default / silent (the
 	// pa.pas@2.0 own-line case).
 	declared []string
+	// deliveryOnly selects the participant's none policy for tests of routing,
+	// pinning, carry and workflow continuation. Strict is retained by default
+	// for callers that prove an enforced conformance rule.
+	deliveryOnly bool
 }
 
 // newPendResumeFixture wires a real provider Gateway (default lane —
@@ -340,6 +358,10 @@ func newPendResumeFixture(t *testing.T, opts pendFixtureOpts) (*Gateway, *pendRe
 			RequestFrames: requestFrames})
 		stub.encKeys[id] = encPair{pub: encPub, priv: encPriv}
 	}
+	resolverHolders := []string{"provider", "payer"}
+	for _, id := range opts.extraRoles {
+		resolverHolders = append(resolverHolders, id)
+	}
 
 	gw := mustNew(t, Config{
 		Role:        "provider",
@@ -357,15 +379,24 @@ func newPendResumeFixture(t *testing.T, opts pendFixtureOpts) (*Gateway, *pendRe
 		HubURL:                   "http://stub.test",
 		Reg:                      reg,
 		DeclaredContractVersions: opts.declared,
-		Validator:                shnsdk.NewFakeValidator(),
+		Validator:                syntheticFakeValidator(),
+		SubjectReferenceResolver: censusSubjectResolver(resolverHolders...),
 		SoR:                      base,
 		Store:                    base,
 		Clock:                    clock,
 		NPI:                      "1234567890",
 		Populator:                fakePopulator{canonical: fhirseed.LumbarMRIQuestionnaireCanonical},
 		Client:                   &http.Client{Transport: stub},
+		ConformanceEnforcement:   pendFixturePolicy(opts),
 	})
 	return gw, stub
+}
+
+func pendFixturePolicy(opts pendFixtureOpts) ConformanceEnforcement {
+	if opts.deliveryOnly {
+		return EnforcementNone
+	}
+	return EnforcementStrict
 }
 
 // uc06Fixture is the original UC-06 wiring (silent peer ⇒ own-line pa.pas@2.0).
@@ -373,7 +404,7 @@ func uc06Fixture(t *testing.T) (*Gateway, *pendResumeSubstrate) {
 	t.Helper()
 	return newPendResumeFixture(t, pendFixtureOpts{
 		member: "MBR-UC06", birthDate: "1969-07-21", familyName: "Reyes",
-		pendedItem: "functional-status",
+		pendedItem: "functional-status", deliveryOnly: true,
 	})
 }
 
@@ -442,6 +473,14 @@ func TestScenarioToPendSelectsAndCompleteClinicianHonorsPin(t *testing.T) {
 	if st.pasToken != "pa.pas@2.0" {
 		t.Fatalf("pendState.pasToken = %q, want pa.pas@2.0 (own SupportedContractVersions line, silent peer)", st.pasToken)
 	}
+	var submitted struct {
+		ResourceType string                           `json:"resourceType"`
+		Identifier   []struct{ System, Value string } `json:"identifier"`
+	}
+	if err := json.Unmarshal(st.priorClaim, &submitted); err != nil || submitted.ResourceType != "Claim" ||
+		len(submitted.Identifier) == 0 || submitted.Identifier[0].Value != st.pasCorr {
+		t.Fatalf("pend lost actual submitted Claim source: %s (%v)", st.priorClaim, err)
+	}
 	if st.recipient != "payer" {
 		t.Fatalf("pendState.recipient = %q, want payer", st.recipient)
 	}
@@ -489,10 +528,11 @@ func TestScenarioToPendSelectsAndCompleteClinicianHonorsPin(t *testing.T) {
 // re-selecting to 2.2 succeeds, so only reading the CLAIMED VERSION off the
 // request frame catches it.
 //
-// The RESPONDER half of request framing (honoring a claimed token rather than recomputing its
-// own, and stamping the honored line on the answer) is proven against the REAL
-// payer gateway in test/conformance's per-line pin test — a fake Hub can only
-// honor by construction.
+// The RESPONDER half of request framing (honoring a claimed request token
+// rather than recomputing its own) is proven against the real payer gateway in
+// test/conformance's per-line pin test. Its synthetic payer explicitly
+// declares its own response line; the request pin never supplies an absent
+// answer declaration. A fake Hub can honor the request claim only by construction.
 func TestCompletePatient_HonorsPinAcrossDifferentLineDrift(t *testing.T) {
 	const (
 		line20 = "pa.pas@2.0"
@@ -503,9 +543,10 @@ func TestCompletePatient_HonorsPinAcrossDifferentLineDrift(t *testing.T) {
 	declared20 := []string{shnsdk.ContractPACRD20, shnsdk.ContractPADTR20, shnsdk.ContractPAPAS20}
 	gw, stub := newPendResumeFixture(t, pendFixtureOpts{
 		member: "MBR-UC07", birthDate: "1990-08-25", familyName: "Haddad",
-		pendedItem: "patient-reported-functional-status",
-		extraRoles: map[string]string{"phg": "phg"},
-		declared:   declared20,
+		pendedItem:   "patient-reported-functional-status",
+		extraRoles:   map[string]string{"phg": "phg"},
+		deliveryOnly: true,
+		declared:     declared20,
 	})
 
 	// --- run to PENDED ---
@@ -589,15 +630,18 @@ func TestCompletePatient_ChainResumeRunsEgressAdapt(t *testing.T) {
 	declared21 := []string{shnsdk.ContractPACRD21, shnsdk.ContractPADTR21, shnsdk.ContractPAPAS21}
 	gw, stub := newPendResumeFixture(t, pendFixtureOpts{
 		member: "MBR-UC07", birthDate: "1990-08-25", familyName: "Haddad",
-		pendedItem: "patient-reported-functional-status",
-		extraRoles: map[string]string{"phg": "phg"},
-		declared:   declared21,
+		pendedItem:   "patient-reported-functional-status",
+		extraRoles:   map[string]string{"phg": "phg"},
+		declared:     declared21,
+		deliveryOnly: true,
 	})
 	// The payer declares pa.pas@2.2 (crd/dtr stay shared @2.1 so the run-to-pend
 	// prefix routes normally) — no shared pas line, and D1c restricts arm (2)'s
 	// native view to {2.1} so only arm (3) (the transform chain) can bridge it.
 	driftRegistryTo(t, gw, "payer", []string{shnsdk.ContractPACRD21, shnsdk.ContractPADTR21, shnsdk.ContractPAPAS22})
 	gw.cfg.EgressNativeLines = []string{"2.1"}
+	sourceProof, targetProof := &recordingValidator{valid: true}, &recordingValidator{valid: true}
+	gw.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"2.1": sourceProof, "2.2": targetProof}
 
 	var transformed int
 	gw.cfg.Observer = func(e ObserverEvent) {
@@ -617,10 +661,15 @@ func TestCompletePatient_ChainResumeRunsEgressAdapt(t *testing.T) {
 	if st.pasToken != "pa.pas@2.2" {
 		t.Fatalf("pendState.pasToken = %q, want pa.pas@2.2 (arm-3 chain target)", st.pasToken)
 	}
+	observationFlush(t, gw)
 	if transformed == 0 {
 		t.Fatalf("fixture invalid: the initial pas-claim submit must have chained (leg.transformed observed=%d)", transformed)
 	}
+	if len(sourceProof.calls) == 0 || len(targetProof.calls) == 0 {
+		t.Fatalf("the initial chain skipped source or target certification at none: source=%d target=%d", len(sourceProof.calls), len(targetProof.calls))
+	}
 	beforeResume := transformed
+	beforeSource, beforeTarget := len(sourceProof.calls), len(targetProof.calls)
 
 	// --- resume: completePatient's pas-claim-update leg must ALSO re-derive the
 	// route (arm 3 again — the mesh never widened) and run it through egressAdapt.
@@ -636,6 +685,9 @@ func TestCompletePatient_ChainResumeRunsEgressAdapt(t *testing.T) {
 		t.Fatalf("completePatient's pas-claim-update leg never ran g.egressAdapt (leg.transformed count "+
 			"%d -> %d, want an increase) — the resume path is building shnsdk.LineOf(st.pasToken) directly "+
 			"instead of re-running g.selectResumeRoute, unlike completeClinician's sibling leg", beforeResume, transformed)
+	}
+	if len(sourceProof.calls) <= beforeSource || len(targetProof.calls) <= beforeTarget {
+		t.Fatalf("the resume chain skipped source or target certification at none: source=%d->%d target=%d->%d", beforeSource, len(sourceProof.calls), beforeTarget, len(targetProof.calls))
 	}
 	assertClaimedVersions(t, stub, "pas-claim-update", "pa.pas@2.2")
 }
@@ -653,7 +705,7 @@ func TestCompletePatient_ChainResumeRunsEgressAdapt(t *testing.T) {
 func TestHandleUC04_PinsBothLegsAcrossMidRequestDrift(t *testing.T) {
 	gw, stub := newPendResumeFixture(t, pendFixtureOpts{
 		member: "MBR-UC04", birthDate: "1982-11-03", familyName: "Chen",
-		pendedItem: "operative-diagnostic-report",
+		pendedItem: "operative-diagnostic-report", deliveryOnly: true,
 	})
 	driftOnPASClaim(gw, stub)
 
@@ -672,8 +724,9 @@ func TestHandleUC04_PinsBothLegsAcrossMidRequestDrift(t *testing.T) {
 func TestHandleUC05_PinsBothLegsAcrossMidRequestDrift(t *testing.T) {
 	gw, stub := newPendResumeFixture(t, pendFixtureOpts{
 		member: "MBR-UC05", birthDate: "1968-03-12", familyName: "Johansson",
-		pendedItem: "operative-diagnostic-report",
-		extraRoles: map[string]string{"facility": "metro-spine"},
+		pendedItem:   "operative-diagnostic-report",
+		extraRoles:   map[string]string{"facility": "metro-spine"},
+		deliveryOnly: true,
 	})
 	driftOnPASClaim(gw, stub)
 
@@ -696,6 +749,45 @@ func TestHandleUC05_PinsBothLegsAcrossMidRequestDrift(t *testing.T) {
 // over these exact bytes.
 const federatedQueryIngressMutationMarker = "UC05_FQ_INGRESS_MUTATION_MARKER"
 
+type recordingMarkerValidator struct {
+	*shnsdk.FakeValidator
+	calls, facilityAnswers [][]byte
+}
+
+func (v *recordingMarkerValidator) ValidateEvidence(ctx context.Context, body []byte, profile string) (shnsdk.ValidationEvidence, error) {
+	v.calls = append(v.calls, bytes.Clone(body))
+	return v.FakeValidator.ValidateEvidence(ctx, body, profile)
+}
+
+// closeStrictPendedGraph supplies the synthetic payer's referenced resources
+// for the strict control. The ordinary canned answer stays untouched for
+// delivery and pin tests, whose producer gave no line declaration.
+func closeStrictPendedGraph(t *testing.T, payload []byte, member string) []byte {
+	t.Helper()
+	var bundle map[string]any
+	if err := json.Unmarshal(payload, &bundle); err != nil {
+		t.Fatalf("strict PAS fixture: decode pended answer: %v", err)
+	}
+	entries, ok := bundle["entry"].([]any)
+	if !ok {
+		t.Fatal("strict PAS fixture: no entry array")
+	}
+	patientURL := "https://payer.example/fhir/Patient/" + member
+	entries = append(entries,
+		map[string]any{"fullUrl": "https://payer.example/fhir/Organization/payer", "resource": map[string]any{"resourceType": "Organization", "id": "payer"}},
+		map[string]any{"fullUrl": patientURL, "resource": map[string]any{"resourceType": "Patient", "id": member}},
+		map[string]any{"fullUrl": "https://provider.example/fhir/Claim/claim-corr-pend", "resource": map[string]any{
+			"resourceType": "Claim", "id": "claim-corr-pend", "patient": map[string]any{"reference": patientURL},
+		}},
+	)
+	bundle["entry"] = entries
+	out, err := json.Marshal(bundle)
+	if err != nil {
+		t.Fatalf("strict PAS fixture: encode pended answer: %v", err)
+	}
+	return out
+}
+
 // TestHandleUC05_FederatedQueryIngressValidatesOnDemoLane is NEW-2's call-site
 // guard: Finding 1's original defect (originate.go's UC-05 facility federated-query
 // leg calling validateFHIRPayerIngress instead of plain validateFHIR) was only
@@ -710,7 +802,8 @@ const federatedQueryIngressMutationMarker = "UC05_FQ_INGRESS_MUTATION_MARKER"
 // relaysReferencePayerBytes's demo-lane skip and the corrupted bytes would sail
 // through — this test's assertion on rec.Code == http.StatusOK is what makes that
 // regression visible (a passing status where a rejection was expected).
-func TestHandleUC05_FederatedQueryIngressValidatesOnDemoLane(t *testing.T) {
+func strictUC05Fixture(t *testing.T) (*Gateway, *pendResumeSubstrate) {
+	t.Helper()
 	gw, stub := newPendResumeFixture(t, pendFixtureOpts{
 		// MBR-D-UC05, not MBR-UC05: sceneMember only resolves to the demo persona once
 		// OriginationProfile (set below) reads "demo" — driving this leg through the
@@ -723,14 +816,70 @@ func TestHandleUC05_FederatedQueryIngressValidatesOnDemoLane(t *testing.T) {
 	// lane the R-8 scope fix (Finding 1) had to stop leaking the skip into this
 	// exact leg on.
 	gw.cfg.OriginationProfile = "demo"
-	// Pinned to strict explicitly, not the default: the none twin right below
-	// drives the SAME corrupted marker and asserts it records-and-relays instead.
+	// This row proves the strict rule, independently from the none twin below.
 	gw.cfg.ConformanceEnforcement = EnforcementStrict
+	// This fixture builds its own CRD/DTR/PAS answers at 2.0. Their producer
+	// declarations let strict complete those earlier controls; no response line
+	// is copied from the corresponding request or inferred after delivery.
+	stub.responseDeclarations = map[string]string{
+		"crd-order-select":        shnsdk.ContractPACRD20,
+		"dtr-questionnaire-fetch": shnsdk.ContractPADTR20,
+		"pas-claim":               shnsdk.ContractPAPAS20,
+		"pas-claim-update":        shnsdk.ContractPAPAS20,
+	}
 	// A validator that rejects only the corrupted marker: every OTHER leg's
 	// bytes in this run (CRD SR/Coverage, DTR QR, PAS bundles) must still pass,
 	// so a false rejection elsewhere would misattribute the failure.
-	gw.cfg.Validator = &shnsdk.FakeValidator{RejectIfContains: federatedQueryIngressMutationMarker}
+	checker := &recordingMarkerValidator{FakeValidator: &shnsdk.FakeValidator{Evidence: syntheticEvidence(), RejectIfContains: federatedQueryIngressMutationMarker}}
+	gw.cfg.Validator = checker
 	stub.overrideResponse = func(legType string, payload []byte) []byte {
+		if legType == "pas-claim" {
+			return closeStrictPendedGraph(t, payload, "MBR-D-UC05")
+		}
+		if legType == "pas-claim-update" {
+			return dtrResumeApprovalBundle(t, payload, "MBR-D-UC05")
+		}
+		if legType == "federated-query" {
+			checker.facilityAnswers = append(checker.facilityAnswers, bytes.Clone(payload))
+		}
+		return payload
+	}
+	return gw, stub
+}
+
+func TestHandleUC05_FederatedQueryStrictControlAcceptsFacilityAnswers(t *testing.T) {
+	gw, stub := strictUC05Fixture(t)
+	checker := gw.cfg.Validator.(*recordingMarkerValidator)
+	rec := httptest.NewRecorder()
+	gw.handleUC05(rec, httptest.NewRequest(http.MethodPost, "/scenario/uc05", nil))
+	if len(stub.claimedFor("federated-query")) != 2 {
+		t.Fatalf("strict control did not accept both facility answers: legs=%v; status=%d body=%s", stub.legTypes, rec.Code, rec.Body.String())
+	}
+	if len(checker.facilityAnswers) != 2 {
+		t.Fatalf("strict fixture produced %d facility answers, want both CDex resources", len(checker.facilityAnswers))
+	}
+	for _, answer := range checker.facilityAnswers {
+		checked := false
+		for _, call := range checker.calls {
+			if bytes.Equal(call, answer) {
+				checked = true
+				break
+			}
+		}
+		if !checked {
+			t.Fatalf("strict control did not validate facility answer %s", answer)
+		}
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("strict control failed after clean facility answers: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleUC05_FederatedQueryIngressValidatesOnDemoLane(t *testing.T) {
+	gw, stub := strictUC05Fixture(t)
+	priorOverride := stub.overrideResponse
+	stub.overrideResponse = func(legType string, payload []byte) []byte {
+		payload = priorOverride(legType, payload)
 		if legType != "federated-query" {
 			return payload
 		}
@@ -748,29 +897,30 @@ func TestHandleUC05_FederatedQueryIngressValidatesOnDemoLane(t *testing.T) {
 	if !legAttempted(stub.legTypes, "federated-query") {
 		t.Fatalf("federated-query leg never ran (legs: %v); status=%d body=%s", stub.legTypes, rec.Code, rec.Body.String())
 	}
-	if rec.Code == http.StatusOK {
-		t.Fatalf("handleUC05 accepted a federated-query response the validator flags as invalid "+
-			"(demo lane) — the facility ingress leg must never share the R-8 payer-ingress skip; "+
-			"status=%d body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "conformance_invalid: fhir.profile") {
+		t.Fatalf("strict rejected at the wrong rule or accepted the mutated facility answer: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if legAttempted(stub.legTypes, "pas-claim-update") {
+		t.Fatalf("strict sent an amendment after rejecting the facility answer: %v", stub.legTypes)
 	}
 }
 
 // TestHandleUC05_FederatedQueryIngressValidatesOnDemoLane_NoneRelays is the none
 // twin of the row above: the SAME corrupted federated-query answer, on the SAME
-// demo lane, but ConformanceEnforcement=none. The ingress-validate call still
-// runs (it is not skipped) but an invalid verdict is now RECORDED, not refused,
-// so handleUC05 completes (200) and the finding is observed.
+// demo lane, but ConformanceEnforcement=none. No optional checker runs or
+// records a finding; the workflow still reaches its approved outcome.
 func TestHandleUC05_FederatedQueryIngressValidatesOnDemoLane_NoneRelays(t *testing.T) {
 	gw, stub := newPendResumeFixture(t, pendFixtureOpts{
 		member: "MBR-D-UC05", birthDate: "1968-03-12", familyName: "Johansson-Demo",
-		pendedItem: "operative-diagnostic-report",
-		extraRoles: map[string]string{"facility": "metro-spine"},
+		pendedItem:   "operative-diagnostic-report",
+		extraRoles:   map[string]string{"facility": "metro-spine"},
+		deliveryOnly: true,
 	})
 	gw.cfg.OriginationProfile = "demo"
 	gw.cfg.ConformanceEnforcement = EnforcementNone
 	var events []ObserverEvent
 	gw.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
-	gw.cfg.Validator = &shnsdk.FakeValidator{RejectIfContains: federatedQueryIngressMutationMarker}
+	gw.cfg.Validator = failIfCalledValidator{t: t}
 	stub.overrideResponse = func(legType string, payload []byte) []byte {
 		if legType != "federated-query" {
 			return payload
@@ -786,7 +936,7 @@ func TestHandleUC05_FederatedQueryIngressValidatesOnDemoLane_NoneRelays(t *testi
 		t.Fatalf("federated-query leg never ran (legs: %v); status=%d body=%s", stub.legTypes, rec.Code, rec.Body.String())
 	}
 	if rec.Code != http.StatusOK {
-		t.Fatalf("at none the corrupted federated-query answer must relay (recorded, not refused): status=%d body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("at none the corrupted federated-query answer must relay: status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	// AuthNumber discriminates the approved branch from pended/consent-denied
 	// (unlike FacilityID, which is a registry lookup by role — originate.go's
@@ -809,27 +959,12 @@ func TestHandleUC05_FederatedQueryIngressValidatesOnDemoLane_NoneRelays(t *testi
 	// resource, so cdexEvidence's extraction never carries it into the
 	// ClaimUpdate. There is no wire body downstream of the verdict this marker
 	// could appear in.
-	// stub.overrideResponse matches every "federated-query" leg regardless of the
-	// CDex doc type, so BOTH the DiagnosticReport and the DocumentReference
-	// searchset legs carry the marker and are recorded — unlike the harness-level
-	// twin (which corrupts only DiagnosticReport bytes), so this asserts at
-	// least one rather than exactly one.
-	var matched []ConformanceFinding
+	// No optional result may appear for any leg at none, including the two
+	// federated-query answers that both carry the marker.
+	observationFlush(t, gw)
 	for _, e := range events {
-		if e.Kind != ConformanceObservedEvent {
-			continue
-		}
-		var f ConformanceFinding
-		if json.Unmarshal([]byte(e.Detail), &f) == nil && f.Kind == string(KindFHIRIngress) {
-			matched = append(matched, f)
-		}
-	}
-	if len(matched) == 0 {
-		t.Fatalf("want at least one fhir-ingress finding, got %d: %+v", len(matched), matched)
-	}
-	for _, f := range matched {
-		if f.Decision != Record.String() {
-			t.Fatalf("fhir-ingress finding decision = %q, want %q: %+v", f.Decision, Record.String(), f)
+		if e.Kind == ConformanceObservedEvent {
+			t.Fatalf("none emitted optional finding: %+v", e)
 		}
 	}
 }
@@ -926,12 +1061,12 @@ func downChainPendFixture(t *testing.T, opts pendFixtureOpts) (*Gateway, *pendRe
 
 func uc06PendOpts() pendFixtureOpts {
 	return pendFixtureOpts{member: "MBR-UC06", birthDate: "1969-07-21", familyName: "Reyes",
-		pendedItem: "functional-status"}
+		pendedItem: "functional-status", deliveryOnly: true}
 }
 
 func uc07PendOpts() pendFixtureOpts {
 	return pendFixtureOpts{member: "MBR-UC07", birthDate: "1990-08-25", familyName: "Haddad",
-		pendedItem: "patient-reported-functional-status", extraRoles: map[string]string{"phg": "phg"}}
+		pendedItem: "patient-reported-functional-status", extraRoles: map[string]string{"phg": "phg"}, deliveryOnly: true}
 }
 
 // realPASCarryEntries is a GENUINE declared-carry list: the real pa.pas
@@ -1071,6 +1206,7 @@ func TestCompleteClinician_PendedCarryStrippedMidPendRefuses(t *testing.T) {
 			"no-opped and the amendment would answer the pend without content its own loss record declares: %s",
 			rec2.Body.String())
 	}
+	observationFlush(t, gw)
 	assertPendCarryRefusal(t, stub, rec2, *failed, "completeClinician")
 }
 
@@ -1093,6 +1229,7 @@ func TestCompletePatient_PendedCarryStrippedMidPendRefuses(t *testing.T) {
 	if gw.completePatient(rec2, httptest.NewRequest(http.MethodPost, "/scenario/uc07/complete", nil), st, "") {
 		t.Fatalf("completePatient resumed GREEN over a stripped carry: %s", rec2.Body.String())
 	}
+	observationFlush(t, gw)
 	assertPendCarryRefusal(t, stub, rec2, *failed, "completePatient")
 }
 
@@ -1211,7 +1348,7 @@ func TestScenarioToPend_ThreadsChainCarriedEntriesIntoThePendRecord(t *testing.T
 		t.Fatal("scenarioToPend DISCARDS egressAdapt's LossReports — the pended leg's Carried entries are the " +
 			"pend record's only input, so discarding them leaves the resume guard nothing to verify against")
 	}
-	adaptAt := strings.Index(fn, "g.egressAdapt(route, bundleJSON,")
+	adaptAt := strings.Index(fn, "g.egressAdapt(ctx, route, bundleJSON,")
 	if adaptAt < 0 {
 		t.Fatal("scenarioToPend no longer runs its pas-claim leg through g.egressAdapt")
 	}
@@ -1240,13 +1377,13 @@ func TestScenarioToPend_ThreadsChainCarriedEntriesIntoThePendRecord(t *testing.T
 
 func assertBuildsAfterLineSelection(t *testing.T, fn, fnName string) {
 	t.Helper()
-	sel := `route, ok := g.selectLegLineOrFail(w, res.recipient, "pas-claim", pasCorr)`
+	sel := `route, ok := g.selectLegLineOrFail(w, res.recipient, "pas-claim", pasCorr, res.attempt)`
 	selAt := strings.Index(fn, sel)
 	if selAt < 0 {
 		t.Fatalf("%s does not pre-select the pas-claim line via g.selectLegLineOrFail before its pas-claim leg", fnName)
 	}
 	for _, build := range []string{
-		"buildAuthoredPASSubmit(route.BuildLine,",
+		"g.buildAuthoredPASSubmit(ctx, route.BuildLine, res.member,",
 		"buildAuthoredPASUpdate(route.BuildLine,",
 	} {
 		at := strings.Index(fn, build)
@@ -1275,14 +1412,35 @@ func TestHandleUC05_SelectsLineBeforeBuilding(t *testing.T) {
 	assertBuildsAfterLineSelection(t, extractFunc(t, string(src), "handleUC05"), "handleUC05")
 }
 
+func TestPendedTwoPhase_SelectsLineBeforeBuilding(t *testing.T) {
+	src, err := os.ReadFile("originate_resume.go")
+	if err != nil {
+		t.Fatalf("read source: %v", err)
+	}
+	for _, tc := range []struct{ name, selectCall, buildCall string }{
+		{"scenarioToPend", `route, ok := g.selectLegLineOrFail(w, res.recipient, "pas-claim", pasCorr, res.attempt)`, "g.buildAuthoredPASSubmit(ctx, route.BuildLine, res.member,"},
+		{"completeClinician", `route, rerr := g.selectResumeRoute(st.pasToken, st.recipient, "pas-claim-update")`, "buildAuthoredPASUpdate(route.BuildLine,"},
+		{"completePatient", `route, rerr := g.selectResumeRoute(st.pasToken, st.recipient, "pas-claim-update")`, "buildAuthoredPASUpdate(route.BuildLine,"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fn := extractFunc(t, string(src), tc.name)
+			selAt, buildAt := strings.Index(fn, tc.selectCall), strings.Index(fn, tc.buildCall)
+			if selAt < 0 || buildAt < 0 || buildAt <= selAt {
+				t.Fatalf("%s must select its real route before the reachable line-aware builder (selection=%d build=%d)", tc.name, selAt, buildAt)
+			}
+		})
+	}
+}
+
 // TestHandleUC05_RequesterRefusesAnotherPatientsRecord: a facility answer
 // that crosses the Hub carrying a report about another patient is refused by
 // the requester before any of it is used — no ClaimUpdate is sent.
 func TestHandleUC05_RequesterRefusesAnotherPatientsRecord(t *testing.T) {
 	gw, stub := newPendResumeFixture(t, pendFixtureOpts{
 		member: "MBR-UC05", birthDate: "1968-03-12", familyName: "Johansson",
-		pendedItem: "operative-diagnostic-report",
-		extraRoles: map[string]string{"facility": "metro-spine"},
+		pendedItem:   "operative-diagnostic-report",
+		extraRoles:   map[string]string{"facility": "metro-spine"},
+		deliveryOnly: true,
 	})
 	replaced := 0
 	stub.overrideResponse = func(legType string, payload []byte) []byte {

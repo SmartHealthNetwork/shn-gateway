@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -26,6 +27,22 @@ const crdTopic = `{"system":"http://hl7.org/fhir/us/davinci-crd/CodeSystem/temp"
 // crdCard is a valid CRD card with extra members.
 const crdCard = `{"summary":"Prior authorization required","indicator":"warning","source":{"label":"Example Health Plan","topic":` + crdTopic + `},"x-payer-note":{"n":1}}`
 
+// The controlled CDS backend fixture explicitly asserts its output line at
+// each service URL. Receive capability alone cannot do that for a real payer.
+func declaredCDSFixtureOutput(t *testing.T, base string) NativeResponseDeclarations {
+	t.Helper()
+	rows := []string{
+		responseBinding("crd-order-select", base+"/cds-services/order-select-crd", "pa.crd@2.0"),
+		responseBinding("crd-order-select", base+"/cds-services/order-sign-crd", "pa.crd@2.0"),
+		responseBinding("crd-order-dispatch", base+"/cds-services/order-dispatch-crd", "pa.crd@2.0"),
+	}
+	declarations, err := ParseNativeResponseDeclarations("[" + strings.Join(rows, ",") + "]")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return declarations
+}
+
 // unusualAnswer is a payer answer in the payer's own layout: whitespace,
 // escapes, number forms, member order and members this gateway does not know.
 // The escapes are built at run time so no editor can fold them.
@@ -43,7 +60,8 @@ func relayCase(t *testing.T, leg, hook string, contentType string, answer []byte
 	t.Helper()
 	p := newCDSPayer(t, referencePayerServices...)
 	p.respond(http.StatusOK, contentType, answer)
-	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "", nil, nil)
+	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "", nil, nil,
+		WithConformancePolicy(NewConformancePolicy(EnforcementStrict)))
 	req := cdsRequest(hook)
 	res, err := n.Handle(context.Background(), leg, "corr", "pci", req)
 	if err != nil {
@@ -212,23 +230,29 @@ func TestNativeCRD_MalformedEnvelopeRefused(t *testing.T) {
 			t.Errorf("no refusal row for rule %s", rule.ID)
 		}
 	}
+	for _, leg := range []string{"crd-order-select", "crd-order-dispatch"} {
+		t.Run(leg+"/valid control", func(t *testing.T) {
+			answer := []byte(withCard(crdCard))
+			status, body, _ := nativeCRDPolicyCase(t, leg, answer)
+			if status != 202 || !bytes.Equal(body, answer) {
+				t.Fatalf("valid control status=%d body=%s", status, body)
+			}
+		})
+	}
 	for _, r := range rows {
 		for _, leg := range []string{"crd-order-select", "crd-order-dispatch"} {
 			t.Run(leg+"/"+r.rule, func(t *testing.T) {
-				hook := "order-sign"
-				if leg == "crd-order-dispatch" {
-					hook = "order-dispatch"
-				}
 				if v := shnsdk.CheckCDSHooksResponse([]byte(r.answer), "2.2"); !slices.ContainsFunc(v, func(v shnsdk.Violation) bool { return v.Rule == r.rule }) {
 					t.Fatalf("the row does not break %s: %v", r.rule, v)
 				}
-				res, p, _ := relayCase(t, leg, hook, "application/json", []byte(r.answer))
-				const prefix = "payer CRD response is not a valid CDS Hooks response: "
-				if res.Status != http.StatusBadGateway || !strings.HasPrefix(res.Message, prefix) || !strings.Contains(res.Message, r.rule) {
-					t.Fatalf("got %d %q", res.Status, res.Message)
+				status, body, p := nativeCRDPolicyCase(t, leg, []byte(r.answer))
+				wantRule := map[string]string{"response.json": "json.duplicate_key", "response.object": "json.object", "response.cards": "response.cards", "card.object": "card.object"}[r.rule]
+				if wantRule == "" {
+					wantRule = "cds.response"
 				}
-				if res.Response.Ownership() != 0 {
-					t.Fatal("the refusal carries the payer's answer")
+				var carrier map[string]any
+				if status != http.StatusBadGateway || json.Unmarshal(body, &carrier) != nil || len(carrier) != 5 || carrier["category"] != "conformance_invalid" || carrier["rule"] != wantRule || carrier["gateway"] != "payer" || carrier["level"] != "strict" || carrier["direction"] != "response" {
+					t.Fatalf("mutation=%s actual status=%d carrier=%s; want502 invalid %s (original invalidity obligation retained)", r.rule, status, body, wantRule)
 				}
 				if p.sentAny() != 1 {
 					t.Fatalf("%d requests reached the payer, want 1", p.sentAny())
@@ -236,19 +260,25 @@ func TestNativeCRD_MalformedEnvelopeRefused(t *testing.T) {
 			})
 		}
 	}
-	t.Run("the refusal names where each rule is broken", func(t *testing.T) {
+	t.Run("active checker retains subrule paths", func(t *testing.T) {
 		answer := withCard(`{"summary":"s","indicator":"info","source":{}}`)
-		res, _, _ := relayCase(t, "crd-order-select", "order-sign", "application/json", []byte(answer))
-		want := "payer CRD response is not a valid CDS Hooks response: card.source.label at cards[0].source.label; card.source.topic at cards[0].source.topic"
-		if res.Message != want {
-			t.Fatalf("message %q\nwant %q", res.Message, want)
+		violations := shnsdk.CheckCDSHooksResponse([]byte(answer), "2.0")
+		for _, want := range []shnsdk.Violation{{Rule: "card.source.label", Path: "cards[0].source.label", Severity: shnsdk.SeverityError}, {Rule: "card.source.topic", Path: "cards[0].source.topic", Severity: shnsdk.SeverityError}} {
+			if !slices.Contains(violations, want) {
+				t.Fatalf("missing %+v in %+v", want, violations)
+			}
 		}
 	})
-	t.Run("a long list is shortened", func(t *testing.T) {
+	t.Run("registered policy bounds a long list", func(t *testing.T) {
 		cards := strings.TrimSuffix(strings.Repeat(`"x",`, 7), ",")
-		res, _, _ := relayCase(t, "crd-order-select", "order-sign", "application/json", []byte(`{"cards":[`+cards+`]}`))
-		if !strings.HasSuffix(res.Message, "; and 2 more") || strings.Count(res.Message, "card.object") != 5 {
-			t.Fatalf("message %q", res.Message)
+		answer := []byte(`{"cards":[` + cards + `]}`)
+		if got := shnsdk.CheckCDSHooksResponse(answer, "2.0"); len(got) != 7 {
+			t.Fatalf("expected seven independent card violations: %+v", got)
+		}
+		status, body, _ := nativeCRDPolicyCase(t, "crd-order-select", answer)
+		want := `{"category":"conformance_invalid","rule":"card.object","gateway":"payer","level":"strict","direction":"response"}`
+		if status != 502 || string(body) != want {
+			t.Fatalf("status=%d carrier=%s; want bounded safe carrier %s", status, body, want)
 		}
 	})
 }
@@ -336,10 +366,15 @@ func TestNativeCRD_EmbeddedValidationObservesOnly(t *testing.T) {
 			t.Run(tail.leg+"/"+verdict.name, func(t *testing.T) {
 				g, requester := newInboundTestGateway(t, true)
 				p := newCDSPayer(t, referencePayerServices...)
-				g.cfg.Responder = NewNativeResponder(p.srv.Client(), p.srv.URL, "", nil, nil)
+				g.cfg.Responder = NewNativeResponder(p.srv.Client(), p.srv.URL, "", nil, nil,
+					WithDeclaredContractVersions([]string{"pa.crd@2.0"}),
+					WithNativeResponseDeclarations(declaredCDSFixtureOutput(t, p.srv.URL)),
+					WithConformancePolicy(NewConformancePolicy(EnforcementObserve)))
+				g.cfg.ConformanceEnforcement = EnforcementObserve
+				g.startCertification()
 				var mu sync.Mutex
 				var validated [][]byte
-				g.cfg.Validator = validatorFunc(func(b []byte) (shnsdk.Result, error) {
+				g.cfg.Validator = syntheticEvidenceValidatorFunc(func(b []byte) (shnsdk.Result, error) {
 					mu.Lock()
 					validated = append(validated, bytes.Clone(b))
 					mu.Unlock()
@@ -355,7 +390,13 @@ func TestNativeCRD_EmbeddedValidationObservesOnly(t *testing.T) {
 				env := shnsdk.Envelope{}
 				env.Metadata.CorrelationID, env.Metadata.Sender = "corr-1", requester.ID
 				rec := httptest.NewRecorder()
-				tail.handle(g, rec, newSignedInboundRequest(t, g, requester.ID), env, shnsdk.Token{Subject: pci})
+				r := newSignedInboundRequest(t, g, requester.ID)
+				r = r.WithContext(context.WithValue(r.Context(), nativeExchangeKey{}, ExchangeContext{
+					holder: requester.ID, recipient: g.cfg.HolderID, legType: tail.leg,
+					subjectPCI: pci, correlationID: env.Metadata.CorrelationID,
+					contractVersion: "pa.crd@2.0", policy: g.policy(),
+				}))
+				tail.handle(g, rec, r, env, shnsdk.Token{Subject: pci})
 				if rec.Code != http.StatusOK {
 					t.Fatalf("status %d %s", rec.Code, rec.Body.String())
 				}
@@ -363,32 +404,62 @@ func TestNativeCRD_EmbeddedValidationObservesOnly(t *testing.T) {
 				if err != nil || hdr.Status != http.StatusOK || !bytes.Equal(body, answer) {
 					t.Fatalf("the requester got %v %d %s", err, hdr.Status, body)
 				}
+				observationFlush(t, g)
 				var embedded []byte
 				for _, b := range validated {
 					if bytes.Contains(b, []byte(covInfo)) {
 						embedded = b
 					}
 				}
-				if !bytes.Contains(answer, embedded) || len(embedded) == 0 || embedded[0] != '{' {
+				if len(embedded) == 0 || embedded[0] != '{' {
 					t.Fatalf("the embedded order was not validated as sent: %s", embedded)
 				}
-				var got []crdEmbeddedValidation
+				var gotResource, answerDoc map[string]any
+				if err := json.Unmarshal(embedded, &gotResource); err != nil {
+					t.Fatal(err)
+				}
+				if err := json.Unmarshal(answer, &answerDoc); err != nil {
+					t.Fatal(err)
+				}
+				actions, _ := answerDoc["systemActions"].([]any)
+				if len(actions) != 1 {
+					t.Fatalf("expected one system action, got %d", len(actions))
+				}
+				// Compare decoded JSON values without reflection beside relay's
+				// opaque payload type; the exact full answer is asserted above.
+				gotJSON, err := json.Marshal(gotResource)
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantJSON, err := json.Marshal(actions[0].(map[string]any)["resource"])
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(gotJSON, wantJSON) {
+					t.Fatalf("checker saw a different embedded resource: %s", embedded)
+				}
+				wantState := CheckState(verdict.outcome)
+				found := false
 				for _, e := range events {
-					if e.Kind != CRDEmbeddedValidatedEvent {
+					if e.Kind != ConformanceObservedEvent {
 						continue
 					}
-					if e.LegType != tail.leg || e.CorrelationID != "corr-1" || len(e.Payload) != 0 {
-						t.Errorf("event %+v", e)
-					}
-					var v crdEmbeddedValidation
-					if err := json.Unmarshal([]byte(e.Detail), &v); err != nil {
+					var f ConformanceFinding
+					if err := json.Unmarshal([]byte(e.Detail), &f); err != nil {
 						t.Fatal(err)
 					}
-					got = append(got, v)
+					if f.Direction != "response" || f.Rule != "fhir.profile" {
+						continue
+					}
+					found = true
+					if f.State != wantState || f.LegType != tail.leg || f.CorrelationID != "corr-1" ||
+						f.Gateway != "payer" || f.Level != "observe" || f.Action != "not_enforced" ||
+						f.PayloadSHA256 != sha256hex(answer) {
+						t.Errorf("wrong response finding: %+v", f)
+					}
 				}
-				want := []crdEmbeddedValidation{{Path: "systemActions[0].resource", ResourceType: "DeviceRequest", Line: answerLineOr(context.Background(), "pa.crd"), Outcome: verdict.outcome}}
-				if !slices.Equal(got, want) {
-					t.Fatalf("recorded %+v, want %+v", got, want)
+				if !found {
+					t.Fatal("missing response profile observation")
 				}
 			})
 		}
@@ -397,9 +468,12 @@ func TestNativeCRD_EmbeddedValidationObservesOnly(t *testing.T) {
 		g, requester := newInboundTestGateway(t, true)
 		p := newCDSPayer(t, referencePayerServices...)
 		p.respond(http.StatusOK, "application/json", []byte(withCard(`{"summary":"s","indicator":"info"}`)))
-		g.cfg.Responder = NewNativeResponder(p.srv.Client(), p.srv.URL, "", nil, nil)
+		g.cfg.Responder = NewNativeResponder(p.srv.Client(), p.srv.URL, "", nil, nil,
+			WithDeclaredContractVersions([]string{"pa.crd@2.0"}),
+			WithNativeResponseDeclarations(declaredCDSFixtureOutput(t, p.srv.URL)),
+			WithConformancePolicy(NewConformancePolicy(EnforcementStrict)))
 		calls := 0
-		g.cfg.Validator = validatorFunc(func(b []byte) (shnsdk.Result, error) {
+		g.cfg.Validator = syntheticEvidenceValidatorFunc(func(b []byte) (shnsdk.Result, error) {
 			calls++
 			return shnsdk.Result{Valid: true}, nil
 		})
@@ -408,7 +482,13 @@ func TestNativeCRD_EmbeddedValidationObservesOnly(t *testing.T) {
 		env.Metadata.CorrelationID, env.Metadata.Sender = "corr-1", requester.ID
 		req := bytes.Replace(conformantCRD("MBR-COVERED", "72148"), []byte(`"order-select"`), []byte(`"order-sign"`), 1)
 		rec := httptest.NewRecorder()
-		g.handleCRDNativeInbound(rec, newSignedInboundRequest(t, g, requester.ID), env, shnsdk.Token{Subject: pci}, req, "")
+		r := newSignedInboundRequest(t, g, requester.ID)
+		r = r.WithContext(context.WithValue(r.Context(), nativeExchangeKey{}, ExchangeContext{
+			holder: requester.ID, recipient: g.cfg.HolderID, legType: "crd-order-select",
+			subjectPCI: pci, correlationID: env.Metadata.CorrelationID,
+			contractVersion: "pa.crd@2.0", policy: g.policy(),
+		}))
+		g.handleCRDNativeInbound(rec, r, env, shnsdk.Token{Subject: pci}, req, "")
 		hdr, _, err := shnsdk.DecodeHTTPFrame(openResponseLeg(t, requester, rec.Body.Bytes()))
 		if err != nil || hdr.Status != http.StatusBadGateway {
 			t.Fatalf("got %v %d", err, hdr.Status)
@@ -480,13 +560,13 @@ func TestCDSCertifierStructuralRulesRefuseAtNone(t *testing.T) {
 	}
 }
 
-// A responder the engine never wired still refuses at strict and never panics
-// when it emits.
+// A responder the engine never wired can still select strict explicitly and
+// never panics when it emits.
 func TestCDSCertifierUnwiredEmitterIsSafe(t *testing.T) {
-	got := certifyCDSHooksAnswer(context.Background(), ConformancePolicy{}, nil,
+	got := certifyCDSHooksAnswer(context.Background(), NewConformancePolicy(EnforcementStrict), nil,
 		[]byte(externalPayerDescriptionlessAnswer), "2.0", "peer")
 	if got.Status != http.StatusBadGateway {
-		t.Fatalf("an unwired responder is strict by the zero value, got %d", got.Status)
+		t.Fatalf("an unwired responder with an explicit strict policy must refuse, got %d", got.Status)
 	}
 }
 
@@ -567,7 +647,7 @@ func TestNewBindsFindingEmitterToNativeResponder(t *testing.T) {
 		AuthzPub:        authzPub,
 		HubTransportPub: authzPub,
 		Reg:             shnsdk.NewRegistry(),
-		Validator:       shnsdk.NewFakeValidator(),
+		Validator:       syntheticFakeValidator(),
 		SoR:             sor,
 		Store:           sor,
 		Responder:       n,
@@ -578,66 +658,137 @@ func TestNewBindsFindingEmitterToNativeResponder(t *testing.T) {
 	}
 }
 
-// TestForwardCRD_RelaysAtNoneWithOwnFinding drives forwardCRD through a REAL
-// engine.New-constructed payer gateway (not a bare Handle call): the
-// responder's WithConformancePolicy option and the emitter engine.New binds
-// to it must both actually take effect, and the finding forwardCRD emits
-// must say "own" — the certified bytes are this gateway's OWN backend
-// answering, never a peer's — not the "peer" value that is only correct at
-// the provider-ingress certifier (crdAnswerOutcome).
+// A real receiving gateway applies its registry around the HTTP responder.
+// Delivery is proved independently of optional findings about its own backend.
 func TestForwardCRD_RelaysAtNoneWithOwnFinding(t *testing.T) {
+	for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve} {
+		for _, missing := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/missing-description=%v", level, missing), func(t *testing.T) {
+				p := newCDSPayer(t, referencePayerServices...)
+				answer := []byte(externalPayerDescriptionlessAnswer)
+				wantState := CheckInvalid
+				if !missing {
+					answer = bytes.Replace(answer, []byte(`"type":"update",`), []byte(`"type":"update","description":"apply coverage",`), 1)
+					wantState = CheckValid
+				}
+				violations := shnsdk.CheckCDSHooksResponse(answer, "2.0")
+				errorsFound := 0
+				for _, v := range violations {
+					if v.Severity == shnsdk.SeverityError {
+						errorsFound++
+						if v.Rule != "action.description" {
+							t.Fatalf("unrelated mutation: %+v", v)
+						}
+					}
+				}
+				if (errorsFound == 1) != missing {
+					t.Fatalf("control-minus-description: missing=%v violations=%+v", missing, violations)
+				}
+				p.respond(http.StatusAccepted, "application/json; charset=utf-8", answer)
+				gw, requester := newInboundTestGatewayWithPolicy(t, true, level)
+				var mu sync.Mutex
+				calls := 0
+				gw.cfg.Validator = syntheticEvidenceValidatorFunc(func([]byte) (shnsdk.Result, error) {
+					mu.Lock()
+					calls++
+					mu.Unlock()
+					return shnsdk.Result{Valid: true}, nil
+				})
+				gw.cfg.SoR = nativeReadPanicSoR{}
+				gw.cfg.Responder = NewNativeResponder(p.srv.Client(), p.srv.URL, "", nil, nil, WithDeclaredContractVersions([]string{"pa.crd@2.0"}), WithNativeResponseDeclarations(declaredCDSFixtureOutput(t, p.srv.URL)))
+				env := shnsdk.Envelope{}
+				env.Metadata.CorrelationID, env.Metadata.Sender = "corr-own", requester.ID
+				req := conformantCRD("MBR-COVERED", "72148")
+				r := newSignedInboundRequest(t, gw, requester.ID)
+				ex := ExchangeContext{holder: requester.ID, recipient: "payer", legType: "crd-order-select", operation: "crd-order-select", subjectPCI: "explicit-synthetic-subject", correlationID: "corr-own", contractVersion: "pa.crd@2.0", policy: gw.policy()}
+				r = r.WithContext(context.WithValue(r.Context(), nativeExchangeKey{}, ex))
+				rec := httptest.NewRecorder()
+				gw.handleNativeInbound(rec, r, "crd-order-select", env, shnsdk.Token{Subject: ex.subjectPCI}, req, "")
+				if rec.Code != 200 {
+					t.Fatalf("sealed response: %d %s", rec.Code, rec.Body.String())
+				}
+				hdr, body, err := shnsdk.DecodeHTTPFrame(openResponseLeg(t, requester, rec.Body.Bytes()))
+				if err != nil || hdr.Status != 202 || hdr.Headers["Content-Type"] != "application/json; charset=utf-8" || !bytes.Equal(body, answer) || p.sentAny() != 1 {
+					t.Fatalf("delivery: frame=%+v err=%v body=%q backend=%d", hdr, err, body, p.sentAny())
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				defer cancel()
+				if err := gw.WaitObserverCompletion(ctx); err != nil {
+					t.Fatal(err)
+				}
+				findings, dropped := gw.ConformanceObservationsForTest()
+				if dropped != 0 {
+					t.Fatalf("optional evidence lost: %d", dropped)
+				}
+				mu.Lock()
+				n := calls
+				mu.Unlock()
+				if level == EnforcementNone {
+					if len(findings) != 0 || n != 0 {
+						t.Fatalf("none work: checker=%d findings=%+v", n, findings)
+					}
+					return
+				}
+				found := false
+				for _, f := range findings {
+					if f.Rule == "cds.response" && f.Direction == "response" {
+						if f.Gateway != "payer" || f.PayloadSHA256 != sha256hex(answer) || f.State != wantState || f.Action != "not_enforced" || f.Level != "observe" || f.Decision != "" {
+							t.Fatalf("backend finding=%+v", f)
+						}
+						if missing && !slices.ContainsFunc(f.CheckIssues, func(i CheckIssue) bool { return i.Severity == "error" && i.Code == "validator-result" }) {
+							t.Fatalf("specific mutation missing: %+v", f)
+						}
+						found = true
+					}
+				}
+				if !found || n == 0 {
+					t.Fatalf("response check not executed: calls=%d findings=%+v", n, findings)
+				}
+			})
+		}
+	}
+}
+
+// nativeCRDPolicyCase traverses the real response policy and sealed reply path.
+// The caller supplies the backend's bytes independently of the request context.
+func nativeCRDPolicyCase(t *testing.T, leg string, answer []byte) (int, []byte, *cdsPayer) {
+	t.Helper()
 	p := newCDSPayer(t, referencePayerServices...)
-	p.respond(http.StatusOK, "application/json", []byte(externalPayerDescriptionlessAnswer))
-
-	authzPub, _ := genED25519(t)
-	_, paySignPriv := genED25519(t)
-	payEncPub, payEncPriv := genKeyPair(t)
-	sor := newCensusSoR()
-	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "", nil, nil,
-		WithConformancePolicy(NewConformancePolicy(EnforcementNone)))
-	gw := mustNew(t, Config{
-		Role:            "payer",
-		HolderID:        "payer",
-		Identity:        shnsdk.Identity{HolderID: "payer", SignPriv: paySignPriv, EncPub: payEncPub, EncPriv: payEncPriv},
-		AuthzURL:        "http://stub.test",
-		AuthzPub:        authzPub,
-		HubTransportPub: authzPub,
-		Reg:             shnsdk.NewRegistry(),
-		Validator:       shnsdk.NewFakeValidator(),
-		SoR:             sor,
-		Store:           sor,
-		Responder:       n,
-		Clock:           func() time.Time { return time.Unix(1700000000, 0).UTC() },
-	})
-	var events []ObserverEvent
-	gw.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
-
-	res, err := n.Handle(context.Background(), "crd-order-select", "corr-own", "pci", cdsRequest("order-sign"))
-	if err != nil {
-		t.Fatalf("Handle: %v", err)
-	}
-	if res.Status != 0 {
-		t.Fatalf("at none the payer's own backend's malformed answer must still relay, got %d %s", res.Status, res.Message)
-	}
-	if got := relay.BytesForTest(res.Response); !bytes.Equal(got, []byte(externalPayerDescriptionlessAnswer)) {
-		t.Fatalf("answer changed:\n got %s\nwant %s", got, externalPayerDescriptionlessAnswer)
-	}
-	var found bool
-	for _, e := range events {
-		if e.Kind != ConformanceObservedEvent {
-			continue
+	p.respond(202, "application/json", answer)
+	g, requester := newInboundTestGatewayWithPolicy(t, true, EnforcementStrict)
+	g.cfg.Responder = NewNativeResponder(p.srv.Client(), p.srv.URL, "", nil, nil, WithDeclaredContractVersions([]string{"pa.crd@2.0"}), WithNativeResponseDeclarations(declaredCDSFixtureOutput(t, p.srv.URL)))
+	subject := coveredPCI(t, g)
+	ex := ExchangeContext{holder: requester.ID, recipient: "payer", legType: leg, operation: leg, subjectPCI: subject, correlationID: "crd-policy-corpus", contractVersion: "pa.crd@2.0", policy: g.policy()}
+	r := newSignedInboundRequest(t, g, requester.ID)
+	r = r.WithContext(context.WithValue(r.Context(), nativeExchangeKey{}, ex))
+	request := conformantCRD("MBR-COVERED", "72148")
+	if leg == "crd-order-dispatch" {
+		// This response corpus must enter through a complete dispatch request:
+		// merely changing order-select's hook leaves its context invalid and
+		// preempts every answer-shape mutation with cds.request.context.
+		var payload map[string]any
+		if err := json.Unmarshal(request, &payload); err != nil {
+			t.Fatal(err)
 		}
-		if strings.Contains(e.Detail, `"rule":"action.description"`) {
-			found = true
-			if !strings.Contains(e.Detail, `"whose":"own"`) {
-				t.Fatalf("forwardCRD's finding must say whose=own (this gateway's own backend), got: %s", e.Detail)
-			}
-			if !strings.Contains(e.Detail, `"decision":"relayed"`) || !strings.Contains(e.Detail, `"level":"none"`) {
-				t.Fatalf("finding must record relayed/none, got: %s", e.Detail)
-			}
+		payload["hook"] = "order-dispatch"
+		payload["context"] = map[string]any{"patientId": "MBR-COVERED", "dispatchedOrders": []string{"ServiceRequest/sr1"}, "performer": "Organization/o1"}
+		var err error
+		request, err = json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
 		}
+	} else {
+		request = bytes.Replace(request, []byte(`"order-select"`), []byte(`"order-sign"`), 1)
 	}
-	if !found {
-		t.Fatal("no cds-envelope finding observed for action.description")
+	env := shnsdk.Envelope{Metadata: shnsdk.Metadata{Sender: requester.ID, CorrelationID: ex.correlationID}}
+	rec := httptest.NewRecorder()
+	g.handleNativeInbound(rec, r, leg, env, shnsdk.Token{Subject: subject}, request, "")
+	if rec.Code != 200 {
+		t.Fatalf("transport status=%d body=%s", rec.Code, rec.Body.String())
 	}
+	hdr, body, err := shnsdk.DecodeHTTPFrame(openResponseLeg(t, requester, rec.Body.Bytes()))
+	if err != nil || p.sentAny() != 1 {
+		t.Fatalf("frame=%+v err=%v backend=%d body=%s", hdr, err, p.sentAny(), body)
+	}
+	return hdr.Status, body, p
 }

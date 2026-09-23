@@ -48,6 +48,9 @@ func checkValidatorLaneURL(name, base string) error {
 func discoverValidatorLanes(ctx context.Context, getenv func(string) string, declared []string, canonical shnsdk.Validator, cfg config, resolve func(string) string, qualify engine.LaneQualifier) (map[string]shnsdk.Validator, *laneManager, error) {
 	startup, cancel := context.WithTimeout(ctx, defaultLaneStartupBudget)
 	m := &laneManager{defaults: map[string]*engine.DiscoveredLane{}, fallbacks: map[string]bool{}, cancel: cancel}
+	if cfg.ConformanceEnforcement == engine.EnforcementNone {
+		return map[string]shnsdk.Validator{}, m, nil
+	}
 	fail := func(err error) (map[string]shnsdk.Validator, *laneManager, error) { m.Close(); return nil, nil, err }
 	linesPerContract := map[string]map[string]bool{}
 	for _, tok := range shnsdk.NativeContractVersions() {
@@ -56,13 +59,6 @@ func discoverValidatorLanes(ctx context.Context, getenv func(string) string, dec
 			linesPerContract[contract] = map[string]bool{}
 		}
 		linesPerContract[contract][line] = true
-	}
-	required := map[string]bool{}
-	for _, tok := range declared {
-		contract, line, _ := strings.Cut(tok, "@")
-		if len(linesPerContract[contract]) > 1 {
-			required[line] = true
-		}
 	}
 	supplied := cfg
 	for _, entry := range []struct {
@@ -123,21 +119,9 @@ func discoverValidatorLanes(ctx context.Context, getenv func(string) string, dec
 		emit(state)
 		return err
 	}
-	// Declared defaults finish before admission. Explicit overrides retain their
-	// existing URL-only startup behavior and never enter this qualification path.
-	for _, line := range []string{"2.1", "2.2"} {
-		d := m.defaults[line]
-		if d == nil || !required[line] {
-			continue
-		}
-		if err := qualifyLane(line, d); err != nil {
-			return fail(fmt.Errorf("gateway: declared validator line %s at %s failed qualification: %w", line, resolve(line), err))
-		}
-	}
+	// Qualification is optional background work at every level. A strict
+	// operation refuses only when its required checker is unavailable.
 	for line, d := range m.defaults {
-		if required[line] {
-			continue
-		}
 		m.workers.Add(1)
 		go func() { defer m.workers.Done(); _ = qualifyLane(line, d) }()
 	}

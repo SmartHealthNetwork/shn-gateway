@@ -172,7 +172,7 @@ func TestMemReplayStore_ShippedCeilingAndScopes(t *testing.T) {
 	if !ok {
 		t.Fatalf("NewInMemoryReplayStore returned %T, not the in-memory mirror", NewInMemoryReplayStore())
 	}
-	for _, scope := range []string{ReplayScopeIngressJTI, ReplayScopeHubJTI, ReplayScopePatientAccess} {
+	for _, scope := range []string{ReplayScopeIngressContext, ReplayScopeIngressJTI, ReplayScopeHubJTI, ReplayScopePatientAccess} {
 		sc, ok := s.scopes[scope]
 		if !ok {
 			t.Fatalf("scope %q has no record set", scope)
@@ -181,8 +181,8 @@ func TestMemReplayStore_ShippedCeilingAndScopes(t *testing.T) {
 			t.Fatalf("scope %q ceiling = %d, want memReplayMaxEntries (%d)", scope, sc.max, memReplayMaxEntries)
 		}
 	}
-	if len(s.scopes) != 3 {
-		t.Fatalf("record sets = %d, want exactly the 3 engine scopes", len(s.scopes))
+	if len(s.scopes) != 4 {
+		t.Fatalf("record sets = %d, want exactly the 4 engine scopes", len(s.scopes))
 	}
 }
 
@@ -271,3 +271,19 @@ func (s *stubReplayStore) CheckAndRecord(string, string, string, time.Time, time
 }
 
 var _ ReplayStore = (*stubReplayStore)(nil)
+
+func TestMemReplayStore_IngressContextScope(t *testing.T) {
+	s := NewInMemoryReplayStore()
+	now := ingressFixedClock()()
+	exp := now.Add(time.Minute)
+	for _, scope := range []string{ReplayScopeIngressContext, ReplayScopeIngressJTI} {
+		for _, client := range []string{"source", "other"} {
+			if memCheck(t, s, scope, client, "same-jti", now, exp) {
+				t.Fatal("independent key already spent")
+			}
+			if !memCheck(t, s, scope, client, "same-jti", now, exp) {
+				t.Fatal("replayed context accepted")
+			}
+		}
+	}
+}

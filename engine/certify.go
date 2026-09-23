@@ -3,13 +3,8 @@ package engine
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"log"
 	"net"
 	"net/http"
 	"sync"
@@ -60,30 +55,24 @@ type CertificationEvidence struct {
 }
 
 type certificationJob struct {
-	evidence CertificationEvidence
+	input    *CheckInput
+	authored *authoredValidationTarget
 	payload  []byte
 	queued   time.Time
 	sequence uint64
+	reserved int
 }
-type certificationNotice struct {
-	evidence CertificationEvidence
-	sequence uint64
-}
-
 type certificationWorker struct {
-	notices              []certificationNotice
-	wake                 chan struct{}
-	droppedNotifications uint64
-	mu                   sync.Mutex
-	queue                []certificationJob
-	ctx                  context.Context
-	cancel               context.CancelFunc
-	done                 chan struct{}
-	changed              chan struct{}
-	accepted, completed  uint64
-	closed               bool
-	ring                 []CertificationEvidence
-	validators           map[string]shnsdk.Validator
+	wake                         chan struct{}
+	mu                           sync.Mutex
+	queue                        []certificationJob
+	ctx                          context.Context
+	cancel                       context.CancelFunc
+	done                         chan struct{}
+	changed                      chan struct{}
+	accepted, completed, dropped uint64
+	closed                       bool
+	findings                     []ConformanceFinding
 }
 
 // DisableCertificationForTest leaves exchanges intact while suppressing evidence
@@ -92,8 +81,8 @@ func DisableCertificationForTest(c *Config) { c.certificationDisabled = true }
 
 // CloseCertificationClients releases every certification client: a gated
 // client's background qualification loop is stopped and joined, and each
-// client's connection pool is released. It is what the worker's shutdown runs,
-// and what an embedder that built clients but no worker must run.
+// client's connection pool is released. New retires these legacy dedicated
+// clients; embedders that construct them without New must close them themselves.
 func CloseCertificationClients(clients map[string]shnsdk.Validator) {
 	for _, v := range clients {
 		switch c := v.(type) {
@@ -110,24 +99,22 @@ func CloseCertificationClients(clients map[string]shnsdk.Validator) {
 }
 
 func (g *Gateway) startCertification() {
-	if g.cfg.certificationDisabled {
+	CloseCertificationClients(g.cfg.CertificationValidatorsByLine)
+	if g.cfg.certificationDisabled || g.policy().Level() == EnforcementNone || g.policy().Level() == EnforcementStrict {
 		// No worker will own the clients: stop any gated loop now.
-		CloseCertificationClients(g.cfg.CertificationValidatorsByLine)
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	w := &certificationWorker{queue: make([]certificationJob, 0, certificationQueueCapacity), notices: make([]certificationNotice, 0, certificationRingCapacity), wake: make(chan struct{}, 1), ctx: ctx, cancel: cancel, done: make(chan struct{}), changed: make(chan struct{}), validators: make(map[string]shnsdk.Validator)}
-	for line, v := range g.cfg.CertificationValidatorsByLine {
-		w.validators[line] = v
-	}
+	w := &certificationWorker{queue: make([]certificationJob, 0, certificationQueueCapacity), wake: make(chan struct{}, 1), ctx: ctx, cancel: cancel, done: make(chan struct{}), changed: make(chan struct{})}
 	g.certification = w
 	go g.runCertification(w)
 }
 
-// Close cancels observation HTTP work and joins the single owned worker.
-// Observer callbacks are cooperative: they must return promptly. Owners stop
-// serving requests before closing and release callback barriers before joining.
+// Close cancels queued work and returns within the collection bound. Callback
+// completion remains independently observable through WaitObserverCompletion.
+// Owners stop serving before Close. A custom checker must honor context.
 func (g *Gateway) Close() error {
+	g.closeObserver()
 	w := g.certification
 	if w == nil {
 		return nil
@@ -135,60 +122,43 @@ func (g *Gateway) Close() error {
 	w.mu.Lock()
 	w.closed = true
 	w.cancel()
+	for _, job := range w.queue {
+		g.observationMemory.release(job.reserved)
+		w.dropped++
+	}
+	w.queue = nil
+	close(w.changed)
+	w.changed = make(chan struct{})
 	w.mu.Unlock()
-	<-w.done
-	return nil
+	select {
+	case <-w.done:
+		return nil
+	case <-time.After(certificationCollectionTimeout):
+		return context.DeadlineExceeded
+	}
 }
 
-func (g *Gateway) enqueueCertification(job certificationJob) {
+func (g *Gateway) enqueueObservation(job certificationJob) bool {
 	w := g.certification
 	if w == nil {
-		return
+		return false
 	}
-	e := job.evidence
-	e.Mode = "evidence"
-	e.Species = detectSpecies(job.payload)
-	e.Candidates = candidateOrder(e.Species, job.payload)
-	if len(e.Candidates) == 0 {
-		return
-	}
-	hash := sha256.Sum256(job.payload)
-	e.PayloadSHA256 = hex.EncodeToString(hash[:])
-	e.Certified = []string{}
-	e.Verdicts = []LaneVerdict{}
-	if _, ok := shnsdk.PASLineDef(e.TargetLine); !ok {
-		e.TargetLine = ""
-	}
-	job.evidence = e
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	reason := ""
-	switch {
-	case w.closed:
-		reason = "certification closed"
-	case len(job.payload) > shnsdk.MaxRequestBytes:
-		reason = "payload exceeds observation limit"
-	case len(w.queue) == cap(w.queue):
-		reason = "certification queue full"
+	if w.closed || len(job.payload) > observationMessageLimit || len(w.queue) == certificationQueueCapacity || !g.observationMemory.reserve(len(job.payload)) {
+		w.dropped++
+		return false
 	}
-	if reason != "" {
-		e = certificationUnavailable(e, "unavailable", reason)
-		if !w.closed {
-			if len(w.notices) < cap(w.notices) {
-				w.accepted++
-				w.notices = append(w.notices, certificationNotice{evidence: e, sequence: w.accepted})
-				w.signalLocked()
-			} else {
-				w.droppedNotifications++
-				for i := range e.Verdicts {
-					e.Verdicts[i].Error += fmt.Sprintf("; observer notifications dropped=%d", w.droppedNotifications)
-				}
-			}
-		}
-		w.storeLocked(e)
-		return
-	}
+	job.reserved = len(job.payload)
 	job.payload = bytes.Clone(job.payload)
+	if job.input != nil {
+		in := *job.input
+		in.Body = job.payload
+		in.decoded = nil
+		in.evidence = nil
+		in.Exchange.boundary = append([]BoundaryCompletion(nil), in.Exchange.boundary...)
+		job.input = &in
+	}
 	if job.queued.IsZero() {
 		job.queued = time.Now()
 	}
@@ -196,127 +166,45 @@ func (g *Gateway) enqueueCertification(job certificationJob) {
 	job.sequence = w.accepted
 	w.queue = append(w.queue, job)
 	w.signalLocked()
+	return true
 }
 
-func certificationUnavailable(e CertificationEvidence, state, reason string) CertificationEvidence {
-	for _, line := range e.Candidates {
-		profile, _ := profileFor(e.Species, line, e.LegType)
-		e.Verdicts = append(e.Verdicts, LaneVerdict{Line: line, Profile: profile, State: state, Error: reason, Issues: []string{}})
-	}
-	return e
-}
-func (w *certificationWorker) storeLocked(e CertificationEvidence) {
-	if len(w.ring) == certificationRingCapacity {
-		copy(w.ring, w.ring[1:])
-		w.ring[len(w.ring)-1] = e
-	} else {
-		w.ring = append(w.ring, e)
-	}
-}
 func (g *Gateway) runCertification(w *certificationWorker) {
 	defer close(w.done)
-	defer func() {
-		CloseCertificationClients(w.validators)
-	}()
 	for {
-		var job certificationJob
-		var notice certificationNotice
 		w.mu.Lock()
-		if len(w.queue) == 0 && len(w.notices) == 0 {
-			closed := w.closed
+		if w.closed {
 			w.mu.Unlock()
-			if closed {
-				return
-			}
+			return
+		}
+		if len(w.queue) == 0 {
+			w.mu.Unlock()
 			select {
 			case <-w.wake:
 			case <-w.ctx.Done():
 			}
 			continue
 		}
-		isNotice := len(w.notices) > 0 && (len(w.queue) == 0 || w.notices[0].sequence < w.queue[0].sequence)
-		if isNotice {
-			notice = w.notices[0]
-			copy(w.notices, w.notices[1:])
-			w.notices[len(w.notices)-1] = certificationNotice{}
-			w.notices = w.notices[:len(w.notices)-1]
-		} else {
-			job = w.queue[0]
-			copy(w.queue, w.queue[1:])
-			w.queue[len(w.queue)-1] = certificationJob{}
-			w.queue = w.queue[:len(w.queue)-1]
-		}
+		job := w.queue[0]
+		copy(w.queue, w.queue[1:])
+		w.queue[len(w.queue)-1] = certificationJob{}
+		w.queue = w.queue[:len(w.queue)-1]
 		w.mu.Unlock()
-		e, sequence := notice.evidence, notice.sequence
-		if !isNotice {
-			e = g.collectCertification(w, job)
-			sequence = job.sequence
-			w.mu.Lock()
-			w.storeLocked(e)
-			w.mu.Unlock()
-		}
-		raw, _ := json.Marshal(e)
-		log.Printf("certify: %s", raw)
-		g.observe(ObserverEvent{Kind: "leg.certified", LegType: e.LegType, Direction: e.Direction, CorrelationID: e.CorrelationID, Detail: string(raw)})
+		func() {
+			defer func() {
+				if recover() != nil {
+					g.recordObservation(w, ConformanceFinding{Kind: ConformanceObservedEvent, State: CheckUnavailable, Action: "not_enforced", Rule: "observation", Issues: []string{"checker_panic"}})
+				}
+			}()
+			g.collectObservation(w, job)
+		}()
+		g.observationMemory.release(job.reserved)
 		w.mu.Lock()
-		w.completed = sequence
+		w.completed = job.sequence
 		close(w.changed)
 		w.changed = make(chan struct{})
 		w.mu.Unlock()
 	}
-}
-func (g *Gateway) collectCertification(w *certificationWorker, job certificationJob) CertificationEvidence {
-	e := job.evidence
-	deadline := job.queued.Add(certificationQueueMaxAge)
-	if now := time.Now().Add(certificationCollectionTimeout); now.Before(deadline) {
-		deadline = now
-	}
-	ctx, cancel := context.WithDeadline(w.ctx, deadline)
-	defer cancel()
-	for _, line := range e.Candidates {
-		profile, ok := profileFor(e.Species, line, e.LegType)
-		v := LaneVerdict{Line: line, Profile: profile, Issues: []string{}}
-		switch {
-		case ctx.Err() != nil:
-			v.State = "expired"
-			v.Error = ctx.Err().Error()
-		case !ok:
-			v.State = "unavailable"
-			v.Error = "unsupported certification profile"
-		case w.validators[line] == nil:
-			v.State = "unavailable"
-			v.Error = "certification validator unavailable"
-		default:
-			candidate, cancel := context.WithTimeout(ctx, certificationCandidateTimeout)
-			result, err := w.validators[line].Validate(candidate, job.payload, profile)
-			contextErr := candidate.Err()
-			cancel()
-			v.Issues = certificationIssueMetadata(result.Issues)
-			var noLane *CertificationLaneUnavailable
-			switch {
-			case contextErr != nil:
-				v.State = "expired"
-				v.Error = contextErr.Error()
-			case errors.As(err, &noLane):
-				// Authored text, not a server's bytes: recorded as written so the
-				// evidence says which lane is missing.
-				v.State = "unavailable"
-				v.Error = err.Error()
-			case err != nil:
-				v.State = "unavailable"
-				v.Error = certificationErrorMetadata(err)
-			case result.Valid:
-				v.State = "valid"
-				v.Valid = true
-				e.Certified = append(e.Certified, line)
-			default:
-				v.State = "invalid"
-			}
-		}
-		e.Verdicts = append(e.Verdicts, v)
-	}
-	e.SourceLine = certificationSource(e.Certified, e.TargetLine)
-	return e
 }
 
 // External diagnostic strings can contain entire foreign resources. Retain only
@@ -325,58 +213,38 @@ func certificationIssueMetadata(issues []string) []string {
 	if len(issues) == 0 {
 		return []string{}
 	}
-	hash := sha256.New()
-	var size uint64
-	for _, issue := range issues {
-		size += uint64(len(issue))
-		fmt.Fprintf(hash, "%d:", len(issue))
-		io.WriteString(hash, issue)
-	}
-	return []string{fmt.Sprintf("validator issues count=%d bytes=%d sha256=%x", len(issues), size, hash.Sum(nil))}
-}
-func certificationErrorMetadata(err error) string {
-	raw := err.Error()
-	hash := sha256.Sum256([]byte(raw))
-	return fmt.Sprintf("validator error bytes=%d sha256=%x", len(raw), hash)
+	return []string{fmt.Sprintf("validator_issues count=%d", len(issues))}
 }
 
-// CertificationEvidenceForTest returns the oldest-first bounded ring with all
-// nested slices copied; callers cannot mutate retained completion records.
-// CertificationClientForTest returns the certification client wired for line,
-// nil when the line has none.
-func (g *Gateway) CertificationClientForTest(line string) shnsdk.Validator {
-	if g.certification == nil {
-		return nil
-	}
-	g.certification.mu.Lock()
-	defer g.certification.mu.Unlock()
-	return g.certification.validators[line]
-}
+// CertificationEvidenceForTest is retained for source compatibility. Native
+// observations no longer probe candidate IG lines or infer a source line.
+// Use ConformanceObservationsForTest for the actual registry findings.
+func (g *Gateway) CertificationEvidenceForTest() []CertificationEvidence { return nil }
 
-func (g *Gateway) CertificationEvidenceForTest() []CertificationEvidence {
+// ConformanceObservationsForTest returns copied metadata and dropped job count.
+// An empty set is not a certification claim, including at none.
+func (g *Gateway) ConformanceObservationsForTest() ([]ConformanceFinding, uint64) {
 	w := g.certification
 	if w == nil {
-		return nil
+		return nil, 0
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	out := make([]CertificationEvidence, len(w.ring))
-	for i, e := range w.ring {
-		out[i] = e
-		out[i].Candidates = append([]string{}, e.Candidates...)
-		out[i].Certified = append([]string{}, e.Certified...)
-		out[i].Verdicts = append([]LaneVerdict{}, e.Verdicts...)
-		for j := range e.Verdicts {
-			out[i].Verdicts[j].Issues = append([]string{}, e.Verdicts[j].Issues...)
-		}
+	out := append([]ConformanceFinding(nil), w.findings...)
+	for i := range out {
+		out[i].Issues = append([]string(nil), out[i].Issues...)
+		out[i].CheckIssues = append([]CheckIssue(nil), out[i].CheckIssues...)
 	}
-	return out
+	return out, w.dropped
 }
 
 // FlushCertificationForTest waits for accepted jobs preceding its barrier,
 // including cooperative observer delivery. Cancellation is reported explicitly.
 func (g *Gateway) FlushCertificationForTest(ctx context.Context) error {
-	return g.waitCertification(ctx)
+	if err := g.waitCertification(ctx); err != nil {
+		return err
+	}
+	return g.waitObserver(ctx)
 }
 
 func (g *Gateway) waitCertification(ctx context.Context) error {
@@ -389,7 +257,7 @@ func (g *Gateway) waitCertification(ctx context.Context) error {
 	}
 	w.mu.Lock()
 	barrier := w.accepted
-	for w.completed < barrier {
+	for w.completed < barrier && !w.closed {
 		changed := w.changed
 		w.mu.Unlock()
 		select {
@@ -399,98 +267,19 @@ func (g *Gateway) waitCertification(ctx context.Context) error {
 		}
 		w.mu.Lock()
 	}
-	w.mu.Unlock()
+	defer w.mu.Unlock()
+	if w.dropped > 0 || w.completed < barrier {
+		return errors.New("observation incomplete")
+	}
 	return nil
 }
 
-// NewCertificationOperationValidator uses a dedicated bounded transport. Raw
-// server execution failures remain unavailable even when their OperationOutcome
-// parses as an invalid result under the separate routing client's contract.
+// NewCertificationOperationValidator uses a dedicated bounded transport. The
+// SDK's single decoder owns content interpretation and private response capture.
 func NewCertificationOperationValidator(endpoint string) *shnsdk.OperationValidator {
 	transport := &http.Transport{Proxy: http.ProxyFromEnvironment, DialContext: (&net.Dialer{Timeout: certificationCandidateTimeout, KeepAlive: 30 * time.Second}).DialContext, MaxIdleConns: 1, MaxIdleConnsPerHost: 1, MaxConnsPerHost: 1, IdleConnTimeout: 30 * time.Second, TLSHandshakeTimeout: certificationCandidateTimeout, ResponseHeaderTimeout: certificationCandidateTimeout}
-	return &shnsdk.OperationValidator{BaseURL: endpoint, Client: &http.Client{Transport: certificationTransport{transport}, Timeout: certificationCandidateTimeout}}
+	return &shnsdk.OperationValidator{BaseURL: endpoint, Client: &http.Client{Transport: transport, Timeout: certificationCandidateTimeout}}
 }
-
-type certificationTransport struct{ inner *http.Transport }
-
-func (t certificationTransport) CloseIdleConnections() { t.inner.CloseIdleConnections() }
-func (t certificationTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	response, err := t.inner.RoundTrip(r)
-	if err != nil {
-		return nil, err
-	}
-	raw, readErr := io.ReadAll(io.LimitReader(response.Body, shnsdk.MaxResponseBytes+1))
-	response.Body.Close()
-	if readErr != nil {
-		return nil, readErr
-	}
-	if len(raw) > shnsdk.MaxResponseBytes {
-		return nil, errors.New("certification response exceeds limit")
-	}
-	if response.StatusCode >= 500 {
-		return nil, &certificationHTTPError{status: response.StatusCode, reason: "server execution unavailable", raw: bytes.Clone(raw)}
-	}
-	var oo struct {
-		ResourceType string `json:"resourceType"`
-		Issue        []struct {
-			Severity    string `json:"severity"`
-			Diagnostics string `json:"diagnostics"`
-		} `json:"issue"`
-	}
-	if json.Unmarshal(raw, &oo) != nil || oo.ResourceType != "OperationOutcome" || oo.Issue == nil {
-		return nil, &certificationHTTPError{status: response.StatusCode, reason: "malformed OperationOutcome", raw: bytes.Clone(raw)}
-	}
-	for _, issue := range oo.Issue {
-		switch issue.Severity {
-		case "fatal", "error", "warning", "information":
-		default:
-			return nil, &certificationHTTPError{status: response.StatusCode, reason: "malformed issue severity", raw: bytes.Clone(raw)}
-		}
-	}
-	response.Body = io.NopCloser(bytes.NewReader(raw))
-	return response, nil
-}
-
-// certificationTargetKey carries a write-only observation of the selected token
-// through the existing dispatch; the collector never supplies a routing input.
-type certificationTargetKey struct{}
-
-// certificationPair certifies both halves of one exchange. responseNonconformance,
-// when non-empty, is carried on the RESPONSE half's evidence: it describes the
-// answer that was received, so it belongs with that answer's record and nowhere
-// else.
-func (g *Gateway) certificationPair(leg, seam, corr, target string, request, response []byte, responseNonconformance ...string) {
-	for _, part := range []struct {
-		direction      string
-		payload        []byte
-		nonconformance []string
-	}{{"request", request, nil}, {"response", response, responseNonconformance}} {
-		if len(part.payload) > 0 {
-			g.enqueueCertification(certificationJob{evidence: CertificationEvidence{LegType: leg, Seam: seam, CorrelationID: corr, TargetLine: target, Direction: part.direction, Nonconformance: part.nonconformance}, payload: part.payload})
-		}
-	}
-}
-
-// certificationHTTPError keeps bounded raw execution evidence separate from its
-// safe string representation. Wrapping the error cannot expose response bytes.
-type certificationHTTPError struct {
-	status int
-	reason string
-	raw    []byte
-}
-
-func (e *certificationHTTPError) Error() string {
-	hash := sha256.Sum256(e.raw)
-	return fmt.Sprintf("certification HTTP %d %s (response bytes=%d sha256=%x)", e.status, e.reason, len(e.raw), hash)
-}
-
-// nativeCertificationCapture belongs to one synchronous responder call. It
-// captures the final POST attempt before any polling or terminal assembly.
-type nativeCertificationCapture struct {
-	request, response []byte
-	attempted         bool
-}
-type nativeCertificationKey struct{}
 
 // signalLocked wakes the sole worker without blocking an exchange handler.
 func (w *certificationWorker) signalLocked() {

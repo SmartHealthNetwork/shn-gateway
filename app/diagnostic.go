@@ -90,3 +90,23 @@ func (d *diagnosticSource) client(base *http.Client) *http.Client {
 	c.Transport = d.transport(c.Transport)
 	return &c
 }
+
+// start owns exactly one publisher per runtime. Shutdown closes admission and
+// pending ownership immediately; an uncooperative active transport may retain
+// this one worker and its charged body until it returns, never a replacement.
+func (d *diagnosticSource) start(parent context.Context) func() {
+	if d == nil {
+		return func() {}
+	}
+	ctx, cancel := context.WithCancel(parent)
+	done := make(chan struct{})
+	go func() { defer close(done); d.run(ctx) }()
+	return func() {
+		d.queue.Close()
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+		}
+	}
+}

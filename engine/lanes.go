@@ -61,6 +61,14 @@ func (d *DiscoveredLane) Validate(ctx context.Context, body []byte, profile stri
 	return d.validator.Validate(ctx, body, profile)
 }
 
+// ValidateEvidence retains the same qualification boundary as Validate.
+func (d *DiscoveredLane) ValidateEvidence(ctx context.Context, body []byte, profile string) (shnsdk.ValidationEvidence, error) {
+	if !d.Ready() {
+		return unavailableValidatorEvidence(), fmt.Errorf("validator line %s has not qualified", d.line)
+	}
+	return delegateValidatorEvidence(ctx, d.validator, body, profile)
+}
+
 func nativeContractLineCount(contract string) int {
 	lines := map[string]bool{}
 	for _, tok := range shnsdk.NativeContractVersions() {
@@ -96,4 +104,14 @@ func (g *Gateway) qualifiedDefault(line string) shnsdk.Validator {
 		return observingValidator{inner: d, g: g}
 	}
 	return d
+}
+
+func (g *Gateway) adaptationValidator(contract, line string) shnsdk.Validator {
+	if v := g.validatorForContractLine(contract, line); v != nil {
+		return v
+	}
+	if g.cfg.AdaptationValidator != nil {
+		return g.cfg.AdaptationValidator(contract, line)
+	}
+	return nil
 }

@@ -79,13 +79,15 @@ func questionnaireIsAdaptive(questionnaireJSON []byte) bool {
 // functional-status amendment) takes a SEPARATE, already-attested path
 // (shnsdk.BuildManualAttestedItem, the model originate_uc03_oxygen.go's 6.1 item uses) and
 // never goes through this function.
-func (g *Gateway) attestAdaptiveQuestionnaire(ctx context.Context, r *http.Request, res crdDtrResult, answers map[string]shnsdk.Answer, qc shnsdk.QRContext) (qrJSON, questionnaireJSON []byte, status int, msg string, err error) {
+func (g *Gateway) attestAdaptiveQuestionnaire(ctx context.Context, r *http.Request, res *crdDtrResult, answers map[string]shnsdk.Answer, qc shnsdk.QRContext) (qrJSON, questionnaireJSON []byte, status int, msg string, err error) {
+	res.attempt.Consumption = unavailableConsumption("local_action_unavailable")
 	tree := res.questionnaireJSON
 	if !questionnaireIsAdaptive(tree) {
 		qr, ferr := shnsdk.FillQuestionnaireFromAutoAnswersAtLine(res.dtrLine, tree, answers, qc)
 		if ferr != nil {
 			return nil, nil, http.StatusInternalServerError, "attest questionnaire failed", nil
 		}
+		res.attempt.Consumption = ConsumptionOutcome{State: "available"}
 		return qr, tree, 0, "", nil
 	}
 	canonical, perr := shnsdk.ParseQuestionnaireURL(tree)
@@ -118,6 +120,7 @@ func (g *Gateway) attestAdaptiveQuestionnaire(ctx context.Context, r *http.Reque
 		if !grew {
 			// The completing round: nothing new unlocked — `partial` IS the fill of the complete
 			// delivered tree.
+			res.attempt.Consumption = ConsumptionOutcome{State: "available"}
 			return partial, tree, 0, "", nil
 		}
 		tree = merged
@@ -132,7 +135,7 @@ func (g *Gateway) attestAdaptiveQuestionnaire(ctx context.Context, r *http.Reque
 // two fences: the answer must be a questionnaire-response Parameters (a package, a bare
 // Bundle, anything else is refused — a payer that ignores the op must not be mistaken for
 // one that answered it) and its QuestionnaireResponse must be about THIS patient.
-func (g *Gateway) nextQuestionLeg(ctx context.Context, r *http.Request, res crdDtrResult, canonical string, reqQR []byte) (delivered []json.RawMessage, status int, msg string, err error) {
+func (g *Gateway) nextQuestionLeg(ctx context.Context, r *http.Request, res *crdDtrResult, canonical string, reqQR []byte) (delivered []json.RawMessage, status int, msg string, err error) {
 	corr := g.cfg.CorrelationGen()
 	route, rerr := g.selectLegLine(res.recipient, "dtr-questionnaire-fetch", corr)
 	if rerr != nil {
@@ -152,14 +155,15 @@ func (g *Gateway) nextQuestionLeg(ctx context.Context, r *http.Request, res crdD
 		return nil, http.StatusInternalServerError, "build next-question leg failed", nil
 	}
 	x := ExchangeIdentity{CorrelationID: corr, LegType: "dtr-questionnaire-fetch", Counterpart: res.recipient}
-	adapted, _, aerr := g.egressAdapt(route, reqBytes, x)
+	adapted, _, aerr := g.egressAdapt(ctx, route, reqBytes, x)
 	if aerr != nil {
-		return nil, http.StatusBadGateway, aerr.Error(), aerr
+		return nil, adaptationRefusalStatus(aerr), aerr.Error(), aerr
 	}
-	body, oerr := g.OriginateLeg(ctx, r, res.recipient, "dtr-questionnaire-fetch", res.pci, corr, "",
-		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route),
+	reply, oerr := g.OriginateLegMessage(ctx, r, res.recipient, "dtr-questionnaire-fetch", res.pci, corr, "",
+		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, DeclaredVersion: route.Token, Route: routeInfoFor(route),
 			Payload:   sealRequest(relay.BuilderDTRNextQuestion, adapted, "application/fhir+json"),
 			Operation: shnsdk.FrameOperationNextQuestion})
+	body, oerr := res.attempt.receive(reply, "dtr-questionnaire-fetch", corr, oerr)
 	if oerr != nil {
 		return nil, http.StatusBadGateway, oerr.Error(), oerr
 	}
@@ -221,7 +225,8 @@ func buildNextQuestionQR(partialQR, tree []byte, canonical string) ([]byte, erro
 }
 
 // parseNextQuestionResponse reads a $next-question answer: a Parameters whose
-// questionnaire-response parameter carries the QuestionnaireResponse, whose contained
+// return parameter (or the legacy questionnaire-response parameter) carries the
+// QuestionnaireResponse, whose contained
 // Questionnaire holds the delivered tree. Anything else — a package Bundle, a Parameters
 // without the parameter, a response with no contained Questionnaire — is an error.
 func parseNextQuestionResponse(body []byte) (qrJSON []byte, deliveredItems []json.RawMessage, err error) {
@@ -238,8 +243,17 @@ func parseNextQuestionResponse(body []byte) (qrJSON []byte, deliveredItems []jso
 	if top.ResourceType != "Parameters" {
 		return nil, nil, fmt.Errorf("resourceType %q, want Parameters", top.ResourceType)
 	}
+	count := 0
 	for _, p := range top.Parameter {
-		if p.Name != "questionnaire-response" {
+		if p.Name == "return" || p.Name == "questionnaire-response" {
+			count++
+		}
+	}
+	if count > 1 {
+		return nil, nil, fmt.Errorf("next-question response requires exactly one result")
+	}
+	for _, p := range top.Parameter {
+		if p.Name != "return" && p.Name != "questionnaire-response" {
 			continue
 		}
 		var qr struct {

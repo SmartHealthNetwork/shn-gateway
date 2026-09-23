@@ -272,7 +272,7 @@ func TestNextQuestion_FramedWhenCapable(t *testing.T) {
 	reqQR := []byte(`{"resourceType":"QuestionnaireResponse","status":"in-progress","subject":{"reference":"` + subject + `"}}`)
 	round := func(t *testing.T, capable bool) (*inProcessExchange, []json.RawMessage, int, string) {
 		t.Helper()
-		env := newInProcessExchange(t)
+		env := newTransportExchange(t)
 		declareFramedDTR(t, env, capable)
 		route, err := env.originator.selectLegLine(env.payerID, "dtr-questionnaire-fetch", "corr-0")
 		if err != nil {
@@ -280,7 +280,7 @@ func TestNextQuestion_FramedWhenCapable(t *testing.T) {
 		}
 		env.payerReturns(LegResult{Response: testResponse(nextQuestionAnswer(t, subject, rawItems(t, adaptiveTree(t, "1", "3"))))})
 		res := crdDtrResult{recipient: env.payerID, pci: "pci-covered", patientRef: subject, dtrLine: shnsdk.LineOf(route.Token)}
-		items, status, msg, _ := env.originator.nextQuestionLeg(context.Background(), env.req, res, testAdaptiveCanonical, reqQR)
+		items, status, msg, _ := env.originator.nextQuestionLeg(context.Background(), env.req, &res, testAdaptiveCanonical, reqQR)
 		return env, items, status, msg
 	}
 	t.Run("a capable payer", func(t *testing.T) {

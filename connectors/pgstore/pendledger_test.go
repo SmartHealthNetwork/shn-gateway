@@ -495,6 +495,30 @@ func pendLedgerChecks(t *testing.T, newLedger func(*testing.T) ledgerUnderTest) 
 		}
 	})
 
+	// A reused EOB id cannot move another patient's bytes into the first
+	// patient's Patient Access list, and the failed EOB must roll back decision.
+	t.Run("an EOB id owned by another subject leaves decision pended", func(t *testing.T) {
+		l := newLedger(t)
+		first := []byte(`{"resourceType":"ExplanationOfBenefit","id":"shared","patient":{"reference":"Patient/A"}}`)
+		if err := l.RecordEOB(pciA, "shared", first); err != nil {
+			t.Fatal(err)
+		}
+		const pciB = "PCI-B"
+		pend(t, l, pciB, corrB, tPend, keys(requester))
+		_, err := l.RecordDecision(pciB, corrB, engine.PendOutcomeApproved, tDecided,
+			&engine.EOBRecord{SubjectPCI: pciB, EOBID: "shared", JSON: []byte(`{"resourceType":"ExplanationOfBenefit","id":"shared","patient":{"reference":"Patient/B"}}`)})
+		if err == nil {
+			t.Fatal("cross-subject EOB ID replacement decided an authorization")
+		}
+		wantState(t, l, pciB, corrB, engine.PendStatePended)
+		if got, ok := l.EOBsForPatient(pciA); !ok || len(got) != 1 || string(got[0]) != string(first) {
+			t.Fatalf("first patient's EOB changed: %s, found=%v", got, ok)
+		}
+		if got, ok := l.EOBsForPatient(pciB); ok || len(got) != 0 {
+			t.Fatalf("second patient's refused EOB became visible: %s, found=%v", got, ok)
+		}
+	})
+
 	// A decision needs no EOB (the update leg records one without) — a nil EOB is
 	// the decision alone.
 	t.Run("a decision without an EOB", func(t *testing.T) {

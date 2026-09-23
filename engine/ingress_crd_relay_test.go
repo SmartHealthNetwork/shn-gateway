@@ -2,7 +2,6 @@ package engine
 
 import (
 	"bytes"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -10,20 +9,22 @@ import (
 	"testing"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
+	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
 // TestCRDIngress_RequestBytesExceptDeclaredEdits drives an EHR's signed
 // order-sign request through the provider ingress and the network, and
 // compares what the payer's side received with what the EHR sent, byte by
-// byte: only fhirServer and fhirAuthorization are gone and only the two
-// absent prefetch keys are new; every other member keeps its bytes and its
-// place.
+// byte: only the E-01 callback fields are removed. Explicit source assembly
+// separately proves that absent prefetch can be obtained from the provider SoR.
 func TestCRDIngress_RequestBytesExceptDeclaredEdits(t *testing.T) {
 	sentByEHR := signedEHRRequest(t)
 	s := newPrefetchSoR()
 	medication := searchPage(`{"resourceType":"MedicationRequest","id":"m1","status":"active","intent":"order","subject":{"reference":"Patient/example"},"medicationCodeableConcept":{"text":"a ` + lt + ` b"},"dosageInstruction":[{"doseAndRate":[{"doseQuantity":{"value":0.50}}]}]}`)
 	s.answer(t, "MedicationRequest", medication)
-	env, rec := ingressRow(t, s, sentByEHR)
+	env := newTransportExchange(t)
+	env.originator.cfg.SoR = s.sor()
+	rec := ingressAt(t, env, "shn-order-sign", sentByEHR)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("answer %d %s", rec.Code, rec.Body.String())
 	}
@@ -49,12 +50,20 @@ func TestCRDIngress_RequestBytesExceptDeclaredEdits(t *testing.T) {
 			t.Errorf("%s changed:\n got %s\nwant %s", want[i].name, got[i].value, want[i].value)
 		}
 	}
-	// The prefetch: the EHR's values exactly, then the obtained ones.
-	wantPrefetch := append(membersOf(t, sentByEHR, "prefetch"),
-		member{"medicationHistory", sorAssembly(t, "MedicationRequest", medication)},
-		member{"questionnaireResponses", "null"})
+	// Native carriage leaves supplied prefetch alone; missing values are not
+	// an implicit request to assemble from the source system.
+	wantPrefetch := membersOf(t, sentByEHR, "prefetch")
 	if gotPrefetch := membersOf(t, received, "prefetch"); !slices.Equal(gotPrefetch, wantPrefetch) {
 		t.Fatalf("prefetch %v, want %v", names(gotPrefetch), names(wantPrefetch))
+	}
+	// Explicit source assembly remains accountable when invoked. It obtains
+	// absent values from the provider SoR, rather than minting them in relay.
+	_, assembled := mustPrepare(t, prefetchGateway(s), sentByEHR)
+	wantAssembled := append(slices.Clone(wantPrefetch),
+		member{"medicationHistory", sorAssembly(t, "MedicationRequest", medication)},
+		member{"questionnaireResponses", "null"})
+	if got := membersOf(t, assembled, "prefetch"); !slices.Equal(got, wantAssembled) {
+		t.Fatalf("source assembly prefetch %v, want %v", names(got), names(wantAssembled))
 	}
 
 	// Outside the edited places the bytes are the EHR's: everything up to
@@ -80,7 +89,8 @@ func TestCRDIngress_RequestBytesExceptDeclaredEdits(t *testing.T) {
 		if p.request.Ownership() != relay.OwnershipRelayed || !bytes.Equal(sent, body) {
 			t.Fatalf("ownership %v, bytes equal %v", p.request.Ownership(), bytes.Equal(sent, body))
 		}
-		env, rec := ingressRow(t, newPrefetchSoR(), body)
+		env := newTransportExchange(t)
+		rec := ingressAt(t, env, "shn-order-sign", body)
 		if rec.Code != http.StatusOK || !bytes.Equal(sentRequest(t, env), body) {
 			t.Fatalf("answer %d; received equals sent: %v", rec.Code, bytes.Equal(sentRequest(t, env), body))
 		}
@@ -91,8 +101,16 @@ func TestCRDIngress_RequestBytesExceptDeclaredEdits(t *testing.T) {
 // /cds-services/<service>, through the in-process network, and returns the
 // EHR's answer.
 func ingressAt(t *testing.T, env *inProcessExchange, service string, body []byte) *httptest.ResponseRecorder {
+	return ingressAtVersion(t, env, service, "pa.crd@2.0", body)
+}
+
+func ingressAtVersion(t *testing.T, env *inProcessExchange, service, version string, body []byte) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/cds-services/"+service, bytes.NewReader(body))
+	svc, _, known := env.originator.advertisedCDSServiceByID(service)
+	if !known {
+		svc = cdsIngressServices[1] // valid signed operation; unknown path is rejected independently
+	}
+	req := signedFixtureIngress(t, env.originator, "/cds-services/"+service, svc.Leg, svc.Leg, svc.Hook, "pci-covered", version, "crd-ingress", body)
 	req.SetPathValue("id", service)
 	rec := httptest.NewRecorder()
 	env.originator.handleCRDIngress(rec, req)
@@ -110,25 +128,46 @@ func lastOutcome(t *testing.T, g *Gateway) (string, string) {
 	return legs[len(legs)-1].Type, legs[len(legs)-1].Outcome
 }
 
+// The shared transport stub seals successful payloads verbatim. Frame here so
+// the peer's application media type is carried independently of body bytes.
+func framedCRDReply(t *testing.T, status int, media string, body []byte) LegResult {
+	t.Helper()
+	frame, err := shnsdk.EncodeHTTPFrame(status, media, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return LegResult{Response: relay.ForTest(frame, media)}
+}
+
+func framedCRDReplyDeclared(t *testing.T, status int, media, version string, body []byte) LegResult {
+	t.Helper()
+	frame, err := shnsdk.EncodeHTTPFrameHeaders(status, map[string]string{
+		"Content-Type": media, shnsdk.FrameHeaderContractVersion: version,
+	}, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return LegResult{Response: relay.ForTest(frame, media)}
+}
+
 func TestCRDIngress_RelaysExactly(t *testing.T) {
 	notCovered := bytes.Replace(realCRDAnswer(t), []byte(`"valueCode": "covered"`), []byte(`"valueCode": "not-covered"`), 1)
 	if bytes.Equal(notCovered, realCRDAnswer(t)) {
 		t.Fatal("fixture: the recorded answer's covered value was not found")
 	}
 	for _, row := range []struct {
-		name    string
-		answer  []byte
-		outcome string
+		name   string
+		answer []byte
 	}{
-		{"the reference payer's recorded answer", realCRDAnswer(t), "pa-required"},
-		{"a denial", notCovered, "denied"},
-		{"an answer in the payer's own layout", unusualAnswer(), "approved"},
-		{"no card and no system action", []byte(`{"cards":[]}`), "answered"},
-		{"a legacy card suggestion", []byte(`{"cards":[` + cardWith(`"selectionBehavior":"any","suggestions":[{"label":"Save","actions":[{"type":"update","description":"d","resource":{"resourceType":"DeviceRequest","extension":[{"url":"http://hl7.org/fhir/us/davinci-crd/StructureDefinition/ext-coverage-information","extension":[{"url":"covered","valueCode":"covered"},{"url":"pa-needed","valueCode":"no-auth"}]}]}}]}]`) + `]}`), "approved"},
+		{"the reference payer's recorded answer", realCRDAnswer(t)},
+		{"a denial", notCovered},
+		{"an answer in the payer's own layout", unusualAnswer()},
+		{"no card and no system action", []byte(`{"cards":[]}`)},
+		{"a legacy card suggestion", []byte(`{"cards":[` + cardWith(`"selectionBehavior":"any","suggestions":[{"label":"Save","actions":[{"type":"update","description":"d","resource":{"resourceType":"DeviceRequest","extension":[{"url":"http://hl7.org/fhir/us/davinci-crd/StructureDefinition/ext-coverage-information","extension":[{"url":"covered","valueCode":"covered"},{"url":"pa-needed","valueCode":"no-auth"}]}]}}]}]`) + `]}`)},
 	} {
 		t.Run(row.name, func(t *testing.T) {
-			env := newInProcessExchange(t)
-			env.payerReturns(LegResult{Response: testResponse(row.answer)})
+			env := newTransportExchange(t)
+			env.payerReturns(framedCRDReply(t, 200, "application/json", row.answer))
 			rec := ingressAt(t, env, "shn-order-select", conformantCRDRequest("MBR-COVERED"))
 			if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), row.answer) {
 				t.Fatalf("EHR got %d %q\nwant %q", rec.Code, rec.Body.Bytes(), row.answer)
@@ -136,40 +175,48 @@ func TestCRDIngress_RelaysExactly(t *testing.T) {
 			if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
 				t.Fatalf("content type %q", ct)
 			}
-			if leg, outcome := lastOutcome(t, env.originator); leg != "crd-order-select" || outcome != row.outcome {
-				t.Fatalf("recorded %s %s, want %s", leg, outcome, row.outcome)
+			if leg, outcome := lastOutcome(t, env.originator); leg != "crd-order-select" || outcome != "ok" {
+				t.Fatalf("recorded %s %s, want delivered crd-order-select", leg, outcome)
 			}
 		})
 	}
 	for _, r := range certifierRows() {
-		t.Run("refused: "+r.rule, func(t *testing.T) {
-			env := newInProcessExchange(t)
-			env.payerReturns(LegResult{Response: testResponse([]byte(r.answer))})
+		t.Run("none relays: "+r.rule, func(t *testing.T) {
+			env := newTransportExchange(t)
+			env.payerReturns(framedCRDReply(t, 200, "application/json", []byte(r.answer)))
 			rec := ingressAt(t, env, "shn-order-select", conformantCRDRequest("MBR-COVERED"))
-			var body struct {
-				Error string `json:"error"`
+			if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), []byte(r.answer)) || rec.Header().Get("Content-Type") != "application/json" || env.routeHitCount() != 1 {
+				t.Fatalf("the peer's %s answer changed: %d %s", r.rule, rec.Code, rec.Body.String())
 			}
-			_ = json.Unmarshal(rec.Body.Bytes(), &body)
-			if rec.Code != http.StatusBadGateway || !strings.HasPrefix(body.Error, "payer CRD response is not a valid CDS Hooks response: ") || !strings.Contains(body.Error, r.rule) {
-				t.Fatalf("EHR got %d %s", rec.Code, rec.Body.String())
-			}
-			if bytes.Contains(rec.Body.Bytes(), []byte(r.answer)) {
-				t.Fatal("the refused answer reached the EHR")
-			}
-			if _, outcome := lastOutcome(t, env.originator); outcome != "error" {
-				t.Fatalf("recorded %s", outcome)
+			observationFlush(t, env.originator)
+			if findings, drops := env.originator.ConformanceObservationsForTest(); len(findings) != 0 || drops != 0 || env.originator.certification != nil {
+				t.Fatalf("none ran optional checks: findings=%+v drops=%d", findings, drops)
 			}
 		})
 	}
 	t.Run("the payer's error is relayed", func(t *testing.T) {
-		env := newInProcessExchange(t)
+		env := newTransportExchange(t)
 		body := []byte(`{"error":"payer offers no CDS service for hook order-select","offered":["order-sign"]}`)
-		env.payerReturns(LegResult{Status: http.StatusUnprocessableEntity, Response: relay.ForTest(body, "application/json")})
+		env.payerReturns(framedCRDReply(t, http.StatusUnprocessableEntity, "application/json", body))
 		rec := ingressAt(t, env, "shn-order-select", conformantCRDRequest("MBR-COVERED"))
-		if rec.Code != http.StatusUnprocessableEntity || !bytes.Equal(rec.Body.Bytes(), body) {
+		if rec.Code != http.StatusUnprocessableEntity || !bytes.Equal(rec.Body.Bytes(), body) || rec.Header().Get("Content-Type") != "application/json" {
 			t.Fatalf("EHR got %d %s", rec.Code, rec.Body.String())
 		}
 	})
+	for _, status := range []int{http.StatusCreated, http.StatusAccepted, http.StatusNoContent} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			env := newTransportExchange(t)
+			body := []byte(`{"cards":[]}`)
+			if status == http.StatusNoContent {
+				body = nil
+			}
+			env.payerReturns(framedCRDReply(t, status, "application/json", body))
+			rec := ingressAt(t, env, "shn-order-select", conformantCRDRequest("MBR-COVERED"))
+			if rec.Code != status || !bytes.Equal(rec.Body.Bytes(), body) || rec.Header().Get("Content-Type") != "application/json" {
+				t.Fatalf("peer reply changed: got %d %q %q", rec.Code, rec.Header().Get("Content-Type"), rec.Body.Bytes())
+			}
+		})
+	}
 }
 
 // dispatchRequest is an EHR's order-dispatch request for MBR-COVERED: the
@@ -185,7 +232,7 @@ func dispatchRequest(member string) []byte {
 }
 
 func TestCRDIngress_OrderDispatchRoute(t *testing.T) {
-	env := newInProcessExchange(t)
+	env := newTransportExchange(t)
 	answer := realCRDAnswer(t)
 	env.payerReturns(LegResult{Response: testResponse(answer)})
 	body := dispatchRequest("MBR-COVERED")
@@ -193,7 +240,7 @@ func TestCRDIngress_OrderDispatchRoute(t *testing.T) {
 	if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), answer) {
 		t.Fatalf("EHR got %d %s", rec.Code, rec.Body.String())
 	}
-	if leg, outcome := lastOutcome(t, env.originator); leg != "crd-order-dispatch" || outcome != "pa-required" {
+	if leg, outcome := lastOutcome(t, env.originator); leg != "crd-order-dispatch" || outcome != "ok" {
 		t.Fatalf("recorded %s %s", leg, outcome)
 	}
 	want := bytes.Replace(body, []byte(`"fhirServer":"https://provider.example/fhir",
@@ -201,17 +248,22 @@ func TestCRDIngress_OrderDispatchRoute(t *testing.T) {
 	if got := sentRequest(t, env); !bytes.Equal(got, want) {
 		t.Fatalf("the payer's side received\n%s\nwant\n%s", got, want)
 	}
-	t.Run("a dispatch prefetch about another patient is refused", func(t *testing.T) {
-		env := newInProcessExchange(t)
+	t.Run("a dispatch prefetch about another patient is carried at none", func(t *testing.T) {
+		env := newTransportExchange(t)
 		foreign := bytes.Replace(body, []byte(`"subject":{"reference":"Patient/MBR-COVERED"}`), []byte(`"subject":{"reference":"Patient/MBR-NOTCOVERED"}`), 1)
 		rec := ingressAt(t, env, "shn-order-dispatch", foreign)
-		if rec.Code != http.StatusForbidden || env.routeHitCount() != 0 {
+		if rec.Code != http.StatusOK || env.routeHitCount() != 1 {
 			t.Fatalf("got %d %s (routed %d)", rec.Code, rec.Body.String(), env.routeHitCount())
+		}
+		want := bytes.Replace(foreign, []byte(`"fhirServer":"https://provider.example/fhir",
+  `), nil, 1)
+		if got := sentRequest(t, env); !bytes.Equal(got, want) {
+			t.Fatalf("wrong-patient peer bytes changed: got %s want %s", got, want)
 		}
 	})
 }
 
-func TestCRDIngress_ServiceIDHookMismatch400(t *testing.T) {
+func TestCRDIngress_DeclaredServiceCarriesContradictoryBodyAtNone(t *testing.T) {
 	for _, row := range []struct {
 		service, hook string
 	}{
@@ -222,21 +274,22 @@ func TestCRDIngress_ServiceIDHookMismatch400(t *testing.T) {
 		{"shn-order-sign", ""},
 	} {
 		t.Run(row.service+"/"+row.hook, func(t *testing.T) {
-			env := newInProcessExchange(t)
+			env := newTransportExchange(t)
 			body := bytes.Replace(conformantCRDRequest("MBR-COVERED"), []byte(`"hook":"order-select"`), []byte(`"hook":"`+row.hook+`"`), 1)
 			rec := ingressAt(t, env, row.service, body)
-			want := "CDS service " + row.service + " is for hook "
-			if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), want) {
+			if rec.Code != http.StatusOK || env.routeHitCount() != 1 {
 				t.Fatalf("got %d %s", rec.Code, rec.Body.String())
 			}
-			if env.routeHitCount() != 0 {
-				t.Fatal("a mismatched request crossed the network")
+			want := bytes.Replace(body, []byte("\n      \"fhirServer\":\"https://provider.example/fhir\","), nil, 1)
+			want = bytes.Replace(want, []byte("\n      \"fhirAuthorization\":{\"token_type\":\"Bearer\",\"access_token\":\"tok\"},"), nil, 1)
+			if got := sentRequest(t, env); !bytes.Equal(got, want) {
+				t.Fatalf("declared route changed supplied body: got %s want %s", got, want)
 			}
 		})
 	}
 	t.Run("each service accepts its own hook", func(t *testing.T) {
 		for _, svc := range []string{"shn-order-sign", "shn-order-select"} {
-			env := newInProcessExchange(t)
+			env := newTransportExchange(t)
 			hook := strings.TrimPrefix(svc, "shn-")
 			body := bytes.Replace(conformantCRDRequest("MBR-COVERED"), []byte(`"hook":"order-select"`), []byte(`"hook":"`+hook+`"`), 1)
 			if rec := ingressAt(t, env, svc, body); rec.Code != http.StatusOK {
@@ -249,12 +302,12 @@ func TestCRDIngress_ServiceIDHookMismatch400(t *testing.T) {
 	})
 }
 
-func TestCRDIngress_UnknownService404(t *testing.T) {
+func TestCRDIngress_UnknownServiceRejectedAfterAuthentication(t *testing.T) {
 	for _, service := range []string{"order-select-crd", "no-such-service", "SHN-ORDER-SIGN", ""} {
 		t.Run(service, func(t *testing.T) {
-			env := newInProcessExchange(t)
+			env := newTransportExchange(t)
 			rec := ingressAt(t, env, service, conformantCRDRequest("MBR-COVERED"))
-			if rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), "unknown CDS service") {
+			if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "context_invalid") {
 				t.Fatalf("got %d %s", rec.Code, rec.Body.String())
 			}
 			if env.routeHitCount() != 0 {
@@ -263,50 +316,47 @@ func TestCRDIngress_UnknownService404(t *testing.T) {
 		})
 	}
 	t.Run("the service is checked after the caller is authenticated", func(t *testing.T) {
-		env := newInProcessExchange(t)
+		env := newTransportExchange(t)
 		env.originator.cfg.ingressAuthBypass = false
 		env.originator.ingressAuth = nil
-		rec := ingressAt(t, env, "no-such-service", conformantCRDRequest("MBR-COVERED"))
+		rec := httptest.NewRecorder()
+		env.originator.handleCRDIngress(rec, crdIngressPost(conformantCRDRequest("MBR-COVERED")))
 		if rec.Code != http.StatusUnauthorized {
 			t.Fatalf("got %d %s", rec.Code, rec.Body.String())
 		}
 	})
 }
 
-// TestCRDIngress_RelaysAtNoneWithFinding is the observable-behaviour proof
-// that crdAnswerOutcome's use of g.policy() — not a hardcoded strict
-// policy — is what the wire actually does: at ConformanceEnforcement=none, a
-// payer answer that breaks a non-structural CDS Hooks rule (an action with no
-// description) still reaches the EHR byte-identical, and the violation is
-// recorded on the observer stream as a cds-envelope finding, whose="peer"
-// (this is a peer's answer, received over the network) and decision="relayed".
-func TestCRDIngress_RelaysAtNoneWithFinding(t *testing.T) {
-	env := newInProcessExchange(t)
-	env.originator.cfg.ConformanceEnforcement = EnforcementNone
-	var events []ObserverEvent
-	env.originator.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
-	env.payerReturns(LegResult{Response: testResponse([]byte(externalPayerDescriptionlessAnswer))})
-
-	rec := ingressAt(t, env, "shn-order-select", conformantCRDRequest("MBR-COVERED"))
-	if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), []byte(externalPayerDescriptionlessAnswer)) {
-		t.Fatalf("at none the payer's answer must relay exactly: got %d %q, want 200 %q", rec.Code, rec.Body.Bytes(), externalPayerDescriptionlessAnswer)
-	}
-	var found bool
-	for _, e := range events {
-		if e.Kind != ConformanceObservedEvent {
-			continue
-		}
-		if strings.Contains(e.Detail, `"rule":"action.description"`) {
-			found = true
-			if !strings.Contains(e.Detail, `"whose":"peer"`) {
-				t.Fatalf("the provider ingress's finding must say whose=peer (a peer's answer), got: %s", e.Detail)
+func TestCRDIngress_NoneRelaysWithoutOptionalChecks_ObserveFinds(t *testing.T) {
+	for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve} {
+		t.Run(level.String(), func(t *testing.T) {
+			env := newTransportExchangeWithPolicy(t, level)
+			answer := []byte(externalPayerDescriptionlessAnswer)
+			env.payerReturns(framedCRDReplyDeclared(t, 202, "application/json", "pa.crd@2.0", answer))
+			rec := ingressAt(t, env, "shn-order-select", conformantCRDRequest("MBR-COVERED"))
+			if rec.Code != 202 || !bytes.Equal(rec.Body.Bytes(), answer) || rec.Header().Get("Content-Type") != "application/json" || env.routeHitCount() != 1 {
+				t.Fatalf("peer reply changed: %d %s %q", rec.Code, rec.Header(), rec.Body.Bytes())
 			}
-			if !strings.Contains(e.Detail, `"decision":"relayed"`) || !strings.Contains(e.Detail, `"level":"none"`) {
-				t.Fatalf("finding must record relayed/none, got: %s", e.Detail)
+			observationFlush(t, env.originator)
+			findings, drops := env.originator.ConformanceObservationsForTest()
+			if drops != 0 {
+				t.Fatalf("observation drops=%d", drops)
 			}
-		}
-	}
-	if !found {
-		t.Fatal("no cds-envelope finding observed for action.description — a hardcoded-strict policy at crdAnswerOutcome would refuse instead of reaching here")
+			if level == EnforcementNone {
+				if len(findings) != 0 || env.originator.certification != nil {
+					t.Fatalf("none ran optional checks: %+v", findings)
+				}
+				return
+			}
+			found := false
+			for _, f := range findings {
+				if f.Direction == "response" && f.Rule == "cds.response" && f.State == CheckInvalid && f.PayloadSHA256 == sha256hex(answer) {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("observe did not record the peer's invalid reply: %+v", findings)
+			}
+		})
 	}
 }

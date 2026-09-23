@@ -16,6 +16,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"io"
@@ -147,6 +148,13 @@ type stubSubstrate struct {
 	// before DTR/PAS).
 	pasDenialRationale string
 	pasLine            string
+	// routeDelay, when set, holds every /route call open for that long before
+	// answering, giving up as soon as the request context ends — the way a
+	// real Hub leg looks to an HTTP client whose timeout budget expires first.
+	// routeErr, when set, fails every /route call with that transport error
+	// (a fault that is not a timeout).
+	routeDelay time.Duration
+	routeErr   error
 }
 
 func (s *stubSubstrate) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -157,6 +165,16 @@ func (s *stubSubstrate) RoundTrip(req *http.Request) (*http.Response, error) {
 	case strings.HasSuffix(path, "/authorize"):
 		return s.handleAuthorize(req, body)
 	case strings.HasSuffix(path, "/route"):
+		if s.routeErr != nil {
+			return nil, s.routeErr
+		}
+		if s.routeDelay > 0 {
+			select {
+			case <-time.After(s.routeDelay):
+			case <-req.Context().Done():
+				return nil, req.Context().Err()
+			}
+		}
 		return s.handleRoute(req, body)
 	default:
 		return &http.Response{
@@ -337,7 +355,7 @@ func crdTestSystem(t *testing.T, cov shnsdk.CardCoverage) (*Gateway, *stubSubstr
 		HubTransportPub: authzPub, // not used by provider (only inbound gateways check it)
 		HubURL:          fakeBase,
 		Reg:             reg,
-		Validator:       shnsdk.NewFakeValidator(),
+		Validator:       syntheticFakeValidator(),
 		SoR:             sor,
 		Store:           sor,
 		Clock:           clock,
@@ -556,6 +574,15 @@ func TestRunCRDThenDTROrder_NotCovered_ProceedFlag(t *testing.T) {
 		if len(res.srJSON) == 0 {
 			t.Fatal("opt-in: returned no ServiceRequest — the order must be built for the PAS A2 submit")
 		}
+		held, ok := gw.cfg.SoR.OpenOrder(member)
+		if !ok || !bytes.Equal(res.sourceOrder, held) {
+			t.Fatal("opt-in: PAS source is not the participant-held order read before patient rewrite")
+		}
+		before := bytes.Clone(res.sourceOrder)
+		res.srJSON[0] ^= 1
+		if !bytes.Equal(res.sourceOrder, before) {
+			t.Fatal("opt-in: caller mutation changed the captured PAS source order")
+		}
 	})
 }
 
@@ -569,7 +596,9 @@ func TestRunCRDThenDTROrder_NotCovered_ProceedFlag(t *testing.T) {
 // (All(Has(`"denied":true`), Has(`"rationale"`))). Before this fix, an empty profile
 // hit the CRD not-covered stop and UC-08 returned
 // {"covered":false,"outcome":"not-covered","paRequired":false} instead — precisely the
-// live smoke failure this test locks down.
+// live smoke failure this test locks down. This older PAS 2.0 stub deliberately
+// lacks request linkage, so its denial remains received evidence rather than
+// a locally consumable determination.
 func TestHandleUC08_DemoLane_ProceedsPastNotCoveredToDeny(t *testing.T) {
 	notCovered := shnsdk.CardCoverage{Covered: shnsdk.CoveredNotCovered, PANeeded: shnsdk.PANeededNoAuth}
 	gw, stub, _ := crdTestSystem(t, notCovered)
@@ -591,18 +620,28 @@ func TestHandleUC08_DemoLane_ProceedsPastNotCoveredToDeny(t *testing.T) {
 	rec := httptest.NewRecorder()
 	gw.handleUC08(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("demo not-covered UC08: want 200, got %d body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("demo not-covered UC08: want source binding unavailable, got %d body=%s", rec.Code, rec.Body.String())
 	}
 	var body map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("unmarshal response: %v; body=%s", err, rec.Body.String())
 	}
-	if v, ok := body["denied"].(bool); !ok || !v {
-		t.Fatalf("demo not-covered UC08: want denied=true (proceeded past the CRD not-covered stop to a real PAS deny), got body=%s", rec.Body.String())
+	consumption, _ := body["consumption"].(map[string]any)
+	if consumption["code"] != "decision_binding_unavailable" {
+		t.Fatalf("demo not-covered UC08: unlinked PAS 2.0 reply was locally consumed: %s", rec.Body.String())
 	}
-	if r, _ := body["rationale"].(string); r == "" {
-		t.Fatalf("demo not-covered UC08: want a non-empty rationale, got body=%s", rec.Body.String())
+	reply, _ := body["applicationReply"].(map[string]any)
+	if reply["leg"] != "pas-claim" {
+		t.Fatalf("demo not-covered UC08: PAS application reply missing: %s", rec.Body.String())
+	}
+	raw, err := base64.StdEncoding.DecodeString(reply["bodyBase64"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision, err := shnsdk.ParseClaimResponse(raw)
+	if err != nil || decision.Outcome != "denied" || decision.Denial == nil || decision.Denial.Rationale != rationale {
+		t.Fatalf("demo not-covered UC08: payer denial not retained as evidence: %+v %v", decision, err)
 	}
 	// Pin the ABSENCE of the CRD-leg terminal-stop shape — the exact regression: a
 	// demo-lane UC08 that stopped at the not-covered CRD verdict (the bug) writes
@@ -780,8 +819,13 @@ func classifyTestGateway(t *testing.T, profile string) *Gateway {
 // re-pend used to reach an operator as a failed request. Profile-independent (the
 // per-profile terminal pend is gone); both profiles are asserted so no row is vacuous.
 func TestClassifyResolution(t *testing.T) {
-	// approved: bare ClaimResponse, outcome complete + preAuthRef present.
-	approved := []byte(`{"resourceType":"ClaimResponse","outcome":"complete","use":"preauthorization","preAuthRef":"PA-0123456789ab","preAuthPeriod":{"end":"2026-09-02"}}`)
+	// Approved requires the payer's affirmative A1 review action as well as
+	// its authorization number. A complete outcome alone is not approval.
+	approved, err := shnsdk.BuildClaimResponse("PA-0123456789ab", "2026-09-02", "Patient/MBR-COVERED", "corr-classify", fixedClock())
+	if err != nil {
+		t.Fatal(err)
+	}
+	completeWithoutA1 := []byte(`{"resourceType":"ClaimResponse","outcome":"complete","use":"preauthorization","preAuthRef":"PA-0123456789ab","preAuthPeriod":{"end":"2026-09-02"}}`)
 	// denied: bare ClaimResponse carrying reviewActionCode A3.
 	denied := []byte(`{"resourceType":"ClaimResponse","outcome":"complete","use":"preauthorization","item":[{"adjudication":[{"extension":[{"url":"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewAction","extension":[{"url":"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewActionCode","valueCodeableConcept":{"coding":[{"system":"https://codesystem.x12.org/005010/306","code":"A3"}]}}]}]}]}]}`)
 	// unresolved pend: a well-formed PAS Bundle with a Task input (ParseClaimResponse treats it as
@@ -799,6 +843,8 @@ func TestClassifyResolution(t *testing.T) {
 	}{
 		{"approved/provider-data", "provider-data", approved, "approved"},
 		{"approved/default", "", approved, "approved"},
+		{"complete without A1/provider-data", "provider-data", completeWithoutA1, ""},
+		{"complete without A1/default", "", completeWithoutA1, ""},
 		{"denied/provider-data", "provider-data", denied, "denied"},
 		{"denied/default", "", denied, "denied"},
 		// A pend is the payer's own answer, reported as a pend. It is what the
@@ -961,7 +1007,7 @@ func TestValidateFHIR_IngressSkip_Demo(t *testing.T) {
 // call site (originate.go's UC-05 federated-query read) now does.
 func TestValidateFHIR_FacilityIngressStillFailsClosed_Demo(t *testing.T) {
 	v := &recordingValidator{valid: false}
-	g := &Gateway{cfg: Config{OriginationProfile: "demo", Validator: v}}
+	g := &Gateway{cfg: Config{OriginationProfile: "demo", Validator: v, ConformanceEnforcement: EnforcementStrict}}
 	status, msg := g.validateFHIR(context.Background(), []byte(`{"resourceType":"Bundle"}`), "ingress", "")
 	if status != http.StatusUnprocessableEntity {
 		t.Fatalf("demo-lane facility ingress with an invalid resource: status=%d, want %d; msg=%q — the R-8 payer skip must never leak to a non-payer-directed leg", status, http.StatusUnprocessableEntity, msg)
@@ -988,7 +1034,7 @@ func TestValidateFHIR_PayerIngressStillSkips_Demo(t *testing.T) {
 // rejecting it.
 func TestValidateFHIR_EgressStillFailsClosed_Demo(t *testing.T) {
 	v := &recordingValidator{valid: false}
-	g := &Gateway{cfg: Config{OriginationProfile: "demo", Validator: v}}
+	g := &Gateway{cfg: Config{OriginationProfile: "demo", Validator: v, ConformanceEnforcement: EnforcementStrict}}
 	status, msg := g.validateFHIR(context.Background(), []byte(`{"resourceType":"Bundle"}`), "egress", "")
 	if status != http.StatusUnprocessableEntity {
 		t.Fatalf("demo egress with an invalid resource: status=%d, want %d; msg=%q", status, http.StatusUnprocessableEntity, msg)
@@ -1005,7 +1051,7 @@ func TestValidateFHIR_EgressStillFailsClosed_Demo(t *testing.T) {
 // anything unrecognized.
 func TestValidateFHIR_IngressStillFailsClosed_OtherLane(t *testing.T) {
 	v := &recordingValidator{valid: false}
-	g := &Gateway{cfg: Config{OriginationProfile: "unknown-lane", Validator: v}}
+	g := &Gateway{cfg: Config{OriginationProfile: "unknown-lane", Validator: v, ConformanceEnforcement: EnforcementStrict}}
 	status, msg := g.validateFHIRPayerIngress(context.Background(), []byte(`{"resourceType":"Bundle"}`), "", "pa.dtr")
 	if status != http.StatusUnprocessableEntity {
 		t.Fatalf("non-reference-payer-lane payer-ingress with an invalid resource: status=%d, want %d; msg=%q", status, http.StatusUnprocessableEntity, msg)
@@ -1023,7 +1069,7 @@ func TestValidateFHIR_IngressStillFailsClosed_OtherLane(t *testing.T) {
 func TestValidateFHIR_PlainIngressNeverSkips_AnyLane(t *testing.T) {
 	for _, profile := range []string{"", "demo", "provider-data", "unknown-lane"} {
 		v := &recordingValidator{valid: false}
-		g := &Gateway{cfg: Config{OriginationProfile: profile, Validator: v}}
+		g := &Gateway{cfg: Config{OriginationProfile: profile, Validator: v, ConformanceEnforcement: EnforcementStrict}}
 		status, msg := g.validateFHIR(context.Background(), []byte(`{"resourceType":"Bundle"}`), "ingress", "")
 		if status != http.StatusUnprocessableEntity {
 			t.Errorf("profile %q: plain validateFHIR ingress with an invalid resource: status=%d, want %d; msg=%q", profile, status, http.StatusUnprocessableEntity, msg)

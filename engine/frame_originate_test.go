@@ -50,7 +50,7 @@ func sealBare(e *inProcessExchange, payload []byte) {
 }
 
 func TestOriginateDecodesFramedError(t *testing.T) {
-	env := newInProcessExchange(t)
+	env := newTransportExchange(t)
 	advertiseRecipientFrameV1(t, env)
 	oo := []byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"error"}]}`)
 	frame, err := shnsdk.EncodeHTTPFrame(422, "application/fhir+json", oo)
@@ -79,7 +79,7 @@ func TestOriginateDecodesFramedError(t *testing.T) {
 }
 
 func TestOriginateDecodesFramedSuccess(t *testing.T) {
-	env := newInProcessExchange(t)
+	env := newTransportExchange(t)
 	advertiseRecipientFrameV1(t, env)
 	want := []byte(`{"resourceType":"Parameters","parameter":[{"name":"ok"}]}`)
 	frame, err := shnsdk.EncodeHTTPFrame(200, "application/fhir+json", want)
@@ -104,7 +104,7 @@ func TestOriginateDecodesFramedSuccess(t *testing.T) {
 // keyed on the frame magic, not the recipient's advertised frames, so the framed
 // answer MUST still surface as a verbatim *RelayError — never handed raw to the app.
 func TestOriginateDecodesFramedErrorFromUnadvertisedRecipient(t *testing.T) {
-	env := newInProcessExchange(t)
+	env := newTransportExchange(t)
 	// deliberately DO NOT advertiseRecipientFrameV1 — recipient's entry stays legacy.
 	oo := []byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"invalid"}]}`)
 	frame, err := shnsdk.EncodeHTTPFrame(422, "application/fhir+json", oo)
@@ -127,7 +127,7 @@ func TestOriginateDecodesFramedErrorFromUnadvertisedRecipient(t *testing.T) {
 }
 
 func TestOriginateStaleFeedFallback(t *testing.T) {
-	env := newInProcessExchange(t)
+	env := newTransportExchange(t)
 	advertiseRecipientFrameV1(t, env) // recipient advertises v1...
 	bare := []byte(`{"resourceType":"Parameters","parameter":[{"name":"stale"}]}`)
 	sealBare(env, bare) // ...but answers BARE JSON (stale-feed view)
@@ -145,6 +145,7 @@ func TestOriginateStaleFeedFallback(t *testing.T) {
 	// The forward stale-feed downgrade emits a structured observer event (the seam
 	// the Kit's flow map consumes), not just a log line.
 	var dg *ObserverEvent
+	observationFlush(t, env.originator)
 	for i := range events {
 		if events[i].Kind == "leg.downgrade" {
 			dg = &events[i]
@@ -159,7 +160,7 @@ func TestOriginateStaleFeedFallback(t *testing.T) {
 }
 
 func TestOriginateRejectsCorruptFrame(t *testing.T) {
-	env := newInProcessExchange(t)
+	env := newTransportExchange(t)
 	advertiseRecipientFrameV1(t, env)
 	// v1 magic byte + garbage: a capable recipient that answers a corrupt frame
 	// must be rejected, never processed as a bare/legacy body (mutation row for
@@ -240,7 +241,7 @@ func TestDispatchRelaysFramedRecipientError(t *testing.T) {
 // runCRDThenDTROrder crd-order-select site) over the in-process substrate: a framed 400 on the
 // first leg is relayed verbatim to the caller.
 func TestScenarioRelaysFramedRecipientError(t *testing.T) {
-	env := newInProcessExchange(t)
+	env := newTransportExchange(t)
 	status, ct, body := framedErrorFixture()
 	env.payerReturns(LegResult{Status: status, Response: testResponse(body)})
 
@@ -290,7 +291,7 @@ func declareRecipientVersions(t *testing.T, e *inProcessExchange, tokens []strin
 // valid exchange − shared line → typed refusal BEFORE any leg is routed
 // (no seal, no authorize, no Hub round-trip).
 func TestOriginateRefusesUnsharedLine(t *testing.T) {
-	env := newInProcessExchange(t)
+	env := newTransportExchange(t)
 	declareRecipientVersions(t, env, []string{"pa.crd@2.2"})
 
 	var events []ObserverEvent
@@ -309,6 +310,7 @@ func TestOriginateRefusesUnsharedLine(t *testing.T) {
 	// the Kit's flow map consumes) — the same discipline TestOriginateStaleFeedFallback
 	// pins for leg.downgrade.
 	var refused *ObserverEvent
+	observationFlush(t, env.originator)
 	for i := range events {
 		if events[i].Kind == "leg.refused" {
 			refused = &events[i]
@@ -329,7 +331,7 @@ func TestOriginateRefusesUnsharedLine(t *testing.T) {
 // the PENDED-LINE PIN — honored verbatim, no re-selection, even when
 // the registry has since changed to an incompatible declaration.
 func TestOriginatePinnedProfileIDSkipsSelection(t *testing.T) {
-	env := newInProcessExchange(t)
+	env := newTransportExchange(t)
 	declareRecipientVersions(t, env, []string{"pa.crd@2.2"}) // would refuse if re-selected
 	env.payerReturns(LegResult{Status: 0, Response: testResponse([]byte(`{"resourceType":"Bundle","type":"collection"}`))})
 	if _, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "",
@@ -367,60 +369,40 @@ func TestScenarioRefusalWrites422(t *testing.T) {
 	}
 }
 
-// TestOriginateRejectsStampMismatch: mutation row — valid framed 2xx answer
-// − contractVersion stamped with a DIFFERENT line than the originator routed
-// → rejected before the body reaches any parser (the
-// in-seal tamper case the wire mutator table cannot express).
-func TestOriginateRejectsStampMismatch(t *testing.T) {
-	env := newInProcessExchange(t)
-	advertiseRecipientFrameV1(t, env)
-	body := []byte(`{"resourceType":"Bundle","type":"collection"}`) // any valid JSON — OriginateLeg returns the raw body to direct callers; there is no crdCards fixture field (cards are built inline in the fake substrate)
-	frame, err := shnsdk.EncodeHTTPFrameHeaders(200, map[string]string{
-		"Content-Type":                    "application/fhir+json",
-		shnsdk.FrameHeaderContractVersion: "pa.crd@2.2",
-	}, body)
-	if err != nil {
-		t.Fatalf("encode: %v", err)
-	}
-	sealBare(env, frame)
-	_, err = env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "", Content{WorkstreamType: workstreamPA, Payload: testRequest(env.crdReq)})
-	if err == nil || !strings.Contains(err.Error(), "contract version mismatch") {
-		t.Fatalf("want contract-version-mismatch rejection, got %v", err)
-	}
-}
-
-// TestOriginateRejectsStampMismatchAcrossLines is the line-aware sibling of the row
-// above: the same CONTRACT, a genuinely DIFFERENT LINE (pa.crd@2.2 answering a
-// pa.crd@2.0 leg). The 2026-08-10 row used a token whose contract differed too;
-// now that both lines are natively buildable, this is a real, plausible payload of
-// the WRONG SHAPE — and it must still be rejected before any parser or validator
-// touches it. The leg is pinned via Content.ProfileID (the pended-pin form) so the
-// routed line is unambiguous.
-func TestOriginateRejectsStampMismatchAcrossLines(t *testing.T) {
-	env := newInProcessExchange(t)
-	advertiseRecipientFrameV1(t, env)
-	frame, err := shnsdk.EncodeHTTPFrameHeaders(200, map[string]string{
-		"Content-Type":                    "application/fhir+json",
-		shnsdk.FrameHeaderContractVersion: "pa.crd@2.2",
-	}, []byte(`{"resourceType":"Bundle","type":"collection"}`))
-	if err != nil {
-		t.Fatalf("encode: %v", err)
-	}
-	sealBare(env, frame)
-	_, err = env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "",
-		Content{WorkstreamType: workstreamPA, ProfileID: "pa.crd@2.0", Payload: testRequest(env.crdReq)})
-	if err == nil || !strings.Contains(err.Error(), "contract version mismatch") {
-		t.Fatalf("want contract-version-mismatch rejection for pa.crd@2.2 on a pa.crd@2.0 leg, got %v", err)
-	}
-	if !strings.Contains(err.Error(), "pa.crd@2.2") || !strings.Contains(err.Error(), "pa.crd@2.0") {
-		t.Fatalf("rejection must name BOTH lines, got %v", err)
+// An authenticated reply carries its producer's actual declaration, even when
+// the route or request chose another line. Strict version consistency is tested
+// by TestNativeVersionDeclarationPolicy, after metadata preservation.
+func TestOriginatePreservesStampMismatch(t *testing.T) {
+	for _, declared := range []string{"", "pa.crd@2.0"} {
+		t.Run(declared, func(t *testing.T) {
+			env := newTransportExchange(t)
+			advertiseRecipientFrameV1(t, env)
+			body := []byte(`{"resourceType":"Bundle","type":"collection"}`)
+			frame, err := shnsdk.EncodeHTTPFrameHeaders(200, map[string]string{
+				"Content-Type":                    "application/fhir+json",
+				shnsdk.FrameHeaderContractVersion: "pa.crd@2.2",
+			}, body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sealBare(env, frame)
+			reply, err := env.originator.OriginateLegMessage(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "",
+				Content{WorkstreamType: workstreamPA, ProfileID: "pa.crd@2.0", DeclaredVersion: declared, Payload: testRequest(env.crdReq)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, err := reply.bytes("crd-order-select")
+			if err != nil || !bytes.Equal(raw, body) || reply.DeclaredVersion != "pa.crd@2.2" {
+				t.Fatalf("reply=%+v raw=%s err=%v", reply, raw, err)
+			}
+		})
 	}
 }
 
 // TestOriginateAcceptsMatchingStamp: the same exchange with the CORRECT stamp
 // succeeds — the guard rejects mismatches, not stamps.
 func TestOriginateAcceptsMatchingStamp(t *testing.T) {
-	env := newInProcessExchange(t)
+	env := newTransportExchange(t)
 	advertiseRecipientFrameV1(t, env)
 	body := []byte(`{"resourceType":"Bundle","type":"collection"}`)
 	frame, _ := shnsdk.EncodeHTTPFrameHeaders(200, map[string]string{
@@ -438,7 +420,7 @@ func TestOriginateAcceptsMatchingStamp(t *testing.T) {
 // existing TestOriginateDecodesFramedSuccess behavior; assert it explicitly
 // under the new guard so the tolerance is pinned, not incidental.
 func TestOriginateToleratesAbsentStamp(t *testing.T) {
-	env := newInProcessExchange(t)
+	env := newTransportExchange(t)
 	advertiseRecipientFrameV1(t, env)
 	frame, _ := shnsdk.EncodeHTTPFrame(200, "application/fhir+json", []byte(`{"resourceType":"Bundle","type":"collection"}`))
 	sealBare(env, frame)
@@ -478,7 +460,7 @@ func TestRelayErrorSurvivesHelperWrapping(t *testing.T) {
 // response leg, so this legType is what lets the drive actually complete —
 // production's promotion of the CRD legs onto this primitive is covered separately).
 func TestLegOriginatedCarriesRoute(t *testing.T) {
-	env := newInProcessExchange(t)
+	env := newTransportExchange(t)
 	env.payerReturns(LegResult{Status: 0, Response: testResponse([]byte(`{"resourceType":"Bundle","type":"collection"}`))})
 
 	var events []ObserverEvent
@@ -501,6 +483,7 @@ func TestLegOriginatedCarriesRoute(t *testing.T) {
 	}
 
 	var originated *ObserverEvent
+	observationFlush(t, env.originator)
 	for i := range events {
 		if events[i].Kind == "leg.originated" {
 			originated = &events[i]
@@ -526,7 +509,7 @@ func TestLegOriginatedCarriesRoute(t *testing.T) {
 // fact — leg.originated carries Route: nil on this path (never a
 // speculative/re-derived one).
 func TestOriginateLegFallbackOmitsRoute(t *testing.T) {
-	env := newInProcessExchange(t)
+	env := newTransportExchange(t)
 	env.payerReturns(LegResult{Status: 0, Response: testResponse([]byte(`{"resourceType":"Parameters"}`))})
 
 	var events []ObserverEvent
@@ -538,6 +521,7 @@ func TestOriginateLegFallbackOmitsRoute(t *testing.T) {
 	}
 
 	var originated *ObserverEvent
+	observationFlush(t, env.originator)
 	for i := range events {
 		if events[i].Kind == "leg.originated" {
 			originated = &events[i]
@@ -557,7 +541,7 @@ func TestOriginateLegFallbackOmitsRoute(t *testing.T) {
 // while Detail stays the exact Error() string byte-unchanged (the existing
 // wire-contract pin TestOriginateRefusesUnsharedLine already covers).
 func TestLegRefusedCarriesStructuredRoute(t *testing.T) {
-	env := newInProcessExchange(t)
+	env := newTransportExchange(t)
 	declareRecipientVersions(t, env, []string{"pa.crd@2.2"})
 
 	var events []ObserverEvent
@@ -571,6 +555,7 @@ func TestLegRefusedCarriesStructuredRoute(t *testing.T) {
 	}
 
 	var refused *ObserverEvent
+	observationFlush(t, env.originator)
 	for i := range events {
 		if events[i].Kind == "leg.refused" {
 			refused = &events[i]
@@ -601,7 +586,7 @@ func TestLegRefusedCarriesStructuredRoute(t *testing.T) {
 // concern) driven through "crd-order-select" — see
 // TestLegOriginatedCarriesRoute for why that legType, not "pas-claim".
 func TestLegOriginatedRouteChainOnArm3(t *testing.T) {
-	env := newInProcessExchange(t)
+	env := newTransportExchange(t)
 	env.payerReturns(LegResult{Status: 0, Response: testResponse([]byte(`{"resourceType":"Bundle","type":"collection"}`))})
 
 	var events []ObserverEvent
@@ -623,6 +608,7 @@ func TestLegOriginatedRouteChainOnArm3(t *testing.T) {
 	}
 
 	var originated *ObserverEvent
+	observationFlush(t, env.originator)
 	for i := range events {
 		if events[i].Kind == "leg.originated" {
 			originated = &events[i]
@@ -656,12 +642,12 @@ func TestLegOriginatedRouteChainOnArm3(t *testing.T) {
 // rather than a hand-rolled site call, so the zero-bytes property is
 // asserted against the genuine origination path, not a stub.
 func TestTransformRefusalZeroBytes(t *testing.T) {
-	env := newInProcessExchange(t)
+	env := newTransportExchange(t)
 	declareRecipientVersions(t, env, []string{"pa.pas@2.2"})
 	env.originator.cfg.DeclaredContractVersions = []string{"pa.pas@2.0"}
 	env.originator.cfg.EgressNativeLines = []string{"2.0"}
 	env.originator.cfg.ValidatorsByLine = map[string]shnsdk.Validator{
-		"2.0": shnsdk.NewFakeValidator(), "2.1": shnsdk.NewFakeValidator(), "2.2": shnsdk.NewFakeValidator(),
+		"2.0": syntheticFakeValidator(), "2.1": syntheticFakeValidator(), "2.2": syntheticFakeValidator(),
 	}
 
 	var events []ObserverEvent
@@ -707,6 +693,7 @@ func TestTransformRefusalZeroBytes(t *testing.T) {
 
 	var failed int
 	var ev ObserverEvent
+	observationFlush(t, env.originator)
 	for _, e := range events {
 		if e.Kind == "leg.failed" {
 			failed++

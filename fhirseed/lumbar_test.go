@@ -1,18 +1,105 @@
 package fhirseed
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
+
+// PCV-06: the packaged vocabulary must stay aligned with the shared
+// constants used by reference seeding, FHIR SoR search, and generated CQL.
+func TestPackagedClinicalContextMatchesSeedSearchAndCQL(t *testing.T) {
+	path := filepath.Join("..", "deploy", "validator", "support", "shn.fhir.validation-support-1.4.0.tgz")
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	zipped, err := gzip.NewReader(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zipped.Close()
+	archive := tar.NewReader(zipped)
+	var resource struct {
+		URL     string `json:"url"`
+		Concept []struct {
+			Code string `json:"code"`
+		} `json:"concept"`
+	}
+	for {
+		header, err := archive.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if header.Name == "package/CodeSystem-shn-clinical-context.json" {
+			if err := json.NewDecoder(archive).Decode(&resource); err != nil {
+				t.Fatal(err)
+			}
+			break
+		}
+	}
+	if resource.URL != shnsdk.SystemSHNClinical {
+		t.Fatalf("packaged system %q differs from seed/search system %q", resource.URL, shnsdk.SystemSHNClinical)
+	}
+	got := make([]string, len(resource.Concept))
+	for i, concept := range resource.Concept {
+		got[i] = concept.Code
+	}
+	sort.Strings(got)
+	want := []string{shnsdk.ConservativeTherapyWeeksCode, shnsdk.NeuroDeficitCode, shnsdk.PatientReportedCode}
+	sort.Strings(want)
+	if len(got) != len(want) {
+		t.Fatalf("packaged concepts %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("packaged concepts %v, want %v", got, want)
+		}
+	}
+	lib, err := DemoLumbarLibrary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var library struct {
+		Content []struct {
+			Data string `json:"data"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(lib, &library); err != nil {
+		t.Fatal(err)
+	}
+	cql, err := base64.StdEncoding.DecodeString(library.Content[0].Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, declaration := range []string{
+		"codesystem \"SHNClinical\": '" + resource.URL + "'",
+		"code \"CTWeeks\": '" + shnsdk.ConservativeTherapyWeeksCode + "' from \"SHNClinical\"",
+		"code \"Neuro\": '" + shnsdk.NeuroDeficitCode + "' from \"SHNClinical\"",
+		"code \"PatientReported\": '" + shnsdk.PatientReportedCode + "' from \"SHNClinical\"",
+	} {
+		if !bytes.Contains(cql, []byte(declaration)) {
+			t.Fatalf("CQL missing packaged code declaration %q", declaration)
+		}
+	}
+}
 
 func TestDemoLumbarLibrary(t *testing.T) {
 	lib, err := DemoLumbarLibrary()

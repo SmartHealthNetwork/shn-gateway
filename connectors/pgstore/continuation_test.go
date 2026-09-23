@@ -9,6 +9,7 @@ package pgstore
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -54,7 +55,7 @@ func TestContinuation_NoClinicalColumns(t *testing.T) {
 	// And the parent's arrays stay arrays of scalars rather than becoming one
 	// opaque column with the keys inside it.
 	parent := tables["gw_pa_continuation"]
-	for _, want := range []string{"item_trace_numbers", "payer_claimresponse_ids"} {
+	for _, want := range []string{"item_trace_numbers", "payer_claimresponse_ids", "claim_references"} {
 		typ, ok := columnType(parent, want)
 		if !ok {
 			t.Fatalf("gw_pa_continuation declares no %s column", want)
@@ -76,6 +77,7 @@ func TestContinuation_NoClinicalColumns(t *testing.T) {
 		"subject_pci": true, "member_id": true, "sor_patient_id": true, // the patient, three ways
 		"order_ref": true, "provider_npi": true, // what was asked, and who asked
 		"claim_identifier": true, "claim_type": true, "claim_priority": true,
+		"claim_references":   true, // exact submitted Claim identity metadata, never clinical bytes
 		"item_trace_numbers": true, "payer_claimresponse_ids": true, "payer_preauth_ref": true,
 		"last_outcome": true, "created_at": true, "updated_at": true,
 	}
@@ -93,6 +95,37 @@ func TestContinuation_NoClinicalColumns(t *testing.T) {
 		if !got[name] {
 			t.Errorf("gw_pa_continuation no longer declares %s — if the column is gone, shrink this list too", name)
 		}
+	}
+}
+
+// An existing metadata row gains no invented request-linkage authority when
+// EnsureSchema adds the column. This runs only against the owned PG test DB.
+func TestContinuation_ExistingRowMigrationDefaultsEmpty(t *testing.T) {
+	pool := openTestPool(t)
+	dropGWTables(t, pool)
+	ctx := context.Background()
+	_, err := pool.Exec(ctx, `CREATE TABLE gw_pa_continuation (
+		holder_id TEXT NOT NULL, continuation_id TEXT NOT NULL,
+		updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+		PRIMARY KEY (holder_id, continuation_id))`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO gw_pa_continuation (holder_id, continuation_id) VALUES ('provider-a', 'old')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureSchema(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	var refs []string
+	if err := pool.QueryRow(ctx, `SELECT claim_references FROM gw_pa_continuation WHERE holder_id='provider-a' AND continuation_id='old'`).Scan(&refs); err != nil {
+		t.Fatal(err)
+	}
+	if len(refs) != 0 {
+		t.Fatalf("migration invented old-row request authority: %q", refs)
+	}
+	if err := EnsureSchema(ctx, pool); err != nil {
+		t.Fatalf("repeat migration: %v", err)
 	}
 }
 
@@ -121,6 +154,7 @@ func durableSample(holder string) engine.Continuation {
 		OrderRef:         "ServiceRequest/sr-1",
 		ProviderNPI:      "1234567893",
 		ClaimIdentifier:  "urn:shn:claim|claim-1",
+		ClaimReferences:  []string{"Claim/claim-1", "https://shn.example/fhir/Claim/claim-1"},
 		ClaimType:        "http://terminology.hl7.org/CodeSystem/claim-type|professional",
 		ClaimPriority:    "http://terminology.hl7.org/CodeSystem/processpriority|normal",
 		ItemTraceNumbers: []string{"urn:shn:trace|corr-1-1"},
@@ -156,6 +190,7 @@ func TestContinuation_SurvivesRestart(t *testing.T) {
 		t.Fatalf("after a restart: lookup = %v, err = %v", look, err)
 	}
 	if got.OrderRef != "ServiceRequest/sr-1" || got.PayerPreAuthRef != "PA-0001" ||
+		!slices.Equal(got.ClaimReferences, stored.ClaimReferences) ||
 		got.ClaimType != "http://terminology.hl7.org/CodeSystem/claim-type|professional" ||
 		got.Items[0].AuthorizationNumber != "REF-BB-1" || got.Items[0].AdministrationReferenceNumber != "REF-NT-1" ||
 		len(got.Items) != 1 || got.Items[0].ProductCode != "hcpcs|E0424" ||
@@ -201,6 +236,9 @@ func TestContinuation_ReplicaSwitch(t *testing.T) {
 	}
 	if back.LastOutcome != "approved" {
 		t.Fatalf("LastOutcome = %q, want approved", back.LastOutcome)
+	}
+	if !slices.Equal(back.ClaimReferences, stored.ClaimReferences) {
+		t.Fatalf("replica update lost submitted references: %v", back.ClaimReferences)
 	}
 	if !back.CreatedAt.Equal(stored.CreatedAt) {
 		t.Fatalf("an update at another replica moved CreatedAt: %v → %v", stored.CreatedAt, back.CreatedAt)

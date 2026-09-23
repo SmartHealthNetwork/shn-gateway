@@ -81,3 +81,27 @@ func parityChecks(t *testing.T, s storeUnderTest) {
 
 func TestParity_Mem(t *testing.T) { parityChecks(t, engine.NewMemStore()) }
 func TestParity_Pg(t *testing.T)  { parityChecks(t, pgStore(t)) }
+
+func eobSubjectOwnershipChecks(t *testing.T, s storeUnderTest) {
+	t.Helper()
+	first := []byte(`{"resourceType":"ExplanationOfBenefit","id":"shared","patient":{"reference":"Patient/A"}}`)
+	foreign := []byte(`{"resourceType":"ExplanationOfBenefit","id":"shared","patient":{"reference":"Patient/B"}}`)
+	if err := s.RecordEOB("pci:A", "shared", first); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordEOB("pci:B", "shared", foreign); err == nil {
+		t.Fatal("a second patient replaced an EOB ID already owned by the first")
+	}
+	if got, ok := s.EOBsForPatient("pci:A"); !ok || len(got) != 1 || string(got[0]) != string(first) {
+		t.Fatalf("first patient's EOB changed after refused replacement: %s, found=%v", got, ok)
+	}
+	if got, ok := s.EOBsForPatient("pci:B"); ok || len(got) != 0 {
+		t.Fatalf("second patient's refused EOB became visible: %s, found=%v", got, ok)
+	}
+	if got, ok := s.EOBByID("shared"); !ok || string(got) != string(first) {
+		t.Fatalf("instance read changed after refused replacement: %s, found=%v", got, ok)
+	}
+}
+
+func TestEOBSubjectOwnership_Mem(t *testing.T) { eobSubjectOwnershipChecks(t, engine.NewMemStore()) }
+func TestEOBSubjectOwnership_Pg(t *testing.T)  { eobSubjectOwnershipChecks(t, pgStore(t)) }

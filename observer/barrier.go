@@ -25,10 +25,14 @@ func (h *Hub) HandlerWithBarrier(wait func(context.Context) error) http.Handler 
 			return
 		}
 		h.mu.Lock()
-		n := h.seq
+		n, dropped := h.seq, h.dropped
 		h.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"events":%d}`, n)
+		if dropped == 0 {
+			fmt.Fprintf(w, `{"events":%d}`, n)
+		} else {
+			fmt.Fprintf(w, `{"events":%d,"inspectionDropped":%d}`, n, dropped)
+		}
 	})
 	if wait != nil {
 		mux.HandleFunc("POST /barrier", func(w http.ResponseWriter, r *http.Request) {
@@ -38,6 +42,11 @@ func (h *Hub) HandlerWithBarrier(wait func(context.Context) error) http.Handler 
 			if err == nil {
 				err = ctx.Err()
 			}
+			h.mu.Lock()
+			if err == nil && (h.dropped > 0 || h.closed) {
+				err = errors.New("inspection delivery incomplete")
+			}
+			h.mu.Unlock()
 			if err != nil {
 				status := http.StatusServiceUnavailable
 				if errors.Is(err, context.DeadlineExceeded) {
@@ -54,13 +63,15 @@ func (h *Hub) HandlerWithBarrier(wait func(context.Context) error) http.Handler 
 }
 func (h *Hub) writeCompletion(w http.ResponseWriter) {
 	h.mu.Lock()
-	n := h.seq
+	n, dropped, closed := h.seq, h.dropped, h.closed
 	h.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(struct {
-		Protocol    int    `json:"protocol"`
-		Incarnation string `json:"incarnation"`
-		Events      uint64 `json:"events"`
-	}{1, h.incarnation, n})
+		Protocol          int    `json:"protocol"`
+		Incarnation       string `json:"incarnation"`
+		Events            uint64 `json:"events"`
+		InspectionDropped uint64 `json:"inspectionDropped"`
+		Closed            bool   `json:"closed"`
+	}{1, h.incarnation, n, dropped, closed})
 }

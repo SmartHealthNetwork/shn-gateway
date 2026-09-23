@@ -76,5 +76,5 @@ func (g *Gateway) WaitObserverCompletion(ctx context.Context) error {
 	if err := g.waitCertification(ctx); err != nil {
 		return err
 	}
-	return ctx.Err()
+	return g.waitObserver(ctx)
 }

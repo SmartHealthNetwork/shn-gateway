@@ -149,33 +149,37 @@
     {
       "fullUrl": "Patient/pat-mbrhealthlx01-provider",
       "resource": {
+        "birthDate": "1950-12-05",
+        "gender": "unknown",
         "id": "pat-mbrhealthlx01-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-HEALTHLX-01"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:ea2cc04cfdd8da961216738b1f3c8535"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-HEALTHLX-01"
-          }
-        ],
         "name": [
           {
             "family": "Batista-Healthlx"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1950-12-05",
         "resourceType": "Patient"
       },
       "request": {
@@ -186,33 +190,37 @@
     {
       "fullUrl": "Patient/pat-mbrhealthlx02-provider",
       "resource": {
+        "birthDate": "1979-04-22",
+        "gender": "unknown",
         "id": "pat-mbrhealthlx02-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-HEALTHLX-02"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:39c4078fb05daf99c600913e7652a918"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-HEALTHLX-02"
-          }
-        ],
         "name": [
           {
             "family": "Fontaine-Healthlx"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1979-04-22",
         "resourceType": "Patient"
       },
       "request": {

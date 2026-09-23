@@ -115,14 +115,20 @@ func (c *Client) CreatePartitions(ctx context.Context, names []string) error {
 		if err != nil {
 			return err
 		}
-		rb, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+		rb, readErr := io.ReadAll(io.LimitReader(resp.Body, 8193))
 		resp.Body.Close()
+		if readErr != nil || len(rb) > 8192 {
+			return fmt.Errorf("create partition %q: incomplete response body: %v", name, readErr)
+		}
 		respBody := string(rb)
 		// Idempotent: a partition that already exists is success on re-run. Match the PHRASE,
 		// not a brittle code — stock HAPI says "already exists"; HAPI on persistent Postgres
 		// returns HAPI-1309 "Partition name … is already defined" (hfj_partition rows survive a
 		// restart).
-		if resp.StatusCode/100 != 2 && !strings.Contains(respBody, "already exists") && !strings.Contains(respBody, "already defined") {
+		terminalCreate := resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated
+		alreadyPresent := (resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusConflict) &&
+			(strings.Contains(respBody, "already exists") || strings.Contains(respBody, "already defined"))
+		if !terminalCreate && !alreadyPresent {
 			return fmt.Errorf("create partition %q: %d: %s", name, resp.StatusCode, respBody)
 		}
 	}
@@ -146,7 +152,7 @@ func (c *Client) InstallCRLibraries(ctx context.Context) error {
 		}
 		rb, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
 		resp.Body.Close()
-		if resp.StatusCode/100 != 2 {
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 			return fmt.Errorf("PUT Library/%s: %d: %s", id, resp.StatusCode, rb)
 		}
 		c.logf("fhirseed: installed Library/%s into DEFAULT", id)
@@ -157,7 +163,7 @@ func (c *Client) InstallCRLibraries(ctx context.Context) error {
 // WarmUpPopulate compiles each prepop library's ELM so the first real $populate is not the cold
 // compile. Measured: GET DEFAULT/Library/<id>/$evaluate (no subject) compiles + caches the
 // canonical-keyed ELM that $populate reuses (cold first $populate 5.37s → 4.38s after warm-up). A
-// non-2xx is a hard failure (the engine is known-broken before scenarios run).
+// non-200 is a hard failure (a 202 does not prove the compile completed).
 func (c *Client) WarmUpPopulate(ctx context.Context) error {
 	dbase := c.Base + "/DEFAULT"
 	for id := range CRPrepopLibraries() {
@@ -172,7 +178,7 @@ func (c *Client) WarmUpPopulate(ctx context.Context) error {
 		}
 		rb, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
 		resp.Body.Close()
-		if resp.StatusCode/100 != 2 {
+		if resp.StatusCode != http.StatusOK {
 			return fmt.Errorf("$evaluate Library/%s (warm-up): %d: %s", id, resp.StatusCode, rb)
 		}
 		c.logf("fhirseed: warmed ELM for Library/%s", id)
@@ -201,7 +207,9 @@ func (c *Client) LoadProviderDataBundles(ctx context.Context, tenant string) err
 	return nil
 }
 
-// PostTransaction POSTs a FHIR transaction Bundle to {Base}/{tenant} and fails on a non-2xx.
+// PostTransaction POSTs a FHIR transaction Bundle to {Base}/{tenant} and
+// requires a completed response for every requested write before seeding can
+// be marked complete. A 202 acknowledgement is not a completed transaction.
 func (c *Client) PostTransaction(ctx context.Context, tenant string, bundle []byte) error {
 	url := c.Base + "/" + tenant
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bundle))
@@ -213,20 +221,98 @@ func (c *Client) PostTransaction(ctx context.Context, tenant string, bundle []by
 	if err != nil {
 		return err
 	}
-	rb, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+	rb, readErr := io.ReadAll(io.LimitReader(resp.Body, (4<<20)+1))
 	resp.Body.Close()
-	if resp.StatusCode/100 != 2 {
+	if readErr != nil || len(rb) > 4<<20 {
+		return fmt.Errorf("POST %s: incomplete transaction response body: %v", url, readErr)
+	}
+	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("POST %s: status %d: %s", url, resp.StatusCode, rb)
+	}
+	var result struct {
+		ResourceType string `json:"resourceType"`
+		Type         string `json:"type"`
+		Entry        []struct {
+			Response struct {
+				Status string `json:"status"`
+			} `json:"response"`
+		} `json:"entry"`
+	}
+	if err := json.Unmarshal(rb, &result); err != nil || result.ResourceType != "Bundle" || result.Type != "transaction-response" {
+		return fmt.Errorf("POST %s: incomplete transaction response", url)
+	}
+	var source struct {
+		ResourceType string `json:"resourceType"`
+		Type         string `json:"type"`
+		Entry        []struct {
+			Request struct {
+				Method string `json:"method"`
+			} `json:"request"`
+		} `json:"entry"`
+	}
+	if err := json.Unmarshal(bundle, &source); err != nil || source.ResourceType != "Bundle" || source.Type != "transaction" || len(source.Entry) == 0 || len(result.Entry) != len(source.Entry) {
+		return fmt.Errorf("POST %s: transaction response entry count mismatch: got %d", url, len(result.Entry))
+	}
+	for i, entry := range result.Entry {
+		status := strings.Fields(entry.Response.Status)
+		code := ""
+		if len(status) != 0 {
+			code = status[0]
+		}
+		method := source.Entry[i].Request.Method
+		complete := false
+		switch method {
+		case http.MethodGet, http.MethodPatch:
+			complete = code == "200"
+		case http.MethodPost, http.MethodPut:
+			complete = code == "200" || code == "201"
+		case http.MethodDelete:
+			complete = code == "200" || code == "204"
+		}
+		if !complete {
+			return fmt.Errorf("POST %s: transaction entry %d method %q status %q is not complete", url, i, method, entry.Response.Status)
+		}
 	}
 	return nil
 }
 
-// WriteSeedMarker PUTs a Basic/seed-complete resource into the tenant partition. Its presence is
-// the "all seeding done" signal a readiness probe polls for (WaitForSeedMarker) — distinct from
-// "seeding started", which a per-partition data check would falsely report. Basic is
-// profile-free, so no $validate.
+// ClearSeedMarker removes prior-run readiness before a new load starts. A
+// missing marker is expected on first boot; any other write failure refuses
+// the run so stale readiness cannot survive a partial reseed.
+func (c *Client) ClearSeedMarker(ctx context.Context, tenant string) error {
+	url := c.Base + "/" + tenant + "/Basic/seed-complete"
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return err
+	}
+	rb, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
+		return fmt.Errorf("clear seed-complete marker: %d: %s", resp.StatusCode, rb)
+	}
+	return nil
+}
+
+// WriteSeedMarker PUTs a Basic/seed-complete resource into the tenant partition.
+// Its presence is the "all seeding done" signal a readiness probe polls for
+// (WaitForSeedMarker), not a profile verdict. Basic is profile-free.
 func (c *Client) WriteSeedMarker(ctx context.Context, tenant string) error {
 	const body = `{"resourceType":"Basic","id":"seed-complete","code":{"coding":[{"system":"urn:shn:seed","code":"complete"}]}}`
+	return c.writeSeedMarker(ctx, tenant, body)
+}
+
+// WriteSyntheticUncertifiedSeedMarker records complete synthetic source loading
+// without asserting that any resource passed an IG-profile verdict.
+func (c *Client) WriteSyntheticUncertifiedSeedMarker(ctx context.Context, tenant string) error {
+	const body = `{"resourceType":"Basic","id":"seed-complete","meta":{"tag":[{"system":"urn:shn:seed","code":"synthetic-uncertified"}]},"code":{"coding":[{"system":"urn:shn:seed","code":"complete"}]}}`
+	return c.writeSeedMarker(ctx, tenant, body)
+}
+
+func (c *Client) writeSeedMarker(ctx context.Context, tenant, body string) error {
 	url := c.Base + "/" + tenant + "/Basic/seed-complete"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, strings.NewReader(body))
 	if err != nil {
@@ -239,7 +325,7 @@ func (c *Client) WriteSeedMarker(ctx context.Context, tenant string) error {
 	}
 	rb, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
 	resp.Body.Close()
-	if resp.StatusCode/100 != 2 {
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		return fmt.Errorf("write seed-complete marker: %d: %s", resp.StatusCode, rb)
 	}
 	return nil

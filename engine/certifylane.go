@@ -97,20 +97,35 @@ func NewGatedCertificationValidator(lane *DiscoveredLane, qualify LaneQualifier,
 // Validate certifies through the gated client once the lane is ready; until
 // then it answers the lane-unavailable error immediately.
 func (v *GatedCertificationValidator) Validate(ctx context.Context, body []byte, profile string) (shnsdk.Result, error) {
+	if err := v.unavailable(); err != nil {
+		return shnsdk.Result{}, err
+	}
+	return v.client.Validate(ctx, body, profile)
+}
+
+// ValidateEvidence uses the same readiness snapshot and one client call.
+func (v *GatedCertificationValidator) ValidateEvidence(ctx context.Context, body []byte, profile string) (shnsdk.ValidationEvidence, error) {
+	if err := v.unavailable(); err != nil {
+		return unavailableValidatorEvidence(), err
+	}
+	return v.client.ValidateEvidence(ctx, body, profile)
+}
+
+func (v *GatedCertificationValidator) unavailable() error {
 	if v.lane.Ready() {
-		return v.client.Validate(ctx, body, profile)
+		return nil
 	}
 	v.mu.Lock()
 	ready, failures := v.ready, v.failures
 	v.mu.Unlock()
 	if ready {
-		return v.client.Validate(ctx, body, profile)
+		return nil
 	}
 	state := "default lane qualification pending"
 	if failures > 0 {
 		state = "default lane qualification failed, retrying"
 	}
-	return shnsdk.Result{}, &CertificationLaneUnavailable{Reason: v.reason + "; " + state}
+	return &CertificationLaneUnavailable{Reason: v.reason + "; " + state}
 }
 
 // loop runs the client's own attempts until the lane is ready from either

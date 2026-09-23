@@ -4,6 +4,8 @@
 package engine
 
 import (
+	"encoding/json"
+	"reflect"
 	"testing"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
@@ -92,7 +94,22 @@ func TestLegMetric_NilIsNoop(t *testing.T) {
 func TestLegMetric_ConformanceNeutral(t *testing.T) {
 	respWith := driveUC03Body(t, true)
 	respWithout := driveUC03Body(t, false)
-	if respWith != respWithout {
+	// Each run issues a fresh correlation ID. Compare every stable field,
+	// including the exact peer answer, after removing only that ID.
+	canonical := func(body string) map[string]any {
+		t.Helper()
+		var reply map[string]any
+		if err := json.Unmarshal([]byte(body), &reply); err != nil {
+			t.Fatal(err)
+		}
+		application, ok := reply["applicationReply"].(map[string]any)
+		if !ok || application["correlationId"] == "" {
+			t.Fatalf("missing correlated peer answer: %s", body)
+		}
+		delete(application, "correlationId")
+		return reply
+	}
+	if !reflect.DeepEqual(canonical(respWith), canonical(respWithout)) {
 		t.Fatalf("LegMetric emission changed the response body:\nwith:    %s\nwithout: %s", respWith, respWithout)
 	}
 }

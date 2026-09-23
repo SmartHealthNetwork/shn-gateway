@@ -186,6 +186,9 @@ var sweepAllowlist = map[string][]string{
 	},
 
 	// ASCII uppercase range is Go syntax, not a decision label.
+	"connectors/fhirsor/subject_link.go": {
+		"if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '.' {",
+	},
 	"engine/pasgraph.go": {
 		"if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '.') {",
 	},

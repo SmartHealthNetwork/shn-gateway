@@ -269,11 +269,18 @@ func (s *PgStore) RecordDecision(subjectPCI, corrID, outcome string, decidedAt t
 		return engine.PendTransition{}, fmt.Errorf("pgstore: RecordDecision: %w", err)
 	}
 	if eob != nil {
-		if _, err := tx.Exec(ctx, `
+		var recordedID string
+		err := tx.QueryRow(ctx, `
 INSERT INTO gw_eob (holder_id, eob_id, subject_pci, eob_json)
 VALUES ($1, $2, $3, $4)
-ON CONFLICT (holder_id, eob_id) DO UPDATE SET eob_json = EXCLUDED.eob_json`,
-			s.holderID, eob.EOBID, eob.SubjectPCI, eob.JSON); err != nil {
+ON CONFLICT (holder_id, eob_id) DO UPDATE SET eob_json = EXCLUDED.eob_json
+WHERE gw_eob.subject_pci = EXCLUDED.subject_pci
+RETURNING eob_id`,
+			s.holderID, eob.EOBID, eob.SubjectPCI, eob.JSON).Scan(&recordedID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return engine.PendTransition{}, engine.ErrEOBSubjectMismatch
+		}
+		if err != nil {
 			return engine.PendTransition{}, fmt.Errorf("pgstore: RecordDecision: EOB: %w", err)
 		}
 	}

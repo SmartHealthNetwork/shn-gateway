@@ -1,0 +1,31 @@
+{
+  "resourceType": "CodeSystem",
+  "id": "shn-clinical-context",
+  "url": "urn:shn:clinical-context",
+  "version": "1.0.0",
+  "name": "SHNClinicalContext",
+  "status": "active",
+  "experimental": false,
+  "publisher": "Smart Health Network",
+  "caseSensitive": true,
+  "content": "complete",
+  "count": 3,
+  "description": "First SHN-maintained release of three local clinical-context concepts used by the lumbar prior-authorization workflow. Membership does not establish a suitable standard clinical code or the truth of a participant-reported value.",
+  "concept": [
+    {
+      "code": "conservative-therapy-weeks",
+      "display": "Weeks of completed conservative therapy",
+      "definition": "Number of weeks of conservative therapy completed, as reported by the participant source system."
+    },
+    {
+      "code": "neuro-deficit",
+      "display": "Progressive neurological deficit present",
+      "definition": "Boolean flag for whether a progressive neurological deficit is present, as reported by the participant source system."
+    },
+    {
+      "code": "patient-reported-required",
+      "display": "Patient-reported functional-status attestation required",
+      "definition": "Boolean workflow requirement for patient-reported functional-status attestation; this signal is not the attestation itself."
+    }
+  ]
+}

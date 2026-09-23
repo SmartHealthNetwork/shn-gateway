@@ -43,11 +43,11 @@ var relayEdits = []relayEdit{
 		Direction: relay.DirectionRequest,
 		Paths:     []string{"$.fhirServer", "$.fhirAuthorization"},
 		Kind:      editRemoveMember,
-		Precondition: "Always, when the member is present. A payer never receives a route or a credential " +
-			"into the provider's system.",
+		Precondition: "At the source boundary unless authenticated, byte-bound connector completion is verified; " +
+			"when present, the member is removed. A payer never receives a route or a credential into the provider's system.",
 		Authority: "None: the members are removed, nothing is written.",
-		Disclosure: "The provider's gateway removes fhirServer and fhirAuthorization from every CDS Hooks request " +
-			"before it leaves the provider; the payer answers from the request and its prefetch.",
+		Disclosure: "Before a CDS Hooks request leaves the provider, its gateway removes fhirServer and fhirAuthorization " +
+			"or verifies the source connector's byte-bound declaration that preparation is complete; the payer answers from the request and its prefetch.",
 	},
 	{
 		ID:        relay.EditCDSPrefetchObtain,
@@ -57,13 +57,13 @@ var relayEdits = []relayEdit{
 		Direction: relay.DirectionRequest,
 		Paths:     []string{"$.prefetch", "$.prefetch.<key>"},
 		Kind:      editInsertMember,
-		Precondition: "Only for a prefetch key the payer's service advertises and the request left out; " +
+		Precondition: "Only for explicit source-data assembly, for a prefetch key the payer's service advertises and the request left out; " +
 			"$.prefetch itself is created when the request has none. A key the request carries is never changed.",
 		Authority: "The provider's own system, read over the gateway's authenticated connection. The patient " +
 			"is that system's bytes; a search is a searchset the gateway writes around that system's records " +
 			"(each matching or included record byte for byte, under a urn:uuid entry address the gateway " +
 			"assigns, with no links or addresses of that system); null when it holds nothing.",
-		Disclosure: "When a CDS Hooks request leaves out a prefetch value the payer's service asks for, the provider's " +
+		Disclosure: "When source-data assembly is requested for an absent prefetch value the payer's service asks for, the provider's " +
 			"gateway adds it from the provider's own system: the records exactly as that system holds them, in a " +
 			"searchset the gateway writes, never an address in that system; values the request carries are sent unchanged.",
 	},
@@ -105,10 +105,10 @@ var relayEdits = []relayEdit{
 		Direction: relay.DirectionRequest,
 		Paths:     []string{"$.parameter"},
 		Kind:      editArrayAppend,
-		Precondition: `Only when the request carries no "coverage" parameter; one {"name":"coverage","resource":…} ` +
+		Precondition: `Only for source assembly when routing needs Coverage and the request carries no "coverage" parameter; one {"name":"coverage","resource":…} ` +
 			"element is appended.",
 		Authority: "The provider's own system: its Coverage for the bound patient.",
-		Disclosure: "When a questionnaire package request carries no coverage, the provider's gateway appends the " +
+		Disclosure: "When routing needs source Coverage for a questionnaire package request, the provider's gateway appends the " +
 			"patient's Coverage from the provider's own system; the rest of the request is sent unchanged.",
 	},
 	{
@@ -119,13 +119,12 @@ var relayEdits = []relayEdit{
 		Direction: relay.DirectionRequest,
 		Paths:     []string{"$.parameter"},
 		Kind:      editArrayAppend,
-		Precondition: "Only under the connectathon seam that carries members a gateway does not hold " +
-			"(SHN_ACCEPT_UNKNOWN_MEMBERS), only when the request carries no Patient resource for the bound " +
+		Precondition: "Only for explicit source assembly, when the request carries no Patient resource for the bound " +
 			"patient anywhere in its parameters, and only when the provider's own system holds the patient " +
 			"under the id the request names; one {\"name\":\"referenced\",\"resource\":<Patient>} element is appended.",
 		Authority: "The provider's own system: its Patient record for the bound patient.",
-		Disclosure: "When a questionnaire package request carries no Patient and the provider's gateway is carrying " +
-			"members the payer may not hold, the provider's gateway appends the patient's own Patient record from " +
+		Disclosure: "When source Patient assembly is explicitly requested for a questionnaire package request carrying no Patient, " +
+			"the provider's gateway appends the patient's own Patient record from " +
 			"the provider's system as a referenced resource; the rest of the request is sent unchanged.",
 	},
 }

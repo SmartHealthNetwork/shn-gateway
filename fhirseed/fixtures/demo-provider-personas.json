@@ -1,6 +1,3558 @@
 {
   "entry": [
     {
+      "fullUrl": "Claim/claim-kit-draft-mbrcovered-e0424",
+      "resource": {
+        "created": "2026-06-01",
+        "id": "claim-kit-draft-mbrcovered-e0424",
+        "insurance": [
+          {
+            "coverage": {
+              "reference": "Coverage/cov-mbrcovered-provider"
+            },
+            "focal": true,
+            "sequence": 1
+          }
+        ],
+        "item": [
+          {
+            "extension": [
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService",
+                "valueReference": {
+                  "reference": "ServiceRequest/sr-kit-pas-mbrcovered-e0424"
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-certificationType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "I",
+                      "system": "https://codesystem.x12.org/005010/1322"
+                    }
+                  ]
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceItemRequestType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "IN",
+                      "system": "https://codesystem.x12.org/005010/1525"
+                    }
+                  ]
+                }
+              }
+            ],
+            "locationCodeableConcept": {
+              "coding": [
+                {
+                  "code": "12",
+                  "system": "https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set"
+                }
+              ]
+            },
+            "productOrService": {
+              "coding": [
+                {
+                  "code": "E0424",
+                  "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
+                }
+              ]
+            },
+            "sequence": 1
+          }
+        ],
+        "patient": {
+          "reference": "Patient/pat-mbrcovered-provider"
+        },
+        "priority": {
+          "coding": [
+            {
+              "code": "normal",
+              "system": "http://terminology.hl7.org/CodeSystem/processpriority"
+            }
+          ]
+        },
+        "provider": {
+          "reference": "Organization/org-ordering-provider"
+        },
+        "resourceType": "Claim",
+        "status": "draft",
+        "type": {
+          "coding": [
+            {
+              "code": "professional",
+              "system": "http://terminology.hl7.org/CodeSystem/claim-type"
+            }
+          ]
+        },
+        "use": "preauthorization"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Claim/claim-kit-draft-mbrcovered-e0424"
+      }
+    },
+    {
+      "fullUrl": "Claim/claim-kit-draft-mbrcovered-l8000",
+      "resource": {
+        "created": "2026-06-01",
+        "id": "claim-kit-draft-mbrcovered-l8000",
+        "insurance": [
+          {
+            "coverage": {
+              "reference": "Coverage/cov-mbrcovered-provider"
+            },
+            "focal": true,
+            "sequence": 1
+          }
+        ],
+        "item": [
+          {
+            "extension": [
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService",
+                "valueReference": {
+                  "reference": "ServiceRequest/sr-kit-pas-mbrcovered-l8000"
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-certificationType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "I",
+                      "system": "https://codesystem.x12.org/005010/1322"
+                    }
+                  ]
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceItemRequestType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "IN",
+                      "system": "https://codesystem.x12.org/005010/1525"
+                    }
+                  ]
+                }
+              }
+            ],
+            "locationCodeableConcept": {
+              "coding": [
+                {
+                  "code": "11",
+                  "system": "https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set"
+                }
+              ]
+            },
+            "productOrService": {
+              "coding": [
+                {
+                  "code": "L8000",
+                  "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
+                }
+              ]
+            },
+            "sequence": 1
+          }
+        ],
+        "patient": {
+          "reference": "Patient/pat-mbrcovered-provider"
+        },
+        "priority": {
+          "coding": [
+            {
+              "code": "normal",
+              "system": "http://terminology.hl7.org/CodeSystem/processpriority"
+            }
+          ]
+        },
+        "provider": {
+          "reference": "Organization/org-ordering-provider"
+        },
+        "resourceType": "Claim",
+        "status": "draft",
+        "type": {
+          "coding": [
+            {
+              "code": "professional",
+              "system": "http://terminology.hl7.org/CodeSystem/claim-type"
+            }
+          ]
+        },
+        "use": "preauthorization"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Claim/claim-kit-draft-mbrcovered-l8000"
+      }
+    },
+    {
+      "fullUrl": "Claim/claim-kit-draft-mbruc06-e0424",
+      "resource": {
+        "created": "2026-06-01",
+        "id": "claim-kit-draft-mbruc06-e0424",
+        "insurance": [
+          {
+            "coverage": {
+              "reference": "Coverage/cov-mbruc06-provider"
+            },
+            "focal": true,
+            "sequence": 1
+          }
+        ],
+        "item": [
+          {
+            "extension": [
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService",
+                "valueReference": {
+                  "reference": "ServiceRequest/sr-kit-pas-mbruc06-e0424"
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-certificationType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "I",
+                      "system": "https://codesystem.x12.org/005010/1322"
+                    }
+                  ]
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceItemRequestType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "IN",
+                      "system": "https://codesystem.x12.org/005010/1525"
+                    }
+                  ]
+                }
+              }
+            ],
+            "locationCodeableConcept": {
+              "coding": [
+                {
+                  "code": "12",
+                  "system": "https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set"
+                }
+              ]
+            },
+            "productOrService": {
+              "coding": [
+                {
+                  "code": "E0424",
+                  "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
+                }
+              ]
+            },
+            "sequence": 1
+          }
+        ],
+        "patient": {
+          "reference": "Patient/pat-mbruc06-provider"
+        },
+        "priority": {
+          "coding": [
+            {
+              "code": "normal",
+              "system": "http://terminology.hl7.org/CodeSystem/processpriority"
+            }
+          ]
+        },
+        "provider": {
+          "reference": "Organization/org-ordering-provider"
+        },
+        "resourceType": "Claim",
+        "status": "draft",
+        "type": {
+          "coding": [
+            {
+              "code": "professional",
+              "system": "http://terminology.hl7.org/CodeSystem/claim-type"
+            }
+          ]
+        },
+        "use": "preauthorization"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Claim/claim-kit-draft-mbruc06-e0424"
+      }
+    },
+    {
+      "fullUrl": "Claim/claim-origin-draft-mbrbridgedemo",
+      "resource": {
+        "created": "2026-06-01",
+        "id": "claim-origin-draft-mbrbridgedemo",
+        "insurance": [
+          {
+            "coverage": {
+              "reference": "Coverage/cov-mbrbridgedemo-provider"
+            },
+            "focal": true,
+            "sequence": 1
+          }
+        ],
+        "item": [
+          {
+            "extension": [
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService",
+                "valueReference": {
+                  "reference": "ServiceRequest/sr-order-mbrbridgedemo-provider"
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-certificationType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "I",
+                      "system": "https://codesystem.x12.org/005010/1322"
+                    }
+                  ]
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceItemRequestType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "IN",
+                      "system": "https://codesystem.x12.org/005010/1525"
+                    }
+                  ]
+                }
+              }
+            ],
+            "locationCodeableConcept": {
+              "coding": [
+                {
+                  "code": "11",
+                  "system": "https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set"
+                }
+              ]
+            },
+            "productOrService": {
+              "coding": [
+                {
+                  "code": "L8000",
+                  "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
+                }
+              ]
+            },
+            "sequence": 1
+          }
+        ],
+        "patient": {
+          "reference": "Patient/pat-mbrbridgedemo-provider"
+        },
+        "priority": {
+          "coding": [
+            {
+              "code": "normal",
+              "system": "http://terminology.hl7.org/CodeSystem/processpriority"
+            }
+          ]
+        },
+        "provider": {
+          "reference": "Organization/org-ordering-provider"
+        },
+        "resourceType": "Claim",
+        "status": "draft",
+        "type": {
+          "coding": [
+            {
+              "code": "professional",
+              "system": "http://terminology.hl7.org/CodeSystem/claim-type"
+            }
+          ]
+        },
+        "use": "preauthorization"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Claim/claim-origin-draft-mbrbridgedemo"
+      }
+    },
+    {
+      "fullUrl": "Claim/claim-origin-draft-mbrbridgerefuse",
+      "resource": {
+        "created": "2026-06-01",
+        "id": "claim-origin-draft-mbrbridgerefuse",
+        "insurance": [
+          {
+            "coverage": {
+              "reference": "Coverage/cov-mbrbridgerefuse-provider"
+            },
+            "focal": true,
+            "sequence": 1
+          }
+        ],
+        "item": [
+          {
+            "extension": [
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService",
+                "valueReference": {
+                  "reference": "ServiceRequest/sr-order-mbrbridgerefuse-provider"
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-certificationType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "I",
+                      "system": "https://codesystem.x12.org/005010/1322"
+                    }
+                  ]
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceItemRequestType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "IN",
+                      "system": "https://codesystem.x12.org/005010/1525"
+                    }
+                  ]
+                }
+              }
+            ],
+            "locationCodeableConcept": {
+              "coding": [
+                {
+                  "code": "11",
+                  "system": "https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set"
+                }
+              ]
+            },
+            "productOrService": {
+              "coding": [
+                {
+                  "code": "L8000",
+                  "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
+                }
+              ]
+            },
+            "sequence": 1
+          }
+        ],
+        "patient": {
+          "reference": "Patient/pat-mbrbridgerefuse-provider"
+        },
+        "priority": {
+          "coding": [
+            {
+              "code": "normal",
+              "system": "http://terminology.hl7.org/CodeSystem/processpriority"
+            }
+          ]
+        },
+        "provider": {
+          "reference": "Organization/org-ordering-provider"
+        },
+        "resourceType": "Claim",
+        "status": "draft",
+        "type": {
+          "coding": [
+            {
+              "code": "professional",
+              "system": "http://terminology.hl7.org/CodeSystem/claim-type"
+            }
+          ]
+        },
+        "use": "preauthorization"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Claim/claim-origin-draft-mbrbridgerefuse"
+      }
+    },
+    {
+      "fullUrl": "Claim/claim-origin-draft-mbrcanarycovered",
+      "resource": {
+        "created": "2026-06-01",
+        "id": "claim-origin-draft-mbrcanarycovered",
+        "insurance": [
+          {
+            "coverage": {
+              "reference": "Coverage/cov-mbrcanarycovered-provider"
+            },
+            "focal": true,
+            "sequence": 1
+          }
+        ],
+        "item": [
+          {
+            "extension": [
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService",
+                "valueReference": {
+                  "reference": "DeviceRequest/dr-order-mbrcanarycovered-provider"
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-certificationType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "I",
+                      "system": "https://codesystem.x12.org/005010/1322"
+                    }
+                  ]
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceItemRequestType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "IN",
+                      "system": "https://codesystem.x12.org/005010/1525"
+                    }
+                  ]
+                }
+              }
+            ],
+            "locationCodeableConcept": {
+              "coding": [
+                {
+                  "code": "12",
+                  "system": "https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set"
+                }
+              ]
+            },
+            "productOrService": {
+              "coding": [
+                {
+                  "code": "E1390",
+                  "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
+                }
+              ]
+            },
+            "sequence": 1
+          }
+        ],
+        "patient": {
+          "reference": "Patient/pat-mbrcanarycovered-provider"
+        },
+        "priority": {
+          "coding": [
+            {
+              "code": "normal",
+              "system": "http://terminology.hl7.org/CodeSystem/processpriority"
+            }
+          ]
+        },
+        "provider": {
+          "reference": "Organization/org-uc03-demo-supplier"
+        },
+        "resourceType": "Claim",
+        "status": "draft",
+        "type": {
+          "coding": [
+            {
+              "code": "professional",
+              "system": "http://terminology.hl7.org/CodeSystem/claim-type"
+            }
+          ]
+        },
+        "use": "preauthorization"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Claim/claim-origin-draft-mbrcanarycovered"
+      }
+    },
+    {
+      "fullUrl": "Claim/claim-origin-draft-mbrcanaryduc02",
+      "resource": {
+        "created": "2026-06-01",
+        "id": "claim-origin-draft-mbrcanaryduc02",
+        "insurance": [
+          {
+            "coverage": {
+              "reference": "Coverage/cov-mbrcanaryduc02-provider"
+            },
+            "focal": true,
+            "sequence": 1
+          }
+        ],
+        "item": [
+          {
+            "extension": [
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService",
+                "valueReference": {
+                  "reference": "ServiceRequest/sr-order-mbrcanaryduc02-provider"
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-certificationType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "I",
+                      "system": "https://codesystem.x12.org/005010/1322"
+                    }
+                  ]
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceItemRequestType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "IN",
+                      "system": "https://codesystem.x12.org/005010/1525"
+                    }
+                  ]
+                }
+              }
+            ],
+            "locationCodeableConcept": {
+              "coding": [
+                {
+                  "code": "12",
+                  "system": "https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set"
+                }
+              ]
+            },
+            "productOrService": {
+              "coding": [
+                {
+                  "code": "E0250",
+                  "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
+                }
+              ]
+            },
+            "sequence": 1
+          }
+        ],
+        "patient": {
+          "reference": "Patient/pat-mbrcanaryduc02-provider"
+        },
+        "priority": {
+          "coding": [
+            {
+              "code": "normal",
+              "system": "http://terminology.hl7.org/CodeSystem/processpriority"
+            }
+          ]
+        },
+        "provider": {
+          "reference": "Organization/org-ordering-provider"
+        },
+        "resourceType": "Claim",
+        "status": "draft",
+        "type": {
+          "coding": [
+            {
+              "code": "professional",
+              "system": "http://terminology.hl7.org/CodeSystem/claim-type"
+            }
+          ]
+        },
+        "use": "preauthorization"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Claim/claim-origin-draft-mbrcanaryduc02"
+      }
+    },
+    {
+      "fullUrl": "Claim/claim-origin-draft-mbrcanaryduc03",
+      "resource": {
+        "created": "2026-06-01",
+        "id": "claim-origin-draft-mbrcanaryduc03",
+        "insurance": [
+          {
+            "coverage": {
+              "reference": "Coverage/cov-mbrcanaryduc03-provider"
+            },
+            "focal": true,
+            "sequence": 1
+          }
+        ],
+        "item": [
+          {
+            "extension": [
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService",
+                "valueReference": {
+                  "reference": "DeviceRequest/dr-order-mbrcanaryduc03-provider"
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-certificationType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "I",
+                      "system": "https://codesystem.x12.org/005010/1322"
+                    }
+                  ]
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceItemRequestType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "IN",
+                      "system": "https://codesystem.x12.org/005010/1525"
+                    }
+                  ]
+                }
+              }
+            ],
+            "locationCodeableConcept": {
+              "coding": [
+                {
+                  "code": "12",
+                  "system": "https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set"
+                }
+              ]
+            },
+            "productOrService": {
+              "coding": [
+                {
+                  "code": "E1390",
+                  "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
+                }
+              ]
+            },
+            "sequence": 1
+          }
+        ],
+        "patient": {
+          "reference": "Patient/pat-mbrcanaryduc03-provider"
+        },
+        "priority": {
+          "coding": [
+            {
+              "code": "normal",
+              "system": "http://terminology.hl7.org/CodeSystem/processpriority"
+            }
+          ]
+        },
+        "provider": {
+          "reference": "Organization/org-uc03-demo-supplier"
+        },
+        "resourceType": "Claim",
+        "status": "draft",
+        "type": {
+          "coding": [
+            {
+              "code": "professional",
+              "system": "http://terminology.hl7.org/CodeSystem/claim-type"
+            }
+          ]
+        },
+        "use": "preauthorization"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Claim/claim-origin-draft-mbrcanaryduc03"
+      }
+    },
+    {
+      "fullUrl": "Claim/claim-origin-draft-mbrcanaryduc04",
+      "resource": {
+        "created": "2026-06-01",
+        "id": "claim-origin-draft-mbrcanaryduc04",
+        "insurance": [
+          {
+            "coverage": {
+              "reference": "Coverage/cov-mbrcanaryduc04-provider"
+            },
+            "focal": true,
+            "sequence": 1
+          }
+        ],
+        "item": [
+          {
+            "extension": [
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService",
+                "valueReference": {
+                  "reference": "ServiceRequest/sr-order-mbrcanaryduc04-provider"
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-certificationType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "I",
+                      "system": "https://codesystem.x12.org/005010/1322"
+                    }
+                  ]
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceItemRequestType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "IN",
+                      "system": "https://codesystem.x12.org/005010/1525"
+                    }
+                  ]
+                }
+              }
+            ],
+            "locationCodeableConcept": {
+              "coding": [
+                {
+                  "code": "12",
+                  "system": "https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set"
+                }
+              ]
+            },
+            "productOrService": {
+              "coding": [
+                {
+                  "code": "G0151",
+                  "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
+                }
+              ]
+            },
+            "sequence": 1
+          }
+        ],
+        "patient": {
+          "reference": "Patient/pat-mbrcanaryduc04-provider"
+        },
+        "priority": {
+          "coding": [
+            {
+              "code": "normal",
+              "system": "http://terminology.hl7.org/CodeSystem/processpriority"
+            }
+          ]
+        },
+        "provider": {
+          "reference": "Organization/org-ordering-provider"
+        },
+        "resourceType": "Claim",
+        "status": "draft",
+        "type": {
+          "coding": [
+            {
+              "code": "professional",
+              "system": "http://terminology.hl7.org/CodeSystem/claim-type"
+            }
+          ]
+        },
+        "use": "preauthorization"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Claim/claim-origin-draft-mbrcanaryduc04"
+      }
+    },
+    {
+      "fullUrl": "Claim/claim-origin-draft-mbrcanaryduc05",
+      "resource": {
+        "created": "2026-06-01",
+        "id": "claim-origin-draft-mbrcanaryduc05",
+        "insurance": [
+          {
+            "coverage": {
+              "reference": "Coverage/cov-mbrcanaryduc05-provider"
+            },
+            "focal": true,
+            "sequence": 1
+          }
+        ],
+        "item": [
+          {
+            "extension": [
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService",
+                "valueReference": {
+                  "reference": "ServiceRequest/sr-order-mbrcanaryduc05-provider"
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-certificationType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "I",
+                      "system": "https://codesystem.x12.org/005010/1322"
+                    }
+                  ]
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceItemRequestType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "IN",
+                      "system": "https://codesystem.x12.org/005010/1525"
+                    }
+                  ]
+                }
+              }
+            ],
+            "locationCodeableConcept": {
+              "coding": [
+                {
+                  "code": "12",
+                  "system": "https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set"
+                }
+              ]
+            },
+            "productOrService": {
+              "coding": [
+                {
+                  "code": "G0151",
+                  "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
+                }
+              ]
+            },
+            "sequence": 1
+          }
+        ],
+        "patient": {
+          "reference": "Patient/pat-mbrcanaryduc05-provider"
+        },
+        "priority": {
+          "coding": [
+            {
+              "code": "normal",
+              "system": "http://terminology.hl7.org/CodeSystem/processpriority"
+            }
+          ]
+        },
+        "provider": {
+          "reference": "Organization/org-ordering-provider"
+        },
+        "resourceType": "Claim",
+        "status": "draft",
+        "type": {
+          "coding": [
+            {
+              "code": "professional",
+              "system": "http://terminology.hl7.org/CodeSystem/claim-type"
+            }
+          ]
+        },
+        "use": "preauthorization"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Claim/claim-origin-draft-mbrcanaryduc05"
+      }
+    },
+    {
+      "fullUrl": "Claim/claim-origin-draft-mbrcanaryduc05nc",
+      "resource": {
+        "created": "2026-06-01",
+        "id": "claim-origin-draft-mbrcanaryduc05nc",
+        "insurance": [
+          {
+            "coverage": {
+              "reference": "Coverage/cov-mbrcanaryduc05nc-provider"
+            },
+            "focal": true,
+            "sequence": 1
+          }
+        ],
+        "item": [
+          {
+            "extension": [
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService",
+                "valueReference": {
+                  "reference": "ServiceRequest/sr-order-mbrcanaryduc05nc-provider"
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-certificationType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "I",
+                      "system": "https://codesystem.x12.org/005010/1322"
+                    }
+                  ]
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceItemRequestType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "IN",
+                      "system": "https://codesystem.x12.org/005010/1525"
+                    }
+                  ]
+                }
+              }
+            ],
+            "locationCodeableConcept": {
+              "coding": [
+                {
+                  "code": "12",
+                  "system": "https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set"
+                }
+              ]
+            },
+            "productOrService": {
+              "coding": [
+                {
+                  "code": "G0151",
+                  "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
+                }
+              ]
+            },
+            "sequence": 1
+          }
+        ],
+        "patient": {
+          "reference": "Patient/pat-mbrcanaryduc05nc-provider"
+        },
+        "priority": {
+          "coding": [
+            {
+              "code": "normal",
+              "system": "http://terminology.hl7.org/CodeSystem/processpriority"
+            }
+          ]
+        },
+        "provider": {
+          "reference": "Organization/org-ordering-provider"
+        },
+        "resourceType": "Claim",
+        "status": "draft",
+        "type": {
+          "coding": [
+            {
+              "code": "professional",
+              "system": "http://terminology.hl7.org/CodeSystem/claim-type"
+            }
+          ]
+        },
+        "use": "preauthorization"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Claim/claim-origin-draft-mbrcanaryduc05nc"
+      }
+    },
+    {
+      "fullUrl": "Claim/claim-origin-draft-mbrcanaryduc06",
+      "resource": {
+        "created": "2026-06-01",
+        "id": "claim-origin-draft-mbrcanaryduc06",
+        "insurance": [
+          {
+            "coverage": {
+              "reference": "Coverage/cov-mbrcanaryduc06-provider"
+            },
+            "focal": true,
+            "sequence": 1
+          }
+        ],
+        "item": [
+          {
+            "extension": [
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService",
+                "valueReference": {
+                  "reference": "ServiceRequest/sr-order-mbrcanaryduc06-provider"
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-certificationType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "I",
+                      "system": "https://codesystem.x12.org/005010/1322"
+                    }
+                  ]
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceItemRequestType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "IN",
+                      "system": "https://codesystem.x12.org/005010/1525"
+                    }
+                  ]
+                }
+              }
+            ],
+            "locationCodeableConcept": {
+              "coding": [
+                {
+                  "code": "12",
+                  "system": "https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set"
+                }
+              ]
+            },
+            "productOrService": {
+              "coding": [
+                {
+                  "code": "G0151",
+                  "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
+                }
+              ]
+            },
+            "sequence": 1
+          }
+        ],
+        "patient": {
+          "reference": "Patient/pat-mbrcanaryduc06-provider"
+        },
+        "priority": {
+          "coding": [
+            {
+              "code": "normal",
+              "system": "http://terminology.hl7.org/CodeSystem/processpriority"
+            }
+          ]
+        },
+        "provider": {
+          "reference": "Organization/org-ordering-provider"
+        },
+        "resourceType": "Claim",
+        "status": "draft",
+        "type": {
+          "coding": [
+            {
+              "code": "professional",
+              "system": "http://terminology.hl7.org/CodeSystem/claim-type"
+            }
+          ]
+        },
+        "use": "preauthorization"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Claim/claim-origin-draft-mbrcanaryduc06"
+      }
+    },
+    {
+      "fullUrl": "Claim/claim-origin-draft-mbrcanaryduc07",
+      "resource": {
+        "created": "2026-06-01",
+        "id": "claim-origin-draft-mbrcanaryduc07",
+        "insurance": [
+          {
+            "coverage": {
+              "reference": "Coverage/cov-mbrcanaryduc07-provider"
+            },
+            "focal": true,
+            "sequence": 1
+          }
+        ],
+        "item": [
+          {
+            "extension": [
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService",
+                "valueReference": {
+                  "reference": "ServiceRequest/sr-order-mbrcanaryduc07-provider"
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-certificationType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "I",
+                      "system": "https://codesystem.x12.org/005010/1322"
+                    }
+                  ]
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceItemRequestType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "IN",
+                      "system": "https://codesystem.x12.org/005010/1525"
+                    }
+                  ]
+                }
+              }
+            ],
+            "locationCodeableConcept": {
+              "coding": [
+                {
+                  "code": "12",
+                  "system": "https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set"
+                }
+              ]
+            },
+            "productOrService": {
+              "coding": [
+                {
+                  "code": "G0151",
+                  "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
+                }
+              ]
+            },
+            "sequence": 1
+          }
+        ],
+        "patient": {
+          "reference": "Patient/pat-mbrcanaryduc07-provider"
+        },
+        "priority": {
+          "coding": [
+            {
+              "code": "normal",
+              "system": "http://terminology.hl7.org/CodeSystem/processpriority"
+            }
+          ]
+        },
+        "provider": {
+          "reference": "Organization/org-ordering-provider"
+        },
+        "resourceType": "Claim",
+        "status": "draft",
+        "type": {
+          "coding": [
+            {
+              "code": "professional",
+              "system": "http://terminology.hl7.org/CodeSystem/claim-type"
+            }
+          ]
+        },
+        "use": "preauthorization"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Claim/claim-origin-draft-mbrcanaryduc07"
+      }
+    },
+    {
+      "fullUrl": "Claim/claim-origin-draft-mbrcanaryduc08",
+      "resource": {
+        "created": "2026-06-01",
+        "id": "claim-origin-draft-mbrcanaryduc08",
+        "insurance": [
+          {
+            "coverage": {
+              "reference": "Coverage/cov-mbrcanaryduc08-provider"
+            },
+            "focal": true,
+            "sequence": 1
+          }
+        ],
+        "item": [
+          {
+            "extension": [
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService",
+                "valueReference": {
+                  "reference": "ServiceRequest/sr-order-mbrcanaryduc08-provider"
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-certificationType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "I",
+                      "system": "https://codesystem.x12.org/005010/1322"
+                    }
+                  ]
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceItemRequestType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "IN",
+                      "system": "https://codesystem.x12.org/005010/1525"
+                    }
+                  ]
+                }
+              }
+            ],
+            "locationCodeableConcept": {
+              "coding": [
+                {
+                  "code": "11",
+                  "system": "https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set"
+                }
+              ]
+            },
+            "productOrService": {
+              "coding": [
+                {
+                  "code": "J3490",
+                  "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
+                }
+              ]
+            },
+            "sequence": 1
+          }
+        ],
+        "patient": {
+          "reference": "Patient/pat-mbrcanaryduc08-provider"
+        },
+        "priority": {
+          "coding": [
+            {
+              "code": "normal",
+              "system": "http://terminology.hl7.org/CodeSystem/processpriority"
+            }
+          ]
+        },
+        "provider": {
+          "reference": "Organization/org-ordering-provider"
+        },
+        "resourceType": "Claim",
+        "status": "draft",
+        "type": {
+          "coding": [
+            {
+              "code": "professional",
+              "system": "http://terminology.hl7.org/CodeSystem/claim-type"
+            }
+          ]
+        },
+        "use": "preauthorization"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Claim/claim-origin-draft-mbrcanaryduc08"
+      }
+    },
+    {
+      "fullUrl": "Claim/claim-origin-draft-mbrcanaryuc04",
+      "resource": {
+        "created": "2026-06-01",
+        "id": "claim-origin-draft-mbrcanaryuc04",
+        "insurance": [
+          {
+            "coverage": {
+              "reference": "Coverage/cov-mbrcanaryuc04-provider"
+            },
+            "focal": true,
+            "sequence": 1
+          }
+        ],
+        "item": [
+          {
+            "extension": [
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService",
+                "valueReference": {
+                  "reference": "ServiceRequest/sr-order-mbrcanaryuc04-provider"
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-certificationType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "I",
+                      "system": "https://codesystem.x12.org/005010/1322"
+                    }
+                  ]
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceItemRequestType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "IN",
+                      "system": "https://codesystem.x12.org/005010/1525"
+                    }
+                  ]
+                }
+              }
+            ],
+            "locationCodeableConcept": {
+              "coding": [
+                {
+                  "code": "12",
+                  "system": "https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set"
+                }
+              ]
+            },
+            "productOrService": {
+              "coding": [
+                {
+                  "code": "G0151",
+                  "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
+                }
+              ]
+            },
+            "sequence": 1
+          }
+        ],
+        "patient": {
+          "reference": "Patient/pat-mbrcanaryuc04-provider"
+        },
+        "priority": {
+          "coding": [
+            {
+              "code": "normal",
+              "system": "http://terminology.hl7.org/CodeSystem/processpriority"
+            }
+          ]
+        },
+        "provider": {
+          "reference": "Organization/org-ordering-provider"
+        },
+        "resourceType": "Claim",
+        "status": "draft",
+        "type": {
+          "coding": [
+            {
+              "code": "professional",
+              "system": "http://terminology.hl7.org/CodeSystem/claim-type"
+            }
+          ]
+        },
+        "use": "preauthorization"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Claim/claim-origin-draft-mbrcanaryuc04"
+      }
+    },
+    {
+      "fullUrl": "Claim/claim-origin-draft-mbrcanaryuc05",
+      "resource": {
+        "created": "2026-06-01",
+        "id": "claim-origin-draft-mbrcanaryuc05",
+        "insurance": [
+          {
+            "coverage": {
+              "reference": "Coverage/cov-mbrcanaryuc05-provider"
+            },
+            "focal": true,
+            "sequence": 1
+          }
+        ],
+        "item": [
+          {
+            "extension": [
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService",
+                "valueReference": {
+                  "reference": "ServiceRequest/sr-order-mbrcanaryuc05-provider"
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-certificationType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "I",
+                      "system": "https://codesystem.x12.org/005010/1322"
+                    }
+                  ]
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceItemRequestType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "IN",
+                      "system": "https://codesystem.x12.org/005010/1525"
+                    }
+                  ]
+                }
+              }
+            ],
+            "locationCodeableConcept": {
+              "coding": [
+                {
+                  "code": "12",
+                  "system": "https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set"
+                }
+              ]
+            },
+            "productOrService": {
+              "coding": [
+                {
+                  "code": "G0151",
+                  "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
+                }
+              ]
+            },
+            "sequence": 1
+          }
+        ],
+        "patient": {
+          "reference": "Patient/pat-mbrcanaryuc05-provider"
+        },
+        "priority": {
+          "coding": [
+            {
+              "code": "normal",
+              "system": "http://terminology.hl7.org/CodeSystem/processpriority"
+            }
+          ]
+        },
+        "provider": {
+          "reference": "Organization/org-ordering-provider"
+        },
+        "resourceType": "Claim",
+        "status": "draft",
+        "type": {
+          "coding": [
+            {
+              "code": "professional",
+              "system": "http://terminology.hl7.org/CodeSystem/claim-type"
+            }
+          ]
+        },
+        "use": "preauthorization"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Claim/claim-origin-draft-mbrcanaryuc05"
+      }
+    },
+    {
+      "fullUrl": "Claim/claim-origin-draft-mbrcanaryuc05noconsent",
+      "resource": {
+        "created": "2026-06-01",
+        "id": "claim-origin-draft-mbrcanaryuc05noconsent",
+        "insurance": [
+          {
+            "coverage": {
+              "reference": "Coverage/cov-mbrcanaryuc05noconsent-provider"
+            },
+            "focal": true,
+            "sequence": 1
+          }
+        ],
+        "item": [
+          {
+            "extension": [
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService",
+                "valueReference": {
+                  "reference": "ServiceRequest/sr-order-mbrcanaryuc05noconsent-provider"
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-certificationType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "I",
+                      "system": "https://codesystem.x12.org/005010/1322"
+                    }
+                  ]
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceItemRequestType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "IN",
+                      "system": "https://codesystem.x12.org/005010/1525"
+                    }
+                  ]
+                }
+              }
+            ],
+            "locationCodeableConcept": {
+              "coding": [
+                {
+                  "code": "12",
+                  "system": "https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set"
+                }
+              ]
+            },
+            "productOrService": {
+              "coding": [
+                {
+                  "code": "G0151",
+                  "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
+                }
+              ]
+            },
+            "sequence": 1
+          }
+        ],
+        "patient": {
+          "reference": "Patient/pat-mbrcanaryuc05noconsent-provider"
+        },
+        "priority": {
+          "coding": [
+            {
+              "code": "normal",
+              "system": "http://terminology.hl7.org/CodeSystem/processpriority"
+            }
+          ]
+        },
+        "provider": {
+          "reference": "Organization/org-ordering-provider"
+        },
+        "resourceType": "Claim",
+        "status": "draft",
+        "type": {
+          "coding": [
+            {
+              "code": "professional",
+              "system": "http://terminology.hl7.org/CodeSystem/claim-type"
+            }
+          ]
+        },
+        "use": "preauthorization"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Claim/claim-origin-draft-mbrcanaryuc05noconsent"
+      }
+    },
+    {
+      "fullUrl": "Claim/claim-origin-draft-mbrcanaryuc06",
+      "resource": {
+        "created": "2026-06-01",
+        "id": "claim-origin-draft-mbrcanaryuc06",
+        "insurance": [
+          {
+            "coverage": {
+              "reference": "Coverage/cov-mbrcanaryuc06-provider"
+            },
+            "focal": true,
+            "sequence": 1
+          }
+        ],
+        "item": [
+          {
+            "extension": [
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService",
+                "valueReference": {
+                  "reference": "ServiceRequest/sr-order-mbrcanaryuc06-provider"
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-certificationType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "I",
+                      "system": "https://codesystem.x12.org/005010/1322"
+                    }
+                  ]
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceItemRequestType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "IN",
+                      "system": "https://codesystem.x12.org/005010/1525"
+                    }
+                  ]
+                }
+              }
+            ],
+            "locationCodeableConcept": {
+              "coding": [
+                {
+                  "code": "12",
+                  "system": "https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set"
+                }
+              ]
+            },
+            "productOrService": {
+              "coding": [
+                {
+                  "code": "G0151",
+                  "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
+                }
+              ]
+            },
+            "sequence": 1
+          }
+        ],
+        "patient": {
+          "reference": "Patient/pat-mbrcanaryuc06-provider"
+        },
+        "priority": {
+          "coding": [
+            {
+              "code": "normal",
+              "system": "http://terminology.hl7.org/CodeSystem/processpriority"
+            }
+          ]
+        },
+        "provider": {
+          "reference": "Organization/org-ordering-provider"
+        },
+        "resourceType": "Claim",
+        "status": "draft",
+        "type": {
+          "coding": [
+            {
+              "code": "professional",
+              "system": "http://terminology.hl7.org/CodeSystem/claim-type"
+            }
+          ]
+        },
+        "use": "preauthorization"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Claim/claim-origin-draft-mbrcanaryuc06"
+      }
+    },
+    {
+      "fullUrl": "Claim/claim-origin-draft-mbrcanaryuc07",
+      "resource": {
+        "created": "2026-06-01",
+        "id": "claim-origin-draft-mbrcanaryuc07",
+        "insurance": [
+          {
+            "coverage": {
+              "reference": "Coverage/cov-mbrcanaryuc07-provider"
+            },
+            "focal": true,
+            "sequence": 1
+          }
+        ],
+        "item": [
+          {
+            "extension": [
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService",
+                "valueReference": {
+                  "reference": "ServiceRequest/sr-order-mbrcanaryuc07-provider"
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-certificationType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "I",
+                      "system": "https://codesystem.x12.org/005010/1322"
+                    }
+                  ]
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceItemRequestType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "IN",
+                      "system": "https://codesystem.x12.org/005010/1525"
+                    }
+                  ]
+                }
+              }
+            ],
+            "locationCodeableConcept": {
+              "coding": [
+                {
+                  "code": "12",
+                  "system": "https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set"
+                }
+              ]
+            },
+            "productOrService": {
+              "coding": [
+                {
+                  "code": "G0151",
+                  "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
+                }
+              ]
+            },
+            "sequence": 1
+          }
+        ],
+        "patient": {
+          "reference": "Patient/pat-mbrcanaryuc07-provider"
+        },
+        "priority": {
+          "coding": [
+            {
+              "code": "normal",
+              "system": "http://terminology.hl7.org/CodeSystem/processpriority"
+            }
+          ]
+        },
+        "provider": {
+          "reference": "Organization/org-ordering-provider"
+        },
+        "resourceType": "Claim",
+        "status": "draft",
+        "type": {
+          "coding": [
+            {
+              "code": "professional",
+              "system": "http://terminology.hl7.org/CodeSystem/claim-type"
+            }
+          ]
+        },
+        "use": "preauthorization"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Claim/claim-origin-draft-mbrcanaryuc07"
+      }
+    },
+    {
+      "fullUrl": "Claim/claim-origin-draft-mbrcanaryuc07hcpcs",
+      "resource": {
+        "created": "2026-06-01",
+        "id": "claim-origin-draft-mbrcanaryuc07hcpcs",
+        "insurance": [
+          {
+            "coverage": {
+              "reference": "Coverage/cov-mbrcanaryuc07hcpcs-provider"
+            },
+            "focal": true,
+            "sequence": 1
+          }
+        ],
+        "item": [
+          {
+            "extension": [
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService",
+                "valueReference": {
+                  "reference": "ServiceRequest/sr-order-mbrcanaryuc07hcpcs-provider"
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-certificationType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "I",
+                      "system": "https://codesystem.x12.org/005010/1322"
+                    }
+                  ]
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceItemRequestType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "IN",
+                      "system": "https://codesystem.x12.org/005010/1525"
+                    }
+                  ]
+                }
+              }
+            ],
+            "locationCodeableConcept": {
+              "coding": [
+                {
+                  "code": "11",
+                  "system": "https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set"
+                }
+              ]
+            },
+            "productOrService": {
+              "coding": [
+                {
+                  "code": "L8000",
+                  "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
+                }
+              ]
+            },
+            "sequence": 1
+          }
+        ],
+        "patient": {
+          "reference": "Patient/pat-mbrcanaryuc07hcpcs-provider"
+        },
+        "priority": {
+          "coding": [
+            {
+              "code": "normal",
+              "system": "http://terminology.hl7.org/CodeSystem/processpriority"
+            }
+          ]
+        },
+        "provider": {
+          "reference": "Organization/org-ordering-provider"
+        },
+        "resourceType": "Claim",
+        "status": "draft",
+        "type": {
+          "coding": [
+            {
+              "code": "professional",
+              "system": "http://terminology.hl7.org/CodeSystem/claim-type"
+            }
+          ]
+        },
+        "use": "preauthorization"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Claim/claim-origin-draft-mbrcanaryuc07hcpcs"
+      }
+    },
+    {
+      "fullUrl": "Claim/claim-origin-draft-mbrcanaryuc08",
+      "resource": {
+        "created": "2026-06-01",
+        "id": "claim-origin-draft-mbrcanaryuc08",
+        "insurance": [
+          {
+            "coverage": {
+              "reference": "Coverage/cov-mbrcanaryuc08-provider"
+            },
+            "focal": true,
+            "sequence": 1
+          }
+        ],
+        "item": [
+          {
+            "extension": [
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService",
+                "valueReference": {
+                  "reference": "ServiceRequest/sr-order-mbrcanaryuc08-provider"
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-certificationType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "I",
+                      "system": "https://codesystem.x12.org/005010/1322"
+                    }
+                  ]
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceItemRequestType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "IN",
+                      "system": "https://codesystem.x12.org/005010/1525"
+                    }
+                  ]
+                }
+              }
+            ],
+            "locationCodeableConcept": {
+              "coding": [
+                {
+                  "code": "11",
+                  "system": "https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set"
+                }
+              ]
+            },
+            "productOrService": {
+              "coding": [
+                {
+                  "code": "J3490",
+                  "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
+                }
+              ]
+            },
+            "sequence": 1
+          }
+        ],
+        "patient": {
+          "reference": "Patient/pat-mbrcanaryuc08-provider"
+        },
+        "priority": {
+          "coding": [
+            {
+              "code": "normal",
+              "system": "http://terminology.hl7.org/CodeSystem/processpriority"
+            }
+          ]
+        },
+        "provider": {
+          "reference": "Organization/org-ordering-provider"
+        },
+        "resourceType": "Claim",
+        "status": "draft",
+        "type": {
+          "coding": [
+            {
+              "code": "professional",
+              "system": "http://terminology.hl7.org/CodeSystem/claim-type"
+            }
+          ]
+        },
+        "use": "preauthorization"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Claim/claim-origin-draft-mbrcanaryuc08"
+      }
+    },
+    {
+      "fullUrl": "Claim/claim-origin-draft-mbrcovered",
+      "resource": {
+        "created": "2026-06-01",
+        "id": "claim-origin-draft-mbrcovered",
+        "insurance": [
+          {
+            "coverage": {
+              "reference": "Coverage/cov-mbrcovered-provider"
+            },
+            "focal": true,
+            "sequence": 1
+          }
+        ],
+        "item": [
+          {
+            "extension": [
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService",
+                "valueReference": {
+                  "reference": "DeviceRequest/dr-order-mbrcovered-provider"
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-certificationType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "I",
+                      "system": "https://codesystem.x12.org/005010/1322"
+                    }
+                  ]
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceItemRequestType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "IN",
+                      "system": "https://codesystem.x12.org/005010/1525"
+                    }
+                  ]
+                }
+              }
+            ],
+            "locationCodeableConcept": {
+              "coding": [
+                {
+                  "code": "12",
+                  "system": "https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set"
+                }
+              ]
+            },
+            "productOrService": {
+              "coding": [
+                {
+                  "code": "E1390",
+                  "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
+                }
+              ]
+            },
+            "sequence": 1
+          }
+        ],
+        "patient": {
+          "reference": "Patient/pat-mbrcovered-provider"
+        },
+        "priority": {
+          "coding": [
+            {
+              "code": "normal",
+              "system": "http://terminology.hl7.org/CodeSystem/processpriority"
+            }
+          ]
+        },
+        "provider": {
+          "reference": "Organization/org-uc03-demo-supplier"
+        },
+        "resourceType": "Claim",
+        "status": "draft",
+        "type": {
+          "coding": [
+            {
+              "code": "professional",
+              "system": "http://terminology.hl7.org/CodeSystem/claim-type"
+            }
+          ]
+        },
+        "use": "preauthorization"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Claim/claim-origin-draft-mbrcovered"
+      }
+    },
+    {
+      "fullUrl": "Claim/claim-origin-draft-mbrduc02",
+      "resource": {
+        "created": "2026-06-01",
+        "id": "claim-origin-draft-mbrduc02",
+        "insurance": [
+          {
+            "coverage": {
+              "reference": "Coverage/cov-mbrduc02-provider"
+            },
+            "focal": true,
+            "sequence": 1
+          }
+        ],
+        "item": [
+          {
+            "extension": [
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService",
+                "valueReference": {
+                  "reference": "ServiceRequest/sr-order-mbrduc02-provider"
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-certificationType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "I",
+                      "system": "https://codesystem.x12.org/005010/1322"
+                    }
+                  ]
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceItemRequestType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "IN",
+                      "system": "https://codesystem.x12.org/005010/1525"
+                    }
+                  ]
+                }
+              }
+            ],
+            "locationCodeableConcept": {
+              "coding": [
+                {
+                  "code": "12",
+                  "system": "https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set"
+                }
+              ]
+            },
+            "productOrService": {
+              "coding": [
+                {
+                  "code": "E0250",
+                  "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
+                }
+              ]
+            },
+            "sequence": 1
+          }
+        ],
+        "patient": {
+          "reference": "Patient/pat-mbrduc02-provider"
+        },
+        "priority": {
+          "coding": [
+            {
+              "code": "normal",
+              "system": "http://terminology.hl7.org/CodeSystem/processpriority"
+            }
+          ]
+        },
+        "provider": {
+          "reference": "Organization/org-ordering-provider"
+        },
+        "resourceType": "Claim",
+        "status": "draft",
+        "type": {
+          "coding": [
+            {
+              "code": "professional",
+              "system": "http://terminology.hl7.org/CodeSystem/claim-type"
+            }
+          ]
+        },
+        "use": "preauthorization"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Claim/claim-origin-draft-mbrduc02"
+      }
+    },
+    {
+      "fullUrl": "Claim/claim-origin-draft-mbrduc03",
+      "resource": {
+        "created": "2026-06-01",
+        "id": "claim-origin-draft-mbrduc03",
+        "insurance": [
+          {
+            "coverage": {
+              "reference": "Coverage/cov-mbrduc03-provider"
+            },
+            "focal": true,
+            "sequence": 1
+          }
+        ],
+        "item": [
+          {
+            "extension": [
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService",
+                "valueReference": {
+                  "reference": "DeviceRequest/dr-order-mbrduc03-provider"
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-certificationType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "I",
+                      "system": "https://codesystem.x12.org/005010/1322"
+                    }
+                  ]
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceItemRequestType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "IN",
+                      "system": "https://codesystem.x12.org/005010/1525"
+                    }
+                  ]
+                }
+              }
+            ],
+            "locationCodeableConcept": {
+              "coding": [
+                {
+                  "code": "12",
+                  "system": "https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set"
+                }
+              ]
+            },
+            "productOrService": {
+              "coding": [
+                {
+                  "code": "E1390",
+                  "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
+                }
+              ]
+            },
+            "sequence": 1
+          }
+        ],
+        "patient": {
+          "reference": "Patient/pat-mbrduc03-provider"
+        },
+        "priority": {
+          "coding": [
+            {
+              "code": "normal",
+              "system": "http://terminology.hl7.org/CodeSystem/processpriority"
+            }
+          ]
+        },
+        "provider": {
+          "reference": "Organization/org-uc03-demo-supplier"
+        },
+        "resourceType": "Claim",
+        "status": "draft",
+        "type": {
+          "coding": [
+            {
+              "code": "professional",
+              "system": "http://terminology.hl7.org/CodeSystem/claim-type"
+            }
+          ]
+        },
+        "use": "preauthorization"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Claim/claim-origin-draft-mbrduc03"
+      }
+    },
+    {
+      "fullUrl": "Claim/claim-origin-draft-mbrduc04",
+      "resource": {
+        "created": "2026-06-01",
+        "id": "claim-origin-draft-mbrduc04",
+        "insurance": [
+          {
+            "coverage": {
+              "reference": "Coverage/cov-mbrduc04-provider"
+            },
+            "focal": true,
+            "sequence": 1
+          }
+        ],
+        "item": [
+          {
+            "extension": [
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService",
+                "valueReference": {
+                  "reference": "ServiceRequest/sr-order-mbrduc04-provider"
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-certificationType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "I",
+                      "system": "https://codesystem.x12.org/005010/1322"
+                    }
+                  ]
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceItemRequestType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "IN",
+                      "system": "https://codesystem.x12.org/005010/1525"
+                    }
+                  ]
+                }
+              }
+            ],
+            "locationCodeableConcept": {
+              "coding": [
+                {
+                  "code": "12",
+                  "system": "https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set"
+                }
+              ]
+            },
+            "productOrService": {
+              "coding": [
+                {
+                  "code": "G0151",
+                  "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
+                }
+              ]
+            },
+            "sequence": 1
+          }
+        ],
+        "patient": {
+          "reference": "Patient/pat-mbrduc04-provider"
+        },
+        "priority": {
+          "coding": [
+            {
+              "code": "normal",
+              "system": "http://terminology.hl7.org/CodeSystem/processpriority"
+            }
+          ]
+        },
+        "provider": {
+          "reference": "Organization/org-ordering-provider"
+        },
+        "resourceType": "Claim",
+        "status": "draft",
+        "type": {
+          "coding": [
+            {
+              "code": "professional",
+              "system": "http://terminology.hl7.org/CodeSystem/claim-type"
+            }
+          ]
+        },
+        "use": "preauthorization"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Claim/claim-origin-draft-mbrduc04"
+      }
+    },
+    {
+      "fullUrl": "Claim/claim-origin-draft-mbrduc05",
+      "resource": {
+        "created": "2026-06-01",
+        "id": "claim-origin-draft-mbrduc05",
+        "insurance": [
+          {
+            "coverage": {
+              "reference": "Coverage/cov-mbrduc05-provider"
+            },
+            "focal": true,
+            "sequence": 1
+          }
+        ],
+        "item": [
+          {
+            "extension": [
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService",
+                "valueReference": {
+                  "reference": "ServiceRequest/sr-order-mbrduc05-provider"
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-certificationType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "I",
+                      "system": "https://codesystem.x12.org/005010/1322"
+                    }
+                  ]
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceItemRequestType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "IN",
+                      "system": "https://codesystem.x12.org/005010/1525"
+                    }
+                  ]
+                }
+              }
+            ],
+            "locationCodeableConcept": {
+              "coding": [
+                {
+                  "code": "12",
+                  "system": "https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set"
+                }
+              ]
+            },
+            "productOrService": {
+              "coding": [
+                {
+                  "code": "G0151",
+                  "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
+                }
+              ]
+            },
+            "sequence": 1
+          }
+        ],
+        "patient": {
+          "reference": "Patient/pat-mbrduc05-provider"
+        },
+        "priority": {
+          "coding": [
+            {
+              "code": "normal",
+              "system": "http://terminology.hl7.org/CodeSystem/processpriority"
+            }
+          ]
+        },
+        "provider": {
+          "reference": "Organization/org-ordering-provider"
+        },
+        "resourceType": "Claim",
+        "status": "draft",
+        "type": {
+          "coding": [
+            {
+              "code": "professional",
+              "system": "http://terminology.hl7.org/CodeSystem/claim-type"
+            }
+          ]
+        },
+        "use": "preauthorization"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Claim/claim-origin-draft-mbrduc05"
+      }
+    },
+    {
+      "fullUrl": "Claim/claim-origin-draft-mbrduc05nc",
+      "resource": {
+        "created": "2026-06-01",
+        "id": "claim-origin-draft-mbrduc05nc",
+        "insurance": [
+          {
+            "coverage": {
+              "reference": "Coverage/cov-mbrduc05nc-provider"
+            },
+            "focal": true,
+            "sequence": 1
+          }
+        ],
+        "item": [
+          {
+            "extension": [
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService",
+                "valueReference": {
+                  "reference": "ServiceRequest/sr-order-mbrduc05nc-provider"
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-certificationType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "I",
+                      "system": "https://codesystem.x12.org/005010/1322"
+                    }
+                  ]
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceItemRequestType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "IN",
+                      "system": "https://codesystem.x12.org/005010/1525"
+                    }
+                  ]
+                }
+              }
+            ],
+            "locationCodeableConcept": {
+              "coding": [
+                {
+                  "code": "12",
+                  "system": "https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set"
+                }
+              ]
+            },
+            "productOrService": {
+              "coding": [
+                {
+                  "code": "G0151",
+                  "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
+                }
+              ]
+            },
+            "sequence": 1
+          }
+        ],
+        "patient": {
+          "reference": "Patient/pat-mbrduc05nc-provider"
+        },
+        "priority": {
+          "coding": [
+            {
+              "code": "normal",
+              "system": "http://terminology.hl7.org/CodeSystem/processpriority"
+            }
+          ]
+        },
+        "provider": {
+          "reference": "Organization/org-ordering-provider"
+        },
+        "resourceType": "Claim",
+        "status": "draft",
+        "type": {
+          "coding": [
+            {
+              "code": "professional",
+              "system": "http://terminology.hl7.org/CodeSystem/claim-type"
+            }
+          ]
+        },
+        "use": "preauthorization"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Claim/claim-origin-draft-mbrduc05nc"
+      }
+    },
+    {
+      "fullUrl": "Claim/claim-origin-draft-mbrduc06",
+      "resource": {
+        "created": "2026-06-01",
+        "id": "claim-origin-draft-mbrduc06",
+        "insurance": [
+          {
+            "coverage": {
+              "reference": "Coverage/cov-mbrduc06-provider"
+            },
+            "focal": true,
+            "sequence": 1
+          }
+        ],
+        "item": [
+          {
+            "extension": [
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService",
+                "valueReference": {
+                  "reference": "ServiceRequest/sr-order-mbrduc06-provider"
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-certificationType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "I",
+                      "system": "https://codesystem.x12.org/005010/1322"
+                    }
+                  ]
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceItemRequestType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "IN",
+                      "system": "https://codesystem.x12.org/005010/1525"
+                    }
+                  ]
+                }
+              }
+            ],
+            "locationCodeableConcept": {
+              "coding": [
+                {
+                  "code": "12",
+                  "system": "https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set"
+                }
+              ]
+            },
+            "productOrService": {
+              "coding": [
+                {
+                  "code": "G0151",
+                  "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
+                }
+              ]
+            },
+            "sequence": 1
+          }
+        ],
+        "patient": {
+          "reference": "Patient/pat-mbrduc06-provider"
+        },
+        "priority": {
+          "coding": [
+            {
+              "code": "normal",
+              "system": "http://terminology.hl7.org/CodeSystem/processpriority"
+            }
+          ]
+        },
+        "provider": {
+          "reference": "Organization/org-ordering-provider"
+        },
+        "resourceType": "Claim",
+        "status": "draft",
+        "type": {
+          "coding": [
+            {
+              "code": "professional",
+              "system": "http://terminology.hl7.org/CodeSystem/claim-type"
+            }
+          ]
+        },
+        "use": "preauthorization"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Claim/claim-origin-draft-mbrduc06"
+      }
+    },
+    {
+      "fullUrl": "Claim/claim-origin-draft-mbrduc07",
+      "resource": {
+        "created": "2026-06-01",
+        "id": "claim-origin-draft-mbrduc07",
+        "insurance": [
+          {
+            "coverage": {
+              "reference": "Coverage/cov-mbrduc07-provider"
+            },
+            "focal": true,
+            "sequence": 1
+          }
+        ],
+        "item": [
+          {
+            "extension": [
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService",
+                "valueReference": {
+                  "reference": "ServiceRequest/sr-order-mbrduc07-provider"
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-certificationType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "I",
+                      "system": "https://codesystem.x12.org/005010/1322"
+                    }
+                  ]
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceItemRequestType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "IN",
+                      "system": "https://codesystem.x12.org/005010/1525"
+                    }
+                  ]
+                }
+              }
+            ],
+            "locationCodeableConcept": {
+              "coding": [
+                {
+                  "code": "12",
+                  "system": "https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set"
+                }
+              ]
+            },
+            "productOrService": {
+              "coding": [
+                {
+                  "code": "G0151",
+                  "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
+                }
+              ]
+            },
+            "sequence": 1
+          }
+        ],
+        "patient": {
+          "reference": "Patient/pat-mbrduc07-provider"
+        },
+        "priority": {
+          "coding": [
+            {
+              "code": "normal",
+              "system": "http://terminology.hl7.org/CodeSystem/processpriority"
+            }
+          ]
+        },
+        "provider": {
+          "reference": "Organization/org-ordering-provider"
+        },
+        "resourceType": "Claim",
+        "status": "draft",
+        "type": {
+          "coding": [
+            {
+              "code": "professional",
+              "system": "http://terminology.hl7.org/CodeSystem/claim-type"
+            }
+          ]
+        },
+        "use": "preauthorization"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Claim/claim-origin-draft-mbrduc07"
+      }
+    },
+    {
+      "fullUrl": "Claim/claim-origin-draft-mbrduc08",
+      "resource": {
+        "created": "2026-06-01",
+        "id": "claim-origin-draft-mbrduc08",
+        "insurance": [
+          {
+            "coverage": {
+              "reference": "Coverage/cov-mbrduc08-provider"
+            },
+            "focal": true,
+            "sequence": 1
+          }
+        ],
+        "item": [
+          {
+            "extension": [
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService",
+                "valueReference": {
+                  "reference": "ServiceRequest/sr-order-mbrduc08-provider"
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-certificationType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "I",
+                      "system": "https://codesystem.x12.org/005010/1322"
+                    }
+                  ]
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceItemRequestType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "IN",
+                      "system": "https://codesystem.x12.org/005010/1525"
+                    }
+                  ]
+                }
+              }
+            ],
+            "locationCodeableConcept": {
+              "coding": [
+                {
+                  "code": "11",
+                  "system": "https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set"
+                }
+              ]
+            },
+            "productOrService": {
+              "coding": [
+                {
+                  "code": "J3490",
+                  "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
+                }
+              ]
+            },
+            "sequence": 1
+          }
+        ],
+        "patient": {
+          "reference": "Patient/pat-mbrduc08-provider"
+        },
+        "priority": {
+          "coding": [
+            {
+              "code": "normal",
+              "system": "http://terminology.hl7.org/CodeSystem/processpriority"
+            }
+          ]
+        },
+        "provider": {
+          "reference": "Organization/org-ordering-provider"
+        },
+        "resourceType": "Claim",
+        "status": "draft",
+        "type": {
+          "coding": [
+            {
+              "code": "professional",
+              "system": "http://terminology.hl7.org/CodeSystem/claim-type"
+            }
+          ]
+        },
+        "use": "preauthorization"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Claim/claim-origin-draft-mbrduc08"
+      }
+    },
+    {
+      "fullUrl": "Claim/claim-origin-draft-mbruc04",
+      "resource": {
+        "created": "2026-06-01",
+        "id": "claim-origin-draft-mbruc04",
+        "insurance": [
+          {
+            "coverage": {
+              "reference": "Coverage/cov-mbruc04-provider"
+            },
+            "focal": true,
+            "sequence": 1
+          }
+        ],
+        "item": [
+          {
+            "extension": [
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService",
+                "valueReference": {
+                  "reference": "ServiceRequest/sr-order-mbruc04-provider"
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-certificationType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "I",
+                      "system": "https://codesystem.x12.org/005010/1322"
+                    }
+                  ]
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceItemRequestType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "IN",
+                      "system": "https://codesystem.x12.org/005010/1525"
+                    }
+                  ]
+                }
+              }
+            ],
+            "locationCodeableConcept": {
+              "coding": [
+                {
+                  "code": "12",
+                  "system": "https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set"
+                }
+              ]
+            },
+            "productOrService": {
+              "coding": [
+                {
+                  "code": "G0151",
+                  "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
+                }
+              ]
+            },
+            "sequence": 1
+          }
+        ],
+        "patient": {
+          "reference": "Patient/pat-mbruc04-provider"
+        },
+        "priority": {
+          "coding": [
+            {
+              "code": "normal",
+              "system": "http://terminology.hl7.org/CodeSystem/processpriority"
+            }
+          ]
+        },
+        "provider": {
+          "reference": "Organization/org-ordering-provider"
+        },
+        "resourceType": "Claim",
+        "status": "draft",
+        "type": {
+          "coding": [
+            {
+              "code": "professional",
+              "system": "http://terminology.hl7.org/CodeSystem/claim-type"
+            }
+          ]
+        },
+        "use": "preauthorization"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Claim/claim-origin-draft-mbruc04"
+      }
+    },
+    {
+      "fullUrl": "Claim/claim-origin-draft-mbruc05",
+      "resource": {
+        "created": "2026-06-01",
+        "id": "claim-origin-draft-mbruc05",
+        "insurance": [
+          {
+            "coverage": {
+              "reference": "Coverage/cov-mbruc05-provider"
+            },
+            "focal": true,
+            "sequence": 1
+          }
+        ],
+        "item": [
+          {
+            "extension": [
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService",
+                "valueReference": {
+                  "reference": "ServiceRequest/sr-order-mbruc05-provider"
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-certificationType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "I",
+                      "system": "https://codesystem.x12.org/005010/1322"
+                    }
+                  ]
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceItemRequestType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "IN",
+                      "system": "https://codesystem.x12.org/005010/1525"
+                    }
+                  ]
+                }
+              }
+            ],
+            "locationCodeableConcept": {
+              "coding": [
+                {
+                  "code": "12",
+                  "system": "https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set"
+                }
+              ]
+            },
+            "productOrService": {
+              "coding": [
+                {
+                  "code": "G0151",
+                  "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
+                }
+              ]
+            },
+            "sequence": 1
+          }
+        ],
+        "patient": {
+          "reference": "Patient/pat-mbruc05-provider"
+        },
+        "priority": {
+          "coding": [
+            {
+              "code": "normal",
+              "system": "http://terminology.hl7.org/CodeSystem/processpriority"
+            }
+          ]
+        },
+        "provider": {
+          "reference": "Organization/org-ordering-provider"
+        },
+        "resourceType": "Claim",
+        "status": "draft",
+        "type": {
+          "coding": [
+            {
+              "code": "professional",
+              "system": "http://terminology.hl7.org/CodeSystem/claim-type"
+            }
+          ]
+        },
+        "use": "preauthorization"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Claim/claim-origin-draft-mbruc05"
+      }
+    },
+    {
+      "fullUrl": "Claim/claim-origin-draft-mbruc05noconsent",
+      "resource": {
+        "created": "2026-06-01",
+        "id": "claim-origin-draft-mbruc05noconsent",
+        "insurance": [
+          {
+            "coverage": {
+              "reference": "Coverage/cov-mbruc05noconsent-provider"
+            },
+            "focal": true,
+            "sequence": 1
+          }
+        ],
+        "item": [
+          {
+            "extension": [
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService",
+                "valueReference": {
+                  "reference": "ServiceRequest/sr-order-mbruc05noconsent-provider"
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-certificationType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "I",
+                      "system": "https://codesystem.x12.org/005010/1322"
+                    }
+                  ]
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceItemRequestType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "IN",
+                      "system": "https://codesystem.x12.org/005010/1525"
+                    }
+                  ]
+                }
+              }
+            ],
+            "locationCodeableConcept": {
+              "coding": [
+                {
+                  "code": "12",
+                  "system": "https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set"
+                }
+              ]
+            },
+            "productOrService": {
+              "coding": [
+                {
+                  "code": "G0151",
+                  "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
+                }
+              ]
+            },
+            "sequence": 1
+          }
+        ],
+        "patient": {
+          "reference": "Patient/pat-mbruc05noconsent-provider"
+        },
+        "priority": {
+          "coding": [
+            {
+              "code": "normal",
+              "system": "http://terminology.hl7.org/CodeSystem/processpriority"
+            }
+          ]
+        },
+        "provider": {
+          "reference": "Organization/org-ordering-provider"
+        },
+        "resourceType": "Claim",
+        "status": "draft",
+        "type": {
+          "coding": [
+            {
+              "code": "professional",
+              "system": "http://terminology.hl7.org/CodeSystem/claim-type"
+            }
+          ]
+        },
+        "use": "preauthorization"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Claim/claim-origin-draft-mbruc05noconsent"
+      }
+    },
+    {
+      "fullUrl": "Claim/claim-origin-draft-mbruc06",
+      "resource": {
+        "created": "2026-06-01",
+        "id": "claim-origin-draft-mbruc06",
+        "insurance": [
+          {
+            "coverage": {
+              "reference": "Coverage/cov-mbruc06-provider"
+            },
+            "focal": true,
+            "sequence": 1
+          }
+        ],
+        "item": [
+          {
+            "extension": [
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService",
+                "valueReference": {
+                  "reference": "ServiceRequest/sr-order-mbruc06-provider"
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-certificationType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "I",
+                      "system": "https://codesystem.x12.org/005010/1322"
+                    }
+                  ]
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceItemRequestType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "IN",
+                      "system": "https://codesystem.x12.org/005010/1525"
+                    }
+                  ]
+                }
+              }
+            ],
+            "locationCodeableConcept": {
+              "coding": [
+                {
+                  "code": "12",
+                  "system": "https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set"
+                }
+              ]
+            },
+            "productOrService": {
+              "coding": [
+                {
+                  "code": "G0151",
+                  "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
+                }
+              ]
+            },
+            "sequence": 1
+          }
+        ],
+        "patient": {
+          "reference": "Patient/pat-mbruc06-provider"
+        },
+        "priority": {
+          "coding": [
+            {
+              "code": "normal",
+              "system": "http://terminology.hl7.org/CodeSystem/processpriority"
+            }
+          ]
+        },
+        "provider": {
+          "reference": "Organization/org-ordering-provider"
+        },
+        "resourceType": "Claim",
+        "status": "draft",
+        "type": {
+          "coding": [
+            {
+              "code": "professional",
+              "system": "http://terminology.hl7.org/CodeSystem/claim-type"
+            }
+          ]
+        },
+        "use": "preauthorization"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Claim/claim-origin-draft-mbruc06"
+      }
+    },
+    {
+      "fullUrl": "Claim/claim-origin-draft-mbruc07",
+      "resource": {
+        "created": "2026-06-01",
+        "id": "claim-origin-draft-mbruc07",
+        "insurance": [
+          {
+            "coverage": {
+              "reference": "Coverage/cov-mbruc07-provider"
+            },
+            "focal": true,
+            "sequence": 1
+          }
+        ],
+        "item": [
+          {
+            "extension": [
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService",
+                "valueReference": {
+                  "reference": "ServiceRequest/sr-order-mbruc07-provider"
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-certificationType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "I",
+                      "system": "https://codesystem.x12.org/005010/1322"
+                    }
+                  ]
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceItemRequestType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "IN",
+                      "system": "https://codesystem.x12.org/005010/1525"
+                    }
+                  ]
+                }
+              }
+            ],
+            "locationCodeableConcept": {
+              "coding": [
+                {
+                  "code": "12",
+                  "system": "https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set"
+                }
+              ]
+            },
+            "productOrService": {
+              "coding": [
+                {
+                  "code": "G0151",
+                  "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
+                }
+              ]
+            },
+            "sequence": 1
+          }
+        ],
+        "patient": {
+          "reference": "Patient/pat-mbruc07-provider"
+        },
+        "priority": {
+          "coding": [
+            {
+              "code": "normal",
+              "system": "http://terminology.hl7.org/CodeSystem/processpriority"
+            }
+          ]
+        },
+        "provider": {
+          "reference": "Organization/org-ordering-provider"
+        },
+        "resourceType": "Claim",
+        "status": "draft",
+        "type": {
+          "coding": [
+            {
+              "code": "professional",
+              "system": "http://terminology.hl7.org/CodeSystem/claim-type"
+            }
+          ]
+        },
+        "use": "preauthorization"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Claim/claim-origin-draft-mbruc07"
+      }
+    },
+    {
+      "fullUrl": "Claim/claim-origin-draft-mbruc07hcpcs",
+      "resource": {
+        "created": "2026-06-01",
+        "id": "claim-origin-draft-mbruc07hcpcs",
+        "insurance": [
+          {
+            "coverage": {
+              "reference": "Coverage/cov-mbruc07hcpcs-provider"
+            },
+            "focal": true,
+            "sequence": 1
+          }
+        ],
+        "item": [
+          {
+            "extension": [
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService",
+                "valueReference": {
+                  "reference": "ServiceRequest/sr-order-mbruc07hcpcs-provider"
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-certificationType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "I",
+                      "system": "https://codesystem.x12.org/005010/1322"
+                    }
+                  ]
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceItemRequestType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "IN",
+                      "system": "https://codesystem.x12.org/005010/1525"
+                    }
+                  ]
+                }
+              }
+            ],
+            "locationCodeableConcept": {
+              "coding": [
+                {
+                  "code": "11",
+                  "system": "https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set"
+                }
+              ]
+            },
+            "productOrService": {
+              "coding": [
+                {
+                  "code": "L8000",
+                  "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
+                }
+              ]
+            },
+            "sequence": 1
+          }
+        ],
+        "patient": {
+          "reference": "Patient/pat-mbruc07hcpcs-provider"
+        },
+        "priority": {
+          "coding": [
+            {
+              "code": "normal",
+              "system": "http://terminology.hl7.org/CodeSystem/processpriority"
+            }
+          ]
+        },
+        "provider": {
+          "reference": "Organization/org-ordering-provider"
+        },
+        "resourceType": "Claim",
+        "status": "draft",
+        "type": {
+          "coding": [
+            {
+              "code": "professional",
+              "system": "http://terminology.hl7.org/CodeSystem/claim-type"
+            }
+          ]
+        },
+        "use": "preauthorization"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Claim/claim-origin-draft-mbruc07hcpcs"
+      }
+    },
+    {
+      "fullUrl": "Claim/claim-origin-draft-mbruc08",
+      "resource": {
+        "created": "2026-06-01",
+        "id": "claim-origin-draft-mbruc08",
+        "insurance": [
+          {
+            "coverage": {
+              "reference": "Coverage/cov-mbruc08-provider"
+            },
+            "focal": true,
+            "sequence": 1
+          }
+        ],
+        "item": [
+          {
+            "extension": [
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService",
+                "valueReference": {
+                  "reference": "ServiceRequest/sr-order-mbruc08-provider"
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-certificationType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "I",
+                      "system": "https://codesystem.x12.org/005010/1322"
+                    }
+                  ]
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceItemRequestType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "IN",
+                      "system": "https://codesystem.x12.org/005010/1525"
+                    }
+                  ]
+                }
+              }
+            ],
+            "locationCodeableConcept": {
+              "coding": [
+                {
+                  "code": "11",
+                  "system": "https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set"
+                }
+              ]
+            },
+            "productOrService": {
+              "coding": [
+                {
+                  "code": "J3490",
+                  "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
+                }
+              ]
+            },
+            "sequence": 1
+          }
+        ],
+        "patient": {
+          "reference": "Patient/pat-mbruc08-provider"
+        },
+        "priority": {
+          "coding": [
+            {
+              "code": "normal",
+              "system": "http://terminology.hl7.org/CodeSystem/processpriority"
+            }
+          ]
+        },
+        "provider": {
+          "reference": "Organization/org-ordering-provider"
+        },
+        "resourceType": "Claim",
+        "status": "draft",
+        "type": {
+          "coding": [
+            {
+              "code": "professional",
+              "system": "http://terminology.hl7.org/CodeSystem/claim-type"
+            }
+          ]
+        },
+        "use": "preauthorization"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Claim/claim-origin-draft-mbruc08"
+      }
+    },
+    {
       "fullUrl": "Condition/cond-comorbid-mbrcanaryduc03-provider",
       "resource": {
         "category": [
@@ -7999,33 +11551,37 @@
     {
       "fullUrl": "Patient/pat-mbrbridgedemo-provider",
       "resource": {
+        "birthDate": "1983-03-11",
+        "gender": "unknown",
         "id": "pat-mbrbridgedemo-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-BRIDGE-DEMO"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:2b7bf6ac913e40eae92ee1ad60e41549"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-BRIDGE-DEMO"
-          }
-        ],
         "name": [
           {
             "family": "Solberg-BridgeDemo"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1983-03-11",
         "resourceType": "Patient"
       },
       "request": {
@@ -8036,33 +11592,37 @@
     {
       "fullUrl": "Patient/pat-mbrbridgerefuse-provider",
       "resource": {
+        "birthDate": "1986-09-27",
+        "gender": "unknown",
         "id": "pat-mbrbridgerefuse-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-BRIDGE-REFUSE"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:c5ea9beb2fdf5f4bb67d8e45188b296d"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-BRIDGE-REFUSE"
-          }
-        ],
         "name": [
           {
             "family": "Amara-BridgeRefuse"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1986-09-27",
         "resourceType": "Patient"
       },
       "request": {
@@ -8073,33 +11633,37 @@
     {
       "fullUrl": "Patient/pat-mbrcanarycovered-provider",
       "resource": {
+        "birthDate": "1975-04-02",
+        "gender": "unknown",
         "id": "pat-mbrcanarycovered-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-CANARY-COVERED"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:e82fe565e0eade5f0ff068b5e5b5e2a2"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-CANARY-COVERED"
-          }
-        ],
         "name": [
           {
             "family": "Johansson-Canary"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1975-04-02",
         "resourceType": "Patient"
       },
       "request": {
@@ -8110,33 +11674,37 @@
     {
       "fullUrl": "Patient/pat-mbrcanaryduc01-provider",
       "resource": {
+        "birthDate": "1972-03-14",
+        "gender": "unknown",
         "id": "pat-mbrcanaryduc01-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-CANARY-D-UC01"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:18604cb749c017b89ac33cb39108dfec"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-CANARY-D-UC01"
-          }
-        ],
         "name": [
           {
             "family": "Larsen-Canary"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1972-03-14",
         "resourceType": "Patient"
       },
       "request": {
@@ -8147,33 +11715,37 @@
     {
       "fullUrl": "Patient/pat-mbrcanaryduc01nc-provider",
       "resource": {
+        "birthDate": "1972-03-14",
+        "gender": "unknown",
         "id": "pat-mbrcanaryduc01nc-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-CANARY-D-UC01-NC"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:bcc6a6a31f2f5b63b0a785d767c8d096"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-CANARY-D-UC01-NC"
-          }
-        ],
         "name": [
           {
             "family": "Larsen-Terminated-Canary"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1972-03-14",
         "resourceType": "Patient"
       },
       "request": {
@@ -8184,33 +11756,37 @@
     {
       "fullUrl": "Patient/pat-mbrcanaryduc02-provider",
       "resource": {
+        "birthDate": "1965-06-11",
+        "gender": "unknown",
         "id": "pat-mbrcanaryduc02-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-CANARY-D-UC02"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:70ca96f4174302837cbf66854af3a729"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-CANARY-D-UC02"
-          }
-        ],
         "name": [
           {
             "family": "Fontaine-Canary"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1965-06-11",
         "resourceType": "Patient"
       },
       "request": {
@@ -8221,33 +11797,37 @@
     {
       "fullUrl": "Patient/pat-mbrcanaryduc03-provider",
       "resource": {
+        "birthDate": "1979-09-02",
+        "gender": "unknown",
         "id": "pat-mbrcanaryduc03-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-CANARY-D-UC03"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:17d6bff96302bcf7fb8eff6147c59b9e"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-CANARY-D-UC03"
-          }
-        ],
         "name": [
           {
             "family": "Whitfield-Canary"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1979-09-02",
         "resourceType": "Patient"
       },
       "request": {
@@ -8258,33 +11838,37 @@
     {
       "fullUrl": "Patient/pat-mbrcanaryduc04-provider",
       "resource": {
+        "birthDate": "1958-12-19",
+        "gender": "unknown",
         "id": "pat-mbrcanaryduc04-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-CANARY-D-UC04"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:7081746c01dc6a68980db77bd6d75cf7"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-CANARY-D-UC04"
-          }
-        ],
         "name": [
           {
             "family": "Okereke-Canary"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1958-12-19",
         "resourceType": "Patient"
       },
       "request": {
@@ -8295,33 +11879,37 @@
     {
       "fullUrl": "Patient/pat-mbrcanaryduc05-provider",
       "resource": {
+        "birthDate": "1963-02-27",
+        "gender": "unknown",
         "id": "pat-mbrcanaryduc05-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-CANARY-D-UC05"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:ca0d3e7961fddf5e4b8cb247ba77895e"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-CANARY-D-UC05"
-          }
-        ],
         "name": [
           {
             "family": "Marchetti-Canary"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1963-02-27",
         "resourceType": "Patient"
       },
       "request": {
@@ -8332,33 +11920,37 @@
     {
       "fullUrl": "Patient/pat-mbrcanaryduc05nc-provider",
       "resource": {
+        "birthDate": "1963-02-27",
+        "gender": "unknown",
         "id": "pat-mbrcanaryduc05nc-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-CANARY-D-UC05-NC"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:030b388af070db0430d1777d5a91eb06"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-CANARY-D-UC05-NC"
-          }
-        ],
         "name": [
           {
             "family": "Marchetti-Noconsent-Canary"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1963-02-27",
         "resourceType": "Patient"
       },
       "request": {
@@ -8369,33 +11961,37 @@
     {
       "fullUrl": "Patient/pat-mbrcanaryduc06-provider",
       "resource": {
+        "birthDate": "1970-05-08",
+        "gender": "unknown",
         "id": "pat-mbrcanaryduc06-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-CANARY-D-UC06"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:abae564df0bf065f626bced4e495ce31"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-CANARY-D-UC06"
-          }
-        ],
         "name": [
           {
             "family": "Adeyemi-Canary"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1970-05-08",
         "resourceType": "Patient"
       },
       "request": {
@@ -8406,33 +12002,37 @@
     {
       "fullUrl": "Patient/pat-mbrcanaryduc07-provider",
       "resource": {
+        "birthDate": "1985-10-23",
+        "gender": "unknown",
         "id": "pat-mbrcanaryduc07-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-CANARY-D-UC07"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:0644362a05e2eac0522a316965166ebb"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-CANARY-D-UC07"
-          }
-        ],
         "name": [
           {
             "family": "Kowalczyk-Canary"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1985-10-23",
         "resourceType": "Patient"
       },
       "request": {
@@ -8443,33 +12043,37 @@
     {
       "fullUrl": "Patient/pat-mbrcanaryduc08-provider",
       "resource": {
+        "birthDate": "1968-07-30",
+        "gender": "unknown",
         "id": "pat-mbrcanaryduc08-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-CANARY-D-UC08"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:a40758bdfca814042f933a27d43c0e46"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-CANARY-D-UC08"
-          }
-        ],
         "name": [
           {
             "family": "Delacroix-Canary"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1968-07-30",
         "resourceType": "Patient"
       },
       "request": {
@@ -8480,33 +12084,37 @@
     {
       "fullUrl": "Patient/pat-mbrcanarynotcovered-provider",
       "resource": {
+        "birthDate": "1980-09-15",
+        "gender": "unknown",
         "id": "pat-mbrcanarynotcovered-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-CANARY-NOTCOVERED"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:79b195089e22bfb27a85a6d7fb566604"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-CANARY-NOTCOVERED"
-          }
-        ],
         "name": [
           {
             "family": "Reyes-Canary"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1980-09-15",
         "resourceType": "Patient"
       },
       "request": {
@@ -8517,33 +12125,37 @@
     {
       "fullUrl": "Patient/pat-mbrcanaryuc04-provider",
       "resource": {
+        "birthDate": "1982-11-03",
+        "gender": "unknown",
         "id": "pat-mbrcanaryuc04-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-CANARY-UC04"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:bb7a0c03cb28202afdfce8f39df4fd70"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-CANARY-UC04"
-          }
-        ],
         "name": [
           {
             "family": "Chen-Canary"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1982-11-03",
         "resourceType": "Patient"
       },
       "request": {
@@ -8554,33 +12166,37 @@
     {
       "fullUrl": "Patient/pat-mbrcanaryuc05-provider",
       "resource": {
+        "birthDate": "1968-03-12",
+        "gender": "unknown",
         "id": "pat-mbrcanaryuc05-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-CANARY-UC05"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:658870cafbebb3e377828f3cd5ed60b2"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-CANARY-UC05"
-          }
-        ],
         "name": [
           {
             "family": "Johansson-Canary"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1968-03-12",
         "resourceType": "Patient"
       },
       "request": {
@@ -8591,33 +12207,37 @@
     {
       "fullUrl": "Patient/pat-mbrcanaryuc05noconsent-provider",
       "resource": {
+        "birthDate": "1968-03-12",
+        "gender": "unknown",
         "id": "pat-mbrcanaryuc05noconsent-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-CANARY-UC05-NOCONSENT"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:7b323fd75928491eab231f0af0c5b40f"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-CANARY-UC05-NOCONSENT"
-          }
-        ],
         "name": [
           {
             "family": "Johansson-Noconsent-Canary"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1968-03-12",
         "resourceType": "Patient"
       },
       "request": {
@@ -8628,33 +12248,37 @@
     {
       "fullUrl": "Patient/pat-mbrcanaryuc06-provider",
       "resource": {
+        "birthDate": "1969-07-21",
+        "gender": "unknown",
         "id": "pat-mbrcanaryuc06-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-CANARY-UC06"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:29e53f8fc612e92ca384444c21b26938"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-CANARY-UC06"
-          }
-        ],
         "name": [
           {
             "family": "Reyes-Canary"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1969-07-21",
         "resourceType": "Patient"
       },
       "request": {
@@ -8665,33 +12289,37 @@
     {
       "fullUrl": "Patient/pat-mbrcanaryuc07-provider",
       "resource": {
+        "birthDate": "1990-08-25",
+        "gender": "unknown",
         "id": "pat-mbrcanaryuc07-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-CANARY-UC07"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:51985a2a48f18c6ece4be8fa20654682"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-CANARY-UC07"
-          }
-        ],
         "name": [
           {
             "family": "Haddad-Canary"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1990-08-25",
         "resourceType": "Patient"
       },
       "request": {
@@ -8702,33 +12330,37 @@
     {
       "fullUrl": "Patient/pat-mbrcanaryuc07hcpcs-provider",
       "resource": {
+        "birthDate": "1977-01-30",
+        "gender": "unknown",
         "id": "pat-mbrcanaryuc07hcpcs-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-CANARY-UC07HCPCS"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:b8d593142582da8f3f6428a58cb3be74"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-CANARY-UC07HCPCS"
-          }
-        ],
         "name": [
           {
             "family": "Nakamura-Canary"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1977-01-30",
         "resourceType": "Patient"
       },
       "request": {
@@ -8739,33 +12371,37 @@
     {
       "fullUrl": "Patient/pat-mbrcanaryuc08-provider",
       "resource": {
+        "birthDate": "1971-02-09",
+        "gender": "unknown",
         "id": "pat-mbrcanaryuc08-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-CANARY-UC08"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:15f8c797ce3b1f45bf23ec8959e4ca85"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-CANARY-UC08"
-          }
-        ],
         "name": [
           {
             "family": "Okafor-Canary"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1971-02-09",
         "resourceType": "Patient"
       },
       "request": {
@@ -8776,33 +12412,37 @@
     {
       "fullUrl": "Patient/pat-mbrcovered-provider",
       "resource": {
+        "birthDate": "1975-04-02",
+        "gender": "unknown",
         "id": "pat-mbrcovered-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-COVERED"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:223665feed95ab0cd1e7b0cda6cfa948"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-COVERED"
-          }
-        ],
         "name": [
           {
             "family": "Johansson"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1975-04-02",
         "resourceType": "Patient"
       },
       "request": {
@@ -8813,33 +12453,37 @@
     {
       "fullUrl": "Patient/pat-mbrduc01-provider",
       "resource": {
+        "birthDate": "1972-03-14",
+        "gender": "unknown",
         "id": "pat-mbrduc01-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-D-UC01"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:23724c7081daccf35c4449afcd69e060"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-D-UC01"
-          }
-        ],
         "name": [
           {
             "family": "Larsen"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1972-03-14",
         "resourceType": "Patient"
       },
       "request": {
@@ -8850,33 +12494,37 @@
     {
       "fullUrl": "Patient/pat-mbrduc01nc-provider",
       "resource": {
+        "birthDate": "1972-03-14",
+        "gender": "unknown",
         "id": "pat-mbrduc01nc-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-D-UC01-NC"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:d4a8b1ebd909c3bf2ac000dd11d02a08"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-D-UC01-NC"
-          }
-        ],
         "name": [
           {
             "family": "Larsen-Terminated"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1972-03-14",
         "resourceType": "Patient"
       },
       "request": {
@@ -8887,33 +12535,37 @@
     {
       "fullUrl": "Patient/pat-mbrduc02-provider",
       "resource": {
+        "birthDate": "1965-06-11",
+        "gender": "unknown",
         "id": "pat-mbrduc02-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-D-UC02"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:758ba06e45ad02f2a974b2c2099c1407"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-D-UC02"
-          }
-        ],
         "name": [
           {
             "family": "Fontaine"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1965-06-11",
         "resourceType": "Patient"
       },
       "request": {
@@ -8924,33 +12576,37 @@
     {
       "fullUrl": "Patient/pat-mbrduc03-provider",
       "resource": {
+        "birthDate": "1979-09-02",
+        "gender": "unknown",
         "id": "pat-mbrduc03-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-D-UC03"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:6795089cd8963273525566530eb291c0"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-D-UC03"
-          }
-        ],
         "name": [
           {
             "family": "Whitfield"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1979-09-02",
         "resourceType": "Patient"
       },
       "request": {
@@ -8961,33 +12617,37 @@
     {
       "fullUrl": "Patient/pat-mbrduc04-provider",
       "resource": {
+        "birthDate": "1958-12-19",
+        "gender": "unknown",
         "id": "pat-mbrduc04-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-D-UC04"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:2a2b1d4a690c7bcb0d270e475ea4e424"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-D-UC04"
-          }
-        ],
         "name": [
           {
             "family": "Okereke"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1958-12-19",
         "resourceType": "Patient"
       },
       "request": {
@@ -8998,33 +12658,37 @@
     {
       "fullUrl": "Patient/pat-mbrduc05-provider",
       "resource": {
+        "birthDate": "1963-02-27",
+        "gender": "unknown",
         "id": "pat-mbrduc05-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-D-UC05"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:64c691ecb3b5216ac1dbc97b497c8e65"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-D-UC05"
-          }
-        ],
         "name": [
           {
             "family": "Marchetti"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1963-02-27",
         "resourceType": "Patient"
       },
       "request": {
@@ -9035,33 +12699,37 @@
     {
       "fullUrl": "Patient/pat-mbrduc05nc-provider",
       "resource": {
+        "birthDate": "1963-02-27",
+        "gender": "unknown",
         "id": "pat-mbrduc05nc-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-D-UC05-NC"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:666220e4d34924b066a2bc0ac503e864"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-D-UC05-NC"
-          }
-        ],
         "name": [
           {
             "family": "Marchetti-Noconsent"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1963-02-27",
         "resourceType": "Patient"
       },
       "request": {
@@ -9072,33 +12740,37 @@
     {
       "fullUrl": "Patient/pat-mbrduc06-provider",
       "resource": {
+        "birthDate": "1970-05-08",
+        "gender": "unknown",
         "id": "pat-mbrduc06-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-D-UC06"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:31d0032f2a8ed800758f18deff61502c"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-D-UC06"
-          }
-        ],
         "name": [
           {
             "family": "Adeyemi"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1970-05-08",
         "resourceType": "Patient"
       },
       "request": {
@@ -9109,33 +12781,37 @@
     {
       "fullUrl": "Patient/pat-mbrduc07-provider",
       "resource": {
+        "birthDate": "1985-10-23",
+        "gender": "unknown",
         "id": "pat-mbrduc07-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-D-UC07"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:adc8ce55a28f102f04cff027a4ecd448"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-D-UC07"
-          }
-        ],
         "name": [
           {
             "family": "Kowalczyk"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1985-10-23",
         "resourceType": "Patient"
       },
       "request": {
@@ -9146,33 +12822,37 @@
     {
       "fullUrl": "Patient/pat-mbrduc08-provider",
       "resource": {
+        "birthDate": "1968-07-30",
+        "gender": "unknown",
         "id": "pat-mbrduc08-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-D-UC08"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:06726cea32d44199c87b7a5c60ffd554"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-D-UC08"
-          }
-        ],
         "name": [
           {
             "family": "Delacroix"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1968-07-30",
         "resourceType": "Patient"
       },
       "request": {
@@ -9183,33 +12863,37 @@
     {
       "fullUrl": "Patient/pat-mbredifecs01-provider",
       "resource": {
+        "birthDate": "1955-03-01",
+        "gender": "unknown",
         "id": "pat-mbredifecs01-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-EDIFECS-01"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:80a6562037296634ecd1308ae429f995"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-EDIFECS-01"
-          }
-        ],
         "name": [
           {
             "family": "Dvorak-Edifecs"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1955-03-01",
         "resourceType": "Patient"
       },
       "request": {
@@ -9220,33 +12904,37 @@
     {
       "fullUrl": "Patient/pat-mbredifecs02-provider",
       "resource": {
+        "birthDate": "1968-09-30",
+        "gender": "unknown",
         "id": "pat-mbredifecs02-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-EDIFECS-02"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:5cb0dfdcae335cebf35fe6866b808985"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-EDIFECS-02"
-          }
-        ],
         "name": [
           {
             "family": "Iversen-Edifecs"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1968-09-30",
         "resourceType": "Patient"
       },
       "request": {
@@ -9257,33 +12945,37 @@
     {
       "fullUrl": "Patient/pat-mbrevicore01-provider",
       "resource": {
+        "birthDate": "1954-06-18",
+        "gender": "unknown",
         "id": "pat-mbrevicore01-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-EVICORE-01"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:65e45456aeb076480ff5801019427dfe"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-EVICORE-01"
-          }
-        ],
         "name": [
           {
             "family": "Adeyemi-Evicore"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1954-06-18",
         "resourceType": "Patient"
       },
       "request": {
@@ -9294,33 +12986,37 @@
     {
       "fullUrl": "Patient/pat-mbrextpayerabby-provider",
       "resource": {
+        "birthDate": "1965-12-24",
+        "gender": "unknown",
         "id": "pat-mbrextpayerabby-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-EXTPAYER-ABBY"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:e3376b37c9c8bb76d53af8f130e724a3"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-EXTPAYER-ABBY"
-          }
-        ],
         "name": [
           {
             "family": "Anesthesia"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1965-12-24",
         "resourceType": "Patient"
       },
       "request": {
@@ -9331,33 +13027,37 @@
     {
       "fullUrl": "Patient/pat-mbrhealthlx01-provider",
       "resource": {
+        "birthDate": "1950-12-05",
+        "gender": "unknown",
         "id": "pat-mbrhealthlx01-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-HEALTHLX-01"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:ea2cc04cfdd8da961216738b1f3c8535"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-HEALTHLX-01"
-          }
-        ],
         "name": [
           {
             "family": "Batista-Healthlx"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1950-12-05",
         "resourceType": "Patient"
       },
       "request": {
@@ -9368,33 +13068,37 @@
     {
       "fullUrl": "Patient/pat-mbrhealthlx02-provider",
       "resource": {
+        "birthDate": "1979-04-22",
+        "gender": "unknown",
         "id": "pat-mbrhealthlx02-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-HEALTHLX-02"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:39c4078fb05daf99c600913e7652a918"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-HEALTHLX-02"
-          }
-        ],
         "name": [
           {
             "family": "Fontaine-Healthlx"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1979-04-22",
         "resourceType": "Patient"
       },
       "request": {
@@ -9405,33 +13109,37 @@
     {
       "fullUrl": "Patient/pat-mbrnotcovered-provider",
       "resource": {
+        "birthDate": "1980-09-15",
+        "gender": "unknown",
         "id": "pat-mbrnotcovered-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-NOTCOVERED"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:1f076d85aedba28112dfe8c6e96153f0"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-NOTCOVERED"
-          }
-        ],
         "name": [
           {
             "family": "Reyes"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1980-09-15",
         "resourceType": "Patient"
       },
       "request": {
@@ -9442,33 +13150,37 @@
     {
       "fullUrl": "Patient/pat-mbrsmile01-provider",
       "resource": {
+        "birthDate": "1961-11-27",
+        "gender": "unknown",
         "id": "pat-mbrsmile01-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-SMILE-01"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:91b45c6030911bb6d52192f2c136bafc"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-SMILE-01"
-          }
-        ],
         "name": [
           {
             "family": "Lindqvist-Smile"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1961-11-27",
         "resourceType": "Patient"
       },
       "request": {
@@ -9479,33 +13191,37 @@
     {
       "fullUrl": "Patient/pat-mbrsmile02-provider",
       "resource": {
+        "birthDate": "1973-02-14",
+        "gender": "unknown",
         "id": "pat-mbrsmile02-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-SMILE-02"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:f84a31e22c7762e8d751e49add5345e9"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-SMILE-02"
-          }
-        ],
         "name": [
           {
             "family": "Moreau-Smile"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1973-02-14",
         "resourceType": "Patient"
       },
       "request": {
@@ -9516,33 +13232,37 @@
     {
       "fullUrl": "Patient/pat-mbruc04-provider",
       "resource": {
+        "birthDate": "1982-11-03",
+        "gender": "unknown",
         "id": "pat-mbruc04-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-UC04"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:208dbbf0bdeb705d47d05ee45fec9465"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-UC04"
-          }
-        ],
         "name": [
           {
             "family": "Chen"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1982-11-03",
         "resourceType": "Patient"
       },
       "request": {
@@ -9553,33 +13273,37 @@
     {
       "fullUrl": "Patient/pat-mbruc05-provider",
       "resource": {
+        "birthDate": "1968-03-12",
+        "gender": "unknown",
         "id": "pat-mbruc05-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-UC05"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:612bc0af520ea117814683f50e163a80"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-UC05"
-          }
-        ],
         "name": [
           {
             "family": "Johansson"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1968-03-12",
         "resourceType": "Patient"
       },
       "request": {
@@ -9590,33 +13314,37 @@
     {
       "fullUrl": "Patient/pat-mbruc05noconsent-provider",
       "resource": {
+        "birthDate": "1968-03-12",
+        "gender": "unknown",
         "id": "pat-mbruc05noconsent-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-UC05-NOCONSENT"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:363fc2914868ae4eee4a0be987ea0729"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-UC05-NOCONSENT"
-          }
-        ],
         "name": [
           {
             "family": "Johansson-Noconsent"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1968-03-12",
         "resourceType": "Patient"
       },
       "request": {
@@ -9627,33 +13355,37 @@
     {
       "fullUrl": "Patient/pat-mbruc06-provider",
       "resource": {
+        "birthDate": "1969-07-21",
+        "gender": "unknown",
         "id": "pat-mbruc06-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-UC06"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:eb16c8dfd47ab6ff52751c27fd76e565"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-UC06"
-          }
-        ],
         "name": [
           {
             "family": "Reyes"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1969-07-21",
         "resourceType": "Patient"
       },
       "request": {
@@ -9664,33 +13396,37 @@
     {
       "fullUrl": "Patient/pat-mbruc07-provider",
       "resource": {
+        "birthDate": "1990-08-25",
+        "gender": "unknown",
         "id": "pat-mbruc07-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-UC07"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:7a3811cae4b5d89dcf8d3aec259dc4d1"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-UC07"
-          }
-        ],
         "name": [
           {
             "family": "Haddad"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1990-08-25",
         "resourceType": "Patient"
       },
       "request": {
@@ -9701,33 +13437,37 @@
     {
       "fullUrl": "Patient/pat-mbruc07hcpcs-provider",
       "resource": {
+        "birthDate": "1977-01-30",
+        "gender": "unknown",
         "id": "pat-mbruc07hcpcs-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-UC07HCPCS"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:dacc9c5002360203ead83c33bc5b37ea"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-UC07HCPCS"
-          }
-        ],
         "name": [
           {
             "family": "Nakamura"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1977-01-30",
         "resourceType": "Patient"
       },
       "request": {
@@ -9738,33 +13478,37 @@
     {
       "fullUrl": "Patient/pat-mbruc08-provider",
       "resource": {
+        "birthDate": "1971-02-09",
+        "gender": "unknown",
         "id": "pat-mbruc08-provider",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-UC08"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:2e99322cfb7332d7b63d301228512de4"
+          }
+        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
-        "identifier": [
-          {
-            "type": {
-              "coding": [
-                {
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
-                  "code": "MB"
-                }
-              ]
-            },
-            "system": "urn:shn:member",
-            "value": "MBR-UC08"
-          }
-        ],
         "name": [
           {
             "family": "Okafor"
           }
         ],
-        "gender": "unknown",
-        "birthDate": "1971-02-09",
         "resourceType": "Patient"
       },
       "request": {
@@ -9950,6 +13694,126 @@
       "request": {
         "method": "PUT",
         "url": "Procedure/proc-mbruc05noconsent-provider"
+      }
+    },
+    {
+      "fullUrl": "ServiceRequest/sr-kit-pas-mbrcovered-e0424",
+      "resource": {
+        "id": "sr-kit-pas-mbrcovered-e0424",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-servicerequest"
+          ]
+        },
+        "status": "active",
+        "intent": "order",
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "E0424",
+              "display": "Stationary Oxygen System"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbrcovered-provider"
+        },
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "J44.9"
+              }
+            ]
+          }
+        ],
+        "resourceType": "ServiceRequest"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ServiceRequest/sr-kit-pas-mbrcovered-e0424"
+      }
+    },
+    {
+      "fullUrl": "ServiceRequest/sr-kit-pas-mbrcovered-l8000",
+      "resource": {
+        "id": "sr-kit-pas-mbrcovered-l8000",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-servicerequest"
+          ]
+        },
+        "status": "active",
+        "intent": "order",
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "L8000",
+              "display": "Breast prosthesis, mastectomy bra"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbrcovered-provider"
+        },
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "Z90.10"
+              }
+            ]
+          }
+        ],
+        "resourceType": "ServiceRequest"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ServiceRequest/sr-kit-pas-mbrcovered-l8000"
+      }
+    },
+    {
+      "fullUrl": "ServiceRequest/sr-kit-pas-mbruc06-e0424",
+      "resource": {
+        "id": "sr-kit-pas-mbruc06-e0424",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-servicerequest"
+          ]
+        },
+        "status": "active",
+        "intent": "order",
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "E0424",
+              "display": "Stationary Oxygen System"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pat-mbruc06-provider"
+        },
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "J44.9"
+              }
+            ]
+          }
+        ],
+        "resourceType": "ServiceRequest"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ServiceRequest/sr-kit-pas-mbruc06-e0424"
       }
     },
     {

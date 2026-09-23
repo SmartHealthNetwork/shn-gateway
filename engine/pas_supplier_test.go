@@ -79,15 +79,22 @@ func TestDispatchPASSuppliesActualOrganization(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	validator := &recordingValidator{valid: true}
-	fixture := newDispatchFixtureWith(t, "MBR-OX", Demo{BirthDate: "1958-07-14", FamilyName: "Okafor-Oxygen"}, order, "Organization/org-dme-ox", supplier, func(c *Config) { c.Validator = validator })
+	var sent [][]byte
+	fixture := newDispatchFixtureWith(t, "MBR-OX", Demo{BirthDate: "1958-07-14", FamilyName: "Okafor-Oxygen"}, order, "Organization/org-dme-ox", supplier, func(c *Config) {
+		c.ConformanceEnforcement = EnforcementNone
+		c.Observer = func(e ObserverEvent) {
+			if e.Kind == "leg.originated" && e.LegType == "pas-claim" {
+				sent = append(sent, bytes.Clone(e.Payload))
+			}
+		}
+	})
 	rec := httptest.NewRecorder()
 	fixture.gw.handleDispatch(rec, httptest.NewRequest(http.MethodPost, "/scenario/dispatch", bytes.NewBufferString(`{"member":"MBR-OX"}`)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("dispatch: %d %s", rec.Code, rec.Body.String())
 	}
 	found := false
-	for _, body := range validator.calls {
+	for _, body := range sent {
 		var bundle struct {
 			ResourceType string `json:"resourceType"`
 			Entry        []struct {
@@ -121,7 +128,7 @@ func TestDispatchPASSuppliesActualOrganization(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatal("actual SoR supplier absent from validated PAS request")
+		t.Fatal("actual SoR supplier absent from outgoing PAS request")
 	}
 }
 

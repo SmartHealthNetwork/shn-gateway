@@ -56,8 +56,8 @@ import (
 //	                  Provenance + LossReport this describes ride INSIDE the transformed
 //	                  payload itself (or observer-only where the target profile can't
 //	                  tolerate the extra resource) — never the envelope, never Hub-visible.
-//	leg.certified    completed observational source certification (Detail = metadata-only JSON;
-//	                  stored before callback delivery; callbacks must return promptly)
+//	conformance.observed rule outcome and enforcement action (safe metadata only;
+//	                  never proof of delivery)
 //	relay.ownership.refused
 //	                  a payload was not sent because the leg ownership table does not
 //	                  permit it at that transmit (relay.RefusedEvent; LegType = the leg,
@@ -84,6 +84,7 @@ import (
 //	                  Payload = the
 //	                  resource bytes for byte-returning reads)
 type ObserverEvent struct {
+	inspection     *ObserverInspection
 	Time           time.Time       `json:"time"`
 	Kind           string          `json:"kind"`
 	LegType        string          `json:"legType,omitempty"`
@@ -192,16 +193,16 @@ func refusalRouteInfo(e *RouteRefusalError) *RouteInfo {
 	return &RouteInfo{Own: e.Own, Peer: e.Peer, BridgeIssue: e.BridgeIssue}
 }
 
-// observe emits e to the configured Observer, stamping Time from the gateway
-// clock. nil-safe: without an Observer this is one nil check. Payload slices
-// are passed by reference — observers must treat events as read-only and
-// serialize promptly (the SSE hub marshals on receipt).
+// observe queues a bounded immutable participant inspection snapshot. Nil means
+// no allocation. Delivery never waits for callbacks, including at none.
 func (g *Gateway) observe(e ObserverEvent) {
 	if g.cfg.Observer == nil {
 		return
 	}
-	e.Time = g.cfg.Clock()
-	g.cfg.Observer(e)
+	if g.cfg.Clock != nil {
+		e.Time = g.cfg.Clock()
+	}
+	g.enqueueObserver(e)
 }
 
 // observingValidator decorates the configured shnsdk.Validator so EVERY
@@ -233,6 +234,35 @@ func (v observingValidator) Validate(ctx context.Context, resourceJSON []byte, p
 	return res, err
 }
 
+// ValidateEvidence preserves the capability through inspection without a legacy
+// call or raw diagnostic event. Notification scheduling is unchanged here.
+func (v observingValidator) ValidateEvidence(ctx context.Context, body []byte, profile string) (shnsdk.ValidationEvidence, error) {
+	ev, err := delegateValidatorEvidence(ctx, v.inner, body, profile)
+	detail := "valid"
+	if err != nil || ev.Profile.State == shnsdk.ValidationUnavailable || ev.Terminology.State == shnsdk.ValidationUnavailable || ev.Profile.State == shnsdk.ValidationNotApplicable || ev.Terminology.State == shnsdk.ValidationNotApplicable {
+		detail = "validator unavailable"
+	} else if ev.Profile.State == shnsdk.ValidationInvalid || ev.Terminology.State == shnsdk.ValidationInvalid {
+		detail = "invalid"
+	} else if ev.Profile.State != shnsdk.ValidationValid || ev.Terminology.State != shnsdk.ValidationValid {
+		detail = "validator unavailable"
+	}
+	v.g.observe(ObserverEvent{Kind: "validate.result", Direction: "validate", Payload: json.RawMessage(body), Detail: detail})
+	return ev, err
+}
+
+// Missing capability has one stable answer regardless of decoration or gate.
+func unavailableValidatorEvidence() shnsdk.ValidationEvidence {
+	return shnsdk.ValidationEvidence{Profile: shnsdk.ValidationCheckEvidence{State: shnsdk.ValidationUnavailable, Code: "validator-evidence-unavailable"}, Terminology: shnsdk.ValidationCheckEvidence{State: shnsdk.ValidationUnavailable, Code: "terminology-support-unproven"}}
+}
+
+func delegateValidatorEvidence(ctx context.Context, inner shnsdk.Validator, body []byte, profile string) (shnsdk.ValidationEvidence, error) {
+	v, ok := inner.(shnsdk.EvidenceValidator)
+	if !ok {
+		return unavailableValidatorEvidence(), errors.New("validator does not provide execution evidence")
+	}
+	return v.ValidateEvidence(ctx, body, profile)
+}
+
 // observeIngress tees only bytes consumed by the handler. Authentication and
 // read errors keep their original ordering. Rejected unread bodies remain partial.
 func (g *Gateway) observeIngress(route string, h http.HandlerFunc) http.HandlerFunc {
@@ -248,12 +278,7 @@ func (g *Gateway) observeIngress(route string, h http.HandlerFunc) http.HandlerF
 			}
 			r = r.WithContext(diagnostics.WithCallID(r.Context(), id))
 		}
-		var observerPanic any
-		defer func() {
-			if observerPanic != nil {
-				panic(observerPanic)
-			}
-		}()
+		r = r.WithContext(diagnostics.WithBodyBudget(r.Context(), &g.observationMemory))
 		observedHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if g.cfg.Observer == nil {
 				h(w, r)
@@ -291,14 +316,7 @@ func (g *Gateway) observeIngress(route string, h http.HandlerFunc) http.HandlerF
 			g.diagnostic(observed)
 			if g.cfg.Observer != nil && e.Kind == "ingress.responded" {
 				detail := strconv.Itoa(e.Status)
-				func() {
-					defer func() {
-						if v := recover(); v != nil && observerPanic == nil {
-							observerPanic = v
-						}
-					}()
-					g.observe(ObserverEvent{Kind: e.Kind, Direction: "ingress", LegType: route, Detail: detail, Payload: json.RawMessage(e.Body), PayloadIncomplete: !e.BodyComplete})
-				}()
+				g.observe(ObserverEvent{Kind: e.Kind, Direction: "ingress", LegType: route, Detail: detail, Payload: json.RawMessage(e.Body), PayloadIncomplete: !e.BodyComplete})
 			}
 			return true
 		}, func(*http.Request) diagnostics.HTTPInfo { return diagnostics.HTTPInfo{Kind: "ingress"} }, g.cfg.Clock, shnsdk.MaxRequestBytes, nil).ServeHTTP(w, r)
@@ -314,8 +332,8 @@ func (g *Gateway) observeIngress(route string, h http.HandlerFunc) http.HandlerF
 // Unlike observingValidator this cannot hold *Gateway: the decoration must
 // land BEFORE New()'s Responder/Populator derivations capture cfg.SoR
 // (see the install site in New()), and g does not
-// exist yet at that point. It closes over the Observer func and Clock
-// directly instead.
+// exist yet at that point. Its closure binds the gateway dispatcher after
+// construction, preserving the same bounded callback lifecycle as other events.
 type observingSoR struct {
 	inner    SystemOfRecord
 	observer func(ObserverEvent)

@@ -897,12 +897,63 @@ func (d *censusSoR) SearchPatientContext(_ context.Context, resourceType, id str
 			page = append(page, `,"search":{"mode":"match"}}`...)
 		}
 	}
+	if order, ok := d.OpenOrder(id); ok && resourceType == "Claim" {
+		claim, err := syntheticPASDraftClaimForOrder(order)
+		if err != nil {
+			return SearchResult{}, err
+		}
+		page = append(page, `{"fullUrl":"https://census.invalid/fhir/Claim/fixture-draft","resource":`...)
+		page = append(page, claim...)
+		page = append(page, `,"search":{"mode":"match"}}`...)
+	}
 	page = append(page, "]}"...)
 	parsed, err := ParseSearchPage(page, resourceType)
 	if err != nil {
 		return SearchResult{}, err
 	}
 	return SearchResult{Pages: [][]byte{page}, Entries: parsed.Entries, Total: len(parsed.Entries)}, nil
+}
+
+// The engine's synthetic provider explicitly holds a draft Claim tied to its
+// own open order. Production source reads never use this test-only fixture.
+func syntheticPASDraftClaimForOrder(order []byte) ([]byte, error) {
+	var source struct {
+		ResourceType, ID string
+		Subject          struct{ Reference string }
+	}
+	if err := json.Unmarshal(order, &source); err != nil {
+		return nil, err
+	}
+	if source.ID == "" || source.Subject.Reference == "" {
+		return nil, errors.New("fixture order lacks identity")
+	}
+	productSystem, productCode, _, err := shnsdk.ParseOrderProductCoding(order)
+	if err != nil {
+		return nil, err
+	}
+	claim := map[string]any{
+		"resourceType": "Claim", "id": "fixture-draft", "status": "draft", "use": "preauthorization", "patient": map[string]any{"reference": source.Subject.Reference},
+		"priority": json.RawMessage(`{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/processpriority","code":"normal"}]}`),
+		"item": []any{map[string]any{
+			"productOrService": map[string]any{"coding": []any{map[string]string{"system": productSystem, "code": productCode}}},
+			"extension": []any{
+				map[string]any{"url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService", "valueReference": map[string]any{"reference": source.ResourceType + "/" + source.ID}},
+				map[string]any{"url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-certificationType", "valueCodeableConcept": json.RawMessage(`{"coding":[{"system":"https://codesystem.x12.org/005010/1322","code":"I"}]}`)},
+				map[string]any{"url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceItemRequestType", "valueCodeableConcept": json.RawMessage(`{"coding":[{"system":"https://codesystem.x12.org/005010/1525","code":"IN"}]}`)},
+			},
+			"locationCodeableConcept": json.RawMessage(`{"coding":[{"system":"https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set","code":"11"}]}`),
+		}},
+	}
+	return json.Marshal(claim)
+}
+
+func syntheticPASItemFacts() *shnsdk.PASLineItemFacts {
+	return &shnsdk.PASLineItemFacts{
+		Priority:                json.RawMessage(`{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/processpriority","code":"normal"}]}`),
+		CertificationType:       json.RawMessage(`{"coding":[{"system":"https://codesystem.x12.org/005010/1322","code":"I"}]}`),
+		ServiceItemRequestType:  json.RawMessage(`{"coding":[{"system":"https://codesystem.x12.org/005010/1525","code":"IN"}]}`),
+		LocationCodeableConcept: json.RawMessage(`{"coding":[{"system":"https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set","code":"11"}]}`),
+	}
 }
 
 // FacilityRecords returns metro-spine's held records for MBR-UC05 (UC-05): the
@@ -1165,4 +1216,22 @@ func TestCensusFixture_BridgeDemoPersonas(t *testing.T) {
 	if demoPCI == refusePCI {
 		t.Fatalf("MBR-BRIDGE-DEMO and MBR-BRIDGE-REFUSE must have different PCIs, both got %q", demoPCI)
 	}
+}
+
+// censusSubjectResolver provisions explicit synthetic links for named fixture
+// holders. It does not infer linkage for an unregistered namespace or reference.
+func censusSubjectResolver(holders ...string) SubjectReferenceResolver {
+	links := map[PatientReference]string{}
+	for member, person := range censusPersonas {
+		pci := shnsdk.ResolvePCI(member, person.demo.BirthDate, person.demo.FamilyName)
+		for _, holder := range holders {
+			links[PatientReference{holder, "fhir-relative", "Patient/" + member}] = pci
+			links[PatientReference{holder, shnsdk.MemberSystem, member}] = pci
+			links[PatientReference{holder, "https://" + holder + ".example/fhir", "Patient/" + member}] = pci
+		}
+	}
+	return subjectResolverFunc(func(_ context.Context, ref PatientReference) (string, bool, error) {
+		pci, ok := links[ref]
+		return pci, ok, nil
+	})
 }

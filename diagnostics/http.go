@@ -114,6 +114,7 @@ func IngressBody(ctx context.Context) []byte {
 
 // RequestIdentity adds only independently verified envelope attribution.
 func RequestIdentity(ctx context.Context, e Event) Event {
+	e.bodyBudget = bodyBudget(ctx)
 	id, _ := ctx.Value(identityKey).(requestIdentity)
 	e.RequestCiphertextHash, e.Sender, e.Recipient, e.CorrelationID = id.hash, id.sender, id.recipient, id.correlation
 	e.CallID = CallID(ctx)
@@ -121,17 +122,19 @@ func RequestIdentity(ctx context.Context, e Event) Event {
 }
 
 type captureState struct {
-	mu        sync.Mutex
-	budget    *CaptureBudget
-	cap       int64
-	held      int64
-	data      []byte
-	complete  bool
-	available bool
-	hash      hash.Hash
-	observed  int64
-	failed    bool
-	closed    bool
+	shared     BodyBudget
+	sharedHeld int
+	mu         sync.Mutex
+	budget     *CaptureBudget
+	cap        int64
+	held       int64
+	data       []byte
+	complete   bool
+	available  bool
+	hash       hash.Hash
+	observed   int64
+	failed     bool
+	closed     bool
 }
 
 func (s *captureState) add(p []byte) {
@@ -150,6 +153,11 @@ func (s *captureState) add(p []byte) {
 	}
 	if s.data == nil && s.cap > 0 {
 		n, _ := s.budget.reserve(s.cap, s.cap)
+		if s.shared != nil && !s.shared.TryReserve(int(n)) {
+			s.budget.release(n)
+			n = 0
+		}
+		s.sharedHeld += int(n)
 		s.held += n
 		s.data = make([]byte, 0, n)
 	}
@@ -173,6 +181,11 @@ func (s *captureState) release() {
 	defer s.mu.Unlock()
 	if s.available {
 		s.budget.release(s.held)
+		if s.shared != nil {
+			s.shared.Release(s.sharedHeld)
+			s.sharedHeld = 0
+		}
+		s.held = 0
 	}
 }
 func captureHeader(s *captureState, h http.Header) (http.Header, bool) {
@@ -528,6 +541,8 @@ func ObserveHTTP(next http.Handler, emit func(Event) bool, info func(*http.Reque
 			}
 		}
 		rs, ws, release := captureSession(budget, bodyCap)
+		rs.shared = bodyBudget(r.Context())
+		ws.shared = rs.shared
 		defer release()
 		requestHeaders, requestHeadersComplete := captureHeader(rs, r.Header)
 		noRequestBody := r.Body == nil || r.Body == http.NoBody
@@ -566,9 +581,9 @@ func ObserveHTTP(next http.Handler, emit func(Event) bool, info func(*http.Reque
 			id, _ := r.Context().Value(identityKey).(requestIdentity)
 			fp := RequestFingerprint{Algorithm: "sha256-body-v1", Method: method, RequestURI: uri, BodySHA256: rs.digest(), ObservedBytes: rs.observed, Complete: rs.complete && rs.available}
 			req := Event{Time: start, Kind: hi.Kind, CallID: hi.CallID, CorrelationID: id.correlation, RequestCiphertextHash: id.hash, Sender: id.sender, Recipient: id.recipient, Method: method, URL: uri, Headers: requestHeaders, HeadersComplete: requestHeadersComplete, Body: rs.data, BodyComplete: rs.available && rs.complete && int64(len(rs.data)) == rs.observed, RequestFingerprint: fp, Status: ow.status, DurationNanos: safeNow(now).Sub(start).Nanoseconds()}
-			safeEmit(emit, req)
+			safeEmit(emit, WithEventBudget(req, rs.shared))
 			resp := Event{Time: safeNow(now), Kind: hi.Kind + "-response", CallID: hi.CallID, Method: method, URL: uri, Headers: ow.headers, HeadersComplete: ow.headersComplete, Body: ws.data, BodyComplete: ws.available && ws.complete && int64(len(ws.data)) == ws.observed, RequestFingerprint: fp, Status: ow.status}
-			safeEmit(emit, resp)
+			safeEmit(emit, WithEventBudget(resp, ws.shared))
 		}()
 		next.ServeHTTP(wrapWriter(ow), r)
 		returned = true
@@ -597,6 +612,8 @@ func (t *observedTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	requestSnapshot := new(http.Request)
 	*requestSnapshot = *r
 	rs, responseState, release := captureSession(t.budget, t.cap)
+	rs.shared = bodyBudget(r.Context())
+	responseState.shared = rs.shared
 	requestHeaders, requestHeadersComplete := captureHeader(rs, r.Header)
 	var lifecycleMu sync.Mutex
 	remaining := 2

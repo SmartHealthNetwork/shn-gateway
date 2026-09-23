@@ -45,8 +45,9 @@ type MemStore struct {
 	// holds the bytes. Storing the id list rather than the bytes is what makes a
 	// re-recorded EOB id ONE EOB here exactly as it is one row in the durable
 	// store. Metadata/decision only — AI-1-compatible.
-	eobIDsByPCI map[string][]string
-	eobByID     map[string][]byte
+	eobIDsByPCI  map[string][]string
+	eobByID      map[string][]byte
+	eobOwnerByID map[string]string
 	// now is the store's own clock (retention and arrival order). Injected so the
 	// retention rows are deterministic; never reassigned outside tests.
 	now func() time.Time
@@ -264,6 +265,11 @@ func (d *MemStore) RecordDecision(subjectPCI, corrID, outcome string, decidedAt 
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if eob != nil {
+		if err := d.recordEOBLocked(eob.SubjectPCI, eob.EOBID, eob.JSON); err != nil {
+			return PendTransition{}, err
+		}
+	}
 	row, found := d.pendedClaims[pendedKey(subjectPCI, corrID)]
 	var cur PendRecord
 	if found {
@@ -273,9 +279,6 @@ func (d *MemStore) RecordDecision(subjectPCI, corrID, outcome string, decidedAt 
 	next.RequesterHolder = cur.RequesterHolder
 	next.LastTransition = d.now()
 	d.upsertLocked(subjectPCI, corrID, next)
-	if eob != nil {
-		d.recordEOBLocked(eob.SubjectPCI, eob.EOBID, eob.JSON)
-	}
 	return tr, nil
 }
 
@@ -395,13 +398,18 @@ func (d *MemStore) maybePurgeLocked() {
 // recordEOBLocked stores a COPY of the bytes under eobID, appending the id to the
 // patient's list only the first time that id is seen — a re-recorded id is ONE EOB,
 // exactly as it is one row in the durable store.
-func (d *MemStore) recordEOBLocked(subjectPCI, eobID string, eobJSON []byte) {
+func (d *MemStore) recordEOBLocked(subjectPCI, eobID string, eobJSON []byte) error {
+	if owner, seen := d.eobOwnerByID[eobID]; seen && owner != subjectPCI {
+		return ErrEOBSubjectMismatch
+	}
 	cp := make([]byte, len(eobJSON))
 	copy(cp, eobJSON)
-	if _, seen := d.eobByID[eobID]; !seen {
+	if _, seen := d.eobOwnerByID[eobID]; !seen {
 		d.eobIDsByPCI[subjectPCI] = append(d.eobIDsByPCI[subjectPCI], eobID)
 	}
+	d.eobOwnerByID[eobID] = subjectPCI
 	d.eobByID[eobID] = cp
+	return nil
 }
 
 // RecordEOB stores a PA-decision EOB for a patient (keyed by subject PCI) and
@@ -410,8 +418,7 @@ func (d *MemStore) recordEOBLocked(subjectPCI, eobID string, eobJSON []byte) {
 func (d *MemStore) RecordEOB(subjectPCI, eobID string, eobJSON []byte) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.recordEOBLocked(subjectPCI, eobID, eobJSON)
-	return nil
+	return d.recordEOBLocked(subjectPCI, eobID, eobJSON)
 }
 
 // EOBsForPatient returns all stored EOBs for a patient PCI (search), or ok=false
@@ -483,6 +490,7 @@ func (d *MemStore) reset() {
 	d.pendedKeys = make(map[pendIndexKey]map[string]bool)
 	d.eobIDsByPCI = make(map[string][]string)
 	d.eobByID = make(map[string][]byte)
+	d.eobOwnerByID = make(map[string]string)
 	d.lastPurge = time.Time{}
 	// The continuation store keeps its OWN mutex, so it is reset through its own
 	// entry point rather than reconstructed here — reconstructing it would drop

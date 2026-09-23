@@ -39,10 +39,28 @@ func NewNativePopulator(client *http.Client, url string) *nativePopulator {
 // must return promptly and support concurrent calls. A nil observer is disabled;
 // the old constructor is equivalent to passing nil here.
 func NewNativePopulatorWithFailureObserver(client *http.Client, url string, observer func(PopulateFailure)) *nativePopulator {
-	return &nativePopulator{client: client, url: url, observer: observer}
+	// Own redirect policy without changing the caller's transport, SMART token
+	// acquisition, cookie jar or timeout. An accepting callback cannot authorize
+	// a second mutation; a rejecting callback retains its existing error semantics.
+	local := *client
+	checkRedirect := client.CheckRedirect
+	local.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if checkRedirect != nil {
+			if err := checkRedirect(req, via); err != nil {
+				return err
+			}
+		}
+		return http.ErrUseLastResponse
+	}
+	return &nativePopulator{client: &local, url: url, observer: observer}
 }
 
 func (n *nativePopulator) Populate(ctx context.Context, packageJSON []byte, pc PopulateContext) ([]byte, []FilledItem, error) {
+	// The logical subject is required even when the store-scoped subject is
+	// supplied: otherwise successful normalization would erase patient identity.
+	if pc.PatientRef == "" {
+		return nil, nil, errNoClinicalContext
+	}
 	q, err := extractQuestionnaireFromPackage(packageJSON)
 	if err != nil {
 		return nil, nil, err // no-Questionnaire → consumer 502
@@ -114,7 +132,10 @@ func (n *nativePopulator) post(ctx context.Context, body []byte) ([]byte, int, *
 	}
 	defer resp.Body.Close()
 	status := populateObservedStatus(resp.StatusCode)
-	rb, err := io.ReadAll(io.LimitReader(resp.Body, maxPartnerBody))
+	rb, err := io.ReadAll(io.LimitReader(resp.Body, maxPartnerBody+1))
+	if err == nil && len(rb) > maxPartnerBody {
+		err = fmt.Errorf("population response exceeds body limit")
+	}
 	if err != nil {
 		return nil, status, populateBoundaryFailure(populateStageBodyRead, status, err)
 	}

@@ -67,13 +67,10 @@ var transmitBoundaries = map[string]boundaryRule{
 	// Answers to the network.
 	"Gateway.buildResponseLeg": {kind: transmits, noSink: true},
 	"writeLeg": {kind: excluded,
-		callers: []string{"Gateway.respondLeg", "Gateway.respondLegError", "Gateway.handlePASNativeInbound", "Gateway.handlePASUpdateNativeInbound", "Gateway.handlePASInquireInbound"},
+		callers: []string{"Gateway.respondLeg", "Gateway.respondLegError"},
 		reason:  "writes the sealed envelope buildResponseLeg built from its checked answer"},
-	"Gateway.respondLeg":                   {kind: sealsVia, via: "Gateway.buildResponseLeg"},
-	"Gateway.respondLegError":              {kind: sealsVia, via: "Gateway.buildResponseLeg"},
-	"Gateway.handlePASNativeInbound":       {kind: sealsVia, via: "Gateway.buildResponseLeg"},
-	"Gateway.handlePASUpdateNativeInbound": {kind: sealsVia, via: "Gateway.buildResponseLeg"},
-	"Gateway.handlePASInquireInbound":      {kind: sealsVia, via: "Gateway.buildResponseLeg"},
+	"Gateway.respondLeg":      {kind: sealsVia, via: "Gateway.buildResponseLeg"},
+	"Gateway.respondLegError": {kind: sealsVia, via: "Gateway.buildResponseLeg"},
 	// Answers to the participant's own system (the ingress writers, the
 	// relayed application errors) and every refusal.
 	"Gateway.writePayload": {kind: transmits},
@@ -82,6 +79,8 @@ var transmitBoundaries = map[string]boundaryRule{
 	"Gateway.admit": {kind: transmits, noSink: true},
 
 	// Sends that are not exchange messages.
+	"FetchConformanceStatus": {kind: excluded,
+		reason: "a bodyless operational health read of the authorized participant gateway; only bounded allowlisted metadata is returned"},
 	"Gateway.observeIngress": {kind: excluded, reason: "transparent HTTP observation delegates to the original ingress handler; no payload is authored or transmitted here"},
 	"Gateway.observeInbound": {kind: excluded, reason: "transparent HTTP observation delegates to the independently checked inbound handler; no payload is authored or transmitted here"},
 	"writeLocalJSON": {kind: excluded,
@@ -98,8 +97,6 @@ var transmitBoundaries = map[string]boundaryRule{
 		reason: "a call to the participant's own pre-population service with a request this gateway builds; no peer is on the wire"},
 	"Gateway.handleUC08": {kind: excluded,
 		reason: "the scenario's read of the patient view, which sends no body"},
-	"certificationTransport.RoundTrip": {kind: excluded,
-		reason: "the certification validator's transport: observational $validate of observed bytes, never an exchange"},
 	"Gateway.handleIngressMetadata": {kind: excluded,
 		reason: "this gateway's own CapabilityStatement"},
 	"Gateway.handlePatientAccessMetadata": {kind: excluded,

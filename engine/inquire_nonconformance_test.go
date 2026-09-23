@@ -2,14 +2,11 @@ package engine
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-
-	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
 // The Da Vinci reference payer answers `Claim/$inquire` with a `Parameters` whose
@@ -21,11 +18,8 @@ import (
 //
 // What makes this worth a file of its own is how it used to fail. Reading only the
 // declared name, this gateway relayed the payer's bytes to the requester intact and
-// took NOTHING from them — no match attempted, no decision recorded, and no signal
-// anywhere that a decision had gone missing. Silent loss reads exactly like
-// "the payer had nothing to say", which is why the reporting rows below assert on
-// the REPORT and not only on the ledger: a row that watched the ledger alone would
-// have passed just as happily before this was fixed, for the wrong reason.
+// failed to report that it had read a nonconformant output name. The reporting
+// rows below preserve the source boundary and keep that deviation visible.
 
 // inquiryAnswerUnder re-labels the synthetic 2.2 answer's output parameters to
 // name, leaving every other byte alone. The Bundles are identical across the rows
@@ -62,8 +56,8 @@ func inquiryAnswerUnder(t *testing.T, name string) []byte {
 }
 
 // TestPASInquire_ReadsEitherOutputParameterName: the same response Bundles reach
-// the same reader, the same subject check and the same ledger effect whether the
-// payer names its output parameter the declared `return` or the `responseBundle`
+// the same reader and subject check whether the payer names its output
+// parameter the declared `return` or the `responseBundle`
 // the reference payer actually sends — and a THIRD name is read by neither, so the
 // set that is accepted stays closed rather than becoming "any parameter".
 func TestPASInquire_ReadsEitherOutputParameterName(t *testing.T) {
@@ -85,9 +79,9 @@ func TestPASInquire_ReadsEitherOutputParameterName(t *testing.T) {
 				t.Fatalf("%s (%s): the shape check refused a Parameters of response Bundles: %+v", row.name, row.reason, bad)
 			}
 
-			got := readPASInquiryAnswers(inquiryRequester, answer)
+			got := readPASInquiryAnswers("provider", answer)
 			if row.read && len(got) == 0 {
-				t.Fatalf("%s (%s): no ClaimResponse was read; the payer's decision would be taken to the requester and recorded nowhere", row.name, row.reason)
+				t.Fatalf("%s (%s): no ClaimResponse was read from a supported output name", row.name, row.reason)
 			}
 			if !row.read && len(got) != 0 {
 				t.Fatalf("%s (%s): %d ClaimResponse(s) read under a name outside the closed set", row.name, row.reason, len(got))
@@ -107,17 +101,6 @@ func TestPASInquire_ReadsEitherOutputParameterName(t *testing.T) {
 				t.Errorf("%s: the subject check walked Bundles the reader does not read", row.name)
 			}
 
-			// And the effect that matters: the decision is recorded under either
-			// accepted name, and under neither rejected one.
-			f := newInquiryLedgerFixture(t, PendKeys{RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{inquiryCRKey}})
-			f.apply(t, inquiryRequester, answer)
-			rec := f.state(t)
-			if row.read && (rec.State != PendStateDecided || rec.Outcome != PendOutcomeApproved) {
-				t.Errorf("%s: ledger = %+v, want the payer's decision recorded", row.name, rec)
-			}
-			if !row.read && rec.State != PendStatePended {
-				t.Errorf("%s: ledger = %+v, want no movement", row.name, rec)
-			}
 		})
 	}
 }
@@ -125,8 +108,7 @@ func TestPASInquire_ReadsEitherOutputParameterName(t *testing.T) {
 // TestPASInquire_NonconformantOutputNameReported is the row the fix exists for:
 // reading the deviant name must not make it invisible. It asserts the REPORT — the
 // observer event and the sentences that ride the answer's certification evidence —
-// not the ledger outcome, because the ledger outcome is identical whether or not
-// anything was ever said about the deviation.
+// not a clinical ledger outcome, because native inquiry has no such write.
 func TestPASInquire_NonconformantOutputNameReported(t *testing.T) {
 	const (
 		corr    = "corr-inquiry-leg-77"
@@ -136,7 +118,9 @@ func TestPASInquire_NonconformantOutputNameReported(t *testing.T) {
 		t.Helper()
 		var seen []ObserverEvent
 		g := &Gateway{cfg: Config{Clock: fixedClock, Observer: func(e ObserverEvent) { seen = append(seen, e) }}}
-		return g.reportInquiryAnswerNonconformance(corr, partner, answer), seen
+		stated := g.reportInquiryAnswerNonconformance(corr, partner, answer)
+		observationFlush(t, g)
+		return stated, seen
 	}
 
 	t.Run("the reference payer's name is reported, naming both terms", func(t *testing.T) {
@@ -190,7 +174,7 @@ func TestPASInquire_NonconformantOutputNameReported(t *testing.T) {
 			t.Errorf("the report must say the resource went UNREAD, which is what distinguishes it from a name we do read: %q", stated[0])
 		}
 		// And it really is unread: the read set stays closed.
-		if got := readPASInquiryAnswers(inquiryRequester, inquiryAnswerUnder(t, "bundle")); len(got) != 0 {
+		if got := readPASInquiryAnswers("provider", inquiryAnswerUnder(t, "bundle")); len(got) != 0 {
 			t.Errorf("%d ClaimResponse(s) read under a name outside the closed set", len(got))
 		}
 	})
@@ -210,7 +194,7 @@ func TestPASInquire_NonconformantOutputNameReported(t *testing.T) {
 			t.Fatalf("a conformant answer was reported as nonconformant: stated=%v observed=%+v", stated, seen)
 		}
 		// The 2.0.1/2.1.0 shape is a bare Bundle with no output parameter at all.
-		if stated, seen := report(t, decidedAnswer(t)); len(stated) != 0 || len(seen) != 0 {
+		if stated, seen := report(t, inquiryFixture(t, "pas-inquiry-response-2.0.json")); len(stated) != 0 || len(seen) != 0 {
 			t.Fatalf("a bare response Bundle was reported as nonconformant: stated=%v observed=%+v", stated, seen)
 		}
 	})
@@ -224,60 +208,42 @@ func TestPASInquire_NonconformantOutputNameReported(t *testing.T) {
 			t.Fatalf("the recorded reference-payer answer deviates as %v, want [%s] — if this changed, the addendum and the reader's closed set both need revisiting",
 				got, pasInquiryRecordedOutput)
 		}
-		if len(readPASInquiryAnswers(inquiryRequester, real)) == 0 {
-			t.Error("the recorded reference-payer answer yields no ClaimResponse: its decision would reach the requester and be recorded nowhere")
+		if len(readPASInquiryAnswers("provider", real)) == 0 {
+			t.Error("the recorded reference-payer answer yields no ClaimResponse under the supported output name")
 		}
 	})
 }
 
-// TestPASInquire_NonconformanceRidesCertificationEvidence: the sentence reaches the
-// certification record for the ANSWER, and only for the answer — the request this
-// gateway sent is its own and has no departure to report. Without this, the
-// evidence an operator reads back would say the exchange was ordinary.
+// Inquiry departure evidence belongs to the response rule, never to source-line
+// speculation or a delivery claim. The historical evidence API stays compatible.
 func TestPASInquire_NonconformanceRidesCertificationEvidence(t *testing.T) {
-	var seen []ObserverEvent
-	g := certificationGateway(t, certificationValidatorFunc(func(context.Context, []byte, string) (shnsdk.Result, error) {
-		return shnsdk.Result{Valid: true}, nil
-	}), func(e ObserverEvent) { seen = append(seen, e) })
-
-	const sentence = "prior-authorization inquiry answer carries its response bundle under output parameter responseBundle; the operation declares return"
-	g.certificationPair("pas-claim-inquire", "payer-native", "corr-inquiry-cert", "2.0",
-		[]byte(`{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"Claim"}}]}`),
-		[]byte(`{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"ClaimResponse"}}]}`),
-		sentence)
+	g := certificationGateway(t, syntheticFakeValidator(), nil)
+	in := observationInput(EnforcementObserve)
+	in.Exchange.legType = "pas-claim-inquire"
+	in.Exchange.contractVersion = "pa.pas@2.2"
+	in.DeclaredVersion = "pa.pas@2.2"
+	g.observeContent(in)
 	certificationFlush(t, g)
-
-	byDirection := map[string]CertificationEvidence{}
-	for _, e := range seen {
-		if e.Kind != "leg.certified" {
-			continue
+	in.Direction = "response"
+	in.Status = 200
+	in.Body = []byte(`{"resourceType":"Parameters","parameter":[{"name":"responseBundle","resource":{"resourceType":"Bundle","type":"collection"}}]}`)
+	g.observeContent(in)
+	certificationFlush(t, g)
+	findings, _ := g.ConformanceObservationsForTest()
+	found := false
+	for _, f := range findings {
+		if f.Rule == "pas.inquiry.return" {
+			if f.Direction != "response" || f.State != CheckInvalid || f.Action != "not_enforced" {
+				t.Fatalf("inquiry evidence %+v", f)
+			}
+			found = true
 		}
-		var ev CertificationEvidence
-		if err := json.Unmarshal([]byte(e.Detail), &ev); err != nil {
-			t.Fatalf("certification evidence is not readable: %v", err)
-		}
-		byDirection[ev.Direction] = ev
 	}
-	answer, ok := byDirection["response"]
-	if !ok {
-		t.Fatalf("no certification evidence for the answer; saw %d events", len(seen))
+	if !found {
+		t.Fatal("missing response departure finding")
 	}
-	if len(answer.Nonconformance) != 1 || answer.Nonconformance[0] != sentence {
-		t.Errorf("the answer's evidence states %v, want the departure %q", answer.Nonconformance, sentence)
-	}
-	request, ok := byDirection["request"]
-	if !ok {
-		t.Fatal("no certification evidence for the request")
-	}
-	if len(request.Nonconformance) != 0 {
-		t.Errorf("the request's evidence carries %v; the departure belongs to the answer that made it", request.Nonconformance)
-	}
-	// A conformant exchange says nothing at all — the field is absent, not empty.
 	raw, err := json.Marshal(CertificationEvidence{LegType: "pas-claim-inquire", Direction: "response"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if bytes.Contains(raw, []byte("nonconformance")) {
-		t.Errorf("a conformant record carries a nonconformance member: %s", raw)
+	if err != nil || bytes.Contains(raw, []byte("nonconformance")) {
+		t.Fatal("historical metadata shape changed")
 	}
 }

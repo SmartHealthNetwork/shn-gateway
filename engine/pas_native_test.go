@@ -131,7 +131,7 @@ func originatorBuiltConformantBundle(t *testing.T, member string) []byte {
 	if err != nil {
 		t.Fatalf("FillQuestionnaire: %v", err)
 	}
-	got, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{Coverage: testMemberCoverage(member),
+	got, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{ItemFacts: syntheticPASItemFacts(), Coverage: testMemberCoverage(member),
 		Provider:       testRequestingProvider(),
 		MemberIDSystem: shnsdk.MemberSystem,
 		QR:             qrJSON,
@@ -222,7 +222,7 @@ func TestParseConformantPASSubjects_AbsoluteRefs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FillQuestionnaire: %v", err)
 	}
-	got, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{Coverage: testMemberCoverage(member),
+	got, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{ItemFacts: syntheticPASItemFacts(), Coverage: testMemberCoverage(member),
 		Provider:         testRequestingProvider(),
 		MemberIDSystem:   shnsdk.MemberSystem,
 		QR:               qrJSON,
@@ -550,7 +550,7 @@ func conformantPASBundlePended(t *testing.T, member string) []byte {
 	if err != nil {
 		t.Fatalf("FillQuestionnaire: %v", err)
 	}
-	got, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{Coverage: testMemberCoverage(member),
+	got, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{ItemFacts: syntheticPASItemFacts(), Coverage: testMemberCoverage(member),
 		Provider:       testRequestingProvider(),
 		MemberIDSystem: shnsdk.MemberSystem,
 		QR:             qrJSON,
@@ -630,7 +630,27 @@ func originatorBuiltConformantUpdateBundleCorrs(t *testing.T, brPayer bool, corr
 	if err != nil {
 		t.Fatalf("BuildServiceRequest: %v", err)
 	}
-	got, err := shnsdk.BuildConformantClaimUpdateBundle(shnsdk.ConformantClaimUpdateInputs{Coverage: testMemberCoverage(member),
+	line := "2.0"
+	if brPayer {
+		line = "2.2"
+	}
+	// Both wire shapes consume the Claim from the same authored original
+	// submission. The 2.0 cardinality only prevents carrying it as a second
+	// entry; it does not make prior-source evidence optional.
+	submitted, err := shnsdk.BuildConformantClaimBundleAtLine(line, shnsdk.ConformantClaimInputs{ItemFacts: syntheticPASItemFacts(),
+		Coverage: testMemberCoverage(member), Provider: testRequestingProvider(), Insurer: testPayerOrganization(shnsdk.CMSPayerIdentity),
+		MemberIDSystem: shnsdk.MemberSystem, QR: qrJSON, SR: srJSON, PatientRef: ref,
+		CoverageRef: "Coverage/convergence-coverage", MemberID: member, Corr: originalCorr,
+		Created: created, ContainedInsurer: brPayer, AbsoluteRefs: brPayer, PayerOrgEntry: brPayer, Payer: shnsdk.CMSPayerIdentity,
+	})
+	if err != nil {
+		t.Fatalf("build source submit: %v", err)
+	}
+	priorClaim, err := shnsdk.SubmittedPASClaim(submitted)
+	if err != nil {
+		t.Fatalf("read source Claim: %v", err)
+	}
+	got, err := shnsdk.BuildConformantClaimUpdateBundleAtLine(line, shnsdk.ConformantClaimUpdateInputs{Coverage: testMemberCoverage(member),
 		Provider:         testRequestingProvider(),
 		MemberIDSystem:   shnsdk.MemberSystem,
 		QR:               qrJSON,
@@ -648,6 +668,7 @@ func originatorBuiltConformantUpdateBundleCorrs(t *testing.T, brPayer bool, corr
 		PayerOrgEntry:    brPayer,
 		Insurer:          testPayerOrganization(shnsdk.CMSPayerIdentity),
 		Payer:            shnsdk.CMSPayerIdentity,
+		PriorClaim:       priorClaim,
 	})
 	if err != nil {
 		t.Fatalf("BuildConformantClaimUpdateBundle: %v", err)

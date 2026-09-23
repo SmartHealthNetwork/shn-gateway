@@ -130,6 +130,9 @@ var (
 	// ErrPendEOBInvalid: the EOB is written in the SAME transaction as the
 	// decision, so a malformed one refuses the decision rather than landing half.
 	ErrPendEOBInvalid = errors.New("engine: pend ledger: EOB record is not writable")
+	// ErrEOBSubjectMismatch prevents an EOB ID already filed for one patient from
+	// exposing replacement bytes through that patient's Patient Access list.
+	ErrEOBSubjectMismatch = errors.New("engine: EOB id belongs to another patient")
 )
 
 // PendKeys are the facts a follow-up can name an authorization by, as the payer's

@@ -153,7 +153,8 @@ CREATE TABLE IF NOT EXISTS gw_pended_claim_key (
 -- participant's own system at inquiry time, and the item table below is what
 -- says whether it still matches what was submitted. The two arrays hold
 -- identifier strings ("system|value"), which is what an answer is matched back
--- by; a JSON column "just for the keys" is exactly what the fence exists to stop.
+-- by; claim_references holds exact submitted Claim reference strings for reply
+-- linkage. A JSON column "just for the keys" is exactly what the fence exists to stop.
 --
 -- Retention counts from updated_at, the store's OWN clock, for the same six
 -- months the pend ledger keeps its authorizations: a capability outliving the
@@ -173,6 +174,7 @@ CREATE TABLE IF NOT EXISTS gw_pa_continuation (
     claim_identifier        TEXT NOT NULL,
     claim_type              TEXT NOT NULL,
     claim_priority          TEXT NOT NULL,
+    claim_references        TEXT[] NOT NULL DEFAULT '{}',
     item_trace_numbers      TEXT[] NOT NULL DEFAULT '{}',
     payer_claimresponse_ids TEXT[] NOT NULL DEFAULT '{}',
     payer_preauth_ref       TEXT NOT NULL,
@@ -181,6 +183,9 @@ CREATE TABLE IF NOT EXISTS gw_pa_continuation (
     updated_at              TIMESTAMPTZ NOT NULL,
     PRIMARY KEY (holder_id, continuation_id)
 );
+-- Existing continuation rows predate request-reference retention. Empty means
+-- no reference authority was recorded; it cannot authorize an asserted URL.
+ALTER TABLE gw_pa_continuation ADD COLUMN IF NOT EXISTS claim_references TEXT[] NOT NULL DEFAULT '{}';
 CREATE INDEX IF NOT EXISTS gw_pa_continuation_retention ON gw_pa_continuation (holder_id, updated_at);
 -- gw_pa_continuation_item is the item map: one row per line the submission
 -- carried, with the sequence it was submitted under, the product it asked for,
@@ -386,11 +391,17 @@ WHERE holder_id=$1 AND subject_pci=$2 AND correlation_id=$3 AND state <> 'decide
 // --- EOBs (Patient Access API surface) ---
 
 func (s *PgStore) RecordEOB(subjectPCI, eobID string, eobJSON []byte) error {
-	_, err := s.pool.Exec(context.Background(), `
+	var recordedID string
+	err := s.pool.QueryRow(context.Background(), `
 INSERT INTO gw_eob (holder_id, eob_id, subject_pci, eob_json)
 VALUES ($1, $2, $3, $4)
-ON CONFLICT (holder_id, eob_id) DO UPDATE SET eob_json = EXCLUDED.eob_json`,
-		s.holderID, eobID, subjectPCI, eobJSON)
+ON CONFLICT (holder_id, eob_id) DO UPDATE SET eob_json = EXCLUDED.eob_json
+WHERE gw_eob.subject_pci = EXCLUDED.subject_pci
+RETURNING eob_id`,
+		s.holderID, eobID, subjectPCI, eobJSON).Scan(&recordedID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return engine.ErrEOBSubjectMismatch
+	}
 	if err != nil {
 		return fmt.Errorf("pgstore: RecordEOB: %w", err)
 	}

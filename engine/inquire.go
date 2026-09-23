@@ -1,53 +1,12 @@
-// inquire.go — the Da Vinci prior-authorization inquiry leg (pas-claim-inquire):
-// how a requester asks a payer for the decision on an authorization the payer
-// pended, and how a payer gateway answers.
-//
-// Nothing here polls and nothing here assembles. The requester asks explicitly,
-// the payer's own system answers, and the payer's bytes reach the requester
-// exactly as the payer wrote them — with the payer's own media type. The only
-// change the leg may make is the registered payer-identity restamp on the request
-// it sends its own system, the same edit the submit and update legs make.
-//
-// The one thing the payer gateway DERIVES from the answer is its own pend
-// ledger: an inquiry that comes back decided is how a payer gateway learns the
-// decision for an authorization it recorded as pended. That is a Store
-// side-effect, orthogonal to the relay — the requester receives the payer's
-// answer whether or not anything in the ledger matches it.
-//
-// TWO ANSWER SHAPES, one reader. The published operation definitions differ by
-// IG line: at 2.0.1 and 2.1.0 `Claim/$inquire` returns the response Bundle
-// itself; at 2.2.1 it returns a `Parameters` whose `return` parameters are 0..*
-// response Bundles, one ClaimResponse each. Every ClaimResponse in either shape
-// is read, because an answer that carries several authorizations decides several.
-//
-// WHAT PROFILE-VALIDATES AN INBOUND PEER'S INQUIRY: nothing on this path, by
-// design, and the same is true of the payer's answer. Neither hop runs an
-// enforcing `$validate` over either one — a peer's bytes are preserved and this
-// gateway does not certify content it did not produce, the posture the submit and
-// update legs already take. Concretely, on the payer hop the response check
-// stands down for a relayed answer (and an inquiry's answer is always relayed),
-// and the one `$validate` that does run covers only this gateway's OWN decision
-// ExplanationOfBenefit; on the provider hop the inquiry is carried as sent.
-//
-// Two consequences worth stating rather than discovering. First, a line-specific
-// defect in a peer's inquiry — an inquiry naming no item, which the earliest
-// prior-authorization line requires and the later ones do not — is not refused
-// here; the payer's own system is what certifies an inquiry it receives, which is
-// where that judgement belongs. Second, the certification lane still OBSERVES
-// both directions, at the inquiry's own profiles and at every candidate line
-// (TestPASInquire_NotProfileValidatedButObserved pins the profile resolution), so
-// such a defect is visible as evidence. That evidence is observational: no
-// decision on this path reads it. The 2.2.1 `Parameters` wrapper is not observed
-// either, because the IG governs it by its operation definition and declares no
-// profile for it.
+// Native PAS inquiries preserve the participant backend's application reply.
+// Optional content checks run at the shared native boundaries. The local
+// inquiry readers and ledger utilities in this file do not run during delivery.
 package engine
 
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"sort"
 	"strings"
@@ -66,9 +25,7 @@ const pasExtItemTraceNumberURL = "http://hl7.org/fhir/us/davinci-pas/StructureDe
 
 // pasInquiryFacts is what the inquiry bind extracted: the one member every
 // patient reference in the inquiry names, and the item lines it asks about (their
-// trace numbers and product coding — the coding a decision's own
-// ExplanationOfBenefit is built from, sourced from the requester's own inquiry and
-// never invented).
+// trace numbers and product coding).
 type pasInquiryFacts struct {
 	member string
 	items  []pasInquiryItemFact
@@ -199,9 +156,6 @@ func parsePASInquiryFacts(bundleJSON []byte) (pasInquiryFacts, int, string) {
 	// would refuse a conformant peer, and would make this gateway stricter than the
 	// published Responder, whose own inquiry reader requires no item either.
 	//
-	// The only thing the items are read for is the product coding a recorded
-	// decision's ExplanationOfBenefit states, and an inquiry that names none simply
-	// records the decision without one — nothing is invented to fill the gap.
 	//
 	// The bind: one member across the whole Bundle.
 	if len(members) != 1 || !members[facts.member] {
@@ -993,8 +947,8 @@ func claimResponseLookup(requesterHolder string, raw []byte) inquiryAnswerRespon
 // The only change it may make to the request is the registered payer-identity
 // restamp; the answer is never edited, never re-shaped and never certified by
 // this gateway.
-func (n *nativeResponder) handlePASInquireNative(ctx context.Context, contract string, in relay.Body) (LegResult, error) {
-	const fhirJSON = "application/fhir+json"
+func (n *nativeResponder) handlePASInquireNative(ctx context.Context, in relay.Body) (LegResult, error) {
+	fhirJSON := nativeRequestMedia(ctx, "application/fhir+json")
 	forward, refused, err := n.payorEdgeRequest(in, payorEdgePASBundle, fhirJSON)
 	if err != nil {
 		return LegResult{}, err
@@ -1009,8 +963,7 @@ func (n *nativeResponder) handlePASInquireNative(ctx context.Context, contract s
 	// later ever arrives. Read through the accessor, because several tests build
 	// this responder as a struct literal and skip the constructor's defaults;
 	// behaviour is unchanged unless WithPASBaseURL was applied.
-	inquireURL := n.resolvedURL(ctx, contract, n.pasBase(), "/Claim/$inquire")
-	up, bad, err := n.post(ctx, inquireURL, "", forward, "pas-claim-inquire", "PAS inquiry")
+	up, bad, err := n.post(ctx, n.pasBase(), "/Claim/$inquire", forward, "pas-claim-inquire", "PAS inquiry")
 	if err != nil {
 		return LegResult{}, err // no-response fault → engine 500
 	}
@@ -1020,384 +973,19 @@ func (n *nativeResponder) handlePASInquireNative(ctx context.Context, contract s
 	// The payer answers in its OWN patient namespace, as it does on every other
 	// relayed leg, so the response member-fence stands down and only the answer's
 	// internal consistency is checked.
-	return LegResult{Response: relay.Exact(up.body, up.contentType), ResponseSubjectForeign: true}, nil
+	return LegResult{ApplicationStatus: up.status, ResponseContractVersion: up.version, ResponseVersionSource: up.versionSource, Response: relay.Exact(up.body, up.contentType), ResponseSubjectForeign: true}, nil
 }
 
 // ---- the payer gateway's inbound handler ----
 
-// handlePASInquireInbound serves the inquiry leg payer-side.
-//
-// Authority is evaluated independently here, as on every leg: the inquiry must
-// bind to one member (parsePASInquiryFacts, over EVERY Patient it names) and that
-// member must resolve to the inbound token's own subject. Nothing about the
-// authority is inherited from the submit that created the authorization — a
-// requester holding a submit token cannot ask about the authorization with it,
-// because the catalog pins this leg's own operation into the token binding.
-//
-// The ledger effect is derived AFTER the answer is in hand and BEFORE the response
-// leg is sealed, so the answer the requester receives and the decision the ledger
-// records are the same answer. It follows the same order the submit leg uses:
-// fence, egress-$validate the gateway's own side-effects, build the response leg,
-// then write holder state — a response-leg failure can never leave a recorded
-// decision the requester never received.
+// handlePASInquireInbound delegates verified inquiry delivery to the shared native boundary.
 func (g *Gateway) handlePASInquireInbound(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token, bundleJSON []byte, answerTok string) {
-	facts, status, msg := parsePASInquiryFacts(bundleJSON)
-	if status != 0 {
-		g.refuseInbound(w, r, legPASClaimInquire, env, tok, answerTok, status, msg, nil)
-		return
-	}
-	pci, found, readErr := g.resolveSubjectPCI(r.Context(), facts.member, bundleJSON)
-	if writeSoRFailure(w, readErr) {
-		return
-	}
-	if !found {
-		g.refuseInbound(w, r, legPASClaimInquire, env, tok, answerTok, http.StatusBadRequest, refusalUnknownMember, nil)
-		return
-	}
-	if pci != tok.Subject {
-		g.refuseInbound(w, r, legPASClaimInquire, env, tok, answerTok, http.StatusForbidden, "token subject does not match request patient", nil)
-		return
-	}
-	boundPatientRef := "Patient/" + facts.member
-
-	capture := &nativeCertificationCapture{}
-	// The payer's own departures from the operation it answered, reported with the
-	// answer they describe. Filled once the answer is in hand, below.
-	var answerNonconformance []string
-	defer func() {
-		if capture.attempted {
-			g.certificationPair("pas-claim-inquire", "payer-native", env.Metadata.CorrelationID, shnsdk.LineOf(answerTok), capture.request, capture.response, answerNonconformance...)
-		}
-	}()
-	observationContext := context.WithValue(r.Context(), nativeCertificationKey{}, capture)
-	result, err := g.cfg.Responder.Handle(observationContext, "pas-claim-inquire", env.Metadata.CorrelationID, tok.Subject, bundleJSON)
-	committed := false
-	defer func() {
-		if !committed && result.Rollback != nil {
-			result.Rollback()
-		}
-	}()
-	if err != nil {
-		g.responderFailed(w, "pas-claim-inquire", err)
-		return
-	}
-	if result.Status != 0 {
-		g.respondLegError(w, r, "payer-coverage", "pas-inquire-response", "pas-claim-inquire",
-			env.Metadata.CorrelationID, result, tok.Subject, env.Metadata.Sender, "", answerTok)
-		return
-	}
-	responseFHIR, err := g.admit(result.Response, answerKey("pas-claim-inquire", relay.OutcomeAnswered))
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": errOwnershipFault})
-		return
-	}
-	if bad := validatePASInquiryAnswer(responseFHIR); bad.Status != 0 {
-		g.refuseInbound(w, r, legPASClaimInquire, env, tok, answerTok, bad.Status, bad.Message, nil)
-		return
-	}
-	// Whatever the payer's answer departs from, stated before anything is derived
-	// from it. Reported IMMEDIATELY rather than with the ledger's events: the
-	// payer deviated whatever this exchange does next, and an operator asking why
-	// a decision went unrecorded is asking about exactly the runs that fail later.
-	answerNonconformance = g.reportInquiryAnswerNonconformance(env.Metadata.CorrelationID, env.Metadata.Sender, responseFHIR)
-	// The ledger effect, derived from the answer. The EOBs it produces join the
-	// gateway's own side-effects, so they are member-fenced and egress-$validated
-	// below exactly as the submit leg's decision EOB is.
-	ledgerCommit, events := g.inquiryLedgerEffect(env.Metadata.Sender, tok.Subject, boundPatientRef, env.Metadata.CorrelationID, facts, responseFHIR, &result)
-	if status, msg := g.fenceResponseSubject("pas-claim-inquire", boundPatientRef, env.Metadata.CorrelationID, result); status != 0 {
-		g.refuseInbound(w, r, legPASClaimInquire, env, tok, answerTok, status, msg, nil)
-		return
-	}
-	// The direction flips here, as it does on every inbound leg that answers with
-	// bytes it built itself. handleInbound tagged this context with the peer's
-	// inquiry — right for everything above — but everything validated from here
-	// on is THIS participant's own build: the answer when this gateway produced
-	// it (validatePASResult certifies only that case; a relayed answer returns
-	// early, being the payer's own message) and the ledger's EOBs below. Retag
-	// rather than re-tag from scratch, so the leg and the correlation id
-	// handleInbound resolved are carried, not re-derived.
-	fc := findingContextFrom(r.Context())
-	fc.Whose = "own"
-	ctx := withFindingContext(r.Context(), fc)
-	if status, msg := g.validatePASResult(ctx, result, answerTok, "pas-claim-inquire"); status != 0 {
-		g.refuseInbound(w, r, legPASClaimInquire, env, tok, answerTok, status, msg, nil)
-		return
-	}
-	for _, b := range result.SideEffectFHIR {
-		if status, msg := g.validateFHIR(ctx, b, "egress", ""); status != 0 {
-			g.refuseInbound(w, r, legPASClaimInquire, env, tok, answerTok, status, msg, nil)
-			return
-		}
-	}
-	// Stamp honesty, as on every relaying leg: a verbatim foreign relay is left
-	// unstamped, because this build did not produce the payer's bytes and cannot
-	// vouch for the line they were built at. The answer's media type is the payer's
-	// own.
-	stampTok := stampForBuiltAnswer(result, answerTok)
-	respBytes, status, msg := g.buildResponseLeg(r, "payer-coverage", "pas-inquire-response", "pas-claim-inquire", env.Metadata.CorrelationID,
-		result.Response, answerKey("pas-claim-inquire", relay.OutcomeAnswered),
-		g.successFrame(env.Metadata.Sender, result.ResponseContentType(), stampTok),
-		tok.Subject, env.Metadata.Sender, "")
-	if status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
-		return
-	}
-	if ledgerCommit != nil {
-		if err := ledgerCommit(); err != nil {
-			// The established holder-write contract for the PAS legs: a failed write
-			// is reported, never swallowed. The payer's bytes are not sent in that
-			// case, and the requester can ask again — an inquiry is a read, so
-			// repeating it is safe.
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "holder write failed"})
-			return
-		}
-	}
-	if result.Commit != nil {
-		if err := result.Commit(); err != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "holder write failed"})
-			return
-		}
-	}
-	committed = true
-	for _, e := range events {
-		g.observe(e)
-	}
-	writeLeg(w, respBytes)
-}
-
-// inquiryLedgerEffect derives this payer gateway's own pend-ledger effect from the
-// answer, and returns the write to run once the response leg is sealed plus the
-// observer events the ledger's transitions raised.
-//
-// For every ClaimResponse the answer carries:
-//   - exactly one match whose state the payer has now decided → RecordDecision,
-//     with the decision's ExplanationOfBenefit in the same write;
-//   - no match, an ambiguous match, or a match the payer still reports as pended →
-//     NO ledger change.
-//
-// A match that resolves to another patient's authorization changes nothing either:
-// this inquiry is bound to one subject, and an answer about a different one is not
-// this requester's to decide.
-//
-// A Store with no pend ledger has no inquiry entry point at all: the answer relays
-// and no state moves.
-//
-// legCorrID is THIS exchange's correlation, and it is what every event below is
-// tied to — an event an operator cannot trace back to the exchange that raised it
-// answers no question. Where the authorization the event is about has a
-// correlation of its own, that one rides in Detail; a failed lookup has none to
-// report, which is exactly the case that would otherwise carry an empty id.
-func (g *Gateway) inquiryLedgerEffect(requester, subject, boundPatientRef, legCorrID string, facts pasInquiryFacts, answer []byte, result *LegResult) (func() error, []ObserverEvent) {
-	ledger, ok := LedgerOf(g.cfg.Store)
-	if !ok || strings.TrimSpace(requester) == "" {
-		return nil, nil
-	}
-	type decision struct {
-		subjectPCI string
-		corrID     string
-		outcome    string
-		decidedAt  time.Time
-		eob        *EOBRecord
-	}
-	var (
-		decisions []decision
-		events    []ObserverEvent
-	)
-	for _, ans := range readPASInquiryAnswers(requester, answer) {
-		if len(ProbePendKeys(ans.keys)) == 0 {
-			continue // the answer states nothing a follow-up could have named
-		}
-		subjectPCI, corrID, found, ambiguous, err := ledger.LookupPended(requester, ans.keys)
-		switch {
-		case err != nil:
-			// The ledger could not be consulted. The payer's answer still reaches
-			// the requester — the relay is not the ledger's to withhold — and the
-			// operator sees why nothing was recorded.
-			g.noteStoreError(storeErrPended)
-			events = append(events, ObserverEvent{Kind: "pend.lookup-unavailable", Direction: "ingress",
-				LegType: "pas-claim-inquire", CorrelationID: legCorrID, Op: "pas-inquire"})
-			continue
-		case ambiguous, !found, subjectPCI != subject:
-			continue
-		}
-		outcome, parsed, decided := inquiryDecisionOf(ans.raw)
-		if !decided {
-			continue // still pended, or an answer that states no decision
-		}
-		eob, eobErr := g.inquiryDecisionEOB(subjectPCI, corrID, boundPatientRef, facts, ans, parsed)
-		if eobErr != nil {
-			// The payer's own decision detail cannot be stated on a decision EOB.
-			// Refusing the RECORD, not the relay: the answer still reaches the
-			// requester, and nothing half-stated is written.
-			events = append(events, ObserverEvent{Kind: "pend.decision-not-recorded", Direction: "ingress",
-				LegType: "pas-claim-inquire", CorrelationID: legCorrID, Op: "pas-inquire",
-				Detail: "authorization " + corrID + ": " + eobErr.Error()})
-			continue
-		}
-		if eob != nil {
-			result.SideEffectFHIR = append(result.SideEffectFHIR, eob.JSON)
-		}
-		decisions = append(decisions, decision{subjectPCI: subjectPCI, corrID: corrID, outcome: outcome, decidedAt: ans.created, eob: eob})
-	}
-	if len(decisions) == 0 {
-		return nil, events
-	}
-	commit := func() error {
-		for _, d := range decisions {
-			tr, err := ledger.RecordDecision(d.subjectPCI, d.corrID, d.outcome, d.decidedAt, d.eob)
-			if err != nil {
-				return err
-			}
-			if tr.Event != "" {
-				g.observe(ObserverEvent{Kind: tr.Event, Direction: "ingress", LegType: "pas-claim-inquire",
-					CorrelationID: legCorrID, Op: "pas-inquire", Detail: "authorization " + d.corrID})
-			}
-		}
-		return nil
-	}
-	return commit, events
-}
-
-// inquiryDecisionOf classifies one ClaimResponse from an inquiry's answer: the
-// ledger outcome it records, the decision detail its EOB is built from, and
-// whether it is a decision at all. A response the payer still reports as pended,
-// or one this gateway cannot read as a decision, decides nothing.
-func inquiryDecisionOf(raw []byte) (string, shnsdk.PriorAuthResult, bool) {
-	if pended, _, err := shnsdk.ParsePendedResponse(raw); err != nil || pended {
-		return "", shnsdk.PriorAuthResult{}, false
-	}
-	parsed, err := shnsdk.ParseClaimResponse(raw)
-	if err != nil {
-		return "", shnsdk.PriorAuthResult{}, false
-	}
-	switch parsed.Outcome {
-	case "approved":
-		return PendOutcomeApproved, parsed, true
-	case "denied":
-		return PendOutcomeDenied, parsed, true
-	}
-	return "", shnsdk.PriorAuthResult{}, false
-}
-
-// inquiryDecisionEOB projects the decision EOB that is written in the SAME write
-// as the decision. Its product coding comes from the REQUESTER's own inquiry —
-// the item line whose trace number the payer echoed, else the first line it asked
-// about — never from a code this gateway chose. A line with no recognizable
-// product coding yields no EOB, exactly as a submit with none does: the decision
-// is still recorded, and nothing is invented to carry it.
-func (g *Gateway) inquiryDecisionEOB(subjectPCI, corrID, boundPatientRef string, facts pasInquiryFacts, ans inquiryAnswerResponse, parsed shnsdk.PriorAuthResult) (*EOBRecord, error) {
-	item := inquiryItemFor(facts, ans.keys.ItemTraceNumbers)
-	if item.code == "" {
-		return nil, nil
-	}
-	eobJSON, err := decisionEOB(g.cfg.Clock, corrID, boundPatientRef, item.system, item.code, item.display, parsed)
-	if err != nil {
-		return nil, err
-	}
-	return &EOBRecord{SubjectPCI: subjectPCI, EOBID: "eob-" + corrID, JSON: eobJSON}, nil
-}
-
-// inquiryItemFor picks the inquiry line an answer is about: the line whose trace
-// number the answer echoed, else the first line the inquiry asked about.
-func inquiryItemFor(facts pasInquiryFacts, answerTraceNumbers []string) pasInquiryItemFact {
-	for _, tn := range answerTraceNumbers {
-		for _, it := range facts.items {
-			if it.traceNumber != "" && it.traceNumber == tn {
-				return it
-			}
-		}
-	}
-	if len(facts.items) > 0 {
-		return facts.items[0]
-	}
-	return pasInquiryItemFact{}
+	g.handleNativeInbound(w, r, "pas-claim-inquire", env, tok, bundleJSON, answerTok)
 }
 
 // ---- the provider gateway's ingress ----
 
-// handlePASInquireIngress is the provider-facing `POST /Claim/$inquire`: a
-// participant's own system asks its own gateway, and the gateway carries the
-// inquiry onto the network exactly as sent.
-//
-// It binds the inquiry over EVERY Patient the Bundle names and routes by the
-// Coverage(s) the inquiry carries — no default payer. The payer's answer comes
-// back to the participant's system exactly as the payer wrote it.
+// handlePASInquireIngress accepts native inquiry context and preserves the application reply.
 func (g *Gateway) handlePASInquireIngress(w http.ResponseWriter, r *http.Request) {
-	w, scope := g.withScope(w, relay.RoleRequester)
-	w = &fhirOperationWriter{w}
-	if g.ingressAuthRefused(w, r) {
-		return
-	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, shnsdk.MaxRequestBytes))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "read body failed"})
-		return
-	}
-	facts, status, msg := parsePASInquiryFacts(body)
-	if status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
-		return
-	}
-	pci, found, readErr := g.resolveSubjectPCI(r.Context(), facts.member, body)
-	if writeSoRFailure(w, readErr) {
-		return
-	}
-	if !found {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown member"})
-		return
-	}
-	// Routed by the inquiry's OWN Coverage, the same rule the submit ingress
-	// follows: a Coverage naming no resolvable payer fails closed rather than
-	// defaulting to one.
-	recipient, _, status, msg := g.recipientForWith(pasBundleCoverage(body), bundleRefResolver(body))
-	if status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
-		return
-	}
-	const leg = "pas-claim-inquire"
-	scope.leg = leg
-	ex := g.exchanges.Begin(workstreamPA)
-	child := g.ingressCorrelation(w, r)
-	requestObservation := append([]byte(nil), body...)
-	var responseObservation []byte
-	var observedTarget string
-	defer func() {
-		g.certificationPair(leg, "provider-ingress", child, shnsdk.LineOf(observedTarget), requestObservation, responseObservation)
-	}()
-	observationContext := context.WithValue(r.Context(), certificationTargetKey{}, &observedTarget)
-	request := relay.Exact(relay.NewBody(body, relay.OriginIngressRequest), "application/fhir+json")
-	content := Content{WorkstreamType: workstreamPA, Payload: request, Carried: true}
-	answer, err := g.OriginateLeg(observationContext, r, recipient, leg, pci, child, "", content)
-	responseObservation = append([]byte(nil), answer...)
-	var relayed *RelayError
-	if errors.As(err, &relayed) {
-		responseObservation = append([]byte(nil), relayed.Body...)
-	}
-	legProj := Leg{Type: leg, Physics: paCatalog[leg].Physics, Content: content, Subjects: []string{pci}}
-	if err != nil {
-		g.recordLeg(ex.ID, legProj.Project(child, "error"))
-		if g.relayOriginationError(w, err) {
-			return
-		}
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
-		return
-	}
-	if bad := validatePASInquiryAnswer(answer); bad.Status != 0 {
-		g.recordLeg(ex.ID, legProj.Project(child, "error"))
-		writeJSON(w, bad.Status, map[string]string{"error": bad.Message})
-		return
-	}
-	// The same subject-linkage rule the submit ingress applies to a payer's
-	// response: every patient the answer names, at every depth, must be the same
-	// one. Shape alone would pass an answer whose Coverage beneficiary named
-	// another member.
-	if !consistentPASInquiryAnswerSubjects(answer) {
-		g.recordLeg(ex.ID, legProj.Project(child, "error"))
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "PAS inquiry answer has inconsistent patient linkage"})
-		return
-	}
-	g.recordLeg(ex.ID, legProj.Project(child, "ok"))
-	g.writePayload(w, http.StatusOK, "application/fhir+json",
-		relay.Exact(relay.NewBody(answer, relay.OriginPeerFrame), "application/fhir+json"),
-		relay.Key{Leg: leg, Role: relay.RoleRequester, Direction: relay.DirectionResponse, Outcome: relay.OutcomeAnswered})
+	g.handleNativeIngress(w, r)
 }

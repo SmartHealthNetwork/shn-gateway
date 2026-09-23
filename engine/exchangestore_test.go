@@ -209,7 +209,7 @@ func TestGatewayReset_CallsStoreResetNeverReassigns(t *testing.T) {
 		Identity:       shnsdk.Identity{HolderID: "provider", SignPriv: signPriv},
 		IngressEnabled: true, IngressBaseURL: testIngressBaseURL,
 		IngressClients: map[string]IngressClientRegistration{"c": {Alg: "ES384", PublicKeyPEM: pub, Scopes: []string{ingressScope}}},
-		Reg:            shnsdk.NewRegistry(), Validator: shnsdk.NewFakeValidator(), SoR: sor, Store: sor,
+		Reg:            shnsdk.NewRegistry(), Validator: syntheticFakeValidator(), SoR: sor, Store: sor,
 		Clock: ingressFixedClock(), HubURL: "http://hub.test",
 		Exchanges: fake,
 	})
@@ -240,10 +240,14 @@ func routableCRDReqJSON() []byte {
 }
 
 func TestRecordLeg_StoreFailureIsLoggedCountedNotFatal(t *testing.T) {
-	// crdTestSystem (originate_test.go) + EnableIngressForTest (auth bypass) is the
-	// fixture observer_test.go uses to drive a real CRD ingress call to 200.
-	gw, _, _ := crdTestSystem(t, shnsdk.CardCoverage{Covered: shnsdk.CoveredCovered, PANeeded: shnsdk.PANeededAuthNeeded, Questionnaires: []string{"http://example.org/q"}})
+	// Exercise the best-effort exchange store on authenticated native carriage.
+	gw, transport, pci := crdTestSystem(t, shnsdk.CardCoverage{Covered: shnsdk.CoveredCovered, PANeeded: shnsdk.PANeededAuthNeeded, Questionnaires: []string{"http://example.org/q"}})
 	cfg := gw.cfg
+	cfg.ConformanceEnforcement = EnforcementNone
+	peer, _ := cfg.Reg.Lookup("payer")
+	peer.BaseURL = "http://stub.test"
+	peer.RequestFrames = SupportedRequestFrames()
+	cfg.Reg.Set("payer", peer)
 	EnableIngressForTest(&cfg)
 	fake := &fakeExchangeStore{mem: NewInMemoryExchangeStore(time.Hour, cfg.Clock), failAppend: true}
 	cfg.Exchanges = fake
@@ -257,13 +261,16 @@ func TestRecordLeg_StoreFailureIsLoggedCountedNotFatal(t *testing.T) {
 	log.SetOutput(&logBuf)
 	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 
-	req := httptest.NewRequest(http.MethodPost, "/cds-services/shn-order-select", bytes.NewReader(routableCRDReqJSON()))
+	req := signedFixtureIngress(t, gw2, "/cds-services/shn-order-select", "crd-order-select", "crd-order-select", "order-select", pci, "pa.crd@2.0", "store-error-control", routableCRDReqJSON())
 	rec := httptest.NewRecorder()
 	gw2.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("CRD with a failing exchange store = %d, want 200 (best-effort seam); body=%s", rec.Code, rec.Body.String())
 	}
-	// The CRD 200 path records exactly one leg (ingress.go: the AppendLeg after wrapCards).
+	if transport.legCount != 1 {
+		t.Fatalf("forwarded legs=%d want1", transport.legCount)
+	}
+	// The completed native exchange appends exactly one leg.
 	if n := strings.Count(logBuf.String(), "gateway: exchange store: append leg"); n != 1 {
 		t.Fatalf("exchange store error logged %d times, want 1:\n%s", n, logBuf.String())
 	}

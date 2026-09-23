@@ -1,20 +1,9 @@
-// conformance_findingvalues_test.go — pins the ACTUAL findingContext value a
-// real handler or helper hands validateGoverned, one representative
-// ingress/egress pair per leg family (CRD, DTR incl. the adaptive path, PAS,
-// federated query, patient access, inbound). The AST census in
-// conformance_sources_test.go can only see that a handler CALLS
-// withFindingContext somewhere in its body — it cannot see ordering, value
-// truth, or a helper's own internal retagging. This file is the guard two
-// successive audits (fix rounds 1 and 2 of the conformance-enforcement-levels
-// work) showed that census alone cannot provide.
-//
-// Every case below drives a real production handler or helper — never a
-// hand-built findingContext passed straight to validateFHIR/validateGoverned
-// — through findingSpyValidator, a Validator double that always returns a
-// valid verdict (so a multi-leg flow runs to completion undisturbed) and
-// records, for every call, the resourceType of what it checked and
-// findingContextFrom(ctx): the exact value validateGoverned itself would have
-// read for emitFinding, had the verdict been invalid instead.
+// conformance_findingvalues_test.go pins source attribution on real handler
+// paths. Optional checks run after the handler returns; finding tests wait for
+// the bounded completion barrier before inspecting their metadata.
+// The synthetic validator records the resource and immutable context seen by
+// each actual check; the observer captures findings for checks with no
+// independently declared validator target.
 package engine
 
 import (
@@ -26,11 +15,151 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
+
+func TestRetainedDTRCorrelation(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		reply *ApplicationReplyView
+		want  string
+		ok    bool
+	}{
+		{"absent", nil, "", false},
+		{"prior CRD leg", &ApplicationReplyView{Leg: "crd-order-dispatch", CorrelationID: "crd-correlation"}, "", false},
+		{"empty DTR correlation", &ApplicationReplyView{Leg: "dtr-questionnaire-fetch"}, "", false},
+		{"received DTR leg", &ApplicationReplyView{Leg: "dtr-questionnaire-fetch", CorrelationID: "dtr-correlation"}, "dtr-correlation", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := retainedDTRCorrelation(ConsumptionAttempt{ApplicationReply: tc.reply})
+			if got != tc.want || ok != tc.ok {
+				t.Fatalf("retained DTR correlation = %q/%v, want %q/%v", got, ok, tc.want, tc.ok)
+			}
+		})
+	}
+}
+
+// PCV-02/05/11: the optional worker must retain the authenticated leg's
+// metadata for both directions after the handler has returned. The fixture is
+// synthetic and checks only the gateway's metadata plumbing.
+func TestObservationFindingMetadataNativeInbound(t *testing.T) {
+	g, requester := newInboundTestGatewayWithPolicy(t, true, EnforcementObserve)
+	g.cfg.Validator = syntheticFakeValidator()
+	answer := realCRDAnswer(t)
+	g.cfg.Responder = pasResultResponder{result: LegResult{Response: testResponse(answer)}}
+	var mu sync.Mutex
+	var findings []ConformanceFinding
+	g.cfg.Observer = func(e ObserverEvent) {
+		if e.Kind != ConformanceObservedEvent {
+			return
+		}
+		var f ConformanceFinding
+		if json.Unmarshal([]byte(e.Detail), &f) != nil {
+			return
+		}
+		mu.Lock()
+		findings = append(findings, f)
+		mu.Unlock()
+	}
+	pci, _, _ := g.cfg.SoR.ResolvePatient("MBR-COVERED")
+	const correlation = "corr-observation-native-crd"
+	req := conformantCRD("MBR-COVERED", "72148")
+	ex := ExchangeContext{holder: requester.ID, recipient: g.cfg.HolderID,
+		legType: "crd-order-select", subjectPCI: pci, correlationID: correlation,
+		contractVersion: "pa.crd@2.0", policy: g.policy()}
+	env := shnsdk.Envelope{}
+	env.Metadata.CorrelationID, env.Metadata.Sender = correlation, requester.ID
+	r := newSignedInboundRequest(t, g, requester.ID)
+	r = r.WithContext(context.WithValue(r.Context(), nativeExchangeKey{}, ex))
+	r = r.WithContext(withFindingContext(r.Context(), findingContext{
+		LegType: ex.legType, CorrelationID: correlation,
+		Seam: inboundSeamFor(ex.legType), Whose: "peer",
+	}))
+	rec := httptest.NewRecorder()
+	g.handleCRDNativeInbound(rec, r, env, shnsdk.Token{Subject: pci}, req, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("native answer status %d: %s", rec.Code, rec.Body.String())
+	}
+	hdr, gotBody, err := shnsdk.DecodeHTTPFrame(openResponseLeg(t, requester, rec.Body.Bytes()))
+	if err != nil || hdr.Status != http.StatusOK || !bytes.Equal(gotBody, answer) {
+		t.Fatalf("native answer changed: %v %d %s", err, hdr.Status, gotBody)
+	}
+	observationFlush(t, g)
+	mu.Lock()
+	defer mu.Unlock()
+	for _, row := range []struct {
+		direction, whose, digest string
+		state                    CheckState
+	}{
+		{"request", "peer", sha256hex(req), CheckValid},
+		// The native responder did not declare a response line. An unavailable
+		// profile finding must not become an invented passing certificate.
+		{"response", "own", sha256hex(answer), CheckUnavailable},
+	} {
+		found := false
+		for _, f := range findings {
+			if f.Direction != row.direction || f.Rule != "fhir.profile" {
+				continue
+			}
+			found = true
+			if f.Gateway != g.cfg.HolderID || f.LegType != ex.legType || f.CorrelationID != correlation ||
+				f.Seam != "payer-native" || f.Whose != row.whose || f.Level != "observe" ||
+				f.Action != "not_enforced" || f.State != row.state || f.PayloadSHA256 != row.digest {
+				t.Errorf("%s finding metadata: %+v", row.direction, f)
+			}
+		}
+		if !found {
+			t.Errorf("missing %s fhir.profile finding: %+v", row.direction, findings)
+		}
+	}
+}
+
+func TestObservationFindingMetadataNativeInbound_None(t *testing.T) {
+	g, requester := newInboundTestGatewayWithPolicy(t, true, EnforcementNone)
+	g.cfg.Validator = failIfCalledValidator{t: t}
+	if g.certification != nil {
+		t.Fatal("none started an optional certification worker")
+	}
+	answer := realCRDAnswer(t)
+	g.cfg.Responder = pasResultResponder{result: LegResult{Response: testResponse(answer)}}
+	var mu sync.Mutex
+	findings := 0
+	g.cfg.Observer = func(e ObserverEvent) {
+		if e.Kind == ConformanceObservedEvent {
+			mu.Lock()
+			findings++
+			mu.Unlock()
+		}
+	}
+	pci, _, _ := g.cfg.SoR.ResolvePatient("MBR-COVERED")
+	const correlation = "corr-none-native-crd"
+	ex := ExchangeContext{holder: requester.ID, recipient: g.cfg.HolderID,
+		legType: "crd-order-select", subjectPCI: pci, correlationID: correlation,
+		contractVersion: "pa.crd@2.0", policy: g.policy()}
+	env := shnsdk.Envelope{}
+	env.Metadata.CorrelationID, env.Metadata.Sender = correlation, requester.ID
+	r := newSignedInboundRequest(t, g, requester.ID)
+	r = r.WithContext(context.WithValue(r.Context(), nativeExchangeKey{}, ex))
+	rec := httptest.NewRecorder()
+	g.handleCRDNativeInbound(rec, r, env, shnsdk.Token{Subject: pci}, conformantCRD("MBR-COVERED", "72148"), "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("native answer status %d: %s", rec.Code, rec.Body.String())
+	}
+	hdr, gotBody, err := shnsdk.DecodeHTTPFrame(openResponseLeg(t, requester, rec.Body.Bytes()))
+	if err != nil || hdr.Status != http.StatusOK || !bytes.Equal(gotBody, answer) {
+		t.Fatalf("none changed answer: %v %d %s", err, hdr.Status, gotBody)
+	}
+	observationFlush(t, g)
+	mu.Lock()
+	defer mu.Unlock()
+	if findings != 0 {
+		t.Fatalf("none emitted %d optional conformance findings", findings)
+	}
+}
 
 // findingSpyCall is one $validate call findingSpyValidator observed.
 type findingSpyCall struct {
@@ -41,7 +170,43 @@ type findingSpyCall struct {
 // findingSpyValidator always returns Valid (see file doc) and records every
 // call's resourceType + the findingContext actually attached to ctx.
 type findingSpyValidator struct {
-	calls []findingSpyCall
+	mu       sync.Mutex
+	calls    []findingSpyCall
+	findings []ConformanceFinding
+	flush    func()
+}
+
+func (s *findingSpyValidator) observe(e ObserverEvent) {
+	if e.Kind != ConformanceObservedEvent {
+		return
+	}
+	var f ConformanceFinding
+	if json.Unmarshal([]byte(e.Detail), &f) != nil {
+		return
+	}
+	s.mu.Lock()
+	s.findings = append(s.findings, f)
+	s.mu.Unlock()
+}
+
+func (s *findingSpyValidator) finding(t *testing.T, leg, direction, rule string) ConformanceFinding {
+	t.Helper()
+	if s.flush != nil {
+		s.flush()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, f := range s.findings {
+		if f.LegType == leg && f.Direction == direction && f.Rule == rule {
+			return f
+		}
+	}
+	t.Fatalf("no %s/%s/%s finding (got %+v)", leg, direction, rule, s.findings)
+	return ConformanceFinding{}
+}
+
+func findingTag(f ConformanceFinding) findingContext {
+	return findingContext{LegType: f.LegType, CorrelationID: f.CorrelationID, Seam: f.Seam, Whose: f.Whose}
 }
 
 func (s *findingSpyValidator) Validate(ctx context.Context, resourceJSON []byte, _ string) (shnsdk.Result, error) {
@@ -49,7 +214,9 @@ func (s *findingSpyValidator) Validate(ctx context.Context, resourceJSON []byte,
 		ResourceType string `json:"resourceType"`
 	}
 	_ = json.Unmarshal(resourceJSON, &probe)
+	s.mu.Lock()
 	s.calls = append(s.calls, findingSpyCall{resourceType: probe.ResourceType, fc: findingContextFrom(ctx)})
+	s.mu.Unlock()
 	return shnsdk.Result{Valid: true}, nil
 }
 
@@ -58,6 +225,11 @@ func (s *findingSpyValidator) Validate(ctx context.Context, resourceJSON []byte,
 // fails loudly, not with a silent index-out-of-range).
 func (s *findingSpyValidator) nth(t *testing.T, n int, resourceType string) findingSpyCall {
 	t.Helper()
+	if s.flush != nil {
+		s.flush()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	i := 0
 	for _, c := range s.calls {
 		if c.resourceType != resourceType {
@@ -72,10 +244,7 @@ func (s *findingSpyValidator) nth(t *testing.T, n int, resourceType string) find
 	return findingSpyCall{}
 }
 
-// wantTag pins the fields a real check's findingContext must carry. Only
-// PRESENCE of a correlation id is pinned (not its value, which is
-// test-run-generated) — matching this task's own "" == not minted yet
-// convention for a check that runs before its leg's id exists.
+// wantTag pins source attribution and correlation presence on the actual leg.
 type wantTag struct {
 	legType, whose, seam string
 	corrPresent          bool
@@ -110,6 +279,10 @@ func TestPinnedFindingContext_CRDIngress(t *testing.T) {
 	g, requester := newInboundTestGateway(t, true)
 	spy := &findingSpyValidator{}
 	g.cfg.Validator = spy
+	g.cfg.ConformanceEnforcement = EnforcementObserve
+	g.startCertification()
+	spy.flush = func() { observationFlush(t, g) }
+	g.cfg.Observer = spy.observe
 	// A non-2xx stop: the ingress checks under test run BEFORE the Responder is
 	// ever reached, so a cheap refusal here just ends the request cleanly.
 	g.cfg.Responder = pasResultResponder{result: LegResult{Status: http.StatusBadRequest, Message: "test stop"}}
@@ -120,6 +293,11 @@ func TestPinnedFindingContext_CRDIngress(t *testing.T) {
 	req := conformantCRD("MBR-COVERED", "72148")
 
 	r := newSignedInboundRequest(t, g, requester.ID)
+	r = r.WithContext(context.WithValue(r.Context(), nativeExchangeKey{}, ExchangeContext{
+		holder: requester.ID, recipient: g.cfg.HolderID, legType: "crd-order-select",
+		subjectPCI: pci, correlationID: env.Metadata.CorrelationID,
+		contractVersion: "pa.crd@2.0", policy: g.policy(),
+	}))
 	r = r.WithContext(withFindingContext(r.Context(), findingContext{
 		LegType: "crd-order-select", CorrelationID: env.Metadata.CorrelationID,
 		Seam: inboundSeamFor("crd-order-select"), Whose: "peer",
@@ -127,8 +305,8 @@ func TestPinnedFindingContext_CRDIngress(t *testing.T) {
 	rec := httptest.NewRecorder()
 	g.handleCRDNativeInbound(rec, r, env, shnsdk.Token{Subject: pci}, req, "")
 
-	call := spy.nth(t, 1, "ServiceRequest")
-	assertTag(t, "CRD ingress (peer's incoming order)", call.fc, wantTag{
+	f := spy.finding(t, "crd-order-select", "request", "fhir.profile")
+	assertTag(t, "CRD ingress (peer's incoming order)", findingTag(f), wantTag{
 		legType: "crd-order-select", whose: "peer", seam: "payer-native", corrPresent: true,
 	})
 }
@@ -139,6 +317,10 @@ func TestPinnedFindingContext_CRDEgress(t *testing.T) {
 	env := newInProcessExchange(t)
 	spy := &findingSpyValidator{}
 	env.originator.cfg.Validator = spy
+	env.originator.cfg.ConformanceEnforcement = EnforcementObserve
+	env.originator.startCertification()
+	spy.flush = func() { observationFlush(t, env.originator) }
+	env.originator.cfg.Observer = spy.observe
 	// The demo lane (what an unset ORIGINATION_PROFILE normalizes to in
 	// gateway/app.go's loadConfig) puts UC-02 on MBR-D-UC02, the member whose
 	// open order in the census stand-in IS the UC-02 hospital-bed order. On
@@ -153,26 +335,27 @@ func TestPinnedFindingContext_CRDEgress(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("want 200, got %d body=%s", rec.Code, rec.Body.String())
 	}
-	call := spy.nth(t, 1, "ServiceRequest")
-	assertTag(t, "CRD egress (this participant's own order)", call.fc, wantTag{
-		legType: "crd-order-select", whose: "own", seam: "originate", corrPresent: false,
+	f := spy.finding(t, "crd-order-select", "request", "fhir.profile")
+	assertTag(t, "CRD egress (this participant's own order)", findingTag(f), wantTag{
+		legType: "crd-order-select", whose: "own", seam: "originate", corrPresent: true,
 	})
 }
 
-// TestPinnedFindingContext_UC01EligibilityEgress drives handleScenario (UC-01)
-// — this participant's own built CoverageEligibilityRequest, egress-validated
-// before it is sent. This check used to bypass the choke point entirely (no
-// finding was ever emitted, so nothing downstream ever read the context tag);
-// now that it is routed through validateGoverned, an untagged context would
-// surface as legType "unknown" on a live path, which is exactly the
-// evidence-quality gap tagging exists to close. This row proves the tag
-// precedes the check and is true for these bytes: legType/seam/whose are all
-// populated, and correlationId is correctly ABSENT (not invented) — it is not
-// minted until after this check, just before the Hub round trip.
+// TestPinnedFindingContext_UC01EligibilityEgress pins the provider's own
+// built eligibility request after the leg acquires its correlation ID.
 func TestPinnedFindingContext_UC01EligibilityEgress(t *testing.T) {
 	env := newInProcessExchange(t)
 	spy := &findingSpyValidator{}
 	env.originator.cfg.Validator = spy
+	env.originator.cfg.ConformanceEnforcement = EnforcementObserve
+	env.originator.startCertification()
+	spy.flush = func() { observationFlush(t, env.originator) }
+	env.originator.cfg.Observer = spy.observe
+	correlationCalls := 0
+	env.originator.cfg.CorrelationGen = func() string {
+		correlationCalls++
+		return "uc01-eligibility-leg"
+	}
 	// A minimal but resourceType-valid CoverageEligibilityResponse: ParseEligibilityResponse
 	// (run after the checks under test) only needs the resourceType to match — the
 	// response's own content is not what this row is about.
@@ -185,8 +368,17 @@ func TestPinnedFindingContext_UC01EligibilityEgress(t *testing.T) {
 		t.Fatalf("want 200, got %d body=%s", rec.Code, rec.Body.String())
 	}
 	call := spy.nth(t, 1, "CoverageEligibilityRequest")
+	if correlationCalls != 1 || call.fc.CorrelationID != "uc01-eligibility-leg" {
+		t.Fatalf("eligibility correlation generated %d times; authored check=%q", correlationCalls, call.fc.CorrelationID)
+	}
+	env.substrate.mu.Lock()
+	routedCorrelation := env.substrate.lastMetadata.CorrelationID
+	env.substrate.mu.Unlock()
+	if routedCorrelation != call.fc.CorrelationID {
+		t.Fatalf("authored check correlation=%q, routed leg=%q", call.fc.CorrelationID, routedCorrelation)
+	}
 	assertTag(t, "UC-01 eligibility egress (this participant's own request)", call.fc, wantTag{
-		legType: "coverage-eligibility", whose: "own", seam: "originate", corrPresent: false,
+		legType: "coverage-eligibility", whose: "own", seam: "originate", corrPresent: true,
 	})
 }
 
@@ -195,19 +387,19 @@ func TestPinnedFindingContext_UC01EligibilityEgress(t *testing.T) {
 // TestPinnedFindingContext_InboundEgress drives handlePASNativeInbound
 // directly, pre-tagged exactly as handleInbound sets it for an inbound
 // pas-claim leg (Whose "peer", the REQUEST's own direction) — proving the
-// direction-flip retag added after g.admit (before the payer's own
-// ClaimResponse/side-effect FHIR are validated) actually reaches the check
-// as Whose "own".
+// direction-specific source metadata retained by the observation worker.
 func TestPinnedFindingContext_InboundEgress(t *testing.T) {
 	g, requester := newInboundTestGateway(t, true)
 	spy := &findingSpyValidator{}
 	g.cfg.Validator = spy
+	g.cfg.ConformanceEnforcement = EnforcementObserve
+	g.startCertification()
+	spy.flush = func() { observationFlush(t, g) }
+	g.cfg.Observer = spy.observe
 	// A conformant terminal PAS response Bundle, sealed as an answer this
 	// responder AUTHORED (testResponse — ResponseRelayed() false), which is
-	// what validatePASResult certifies; a relayedResponse would stand the
-	// egress check down (R-8) and there would be no call to read the tag off.
-	// ResponseSubjectForeign stands the member-fence down (the fixture's own
-	// subject, SubscriberExample, is not MBR-COVERED).
+	// The answer is authored by this participant. Its clinical closure must not
+	// commit as a prerequisite for native delivery; rollback releases it.
 	answer := pasBundleWithResponse(t, []byte(assemblyRealPending), []byte(assemblyRealTerminal))
 	commits, rollbacks := 0, 0
 	result := LegResult{
@@ -231,7 +423,7 @@ func TestPinnedFindingContext_InboundEgress(t *testing.T) {
 	rec := httptest.NewRecorder()
 	g.handlePASNativeInbound(rec, r, env, tok, req, "pa.pas@2.0")
 
-	if commits != 1 || rollbacks != 0 || rec.Code != http.StatusOK {
+	if commits != 0 || rollbacks != 1 || rec.Code != http.StatusOK {
 		t.Fatalf("commits=%d rollbacks=%d status=%d body=%s — fixture is not reaching the egress checks cleanly",
 			commits, rollbacks, rec.Code, rec.Body.String())
 	}
@@ -242,19 +434,17 @@ func TestPinnedFindingContext_InboundEgress(t *testing.T) {
 }
 
 // TestPinnedFindingContext_PayerDTREgress drives handleDTRInbound
-// (payer.go) directly, pre-tagged exactly as handleInbound sets it for an
-// inbound dtr-questionnaire-fetch leg — proving the direction-flip retag at
-// payer.go:92-94 (after g.admit, before the payer's own $questionnaire-package
-// answer is validated) actually reaches the check as Whose "own". This is
-// the row that closes the gap the re-review found: this exact retag had no
-// test at all.
+// (payer.go) directly, with the inbound DTR leg's request context. The
+// validator sees the payer's own authored questionnaire-package answer.
 func TestPinnedFindingContext_PayerDTREgress(t *testing.T) {
 	g, requester := newInboundTestGateway(t, true)
 	spy := &findingSpyValidator{}
 	g.cfg.Validator = spy
-	// An authored (not relayed) package: ResponseRelayed() must be false or
-	// the egress check under test is skipped by the R-8 near-relay rule
-	// (payer.go's own comment on this exact call site).
+	g.cfg.ConformanceEnforcement = EnforcementObserve
+	g.startCertification()
+	spy.flush = func() { observationFlush(t, g) }
+	g.cfg.Observer = spy.observe
+	// An authored package keeps this participant's ownership on the answer.
 	pkg := []byte(`{"resourceType":"Bundle","type":"collection","entry":[]}`)
 	g.cfg.Responder = pasResultResponder{result: LegResult{Response: testResponse(pkg)}}
 	pci, _, _ := g.cfg.SoR.ResolvePatient("MBR-COVERED")
@@ -281,23 +471,27 @@ func TestPinnedFindingContext_PayerDTREgress(t *testing.T) {
 	assertTag(t, "payer DTR egress (this payer's own questionnaire-package answer, after the admit direction-flip)", call.fc, wantTag{
 		legType: "dtr-questionnaire-fetch", whose: "own", seam: "payer-native", corrPresent: true,
 	})
+	f := spy.finding(t, "dtr-questionnaire-fetch", "response", "fhir.profile")
+	def, _ := shnsdk.DTRLineDef("2.0")
+	if f.CheckClass != CheckDeep || f.Operation != shnsdk.FrameOperationQuestionnairePackage || f.Profile != certificationDTR+"DTR-QPackageBundle|"+def.PackageVersion || f.State != CheckValid {
+		t.Fatalf("DTR profile classification: %+v", f)
+	}
 }
 
 // TestPinnedFindingContext_InboundUpdateEgress drives
 // handlePASUpdateNativeInbound directly, pre-tagged exactly as handleInbound
-// sets it for an inbound pas-claim-update leg — proving the direction-flip
-// retag at pas_native.go:413-415 actually reaches the check as Whose "own".
-// The other unguarded row the re-review found; mirrors
-// TestPinnedFindingContext_InboundEgress's pattern on the amendment leg —
-// the check under test is validatePASResult's validateFHIRForContract call,
-// the one arm it has for an answer this gateway produced.
+// sets it for an inbound pas-claim-update leg. It pins the authored response's
+// ownership and the inherited correlation ID at the observer worker.
 func TestPinnedFindingContext_InboundUpdateEgress(t *testing.T) {
 	g, requester := newInboundTestGateway(t, true)
 	spy := &findingSpyValidator{}
 	g.cfg.Validator = spy
+	g.cfg.ConformanceEnforcement = EnforcementObserve
+	g.startCertification()
+	spy.flush = func() { observationFlush(t, g) }
+	g.cfg.Observer = spy.observe
 	// A conformant terminal PAS response Bundle, sealed as AUTHORED
-	// (testResponse — ResponseRelayed() false) so validatePASResult certifies
-	// it rather than standing down under R-8. ResponseSubjectForeign stands
+	// (testResponse — ResponseRelayed() false). ResponseSubjectForeign stands
 	// the member-fence down (the fixture's own subject, SubscriberExample, is
 	// not MBR-COVERED) — the same posture a real RI-relayed answer carries.
 	answer := pasBundleWithResponse(t, []byte(assemblyRealPending), []byte(assemblyRealTerminal))
@@ -348,6 +542,10 @@ func TestPinnedFindingContext_InboundInquireEgress(t *testing.T) {
 	g, requester := newInboundTestGateway(t, true)
 	spy := &findingSpyValidator{}
 	g.cfg.Validator = spy
+	g.cfg.ConformanceEnforcement = EnforcementObserve
+	g.startCertification()
+	spy.flush = func() { observationFlush(t, g) }
+	g.cfg.Observer = spy.observe
 	// The synthetic 2.0/2.1 inquiry answer (a response Bundle — the shape
 	// validatePASInquiryAnswer accepts), sealed as AUTHORED (testResponse —
 	// ResponseRelayed() false) so validatePASResult certifies it rather than
@@ -408,20 +606,21 @@ func TestPinnedFindingContext_PatientAccessEgress(t *testing.T) {
 	}
 	spy := &findingSpyValidator{}
 	g := mustNew(t, Config{
-		Role:            "payer",
-		HolderID:        "payer",
-		Identity:        shnsdk.Identity{HolderID: "payer", SignPriv: paySignPriv, EncPub: payEncPub, EncPriv: payEncPriv},
-		AuthzURL:        "http://stub.test",
-		AuthzPub:        authzPub,
-		HubTransportPub: authzPub,
-		Reg:             shnsdk.NewRegistry(),
-		Validator:       spy,
-		SoR:             sor,
-		Store:           sor,
-		Responder:       unusedResponder{},
-		Clock:           fixedClock,
-		Client:          audit.Client(),
-		AuditURL:        audit.URL,
+		ConformanceEnforcement: EnforcementStrict,
+		Role:                   "payer",
+		HolderID:               "payer",
+		Identity:               shnsdk.Identity{HolderID: "payer", SignPriv: paySignPriv, EncPub: payEncPub, EncPriv: payEncPriv},
+		AuthzURL:               "http://stub.test",
+		AuthzPub:               authzPub,
+		HubTransportPub:        authzPub,
+		Reg:                    shnsdk.NewRegistry(),
+		Validator:              spy,
+		SoR:                    sor,
+		Store:                  sor,
+		Responder:              unusedResponder{},
+		Clock:                  fixedClock,
+		Client:                 audit.Client(),
+		AuditURL:               audit.URL,
 	})
 
 	tok := signTestToken(shnsdk.Token{
@@ -458,6 +657,10 @@ func TestPinnedFindingContext_DTRAndPAS(t *testing.T) {
 	})
 	spy := &findingSpyValidator{}
 	gw.cfg.Validator = spy
+	gw.cfg.ConformanceEnforcement = EnforcementObserve
+	gw.startCertification()
+	spy.flush = func() { observationFlush(t, gw) }
+	gw.cfg.Observer = spy.observe
 
 	rec := httptest.NewRecorder()
 	gw.handleUC04(rec, httptest.NewRequest(http.MethodPost, "/scenario/uc04", nil))
@@ -465,61 +668,50 @@ func TestPinnedFindingContext_DTRAndPAS(t *testing.T) {
 		t.Fatalf("want 200, got %d body=%s", rec.Code, rec.Body.String())
 	}
 
-	// DTR ingress: the payer's $questionnaire-package answer (a Bundle wrapping
-	// the fetched Questionnaire) — the FIRST Bundle-typed call in the run.
-	dtrIngress := spy.nth(t, 1, "Bundle")
-	assertTag(t, "DTR ingress (payer's questionnaire package)", dtrIngress.fc, wantTag{
+	// The worker reports the whole carried message for each leg. A missing
+	// producer declaration may yield unavailable, never a fabricated pass.
+	dtrIngress := spy.finding(t, "dtr-questionnaire-fetch", "response", "fhir.profile")
+	assertTag(t, "DTR ingress (payer's questionnaire package)", findingTag(dtrIngress), wantTag{
 		legType: "dtr-questionnaire-fetch", whose: "peer", seam: "originate", corrPresent: true,
 	})
-
-	// DTR egress: the populated QuestionnaireResponse this participant built —
-	// the FIRST QuestionnaireResponse-typed call (it runs before any PAS-phase
-	// QR is embedded and re-checked by validatePASAttachments).
-	dtrEgress := spy.nth(t, 1, "QuestionnaireResponse")
-	assertTag(t, "DTR egress (this participant's own populated QR)", dtrEgress.fc, wantTag{
+	dtrEgress := spy.finding(t, "dtr-questionnaire-fetch", "request", "fhir.profile")
+	assertTag(t, "DTR egress (this participant's own populated QR)", findingTag(dtrEgress), wantTag{
 		legType: "dtr-questionnaire-fetch", whose: "own", seam: "originate", corrPresent: true,
 	})
-
-	// PAS: the pended (submit) answer is the Da Vinci Bundle-wrapped pended
-	// shape (testPendedResponse); the approved (update) answer is a bare
-	// ClaimResponse (homeOxygenApprovedClaimResponse) — so, among the
-	// Bundle-typed calls, in call order: #1 DTR ingress (peer), #2 PAS submit
-	// egress (own), #3 PAS submit ingress (peer), #4 PAS update egress (own);
-	// the update's ingress is the run's only "ClaimResponse"-typed call.
-	pasSubmitEgress := spy.nth(t, 2, "Bundle")
-	assertTag(t, "PAS egress (this participant's own submit bundle)", pasSubmitEgress.fc, wantTag{
+	pasSubmitEgress := spy.finding(t, "pas-claim", "request", "fhir.profile")
+	pasDef, _ := shnsdk.PASLineDef("2.0")
+	if pasSubmitEgress.CheckClass != CheckDeep || pasSubmitEgress.Profile != certificationPAS+"profile-pas-request-bundle|"+pasDef.PackageVersion || pasSubmitEgress.Operation != "" {
+		t.Fatalf("PAS profile classification: %+v", pasSubmitEgress)
+	}
+	assertTag(t, "PAS egress (this participant's own submit bundle)", findingTag(pasSubmitEgress), wantTag{
 		legType: "pas-claim", whose: "own", seam: "originate", corrPresent: true,
 	})
-	pasSubmitIngress := spy.nth(t, 3, "Bundle")
-	assertTag(t, "PAS ingress (payer's pended response)", pasSubmitIngress.fc, wantTag{
+	pasSubmitIngress := spy.finding(t, "pas-claim", "response", "fhir.profile")
+	assertTag(t, "PAS ingress (payer's pended response)", findingTag(pasSubmitIngress), wantTag{
 		legType: "pas-claim", whose: "peer", seam: "originate", corrPresent: true,
 	})
-	pasUpdateEgress := spy.nth(t, 4, "Bundle")
-	assertTag(t, "PAS egress (this participant's own amendment bundle)", pasUpdateEgress.fc, wantTag{
+	pasUpdateEgress := spy.finding(t, "pas-claim-update", "request", "fhir.profile")
+	assertTag(t, "PAS egress (this participant's own amendment bundle)", findingTag(pasUpdateEgress), wantTag{
 		legType: "pas-claim-update", whose: "own", seam: "originate", corrPresent: true,
 	})
-	pasUpdateIngress := spy.nth(t, 1, "ClaimResponse")
-	assertTag(t, "PAS ingress (payer's approved response, amendment)", pasUpdateIngress.fc, wantTag{
+	pasUpdateIngress := spy.finding(t, "pas-claim-update", "response", "fhir.profile")
+	assertTag(t, "PAS ingress (payer's approved response, amendment)", findingTag(pasUpdateIngress), wantTag{
 		legType: "pas-claim-update", whose: "peer", seam: "originate", corrPresent: true,
 	})
 }
 
-// TestPinnedFindingContext_DTRAdaptiveIngress drives nextQuestionLeg directly
-// — the $next-question round helper whose own retag names the payer's answer
-// truthfully, regardless of which attestation path called it — over the SAME
-// in-process origination harness used by the CRD family, with a
-// hand-built crdDtrResult naming only what nextQuestionLeg itself reads
-// (recipient/dtrLine/patientRef/pci). This is a real helper call, not a
-// hand-built findingContext: the retag under test is nextQuestionLeg's own.
-// It is the one case in this file where the checked resource has no
-// resourceType-based ambiguity to resolve: validateFHIRPayerIngress here
-// validates the OUTER Parameters wrapper (parseNextQuestionResponse extracts
-// the QuestionnaireResponse only AFTER that check passes), and no other test
-// in this file drives a $next-question round.
+// TestPinnedFindingContext_DTRAdaptiveIngress drives the actual $next-question
+// round through OriginateLegMessage. Its undeclared response still produces an
+// unavailable profile observation with the peer's source metadata; it is not
+// represented as a passing validation of the Parameters wrapper.
 func TestPinnedFindingContext_DTRAdaptiveIngress(t *testing.T) {
 	env := newInProcessExchange(t)
 	spy := &findingSpyValidator{}
 	env.originator.cfg.Validator = spy
+	env.originator.cfg.ConformanceEnforcement = EnforcementObserve
+	env.originator.startCertification()
+	spy.flush = func() { observationFlush(t, env.originator) }
+	env.originator.cfg.Observer = spy.observe
 
 	// The harness's payer entry declares no RequestFrames; nextQuestionLeg
 	// refuses before ever reaching OriginateLeg unless the recipient declares
@@ -565,13 +757,16 @@ func TestPinnedFindingContext_DTRAdaptiveIngress(t *testing.T) {
 	}
 	env.payerReturns(LegResult{Response: testResponse(answer)})
 
-	_, status, msg, lerr := env.originator.nextQuestionLeg(env.ctx, env.req, res, canonical, reqQR)
+	_, status, msg, lerr := env.originator.nextQuestionLeg(env.ctx, env.req, &res, canonical, reqQR)
 	if status != 0 {
 		t.Fatalf("nextQuestionLeg refused: %d %s (%v)", status, msg, lerr)
 	}
 
-	call := spy.nth(t, 1, "Parameters")
-	assertTag(t, "DTR ingress, adaptive $next-question round (payer's answer)", call.fc, wantTag{
+	f := spy.finding(t, "dtr-questionnaire-fetch", "response", "fhir.profile")
+	if f.State != CheckUnavailable || f.Operation != shnsdk.FrameOperationNextQuestion || f.Profile != "" || len(f.Profiles) != 0 {
+		t.Errorf("undeclared adaptive answer was certified: %+v", f)
+	}
+	assertTag(t, "DTR ingress, adaptive $next-question round (payer's answer)", findingTag(f), wantTag{
 		legType: "dtr-questionnaire-fetch", whose: "peer", seam: "originate", corrPresent: true,
 	})
 }
@@ -627,20 +822,21 @@ func TestPinnedFindingContext_FederatedQueryEgress(t *testing.T) {
 
 	spy := &findingSpyValidator{}
 	g := mustNew(t, Config{
-		Role:            "payer",
-		HolderID:        "payer",
-		Identity:        shnsdk.Identity{HolderID: "payer", SignPriv: paySignPriv, EncPub: payEncPub, EncPriv: payEncPriv},
-		AuthzURL:        "http://stub.test",
-		AuthzPub:        authzPub,
-		HubTransportPub: authzPub,
-		ConsentURL:      "http://stub.test/consent",
-		Reg:             reg,
-		Validator:       spy,
-		SoR:             &fqFacilitySoR{censusSoR: newCensusSoR()},
-		Store:           newCensusSoR(),
-		Responder:       unusedResponder{},
-		Clock:           fixedClock,
-		Client:          &http.Client{Transport: &consentGrantStub{authz: inboundAuthzStub{authzPriv: authzPriv, clock: fixedClock}, consentRef: consentRef}},
+		ConformanceEnforcement: EnforcementStrict,
+		Role:                   "payer",
+		HolderID:               "payer",
+		Identity:               shnsdk.Identity{HolderID: "payer", SignPriv: paySignPriv, EncPub: payEncPub, EncPriv: payEncPriv},
+		AuthzURL:               "http://stub.test",
+		AuthzPub:               authzPub,
+		HubTransportPub:        authzPub,
+		ConsentURL:             "http://stub.test/consent",
+		Reg:                    reg,
+		Validator:              spy,
+		SoR:                    &fqFacilitySoR{censusSoR: newCensusSoR()},
+		Store:                  newCensusSoR(),
+		Responder:              unusedResponder{},
+		Clock:                  fixedClock,
+		Client:                 &http.Client{Transport: &consentGrantStub{authz: inboundAuthzStub{authzPriv: authzPriv, clock: fixedClock}, consentRef: consentRef}},
 	})
 
 	const member = "MBR-UC05"
@@ -681,8 +877,8 @@ func TestPinnedFindingContext_FederatedQueryEgress(t *testing.T) {
 // TestPinnedFindingContext_FederatedQueryIngress reuses
 // pendstate_pin_test.go's newPendResumeFixture — the same proven harness
 // TestHandleUC05_FederatedQueryIngressValidatesOnDemoLane already drives
-// through handleUC05's real federated-query loop — to pin the ingress check's
-// findingContext: this call must never share the R-8 payer-ingress skip.
+// through handleUC05's real federated-query loop to pin the facility answer's
+// source metadata independently from the preceding PAS legs.
 func TestPinnedFindingContext_FederatedQueryIngress(t *testing.T) {
 	gw, _ := newPendResumeFixture(t, pendFixtureOpts{
 		member: "MBR-D-UC05", birthDate: "1968-03-12", familyName: "Johansson-Demo",
@@ -692,6 +888,10 @@ func TestPinnedFindingContext_FederatedQueryIngress(t *testing.T) {
 	gw.cfg.OriginationProfile = "demo"
 	spy := &findingSpyValidator{}
 	gw.cfg.Validator = spy
+	gw.cfg.ConformanceEnforcement = EnforcementObserve
+	gw.startCertification()
+	spy.flush = func() { observationFlush(t, gw) }
+	gw.cfg.Observer = spy.observe
 
 	rec := httptest.NewRecorder()
 	gw.handleUC05(rec, httptest.NewRequest(http.MethodPost, "/scenario/uc05", nil))
@@ -699,17 +899,10 @@ func TestPinnedFindingContext_FederatedQueryIngress(t *testing.T) {
 		t.Fatalf("want 200, got %d body=%s", rec.Code, rec.Body.String())
 	}
 
-	// The ingress check validates the WHOLE CDex query result (the payer's
-	// request Task, extended and returned by the facility per
-	// shnsdk.BuildCDexQueryResult) — resourceType "Task", not the inner
-	// records Bundle. The demo lane deliberately exercises R-8's skip
-	// boundary: this same run's pas-claim/pas-claim-update peer responses ARE
-	// skip-eligible (relaysReferencePayerBytes) and so emit no validator call
-	// at all, which is exactly why federated-query must never share that
-	// skip — a shared skip would leave this call with nothing to check
-	// either.
-	call := spy.nth(t, 1, "Task")
-	assertTag(t, "federated query ingress (the facility's answer, as the requesting provider sees it)", call.fc, wantTag{
+	// The finding belongs to the facility's returned CDex query result, not
+	// to a provider-authored Task or a PAS response earlier in this run.
+	f := spy.finding(t, "federated-query", "response", "fhir.profile")
+	assertTag(t, "federated query ingress (the facility's answer, as the requesting provider sees it)", findingTag(f), wantTag{
 		legType: "federated-query", whose: "peer", seam: "originate", corrPresent: true,
 	})
 }

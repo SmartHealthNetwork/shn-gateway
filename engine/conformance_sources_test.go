@@ -21,7 +21,7 @@ import (
 // removing a row is only correct when the handler is gone.
 var findingContextHandlers = []string{
 	"handleInbound",
-	"handleCRDIngress", "handleDTRIngress", "handlePASIngress",
+	"handleNativeIngress",
 	"handleScenario",
 	"handleUC02", "handleUC02PayerB", "handleUC02UnknownPayer",
 	"handleUC03", "handleUC03Oxygen", "handleUC03Bridge",
@@ -159,12 +159,17 @@ func TestEveryLegHandlerSetsTheFindingContext(t *testing.T) {
 // and would need extending here if either subpackage ever validates FHIR
 // resources directly.
 var validateCallSites = map[string]string{
-	"gateway.go:validateGoverned":      "choke",
-	"crd_native.go:observeCRDEmbedded": "observational",
-	"certify.go:collectCertification":  "observational",
-	"lanes.go:Validate":                "delegating",
-	"certifylane.go:Validate":          "delegating",
-	"observer.go:Validate":             "delegating",
+	"../app/adaptation.go:Validate":         "delegating",
+	"../app/adaptation.go:ValidateEvidence": "delegating",
+	"gateway.go:validateGoverned":           "choke",
+	"crd_native.go:observeCRDEmbedded":      "observational",
+	"certify.go:collectCertification":       "observational",
+	"lanes.go:Validate":                     "delegating",
+	"certifylane.go:Validate":               "delegating",
+	"observer.go:Validate":                  "delegating",
+	"observer.go:delegateValidatorEvidence": "delegating",
+	"certifylane.go:ValidateEvidence":       "delegating",
+	"linefake.go:ValidateEvidence":          "delegating",
 	// EOBRecord.Validate (pendledger.go) checks the ledger row's own fields —
 	// an EOB id, non-empty bytes, and a subject matching the decision's — and
 	// never reaches a Validator. It is the one name collision in this
@@ -181,6 +186,7 @@ var validateCallSites = map[string]string{
 var validateFHIREntryPoints = []string{
 	"gateway.go:validateFHIR", "gateway.go:validateFHIRAtProfile",
 	"gateway.go:validateFHIRForContract", "gateway.go:validateFHIRPayerIngress",
+	"gateway.go:validatePASApplicationReply",
 	"gateway.go:validateFHIREgressOrBridged",
 }
 
@@ -205,8 +211,8 @@ var validateFHIREntryPoints = []string{
 // site in TestEveryValidateCallIsClassified.
 func TestValidateFHIRCallSiteFloor(t *testing.T) {
 	const (
-		wantTotal       = 51
-		wantDelegations = 2 // the wrappers' own internal delegations, both in gateway.go
+		wantTotal       = 33 // eleven PAS reply sites now pass the authenticated producer declaration
+		wantDelegations = 2  // the wrappers' own internal delegations, both in gateway.go
 	)
 	_, files := engineFiles(t, ".")
 	total, delegations := 0, 0
@@ -253,7 +259,7 @@ func TestEveryValidateCallIsClassified(t *testing.T) {
 				return true
 			}
 			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok || sel.Sel.Name != "Validate" {
+			if !ok || (sel.Sel.Name != "Validate" && sel.Sel.Name != "ValidateEvidence") {
 				return true
 			}
 			if _, known := validateCallSites[key]; !known {

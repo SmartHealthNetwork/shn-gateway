@@ -1,12 +1,9 @@
 // nativepas_relay_test.go — the PAS submit and update legs relay the payer's own
-// decision.
+// reply, whether it is a decision, a pend, or an application refusal.
 //
-// Every row here asserts the same two things about a payer answer: the requester
-// receives THE PAYER'S BYTES, byte for byte, and the payer gateway's own pend
-// ledger follows the answer rather than deciding anything of its own. A pend, a
-// re-pend, a denial and an approval are all the payer's message; none of them is
-// a failure of this gateway, and none of them is replaced by a later answer to a
-// different operation.
+// Every row here asserts that the requester receives THE PAYER'S BYTES, status,
+// and media type. Native delivery neither reads nor advances a clinical ledger;
+// explicit ledger actions have independent tests below.
 //
 // The rows that pin what is GONE are as load-bearing as the rows that pin what is
 // relayed: nothing polls (`GET /ClaimResponse/{id}` never fires), nothing is
@@ -17,9 +14,11 @@ package engine
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -35,8 +34,7 @@ const relayRequester = "holder:requesting-ehr"
 // what a non-conformant amendment looks like — a test fixture, not a code path.
 const pasInfoChangedExtURL = "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-infoChanged"
 
-// payerCreated is the date the payer puts on every answer in this file. It is the
-// ledger's timestamp-rule input, so it is fixed rather than "now".
+// payerCreated is the synthetic date the payer puts on every answer in this file.
 var payerCreated = time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
 
 // recordingPayer is a payer endpoint that answers its queued replies in order and
@@ -112,7 +110,8 @@ func relayPendAnswer(t *testing.T, id, trace string) []byte {
 	return fixturePASResponse(t, []byte(cr), true)
 }
 
-// decidedAnswer is a terminal payer decision with the same identifiers.
+// This synthetic complete answer has no explicit review action. It remains an
+// ambiguous local-consumption fixture even though native relay carries it intact.
 func relayDecidedAnswer(t *testing.T, id, trace, preAuthRef string) []byte {
 	t.Helper()
 	cr := `{"resourceType":"ClaimResponse","id":"` + id + `","status":"active","outcome":"complete",` +
@@ -129,7 +128,7 @@ func relayDecidedAnswer(t *testing.T, id, trace, preAuthRef string) []byte {
 func deviceRequestSubmitBundle(t *testing.T) []byte {
 	t.Helper()
 	dr := []byte(`{"resourceType":"DeviceRequest","id":"dr-x","status":"active","intent":"order","subject":{"reference":"Patient/MBR-COVERED"},"codeCodeableConcept":{"coding":[{"system":"http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets","code":"E0424","display":"Stationary compressed gaseous oxygen system"}]}}`)
-	b, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
+	b, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{ItemFacts: syntheticPASItemFacts(),
 		Coverage: testMemberCoverage("MBR-COVERED"), Provider: testRequestingProvider(),
 		MemberIDSystem: shnsdk.MemberSystem, SR: dr,
 		PatientRef: "Patient/MBR-COVERED", CoverageRef: "Coverage/MBR-COVERED", MemberID: "MBR-COVERED",
@@ -179,14 +178,15 @@ func ledgerState(t *testing.T, store Store, pci, corr string) PendRecord {
 // ---- submit ----
 
 // TestNativeSubmit_PendRelayedForDeviceRequest: the DME single-shot lane. The
-// payer pended; the requester receives that pend, and the authorization is
-// recorded under the keys the payer's own answer states.
+// payer pended; the requester receives those exact bytes without a local
+// ledger write or a follow-up poll.
 func TestNativeSubmit_PendRelayedForDeviceRequest(t *testing.T) {
 	pend := relayPendAnswer(t, "cr-dme", "trace-dme")
 	srv, payer := newRecordingPayer(t, conflictAnswer{http.StatusOK, string(pend)})
-	store := newCensusSoR()
+	store := nativeClinicalStoreForbidden{}
 	n, ctx := relayResponder(t, srv, store)
-	res, err := n.Handle(ctx, "pas-claim", "corr-dme", "PCI-1", deviceRequestSubmitBundle(t))
+	request := deviceRequestSubmitBundle(t)
+	res, err := n.Handle(ctx, "pas-claim", "corr-dme", "PCI-1", request)
 	if err != nil || res.Status != 0 {
 		t.Fatalf("submit: err=%v status=%d msg=%s", err, res.Status, res.Message)
 	}
@@ -195,20 +195,10 @@ func TestNativeSubmit_PendRelayedForDeviceRequest(t *testing.T) {
 		t.Fatalf("a DeviceRequest single-shot must surface the payer's PEND (pended=%v err=%v)", pended, perr)
 	}
 	payer.refuseAnyPoll(t)
-	if res.Commit == nil {
-		t.Fatal("a pend must be recorded so a follow-up can resolve it")
-	}
-	if err := res.Commit(); err != nil {
-		t.Fatalf("commit: %v", err)
-	}
-	if got := ledgerState(t, store, "PCI-1", "corr-dme").State; got != PendStatePended {
-		t.Fatalf("ledger state = %q, want pended", got)
-	}
-	ledger, _ := LedgerOf(store)
-	_, corr, found, ambiguous, lerr := ledger.LookupPended(relayRequester, PendKeys{
-		RequesterHolder: relayRequester, PreAuthRef: "", ItemTraceNumbers: []string{"urn:payer:trace|trace-dme"}})
-	if lerr != nil || ambiguous || !found || corr != "corr-dme" {
-		t.Fatalf("the pend is not findable by the trace number the payer echoed (found=%v ambiguous=%v corr=%q err=%v)", found, ambiguous, corr, lerr)
+	assertNativeRelayWithoutClinicalEffects(t, res, pend, http.StatusOK, "application/fhir+json")
+	calls := payer.seen()
+	if len(calls) != 1 || !bytes.Equal(calls[0].body, request) {
+		t.Fatalf("native requests=%+v", calls)
 	}
 }
 
@@ -219,9 +209,10 @@ func TestNativeSubmit_PendRelayedForDeviceRequest(t *testing.T) {
 func TestNativeSubmit_PendRelayedForInfoChanged(t *testing.T) {
 	pend := relayPendAnswer(t, "cr-ic", "trace-ic")
 	srv, payer := newRecordingPayer(t, conflictAnswer{http.StatusOK, string(pend)})
-	store := newCensusSoR()
+	store := nativeClinicalStoreForbidden{}
 	n, ctx := relayResponder(t, srv, store)
-	res, err := n.Handle(ctx, "pas-claim", "corr-ic", "PCI-1", serviceRequestSubmitBundle(t, true))
+	request := serviceRequestSubmitBundle(t, true)
+	res, err := n.Handle(ctx, "pas-claim", "corr-ic", "PCI-1", request)
 	if err != nil || res.Status != 0 {
 		t.Fatalf("submit: err=%v status=%d msg=%s", err, res.Status, res.Message)
 	}
@@ -230,14 +221,10 @@ func TestNativeSubmit_PendRelayedForInfoChanged(t *testing.T) {
 	if pended, _, perr := shnsdk.ParsePendedResponse(responseBytes(res)); perr != nil || !pended {
 		t.Fatalf("an infoChanged submit must surface the payer's PEND (pended=%v err=%v)", pended, perr)
 	}
-	if res.Commit == nil {
-		t.Fatal("a pend must be recorded so a follow-up can resolve it")
-	}
-	if err := res.Commit(); err != nil {
-		t.Fatalf("commit: %v", err)
-	}
-	if got := ledgerState(t, store, "PCI-1", "corr-ic").State; got != PendStatePended {
-		t.Fatalf("ledger state = %q, want pended", got)
+	assertNativeRelayWithoutClinicalEffects(t, res, pend, http.StatusOK, "application/fhir+json")
+	calls := payer.seen()
+	if len(calls) != 1 || !bytes.Equal(calls[0].body, request) {
+		t.Fatalf("native requests=%+v", calls)
 	}
 }
 
@@ -272,63 +259,45 @@ func TestNativeSubmit_PendWithUnusableTransmissionIdentifiersRelayed(t *testing.
 	payer.refuseAnyPoll(t)
 }
 
-// TestNativeSubmit_DenialRelayed: the payer denied at submit. The denial reaches
-// the requester unchanged, the ledger records the decision, and the decision EOB
-// is written in the same write.
+// TestNativeSubmit_DenialRelayed: the payer response reaches the requester
+// unchanged without implicit clinical writes.
 func TestNativeSubmit_DenialRelayed(t *testing.T) {
 	denied := fixturePASResponse(t, loadDeniedClaimResponseBytes(t), true)
 	srv, payer := newRecordingPayer(t, conflictAnswer{http.StatusOK, string(denied)})
-	store := newCensusSoR()
+	store := nativeClinicalStoreForbidden{}
 	n, ctx := relayResponder(t, srv, store)
-	res, err := n.Handle(ctx, "pas-claim", "corr-deny", "PCI-1", serviceRequestSubmitBundle(t, false))
+	request := serviceRequestSubmitBundle(t, false)
+	res, err := n.Handle(ctx, "pas-claim", "corr-deny", "PCI-1", request)
 	if err != nil || res.Status != 0 {
 		t.Fatalf("submit: err=%v status=%d msg=%s", err, res.Status, res.Message)
 	}
 	relayedExactly(t, res, denied)
 	payer.refuseAnyPoll(t)
-	if len(res.SideEffectFHIR) != 1 {
-		t.Fatalf("a denial states the payer's own decision on one EOB; got %d side-effects", len(res.SideEffectFHIR))
-	}
-	if res.Commit == nil {
-		t.Fatal("a decision must be recorded")
-	}
-	if err := res.Commit(); err != nil {
-		t.Fatalf("commit: %v", err)
-	}
-	rec := ledgerState(t, store, "PCI-1", "corr-deny")
-	if rec.State != PendStateDecided || rec.Outcome != PendOutcomeDenied {
-		t.Fatalf("ledger = %q/%q, want decided/denied", rec.State, rec.Outcome)
-	}
-	if _, ok := store.EOBByID("eob-corr-deny"); !ok {
-		t.Fatal("the decision EOB was not written with the decision")
+	assertNativeRelayWithoutClinicalEffects(t, res, denied, http.StatusOK, "application/fhir+json")
+	calls := payer.seen()
+	if len(calls) != 1 || !bytes.Equal(calls[0].body, request) {
+		t.Fatalf("native requests=%+v", calls)
 	}
 }
 
-// TestNativeSubmit_ApprovalRelayed: an approval at submit is relayed exactly and
-// decides the authorization.
+// TestNativeSubmit_ApprovalRelayed: the response is relayed exactly without
+// interpreting or recording a local clinical decision.
 func TestNativeSubmit_ApprovalRelayed(t *testing.T) {
 	approved := relayDecidedAnswer(t, "cr-ok", "trace-ok", "AUTH-OK-1")
 	srv, payer := newRecordingPayer(t, conflictAnswer{http.StatusOK, string(approved)})
-	store := newCensusSoR()
+	store := nativeClinicalStoreForbidden{}
 	n, ctx := relayResponder(t, srv, store)
-	res, err := n.Handle(ctx, "pas-claim", "corr-ok", "PCI-1", serviceRequestSubmitBundle(t, false))
+	request := serviceRequestSubmitBundle(t, false)
+	res, err := n.Handle(ctx, "pas-claim", "corr-ok", "PCI-1", request)
 	if err != nil || res.Status != 0 {
 		t.Fatalf("submit: err=%v status=%d msg=%s", err, res.Status, res.Message)
 	}
 	relayedExactly(t, res, approved)
 	payer.refuseAnyPoll(t)
-	if res.Commit == nil {
-		t.Fatal("a decision must be recorded")
-	}
-	if err := res.Commit(); err != nil {
-		t.Fatalf("commit: %v", err)
-	}
-	rec := ledgerState(t, store, "PCI-1", "corr-ok")
-	if rec.State != PendStateDecided || rec.Outcome != PendOutcomeApproved {
-		t.Fatalf("ledger = %q/%q, want decided/approved", rec.State, rec.Outcome)
-	}
-	if !rec.DecidedAt.Equal(payerCreated) {
-		t.Fatalf("the ledger dated the decision %v, want the payer's own %v", rec.DecidedAt, payerCreated)
+	assertNativeRelayWithoutClinicalEffects(t, res, approved, http.StatusOK, "application/fhir+json")
+	calls := payer.seen()
+	if len(calls) != 1 || !bytes.Equal(calls[0].body, request) {
+		t.Fatalf("native requests=%+v", calls)
 	}
 }
 
@@ -360,242 +329,158 @@ func TestNoInfoChangedInjectedOnFreshSubmit(t *testing.T) {
 	}
 }
 
-// ---- update ----
+// ---- update: PCV-07/08/09 native delivery and explicit local state ----
 
-// updateRelayLeg seeds a pended authorization for the conformant update golden's
-// prior claim and returns the leg under test.
+const updatePriorCorr = "convergence-pas-submit-0001"
+const updatePCI = "PCI-CONF-UPD"
+
+// A seeded authorization is deliberately present to detect an implicit mutation.
+// The separate poison-store row proves that a native update does not read one.
 func updateRelayLeg(t *testing.T, srv *httptest.Server) (*nativeResponder, context.Context, *censusSoR, []byte, string, string) {
 	t.Helper()
 	bundle := originatorBuiltConformantUpdateBundleProfile(t, true)
-	const origCorr = "convergence-pas-submit-0001"
-	const pci = "PCI-CONF-UPD"
 	store := newCensusSoR()
-	if _, err := store.RecordPendedKeyed(pci, origCorr, payerCreated.Add(-time.Hour), PendKeys{
-		RequesterHolder: relayRequester, RequestIDs: []string{"urn:shn:corr|" + origCorr}}); err != nil {
-		t.Fatalf("seed the pend: %v", err)
+	if _, err := store.RecordPendedKeyed(updatePCI, updatePriorCorr, payerCreated.Add(-time.Hour), PendKeys{
+		RequesterHolder: relayRequester, RequestIDs: []string{"urn:shn:corr|" + updatePriorCorr}}); err != nil {
+		t.Fatal(err)
 	}
 	n, ctx := relayResponder(t, srv, store)
-	return n, ctx, store, bundle, pci, origCorr
+	return n, ctx, store, bundle, updatePCI, updatePriorCorr
 }
 
-// TestNativeUpdate_RePendRelayedAndReleased: the payer re-pends an amendment that
-// asked for re-evaluation. That re-pend is the payer's answer — it is relayed,
-// and the authorization returns to pended so a later amendment can still bind.
-func TestNativeUpdate_RePendRelayedAndReleased(t *testing.T) {
+func assertUpdateRelay(t *testing.T, n *nativeResponder, ctx context.Context, store *censusSoR,
+	payer *recordingPayer, corr, pci, prior string, request, answer []byte, status int) {
+	t.Helper()
+	t.Logf("fixture sha256 request=%x answer=%x", sha256.Sum256(request), sha256.Sum256(answer))
+	before := ledgerState(t, store, pci, prior)
+	res, err := n.Handle(ctx, "pas-claim-update", corr, pci, request)
+	if err != nil {
+		t.Fatalf("native update: %v", err)
+	}
+	if res.ApplicationStatus != status || res.Response.ContentType() != "application/fhir+json" || !bytes.Equal(responseBytes(res), answer) {
+		t.Fatalf("peer reply changed: status=%d application=%d media=%q body=%q", res.Status, res.ApplicationStatus, res.Response.ContentType(), responseBytes(res))
+	}
+	if res.Status != 0 && res.Status != status {
+		t.Fatalf("unexpected local status %d for application status %d", res.Status, status)
+	}
+	if res.Commit != nil || res.Rollback != nil || len(res.SideEffectFHIR) != 0 {
+		t.Fatal("native relay returned clinical callbacks or side effects")
+	}
+	if !res.ResponseRelayed() {
+		t.Fatal("peer reply ownership lost")
+	}
+	calls := payer.seen()
+	if len(calls) != 1 || calls[0].method != http.MethodPost || calls[0].path != "/Claim/$submit" || !bytes.Equal(calls[0].body, request) {
+		t.Fatalf("native update dispatched other than exact one POST: %+v", calls)
+	}
+	payer.refuseAnyPoll(t)
+	if after := ledgerState(t, store, pci, prior); !reflect.DeepEqual(after, before) {
+		t.Fatalf("native delivery changed ledger row: before=%+v after=%+v", before, after)
+	}
+}
+
+func TestNativeUpdate_RePendRelayedWithoutLocalTransition(t *testing.T) {
 	repend := relayPendAnswer(t, "cr-rp", "trace-rp")
 	srv, payer := newRecordingPayer(t, conflictAnswer{http.StatusOK, string(repend)})
-	n, ctx, store, bundle, pci, origCorr := updateRelayLeg(t, srv)
-	res, err := n.Handle(ctx, "pas-claim-update", "corr-upd", pci, bundle)
-	if err != nil || res.Status != 0 {
-		t.Fatalf("a payer re-pend is an answer, not a refusal: err=%v status=%d msg=%s", err, res.Status, res.Message)
-	}
-	relayedExactly(t, res, repend)
-	payer.refuseAnyPoll(t)
-	if res.Commit == nil {
-		t.Fatal("a re-pend must release the claim and refresh its keys")
-	}
-	if err := res.Commit(); err != nil {
-		t.Fatalf("commit: %v", err)
-	}
-	if got := ledgerState(t, store, pci, origCorr).State; got != PendStatePended {
-		t.Fatalf("ledger state after a re-pend = %q, want pended", got)
-	}
-	ledger, _ := LedgerOf(store)
-	_, corr, found, _, lerr := ledger.LookupPended(relayRequester, PendKeys{
-		RequesterHolder: relayRequester, ItemTraceNumbers: []string{"urn:payer:trace|trace-rp"}})
-	if lerr != nil || !found || corr != origCorr {
-		t.Fatalf("the re-pend's own identifiers were not added to the authorization (found=%v corr=%q err=%v)", found, corr, lerr)
-	}
+	n, ctx, store, bundle, pci, prior := updateRelayLeg(t, srv)
+	assertUpdateRelay(t, n, ctx, store, payer, "corr-upd", pci, prior, bundle, repend, http.StatusOK)
+	assertTraceAbsent(t, store, "trace-rp")
 }
 
-// TestNativeUpdate_CarryForwardRePendRelayed: an amendment that asks for no
-// re-evaluation is re-pended by the payer too, and this gateway used to replace
-// that answer with its own 422 "amendment still insufficient". The payer's word
-// is the answer.
 func TestNativeUpdate_CarryForwardRePendRelayed(t *testing.T) {
 	repend := relayPendAnswer(t, "cr-cf", "trace-cf")
 	srv, payer := newRecordingPayer(t, conflictAnswer{http.StatusOK, string(repend)})
-	n, ctx, store, bundle, pci, origCorr := updateRelayLeg(t, srv)
-	res, err := n.Handle(ctx, "pas-claim-update", "corr-cf", pci, stripInfoChangedExtension(t, bundle))
-	if err != nil || res.Status != 0 {
-		t.Fatalf("a carry-forward re-pend is the payer's answer: err=%v status=%d msg=%s", err, res.Status, res.Message)
+	n, ctx, store, bundle, pci, prior := updateRelayLeg(t, srv)
+	carryForward := stripInfoChangedExtension(t, bundle)
+	if bytes.Equal(carryForward, bundle) {
+		t.Fatal("carry-forward fixture retained infoChanged")
 	}
-	relayedExactly(t, res, repend)
-	payer.refuseAnyPoll(t)
-	if res.Commit != nil {
-		if err := res.Commit(); err != nil {
-			t.Fatalf("commit: %v", err)
-		}
-	}
-	if got := ledgerState(t, store, pci, origCorr).State; got != PendStatePended {
-		t.Fatalf("ledger state after a carry-forward re-pend = %q, want pended", got)
-	}
+	assertUpdateRelay(t, n, ctx, store, payer, "corr-cf", pci, prior, carryForward, repend, http.StatusOK)
+	assertTraceAbsent(t, store, "trace-cf")
 }
 
-// TestNativeUpdate_DenialRelayedAndDecided: a terminal denial on the update leg
-// reaches the requester and decides the authorization, so it is never re-pended.
-func TestNativeUpdate_DenialRelayedAndDecided(t *testing.T) {
+func TestNativeUpdate_DenialRelayedWithoutLocalDecision(t *testing.T) {
 	denied := fixturePASResponse(t, loadDeniedClaimResponseBytes(t), true)
 	srv, payer := newRecordingPayer(t, conflictAnswer{http.StatusOK, string(denied)})
-	n, ctx, store, bundle, pci, origCorr := updateRelayLeg(t, srv)
-	res, err := n.Handle(ctx, "pas-claim-update", "corr-upd-deny", pci, bundle)
-	if err != nil || res.Status != 0 {
-		t.Fatalf("a payer denial is an answer, not this gateway's 422: err=%v status=%d msg=%s", err, res.Status, res.Message)
-	}
-	relayedExactly(t, res, denied)
-	payer.refuseAnyPoll(t)
-	if res.Commit == nil {
-		t.Fatal("a decision must be recorded")
-	}
-	if err := res.Commit(); err != nil {
-		t.Fatalf("commit: %v", err)
-	}
-	rec := ledgerState(t, store, pci, origCorr)
-	if rec.State != PendStateDecided || rec.Outcome != PendOutcomeDenied {
-		t.Fatalf("ledger = %q/%q, want decided/denied", rec.State, rec.Outcome)
-	}
-	if len(res.SideEffectFHIR) != 0 {
-		t.Fatalf("the update leg builds no EOB; got %d side-effects", len(res.SideEffectFHIR))
-	}
+	n, ctx, store, bundle, pci, prior := updateRelayLeg(t, srv)
+	assertUpdateRelay(t, n, ctx, store, payer, "corr-upd-deny", pci, prior, bundle, denied, http.StatusOK)
 }
 
-// TestNativeUpdate_ApprovalRelayedAndDecided: an approval is relayed exactly and
-// decides the authorization.
-func TestNativeUpdate_ApprovalRelayedAndDecided(t *testing.T) {
+func TestNativeUpdate_AmbiguousCompleteRelayedWithoutLocalDecision(t *testing.T) {
+	// This exact fixture has no explicit A1. Its clinical meaning remains ambiguous.
 	approved := relayDecidedAnswer(t, "cr-upd-ok", "trace-upd-ok", "AUTH-UPD-1")
 	srv, payer := newRecordingPayer(t, conflictAnswer{http.StatusOK, string(approved)})
-	n, ctx, store, bundle, pci, origCorr := updateRelayLeg(t, srv)
-	res, err := n.Handle(ctx, "pas-claim-update", "corr-upd-ok", pci, bundle)
-	if err != nil || res.Status != 0 {
-		t.Fatalf("update: err=%v status=%d msg=%s", err, res.Status, res.Message)
-	}
-	relayedExactly(t, res, approved)
-	payer.refuseAnyPoll(t)
-	if res.Commit == nil || res.Rollback == nil {
-		t.Fatal("a decided update commits the decision and keeps Rollback armed")
-	}
-	if err := res.Commit(); err != nil {
-		t.Fatalf("commit: %v", err)
-	}
-	rec := ledgerState(t, store, pci, origCorr)
-	if rec.State != PendStateDecided || rec.Outcome != PendOutcomeApproved {
-		t.Fatalf("ledger = %q/%q, want decided/approved", rec.State, rec.Outcome)
+	n, ctx, store, bundle, pci, prior := updateRelayLeg(t, srv)
+	assertUpdateRelay(t, n, ctx, store, payer, "corr-upd-ok", pci, prior, bundle, approved, http.StatusOK)
+	if parsed, err := shnsdk.ParseClaimResponse(approved); err == nil || parsed.Outcome == "approved" {
+		t.Fatalf("ambiguous original fixture was silently consumed as approval: parsed=%+v err=%v", parsed, err)
 	}
 }
 
-// TestNativeUpdate_VersionConflictRetrySameBytes: the payer's own unpersisted
-// write is re-issued exactly once, and the re-issue sends THE SAME BYTES. A
-// re-encoded retry would be a second, different message.
-func TestNativeUpdate_VersionConflictRetrySameBytes(t *testing.T) {
-	fastConflictRetry(t)
+func TestNativeUpdate_VersionConflictReturnsFirst409(t *testing.T) {
 	approved := relayDecidedAnswer(t, "cr-retry", "trace-retry", "AUTH-RETRY-1")
 	srv, payer := newRecordingPayer(t,
 		conflictAnswer{http.StatusConflict, hapiVersionConflict},
 		conflictAnswer{http.StatusOK, string(approved)})
-	n, ctx, _, bundle, pci, _ := updateRelayLeg(t, srv)
-	res, err := n.Handle(ctx, "pas-claim-update", "corr-retry", pci, bundle)
-	if err != nil || res.Status != 0 {
-		t.Fatalf("the re-issue's answer is relayed: err=%v status=%d msg=%s", err, res.Status, res.Message)
-	}
-	relayedExactly(t, res, approved)
-	calls := payer.seen()
-	if len(calls) != 2 {
-		t.Fatalf("posts = %d, want 2 (the conflict, then exactly one re-issue)", len(calls))
-	}
-	if !bytes.Equal(calls[0].body, calls[1].body) {
-		t.Fatalf("the re-issue changed the message it re-sent\nfirst:  %s\nsecond: %s", calls[0].body, calls[1].body)
-	}
+	n, ctx, store, bundle, pci, prior := updateRelayLeg(t, srv)
+	assertUpdateRelay(t, n, ctx, store, payer, "corr-retry", pci, prior, bundle, []byte(hapiVersionConflict), http.StatusConflict)
+	// The queued approval is never delivered by this invocation.
 }
 
-// TestNativeUpdate_VersionConflictRetryRePendRelayed is the sibling of the row
-// above for the answer the reference payer actually gives most often: the
-// re-issue is answered with a RE-PEND, not a decision.
-//
-// It matters on its own because the two halves differ after the relay. A decision
-// decides the ledger; a re-pend RELEASES the authorization back to pended so a
-// later amendment can still bind to it — and a re-issue that quietly decided a
-// re-pended authorization would be invisible to the row above.
-func TestNativeUpdate_VersionConflictRetryRePendRelayed(t *testing.T) {
-	fastConflictRetry(t)
+func TestNativeUpdate_VersionConflictDoesNotDispatchQueuedRePend(t *testing.T) {
 	repend := relayPendAnswer(t, "cr-retry-rp", "trace-retry-rp")
 	srv, payer := newRecordingPayer(t,
 		conflictAnswer{http.StatusConflict, hapiVersionConflict},
 		conflictAnswer{http.StatusOK, string(repend)})
-	n, ctx, store, bundle, pci, origCorr := updateRelayLeg(t, srv)
-	res, err := n.Handle(ctx, "pas-claim-update", "corr-retry-rp", pci, bundle)
-	if err != nil || res.Status != 0 {
-		t.Fatalf("the re-issue's re-pend is relayed: err=%v status=%d msg=%s", err, res.Status, res.Message)
-	}
-	relayedExactly(t, res, repend)
-	calls := payer.seen()
-	if len(calls) != 2 {
-		t.Fatalf("posts = %d, want 2 (the conflict, then exactly one re-issue)", len(calls))
-	}
-	if !bytes.Equal(calls[0].body, calls[1].body) {
-		t.Fatalf("the re-issue changed the message it re-sent\nfirst:  %s\nsecond: %s", calls[0].body, calls[1].body)
-	}
-	if res.Commit == nil {
-		t.Fatal("a re-pend must release the claim and refresh its keys")
-	}
-	if err := res.Commit(); err != nil {
-		t.Fatalf("commit: %v", err)
-	}
-	if got := ledgerState(t, store, pci, origCorr).State; got != PendStatePended {
-		t.Fatalf("ledger state after a re-issued re-pend = %q, want pended", got)
-	}
+	n, ctx, store, bundle, pci, prior := updateRelayLeg(t, srv)
+	assertUpdateRelay(t, n, ctx, store, payer, "corr-retry-rp", pci, prior, bundle, []byte(hapiVersionConflict), http.StatusConflict)
+	assertTraceAbsent(t, store, "trace-retry-rp")
 }
 
-// TestNativeUpdate_DecidedClaim409: an amendment of an authorization the payer
-// already decided is refused with the reason, and nothing is sent to the payer.
 func TestNativeUpdate_DecidedClaim409(t *testing.T) {
-	srv, payer := newRecordingPayer(t)
-	n, ctx, store, bundle, pci, origCorr := updateRelayLeg(t, srv)
-	if _, err := store.RecordDecision(pci, origCorr, PendOutcomeApproved, payerCreated, nil); err != nil {
-		t.Fatalf("decide the claim: %v", err)
-	}
-	res, err := n.Handle(ctx, "pas-claim-update", "corr-decided", pci, bundle)
-	if err != nil {
-		t.Fatalf("a decided claim is refused, not an error: %v", err)
-	}
-	if res.Status != http.StatusConflict {
-		t.Fatalf("status = %d, want 409", res.Status)
-	}
-	if !bytes.Contains([]byte(res.Message), []byte("already decided")) {
-		t.Fatalf("the refusal must say the authorization is already decided, got %q", res.Message)
-	}
-	if len(payer.seen()) != 0 {
-		t.Fatalf("a refused amendment must not reach the payer; %d call(s) made", len(payer.seen()))
-	}
-}
-
-// TestNativeUpdate_MalformedUpstream502: a 2xx this gateway cannot read as a PAS
-// answer is an upstream problem, refused with 502, and the claim is released.
-func TestNativeUpdate_MalformedUpstream502(t *testing.T) {
-	srv, _ := newRecordingPayer(t, conflictAnswer{http.StatusOK, `{"resourceType":"Bundle","type":"collection","entry":[]}`})
-	n, ctx, _, bundle, pci, _ := updateRelayLeg(t, srv)
-	res, err := n.Handle(ctx, "pas-claim-update", "corr-bad", pci, bundle)
-	if err != nil {
-		t.Fatalf("an unreadable 2xx is a refusal, not an error: %v", err)
-	}
-	if res.Status != http.StatusBadGateway {
-		t.Fatalf("status = %d, want 502", res.Status)
-	}
-	if res.Rollback == nil {
-		t.Fatal("a post-Begin refusal must release the claim")
+	bundle := originatorBuiltConformantUpdateBundleProfile(t, true)
+	for _, row := range []struct {
+		name   string
+		status int
+		answer []byte
+	}{
+		{"peer409", http.StatusConflict, []byte(`{"resourceType":"OperationOutcome","issue":[{"code":"processing","diagnostics":"claim already decided"}]}`)},
+		{"peer-success", http.StatusOK, relayDecidedAnswer(t, "cr-decided", "trace-decided", "AUTH-DECIDED")},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			srv, payer := newRecordingPayer(t, conflictAnswer{row.status, string(row.answer)})
+			n, ctx, store, _, pci, prior := updateRelayLeg(t, srv)
+			if _, err := store.RecordDecision(pci, prior, PendOutcomeApproved, payerCreated, nil); err != nil {
+				t.Fatal(err)
+			}
+			assertUpdateRelay(t, n, ctx, store, payer, "corr-decided", pci, prior, bundle, row.answer, row.status)
+		})
 	}
 }
 
-// TestNativeUpdate_Transport500: a payer that cannot be reached at all is a fault,
-// and the claim is still released.
-func TestNativeUpdate_Transport500(t *testing.T) {
-	srv, _ := newRecordingPayer(t)
-	n, ctx, _, bundle, pci, _ := updateRelayLeg(t, srv)
-	n = NewNativeResponder(&http.Client{}, "http://127.0.0.1:1", "shn-order-select", n.store, fixedClock)
-	res, err := n.Handle(ctx, "pas-claim-update", "corr-dead", pci, bundle)
+func TestNativeUpdate_MalformedSuccessRelayedAtAdapter(t *testing.T) {
+	malformed := []byte(`{"resourceType":"Bundle","type":"collection","entry":[]}`)
+	srv, payer := newRecordingPayer(t, conflictAnswer{http.StatusOK, string(malformed)})
+	n, ctx, store, bundle, pci, prior := updateRelayLeg(t, srv)
+	assertUpdateRelay(t, n, ctx, store, payer, "corr-bad", pci, prior, bundle, malformed, http.StatusOK)
+}
+
+func TestNativeUpdate_TransportFaultHasNoReplyOrLocalWork(t *testing.T) {
+	bundle := originatorBuiltConformantUpdateBundleProfile(t, true)
+	n := NewNativeResponder(&http.Client{}, "http://127.0.0.1:1", "shn-order-select", nativeClinicalStoreForbidden{}, fixedClock)
+	res, err := n.Handle(context.Background(), "pas-claim-update", "corr-dead", updatePCI, bundle)
 	if err == nil {
-		t.Fatal("a no-response fault must surface as an error return")
+		t.Fatal("no-response transport failure must return an error")
 	}
-	if res.Rollback == nil {
-		t.Fatal("a post-Begin fault must release the claim")
+	if res.Status != 0 || res.ApplicationStatus != 0 || res.Commit != nil || res.Rollback != nil || len(res.SideEffectFHIR) != 0 || len(responseBytes(res)) != 0 {
+		t.Fatalf("transport failure had clinical effect or fabricated application reply: %+v", res)
+	}
+}
+
+func assertTraceAbsent(t *testing.T, store *censusSoR, trace string) {
+	t.Helper()
+	_, _, found, _, err := store.LookupPended(relayRequester, PendKeys{ItemTraceNumbers: []string{"urn:payer:trace|" + trace}})
+	if err != nil || found {
+		t.Fatalf("native relay indexed response trace %q: found=%v err=%v", trace, found, err)
 	}
 }

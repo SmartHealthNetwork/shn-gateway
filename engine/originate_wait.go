@@ -140,6 +140,12 @@ var ErrOrderChanged = errors.New("order changed since submission")
 // the wait ran to a decision or reached its bound. A caller therefore never has
 // to tell "no decision yet" from "something went wrong" by reading a status code.
 type PASDecision struct {
+	// ApplicationReply retains the complete last received answer, independently
+	// of whether this local workflow can interpret it as a determination.
+	ApplicationReply           ApplicationReply `json:"-"`
+	ReplyLeg, ReplyCorrelation string
+	ReplyView                  *ApplicationReplyView
+	Consumption                ConsumptionOutcome
 	// Decision is approved, denied or pended.
 	Decision string
 	// Parsed is the payer's determination as the shared parser read it.
@@ -155,7 +161,8 @@ type PASDecision struct {
 	ContinuationDurable bool
 	// Inquiries is how many inquiries the wait made. Zero means the payer's
 	// first answer was the decision.
-	Inquiries int
+	Inquiries   int
+	LastInquiry *ConsumptionAttempt
 }
 
 // classifyResolution classifies a PAS ClaimResponse at a resolution site as the
@@ -193,11 +200,14 @@ type pasFollowInputs struct {
 	// site: the PAS request carries it as the resolvable entry the Claim names.
 	coverage []byte
 	// insurer is the payer's own Organization record — see crdDtrResult.insurer.
-	insurer      []byte
-	member       string
-	recipient    string
-	orderRef     string
-	orderJSON    []byte
+	insurer   []byte
+	member    string
+	recipient string
+	orderRef  string
+	orderJSON []byte
+	// sourceOrder is the original participant-held order acquired before its
+	// checked patient-name rewrite; PAS binds fresh Claim facts to these bytes.
+	sourceOrder  []byte
 	supplierJSON []byte
 	// memberSystem is the namespace the participant's own system names this
 	// member under, carried from the one reading of their Patient.
@@ -219,9 +229,9 @@ type pasFollowInputs struct {
 // read as a prior-authorization answer at all. An approval, a denial and a pend
 // all come back as a PASDecision with status 0.
 func (g *Gateway) submitClaimAndFollow(ctx context.Context, r *http.Request, in pasFollowInputs) (PASDecision, int, string, error) {
-	sub, status, msg, err := g.submitPASClaim(ctx, r, in.pci, in.orderJSON, in.supplierJSON, in.source, in.coverage, in.insurer, in.patientRef, in.coverageRef, in.member, in.memberSystem, in.payer, in.recipient)
+	sub, status, msg, err := g.submitPASClaim(ctx, r, in.pci, in.sourceOrder, in.orderJSON, in.supplierJSON, in.source, in.coverage, in.insurer, in.patientRef, in.coverageRef, in.member, in.memberSystem, in.payer, in.recipient)
 	if status != 0 {
-		return PASDecision{}, status, msg, err
+		return sub.receivedDecision(), status, msg, err
 	}
 	return g.followDecision(ctx, r, sub, in)
 }
@@ -235,16 +245,24 @@ func (g *Gateway) submitClaimAndFollow(ctx context.Context, r *http.Request, in 
 // implementation of "what do we do about a pend" is how the two would come to
 // disagree.
 func (g *Gateway) followDecision(ctx context.Context, r *http.Request, sub pasSubmission, in pasFollowInputs) (PASDecision, int, string, error) {
+	out := sub.receivedDecision()
+	out.Consumption = unavailableConsumption("decision_unreadable")
 	parsed, decision := g.classifyResolution(sub.respJSON)
 	if decision == "" {
-		return PASDecision{PayerResponse: sub.respJSON}, http.StatusBadGateway, "claim response parse failed", nil
+		return out, http.StatusBadGateway, "claim response parse failed", nil
 	}
-	out := PASDecision{Decision: decision, Parsed: parsed, PayerResponse: sub.respJSON}
+	if status, msg := g.validatePASConsumption(ctx, sub, in.pci, in.recipient); status != 0 {
+		out.Consumption = unavailableConsumption("decision_binding_unavailable")
+		return out, status, msg, nil
+	}
+	out.Decision, out.Parsed = decision, parsed
+	out.Consumption = ConsumptionOutcome{State: "available"}
 	if decision != PASDecisionPended {
 		return out, 0, "", nil
 	}
 	cont, status, msg := g.recordContinuation(ctx, in, sub)
 	if status != 0 {
+		out.Consumption = unavailableConsumption("continuation_unavailable")
 		return out, status, msg, nil
 	}
 	out.Continuation, out.ContinuationDurable = cont.ID, g.continuationsAreDurable()
@@ -355,6 +373,9 @@ func (g *Gateway) followPended(ctx context.Context, pend PASDecision, wait time.
 		next, status, msg, _ := inquire(ctx)
 		pend.Inquiries++
 		if status != 0 {
+			if next.ReplyView != nil {
+				pend.LastInquiry = &ConsumptionAttempt{ApplicationReply: next.ReplyView, Consumption: next.Consumption}
+			}
 			// An inquiry that could not be made does not erase the answer the
 			// payer already gave. The pend, and its continuation, stand — and
 			// the failure is reported rather than reshaped into a decision.
@@ -444,6 +465,9 @@ func (g *Gateway) inquireContinuation(ctx context.Context, r *http.Request, cont
 		return PASDecision{}, status, msg, nil
 	}
 	corr := g.cfg.CorrelationGen()
+	ctx = withFindingContext(ctx, findingContext{
+		LegType: "pas-claim-inquire", CorrelationID: corr, Seam: "originate", Whose: "own",
+	})
 	// The inquiry runs at the line the SUBMISSION ran at, pinned on the
 	// continuation and never re-negotiated. An inquiry is a follow-up about that
 	// authorization, so asking about it at a line it was never sent at would ask
@@ -457,9 +481,9 @@ func (g *Gateway) inquireContinuation(ctx context.Context, r *http.Request, cont
 	if err != nil {
 		return PASDecision{}, http.StatusBadGateway, "build the prior-authorization inquiry: " + err.Error(), err
 	}
-	adapted, _, aerr := g.egressAdapt(route, body, ExchangeIdentity{CorrelationID: corr, LegType: "pas-claim-inquire", Counterpart: cont.PayerHolder})
+	adapted, _, aerr := g.egressAdapt(ctx, route, body, ExchangeIdentity{CorrelationID: corr, LegType: "pas-claim-inquire", Counterpart: cont.PayerHolder})
 	if aerr != nil {
-		return PASDecision{}, http.StatusBadGateway, aerr.Error(), aerr
+		return PASDecision{}, adaptationRefusalStatus(aerr), aerr.Error(), aerr
 	}
 	if !bytes.Equal(adapted, body) {
 		// The inquiry this gateway authored cannot be carried to the payer's
@@ -481,25 +505,51 @@ func (g *Gateway) inquireContinuation(ctx context.Context, r *http.Request, cont
 	if status, msg := g.validateFHIRForContract(ctx, body, "egress", "pa.pas", shnsdk.LineOf(route.Token), inquiryProfile); status != 0 {
 		return PASDecision{}, status, msg, nil
 	}
-	answer, err := g.OriginateLeg(ctx, r, cont.PayerHolder, "pas-claim-inquire", cont.SubjectPCI, corr, "",
-		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Payload: sealed})
+	reply, err := g.OriginateLegMessage(ctx, r, cont.PayerHolder, "pas-claim-inquire", cont.SubjectPCI, corr, "",
+		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, DeclaredVersion: route.Token, Route: routeInfoFor(route), Payload: sealed})
+	out := PASDecision{ApplicationReply: reply, ReplyLeg: "pas-claim-inquire", ReplyCorrelation: corr, Consumption: unavailableConsumption("application_reply_unavailable")}
+	// Response enforcement can return both a received reply and an error. Keep
+	// the independently checked evidence without replacing the original refusal.
+	var viewErr error
+	out.ReplyView, viewErr = reply.view(out.ReplyLeg, corr)
+	if err == nil {
+		err = viewErr
+	}
+	answer, err := reply.legacy("pas-claim-inquire", err)
 	if err != nil {
-		return PASDecision{}, http.StatusBadGateway, err.Error(), err
+		var ce *conformanceError
+		if errors.As(err, &ce) {
+			out.Consumption = unavailableConsumption("response_enforcement_failed")
+			out.Consumption.Refusal = localConsumptionRefusal(ce)
+		}
+		return out, http.StatusBadGateway, err.Error(), err
 	}
+	out.PayerResponse = answer
+	out.Consumption = unavailableConsumption("inquiry_answer_unreadable")
 	if bad := validatePASInquiryAnswer(answer); bad.Status != 0 {
-		return PASDecision{}, bad.Status, bad.Message, nil
+		return out, bad.Status, bad.Message, nil
 	}
-	decision, parsed, status, msg := decideFromInquiryAnswer(cont, answer)
+	decision, parsed, selected, status, msg := decideFromInquiryAnswer(cont, answer)
 	if status != 0 {
-		return PASDecision{PayerResponse: answer}, status, msg, nil
+		return out, status, msg, nil
 	}
-	out := PASDecision{Decision: decision, Parsed: parsed, PayerResponse: answer}
+	if err := cont.SDKContinuation().ValidateResponseLinkage(selected.Response); err != nil {
+		out.Consumption = unavailableConsumption("decision_binding_unavailable")
+		return out, http.StatusBadGateway, "inquiry response request linkage unavailable", nil
+	}
+	if status, msg := g.validateInquiryPatient(ctx, selected, cont.SubjectPCI, cont.PayerHolder, body); status != 0 {
+		out.Consumption = unavailableConsumption("decision_binding_unavailable")
+		return out, status, msg, nil
+	}
+	out.Decision, out.Parsed = decision, parsed
+	out.Consumption = ConsumptionOutcome{State: "available"}
 	if store, ok := g.continuations(); ok {
 		// The continuation records what the payer has said SINCE, so a later
 		// inquiry about a decided authorization resolves to the decision rather
 		// than asking again. It also keeps the payer's own new identifiers, so a
-		// second inquiry can name the authorization by everything it has.
-		next := ContinuationFacts(cont, recordedInquiryFacts(cont, answer))
+		// second inquiry can name the authorization by everything it has. Only
+		// the selected response contributes facts; the full reply stays evidence.
+		next := ContinuationFacts(cont, recordedInquiryFacts(cont, selected.Response))
 		next.LastOutcome = decision
 		if _, err := store.PutContinuation(next); err != nil {
 			// The payer's answer is not lost because the record of it was not
@@ -529,16 +579,17 @@ func recordedInquiryFacts(cont Continuation, answer []byte) shnsdk.PriorAuthCont
 // Zero matches and more than one match are REPORTED, never resolved by taking the
 // first: an inquiry that matched nothing has not been answered, and one that
 // matched twice has not been answered unambiguously.
-func decideFromInquiryAnswer(cont Continuation, answer []byte) (string, shnsdk.PriorAuthResult, int, string) {
-	result, err := shnsdk.InquiryDecision(answer, cont.SDKContinuation())
+func decideFromInquiryAnswer(cont Continuation, answer []byte) (string, shnsdk.PriorAuthResult, shnsdk.PASInquirySelection, int, string) {
+	selected, err := shnsdk.SelectPASInquiryAnswer(answer, cont.SDKContinuation())
+	result := selected.Result
 	if err != nil {
-		return "", shnsdk.PriorAuthResult{}, http.StatusBadGateway, "read the prior-authorization inquiry answer: " + err.Error()
+		return "", shnsdk.PriorAuthResult{}, selected, http.StatusBadGateway, "read the prior-authorization inquiry answer: " + err.Error()
 	}
 	switch result.Outcome {
 	case PASDecisionApproved, PASDecisionDenied, PASDecisionPended:
-		return result.Outcome, result, 0, ""
+		return result.Outcome, result, selected, 0, ""
 	}
-	return "", shnsdk.PriorAuthResult{}, http.StatusBadGateway,
+	return "", shnsdk.PriorAuthResult{}, selected, http.StatusBadGateway,
 		fmt.Sprintf("the prior-authorization inquiry answer reports %q, which is not a determination", result.Outcome)
 }
 
@@ -832,10 +883,10 @@ func (g *Gateway) pasMemberSystem(system, member string) (string, int, string) {
 
 // pasMemberSystemOrFail is pasMemberSystem for a scenario handler: it writes the
 // refusal itself, in the same words at every originator flow.
-func (g *Gateway) pasMemberSystemOrFail(w http.ResponseWriter, system, member string) (string, bool) {
+func (g *Gateway) pasMemberSystemOrFail(w http.ResponseWriter, system, member string, attempts ...ConsumptionAttempt) (string, bool) {
 	out, status, msg := g.pasMemberSystem(system, member)
 	if status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
+		g.writeAttemptFailure(w, priorAttempt(attempts), status, msg, nil)
 		return "", false
 	}
 	return out, true
@@ -875,10 +926,10 @@ func pasResourceID(resource []byte) string {
 // pasProviderOrFail is pasProvider for a scenario handler: it writes the refusal
 // itself, so every originator flow refuses an order naming no carryable provider
 // in the same words rather than each inventing its own.
-func (g *Gateway) pasProviderOrFail(w http.ResponseWriter, r *http.Request, order []byte) ([]byte, bool) {
+func (g *Gateway) pasProviderOrFail(w http.ResponseWriter, r *http.Request, order []byte, attempts ...ConsumptionAttempt) ([]byte, bool) {
 	_, provider, status, msg := g.pasProvider(r.Context(), order)
 	if status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
+		g.writeAttemptFailure(w, priorAttempt(attempts), status, msg, nil)
 		return nil, false
 	}
 	return provider, true
@@ -924,16 +975,19 @@ type paInquireReq struct {
 // paInquireResp is the wait operation's result on the wire: the decision, the
 // continuation it belongs to, and the payer's own answer.
 type paInquireResp struct {
-	Decision            string          `json:"decision"`
-	Continuation        string          `json:"continuation,omitempty"`
-	ContinuationDurable bool            `json:"continuationDurable"`
-	AuthNumber          string          `json:"authNumber,omitempty"`
-	ValidUntil          string          `json:"validUntil,omitempty"`
-	Denied              bool            `json:"denied,omitempty"`
-	Rationale           string          `json:"rationale,omitempty"`
-	PendedItems         []string        `json:"pendedItems,omitempty"`
-	Inquiries           int             `json:"inquiries"`
-	PayerResponse       json.RawMessage `json:"payerResponse,omitempty"`
+	LastInquiry         *ConsumptionAttempt   `json:"lastInquiry,omitempty"`
+	ApplicationReply    *ApplicationReplyView `json:"applicationReply,omitempty"`
+	Consumption         ConsumptionOutcome    `json:"consumption"`
+	Decision            string                `json:"decision"`
+	Continuation        string                `json:"continuation,omitempty"`
+	ContinuationDurable bool                  `json:"continuationDurable"`
+	AuthNumber          string                `json:"authNumber,omitempty"`
+	ValidUntil          string                `json:"validUntil,omitempty"`
+	Denied              bool                  `json:"denied,omitempty"`
+	Rationale           string                `json:"rationale,omitempty"`
+	PendedItems         []string              `json:"pendedItems,omitempty"`
+	Inquiries           int                   `json:"inquiries"`
+	PayerResponse       json.RawMessage       `json:"payerResponse,omitempty"`
 }
 
 // handlePAInquire is POST /scenario/pa/inquire: continue a prior-authorization
@@ -990,10 +1044,10 @@ func (g *Gateway) handlePAInquire(w http.ResponseWriter, r *http.Request) {
 	}
 	out, status, msg, err := g.inquireContinuation(r.Context(), r, cont)
 	if status != 0 {
-		if g.relayOriginationError(w, err) {
+		if out.writeReceivedRefusal(w) || g.relayOriginationError(w, err) {
 			return
 		}
-		writeJSON(w, status, map[string]string{"error": msg})
+		writeConsumptionFailure(w, status, msg, out.ReplyView, out.Consumption)
 		return
 	}
 	out.Continuation, out.ContinuationDurable = cont.ID, DurableContinuations(store)
@@ -1003,10 +1057,10 @@ func (g *Gateway) handlePAInquire(w http.ResponseWriter, r *http.Request) {
 		// under the same bounds the submit's own wait runs under.
 		out, status, msg, err = g.followPended(r.Context(), out, wait, g.inquiryFor(r, cont))
 		if status != 0 {
-			if g.relayOriginationError(w, err) {
+			if out.writeReceivedRefusal(w) || g.relayOriginationError(w, err) {
 				return
 			}
-			writeJSON(w, status, map[string]string{"error": msg})
+			writeConsumptionFailure(w, status, msg, out.ReplyView, out.Consumption)
 			return
 		}
 	}
@@ -1021,6 +1075,7 @@ func (g *Gateway) handlePAInquire(w http.ResponseWriter, r *http.Request) {
 // spelled a denial its own way would leave a consumer reading one route's
 // vocabulary and missing another's.
 func (d PASDecision) applyTo(resp uc03Resp) uc03Resp {
+	resp.ApplicationReply, resp.Consumption, resp.LastInquiry = d.ReplyView, d.Consumption, d.LastInquiry
 	resp.Decision = d.Decision
 	resp.AuthNumber = d.Parsed.PreAuthRef
 	resp.ValidUntil = d.Parsed.ValidUntil
@@ -1048,6 +1103,7 @@ func (d PASDecision) applyTo(resp uc03Resp) uc03Resp {
 // a determination, wherever it is reported.
 func (d PASDecision) applyToUC05(resp uc05Resp) uc05Resp {
 	projected := d.applyTo(uc03Resp{PendedItems: resp.PendedItems})
+	resp.ApplicationReply, resp.Consumption, resp.LastInquiry = projected.ApplicationReply, projected.Consumption, projected.LastInquiry
 	resp.Decision = projected.Decision
 	resp.AuthNumber = projected.AuthNumber
 	resp.ValidUntil = projected.ValidUntil
@@ -1063,6 +1119,7 @@ func (d PASDecision) applyToUC05(resp uc05Resp) uc05Resp {
 // paInquireRespOf projects a decision onto the route's answer shape.
 func paInquireRespOf(d PASDecision) paInquireResp {
 	out := paInquireResp{
+		ApplicationReply: d.ReplyView, Consumption: d.Consumption, LastInquiry: d.LastInquiry,
 		Decision:            d.Decision,
 		Continuation:        d.Continuation,
 		ContinuationDurable: d.ContinuationDurable,

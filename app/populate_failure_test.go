@@ -28,6 +28,17 @@ type populateOutput struct {
 	bytes.Buffer
 }
 
+const populateFailureDTRReply = `{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"Questionnaire","status":"active","url":"https://example.test/CANARY-CANONICAL"}}]}`
+
+func expectedPopulateFailureResponse(t *testing.T, message, correlation string) string {
+	t.Helper()
+	if correlation == "" {
+		t.Fatal("DTR exchange did not capture its correlation")
+	}
+	return fmt.Sprintf(`{"error":%q,"applicationReply":{"leg":"dtr-questionnaire-fetch","correlationId":%q,"status":200,"contentType":"","bodyBase64":%q},"consumption":{"state":"unavailable","code":"local_consumption_unavailable"}}`+"\n",
+		message, correlation, base64.StdEncoding.EncodeToString([]byte(populateFailureDTRReply)))
+}
+
 func (o *populateOutput) Write(p []byte) (int, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -39,15 +50,15 @@ func (o *populateOutput) text() string { o.mu.Lock(); defer o.mu.Unlock(); retur
 // sealed CRD/DTR fixtures through the Hub. Live payer/CQL validation is a separate gate.
 func TestBuildPopulateFailureEvidence(t *testing.T) {
 	for _, row := range []struct {
-		name                 string
-		tokenStatus, status  int
-		body, record, public string
-		calls                int32
+		name                      string
+		tokenStatus, status       int
+		body, record, publicError string
+		calls                     int32
 	}{
-		{"token refusal", 401, 200, "", `gateway: populate_failure {"version":1,"stage":"token_acquisition","reason":"other","status":0}`, `{"error":"engine: $populate upstream failed"}` + "\n", 0},
-		{"population status", 200, 503, "CANARY-POPULATION-BODY", `gateway: populate_failure {"version":1,"stage":"http_status","reason":"non_2xx","status":503}`, `{"error":"engine: $populate upstream failed"}` + "\n", 1},
-		{"foreign subject", 200, 200, `{"resourceType":"QuestionnaireResponse","subject":{"reference":"Patient/CANARY-FOREIGN"},"questionnaire":"https://example.test/CANARY-CANONICAL"}`, "", `{"error":"engine: populated QR subject does not match patient"}` + "\n", 1},
-		{"foreign canonical", 200, 200, `{"resourceType":"QuestionnaireResponse","subject":{"reference":"Patient/CANARY-STORE"},"questionnaire":"https://example.test/CANARY-FOREIGN"}`, "", `{"error":"populated QR questionnaire does not match canonical"}` + "\n", 1},
+		{"token refusal", 401, 200, "", `gateway: populate_failure {"version":1,"stage":"token_acquisition","reason":"other","status":0}`, "engine: $populate upstream failed", 0},
+		{"population status", 200, 503, "CANARY-POPULATION-BODY", `gateway: populate_failure {"version":1,"stage":"http_status","reason":"non_2xx","status":503}`, "engine: $populate upstream failed", 1},
+		{"foreign subject", 200, 200, `{"resourceType":"QuestionnaireResponse","subject":{"reference":"Patient/CANARY-FOREIGN"},"questionnaire":"https://example.test/CANARY-CANONICAL"}`, "", "engine: populated QR subject does not match patient", 1},
+		{"foreign canonical", 200, 200, `{"resourceType":"QuestionnaireResponse","subject":{"reference":"Patient/CANARY-STORE"},"questionnaire":"https://example.test/CANARY-FOREIGN"}`, "", "populated QR questionnaire does not match canonical", 1},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			var calls, tokenCalls atomic.Int32
@@ -72,11 +83,13 @@ func TestBuildPopulateFailureEvidence(t *testing.T) {
 			}))
 			defer pop.Close()
 			out := &populateOutput{}
-			handler := populateFailureApp(t, map[string]string{"PROVIDER_DTR_POPULATE_URL": pop.URL + "/CANARY-URL", "PROVIDER_DTR_POPULATE_TOKEN_URL": token.URL + "/CANARY-TOKEN-URL", "PROVIDER_DTR_POPULATE_CLIENT_ID": "CANARY-CLIENT", "PROVIDER_DTR_POPULATE_CLIENT_SECRET": "CANARY-SECRET"}, out)
+			var dtrCorrelation string
+			handler := populateFailureApp(t, map[string]string{"PROVIDER_DTR_POPULATE_URL": pop.URL + "/CANARY-URL", "PROVIDER_DTR_POPULATE_TOKEN_URL": token.URL + "/CANARY-TOKEN-URL", "PROVIDER_DTR_POPULATE_CLIENT_ID": "CANARY-CLIENT", "PROVIDER_DTR_POPULATE_CLIENT_SECRET": "CANARY-SECRET"}, out, &dtrCorrelation)
 			rr := httptest.NewRecorder()
 			handler.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/scenario/uc08", strings.NewReader(`{}`)))
-			if rr.Code != 502 || rr.Body.String() != row.public {
-				t.Fatalf("public response=%d %q, want 502 %q", rr.Code, rr.Body.String(), row.public)
+			wantPublic := expectedPopulateFailureResponse(t, row.publicError, dtrCorrelation)
+			if rr.Code != 502 || rr.Body.String() != wantPublic {
+				t.Fatalf("public response=%d %q, want 502 %q", rr.Code, rr.Body.String(), wantPublic)
 			}
 			var records []string
 			for _, line := range strings.Split(out.text(), "\n") {
@@ -101,7 +114,7 @@ func TestBuildPopulateFailureEvidence(t *testing.T) {
 	}
 }
 
-func populateFailureApp(t *testing.T, populate map[string]string, out io.Writer) http.Handler {
+func populateFailureApp(t *testing.T, populate map[string]string, out io.Writer, dtrCorrelation *string) http.Handler {
 	t.Helper()
 	now := time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC)
 	provider, err := shnsdk.GenerateIdentity("provider")
@@ -136,10 +149,10 @@ func populateFailureApp(t *testing.T, populate map[string]string, out io.Writer)
 			return
 		case "/Patient/CANARY-STORE":
 			// The originated CRD request reads the member's Patient by id.
-			_, _ = io.WriteString(w, `{"resourceType":"Patient","id":"CANARY-STORE","birthDate":"1980-01-01","name":[{"family":"CANARY-FAMILY"}]}`)
+			_, _ = io.WriteString(w, `{"resourceType":"Patient","id":"CANARY-STORE","identifier":[{"system":"urn:shn:member","value":"MBR-D-UC08"},{"system":"urn:shn:pci","value":"`+shnsdk.ResolvePCI("MBR-D-UC08", "1980-01-01", "CANARY-FAMILY")+`"}],"birthDate":"1980-01-01","name":[{"family":"CANARY-FAMILY"}]}`)
 			return
 		case "/Patient":
-			resource = `{"resourceType":"Patient","id":"CANARY-STORE","birthDate":"1980-01-01","name":[{"family":"CANARY-FAMILY"}]}`
+			resource = `{"resourceType":"Patient","id":"CANARY-STORE","identifier":[{"system":"urn:shn:member","value":"MBR-D-UC08"},{"system":"urn:shn:pci","value":"` + shnsdk.ResolvePCI("MBR-D-UC08", "1980-01-01", "CANARY-FAMILY") + `"}],"birthDate":"1980-01-01","name":[{"family":"CANARY-FAMILY"}]}`
 		case "/Coverage":
 			resource = `{"resourceType":"Coverage","id":"CANARY-COVERAGE","status":"active","beneficiary":{"reference":"Patient/CANARY-STORE"},"payor":[{"identifier":{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00001"}}]}`
 		case "/DeviceRequest":
@@ -227,7 +240,8 @@ func populateFailureApp(t *testing.T, populate map[string]string, out io.Writer)
 			}}})
 			op = "crd-cards"
 		case "dtr-questionnaire-fetch":
-			payload = []byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"Questionnaire","status":"active","url":"https://example.test/CANARY-CANONICAL"}}]}`)
+			*dtrCorrelation = env.Metadata.CorrelationID
+			payload = []byte(populateFailureDTRReply)
 			op = "dtr-questionnaire"
 		default:
 			t.Errorf("unexpected payer leg: %s", env.Metadata.TransactionType)
@@ -372,10 +386,11 @@ func TestBuildPopulateFailureEvidenceWriterFailurePreservesResponse(t *testing.T
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1); w.WriteHeader(503) }))
 	defer srv.Close()
-	h := populateFailureApp(t, map[string]string{"PROVIDER_DTR_POPULATE_URL": srv.URL}, populateFailingWriter{})
+	var dtrCorrelation string
+	h := populateFailureApp(t, map[string]string{"PROVIDER_DTR_POPULATE_URL": srv.URL}, populateFailingWriter{}, &dtrCorrelation)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/scenario/uc08", strings.NewReader(`{}`)))
-	if rr.Code != 502 || rr.Body.String() != `{"error":"engine: $populate upstream failed"}`+"\n" || calls.Load() != 1 {
+	if rr.Code != 502 || rr.Body.String() != expectedPopulateFailureResponse(t, "engine: $populate upstream failed", dtrCorrelation) || calls.Load() != 1 {
 		t.Fatalf("status=%d body=%q calls=%d", rr.Code, rr.Body.String(), calls.Load())
 	}
 }

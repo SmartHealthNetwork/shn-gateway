@@ -17,7 +17,7 @@ func (g *Gateway) diagnostic(e diagnostics.Event) {
 	if e.Time.IsZero() {
 		e.Time = g.cfg.Clock()
 	}
-	g.cfg.Diagnostic(e)
+	g.cfg.Diagnostic(diagnostics.WithEventBudget(e, &g.observationMemory))
 }
 func (g *Gateway) diagnosticStage(ctx context.Context, kind, leg string, body []byte, status int, detail string) {
 	if g.cfg.Diagnostic == nil {
@@ -67,6 +67,7 @@ func (g *Gateway) observeInbound(h http.HandlerFunc) http.HandlerFunc {
 			h(w, r)
 			return
 		}
+		r = r.WithContext(diagnostics.WithBodyBudget(r.Context(), &g.observationMemory))
 		leg := &diagnosticLeg{}
 		r = r.WithContext(context.WithValue(r.Context(), diagnosticLegKey{}, leg))
 		diagnostics.ObserveHTTP(h, func(e diagnostics.Event) bool {

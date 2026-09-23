@@ -9,9 +9,12 @@ package engine
 // made-up id that the gateway once had it.
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
 // sampleContinuation is a complete, consistent record: two submitted lines, both
@@ -28,6 +31,7 @@ func sampleContinuation(holder string) Continuation {
 		OrderRef:        "ServiceRequest/sr-1",
 		ProviderNPI:     "1234567893",
 		ClaimIdentifier: "urn:shn:claim|claim-1",
+		ClaimReferences: []string{"Claim/claim-1", "https://shn.example/fhir/Claim/claim-1"},
 		ItemTraceNumbers: []string{
 			"urn:shn:trace|corr-1-1",
 			"urn:shn:trace|corr-1-2",
@@ -39,6 +43,24 @@ func sampleContinuation(holder string) Continuation {
 		PayerClaimResponseIDs: []string{"urn:payer:cr|cr-1"},
 		PayerPreAuthRef:       "PA-0001",
 		LastOutcome:           ContinuationOutcomePended,
+	}
+}
+
+func TestContinuation_ClaimReferencesBridgeAndClone(t *testing.T) {
+	refs := []string{"Claim/claim-1", "https://shn.example/fhir/Claim/claim-1"}
+	sdk := shnsdk.PriorAuthContinuation{ClaimReferences: refs}
+	facts := ContinuationFacts(sampleContinuation("provider-a"), sdk)
+	refs[0] = "caller mutation"
+	if !slices.Equal(facts.ClaimReferences, []string{"Claim/claim-1", "https://shn.example/fhir/Claim/claim-1"}) {
+		t.Fatalf("bridge kept caller slice: %v", facts.ClaimReferences)
+	}
+	inflated := facts.SDKContinuation()
+	inflated.ClaimReferences[0] = "returned mutation"
+	if facts.ClaimReferences[0] != "Claim/claim-1" {
+		t.Fatalf("inflated continuation shares stored slice: %v", facts.ClaimReferences)
+	}
+	if got := facts.SDKContinuation().ClaimReferences; !slices.Equal(got, facts.ClaimReferences) {
+		t.Fatalf("bridge lost exact references: %v", got)
 	}
 }
 
@@ -60,6 +82,7 @@ func TestContinuation_RoundTripsEveryStoredFact(t *testing.T) {
 		got.SubjectPCI != "pci:one" || got.MemberID != "MBR-D-UC04" || got.SoRPatientID != "Patient/p1" ||
 		got.OrderRef != "ServiceRequest/sr-1" || got.ProviderNPI != "1234567893" ||
 		got.ClaimIdentifier != "urn:shn:claim|claim-1" || got.PayerPreAuthRef != "PA-0001" ||
+		!slices.Equal(got.ClaimReferences, []string{"Claim/claim-1", "https://shn.example/fhir/Claim/claim-1"}) ||
 		got.LastOutcome != "pended" {
 		t.Fatalf("a stored fact did not round-trip: %+v", got)
 	}
@@ -70,8 +93,9 @@ func TestContinuation_RoundTripsEveryStoredFact(t *testing.T) {
 	// The record the caller handed in must not be reachable through the store.
 	out.Items[0].ProductCode = "mutated"
 	out.ItemTraceNumbers[0] = "mutated"
+	out.ClaimReferences[0] = "mutated"
 	again, _, _ := cs.ReadContinuation("provider-a", out.ID)
-	if again.Items[0].ProductCode == "mutated" || again.ItemTraceNumbers[0] == "mutated" {
+	if again.Items[0].ProductCode == "mutated" || again.ItemTraceNumbers[0] == "mutated" || again.ClaimReferences[0] == "mutated" {
 		t.Fatal("a returned record shares its slices with the stored one")
 	}
 }

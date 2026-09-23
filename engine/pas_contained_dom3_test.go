@@ -182,7 +182,7 @@ func TestAuthoredPASSubmit_SeededContainedPayerOrgIsNeverStranded(t *testing.T) 
 			// The demo lane's own flags (originate.go: relaysReferencePayerBytes) —
 			// the payer organization rides as a resolvable bundle entry, which is
 			// the re-point that strands a contained copy.
-			bundleJSON, err := buildAuthoredPASSubmit("2.2", shnsdk.ConformantClaimInputs{
+			bundleJSON, err := buildAuthoredPASSubmit("2.2", shnsdk.ConformantClaimInputs{ItemFacts: syntheticPASItemFacts(),
 				SR: order, Provider: provider, Coverage: coverage, Insurer: insurer,
 				PatientRef: "Patient/" + member, CoverageRef: "Coverage/" + member,
 				MemberID: member, MemberIDSystem: shnsdk.MemberSystem,

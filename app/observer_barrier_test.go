@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"github.com/SmartHealthNetwork/shn-gateway/engine"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -105,5 +106,33 @@ func TestObserverBarrierOffByDefault(t *testing.T) {
 	b.handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/barrier", nil))
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("default barrier: %d", response.Code)
+	}
+}
+
+func TestObserverHubLossAndCloseAppBinding(t *testing.T) {
+	b, _, err := buildProviderForPopulate(t, map[string]string{"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate", "OBSERVER_ADDR": "127.0.0.1:9411"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.observerHub == nil {
+		t.Fatal("missing owned Hub")
+	}
+	b.observerHub.Emit(engine.ObserverEvent{Kind: "ingress.received", Payload: []byte(strings.Repeat("x", 8<<20))})
+	w := httptest.NewRecorder()
+	b.observerHandler.ServeHTTP(w, httptest.NewRequest("POST", "/barrier", nil))
+	if w.Code != 503 {
+		t.Fatal("app claimed successful lost inspection", w.Code)
+	}
+	health := httptest.NewRecorder()
+	b.handler.ServeHTTP(health, httptest.NewRequest("GET", "/health", nil))
+	if health.Code != 200 {
+		t.Fatal("inspection loss changed clinical readiness")
+	}
+	b.observerHub.Close()
+	b.observerHub.Close()
+	w = httptest.NewRecorder()
+	b.observerHandler.ServeHTTP(w, httptest.NewRequest("GET", "/health", nil))
+	if !strings.Contains(w.Body.String(), `"closed":true`) || !strings.Contains(w.Body.String(), `"inspectionDropped":1`) {
+		t.Fatal(w.Body.String())
 	}
 }

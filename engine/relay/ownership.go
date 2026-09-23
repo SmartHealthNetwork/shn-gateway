@@ -258,8 +258,12 @@ var legOwnership = func() map[Key]Rule {
 		{"pas-claim-inquire", RoleRequester, DirectionRequest, OutcomeOriginated}: {Allowed: authored, Builders: []BuilderID{BuilderSDKPASInquiry}},
 		{"pas-claim-update", RoleRequester, DirectionRequest, OutcomeOriginated}:  {Allowed: authored, Builders: []BuilderID{BuilderSDKPASUpdate}},
 
-		// Requester to its participant's system: the recipient's answer,
+		// Requester consumes an authenticated peer answer or carries it to its own
+		// system: the recipient's answer,
 		// exactly as it arrived.
+		{"coverage-eligibility", RoleRequester, DirectionResponse, OutcomeAnswered}:    {Allowed: relayed},
+		{"federated-query", RoleRequester, DirectionResponse, OutcomeAnswered}:         {Allowed: relayed},
+		{"patient-dtr", RoleRequester, DirectionResponse, OutcomeAnswered}:             {Allowed: relayed},
 		{"crd-order-dispatch", RoleRequester, DirectionResponse, OutcomeAnswered}:      {Allowed: relayed},
 		{"crd-order-select", RoleRequester, DirectionResponse, OutcomeAnswered}:        {Allowed: relayed},
 		{"dtr-questionnaire-fetch", RoleRequester, DirectionResponse, OutcomeAnswered}: {Allowed: relayed},
@@ -308,13 +312,10 @@ var legOwnership = func() map[Key]Rule {
 		// listed: this leg has never rebuilt an answer, so nothing may author one.
 		{"pas-claim-inquire", RoleRecipient, DirectionResponse, OutcomeAnswered}: {Allowed: relayed},
 	}
-	// An application error from the participant's system is relayed. On
-	// the recipient an interim builder still replaces an empty error body,
-	// and the bare error a requester that negotiated no frame receives.
+	// An application error from the participant's system is relayed exactly,
+	// including an empty body. Only the refusal rows permit authored errors.
 	for _, leg := range []string{"crd-order-dispatch", "crd-order-select", "dtr-questionnaire-fetch", "pas-claim", "pas-claim-inquire", "pas-claim-update"} {
-		m[Key{leg, RoleRecipient, DirectionResponse, OutcomeUpstreamError}] = Rule{
-			Allowed: either, Builders: []BuilderID{BuilderInterimEmptyErrorSubstitution},
-		}
+		m[Key{leg, RoleRecipient, DirectionResponse, OutcomeUpstreamError}] = Rule{Allowed: relayed}
 	}
 	// On the requester, an application error the recipient answered with is
 	// relayed to the participant's system exactly as it arrived.

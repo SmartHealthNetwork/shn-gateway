@@ -1,12 +1,16 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"github.com/SmartHealthNetwork/shn-gateway/connectors/exchangecontext"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -67,7 +71,7 @@ func assertFHIRIngressError(t *testing.T, w *httptest.ResponseRecorder, status i
 	}
 	// FHIR R4 IssueType codes (https://hl7.org/fhir/R4/codesystem-issue-type.html),
 	// pinned independently of the response encoder.
-	wantCode := map[int]string{400: "invalid", 401: "login", 403: "forbidden", 422: "not-supported", 500: "processing", 502: "processing", 503: "transient"}[status]
+	wantCode := map[int]string{400: "invalid", 401: "login", 403: "forbidden", 413: "processing", 422: "not-supported", 500: "processing", 502: "processing", 503: "transient", 504: "timeout"}[status]
 	if len(oo.Issue) == 1 && oo.Issue[0].Code != wantCode {
 		t.Errorf("issue code=%q want=%q", oo.Issue[0].Code, wantCode)
 	}
@@ -144,11 +148,7 @@ func TestFHIRIngressPreservesFramedUpstreamFailure(t *testing.T) {
 			if !(&Gateway{}).relayOriginationError(&fhirOperationWriter{w}, &RelayError{Status: 409, Body: []byte(body), ContentType: contentType, leg: "pas-claim"}) {
 				t.Fatal("framed failure not handled")
 			}
-			wantType := contentType
-			if wantType == "" {
-				wantType = "application/fhir+json"
-			}
-			if w.Code != 409 || w.Body.String() != body || w.Header().Get("Content-Type") != wantType {
+			if w.Code != 409 || w.Body.String() != body || w.Header().Get("Content-Type") != contentType {
 				t.Fatalf("upstream answer changed: %d %s %s", w.Code, w.Header(), w.Body.String())
 			}
 		})
@@ -156,12 +156,22 @@ func TestFHIRIngressPreservesFramedUpstreamFailure(t *testing.T) {
 }
 
 func TestNonFHIRIngressKeepsJSONErrors(t *testing.T) {
-	for _, handler := range []func(http.ResponseWriter, *http.Request){(&Gateway{}).handleCRDIngress, (&Gateway{}).handleCDSDiscovery} {
-		w := httptest.NewRecorder()
-		handler(w, httptest.NewRequest(http.MethodPost, "/", strings.NewReader("{}")))
-		if w.Code != 401 || w.Header().Get("Content-Type") != "application/json" || !strings.Contains(w.Body.String(), `"error":`) {
-			t.Fatalf("non-FHIR envelope changed: %d %s %s", w.Code, w.Header(), w.Body.String())
-		}
+	for _, tc := range []struct {
+		method, path string
+		handler      func(http.ResponseWriter, *http.Request)
+	}{
+		{http.MethodPost, "/cds-services/order-select", (&Gateway{}).handleCRDIngress},
+		{http.MethodGet, "/cds-services", (&Gateway{}).handleCDSDiscovery},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			// The shared dispatcher selects the protocol's local-error format from
+			// the mounted route; "/" is not a CDS Hooks invocation path.
+			tc.handler(w, httptest.NewRequest(tc.method, tc.path, strings.NewReader("{}")))
+			if w.Code != 401 || w.Header().Get("Content-Type") != "application/json" || !strings.Contains(w.Body.String(), `"error":`) {
+				t.Fatalf("non-FHIR envelope changed: %d %s %s", w.Code, w.Header(), w.Body.String())
+			}
+		})
 	}
 }
 
@@ -172,13 +182,11 @@ func TestFHIRIngressExchangeFailures(t *testing.T) {
 		if protocol == "dtr" {
 			body = `{"resourceType":"Parameters","parameter":[{"name":"questionnaire","valueCanonical":"urn:test:questionnaire"},{"name":"coverage","resource":` + coverage + `}]}`
 		}
-		failures := []string{"framed upstream", "unframed transport", "unsupported contract", "payer absent"}
-		if protocol == "pas" {
-			failures = append(failures, "unattested item")
-		}
+		failures := []string{"framed upstream", "unframed transport", "unsupported contract", "payer absent", "context absent"}
+
 		for _, failure := range failures {
 			t.Run(protocol+"/"+failure, func(t *testing.T) {
-				env := newInProcessExchange(t)
+				env := newTransportExchange(t)
 				if protocol == "dtr" {
 					declareFramedDTR(t, env, true)
 				}
@@ -192,16 +200,22 @@ func TestFHIRIngressExchangeFailures(t *testing.T) {
 					declareRecipientVersions(t, env, []string{"pa.crd@2.0"})
 				case "payer absent":
 					requestBody = strings.ReplaceAll(body, `,"payor":[{"identifier":{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00001"}}]`, "")
-				case "unattested item":
-					item, err := shnsdk.BuildManualAttestedItem("functional-status-oswestry", "42", shnsdk.Attestation{NPI: "1999999999", Text: "I attest these are my clinical findings.", When: "2026-06-04"})
-					if err != nil {
-						t.Fatal(err)
+				case "context absent":
+					requestBody = `{"resourceType":"Bundle","entry":[]}`
+					if protocol == "dtr" {
+						requestBody = `{"resourceType":"Parameters","parameter":[]}`
 					}
-					qr := `{"resource":{"resourceType":"QuestionnaireResponse","subject":{"reference":"Patient/MBR-COVERED"},"item":[` + string(stripItemExtension(t, item)) + `]}},`
-					requestBody = strings.Replace(body, `"entry":[`, `"entry":[`+qr, 1)
+
 				}
 				w := httptest.NewRecorder()
-				r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(requestBody))
+				path, leg, operation, version := "/Claim/$submit", "pas-claim", "pas-submit", "pa.pas@2.0"
+				if protocol == "dtr" {
+					path, leg, operation, version = "/Questionnaire/$questionnaire-package", "dtr-questionnaire-fetch", "questionnaire-package", "pa.dtr@2.0"
+				}
+				r := signedFixtureIngress(t, env.originator, path, leg, operation, "", "pci-covered", version, "fhir-failure", []byte(requestBody))
+				if failure == "payer absent" || failure == "context absent" {
+					r.Header.Del(exchangecontext.Header)
+				}
 				if protocol == "pas" {
 					env.originator.handlePASIngress(w, r)
 				} else {
@@ -214,12 +228,128 @@ func TestFHIRIngressExchangeFailures(t *testing.T) {
 					}
 				case "unframed transport":
 					assertFHIRIngressError(t, w, 502)
-				case "unsupported contract", "payer absent":
+				case "unsupported contract":
 					assertFHIRIngressError(t, w, 422)
-				case "unattested item":
-					assertFHIRIngressError(t, w, 403)
-					if !strings.Contains(w.Body.String(), "FR-16") {
-						t.Fatalf("attestation diagnostic lost: %s", w.Body.String())
+				case "payer absent":
+					assertFHIRIngressError(t, w, 422)
+					if !strings.Contains(w.Body.String(), "no payer identifier") {
+						t.Fatalf("missing payer was not a routing refusal: %s", w.Body.String())
+					}
+				case "context absent":
+					assertFHIRIngressError(t, w, 400)
+					if !strings.Contains(w.Body.String(), "context_missing") {
+						t.Fatalf("missing context not identified: %s", w.Body.String())
+					}
+				}
+				wantHits := 1
+				if failure == "unsupported contract" || failure == "payer absent" || failure == "context absent" {
+					wantHits = 0
+				}
+				if env.routeHitCount() != wantHits {
+					t.Fatalf("Hub calls=%d want%d", env.routeHitCount(), wantHits)
+				}
+			})
+		}
+	}
+}
+
+// TestFHIRIngressHubLegTimeoutIsTimeoutOutcome: a $submit whose Hub leg produces
+// no answer within the gateway's leg deadline answers 504 as an OperationOutcome
+// with issue code "timeout" and the reason text carrying the budget. The Hub is
+// held open until the deadline; nothing else in the exchange is changed.
+func TestFHIRIngressHubLegTimeoutIsTimeoutOutcome(t *testing.T) {
+	env := newTransportExchange(t)
+	var routeCalls atomic.Int32
+	base := env.originator.cfg.Client.Transport
+	held := diagnosticRoundTripper(func(r *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(r.URL.Path, "/route") {
+			routeCalls.Add(1)
+			select {
+			case <-time.After(5 * time.Second):
+			case <-r.Context().Done():
+				return nil, r.Context().Err()
+			}
+		}
+		return base.RoundTrip(r)
+	})
+	env.originator.cfg.Client = &http.Client{Transport: held, Timeout: 50 * time.Millisecond}
+
+	w := httptest.NewRecorder()
+	r := signedFixtureIngress(t, env.originator, "/Claim/$submit", "pas-claim", "pas-submit", "", "pci-covered", "pa.pas@2.0", "timeout-proof", []byte(pasIngressBundle("00001", "")))
+	env.originator.handlePASIngress(w, r)
+
+	assertFHIRIngressError(t, w, http.StatusGatewayTimeout)
+	if routeCalls.Load() != 1 {
+		t.Fatalf("Hub calls=%d", routeCalls.Load())
+	}
+	const want = `"diagnostics":"no answer on the hub leg within 50ms (hub leg timeout)"`
+	if !strings.Contains(w.Body.String(), want) {
+		t.Fatalf("body=%s want to contain %s", w.Body.String(), want)
+	}
+}
+
+// The supplied QR is checked only under the participant's chosen content policy.
+// Source-disclosure and local signing requirements are separate mandatory guards.
+func TestFHIRIngressSuppliedQRAttestationPolicy(t *testing.T) {
+	item, err := shnsdk.BuildManualAttestedItem("functional-status-oswestry", "42", shnsdk.Attestation{NPI: "1999999999", Text: "I attest these are my clinical findings.", When: "2026-06-04"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const upstream = `{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"business-rule","diagnostics":"payer refusal"}]}`
+	for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve, EnforcementBasic, EnforcementStrict} {
+		for _, mutated := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/attestation-removed=%v", level, mutated), func(t *testing.T) {
+				env := newTransportExchangeWithPolicy(t, level)
+				var checkerCalls atomic.Int32
+				env.originator.cfg.Validator = observationValidator(func(context.Context, []byte, string) (shnsdk.ValidationEvidence, error) {
+					checkerCalls.Add(1)
+					return *syntheticEvidence(), nil
+				})
+				subject, _, ok := env.originator.cfg.SoR.ResolvePatient("MBR-COVERED")
+				if !ok {
+					t.Fatal("seeded subject missing")
+				}
+				qrItem := item
+				if mutated {
+					qrItem = stripItemExtension(t, item)
+				}
+				qr := `{"resource":{"resourceType":"QuestionnaireResponse","subject":{"reference":"Patient/MBR-COVERED"},"item":[` + string(qrItem) + `]}},`
+				body := strings.Replace(pasIngressBundle("00001", ""), `"entry":[`, `"entry":[`+qr, 1)
+				env.payerReturns(LegResult{Status: 409, Response: testResponse([]byte(upstream))})
+				r := signedFixtureIngress(t, env.originator, "/Claim/$submit", "pas-claim", "pas-submit", "", subject, "pa.pas@2.0", "qr-policy", []byte(body))
+				w := httptest.NewRecorder()
+				env.originator.handlePASIngress(w, r)
+				if mutated && level == EnforcementStrict {
+					if w.Code != 422 || env.routeHitCount() != 0 || !strings.Contains(w.Body.String(), `"valueString":"qr.attestation"`) || !strings.Contains(w.Body.String(), `"valueString":"conformance_invalid"`) {
+						t.Fatalf("refusal status=%d Hub=%d body=%s", w.Code, env.routeHitCount(), w.Body.String())
+					}
+				} else if w.Code != 409 || w.Body.String() != upstream || w.Header().Get("Content-Type") != "application/fhir+json" || env.routeHitCount() != 1 {
+					t.Fatalf("delivery status=%d Hub=%d body=%s", w.Code, env.routeHitCount(), w.Body.String())
+				}
+				observationFlush(t, env.originator)
+				findings, drops := env.originator.ConformanceObservationsForTest()
+				if drops != 0 {
+					t.Fatal(drops)
+				}
+				if level == EnforcementNone && (len(findings) != 0 || checkerCalls.Load() != 0 || env.originator.certification != nil) {
+					t.Fatalf("none checker=%d findings=%+v", checkerCalls.Load(), findings)
+				}
+				if level == EnforcementObserve || level == EnforcementBasic {
+					found := false
+					for _, f := range findings {
+						if f.Rule == "qr.attestation" && f.Direction == "request" {
+							found = true
+							want := CheckValid
+							if mutated {
+								want = CheckInvalid
+							}
+							if f.State != want || f.PayloadSHA256 != sha256hex([]byte(body)) {
+								t.Fatalf("finding=%+v", f)
+							}
+						}
+					}
+					if !found {
+						t.Fatal("missing attestation finding")
 					}
 				}
 			})

@@ -1,7 +1,8 @@
 // pasgraph.go — the PAS response-graph REFERENCE-CLOSURE RULE (FR-G28).
 //
 // A payer's answer must CARRY EVERY RESOURCE IT NAMES. This reads a PAS response
-// Bundle as a graph — one ClaimResponse, every entry identified by an absolute
+// Bundle as a graph — one ClaimResponse for submission, zero or more for inquiry,
+// every entry identified by an absolute
 // fullUrl, every Reference resolving to an entry, a contained resource of its own
 // owner, or a version the graph actually holds — and refuses anything else. It
 // changes not one byte: the rule decides whether a payer's bytes are relayed or
@@ -133,6 +134,12 @@ type pasGraph struct {
 }
 
 func readPASGraph(raw []byte) (*pasGraph, error) {
+	return readPASResponseGraph(raw, false)
+}
+
+// Inquiry replies retain the same reference closure but permit zero or multiple
+// answers. Submission and authored attachment readers retain exactly one answer.
+func readPASResponseGraph(raw []byte, inquiry bool) (*pasGraph, error) {
 	if len(raw) > pasGraphMaxBytes {
 		return nil, pasGraphError()
 	}
@@ -142,7 +149,8 @@ func readPASGraph(raw []byte) (*pasGraph, error) {
 	}
 	var ok bool
 	g.entries, ok = g.bundle["entry"].([]any)
-	if !ok || len(g.entries) == 0 {
+	_, entriesPresent := g.bundle["entry"]
+	if (!ok && (entriesPresent || !inquiry)) || (len(g.entries) == 0 && !inquiry) {
 		return nil, pasGraphStructural("the Bundle has no entries")
 	}
 	if len(g.entries) > pasGraphMaxResources {
@@ -192,13 +200,13 @@ func readPASGraph(raw []byte) (*pasGraph, error) {
 		entry := &pasGraphEntry{full, r, i}
 		g.byURL[full] = entry
 		if typ == "ClaimResponse" {
-			if g.response != nil {
+			if g.response != nil && !inquiry {
 				return nil, pasGraphStructural("the Bundle carries more than one ClaimResponse (%s and %s)", g.response.fullURL, full)
 			}
 			g.response = entry
 		}
 	}
-	if g.response == nil {
+	if g.response == nil && !inquiry {
 		return nil, pasGraphStructural("the Bundle carries no ClaimResponse")
 	}
 	return g, nil

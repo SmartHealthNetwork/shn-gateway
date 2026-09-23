@@ -20,6 +20,7 @@ type Identity struct {
 }
 
 type Event struct {
+	bodyBudget            BodyBudget
 	Source                string             `json:"source"`
 	Incarnation           string             `json:"incarnation"`
 	Sequence              uint64             `json:"sequence"`
@@ -61,6 +62,7 @@ func FingerprintLink(a, b RequestFingerprint) bool {
 }
 
 type Health struct {
+	Closed           bool      `json:"closed,omitempty"`
 	Source           string    `json:"source"`
 	Incarnation      string    `json:"incarnation"`
 	Time             time.Time `json:"time"`

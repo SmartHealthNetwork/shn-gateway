@@ -32,10 +32,13 @@ type LineFakeCall struct {
 type LineFakeValidator struct {
 	// Line is read-only metadata for callers. Validation uses the constructor's
 	// private copy, so assigning this field cannot change the selected rules.
-	Line  string
-	line  string
-	mu    sync.Mutex
-	calls []LineFakeCall
+	// Evidence explicitly declares synthetic support for a test scenario.
+	// Nil cannot establish complete profile or terminology coverage.
+	Evidence *shnsdk.ValidationEvidence
+	Line     string
+	line     string
+	mu       sync.Mutex
+	calls    []LineFakeCall
 }
 
 var _ shnsdk.Validator = (*LineFakeValidator)(nil)
@@ -63,6 +66,25 @@ func (v *LineFakeValidator) Validate(_ context.Context, payload []byte, profile 
 	v.calls = append(v.calls, call)
 	v.mu.Unlock()
 	return result, err
+}
+
+// ValidateEvidence executes the scoped rules once and applies explicitly
+// configured synthetic coverage. It never infers complete support from Valid.
+func (v *LineFakeValidator) ValidateEvidence(ctx context.Context, body []byte, profile string) (shnsdk.ValidationEvidence, error) {
+	result, err := v.Validate(ctx, body, profile)
+	if err != nil {
+		return unavailableValidatorEvidence(), err
+	}
+	if v.Evidence == nil {
+		return unavailableValidatorEvidence(), nil
+	}
+	ev := *v.Evidence
+	ev.Profile.Issues = append([]shnsdk.ValidationIssue(nil), ev.Profile.Issues...)
+	ev.Terminology.Issues = append([]shnsdk.ValidationIssue(nil), ev.Terminology.Issues...)
+	if !result.Valid {
+		ev.Profile = shnsdk.ValidationCheckEvidence{State: shnsdk.ValidationInvalid, Code: "synthetic-rejection", Issues: []shnsdk.ValidationIssue{{Severity: "error", Code: "synthetic-rejection"}}}
+	}
+	return ev, nil
 }
 
 // Calls returns an isolated snapshot, including a copy of every issue slice.

@@ -177,3 +177,30 @@ func TestDirectBearer_JTIReusableWithinExp(t *testing.T) {
 		t.Error("second presentation of the same jti rejected — should be reusable within exp (baseline)")
 	}
 }
+
+func TestDirectBearer_NonStringSubjectRejections(t *testing.T) {
+	key, pub := newTestClientKey(t)
+	s := newTestAuthServer(t, "br-provider", pub, "ES384")
+	for _, row := range []struct {
+		name    string
+		subject any
+	}{
+		{"matching string", "br-provider"}, {"number", 42}, {"boolean", true}, {"null", nil}, {"array", []string{"br-provider"}}, {"object", map[string]string{"id": "br-provider"}},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			claims := directClaims("br-provider", testIngressBaseURL+"/cds-services/order-sign-crd", s.now())
+			claims["sub"] = row.subject
+			raw := signJWT(t, jwt.SigningMethodES384, key, claims)
+			principal, ok := s.verifyDirectBearerPrincipal(directBearerReq(raw))
+			if row.name == "matching string" {
+				if !ok || principal.ClientID != "br-provider" {
+					t.Fatalf("valid baseline refused: %+v %v", principal, ok)
+				}
+				return
+			}
+			if ok || principal.ClientID != "" {
+				t.Fatalf("non-string subject admitted: %+v %v", principal, ok)
+			}
+		})
+	}
+}

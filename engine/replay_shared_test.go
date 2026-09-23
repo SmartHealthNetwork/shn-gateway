@@ -44,7 +44,7 @@ func replayGateway(t *testing.T, id shnsdk.Identity, authzPub, hubPub ed25519.Pu
 		AuthzPub:        authzPub,
 		HubTransportPub: hubPub,
 		Reg:             shnsdk.NewRegistry(),
-		Validator:       shnsdk.NewFakeValidator(),
+		Validator:       syntheticFakeValidator(),
 		SoR:             sor,
 		Store:           sor,
 		Responder:       unusedResponder{},

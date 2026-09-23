@@ -30,12 +30,17 @@ type LegResult struct {
 	// On a non-2xx Status, a set Response is the participant's application
 	// error, relayed; an unset Response means the gateway (or the connector)
 	// refuses, and Message is the refusal text.
-	Response       relay.Payload
-	SideEffectFHIR [][]byte     // payer-local FHIR to persist (EOB); engine egress-$validates each before Commit
-	Status         int          // connector-signalled HTTP outcome (409/422); 0 = proceed
-	Message        string       // body for a non-zero Status
-	Commit         func() error // NON-FHIR durable state (Store writes); fired after buildResponseLeg, before writeLeg; error => 502
-	Rollback       func()       // undo a claim acquired in Handle; engine arms defer-rollback-unless-committed
+	Response relay.Payload
+	// ApplicationStatus is the actual peer HTTP status; Status remains the local
+	// refusal/legacy responder field. Conflicting nonzero fields are refused.
+	ApplicationStatus       int
+	ResponseContractVersion string
+	ResponseVersionSource   string
+	SideEffectFHIR          [][]byte     // legacy local-workflow output; native Da Vinci delivery does not consume it
+	Status                  int          // connector-signalled HTTP outcome (409/422); 0 = proceed
+	Message                 string       // body for a non-zero Status
+	Commit                  func() error // legacy local-workflow action; never invoked by native Da Vinci delivery
+	Rollback                func()       // releases acquired work; native Da Vinci delivery always defers this cleanup
 	// ResponseSubjectForeign identifies the payer's patient namespace. The full
 	// graph must remain internally subject-consistent; it is not compared with
 	// the request's SHN member id. Locally produced EOBs remain member-fenced.
@@ -53,3 +58,11 @@ func (r LegResult) ResponseRelayed() bool {
 
 // ResponseContentType is the answer's media type.
 func (r LegResult) ResponseContentType() string { return r.Response.ContentType() }
+
+func (g *Gateway) handleResponder(ctx context.Context, leg, corrID, subjectPCI string, request []byte) (LegResult, error) {
+	result, err := g.cfg.Responder.Handle(ctx, leg, corrID, subjectPCI, request)
+	if err != nil {
+		return result, err
+	}
+	return normalizeResult(result)
+}

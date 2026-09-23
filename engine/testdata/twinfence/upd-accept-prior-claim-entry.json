@@ -49,6 +49,30 @@
                   }
                 },
                 {
+                  "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-certificationType",
+                  "valueCodeableConcept": {
+                    "coding": [
+                      {
+                        "code": "I",
+                        "display": "Initial",
+                        "system": "https://codesystem.x12.org/005010/1322"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceItemRequestType",
+                  "valueCodeableConcept": {
+                    "coding": [
+                      {
+                        "code": "IN",
+                        "display": "Initial Medical Services Reservation",
+                        "system": "https://codesystem.x12.org/005010/1525"
+                      }
+                    ]
+                  }
+                },
+                {
                   "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-infoChanged",
                   "valueCode": "changed"
                 },
@@ -60,6 +84,14 @@
                   }
                 }
               ],
+              "locationCodeableConcept": {
+                "coding": [
+                  {
+                    "code": "11",
+                    "system": "https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set"
+                  }
+                ]
+              },
               "productOrService": {
                 "coding": [
                   {
@@ -78,7 +110,8 @@
           "priority": {
             "coding": [
               {
-                "code": "normal"
+                "code": "normal",
+                "system": "http://terminology.hl7.org/CodeSystem/processpriority"
               }
             ]
           },
@@ -93,6 +126,14 @@
                   "value": "twinfence-sub-0001"
                 },
                 "reference": "https://shn.example/fhir/Claim/convergence-claim"
+              },
+              "relationship": {
+                "coding": [
+                  {
+                    "code": "prior",
+                    "system": "http://terminology.hl7.org/CodeSystem/ex-relatedclaimrelationship"
+                  }
+                ]
               }
             }
           ],
@@ -357,13 +398,84 @@
           "insurer": {
             "reference": "https://shn.example/fhir/Organization/org-cms-payer"
           },
+          "item": [
+            {
+              "category": {
+                "coding": [
+                  {
+                    "code": "1",
+                    "display": "Medical Care",
+                    "system": "https://codesystem.x12.org/005010/1365"
+                  }
+                ]
+              },
+              "extension": [
+                {
+                  "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService",
+                  "valueReference": {
+                    "reference": "https://shn.example/fhir/ServiceRequest/convergence-sr"
+                  }
+                },
+                {
+                  "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-certificationType",
+                  "valueCodeableConcept": {
+                    "coding": [
+                      {
+                        "code": "I",
+                        "display": "Initial",
+                        "system": "https://codesystem.x12.org/005010/1322"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceItemRequestType",
+                  "valueCodeableConcept": {
+                    "coding": [
+                      {
+                        "code": "IN",
+                        "display": "Initial Medical Services Reservation",
+                        "system": "https://codesystem.x12.org/005010/1525"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-itemTraceNumber",
+                  "valueIdentifier": {
+                    "system": "urn:shn:pas:item-trace",
+                    "value": "twinfence-sub-0001.1"
+                  }
+                }
+              ],
+              "locationCodeableConcept": {
+                "coding": [
+                  {
+                    "code": "11",
+                    "system": "https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set"
+                  }
+                ]
+              },
+              "productOrService": {
+                "coding": [
+                  {
+                    "code": "72148",
+                    "display": "MRI lumbar spine w/o contrast",
+                    "system": "http://www.ama-assn.org/go/cpt"
+                  }
+                ]
+              },
+              "sequence": 1
+            }
+          ],
           "patient": {
             "reference": "https://shn.example/fhir/Patient/MBR-COVERED"
           },
           "priority": {
             "coding": [
               {
-                "code": "normal"
+                "code": "normal",
+                "system": "http://terminology.hl7.org/CodeSystem/processpriority"
               }
             ]
           },

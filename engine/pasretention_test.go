@@ -8,6 +8,7 @@ import (
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -25,11 +26,10 @@ func TestNativePASRetainsApprovedBundle(t *testing.T) {
 	}
 }
 
-// TestNativePAS_UnclosedPayerGraphRefusedNoCommit: an answer naming records it
-// does not carry is refused (502) and writes nothing. The refusal is the
-// reference-closure rule's, applied to the payer's own bytes — this gateway
-// neither repairs the graph nor records a claim it could not read.
-func TestNativePAS_UnclosedPayerGraphRefusedNoCommit(t *testing.T) {
+// PCV-07: native relay preserves the payer's answer even if its graph is
+// unclosed; a separate strict gateway can refuse it under the graph rule.
+// Neither path implicitly commits a clinical ledger entry.
+func TestNativePAS_UnclosedPayerGraphRelayedNoCommit(t *testing.T) {
 	var b map[string]any
 	if err := json.Unmarshal([]byte(assemblyRealPending), &b); err != nil {
 		t.Fatal(err)
@@ -47,14 +47,14 @@ func TestNativePAS_UnclosedPayerGraphRefusedNoCommit(t *testing.T) {
 	srv := stubPartnerSrv(t, 200, unclosed)
 	n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", newCensusSoR(), fixedClock)
 	result, err := n.Handle(context.Background(), "pas-claim", "corr-unclosed", "PCI-1", originatorBuiltConformantBundle(t, "MBR-COVERED"))
-	if err != nil {
-		t.Fatalf("an unreadable payer answer is a refusal, not an error: %v", err)
+	if err != nil || result.Status != 0 {
+		t.Fatalf("native relay = %d, %v", result.Status, err)
 	}
-	if result.Status != http.StatusBadGateway {
-		t.Fatalf("status = %d, want 502", result.Status)
+	if !bytes.Equal(responseBytes(result), unclosed) || !result.ResponseRelayed() {
+		t.Fatal("native relay changed the payer's unclosed answer")
 	}
 	if result.Commit != nil {
-		t.Fatal("a refused answer must write nothing")
+		t.Fatal("native relay installed an implicit clinical commit")
 	}
 }
 
@@ -97,6 +97,7 @@ func TestPASForeignGraphSubjectFence(t *testing.T) {
 
 type pasAssemblyValidator struct {
 	profile string
+	calls   int
 	valid   bool
 	err     error
 }
@@ -184,59 +185,65 @@ func (r pasResultResponder) Handle(context.Context, string, string, string, []by
 	return r.result, r.err
 }
 
-// TestPASResultCertification: this gateway certifies what it PRODUCED and stands
-// down for what it RELAYED. A relayed payer answer never reaches the validator —
-// the case that used to fail an entire exchange because a payer's own extension
-// made SHN's validator refuse SHN's copy of the payer's decision.
+// Strict certifies both authored and relayed content on an independently declared line.
 func TestPASResultCertification(t *testing.T) {
 	raw := pasBundleWithResponse(t, []byte(assemblyRealPending), []byte(assemblyRealTerminal))
-	for _, mode := range []string{"relayed", "produced", "produced invalid", "produced unavailable", "missing lane"} {
-		t.Run(mode, func(t *testing.T) {
-			validator := &pasAssemblyValidator{valid: true}
-			g := &Gateway{cfg: Config{HolderID: "payer", Clock: fixedClock, ValidatorsByLine: map[string]shnsdk.Validator{"2.0": validator}}}
-			result := LegResult{Response: testResponse(raw), ResponseSubjectForeign: true}
-			switch mode {
-			case "relayed":
-				result.Response = relayedResponse(raw)
-			case "produced invalid":
-				validator.valid = false
-			case "produced unavailable":
-				validator.err = fmt.Errorf("unavailable")
-			case "missing lane":
-				g.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"2.1": validator}
-			}
-			status, _ := g.validatePASResult(context.Background(), result, "pa.pas@2.0", "pas-claim")
-			switch mode {
-			case "relayed":
-				if status != 0 {
-					t.Fatalf("a relayed payer answer must not be certified by this gateway (status=%d)", status)
+	for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve, EnforcementBasic, EnforcementStrict} {
+		for _, mode := range []string{"relayed declared", "relayed undeclared", "produced", "invalid", "unavailable", "missing lane"} {
+			t.Run(level.String()+"/"+mode, func(t *testing.T) {
+				v := &pasAssemblyValidator{valid: true}
+				g := &Gateway{cfg: Config{HolderID: "payer", Clock: fixedClock, ValidatorsByLine: map[string]shnsdk.Validator{"2.0": v}, ConformanceEnforcement: level}}
+				result := LegResult{Response: testResponse(raw), ResponseSubjectForeign: true}
+				if strings.HasPrefix(mode, "relayed") {
+					result.Response = relayedResponse(raw)
 				}
-				if validator.profile != "" {
-					t.Fatal("the validator was handed a payer's own bytes")
+				if mode == "relayed declared" {
+					result.ResponseContractVersion = "pa.pas@2.0"
 				}
-			case "produced":
-				if status != 0 {
-					t.Fatalf("a valid produced answer was refused (status=%d)", status)
+				if mode == "invalid" {
+					v.valid = false
 				}
-			default:
-				if status == 0 {
-					t.Fatal("accepted an uncertified produced answer")
+				if mode == "unavailable" {
+					v.err = fmt.Errorf("unavailable")
 				}
-			}
-		})
+				if mode == "missing lane" {
+					g.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"2.1": v}
+				}
+				status, msg := g.validatePASResult(context.Background(), result, "pa.pas@2.0", "pas-claim")
+				want := 0
+				if level == EnforcementStrict {
+					switch mode {
+					case "relayed undeclared", "unavailable", "missing lane":
+						want = 503
+					case "invalid":
+						want = 422
+					}
+				}
+				if status != want {
+					t.Fatalf("got %d %q want %d", status, msg, want)
+				}
+				if level != EnforcementStrict || mode == "relayed undeclared" || mode == "missing lane" {
+					if v.calls != 0 {
+						t.Fatal("unexpected validation")
+					}
+				} else if v.calls == 0 {
+					t.Fatal("strict skipped supported content")
+				}
+			})
+		}
 	}
 }
 
-// TestPASInboundCommitOrdering pins the ordering both PAS inbound handlers keep:
-// the response leg is sealed BEFORE any payer state is committed, and every
-// pre-commit exit rolls back. It drives an answer the gateway PRODUCED (a test
-// payload), because that is the arm where certification can still refuse.
-func TestPASInboundCommitOrdering(t *testing.T) {
+// PCV-07/08: a native PAS exchange retains the application's exact reply and
+// does not invoke legacy clinical commit hooks. Failures in an optional checker
+// or an irrelevant local store cannot turn that reply into a refusal.
+func TestPASInboundNativeRelayNoImplicitCommit(t *testing.T) {
 	assembled := pasBundleWithResponse(t, []byte(assemblyRealPending), []byte(assemblyRealTerminal))
 	for _, leg := range []string{"pas-claim", "pas-claim-update"} {
 		for _, mode := range []string{"valid", "validator reject", "validator unavailable", "cancelled", "seal failure", "store failure", "responder error", "bare operation"} {
 			t.Run(leg+"/"+mode, func(t *testing.T) {
 				g, requester := newInboundTestGateway(t, true)
+				g.cfg.ConformanceEnforcement = EnforcementNone
 				pci, _, _ := g.cfg.SoR.ResolvePatient("MBR-COVERED")
 				request := conformantPASBundleWithQR(t, "MBR-COVERED")
 				if leg == "pas-claim-update" {
@@ -265,20 +272,11 @@ func TestPASInboundCommitOrdering(t *testing.T) {
 				}
 				g.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"2.0": validator}
 				g.cfg.Observer = func(e ObserverEvent) {
-					// A conformance finding is not a leg note. validateGoverned
-					// emits it AT the invalid verdict — necessarily before any
-					// Commit, since the refusal is what stops the commit — and
-					// that record is the whole point of the governed check.
-					// Counting it separately keeps the ordering rule below about
-					// leg notes, and findings is asserted on its own after.
 					if e.Kind == ConformanceObservedEvent {
 						findings++
 						return
 					}
 					observed++
-					if commits != 1 {
-						t.Error("a leg note was observed before Commit")
-					}
 				}
 				env := shnsdk.Envelope{Metadata: shnsdk.Metadata{Sender: requester.ID, Recipient: "payer", TransactionType: leg, AuthorityFrame: "payer-coverage", CorrelationID: "corr-assembly-inbound"}}
 				if mode == "seal failure" {
@@ -298,45 +296,20 @@ func TestPASInboundCommitOrdering(t *testing.T) {
 				} else {
 					g.handlePASUpdateNativeInbound(rec, r, env, tok, request, "pa.pas@2.0")
 				}
-				if mode == "valid" {
-					if rec.Code != 200 || commits != 1 || rollbacks != 0 {
-						t.Fatalf("status=%d commits=%d releases=%d body=%s", rec.Code, commits, rollbacks, rec.Body.String())
-					}
-					payload := openResponseLeg(t, requester, rec.Body.Bytes())
-					hdr, body, err := shnsdk.DecodeHTTPFrame(payload)
-					if err != nil || hdr.Headers[shnsdk.FrameHeaderContractVersion] != "pa.pas@2.0" || !bytes.Equal(body, assembled) {
-						t.Fatal("the produced response or its certified stamp changed")
-					}
+				wantStatus := http.StatusOK
+				if mode == "seal failure" || mode == "responder error" {
+					wantStatus = http.StatusInternalServerError
+				}
+				if rec.Code != wantStatus || commits != 0 || rollbacks != 1 || findings != 0 || observed != 0 || validator.calls != 0 {
+					t.Fatalf("status=%d commits=%d rollbacks=%d findings=%d notes=%d checks=%d", rec.Code, commits, rollbacks, findings, observed, validator.calls)
+				}
+				if wantStatus != http.StatusOK {
 					return
 				}
-				wantCommits := 0
-				if mode == "store failure" {
-					wantCommits = 1
-				}
-				// A refusal about the produced answer is the payer's own verdict and
-				// travels framed (200 to the Hub, the refusal inside); machinery — a
-				// seal failure, a store failure, a responder fault — stays a raw non-2xx.
-				status := rec.Code
-				if rec.Code == 200 {
-					hdr, _, err := shnsdk.DecodeHTTPFrame(openResponseLeg(t, requester, rec.Body.Bytes()))
-					if err != nil {
-						t.Fatalf("decode the framed refusal: %v (body %s)", err, rec.Body.String())
-					}
-					status = hdr.Status
-				}
-				if status/100 == 2 || commits != wantCommits || rollbacks != 1 || observed != 0 {
-					t.Fatalf("status=%d commits=%d releases=%d events=%d", status, commits, rollbacks, observed)
-				}
-				// Only an invalid VERDICT is a conformance finding: an outage
-				// ("validator unavailable") is identical at every enforcement
-				// level and records nothing, and every other refusal here never
-				// reaches a check at all.
-				wantFindings := 0
-				if mode == "validator reject" {
-					wantFindings = 1
-				}
-				if findings != wantFindings {
-					t.Fatalf("conformance findings = %d, want %d — the refusal must leave exactly its own record", findings, wantFindings)
+				payload := openResponseLeg(t, requester, rec.Body.Bytes())
+				hdr, body, err := shnsdk.DecodeHTTPFrame(payload)
+				if err != nil || hdr.Status != http.StatusOK || hdr.Headers[shnsdk.FrameHeaderContractVersion] != "pa.pas@2.0" || !bytes.Equal(body, responseBytes(result)) {
+					t.Fatalf("native reply changed: header=%+v body=%s err=%v", hdr, body, err)
 				}
 			})
 		}

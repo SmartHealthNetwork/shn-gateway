@@ -153,38 +153,7 @@ func (g *Gateway) conformantCRDDispatchBindContext(ctx context.Context, reqJSON 
 	return firstOrder, covJSON, 0, ""
 }
 
-// handleCRDDispatchInbound serves the conformant crd-order-dispatch leg. Mirrors handleCRDNativeInbound:
-// subject-bind, ingress-validate the resolved DeviceRequest + coverage (validateFHIR respects A4's R-8
-// skip on br-payer-targeting lanes), then forward the verbatim request to the responder.
+// handleCRDDispatchInbound delegates verified dispatch delivery to the shared native boundary.
 func (g *Gateway) handleCRDDispatchInbound(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token, reqJSON []byte, answerTok string) {
-	ctx := r.Context()
-	orderJSON, _, status, msg := g.conformantCRDDispatchBindContext(ctx, reqJSON, tok.Subject)
-	if status != 0 {
-		g.refuseInbound(w, r, legCRDOrderDispatch, env, tok, answerTok, status, msg, nil)
-		return
-	}
-	// Ingress-$validate the resolved DeviceRequest (SHN-shaped order; US Core warns-passes an
-	// unprofiled type). We deliberately do NOT $validate the COVERAGE here: for order-dispatch the
-	// coverage rides as a PREFETCH BUNDLE whose entry fullUrls are the relative "Type/id" form
-	// br-payer's findInBundle resolves by — but a US-Core $validate rejects a relative fullUrl
-	// ("must be an absolute URL"). That bundle is a relayed prefetch container carrying the payer's
-	// OWN Org (R-8: SHN doesn't $validate relayed foreign bytes), and the AI-11 bind already
-	// subject-fenced the coverage beneficiary. (The bare-Coverage order-select path still validates
-	// its coverage — that one is not a bundle.)
-	if status, msg := g.validateFHIR(ctx, orderJSON, "ingress", ""); status != 0 {
-		g.refuseInbound(w, r, legCRDOrderDispatch, env, tok, answerTok, status, msg, nil)
-		return
-	}
-	result, err := g.cfg.Responder.Handle(ctx, "crd-order-dispatch", env.Metadata.CorrelationID, tok.Subject, reqJSON)
-	if err != nil {
-		g.responderFailed(w, "crd-order-dispatch", err)
-		return
-	}
-	if result.Status != 0 {
-		g.respondLegError(w, r, "payer-coverage", "crd-dispatch-cards", "crd-order-dispatch",
-			env.Metadata.CorrelationID, result, tok.Subject, env.Metadata.Sender, "", answerTok)
-		return
-	}
-	g.observeCRDEmbedded(ctx, "crd-order-dispatch", env.Metadata.CorrelationID, result.Response)
-	g.respondLeg(w, r, "payer-coverage", "crd-dispatch-cards", "crd-order-dispatch", env.Metadata.CorrelationID, result.Response, tok.Subject, env.Metadata.Sender, "", answerTok)
+	g.handleNativeInbound(w, r, "crd-order-dispatch", env, tok, reqJSON, answerTok)
 }

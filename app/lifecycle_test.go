@@ -27,6 +27,7 @@ func lifecycleEnv(t *testing.T, failBuild bool) (map[string]string, <-chan struc
 	t.Helper()
 	env := buildEnvWithBundle(t, "provider", "provider")
 	env["SHN_DISCOVERY_URL"] = "http://fixture.test/discovery"
+	env["CONFORMANCE_ENFORCEMENT"] = "strict"
 	env["FHIR_VALIDATE_URL"] = "http://fixture.test/fhir"
 	env["FHIR_VALIDATE_URL_2_2"] = "http://fixture.test/v22"
 	env["FHIR_DATA_URL"] = "http://fixture.test/fhir"

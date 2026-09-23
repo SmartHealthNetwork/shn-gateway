@@ -623,3 +623,20 @@ func TestPayorEdge_RepeatedDTRCoverages(t *testing.T) {
 		}
 	})
 }
+
+func TestPayorEdgePreparationOpaqueWithoutMapping(t *testing.T) {
+	body := []byte(`{bad`)
+	n := NewNativeResponder(nil, "", "order-sign", nil, nil)
+	p, lr, err := n.payorEdgeRequest(peerBody(body), payorEdgeCRDRequest, "application/json; charset=utf-8")
+	if err != nil || lr.Status != 0 || !bytes.Equal(relay.BytesForTest(p), body) || p.ContentType() != "application/json; charset=utf-8" {
+		t.Fatalf("unconfigured mapping: %v %+v %v", p, lr, err)
+	}
+}
+
+func TestPayorEdgePreparationMalformedIsAdaptationFailure(t *testing.T) {
+	n := NewNativeResponder(nil, "", "order-sign", nil, nil, WithPayorEdgeIdentity(ownIdentity, backendIdentity))
+	p, lr, err := n.payorEdgeRequest(peerBody([]byte(`{bad`)), payorEdgeCRDRequest, "application/json")
+	if err != nil || p.Ownership() != 0 || lr.Status != http.StatusServiceUnavailable || lr.Message != "adaptation_unavailable" {
+		t.Fatalf("configured mapping: %v %+v %v", p, lr, err)
+	}
+}

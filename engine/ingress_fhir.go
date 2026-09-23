@@ -16,6 +16,9 @@ func (w *fhirOperationWriter) Unwrap() http.ResponseWriter { return w.ResponseWr
 // locally generated JSON answer: an {"error": …} refusal becomes an
 // OperationOutcome; anything else is unchanged.
 func fhirOperationValue(status int, value any) any {
+	if ce, ok := value.(*conformanceError); ok && status >= 400 {
+		return ce.operationOutcome()
+	}
 	if failure, ok := value.(map[string]string); ok && status >= 400 {
 		if message, exists := failure["error"]; exists {
 			code := "processing"
@@ -30,6 +33,8 @@ func fhirOperationValue(status int, value any) any {
 				code = "not-supported"
 			case http.StatusServiceUnavailable:
 				code = "transient"
+			case http.StatusGatewayTimeout:
+				code = "timeout"
 			}
 			return map[string]any{"resourceType": "OperationOutcome", "issue": []map[string]string{{"severity": "error", "code": code, "diagnostics": message}}}
 		}

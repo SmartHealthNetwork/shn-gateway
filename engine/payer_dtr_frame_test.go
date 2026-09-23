@@ -78,12 +78,16 @@ type dtrPayer struct {
 }
 
 func newDTRPayer(t *testing.T, opts ...NativeOption) dtrPayer {
+	return newDTRPayerAt(t, EnforcementNone, opts...)
+}
+
+func newDTRPayerAt(t *testing.T, level ConformanceEnforcement, opts ...NativeOption) dtrPayer {
 	t.Helper()
-	g, requester := newInboundTestGateway(t, true)
+	g, requester := newInboundTestGatewayWithPolicy(t, true, level)
 	p := newStubPartner(t)
-	p.respByPath[packagePath] = []byte(`{"resourceType":"Bundle","type":"collection","entry":[]}`)
+	p.respByPath[packagePath] = []byte(`{"resourceType":"Bundle","type":"collection","entry":[{"fullUrl":"http://example.org/Questionnaire/q","resource":{"resourceType":"Questionnaire","status":"active","url":"http://example.org/Questionnaire/q"}}]}`)
 	p.respByPath[nextPath] = nextQuestionAnswer(t, "Patient/"+dtrFrameMember, rawItems(t, adaptiveTree(t, "1")))
-	g.cfg.Responder = NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", nil, nil, opts...)
+	g.cfg.Responder = declaredDTRFixtureResponder{NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", nil, nil, opts...)}
 	pci, _, ok := g.cfg.SoR.(*censusSoR).ResolvePatient(dtrFrameMember)
 	if !ok {
 		t.Fatalf("%s is not in the test system of record", dtrFrameMember)
@@ -119,7 +123,11 @@ func (d dtrPayer) sendFor(t *testing.T, operation string, body []byte, subject s
 		t.Fatal(err)
 	}
 	rec := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/", nil).WithContext(withRequestFrameOperation(withAnswerLine(context.Background(), "pa.dtr@2.0"), operation))
+	ctx := withRequestFrameOperation(withAnswerLine(context.Background(), "pa.dtr@2.0"), operation)
+	// This direct-handler fixture supplies the declaration and verified exchange
+	// context normally installed by the mounted envelope/frame boundary.
+	ctx = context.WithValue(ctx, nativeExchangeKey{}, ExchangeContext{holder: d.requester.ID, recipient: "payer", legType: "dtr-questionnaire-fetch", operation: operation, subjectPCI: subject, correlationID: "corr-dtr-op", contractVersion: "pa.dtr@2.0", policy: d.g.policy()})
+	r := httptest.NewRequest(http.MethodPost, "/", nil).WithContext(ctx)
 	d.g.handleDTRInbound(rec, r, env, shnsdk.Token{Operation: "dtr-questionnaire-fetch", Subject: subject, CorrelationID: "corr-dtr-op"},
 		body, "pa.dtr@2.0")
 	if rec.Code != http.StatusOK {
@@ -136,7 +144,7 @@ func (d dtrPayer) sendFor(t *testing.T, operation string, body []byte, subject s
 func (d dtrPayer) requireRefused(t *testing.T, got dtrAnswer, status int, msg string) {
 	t.Helper()
 	if got.status != status || !strings.Contains(string(got.body), msg) {
-		t.Fatalf("answer = %d %s, want %d naming %q", got.status, got.body, status, msg)
+		t.Fatalf("answer = %d %s, payer path = %q, want %d naming %q", got.status, got.body, d.partner.lastPath, status, msg)
 	}
 	if d.partner.lastPath != "" {
 		t.Fatalf("a refused request reached the payer's system at %s: %s", d.partner.lastPath, d.partner.lastBody)
@@ -252,11 +260,11 @@ func TestPayerDTR_LegacyEnvelopeRefused400(t *testing.T) {
 	})
 }
 
-// TestPayerDTR_PackageSubjectBound: every patient a questionnaire request
-// names must be the authorized subject. Each rejection row changes one thing
-// in a request the control answers.
+// TestPayerDTR_PackageSubjectBound exercises supported strict comparisons
+// against the declared subject. Unresolvable identity is unavailable, while
+// nonbinding extras remain the participant's assertion (PCV-04/06).
 func TestPayerDTR_PackageSubjectBound(t *testing.T) {
-	d := newDTRPayer(t)
+	d := newDTRPayerAt(t, EnforcementStrict)
 	pkg := func(params ...string) []byte {
 		return dtrParams(append(params, questionnaireParam)...)
 	}
@@ -277,37 +285,54 @@ func TestPayerDTR_PackageSubjectBound(t *testing.T) {
 		status  int
 		message string
 	}{
-		{"second coverage for another patient", pkg(own, resourceParam("coverage", dtrCoverage("cov-2", dtrOtherMember))), http.StatusForbidden, "more than one patient"},
-		{"order for another patient", pkg(own, resourceParam("order", dtrOrder(dtrOtherMember))), http.StatusForbidden, "more than one patient"},
-		{"order names another patient as patient", pkg(own, resourceParam("order", `{"resourceType":"DeviceRequest","status":"draft","intent":"order","subject":{"reference":"Patient/`+dtrFrameMember+`"},"patient":{"reference":"Patient/`+dtrOtherMember+`"}}`)), http.StatusForbidden, "more than one patient"},
-		{"Patient resource for another patient", pkg(own, resourceParam("referenced", `{"resourceType":"Patient","id":"`+dtrOtherMember+`"}`)), http.StatusForbidden, "more than one patient"},
-		{"referenced resource about another patient", pkg(own, resourceParam("referenced", `{"resourceType":"Observation","status":"final","subject":{"reference":"https://ehr.example/fhir/Patient/`+dtrOtherMember+`"}}`)), http.StatusForbidden, "more than one patient"},
-		{"coverage for a patient other than the authorized one", pkg(resourceParam("coverage", dtrCoverage("cov-2", dtrOtherMember))), http.StatusForbidden, "token subject does not match request patient"},
-		{"unknown member", pkg(resourceParam("coverage", dtrCoverage("cov-2", "MBR-NOBODY"))), http.StatusBadRequest, "unknown member"},
-		{"no coverage", pkg(ownOrder), http.StatusBadRequest, "has no coverage"},
-		{"coverage without a beneficiary", pkg(resourceParam("coverage", `{"resourceType":"Coverage","status":"active"}`)), http.StatusBadRequest, "not a Patient reference"},
-		{"coverage parameter that is not a Coverage", pkg(resourceParam("coverage", `{"resourceType":"Patient","id":"`+dtrFrameMember+`"}`)), http.StatusBadRequest, "not a Coverage"},
-		{"order subject that is not a Patient", pkg(own, resourceParam("order", `{"resourceType":"ServiceRequest","status":"draft","intent":"order","subject":{"reference":"Group/g1"}}`)), http.StatusBadRequest, "not a Patient reference"},
-		{"Patient resource with no id", pkg(own, resourceParam("referenced", `{"resourceType":"Patient","name":[{"family":"Other"}],"birthDate":"1970-01-01"}`)), http.StatusBadRequest, "Patient resource with no id"},
-		{"not Parameters", []byte(`{"resourceType":"Bundle"}`), http.StatusBadRequest, "parse questionnaire-package parameters failed"},
-		{"duplicate beneficiary member", pkg(resourceParam("coverage", strings.Replace(dtrCoverage("cov-1", dtrFrameMember), `"beneficiary":`, `"beneficiary":{"reference":"Patient/`+dtrOtherMember+`"},"beneficiary":`, 1))), http.StatusBadRequest, "parse questionnaire-package parameters failed"},
+		{"second coverage for another patient", pkg(own, resourceParam("coverage", dtrCoverage("cov-2", dtrOtherMember))), http.StatusUnprocessableEntity, `"rule","valueString":"patient.consistency"`},
+		{"order for another patient", pkg(own, resourceParam("order", dtrOrder(dtrOtherMember))), http.StatusUnprocessableEntity, `"rule","valueString":"patient.consistency"`},
+		{"order names another patient as patient", pkg(own, resourceParam("order", `{"resourceType":"DeviceRequest","status":"draft","intent":"order","subject":{"reference":"Patient/`+dtrFrameMember+`"},"patient":{"reference":"Patient/`+dtrOtherMember+`"}}`)), http.StatusOK, ""},
+		{"Patient resource for another patient", pkg(own, resourceParam("referenced", `{"resourceType":"Patient","id":"`+dtrOtherMember+`"}`)), http.StatusOK, ""},
+		{"referenced resource about another patient", pkg(own, resourceParam("referenced", `{"resourceType":"Observation","status":"final","subject":{"reference":"https://ehr.example/fhir/Patient/`+dtrOtherMember+`"}}`)), http.StatusServiceUnavailable, `"rule","valueString":"patient.consistency"`},
+		{"coverage for a patient other than the authorized one", pkg(resourceParam("coverage", dtrCoverage("cov-2", dtrOtherMember))), http.StatusUnprocessableEntity, `"rule","valueString":"patient.consistency"`},
+		{"unknown member", pkg(resourceParam("coverage", dtrCoverage("cov-2", "MBR-NOBODY"))), http.StatusServiceUnavailable, `"rule","valueString":"patient.consistency"`},
+		{"no coverage", pkg(ownOrder), http.StatusOK, ""},
+		{"coverage without a beneficiary", pkg(resourceParam("coverage", `{"resourceType":"Coverage","status":"active"}`)), http.StatusServiceUnavailable, `"rule","valueString":"patient.consistency"`},
+		{"coverage parameter that is not a Coverage", pkg(resourceParam("coverage", `{"resourceType":"Patient","id":"`+dtrFrameMember+`"}`)), http.StatusServiceUnavailable, `"rule","valueString":"patient.consistency"`},
+		{"order subject that is not a Patient", pkg(own, resourceParam("order", `{"resourceType":"ServiceRequest","status":"draft","intent":"order","subject":{"reference":"Group/g1"}}`)), http.StatusOK, ""},
+		{"Patient resource with no id", pkg(own, resourceParam("referenced", `{"resourceType":"Patient","name":[{"family":"Other"}],"birthDate":"1970-01-01"}`)), http.StatusOK, ""},
+		{"not Parameters", []byte(`{"resourceType":"Bundle"}`), http.StatusUnprocessableEntity, `"rule","valueString":"dtr.package.request"`},
+		{"duplicate beneficiary member", pkg(resourceParam("coverage", strings.Replace(dtrCoverage("cov-1", dtrFrameMember), `"beneficiary":`, `"beneficiary":{"reference":"Patient/`+dtrOtherMember+`"},"beneficiary":`, 1))), http.StatusUnprocessableEntity, `"rule","valueString":"json.duplicate_key"`},
 	}
 	for _, tc := range framed {
 		t.Run("framed/"+tc.name, func(t *testing.T) {
-			d.requireRefused(t, d.send(t, package_, tc.body), tc.status, tc.message)
+			got := d.send(t, package_, tc.body)
+			if tc.status != http.StatusOK {
+				d.requireRefused(t, got, tc.status, tc.message)
+				return
+			}
+			if got.status != http.StatusOK || !bytes.Equal(d.partner.lastBody, tc.body) || !bytes.Equal(got.body, d.partner.respByPath[packagePath]) {
+				t.Fatalf("nonbinding request changed or lost: status=%d payer=%s answer=%s", got.status, d.partner.lastBody, got.body)
+			}
 		})
 	}
 
 	t.Run("framed next-question", func(t *testing.T) {
+		d.g.cfg.ConformanceEnforcement = EnforcementNone
+		defer func() { d.g.cfg.ConformanceEnforcement = EnforcementStrict }()
 		next := shnsdk.FrameOperationNextQuestion
-		d.requireRefused(t, d.send(t, next, []byte(nextQuestionQR(dtrOtherMember))), http.StatusForbidden, "token subject does not match request patient")
+		foreign := []byte(nextQuestionQR(dtrOtherMember))
+		if got := d.send(t, next, foreign); got.status != http.StatusOK || !bytes.Equal(d.partner.lastBody, foreign) {
+			t.Fatalf("none altered participant next-question: %d %s", got.status, got.body)
+		}
 		two := dtrParams(resourceParam("questionnaire-response", nextQuestionQR(dtrFrameMember)), resourceParam("questionnaire-response", nextQuestionQR(dtrOtherMember)))
-		d.requireRefused(t, d.send(t, next, two), http.StatusBadRequest, "parse next-question input failed")
-		d.requireRefused(t, d.send(t, next, pkg(own)), http.StatusBadRequest, "parse next-question input failed")
-		d.requireRefused(t, d.send(t, next, []byte(`{"resourceType":"QuestionnaireResponse","status":"in-progress","subject":{"reference":"Group/g1"}}`)), http.StatusBadRequest, "carries no patient subject")
+		for _, body := range [][]byte{two, pkg(own), []byte(`{"resourceType":"QuestionnaireResponse","status":"in-progress","subject":{"reference":"Group/g1"}}`)} {
+			got := d.send(t, next, body)
+			if got.status != http.StatusOK || !bytes.Equal(d.partner.lastBody, body) {
+				t.Fatalf("none altered unsupported participant input: %d %s", got.status, got.body)
+			}
+		}
 	})
 
 	t.Run("framed next-question with an absolute patient reference", func(t *testing.T) {
+		d.g.cfg.ConformanceEnforcement = EnforcementNone
+		defer func() { d.g.cfg.ConformanceEnforcement = EnforcementStrict }()
 		qr := `{"resourceType":"QuestionnaireResponse","status":"in-progress","subject":{"reference":"https://ehr.example/fhir/Patient/` + dtrFrameMember + `"}}`
 		d.partner.respByPath[nextPath] = nextQuestionAnswer(t, "https://ehr.example/fhir/Patient/"+dtrFrameMember, rawItems(t, adaptiveTree(t, "1")))
 		defer func() {
@@ -316,8 +341,26 @@ func TestPayerDTR_PackageSubjectBound(t *testing.T) {
 		if got := d.send(t, next0, []byte(qr)); got.status != http.StatusOK {
 			t.Fatalf("answer = %d %s, want 200", got.status, got.body)
 		}
-		other := strings.Replace(qr, dtrFrameMember, dtrOtherMember, 1)
-		d.requireRefused(t, d.send(t, next0, []byte(other)), http.StatusForbidden, "token subject does not match request patient")
+		other := []byte(strings.Replace(qr, dtrFrameMember, dtrOtherMember, 1))
+		if got := d.send(t, next0, other); got.status != http.StatusOK || !bytes.Equal(d.partner.lastBody, other) {
+			t.Fatalf("none altered absolute patient reference: %d %s", got.status, got.body)
+		}
+	})
+	t.Run("strict next-question published output", func(t *testing.T) {
+		old := d.partner.respByPath[nextPath]
+		d.partner.respByPath[nextPath] = bytes.Replace(old, []byte(`"name":"questionnaire-response"`), []byte(`"name":"return"`), 1)
+		defer func() { d.partner.respByPath[nextPath] = old }()
+		got := d.send(t, next0, []byte(nextQuestionQR(dtrFrameMember)))
+		if got.status != http.StatusOK || !bytes.Equal(got.body, d.partner.respByPath[nextPath]) {
+			t.Fatalf("strict published output = %d %s", got.status, got.body)
+		}
+	})
+	t.Run("strict next-question absent checker remains unavailable", func(t *testing.T) {
+		old := d.g.cfg.Validator
+		d.g.cfg.Validator = nil
+		defer func() { d.g.cfg.Validator = old }()
+		got := d.send(t, next0, []byte(nextQuestionQR(dtrFrameMember)))
+		d.requireRefused(t, got, http.StatusServiceUnavailable, `"rule","valueString":"fhir.profile"`)
 	})
 
 }
@@ -423,20 +466,22 @@ func TestInboundFrameOperation(t *testing.T) {
 		payload   []byte
 		wantOp    string
 		status    int
+		message   string
 	}{
-		{"framed operation", "dtr-questionnaire-fetch", frame(withOp, `{}`), shnsdk.FrameOperationNextQuestion, 0},
-		{"unknown operation is passed to the leg", "dtr-questionnaire-fetch", frame(map[string]string{shnsdk.FrameHeaderOperation: "other"}, `{}`), "other", 0},
-		{"frame without the header", "dtr-questionnaire-fetch", frame(map[string]string{shnsdk.FrameHeaderContractVersion: "pa.dtr@2.0"}, `{}`), "", 0},
-		{"bare request", "dtr-questionnaire-fetch", []byte(`{"canonical":"q"}`), "", 0},
-		{"operation on another leg", "pas-claim", frame(map[string]string{shnsdk.FrameHeaderContractVersion: "pa.pas@2.0", shnsdk.FrameHeaderOperation: shnsdk.FrameOperationQuestionnairePackage}, `{}`), "", http.StatusBadRequest},
+		{"package operation", "dtr-questionnaire-fetch", frame(map[string]string{shnsdk.FrameHeaderContractVersion: "pa.dtr@2.0", shnsdk.FrameHeaderOperation: shnsdk.FrameOperationQuestionnairePackage}, `{}`), shnsdk.FrameOperationQuestionnairePackage, 0, ""},
+		{"framed operation", "dtr-questionnaire-fetch", frame(withOp, `{}`), shnsdk.FrameOperationNextQuestion, 0, ""},
+		{"unknown operation is rejected at the frame boundary", "dtr-questionnaire-fetch", frame(map[string]string{shnsdk.FrameHeaderOperation: "other"}, `{}`), "", http.StatusBadRequest, "unsupported DTR operation"},
+		{"frame without the header", "dtr-questionnaire-fetch", frame(map[string]string{shnsdk.FrameHeaderContractVersion: "pa.dtr@2.0"}, `{}`), "", 0, ""},
+		{"bare request", "dtr-questionnaire-fetch", []byte(`{"canonical":"q"}`), "", 0, ""},
+		{"operation on another leg", "pas-claim", frame(map[string]string{shnsdk.FrameHeaderContractVersion: "pa.pas@2.0", shnsdk.FrameHeaderOperation: shnsdk.FrameOperationQuestionnairePackage}, `{}`), "", http.StatusBadRequest, "operation header is not defined for this transaction type"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			op, status, msg := inboundFrameOperation(tc.leg, tc.payload)
 			if op != tc.wantOp || status != tc.status {
 				t.Fatalf("got (%q, %d, %q), want (%q, %d)", op, status, msg, tc.wantOp, tc.status)
 			}
-			if status != 0 && !strings.Contains(msg, "operation header is not defined") {
-				t.Fatalf("refusal %q does not name the header", msg)
+			if msg != tc.message {
+				t.Fatalf("diagnostic = %q, want %q", msg, tc.message)
 			}
 		})
 	}
@@ -466,4 +511,13 @@ func TestPayerDTR_AnswerWithoutMediaType(t *testing.T) {
 	if res.ResponseContentType() != "application/fhir+json" || !bytes.Equal(responseBytes(res), answer) {
 		t.Fatalf("answer %q %s, want the payer's bytes as application/fhir+json", res.ResponseContentType(), responseBytes(res))
 	}
+}
+
+// This synthetic endpoint fixture declares its independent output line.
+type declaredDTRFixtureResponder struct{ LegResponder }
+
+func (r declaredDTRFixtureResponder) Handle(ctx context.Context, leg, corr, pci string, b []byte) (LegResult, error) {
+	out, err := r.LegResponder.Handle(ctx, leg, corr, pci, b)
+	out.ResponseContractVersion = "pa.dtr@2.0"
+	return out, err
 }

@@ -5,10 +5,9 @@ import (
 	"testing"
 )
 
-// The whole table, both levels. At strict every invalid verdict refuses. At
-// none only SHN's own bridged edit and the three structural CDS Hooks rules
-// do — those three because the reader that follows the certifier needs the
-// shape (§2).
+// The compatibility table keeps the existing certifier behavior explicit
+// while callers migrate to classed rules. Adaptation and unreadable-answer
+// failures remain mandatory; legacy optional checks enforce only at strict.
 func TestConformancePolicyTable(t *testing.T) {
 	for _, tc := range []struct {
 		kind  CheckKind
@@ -38,9 +37,9 @@ func TestConformancePolicyTable(t *testing.T) {
 	}
 }
 
-// A valid verdict decides nothing at either level.
+// A valid verdict decides nothing at any level.
 func TestConformancePolicyValidVerdictRecords(t *testing.T) {
-	for _, level := range []ConformanceEnforcement{EnforcementStrict, EnforcementNone} {
+	for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve, EnforcementBasic, EnforcementStrict} {
 		for _, kind := range []CheckKind{KindFHIRIngress, KindFHIREgress, KindFHIRBridged, KindCDSEnvelope} {
 			if got := NewConformancePolicy(level).Decide(kind, "", VerdictValid); got != Record {
 				t.Errorf("a valid verdict must never refuse (%s at %s): %v", kind, level, got)
@@ -49,31 +48,26 @@ func TestConformancePolicyValidVerdictRecords(t *testing.T) {
 	}
 }
 
-// The zero value is strict: no in-process engine.Config construction can
-// become permissive by omission (§3).
-func TestConformanceEnforcementZeroValueIsStrict(t *testing.T) {
+// The zero value is none so direct engine construction and app configuration
+// have the same participant default.
+func TestConformanceEnforcementZeroValueIsNone(t *testing.T) {
 	var level ConformanceEnforcement
-	if level != EnforcementStrict || level.String() != "strict" {
-		t.Fatalf("the zero value must be strict, got %v (%q)", level, level.String())
+	if level != EnforcementNone || level.String() != "none" {
+		t.Fatalf("the zero value must be none, got %v (%q)", level, level.String())
 	}
-	var p ConformancePolicy
-	if p.Decide(KindFHIRIngress, "", VerdictInvalid) != Refuse {
-		t.Fatal("a zero-value policy must refuse: an unset policy is strict, never permissive")
+	p := NewConformancePolicy(EnforcementNone)
+	if p.Decide(KindFHIRIngress, "", VerdictInvalid) != Record {
+		t.Fatal("a none policy must not refuse a legacy optional conformance check")
 	}
 }
 
-// TestConformanceEnforcementZeroValueIsStrictDirect asserts the zero value on
-// the type itself: a bare, never-assigned ConformanceEnforcement must equal
-// EnforcementStrict. This is the property that stops any in-process
-// engine.Config construction anywhere in the tree from going permissive by
-// omitting the field, and it must be checked directly against a genuine zero
-// value — not only through a function whose return path always carries a
-// named symbol (see TestDecisionZeroValueIsRefuse for why that distinction
-// matters).
-func TestConformanceEnforcementZeroValueIsStrictDirect(t *testing.T) {
+// TestConformanceEnforcementZeroValueIsNoneDirect asserts the enum's real zero
+// rather than only a constructor result, so reordering the constants cannot
+// silently make direct Config construction disagree with the app default.
+func TestConformanceEnforcementZeroValueIsNoneDirect(t *testing.T) {
 	var e ConformanceEnforcement
-	if e != EnforcementStrict {
-		t.Fatalf("the zero value of ConformanceEnforcement must be EnforcementStrict, got %v", e)
+	if e != EnforcementNone {
+		t.Fatalf("the zero value of ConformanceEnforcement must be EnforcementNone, got %v", e)
 	}
 }
 
@@ -96,17 +90,21 @@ func TestDecisionZeroValueIsRefuse(t *testing.T) {
 }
 
 func TestParseConformanceEnforcement(t *testing.T) {
-	for in, want := range map[string]ConformanceEnforcement{"none": EnforcementNone, "strict": EnforcementStrict} {
+	for in, want := range map[string]ConformanceEnforcement{
+		"none": EnforcementNone, "observe": EnforcementObserve,
+		"basic": EnforcementBasic, "strict": EnforcementStrict,
+	} {
 		got, err := ParseConformanceEnforcement(in)
 		if err != nil || got != want {
 			t.Errorf("ParseConformanceEnforcement(%q) = %v, %v", in, got, err)
 		}
 	}
-	for _, bad := range []string{"middle", "lenient", "NONE", "true", " none"} {
+	for _, bad := range []string{"", " ", "middle", "lenient", "NONE", "Observe", "BASIC", "true", " none", "strict "} {
 		if _, err := ParseConformanceEnforcement(bad); err == nil {
 			t.Errorf("ParseConformanceEnforcement(%q) must be a boot error", bad)
-		} else if !strings.Contains(err.Error(), "none") || !strings.Contains(err.Error(), "strict") {
-			t.Errorf("the boot error must name both accepted values, got %v", err)
+		} else if !strings.Contains(err.Error(), "none") || !strings.Contains(err.Error(), "observe") ||
+			!strings.Contains(err.Error(), "basic") || !strings.Contains(err.Error(), "strict") {
+			t.Errorf("the boot error must name all accepted values, got %v", err)
 		}
 	}
 }

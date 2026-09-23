@@ -158,20 +158,19 @@ func TestNativeForwardVersionFilter(t *testing.T) {
 	}))
 	defer partner.Close()
 
-	// Declared 2.2-only: the CRD leg (pa.crd, own 2.0) refuses without forwarding.
+	// Declared 2.2-only backend refuses an independently declared 2.0 request.
 	n := NewNativeResponder(partner.Client(), partner.URL, "svc", nil, nil,
 		WithDeclaredContractVersions([]string{"pa.crd@2.2", "pa.crd@2.2"})) // duplicate on purpose
-	res, err := n.Handle(context.Background(), "crd-order-select", "corr", "pci", cdsRequest("order-select"))
+	ctx := context.WithValue(context.Background(), nativeExchangeKey{}, ExchangeContext{contractVersion: "pa.crd@2.0"})
+	res, err := n.Handle(ctx, "crd-order-select", "corr", "pci", cdsRequest("order-select"))
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	if res.Status != http.StatusUnprocessableEntity {
 		t.Fatalf("Status = %d, want 422", res.Status)
 	}
-	for _, must := range []string{"pa.crd", "pa.crd@2.0", "pa.crd@2.2"} {
-		if !strings.Contains(res.Message, must) {
-			t.Fatalf("message %q missing %q", res.Message, must)
-		}
+	if res.Message != "backend does not declare this operation and representation" {
+		t.Fatal(res.Message)
 	}
 	if hits != 0 {
 		t.Fatal("refused leg must not touch the partner endpoint")
@@ -228,13 +227,13 @@ func TestNativeForwardStaysArm1(t *testing.T) {
 	p := newStubPartner(t)
 	p.respByPath["/cds-services/svc"] = []byte(`{"cards":[]}`)
 
-	// No shared declared line (own defaults to pa.crd@2.0; peer declares
-	// pa.crd@2.2 only) — 2.2 IS this build's native set, an arm-2/3-worthy
-	// peer. Handle must refuse, never native-reach or chain.
+	// Actual request representation differs from the backend declaration.
+	// Handle must refuse, never relabel the carried bytes or run a chain.
 	nRefuse := NewNativeResponder(p.srv.Client(), p.srv.URL, "svc", nil, nil,
 		WithDeclaredContractVersions([]string{"pa.crd@2.2"}))
 	req := []byte(`{"hook":"order-select"}`)
-	res, err := nRefuse.Handle(context.Background(), "crd-order-select", "corr-refuse", "pci", req)
+	ctx := context.WithValue(context.Background(), nativeExchangeKey{}, ExchangeContext{contractVersion: "pa.crd@2.0"})
+	res, err := nRefuse.Handle(ctx, "crd-order-select", "corr-refuse", "pci", req)
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -304,7 +303,7 @@ func dtrPkgCtx(ctx context.Context) context.Context {
 }
 
 // TestNativeForwardSelectsLineEndpoint: the
-// per-line endpoint resolution before n.post. Evidence present AND
+// per-line endpoint resolution within n.post. Evidence present AND
 // token-matched to the routed line -> the #<line> endpoint is used; evidence
 // absent, or present for a DIFFERENT token, both fall back to the configured
 // base+path UNCHANGED (the fence — never a partial/wrong-token match).
@@ -471,7 +470,7 @@ func TestEndpointEvidenceSameOriginDefaultPortNormalized(t *testing.T) {
 }
 
 // TestEndpointEvidenceRaceClean: SetEndpointEvidence (writer, wholesale
-// replace under Lock) racing against Handle's resolvedURL reads (RLock) must
+// replace under Lock) racing against Handle's endpointForDispatch snapshot (RLock) must
 // be -race clean.
 func TestEndpointEvidenceRaceClean(t *testing.T) {
 	p := newStubPartner(t)

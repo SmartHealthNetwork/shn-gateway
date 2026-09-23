@@ -1,12 +1,7 @@
-// ingress_dtr.go — the DTR $questionnaire-package ingress: the EHR's own
-// operation input (its Parameters) is carried to the payer exactly, or with
-// the registered edits that add, from this participant's system of record,
-// the patient's Coverage when the request carries none and — under the seam
-// that carries members a gateway does not hold — the patient's own record
-// when the request carries no Patient. The ingress
-// binds every resource the request carries to one patient, routes by every
-// coverage, and names the operation in the request frame. It does not invoke
-// the Populator: the EHR's own DTR application populates.
+// ingress_dtr.go contains the legacy DTR preparation helper and operation
+// framing guard. Authenticated native DTR ingress carries the participant's
+// Parameters without implicit source enrichment (PCV-08/10). A participant
+// constructing its own Parameters can use the explicit SDK builder.
 package engine
 
 import (
@@ -43,7 +38,7 @@ const dtrPackageContentType = "application/fhir+json"
 // the provider.
 type dtrIngressRequest struct {
 	// request is the EHR's Parameters, exact or with the patient's Coverage
-	// (relay.EditDTRCoverageObtain) and, under Config.AcceptUnknownMembers, the
+	// (relay.EditDTRCoverageObtain) and, for explicit source assembly, the
 	// provider's own Patient record (relay.EditDTRPatientObtain) appended.
 	request relay.Payload
 	// member is the patient every resource names; pci is the network's
@@ -67,8 +62,8 @@ type dtrPackageParam struct {
 	hasRes   bool
 }
 
-// prepareDTRPackageRequest reads the EHR's $questionnaire-package Parameters
-// without re-encoding them and prepares them for the network:
+// prepareDTRPackageRequest is the legacy, currently uncalled source-assembly
+// helper. It reads the EHR's Parameters without re-encoding them:
 //
 //   - the patient is the one every coverage beneficiary and order subject
 //     names; a request naming none is refused (422), one naming several is
@@ -87,6 +82,13 @@ type dtrPackageParam struct {
 // Nothing else changes: the EHR's parameters keep their order, repeats,
 // values (a canonical's |version included), meta and unknown members.
 func (g *Gateway) prepareDTRPackageRequest(ctx context.Context, raw []byte) (dtrIngressRequest, int, string) {
+	return g.assembleDTRPackageRequest(ctx, raw, false)
+}
+
+// assembleDTRPackageRequest retains authenticated source assembly separately
+// from native admission. includePatient explicitly requests the real source
+// Patient; AcceptUnknownMembers never requests an insertion.
+func (g *Gateway) assembleDTRPackageRequest(ctx context.Context, raw []byte, includePatient bool) (dtrIngressRequest, int, string) {
 	var out dtrIngressRequest
 	parseFailed := func() (dtrIngressRequest, int, string) {
 		return out, http.StatusBadRequest, "parse questionnaire-package parameters failed"
@@ -221,7 +223,7 @@ func (g *Gateway) prepareDTRPackageRequest(ctx context.Context, raw []byte) (dtr
 		changes = append(changes, relay.Change{Edit: relay.EditDTRCoverageObtain, Ops: []relay.Op{doc.AppendElement(paramArr, element("coverage", coverage))}})
 		out.coverages = [][]byte{coverage}
 	}
-	if g.cfg.AcceptUnknownMembers && !carriesPatient(raw, out.member) {
+	if includePatient && !carriesPatient(raw, out.member) {
 		patient, status, msg := g.obtainDTRPatient(ctx, out.member, fence)
 		if status != 0 {
 			return out, status, msg
@@ -246,7 +248,7 @@ func (g *Gateway) prepareDTRPackageRequest(ctx context.Context, raw []byte) (dtr
 }
 
 // obtainDTRPatient reads the Patient a request carrying none is sent with
-// under Config.AcceptUnknownMembers: the system of record's own record for
+// by explicit source assembly: the system of record's own record for
 // the bound patient, by the reference the system names it by, recorded as a
 // PrefetchObtainedEvent (key patient, operation questionnaire-package). The
 // payer's side, which may not hold the member, derives the subject from

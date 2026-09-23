@@ -3,23 +3,21 @@ package engine
 import (
 	"bytes"
 	"context"
-	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
-// The DTR ingress rows drive an EHR's $questionnaire-package request through
-// the provider gateway and the network: the payer's side receives the EHR's
-// own Parameters, byte for byte, except for the one registered edit that adds
-// the patient's Coverage when the EHR sent none.
+// Native DTR ingress carries the producer's Parameters without enrichment.
+// Explicit participant construction is exercised through the SDK builder.
 
 // packageAnswer is the payer's package, in its own layout.
 var packageAnswer = []byte("{ \"resourceType\" : \"Parameters\", \"parameter\" : [ { \"name\" : \"PackageBundle\", \"resource\" : { \"resourceType\" : \"Bundle\", \"type\" : \"collection\", \"entry\" : [ { \"resource\" : { \"resourceType\" : \"Questionnaire\", \"url\" : \"http://x/q\", \"text\" : { \"div\" : \"a " + lt + " b\" } } } ] } } ] }")
@@ -96,17 +94,8 @@ func declareFramedDTR(t *testing.T, env *inProcessExchange, capable bool) {
 	env.originator.cfg.Reg.Set(env.payerID, entry)
 }
 
-// dtrIngressRow posts body to the provider's DTR ingress, the payer
-// declaring framed operations, and answering with packageAnswer.
-func dtrIngressRow(t *testing.T, s *prefetchSoR, body []byte) (*inProcessExchange, *httptest.ResponseRecorder) {
-	t.Helper()
-	env := newInProcessExchange(t)
-	env.originator.cfg.SoR = s.sor()
-	declareFramedDTR(t, env, true)
-	env.payerReturns(LegResult{Response: testResponse(packageAnswer)})
-	return env, postDTRIngress(env, body)
-}
-
+// postDTRIngress remains the raw-ingress fixture used by legacy patient
+// assembly unit rows. Signed native tests below use signedFixtureIngress.
 func postDTRIngress(env *inProcessExchange, body []byte) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodPost, "/Questionnaire/$questionnaire-package", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/fhir+json")
@@ -148,278 +137,268 @@ func TestDTRIngress_ParametersRelayedExactly(t *testing.T) {
 		{"context and a coverage only", ehrParams(ehrCoverageParam(prefetchMember, "00001"), `{"name":"context","valueString":"ctx-1"}`)},
 		{"the same parameter repeated", ehrParams(ehrCoverageParam(prefetchMember, "00001"), dtrQuestionnaire, dtrQuestionnaire, `{"name":"context","valueString":"a"}`, `{"name":"context","valueString":"a"}`)},
 	} {
-		t.Run(row.name, func(t *testing.T) {
-			s := newPrefetchSoR()
-			env, rec := dtrIngressRow(t, s, row.body)
-			if rec.Code != http.StatusOK {
-				t.Fatalf("answer %d %s", rec.Code, rec.Body.String())
-			}
-			op, sent := sentOperation(t, env)
-			if op != shnsdk.FrameOperationQuestionnairePackage {
-				t.Fatalf("operation header %q", op)
-			}
-			if !bytes.Equal(sent, row.body) {
-				t.Fatalf("the payer's side received other bytes:\n got %s\nwant %s", sent, row.body)
-			}
-			if searched, _ := s.calls(); len(searched) != 0 {
-				t.Fatalf("a request carrying coverage searched the system of record: %v", searched)
-			}
-			if !bytes.Equal(rec.Body.Bytes(), packageAnswer) {
-				t.Fatalf("the EHR received %s", rec.Body.Bytes())
-			}
-			if leg, outcome := lastOutcome(t, env.originator); leg != "dtr-questionnaire-fetch" || outcome != "ok" {
-				t.Fatalf("recorded %s %s", leg, outcome)
-			}
-		})
+		for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve} {
+			t.Run(row.name+"/"+level.String(), func(t *testing.T) {
+				s := newPrefetchSoR()
+				env := newTransportExchange(t)
+				env.originator.cfg.ConformanceEnforcement = level
+				env.originator.cfg.SoR = s.sor()
+				env.payerReturns(LegResult{Response: testResponse(packageAnswer)})
+				req := signedFixtureIngress(t, env.originator, "/Questionnaire/$questionnaire-package", "dtr-questionnaire-fetch", shnsdk.FrameOperationQuestionnairePackage, "", "pci-example", "", "dtr-exact", row.body)
+				rec := httptest.NewRecorder()
+				env.originator.Handler().ServeHTTP(rec, req)
+				if rec.Code != http.StatusOK {
+					t.Fatalf("answer %d %s", rec.Code, rec.Body.String())
+				}
+				op, sent := sentOperation(t, env)
+				if op != shnsdk.FrameOperationQuestionnairePackage {
+					t.Fatalf("operation header %q", op)
+				}
+				if !bytes.Equal(sent, row.body) {
+					t.Fatalf("the payer's side received other bytes:\n got %s\nwant %s", sent, row.body)
+				}
+				if searched, read := s.calls(); len(searched) != 0 || len(read) != 0 || env.routeHitCount() != 1 {
+					t.Fatalf("native request consulted source or changed dispatch count: searched=%v read=%v hits=%d", searched, read, env.routeHitCount())
+				}
+				if !bytes.Equal(rec.Body.Bytes(), packageAnswer) {
+					t.Fatalf("the EHR received %s", rec.Body.Bytes())
+				}
+				if leg, outcome := lastOutcome(t, env.originator); leg != "dtr-questionnaire-fetch" || outcome != "ok" {
+					t.Fatalf("recorded %s %s", leg, outcome)
+				}
+			})
+		}
 	}
 }
 
-func TestDTRIngress_CoverageObtainedOnlyWhenAbsent(t *testing.T) {
-	noCoverage := ehrParams(ehrOrderParam("sr1", prefetchMember), dtrQuestionnaire, `{"name":"context","valueString":"ctx-1"}`)
-	sorCov := sorCoverage("cov-1", shnsdk.CMSPayerIdentity.Value)
-
-	t.Run("a request with coverage is sent as it is", func(t *testing.T) {
-		body := ehrParams(ehrOrderParam("sr1", prefetchMember), ehrCoverageParam(prefetchMember, "00001"))
-		s := newPrefetchSoR()
-		p, status, msg := prefetchGateway(s).prepareDTRPackageRequest(context.Background(), body)
-		if status != 0 || p.request.Ownership() != relay.OwnershipRelayed || !bytes.Equal(relay.BytesForTest(p.request), body) {
-			t.Fatalf("%d %s: ownership %v", status, msg, p.request.Ownership())
+func TestDTRIngress_SuppliedSubjectPolicy(t *testing.T) {
+	const answer = `{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"business-rule","diagnostics":"payer inquiry refusal"}]}`
+	for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve, EnforcementBasic, EnforcementStrict} {
+		for _, mutation := range []string{"", "second coverage", "second order"} {
+			mutated := mutation != ""
+			t.Run(fmt.Sprintf("%s/%s", level, mutation), func(t *testing.T) {
+				env := newTransportExchangeWithPolicy(t, level)
+				var calls atomic.Int32
+				env.originator.cfg.Validator = observationValidator(func(context.Context, []byte, string) (shnsdk.ValidationEvidence, error) {
+					calls.Add(1)
+					return *syntheticEvidence(), nil
+				})
+				sor := newPrefetchSoR()
+				subject, _, ok, err := sor.ResolvePatientContext(context.Background(), prefetchMember)
+				if err != nil || !ok {
+					t.Fatal("seeded subject missing")
+				}
+				env.originator.cfg.SubjectReferenceResolver = subjectResolverFunc(func(ctx context.Context, ref PatientReference) (string, bool, error) {
+					if ref.Holder != "provider" || ref.System != "fhir-relative" {
+						return "", false, nil
+					}
+					switch ref.Value {
+					case "Patient/" + prefetchMember:
+						return subject, true, nil
+					case "Patient/other":
+						return "pci-other", true, nil
+					}
+					return "", false, nil
+				})
+				valid := []string{ehrCoverageParam(prefetchMember, "00001"), ehrOrderParam("sr1", prefetchMember), dtrQuestionnaire}
+				switch mutation {
+				case "second coverage":
+					valid = append(valid, strings.ReplaceAll(ehrCoverageParam(prefetchMember, "00001"), "Patient/"+prefetchMember, "Patient/other"))
+				case "second order":
+					valid = append(valid, strings.ReplaceAll(ehrOrderParam("sr2", prefetchMember), "Patient/"+prefetchMember, "Patient/other"))
+				}
+				body := ehrParams(valid...)
+				env.payerReturns(LegResult{Status: 409, Response: testResponse([]byte(answer))})
+				req := signedFixtureIngress(t, env.originator, "/Questionnaire/$questionnaire-package", "dtr-questionnaire-fetch", shnsdk.FrameOperationQuestionnairePackage, "", subject, "pa.dtr@2.0", "dtr-subject-policy", body)
+				rec := httptest.NewRecorder()
+				env.originator.handleDTRIngress(rec, req)
+				if mutated && level == EnforcementStrict {
+					if rec.Code != 422 || env.routeHitCount() != 0 || !strings.Contains(rec.Body.String(), `"valueString":"patient.consistency"`) || !strings.Contains(rec.Body.String(), `"valueString":"conformance_invalid"`) {
+						t.Fatalf("refusal status=%d Hub=%d body=%s", rec.Code, env.routeHitCount(), rec.Body)
+					}
+				} else {
+					if rec.Code != 409 || rec.Body.String() != answer || rec.Header().Get("Content-Type") != "application/fhir+json" || env.routeHitCount() != 1 {
+						t.Fatalf("delivery status=%d Hub=%d body=%s", rec.Code, env.routeHitCount(), rec.Body)
+					}
+					hdr, sent, err := shnsdk.DecodeHTTPFrame(env.lastRequestPayload())
+					if err != nil || !bytes.Equal(sent, body) || hdr.Headers["Content-Type"] != "application/fhir+json" {
+						t.Fatalf("request changed: %s header=%+v err=%v", sent, hdr, err)
+					}
+				}
+				observationFlush(t, env.originator)
+				findings, drops := env.originator.ConformanceObservationsForTest()
+				if drops != 0 {
+					t.Fatal(drops)
+				}
+				if level == EnforcementNone && (calls.Load() != 0 || len(findings) != 0 || env.originator.certification != nil) {
+					t.Fatalf("none calls=%d findings=%+v", calls.Load(), findings)
+				}
+				if level == EnforcementObserve || level == EnforcementBasic {
+					found := false
+					for _, f := range findings {
+						if f.Rule != "patient.consistency" || f.Direction != "request" {
+							continue
+						}
+						found = true
+						want := CheckValid
+						if mutated {
+							want = CheckInvalid
+						}
+						if f.State != want || f.Action != "not_enforced" || f.PayloadSHA256 != sha256hex(body) {
+							t.Fatalf("finding=%+v", f)
+						}
+					}
+					if !found {
+						t.Fatal("missing patient consistency finding")
+					}
+				}
+			})
 		}
-		// Nothing is obtained, so the system's id for the patient is not read.
-		if searched, read := s.calls(); len(searched) != 0 || len(read) != 0 || s.idReads != 0 {
-			t.Fatalf("the system of record was consulted: searched %v, read %v, id reads %d", searched, read, s.idReads)
-		}
-	})
-
-	t.Run("a request without coverage gains the system of record's", func(t *testing.T) {
-		s := newPrefetchSoR()
-		s.answer(t, "Coverage", page("", "", sorEntry(sorCov), includeEntry(`{"resourceType":"Organization","id":"org-1","name":"Payer"}`)))
-		obs := &observed{}
-		env := newInProcessExchange(t)
-		env.originator.cfg.SoR = s.sor()
-		env.originator.cfg.Observer = obs.observe
-		env.originator.cfg.Clock = fixedClock
-		declareFramedDTR(t, env, true)
-		env.payerReturns(LegResult{Response: testResponse(packageAnswer)})
-		rec := postDTRIngress(env, noCoverage)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("answer %d %s", rec.Code, rec.Body.String())
-		}
-		_, sent := sentOperation(t, env)
-		// The EHR's bytes up to the end of its last parameter and from the
-		// end of the array on are unchanged; between them is one new element
-		// holding the system of record's Coverage byte for byte.
-		k := bytes.LastIndex(noCoverage, []byte("\n  ]"))
-		if !bytes.HasPrefix(sent, noCoverage[:k]) || !bytes.HasSuffix(sent, noCoverage[k:]) {
-			t.Fatalf("the EHR's bytes changed:\n%s", sent)
-		}
-		added := strings.TrimSpace(string(sent[k : len(sent)-(len(noCoverage)-k)]))
-		if added != `,{"name":"coverage","resource":`+sorCov+`}` && !strings.HasPrefix(added, ",") {
-			t.Fatalf("added %q", added)
-		}
-		if strings.TrimSpace(strings.TrimPrefix(added, ",")) != `{"name":"coverage","resource":`+sorCov+`}` {
-			t.Fatalf("added element %q", added)
-		}
-		p, _, _ := prefetchGateway(s).prepareDTRPackageRequest(context.Background(), noCoverage)
-		if got := p.request.Edits(); !slices.Equal(got, []relay.EditID{relay.EditDTRCoverageObtain}) {
-			t.Fatalf("edits %v", got)
-		}
-		ev, ok := obs.prefetchOn(t, "dtr-questionnaire-fetch")["coverage"]
-		wantEv := prefetchObtained{Key: "coverage", Operation: shnsdk.FrameOperationQuestionnairePackage, Source: "system-of-record",
-			Query: "Coverage?patient=Patient%2Fexample&_include=Coverage%3Apayor", Outcome: SearchOK, Count: 1, Pages: 1, RetrievedAt: fixedClock().UTC()}
-		if !ok || ev != wantEv {
-			t.Fatalf("provenance %+v\nwant %+v", ev, wantEv)
-		}
-	})
-
-	refused := func(t *testing.T, s *prefetchSoR, body []byte, status int, msg string) {
-		t.Helper()
-		env, rec := dtrIngressRow(t, s, body)
-		refusedBeforeTheNetwork(t, env, rec, status, msg)
 	}
-	t.Run("no coverage in the system of record", func(t *testing.T) {
-		refused(t, newPrefetchSoR(), noCoverage, http.StatusUnprocessableEntity, "no coverage in request or system of record")
-	})
-	t.Run("a coverage parameter without a resource is the EHR's, and refused", func(t *testing.T) {
-		// The system of record holds a Coverage the gateway would add to a
-		// request that had no coverage parameter; beside the EHR's own
-		// coverage parameter it adds nothing, and one without a resource is
-		// refused before any search or routing.
-		for _, param := range []string{
-			`{"name":"coverage","valueReference":{"reference":"Coverage/cov-1"}}`,
-			`{"name":"coverage"}`,
-		} {
-			s := newPrefetchSoR()
-			s.answer(t, "Coverage", searchPage(sorCov))
-			body := ehrParams(ehrOrderParam("sr1", prefetchMember), param, dtrQuestionnaire)
-			refused(t, s, body, http.StatusBadRequest, "coverage parameter carries no resource")
-			if searched, _ := s.calls(); len(searched) != 0 {
-				t.Fatalf("%s: the system of record was searched: %v", param, searched)
-			}
-		}
-	})
-	t.Run("a system that cannot search", func(t *testing.T) {
-		s := newPrefetchSoR()
-		s.search = false
-		refused(t, s, noCoverage, http.StatusUnprocessableEntity, "cannot search for it")
-	})
-	t.Run("a system that is unavailable", func(t *testing.T) {
-		s := newPrefetchSoR()
-		s.searches["Coverage"] = searchAnswer{err: &SearchError{Outcome: SearchUnavailable, Reason: "down"}}
-		refused(t, s, noCoverage, http.StatusServiceUnavailable, "coverage unavailable")
-	})
-	t.Run("coverages naming two payers", func(t *testing.T) {
-		s := newPrefetchSoR()
-		s.answer(t, "Coverage", searchPage(sorCov, sorCoverage("cov-2", "00078")))
-		refused(t, s, noCoverage, http.StatusUnprocessableEntity, "ambiguous coverage")
-	})
-	t.Run("a system naming the patient differently", func(t *testing.T) {
-		s := newPrefetchSoR()
-		s.sorID = "sor-9"
-		s.answer(t, "Coverage", searchPage(sorCov))
-		refused(t, s, noCoverage, http.StatusUnprocessableEntity, dtrCoverageNamedDifferently)
-		if searched, _ := s.calls(); len(searched) != 0 {
-			t.Fatalf("searched %v", searched)
-		}
-	})
-	t.Run("a coverage about another patient", func(t *testing.T) {
-		s := newPrefetchSoR()
-		s.answer(t, "Coverage", searchPage(strings.Replace(sorCov, "Patient/"+prefetchSoRID, "Patient/other", 1)))
-		refused(t, s, noCoverage, http.StatusBadGateway, "another patient's resource")
-	})
 }
 
-// includeEntry is an entry the search included.
-func includeEntry(res string) string {
-	return "{ \"fullUrl\": \"https://sor.example/fhir/Organization/org-1\", \"resource\": " + res + ", \"search\": { \"mode\": \"include\" } }"
-}
-
-func TestDTRIngress_NoPatient422(t *testing.T) {
-	for name, body := range map[string][]byte{
-		"a canonical only":         ehrParams(dtrQuestionnaire),
-		"context only":             ehrParams(`{"name":"context","valueString":"ctx-1"}`),
-		"no parameters":            []byte(`{"resourceType":"Parameters","parameter":[]}`),
-		"no parameter member":      []byte(`{"resourceType":"Parameters"}`),
-		"a referenced Bundle only": ehrParams(`{"name":"referenced","resource":{"resourceType":"Bundle","type":"collection"}}`),
+// Each nested DTR form that the old raw-ingress guard traversed has its own
+// signed control. Patient consistency binds subject references; incidental
+// Patient records and an order with no subject are not a proven mismatch under
+// this rule. Profile validity remains the separate FHIR checker obligation.
+func TestDTRIngress_NestedSuppliedSubjectVariants(t *testing.T) {
+	for _, row := range []struct{ name, control, mutation, rule string }{
+		{"referenced Bundle", `{"name":"referenced","resource":{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"Observation","id":"o1","status":"final","code":{"text":"x"},"subject":{"reference":"Patient/example"}}}]}}`, `{"name":"referenced","resource":{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"Observation","id":"o1","status":"final","code":{"text":"x"},"subject":{"reference":"Patient/other"}}}]}}`, "patient.consistency"},
+		{"referenced Patient without binding reference", `{"name":"referenced","resource":{"resourceType":"Patient","id":"example"}}`, `{"name":"referenced","resource":{"resourceType":"Patient","id":"other"}}`, ""},
+		{"nested part", `{"name":"x","part":[{"name":"y","resource":{"resourceType":"Condition","id":"c1","subject":{"reference":"Patient/example"}}}]}`, `{"name":"x","part":[{"name":"y","resource":{"resourceType":"Condition","id":"c1","subject":{"reference":"Patient/other"}}}]}`, "patient.consistency"},
+		{"contained Patient without binding reference", `{"name":"referenced","resource":{"resourceType":"Condition","id":"c2","subject":{"reference":"Patient/example"},"contained":[{"resourceType":"Patient","id":"p","identifier":[{"system":"` + shnsdk.MemberSystem + `","value":"example"}]}]}}`, `{"name":"referenced","resource":{"resourceType":"Condition","id":"c2","subject":{"reference":"Patient/example"},"contained":[{"resourceType":"Patient","id":"p","identifier":[{"system":"` + shnsdk.MemberSystem + `","value":"other"}]}]}}`, ""},
+		{"order without subject is not a mismatched binding", ehrOrderParam("sr3", prefetchMember), `{"name":"order","resource":{"resourceType":"ServiceRequest","id":"sr3","status":"active","intent":"order"}}`, ""},
 	} {
-		t.Run(name, func(t *testing.T) {
-			env, rec := dtrIngressRow(t, newPrefetchSoR(), body)
-			refusedBeforeTheNetwork(t, env, rec, http.StatusUnprocessableEntity, "cannot bind the request to a patient")
+		t.Run(row.name, func(t *testing.T) {
+			for _, specimen := range []struct{ name, extra, rule string }{{"control", row.control, ""}, {"mutation", row.mutation, row.rule}} {
+				body := ehrParams(ehrCoverageParam(prefetchMember, "00001"), ehrOrderParam("sr1", prefetchMember), dtrQuestionnaire, specimen.extra)
+				for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve, EnforcementStrict} {
+					t.Run(specimen.name+"/"+level.String(), func(t *testing.T) {
+						env := newTransportExchangeWithPolicy(t, level)
+						env.originator.cfg.Validator = syntheticFakeValidator()
+						env.originator.cfg.SubjectReferenceResolver = subjectResolverFunc(func(_ context.Context, ref PatientReference) (string, bool, error) {
+							if ref.Holder != "provider" || (ref.System != "fhir-relative" && ref.System != shnsdk.MemberSystem) {
+								return "", false, nil
+							}
+							switch ref.Value {
+							case "Patient/example", "example":
+								return "pci-example", true, nil
+							case "Patient/other", "other":
+								return "pci-other", true, nil
+							}
+							return "", false, nil
+						})
+						env.payerReturns(LegResult{Status: 409, Response: testResponse([]byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"business-rule","diagnostics":"payer refusal"}]}`))})
+						req := signedFixtureIngress(t, env.originator, "/Questionnaire/$questionnaire-package", "dtr-questionnaire-fetch", shnsdk.FrameOperationQuestionnairePackage, "", "pci-example", "pa.dtr@2.0", "nested-dtr-"+row.name+specimen.name+level.String(), body)
+						rec := httptest.NewRecorder()
+						env.originator.handleDTRIngress(rec, req)
+						if level == EnforcementStrict && specimen.rule != "" {
+							if rec.Code != http.StatusUnprocessableEntity || env.routeHitCount() != 0 || !strings.Contains(rec.Body.String(), `"valueString":"`+specimen.rule+`"`) || !strings.Contains(rec.Body.String(), `"valueString":"conformance_invalid"`) {
+								t.Fatalf("strict status=%d Hub=%d body=%s", rec.Code, env.routeHitCount(), rec.Body)
+							}
+							return
+						}
+						_, sent := sentOperation(t, env)
+						if rec.Code != http.StatusConflict || env.routeHitCount() != 1 || !bytes.Equal(sent, body) {
+							t.Fatalf("carriage status=%d Hub=%d body=%s", rec.Code, env.routeHitCount(), rec.Body)
+						}
+					})
+				}
+			}
 		})
 	}
-	t.Run("not a Parameters", func(t *testing.T) {
-		env, rec := dtrIngressRow(t, newPrefetchSoR(), []byte(`{"canonical":"http://x/q"}`))
-		refusedBeforeTheNetwork(t, env, rec, http.StatusBadRequest, "parse questionnaire-package parameters failed")
-	})
-	t.Run("a coverage that is not a Coverage", func(t *testing.T) {
-		env, rec := dtrIngressRow(t, newPrefetchSoR(), ehrParams(`{"name":"coverage","resource":{"resourceType":"Patient","id":"example"}}`))
-		refusedBeforeTheNetwork(t, env, rec, http.StatusBadRequest, "not a Coverage")
-	})
 }
 
-func TestDTRIngress_CoveragesTwoPayers422(t *testing.T) {
-	router, err := NewConfigPayerRouter([]PayerDirectoryEntry{
-		{System: shnsdk.CMSPayerIdentity.System, Value: "00001", HolderID: "payer"},
-		{System: shnsdk.CMSPayerIdentity.System, Value: "00078", HolderID: "payer-b"},
-	})
+// PCV-08/10: absent Coverage or Patient data is not a request for the native
+// gateway to read its optional source. The authenticated participant supplies
+// route and subject independently; the backend receives its original bytes.
+func TestDTRIngress_NativeParametersWithoutEnrichment(t *testing.T) {
+	for _, row := range []struct {
+		name string
+		body []byte
+	}{
+		{"complete", ehrParams(ehrCoverageParam(prefetchMember, "00001"), ehrOrderParam("sr1", prefetchMember), dtrQuestionnaire)},
+		{"coverage absent", ehrParams(ehrOrderParam("sr1", prefetchMember), dtrQuestionnaire)},
+		{"patient absent", ehrParams(dtrQuestionnaire)},
+		{"empty", []byte(`{"resourceType":"Parameters","parameter":[]}`)},
+		{"two payers", ehrParams(ehrCoverageParam(prefetchMember, "00001"), ehrCoverageParam(prefetchMember, "00078"), dtrQuestionnaire)},
+		{"wrong subject", ehrParams(ehrCoverageParam(prefetchMember, "00001"), ehrOrderParam("sr-other", "other"), dtrQuestionnaire)},
+		{"opaque member", ehrParams(`{"name":"x","valueString":"opaque"}`, dtrQuestionnaire)},
+	} {
+		for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve} {
+			t.Run(row.name+"/"+level.String(), func(t *testing.T) {
+				s := newPrefetchSoR()
+				s.searches["Coverage"] = searchAnswer{err: &SearchError{Outcome: SearchUnavailable, Reason: "must not search"}}
+				env := newTransportExchange(t)
+				env.originator.cfg.ConformanceEnforcement = level
+				env.originator.cfg.SoR = s.sor()
+				env.payerReturns(LegResult{Response: testResponse(packageAnswer)})
+				req := signedFixtureIngress(t, env.originator, "/Questionnaire/$questionnaire-package", "dtr-questionnaire-fetch", shnsdk.FrameOperationQuestionnairePackage, "", "pci-example", "", "dtr-native-"+row.name, row.body)
+				rec := httptest.NewRecorder()
+				env.originator.handleDTRIngress(rec, req)
+				if rec.Code != http.StatusOK || env.routeHitCount() != 1 || !bytes.Equal(rec.Body.Bytes(), packageAnswer) {
+					t.Fatalf("native DTR status=%d Hub=%d body=%s", rec.Code, env.routeHitCount(), rec.Body)
+				}
+				op, sent := sentOperation(t, env)
+				if op != shnsdk.FrameOperationQuestionnairePackage || !bytes.Equal(sent, row.body) {
+					t.Fatalf("operation=%q sent=%s want=%s", op, sent, row.body)
+				}
+				if searched, read := s.calls(); len(searched) != 0 || len(read) != 0 || s.idReads != 0 {
+					t.Fatalf("native DTR read source: searched=%v read=%v idReads=%d", searched, read, s.idReads)
+				}
+			})
+		}
+	}
+}
+
+// An explicit provider-authored DTR request has different obligations. The
+// builder copies source-owned resources exactly and refuses absent Coverage or
+// a cross-patient order before a body exists to submit to native ingress.
+func TestDTRIngress_ExplicitParticipantConstruction(t *testing.T) {
+	coverage := []byte(sorCoverage("cov-1", "00001"))
+	order := []byte(sorRequest("sr1", "Patient/"+prefetchMember))
+	in := shnsdk.QuestionnairePackageInputs{Coverages: [][]byte{coverage}, Orders: [][]byte{order}, Questionnaires: []string{"http://x/q|2.1.0"}}
+	built, err := shnsdk.BuildQuestionnairePackageParameters("2.0", in)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for name, row := range map[string]struct {
-		body   []byte
-		status int
-		msg    string
-	}{
-		"two payers":          {ehrParams(ehrCoverageParam(prefetchMember, "00001"), dtrQuestionnaire, ehrCoverageParam(prefetchMember, "00078")), http.StatusUnprocessableEntity, "coverages name more than one payer"},
-		"an unknown payer":    {ehrParams(ehrCoverageParam(prefetchMember, "00001"), ehrCoverageParam(prefetchMember, "99999")), http.StatusUnprocessableEntity, "no registered payer"},
-		"a coverage no payer": {ehrParams(`{"name":"coverage","resource":{"resourceType":"Coverage","id":"c","beneficiary":{"reference":"Patient/example"}}}`), http.StatusUnprocessableEntity, "no payer identifier"},
-	} {
-		t.Run(name, func(t *testing.T) {
-			env := newInProcessExchange(t)
-			env.originator.cfg.SoR = newPrefetchSoR().sor()
-			env.originator.cfg.PayerRouter = router
-			declareFramedDTR(t, env, true)
-			refusedBeforeTheNetwork(t, env, postDTRIngress(env, row.body), row.status, row.msg)
-		})
-	}
-	t.Run("two coverages naming one payer are both carried", func(t *testing.T) {
-		body := ehrParams(ehrCoverageParam(prefetchMember, "00001"), dtrQuestionnaire, strings.Replace(ehrCoverageParam(prefetchMember, "00001"), "cov-00001", "cov-b", 1))
-		env, rec := dtrIngressRow(t, newPrefetchSoR(), body)
-		if _, sent := sentOperation(t, env); rec.Code != http.StatusOK || !bytes.Equal(sent, body) {
-			t.Fatalf("answer %d %s", rec.Code, rec.Body.String())
+	for _, span := range built.Copied {
+		var source []byte
+		switch span.Parameter {
+		case "coverage":
+			source = coverage
+		case "order":
+			source = order
+		default:
+			t.Fatalf("unexpected copied parameter %s", span.Parameter)
 		}
-	})
-}
-
-// TestDTRIngress_SubjectBindAllResources: a valid request, then the same
-// request with one resource about another patient, which is refused before
-// anything is sent.
-func TestDTRIngress_SubjectBindAllResources(t *testing.T) {
-	valid := []string{ehrCoverageParam(prefetchMember, "00001"), ehrOrderParam("sr1", prefetchMember), dtrQuestionnaire}
-	env, rec := dtrIngressRow(t, newPrefetchSoR(), ehrParams(valid...))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("the valid request: %d %s", rec.Code, rec.Body.String())
+		if got := built.Body[span.At : span.At+span.End-span.Start]; !bytes.Equal(got, source[span.Start:span.End]) {
+			t.Fatalf("%s changed: got=%s want=%s", span.Parameter, got, source[span.Start:span.End])
+		}
 	}
-	if _, sent := sentOperation(t, env); !bytes.Equal(sent, ehrParams(valid...)) {
-		t.Fatal("the valid request was not relayed exactly")
-	}
-	other := func(s string) string { return strings.ReplaceAll(s, "Patient/"+prefetchMember, "Patient/other") }
 	for _, row := range []struct {
-		name   string
-		extra  []string
-		status int
-		msg    string
+		name string
+		in   shnsdk.QuestionnairePackageInputs
+		want string
 	}{
-		{"a second coverage for another patient", []string{other(ehrCoverageParam(prefetchMember, "00001"))}, http.StatusForbidden, "inconsistent patient reference"},
-		{"a second order for another patient", []string{other(ehrOrderParam("sr2", prefetchMember))}, http.StatusForbidden, "inconsistent patient reference"},
-		{"an order naming no patient", []string{`{"name":"order","resource":{"resourceType":"ServiceRequest","id":"sr3","status":"active","intent":"order"}}`}, http.StatusForbidden, "names no patient"},
-		{"a referenced record about another patient", []string{`{"name":"referenced","resource":{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"Observation","id":"o1","status":"final","code":{"text":"x"},"subject":{"reference":"Patient/other"}}}]}}`}, http.StatusForbidden, "parameter referenced refused"},
-		{"another patient's record", []string{`{"name":"referenced","resource":{"resourceType":"Patient","id":"other"}}`}, http.StatusForbidden, "parameter referenced refused"},
-		{"a record in a part about another patient", []string{`{"name":"x","part":[{"name":"y","resource":{"resourceType":"Condition","id":"c1","subject":{"reference":"Patient/other"}}}]}`}, http.StatusForbidden, "parameter x.y refused"},
-		{"a contained record about another patient", []string{`{"name":"referenced","resource":{"resourceType":"Condition","id":"c2","subject":{"reference":"Patient/example"},"contained":[{"resourceType":"Patient","id":"p","identifier":[{"system":"` + shnsdk.MemberSystem + `","value":"other"}]}]}}`}, http.StatusForbidden, "parameter referenced refused"},
+		{"missing coverage", shnsdk.QuestionnairePackageInputs{Orders: in.Orders, Questionnaires: in.Questionnaires}, "requires at least one coverage"},
+		{"wrong-subject order", shnsdk.QuestionnairePackageInputs{Coverages: in.Coverages, Orders: [][]byte{[]byte(sorRequest("sr-other", "Patient/other"))}, Questionnaires: in.Questionnaires}, "another patient"},
+		{"coverage without beneficiary", shnsdk.QuestionnairePackageInputs{Coverages: [][]byte{[]byte(`{"resourceType":"Coverage","id":"c1"}`)}, Orders: in.Orders, Questionnaires: in.Questionnaires}, "beneficiary"},
 	} {
 		t.Run(row.name, func(t *testing.T) {
-			body := ehrParams(append(slices.Clone(valid), row.extra...)...)
-			env, rec := dtrIngressRow(t, newPrefetchSoR(), body)
-			refusedBeforeTheNetwork(t, env, rec, row.status, row.msg)
+			if _, err := shnsdk.BuildQuestionnairePackageParameters("2.0", row.in); err == nil || !strings.Contains(err.Error(), row.want) {
+				t.Fatalf("builder error=%v; want %q", err, row.want)
+			}
 		})
 	}
-	t.Run("a patient the system of record does not know", func(t *testing.T) {
-		body := ehrParams(ehrCoverageParam("MBR-UNKNOWN", "00001"), dtrQuestionnaire)
-		env, rec := dtrIngressRow(t, newPrefetchSoR(), body)
-		refusedBeforeTheNetwork(t, env, rec, http.StatusForbidden, "request patient does not resolve")
-	})
 }
 
-// TestProviderDTR_RefusedWithoutPeerCapability: a payer whose registration
-// does not declare framed DTR operations is refused before anything is sent,
-// whatever sends the operation.
 func TestProviderDTR_RefusedWithoutPeerCapability(t *testing.T) {
-	want := shnsdk.ErrFramedDTRUnsupported.Error()
-	t.Run("the ingress", func(t *testing.T) {
-		env := newInProcessExchange(t)
-		env.originator.cfg.SoR = newPrefetchSoR().sor()
-		declareFramedDTR(t, env, false)
-		rec := postDTRIngress(env, ehrParams(ehrCoverageParam(prefetchMember, "00001"), dtrQuestionnaire))
-		refusedBeforeTheNetwork(t, env, rec, http.StatusBadGateway, want)
-	})
-	t.Run("the leg itself", func(t *testing.T) {
-		env := newInProcessExchange(t)
-		declareFramedDTR(t, env, false)
-		p, err := relay.Authored(relay.BuilderSDKDTRPackage, ehrParams(ehrCoverageParam("MBR-COVERED", "00001")), dtrPackageContentType)
-		if err != nil {
-			t.Fatal(err)
-		}
-		_, err = env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "dtr-questionnaire-fetch", "pci", "corr-1", "",
-			Content{WorkstreamType: workstreamPA, Payload: p, Operation: shnsdk.FrameOperationQuestionnairePackage})
-		if !errors.Is(err, shnsdk.ErrFramedDTRUnsupported) || env.routeHitCount() != 0 {
-			t.Fatalf("err %v, route hits %d", err, env.routeHitCount())
-		}
-	})
-	t.Run("a payer missing from the registry", func(t *testing.T) {
-		env := newInProcessExchange(t)
-		if status, msg := env.originator.framedDTRRefusal("nobody"); status != http.StatusBadGateway || msg != want {
-			t.Fatalf("%d %s", status, msg)
-		}
-	})
+	env := newTransportExchange(t)
+	declareFramedDTR(t, env, false)
+	body := ehrParams(ehrCoverageParam(prefetchMember, "00001"), dtrQuestionnaire)
+	req := signedFixtureIngress(t, env.originator, "/Questionnaire/$questionnaire-package", "dtr-questionnaire-fetch", shnsdk.FrameOperationQuestionnairePackage, "", "pci-example", "", "dtr-no-capability", body)
+	rec := httptest.NewRecorder()
+	env.originator.handleDTRIngress(rec, req)
+	refusedBeforeTheNetwork(t, env, rec, http.StatusBadGateway, shnsdk.ErrFramedDTRUnsupported.Error())
 }

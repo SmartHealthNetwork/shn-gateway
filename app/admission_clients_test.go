@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/SmartHealthNetwork/shn-gateway/engine"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -88,9 +89,12 @@ func TestIndependentDefaultClientsWaitThenEachQualifyCompleteCorpus(t *testing.T
 		workers.Add(1)
 		go func(id int) {
 			defer workers.Done()
-			_, manager, e := discoverValidatorLanes(ctx, func(string) string { return "" }, []string{"pa.dtr@2.1"}, shnsdk.NewFakeValidator(), config{FHIRValidateURL22: "http://explicit.invalid/fhir"}, func(string) string { return fmt.Sprintf("%s/%d/fhir", server.URL, id) }, qualifyDefaultLane)
+			_, manager, e := discoverValidatorLanes(ctx, func(string) string { return "" }, []string{"pa.dtr@2.1"}, shnsdk.NewFakeValidator(), config{ConformanceEnforcement: engine.EnforcementStrict, FHIRValidateURL22: "http://explicit.invalid/fhir"}, func(string) string { return fmt.Sprintf("%s/%d/fhir", server.URL, id) }, qualifyDefaultLane)
 			if manager != nil {
 				defer manager.Close()
+			}
+			if e == nil {
+				manager.workers.Wait()
 			}
 			if e == nil && !manager.defaults["2.1"].Ready() {
 				e = fmt.Errorf("client %d returned before qualification", id)

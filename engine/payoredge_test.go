@@ -42,7 +42,7 @@ var crdPartnerCoverageCard = []byte(`{"cards":[],"systemActions":[{"type":"updat
 func conformantSubmitBundle(t *testing.T, payer shnsdk.PayerIdentifier, payerOrgEntry bool) []byte {
 	t.Helper()
 	sr := []byte(`{"resourceType":"ServiceRequest","id":"sr-x","status":"active","intent":"order","subject":{"reference":"Patient/MBR-1"},"code":{"coding":[{"system":"http://www.ama-assn.org/go/cpt","code":"72148","display":"MRI lumbar spine w/o contrast"}]}}`)
-	b, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{Coverage: testMemberCoverage("MBR-1"),
+	b, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{ItemFacts: syntheticPASItemFacts(), Coverage: testMemberCoverage("MBR-1"),
 		Provider:       testRequestingProvider(),
 		MemberIDSystem: shnsdk.MemberSystem,
 		SR:             sr, PatientRef: "Patient/MBR-1", CoverageRef: "Coverage/MBR-1", MemberID: "MBR-1",
@@ -158,7 +158,7 @@ func TestPayorEdgePASBundle_UnresolvedInsurerRefused(t *testing.T) {
 // both contained identifiers are mapped.
 func TestPayorEdgePASBundle_ContainedShape_Maps(t *testing.T) {
 	sr := []byte(`{"resourceType":"ServiceRequest","id":"sr-x","status":"active","intent":"order","subject":{"reference":"Patient/MBR-1"},"code":{"coding":[{"system":"http://www.ama-assn.org/go/cpt","code":"72148","display":"MRI lumbar spine w/o contrast"}]}}`)
-	bundle, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{Coverage: testMemberCoverage("MBR-1"),
+	bundle, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{ItemFacts: syntheticPASItemFacts(), Coverage: testMemberCoverage("MBR-1"),
 		Provider:       testRequestingProvider(),
 		MemberIDSystem: shnsdk.MemberSystem,
 		SR:             sr, PatientRef: "Patient/MBR-1", CoverageRef: "Coverage/MBR-1", MemberID: "MBR-1",
@@ -636,7 +636,25 @@ func conformantUpdateBundle(t *testing.T, payer shnsdk.PayerIdentifier, payerOrg
 	}
 	ref := "Patient/" + member
 	sr := []byte(`{"resourceType":"ServiceRequest","id":"sr-x","status":"active","intent":"order","subject":{"reference":"` + ref + `"},"code":{"coding":[{"system":"http://www.ama-assn.org/go/cpt","code":"72148","display":"MRI lumbar spine w/o contrast"}]}}`)
-	b, err := shnsdk.BuildConformantClaimUpdateBundle(shnsdk.ConformantClaimUpdateInputs{Coverage: testMemberCoverage(member),
+	line := "2.0"
+	var priorClaim []byte
+	if payerOrgEntry {
+		line = "2.2"
+		submitted, err := shnsdk.BuildConformantClaimBundleAtLine(line, shnsdk.ConformantClaimInputs{ItemFacts: syntheticPASItemFacts(),
+			Coverage: testMemberCoverage(member), Provider: testRequestingProvider(), Insurer: testPayerOrganization(payer),
+			MemberIDSystem: shnsdk.MemberSystem, QR: qrJSON, SR: sr, PatientRef: ref,
+			CoverageRef: "Coverage/" + member, MemberID: member, Corr: originalCorr, Created: created,
+			ContainedInsurer: true, AbsoluteRefs: true, PayerOrgEntry: true, Payer: payer,
+		})
+		if err != nil {
+			t.Fatalf("build source submit: %v", err)
+		}
+		priorClaim, err = shnsdk.SubmittedPASClaim(submitted)
+		if err != nil {
+			t.Fatalf("read source Claim: %v", err)
+		}
+	}
+	b, err := shnsdk.BuildConformantClaimUpdateBundleAtLine(line, shnsdk.ConformantClaimUpdateInputs{Coverage: testMemberCoverage(member),
 		Provider:       testRequestingProvider(),
 		MemberIDSystem: shnsdk.MemberSystem,
 		QR:             qrJSON, SR: sr, PatientRef: ref, CoverageRef: "Coverage/" + member, MemberID: member,
@@ -644,8 +662,9 @@ func conformantUpdateBundle(t *testing.T, payer shnsdk.PayerIdentifier, payerOrg
 		Corr: corr, OriginalCorr: originalCorr,
 		Created:          created,
 		ContainedInsurer: payerOrgEntry, AbsoluteRefs: payerOrgEntry, PayerOrgEntry: payerOrgEntry,
-		Insurer: testPayerOrganization(payer),
-		Payer:   payer,
+		Insurer:    testPayerOrganization(payer),
+		Payer:      payer,
+		PriorClaim: priorClaim,
 	})
 	if err != nil {
 		t.Fatalf("conformantUpdateBundle: %v", err)

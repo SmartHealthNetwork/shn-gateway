@@ -458,6 +458,6 @@ func newTestProviderGateway(t *testing.T) *Gateway {
 		},
 		SoR:       stub,
 		Store:     stub,
-		Validator: shnsdk.NewFakeValidator(),
+		Validator: syntheticFakeValidator(),
 	})
 }

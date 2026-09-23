@@ -38,12 +38,14 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/SmartHealthNetwork/shn-gateway/connectors/exchangecontext"
 	"github.com/SmartHealthNetwork/shn-gateway/connectors/pgstore"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
@@ -52,13 +54,9 @@ import (
 // bundle the exchange row submits.
 const pgMultiMember = "MBR-multi"
 
-// pgMultiPayerSystem/Value is the Coverage.payor identity the PAYER_DIRECTORY maps to a
-// payer holder that is NOT in the peer registry. Line selection does NOT refuse for it
-// (an undeclared peer takes selectContractToken's own-highest arm); the refusal is
-// roundTripInner's `recipient %q not in registry`, which fires BEFORE any authz/Hub
-// call — so the leg is recorded with outcome "error" and no network is touched. Do NOT
-// "fix" this by registering the payer: that would turn these rows into a Hub round trip.
-// The exchange record is what this file is about; the leg's outcome is not.
+// pgMultiPayerSystem/Value identify the synthetic payer in the request. The
+// authenticated exchange fixtures register that recipient, then force a bounded
+// authorization HTTP failure after admission and before Hub dispatch.
 const (
 	pgMultiPayerSystem = "urn:shn:payer"
 	pgMultiPayerValue  = "PAYER-MULTI"
@@ -176,6 +174,11 @@ func pgMultiSetup(t *testing.T) (env map[string]string, key *ecdsa.PrivateKey, d
 func pgMultiPair(t *testing.T) (a, b *httptest.Server, key *ecdsa.PrivateKey, pool *pgxpool.Pool, holderID string) {
 	t.Helper()
 	env, key, dsn, holderID := pgMultiSetup(t)
+	return pgMultiPairFromEnv(t, env, key, dsn, holderID)
+}
+
+func pgMultiPairFromEnv(t *testing.T, env map[string]string, key *ecdsa.PrivateKey, dsn, holderID string) (a, b *httptest.Server, returnedKey *ecdsa.PrivateKey, pool *pgxpool.Pool, returnedHolder string) {
+	t.Helper()
 	pool, err := pgxpool.New(context.Background(), dsn)
 	if err != nil {
 		t.Fatal(err)
@@ -204,6 +207,62 @@ func pgMultiPair(t *testing.T) (a, b *httptest.Server, key *ecdsa.PrivateKey, po
 	t.Cleanup(a.Close)
 	t.Cleanup(b.Close)
 	return a, b, key, pool, holderID
+}
+
+// pgMultiAuthenticatedPair supplies independently seeded connector authority and
+// a real registry snapshot. Only the authorization endpoint fails; admission and
+// the exchange store remain the production application path.
+func pgMultiAuthenticatedPair(t *testing.T) (a, b *httptest.Server, key *ecdsa.PrivateKey, pool *pgxpool.Pool, holderID string, authzCalls, hubCalls *atomic.Int32) {
+	t.Helper()
+	env, key, dsn, holderID := pgMultiSetup(t)
+	var registrations []map[string]any
+	raw, err := os.ReadFile(env["INGRESS_CLIENTS_FILE"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &registrations); err != nil {
+		t.Fatal(err)
+	}
+	registrations[0]["context_operations"] = []string{"pas-submit"}
+	raw, err = json.Marshal(registrations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env["INGRESS_CLIENTS_FILE"] = writeClientsFile(t, string(raw))
+	payer, err := shnsdk.GenerateIdentity("h-multi-payer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	authzCalls, hubCalls = &atomic.Int32{}, &atomic.Int32{}
+	authzCount, hubCount := authzCalls, hubCalls
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/holders":
+			_ = json.NewEncoder(w).Encode([]shnsdk.Holder{{ID: payer.HolderID, Role: "payer", BaseURL: srv.URL, EncPub: base64.StdEncoding.EncodeToString(payer.EncPub[:]), SignPub: base64.StdEncoding.EncodeToString(payer.SignPub), ContractVersions: []string{"pa.pas@2.0"}}})
+		case "/authorize":
+			authzCount.Add(1)
+			http.Error(w, "synthetic authorization unavailable", http.StatusServiceUnavailable)
+		default:
+			hubCount.Add(1)
+			http.Error(w, "unexpected Hub dispatch", http.StatusInternalServerError)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	env["REGISTRAR_URL"], env["AUTHZ_URL"], env["HUB_URL"] = srv.URL, srv.URL, srv.URL
+	a, b, key, pool, holderID = pgMultiPairFromEnv(t, env, key, dsn, holderID)
+	return
+}
+
+func pgMultiContext(t *testing.T, key *ecdsa.PrivateKey, holder, body string) string {
+	t.Helper()
+	now := time.Now()
+	claims := exchangecontext.Claims{RegisteredClaims: jwt.RegisteredClaims{Issuer: "br-provider", Subject: "br-provider", Audience: jwt.ClaimStrings{"http://ingress.test/Claim/$submit"}, ID: randHex(t, 16), IssuedAt: jwt.NewNumericDate(now), NotBefore: jwt.NewNumericDate(now), ExpiresAt: jwt.NewNumericDate(now.Add(time.Minute))}, Holder: holder, Recipient: "h-multi-payer", Leg: "pas-claim", Operation: "pas-submit", SubjectPCI: "seeded-pg-multi-pci", CorrelationID: "pg-multi-correlation", ContractVersion: "pa.pas@2.0", ContentType: "application/json"}
+	token, err := exchangecontext.Sign(claims, []byte(body), "ES384", key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return token
 }
 
 // assertion mints a private_key_jwt client assertion for br-provider with a fresh jti,
@@ -253,6 +312,12 @@ func ingressToken(t *testing.T, srv *httptest.Server, clientAssertion string) (i
 // postIngress POSTs body to path on srv with the bearer, and returns the status.
 func postIngress(t *testing.T, srv *httptest.Server, bearer, path, body string) int {
 	t.Helper()
+	status, _ := postIngressContext(t, srv, bearer, path, body, "")
+	return status
+}
+
+func postIngressContext(t *testing.T, srv *httptest.Server, bearer, path, body, token string) (int, string) {
+	t.Helper()
 	req, err := http.NewRequest(http.MethodPost, srv.URL+path, strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
@@ -261,23 +326,24 @@ func postIngress(t *testing.T, srv *httptest.Server, bearer, path, body string) 
 		req.Header.Set("Authorization", "Bearer "+bearer)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set(exchangecontext.Header, token)
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+	diagnostic, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if err != nil {
 		t.Fatal(err)
 	}
-	return resp.StatusCode
+	return resp.StatusCode, string(diagnostic)
 }
 
-// pgMultiPASBundle is the minimum conformant-shaped PAS submit that reaches the
-// ingress's exchange seam: one Claim, one order and one Coverage, all bound to the same
-// member, with an inline payor identity the PAYER_DIRECTORY resolves. It reaches the
-// exchange seam (ingress.go's Begin precedes leg selection on this route), origination
-// then fails closed at the registry lookup, and the handler records exactly one leg and
-// answers 502.
+// pgMultiPASBundle is the synthetic source's PAS body, independently declared
+// pa.pas@2.0 by its connector. At none it reaches origination without clinical
+// parsing; the owned authorization failure then records an error leg.
 func pgMultiPASBundle() string {
 	return fmt.Sprintf(`{"resourceType":"Bundle","type":"collection","entry":[
 {"resource":{"resourceType":"Claim","id":"c1","patient":{"reference":"Patient/%[1]s"}}},
@@ -291,28 +357,35 @@ func pgMultiPASBundle() string {
 // never seen the kid A signed with, so it can only accept the bearer by resolving that
 // kid out of the store.
 func TestPgMulti_TokenFromAAcceptedAtB(t *testing.T) {
-	a, b, key, _, _ := pgMultiPair(t)
+	a, b, key, _, holderID, authzCalls, hubCalls := pgMultiAuthenticatedPair(t)
 	code, bearer := ingressToken(t, a, assertion(t, key))
 	if code != http.StatusOK || bearer == "" {
 		t.Fatalf("token at A: %d %q", code, bearer)
 	}
 	// EXACT status, not "anything but 401": 502 is the far end of B's PAS ingress —
-	// auth, subject-bind, payer routing, exchange Begin and origination all ran on a
+	// auth, signed context, exchange Begin and origination all ran on a
 	// bearer B never issued. A 401/403/400 would each name a different stage failing,
 	// and "not 401" would pass for all of them.
-	if got := postIngress(t, b, bearer, "/Claim/$submit", pgMultiPASBundle()); got != http.StatusBadGateway {
+	if got, diagnostic := postIngressContext(t, b, bearer, "/Claim/$submit", pgMultiPASBundle(), pgMultiContext(t, key, holderID, pgMultiPASBundle())); got != http.StatusBadGateway {
 		t.Fatalf("PAS submit at B on A's bearer = %d, want 502 — B did not accept a bearer A issued, "+
-			"or did not run the request to origination (the signing key is not shared)", got)
+			"or did not run the request to origination; diagnostic=%q", got, diagnostic)
+	}
+	if authzCalls.Load() != 1 || hubCalls.Load() != 0 {
+		t.Fatalf("origination stage: authorization=%d Hub=%d", authzCalls.Load(), hubCalls.Load())
 	}
 	// The same route with no bearer is 401: the gate is on, so the 502 above is
 	// acceptance, not an open door.
-	if got := postIngress(t, b, "", "/Claim/$submit", pgMultiPASBundle()); got != http.StatusUnauthorized {
-		t.Fatalf("no-bearer PAS submit at B = %d, want 401", got)
+	if got, diagnostic := postIngressContext(t, b, "", "/Claim/$submit", pgMultiPASBundle(), pgMultiContext(t, key, holderID, pgMultiPASBundle())); got != http.StatusUnauthorized {
+		t.Fatalf("no-bearer PAS submit at B = %d, want 401: %q", got, diagnostic)
 	}
 	// A second route on the same bearer, pinned exactly: 400 is the CRD handler's own
-	// "missing context.patientId" — past the bearer gate, refused on content.
-	if got := postIngress(t, b, bearer, "/cds-services/shn-order-select", "{}"); got != http.StatusBadRequest {
-		t.Fatalf("CRD at B on A's bearer = %d, want 400 (past the bearer gate, refused on content)", got)
+	// missing authenticated exchange context — past the bearer gate. The error
+	// category proves the stage independently of the unchanged 400 status.
+	if got, diagnostic := postIngressContext(t, b, bearer, "/cds-services/shn-order-select", "{}", ""); got != http.StatusBadRequest || !strings.Contains(diagnostic, "context_missing") {
+		t.Fatalf("CRD at B = %d %q, want 400 context_missing", got, diagnostic)
+	}
+	if authzCalls.Load() != 1 || hubCalls.Load() != 0 {
+		t.Fatal("refused control reached origination")
 	}
 }
 
@@ -361,16 +434,19 @@ func pgMultiExchangeIDs(t *testing.T, pool *pgxpool.Pool, holderID string) []str
 // instance A is read back — with its legs — by a FRESH ExchangeStore over the same pool.
 // That fresh store shares no memory with A: it is the process-restart proof.
 func TestPgMulti_ExchangeRowsVisibleAcrossInstances(t *testing.T) {
-	a, _, key, pool, holderID := pgMultiPair(t)
+	a, _, key, pool, holderID, authzCalls, hubCalls := pgMultiAuthenticatedPair(t)
 	code, bearer := ingressToken(t, a, assertion(t, key))
 	if code != http.StatusOK || bearer == "" {
 		t.Fatalf("token at A: %d %q", code, bearer)
 	}
-	// 502: origination stops at roundTripInner's registry lookup, so the leg is recorded
-	// with outcome "error" and nothing goes on the wire. The exchange RECORD is the
+	// 502: origination reaches the owned authorization HTTP failure, so the leg
+	// has outcome "error" and nothing reaches the Hub. The exchange RECORD is the
 	// subject here, not the outcome.
-	if got := postIngress(t, a, bearer, "/Claim/$submit", pgMultiPASBundle()); got != http.StatusBadGateway {
-		t.Fatalf("PAS submit at A = %d, want 502 (origination fails closed, leg still recorded)", got)
+	if got, diagnostic := postIngressContext(t, a, bearer, "/Claim/$submit", pgMultiPASBundle(), pgMultiContext(t, key, holderID, pgMultiPASBundle())); got != http.StatusBadGateway {
+		t.Fatalf("PAS submit at A = %d, want 502; diagnostic=%q", got, diagnostic)
+	}
+	if authzCalls.Load() != 1 || hubCalls.Load() != 0 {
+		t.Fatalf("origination stage: authorization=%d Hub=%d", authzCalls.Load(), hubCalls.Load())
 	}
 
 	ctx := context.Background()
@@ -392,6 +468,9 @@ func TestPgMulti_ExchangeRowsVisibleAcrossInstances(t *testing.T) {
 	}
 	if len(ex.Legs) != 1 {
 		t.Fatalf("legs read by the fresh instance = %d, want 1", len(ex.Legs))
+	}
+	if ex.Legs[0].Outcome != "error" {
+		t.Fatalf("persisted outcome = %q, want error", ex.Legs[0].Outcome)
 	}
 	if ex.Legs[0].Type != "pas-claim" {
 		t.Fatalf("leg type = %q, want pas-claim", ex.Legs[0].Type)

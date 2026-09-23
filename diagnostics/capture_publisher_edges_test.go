@@ -113,8 +113,8 @@ func TestPublisherExpiresBeforeHeartbeatAndReleasesAutonomously(t *testing.T) {
 	}
 	cancel()
 	<-done
-	if !q.TryEmit(Event{Kind: "released"}) {
-		t.Fatal("expired item retained reservation")
+	if h := q.Health(time.Now()); h.Pending != 0 || !h.Closed || q.retainedBytes != 0 {
+		t.Fatalf("expired item retained reservation: %+v bytes=%d", h, q.retainedBytes)
 	}
 	for _, at := range heartbeatTimes {
 		if !at.Before(time.Unix(0, 0).Add(30 * time.Second)) {

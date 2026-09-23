@@ -12,13 +12,10 @@ import "github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 // the edge (FR-36/FR-G29) and binds its subject for authority, but never reads its
 // clinical semantics. WorkstreamType identifies the owning module (read live by
 // OriginateLeg's selection-seam guard). ProfileID carries the routed/pinned
-// contract-version token. The origination sites now
-// SELECT it BEFORE building, so the builder that produced Payload and the token in
-// this field name the same line by construction; a resume leg still pins it verbatim
-// as the pended-line pin. It now has THREE readers: the response-frame stamp
-// verification in roundTripInner, the REQUEST frame roundTripInner emits toward a
-// requestFrames-declaring recipient, and the per-line $validate lane the origination
-// sites pick — validation is LINE-AWARE now, no longer meta.profile-driven alone.
+// contract-version token used for routing, building and validation. DeclaredVersion
+// independently records what a producer explicitly declares about carried bytes.
+// Request framing temporarily retains its legacy ProfileID fallback;
+// that routing fallback does not populate DeclaredVersion or VersionSource.
 // Payload holds the FHIR/payload bytes that reach the wire. Route is the observer-
 // facing routing story: the select-before-build sites set it from
 // routeInfoFor(route) alongside ProfileID; it rides through roundTrip's
@@ -28,6 +25,12 @@ import "github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 type Content struct {
 	WorkstreamType string
 	ProfileID      string
+	// DeclaredVersion is supplied by the producer, independently of routing.
+	DeclaredVersion string
+	VersionSource   string
+	// CRDHook is declared CRD addressing, carried inside a sealed request frame
+	// only to a recipient advertising v1crd. It is never an HTTP header.
+	CRDHook string
 	// Payload is the request. It is checked against the leg's ownership row
 	// before it is sent: a request this gateway's own workflow builds is
 	// relay.Authored by a registered builder; a request carried from the

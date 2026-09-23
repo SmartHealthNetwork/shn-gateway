@@ -13,7 +13,9 @@ package engine
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -104,6 +106,7 @@ func newDispatchFixtureWith(t *testing.T, member string, demo Demo, orderJSON []
 		clock:          clock,
 		pci:            pci,
 		canonical:      canonical,
+		patientRef:     "Patient/" + member,
 	}
 
 	reg := shnsdk.NewRegistry()
@@ -120,12 +123,18 @@ func newDispatchFixtureWith(t *testing.T, member string, demo Demo, orderJSON []
 			EncPub:   provEncPub,
 			EncPriv:  provEncPriv,
 		},
-		AuthzURL:           "http://stub.test",
-		AuthzPub:           authzPub,
-		HubTransportPub:    authzPub,
-		HubURL:             "http://stub.test",
-		Reg:                reg,
-		Validator:          shnsdk.NewFakeValidator(),
+		AuthzURL:        "http://stub.test",
+		AuthzPub:        authzPub,
+		HubTransportPub: authzPub,
+		HubURL:          "http://stub.test",
+		Reg:             reg,
+		Validator:       syntheticFakeValidator(),
+		SubjectReferenceResolver: subjectResolverFunc(func(_ context.Context, ref PatientReference) (string, bool, error) {
+			if (ref.Holder == "payer" || ref.Holder == "provider") && ref.System == "fhir-relative" && ref.Value == "Patient/"+member {
+				return pci, true, nil
+			}
+			return "", false, nil
+		}),
 		SoR:                sor,
 		Store:              base,
 		Clock:              clock,
@@ -370,6 +379,8 @@ func TestDispatch_DTRPackageRequestFollowsSelectedLine(t *testing.T) {
 				dtr = shnsdk.ContractPADTR22
 			}
 			var events []ObserverEvent
+			var wireToken string
+			payerPub, payerPriv := genKeyPair(t)
 			fix := newDispatchFixtureWith(t, "MBR-OX", demo, orderJSON, performerRef, supplierJSON, func(cfg *Config) {
 				cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
 				cfg.OriginationProfile = ""
@@ -384,6 +395,33 @@ func TestDispatch_DTRPackageRequestFollowsSelectedLine(t *testing.T) {
 					t.Fatal("fixture registry has no payer entry")
 				}
 				entry.ContractVersions = []string{shnsdk.ContractPACRD20, dtr, shnsdk.ContractPAPAS20}
+				entry.EncPub = payerPub
+				next := cfg.Client.Transport
+				cfg.Client.Transport = diagnosticRoundTripper(func(r *http.Request) (*http.Response, error) {
+					if r.URL.Path == "/route" {
+						raw, err := io.ReadAll(r.Body)
+						if err != nil {
+							t.Fatal(err)
+						}
+						r.Body = io.NopCloser(bytes.NewReader(raw))
+						env, err := shnsdk.DecodeEnvelope(raw)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if env.Metadata.TransactionType == "dtr-questionnaire-fetch" {
+							clear, err := shnsdk.Open(env, payerPub, payerPriv)
+							if err != nil {
+								t.Fatal(err)
+							}
+							header, _, err := shnsdk.DecodeHTTPFrame(clear)
+							if err != nil {
+								t.Fatal(err)
+							}
+							wireToken = header.Headers[shnsdk.FrameHeaderContractVersion]
+						}
+					}
+					return next.RoundTrip(r)
+				})
 				cfg.Reg.Set("payer", entry)
 			})
 			rec := httptest.NewRecorder()
@@ -392,6 +430,7 @@ func TestDispatch_DTRPackageRequestFollowsSelectedLine(t *testing.T) {
 				t.Fatalf("want %d, got %d body=%s", row.status, rec.Code, rec.Body.String())
 			}
 			var sent []ObserverEvent
+			observationFlush(t, fix.gw)
 			for _, e := range events {
 				if e.Kind == "leg.originated" && e.LegType == "dtr-questionnaire-fetch" {
 					sent = append(sent, e)
@@ -402,6 +441,9 @@ func TestDispatch_DTRPackageRequestFollowsSelectedLine(t *testing.T) {
 					t.Fatalf("refused request sent %d questionnaire requests: %s", len(sent), rec.Body.String())
 				}
 				return
+			}
+			if wireToken != dtr {
+				t.Fatalf("built DTR request declared %q want %q", wireToken, dtr)
 			}
 			if len(sent) != 1 {
 				t.Fatalf("%d questionnaire requests observed", len(sent))
@@ -474,7 +516,7 @@ func TestHandler_DispatchRouteRegistered(t *testing.T) {
 		},
 		SoR:       stub,
 		Store:     stub,
-		Validator: shnsdk.NewFakeValidator(),
+		Validator: syntheticFakeValidator(),
 	})
 	h := gw.Handler()
 	req := httptest.NewRequest(http.MethodPost, "/scenario/dispatch", bytes.NewBufferString(`{}`))
