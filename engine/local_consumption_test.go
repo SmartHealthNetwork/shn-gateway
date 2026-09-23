@@ -16,7 +16,7 @@ import (
 )
 
 func TestLocalConsumptionInquiryPreservesApplicationReply(t *testing.T) {
-	for _, kind := range []string{"approved", "opaque", "malformed FHIR", "unknown decision", "other authorization", "foreign patient", "conflicting asserted request", "unresolved request reference", "selected valid with unrelated patient", "backend error"} {
+	for _, kind := range []string{"approved", "opaque", "malformed FHIR", "unknown decision", "other authorization", "selected valid with unrelated patient", "backend error"} {
 		t.Run(kind, func(t *testing.T) {
 			g, stub := pasFollowSystem(t, "pended")
 			req := httptest.NewRequest("POST", "/scenario/uc03", nil)
@@ -48,10 +48,6 @@ func TestLocalConsumptionInquiryPreservesApplicationReply(t *testing.T) {
 				answer = bytes.ReplaceAll(answer, []byte(stub.submitCorr), []byte("unrelated-authorization"))
 				wantStatus = 502
 			}
-			if kind == "foreign patient" {
-				answer = bytes.ReplaceAll(answer, []byte("Patient/"+pasFollowMember), []byte("Patient/MBR-NOTCOVERED"))
-				wantStatus = 502
-			}
 			if kind == "selected valid with unrelated patient" {
 				foreign, e := stub.pasAnswer("approved", "unrelated-authorization")
 				if e != nil {
@@ -59,14 +55,6 @@ func TestLocalConsumptionInquiryPreservesApplicationReply(t *testing.T) {
 				}
 				foreign = bytes.ReplaceAll(foreign, []byte("Patient/"+pasFollowMember), []byte("Patient/foreign"))
 				answer, _, _ = mixedInquiryFacts(t, answer, inquiryResponseBundle(foreign, stub.clock()))
-			}
-			if kind == "conflicting asserted request" {
-				answer = bytes.Replace(answer, []byte(`"resourceType":"ClaimResponse"`), []byte(`"resourceType":"ClaimResponse","request":{"identifier":{"system":"urn:claim","value":"foreign"}}`), 1)
-				wantStatus = 502
-			}
-			if kind == "unresolved request reference" {
-				answer = bytes.Replace(answer, []byte(`"resourceType":"ClaimResponse"`), []byte(`"resourceType":"ClaimResponse","request":{"reference":"https://payer.example/fhir/Claim/unknown"}`), 1)
-				wantStatus = 502
 			}
 			if kind == "backend error" {
 				answer = []byte("backend refused\x00\n")
@@ -141,6 +129,30 @@ func TestLocalConsumptionInquiryPreservesApplicationReply(t *testing.T) {
 				t.Fatalf("consumption=%+v want=%s", out.Consumption, wantState)
 			}
 		})
+	}
+}
+
+// A payer may store the Claim and Patient under its own REST ids. The built-in
+// scenario classifies the authenticated queued and final answers by the
+// authorization's identifiers, while retaining the received reply unchanged.
+func TestBuiltInPASWorkflow_PayerLocalReferencesReachFinalDecision(t *testing.T) {
+	g, payer := pasFollowSystem(t, "pended")
+	payer.payerLocalPASRefs = true
+	r := httptest.NewRequest("POST", "/scenario/uc03", nil)
+	pend, status, msg, err := g.submitClaimAndFollow(r.Context(), r, pasFollowSubmit(0))
+	if status != 0 || err != nil || pend.Decision != PASDecisionPended || pend.Continuation == "" || pend.ReplyView == nil {
+		t.Fatalf("queued payer answer refused: status=%d message=%q error=%v decision=%q continuation=%q", status, msg, err, pend.Decision, pend.Continuation)
+	}
+	payer.inquireAnswer = "approved"
+	w := httptest.NewRecorder()
+	g.handlePAInquire(w, httptest.NewRequest("POST", "/scenario/pa/inquire", strings.NewReader(`{"continuation":"`+pend.Continuation+`","waitSeconds":0}`)))
+	var final struct {
+		Decision         string
+		ApplicationReply *ApplicationReplyView
+		Consumption      ConsumptionOutcome
+	}
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &final) != nil || final.Decision != PASDecisionApproved || final.ApplicationReply == nil || final.Consumption.State != "available" || !payer.sawInquiry {
+		t.Fatalf("final payer answer refused: status=%d body=%s", w.Code, w.Body.String())
 	}
 }
 

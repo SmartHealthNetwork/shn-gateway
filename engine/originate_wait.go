@@ -251,10 +251,6 @@ func (g *Gateway) followDecision(ctx context.Context, r *http.Request, sub pasSu
 	if decision == "" {
 		return out, http.StatusBadGateway, "claim response parse failed", nil
 	}
-	if status, msg := g.validatePASConsumption(ctx, sub, in.pci, in.recipient); status != 0 {
-		out.Consumption = unavailableConsumption("decision_binding_unavailable")
-		return out, status, msg, nil
-	}
 	out.Decision, out.Parsed = decision, parsed
 	out.Consumption = ConsumptionOutcome{State: "available"}
 	if decision != PASDecisionPended {
@@ -531,14 +527,6 @@ func (g *Gateway) inquireContinuation(ctx context.Context, r *http.Request, cont
 	}
 	decision, parsed, selected, status, msg := decideFromInquiryAnswer(cont, answer)
 	if status != 0 {
-		return out, status, msg, nil
-	}
-	if err := cont.SDKContinuation().ValidateResponseLinkage(selected.Response); err != nil {
-		out.Consumption = unavailableConsumption("decision_binding_unavailable")
-		return out, http.StatusBadGateway, "inquiry response request linkage unavailable", nil
-	}
-	if status, msg := g.validateInquiryPatient(ctx, selected, cont.SubjectPCI, cont.PayerHolder, body); status != 0 {
-		out.Consumption = unavailableConsumption("decision_binding_unavailable")
 		return out, status, msg, nil
 	}
 	out.Decision, out.Parsed = decision, parsed

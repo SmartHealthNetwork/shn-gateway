@@ -1140,14 +1140,15 @@ func (s *pasFollowSoR) ResolveByReference(ref string) ([]byte, bool) {
 // determination the row asked for, and the inquiry, with the later one.
 type pasFollowStub struct {
 	*stubSubstrate
-	submitAnswer     string
-	inquireAnswer    string
-	answerMember     string
-	inquiryWireQueue [][]byte
-	submitWire       []byte
-	inquiryWire      []byte // optional exact framed fixture answer for local-consumption tests
-	sawInquiry       bool
-	line             string
+	submitAnswer      string
+	inquireAnswer     string
+	answerMember      string
+	inquiryWireQueue  [][]byte
+	submitWire        []byte
+	inquiryWire       []byte // optional exact framed fixture answer for local-consumption tests
+	payerLocalPASRefs bool   // synthetic payer stores Claim and Patient at its own local addresses
+	sawInquiry        bool
+	line              string
 	// submitCorr is the correlation the submission ran under. The payer's own
 	// identifiers for the authorization derive from it, and an inquiry's answer
 	// carries those, not the inquiry's own.
@@ -1210,6 +1211,14 @@ func (s *pasFollowStub) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	if err != nil {
 		return errResp("stub: build answer: " + err.Error()), nil
+	}
+	if s.payerLocalPASRefs {
+		member := s.answerMember
+		if member == "" {
+			member = pasFollowMember
+		}
+		payload = []byte(strings.Replace(string(payload), `"resourceType":"ClaimResponse"`, `"resourceType":"ClaimResponse","request":{"reference":"Claim/10353"}`, 1))
+		payload = []byte(strings.ReplaceAll(string(payload), "Patient/"+member, "Patient/10354"))
 	}
 	if leg == "pas-claim" && s.submitWire != nil {
 		payload = s.submitWire

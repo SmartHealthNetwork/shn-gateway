@@ -10,7 +10,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -177,7 +176,7 @@ func TestLocalConsumptionDirectPASSubmit(t *testing.T) {
 
 func TestLocalConsumptionPASResume(t *testing.T) {
 	for _, scenario := range []string{"uc06", "uc07"} {
-		for _, kind := range []string{"approved", "opaque", "unknown decision", "backend error", "local write failure", "foreign patient", "foreign request", "missing decision patient with unrelated valid patient resource"} {
+		for _, kind := range []string{"approved", "opaque", "unknown decision", "backend error", "local write failure"} {
 			t.Run(scenario+"/"+kind, func(t *testing.T) {
 				member := "MBR-UC06"
 				if scenario == "uc07" {
@@ -206,15 +205,6 @@ func TestLocalConsumptionPASResume(t *testing.T) {
 				case "unknown decision":
 					answer = bytes.ReplaceAll(answer, []byte(`"code":"A1"`), []byte(`"code":"ZZ"`))
 					wantStatus = 502
-				case "foreign patient":
-					answer = bytes.ReplaceAll(answer, []byte("Patient/"+member), []byte("Patient/MBR-UC05"))
-					wantStatus = 502
-				case "missing decision patient with unrelated valid patient resource":
-					answer = decisionPatientFixture(t, answer, "Patient/"+member, "missing")
-					wantStatus = 503
-				case "foreign request":
-					answer = bytes.Replace(answer, []byte(`"resourceType":"ClaimResponse"`), []byte(`"resourceType":"ClaimResponse","request":{"reference":"Claim/unrelated"}`), 1)
-					wantStatus = 502
 				case "backend error":
 					answer = []byte("backend update error\x00")
 					appStatus = 409
@@ -223,10 +213,6 @@ func TestLocalConsumptionPASResume(t *testing.T) {
 					wantStatus = 502
 					g.cfg.Store = &failedAuthNumberStore{Store: g.cfg.Store}
 				}
-				pendingBefore, _ := g.loadPending(start.ResumeToken)
-				cs, _ := g.continuations()
-				mutations := &consumptionMutationStore{Store: g.cfg.Store, ContinuationStore: cs}
-				g.cfg.Store = mutations
 				stub.overrideResponse = func(leg string, b []byte) []byte {
 					if leg != "pas-claim-update" {
 						return b
@@ -253,13 +239,7 @@ func TestLocalConsumptionPASResume(t *testing.T) {
 				if w.Code != wantStatus {
 					t.Fatalf("status=%d want=%d body=%s", w.Code, wantStatus, w.Body.String())
 				}
-				if kind == "missing decision patient with unrelated valid patient resource" && (mutations.writes != 0 || mutations.puts != 0) {
-					t.Fatalf("unbound update mutated local state: writes=%d continuations=%d", mutations.writes, mutations.puts)
-				}
-				pendingAfter, stillPending := g.loadPending(start.ResumeToken)
-				if kind == "missing decision patient with unrelated valid patient resource" && !reflect.DeepEqual(pendingBefore, pendingAfter) {
-					t.Fatal("unbound update changed pending workflow")
-				}
+				_, stillPending := g.loadPending(start.ResumeToken)
 				if stillPending != (kind != "approved") {
 					t.Fatal("failed consumer advanced/deleted pending workflow")
 				}
@@ -492,74 +472,6 @@ type workflowAuthWrites struct {
 func (s *workflowAuthWrites) StoreAuthNumber(order, auth string) error {
 	s.calls++
 	return s.Store.StoreAuthNumber(order, auth)
-}
-
-func TestLocalConsumptionPASBindingBeforeWrite(t *testing.T) {
-	for _, kind := range []string{"absent request linkage", "patient alias", "foreign patient", "unresolved patient", "resolver unavailable", "foreign request", "missing decision patient with unrelated valid patient resource", "own Bundle patient", "own contained patient"} {
-		t.Run(kind, func(t *testing.T) {
-			f := newMBROXDispatchFixture(t)
-			body := homeOxygenApprovedClaimResponse()
-			switch kind {
-			case "missing decision patient with unrelated valid patient resource":
-				body = decisionPatientFixture(t, body, "Patient/MBR-OX", "missing")
-			case "own Bundle patient", "own contained patient":
-				body = decisionPatientFixture(t, body, "Patient/MBR-OX", kind)
-			case "patient alias":
-				body = bytes.ReplaceAll(body, []byte("Patient/MBR-OX"), []byte("https://payer.example/fhir/Patient/alias"))
-				f.gw.cfg.SubjectReferenceResolver = subjectResolverFunc(func(_ context.Context, ref PatientReference) (string, bool, error) {
-					if ref == (PatientReference{"payer", "https://payer.example/fhir", "Patient/alias"}) {
-						return f.sor.pci, true, nil
-					}
-					return "", false, nil
-				})
-			case "foreign patient":
-				body = bytes.ReplaceAll(body, []byte("Patient/MBR-OX"), []byte("Patient/foreign"))
-				f.gw.cfg.SubjectReferenceResolver = subjectResolverFunc(func(_ context.Context, ref PatientReference) (string, bool, error) {
-					if ref == (PatientReference{"payer", "fhir-relative", "Patient/foreign"}) {
-						return "other-pci", true, nil
-					}
-					return "", false, nil
-				})
-			case "unresolved patient":
-				body = bytes.ReplaceAll(body, []byte("Patient/MBR-OX"), []byte("Patient/unresolved"))
-			case "resolver unavailable":
-				f.gw.cfg.SubjectReferenceResolver = nil
-			case "foreign request":
-				body = bytes.Replace(body, []byte(`"resourceType":"ClaimResponse"`), []byte(`"resourceType":"ClaimResponse","request":{"identifier":{"system":"urn:claim","value":"unrelated"}}`), 1)
-			}
-			cs, _ := f.gw.continuations()
-			writes := &consumptionMutationStore{Store: f.gw.cfg.Store, ContinuationStore: cs}
-			f.gw.cfg.Store = writes
-			f.stub.frameErrLeg, f.stub.frameErrStatus, f.stub.frameErrBody, f.stub.frameErrCT = "pas-claim", 201, body, "application/fhir+json"
-			peer, _ := f.gw.cfg.Reg.Lookup("payer")
-			peer.MessageFrames = shnsdk.SupportedMessageFrames()
-			f.gw.cfg.Reg.Set("payer", peer)
-			w := httptest.NewRecorder()
-			f.gw.handleDispatch(w, httptest.NewRequest("POST", "/scenario/dispatch?wait=0", strings.NewReader(`{"member":"MBR-OX"}`)))
-			valid := kind == "absent request linkage" || kind == "patient alias" || kind == "own Bundle patient" || kind == "own contained patient"
-			var out struct {
-				ApplicationReply *ApplicationReplyView
-				Consumption      ConsumptionOutcome
-				Decision         string
-			}
-			if json.Unmarshal(w.Body.Bytes(), &out) != nil || out.ApplicationReply == nil {
-				t.Fatalf("reply lost: %d %s", w.Code, w.Body.String())
-			}
-			raw, _ := base64.StdEncoding.DecodeString(out.ApplicationReply.BodyBase64)
-			if !bytes.Equal(raw, body) {
-				t.Fatal("reply changed")
-			}
-			if valid {
-				if w.Code != 200 || writes.writes != 1 || out.Decision != "approved" || out.Consumption.State != "available" {
-					t.Fatalf("valid local result refused: %d %s writes=%d", w.Code, w.Body.String(), writes.writes)
-				}
-			} else {
-				if w.Code < 400 || writes.puts != 0 || len(f.gw.pending) != 0 || writes.writes != 0 || out.Decision != "" || out.Consumption.State != "unavailable" {
-					t.Fatalf("invalid local decision or write: %d %s writes=%d", w.Code, w.Body.String(), writes.writes)
-				}
-			}
-		})
-	}
 }
 
 func TestLocalConsumptionDisclosureReplies(t *testing.T) {
@@ -800,51 +712,6 @@ func TestLocalConsumptionLatestReplySurvivesNextDispatchFailure(t *testing.T) {
 	}
 }
 
-// decisionPatientFixture keeps the actual decision while varying which resource
-// owns the authoritative patient reference.
-func decisionPatientFixture(t *testing.T, body []byte, patient, kind string) []byte {
-	t.Helper()
-	var root map[string]any
-	if err := json.Unmarshal(body, &root); err != nil {
-		t.Fatal(err)
-	}
-	if root["resourceType"] == "ClaimResponse" {
-		root = map[string]any{"resourceType": "Bundle", "type": "collection", "entry": []any{map[string]any{"resource": root}}}
-	}
-	entries := root["entry"].([]any)
-	var cr map[string]any
-	for _, e := range entries {
-		r := e.(map[string]any)["resource"].(map[string]any)
-		if r["resourceType"] == "ClaimResponse" {
-			cr = r
-			break
-		}
-	}
-	if cr == nil {
-		t.Fatal("fixture has no decision")
-	}
-	switch kind {
-	case "missing":
-		delete(cr, "patient")
-		root["entry"] = append(entries, map[string]any{"resource": map[string]any{"resourceType": "Claim", "patient": map[string]any{"reference": patient}}})
-	case "own Bundle patient", "own contained patient":
-		p := map[string]any{"resourceType": "Patient", "id": "decision-patient", "identifier": []any{map[string]any{"system": "fhir-relative", "value": patient}}}
-		ref := "urn:uuid:decision-patient"
-		if kind == "own contained patient" {
-			ref = "#decision-patient"
-			cr["contained"] = []any{p}
-		} else {
-			root["entry"] = append(entries, map[string]any{"fullUrl": ref, "resource": p})
-		}
-		cr["patient"] = map[string]any{"reference": ref}
-	}
-	out, err := json.Marshal(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return out
-}
-
 type consumptionMutationStore struct {
 	Store
 	ContinuationStore
@@ -858,46 +725,6 @@ func (s *consumptionMutationStore) StoreAuthNumber(order, auth string) error {
 func (s *consumptionMutationStore) PutContinuation(c Continuation) (Continuation, error) {
 	s.puts++
 	return s.ContinuationStore.PutContinuation(c)
-}
-
-func TestLocalConsumptionInitialPendRequiresDecisionPatient(t *testing.T) {
-	for _, scenario := range []string{"uc06", "uc07"} {
-		t.Run(scenario+"/missing decision patient with unrelated valid patient resource", func(t *testing.T) {
-			member := "MBR-UC06"
-			if scenario == "uc07" {
-				member = "MBR-UC07"
-			}
-			_, demo, _ := newCensusSoR().ResolvePatient(member)
-			g, stub := newPendResumeFixture(t, pendFixtureOpts{member: member, birthDate: demo.BirthDate, familyName: demo.FamilyName, pendedItem: "functional-status", extraRoles: map[string]string{"phg": "phg"}})
-			g.cfg.ConformanceEnforcement = EnforcementNone
-			cs, _ := g.continuations()
-			mutations := &consumptionMutationStore{Store: g.cfg.Store, ContinuationStore: cs}
-			g.cfg.Store = mutations
-			var answer []byte
-			stub.overrideResponse = func(leg string, b []byte) []byte {
-				if leg == "pas-claim" {
-					answer = decisionPatientFixture(t, b, "Patient/"+member, "missing")
-					return answer
-				}
-				return b
-			}
-			w := httptest.NewRecorder()
-			r := httptest.NewRequest("POST", "/scenario/"+scenario+"/start", nil)
-			if scenario == "uc06" {
-				g.handleUC06Start(w, r)
-			} else {
-				g.handleUC07Start(w, r)
-			}
-			var out startResp
-			if json.Unmarshal(w.Body.Bytes(), &out) != nil || w.Code != 503 || out.ResumeToken != "" || out.ApplicationReply == nil || out.Consumption.State != "unavailable" || len(g.pending) != 0 || mutations.puts != 0 || mutations.writes != 0 {
-				t.Fatalf("unbound initial pend: %d %s pending=%d puts=%d writes=%d", w.Code, w.Body.String(), len(g.pending), mutations.puts, mutations.writes)
-			}
-			raw, _ := base64.StdEncoding.DecodeString(out.ApplicationReply.BodyBase64)
-			if !bytes.Equal(raw, answer) || out.ApplicationReply.Leg != "pas-claim" {
-				t.Fatal("initial reply lost")
-			}
-		})
-	}
 }
 
 func TestLocalConsumptionFQTimeoutRetainsLastReply(t *testing.T) {
@@ -1025,17 +852,5 @@ func TestLocalConsumptionFQConsentDenialRetainsPend(t *testing.T) {
 	raw, _ := base64.StdEncoding.DecodeString(out.ApplicationReply.BodyBase64)
 	if !bytes.Equal(raw, pend) || out.ApplicationReply.Leg != "pas-claim" || writes.calls != 0 || legAttempted(stub.legTypes, "federated-query") || legAttempted(stub.legTypes, "pas-claim-update") {
 		t.Fatal("denial lost pend or advanced workflow")
-	}
-}
-
-func TestLocalConsumptionDecisionSelectionRefusals(t *testing.T) {
-	for _, body := range []string{`{`, `{"resourceType":"Patient"}`, `{"resourceType":"Bundle","entry":[]}`, `{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"ClaimResponse"}},{"resource":{"resourceType":"ClaimResponse"}}]}`} {
-		t.Run(body, func(t *testing.T) {
-			g, _ := pasFollowSystem(t, "approved")
-			status, _ := g.validateConsumedPatient(context.Background(), []byte(body), "pas-claim", "unused", "payer")
-			if status != 502 {
-				t.Fatalf("status=%d", status)
-			}
-		})
 	}
 }

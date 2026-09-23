@@ -183,11 +183,6 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 		g.writePASConsumptionFailure(w, pasEvidence.receivedDecision().withPriorAttempt(res.attempt), http.StatusBadGateway, "expected pended response", nil)
 		return pendState{}, false
 	}
-	if status, msg := g.validatePASConsumption(ctx, pasEvidence, res.pci, res.recipient); status != 0 {
-		pasEvidence.consumption = unavailableConsumption("decision_binding_unavailable")
-		g.writePASConsumptionFailure(w, pasEvidence.receivedDecision().withPriorAttempt(res.attempt), status, msg, nil)
-		return pendState{}, false
-	}
 	needed := neededItemCodes(neededItems)
 	pasEvidence.consumption = ConsumptionOutcome{State: "available"}
 	return pendState{

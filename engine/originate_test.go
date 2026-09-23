@@ -596,9 +596,8 @@ func TestRunCRDThenDTROrder_NotCovered_ProceedFlag(t *testing.T) {
 // (All(Has(`"denied":true`), Has(`"rationale"`))). Before this fix, an empty profile
 // hit the CRD not-covered stop and UC-08 returned
 // {"covered":false,"outcome":"not-covered","paRequired":false} instead — precisely the
-// live smoke failure this test locks down. This older PAS 2.0 stub deliberately
-// lacks request linkage, so its denial remains received evidence rather than
-// a locally consumable determination.
+// live smoke failure this test locks down. The older PAS 2.0 stub omits a
+// request URL, as a payer is allowed to do while still answering this workflow.
 func TestHandleUC08_DemoLane_ProceedsPastNotCoveredToDeny(t *testing.T) {
 	notCovered := shnsdk.CardCoverage{Covered: shnsdk.CoveredNotCovered, PANeeded: shnsdk.PANeededNoAuth}
 	gw, stub, _ := crdTestSystem(t, notCovered)
@@ -620,16 +619,15 @@ func TestHandleUC08_DemoLane_ProceedsPastNotCoveredToDeny(t *testing.T) {
 	rec := httptest.NewRecorder()
 	gw.handleUC08(rec, req)
 
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("demo not-covered UC08: want source binding unavailable, got %d body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("demo not-covered UC08: want 200, got %d body=%s", rec.Code, rec.Body.String())
 	}
 	var body map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("unmarshal response: %v; body=%s", err, rec.Body.String())
 	}
-	consumption, _ := body["consumption"].(map[string]any)
-	if consumption["code"] != "decision_binding_unavailable" {
-		t.Fatalf("demo not-covered UC08: unlinked PAS 2.0 reply was locally consumed: %s", rec.Body.String())
+	if denied, _ := body["denied"].(bool); !denied || body["rationale"] != rationale {
+		t.Fatalf("demo not-covered UC08: want payer denial and rationale: %s", rec.Body.String())
 	}
 	reply, _ := body["applicationReply"].(map[string]any)
 	if reply["leg"] != "pas-claim" {

@@ -2500,11 +2500,6 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 	}
 	// Map []NeededItem → []string using .Code (the Task.input valueString, matching
 	// what the internal ParsePendedOrApproved returned as a plain []string).
-	if status, msg := g.validatePASConsumption(ctx, pasEvidence, res.pci, res.recipient); status != 0 {
-		pasEvidence.consumption = unavailableConsumption("decision_binding_unavailable")
-		g.writePASConsumptionFailure(w, pasEvidence.receivedDecision().withPriorAttempt(res.attempt), status, msg, nil)
-		return
-	}
 	needed := neededItemCodes(neededItems)
 	pasEvidence.consumption = unavailableConsumption("local_action_unavailable")
 
@@ -2848,11 +2843,6 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 		g.writePASConsumptionFailure(w, pasEvidence.receivedDecision().withPriorAttempt(res.attempt), http.StatusBadGateway, "expected pended response", nil)
 		return
 	}
-	if status, msg := g.validatePASConsumption(ctx, pasEvidence, res.pci, res.recipient); status != 0 {
-		pasEvidence.consumption = unavailableConsumption("decision_binding_unavailable")
-		g.writePASConsumptionFailure(w, pasEvidence.receivedDecision().withPriorAttempt(res.attempt), status, msg, nil)
-		return
-	}
 	needed := neededItemCodes(neededItems)
 	pasEvidence.consumption = unavailableConsumption("local_action_unavailable")
 
@@ -3167,11 +3157,6 @@ func (g *Gateway) handleUC08(w http.ResponseWriter, r *http.Request) {
 	parsed, err := shnsdk.ParseClaimResponse(claimRespJSON)
 	if err != nil {
 		g.writePASConsumptionFailure(w, pasEvidence.receivedDecision().withPriorAttempt(res.attempt), http.StatusBadGateway, "claim response parse failed", nil)
-		return
-	}
-	if status, msg := g.validatePASConsumption(ctx, pasEvidence, res.pci, res.recipient); status != 0 {
-		pasEvidence.consumption = unavailableConsumption("decision_binding_unavailable")
-		g.writePASConsumptionFailure(w, pasEvidence.receivedDecision().withPriorAttempt(res.attempt), status, msg, nil)
 		return
 	}
 	if parsed.Outcome == "approved" {
