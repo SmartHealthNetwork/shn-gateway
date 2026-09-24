@@ -49,12 +49,9 @@ func TestObservationCallbackDoesNotBlock(t *testing.T) {
 	}
 }
 
-type observationValidator func(context.Context, []byte, string) (shnsdk.ValidationEvidence, error)
+type observationValidator func(context.Context, []byte, string) (shnsdk.Result, error)
 
-func (f observationValidator) Validate(context.Context, []byte, string) (shnsdk.Result, error) {
-	panic("legacy validation unexpectedly called")
-}
-func (f observationValidator) ValidateEvidence(c context.Context, b []byte, p string) (shnsdk.ValidationEvidence, error) {
+func (f observationValidator) Validate(c context.Context, b []byte, p string) (shnsdk.Result, error) {
 	return f(c, b, p)
 }
 func observationInput(level ConformanceEnforcement) CheckInput {
@@ -78,14 +75,14 @@ func observationFlush(t *testing.T, g *Gateway) {
 func TestObservationRegistryImmutableAndNonblocking(t *testing.T) {
 	entered, release := make(chan struct{}), make(chan struct{})
 	var once sync.Once
-	g := newObservationGateway(t, EnforcementObserve, observationValidator(func(ctx context.Context, b []byte, p string) (shnsdk.ValidationEvidence, error) {
+	g := newObservationGateway(t, EnforcementObserve, observationValidator(func(ctx context.Context, b []byte, p string) (shnsdk.Result, error) {
 		once.Do(func() { close(entered) })
 		select {
 		case <-release:
 		case <-ctx.Done():
-			return shnsdk.ValidationEvidence{}, ctx.Err()
+			return shnsdk.Result{}, ctx.Err()
 		}
-		return *syntheticEvidence(), nil
+		return shnsdk.Result{Valid: true}, nil
 	}))
 	defer func() {
 		select {
@@ -120,11 +117,11 @@ func TestObservationRegistryImmutableAndNonblocking(t *testing.T) {
 }
 func TestObservationBasicOnlyDeepAndPanicRecovery(t *testing.T) {
 	var calls atomic.Int32
-	g := newObservationGateway(t, EnforcementBasic, observationValidator(func(context.Context, []byte, string) (shnsdk.ValidationEvidence, error) {
+	g := newObservationGateway(t, EnforcementBasic, observationValidator(func(context.Context, []byte, string) (shnsdk.Result, error) {
 		if calls.Add(1) == 1 {
 			panic("FOREIGN-RESOURCE")
 		}
-		return *syntheticEvidence(), nil
+		return shnsdk.Result{Valid: true}, nil
 	}))
 	if !g.observeContent(observationInput(EnforcementBasic)) {
 		t.Fatal("dropped")
@@ -196,10 +193,10 @@ func TestObservationNotificationOwnershipAndPanic(t *testing.T) {
 func TestObservationSharedBudgetAndBoundedClose(t *testing.T) {
 	entered, release := make(chan struct{}), make(chan struct{})
 	var once sync.Once
-	g := newObservationGateway(t, EnforcementObserve, observationValidator(func(ctx context.Context, _ []byte, _ string) (shnsdk.ValidationEvidence, error) {
+	g := newObservationGateway(t, EnforcementObserve, observationValidator(func(ctx context.Context, _ []byte, _ string) (shnsdk.Result, error) {
 		once.Do(func() { close(entered) })
 		<-release
-		return *syntheticEvidence(), nil
+		return shnsdk.Result{Valid: true}, nil
 	}))
 	var releaseOnce sync.Once
 	defer releaseOnce.Do(func() { close(release) })
@@ -288,7 +285,7 @@ func TestObservationMountedNativeNoninterference(t *testing.T) {
 			var once, releaseOnce sync.Once
 			defer releaseOnce.Do(func() { close(release) })
 			var validations atomic.Int32
-			g.cfg.Validator = observationValidator(func(ctx context.Context, _ []byte, _ string) (shnsdk.ValidationEvidence, error) {
+			g.cfg.Validator = observationValidator(func(ctx context.Context, _ []byte, _ string) (shnsdk.Result, error) {
 				validations.Add(1)
 				if level == EnforcementNone {
 					panic("none validator")
@@ -297,9 +294,9 @@ func TestObservationMountedNativeNoninterference(t *testing.T) {
 				select {
 				case <-release:
 				case <-ctx.Done():
-					return shnsdk.ValidationEvidence{}, ctx.Err()
+					return shnsdk.Result{}, ctx.Err()
 				}
-				return *syntheticEvidence(), nil
+				return shnsdk.Result{Valid: true}, nil
 			})
 			g.cfg.CertificationValidatorsByLine = map[string]shnsdk.Validator{"2.0": certificationValidatorFunc(func(context.Context, []byte, string) (shnsdk.Result, error) { panic("passive certifier") })}
 			g.cfg.SubjectReferenceResolver = subjectResolverFunc(func(context.Context, PatientReference) (string, bool, error) { panic("patient resolver") })
@@ -375,11 +372,11 @@ func TestObservationUncooperativeCheckerCloseBound(t *testing.T) {
 	entered, release := make(chan struct{}), make(chan struct{})
 	var once sync.Once
 	var targetBytes atomic.Int64
-	g := newObservationGateway(t, EnforcementObserve, observationValidator(func(_ context.Context, target []byte, _ string) (shnsdk.ValidationEvidence, error) {
+	g := newObservationGateway(t, EnforcementObserve, observationValidator(func(_ context.Context, target []byte, _ string) (shnsdk.Result, error) {
 		targetBytes.Store(int64(len(target)))
 		once.Do(func() { close(entered) })
 		<-release
-		return *syntheticEvidence(), nil
+		return shnsdk.Result{Valid: true}, nil
 	}))
 	g.observeContent(observationInput(EnforcementObserve))
 	<-entered
@@ -408,9 +405,9 @@ func TestObservationUncooperativeCheckerCloseBound(t *testing.T) {
 
 func TestObservationLimitsExpiryAndRing(t *testing.T) {
 	var calls atomic.Int32
-	g := newObservationGateway(t, EnforcementObserve, observationValidator(func(context.Context, []byte, string) (shnsdk.ValidationEvidence, error) {
+	g := newObservationGateway(t, EnforcementObserve, observationValidator(func(context.Context, []byte, string) (shnsdk.Result, error) {
 		calls.Add(1)
-		return *syntheticEvidence(), nil
+		return shnsdk.Result{Valid: true}, nil
 	}))
 	in := observationInput(EnforcementObserve)
 	if !g.enqueueObservation(certificationJob{input: &in, payload: in.Body, queued: time.Now().Add(-31 * time.Second)}) {
@@ -453,9 +450,9 @@ func TestObservationLimitsExpiryAndRing(t *testing.T) {
 	}
 }
 func TestObservationCandidateTimeout(t *testing.T) {
-	g := newObservationGateway(t, EnforcementObserve, observationValidator(func(ctx context.Context, _ []byte, _ string) (shnsdk.ValidationEvidence, error) {
+	g := newObservationGateway(t, EnforcementObserve, observationValidator(func(ctx context.Context, _ []byte, _ string) (shnsdk.Result, error) {
 		<-ctx.Done()
-		return shnsdk.ValidationEvidence{}, ctx.Err()
+		return shnsdk.Result{}, ctx.Err()
 	}))
 	start := time.Now()
 	g.observeContent(observationInput(EnforcementObserve))
@@ -532,9 +529,9 @@ func TestObservationClosedDequeuedNotificationIsDropped(t *testing.T) {
 
 func TestObservationTargetSerializationPressureUnavailable(t *testing.T) {
 	var calls atomic.Int32
-	g := newObservationGateway(t, EnforcementObserve, observationValidator(func(context.Context, []byte, string) (shnsdk.ValidationEvidence, error) {
+	g := newObservationGateway(t, EnforcementObserve, observationValidator(func(context.Context, []byte, string) (shnsdk.Result, error) {
 		calls.Add(1)
-		return *syntheticEvidence(), nil
+		return shnsdk.Result{Valid: true}, nil
 	}))
 	in := observationInput(EnforcementObserve)
 	pressure := observationBodyBudget - len(in.Body)
@@ -574,7 +571,7 @@ func TestObservationTargetsOwnOneSerializedResourceAtATime(t *testing.T) {
 	in.Body = []byte(`{"hook":"order-select","hookInstance":"synthetic","context":{"patientId":"p"},"prefetch":{"one":{"resourceType":"Patient","id":"one"},"two":{"resourceType":"Patient","id":"two"}}}`)
 	target := []byte(`{"id":"one","resourceType":"Patient"}`)
 	pressure := observationBodyBudget - len(in.Body) - len(target)
-	g = newObservationGateway(t, EnforcementObserve, observationValidator(func(_ context.Context, raw []byte, _ string) (shnsdk.ValidationEvidence, error) {
+	g = newObservationGateway(t, EnforcementObserve, observationValidator(func(_ context.Context, raw []byte, _ string) (shnsdk.Result, error) {
 		calls.Add(1)
 		g.observationMemory.mu.Lock()
 		held := g.observationMemory.bytes
@@ -582,7 +579,7 @@ func TestObservationTargetsOwnOneSerializedResourceAtATime(t *testing.T) {
 		if held != pressure+len(in.Body)+len(raw) {
 			t.Errorf("target ownership=%d", held)
 		}
-		return *syntheticEvidence(), nil
+		return shnsdk.Result{Valid: true}, nil
 	}))
 	if !g.observationMemory.reserve(pressure) {
 		t.Fatal("pressure")

@@ -81,7 +81,7 @@ func TestNativeRelaySuppliedContext(t *testing.T) {
 	}
 }
 
-func TestNativeRelayPASDoesNotConsumeClinicalState(t *testing.T) {
+func TestNativeRelaySchedulesOnlyBaselinePASSubmitProjection(t *testing.T) {
 	for _, leg := range []string{"pas-claim", "pas-claim-update", "pas-claim-inquire"} {
 		t.Run(leg, func(t *testing.T) {
 			request := []byte(`no ServiceRequest or local pend`)
@@ -103,8 +103,8 @@ func TestNativeRelayPASDoesNotConsumeClinicalState(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if result.Commit != nil || result.Rollback != nil || len(result.SideEffectFHIR) != 0 {
-				t.Fatal("native relay scheduled clinical state")
+			if (leg == "pas-claim") != (result.Commit != nil) || result.Rollback != nil || len(result.SideEffectFHIR) != 0 {
+				t.Fatalf("%s local effects: commit=%v rollback=%v sideeffects=%d", leg, result.Commit != nil, result.Rollback != nil, len(result.SideEffectFHIR))
 			}
 			raw, err := relay.Transmit(result.Response, relay.Check(answerKey(leg, relay.OutcomeAnswered)))
 			if err != nil || hits != 1 || result.ApplicationStatus != 202 || result.Response.ContentType() != "application/backend+json" || !bytes.Equal(raw, answer) {
@@ -114,52 +114,175 @@ func TestNativeRelayPASDoesNotConsumeClinicalState(t *testing.T) {
 	}
 }
 
-func TestNativeRelayRecipientIgnoresClinicalClosures(t *testing.T) {
+func TestNativeRelayNonPASCommitIsInert(t *testing.T) {
+	g, requester := newInboundTestGateway(t, true)
+	g.cfg.ConformanceEnforcement = EnforcementNone
+	commits, rollbacks := 0, 0
+	answer := []byte(`opaque participant answer`)
+	g.cfg.Responder = pasResultResponder{result: LegResult{
+		ApplicationStatus: 202,
+		Response:          relay.Exact(relay.NewBody(answer, relay.OriginPeerFrame), "application/answer+json"),
+		Commit:            func() error { commits++; return nil },
+		Rollback:          func() { rollbacks++ },
+	}}
+	leg := "crd-order-select"
+	env := shnsdk.Envelope{Metadata: shnsdk.Metadata{Sender: requester.ID, Recipient: "payer", TransactionType: leg, CorrelationID: "native-corr"}}
+	w := httptest.NewRecorder()
+	g.handleNativeInbound(w, newSignedInboundRequest(t, g, requester.ID), leg, env, shnsdk.Token{Subject: "external-pci"}, []byte(`opaque participant request`), "pa.crd@2.0")
+	if w.Code != http.StatusOK || commits != 0 || rollbacks != 1 {
+		t.Fatalf("delivery status=%d commits=%d rollbacks=%d body=%s", w.Code, commits, rollbacks, w.Body.String())
+	}
+	header, body, err := shnsdk.DecodeHTTPFrame(openResponseLeg(t, requester, w.Body.Bytes()))
+	if err != nil || header.Status != 202 || header.Headers["Content-Type"] != "application/answer+json" || !bytes.Equal(body, answer) {
+		t.Fatalf("delivered peer answer header=%+v body=%s err=%v", header, body, err)
+	}
+}
+
+func TestNativeRelayLocalEffectFailureDoesNotRewriteDeliveredAnswer(t *testing.T) {
 	for _, authored := range []bool{false, true} {
-		for _, panics := range []bool{false, true} {
-			t.Run(fmt.Sprintf("authored=%v/panic=%v", authored, panics), func(t *testing.T) {
-				g, requester := newInboundTestGateway(t, true)
-				g.cfg.ConformanceEnforcement = EnforcementNone
-				pci, _, _ := g.cfg.SoR.ResolvePatient("MBR-COVERED")
-				body := conformantPASBundleWithQR(t, "MBR-COVERED")
-				commits, rollbacks := 0, 0
-				answer := []byte(assemblyRealPending)
-				response := relay.Exact(relay.NewBody(answer, relay.OriginPeerFrame), "application/answer+json")
-				if authored {
-					var err error
-					response, err = relay.Authored(relay.BuilderSDKPASSubmit, answer, "application/answer+json")
-					if err != nil {
-						t.Fatal(err)
-					}
+		t.Run(fmt.Sprintf("authored=%v", authored), func(t *testing.T) {
+			g, requester := newInboundTestGateway(t, true)
+			g.cfg.ConformanceEnforcement = EnforcementNone
+			pci, _, _ := g.cfg.SoR.ResolvePatient("MBR-COVERED")
+			body := conformantPASBundleWithQR(t, "MBR-COVERED")
+			commits, rollbacks := 0, 0
+			answer := []byte(assemblyRealPending)
+			response := relay.Exact(relay.NewBody(answer, relay.OriginPeerFrame), "application/answer+json")
+			if authored {
+				var err error
+				response, err = relay.Authored(relay.BuilderSDKPASSubmit, answer, "application/answer+json")
+				if err != nil {
+					t.Fatal(err)
 				}
-				g.cfg.Responder = pasResultResponder{result: LegResult{ApplicationStatus: 201, Response: response, SideEffectFHIR: [][]byte{[]byte("invalid projected EOB")}, Commit: func() error {
-					commits++
-					if panics {
-						panic("clinical closure executed")
-					}
-					return errors.New("clinical ledger unavailable")
-				}, Rollback: func() { rollbacks++ }}}
-				env := shnsdk.Envelope{Metadata: shnsdk.Metadata{Sender: requester.ID, Recipient: "payer", TransactionType: "pas-claim", CorrelationID: "native-corr"}}
-				w := httptest.NewRecorder()
-				g.handlePASNativeInbound(w, newSignedInboundRequest(t, g, requester.ID), env, shnsdk.Token{Subject: pci}, body, "pa.pas@2.0")
-				if commits != 0 || rollbacks != 1 {
-					t.Fatalf("commits=%d rollbacks=%d", commits, rollbacks)
+			}
+			g.cfg.Responder = pasResultResponder{result: LegResult{ApplicationStatus: 201, Response: response, Commit: func() error {
+				commits++
+				return errors.New("clinical ledger unavailable")
+			}, Rollback: func() { rollbacks++ }}}
+			env := shnsdk.Envelope{Metadata: shnsdk.Metadata{Sender: requester.ID, Recipient: "payer", TransactionType: "pas-claim", CorrelationID: "native-corr"}}
+			w := httptest.NewRecorder()
+			g.handlePASNativeInbound(w, newSignedInboundRequest(t, g, requester.ID), env, shnsdk.Token{Subject: pci}, body, "pa.pas@2.0")
+			wantCommits := 1
+			if authored {
+				wantCommits = 0
+			}
+			if commits != wantCommits || rollbacks != 1 {
+				t.Fatalf("commits=%d rollbacks=%d", commits, rollbacks)
+			}
+			if authored {
+				if w.Code != 500 {
+					t.Fatalf("unregistered answer builder admitted: %d", w.Code)
 				}
-				if authored {
-					if w.Code != 500 {
-						t.Fatalf("unregistered answer builder admitted: %d", w.Code)
-					}
-					return
-				}
-				if w.Code != 200 {
-					t.Fatalf("transport refusal %d %s", w.Code, w.Body.String())
-				}
-				header, got, err := shnsdk.DecodeHTTPFrame(openResponseLeg(t, requester, w.Body.Bytes()))
-				if err != nil || header.Status != 201 || !bytes.Equal(got, answer) {
-					t.Fatalf("reply=%+v err=%v", header, err)
-				}
-			})
+				return
+			}
+			if w.Code != 200 {
+				t.Fatalf("transport refusal %d %s", w.Code, w.Body.String())
+			}
+			header, got, err := shnsdk.DecodeHTTPFrame(openResponseLeg(t, requester, w.Body.Bytes()))
+			if err != nil || header.Status != 201 || !bytes.Equal(got, answer) {
+				t.Fatalf("reply=%+v err=%v", header, err)
+			}
+		})
+	}
+}
+
+func TestNativeRelayFlushesAnswerBeforeParticipantLocalEffectCompletes(t *testing.T) {
+	g, requester := newInboundTestGateway(t, true)
+	g.cfg.ConformanceEnforcement = EnforcementNone
+	pci, _, _ := g.cfg.SoR.ResolvePatient("MBR-COVERED")
+	requestBody := conformantPASBundleWithQR(t, "MBR-COVERED")
+	answer := []byte(assemblyRealPending)
+	commitStarted := make(chan struct{})
+	releaseCommit := make(chan struct{})
+	g.cfg.Responder = pasResultResponder{result: LegResult{
+		ApplicationStatus: 201,
+		Response:          relay.Exact(relay.NewBody(answer, relay.OriginPeerFrame), "application/answer+json"),
+		Commit: func() error {
+			close(commitStarted)
+			<-releaseCommit
+			return nil
+		},
+	}}
+	env := shnsdk.Envelope{Metadata: shnsdk.Metadata{Sender: requester.ID, Recipient: "payer", TransactionType: "pas-claim", CorrelationID: "native-corr"}}
+	handlerDone := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		defer close(handlerDone)
+		g.handlePASNativeInbound(w, newSignedInboundRequest(t, g, requester.ID), env, shnsdk.Token{Subject: pci}, requestBody, "pa.pas@2.0")
+	}))
+	defer srv.Close()
+	type received struct {
+		status, contentLength int
+		contentType           string
+		body                  []byte
+		err                   error
+	}
+	receivedCh := make(chan received, 1)
+	go func() {
+		resp, err := srv.Client().Get(srv.URL)
+		if err != nil {
+			receivedCh <- received{err: err}
+			return
 		}
+		defer resp.Body.Close()
+		body, readErr := io.ReadAll(resp.Body)
+		receivedCh <- received{status: resp.StatusCode, contentLength: int(resp.ContentLength), contentType: resp.Header.Get("Content-Type"), body: body, err: readErr}
+	}()
+	select {
+	case <-commitStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("participant-local effect did not start")
+	}
+	var got received
+	select {
+	case got = <-receivedCh:
+	case <-time.After(2 * time.Second):
+		close(releaseCommit)
+		t.Fatal("client did not receive the complete response while the local effect was held")
+	}
+	if got.err != nil || got.status != http.StatusOK || got.contentType != "application/json" || got.contentLength != len(got.body) {
+		close(releaseCommit)
+		t.Fatalf("wire response status=%d content-type=%q length=%d/%d err=%v", got.status, got.contentType, got.contentLength, len(got.body), got.err)
+	}
+	select {
+	case <-handlerDone:
+		close(releaseCommit)
+		t.Fatal("handler completed before the held local effect")
+	default:
+	}
+	header, body, err := shnsdk.DecodeHTTPFrame(openResponseLeg(t, requester, got.body))
+	if err != nil || header.Status != 201 || header.Headers["Content-Type"] != "application/answer+json" || !bytes.Equal(body, answer) {
+		close(releaseCommit)
+		t.Fatalf("delivered peer answer header=%+v body=%s err=%v", header, body, err)
+	}
+	close(releaseCommit)
+	select {
+	case <-handlerDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler did not finish after local effect release")
+	}
+}
+
+func TestNativeRelayLocalProjectionRejectsForeignRequestPatientAfterDelivery(t *testing.T) {
+	g, requester := newInboundTestGateway(t, true)
+	g.cfg.ConformanceEnforcement = EnforcementNone
+	pci, _, _ := g.cfg.SoR.ResolvePatient("MBR-COVERED")
+	requestBody := bytes.ReplaceAll(conformantPASBundleWithQR(t, "MBR-COVERED"), []byte("MBR-COVERED"), []byte("MBR-OTHER"))
+	answer := []byte(assemblyRealPending)
+	commits := 0
+	g.cfg.Responder = pasResultResponder{result: LegResult{
+		ApplicationStatus: 201,
+		Response:          relay.Exact(relay.NewBody(answer, relay.OriginPeerFrame), "application/answer+json"),
+		Commit:            func() error { commits++; return nil },
+	}}
+	env := shnsdk.Envelope{Metadata: shnsdk.Metadata{Sender: requester.ID, Recipient: "payer", TransactionType: "pas-claim", CorrelationID: "native-corr"}}
+	w := httptest.NewRecorder()
+	g.handlePASNativeInbound(w, newSignedInboundRequest(t, g, requester.ID), env, shnsdk.Token{Subject: pci}, requestBody, "pa.pas@2.0")
+	if w.Code != http.StatusOK || commits != 0 {
+		t.Fatalf("delivery status=%d commits=%d body=%s", w.Code, commits, w.Body.String())
+	}
+	header, body, err := shnsdk.DecodeHTTPFrame(openResponseLeg(t, requester, w.Body.Bytes()))
+	if err != nil || header.Status != 201 || !bytes.Equal(body, answer) {
+		t.Fatalf("delivered peer answer header=%+v body=%s err=%v", header, body, err)
 	}
 }
 
@@ -273,7 +396,6 @@ func TestNativeRelayReceiverPolicy(t *testing.T) {
 		{"observe opaque", EnforcementObserve, "opaque", "opaque reply", 202, 1},
 		{"basic request", EnforcementBasic, "opaque", "opaque reply", 422, 0},
 		{"basic response", EnforcementBasic, `{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"Claim"}}]}`, "opaque reply", 502, 1},
-		{"strict unavailable linkage", EnforcementStrict, `{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"Claim","patient":{"reference":"Patient/external"}}}]}`, "opaque reply", 503, 0},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			g, requester := newInboundTestGateway(t, true)

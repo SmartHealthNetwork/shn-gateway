@@ -2,12 +2,8 @@ package fhirseed
 
 import (
 	"context"
-	"crypto/sha256"
-	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -98,58 +94,5 @@ func TestWarmDeadlineIsFarAboveTheConsumerBudget(t *testing.T) {
 	// able to absorb a cold first call that is several times that.
 	if WarmDeadline < 5*30*time.Second {
 		t.Fatalf("WarmDeadline = %s, want at least five consumer budgets", WarmDeadline)
-	}
-}
-
-// Warming requires an interpretable execution, not necessarily valid content.
-// Source preparation independently refuses invalid content before writing it.
-func TestWarmValidate_InterpretableExecution(t *testing.T) {
-	captured, err := os.ReadFile("testdata/hapi-dom6-warning.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fmt.Sprintf("%x", sha256.Sum256(captured)) != "f1d5187bafe37f28125f7b3248cf84bfadfb6d14608de9da57cbe5f12d98385e" {
-		t.Fatal("captured response changed")
-	}
-	for _, tc := range []struct {
-		name, body string
-		status     int
-		wantErr    bool
-	}{
-		{"captured advisory", string(captured), 200, false},
-		{"invalid content", `{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"structure"}]}`, 200, false},
-		{"unsupported", `{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"not-supported"}]}`, 200, true},
-		{"uninterpretable", `{"resourceType":"OperationOutcome","issue":[{"severity":"warning","code":"unknown"}]}`, 200, true},
-		{"malformed", `{`, 200, true},
-		{"server failure", string(captured), 500, true},
-		{"warning non-content status", string(captured), 422, true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			calls := 0
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				calls++
-				body, err := io.ReadAll(r.Body)
-				if err != nil || string(body) != warmBody || r.Method != "POST" || r.URL.RequestURI() != "/fhir/DEFAULT/Patient/$validate" {
-					t.Errorf("warm request changed: %s %s %s %v", r.Method, r.URL.RequestURI(), body, err)
-				}
-				w.WriteHeader(tc.status)
-				fmt.Fprint(w, tc.body)
-			}))
-			defer srv.Close()
-			c := &Client{Base: srv.URL + "/fhir"}
-			_, err := c.WarmValidate(context.Background(), "DEFAULT")
-			if (err != nil) != tc.wantErr || calls != 1 {
-				t.Fatalf("warm err=%v calls=%d", err, calls)
-			}
-		})
-	}
-}
-
-func TestWarmValidate_TransportFailure(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	srv.Close()
-	c := &Client{Base: srv.URL + "/fhir"}
-	if _, err := c.WarmValidate(context.Background(), "DEFAULT"); err == nil {
-		t.Fatal("transport failure counted as warm")
 	}
 }

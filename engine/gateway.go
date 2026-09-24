@@ -18,6 +18,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -94,10 +95,6 @@ type Config struct {
 	// Validator is the CANONICAL-lane FHIR $validate client (FR-36). It stays the
 	// only required validator: a deployment that speaks one line needs one lane.
 	Validator shnsdk.Validator
-	// PayerEOBValidator certifies an explicitly requested payer-owned EOB record
-	// against PDex. It is independent of optional native conformance lanes, so
-	// native none stays no-check while this local clinical write remains gated.
-	PayerEOBValidator shnsdk.Validator
 	// ValidatorsByLine are the per-contract-LINE $validate lanes:
 	// "2.0"/"2.1"/"2.2" → the validator that resolves THAT line's IG
 	// packages. A HAPI instance can host exactly one version of an IG, so a tri-line
@@ -193,9 +190,6 @@ type Config struct {
 	// ingressAuthBypass (real inbound UDAP auth is a planned future enhancement), so
 	// enabling them in prod is safe — they reject every call.
 	IngressEnabled bool
-	// PayerEOBActionsEnabled exposes the payer's explicit, authenticated local
-	// EOB recording action. It never runs during native PAS delivery.
-	PayerEOBActionsEnabled bool
 	// IngressBaseURL is the gateway's CONFIG-PINNED public base URL: the SMART
 	// Backend Services aud (assertion + bearer) and the advertised token endpoint.
 	// Never request-derived (no Host-header spoof). Required when IngressEnabled and
@@ -513,7 +507,7 @@ func New(cfg Config) (*Gateway, error) {
 	// Build the inbound auth server only for a real-auth ingress (not under the
 	// test bypass — body-conformance tests don't register clients). app.go has
 	// already validated registrations; a failure here is a config invariant.
-	if (cfg.IngressEnabled || cfg.PayerEOBActionsEnabled) && !cfg.ingressAuthBypass {
+	if cfg.IngressEnabled && !cfg.ingressAuthBypass {
 		keys := cfg.IngressKeys
 		if keys == nil {
 			ek, err := newEphemeralKeyStore()
@@ -587,7 +581,6 @@ func (g *Gateway) recipientFor(ctx context.Context, coverageJSON []byte) (holder
 // opaque token. The store is in-memory, Reset-cleared, no TTL — a documented
 // single-operator demo simplification (a production EHR would persist + expire).
 type pendState struct {
-	pasReply   ConsumptionAttempt
 	qrSource   *dtrBuildSource
 	pasDTRLine string // DTR generation paired with the pinned PAS target.
 	dtrLine    string // DTR line selected before population, retained through completion.
@@ -630,7 +623,6 @@ type pendState struct {
 	payer        shnsdk.PayerIdentifier // the member's REAL payer identity (parsed from OpenCoverage at run-to-PENDED) — threads to the resume ClaimUpdate builders so the payload's payer derives from the patient's real Coverage (FR-G40)
 	recipient    string                 // the payer HOLDER id the resume legs route to, resolved from the member's real Coverage at run-to-PENDED (recipientFor) — no default (FR-G40 / AI-G11 / OWD-G10)
 	pasToken     string                 // the pa.pas contract token selected at run-to-PENDED — the PENDED-LINE PIN. Threads to the resume pas-claim-update legs as Content.ProfileID so a pended exchange finishes on the line it started on, regardless of registry drift. Lives HERE by settled decision (AI-1: never ExchangeStore); in-memory/Reset-cleared like the recipient pin beside it — a durable pend store inherits it.
-	priorClaim   []byte                 // Claim resource from this participant's actual PAS submit, retained for source-complete FR-21 amendment.
 	// carriedEntries is the pended pas-claim leg's own declared CARRY record
 	// (the multi-version spec's verifyCarryPresent obligation) — the
 	// Carried LossEntries the pend's transform chain reported, pinned beside
@@ -873,13 +865,6 @@ func (g *Gateway) Handler() http.Handler {
 		}
 	case "payer":
 		mux.HandleFunc("POST /substrate/inbound", g.observeInbound(g.handleInbound))
-		if g.cfg.PayerEOBActionsEnabled {
-			mux.HandleFunc("POST /local/payer/eob-record", g.handlePayerEOBRecord)
-			if g.ingressAuth != nil {
-				mux.HandleFunc("POST /oauth/token", g.ingressAuth.handleToken)
-				mux.HandleFunc("GET /.well-known/smart-configuration", g.ingressAuth.handleSmartConfig)
-			}
-		}
 		// FR-28: CMS-0057 Patient Access API — conformant FHIR search + instance read
 		// over the PDex PA EOB, gated by a patient-access authority token. Distinct
 		// from the sealed substrate legs. FR-37: the CapabilityStatement for this
@@ -1620,18 +1605,9 @@ func (g *Gateway) validateFHIRForContract(ctx context.Context, resourceJSON []by
 	return g.validateGoverned(ctx, findingContextFrom(ctx), g.validatorForContractLine(contract, line), resourceJSON, dir, line, profile, false).refusal()
 }
 
-// validateFHIREgressOrBridged is the target-line egress check that follows
-// egressAdapt. bridged says whether the payload actually went through a
-// transform chain (len(route.Chain) > 0 at the call site): if it did, these
-// bytes are SHN's own registered edit and the check refuses at every level;
-// if it did not, they are the participant's own and the level governs.
-//
-// This is the ONE exception to "the validateFHIR* call lines keep their
-// signatures": the eleven PAS-bundle sites each pass the flag, and
-// conformance_sources_test.go lists exactly those eleven. The adaptive-DTR
-// site is deliberately NOT among them: its leg is an envelope leg, so
-// egressAdapt transforms nothing there, and a check that cannot see an SHN
-// edit has nothing to verify.
+// validateFHIREgressOrBridged validates the exact target bytes after a registered
+// transform. Native participant bytes remain governed by the selected level; a
+// transformed payload is this gateway's edit and always requires target proof.
 func (g *Gateway) validateFHIREgressOrBridged(ctx context.Context, resourceJSON []byte, contract, targetLine string, bridged bool) (int, string) {
 	if bridged {
 		return g.certifyBridgedEgressTarget(ctx, resourceJSON, contract, targetLine, findingContextFrom(ctx))
@@ -1899,20 +1875,15 @@ func (g *Gateway) egressAdapt(ctx context.Context, route legRoute, payload []byt
 		// fence in place of the impossible envelope $validate.
 		out, reports = payload, envelopeChainReports(route.Chain, route.BuildLine)
 	} else {
-		if contract != "pa.crd" { // CRD's registered steps are guarded byte-identities below.
-			err = g.certifyEgressSource(ctx, route, payload, x)
+		input := payload
+		if contract == "pa.crd" {
+			// Every registered CRD step is identity. Run it on an owned copy:
+			// a faulty step may edit its input slice before returning it.
+			input = bytes.Clone(payload)
 		}
-		if err == nil {
-			input := payload
-			if contract == "pa.crd" {
-				// Every registered CRD step is identity. Run it on an owned copy:
-				// a faulty step may edit its input slice before returning it.
-				input = bytes.Clone(payload)
-			}
-			out, reports, err = applyChain(route.Chain, route.BuildLine, input, x)
-			if err == nil && contract == "pa.crd" && !bytes.Equal(out, payload) {
-				err = contextError(http.StatusBadGateway, "adaptation_failed")
-			}
+		out, reports, err = applyChain(route.Chain, route.BuildLine, input, x)
+		if err == nil && contract == "pa.crd" && !bytes.Equal(out, payload) {
+			err = contextError(http.StatusBadGateway, "adaptation_failed")
 		}
 	}
 	if err != nil {
@@ -2006,45 +1977,6 @@ func (g *Gateway) egressAdapt(ctx context.Context, route legRoute, payload []byt
 	}
 
 	return out, reports, nil
-}
-
-// certifyEgressSource proves the exact pre-transform PAS request at the line
-// the builder used. PCV-15 requires this for a real transformation at every
-// optional conformance level. Unsupported operation/profile pairs fail closed;
-// envelope and registered identity chains are handled separately above.
-func (g *Gateway) certifyEgressSource(ctx context.Context, route legRoute, payload []byte, x ExchangeIdentity) error {
-	if ctx.Err() != nil {
-		return contextError(http.StatusServiceUnavailable, "adaptation_unavailable")
-	}
-	if route.Chain[0].Contract != "pa.pas" || (x.LegType != "pas-claim" && x.LegType != "pas-claim-update") {
-		return contextError(http.StatusServiceUnavailable, "adaptation_unavailable")
-	}
-	profile, ok := profileFor("PASRequestBundle", route.BuildLine, x.LegType)
-	if !ok {
-		return contextError(http.StatusServiceUnavailable, "adaptation_unavailable")
-	}
-	v := g.adaptationValidator("pa.pas", route.BuildLine)
-	if v == nil {
-		return contextError(http.StatusServiceUnavailable, "adaptation_unavailable")
-	}
-	// The checker may retain or mutate its argument. It never owns the bytes
-	// applyChain will consume or the source holder supplied.
-	ev, checkErr := delegateValidatorEvidence(ctx, v, bytes.Clone(payload), profile)
-	if ctx.Err() != nil || checkErr != nil || !ev.ExecutionAttempted {
-		return contextError(http.StatusServiceUnavailable, "adaptation_unavailable")
-	}
-	// FR-G54 proves this request's species profile at its source line.
-	// Terminology coverage is a separate optional deep/strict check: the
-	// production OperationValidator reports it unavailable even after a
-	// successful $validate, so it cannot gate the transformation here.
-	switch validationResult(ev.Profile, nil).State {
-	case CheckValid:
-		return nil
-	case CheckInvalid:
-		return contextError(http.StatusBadGateway, "adaptation_failed")
-	default:
-		return contextError(http.StatusServiceUnavailable, "adaptation_unavailable")
-	}
 }
 
 // adaptationRefusalStatus preserves the source-certification distinction
@@ -2719,12 +2651,11 @@ func (g *Gateway) successFrame(requester string, status int, contentType, contra
 }
 
 // respondLegPayload is the compatibility helper for answers built locally.
-// respondLeg builds and writes a response leg in one call. Used by the legs that
-// do NOT commit holder state between build and write (eligibility, CRD, DTR,
-// federated query). The PAS legs call buildResponseLeg/writeLeg explicitly so
-// they can commit state ONLY after a successful build. The
-// answer is sealed with its actual status and media type for a frame-negotiated
-// requester, bare legacy otherwise.
+// respondLeg builds and writes a response leg in one call. Most legs finish
+// there. The baseline PAS submit and inquiry projections may then run their
+// participant-local Commit only after this helper has successfully written and
+// flushed the sealed response. The answer is sealed with its actual status and
+// media type for a frame-negotiated requester, bare legacy otherwise.
 //
 // builtToken is the contract-version token this answer's payload was BUILT at —
 // the honored/recomputed answer line — and becomes the frame's contractVersion
@@ -2739,26 +2670,36 @@ func (g *Gateway) respondLegPayload(w http.ResponseWriter, r *http.Request, resp
 	g.respondLeg(w, r, respFrame, respOp, txType, inboundCorrID, LegResult{Response: p}, subjectPCI, requester, consentRef, builtToken)
 }
 
-func (g *Gateway) respondLeg(w http.ResponseWriter, r *http.Request, respFrame, respOp, txType, inboundCorrID string, result LegResult, subjectPCI, requester, consentRef, builtToken string) {
+func (g *Gateway) respondLeg(w http.ResponseWriter, r *http.Request, respFrame, respOp, txType, inboundCorrID string, result LegResult, subjectPCI, requester, consentRef, builtToken string) bool {
 	result, err := normalizeResult(result)
 	if err != nil {
 		g.responderFailed(w, txType, err)
-		return
+		return false
 	}
 	p := result.Response
 	stamp, terr := g.contractTokenForLeg(txType, builtToken)
 	if terr != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": terr.Error()})
-		return
+		return false
 	}
 	stamp = stampForBuiltAnswer(result, stamp)
 	out, status, msg := g.buildResponseLeg(r, respFrame, respOp, txType, inboundCorrID, p, answerKey(txType, relay.OutcomeAnswered),
 		g.successFrame(requester, result.ApplicationStatus, p.ContentType(), stamp), subjectPCI, requester, consentRef)
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
-		return
+		return false
+	}
+	if result.Commit != nil {
+		w.Header().Set("Content-Length", strconv.Itoa(len(out)))
 	}
 	writeLeg(w, out)
+	if result.Commit != nil {
+		if err := http.NewResponseController(w).Flush(); err != nil {
+			g.observe(ObserverEvent{Kind: "leg.failed", Direction: "response", LegType: txType, CorrelationID: inboundCorrID, Detail: "response flush failed before participant-local effect"})
+			return false
+		}
+	}
+	return true
 }
 
 // legibleLegErrorMessage returns msg unchanged when it is non-empty; otherwise it

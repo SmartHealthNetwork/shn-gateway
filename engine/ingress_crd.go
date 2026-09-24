@@ -1,7 +1,8 @@
-// ingress_crd.go contains the legacy CRD extraction and prefetch helpers, plus
-// source-record reads shared with provider-owned origination. Native CRD ingress
-// uses authenticated exchange context and the registered E-01 callback edit;
-// absent prefetch is not an implicit source-read request (PCV-08/10).
+// ingress_crd.go — CRD (CDS Hooks order-select) ingress: parse the conformant inbound request,
+// prove every patient reference resolves to ONE pci before any leg, and prepare the EHR's own
+// bytes for the network (the callback removed, absent prefetch obtained from the participant's
+// system of record). On the ingress the payload is EXTERNAL (the EHR), so cross-field patient
+// consistency is not automatic the way it is for the /scenario Originator.
 package engine
 
 import (
@@ -223,9 +224,8 @@ type prefetchObtained struct {
 	RetrievedAt time.Time     `json:"retrievedAt"`
 }
 
-// ingressEnsureSelfContainedContext is the legacy source-assembly action for
-// a CDS Hooks request. Native carriage with verified addressing uses
-// prepareBoundary instead; missing prefetch does not request assembly there.
+// ingressEnsureSelfContainedContext prepares the EHR's CDS Hooks request for
+// the network without re-encoding it.
 //
 //   - fhirServer and fhirAuthorization are removed (the callback-strip
 //     edit): the payer never receives a route or a credential into the
@@ -254,7 +254,7 @@ func (g *Gateway) ingressEnsureSelfContainedContext(ctx context.Context, leg str
 	}
 	root := doc.Root()
 
-	strip := callbackRemovalOps(doc)
+	var strip []relay.Op
 	var bases []string
 	for _, key := range []string{"fhirServer", "fhirAuthorization"} {
 		n, ok := doc.Member(root, key)
@@ -268,6 +268,7 @@ func (g *Gateway) ingressEnsureSelfContainedContext(ctx context.Context, leg str
 				bases = append(bases, s)
 			}
 		}
+		strip = append(strip, doc.RemoveMember(root, key))
 	}
 	prefetch, hasPrefetch := doc.Member(root, "prefetch")
 	if hasPrefetch && doc.Kind(prefetch) != relay.KindObject {
@@ -318,9 +319,18 @@ func (g *Gateway) ingressEnsureSelfContainedContext(ctx context.Context, leg str
 			}
 		}
 		if sorID == "" {
-			// This explicit source-data assembly requires a real local record.
-			// Compatibility configuration cannot authorize missing source facts.
-			return out, http.StatusUnprocessableEntity, "patient not found in system of record"
+			// A member the system of record does not hold — bound by member id
+			// alone under Config.AcceptUnknownMembers — has nothing to read: the
+			// patient and the coverage must come with the request, and a history
+			// key is left out with the reason recorded, as when the system names
+			// the patient differently. Without the seam a bound member the system
+			// cannot name is an inconsistent system of record, refused as before.
+			if key == prefetchPatientKey || key == "coverage" || !g.cfg.AcceptUnknownMembers {
+				return out, http.StatusUnprocessableEntity, "patient not found in system of record"
+			}
+			query, _ := SoRSearchQuery(prefetchSearchTypes[key], member)
+			g.recordPrefetch(leg, prefetchObtained{Key: key, Query: query, Outcome: SearchNotRun, Reason: historyMemberNotHeld})
+			continue
 		}
 		if sorID != member {
 			// Values from the system of record would name the patient by an id
@@ -390,6 +400,11 @@ const patientNamedDifferently = "system of record names the patient differently 
 // historyNamedDifferently is the recorded reason a history key is left out
 // for the same cause.
 const historyNamedDifferently = "patient named differently in the system of record"
+
+// historyMemberNotHeld is the recorded reason a history key is left out for a
+// member the system of record does not hold (bound by the member id and the Patient the
+// request carries under Config.AcceptUnknownMembers).
+const historyMemberNotHeld = "member not held by the system of record"
 
 // coverageOmitted is the refusal for a request whose coverage the system of
 // record could not provide.

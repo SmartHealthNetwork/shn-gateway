@@ -3,7 +3,6 @@ package engine
 import (
 	"bytes"
 	"net/http"
-	"strings"
 	"testing"
 	"time"
 
@@ -52,7 +51,7 @@ func TestBuildPASSubmitBundle_ByteParity(t *testing.T) {
 		}
 		// The existing HomeOxygen path builds this EXACT call (relaysReferencePayerBytes(provider-data)=true,
 		// no InfoChanged set → default false).
-		want, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{ItemFacts: syntheticPASItemFacts(), Insurer: testPayerOrganization(shnsdk.CMSPayerIdentity), Coverage: testMemberCoverage(member),
+		want, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{Insurer: testPayerOrganization(shnsdk.CMSPayerIdentity), Coverage: testMemberCoverage(member),
 			Provider:       testRequestingProvider(),
 			MemberIDSystem: shnsdk.MemberSystem,
 			QR:             qr, SR: order, PatientRef: patientRef, CoverageRef: coverageRef, MemberID: member,
@@ -77,7 +76,7 @@ func TestBuildPASSubmitBundle_ByteParity(t *testing.T) {
 		if err != nil {
 			t.Fatalf("buildPASSubmitBundle: %v", err)
 		}
-		want, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{ItemFacts: syntheticPASItemFacts(), Insurer: testPayerOrganization(shnsdk.CMSPayerIdentity), Coverage: testMemberCoverage(member),
+		want, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{Insurer: testPayerOrganization(shnsdk.CMSPayerIdentity), Coverage: testMemberCoverage(member),
 			Provider:       testRequestingProvider(),
 			MemberIDSystem: shnsdk.MemberSystem,
 			QR:             qr, SR: order, PatientRef: patientRef, CoverageRef: coverageRef, MemberID: member,
@@ -108,7 +107,7 @@ func TestBuildPASSubmitBundle_ByteParity(t *testing.T) {
 		if err != nil {
 			t.Fatalf("buildPASSubmitBundle: %v", err)
 		}
-		want, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{ItemFacts: syntheticPASItemFacts(), Coverage: testMemberCoverage(member),
+		want, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{Coverage: testMemberCoverage(member),
 			Provider:       testRequestingProvider(),
 			MemberIDSystem: shnsdk.MemberSystem,
 			QR:             qr, SR: order, PatientRef: patientRef, CoverageRef: coverageRef, MemberID: member,
@@ -168,7 +167,8 @@ func TestClassifyResolution_RealA1(t *testing.T) {
 // 2.0->2.1 StepGated hop does (TestTransformRefusalZeroBytes's row) — so
 // egressAdapt actually SUCCEEDS and route.Chain is genuinely non-empty by
 // the time submitClaimAndResolve's call reads it. With the target line 2.2
-// rigged to reject every Bundle, the wire call still refuses with 502 adaptation_failed despite
+// rigged to reject every Bundle, the wire call still refuses with 502
+// adaptation_failed despite
 // ConformanceEnforcement=none: this is "the message refuses", the
 // call-site-level twin of TestEgressAdaptValidatesAtTargetLane's
 // helper-level proof.
@@ -179,8 +179,8 @@ func TestSubmitClaimAndResolve_BridgedEgressRefusesAtNone(t *testing.T) {
 	env.originator.cfg.EgressNativeLines = []string{"2.1"}
 	env.originator.cfg.ConformanceEnforcement = EnforcementNone
 	env.originator.cfg.ValidatorsByLine = map[string]shnsdk.Validator{
-		"2.1": syntheticFakeValidator(),
-		"2.2": &shnsdk.FakeValidator{Evidence: syntheticEvidence(), RejectIfContains: `"resourceType":"Bundle"`},
+		"2.1": shnsdk.NewFakeValidator(),
+		"2.2": &shnsdk.FakeValidator{RejectIfContains: `"resourceType":"Bundle"`},
 	}
 
 	// A member the participant's own system actually holds, with that system's
@@ -193,10 +193,6 @@ func TestSubmitClaimAndResolve_BridgedEgressRefusesAtNone(t *testing.T) {
 		patientRef  = "Patient/" + member
 		coverageRef = "Coverage/" + member
 	)
-	// This synthetic participant holds the exact procedure order and its draft
-	// Claim; the row is about a later bridged egress refusal.
-	order := []byte(strings.Replace(string(pasTailServiceRequest()), "Patient/MBR-PD-UC04", patientRef, 1))
-	env.originator.cfg.SoR = &authoredQRSoR{censusSoR: newCensusSoR(), orders: map[string][]byte{member: order}}
 	recs, status, msg := env.originator.originCRDRecords(env.ctx, "crd-order-select", member)
 	if status != 0 {
 		t.Fatalf("originCRDRecords: %d %s", status, msg)
@@ -209,7 +205,8 @@ func TestSubmitClaimAndResolve_BridgedEgressRefusesAtNone(t *testing.T) {
 	if status != 0 {
 		t.Fatalf("memberPayerOrganization: %d %s", status, msg)
 	}
-	sub, status, msg, err := env.originator.submitPASClaim(env.ctx, env.req, "pci-1", order, order, nil, nil, realCov, realPayerOrg, patientRef, coverageRef, member, recs.memberSystem, shnsdk.CMSPayerIdentity, env.payerID)
+	order := pasTailServiceRequest()
+	sub, status, msg, err := env.originator.submitPASClaim(env.ctx, env.req, "pci-1", order, nil, nil, realCov, realPayerOrg, patientRef, coverageRef, member, recs.memberSystem, shnsdk.CMSPayerIdentity, env.payerID)
 	respJSON := sub.respJSON
 	if err != nil {
 		t.Fatalf("submitPASClaim: unexpected error (want an adaptation_failed refusal, not an error path): %v", err)

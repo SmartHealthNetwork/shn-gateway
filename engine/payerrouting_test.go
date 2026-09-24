@@ -257,7 +257,7 @@ func twoPayerTestSystem(t *testing.T) (*Gateway, *twoPayerSubstrate) {
 		HubTransportPub: authzPub, // not used by provider (only inbound gateways check it)
 		HubURL:          fakeBase,
 		Reg:             reg,
-		Validator:       syntheticFakeValidator(),
+		Validator:       shnsdk.NewFakeValidator(),
 		SoR:             newCensusSoR(),
 		Store:           newCensusSoR(),
 		Clock:           clock,

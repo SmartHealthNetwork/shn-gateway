@@ -182,10 +182,6 @@ type Continuation struct {
 	// ClaimIdentifier is the submitted Claim.identifier as "system|value" — the
 	// one the payer echoes in ClaimResponse.request.identifier.
 	ClaimIdentifier string
-	// ClaimReferences are exact request-side Claim references retained from the
-	// submitted Bundle for selected inquiry-answer linkage. They are not
-	// inferred from a payer reply or an identifier.
-	ClaimReferences []string
 	// ClaimType and ClaimPriority are the submitted Claim's type and priority
 	// codings, as "system|code". An inquiry Claim must carry the same ones the
 	// request carried, so a continuation that did not keep them could not build
@@ -469,7 +465,6 @@ func (m *MemContinuations) purgeLocked() {
 func (c Continuation) clone() Continuation {
 	out := c
 	out.ItemTraceNumbers = append([]string(nil), c.ItemTraceNumbers...)
-	out.ClaimReferences = append([]string(nil), c.ClaimReferences...)
 	out.PayerClaimResponseIDs = append([]string(nil), c.PayerClaimResponseIDs...)
 	out.Items = append([]ContinuationItem(nil), c.Items...)
 	return out
@@ -514,7 +509,6 @@ func ContinuationFacts(c Continuation, sdk shnsdk.PriorAuthContinuation) Continu
 	c.ClaimType = codingKey(sdk.ClaimType.System, sdk.ClaimType.Code)
 	c.ClaimPriority = codingKey(sdk.Priority.System, sdk.Priority.Code)
 	c.ClaimIdentifier = ""
-	c.ClaimReferences = append([]string(nil), sdk.ClaimReferences...)
 	if len(sdk.ClaimIdentifiers) > 0 {
 		c.ClaimIdentifier = identifierKey(sdk.ClaimIdentifiers[0].System, sdk.ClaimIdentifiers[0].Value)
 	}
@@ -556,7 +550,6 @@ func (c Continuation) SDKContinuation() shnsdk.PriorAuthContinuation {
 		ClaimType:   codingOfKey(c.ClaimType),
 		Priority:    codingOfKey(c.ClaimPriority),
 	}
-	out.ClaimReferences = append([]string(nil), c.ClaimReferences...)
 	if id, ok := identifierOfKey(c.ClaimIdentifier); ok {
 		out.ClaimIdentifiers = append(out.ClaimIdentifiers, id)
 	}

@@ -36,11 +36,11 @@ type LegResult struct {
 	ApplicationStatus       int
 	ResponseContractVersion string
 	ResponseVersionSource   string
-	SideEffectFHIR          [][]byte     // legacy local-workflow output; native Da Vinci delivery does not consume it
+	SideEffectFHIR          [][]byte     // legacy local-workflow output
 	Status                  int          // connector-signalled HTTP outcome (409/422); 0 = proceed
 	Message                 string       // body for a non-zero Status
-	Commit                  func() error // legacy local-workflow action; never invoked by native Da Vinci delivery
-	Rollback                func()       // releases acquired work; native Da Vinci delivery always defers this cleanup
+	Commit                  func() error // participant-local effect run only after the response is written and flushed
+	Rollback                func()       // releases acquired work when delivery or the local effect does not complete
 	// ResponseSubjectForeign identifies the payer's patient namespace. The full
 	// graph must remain internally subject-consistent; it is not compared with
 	// the request's SHN member id. Locally produced EOBs remain member-fenced.

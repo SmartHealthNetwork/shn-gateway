@@ -3,11 +3,8 @@ package fhirseed
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -43,33 +40,11 @@ func (h *hapiStub) handler() http.Handler {
 			} else {
 				w.WriteHeader(http.StatusNotFound)
 			}
-		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/provider"):
-			var request struct {
-				Entry []json.RawMessage `json:"entry"`
-			}
-			body, _ := io.ReadAll(r.Body)
-			if err := json.Unmarshal(body, &request); err != nil {
-				http.Error(w, "bad transaction", http.StatusBadRequest)
-				return
-			}
-			entries := make([]map[string]any, len(request.Entry))
-			for i := range entries {
-				entries[i] = map[string]any{"response": map[string]any{"status": "200 OK"}}
-			}
-			_, _ = w.Write(mustJSON(map[string]any{"resourceType": "Bundle", "type": "transaction-response", "entry": entries}))
 		default:
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte(`{}`))
 		}
 	})
-}
-
-func mustJSON(v any) []byte {
-	out, err := json.Marshal(v)
-	if err != nil {
-		panic(err)
-	}
-	return out
 }
 
 func TestClient_SeedFlow(t *testing.T) {
@@ -126,121 +101,6 @@ func TestClient_SeedFlow(t *testing.T) {
 	}
 	if txns == 0 {
 		t.Fatal("no provider-data transaction bundles POSTed")
-	}
-}
-
-// A transaction endpoint can answer HTTP 200 while recording a failed entry.
-// The seeder must not count that as a complete synthetic source.
-func TestPostTransaction_RefusesFailedEntryDespiteHTTP200(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/fhir+json")
-		_, _ = w.Write([]byte(`{"resourceType":"Bundle","type":"transaction-response","entry":[{"response":{"status":"422 Unprocessable Entity","outcome":{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"invalid"}]}}}]}`))
-	}))
-	defer srv.Close()
-	c := &Client{Base: srv.URL + "/fhir"}
-	err := c.PostTransaction(context.Background(), "provider", []byte(`{"resourceType":"Bundle","type":"transaction","entry":[{"request":{"method":"PUT","url":"Patient/p"}}]}`))
-	if err == nil || !strings.Contains(err.Error(), "422") {
-		t.Fatalf("failed transaction entry accepted: %v", err)
-	}
-}
-
-func TestPostTransaction_RequiresTerminalWriteAcknowledgements(t *testing.T) {
-	for _, tc := range []struct {
-		name, method, outer, entry string
-		wantError                  bool
-	}{
-		{"put-created", "PUT", "200", "201 Created", false},
-		{"put-updated", "PUT", "200", "200 OK", false},
-		{"pending-outer", "PUT", "202", "200 OK", true},
-		{"pending-entry", "PUT", "200", "202 Accepted", true},
-		{"put-no-content", "PUT", "200", "204 No Content", true},
-		{"delete-complete", "DELETE", "200", "204 No Content", false},
-		{"unknown-method", "BREW", "200", "200 OK", true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "application/fhir+json")
-				code, _ := strconv.Atoi(tc.outer)
-				w.WriteHeader(code)
-				fmt.Fprintf(w, `{"resourceType":"Bundle","type":"transaction-response","entry":[{"response":{"status":%q}}]}`, tc.entry)
-			}))
-			defer srv.Close()
-			c := &Client{Base: srv.URL + "/fhir"}
-			bundle := []byte(fmt.Sprintf(`{"resourceType":"Bundle","type":"transaction","entry":[{"request":{"method":%q,"url":"Patient/p"}}]}`, tc.method))
-			err := c.PostTransaction(context.Background(), "provider", bundle)
-			if (err != nil) != tc.wantError {
-				t.Fatalf("outer=%s method=%s entry=%s error=%v, wantError=%v", tc.outer, tc.method, tc.entry, err, tc.wantError)
-			}
-		})
-	}
-}
-
-func TestPostTransaction_RefusesOversizedResponseEvenAfterValidPrefix(t *testing.T) {
-	response := `{"resourceType":"Bundle","type":"transaction-response","entry":[{"response":{"status":"200 OK"}}]}` + strings.Repeat(" ", 4<<20)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/fhir+json")
-		_, _ = w.Write([]byte(response))
-	}))
-	defer srv.Close()
-	c := &Client{Base: srv.URL + "/fhir"}
-	err := c.PostTransaction(context.Background(), "provider", []byte(`{"resourceType":"Bundle","type":"transaction","entry":[{"request":{"method":"PUT","url":"Patient/p"}}]}`))
-	if err == nil {
-		t.Fatal("truncated but JSON-valid response prefix counted as a completed transaction")
-	}
-}
-
-func TestSeedPrerequisitesRejectPendingAcknowledgements(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		call func(*Client) error
-	}{
-		{"partition create", func(c *Client) error { return c.CreatePartitions(context.Background(), []string{"provider"}) }},
-		{"CR Library PUT", func(c *Client) error { return c.InstallCRLibraries(context.Background()) }},
-		{"ELM warm-up", func(c *Client) error { return c.WarmUpPopulate(context.Background()) }},
-		{"marker DELETE", func(c *Client) error { return c.ClearSeedMarker(context.Background(), "provider") }},
-		{"certified marker PUT", func(c *Client) error { return c.WriteSeedMarker(context.Background(), "provider") }},
-		{"uncertified marker PUT", func(c *Client) error { return c.WriteSyntheticUncertifiedSeedMarker(context.Background(), "provider") }},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(http.StatusAccepted)
-			}))
-			defer srv.Close()
-			if err := tc.call(&Client{Base: srv.URL + "/fhir"}); err == nil {
-				t.Fatal("202 pending acknowledgement counted as completed source prerequisite")
-			}
-		})
-	}
-}
-
-func TestSeedMarkerRejectsPartialOrBodylessPut(t *testing.T) {
-	for _, row := range []struct {
-		name, method string
-		status       int
-	}{
-		{"partial marker clear", http.MethodDelete, http.StatusPartialContent},
-		{"partial marker write", http.MethodPut, http.StatusPartialContent},
-		{"bodyless marker write", http.MethodPut, http.StatusNoContent},
-	} {
-		t.Run(row.name, func(t *testing.T) {
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != row.method {
-					t.Errorf("method %s, want %s", r.Method, row.method)
-				}
-				w.WriteHeader(row.status)
-			}))
-			defer srv.Close()
-			c := &Client{Base: srv.URL + "/fhir"}
-			var err error
-			if row.method == http.MethodDelete {
-				err = c.ClearSeedMarker(context.Background(), "provider")
-			} else {
-				err = c.WriteSyntheticUncertifiedSeedMarker(context.Background(), "provider")
-			}
-			if err == nil {
-				t.Fatalf("incomplete marker %s status %d accepted", row.method, row.status)
-			}
-		})
 	}
 }
 

@@ -763,9 +763,9 @@ func nativeCRDPolicyCase(t *testing.T, leg string, answer []byte) (int, []byte, 
 	r = r.WithContext(context.WithValue(r.Context(), nativeExchangeKey{}, ex))
 	request := conformantCRD("MBR-COVERED", "72148")
 	if leg == "crd-order-dispatch" {
-		// This response corpus must enter through a complete dispatch request:
-		// merely changing order-select's hook leaves its context invalid and
-		// preempts every answer-shape mutation with cds.request.context.
+		// This response corpus enters through the complete dispatch shape the
+		// participant backend expects, so a request-shape failure cannot obscure
+		// the answer mutation under test.
 		var payload map[string]any
 		if err := json.Unmarshal(request, &payload); err != nil {
 			t.Fatal(err)

@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -212,38 +211,4 @@ func TestPASInquire_NonconformantOutputNameReported(t *testing.T) {
 			t.Error("the recorded reference-payer answer yields no ClaimResponse under the supported output name")
 		}
 	})
-}
-
-// Inquiry departure evidence belongs to the response rule, never to source-line
-// speculation or a delivery claim. The historical evidence API stays compatible.
-func TestPASInquire_NonconformanceRidesCertificationEvidence(t *testing.T) {
-	g := certificationGateway(t, syntheticFakeValidator(), nil)
-	in := observationInput(EnforcementObserve)
-	in.Exchange.legType = "pas-claim-inquire"
-	in.Exchange.contractVersion = "pa.pas@2.2"
-	in.DeclaredVersion = "pa.pas@2.2"
-	g.observeContent(in)
-	certificationFlush(t, g)
-	in.Direction = "response"
-	in.Status = 200
-	in.Body = []byte(`{"resourceType":"Parameters","parameter":[{"name":"responseBundle","resource":{"resourceType":"Bundle","type":"collection"}}]}`)
-	g.observeContent(in)
-	certificationFlush(t, g)
-	findings, _ := g.ConformanceObservationsForTest()
-	found := false
-	for _, f := range findings {
-		if f.Rule == "pas.inquiry.return" {
-			if f.Direction != "response" || f.State != CheckInvalid || f.Action != "not_enforced" {
-				t.Fatalf("inquiry evidence %+v", f)
-			}
-			found = true
-		}
-	}
-	if !found {
-		t.Fatal("missing response departure finding")
-	}
-	raw, err := json.Marshal(CertificationEvidence{LegType: "pas-claim-inquire", Direction: "response"})
-	if err != nil || bytes.Contains(raw, []byte("nonconformance")) {
-		t.Fatal("historical metadata shape changed")
-	}
 }

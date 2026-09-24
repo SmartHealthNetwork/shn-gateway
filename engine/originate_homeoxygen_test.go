@@ -184,7 +184,6 @@ type homeOxygenSubstrate struct {
 	clock          func() time.Time
 	pci            string
 	canonical      string
-	patientRef     string
 
 	legTypes []string
 
@@ -194,11 +193,10 @@ type homeOxygenSubstrate struct {
 	// frame-capable recipient that frames every answer. Requires the payer registry entry to
 	// advertise MessageFrames:["v1"] (else the originator treats the frame as a stale-feed bare
 	// payload). Zero-valued by default, so the bare-sealing tests above are byte-unaffected.
-	packageParameters bool
-	frameErrLeg       string
-	frameErrStatus    int
-	frameErrBody      []byte
-	frameErrCT        string
+	frameErrLeg    string
+	frameErrStatus int
+	frameErrBody   []byte
+	frameErrCT     string
 }
 
 func (s *homeOxygenSubstrate) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -270,12 +268,9 @@ func (s *homeOxygenSubstrate) handleRoute(body []byte) (*http.Response, error) {
 			return errResp("stub: package: " + perr.Error()), nil
 		}
 		respPayload = pkg
-		if s.packageParameters {
-			respPayload, _ = json.Marshal(map[string]any{"resourceType": "Parameters", "parameter": []any{map[string]any{"name": "return", "resource": json.RawMessage(pkg)}}})
-		}
 		respOp, respFrame = "dtr-questionnaire", "payer-coverage"
 	case "pas-claim":
-		respPayload = homeOxygenApprovedClaimResponseFor(s.patientRef)
+		respPayload = homeOxygenApprovedClaimResponse()
 		respOp, respFrame = "pas-response", "payer-coverage"
 	default:
 		return errResp("stub: unexpected leg " + txType), nil
@@ -335,17 +330,20 @@ func homeOxygenQuestionnaire(canonical string) []byte {
 	return b
 }
 
-// homeOxygenApprovedClaimResponse states the synthetic payer's explicit A1
-// decision using the same shared builder as other approved fixture answers.
+// homeOxygenApprovedClaimResponse builds an A1-equivalent approved ClaimResponse —
+// outcome "complete" + a preAuthRef — which ParseClaimResponse reads as approved.
 func homeOxygenApprovedClaimResponse() []byte {
-	return homeOxygenApprovedClaimResponseFor("Patient/MBR-OX")
-}
-
-func homeOxygenApprovedClaimResponseFor(patientRef string) []byte {
-	b, err := shnsdk.BuildClaimResponse("AUTH-OX-001", "2027-01-01", patientRef, "home-oxygen-fixture", time.Unix(1700000000, 0))
-	if err != nil {
-		panic(err)
+	cr := map[string]any{
+		"resourceType": "ClaimResponse",
+		"id":           "cr-homeoxygen",
+		"status":       "active",
+		"outcome":      "complete",
+		"preAuthRef":   "AUTH-OX-001",
+		"preAuthPeriod": map[string]string{
+			"end": "2027-01-01",
+		},
 	}
+	b, _ := json.Marshal(cr)
 	return b
 }
 
@@ -399,7 +397,6 @@ func TestHandleHomeOxygen(t *testing.T) {
 		clock:          clock,
 		pci:            pci,
 		canonical:      canonical,
-		patientRef:     "Patient/MBR-OX",
 	}
 
 	reg := shnsdk.NewRegistry()
@@ -417,20 +414,19 @@ func TestHandleHomeOxygen(t *testing.T) {
 			EncPub:   provEncPub,
 			EncPriv:  provEncPriv,
 		},
-		AuthzURL:                 fakeBase,
-		AuthzPub:                 authzPub,
-		HubTransportPub:          authzPub,
-		HubURL:                   fakeBase,
-		Reg:                      reg,
-		Validator:                syntheticFakeValidator(),
-		SubjectReferenceResolver: censusSubjectResolver("provider", "payer"),
-		SoR:                      sor,
-		Store:                    base,
-		Clock:                    clock,
-		NPI:                      "1234567890",
-		OriginationProfile:       "provider-data",
-		Populator:                fakePopulator{canonical: canonical},
-		Client:                   &http.Client{Transport: stub},
+		AuthzURL:           fakeBase,
+		AuthzPub:           authzPub,
+		HubTransportPub:    authzPub,
+		HubURL:             fakeBase,
+		Reg:                reg,
+		Validator:          shnsdk.NewFakeValidator(),
+		SoR:                sor,
+		Store:              base,
+		Clock:              clock,
+		NPI:                "1234567890",
+		OriginationProfile: "provider-data",
+		Populator:          fakePopulator{canonical: canonical},
+		Client:             &http.Client{Transport: stub},
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/scenario/homeoxygen", nil)
@@ -558,7 +554,7 @@ func TestHandler_HomeOxygenRouteRegistered(t *testing.T) {
 		},
 		SoR:       stub,
 		Store:     stub,
-		Validator: syntheticFakeValidator(),
+		Validator: shnsdk.NewFakeValidator(),
 	})
 	h := gw.Handler()
 	req := httptest.NewRequest(http.MethodPost, "/scenario/homeoxygen", strings.NewReader("{}"))

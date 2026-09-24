@@ -24,7 +24,7 @@ func TestUnknownPASStructuralAvailability(t *testing.T) {
 			for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve, EnforcementBasic, EnforcementStrict} {
 				t.Run(level.String(), func(t *testing.T) {
 					var checkerCalls atomic.Int32
-					g := newObservationGateway(t, level, observationValidator(func(context.Context, []byte, string) (shnsdk.ValidationEvidence, error) {
+					g := newObservationGateway(t, level, observationValidator(func(context.Context, []byte, string) (shnsdk.Result, error) {
 						checkerCalls.Add(1)
 						panic("unknown PAS must not be passed to a known checker")
 					}))

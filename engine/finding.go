@@ -275,8 +275,7 @@ func knownFindingProfile(profile string) bool {
 }
 
 // ruleFinding is shared by the asynchronous observer and synchronous refusal.
-// The evidence cache contains targets selected during the check already run;
-// this function does not parse or ask the validator for another verdict.
+// This function does not parse or ask the validator for another verdict.
 func ruleFinding(in CheckInput, rule ConformanceRule, result CheckResult, action string) ConformanceFinding {
 	f := ConformanceFinding{Kind: ConformanceObservedEvent, Direction: in.Direction, LegType: in.Exchange.legType,
 		CorrelationID: in.Exchange.correlationID, Seam: in.finding.Seam, Whose: in.finding.Whose,
@@ -284,11 +283,5 @@ func ruleFinding(in CheckInput, rule ConformanceRule, result CheckResult, action
 		Action: action, Rule: rule.ID, CheckClass: rule.Class, Operation: in.Exchange.operation,
 		ResultSeverity: result.Severity, ClosedReason: result.Code, CheckIssues: result.Issues,
 		PayloadSHA256: sha256hex(in.Body)}
-	if rule.Class == CheckDeep && in.evidence != nil && (rule.ID == "fhir.profile" || rule.ID == "fhir.terminology") {
-		f.Profiles = append([]string(nil), in.evidence.profiles...)
-		if len(f.Profiles) == 1 {
-			f.Profile = f.Profiles[0]
-		}
-	}
 	return f
 }

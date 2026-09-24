@@ -3,7 +3,6 @@ package engine
 import (
 	"context"
 	"encoding/json"
-	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 	"io"
 	"net/http"
 	"sync"
@@ -20,7 +19,7 @@ type ConformanceStatus struct {
 	Dropped uint64 `json:"dropped"`
 }
 
-var conformanceCategories = [...]string{"structural", "builtInDeep", "patientConsistency", "profile", "terminology"}
+var conformanceCategories = [...]string{"structural", "builtInDeep", "profile"}
 
 // UnavailableConformanceStatus represents an unknown/old/down gateway, not none.
 func UnavailableConformanceStatus() ConformanceStatus {
@@ -33,7 +32,7 @@ func UnavailableConformanceStatus() ConformanceStatus {
 
 // ConformanceStatus reads bounded local snapshots only: no callbacks, I/O,
 // validation, payloads or finding copies. Recent execution demonstrates only partial coverage; a successful message
-// never proves full profile/terminology coverage. Qualification is not liveness. Per-message applicability can still be unknown.
+// never proves full profile coverage. Qualification is not liveness. Per-message applicability can still be unknown.
 func (g *Gateway) ConformanceStatus() ConformanceStatus {
 	s := UnavailableConformanceStatus()
 	s.Level, s.RuleSet = g.policy().Level().String(), ConformanceRuleSet
@@ -44,9 +43,6 @@ func (g *Gateway) ConformanceStatus() ConformanceStatus {
 		return s
 	}
 	s.Availability["structural"], s.Availability["builtInDeep"] = "available", "available"
-	if g.cfg.SubjectReferenceResolver != nil {
-		s.Availability["patientConsistency"] = "available"
-	}
 	now := g.checkerNow()
 	g.checkerAvailability.mu.Lock()
 	for _, row := range g.checkerAvailability.rows {
@@ -56,9 +52,6 @@ func (g *Gateway) ConformanceStatus() ConformanceStatus {
 		}
 		if executedCheck(row.profile) {
 			s.Availability["profile"] = "partial"
-		}
-		if executedCheck(row.terminology) {
-			s.Availability["terminology"] = "partial"
 		}
 	}
 	g.checkerAvailability.mu.Unlock()
@@ -109,7 +102,7 @@ func FetchConformanceStatus(ctx context.Context, client *http.Client, base strin
 	}
 	s := envelope.Conformance
 	level, err := ParseConformanceEnforcement(s.Level)
-	if err != nil || s.Level == "" || (s.RuleSet != ConformanceRuleSet && s.RuleSet != "participant-conformance/4" && s.RuleSet != "participant-conformance/3" && s.RuleSet != "participant-conformance/2" && s.RuleSet != "participant-conformance/1") {
+	if err != nil || s.Level == "" || s.RuleSet != ConformanceRuleSet {
 		return unavailable
 	}
 	out := UnavailableConformanceStatus()
@@ -139,16 +132,16 @@ const checkerAvailabilityFreshness = 5 * time.Minute
 var checkerScopes = [...]string{"pa.crd@2.0", "pa.crd@2.1", "pa.crd@2.2", "pa.dtr@2.0", "pa.dtr@2.1", "pa.dtr@2.2", "pa.pas@2.0", "pa.pas@2.1", "pa.pas@2.2"}
 
 type checkerAvailabilityRow struct {
-	at                   time.Time
-	profile, terminology shnsdk.ValidationState
+	at      time.Time
+	profile validationState
 }
 type checkerAvailability struct {
 	mu   sync.Mutex
 	rows [len(checkerScopes)]checkerAvailabilityRow
 }
 
-func executedCheck(s shnsdk.ValidationState) bool {
-	return s == shnsdk.ValidationValid || s == shnsdk.ValidationInvalid
+func executedCheck(s validationState) bool {
+	return s == validationValid || s == validationInvalid
 }
 func (g *Gateway) checkerNow() time.Time {
 	if g.cfg.Clock != nil {
@@ -156,13 +149,13 @@ func (g *Gateway) checkerNow() time.Time {
 	}
 	return time.Now()
 }
-func (g *Gateway) recordCheckerAvailability(contract, line string, ev shnsdk.ValidationEvidence) {
+func (g *Gateway) recordCheckerAvailability(contract, line string, ev validationEvidence) {
 	if !ev.ExecutionAttempted || g.policy().Level() == EnforcementNone {
 		return
 	}
 	for i, scope := range checkerScopes {
 		if scope == contract+"@"+line {
-			row := checkerAvailabilityRow{at: g.checkerNow(), profile: ev.Profile.State, terminology: ev.Terminology.State}
+			row := checkerAvailabilityRow{at: g.checkerNow(), profile: ev.Profile.State}
 			g.checkerAvailability.mu.Lock()
 			// A delayed recorder cannot replace a more recent execution result.
 			if !row.at.Before(g.checkerAvailability.rows[i].at) {

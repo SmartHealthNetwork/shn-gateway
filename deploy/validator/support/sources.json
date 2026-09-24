@@ -9,26 +9,8 @@
       "file": "cms-pos-2024-05-02.html",
       "url": "https://www.cms.gov/medicare/coding-billing/place-of-service-codes/code-sets",
       "sha256": "491efe1dadf8c8ea120deaf6973e8936c8624847190aa0d484f37e9dfa81cce4"
-    },
-    {
-      "file": "cms-icd10cm-april-2026-order.zip",
-      "url": "https://www.cms.gov/files/zip/april-1-2026-code-descriptions-tabular-order.zip",
-      "sha256": "4fd9d8b37f02ab42827c7e7be30595c005b0cc3a6bae7a515e3f4c86b6918688"
     }
   ],
-  "local": {
-    "file": "shn-clinical-context-1.0.0.json",
-    "sha256": "685cfac6adacda09011328342d2d4e3601eea1b686cd222bbd970303cfaaf1b2",
-    "publisher": "Smart Health Network",
-    "license": "Apache-2.0",
-    "sourceCommit": "e34a57feeb9dcc71d1b54ed135831a31cc2dc14f",
-    "sourceFiles": {
-      "sdk/fhircodes.go": "7f970ff9d62a0c5512968c4dcdd59a9b0d673f4e3274a852d94a6457aeb0dcaf",
-      "gateway/connectors/fhirsor/fhirsor.go": "a6e4c2eee7c6b11f2bb58e6a8ed9cf223f3750f9b2306fdbe4334bb73c69d828",
-      "gateway/fhirseed/lumbar.go": "f5d39249cd706d5876788e24f08d4b690ade812377e7ec2fab223d82e05516dd",
-      "gateway/fhirseed/testdata/lumbar-mri-questionnaire.json": "7c5a062da8beacc2d21f9e6361705e4b78b52859825e5521a7aca13b74218773"
-    }
-  },
   "closure": {
     "seeds": [
       "http://hl7.org/fhir/5.0/StructureDefinition/extension-Claim.encounter"

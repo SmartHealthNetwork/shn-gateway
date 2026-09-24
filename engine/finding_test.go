@@ -102,11 +102,9 @@ func TestRuleFindingIgnoresUntrustedPayloadProfile(t *testing.T) {
 
 func TestStrictAuthoredDTRQRFindingPreservesSelectedBaseProfile(t *testing.T) {
 	var validatedProfile string
-	g, events, logged := findingGateway(t, observationValidator(func(_ context.Context, _ []byte, profile string) (shnsdk.ValidationEvidence, error) {
+	g, events, logged := findingGateway(t, observationValidator(func(_ context.Context, _ []byte, profile string) (shnsdk.Result, error) {
 		validatedProfile = profile
-		evidence := *syntheticEvidence()
-		evidence.Profile = shnsdk.ValidationCheckEvidence{State: shnsdk.ValidationInvalid, Code: "synthetic-rejection"}
-		return evidence, nil
+		return shnsdk.Result{Valid: false, Issues: []string{"synthetic rejection"}}, nil
 	}))
 	ctx := withFindingContext(context.Background(), findingContext{LegType: "dtr-questionnaire-fetch", CorrelationID: "corr-qr-profile", Seam: "originate", Whose: "own"})
 	status, _ := g.validateFHIRForContract(ctx, []byte(`{"resourceType":"QuestionnaireResponse","status":"completed"}`), "egress", "pa.dtr", "2.0", baseQRProfile)

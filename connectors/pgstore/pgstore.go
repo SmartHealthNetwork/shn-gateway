@@ -153,8 +153,7 @@ CREATE TABLE IF NOT EXISTS gw_pended_claim_key (
 -- participant's own system at inquiry time, and the item table below is what
 -- says whether it still matches what was submitted. The two arrays hold
 -- identifier strings ("system|value"), which is what an answer is matched back
--- by; claim_references holds exact submitted Claim reference strings for reply
--- linkage. A JSON column "just for the keys" is exactly what the fence exists to stop.
+-- by; a JSON column "just for the keys" is exactly what the fence exists to stop.
 --
 -- Retention counts from updated_at, the store's OWN clock, for the same six
 -- months the pend ledger keeps its authorizations: a capability outliving the
@@ -174,7 +173,6 @@ CREATE TABLE IF NOT EXISTS gw_pa_continuation (
     claim_identifier        TEXT NOT NULL,
     claim_type              TEXT NOT NULL,
     claim_priority          TEXT NOT NULL,
-    claim_references        TEXT[] NOT NULL DEFAULT '{}',
     item_trace_numbers      TEXT[] NOT NULL DEFAULT '{}',
     payer_claimresponse_ids TEXT[] NOT NULL DEFAULT '{}',
     payer_preauth_ref       TEXT NOT NULL,
@@ -183,9 +181,6 @@ CREATE TABLE IF NOT EXISTS gw_pa_continuation (
     updated_at              TIMESTAMPTZ NOT NULL,
     PRIMARY KEY (holder_id, continuation_id)
 );
--- Existing continuation rows predate request-reference retention. Empty means
--- no reference authority was recorded; it cannot authorize an asserted URL.
-ALTER TABLE gw_pa_continuation ADD COLUMN IF NOT EXISTS claim_references TEXT[] NOT NULL DEFAULT '{}';
 CREATE INDEX IF NOT EXISTS gw_pa_continuation_retention ON gw_pa_continuation (holder_id, updated_at);
 -- gw_pa_continuation_item is the item map: one row per line the submission
 -- carried, with the sequence it was submitted under, the product it asked for,

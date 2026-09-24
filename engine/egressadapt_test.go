@@ -18,6 +18,13 @@ import (
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
+func waitEgressObserver(t *testing.T, g *Gateway) {
+	t.Helper()
+	if err := g.WaitObserverCompletion(context.Background()); err != nil {
+		t.Fatalf("wait for observer completion: %v", err)
+	}
+}
+
 var fixedEgressClock = func() time.Time { return time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC) }
 
 // TestEgressAdaptNilChainIsPassthrough: arms (1)/(2) carry route.Chain==nil
@@ -28,8 +35,7 @@ func TestEgressAdaptNilChainIsPassthrough(t *testing.T) {
 	var observed []ObserverEvent
 	g := &Gateway{cfg: Config{
 		HolderID: "test-holder", Clock: fixedEgressClock,
-		Observer:         func(e ObserverEvent) { observed = append(observed, e) },
-		ValidatorsByLine: map[string]shnsdk.Validator{"2.0": failIfCalledValidator{t}},
+		Observer: func(e ObserverEvent) { observed = append(observed, e) },
 	}}
 	route := legRoute{Token: "pa.pas@2.0", BuildLine: "2.0", Chain: nil}
 	in := []byte(`{"resourceType":"Bundle"}`)
@@ -43,7 +49,6 @@ func TestEgressAdaptNilChainIsPassthrough(t *testing.T) {
 	if reports != nil {
 		t.Fatalf("nil-chain must produce no LossReports, got %+v", reports)
 	}
-	observationFlush(t, g)
 	if len(observed) != 0 {
 		t.Fatalf("nil-chain must emit NO observer event (no transform ran), got %+v", observed)
 	}
@@ -73,11 +78,11 @@ func TestEgressAdaptValidatesAtTargetLane(t *testing.T) {
 
 	g := &Gateway{cfg: Config{
 		HolderID: "test-holder", Clock: fixedEgressClock,
-		Validator:        syntheticFakeValidator(),
-		ValidatorsByLine: map[string]shnsdk.Validator{"2.0": syntheticFakeValidator(), "2.1": &shnsdk.FakeValidator{Evidence: syntheticEvidence(), RejectIfContains: corruptMarker}},
+		Validator:        shnsdk.NewFakeValidator(),
+		ValidatorsByLine: map[string]shnsdk.Validator{"2.0": shnsdk.NewFakeValidator(), "2.1": &shnsdk.FakeValidator{RejectIfContains: corruptMarker}},
 	}}
 
-	adapted, _, err := g.egressAdapt(context.Background(), route, []byte(`{"resourceType":"Bundle"}`), ExchangeIdentity{CorrelationID: "corr-2", LegType: "pas-claim"})
+	adapted, _, err := g.egressAdapt(context.Background(), route, []byte(`{"resourceType":"Bundle"}`), ExchangeIdentity{CorrelationID: "corr-2"})
 	if err != nil {
 		t.Fatalf("egressAdapt itself must not error on a structurally-valid (if semantically corrupted) stub output: %v", err)
 	}
@@ -86,9 +91,8 @@ func TestEgressAdaptValidatesAtTargetLane(t *testing.T) {
 	// a strict row plus a relaxed twin.
 	for _, level := range []ConformanceEnforcement{EnforcementStrict, EnforcementNone} {
 		g.cfg.ConformanceEnforcement = level
-		ctx := withFindingContext(context.Background(), findingContext{LegType: "pas-claim", CorrelationID: "corr-2", Seam: "originate", Whose: "own"})
-		status, msg := g.validateFHIREgressOrBridged(ctx, adapted, "pa.pas", shnsdk.LineOf(route.Token), true)
-		if status != http.StatusBadGateway {
+		status, msg := g.validateFHIREgressOrBridged(context.Background(), adapted, "pa.pas", shnsdk.LineOf(route.Token), true)
+		if status == 0 {
 			t.Fatalf("at %s a corrupted chain output must still fail the target-lane validate — nothing may seal", level)
 		}
 		if msg == "" {
@@ -114,8 +118,8 @@ func TestEgressUnbridgedIsGovernedByTheLevel(t *testing.T) {
 		g := &Gateway{cfg: Config{
 			HolderID: "test-holder", Clock: fixedEgressClock,
 			ConformanceEnforcement: tc.level,
-			Validator:              syntheticFakeValidator(),
-			ValidatorsByLine:       map[string]shnsdk.Validator{"2.1": &shnsdk.FakeValidator{Evidence: syntheticEvidence(), RejectIfContains: marker}},
+			Validator:              shnsdk.NewFakeValidator(),
+			ValidatorsByLine:       map[string]shnsdk.Validator{"2.1": &shnsdk.FakeValidator{RejectIfContains: marker}},
 		}}
 		status, _ := g.validateFHIREgressOrBridged(context.Background(),
 			[]byte(`{"resourceType":"Bundle","`+marker+`":true}`), "pa.pas", "2.1", false)
@@ -129,37 +133,37 @@ func TestEgressUnbridgedIsGovernedByTheLevel(t *testing.T) {
 // (route.Token) while BuildLine was 2.0 — the wire-truth line a caller
 // stamps onto Content.ProfileID is ALWAYS route.Token, never route.BuildLine
 // (the frame semantics are unchanged by construction). Drives the REAL pa.pas
-// 2.1->2.2 chain over a real request Bundle.
+// 2.0->2.2 chain (two wired steps) over a real golden fixture.
 func TestEgressAdaptStampsTargetToken(t *testing.T) {
-	steps := chainFor("pa.pas", "2.1", "2.2")
-	if len(steps) != 1 {
-		t.Fatalf("want a 1-hop pa.pas 2.1->2.2 chain, got %d steps: %+v", len(steps), steps)
+	steps := chainFor("pa.pas", "2.0", "2.2")
+	if len(steps) != 2 {
+		t.Fatalf("want a 2-hop pa.pas 2.0->2.2 chain, got %d steps: %+v", len(steps), steps)
 	}
-	route := legRoute{Token: "pa.pas@2.2", BuildLine: "2.1", Chain: steps}
+	route := legRoute{Token: "pa.pas@2.2", BuildLine: "2.0", Chain: steps}
 	if route.BuildLine == shnsdk.LineOf(route.Token) {
 		t.Fatal("fixture invalid: BuildLine must differ from the target line to prove the stamp/build split")
 	}
 
-	in := pasGolden(t, "2.1/conformant/pas-submit-request.json")
+	in := pasGolden(t, "claimresponse-approved.json") // real 2.0 golden, bare ClaimResponse
 	var observed []ObserverEvent
 	g := &Gateway{cfg: Config{
 		HolderID: "test-holder", Clock: fixedEgressClock,
-		Observer:         func(e ObserverEvent) { observed = append(observed, e) },
-		ValidatorsByLine: map[string]shnsdk.Validator{"2.1": syntheticFakeValidator()},
+		Observer: func(e ObserverEvent) { observed = append(observed, e) },
 	}}
 
-	adapted, reports, err := g.egressAdapt(context.Background(), route, in, ExchangeIdentity{CorrelationID: "corr-3", LegType: "pas-claim"})
+	adapted, reports, err := g.egressAdapt(context.Background(), route, in, ExchangeIdentity{CorrelationID: "corr-3"})
 	if err != nil {
 		t.Fatalf("egressAdapt: unexpected error: %v", err)
 	}
+	waitEgressObserver(t, g)
 	if len(adapted) == 0 {
 		t.Fatal("adapted bytes must be non-empty")
 	}
-	if len(reports) != 1 {
-		t.Fatalf("want one LossReport for the chained step, got %d: %+v", len(reports), reports)
+	if len(reports) != 2 {
+		t.Fatalf("want one LossReport per chained step, got %d: %+v", len(reports), reports)
 	}
-	if reports[0].Module != "pa.pas 2.1->2.2" {
-		t.Fatalf("report module trace = %+v, want the 2.1->2.2 step", reports)
+	if reports[0].Module != "pa.pas 2.0->2.1" || reports[1].Module != "pa.pas 2.1->2.2" {
+		t.Fatalf("report module trace = %+v, want the two-hop chain in order", reports)
 	}
 	// The wire-truth check itself: this is what every call site stamps onto
 	// Content.ProfileID — it is route.Token, computed once at selection, and
@@ -172,7 +176,6 @@ func TestEgressAdaptStampsTargetToken(t *testing.T) {
 	// CorrelationID threads through, and since no contract has in-payload
 	// tolerance evidence yet (the safe default), the Provenance rides the
 	// observer Payload — never the wire.
-	observationFlush(t, g)
 	if len(observed) != 1 || observed[0].Kind != legTransformedKind {
 		t.Fatalf("observed = %+v, want exactly one leg.transformed event", observed)
 	}
@@ -219,8 +222,8 @@ func TestEgressAdaptFillsPromisedFields(t *testing.T) {
 	if _, _, err := g.egressAdapt(context.Background(), route, in, x); err != nil {
 		t.Fatalf("egressAdapt: unexpected error: %v", err)
 	}
+	waitEgressObserver(t, g)
 
-	observationFlush(t, g)
 	if len(observed) != 1 || observed[0].Kind != legTransformedKind {
 		t.Fatalf("observed = %+v, want exactly one leg.transformed event", observed)
 	}
@@ -269,8 +272,8 @@ func TestEgressAdaptFillsPromisedFieldsChainInvoking(t *testing.T) {
 	if _, _, err := g.egressAdapt(context.Background(), route, in, x); err != nil {
 		t.Fatalf("egressAdapt: unexpected error: %v", err)
 	}
+	waitEgressObserver(t, g)
 
-	observationFlush(t, g)
 	if len(observed) != 1 || observed[0].Kind != legTransformedKind {
 		t.Fatalf("observed = %+v, want exactly one leg.transformed event", observed)
 	}
@@ -319,6 +322,7 @@ func TestEnvelopeLegChainIsByteIdenticalPassThrough(t *testing.T) {
 	if err != nil {
 		t.Fatalf("egressAdapt: unexpected error: %v", err)
 	}
+	waitEgressObserver(t, g)
 	if !bytes.Equal(out, in) {
 		t.Fatalf("envelope leg must be byte-IDENTICAL pass-through (proves the step funcs never ran): got %s, want %s", out, in)
 	}
@@ -341,7 +345,6 @@ func TestEnvelopeLegChainIsByteIdenticalPassThrough(t *testing.T) {
 
 	// leg.transformed still fires — the live machinery story stays honest
 	// even though the bytes never moved.
-	observationFlush(t, g)
 	if len(observed) != 1 || observed[0].Kind != legTransformedKind {
 		t.Fatalf("observed = %+v, want exactly one leg.transformed event", observed)
 	}
@@ -392,12 +395,12 @@ func TestEgressAdaptRefusalEmitsLegFailed(t *testing.T) {
 	var observed []ObserverEvent
 	g := &Gateway{cfg: Config{
 		HolderID: "test-holder", Clock: fixedEgressClock,
-		Observer:         func(e ObserverEvent) { observed = append(observed, e) },
-		ValidatorsByLine: map[string]shnsdk.Validator{"2.0": syntheticFakeValidator()},
+		Observer: func(e ObserverEvent) { observed = append(observed, e) },
 	}}
 
 	x := ExchangeIdentity{CorrelationID: "corr-refuse", LegType: "pas-claim", Counterpart: "payer-x"}
 	out, reports, err := g.egressAdapt(context.Background(), route, in, x)
+	waitEgressObserver(t, g)
 	if err == nil {
 		t.Fatal("want an error (gated chain must refuse), got nil")
 	}
@@ -411,7 +414,6 @@ func TestEgressAdaptRefusalEmitsLegFailed(t *testing.T) {
 
 	var failed, transformed int
 	var ev ObserverEvent
-	observationFlush(t, g)
 	for _, e := range observed {
 		switch e.Kind {
 		case "leg.failed":

@@ -151,7 +151,7 @@ func TestDTRResumeValidationAndRefusals(t *testing.T) {
 	for _, scenario := range []string{"uc06", "uc07"} {
 		for _, mode := range []string{"approval", "QR rejection", "Provenance rejection", "validator outage", "missing lane"} {
 			t.Run(scenario+"/"+mode, func(t *testing.T) {
-				opts := pendFixtureOpts{member: "MBR-UC06", birthDate: "1969-07-21", familyName: "Reyes", pendedItem: "functional-status", declared: []string{shnsdk.ContractPACRD22, shnsdk.ContractPADTR22, shnsdk.ContractPAPAS22}, deliveryOnly: true}
+				opts := pendFixtureOpts{member: "MBR-UC06", birthDate: "1969-07-21", familyName: "Reyes", pendedItem: "functional-status", declared: []string{shnsdk.ContractPACRD22, shnsdk.ContractPADTR22, shnsdk.ContractPAPAS22}}
 				if scenario == "uc07" {
 					opts.member = "MBR-UC07"
 					opts.birthDate = "1990-08-25"
@@ -184,9 +184,9 @@ func TestDTRResumeValidationAndRefusals(t *testing.T) {
 					}
 					return payload
 				}
+				stub.responseDeclarations = map[string]string{"pas-claim-update": shnsdk.ContractPAPAS22}
 				// The synthetic payer declares its own published output line;
 				// the request's pin is not evidence of the producer's version.
-				stub.responseDeclarations = map[string]string{"pas-claim-update": shnsdk.ContractPAPAS22}
 				recorder.calls = nil
 				recorder.mode = mode
 				if mode == "missing lane" {
@@ -246,7 +246,7 @@ func TestDTRResumeIndependentPinsAndRefusals(t *testing.T) {
 	for _, scenario := range []string{"uc06", "uc07"} {
 		for _, mode := range []string{"approval", "original QR rejection", "target QR rejection", "Provenance rejection", "original outage", "target outage", "original missing", "target missing"} {
 			t.Run(scenario+"/"+mode, func(t *testing.T) {
-				opts := pendFixtureOpts{member: "MBR-UC06", birthDate: "1969-07-21", familyName: "Reyes", pendedItem: "functional-status", declared: []string{shnsdk.ContractPACRD20, shnsdk.ContractPADTR20, shnsdk.ContractPAPAS22}, deliveryOnly: true}
+				opts := pendFixtureOpts{member: "MBR-UC06", birthDate: "1969-07-21", familyName: "Reyes", pendedItem: "functional-status", declared: []string{shnsdk.ContractPACRD20, shnsdk.ContractPADTR20, shnsdk.ContractPAPAS22}}
 				if scenario == "uc07" {
 					opts.member = "MBR-UC07"
 					opts.birthDate = "1990-08-25"

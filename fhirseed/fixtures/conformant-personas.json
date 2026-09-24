@@ -3,20 +3,23 @@
     {
       "fullUrl": "Patient/MBR-BRIDGE-DEMO",
       "resource": {
-        "birthDate": "1983-03-11",
-        "gender": "unknown",
         "id": "MBR-BRIDGE-DEMO",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
         "identifier": [
           {
-            "system": "urn:shn:member",
             "type": {
               "coding": [
                 {
-                  "code": "MB",
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
                 }
               ]
             },
+            "system": "urn:shn:member",
             "value": "MBR-BRIDGE-DEMO"
           },
           {
@@ -24,16 +27,13 @@
             "value": "pci:2b7bf6ac913e40eae92ee1ad60e41549"
           }
         ],
-        "meta": {
-          "profile": [
-            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
-          ]
-        },
         "name": [
           {
             "family": "Solberg-BridgeDemo"
           }
         ],
+        "gender": "unknown",
+        "birthDate": "1983-03-11",
         "resourceType": "Patient"
       },
       "request": {
@@ -44,20 +44,23 @@
     {
       "fullUrl": "Patient/MBR-COVERED",
       "resource": {
-        "birthDate": "1975-04-02",
-        "gender": "unknown",
         "id": "MBR-COVERED",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
         "identifier": [
           {
-            "system": "urn:shn:member",
             "type": {
               "coding": [
                 {
-                  "code": "MB",
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
                 }
               ]
             },
+            "system": "urn:shn:member",
             "value": "MBR-COVERED"
           },
           {
@@ -65,16 +68,13 @@
             "value": "pci:223665feed95ab0cd1e7b0cda6cfa948"
           }
         ],
-        "meta": {
-          "profile": [
-            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
-          ]
-        },
         "name": [
           {
             "family": "Johansson"
           }
         ],
+        "gender": "unknown",
+        "birthDate": "1975-04-02",
         "resourceType": "Patient"
       },
       "request": {
@@ -85,20 +85,23 @@
     {
       "fullUrl": "Patient/MBR-NOTCOVERED",
       "resource": {
-        "birthDate": "1980-09-15",
-        "gender": "unknown",
         "id": "MBR-NOTCOVERED",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
         "identifier": [
           {
-            "system": "urn:shn:member",
             "type": {
               "coding": [
                 {
-                  "code": "MB",
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
                 }
               ]
             },
+            "system": "urn:shn:member",
             "value": "MBR-NOTCOVERED"
           },
           {
@@ -106,16 +109,13 @@
             "value": "pci:1f076d85aedba28112dfe8c6e96153f0"
           }
         ],
-        "meta": {
-          "profile": [
-            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
-          ]
-        },
         "name": [
           {
             "family": "Reyes"
           }
         ],
+        "gender": "unknown",
+        "birthDate": "1980-09-15",
         "resourceType": "Patient"
       },
       "request": {
@@ -126,20 +126,23 @@
     {
       "fullUrl": "Patient/MBR-UC06",
       "resource": {
-        "birthDate": "1969-07-21",
-        "gender": "unknown",
         "id": "MBR-UC06",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
         "identifier": [
           {
-            "system": "urn:shn:member",
             "type": {
               "coding": [
                 {
-                  "code": "MB",
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
                 }
               ]
             },
+            "system": "urn:shn:member",
             "value": "MBR-UC06"
           },
           {
@@ -147,16 +150,13 @@
             "value": "pci:eb16c8dfd47ab6ff52751c27fd76e565"
           }
         ],
-        "meta": {
-          "profile": [
-            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
-          ]
-        },
         "name": [
           {
             "family": "Reyes"
           }
         ],
+        "gender": "unknown",
+        "birthDate": "1969-07-21",
         "resourceType": "Patient"
       },
       "request": {
@@ -167,20 +167,23 @@
     {
       "fullUrl": "Patient/MBR-UC07HCPCS",
       "resource": {
-        "birthDate": "1977-01-30",
-        "gender": "unknown",
         "id": "MBR-UC07HCPCS",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
         "identifier": [
           {
-            "system": "urn:shn:member",
             "type": {
               "coding": [
                 {
-                  "code": "MB",
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
                 }
               ]
             },
+            "system": "urn:shn:member",
             "value": "MBR-UC07HCPCS"
           },
           {
@@ -188,16 +191,13 @@
             "value": "pci:dacc9c5002360203ead83c33bc5b37ea"
           }
         ],
-        "meta": {
-          "profile": [
-            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
-          ]
-        },
         "name": [
           {
             "family": "Nakamura"
           }
         ],
+        "gender": "unknown",
+        "birthDate": "1977-01-30",
         "resourceType": "Patient"
       },
       "request": {
@@ -208,20 +208,23 @@
     {
       "fullUrl": "Patient/MBR-UC08",
       "resource": {
-        "birthDate": "1971-02-09",
-        "gender": "unknown",
         "id": "MBR-UC08",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
         "identifier": [
           {
-            "system": "urn:shn:member",
             "type": {
               "coding": [
                 {
-                  "code": "MB",
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
                 }
               ]
             },
+            "system": "urn:shn:member",
             "value": "MBR-UC08"
           },
           {
@@ -229,16 +232,13 @@
             "value": "pci:2e99322cfb7332d7b63d301228512de4"
           }
         ],
-        "meta": {
-          "profile": [
-            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
-          ]
-        },
         "name": [
           {
             "family": "Okafor"
           }
         ],
+        "gender": "unknown",
+        "birthDate": "1971-02-09",
         "resourceType": "Patient"
       },
       "request": {

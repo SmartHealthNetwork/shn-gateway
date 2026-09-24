@@ -38,4 +38,4 @@ type ExchangeContext struct {
 	policy                                                          ConformancePolicy
 }
 type BoundaryCompletion struct{ ID, Version string }
-type IngressPrincipal struct{ ClientID, Scope string }
+type IngressPrincipal struct{ ClientID string }

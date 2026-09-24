@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -46,7 +47,7 @@ func findingGateway(t *testing.T, v shnsdk.Validator) (*Gateway, *[]ObserverEven
 // supplies, and refuses with the validator's issues in the message.
 func TestValidateGovernedInvalidEmitsFindingAndRefuses(t *testing.T) {
 	const marker = "REJECTED-MARKER"
-	g, events, logged := findingGateway(t, &shnsdk.FakeValidator{Evidence: syntheticEvidence(), RejectIfContains: marker})
+	g, events, logged := findingGateway(t, &shnsdk.FakeValidator{RejectIfContains: marker})
 	ctx := withFindingContext(context.Background(), findingContext{
 		LegType: "crd-order-select", CorrelationID: "corr-7", Seam: "provider-ingress", Whose: "peer",
 	})
@@ -129,7 +130,7 @@ func TestValidateGovernedOutageIsUnavailableFinding(t *testing.T) {
 // unknown: an absent context never suppresses.
 func TestValidateGovernedWithoutContextStillEmits(t *testing.T) {
 	const marker = "REJECTED-MARKER"
-	g, events, _ := findingGateway(t, &shnsdk.FakeValidator{Evidence: syntheticEvidence(), RejectIfContains: marker})
+	g, events, _ := findingGateway(t, &shnsdk.FakeValidator{RejectIfContains: marker})
 	g.validateFHIR(context.Background(), []byte(`{"id":"`+marker+`"}`), "egress", "")
 	var found bool
 	observationFlush(t, g)
@@ -207,6 +208,26 @@ func wantJSONErrorBody(wantError string, wantIssues []string) func(t *testing.T,
 	}
 }
 
+func wantSafeConformanceRefusal(category, rule, direction string) func(t *testing.T, body string) {
+	return func(t *testing.T, body string) {
+		t.Helper()
+		var got map[string]string
+		if err := json.Unmarshal([]byte(body), &got); err != nil {
+			t.Fatalf("body did not decode as JSON: %v (body=%q)", err, body)
+		}
+		want := map[string]string{
+			"category":  category,
+			"rule":      rule,
+			"gateway":   "provider",
+			"level":     "strict",
+			"direction": direction,
+		}
+		if !maps.Equal(got, want) {
+			t.Fatalf("safe refusal = %#v, want %#v", got, want)
+		}
+	}
+}
+
 // wantRawMessage is DELETED with its only caller, the "pas assembly" row: it
 // asserted validatePASResult's bare (status, msg) pair, which no migrated site
 // returns any more (see drivePASAssembly's deletion note below).
@@ -233,7 +254,7 @@ func TestMigratedBypassSitesKeepTheirStatusAndEmit(t *testing.T) {
 		{
 			name: "eligibility response ingress", wantStatus: http.StatusBadGateway,
 			wantLegType: "coverage-eligibility", drive: driveEligibilityResponseIngress,
-			assertBody: wantJSONErrorBody("conformance_invalid: fhir.profile", nil),
+			assertBody: wantSafeConformanceRefusal("conformance_invalid", "fhir.profile", "response"),
 		},
 		{
 			name: "payer eligibility ingress", wantStatus: http.StatusUnprocessableEntity,
@@ -297,7 +318,7 @@ func driveUC01EligibilityEgress(t *testing.T, marker string) (int, string, []Obs
 	env := newInProcessExchange(t)
 	env.originator.cfg.ConformanceEnforcement = EnforcementStrict
 	env.originator.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
-	env.originator.cfg.Validator = &shnsdk.FakeValidator{Evidence: syntheticEvidence(), RejectIfContains: marker}
+	env.originator.cfg.Validator = &shnsdk.FakeValidator{RejectIfContains: marker}
 	env.originator.cfg.NPI = marker
 	rec := httptest.NewRecorder()
 	env.originator.handleScenario(rec, httptest.NewRequest(http.MethodPost, "/scenario/uc01", strings.NewReader(`{"branch":"covered"}`)))
@@ -319,7 +340,7 @@ func driveEligibilityResponseIngress(t *testing.T, marker string) (int, string, 
 	env := newInProcessExchange(t)
 	env.originator.cfg.ConformanceEnforcement = EnforcementStrict
 	env.originator.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
-	env.originator.cfg.Validator = &shnsdk.FakeValidator{Evidence: syntheticEvidence(), RejectIfContains: marker}
+	env.originator.cfg.Validator = &shnsdk.FakeValidator{RejectIfContains: marker}
 	crrJSON := []byte(`{"resourceType":"CoverageEligibilityResponse","marker":"` + marker + `"}`)
 	env.payerReturns(LegResult{Response: testResponse(crrJSON)})
 	rec := httptest.NewRecorder()
@@ -418,7 +439,7 @@ func drivePayerEligibilityIngress(t *testing.T, marker string) (int, string, []O
 	gw, _ := newPendResumeFixture(t, pendFixtureOpts{member: "MBR-COVERED"})
 	gw.cfg.ConformanceEnforcement = EnforcementStrict
 	gw.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
-	gw.cfg.Validator = &shnsdk.FakeValidator{Evidence: syntheticEvidence(), RejectIfContains: marker}
+	gw.cfg.Validator = &shnsdk.FakeValidator{RejectIfContains: marker}
 	rec := httptest.NewRecorder()
 	gw.handleInbound(rec, eligibilityInboundRequest(t, gw, marker))
 	observationFlush(t, gw)
@@ -435,7 +456,7 @@ func drivePayerEligibilityEgress(t *testing.T, marker string) (int, string, []Ob
 	gw, _ := newPendResumeFixture(t, pendFixtureOpts{member: "MBR-COVERED"})
 	gw.cfg.ConformanceEnforcement = EnforcementStrict
 	gw.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
-	gw.cfg.Validator = &shnsdk.FakeValidator{Evidence: syntheticEvidence(), RejectIfContains: marker}
+	gw.cfg.Validator = &shnsdk.FakeValidator{RejectIfContains: marker}
 	rec := httptest.NewRecorder()
 	gw.handleInbound(rec, eligibilityInboundRequestClean(t, gw, marker))
 	observationFlush(t, gw)
@@ -526,7 +547,7 @@ func TestValidateGovernedFindingPinsFullFieldSet(t *testing.T) {
 				Seam: "provider-ingress", Whose: "peer",
 			})
 
-			gr := g.validateGoverned(ctx, findingContextFrom(ctx), &shnsdk.FakeValidator{Evidence: syntheticEvidence(), RejectIfContains: marker},
+			gr := g.validateGoverned(ctx, findingContextFrom(ctx), &shnsdk.FakeValidator{RejectIfContains: marker},
 				resourceJSON, tc.dir, tc.line, tc.profile, tc.bridged)
 			if gr.Status == 0 {
 				t.Fatal("fixture bug: expected a refusal (a bridged check always refuses; the strict case must too)")
@@ -605,7 +626,7 @@ func TestEligibilityUnavailableStatusAllCallers(t *testing.T) {
 				} // no checker can pass the preceding request
 				t.Run(side+"/"+direction+fmt.Sprint(missing), func(t *testing.T) {
 					var events []ObserverEvent
-					var validator shnsdk.Validator = syntheticEvidenceValidatorFunc(func(body []byte) (shnsdk.Result, error) {
+					var validator shnsdk.Validator = syntheticValidatorFunc(func(body []byte) (shnsdk.Result, error) {
 						if direction == "request" || bytes.Contains(body, []byte(`"CoverageEligibilityResponse"`)) {
 							return shnsdk.Result{}, errors.New("synthetic unavailable")
 						}
@@ -631,7 +652,12 @@ func TestEligibilityUnavailableStatusAllCallers(t *testing.T) {
 						g.handleInbound(rec, eligibilityInboundRequestClean(t, g, "unavailable"))
 						observationFlush(t, g)
 					}
-					if rec.Code != 503 || !strings.Contains(rec.Body.String(), "conformance_unavailable: fhir.profile") {
+					if rec.Code != 503 {
+						t.Fatalf("unavailable flattened: %d %s", rec.Code, rec.Body.String())
+					}
+					if side == "originator" && direction == "response" {
+						wantSafeConformanceRefusal("conformance_unavailable", "fhir.profile", "response")(t, rec.Body.String())
+					} else if !strings.Contains(rec.Body.String(), "conformance_unavailable: fhir.profile") {
 						t.Fatalf("unavailable flattened: %d %s", rec.Code, rec.Body.String())
 					}
 					found := false

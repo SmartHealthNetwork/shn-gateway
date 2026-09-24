@@ -157,7 +157,7 @@ func TestDEFG15_ChainArmDormantWhileEveryPublishedLineIsNative(t *testing.T) {
 		}
 	}
 
-	fake := syntheticFakeValidator()
+	fake := shnsdk.NewFakeValidator()
 	lanes := map[string]shnsdk.Validator{}
 	for _, contract := range nativeContracts() {
 		for _, l := range nativeLinesForContract(contract) {

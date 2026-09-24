@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -48,14 +47,9 @@ import (
 // names, because a payer matches a later inquiry on the member id plus the
 // ordering or rendering provider identifier.
 func buildPASSubmitBundle(line string, brPayer bool, orderJSON, qrJSON, providerJSON, coverageJSON, insurerJSON []byte, memberSystem, patientRef, coverageRef, member, corr string, created time.Time, payer shnsdk.PayerIdentifier) ([]byte, error) {
-	return buildPASSubmitBundleWithFacts(line, brPayer, orderJSON, qrJSON, providerJSON, coverageJSON, insurerJSON, memberSystem, patientRef, coverageRef, member, corr, created, payer, nil)
-}
-
-func buildPASSubmitBundleWithFacts(line string, brPayer bool, orderJSON, qrJSON, providerJSON, coverageJSON, insurerJSON []byte, memberSystem, patientRef, coverageRef, member, corr string, created time.Time, payer shnsdk.PayerIdentifier, facts *shnsdk.PASLineItemFacts) ([]byte, error) {
 	return buildAuthoredPASSubmit(line, shnsdk.ConformantClaimInputs{
 		QR: qrJSON, SR: orderJSON, Provider: providerJSON, Coverage: coverageJSON, Insurer: insurerJSON, PatientRef: patientRef, CoverageRef: coverageRef, MemberID: member, MemberIDSystem: memberSystem,
-		ItemFacts: facts,
-		Corr:      corr, Created: created,
+		Corr: corr, Created: created,
 		ContainedInsurer: brPayer,
 		AbsoluteRefs:     brPayer,
 		PayerOrgEntry:    brPayer, // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
@@ -71,34 +65,10 @@ func buildPASSubmitBundleWithFacts(line string, brPayer bool, orderJSON, qrJSON,
 // identifiers and item trace numbers SHN actually put on the wire — never from a
 // second reading of what the gateway meant to send.
 type pasSubmission struct {
-	reply       ApplicationReply
-	leg         string
-	consumption ConsumptionOutcome
-	corr        string
-	route       legRoute
-	bundleJSON  []byte
-	respJSON    []byte
-}
-
-// receive retains transport evidence before any PAS-specific interpretation.
-// It preserves an original response refusal independently of the checked view.
-func (s *pasSubmission) receive(reply ApplicationReply, leg string, err error) error {
-	s.reply, s.leg, s.consumption = reply, leg, unavailableConsumption("application_reply_unavailable")
-	_, viewErr := reply.view(leg, s.corr)
-	if err == nil {
-		err = viewErr
-	}
-	s.respJSON, err = reply.legacy(leg, err)
-	if err != nil {
-		var ce *conformanceError
-		if errors.As(err, &ce) {
-			s.consumption = unavailableConsumption("response_enforcement_failed")
-			s.consumption.Refusal = localConsumptionRefusal(ce)
-		}
-		return err
-	}
-	s.consumption = unavailableConsumption("decision_unreadable")
-	return nil
+	corr       string
+	route      legRoute
+	bundleJSON []byte
+	respJSON   []byte
 }
 
 // submitPASClaim builds and egress-validates the conformant Claim Bundle,
@@ -114,7 +84,7 @@ func (s *pasSubmission) receive(reply ApplicationReply, leg string, err error) e
 // relayOriginationError before the writeJSON(status,msg) fallback; a bare
 // (status,msg) return would re-synthesize the error to a string and DROP the
 // *RelayError sentinel (the %w audit).
-func (g *Gateway) submitPASClaim(ctx context.Context, r *http.Request, pci string, sourceOrder, orderJSON, supplierJSON []byte, source *dtrBuildSource, coverageJSON, insurerJSON []byte, patientRef, coverageRef, member, memberSystemOfFlow string, payer shnsdk.PayerIdentifier, recipient string) (pasSubmission, int, string, error) {
+func (g *Gateway) submitPASClaim(ctx context.Context, r *http.Request, pci string, orderJSON, supplierJSON []byte, source *dtrBuildSource, coverageJSON, insurerJSON []byte, patientRef, coverageRef, member, memberSystemOfFlow string, payer shnsdk.PayerIdentifier, recipient string) (pasSubmission, int, string, error) {
 	out := pasSubmission{corr: g.cfg.CorrelationGen()}
 	// Select-before-build: this tail used to let OriginateLeg select
 	// INTERNALLY off an empty Content.ProfileID, which put the choice AFTER the bundle
@@ -144,14 +114,7 @@ func (g *Gateway) submitPASClaim(ctx context.Context, r *http.Request, pci strin
 	if status != 0 {
 		return out, status, msg, nil
 	}
-	var facts *shnsdk.PASLineItemFacts
-	if def, ok := shnsdk.PASLineDef(route.BuildLine); ok && def.ClaimItemLineDetailRequired {
-		facts, err = g.pasFactsFromSource(ctx, member, sourceOrder, orderJSON)
-		if err != nil {
-			return out, http.StatusUnprocessableEntity, err.Error(), nil
-		}
-	}
-	bundleJSON, err := buildPASSubmitBundleWithFacts(route.BuildLine, relaysReferencePayerBytes(g.cfg.OriginationProfile), orderJSON, qrJSON, providerJSON, coverageJSON, insurerJSON, memberSystem, patientRef, coverageRef, member, out.corr, g.cfg.Clock(), payer, facts)
+	bundleJSON, err := buildPASSubmitBundle(route.BuildLine, relaysReferencePayerBytes(g.cfg.OriginationProfile), orderJSON, qrJSON, providerJSON, coverageJSON, insurerJSON, memberSystem, patientRef, coverageRef, member, out.corr, g.cfg.Clock(), payer)
 	if err != nil {
 		return out, http.StatusInternalServerError, "build bundle failed: " + err.Error(), nil
 	}
@@ -165,7 +128,7 @@ func (g *Gateway) submitPASClaim(ctx context.Context, r *http.Request, pci strin
 	}
 	bundleJSON, _, aerr := g.egressAdapt(ctx, route, bundleJSON, ExchangeIdentity{CorrelationID: out.corr, LegType: "pas-claim", Counterpart: recipient})
 	if aerr != nil {
-		return out, adaptationRefusalStatus(aerr), aerr.Error(), aerr
+		return out, http.StatusBadGateway, aerr.Error(), aerr
 	}
 	// This helper owns the pas-claim leg wholesale — a single-shot submit+resolve —
 	// regardless of which caller's headline leg dispatched here, so it retags rather
@@ -182,17 +145,18 @@ func (g *Gateway) submitPASClaim(ctx context.Context, r *http.Request, pci strin
 	out.bundleJSON = bundleJSON
 	// recipient is the payer HOLDER resolved from the member's real Coverage at the fresh origination
 	// site (FR-G40) — no default; it replaced the deleted Config.CounterpartID here.
-	reply, err := g.OriginateLegMessage(ctx, r, recipient, "pas-claim", pci, out.corr, "",
+	respJSON, err := g.OriginateLeg(ctx, r, recipient, "pas-claim", pci, out.corr, "",
 		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, DeclaredVersion: route.Token, Route: routeInfoFor(route), Payload: sealRequest(relay.BuilderSDKPASSubmit, bundleJSON, "application/fhir+json")})
-	if err = out.receive(reply, "pas-claim", err); err != nil {
+	if err != nil {
+		// Return the RAW err (not just err.Error()) so the caller can relayOriginationError a framed
+		// *RelayError verbatim; msg stays for the non-relay writeJSON fallback (byte-identical).
 		return out, http.StatusBadGateway, err.Error(), err
 	}
-	respJSON := out.respJSON
-	out.consumption = unavailableConsumption("response_validation_unavailable")
+	out.respJSON = respJSON
 	ctx = withFindingContext(ctx, findingContext{
 		LegType: "pas-claim", CorrelationID: out.corr, Seam: "originate", Whose: "peer",
 	})
-	if status, msg := g.validatePASApplicationReply(ctx, respJSON, out.reply); status != 0 {
+	if status, msg := g.validateFHIRPayerIngress(ctx, respJSON, targetLine, "pa.pas"); status != 0 {
 		return out, status, msg, nil
 	}
 	return out, 0, "", nil

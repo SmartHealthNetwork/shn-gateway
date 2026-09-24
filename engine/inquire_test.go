@@ -4,15 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
-	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 )
 
@@ -299,77 +296,6 @@ func TestPASInquire_ByAuthorizationNumberWithNoItems(t *testing.T) {
 		t.Fatalf("items = %+v, want none", facts.items)
 	}
 
-}
-
-// TestIngressInquire_SubjectBound keeps connector authority fixed while only
-// the supplied Coverage beneficiary changes. Patient consistency is deep policy.
-func TestIngressInquire_SubjectBound(t *testing.T) {
-	const answer = `{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"business-rule","diagnostics":"payer inquiry refusal"}]}`
-	for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve, EnforcementBasic, EnforcementStrict} {
-		for _, mutated := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/beneficiary-mutated=%v", level, mutated), func(t *testing.T) {
-				env := newTransportExchangeWithPolicy(t, level)
-				var calls atomic.Int32
-				env.originator.cfg.Validator = observationValidator(func(context.Context, []byte, string) (shnsdk.ValidationEvidence, error) {
-					calls.Add(1)
-					return *syntheticEvidence(), nil
-				})
-				subject, _, ok := env.originator.cfg.SoR.ResolvePatient("MBR-COVERED")
-				if !ok {
-					t.Fatal("seeded subject missing")
-				}
-				coverage := ""
-				if mutated {
-					coverage = "MBR-NOTCOVERED"
-				}
-				body := inquiryBundle("MBR-COVERED", coverage, "TRN-1", "72148")
-				env.payerReturns(LegResult{Status: 409, Response: testResponse([]byte(answer))})
-				req := signedFixtureIngress(t, env.originator, "/Claim/$inquire", "pas-claim-inquire", "pas-inquire", "", subject, "pa.pas@2.0", "inquiry-subject-policy", body)
-				rec := httptest.NewRecorder()
-				env.originator.handlePASInquireIngress(rec, req)
-				if mutated && level == EnforcementStrict {
-					if rec.Code != 422 || env.routeHitCount() != 0 || !strings.Contains(rec.Body.String(), `"valueString":"patient.consistency"`) || !strings.Contains(rec.Body.String(), `"valueString":"conformance_invalid"`) {
-						t.Fatalf("refusal status=%d Hub=%d body=%s", rec.Code, env.routeHitCount(), rec.Body)
-					}
-				} else {
-					if rec.Code != 409 || rec.Body.String() != answer || rec.Header().Get("Content-Type") != "application/fhir+json" || env.routeHitCount() != 1 {
-						t.Fatalf("delivery status=%d Hub=%d body=%s", rec.Code, env.routeHitCount(), rec.Body)
-					}
-					hdr, sent, err := shnsdk.DecodeHTTPFrame(env.lastRequestPayload())
-					if err != nil || !bytes.Equal(sent, body) || hdr.Headers["Content-Type"] != "application/fhir+json" {
-						t.Fatalf("request changed: %s header=%+v err=%v", sent, hdr, err)
-					}
-				}
-				observationFlush(t, env.originator)
-				findings, drops := env.originator.ConformanceObservationsForTest()
-				if drops != 0 {
-					t.Fatal(drops)
-				}
-				if level == EnforcementNone && (calls.Load() != 0 || len(findings) != 0 || env.originator.certification != nil) {
-					t.Fatalf("none calls=%d findings=%+v", calls.Load(), findings)
-				}
-				if level == EnforcementObserve || level == EnforcementBasic {
-					found := false
-					for _, f := range findings {
-						if f.Rule != "patient.consistency" || f.Direction != "request" {
-							continue
-						}
-						found = true
-						want := CheckValid
-						if mutated {
-							want = CheckInvalid
-						}
-						if f.State != want || f.Action != "not_enforced" || f.PayloadSHA256 != sha256hex(body) {
-							t.Fatalf("finding=%+v", f)
-						}
-					}
-					if !found {
-						t.Fatal("missing patient consistency finding")
-					}
-				}
-			})
-		}
-	}
 }
 
 // TestPASInquire_AnswerSubjectLinkage: every patient an answer names, at every
@@ -739,50 +665,6 @@ func assertJSONObject(t *testing.T, raw []byte) {
 	var v map[string]any
 	if err := json.Unmarshal(raw, &v); err != nil {
 		t.Fatalf("fixture is not one JSON object: %v", err)
-	}
-}
-
-// TestPASInquire_NotProfileValidatedButObserved pins WHAT LOOKS AT an inbound
-// peer's inquiry, because the answer is "no enforcing $validate does" and that is
-// a fact worth being executable rather than assumed.
-//
-// Nothing on this path refuses an inquiry, or a payer's answer, for failing its
-// profile: the gateway preserves a peer's bytes and does not certify content it
-// did not produce, the same posture the submit and update legs take. The payer's
-// own system is what certifies an inquiry it receives, and the certification lane
-// records an observation of both directions — at the inquiry's OWN profiles, at
-// every candidate line, which is what makes a line-specific defect (a 2.0.1
-// inquiry naming no item, say) visible as evidence without refusing the peer.
-func TestPASInquire_NotProfileValidatedButObserved(t *testing.T) {
-	request := inquiryFixture(t, "pas-inquiry-request-2.0.json")
-	answer := inquiryFixture(t, "pas-inquiry-response-2.0.json")
-
-	// The request and the Bundle-shaped answer are both recognised, and each
-	// resolves to the INQUIRY profile rather than the submit leg's.
-	for _, tc := range []struct{ name, species, want string }{
-		{"the inquiry request", detectSpecies(request), "profile-pas-inquiry-request-bundle"},
-		{"the answer Bundle", detectSpecies(answer), "profile-pas-inquiry-response-bundle"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if tc.species == "" {
-				t.Fatalf("%s is not a recognised species — nothing would observe it", tc.name)
-			}
-			for _, line := range []string{"2.0", "2.1", "2.2"} {
-				profile, ok := profileFor(tc.species, line, "pas-claim-inquire")
-				if !ok {
-					t.Fatalf("line %s: no certification profile for %s", line, tc.name)
-				}
-				if !strings.Contains(profile, tc.want) {
-					t.Errorf("line %s: profile %q, want the inquiry profile %s", line, profile, tc.want)
-				}
-			}
-		})
-	}
-	// The 2.2.1 answer's Parameters wrapper is deliberately NOT observed: the IG
-	// governs it by its operation definition and declares no profile for it, so
-	// there is nothing to certify it against.
-	if got := detectSpecies(inquiryFixture(t, "pas-inquiry-response-2.2.json")); got != "" {
-		t.Errorf("the 2.2.1 Parameters wrapper resolved to species %q; the IG declares no profile for it", got)
 	}
 }
 

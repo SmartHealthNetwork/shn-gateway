@@ -15,15 +15,10 @@ import (
 // a message is relayed, authored, or supplied by a reference participant.
 func (g *Gateway) DeepRules() []ConformanceRule {
 	rules := []ConformanceRule{
-		{ID: "cds.request.context", Check: checkCDSRequestContext},
 		{ID: "cds.response", Check: checkCDSResponse},
 		{ID: "fhir.profile", Check: func(ctx context.Context, in CheckInput) CheckResult {
 			return validationResult(g.contentValidation(ctx, in).Profile, nil)
 		}},
-		{ID: "fhir.terminology", Check: func(ctx context.Context, in CheckInput) CheckResult {
-			return validationResult(g.contentValidation(ctx, in).Terminology, nil)
-		}},
-		{ID: "patient.consistency", Check: g.checkSubjectConsistency},
 		{ID: "pas.graph", Check: checkPASGraph},
 		{ID: "pas.provenance", Check: checkPASProvenance},
 		{ID: "qr.attestation", Check: checkQRAttestation},
@@ -44,24 +39,20 @@ func (g *Gateway) DeepRules() []ConformanceRule {
 			crd := in.Exchange.legType == "crd-order-select" || in.Exchange.legType == "crd-order-dispatch"
 			pas := strings.HasPrefix(in.Exchange.legType, "pas-claim")
 			switch id {
-			case "cds.request.context":
-				return crd && in.Direction == "request"
 			case "pas.graph":
 				return pas && in.Direction == "response"
 			case "pas.provenance":
 				return in.Exchange.legType == "pas-claim-update" && in.Direction == "request"
 			case "qr.attestation":
-				return pas || in.Exchange.legType == "dtr-questionnaire-fetch"
+				return pas && in.Direction == "request"
 			case "crd.resources":
 				return crd
 			case "cds.response":
 				return crd && in.Direction == "response"
 			case "version.consistency":
 				return in.Direction == "response" && paCatalog[in.Exchange.legType].Contract != ""
-			case "fhir.profile", "fhir.terminology":
+			case "fhir.profile":
 				return in.Exchange.legType != "patient-dtr" && !emptyInquiryReply(in, true) && !emptyCRDResponse(in)
-			case "patient.consistency":
-				return !(crd && in.Direction == "response") && !(in.Exchange.legType == "patient-dtr" && in.Direction == "response") && !emptyInquiryReply(in, false) && !definitionOnlyDTRResponse(in)
 			}
 			return false
 		}
@@ -203,21 +194,21 @@ func deepDocument(in CheckInput) (map[string]any, bool) { return structuralObjec
 // from custom evidence adapters cannot leak resource values through findings.
 func safeValidationCode(code string) string {
 	switch code {
-	case "invalid", "structure", "required", "value", "invariant", "too-long", "duplicate", "business-rule", "informational", "code-invalid", "not-supported", "not-found", "incomplete", "profile-unsupported", "terminology-support-unproven", "execution-unavailable", "synthetic", "synthetic-rejection":
+	case "invalid", "structure", "required", "value", "invariant", "too-long", "duplicate", "business-rule", "informational", "code-invalid", "not-supported", "not-found", "incomplete", "profile-unsupported", "execution-unavailable", "synthetic", "synthetic-rejection":
 		return code
 	default:
 		return "validator-result"
 	}
 }
-func validationResult(result shnsdk.ValidationCheckEvidence, err error) CheckResult {
+func validationResult(result validationCheckEvidence, err error) CheckResult {
 	out := deepUnavailable("validator_unavailable")
 	if err != nil {
 		return out
 	}
 	switch result.State {
-	case shnsdk.ValidationValid:
+	case validationValid:
 		out = CheckResult{State: CheckValid}
-	case shnsdk.ValidationInvalid:
+	case validationInvalid:
 		out = CheckResult{State: CheckInvalid, Code: safeValidationCode(result.Code), Severity: "error"}
 		// Required rules already established applicability. A checker cannot waive
 		// the rule by returning not-applicable without that rule's own evidence.
@@ -237,17 +228,15 @@ func validationResult(result shnsdk.ValidationCheckEvidence, err error) CheckRes
 }
 
 type contentEvidence struct {
-	done     bool
-	value    shnsdk.ValidationEvidence
-	profiles []string // target selection captured during this check, never payload meta.profile
+	done  bool
+	value validationEvidence
 }
 type validationTarget struct {
-	resource map[string]any
-	profile  string
-	raw      []byte // exact occurrence in the immutable message snapshot
+	body    []byte
+	profile string
 }
 
-func (g *Gateway) contentValidation(ctx context.Context, in CheckInput) shnsdk.ValidationEvidence {
+func (g *Gateway) contentValidation(ctx context.Context, in CheckInput) validationEvidence {
 	if in.evidence != nil && in.evidence.done {
 		return in.evidence.value
 	}
@@ -255,32 +244,15 @@ func (g *Gateway) contentValidation(ctx context.Context, in CheckInput) shnsdk.V
 	if ctx.Err() == nil {
 		targets, contract, line, ok := deepValidationTargets(in)
 		if ok {
-			if in.evidence != nil {
-				for _, target := range targets {
-					if target.profile == "" || len(in.evidence.profiles) == 8 {
-						continue
-					}
-					seen := false
-					for _, p := range in.evidence.profiles {
-						if p == target.profile {
-							seen = true
-							break
-						}
-					}
-					if !seen {
-						in.evidence.profiles = append(in.evidence.profiles, target.profile)
-					}
-				}
-			}
 			evidence = *validContentEvidence()
 			validator := g.validatorForContractLine(contract, line)
 			for _, target := range targets {
-				raw, release, ok := exactObservationTarget(in, target.raw)
+				raw, release, ok := observationBytesTarget(in, target.body)
 				if !ok {
 					evidence = unavailableValidatorEvidence()
 					break
 				}
-				result, err := func() (shnsdk.ValidationEvidence, error) {
+				result, err := func() (validationEvidence, error) {
 					defer release()
 					return delegateValidatorEvidence(ctx, validator, raw, target.profile)
 				}()
@@ -293,7 +265,6 @@ func (g *Gateway) contentValidation(ctx context.Context, in CheckInput) shnsdk.V
 				// Interface implementation alone does not prove execution.
 				g.recordCheckerAvailability(contract, line, result)
 				evidence.Profile = mergeValidationEvidence(evidence.Profile, result.Profile)
-				evidence.Terminology = mergeValidationEvidence(evidence.Terminology, result.Terminology)
 			}
 		}
 	}
@@ -303,15 +274,15 @@ func (g *Gateway) contentValidation(ctx context.Context, in CheckInput) shnsdk.V
 	}
 	return evidence
 }
-func validContentEvidence() *shnsdk.ValidationEvidence {
-	return &shnsdk.ValidationEvidence{Profile: shnsdk.ValidationCheckEvidence{State: shnsdk.ValidationValid}, Terminology: shnsdk.ValidationCheckEvidence{State: shnsdk.ValidationValid}}
+func validContentEvidence() *validationEvidence {
+	return &validationEvidence{Profile: validationCheckEvidence{State: validationValid}}
 }
-func mergeValidationEvidence(a, b shnsdk.ValidationCheckEvidence) shnsdk.ValidationCheckEvidence {
-	rank := func(s shnsdk.ValidationState) int {
+func mergeValidationEvidence(a, b validationCheckEvidence) validationCheckEvidence {
+	rank := func(s validationState) int {
 		switch s {
-		case shnsdk.ValidationValid:
+		case validationValid:
 			return 0
-		case shnsdk.ValidationInvalid:
+		case validationInvalid:
 			return 1
 		default:
 			return 2
@@ -323,7 +294,7 @@ func mergeValidationEvidence(a, b shnsdk.ValidationCheckEvidence) shnsdk.Validat
 	}
 	a.Issues = issues
 	if len(issues) > 64 {
-		a.State = shnsdk.ValidationUnavailable
+		a.State = validationUnavailable
 		a.Code = "validator_issue_budget"
 		a.Issues = nil
 	}
@@ -359,7 +330,8 @@ func deepValidationTargets(in CheckInput) ([]validationTarget, string, string, b
 	}
 	targets := []validationTarget{}
 	add := func(resource map[string]any, profile string) {
-		targets = append(targets, validationTarget{resource: resource, profile: profile})
+		raw, _ := json.Marshal(resource)
+		targets = append(targets, validationTarget{body: raw, profile: profile})
 	}
 	switch contract {
 	case "pa.pas":
@@ -413,14 +385,6 @@ func deepValidationTargets(in CheckInput) ([]validationTarget, string, string, b
 	case "pa.dtr":
 		// The pinned DTR package defines both the collection Bundle and optional
 		// operation wrapper at all supported lines (DTRDef and dtr.go).
-		if in.Exchange.operation == shnsdk.FrameOperationNextQuestion {
-			profile, supported := nextQuestionProfile(root, line, in.Direction)
-			if !supported {
-				return nil, contract, line, false
-			}
-			add(root, profile)
-			break
-		}
 		if in.Exchange.operation != shnsdk.FrameOperationQuestionnairePackage {
 			return nil, contract, line, false
 		}
@@ -443,20 +407,12 @@ func deepValidationTargets(in CheckInput) ([]validationTarget, string, string, b
 	if len(targets) == 0 || len(targets) > crdEmbeddedValidationMax {
 		return nil, contract, line, false
 	}
-	raws, ok := sourceValidationTargets(in, contract, contract == "pa.pas" && resourceIs(root, "Parameters") && in.Exchange.legType == "pas-claim-inquire" && in.Direction == "response")
-	if !ok || len(raws) != len(targets) {
-		return nil, contract, line, false
-	}
-	for i := range targets {
-		targets[i].raw = raws[i]
-	}
 	return targets, contract, line, true
 }
 
-// The worker already owns an immutable, budgeted copy of the complete body.
-// Nested targets are views into that copy; no second RawMessage allocation or
-// reserialization can change the bytes certified by the validator.
-func exactObservationTarget(in CheckInput, raw []byte) ([]byte, func(), bool) {
+// observationBytesTarget accounts for a serialized validation target against
+// the bounded asynchronous observer's shared memory budget.
+func observationBytesTarget(in CheckInput, raw []byte) ([]byte, func(), bool) {
 	if len(raw) == 0 {
 		return nil, nil, false
 	}
@@ -502,9 +458,6 @@ func checkPASGraph(ctx context.Context, in CheckInput) CheckResult {
 	return checkResult("pas.graph", checkBundle(in.Body))
 }
 
-// checkPASProvenance verifies the source's supplemental-data authorship proof.
-// References close only in the Bundle owner's exact fullUrl namespace. Profile
-// validation remains independent; unreadable graph shapes cannot prove validity.
 func checkPASProvenance(ctx context.Context, in CheckInput) CheckResult {
 	if ctx.Err() != nil {
 		return deepUnavailable("checker_canceled")
@@ -805,32 +758,27 @@ func checkVersionConsistency(ctx context.Context, in CheckInput) CheckResult {
 }
 
 // validateGovernedEvidence preserves explicit unavailable outcomes at existing
-// resource-validation callers. New message handlers consume the same evidence
-// through DeepRules; no legacy validity bit establishes terminology support.
+// resource-validation callers. New message handlers consume the same baseline
+// profile verdict through DeepRules.
 func (g *Gateway) validateGovernedEvidence(ctx context.Context, fc findingContext, v shnsdk.Validator, body []byte, dir, line, profile string) govResult {
 	ev, err := delegateValidatorEvidence(ctx, v, body, profile)
-	for _, entry := range []struct {
-		id       string
-		evidence shnsdk.ValidationCheckEvidence
-	}{{"fhir.profile", ev.Profile}, {"fhir.terminology", ev.Terminology}} {
-		result := validationResult(entry.evidence, err)
-		if result.State == CheckValid && len(result.Issues) == 0 {
-			continue
-		}
-		action, decision := "allowed", ""
-		if result.State != CheckValid {
-			action, decision = "refused", "refused"
-		}
-		g.emitFinding(ConformanceFinding{Kind: string(kindForDirection(dir, false)), Direction: dir, LegType: fc.LegType, CorrelationID: fc.CorrelationID, Seam: fc.Seam, Whose: fc.Whose, Line: line, Profile: profile, Level: g.policy().Level().String(), Rule: entry.id, Action: action, Decision: decision, State: result.State, CheckIssues: result.Issues, PayloadSHA256: sha256hex(body)})
-		switch result.State {
-		case CheckValid:
-		case CheckInvalid:
-			return govResult{Status: 422, Msg: dir + " validation failed", Issues: []string{entry.id}}
-		default:
-			return govResult{Status: 503, Msg: "conformance_unavailable: " + entry.id}
-		}
+	result := validationResult(ev.Profile, err)
+	if result.State == CheckValid && len(result.Issues) == 0 {
+		return govResult{}
 	}
-	return govResult{}
+	action, decision := "allowed", ""
+	if result.State != CheckValid {
+		action, decision = "refused", "refused"
+	}
+	g.emitFinding(ConformanceFinding{Kind: string(kindForDirection(dir, false)), Direction: dir, LegType: fc.LegType, CorrelationID: fc.CorrelationID, Seam: fc.Seam, Whose: fc.Whose, Line: line, Profile: profile, Level: g.policy().Level().String(), Rule: "fhir.profile", Action: action, Decision: decision, State: result.State, CheckIssues: result.Issues, PayloadSHA256: sha256hex(body)})
+	switch result.State {
+	case CheckInvalid:
+		return govResult{Status: 422, Msg: dir + " validation failed", Issues: []string{"fhir.profile"}}
+	case CheckValid:
+		return govResult{}
+	default:
+		return govResult{Status: 503, Msg: "conformance_unavailable: fhir.profile"}
+	}
 }
 
 // observationTarget serializes one resource at a time. The original job and this
@@ -847,40 +795,4 @@ func observationTarget(in CheckInput, resource map[string]any) ([]byte, func(), 
 	}
 	raw := observationjson.Append(make([]byte, 0, n), resource)
 	return raw, func() { in.observation.release(n) }, true
-}
-
-// DTR 2.0 inherits next-question from SDC 3.0.0; later DTR packages publish
-// their own profiles. These are pinned published targets, not body meta claims.
-func nextQuestionProfile(root map[string]any, line, direction string) (string, bool) {
-	if direction != "request" && direction != "response" {
-		return "", false
-	}
-	def, ok := shnsdk.DTRLineDef(line)
-	if !ok {
-		return "", false
-	}
-	base, version := certificationDTR, def.PackageVersion
-	input, output, qr := "dtr-next-question-input-parameters", "dtr-next-question-output-parameters", "dtr-questionnaireresponse"
-	switch line {
-	case "2.0":
-		base, version = "http://hl7.org/fhir/uv/sdc/StructureDefinition/", "3.0.0"
-		input, output, qr = "parameters-questionnaire-next-question-in", "parameters-questionnaire-next-question-out", "sdc-questionnaireresponse-adapt"
-	case "2.1":
-	case "2.2":
-		qr = "dtr-questionnaireresponse-adapt"
-	default:
-		return "", false
-	}
-	profile := qr
-	switch root["resourceType"] {
-	case "QuestionnaireResponse":
-	case "Parameters":
-		profile = input
-		if direction == "response" {
-			profile = output
-		}
-	default:
-		return "", false
-	}
-	return base + profile + "|" + version, true
 }

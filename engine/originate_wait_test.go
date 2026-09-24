@@ -1027,7 +1027,6 @@ func pendingPersonaSystem(t *testing.T) (*Gateway, *pasFollowStub) {
 	sor := newPendingPersonaSoR(t)
 	gw, stub := pasFollowSystemWithSoR(t, "pended", sor, sor)
 	pci, _, _ := sor.ResolvePatient(pendingPersonaMember)
-	gw.cfg.SubjectReferenceResolver = participantLinkageFixture(pendingPersonaMember, pci, "provider", "payer")
 	stub.answerMember = pendingPersonaMember
 	stub.stubSubstrate.pci = pci
 	stub.inquireAnswer = "approved"

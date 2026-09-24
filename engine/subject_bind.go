@@ -4,24 +4,47 @@ import (
 	"context"
 	"encoding/json"
 	"net/url"
-	"reflect"
 	"strings"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
-// resolveSubjectPCI is a local source-action lookup through this holder's own
-// record. Native carriage uses verified exchange context instead. The deprecated
-// compatibility flag never supplies identity from payload bytes.
-func (g *Gateway) resolveSubjectPCI(ctx context.Context, member string, _ []byte) (pci string, found bool, readErr error) {
+// resolveSubjectPCI binds a member id to its network patient identifier (pci) through this
+// holder's OWN system of record. It is the one read the Da Vinci CRD, DTR and PAS legs make
+// to bind a subject, on the ingress (origination) side and the inbound (payer) side alike.
+// payload is the request the member arrived in, read only when the system of record does
+// not hold the member (below); nil when the leg has none.
+//
+// Seam (connectathon test lane): with Config.AcceptUnknownMembers set, a member the
+// system of record does not hold is bound instead of refused, from the same three facts a
+// holder's record supplies — member id, birthDate and family name — read from the Patient
+// the request itself carries for that member (PatientDemographics, the read this holder's
+// FHIR system of record makes of its own Patient), or from the member id alone when the
+// request carries no such Patient. Nothing is minted: every fact is one the partner sent.
+// Both sides of an exchange derive the identifier the same way, so the payer-side
+// token-subject check holds whether the member is held on one side, both or neither; a
+// request whose Patient disagrees with the record of the side that holds the member fails
+// that check, as it should. A request carrying Patients for the member that disagree with
+// each other binds by id alone. Default off (the zero value); never set outside the
+// preview test lane (test/testdoorposture fences where it may appear in infra). Everything
+// else on these legs is untouched: member-mixing refusals, prefetch read only from this
+// system or the request, and the payer's own independent member resolution.
+//
+// A read failure is returned as is, with the flag set or not: an unreadable system of record
+// is never mistaken for a member it does not hold.
+func (g *Gateway) resolveSubjectPCI(ctx context.Context, member string, payload []byte) (pci string, found bool, readErr error) {
 	pci, _, found, readErr = ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(ctx, member)
-	return pci, found, readErr
+	if readErr != nil || found || !g.cfg.AcceptUnknownMembers {
+		return pci, found, readErr
+	}
+	demo, _ := carriedPatientDemographics(payload, member)
+	return shnsdk.ResolvePCI(member, demo.BirthDate, demo.FamilyName), true, nil
 }
 
 // PatientDemographics reads the two demographics the patient identifier is derived from
 // off a FHIR Patient: birthDate and the family name of the first name, both required and
 // read verbatim. It is the one read of a Patient's demographics, for a holder's own record
-// only. Carried demographics are never a source of missing exchange identity.
+// and for a Patient a request carries alike, so a subject derived from either is the same.
 func PatientDemographics(patientJSON []byte) (Demo, bool) {
 	var p struct {
 		ResourceType string `json:"resourceType"`
@@ -34,6 +57,33 @@ func PatientDemographics(patientJSON []byte) (Demo, bool) {
 		return Demo{}, false
 	}
 	return Demo{BirthDate: p.BirthDate, FamilyName: p.Name[0].Family}, true
+}
+
+// carriedPatientDemographics reads the demographics of the member's Patient wherever the
+// request carries it — a prefetch value or a searchset entry, a bundle entry, a contained
+// resource, an operation parameter. Zero and false when the request carries none with both
+// demographics, or carries several that disagree.
+func carriedPatientDemographics(payload []byte, member string) (Demo, bool) {
+	var demo Demo
+	var found, conflict bool
+	forEachCarriedPatient(payload, member, func(patient map[string]any) {
+		raw, err := json.Marshal(patient)
+		if err != nil {
+			return
+		}
+		d, ok := PatientDemographics(raw)
+		if !ok {
+			return
+		}
+		if found && d != demo {
+			conflict = true
+		}
+		demo, found = d, true
+	})
+	if !found || conflict {
+		return Demo{}, false
+	}
+	return demo, true
 }
 
 // carriesPatient reports whether the request carries a Patient resource for the member
@@ -87,229 +137,14 @@ func patientIsMember(patient map[string]any, member string) bool {
 }
 
 // PatientReference names a patient in its producer holder and identifier system.
-// Relative FHIR references use System "fhir-relative"; absolute FHIR references
-// use the full endpoint base as System, with "Patient/id" as Value. Identifiers
-// retain their exact system/value. Equal lexical ids in different namespaces
-// never establish equal people.
+// It is used only to reconstruct verified exchange addressing when signed ingress
+// context is unavailable; native conformance checks do not parse patient content.
 type PatientReference struct{ Holder, System, Value string }
 
-// SubjectReferenceResolver is an authoritative integration capability, not a
-// demographic matching algorithm. found=false means linkage unavailable. The
-// integration must resolve only namespaces it is actually authorized to know.
+// SubjectReferenceResolver resolves authoritative, holder-scoped addressing.
+// It is not a native payload conformance checker.
 type SubjectReferenceResolver interface {
 	ResolveSubject(context.Context, PatientReference) (pci string, found bool, err error)
-}
-
-func (g *Gateway) checkSubjectConsistency(ctx context.Context, in CheckInput) CheckResult {
-	return g.checkSubjectConsistencyResource(ctx, in, nil)
-}
-
-func (g *Gateway) checkSubjectConsistencyResource(ctx context.Context, in CheckInput, selected map[string]any) CheckResult {
-	if ctx.Err() != nil {
-		return deepUnavailable("identity_unavailable")
-	}
-	root, ok := deepDocument(in)
-	if !ok {
-		return deepUnavailable("content_unreadable")
-	}
-	if in.Exchange.subjectPCI == "" || g.cfg.SubjectReferenceResolver == nil {
-		return deepUnavailable("identity_unavailable")
-	}
-	holder := in.Exchange.holder
-	if in.Direction == "response" {
-		holder = in.Exchange.recipient
-	}
-	if holder == "" {
-		return deepUnavailable("identity_unavailable")
-	}
-	result := CheckResult{State: CheckValid}
-	checked := 0
-	resolve := func(ref PatientReference) bool {
-		if ctx.Err() != nil {
-			result = deepUnavailable("identity_unavailable")
-			return false
-		}
-		pci, found, err := g.cfg.SubjectReferenceResolver.ResolveSubject(ctx, ref)
-		if err != nil || !found || pci == "" {
-			return false
-		}
-		checked++
-		if pci != in.Exchange.subjectPCI {
-			result = checkResult("patient.consistency", false)
-		}
-		return true
-	}
-	var patient func(map[string]any, string) bool
-	patient = func(p map[string]any, fallback string) bool {
-		if !resourceIs(p, "Patient") {
-			return false
-		}
-		found := false
-		identifiers, _ := p["identifier"].([]any)
-		for _, v := range identifiers {
-			i, _ := v.(map[string]any)
-			sys, _ := i["system"].(string)
-			value, _ := i["value"].(string)
-			if sys != "" && value != "" {
-				found = resolve(PatientReference{holder, sys, value}) || found
-			}
-		}
-		if found {
-			return true
-		}
-		if fallback == "" {
-			return false
-		}
-		ref, ok := patientReference(holder, fallback)
-		return ok && resolve(ref)
-	}
-	visitRef := func(raw any, owner map[string]any, ownerURL string, scope *identityBundleScope) {
-		ref, ok := raw.(map[string]any)
-		if !ok {
-			result = checkResult("patient.consistency", false)
-			return
-		}
-		value, _ := ref["reference"].(string)
-		if value == "" {
-			i, _ := ref["identifier"].(map[string]any)
-			sys, _ := i["system"].(string)
-			value, _ := i["value"].(string)
-			if sys != "" && value != "" && resolve(PatientReference{holder, sys, value}) {
-				return
-			}
-			result = deepUnavailable("identity_unavailable")
-			return
-		}
-		if strings.HasPrefix(value, "#") {
-			contained, _ := owner["contained"].([]any)
-			var target map[string]any
-			for _, v := range contained {
-				r, _ := v.(map[string]any)
-				if r["id"] == strings.TrimPrefix(value, "#") {
-					if target != nil {
-						result = deepUnavailable("identity_unavailable")
-						return
-					}
-					target = r
-				}
-			}
-			if target == nil || (resourceIs(target, "Patient") && !patient(target, "")) {
-				result = deepUnavailable("identity_unavailable")
-			}
-			return
-		}
-		// FHIR relative references inherit the producing entry's REST base.
-		// Never discard a foreign base and reinterpret its lexical id locally.
-		if relativeRef.MatchString(value) && ownerURL != "" {
-			u, err := url.Parse(ownerURL)
-			if err == nil && (u.Scheme == "https" || u.Scheme == "http") {
-				parts := strings.Split(strings.TrimSuffix(u.Path, "/"), "/")
-				if len(parts) >= 3 {
-					u.Path = strings.Join(parts[:len(parts)-2], "/") + "/" + value
-					u.RawPath = ""
-					value = u.String()
-				}
-			}
-		}
-		if scope != nil && scope.ambiguous[value] {
-			result = deepUnavailable("identity_unavailable")
-			return
-		}
-		if scope != nil && scope.byURL[value] != nil {
-			p := scope.byURL[value]
-			if resourceIs(p, "Patient") && !patient(p, value) {
-				result = deepUnavailable("identity_unavailable")
-			}
-			return
-		}
-		p, ok := patientReference(holder, value)
-		if !ok {
-			if typ, known := foreignType(value); known && typ != "Patient" {
-				return
-			}
-			if parts := relativeRef.FindStringSubmatch(value); len(parts) > 1 && parts[1] != "Patient" {
-				return
-			}
-			result = deepUnavailable("identity_unavailable")
-			return
-		}
-		if !resolve(p) {
-			result = deepUnavailable("identity_unavailable")
-		}
-	}
-	roots := []any{root}
-	// A supported DTR operation's Parameters is a transport wrapper, not a
-	// patient-compartment resource. Walk its children with their original
-	// Bundle and contained-resource scopes; nested unknown wrappers still fail.
-	_, dtrWrapper := dtrIdentityParameters(in, root)
-	// Recognized inquiry envelopes are transport wrappers; compare the subjects
-	// in their returned Bundles, each within its own reference scope.
-	if bundles, ok := inquiryReplyBundles(in); ok {
-		roots = bundles
-	}
-	walkIdentityResources(roots, "", nil, nil, func(r map[string]any, ownerURL string, scope *identityBundleScope, owner map[string]any) {
-		// The walker visits the root before its children. Skip only that proven
-		// transport wrapper, never an unknown nested resource.
-		if dtrWrapper {
-			dtrWrapper = false
-			return
-		}
-		// Keep the complete Bundle namespace for lookup, but only the selected
-		// resource contributes patient-binding obligations to this consumer.
-		if selected != nil && !reflect.DeepEqual(r, selected) {
-			return
-		}
-		rt, _ := r["resourceType"].(string)
-		if rt == "Patient" {
-			return
-		} // Non-binding subscriber/related patients are not the subject.
-		// CDex data-request Tasks bind the declared patient in Task.for. Generic
-		// FHIR Task has no patient-compartment path, so apply this only to the
-		// federated-query operation's top-level Task. Resolve through the
-		// producer's holder and reference namespace, never a lexical ID match.
-		if in.Exchange.legType == "federated-query" && resourceIs(root, "Task") && rt == "Task" && reflect.DeepEqual(r, root) {
-			if target, present := r["for"]; present {
-				visitRef(target, r, ownerURL, scope)
-			} else {
-				result = deepUnavailable("identity_unavailable")
-			}
-		}
-		paths, known := patientBindingPaths[rt]
-		if !known {
-			result = deepUnavailable("identity_unavailable")
-			return
-		}
-		for _, path := range paths {
-			var refs []any
-			collect(r, strings.Split(path, "."), &refs)
-			for _, ref := range refs {
-				visitRef(ref, owner, ownerURL, scope)
-			}
-		}
-	})
-	if resourceIs(root, "Patient") && !patient(root, "") {
-		result = deepUnavailable("identity_unavailable")
-	}
-	if strings.HasPrefix(in.Exchange.legType, "crd-") {
-		c, _ := root["context"].(map[string]any)
-		id, _ := c["patientId"].(string)
-		if id != "" {
-			if !strings.Contains(id, "/") {
-				id = "Patient/" + id
-			}
-			visitRef(map[string]any{"reference": id}, root, "", nil)
-		}
-	}
-	if in.Exchange.legType == "patient-dtr" {
-		ref, _ := root["patientRef"].(string)
-		if ref != "" {
-			visitRef(map[string]any{"reference": ref}, root, "", nil)
-		}
-	}
-	if checked == 0 && result.State == CheckValid {
-		return deepUnavailable("identity_unavailable")
-	}
-	return result
 }
 
 func patientReference(holder, value string) (PatientReference, bool) {
@@ -331,133 +166,4 @@ func patientReference(holder, value string) (PatientReference, bool) {
 	u.Path = u.Path[:pos]
 	u.RawPath = ""
 	return PatientReference{holder, u.String(), ref}, true
-}
-
-type identityBundleScope struct {
-	byURL     map[string]map[string]any
-	ambiguous map[string]bool
-}
-
-// walkIdentityResources retains the nearest Bundle's entry namespace. Contained
-// resources share their owning resource's contained scope, never another entry's.
-func walkIdentityResources(v any, ownerURL string, scope *identityBundleScope, containedOwner map[string]any, fn func(map[string]any, string, *identityBundleScope, map[string]any)) {
-	switch v := v.(type) {
-	case map[string]any:
-		owner := containedOwner
-		if _, ok := v["resourceType"].(string); ok {
-			if owner == nil {
-				owner = v
-			}
-			if resourceIs(v, "Bundle") {
-				scope = &identityBundleScope{byURL: map[string]map[string]any{}, ambiguous: map[string]bool{}}
-				entries, _ := v["entry"].([]any)
-				for _, raw := range entries {
-					e, _ := raw.(map[string]any)
-					full, _ := e["fullUrl"].(string)
-					if full == "" {
-						continue
-					}
-					if _, exists := scope.byURL[full]; exists {
-						scope.ambiguous[full] = true
-					}
-					scope.byURL[full], _ = e["resource"].(map[string]any)
-				}
-			}
-			fn(v, ownerURL, scope, owner)
-		}
-		for _, k := range pasSortedKeys(v) {
-			if k == "entry" && resourceIs(v, "Bundle") {
-				entries, _ := v[k].([]any)
-				for _, raw := range entries {
-					e, _ := raw.(map[string]any)
-					full, _ := e["fullUrl"].(string)
-					walkIdentityResources(e, full, scope, nil, fn)
-				}
-			} else if k == "contained" {
-				walkIdentityResources(v[k], ownerURL, scope, owner, fn)
-			} else {
-				walkIdentityResources(v[k], ownerURL, scope, nil, fn)
-			}
-		}
-	case []any:
-		for _, child := range v {
-			walkIdentityResources(child, ownerURL, scope, containedOwner, fn)
-		}
-	}
-}
-
-// dtrIdentityParameters recognizes only the outer supported operation envelope.
-// It does not exempt patient-free content or certify the IG profile.
-func dtrIdentityParameters(in CheckInput, root map[string]any) ([]any, bool) {
-	if in.Exchange.legType != "dtr-questionnaire-fetch" || (in.Direction != "request" && in.Direction != "response") {
-		return nil, false
-	}
-	contract, line, ok := strings.Cut(in.DeclaredVersion, "@")
-	if !ok || contract != "pa.dtr" {
-		return nil, false
-	}
-	if _, ok := shnsdk.DTRLineDef(line); !ok {
-		return nil, false
-	}
-	params, ok := parameterShapes(root, in.Direction == "request")
-	if !ok {
-		return nil, false
-	}
-	switch in.Exchange.operation {
-	case shnsdk.FrameOperationQuestionnairePackage:
-		if in.Direction == "response" && !dtrPackageOutputParameters(params, line) {
-			return nil, false
-		}
-	case shnsdk.FrameOperationNextQuestion:
-		if !nextQuestionShape(root, in.Direction) {
-			return nil, false
-		}
-	default:
-		return nil, false
-	}
-	return params, true
-}
-
-// dtrPackageOutputParameters proves only the published output envelope and
-// primary resource shapes. The walker still checks every child in its original
-// namespace; profile validity and clinical content remain separate checks.
-func dtrPackageOutputParameters(params []any, line string) bool {
-	packages := 0
-	for _, raw := range params {
-		p := raw.(map[string]any) // parameterShapes established object/name shape.
-		for key := range p {
-			if key == "part" || strings.HasPrefix(key, "value") {
-				return false // A resource parameter cannot also assert a value/part.
-			}
-		}
-		r, ok := p["resource"].(map[string]any)
-		if !ok {
-			return false
-		}
-		name := p["name"].(string)
-		packageName := (line == "2.0" && name == "return") ||
-			((line == "2.0" || line == "2.1") && name == "PackageBundle") ||
-			(line == "2.2" && name == "packagebundle")
-		if !packageName {
-			outcomeName := (line == "2.2" && name == "outcome") ||
-				((line == "2.0" || line == "2.1") && name == "operationOutcome")
-			if !outcomeName || !resourceIs(r, "OperationOutcome") {
-				return false
-			}
-			continue
-		}
-		entries, ok := bundleEntries(r, true)
-		if !ok || r["type"] != "collection" {
-			return false
-		}
-		for _, raw := range entries {
-			e := raw.(map[string]any)
-			child, ok := e["resource"].(map[string]any)
-			if !ok || !shapeString(child["resourceType"]) {
-				return false
-			}
-		}
-		packages++
-	}
-	return packages > 0
 }

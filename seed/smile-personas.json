@@ -149,37 +149,33 @@
     {
       "fullUrl": "Patient/pat-mbrsmile01-provider",
       "resource": {
-        "birthDate": "1961-11-27",
-        "gender": "unknown",
         "id": "pat-mbrsmile01-provider",
-        "identifier": [
-          {
-            "system": "urn:shn:member",
-            "type": {
-              "coding": [
-                {
-                  "code": "MB",
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
-                }
-              ]
-            },
-            "value": "MBR-SMILE-01"
-          },
-          {
-            "system": "urn:shn:pci",
-            "value": "pci:91b45c6030911bb6d52192f2c136bafc"
-          }
-        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:member",
+            "value": "MBR-SMILE-01"
+          }
+        ],
         "name": [
           {
             "family": "Lindqvist-Smile"
           }
         ],
+        "gender": "unknown",
+        "birthDate": "1961-11-27",
         "resourceType": "Patient"
       },
       "request": {
@@ -190,37 +186,33 @@
     {
       "fullUrl": "Patient/pat-mbrsmile02-provider",
       "resource": {
-        "birthDate": "1973-02-14",
-        "gender": "unknown",
         "id": "pat-mbrsmile02-provider",
-        "identifier": [
-          {
-            "system": "urn:shn:member",
-            "type": {
-              "coding": [
-                {
-                  "code": "MB",
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
-                }
-              ]
-            },
-            "value": "MBR-SMILE-02"
-          },
-          {
-            "system": "urn:shn:pci",
-            "value": "pci:f84a31e22c7762e8d751e49add5345e9"
-          }
-        ],
         "meta": {
           "profile": [
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
           ]
         },
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:member",
+            "value": "MBR-SMILE-02"
+          }
+        ],
         "name": [
           {
             "family": "Moreau-Smile"
           }
         ],
+        "gender": "unknown",
+        "birthDate": "1973-02-14",
         "resourceType": "Patient"
       },
       "request": {

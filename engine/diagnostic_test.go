@@ -356,6 +356,9 @@ func TestDiagnosticVerifiedLegRequiresBoundAuthority(t *testing.T) {
 	for _, mutation := range []string{"valid", "empty subject", "ciphertext", "sender", "correlation", "hub"} {
 		t.Run(mutation, func(t *testing.T) {
 			g, requester := newInboundTestGateway(t, false)
+			// The valid signed row reaches the participant content boundary once
+			// native carriage no longer parses the clinical body for admission.
+			g.cfg.Responder = pasResultResponder{result: LegResult{Status: http.StatusUnprocessableEntity, Message: "diagnostic fixture stop"}}
 			key := g.cfg.Client.Transport.(*inboundAuthzStub).authzPriv
 			var events []diagnostics.Event
 			g.cfg.Diagnostic = func(e diagnostics.Event) bool { events = append(events, e); return true }

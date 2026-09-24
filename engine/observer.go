@@ -234,33 +234,51 @@ func (v observingValidator) Validate(ctx context.Context, resourceJSON []byte, p
 	return res, err
 }
 
-// ValidateEvidence preserves the capability through inspection without a legacy
-// call or raw diagnostic event. Notification scheduling is unchanged here.
-func (v observingValidator) ValidateEvidence(ctx context.Context, body []byte, profile string) (shnsdk.ValidationEvidence, error) {
-	ev, err := delegateValidatorEvidence(ctx, v.inner, body, profile)
-	detail := "valid"
-	if err != nil || ev.Profile.State == shnsdk.ValidationUnavailable || ev.Terminology.State == shnsdk.ValidationUnavailable || ev.Profile.State == shnsdk.ValidationNotApplicable || ev.Terminology.State == shnsdk.ValidationNotApplicable {
-		detail = "validator unavailable"
-	} else if ev.Profile.State == shnsdk.ValidationInvalid || ev.Terminology.State == shnsdk.ValidationInvalid {
-		detail = "invalid"
-	} else if ev.Profile.State != shnsdk.ValidationValid || ev.Terminology.State != shnsdk.ValidationValid {
-		detail = "validator unavailable"
-	}
-	v.g.observe(ObserverEvent{Kind: "validate.result", Direction: "validate", Payload: json.RawMessage(body), Detail: detail})
-	return ev, err
+type validationState string
+
+const (
+	validationValid       validationState = "valid"
+	validationInvalid     validationState = "invalid"
+	validationUnavailable validationState = "unavailable"
+)
+
+type validationCheckEvidence struct {
+	State  validationState
+	Code   string
+	Issues []CheckIssue
 }
 
-// Missing capability has one stable answer regardless of decoration or gate.
-func unavailableValidatorEvidence() shnsdk.ValidationEvidence {
-	return shnsdk.ValidationEvidence{Profile: shnsdk.ValidationCheckEvidence{State: shnsdk.ValidationUnavailable, Code: "validator-evidence-unavailable"}, Terminology: shnsdk.ValidationCheckEvidence{State: shnsdk.ValidationUnavailable, Code: "terminology-support-unproven"}}
+// validationEvidence is gateway-local execution state for the baseline
+// Validator result. It intentionally carries no independent terminology or
+// release-certification claim.
+type validationEvidence struct {
+	ExecutionAttempted bool
+	Profile            validationCheckEvidence
 }
 
-func delegateValidatorEvidence(ctx context.Context, inner shnsdk.Validator, body []byte, profile string) (shnsdk.ValidationEvidence, error) {
-	v, ok := inner.(shnsdk.EvidenceValidator)
-	if !ok {
-		return unavailableValidatorEvidence(), errors.New("validator does not provide execution evidence")
+func unavailableValidatorEvidence() validationEvidence {
+	return validationEvidence{Profile: validationCheckEvidence{State: validationUnavailable, Code: "validator_unavailable"}}
+}
+
+func delegateValidatorEvidence(ctx context.Context, inner shnsdk.Validator, body []byte, profile string) (validationEvidence, error) {
+	if inner == nil {
+		return unavailableValidatorEvidence(), errors.New("validator unavailable")
 	}
-	return v.ValidateEvidence(ctx, body, profile)
+	result, err := inner.Validate(ctx, body, profile)
+	if err != nil {
+		out := unavailableValidatorEvidence()
+		out.ExecutionAttempted = true
+		return out, err
+	}
+	out := validationEvidence{ExecutionAttempted: true, Profile: validationCheckEvidence{State: validationValid}}
+	if !result.Valid {
+		out.Profile.State = validationInvalid
+		out.Profile.Code = "invalid"
+		if len(result.Issues) != 0 {
+			out.Profile.Issues = []CheckIssue{{Severity: "error", Code: "invalid"}}
+		}
+	}
+	return out, nil
 }
 
 // observeIngress tees only bytes consumed by the handler. Authentication and

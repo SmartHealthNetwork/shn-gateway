@@ -67,7 +67,7 @@ func (g *Gateway) collectAuthoredObservation(w *certificationWorker, job certifi
 	ctx = withFindingContext(ctx, target.finding)
 	candidate, stop := context.WithTimeout(ctx, certificationCandidateTimeout)
 	defer stop()
-	evidence, err := func() (value shnsdk.ValidationEvidence, err error) {
+	evidence, err := func() (value validationEvidence, err error) {
 		if candidate.Err() != nil {
 			return unavailableValidatorEvidence(), candidate.Err()
 		}
@@ -82,22 +82,17 @@ func (g *Gateway) collectAuthoredObservation(w *certificationWorker, job certifi
 	if candidate.Err() != nil {
 		err = candidate.Err()
 	}
-	for _, rule := range []struct {
-		id    string
-		value shnsdk.ValidationCheckEvidence
-	}{{"fhir.profile", evidence.Profile}, {"fhir.terminology", evidence.Terminology}} {
-		result := validationResult(rule.value, err)
-		g.recordObservation(w, ConformanceFinding{
-			Kind: ConformanceObservedEvent, Direction: target.direction,
-			LegType: target.finding.LegType, CorrelationID: target.finding.CorrelationID,
-			Seam: target.finding.Seam, Whose: target.finding.Whose,
-			Line: target.line, Profile: target.profile,
-			Level: g.policy().Level().String(), CheckClass: CheckDeep,
-			Action: "not_enforced", Rule: rule.id, State: result.State,
-			ResultSeverity: result.Severity, ClosedReason: result.Code,
-			CheckIssues: result.Issues, PayloadSHA256: sha256hex(job.payload),
-		})
-	}
+	result := validationResult(evidence.Profile, err)
+	g.recordObservation(w, ConformanceFinding{
+		Kind: ConformanceObservedEvent, Direction: target.direction,
+		LegType: target.finding.LegType, CorrelationID: target.finding.CorrelationID,
+		Seam: target.finding.Seam, Whose: target.finding.Whose,
+		Line: target.line, Profile: target.profile,
+		Level: g.policy().Level().String(), CheckClass: CheckDeep,
+		Action: "not_enforced", Rule: "fhir.profile", State: result.State,
+		ResultSeverity: result.Severity, ClosedReason: result.Code,
+		CheckIssues: result.Issues, PayloadSHA256: sha256hex(job.payload),
+	})
 }
 func observeRule(ctx context.Context, rule ConformanceRule, in CheckInput) (out CheckResult, applies bool) {
 	applies = true

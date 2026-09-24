@@ -9,11 +9,10 @@ from pathlib import Path
 import re
 import tarfile
 import zipfile
-import icd10cm
 
 ROOT = Path(__file__).parent
 NAME = 'shn.fhir.validation-support'
-VERSION = '1.4.0'
+VERSION = '1.2.0'
 
 def verify_input(source, subdir=''):
     data = (ROOT / 'inputs' / subdir / source['file']).read_bytes()
@@ -57,44 +56,8 @@ def code_system(identifier, url, version, concepts):
                 publisher='Centers for Medicare & Medicaid Services', caseSensitive=True,
                 content='complete', count=len(concepts), concept=sorted(concepts, key=lambda c: c['code']))
 
-def shn_clinical_context(data):
-    """Admit only the reviewed first local release; CMS ownership rules do not apply."""
-    def unique(pairs):
-        result = {}
-        for key, value in pairs:
-            if key in result:
-                raise ValueError('duplicate local CodeSystem field: ' + key)
-            result[key] = value
-        return result
-    resource = json.loads(data, object_pairs_hook=unique)
-    required = dict(resourceType='CodeSystem', id='shn-clinical-context',
-                    url='urn:shn:clinical-context', version='1.0.0',
-                    name='SHNClinicalContext', status='active', experimental=False,
-                    publisher='Smart Health Network', caseSensitive=True,
-                    content='complete', count=3)
-    if any(type(resource.get(key)) is not type(value) or resource.get(key) != value
-           for key, value in required.items()):
-        raise ValueError('invalid SHN local CodeSystem identity or release metadata')
-    if set(resource) != set(required) | {'description', 'concept'} or not isinstance(resource['description'], str) or not resource['description'].strip():
-        raise ValueError('invalid SHN local CodeSystem shape')
-    concepts = resource['concept']
-    if not isinstance(concepts, list) or any(not isinstance(c, dict) for c in concepts):
-        raise ValueError('invalid SHN local concept shape')
-    codes = [c.get('code') for c in concepts]
-    if len(codes) != len(set(codes)):
-        raise ValueError('duplicate SHN local concept')
-    if set(codes) != {'conservative-therapy-weeks', 'neuro-deficit', 'patient-reported-required'} or len(codes) != 3:
-        raise ValueError('SHN local concept membership mismatch')
-    for concept in concepts:
-        if set(concept) != {'code', 'display', 'definition'} or any(not isinstance(concept[key], str) or not concept[key].strip() for key in ('display', 'definition')):
-            raise ValueError('invalid SHN local concept shape')
-    resource['concept'] = sorted(concepts, key=lambda c: c['code'])
-    return resource
-
 def resources():
-    sources = json.loads((ROOT / 'sources.json').read_text())
-    inputs = {s['file']: verify_input(s) for s in sources['inputs']}
-    local = shn_clinical_context(verify_input(sources['local']))
+    inputs = {s['file']: verify_input(s) for s in json.loads((ROOT / 'sources.json').read_text())['inputs']}
     archive = zipfile.ZipFile(io.BytesIO(inputs['cms-hcpcs-2026-07.zip']))
     lines = archive.read('HCPC2026_JUL_ANWEB_06172026.txt').decode('cp1252').splitlines()
     concepts = []
@@ -145,19 +108,7 @@ def resources():
     if covered != set(range(1, 100)) or len(concepts) != 52:
         raise ValueError('incomplete CMS POS table')
     pos = code_system('cms-pos', 'https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set', '2024-05-02', concepts)
-    icd = code_system('cms-icd10cm', 'http://hl7.org/fhir/sid/icd-10-cm', '2026-04-01',
-                      icd10cm.concepts(inputs['cms-icd10cm-april-2026-order.zip']))
-    icd['date'] = '2026-04-01'
-    icd['description'] = ('Complete CMS April 2026 ICD-10-CM order file: codes and headers. '
-                          'Header membership does not establish validity for HIPAA-covered transactions. '
-                          'No hierarchy, abstract status or billability is inferred.')
-    icd['property'] = [
-        {'code': 'cmsOrder', 'type': 'integer', 'description': 'CMS release-specific tabular order number.'},
-        {'code': 'cmsValidForHIPAATransactions', 'type': 'boolean',
-         'description': 'CMS source flag: 1 is valid for HIPAA-covered transactions; 0 is a header, not valid for those transactions.'},
-    ]
-    return {'CodeSystem-cms-hcpcs.json': hcpcs, 'CodeSystem-cms-pos.json': pos, 'CodeSystem-cms-icd10cm.json': icd,
-            'CodeSystem-shn-clinical-context.json': local}
+    return {'CodeSystem-cms-hcpcs.json': hcpcs, 'CodeSystem-cms-pos.json': pos}
 
 def package_bytes():
     data = {name: (json.dumps(resource, indent=2, ensure_ascii=False) + '\n').encode() for name, resource in resources().items()}
@@ -167,7 +118,7 @@ def package_bytes():
         data[name] = content
     data['package.json'] = (json.dumps(dict(name=NAME, version=VERSION, type='fhir.ig',
         fhirVersions=['4.0.1'],
-        description='Offline CMS terminology, SHN local clinical-context vocabulary and the validation closure of the R5 Claim.encounter extension, copied unchanged from the pinned cross-version and extensions packages',
+        description='Offline CMS terminology and the validation closure of the R5 Claim.encounter extension, copied unchanged from the pinned cross-version and extensions packages',
         dependencies={'hl7.fhir.r4.core': '4.0.1'}), indent=2) + '\n').encode()
     output = io.BytesIO()
     with gzip.GzipFile(fileobj=output, mode='wb', filename='', mtime=0) as gz:

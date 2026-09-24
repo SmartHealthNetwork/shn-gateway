@@ -25,10 +25,10 @@ func TestHandleUC04_ProviderDataAttestsAndLeanTail(t *testing.T) {
 
 	// provider-data lane: attest off the seeded order, then the lean tail.
 	for _, want := range []string{
-		"uc04AttestationAnswers(res.srJSON, resolve)",          // build the attestation map FROM the seeded order (+ its supportingInfo)
-		"g.attestAdaptiveQuestionnaire(ctx, r, &res, answers,", // attest the questionnaire — adaptive-aware ($next-question first), re-fill ($populate auto-pops nothing)
-		"g.submitClaimAndFollow(ctx, r, pasFollowInputs{",      // the lean single-shot PAS tail (no amendment leg), reporting the payer's own determination
-		"attestedAnswerValues(answers)",                        // surface the traces-to-seed evidence
+		"uc04AttestationAnswers(res.srJSON, resolve)",         // build the attestation map FROM the seeded order (+ its supportingInfo)
+		"g.attestAdaptiveQuestionnaire(ctx, r, res, answers,", // attest the questionnaire — adaptive-aware ($next-question first), re-fill ($populate auto-pops nothing)
+		"g.submitClaimAndFollow(ctx, r, pasFollowInputs{",     // the lean single-shot PAS tail (no amendment leg), reporting the payer's own determination
+		"attestedAnswerValues(answers)",                       // surface the traces-to-seed evidence
 	} {
 		if !strings.Contains(fn, want) {
 			t.Fatalf("handleUC04 provider-data branch missing %q", want)
@@ -40,7 +40,7 @@ func TestHandleUC04_ProviderDataAttestsAndLeanTail(t *testing.T) {
 	// per-scenario literal. The literal named an order no participant's system held,
 	// so both the stored authorization and any later inquiry were keyed on a
 	// reference that resolved to nothing.
-	if !strings.Contains(fn, "srRef, ok := orderRefOrFail(w, res.srJSON, res.attempt)") {
+	if !strings.Contains(fn, "srRef, ok := orderRefOrFail(w, res.srJSON)") {
 		t.Fatalf("handleUC04 must derive the order ref from the order the system of record supplied")
 	}
 	for _, literal := range []string{`"ServiceRequest/sr-uc04"`, `"ServiceRequest/sr-uc03"`} {

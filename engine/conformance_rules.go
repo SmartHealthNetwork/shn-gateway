@@ -65,7 +65,7 @@ func (p ConformancePolicy) Action(class CheckClass) CheckAction {
 
 // ConformanceRuleSet identifies the blocking semantics of this rule table.
 // Changing those semantics requires a new version and a migration note.
-const ConformanceRuleSet = "participant-conformance/5"
+const ConformanceRuleSet = "participant-conformance/1"
 
 // CheckInput describes one message at a verified participant boundary. Response
 // applicability uses the actual status and independent producer declaration.

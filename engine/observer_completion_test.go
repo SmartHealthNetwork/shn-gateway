@@ -90,7 +90,7 @@ func TestObserverCompletionWaitsForDeferredEnqueue(t *testing.T) {
 }
 func TestObserverCompletionWaitsForCallback(t *testing.T) {
 	entered, release := make(chan struct{}), make(chan struct{})
-	g := certificationGateway(t, &shnsdk.FakeValidator{Evidence: syntheticEvidence()}, func(e ObserverEvent) {
+	g := certificationGateway(t, &shnsdk.FakeValidator{}, func(e ObserverEvent) {
 		if e.Kind == ConformanceObservedEvent {
 			select {
 			case <-entered:

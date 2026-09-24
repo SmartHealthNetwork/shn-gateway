@@ -256,8 +256,9 @@ func (g *Gateway) legacyIngressContext(ctx context.Context, r *http.Request, bod
 }
 
 // handleNativeInbound runs after the envelope's authority, replay and ciphertext
-// bindings have been verified. A responder's clinical closures are deliberately
-// not delivery prerequisites; acquired work is released without committing it.
+// bindings have been verified. A participant-local effect may run only after the
+// exact response envelope has been written and flushed; its outcome cannot alter
+// that authoritative peer response.
 func (g *Gateway) handleNativeInbound(w http.ResponseWriter, r *http.Request, leg string, env shnsdk.Envelope, tok shnsdk.Token, body []byte, answerToken string) {
 	ex, ok := r.Context().Value(nativeExchangeKey{}).(ExchangeContext)
 	if !ok {
@@ -282,9 +283,18 @@ func (g *Gateway) handleNativeInbound(w http.ResponseWriter, r *http.Request, le
 		refuse(err)
 		return
 	}
-	result, err := g.handleResponder(r.Context(), leg, ex.correlationID, tok.Subject, body)
+	responderContext := r.Context()
+	if strings.HasPrefix(leg, "pas-claim") {
+		responderContext, _ = withPASLeg(responderContext, env.Metadata.Sender)
+	}
+	result, err := g.handleResponder(responderContext, leg, ex.correlationID, tok.Subject, body)
+	committed := false
 	if result.Rollback != nil {
-		defer result.Rollback()
+		defer func() {
+			if !committed {
+				result.Rollback()
+			}
+		}()
 	}
 	if err != nil {
 		g.responderFailed(w, leg, err)
@@ -309,5 +319,48 @@ func (g *Gateway) handleNativeInbound(w http.ResponseWriter, r *http.Request, le
 		refuse(err)
 		return
 	}
-	g.respondLeg(w, r, spec.RespFrame, spec.RespOp, leg, ex.correlationID, result, tok.Subject, env.Metadata.Sender, env.Metadata.ConsentRef, answerToken)
+	if leg == "pas-claim-inquire" && result.Commit == nil {
+		result.Commit = g.projectPASInquiry(env.Metadata.Sender, tok.Subject, ex.correlationID, body, raw)
+	}
+	// Only the two baseline PAS projections own a participant-local post-delivery
+	// effect. A connector cannot attach local work to another native carrier leg.
+	if leg != "pas-claim" && leg != "pas-claim-inquire" {
+		result.Commit = nil
+	}
+	if !g.respondLeg(w, r, spec.RespFrame, spec.RespOp, leg, ex.correlationID, result, tok.Subject, env.Metadata.Sender, env.Metadata.ConsentRef, answerToken) || result.Commit == nil {
+		return
+	}
+	// The submit projection is an existing participant-owned write. Its request
+	// subject is checked against the authenticated PCI after delivery, so a local
+	// mismatch skips the write without turning clinical parsing into admission.
+	if leg == "pas-claim" {
+		if _, status, msg := g.conformantPASBindContext(r.Context(), body, tok.Subject); status != 0 {
+			g.observe(ObserverEvent{Kind: "pa.local-projection-failed", Direction: "response", LegType: leg, CorrelationID: ex.correlationID, Detail: msg})
+			return
+		}
+	} else if leg == "pas-claim-inquire" {
+		facts, status, msg := parsePASInquiryFacts(body)
+		if status == 0 {
+			var found bool
+			var err error
+			var pci string
+			pci, found, err = g.resolveSubjectPCI(r.Context(), facts.member, body)
+			if err != nil {
+				status, msg = SoRFailureResponse(err)
+			} else if !found {
+				status, msg = http.StatusBadRequest, "unknown member"
+			} else if pci != tok.Subject {
+				status, msg = http.StatusForbidden, "token subject does not match request patient"
+			}
+		}
+		if status != 0 {
+			g.observe(ObserverEvent{Kind: "pa.local-projection-failed", Direction: "response", LegType: leg, CorrelationID: ex.correlationID, Detail: msg})
+			return
+		}
+	}
+	if err := result.Commit(); err != nil {
+		g.observe(ObserverEvent{Kind: "pa.local-projection-failed", Direction: "response", LegType: leg, CorrelationID: ex.correlationID, Detail: err.Error()})
+		return
+	}
+	committed = true
 }

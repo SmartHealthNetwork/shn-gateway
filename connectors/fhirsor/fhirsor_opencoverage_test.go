@@ -29,7 +29,7 @@ func openCoverageFHIR(t *testing.T, memberID string) *fhirclient.Client {
 				w.Write([]byte(`{"resourceType":"Bundle","type":"searchset"}`))
 				return
 			}
-			patient := `{"resourceType":"Patient","id":"p","identifier":[{"system":"urn:shn:member","value":"MBR-TWO"}],"identifier":[{"system":"urn:shn:member","value":"` + memberID + `"}],"name":[{"family":"Test"}],"birthDate":"1970-01-01"}`
+			patient := `{"resourceType":"Patient","id":"p","identifier":[{"system":"urn:shn:member","value":"` + memberID + `"}],"name":[{"family":"Test"}],"birthDate":"1970-01-01"}`
 			w.Write([]byte(`{"resourceType":"Bundle","type":"searchset","entry":[{"resource":` + patient + `}]}`))
 		case strings.HasPrefix(r.URL.Path, "/Coverage"):
 			coverage := `{"resourceType":"Coverage","id":"cov-1","status":"active","beneficiary":{"reference":"Patient/p"},"payor":[{"reference":"#cms-payer"}],"contained":[{"resourceType":"Organization","id":"cms-payer","identifier":[{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00001"}]}]}`
@@ -83,7 +83,7 @@ func TestOpenCoverageContextReturnsEveryMatch(t *testing.T) {
 		w.Header().Set("Content-Type", "application/fhir+json")
 		switch {
 		case strings.HasPrefix(r.URL.Path, "/Patient"):
-			w.Write([]byte(`{"resourceType":"Bundle","type":"searchset","entry":[{"resource":{"resourceType":"Patient","id":"p","identifier":[{"system":"urn:shn:member","value":"MBR-TWO"}]}}]}`))
+			w.Write([]byte(`{"resourceType":"Bundle","type":"searchset","entry":[{"resource":{"resourceType":"Patient","id":"p"}}]}`))
 		case strings.HasPrefix(r.URL.Path, "/Coverage"):
 			coverageQuery = r.URL.RawQuery
 			w.Write([]byte(`{"resourceType":"Bundle","type":"searchset","entry":[{"resource":` + covA + `},{"resource":` + included + `,"search":{"mode":"include"}},{"resource":` + covB + `,"search":{"mode":"match"}}]}`))
@@ -119,7 +119,7 @@ func TestOpenCoverageContextReadsEveryPage(t *testing.T) {
 		w.Header().Set("Content-Type", "application/fhir+json")
 		switch {
 		case strings.HasPrefix(r.URL.Path, "/Patient"):
-			w.Write([]byte(`{"resourceType":"Bundle","type":"searchset","entry":[{"resource":{"resourceType":"Patient","id":"p","identifier":[{"system":"urn:shn:member","value":"MBR-TWO"}]}}]}`))
+			w.Write([]byte(`{"resourceType":"Bundle","type":"searchset","entry":[{"resource":{"resourceType":"Patient","id":"p"}}]}`))
 		case r.URL.Query().Get("page") == "2":
 			pages++
 			w.Write([]byte(`{"resourceType":"Bundle","type":"searchset","entry":[{"resource":` + covB + `}]}`))
@@ -144,7 +144,7 @@ func TestOpenCoverageContextReadsEveryPage(t *testing.T) {
 		loop.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/fhir+json")
 			if strings.HasPrefix(r.URL.Path, "/Patient") {
-				w.Write([]byte(`{"resourceType":"Bundle","type":"searchset","entry":[{"resource":{"resourceType":"Patient","id":"p","identifier":[{"system":"urn:shn:member","value":"MBR-TWO"}]}}]}`))
+				w.Write([]byte(`{"resourceType":"Bundle","type":"searchset","entry":[{"resource":{"resourceType":"Patient","id":"p"}}]}`))
 				return
 			}
 			n++
@@ -161,7 +161,7 @@ func TestOpenCoverageContextReadsEveryPage(t *testing.T) {
 		down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if strings.HasPrefix(r.URL.Path, "/Patient") {
 				w.Header().Set("Content-Type", "application/fhir+json")
-				w.Write([]byte(`{"resourceType":"Bundle","type":"searchset","entry":[{"resource":{"resourceType":"Patient","id":"p","identifier":[{"system":"urn:shn:member","value":"MBR-TWO"}]}}]}`))
+				w.Write([]byte(`{"resourceType":"Bundle","type":"searchset","entry":[{"resource":{"resourceType":"Patient","id":"p"}}]}`))
 				return
 			}
 			w.WriteHeader(http.StatusServiceUnavailable)

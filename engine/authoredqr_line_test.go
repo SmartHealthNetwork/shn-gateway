@@ -66,27 +66,6 @@ func (s *authoredQRSoR) PatientFHIRRef(memberID string) (string, bool) {
 	return s.censusSoR.PatientFHIRRef(memberID)
 }
 
-func (s *authoredQRSoR) SearchPatientContext(ctx context.Context, resourceType, id string, dates ...SearchDateRange) (SearchResult, error) {
-	if resourceType != "Claim" {
-		return s.censusSoR.SearchPatientContext(ctx, resourceType, id, dates...)
-	}
-	order, ok := s.OpenOrder(id)
-	if !ok {
-		return s.censusSoR.SearchPatientContext(ctx, resourceType, id, dates...)
-	}
-	claim, err := syntheticPASDraftClaimForOrder(order)
-	if err != nil {
-		return SearchResult{}, err
-	}
-	page := append([]byte(`{"resourceType":"Bundle","type":"searchset","entry":[{"fullUrl":"https://fixture.invalid/fhir/Claim/fixture-draft","resource":`), claim...)
-	page = append(page, `,"search":{"mode":"match"}}]}`...)
-	parsed, err := ParseSearchPage(page, resourceType)
-	if err != nil {
-		return SearchResult{}, err
-	}
-	return SearchResult{Pages: [][]byte{page}, Entries: parsed.Entries, Total: len(parsed.Entries)}, nil
-}
-
 // ClinicalContext: the provider-data attestation sites this fixture drives
 // (handleUC04 / scenarioToPend's uc06 branch) re-fill from the seeded ORDER, not
 // from ClinicalContext — but runCRDThenDTROrder's DTR block ALWAYS calls the
@@ -261,8 +240,7 @@ func newAuthoredQRGateway(t *testing.T, keys authoredQRKeys, sor SystemOfRecord,
 		HubURL:                   "http://stub.test",
 		Reg:                      newAuthoredQRRegistry(keys),
 		DeclaredContractVersions: declaredLine22(),
-		Validator:                syntheticFakeValidator(),
-		SubjectReferenceResolver: authoredQRSubjectResolver(sor),
+		Validator:                shnsdk.NewFakeValidator(),
 		SoR:                      sor,
 		Store:                    newCensusSoR(),
 		Clock:                    clock,
@@ -270,13 +248,6 @@ func newAuthoredQRGateway(t *testing.T, keys authoredQRKeys, sor SystemOfRecord,
 		OriginationProfile:       "provider-data",
 		Client:                   &http.Client{Transport: transport},
 	})
-}
-
-func authoredQRSubjectResolver(sor SystemOfRecord) SubjectReferenceResolver {
-	for member, demo := range sor.(*authoredQRSoR).extraPersonas {
-		return participantLinkageFixture(member, shnsdk.ResolvePCI(member, demo.BirthDate, demo.FamilyName), "provider", "payer")
-	}
-	return censusSubjectResolver("provider", "payer")
 }
 
 func newAuthoredQRSoR(member string, demo Demo, orderJSON []byte) *authoredQRSoR {
@@ -323,7 +294,6 @@ func newAuthoredQRSingleShotFixture(t *testing.T, member string, demo Demo, orde
 		providerEncPub: keys.provEncPub,
 		clock:          clock,
 		pci:            pci,
-		patientRef:     "Patient/" + member,
 		encKeys:        map[string]encPair{"payer": {pub: keys.payerEncPub, priv: keys.payerEncPriv}},
 	}
 	capture := &capturingTransport{inner: stub, encKeys: stub.encKeys, captured: map[string][][]byte{}}
@@ -342,7 +312,6 @@ type uc04SingleShotSubstrate struct {
 	providerEncPub *[32]byte
 	clock          func() time.Time
 	pci            string
-	patientRef     string
 	encKeys        map[string]encPair
 
 	legTypes []string
@@ -415,7 +384,7 @@ func (s *uc04SingleShotSubstrate) handleRoute(body []byte) (*http.Response, erro
 		respPayload, err = testQuestionnairePackage(fhirseed.DemoLumbarQuestionnaire())
 		respOp, respFrame = "dtr-questionnaire", "payer-coverage"
 	case "pas-claim":
-		respPayload = homeOxygenApprovedClaimResponseFor(s.patientRef)
+		respPayload = homeOxygenApprovedClaimResponse()
 	default:
 		return errResp("stub: unexpected leg " + txType), nil
 	}

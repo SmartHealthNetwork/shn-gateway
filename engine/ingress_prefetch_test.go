@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -968,179 +967,31 @@ func TestPrefetch_OriginatedCoverageIncludedPayor(t *testing.T) {
 // separately above and does not run this optional content rule.
 func TestCRDIngress_SubjectAbsoluteOnEHRServer(t *testing.T) {
 	onBase := func(base string) []byte {
-		body := ehrRequest(allAdvertised)
-		body = bytes.Replace(body, []byte(`"subject" : { "reference" : "Patient/example" }`), []byte(`"subject" : { "reference" : "`+base+`Patient/example" }`), 1)
-		return bytes.Replace(body, []byte(`"beneficiary":{"reference":"Patient/example"}`), []byte(`"beneficiary":{"reference":"`+base+`Patient/example"}`), 1)
+		b := ehrRequest(allAdvertised)
+		b = bytes.Replace(b, []byte(`"subject" : { "reference" : "Patient/example" }`), []byte(`"subject" : { "reference" : "`+base+`Patient/example" }`), 1)
+		return bytes.Replace(b, []byte(`"beneficiary":{"reference":"Patient/example"}`), []byte(`"beneficiary":{"reference":"`+base+`Patient/example"}`), 1)
 	}
-	for _, row := range []struct {
-		name  string
-		base  string
-		valid bool
-	}{
-		{"on EHR server", "https://ehr.example/fhir/", true},
-		{"another server", "https://elsewhere.example/fhir/", false},
-		{"prefix of EHR server", "https://ehr.example/", false},
-		{"host-only prefix", "https://ehr.example/fhirX/", false},
-	} {
-		t.Run(row.name, func(t *testing.T) {
-			env := newTransportExchangeWithPolicy(t, EnforcementStrict)
-			env.originator.cfg.Validator = syntheticFakeValidator()
-			env.originator.cfg.SubjectReferenceResolver = subjectResolverFunc(func(_ context.Context, ref PatientReference) (string, bool, error) {
-				if ref.Holder != "provider" {
-					return "", false, nil
-				}
-				if ref.Value != "Patient/example" {
-					return "", false, nil
-				}
-				switch ref.System {
-				case "fhir-relative", "https://ehr.example/fhir":
-					return "pci-covered", true, nil
-				case "https://elsewhere.example/fhir", "https://ehr.example", "https://ehr.example/fhirX":
-					return "pci-other", true, nil
-				}
-				return "", false, nil
-			})
-			env.payerReturns(framedCRDReplyDeclared(t, http.StatusOK, "application/json", "pa.crd@2.0", []byte(`{"cards":[]}`)))
-			body := onBase(row.base)
-			req := signedFixtureIngress(t, env.originator, "/cds-services/shn-order-select", "crd-order-select", "crd-order-select", "order-select", "pci-covered", "pa.crd@2.0", "absolute-source-"+row.name, body)
-			req.SetPathValue("id", "shn-order-select")
-			rec := httptest.NewRecorder()
-			env.originator.handleCRDIngress(rec, req)
-			if row.valid {
-				if rec.Code != http.StatusOK || env.routeHitCount() != 1 {
-					t.Fatalf("valid absolute reference status=%d body=%s Hub=%d", rec.Code, rec.Body, env.routeHitCount())
-				}
-				if got := sentRequest(t, env); !bytes.Contains(got, []byte(row.base+"Patient/example")) {
-					t.Fatalf("absolute source reference changed: %s", got)
-				}
-			} else if rec.Code != http.StatusUnprocessableEntity || env.routeHitCount() != 0 || !strings.Contains(rec.Body.String(), "patient.consistency") {
-				t.Fatalf("foreign absolute reference status=%d body=%s Hub=%d", rec.Code, rec.Body, env.routeHitCount())
+	for _, base := range []string{"https://ehr.example/fhir/"} {
+		t.Run("on the EHR's server", func(t *testing.T) {
+			body := onBase(base)
+			if !bytes.Contains(body, []byte(`"`+base+`Patient/example"`)) {
+				t.Fatal("fixture not rewritten")
+			}
+			if pci, status, msg := prefetchGateway(newPrefetchSoR()).ingressCRDSubjectPCIContext(context.Background(), body); status != 0 || pci != "pci-example" {
+				t.Fatalf("subject binding: %q %d %q", pci, status, msg)
 			}
 		})
 	}
-}
-
-// Distinct old supplied-value mutations remain observable under the explicit
-// strict patient-consistency rule. The unmutated signed Bundle is the control;
-// at none/observe the same bytes are carried by the native rows above.
-func TestPrefetch_StrictSuppliedSubjectMutations(t *testing.T) {
-	valid := signedEHRRequest(t)
-	for _, row := range []struct {
-		name  string
-		body  []byte
-		valid bool
-	}{
-		{"signed Bundle control", valid, true},
-		{"foreign history entry", bytes.Replace(valid, []byte(`"serviceHistory" : null`), []byte(`"serviceHistory" : `+foreignRecords), 1), false},
-		{"unadvertised foreign records", bytes.Replace(valid, []byte(`"serviceHistory" : null`), []byte(`"serviceHistory" : null,"labs":`+foreignRecords), 1), false},
-		{"case-variant foreign records", bytes.Replace(valid, []byte(`"serviceHistory" : null`), []byte(`"serviceHistory" : null,"Patient":`+foreignRecords), 1), false},
+	for name, base := range map[string]string{
+		"another server":             "https://elsewhere.example/fhir/",
+		"a prefix of the EHR server": "https://ehr.example/",
+		"the EHR server's host only": "https://ehr.example/fhirX/",
 	} {
-		t.Run(row.name, func(t *testing.T) {
-			if !row.valid && bytes.Equal(row.body, valid) {
-				t.Fatal("mutation did not change fixture")
-			}
-			env := newTransportExchangeWithPolicy(t, EnforcementStrict)
-			env.originator.cfg.Validator = syntheticFakeValidator()
-			s := newPrefetchSoR()
-			env.originator.cfg.SoR = s.sor()
-			env.originator.cfg.SubjectReferenceResolver = subjectResolverFunc(func(_ context.Context, ref PatientReference) (string, bool, error) {
-				if ref.Holder != "provider" || (ref.System != "fhir-relative" && ref.System != "http://localhost:8081/fhir") {
-					return "", false, nil
-				}
-				switch ref.Value {
-				case "Patient/example":
-					return "pci-covered", true, nil
-				case "Patient/other":
-					return "pci-other", true, nil
-				}
-				return "", false, nil
-			})
-			env.payerReturns(framedCRDReplyDeclared(t, http.StatusOK, "application/json", "pa.crd@2.0", []byte(`{"cards":[]}`)))
-			req := signedFixtureIngress(t, env.originator, "/cds-services/shn-order-sign", "crd-order-select", "crd-order-select", "order-sign", "pci-covered", "pa.crd@2.0", "strict-prefetch-"+row.name, row.body)
-			req.SetPathValue("id", "shn-order-sign")
-			rec := httptest.NewRecorder()
-			env.originator.handleCRDIngress(rec, req)
-			if row.valid {
-				if rec.Code != http.StatusOK || env.routeHitCount() != 1 {
-					t.Fatalf("valid request status=%d body=%s Hub=%d", rec.Code, rec.Body, env.routeHitCount())
-				}
-			} else if row.name == "case-variant foreign records" {
-				if rec.Code != http.StatusServiceUnavailable || env.routeHitCount() != 0 || !strings.Contains(rec.Body.String(), "adaptation_unavailable") {
-					t.Fatalf("ambiguous callback edit status=%d body=%s Hub=%d", rec.Code, rec.Body, env.routeHitCount())
-				}
-			} else if rec.Code != http.StatusUnprocessableEntity || env.routeHitCount() != 0 || !strings.Contains(rec.Body.String(), "patient.consistency") {
-				t.Fatalf("foreign resource status=%d body=%s Hub=%d", rec.Code, rec.Body, env.routeHitCount())
-			}
-			if searched, read := s.calls(); len(searched) != 0 || len(read) != 0 {
-				t.Fatalf("strict native request read source: searched=%v read=%v", searched, read)
-			}
-		})
-	}
-}
-
-// The old kept-value guard had separate serviceHistory mutations. Give each a
-// signed control. Patient consistency binds subject references, not incidental
-// Patient records in a searchset; an unresolved identifier/server is unavailable
-// at strict. None/observe carry every original byte under PCV-06.
-func TestPrefetch_SuppliedHistorySubjectVariants(t *testing.T) {
-	base := []byte(`{"hook":"order-select","hookInstance":"hi-history-variants","context":{"userId":"Practitioner/p1","patientId":"example","draftOrders":{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"ServiceRequest","id":"draft-1","status":"draft","intent":"order","subject":{"reference":"Patient/example"}}}]},"selections":["ServiceRequest/draft-1"]},"prefetch":{"serviceHistory":%s}}`)
-	history := func(resource string) []byte {
-		return []byte(fmt.Sprintf(string(base), `{"resourceType":"Bundle","type":"searchset","entry":[{"resource":`+resource+`}]}`))
-	}
-	own := `{"resourceType":"ServiceRequest","id":"x","status":"active","intent":"order","subject":{"reference":"Patient/example"}}`
-	for _, row := range []struct {
-		name, from, to, rule string
-		status               int
-	}{
-		{"foreign ServiceRequest", own, strings.ReplaceAll(own, "Patient/example", "Patient/other"), "patient.consistency", http.StatusUnprocessableEntity},
-		{"identifier-only subject", own, strings.ReplaceAll(own, `"reference":"Patient/example"`, `"identifier":{"system":"urn:mrn","value":"unlinked"}`), "patient.consistency", http.StatusServiceUnavailable},
-		{"foreign Patient entry without a binding reference", own, `{"resourceType":"Patient","id":"other"}`, "", http.StatusOK},
-		{"foreign server reference", own, strings.ReplaceAll(own, "Patient/example", "https://elsewhere.example/fhir/Patient/example"), "patient.consistency", http.StatusServiceUnavailable},
-		{"same-server absolute control", own, strings.ReplaceAll(own, "Patient/example", "http://localhost:8081/fhir/Patient/example"), "", http.StatusOK},
-	} {
-		t.Run(row.name, func(t *testing.T) {
-			control, mutated := history(row.from), history(row.to)
-			if bytes.Equal(control, mutated) {
-				t.Fatal("mutation absent")
-			}
-			for _, specimen := range []struct {
-				name   string
-				body   []byte
-				rule   string
-				status int
-			}{{"control", control, "", http.StatusOK}, {"mutation", mutated, row.rule, row.status}} {
-				for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve, EnforcementStrict} {
-					t.Run(specimen.name+"/"+level.String(), func(t *testing.T) {
-						env := newTransportExchangeWithPolicy(t, level)
-						env.originator.cfg.Validator = syntheticFakeValidator()
-						env.originator.cfg.SubjectReferenceResolver = subjectResolverFunc(func(_ context.Context, ref PatientReference) (string, bool, error) {
-							if ref.Holder != "provider" || (ref.System != "fhir-relative" && ref.System != "http://localhost:8081/fhir") {
-								return "", false, nil
-							}
-							switch ref.Value {
-							case "Patient/example":
-								return "pci-covered", true, nil
-							case "Patient/other":
-								return "pci-other", true, nil
-							}
-							return "", false, nil
-						})
-						env.payerReturns(framedCRDReplyDeclared(t, http.StatusOK, "application/json", "pa.crd@2.0", []byte(`{"cards":[]}`)))
-						req := signedFixtureIngress(t, env.originator, "/cds-services/shn-order-select", "crd-order-select", "crd-order-select", "order-select", "pci-covered", "pa.crd@2.0", "history-variant-"+row.name+specimen.name+level.String(), specimen.body)
-						req.SetPathValue("id", "shn-order-select")
-						rec := httptest.NewRecorder()
-						env.originator.handleCRDIngress(rec, req)
-						if level == EnforcementStrict && specimen.rule != "" {
-							if rec.Code != specimen.status || env.routeHitCount() != 0 || !strings.Contains(rec.Body.String(), specimen.rule) {
-								t.Fatalf("strict status=%d Hub=%d body=%s", rec.Code, env.routeHitCount(), rec.Body)
-							}
-							return
-						}
-						if rec.Code != http.StatusOK || env.routeHitCount() != 1 || !bytes.Equal(sentRequest(t, env), specimen.body) {
-							t.Fatalf("carriage status=%d Hub=%d body=%s", rec.Code, env.routeHitCount(), rec.Body)
-						}
-					})
-				}
+		t.Run(name, func(t *testing.T) {
+			// The subject binding itself refuses the reference, whatever
+			// else would refuse the request later.
+			if _, status, msg := prefetchGateway(newPrefetchSoR()).ingressCRDSubjectPCIContext(context.Background(), onBase(base)); status != http.StatusForbidden || msg != "inconsistent patient reference in ingress payload" {
+				t.Fatalf("subject binding: %d %q, want 403", status, msg)
 			}
 		})
 	}

@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 	"net/http/httptest"
@@ -24,12 +25,12 @@ func TestCRDEmptyFHIRTargetsApplicability(t *testing.T) {
 			for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve, EnforcementBasic, EnforcementStrict} {
 				t.Run(fmt.Sprintf("%s/%s/%s", version, level, body), func(t *testing.T) {
 					var calls atomic.Int32
-					g := newObservationGateway(t, level, observationValidator(func(context.Context, []byte, string) (shnsdk.ValidationEvidence, error) {
+					g := newObservationGateway(t, level, observationValidator(func(context.Context, []byte, string) (shnsdk.Result, error) {
 						calls.Add(1)
 						panic("no FHIR target")
 					}))
 					in := crdResponseInput(body, version, level)
-					for _, id := range []string{"fhir.profile", "fhir.terminology"} {
+					for _, id := range []string{"fhir.profile"} {
 						if deepRule(t, g, id).Applies(in) {
 							t.Fatalf("%s must be inapplicable", id)
 						}
@@ -46,7 +47,7 @@ func TestCRDEmptyFHIRTargetsApplicability(t *testing.T) {
 						t.Fatalf("none optional work=%+v", findings)
 					}
 					for _, f := range findings {
-						if f.Rule == "fhir.profile" || f.Rule == "fhir.terminology" {
+						if f.Rule == "fhir.profile" {
 							t.Fatalf("no-target must not claim evidence: %+v", f)
 						}
 					}
@@ -55,7 +56,7 @@ func TestCRDEmptyFHIRTargetsApplicability(t *testing.T) {
 					if level == EnforcementNone {
 						want = "disabled"
 					}
-					if health.Availability["profile"] != want || health.Availability["terminology"] != want {
+					if health.Availability["profile"] != want {
 						t.Fatalf("health=%+v", health)
 					}
 				})
@@ -91,7 +92,7 @@ func TestCRDEmptyFHIRTargetsCannotHideChecks(t *testing.T) {
 		t.Run(row.name, func(t *testing.T) {
 			in := crdResponseInput(row.body, row.version, EnforcementStrict)
 			in.Direction = row.direction
-			for _, id := range []string{"fhir.profile", "fhir.terminology"} {
+			for _, id := range []string{"fhir.profile"} {
 				if !deepRule(t, &Gateway{}, id).Applies(in) {
 					t.Fatalf("%s incorrectly waived", id)
 				}
@@ -192,7 +193,7 @@ func TestCRDEmptyFHIRTargetsNativePolicy(t *testing.T) {
 					t.Fatalf("none findings=%+v", findings)
 				}
 				for _, f := range findings {
-					if f.Direction == "response" && (f.Rule == "fhir.profile" || f.Rule == "fhir.terminology") {
+					if f.Direction == "response" && (f.Rule == "fhir.profile") {
 						t.Fatalf("inapplicable response evidence=%+v", f)
 					}
 				}
@@ -211,9 +212,9 @@ func TestCRDEnvelopeBeforeFHIRChecks(t *testing.T) {
 						body = `{"cards":[],"systemActions":{}}`
 					}
 					var calls atomic.Int32
-					g := newObservationGateway(t, level, observationValidator(func(context.Context, []byte, string) (shnsdk.ValidationEvidence, error) {
+					g := newObservationGateway(t, level, observationValidator(func(context.Context, []byte, string) (shnsdk.Result, error) {
 						calls.Add(1)
-						return shnsdk.ValidationEvidence{}, nil
+						return shnsdk.Result{}, errors.New("validator unavailable")
 					}))
 					in := crdResponseInput(body, version, level)
 					err := g.enforceContent(context.Background(), in)

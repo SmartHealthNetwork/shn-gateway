@@ -209,54 +209,6 @@ func TestPendLedger_KeyedLookupIgnoresAnOversizedProbe(t *testing.T) {
 	}
 }
 
-// A local authored workflow may resolve a payer's retained authorization using
-// any of the four source-stated keys. The active Store API must keep requester,
-// subject, and ambiguity boundaries even though native inquiry never mutates it.
-func TestPendLedger_SourceKeyLookupBoundaries(t *testing.T) {
-	const requester = "provider-a"
-	for _, tc := range []struct {
-		name string
-		keys PendKeys
-	}{
-		{"request identifier", PendKeys{RequestIDs: []string{"urn:claim|SUB-9"}}},
-		{"response identifier", PendKeys{ClaimResponseIDs: []string{"urn:response|CR-9"}}},
-		{"authorization reference", PendKeys{PreAuthRef: "AUTH-9"}},
-		{"item trace", PendKeys{ItemTraceNumbers: []string{"urn:trace|TRN-9"}}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			store := NewMemStore()
-			seed := tc.keys
-			seed.RequesterHolder = requester
-			if _, err := store.RecordPendedKeyed("pci:patient-a", "corr-a", time.Time{}, seed); err != nil {
-				t.Fatal(err)
-			}
-			assertLookup := func(holder string, probe PendKeys, wantFound, wantAmbiguous bool) {
-				t.Helper()
-				subject, corr, found, ambiguous, err := store.LookupPended(holder, probe)
-				if err != nil || found != wantFound || ambiguous != wantAmbiguous {
-					t.Fatalf("lookup holder=%q probe=%+v: subject=%q corr=%q found=%v ambiguous=%v err=%v", holder, probe, subject, corr, found, ambiguous, err)
-				}
-				if found && (subject != "pci:patient-a" || corr != "corr-a") {
-					t.Fatalf("lookup resolved wrong authorization: %s/%s", subject, corr)
-				}
-			}
-			assertLookup(requester, tc.keys, true, false)
-			assertLookup("provider-b", tc.keys, false, false)
-			assertLookup(requester, PendKeys{PreAuthRef: "UNRELATED"}, false, false)
-			if _, err := store.RecordPendedKeyed("pci:patient-b", "corr-b", time.Time{}, seed); err != nil {
-				t.Fatal(err)
-			}
-			assertLookup(requester, tc.keys, false, true)
-			for _, row := range []struct{ subject, corr string }{{"pci:patient-a", "corr-a"}, {"pci:patient-b", "corr-b"}} {
-				rec, found, err := store.PendRecordOf(row.subject, row.corr)
-				if err != nil || !found || rec.State != PendStatePended {
-					t.Fatalf("ambiguous lookup mutated %s/%s: %+v found=%v err=%v", row.subject, row.corr, rec, found, err)
-				}
-			}
-		})
-	}
-}
-
 // TestPendLedger_ResetClearsTheLedger: the demo reset contract covers the new
 // ledger state too (an unreset index would leak keys across a reset).
 func TestPendLedger_ResetClearsTheLedger(t *testing.T) {

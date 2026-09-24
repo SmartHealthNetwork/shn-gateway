@@ -46,26 +46,6 @@ asking for it (`Claim/$inquire`, leg type `pas-claim-inquire`).
   The bound and the schedule are now derived from each other and held together by a
   test, so they cannot drift apart again.
 
-## Explicit payer EOB action
-
-`engine.Config.PayerEOBActionsEnabled` mounts the payer-only local
-`POST /local/payer/eob-record` route. A registered client needs
-`IngressClientRegistration.PayerEOBRecord` and the
-`system/ExplanationOfBenefit.write` scope. The exported
-`Gateway.RecordPayerEOBFromSource` method reads a complete EOB from the payer's
-own `SystemOfRecord` and writes its original bytes to `Store`; a source miss,
-missing issued `urn:shn:pci` Patient linkage, inconsistent references or failed
-PDex certification returns `ErrPayerEOBSourceUnavailable` and writes nothing.
-`Config.PayerEOBValidator` is mandatory for this action and independent of the
-optional native conformance lanes, including at `none`. Native relay never calls
-the action or creates an EOB.
-
-`Store.RecordEOB` and `PendLedger.RecordDecision` refuse an EOB id already owned
-by another PCI with `ErrEOBSubjectMismatch`. The refusal is atomic with any
-decision write; the HTTP action returns `409`. Re-recording an id for the same
-PCI remains supported. A payer must author the EOB in its own source first; the
-gateway does not infer missing EOB facts from a PAS ClaimResponse.
-
 ## Conformance observation
 
 Native messages use the participant's policy snapshot for both directions.
@@ -233,14 +213,13 @@ or global failure state is introduced.
   in-process persona stub (`engine.StubHolderData`) is gone. Its Store half survives as
   `engine.NewMemStore` — the in-memory `Store` default, carrying no persona content.
 
-**Breaking in this release** (wire behaviour — new refusal class):
+**Attestation behavior:**
 
-- **The gateway now enforces the FR-16 / FR-27 attestation requirements at the inbound
-  gate, before dispatch, and answers `403`.** This runs on all three PAS entrances — the
-  payer inbound `pas-claim` and `pas-claim-update` legs, and the provider-facing Da Vinci
-  ingress. No earlier gateway inspected attestations on the wire, so **every refusal in this
-  class is new**: traffic a v0.38.x gateway forwarded to the occupant can now be stopped at
-  the door, and the occupant never sees it.
+- The provider-facing PAS submit/amend action owns the authored clinical business action and
+  retains its local FR-16 / FR-27 attestation fence. Native PAS carriage treats
+  `qr.attestation` as an optional deeper request rule: `strict` enforces it, `observe` and
+  `basic` record it without blocking, and `none` does not run it. Native carriage does not
+  turn that local action fence into an all-level body parser.
 
   A `QuestionnaireResponse` item that declares itself manually entered (the DTR
   information-origin extension with `source="manual"`) and names a `Practitioner` author
@@ -250,7 +229,7 @@ or global failure state is introduced.
   non-empty `reference` OR an `identifier` with a non-empty `value` (`system` optional —
   both of FHIR R4's legal `Signature.who` forms are accepted), and `data`. Whitespace-only
   counts as empty. A system-sourced item — one with no manual-source
-  marker at all — is untouched and requires no attestation. The refusal names the failing
+  marker at all — is untouched and requires no attestation. A refusal names the failing
   requirement, the item's `linkId`, and the specific field that is absent or empty.
 
   `Config.Adjudicator` is unaffected in shape; what changes is that a nonconformant item is

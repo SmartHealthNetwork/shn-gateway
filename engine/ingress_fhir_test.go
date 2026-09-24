@@ -301,9 +301,9 @@ func TestFHIRIngressSuppliedQRAttestationPolicy(t *testing.T) {
 			t.Run(fmt.Sprintf("%s/attestation-removed=%v", level, mutated), func(t *testing.T) {
 				env := newTransportExchangeWithPolicy(t, level)
 				var checkerCalls atomic.Int32
-				env.originator.cfg.Validator = observationValidator(func(context.Context, []byte, string) (shnsdk.ValidationEvidence, error) {
+				env.originator.cfg.Validator = observationValidator(func(context.Context, []byte, string) (shnsdk.Result, error) {
 					checkerCalls.Add(1)
-					return *syntheticEvidence(), nil
+					return shnsdk.Result{Valid: true}, nil
 				})
 				subject, _, ok := env.originator.cfg.SoR.ResolvePatient("MBR-COVERED")
 				if !ok {

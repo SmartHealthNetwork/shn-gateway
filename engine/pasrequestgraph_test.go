@@ -242,7 +242,7 @@ func TestAuthoredPASOptionalEvidenceScope(t *testing.T) {
 						check(buildAuthoredPASSubmit(line, in))
 						if orderType == "ServiceRequest" {
 							for _, diagnostic := range []bool{false, true} {
-								u := attachmentUpdateInputs(t, line, absolute, diagnostic)
+								u := attachmentUpdateInputs(line, absolute, diagnostic)
 								u.QR = in.QR
 								u.SR = in.SR
 								check(buildAuthoredPASUpdate(line, u))

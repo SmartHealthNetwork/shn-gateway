@@ -28,14 +28,9 @@ var _ engine.SystemOfRecord = (*SoR)(nil)
 type SoR struct {
 	fc  *fhirclient.Client
 	now func() time.Time
-	// holder is set only by the participant-owned integration. It bounds subject
-	// linkage to this source's namespace and requires an explicit network PCI.
-	holder string
 }
 
 // New returns a SoR over fc. The FHIR base URL embedded in fc determines partition locality.
-// Patient resolution requires a matching member identifier and an already-issued
-// urn:shn:pci identifier in the source Patient; demographics never mint a PCI.
 func New(fc *fhirclient.Client) *SoR {
 	return &SoR{fc: fc, now: time.Now}
 }
@@ -47,15 +42,6 @@ func New(fc *fhirclient.Client) *SoR {
 // than a pre-built fhirclient. hc==nil uses a default client.
 func NewFromURL(baseURL string, hc *http.Client) *SoR {
 	return New(fhirclient.New(baseURL, hc))
-}
-
-// NewFromURLForHolder binds the FHIR reader to one authenticated participant's
-// own source. Patient identifiers from this source, including a Trust-issued PCI
-// link, never establish facts about another holder's Patient namespace.
-func NewFromURLForHolder(baseURL string, hc *http.Client, holder string) *SoR {
-	s := NewFromURL(baseURL, hc)
-	s.holder = holder
-	return s
 }
 
 // resolvePatient returns the parsed Patient and its server id, or ok=false. Shared
@@ -87,15 +73,15 @@ func (s *SoR) resolvePatient(ctx context.Context, memberID string) (p fhir.Patie
 	if err := json.Unmarshal(b.Entry[0].Resource, &p); err != nil {
 		return fhir.Patient{}, nil, "", false, invalidResponse()
 	}
-	if p.Id == nil || *p.Id == "" || !patientHasIdentifier(b.Entry[0].Resource, shnsdk.MemberSystem, memberID) {
+	if p.Id == nil || *p.Id == "" {
 		return fhir.Patient{}, nil, "", false, invalidResponse()
 	}
 	return p, b.Entry[0].Resource, *p.Id, true, nil
 }
 
-// ResolvePatientContext reads an already-issued PCI from the participant's own
-// Patient record. Missing linkage stays unavailable for every constructor;
-// demographics describe the source patient but never mint network identity.
+// ResolvePatient turns a member id into a substrate PCI via the SAME shnsdk.ResolvePCI
+// the stub uses, reading birthDate + family from the US Core Patient through
+// engine.PatientDemographics, the read a Patient carried in a request gets too.
 func (s *SoR) ResolvePatientContext(ctx context.Context, memberID string) (string, engine.Demo, bool, error) {
 	_, raw, _, ok, err := s.resolvePatient(ctx, memberID)
 	if err != nil {
@@ -104,18 +90,11 @@ func (s *SoR) ResolvePatientContext(ctx context.Context, memberID string) (strin
 	if !ok {
 		return "", engine.Demo{}, false, nil
 	}
-	pci, linked, err := sourcePCI(raw)
-	if err != nil {
-		return "", engine.Demo{}, false, err
-	}
-	if !linked {
-		return "", engine.Demo{}, false, nil
-	}
 	demo, ok := engine.PatientDemographics(raw)
 	if !ok {
 		return "", engine.Demo{}, false, invalidResponse()
 	}
-	return pci, demo, true, nil
+	return shnsdk.ResolvePCI(memberID, demo.BirthDate, demo.FamilyName), demo, true, nil
 }
 
 // PatientFHIRRef returns "Patient/<store-id>" — the FHIR store's resource id for the member

@@ -55,7 +55,6 @@ type IngressClientRegistration struct {
 	Scopes               []string // permitted scopes
 	ContextOperations    []string // explicit application operation grants; empty grants none
 	BoundaryPreparations []string // explicit completed preparation grants; empty grants none
-	PayerEOBRecord       bool     // explicit grant to invoke the payer's local EOB recording action
 }
 
 type ingressAuthServer struct {
@@ -394,8 +393,7 @@ func (s *ingressAuthServer) verifyBearerPrincipal(r *http.Request) (principal In
 	if _, present := claims["iss"]; present {
 		return IngressPrincipal{}, false, false
 	}
-	scope, _ := claims["scope"].(string)
-	return IngressPrincipal{ClientID: clientID, Scope: scope}, true, false
+	return IngressPrincipal{ClientID: clientID}, true, false
 }
 
 // audUnder reports whether aud is the config base itself or a path strictly under it.
@@ -490,8 +488,7 @@ func (s *ingressAuthServer) verifyDirectBearerPrincipal(r *http.Request) (Ingres
 	if jtiVal, _ := claims["jti"].(string); jtiVal == "" {
 		return IngressPrincipal{}, false
 	}
-	scope, _ := claims["scope"].(string)
-	return IngressPrincipal{ClientID: clientID, Scope: scope}, true
+	return IngressPrincipal{ClientID: clientID}, true
 }
 
 func (s *ingressAuthServer) handleSmartConfig(w http.ResponseWriter, r *http.Request) {

@@ -2,14 +2,11 @@ package engine
 
 import (
 	"bytes"
-	"context"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
@@ -168,144 +165,6 @@ func TestDTRIngress_ParametersRelayedExactly(t *testing.T) {
 				}
 			})
 		}
-	}
-}
-
-func TestDTRIngress_SuppliedSubjectPolicy(t *testing.T) {
-	const answer = `{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"business-rule","diagnostics":"payer inquiry refusal"}]}`
-	for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve, EnforcementBasic, EnforcementStrict} {
-		for _, mutation := range []string{"", "second coverage", "second order"} {
-			mutated := mutation != ""
-			t.Run(fmt.Sprintf("%s/%s", level, mutation), func(t *testing.T) {
-				env := newTransportExchangeWithPolicy(t, level)
-				var calls atomic.Int32
-				env.originator.cfg.Validator = observationValidator(func(context.Context, []byte, string) (shnsdk.ValidationEvidence, error) {
-					calls.Add(1)
-					return *syntheticEvidence(), nil
-				})
-				sor := newPrefetchSoR()
-				subject, _, ok, err := sor.ResolvePatientContext(context.Background(), prefetchMember)
-				if err != nil || !ok {
-					t.Fatal("seeded subject missing")
-				}
-				env.originator.cfg.SubjectReferenceResolver = subjectResolverFunc(func(ctx context.Context, ref PatientReference) (string, bool, error) {
-					if ref.Holder != "provider" || ref.System != "fhir-relative" {
-						return "", false, nil
-					}
-					switch ref.Value {
-					case "Patient/" + prefetchMember:
-						return subject, true, nil
-					case "Patient/other":
-						return "pci-other", true, nil
-					}
-					return "", false, nil
-				})
-				valid := []string{ehrCoverageParam(prefetchMember, "00001"), ehrOrderParam("sr1", prefetchMember), dtrQuestionnaire}
-				switch mutation {
-				case "second coverage":
-					valid = append(valid, strings.ReplaceAll(ehrCoverageParam(prefetchMember, "00001"), "Patient/"+prefetchMember, "Patient/other"))
-				case "second order":
-					valid = append(valid, strings.ReplaceAll(ehrOrderParam("sr2", prefetchMember), "Patient/"+prefetchMember, "Patient/other"))
-				}
-				body := ehrParams(valid...)
-				env.payerReturns(LegResult{Status: 409, Response: testResponse([]byte(answer))})
-				req := signedFixtureIngress(t, env.originator, "/Questionnaire/$questionnaire-package", "dtr-questionnaire-fetch", shnsdk.FrameOperationQuestionnairePackage, "", subject, "pa.dtr@2.0", "dtr-subject-policy", body)
-				rec := httptest.NewRecorder()
-				env.originator.handleDTRIngress(rec, req)
-				if mutated && level == EnforcementStrict {
-					if rec.Code != 422 || env.routeHitCount() != 0 || !strings.Contains(rec.Body.String(), `"valueString":"patient.consistency"`) || !strings.Contains(rec.Body.String(), `"valueString":"conformance_invalid"`) {
-						t.Fatalf("refusal status=%d Hub=%d body=%s", rec.Code, env.routeHitCount(), rec.Body)
-					}
-				} else {
-					if rec.Code != 409 || rec.Body.String() != answer || rec.Header().Get("Content-Type") != "application/fhir+json" || env.routeHitCount() != 1 {
-						t.Fatalf("delivery status=%d Hub=%d body=%s", rec.Code, env.routeHitCount(), rec.Body)
-					}
-					hdr, sent, err := shnsdk.DecodeHTTPFrame(env.lastRequestPayload())
-					if err != nil || !bytes.Equal(sent, body) || hdr.Headers["Content-Type"] != "application/fhir+json" {
-						t.Fatalf("request changed: %s header=%+v err=%v", sent, hdr, err)
-					}
-				}
-				observationFlush(t, env.originator)
-				findings, drops := env.originator.ConformanceObservationsForTest()
-				if drops != 0 {
-					t.Fatal(drops)
-				}
-				if level == EnforcementNone && (calls.Load() != 0 || len(findings) != 0 || env.originator.certification != nil) {
-					t.Fatalf("none calls=%d findings=%+v", calls.Load(), findings)
-				}
-				if level == EnforcementObserve || level == EnforcementBasic {
-					found := false
-					for _, f := range findings {
-						if f.Rule != "patient.consistency" || f.Direction != "request" {
-							continue
-						}
-						found = true
-						want := CheckValid
-						if mutated {
-							want = CheckInvalid
-						}
-						if f.State != want || f.Action != "not_enforced" || f.PayloadSHA256 != sha256hex(body) {
-							t.Fatalf("finding=%+v", f)
-						}
-					}
-					if !found {
-						t.Fatal("missing patient consistency finding")
-					}
-				}
-			})
-		}
-	}
-}
-
-// Each nested DTR form that the old raw-ingress guard traversed has its own
-// signed control. Patient consistency binds subject references; incidental
-// Patient records and an order with no subject are not a proven mismatch under
-// this rule. Profile validity remains the separate FHIR checker obligation.
-func TestDTRIngress_NestedSuppliedSubjectVariants(t *testing.T) {
-	for _, row := range []struct{ name, control, mutation, rule string }{
-		{"referenced Bundle", `{"name":"referenced","resource":{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"Observation","id":"o1","status":"final","code":{"text":"x"},"subject":{"reference":"Patient/example"}}}]}}`, `{"name":"referenced","resource":{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"Observation","id":"o1","status":"final","code":{"text":"x"},"subject":{"reference":"Patient/other"}}}]}}`, "patient.consistency"},
-		{"referenced Patient without binding reference", `{"name":"referenced","resource":{"resourceType":"Patient","id":"example"}}`, `{"name":"referenced","resource":{"resourceType":"Patient","id":"other"}}`, ""},
-		{"nested part", `{"name":"x","part":[{"name":"y","resource":{"resourceType":"Condition","id":"c1","subject":{"reference":"Patient/example"}}}]}`, `{"name":"x","part":[{"name":"y","resource":{"resourceType":"Condition","id":"c1","subject":{"reference":"Patient/other"}}}]}`, "patient.consistency"},
-		{"contained Patient without binding reference", `{"name":"referenced","resource":{"resourceType":"Condition","id":"c2","subject":{"reference":"Patient/example"},"contained":[{"resourceType":"Patient","id":"p","identifier":[{"system":"` + shnsdk.MemberSystem + `","value":"example"}]}]}}`, `{"name":"referenced","resource":{"resourceType":"Condition","id":"c2","subject":{"reference":"Patient/example"},"contained":[{"resourceType":"Patient","id":"p","identifier":[{"system":"` + shnsdk.MemberSystem + `","value":"other"}]}]}}`, ""},
-		{"order without subject is not a mismatched binding", ehrOrderParam("sr3", prefetchMember), `{"name":"order","resource":{"resourceType":"ServiceRequest","id":"sr3","status":"active","intent":"order"}}`, ""},
-	} {
-		t.Run(row.name, func(t *testing.T) {
-			for _, specimen := range []struct{ name, extra, rule string }{{"control", row.control, ""}, {"mutation", row.mutation, row.rule}} {
-				body := ehrParams(ehrCoverageParam(prefetchMember, "00001"), ehrOrderParam("sr1", prefetchMember), dtrQuestionnaire, specimen.extra)
-				for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve, EnforcementStrict} {
-					t.Run(specimen.name+"/"+level.String(), func(t *testing.T) {
-						env := newTransportExchangeWithPolicy(t, level)
-						env.originator.cfg.Validator = syntheticFakeValidator()
-						env.originator.cfg.SubjectReferenceResolver = subjectResolverFunc(func(_ context.Context, ref PatientReference) (string, bool, error) {
-							if ref.Holder != "provider" || (ref.System != "fhir-relative" && ref.System != shnsdk.MemberSystem) {
-								return "", false, nil
-							}
-							switch ref.Value {
-							case "Patient/example", "example":
-								return "pci-example", true, nil
-							case "Patient/other", "other":
-								return "pci-other", true, nil
-							}
-							return "", false, nil
-						})
-						env.payerReturns(LegResult{Status: 409, Response: testResponse([]byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"business-rule","diagnostics":"payer refusal"}]}`))})
-						req := signedFixtureIngress(t, env.originator, "/Questionnaire/$questionnaire-package", "dtr-questionnaire-fetch", shnsdk.FrameOperationQuestionnairePackage, "", "pci-example", "pa.dtr@2.0", "nested-dtr-"+row.name+specimen.name+level.String(), body)
-						rec := httptest.NewRecorder()
-						env.originator.handleDTRIngress(rec, req)
-						if level == EnforcementStrict && specimen.rule != "" {
-							if rec.Code != http.StatusUnprocessableEntity || env.routeHitCount() != 0 || !strings.Contains(rec.Body.String(), `"valueString":"`+specimen.rule+`"`) || !strings.Contains(rec.Body.String(), `"valueString":"conformance_invalid"`) {
-								t.Fatalf("strict status=%d Hub=%d body=%s", rec.Code, env.routeHitCount(), rec.Body)
-							}
-							return
-						}
-						_, sent := sentOperation(t, env)
-						if rec.Code != http.StatusConflict || env.routeHitCount() != 1 || !bytes.Equal(sent, body) {
-							t.Fatalf("carriage status=%d Hub=%d body=%s", rec.Code, env.routeHitCount(), rec.Body)
-						}
-					})
-				}
-			}
-		})
 	}
 }
 

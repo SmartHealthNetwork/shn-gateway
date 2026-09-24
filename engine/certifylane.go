@@ -103,14 +103,6 @@ func (v *GatedCertificationValidator) Validate(ctx context.Context, body []byte,
 	return v.client.Validate(ctx, body, profile)
 }
 
-// ValidateEvidence uses the same readiness snapshot and one client call.
-func (v *GatedCertificationValidator) ValidateEvidence(ctx context.Context, body []byte, profile string) (shnsdk.ValidationEvidence, error) {
-	if err := v.unavailable(); err != nil {
-		return unavailableValidatorEvidence(), err
-	}
-	return v.client.ValidateEvidence(ctx, body, profile)
-}
-
 func (v *GatedCertificationValidator) unavailable() error {
 	if v.lane.Ready() {
 		return nil

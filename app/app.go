@@ -298,11 +298,6 @@ type config struct {
 	// ([{client_id, alg, public_key_pem, scopes}]). Set by INGRESS_CLIENTS_FILE.
 	// Required when ProviderDavinciIngress is set.
 	ProviderDavinciIngressClientsFile string
-	// PayerEOBActionsEnabled mounts the payer's authenticated local action to
-	// record an EOB already authored in its own FHIR source.
-	PayerEOBActionsEnabled bool
-	PayerEOBActionsBaseURL string
-
 	// AcceptUnknownMembers is retained for source compatibility for one release.
 	// Deprecated: it has no effect on identity, admission or source disclosure.
 	AcceptUnknownMembers bool
@@ -511,10 +506,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 
 		ProviderDavinciIngressBaseURL:     getenv("PROVIDER_DAVINCI_INGRESS_BASE_URL"),
 		ProviderDavinciIngressClientsFile: getenv("INGRESS_CLIENTS_FILE"),
-		PayerEOBActionsEnabled:            getenv("PAYER_EOB_ACTIONS") != "",
-		PayerEOBActionsBaseURL:            getenv("PAYER_EOB_ACTIONS_BASE_URL"),
-
-		AcceptUnknownMembers: getenv("SHN_ACCEPT_UNKNOWN_MEMBERS") != "",
+		AcceptUnknownMembers:              getenv("SHN_ACCEPT_UNKNOWN_MEMBERS") != "",
 
 		AuthzPubkeyURL:     getenv("AUTHZ_PUBKEY_URL"),
 		HubTransportKeyURL: getenv("HUB_TRANSPORT_KEY_URL"),
@@ -768,43 +760,6 @@ func loadConfig(getenv func(string) string) (config, error) {
 		cfg.IngressBaseURL = cfg.ProviderDavinciIngressBaseURL
 		cfg.IngressClients = clients
 	}
-	if cfg.PayerEOBActionsEnabled {
-		if role != "payer" {
-			return config{}, fmt.Errorf("gateway: PAYER_EOB_ACTIONS is payer-only (role=%q)", role)
-		}
-		if cfg.FHIRValidateURL == "" {
-			return config{}, fmt.Errorf("gateway: PAYER_EOB_ACTIONS requires FHIR_VALIDATE_URL for PDex certification")
-		}
-		if cfg.PayerEOBActionsBaseURL == "" {
-			return config{}, fmt.Errorf("gateway: PAYER_EOB_ACTIONS requires PAYER_EOB_ACTIONS_BASE_URL")
-		}
-		clients, err := loadIngressClients(cfg.ProviderDavinciIngressClientsFile)
-		if err != nil {
-			return config{}, fmt.Errorf("gateway: payer EOB action clients: %w", err)
-		}
-		granted := false
-		for _, client := range clients {
-			if client.PayerEOBRecord {
-				allowed := false
-				for _, scope := range client.Scopes {
-					if scope == "system/ExplanationOfBenefit.write" {
-						allowed = true
-						break
-					}
-				}
-				if !allowed {
-					return config{}, fmt.Errorf("gateway: payer_eob_record grant requires system/ExplanationOfBenefit.write scope")
-				}
-				granted = true
-			}
-		}
-		if !granted {
-			return config{}, fmt.Errorf("gateway: PAYER_EOB_ACTIONS requires INGRESS_CLIENTS_FILE with a payer_eob_record grant")
-		}
-		cfg.IngressBaseURL = cfg.PayerEOBActionsBaseURL
-		cfg.IngressClients = clients
-	}
-
 	// Observer stream: off unless OBSERVER_ADDR is set, and REFUSED unless the
 	// bind host is loopback — the observer carries edge payloads; it is a
 	// local diagnostic surface, never a network service.
@@ -903,7 +858,6 @@ func loadIngressClients(path string) (map[string]engine.IngressClientRegistratio
 		Scopes               []string `json:"scopes"`
 		ContextOperations    []string `json:"context_operations"`
 		BoundaryPreparations []string `json:"boundary_preparations"`
-		PayerEOBRecord       bool     `json:"payer_eob_record"`
 	}
 	if err := json.Unmarshal(raw, &arr); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
@@ -940,7 +894,7 @@ func loadIngressClients(path string) (map[string]engine.IngressClientRegistratio
 		if len(scopes) == 0 {
 			scopes = []string{"system/Davinci.write"}
 		}
-		out[c.ClientID] = engine.IngressClientRegistration{Alg: c.Alg, PublicKeyPEM: pemBytes, Scopes: scopes, ContextOperations: c.ContextOperations, BoundaryPreparations: c.BoundaryPreparations, PayerEOBRecord: c.PayerEOBRecord}
+		out[c.ClientID] = engine.IngressClientRegistration{Alg: c.Alg, PublicKeyPEM: pemBytes, Scopes: scopes, ContextOperations: c.ContextOperations, BoundaryPreparations: c.BoundaryPreparations}
 	}
 	return out, nil
 }
@@ -989,7 +943,6 @@ func optionalURLs(cfg config) [][2]string {
 		{"PROVIDER_DTR_POPULATE_URL", cfg.ProviderDTRPopulateURL},
 		{"PROVIDER_DTR_POPULATE_TOKEN_URL", cfg.ProviderDTRPopulateTokenURL},
 		{"PROVIDER_DAVINCI_INGRESS_BASE_URL", cfg.ProviderDavinciIngressBaseURL},
-		{"PAYER_EOB_ACTIONS_BASE_URL", cfg.PayerEOBActionsBaseURL},
 		{"SHN_DISCOVERY_URL", cfg.DiscoveryURL},
 		{"AUTHZ_PUBKEY_URL", cfg.AuthzPubkeyURL},
 		{"HUB_TRANSPORT_KEY_URL", cfg.HubTransportKeyURL},
@@ -1481,7 +1434,7 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	if hc == nil && cfg.diagnostic != nil {
 		hc = cfg.diagnostic.client(http.DefaultClient)
 	}
-	var sor engine.SystemOfRecord = fhirsor.NewFromURLForHolder(cfg.FHIRDataURL, hc, bundle.Identity.HolderID)
+	var sor engine.SystemOfRecord = fhirsor.NewFromURL(cfg.FHIRDataURL, hc)
 	// Store: the gateway's OWN business state (auth numbers, pended-claim ledger, EOBs).
 	// In-memory by default; the SHN_STORE_DATABASE_URL override below swaps in pgstore.
 	var store engine.Store = engine.NewMemStore()
@@ -1605,7 +1558,6 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		HubURL:                  firstNonEmpty(cfg.HubURL, endpoints.Hub),
 		Reg:                     reg, // populated by the snapshot above
 		Validator:               validator,
-		PayerEOBValidator:       payerEOBActionValidator(cfg),
 		AdaptationValidator:     adaptationValidatorFactory(cfg, firstNonEmpty(cfg.FHIRValidateURL, endpoints.FHIRValidate), getenv("SHN_FAKE_VALIDATOR") == "1", func(base string) shnsdk.Validator { return shnsdk.NewOperationValidator(base) }),
 		ValidatorsByLine:        validatorLanes,
 		DefaultValidatorsByLine: lanes.defaults,
@@ -1781,7 +1733,6 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		gwCfg.Populator = engine.NewNativePopulatorWithFailureObserver(ppc, cfg.ProviderDTRPopulateURL, populateFailureObserver(stdout))
 	}
 	gwCfg.IngressEnabled = cfg.ProviderDavinciIngress
-	gwCfg.PayerEOBActionsEnabled = cfg.PayerEOBActionsEnabled
 	gwCfg.IngressBaseURL = cfg.IngressBaseURL
 	gwCfg.IngressClients = cfg.IngressClients
 	gwCfg.AcceptUnknownMembers = cfg.AcceptUnknownMembers
@@ -2232,16 +2183,6 @@ func selectValidator(getenv func(string) string, validatorURL string) (shnsdk.Va
 	default:
 		return nil, nil
 	}
-}
-
-// payerEOBActionValidator is a mandatory certifier only for the explicit
-// payer-owned clinical write. It does not enter the optional native lanes or
-// their readiness lifecycle when CONFORMANCE_ENFORCEMENT=none.
-func payerEOBActionValidator(cfg config) shnsdk.Validator {
-	if !cfg.PayerEOBActionsEnabled {
-		return nil
-	}
-	return shnsdk.NewOperationValidator(cfg.FHIRValidateURL)
 }
 
 // convergeRegistry snapshots the /holders feed into reg (Holder → RegistryEntry).

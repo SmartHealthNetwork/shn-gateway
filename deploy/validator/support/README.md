@@ -1,12 +1,10 @@
 # Offline validation support
 
-`shn.fhir.validation-support-1.4.0.tgz` supplies three things the validator lines load from
+`shn.fhir.validation-support-1.2.0.tgz` supplies two things the validator lines load from
 `file://` beside their IG packages:
 
-- the CMS terminology used by PAS response and US Core Condition validation (it does not
+- the CMS terminology required when validating the complete PAS response graph (it does not
   replace PAS profiles or change their required bindings);
-- the first SHN-maintained release (`1.0.0`) of the local
-  `urn:shn:clinical-context` CodeSystem used by the lumbar workflow;
 - the validation closure of the cross-version canonicals SHN-built resources carry — today
   the R5 `Claim.encounter` extension — copied unchanged from the pinned
   `hl7.fhir.uv.xver-r5.r4` 0.1.0 and `hl7.fhir.uv.extensions.r4` 5.3.0-ballot-tc1 packages
@@ -40,21 +38,7 @@ and `closure.py` refuses to walk an archive whose digest differs from the record
 
 ## Sources and scope
 
-`sources.json` pins every downloaded input by SHA-256 and records its source URL. Its
-separate `local` entry pins SHN's authored CodeSystem input and identifies the source
-snapshot, public constants and consumers that define the current convention. That
-snapshot is provenance for this authored release, not an upstream clinical authority.
-
-The local release is flat, case-sensitive and complete for exactly three concepts:
-`conservative-therapy-weeks` is a quantity of completed conservative-therapy weeks;
-`neuro-deficit` is a Boolean progressive neurological-deficit flag; and
-`patient-reported-required` is a Boolean workflow requirement for a patient-reported
-functional-status attestation, not the attestation act. Each participant supplies
-its own facts and maps its own system to these concepts; missing facts remain missing.
-The release does not set a clinical threshold, identify a suitable LOINC code, or
-establish clinical equivalence. Source `Coding.version` remains absent. The local
-CodeSystem is SHN-authored under Apache-2.0 (`LICENSE`); the original CMS notices
-remain in their archives, and the copied HL7 sources retain their CC0-1.0 terms.
+`sources.json` pins every downloaded input by SHA-256 and records its source URL.
 
 - CMS July 2026 alpha-numeric HCPCS release, updated June 17, 2026: the full public
   use archive, including its record layout and notices. CMS describes releases from
@@ -67,28 +51,6 @@ remain in their archives, and the copied HL7 sources retain their CC0-1.0 terms.
   canonical is the exact `http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets`
   used by PAS. The release remains versioned `2026-07`; no current-date network
   fetch occurs during generation or runtime.
-- CMS April 1, 2026 ICD-10-CM Code Descriptions in Tabular Order archive:
-  all 98,186 entries (23,467 headers and 74,719 diagnosis codes). Its included
-  format documents define flag 0 as a header, not valid for HIPAA-covered
-  transactions, and flag 1 as valid for those transactions. Both types remain
-  present. The independent codes file must exactly equal the flag-1 keys and
-  full descriptions. The generator preserves the full description as display,
-  abbreviated description as an English designation, release-specific order as
-  `cmsOrder`, and the exact source flag as `cmsValidForHIPAATransactions`.
-  Membership alone does not make a header a valid diagnosis code. No hierarchy,
-  FHIR abstract status, billability, exclusions or clinical rules are inferred.
-  `content=complete` describes membership of this full official release, not a
-  claim to encode every tabular annotation or to supply every US Core binding.
-  The [FHIR R4 ICD representation](https://hl7.org/fhir/R4/icd.html) requires
-  decimal notation: three-character keys remain unchanged; longer keys receive
-  a period after the third character. This also preserves the source's `QA`
-  entries; a second-character-digit assumption would discard official rows.
-  The canonical remains `http://hl7.org/fhir/sid/icd-10-cm`. The explicit release
-  identifier `2026-04-01` identifies the [CMS April FY2026 release](https://www.cms.gov/medicare/coding-billing/icd-10-codes),
-  applicable April–September 2026; it is not a claimed CMS version string or
-  a change to source Coding.version. Original archive, documentation and notices
-  are retained unchanged. This ICD-10-CM representation is not WHO ICD-10,
-  ICD-10-PCS, ICD-9-CM or a replacement for missing SNOMED/LOINC/CPT content.
 - CMS Place of Service database, updated May 2, 2024, downloaded September 10, 2026:
   the complete HTML source table. Its 52 assigned codes are represented; unassigned
   codes/ranges are not valid concepts. The generator verifies coverage of all
@@ -111,10 +73,8 @@ Python's standard library is sufficient. Input digest mismatches, unknown record
 duplicate codes and incomplete tables fail. The tar entries are sorted with fixed metadata
 and the gzip timestamp is zero. The tests compare regenerated bytes with the committed
 package, verify known valid and absent codes, verify every closure member against its
-recorded digest, and assert the archive holds exactly the three CMS CodeSystems, this
-one SHN CodeSystem, the 25 closure members and the manifest. `prior-resource-sha256.json`
-pins all 28 resource bytes from support 1.3.0; only the new local member and package
-metadata may differ in 1.4.0.
+recorded digest, and assert the archive holds exactly the two CodeSystems, the 25 closure
+members and the manifest.
 
 To re-derive the closure, place the two archives (digests as recorded) in a directory and run
 `SHN_IG_ARCHIVES=<that directory> python3 closure.py`, then `python3 generate.py`. With the

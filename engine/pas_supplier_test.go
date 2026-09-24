@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -79,22 +80,24 @@ func TestDispatchPASSuppliesActualOrganization(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var sent [][]byte
+	var events []ObserverEvent
 	fixture := newDispatchFixtureWith(t, "MBR-OX", Demo{BirthDate: "1958-07-14", FamilyName: "Okafor-Oxygen"}, order, "Organization/org-dme-ox", supplier, func(c *Config) {
-		c.ConformanceEnforcement = EnforcementNone
-		c.Observer = func(e ObserverEvent) {
-			if e.Kind == "leg.originated" && e.LegType == "pas-claim" {
-				sent = append(sent, bytes.Clone(e.Payload))
-			}
-		}
+		c.Observer = func(e ObserverEvent) { events = append(events, e) }
 	})
 	rec := httptest.NewRecorder()
 	fixture.gw.handleDispatch(rec, httptest.NewRequest(http.MethodPost, "/scenario/dispatch", bytes.NewBufferString(`{"member":"MBR-OX"}`)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("dispatch: %d %s", rec.Code, rec.Body.String())
 	}
+	if err := fixture.gw.WaitObserverCompletion(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	found := false
-	for _, body := range sent {
+	for _, event := range events {
+		if event.Kind != "leg.originated" || event.LegType != "pas-claim" {
+			continue
+		}
+		body := event.Payload
 		var bundle struct {
 			ResourceType string `json:"resourceType"`
 			Entry        []struct {

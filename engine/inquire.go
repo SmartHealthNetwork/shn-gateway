@@ -1,6 +1,6 @@
 // Native PAS inquiries preserve the participant backend's application reply.
-// Optional content checks run at the shared native boundaries. The local
-// inquiry readers and ledger utilities in this file do not run during delivery.
+// Optional content checks run at the shared native boundaries. After delivery,
+// the payer's pre-existing local projection may resolve and record a decision.
 package engine
 
 import (
@@ -974,6 +974,100 @@ func (n *nativeResponder) handlePASInquireNative(ctx context.Context, in relay.B
 	// relayed leg, so the response member-fence stands down and only the answer's
 	// internal consistency is checked.
 	return LegResult{ApplicationStatus: up.status, ResponseContractVersion: up.version, ResponseVersionSource: up.versionSource, Response: relay.Exact(up.body, up.contentType), ResponseSubjectForeign: true}, nil
+}
+
+// projectPASInquiry returns the payer-local decision/EOB projection for an
+// already-delivered inquiry answer. Request and answer parsing, ledger lookup,
+// and every write remain inside the closure.
+func (g *Gateway) projectPASInquiry(requester, subject, legCorrID string, request, answer []byte) func() error {
+	request = append([]byte(nil), request...)
+	answer = append([]byte(nil), answer...)
+	return func() error {
+		facts, status, msg := parsePASInquiryFacts(request)
+		if status != 0 {
+			return fmt.Errorf("parse PAS inquiry for local projection: %s", msg)
+		}
+		ledger, ok := LedgerOf(g.cfg.Store)
+		if !ok || strings.TrimSpace(requester) == "" {
+			return nil
+		}
+		boundPatientRef := "Patient/" + facts.member
+		for _, ans := range readPASInquiryAnswers(requester, answer) {
+			if len(ProbePendKeys(ans.keys)) == 0 {
+				continue
+			}
+			subjectPCI, corrID, found, ambiguous, err := ledger.LookupPended(requester, ans.keys)
+			if err != nil {
+				g.noteStoreError(storeErrPended)
+				g.observe(ObserverEvent{Kind: "pend.lookup-unavailable", Direction: "ingress", LegType: "pas-claim-inquire", CorrelationID: legCorrID, Op: "pas-inquire"})
+				continue
+			}
+			if ambiguous || !found || subjectPCI != subject {
+				continue
+			}
+			outcome, parsed, decided := inquiryDecisionOf(ans.raw)
+			if !decided {
+				continue
+			}
+			eob, err := g.inquiryDecisionEOB(subjectPCI, corrID, boundPatientRef, facts, ans, parsed)
+			if err != nil {
+				g.observe(ObserverEvent{Kind: "pend.decision-not-recorded", Direction: "ingress", LegType: "pas-claim-inquire", CorrelationID: legCorrID, Op: "pas-inquire", Detail: "authorization " + corrID + ": " + err.Error()})
+				continue
+			}
+			tr, err := ledger.RecordDecision(subjectPCI, corrID, outcome, ans.created, eob)
+			if err != nil {
+				return err
+			}
+			if tr.Event != "" {
+				g.observe(ObserverEvent{Kind: tr.Event, Direction: "ingress", LegType: "pas-claim-inquire", CorrelationID: legCorrID, Op: "pas-inquire", Detail: "authorization " + corrID})
+			}
+		}
+		return nil
+	}
+}
+
+func inquiryDecisionOf(raw []byte) (string, shnsdk.PriorAuthResult, bool) {
+	if pended, _, err := shnsdk.ParsePendedResponse(raw); err != nil || pended {
+		return "", shnsdk.PriorAuthResult{}, false
+	}
+	parsed, err := shnsdk.ParseClaimResponse(raw)
+	if err != nil {
+		return "", shnsdk.PriorAuthResult{}, false
+	}
+	switch parsed.Outcome {
+	case "approved":
+		return PendOutcomeApproved, parsed, true
+	case "denied":
+		return PendOutcomeDenied, parsed, true
+	default:
+		return "", shnsdk.PriorAuthResult{}, false
+	}
+}
+
+func (g *Gateway) inquiryDecisionEOB(subjectPCI, corrID, boundPatientRef string, facts pasInquiryFacts, ans inquiryAnswerResponse, parsed shnsdk.PriorAuthResult) (*EOBRecord, error) {
+	item := inquiryItemFor(facts, ans.keys.ItemTraceNumbers)
+	if item.code == "" {
+		return nil, nil
+	}
+	eobJSON, err := decisionEOB(g.cfg.Clock, corrID, boundPatientRef, item.system, item.code, item.display, parsed)
+	if err != nil {
+		return nil, err
+	}
+	return &EOBRecord{SubjectPCI: subjectPCI, EOBID: "eob-" + corrID, JSON: eobJSON}, nil
+}
+
+func inquiryItemFor(facts pasInquiryFacts, answerTraceNumbers []string) pasInquiryItemFact {
+	for _, trace := range answerTraceNumbers {
+		for _, item := range facts.items {
+			if item.traceNumber != "" && item.traceNumber == trace {
+				return item
+			}
+		}
+	}
+	if len(facts.items) > 0 {
+		return facts.items[0]
+	}
+	return pasInquiryItemFact{}
 }
 
 // ---- the payer gateway's inbound handler ----

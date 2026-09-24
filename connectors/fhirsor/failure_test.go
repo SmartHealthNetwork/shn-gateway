@@ -31,7 +31,7 @@ func TestPatientFailure(t *testing.T) {
 	}
 }
 
-const failurePatient = `{"resourceType":"Patient","id":"p","identifier":[{"system":"urn:shn:member","value":"MBR-OP"},{"system":"urn:shn:member","value":"m"},{"system":"urn:shn:member","value":"private-member-sentinel"},{"system":"urn:shn:pci","value":"pci:issued-op"}],"name":[{"family":"Op"}],"birthDate":"1970-01-01"}`
+const failurePatient = `{"resourceType":"Patient","id":"p","identifier":[{"system":"urn:shn:member","value":"MBR-OP"}],"name":[{"family":"Op"}],"birthDate":"1970-01-01"}`
 const emptySearch = `{"resourceType":"Bundle","type":"searchset"}`
 
 func searchResource(raw string) string {
@@ -48,7 +48,7 @@ func TestPatientFailureClassification(t *testing.T) {
 		{"wrong-bundle", failurePatient, 200, 502, false},
 		{"wrong-resource", searchResource(`{"resourceType":"Organization","id":"p"}`), 200, 502, false},
 		{"no-id", searchResource(`{"resourceType":"Patient"}`), 200, 502, false},
-		{"no-demographics", searchResource(`{"resourceType":"Patient","id":"p","identifier":[{"system":"urn:shn:member","value":"m"}]}`), 200, 502, false},
+		{"no-demographics", searchResource(`{"resourceType":"Patient","id":"p"}`), 200, 502, false},
 		{"bad-demographics", searchResource(`{"resourceType":"Patient","id":"p","birthDate":42}`), 200, 502, false},
 		{"ambiguous", strings.Replace(searchResource(failurePatient), `"entry":`, `"total":2,"entry":`, 1), 200, 502, false},
 		{"next", strings.Replace(searchResource(failurePatient), `"entry":`, `"link":[{"relation":"next","url":"private-response-sentinel"}],"entry":`, 1), 200, 502, false},
@@ -272,7 +272,7 @@ func TestOptionalAbsenceControls(t *testing.T) {
 		}
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(searchResource(`{"resourceType":"Patient","id":"p","identifier":[{"system":"urn:shn:member","value":"m"}]}`)))
+		w.Write([]byte(searchResource(`{"resourceType":"Patient","id":"p"}`)))
 	}))
 	defer srv.Close()
 	ref, found, err := NewFromURL(srv.URL, srv.Client()).PatientFHIRRefContext(context.Background(), "m")

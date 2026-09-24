@@ -55,9 +55,3 @@ func (v *adaptationDefault) Validate(ctx context.Context, body []byte, profile s
 	}
 	return v.lane.Validate(ctx, body, profile)
 }
-func (v *adaptationDefault) ValidateEvidence(ctx context.Context, body []byte, profile string) (shnsdk.ValidationEvidence, error) {
-	if err := v.qualify(ctx); err != nil {
-		return shnsdk.ValidationEvidence{}, err
-	}
-	return v.lane.ValidateEvidence(ctx, body, profile)
-}

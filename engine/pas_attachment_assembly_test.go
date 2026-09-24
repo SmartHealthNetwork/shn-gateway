@@ -12,7 +12,6 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -46,25 +45,15 @@ func attachmentInputs(orderType, line string, absolute bool) shnsdk.ConformantCl
 		oldID = "dr-ox"
 	}
 	order = bytes.Replace(order, []byte(oldID), []byte("source-order"), 1)
-	return shnsdk.ConformantClaimInputs{ItemFacts: syntheticPASItemFacts(), Insurer: testPayerOrganization(shnsdk.CMSPayerIdentity), Coverage: testMemberCoverage("MBR-OX"), QR: attachmentQRFixture(orderType, line), SR: order, Provider: testRequestingProvider(), MemberIDSystem: shnsdk.MemberSystem,
+	return shnsdk.ConformantClaimInputs{Insurer: testPayerOrganization(shnsdk.CMSPayerIdentity), Coverage: testMemberCoverage("MBR-OX"), QR: attachmentQRFixture(orderType, line), SR: order, Provider: testRequestingProvider(), MemberIDSystem: shnsdk.MemberSystem,
 		PatientRef: "Patient/MBR-OX", CoverageRef: "Coverage/source-coverage", MemberID: "MBR-OX",
 		Corr: "synthetic-submit", Created: pasTailClock(), AbsoluteRefs: absolute, PayerOrgEntry: true, Payer: shnsdk.CMSPayerIdentity}
 }
 
-func attachmentUpdateInputs(t *testing.T, line string, absolute, diagnostic bool) shnsdk.ConformantClaimUpdateInputs {
-	t.Helper()
+func attachmentUpdateInputs(line string, absolute, diagnostic bool) shnsdk.ConformantClaimUpdateInputs {
 	in := attachmentInputs("ServiceRequest", line, absolute)
-	submitted, err := shnsdk.BuildConformantClaimBundleAtLine(line, in)
-	if err != nil {
-		t.Fatal(err)
-	}
-	prior, err := shnsdk.SubmittedPASClaim(submitted)
-	if err != nil {
-		t.Fatal(err)
-	}
 	out := shnsdk.ConformantClaimUpdateInputs{Insurer: testPayerOrganization(in.Payer), Coverage: testMemberCoverage(in.MemberID), QR: in.QR, SR: in.SR, Provider: in.Provider, MemberIDSystem: in.MemberIDSystem, PatientRef: in.PatientRef, CoverageRef: in.CoverageRef,
 		MemberID: in.MemberID, Corr: "synthetic-update", OriginalCorr: in.Corr, Created: in.Created,
-		PriorClaim:   prior,
 		AbsoluteRefs: absolute, PayerOrgEntry: true, Payer: in.Payer,
 		Provenance: []byte(`{"resourceType":"Provenance","id":"source-prov","recorded":"2023-11-14T22:13:20Z","target":[{"reference":"QuestionnaireResponse/source-qr"}],"agent":[{"who":{"identifier":{"system":"http://hl7.org/fhir/sid/us-npi","value":"1234567890"}}}],"opaque":{"preserve":"attribution"}}`)}
 	if diagnostic {
@@ -220,17 +209,16 @@ func assertAttachmentPreservation(t *testing.T, source, body, sdkBody []byte, or
 			t.Errorf("other ref[%d]=%s want %s", i, refs[i]["reference"], want)
 		}
 	}
-	// Independently resolve requestedService on the operative Claim. A genuine
-	// prior Claim can also carry its original item and requestedService.
+	// Independently resolve requestedService on the actual current Claim.
 	requestedServices := 0
-	for _, e := range entries[:1] {
+	for _, e := range entries {
 		m := attachmentObject(t, e.Resource)
 		if attachmentString(t, m["resourceType"]) != "Claim" {
 			continue
 		}
 		if len(m["item"]) == 0 {
 			continue
-		}
+		} // Minimal prior Claim has no requested item.
 		var items []struct {
 			Extension []struct {
 				URL            string `json:"url"`
@@ -288,7 +276,7 @@ func TestAuthoredPASUpdatePreservesAttachment(t *testing.T) {
 		for _, absolute := range []bool{false, true} {
 			for _, diagnostic := range []bool{false, true} {
 				t.Run(fmt.Sprintf("%s/absolute=%t/diagnostic=%t", line, absolute, diagnostic), func(t *testing.T) {
-					in := attachmentUpdateInputs(t, line, absolute, diagnostic)
+					in := attachmentUpdateInputs(line, absolute, diagnostic)
 					before, _ := json.Marshal(in)
 					sdkBody, err := shnsdk.BuildConformantClaimUpdateBundleAtLine(line, in)
 					if err != nil {
@@ -310,12 +298,8 @@ func TestAuthoredPASUpdatePreservesAttachment(t *testing.T) {
 							claims++
 						}
 					}
-					wantClaims := 2
-					if line == "2.0" {
-						wantClaims = 1
-					}
-					if claims != wantClaims {
-						t.Errorf("Claim entries=%d, want %d at PAS %s", claims, wantClaims, line)
+					if claims != 2 {
+						t.Errorf("prior and current Claims=%d", claims)
 					}
 					prov := attachmentObject(t, attachmentResource(t, entries, "Provenance").Resource)
 					var targets []map[string]string
@@ -365,7 +349,7 @@ func TestAuthoredPASUnsupportedLinePreservesSDKError(t *testing.T) {
 	if want == nil || got == nil || got.Error() != want.Error() {
 		t.Fatalf("submit error=%v want %v", got, want)
 	}
-	update := attachmentUpdateInputs(t, "2.0", true, false)
+	update := attachmentUpdateInputs("2.0", true, false)
 	_, want = shnsdk.BuildConformantClaimUpdateBundleAtLine("9.9", update)
 	_, got = authoredUpdateUnderTest("9.9", update)
 	if want == nil || got == nil || got.Error() != want.Error() {
@@ -405,8 +389,6 @@ func TestAuthoredPASProviderDataOptionalOrder(t *testing.T) {
 }
 func testAuthoredPASFinalOutgoing(t *testing.T, optionalType string) {
 	var events []ObserverEvent
-	var eventsMu sync.Mutex
-	eventReady := make(chan struct{}, 1)
 	populator := attachmentPrecisionPopulator{canonical: "http://smarthealth.network/fhir/Questionnaire/home-oxygen", optionalType: optionalType}
 
 	authzPub, authzPriv := genED25519(t)
@@ -449,7 +431,6 @@ func testAuthoredPASFinalOutgoing(t *testing.T, optionalType string) {
 		clock:          clock,
 		pci:            pci,
 		canonical:      canonical,
-		patientRef:     "Patient/MBR-OX",
 	}
 
 	reg := shnsdk.NewRegistry()
@@ -458,40 +439,29 @@ func testAuthoredPASFinalOutgoing(t *testing.T, optionalType string) {
 
 	const fakeBase = "http://stub.test"
 	gw := mustNew(t, Config{
-		ConformanceEnforcement: EnforcementObserve,
-		Role:                   "provider",
-		HolderID:               "provider",
-		PayerRouter:            payerRouterFor(t, "payer"),
+		Role:        "provider",
+		HolderID:    "provider",
+		PayerRouter: payerRouterFor(t, "payer"),
 		Identity: shnsdk.Identity{
 			HolderID: "provider",
 			SignPriv: provSignPriv,
 			EncPub:   provEncPub,
 			EncPriv:  provEncPriv,
 		},
-		AuthzURL:                 fakeBase,
-		AuthzPub:                 authzPub,
-		HubTransportPub:          authzPub,
-		HubURL:                   fakeBase,
-		Reg:                      reg,
-		Validator:                syntheticFakeValidator(),
-		SubjectReferenceResolver: participantLinkageFixture("MBR-OX", pci, "provider", "payer"),
-		SoR:                      sor,
-		Store:                    base,
-		Clock:                    clock,
-		NPI:                      "1234567890",
-		OriginationProfile:       "provider-data",
-		Populator:                &populator,
-		Observer: func(e ObserverEvent) {
-			e.Payload = bytes.Clone(e.Payload)
-			eventsMu.Lock()
-			events = append(events, e)
-			eventsMu.Unlock()
-			select {
-			case eventReady <- struct{}{}:
-			default:
-			}
-		},
-		Client: &http.Client{Transport: stub},
+		AuthzURL:           fakeBase,
+		AuthzPub:           authzPub,
+		HubTransportPub:    authzPub,
+		HubURL:             fakeBase,
+		Reg:                reg,
+		Validator:          shnsdk.NewFakeValidator(),
+		SoR:                sor,
+		Store:              base,
+		Clock:              clock,
+		NPI:                "1234567890",
+		OriginationProfile: "provider-data",
+		Populator:          &populator,
+		Observer:           func(e ObserverEvent) { e.Payload = bytes.Clone(e.Payload); events = append(events, e) },
+		Client:             &http.Client{Transport: stub},
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/scenario/homeoxygen", nil)
@@ -500,11 +470,11 @@ func testAuthoredPASFinalOutgoing(t *testing.T, optionalType string) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("full outgoing path status=%d: %s", rec.Code, rec.Body.String())
 	}
+	if err := gw.WaitObserverCompletion(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	var outgoing, finalQR []byte
-	eventsMu.Lock()
-	initial := append([]ObserverEvent(nil), events...)
-	eventsMu.Unlock()
-	for _, e := range initial {
+	for _, e := range events {
 		if e.Kind == "leg.originated" && e.LegType == "pas-claim" {
 			outgoing = e.Payload
 			finalQR = attachmentResource(t, attachmentEntries(t, outgoing), "QuestionnaireResponse").Resource
@@ -520,34 +490,6 @@ func testAuthoredPASFinalOutgoing(t *testing.T, optionalType string) {
 		if !bytes.Contains(populator.returned, []byte(literal)) {
 			t.Errorf("source specimen lost %s", literal)
 		}
-	}
-	// Observe executes independently of delivery. Wait for the controlled
-	// fixture's optional checks after capturing the already returned message.
-	qrChecked, bundleChecked := false, false
-	timer := time.NewTimer(2 * time.Second)
-	defer timer.Stop()
-	for !qrChecked || !bundleChecked {
-		eventsMu.Lock()
-		snapshot := append([]ObserverEvent(nil), events...)
-		eventsMu.Unlock()
-		for _, e := range snapshot {
-			if e.Kind == "validate.result" && e.Detail == "valid" {
-				qrChecked = qrChecked || bytes.Equal(e.Payload, finalQR)
-				bundleChecked = bundleChecked || bytes.Equal(e.Payload, outgoing)
-			}
-		}
-		if qrChecked && bundleChecked {
-			break
-		}
-		select {
-		case <-eventReady:
-		case <-timer.C:
-			goto observed
-		}
-	}
-observed:
-	if !qrChecked || !bundleChecked {
-		t.Fatalf("actual outgoing bytes validated: QR=%t Bundle=%t", qrChecked, bundleChecked)
 	}
 	if len(sor.resolveByRefCall) == 0 {
 		t.Fatal("supplier/evidence path was not reached")
@@ -588,14 +530,14 @@ func TestAuthoredPASRejectsInvalidInputs(t *testing.T) {
 		})
 	}
 	t.Run("update requires QR", func(t *testing.T) {
-		in := attachmentUpdateInputs(t, "2.0", true, false)
+		in := attachmentUpdateInputs("2.0", true, false)
 		in.QR = nil
 		if _, err := authoredUpdateUnderTest("2.0", in); err == nil {
 			t.Fatal("accepted update without QR")
 		}
 	})
 	t.Run("update refuses DeviceRequest", func(t *testing.T) {
-		in := attachmentUpdateInputs(t, "2.0", true, false)
+		in := attachmentUpdateInputs("2.0", true, false)
 		device := attachmentInputs("DeviceRequest", "2.0", true)
 		in.SR = device.SR
 		in.QR = device.QR
@@ -820,11 +762,6 @@ func TestAuthoredPASConstructionBoundary(t *testing.T) {
 			if selector.Sel.Name == "completeAuthoredPASRequest" {
 				completions[file]++
 			}
-			if selector.Sel.Name == "buildAuthoredPASSubmit" {
-				if owner, ok := selector.X.(*ast.Ident); ok && owner.Name == "g" {
-					calls[file]++
-				}
-			}
 			owner, ok := selector.X.(*ast.Ident)
 			if !ok || owner.Name != "shnsdk" || !strings.HasPrefix(selector.Sel.Name, "BuildConformantClaim") {
 				return true
@@ -847,16 +784,12 @@ func TestAuthoredPASConstructionBoundary(t *testing.T) {
 	if sdkCalls != 2 {
 		t.Errorf("SDK conformant construction calls=%d", sdkCalls)
 	}
-	for file, want := range map[string]int{"pas_attachment_assembly.go": 1, "pas_tail.go": 1, "originate_resume.go": 3, "originate.go": 7} {
+	for file, want := range map[string]int{"pas_tail.go": 1, "originate_resume.go": 3, "originate.go": 7} {
 		if calls[file] != want {
 			t.Errorf("%s wrapper calls=%d want%d", file, calls[file], want)
 		}
-		completionWant := want
-		if file == "pas_attachment_assembly.go" {
-			completionWant = 0
-		}
-		if completions[file] != completionWant {
-			t.Errorf("%s source-bound completion calls=%d want%d", file, completions[file], completionWant)
+		if completions[file] != want {
+			t.Errorf("%s source-bound completion calls=%d want%d", file, completions[file], want)
 		}
 		delete(completions, file)
 		delete(calls, file)
@@ -941,7 +874,7 @@ func TestAuthoredPASLogicalContext(t *testing.T) {
 						check(buildAuthoredPASSubmit(line, in))
 						if typ == "ServiceRequest" {
 							for _, diagnostic := range []bool{false, true} {
-								update := attachmentUpdateInputs(t, line, absolute, diagnostic)
+								update := attachmentUpdateInputs(line, absolute, diagnostic)
 								update.QR = composed
 								check(buildAuthoredPASUpdate(line, update))
 							}
@@ -965,7 +898,7 @@ func TestAuthoredPASLogicalContextRefusals(t *testing.T) {
 					}
 					if typ == "ServiceRequest" {
 						for _, diagnostic := range []bool{false, true} {
-							update := attachmentUpdateInputs(t, line, false, diagnostic)
+							update := attachmentUpdateInputs(line, false, diagnostic)
 							update.QR = in.QR
 							if _, err := buildAuthoredPASUpdate(line, update); err == nil {
 								t.Fatal("update accepted malformed logical Reference")

@@ -282,7 +282,7 @@ func gatewayWithAuth(t *testing.T, clientID string, pubPEM []byte) *Gateway {
 			clientID: {Alg: "ES384", PublicKeyPEM: pubPEM, Scopes: []string{ingressScope}},
 		},
 		Reg:       shnsdk.NewRegistry(),
-		Validator: syntheticFakeValidator(),
+		Validator: shnsdk.NewFakeValidator(),
 		SoR:       sor,
 		Store:     sor,
 		Clock:     ingressFixedClock(),
@@ -415,7 +415,7 @@ func gatewayWithAuthStores(t *testing.T, clientID string, pubPEM []byte, keys In
 			clientID: {Alg: "ES384", PublicKeyPEM: pubPEM, Scopes: []string{ingressScope}},
 		},
 		Reg:         shnsdk.NewRegistry(),
-		Validator:   syntheticFakeValidator(),
+		Validator:   shnsdk.NewFakeValidator(),
 		SoR:         sor,
 		Store:       sor,
 		Clock:       ingressFixedClock(),
@@ -560,7 +560,7 @@ func TestIngressToken_SameJTIDifferentClientsBothFirstUse(t *testing.T) {
 			"client-a": {Alg: "ES384", PublicKeyPEM: pubA, Scopes: []string{ingressScope}},
 			"client-b": {Alg: "ES384", PublicKeyPEM: pubB, Scopes: []string{ingressScope}},
 		},
-		Reg: shnsdk.NewRegistry(), Validator: syntheticFakeValidator(), SoR: sor, Store: sor,
+		Reg: shnsdk.NewRegistry(), Validator: shnsdk.NewFakeValidator(), SoR: sor, Store: sor,
 		Clock: ingressFixedClock(), HubURL: "http://hub.test",
 	})
 	now := ingressFixedClock()()
@@ -683,7 +683,7 @@ func TestIngressEphemeralKeyBootLine(t *testing.T) {
 		mustNew(t, Config{
 			Role: "provider", HolderID: "provider", PayerRouter: payerRouterFor(t, "payer"),
 			Identity: shnsdk.Identity{HolderID: "provider", SignPriv: signPriv},
-			Reg:      shnsdk.NewRegistry(), Validator: syntheticFakeValidator(), SoR: sor, Store: sor,
+			Reg:      shnsdk.NewRegistry(), Validator: shnsdk.NewFakeValidator(), SoR: sor, Store: sor,
 			Clock: ingressFixedClock(), HubURL: "http://hub.test",
 		})
 	})
@@ -1364,78 +1364,5 @@ func TestIngressToken_AckLostRecordWrite_FreshAssertionIsTheRetry(t *testing.T) 
 	}
 	if replay.calls != 3 {
 		t.Fatalf("record consulted %d times across the three requests, want 3", replay.calls)
-	}
-}
-
-func TestIngressContextAuthenticationIdentity(t *testing.T) {
-	key, pub := newTestClientKey(t)
-	s := newTestAuthServer(t, "source", pub, "ES384")
-	g := &Gateway{ingressAuth: s}
-	now := s.now()
-	kid, signer, err := s.keys.SigningKey(now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	issued, err := signBearer(kid, signer, "source", ingressScope, s.baseURL, now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	direct := mintAssertion(t, key, jwt.SigningMethodES384, validClaims("source", s.baseURL, now))
-	for _, token := range []string{issued, direct} {
-		r := httptest.NewRequest(http.MethodPost, "/Claim/$submit", nil)
-		r.Header.Set("Authorization", "Bearer "+token)
-		p, ok, down := g.ingressPrincipal(r)
-		if !ok || down || p.ClientID != "source" {
-			t.Fatalf("principal=%+v ok=%v unavailable=%v", p, ok, down)
-		}
-	}
-	delete(s.clients, "source")
-	r := httptest.NewRequest(http.MethodPost, "/Claim/$submit", nil)
-	r.Header.Set("Authorization", "Bearer "+issued)
-	if _, ok, _ := g.ingressPrincipal(r); ok {
-		t.Fatal("removed registration retained identity")
-	}
-}
-
-func TestIngressContextIssuedBearerClaimShapeRejections(t *testing.T) {
-	_, pub := newTestClientKey(t)
-	s := newTestAuthServer(t, "source", pub, "ES384")
-	kid, key, err := s.keys.SigningKey(s.now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, row := range []struct {
-		name   string
-		mutate func(jwt.MapClaims)
-	}{
-		{"valid", func(jwt.MapClaims) {}},
-		{"missing client_id", func(c jwt.MapClaims) { delete(c, "client_id") }},
-		{"empty client_id", func(c jwt.MapClaims) { c["client_id"] = "" }},
-		{"non-string client_id", func(c jwt.MapClaims) { c["client_id"] = 42 }},
-		{"present issuer", func(c jwt.MapClaims) { c["iss"] = "source" }},
-		{"empty issuer", func(c jwt.MapClaims) { c["iss"] = "" }},
-	} {
-		t.Run(row.name, func(t *testing.T) {
-			claims := jwt.MapClaims{"client_id": "source", "scope": ingressScope, "aud": s.baseURL, "iat": s.now().Unix(), "exp": s.now().Add(IngressBearerTTL).Unix()}
-			row.mutate(claims)
-			token := jwt.NewWithClaims(jwt.SigningMethodES384, claims)
-			token.Header["kid"] = kid
-			raw, err := token.SignedString(key)
-			if err != nil {
-				t.Fatal(err)
-			}
-			r := httptest.NewRequest(http.MethodPost, "/Claim/$submit", nil)
-			r.Header.Set("Authorization", "Bearer "+raw)
-			principal, ok, unavailable := s.verifyBearerPrincipal(r)
-			if row.name == "valid" {
-				if !ok || unavailable || principal.ClientID != "source" {
-					t.Fatalf("valid baseline refused: %+v %v %v", principal, ok, unavailable)
-				}
-				return
-			}
-			if ok || unavailable || principal.ClientID != "" {
-				t.Fatalf("invalid issued shape admitted or misclassified: %+v %v %v", principal, ok, unavailable)
-			}
-		})
 	}
 }
