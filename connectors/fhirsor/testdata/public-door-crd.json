@@ -1,0 +1,73 @@
+{
+  "context": {
+    "draftOrders": {
+      "entry": [
+        {
+          "fullUrl": "urn:uuid:sr1",
+          "resource": {
+            "code": {
+              "coding": [
+                {
+                  "code": "L8000",
+                  "display": "Breast prosthesis, mastectomy bra",
+                  "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
+                }
+              ]
+            },
+            "id": "sr1",
+            "insurance": [
+              {
+                "reference": "Coverage/c1"
+              }
+            ],
+            "intent": "order",
+            "resourceType": "ServiceRequest",
+            "status": "draft",
+            "subject": {
+              "reference": "Patient/MBR-COVERED"
+            }
+          }
+        }
+      ],
+      "resourceType": "Bundle",
+      "type": "collection"
+    },
+    "patientId": "MBR-COVERED",
+    "userId": "Practitioner/p1"
+  },
+  "fhirServer": "https://provider.example/fhir",
+  "hook": "order-sign",
+  "hookInstance": "shn-scenariodriver",
+  "prefetch": {
+    "coverage": {
+      "beneficiary": {
+        "reference": "Patient/MBR-COVERED"
+      },
+      "contained": [
+        {
+          "id": "cms-payer",
+          "identifier": [
+            {
+              "system": "urn:oid:2.16.840.1.113883.6.300",
+              "value": "00001"
+            }
+          ],
+          "name": "Centers for Medicare and Medicaid Services",
+          "resourceType": "Organization"
+        }
+      ],
+      "id": "c1",
+      "payor": [
+        {
+          "reference": "#cms-payer"
+        }
+      ],
+      "resourceType": "Coverage",
+      "status": "active"
+    },
+    "patient": {
+      "id": "MBR-COVERED",
+      "resourceType": "Patient"
+    }
+  }
+}

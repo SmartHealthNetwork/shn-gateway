@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -21,6 +22,7 @@ import (
 )
 
 var _ engine.SystemOfRecord = (*SoR)(nil)
+var _ engine.SubjectReferenceResolver = (*SoR)(nil)
 
 // SoR reads a holder's US Core FHIR server. Locality (provider vs facility vs payer) is
 // enforced by the partition URL passed to New; a single per-role SoR instance handles one
@@ -42,6 +44,60 @@ func New(fc *fhirclient.Client) *SoR {
 // than a pre-built fhirclient. hc==nil uses a default client.
 func NewFromURL(baseURL string, hc *http.Client) *SoR {
 	return New(fhirclient.New(baseURL, hc))
+}
+
+// ResolveSubject restores legacy unsigned Da Vinci ingress addressing from an
+// exact Patient reference in this participant's configured FHIR source. The
+// Patient's participant-issued urn:shn:pci identifier is the only identity
+// authority used here; this path never derives an exchange identity from
+// demographics or from a carried Patient body.
+func (s *SoR) ResolveSubject(ctx context.Context, ref engine.PatientReference) (string, bool, error) {
+	if s == nil || s.fc == nil || strings.TrimSpace(ref.Holder) == "" {
+		return "", false, nil
+	}
+	if ref.System != "fhir-relative" && ref.System != s.fc.BaseURL() {
+		return "", false, nil
+	}
+	parts := strings.Split(ref.Value, "/")
+	if len(parts) != 2 || parts[0] != "Patient" || !validFHIRID(parts[1]) {
+		return "", false, nil
+	}
+	raw, found, err := s.fc.Read(ctx, "Patient", parts[1])
+	if err != nil {
+		return "", false, safeReadError(err)
+	}
+	if !found {
+		return "", false, nil
+	}
+	var patient struct {
+		ID         string `json:"id"`
+		Identifier []struct {
+			System string `json:"system"`
+			Value  string `json:"value"`
+		} `json:"identifier"`
+	}
+	if json.Unmarshal(raw, &patient) != nil || patient.ID != parts[1] {
+		return "", false, invalidResponse()
+	}
+	var issued []string
+	for _, id := range patient.Identifier {
+		if id.System == "urn:shn:pci" {
+			issued = append(issued, id.Value)
+		}
+	}
+	if len(issued) == 0 {
+		return "", false, nil
+	}
+	if len(issued) != 1 || strings.TrimSpace(issued[0]) == "" {
+		return "", false, invalidResponse()
+	}
+	return issued[0], true, nil
+}
+
+var fhirIDPattern = regexp.MustCompile(`^[A-Za-z0-9.-]{1,64}$`)
+
+func validFHIRID(id string) bool {
+	return fhirIDPattern.MatchString(id)
 }
 
 // resolvePatient returns the parsed Patient and its server id, or ok=false. Shared
