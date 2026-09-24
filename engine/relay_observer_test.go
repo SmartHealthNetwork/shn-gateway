@@ -7,7 +7,7 @@ import (
 )
 
 func TestRoundTrip_RelayError_EmitsLegResponseWithStatus(t *testing.T) {
-	env := newTransportExchange(t)
+	env := newInProcessExchange(t)
 	var events []ObserverEvent
 	env.originator.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
 	env.payerReturns(LegResult{Status: 502, Response: testResponse([]byte(`{"resourceType":"OperationOutcome"}`))})
@@ -17,7 +17,6 @@ func TestRoundTrip_RelayError_EmitsLegResponseWithStatus(t *testing.T) {
 		t.Fatalf("want *RelayError, got %v", err)
 	}
 	var got *ObserverEvent
-	observationFlush(t, env.originator)
 	for i := range events {
 		if events[i].Kind == "leg.response" {
 			got = &events[i]

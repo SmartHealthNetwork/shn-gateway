@@ -354,7 +354,7 @@ func crdTestSystem(t *testing.T, cov shnsdk.CardCoverage) (*Gateway, *stubSubstr
 		HubTransportPub: authzPub, // not used by provider (only inbound gateways check it)
 		HubURL:          fakeBase,
 		Reg:             reg,
-		Validator:       syntheticFakeValidator(),
+		Validator:       shnsdk.NewFakeValidator(),
 		SoR:             sor,
 		Store:           sor,
 		Clock:           clock,
@@ -586,8 +586,7 @@ func TestRunCRDThenDTROrder_NotCovered_ProceedFlag(t *testing.T) {
 // (All(Has(`"denied":true`), Has(`"rationale"`))). Before this fix, an empty profile
 // hit the CRD not-covered stop and UC-08 returned
 // {"covered":false,"outcome":"not-covered","paRequired":false} instead — precisely the
-// live smoke failure this test locks down. The older PAS 2.0 stub omits a
-// request URL, as a payer is allowed to do while still answering this workflow.
+// live smoke failure this test locks down.
 func TestHandleUC08_DemoLane_ProceedsPastNotCoveredToDeny(t *testing.T) {
 	notCovered := shnsdk.CardCoverage{Covered: shnsdk.CoveredNotCovered, PANeeded: shnsdk.PANeededNoAuth}
 	gw, stub, _ := crdTestSystem(t, notCovered)
@@ -636,7 +635,6 @@ func TestHandleUC08_DemoLane_ProceedsPastNotCoveredToDeny(t *testing.T) {
 // TestRunCRDThenDTR_Satisfied verifies the fail-closed response when the payer
 // signals PA already satisfied (PANeeded==satisfied). The short-circuit path is
 // deferred this slice; expect HTTP 502 with a message containing "satisfied".
-
 func TestRunCRDThenDTR_Satisfied(t *testing.T) {
 	gw, stub, _ := crdTestSystem(t, shnsdk.CardCoverage{
 		Covered:       shnsdk.CoveredCovered,
@@ -850,7 +848,6 @@ func TestClassifyResolution(t *testing.T) {
 // TestRunCRDThenDTROrder_NamesPayer proves the CRD origination Coverage carries a
 // resolvable named payer (contained #cms-payer), not the dangling Organization/payer —
 // a real Da Vinci payer (br-payer) 400s "lacks valid payer identifier" otherwise.
-
 func TestRunCRDThenDTROrder_NamesPayer(t *testing.T) {
 	covJSON, err := shnsdk.BuildCoverageWithPayer("Patient/MBR-COVERED", "MBR-COVERED", shnsdk.CMSPayerIdentity)
 	if err != nil {
@@ -981,7 +978,7 @@ func TestValidateFHIR_IngressSkip_Demo(t *testing.T) {
 // call site (originate.go's UC-05 federated-query read) now does.
 func TestValidateFHIR_FacilityIngressStillFailsClosed_Demo(t *testing.T) {
 	v := &recordingValidator{valid: false}
-	g := &Gateway{cfg: Config{OriginationProfile: "demo", Validator: v, ConformanceEnforcement: EnforcementStrict}}
+	g := &Gateway{cfg: Config{OriginationProfile: "demo", Validator: v}}
 	status, msg := g.validateFHIR(context.Background(), []byte(`{"resourceType":"Bundle"}`), "ingress", "")
 	if status != http.StatusUnprocessableEntity {
 		t.Fatalf("demo-lane facility ingress with an invalid resource: status=%d, want %d; msg=%q — the R-8 payer skip must never leak to a non-payer-directed leg", status, http.StatusUnprocessableEntity, msg)
@@ -1008,7 +1005,7 @@ func TestValidateFHIR_PayerIngressStillSkips_Demo(t *testing.T) {
 // rejecting it.
 func TestValidateFHIR_EgressStillFailsClosed_Demo(t *testing.T) {
 	v := &recordingValidator{valid: false}
-	g := &Gateway{cfg: Config{OriginationProfile: "demo", Validator: v, ConformanceEnforcement: EnforcementStrict}}
+	g := &Gateway{cfg: Config{OriginationProfile: "demo", Validator: v}}
 	status, msg := g.validateFHIR(context.Background(), []byte(`{"resourceType":"Bundle"}`), "egress", "")
 	if status != http.StatusUnprocessableEntity {
 		t.Fatalf("demo egress with an invalid resource: status=%d, want %d; msg=%q", status, http.StatusUnprocessableEntity, msg)
@@ -1025,7 +1022,7 @@ func TestValidateFHIR_EgressStillFailsClosed_Demo(t *testing.T) {
 // anything unrecognized.
 func TestValidateFHIR_IngressStillFailsClosed_OtherLane(t *testing.T) {
 	v := &recordingValidator{valid: false}
-	g := &Gateway{cfg: Config{OriginationProfile: "unknown-lane", Validator: v, ConformanceEnforcement: EnforcementStrict}}
+	g := &Gateway{cfg: Config{OriginationProfile: "unknown-lane", Validator: v}}
 	status, msg := g.validateFHIRPayerIngress(context.Background(), []byte(`{"resourceType":"Bundle"}`), "", "pa.dtr")
 	if status != http.StatusUnprocessableEntity {
 		t.Fatalf("non-reference-payer-lane payer-ingress with an invalid resource: status=%d, want %d; msg=%q", status, http.StatusUnprocessableEntity, msg)
@@ -1043,7 +1040,7 @@ func TestValidateFHIR_IngressStillFailsClosed_OtherLane(t *testing.T) {
 func TestValidateFHIR_PlainIngressNeverSkips_AnyLane(t *testing.T) {
 	for _, profile := range []string{"", "demo", "provider-data", "unknown-lane"} {
 		v := &recordingValidator{valid: false}
-		g := &Gateway{cfg: Config{OriginationProfile: profile, Validator: v, ConformanceEnforcement: EnforcementStrict}}
+		g := &Gateway{cfg: Config{OriginationProfile: profile, Validator: v}}
 		status, msg := g.validateFHIR(context.Background(), []byte(`{"resourceType":"Bundle"}`), "ingress", "")
 		if status != http.StatusUnprocessableEntity {
 			t.Errorf("profile %q: plain validateFHIR ingress with an invalid resource: status=%d, want %d; msg=%q", profile, status, http.StatusUnprocessableEntity, msg)

@@ -52,12 +52,11 @@ type relaySubstrate struct {
 	recipientEncPub  *[32]byte
 	recipientEncPriv *[32]byte
 
-	mu           sync.Mutex
-	lastMetadata shnsdk.Metadata
-	lastReq      []byte    // the last decrypted REQUEST payload (raw: framed or bare)
-	result       LegResult // seal target for /route; meaningful only when set==true
-	set          bool      // false until the test calls setResult (falls back to default success cards)
-	routeHits    int       // count of handleRoute calls — the version-filter refusal test asserts this stays 0 (fail-closed BEFORE any Hub round-trip)
+	mu        sync.Mutex
+	lastReq   []byte    // the last decrypted REQUEST payload (raw: framed or bare)
+	result    LegResult // seal target for /route; meaningful only when set==true
+	set       bool      // false until the test calls setResult (falls back to default success cards)
+	routeHits int       // count of handleRoute calls — the version-filter refusal test asserts this stays 0 (fail-closed BEFORE any Hub round-trip)
 
 	// mutateResp, if set, transforms the sealed response-leg wire bytes AFTER
 	// sealForProvider succeeds and BEFORE they're wrapped into the stub's HTTP
@@ -134,9 +133,6 @@ func (s *relaySubstrate) handleRoute(body []byte) (*http.Response, error) {
 	if err != nil {
 		return errResp("stub: decode envelope: " + err.Error()), nil
 	}
-	s.mu.Lock()
-	s.lastMetadata = env.Metadata
-	s.mu.Unlock()
 	if s.recipientEncPub != nil && s.recipientEncPriv != nil {
 		if plain, oerr := shnsdk.Open(env, s.recipientEncPub, s.recipientEncPriv); oerr == nil {
 			s.mu.Lock()
@@ -299,11 +295,6 @@ func (e *inProcessExchange) corruptResponseToken(t *testing.T) {
 // consults PayerRouter or ingressAuthBypass.
 func newInProcessExchange(t *testing.T) *inProcessExchange {
 	t.Helper()
-	return newInProcessExchangeWithPolicy(t, EnforcementStrict)
-}
-
-func newInProcessExchangeWithPolicy(t *testing.T, level ConformanceEnforcement) *inProcessExchange {
-	t.Helper()
 	authzPub, authzPriv := genED25519(t)
 	provEncPub, provEncPriv := genKeyPair(t)
 	_, provSignPriv := genED25519(t)
@@ -320,27 +311,25 @@ func newInProcessExchangeWithPolicy(t *testing.T, level ConformanceEnforcement) 
 	// handleRoute seals; frame_originate_test.go re-asserts this per
 	// case via advertiseRecipientFrameV1 (idempotent) and its stale-feed row seals a
 	// bare payload against this same v1-advertising entry.
-	reg.Set("payer", shnsdk.RegistryEntry{ID: "payer", Role: "payer", BaseURL: "http://relay-stub.test", EncPub: payerEncPub, SignPub: payerSignPub, MessageFrames: shnsdk.SupportedMessageFrames()})
+	reg.Set("payer", shnsdk.RegistryEntry{ID: "payer", Role: "payer", EncPub: payerEncPub, SignPub: payerSignPub, MessageFrames: shnsdk.SupportedMessageFrames()})
 
 	const fakeBase = "http://relay-stub.test"
 	cfg := Config{
-		Role:                     "provider",
-		HolderID:                 "provider",
-		Identity:                 shnsdk.Identity{HolderID: "provider", SignPriv: provSignPriv, EncPub: provEncPub, EncPriv: provEncPriv},
-		AuthzURL:                 fakeBase,
-		AuthzPub:                 authzPub,
-		HubTransportPub:          authzPub, // not checked for role "provider"; kept for parity with twoPayerTestSystem
-		HubURL:                   fakeBase,
-		Reg:                      reg,
-		SubjectReferenceResolver: censusSubjectResolver("provider", "payer"),
-		Validator:                syntheticFakeValidator(),
-		SoR:                      newCensusSoR(),
-		Store:                    newCensusSoR(),
-		Clock:                    clock,
-		NPI:                      "1234567890",
-		Client:                   &http.Client{Transport: stub},
-		PayerRouter:              payerRouterFor(t, "payer"),
-		ConformanceEnforcement:   level,
+		Role:            "provider",
+		HolderID:        "provider",
+		Identity:        shnsdk.Identity{HolderID: "provider", SignPriv: provSignPriv, EncPub: provEncPub, EncPriv: provEncPriv},
+		AuthzURL:        fakeBase,
+		AuthzPub:        authzPub,
+		HubTransportPub: authzPub, // not checked for role "provider"; kept for parity with twoPayerTestSystem
+		HubURL:          fakeBase,
+		Reg:             reg,
+		Validator:       shnsdk.NewFakeValidator(),
+		SoR:             newCensusSoR(),
+		Store:           newCensusSoR(),
+		Clock:           clock,
+		NPI:             "1234567890",
+		Client:          &http.Client{Transport: stub},
+		PayerRouter:     payerRouterFor(t, "payer"),
 	}
 	EnableIngressForTest(&cfg) // bypassed auth ⇒ IngressBaseURL/IngressClients not required
 	gw := mustNew(t, cfg)
@@ -356,23 +345,6 @@ func newInProcessExchangeWithPolicy(t *testing.T, level ConformanceEnforcement) 
 		payerID:    "payer",
 		crdReq:     []byte(`{"resourceType":"Parameters"}`),
 	}
-}
-
-// newTransportExchange isolates framing, cryptography and relay fidelity from
-// optional clinical checks. Content-policy tests use newInProcessExchange and
-// choose the level and evidence for their intended guard explicitly.
-func newTransportExchange(t *testing.T) *inProcessExchange {
-	t.Helper()
-	return newTransportExchangeWithPolicy(t, EnforcementNone)
-}
-
-func newTransportExchangeWithPolicy(t *testing.T, level ConformanceEnforcement) *inProcessExchange {
-	t.Helper()
-	e := newInProcessExchangeWithPolicy(t, level)
-	peer, _ := e.originator.cfg.Reg.Lookup("payer")
-	peer.RequestFrames = append(shnsdk.SupportedRequestFrames(), shnsdk.RequestFrameV1CRD)
-	e.originator.cfg.Reg.Set("payer", peer)
-	return e
 }
 
 // conformantCRDRequest is a conformant CDS Hooks order-select request for `member`, with a
@@ -427,7 +399,7 @@ func crdIngressPost(body []byte) *http.Request {
 // *RelayError{502, body}, NOT the Hub's generic mechanical fault. Reuses the in-process
 // substrate harness (hub + authz + originator gateway) above.
 func TestRoundTrip_RecipientNon2xx_SurfacesRelayError(t *testing.T) {
-	env := newTransportExchange(t)
+	env := newInProcessExchange(t)
 	oo := []byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"error"}]}`)
 	env.payerReturns(LegResult{Status: 502, Response: testResponse(oo)})
 	_, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "", Content{WorkstreamType: workstreamPA, Payload: testRequest(env.crdReq)})

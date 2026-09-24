@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 	"github.com/golang-jwt/jwt/v5"
 )
 
@@ -98,17 +97,16 @@ func TestPostCRD_BearerAndAud(t *testing.T) {
 }
 
 // TestSubmitPAS_ParsesOutcome: 200 A1 body → Approved+PreAuthRef; non-200 → raw only.
-// The approved shape carries explicit X12 A1 evidence as well as the number.
+// The approved shape is a BARE ClaimResponse with explicit preAuthRef + outcome
+// "complete" (shnsdk.ParseClaimResponse's explicit-signal contract; a pended
+// response is a Bundle detected by ParsePendedResponse instead).
 func TestSubmitPAS_ParsesOutcome(t *testing.T) {
-	a1, err := shnsdk.BuildClaimResponse("AUTH-0001", "2030-01-01", "Patient/test", "corr", time.Unix(1700000000, 0))
-	if err != nil {
-		t.Fatal(err)
-	}
+	a1 := `{"resourceType":"ClaimResponse","status":"active","outcome":"complete","preAuthRef":"AUTH-0001"}`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/Claim/$submit" {
 			t.Errorf("path = %s", r.URL.Path)
 		}
-		w.Write(a1)
+		w.Write([]byte(a1))
 	}))
 	defer srv.Close()
 	d, _ := testDriver(t, srv)

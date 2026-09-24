@@ -97,13 +97,3 @@ func (g *Gateway) qualifiedDefault(line string) shnsdk.Validator {
 	}
 	return d
 }
-
-func (g *Gateway) adaptationValidator(contract, line string) shnsdk.Validator {
-	if v := g.validatorForContractLine(contract, line); v != nil {
-		return v
-	}
-	if g.cfg.AdaptationValidator != nil {
-		return g.cfg.AdaptationValidator(contract, line)
-	}
-	return nil
-}

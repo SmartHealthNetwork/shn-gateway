@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 )
@@ -119,71 +118,5 @@ func TestGatewayBuildAndServeWithoutDiagnosticKey(t *testing.T) {
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("gateway unavailable with missing diagnostic key: %d", res.StatusCode)
-	}
-}
-
-type diagnosticOwnedBudget struct {
-	mu sync.Mutex
-	n  int
-}
-
-func (b *diagnosticOwnedBudget) TryReserve(n int) bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if n > 32<<20-b.n {
-		return false
-	}
-	b.n += n
-	return true
-}
-func (b *diagnosticOwnedBudget) Release(n int) { b.mu.Lock(); b.n -= n; b.mu.Unlock() }
-func (b *diagnosticOwnedBudget) held() int     { b.mu.Lock(); defer b.mu.Unlock(); return b.n }
-
-type diagnosticHeldTransport func(*http.Request) (*http.Response, error)
-
-func (f diagnosticHeldTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
-func TestDiagnosticSourceCleanupOwnsActiveAndDrainsPending(t *testing.T) {
-	key := filepath.Join(t.TempDir(), "key")
-	if err := os.WriteFile(key, []byte("synthetic"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	env := map[string]string{"DIAGNOSTIC_SINK_URL": "https://collector.test/events", "DIAGNOSTIC_SOURCE": "synthetic", "DIAGNOSTIC_KEY_FILE": key}
-	d := newDiagnosticSource(func(k string) string { return env[k] }, "provider", io.Discard, time.Now)
-	entered, release := make(chan struct{}), make(chan struct{})
-	var released sync.Once
-	defer released.Do(func() { close(release) })
-	b := &diagnosticOwnedBudget{}
-	for _, raw := range []string{"active", "queued"} {
-		if !d.emit(diagnostics.WithEventBudget(diagnostics.Event{Kind: "test", Body: []byte(raw)}, b)) {
-			t.Fatal("admission")
-		}
-	}
-	d.publisher.Client = &http.Client{Transport: diagnosticHeldTransport(func(*http.Request) (*http.Response, error) { close(entered); <-release; return nil, io.ErrClosedPipe })}
-	stop := d.start(context.Background())
-	<-entered
-	start := time.Now()
-	stop()
-	if time.Since(start) > 2*time.Second {
-		t.Fatal("source cleanup waited indefinitely")
-	}
-	d.queue.Close()
-	d.queue.Close()
-	if h := d.queue.Health(time.Now()); !h.Closed || h.Pending != 1 || h.Dropped != 1 || h.LastAcknowledged != 0 {
-		t.Fatalf("shutdown=%+v", h)
-	}
-	if b.held() <= len("active") {
-		t.Fatal("active serialized owner released early")
-	}
-	released.Do(func() { close(release) })
-	deadline := time.Now().Add(time.Second)
-	for d.queue.Health(time.Now()).Pending != 0 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	if h := d.queue.Health(time.Now()); h.Pending != 0 || h.Dropped != 2 || b.held() != 0 {
-		t.Fatalf("final=%+v bytes=%d", h, b.held())
-	}
-	stop()
-	if d.emit(diagnostics.Event{Kind: "late"}) {
-		t.Fatal("closed source admitted new observation")
 	}
 }

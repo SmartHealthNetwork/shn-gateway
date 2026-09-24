@@ -268,7 +268,7 @@ func (g *Gateway) selectLegRoute(recipient, legType string) (legRoute, error) {
 		return route, nil
 	}
 	strict := g.strictPeer(recipient)
-	laned := func(line string) bool { return g.adaptationValidator(contract, line) != nil }
+	laned := func(line string) bool { return g.validatorForContractLine(contract, line) != nil }
 	route, issue, ok := selectChainRoute(contract, ownLines, peerLines, strict, laned)
 	if ok {
 		return route, nil
@@ -277,14 +277,15 @@ func (g *Gateway) selectLegRoute(recipient, legType string) (legRoute, error) {
 }
 
 // selectNativeReachRoute is arm (2): some peer-declared line t native to
-// this build's binary wins, highest t first. Native construction capability is
-// independent of optional validator availability and of the holder's declared
-// set. EgressNativeLines may explicitly narrow the executable builder set;
-// selected content checks and transformation proofs remain separate boundaries.
+// this build's binary AND laned wins, highest t first. Deliberately
+// independent of own's DECLARED set — native reach is the
+// sanctioned exception to "declared is the egress statement", gated only by
+// the lane map and, when narrowed (tests or SHN_DEMO_EGRESS_NATIVE_LINES),
+// EgressNativeLines.
 func (g *Gateway) selectNativeReachRoute(contract string, peerLines map[string]bool) (legRoute, bool) {
 	best := ""
 	for _, t := range g.nativeLinesView(contract) {
-		if !peerLines[t] {
+		if !peerLines[t] || g.validatorForContractLine(contract, t) == nil {
 			continue
 		}
 		if best == "" || compareLines(t, best) > 0 {
@@ -518,20 +519,20 @@ func (g *Gateway) selectResumeRoute(pinnedToken, recipient, legType string) (leg
 	// been sent at, whenever the two differed: an authorization that could be
 	// created could not then be continued, which is the one thing a pin exists
 	// to prevent.
-	if ownLines[target] {
+	if ownLines[target] && g.validatorForContractLine(contract, target) != nil {
 		return legRoute{Token: pinnedToken, BuildLine: target, Chain: nil}, nil
 	}
 	// Arm 2 equivalent: is the pinned target line buildable natively RIGHT
 	// NOW (own declared may have grown to include it, or it may simply be
 	// laned)? Either way, native beats a chain at resume too.
 	for _, t := range g.nativeLinesView(contract) {
-		if t == target {
+		if t == target && g.validatorForContractLine(contract, t) != nil {
 			return legRoute{Token: pinnedToken, BuildLine: target, Chain: nil}, nil
 		}
 	}
 	// Arm 3: re-derive a chain from a CURRENT own-declared source to the
 	// pinned target.
-	if g.adaptationValidator(contract, target) != nil {
+	if g.validatorForContractLine(contract, target) != nil {
 		strict := g.strictPeer(recipient)
 		var candidates []legRoute
 		for s := range ownLines {
@@ -572,24 +573,6 @@ func (g *Gateway) selectResumeRoute(pinnedToken, recipient, legType string) (leg
 // A request payload the ownership table refused is this gateway's own fault:
 // it is answered 500 here, before any other mapping.
 func (g *Gateway) relayOriginationError(w http.ResponseWriter, err error) bool {
-	var ce *conformanceError
-	if errors.As(err, &ce) {
-		writeJSON(w, ce.status, ce.safeRefusal())
-		return true
-	}
-	var ice *ingressContextError
-	if errors.As(err, &ice) {
-		if ice.status == http.StatusServiceUnavailable {
-			w.Header().Set("Cache-Control", "no-store")
-		}
-		writeJSON(w, ice.status, map[string]string{"error": ice.code})
-		return true
-	}
-	var pre *localPayerRoutingError
-	if errors.As(err, &pre) {
-		writeJSON(w, pre.status, map[string]string{"error": pre.message})
-		return true
-	}
 	if isOwnershipFault(err) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": errOwnershipFault})
 		return true
@@ -611,6 +594,9 @@ func (g *Gateway) relayOriginationError(w http.ResponseWriter, err error) bool {
 		return false
 	}
 	ct := re.ContentType
+	if ct == "" {
+		ct = "application/fhir+json"
+	}
 	// The recipient's answer, exactly as it arrived.
 	body := relay.NewBody(re.Body, relay.OriginPeerFrame)
 	k := relay.Key{Leg: re.leg, Role: relay.RoleRequester, Direction: relay.DirectionResponse, Outcome: relay.OutcomeUpstreamError}
@@ -809,16 +795,33 @@ func (g *Gateway) handleScenario(w http.ResponseWriter, r *http.Request) {
 		LegType: "coverage-eligibility", Seam: "originate", Whose: "own",
 	})
 
-	// Eligibility is version-neutral. Optional checks use the canonical lane;
-	// required unavailable evidence remains 503, while invalid own content is 422.
+	// Egress validation is load-bearing: an invalid resource must never reach the
+	// substrate. Empty profile = base-R4 + meta.profile pinning (see roundTrip).
+	// F7: lane-selected per line like every other validate, but deliberately
+	// NOT g.validateFHIR — this site echoes the choke point's bounded
+	// govResult.Issues in its 422 body, which validateFHIR's (status,msg)
+	// contract cannot carry. coverage-eligibility is
+	// version-neutral, so the line is "" (the canonical lane).
+	// Unconditional on purpose, not an oversight — relaysReferencePayerBytes does not apply
+	// here. cerJSON is a request THIS
+	// engine builds (shnsdk.BuildEligibilityRequest), never a relay of anyone else's bytes,
+	// on every origination lane. Only the ingress/egress legs a LegResponder (the payer
+	// content occupant — CRD/DTR/PAS) actually touches can carry reference-payer bytes;
+	// eligibility bypasses that occupant entirely (R11 — see gateway/engine/native.go's "NO
+	// coverage-eligibility arm" comment).
 	cerValidator := g.validatorForLine("")
+	if cerValidator == nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "no FHIR validator lane configured (FR-36/FR-G29)"})
+		return
+	}
+	// Routed through the choke point (validateGoverned) so an invalid verdict emits
+	// its conformance finding — this site's own status/message contract is
+	// preserved explicitly below, never relayed from the choke point's generic
+	// text, since a nil-lane outage never reaches here (checked above) and the
+	// choke point's own nil-lane message differs from this site's.
 	fc := findingContextFrom(ctx)
 	fc.Whose = "own"
 	if gr := g.validateGoverned(ctx, fc, cerValidator, cerJSON, "egress", "", "", false); gr.Status != 0 {
-		if gr.Status == http.StatusServiceUnavailable {
-			writeJSON(w, gr.Status, map[string]string{"error": gr.Msg})
-			return
-		}
 		if gr.Status == http.StatusInternalServerError {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "validator unavailable"})
 			return
@@ -854,16 +857,32 @@ func (g *Gateway) handleScenario(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Invalid peer content retains the scenario's upstream-failure status.
-	// Missing required evidence is a distinct 503, including an absent lane.
+	// Ingress-validate the decrypted response (load-bearing). A payer returning an
+	// invalid CRR is an UPSTREAM failure → 502 (preserves the UC-01 contract; only
+	// the response-leg token verification was folded into roundTrip (via OriginateLeg),
+	// not the validation-status semantics).
+	// F7: lane-selected, still NOT g.validateFHIR — an invalid payer answer is a 502
+	// here (an UPSTREAM failure), not validateFHIR's 500/422. Version-neutral leg ⇒
+	// line "" ⇒ the canonical lane; a missing lane keeps THIS site's 502.
+	// Unconditional on purpose here too — crrJSON is the CoverageEligibilityResponse the
+	// PAYER's own handleEligibilityInbound built directly off
+	// its SoR's Coverage read (R11), on every lane, including provider-data/demo against the
+	// reference payer's own conformance-payer holder — it is SHN-produced content, never a
+	// relay of br-payer's/the mirror's foreign DTR/PAS bytes, so it always validates.
 	crrValidator := g.validatorForLine("")
+	if crrValidator == nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "no FHIR validator lane configured (FR-36/FR-G29)"})
+		return
+	}
+	// Routed through the choke point so an invalid payer answer still emits its
+	// conformance finding. This site answers the scenario caller, which reads a
+	// payer-side failure as a bad gateway — every outcome here is 502
+	// (unchanged from before the migration); the choke point's own status
+	// (500/422) is never relayed, only its message, which already matches this
+	// site's literals byte-for-byte in both cases.
 	fc = findingContextFrom(ctx)
 	fc.Whose = "peer"
 	if gr := g.validateGoverned(ctx, fc, crrValidator, crrJSON, "ingress", "", "", false); gr.Status != 0 {
-		if gr.Status == http.StatusServiceUnavailable {
-			writeJSON(w, gr.Status, map[string]string{"error": gr.Msg})
-			return
-		}
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": gr.Msg})
 		return
 	}
@@ -1239,13 +1258,13 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 	// FHIR resource the pa.crd compat-manifest rows model. The order it carries
 	// is $validated above; the Patient and Coverage are the participant's own
 	// records, relayed as its system holds them and fenced to the member.
-	adaptedCRDReq, _, err := g.egressAdapt(ctx, crdRoute, crdReq, ExchangeIdentity{CorrelationID: crdCorr, LegType: "crd-order-select", Counterpart: recipient})
+	adaptedCRDReq, _, err := g.egressAdapt(crdRoute, crdReq, ExchangeIdentity{CorrelationID: crdCorr, LegType: "crd-order-select", Counterpart: recipient})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return crdDtrResult{}, false
 	}
 	crdRespJSON, err := g.OriginateLeg(ctx, r, recipient, "crd-order-select", pci, crdCorr, "",
-		Content{WorkstreamType: workstreamPA, ProfileID: crdRoute.Token, DeclaredVersion: crdRoute.Token, Route: routeInfoFor(crdRoute), Payload: sealRequest(relay.BuilderSDKCRDRequest, adaptedCRDReq, "application/json")})
+		Content{WorkstreamType: workstreamPA, ProfileID: crdRoute.Token, Route: routeInfoFor(crdRoute), Payload: sealRequest(relay.BuilderSDKCRDRequest, adaptedCRDReq, "application/json")})
 	if err != nil {
 		if g.relayOriginationError(w, err) {
 			return crdDtrResult{}, false
@@ -1340,12 +1359,12 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "build questionnaire-package request failed: " + err.Error()})
 			return crdDtrResult{}, false
 		}
-		if status, msg := g.carryUnchanged(ctx, route, dtrReq, dtrCorr, recipient); status != 0 {
+		if status, msg := g.carryUnchanged(route, dtrReq, dtrCorr, recipient); status != 0 {
 			writeJSON(w, status, map[string]string{"error": msg})
 			return crdDtrResult{}, false
 		}
 		packageJSON, err := g.OriginateLeg(ctx, r, recipient, "dtr-questionnaire-fetch", pci, dtrCorr, "",
-			Content{WorkstreamType: workstreamPA, ProfileID: route.Token, DeclaredVersion: route.Token, Route: routeInfoFor(route), Payload: dtrPayload,
+			Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Payload: dtrPayload,
 				Operation: shnsdk.FrameOperationQuestionnairePackage})
 		if err != nil {
 			if g.relayOriginationError(w, err) {
@@ -1761,13 +1780,13 @@ func (g *Gateway) originateNoPACRD(w http.ResponseWriter, r *http.Request, membe
 	// Hooks envelope, not a FHIR resource; the order it carries is $validated
 	// above, the Patient and Coverage are the participant's own records. No
 	// enforcement point is added or removed after egressAdapt.
-	adaptedReqJSON, _, err := g.egressAdapt(ctx, crdRoute, reqJSON, ExchangeIdentity{CorrelationID: correlationID, LegType: "crd-order-select", Counterpart: recipient})
+	adaptedReqJSON, _, err := g.egressAdapt(crdRoute, reqJSON, ExchangeIdentity{CorrelationID: correlationID, LegType: "crd-order-select", Counterpart: recipient})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
 	respJSON, err := g.OriginateLeg(ctx, r, recipient, "crd-order-select", pci, correlationID, "",
-		Content{WorkstreamType: workstreamPA, ProfileID: crdRoute.Token, DeclaredVersion: crdRoute.Token, Route: routeInfoFor(crdRoute), Payload: sealRequest(relay.BuilderSDKCRDRequest, adaptedReqJSON, "application/json")})
+		Content{WorkstreamType: workstreamPA, ProfileID: crdRoute.Token, Route: routeInfoFor(crdRoute), Payload: sealRequest(relay.BuilderSDKCRDRequest, adaptedReqJSON, "application/json")})
 	if err != nil {
 		if g.relayOriginationError(w, err) {
 			return
@@ -2105,7 +2124,7 @@ func (g *Gateway) handleUC03Bridge(w http.ResponseWriter, r *http.Request, membe
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "PAS evidence linkage failed"})
 		return
 	}
-	bundleJSON, _, err = g.egressAdapt(ctx, route, bundleJSON, ExchangeIdentity{CorrelationID: pasCorr, LegType: "pas-claim", Counterpart: res.recipient})
+	bundleJSON, _, err = g.egressAdapt(route, bundleJSON, ExchangeIdentity{CorrelationID: pasCorr, LegType: "pas-claim", Counterpart: res.recipient})
 	if err != nil {
 		if text, ok := bridgeRefusalText(err); ok {
 			writeBridgeRefusal(w, "pas-claim", text)
@@ -2123,7 +2142,7 @@ func (g *Gateway) handleUC03Bridge(w http.ResponseWriter, r *http.Request, membe
 		return
 	}
 	claimRespJSON, err := g.OriginateLeg(ctx, r, res.recipient, "pas-claim", res.pci, pasCorr, "",
-		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, DeclaredVersion: route.Token, Route: routeInfoFor(route), Payload: sealRequest(relay.BuilderSDKPASSubmit, bundleJSON, "application/fhir+json")})
+		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Payload: sealRequest(relay.BuilderSDKPASSubmit, bundleJSON, "application/fhir+json")})
 	if err != nil {
 		if g.relayOriginationError(w, err) {
 			return
@@ -2243,7 +2262,7 @@ func (g *Gateway) handleUC07HCPCS(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "PAS evidence linkage failed"})
 		return
 	}
-	bundleJSON, _, err = g.egressAdapt(ctx, route, bundleJSON, ExchangeIdentity{CorrelationID: pasCorr, LegType: "pas-claim", Counterpart: res.recipient})
+	bundleJSON, _, err = g.egressAdapt(route, bundleJSON, ExchangeIdentity{CorrelationID: pasCorr, LegType: "pas-claim", Counterpart: res.recipient})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
@@ -2257,7 +2276,7 @@ func (g *Gateway) handleUC07HCPCS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	claimRespJSON, err := g.OriginateLeg(ctx, r, res.recipient, "pas-claim", res.pci, pasCorr, "",
-		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, DeclaredVersion: route.Token, Route: routeInfoFor(route), Payload: sealRequest(relay.BuilderSDKPASSubmit, bundleJSON, "application/fhir+json")})
+		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Payload: sealRequest(relay.BuilderSDKPASSubmit, bundleJSON, "application/fhir+json")})
 	if err != nil {
 		if g.relayOriginationError(w, err) {
 			return
@@ -2448,7 +2467,7 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "PAS evidence linkage failed"})
 		return
 	}
-	bundleJSON, _, err = g.egressAdapt(ctx, route, bundleJSON, ExchangeIdentity{CorrelationID: pasCorr, LegType: "pas-claim", Counterpart: res.recipient})
+	bundleJSON, _, err = g.egressAdapt(route, bundleJSON, ExchangeIdentity{CorrelationID: pasCorr, LegType: "pas-claim", Counterpart: res.recipient})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
@@ -2462,7 +2481,7 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pendedResp, err := g.OriginateLeg(ctx, r, res.recipient, "pas-claim", res.pci, pasCorr, "",
-		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, DeclaredVersion: route.Token, Route: routeInfoFor(route), Payload: sealRequest(relay.BuilderSDKPASSubmit, bundleJSON, "application/fhir+json")})
+		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Payload: sealRequest(relay.BuilderSDKPASSubmit, bundleJSON, "application/fhir+json")})
 	if err != nil {
 		if g.relayOriginationError(w, err) {
 			return
@@ -2548,7 +2567,7 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "PAS evidence linkage failed"})
 		return
 	}
-	updateBundle, _, err = g.egressAdapt(ctx, route, updateBundle, ExchangeIdentity{CorrelationID: updateCorr, LegType: "pas-claim-update", Counterpart: res.recipient})
+	updateBundle, _, err = g.egressAdapt(route, updateBundle, ExchangeIdentity{CorrelationID: updateCorr, LegType: "pas-claim-update", Counterpart: res.recipient})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
@@ -2564,7 +2583,7 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 
 	// ClaimUpdate exchange — expect APPROVED.
 	updateResp, err := g.OriginateLeg(ctx, r, res.recipient, "pas-claim-update", res.pci, updateCorr, "",
-		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, DeclaredVersion: route.Token, Route: routeInfoFor(route), Payload: sealRequest(relay.BuilderSDKPASUpdate, updateBundle, "application/fhir+json")})
+		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Payload: sealRequest(relay.BuilderSDKPASUpdate, updateBundle, "application/fhir+json")})
 	if err != nil {
 		if g.relayOriginationError(w, err) {
 			return
@@ -2782,7 +2801,7 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "PAS evidence linkage failed"})
 		return
 	}
-	bundleJSON, _, err = g.egressAdapt(ctx, route, bundleJSON, ExchangeIdentity{CorrelationID: pasCorr, LegType: "pas-claim", Counterpart: res.recipient})
+	bundleJSON, _, err = g.egressAdapt(route, bundleJSON, ExchangeIdentity{CorrelationID: pasCorr, LegType: "pas-claim", Counterpart: res.recipient})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
@@ -2796,7 +2815,7 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pendedResp, err := g.OriginateLeg(ctx, r, res.recipient, "pas-claim", res.pci, pasCorr, "",
-		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, DeclaredVersion: route.Token, Route: routeInfoFor(route), Payload: sealRequest(relay.BuilderSDKPASSubmit, bundleJSON, "application/fhir+json")})
+		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Payload: sealRequest(relay.BuilderSDKPASSubmit, bundleJSON, "application/fhir+json")})
 	if err != nil {
 		if g.relayOriginationError(w, err) {
 			return
@@ -2930,7 +2949,7 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "PAS evidence linkage failed"})
 		return
 	}
-	updateBundle, _, err = g.egressAdapt(ctx, route, updateBundle, ExchangeIdentity{CorrelationID: updateCorr, LegType: "pas-claim-update", Counterpart: res.recipient})
+	updateBundle, _, err = g.egressAdapt(route, updateBundle, ExchangeIdentity{CorrelationID: updateCorr, LegType: "pas-claim-update", Counterpart: res.recipient})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
@@ -2944,7 +2963,7 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	updateResp, err := g.OriginateLeg(ctx, r, res.recipient, "pas-claim-update", res.pci, updateCorr, "",
-		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, DeclaredVersion: route.Token, Route: routeInfoFor(route), Payload: sealRequest(relay.BuilderSDKPASUpdate, updateBundle, "application/fhir+json")})
+		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Payload: sealRequest(relay.BuilderSDKPASUpdate, updateBundle, "application/fhir+json")})
 	if err != nil {
 		if g.relayOriginationError(w, err) {
 			return
@@ -3085,7 +3104,7 @@ func (g *Gateway) handleUC08(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "PAS evidence linkage failed"})
 		return
 	}
-	bundleJSON, _, err = g.egressAdapt(ctx, route, bundleJSON, ExchangeIdentity{CorrelationID: pasCorr, LegType: "pas-claim", Counterpart: res.recipient})
+	bundleJSON, _, err = g.egressAdapt(route, bundleJSON, ExchangeIdentity{CorrelationID: pasCorr, LegType: "pas-claim", Counterpart: res.recipient})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
@@ -3100,7 +3119,7 @@ func (g *Gateway) handleUC08(w http.ResponseWriter, r *http.Request) {
 	}
 
 	claimRespJSON, err := g.OriginateLeg(ctx, r, res.recipient, "pas-claim", res.pci, pasCorr, "",
-		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, DeclaredVersion: route.Token, Route: routeInfoFor(route), Payload: sealRequest(relay.BuilderSDKPASSubmit, bundleJSON, "application/fhir+json")})
+		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Payload: sealRequest(relay.BuilderSDKPASSubmit, bundleJSON, "application/fhir+json")})
 	if err != nil {
 		if g.relayOriginationError(w, err) {
 			return

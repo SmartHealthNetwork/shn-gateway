@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -39,20 +38,6 @@ func check(t *testing.T, s engine.ReplayStore, scope, clientID, key string, now,
 // other's; the exact-boundary row is the pin on the comparison itself.
 func replayRows(t *testing.T, mk func() engine.ReplayStore) {
 	t0 := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
-	t.Run("ingress context scope is independent and single-use", func(t *testing.T) {
-		s := mk()
-		exp := t0.Add(time.Minute)
-		for _, scope := range []string{engine.ReplayScopeIngressContext, engine.ReplayScopeIngressJTI} {
-			for _, client := range []string{"source", "other"} {
-				if check(t, s, scope, client, "same-jti", t0, exp) {
-					t.Fatal("independent key already spent")
-				}
-				if !check(t, s, scope, client, "same-jti", t0, exp) {
-					t.Fatal("replayed context accepted")
-				}
-			}
-		}
-	})
 	w := 5 * time.Minute // == engine ingressJTIWindow (unexported); see the doc comment
 	t.Run("first use then replay", func(t *testing.T) {
 		s := mk()
@@ -269,7 +254,6 @@ func TestReplayPg_SharedAcrossInstances(t *testing.T) {
 	b := NewReplayStore(pool, "holder", time.Now)
 	other := NewReplayStore(pool, "other", time.Now)
 	for _, tc := range []struct{ scope, client string }{
-		{engine.ReplayScopeIngressContext, "context-source"},
 		{engine.ReplayScopeIngressJTI, "br-provider"},
 		{engine.ReplayScopeHubJTI, ""},
 		{engine.ReplayScopePatientAccess, ""},
@@ -321,34 +305,5 @@ func TestReplayPg_PurgeThrottledAndNeverLoadBearing(t *testing.T) {
 	check(t, s, engine.ReplayScopeIngressJTI, "c", "new2", now(), now().Add(time.Minute))
 	if s.lastPurge != now().Add(-30*time.Second) {
 		t.Fatalf("purge ran inside the 1-minute throttle (lastPurge=%v)", s.lastPurge)
-	}
-}
-
-func TestReplayPg_IngressContextConcurrentReplicas(t *testing.T) {
-	pool := testPool(t)
-	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
-	stores := []engine.ReplayStore{NewReplayStore(pool, "holder", time.Now), NewReplayStore(pool, "holder", time.Now)}
-	var first atomic.Int32
-	var failures atomic.Int32
-	var wg sync.WaitGroup
-	for i := 0; i < 40; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			replay, err := stores[i%2].CheckAndRecord(engine.ReplayScopeIngressContext, "source", "one-assertion", now, now.Add(time.Minute))
-			if err != nil {
-				failures.Add(1)
-			} else if !replay {
-				first.Add(1)
-			}
-		}(i)
-	}
-	wg.Wait()
-	if first.Load() != 1 || failures.Load() != 0 {
-		t.Fatalf("first=%d failures=%d", first.Load(), failures.Load())
-	}
-	pool.Close()
-	if replay, err := stores[0].CheckAndRecord(engine.ReplayScopeIngressContext, "source", "fresh", now, now.Add(time.Minute)); !replay || err == nil {
-		t.Fatalf("outage not fail-closed: replay=%v err=%v", replay, err)
 	}
 }

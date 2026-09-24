@@ -931,7 +931,7 @@ func TestBuilderSetIsClosed(t *testing.T) {
 	if !slices.Equal(registeredBuilders, want) {
 		t.Fatalf("registeredBuilders = %v", registeredBuilders)
 	}
-	var wantInterim []BuilderID
+	wantInterim := []BuilderID{"defect-empty-error-substitution"}
 	if !slices.Equal(interimBuilders, wantInterim) {
 		t.Fatalf("interimBuilders = %v", interimBuilders)
 	}

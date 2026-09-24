@@ -16,13 +16,11 @@ below, see [CONFIGURATION.md](CONFIGURATION.md).
 - [Provider-data origination](#provider-data-origination)
 - [Native Da Vinci ingress](#native-da-vinci-ingress)
   - [Calling the ingress from your EHR](#calling-the-ingress-from-your-ehr)
-- [Authenticated exchange context](#authenticated-exchange-context)
 - [A non-FHIR backend (custom connector)](#a-non-fhir-backend-custom-connector)
 - [Payer decisioning](#payer-decisioning)
 - [Native-forward payer mode](#native-forward-payer-mode)
 - [Provider DTR population](#provider-dtr-population)
 - [Durable claim state](#durable-claim-state)
-- [Conformance enforcement](#conformance-enforcement)
 - [Seed your own FHIR server](#seed-your-own-fhir-server)
 
 ---
@@ -38,6 +36,7 @@ Backend Services credential block:
 docker run --rm \
   -e SHN_DISCOVERY_URL=https://accounts.shn-preview.org/discovery \
   -e ROLE=provider \
+  -e FHIR_VALIDATE_URL=https://your-hapi.example.com/fhir \
   -e FHIR_DATA_URL=https://fhir.your-org.example.com/r4 \
   -e FHIR_TOKEN_URL=https://fhir.your-org.example.com/oauth2/token \
   -e FHIR_CLIENT_ID=shn-gateway \
@@ -53,11 +52,6 @@ docker run --rm \
 `FHIR_CLIENT_KEY` is a **path to a mounted PEM file**, not the key text. See
 [Authenticating to your backend](#authenticating-to-your-backend-smart-backend-services)
 for creating that key pair and registering its public key with your server.
-This example uses the default `CONFORMANCE_ENFORCEMENT=none` and requires no
-optional FHIR validator. It still needs your real FHIR system of record for
-local reads and authored actions. A payer also needs its real
-`PAYER_DAVINCI_BASE_URL` to answer forwarded Da Vinci legs. Add an IG-loaded
-validator when your chosen checks or an explicit transformation require one.
 
 Trust anchors, the Hub/authz/registrar, and the consent/audit/PHG planes are all
 resolved from `SHN_DISCOVERY_URL` — nothing else to wire. Payer routing resolves
@@ -163,17 +157,12 @@ out, read from your own system of record — never made up. See
 [CDS Hooks prefetch](CONFIGURATION.md#cds-hooks-prefetch) for the rules. The
 gateway's `GET /cds-services` lists one service per hook (`shn-order-sign`,
 `shn-order-select`, `shn-order-dispatch`); post each CDS Hooks request to the service
-for its hook. The payer's framed answer keeps its actual body and application
-status, and its media type when supplied. Non-JSON and empty peer errors remain peer
-errors. An absent or unknown media type is not treated as proof of FHIR.
+for its hook. The payer's answer comes back exactly as the payer sent it.
 A `$questionnaire-package` request is carried as your EHR sent it, with your Coverage
 appended only when it carries none. A signature inside a message travels untouched;
 HTTP-level signatures are not carried, so sign inside the payload when you need an
-end-to-end signature. The legacy adapter may need a readable patient hint for addressing; see
-[CDS Hooks prefetch](CONFIGURATION.md#cds-hooks-prefetch). Authenticated exchange
-context supplies the declared network subject independently of body inspection. It
-still needs an authorized identity source; a member hash or self-asserted value
-is not production identity authority.
+end-to-end signature. The request's patient must be named by the network member id; see
+the member id limitation in [CDS Hooks prefetch](CONFIGURATION.md#cds-hooks-prefetch).
 
 See [`PROVIDER_DAVINCI_INGRESS` and related variables in
 CONFIGURATION.md](CONFIGURATION.md#accept-da-vinci-requests-from-a-provider-ehr-provider-optional)
@@ -214,9 +203,7 @@ Four steps, all on your side:
        "client_id": "my-ehr",
        "alg": "ES384",
        "public_key_pem": "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
-       "scopes": ["system/Davinci.write"],
-       "context_operations": ["pas-submit", "crd-order-select"],
-       "boundary_preparations": ["E-01"]
+       "scopes": ["system/Davinci.write"]
      }
    ]
    ```
@@ -261,12 +248,11 @@ Four steps, all on your side:
    `invalid_scope` `400` is different — it is decided before the `jti` is recorded, so fix
    the `scope` and retry with the assertion you already hold.
 
-4. **Call the ingress with the bearer and signed exchange context:**
+4. **Call the ingress with the bearer:**
 
    ```sh
    curl -s "$BASE/Claim/\$submit" \
      -H "Authorization: Bearer $TOKEN" \
-     -H "SHN-Exchange-Context: $EXCHANGE_CONTEXT_JWS" \
      -H 'Content-Type: application/json' \
      --data-binary @pas-bundle.json
    ```
@@ -302,87 +288,16 @@ Token-endpoint errors are deliberately generic (`invalid_client`,
 or signature detail — check the assertion against the tables above rather than
 the response body.
 
-## Authenticated exchange context
-
-For a supplied native message, the caller authenticates with the ingress bearer
-above and signs a second, byte-bound JWS in `SHN-Exchange-Context`. The same
-registered `client_id`, pinned public key and `ES384` or `RS384` algorithm verify
-that context. In `INGRESS_CLIENTS_FILE`, `context_operations` grants only the
-listed operations; `boundary_preparations` grants only the listed completed edits.
-The bearer, signed context, registration and network authorization each have a
-different job. A self-signed context from an unregistered caller grants nothing.
-
-For example, a registered `my-ehr` client can sign these **synthetic claim values**
-for the exact bytes it POSTs to `/Claim/$submit`:
-
-```json
-{
-  "iss": "my-ehr", "sub": "my-ehr",
-  "aud": ["https://gateway.internal.example/Claim/$submit"],
-  "iat": 1789992000, "nbf": 1789992000, "exp": 1789992300,
-  "jti": "unique-message-001",
-  "holder": "registered-provider", "recipient": "registered-payer",
-  "leg": "pas-claim", "operation": "pas-submit",
-  "subject_pci": "pci:authorized-synthetic-subject",
-  "correlation_id": "synthetic-correlation-001",
-  "contract_version": "pa.pas@2.0",
-  "content_type": "application/json",
-  "body_sha256": "lowercase-sha256-of-the-exact-posted-body"
-}
-```
-
-Replace the illustrative digest with SHA-256 of the **final application bytes**;
-`exchangecontext.Sign` computes it when left empty. Sign with the registered
-private key and send the compact JWS as the header value. These fixed example
-timestamps are historical; mint fresh times and a new `jti` for each real request.
-The gateway verifies
-issuer and subject against the authenticated client, audience against its configured
-base URL plus the actual path, method/path and operation, holder and registered
-recipient, content type, exact body digest, a validity window of at most five
-minutes, and one-time `jti` replay. A presented invalid context is refused; it
-does not fall back to unsigned message extraction. `contract_version` is the
-producer's representation declaration, not a validator certificate. If the
-producer has no authoritative response-line declaration, leave it absent rather
-than copying the request's line.
-
-The `subject_pci` must come from your authorized patient-identity integration;
-the claim does not mint a patient identity or prove the body's patient references.
-The gateway still obtains per-leg authority and checks consent, scope, recipient,
-encryption and audit. If authorized identity or routing context is unavailable,
-the operation needs that input; it cannot choose a default patient or payer.
-Arbitrary-new-patient production ingress is not yet proved by this interface.
-
-CRD requests have a further registered boundary step: remove `fhirServer` and
-`fhirAuthorization` before the message crosses the participant boundary (E-01
-version `1`). A trusted connector granted `boundary_preparations: ["E-01"]`
-may include `"completed": [{"id": "E-01", "version": "1"}]` in its
-signed context for the **already prepared final bytes**, with the matching
-`crd_hook`, operation, recipient and digest. Without that evidence the gateway
-attempts the registered edit itself. If the body cannot be read to perform it,
-the gateway returns `adaptation_unavailable`. Forged, stale or mismatched
-evidence is refused; it never bypasses preparation. Completion says nothing
-about patient consistency, terminology or clinical correctness.
-
 ## A non-FHIR backend (custom connector)
 
 For a legacy or non-FHIR system of record (HL7v2, X12, SQL, SOAP), implement the
 `engine.SystemOfRecord` interface starting from the runnable scaffold. See
 [`connectors/scaffold/README.md`](../connectors/scaffold/README.md) for the
 step-by-step: copy `scaffold.go`, fill the read methods against your backend
-(reading the already-issued patient identifier from your own source), and wire your
+(deriving the patient identifier via `shnsdk.ResolvePCI`), and wire your
 connector through the already-public `engine.Config.SoR` seam.
 
 ## System-of-record read failures
-
-For local source assembly and clinical consumption, the FHIR connector searches
-for the requested `urn:shn:member` identifier and confirms that identifier in the
-returned Patient. The source Patient must also carry one already-issued
-`urn:shn:pci` identifier whose value starts with `pci:`. The connector does not
-create that link from demographics. Missing linkage leaves the local action
-unavailable; duplicate or malformed linkage is an invalid source response.
-`NewFromURLForHolder` additionally scopes reference resolution to the authenticated
-holder and its FHIR namespace. Native relay at `none` does not require this local
-roster lookup or inspect the body's patient consistency.
 
 The built-in FHIR connector distinguishes absent records from failed reads. A valid
 empty Patient search keeps the existing unknown-member result. A failed token request,
@@ -492,22 +407,6 @@ compatibility but is **no longer read by anything**: setting it alone does nothi
 wrap it in your own `LegResponder` implementation if you want the engine to call it. See
 [`STABILITY.md`](../STABILITY.md) for the supported `engine` seams.
 
-A responder returns the participant's answer in `LegResult.Response` and its actual
-HTTP status in `ApplicationStatus`. Use a set, empty `relay.Payload` for an empty
-application answer; an unset response with `Status` and `Message` is a gateway
-refusal. Legacy responders may continue using `Status` with a set response. If both
-status fields are nonzero they must agree. `ResponseContractVersion` and
-`ResponseVersionSource` describe an explicit declaration, independently of the
-line selected for routing.
-
-Embeddings that need reply metadata can call `Gateway.OriginateLegMessage`, which
-returns an `ApplicationReply` for both success and error answers. Transport and
-local refusal errors remain separate Go errors. Existing `OriginateLeg` callers
-retain the byte-returning API and `*engine.RelayError` for non-2xx answers,
-including through helper wrapping. Both APIs use the same authorized exchange.
-Legacy bare peer replies provide no status or media metadata: they retain the
-existing success convention, and ingress supplies its usual default media type.
-
 > **Note:** The `engine.LegResponder` interface is an **internal, unstable 0.x
 > seam** — it may change in any minor version. Do not depend on it directly.
 
@@ -568,49 +467,27 @@ across replicas (see [DEPLOYMENT.md](DEPLOYMENT.md), "Running more than one repl
 
 ## Conformance enforcement
 
-`CONFORMANCE_ENFORCEMENT` is your gateway's policy for its outgoing and incoming
-messages. Its default is `none`: no optional validators, passive certification,
-findings or workers run for native carriage. `observe` attempts bounded checks
-without changing the message or application result. `basic` enforces registered
-structural checks and observes deeper checks. `strict` enforces supported rules;
-it distinguishes an invalid message from a required check that is unavailable.
-Each peer independently applies its own level, so an older or strict peer may
-still refuse. See the [four-level table](CONFIGURATION.md#validation-and-conformance-enforcement).
+Every message your gateway sends or receives is checked against its FHIR profile —
+and, for a payer's CDS Hooks answer, against the CDS Hooks response rules. That
+check always runs. What happens when a check fails is `CONFORMANCE_ENFORCEMENT`, a
+setting on your own gateway:
 
-Local clinical consumption is separate. Reading the payer answer into a decision,
-projecting an EOB, populating a questionnaire from your source system, building an
-outgoing request, or transforming an IG line may need readable content and its
-own authority or certification evidence. A failure of such an action must be
-reported as that action's failure, not as a refusal of an already delivered native
-answer. Optional observations belong to this gateway's operational view; `/health`
-reports level, rule set, availability and dropped jobs, but does not certify a
-message or prove delivery. Current source-tree behavior and focused documentation
-checks do not establish full live two-participant acceptance. The corresponding
-SDK, gateway and Kit public artifacts still require ordered release cuts before
-these newer interfaces can be assumed available from published modules.
+- `strict`: an invalid result refuses the message. A FHIR profile refusal names the
+  validator issues it was based on; a CDS Hooks response-rules refusal names the
+  rule (and the violating path) as well.
+- `none` (the default when the variable is unset): every check still runs and every invalid result is still recorded as a
+  finding — it does not stop the message. The message relays as sent, except an
+  answer this gateway cannot read at all, and a payload this gateway itself
+  translated between IG lines, both of which refuse at every level regardless of
+  the setting.
 
-For a payer whose own FHIR source already holds a PDex prior-authorization
-`ExplanationOfBenefit`, the payer's registered local connector can explicitly
-record that resource for Patient Access. Set `PAYER_EOB_ACTIONS=1`,
-`PAYER_EOB_ACTIONS_BASE_URL` to the gateway's fixed local SMART audience,
-`FHIR_VALIDATE_URL` to a validator with the PDex profile, and
-`INGRESS_CLIENTS_FILE` to a registered payer connector with
-`"payer_eob_record":true` and the
-`system/ExplanationOfBenefit.write` scope. The connector obtains a bearer from
-`POST /oauth/token`, then calls `POST /local/payer/eob-record` with
-`{"subjectPCI":"<issued PCI>","sourceRef":"ExplanationOfBenefit/<source id>"}`.
-The gateway reads the EOB and its Patient, insurer, provider and Coverage from
-this payer's FHIR source. The Patient must carry exactly one already-issued
-`urn:shn:pci` identifier matching `subjectPCI`; resource identity and linkage
-are proved from one Patient read. The gateway validates the EOB against PDex
-and records its original bytes. The existing
-patient-access `GET /ExplanationOfBenefit` endpoint then serves it to PHG under
-the patient's read authority. An absent source record or failed check refuses
-the local action; native PAS delivery remains independent. The Da Vinci reference
-payer's ClaimResponse by itself is not an EOB source and does not activate this
-action. A payer integration must author the complete EOB in its own FHIR source
-before invoking it. Reusing an EOB id under a different PCI returns `409` and
-preserves both patient compartments; same-patient replay retains one record.
+Any other value refuses to boot.
+
+**Reading a finding.** If you run the gateway yourself — through the SHN Kit or a
+self-hosted deployment — findings appear in your own gateway log and observer
+stream: look for the `conformance:` log line, or the `conformance.observed` event
+if you're watching the observer stream. If SHN hosts your gateway, ask your SHN
+contact for a finding until partner login ships a self-serve view.
 
 ## Seed your own FHIR server
 
@@ -630,10 +507,8 @@ Load either with a single transaction POST to your FHIR base (run from the repo 
       --data-binary @seed/provider-personas.json \
       https://your-fhir-server/fhir
 
-The reference payer fixtures contain only the member ids in these bundles. A local
-source action requesting another record cannot supply facts that are absent from
-that source. Native carriage with valid authenticated exchange context does not
-require a gateway-local roster entry.
+The reference payer recognizes **only** the member ids in these bundles; a request
+for any other member is rejected by the gateway as an unknown member.
 
 ### Keep the provider-data Observations recent
 

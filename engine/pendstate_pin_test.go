@@ -30,7 +30,6 @@ package engine
 
 import (
 	"bytes"
-	"context"
 	"crypto/ed25519"
 	"encoding/json"
 	"io"
@@ -90,9 +89,6 @@ type pendResumeSubstrate struct {
 	// stays untouched. nil is the default and changes nothing (every existing
 	// caller is unaffected).
 	overrideResponse func(legType string, payload []byte) []byte
-	// responseDeclarations are the canned producer's independently known lines.
-	// A missing entry stays unstamped, regardless of the request's pin.
-	responseDeclarations map[string]string
 }
 
 func (s *pendResumeSubstrate) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -220,13 +216,6 @@ func (s *pendResumeSubstrate) handleRoute(body []byte) (*http.Response, error) {
 	}
 	if s.overrideResponse != nil {
 		respPayload = s.overrideResponse(txType, respPayload)
-	}
-	if line := s.responseDeclarations[txType]; line != "" {
-		respPayload, err = shnsdk.EncodeHTTPFrameHeaders(http.StatusOK,
-			map[string]string{"Content-Type": "application/fhir+json", shnsdk.FrameHeaderContractVersion: line}, respPayload)
-		if err != nil {
-			return errResp("stub: frame " + txType + " response: " + err.Error()), nil
-		}
 	}
 
 	meta := shnsdk.Metadata{
@@ -707,6 +696,144 @@ func TestHandleUC05_PinsBothLegsAcrossMidRequestDrift(t *testing.T) {
 // over these exact bytes.
 const federatedQueryIngressMutationMarker = "UC05_FQ_INGRESS_MUTATION_MARKER"
 
+// TestHandleUC05_FederatedQueryIngressValidatesOnDemoLane is NEW-2's call-site
+// guard: Finding 1's original defect (originate.go's UC-05 facility federated-query
+// leg calling validateFHIRPayerIngress instead of plain validateFHIR) was only
+// caught by gateway.go-level unit tests exercising the two validate functions
+// directly — go test ./engine/ stayed green if that ONE call site regressed back to
+// the wrong function, because nothing drove the regression through the actual leg.
+// This test does: it runs a live OriginationProfile="demo" lane (the lane whose
+// skip wrongly swallowed this exact leg before the R-8 scope fix) through the real
+// handleUC05 HTTP handler, with metro-spine's federated-query answer corrupted in a
+// way a validator would reject, and asserts the request fails. If the call site
+// ever regresses to validateFHIRPayerIngress, this lane is squarely inside
+// relaysReferencePayerBytes's demo-lane skip and the corrupted bytes would sail
+// through — this test's assertion on rec.Code == http.StatusOK is what makes that
+// regression visible (a passing status where a rejection was expected).
+func TestHandleUC05_FederatedQueryIngressValidatesOnDemoLane(t *testing.T) {
+	gw, stub := newPendResumeFixture(t, pendFixtureOpts{
+		// MBR-D-UC05, not MBR-UC05: sceneMember only resolves to the demo persona once
+		// OriginationProfile (set below) reads "demo" — driving this leg through the
+		// actual demo lane, not the default arm, is the whole point of this guard.
+		member: "MBR-D-UC05", birthDate: "1968-03-12", familyName: "Johansson-Demo",
+		pendedItem: "operative-diagnostic-report",
+		extraRoles: map[string]string{"facility": "metro-spine"},
+	})
+	// The lane relaysReferencePayerBytes recognizes as skip-eligible — the SAME
+	// lane the R-8 scope fix (Finding 1) had to stop leaking the skip into this
+	// exact leg on.
+	gw.cfg.OriginationProfile = "demo"
+	// Pinned to strict explicitly, not the default: the none twin right below
+	// drives the SAME corrupted marker and asserts it records-and-relays instead.
+	gw.cfg.ConformanceEnforcement = EnforcementStrict
+	// A validator that rejects only the corrupted marker: every OTHER leg's
+	// bytes in this run (CRD SR/Coverage, DTR QR, PAS bundles) must still pass,
+	// so a false rejection elsewhere would misattribute the failure.
+	gw.cfg.Validator = &shnsdk.FakeValidator{RejectIfContains: federatedQueryIngressMutationMarker}
+	stub.overrideResponse = func(legType string, payload []byte) []byte {
+		if legType != "federated-query" {
+			return payload
+		}
+		// Stay valid JSON (a top-level object): inject one more key so the
+		// marker is real content the validator's ingress call actually reads,
+		// not a syntax break OriginateLeg's own decode would catch first
+		// (which would prove nothing about validateFHIR specifically).
+		return bytes.Replace(payload, []byte(`{`),
+			[]byte(`{"`+federatedQueryIngressMutationMarker+`":true,`), 1)
+	}
+
+	rec := httptest.NewRecorder()
+	gw.handleUC05(rec, httptest.NewRequest(http.MethodPost, "/scenario/uc05", nil))
+
+	if !legAttempted(stub.legTypes, "federated-query") {
+		t.Fatalf("federated-query leg never ran (legs: %v); status=%d body=%s", stub.legTypes, rec.Code, rec.Body.String())
+	}
+	if rec.Code == http.StatusOK {
+		t.Fatalf("handleUC05 accepted a federated-query response the validator flags as invalid "+
+			"(demo lane) — the facility ingress leg must never share the R-8 payer-ingress skip; "+
+			"status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandleUC05_FederatedQueryIngressValidatesOnDemoLane_NoneRelays is the none
+// twin of the row above: the SAME corrupted federated-query answer, on the SAME
+// demo lane, but ConformanceEnforcement=none. The ingress-validate call still
+// runs (it is not skipped) but an invalid verdict is now RECORDED, not refused,
+// so handleUC05 completes (200) and the finding is observed.
+func TestHandleUC05_FederatedQueryIngressValidatesOnDemoLane_NoneRelays(t *testing.T) {
+	gw, stub := newPendResumeFixture(t, pendFixtureOpts{
+		member: "MBR-D-UC05", birthDate: "1968-03-12", familyName: "Johansson-Demo",
+		pendedItem: "operative-diagnostic-report",
+		extraRoles: map[string]string{"facility": "metro-spine"},
+	})
+	gw.cfg.OriginationProfile = "demo"
+	gw.cfg.ConformanceEnforcement = EnforcementNone
+	var events []ObserverEvent
+	gw.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
+	gw.cfg.Validator = &shnsdk.FakeValidator{RejectIfContains: federatedQueryIngressMutationMarker}
+	stub.overrideResponse = func(legType string, payload []byte) []byte {
+		if legType != "federated-query" {
+			return payload
+		}
+		return bytes.Replace(payload, []byte(`{`),
+			[]byte(`{"`+federatedQueryIngressMutationMarker+`":true,`), 1)
+	}
+
+	rec := httptest.NewRecorder()
+	gw.handleUC05(rec, httptest.NewRequest(http.MethodPost, "/scenario/uc05", nil))
+
+	if !legAttempted(stub.legTypes, "federated-query") {
+		t.Fatalf("federated-query leg never ran (legs: %v); status=%d body=%s", stub.legTypes, rec.Code, rec.Body.String())
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("at none the corrupted federated-query answer must relay (recorded, not refused): status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	// AuthNumber discriminates the approved branch from pended/consent-denied
+	// (unlike FacilityID, which is a registry lookup by role — originate.go's
+	// "facility, fok := g.cfg.Reg.LookupByRole" then "FacilityID: facility.ID"
+	// — known before the leg runs and identical regardless of what the record
+	// contains, so it proves nothing about the evidence itself).
+	var resp uc05Resp
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode uc05 response: %v (body=%s)", err, rec.Body.String())
+	}
+	if resp.AuthNumber == "" {
+		t.Fatalf("uc05 completed with no authNumber — the approved branch never reached completion (body=%s)", rec.Body.String())
+	}
+	// No downstream byte assertion is possible for THIS marker: unlike the
+	// harness-level twin's marker (a DiagnosticReport's own code.coding[0].display,
+	// which repointEvidenceSubject leaves untouched and which is folded into the
+	// pas-claim-update request), federatedQueryIngressMutationMarker is injected
+	// as a synthetic TOP-LEVEL Bundle key (overrideResponse prepends
+	// `"<marker>":true,` before the bundle's own members) — not part of any FHIR
+	// resource, so cdexEvidence's extraction never carries it into the
+	// ClaimUpdate. There is no wire body downstream of the verdict this marker
+	// could appear in.
+	// stub.overrideResponse matches every "federated-query" leg regardless of the
+	// CDex doc type, so BOTH the DiagnosticReport and the DocumentReference
+	// searchset legs carry the marker and are recorded — unlike the harness-level
+	// twin (which corrupts only DiagnosticReport bytes), so this asserts at
+	// least one rather than exactly one.
+	var matched []ConformanceFinding
+	for _, e := range events {
+		if e.Kind != ConformanceObservedEvent {
+			continue
+		}
+		var f ConformanceFinding
+		if json.Unmarshal([]byte(e.Detail), &f) == nil && f.Kind == string(KindFHIRIngress) {
+			matched = append(matched, f)
+		}
+	}
+	if len(matched) == 0 {
+		t.Fatalf("want at least one fhir-ingress finding, got %d: %+v", len(matched), matched)
+	}
+	for _, f := range matched {
+		if f.Decision != Record.String() {
+			t.Fatalf("fhir-ingress finding decision = %q, want %q: %+v", f.Decision, Record.String(), f)
+		}
+	}
+}
+
 // driftOnPASClaim installs the MID-REQUEST drift: the instant the substrate sees
 // the pas-claim leg, the payer's declared line is rewritten to one this build
 // cannot route. handleUC04/handleUC05 are still inside the same request; their
@@ -944,9 +1071,6 @@ func TestCompleteClinician_PendedCarryStrippedMidPendRefuses(t *testing.T) {
 			"no-opped and the amendment would answer the pend without content its own loss record declares: %s",
 			rec2.Body.String())
 	}
-	if err := gw.WaitObserverCompletion(context.Background()); err != nil {
-		t.Fatal(err)
-	}
 	assertPendCarryRefusal(t, stub, rec2, *failed, "completeClinician")
 }
 
@@ -968,9 +1092,6 @@ func TestCompletePatient_PendedCarryStrippedMidPendRefuses(t *testing.T) {
 	rec2 := httptest.NewRecorder()
 	if gw.completePatient(rec2, httptest.NewRequest(http.MethodPost, "/scenario/uc07/complete", nil), st, "") {
 		t.Fatalf("completePatient resumed GREEN over a stripped carry: %s", rec2.Body.String())
-	}
-	if err := gw.WaitObserverCompletion(context.Background()); err != nil {
-		t.Fatal(err)
 	}
 	assertPendCarryRefusal(t, stub, rec2, *failed, "completePatient")
 }
@@ -1090,7 +1211,7 @@ func TestScenarioToPend_ThreadsChainCarriedEntriesIntoThePendRecord(t *testing.T
 		t.Fatal("scenarioToPend DISCARDS egressAdapt's LossReports — the pended leg's Carried entries are the " +
 			"pend record's only input, so discarding them leaves the resume guard nothing to verify against")
 	}
-	adaptAt := strings.Index(fn, "g.egressAdapt(")
+	adaptAt := strings.Index(fn, "g.egressAdapt(route, bundleJSON,")
 	if adaptAt < 0 {
 		t.Fatal("scenarioToPend no longer runs its pas-claim leg through g.egressAdapt")
 	}

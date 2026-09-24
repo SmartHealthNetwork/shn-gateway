@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -19,8 +18,9 @@ const (
 	HeaderEvidenceIncarnation = "X-SHN-Evidence-Incarnation"
 	HeaderEvidenceTime        = "X-SHN-Evidence-Time"
 	HeaderEvidenceSignature   = "X-SHN-Evidence-Signature"
-	// Metadata escaping/encoder scratch is conservatively bounded. Raw body
-	// bytes bypass the pooled encoder and use a directly sized base64 destination.
+	// JSON escaping is at most six bytes per retained input byte. The factor
+	// also covers Marshal's result and growth scratch concurrently; no event is
+	// marshaled unless its conservative retained cost is within the queue bound.
 	publisherTransientMultiplier = 16
 	publisherEnvelopeBytes       = 4096
 	maxPublisherIdentityBytes    = 4096
@@ -49,14 +49,6 @@ func RunPublisher(ctx context.Context, q *Queue, cfg PublisherConfig) error {
 	if q == nil {
 		return errors.New("diagnostics: nil queue")
 	}
-	closeDone := make(chan struct{})
-	stopClose := context.AfterFunc(ctx, func() { q.Close(); close(closeDone) })
-	defer func() {
-		if !stopClose() {
-			<-closeDone
-		}
-		q.Close()
-	}()
 	if err := validatePublisherURL(cfg.URL); err != nil {
 		return err
 	}
@@ -111,9 +103,6 @@ func RunPublisher(ctx context.Context, q *Queue, cfg PublisherConfig) error {
 			continue
 		}
 		if err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
 			return err
 		}
 		e.Source = cfg.Source
@@ -148,12 +137,17 @@ func RunPublisher(ctx context.Context, q *Queue, cfg PublisherConfig) error {
 				q.Drop(e.Sequence)
 				break
 			}
-			result, err, admitted := publishEvent(ctx, cfg, e, deadline)
-			if !admitted {
+			raw, err := json.Marshal(e)
+			if err != nil {
 				q.Drop(e.Sequence)
 				break
 			}
-
+			remaining = deadline.Sub(cfg.Clock())
+			if remaining <= 0 {
+				q.Drop(e.Sequence)
+				break
+			}
+			result, err := publish(ctx, cfg, cfg.URL, raw, deadline)
 			if err == nil {
 				if result.status >= 200 && result.status < 300 {
 					q.Acknowledge(e.Sequence)
@@ -267,44 +261,4 @@ func waitContext(ctx context.Context, d time.Duration) error {
 	case <-t.C:
 		return nil
 	}
-}
-
-// publishEvent owns the encoded copy through the actual HTTP consumer, including
-// a transport that ignores cancellation. No clinical body enters a pooled encoder.
-func publishEvent(ctx context.Context, cfg PublisherConfig, e Event, deadline time.Time) (publishResult, error, bool) {
-	body := e.Body
-	e.Body = nil
-	bound := int(eventCost(e))*publisherTransientMultiplier + publisherEnvelopeBytes
-	if len(body) > 0 {
-		bound += base64.StdEncoding.EncodedLen(len(body)) + len(`"body":"",`)
-	}
-	if e.bodyBudget != nil {
-		if !e.bodyBudget.TryReserve(bound) {
-			return publishResult{}, nil, false
-		}
-		defer e.bodyBudget.Release(bound)
-	}
-	metadata, err := json.Marshal(e)
-	if err != nil {
-		return publishResult{}, err, false
-	}
-	raw := metadata
-	if len(body) > 0 {
-		marker := bytes.Index(metadata, []byte(`"bodyComplete":`))
-		if marker < 0 {
-			return publishResult{}, errors.New("diagnostics: missing body marker"), false
-		}
-		capacity := len(metadata) + base64.StdEncoding.EncodedLen(len(body)) + len(`"body":"",`)
-		if capacity > bound {
-			return publishResult{}, errors.New("diagnostics: serialization bound"), false
-		}
-		raw = make([]byte, 0, capacity)
-		raw = append(raw, metadata[:marker]...)
-		raw = append(raw, `"body":"`...)
-		raw = base64.StdEncoding.AppendEncode(raw, body)
-		raw = append(raw, `",`...)
-		raw = append(raw, metadata[marker:]...)
-	}
-	result, err := publish(ctx, cfg, cfg.URL, raw, deadline)
-	return result, err, true
 }

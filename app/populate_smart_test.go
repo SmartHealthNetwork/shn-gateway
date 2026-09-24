@@ -352,7 +352,6 @@ func buildProviderForPopulate(t *testing.T, populate map[string]string) (built, 
 	t.Cleanup(func() {
 		if b.gateway != nil {
 			_ = b.gateway.Close()
-			b.observerHub.Close()
 		}
 	})
 	return b, out.String(), err

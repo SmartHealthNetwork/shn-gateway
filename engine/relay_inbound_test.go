@@ -82,11 +82,6 @@ func (s *inboundAuthzStub) RoundTrip(req *http.Request) (*http.Response, error) 
 // private half to Open the seal — a real Registry never carries it).
 func newInboundTestGateway(t *testing.T, frameCapable bool) (*Gateway, inboundTestRequester) {
 	t.Helper()
-	return newInboundTestGatewayWithPolicy(t, frameCapable, EnforcementStrict)
-}
-
-func newInboundTestGatewayWithPolicy(t *testing.T, frameCapable bool, level ConformanceEnforcement) (*Gateway, inboundTestRequester) {
-	t.Helper()
 	authzPub, authzPriv := genED25519(t)
 	_, paySignPriv := genED25519(t)
 	payEncPub, payEncPriv := genKeyPair(t)
@@ -104,21 +99,19 @@ func newInboundTestGatewayWithPolicy(t *testing.T, frameCapable bool, level Conf
 
 	sor := newCensusSoR()
 	gw := mustNew(t, Config{
-		Role:                     "payer",
-		HolderID:                 "payer",
-		Identity:                 shnsdk.Identity{HolderID: "payer", SignPriv: paySignPriv, EncPub: payEncPub, EncPriv: payEncPriv},
-		AuthzURL:                 "http://stub.test",
-		AuthzPub:                 authzPub,
-		HubTransportPub:          authzPub, // payer role requires a non-empty HubTransportPub (hop-auth); unused by respondLegError
-		Reg:                      reg,
-		SubjectReferenceResolver: censusSubjectResolver("requester", "payer"),
-		Validator:                syntheticFakeValidator(),
-		SoR:                      sor,
-		Store:                    sor,
-		Responder:                unusedResponder{}, // payer role requires a content occupant; this suite drives none
-		Clock:                    clock,
-		Client:                   &http.Client{Transport: &inboundAuthzStub{authzPriv: authzPriv, clock: clock}},
-		ConformanceEnforcement:   level,
+		Role:            "payer",
+		HolderID:        "payer",
+		Identity:        shnsdk.Identity{HolderID: "payer", SignPriv: paySignPriv, EncPub: payEncPub, EncPriv: payEncPriv},
+		AuthzURL:        "http://stub.test",
+		AuthzPub:        authzPub,
+		HubTransportPub: authzPub, // payer role requires a non-empty HubTransportPub (hop-auth); unused by respondLegError
+		Reg:             reg,
+		Validator:       shnsdk.NewFakeValidator(),
+		SoR:             sor,
+		Store:           sor,
+		Responder:       unusedResponder{}, // payer role requires a content occupant; this suite drives none
+		Clock:           clock,
+		Client:          &http.Client{Transport: &inboundAuthzStub{authzPriv: authzPriv, clock: clock}},
 	})
 	return gw, inboundTestRequester{ID: "requester", EncPub: reqEncPub, EncPriv: reqEncPriv}
 }
@@ -335,7 +328,7 @@ func TestRespondLegFramesSuccessForCapableRequester(t *testing.T) {
 	fhir := []byte(`{"resourceType":"ClaimResponse","status":"active"}`)
 	rec := httptest.NewRecorder()
 	r := newSignedInboundRequest(t, g, requester.ID)
-	g.respondLegPayload(rec, r, "payer-coverage", "crd-cards", "crd-order-select",
+	g.respondLeg(rec, r, "payer-coverage", "crd-cards", "crd-order-select",
 		"corr-1", testResponse(fhir), "pci-1", requester.ID, "", "")
 	if rec.Code != 200 {
 		t.Fatalf("to-Hub status = %d, want 200", rec.Code)
@@ -361,7 +354,7 @@ func TestRespondLegBareSuccessForLegacyRequester(t *testing.T) {
 	fhir := []byte(`{"resourceType":"ClaimResponse","status":"active"}`)
 	rec := httptest.NewRecorder()
 	r := newSignedInboundRequest(t, g, requester.ID)
-	g.respondLegPayload(rec, r, "payer-coverage", "crd-cards", "crd-order-select",
+	g.respondLeg(rec, r, "payer-coverage", "crd-cards", "crd-order-select",
 		"corr-1", testResponse(fhir), "pci-1", requester.ID, "", "")
 	if rec.Code != 200 {
 		t.Fatalf("to-Hub status = %d, want 200", rec.Code)
@@ -426,7 +419,7 @@ func TestFramePayloadStampsContractVersion(t *testing.T) {
 // to frame(200, application/fhir+json, ClaimResponse) — stamped pa.pas@2.0 (this
 // build's own native line), the content-descriptive frame stamp.
 func TestPASNativeSuccessFramedForCapableRequester(t *testing.T) {
-	g, requester := newInboundTestGatewayWithPolicy(t, true, EnforcementNone)
+	g, requester := newInboundTestGateway(t, true)
 	pci, _, ok := g.cfg.SoR.ResolvePatient("MBR-COVERED")
 	if !ok {
 		t.Fatal("MBR-COVERED not resolvable in censusSoR")

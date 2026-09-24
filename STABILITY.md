@@ -46,66 +46,42 @@ asking for it (`Claim/$inquire`, leg type `pas-claim-inquire`).
   The bound and the schedule are now derived from each other and held together by a
   test, so they cannot drift apart again.
 
-## Conformance observation
+## Observational source certification
 
-Native messages use the participant's policy snapshot for both directions.
-`none` disables all conformance jobs and validators. `observe` checks structural
-and deeper rules asynchronously; `basic` observes only deeper rules while
-structural enforcement remains synchronous. `strict` enforces required checks.
-Findings state the rule set, gateway, outcome and enforcement action; they never
-assert delivery. Historical `decision:relayed` means only a historical enforcement
-decision. An empty observation window is not certification.
+PAS ingress and native POST forwarding collect source-profile evidence after dispatch.
+Each supported payload is checked independently at all three PAS/DTR lines; the
+certified set and nearest source line are observations only. They do not change
+routing, authority, payload bytes, acceptance, response stamps or lane readiness.
+The native record describes the final POST attempt, before any polling or terminal
+assembly. The provider ingress record describes the bytes dispatched and relayed.
 
-One worker owns a queue of 32 immutable bodies and a ring of 256 metadata findings.
-Each body is limited to eight MiB. A shared 32-MiB budget covers queued and active
-conformance bodies, opted-in inspection snapshots, and overlapping diagnostic
-capture and queue copies, plus the shipped local SSE observer's serialized
-replay/subscriber buffers. Existing diagnostic capture limits remain tighter.
-Reservations precede copying and remain held until processing or dropping ends.
-Rules have a two-second candidate limit, collections six seconds, and queued
-work expires after thirty seconds. Unavailable checks and dropped work remain
-separate from invalid findings. Findings never retain raw validator diagnostics,
-diagnostic hashes or reference-bearing paths.
+The app creates separate clients at each configured validator endpoint and never
+invents one: per line it uses `FHIR_CERTIFY_URL_<line>` (an address for the evidence
+alone, never a routing lane), then the routing lane `FHIR_VALIDATE_URL_<line>`, then the
+Compose default only once it has qualified — by routing at boot or by the evidence's own
+background attempts afterwards, which never change routing's lanes; until then the line's
+verdict states that no lane is configured and the qualification's state, verbatim, and no
+exchange waits on or dials for a qualification. Embedders may
+supply independent clients through `Config.CertificationValidatorsByLine`; they must
+not share routing validators or qualification wrappers. Missing clients are recorded
+as unavailable. HTTP server execution failures are unavailable rather than conclusive
+invalidity. Logs beginning `certify: ` and `leg.certified` observer details contain
+JSON metadata, hashes and verdicts, without payload snapshots. External validator
+issues and errors are represented only by bounded counts, byte lengths and
+SHA-256 digests; diagnostic text is never retained or broadcast in evidence.
 
-`Config.Observer` remains separately opt-in transient participant inspection.
-The app enables it only through `OBSERVER_ADDR`; the Kit consumes this local SSE
-stream. It may contain raw snapshots even at `none`, but never runs conformance
-work there. Metadata events allocate no body snapshot. Notifications use a
-32-event queue and one isolated dispatcher. Callbacks must return promptly, treat
-snapshots as read-only and use their own bounded storage if retaining them.
-Callback panics or saturation cannot change delivery, but fail completion proof.
-The shipped SSE observer keeps at most 1,000 replay entries, 1,024 references per
-subscriber, and 32 subscribers. Distinct serialized buffers are charged once until
-their last ring, replay, queue or active writer owner releases them. Conservative
-serialization admission includes expansion and may shed a body below eight MiB;
-health reports `inspectionDropped`, and a loss makes `/barrier` fail. Ordinary
-ring eviction ends historical availability; it does not establish client receipt.
-`Hub.Close` releases retained and queued ownership; blocked writers keep their
-charged buffer until returning, with at most 32 such writers per Hub. The app
-closes its Hub on shutdown and unsuccessful startup. No network write holds an
-observation lock. `ObserverEvent.Inspection` and its idempotent reservation handle
-allow the shipped sink to share ownership without changing the callback shape.
-Other callbacks and external clients must bound their own retained allocations;
-the gateway budget does not promise to control arbitrary external code.
+Each gateway owns one worker, a 32-payload queue and a 256-record evidence ring.
+Candidates have a two-second limit, collection has a six-second limit, and queued
+work expires after thirty seconds. Overflow records retain metadata only; bounded
+observer notifications report drops explicitly. Callbacks must return promptly and
+support concurrent invocation. Completion is stored before callback delivery.
 
-Call `Gateway.Close()` after stopping service. It cancels jobs, releases queued
-copies and returns within six seconds without waiting for arbitrary callbacks.
-Custom checkers must honor context cancellation. A checker that does not return
-can strand at most one worker and its charged body; a blocked callback can strand
-at most one dispatcher and its charged snapshot until it returns or process exit.
-No replacement worker or per-event goroutine is created.
-
-Source-profile probing and nearest-source inference have been retired.
-`CertificationEvidence` and `NewCertificationOperationValidator` remain source
-compatible; `CertificationEvidenceForTest` returns no legacy inferred evidence.
-`ConformanceObservationsForTest` exposes copied registry metadata and job drops.
-Legacy dedicated `CertificationValidatorsByLine` clients are closed, never used
-for native observations. App startup no longer constructs those clients or their
-independent qualification loops. `FHIR_CERTIFY_URL_2_1`/`_2_2` remain parsed and
-URL-validated for compatibility but have no native observation effect. Exported
-legacy client constructors remain available for explicit callers; native routing
-readiness clients are unchanged. `FlushCertificationForTest` waits for accepted registry
-jobs and their notifications; it does not control native delivery.
+Call `Gateway.Close()` after stopping service and before releasing dependencies.
+It cancels observation HTTP work, closes idle connections and joins the worker.
+It waits for cooperative callbacks; it cannot forcibly cancel a blocked callback.
+The app runner and managed app handlers own this cleanup. Tests may use
+`FlushCertificationForTest` as a context-bounded completion barrier, and
+`DisableCertificationForTest` for evidence-off comparison runs.
 
 ## Observer source completion
 
@@ -118,17 +94,17 @@ wait returns a diagnostic non-2xx response without a successful event count;
 deadline failures return 504 and other completion failures return 503. Wrong
 methods return 405.
 
-`GET /health` remains immediate and adds `protocol:1`, the same nonempty
-`incarnation`, `inspectionDropped` and `closed` to its existing `events` count. It never waits or submits validation.
+`GET /health` remains immediate and adds `protocol:1` and the same nonempty
+`incarnation` to its existing `events` count. It never waits or submits validation.
 `GET /events` includes `X-SHN-Observer-Incarnation` before sending frames; SSE
 IDs and data bytes retain their representation. Each Hub construction gets a fresh
 random identity, so counts from different source instances are not interchangeable.
 
 `Gateway.WaitObserverCompletion(ctx)` snapshots HTTP operations already entered
 through `Gateway.Handler()`, awaits their return (including deferred evidence
-enqueue), then snapshots accepted registry work and awaits its observer
+enqueue), then snapshots accepted certification work and awaits its observer
 callbacks. Operations admitted after the first snapshot do not hold that operation
-cutoff; observations accepted before the second snapshot are included. Direct
+cutoff; certification accepted before the second snapshot is included. Direct
 `OriginateLeg` calls outside Handler and requests not yet entered are outside this
 protocol. Simultaneous external traffic is not a causal attribution guarantee.
 Completion proves diagnostic delivery through the source callback, not receipt by
@@ -137,7 +113,7 @@ an SSE client; clients must separately catch up to `events` in the same incarnat
 This accounting is diagnostic only: clinical responses, asynchronous certification,
 routing, authority, payload bytes and readiness remain unchanged. The ordinary
 app health wrapper bypasses operation tracking. `FlushCertificationForTest` retains
-its accepted-job and notification semantics. `observer.Hub.HandlerWithBarrier(wait)` enables
+its accepted-queue-only semantics. `observer.Hub.HandlerWithBarrier(wait)` enables
 the capability with a context-cooperative completion waiter; nil and the existing
 `Handler()` retain count-only health and do not expose `/barrier`. Both forms serve
 the SSE incarnation header. No observer listener is created by default.
@@ -213,13 +189,14 @@ or global failure state is introduced.
   in-process persona stub (`engine.StubHolderData`) is gone. Its Store half survives as
   `engine.NewMemStore` — the in-memory `Store` default, carrying no persona content.
 
-**Attestation behavior:**
+**Breaking in this release** (wire behaviour — new refusal class):
 
-- The provider-facing PAS submit/amend action owns the authored clinical business action and
-  retains its local FR-16 / FR-27 attestation fence. Native PAS carriage treats
-  `qr.attestation` as an optional deeper request rule: `strict` enforces it, `observe` and
-  `basic` record it without blocking, and `none` does not run it. Native carriage does not
-  turn that local action fence into an all-level body parser.
+- **The gateway now enforces the FR-16 / FR-27 attestation requirements at the inbound
+  gate, before dispatch, and answers `403`.** This runs on all three PAS entrances — the
+  payer inbound `pas-claim` and `pas-claim-update` legs, and the provider-facing Da Vinci
+  ingress. No earlier gateway inspected attestations on the wire, so **every refusal in this
+  class is new**: traffic a v0.38.x gateway forwarded to the occupant can now be stopped at
+  the door, and the occupant never sees it.
 
   A `QuestionnaireResponse` item that declares itself manually entered (the DTR
   information-origin extension with `source="manual"`) and names a `Practitioner` author
@@ -229,7 +206,7 @@ or global failure state is introduced.
   non-empty `reference` OR an `identifier` with a non-empty `value` (`system` optional —
   both of FHIR R4's legal `Signature.who` forms are accepted), and `data`. Whitespace-only
   counts as empty. A system-sourced item — one with no manual-source
-  marker at all — is untouched and requires no attestation. A refusal names the failing
+  marker at all — is untouched and requires no attestation. The refusal names the failing
   requirement, the item's `linkId`, and the specific field that is absent or empty.
 
   `Config.Adjudicator` is unaffected in shape; what changes is that a nonconformant item is
@@ -248,6 +225,33 @@ or global failure state is introduced.
   generic `502` for a timed-out leg now sees the `504`. `LegMetric` outcomes are unchanged:
   a timed-out leg is still `unreachable`. Every other Hub-leg transport fault keeps the
   generic `502`.
+
+**Breaking in this release** (wire behaviour — a correlation id belongs to one patient):
+
+- A payer gateway refuses a prior-authorization submission with `409` (`correlation id
+  already names another patient's authorization`) before its payer's system is asked, in
+  two cases: a decision EOB for another patient is filed under that correlation id, or
+  another patient's authorization is still awaiting its decision under it. A
+  submission of this kind that the Hub forwarded (one outside its two-hour replay window)
+  previously reached the payer. If the gateway cannot read its store to decide, it answers
+  the Hub `502 {"error":"holder read failed"}` without asking the payer; the requester
+  sees `502 hub routing failed`.
+
+**Breaking in this release** (`Store` connectors):
+
+- `RecordEOB` and `RecordDecision` on `engine.MemStore` and `pgstore.PgStore` return
+  `engine.ErrEOBSubjectMismatch` instead of replacing an EOB filed for another patient.
+  A decision caught this way is not recorded. The gateway emits a
+  `pend.decision-not-recorded` observer event and relays the payer's answer as sent.
+- Two optional `Store` capabilities are added, and both built-in stores implement them.
+  A custom `Store` gets each half of the pre-forward correlation check above by
+  implementing its capability:
+  - `engine.EOBOwnerLookup` covers an EOB already filed under the id.
+  - `engine.PendCorrelationLookup` covers an authorization still awaiting its decision.
+
+  Without either capability, the custom store's submissions reach the payer as before.
+- `(*engine.Gateway).CertificationClientForTest`, a test helper outside the supported
+  surface, is removed.
 
 ## Evolving surfaces
 
@@ -417,7 +421,7 @@ when request or response bytes were unread, truncated, failed, or unavailable du
 to capture limits. An absent payload with this flag does not assert an empty body.
 Complete events omit the flag and retain their existing JSON shape. Durable HTTP
 events finalize on return. The existing observer
-callback's panics are contained, independently of the isolated diagnostic
+callback's panic behavior is retained, independently of the isolated diagnostic
 sink. The SSE payload representation is unchanged; durable diagnostics carry raw
 bytes directly. This source addition is not a published release or a version pin.
 
@@ -426,48 +430,3 @@ Relayed non-2xx responses preserve the participant's declared `Content-Type` wit
 its exact body bytes. The existing `application/fhir+json` fallback applies only
 when that media type is absent; locally authored and empty-body refusal rules are
 unchanged. This fixes a prior hardcoded media type on nonempty foreign errors.
-
-
-Diagnostic queue shutdown now closes admission and explicitly drops pending
-inspection. `diagnostics.Queue.Close` is idempotent; `Health.Closed` identifies a
-closed queue. `RunPublisher` owns this closure on cancellation or return. A new
-publisher lifecycle uses a new queue. An already delivered body remains charged
-until its actual consumer finishes. App cleanup waits at most one second for its
-single diagnostic publisher; a transport ignoring cancellation retains that one
-worker and its charged bytes until return. No replacement worker is started.
-Diagnostic base64 publication and registry validation targets now reserve their
-serialized copies before allocation; pressure sheds optional diagnostic capture
-or yields unavailable observation without changing native delivery. Registry
-observation serializes one target at a time without pooled clinical body buffers.
-Malformed SSE payloads retain encoding/json's legacy short-control and invalid
-UTF-8 escaping, including exact serialized event bytes.
-
-## Native declarations and optional validation
-
-Native transport uses registered endpoint capability independently of validator
-readiness. None constructs no optional conformance clients or pollers; other
-levels start with unavailable coverage and enforce only their applicable rules.
-Explicit adaptations obtain separate proof clients and retain mandatory refusal
-when proof cannot be obtained.
-
-`Content.ProfileID` selects a build or route. Only `Content.DeclaredVersion`
-declares carried bytes; callers producing messages set it beside the build.
-Authenticated response declarations remain as sent, including absent or differing
-lines. A relayed backend answer receives an endpoint declaration only when the
-independent endpoint evidence identifies one unambiguous line. Native metadata
-consistency is governed by the registered deep rule at strict.
-
-`engine.SupportedRequestFrames` includes the declared-hook receiver (`v1crd`).
-The SDK registrant's defaults remain `v1`/`v1op`. Registration must establish
-which gateway artifact actually serves the holder; a newer registration client
-alone establishes no extra remote capability.
-
-The additive `engine.NativeResponseDeclarations` value is opaque and immutable;
-its zero value means absent. `engine.ParseNativeResponseDeclarations(string)`
-validates the bounded operation/endpoint/contract JSON configuration, and
-`engine.WithNativeResponseDeclarations` installs it on the native adapter. Exact
-bindings establish output declarations independently of accepted request tokens.
-Managed operations with unmatched endpoints remain unstamped. Local
-`ResponseVersionSource` is `configured-endpoint`; authenticated remote
-`ApplicationReply.VersionSource` remains `producer`. These APIs do not certify
-payloads, publish receive capabilities, or alter sealed frame formats.

@@ -15,7 +15,7 @@ import (
 func TestDiscoveredLaneQualification(t *testing.T) {
 	for _, fail := range []bool{false, true} {
 		t.Run(map[bool]string{false: "ready", true: "terminal failure"}[fail], func(t *testing.T) {
-			v := syntheticFakeValidator()
+			v := shnsdk.NewFakeValidator()
 			d := NewDiscoveredLane("2.1", "http://validator/fhir", v)
 			if d.Ready() {
 				t.Fatal("new lane is ready")
@@ -62,25 +62,22 @@ func TestDiscoveredLaneQualification(t *testing.T) {
 	}
 }
 
-func TestUnavailableDefaultsCannotCertifyButCarryNativeFrames(t *testing.T) {
+func TestUnavailableDefaultsCannotRouteOrHonorFrames(t *testing.T) {
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { requests.Add(1) }))
 	defer server.Close()
-	canonical := syntheticFakeValidator()
+	canonical := shnsdk.NewFakeValidator()
 	d := NewDiscoveredLane("2.1", server.URL, shnsdk.NewOperationValidator(server.URL))
 	g := d9Gateway(map[string]shnsdk.Validator{"2.0": canonical, "2.1": canonical}, nil)
 	g.cfg.CanonicalFallbackLines = map[string]bool{"2.1": true}
 	g.cfg.DefaultValidatorsByLine = map[string]*DiscoveredLane{"2.1": d}
 	for i := 0; i < 100; i++ {
-		if _, ok := g.selectNativeReachRoute("pa.dtr", map[string]bool{"2.1": true}); !ok {
-			t.Fatal("native capability incorrectly depends on optional checker qualification")
-		}
-		if g.validatorForContractLine("pa.dtr", "2.1") != nil {
-			t.Fatal("unqualified checker became certification evidence")
+		if _, ok := g.selectNativeReachRoute("pa.dtr", map[string]bool{"2.1": true}); ok {
+			t.Fatal("unavailable default entered routing")
 		}
 		_, _, status, _ := g.unframeRequest("dtr-questionnaire-fetch", framedRequest(t, "pa.dtr@2.1", []byte(`{}`)))
-		if status != 0 {
-			t.Fatalf("native frame blocked by unqualified checker: status=%d", status)
+		if status != http.StatusUnprocessableEntity {
+			t.Fatalf("unqualified frame status=%d", status)
 		}
 		_, _, status, _ = g.unframeRequest("pas-claim", framedRequest(t, "pa.pas@2.0", []byte(`{}`)))
 		if status != 0 {
@@ -99,13 +96,13 @@ func TestUnavailableDefaultsCannotCertifyButCarryNativeFrames(t *testing.T) {
 }
 
 func TestContractLaneFallbackCollision(t *testing.T) {
-	canonical, explicit := syntheticFakeValidator(), syntheticFakeValidator()
+	canonical, explicit := shnsdk.NewFakeValidator(), shnsdk.NewFakeValidator()
 	d := NewDiscoveredLane("2.1", "http://unused.invalid/fhir", explicit)
-	g := &Gateway{cfg: Config{ConformanceEnforcement: EnforcementStrict, Validator: canonical, ValidatorsByLine: map[string]shnsdk.Validator{"2.0": canonical, "2.1": canonical}, CanonicalFallbackLines: map[string]bool{"2.1": true}, DefaultValidatorsByLine: map[string]*DiscoveredLane{"2.1": d}}}
+	g := &Gateway{cfg: Config{Validator: canonical, ValidatorsByLine: map[string]shnsdk.Validator{"2.0": canonical, "2.1": canonical}, CanonicalFallbackLines: map[string]bool{"2.1": true}, DefaultValidatorsByLine: map[string]*DiscoveredLane{"2.1": d}}}
 	if g.validatorForContractLine("pa.dtr", "2.1") != nil {
 		t.Fatal("PA borrowed the single-contract fallback")
 	}
-	if status, _ := g.validateFHIRForContract(context.Background(), []byte(`{"resourceType":"Patient"}`), "egress", "pa.dtr", "2.1", ""); status != http.StatusServiceUnavailable {
+	if status, _ := g.validateFHIRForContract(context.Background(), []byte(`{"resourceType":"Patient"}`), "egress", "pa.dtr", "2.1", ""); status != http.StatusInternalServerError {
 		t.Fatal("PA validated through PDex compatibility fallback")
 	}
 	if status, _ := g.validateFHIRForContract(context.Background(), []byte(`{"resourceType":"Patient"}`), "egress", "pa.pdex", "2.1", ""); status != 0 {
@@ -160,12 +157,12 @@ func TestValidationVerdictDoesNotChangeDefaultReadiness(t *testing.T) {
 }
 
 func TestDTRContextCannotUseSingleContractFallback(t *testing.T) {
-	canonical := syntheticFakeValidator()
-	g := &Gateway{cfg: Config{ConformanceEnforcement: EnforcementStrict, Validator: canonical, ValidatorsByLine: map[string]shnsdk.Validator{"2.0": canonical, "2.1": canonical}, CanonicalFallbackLines: map[string]bool{"2.1": true}}}
-	if status, _ := g.validateDTRQuestionnaireResponse(context.Background(), []byte(`{"resourceType":"QuestionnaireResponse"}`), "2.1"); status != http.StatusServiceUnavailable {
+	canonical := shnsdk.NewFakeValidator()
+	g := &Gateway{cfg: Config{Validator: canonical, ValidatorsByLine: map[string]shnsdk.Validator{"2.0": canonical, "2.1": canonical}, CanonicalFallbackLines: map[string]bool{"2.1": true}}}
+	if status, _ := g.validateDTRQuestionnaireResponse(context.Background(), []byte(`{"resourceType":"QuestionnaireResponse"}`), "2.1"); status != http.StatusInternalServerError {
 		t.Fatalf("DTR context status=%d; unavailable PA lane borrowed PDex fallback", status)
 	}
-	if status, _ := g.validateFHIRPayerIngress(context.Background(), []byte(`{"resourceType":"Patient"}`), "2.1", "pa.dtr"); status != http.StatusServiceUnavailable {
+	if status, _ := g.validateFHIRPayerIngress(context.Background(), []byte(`{"resourceType":"Patient"}`), "2.1", "pa.dtr"); status != http.StatusInternalServerError {
 		t.Fatalf("DTR ingress status=%d", status)
 	}
 	if status, _ := g.validateFHIR(context.Background(), []byte(`{"resourceType":"Patient"}`), "egress", ""); status != 0 {

@@ -89,7 +89,7 @@ func TestDeclaredContractVersionsAccessor(t *testing.T) {
 // ---- (F7) the line-aware validator seam. ----
 
 func TestValidatorForLine(t *testing.T) {
-	canonical := syntheticFakeValidator()
+	canonical := shnsdk.NewFakeValidator()
 	// Legacy wiring (Validator only, no per-line map): every line uses it.
 	g := &Gateway{cfg: Config{Validator: canonical}}
 	if g.validatorForLine("2.2") == nil {
@@ -111,13 +111,12 @@ func TestValidatorForLine(t *testing.T) {
 
 func TestValidateFHIRUnlanedFailsClosed(t *testing.T) {
 	g := &Gateway{cfg: Config{
-		ConformanceEnforcement: EnforcementStrict,
-		Validator:              syntheticFakeValidator(),
-		ValidatorsByLine:       map[string]shnsdk.Validator{"2.0": syntheticFakeValidator()},
+		Validator:        shnsdk.NewFakeValidator(),
+		ValidatorsByLine: map[string]shnsdk.Validator{"2.0": shnsdk.NewFakeValidator()},
 	}}
 	status, msg := g.validateFHIR(context.Background(), []byte(`{"resourceType":"Patient"}`), "egress", "2.2")
-	if status != http.StatusServiceUnavailable || !strings.Contains(msg, "conformance_unavailable: fhir.profile") {
-		t.Fatalf("unlaned validate = (%d,%q), want 503 naming the unavailable rule", status, msg)
+	if status != http.StatusInternalServerError || !strings.Contains(msg, "2.2") {
+		t.Fatalf("unlaned validate = (%d,%q), want 500 naming the line", status, msg)
 	}
 }
 
@@ -130,7 +129,7 @@ func d9Gateway(lanes map[string]shnsdk.Validator, senderDeclared []string) *Gate
 	reg.Set("requester", shnsdk.RegistryEntry{ID: "requester", Role: "provider", ContractVersions: senderDeclared})
 	return &Gateway{cfg: Config{
 		Reg:              reg,
-		Validator:        syntheticFakeValidator(),
+		Validator:        shnsdk.NewFakeValidator(),
 		ValidatorsByLine: lanes,
 	}}
 }
@@ -148,7 +147,7 @@ func framedRequest(t *testing.T, token string, body []byte) []byte {
 }
 
 func TestFramedRequestHonored(t *testing.T) {
-	fake := syntheticFakeValidator()
+	fake := shnsdk.NewFakeValidator()
 	g := d9Gateway(map[string]shnsdk.Validator{"2.0": fake, "2.1": fake, "2.2": fake}, nil)
 	body := []byte(`{"resourceType":"Bundle"}`)
 	got, answer, status, msg := g.unframeRequest("pas-claim", framedRequest(t, "pa.pas@2.2", body))
@@ -183,22 +182,31 @@ func TestFramedRequestWrongContractRefused(t *testing.T) {
 	}
 }
 
-// Native decoding is independent of both missing and obsolete passive clients.
-// Strict operation enforcement still requires its real checker; transport never
-// borrows certification or turns an unknown representation into a supported one.
-func TestFramedRequestNativeButUnlanedCarried(t *testing.T) {
-	for _, passive := range []bool{false, true} {
-		g := d9Gateway(map[string]shnsdk.Validator{"2.0": syntheticFakeValidator()}, nil)
-		if passive {
-			g.cfg.CertificationValidatorsByLine = map[string]shnsdk.Validator{"2.2": syntheticFakeValidator()}
-		}
-		body, decl, status, msg := g.unframeRequest("pas-claim", framedRequest(t, "pa.pas@2.2", []byte(`{}`)))
-		if status != 0 || decl != "pa.pas@2.2" || string(body) != "{}" {
-			t.Fatalf("status=%d declared=%s body=%s msg=%s", status, decl, body, msg)
-		}
-		if g.validatorForContractLine("pa.pas", "2.2") != nil {
-			t.Fatal("transport invented validation coverage")
-		}
+// A certification-only client for 2.2 is evidence, not a lane: an inbound 2.2
+// frame is still refused exactly as it is with no 2.2 client at all.
+func TestFramedRequestCertifyOnlyClientStillRefused(t *testing.T) {
+	fake := shnsdk.NewFakeValidator()
+	g := d9Gateway(map[string]shnsdk.Validator{"2.0": fake}, nil)
+	g.cfg.CertificationValidatorsByLine = map[string]shnsdk.Validator{"2.0": fake, "2.2": fake}
+	_, _, status, msg := g.unframeRequest("pas-claim", framedRequest(t, "pa.pas@2.2", []byte(`{}`)))
+	if status != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422 — a certify-only client must not honour an inbound 2.2 frame", status)
+	}
+	if !strings.Contains(msg, "2.2") || !strings.Contains(strings.ToLower(msg), "validator") {
+		t.Fatalf("refusal must name the missing lane (FR-36/FR-G29): %q", msg)
+	}
+}
+
+func TestFramedRequestNativeButUnlanedRefused(t *testing.T) {
+	fake := shnsdk.NewFakeValidator()
+	// 2.2 is natively buildable but this deployment configured no 2.2 lane.
+	g := d9Gateway(map[string]shnsdk.Validator{"2.0": fake}, nil)
+	_, _, status, msg := g.unframeRequest("pas-claim", framedRequest(t, "pa.pas@2.2", []byte(`{}`)))
+	if status != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422", status)
+	}
+	if !strings.Contains(msg, "2.2") || !strings.Contains(strings.ToLower(msg), "validator") {
+		t.Fatalf("refusal must name the missing lane (FR-36/FR-G29): %q", msg)
 	}
 }
 
@@ -230,7 +238,7 @@ func TestBareRequestTolerated(t *testing.T) {
 }
 
 func TestTamperedRequestFrameRefused(t *testing.T) {
-	fake := syntheticFakeValidator()
+	fake := shnsdk.NewFakeValidator()
 	g := d9Gateway(map[string]shnsdk.Validator{"2.0": fake, "2.2": fake}, nil)
 	frame := framedRequest(t, "pa.pas@2.2", []byte(`{"resourceType":"Bundle"}`))
 	// One mutation on an otherwise-valid framed request: flip the claimed token
@@ -255,10 +263,6 @@ func TestRelayedForeignBodyUnstamped(t *testing.T) {
 	run := func(t *testing.T, relayed bool, answerTok string) (map[string]string, bool) {
 		t.Helper()
 		g, requester := newInboundTestGateway(t, true)
-		// This row isolates frame provenance. Strict request certification is a
-		// separate obligation and would refuse this direct-handler fixture before
-		// either response is built.
-		g.cfg.ConformanceEnforcement = EnforcementNone
 		pci, _, ok := g.cfg.SoR.ResolvePatient("MBR-COVERED")
 		if !ok {
 			t.Fatal("MBR-COVERED not resolvable")
@@ -370,9 +374,6 @@ func TestDTRRelayedPackageUnstamped(t *testing.T) {
 	stampOf := func(t *testing.T, relayed bool) (string, bool) {
 		t.Helper()
 		g, requester := newInboundTestGateway(t, true)
-		// Hold optional conformance out of this stamp-only comparison: the
-		// direct-handler request has no verified line in its exchange context.
-		g.cfg.ConformanceEnforcement = EnforcementNone
 		g.cfg.Responder = dtrRelayResponder{body: pkg, relayed: relayed}
 		env, err := shnsdk.Seal(shnsdk.Metadata{
 			Sender: requester.ID, Recipient: "payer", TransactionType: "dtr-questionnaire-fetch",
@@ -419,13 +420,13 @@ func TestDTRRelayedPackageUnstamped(t *testing.T) {
 // If payer.go regresses to passing "" the validate lands on the canonical lane and
 // this test goes green-when-it-should-not — hence the paired 2.0 control.
 func TestDTREgressValidatesOnAnswerLine(t *testing.T) {
-	pkg := []byte(definitionPackage(t, "2.0"))
-	run := func(t *testing.T, answerTok string) (int, string) {
+	pkg := []byte(`{"resourceType":"Bundle","type":"collection","entry":[]}`)
+	run := func(t *testing.T, answerTok string) *httptest.ResponseRecorder {
 		t.Helper()
 		g, requester := newInboundTestGateway(t, true)
 		g.cfg.Responder = dtrRelayResponder{body: pkg} // SHN-produced ⇒ egress-validated
 		// Explicitly laned: 2.0 only. 2.2 is therefore UNLANED (fail-closed).
-		g.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"2.0": syntheticFakeValidator()}
+		g.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"2.0": shnsdk.NewFakeValidator()}
 		env, err := shnsdk.Seal(shnsdk.Metadata{
 			Sender: requester.ID, Recipient: "payer", TransactionType: "dtr-questionnaire-fetch",
 			AuthorityFrame: "payer-coverage", Timestamp: g.cfg.Clock().Format(time.RFC3339),
@@ -437,39 +438,23 @@ func TestDTREgressValidatesOnAnswerLine(t *testing.T) {
 		rec := httptest.NewRecorder()
 		r := newSignedInboundRequest(t, g, requester.ID)
 		r = r.WithContext(withRequestFrameOperation(r.Context(), shnsdk.FrameOperationQuestionnairePackage))
-		// Direct handler invocation starts after ingress frame verification. Give
-		// strict request certification its verified 2.0 declaration, so this
-		// row reaches the independent answer-line check.
-		r = r.WithContext(context.WithValue(r.Context(), nativeExchangeKey{}, ExchangeContext{
-			holder: requester.ID, recipient: "payer", legType: "dtr-questionnaire-fetch",
-			subjectPCI: coveredPCI(t, g), correlationID: "corr-dtr-2", operation: shnsdk.FrameOperationQuestionnairePackage,
-			contractVersion: "pa.dtr@2.0", policy: g.policy(),
-		}))
 		g.handleDTRInbound(rec, r, env, shnsdk.Token{Operation: "dtr-questionnaire-fetch", Subject: coveredPCI(t, g), CorrelationID: "corr-dtr-2"},
 			dtrFramedPackageFor(t, g), answerTok)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("response envelope transport status = %d: %s", rec.Code, rec.Body.String())
-		}
-		hdr, body, err := shnsdk.DecodeHTTPFrame(openResponseLeg(t, requester, rec.Body.Bytes()))
-		if err != nil {
-			t.Fatal(err)
-		}
-		return hdr.Status, string(body)
+		return rec
 	}
 
 	t.Run("laned answer line validates and answers", func(t *testing.T) {
-		if status, body := run(t, "pa.dtr@2.0"); status != http.StatusOK {
-			t.Fatalf("answer status = %d, want 200; body=%s", status, body)
+		if rec := run(t, "pa.dtr@2.0"); rec.Code != 200 {
+			t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 		}
 	})
 	t.Run("unlaned answer line fails closed", func(t *testing.T) {
-		status, body := run(t, "pa.dtr@2.2")
-		if status != http.StatusServiceUnavailable {
-			t.Fatalf("answer status = %d, want 503 — a 2.2 package must NOT be validated on the 2.0 lane; body=%s", status, body)
+		rec := run(t, "pa.dtr@2.2")
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500 — a 2.2 package must NOT be validated on the 2.0 lane; body=%s", rec.Code, rec.Body.String())
 		}
-		if !strings.Contains(body, `"valueString":"conformance_unavailable"`) ||
-			!strings.Contains(body, `"valueString":"fhir.profile"`) {
-			t.Fatalf("failure must name the unavailable rule: %s", body)
+		if !strings.Contains(rec.Body.String(), "2.2") {
+			t.Fatalf("failure must name the missing lane: %s", rec.Body.String())
 		}
 	})
 }
@@ -482,31 +467,48 @@ func (errTransport) RoundTrip(*http.Request) (*http.Response, error) {
 	return nil, errors.New("partner unreachable (test transport)")
 }
 
-// The backend's declaration is independent of the gateway's builder defaults.
-// A wrong declared request still refuses before touching the backend.
-func TestNativeForwardFilterUsesDeclaredRepresentation(t *testing.T) {
-	for _, row := range []struct {
-		name, declared string
-		want           int
-	}{
-		{"absent request declaration", "", http.StatusBadGateway},
-		{"matching request declaration", "pa.crd@2.2", http.StatusBadGateway},
-		{"wrong request declaration", "pa.crd@2.0", http.StatusUnprocessableEntity},
-		{"wrong request contract", "pa.pas@2.2", http.StatusUnprocessableEntity},
-	} {
-		t.Run(row.name, func(t *testing.T) {
-			n := NewNativeResponder(&http.Client{Transport: errTransport{}}, "http://partner.invalid", "svc", newCensusSoR(), nil,
-				WithDeclaredContractVersions([]string{"pa.crd@2.2"}))
-			ctx := context.WithValue(context.Background(), nativeExchangeKey{}, ExchangeContext{contractVersion: row.declared})
-			res, err := n.Handle(ctx, "crd-order-select", "corr", "pci", cdsRequest("order-select"))
-			if err != nil || res.Status != row.want {
-				t.Fatalf("res=%+v err=%v", res, err)
-			}
-			if row.want == http.StatusBadGateway && res.Message != "payer CDS service listing unavailable" {
-				t.Fatal(res.Message)
-			}
-		})
+// TestNativeForwardFilterUsesDeclaredSet (review finding 2, D1a): the foreign-peer
+// version filter's OWN half must be this deployment's DECLARED set, not the library
+// build constant. A deployment declaring 2.2 must forward to a 2.2-only partner;
+// the same responder without the override refuses (proving the override is what
+// moved the outcome).
+func TestNativeForwardFilterUsesDeclaredSet(t *testing.T) {
+	peer := []string{"pa.crd@2.2"} // partner speaks 2.2 only
+	// A client whose transport always errors: once the filter PASSES, the leg
+	// cannot read the partner's CDS service listing — a clearly different outcome
+	// from the 422 refuse-before-forward, and it sends zero bytes anywhere.
+	newResponder := func(own []string) LegResponder {
+		opts := []NativeOption{WithDeclaredContractVersions(peer)}
+		if own != nil {
+			opts = append(opts, WithOwnContractVersions(own))
+		}
+		return NewNativeResponder(&http.Client{Transport: errTransport{}}, "http://partner.invalid",
+			"svc", newCensusSoR(), func() time.Time { return time.Unix(1700000000, 0).UTC() }, opts...)
 	}
+	t.Run("build constant alone refuses", func(t *testing.T) {
+		res, err := newResponder(nil).Handle(context.Background(), "crd-order-select", "corr", "pci", nil)
+		if err != nil || res.Status != http.StatusUnprocessableEntity {
+			t.Fatalf("want a legible 422 refusal, got status=%d err=%v", res.Status, err)
+		}
+		if !strings.Contains(res.Message, "pa.crd@2.0") || !strings.Contains(res.Message, "pa.crd@2.2") {
+			t.Fatalf("refusal must name both declarations: %s", res.Message)
+		}
+	})
+	t.Run("declared override forwards", func(t *testing.T) {
+		res, err := newResponder([]string{"pa.crd@2.0", "pa.crd@2.2"}).Handle(context.Background(), "crd-order-select", "corr", "pci", cdsRequest("order-select"))
+		if res.Status == http.StatusUnprocessableEntity {
+			t.Fatalf("declared override must clear the version filter, still refused: %s", res.Message)
+		}
+		if err != nil || res.Status != http.StatusBadGateway || res.Message != "payer CDS service listing unavailable" {
+			t.Fatalf("fixture bug: the leg should have reached the partner's service listing once the filter passed: %v %+v", err, res)
+		}
+	})
+	t.Run("accessor mirrors the gateway's empty-means-default rule", func(t *testing.T) {
+		n := &nativeResponder{}
+		if strings.Join(n.ownDeclared(), ",") != strings.Join(shnsdk.SupportedContractVersions(), ",") {
+			t.Fatalf("unset ownContractVersions must fall back to the build default, got %v", n.ownDeclared())
+		}
+	})
 }
 
 // TestAnswerLineFallbackUsesDeclaredSet (review finding 2, second half): when no
@@ -546,13 +548,10 @@ func declareRecipientRequestFrames(t *testing.T, e *inProcessExchange) {
 // framed immediately — but a peer whose registry entry does NOT declare the
 // capability must receive the pre-framing BARE payload, byte for byte.
 func TestRequestNotFramedToNonDeclaringPeer(t *testing.T) {
-	env := newTransportExchange(t)
+	env := newInProcessExchange(t)
 	advertiseRecipientFrameV1(t, env) // messageFrames v1 (responses) — deliberately NOT requestFrames
-	peer, _ := env.originator.cfg.Reg.Lookup(env.payerID)
-	peer.RequestFrames = nil
-	env.originator.cfg.Reg.Set(env.payerID, peer)
 	if _, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "",
-		Content{WorkstreamType: workstreamPA, Payload: testRequest(env.crdReq), DeclaredVersion: "pa.crd@2.0"}); err != nil {
+		Content{WorkstreamType: workstreamPA, Payload: testRequest(env.crdReq)}); err != nil {
 		t.Fatalf("exchange failed: %v", err)
 	}
 	got := env.lastRequestPayload()
@@ -567,11 +566,11 @@ func TestRequestNotFramedToNonDeclaringPeer(t *testing.T) {
 // TestRequestFramedToDeclaringPeer: the same exchange toward a requestFrames-declaring
 // peer carries the routed token in the request frame, with the body verbatim inside.
 func TestRequestFramedToDeclaringPeer(t *testing.T) {
-	env := newTransportExchange(t)
+	env := newInProcessExchange(t)
 	advertiseRecipientFrameV1(t, env)
 	declareRecipientRequestFrames(t, env)
 	if _, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "",
-		Content{WorkstreamType: workstreamPA, Payload: testRequest(env.crdReq), DeclaredVersion: "pa.crd@2.0"}); err != nil {
+		Content{WorkstreamType: workstreamPA, Payload: testRequest(env.crdReq)}); err != nil {
 		t.Fatalf("exchange failed: %v", err)
 	}
 	got := env.lastRequestPayload()

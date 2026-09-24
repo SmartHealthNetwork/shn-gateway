@@ -126,7 +126,7 @@ func (g *Gateway) submitPASClaim(ctx context.Context, r *http.Request, pci strin
 	if err != nil {
 		return out, http.StatusBadGateway, "PAS evidence linkage failed", err
 	}
-	bundleJSON, _, aerr := g.egressAdapt(ctx, route, bundleJSON, ExchangeIdentity{CorrelationID: out.corr, LegType: "pas-claim", Counterpart: recipient})
+	bundleJSON, _, aerr := g.egressAdapt(route, bundleJSON, ExchangeIdentity{CorrelationID: out.corr, LegType: "pas-claim", Counterpart: recipient})
 	if aerr != nil {
 		return out, http.StatusBadGateway, aerr.Error(), aerr
 	}
@@ -146,7 +146,7 @@ func (g *Gateway) submitPASClaim(ctx context.Context, r *http.Request, pci strin
 	// recipient is the payer HOLDER resolved from the member's real Coverage at the fresh origination
 	// site (FR-G40) — no default; it replaced the deleted Config.CounterpartID here.
 	respJSON, err := g.OriginateLeg(ctx, r, recipient, "pas-claim", pci, out.corr, "",
-		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, DeclaredVersion: route.Token, Route: routeInfoFor(route), Payload: sealRequest(relay.BuilderSDKPASSubmit, bundleJSON, "application/fhir+json")})
+		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Payload: sealRequest(relay.BuilderSDKPASSubmit, bundleJSON, "application/fhir+json")})
 	if err != nil {
 		// Return the RAW err (not just err.Error()) so the caller can relayOriginationError a framed
 		// *RelayError verbatim; msg stays for the non-relay writeJSON fallback (byte-identical).

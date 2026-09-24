@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -19,13 +20,15 @@ import (
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
-// Native ingress preserves supplied CDS Hooks prefetch without enrichment.
-// Source-owned construction has a separate, reachable originCRDRecords path.
+// The prefetch rows drive the provider ingress's handling of CDS Hooks
+// prefetch: a value the EHR sent is kept exactly; a value it left out is read
+// from the participant's own system of record, or left out when that system
+// cannot provide it; nothing is ever synthesized.
 
 // prefetchMember is the patient of the EHR requests below: the vendored
 // signed request's context.patientId. The system of record names the patient
-// prefetchSoRID, the same id (source-originated renaming is covered by
-// TestPrefetch_OriginatedRenamedPatient).
+// prefetchSoRID, the same id (values are obtained only then; see
+// TestPrefetch_PatientNamedDifferentlyRefused).
 const (
 	prefetchMember = "example"
 	prefetchSoRID  = "example"
@@ -226,9 +229,7 @@ func signedEHRRequest(t *testing.T) []byte {
 	return b
 }
 
-// prepare exercises the retired implicit-preparation helper in isolation.
-// Production ingress does not call this helper; source-owned acceptance is
-// covered through originCRDRecords below.
+// prepare runs the ingress preparation and returns the bytes it would send.
 func prepare(t *testing.T, g *Gateway, body []byte) (crdIngressRequest, []byte, int, string) {
 	t.Helper()
 	p, status, msg := g.ingressEnsureSelfContainedContext(context.Background(), "crd-order-select", body, prefetchMember)
@@ -454,17 +455,14 @@ func TestPrefetch_MissingCoverageSearchsetFromSoR(t *testing.T) {
 	})
 }
 
-// ingressRow sends a body with authenticated exchange context through native
-// provider ingress. The supplied body is the producer's message; none does not
-// request source enrichment.
+// ingressRow runs the whole provider ingress for body against a system of
+// record, through the in-process network, and returns the EHR's answer.
 func ingressRow(t *testing.T, s *prefetchSoR, body []byte) (*inProcessExchange, *httptest.ResponseRecorder) {
 	t.Helper()
-	env := newTransportExchange(t)
+	env := newInProcessExchange(t)
 	env.originator.cfg.SoR = s.sor()
 	rec := httptest.NewRecorder()
-	req := signedFixtureIngress(t, env.originator, "/cds-services/shn-order-select", "crd-order-select", "crd-order-select", "order-select", "pci-covered", "pa.crd@2.0", "prefetch-native", body)
-	req.SetPathValue("id", "shn-order-select")
-	env.originator.handleCRDIngress(rec, req)
+	env.originator.handleCRDIngress(rec, crdIngressPost(body))
 	return env, rec
 }
 
@@ -480,6 +478,79 @@ func refusedBeforeTheNetwork(t *testing.T, env *inProcessExchange, rec *httptest
 
 var patientOnly = `"patient":{"resourceType":"Patient","id":"example"}`
 
+func TestPrefetch_NoCoverage422(t *testing.T) {
+	s := newPrefetchSoR() // the coverage search finds nothing
+	g := prefetchGateway(s)
+	_, sent := mustPrepare(t, g, ehrRequest(patientOnly))
+	if v, _ := valueOf(t, sent, "prefetch", "coverage"); v != "null" {
+		t.Fatalf("coverage = %q, want null for no match", v)
+	}
+	env, rec := ingressRow(t, s, ehrRequest(patientOnly))
+	refusedBeforeTheNetwork(t, env, rec, http.StatusUnprocessableEntity, "no coverage in request or system of record")
+
+	t.Run("the EHR's own null", func(t *testing.T) {
+		env, rec := ingressRow(t, newPrefetchSoR(), ehrRequest(patientOnly+`,"coverage":null`))
+		refusedBeforeTheNetwork(t, env, rec, http.StatusUnprocessableEntity, "no coverage in request or system of record")
+	})
+}
+
+func TestPrefetch_AmbiguousCoverage422(t *testing.T) {
+	s := newPrefetchSoR()
+	s.answer(t, "Coverage", searchPage(sorCoverage("cov-1", "00001"), sorCoverage("cov-2", "00078")))
+	env, rec := ingressRow(t, s, ehrRequest(patientOnly))
+	refusedBeforeTheNetwork(t, env, rec, http.StatusUnprocessableEntity, "ambiguous coverage for routing")
+
+	t.Run("the EHR's own Bundle", func(t *testing.T) {
+		bundle := `{"resourceType":"Bundle","type":"collection","entry":[{"resource":` + ehrCoverage + `},{"resource":` + strings.Replace(ehrCoverage, `"00001"`, `"00078"`, 1) + `}]}`
+		env, rec := ingressRow(t, newPrefetchSoR(), ehrRequest(patientOnly+`,"coverage":`+bundle))
+		refusedBeforeTheNetwork(t, env, rec, http.StatusUnprocessableEntity, "ambiguous coverage for routing")
+	})
+}
+
+func TestPrefetch_CoverageUnavailable503(t *testing.T) {
+	s := newPrefetchSoR()
+	s.searches["Coverage"] = searchAnswer{err: &SearchError{Outcome: SearchUnavailable, Reason: "server error"}}
+	g := prefetchGateway(s)
+	p, sent := mustPrepare(t, g, ehrRequest(patientOnly))
+	if _, ok := valueOf(t, sent, "prefetch", "coverage"); ok {
+		t.Fatal("an unavailable coverage search inserted a value")
+	}
+	if p.coverageStatus != http.StatusServiceUnavailable {
+		t.Fatalf("coverageStatus = %d", p.coverageStatus)
+	}
+	env, rec := ingressRow(t, s, ehrRequest(patientOnly))
+	refusedBeforeTheNetwork(t, env, rec, http.StatusServiceUnavailable, "coverage unavailable from system of record")
+
+	t.Run("a connector that cannot search", func(t *testing.T) {
+		s := newPrefetchSoR()
+		s.search = false
+		env, rec := ingressRow(t, s, ehrRequest(patientOnly))
+		refusedBeforeTheNetwork(t, env, rec, http.StatusUnprocessableEntity, "the system of record cannot search for it")
+	})
+}
+
+func TestPrefetch_CoverageMalformed422(t *testing.T) {
+	for name, answer := range map[string]func(t *testing.T, s *prefetchSoR){
+		"not a searchset": func(t *testing.T, s *prefetchSoR) {
+			s.searches["Coverage"] = searchAnswer{res: SearchResult{Pages: [][]byte{[]byte(`{"resourceType":"Bundle","type":"collection"}`)}}}
+		},
+		"over the bound": func(t *testing.T, s *prefetchSoR) {
+			s.searches["Coverage"] = searchAnswer{res: overBound(t, "Coverage", sorCoverage("c", "00001"))}
+		},
+		"repeated member": func(t *testing.T, s *prefetchSoR) {
+			s.searches["Coverage"] = searchAnswer{err: &SearchError{Outcome: SearchMalformed, Reason: "repeated member name"}}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := newPrefetchSoR()
+			answer(t, s)
+			env, rec := ingressRow(t, s, ehrRequest(patientOnly))
+			refusedBeforeTheNetwork(t, env, rec, http.StatusUnprocessableEntity, "coverage unreadable from system of record")
+		})
+	}
+}
+
+// overBound is a search result one page over the page bound.
 func overBound(t *testing.T, resourceType, resource string) SearchResult {
 	t.Helper()
 	var pages [][]byte
@@ -528,6 +599,35 @@ func TestPrefetch_HistoryZeroMatchesInsertsNull(t *testing.T) {
 	})
 }
 
+func TestPrefetch_HistoryUnsupportedOmitted(t *testing.T) {
+	s := newPrefetchSoR()
+	s.search = false
+	p, sent := mustPrepare(t, prefetchGateway(s), ehrRequest(supported))
+	if got := names(membersOf(t, sent, "prefetch")); !slices.Equal(got, []string{"patient", "coverage"}) {
+		t.Fatalf("prefetch keys = %v, want the unsupported histories left out", got)
+	}
+	if got := p.request.Edits(); !slices.Equal(got, []relay.EditID{relay.EditCDSCallbackStrip}) {
+		t.Fatalf("edits = %v", got)
+	}
+	env, rec := ingressRow(t, s, ehrRequest(supported))
+	if rec.Code != http.StatusOK || env.routeHitCount() != 1 {
+		t.Fatalf("an EHR request with its histories left out: %d %s", rec.Code, rec.Body.String())
+	}
+
+	t.Run("the server does not support the search", func(t *testing.T) {
+		s := newPrefetchSoR()
+		s.searches["DeviceRequest"] = searchAnswer{err: &SearchError{Outcome: SearchUnsupported, Reason: "search not supported"}}
+		_, sent := mustPrepare(t, prefetchGateway(s), ehrRequest(supported))
+		if _, ok := valueOf(t, sent, "prefetch", "deviceHistory"); ok {
+			t.Fatal("deviceHistory inserted")
+		}
+		if v, _ := valueOf(t, sent, "prefetch", "medicationHistory"); v != "null" {
+			t.Fatalf("medicationHistory = %q", v)
+		}
+	})
+}
+
+// observed collects the observer's prefetch events.
 type observed struct {
 	mu     sync.Mutex
 	events []ObserverEvent
@@ -566,6 +666,92 @@ func (o *observed) prefetchOn(t *testing.T, leg string) map[string]prefetchObtai
 	return out
 }
 
+func TestPrefetch_HistoryBackendErrorOmittedAndRecorded(t *testing.T) {
+	s := newPrefetchSoR()
+	s.searches["ServiceRequest"] = searchAnswer{err: &SearchError{Outcome: SearchUnavailable, Reason: "server error"}}
+	s.searches["MedicationRequest"] = searchAnswer{err: errors.New("connection reset")}
+	obs := &observed{}
+	env := newInProcessExchange(t)
+	env.originator.cfg.SoR = s.sor()
+	env.originator.cfg.Observer = obs.observe
+	rec := httptest.NewRecorder()
+	env.originator.handleCRDIngress(rec, crdIngressPost(ehrRequest(supported)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("answer %d %s", rec.Code, rec.Body.String())
+	}
+	sent := sentRequest(t, env)
+	for _, k := range []string{"serviceHistory", "medicationHistory"} {
+		if _, ok := valueOf(t, sent, "prefetch", k); ok {
+			t.Errorf("%s was inserted after a backend failure", k)
+		}
+	}
+	events := obs.prefetch(t)
+	for _, k := range []string{"serviceHistory", "medicationHistory"} {
+		if e := events[k]; e.Outcome != SearchUnavailable || e.Reason == "" {
+			t.Errorf("%s recorded as %+v, want unavailable with a reason", k, e)
+		}
+	}
+	if e := events["deviceHistory"]; e.Outcome != SearchZero {
+		t.Errorf("deviceHistory recorded as %+v", e)
+	}
+}
+
+func TestPrefetch_HistoryOverBoundOmitted(t *testing.T) {
+	s := newPrefetchSoR()
+	s.searches["DeviceRequest"] = searchAnswer{res: overBound(t, "DeviceRequest", `{"resourceType":"DeviceRequest","id":"d","status":"active","intent":"order","subject":{"reference":"Patient/example"}}`)}
+	obs := &observed{}
+	g := prefetchGateway(s)
+	g.cfg.Observer = obs.observe
+	g.cfg.Clock = fixedClock
+	_, sent := mustPrepare(t, g, ehrRequest(supported))
+	if _, ok := valueOf(t, sent, "prefetch", "deviceHistory"); ok {
+		t.Fatal("an over-bound search was inserted")
+	}
+	if e := obs.prefetch(t)["deviceHistory"]; e.Outcome != SearchBound || e.Pages != SoRSearchMaxPages+1 {
+		t.Fatalf("recorded %+v", e)
+	}
+}
+
+func TestPrefetch_WrongSubjectSearchResult502(t *testing.T) {
+	for name, key := range map[string]string{"ServiceRequest": "serviceHistory", "Coverage": "coverage"} {
+		t.Run(key, func(t *testing.T) {
+			s := newPrefetchSoR()
+			if name == "Coverage" {
+				s.answer(t, "Coverage", searchPage(strings.Replace(sorCoverage("c", "00001"), "Patient/"+prefetchSoRID, "Patient/other", 1)))
+			} else {
+				s.answer(t, name, searchPage(sorRequest("h1", "Patient/"+prefetchSoRID), sorRequest("h2", "Patient/other")))
+			}
+			body := ehrRequest(patientOnly)
+			if key != "coverage" {
+				body = ehrRequest(supported)
+			}
+			env, rec := ingressRow(t, s, body)
+			refusedBeforeTheNetwork(t, env, rec, http.StatusBadGateway, "system of record returned another patient's resource")
+		})
+	}
+}
+
+func TestPrefetch_KeptValueForAnotherPatientRefused(t *testing.T) {
+	for name, value := range map[string]string{
+		"history entry":       `{"resourceType":"Bundle","type":"searchset","entry":[{"resource":{"resourceType":"ServiceRequest","id":"x","status":"active","intent":"order","subject":{"reference":"Patient/other"}}}]}`,
+		"patient in a bundle": `{"resourceType":"Bundle","type":"searchset","entry":[{"resource":{"resourceType":"Patient","id":"other"}}]}`,
+		"untyped identifier":  `{"resourceType":"Bundle","type":"searchset","entry":[{"resource":{"resourceType":"ServiceRequest","id":"x","status":"active","intent":"order","subject":{"identifier":{"system":"urn:mrn","value":"1"}}}}]}`,
+		"foreign server":      `{"resourceType":"Bundle","type":"searchset","entry":[{"resource":{"resourceType":"ServiceRequest","id":"x","status":"active","intent":"order","subject":{"reference":"https://elsewhere.example/fhir/Patient/example"}}}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			env, rec := ingressRow(t, newPrefetchSoR(), ehrRequest(supported+`,"serviceHistory":`+value))
+			refusedBeforeTheNetwork(t, env, rec, http.StatusForbidden, "prefetch serviceHistory refused")
+		})
+	}
+	t.Run("absolute reference on the EHR's own server", func(t *testing.T) {
+		value := `{"resourceType":"Bundle","type":"searchset","entry":[{"resource":{"resourceType":"ServiceRequest","id":"x","status":"active","intent":"order","subject":{"reference":"https://ehr.example/fhir/Patient/example"}}}]}`
+		if _, _, status, msg := prepare(t, prefetchGateway(newPrefetchSoR()), ehrRequest(supported+`,"serviceHistory":`+value)); status != 0 {
+			t.Fatalf("got %d %s", status, msg)
+		}
+	})
+}
+
+// sentRequest is the CDS Hooks request the payer's side received.
 func sentRequest(t *testing.T, env *inProcessExchange) []byte {
 	t.Helper()
 	b := env.lastRequestPayload()
@@ -579,6 +765,42 @@ func sentRequest(t *testing.T, env *inProcessExchange) []byte {
 	return b
 }
 
+func TestPrefetch_FHIRServerNeverFetched(t *testing.T) {
+	var hits atomic.Int32
+	spy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		http.Error(w, "unexpected", http.StatusTeapot)
+	}))
+	defer spy.Close()
+	body := bytes.Replace(ehrRequest(patientOnly), []byte("https://ehr.example/fhir"), []byte(spy.URL), 1)
+	s := newPrefetchSoR()
+	s.answer(t, "Coverage", searchPage(sorCoverage("cov-1", "00001")))
+	env, rec := ingressRow(t, s, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("answer %d %s", rec.Code, rec.Body.String())
+	}
+	if n := hits.Load(); n != 0 {
+		t.Fatalf("the EHR's fhirServer received %d requests", n)
+	}
+	sent := sentRequest(t, env)
+	if bytes.Contains(sent, []byte(spy.URL)) || bytes.Contains(sent, []byte(`"fhirServer"`)) {
+		t.Fatalf("the payer received the EHR's server: %s", sent)
+	}
+}
+
+func TestPrefetch_AuthorizationNeverForwarded(t *testing.T) {
+	env, rec := ingressRow(t, newPrefetchSoR(), ehrRequest(supported))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("answer %d %s", rec.Code, rec.Body.String())
+	}
+	sent := sentRequest(t, env)
+	for _, s := range []string{`"fhirAuthorization"`, "ehr-secret-token", "access_token"} {
+		if bytes.Contains(sent, []byte(s)) {
+			t.Fatalf("the payer received %s: %s", s, sent)
+		}
+	}
+}
+
 func TestPrefetchProvenanceEmitted(t *testing.T) {
 	s := newPrefetchSoR()
 	marker := "clinical-content-marker"
@@ -589,7 +811,6 @@ func TestPrefetchProvenanceEmitted(t *testing.T) {
 	g.cfg.Observer = obs.observe
 	g.cfg.Clock = fixedClock
 	mustPrepare(t, g, ehrRequest(`"coverage":`+ehrCoverage))
-	observationFlush(t, g)
 	events := obs.prefetch(t)
 	want := map[string]prefetchObtained{
 		"patient":                {Query: "Patient/example", Outcome: SearchOK, Count: 1},
@@ -643,7 +864,6 @@ func TestPrefetchProvenanceEmitted(t *testing.T) {
 				g.cfg.Observer = obs.observe
 				g.cfg.Clock = fixedClock
 				_, _, _ = g.prepareDTRPackageRequest(context.Background(), body)
-				observationFlush(t, g)
 				got := obs.prefetchOn(t, "dtr-questionnaire-fetch")
 				w := row.want
 				w.Key, w.Operation, w.Source, w.Query, w.RetrievedAt = "coverage", shnsdk.FrameOperationQuestionnairePackage, "system-of-record", query, fixedClock().UTC()
@@ -683,9 +903,9 @@ func TestPrefetch_NoEditInsideSignedBundle(t *testing.T) {
 	}
 }
 
-// TestPrefetch_SignedContentRefusalSurfaces exercises the isolated legacy
-// source-preparation helper's refusal to edit a signed whole request. Native
-// ingress boundary behavior is covered by the signed request rows above.
+// TestPrefetch_SignedContentRefusalSurfaces proves the ingress reports a
+// refusal to edit signed content as the documented 422 rather than sending
+// the request: here the whole CDS Hooks request is a signed object.
 func TestPrefetch_SignedContentRefusalSurfaces(t *testing.T) {
 	body := []byte(`{"hook":"order-select","context":{"patientId":"example"},"fhirServer":"https://ehr.example/fhir","prefetch":{"patient":{"resourceType":"Patient","id":"example"}},` +
 		`"signature":{"type":[{"code":"1.2.840.10065.1.12.1.1"}],"when":"2026-01-01T00:00:00Z","who":{"reference":"Practitioner/p"}}}`)
@@ -707,264 +927,242 @@ func namedDifferently(t *testing.T) *prefetchSoR {
 	return s
 }
 
+// TestPrefetch_PatientNamedDifferentlyRefused: when the system of record
+// names the patient by an id other than context.patientId, a request whose
+// patient or coverage would have to come from it is refused before anything
+// is read or sent; a request carrying every key is unaffected.
+func TestPrefetch_PatientNamedDifferentlyRefused(t *testing.T) {
+	for name, body := range map[string][]byte{
+		"patient absent":  ehrRequest(`"coverage":` + ehrCoverage),
+		"coverage absent": ehrRequest(patientOnly),
+		"no prefetch":     ehrRequest("-"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := namedDifferently(t)
+			obs := &observed{}
+			env := newInProcessExchange(t)
+			env.originator.cfg.SoR = s.sor()
+			env.originator.cfg.Observer = obs.observe
+			rec := httptest.NewRecorder()
+			env.originator.handleCRDIngress(rec, crdIngressPost(body))
+			refusedBeforeTheNetwork(t, env, rec, http.StatusUnprocessableEntity, patientNamedDifferently)
+			if searched, read := s.calls(); len(searched) != 0 || len(read) != 0 {
+				t.Fatalf("the system of record was read: searched %v, read %v", searched, read)
+			}
+			if len(obs.prefetch(t)) != 0 {
+				t.Fatal("a refused request recorded an obtained value")
+			}
+		})
+	}
+	t.Run("every key supplied", func(t *testing.T) {
+		s := newPrefetchSoR()
+		s.sorID = "pat-elsewhere"
+		env, rec := ingressRow(t, s, ehrRequest(supported+`,"serviceHistory":null,"deviceHistory":null,"medicationHistory":null,"questionnaireResponses":null`))
+		if rec.Code != http.StatusOK || env.routeHitCount() != 1 {
+			t.Fatalf("answer %d %s", rec.Code, rec.Body.String())
+		}
+	})
+}
+
+// TestPrefetch_HistoryOmittedWhenPatientNamedDifferently: with the patient
+// and coverage in the request, a system of record that names the patient
+// differently is not searched; the absent history keys are left out with the
+// reason recorded, and the request routes.
+func TestPrefetch_HistoryOmittedWhenPatientNamedDifferently(t *testing.T) {
+	s := namedDifferently(t)
+	obs := &observed{}
+	env := newInProcessExchange(t)
+	env.originator.cfg.SoR = s.sor()
+	env.originator.cfg.Observer = obs.observe
+	rec := httptest.NewRecorder()
+	body := ehrRequest(supported + `,"deviceHistory":null`)
+	env.originator.handleCRDIngress(rec, crdIngressPost(body))
+	if rec.Code != http.StatusOK || env.routeHitCount() != 1 {
+		t.Fatalf("answer %d %s", rec.Code, rec.Body.String())
+	}
+	if searched, read := s.calls(); len(searched) != 0 || len(read) != 0 {
+		t.Fatalf("the system of record was read: searched %v, read %v", searched, read)
+	}
+	sent := sentRequest(t, env)
+	if got := names(membersOf(t, sent, "prefetch")); !slices.Equal(got, []string{"patient", "coverage", "deviceHistory"}) {
+		t.Fatalf("prefetch keys %v, want only the EHR's", got)
+	}
+	events := obs.prefetch(t)
+	if len(events) != 3 {
+		t.Fatalf("events %+v, want one per omitted history key", events)
+	}
+	for _, k := range []string{"serviceHistory", "medicationHistory", "questionnaireResponses"} {
+		e := events[k]
+		if e.Outcome != SearchNotRun || e.Reason != historyNamedDifferently || e.Count != 0 || !strings.Contains(e.Query, "Patient%2Fpat-elsewhere") {
+			t.Errorf("%s recorded as %+v", k, e)
+		}
+	}
+}
+
+// foreignRecords is a searchset about another patient: an Observation and the
+// other patient's own Patient resource.
 const foreignRecords = `{"resourceType":"Bundle","type":"searchset","entry":[{"resource":{"resourceType":"Observation","id":"o1","status":"final","code":{"text":"x"},"subject":{"reference":"Patient/other"}}},{"resource":{"resourceType":"Patient","id":"other","name":[{"family":"Someone"}]}}]}`
 
 // allAdvertised carries every advertised key, so nothing is obtained.
 var allAdvertised = supported + `,"serviceHistory":null,"deviceHistory":null,"medicationHistory":null,"questionnaireResponses":null`
 
-// PCV-08/10: a signed native request does not ask the gateway to fill absent
-// prefetch members. Missing, null, signed and opaque values remain the sender's
-// exact assertion, even when the provider's optional source is unavailable.
-func TestPrefetch_NativeSuppliedAbsentAndNull(t *testing.T) {
-	for _, row := range []struct {
-		name string
-		body []byte
-	}{
-		{"complete", []byte(`{"hook":"order-select","context":{"patientId":"example"},"prefetch":{` + allAdvertised + `}}`)},
-		{"absent", []byte(`{"hook":"order-select","context":{"patientId":"example"}}`)},
-		{"empty", []byte(`{"hook":"order-select","context":{"patientId":"example"},"prefetch":{}}`)},
-		{"explicit null", []byte(`{"hook":"order-select","context":{"patientId":"example"},"prefetch":{"patient":null,"coverage":null,"serviceHistory":null}}`)},
-		{"foreign history", []byte(`{"hook":"order-select","context":{"patientId":"example"},"prefetch":{"serviceHistory":` + foreignRecords + `}}`)},
-		{"unadvertised foreign records", []byte(`{"hook":"order-select","context":{"patientId":"example"},"prefetch":{"labs":` + foreignRecords + `}}`)},
-		{"unadvertised own record", []byte(`{"hook":"order-select","context":{"patientId":"example"},"prefetch":{"labs":{"resourceType":"Observation","id":"o1","subject":{"reference":"Patient/example"},"valueQuantity":{"value":1.50}},"none":null}}`)},
-		{"case variant key", []byte(`{"hook":"order-select","context":{"patientId":"example"},"prefetch":{"Patient":` + foreignRecords + `}}`)},
-		{"binary history", []byte(`{"hook":"order-select","context":{"patientId":"example"},"prefetch":{"serviceHistory":{"resourceType":"Binary","id":"b1","contentType":"application/pdf","data":"JVBERi0="}}}`)},
-		{"coverage without payer", []byte(`{"hook":"order-select","context":{"patientId":"example"},"prefetch":{"coverage":{"resourceType":"Coverage","id":"c1","beneficiary":{"reference":"Patient/example"}}}}`)},
-		{"ambiguous supplied coverage", []byte(`{"hook":"order-select","context":{"patientId":"example"},"prefetch":{"coverage":{"resourceType":"Bundle","type":"collection","entry":[{"resource":` + ehrCoverage + `},{"resource":` + strings.Replace(ehrCoverage, `"00001"`, `"00078"`, 1) + `}]}}}`)},
-		{"signed coverage", signedEHRRequest(t)},
-	} {
-		for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve} {
-			t.Run(row.name+"/"+level.String(), func(t *testing.T) {
-				s := newPrefetchSoR()
-				s.searches["Coverage"] = searchAnswer{err: &SearchError{Outcome: SearchUnavailable, Reason: "must not search"}}
-				env := newTransportExchange(t)
-				env.originator.cfg.ConformanceEnforcement = level
-				env.originator.cfg.SoR = s.sor()
-				req := signedFixtureIngress(t, env.originator, "/cds-services/shn-order-select", "crd-order-select", "crd-order-select", "order-select", "pci-covered", "pa.crd@2.0", "prefetch-native-"+row.name, row.body)
-				req.SetPathValue("id", "shn-order-select")
-				rec := httptest.NewRecorder()
-				env.originator.handleCRDIngress(rec, req)
-				if rec.Code != http.StatusOK || env.routeHitCount() != 1 {
-					t.Fatalf("native ingress status=%d body=%s Hub=%d", rec.Code, rec.Body.String(), env.routeHitCount())
-				}
-				sent := sentRequest(t, env)
-				if row.name == "signed coverage" {
-					if got, want := membersOf(t, sent, "prefetch"), membersOf(t, row.body, "prefetch"); !slices.Equal(got, want) {
-						t.Fatalf("signed prefetch changed: got=%v want=%v", got, want)
-					}
-				} else if !bytes.Equal(sent, row.body) {
-					t.Fatalf("native body changed:\n got %s\nwant %s", sent, row.body)
-				}
-				if searched, read := s.calls(); len(searched) != 0 || len(read) != 0 || s.idReads != 0 {
-					t.Fatalf("native ingress read source: searched=%v read=%v idReads=%d", searched, read, s.idReads)
-				}
-			})
+func TestPrefetch_UnadvertisedMemberFenced(t *testing.T) {
+	t.Run("an unadvertised key with another patient's records", func(t *testing.T) {
+		env, rec := ingressRow(t, newPrefetchSoR(), ehrRequest(allAdvertised+`,"labs":`+foreignRecords))
+		refusedBeforeTheNetwork(t, env, rec, http.StatusForbidden, "prefetch labs refused")
+	})
+	t.Run("a case-variant key with another patient's records", func(t *testing.T) {
+		body := ehrRequest(`"Patient":` + foreignRecords + `,"coverage":` + ehrCoverage + `,"serviceHistory":null,"deviceHistory":null,"medicationHistory":null,"questionnaireResponses":null`)
+		if _, _, status, msg := prepare(t, prefetchGateway(newPrefetchSoR()), body); status != http.StatusForbidden || !strings.Contains(msg, "prefetch Patient refused") {
+			t.Fatalf("got %d %s", status, msg)
 		}
-	}
-}
-
-// E-01 remains mandatory even at none: the callback endpoint and bearer are
-// removed by the registered boundary edit, without fetching the endpoint.
-func TestPrefetch_NativeCallbackAuthorityRemoved(t *testing.T) {
-	var hits atomic.Int32
-	spy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits.Add(1)
-		http.Error(w, "unexpected", http.StatusTeapot)
-	}))
-	defer spy.Close()
-	body := bytes.Replace(ehrRequest(allAdvertised), []byte("https://ehr.example/fhir"), []byte(spy.URL), 1)
-	s := newPrefetchSoR()
-	env, rec := ingressRow(t, s, body)
-	if rec.Code != http.StatusOK || env.routeHitCount() != 1 {
-		t.Fatalf("status=%d body=%s Hub=%d", rec.Code, rec.Body, env.routeHitCount())
-	}
-	sent := sentRequest(t, env)
-	for _, forbidden := range [][]byte{[]byte(spy.URL), []byte(`"fhirServer"`), []byte(`"fhirAuthorization"`), []byte("ehr-secret-token")} {
-		if bytes.Contains(sent, forbidden) {
-			t.Fatalf("callback authority crossed boundary: %s", sent)
-		}
-	}
-	if hits.Load() != 0 {
-		t.Fatalf("callback endpoint fetched %d times", hits.Load())
-	}
-	if got, want := membersOf(t, sent, "prefetch"), membersOf(t, body, "prefetch"); !slices.Equal(got, want) {
-		t.Fatalf("prefetch changed: got=%v want=%v", got, want)
-	}
-	if searched, read := s.calls(); len(searched) != 0 || len(read) != 0 {
-		t.Fatalf("native ingress read source: %v %v", searched, read)
-	}
-}
-
-// The actual provider-originated construction action still reads source
-// records, preserves their pagination/record bytes, and refuses unavailable or
-// cross-patient mandatory inputs before any authored request exists.
-func TestPrefetch_OriginatedSourceConstruction(t *testing.T) {
-	t.Run("source records become authored request", func(t *testing.T) {
-		s := newPrefetchSoR()
-		patient := s.reads["Patient/"+prefetchSoRID]
-		cov := sorCoverage("cov-1", shnsdk.CMSPayerIdentity.Value)
-		p1 := page("", "https://sor.example/fhir/next", sorEntry(cov))
-		p2 := page("", "", sorEntry(sorCoverage("cov-2", shnsdk.CMSPayerIdentity.Value)))
-		s.answer(t, "Coverage", p1, p2)
-		history := `{"resourceType":"ServiceRequest","id":"prior-order-1","status":"completed","intent":"order","subject":{"reference":"Patient/example"},"code":{"coding":[{"system":"http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets","code":"G0151"}]},"quantityQuantity":{"value":1.50}}`
-		s.answer(t, "ServiceRequest", searchPage(history))
-		g := prefetchGateway(s)
-		g.cfg.NPI = "1234567890"
-		recs, status, msg := g.originCRDRecords(context.Background(), "crd-order-select", prefetchMember)
-		if status != 0 {
-			t.Fatalf("origin source: %d %s", status, msg)
-		}
-		if !bytes.Equal(recs.patient, patient) || string(recs.coverage) != sorAssembly(t, "Coverage", p1, p2) || string(recs.history["serviceHistory"]) != sorAssembly(t, "ServiceRequest", searchPage(history)) {
-			t.Fatalf("source bytes changed: patient=%s coverage=%s history=%s", recs.patient, recs.coverage, recs.history["serviceHistory"])
-		}
-		for _, key := range []string{"deviceHistory", "medicationHistory", "questionnaireResponses"} {
-			if string(recs.history[key]) != "null" {
-				t.Fatalf("%s=%s, want source zero-match null", key, recs.history[key])
-			}
-		}
-		order := []byte(`{"resourceType":"ServiceRequest","id":"new-order","status":"draft","intent":"order","subject":{"reference":"Patient/example"}}`)
-		authored, err := g.originatedOrderingRequest(hookOrderSelect, "source-correlation", recs, order)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for key, want := range map[string][]byte{"patient": patient, "coverage": recs.coverage, "serviceHistory": recs.history["serviceHistory"]} {
-			if got, ok := valueOf(t, authored, "prefetch", key); !ok || got != string(want) {
-				t.Fatalf("authored %s=%s want=%s", key, got, want)
-			}
-		}
-		if searched, read := s.calls(); !slices.Contains(searched, "Coverage?patient=Patient/example") || !slices.Contains(searched, "ServiceRequest?patient=Patient/example") || !slices.Contains(read, "Patient/example") {
-			t.Fatalf("source not read: searched=%v read=%v", searched, read)
+		env, rec := ingressRow(t, newPrefetchSoR(), body)
+		refusedBeforeTheNetwork(t, env, rec, http.StatusForbidden, "prefetch Patient refused")
+	})
+	t.Run("a case-variant key beside the advertised one", func(t *testing.T) {
+		// Member names that differ only in case are refused as one repeated name.
+		body := ehrRequest(allAdvertised + `,"Patient":{"resourceType":"Patient","id":"example"}`)
+		if _, _, status, msg := prepare(t, prefetchGateway(newPrefetchSoR()), body); status != http.StatusBadRequest || msg != "parse cds request failed" {
+			t.Fatalf("got %d %s", status, msg)
 		}
 	})
-	for _, row := range []struct {
-		name   string
-		change func(*prefetchSoR)
-		status int
-		msg    string
-	}{
-		{"missing patient", func(s *prefetchSoR) { delete(s.reads, "Patient/example") }, http.StatusUnprocessableEntity, "patient not found"},
-		{"missing coverage", func(s *prefetchSoR) {}, http.StatusUnprocessableEntity, "no coverage"},
-		{"unavailable coverage", func(s *prefetchSoR) {
-			s.searches["Coverage"] = searchAnswer{err: &SearchError{Outcome: SearchUnavailable, Reason: "down"}}
-		}, http.StatusServiceUnavailable, "coverage unavailable"},
-		{"wrong-subject coverage", func(s *prefetchSoR) {
-			s.answer(t, "Coverage", searchPage(strings.Replace(sorCoverage("cov-x", "00001"), "Patient/example", "Patient/other", 1)))
-		}, http.StatusBadGateway, "another patient's resource"},
-		{"wrong-subject patient", func(s *prefetchSoR) {
-			s.reads["Patient/example"] = []byte(`{"resourceType":"Patient","id":"other"}`)
-		}, http.StatusBadGateway, "another patient's resource"},
-		{"malformed coverage search", func(s *prefetchSoR) {
-			s.searches["Coverage"] = searchAnswer{res: SearchResult{Pages: [][]byte{[]byte(`{"resourceType":"Bundle","type":"collection"}`)}}}
-		}, http.StatusUnprocessableEntity, "coverage unreadable"},
-		{"repeated-member coverage search", func(s *prefetchSoR) {
-			s.searches["Coverage"] = searchAnswer{res: SearchResult{Pages: [][]byte{[]byte(`{"resourceType":"Bundle","resourceType":"Bundle","type":"searchset","entry":[]}`)}}}
-		}, http.StatusUnprocessableEntity, "coverage unreadable"},
-		{"over-bound coverage search", func(s *prefetchSoR) {
-			s.searches["Coverage"] = searchAnswer{res: overBound(t, "Coverage", sorCoverage("cov-1", "00001"))}
-		}, http.StatusUnprocessableEntity, "coverage unreadable"},
-		{"binary coverage include", func(s *prefetchSoR) {
-			s.answer(t, "Coverage", page("", "", sorEntry(sorCoverage("cov-1", "00001")), `{"resource":{"resourceType":"Binary","id":"b1","contentType":"application/pdf","data":"JVBERi0="},"search":{"mode":"include"}}`))
-		}, http.StatusBadGateway, "Binary resource"},
-	} {
-		t.Run(row.name, func(t *testing.T) {
-			s := newPrefetchSoR()
-			row.change(s)
-			_, status, msg := prefetchGateway(s).originCRDRecords(context.Background(), "crd-order-select", prefetchMember)
-			if status != row.status || !strings.Contains(msg, row.msg) {
-				t.Fatalf("origin source: %d %s; want %d %q", status, msg, row.status, row.msg)
-			}
-		})
-	}
-}
-
-func TestPrefetch_OriginatedHistoryBoundaries(t *testing.T) {
-	for _, row := range []struct {
-		name    string
-		answer  searchAnswer
-		outcome SearchOutcome
-		status  int
-		msg     string
-	}{
-		{"unsupported", searchAnswer{err: &SearchError{Outcome: SearchUnsupported, Reason: "unsupported"}}, SearchUnsupported, 0, ""},
-		{"unavailable", searchAnswer{err: &SearchError{Outcome: SearchUnavailable, Reason: "down"}}, SearchUnavailable, 0, ""},
-		{"over bound", searchAnswer{res: overBound(t, "ServiceRequest", sorRequest("h1", "Patient/example"))}, SearchBound, 0, ""},
-		{"malformed", searchAnswer{res: SearchResult{Pages: [][]byte{[]byte(`{"resourceType":"Bundle","type":"collection"}`)}}}, SearchMalformed, 0, ""},
-		{"wrong subject", searchAnswer{res: resultOf(t, "ServiceRequest", searchPage(sorRequest("h1", "Patient/other")))}, SearchOK, http.StatusBadGateway, "another patient's resource"},
-		{"binary include", searchAnswer{res: resultOf(t, "ServiceRequest", page("", "", sorEntry(sorRequest("h1", "Patient/example")), `{"resource":{"resourceType":"Binary","id":"b1","data":"JVBERi0="},"search":{"mode":"include"}}`))}, SearchOK, http.StatusBadGateway, "Binary resource"},
-	} {
-		t.Run(row.name, func(t *testing.T) {
-			s := newPrefetchSoR()
-			s.answer(t, "Coverage", searchPage(sorCoverage("cov-1", "00001")))
-			s.searches["ServiceRequest"] = row.answer
-			obs := &observed{}
-			g := prefetchGateway(s)
-			g.cfg.Observer = obs.observe
-			g.cfg.Clock = fixedClock
-			recs, status, msg := g.originCRDRecords(context.Background(), "crd-order-select", prefetchMember)
-			if status != row.status || !strings.Contains(msg, row.msg) {
-				t.Fatalf("origin history status=%d msg=%s, want %d %q", status, msg, row.status, row.msg)
-			}
-			if status == 0 {
-				if value, exists := recs.history["serviceHistory"]; exists {
-					t.Fatalf("unavailable history invented: %s", value)
-				}
-			}
-			observationFlush(t, g)
-			if ev, ok := obs.prefetch(t)["serviceHistory"]; !ok || ev.Outcome != row.outcome {
-				t.Fatalf("source finding=%+v; want %s", ev, row.outcome)
-			}
-		})
-	}
-}
-
-func TestPrefetch_OriginatedRenamedPatient(t *testing.T) {
-	s := namedDifferently(t)
-	obs := &observed{}
-	g := prefetchGateway(s)
-	g.cfg.Observer = obs.observe
-	recs, status, msg := g.originCRDRecords(context.Background(), "crd-order-select", prefetchMember)
-	if status != 0 {
-		t.Fatalf("origin source: %d %s", status, msg)
-	}
-	if recs.sorID != "pat-elsewhere" || !bytes.Contains(recs.patient, []byte(`"id":"example"`)) || bytes.Contains(recs.coverage, []byte("Patient/pat-elsewhere")) || !bytes.Contains(recs.coverage, []byte("Patient/example")) {
-		t.Fatalf("source identity edit missing: patient=%s coverage=%s", recs.patient, recs.coverage)
-	}
-	if len(recs.history) != 0 {
-		t.Fatalf("history searched under a renamed source patient: %+v", recs.history)
-	}
-	if searched, read := s.calls(); len(searched) != 1 || searched[0] != "Coverage?patient=Patient/pat-elsewhere" || !slices.Equal(read, []string{"Patient/pat-elsewhere"}) {
-		t.Fatalf("source calls searched=%v read=%v", searched, read)
-	}
-	observationFlush(t, g)
-	for _, key := range []string{"serviceHistory", "deviceHistory", "medicationHistory", "questionnaireResponses"} {
-		if ev := obs.prefetch(t)[key]; ev.Outcome != SearchNotRun || ev.Reason != historyNamedDifferently {
-			t.Fatalf("%s omission not accounted: %+v", key, ev)
+	t.Run("an unadvertised key that is not a resource", func(t *testing.T) {
+		if _, _, status, msg := prepare(t, prefetchGateway(newPrefetchSoR()), ehrRequest(allAdvertised+`,"note":"free text"`)); status != http.StatusForbidden || !strings.Contains(msg, "prefetch note refused") {
+			t.Fatalf("got %d %s", status, msg)
 		}
-	}
+	})
+	t.Run("an unadvertised key about the patient is carried exactly", func(t *testing.T) {
+		labs := `{"resourceType":"Bundle","type":"searchset","entry":[{"resource":{"resourceType":"Observation","id":"o1","status":"final","code":{"text":"x"},"subject":{"reference":"Patient/example"},"valueQuantity":{"value":1.50}}}]}`
+		env, rec := ingressRow(t, newPrefetchSoR(), ehrRequest(allAdvertised+`,"labs":`+labs+`,"none":null`))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("answer %d %s", rec.Code, rec.Body.String())
+		}
+		sent := sentRequest(t, env)
+		if v, _ := valueOf(t, sent, "prefetch", "labs"); v != labs {
+			t.Fatalf("labs carried as %s", v)
+		}
+		if v, _ := valueOf(t, sent, "prefetch", "none"); v != "null" {
+			t.Fatalf("none carried as %s", v)
+		}
+	})
 }
 
-func TestPrefetch_OriginatedCoverageIncludedPayor(t *testing.T) {
+func TestPrefetch_KeptValuesFencedBeforeAnySearch(t *testing.T) {
 	s := newPrefetchSoR()
-	cov := `{"resourceType":"Coverage","id":"cov-9","status":"active","beneficiary":{"reference":"Patient/example"},"payor":[{"reference":"Organization/pay-9"}]}`
-	org := `{"resourceType":"Organization","id":"pay-9","identifier":[{"system":"` + shnsdk.CMSPayerIdentity.System + `","value":"00001"}]}`
-	pg := page("", "", sorEntry(cov), `{"fullUrl":"https://sor.example/fhir/Organization/pay-9","resource":`+org+`,"search":{"mode":"include"}}`)
-	s.answer(t, "Coverage", pg)
-	recs, status, msg := prefetchGateway(s).originCRDRecords(context.Background(), "crd-order-select", prefetchMember)
-	if status != 0 {
-		t.Fatalf("source Coverage: %d %s", status, msg)
+	obs := &observed{}
+	env := newInProcessExchange(t)
+	env.originator.cfg.SoR = s.sor()
+	env.originator.cfg.Observer = obs.observe
+	rec := httptest.NewRecorder()
+	// The patient and every history key are absent, and the last member the
+	// EHR sent is another patient's: nothing may be read or searched first.
+	body := ehrRequest(`"coverage":` + ehrCoverage + `,"labs":` + foreignRecords)
+	env.originator.handleCRDIngress(rec, crdIngressPost(body))
+	refusedBeforeTheNetwork(t, env, rec, http.StatusForbidden, "prefetch labs refused")
+	if searched, read := s.calls(); len(searched) != 0 || len(read) != 0 {
+		t.Fatalf("a refused request read the system of record: searched %v, read %v", searched, read)
 	}
-	if got, want := string(recs.coverage), sorAssembly(t, "Coverage", pg); got != want || !strings.Contains(got, org) || strings.Contains(got, "sor.example") {
-		t.Fatalf("included payer changed or leaked source URL: got %s want %s", got, want)
-	}
-	if _, read := s.calls(); !slices.Equal(read, []string{"Patient/example"}) {
-		t.Fatalf("included payer was fetched again: %v", read)
+	if events := obs.prefetch(t); len(events) != 0 {
+		t.Fatalf("a refused request recorded prefetch attempts: %+v", events)
 	}
 }
 
-// A native producer may supply absolute Patient references on its declared
-// FHIR server. Strict patient-consistency checking distinguishes that valid
-// control from references on a different server; none carriage is covered
-// separately above and does not run this optional content rule.
+// An obtained coverage carries the payor Organization the search included,
+// as an included record: the payer resolves the Coverage's payor from the
+// request (the provider's gateway does not read it again either), and no
+// address of the system of record is sent.
+func TestPrefetch_ObtainedCoverageCarriesIncludedPayor(t *testing.T) {
+	cov := "{ \"resourceType\" : \"Coverage\", \"id\" : \"cov-9\", \"status\" : \"active\",\n  \"beneficiary\" : { \"reference\" : \"Patient/" + prefetchSoRID + "\" },\n  \"payor\" : [ { \"reference\" : \"Organization/pay-9\" } ] }"
+	org := "{ \"resourceType\" : \"Organization\", \"id\" : \"pay-9\",\n  \"identifier\" : [ { \"system\" : \"" + shnsdk.CMSPayerIdentity.System + "\", \"value\" : \"00001\" } ] }"
+	include := func(res string) string {
+		return `{"fullUrl":"https://sor.example/fhir/Organization/pay-9","resource":` + res + `,"search":{"mode":"include"}}`
+	}
+	t.Run("routed from the included payor", func(t *testing.T) {
+		s := newPrefetchSoR()
+		pg := page("", "", sorEntry(cov), include(org))
+		s.answer(t, "Coverage", pg)
+		env, rec := ingressRow(t, s, ehrRequest(`"patient":{"resourceType":"Patient","id":"example"}`))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("answer %d %s", rec.Code, rec.Body.String())
+		}
+		v, _ := valueOf(t, sentRequest(t, env), "prefetch", "coverage")
+		if v != sorAssembly(t, "Coverage", pg) {
+			t.Fatalf("coverage = %s", v)
+		}
+		if !strings.Contains(v, org+`,"search":{"mode":"include"}`) || strings.Contains(v, "sor.example") {
+			t.Fatalf("coverage = %s: want the payor Organization exactly, as an included record, and no system of record address", v)
+		}
+		if _, read := s.calls(); slices.Contains(read, "Organization/pay-9") {
+			t.Fatalf("the payor was read again from the system of record: %v", read)
+		}
+	})
+	t.Run("an included record about another patient is refused", func(t *testing.T) {
+		s := newPrefetchSoR()
+		other := `{"resourceType":"Observation","id":"o-1","status":"final","code":{"text":"x"},"subject":{"reference":"Patient/someone-else"}}`
+		s.answer(t, "Coverage", page("", "", sorEntry(cov), include(org), include(other)))
+		env, rec := ingressRow(t, s, ehrRequest(`"patient":{"resourceType":"Patient","id":"example"}`))
+		if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "system of record returned another patient's resource") {
+			t.Fatalf("answer %d %s", rec.Code, rec.Body.String())
+		}
+		if env.routeHitCount() != 0 {
+			t.Fatal("a refused request reached the Hub")
+		}
+	})
+}
+
+// A Binary is never carried in a prefetch value: refused with 403 when the
+// EHR sent it, 502 when the system of record returned it.
+func TestPrefetch_BinaryRefused(t *testing.T) {
+	binary := `{"resourceType":"Binary","id":"b1","contentType":"application/pdf","data":"JVBERi0="}`
+	t.Run("kept bundle entry", func(t *testing.T) {
+		value := `{"resourceType":"Bundle","type":"searchset","entry":[{"resource":` + binary + `}]}`
+		env, rec := ingressRow(t, newPrefetchSoR(), ehrRequest(supported+`,"serviceHistory":`+value))
+		refusedBeforeTheNetwork(t, env, rec, http.StatusForbidden, "prefetch serviceHistory refused: Binary refused: "+opaqueContentReason)
+	})
+	t.Run("kept value", func(t *testing.T) {
+		env, rec := ingressRow(t, newPrefetchSoR(), ehrRequest(allAdvertised+`,"document":`+binary))
+		refusedBeforeTheNetwork(t, env, rec, http.StatusForbidden, "prefetch document refused: Binary refused")
+	})
+	t.Run("obtained", func(t *testing.T) {
+		s := newPrefetchSoR()
+		s.answer(t, "ServiceRequest", page("", "", sorEntry(sorRequest("h1", "Patient/"+prefetchSoRID)), `{"resource":`+binary+`,"search":{"mode":"include"}}`))
+		env, rec := ingressRow(t, s, ehrRequest(supported))
+		refusedBeforeTheNetwork(t, env, rec, http.StatusBadGateway, "system of record returned a Binary resource")
+	})
+}
+
+// The payor a kept coverage references is resolved from every value the
+// request carries, whatever its key (a resource, or a Bundle's entries), in
+// key order; null values are skipped.
+func TestPrefetch_PayorResolvedFromEveryValue(t *testing.T) {
+	cov := `{"resourceType":"Coverage","id":"c1","beneficiary":{"reference":"Patient/example"},"payor":[{"reference":"Organization/pay-1"}]}`
+	org := `{"resourceType":"Organization","id":"pay-1","identifier":[{"system":"` + shnsdk.CMSPayerIdentity.System + `","value":"00001"}]}`
+	for name, extra := range map[string]string{
+		"an unadvertised resource value": `,"payer":` + org,
+		"an unadvertised bundle value":   `,"organizations":{"resourceType":"Bundle","type":"collection","entry":[{"resource":` + org + `}]},"zzz":null`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			body := ehrRequest(patientOnly + `,"coverage":` + cov + `,"serviceHistory":null,"deviceHistory":null,"medicationHistory":null,"questionnaireResponses":null` + extra)
+			s := newPrefetchSoR()
+			_, rec := ingressRow(t, s, body)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("answer %d %s", rec.Code, rec.Body.String())
+			}
+			if _, read := s.calls(); len(read) != 0 {
+				t.Fatalf("the system of record was read: %v", read)
+			}
+		})
+	}
+	t.Run("no value names the payor", func(t *testing.T) {
+		body := ehrRequest(patientOnly + `,"coverage":` + cov + `,"serviceHistory":null,"deviceHistory":null,"medicationHistory":null,"questionnaireResponses":null`)
+		env, rec := ingressRow(t, newPrefetchSoR(), body)
+		refusedBeforeTheNetwork(t, env, rec, http.StatusUnprocessableEntity, "no payer identifier on member coverage")
+	})
+}
+
+// The request's patient references are bound the same way the prefetch fence
+// reads them: an absolute reference on the EHR's own fhirServer is the EHR's
+// patient, like a relative one; one on another server is refused.
 func TestCRDIngress_SubjectAbsoluteOnEHRServer(t *testing.T) {
 	onBase := func(base string) []byte {
 		b := ehrRequest(allAdvertised)
@@ -976,6 +1174,13 @@ func TestCRDIngress_SubjectAbsoluteOnEHRServer(t *testing.T) {
 			body := onBase(base)
 			if !bytes.Contains(body, []byte(`"`+base+`Patient/example"`)) {
 				t.Fatal("fixture not rewritten")
+			}
+			env, rec := ingressRow(t, newPrefetchSoR(), body)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("answer %d %s", rec.Code, rec.Body.String())
+			}
+			if env.routeHitCount() == 0 {
+				t.Fatal("nothing was sent")
 			}
 			if pci, status, msg := prefetchGateway(newPrefetchSoR()).ingressCRDSubjectPCIContext(context.Background(), body); status != 0 || pci != "pci-example" {
 				t.Fatalf("subject binding: %q %d %q", pci, status, msg)
@@ -992,6 +1197,13 @@ func TestCRDIngress_SubjectAbsoluteOnEHRServer(t *testing.T) {
 			// else would refuse the request later.
 			if _, status, msg := prefetchGateway(newPrefetchSoR()).ingressCRDSubjectPCIContext(context.Background(), onBase(base)); status != http.StatusForbidden || msg != "inconsistent patient reference in ingress payload" {
 				t.Fatalf("subject binding: %d %q, want 403", status, msg)
+			}
+			env, rec := ingressRow(t, newPrefetchSoR(), onBase(base))
+			if rec.Code != http.StatusForbidden && rec.Code != http.StatusBadRequest {
+				t.Fatalf("answer %d %s, want a refusal", rec.Code, rec.Body.String())
+			}
+			if env.routeHitCount() != 0 {
+				t.Fatal("the refused request crossed the network")
 			}
 		})
 	}

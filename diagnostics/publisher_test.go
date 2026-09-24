@@ -66,8 +66,8 @@ func TestPublisherRetryScheduleExpiresAndReleases(t *testing.T) {
 	if h := q.Health(now); h.Dropped != 1 {
 		t.Fatalf("health=%+v", h)
 	}
-	if h := q.Health(time.Now()); h.Pending != 0 || !h.Closed || q.retainedBytes != 0 {
-		t.Fatalf("expired item retained bytes: %+v bytes=%d", h, q.retainedBytes)
+	if !q.TryEmit(Event{Body: []byte("released")}) {
+		t.Fatal("expired item pinned memory")
 	}
 }
 
@@ -85,8 +85,8 @@ func TestPublisherCancellationDoesNotLeak(t *testing.T) {
 	if err := RunPublisher(ctx, q, PublisherConfig{URL: "https://sink", Client: client}); err != context.Canceled {
 		t.Fatalf("err=%v", err)
 	}
-	if h := q.Health(time.Now()); h.Pending != 0 || !h.Closed || q.retainedBytes != 0 {
-		t.Fatalf("canceled publication retained reservation: %+v bytes=%d", h, q.retainedBytes)
+	if !q.TryEmit(Event{Kind: "released"}) {
+		t.Fatal("canceled publication retained reservation")
 	}
 }
 
@@ -125,8 +125,8 @@ func TestPublisherDiscardsConfirmedOutOfScopeSeparately(t *testing.T) {
 	if got := q.Health(time.Now()).Dropped; got != 0 {
 		t.Fatalf("out-of-scope counted as capture drop: %d", got)
 	}
-	if h := q.Health(time.Now()); h.Pending != 0 || !h.Closed || q.retainedBytes != 0 {
-		t.Fatalf("out-of-scope item retained its reservation: %+v bytes=%d", h, q.retainedBytes)
+	if !q.TryEmit(Event{Body: []byte("released")}) {
+		t.Fatal("out-of-scope item retained its reservation")
 	}
 }
 
@@ -187,8 +187,8 @@ func TestPublisherPendingBindingYieldsToQueuedPrerequisite(t *testing.T) {
 	if want := []string{"1:leg.sealed", "2:provider.ingress.request", "1:leg.sealed"}; !reflect.DeepEqual(attempts, want) {
 		t.Fatalf("publisher changed out-of-order identity: got %v want %v", attempts, want)
 	}
-	if h := q.Health(time.Now()); h.Pending != 0 || !h.Closed || q.retainedBytes != 0 {
-		t.Fatalf("acknowledged deferred event retained its byte reservation: %+v bytes=%d", h, q.retainedBytes)
+	if !q.TryEmit(Event{Body: bytesForTest(3000)}) {
+		t.Fatal("acknowledged deferred event retained its byte reservation")
 	}
 }
 
@@ -252,7 +252,7 @@ func TestPublisherDeferredBindingKeepsOriginalDeadlineAndBudget(t *testing.T) {
 	if now.Sub(time.Unix(0, 0)) > 30*time.Second || attempts > 700 {
 		t.Fatalf("deferral renewed ownership deadline: elapsed=%s attempts=%d", now.Sub(time.Unix(0, 0)), attempts)
 	}
-	if h := q.Health(time.Now()); h.Pending != 0 || !h.Closed || q.retainedBytes != 0 {
-		t.Fatalf("cancellation retained deferred event: %+v bytes=%d", h, q.retainedBytes)
+	if !q.TryEmit(Event{Body: []byte("released")}) {
+		t.Fatal("cancellation retained deferred event")
 	}
 }

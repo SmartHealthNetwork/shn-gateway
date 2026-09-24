@@ -2,7 +2,6 @@ package engine
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -80,24 +79,15 @@ func TestDispatchPASSuppliesActualOrganization(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var events []ObserverEvent
-	fixture := newDispatchFixtureWith(t, "MBR-OX", Demo{BirthDate: "1958-07-14", FamilyName: "Okafor-Oxygen"}, order, "Organization/org-dme-ox", supplier, func(c *Config) {
-		c.Observer = func(e ObserverEvent) { events = append(events, e) }
-	})
+	validator := &recordingValidator{valid: true}
+	fixture := newDispatchFixtureWith(t, "MBR-OX", Demo{BirthDate: "1958-07-14", FamilyName: "Okafor-Oxygen"}, order, "Organization/org-dme-ox", supplier, func(c *Config) { c.Validator = validator })
 	rec := httptest.NewRecorder()
 	fixture.gw.handleDispatch(rec, httptest.NewRequest(http.MethodPost, "/scenario/dispatch", bytes.NewBufferString(`{"member":"MBR-OX"}`)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("dispatch: %d %s", rec.Code, rec.Body.String())
 	}
-	if err := fixture.gw.WaitObserverCompletion(context.Background()); err != nil {
-		t.Fatal(err)
-	}
 	found := false
-	for _, event := range events {
-		if event.Kind != "leg.originated" || event.LegType != "pas-claim" {
-			continue
-		}
-		body := event.Payload
+	for _, body := range validator.calls {
 		var bundle struct {
 			ResourceType string `json:"resourceType"`
 			Entry        []struct {
@@ -131,7 +121,7 @@ func TestDispatchPASSuppliesActualOrganization(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatal("actual SoR supplier absent from outgoing PAS request")
+		t.Fatal("actual SoR supplier absent from validated PAS request")
 	}
 }
 

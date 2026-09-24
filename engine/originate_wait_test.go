@@ -571,7 +571,7 @@ func TestOriginator_InquiryRunsAtTheLineTheSubmissionRanAt(t *testing.T) {
 	// The rejection: a pin this gateway cannot build refuses, and sends nothing.
 	stub.sawInquiry = false
 	moved := cont
-	moved.Line = "9.9" // no declared, native, or registered transform route
+	moved.Line = "2.2"
 	_, status, msg, _ = gw.inquireContinuation(req.Context(), req, moved)
 	if status == 0 {
 		t.Fatal("an inquiry pinned to a line this gateway cannot build must be refused, not re-negotiated onto another line")
@@ -579,7 +579,7 @@ func TestOriginator_InquiryRunsAtTheLineTheSubmissionRanAt(t *testing.T) {
 	if stub.sawInquiry {
 		t.Fatal("the refused inquiry was sent anyway")
 	}
-	if !strings.Contains(msg, "9.9") {
+	if !strings.Contains(msg, "2.2") {
 		t.Fatalf("the refusal must name the line it could not reach: %q", msg)
 	}
 }
@@ -1002,7 +1002,6 @@ func pendingPersonaContinuation() Continuation {
 		Line:            "2.0",
 		CorrID:          "corr-pending",
 		MemberID:        pendingPersonaMember,
-		SubjectPCI:      shnsdk.ResolvePCI(pendingPersonaMember, "1951-10-06", "Thorvaldsen-StationaryOxygen"),
 		SoRPatientID:    "Patient/" + pendingPersonaMember,
 		OrderRef:        pendingPersonaOrderRef,
 		ClaimIdentifier: "urn:shn:correlation|corr-pending",
@@ -1026,9 +1025,6 @@ func pendingPersonaSystem(t *testing.T) (*Gateway, *pasFollowStub) {
 	t.Helper()
 	sor := newPendingPersonaSoR(t)
 	gw, stub := pasFollowSystemWithSoR(t, "pended", sor, sor)
-	pci, _, _ := sor.ResolvePatient(pendingPersonaMember)
-	stub.answerMember = pendingPersonaMember
-	stub.stubSubstrate.pci = pci
 	stub.inquireAnswer = "approved"
 	stub.submitCorr = "corr-pending"
 	return gw, stub
@@ -1139,15 +1135,10 @@ func (s *pasFollowSoR) ResolveByReference(ref string) ([]byte, bool) {
 // determination the row asked for, and the inquiry, with the later one.
 type pasFollowStub struct {
 	*stubSubstrate
-	submitAnswer      string
-	inquireAnswer     string
-	answerMember      string
-	inquiryWireQueue  [][]byte
-	submitWire        []byte
-	inquiryWire       []byte // optional exact framed fixture answer for local-consumption tests
-	payerLocalPASRefs bool   // synthetic payer stores Claim and Patient at its own local addresses
-	sawInquiry        bool
-	line              string
+	submitAnswer  string
+	inquireAnswer string
+	sawInquiry    bool
+	line          string
 	// submitCorr is the correlation the submission ran under. The payer's own
 	// identifiers for the authorization derive from it, and an inquiry's answer
 	// carries those, not the inquiry's own.
@@ -1211,24 +1202,6 @@ func (s *pasFollowStub) RoundTrip(req *http.Request) (*http.Response, error) {
 	if err != nil {
 		return errResp("stub: build answer: " + err.Error()), nil
 	}
-	if s.payerLocalPASRefs {
-		member := s.answerMember
-		if member == "" {
-			member = pasFollowMember
-		}
-		payload = []byte(strings.Replace(string(payload), `"resourceType":"ClaimResponse"`, `"resourceType":"ClaimResponse","request":{"reference":"Claim/10353"}`, 1))
-		payload = []byte(strings.ReplaceAll(string(payload), "Patient/"+member, "Patient/10354"))
-	}
-	if leg == "pas-claim" && s.submitWire != nil {
-		payload = s.submitWire
-	}
-	if leg == "pas-claim-inquire" && s.inquiryWire != nil {
-		payload = s.inquiryWire
-	}
-	if leg == "pas-claim-inquire" && len(s.inquiryWireQueue) > 0 {
-		payload = s.inquiryWireQueue[0]
-		s.inquiryWireQueue = s.inquiryWireQueue[1:]
-	}
 	meta := shnsdk.Metadata{
 		Sender: "payer", Recipient: "provider", TransactionType: leg,
 		AuthorityFrame: "payer-coverage", Timestamp: s.clock().UTC().Format(time.RFC3339), CorrelationID: corrID,
@@ -1245,11 +1218,7 @@ func (s *pasFollowStub) RoundTrip(req *http.Request) (*http.Response, error) {
 // request's item trace number, which is what a later inquiry names the
 // authorization by.
 func (s *pasFollowStub) pasAnswer(kind, corrID string) ([]byte, error) {
-	member := s.answerMember
-	if member == "" {
-		member = pasFollowMember
-	}
-	patientRef := "Patient/" + member
+	patientRef := "Patient/" + pasFollowMember
 	switch kind {
 	case "approved":
 		return shnsdk.BuildClaimResponse("AUTH-FOLLOW-1", "2030-01-01", patientRef, corrID, s.clock())
@@ -1309,18 +1278,17 @@ func pasFollowSystemWithSoR(t *testing.T, submitAnswer string, sor SystemOfRecor
 		HubTransportPub: authzPub,
 		HubURL:          fakeBase,
 		Reg:             reg,
-		Validator:       syntheticFakeValidator(),
+		Validator:       shnsdk.NewFakeValidator(),
 		// One laned line. A non-empty map makes the deployment AUTHORITATIVE about
 		// which lines it can validate, which is what lets the line-pin row below
 		// have a real rejection: a continuation pinned to an unlaned line is
 		// refused rather than quietly re-negotiated onto this one.
-		ValidatorsByLine:         map[string]shnsdk.Validator{"2.0": syntheticFakeValidator()},
-		SubjectReferenceResolver: censusSubjectResolver("provider", "payer"),
-		SoR:                      sor,
-		Store:                    store,
-		Clock:                    clock,
-		NPI:                      pasFollowNPI,
-		Client:                   &http.Client{Transport: stub},
+		ValidatorsByLine: map[string]shnsdk.Validator{"2.0": shnsdk.NewFakeValidator()},
+		SoR:              sor,
+		Store:            store,
+		Clock:            clock,
+		NPI:              pasFollowNPI,
+		Client:           &http.Client{Transport: stub},
 	})
 	return gw, stub
 }

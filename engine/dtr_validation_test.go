@@ -30,7 +30,7 @@ func TestLineFakeQRValidationScope(t *testing.T) {
 			if tc.claim != "" {
 				raw = strings.Replace(raw, `"status"`, `"meta":{"profile":["`+tc.claim+`"]},"status"`, 1)
 			}
-			result, err := syntheticLineValidator("2.2").Validate(context.Background(), []byte(raw), tc.profile)
+			result, err := NewLineFakeValidator("2.2").Validate(context.Background(), []byte(raw), tc.profile)
 			if err != nil || result.Valid != tc.valid {
 				t.Fatalf("valid=%v issues=%v err=%v", result.Valid, result.Issues, err)
 			}
@@ -105,33 +105,6 @@ type dtrRecordingValidator struct {
 	calls []dtrRecordedValidation
 }
 
-// A controlled payer approval for the strict resume rows. The older stub's
-// bare ClaimResponse is a valid local decision specimen but not a PAS success
-// envelope. This graph has one decision and closes only synthetic references.
-func dtrResumeApprovalBundle(t *testing.T, response []byte, member string) []byte {
-	t.Helper()
-	var cr map[string]any
-	if err := json.Unmarshal(response, &cr); err != nil {
-		t.Fatal(err)
-	}
-	cr["id"] = "resume-decision"
-	patient := "Patient/" + member
-	base := "https://payer.example/fhir/"
-	b := map[string]any{"resourceType": "Bundle", "type": "collection", "entry": []any{
-		map[string]any{"fullUrl": base + "ClaimResponse/resume-decision", "resource": cr},
-		map[string]any{"fullUrl": base + patient, "resource": map[string]any{"resourceType": "Patient", "id": member}},
-		map[string]any{"fullUrl": base + "Organization/payer", "resource": map[string]any{"resourceType": "Organization", "id": "payer"}},
-	}}
-	out, err := json.Marshal(b)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := validatePASBundleGraph(out); err != nil {
-		t.Fatalf("synthetic payer response graph: %v", err)
-	}
-	return out
-}
-
 func (v *dtrRecordingValidator) Validate(ctx context.Context, raw []byte, profile string) (shnsdk.Result, error) {
 	var resource struct{ ResourceType string }
 	_ = json.Unmarshal(raw, &resource)
@@ -163,9 +136,9 @@ func TestDTRResumeValidationAndRefusals(t *testing.T) {
 				// This existing transport fixture returns canonical PAS stubs. Inject the
 				// validator outcomes explicitly to isolate resume validation and refusal
 				// ordering; full line conformance runs in the native exchange harness.
-				recorder := &dtrRecordingValidator{base: syntheticFakeValidator()}
-				gw.cfg.Validator = syntheticLineValidator("2.0")
-				gw.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"2.0": syntheticLineValidator("2.0"), "2.2": recorder}
+				recorder := &dtrRecordingValidator{base: shnsdk.NewFakeValidator()}
+				gw.cfg.Validator = NewLineFakeValidator("2.0")
+				gw.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"2.0": NewLineFakeValidator("2.0"), "2.2": recorder}
 				before := httptest.NewRecorder()
 				request := httptest.NewRequest(http.MethodPost, "/scenario/"+scenario, nil)
 				st, ok := gw.scenarioToPend(before, request, scenario, opts.member)
@@ -175,18 +148,6 @@ func TestDTRResumeValidationAndRefusals(t *testing.T) {
 				if st.dtrLine != "2.2" {
 					t.Fatalf("pending DTR line=%q", st.dtrLine)
 				}
-				// The pending state is fixture setup. The row under test is the
-				// independently enforced amendment, after the pending answer arrived.
-				gw.cfg.ConformanceEnforcement = EnforcementStrict
-				stub.overrideResponse = func(leg string, payload []byte) []byte {
-					if leg == "pas-claim-update" {
-						return dtrResumeApprovalBundle(t, payload, opts.member)
-					}
-					return payload
-				}
-				stub.responseDeclarations = map[string]string{"pas-claim-update": shnsdk.ContractPAPAS22}
-				// The synthetic payer declares its own published output line;
-				// the request's pin is not evidence of the producer's version.
 				recorder.calls = nil
 				recorder.mode = mode
 				if mode == "missing lane" {
@@ -203,7 +164,7 @@ func TestDTRResumeValidationAndRefusals(t *testing.T) {
 					want = 422
 				}
 				if mode == "validator outage" || mode == "missing lane" {
-					want = 503
+					want = 500
 				}
 				if mode == "target missing" {
 					want = 422
@@ -255,8 +216,8 @@ func TestDTRResumeIndependentPinsAndRefusals(t *testing.T) {
 					opts.extraRoles = map[string]string{"phg": "phg"}
 				}
 				gw, stub := newPendResumeFixture(t, opts)
-				original := &dtrRecordingValidator{base: syntheticFakeValidator()}
-				target := &dtrRecordingValidator{base: syntheticFakeValidator()}
+				original := &dtrRecordingValidator{base: shnsdk.NewFakeValidator()}
+				target := &dtrRecordingValidator{base: shnsdk.NewFakeValidator()}
 				gw.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"2.0": original, "2.2": target}
 				request := httptest.NewRequest(http.MethodPost, "/scenario/"+scenario, nil)
 				before := httptest.NewRecorder()
@@ -267,14 +228,6 @@ func TestDTRResumeIndependentPinsAndRefusals(t *testing.T) {
 				if st.dtrLine != "2.0" || st.pasDTRLine != "2.2" {
 					t.Fatalf("wrong pins: DTR=%s PAS DTR=%s", st.dtrLine, st.pasDTRLine)
 				}
-				gw.cfg.ConformanceEnforcement = EnforcementStrict
-				stub.overrideResponse = func(leg string, payload []byte) []byte {
-					if leg == "pas-claim-update" {
-						return dtrResumeApprovalBundle(t, payload, opts.member)
-					}
-					return payload
-				}
-				stub.responseDeclarations = map[string]string{"pas-claim-update": shnsdk.ContractPAPAS22}
 				sourceBefore, err := st.qrSource.buildAtLine(st.dtrLine)
 				if err != nil {
 					t.Fatal(err)
@@ -309,11 +262,11 @@ func TestDTRResumeIndependentPinsAndRefusals(t *testing.T) {
 					want = 422
 				}
 				if strings.Contains(mode, "outage") || strings.Contains(mode, "missing") {
-					want = 503
+					want = 500
 				}
-				// The unchanged pinned line remains natively routable without
-				// the optional target validator; strict enforcement refuses it
-				// at the content boundary before dispatch.
+				if mode == "target missing" {
+					want = 422
+				} // The existing pinned-route guard refuses before validation.
 				if after.Code != want || ok != (mode == "approval") {
 					t.Fatalf("status=%d want=%d ok=%v %s", after.Code, want, ok, after.Body.String())
 				}

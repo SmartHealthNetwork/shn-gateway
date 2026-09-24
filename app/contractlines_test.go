@@ -8,7 +8,6 @@ import (
 	"context"
 	"errors"
 	"github.com/SmartHealthNetwork/shn-gateway/engine"
-	"slices"
 	"strings"
 	"testing"
 
@@ -76,10 +75,16 @@ func TestDeclaredSetEnv(t *testing.T) {
 func TestConfiguredValidatorLaneFailClosed(t *testing.T) {
 	canonical := shnsdk.NewFakeValidator()
 
-	t.Run("declared 2.2 with no lane stays unavailable", func(t *testing.T) {
-		lanes, err := validatorLanesForDeclared(func(string) string { return "" }, []string{"pa.pas@2.2"}, canonical, config{FHIRValidateURL: "http://v/fhir"})
-		if err != nil || lanes["2.2"] != nil {
-			t.Fatalf("missing lane borrowed or boot blocked: lanes=%v err=%v", lanes, err)
+	t.Run("declared 2.2 with no lane refuses", func(t *testing.T) {
+		_, err := validatorLanesForDeclared(func(string) string { return "" },
+			[]string{"pa.pas@2.2"}, canonical, config{FHIRValidateURL: "http://v/fhir"})
+		if err == nil {
+			t.Fatal("want a fail-closed boot error")
+		}
+		for _, must := range []string{"pa.pas@2.2", "FHIR_VALIDATE_URL_2_2", "FR-36"} {
+			if !strings.Contains(err.Error(), must) {
+				t.Fatalf("refusal %q missing %q", err, must)
+			}
 		}
 	})
 
@@ -147,10 +152,16 @@ func TestConfiguredValidatorLaneFailClosed(t *testing.T) {
 func TestConfiguredValidatorLaneSingleLineDeclaration(t *testing.T) {
 	canonical := shnsdk.NewFakeValidator()
 
-	t.Run("declared pa.crd@2.2 alone, no lane, stays unavailable", func(t *testing.T) {
-		lanes, err := validatorLanesForDeclared(func(string) string { return "" }, []string{"pa.crd@2.2"}, canonical, config{FHIRValidateURL: "http://v/fhir"})
-		if err != nil || lanes["2.2"] != nil {
-			t.Fatalf("missing lane borrowed or boot blocked: lanes=%v err=%v", lanes, err)
+	t.Run("declared pa.crd@2.2 alone, no lane, refuses", func(t *testing.T) {
+		_, err := validatorLanesForDeclared(func(string) string { return "" },
+			[]string{"pa.crd@2.2"}, canonical, config{FHIRValidateURL: "http://v/fhir"})
+		if err == nil {
+			t.Fatal("want a fail-closed boot error for a single-line non-canonical declaration")
+		}
+		for _, must := range []string{"pa.crd@2.2", "FHIR_VALIDATE_URL_2_2", "FR-36"} {
+			if !strings.Contains(err.Error(), must) {
+				t.Fatalf("refusal %q missing %q", err, must)
+			}
 		}
 	})
 
@@ -235,10 +246,12 @@ func TestConfiguredLaneMapIncludesConfiguredUndeclaredLine(t *testing.T) {
 		}
 	})
 
-	t.Run("declared-without-lane stays unavailable", func(t *testing.T) {
-		lanes, err := validatorLanesForDeclared(func(string) string { return "" }, []string{"pa.pas@2.0", "pa.pas@2.2"}, canonical, config{})
-		if err != nil || lanes["2.2"] != nil {
-			t.Fatal("missing lane borrowed or boot blocked")
+	t.Run("rejection pair: declared-without-lane still fails closed", func(t *testing.T) {
+		_, err := validatorLanesForDeclared(func(string) string { return "" },
+			[]string{"pa.pas@2.0", "pa.pas@2.2"}, canonical,
+			config{FHIRValidateURL: "http://v/fhir"}) // no FHIRValidateURL22
+		if err == nil {
+			t.Fatal("declared 2.2 with no configured lane must still refuse boot — D1a only ADDS undeclared lanes, never rescues a declared-but-unlaned line")
 		}
 	})
 }
@@ -275,30 +288,61 @@ func TestSelectValidatorCanonicalLineFake(t *testing.T) {
 // The named declaration gates exercise discovery and retain its cleanup owner;
 // TestConfigured* above independently preserves configured-map compatibility.
 func TestValidatorLaneFailClosed(t *testing.T) {
-	for _, token := range []string{"pa.crd@2.2", "pa.dtr@2.1", "pa.pas@2.1"} {
-		for _, fail := range []bool{false, true} {
-			line := shnsdk.LineOf(token)
-			lanes, m, err := discoverValidatorLanes(context.Background(), func(string) string { return "" }, []string{token}, shnsdk.NewFakeValidator(), config{ConformanceEnforcement: engine.EnforcementStrict}, engine.DefaultLaneURL, func(context.Context, string, string) error {
-				if fail {
-					return errors.New("finite qualifier refused")
+	for _, line := range []string{"2.1", "2.2"} {
+		t.Run(line, func(t *testing.T) {
+			for _, fail := range []bool{false, true} {
+				lanes, m, err := discoverValidatorLanes(context.Background(), func(string) string { return "" }, []string{"pa.pas@" + line}, shnsdk.NewFakeValidator(), config{}, engine.DefaultLaneURL, func(ctx context.Context, base, l string) error {
+					if l != line {
+						<-ctx.Done()
+						return ctx.Err()
+					}
+					if fail {
+						return errors.New("finite qualifier refused")
+					}
+					return nil
+				})
+				if m != nil {
+					defer m.Close()
 				}
-				return nil
-			})
-			if err != nil {
-				t.Fatal(err)
+				if (err != nil) != fail {
+					t.Fatalf("fail=%v err=%v", fail, err)
+				}
+				if fail {
+					if !strings.Contains(err.Error(), line) || !strings.Contains(err.Error(), "finite qualifier refused") {
+						t.Fatal(err)
+					}
+					continue
+				}
+				if lanes[line] != nil || !m.defaults[line].Ready() {
+					t.Fatal("declared default was not independently qualified")
+				}
 			}
-			m.workers.Wait()
-			if lanes[line] != nil || m.defaults[line].Ready() == fail {
-				t.Fatal("qualification coverage misreported")
-			}
-			m.Close()
-		}
+		})
 	}
 }
-
+func TestValidatorLaneSingleLineDeclaration(t *testing.T) {
+	for _, token := range []string{"pa.crd@2.2", "pa.dtr@2.1", "pa.pas@2.1"} {
+		t.Run(token, func(t *testing.T) {
+			line := shnsdk.LineOf(token)
+			_, m, err := discoverValidatorLanes(context.Background(), func(string) string { return "" }, []string{token}, shnsdk.NewFakeValidator(), config{}, engine.DefaultLaneURL, func(ctx context.Context, base, l string) error {
+				if l == line {
+					return errors.New("unqualified declared default")
+				}
+				<-ctx.Done()
+				return ctx.Err()
+			})
+			if m != nil {
+				m.Close()
+			}
+			if err == nil {
+				t.Fatal("single declaration bypassed native multiplicity qualification")
+			}
+		})
+	}
+}
 func TestLaneMapIncludesConfiguredUndeclaredLine(t *testing.T) {
 	canonical := shnsdk.NewFakeValidator()
-	lanes, m, err := discoverValidatorLanes(context.Background(), func(string) string { return "" }, []string{"pa.pdex@2.1"}, canonical, config{ConformanceEnforcement: engine.EnforcementStrict, FHIRValidateURL22: "http://configured.test/fhir"}, engine.DefaultLaneURL, func(ctx context.Context, _, _ string) error { <-ctx.Done(); return ctx.Err() })
+	lanes, m, err := discoverValidatorLanes(context.Background(), func(string) string { return "" }, []string{"pa.pdex@2.1"}, canonical, config{FHIRValidateURL22: "http://configured.test/fhir"}, engine.DefaultLaneURL, func(ctx context.Context, _, _ string) error { <-ctx.Done(); return ctx.Err() })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,104 +352,5 @@ func TestLaneMapIncludesConfiguredUndeclaredLine(t *testing.T) {
 	}
 	if lanes["2.1"] != canonical || !m.fallbacks["2.1"] || m.defaults["2.1"].Ready() {
 		t.Fatal("PDex fallback and unavailable default were conflated")
-	}
-}
-
-// Native backend configuration does not expand this gateway's authored builders
-// or its ordinary publication declaration. Future receive publication is separate.
-func TestNativeBackendFutureConfigurationIsNotBuilderCapability(t *testing.T) {
-	e := baseEnv(map[string]string{"ROLE": "payer", "SHN_CONTRACT_VERSIONS": "pa.pas@2.0", "PAYER_DAVINCI_BASE_URL": "https://backend.example", "PAYER_DAVINCI_CONTRACT_VERSIONS": "pa.pas@9.9"})
-	cfg, err := loadConfig(func(k string) string { return e[k] })
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Join(cfg.PayerDavinciContractVersions, ",") != "pa.pas@9.9" || strings.Join(cfg.ContractVersions, ",") != "pa.pas@2.0" {
-		t.Fatalf("backend=%v builders=%v", cfg.PayerDavinciContractVersions, cfg.ContractVersions)
-	}
-	if strings.Join(cfg.NativeReceiveVersions, ",") != "pa.pas@9.9" {
-		t.Fatalf("native receive declaration = %v", cfg.NativeReceiveVersions)
-	}
-	delete(e, "PAYER_DAVINCI_BASE_URL")
-	if _, err := loadConfig(func(k string) string { return e[k] }); err == nil || !strings.Contains(err.Error(), "PAYER_DAVINCI_CONTRACT_VERSIONS") {
-		t.Fatalf("future backend without base: %v", err)
-	}
-	e["PAYER_DAVINCI_BASE_URL"] = "https://backend.example"
-	e["SHN_CONTRACT_VERSIONS"] = "pa.pas@9.9"
-	if _, err := loadConfig(func(k string) string { return e[k] }); err == nil || !strings.Contains(err.Error(), "pa.pas@9.9") {
-		t.Fatalf("future authored builder admitted: %v", err)
-	}
-}
-
-func TestNativeReceivePublicationMatchesActualBackend(t *testing.T) {
-	e := baseEnv(map[string]string{"ROLE": "payer", "PAYER_DAVINCI_BASE_URL": "https://backend.example/fhir", "PAYER_DAVINCI_CONTRACT_VERSIONS": "pa.pas@9.9"})
-	cfg, err := loadConfig(func(k string) string { return e[k] })
-	if err != nil {
-		t.Fatal(err)
-	}
-	reg := shnsdk.NewRegistry()
-	entry := shnsdk.RegistryEntry{ID: "payer", Role: "payer", BaseURL: "https://gateway.example", ContractVersions: cfg.PublishedContractVersions}
-	reg.Set("payer", entry)
-	if err := checkNativeReceivePublication(cfg, "payer", reg); err != nil {
-		t.Fatal(err)
-	}
-	entry.ContractVersions = []string{shnsdk.ContractPAPDex21}
-	reg.Set("payer", entry)
-	if err := checkNativeReceivePublication(cfg, "payer", reg); err != nil {
-		t.Fatalf("underpublication must permit boot until safe post-deploy rotation: %v", err)
-	}
-	entry.ContractVersions = shnsdk.SupportedContractVersions()
-	reg.Set("payer", entry)
-	if err := checkNativeReceivePublication(cfg, "payer", reg); err == nil {
-		t.Fatal("known PAS line absent from backend advertised")
-	}
-	delete(e, "PAYER_DAVINCI_CONTRACT_VERSIONS")
-	cfg, err = loadConfig(func(k string) string { return e[k] })
-	if err != nil {
-		t.Fatal(err)
-	}
-	entry.ContractVersions = append(shnsdk.SupportedContractVersions(), "pa.pas@9.9")
-	reg.Set("payer", entry)
-	if err := checkNativeReceivePublication(cfg, "payer", reg); err == nil {
-		t.Fatal("contradictory registry declaration accepted")
-	}
-}
-
-func TestKnownBackendReceiveLineDoesNotChangeBuilder(t *testing.T) {
-	e := baseEnv(map[string]string{"ROLE": "payer", "PAYER_DAVINCI_BASE_URL": "https://backend.example/fhir", "PAYER_DAVINCI_CONTRACT_VERSIONS": "pa.pas@2.2"})
-	cfg, err := loadConfig(func(k string) string { return e[k] })
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !slices.Contains(cfg.PublishedContractVersions, "pa.pas@2.2") || slices.Contains(cfg.PublishedContractVersions, "pa.pas@2.0") {
-		t.Fatalf("peer-visible backend receipt = %v", cfg.PublishedContractVersions)
-	}
-	if !slices.Contains(cfg.ContractVersions, "pa.pas@2.0") || slices.Contains(cfg.ContractVersions, "pa.pas@2.2") {
-		t.Fatalf("authored builder set changed = %v", cfg.ContractVersions)
-	}
-	reg := shnsdk.NewRegistry()
-	reg.Set("payer", shnsdk.RegistryEntry{ID: "payer", Role: "payer", BaseURL: "https://gateway.example", ContractVersions: cfg.PublishedContractVersions})
-	if err := checkNativeReceivePublication(cfg, "payer", reg); err != nil {
-		t.Fatalf("app refused backend-supported feed line: %v", err)
-	}
-}
-
-func TestNativeReceiveBootGuardPreservesUnconfiguredKnownLines(t *testing.T) {
-	for _, role := range []string{"provider", "payer"} {
-		e := baseEnv(map[string]string{"ROLE": role})
-		cfg, err := loadConfig(func(k string) string { return e[k] })
-		if err != nil {
-			t.Fatal(err)
-		}
-		reg := shnsdk.NewRegistry()
-		entry := shnsdk.RegistryEntry{ID: role, Role: role, BaseURL: "https://gateway.example", ContractVersions: []string{"pa.pas@2.2"}}
-		reg.Set(role, entry)
-		if err := checkNativeReceivePublication(cfg, role, reg); err != nil {
-			t.Fatalf("%s rejected SDK-known native receipt without backend assertion: %v", role, err)
-		}
-		entry.ContractVersions = []string{"pa.pas@9.9"}
-		reg.Set(role, entry)
-		if err := checkNativeReceivePublication(cfg, role, reg); err == nil {
-			t.Fatalf("%s accepted unsupported future receipt", role)
-		}
 	}
 }

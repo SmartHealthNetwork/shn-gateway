@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
@@ -220,7 +222,7 @@ func TestSelectLegToken_RefusalContractNotDeclared(t *testing.T) {
 func TestSelectRoutePrefersDeclaredThenNativeReachThenChain(t *testing.T) {
 	reg := shnsdk.NewRegistry()
 	reg.Set("payer-22", shnsdk.RegistryEntry{ID: "payer-22", Role: "payer", ContractVersions: []string{"pa.pas@2.2"}})
-	fake := syntheticFakeValidator()
+	fake := shnsdk.NewFakeValidator()
 
 	t.Run("arm 2: native reach when 2.2 is laned", func(t *testing.T) {
 		g := &Gateway{cfg: Config{
@@ -236,11 +238,24 @@ func TestSelectRoutePrefersDeclaredThenNativeReachThenChain(t *testing.T) {
 		}
 	})
 
-	t.Run("same without optional validator lanes remains native", func(t *testing.T) {
-		g := &Gateway{cfg: Config{Reg: reg, DeclaredContractVersions: []string{"pa.pas@2.0"}}}
-		route, err := g.selectLegRoute("payer-22", "pas-claim")
-		if err != nil || route.Token != "pa.pas@2.2" || route.BuildLine != "2.2" || route.Chain != nil {
-			t.Fatalf("native route depends on optional lane: %+v %v", route, err)
+	t.Run("same minus the 2.2 lane: refuses naming the missing lane", func(t *testing.T) {
+		g := &Gateway{cfg: Config{
+			Reg: reg, DeclaredContractVersions: []string{"pa.pas@2.0"},
+			ValidatorsByLine: map[string]shnsdk.Validator{"2.0": fake}, // no 2.2 lane
+			// A certification-only client for 2.2 is evidence, not a lane: it must
+			// not make 2.2 reachable.
+			CertificationValidatorsByLine: map[string]shnsdk.Validator{"2.0": fake, "2.2": fake},
+		}}
+		_, err := g.selectLegRoute("payer-22", "pas-claim")
+		if err == nil {
+			t.Fatal("want refusal — 2.2 is native but unlaned, no bridge available")
+		}
+		var rre *RouteRefusalError
+		if !errors.As(err, &rre) {
+			t.Fatalf("want *RouteRefusalError, got %T", err)
+		}
+		if !strings.Contains(rre.Error(), "no configured validator lane for line 2.2") {
+			t.Fatalf("refusal %q missing the missing-lane bridge issue", rre.Error())
 		}
 	})
 
@@ -274,7 +289,7 @@ func TestSelectRoutePrefersDeclaredThenNativeReachThenChain(t *testing.T) {
 func TestSelectRouteNativeReachHighestAmongMultipleDeclaredPeerLines(t *testing.T) {
 	reg := shnsdk.NewRegistry()
 	reg.Set("payer-2122", shnsdk.RegistryEntry{ID: "payer-2122", Role: "payer", ContractVersions: []string{"pa.pas@2.1", "pa.pas@2.2"}})
-	fake := syntheticFakeValidator()
+	fake := shnsdk.NewFakeValidator()
 
 	t.Run("both peer lines laned: highest (2.2) wins", func(t *testing.T) {
 		g := &Gateway{cfg: Config{
@@ -290,11 +305,10 @@ func TestSelectRouteNativeReachHighestAmongMultipleDeclaredPeerLines(t *testing.
 		}
 	})
 
-	t.Run("control: 2.2 builder excluded, next-highest native line (2.1)", func(t *testing.T) {
+	t.Run("control: the 2.2 lane absent, falls back to the next-highest declared+laned line (2.1)", func(t *testing.T) {
 		g := &Gateway{cfg: Config{
 			Reg: reg, DeclaredContractVersions: []string{"pa.pas@2.0"},
-			ValidatorsByLine:  map[string]shnsdk.Validator{"2.0": fake, "2.1": fake},
-			EgressNativeLines: []string{"2.0", "2.1"}, // no executable 2.2 builder
+			ValidatorsByLine: map[string]shnsdk.Validator{"2.0": fake, "2.1": fake}, // no 2.2 lane
 			// A certification-only client for 2.2 does not make it a lane either.
 			CertificationValidatorsByLine: map[string]shnsdk.Validator{"2.0": fake, "2.1": fake, "2.2": fake},
 		}}
@@ -303,7 +317,7 @@ func TestSelectRouteNativeReachHighestAmongMultipleDeclaredPeerLines(t *testing.
 			t.Fatalf("want a route, got refusal: %v", err)
 		}
 		if route.Token != "pa.pas@2.1" || route.BuildLine != "2.1" || route.Chain != nil {
-			t.Fatalf("route = %+v, want native reach @2.1 (2.2 builder unavailable so it's skipped, not 2.2)", route)
+			t.Fatalf("route = %+v, want native reach @2.1 (2.2 unlaned so it's skipped, not 2.2)", route)
 		}
 	})
 }
@@ -333,7 +347,7 @@ func TestSelectRouteNativeReachHighestAmongMultipleDeclaredPeerLines(t *testing.
 // source; fabricating fake manifest rows to force that isolation was
 // deliberately avoided per review instruction.
 func TestSelectRouteChainRankingFixedTargetPrefersShorterChain(t *testing.T) {
-	fake := syntheticFakeValidator()
+	fake := shnsdk.NewFakeValidator()
 
 	t.Run("motivating case: pa.pas own={2.0,2.1} peer={2.2} — the 1-step 2.1->2.2 chain wins over the 2-step 2.0->2.1->2.2 chain", func(t *testing.T) {
 		reg := shnsdk.NewRegistry()
@@ -395,7 +409,7 @@ func TestStrictPeerRefusesCarryChain(t *testing.T) {
 	// pa.pas 2.0<->2.1's manifest row is Class=gated (compat.go) — a real,
 	// non-stub chain a strict peer must refuse AT SELECTION, naming the
 	// overlay.
-	fake := syntheticFakeValidator()
+	fake := shnsdk.NewFakeValidator()
 	gatedReg := shnsdk.NewRegistry()
 	gatedReg.Set("payer-21", shnsdk.RegistryEntry{ID: "payer-21", Role: "payer", ContractVersions: []string{"pa.pas@2.1"}})
 
@@ -460,15 +474,14 @@ func TestStrictPeerRefusesCarryChain(t *testing.T) {
 // / missing target lane / gated-peer each produce a DISTINCT legible
 // message — the RouteRefusalError grammar extension.
 func TestSelectRouteRefusalNamesBridgeIngredient(t *testing.T) {
-	fake := syntheticFakeValidator()
+	fake := shnsdk.NewFakeValidator()
 
 	t.Run("missing target lane", func(t *testing.T) {
 		reg := shnsdk.NewRegistry()
 		reg.Set("payer-22", shnsdk.RegistryEntry{ID: "payer-22", Role: "payer", ContractVersions: []string{"pa.pas@2.2"}})
 		g := &Gateway{cfg: Config{
 			Reg: reg, DeclaredContractVersions: []string{"pa.pas@2.0"},
-			ValidatorsByLine:  map[string]shnsdk.Validator{"2.0": fake},
-			EgressNativeLines: []string{"2.0"}, // force actual adaptation; native needs no lane
+			ValidatorsByLine: map[string]shnsdk.Validator{"2.0": fake},
 		}}
 		_, err := g.selectLegRoute("payer-22", "pas-claim")
 		assertBridgeIssue(t, err, "no configured validator lane for line 2.2")
@@ -535,7 +548,7 @@ func TestOriginateLegFallbackStaysIntersectionOnly(t *testing.T) {
 	// 2.2 is native+laned (an arm-2-worthy peer for selectLegRoute) — the
 	// fallback must not be tempted.
 	reg.Set("payer-22", shnsdk.RegistryEntry{ID: "payer-22", Role: "payer", ContractVersions: []string{"pa.pas@2.2"}})
-	fake := syntheticFakeValidator()
+	fake := shnsdk.NewFakeValidator()
 	g := &Gateway{cfg: Config{
 		Reg: reg, DeclaredContractVersions: []string{"pa.pas@2.0"},
 		ValidatorsByLine: map[string]shnsdk.Validator{"2.0": fake, "2.2": fake},
@@ -580,7 +593,7 @@ func TestEgressNativeLinesDoesNotAffectSharedDeclaredLine(t *testing.T) {
 // touch), then as natively reachable under the knob, then by chain — and a pin
 // none of the three can reach is refused.
 func TestSelectResumeRouteUnderNarrowing(t *testing.T) {
-	fake := syntheticFakeValidator()
+	fake := shnsdk.NewFakeValidator()
 
 	t.Run("knob permits the pinned line: native resume, no chain", func(t *testing.T) {
 		g := &Gateway{cfg: Config{
@@ -651,25 +664,6 @@ func TestSelectResumeRouteUnderNarrowing(t *testing.T) {
 	})
 }
 
-// Native continuation reachability is a builder/route fact. Optional runtime
-// validator readiness cannot strand a pend whose submit already succeeded.
-func TestSelectResumeRouteNativeWithoutValidator(t *testing.T) {
-	for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve, EnforcementBasic, EnforcementStrict} {
-		t.Run(level.String(), func(t *testing.T) {
-			g := &Gateway{cfg: Config{
-				DeclaredContractVersions: []string{"pa.pas@2.0"},
-				ConformanceEnforcement:   level,
-			}}
-			for _, leg := range []string{"pas-claim-update", "pas-claim-inquire"} {
-				route, err := g.selectResumeRoute("pa.pas@2.0", "payer", leg)
-				if err != nil || route.Token != "pa.pas@2.0" || route.BuildLine != "2.0" || len(route.Chain) != 0 {
-					t.Fatalf("%s route=%+v err=%v", leg, route, err)
-				}
-			}
-		})
-	}
-}
-
 // TestLegRecordStaysVersionFree pins LegRecord's field inventory. The pended-
 // line pin lives in pendState by SETTLED DECISION (AI-1: ExchangeStore is
 // metadata-only, "gates nothing", and a stored line that later drives
@@ -714,10 +708,10 @@ func d7SetPeerContractVersions(t *testing.T, env *inProcessExchange, tokens ...s
 // d7CaptureEvents wires the observer seam on the harness gateway and returns a
 // pointer to the accumulating event slice (read after the handler returns — the
 // engine emits synchronously on the calling goroutine).
-func d7CaptureEvents(t *testing.T, env *inProcessExchange) func() []ObserverEvent {
+func d7CaptureEvents(env *inProcessExchange) *[]ObserverEvent {
 	evs := &[]ObserverEvent{}
 	env.originator.cfg.Observer = func(e ObserverEvent) { *evs = append(*evs, e) }
-	return func() []ObserverEvent { observationFlush(t, env.originator); return *evs }
+	return evs
 }
 
 func d7EventsOfKind(evs []ObserverEvent, kind string) []ObserverEvent {
@@ -758,7 +752,7 @@ func d7OneEventOfKind(t *testing.T, evs []ObserverEvent, kind string) ObserverEv
 // legacy path REFUSED; they may never re-decide a topology that already routed.
 // If this fails, the promotion changed live routing, not just reachability.
 func TestD7PromotedSitesPreserveIntersectingTopologies(t *testing.T) {
-	fake := syntheticFakeValidator()
+	fake := shnsdk.NewFakeValidator()
 	// The legTypes D-7 promoted, spanning both promoted contracts.
 	legTypes := []string{"crd-order-select", "crd-order-dispatch", "dtr-questionnaire-fetch"}
 
@@ -828,7 +822,7 @@ func TestD7PromotedSitesPreserveIntersectingTopologies(t *testing.T) {
 // refused — the exact hole D-7 exists to close. Chain nil: the bytes are built
 // natively at 2.2, nothing is transformed.
 func TestD7CRDArm2ReachesSkewedPeer(t *testing.T) {
-	fake := syntheticFakeValidator()
+	fake := shnsdk.NewFakeValidator()
 	reg := shnsdk.NewRegistry()
 	reg.Set("payer-crd22", shnsdk.RegistryEntry{ID: "payer-crd22", Role: "payer", ContractVersions: []string{"pa.crd@2.2"}})
 	g := &Gateway{cfg: Config{
@@ -846,32 +840,48 @@ func TestD7CRDArm2ReachesSkewedPeer(t *testing.T) {
 	}
 }
 
-// A producer declaration is independent of this gateway's own built line and
-// validator lanes. The signed 2.2 body reaches an endpoint advertising 2.2.
-func TestD7CRDIngressNativeProducerDeclarationReachesSkewedPeer(t *testing.T) {
-	env := newTransportExchange(t)
-	d7SetPeerContractVersions(t, env, "pa.crd@2.2")
-	env.originator.cfg.Validator = nil
-	env.originator.cfg.ValidatorsByLine = nil
-	evs := d7CaptureEvents(t, env)
-	body := conformantCRDRequest("MBR-COVERED")
-	rec := ingressAtVersion(t, env, "shn-order-select", "pa.crd@2.2", body)
-	if rec.Code != 200 || env.routeHitCount() != 1 {
-		t.Fatalf("native delivery %d %s hits=%d", rec.Code, rec.Body.String(), env.routeHitCount())
+// TestD7CRDIngressRoutesSkewedPeerInsteadOfRefusing is the INGRESS-LEVEL skew
+// pin required by the census adjudication (site 4, ingress.go's
+// handleCRDIngress). Before the promotion this drive 422'd on OriginateLeg's
+// arm-1-only backfill; after it, the partner's CDS Hooks request reaches a
+// pa.crd@2.2-only peer, stamped at the routed line. pa.crd bytes are LINE-INERT
+// by verified derivation (compat.go's identity rows), so stamping the routed
+// line is as truthful for partner-built bytes as for our own.
+func TestD7CRDIngressRoutesSkewedPeerInsteadOfRefusing(t *testing.T) {
+	env := newInProcessExchange(t)
+	d7SetPeerContractVersions(t, env, "pa.crd@2.2") // no shared declared line: own default is pa.crd@2.0
+	evs := d7CaptureEvents(env)
+
+	rec := httptest.NewRecorder()
+	env.originator.handleCRDIngress(rec, env.crdIngressRequest(t))
+
+	if rec.Code != 200 {
+		t.Fatalf("ingress status = %d (%s), want 200 — a 2.2-only peer must now be REACHED, not refused",
+			rec.Code, rec.Body.String())
 	}
-	if len(d7EventsOfKind(evs(), legTransformedKind)) != 0 {
-		t.Fatal("native carriage invoked a transform")
+	if n := len(d7EventsOfKind(*evs, "leg.refused")); n != 0 {
+		t.Fatalf("got %d leg.refused events, want 0", n)
 	}
-	got := env.lastRequestPayload()
-	hdr, carried, err := shnsdk.DecodeHTTPFrame(got)
-	if err != nil || hdr.Headers[shnsdk.FrameHeaderContractVersion] != "pa.crd@2.2" {
-		t.Fatalf("producer declaration lost: header=%+v err=%v", hdr, err)
+	originated := d7OneEventOfKind(t, *evs, "leg.originated")
+	if originated.LegType != "crd-order-select" {
+		t.Fatalf("leg.originated LegType = %q, want crd-order-select", originated.LegType)
 	}
-	if !bytes.Equal(carried, sentRequest(t, env)) || bytes.Contains(carried, []byte(`"fhirAuthorization"`)) {
-		t.Fatalf("wrong carried bytes: %s", carried)
+	if originated.Route == nil {
+		t.Fatal("leg.originated carries Route: nil — the ingress site is still on the arm-1-only backfill")
+	}
+	if originated.Route.Token != "pa.crd@2.2" || originated.Route.BuildLine != "2.2" {
+		t.Fatalf("Route = %+v, want Token=pa.crd@2.2 BuildLine=2.2", originated.Route)
+	}
+	if originated.Route.Chain != nil {
+		t.Fatalf("Route.Chain = %+v, want nil — arm 2 builds natively, it never transforms", originated.Route.Chain)
+	}
+	if n := len(d7EventsOfKind(*evs, legTransformedKind)); n != 0 {
+		t.Fatalf("got %d %s events on an arm-2 route, want 0 (transform-iff)", n, legTransformedKind)
 	}
 }
 
+// countingExchangeStore wraps an ExchangeStore, counting Begin calls — the
+// no-Exchange-record refusal pin's spy.
 type countingExchangeStore struct {
 	ExchangeStore
 	begins int
@@ -882,38 +892,66 @@ func (c *countingExchangeStore) Begin(workstream string) *Exchange {
 	return c.ExchangeStore.Begin(workstream)
 }
 
-// A signed source declaration cannot be relabeled to a recipient that does
-// not advertise it. The failed attempt is recorded, but no Hub route is made.
-func TestD7CRDIngressIncompatibleProducerRefusesBeforeHub(t *testing.T) {
-	env := newTransportExchange(t)
-	d7SetPeerContractVersions(t, env, "pa.pas@2.0")
+// TestD7CRDIngressRoutingRefusalCreatesNoExchangeRecord pins the ingress
+// site's selection-precedes-Begin ordering (ingress.go's own comment:
+// "Selection precedes the exchange so a refusal costs no Exchange record" —
+// console-visible behavior, previously unpinned): a peer
+// declaring NO pa.crd line refuses with the legible 422 + a leg.refused
+// event, and the Exchange store never Begins.
+func TestD7CRDIngressRoutingRefusalCreatesNoExchangeRecord(t *testing.T) {
+	env := newInProcessExchange(t)
+	d7SetPeerContractVersions(t, env, "pa.pas@2.0") // declares, but no pa.crd line at all
+	evs := d7CaptureEvents(env)
 	spy := &countingExchangeStore{ExchangeStore: env.originator.exchanges}
 	env.originator.exchanges = spy
-	rec := ingressAt(t, env, "shn-order-select", conformantCRDRequest("MBR-COVERED"))
-	if rec.Code != 422 || !strings.Contains(rec.Body.String(), "no registered native endpoint") || env.routeHitCount() != 0 {
-		t.Fatalf("incompatible native route: %d %s hits=%d", rec.Code, rec.Body.String(), env.routeHitCount())
+
+	rec := httptest.NewRecorder()
+	env.originator.handleCRDIngress(rec, env.crdIngressRequest(t))
+
+	if rec.Code != 422 {
+		t.Fatalf("ingress status = %d (%s), want 422 (route refusal)", rec.Code, rec.Body.String())
 	}
-	if spy.begins != 1 {
-		t.Fatalf("exchange attempts=%d, want one audited attempt", spy.begins)
+	if n := len(d7EventsOfKind(*evs, "leg.refused")); n != 1 {
+		t.Fatalf("got %d leg.refused events, want 1", n)
+	}
+	if n := len(d7EventsOfKind(*evs, "leg.originated")); n != 0 {
+		t.Fatalf("got %d leg.originated events on a refused ingress, want 0", n)
+	}
+	if spy.begins != 0 {
+		t.Fatalf("Exchange store Begin called %d times on a refused ingress, want 0 — a refusal must cost no Exchange record", spy.begins)
 	}
 }
 
+// TestD7CRDIngressSharedLineControl is the behavior-preservation CONTROL for the
+// ingress promotion (adjudication requirement): the ORDINARY topology — a peer
+// sharing this build's declared pa.crd@2.0 — must keep routing exactly as
+// before, at 2.0, with no chain and no transform. Pin (a) proves this at the
+// selection layer; this proves it at the real site.
 func TestD7CRDIngressSharedLineControl(t *testing.T) {
-	env := newTransportExchange(t)
+	env := newInProcessExchange(t)
 	d7SetPeerContractVersions(t, env, "pa.crd@2.0", "pa.dtr@2.0", "pa.pas@2.0")
-	evs := d7CaptureEvents(t, env)
+	evs := d7CaptureEvents(env)
 	spy := &countingExchangeStore{ExchangeStore: env.originator.exchanges}
 	env.originator.exchanges = spy
-	rec := ingressAt(t, env, "shn-order-select", conformantCRDRequest("MBR-COVERED"))
-	if rec.Code != 200 || env.routeHitCount() != 1 || spy.begins != 1 {
-		t.Fatalf("shared native route: %d %s hits=%d begins=%d", rec.Code, rec.Body.String(), env.routeHitCount(), spy.begins)
+
+	rec := httptest.NewRecorder()
+	env.originator.handleCRDIngress(rec, env.crdIngressRequest(t))
+
+	if rec.Code != 200 {
+		t.Fatalf("ingress status = %d (%s), want 200 on the ordinary shared-line topology", rec.Code, rec.Body.String())
 	}
-	hdr, body, err := shnsdk.DecodeHTTPFrame(env.lastRequestPayload())
-	if err != nil || hdr.Headers[shnsdk.FrameHeaderContractVersion] != "pa.crd@2.0" || !bytes.Equal(body, sentRequest(t, env)) {
-		t.Fatalf("shared-line producer declaration/body changed: header=%+v err=%v", hdr, err)
+	originated := d7OneEventOfKind(t, *evs, "leg.originated")
+	if originated.Route == nil || originated.Route.Token != "pa.crd@2.0" || originated.Route.BuildLine != "2.0" {
+		t.Fatalf("Route = %+v, want the unchanged arm-1 Token=pa.crd@2.0 BuildLine=2.0", originated.Route)
 	}
-	if len(d7EventsOfKind(evs(), legTransformedKind)) != 0 {
-		t.Fatal("shared native route transformed")
+	if originated.Route.Chain != nil {
+		t.Fatalf("Route.Chain = %+v, want nil on a shared declared line", originated.Route.Chain)
+	}
+	if n := len(d7EventsOfKind(*evs, legTransformedKind)); n != 0 {
+		t.Fatalf("got %d %s events on the ordinary topology, want 0", n, legTransformedKind)
+	}
+	if spy.begins != 1 {
+		t.Fatalf("Exchange store Begin called %d times on an accepted ingress, want 1 — an accepted leg costs exactly one Exchange record", spy.begins)
 	}
 }
 
@@ -928,7 +966,7 @@ func TestD7CRDIngressSharedLineControl(t *testing.T) {
 // identity chain actually RUNNING, so a future real CRD transform module must
 // run or refuse honestly, never be bypassed.
 func TestD7CRDArm3IdentityChainIsBytePreserving(t *testing.T) {
-	fake := syntheticFakeValidator()
+	fake := shnsdk.NewFakeValidator()
 	reg := shnsdk.NewRegistry()
 	reg.Set("payer-crd22", shnsdk.RegistryEntry{ID: "payer-crd22", Role: "payer", ContractVersions: []string{"pa.crd@2.2"}})
 	var evs []ObserverEvent
@@ -953,7 +991,7 @@ func TestD7CRDArm3IdentityChainIsBytePreserving(t *testing.T) {
 	}
 
 	in := []byte(`{"hook":"order-select","hookInstance":"hi-1","context":{"patientId":"MBR-COVERED"}}`)
-	out, reports, err := g.egressAdapt(context.Background(), route, in,
+	out, reports, err := g.egressAdapt(route, in,
 		ExchangeIdentity{CorrelationID: "corr-d7", LegType: "crd-order-select", Counterpart: "payer-crd22"})
 	if err != nil {
 		t.Fatalf("egressAdapt over the pa.crd identity chain failed: %v", err)
@@ -961,7 +999,6 @@ func TestD7CRDArm3IdentityChainIsBytePreserving(t *testing.T) {
 	if !bytes.Equal(out, in) {
 		t.Fatalf("identity chain altered the bytes:\n in = %s\nout = %s", in, out)
 	}
-	observationFlush(t, g)
 	if len(reports) != 2 {
 		t.Fatalf("want one LossReport per hop (2), got %d: %+v", len(reports), reports)
 	}
@@ -980,41 +1017,63 @@ func TestD7CRDArm3IdentityChainIsBytePreserving(t *testing.T) {
 	}
 }
 
-// The native ingress carries either producer-declared line without an
-// implicit 2.0→2.2 identity walk or a validator dependency.
-func TestD7CRDIngressNativeSkewDoesNotInvokeIdentityChain(t *testing.T) {
-	var bodies [][]byte
-	for _, version := range []string{"pa.crd@2.0", "pa.crd@2.2"} {
-		t.Run(version, func(t *testing.T) {
-			env := newTransportExchange(t)
-			d7SetPeerContractVersions(t, env, version)
-			env.originator.cfg.Validator = nil
-			env.originator.cfg.ValidatorsByLine = nil
-			env.originator.cfg.EgressNativeLines = []string{"2.0"}
-			evs := d7CaptureEvents(t, env)
-			rec := ingressAtVersion(t, env, "shn-order-select", version, conformantCRDRequest("MBR-COVERED"))
-			if rec.Code != 200 || env.routeHitCount() != 1 {
-				t.Fatalf("native %s: %d %s", version, rec.Code, rec.Body.String())
-			}
-			if len(d7EventsOfKind(evs(), legTransformedKind)) != 0 {
-				t.Fatal("hidden identity walk")
-			}
-			hdr, body, err := shnsdk.DecodeHTTPFrame(env.lastRequestPayload())
-			if err != nil || hdr.Headers[shnsdk.FrameHeaderContractVersion] != version {
-				t.Fatalf("header=%+v err=%v", hdr, err)
-			}
-			bodies = append(bodies, bytes.Clone(body))
-		})
+// TestD7CRDIngressArm3IdentityChainKeepsEgressBytes drives pin (c) at the REAL
+// ingress site: the same conformant CDS Hooks fixture, once on the ordinary
+// shared line (arm 1, no chain) and once forced through the arm-3 identity chain
+// to a 2.2-only peer. The bytes handed to OriginateLeg must be identical across
+// the two runs — the chain is genuinely a pass-through end to end, not just at
+// the primitive.
+func TestD7CRDIngressArm3IdentityChainKeepsEgressBytes(t *testing.T) {
+	run := func(t *testing.T, arm3 bool) ([]byte, []ObserverEvent) {
+		t.Helper()
+		env := newInProcessExchange(t)
+		if arm3 {
+			d7SetPeerContractVersions(t, env, "pa.crd@2.2")
+			fake := shnsdk.NewFakeValidator()
+			env.originator.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"2.0": fake, "2.1": fake, "2.2": fake}
+			env.originator.cfg.EgressNativeLines = []string{"2.0"} // D1c: force arm 3
+		} else {
+			d7SetPeerContractVersions(t, env, "pa.crd@2.0")
+		}
+		evs := d7CaptureEvents(env)
+		rec := httptest.NewRecorder()
+		env.originator.handleCRDIngress(rec, env.crdIngressRequest(t))
+		if rec.Code != 200 {
+			t.Fatalf("arm3=%v: ingress status = %d (%s), want 200", arm3, rec.Code, rec.Body.String())
+		}
+		originated := d7OneEventOfKind(t, *evs, "leg.originated")
+		return originated.Payload, *evs
 	}
-	if len(bodies) != 2 || !bytes.Equal(bodies[0], bodies[1]) {
-		t.Fatalf("native bodies differ: %q / %q", bodies[0], bodies[1])
+
+	arm1Bytes, arm1Evs := run(t, false)
+	arm3Bytes, arm3Evs := run(t, true)
+
+	if !bytes.Equal(arm1Bytes, arm3Bytes) {
+		t.Fatalf("arm-3 identity chain changed the egress bytes at the ingress site:\narm1 = %s\narm3 = %s", arm1Bytes, arm3Bytes)
+	}
+	if n := len(d7EventsOfKind(arm1Evs, legTransformedKind)); n != 0 {
+		t.Fatalf("arm-1 run emitted %d %s events, want 0", n, legTransformedKind)
+	}
+	transformed := d7OneEventOfKind(t, arm3Evs, legTransformedKind)
+	if transformed.LegType != "crd-order-select" {
+		t.Fatalf("leg.transformed LegType = %q, want crd-order-select", transformed.LegType)
+	}
+	originated := d7OneEventOfKind(t, arm3Evs, "leg.originated")
+	if originated.Route == nil || originated.Route.Token != "pa.crd@2.2" || originated.Route.BuildLine != "2.0" {
+		t.Fatalf("arm-3 Route = %+v, want Token=pa.crd@2.2 BuildLine=2.0", originated.Route)
+	}
+	if len(originated.Route.Chain) != 2 {
+		t.Fatalf("arm-3 Route.Chain = %+v, want the 2-hop identity chain rendered on the observer seam", originated.Route.Chain)
 	}
 }
 
-// Both original byte-mutation controls remain live. Native carriage of a
-// producer-declared representation never invokes even a locally registered
-// cross-line step, so neither an assertion edit nor whitespace is introduced.
-func TestD7CRDIngressNativeSkipsMutatedIdentitySteps(t *testing.T) {
+// TestD7CRDIngressRefusesAWalkThatChangesBytes is the rejection row for the
+// ingress's walk-equality guard: the CDS Hooks request is carried unchanged
+// to the payer's line, so a translation step on the route that changes any
+// byte (here one byte of the request, or trailing whitespace) makes the
+// ingress refuse (502) before anything reaches the Hub. The pa.crd row is
+// swapped for the length of the test only.
+func TestD7CRDIngressRefusesAWalkThatChangesBytes(t *testing.T) {
 	for _, row := range []struct {
 		name   string
 		change func([]byte) []byte
@@ -1023,179 +1082,128 @@ func TestD7CRDIngressNativeSkipsMutatedIdentitySteps(t *testing.T) {
 			out := bytes.Clone(in)
 			i := bytes.Index(out, []byte(`"hookInstance":"`))
 			if i < 0 {
-				return append(out, 'x')
+				return append(out, ' ')
 			}
-			out[i+len(`"hookInstance":"`)] ^= 1
+			j := i + len(`"hookInstance":"`)
+			out[j] ^= 0x01
 			return out
 		}},
 		{"whitespace appended", func(in []byte) []byte { return append(bytes.Clone(in), '\n') }},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			idx := -1
-			for i, step := range compatManifest {
-				if step.Contract == "pa.crd" && step.From == "2.0" && step.To == "2.1" {
+			for i, s := range compatManifest {
+				if s.Contract == "pa.crd" && s.From == "2.0" && s.To == "2.1" {
 					idx = i
 				}
 			}
 			if idx < 0 {
-				t.Fatal("missing registered step")
+				t.Fatal("no pa.crd 2.0->2.1 row")
 			}
 			saved := compatManifest[idx]
 			t.Cleanup(func() { compatManifest[idx] = saved })
-			walked := 0
+			var walked int
 			compatManifest[idx].Up = func(p []byte, x ExchangeIdentity) ([]byte, LossReport, error) {
 				walked++
 				return row.change(p), LossReport{Module: "pa.crd 2.0->2.1", Source: "2.0", Target: "2.1"}, nil
 			}
-			body := conformantCRDRequest("MBR-COVERED")
-			control := newTransportExchange(t)
-			d7SetPeerContractVersions(t, control, "pa.crd@2.2")
-			if rec := ingressAtVersion(t, control, "shn-order-select", "pa.crd@2.2", body); rec.Code != 200 {
-				t.Fatalf("control %d %s", rec.Code, rec.Body.String())
-			}
-			want := bytes.Clone(sentRequest(t, control))
-			env := newTransportExchange(t)
-			d7SetPeerContractVersions(t, env, "pa.crd@2.2")
-			env.originator.cfg.EgressNativeLines = []string{"2.0"}
-			evs := d7CaptureEvents(t, env)
-			rec := ingressAtVersion(t, env, "shn-order-select", "pa.crd@2.2", body)
-			if rec.Code != 200 || env.routeHitCount() != 1 || walked != 0 || !bytes.Equal(sentRequest(t, env), want) {
-				t.Fatalf("native changed: status=%d hits=%d walks=%d got=%s want=%s", rec.Code, env.routeHitCount(), walked, sentRequest(t, env), want)
-			}
-			if len(d7EventsOfKind(evs(), legTransformedKind)) != 0 {
-				t.Fatal("native delivery claimed transformation")
-			}
-		})
-	}
-}
 
-// An explicitly selected CRD identity bridge must refuse bytes its registered
-// step changes. The third row ensures a step cannot mutate the caller's input
-// and thereby make a later equality check compare two altered slices.
-func TestD7CRDIngressExplicitIdentityRejectsChangedBytes(t *testing.T) {
-	for _, row := range []struct {
-		name   string
-		change func([]byte) []byte
-	}{
-		{"hookInstance byte", func(in []byte) []byte {
-			out := bytes.Clone(in)
-			out[bytes.Index(out, []byte(`"hookInstance":"`))+len(`"hookInstance":"`)] ^= 1
-			return out
-		}},
-		{"trailing whitespace", func(in []byte) []byte { return append(bytes.Clone(in), '\n') }},
-		{"in-place hookInstance byte", func(in []byte) []byte {
-			in[bytes.Index(in, []byte(`"hookInstance":"`))+len(`"hookInstance":"`)] ^= 1
-			return in
-		}},
-	} {
-		t.Run(row.name, func(t *testing.T) {
-			idx := -1
-			for i, step := range compatManifest {
-				if step.Contract == "pa.crd" && step.From == "2.0" && step.To == "2.1" {
-					idx = i
-				}
-			}
-			if idx < 0 {
-				t.Fatal("missing registered CRD identity step")
-			}
-			saved := compatManifest[idx]
-			t.Cleanup(func() { compatManifest[idx] = saved })
-			compatManifest[idx].Up = func(p []byte, x ExchangeIdentity) ([]byte, LossReport, error) {
-				return row.change(p), LossReport{Module: "pa.crd 2.0->2.1", Source: "2.0", Target: "2.1"}, nil
-			}
-			env := newTransportExchange(t)
+			env := newInProcessExchange(t)
 			d7SetPeerContractVersions(t, env, "pa.crd@2.2")
-			fake := syntheticFakeValidator()
+			fake := shnsdk.NewFakeValidator()
 			env.originator.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"2.0": fake, "2.1": fake, "2.2": fake}
-			env.originator.cfg.EgressNativeLines = []string{"2.0"}
-			env.originator.cfg.DemoEdgeCapture = true
-			route, err := env.originator.selectLegRoute("payer", "crd-order-select")
-			if err != nil || len(route.Chain) != 2 {
-				t.Fatalf("explicit route=%+v err=%v", route, err)
+			env.originator.cfg.EgressNativeLines = []string{"2.0"} // D1c: force arm 3 through the swapped row
+			evs := d7CaptureEvents(env)
+
+			rec := httptest.NewRecorder()
+			env.originator.handleCRDIngress(rec, env.crdIngressRequest(t))
+
+			if walked != 1 {
+				t.Fatalf("the swapped step ran %d times, want 1 — the row did not exercise the arm-3 walk", walked)
 			}
-			original := []byte(`{"hook":"order-select","hookInstance":"h1","context":{"patientId":"MBR-COVERED"}}`)
-			want := bytes.Clone(original)
-			evs := d7CaptureEvents(t, env)
-			out, reports, err := env.originator.egressAdapt(context.Background(), route, original,
-				ExchangeIdentity{CorrelationID: "changed-identity", LegType: "crd-order-select", Counterpart: "payer"})
-			var typed *ingressContextError
-			if !errors.As(err, &typed) || typed.status != 502 || typed.code != "adaptation_failed" || out != nil || reports != nil {
-				t.Fatalf("changed identity accepted: out=%s reports=%+v err=%v", out, reports, err)
+			if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "the CDS Hooks request cannot be carried to the payer's line unchanged") {
+				t.Fatalf("ingress = %d %s, want 502 naming the unchanged-carry refusal", rec.Code, rec.Body.String())
 			}
-			if !bytes.Equal(original, want) {
-				t.Fatalf("adapter mutated caller's source bytes: %s", original)
+			if n := len(d7EventsOfKind(*evs, "leg.originated")); n != 0 {
+				t.Fatalf("got %d leg.originated events, want 0", n)
 			}
-			if len(d7EventsOfKind(evs(), "leg.failed")) != 1 || len(d7EventsOfKind(evs(), legTransformedKind)) != 0 || env.routeHitCount() != 0 {
-				t.Fatalf("failure was misreported or dispatched: events=%v hits=%d", d7Kinds(evs()), env.routeHitCount())
-			}
-			if _, ok := env.originator.edgeCaptureLookup("changed-identity"); ok {
-				t.Fatal("refused transform entered successful edge capture")
+			if env.routeHitCount() != 0 {
+				t.Fatalf("route hits = %d, want 0 — a refused request never reaches the Hub", env.routeHitCount())
 			}
 		})
 	}
 }
 
-func TestD7CRDIngressNativeWithoutValidatorDoesNotDemandLane(t *testing.T) {
-	env := newTransportExchange(t)
+// TestD7CRDIngressRefusalNamesMissingLane is pin (d): a pa.crd@2.2-only peer
+// with NO 2.2 validator lane has no honest bridge — arm 2 cannot reach an
+// unlaned line and arm 3 cannot land on one — so the ingress refuses with the
+// legible RouteRefusalError grammar NAMING the missing lane. The refusal is the
+// promoted path's (it carries a BridgeIssue); the legacy backfill's refusal
+// never named an ingredient.
+func TestD7CRDIngressRefusalNamesMissingLane(t *testing.T) {
+	env := newInProcessExchange(t)
 	d7SetPeerContractVersions(t, env, "pa.crd@2.2")
-	env.originator.cfg.Validator = nil
-	env.originator.cfg.ValidatorsByLine = nil
-	rec := ingressAtVersion(t, env, "shn-order-select", "pa.crd@2.2", conformantCRDRequest("MBR-COVERED"))
-	if rec.Code != 200 || env.routeHitCount() != 1 {
-		t.Fatalf("native unlaned status=%d %s", rec.Code, rec.Body.String())
-	}
-}
+	fake := shnsdk.NewFakeValidator()
+	env.originator.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"2.0": fake} // 2.2 deliberately UNLANED
+	evs := d7CaptureEvents(env)
 
-func TestD7CRDIngressExplicitBridgeMissingLaneRefuses(t *testing.T) {
-	env := newTransportExchange(t)
-	d7SetPeerContractVersions(t, env, "pa.crd@2.2")
-	env.originator.cfg.EgressNativeLines = []string{"2.0"}
-	env.originator.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"2.0": syntheticFakeValidator()}
-	_, err := env.originator.selectLegRoute("payer", "crd-order-select")
-	var refusal *RouteRefusalError
-	if !errors.As(err, &refusal) || !strings.Contains(refusal.BridgeIssue, "no configured validator lane for line 2.2") {
-		t.Fatalf("explicit bridge missing source/target proof: %v", err)
+	rec := httptest.NewRecorder()
+	env.originator.handleCRDIngress(rec, env.crdIngressRequest(t))
+
+	if rec.Code != 422 {
+		t.Fatalf("ingress status = %d (%s), want 422 — no lane for 2.2 means no honest bridge", rec.Code, rec.Body.String())
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "no configured validator lane for line 2.2") {
+		t.Fatalf("refusal body must NAME the missing lane, got %q", body)
+	}
+	refused := d7OneEventOfKind(t, *evs, "leg.refused")
+	if refused.Route == nil || refused.Route.BridgeIssue == "" {
+		t.Fatalf("leg.refused Route = %+v, want the promoted path's structured refusal with a BridgeIssue", refused.Route)
+	}
+	if n := len(d7EventsOfKind(*evs, "leg.originated")); n != 0 {
+		t.Fatalf("got %d leg.originated events on a refusal, want 0 — nothing may reach the Hub", n)
 	}
 	if env.routeHitCount() != 0 {
-		t.Fatal("bridge selection dispatched")
+		t.Fatalf("route hits = %d, want 0 — a refused leg never reaches the Hub", env.routeHitCount())
 	}
 }
 
-// The edge capture is populated only by explicit adaptation. Its before/after
-// bytes are the source-ready body carried at the participant boundary.
-func TestD7CRDIngressExplicitIdentityCaptureHoldsSourceReadyBytes(t *testing.T) {
-	env := newTransportExchange(t)
-	d7SetPeerContractVersions(t, env, "pa.crd@2.0")
+// TestD7CRDIngressArm3EdgeCaptureHoldsSentBytes: with the edge capture on, the
+// forced identity walk at the ingress runs over the request this gateway
+// sends — the callback removed, obtained prefetch added — so what the capture
+// holds is exactly what the payer's side received, and never the EHR's
+// credential.
+func TestD7CRDIngressArm3EdgeCaptureHoldsSentBytes(t *testing.T) {
+	env := newInProcessExchange(t)
+	d7SetPeerContractVersions(t, env, "pa.crd@2.2")
+	fake := shnsdk.NewFakeValidator()
+	env.originator.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"2.0": fake, "2.1": fake, "2.2": fake}
+	env.originator.cfg.EgressNativeLines = []string{"2.0"} // D1c: force arm 3
 	env.originator.cfg.DemoEdgeCapture = true
-	body := ehrRequest(supported)
-	rec := ingressAtVersion(t, env, "shn-order-sign", "pa.crd@2.0", body)
-	if rec.Code != 200 {
-		t.Fatalf("native ingress %d %s", rec.Code, rec.Body.String())
+	s := newPrefetchSoR()
+	s.answer(t, "ServiceRequest", searchPage(sorRequest("h1", "Patient/"+prefetchSoRID)))
+	env.originator.cfg.SoR = s.sor()
+	evs := d7CaptureEvents(env)
+	rec := httptest.NewRecorder()
+	env.originator.handleCRDIngress(rec, crdIngressPost(ehrRequest(supported)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("ingress status = %d (%s), want 200", rec.Code, rec.Body.String())
+	}
+	transformed := d7OneEventOfKind(t, *evs, legTransformedKind)
+	c, ok := env.originator.edgeCaptureLookup(transformed.CorrelationID)
+	if !ok {
+		t.Fatal("no edge capture for the transformed leg")
 	}
 	sent := sentRequest(t, env)
+	if !bytes.Equal(c.Before, sent) || !bytes.Equal(c.After, sent) {
+		t.Fatalf("capture does not hold the sent bytes:\nbefore = %s\nafter  = %s\nsent   = %s", c.Before, c.After, sent)
+	}
 	for _, s := range []string{"fhirAuthorization", "ehr-secret-token", "fhirServer"} {
-		if bytes.Contains(sent, []byte(s)) {
-			t.Fatalf("source-ready bytes contain %s", s)
+		if bytes.Contains(c.Before, []byte(s)) {
+			t.Fatalf("capture holds %s: %s", s, c.Before)
 		}
 	}
-	d7SetPeerContractVersions(t, env, "pa.crd@2.2")
-	fake := syntheticFakeValidator()
-	env.originator.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"2.0": fake, "2.1": fake, "2.2": fake}
-	env.originator.cfg.EgressNativeLines = []string{"2.0"}
-	route, err := env.originator.selectLegRoute("payer", "crd-order-select")
-	if err != nil || len(route.Chain) != 2 {
-		t.Fatalf("explicit route=%+v err=%v", route, err)
-	}
-	evs := d7CaptureEvents(t, env)
-	out, _, err := env.originator.egressAdapt(context.Background(), route, sent, ExchangeIdentity{CorrelationID: "explicit-capture", LegType: "crd-order-select", Counterpart: "payer"})
-	if err != nil || !bytes.Equal(out, sent) {
-		t.Fatalf("identity output=%s err=%v", out, err)
-	}
-	if len(d7EventsOfKind(evs(), legTransformedKind)) != 1 {
-		t.Fatal("explicit identity transform not observed")
-	}
-	capture, ok := env.originator.edgeCaptureLookup("explicit-capture")
-	if !ok || !bytes.Equal(capture.Before, sent) || !bytes.Equal(capture.After, sent) {
-		t.Fatalf("capture=%+v ok=%v, sent=%s", capture, ok, sent)
+	if v, ok := valueOf(t, c.After, "prefetch", "serviceHistory"); !ok || !strings.Contains(v, `"h1"`) {
+		t.Fatalf("capture lacks the obtained serviceHistory: %s", c.After)
 	}
 }

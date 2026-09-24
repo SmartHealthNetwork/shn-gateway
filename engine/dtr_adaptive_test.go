@@ -272,7 +272,7 @@ func TestNextQuestion_FramedWhenCapable(t *testing.T) {
 	reqQR := []byte(`{"resourceType":"QuestionnaireResponse","status":"in-progress","subject":{"reference":"` + subject + `"}}`)
 	round := func(t *testing.T, capable bool) (*inProcessExchange, []json.RawMessage, int, string) {
 		t.Helper()
-		env := newTransportExchange(t)
+		env := newInProcessExchange(t)
 		declareFramedDTR(t, env, capable)
 		route, err := env.originator.selectLegLine(env.payerID, "dtr-questionnaire-fetch", "corr-0")
 		if err != nil {

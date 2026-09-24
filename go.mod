@@ -13,6 +13,8 @@ go 1.26.0
 // entry, so each reason is ONE physical line, however long — a wrapped reason clips
 // mid-clause in the warning a consumer actually sees.
 retract (
+	// Withdrawn: superseded by v0.52.0.
+	[v0.50.0, v0.51.1]
 	// Withdrawn: release tag identified the prior v0.42.0 snapshot instead of the intended release. Superseded by v0.43.1.
 	v0.43.0
 	// Withdrawn: returned 500 on clinician/patient attestation resumes against an SDC adaptive questionnaire (the amend refused an item whose group had not been delivered yet). Superseded by v0.37.1.
@@ -26,7 +28,7 @@ retract (
 )
 
 require (
-	github.com/SmartHealthNetwork/shn-sdk v0.55.0
+	github.com/SmartHealthNetwork/shn-sdk v0.56.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/samply/golang-fhir-models/fhir-models v0.3.2

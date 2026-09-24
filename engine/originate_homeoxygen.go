@@ -180,13 +180,13 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member 
 	// Hooks envelope, not a FHIR resource; the Patient, Coverage and history are the
 	// participant's own records. No enforcement point is added or removed after
 	// egressAdapt.
-	adaptedCRDReq, _, err := g.egressAdapt(ctx, crdRoute, crdReq, ExchangeIdentity{CorrelationID: crdCorr, LegType: "crd-order-dispatch", Counterpart: recipient})
+	adaptedCRDReq, _, err := g.egressAdapt(crdRoute, crdReq, ExchangeIdentity{CorrelationID: crdCorr, LegType: "crd-order-dispatch", Counterpart: recipient})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return dispatchResult{}, false
 	}
 	crdRespJSON, err := g.OriginateLeg(ctx, r, recipient, "crd-order-dispatch", pci, crdCorr, "",
-		Content{WorkstreamType: workstreamPA, ProfileID: crdRoute.Token, DeclaredVersion: crdRoute.Token, Route: routeInfoFor(crdRoute), Payload: sealRequest(relay.BuilderSDKCRDRequest, adaptedCRDReq, "application/json")})
+		Content{WorkstreamType: workstreamPA, ProfileID: crdRoute.Token, Route: routeInfoFor(crdRoute), Payload: sealRequest(relay.BuilderSDKCRDRequest, adaptedCRDReq, "application/json")})
 	if err != nil {
 		if g.relayOriginationError(w, err) {
 			return dispatchResult{}, false
@@ -252,12 +252,12 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member 
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "build questionnaire-package request failed: " + err.Error()})
 		return dispatchResult{}, false
 	}
-	if status, msg := g.carryUnchanged(ctx, route, dtrReq, dtrCorr, recipient); status != 0 {
+	if status, msg := g.carryUnchanged(route, dtrReq, dtrCorr, recipient); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return dispatchResult{}, false
 	}
 	packageJSON, err := g.OriginateLeg(ctx, r, recipient, "dtr-questionnaire-fetch", pci, dtrCorr, "",
-		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, DeclaredVersion: route.Token, Route: routeInfoFor(route), Payload: dtrPayload,
+		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Payload: dtrPayload,
 			Operation: shnsdk.FrameOperationQuestionnairePackage})
 	if err != nil {
 		if g.relayOriginationError(w, err) {

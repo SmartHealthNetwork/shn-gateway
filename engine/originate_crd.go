@@ -480,13 +480,6 @@ func readOriginatedAnswer(answer, order []byte) (crdOriginated, error) {
 // never renamed.
 var patientRefRE = regexp.MustCompile(`^Patient/([A-Za-z0-9\-.]{1,64})(?:/_history/[A-Za-z0-9\-.]{1,64})?$`)
 
-// NamePatientByMember readdresses the verified source patient ID to the member
-// identity on an outgoing participant resource. The same checked transformation
-// is used by gateway origination and by Kit's participant-held PAS order path.
-func NamePatientByMember(record []byte, sorID, member string) ([]byte, error) {
-	return namePatientByMember(record, sorID, member)
-}
-
 // namePatientByMember returns record — a resource, or a Bundle of resources —
 // with the patient the system of record names sorID named by member:
 //   - a Patient resource (the record, or an entry's resource) whose id is

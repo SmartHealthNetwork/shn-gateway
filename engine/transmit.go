@@ -100,7 +100,7 @@ func (g *Gateway) admit(p relay.Payload, k relay.Key) ([]byte, error) {
 }
 
 // writePayload is the response writer for payloads: it checks p against
-// transmit k and writes it with status and contentType ("" sends no header).
+// transmit k and writes it with status and contentType ("" sets no header).
 // A refused payload writes a 500 local fault instead.
 func (g *Gateway) writePayload(w http.ResponseWriter, status int, contentType string, p relay.Payload, k relay.Key) {
 	b, err := relay.Transmit(p, relay.Check(k))
@@ -111,10 +111,6 @@ func (g *Gateway) writePayload(w http.ResponseWriter, status int, contentType st
 	}
 	if contentType != "" {
 		w.Header().Set("Content-Type", contentType)
-	} else {
-		// A nil slice suppresses net/http's automatic type sniffing when the
-		// peer sent no Content-Type, including for a nonempty opaque body.
-		w.Header()["Content-Type"] = nil
 	}
 	w.WriteHeader(status)
 	_, _ = w.Write(b)

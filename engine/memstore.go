@@ -186,6 +186,12 @@ func (d *MemStore) FinalizeClaimUpdate(subjectPCI, correlationID string) error {
 
 var _ PendLedger = (*MemStore)(nil)
 
+// The in-memory Store answers the pre-forward correlation checks (eobowner.go).
+var (
+	_ EOBOwnerLookup        = (*MemStore)(nil)
+	_ PendCorrelationLookup = (*MemStore)(nil)
+)
+
 // RecordPendedKeyed records (or re-pends) an authorization and indexes its lookup
 // keys. See PendLedger.
 func (d *MemStore) RecordPendedKeyed(subjectPCI, corrID string, created time.Time, k PendKeys) (PendTransition, error) {
@@ -419,6 +425,32 @@ func (d *MemStore) RecordEOB(subjectPCI, eobID string, eobJSON []byte) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.recordEOBLocked(subjectPCI, eobID, eobJSON)
+}
+
+// EOBOwner reports the patient an EOB id is filed for. See EOBOwnerLookup.
+func (d *MemStore) EOBOwner(eobID string) (string, bool, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	owner, found := d.eobOwnerByID[eobID]
+	return owner, found, nil
+}
+
+// PendedForOtherSubject reports a patient other than subjectPCI with an undecided
+// authorization under corrID. See PendCorrelationLookup. When more than one
+// qualifies the least PCI is reported, so the answer does not depend on map order.
+func (d *MemStore) PendedForOtherSubject(corrID, subjectPCI string) (string, bool, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	other, found := "", false
+	for _, row := range d.pendedClaims {
+		if row.correlationID != corrID || row.subjectPCI == subjectPCI || row.rec.State == PendStateDecided {
+			continue
+		}
+		if !found || row.subjectPCI < other {
+			other, found = row.subjectPCI, true
+		}
+	}
+	return other, found, nil
 }
 
 // EOBsForPatient returns all stored EOBs for a patient PCI (search), or ok=false

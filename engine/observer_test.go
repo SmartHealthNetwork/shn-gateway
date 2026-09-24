@@ -38,7 +38,7 @@ func TestObserve_NilObserverIsNoop(t *testing.T) {
 			EncPub:   provEncPub,
 			EncPriv:  provEncPriv,
 		},
-		Validator: syntheticFakeValidator(),
+		Validator: shnsdk.NewFakeValidator(),
 		SoR:       sor,
 		Store:     sor,
 		Clock:     clock,
@@ -68,14 +68,13 @@ func TestObserve_StampsClockTime(t *testing.T) {
 			EncPub:   provEncPub,
 			EncPriv:  provEncPriv,
 		},
-		Validator: syntheticFakeValidator(),
+		Validator: shnsdk.NewFakeValidator(),
 		SoR:       sor,
 		Store:     sor,
 		Clock:     clock,
 		Observer:  func(e ObserverEvent) { got = append(got, e) },
 	})
 	gw.observe(ObserverEvent{Kind: "leg.originated", LegType: "crd-order-select"})
-	observationFlush(t, gw)
 	if len(got) != 1 {
 		t.Fatalf("want 1 event, got %d", len(got))
 	}
@@ -98,7 +97,6 @@ func TestObserver_OriginationLegEvents(t *testing.T) {
 	gw.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
 
 	callUC03(t, gw) // HTTP outcome is irrelevant here; the stub errors leg 1 by design
-	observationFlush(t, gw)
 
 	var kinds []string
 	for _, e := range events {
@@ -168,7 +166,6 @@ func TestObserver_ValidateEvents(t *testing.T) {
 		t.Fatal(err)
 	}
 	fix := newDispatchFixtureWith(t, "MBR-OX", Demo{BirthDate: "1958-07-14", FamilyName: "Okafor-Oxygen"}, orderJSON, "Organization/org-dme-ox", supplierJSON, func(cfg *Config) {
-		cfg.ConformanceEnforcement = EnforcementObserve
 		cfg.Observer = func(e ObserverEvent) {
 			if e.Kind == "validate.result" {
 				validates = append(validates, e)
@@ -181,7 +178,6 @@ func TestObserver_ValidateEvents(t *testing.T) {
 		t.Fatalf("dispatch %d %s", rec.Code, rec.Body.String())
 	}
 
-	observationFlush(t, fix.gw)
 	if len(validates) == 0 {
 		t.Fatal("no validate.result events observed for a dispatch run")
 	}
@@ -208,7 +204,7 @@ func TestObserver_ValidateEvents(t *testing.T) {
 // It also pins that New copies the lane map rather than decorating the caller's
 // (gateway/app builds one per boot; a test may share one across gateways).
 func TestObserver_ValidateEventsFromPerLineLanes(t *testing.T) {
-	fake := syntheticFakeValidator()
+	fake := shnsdk.NewFakeValidator()
 	lanes := map[string]shnsdk.Validator{"2.0": fake, "2.2": fake}
 	_, signPriv, err := ed25519.GenerateKey(nil)
 	if err != nil {
@@ -217,16 +213,15 @@ func TestObserver_ValidateEventsFromPerLineLanes(t *testing.T) {
 	stub := newCensusSoR()
 	var seen []ObserverEvent
 	g := mustNew(t, Config{
-		Role:                   "provider",
-		HolderID:               "provider",
-		Identity:               shnsdk.Identity{HolderID: "provider", SignPriv: signPriv},
-		SoR:                    stub,
-		Store:                  stub,
-		Validator:              fake,
-		ValidatorsByLine:       lanes,
-		ConformanceEnforcement: EnforcementStrict,
-		Clock:                  func() time.Time { return time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC) },
-		Observer:               func(e ObserverEvent) { seen = append(seen, e) },
+		Role:             "provider",
+		HolderID:         "provider",
+		Identity:         shnsdk.Identity{HolderID: "provider", SignPriv: signPriv},
+		SoR:              stub,
+		Store:            stub,
+		Validator:        fake,
+		ValidatorsByLine: lanes,
+		Clock:            func() time.Time { return time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC) },
+		Observer:         func(e ObserverEvent) { seen = append(seen, e) },
 	})
 
 	body := []byte(`{"resourceType":"Patient"}`)
@@ -235,7 +230,6 @@ func TestObserver_ValidateEventsFromPerLineLanes(t *testing.T) {
 			t.Fatalf("validateFHIR(line=%q) = (%d,%q), want ok", line, status, msg)
 		}
 	}
-	observationFlush(t, g)
 	if len(seen) != 3 {
 		t.Fatalf("%d validate.result events for 2 laned + 1 line-less $validate, want 3: %+v", len(seen), seen)
 	}
@@ -270,7 +264,6 @@ func TestObserver_IngressEvents(t *testing.T) {
 		bytes.NewReader(crdReqJSON("MBR-COVERED", ref, ref)))
 	rec := httptest.NewRecorder()
 	gw2.Handler().ServeHTTP(rec, req)
-	observationFlush(t, gw2)
 
 	var recv, resp *ObserverEvent
 	for i := range events {
@@ -346,7 +339,6 @@ func TestObserver_IngressConformanceNeutral(t *testing.T) {
 			bytes.NewReader(crdReqJSON("MBR-COVERED", ref, ref)))
 		rec := httptest.NewRecorder()
 		gw2.Handler().ServeHTTP(rec, req)
-		observationFlush(t, gw2)
 		return rec.Code, rec.Body.String()
 	}
 	offCode, offBody := run(false)
@@ -506,8 +498,6 @@ func TestObserver_SoRDecorationIdempotent(t *testing.T) {
 	cfg.Observer = func(ObserverEvent) {}
 	g2 := mustNew(t, cfg) // decorates
 	cfg2 := g2.cfg
-	var current []ObserverEvent
-	cfg2.Observer = func(e ObserverEvent) { current = append(current, e) }
 	g3 := mustNew(t, cfg2) // must NOT re-wrap
 	inner, ok := g3.cfg.SoR.(observingSoR)
 	if !ok {
@@ -515,11 +505,6 @@ func TestObserver_SoRDecorationIdempotent(t *testing.T) {
 	}
 	if _, doubled := inner.inner.(observingSoR); doubled {
 		t.Fatal("SoR decorated twice — New() must guard on the decorator type")
-	}
-	_, _, _ = g3.cfg.SoR.ResolvePatient("missing")
-	observationFlush(t, g3)
-	if len(current) != 1 || current[0].Kind != "sor.read" {
-		t.Fatalf("rebuilt SoR must dispatch through its owning gateway: %+v", current)
 	}
 	// Same guard-on-decorator-type pattern for the validator: before this
 	// change gateway.go:263-264 double-wrapped on a re-New, double-emitting
@@ -553,7 +538,6 @@ func TestObserver_SoREventsInUC03(t *testing.T) {
 	g2 := mustNew(t, cfg)
 
 	callUC03(t, g2)
-	observationFlush(t, g2)
 
 	ops := map[string]bool{}
 	for _, e := range events {
@@ -590,7 +574,6 @@ func TestObserver_SoREventsInUC03(t *testing.T) {
 		t.Fatalf("managed populate: %v", err)
 	}
 
-	observationFlush(t, g2)
 	ops = map[string]bool{}
 	for _, e := range events {
 		if e.Kind == "sor.read" {

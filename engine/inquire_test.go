@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -295,7 +296,369 @@ func TestPASInquire_ByAuthorizationNumberWithNoItems(t *testing.T) {
 	if len(facts.items) != 0 {
 		t.Fatalf("items = %+v, want none", facts.items)
 	}
+	// It still reaches the ledger and still decides — with no EOB, because the
+	// requester named no product coding and this gateway will not choose one.
+	store := NewMemStore()
+	g := &Gateway{cfg: Config{Store: store, Clock: fixedClock}}
+	const subject, corr = "pci:MBR-COVERED", "corr-noitems"
+	if _, err := store.RecordPendedKeyed(subject, corr, fixedClock(), PendKeys{
+		RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{inquiryCRKey},
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	result := LegResult{}
+	commit, _ := g.inquiryLedgerEffect(inquiryRequester, subject, "Patient/MBR-COVERED", "corr-inquiry-leg", facts, decidedAnswer(t), &result)
+	if commit == nil {
+		t.Fatal("an item-less inquiry produced no ledger write")
+	}
+	if err := commit(); err != nil {
+		t.Fatalf("ledger write: %v", err)
+	}
+	rec, _, _ := store.PendRecordOf(subject, corr)
+	if rec.State != PendStateDecided || rec.Outcome != PendOutcomeApproved {
+		t.Fatalf("ledger = %+v, want decided/approved", rec)
+	}
+	if len(result.SideEffectFHIR) != 0 {
+		t.Errorf("an item-less inquiry produced %d EOBs; it names no product coding, so it must produce none", len(result.SideEffectFHIR))
+	}
+}
 
+// TestIngressInquire_SubjectBound: the provider-facing `POST /Claim/$inquire`
+// refuses an inquiry that names two members, and it refuses it at the BIND —
+// before anything is routed anywhere. The control reaches routing (and fails
+// there, on this fixture's unroutable Coverage), so the 403 is attributable to
+// the mutated member and not to some other property of the request.
+func TestIngressInquire_SubjectBound(t *testing.T) {
+	newGateway := func() *Gateway {
+		return &Gateway{cfg: Config{ingressAuthBypass: true, SoR: newCensusSoR(), Clock: fixedClock}}
+	}
+	post := func(t *testing.T, body []byte) *httptest.ResponseRecorder {
+		t.Helper()
+		w := httptest.NewRecorder()
+		newGateway().handlePASInquireIngress(w, httptest.NewRequest(http.MethodPost, "/Claim/$inquire", bytes.NewReader(body)))
+		return w
+	}
+	control := post(t, inquiryBundle("MBR-COVERED", "", "TRN-1", "72148"))
+	if control.Code == http.StatusForbidden {
+		t.Fatalf("the control inquiry was refused by the subject bind (%s) — the rejection row below would be vacuous", control.Body)
+	}
+	if control.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("control status=%d body=%s, want 422 (past the bind, refused at routing)", control.Code, control.Body)
+	}
+	mutated := post(t, inquiryBundle("MBR-COVERED", "MBR-NOTCOVERED", "TRN-1", "72148"))
+	if mutated.Code != http.StatusForbidden {
+		t.Fatalf("a two-member inquiry was not refused: status=%d body=%s", mutated.Code, mutated.Body)
+	}
+	if !strings.Contains(mutated.Body.String(), "inconsistent patient in PAS inquiry") {
+		t.Errorf("refusal does not name the inconsistency: %s", mutated.Body)
+	}
+}
+
+// ---- the ledger effect ----
+
+// inquiryLedgerFixture is a payer gateway with a real pend ledger, the pended
+// authorization the rows below inquire about, and the inquiry that asks.
+type inquiryLedgerFixture struct {
+	g       *Gateway
+	store   *MemStore
+	facts   pasInquiryFacts
+	subject string
+	corr    string
+}
+
+const (
+	inquiryRequester      = "provider"
+	inquiryOtherRequester = "provider-b"
+	inquiryCRKey          = "http://example.org/PATIENT_EVENT_TRACE_NUMBER|111099"
+)
+
+func newInquiryLedgerFixture(t *testing.T, keys PendKeys) *inquiryLedgerFixture {
+	t.Helper()
+	store := NewMemStore()
+	g := &Gateway{cfg: Config{Store: store, Clock: fixedClock}}
+	facts, status, msg := parsePASInquiryFacts(inquiryBundle("MBR-COVERED", "", "TRN-1", "72148"))
+	if status != 0 {
+		t.Fatalf("fixture inquiry refused: %d %s", status, msg)
+	}
+	f := &inquiryLedgerFixture{g: g, store: store, facts: facts, subject: "pci:MBR-COVERED", corr: "corr-submit-1"}
+	if keys.RequesterHolder != "" {
+		if _, err := store.RecordPendedKeyed(f.subject, f.corr, fixedClock(), keys); err != nil {
+			t.Fatalf("seed pend: %v", err)
+		}
+	}
+	return f
+}
+
+// state reads the ledger row the rows below assert on.
+func (f *inquiryLedgerFixture) state(t *testing.T) PendRecord {
+	t.Helper()
+	rec, found, err := f.store.PendRecordOf(f.subject, f.corr)
+	if err != nil {
+		t.Fatalf("read ledger: %v", err)
+	}
+	if !found {
+		t.Fatalf("the seeded pend is gone")
+	}
+	return rec
+}
+
+// apply runs the ledger effect and its write, the way the inbound handler does.
+func (f *inquiryLedgerFixture) apply(t *testing.T, requester string, answer []byte) LegResult {
+	t.Helper()
+	result := LegResult{}
+	commit, _ := f.g.inquiryLedgerEffect(requester, f.subject, "Patient/MBR-COVERED", "corr-inquiry-leg", f.facts, answer, &result)
+	if commit != nil {
+		if err := commit(); err != nil {
+			t.Fatalf("ledger write: %v", err)
+		}
+	}
+	return result
+}
+
+// decidedAnswer is the synthetic 2.0.1/2.1.0-shape answer, whose ClaimResponse
+// states the payer's approval (review action A1) and carries the identifier the
+// pend was keyed on.
+func decidedAnswer(t *testing.T) []byte {
+	t.Helper()
+	return inquiryFixture(t, "pas-inquiry-response-2.0.json")
+}
+
+// pendedAnswer states a re-pend for the same authorization: the same lookup key,
+// but no decision.
+func pendedAnswer() []byte {
+	return []byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{
+		"resourceType":"ClaimResponse","outcome":"queued","created":"2026-09-18T00:00:00Z",
+		"identifier":[{"system":"http://example.org/PATIENT_EVENT_TRACE_NUMBER","value":"111099"}],
+		"item":[{"itemSequence":1,"adjudication":[{"extension":[{"url":"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewAction",
+		  "extension":[{"url":"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewActionCode",
+		    "valueCodeableConcept":{"coding":[{"system":"https://codesystem.x12.org/005010/306","code":"A4","display":"Pended"}]}}]}],
+		  "category":{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/adjudication","code":"submitted"}]}}]}]}}]}`)
+}
+
+// TestPASInquire_LedgerDecidedOnMatch: exactly one match whose answer states a
+// decision records that decision, with its ExplanationOfBenefit in the same
+// write. The EOB's product coding comes from the REQUESTER's own inquiry line.
+func TestPASInquire_LedgerDecidedOnMatch(t *testing.T) {
+	f := newInquiryLedgerFixture(t, PendKeys{RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{inquiryCRKey}})
+	if got := f.state(t).State; got != PendStatePended {
+		t.Fatalf("seeded state = %q, want pended", got)
+	}
+	result := f.apply(t, inquiryRequester, decidedAnswer(t))
+	rec := f.state(t)
+	if rec.State != PendStateDecided || rec.Outcome != PendOutcomeApproved {
+		t.Fatalf("ledger = %+v, want decided/approved", rec)
+	}
+	if rec.DecidedAt.IsZero() {
+		t.Error("the decision was recorded without the payer's own date")
+	}
+	if len(result.SideEffectFHIR) != 1 {
+		t.Fatalf("want one decision EOB, got %d", len(result.SideEffectFHIR))
+	}
+	eob := result.SideEffectFHIR[0]
+	if !bytes.Contains(eob, []byte("72148")) {
+		t.Errorf("the EOB's product coding did not come from the inquiry's own line:\n%s", eob)
+	}
+	if ref, err := parseEOBPatient(eob); err != nil || ref != "Patient/MBR-COVERED" {
+		t.Errorf("EOB patient = %q (err=%v), want the bound member", ref, err)
+	}
+	if written, found := f.store.EOBByID("eob-" + f.corr); !found || !bytes.Equal(written, eob) {
+		t.Errorf("the EOB was not written in the same write as the decision (found=%v)", found)
+	}
+}
+
+// TestPASInquire_NoMatchNoLedgerChange: an answer whose keys name no authorization
+// this requester has changes nothing. The ledger is deliberately NOT empty, so the
+// row proves the lookup discriminated rather than that there was nothing to find.
+func TestPASInquire_NoMatchNoLedgerChange(t *testing.T) {
+	f := newInquiryLedgerFixture(t, PendKeys{RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{"http://payer.example/cr|SOMETHING-ELSE"}})
+	result := f.apply(t, inquiryRequester, decidedAnswer(t))
+	if got := f.state(t); got.State != PendStatePended || got.Outcome != "" {
+		t.Fatalf("ledger moved on a non-matching answer: %+v", got)
+	}
+	if len(result.SideEffectFHIR) != 0 {
+		t.Errorf("a non-matching answer produced %d side-effects", len(result.SideEffectFHIR))
+	}
+}
+
+// TestPASInquire_AmbiguousMatchNoLedgerChange: two authorizations sharing the
+// answer's key are ambiguous, and the leg will not guess which one the requester
+// meant. Both stay pended.
+func TestPASInquire_AmbiguousMatchNoLedgerChange(t *testing.T) {
+	f := newInquiryLedgerFixture(t, PendKeys{RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{inquiryCRKey}})
+	const other = "corr-submit-2"
+	if _, err := f.store.RecordPendedKeyed(f.subject, other, fixedClock(), PendKeys{
+		RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{inquiryCRKey},
+	}); err != nil {
+		t.Fatalf("seed the colliding pend: %v", err)
+	}
+	result := f.apply(t, inquiryRequester, decidedAnswer(t))
+	if got := f.state(t); got.State != PendStatePended {
+		t.Fatalf("the first authorization moved on an ambiguous answer: %+v", got)
+	}
+	rec, found, err := f.store.PendRecordOf(f.subject, other)
+	if err != nil || !found || rec.State != PendStatePended {
+		t.Fatalf("the second authorization moved on an ambiguous answer: %+v (found=%v err=%v)", rec, found, err)
+	}
+	if len(result.SideEffectFHIR) != 0 {
+		t.Errorf("an ambiguous answer produced %d side-effects", len(result.SideEffectFHIR))
+	}
+}
+
+// TestPASInquire_StillPendedNoChange: a match the payer still reports as pended is
+// not a decision. The answer relays; the ledger stays as it was.
+func TestPASInquire_StillPendedNoChange(t *testing.T) {
+	f := newInquiryLedgerFixture(t, PendKeys{RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{inquiryCRKey}})
+	result := f.apply(t, inquiryRequester, pendedAnswer())
+	if got := f.state(t); got.State != PendStatePended || got.Outcome != "" {
+		t.Fatalf("a still-pended answer moved the ledger: %+v", got)
+	}
+	if len(result.SideEffectFHIR) != 0 {
+		t.Errorf("a still-pended answer produced %d side-effects", len(result.SideEffectFHIR))
+	}
+}
+
+// TestPASInquire_LedgerNeverMatchesTheInquirysOwnIdentifier is the ledger-effect
+// half of the same rule, and it is the half a mutation can reach: an authorization
+// keyed ONLY on the identifier the inquiry minted for itself must not be decided
+// by that inquiry's answer.
+//
+// Pinning it at the reader alone leaves this open — threading the inquiry's own
+// Claim.identifier into the probe keys before LookupPended keeps every other row
+// green, because they all key the pend on something the payer's response carries.
+// Here the pend is keyed on NOTHING ELSE, so a probe that included the inquiry's
+// own identifier would match and decide.
+//
+// The rule is KIND-AGNOSTIC, and the index is keyed per kind, so each of the four
+// kinds gets its own row: seeding the own-identifier pend under only one of them
+// would leave the other three spellings of the same mistake green.
+func TestPASInquire_LedgerNeverMatchesTheInquirysOwnIdentifier(t *testing.T) {
+	// The value the fixture inquiry's own Claim.identifier states, and nothing the
+	// payer's answer carries.
+	const ownKey = "http://provider.example/inq|INQUIRY-TRN"
+	for _, tc := range []struct {
+		name string
+		keys PendKeys
+	}{
+		{"as a submitted-claim identifier", PendKeys{RequesterHolder: inquiryRequester, RequestIDs: []string{ownKey}}},
+		{"as a ClaimResponse identifier", PendKeys{RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{ownKey}}},
+		{"as an authorization reference", PendKeys{RequesterHolder: inquiryRequester, PreAuthRef: ownKey}},
+		{"as an item trace number", PendKeys{RequesterHolder: inquiryRequester, ItemTraceNumbers: []string{ownKey}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newInquiryLedgerFixture(t, tc.keys)
+			result := f.apply(t, inquiryRequester, decidedAnswer(t))
+			if got := f.state(t); got.State != PendStatePended || got.Outcome != "" {
+				t.Fatalf("an authorization keyed only on the inquiry's own identifier (%s) was decided: %+v — the lookup matched on a fact the inquiry minted for itself", tc.name, got)
+			}
+			if len(result.SideEffectFHIR) != 0 {
+				t.Errorf("that match produced %d side-effects", len(result.SideEffectFHIR))
+			}
+		})
+	}
+	// Non-vacuous control: the same answer against a pend keyed on what the
+	// PAYER's response carries does decide it.
+	control := newInquiryLedgerFixture(t, PendKeys{RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{inquiryCRKey}})
+	control.apply(t, inquiryRequester, decidedAnswer(t))
+	if got := control.state(t).State; got != PendStateDecided {
+		t.Fatalf("control: a payer-stated key did not decide it (%q) — every row above would be vacuous", got)
+	}
+}
+
+// unreadableLedger is a pend ledger whose LOOKUP fails, the one case that has no
+// authorization correlation to report — and therefore the one whose event would
+// otherwise carry an empty one.
+type unreadableLedger struct{ *MemStore }
+
+func (unreadableLedger) LookupPended(string, PendKeys) (string, string, bool, bool, error) {
+	return "", "", false, false, errors.New("pend index unavailable")
+}
+
+// TestPASInquire_LookupUnavailableNamesTheExchange: when the ledger cannot be
+// consulted, the payer's answer still relays and the operator gets an event
+// saying why nothing was recorded. That event is useless unless it names the
+// exchange that raised it — a failed lookup returns no correlation of its own, so
+// the leg's is what it must carry.
+func TestPASInquire_LookupUnavailableNamesTheExchange(t *testing.T) {
+	var seen []ObserverEvent
+	g := &Gateway{cfg: Config{
+		Store:    unreadableLedger{MemStore: NewMemStore()},
+		Clock:    fixedClock,
+		Observer: func(e ObserverEvent) { seen = append(seen, e) },
+	}}
+	facts, status, _ := parsePASInquiryFacts(inquiryBundle("MBR-COVERED", "", "TRN-1", "72148"))
+	if status != 0 {
+		t.Fatal("fixture inquiry refused")
+	}
+	const legCorr = "corr-inquiry-leg-42"
+	result := LegResult{}
+	commit, events := g.inquiryLedgerEffect(inquiryRequester, "pci:MBR-COVERED", "Patient/MBR-COVERED", legCorr, facts, decidedAnswer(t), &result)
+	if commit != nil {
+		t.Fatal("an unreadable ledger produced a write")
+	}
+	if len(result.SideEffectFHIR) != 0 {
+		t.Errorf("an unreadable ledger produced %d side-effects", len(result.SideEffectFHIR))
+	}
+	if len(events) != 1 || events[0].Kind != "pend.lookup-unavailable" {
+		t.Fatalf("events = %+v, want one pend.lookup-unavailable", events)
+	}
+	if events[0].CorrelationID != legCorr {
+		t.Errorf("the event's correlation = %q, want the exchange's %q — an event that cannot be traced to its exchange explains nothing", events[0].CorrelationID, legCorr)
+	}
+	if events[0].LegType != "pas-claim-inquire" || events[0].Op != "pas-inquire" {
+		t.Errorf("event = %+v, want it named to this leg and operation", events[0])
+	}
+	// The events the effect returns are emitted by the handler, not here, so
+	// nothing was observed yet — the caller decides when they are seen.
+	if len(seen) != 0 {
+		t.Errorf("the effect emitted %d events itself; the handler emits them after the answer is sealed", len(seen))
+	}
+}
+
+// TestPASInquire_MatchesOnEveryPayerStatedKeyKind: the reader extracts four kinds
+// of lookup key, and the ledger effect must resolve on each of them. A regression
+// that narrowed key selection to the ClaimResponse identifier alone would
+// otherwise only surface against a live payer.
+func TestPASInquire_MatchesOnEveryPayerStatedKeyKind(t *testing.T) {
+	// One answer stating all four key kinds; each row seeds a pend on exactly ONE
+	// of them, so the row names which kind resolved it.
+	answer := []byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{
+		"resourceType":"ClaimResponse","outcome":"complete","created":"2026-09-17T00:00:00Z",
+		"patient":{"reference":"Patient/SubscriberExample"},
+		"identifier":[{"system":"http://payer.example/cr","value":"CR-9"}],
+		"request":{"identifier":{"system":"http://provider.example/claim","value":"SUB-9"}},
+		"preAuthRef":"AUTH-9",
+		"item":[{"itemSequence":1,
+		  "extension":[{"url":"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-itemTraceNumber",
+		    "valueIdentifier":{"system":"http://provider.example/trn","value":"TRN-9"}}],
+		  "adjudication":[{"extension":[{"url":"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewAction",
+		    "extension":[{"url":"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewActionCode",
+		      "valueCodeableConcept":{"coding":[{"system":"https://codesystem.x12.org/005010/306","code":"A1","display":"Certified in total"}]}}]}],
+		    "category":{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/adjudication","code":"submitted"}]}}]}]}}]}`)
+	for _, tc := range []struct {
+		name string
+		keys PendKeys
+	}{
+		{"the identifier the payer echoed for the submitted claim", PendKeys{RequesterHolder: inquiryRequester, RequestIDs: []string{"http://provider.example/claim|SUB-9"}}},
+		{"the payer's own ClaimResponse identifier", PendKeys{RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{"http://payer.example/cr|CR-9"}}},
+		{"the authorization reference", PendKeys{RequesterHolder: inquiryRequester, PreAuthRef: "AUTH-9"}},
+		{"an item trace number", PendKeys{RequesterHolder: inquiryRequester, ItemTraceNumbers: []string{"http://provider.example/trn|TRN-9"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newInquiryLedgerFixture(t, tc.keys)
+			f.apply(t, inquiryRequester, answer)
+			if got := f.state(t); got.State != PendStateDecided || got.Outcome != PendOutcomeApproved {
+				t.Fatalf("a pend keyed on %s was not decided: %+v", tc.name, got)
+			}
+		})
+	}
+	// Non-vacuous control: a pend keyed on none of the four is not decided by the
+	// same answer, so each row above is the key it names and not a match on
+	// anything else.
+	f := newInquiryLedgerFixture(t, PendKeys{RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{"http://payer.example/cr|SOMETHING-ELSE"}})
+	f.apply(t, inquiryRequester, answer)
+	if got := f.state(t).State; got != PendStatePended {
+		t.Fatalf("control: an unrelated key was decided (%q) — the rows above prove nothing", got)
+	}
 }
 
 // TestPASInquire_AnswerSubjectLinkage: every patient an answer names, at every
@@ -658,6 +1021,90 @@ func inquireAnswerGuard(answer []byte) (int, string) {
 	return 0, ""
 }
 
+// TestPASInquire_RequesterNamespace: the keys are namespaced by the requester that
+// submitted the claim. Another participant asking with the same keys resolves to
+// nothing — one participant can never decide another's authorization.
+func TestPASInquire_RequesterNamespace(t *testing.T) {
+	f := newInquiryLedgerFixture(t, PendKeys{RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{inquiryCRKey}})
+	// Control: the requester that submitted it does decide it.
+	control := newInquiryLedgerFixture(t, PendKeys{RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{inquiryCRKey}})
+	control.apply(t, inquiryRequester, decidedAnswer(t))
+	if got := control.state(t).State; got != PendStateDecided {
+		t.Fatalf("control: the submitting requester did not decide it (%q) — the row below would be vacuous", got)
+	}
+	f.apply(t, inquiryOtherRequester, decidedAnswer(t))
+	if got := f.state(t); got.State != PendStatePended || got.Outcome != "" {
+		t.Fatalf("another requester's inquiry decided this authorization: %+v", got)
+	}
+}
+
+// TestPASInquire_OtherSubjectNoLedgerChange: an answer that resolves to an
+// authorization for a DIFFERENT patient than the one this inquiry is bound to
+// changes nothing. The inquiry's authority covers one subject.
+func TestPASInquire_OtherSubjectNoLedgerChange(t *testing.T) {
+	store := NewMemStore()
+	g := &Gateway{cfg: Config{Store: store, Clock: fixedClock}}
+	facts, status, _ := parsePASInquiryFacts(inquiryBundle("MBR-COVERED", "", "TRN-1", "72148"))
+	if status != 0 {
+		t.Fatal("fixture inquiry refused")
+	}
+	const otherSubject, otherCorr = "pci:MBR-NOTCOVERED", "corr-other"
+	if _, err := store.RecordPendedKeyed(otherSubject, otherCorr, fixedClock(), PendKeys{
+		RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{inquiryCRKey},
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	result := LegResult{}
+	commit, _ := g.inquiryLedgerEffect(inquiryRequester, "pci:MBR-COVERED", "Patient/MBR-COVERED", "corr-inquiry-leg", facts, decidedAnswer(t), &result)
+	if commit != nil {
+		t.Fatal("an answer about another patient's authorization produced a ledger write")
+	}
+	rec, _, _ := store.PendRecordOf(otherSubject, otherCorr)
+	if rec.State != PendStatePended {
+		t.Fatalf("another patient's authorization was decided: %+v", rec)
+	}
+}
+
+// TestPASInquire_NoLedgerNoEffect: a Store with no pend ledger has no inquiry
+// entry point at all. The answer relays and nothing is derived.
+func TestPASInquire_NoLedgerNoEffect(t *testing.T) {
+	g := &Gateway{cfg: Config{Store: storeWithoutLedger{inner: NewMemStore()}, Clock: fixedClock}}
+	facts, status, _ := parsePASInquiryFacts(inquiryBundle("MBR-COVERED", "", "TRN-1", "72148"))
+	if status != 0 {
+		t.Fatal("fixture inquiry refused")
+	}
+	result := LegResult{}
+	commit, events := g.inquiryLedgerEffect(inquiryRequester, "pci:MBR-COVERED", "Patient/MBR-COVERED", "corr-inquiry-leg", facts, decidedAnswer(t), &result)
+	if commit != nil || len(events) != 0 || len(result.SideEffectFHIR) != 0 {
+		t.Fatalf("a store with no ledger produced an effect: commit=%v events=%d sideEffects=%d", commit != nil, len(events), len(result.SideEffectFHIR))
+	}
+	// Non-vacuous control: the same answer against a ledger-bearing store DOES
+	// produce a write, so the absence above is the missing ledger and nothing else.
+	f := newInquiryLedgerFixture(t, PendKeys{RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{inquiryCRKey}})
+	if c, _ := f.g.inquiryLedgerEffect(inquiryRequester, f.subject, "Patient/MBR-COVERED", "corr-inquiry-leg", f.facts, decidedAnswer(t), &LegResult{}); c == nil {
+		t.Fatal("control: a ledger-bearing store produced no write — the row above would be vacuous")
+	}
+}
+
+// TestPASInquire_ItemLineForTheAnswer: the decision EOB's product coding comes
+// from the inquiry line whose trace number the payer echoed, so an answer about
+// the second line is not costed as the first.
+func TestPASInquire_ItemLineForTheAnswer(t *testing.T) {
+	facts := pasInquiryFacts{items: []pasInquiryItemFact{
+		{traceNumber: "s|TRN-1", code: "72148"},
+		{traceNumber: "s|TRN-2", code: "E0424"},
+	}}
+	if got := inquiryItemFor(facts, []string{"s|TRN-2"}).code; got != "E0424" {
+		t.Errorf("echoed TRN-2 selected %q, want E0424", got)
+	}
+	if got := inquiryItemFor(facts, nil).code; got != "72148" {
+		t.Errorf("an answer echoing no trace number selected %q, want the first line", got)
+	}
+	if got := inquiryItemFor(pasInquiryFacts{}, nil).code; got != "" {
+		t.Errorf("an inquiry with no line selected %q", got)
+	}
+}
+
 // assertJSONObject is a small readability guard for the fixture rows above: every
 // fixture the leg reads must be one JSON object.
 func assertJSONObject(t *testing.T, raw []byte) {
@@ -665,6 +1112,50 @@ func assertJSONObject(t *testing.T, raw []byte) {
 	var v map[string]any
 	if err := json.Unmarshal(raw, &v); err != nil {
 		t.Fatalf("fixture is not one JSON object: %v", err)
+	}
+}
+
+// TestPASInquire_NotProfileValidatedButObserved pins WHAT LOOKS AT an inbound
+// peer's inquiry, because the answer is "no enforcing $validate does" and that is
+// a fact worth being executable rather than assumed.
+//
+// Nothing on this path refuses an inquiry, or a payer's answer, for failing its
+// profile: the gateway preserves a peer's bytes and does not certify content it
+// did not produce, the same posture the submit and update legs take. The payer's
+// own system is what certifies an inquiry it receives, and the certification lane
+// records an observation of both directions — at the inquiry's OWN profiles, at
+// every candidate line, which is what makes a line-specific defect (a 2.0.1
+// inquiry naming no item, say) visible as evidence without refusing the peer.
+func TestPASInquire_NotProfileValidatedButObserved(t *testing.T) {
+	request := inquiryFixture(t, "pas-inquiry-request-2.0.json")
+	answer := inquiryFixture(t, "pas-inquiry-response-2.0.json")
+
+	// The request and the Bundle-shaped answer are both recognised, and each
+	// resolves to the INQUIRY profile rather than the submit leg's.
+	for _, tc := range []struct{ name, species, want string }{
+		{"the inquiry request", detectSpecies(request), "profile-pas-inquiry-request-bundle"},
+		{"the answer Bundle", detectSpecies(answer), "profile-pas-inquiry-response-bundle"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.species == "" {
+				t.Fatalf("%s is not a recognised species — nothing would observe it", tc.name)
+			}
+			for _, line := range []string{"2.0", "2.1", "2.2"} {
+				profile, ok := profileFor(tc.species, line, "pas-claim-inquire")
+				if !ok {
+					t.Fatalf("line %s: no certification profile for %s", line, tc.name)
+				}
+				if !strings.Contains(profile, tc.want) {
+					t.Errorf("line %s: profile %q, want the inquiry profile %s", line, profile, tc.want)
+				}
+			}
+		})
+	}
+	// The 2.2.1 answer's Parameters wrapper is deliberately NOT observed: the IG
+	// governs it by its operation definition and declares no profile for it, so
+	// there is nothing to certify it against.
+	if got := detectSpecies(inquiryFixture(t, "pas-inquiry-response-2.2.json")); got != "" {
+		t.Errorf("the 2.2.1 Parameters wrapper resolved to species %q; the IG declares no profile for it", got)
 	}
 }
 

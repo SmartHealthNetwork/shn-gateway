@@ -90,7 +90,7 @@ func lfCheck(t *testing.T, line string, m lfObject, profile string, paths ...str
 	t.Helper()
 	b := lfBytes(t, m)
 	before := append([]byte(nil), b...)
-	r, err := syntheticLineValidator(line).Validate(context.Background(), b, profile)
+	r, err := NewLineFakeValidator(line).Validate(context.Background(), b, profile)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -338,7 +338,7 @@ func TestLineFakeNestedAnswers(t *testing.T) {
 }
 
 func TestLineFakeCallSnapshotsIsolated(t *testing.T) {
-	v := syntheticLineValidator("2.2")
+	v := NewLineFakeValidator("2.2")
 	q := lfQR(t)
 	delete(q, "extension")
 	b := lfBytes(t, q)
@@ -392,7 +392,7 @@ func TestLineFakeCallSnapshotsIsolated(t *testing.T) {
 func TestLineFakeInvalidJSONAndUnknownLine(t *testing.T) {
 	for _, raw := range []string{"", `{"resourceType":`, `{"resourceType":"Patient"} {}`, `{"resourceType":"Patient"} junk`, `[]`, `null`, `true`} {
 		t.Run(raw, func(t *testing.T) {
-			v := syntheticLineValidator("2.2")
+			v := NewLineFakeValidator("2.2")
 			r, err := v.Validate(context.Background(), []byte(raw), "test-profile")
 			if err == nil || r.Valid {
 				t.Fatalf("result=%+v err=%v", r, err)
@@ -406,7 +406,7 @@ func TestLineFakeInvalidJSONAndUnknownLine(t *testing.T) {
 		})
 	}
 	for _, line := range []string{"", "9.9", "2.2.1"} {
-		v := syntheticLineValidator(line)
+		v := NewLineFakeValidator(line)
 		r, err := v.Validate(context.Background(), []byte(`{"resourceType":"Patient"}`), "")
 		if err == nil || r.Valid {
 			t.Fatalf("line=%q result=%+v err=%v", line, r, err)
@@ -466,7 +466,7 @@ func TestLineFake_InquiryClaimNotHeldToSubmitItemDetail(t *testing.T) {
 		"entry":        []any{lfObject{"resource": claim}},
 	})
 
-	v := syntheticLineValidator(line)
+	v := NewLineFakeValidator(line)
 	res, err := v.Validate(context.Background(), bundle, lfPAS+"profile-pas-inquiry-request-bundle")
 	if err != nil {
 		t.Fatalf("validate as an inquiry: %v", err)

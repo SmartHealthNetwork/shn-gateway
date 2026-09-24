@@ -27,7 +27,7 @@ func TestLanesDiscoveredAtDefaultAddresses(t *testing.T) {
 	canonical := shnsdk.NewFakeValidator()
 	t.Run("malformed overrides refuse before qualification", func(t *testing.T) {
 		for _, base := range []string{":invalid", "ftp://validator/fhir", "http://"} {
-			_, manager, err := discoverValidatorLanes(context.Background(), func(string) string { return "" }, []string{"pa.dtr@2.1"}, canonical, config{ConformanceEnforcement: engine.EnforcementStrict, FHIRValidateURL21: base}, engine.DefaultLaneURL, func(context.Context, string, string) error { return errors.New("unexpected qualification") })
+			_, manager, err := discoverValidatorLanes(context.Background(), func(string) string { return "" }, []string{"pa.dtr@2.1"}, canonical, config{FHIRValidateURL21: base}, engine.DefaultLaneURL, func(context.Context, string, string) error { return errors.New("unexpected qualification") })
 			manager.Close()
 			if err == nil {
 				t.Fatalf("malformed override %q admitted", base)
@@ -35,7 +35,7 @@ func TestLanesDiscoveredAtDefaultAddresses(t *testing.T) {
 		}
 	})
 	t.Run("fake mode keeps distinct deterministic lines", func(t *testing.T) {
-		lanes, m, err := discoverValidatorLanes(context.Background(), func(string) string { return "1" }, shnsdk.NativeContractVersions(), canonical, config{ConformanceEnforcement: engine.EnforcementStrict}, func(string) string { t.Fatal("fake mode resolved DNS"); return "" }, func(context.Context, string, string) error { t.Fatal("fake mode qualified"); return nil })
+		lanes, m, err := discoverValidatorLanes(context.Background(), func(string) string { return "1" }, shnsdk.NativeContractVersions(), canonical, config{}, func(string) string { t.Fatal("fake mode resolved DNS"); return "" }, func(context.Context, string, string) error { t.Fatal("fake mode qualified"); return nil })
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -72,18 +72,17 @@ func TestLanesDiscoveredAtDefaultAddresses(t *testing.T) {
 						return ctx.Err()
 					}
 				}
-				lanes, m, err := discoverValidatorLanes(context.Background(), func(string) string { return "" }, declared, canonical, config{ConformanceEnforcement: engine.EnforcementStrict}, engine.DefaultLaneURL, qualifier)
-
+				lanes, m, err := discoverValidatorLanes(context.Background(), func(string) string { return "" }, declared, canonical, config{}, engine.DefaultLaneURL, qualifier)
+				if declared[0] == "pa.crd@2.2" && fail {
+					if err == nil || !strings.Contains(err.Error(), "2.2") || !strings.Contains(err.Error(), "wrong-line verdict") {
+						t.Fatalf("boot error=%v", err)
+					}
+					return
+				}
 				if err != nil {
 					t.Fatal(err)
 				}
 				defer m.Close()
-				if declared[0] == "pa.crd@2.2" {
-					m.workers.Wait()
-					if m.defaults["2.2"].Ready() == fail {
-						t.Fatal("failed qualification admitted, or success lost")
-					}
-				}
 				if lanes["2.0"] != canonical {
 					t.Fatal("configured canonical missing")
 				}
@@ -109,7 +108,7 @@ func TestLanesDiscoveredAtDefaultAddresses(t *testing.T) {
 	}
 	t.Run("explicit override is never qualified", func(t *testing.T) {
 		var calls atomic.Int32
-		_, m, err := discoverValidatorLanes(context.Background(), func(string) string { return "" }, []string{"pa.crd@2.2"}, canonical, config{ConformanceEnforcement: engine.EnforcementStrict, FHIRValidateURL21: "http://explicit21/fhir", FHIRValidateURL22: "http://explicit22/fhir"}, engine.DefaultLaneURL, func(context.Context, string, string) error {
+		_, m, err := discoverValidatorLanes(context.Background(), func(string) string { return "" }, []string{"pa.crd@2.2"}, canonical, config{FHIRValidateURL21: "http://explicit21/fhir", FHIRValidateURL22: "http://explicit22/fhir"}, engine.DefaultLaneURL, func(context.Context, string, string) error {
 			calls.Add(1)
 			return errors.New("unexpected qualification")
 		})
@@ -123,7 +122,7 @@ func TestLanesDiscoveredAtDefaultAddresses(t *testing.T) {
 	})
 	t.Run("close cancels and joins", func(t *testing.T) {
 		entered, exited := make(chan struct{}, 2), make(chan struct{}, 2)
-		_, m, err := discoverValidatorLanes(context.Background(), func(string) string { return "" }, []string{"pa.pas@2.0"}, canonical, config{ConformanceEnforcement: engine.EnforcementStrict}, engine.DefaultLaneURL, func(ctx context.Context, base, line string) error {
+		_, m, err := discoverValidatorLanes(context.Background(), func(string) string { return "" }, []string{"pa.pas@2.0"}, canonical, config{}, engine.DefaultLaneURL, func(ctx context.Context, base, line string) error {
 			entered <- struct{}{}
 			<-ctx.Done()
 			exited <- struct{}{}
@@ -178,12 +177,11 @@ func TestDeclaredDefaultPassesTheExactFiniteCorpus(t *testing.T) {
 		_, _ = w.Write(row.Outcome)
 	}))
 	defer server.Close()
-	_, m, err := discoverValidatorLanes(context.Background(), func(string) string { return "" }, []string{"pa.dtr@2.1"}, shnsdk.NewFakeValidator(), config{ConformanceEnforcement: engine.EnforcementStrict, FHIRValidateURL22: "http://configured.invalid/fhir"}, func(string) string { return server.URL + "/fhir" }, qualifyDefaultLane)
+	_, m, err := discoverValidatorLanes(context.Background(), func(string) string { return "" }, []string{"pa.dtr@2.1"}, shnsdk.NewFakeValidator(), config{FHIRValidateURL22: "http://configured.invalid/fhir"}, func(string) string { return server.URL + "/fhir" }, qualifyDefaultLane)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer m.Close()
-	m.workers.Wait()
 	if !m.defaults["2.1"].Ready() || int(posts.Load()) != len(rows) {
 		t.Fatalf("ready=%v rows=%d", m.defaults["2.1"].Ready(), posts.Load())
 	}
@@ -235,17 +233,16 @@ func TestQualificationEventsDescribeTerminalState(t *testing.T) {
 			old := log.Writer()
 			log.SetOutput(&out)
 			defer log.SetOutput(old)
-			_, m, err := discoverValidatorLanes(context.Background(), func(string) string { return "" }, []string{"pa.pas@2.1"}, shnsdk.NewFakeValidator(), config{ConformanceEnforcement: engine.EnforcementStrict, FHIRValidateURL22: "http://explicit.test/fhir"}, engine.DefaultLaneURL, func(context.Context, string, string) error {
+			_, m, err := discoverValidatorLanes(context.Background(), func(string) string { return "" }, []string{"pa.pas@2.1"}, shnsdk.NewFakeValidator(), config{FHIRValidateURL22: "http://explicit.test/fhir"}, engine.DefaultLaneURL, func(context.Context, string, string) error {
 				if fail {
 					return errors.New("private outcome payload must not be logged")
 				}
 				return nil
 			})
 			if m != nil {
-				m.workers.Wait()
 				m.Close()
 			}
-			if err != nil {
+			if (err != nil) != fail {
 				t.Fatalf("error=%v", err)
 			}
 			records := strings.Split(strings.TrimSpace(out.String()), "\n")

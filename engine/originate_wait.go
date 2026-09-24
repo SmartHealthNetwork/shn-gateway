@@ -457,7 +457,7 @@ func (g *Gateway) inquireContinuation(ctx context.Context, r *http.Request, cont
 	if err != nil {
 		return PASDecision{}, http.StatusBadGateway, "build the prior-authorization inquiry: " + err.Error(), err
 	}
-	adapted, _, aerr := g.egressAdapt(ctx, route, body, ExchangeIdentity{CorrelationID: corr, LegType: "pas-claim-inquire", Counterpart: cont.PayerHolder})
+	adapted, _, aerr := g.egressAdapt(route, body, ExchangeIdentity{CorrelationID: corr, LegType: "pas-claim-inquire", Counterpart: cont.PayerHolder})
 	if aerr != nil {
 		return PASDecision{}, http.StatusBadGateway, aerr.Error(), aerr
 	}
@@ -482,7 +482,7 @@ func (g *Gateway) inquireContinuation(ctx context.Context, r *http.Request, cont
 		return PASDecision{}, status, msg, nil
 	}
 	answer, err := g.OriginateLeg(ctx, r, cont.PayerHolder, "pas-claim-inquire", cont.SubjectPCI, corr, "",
-		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, DeclaredVersion: route.Token, Route: routeInfoFor(route), Payload: sealed})
+		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Payload: sealed})
 	if err != nil {
 		return PASDecision{}, http.StatusBadGateway, err.Error(), err
 	}

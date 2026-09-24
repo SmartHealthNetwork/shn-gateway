@@ -38,11 +38,15 @@ func env(m map[string]string) func(string) string {
 	return func(k string) string { return m[k] }
 }
 
-// Missing checker coverage remains explicit; startup and native carriage do not
-// depend on an optional validator. Strict operation checks refuse unavailable.
-func TestSelectValidator_AbsentCoverage(t *testing.T) {
-	if v, err := selectValidator(env(map[string]string{}), ""); err != nil || v != nil {
-		t.Fatalf("absent coverage=%v err=%v", v, err)
+// The fail-closed rule is a PURE decision — unit-test it directly via selectValidator,
+// not through Run/build (whose LoadBundle+discovery steps run BEFORE the validator gate,
+// so an empty-env call never reaches it). The INTEGRATED fail-closed assertion lives in the
+// boot gate, which supplies a real bundle + a validator-less /discovery.
+
+// No validator URL + no fake opt-in ⇒ error (FR-36 fail-closed).
+func TestSelectValidator_FailsClosed(t *testing.T) {
+	if _, err := selectValidator(env(map[string]string{}), ""); err == nil {
+		t.Fatal("selectValidator(no url, no fake) = nil error, want fail-closed error")
 	}
 }
 
@@ -205,9 +209,9 @@ func TestLoadConfig_MetricsServiceReadThrough(t *testing.T) {
 	}
 }
 
-// TestLoadConfigConformanceEnforcement proves the environment accepts the
-// four published levels and that absence agrees with engine.Config's none
-// zero value.
+// TestLoadConfigConformanceEnforcement: absent means NONE — this is the ONE
+// place in the tree where a non-strict level comes from an omission. Every
+// other construction of engine.Config is strict by the zero value.
 func TestLoadConfigConformanceEnforcement(t *testing.T) {
 	base := map[string]string{
 		"ROLE":                      "provider",
@@ -224,8 +228,6 @@ func TestLoadConfigConformanceEnforcement(t *testing.T) {
 		// (test/invariants' TestInvariant_EveryGateRunsStrict).
 		{"", engine.EnforcementNone},
 		{"none", engine.EnforcementNone},
-		{"observe", engine.EnforcementObserve},
-		{"basic", engine.EnforcementBasic},
 		{"strict", engine.EnforcementStrict},
 	} {
 		m := map[string]string{}
@@ -255,9 +257,8 @@ func TestLoadConfigConformanceEnforcementUnknownValueRefusesBoot(t *testing.T) {
 	if err == nil {
 		t.Fatal("an unknown level must refuse to boot")
 	}
-	if !strings.Contains(err.Error(), "none") || !strings.Contains(err.Error(), "observe") ||
-		!strings.Contains(err.Error(), "basic") || !strings.Contains(err.Error(), "strict") {
-		t.Fatalf("the boot error must name the four accepted values, got %v", err)
+	if !strings.Contains(err.Error(), "none") || !strings.Contains(err.Error(), "strict") {
+		t.Fatalf("the boot error must name the two accepted values, got %v", err)
 	}
 }
 
@@ -266,8 +267,8 @@ func TestLoadConfigConformanceEnforcementUnknownValueRefusesBoot(t *testing.T) {
 // the constructed Gateway — not just to loadConfig's own config struct.
 // Deleting the "ConformanceEnforcement: cfg.ConformanceEnforcement," line in
 // build() leaves this red: ConformanceLevelForTest would report strict at
-// observe/basic/strict rows, since the Gateway's own field would stay at
-// its none zero value regardless of what loadConfig parsed.
+// every row, since the Gateway's own field would stay at its zero value
+// regardless of what loadConfig parsed.
 func TestBuildWiresConformanceEnforcementToGateway(t *testing.T) {
 	for _, tc := range []struct {
 		env  string
@@ -275,8 +276,6 @@ func TestBuildWiresConformanceEnforcementToGateway(t *testing.T) {
 	}{
 		{"", engine.EnforcementNone},
 		{"none", engine.EnforcementNone},
-		{"observe", engine.EnforcementObserve},
-		{"basic", engine.EnforcementBasic},
 		{"strict", engine.EnforcementStrict},
 	} {
 		extra := map[string]string{"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate"}
@@ -325,8 +324,6 @@ func TestBuildWiresConformanceEnforcementToNativeResponder(t *testing.T) {
 	}{
 		{"", engine.EnforcementNone},
 		{"none", engine.EnforcementNone},
-		{"observe", engine.EnforcementObserve},
-		{"basic", engine.EnforcementBasic},
 		// The strict row is what keeps this a two-directional fence now that
 		// the absent row wants none: without it, hardcoding the responder's
 		// policy to none would pass.
@@ -1647,32 +1644,6 @@ func TestApp_ChecksEndpoint_TokenGatedAndHealthUnaffected(t *testing.T) {
 	if healthResp.StatusCode != http.StatusOK {
 		t.Fatalf("/health status = %d, want 200 (healthy) despite the failing AUDIT_URL probe", healthResp.StatusCode)
 	}
-	var payload map[string]json.RawMessage
-	if err := json.NewDecoder(healthResp.Body).Decode(&payload); err != nil {
-		t.Fatal(err)
-	}
-	allowed := map[string]bool{"service": true, "version": true, "uptimeSeconds": true, "status": true, "checks": true, "conformance": true}
-	for k := range payload {
-		if !allowed[k] {
-			t.Fatalf("unapproved health field %s", k)
-		}
-	}
-	var c map[string]json.RawMessage
-	if err := json.Unmarshal(payload["conformance"], &c); err != nil {
-		t.Fatal("missing informational status", err)
-	}
-	if len(c) != 4 {
-		t.Fatal(c)
-	}
-	for _, key := range []string{"level", "ruleSet", "availability", "dropped"} {
-		if _, ok := c[key]; !ok {
-			t.Fatal("missing", key)
-		}
-	}
-	if string(c["level"]) != `"none"` || string(payload["status"]) != `"ok"` {
-		t.Fatalf("optional info changed health or mode: %v", payload)
-	}
-
 }
 
 // TestProbeEvidenceReachesResponder (per-line endpoint evidence): the REAL
@@ -2339,79 +2310,5 @@ func TestCheckTargets_PayerDavinciBackendHeaders(t *testing.T) {
 		if !seen[id] {
 			t.Errorf("control target %s missing", id)
 		}
-	}
-}
-
-func TestLoadIngressContextGrants(t *testing.T) {
-	for _, row := range []struct {
-		op, prep string
-		valid    bool
-	}{{"pas-submit", "E-01", true}, {"questionnaire-package", "", true}, {"", "", true}, {"not-an-operation", "", false}, {"pas-submit", "unknown-edit", false}} {
-		t.Run(row.op+row.prep, func(t *testing.T) {
-			var registrations []map[string]any
-			if err := json.Unmarshal([]byte(testValidClientsJSON(t)), &registrations); err != nil {
-				t.Fatal(err)
-			}
-			registrations[0]["context_operations"] = []string{}
-			registrations[0]["boundary_preparations"] = []string{}
-			if row.op != "" {
-				registrations[0]["context_operations"] = []string{row.op}
-			}
-			if row.prep != "" {
-				registrations[0]["boundary_preparations"] = []string{row.prep}
-			}
-			raw, err := json.Marshal(registrations)
-			if err != nil {
-				t.Fatal(err)
-			}
-			clients, err := loadIngressClients(writeClientsFile(t, string(raw)))
-			if (err == nil) != row.valid {
-				t.Fatalf("valid=%v error=%v", row.valid, err)
-			}
-			if !row.valid {
-				return
-			}
-			for _, c := range clients {
-				if row.op != "" && (len(c.ContextOperations) != 1 || c.ContextOperations[0] != row.op) {
-					t.Fatalf("lost operation grants: %+v", c)
-				}
-				if row.prep != "" && (len(c.BoundaryPreparations) != 1 || c.BoundaryPreparations[0] != row.prep) {
-					t.Fatalf("lost boundary grants: %+v", c)
-				}
-			}
-		})
-	}
-}
-
-func TestLoadIngressClientsRejectsDuplicateIdentity(t *testing.T) {
-	var registrations []map[string]any
-	if err := json.Unmarshal([]byte(testValidClientsJSON(t)), &registrations); err != nil {
-		t.Fatal(err)
-	}
-	registrations = append(registrations, registrations[0])
-	raw, err := json.Marshal(registrations)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := loadIngressClients(writeClientsFile(t, string(raw))); err == nil {
-		t.Fatal("duplicate client identity silently replaced prior key and authority")
-	}
-}
-
-func TestUnknownMemberCompatibilityWarning(t *testing.T) {
-	for _, value := range []string{"0", "1"} {
-		t.Run(value, func(t *testing.T) {
-			var output bytes.Buffer
-			previous := log.Writer()
-			log.SetOutput(&output)
-			defer log.SetOutput(previous)
-			_, _, err := buildProviderForPopulate(t, map[string]string{"SHN_ACCEPT_UNKNOWN_MEMBERS": value, "PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate"})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !strings.Contains(output.String(), "SHN_ACCEPT_UNKNOWN_MEMBERS is deprecated and ignored") {
-				t.Fatalf("missing compatibility warning: %s", output.String())
-			}
-		})
 	}
 }

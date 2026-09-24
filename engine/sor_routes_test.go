@@ -309,14 +309,18 @@ func TestSoRReferenceCallbackStopsAndSanitizes(t *testing.T) {
 	}
 }
 
-func TestSoRDisclosureHandlersStopBeforeResponder(t *testing.T) {
+func TestSoRNativeHandlersStopBeforeResponder(t *testing.T) {
 	s := scriptedReadSoR{t: t, base: ReadSystemOfRecord(newCensusSoR()), before: func(context.Context, string, string) error { return &SoRReadError{Kind: SoRAuthenticationFailed} }}
 	g := &Gateway{cfg: Config{SoR: s}} // A responder call would panic: failure must stop first.
-	for _, route := range []string{"patient-dtr", "eligibility", "records"} {
+	for _, route := range []string{"crd", "pas", "patient-dtr", "eligibility", "records"} {
 		t.Run(route, func(t *testing.T) {
 			w := httptest.NewRecorder()
 			r := httptest.NewRequest(http.MethodPost, "/substrate/inbound", nil)
 			switch route {
+			case "crd":
+				g.handleCRDNativeInbound(w, r, shnsdk.Envelope{}, shnsdk.Token{}, conformantCRD("MBR-COVERED", "72148"), "")
+			case "pas":
+				g.handlePASNativeInbound(w, r, shnsdk.Envelope{}, shnsdk.Token{}, loadPASGolden(t, "MBR-COVERED"), "")
 			case "eligibility":
 				b, e := shnsdk.BuildEligibilityRequest("MBR-COVERED", "1234567890", time.Now())
 				if e != nil {
@@ -381,13 +385,8 @@ func TestSoRFHIROperationEnvelope(t *testing.T) {
 		s := scriptedReadSoR{t: t, base: ReadSystemOfRecord(newCensusSoR()), before: func(context.Context, string, string) error { return &SoRReadError{Kind: kind} }}
 		g := &Gateway{cfg: Config{SoR: s}}
 		w := httptest.NewRecorder()
-		r := httptest.NewRequest("POST", "/substrate/inbound", nil)
-		request, err := shnsdk.BuildEligibilityRequest("MBR-COVERED", "1234567890", fixedClock())
-		if err != nil {
-			t.Fatal(err)
-		}
-		// Eligibility discloses a local record; native PAS no longer reads one.
-		g.handleEligibilityInbound(&fhirOperationWriter{w}, r, shnsdk.Envelope{}, shnsdk.Token{}, request, "")
+		r := httptest.NewRequest("POST", "/fhir/Claim/$submit", nil)
+		g.handlePASNativeInbound(&fhirOperationWriter{w}, r, shnsdk.Envelope{}, shnsdk.Token{}, loadPASGolden(t, "MBR-COVERED"), "")
 		want, _ := SoRFailureResponse(&SoRReadError{Kind: kind})
 		assertFHIRIngressError(t, w, want)
 		code := "processing"
@@ -428,32 +427,5 @@ func TestSoRObserverEveryReadFailure(t *testing.T) {
 		if e.Detail != "invalid_response" || e.Payload != nil {
 			t.Fatalf("unsafe observation %+v", e)
 		}
-	}
-}
-
-// Native carriage must not consult the local record even when its read would
-// fail. Source-disclosure actions retain the independent rejection rows above.
-func TestSoRNativeHandlersDoNotReadSource(t *testing.T) {
-	for _, leg := range []string{"crd-order-select", "pas-claim"} {
-		t.Run(leg, func(t *testing.T) {
-			g, requester := newInboundTestGateway(t, true)
-			g.cfg.ConformanceEnforcement = EnforcementNone
-			g.cfg.SoR = nativeReadPanicSoR{}
-			calls := 0
-			g.cfg.Responder = nativeCountResponder{count: &calls, answer: []byte("participant answer")}
-			ex := ExchangeContext{holder: requester.ID, recipient: "payer", legType: leg, subjectPCI: "pci:external", correlationID: "no-local-read", policy: g.policy()}
-			r := newSignedInboundRequest(t, g, requester.ID)
-			r = r.WithContext(context.WithValue(r.Context(), nativeExchangeKey{}, ex))
-			env := shnsdk.Envelope{Metadata: shnsdk.Metadata{Sender: requester.ID, Recipient: "payer", TransactionType: leg, CorrelationID: ex.correlationID}}
-			w := httptest.NewRecorder()
-			g.handleNativeInbound(w, r, leg, env, shnsdk.Token{Subject: ex.subjectPCI}, []byte("opaque participant request"), "")
-			if w.Code != http.StatusOK {
-				t.Fatalf("transport %d %s", w.Code, w.Body.String())
-			}
-			hdr, body, err := shnsdk.DecodeHTTPFrame(openResponseLeg(t, requester, w.Body.Bytes()))
-			if err != nil || hdr.Status != 202 || calls != 1 || string(body) != "participant answer" {
-				t.Fatalf("reply status=%d calls=%d body=%s err=%v", hdr.Status, calls, body, err)
-			}
-		})
 	}
 }

@@ -197,7 +197,37 @@ func (g *Gateway) observeCRDEmbedded(ctx context.Context, leg, corr string, answ
 	}
 }
 
-// handleCRDNativeInbound delegates verified CRD delivery to the shared native boundary.
+// handleCRDNativeInbound serves the conformant CRD leg: subject-bind on the conformant shape,
+// ingress-validate the SR + coverage, then forward the VERBATIM conformant bytes to the responder
+// (an injected LegResponder decides / native forwards to the real RI). Mirrors handleCRDInbound's structure for
+// the conformant shape; the existing minimized handler is untouched.
 func (g *Gateway) handleCRDNativeInbound(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token, reqJSON []byte, answerTok string) {
-	g.handleNativeInbound(w, r, "crd-order-select", env, tok, reqJSON, answerTok)
+	ctx := r.Context()
+	srJSON, covJSON, status, msg := g.conformantCRDBindContext(ctx, reqJSON, tok.Subject)
+	if status != 0 {
+		g.refuseInbound(w, r, legCRDOrderSelect, env, tok, answerTok, status, msg, nil)
+		return
+	}
+	if status, msg := g.validateFHIR(ctx, srJSON, "ingress", ""); status != 0 {
+		g.refuseInbound(w, r, legCRDOrderSelect, env, tok, answerTok, status, msg, nil)
+		return
+	}
+	if len(covJSON) > 0 {
+		if status, msg := g.validateFHIR(ctx, covJSON, "ingress", ""); status != 0 {
+			g.refuseInbound(w, r, legCRDOrderSelect, env, tok, answerTok, status, msg, nil)
+			return
+		}
+	}
+	result, err := g.cfg.Responder.Handle(ctx, "crd-order-select", env.Metadata.CorrelationID, tok.Subject, reqJSON)
+	if err != nil {
+		g.responderFailed(w, "crd-order-select", err)
+		return
+	}
+	if result.Status != 0 {
+		g.respondLegError(w, r, "payer-coverage", "crd-cards", "crd-order-select",
+			env.Metadata.CorrelationID, result, tok.Subject, env.Metadata.Sender, "", answerTok)
+		return
+	}
+	g.observeCRDEmbedded(ctx, "crd-order-select", env.Metadata.CorrelationID, result.Response)
+	g.respondLeg(w, r, "payer-coverage", "crd-cards", "crd-order-select", env.Metadata.CorrelationID, result.Response, tok.Subject, env.Metadata.Sender, "", answerTok)
 }

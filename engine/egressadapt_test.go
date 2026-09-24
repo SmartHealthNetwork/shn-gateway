@@ -18,13 +18,6 @@ import (
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
-func waitEgressObserver(t *testing.T, g *Gateway) {
-	t.Helper()
-	if err := g.WaitObserverCompletion(context.Background()); err != nil {
-		t.Fatalf("wait for observer completion: %v", err)
-	}
-}
-
 var fixedEgressClock = func() time.Time { return time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC) }
 
 // TestEgressAdaptNilChainIsPassthrough: arms (1)/(2) carry route.Chain==nil
@@ -39,7 +32,7 @@ func TestEgressAdaptNilChainIsPassthrough(t *testing.T) {
 	}}
 	route := legRoute{Token: "pa.pas@2.0", BuildLine: "2.0", Chain: nil}
 	in := []byte(`{"resourceType":"Bundle"}`)
-	out, reports, err := g.egressAdapt(context.Background(), route, in, ExchangeIdentity{CorrelationID: "corr-1"})
+	out, reports, err := g.egressAdapt(route, in, ExchangeIdentity{CorrelationID: "corr-1"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -82,7 +75,7 @@ func TestEgressAdaptValidatesAtTargetLane(t *testing.T) {
 		ValidatorsByLine: map[string]shnsdk.Validator{"2.0": shnsdk.NewFakeValidator(), "2.1": &shnsdk.FakeValidator{RejectIfContains: corruptMarker}},
 	}}
 
-	adapted, _, err := g.egressAdapt(context.Background(), route, []byte(`{"resourceType":"Bundle"}`), ExchangeIdentity{CorrelationID: "corr-2"})
+	adapted, _, err := g.egressAdapt(route, []byte(`{"resourceType":"Bundle"}`), ExchangeIdentity{CorrelationID: "corr-2"})
 	if err != nil {
 		t.Fatalf("egressAdapt itself must not error on a structurally-valid (if semantically corrupted) stub output: %v", err)
 	}
@@ -151,11 +144,10 @@ func TestEgressAdaptStampsTargetToken(t *testing.T) {
 		Observer: func(e ObserverEvent) { observed = append(observed, e) },
 	}}
 
-	adapted, reports, err := g.egressAdapt(context.Background(), route, in, ExchangeIdentity{CorrelationID: "corr-3"})
+	adapted, reports, err := g.egressAdapt(route, in, ExchangeIdentity{CorrelationID: "corr-3"})
 	if err != nil {
 		t.Fatalf("egressAdapt: unexpected error: %v", err)
 	}
-	waitEgressObserver(t, g)
 	if len(adapted) == 0 {
 		t.Fatal("adapted bytes must be non-empty")
 	}
@@ -219,10 +211,9 @@ func TestEgressAdaptFillsPromisedFields(t *testing.T) {
 	}}
 
 	x := ExchangeIdentity{CorrelationID: "corr-1", LegType: "dtr-questionnaire-fetch", Counterpart: "payer"}
-	if _, _, err := g.egressAdapt(context.Background(), route, in, x); err != nil {
+	if _, _, err := g.egressAdapt(route, in, x); err != nil {
 		t.Fatalf("egressAdapt: unexpected error: %v", err)
 	}
-	waitEgressObserver(t, g)
 
 	if len(observed) != 1 || observed[0].Kind != legTransformedKind {
 		t.Fatalf("observed = %+v, want exactly one leg.transformed event", observed)
@@ -269,10 +260,9 @@ func TestEgressAdaptFillsPromisedFieldsChainInvoking(t *testing.T) {
 	}}
 
 	x := ExchangeIdentity{CorrelationID: "corr-5", LegType: "crd-order-select", Counterpart: "payer-crd22"}
-	if _, _, err := g.egressAdapt(context.Background(), route, in, x); err != nil {
+	if _, _, err := g.egressAdapt(route, in, x); err != nil {
 		t.Fatalf("egressAdapt: unexpected error: %v", err)
 	}
-	waitEgressObserver(t, g)
 
 	if len(observed) != 1 || observed[0].Kind != legTransformedKind {
 		t.Fatalf("observed = %+v, want exactly one leg.transformed event", observed)
@@ -318,11 +308,10 @@ func TestEnvelopeLegChainIsByteIdenticalPassThrough(t *testing.T) {
 	}}
 
 	x := ExchangeIdentity{CorrelationID: "corr-envelope", LegType: "dtr-questionnaire-fetch", Counterpart: "payer"}
-	out, reports, err := g.egressAdapt(context.Background(), route, in, x)
+	out, reports, err := g.egressAdapt(route, in, x)
 	if err != nil {
 		t.Fatalf("egressAdapt: unexpected error: %v", err)
 	}
-	waitEgressObserver(t, g)
 	if !bytes.Equal(out, in) {
 		t.Fatalf("envelope leg must be byte-IDENTICAL pass-through (proves the step funcs never ran): got %s, want %s", out, in)
 	}
@@ -399,8 +388,7 @@ func TestEgressAdaptRefusalEmitsLegFailed(t *testing.T) {
 	}}
 
 	x := ExchangeIdentity{CorrelationID: "corr-refuse", LegType: "pas-claim", Counterpart: "payer-x"}
-	out, reports, err := g.egressAdapt(context.Background(), route, in, x)
-	waitEgressObserver(t, g)
+	out, reports, err := g.egressAdapt(route, in, x)
 	if err == nil {
 		t.Fatal("want an error (gated chain must refuse), got nil")
 	}
@@ -480,7 +468,7 @@ func TestEgressAdapt_EdgeCaptureRecordsPreSealPair(t *testing.T) {
 		DemoEdgeCapture: true,
 	}}
 	x := ExchangeIdentity{CorrelationID: newCorrelationID(), LegType: "crd-order-select", Counterpart: "payer-crd22"}
-	out, reports, err := g.egressAdapt(context.Background(), route, in, x)
+	out, reports, err := g.egressAdapt(route, in, x)
 	if err != nil {
 		t.Fatalf("egressAdapt: unexpected error: %v", err)
 	}
@@ -536,7 +524,7 @@ func TestEgressAdapt_EdgeCaptureOffIsConformanceNeutral(t *testing.T) {
 		}}
 		id = newCorrelationID()
 		x := ExchangeIdentity{CorrelationID: id, LegType: "crd-order-select", Counterpart: "payer-crd22"}
-		out, _, err := g.egressAdapt(context.Background(), route, in, x)
+		out, _, err := g.egressAdapt(route, in, x)
 		if err != nil {
 			t.Fatalf("egressAdapt: unexpected error: %v", err)
 		}
@@ -577,7 +565,7 @@ func TestEgressAdapt_EnvelopeLegCaptureIsByteIdentical(t *testing.T) {
 		DemoEdgeCapture: true,
 	}}
 	x := ExchangeIdentity{CorrelationID: newCorrelationID(), LegType: "dtr-questionnaire-fetch", Counterpart: "payer"}
-	out, _, err := g.egressAdapt(context.Background(), route, in, x)
+	out, _, err := g.egressAdapt(route, in, x)
 	if err != nil {
 		t.Fatalf("egressAdapt: unexpected error: %v", err)
 	}
@@ -622,7 +610,7 @@ func TestEgressAdapt_RefusedLegCapturesNothing(t *testing.T) {
 		DemoEdgeCapture: true,
 	}}
 	x := ExchangeIdentity{CorrelationID: newCorrelationID(), LegType: "pas-claim", Counterpart: "payer-x"}
-	if _, _, err := g.egressAdapt(context.Background(), route, in, x); err == nil {
+	if _, _, err := g.egressAdapt(route, in, x); err == nil {
 		t.Fatal("want a refusal error (gated chain must refuse)")
 	}
 	if _, ok := g.edgeCaptureLookup(x.CorrelationID); ok {
@@ -645,7 +633,7 @@ func TestEgressAdapt_ChainlessRouteCapturesNothing(t *testing.T) {
 	route := legRoute{Token: "pa.pas@2.0", BuildLine: "2.0", Chain: nil}
 	in := []byte(`{"resourceType":"Bundle"}`)
 	x := ExchangeIdentity{CorrelationID: newCorrelationID(), LegType: "pas-claim", Counterpart: "payer-x"}
-	if _, _, err := g.egressAdapt(context.Background(), route, in, x); err != nil {
+	if _, _, err := g.egressAdapt(route, in, x); err != nil {
 		t.Fatalf("egressAdapt: unexpected error: %v", err)
 	}
 	if _, ok := g.edgeCaptureLookup(x.CorrelationID); ok {
@@ -681,7 +669,7 @@ func TestEgressAdapt_EdgeCaptureConcurrentRecordAndRead(t *testing.T) {
 		defer wg.Done()
 		for i := 0; i < iterations; i++ {
 			x := ExchangeIdentity{CorrelationID: newCorrelationID(), LegType: "crd-order-select", Counterpart: "payer-crd22"}
-			if _, _, err := g.egressAdapt(context.Background(), route, in, x); err != nil {
+			if _, _, err := g.egressAdapt(route, in, x); err != nil {
 				t.Errorf("egressAdapt: unexpected error: %v", err)
 			}
 		}

@@ -403,6 +403,52 @@ RETURNING eob_id`,
 	return nil
 }
 
+// The durable Store answers the pre-forward correlation checks (engine/eobowner.go).
+var (
+	_ engine.EOBOwnerLookup        = (*PgStore)(nil)
+	_ engine.PendCorrelationLookup = (*PgStore)(nil)
+)
+
+// EOBOwner reports the patient an EOB id is filed for. See engine.EOBOwnerLookup.
+// Unlike the Store's read methods it returns the store's error, so an outage is
+// not mistaken for "no such EOB".
+func (s *PgStore) EOBOwner(eobID string) (string, bool, error) {
+	ctx, cancel := storeCtx()
+	defer cancel()
+	var owner string
+	err := s.pool.QueryRow(ctx,
+		`SELECT subject_pci FROM gw_eob WHERE holder_id=$1 AND eob_id=$2`,
+		s.holderID, eobID).Scan(&owner)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("pgstore: EOBOwner: %w", err)
+	}
+	return owner, true, nil
+}
+
+// PendedForOtherSubject reports a patient other than subjectPCI with an undecided
+// authorization under corrID. See engine.PendCorrelationLookup. The least PCI is
+// reported when more than one qualifies, as the in-memory store does.
+func (s *PgStore) PendedForOtherSubject(corrID, subjectPCI string) (string, bool, error) {
+	ctx, cancel := storeCtx()
+	defer cancel()
+	var other string
+	err := s.pool.QueryRow(ctx, `
+SELECT subject_pci FROM gw_pended_claim
+ WHERE holder_id=$1 AND correlation_id=$2 AND subject_pci <> $3 AND state <> 'decided'
+ ORDER BY subject_pci
+ LIMIT 1`, s.holderID, corrID, subjectPCI).Scan(&other)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("pgstore: PendedForOtherSubject: %w", err)
+	}
+	return other, true, nil
+}
+
 func (s *PgStore) EOBsForPatient(subjectPCI string) ([][]byte, bool) {
 	// Ordered by created_at, eob_id — chronological, not the stub's slice-insertion order
 	// (a second, benign divergence from MemStore: no caller asserts EOB order; the

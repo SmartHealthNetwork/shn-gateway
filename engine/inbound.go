@@ -123,14 +123,6 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "authz verification failed"})
 		return
 	}
-	// Every registered exchange is subject-scoped. VerifyBound's empty expected
-	// subject intentionally skips comparison; it does not establish that the
-	// authenticated authority supplied a subject. Require that fact before any
-	// payload use, independently of optional patient-content consistency checks.
-	if tok.Subject == "" {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "authz subject required"})
-		return
-	}
 
 	// Only verified envelope metadata may provide cross-boundary attribution.
 	if leg, ok := r.Context().Value(diagnosticLegKey{}).(*diagnosticLeg); ok {
@@ -171,14 +163,6 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 	}
 	r = r.WithContext(withRequestFrameOperation(r.Context(), operation))
 
-	hook, _, _ := inboundFrameCRDHook(env.Metadata.TransactionType, payload)
-	ex := ExchangeContext{holder: env.Metadata.Sender, recipient: g.cfg.HolderID, legType: env.Metadata.TransactionType, subjectPCI: tok.Subject, correlationID: env.Metadata.CorrelationID, consentRef: env.Metadata.ConsentRef, operation: operation, crdHook: hook, policy: g.policy(), bodySHA256: sha256hex(body)}
-	if shnsdk.IsFramed(payload) {
-		hdr, _, _ := shnsdk.DecodeHTTPFrame(payload)
-		ex.contentType = hdr.Headers["Content-Type"]
-		ex.contractVersion = hdr.Headers[shnsdk.FrameHeaderContractVersion]
-	}
-	r = r.WithContext(context.WithValue(r.Context(), nativeExchangeKey{}, ex))
 	g.diagnosticStage(r.Context(), "recipient.request", env.Metadata.TransactionType, body, 0, "")
 	switch env.Metadata.TransactionType {
 	case "coverage-eligibility":
@@ -189,8 +173,34 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 		g.handleCRDDispatchInbound(w, r, env, tok, body, answerTok)
 	case "dtr-questionnaire-fetch":
 		g.handleDTRInbound(w, r, env, tok, body, answerTok)
-	case "pas-claim", "pas-claim-update", "pas-claim-inquire":
-		g.handleNativeInbound(w, r, env.Metadata.TransactionType, env, tok, body, answerTok)
+	case "pas-claim":
+		// R8 re-home (FR-16/FR-27): fence BEFORE dispatch — an unattested
+		// clinician/patient QR item is nonconformant regardless of which handler
+		// would otherwise run.
+		if reason, ok := fenceAttestedItems(body); !ok {
+			g.refuseInbound(w, r, legPASClaim, env, tok, answerTok, http.StatusForbidden, reason, nil)
+			return
+		}
+		g.handlePASNativeInbound(w, r, env, tok, body, answerTok)
+	case "pas-claim-update":
+		// R8 re-home (FR-16/FR-27): same fence as pas-claim above — the property
+		// belongs to any QR item, not only to amends.
+		if reason, ok := fenceAttestedItems(body); !ok {
+			g.refuseInbound(w, r, legPASClaimUpdate, env, tok, answerTok, http.StatusForbidden, reason, nil)
+			return
+		}
+		g.handlePASUpdateNativeInbound(w, r, env, tok, body, answerTok)
+	case "pas-claim-inquire":
+		// R8 re-home (FR-16/FR-27): the same fence as the two legs above. An
+		// inquiry's profile gives it no QuestionnaireResponse, so the fence is
+		// expected to pass — but the property belongs to any QR item wherever it
+		// arrives, and a fence that runs on two of three PAS legs is a gap waiting
+		// for the third to carry one.
+		if reason, ok := fenceAttestedItems(body); !ok {
+			g.refuseInbound(w, r, legPASClaimInquire, env, tok, answerTok, http.StatusForbidden, reason, nil)
+			return
+		}
+		g.handlePASInquireInbound(w, r, env, tok, body, answerTok)
 	case "federated-query":
 		g.handleFederatedQueryInbound(w, r, env, tok, body, answerTok)
 	case "patient-dtr":
@@ -248,18 +258,30 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 	// Only AFTER the subject binds do we ingress-validate the clinical payload via
 	// the external $validate — fail-closed as before.
 	//
-	// Eligibility is version-neutral. Its optional ingress checks use the
-	// canonical lane; required unavailable evidence remains 503.
+	// F7: the lane is selected per LINE like every other validate, but this
+	// site deliberately does NOT route through g.validateFHIR — its failure contract
+	// (422 on !Valid, with the choke point's bounded govResult.Issues echoed)
+	// differs from validateFHIR's, and unifying them would change the wire.
+	// The line comes from the same
+	// shnsdk.LineOf(answerTok) call every other site uses — it is not special-cased
+	// here — and it evaluates to "" (the canonical lane) because coverage-eligibility
+	// is version-neutral (paCatalog Contract ""), so answerTok itself is always "".
+	// A nil lane keeps THIS site's 500 rather than borrowing another's.
+	// Unconditional on purpose, not an oversight — this is the PAYER'S side of the SAME
+	// eligibility exchange originate.go's two UC-01 sites
+	// cover; cerJSON here is the REQUEST the requesting gateway's own engine built
+	// (shnsdk.BuildEligibilityRequest — never a foreign relay, since only SHN gateways ever
+	// originate a substrate leg), so it is SHN-produced on every lane and always validates.
 	ingressValidator := g.validatorForContractLine(strings.SplitN(answerTok, "@", 2)[0], shnsdk.LineOf(answerTok))
+	if ingressValidator == nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "no FHIR validator lane configured for this leg (FR-36/FR-G29)"})
+		return
+	}
 	// Routed through the choke point so an invalid inbound request emits its
 	// conformance finding. handleInbound already tagged this leg's context
 	// (Whose "peer" — these are the requester's own bytes), so it is read as-is.
 	// This site's own status/message contract is preserved explicitly below.
 	if gr := g.validateGoverned(ctx, findingContextFrom(ctx), ingressValidator, cerJSON, "ingress", shnsdk.LineOf(answerTok), "", false); gr.Status != 0 {
-		if gr.Status == http.StatusServiceUnavailable {
-			writeJSON(w, gr.Status, map[string]string{"error": gr.Msg})
-			return
-		}
 		if gr.Status == http.StatusInternalServerError {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "validator unavailable"})
 			return
@@ -357,21 +379,36 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 		g.refuseInbound(w, r, legEligibility, env, tok, answerTok, status, msg, nil)
 		return
 	}
-	// An invalid locally built answer remains a 500; required unavailable
-	// evidence is a distinct 503. The answer belongs to this participant.
+	// Egress $validate, behavior-identical to the pre-seam inline path: validator
+	// error → 500 "validator unavailable"; !Valid → 500 "egress validation failed".
+	// (NOT g.validateFHIR, which returns 422 on !Valid — that would change the
+	// failure-path contract.)
+	// F7: per-line lane selection, same "" (version-neutral) line as the ingress site
+	// above — and, as the note says, deliberately NOT g.validateFHIR: this site's
+	// !Valid answer is a 500, not a 422, and that distinction is the contract.
+	// Egress is unconditional by definition (R-8 is an ingress-only carve-out) — crrJSON
+	// here is always SHN-produced
+	// (shnsdk.BuildEligibilityResponse), so this was never in scope for the skip either way.
 	egressValidator := g.validatorForContractLine(strings.SplitN(answerTok, "@", 2)[0], shnsdk.LineOf(answerTok))
+	if egressValidator == nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "no FHIR validator lane configured for this leg (FR-36/FR-G29)"})
+		return
+	}
+	// Routed through the choke point so an invalid egress response still emits
+	// its conformance finding. responseFHIR is THIS gateway's own built answer,
+	// not the inbound request's bytes, so Whose is overridden to "own" (the
+	// context the handler entry tagged names the peer's inbound leg). Both
+	// outcomes here answer 500 (unchanged from before the migration) — the
+	// choke point's own message already matches this site's literals
+	// byte-for-byte in both cases, so it is relayed directly.
 	fc := findingContextFrom(ctx)
 	fc.Whose = "own"
 	if gr := g.validateGoverned(ctx, fc, egressValidator, responseFHIR, "egress", shnsdk.LineOf(answerTok), "", false); gr.Status != 0 {
-		if gr.Status == http.StatusServiceUnavailable {
-			writeJSON(w, gr.Status, map[string]string{"error": gr.Msg})
-			return
-		}
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": gr.Msg})
 		return
 	}
 
-	g.respondLeg(w, r, "payer-coverage", "eligibility-response", "coverage-eligibility", env.Metadata.CorrelationID, result, tok.Subject, env.Metadata.Sender, "", answerTok)
+	g.respondLeg(w, r, "payer-coverage", "eligibility-response", "coverage-eligibility", env.Metadata.CorrelationID, result.Response, tok.Subject, env.Metadata.Sender, "", answerTok)
 }
 
 // handleFederatedQueryInbound is the facility source-side handler (UC-05, consent
@@ -470,7 +507,7 @@ func (g *Gateway) handleFederatedQueryInbound(w http.ResponseWriter, r *http.Req
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
-	g.respondLegPayload(w, r, "facility-disclosure", "federated-query-response", "federated-query", env.Metadata.CorrelationID, answer, tok.Subject, env.Metadata.Sender, consentRef, answerTok)
+	g.respondLeg(w, r, "facility-disclosure", "federated-query-response", "federated-query", env.Metadata.CorrelationID, answer, tok.Subject, env.Metadata.Sender, consentRef, answerTok)
 }
 
 // sealCDexFulfillment fulfills the payer's CDex request Task with the
@@ -666,7 +703,7 @@ func (g *Gateway) handlePatientDTRInbound(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "marshal response failed"})
 		return
 	}
-	g.respondLegPayload(w, r, "patient-authorship", "patient-dtr-response", "patient-dtr", env.Metadata.CorrelationID, answer, tok.Subject, env.Metadata.Sender, "", answerTok)
+	g.respondLeg(w, r, "patient-authorship", "patient-dtr-response", "patient-dtr", env.Metadata.CorrelationID, answer, tok.Subject, env.Metadata.Sender, "", answerTok)
 }
 
 // verifyHubAssertion checks the X-Hub-Assertion header: a shnsdk.Assertion

@@ -18,7 +18,6 @@
 package engine
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"net/http/httptest"
@@ -35,7 +34,7 @@ func TestSelectLegLineOrBridgeRefuse_Success(t *testing.T) {
 	reg := shnsdk.NewRegistry()
 	reg.Set("bridge-demo-gw", shnsdk.RegistryEntry{ID: "bridge-demo-gw", Role: "payer",
 		ContractVersions: []string{shnsdk.ContractPAPAS20}})
-	g := &Gateway{cfg: Config{Reg: reg, DeclaredContractVersions: []string{shnsdk.ContractPAPAS20}, EgressNativeLines: []string{"2.0"}}}
+	g := &Gateway{cfg: Config{Reg: reg, DeclaredContractVersions: []string{shnsdk.ContractPAPAS20}}}
 
 	rec := httptest.NewRecorder()
 	route, ok := g.selectLegLineOrBridgeRefuse(rec, "bridge-demo-gw", "pas-claim", "corr-1")
@@ -50,14 +49,19 @@ func TestSelectLegLineOrBridgeRefuse_Success(t *testing.T) {
 	}
 }
 
-// TestSelectLegLineOrBridgeRefuse_RouteRefusalError restricts the actual native
-// builder set to 2.0. The peer requires 2.2, so routing needs a transformation;
-// absent target certification must retain the structured refusal surface.
+// TestSelectLegLineOrBridgeRefuse_RouteRefusalError: own and peer share NO pas-claim line,
+// and this build has no validator lane for the peer's declared line at all — so neither
+// arm (2)'s native reach nor arm (3)'s transform chain can even be attempted (both gate on
+// g.validatorForLine before considering a target line), and selectLegRoute fails closed
+// with a *RouteRefusalError — exactly the shape provider-gw hits against the real deployed
+// bridge-demo-refuse-gw (it declares no 2.1/2.2 validator lane of its own; see
+// scenariodrive.BridgeChecks's doc comment). Asserts the EXACT 200 structured body task2's
+// brief specifies, not just its absence of an error.
 func TestSelectLegLineOrBridgeRefuse_RouteRefusalError(t *testing.T) {
 	reg := shnsdk.NewRegistry()
 	reg.Set("bridge-demo-refuse-gw", shnsdk.RegistryEntry{ID: "bridge-demo-refuse-gw", Role: "payer",
 		ContractVersions: []string{shnsdk.ContractPAPAS22}})
-	g := &Gateway{cfg: Config{Reg: reg, DeclaredContractVersions: []string{shnsdk.ContractPAPAS20}, EgressNativeLines: []string{"2.0"}}}
+	g := &Gateway{cfg: Config{Reg: reg, DeclaredContractVersions: []string{shnsdk.ContractPAPAS20}}}
 
 	rec := httptest.NewRecorder()
 	route, ok := g.selectLegLineOrBridgeRefuse(rec, "bridge-demo-refuse-gw", "pas-claim", "corr-2")
@@ -168,8 +172,8 @@ func TestWriteBridgeRefusal(t *testing.T) {
 // apply-time hermetic proof, driven against the REAL chainFor/applyChain machinery (the
 // same vendored golden fixture and up-direction gated step transform_pas_test.go's
 // TestPasStep2021Up_RequestDirectionGated already proves refuses) rather than a synthetic
-// error — a source certifier proves the exact 2.0 request before the transform;
-// no HTTP substrate is needed. This is exactly the shape the SECOND
+// error — g.egressAdapt only needs route.Chain/payload/x; g.observe is nil-safe on a
+// zero-value Config, so no HTTP substrate is needed. This is exactly the shape the SECOND
 // live run's fix (SHN_DEMO_EGRESS_NATIVE_LINES) is meant to force handleUC03Bridge's own
 // pas-claim leg into: a chain IS selected (2.0->2.2 spans the gated 2.0->2.1 up-step), and
 // it refuses at APPLY time, never at selection.
@@ -183,8 +187,8 @@ func TestHandleUC03BridgeEgressAdapt_SemanticChangeErrorReshapesTo200(t *testing
 	// honest 2.1-mandatory source for it (transform_pas_test.go's own control fixture).
 	payload := pasGolden(t, "conformant/pas-submit-request.json")
 
-	g := &Gateway{cfg: Config{ValidatorsByLine: map[string]shnsdk.Validator{"2.0": syntheticFakeValidator()}}}
-	_, _, err := g.egressAdapt(context.Background(), route, payload, ExchangeIdentity{CorrelationID: "corr-bridge-refuse", LegType: "pas-claim", Counterpart: "bridge-demo-refuse-gw"})
+	g := &Gateway{}
+	_, _, err := g.egressAdapt(route, payload, ExchangeIdentity{CorrelationID: "corr-bridge-refuse", LegType: "pas-claim", Counterpart: "bridge-demo-refuse-gw"})
 	if err == nil {
 		t.Fatal("want a semantic-change refusal from the real 2.0->2.2 chain, got success")
 	}

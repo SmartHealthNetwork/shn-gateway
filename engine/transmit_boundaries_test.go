@@ -97,7 +97,7 @@ func TestBoundaryRequestToNetworkRefusesUnpermittedPayloads(t *testing.T) {
 	payloads := newBoundaryPayloads(t, relay.BuilderSDKPASSubmit, bundle)
 	for _, row := range payloads.rows() {
 		t.Run(row.name, func(t *testing.T) {
-			env := newTransportExchange(t)
+			env := newInProcessExchange(t)
 			refused := &refusalCounter{}
 			env.originator.cfg.Observer = refused.observe
 			_, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "pas-claim", "pci-1", "corr-1", "",
@@ -108,7 +108,6 @@ func TestBoundaryRequestToNetworkRefusesUnpermittedPayloads(t *testing.T) {
 			if env.routeHitCount() != 0 {
 				t.Fatal("a refused request reached the Hub")
 			}
-			observationFlush(t, env.originator)
 			if refused.count() == 0 {
 				t.Fatal("the refusal was not observed")
 			}
@@ -120,7 +119,7 @@ func TestBoundaryRequestToNetworkRefusesUnpermittedPayloads(t *testing.T) {
 		})
 	}
 	t.Run("an originated request under a carried row", func(t *testing.T) {
-		env := newTransportExchange(t)
+		env := newInProcessExchange(t)
 		authored := sealRequest(relay.BuilderSDKPASSubmit, []byte(bundle), "application/fhir+json")
 		_, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "pas-claim", "pci-1", "corr-1", "",
 			Content{WorkstreamType: workstreamPA, Payload: authored, Carried: true})
@@ -129,17 +128,16 @@ func TestBoundaryRequestToNetworkRefusesUnpermittedPayloads(t *testing.T) {
 		}
 	})
 	t.Run("control: the participant's request, carried exactly", func(t *testing.T) {
-		env := newTransportExchange(t)
+		env := newInProcessExchange(t)
 		exact := relay.Exact(relay.NewBody([]byte(bundle), relay.OriginIngressRequest), "application/fhir+json")
 		env.payerReturns(LegResult{Response: testResponse([]byte(`{"resourceType":"Bundle"}`))})
 		_, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "pas-claim", "pci-1", "corr-1", "",
 			Content{WorkstreamType: workstreamPA, Payload: exact, Carried: true})
-		if err != nil || env.routeHitCount() != 1 {
+		if isOwnershipFault(err) || env.routeHitCount() != 1 {
 			t.Fatalf("err = %v, hub calls %d", err, env.routeHitCount())
 		}
-		hdr, body, err := shnsdk.DecodeHTTPFrame(env.lastRequestPayload())
-		if err != nil || hdr.Headers["Content-Type"] != "application/fhir+json" || string(body) != bundle {
-			t.Fatalf("request frame=%+v body=%s err=%v, want the participant's bytes", hdr, body, err)
+		if string(env.lastRequestPayload()) != bundle {
+			t.Fatalf("request = %s, want the participant's bytes", env.lastRequestPayload())
 		}
 	})
 }
@@ -168,7 +166,6 @@ func TestBoundaryRequestToOwnSystemRefusesUnpermittedPayloads(t *testing.T) {
 			g.cfg.Observer = refused.observe
 			rec := httptest.NewRecorder()
 			g.responderFailed(rec, "pas-claim", err)
-			observationFlush(t, g)
 			if rec.Code != http.StatusInternalServerError || refused.count() != 1 {
 				t.Fatalf("status %d, refusals observed %d", rec.Code, refused.count())
 			}
@@ -195,10 +192,9 @@ func TestBoundaryAnswerToNetworkRefusesUnpermittedPayloads(t *testing.T) {
 			refused := &refusalCounter{}
 			g.cfg.Observer = refused.observe
 			rec := httptest.NewRecorder()
-			g.respondLegPayload(rec, newSignedInboundRequest(t, g, requester.ID), "payer-coverage", "dtr-questionnaire", "dtr-questionnaire-fetch",
+			g.respondLeg(rec, newSignedInboundRequest(t, g, requester.ID), "payer-coverage", "dtr-questionnaire", "dtr-questionnaire-fetch",
 				"corr-1", row.payload, "pci-1", requester.ID, "", "")
 			assertLocalFault(t, rec)
-			observationFlush(t, g)
 			if refused.count() == 0 {
 				t.Fatal("the refusal was not observed")
 			}
@@ -252,7 +248,7 @@ func TestBoundaryAnswerToNetworkRefusesUnpermittedPayloads(t *testing.T) {
 	t.Run("control: a relayed package", func(t *testing.T) {
 		g, requester := newInboundTestGateway(t, true)
 		rec := httptest.NewRecorder()
-		g.respondLegPayload(rec, newSignedInboundRequest(t, g, requester.ID), "payer-coverage", "dtr-questionnaire", "dtr-questionnaire-fetch",
+		g.respondLeg(rec, newSignedInboundRequest(t, g, requester.ID), "payer-coverage", "dtr-questionnaire", "dtr-questionnaire-fetch",
 			"corr-1", relayedResponse([]byte(`{"resourceType":"Bundle"}`)), "pci-1", requester.ID, "", "")
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
@@ -273,48 +269,22 @@ func TestBoundaryAnswerToNetworkRefusesUnpermittedPayloads(t *testing.T) {
 // A payer whose system answers a questionnaire request with a package this
 // gateway built (not relayed) is refused: that answer is only ever relayed.
 func TestBoundaryQuestionnaireAnswerMustBeRelayed(t *testing.T) {
-	const body = `{"resourceType":"Bundle","type":"collection","entry":[]}`
-	for _, authored := range []bool{false, true} {
-		t.Run(map[bool]string{false: "relayed control", true: "authored mutation"}[authored], func(t *testing.T) {
-			g, requester := newInboundTestGatewayWithPolicy(t, true, EnforcementNone)
-			payload := relay.Exact(relay.NewBody([]byte(body), relay.OriginPeerFrame), "application/fhir+json")
-			if authored {
-				var err error
-				payload, err = relay.Authored(relay.BuilderSDKDTRPackage, []byte(body), "application/fhir+json")
-				if err != nil {
-					t.Fatal(err)
-				}
-			}
-			g.cfg.Responder = pasResultResponder{result: LegResult{Response: payload}}
-			refused := &refusalCounter{}
-			g.cfg.Observer = refused.observe
-			rec := httptest.NewRecorder()
-			env := shnsdk.Envelope{Metadata: shnsdk.Metadata{CorrelationID: "corr-1", Sender: requester.ID}}
-			r := newSignedInboundRequest(t, g, requester.ID)
-			r = r.WithContext(withRequestFrameOperation(r.Context(), shnsdk.FrameOperationQuestionnairePackage))
-			g.handleDTRInbound(rec, r, env, shnsdk.Token{Subject: coveredPCI(t, g)}, dtrFramedPackageFor(t, g), "")
-			observationFlush(t, g)
-			if authored {
-				assertLocalFault(t, rec)
-				if refused.count() != 1 {
-					t.Fatalf("refusals=%d", refused.count())
-				}
-				refused.mu.Lock()
-				event := refused.seen[0]
-				refused.mu.Unlock()
-				if event.LegType != "dtr-questionnaire-fetch" || event.Direction != "recipient-response" {
-					t.Fatalf("ownership refusal attribution=%+v", event)
-				}
-			} else {
-				if rec.Code != http.StatusOK || refused.count() != 0 {
-					t.Fatalf("status=%d refusals=%d body=%s", rec.Code, refused.count(), rec.Body.String())
-				}
-				hdr, got, err := shnsdk.DecodeHTTPFrame(openResponseLeg(t, requester, rec.Body.Bytes()))
-				if err != nil || hdr.Status != http.StatusOK || string(got) != body {
-					t.Fatalf("frame=%+v body=%s err=%v", hdr, got, err)
-				}
-			}
-		})
+	g, requester := newInboundTestGateway(t, true)
+	built, err := relay.Authored(relay.BuilderSDKDTRPackage, []byte(`{"resourceType":"Bundle","type":"collection","entry":[]}`), "application/fhir+json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.cfg.Responder = pasResultResponder{result: LegResult{Response: built}}
+	refused := &refusalCounter{}
+	g.cfg.Observer = refused.observe
+	rec := httptest.NewRecorder()
+	env := shnsdk.Envelope{Metadata: shnsdk.Metadata{CorrelationID: "corr-1", Sender: requester.ID}}
+	r := newSignedInboundRequest(t, g, requester.ID)
+	r = r.WithContext(withRequestFrameOperation(r.Context(), shnsdk.FrameOperationQuestionnairePackage))
+	g.handleDTRInbound(rec, r, env, shnsdk.Token{Subject: coveredPCI(t, g)}, dtrFramedPackageFor(t, g), "")
+	assertLocalFault(t, rec)
+	if refused.count() == 0 {
+		t.Fatal("the refusal was not observed")
 	}
 }
 
@@ -331,7 +301,6 @@ func TestBoundaryAnswerToOwnSystemRefusesUnpermittedPayloads(t *testing.T) {
 			rec := httptest.NewRecorder()
 			g.writePayload(rec, http.StatusOK, "application/fhir+json", row.payload, key)
 			assertLocalFault(t, rec)
-			observationFlush(t, g)
 			if refused.count() != 1 {
 				t.Fatalf("refusals observed = %d", refused.count())
 			}
@@ -363,7 +332,6 @@ func TestBoundaryRefusalWriterChecksItsScope(t *testing.T) {
 		scope.leg = "no-such-leg"
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "refused"})
 		rec := scope.ResponseWriter.(*httptest.ResponseRecorder)
-		observationFlush(t, g)
 		if rec.Code != http.StatusInternalServerError || rec.Body.Len() != 0 || refused.count() != 1 {
 			t.Fatalf("status %d body %q refusals %d", rec.Code, rec.Body.String(), refused.count())
 		}

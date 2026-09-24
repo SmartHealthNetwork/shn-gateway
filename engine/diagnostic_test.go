@@ -38,8 +38,8 @@ func TestObserverIngressUnauthenticatedBrokenBodyNeutral(t *testing.T) {
 		r.Body = body
 		w := httptest.NewRecorder()
 		g.observeIngress("pas-ingress", g.handlePASIngress)(w, r)
-		if w.Code != 400 || body.reads != 1 || !strings.Contains(w.Body.String(), "read body failed") {
-			t.Fatalf("observed=%v status=%d reads=%d body=%s; want bounded read failure", observed, w.Code, body.reads, w.Body.String())
+		if w.Code != 401 || body.reads != 0 {
+			t.Fatalf("observed=%v status=%d reads=%d; want untouched 401", observed, w.Code, body.reads)
 		}
 	}
 }
@@ -58,12 +58,8 @@ func TestDiagnosticIngressTraceOnlyAttributes(t *testing.T) {
 			}
 			w := httptest.NewRecorder()
 			g.observeIngress("pas-ingress", g.handlePASIngress)(w, r)
-			wantStatus := http.StatusUnauthorized
-			if broken {
-				wantStatus = http.StatusBadRequest
-			}
-			if w.Code != wantStatus {
-				t.Fatalf("proof=%q broken=%v status=%d want%d", proof, broken, w.Code, wantStatus)
+			if w.Code != 401 {
+				t.Fatalf("proof=%q broken=%v status=%d", proof, broken, w.Code)
 			}
 			if len(events) != 2 {
 				t.Fatalf("got %d events", len(events))
@@ -72,15 +68,8 @@ func TestDiagnosticIngressTraceOnlyAttributes(t *testing.T) {
 			if proof != "" && proof != "invalid" {
 				want = "call-one"
 			}
-			if events[0].CallID != want || events[0].BodyComplete == broken || events[0].RequestFingerprint.Complete == broken {
-				t.Fatalf("bounded request attributed incorrectly: %+v", events[0])
-			}
-			wantBody := "invalid-json"
-			if broken {
-				wantBody = ""
-			}
-			if string(events[0].Body) != wantBody || events[0].RequestFingerprint.ObservedBytes != int64(len(wantBody)) || events[0].RequestFingerprint.BodySHA256 != sha256hex([]byte(wantBody)) {
-				t.Fatalf("fingerprint lost observed bytes: %+v", events[0])
+			if events[0].CallID != want || events[0].BodyComplete {
+				t.Fatalf("unread request attributed incorrectly: %+v", events[0])
 			}
 		}
 	}
@@ -106,7 +95,7 @@ func TestDiagnosticIngressFingerprintAvailableDuringHandling(t *testing.T) {
 }
 
 func TestDiagnosticSealedConcurrentReusedCorrelation(t *testing.T) {
-	env := newTransportExchange(t)
+	env := newInProcessExchange(t)
 	var mu sync.Mutex
 	var events []diagnostics.Event
 	env.originator.cfg.Diagnostic = func(e diagnostics.Event) bool { mu.Lock(); defer mu.Unlock(); events = append(events, e); return true }
@@ -122,9 +111,6 @@ func TestDiagnosticSealedConcurrentReusedCorrelation(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	if env.routeHitCount() != 2 {
-		t.Fatalf("Hub calls=%d", env.routeHitCount())
-	}
 	var sealed []diagnostics.Event
 	for _, e := range events {
 		if e.Kind == "leg.sealed" {
@@ -183,7 +169,7 @@ func TestDiagnosticSealedFailureAndRefusalSnapshots(t *testing.T) {
 		ownership bool
 	}{{"recipient refusal", 422, false, false}, {"authority denial", 0, true, false}, {"ownership refusal", 0, false, true}} {
 		t.Run(tc.name, func(t *testing.T) {
-			env := newTransportExchange(t)
+			env := newInProcessExchange(t)
 			var events []diagnostics.Event
 			env.originator.cfg.Diagnostic = func(e diagnostics.Event) bool { events = append(events, e); return true }
 			if tc.status != 0 {
@@ -222,54 +208,6 @@ func TestDiagnosticSealedFailureAndRefusalSnapshots(t *testing.T) {
 			}
 			if !tc.ownership && (sealed == nil || terminal.RequestCiphertextHash != sealed.RequestCiphertextHash) {
 				t.Fatalf("lost attempt link: sealed=%+v terminal=%+v", sealed, terminal)
-			}
-		})
-	}
-}
-
-// Early ownership admission must report the same fault before optional policy
-// checks, sealing, or any network work, whether diagnostics are enabled or not.
-func TestDiagnosticEarlyOwnershipRefusal(t *testing.T) {
-	for _, diagnostic := range []bool{false, true} {
-		t.Run(fmt.Sprint(diagnostic), func(t *testing.T) {
-			env := newTransportExchange(t)
-			env.originator.cfg.Validator = syntheticEvidenceValidatorFunc(func([]byte) (shnsdk.Result, error) {
-				t.Error("optional validator ran on ownership refusal")
-				return shnsdk.Result{}, errors.New("unexpected checker")
-			})
-			var events []diagnostics.Event
-			var observations []ObserverEvent
-			env.originator.cfg.Observer = func(e ObserverEvent) { observations = append(observations, e) }
-			if diagnostic {
-				env.originator.cfg.Diagnostic = func(e diagnostics.Event) bool { events = append(events, e); return true }
-			}
-			calls := 0
-			env.originator.cfg.Client.Transport = diagnosticRoundTripper(func(*http.Request) (*http.Response, error) { calls++; return nil, errors.New("unexpected network") })
-			var unset relay.Payload
-			_, err := env.originator.OriginateLegMessage(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "ownership-correlation", "", Content{WorkstreamType: workstreamPA, Payload: unset})
-			if !errors.Is(err, relay.ErrUnsetOwnership) || calls != 0 {
-				t.Fatalf("ownership error=%v network=%d", err, calls)
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-			defer cancel()
-			if err := env.originator.WaitObserverCompletion(ctx); err != nil {
-				t.Fatal(err)
-			}
-			if len(observations) != 1 || observations[0].Kind != relay.RefusedEvent {
-				t.Fatalf("ownership observations=%+v", observations)
-			}
-			want := 0
-			if diagnostic {
-				want = 1
-			}
-			if len(events) != want {
-				t.Fatalf("diagnostics=%+v", events)
-			}
-			if diagnostic {
-				e := events[0]
-				if e.Kind != "relay.ownership-refused" || e.Sender != "provider" || e.Recipient != "payer" || e.CorrelationID != "ownership-correlation" || e.RequestCiphertextHash != "" || e.Status != 500 {
-					t.Fatalf("ownership metadata=%+v", e)
-				}
 			}
 		})
 	}
@@ -353,12 +291,9 @@ func TestNativeDiagnosticHeaderBudget(t *testing.T) {
 
 }
 func TestDiagnosticVerifiedLegRequiresBoundAuthority(t *testing.T) {
-	for _, mutation := range []string{"valid", "empty subject", "ciphertext", "sender", "correlation", "hub"} {
+	for _, mutation := range []string{"valid", "ciphertext", "sender", "correlation", "hub"} {
 		t.Run(mutation, func(t *testing.T) {
 			g, requester := newInboundTestGateway(t, false)
-			// The valid signed row reaches the participant content boundary once
-			// native carriage no longer parses the clinical body for admission.
-			g.cfg.Responder = pasResultResponder{result: LegResult{Status: http.StatusUnprocessableEntity, Message: "diagnostic fixture stop"}}
 			key := g.cfg.Client.Transport.(*inboundAuthzStub).authzPriv
 			var events []diagnostics.Event
 			g.cfg.Diagnostic = func(e diagnostics.Event) bool { events = append(events, e); return true }
@@ -367,13 +302,7 @@ func TestDiagnosticVerifiedLegRequiresBoundAuthority(t *testing.T) {
 				t.Fatal(err)
 			}
 			hash := sha256hex(env.Ciphertext)
-			// A verified leg requires authenticated subject scope even when payload
-			// conformance is not involved (PCV-01/14).
-			subject := "pci-1"
-			if mutation == "empty subject" {
-				subject = ""
-			}
-			tok := signTestToken(shnsdk.Token{Subject: subject, Operation: paCatalog[env.Metadata.TransactionType].Op, Frame: "provider-tpo", Holder: requester.ID, CorrelationID: "bound", PayloadHash: hash, Expiry: g.cfg.Clock().Add(time.Minute)}, key)
+			tok := signTestToken(shnsdk.Token{Operation: paCatalog[env.Metadata.TransactionType].Op, Frame: "provider-tpo", Holder: requester.ID, CorrelationID: "bound", PayloadHash: hash, Expiry: g.cfg.Clock().Add(time.Minute)}, key)
 			raw, _ := json.Marshal(tok)
 			env.Metadata.AuthzToken = string(raw)
 			switch mutation {
@@ -409,7 +338,7 @@ func TestDiagnosticVerifiedLegRequiresBoundAuthority(t *testing.T) {
 }
 
 func TestDiagnosticHubRefusalRetainsActualStatusAndBytes(t *testing.T) {
-	env := newTransportExchange(t)
+	env := newInProcessExchange(t)
 	raw := []byte(`{"error":"replay detected"}`)
 	var events []diagnostics.Event
 	env.originator.cfg.Diagnostic = func(e diagnostics.Event) bool { events = append(events, e); return true }

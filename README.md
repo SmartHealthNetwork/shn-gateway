@@ -370,9 +370,9 @@ gateway: populate_failure {"version":1,"stage":"http_status","reason":"non_2xx",
 |---|---|---|
 | `request_build` | `canceled`, `deadline`, `other` | The population request could not be constructed. |
 | `token_acquisition` | `canceled`, `deadline`, `other` | The SMART client could not acquire a token; no population request was sent. |
-| `transport` | `canceled`, `deadline`, `other` | The population HTTP client returned an error, including a redirect rejected by a caller-supplied callback. |
-| `body_read` | `canceled`, `deadline`, `other` | Reading the complete population response failed or exceeded 8 MiB, even if its status was also non-2xx. |
-| `http_status` | `non_2xx` | The population response body was read, but its HTTP status was not successful (including redirects). |
+| `transport` | `canceled`, `deadline`, `other` | The population HTTP client returned an error, including a refused redirect. |
+| `body_read` | `canceled`, `deadline`, `other` | Reading the population response failed, even if its status was also non-2xx. |
+| `http_status` | `non_2xx` | The population response body was read, but its HTTP status was not successful. |
 | `qr_extract` | `invalid_json`, `wrong_resource_type` | The successful HTTP response could not be extracted as a QuestionnaireResponse. |
 
 `status` is the observed **population** response status (100–599), or `0` when
@@ -380,14 +380,9 @@ unavailable; token endpoint statuses are not carried here. Cancellation/deadline
 reasons follow typed error causes. Request-local acquisition evidence survives an
 outer client timeout replacing the wrapped error chain. These records contain no URLs, headers,
 credentials, payloads, identifiers, or upstream error text. Success and distinct
-subject/canonical refusals and missing logical patient context emit no upstream-failure
-record. A logical patient reference is required before dispatch; the optional store
-reference falls back to it. Responses must be complete and no larger than 8 MiB.
-Redirects are never followed, including when a supplied redirect callback accepts
-them; a callback's explicit rejection retains its transport-error classification.
-The caller's HTTP client configuration and SMART transport are retained without
-mutation. There is no retry or unauthenticated fallback. These checks apply to
-explicit local population actions at every conformance setting.
+subject/canonical refusals emit no upstream-failure record. The caller's response,
+authority checks, validation, and request count are unchanged; there is no retry
+or unauthenticated fallback.
 
 These diagnostics describe a holder-local failure boundary, not its root cause
 or an AuditEvent. Service/time-window alignment is approximate: records carry no

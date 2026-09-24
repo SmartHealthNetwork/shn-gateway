@@ -47,6 +47,17 @@ const (
 	BuilderDTRNextQuestion BuilderID = "dtr-next-question"
 )
 
+// Interim builders name existing code paths that still rebuild a
+// participant's message instead of relaying it. Each is registered so that
+// such a path is visible and checked; each is removed once its path relays
+// the participant's bytes. BuilderInterimEmptyErrorSubstitution is the
+// recipient's own error body in place of the participant's application
+// error: for an empty error body, and for the bare error a requester that
+// negotiated no frame receives.
+const (
+	BuilderInterimEmptyErrorSubstitution BuilderID = "defect-empty-error-substitution"
+)
+
 // builderTestInjected is reserved for payloads that tests inject. Authored
 // refuses it.
 const builderTestInjected BuilderID = "test-injected"
@@ -67,7 +78,9 @@ var registeredBuilders = []BuilderID{
 	BuilderDTRNextQuestion,
 }
 
-var interimBuilders []BuilderID
+var interimBuilders = []BuilderID{
+	BuilderInterimEmptyErrorSubstitution,
+}
 
 // authoredBuilders is the closed set Authored accepts.
 var authoredBuilders = func() map[BuilderID]struct{} {

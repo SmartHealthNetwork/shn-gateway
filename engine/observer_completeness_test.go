@@ -43,7 +43,6 @@ func TestObserverConcurrentCaptureLossIsExplicit(t *testing.T) {
 			defer wg.Done()
 			w := httptest.NewRecorder()
 			h(w, httptest.NewRequest("POST", "/", bytes.NewBufferString(`{"request":true}`)))
-			observationFlush(t, g)
 			if w.Code != 200 || w.Body.String() != `{"answer":"nonempty"}` {
 				t.Errorf("capture changed response: %d %s", w.Code, w.Body.String())
 			}
@@ -58,7 +57,6 @@ func TestObserverConcurrentCaptureLossIsExplicit(t *testing.T) {
 	}
 	close(finish)
 	wg.Wait()
-	observationFlush(t, g)
 	if len(events) != 18 {
 		t.Fatalf("events=%d, want 18", len(events))
 	}
@@ -103,8 +101,7 @@ func TestObserverUnreadBodyIsExplicitlyIncomplete(t *testing.T) {
 		}
 	}}}
 	w := httptest.NewRecorder()
-	g.observeIngress("pas", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusUnauthorized) })(w, httptest.NewRequest("POST", "/Claim/$submit", bytes.NewBufferString("unread")))
-	observationFlush(t, g)
+	g.observeIngress("pas", g.handlePASIngress)(w, httptest.NewRequest("POST", "/Claim/$submit", bytes.NewBufferString("unread")))
 	raw, _ := json.Marshal(first)
 	var fields map[string]any
 	json.Unmarshal(raw, &fields)
@@ -137,7 +134,6 @@ func TestObserverPayloadCompleteness(t *testing.T) {
 				}
 				w.Write(tc.response)
 			})(w, httptest.NewRequest("POST", "/", bytes.NewReader(tc.request)))
-			observationFlush(t, g)
 			if w.Code != 200 || !bytes.Equal(w.Body.Bytes(), tc.response) {
 				t.Fatal("observation changed response")
 			}
@@ -148,8 +144,8 @@ func TestObserverPayloadCompleteness(t *testing.T) {
 	}
 }
 
-// Retain a foreign error's declared media type, including its absence.
-func TestRelayedErrorPreservesDeclaredOrAbsentMediaType(t *testing.T) {
+// retain a foreign error's declared media type; default only if absent.
+func TestRelayedErrorPreservesMediaTypeUsesAbsentFallback(t *testing.T) {
 	for _, mediaType := range []string{"application/problem+json", "text/plain; charset=utf-8", ""} {
 		t.Run(mediaType, func(t *testing.T) {
 			g, requester := newInboundTestGateway(t, true)
@@ -157,8 +153,11 @@ func TestRelayedErrorPreservesDeclaredOrAbsentMediaType(t *testing.T) {
 			rec := httptest.NewRecorder()
 			g.respondLegError(rec, newSignedInboundRequest(t, g, requester.ID), "payer-coverage", "crd-cards", "crd-order-select", "corr-1", LegResult{Status: 429, Response: relay.Exact(relay.NewBody(raw, relay.OriginUpstreamResponse), mediaType)}, "pci-1", requester.ID, "", "")
 			hdr, body, err := shnsdk.DecodeHTTPFrame(openResponseLeg(t, requester, rec.Body.Bytes()))
-			_, present := hdr.Headers["Content-Type"]
-			if err != nil || hdr.Status != 429 || hdr.Headers["Content-Type"] != mediaType || (mediaType == "" && present) || !bytes.Equal(body, raw) {
+			want := mediaType
+			if want == "" {
+				want = "application/fhir+json"
+			}
+			if err != nil || hdr.Status != 429 || hdr.Headers["Content-Type"] != want || !bytes.Equal(body, raw) {
 				t.Fatalf("framed error: header=%+v body=%q err=%v", hdr, body, err)
 			}
 		})

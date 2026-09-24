@@ -129,8 +129,8 @@ func TestPASAttachmentValidationChecksExactFinalBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	recorder := &dtrRecordingValidator{base: syntheticLineValidator("2.2")}
-	g := &Gateway{cfg: Config{ValidatorsByLine: map[string]shnsdk.Validator{"2.2": recorder}, ConformanceEnforcement: EnforcementStrict}}
+	recorder := &dtrRecordingValidator{base: NewLineFakeValidator("2.2")}
+	g := &Gateway{cfg: Config{ValidatorsByLine: map[string]shnsdk.Validator{"2.2": recorder}}}
 	bundle := []byte(`{"resourceType":"Bundle","entry":[{"resource":` + string(qr) + `}]}`)
 	if status, msg := g.validatePASAttachments(context.Background(), bundle, "2.2", true); status != 0 {
 		t.Fatalf("%d %s", status, msg)
@@ -208,8 +208,8 @@ func TestPASAttachmentFinalMutationRefusals(t *testing.T) {
 			}
 			final, _ := json.Marshal(resource)
 			bundle := []byte(`{"resourceType":"Bundle","entry":[{"resource":` + string(final) + `}]}`)
-			recorder := &dtrRecordingValidator{base: syntheticLineValidator("2.2")}
-			g := &Gateway{cfg: Config{ValidatorsByLine: map[string]shnsdk.Validator{"2.2": recorder}, ConformanceEnforcement: EnforcementStrict}}
+			recorder := &dtrRecordingValidator{base: NewLineFakeValidator("2.2")}
+			g := &Gateway{cfg: Config{ValidatorsByLine: map[string]shnsdk.Validator{"2.2": recorder}}}
 			want := 422
 			switch mode {
 			case "malformed resource":
@@ -220,10 +220,10 @@ func TestPASAttachmentFinalMutationRefusals(t *testing.T) {
 				want = 502
 			case "missing lane":
 				delete(g.cfg.ValidatorsByLine, "2.2")
-				want = 503
+				want = 500
 			case "outage":
 				recorder.mode = "validator outage"
-				want = 503
+				want = 500
 			}
 			if status, _ := g.validatePASAttachments(context.Background(), bundle, "2.2", true); status != want {
 				t.Fatalf("status=%d want=%d", status, want)

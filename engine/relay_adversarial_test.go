@@ -31,7 +31,7 @@ import (
 )
 
 func TestAdversarial_RelayResponseTokenMutated_Rejected(t *testing.T) {
-	env := newTransportExchange(t)
+	env := newInProcessExchange(t)
 	oo := []byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"error"}]}`)
 	env.payerReturns(LegResult{Status: 502, Response: testResponse(oo)})
 	env.corruptResponseToken(t) // THE one mutation

@@ -237,12 +237,7 @@ func (n *nativeResponder) selectCRDService(ctx context.Context, leg string, in r
 	var req struct {
 		Hook string `json:"hook"`
 	}
-	if ex, ok := ctx.Value(nativeExchangeKey{}).(ExchangeContext); ok && ex.crdHook != "" {
-		if ex.legType != leg || !validCRDHook(leg, ex.crdHook) {
-			return "", LegResult{Status: http.StatusForbidden, Message: "context_invalid"}, nil
-		}
-		req.Hook = ex.crdHook
-	} else if err := relay.Decode(in, &req); err != nil {
+	if err := relay.Decode(in, &req); err != nil {
 		return "", LegResult{Status: http.StatusBadRequest, Message: "parse cds request failed"}, nil
 	}
 	if req.Hook == "" {

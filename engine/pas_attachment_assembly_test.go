@@ -470,9 +470,6 @@ func testAuthoredPASFinalOutgoing(t *testing.T, optionalType string) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("full outgoing path status=%d: %s", rec.Code, rec.Body.String())
 	}
-	if err := gw.WaitObserverCompletion(context.Background()); err != nil {
-		t.Fatal(err)
-	}
 	var outgoing, finalQR []byte
 	for _, e := range events {
 		if e.Kind == "leg.originated" && e.LegType == "pas-claim" {
@@ -490,6 +487,16 @@ func testAuthoredPASFinalOutgoing(t *testing.T, optionalType string) {
 		if !bytes.Contains(populator.returned, []byte(literal)) {
 			t.Errorf("source specimen lost %s", literal)
 		}
+	}
+	qrChecked, bundleChecked := false, false
+	for _, e := range events {
+		if e.Kind == "validate.result" && e.Detail == "valid" {
+			qrChecked = qrChecked || bytes.Equal(e.Payload, finalQR)
+			bundleChecked = bundleChecked || bytes.Equal(e.Payload, outgoing)
+		}
+	}
+	if !qrChecked || !bundleChecked {
+		t.Fatalf("actual outgoing bytes validated: QR=%t Bundle=%t", qrChecked, bundleChecked)
 	}
 	if len(sor.resolveByRefCall) == 0 {
 		t.Fatal("supplier/evidence path was not reached")

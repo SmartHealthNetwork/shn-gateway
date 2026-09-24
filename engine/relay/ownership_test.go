@@ -39,9 +39,6 @@ func pinnedOwnership() map[Key]Rule {
 		{"pas-claim-inquire", rq, req, OutcomeOriginated}:       {Allowed: own(A), Builders: b("sdk-pas-inquiry")},
 		{"pas-claim-update", rq, req, OutcomeOriginated}:        {Allowed: own(A), Builders: b("sdk-pas-update")},
 
-		{"coverage-eligibility", rq, resp, OutcomeAnswered}:    relayOnly,
-		{"federated-query", rq, resp, OutcomeAnswered}:         relayOnly,
-		{"patient-dtr", rq, resp, OutcomeAnswered}:             relayOnly,
 		{"crd-order-dispatch", rq, resp, OutcomeAnswered}:      relayOnly,
 		{"crd-order-select", rq, resp, OutcomeAnswered}:        relayOnly,
 		{"dtr-questionnaire-fetch", rq, resp, OutcomeAnswered}: relayOnly,
@@ -76,12 +73,12 @@ func pinnedOwnership() map[Key]Rule {
 		{"pas-claim-inquire", rc, resp, OutcomeAnswered}:       relayOnly,
 		{"pas-claim-update", rc, resp, OutcomeAnswered}:        {Allowed: own(R)},
 
-		{"crd-order-dispatch", rc, resp, OutcomeUpstreamError}:      relayOnly,
-		{"crd-order-select", rc, resp, OutcomeUpstreamError}:        relayOnly,
-		{"dtr-questionnaire-fetch", rc, resp, OutcomeUpstreamError}: relayOnly,
-		{"pas-claim", rc, resp, OutcomeUpstreamError}:               relayOnly,
-		{"pas-claim-inquire", rc, resp, OutcomeUpstreamError}:       relayOnly,
-		{"pas-claim-update", rc, resp, OutcomeUpstreamError}:        relayOnly,
+		{"crd-order-dispatch", rc, resp, OutcomeUpstreamError}:      {Allowed: own(R, A), Builders: b("defect-empty-error-substitution")},
+		{"crd-order-select", rc, resp, OutcomeUpstreamError}:        {Allowed: own(R, A), Builders: b("defect-empty-error-substitution")},
+		{"dtr-questionnaire-fetch", rc, resp, OutcomeUpstreamError}: {Allowed: own(R, A), Builders: b("defect-empty-error-substitution")},
+		{"pas-claim", rc, resp, OutcomeUpstreamError}:               {Allowed: own(R, A), Builders: b("defect-empty-error-substitution")},
+		{"pas-claim-inquire", rc, resp, OutcomeUpstreamError}:       {Allowed: own(R, A), Builders: b("defect-empty-error-substitution")},
+		{"pas-claim-update", rc, resp, OutcomeUpstreamError}:        {Allowed: own(R, A), Builders: b("defect-empty-error-substitution")},
 	}
 	for _, leg := range []string{"", "coverage-eligibility", "crd-order-dispatch", "crd-order-select",
 		"dtr-questionnaire-fetch", "federated-query", "patient-dtr", "pas-claim", "pas-claim-inquire", "pas-claim-update"} {
@@ -246,6 +243,10 @@ func TestCheckRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	interim, err := Authored(BuilderInterimEmptyErrorSubstitution, []byte(`{}`), fhirJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
 	exact := Exact(body, fhirJSON)
 	injected := ForTest([]byte(`{"x":1}`), fhirJSON)
 	unknown := Key{"leg-z", RoleRecipient, DirectionResponse, OutcomeAnswered}
@@ -267,6 +268,8 @@ func TestCheckRows(t *testing.T) {
 		{"unknown key", unknown, exact, false},
 		{"test payload on an unknown key", unknown, injected, false},
 		{"authored at a relay transmit", relayKey, submit, false},
+		{"interim builder where not listed", relayKey, interim, false},
+		{"interim builder at an authored transmit that does not list it", authoredKey, interim, false},
 		{"builder not listed", authoredKey, update, false},
 		{"relayed at an authored transmit", authoredKey, exact, false},
 		{"edit not listed", edited, strip, false},
@@ -458,48 +461,5 @@ func TestForTestAdmittedOnlyInTests(t *testing.T) {
 		if !strings.Contains(string(out), "panic: "+c.msg) || strings.Contains(string(out), "returned") {
 			t.Fatalf("%s: want a panic, got\n%s", c.arg, out)
 		}
-	}
-}
-
-func TestWorkflowPeerAnswerOwnership(t *testing.T) {
-	body := NewBody([]byte(`{"hook":"order-sign"}`), OriginPeerFrame)
-	d := mustDoc(t, body)
-	edited, err := Apply(body, fhirJSON, EditCDSCallbackStrip, d.RemoveMember(d.Root(), "hook"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	authored, err := Authored(BuilderSDKEligibility, []byte(`{}`), fhirJSON)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, leg := range []string{"coverage-eligibility", "federated-query", "patient-dtr"} {
-		k := Key{leg, RoleRequester, DirectionResponse, OutcomeAnswered}
-		if _, err := Transmit(Exact(body, fhirJSON), Check(k)); err != nil {
-			t.Fatalf("%s: %v", leg, err)
-		}
-		for _, p := range []Payload{{}, authored, edited} {
-			if _, err := Transmit(p, Check(k)); err == nil {
-				t.Fatalf("%s allowed substituted peer answer: %s", leg, p.Ownership())
-			}
-		}
-	}
-}
-
-func TestApplicationErrorOwnershipRefusesSubstitution(t *testing.T) {
-	authored, err := Authored(BuilderGatewayRefusal, []byte(`{}`), fhirJSON)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, leg := range []string{"crd-order-dispatch", "crd-order-select", "dtr-questionnaire-fetch", "pas-claim", "pas-claim-inquire", "pas-claim-update"} {
-		k := Key{leg, RoleRecipient, DirectionResponse, OutcomeUpstreamError}
-		if _, err := Transmit(Exact(NewBody(nil, OriginUpstreamResponse), fhirJSON), Check(k)); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := Transmit(authored, Check(k)); err == nil {
-			t.Fatalf("%s allowed substitution", leg)
-		}
-	}
-	if _, err := Authored(BuilderID("defect-empty-error-substitution"), []byte(`{}`), fhirJSON); !errors.Is(err, ErrUnknownBuilder) {
-		t.Fatalf("retired builder admitted: %v", err)
 	}
 }

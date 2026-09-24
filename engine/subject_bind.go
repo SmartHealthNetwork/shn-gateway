@@ -3,8 +3,6 @@ package engine
 import (
 	"context"
 	"encoding/json"
-	"net/url"
-	"strings"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
@@ -134,36 +132,4 @@ func patientIsMember(patient map[string]any, member string) bool {
 		}
 	}
 	return false
-}
-
-// PatientReference names a patient in its producer holder and identifier system.
-// It is used only to reconstruct verified exchange addressing when signed ingress
-// context is unavailable; native conformance checks do not parse patient content.
-type PatientReference struct{ Holder, System, Value string }
-
-// SubjectReferenceResolver resolves authoritative, holder-scoped addressing.
-// It is not a native payload conformance checker.
-type SubjectReferenceResolver interface {
-	ResolveSubject(context.Context, PatientReference) (pci string, found bool, err error)
-}
-
-func patientReference(holder, value string) (PatientReference, bool) {
-	if m := relativeRef.FindStringSubmatch(value); len(m) > 1 && m[1] == "Patient" {
-		return PatientReference{holder, "fhir-relative", value}, true
-	}
-	u, err := url.Parse(value)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.RawQuery != "" || u.Fragment != "" {
-		return PatientReference{}, false
-	}
-	pos := strings.LastIndex(u.Path, "/Patient/")
-	if pos < 0 {
-		return PatientReference{}, false
-	}
-	ref := u.Path[pos+1:]
-	if m := relativeRef.FindStringSubmatch(ref); len(m) < 2 || m[1] != "Patient" {
-		return PatientReference{}, false
-	}
-	u.Path = u.Path[:pos]
-	u.RawPath = ""
-	return PatientReference{holder, u.String(), ref}, true
 }

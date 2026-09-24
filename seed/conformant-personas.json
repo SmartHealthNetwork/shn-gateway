@@ -21,10 +21,6 @@
             },
             "system": "urn:shn:member",
             "value": "MBR-BRIDGE-DEMO"
-          },
-          {
-            "system": "urn:shn:pci",
-            "value": "pci:2b7bf6ac913e40eae92ee1ad60e41549"
           }
         ],
         "name": [
@@ -62,10 +58,6 @@
             },
             "system": "urn:shn:member",
             "value": "MBR-COVERED"
-          },
-          {
-            "system": "urn:shn:pci",
-            "value": "pci:223665feed95ab0cd1e7b0cda6cfa948"
           }
         ],
         "name": [
@@ -103,10 +95,6 @@
             },
             "system": "urn:shn:member",
             "value": "MBR-NOTCOVERED"
-          },
-          {
-            "system": "urn:shn:pci",
-            "value": "pci:1f076d85aedba28112dfe8c6e96153f0"
           }
         ],
         "name": [
@@ -144,10 +132,6 @@
             },
             "system": "urn:shn:member",
             "value": "MBR-UC06"
-          },
-          {
-            "system": "urn:shn:pci",
-            "value": "pci:eb16c8dfd47ab6ff52751c27fd76e565"
           }
         ],
         "name": [
@@ -185,10 +169,6 @@
             },
             "system": "urn:shn:member",
             "value": "MBR-UC07HCPCS"
-          },
-          {
-            "system": "urn:shn:pci",
-            "value": "pci:dacc9c5002360203ead83c33bc5b37ea"
           }
         ],
         "name": [
@@ -226,10 +206,6 @@
             },
             "system": "urn:shn:member",
             "value": "MBR-UC08"
-          },
-          {
-            "system": "urn:shn:pci",
-            "value": "pci:2e99322cfb7332d7b63d301228512de4"
           }
         ],
         "name": [

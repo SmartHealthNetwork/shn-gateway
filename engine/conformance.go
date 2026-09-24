@@ -2,53 +2,41 @@ package engine
 
 import "fmt"
 
-// ConformanceEnforcement is a participant's choice about which payload checks
-// its own gateway runs and enforces. Its zero value is the published default,
-// none, for both direct construction and environment-based configuration.
+// ConformanceEnforcement is a participant's choice about what its own gateway
+// does with a conformance defect it finds. The network always validates and
+// always records; only strict refuses.
+//
+// The ZERO VALUE IS STRICT, deliberately: the default flip to none lives in
+// exactly one place, the gateway/app env loader, so no in-process construction
+// of engine.Config anywhere in this repo can silently become permissive.
 type ConformanceEnforcement int
 
 const (
-	EnforcementNone ConformanceEnforcement = iota
-	EnforcementObserve
-	EnforcementBasic
-	EnforcementStrict
+	EnforcementStrict ConformanceEnforcement = iota
+	EnforcementNone
 )
 
 func (e ConformanceEnforcement) String() string {
-	switch e {
-	case EnforcementNone:
+	if e == EnforcementNone {
 		return "none"
-	case EnforcementObserve:
-		return "observe"
-	case EnforcementBasic:
-		return "basic"
-	case EnforcementStrict:
-		return "strict"
-	default:
-		return fmt.Sprintf("invalid(%d)", int(e))
 	}
+	return "strict"
 }
 
 // ParseConformanceEnforcement maps a setting's value to a level. It accepts
-// exactly the four published values and errors on anything else, including
-// empty. The gateway/app env loader does not call it for an absent setting;
-// its zero-valued configuration already means none.
+// exactly the two published values and errors on anything else, including
+// empty: the gateway/app env loader never calls it for an absent
+// CONFORMANCE_ENFORCEMENT, and sets EnforcementNone itself instead (the
+// published default). No third value is accepted — a middle level is a future
+// set of table rows, not a reserved word.
 func ParseConformanceEnforcement(s string) (ConformanceEnforcement, error) {
 	switch s {
-	case "none":
-		return EnforcementNone, nil
-	case "observe":
-		return EnforcementObserve, nil
-	case "basic":
-		return EnforcementBasic, nil
 	case "strict":
 		return EnforcementStrict, nil
+	case "none":
+		return EnforcementNone, nil
 	}
-	return EnforcementNone, fmt.Errorf("CONFORMANCE_ENFORCEMENT must be none, observe, basic, or strict, got %q", s)
-}
-
-func (e ConformanceEnforcement) valid() bool {
-	return e >= EnforcementNone && e <= EnforcementStrict
+	return EnforcementStrict, fmt.Errorf("CONFORMANCE_ENFORCEMENT must be none or strict, got %q", s)
 }
 
 // CheckKind and its four constants are already declared in finding.go — do
@@ -63,8 +51,8 @@ const (
 	VerdictInvalid
 )
 
-// Decision is what the gateway does about an invalid verdict. Its zero value
-// remains Refuse so an uninitialized legacy decision cannot permit a message.
+// Decision is what the gateway does about an invalid verdict. Refuse is the
+// zero value for the same reason EnforcementStrict is.
 type Decision int
 
 const (
@@ -109,18 +97,12 @@ var alwaysRefusedCDSRules = map[string]bool{
 type ConformancePolicy struct{ level ConformanceEnforcement }
 
 func NewConformancePolicy(level ConformanceEnforcement) ConformancePolicy {
-	if !level.valid() {
-		panic("unvalidated conformance configuration")
-	}
 	return ConformancePolicy{level: level}
 }
 
 func (p ConformancePolicy) Level() ConformanceEnforcement { return p.level }
 
-// Decide keeps existing certifier callers compiling while they migrate to
-// classed rules. Their optional runtime checks are deeper checks; mandatory
-// adaptation and readability failures remain independent of participant
-// conformance policy.
+// Decide is the whole table.
 func (p ConformancePolicy) Decide(kind CheckKind, rule string, v Verdict) Decision {
 	if v != VerdictInvalid {
 		return Record
@@ -130,7 +112,7 @@ func (p ConformancePolicy) Decide(kind CheckKind, rule string, v Verdict) Decisi
 		return Refuse
 	case kind == KindCDSEnvelope && alwaysRefusedCDSRules[rule]:
 		return Refuse
-	case p.Action(CheckDeep) == CheckEnforce:
+	case p.level == EnforcementStrict:
 		return Refuse
 	}
 	return Record

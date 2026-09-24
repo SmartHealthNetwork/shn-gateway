@@ -179,7 +179,7 @@ func TestDTRValidationTransportAndRefusals(t *testing.T) {
 				io.WriteString(w, `{"resourceType":"OperationOutcome","issue":[{"severity":"information","code":"informational"}]}`)
 			}))
 			defer server.Close()
-			g := &Gateway{cfg: Config{Validator: failIfCalledValidator{}, ValidatorsByLine: map[string]shnsdk.Validator{line: shnsdk.NewOperationValidator(server.URL)}, ConformanceEnforcement: EnforcementStrict}}
+			g := &Gateway{cfg: Config{Validator: failIfCalledValidator{}, ValidatorsByLine: map[string]shnsdk.Validator{line: shnsdk.NewOperationValidator(server.URL)}}}
 			if status, msg := g.validateDTRQuestionnaireResponse(context.Background(), []byte(contextQR), line); status != 0 {
 				t.Fatalf("%d %s", status, msg)
 			}
@@ -189,17 +189,17 @@ func TestDTRValidationTransportAndRefusals(t *testing.T) {
 			if status, _ := g.validateDTRQuestionnaireResponse(context.Background(), []byte(contextQR), "9.9"); status != 500 {
 				t.Fatalf("unknown line status=%d", status)
 			}
-			g.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"missing": syntheticFakeValidator()}
-			if status, _ := g.validateDTRQuestionnaireResponse(context.Background(), []byte(contextQR), line); status != 503 {
+			g.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"missing": shnsdk.NewFakeValidator()}
+			if status, _ := g.validateDTRQuestionnaireResponse(context.Background(), []byte(contextQR), line); status != 500 {
 				t.Fatalf("unlaned status=%d", status)
 			}
-			g.cfg.ValidatorsByLine = map[string]shnsdk.Validator{line: syntheticLineValidator(line)}
+			g.cfg.ValidatorsByLine = map[string]shnsdk.Validator{line: NewLineFakeValidator(line)}
 			if status, _ := g.validateDTRQuestionnaireResponse(context.Background(), []byte(contextQR), line); status != 422 {
 				t.Fatalf("invalid final status=%d", status)
 			}
 			server.Close()
 			g.cfg.ValidatorsByLine = map[string]shnsdk.Validator{line: shnsdk.NewOperationValidator(server.URL)}
-			if status, _ := g.validateDTRQuestionnaireResponse(context.Background(), []byte(contextQR), line); status != 503 {
+			if status, _ := g.validateDTRQuestionnaireResponse(context.Background(), []byte(contextQR), line); status != 500 {
 				t.Fatalf("outage status=%d", status)
 			}
 		})

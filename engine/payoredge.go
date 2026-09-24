@@ -160,8 +160,7 @@ func payorEdgeRefusal(own []shnsdk.PayerIdentifier, got shnsdk.PayerIdentifier, 
 // payorEdgeRequest returns the request to send the payer's own system: the network's
 // request in exactly, or, when the mapping is configured and changes something, in with
 // the payer-identity edit applied. A refusal is returned as a LegResult (Status set); a
-// gateway fault as an error. Mapping refusals are adaptation failures; they
-// do not certify or reject the peer's content conformance.
+// gateway fault as an error.
 func (n *nativeResponder) payorEdgeRequest(in relay.Body, carrier payorEdgeCarrier, contentType string) (relay.Payload, LegResult, error) {
 	var none relay.Payload
 	if n.payorEdgeOwn == nil {
@@ -169,14 +168,12 @@ func (n *nativeResponder) payorEdgeRequest(in relay.Body, carrier payorEdgeCarri
 	}
 	doc, err := relay.Doc(in)
 	if err != nil {
-		return none, LegResult{Status: http.StatusServiceUnavailable, Message: "adaptation_unavailable"}, nil
+		return none, LegResult{Status: http.StatusBadRequest, Message: "payer backend identity mapping: request is not one well-formed JSON document"}, nil
 	}
 	ops, err := locatePayorEdge(doc, carrier, n.ownPayerIdentities(), *n.payorEdgeBackend)
 	var refused *payorEdgeRefused
 	if errors.As(err, &refused) {
-		result := refused.legResult()
-		result.Message = "adaptation_unavailable: " + result.Message
-		return none, result, nil
+		return none, refused.legResult(), nil
 	}
 	if err != nil {
 		return none, LegResult{}, fmt.Errorf("engine: payor edge: %w", err)
@@ -187,7 +184,7 @@ func (n *nativeResponder) payorEdgeRequest(in relay.Body, carrier payorEdgeCarri
 	p, err := relay.Apply(in, contentType, relay.EditPayorEdgeRestamp, ops...)
 	var signed *relay.SignedContentError
 	if errors.As(err, &signed) {
-		return none, LegResult{Status: http.StatusUnprocessableEntity, Message: "adaptation_unavailable: " + signed.Error()}, nil
+		return none, LegResult{Status: http.StatusUnprocessableEntity, Message: signed.Error()}, nil
 	}
 	if err != nil {
 		return none, LegResult{}, fmt.Errorf("engine: payor edge: %w", err)

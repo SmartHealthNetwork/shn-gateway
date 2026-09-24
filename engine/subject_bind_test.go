@@ -1,9 +1,12 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -151,6 +154,29 @@ func TestIngressPAS_StrangerBindsUnderSeam(t *testing.T) {
 // The inquiry ingress binds through the same helper: by default a stranger is refused at
 // the bind (400); under the seam it passes the bind and is refused where the control is,
 // at routing (422, this fixture's Coverage names no payer), so the difference is the bind.
+func TestIngressInquire_StrangerBindsUnderSeam(t *testing.T) {
+	post := func(t *testing.T, seam bool, body []byte) *httptest.ResponseRecorder {
+		t.Helper()
+		g := &Gateway{cfg: Config{ingressAuthBypass: true, SoR: newCensusSoR(), Clock: fixedClock, AcceptUnknownMembers: seam}}
+		w := httptest.NewRecorder()
+		g.handlePASInquireIngress(w, httptest.NewRequest(http.MethodPost, "/Claim/$inquire", bytes.NewReader(body)))
+		return w
+	}
+	stranger := inquiryBundle(strangerMember, "", "TRN-1", "72148")
+	if w := post(t, false, stranger); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "unknown member") {
+		t.Fatalf("default inquiry ingress: status=%d body=%s, want 400 unknown member", w.Code, w.Body)
+	}
+	if w := post(t, true, stranger); w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("seam inquiry ingress: status=%d body=%s, want 422 (past the bind, refused at routing)", w.Code, w.Body)
+	}
+	// Rejection row: two members are still refused at the bind under the seam.
+	if w := post(t, true, inquiryBundle(strangerMember, "MBR-COVERED", "TRN-1", "72148")); w.Code != http.StatusForbidden {
+		t.Fatalf("seam inquiry ingress, two members: status=%d body=%s, want 403", w.Code, w.Body)
+	}
+}
+
+// --- the payer inbound legs: the token subject the ingress side derived must bind here -----
+
 func TestPayerCRDBind_StrangerBindsToDerivedSubjectUnderSeam(t *testing.T) {
 	g := &Gateway{cfg: Config{SoR: newCensusSoR(), AcceptUnknownMembers: true}}
 	_, _, status, msg := g.conformantCRDBindContext(context.Background(), conformantCRD(strangerMember, "72148"), strangerPCI())
@@ -215,6 +241,69 @@ func strangerEHRRequest(prefetch string) []byte {
 // and coverage the request carries; the absent history keys are left out with the
 // reason recorded and nothing is read for it. Without patient or coverage in the request
 // it is refused before anything is read; without the seam it never reaches prefetch.
+func TestPrefetch_HistoryOmittedForMemberNotHeld(t *testing.T) {
+	s := newPrefetchSoR()
+	obs := &observed{}
+	env := newInProcessExchange(t)
+	env.originator.cfg.SoR = s.sor()
+	env.originator.cfg.Observer = obs.observe
+	env.originator.cfg.AcceptUnknownMembers = true
+	rec := httptest.NewRecorder()
+	env.originator.handleCRDIngress(rec, crdIngressPost(strangerEHRRequest(supported+`,"deviceHistory":null`)))
+	if rec.Code != http.StatusOK || env.routeHitCount() != 1 {
+		t.Fatalf("answer %d %s", rec.Code, rec.Body.String())
+	}
+	if searched, read := s.calls(); len(searched) != 0 || len(read) != 0 {
+		t.Fatalf("the system of record was read for a member it does not hold: searched %v, read %v", searched, read)
+	}
+	sent := sentRequest(t, env)
+	if got := names(membersOf(t, sent, "prefetch")); !slices.Equal(got, []string{"patient", "coverage", "deviceHistory"}) {
+		t.Fatalf("prefetch keys %v, want only the EHR's", got)
+	}
+	events := obs.prefetch(t)
+	if len(events) != 3 {
+		t.Fatalf("events %+v, want one per omitted history key", events)
+	}
+	for _, k := range []string{"serviceHistory", "medicationHistory", "questionnaireResponses"} {
+		e := events[k]
+		if e.Outcome != SearchNotRun || e.Reason != historyMemberNotHeld || e.Count != 0 || !strings.Contains(e.Query, strangerMember) {
+			t.Errorf("%s recorded as %+v", k, e)
+		}
+	}
+
+	for name, body := range map[string][]byte{
+		"patient absent":  strangerEHRRequest(`"coverage":` + ehrCoverage),
+		"coverage absent": strangerEHRRequest(patientOnly),
+		"no prefetch":     strangerEHRRequest("-"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := newPrefetchSoR()
+			env := newInProcessExchange(t)
+			env.originator.cfg.SoR = s.sor()
+			env.originator.cfg.AcceptUnknownMembers = true
+			rec := httptest.NewRecorder()
+			env.originator.handleCRDIngress(rec, crdIngressPost(body))
+			refusedBeforeTheNetwork(t, env, rec, http.StatusUnprocessableEntity, "patient not found in system of record")
+		})
+	}
+	t.Run("without the seam", func(t *testing.T) {
+		s := newPrefetchSoR()
+		env := newInProcessExchange(t)
+		env.originator.cfg.SoR = s.sor()
+		rec := httptest.NewRecorder()
+		env.originator.handleCRDIngress(rec, crdIngressPost(strangerEHRRequest(supported)))
+		refusedBeforeTheNetwork(t, env, rec, http.StatusBadRequest, "unknown member")
+	})
+}
+
+// --- binding from the Patient the request carries ------------------------------------------
+//
+// A member one side holds and the other does not: the holder derives the subject from its
+// own record (member id + birthDate + family), so the other side must derive it from the
+// same demographics — the Patient the request carries — or the token-subject check fails.
+
+// requestPatient is a Patient as a request carries it: the member id as its id and its
+// member identifier, with the demographics the derivation reads.
 func requestPatient(member, birth, family string) string {
 	return `{"resourceType":"Patient","id":"` + member + `","identifier":[{"system":"` + shnsdk.MemberSystem + `","value":"` + member + `"}],"name":[{"family":"` + family + `","given":["Iris"]}],"birthDate":"` + birth + `"}`
 }

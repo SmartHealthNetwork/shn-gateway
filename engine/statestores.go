@@ -70,10 +70,9 @@ const MaxReplayKeyBytes = 512
 // expiresAt = now + its own window, unchanged from the single-process guards these
 // replace — so neither the mirror nor the oracle carries a window of its own to drift.
 const (
-	ReplayScopeIngressContext = "ingress-context" // byte-bound connector assertion, per client_id
-	ReplayScopeIngressJTI     = "ingress-jti"     // client_assertion jti, per client_id, ingressJTIWindow
-	ReplayScopeHubJTI         = "hub-jti"         // X-Hub-Assertion jti, shnsdk.MaxAssertionTTL
-	ReplayScopePatientAccess  = "patient-access"  // patient-access correlationId, paReplayWindow
+	ReplayScopeIngressJTI    = "ingress-jti"    // client_assertion jti, per client_id, ingressJTIWindow
+	ReplayScopeHubJTI        = "hub-jti"        // X-Hub-Assertion jti, shnsdk.MaxAssertionTTL
+	ReplayScopePatientAccess = "patient-access" // patient-access correlationId, paReplayWindow
 )
 
 // kidHexLen is the wire shape of a bearer kid: 32 lowercase hex characters (16
@@ -190,7 +189,7 @@ func NewInMemoryReplayStore() ReplayStore {
 // 1<<20 records per scope; every shipped construction goes through NewInMemoryReplayStore.
 func newMemReplayStore(max int) *memReplayStore {
 	s := &memReplayStore{scopes: map[string]*memReplayScope{}}
-	for _, scope := range []string{ReplayScopeIngressContext, ReplayScopeIngressJTI, ReplayScopeHubJTI, ReplayScopePatientAccess} {
+	for _, scope := range []string{ReplayScopeIngressJTI, ReplayScopeHubJTI, ReplayScopePatientAccess} {
 		s.scopes[scope] = &memReplayScope{max: max, seen: map[string]time.Time{}}
 	}
 	return s

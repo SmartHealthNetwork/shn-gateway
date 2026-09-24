@@ -141,7 +141,7 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "PAS evidence linkage failed"})
 		return pendState{}, false
 	}
-	bundleJSON, pasReports, err := g.egressAdapt(ctx, route, bundleJSON, ExchangeIdentity{CorrelationID: pasCorr, LegType: "pas-claim", Counterpart: res.recipient})
+	bundleJSON, pasReports, err := g.egressAdapt(route, bundleJSON, ExchangeIdentity{CorrelationID: pasCorr, LegType: "pas-claim", Counterpart: res.recipient})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return pendState{}, false
@@ -161,7 +161,7 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 		return pendState{}, false
 	}
 	pendedResp, err := g.OriginateLeg(ctx, r, res.recipient, "pas-claim", res.pci, pasCorr, "",
-		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, DeclaredVersion: route.Token, Route: routeInfoFor(route), Payload: sealRequest(relay.BuilderSDKPASSubmit, bundleJSON, "application/fhir+json")})
+		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Payload: sealRequest(relay.BuilderSDKPASSubmit, bundleJSON, "application/fhir+json")})
 	if err != nil {
 		if g.relayOriginationError(w, err) {
 			return pendState{}, false
@@ -425,7 +425,7 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "PAS evidence linkage failed"})
 		return false
 	}
-	updateBundle, _, err = g.egressAdapt(ctx, route, updateBundle, pasUpdateID)
+	updateBundle, _, err = g.egressAdapt(route, updateBundle, pasUpdateID)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return false
@@ -439,7 +439,7 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 		return false
 	}
 	updateResp, err := g.OriginateLeg(ctx, r, st.recipient, "pas-claim-update", st.pci, updateCorr, "",
-		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, DeclaredVersion: route.Token, Route: routeInfoFor(route), Payload: sealRequest(relay.BuilderSDKPASUpdate, updateBundle, "application/fhir+json")})
+		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Payload: sealRequest(relay.BuilderSDKPASUpdate, updateBundle, "application/fhir+json")})
 	if err != nil {
 		if g.relayOriginationError(w, err) {
 			return false
@@ -677,7 +677,7 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "PAS evidence linkage failed"})
 		return false
 	}
-	updateBundle, _, err = g.egressAdapt(ctx, route, updateBundle, pasUpdateID)
+	updateBundle, _, err = g.egressAdapt(route, updateBundle, pasUpdateID)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return false
@@ -691,7 +691,7 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 		return false
 	}
 	updateResp, err := g.OriginateLeg(ctx, r, st.recipient, "pas-claim-update", st.pci, updateCorr, "",
-		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, DeclaredVersion: route.Token, Route: routeInfoFor(route), Payload: sealRequest(relay.BuilderSDKPASUpdate, updateBundle, "application/fhir+json")})
+		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Payload: sealRequest(relay.BuilderSDKPASUpdate, updateBundle, "application/fhir+json")})
 	if err != nil {
 		if g.relayOriginationError(w, err) {
 			return false

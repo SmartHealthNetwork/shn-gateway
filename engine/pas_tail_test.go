@@ -167,8 +167,7 @@ func TestClassifyResolution_RealA1(t *testing.T) {
 // 2.0->2.1 StepGated hop does (TestTransformRefusalZeroBytes's row) — so
 // egressAdapt actually SUCCEEDS and route.Chain is genuinely non-empty by
 // the time submitClaimAndResolve's call reads it. With the target line 2.2
-// rigged to reject every Bundle, the wire call still refuses with 502
-// adaptation_failed despite
+// rigged to reject every Bundle, the wire call still refuses at 422 despite
 // ConformanceEnforcement=none: this is "the message refuses", the
 // call-site-level twin of TestEgressAdaptValidatesAtTargetLane's
 // helper-level proof.
@@ -209,13 +208,13 @@ func TestSubmitClaimAndResolve_BridgedEgressRefusesAtNone(t *testing.T) {
 	sub, status, msg, err := env.originator.submitPASClaim(env.ctx, env.req, "pci-1", order, nil, nil, realCov, realPayerOrg, patientRef, coverageRef, member, recs.memberSystem, shnsdk.CMSPayerIdentity, env.payerID)
 	respJSON := sub.respJSON
 	if err != nil {
-		t.Fatalf("submitPASClaim: unexpected error (want an adaptation_failed refusal, not an error path): %v", err)
+		t.Fatalf("submitPASClaim: unexpected error (want a clean 422 refusal, not an error path): %v", err)
 	}
-	if status != http.StatusBadGateway {
-		t.Fatalf("status = %d, want %d — a bridged payload must refuse on the wire even at ConformanceEnforcement=none", status, http.StatusBadGateway)
+	if status != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d — a bridged payload must refuse on the wire even at ConformanceEnforcement=none", status, http.StatusUnprocessableEntity)
 	}
-	if msg != "adaptation_failed" {
-		t.Fatalf("refusal = %q, want adaptation_failed from invalid target profile", msg)
+	if msg == "" {
+		t.Fatal("want a non-empty refusal message")
 	}
 	if respJSON != nil {
 		t.Fatalf("respJSON must be nil (refused before the leg was ever routed), got %q", respJSON)

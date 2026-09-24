@@ -49,14 +49,18 @@ func TestDTRIngress_PatientObtainedUnderSeam(t *testing.T) {
 	t.Run("a request carrying no Patient gains the system of record's", func(t *testing.T) {
 		s := newPrefetchSoR()
 		obs := &observed{}
-		g := seamDTRGateway(s)
-		g.cfg.Observer = obs.observe
-		g.cfg.Clock = fixedClock
-		p, status, msg := g.prepareDTRPackageRequest(ctx, withCoverage)
-		if status != 0 {
-			t.Fatalf("%d %s", status, msg)
+		env := newInProcessExchange(t)
+		env.originator.cfg.SoR = recordSoR{searchingPrefetchSoR{s}}
+		env.originator.cfg.Observer = obs.observe
+		env.originator.cfg.Clock = fixedClock
+		env.originator.cfg.AcceptUnknownMembers = true
+		declareFramedDTR(t, env, true)
+		env.payerReturns(LegResult{Response: testResponse(packageAnswer)})
+		rec := postDTRIngress(env, withCoverage)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("answer %d %s", rec.Code, rec.Body.String())
 		}
-		sent := relay.BytesForTest(p.request)
+		_, sent := sentOperation(t, env)
 		// The EHR's bytes are unchanged but for one element appended to the
 		// parameter array: the system of record's Patient, byte for byte.
 		k := bytes.LastIndex(withCoverage, []byte("\n  ]"))
@@ -67,10 +71,13 @@ func TestDTRIngress_PatientObtainedUnderSeam(t *testing.T) {
 		if strings.TrimSpace(strings.TrimPrefix(added, ",")) != `{"name":"referenced","resource":`+sorPatient+`}` {
 			t.Fatalf("added element %q", added)
 		}
+		p, status, msg := seamDTRGateway(s).prepareDTRPackageRequest(ctx, withCoverage)
+		if status != 0 {
+			t.Fatalf("%d %s", status, msg)
+		}
 		if got := p.request.Edits(); !slices.Equal(got, []relay.EditID{relay.EditDTRPatientObtain}) {
 			t.Fatalf("edits %v", got)
 		}
-		observationFlush(t, g)
 		ev, ok := obs.prefetchOn(t, "dtr-questionnaire-fetch")["patient"]
 		wantEv := prefetchObtained{Key: "patient", Operation: shnsdk.FrameOperationQuestionnairePackage, Source: "system-of-record",
 			Query: "Patient/" + prefetchSoRID, Outcome: SearchOK, Count: 1, RetrievedAt: fixedClock().UTC()}

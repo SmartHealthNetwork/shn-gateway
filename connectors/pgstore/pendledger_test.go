@@ -495,27 +495,137 @@ func pendLedgerChecks(t *testing.T, newLedger func(*testing.T) ledgerUnderTest) 
 		}
 	})
 
-	// A reused EOB id cannot move another patient's bytes into the first
-	// patient's Patient Access list, and the failed EOB must roll back decision.
-	t.Run("an EOB id owned by another subject leaves decision pended", func(t *testing.T) {
+	// An EOB id is the payer's "eob-" + the exchange's correlation id, and a
+	// requester can choose its correlation id. A second patient's exchange that
+	// reuses the first's correlation id — the SAME correlation id, under two
+	// patients, which is the collision a requester can actually cause — must not
+	// move its EOB into the first patient's Patient Access list, and the refused
+	// EOB leaves its decision pended.
+	t.Run("an EOB id owned by another patient is refused on decision", func(t *testing.T) {
 		l := newLedger(t)
+		const (
+			shared = "corr-shared"
+			eobID  = "eob-" + shared
+			pciB   = "PCI-B"
+		)
 		first := []byte(`{"resourceType":"ExplanationOfBenefit","id":"shared","patient":{"reference":"Patient/A"}}`)
-		if err := l.RecordEOB(pciA, "shared", first); err != nil {
-			t.Fatal(err)
+		pend(t, l, pciA, shared, tPend, keys(requester))
+		decide(t, l, pciA, shared, engine.PendOutcomeApproved, tDecided, &engine.EOBRecord{SubjectPCI: pciA, EOBID: eobID, JSON: first})
+		pend(t, l, pciB, shared, tPend, engine.PendKeys{RequesterHolder: requester, RequestIDs: []string{"urn:shn:claim|CLM-B"}})
+		_, err := l.RecordDecision(pciB, shared, engine.PendOutcomeApproved, tDecided,
+			&engine.EOBRecord{SubjectPCI: pciB, EOBID: eobID, JSON: []byte(`{"resourceType":"ExplanationOfBenefit","id":"shared","patient":{"reference":"Patient/B"}}`)})
+		if !errors.Is(err, engine.ErrEOBSubjectMismatch) {
+			t.Fatalf("err = %v, want ErrEOBSubjectMismatch", err)
 		}
-		const pciB = "PCI-B"
-		pend(t, l, pciB, corrB, tPend, keys(requester))
-		_, err := l.RecordDecision(pciB, corrB, engine.PendOutcomeApproved, tDecided,
-			&engine.EOBRecord{SubjectPCI: pciB, EOBID: "shared", JSON: []byte(`{"resourceType":"ExplanationOfBenefit","id":"shared","patient":{"reference":"Patient/B"}}`)})
-		if err == nil {
-			t.Fatal("cross-subject EOB ID replacement decided an authorization")
-		}
-		wantState(t, l, pciB, corrB, engine.PendStatePended)
+		wantState(t, l, pciB, shared, engine.PendStatePended)
+		wantDecision(t, wantState(t, l, pciA, shared, engine.PendStateDecided), engine.PendOutcomeApproved, tDecided)
 		if got, ok := l.EOBsForPatient(pciA); !ok || len(got) != 1 || string(got[0]) != string(first) {
-			t.Fatalf("first patient's EOB changed: %s, found=%v", got, ok)
+			t.Fatalf("the first patient's EOB changed: %s, found=%v", got, ok)
 		}
 		if got, ok := l.EOBsForPatient(pciB); ok || len(got) != 0 {
-			t.Fatalf("second patient's refused EOB became visible: %s, found=%v", got, ok)
+			t.Fatalf("the refused EOB became visible to the second patient: %s, found=%v", got, ok)
+		}
+	})
+
+	// The owner of an EOB id re-recording it through a decision replaces its
+	// bytes and stays ONE EOB: the guard is about the patient, not the id.
+	t.Run("the owning patient re-records its EOB id on decision", func(t *testing.T) {
+		l := newLedger(t)
+		pend(t, l, pciA, corrA, tPend, keys(requester))
+		decide(t, l, pciA, corrA, engine.PendOutcomeApproved, tDecided, eob("eob-"+corrA))
+		again := &engine.EOBRecord{SubjectPCI: pciA, EOBID: "eob-" + corrA, JSON: []byte(`{"resourceType":"ExplanationOfBenefit","id":"again"}`)}
+		decide(t, l, pciA, corrA, engine.PendOutcomeDenied, tLater, again)
+		wantDecision(t, wantState(t, l, pciA, corrA, engine.PendStateDecided), engine.PendOutcomeDenied, tLater)
+		if got, ok := l.EOBsForPatient(pciA); !ok || len(got) != 1 || string(got[0]) != string(again.JSON) {
+			t.Fatalf("re-recorded EOB = %s, found=%v, want the one re-recorded", got, ok)
+		}
+	})
+
+	// The pre-forward check's first question (engine.EOBOwnerLookup): which
+	// patient an EOB id is filed for — and "none" is not an error.
+	t.Run("EOB owner lookup", func(t *testing.T) {
+		l := newLedger(t)
+		lookup, ok := l.(engine.EOBOwnerLookup)
+		if !ok {
+			t.Fatal("the backend does not answer EOBOwner")
+		}
+		if owner, found, err := lookup.EOBOwner("eob-" + corrA); err != nil || found || owner != "" {
+			t.Fatalf("an unfiled id = %q,%v,%v, want not found", owner, found, err)
+		}
+		if err := l.RecordEOB(pciA, "eob-"+corrA, []byte(`{"resourceType":"ExplanationOfBenefit"}`)); err != nil {
+			t.Fatal(err)
+		}
+		if owner, found, err := lookup.EOBOwner("eob-" + corrA); err != nil || !found || owner != pciA {
+			t.Fatalf("a filed id = %q,%v,%v, want %q", owner, found, err, pciA)
+		}
+		// The same id refused for another patient leaves the owner as it was.
+		_ = l.RecordEOB("PCI-B", "eob-"+corrA, []byte(`{"resourceType":"ExplanationOfBenefit"}`))
+		if owner, _, _ := lookup.EOBOwner("eob-" + corrA); owner != pciA {
+			t.Fatalf("owner after a refused write = %q, want %q", owner, pciA)
+		}
+	})
+
+	// The pre-forward check's second question (engine.PendCorrelationLookup):
+	// whether another patient's authorization is still awaiting its decision
+	// under a correlation id. The asking patient's own row, a decided row and a
+	// row under another correlation id are not.
+	t.Run("pended-for-another-patient lookup", func(t *testing.T) {
+		l := newLedger(t)
+		lookup, ok := l.(engine.PendCorrelationLookup)
+		if !ok {
+			t.Fatal("the backend does not answer PendedForOtherSubject")
+		}
+		const pciB, pciC = "PCI-B", "PCI-C"
+		want := func(t *testing.T, corr, asking, wantPCI string, wantFound bool) {
+			t.Helper()
+			other, found, err := lookup.PendedForOtherSubject(corr, asking)
+			if err != nil || found != wantFound || other != wantPCI {
+				t.Fatalf("PendedForOtherSubject(%s,%s) = %q,%v,%v, want %q,%v", corr, asking, other, found, err, wantPCI, wantFound)
+			}
+		}
+		want(t, corrA, pciA, "", false)
+		pend(t, l, pciA, corrA, tPend, keys(requester))
+		want(t, corrA, pciA, "", false) // one's own pend is not another patient's
+		want(t, corrA, pciB, pciA, true)
+		want(t, corrB, pciB, "", false) // another correlation id
+		// An amendment in progress is still awaiting its decision.
+		if claimed, _, err := l.BeginClaimUpdateReason(pciA, corrA); err != nil || !claimed {
+			t.Fatalf("begin = %v,%v", claimed, err)
+		}
+		want(t, corrA, pciB, pciA, true)
+		// A decided authorization is not.
+		decide(t, l, pciA, corrA, engine.PendOutcomeApproved, tDecided, nil)
+		want(t, corrA, pciB, "", false)
+		// With two others pended, the least PCI answers, on every backend.
+		pend(t, l, pciC, corrA, tPend, engine.PendKeys{RequesterHolder: requester, RequestIDs: []string{"urn:shn:claim|CLM-C"}})
+		pend(t, l, pciB, corrA, tPend, engine.PendKeys{RequesterHolder: requester, RequestIDs: []string{"urn:shn:claim|CLM-B"}})
+		want(t, corrA, pciA, pciB, true)
+		want(t, corrA, pciB, pciC, true)
+	})
+
+	// The same guard on the EOB write that has no ledger decision.
+	t.Run("an EOB id owned by another patient is refused on record", func(t *testing.T) {
+		l := newLedger(t)
+		first := []byte(`{"resourceType":"ExplanationOfBenefit","id":"a"}`)
+		if err := l.RecordEOB(pciA, "eob-corr-shared", first); err != nil {
+			t.Fatal(err)
+		}
+		if err := l.RecordEOB("PCI-B", "eob-corr-shared", []byte(`{"resourceType":"ExplanationOfBenefit","id":"b"}`)); !errors.Is(err, engine.ErrEOBSubjectMismatch) {
+			t.Fatalf("err = %v, want ErrEOBSubjectMismatch", err)
+		}
+		if got, ok := l.EOBsForPatient(pciA); !ok || len(got) != 1 || string(got[0]) != string(first) {
+			t.Fatalf("the first patient's EOB changed: %s, found=%v", got, ok)
+		}
+		if got, ok := l.EOBsForPatient("PCI-B"); ok || len(got) != 0 {
+			t.Fatalf("the refused EOB became visible: %s, found=%v", got, ok)
+		}
+		// The same patient re-recording its own EOB id replaces it, as before.
+		again := []byte(`{"resourceType":"ExplanationOfBenefit","id":"a","status":"active"}`)
+		if err := l.RecordEOB(pciA, "eob-corr-shared", again); err != nil {
+			t.Fatalf("re-recording one's own EOB id: %v", err)
+		}
+		if got, _ := l.EOBsForPatient(pciA); len(got) != 1 || string(got[0]) != string(again) {
+			t.Fatalf("re-recorded EOB = %s", got)
 		}
 	})
 

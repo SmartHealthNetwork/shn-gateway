@@ -9,6 +9,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -192,14 +193,312 @@ func (g *Gateway) ingressPASNativeSubjectPCIContext(ctx context.Context, bundleJ
 	return pci, 0, ""
 }
 
-// handlePASNativeInbound delivers a verified native submission through the shared boundary.
+// handlePASNativeInbound serves the conformant PAS leg payer-side: decrypt, subject-bind the
+// conformant request to the token (authority), forward the bundle to the responder (native relays the
+// bundle byte-verbatim to the real RI's /Claim/$submit AND projects the submit-cell Store
+// side-effects; an injected LegResponder adjudicates in-process AND records the same side-effects),
+// and relay the response. The response member-fence (R-7) and response egress-$validate (R-8) are
+// namespace-aware: on by default, standing down only for a foreign/relayed result; explained below.
+//
+// Store side-effects: BOTH responder paths return Commit/SideEffectFHIR — RecordPendedClaim on pend
+// (the load-bearing pend→update handoff depends on it) and the FR-28/FR-34 EOB on approve/deny
+// (both the relaying and non-relaying responder paths). "Pure relay" is now a WIRE property only — the EOB
+// is an ORTHOGONAL Store side-effect, so the native forward is no longer side-effect-free. This
+// handler mirrors handlePASInbound's build-response-BEFORE-Commit ordering: build
+// the response leg, egress-$validate the SHN-PRODUCED EOB side-effects, run the Commit, THEN write —
+// so a response-leg failure can never orphan the pended/EOB ledger. (A best-effort-CPT native submit
+// with no AMA CPT returns Commit==nil/no side-effects — soft EOB — and the Commit-nil/empty
+// branches simply relay.)
+//
+// Response member-fence (R-7) + response egress-$validate (R-8) are now NAMESPACE-AWARE:
+// both run BY DEFAULT (a non-relaying LegResponder answers in SHN's OWN member namespace and
+// produces SHN-shaped output — both flags false) and stand DOWN only when the responder declares the
+// result foreign/relayed by its per-result flags (native-forward path). The bound REQUEST above + the
+// substrate's correlation-binding (the response reaches only this exchange's originator) remain the
+// backstop on the relay path. OWD-G6 / FR-36.
+//
+// R-7 (fence iff !ResponseSubjectForeign): a real RI responds in its OWN patient namespace (br-payer
+// returns Patient/SubscriberExample, not the request's member), so a ClaimResponse.patient ==
+// bound-member check is a category error for a verbatim relay and would 403 every valid response —
+// hence the member-match stands down there; a non-relayed response IS member-fenced strict.
+// (handleCRDNativeInbound has no response fence at all — but the reason differs: CRD cards carry no
+// patient ref, whereas a ClaimResponse does.)
+//
+// R-8 (egress-$validate iff !ResponseRelayed()): a verbatim foreign RI's Da Vinci PAS output declares
+// its source contract. SHN does not stamp or certify unchanged foreign bytes,
+// so $validating it would 422 a valid response — the relay stands down (br-payer validates its own
+// output). A non-relayed response IS egress-$validated.
+//
+// The SHN-PRODUCED EOB side-effect (BuildPADecisionEOB) is, by contrast, fenced + egress-
+// $validated UNCONDITIONALLY — always built from the bound member, always an SHN resource (FR-36). A
+// verbatim relay produces no EOB side-effect, so that loop runs only for a non-relaying responder. This mirrors the DTR
+// near-relay, CRD-native, and the minimized pas-claim case.
 func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token, bundleJSON []byte, answerTok string) {
-	g.handleNativeInbound(w, r, "pas-claim", env, tok, bundleJSON, answerTok)
+	boundPatientRef, status, msg := g.conformantPASBindContext(r.Context(), bundleJSON, tok.Subject)
+	if status != 0 {
+		g.refuseInbound(w, r, legPASClaim, env, tok, answerTok, status, msg, nil)
+		return
+	}
+	// A correlation id that already names another patient's authorization is
+	// refused before the payer is asked (eobowner.go): the payer must not act on a
+	// claim whose decision this gateway could not then record for this patient.
+	if status, msg := g.correlationTaken(tok.Subject, env.Metadata.CorrelationID); status != 0 {
+		g.refuseInbound(w, r, legPASClaim, env, tok, answerTok, status, msg, nil)
+		return
+	}
+	capture := &nativeCertificationCapture{}
+	defer func() {
+		if capture.attempted {
+			g.certificationPair("pas-claim", "payer-native", env.Metadata.CorrelationID, shnsdk.LineOf(answerTok), capture.request, capture.response)
+		}
+	}()
+	observationContext := context.WithValue(r.Context(), nativeCertificationKey{}, capture)
+	// The verified requester this exchange came from, and the notes the leg raises
+	// for the operator, travel beside it (pasleg.go): the pend ledger namespaces
+	// every lookup key by the requester that submitted the claim, and that is the
+	// engine's fact, never the content seam's.
+	observationContext, pasLeg := withPASLeg(observationContext, env.Metadata.Sender)
+	result, err := g.cfg.Responder.Handle(observationContext, "pas-claim", env.Metadata.CorrelationID, tok.Subject, bundleJSON)
+
+	// Rollback on any pre-commit early return (the seam carries it for the update leg; submit
+	// acquires no claim, so Rollback is nil today). Mirrors handlePASInbound.
+	committed := false
+	defer func() {
+		if !committed && result.Rollback != nil {
+			result.Rollback()
+		}
+	}()
+	if err != nil {
+		g.responderFailed(w, "pas-claim", err)
+		return
+	}
+	if result.Status != 0 {
+		g.respondLegError(w, r, "payer-coverage", "pas-response", "pas-claim",
+			env.Metadata.CorrelationID, result, tok.Subject, env.Metadata.Sender, "", answerTok)
+		return
+	}
+	responseFHIR, err := g.admit(result.Response, answerKey("pas-claim", relay.OutcomeAnswered))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": errOwnershipFault})
+		return
+	}
+	// The direction flips here: everything validated below is THIS participant's own
+	// answer (the payer's ClaimResponse and its own side-effect FHIR), not the
+	// peer's request handleInbound tagged the context with.
+	fc := findingContextFrom(r.Context())
+	fc.Whose = "own"
+	r = r.WithContext(withFindingContext(r.Context(), fc))
+	// Native operation success is always a complete Bundle, regardless of the
+	// responder implementation. Resource-level builders and polling stay separate.
+	if _, bad := validateNativePASResponse(responseFHIR); bad.Status != 0 {
+		g.refuseInbound(w, r, legPASClaim, env, tok, answerTok, bad.Status, bad.Message, nil)
+		return
+	}
+	// (C) outbound fence — two-predicate, namespace-aware: member-fence
+	// the ClaimResponse iff !ResponseSubjectForeign (R-7 — a real br-payer answers in its OWN namespace,
+	// so the member-match stands down for a verbatim relay; a non-relaying LegResponder answers in SHN's
+	// member namespace, both flags false, so it fences strict). The SHN-produced EOB side-effect is
+	// fenced UNCONDITIONALLY (always built from the bound member). Re-adds the (C) fence the minimized
+	// pas-claim leg carries, before that leg is deleted (OWD-G6 prove-first).
+	if status, msg := g.fenceResponseSubject("pas-claim", boundPatientRef, env.Metadata.CorrelationID, result); status != 0 {
+		g.refuseInbound(w, r, legPASClaim, env, tok, answerTok, status, msg, nil)
+		return
+	}
+	// Egress-$validate the RESPONSE iff !ResponseRelayed() (R-8: a verbatim foreign relay carries Da
+	// Vinci PAS content which this gateway did not assemble). The
+	// non-relaying LegResponder produces SHN-shaped output (an authored Response) → $validated, matching the
+	// minimized pas-claim handler's response egress-$validate. The SHN-produced EOB side-effects are
+	// $validated unconditionally in the loop below.
+	status, msg = g.validatePASResult(r.Context(), result, answerTok, "pas-claim")
+	if status != 0 {
+		g.refuseInbound(w, r, legPASClaim, env, tok, answerTok, status, msg, nil)
+		return
+	}
+	// Egress-$validate the SHN-PRODUCED EOB side-effects before the Store write (FR-36). The relay
+	// RESPONSE itself is NOT $validated (R-8 — it may be a foreign RI's Da Vinci payload); a verbatim
+	// relay carries no side-effect, so this loop runs only for a non-relaying responder (matches the minimized pas-claim case).
+	// The EOB is PDex, not pa.pas: its shape does not vary with the PAS line, so it validates on the
+	// canonical lane (line "") — passing the PAS answer line here would demand a PAS lane for a
+	// resource that lane does not govern.
+	for _, b := range result.SideEffectFHIR {
+		if status, msg := g.validateFHIR(r.Context(), b, "egress", ""); status != 0 {
+			g.refuseInbound(w, r, legPASClaim, env, tok, answerTok, status, msg, nil)
+			return
+		}
+	}
+	// Build the response leg BEFORE committing payer state so a response-leg
+	// failure (unknown requester, seal, encode) cannot orphan the EOB / pended-claim ledger.
+	//
+	// Stamp honesty: the stamp is
+	// content-descriptive, so a VERBATIM FOREIGN RELAY is now left UNSTAMPED. With multiple
+	// native lines, stamping SHN's own line onto a partner's bytes would assert something
+	// about a payload this build did not produce and cannot vouch for — and the originator's
+	// stamp-verify would then reject a perfectly good relay whose partner answered at another
+	// line. Absence of a stamp is tolerated by design (the frames-absent precedent), so
+	// omission is the honest answer. An SHN-produced answer is stamped at its BUILT line.
+	stampTok := stampForBuiltAnswer(result, answerTok)
+	respBytes, status, msg := g.buildResponseLeg(r, "payer-coverage", "pas-response", "pas-claim", env.Metadata.CorrelationID,
+		result.Response, answerKey("pas-claim", relay.OutcomeAnswered), g.successFrame(env.Metadata.Sender, "application/fhir+json", stampTok),
+		tok.Subject, env.Metadata.Sender, "")
+	if status != 0 {
+		writeJSON(w, status, map[string]string{"error": msg})
+		return
+	}
+	eobOwnedElsewhere := false
+	if result.Commit != nil {
+		if err := result.Commit(); err != nil {
+			if !errors.Is(err, ErrEOBSubjectMismatch) {
+				// Store-write failure → 502 (parity with the minimized pas-claim RecordEOB/RecordPended 502).
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "holder write failed"})
+				return
+			}
+			// Another patient's EOB landed under this id after the pre-forward
+			// check. The payer has already answered, and the relay is not the
+			// ledger's to withhold: the decision is not recorded, the operator is
+			// told, and the payer's answer still reaches the requester.
+			eobOwnedElsewhere = true
+		}
+	}
+	committed = true
+	for _, kind := range pasLeg.notes {
+		g.observe(ObserverEvent{Kind: kind, Direction: "ingress", LegType: "pas-claim",
+			CorrelationID: env.Metadata.CorrelationID, Counterpart: env.Metadata.Sender})
+	}
+	if eobOwnedElsewhere {
+		g.reportEOBOwnedElsewhere("pas-claim", "pas-submit", env.Metadata.CorrelationID, env.Metadata.CorrelationID)
+	}
+	writeLeg(w, respBytes)
 }
 
-// handlePASUpdateNativeInbound delivers a verified amendment without local pend admission.
+// handlePASUpdateNativeInbound serves the CONFORMANT amended-re-POST leg (pas-claim-update)
+// payer-side: decrypt, subject-bind + FR-32-gate the conformant update request to the token
+// (conformantPASUpdateBind — authority + the supplemental-data Provenance attribution), forward the
+// bundle to the responder, and relay the response. It is the UPDATE-family mirror of
+// handlePASNativeInbound (the conformant SUBMIT leg): same Rollback-on-any-pre-commit-early-return +
+// build-response-BEFORE-Commit ordering — the update responder DOES carry a
+// Rollback (it acquires a claim via BeginClaimUpdate, like the minimized pas-claim-update leg).
+//
+// F-PB-R8 — NO ingress-$validate of the REQUEST bundle: the conformant Da Vinci amended re-POST is
+// foreign-shaped and preserved unchanged, so
+// SHN preserves bytes + enforces authority/FR-32 here, exactly as handlePASNativeInbound and the DTR
+// near-relay do. The egress-$validate loop below covers only SHN-PRODUCED SideEffectFHIR; the update
+// leg builds NO EOB (only submit does), so that egress set is empty — the loop is a structural no-op
+// carried for symmetry with the submit handler, NOT a place to "restore parity" with an ingress-$validate.
+//
+// Response member-fence (R-7) + response egress-$validate (R-8) are NAMESPACE-AWARE,
+// mirror of the conformant submit leg: both run BY DEFAULT (a non-relaying LegResponder, both flags
+// false) and stand DOWN only when the result is declared foreign/relayed by its per-result flags (a real
+// RI responds in its OWN patient namespace, so a response-subject == bound-member check / $validating
+// its Da Vinci profiles is a category error for a verbatim relay). The update leg builds NO EOB, so
+// the SHN-produced-side-effect fence/$validate is a no-op here (F-PB-R8 above) — the flags exist to
+// keep this leg symmetric with submit so the native relay stands the response fence/$validate down.
+// (The minimized pas-claim-update leg's (C) fence stays LIVE on its own leg until that leg is deleted.)
 func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token, bundleJSON []byte, answerTok string) {
-	g.handleNativeInbound(w, r, "pas-claim-update", env, tok, bundleJSON, answerTok)
+	boundPatientRef, status, msg := g.conformantPASUpdateBindContext(r.Context(), bundleJSON, tok.Subject)
+	if status != 0 {
+		g.refuseInbound(w, r, legPASClaimUpdate, env, tok, answerTok, status, msg, nil)
+		return
+	}
+	capture := &nativeCertificationCapture{}
+	defer func() {
+		if capture.attempted {
+			g.certificationPair("pas-claim-update", "payer-native", env.Metadata.CorrelationID, shnsdk.LineOf(answerTok), capture.request, capture.response)
+		}
+	}()
+	observationContext := context.WithValue(r.Context(), nativeCertificationKey{}, capture)
+	// The verified requester this exchange came from, and the notes the leg raises
+	// for the operator, travel beside it (pasleg.go): the pend ledger namespaces
+	// every lookup key by the requester that submitted the claim, and that is the
+	// engine's fact, never the content seam's.
+	observationContext, pasLeg := withPASLeg(observationContext, env.Metadata.Sender)
+	result, err := g.cfg.Responder.Handle(observationContext, "pas-claim-update", env.Metadata.CorrelationID, tok.Subject, bundleJSON)
+	// Arm defer-rollback-unless-committed on the returned result BEFORE checking err: the update
+	// responder acquires a claim in BeginClaimUpdate and returns LegResult{Rollback: release} even
+	// alongside a build error, so the claim is still released by this defer. Mirrors handlePASInbound
+	// (payer.go) and handlePASNativeInbound.
+	committed := false
+	defer func() {
+		if !committed && result.Rollback != nil {
+			result.Rollback()
+		}
+	}()
+	if err != nil {
+		g.responderFailed(w, "pas-claim-update", err)
+		return
+	}
+	if result.Status != 0 {
+		g.respondLegError(w, r, "payer-coverage", "pas-update-response", "pas-claim-update",
+			env.Metadata.CorrelationID, result, tok.Subject, env.Metadata.Sender, "", answerTok)
+		return
+	}
+	responseFHIR, err := g.admit(result.Response, answerKey("pas-claim-update", relay.OutcomeAnswered))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": errOwnershipFault})
+		return
+	}
+	// The direction flips here: everything validated below is THIS participant's own
+	// answer (the payer's ClaimResponse and its own side-effect FHIR), not the
+	// peer's request handleInbound tagged the context with.
+	fc := findingContextFrom(r.Context())
+	fc.Whose = "own"
+	r = r.WithContext(withFindingContext(r.Context(), fc))
+	// Native operation success is always a complete Bundle, regardless of the
+	// responder implementation. Resource-level builders and polling stay separate.
+	if _, bad := validateNativePASResponse(responseFHIR); bad.Status != 0 {
+		g.refuseInbound(w, r, legPASClaimUpdate, env, tok, answerTok, bad.Status, bad.Message, nil)
+		return
+	}
+	// (C) outbound fence — two-predicate, namespace-aware: member-fence
+	// the ClaimResponse iff !ResponseSubjectForeign (R-7), mirror of the conformant submit handler.
+	// The update leg builds no EOB, so the SHN-produced-side-effect fence is a no-op here; the flag
+	// keeps the leg symmetric with submit so the native relay (both flags set) stands the member-fence
+	// down. Re-adds the (C) fence before the minimized pas-claim-update leg is deleted (OWD-G6).
+	if status, msg := g.fenceResponseSubject("pas-claim-update", boundPatientRef, env.Metadata.CorrelationID, result); status != 0 {
+		g.refuseInbound(w, r, legPASClaimUpdate, env, tok, answerTok, status, msg, nil)
+		return
+	}
+	// Egress-$validate the RESPONSE iff !ResponseRelayed() (R-8), mirror of the conformant submit
+	// handler: a non-relaying LegResponder produces locally assembled output (validated); a foreign verbatim relay
+	// (a relayed Response) is preserved bytes-only. Assembly is certified explicitly against PAS.
+	status, msg = g.validatePASResult(r.Context(), result, answerTok, "pas-claim-update")
+	if status != 0 {
+		g.refuseInbound(w, r, legPASClaimUpdate, env, tok, answerTok, status, msg, nil)
+		return
+	}
+	// Egress-$validate the SHN-PRODUCED side-effects before the Store write (FR-36). The update leg
+	// builds NO EOB, so SideEffectFHIR is empty and this loop is a structural no-op (F-PB-R8); the
+	// relay RESPONSE itself is NOT $validated (it may be a foreign RI's Da Vinci payload, R-8).
+	for _, b := range result.SideEffectFHIR {
+		if status, msg := g.validateFHIR(r.Context(), b, "egress", ""); status != 0 {
+			g.refuseInbound(w, r, legPASClaimUpdate, env, tok, answerTok, status, msg, nil)
+			return
+		}
+	}
+	// Build the response leg BEFORE committing payer state so a response-leg
+	// failure cannot orphan the claim acquired in BeginClaimUpdate (the deferred Rollback releases it).
+	// Stamp honesty, mirror of the submit leg above: a VERBATIM FOREIGN RELAY is left UNSTAMPED (the stamp
+	// describes bytes THIS build produced); an SHN-produced answer is stamped at its BUILT line.
+	stampTok := stampForBuiltAnswer(result, answerTok)
+	respBytes, status, msg := g.buildResponseLeg(r, "payer-coverage", "pas-update-response", "pas-claim-update", env.Metadata.CorrelationID,
+		result.Response, answerKey("pas-claim-update", relay.OutcomeAnswered), g.successFrame(env.Metadata.Sender, "application/fhir+json", stampTok),
+		tok.Subject, env.Metadata.Sender, "")
+	if status != 0 {
+		writeJSON(w, status, map[string]string{"error": msg})
+		return
+	}
+	if result.Commit != nil {
+		if err := result.Commit(); err != nil {
+			// FinalizeClaimUpdate store-write failure → 502 (parity with the minimized leg).
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "holder write failed (finalize update)"})
+			return
+		}
+	}
+	committed = true
+	for _, kind := range pasLeg.notes {
+		g.observe(ObserverEvent{Kind: kind, Direction: "ingress", LegType: "pas-claim-update",
+			CorrelationID: env.Metadata.CorrelationID, Counterpart: env.Metadata.Sender})
+	}
+	writeLeg(w, respBytes)
 }
 
 // conformantPASBind is the payer-side authority check: the conformant request must subject-bind
@@ -440,32 +739,42 @@ func (g *Gateway) conformantPASUpdateBindContext(ctx context.Context, bundleJSON
 	return "", http.StatusForbidden, "ClaimUpdate Provenance does not target the supplemental data"
 }
 
-// stampForBuiltAnswer preserves an explicit producer declaration for a relayed
-// answer, leaving it absent when the producer supplied none. An answer built by
-// this gateway is stamped at its build line. All response legs share this rule.
+// stampForBuiltAnswer resolves the contractVersion frame stamp for an answer
+// (the stamp-honesty rule). A verbatim foreign relay is UNSTAMPED: the stamp
+// is content-descriptive, and this build neither produced the partner's bytes nor
+// can vouch for the line they were built at — absence is tolerated by design, a
+// wrong claim is not. Anything SHN produced is stamped at answerTok, the line the
+// responder built it at.
+//
+// The rule is NOT PAS-specific — it holds for every leg that can relay foreign
+// bytes. The two PAS legs call it directly because they build their response frame
+// inline (they must seal BEFORE Commit); every other leg gets the same decision
+// through respondLeg, which the DTR native-forward leg exercises (native.go's
+// dtr-questionnaire-fetch case relays its Response).
 func stampForBuiltAnswer(result LegResult, answerTok string) string {
 	if result.ResponseRelayed() {
-		return result.ResponseContractVersion
+		return ""
 	}
 	return answerTok
 }
 
-// validatePASResult applies the local policy to authored and relayed answers.
-// A relayed answer's independent declaration selects its line; an absent
-// declaration cannot borrow the request's line as certification evidence.
+// validatePASResult certifies an answer THIS GATEWAY PRODUCED against the exact
+// PAS response profile for the line it was built at. A RELAYED answer is the
+// participant's own message: this gateway neither wrote it nor can vouch for the
+// line it was written at, so it is not certified here — the reference-closure rule
+// (validateNativePASResponse) is what every PAS answer passes, relayed or not.
+//
+// There is no third case. The terminal-response assembly that used to sit between
+// them — a payer's pend replaced by a later polled approval, certified as SHN's
+// own — is gone, and with it the whole class of failure where a payer's own
+// extension made SHN's validator refuse SHN's copy of the payer's decision.
 func (g *Gateway) validatePASResult(ctx context.Context, result LegResult, answerTok, leg string) (int, string) {
 	responseFHIR, err := g.admit(result.Response, answerKey(leg, relay.OutcomeAnswered))
 	if err != nil {
 		return http.StatusInternalServerError, errOwnershipFault
 	}
 	if result.ResponseRelayed() {
-		if g.policy().Action(CheckDeep) != CheckEnforce {
-			return 0, ""
-		}
-		answerTok = result.ResponseContractVersion
-		if !strings.HasPrefix(answerTok, "pa.pas@") {
-			return http.StatusServiceUnavailable, "conformance_unavailable: response version unavailable"
-		}
+		return 0, ""
 	}
 	return g.validateFHIRForContract(ctx, responseFHIR, "egress", "pa.pas", shnsdk.LineOf(answerTok), "")
 }

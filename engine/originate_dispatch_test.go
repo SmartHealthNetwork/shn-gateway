@@ -391,7 +391,6 @@ func TestDispatch_DTRPackageRequestFollowsSelectedLine(t *testing.T) {
 			if rec.Code != row.status {
 				t.Fatalf("want %d, got %d body=%s", row.status, rec.Code, rec.Body.String())
 			}
-			waitEgressObserver(t, fix.gw)
 			var sent []ObserverEvent
 			for _, e := range events {
 				if e.Kind == "leg.originated" && e.LegType == "dtr-questionnaire-fetch" {

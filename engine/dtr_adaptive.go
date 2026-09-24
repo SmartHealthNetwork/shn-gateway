@@ -152,12 +152,12 @@ func (g *Gateway) nextQuestionLeg(ctx context.Context, r *http.Request, res crdD
 		return nil, http.StatusInternalServerError, "build next-question leg failed", nil
 	}
 	x := ExchangeIdentity{CorrelationID: corr, LegType: "dtr-questionnaire-fetch", Counterpart: res.recipient}
-	adapted, _, aerr := g.egressAdapt(ctx, route, reqBytes, x)
+	adapted, _, aerr := g.egressAdapt(route, reqBytes, x)
 	if aerr != nil {
 		return nil, http.StatusBadGateway, aerr.Error(), aerr
 	}
 	body, oerr := g.OriginateLeg(ctx, r, res.recipient, "dtr-questionnaire-fetch", res.pci, corr, "",
-		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, DeclaredVersion: route.Token, Route: routeInfoFor(route),
+		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route),
 			Payload:   sealRequest(relay.BuilderDTRNextQuestion, adapted, "application/fhir+json"),
 			Operation: shnsdk.FrameOperationNextQuestion})
 	if oerr != nil {
