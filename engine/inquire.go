@@ -81,7 +81,15 @@ type pasInquiryItemFact struct {
 	display     string
 }
 
-// parsePASInquiryFacts reads a Da Vinci PAS inquiry request Bundle and binds it to
+// parsePASInquiryFacts is readPASInquiryFacts refusing every defect it finds.
+// No request path calls it: the provider ingress and the payer side both judge
+// content by their level through readPASInquiryFacts. It stays as the
+// whole-strictness read the inquiry tests pin.
+func parsePASInquiryFacts(bundleJSON []byte) (pasInquiryFacts, int, string) {
+	return readPASInquiryFacts(bundleJSON, func(string) bool { return true })
+}
+
+// readPASInquiryFacts reads a Da Vinci PAS inquiry request Bundle and binds it to
 // ONE member.
 //
 // The bind covers EVERY Patient the Bundle names, not just the first: the
@@ -94,7 +102,22 @@ type pasInquiryItemFact struct {
 // The inquiry request Bundle profile allows no `entry.request` or `entry.response`
 // at any line; a Bundle carrying one is not an inquiry and is refused here rather
 // than sent on.
-func parsePASInquiryFacts(bundleJSON []byte) (pasInquiryFacts, int, string) {
+//
+// The content defects are handed to refuses, which reports whether the defect
+// refuses the inquiry. The checks run in the same order whatever it answers, so
+// a caller whose refuses always answers true refuses every defect it finds.
+//
+// What refuses whatever refuses answers: an inquiry that cannot be read, is not
+// a Bundle, or has an entry or Claim that cannot be read (the subject cannot be
+// read, and a repeated member name is read one way only), a Patient entry
+// whose id cannot be read, and one with no Claim.patient (the subject,
+// RuleSubjectPCI). The content defects, handed to
+// refuses: a Bundle that is not a collection, an entry carrying a request or
+// response, a value of the wrong type off the subject path, and a Claim that
+// is not a preauthorization (RuleRequestShape), and
+// another patient named inside the inquiry (RulePatientMixed). A defect that
+// does not refuse leaves the inquiry bound to its Claim's patient.
+func readPASInquiryFacts(bundleJSON []byte, refuses func(rule string) bool) (pasInquiryFacts, int, string) {
 	var probe struct {
 		ResourceType string `json:"resourceType"`
 		Type         string `json:"type"`
@@ -105,13 +128,23 @@ func parsePASInquiryFacts(bundleJSON []byte) (pasInquiryFacts, int, string) {
 			Response json.RawMessage `json:"response"`
 		} `json:"entry"`
 	}
-	if err := decodeMessage(bundleJSON, &probe); err != nil {
+	// The entries (their resources and fullUrls, the subject path) and the
+	// resourceType must read; a value of the wrong type elsewhere is the
+	// inquiry's own shape (RuleRequestShape).
+	var probeCore struct {
+		ResourceType string `json:"resourceType"`
+		Entry        []struct {
+			FullURL  string          `json:"fullUrl"`
+			Resource json.RawMessage `json:"resource"`
+		} `json:"entry"`
+	}
+	if err := decodeContent(bundleJSON, &probe, &probeCore, func() bool { return refuses(RuleRequestShape) }); err != nil {
 		return pasInquiryFacts{}, http.StatusBadRequest, "parse inquiry bundle failed"
 	}
 	if probe.ResourceType != "Bundle" {
 		return pasInquiryFacts{}, http.StatusBadRequest, "PAS inquiry is not a Bundle"
 	}
-	if probe.Type != "collection" {
+	if probe.Type != "collection" && refuses(RuleRequestShape) {
 		return pasInquiryFacts{}, http.StatusBadRequest, "PAS inquiry Bundle is not a collection"
 	}
 	var (
@@ -125,14 +158,24 @@ func parsePASInquiryFacts(bundleJSON []byte) (pasInquiryFacts, int, string) {
 		}
 	}
 	for _, e := range probe.Entry {
-		if len(e.Request) > 0 || len(e.Response) > 0 {
+		if (len(e.Request) > 0 || len(e.Response) > 0) && refuses(RuleRequestShape) {
 			return pasInquiryFacts{}, http.StatusBadRequest, "PAS inquiry Bundle entries carry no request or response"
 		}
 		var head struct {
 			ResourceType string `json:"resourceType"`
 			ID           string `json:"id"`
 		}
-		if err := decodeMessage(e.Resource, &head); err != nil {
+		// The entry's resourceType must read. A Patient entry's own id is a
+		// patient identity this inquiry names, so it must read too; the id of
+		// any other entry is the inquiry's own shape (RuleRequestShape).
+		// decodeContent reads headCore before it asks, so the callback sees
+		// the entry's type.
+		var headCore struct {
+			ResourceType string `json:"resourceType"`
+		}
+		if err := decodeContent(e.Resource, &head, &headCore, func() bool {
+			return headCore.ResourceType == "Patient" || refuses(RuleRequestShape)
+		}); err != nil {
 			return pasInquiryFacts{}, http.StatusBadRequest, "parse inquiry bundle entry failed"
 		}
 		if head.ResourceType == "Patient" {
@@ -168,10 +211,17 @@ func parsePASInquiryFacts(bundleJSON []byte) (pasInquiryFacts, int, string) {
 				} `json:"productOrService"`
 			} `json:"item"`
 		}
-		if err := decodeMessage(e.Resource, &claim); err != nil {
+		// Claim.patient (the subject) must read; a value of the wrong type
+		// elsewhere on the Claim is the inquiry's own shape.
+		var claimCore struct {
+			Patient struct {
+				Reference string `json:"reference"`
+			} `json:"patient"`
+		}
+		if err := decodeContent(e.Resource, &claim, &claimCore, func() bool { return refuses(RuleRequestShape) }); err != nil {
 			return pasInquiryFacts{}, http.StatusBadRequest, "parse inquiry Claim failed"
 		}
-		if claim.Use != "preauthorization" {
+		if claim.Use != "preauthorization" && refuses(RuleRequestShape) {
 			return pasInquiryFacts{}, http.StatusBadRequest, "PAS inquiry Claim is not a preauthorization"
 		}
 		if claim.Patient.Reference == "" {
@@ -204,7 +254,7 @@ func parsePASInquiryFacts(bundleJSON []byte) (pasInquiryFacts, int, string) {
 	// records the decision without one — nothing is invented to fill the gap.
 	//
 	// The bind: one member across the whole Bundle.
-	if len(members) != 1 || !members[facts.member] {
+	if (len(members) != 1 || !members[facts.member]) && refuses(RulePatientMixed) {
 		return pasInquiryFacts{}, http.StatusForbidden, "inconsistent patient in PAS inquiry"
 	}
 	return facts, 0, ""
@@ -398,8 +448,8 @@ func inquiryAnswerShape(body []byte) (string, []json.RawMessage, []string, error
 
 // pasInquiryOutputDeviations names each nonconformant output parameter an answer
 // carried a response Bundle under. Empty for every conformant answer, and for one
-// this gateway cannot read at all — an unreadable answer is the 502 the shape
-// check already raises, not a nonconformance to report.
+// this gateway cannot read at all — an unreadable answer is the shape check's
+// (answer.shape: a 502 at strict), not a nonconformance to report.
 func pasInquiryOutputDeviations(body []byte) []string {
 	_, _, deviant, err := inquiryAnswerShape(body)
 	if err != nil {
@@ -417,8 +467,12 @@ func pasInquiryOutputDeviations(body []byte) []string {
 // declares — because either alone leaves the reader to guess which side is wrong.
 //
 // It reports; it decides nothing. The answer was read, the answer relays unchanged,
-// and no branch of this leg is taken because of what this returns.
+// and no branch of this leg is taken because of what this returns. It is a
+// conformance check of the payer's answer, so at none it does not run.
 func (g *Gateway) reportInquiryAnswerNonconformance(corrID, counterpart string, answer []byte) []string {
+	if !g.policy().RunsKind(KindContent) {
+		return nil
+	}
 	var stated []string
 	for _, used := range pasInquiryOutputDeviations(answer) {
 		sentence := "prior-authorization inquiry answer carries its response bundle under output parameter " +
@@ -441,7 +495,7 @@ func (g *Gateway) reportInquiryAnswerNonconformance(corrID, counterpart string, 
 // pasInquiryAnswerSubjects returns every patient identity an inquiry's answer
 // names, anywhere in it, and whether the answer is one readable document.
 //
-// It is the ANSWER-side twin of parsePASInquiryFacts' bind, and it is deliberately
+// It is the ANSWER-side twin of readPASInquiryFacts' bind, and it is deliberately
 // as deep as the submit legs' response check: every object at any depth — each
 // `return` Bundle, each entry, and each contained resource inside an entry — has
 // its subject-bearing members read (`patient`, `subject`, `beneficiary`, `for`,
@@ -993,9 +1047,9 @@ func claimResponseLookup(requesterHolder string, raw []byte) inquiryAnswerRespon
 // The only change it may make to the request is the registered payer-identity
 // restamp; the answer is never edited, never re-shaped and never certified by
 // this gateway.
-func (n *nativeResponder) handlePASInquireNative(ctx context.Context, contract string, in relay.Body) (LegResult, error) {
+func (n *nativeResponder) handlePASInquireNative(ctx context.Context, contract string, in relay.Body, requestFHIR []byte) (LegResult, error) {
 	const fhirJSON = "application/fhir+json"
-	forward, refused, err := n.payorEdgeRequest(in, payorEdgePASBundle, fhirJSON)
+	forward, refused, err := n.payorEdgeRequest(in, payorEdgePASBundle, fhirJSON, n.refusesRequest(ctx, RuleInsurer, requestFHIR))
 	if err != nil {
 		return LegResult{}, err
 	}
@@ -1028,8 +1082,9 @@ func (n *nativeResponder) handlePASInquireNative(ctx context.Context, contract s
 // handlePASInquireInbound serves the inquiry leg payer-side.
 //
 // Authority is evaluated independently here, as on every leg: the inquiry must
-// bind to one member (parsePASInquiryFacts, over EVERY Patient it names) and that
-// member must resolve to the inbound token's own subject. Nothing about the
+// bind to one member (readPASInquiryFacts, over EVERY Patient it names), bound by
+// this payer's own system; the ledger projection is keyed by that binding, never
+// by the inbound token's subject. Nothing about the
 // authority is inherited from the submit that created the authorization — a
 // requester holding a submit token cannot ask about the authorization with it,
 // because the catalog pins this leg's own operation into the token binding.
@@ -1040,25 +1095,32 @@ func (n *nativeResponder) handlePASInquireNative(ctx context.Context, contract s
 // fence, egress-$validate the gateway's own side-effects, build the response leg,
 // then write holder state — a response-leg failure can never leave a recorded
 // decision the requester never received.
+//
+// The subject (Claim.patient, bound by this payer's own system — bindInboundSubject — whose
+// binding keys the ledger projection, never the token's subject) and an inquiry that cannot be
+// read refuse at every level; the inquiry's own shape and consistency (readPASInquiryFacts) are not checked at none,
+// recorded at observe and refused at strict. The payer's answer is its own content (payerAnswerRead): below strict an
+// answer this gateway cannot read, whose subjects do not bind, or whose decision EOB is invalid is
+// relayed exactly as the payer sent it, and nothing is written from it.
 func (g *Gateway) handlePASInquireInbound(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token, bundleJSON []byte, answerTok string) {
-	facts, status, msg := parsePASInquiryFacts(bundleJSON)
+	facts, status, msg := readPASInquiryFacts(bundleJSON, func(rule string) bool {
+		return g.guard(r.Context(), KindContent, rule, bundleJSON)
+	})
 	if status != 0 {
 		g.refuseInbound(w, r, legPASClaimInquire, env, tok, answerTok, status, msg, nil)
 		return
 	}
-	pci, found, readErr := g.resolveSubjectPCI(r.Context(), facts.member, bundleJSON)
-	if writeSoRFailure(w, readErr) {
-		return
-	}
-	if !found {
-		g.refuseInbound(w, r, legPASClaimInquire, env, tok, answerTok, http.StatusBadRequest, refusalUnknownMember, nil)
-		return
-	}
-	if pci != tok.Subject {
-		g.refuseInbound(w, r, legPASClaimInquire, env, tok, answerTok, http.StatusForbidden, "token subject does not match request patient", nil)
+	// Everything the payer records about the inquiry is keyed by its own binding
+	// of the member the inquiry names, never by the token.
+	subjectPCI, status, msg := g.bindInboundSubject(r.Context(), facts.member, bundleJSON)
+	if status != 0 {
+		// A system-of-record failure is this gateway's own 5xx, written bare by
+		// refuseInbound like every other leg's.
+		g.refuseInbound(w, r, legPASClaimInquire, env, tok, answerTok, status, msg, nil)
 		return
 	}
 	boundPatientRef := "Patient/" + facts.member
+	g.noteSubjectBinding("pas-claim-inquire", env.Metadata.CorrelationID, tok.Subject, subjectPCI)
 
 	capture := &nativeCertificationCapture{}
 	// The payer's own departures from the operation it answered, reported with the
@@ -1070,7 +1132,7 @@ func (g *Gateway) handlePASInquireInbound(w http.ResponseWriter, r *http.Request
 		}
 	}()
 	observationContext := context.WithValue(r.Context(), nativeCertificationKey{}, capture)
-	result, err := g.cfg.Responder.Handle(observationContext, "pas-claim-inquire", env.Metadata.CorrelationID, tok.Subject, bundleJSON)
+	result, err := g.cfg.Responder.Handle(observationContext, "pas-claim-inquire", env.Metadata.CorrelationID, subjectPCI, bundleJSON)
 	committed := false
 	defer func() {
 		if !committed && result.Rollback != nil {
@@ -1091,20 +1153,30 @@ func (g *Gateway) handlePASInquireInbound(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": errOwnershipFault})
 		return
 	}
-	if bad := validatePASInquiryAnswer(responseFHIR); bad.Status != 0 {
+	// The answer's content checks name it as the participant's own answer.
+	ownFC := findingContextFrom(r.Context())
+	ownFC.Whose = "own"
+	read := g.newPayerAnswerRead(withFindingContext(r.Context(), ownFC), result, responseFHIR, "")
+	if bad := validatePASInquiryAnswer(responseFHIR); bad.Status != 0 && read.refusesUnreadable(RuleAnswerShape) {
 		g.refuseInbound(w, r, legPASClaimInquire, env, tok, answerTok, bad.Status, bad.Message, nil)
 		return
 	}
-	// Whatever the payer's answer departs from, stated before anything is derived
-	// from it. Reported IMMEDIATELY rather than with the ledger's events: the
-	// payer deviated whatever this exchange does next, and an operator asking why
-	// a decision went unrecorded is asking about exactly the runs that fail later.
-	answerNonconformance = g.reportInquiryAnswerNonconformance(env.Metadata.CorrelationID, env.Metadata.Sender, responseFHIR)
-	// The ledger effect, derived from the answer. The EOBs it produces join the
-	// gateway's own side-effects, so they are member-fenced and egress-$validated
-	// below exactly as the submit leg's decision EOB is.
-	ledgerCommit, events := g.inquiryLedgerEffect(env.Metadata.Sender, tok.Subject, boundPatientRef, env.Metadata.CorrelationID, facts, responseFHIR, &result)
-	if status, msg := g.fenceResponseSubject("pas-claim-inquire", boundPatientRef, env.Metadata.CorrelationID, result); status != 0 {
+	var (
+		ledgerCommit func() error
+		events       []ObserverEvent
+	)
+	if read.read() {
+		// Whatever the payer's answer departs from, stated before anything is derived
+		// from it. Reported IMMEDIATELY rather than with the ledger's events: the
+		// payer deviated whatever this exchange does next, and an operator asking why
+		// a decision went unrecorded is asking about exactly the runs that fail later.
+		answerNonconformance = g.reportInquiryAnswerNonconformance(env.Metadata.CorrelationID, env.Metadata.Sender, responseFHIR)
+		// The ledger effect, derived from the answer. The EOBs it produces join the
+		// gateway's own side-effects, so they are member-fenced and egress-$validated
+		// below exactly as the submit leg's decision EOB is.
+		ledgerCommit, events = g.inquiryLedgerEffect(env.Metadata.Sender, subjectPCI, boundPatientRef, env.Metadata.CorrelationID, facts, responseFHIR, &result)
+	}
+	if status, msg := g.fenceResponseSubjectWith("pas-claim-inquire", boundPatientRef, env.Metadata.CorrelationID, result, read.refuses); status != 0 {
 		g.refuseInbound(w, r, legPASClaimInquire, env, tok, answerTok, status, msg, nil)
 		return
 	}
@@ -1123,10 +1195,20 @@ func (g *Gateway) handlePASInquireInbound(w http.ResponseWriter, r *http.Request
 		g.refuseInbound(w, r, legPASClaimInquire, env, tok, answerTok, status, msg, nil)
 		return
 	}
+	// Below strict an EOB built from a relayed answer that is invalid is
+	// recorded, the payer's answer is relayed, and nothing is written
+	// (RuleEOBDecision). An answer not read writes no EOB to validate.
+	if !read.read() {
+		result.SideEffectFHIR = nil
+	}
 	for _, b := range result.SideEffectFHIR {
-		if status, msg := g.validateFHIR(ctx, b, "egress", ""); status != 0 {
+		status, msg, invalid := g.validateFHIRRecorded(ctx, b, "egress", "")
+		if status != 0 {
 			g.refuseInbound(w, r, legPASClaimInquire, env, tok, answerTok, status, msg, nil)
 			return
+		}
+		if invalid {
+			read.eobInvalid()
 		}
 	}
 	// Stamp honesty, as on every relaying leg: a verbatim foreign relay is left
@@ -1140,6 +1222,13 @@ func (g *Gateway) handlePASInquireInbound(w http.ResponseWriter, r *http.Request
 		tok.Subject, env.Metadata.Sender, "")
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
+		return
+	}
+	if !read.read() {
+		// An answer relayed unread writes nothing: no decision and no EOB. The
+		// ledger's lookup events describe a write that is not made.
+		g.payerLocalWriteSkipped("pas-claim-inquire", env.Metadata.CorrelationID, read.unread)
+		writeLeg(w, respBytes)
 		return
 	}
 	if ledgerCommit != nil {
@@ -1164,6 +1253,11 @@ func (g *Gateway) handlePASInquireInbound(w http.ResponseWriter, r *http.Request
 	}
 	writeLeg(w, respBytes)
 }
+
+// PendOtherSubjectEvent is the observer event an inquiry raises when the
+// payer's answer resolves to an authorization this requester holds under a
+// different member binding than the inquiry's. No decision is recorded from it.
+const PendOtherSubjectEvent = "pend.other-subject"
 
 // inquiryLedgerEffect derives this payer gateway's own pend-ledger effect from the
 // answer, and returns the write to run once the response leg is sealed plus the
@@ -1217,7 +1311,15 @@ func (g *Gateway) inquiryLedgerEffect(requester, subject, boundPatientRef, legCo
 			events = append(events, ObserverEvent{Kind: "pend.lookup-unavailable", Direction: "ingress",
 				LegType: "pas-claim-inquire", CorrelationID: legCorrID, Op: "pas-inquire"})
 			continue
-		case ambiguous, !found, subjectPCI != subject:
+		case ambiguous, !found:
+			continue
+		case subjectPCI != subject:
+			// The payer's answer names an authorization this requester holds for
+			// another member than the one this inquiry is bound to — or for the
+			// same member bound differently, when a leg carried a different Patient.
+			// Nothing is recorded; the operator is told.
+			events = append(events, ObserverEvent{Kind: PendOtherSubjectEvent, Direction: "ingress",
+				LegType: "pas-claim-inquire", CorrelationID: legCorrID, Op: "pas-inquire", Detail: "authorization " + corrID})
 			continue
 		}
 		outcome, parsed, decided := inquiryDecisionOf(ans.raw)
@@ -1342,7 +1444,17 @@ func (g *Gateway) handlePASInquireIngress(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "read body failed"})
 		return
 	}
-	facts, status, msg := parsePASInquiryFacts(body)
+	const leg = "pas-claim-inquire"
+	// Tag the leg for every check before routing; the correlation id is added
+	// once the leg is routed.
+	r = r.WithContext(withFindingContext(r.Context(), findingContext{LegType: leg, Seam: "provider-ingress", Whose: "own"}))
+	// The subject (Claim.patient resolving to a pci, the unknown-member setting inside
+	// resolveSubjectPCI), an inquiry that cannot be read and routing refuse at
+	// every level; the inquiry's own shape and consistency (readPASInquiryFacts)
+	// are not checked at none, recorded at observe and refused at strict.
+	facts, status, msg := readPASInquiryFacts(body, func(rule string) bool {
+		return g.guard(r.Context(), KindContent, rule, body)
+	})
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
@@ -1363,7 +1475,6 @@ func (g *Gateway) handlePASInquireIngress(w http.ResponseWriter, r *http.Request
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
-	const leg = "pas-claim-inquire"
 	scope.leg = leg
 	ex := g.exchanges.Begin(workstreamPA)
 	child := g.ingressCorrelation(w, r)
@@ -1391,21 +1502,45 @@ func (g *Gateway) handlePASInquireIngress(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
+	// The answer is the payer's content: an answer this gateway cannot read
+	// (RuleAnswerShape) and one naming more than one patient
+	// (RulePatientAnswer) refuse at strict; below strict the payer's bytes are
+	// relayed exactly as received, recorded at observe. The answer is read at
+	// every level for the local record below, which never acts on an answer it
+	// could not read.
+	answerCtx := withFindingContext(r.Context(), findingContext{LegType: leg, CorrelationID: child, Seam: "provider-ingress", Whose: "peer"})
+	unread := ""
 	if bad := validatePASInquiryAnswer(answer); bad.Status != 0 {
-		g.recordLeg(ex.ID, legProj.Project(child, "error"))
-		writeJSON(w, bad.Status, map[string]string{"error": bad.Message})
-		return
+		// A repeated member name is read one way only (RuleDuplicateKey): it
+		// refuses at every level, with strict's refusal.
+		if errors.Is(scanMessage(answer), relay.ErrDuplicateKey) || g.guard(answerCtx, KindContent, RuleAnswerShape, answer) {
+			g.recordLeg(ex.ID, legProj.Project(child, "error"))
+			writeJSON(w, bad.Status, map[string]string{"error": bad.Message})
+			return
+		}
+		unread = RuleAnswerShape
 	}
 	// The same subject-linkage rule the submit ingress applies to a payer's
 	// response: every patient the answer names, at every depth, must be the same
 	// one. Shape alone would pass an answer whose Coverage beneficiary named
-	// another member.
-	if !consistentPASInquiryAnswerSubjects(answer) {
-		g.recordLeg(ex.ID, legProj.Project(child, "error"))
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "PAS inquiry answer has inconsistent patient linkage"})
-		return
+	// another member. An answer that cannot be read has no subjects to bind;
+	// the rule above already covers it.
+	if unread == "" && !consistentPASInquiryAnswerSubjects(answer) {
+		if g.guard(answerCtx, KindContent, RulePatientAnswer, answer) {
+			g.recordLeg(ex.ID, legProj.Project(child, "error"))
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "PAS inquiry answer has inconsistent patient linkage"})
+			return
+		}
+		unread = RulePatientAnswer
 	}
-	g.recordLeg(ex.ID, legProj.Project(child, "ok"))
+	// "ok" says the answer was read and bound; one relayed unread is recorded
+	// "answered" (localWriteSkipped).
+	outcome := "ok"
+	if unread != "" {
+		outcome = "answered"
+		g.localWriteSkipped(leg, child, unread)
+	}
+	g.recordLeg(ex.ID, legProj.Project(child, outcome))
 	g.writePayload(w, http.StatusOK, "application/fhir+json",
 		relay.Exact(relay.NewBody(answer, relay.OriginPeerFrame), "application/fhir+json"),
 		relay.Key{Leg: leg, Role: relay.RoleRequester, Direction: relay.DirectionResponse, Outcome: relay.OutcomeAnswered})

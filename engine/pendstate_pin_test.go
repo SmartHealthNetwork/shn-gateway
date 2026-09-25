@@ -723,8 +723,8 @@ func TestHandleUC05_FederatedQueryIngressValidatesOnDemoLane(t *testing.T) {
 	// lane the R-8 scope fix (Finding 1) had to stop leaking the skip into this
 	// exact leg on.
 	gw.cfg.OriginationProfile = "demo"
-	// Pinned to strict explicitly, not the default: the none twin right below
-	// drives the SAME corrupted marker and asserts it records-and-relays instead.
+	// Pinned to strict explicitly, not the default: the below-strict twin right
+	// below drives the SAME corrupted marker and asserts it relays instead.
 	gw.cfg.ConformanceEnforcement = EnforcementStrict
 	// A validator that rejects only the corrupted marker: every OTHER leg's
 	// bytes in this run (CRD SR/Coverage, DTR QR, PAS bundles) must still pass,
@@ -755,82 +755,92 @@ func TestHandleUC05_FederatedQueryIngressValidatesOnDemoLane(t *testing.T) {
 	}
 }
 
-// TestHandleUC05_FederatedQueryIngressValidatesOnDemoLane_NoneRelays is the none
+// TestHandleUC05_FederatedQueryIngressRelaysBelowStrict is the below-strict
 // twin of the row above: the SAME corrupted federated-query answer, on the SAME
-// demo lane, but ConformanceEnforcement=none. The ingress-validate call still
-// runs (it is not skipped) but an invalid verdict is now RECORDED, not refused,
-// so handleUC05 completes (200) and the finding is observed.
-func TestHandleUC05_FederatedQueryIngressValidatesOnDemoLane_NoneRelays(t *testing.T) {
-	gw, stub := newPendResumeFixture(t, pendFixtureOpts{
-		member: "MBR-D-UC05", birthDate: "1968-03-12", familyName: "Johansson-Demo",
-		pendedItem: "operative-diagnostic-report",
-		extraRoles: map[string]string{"facility": "metro-spine"},
-	})
-	gw.cfg.OriginationProfile = "demo"
-	gw.cfg.ConformanceEnforcement = EnforcementNone
-	var events []ObserverEvent
-	gw.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
-	gw.cfg.Validator = &shnsdk.FakeValidator{RejectIfContains: federatedQueryIngressMutationMarker}
-	stub.overrideResponse = func(legType string, payload []byte) []byte {
-		if legType != "federated-query" {
-			return payload
-		}
-		return bytes.Replace(payload, []byte(`{`),
-			[]byte(`{"`+federatedQueryIngressMutationMarker+`":true,`), 1)
-	}
+// demo lane, at observe and at none. At observe the ingress-validate call still
+// runs (it is not skipped) and an invalid verdict is RECORDED, not refused; at
+// none no check runs. Either way handleUC05 completes (200).
+func TestHandleUC05_FederatedQueryIngressRelaysBelowStrict(t *testing.T) {
+	for _, level := range []ConformanceEnforcement{EnforcementObserve, EnforcementNone} {
+		t.Run(level.String(), func(t *testing.T) {
+			gw, stub := newPendResumeFixture(t, pendFixtureOpts{
+				member: "MBR-D-UC05", birthDate: "1968-03-12", familyName: "Johansson-Demo",
+				pendedItem: "operative-diagnostic-report",
+				extraRoles: map[string]string{"facility": "metro-spine"},
+			})
+			gw.cfg.OriginationProfile = "demo"
+			gw.cfg.ConformanceEnforcement = level
+			var events []ObserverEvent
+			gw.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
+			gw.cfg.Validator = &shnsdk.FakeValidator{RejectIfContains: federatedQueryIngressMutationMarker}
+			stub.overrideResponse = func(legType string, payload []byte) []byte {
+				if legType != "federated-query" {
+					return payload
+				}
+				return bytes.Replace(payload, []byte(`{`),
+					[]byte(`{"`+federatedQueryIngressMutationMarker+`":true,`), 1)
+			}
 
-	rec := httptest.NewRecorder()
-	gw.handleUC05(rec, httptest.NewRequest(http.MethodPost, "/scenario/uc05", nil))
+			rec := httptest.NewRecorder()
+			gw.handleUC05(rec, httptest.NewRequest(http.MethodPost, "/scenario/uc05", nil))
 
-	if !legAttempted(stub.legTypes, "federated-query") {
-		t.Fatalf("federated-query leg never ran (legs: %v); status=%d body=%s", stub.legTypes, rec.Code, rec.Body.String())
-	}
-	if rec.Code != http.StatusOK {
-		t.Fatalf("at none the corrupted federated-query answer must relay (recorded, not refused): status=%d body=%s", rec.Code, rec.Body.String())
-	}
-	// AuthNumber discriminates the approved branch from pended/consent-denied
-	// (unlike FacilityID, which is a registry lookup by role — originate.go's
-	// "facility, fok := g.cfg.Reg.LookupByRole" then "FacilityID: facility.ID"
-	// — known before the leg runs and identical regardless of what the record
-	// contains, so it proves nothing about the evidence itself).
-	var resp uc05Resp
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode uc05 response: %v (body=%s)", err, rec.Body.String())
-	}
-	if resp.AuthNumber == "" {
-		t.Fatalf("uc05 completed with no authNumber — the approved branch never reached completion (body=%s)", rec.Body.String())
-	}
-	// No downstream byte assertion is possible for THIS marker: unlike the
-	// harness-level twin's marker (a DiagnosticReport's own code.coding[0].display,
-	// which repointEvidenceSubject leaves untouched and which is folded into the
-	// pas-claim-update request), federatedQueryIngressMutationMarker is injected
-	// as a synthetic TOP-LEVEL Bundle key (overrideResponse prepends
-	// `"<marker>":true,` before the bundle's own members) — not part of any FHIR
-	// resource, so cdexEvidence's extraction never carries it into the
-	// ClaimUpdate. There is no wire body downstream of the verdict this marker
-	// could appear in.
-	// stub.overrideResponse matches every "federated-query" leg regardless of the
-	// CDex doc type, so BOTH the DiagnosticReport and the DocumentReference
-	// searchset legs carry the marker and are recorded — unlike the harness-level
-	// twin (which corrupts only DiagnosticReport bytes), so this asserts at
-	// least one rather than exactly one.
-	var matched []ConformanceFinding
-	for _, e := range events {
-		if e.Kind != ConformanceObservedEvent {
-			continue
-		}
-		var f ConformanceFinding
-		if json.Unmarshal([]byte(e.Detail), &f) == nil && f.Kind == string(KindFHIRIngress) {
-			matched = append(matched, f)
-		}
-	}
-	if len(matched) == 0 {
-		t.Fatalf("want at least one fhir-ingress finding, got %d: %+v", len(matched), matched)
-	}
-	for _, f := range matched {
-		if f.Decision != Record.String() {
-			t.Fatalf("fhir-ingress finding decision = %q, want %q: %+v", f.Decision, Record.String(), f)
-		}
+			if !legAttempted(stub.legTypes, "federated-query") {
+				t.Fatalf("federated-query leg never ran (legs: %v); status=%d body=%s", stub.legTypes, rec.Code, rec.Body.String())
+			}
+			if rec.Code != http.StatusOK {
+				t.Fatalf("at %s the corrupted federated-query answer must relay (not refused): status=%d body=%s", level, rec.Code, rec.Body.String())
+			}
+			// AuthNumber discriminates the approved branch from pended/consent-denied
+			// (unlike FacilityID, which is a registry lookup by role — originate.go's
+			// "facility, fok := g.cfg.Reg.LookupByRole" then "FacilityID: facility.ID"
+			// — known before the leg runs and identical regardless of what the record
+			// contains, so it proves nothing about the evidence itself).
+			var resp uc05Resp
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("decode uc05 response: %v (body=%s)", err, rec.Body.String())
+			}
+			if resp.AuthNumber == "" {
+				t.Fatalf("uc05 completed with no authNumber — the approved branch never reached completion (body=%s)", rec.Body.String())
+			}
+			// No downstream byte assertion is possible for THIS marker: unlike the
+			// harness-level twin's marker (a DiagnosticReport's own code.coding[0].display,
+			// which repointEvidenceSubject leaves untouched and which is folded into the
+			// pas-claim-update request), federatedQueryIngressMutationMarker is injected
+			// as a synthetic TOP-LEVEL Bundle key (overrideResponse prepends
+			// `"<marker>":true,` before the bundle's own members) — not part of any FHIR
+			// resource, so cdexEvidence's extraction never carries it into the
+			// ClaimUpdate. There is no wire body downstream of the verdict this marker
+			// could appear in.
+			// stub.overrideResponse matches every "federated-query" leg regardless of the
+			// CDex doc type, so BOTH the DiagnosticReport and the DocumentReference
+			// searchset legs carry the marker and are recorded — unlike the harness-level
+			// twin (which corrupts only DiagnosticReport bytes), so this asserts at
+			// least one rather than exactly one.
+			var matched []ConformanceFinding
+			for _, e := range events {
+				if e.Kind != ConformanceObservedEvent {
+					continue
+				}
+				var f ConformanceFinding
+				if json.Unmarshal([]byte(e.Detail), &f) == nil && f.Kind == string(KindFHIRIngress) {
+					matched = append(matched, f)
+				}
+			}
+			if level == EnforcementNone {
+				if len(matched) != 0 {
+					t.Fatalf("at none no check runs, got %d fhir-ingress findings: %+v", len(matched), matched)
+				}
+				return
+			}
+			if len(matched) == 0 {
+				t.Fatalf("want at least one fhir-ingress finding, got %d: %+v", len(matched), matched)
+			}
+			for _, f := range matched {
+				if f.Decision != Record.String() {
+					t.Fatalf("fhir-ingress finding decision = %q, want %q: %+v", f.Decision, Record.String(), f)
+				}
+			}
+		})
 	}
 }
 

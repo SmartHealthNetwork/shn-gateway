@@ -3,8 +3,10 @@ package engine
 import "fmt"
 
 // ConformanceEnforcement is a participant's choice about what its own gateway
-// does with a conformance defect it finds. The network always validates and
-// always records; only strict refuses.
+// does with the messages it carries. none runs no conformance check at all and
+// relays; observe runs every check, records each defect as a finding and
+// relays; strict refuses a defect. SHN's own bridged edit is checked and
+// refused at every level.
 //
 // The ZERO VALUE IS STRICT, deliberately: the default flip to none lives in
 // exactly one place, the gateway/app env loader, so no in-process construction
@@ -14,41 +16,49 @@ type ConformanceEnforcement int
 const (
 	EnforcementStrict ConformanceEnforcement = iota
 	EnforcementNone
+	EnforcementObserve
 )
 
 func (e ConformanceEnforcement) String() string {
-	if e == EnforcementNone {
+	switch e {
+	case EnforcementNone:
 		return "none"
+	case EnforcementObserve:
+		return "observe"
 	}
 	return "strict"
 }
 
 // ParseConformanceEnforcement maps a setting's value to a level. It accepts
-// exactly the two published values and errors on anything else, including
-// empty: the gateway/app env loader never calls it for an absent
-// CONFORMANCE_ENFORCEMENT, and sets EnforcementNone itself instead (the
-// published default). No third value is accepted — a middle level is a future
-// set of table rows, not a reserved word.
+// exactly the published values and errors on anything else, including empty:
+// the gateway/app env loader never calls it for an absent
+// CONFORMANCE_ENFORCEMENT, and sets EnforcementObserve itself instead (the
+// published default). A level that is not published is a boot error, never a
+// reserved word.
 func ParseConformanceEnforcement(s string) (ConformanceEnforcement, error) {
 	switch s {
 	case "strict":
 		return EnforcementStrict, nil
 	case "none":
 		return EnforcementNone, nil
+	case "observe":
+		return EnforcementObserve, nil
 	}
-	return EnforcementStrict, fmt.Errorf("CONFORMANCE_ENFORCEMENT must be none or strict, got %q", s)
+	return EnforcementStrict, fmt.Errorf("CONFORMANCE_ENFORCEMENT must be none, observe or strict, got %q", s)
 }
 
 // CheckKind and its four constants are already declared in finding.go — do
 // not redeclare them here.
 
-// Verdict is what the check saw. Decide is total over both so the table can be
-// tested whole.
+// Verdict is what the check saw. Decide is total over all three so the table
+// can be tested whole. VerdictUnavailable is a check that could not run: the
+// validator failed, or no validator lane serves the line.
 type Verdict int
 
 const (
 	VerdictValid Verdict = iota
 	VerdictInvalid
+	VerdictUnavailable
 )
 
 // Decision is what the gateway does about an invalid verdict. Refuse is the
@@ -80,39 +90,146 @@ type findingEmitterBinder interface {
 	bindFindingEmitter(func(ConformanceFinding))
 }
 
-// alwaysRefusedCDSRules are the CDS Hooks structural rules that refuse at
-// every level: the reader that follows the certifier (crdAnswerOutcome, which
-// parses with ParseCRDResponse) needs the answer's shape. Breaking one of
-// these does not make an answer non-conformant so much as unreadable.
-var alwaysRefusedCDSRules = map[string]bool{
+// unreadableCDSRules are the CDS Hooks rules whose violation leaves an answer
+// unreadable rather than non-conformant: not one JSON object, or at a line
+// this SDK does not know. Whether they refuse below strict is one table row,
+// cdsUnreadableRefusesBelowStrict.
+var unreadableCDSRules = map[string]bool{
 	"response.json":   true,
 	"response.object": true,
 	"line":            true,
 }
 
-// ConformancePolicy answers, for one check, whether an invalid verdict refuses
-// the message or is only recorded. It is CONFIGURATION: built once at boot
-// from the setting, held on the gateway config, never request-scoped, and it
-// never sees payload bytes.
-type ConformancePolicy struct{ level ConformanceEnforcement }
+// cdsUnreadableRefusesBelowStrict is the table row for an unreadable CDS Hooks
+// answer at none and observe. None and observe refuse nothing a participant's
+// payload is judged by, so the answer is relayed (and recorded at observe).
+// Read only by newConformancePolicy.
+const cdsUnreadableRefusesBelowStrict = false
+
+// ConformancePolicy answers, for one check, whether it runs and whether a
+// defect it finds refuses the message or is only recorded. It is
+// CONFIGURATION: built once at boot from the setting, held on the gateway
+// config, never request-scoped, and it never sees payload bytes. The zero value
+// is strict.
+type ConformancePolicy struct {
+	level                        ConformanceEnforcement
+	unreadableRefusesBelowStrict bool
+}
 
 func NewConformancePolicy(level ConformanceEnforcement) ConformancePolicy {
-	return ConformancePolicy{level: level}
+	return newConformancePolicy(level, cdsUnreadableRefusesBelowStrict)
+}
+
+func newConformancePolicy(level ConformanceEnforcement, unreadableRefusesBelowStrict bool) ConformancePolicy {
+	return ConformancePolicy{level: level, unreadableRefusesBelowStrict: unreadableRefusesBelowStrict}
 }
 
 func (p ConformancePolicy) Level() ConformanceEnforcement { return p.level }
 
-// Decide is the whole table.
+// The network rules. Binding the leg's authority and consent to one patient is
+// network level; the internal consistency of the payload is not. A body that
+// can be read two ways cannot be carried, owned or edited faithfully, so a
+// repeated member name is message integrity, network level too. Network rules
+// refuse at every level.
+//
+// networkRules is what Decide reads for a check routed through the guard as
+// KindNetwork. RuleSubjectPCI and RuleSubjectToken name the subject bind for
+// the record: their sites refuse unconditionally rather than through the
+// guard (without a pci the leg has no authority to carry, whatever the level),
+// so moving them between the tables changes nothing. For a rule that is
+// routed through the guard, moving it between this table and contentRules
+// changes its level behavior and nothing else.
+const (
+	// RuleSubjectPCI: the request names a subject the requesting gateway binds
+	// to a PCI; a receiving gateway that requires known members
+	// (Config.RequireKnownMembers) also refuses a member it does not hold.
+	// Without a PCI the leg has no authority to carry, so this row cannot relay.
+	RuleSubjectPCI = "subject.pci"
+	// RuleSubjectToken: the request's patient is the patient the leg's token
+	// authorizes. The eligibility, federated-query and patient-authored DTR legs
+	// refuse a difference. The Da Vinci CRD, DTR and PAS legs do not compare
+	// them: the payer handles the member the request names as it would
+	// directly, and keys everything it records about the exchange by its own
+	// binding of that member (bindInboundSubject), never by the token.
+	RuleSubjectToken = "subject.token"
+	// RuleDuplicateKey: a repeated JSON member name, exactly or under case
+	// folding, anywhere in a body the gateway reads.
+	RuleDuplicateKey = "json.duplicate-key"
+)
+
+// Content rules: checks of a participant's message that judge its shape or
+// internal consistency, never who may send it to whom.
+const (
+	// RulePatientMixed: another patient referenced inside one request.
+	RulePatientMixed = "patient.mixed"
+	// RulePatientAnswer: an answer about a patient other than the request's.
+	RulePatientAnswer = "patient.answer"
+	// RuleRequestShape: a request missing a required element or not the
+	// operation's shape.
+	RuleRequestShape = "request.shape"
+	// RulePrefetchFill: CRD prefetch this gateway could not fill from the
+	// participant's own system of record.
+	RulePrefetchFill = "prefetch.fill"
+	// RuleAttestation: a QuestionnaireResponse item whose FR-16/FR-17
+	// attestation is incomplete.
+	RuleAttestation = "qr.attestation"
+	// RuleUpdateProvenance: a PAS update whose FR-32 provenance is incomplete.
+	RuleUpdateProvenance = "pas.update-provenance"
+	// RuleAnswerShape: an answer this gateway cannot read (graph, decision,
+	// inquiry answer, questionnaire package).
+	RuleAnswerShape = "answer.shape"
+	// RuleEOBDecision: a payer decision the EOB rules refuse to state.
+	RuleEOBDecision = "eob.decision"
+	// RuleInsurer: a Claim.insurer reference that does not resolve.
+	RuleInsurer = "claim.insurer"
+)
+
+var networkRules = map[string]bool{RuleSubjectPCI: true, RuleSubjectToken: true, RuleDuplicateKey: true}
+
+var contentRules = map[string]bool{
+	RulePatientMixed: true, RulePatientAnswer: true, RuleRequestShape: true,
+	RulePrefetchFill: true, RuleAttestation: true, RuleUpdateProvenance: true, RuleAnswerShape: true,
+	RuleEOBDecision: true, RuleInsurer: true,
+}
+
+// Runs reports whether a check runs at all. At none only SHN's own bridged
+// edit and the network rules are checked; a check that does not run makes
+// no validator call and records no finding.
+func (p ConformancePolicy) Runs(kind CheckKind, rule string) bool {
+	switch {
+	case kind == KindFHIRBridged, p.level != EnforcementNone:
+		return true
+	case kind == KindNetwork, networkRules[rule]:
+		return true
+	}
+	return kind == KindCDSEnvelope && unreadableCDSRules[rule] && p.unreadableRefusesBelowStrict
+}
+
+// RunsKind reports whether any check of kind runs, so a caller can skip the
+// work of checking when none of its rules would run.
+func (p ConformancePolicy) RunsKind(kind CheckKind) bool {
+	switch {
+	case kind == KindFHIRBridged, kind == KindNetwork, p.level != EnforcementNone:
+		return true
+	}
+	return kind == KindCDSEnvelope && p.unreadableRefusesBelowStrict
+}
+
+// Decide is the whole table: what a check that ran does about what it saw.
 func (p ConformancePolicy) Decide(kind CheckKind, rule string, v Verdict) Decision {
-	if v != VerdictInvalid {
+	if v == VerdictValid {
 		return Record
 	}
 	switch {
 	case kind == KindFHIRBridged:
 		return Refuse
-	case kind == KindCDSEnvelope && alwaysRefusedCDSRules[rule]:
+	case networkRules[rule]:
+		// Decided by the rule, whichever kind the call site names: moving a
+		// rule between networkRules and contentRules is the whole change.
 		return Refuse
 	case p.level == EnforcementStrict:
+		return Refuse
+	case kind == KindCDSEnvelope && unreadableCDSRules[rule] && p.unreadableRefusesBelowStrict:
 		return Refuse
 	}
 	return Record

@@ -52,48 +52,105 @@ func orderSubjectRef(orderJSON []byte) (string, bool) {
 	return probe.Subject.Reference, true
 }
 
-// conformantCRDBind subject-binds a conformant order-select request to tokSubject (the payer's
-// inbound token PCI): the ServiceRequest subject, the Coverage beneficiary, and context.patientId
-// must all reference one member resolving to tokSubject. Returns the SR JSON AND the coverage JSON
-// for downstream validation (so the caller need not re-parse the request), or (nil, nil, status,
-// msg). The conformant sibling of handleCRDInbound's minimized bind (payer.go) and
-// bindBundleSubject (payer.go:149).
-func (g *Gateway) conformantCRDBindContext(ctx context.Context, reqJSON []byte, tokSubject string) (srJSON, covJSON []byte, status int, msg string) {
+// conformantCRDBind subject-binds a conformant order-select request by this payer's own system.
+// Returns the SR JSON AND the coverage JSON for downstream validation (so the caller need not
+// re-parse the request) and the payer's binding of the member (bindInboundSubject), or
+// (nil, nil, "", status, msg).
+//
+// The request's subject is the patient context.patientId names, bound by this payer's own system
+// (bindInboundSubject; RuleSubjectPCI when the participant requires known members): network level,
+// refused at every level, as is a request that
+// cannot be read (a repeated member name is read one way only). The order and the prefetch coverage are the
+// request's own content: no order and an absent or unreadable prefetch.coverage
+// (RuleRequestShape: CDS Hooks prefetch is optional), and an order naming no patient or an order
+// or coverage naming another patient (RulePatientMixed), are not checked at none, recorded at
+// observe and refused at strict with the status and body strict has always given. Below strict
+// the request is bound by context.patientId and forwarded as sent. A request naming no
+// context.patientId has no subject to bind and refuses at every level, with the refusal strict
+// would give.
+func (g *Gateway) conformantCRDBindContext(ctx context.Context, reqJSON []byte) (srJSON, covJSON []byte, subjectPCI string, status int, msg string) {
+	// The subject (context.patientId) must read; a value of the wrong type
+	// anywhere else is the request's own shape (RuleRequestShape).
 	var req ingressCDSRequest
-	if err := decodeMessage(reqJSON, &req); err != nil {
-		return nil, nil, http.StatusBadRequest, "parse cds request failed"
+	var core struct {
+		Context struct {
+			PatientID string `json:"patientId"`
+		} `json:"context"`
 	}
+	if err := decodeContent(reqJSON, &req, &core, func() bool { return g.guard(ctx, KindContent, RuleRequestShape, reqJSON) }); err != nil {
+		return nil, nil, "", http.StatusBadRequest, "parse cds request failed"
+	}
+	// firstStatus/firstMsg are strict's refusal for the first content defect
+	// carried below strict: what a request whose subject cannot be read is
+	// refused with.
+	var firstStatus int
+	var firstMsg string
+	refused := func(rule string, status int, msg string) bool {
+		if g.guard(ctx, KindContent, rule, reqJSON) {
+			return true
+		}
+		if firstStatus == 0 {
+			firstStatus, firstMsg = status, msg
+		}
+		return false
+	}
+	const (
+		noOrder        = "no order (ServiceRequest or DeviceRequest) in draftOrders"
+		noOrderSubject = "parse order subject failed"
+		noBeneficiary  = "parse coverage beneficiary failed"
+		inconsistent   = "inconsistent patient in order-select"
+	)
+	// haveSR/haveCov record whether each reference was read, apart from its
+	// value: "Patient/" is read and names the empty member, which is
+	// inconsistent with a non-empty context.patientId exactly as strict has
+	// always refused it.
+	var srMember, covMember string
+	var haveSR, haveCov bool
 	srJSON = firstOrder(req)
 	if len(srJSON) == 0 {
-		return nil, nil, http.StatusBadRequest, "no order (ServiceRequest or DeviceRequest) in draftOrders"
+		if refused(RuleRequestShape, http.StatusBadRequest, noOrder) {
+			return nil, nil, "", http.StatusBadRequest, noOrder
+		}
+	} else if srSubjectRef, ok := orderSubjectRef(srJSON); !ok {
+		if refused(RulePatientMixed, http.StatusBadRequest, noOrderSubject) {
+			return nil, nil, "", http.StatusBadRequest, noOrderSubject
+		}
+	} else {
+		srMember, haveSR = strings.TrimPrefix(srSubjectRef, "Patient/"), true
 	}
 	covJSON = req.Prefetch["coverage"]
-	srSubjectRef, ok := orderSubjectRef(srJSON)
-	if !ok {
-		return nil, nil, http.StatusBadRequest, "parse order subject failed"
+	if covBeneRef, err := shnsdk.ParseCoverageBeneficiary(covJSON); err != nil {
+		if refused(RuleRequestShape, http.StatusBadRequest, noBeneficiary) {
+			return nil, nil, "", http.StatusBadRequest, noBeneficiary
+		}
+	} else {
+		covMember, haveCov = strings.TrimPrefix(covBeneRef, "Patient/"), true
 	}
-	covBeneRef, err := shnsdk.ParseCoverageBeneficiary(covJSON)
-	if err != nil {
-		return nil, nil, http.StatusBadRequest, "parse coverage beneficiary failed"
-	}
-	srMember := strings.TrimPrefix(srSubjectRef, "Patient/")
-	covMember := strings.TrimPrefix(covBeneRef, "Patient/")
 	ctxMember := strings.TrimPrefix(req.Context.PatientID, "Patient/")
-	if srMember != covMember || srMember != ctxMember {
-		return nil, nil, http.StatusBadRequest, "inconsistent patient in order-select"
+	if ctxMember == "" {
+		// No subject to bind: refused at every level, with the refusal strict
+		// gives (the first content defect carried, else the inconsistency
+		// with a reference that names a member). A request whose every read
+		// reference names the empty member is consistent, and is resolved as
+		// strict always resolved it.
+		if firstStatus != 0 {
+			return nil, nil, "", firstStatus, firstMsg
+		}
+		if srMember != "" || covMember != "" {
+			return nil, nil, "", http.StatusBadRequest, inconsistent
+		}
+	} else if (haveSR && srMember != ctxMember) || (haveCov && covMember != ctxMember) {
+		// With both references read (always so at strict) this is exactly
+		// srMember != covMember || srMember != ctxMember.
+		if refused(RulePatientMixed, http.StatusBadRequest, inconsistent) {
+			return nil, nil, "", http.StatusBadRequest, inconsistent
+		}
 	}
-	pci, found, readErr := g.resolveSubjectPCI(ctx, srMember, reqJSON)
-	if readErr != nil {
-		status, msg := SoRFailureResponse(readErr)
-		return nil, nil, status, msg
+	subjectPCI, status, msg = g.bindInboundSubject(ctx, ctxMember, reqJSON)
+	if status != 0 {
+		return nil, nil, "", status, msg
 	}
-	if !found {
-		return nil, nil, http.StatusBadRequest, "unknown member"
-	}
-	if pci != tokSubject {
-		return nil, nil, http.StatusForbidden, "token subject does not match request patient"
-	}
-	return srJSON, covJSON, 0, ""
+	return srJSON, covJSON, subjectPCI, 0, ""
 }
 
 // CRDEmbeddedValidatedEvent is the observer event kind for a FHIR resource
@@ -121,6 +178,9 @@ const (
 // is refused: a payer's content that does not validate is the payer's to fix,
 // and the answer is relayed as it is.
 func (g *Gateway) observeCRDEmbedded(ctx context.Context, leg, corr string, answer relay.Payload) {
+	if !g.policy().RunsKind(KindFHIREgress) {
+		return // none runs no conformance check, observational ones included
+	}
 	raw, err := relay.Transmit(answer, relay.Check(answerKey(leg, relay.OutcomeAnswered)))
 	if err != nil {
 		return // the response transmit refuses it too
@@ -203,14 +263,18 @@ func (g *Gateway) observeCRDEmbedded(ctx context.Context, leg, corr string, answ
 // the conformant shape; the existing minimized handler is untouched.
 func (g *Gateway) handleCRDNativeInbound(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token, reqJSON []byte, answerTok string) {
 	ctx := r.Context()
-	srJSON, covJSON, status, msg := g.conformantCRDBindContext(ctx, reqJSON, tok.Subject)
+	srJSON, covJSON, subjectPCI, status, msg := g.conformantCRDBindContext(ctx, reqJSON)
 	if status != 0 {
 		g.refuseInbound(w, r, legCRDOrderSelect, env, tok, answerTok, status, msg, nil)
 		return
 	}
-	if status, msg := g.validateFHIR(ctx, srJSON, "ingress", ""); status != 0 {
-		g.refuseInbound(w, r, legCRDOrderSelect, env, tok, answerTok, status, msg, nil)
-		return
+	g.noteSubjectBinding("crd-order-select", env.Metadata.CorrelationID, tok.Subject, subjectPCI)
+	// Below strict a request carried without an order has none to validate.
+	if len(srJSON) > 0 {
+		if status, msg := g.validateFHIR(ctx, srJSON, "ingress", ""); status != 0 {
+			g.refuseInbound(w, r, legCRDOrderSelect, env, tok, answerTok, status, msg, nil)
+			return
+		}
 	}
 	if len(covJSON) > 0 {
 		if status, msg := g.validateFHIR(ctx, covJSON, "ingress", ""); status != 0 {
@@ -218,7 +282,7 @@ func (g *Gateway) handleCRDNativeInbound(w http.ResponseWriter, r *http.Request,
 			return
 		}
 	}
-	result, err := g.cfg.Responder.Handle(ctx, "crd-order-select", env.Metadata.CorrelationID, tok.Subject, reqJSON)
+	result, err := g.cfg.Responder.Handle(ctx, "crd-order-select", env.Metadata.CorrelationID, subjectPCI, reqJSON)
 	if err != nil {
 		g.responderFailed(w, "crd-order-select", err)
 		return

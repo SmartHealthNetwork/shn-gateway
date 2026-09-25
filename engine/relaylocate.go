@@ -319,14 +319,19 @@ func referenceRefusal(ref string, res partyResolution) *payorEdgeRefused {
 // reference that resolves to no resource, or to several, is refused naming
 // the reference.
 //
-// A Claim's insurer is resolved the same way, and a reference that resolves
-// to no resource or to several is refused too. It is mapped when it names
-// own. An insurer that names another identity (a payer may name itself by
-// NPI on the insurer and by its payer id on the Coverage), or no readable
-// identity, is left as sent: which payer answers is decided on the
-// Coverages. Only string values that differ from backend are replaced, so a
-// mapping to the identity the request already carries makes no edit.
-func locatePayorEdge(d *relay.Document, carrier payorEdgeCarrier, own []shnsdk.PayerIdentifier, backend shnsdk.PayerIdentifier) ([]relay.Op, error) {
+// A Claim's insurer is resolved the same way, and mapped when it names own.
+// An insurer that names another identity (a payer may name itself by NPI on
+// the insurer and by its payer id on the Coverage), or no readable identity,
+// is left as sent: which payer answers is decided on the Coverages, so the
+// insurer's mapping is not what addresses the payer's system. An insurer
+// reference that resolves to no resource or to several is the request's own
+// content (RuleInsurer), decided by refusesInsurer: when it refuses, the
+// request is refused naming the reference; when it does not, that insurer is
+// left as sent like one naming no readable identity, and the Coverages are
+// mapped as usual. refusesInsurer nil refuses. Only string values that differ
+// from backend are replaced, so a mapping to the identity the request already
+// carries makes no edit.
+func locatePayorEdge(d *relay.Document, carrier payorEdgeCarrier, own []shnsdk.PayerIdentifier, backend shnsdk.PayerIdentifier, refusesInsurer func() bool) ([]relay.Op, error) {
 	l := payorLocator{d: d}
 	coverages, claims, scope := l.sites(carrier)
 	if len(coverages) == 0 {
@@ -372,7 +377,9 @@ func locatePayorEdge(d *relay.Document, carrier payorEdgeCarrier, own []shnsdk.P
 		t, res, ref := l.party(ins, c, scope)
 		switch {
 		case res == partyNoTarget || res == partySeveralTargets:
-			return nil, referenceRefusal(ref, res)
+			if refusesInsurer == nil || refusesInsurer() {
+				return nil, referenceRefusal(ref, res)
+			}
 		case res == partyFound && slices.Contains(own, t.identity):
 			targets = append(targets, t)
 		}

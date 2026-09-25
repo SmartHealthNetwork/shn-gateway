@@ -31,6 +31,72 @@ func certificationGateway(t *testing.T, v shnsdk.Validator, observer func(Observ
 	t.Cleanup(func() { _ = g.Close() })
 	return g
 }
+
+// lockedBuffer is a log destination the certification worker may write to
+// while a test reads it.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// Certification evidence is a conformance check: at none it is not gathered
+// (no validator call, no certify: line, no leg.certified event); at observe it
+// is.
+func TestCertificationEvidenceOnlyWhereChecksRun(t *testing.T) {
+	for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve} {
+		t.Run(level.String(), func(t *testing.T) {
+			var calls atomic.Int32
+			v := certificationValidatorFunc(func(context.Context, []byte, string) (shnsdk.Result, error) {
+				calls.Add(1)
+				return shnsdk.Result{Valid: true}, nil
+			})
+			var logged lockedBuffer
+			previous := log.Writer()
+			log.SetOutput(&logged)
+			defer log.SetOutput(previous)
+			var mu sync.Mutex
+			certified := 0
+			g := &Gateway{cfg: Config{Clock: time.Now, ConformanceEnforcement: level, Observer: func(e ObserverEvent) {
+				if e.Kind == "leg.certified" {
+					mu.Lock()
+					certified++
+					mu.Unlock()
+				}
+			}, CertificationValidatorsByLine: map[string]shnsdk.Validator{"2.0": v, "2.1": v, "2.2": v}}}
+			g.startCertification()
+			t.Cleanup(func() { _ = g.Close() })
+			certificationSubmit(g, "synthetic")
+			certificationFlush(t, g)
+			mu.Lock()
+			defer mu.Unlock()
+			evidence := g.CertificationEvidenceForTest()
+			lines := strings.Contains(logged.String(), "certify: ")
+			switch level {
+			case EnforcementNone:
+				if calls.Load() != 0 || certified != 0 || len(evidence) != 0 || lines {
+					t.Fatalf("at none no evidence is gathered: %d call(s), %d event(s), %d record(s), certify line %v", calls.Load(), certified, len(evidence), lines)
+				}
+			case EnforcementObserve:
+				if calls.Load() == 0 || certified != 1 || len(evidence) != 1 || !lines {
+					t.Fatalf("at observe evidence is gathered: %d call(s), %d event(s), %d record(s), certify line %v", calls.Load(), certified, len(evidence), lines)
+				}
+			}
+		})
+	}
+}
+
 func certificationFlush(t *testing.T, g *Gateway) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

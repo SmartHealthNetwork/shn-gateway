@@ -22,8 +22,11 @@ For a legacy/non-FHIR backend (HL7v2, X12, SQL, SOAP), implement the
 
 1. Copy `scaffold.go`, give your type a backend handle (DB pool, SOAP/X12 client).
 2. Replace each `// TODO(partner):` body with a read against your system of record.
-   `ResolvePatient` must derive the PCI via `shnsdk.ResolvePCI(member, birthDate, family)`
-   (AI-5) — do not invent your own subject identifier.
+   `ResolvePatient` returns the network's patient identifier by calling
+   `shnsdk.ResolvePCI` with the member's identifier and demographics — do not invent your
+   own subject identifier. Treat it as an opaque string: carry it as the SDK returns it and
+   as tokens name it, and do not parse it, reimplement how it is produced, or depend on its
+   format beyond the `pci:` prefix. How it is produced is internal and may change.
 3. Wire your connector in **either** of two identical-seam ways:
    - **Edit the selection** in `app/app.go` (the `if cfg.FHIRDataURL == ""` `sor`/`store` assignment in `build()`), or
    - **Construct the engine directly** in your own `main`:

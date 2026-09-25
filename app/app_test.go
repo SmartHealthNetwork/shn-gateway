@@ -209,7 +209,7 @@ func TestLoadConfig_MetricsServiceReadThrough(t *testing.T) {
 	}
 }
 
-// TestLoadConfigConformanceEnforcement: absent means NONE — this is the ONE
+// TestLoadConfigConformanceEnforcement: absent means OBSERVE — this is the ONE
 // place in the tree where a non-strict level comes from an omission. Every
 // other construction of engine.Config is strict by the zero value.
 func TestLoadConfigConformanceEnforcement(t *testing.T) {
@@ -223,11 +223,13 @@ func TestLoadConfigConformanceEnforcement(t *testing.T) {
 		env  string
 		want engine.ConformanceEnforcement
 	}{
-		// THE default: absent means none. This row is the whole behavioural
-		// diff of the flip — every gate pins its level explicitly instead
-		// (test/invariants' TestInvariant_EveryGateRunsStrict).
-		{"", engine.EnforcementNone},
+		// THE default: absent means observe. Every check runs, each defect
+		// is recorded and nothing is refused for conformance. Every gate pins
+		// its level explicitly instead (test/invariants'
+		// TestInvariant_EveryGateRunsStrict).
+		{"", engine.EnforcementObserve},
 		{"none", engine.EnforcementNone},
+		{"observe", engine.EnforcementObserve},
 		{"strict", engine.EnforcementStrict},
 	} {
 		m := map[string]string{}
@@ -257,8 +259,8 @@ func TestLoadConfigConformanceEnforcementUnknownValueRefusesBoot(t *testing.T) {
 	if err == nil {
 		t.Fatal("an unknown level must refuse to boot")
 	}
-	if !strings.Contains(err.Error(), "none") || !strings.Contains(err.Error(), "strict") {
-		t.Fatalf("the boot error must name the two accepted values, got %v", err)
+	if !strings.Contains(err.Error(), "none") || !strings.Contains(err.Error(), "observe") || !strings.Contains(err.Error(), "strict") {
+		t.Fatalf("the boot error must name every accepted value, got %v", err)
 	}
 }
 
@@ -274,8 +276,9 @@ func TestBuildWiresConformanceEnforcementToGateway(t *testing.T) {
 		env  string
 		want engine.ConformanceEnforcement
 	}{
-		{"", engine.EnforcementNone},
+		{"", engine.EnforcementObserve},
 		{"none", engine.EnforcementNone},
+		{"observe", engine.EnforcementObserve},
 		{"strict", engine.EnforcementStrict},
 	} {
 		extra := map[string]string{"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate"}
@@ -289,6 +292,60 @@ func TestBuildWiresConformanceEnforcementToGateway(t *testing.T) {
 		if got := b.gateway.ConformanceLevelForTest(); got != tc.want {
 			t.Errorf("CONFORMANCE_ENFORCEMENT=%q: Gateway's own conformance level = %v, want %v", tc.env, got, tc.want)
 		}
+	}
+}
+
+// TestBuildWiresKnownMemberOptInToGateway proves REQUIRE_KNOWN_MEMBERS reaches
+// the engine.Config build() hands to engine.New, and that carrying unknown
+// members is the default. Deleting the
+// "gwCfg.RequireKnownMembers = cfg.RequireKnownMembers" line, or the env read in
+// loadConfig, leaves the "true" row red. That the engine honors the field is
+// proven in internal/fhirseed/public_door_integration_test.go and the engine's
+// subject-binding rows. The deprecated SHN_ACCEPT_UNKNOWN_MEMBERS only warns; a
+// value outside true/false, or the alias beside REQUIRE_KNOWN_MEMBERS=true,
+// refuses to boot.
+func TestBuildWiresKnownMemberOptInToGateway(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		env     map[string]string
+		want    bool
+		wantErr string
+		wantLog string
+	}{
+		{name: "unset carries unknown members"},
+		{name: "false carries unknown members", env: map[string]string{"REQUIRE_KNOWN_MEMBERS": "false"}},
+		{name: "true opts in", env: map[string]string{"REQUIRE_KNOWN_MEMBERS": "true"}, want: true, wantLog: "REQUIRE_KNOWN_MEMBERS=true"},
+		{name: "deprecated alias only warns", env: map[string]string{"SHN_ACCEPT_UNKNOWN_MEMBERS": "1"}, wantLog: "SHN_ACCEPT_UNKNOWN_MEMBERS is deprecated"},
+		{name: "other value refuses to boot", env: map[string]string{"REQUIRE_KNOWN_MEMBERS": "yes"}, wantErr: "REQUIRE_KNOWN_MEMBERS must be true or false"},
+		{name: "alias beside opt-in refuses to boot", env: map[string]string{"SHN_ACCEPT_UNKNOWN_MEMBERS": "1", "REQUIRE_KNOWN_MEMBERS": "true"}, wantErr: "contradict"},
+		{name: "a false alias beside opt-in only warns", env: map[string]string{"SHN_ACCEPT_UNKNOWN_MEMBERS": "false", "REQUIRE_KNOWN_MEMBERS": "true"}, want: true, wantLog: "SHN_ACCEPT_UNKNOWN_MEMBERS is deprecated"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			extra := map[string]string{"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate"}
+			for k, v := range tc.env {
+				extra[k] = v
+			}
+			var output bytes.Buffer
+			previous := log.Writer()
+			log.SetOutput(&output)
+			defer log.SetOutput(previous)
+			b, _, err := buildProviderForPopulate(t, extra)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("build err = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("build: %v", err)
+			}
+			if got := b.requireKnownMembers; got != tc.want {
+				t.Errorf("Gateway requires known members = %v, want %v", got, tc.want)
+			}
+			if tc.wantLog != "" && !strings.Contains(output.String(), tc.wantLog) {
+				t.Errorf("boot log missing %q: %s", tc.wantLog, output.String())
+			}
+		})
 	}
 }
 
@@ -322,11 +379,11 @@ func TestBuildWiresConformanceEnforcementToNativeResponder(t *testing.T) {
 		env  string
 		want engine.ConformanceEnforcement
 	}{
-		{"", engine.EnforcementNone},
+		{"", engine.EnforcementObserve},
 		{"none", engine.EnforcementNone},
-		// The strict row is what keeps this a two-directional fence now that
-		// the absent row wants none: without it, hardcoding the responder's
-		// policy to none would pass.
+		// The none and strict rows keep this a fence in every direction:
+		// without them, hardcoding the responder's policy to observe would
+		// pass the absent row.
 		{"strict", engine.EnforcementStrict},
 	} {
 		dir := t.TempDir()

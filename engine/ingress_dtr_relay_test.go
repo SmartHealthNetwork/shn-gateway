@@ -384,9 +384,14 @@ func TestDTRIngress_SubjectBindAllResources(t *testing.T) {
 			refusedBeforeTheNetwork(t, env, rec, row.status, row.msg)
 		})
 	}
-	t.Run("a patient the system of record does not know", func(t *testing.T) {
+	t.Run("a patient the system of record does not know, known members required", func(t *testing.T) {
 		body := ehrParams(ehrCoverageParam("MBR-UNKNOWN", "00001"), dtrQuestionnaire)
-		env, rec := dtrIngressRow(t, newPrefetchSoR(), body)
+		env := newInProcessExchange(t)
+		env.originator.cfg.SoR = newPrefetchSoR().sor()
+		env.originator.cfg.RequireKnownMembers = true
+		declareFramedDTR(t, env, true)
+		env.payerReturns(LegResult{Response: testResponse(packageAnswer)})
+		rec := postDTRIngress(env, body)
 		refusedBeforeTheNetwork(t, env, rec, http.StatusForbidden, "request patient does not resolve")
 	})
 }

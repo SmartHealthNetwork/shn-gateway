@@ -46,6 +46,102 @@ asking for it (`Claim/$inquire`, leg type `pas-claim-inquire`).
   The bound and the schedule are now derived from each other and held together by a
   test, so they cannot drift apart again.
 
+## Conformance enforcement levels
+
+`CONFORMANCE_ENFORCEMENT` takes `none`, `observe` (the default when unset) or
+`strict` (see [docs/CONFIGURATION.md](docs/CONFIGURATION.md)).
+
+**Behavior change in v0.53.0** (v0.52.0 refuses to boot on `observe`):
+
+- An unset `CONFORMANCE_ENFORCEMENT` now means `observe`, not `none`. Like
+  v0.52.0's `none`, `observe` runs every check and records each defect, but
+  refuses nothing a check finds: the content defects earlier releases' `none`
+  refused at every level (below) are now relayed with a finding. A gateway still
+  needs its validator to boot, as before. `engine.Config.ConformanceEnforcement`'s
+  zero value is still `strict`: only the published binary's environment loader
+  maps an unset value to `observe`.
+- `none` now runs no payload conformance check. It no longer validates, applies
+  the CDS Hooks response rules or the content checks, gathers certification
+  evidence or validates the resources a CDS Hooks answer embeds, and it records
+  no finding. A gateway that sets `none` explicitly and relied on it for findings
+  sees none; remove the setting, or set `observe`, to keep them.
+- The new `observe` level runs every check, records each defect as a finding (the
+  `conformance:` log line and the `conformance.observed` event) and carries the
+  message as sent, apart from the gateway's registered edits (the callback
+  removed, prefetch and coverage obtained, and payer identity mapping; see the
+  participant protocol §7a.4). Operators who want findings without refusals set
+  `observe`.
+- A content defect (a request's or answer's own shape or internal consistency, a
+  prefetch value the system of record cannot supply, an answer this gateway
+  cannot read) refuses only at `strict`, with the status and body it has always
+  had. Below `strict` the message is carried or relayed as sent, apart from the
+  gateway's registered edits, and a PAS or inquiry answer relayed unread writes
+  nothing to the local record.
+- Network rules refuse at every level: authentication, authority (including a
+  token presented with a request other than the one it was issued for), consent,
+  the patient binding (as changed below), routing and addressing, replay, a
+  repeated member name in any body, the contract line stamped on an answer's
+  frame, and the check of a payload this gateway translated between IG lines.
+- `strict`'s conformance refusals keep their statuses and bodies. `strict` now
+  also records a finding of kind `content` when it refuses a message for a
+  content defect, and a finding carries an optional `verdict` field
+  (`unavailable` when a check could not finish; absent for an invalid result).
+
+**Behavior change in v0.53.0: members the system of record does not hold are
+carried by default.**
+
+- On the CRD, DTR and PAS legs such a subject is now carried, identified by the
+  member id and the Patient the request carries for it, on the provider ingress
+  and the payer inbound alike. Send the same Patient, unchanged, on every leg of
+  one exchange: for a member the payer does not hold, an amendment carrying a
+  different Patient, or none, finds no pended authorization and is refused
+  `409`, and an inquiry's decision is not recorded (observer event
+  `pend.other-subject`). Earlier releases refused it with `unknown member`.
+  `REQUIRE_KNOWN_MEMBERS=true` opts in to that refusal; any value other than
+  `true` or `false` refuses to boot.
+- **Breaking (Go API):** `engine.Config.AcceptUnknownMembers` is removed; use
+  `engine.Config.RequireKnownMembers`. Its zero value carries unknown members.
+- **Deprecated:** `SHN_ACCEPT_UNKNOWN_MEMBERS` only logs a warning and will be
+  removed in a later release. Set to anything but `0` or `false` together with
+  `REQUIRE_KNOWN_MEMBERS=true`, the gateway refuses to boot.
+- A CRD request for a member the system of record does not hold must carry its
+  own `coverage` prefetch (otherwise `422`, at every level); history prefetch the
+  gateway cannot read for that member is left out, with the reason recorded. With
+  `REQUIRE_KNOWN_MEMBERS=true` the member is refused instead.
+- The provider's own Patient append on `$questionnaire-package`, which earlier
+  releases applied under `SHN_ACCEPT_UNKNOWN_MEMBERS`, is no longer applied: a
+  request carrying no Patient is carried as sent. It returns as a participant
+  opt-in. The other registered edits (callback removed, prefetch obtained, coverage
+  obtained, payer identity mapping) are unchanged.
+- The receiving gateway no longer compares the patient the leg's token names with
+  the patient the request names on the CRD, DTR, PAS and inquiry legs: it handles
+  the member the request names as it would directly. A request whose member the
+  two sides identify differently now reaches the receiver's own system instead of
+  being refused `403 token subject does not match request patient`. Everything
+  the payer gateway records about an exchange (the pend ledger, a decision
+  ExplanationOfBenefit, the correlation it claims, an inquiry's decision) is filed
+  under its own binding of the member the request names, never under the patient
+  the token names. Eligibility, federated query and patient-authored DTR keep
+  their own check of the token's patient. A token presented with a
+  request other than the one it is bound to is refused, as before. When the
+  payer's binding is not the token's patient, the payer answers as usual and
+  raises the observer event `subject.binding-differs`; the network's audit
+  records the exchange under the patient the token names.
+- **Mixed releases:** a payer gateway before v0.53.0 still compares the token's
+  patient with its own binding, and refuses a member its system of record does not
+  hold (`400 unknown member`) unless it sets `SHN_ACCEPT_UNKNOWN_MEMBERS`. A
+  request that a v0.53.0 payer would accept can therefore still be refused by an
+  older payer: `400 unknown member`, or `403 token subject does not match request
+  patient` when the two sides identify the member differently. A provider gateway
+  from v0.53.0 also no longer appends its own Patient to a
+  `$questionnaire-package` request, so for a member the provider holds and an
+  older payer running with `SHN_ACCEPT_UNKNOWN_MEMBERS` does not, that request is
+  refused `403 token subject does not match request patient`. Upgrade payer
+  gateways before the provider gateways that send to them.
+- **Breaking (Go API):** a `LegResponder` on the payer's CRD, DTR, PAS and inquiry
+  legs is handed the payer's own binding of the member the request names as its
+  subject, not the leg token's subject.
+
 ## Observational source certification
 
 PAS ingress and native POST forwarding collect source-profile evidence after dispatch.
@@ -54,6 +150,7 @@ certified set and nearest source line are observations only. They do not change
 routing, authority, payload bytes, acceptance, response stamps or lane readiness.
 The native record describes the final POST attempt, before any polling or terminal
 assembly. The provider ingress record describes the bytes dispatched and relayed.
+At `CONFORMANCE_ENFORCEMENT=none` no evidence is collected and no worker starts.
 
 The app creates separate clients at each configured validator endpoint and never
 invents one: per line it uses `FHIR_CERTIFY_URL_<line>` (an address for the evidence

@@ -82,35 +82,67 @@ func coverageBeneficiaryFromPrefetch(cov json.RawMessage) string {
 
 // conformantCRDDispatchBind is the AI-11 authority check for an order-dispatch request: the dispatched
 // order's (DeviceRequest) subject, the Coverage beneficiary, and context.patientId must all resolve to
-// ONE member == the token subject. performer (the supplier Organization) is non-patient — required-
-// present but not subject-fenced. Returns the resolved order + coverage JSON for the caller's
-// ingress-$validate, or (nil,nil,status,msg).
-func (g *Gateway) conformantCRDDispatchBindContext(ctx context.Context, reqJSON []byte, tokSubject string) (orderJSON, covJSON []byte, status int, msg string) {
+// ONE member, bound by this payer's own system. performer (the supplier Organization) is non-patient —
+// required-present but not subject-fenced. Returns the resolved order + coverage JSON for the caller's
+// ingress-$validate and the payer's binding of the member, or (nil, nil, "", status, msg).
+//
+// The request's subject is context.patientId: it must be present, and it is bound by this payer's
+// own system (bindInboundSubject; RuleSubjectPCI when the participant requires known members).
+// These, and a request that cannot be read, refuse at every level.
+// The rest is the request's own content, not checked at none, recorded at observe and refused at
+// strict with strict's status and body: a value of the wrong type outside context.patientId and
+// prefetch, no dispatchedOrders, no performer and a dispatched order the prefetch does not carry
+// (RuleRequestShape); a dispatched order naming no patient, and an
+// order or coverage naming another patient (RulePatientMixed). When the system of record cannot
+// answer that consistency check, strict keeps its failure and below strict the request is
+// forwarded as sent.
+func (g *Gateway) conformantCRDDispatchBindContext(ctx context.Context, reqJSON []byte) (orderJSON, covJSON []byte, pci string, status int, msg string) {
+	// The subject (context.patientId) and the prefetch the dispatched orders and
+	// the coverage are read from must read; a value of the wrong type anywhere
+	// else is the request's own shape (RuleRequestShape). The hook is read by the
+	// responder on its own (selectCRDService).
+	refuses := func(rule string) bool { return g.guard(ctx, KindContent, rule, reqJSON) }
 	var req dispatchCDSRequest
-	if err := decodeMessage(reqJSON, &req); err != nil {
-		return nil, nil, http.StatusBadRequest, "parse cds request failed"
+	var core struct {
+		Context struct {
+			PatientID string `json:"patientId"`
+		} `json:"context"`
+		Prefetch map[string]json.RawMessage `json:"prefetch"`
+	}
+	if err := decodeContent(reqJSON, &req, &core, func() bool { return refuses(RuleRequestShape) }); err != nil {
+		return nil, nil, "", http.StatusBadRequest, "parse cds request failed"
 	}
 	if req.Context.PatientID == "" {
-		return nil, nil, http.StatusBadRequest, "missing context.patientId"
+		return nil, nil, "", http.StatusBadRequest, "missing context.patientId"
 	}
-	if len(req.Context.DispatchedOrders) == 0 {
-		return nil, nil, http.StatusBadRequest, "no dispatchedOrders"
+	if len(req.Context.DispatchedOrders) == 0 && refuses(RuleRequestShape) {
+		return nil, nil, "", http.StatusBadRequest, "no dispatchedOrders"
 	}
-	if req.Context.Performer == "" {
-		return nil, nil, http.StatusBadRequest, "missing performer"
+	if req.Context.Performer == "" && refuses(RuleRequestShape) {
+		return nil, nil, "", http.StatusBadRequest, "missing performer"
 	}
 	covJSON = req.Prefetch["coverage"]
 	member := strings.TrimPrefix(req.Context.PatientID, "Patient/")
-	pci, ok, readErr := g.resolveSubjectPCI(ctx, member, reqJSON)
-	if readErr != nil {
-		status, msg := SoRFailureResponse(readErr)
-		return nil, nil, status, msg
+	// pci is the payer's binding of the context member, for the payload's own
+	// consistency and for the responder.
+	pci, status, msg = g.bindInboundSubject(ctx, member, reqJSON)
+	if status != 0 {
+		return nil, nil, "", status, msg
 	}
-	if !ok {
-		return nil, nil, http.StatusBadRequest, "unknown member"
-	}
-	if pci != tokSubject {
-		return nil, nil, http.StatusForbidden, "token subject does not match request patient"
+	// sameSubject reports whether the patient ref binds to pci. When the
+	// system of record cannot answer, strict refuses with its failure; below
+	// strict the check could not finish and the request is forwarded as sent
+	// (the second return is then true, with no refusal).
+	sameSubject := func(ref string) (bool, int, string) {
+		rp, ok, readErr := g.resolveSubjectPCI(ctx, strings.TrimPrefix(ref, "Patient/"), reqJSON)
+		if readErr != nil {
+			if g.guardUnavailable(ctx, KindContent, RulePatientMixed, reqJSON) {
+				status, msg := SoRFailureResponse(readErr)
+				return false, status, msg
+			}
+			return true, 0, ""
+		}
+		return ok && rp == pci, 0, ""
 	}
 	// Fence EVERY dispatched order's subject to the bound pci (AI-11: every patient-bearing field) —
 	// the handler forwards ALL dispatched orders verbatim, so fencing only the first would let a
@@ -119,38 +151,40 @@ func (g *Gateway) conformantCRDDispatchBindContext(ctx context.Context, reqJSON 
 	for _, ordRef := range req.Context.DispatchedOrders {
 		order, found := findInPrefetchByRef(req.Prefetch, ordRef)
 		if !found {
-			return nil, nil, http.StatusBadRequest, "dispatched order not resolvable from prefetch"
+			if refuses(RuleRequestShape) {
+				return nil, nil, "", http.StatusBadRequest, "dispatched order not resolvable from prefetch"
+			}
+			continue
 		}
 		if firstOrder == nil {
 			firstOrder = order
 		}
 		subj := patientRefOf(order)
 		if subj == "" {
-			return nil, nil, http.StatusForbidden, "dispatched order missing patient subject"
+			if refuses(RulePatientMixed) {
+				return nil, nil, "", http.StatusForbidden, "dispatched order missing patient subject"
+			}
+			continue
 		}
-		m := strings.TrimPrefix(subj, "Patient/")
-		rp, ok, readErr := g.resolveSubjectPCI(ctx, m, reqJSON)
-		if readErr != nil {
-			status, msg := SoRFailureResponse(readErr)
-			return nil, nil, status, msg
+		same, status, msg := sameSubject(subj)
+		if status != 0 {
+			return nil, nil, "", status, msg
 		}
-		if !ok || rp != pci {
-			return nil, nil, http.StatusForbidden, "inconsistent patient in order-dispatch"
+		if !same && refuses(RulePatientMixed) {
+			return nil, nil, "", http.StatusForbidden, "inconsistent patient in order-dispatch"
 		}
 	}
 	// Coverage beneficiary (when present) must bind to the same pci.
 	if ben := coverageBeneficiaryFromPrefetch(covJSON); ben != "" {
-		m := strings.TrimPrefix(ben, "Patient/")
-		rp, ok, readErr := g.resolveSubjectPCI(ctx, m, reqJSON)
-		if readErr != nil {
-			status, msg := SoRFailureResponse(readErr)
-			return nil, nil, status, msg
+		same, status, msg := sameSubject(ben)
+		if status != 0 {
+			return nil, nil, "", status, msg
 		}
-		if !ok || rp != pci {
-			return nil, nil, http.StatusForbidden, "inconsistent patient in order-dispatch"
+		if !same && refuses(RulePatientMixed) {
+			return nil, nil, "", http.StatusForbidden, "inconsistent patient in order-dispatch"
 		}
 	}
-	return firstOrder, covJSON, 0, ""
+	return firstOrder, covJSON, pci, 0, ""
 }
 
 // handleCRDDispatchInbound serves the conformant crd-order-dispatch leg. Mirrors handleCRDNativeInbound:
@@ -158,11 +192,12 @@ func (g *Gateway) conformantCRDDispatchBindContext(ctx context.Context, reqJSON 
 // skip on br-payer-targeting lanes), then forward the verbatim request to the responder.
 func (g *Gateway) handleCRDDispatchInbound(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token, reqJSON []byte, answerTok string) {
 	ctx := r.Context()
-	orderJSON, _, status, msg := g.conformantCRDDispatchBindContext(ctx, reqJSON, tok.Subject)
+	orderJSON, _, subjectPCI, status, msg := g.conformantCRDDispatchBindContext(ctx, reqJSON)
 	if status != 0 {
 		g.refuseInbound(w, r, legCRDOrderDispatch, env, tok, answerTok, status, msg, nil)
 		return
 	}
+	g.noteSubjectBinding("crd-order-dispatch", env.Metadata.CorrelationID, tok.Subject, subjectPCI)
 	// Ingress-$validate the resolved DeviceRequest (SHN-shaped order; US Core warns-passes an
 	// unprofiled type). We deliberately do NOT $validate the COVERAGE here: for order-dispatch the
 	// coverage rides as a PREFETCH BUNDLE whose entry fullUrls are the relative "Type/id" form
@@ -171,11 +206,14 @@ func (g *Gateway) handleCRDDispatchInbound(w http.ResponseWriter, r *http.Reques
 	// OWN Org (R-8: SHN doesn't $validate relayed foreign bytes), and the AI-11 bind already
 	// subject-fenced the coverage beneficiary. (The bare-Coverage order-select path still validates
 	// its coverage — that one is not a bundle.)
-	if status, msg := g.validateFHIR(ctx, orderJSON, "ingress", ""); status != 0 {
-		g.refuseInbound(w, r, legCRDOrderDispatch, env, tok, answerTok, status, msg, nil)
-		return
+	// Below strict a request carried with no resolvable order has none to validate.
+	if len(orderJSON) > 0 {
+		if status, msg := g.validateFHIR(ctx, orderJSON, "ingress", ""); status != 0 {
+			g.refuseInbound(w, r, legCRDOrderDispatch, env, tok, answerTok, status, msg, nil)
+			return
+		}
 	}
-	result, err := g.cfg.Responder.Handle(ctx, "crd-order-dispatch", env.Metadata.CorrelationID, tok.Subject, reqJSON)
+	result, err := g.cfg.Responder.Handle(ctx, "crd-order-dispatch", env.Metadata.CorrelationID, subjectPCI, reqJSON)
 	if err != nil {
 		g.responderFailed(w, "crd-order-dispatch", err)
 		return

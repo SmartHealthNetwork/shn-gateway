@@ -134,7 +134,7 @@ func bundleClaimInsurerOrg(t *testing.T, bundleJSON []byte) (shnsdk.PayerIdentif
 func mapPASBundle(t *testing.T, bundle []byte, own, backend shnsdk.PayerIdentifier) ([]byte, LegResult) {
 	t.Helper()
 	n := NewNativeResponder(nil, "", "order-sign", nil, nil, WithPayorEdgeIdentity(own, backend))
-	p, lr, err := n.payorEdgeRequest(peerBody(bundle), payorEdgePASBundle, "application/fhir+json")
+	p, lr, err := n.payorEdgeRequest(peerBody(bundle), payorEdgePASBundle, "application/fhir+json", nil)
 	if err != nil {
 		t.Fatalf("payorEdgeRequest: %v", err)
 	}

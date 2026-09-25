@@ -419,6 +419,62 @@ func TestNativeCRD_EmbeddedValidationObservesOnly(t *testing.T) {
 	})
 }
 
+// The embedded validation is a conformance check: at none it does not run (no
+// validator call, no event) and the answer is relayed; at observe it runs and
+// records its event, and the answer is relayed.
+func TestNativeCRD_EmbeddedValidationOnlyWhereChecksRun(t *testing.T) {
+	const covInfo = "ext-coverage-information"
+	answer := realCRDAnswer(t)
+	for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve} {
+		for _, tail := range embeddedValidationTails {
+			t.Run(tail.leg+"/"+level.String(), func(t *testing.T) {
+				g, requester := newInboundTestGateway(t, true)
+				g.cfg.ConformanceEnforcement = level
+				p := newCDSPayer(t, referencePayerServices...)
+				g.cfg.Responder = NewNativeResponder(p.srv.Client(), p.srv.URL, "", nil, nil, WithConformancePolicy(NewConformancePolicy(level)))
+				var mu sync.Mutex
+				embeddedCalls, calls := 0, 0
+				g.cfg.Validator = validatorFunc(func(b []byte) (shnsdk.Result, error) {
+					mu.Lock()
+					defer mu.Unlock()
+					calls++
+					if bytes.Contains(b, []byte(covInfo)) {
+						embeddedCalls++
+					}
+					return shnsdk.Result{Valid: true}, nil
+				})
+				embeddedEvents := 0
+				g.cfg.Observer = func(e ObserverEvent) {
+					mu.Lock()
+					defer mu.Unlock()
+					if e.Kind == CRDEmbeddedValidatedEvent {
+						embeddedEvents++
+					}
+				}
+				pci, _, _ := g.cfg.SoR.ResolvePatient("MBR-COVERED")
+				env := shnsdk.Envelope{}
+				env.Metadata.CorrelationID, env.Metadata.Sender = "corr-1", requester.ID
+				rec := httptest.NewRecorder()
+				tail.handle(g, rec, newSignedInboundRequest(t, g, requester.ID), env, shnsdk.Token{Subject: pci})
+				hdr, body, err := shnsdk.DecodeHTTPFrame(openResponseLeg(t, requester, rec.Body.Bytes()))
+				if err != nil || hdr.Status != http.StatusOK || !bytes.Equal(body, answer) {
+					t.Fatalf("the answer must be relayed: %v %d %s", err, hdr.Status, body)
+				}
+				switch level {
+				case EnforcementNone:
+					if calls != 0 || embeddedEvents != 0 {
+						t.Fatalf("at none nothing is validated: %d validator call(s), %d %s event(s)", calls, embeddedEvents, CRDEmbeddedValidatedEvent)
+					}
+				case EnforcementObserve:
+					if embeddedCalls != 1 || embeddedEvents != 1 {
+						t.Fatalf("at observe the embedded resource is validated and recorded: %d call(s), %d event(s)", embeddedCalls, embeddedEvents)
+					}
+				}
+			})
+		}
+	}
+}
+
 // A real external payer's answer: a system action with no description, which
 // CDS Hooks 2.0 marks REQUIRED. At strict it is refused, naming the rule and
 // where it broke. At none the payer's bytes relay exactly and the finding is
@@ -432,6 +488,7 @@ func TestCDSCertifierDescriptionMissing(t *testing.T) {
 		wantMsg    string
 	}{
 		{EnforcementStrict, http.StatusBadGateway, "action.description at systemActions[0].description"},
+		{EnforcementObserve, 0, ""},
 		{EnforcementNone, 0, ""},
 	} {
 		t.Run(tc.level.String(), func(t *testing.T) {
@@ -446,8 +503,14 @@ func TestCDSCertifierDescriptionMissing(t *testing.T) {
 			if tc.wantMsg != "" && !strings.Contains(got.Message, tc.wantMsg) {
 				t.Fatalf("the refusal must name the rule and path: %q", got.Message)
 			}
+			if tc.level == EnforcementNone {
+				if len(findings) != 0 {
+					t.Fatalf("at none no rule runs, so nothing is recorded: %+v", findings)
+				}
+				return
+			}
 			if len(findings) == 0 {
-				t.Fatal("every violation is recorded at both levels")
+				t.Fatal("every violation is recorded at every level that runs the rules")
 			}
 			f := findings[0]
 			if f.Kind != string(KindCDSEnvelope) || f.Rule != "action.description" || f.Path != "systemActions[0].description" {
@@ -460,7 +523,7 @@ func TestCDSCertifierDescriptionMissing(t *testing.T) {
 				t.Fatalf("a finding carries no diagnostic text — issue text reaches only the refusal body, bounded: %+v", f)
 			}
 			wantDecision := "refused"
-			if tc.level == EnforcementNone {
+			if tc.level == EnforcementObserve {
 				wantDecision = "relayed"
 			}
 			if f.Decision != wantDecision {
@@ -470,13 +533,29 @@ func TestCDSCertifierDescriptionMissing(t *testing.T) {
 	}
 }
 
-// The three structural rules refuse at every level: the reader that follows
-// the certifier needs the shape.
-func TestCDSCertifierStructuralRulesRefuseAtNone(t *testing.T) {
-	got := certifyCDSHooksAnswer(context.Background(), NewConformancePolicy(EnforcementNone), nil,
-		[]byte(`not json at all`), "2.0", "payer")
-	if got.Status != http.StatusBadGateway {
-		t.Fatalf("an unreadable answer must refuse at none too, got %d", got.Status)
+// An unreadable answer refuses only at strict: at
+// observe it is recorded and relayed, at none nothing runs.
+func TestCDSCertifierUnreadableAnswerPerLevel(t *testing.T) {
+	for _, tc := range []struct {
+		level        ConformanceEnforcement
+		wantStatus   int
+		wantFindings int
+	}{
+		{EnforcementStrict, http.StatusBadGateway, 1},
+		{EnforcementObserve, 0, 1},
+		{EnforcementNone, 0, 0},
+	} {
+		var findings []ConformanceFinding
+		got := certifyCDSHooksAnswer(context.Background(), NewConformancePolicy(tc.level),
+			func(f ConformanceFinding) { findings = append(findings, f) },
+			[]byte(`not json at all`), "2.0", "payer")
+		if got.Status != tc.wantStatus || len(findings) != tc.wantFindings {
+			t.Errorf("%s: status %d with %d findings, want %d with %d", tc.level, got.Status, len(findings), tc.wantStatus, tc.wantFindings)
+		}
+	}
+	// The other value of the pending row refuses it below strict too.
+	if got := certifyCDSHooksAnswer(context.Background(), newConformancePolicy(EnforcementNone, true), nil, []byte(`not json at all`), "2.0", "payer"); got.Status != http.StatusBadGateway {
+		t.Fatalf("with the row set to refuse, an unreadable answer must refuse at none, got %d", got.Status)
 	}
 }
 
@@ -496,7 +575,11 @@ func TestCDSCertifierUnwiredEmitterIsSafe(t *testing.T) {
 // green-at-zero-findings instead of red.
 func TestCDSCertifierAdvisoryRecordsAtBothLevels(t *testing.T) {
 	answer := []byte(`{"cards":[],"systemActions":[{"type":"delete","description":"remove the draft"}]}`)
-	for _, level := range []ConformanceEnforcement{EnforcementStrict, EnforcementNone} {
+	if got := certifyCDSHooksAnswer(context.Background(), NewConformancePolicy(EnforcementNone),
+		func(f ConformanceFinding) { t.Fatalf("at none no rule runs, got finding %+v", f) }, answer, "2.0", "peer"); got.Status != 0 {
+		t.Fatalf("at none nothing refuses, got %d", got.Status)
+	}
+	for _, level := range []ConformanceEnforcement{EnforcementStrict, EnforcementObserve} {
 		t.Run(level.String(), func(t *testing.T) {
 			var findings []ConformanceFinding
 			got := certifyCDSHooksAnswer(context.Background(), NewConformancePolicy(level),
@@ -585,59 +668,74 @@ func TestNewBindsFindingEmitterToNativeResponder(t *testing.T) {
 // must say "own" — the certified bytes are this gateway's OWN backend
 // answering, never a peer's — not the "peer" value that is only correct at
 // the provider-ingress certifier (crdAnswerOutcome).
-func TestForwardCRD_RelaysAtNoneWithOwnFinding(t *testing.T) {
-	p := newCDSPayer(t, referencePayerServices...)
-	p.respond(http.StatusOK, "application/json", []byte(externalPayerDescriptionlessAnswer))
+func TestForwardCRD_RelaysBelowStrict(t *testing.T) {
+	for _, level := range []ConformanceEnforcement{EnforcementObserve, EnforcementNone} {
+		t.Run(level.String(), func(t *testing.T) {
+			p := newCDSPayer(t, referencePayerServices...)
+			p.respond(http.StatusOK, "application/json", []byte(externalPayerDescriptionlessAnswer))
 
-	authzPub, _ := genED25519(t)
-	_, paySignPriv := genED25519(t)
-	payEncPub, payEncPriv := genKeyPair(t)
-	sor := newCensusSoR()
-	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "", nil, nil,
-		WithConformancePolicy(NewConformancePolicy(EnforcementNone)))
-	gw := mustNew(t, Config{
-		Role:            "payer",
-		HolderID:        "payer",
-		Identity:        shnsdk.Identity{HolderID: "payer", SignPriv: paySignPriv, EncPub: payEncPub, EncPriv: payEncPriv},
-		AuthzURL:        "http://stub.test",
-		AuthzPub:        authzPub,
-		HubTransportPub: authzPub,
-		Reg:             shnsdk.NewRegistry(),
-		Validator:       shnsdk.NewFakeValidator(),
-		SoR:             sor,
-		Store:           sor,
-		Responder:       n,
-		Clock:           func() time.Time { return time.Unix(1700000000, 0).UTC() },
-	})
-	var events []ObserverEvent
-	gw.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
+			authzPub, _ := genED25519(t)
+			_, paySignPriv := genED25519(t)
+			payEncPub, payEncPriv := genKeyPair(t)
+			sor := newCensusSoR()
+			n := NewNativeResponder(p.srv.Client(), p.srv.URL, "", nil, nil,
+				WithConformancePolicy(NewConformancePolicy(level)))
+			gw := mustNew(t, Config{
+				Role:            "payer",
+				HolderID:        "payer",
+				Identity:        shnsdk.Identity{HolderID: "payer", SignPriv: paySignPriv, EncPub: payEncPub, EncPriv: payEncPriv},
+				AuthzURL:        "http://stub.test",
+				AuthzPub:        authzPub,
+				HubTransportPub: authzPub,
+				Reg:             shnsdk.NewRegistry(),
+				Validator:       shnsdk.NewFakeValidator(),
+				SoR:             sor,
+				Store:           sor,
+				Responder:       n,
+				Clock:           func() time.Time { return time.Unix(1700000000, 0).UTC() },
+			})
+			var events []ObserverEvent
+			gw.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
 
-	res, err := n.Handle(context.Background(), "crd-order-select", "corr-own", "pci", cdsRequest("order-sign"))
-	if err != nil {
-		t.Fatalf("Handle: %v", err)
-	}
-	if res.Status != 0 {
-		t.Fatalf("at none the payer's own backend's malformed answer must still relay, got %d %s", res.Status, res.Message)
-	}
-	if got := relay.BytesForTest(res.Response); !bytes.Equal(got, []byte(externalPayerDescriptionlessAnswer)) {
-		t.Fatalf("answer changed:\n got %s\nwant %s", got, externalPayerDescriptionlessAnswer)
-	}
-	var found bool
-	for _, e := range events {
-		if e.Kind != ConformanceObservedEvent {
-			continue
-		}
-		if strings.Contains(e.Detail, `"rule":"action.description"`) {
-			found = true
-			if !strings.Contains(e.Detail, `"whose":"own"`) {
-				t.Fatalf("forwardCRD's finding must say whose=own (this gateway's own backend), got: %s", e.Detail)
+			res, err := n.Handle(context.Background(), "crd-order-select", "corr-own", "pci", cdsRequest("order-sign"))
+			if err != nil {
+				t.Fatalf("Handle: %v", err)
 			}
-			if !strings.Contains(e.Detail, `"decision":"relayed"`) || !strings.Contains(e.Detail, `"level":"none"`) {
-				t.Fatalf("finding must record relayed/none, got: %s", e.Detail)
+			if res.Status != 0 {
+				t.Fatalf("at %s the payer's own backend's malformed answer must still relay, got %d %s", level, res.Status, res.Message)
 			}
-		}
+			if got := relay.BytesForTest(res.Response); !bytes.Equal(got, []byte(externalPayerDescriptionlessAnswer)) {
+				t.Fatalf("answer changed:\n got %s\nwant %s", got, externalPayerDescriptionlessAnswer)
+			}
+			var found bool
+			for _, e := range events {
+				if e.Kind != ConformanceObservedEvent {
+					continue
+				}
+				if strings.Contains(e.Detail, `"rule":"action.description"`) {
+					found = true
+					if !strings.Contains(e.Detail, `"whose":"own"`) {
+						t.Fatalf("forwardCRD's finding must say whose=own (this gateway's own backend), got: %s", e.Detail)
+					}
+					if !strings.Contains(e.Detail, `"decision":"relayed"`) || !strings.Contains(e.Detail, `"level":"observe"`) {
+						t.Fatalf("finding must record relayed/observe, got: %s", e.Detail)
+					}
+				}
+			}
+			if found != (level == EnforcementObserve) {
+				t.Fatalf("at %s cds-envelope finding observed = %v; observe records it, none runs no rule", level, found)
+			}
+		})
 	}
-	if !found {
-		t.Fatal("no cds-envelope finding observed for action.description")
+}
+
+// A CDS Hooks answer that repeats a member name refuses at every level: a body
+// read two ways cannot be carried faithfully.
+func TestCDSCertifierRepeatedMemberRefusesAtEveryLevel(t *testing.T) {
+	answer := []byte(`{"cards":[],"cards":[]}`)
+	for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve, EnforcementStrict} {
+		if got := certifyCDSHooksAnswer(context.Background(), NewConformancePolicy(level), nil, answer, "2.0", "peer"); got.Status != http.StatusBadGateway {
+			t.Errorf("%s: status %d, want 502", level, got.Status)
+		}
 	}
 }

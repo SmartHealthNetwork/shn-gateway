@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"slices"
 	"strconv"
@@ -184,6 +185,9 @@ func (g *Gateway) handleCRDIngress(w http.ResponseWriter, r *http.Request) {
 	}
 	legType := svc.Leg
 	scope.leg = legType
+	// Tag the leg for every check before routing; the correlation id is added
+	// once the leg is routed.
+	r = r.WithContext(withFindingContext(r.Context(), findingContext{LegType: legType, Seam: "provider-ingress", Whose: "own"}))
 	body, err := io.ReadAll(io.LimitReader(r.Body, shnsdk.MaxRequestBytes))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "read body failed"})
@@ -192,11 +196,18 @@ func (g *Gateway) handleCRDIngress(w http.ResponseWriter, r *http.Request) {
 	var head struct {
 		Hook string `json:"hook"`
 	}
-	if err := decodeMessage(body, &head); err != nil {
+	// A hook of the wrong type is decided, once, with every other value of
+	// the wrong type when the request is read for its subject below.
+	err = decodeMessage(body, &head)
+	if err != nil && !valueTypeError(err) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "parse cds request failed"})
 		return
 	}
-	if head.Hook != svc.Hook {
+	// A hook other than the service's is the request's own shape: below strict
+	// it is carried on the leg of the service the EHR addressed. The payer's
+	// gateway picks its service by the body's hook and refuses, at every level,
+	// a hook that leg does not carry (selectCRDService).
+	if err == nil && head.Hook != svc.Hook && g.guard(r.Context(), KindContent, RuleRequestShape, body) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("CDS service %s is for hook %s, not %s", svc.ID, svc.Hook, strconv.Quote(head.Hook))})
 		return
 	}
@@ -265,6 +276,9 @@ func (g *Gateway) handleCRDIngress(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "the CDS Hooks request cannot be carried to the payer's line unchanged"})
 		return
 	}
+	// The request is routed and carried: record the prefetch values it is
+	// carried without (below strict), under the routed leg's correlation id.
+	prepared.carried.record(r.Context())
 	// One Exchange, one leg (the EHR owns grouping in pure pass-through).
 	ex := g.exchanges.Begin(workstreamPA)
 	request := prepared.request
@@ -314,6 +328,9 @@ func (g *Gateway) handleDTRIngress(w http.ResponseWriter, r *http.Request) {
 	if g.ingressAuthRefused(w, r) {
 		return
 	}
+	// Tag the leg for every check before routing; the correlation id is added
+	// once the leg is routed.
+	r = r.WithContext(withFindingContext(r.Context(), findingContext{LegType: legType, Seam: "provider-ingress", Whose: "own"}))
 	body, err := io.ReadAll(io.LimitReader(r.Body, shnsdk.MaxRequestBytes))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "read body failed"})
@@ -365,6 +382,9 @@ func (g *Gateway) handleDTRIngress(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "the questionnaire-package request cannot be carried to the payer's line unchanged"})
 		return
 	}
+	// The request is routed and carried: record the Patient it is carried
+	// without (below strict), under the routed leg's correlation id.
+	prepared.carried.record(r.Context())
 	ex := g.exchanges.Begin(workstreamPA)
 	content := Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route),
 		Payload: prepared.request, Carried: true, Operation: shnsdk.FrameOperationQuestionnairePackage}
@@ -405,6 +425,28 @@ func (g *Gateway) handlePASIngress(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "read body failed"})
 		return
 	}
+	// F-PB-INGRESS: discriminate $submit vs amended re-POST. A conformant $submit carrying
+	// Claim.related[prior] is an AMENDMENT (FR-21) and MUST route the conformant UPDATE leg
+	// (pas-claim-update) — its own provider-tpo PA-update authority + the FR-32 inbound
+	// gate (conformantPASUpdateBind). Originating it as pas-claim would mis-bind the
+	// authority/responder. An initial submit (no related[prior]) routes pas-claim. The
+	// FR-32 Provenance/DR enforcement still fires DOWNSTREAM at the payer; the ingress only picks
+	// the leg. One parse (F-B2 extractor) serves BOTH discrimination AND the corr-threading below.
+	// It is read before the subject bind so every check is tagged with its leg.
+	// A value of the wrong type outside Claim.related is the bundle's own shape:
+	// below strict it is read past (the facts hold every value that fit), so an
+	// amendment still picks the update leg; at strict the read fails as it always
+	// has. Nothing is recorded here: the payer's gateway judges the update.
+	f, fstatus, _ := readConformantPASUpdateFacts(body, func(rule string) bool {
+		return g.policy().Decide(KindContent, rule, VerdictInvalid) == Refuse
+	})
+	leg := "pas-claim"
+	if fstatus == 0 && f.relatedClaim != "" {
+		leg = "pas-claim-update"
+	}
+	// Tag the leg for every check before routing; the correlation id is added
+	// once the leg is routed.
+	r = r.WithContext(withFindingContext(r.Context(), findingContext{LegType: leg, Seam: "provider-ingress", Whose: "own"}))
 	// Bind the subject across the conformant bundle (every patient reference → one pci). The
 	// minimized ParseClaimBundle path is retired here — a real Da Vinci partner sends the full
 	// conformant bundle (Patient + Coverage + payor Org + …), which ParseClaimBundle rejects. The
@@ -427,25 +469,15 @@ func (g *Gateway) handlePASIngress(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
-	// F-PB-INGRESS: discriminate $submit vs amended re-POST. A conformant $submit carrying
-	// Claim.related[prior] is an AMENDMENT (FR-21) and MUST route the conformant UPDATE leg
-	// (pas-claim-update) — its own provider-tpo PA-update authority + the FR-32 inbound
-	// gate (conformantPASUpdateBind). Originating it as pas-claim would mis-bind the
-	// authority/responder. An initial submit (no related[prior]) routes pas-claim. The
-	// FR-32 Provenance/DR enforcement still fires DOWNSTREAM at the payer; the ingress only picks
-	// the leg. One parse (F-B2 extractor) serves BOTH discrimination AND the corr-threading below.
-	f, fstatus, _ := parseConformantPASUpdateFacts(body)
-	leg := "pas-claim"
-	if fstatus == 0 && f.relatedClaim != "" {
-		leg = "pas-claim-update"
-	}
 	scope.leg = leg
 	// R8 re-home (FR-16/FR-27): fence at the provider-facing edge too, before this
 	// gateway ever originates the bundle onward — a nonconformant clinician/patient
 	// QR item is rejected here regardless of which leg it routes as (the property
 	// belongs to any QR item, not only to amends; mirrors the payer-side fence in
-	// inbound.go).
-	if reason, ok := fenceAttestedItems(body); !ok {
+	// inbound.go). The attestation is the QR's own content (RuleAttestation): not
+	// checked at none, recorded at observe and carried, refused at strict. The
+	// payer's gateway fences it on its own side.
+	if reason, ok := fenceAttestedItems(body); !ok && g.guard(r.Context(), KindContent, RuleAttestation, body) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": reason})
 		return
 	}
@@ -458,9 +490,9 @@ func (g *Gateway) handlePASIngress(w http.ResponseWriter, r *http.Request) {
 	// the existing br-payer goldens (which use PATIENT_EVENT_TRACE_NUMBER, not urn:shn:correlation)
 	// are unaffected: TestTwoRI_DVApprovePAS and TestTwoRI_DVPendPAS fall back unchanged.
 	//
-	// Security: the pend is keyed by (subjectPCI, corr) where subjectPCI is bound to the
-	// authenticated token subject (ingressPASNativeSubjectPCI above). A partner can only thread
-	// a corr for their own member's pends — no cross-member hijack via a crafted identifier.
+	// Security: the pend is keyed by (subjectPCI, corr) where subjectPCI is this gateway's own
+	// binding of the member the request names (ingressPASNativeSubjectPCI above). A corr threads
+	// only to that member's pends — no cross-member hijack via a crafted identifier.
 	child := g.ingressCorrelation(w, r)
 	if fstatus == 0 && f.claimCorrelation != "" {
 		child = f.claimCorrelation
@@ -515,19 +547,45 @@ func (g *Gateway) handlePASIngress(w http.ResponseWriter, r *http.Request) {
 	// Every native operation response, including an external SDK holder's,
 	// must satisfy the complete Bundle contract before reaching the caller.
 	// Validate without rewriting the payer's bytes or repairing missing evidence.
+	// The answer is the payer's content: an answer graph or decision this
+	// gateway cannot read (RuleAnswerShape) and an answer whose subjects do not
+	// bind to its ClaimResponse's patient (RulePatientAnswer) refuse at strict;
+	// below strict the payer's bytes are relayed exactly as received, recorded
+	// at observe. The answer is read at every level for the local record below,
+	// which never acts on an answer it could not read.
+	answerCtx := withFindingContext(r.Context(), findingContext{LegType: leg, CorrelationID: child, Seam: "provider-ingress", Whose: "peer"})
+	unread := ""
 	if _, bad := validateNativePASResponse(crJSON); bad.Status != 0 {
-		g.recordLeg(ex.ID, legProj.Project(child, "error"))
-		writeJSON(w, bad.Status, map[string]string{"error": bad.Message})
-		return
+		// A repeated member name is read one way only (RuleDuplicateKey): it
+		// refuses at every level, with strict's refusal.
+		if errors.Is(scanMessage(crJSON), relay.ErrDuplicateKey) || g.guard(answerCtx, KindContent, RuleAnswerShape, crJSON) {
+			g.recordLeg(ex.ID, legProj.Project(child, "error"))
+			writeJSON(w, bad.Status, map[string]string{"error": bad.Message})
+			return
+		}
+		unread = RuleAnswerShape
 	}
-	if status, msg := refusePASResponseSubjects(ex.ID, "pas-claim", http.StatusBadGateway, crJSON); status != 0 {
-		g.recordLeg(ex.ID, legProj.Project(child, "error"))
-		writeJSON(w, status, map[string]string{"error": msg})
-		return
+	// An answer that cannot be read has no subjects to bind; the rule above
+	// already covers it.
+	if unread == "" && pasResponseSubjectMismatch(crJSON) != nil {
+		if g.guard(answerCtx, KindContent, RulePatientAnswer, crJSON) {
+			status, msg := refusePASResponseSubjects(ex.ID, "pas-claim", http.StatusBadGateway, crJSON)
+			g.recordLeg(ex.ID, legProj.Project(child, "error"))
+			writeJSON(w, status, map[string]string{"error": msg})
+			return
+		}
+		unread = RulePatientAnswer
 	}
 	// Decision fields distinguish pending and terminal responses; both are Bundles.
+	// The exchange's leg outcome is metadata; it is read from the decision only
+	// when the answer was read. An answer relayed unread, or whose decision may
+	// be about another patient, is recorded "answered" and nothing is derived
+	// from it (localWriteSkipped).
 	outcome := "complete"
-	if pended, _, perr := shnsdk.ParsePendedResponse(crJSON); perr == nil && pended {
+	if unread != "" {
+		outcome = "answered"
+		g.localWriteSkipped(leg, child, unread)
+	} else if pended, _, perr := shnsdk.ParsePendedResponse(crJSON); perr == nil && pended {
 		outcome = "pended"
 	} else if res, perr := shnsdk.ParseClaimResponse(crJSON); perr == nil && res.Outcome != "" {
 		outcome = res.Outcome // approved | denied
@@ -537,4 +595,26 @@ func (g *Gateway) handlePASIngress(w http.ResponseWriter, r *http.Request) {
 	g.writePayload(w, http.StatusOK, "application/fhir+json",
 		relay.Exact(relay.NewBody(crJSON, relay.OriginPeerFrame), "application/fhir+json"),
 		relay.Key{Leg: leg, Role: relay.RoleRequester, Direction: relay.DirectionResponse, Outcome: relay.OutcomeAnswered})
+}
+
+// LocalWriteSkippedEvent is the observer event emitted when a provider ingress
+// relays a payer's answer it could not read (below strict) and so derives
+// nothing from it for its own records. It carries the leg, the correlation id
+// and the rule the answer broke; never the answer.
+const LocalWriteSkippedEvent = "pa.local-write-skipped"
+
+// localWriteSkipped records that the exchange's local record for leg took
+// nothing from a relayed answer that broke rule: the leg outcome is recorded
+// as "answered" rather than read from the answer. The provider ingress keeps
+// no pend, continuation or authorization-number state from an answer (those
+// belong to this gateway's own originator flows), so the outcome is the only
+// thing the answer would have been read for. Metadata only: a log line and an
+// observer event, no payload.
+func (g *Gateway) localWriteSkipped(leg, correlationID, rule string) {
+	detail := "answer not read for the local record (" + rule + "); leg outcome recorded as answered"
+	log.Printf("gateway: %s: leg %s correlation %s: %s", LocalWriteSkippedEvent, leg, correlationID, detail)
+	g.observe(ObserverEvent{
+		Kind: LocalWriteSkippedEvent, Direction: "originate", LegType: leg,
+		CorrelationID: correlationID, Detail: detail,
+	})
 }

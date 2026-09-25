@@ -52,7 +52,7 @@ services:
       # CONFORMANCE_ENFORCEMENT is deliberately ABSENT, exactly as in the partner
       # install unit (../../bundle/compose.yml): YOU register and run this gateway, at
       # your own endpoint with your own secrets, so the level is your choice. Absent
-      # means none — every check still runs and an invalid result is recorded as a
+      # means observe — every check runs and an invalid result is recorded as a
       # finding and the message relayed as sent, rather than refused. Set
       # CONFORMANCE_ENFORCEMENT: strict here if you want your self-test to refuse.
       # (The provider bundle ../compose.eval.yml interpolates the value from its

@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
@@ -13,26 +14,24 @@ import (
 // payload is the request the member arrived in, read only when the system of record does
 // not hold the member (below); nil when the leg has none.
 //
-// Seam (connectathon test lane): with Config.AcceptUnknownMembers set, a member the
-// system of record does not hold is bound instead of refused, from the same three facts a
+// By default a member the system of record does not hold is bound, not refused, from the
+// same three facts a
 // holder's record supplies — member id, birthDate and family name — read from the Patient
 // the request itself carries for that member (PatientDemographics, the read this holder's
 // FHIR system of record makes of its own Patient), or from the member id alone when the
 // request carries no such Patient. Nothing is minted: every fact is one the partner sent.
-// Both sides of an exchange derive the identifier the same way, so the payer-side
-// token-subject check holds whether the member is held on one side, both or neither; a
-// request whose Patient disagrees with the record of the side that holds the member fails
-// that check, as it should. A request carrying Patients for the member that disagree with
-// each other binds by id alone. Default off (the zero value); never set outside the
-// preview test lane (test/testdoorposture fences where it may appear in infra). Everything
-// else on these legs is untouched: member-mixing refusals, prefetch read only from this
-// system or the request, and the payer's own independent member resolution.
+// The payer side binds the member the same way, by its own system first
+// (bindInboundSubject). A request carrying Patients for the member that disagree with
+// each other binds by id alone. A participant that opts in to Config.RequireKnownMembers
+// refuses such a member instead. Everything else on these legs is untouched: member-mixing
+// refusals, prefetch read only from this system or the request, and the payer's own
+// independent member resolution.
 //
 // A read failure is returned as is, with the flag set or not: an unreadable system of record
 // is never mistaken for a member it does not hold.
 func (g *Gateway) resolveSubjectPCI(ctx context.Context, member string, payload []byte) (pci string, found bool, readErr error) {
 	pci, _, found, readErr = ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(ctx, member)
-	if readErr != nil || found || !g.cfg.AcceptUnknownMembers {
+	if readErr != nil || found || g.cfg.RequireKnownMembers {
 		return pci, found, readErr
 	}
 	demo, _ := carriedPatientDemographics(payload, member)
@@ -132,4 +131,49 @@ func patientIsMember(patient map[string]any, member string) bool {
 		}
 	}
 	return false
+}
+
+// bindInboundSubject is the payer side's bind of the member its request names,
+// returning the payer's own binding of that member: the PCI from its system of
+// record when it holds the member, else the one derived from the member id and
+// the Patient the request carries (resolveSubjectPCI). The payer handles the
+// member as it would directly: it does not re-derive the leg's identity and
+// refuse a difference. A request that names no member is refused, and a
+// participant that requires known members (Config.RequireKnownMembers) refuses
+// a member its system of record does not hold (400).
+//
+// Every record the payer keeps about the exchange (the pend ledger, a decision
+// EOB, the correlation it claims, an inquiry's projection) is keyed by the PCI
+// returned here, never by the leg token's subject. The requester chooses that
+// subject, so keying a record by it would let one patient's authority file
+// another patient's decision under the first patient's identity.
+func (g *Gateway) bindInboundSubject(ctx context.Context, member string, payload []byte) (pci string, status int, msg string) {
+	if member == "" {
+		return "", http.StatusBadRequest, "unknown member"
+	}
+	pci, found, readErr := g.resolveSubjectPCI(ctx, member, payload)
+	if readErr != nil {
+		status, msg := SoRFailureResponse(readErr)
+		return "", status, msg
+	}
+	if !found || pci == "" {
+		return "", http.StatusBadRequest, "unknown member"
+	}
+	return pci, 0, ""
+}
+
+// SubjectBindingDiffersEvent is the observer event a payer leg raises when its
+// own binding of the member the request names is not the patient the leg's
+// token names. The request is handled as usual and filed under the payer's
+// binding; the event tells the operator that the exchange is attributed, on the
+// network, to a patient other than the one the payer answered about. It carries
+// no identifier.
+const SubjectBindingDiffersEvent = "subject.binding-differs"
+
+// noteSubjectBinding raises SubjectBindingDiffersEvent when pci, the payer's
+// binding, differs from the leg token's subject.
+func (g *Gateway) noteSubjectBinding(leg, corrID, tokenSubject, pci string) {
+	if pci != "" && pci != tokenSubject {
+		g.observe(ObserverEvent{Kind: SubjectBindingDiffersEvent, Direction: "ingress", LegType: leg, CorrelationID: corrID})
+	}
 }

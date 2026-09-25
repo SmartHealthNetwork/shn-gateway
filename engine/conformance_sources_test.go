@@ -112,7 +112,7 @@ func TestEveryLegHandlerSetsTheFindingContext(t *testing.T) {
 //	choke        — validateGoverned itself, the one place a verdict decides
 //	observational — a validate whose outcome never changes the answer
 //	delegating   — a wrapper that forwards to another Validator
-//	appendix-b   — a site whose own parse error persists at both levels (spec
+//	appendix-b   — a site whose own parse error persists at every level (spec
 //	               appendix B). No entry uses it today: appendix B's sites are
 //	               validateFHIR* entries, covered by the second test below.
 //	               Keep the category so a future direct-Validator site of that
@@ -181,7 +181,7 @@ var validateCallSites = map[string]string{
 var validateFHIREntryPoints = []string{
 	"gateway.go:validateFHIR", "gateway.go:validateFHIRAtProfile",
 	"gateway.go:validateFHIRForContract", "gateway.go:validateFHIRPayerIngress",
-	"gateway.go:validateFHIREgressOrBridged",
+	"gateway.go:validateFHIREgressOrBridged", "gateway.go:validateFHIRRecorded",
 }
 
 // A note for whoever next counts call sites here, so they don't redo the work this

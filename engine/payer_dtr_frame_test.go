@@ -282,8 +282,6 @@ func TestPayerDTR_PackageSubjectBound(t *testing.T) {
 		{"order names another patient as patient", pkg(own, resourceParam("order", `{"resourceType":"DeviceRequest","status":"draft","intent":"order","subject":{"reference":"Patient/`+dtrFrameMember+`"},"patient":{"reference":"Patient/`+dtrOtherMember+`"}}`)), http.StatusForbidden, "more than one patient"},
 		{"Patient resource for another patient", pkg(own, resourceParam("referenced", `{"resourceType":"Patient","id":"`+dtrOtherMember+`"}`)), http.StatusForbidden, "more than one patient"},
 		{"referenced resource about another patient", pkg(own, resourceParam("referenced", `{"resourceType":"Observation","status":"final","subject":{"reference":"https://ehr.example/fhir/Patient/`+dtrOtherMember+`"}}`)), http.StatusForbidden, "more than one patient"},
-		{"coverage for a patient other than the authorized one", pkg(resourceParam("coverage", dtrCoverage("cov-2", dtrOtherMember))), http.StatusForbidden, "token subject does not match request patient"},
-		{"unknown member", pkg(resourceParam("coverage", dtrCoverage("cov-2", "MBR-NOBODY"))), http.StatusBadRequest, "unknown member"},
 		{"no coverage", pkg(ownOrder), http.StatusBadRequest, "has no coverage"},
 		{"coverage without a beneficiary", pkg(resourceParam("coverage", `{"resourceType":"Coverage","status":"active"}`)), http.StatusBadRequest, "not a Patient reference"},
 		{"coverage parameter that is not a Coverage", pkg(resourceParam("coverage", `{"resourceType":"Patient","id":"`+dtrFrameMember+`"}`)), http.StatusBadRequest, "not a Coverage"},
@@ -300,7 +298,6 @@ func TestPayerDTR_PackageSubjectBound(t *testing.T) {
 
 	t.Run("framed next-question", func(t *testing.T) {
 		next := shnsdk.FrameOperationNextQuestion
-		d.requireRefused(t, d.send(t, next, []byte(nextQuestionQR(dtrOtherMember))), http.StatusForbidden, "token subject does not match request patient")
 		two := dtrParams(resourceParam("questionnaire-response", nextQuestionQR(dtrFrameMember)), resourceParam("questionnaire-response", nextQuestionQR(dtrOtherMember)))
 		d.requireRefused(t, d.send(t, next, two), http.StatusBadRequest, "parse next-question input failed")
 		d.requireRefused(t, d.send(t, next, pkg(own)), http.StatusBadRequest, "parse next-question input failed")
@@ -316,8 +313,6 @@ func TestPayerDTR_PackageSubjectBound(t *testing.T) {
 		if got := d.send(t, next0, []byte(qr)); got.status != http.StatusOK {
 			t.Fatalf("answer = %d %s, want 200", got.status, got.body)
 		}
-		other := strings.Replace(qr, dtrFrameMember, dtrOtherMember, 1)
-		d.requireRefused(t, d.send(t, next0, []byte(other)), http.StatusForbidden, "token subject does not match request patient")
 	})
 
 }

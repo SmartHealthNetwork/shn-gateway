@@ -110,7 +110,9 @@ func CloseCertificationClients(clients map[string]shnsdk.Validator) {
 }
 
 func (g *Gateway) startCertification() {
-	if g.cfg.certificationDisabled {
+	// At none no conformance check runs, so no certification evidence is
+	// gathered either.
+	if g.cfg.certificationDisabled || !g.policy().RunsKind(KindFHIRIngress) {
 		// No worker will own the clients: stop any gated loop now.
 		CloseCertificationClients(g.cfg.CertificationValidatorsByLine)
 		return

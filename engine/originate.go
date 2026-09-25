@@ -810,18 +810,18 @@ func (g *Gateway) handleScenario(w http.ResponseWriter, r *http.Request) {
 	// eligibility bypasses that occupant entirely (R11 — see gateway/engine/native.go's "NO
 	// coverage-eligibility arm" comment).
 	cerValidator := g.validatorForLine("")
-	if cerValidator == nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "no FHIR validator lane configured (FR-36/FR-G29)"})
-		return
-	}
-	// Routed through the choke point (validateGoverned) so an invalid verdict emits
-	// its conformance finding — this site's own status/message contract is
-	// preserved explicitly below, never relayed from the choke point's generic
-	// text, since a nil-lane outage never reaches here (checked above) and the
-	// choke point's own nil-lane message differs from this site's.
+	// Routed through the choke point (validateGoverned) so the level decides
+	// whether the check runs and an invalid verdict emits its conformance
+	// finding. This site's own status/message contract is preserved explicitly
+	// below, including its own missing-lane text (gr.NoLane), never relayed from
+	// the choke point's generic text.
 	fc := findingContextFrom(ctx)
 	fc.Whose = "own"
 	if gr := g.validateGoverned(ctx, fc, cerValidator, cerJSON, "egress", "", "", false); gr.Status != 0 {
+		if gr.NoLane {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "no FHIR validator lane configured (FR-36/FR-G29)"})
+			return
+		}
 		if gr.Status == http.StatusInternalServerError {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "validator unavailable"})
 			return
@@ -870,10 +870,6 @@ func (g *Gateway) handleScenario(w http.ResponseWriter, r *http.Request) {
 	// reference payer's own conformance-payer holder — it is SHN-produced content, never a
 	// relay of br-payer's/the mirror's foreign DTR/PAS bytes, so it always validates.
 	crrValidator := g.validatorForLine("")
-	if crrValidator == nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "no FHIR validator lane configured (FR-36/FR-G29)"})
-		return
-	}
 	// Routed through the choke point so an invalid payer answer still emits its
 	// conformance finding. This site answers the scenario caller, which reads a
 	// payer-side failure as a bad gateway — every outcome here is 502
@@ -883,7 +879,11 @@ func (g *Gateway) handleScenario(w http.ResponseWriter, r *http.Request) {
 	fc = findingContextFrom(ctx)
 	fc.Whose = "peer"
 	if gr := g.validateGoverned(ctx, fc, crrValidator, crrJSON, "ingress", "", "", false); gr.Status != 0 {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": gr.Msg})
+		msg := gr.Msg
+		if gr.NoLane {
+			msg = "no FHIR validator lane configured (FR-36/FR-G29)"
+		}
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": msg})
 		return
 	}
 	covered, reason, err := shnsdk.ParseEligibilityResponse(crrJSON)

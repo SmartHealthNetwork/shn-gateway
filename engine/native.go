@@ -14,6 +14,7 @@ package engine
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -574,7 +575,7 @@ func (n *nativeResponder) Handle(ctx context.Context, leg, corrID, subjectPCI st
 		// A read of the payer's own record about an authorization it pended
 		// (inquire.go). It acquires no claim and writes nothing here: the ledger
 		// effect is derived by the payer gateway from the answer.
-		return n.handlePASInquireNative(ctx, contract, in)
+		return n.handlePASInquireNative(ctx, contract, in, requestFHIR)
 
 	default:
 		// The br-payer-targeting lane routes the read-only + PAS legs here; this is defensive
@@ -603,7 +604,7 @@ func (n *nativeResponder) forwardDTROperation(ctx context.Context, contract stri
 	const fhirJSON = "application/fhir+json"
 	request := relay.Exact(in, fhirJSON)
 	if carrier != 0 {
-		mapped, lr, err := n.payorEdgeRequest(in, carrier, fhirJSON)
+		mapped, lr, err := n.payorEdgeRequest(in, carrier, fhirJSON, nil)
 		if err != nil || lr.Status != 0 {
 			return lr, err
 		}
@@ -719,10 +720,10 @@ func (n *nativeResponder) forwardCRD(ctx context.Context, contract, leg string, 
 
 // certifyCDSHooksAnswer applies the CDS Hooks response rules (and, at a CRD
 // line, the CRD card rules) to a participant's answer. It never changes the
-// answer. Every violation is recorded as a finding at both levels; whether a
-// refusing violation actually refuses is the receiving participant's choice,
-// which the policy holds. A SHOULD-level finding is logged and the answer
-// passes, as before.
+// answer. At none no rule runs. At every other level each violation is
+// recorded as a finding; whether a refusing violation actually refuses is the
+// receiving participant's choice, which the policy holds. A SHOULD-level
+// finding is logged and the answer passes, as before.
 //
 // whose classifies WHOSE SYSTEM the certified bytes came from, for the
 // finding: "own" when the bytes are this gateway's own backend answering
@@ -735,6 +736,15 @@ func (n *nativeResponder) forwardCRD(ctx context.Context, contract, leg string, 
 // emit may be nil: a responder the engine never wired still certifies and
 // still refuses at strict, it simply records nothing.
 func certifyCDSHooksAnswer(ctx context.Context, policy ConformancePolicy, emit func(ConformanceFinding), body []byte, line, whose string) LegResult {
+	// A repeated member name is message integrity (RuleDuplicateKey), refused at
+	// every level: an answer that can be read two ways cannot be carried
+	// faithfully.
+	if errors.Is(scanMessage(body), relay.ErrDuplicateKey) && guardDefect(ctx, policy, emit, KindNetwork, RuleDuplicateKey, VerdictInvalid, body) {
+		return LegResult{Status: http.StatusBadGateway, Message: "payer CRD response is not a valid CDS Hooks response: response.json"}
+	}
+	if !policy.RunsKind(KindCDSEnvelope) {
+		return LegResult{}
+	}
 	violations := shnsdk.CheckCDSHooksResponse(body, line)
 	if len(violations) == 0 {
 		return LegResult{}
@@ -743,6 +753,9 @@ func certifyCDSHooksAnswer(ctx context.Context, policy ConformancePolicy, emit f
 	var refusing, advisory []string
 	var refuse bool
 	for _, v := range violations {
+		if !policy.Runs(KindCDSEnvelope, v.Rule) {
+			continue
+		}
 		desc := v.Rule
 		if v.Path != "" {
 			desc += " at " + v.Path
@@ -804,5 +817,5 @@ func certifyCDSHooksAnswer(ctx context.Context, policy ConformancePolicy, emit f
 // sent exactly. Configured, a request with no prefetch.coverage at all refuses too — an
 // absent one is itself the "no resolvable payor identifier" case, not a benign skip.
 func (n *nativeResponder) applyPayorEdgeToCRDRequest(in relay.Body) (relay.Payload, LegResult, error) {
-	return n.payorEdgeRequest(in, payorEdgeCRDRequest, "application/json")
+	return n.payorEdgeRequest(in, payorEdgeCRDRequest, "application/json", nil)
 }

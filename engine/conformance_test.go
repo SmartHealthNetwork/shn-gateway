@@ -5,42 +5,128 @@ import (
 	"testing"
 )
 
-// The whole table, both levels. At strict every invalid verdict refuses. At
-// none only SHN's own bridged edit and the three structural CDS Hooks rules
-// do — those three because the reader that follows the certifier needs the
-// shape (§2).
+// The whole table. At strict every invalid verdict refuses. At none no check
+// runs except SHN's own bridged edit, and at observe every check runs and only
+// that bridged edit refuses: an unreadable CDS Hooks answer is relayed below
+// strict.
 func TestConformancePolicyTable(t *testing.T) {
 	for _, tc := range []struct {
 		kind  CheckKind
 		rule  string
 		level ConformanceEnforcement
+		runs  bool
 		want  Decision
 	}{
-		{KindFHIRIngress, "", EnforcementStrict, Refuse},
-		{KindFHIREgress, "", EnforcementStrict, Refuse},
-		{KindFHIRBridged, "", EnforcementStrict, Refuse},
-		{KindCDSEnvelope, "action.description", EnforcementStrict, Refuse},
-		{KindCDSEnvelope, "response.json", EnforcementStrict, Refuse},
+		{KindFHIRIngress, "", EnforcementStrict, true, Refuse},
+		{KindFHIREgress, "", EnforcementStrict, true, Refuse},
+		{KindFHIRBridged, "", EnforcementStrict, true, Refuse},
+		{KindCDSEnvelope, "action.description", EnforcementStrict, true, Refuse},
+		{KindCDSEnvelope, "response.json", EnforcementStrict, true, Refuse},
 
-		{KindFHIRIngress, "", EnforcementNone, Record},
-		{KindFHIREgress, "", EnforcementNone, Record},
-		{KindFHIRBridged, "", EnforcementNone, Refuse},
-		{KindCDSEnvelope, "action.description", EnforcementNone, Record},
-		{KindCDSEnvelope, "card.summary", EnforcementNone, Record},
-		{KindCDSEnvelope, "response.json", EnforcementNone, Refuse},
-		{KindCDSEnvelope, "response.object", EnforcementNone, Refuse},
-		{KindCDSEnvelope, "line", EnforcementNone, Refuse},
+		{KindFHIRIngress, "", EnforcementObserve, true, Record},
+		{KindFHIREgress, "", EnforcementObserve, true, Record},
+		{KindFHIRBridged, "", EnforcementObserve, true, Refuse},
+		{KindCDSEnvelope, "action.description", EnforcementObserve, true, Record},
+		{KindCDSEnvelope, "card.summary", EnforcementObserve, true, Record},
+		{KindCDSEnvelope, "response.json", EnforcementObserve, true, Record},
+		{KindCDSEnvelope, "response.object", EnforcementObserve, true, Record},
+		{KindCDSEnvelope, "line", EnforcementObserve, true, Record},
+
+		{KindFHIRIngress, "", EnforcementNone, false, Record},
+		{KindFHIREgress, "", EnforcementNone, false, Record},
+		{KindFHIRBridged, "", EnforcementNone, true, Refuse},
+		{KindCDSEnvelope, "action.description", EnforcementNone, false, Record},
+		{KindCDSEnvelope, "card.summary", EnforcementNone, false, Record},
+		{KindCDSEnvelope, "response.json", EnforcementNone, false, Record},
+		{KindCDSEnvelope, "response.object", EnforcementNone, false, Record},
+		{KindCDSEnvelope, "line", EnforcementNone, false, Record},
 	} {
-		got := NewConformancePolicy(tc.level).Decide(tc.kind, tc.rule, VerdictInvalid)
-		if got != tc.want {
+		p := NewConformancePolicy(tc.level)
+		if got := p.Runs(tc.kind, tc.rule); got != tc.runs {
+			t.Errorf("Runs(%s, %q) at %s = %v, want %v", tc.kind, tc.rule, tc.level, got, tc.runs)
+		}
+		if got := p.Decide(tc.kind, tc.rule, VerdictInvalid); got != tc.want {
 			t.Errorf("Decide(%s, %q) at %s = %v, want %v", tc.kind, tc.rule, tc.level, got, tc.want)
 		}
 	}
 }
 
-// A valid verdict decides nothing at either level.
+// The one pending row: whether an unreadable CDS Hooks answer refuses below
+// strict. The published table relays it (false); the other value refuses it
+// at none and observe, and at none it is then the only CDS check that runs.
+func TestConformancePolicyUnreadableCDSRow(t *testing.T) {
+	if cdsUnreadableRefusesBelowStrict {
+		t.Fatal("an unreadable CDS Hooks answer is relayed at none and observe")
+	}
+	for _, refuses := range []bool{false, true} {
+		for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve} {
+			p := newConformancePolicy(level, refuses)
+			for rule := range unreadableCDSRules {
+				want := Record
+				if refuses {
+					want = Refuse
+				}
+				if got := p.Decide(KindCDSEnvelope, rule, VerdictInvalid); got != want {
+					t.Errorf("refuses=%v %s: Decide(%q) = %v, want %v", refuses, level, rule, got, want)
+				}
+				if got, want := p.Runs(KindCDSEnvelope, rule), refuses || level != EnforcementNone; got != want {
+					t.Errorf("refuses=%v %s: Runs(%q) = %v, want %v", refuses, level, rule, got, want)
+				}
+			}
+			if level == EnforcementNone && p.Runs(KindCDSEnvelope, "card.summary") {
+				t.Errorf("refuses=%v: a readable-answer rule must not run at none", refuses)
+			}
+			if got, want := p.RunsKind(KindCDSEnvelope), refuses || level != EnforcementNone; got != want {
+				t.Errorf("refuses=%v %s: RunsKind(cds) = %v, want %v", refuses, level, got, want)
+			}
+		}
+	}
+}
+
+// A check that could not run (validator outage, no lane for the line) refuses
+// only at strict and for SHN's own bridged edit; observe records it and relays.
+func TestConformancePolicyUnavailableVerdict(t *testing.T) {
+	for _, tc := range []struct {
+		kind  CheckKind
+		level ConformanceEnforcement
+		want  Decision
+	}{
+		{KindFHIRIngress, EnforcementStrict, Refuse},
+		{KindFHIREgress, EnforcementStrict, Refuse},
+		{KindFHIRBridged, EnforcementStrict, Refuse},
+		{KindFHIRIngress, EnforcementObserve, Record},
+		{KindFHIREgress, EnforcementObserve, Record},
+		{KindFHIRBridged, EnforcementObserve, Refuse},
+		{KindFHIRBridged, EnforcementNone, Refuse},
+	} {
+		if got := NewConformancePolicy(tc.level).Decide(tc.kind, "", VerdictUnavailable); got != tc.want {
+			t.Errorf("Decide(%s, unavailable) at %s = %v, want %v", tc.kind, tc.level, got, tc.want)
+		}
+	}
+}
+
+// At none nothing but SHN's own bridged edit runs; every level above none runs
+// every kind.
+func TestConformancePolicyRunsKind(t *testing.T) {
+	for _, kind := range []CheckKind{KindFHIRIngress, KindFHIREgress, KindFHIRBridged, KindCDSEnvelope} {
+		for _, level := range []ConformanceEnforcement{EnforcementStrict, EnforcementObserve} {
+			if !NewConformancePolicy(level).RunsKind(kind) {
+				t.Errorf("%s must run at %s", kind, level)
+			}
+		}
+		if got, want := NewConformancePolicy(EnforcementNone).RunsKind(kind), kind == KindFHIRBridged; got != want {
+			t.Errorf("RunsKind(%s) at none = %v, want %v", kind, got, want)
+		}
+	}
+	var zero ConformancePolicy
+	if !zero.RunsKind(KindFHIRIngress) || !zero.Runs(KindCDSEnvelope, "card.summary") {
+		t.Fatal("a zero-value policy is strict and runs every check")
+	}
+}
+
+// A valid verdict decides nothing at any level.
 func TestConformancePolicyValidVerdictRecords(t *testing.T) {
-	for _, level := range []ConformanceEnforcement{EnforcementStrict, EnforcementNone} {
+	for _, level := range []ConformanceEnforcement{EnforcementStrict, EnforcementObserve, EnforcementNone} {
 		for _, kind := range []CheckKind{KindFHIRIngress, KindFHIREgress, KindFHIRBridged, KindCDSEnvelope} {
 			if got := NewConformancePolicy(level).Decide(kind, "", VerdictValid); got != Record {
 				t.Errorf("a valid verdict must never refuse (%s at %s): %v", kind, level, got)
@@ -96,17 +182,27 @@ func TestDecisionZeroValueIsRefuse(t *testing.T) {
 }
 
 func TestParseConformanceEnforcement(t *testing.T) {
-	for in, want := range map[string]ConformanceEnforcement{"none": EnforcementNone, "strict": EnforcementStrict} {
+	for in, want := range map[string]ConformanceEnforcement{"none": EnforcementNone, "observe": EnforcementObserve, "strict": EnforcementStrict} {
 		got, err := ParseConformanceEnforcement(in)
 		if err != nil || got != want {
 			t.Errorf("ParseConformanceEnforcement(%q) = %v, %v", in, got, err)
 		}
 	}
-	for _, bad := range []string{"middle", "lenient", "NONE", "true", " none"} {
+	for _, bad := range []string{"middle", "lenient", "NONE", "true", " none", "Observe", "basic"} {
 		if _, err := ParseConformanceEnforcement(bad); err == nil {
 			t.Errorf("ParseConformanceEnforcement(%q) must be a boot error", bad)
-		} else if !strings.Contains(err.Error(), "none") || !strings.Contains(err.Error(), "strict") {
-			t.Errorf("the boot error must name both accepted values, got %v", err)
+		} else if !strings.Contains(err.Error(), "none") || !strings.Contains(err.Error(), "observe") || !strings.Contains(err.Error(), "strict") {
+			t.Errorf("the boot error must name every accepted value, got %v", err)
+		}
+	}
+}
+
+// A level's name round-trips through the setting.
+func TestConformanceEnforcementStringRoundTrips(t *testing.T) {
+	for _, level := range []ConformanceEnforcement{EnforcementStrict, EnforcementObserve, EnforcementNone} {
+		got, err := ParseConformanceEnforcement(level.String())
+		if err != nil || got != level {
+			t.Errorf("ParseConformanceEnforcement(%q) = %v, %v; want %v", level.String(), got, err, level)
 		}
 	}
 }

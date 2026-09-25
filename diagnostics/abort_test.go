@@ -2,6 +2,7 @@ package diagnostics
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -136,6 +137,54 @@ func TestObserveHTTPPreservesPanicAndPartialEvidence(t *testing.T) {
 	}
 }
 
+// truncatedUpstreamBody yields the partial response in transport-sized reads,
+// then blocks until the test releases it and ends with io.ErrUnexpectedEOF, the
+// error a transport reports when an upstream closes before its declared
+// Content-Length. No upstream server, connection or shared transport is
+// involved. The body records how it ended, so an abort that arrives by any
+// other route (a cancelled request, a torn-down connection) is reported
+// instead of passing as the intended one.
+type truncatedUpstreamBody struct {
+	partial []byte
+	release <-chan struct{}
+	ctx     context.Context
+	mu      sync.Mutex
+	ended   error
+}
+
+func (b *truncatedUpstreamBody) Read(p []byte) (int, error) {
+	if len(b.partial) > 0 {
+		n := copy(p[:min(len(p), 4096)], b.partial)
+		b.partial = b.partial[n:]
+		return n, nil
+	}
+	var err error
+	select {
+	case <-b.release:
+		err = io.ErrUnexpectedEOF
+	case <-b.ctx.Done():
+		err = fmt.Errorf("request context ended before the release: %w", context.Cause(b.ctx))
+	}
+	b.mu.Lock()
+	b.ended = err
+	b.mu.Unlock()
+	return 0, err
+}
+
+func (b *truncatedUpstreamBody) endedWith() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.ended
+}
+
+// testLogWriter sends a logger's output to the test log, shown only on
+// failure or with -v.
+type testLogWriter struct{ t *testing.T }
+
+func (w testLogWriter) Write(p []byte) (int, error) { w.t.Logf("%s", p); return len(p), nil }
+
+func (b *truncatedUpstreamBody) Close() error { return nil }
+
 func TestObserveHTTPTruncatedUpstreamPreservesWireAbort(t *testing.T) {
 	const requestBody = "synthetic request"
 	partial := bytes.Repeat([]byte("partial response\n"), 512)
@@ -144,41 +193,69 @@ func TestObserveHTTPTruncatedUpstreamPreservesWireAbort(t *testing.T) {
 		headers   http.Header
 		body      []byte
 		readError error
+		panicked  any // what the proxy's handler panicked with; the wire alone cannot tell
 	}
 	var baseline wireResult
 	for _, capture := range []bool{false, true} {
-		t.Run(fmt.Sprintf("capture=%v", capture), func(t *testing.T) {
+		// The capture=true row is judged against the capture=false baseline,
+		// so a baseline failure stops the test rather than comparing against
+		// an empty result.
+		if !t.Run(fmt.Sprintf("capture=%v", capture), func(t *testing.T) {
 			finishUpstream := make(chan struct{})
 			finish := sync.OnceFunc(func() { close(finishUpstream) })
-			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				body, err := io.ReadAll(r.Body)
-				if err != nil || string(body) != requestBody {
-					t.Errorf("upstream request = %q, %v", body, err)
-				}
-				w.Header().Set("Content-Length", fmt.Sprint(len(partial)+1))
-				w.Header().Set("Content-Type", "application/octet-stream")
-				w.Header().Set("Date", "Thu, 01 Jan 1970 00:00:00 GMT")
-				w.Header().Set("X-Upstream", "short")
-				w.WriteHeader(http.StatusAccepted)
-				_, _ = w.Write(partial)
-				w.(http.Flusher).Flush()
-				<-finishUpstream
-			}))
-			defer upstream.Close()
-			target, err := url.Parse(upstream.URL)
+			target, err := url.Parse("http://upstream.invalid")
 			if err != nil {
 				t.Fatal(err)
 			}
 			proxy := httputil.NewSingleHostReverseProxy(target)
+			var upstream *truncatedUpstreamBody
+			proxy.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				body, err := io.ReadAll(r.Body)
+				if err != nil || string(body) != requestBody {
+					t.Errorf("upstream request = %q, %v", body, err)
+				}
+				_ = r.Body.Close()
+				upstream = &truncatedUpstreamBody{partial: partial, release: finishUpstream, ctx: r.Context()}
+				header := http.Header{}
+				header.Set("Content-Length", fmt.Sprint(len(partial)+1))
+				header.Set("Content-Type", "application/octet-stream")
+				header.Set("Date", "Thu, 01 Jan 1970 00:00:00 GMT")
+				header.Set("X-Upstream", "short")
+				return &http.Response{
+					Status:        "202 Accepted",
+					StatusCode:    http.StatusAccepted,
+					Proto:         "HTTP/1.1",
+					ProtoMajor:    1,
+					ProtoMinor:    1,
+					Header:        header,
+					ContentLength: int64(len(partial) + 1),
+					Body:          upstream,
+					Request:       r,
+				}, nil
+			})
 			proxy.FlushInterval = -1
-			proxy.ErrorLog = log.New(io.Discard, "", 0)
+			// The proxy logs the upstream error that cut the copy short; keep it
+			// in the test log so a failure names its cause.
+			proxy.ErrorLog = log.New(testLogWriter{t}, "", 0)
 			var events []Event
 			var handler http.Handler = proxy
 			if capture {
 				handler = ObserveHTTP(handler, func(e Event) bool { events = append(events, e); return true }, nil, time.Now, 16384, NewCaptureBudget(65536, 1))
 			}
 			done := make(chan struct{})
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { defer close(done); handler.ServeHTTP(w, r) }))
+			var panicked any
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// A handler that panics and one that returns short look the same
+				// on the wire; record the panic, then let the server see it.
+				defer func() {
+					panicked = recover()
+					close(done)
+					if panicked != nil {
+						panic(panicked)
+					}
+				}()
+				handler.ServeHTTP(w, r)
+			}))
 			defer server.Close()
 			defer finish()
 			client := server.Client()
@@ -195,8 +272,11 @@ func TestObserveHTTPTruncatedUpstreamPreservesWireAbort(t *testing.T) {
 			finish()
 			rest, readError := io.ReadAll(resp.Body)
 			<-done
-			got := wireResult{resp.StatusCode, resp.Header, append(body, rest...), readError}
-			if got.status != http.StatusAccepted || !bytes.Equal(got.body, partial) || got.readError != io.ErrUnexpectedEOF {
+			got := wireResult{resp.StatusCode, resp.Header, append(body, rest...), readError, panicked}
+			if ended := upstream.endedWith(); ended != io.ErrUnexpectedEOF {
+				t.Fatalf("upstream body ended with %v, want the released io.ErrUnexpectedEOF", ended)
+			}
+			if got.status != http.StatusAccepted || !bytes.Equal(got.body, partial) || got.readError != io.ErrUnexpectedEOF || got.panicked != http.ErrAbortHandler {
 				t.Fatalf("wire response = %+v", got)
 			}
 			if !capture {
@@ -216,6 +296,8 @@ func TestObserveHTTPTruncatedUpstreamPreservesWireAbort(t *testing.T) {
 			if response.Kind != "http-request-response" || !bytes.Equal(response.Body, partial) || response.BodyComplete || !response.HeadersComplete || !reflect.DeepEqual(response.Headers, got.headers) || response.Status != got.status || response.RequestFingerprint != req.RequestFingerprint {
 				t.Fatalf("response status=%d bytes=%d complete=%v headers=%v", response.Status, len(response.Body), response.BodyComplete, response.Headers)
 			}
-		})
+		}) {
+			t.FailNow()
+		}
 	}
 }

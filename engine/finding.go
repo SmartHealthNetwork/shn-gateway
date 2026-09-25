@@ -70,6 +70,17 @@ const (
 	KindFHIRBridged CheckKind = "fhir-bridged"
 	// KindCDSEnvelope is the CDS Hooks response rules over a payer's answer.
 	KindCDSEnvelope CheckKind = "cds-envelope"
+	// KindNetwork is a network-level check on a relay path (the networkRules):
+	// binding a leg's authority and consent to one patient, and reading a body
+	// one way only. It refuses at every level and records no conformance
+	// finding: it is authority and message integrity, not a check of the
+	// participant's payload.
+	KindNetwork CheckKind = "network"
+	// KindContent is a check of the shape or internal consistency of a
+	// participant's message on a relay path (the contentRules). Like any
+	// conformance check it does not run at none, is recorded at observe and
+	// refuses at strict.
+	KindContent CheckKind = "content"
 )
 
 // ConformanceFinding is what a governed check saw, before it reaches either
@@ -89,6 +100,7 @@ type ConformanceFinding struct {
 	Line          string   `json:"line,omitempty"`
 	Profile       string   `json:"profile,omitempty"`
 	Level         string   `json:"level"`
+	Verdict       string   `json:"verdict,omitempty"` // "unavailable" when the check could not run; absent for an invalid verdict
 	Decision      string   `json:"decision"`
 	Rule          string   `json:"rule,omitempty"`
 	Path          string   `json:"path,omitempty"`
@@ -102,8 +114,8 @@ type ConformanceFinding struct {
 // certificationIssueMetadata's authored summary (count + size + hash) before
 // anything is marshalled, so the redacted form — never the raw diagnostics —
 // is what the log line and the observer event actually carry. It is called
-// before any decision is acted on, at both levels, so the record of what was
-// seen never depends on what was done about it.
+// before any decision is acted on, at every level that runs the check, so the
+// record of what was seen never depends on what was done about it.
 func (g *Gateway) emitFinding(f ConformanceFinding) {
 	f.Issues = certificationIssueMetadata(f.Issues)
 	b, err := json.Marshal(f)

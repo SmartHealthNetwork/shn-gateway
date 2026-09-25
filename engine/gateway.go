@@ -141,13 +141,21 @@ type Config struct {
 	// SoR reads the holder's backing system of record (resolve/coverage/clinical/
 	// supplemental/facility-records). E2 swaps in a FHIR client; demo uses the stub.
 	SoR SystemOfRecord
-	// AcceptUnknownMembers is the connectathon test-lane seam: on the Da Vinci
-	// CRD/DTR/PAS legs, a subject the system of record does not hold binds by member id
-	// alone (resolveSubjectPCI) instead of being refused. PRODUCTION default (false, the
-	// zero value): every subject must resolve through SoR. Set only from
-	// SHN_ACCEPT_UNKNOWN_MEMBERS (gateway/app) on the preview test lane; never read
-	// outside resolveSubjectPCI.
-	AcceptUnknownMembers bool
+	// RequireKnownMembers is the participant's opt-in to checking members against
+	// its own system of record: on the Da Vinci CRD/DTR/PAS legs, a subject the
+	// system of record does not hold is refused ("unknown member"). The default
+	// (false, the zero value) stays out of the way: such a subject binds by member id
+	// and the Patient the request carries (resolveSubjectPCI). Set from
+	// REQUIRE_KNOWN_MEMBERS (gateway/app).
+	RequireKnownMembers bool
+	// enrichDTRPatient turns on the E-05 own-Patient append on the native DTR
+	// ingress (prepareDTRPackageRequest). Off, the zero value: the provider's own
+	// Patient is not appended to a request that carries none (E-02 and E-04 are
+	// unaffected). Temporary seam, tracked with the ENRICH_NATIVE_REQUESTS
+	// participant opt-in: unexported and not wired from configuration, so it can
+	// only be off in a built gateway; it keeps the edit and its fences tested until
+	// that opt-in wires it.
+	enrichDTRPatient bool
 	// Store is the gateway's own business state (auth numbers, pended-claim ledger,
 	// issued EOBs). Demo: in-memory stub; separated: holdersim; later: gateway Postgres.
 	Store Store
@@ -299,7 +307,7 @@ type Config struct {
 	// IS STRICT, and it stays strict for every in-process construction here or
 	// in any test harness that does not say otherwise. A DEPLOYED gateway is
 	// different: the gateway/app env loader maps an ABSENT
-	// CONFORMANCE_ENFORCEMENT to EnforcementNone, which is the one and only
+	// CONFORMANCE_ENFORCEMENT to EnforcementObserve, which is the one and only
 	// place a non-strict level comes from an omission. Every gate, reference
 	// participant and hosted gate therefore pins its level explicitly
 	// (test/invariants' TestInvariant_EveryGateRunsStrict).
@@ -1556,6 +1564,16 @@ func (g *Gateway) validateFHIR(ctx context.Context, resourceJSON []byte, dir, li
 	return g.validateFHIRAtProfile(ctx, resourceJSON, dir, line, "")
 }
 
+// validateFHIRRecorded is validateFHIR that also reports whether an invalid
+// verdict was recorded and the message let through (below strict), for a
+// caller that must not act on a resource that failed: the payer PAS legs'
+// own decision EOBs, which below strict are then not written.
+func (g *Gateway) validateFHIRRecorded(ctx context.Context, resourceJSON []byte, dir, line string) (int, string, bool) {
+	gr := g.validateGoverned(ctx, findingContextFrom(ctx), g.validatorForLine(line), resourceJSON, dir, line, "", false)
+	status, msg := gr.refusal()
+	return status, msg, gr.Recorded
+}
+
 // validateFHIRAtProfile preserves the selected lane and all validation refusals.
 func (g *Gateway) validateFHIRAtProfile(ctx context.Context, resourceJSON []byte, dir, line, profile string) (int, string) {
 	return g.validateGoverned(ctx, findingContextFrom(ctx), g.validatorForLine(line), resourceJSON, dir, line, profile, false).refusal()
@@ -1589,6 +1607,13 @@ type govResult struct {
 	Status int
 	Msg    string
 	Issues []string
+	// NoLane marks a refusal because no validator lane serves the line, so a
+	// call site with its own missing-lane status and text keeps them.
+	NoLane bool
+	// Recorded marks an invalid verdict that was recorded and let through
+	// (the policy decided Record): the message proceeds, but what failed is
+	// known to the caller.
+	Recorded bool
 }
 
 // refusal flattens a govResult for the 42 wrapper call lines that write
@@ -1641,27 +1666,45 @@ func kindForDirection(dir string, bridged bool) CheckKind {
 }
 
 // validateGoverned is the ONE place a runtime FHIR $validate verdict becomes a
-// refusal or a record. Every invalid verdict emits its finding first, at both
-// levels, and only then is the decision acted on. A validator outage or an
-// unlaned contract line is not a conformance verdict: those errors are
-// identical at every level and emit nothing.
+// refusal or a record. At none the check does not run: no validator call, no
+// finding. Every invalid verdict emits its finding first, at every level that
+// runs the check, and only then is the decision acted on. A check that could
+// not run (validator outage, no lane for the line) refuses at strict and for a
+// bridged payload, with no finding; at observe it is recorded as unavailable
+// and the message is relayed.
 func (g *Gateway) validateGoverned(ctx context.Context, fc findingContext, v shnsdk.Validator, resourceJSON []byte, dir, line, profile string, bridged bool) govResult {
-	if v == nil {
-		return govResult{Status: http.StatusInternalServerError, Msg: "no FHIR validator lane configured for contract line " + line + " (FR-36/FR-G29)"}
-	}
-	res, err := v.Validate(ctx, resourceJSON, profile)
-	if err != nil {
-		return govResult{Status: http.StatusInternalServerError, Msg: "validator unavailable"}
-	}
-	if res.Valid {
+	kind := kindForDirection(dir, bridged)
+	pol := g.policy()
+	if !pol.Runs(kind, "") {
 		return govResult{}
 	}
-	kind := kindForDirection(dir, bridged)
-	decision := g.policy().Decide(kind, "", VerdictInvalid)
 	whose := fc.Whose
 	if bridged {
 		whose = "network"
 	}
+	unavailable := func(refused govResult) govResult {
+		if pol.Decide(kind, "", VerdictUnavailable) == Refuse {
+			return refused
+		}
+		g.emitFinding(ConformanceFinding{
+			Kind: string(kind), Direction: dir, LegType: fc.LegType, CorrelationID: fc.CorrelationID,
+			Seam: fc.Seam, Whose: whose, Line: line, Profile: profile,
+			Level: pol.Level().String(), Verdict: "unavailable", Decision: Record.String(),
+			PayloadSHA256: sha256hex(resourceJSON),
+		})
+		return govResult{}
+	}
+	if v == nil {
+		return unavailable(govResult{Status: http.StatusInternalServerError, Msg: "no FHIR validator lane configured for contract line " + line + " (FR-36/FR-G29)", NoLane: true})
+	}
+	res, err := v.Validate(ctx, resourceJSON, profile)
+	if err != nil {
+		return unavailable(govResult{Status: http.StatusInternalServerError, Msg: "validator unavailable"})
+	}
+	if res.Valid {
+		return govResult{}
+	}
+	decision := pol.Decide(kind, "", VerdictInvalid)
 	g.emitFinding(ConformanceFinding{
 		Kind:          string(kind),
 		Direction:     dir,
@@ -1677,7 +1720,7 @@ func (g *Gateway) validateGoverned(ctx context.Context, fc findingContext, v shn
 		Issues:        res.Issues,
 	})
 	if decision == Record {
-		return govResult{}
+		return govResult{Recorded: true}
 	}
 	return govResult{Status: http.StatusUnprocessableEntity, Msg: dir + " validation failed", Issues: boundIssues(res.Issues)}
 }

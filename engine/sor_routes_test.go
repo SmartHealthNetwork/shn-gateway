@@ -201,24 +201,26 @@ func TestSoRSubjectRouteFamilies(t *testing.T) {
 						}
 					}}
 				}
-				g := &Gateway{cfg: Config{SoR: sor}}
+				// The payer routes read the system of record at the bind only when
+				// the participant requires known members.
+				g := &Gateway{cfg: Config{SoR: sor, RequireKnownMembers: true}}
 				var status int
 				var msg string
 				switch route {
 				case "crd-ingress":
 					_, status, msg = g.ingressCRDSubjectPCIContext(ctx, crd)
 				case "crd-native":
-					_, _, status, msg = g.conformantCRDBindContext(ctx, crd, "pci")
+					_, _, _, status, msg = g.conformantCRDBindContext(ctx, crd)
 				case "dispatch-native":
-					_, _, status, msg = g.conformantCRDDispatchBindContext(ctx, dispatch, "pci")
+					_, _, _, status, msg = g.conformantCRDDispatchBindContext(ctx, dispatch)
 				case "pas-ingress":
 					_, status, msg = g.ingressPASNativeSubjectPCIContext(ctx, pas)
 				case "pas-native":
-					_, status, msg = g.conformantPASBindContext(ctx, pas, "pci")
+					_, _, status, msg = g.conformantPASBindContext(ctx, pas)
 				case "pas-update":
-					_, status, msg = g.conformantPASUpdateBindContext(ctx, pas, "pci")
+					_, _, status, msg = g.conformantPASUpdateBindContext(ctx, pas)
 				case "next-question":
-					status, msg = g.bindNextQuestionSubjectContext(ctx, "Patient/MBR-COVERED", "pci", nil)
+					_, status, msg = g.bindNextQuestionSubjectContext(ctx, "Patient/MBR-COVERED", nil)
 				case "crd-prefetch":
 					_, status, msg = g.ingressEnsureSelfContainedContext(ctx, "crd-order-select", crd, "MBR-COVERED")
 				}
@@ -311,7 +313,9 @@ func TestSoRReferenceCallbackStopsAndSanitizes(t *testing.T) {
 
 func TestSoRNativeHandlersStopBeforeResponder(t *testing.T) {
 	s := scriptedReadSoR{t: t, base: ReadSystemOfRecord(newCensusSoR()), before: func(context.Context, string, string) error { return &SoRReadError{Kind: SoRAuthenticationFailed} }}
-	g := &Gateway{cfg: Config{SoR: s}} // A responder call would panic: failure must stop first.
+	// A responder call would panic: failure must stop first. The payer reads its
+	// system of record at the bind when it requires known members.
+	g := &Gateway{cfg: Config{SoR: s, RequireKnownMembers: true}}
 	for _, route := range []string{"crd", "pas", "patient-dtr", "eligibility", "records"} {
 		t.Run(route, func(t *testing.T) {
 			w := httptest.NewRecorder()
@@ -383,7 +387,7 @@ func TestSoRDispatchRefFailureNoLegs(t *testing.T) {
 func TestSoRFHIROperationEnvelope(t *testing.T) {
 	for _, kind := range []SoRFailureKind{SoRAuthenticationFailed, SoRUnavailable} {
 		s := scriptedReadSoR{t: t, base: ReadSystemOfRecord(newCensusSoR()), before: func(context.Context, string, string) error { return &SoRReadError{Kind: kind} }}
-		g := &Gateway{cfg: Config{SoR: s}}
+		g := &Gateway{cfg: Config{SoR: s, RequireKnownMembers: true}} // reads its system of record at the bind
 		w := httptest.NewRecorder()
 		r := httptest.NewRequest("POST", "/fhir/Claim/$submit", nil)
 		g.handlePASNativeInbound(&fhirOperationWriter{w}, r, shnsdk.Envelope{}, shnsdk.Token{}, loadPASGolden(t, "MBR-COVERED"), "")

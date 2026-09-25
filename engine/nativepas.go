@@ -19,6 +19,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -32,7 +33,7 @@ import (
 // (the pas-claim-update leg) — the only PA-update native-forward path.
 //
 // The conformant bundle's Claim.related[prior] key comes from
-// parseConformantPASUpdateFacts (the engine-local conformant extractor). The leg
+// readConformantPASUpdateFacts (the engine-local conformant extractor). The leg
 // binds that prior authorization for one amendment, relays the amendment to the
 // participant's own /Claim/$submit, and RELAYS WHATEVER THE PAYER ANSWERS — a
 // re-pend, a denial and an approval alike. SHN's own "amendment still
@@ -45,7 +46,12 @@ import (
 // `return LegResult{}, err` or `return bad, nil` after Begin would strand the
 // claim permanently.
 func (n *nativeResponder) handlePASClaimUpdateNative(ctx context.Context, corrID, subjectPCI string, in relay.Body, requestFHIR []byte) (LegResult, error) {
-	f, status, _ := parseConformantPASUpdateFacts(requestFHIR)
+	// The inbound bind judged the update's content and recorded any defect;
+	// this read only takes the prior authorization, refusing what strict
+	// refuses.
+	f, status, _ := readConformantPASUpdateFacts(requestFHIR, func(rule string) bool {
+		return n.conformance.Decide(KindContent, rule, VerdictInvalid) == Refuse
+	})
 	if status != 0 {
 		return LegResult{}, fmt.Errorf("engine: nativePAS parse conformant update bundle: status %d", status) // our fault → 500
 	}
@@ -53,7 +59,7 @@ func (n *nativeResponder) handlePASClaimUpdateNative(ctx context.Context, corrID
 	// identity (and a Claim.insurer naming this payer) BEFORE any store write, so a
 	// refusal never leaves a claim pended with no way to release it. Off (the default) ⇒
 	// the bundle is sent exactly.
-	forward, refused, err := n.payorEdgeRequest(in, payorEdgePASBundle, "application/fhir+json")
+	forward, refused, err := n.payorEdgeRequest(in, payorEdgePASBundle, "application/fhir+json", n.refusesRequest(ctx, RuleInsurer, requestFHIR))
 	if err != nil {
 		return LegResult{}, err
 	}
@@ -102,11 +108,16 @@ func (n *nativeResponder) handlePASClaimUpdateNative(ctx context.Context, corrID
 	}
 	// FR-G28: validate the complete partner Bundle without changing its bytes. A
 	// refusal is logged here, with the correlation id and the reference that
-	// dangled, before the framed error goes back.
-	response, lr := validateRelayedPASResponse(corrID, "pas-claim-update", up.raw)
+	// dangled, before the framed error goes back. Below strict an answer this
+	// gateway cannot read is relayed exactly and nothing is written from it.
+	response, lr := validateNativePASResponse(up.raw)
 	if lr.Status != 0 {
-		lr.Rollback = release
-		return lr, nil
+		if n.refusesAnswer(ctx, RuleAnswerShape, up.raw) {
+			_, lr = validateRelayedPASResponse(corrID, "pas-claim-update", up.raw)
+			lr.Rollback = release
+			return lr, nil
+		}
+		return relayUnread(ctx, up, RuleAnswerShape, release), nil
 	}
 	// The answer is the payer's own bytes, whatever they say.
 	answer := LegResult{
@@ -140,7 +151,10 @@ func (n *nativeResponder) handlePASClaimUpdateNative(ctx context.Context, corrID
 		return LegResult{Status: http.StatusBadGateway, Message: "upstream payer PAS update response untranslatable", Rollback: release}, nil
 	}
 	if parsed.Outcome == "denied" && payerStatedAuthNumber(response) != "" {
-		return LegResult{Status: http.StatusBadGateway, Message: "payer decision states both a denial and an authorization number", Rollback: release}, nil
+		if n.refusesAnswer(ctx, RuleEOBDecision, up.raw) {
+			return LegResult{Status: http.StatusBadGateway, Message: "payer decision states both a denial and an authorization number", Rollback: release}, nil
+		}
+		return relayUnread(ctx, up, RuleEOBDecision, release), nil
 	}
 	// A terminal decision on the update leg: relayed, and recorded as the decision
 	// the payer dated. No EOB on the update leg. Rollback stays armed so a
@@ -199,20 +213,24 @@ func pendOutcomeOf(outcome string) string {
 // amendment binds and a later `Claim/$inquire` resolves; a decision is recorded with its EOB in one
 // write. Nothing is polled and nothing is assembled.
 //
-// The conformant bundle is read by parseConformantPASSubjects (the engine-local conformant
+// The conformant bundle is read by readConformantPASSubjects (the engine-local conformant
 // extractor): the EOB patientRef is the BOUND member (R-7, request-side — never the response member,
 // which a real RI answers in its own namespace), and the procedure {system,code} comes from the
 // conformant bundle's ServiceRequest (CPT or HCPCS — the SAME 72148 the EOB-provenance canary checks
 // for the CPT persona). handlePASNativeInbound egress-$validates SideEffectFHIR + Commits.
 func (n *nativeResponder) handlePASClaimNative(ctx context.Context, corrID, subjectPCI string, in relay.Body, requestFHIR []byte) (LegResult, error) {
-	s, status, msg := parseConformantPASSubjects(requestFHIR)
+	// The inbound bind judged the bundle's content and recorded any defect; this
+	// read only takes the member and the order, refusing what strict refuses.
+	s, status, msg := readConformantPASSubjects(requestFHIR, n.mapsPayerIdentity(), func(rule string) bool {
+		return n.conformance.Decide(KindContent, rule, VerdictInvalid) == Refuse
+	})
 	if status != 0 {
 		return LegResult{Status: status, Message: msg}, nil
 	}
 	// Payer-edge identity mapping (payoredge.go): map the bundle's Coverage payer
 	// identity (and a Claim.insurer naming this payer) before it is posted (and before
 	// any store side-effect below). Off (the default) ⇒ the bundle is sent exactly.
-	forward, refused, err := n.payorEdgeRequest(in, payorEdgePASBundle, "application/fhir+json")
+	forward, refused, err := n.payorEdgeRequest(in, payorEdgePASBundle, "application/fhir+json", n.refusesRequest(ctx, RuleInsurer, requestFHIR))
 	if err != nil {
 		return LegResult{}, err
 	}
@@ -237,10 +255,16 @@ func (n *nativeResponder) handlePASClaimNative(ctx context.Context, corrID, subj
 	}
 	// FR-G28: the payer's Bundle must carry every resource it names. A refusal is
 	// logged here, with the correlation id and the reference that dangled, before
-	// the framed error goes back — the bytes themselves are not relayed.
-	response, lr := validateRelayedPASResponse(corrID, "pas-claim", up.raw)
+	// the framed error goes back — the bytes themselves are not relayed. Below
+	// strict an answer this gateway cannot read is relayed exactly and nothing is
+	// written from it.
+	response, lr := validateNativePASResponse(up.raw)
 	if lr.Status != 0 {
-		return lr, nil
+		if n.refusesAnswer(ctx, RuleAnswerShape, up.raw) {
+			_, lr = validateRelayedPASResponse(corrID, "pas-claim", up.raw)
+			return lr, nil
+		}
+		return relayUnread(ctx, up, RuleAnswerShape, nil), nil
 	}
 	// The answer to send: the payer's Bundle, exactly.
 	answer := LegResult{
@@ -277,7 +301,10 @@ func (n *nativeResponder) handlePASClaimNative(ctx context.Context, corrID, subj
 	// the placement the decision reader cannot yet tell apart, and it goes away
 	// once that reader takes both placements.
 	if parsed.Outcome == "denied" && payerStatedAuthNumber(response) != "" {
-		return LegResult{Status: http.StatusBadGateway, Message: "payer decision states both a denial and an authorization number"}, nil
+		if n.refusesAnswer(ctx, RuleEOBDecision, up.raw) {
+			return LegResult{Status: http.StatusBadGateway, Message: "payer decision states both a denial and an authorization number"}, nil
+		}
+		return relayUnread(ctx, up, RuleEOBDecision, nil), nil
 	}
 	outcome := pendOutcomeOf(parsed.Outcome)
 	if cpt == "" {
@@ -293,7 +320,11 @@ func (n *nativeResponder) handlePASClaimNative(ctx context.Context, corrID, subj
 		// cannot carry (a reason code outside the bound code systems, a note
 		// type outside the resource's) is upstream content, so refuse loudly
 		// (502) rather than drop it or substitute a code the payer never sent.
-		return LegResult{Status: http.StatusBadGateway, Message: "payer decision detail cannot be stated on a decision EOB"}, nil
+		// Below strict the payer's answer is relayed and nothing is written.
+		if n.refusesAnswer(ctx, RuleEOBDecision, up.raw) {
+			return LegResult{Status: http.StatusBadGateway, Message: "payer decision detail cannot be stated on a decision EOB"}, nil
+		}
+		return relayUnread(ctx, up, RuleEOBDecision, nil), nil
 	}
 	eob := &EOBRecord{SubjectPCI: subjectPCI, EOBID: decisionEOBID(corrID), JSON: eobJSON}
 	answer.SideEffectFHIR = [][]byte{eobJSON}
@@ -376,4 +407,42 @@ func payerStatedAuthNumber(body []byte) string {
 	}
 	ref, _ := g.response.resource["preAuthRef"].(string)
 	return ref
+}
+
+// refusesAnswer reports whether the payer's answer, which broke rule, is
+// refused. The answer is this participant's own content: the rule is not
+// checked at none, recorded at observe and refused at strict (the finding names
+// the answer as the participant's own). A repeated member name is read one way
+// only and refuses at every level.
+func (n *nativeResponder) refusesAnswer(ctx context.Context, rule string, raw []byte) bool {
+	if errors.Is(scanMessage(raw), relay.ErrDuplicateKey) {
+		return true
+	}
+	fc := findingContextFrom(ctx)
+	fc.Whose = "own"
+	return guardDefect(withFindingContext(ctx, fc), n.conformance, n.emitFinding, KindContent, rule, VerdictInvalid, raw)
+}
+
+// refusesRequest decides a defect of rule in the request this payer received
+// (raw), when called: the request is the requester's content, so the rule is
+// not checked at none, recorded at observe and refused at strict, and the
+// finding names the request as the peer's (the leg context handleInbound set).
+func (n *nativeResponder) refusesRequest(ctx context.Context, rule string, raw []byte) func() bool {
+	return func() bool {
+		return guardDefect(ctx, n.conformance, n.emitFinding, KindContent, rule, VerdictInvalid, raw)
+	}
+}
+
+// relayUnread is the payer's answer relayed exactly as it arrived, not read for
+// this gateway's own records: it carries no Commit and no side-effect, so no
+// pend, decision or EOB is written, and the inbound handler reports the write
+// it skipped (pasLeg.skipWrite, pa.local-write-skipped). rollback releases a
+// claim the leg acquired.
+func relayUnread(ctx context.Context, up upstreamReply, rule string, rollback func()) LegResult {
+	pasLegOf(ctx).skipWrite(rule)
+	return LegResult{
+		ResponseSubjectForeign: true,
+		Response:               relay.Exact(up.body, "application/fhir+json"),
+		Rollback:               rollback,
+	}
 }

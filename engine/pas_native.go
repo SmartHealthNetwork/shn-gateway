@@ -26,14 +26,44 @@ type conformantPASSubjects struct {
 	hasDR  bool   // a DiagnosticReport entry is present (FR-20 pended branch)
 }
 
-// parseConformantPASSubjects does ONE pass over a conformant PAS Claim Bundle, indexing entries by
+// parseConformantPASSubjects is readConformantPASSubjects refusing every defect
+// it finds, with a Coverage required. No request path calls it: every one
+// judges content by its level through readConformantPASSubjects. It stays as
+// the name the SDK's and the reference payer mirror's twin parsers cite, and
+// as the whole-strictness read the goldens and the twin-fence tests pin.
+func parseConformantPASSubjects(bundleJSON []byte) (conformantPASSubjects, int, string) {
+	return readConformantPASSubjects(bundleJSON, true, func(string) bool { return true })
+}
+
+// readConformantPASSubjects does ONE pass over a conformant PAS Claim Bundle, indexing entries by
 // resourceType. Unlike the deleted strict shnsdk.ParseClaimBundle (which rejected any entry outside
 // Claim/QR/SR/DR/Provenance), it TOLERATES the full conformant entry set (Patient, Coverage, payor
 // Organization, Practitioner, PractitionerRole) while binding every patient reference to ONE member:
 // Claim.patient + ServiceRequest.subject + Coverage.beneficiary (REQUIRED, R-4) — and
 // QuestionnaireResponse.subject + DiagnosticReport.subject WHEN PRESENT (R-5: a real br-payer
 // $submit may carry no QR). Engine-local (no SDK symbol).
-func parseConformantPASSubjects(bundleJSON []byte) (conformantPASSubjects, int, string) {
+//
+// The content defects are handed to refuses, which reports whether the defect
+// refuses the bundle. The checks run in the same order whatever it answers, so
+// a caller whose refuses always answers true refuses every defect it finds.
+//
+// What refuses whatever refuses answers: a bundle that cannot be read, is not a
+// Bundle or has an entry that cannot be read (the subject cannot be read, and a
+// repeated member name is read one way only); a Claim with no patient (the
+// subject, RuleSubjectPCI); and, when coverageAddresses is set, a bundle with
+// no Coverage. coverageAddresses says the Coverage's payor addresses this
+// request: the provider ingress routes it by that payor (recipientForWith),
+// and a payer whose identity mapping is configured addresses its own system by
+// it (locatePayorEdge). A payer without that mapping receives a request that
+// is already routed, so there no Coverage at all is the request's own shape
+// (RuleRequestShape), handed to refuses. The other content defects, handed to
+// refuses: no order and a Coverage with no beneficiary (RuleRequestShape: the
+// subject is Claim.patient and routing reads Coverage.payor, so neither needs
+// them), and an order, Coverage, QuestionnaireResponse or DiagnosticReport that
+// names another patient, or a QuestionnaireResponse naming none
+// (RulePatientMixed). A defect that does not refuse leaves the bundle bound to
+// Claim.patient.
+func readConformantPASSubjects(bundleJSON []byte, coverageAddresses bool, refuses func(rule string) bool) (conformantPASSubjects, int, string) {
 	var probe struct {
 		ResourceType string `json:"resourceType"`
 		Entry        []struct {
@@ -105,10 +135,17 @@ func parseConformantPASSubjects(bundleJSON []byte) (conformantPASSubjects, int, 
 	if !haveClaim || claimPat == "" {
 		return conformantPASSubjects{}, http.StatusBadRequest, "PAS bundle missing Claim.patient"
 	}
-	if !haveSR {
+	if !haveSR && refuses(RuleRequestShape) {
 		return conformantPASSubjects{}, http.StatusBadRequest, "PAS bundle missing order (ServiceRequest or DeviceRequest)"
 	}
-	if !haveCov || covBene == "" {
+	// No Coverage at all is addressing where the Coverage's payor addresses
+	// the request (coverageAddresses), refused at every level, and the
+	// request's own shape where it does not; a Coverage without a beneficiary
+	// is the request's own shape.
+	if !haveCov && (coverageAddresses || refuses(RuleRequestShape)) {
+		return conformantPASSubjects{}, http.StatusBadRequest, "PAS bundle missing Coverage.beneficiary"
+	}
+	if haveCov && covBene == "" && refuses(RuleRequestShape) {
 		return conformantPASSubjects{}, http.StatusBadRequest, "PAS bundle missing Coverage.beneficiary"
 	}
 	// Extract the member id tolerantly: the br-payer-targeting lane (provider-data) ABSOLUTIZES
@@ -117,8 +154,8 @@ func parseConformantPASSubjects(bundleJSON []byte) (conformantPASSubjects, int, 
 	// reads the bare id from either form, so SHN's member bind works regardless of base
 	// while the patient-consistency fence below still compares the SAME member identity.
 	member := pasMemberFromRef(claimPat)
-	if pasMemberFromRef(srSubject) != member ||
-		pasMemberFromRef(covBene) != member {
+	if ((haveSR && pasMemberFromRef(srSubject) != member) ||
+		(covBene != "" && pasMemberFromRef(covBene) != member)) && refuses(RulePatientMixed) {
 		return conformantPASSubjects{}, http.StatusForbidden, "inconsistent patient in PAS bundle"
 	}
 	// A QR with no subject could carry answers adjudicated for a different
@@ -126,13 +163,13 @@ func parseConformantPASSubjects(bundleJSON []byte) (conformantPASSubjects, int, 
 	// published SDK Responder's fence (sdk bindConformantClaimSubject), which
 	// enforced this first — this twin had been left behind (twin-fence corpus:
 	// upd-qr-missing-subject).
-	if s.qrJSON != nil && qrSubject == "" {
+	if s.qrJSON != nil && qrSubject == "" && refuses(RulePatientMixed) {
 		return conformantPASSubjects{}, http.StatusForbidden, "PAS bundle QuestionnaireResponse missing subject"
 	}
-	if qrSubject != "" && pasMemberFromRef(qrSubject) != member {
+	if qrSubject != "" && pasMemberFromRef(qrSubject) != member && refuses(RulePatientMixed) {
 		return conformantPASSubjects{}, http.StatusForbidden, "inconsistent patient in PAS bundle"
 	}
-	if s.hasDR && pasMemberFromRef(drSubject) != member {
+	if s.hasDR && pasMemberFromRef(drSubject) != member && refuses(RulePatientMixed) {
 		return conformantPASSubjects{}, http.StatusForbidden, "inconsistent patient in PAS bundle"
 	}
 	s.member = member
@@ -176,9 +213,16 @@ func pasMemberFromRef(ref string) string {
 }
 
 // ingressPASNativeSubjectPCI resolves the bound member of a conformant PAS bundle to a pci
-// (origination side). Mirrors ingressCRDSubjectPCI.
+// (origination side). Mirrors ingressCRDSubjectPCI. The subject (Claim.patient resolving to
+// a pci, the unknown-member setting inside resolveSubjectPCI) and a bundle that cannot be read or routed
+// refuse at every level; the bundle's own shape and consistency (readConformantPASSubjects)
+// are not checked at none, recorded at observe and refused at strict.
 func (g *Gateway) ingressPASNativeSubjectPCIContext(ctx context.Context, bundleJSON []byte) (string, int, string) {
-	s, status, msg := parseConformantPASSubjects(bundleJSON)
+	// The request is routed by its Coverage's payor: no Coverage refuses at
+	// every level.
+	s, status, msg := readConformantPASSubjects(bundleJSON, true, func(rule string) bool {
+		return g.guard(ctx, KindContent, rule, bundleJSON)
+	})
 	if status != 0 {
 		return "", status, msg
 	}
@@ -194,7 +238,7 @@ func (g *Gateway) ingressPASNativeSubjectPCIContext(ctx context.Context, bundleJ
 }
 
 // handlePASNativeInbound serves the conformant PAS leg payer-side: decrypt, subject-bind the
-// conformant request to the token (authority), forward the bundle to the responder (native relays the
+// conformant request by this payer's own system, forward the bundle to the responder (native relays the
 // bundle byte-verbatim to the real RI's /Claim/$submit AND projects the submit-cell Store
 // side-effects; an injected LegResponder adjudicates in-process AND records the same side-effects),
 // and relay the response. The response member-fence (R-7) and response egress-$validate (R-8) are
@@ -234,7 +278,7 @@ func (g *Gateway) ingressPASNativeSubjectPCIContext(ctx context.Context, bundleJ
 // verbatim relay produces no EOB side-effect, so that loop runs only for a non-relaying responder. This mirrors the DTR
 // near-relay, CRD-native, and the minimized pas-claim case.
 func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token, bundleJSON []byte, answerTok string) {
-	boundPatientRef, status, msg := g.conformantPASBindContext(r.Context(), bundleJSON, tok.Subject)
+	boundPatientRef, subjectPCI, status, msg := g.conformantPASBindContext(r.Context(), bundleJSON)
 	if status != 0 {
 		g.refuseInbound(w, r, legPASClaim, env, tok, answerTok, status, msg, nil)
 		return
@@ -242,7 +286,10 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 	// A correlation id that already names another patient's authorization is
 	// refused before the payer is asked (eobowner.go): the payer must not act on a
 	// claim whose decision this gateway could not then record for this patient.
-	if status, msg := g.correlationTaken(tok.Subject, env.Metadata.CorrelationID); status != 0 {
+	// Everything the payer records about the claim is keyed by its own binding
+	// of the member the claim names (bindInboundSubject), never by the token.
+	g.noteSubjectBinding("pas-claim", env.Metadata.CorrelationID, tok.Subject, subjectPCI)
+	if status, msg := g.correlationTaken(subjectPCI, env.Metadata.CorrelationID); status != 0 {
 		g.refuseInbound(w, r, legPASClaim, env, tok, answerTok, status, msg, nil)
 		return
 	}
@@ -258,7 +305,7 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 	// every lookup key by the requester that submitted the claim, and that is the
 	// engine's fact, never the content seam's.
 	observationContext, pasLeg := withPASLeg(observationContext, env.Metadata.Sender)
-	result, err := g.cfg.Responder.Handle(observationContext, "pas-claim", env.Metadata.CorrelationID, tok.Subject, bundleJSON)
+	result, err := g.cfg.Responder.Handle(observationContext, "pas-claim", env.Metadata.CorrelationID, subjectPCI, bundleJSON)
 
 	// Rollback on any pre-commit early return (the seam carries it for the update leg; submit
 	// acquires no claim, so Rollback is nil today). Mirrors handlePASInbound.
@@ -290,7 +337,11 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 	r = r.WithContext(withFindingContext(r.Context(), fc))
 	// Native operation success is always a complete Bundle, regardless of the
 	// responder implementation. Resource-level builders and polling stay separate.
-	if _, bad := validateNativePASResponse(responseFHIR); bad.Status != 0 {
+	// A relayed answer is the participant's own content: below strict an answer
+	// this gateway cannot read, or whose subjects do not bind, is relayed as the
+	// payer sent it and nothing is written from it (payerAnswerRead).
+	read := g.newPayerAnswerRead(r.Context(), result, responseFHIR, pasLeg.unreadRule())
+	if _, bad := validateNativePASResponse(responseFHIR); bad.Status != 0 && read.refusesUnreadable(RuleAnswerShape) {
 		g.refuseInbound(w, r, legPASClaim, env, tok, answerTok, bad.Status, bad.Message, nil)
 		return
 	}
@@ -300,7 +351,7 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 	// member namespace, both flags false, so it fences strict). The SHN-produced EOB side-effect is
 	// fenced UNCONDITIONALLY (always built from the bound member). Re-adds the (C) fence the minimized
 	// pas-claim leg carries, before that leg is deleted (OWD-G6 prove-first).
-	if status, msg := g.fenceResponseSubject("pas-claim", boundPatientRef, env.Metadata.CorrelationID, result); status != 0 {
+	if status, msg := g.fenceResponseSubjectWith("pas-claim", boundPatientRef, env.Metadata.CorrelationID, result, read.refuses); status != 0 {
 		g.refuseInbound(w, r, legPASClaim, env, tok, answerTok, status, msg, nil)
 		return
 	}
@@ -320,10 +371,20 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 	// The EOB is PDex, not pa.pas: its shape does not vary with the PAS line, so it validates on the
 	// canonical lane (line "") — passing the PAS answer line here would demand a PAS lane for a
 	// resource that lane does not govern.
+	//
+	// Below strict an EOB built from a relayed answer that is invalid is recorded,
+	// the payer's answer is relayed, and nothing is written (RuleEOBDecision).
+	if !read.read() {
+		result.SideEffectFHIR = nil
+	}
 	for _, b := range result.SideEffectFHIR {
-		if status, msg := g.validateFHIR(r.Context(), b, "egress", ""); status != 0 {
+		status, msg, invalid := g.validateFHIRRecorded(r.Context(), b, "egress", "")
+		if status != 0 {
 			g.refuseInbound(w, r, legPASClaim, env, tok, answerTok, status, msg, nil)
 			return
+		}
+		if invalid {
+			read.eobInvalid()
 		}
 	}
 	// Build the response leg BEFORE committing payer state so a response-leg
@@ -345,7 +406,10 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	eobOwnedElsewhere := false
-	if result.Commit != nil {
+	// An answer relayed unread writes nothing: the Commit is not run, and the
+	// deferred Rollback releases whatever the responder acquired, exactly as
+	// on any other exit that does not commit.
+	if read.read() && result.Commit != nil {
 		if err := result.Commit(); err != nil {
 			if !errors.Is(err, ErrEOBSubjectMismatch) {
 				// Store-write failure → 502 (parity with the minimized pas-claim RecordEOB/RecordPended 502).
@@ -359,7 +423,10 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 			eobOwnedElsewhere = true
 		}
 	}
-	committed = true
+	committed = read.read()
+	if !committed {
+		g.payerLocalWriteSkipped("pas-claim", env.Metadata.CorrelationID, read.unread)
+	}
 	for _, kind := range pasLeg.notes {
 		g.observe(ObserverEvent{Kind: kind, Direction: "ingress", LegType: "pas-claim",
 			CorrelationID: env.Metadata.CorrelationID, Counterpart: env.Metadata.Sender})
@@ -371,8 +438,8 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 }
 
 // handlePASUpdateNativeInbound serves the CONFORMANT amended-re-POST leg (pas-claim-update)
-// payer-side: decrypt, subject-bind + FR-32-gate the conformant update request to the token
-// (conformantPASUpdateBind — authority + the supplemental-data Provenance attribution), forward the
+// payer-side: decrypt, subject-bind + FR-32-gate the conformant update request by this payer's own
+// system (conformantPASUpdateBind — the subject + the supplemental-data Provenance attribution), forward the
 // bundle to the responder, and relay the response. It is the UPDATE-family mirror of
 // handlePASNativeInbound (the conformant SUBMIT leg): same Rollback-on-any-pre-commit-early-return +
 // build-response-BEFORE-Commit ordering — the update responder DOES carry a
@@ -394,11 +461,12 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 // keep this leg symmetric with submit so the native relay stands the response fence/$validate down.
 // (The minimized pas-claim-update leg's (C) fence stays LIVE on its own leg until that leg is deleted.)
 func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token, bundleJSON []byte, answerTok string) {
-	boundPatientRef, status, msg := g.conformantPASUpdateBindContext(r.Context(), bundleJSON, tok.Subject)
+	boundPatientRef, subjectPCI, status, msg := g.conformantPASUpdateBindContext(r.Context(), bundleJSON)
 	if status != 0 {
 		g.refuseInbound(w, r, legPASClaimUpdate, env, tok, answerTok, status, msg, nil)
 		return
 	}
+	g.noteSubjectBinding("pas-claim-update", env.Metadata.CorrelationID, tok.Subject, subjectPCI)
 	capture := &nativeCertificationCapture{}
 	defer func() {
 		if capture.attempted {
@@ -411,7 +479,7 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 	// every lookup key by the requester that submitted the claim, and that is the
 	// engine's fact, never the content seam's.
 	observationContext, pasLeg := withPASLeg(observationContext, env.Metadata.Sender)
-	result, err := g.cfg.Responder.Handle(observationContext, "pas-claim-update", env.Metadata.CorrelationID, tok.Subject, bundleJSON)
+	result, err := g.cfg.Responder.Handle(observationContext, "pas-claim-update", env.Metadata.CorrelationID, subjectPCI, bundleJSON)
 	// Arm defer-rollback-unless-committed on the returned result BEFORE checking err: the update
 	// responder acquires a claim in BeginClaimUpdate and returns LegResult{Rollback: release} even
 	// alongside a build error, so the claim is still released by this defer. Mirrors handlePASInbound
@@ -444,7 +512,11 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 	r = r.WithContext(withFindingContext(r.Context(), fc))
 	// Native operation success is always a complete Bundle, regardless of the
 	// responder implementation. Resource-level builders and polling stay separate.
-	if _, bad := validateNativePASResponse(responseFHIR); bad.Status != 0 {
+	// A relayed answer is the participant's own content: below strict an answer
+	// this gateway cannot read, or whose subjects do not bind, is relayed as the
+	// payer sent it and nothing is written from it (payerAnswerRead).
+	read := g.newPayerAnswerRead(r.Context(), result, responseFHIR, pasLeg.unreadRule())
+	if _, bad := validateNativePASResponse(responseFHIR); bad.Status != 0 && read.refusesUnreadable(RuleAnswerShape) {
 		g.refuseInbound(w, r, legPASClaimUpdate, env, tok, answerTok, bad.Status, bad.Message, nil)
 		return
 	}
@@ -453,7 +525,7 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 	// The update leg builds no EOB, so the SHN-produced-side-effect fence is a no-op here; the flag
 	// keeps the leg symmetric with submit so the native relay (both flags set) stands the member-fence
 	// down. Re-adds the (C) fence before the minimized pas-claim-update leg is deleted (OWD-G6).
-	if status, msg := g.fenceResponseSubject("pas-claim-update", boundPatientRef, env.Metadata.CorrelationID, result); status != 0 {
+	if status, msg := g.fenceResponseSubjectWith("pas-claim-update", boundPatientRef, env.Metadata.CorrelationID, result, read.refuses); status != 0 {
 		g.refuseInbound(w, r, legPASClaimUpdate, env, tok, answerTok, status, msg, nil)
 		return
 	}
@@ -468,10 +540,17 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 	// Egress-$validate the SHN-PRODUCED side-effects before the Store write (FR-36). The update leg
 	// builds NO EOB, so SideEffectFHIR is empty and this loop is a structural no-op (F-PB-R8); the
 	// relay RESPONSE itself is NOT $validated (it may be a foreign RI's Da Vinci payload, R-8).
+	if !read.read() {
+		result.SideEffectFHIR = nil
+	}
 	for _, b := range result.SideEffectFHIR {
-		if status, msg := g.validateFHIR(r.Context(), b, "egress", ""); status != 0 {
+		status, msg, invalid := g.validateFHIRRecorded(r.Context(), b, "egress", "")
+		if status != 0 {
 			g.refuseInbound(w, r, legPASClaimUpdate, env, tok, answerTok, status, msg, nil)
 			return
+		}
+		if invalid {
+			read.eobInvalid()
 		}
 	}
 	// Build the response leg BEFORE committing payer state so a response-leg
@@ -486,14 +565,20 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
-	if result.Commit != nil {
+	// An answer relayed unread writes nothing: the Commit is not run, and the
+	// deferred Rollback releases whatever the responder acquired, exactly as
+	// on any other exit that does not commit.
+	if read.read() && result.Commit != nil {
 		if err := result.Commit(); err != nil {
 			// FinalizeClaimUpdate store-write failure → 502 (parity with the minimized leg).
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "holder write failed (finalize update)"})
 			return
 		}
 	}
-	committed = true
+	committed = read.read()
+	if !committed {
+		g.payerLocalWriteSkipped("pas-claim-update", env.Metadata.CorrelationID, read.unread)
+	}
 	for _, kind := range pasLeg.notes {
 		g.observe(ObserverEvent{Kind: kind, Direction: "ingress", LegType: "pas-claim-update",
 			CorrelationID: env.Metadata.CorrelationID, Counterpart: env.Metadata.Sender})
@@ -501,32 +586,41 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 	writeLeg(w, respBytes)
 }
 
-// conformantPASBind is the payer-side authority check: the conformant request must subject-bind
-// (parseConformantPASSubjects) AND its member must resolve to the inbound token's PCI. Returns
-// the bound member ref ("Patient/<member>") as the first value on accept (the (C) fence's
-// boundPatientRef — a namespace-aware response member-fence applies on this
-// leg, fenceResponseSubject("pas-claim", …)); "" on every reject. Status 0 = accept.
-func (g *Gateway) conformantPASBindContext(ctx context.Context, bundleJSON []byte, tokSubject string) (memberRef string, status int, msg string) {
-	s, status, msg := parseConformantPASSubjects(bundleJSON)
+// conformantPASBind is the payer-side subject bind: the conformant request must subject-bind
+// (readConformantPASSubjects), and its member is bound by this payer's own system
+// (bindInboundSubject). Returns the bound member ref ("Patient/<member>") as the first value on
+// accept (the (C) fence's boundPatientRef — a namespace-aware response member-fence applies on
+// this leg, fenceResponseSubject("pas-claim", …)) and the payer's binding of the member, which
+// keys the pend ledger, the decision EOB and the correlation check; "" on every reject. Status 0
+// = accept.
+//
+// A bundle with no Coverage is the request's own shape (RuleRequestShape) on a payer
+// without identity mapping; with the mapping configured it refuses at every level,
+// because the mapping addresses the payer's own system by the Coverage's payor.
+//
+// The subject (Claim.patient, bound by this payer's own system, the unknown-member setting
+// applying inside resolveSubjectPCI) and a bundle that cannot be read refuse at every
+// level; the bundle's own shape and consistency (readConformantPASSubjects) are not checked at
+// none, recorded at observe and refused at strict. Below strict the bundle is bound to Claim.patient and forwarded as sent.
+func (g *Gateway) conformantPASBindContext(ctx context.Context, bundleJSON []byte) (memberRef, subjectPCI string, status int, msg string) {
+	// The request is already routed here. No Coverage is its own shape unless
+	// this payer's identity mapping addresses its own system by the Coverage's
+	// payor.
+	s, status, msg := readConformantPASSubjects(bundleJSON, g.mapsPayerIdentity(), func(rule string) bool {
+		return g.guard(ctx, KindContent, rule, bundleJSON)
+	})
 	if status != 0 {
-		return "", status, msg
+		return "", "", status, msg
 	}
-	pci, found, readErr := g.resolveSubjectPCI(ctx, s.member, bundleJSON)
-	if readErr != nil {
-		status, msg := SoRFailureResponse(readErr)
-		return "", status, msg
+	subjectPCI, status, msg = g.bindInboundSubject(ctx, s.member, bundleJSON)
+	if status != 0 {
+		return "", "", status, msg
 	}
-	if !found {
-		return "", http.StatusBadRequest, "unknown member"
-	}
-	if pci != tokSubject {
-		return "", http.StatusForbidden, "token subject does not match request patient"
-	}
-	return "Patient/" + s.member, 0, ""
+	return "Patient/" + s.member, subjectPCI, 0, ""
 }
 
 // conformantUpdateFacts is the CONFORMANT analog of shnsdk.ClaimBundle's FR-32 exposure
-// (sdk/pasresponder.go) — the cross-resource facts parseConformantPASSubjects does NOT surface
+// (sdk/pasresponder.go) — the cross-resource facts readConformantPASSubjects does NOT surface
 // (it returns only {member, qrJSON, srJSON, hasDR}). These are exactly the fields the inbound
 // update gate enforces against (the FR-32 arms mirror payer.go:393-424).
 type conformantUpdateFacts struct {
@@ -541,10 +635,19 @@ type conformantUpdateFacts struct {
 	claimCorrelation   string   // Claim.identifier[].value where system=="urn:shn:correlation", or "" (Finding A: partner-supplied leg corr)
 }
 
-// parseConformantPASUpdateFacts does ONE pass over a conformant amended-re-POST Bundle, extracting the
-// FR-32 cross-resource facts parseConformantPASSubjects does NOT surface, for the CONFORMANT shape: it
+// parseConformantPASUpdateFacts is readConformantPASUpdateFacts refusing every
+// defect it finds. No request path calls it: the provider ingress, the payer's
+// update bind and its responder all read by their level through
+// readConformantPASUpdateFacts. It stays as the name the SDK's twin parser and
+// the scenario driver cite, and as the whole-strictness read the tests pin.
+func parseConformantPASUpdateFacts(bundleJSON []byte) (conformantUpdateFacts, int, string) {
+	return readConformantPASUpdateFacts(bundleJSON, func(string) bool { return true })
+}
+
+// readConformantPASUpdateFacts does ONE pass over a conformant amended-re-POST Bundle, extracting the
+// FR-32 cross-resource facts readConformantPASSubjects does NOT surface, for the CONFORMANT shape: it
 // tolerates the full conformant entry set (Patient/Coverage/Org/Practitioner are present and ignored,
-// like parseConformantPASSubjects) and reads Claim.related[prior], the supplemental DiagnosticReport id,
+// like readConformantPASSubjects) and reads Claim.related[prior], the supplemental DiagnosticReport id,
 // the amended QR id, and the Provenance agents/targets/policies. Returns (facts, 0, "") on a parseable
 // Bundle; (_, 400, msg) on malformed. Engine-local (no SDK symbol).
 //
@@ -558,7 +661,7 @@ type conformantUpdateFacts struct {
 // entry never overwrites either: letting the prior-Claim entry win threaded the SUBMIT's
 // correlation onto the AMEND's envelope in handlePASIngress, which the Hub's replay guard rejected
 // as a duplicate — the partner saw 502 {"error":"hub routing failed"} on every amendment.
-func parseConformantPASUpdateFacts(bundleJSON []byte) (conformantUpdateFacts, int, string) {
+func readConformantPASUpdateFacts(bundleJSON []byte, refuses func(rule string) bool) (conformantUpdateFacts, int, string) {
 	var probe struct {
 		ResourceType string `json:"resourceType"`
 		Entry        []struct {
@@ -572,6 +675,7 @@ func parseConformantPASUpdateFacts(bundleJSON []byte) (conformantUpdateFacts, in
 		return conformantUpdateFacts{}, http.StatusBadRequest, "PAS update request is not a Bundle"
 	}
 	var f conformantUpdateFacts
+	shape := func() bool { return refuses(RuleRequestShape) }
 	// Claim-entry selection state (see the doc comment): the first Claim entry's own correlation,
 	// and the operative update Claim's — the first Claim entry carrying related[]. Resolved after
 	// the pass so a LATER Claim entry (the sdk's prior-Claim entry) can never overwrite either.
@@ -603,7 +707,16 @@ func parseConformantPASUpdateFacts(bundleJSON []byte) (conformantUpdateFacts, in
 					} `json:"claim"`
 				} `json:"related"`
 			}
-			if err := decodeMessage(e.Resource, &c); err != nil {
+			var core struct {
+				Related []struct {
+					Claim struct {
+						Identifier struct {
+							Value string `json:"value"`
+						} `json:"identifier"`
+					} `json:"claim"`
+				} `json:"related"`
+			}
+			if err := decodeContent(e.Resource, &c, &core, shape); err != nil {
 				return conformantUpdateFacts{}, http.StatusBadRequest, "parse update Claim entry failed"
 			}
 			// Finding A: surface the Claim's own urn:shn:correlation so handlePASIngress can key
@@ -628,7 +741,7 @@ func parseConformantPASUpdateFacts(bundleJSON []byte) (conformantUpdateFacts, in
 			var qr struct {
 				Id string `json:"id"`
 			}
-			if err := decodeMessage(e.Resource, &qr); err != nil {
+			if err := decodeContent(e.Resource, &qr, &struct{}{}, shape); err != nil {
 				return conformantUpdateFacts{}, http.StatusBadRequest, "parse update QR entry failed"
 			}
 			f.qrID = qr.Id
@@ -636,7 +749,7 @@ func parseConformantPASUpdateFacts(bundleJSON []byte) (conformantUpdateFacts, in
 			var dr struct {
 				Id string `json:"id"`
 			}
-			if err := decodeMessage(e.Resource, &dr); err != nil {
+			if err := decodeContent(e.Resource, &dr, &struct{}{}, shape); err != nil {
 				return conformantUpdateFacts{}, http.StatusBadRequest, "parse update DiagnosticReport entry failed"
 			}
 			f.hasDR = true
@@ -658,7 +771,7 @@ func parseConformantPASUpdateFacts(bundleJSON []byte) (conformantUpdateFacts, in
 				} `json:"agent"`
 				Policy []string `json:"policy"`
 			}
-			if err := decodeMessage(e.Resource, &prov); err != nil {
+			if err := decodeContent(e.Resource, &prov, &struct{}{}, shape); err != nil {
 				return conformantUpdateFacts{}, http.StatusBadRequest, "parse update Provenance entry failed"
 			}
 			for _, tgt := range prov.Target {
@@ -680,7 +793,7 @@ func parseConformantPASUpdateFacts(bundleJSON []byte) (conformantUpdateFacts, in
 			}
 		default:
 			// Patient / Coverage / ServiceRequest / Organization / Practitioner / PractitionerRole —
-			// tolerated (parseConformantPASSubjects already binds their subjects).
+			// tolerated (readConformantPASSubjects already binds their subjects).
 		}
 	}
 	if sawOperativeClaim {
@@ -693,37 +806,58 @@ func parseConformantPASUpdateFacts(bundleJSON []byte) (conformantUpdateFacts, in
 
 // conformantPASUpdateBind is the payer-side authority + FR-32 check for the CONFORMANT update leg
 // (pas-claim-update). The request must subject-bind (conformantPASBind — three-way patient
-// bind + token-PCI match), AND carry a Provenance with an agent that TARGETS the supplemental
+// bind, bound by this payer's own system), AND carry a Provenance with an agent that TARGETS the supplemental
 // resource — the DiagnosticReport when present, else the amended QuestionnaireResponse. This mirrors
 // the minimized leg's FR-32 enforcement (payer.go:393-424) for the conformant shape: a Provenance
 // for an unrelated/wrong-id resource, or with no agent, does not attribute the evidence and is
 // rejected. Returns the bound member ref ("Patient/<member>", from conformantPASBind) as the first
 // value on accept (the (C) fence's boundPatientRef — a namespace-aware response
-// member-fence applies on this leg too); "" on every reject. Status 0 = accept.
-func (g *Gateway) conformantPASUpdateBindContext(ctx context.Context, bundleJSON []byte, tokSubject string) (memberRef string, status int, msg string) {
-	memberRef, status, msg = g.conformantPASBindContext(ctx, bundleJSON, tokSubject)
+// member-fence applies on this leg too) and the payer's binding of the member, which keys the
+// claim and ledger lookups; "" on every reject. Status 0 = accept.
+//
+// The FR-32 attribution is the update's own content (RuleUpdateProvenance): not checked at none,
+// recorded at observe and forwarded as sent, refused at strict with the status and body strict has
+// always given. A value of the wrong type in the update's entries is its own shape
+// (RuleRequestShape, readConformantPASUpdateFacts), handled the same way. An update whose related[]
+// or entry types cannot be read refuses at every level, as a bundle that cannot be read does.
+func (g *Gateway) conformantPASUpdateBindContext(ctx context.Context, bundleJSON []byte) (memberRef, subjectPCI string, status int, msg string) {
+	memberRef, subjectPCI, status, msg = g.conformantPASBindContext(ctx, bundleJSON)
 	if status != 0 {
-		return "", status, msg
+		return "", "", status, msg
 	}
-	f, status, msg := parseConformantPASUpdateFacts(bundleJSON)
+	f, status, msg := readConformantPASUpdateFacts(bundleJSON, func(rule string) bool {
+		return g.guard(ctx, KindContent, rule, bundleJSON)
+	})
 	if status != 0 {
-		return "", status, msg
+		return "", "", status, msg
 	}
+	if why := updateProvenanceDefect(f); why != "" && g.guard(ctx, KindContent, RuleUpdateProvenance, bundleJSON) {
+		return "", "", http.StatusForbidden, why
+	}
+	return memberRef, subjectPCI, 0, ""
+}
+
+// updateProvenanceDefect is the FR-32 gate over an update's facts: "" when a Provenance with an
+// agent targets the supplemental resource — the DiagnosticReport when present, else the amended
+// QuestionnaireResponse — else the refusal naming what is missing. This mirrors the minimized leg's
+// FR-32 enforcement (payer.go:393-424) for the conformant shape: a Provenance for an
+// unrelated/wrong-id resource, or with no agent, does not attribute the evidence.
+func updateProvenanceDefect(f conformantUpdateFacts) string {
 	if f.provenanceJSON == nil {
-		return "", http.StatusForbidden, "ClaimUpdate missing Provenance"
+		return "ClaimUpdate missing Provenance"
 	}
 	if len(f.provenanceAgents) == 0 {
-		return "", http.StatusForbidden, "ClaimUpdate Provenance missing agent"
+		return "ClaimUpdate Provenance missing agent"
 	}
 	var wantTarget string
 	if f.hasDR {
 		if f.diagnosticReportID == "" {
-			return "", http.StatusForbidden, "supplemental DiagnosticReport missing id"
+			return "supplemental DiagnosticReport missing id"
 		}
 		wantTarget = "DiagnosticReport/" + f.diagnosticReportID
 	} else {
 		if f.qrID == "" {
-			return "", http.StatusForbidden, "supplemental QuestionnaireResponse missing id"
+			return "supplemental QuestionnaireResponse missing id"
 		}
 		wantTarget = "QuestionnaireResponse/" + f.qrID
 	}
@@ -733,10 +867,10 @@ func (g *Gateway) conformantPASUpdateBindContext(ctx context.Context, bundleJSON
 		// Da Vinci payer resolves it. Match either the relative wantTarget or any ref ending
 		// in "/<wantTarget>" — same absolutization-tolerance as pasMemberFromRef.
 		if ref == wantTarget || strings.HasSuffix(ref, "/"+wantTarget) {
-			return memberRef, 0, ""
+			return ""
 		}
 	}
-	return "", http.StatusForbidden, "ClaimUpdate Provenance does not target the supplemental data"
+	return "ClaimUpdate Provenance does not target the supplemental data"
 }
 
 // stampForBuiltAnswer resolves the contractVersion frame stamp for an answer
@@ -777,4 +911,66 @@ func (g *Gateway) validatePASResult(ctx context.Context, result LegResult, answe
 		return 0, ""
 	}
 	return g.validateFHIRForContract(ctx, responseFHIR, "egress", "pa.pas", shnsdk.LineOf(answerTok), "")
+}
+
+// payerAnswerRead tracks whether a payer gateway read its participant's answer
+// for its own records on a PAS or inquiry leg. An answer this gateway built is
+// its own (local consumption): every defect refuses, at every level, as ever.
+// A relayed answer is the participant's content: a defect is not checked at
+// none, recorded at observe and refused at strict; a defect that does not
+// refuse marks the answer unread, the answer is relayed exactly as the payer
+// sent it, its remaining content checks are skipped (an answer that was not
+// read has nothing further to judge) and nothing is written from it — no pend,
+// decision or EOB (payerLocalWriteSkipped). The writes an answer that is read
+// makes keep their order.
+type payerAnswerRead struct {
+	g       *Gateway
+	ctx     context.Context
+	relayed bool
+	answer  []byte
+	// unread is the rule the answer broke below strict: the responder's
+	// (pasLeg.unread), or the first check here that did not refuse. "" when
+	// the answer was read.
+	unread string
+}
+
+func (g *Gateway) newPayerAnswerRead(ctx context.Context, result LegResult, answer []byte, unread string) *payerAnswerRead {
+	return &payerAnswerRead{g: g, ctx: ctx, relayed: result.ResponseRelayed(), answer: answer, unread: unread}
+}
+
+// read reports whether the answer was read, so the local record may be
+// written from it.
+func (a *payerAnswerRead) read() bool { return a.unread == "" }
+
+// refuses is the refuses callback for the answer's content checks.
+func (a *payerAnswerRead) refuses(rule string) bool {
+	switch {
+	case !a.relayed:
+		return true
+	case a.unread != "":
+		return false
+	case a.g.guard(a.ctx, KindContent, rule, a.answer):
+		return true
+	}
+	a.unread = rule
+	return false
+}
+
+// refusesUnreadable is refuses for an answer this gateway cannot read: a
+// repeated member name is read one way only and refuses at every level.
+func (a *payerAnswerRead) refusesUnreadable(rule string) bool {
+	if errors.Is(scanMessage(a.answer), relay.ErrDuplicateKey) {
+		return true
+	}
+	return a.refuses(rule)
+}
+
+// eobInvalid marks a relayed answer whose decision EOB, built by this gateway
+// from it, failed validation and was let through (below strict): the answer is
+// relayed and nothing is written (RuleEOBDecision). The EOB's own finding was
+// recorded by the validation.
+func (a *payerAnswerRead) eobInvalid() {
+	if a.relayed && a.unread == "" {
+		a.unread = RuleEOBDecision
+	}
 }

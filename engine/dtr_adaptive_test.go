@@ -178,27 +178,29 @@ func TestMergeDeliveredGroups(t *testing.T) {
 }
 
 // TestNextQuestionSubjectBindAndFence pins the payer side's two fences on an adaptive round:
-// (A) the carried subject resolves to the token subject via the payer's OWN record; (C) the
+// (A) the carried subject is bound via the payer's OWN record; (C) the
 // answer is about the patient the request carried.
 func TestNextQuestionSubjectBindAndFence(t *testing.T) {
 	stub := newCensusSoR()
-	g := &Gateway{cfg: Config{SoR: stub}}
+	// The payer requires known members, so an unknown member is refused.
+	g := &Gateway{cfg: Config{SoR: stub, RequireKnownMembers: true}}
 	coveredPCI, _, _ := stub.ResolvePatient("MBR-COVERED")
 	uc04PCI, _, _ := stub.ResolvePatient("MBR-UC04")
 
 	for _, tc := range []struct {
-		name, subject, token string
-		wantStatus           int
+		name, subject, want string
+		wantStatus          int
 	}{
 		{"match", "Patient/MBR-COVERED", coveredPCI, 0},
-		{"other-member", "Patient/MBR-UC04", coveredPCI, http.StatusForbidden},
-		{"unknown-member", "Patient/MBR-NOBODY", coveredPCI, http.StatusBadRequest},
-		{"no-subject", "", uc04PCI, http.StatusBadRequest},
-		{"not-a-patient-ref", "Practitioner/1", uc04PCI, http.StatusBadRequest},
+		{"other-member: bound to that member's record", "Patient/MBR-UC04", uc04PCI, 0},
+		{"unknown-member", "Patient/MBR-NOBODY", "", http.StatusBadRequest},
+		{"no-subject", "", "", http.StatusBadRequest},
+		{"not-a-patient-ref", "Practitioner/1", "", http.StatusBadRequest},
 	} {
 		t.Run("bind/"+tc.name, func(t *testing.T) {
-			if status, _ := g.bindNextQuestionSubjectContext(context.Background(), tc.subject, tc.token, nil); status != tc.wantStatus {
-				t.Fatalf("bind(%q) status=%d, want %d", tc.subject, status, tc.wantStatus)
+			pci, status, _ := g.bindNextQuestionSubjectContext(context.Background(), tc.subject, nil)
+			if status != tc.wantStatus || pci != tc.want {
+				t.Fatalf("bind(%q) status=%d pci=%q, want %d %q", tc.subject, status, pci, tc.wantStatus, tc.want)
 			}
 		})
 	}

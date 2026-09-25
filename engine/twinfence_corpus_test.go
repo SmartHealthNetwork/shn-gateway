@@ -26,7 +26,7 @@ import (
 // committed copies fresh and identical.
 //
 // The corpus covers the COMMON decision surface. The engine's registry arm
-// (Claim.patient resolved to a PCI and compared to the token subject) is
+// (Claim.patient bound to a PCI through the payer's own system) is
 // engine-only — the standalone SDK Responder has no patient registry — and
 // stays pinned by this package's own conformantPASUpdateBind rejection set.
 
@@ -112,11 +112,14 @@ func TestTwinFenceCorpus(t *testing.T) {
 				if !found {
 					t.Fatalf("tokenMember %q not resolvable in the census fixture", v.TokenMember)
 				}
-				_, status, msg := g.conformantPASUpdateBindContext(context.Background(), v.Bundle, pci)
+				_, bound, status, msg := g.conformantPASUpdateBindContext(context.Background(), v.Bundle)
 				switch v.Expect {
 				case "accept":
 					if status != 0 {
 						t.Fatalf("update fence rejected an accept vector: %d %s", status, msg)
+					}
+					if bound != pci {
+						t.Fatalf("update fence bound an accept vector to %q, want the payer's record of %s (%q)", bound, v.TokenMember, pci)
 					}
 				case "reject":
 					if status == 0 {

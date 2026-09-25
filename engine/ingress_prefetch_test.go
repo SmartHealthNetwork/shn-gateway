@@ -52,6 +52,7 @@ type prefetchSoR struct {
 	searches map[string]searchAnswer
 	search   bool   // false: the connector cannot search
 	sorID    string // the system's id for prefetchMember, when not prefetchSoRID
+	refErr   error  // what naming prefetchMember fails with, when set
 
 	mu       sync.Mutex
 	searched []string
@@ -89,6 +90,9 @@ func (s *prefetchSoR) PatientFHIRRefContext(ctx context.Context, member string) 
 		s.mu.Lock()
 		s.idReads++
 		s.mu.Unlock()
+		if s.refErr != nil {
+			return "", false, s.refErr
+		}
 		if s.sorID != "" {
 			return "Patient/" + s.sorID, true, nil
 		}
@@ -1205,6 +1209,30 @@ func TestCRDIngress_SubjectAbsoluteOnEHRServer(t *testing.T) {
 			if env.routeHitCount() != 0 {
 				t.Fatal("the refused request crossed the network")
 			}
+		})
+	}
+}
+
+// unnamedMemberSoR holds prefetchMember (it resolves) but cannot name its
+// Patient: an inconsistent system of record.
+type unnamedMemberSoR struct{ *prefetchSoR }
+
+func (s unnamedMemberSoR) PatientFHIRRefContext(context.Context, string) (string, bool, error) {
+	return "", false, nil
+}
+
+// A member the system of record holds but cannot name is an inconsistent
+// system of record, refused, never mistaken for a member it does not hold: by
+// default a history key is left out only for a member not held.
+func TestPrefetch_HeldButUnnamedMemberRefused(t *testing.T) {
+	for _, require := range []bool{false, true} {
+		t.Run(map[bool]string{false: "default", true: "known members required"}[require], func(t *testing.T) {
+			env := newInProcessExchange(t)
+			env.originator.cfg.SoR = unnamedMemberSoR{newPrefetchSoR()}
+			env.originator.cfg.RequireKnownMembers = require
+			rec := httptest.NewRecorder()
+			env.originator.handleCRDIngress(rec, crdIngressPost(ehrRequest(supported)))
+			refusedBeforeTheNetwork(t, env, rec, http.StatusUnprocessableEntity, "patient not found in system of record")
 		})
 	}
 }

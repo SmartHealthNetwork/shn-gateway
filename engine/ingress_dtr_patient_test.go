@@ -29,19 +29,22 @@ func (s recordSoR) ResolvePatientContext(ctx context.Context, member string) (st
 	return s.searchingPrefetchSoR.ResolvePatientContext(ctx, member)
 }
 
-func seamDTRGateway(s *prefetchSoR) *Gateway {
+// defaultDTRGateway carries unknown members (the default) under the E-05
+// enrichment seam, over a system of record that derives the subject from its own
+// Patient record.
+func defaultDTRGateway(s *prefetchSoR) *Gateway {
 	g := prefetchGateway(s)
 	g.cfg.SoR = recordSoR{searchingPrefetchSoR{s}}
-	g.cfg.AcceptUnknownMembers = true
+	g.cfg.enrichDTRPatient = true // the enrichment seam these rows pin
 	return g
 }
 
-// Under the connectathon seam a questionnaire-package request about a member
-// the provider holds, carrying no Patient, gains the provider's own Patient
-// record as a referenced resource, so a payer that does not hold the member
-// derives the same subject from the request that the provider derived from
-// its record.
-func TestDTRIngress_PatientObtainedUnderSeam(t *testing.T) {
+// Under the enrichment seam (Config.enrichDTRPatient) a
+// questionnaire-package request about a member the provider holds, carrying no
+// Patient, gains the provider's own Patient record as a referenced resource, so
+// a payer that does not hold the member derives the same subject from the
+// request that the provider derived from its record.
+func TestDTRIngress_PatientObtainedUnderEnrichment(t *testing.T) {
 	withCoverage := ehrParams(ehrOrderParam("sr1", prefetchMember), ehrCoverageParam(prefetchMember, "00001"), dtrQuestionnaire)
 	sorPatient := string(newPrefetchSoR().reads["Patient/"+prefetchSoRID])
 	ctx := context.Background()
@@ -51,9 +54,9 @@ func TestDTRIngress_PatientObtainedUnderSeam(t *testing.T) {
 		obs := &observed{}
 		env := newInProcessExchange(t)
 		env.originator.cfg.SoR = recordSoR{searchingPrefetchSoR{s}}
+		env.originator.cfg.enrichDTRPatient = true
 		env.originator.cfg.Observer = obs.observe
 		env.originator.cfg.Clock = fixedClock
-		env.originator.cfg.AcceptUnknownMembers = true
 		declareFramedDTR(t, env, true)
 		env.payerReturns(LegResult{Response: testResponse(packageAnswer)})
 		rec := postDTRIngress(env, withCoverage)
@@ -71,7 +74,7 @@ func TestDTRIngress_PatientObtainedUnderSeam(t *testing.T) {
 		if strings.TrimSpace(strings.TrimPrefix(added, ",")) != `{"name":"referenced","resource":`+sorPatient+`}` {
 			t.Fatalf("added element %q", added)
 		}
-		p, status, msg := seamDTRGateway(s).prepareDTRPackageRequest(ctx, withCoverage)
+		p, status, msg := defaultDTRGateway(s).prepareDTRPackageRequest(ctx, withCoverage)
 		if status != 0 {
 			t.Fatalf("%d %s", status, msg)
 		}
@@ -84,15 +87,11 @@ func TestDTRIngress_PatientObtainedUnderSeam(t *testing.T) {
 		if !ok || ev != wantEv {
 			t.Fatalf("provenance %+v\nwant %+v", ev, wantEv)
 		}
-		// The payer, which does not hold the member, binds what was sent to
-		// the subject the provider derived from its record — and no longer to
-		// a subject derived from the id alone.
-		payer := &Gateway{cfg: Config{SoR: noMemberSoR{newPrefetchSoR()}, AcceptUnknownMembers: true}}
-		if status, msg := payer.bindPackageParameters(ctx, sent, p.pci); status != 0 {
-			t.Fatalf("payer bind to the provider's subject: %d %s", status, msg)
-		}
-		if status, _ := payer.bindPackageParameters(ctx, sent, shnsdk.ResolvePCI(prefetchMember, "", "")); status != http.StatusForbidden {
-			t.Fatalf("payer bind to the id-alone subject: %d, want 403", status)
+		// The payer, which does not hold the member, binds it by the Patient
+		// the request now carries: the same subject the provider derived.
+		payer := &Gateway{cfg: Config{SoR: noMemberSoR{newPrefetchSoR()}}}
+		if pci, status, msg := payer.bindPackageParameters(ctx, sent); status != 0 || pci != p.pci {
+			t.Fatalf("payer bind: %d %s pci=%q, want %q", status, msg, pci, p.pci)
 		}
 	})
 
@@ -115,20 +114,25 @@ func TestDTRIngress_PatientObtainedUnderSeam(t *testing.T) {
 		} {
 			t.Run(name, func(t *testing.T) {
 				s := newPrefetchSoR()
-				leftAlone(t, seamDTRGateway(s), s, body)
+				leftAlone(t, defaultDTRGateway(s), s, body)
 			})
 		}
 	})
-	t.Run("without the seam the request is left alone", func(t *testing.T) {
-		s := newPrefetchSoR()
-		g := seamDTRGateway(s)
-		g.cfg.AcceptUnknownMembers = false
-		leftAlone(t, g, s, withCoverage)
-	})
+	// Native traffic is carried as sent: without the enrichment seam nothing is
+	// appended, whether or not the participant requires known members.
+	for _, require := range []bool{false, true} {
+		t.Run(map[bool]string{false: "by default a native request is carried as sent", true: "requiring known members, a native request is carried as sent"}[require], func(t *testing.T) {
+			s := newPrefetchSoR()
+			g := defaultDTRGateway(s)
+			g.cfg.enrichDTRPatient = false
+			g.cfg.RequireKnownMembers = require
+			leftAlone(t, g, s, withCoverage)
+		})
+	}
 	t.Run("a member the provider does not hold sends no Patient and binds by id", func(t *testing.T) {
 		s := newPrefetchSoR()
 		body := ehrParams(ehrOrderParam("sr1", strangerMember), ehrCoverageParam(strangerMember, "00001"), dtrQuestionnaire)
-		g := seamDTRGateway(s)
+		g := defaultDTRGateway(s)
 		p, status, msg := g.prepareDTRPackageRequest(ctx, body)
 		if status != 0 || p.request.Ownership() != relay.OwnershipRelayed || p.pci != strangerPCI() {
 			t.Fatalf("%d %s: ownership %v pci %q", status, msg, p.request.Ownership(), p.pci)
@@ -137,7 +141,7 @@ func TestDTRIngress_PatientObtainedUnderSeam(t *testing.T) {
 	t.Run("a system of record naming the patient differently adds nothing", func(t *testing.T) {
 		s := newPrefetchSoR()
 		s.sorID = "sor-9"
-		p, status, msg := seamDTRGateway(s).prepareDTRPackageRequest(ctx, withCoverage)
+		p, status, msg := defaultDTRGateway(s).prepareDTRPackageRequest(ctx, withCoverage)
 		if status != 0 || p.request.Ownership() != relay.OwnershipRelayed {
 			t.Fatalf("%d %s: ownership %v", status, msg, p.request.Ownership())
 		}
@@ -147,7 +151,7 @@ func TestDTRIngress_PatientObtainedUnderSeam(t *testing.T) {
 		sorCov := sorCoverage("cov-1", shnsdk.CMSPayerIdentity.Value)
 		s.answer(t, "Coverage", searchPage(sorCov))
 		body := ehrParams(ehrOrderParam("sr1", prefetchMember), dtrQuestionnaire)
-		p, status, msg := seamDTRGateway(s).prepareDTRPackageRequest(ctx, body)
+		p, status, msg := defaultDTRGateway(s).prepareDTRPackageRequest(ctx, body)
 		if status != 0 {
 			t.Fatalf("%d %s", status, msg)
 		}
@@ -168,7 +172,7 @@ func TestDTRIngress_PatientObtainedUnderSeam(t *testing.T) {
 	t.Run("another patient's record is refused", func(t *testing.T) {
 		s := newPrefetchSoR()
 		s.reads["Patient/"+prefetchSoRID] = []byte(`{"resourceType":"Patient","id":"other","name":[{"family":"Other"}],"birthDate":"1960-01-01"}`)
-		_, status, msg := seamDTRGateway(s).prepareDTRPackageRequest(ctx, withCoverage)
+		_, status, msg := defaultDTRGateway(s).prepareDTRPackageRequest(ctx, withCoverage)
 		if status != http.StatusBadGateway || msg != "system of record returned another patient's resource" {
 			t.Fatalf("%d %s", status, msg)
 		}

@@ -87,7 +87,8 @@ services:
       # (payer/smoke.sh). Hardcoding `strict` served the first audience by
       # getting the other two wrong: a partner would meet a refusal produced by
       # a value WE put in a bundle THEY operate, and read it as a verdict on
-      # their own conformance. Absent means none, matching the sibling payer
+      # their own conformance. Absent means observe (check, record, relay),
+      # matching the sibling payer
       # bundle and the production install unit (../bundle/compose.yml).
       CONFORMANCE_ENFORCEMENT: ${CONFORMANCE_ENFORCEMENT:-}
     volumes:

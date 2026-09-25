@@ -95,7 +95,8 @@ func TestEgressAdaptValidatesAtTargetLane(t *testing.T) {
 }
 
 // The same call with bridged=false is an ordinary egress check, governed by
-// the level: strict refuses it (422) and none records and relays it (0) —
+// the level: strict refuses it (422), observe records and relays it (0) and
+// none does not check it (0) —
 // asserting the exact status at each level, not just "non-zero", is what
 // proves the LEVEL is the thing governing the outcome here, not some
 // unrelated always-invalid shortcut.
@@ -106,6 +107,7 @@ func TestEgressUnbridgedIsGovernedByTheLevel(t *testing.T) {
 		want  int
 	}{
 		{EnforcementStrict, http.StatusUnprocessableEntity},
+		{EnforcementObserve, 0},
 		{EnforcementNone, 0},
 	} {
 		g := &Gateway{cfg: Config{

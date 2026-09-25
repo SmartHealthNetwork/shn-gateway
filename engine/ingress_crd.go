@@ -80,6 +80,11 @@ func (g *Gateway) crdAnswerOutcome(ctx context.Context, respJSON []byte, line st
 	}
 	obs, err := shnsdk.ParseCRDResponse(respJSON)
 	if err != nil {
+		// Below strict an unreadable answer is relayed as it is: the exchange
+		// has no coverage information to label it by.
+		if g.policy().Decide(KindCDSEnvelope, "response.json", VerdictInvalid) == Record {
+			return "answered", 0, ""
+		}
 		return "", http.StatusBadGateway, "payer CRD response is not a valid CDS Hooks response: response.json"
 	}
 	cov, ok := obs.Primary()
@@ -94,14 +99,27 @@ func (g *Gateway) crdAnswerOutcome(ctx context.Context, respJSON []byte, line st
 	return "approved", 0, ""
 }
 
-// ingressCRDSubjectPCI parses the request and returns the single bound pci. Every patient
-// reference present (context.patientId, each draftOrders entry subject, each prefetch
-// resource's subject/beneficiary/patient) MUST resolve to the SAME pci; any divergence fails
-// closed (403). A reference is relative (Patient/<id>) or absolute on the request's own
+// ingressCRDSubjectPCI parses the request and returns the single bound pci, the patient
+// context.patientId names (RuleSubjectPCI, network level: refused at every level). A request
+// whose subject or prefetch cannot be read refuses at every level; a value of the wrong type
+// elsewhere is the request's own shape (RuleRequestShape). Every
+// other patient reference present (each draftOrders entry subject, each prefetch resource's
+// subject/beneficiary/patient) must resolve to the SAME pci: that is the payload's own
+// consistency (RulePatientMixed), not checked at none, recorded at observe and refused
+// (403) at strict. A reference is relative (Patient/<id>) or absolute on the request's own
 // fhirServer. Returns (pci, 0, "") on success or ("", status, msg) to write.
 func (g *Gateway) ingressCRDSubjectPCIContext(ctx context.Context, body []byte) (string, int, string) {
+	// The subject (context.patientId) and the prefetch the request is routed
+	// by (its coverage) must read; a value of the wrong type anywhere else is
+	// the request's own shape (RuleRequestShape).
 	var req ingressCDSRequest
-	if err := decodeMessage(body, &req); err != nil {
+	var core struct {
+		Context struct {
+			PatientID string `json:"patientId"`
+		} `json:"context"`
+		Prefetch map[string]json.RawMessage `json:"prefetch"`
+	}
+	if err := decodeContent(body, &req, &core, func() bool { return g.guard(ctx, KindContent, RuleRequestShape, body) }); err != nil {
 		return "", http.StatusBadRequest, "parse cds request failed"
 	}
 	if req.Context.PatientID == "" {
@@ -117,14 +135,21 @@ func (g *Gateway) ingressCRDSubjectPCIContext(ctx context.Context, body []byte) 
 		return "", http.StatusBadRequest, "unknown member"
 	}
 	// Every other patient reference must resolve to the SAME pci.
+	if !g.policy().Runs(KindContent, RulePatientMixed) {
+		return pci, 0, ""
+	}
 	var refs []string
 	// A draft order is the order this PA is FOR — it MUST carry a patient subject. A
-	// missing/renamed subject is REJECTED here (not skipped), so an order with no recognizable
-	// patient can never ride into the sealed request behind the bound subject's authority.
+	// missing/renamed subject is a defect here (not skipped), so at strict an order with no
+	// recognizable patient can never ride into the sealed request behind the bound subject's
+	// authority.
 	for _, e := range req.Context.DraftOrders.Entry {
 		ref := patientRefOf(e.Resource)
 		if ref == "" {
-			return "", http.StatusForbidden, "draft order missing patient subject"
+			if g.guard(ctx, KindContent, RulePatientMixed, body) {
+				return "", http.StatusForbidden, "draft order missing patient subject"
+			}
+			return pci, 0, ""
 		}
 		refs = append(refs, ref)
 	}
@@ -158,11 +183,19 @@ func (g *Gateway) ingressCRDSubjectPCIContext(ctx context.Context, body []byte) 
 		m := strings.TrimPrefix(ref, "Patient/")
 		rp, ok, readErr := g.resolveSubjectPCI(ctx, m, body)
 		if readErr != nil {
-			status, msg := SoRFailureResponse(readErr)
-			return "", status, msg
+			// The consistency check could not finish: strict keeps the system of
+			// record's failure; below strict the request is carried.
+			if g.guardUnavailable(ctx, KindContent, RulePatientMixed, body) {
+				status, msg := SoRFailureResponse(readErr)
+				return "", status, msg
+			}
+			return pci, 0, ""
 		}
 		if !ok || rp != pci {
-			return "", http.StatusForbidden, "inconsistent patient reference in ingress payload"
+			if g.guard(ctx, KindContent, RulePatientMixed, body) {
+				return "", http.StatusForbidden, "inconsistent patient reference in ingress payload"
+			}
+			return pci, 0, ""
 		}
 	}
 	return pci, 0, ""
@@ -199,6 +232,23 @@ type crdIngressRequest struct {
 	// left out because the system of record could not provide it.
 	coverageStatus int
 	coverageMsg    string
+	// carried records the finding for each prefetch value left out below
+	// strict (RulePrefetchFill), once the request is routed: a request
+	// refused before it is carried records none.
+	carried carriedFindings
+}
+
+// carriedFindings are the findings for what an ingress request is carried
+// without below strict. They are recorded only once the request is routed.
+type carriedFindings []func(ctx context.Context)
+
+// record records each finding under ctx, the routed request's context, so the
+// finding carries the leg's correlation id. Call once, when the request is
+// routed.
+func (c carriedFindings) record(ctx context.Context) {
+	for _, f := range c {
+		f(ctx)
+	}
 }
 
 // PrefetchObtainedEvent is the observer event kind for a prefetch value the
@@ -244,7 +294,14 @@ type prefetchObtained struct {
 //     reason is recorded).
 //
 // Every value, kept or obtained, must be about the bound patient: a kept
-// value that is not is refused with 403, an obtained one with 502.
+// value that is not is refused with 403 (at strict; RulePatientMixed), an
+// obtained one with 502 at every level (the fill fence).
+//
+// Obtaining the coverage is routing: the request is routed by it, so a
+// coverage the request leaves out and this gateway cannot obtain refuses the
+// request at every level, with the status strict has always given. Any other
+// value that cannot be obtained (RulePrefetchFill) refuses at strict; below
+// strict that key alone is left out and every other key is still obtained.
 func (g *Gateway) ingressEnsureSelfContainedContext(ctx context.Context, leg string, raw []byte, member string) (crdIngressRequest, int, string) {
 	var out crdIngressRequest
 	body := relay.NewBody(raw, relay.OriginIngressRequest)
@@ -272,36 +329,94 @@ func (g *Gateway) ingressEnsureSelfContainedContext(ctx context.Context, leg str
 	}
 	prefetch, hasPrefetch := doc.Member(root, "prefetch")
 	if hasPrefetch && doc.Kind(prefetch) != relay.KindObject {
+		// No object to carry a coverage in or to add one to, and the coverage
+		// is what the request is routed by (crdIngressRecipient): refused at
+		// every level.
 		return out, http.StatusBadRequest, "prefetch is not an object"
+	}
+	carriesCoverage := false
+	if hasPrefetch {
+		_, carriesCoverage = doc.Member(prefetch, "coverage")
+	}
+	// unfilled decides a prefetch value other than the coverage that this
+	// gateway could not obtain from the participant's system of record
+	// (RulePrefetchFill), and reports whether the request is refused (strict,
+	// with the refusal strict has always given). Below strict only that key is
+	// left out; every other key, the coverage included, is still obtained, and
+	// the finding is recorded once the request is routed (carriedFindings), so
+	// a request refused afterwards records none. Obtaining the coverage is
+	// routing, not a fill: its failure refuses at every level.
+	unfilled := func(unavailable bool) bool {
+		v := VerdictInvalid
+		if unavailable {
+			v = VerdictUnavailable
+		}
+		pol := g.policy()
+		if !pol.Runs(KindContent, RulePrefetchFill) {
+			return false
+		}
+		if pol.Decide(KindContent, RulePrefetchFill, v) == Refuse {
+			return guardDefect(ctx, pol, g.emitFinding, KindContent, RulePrefetchFill, v, raw)
+		}
+		out.carried = append(out.carried, func(routed context.Context) {
+			guardDefect(routed, pol, g.emitFinding, KindContent, RulePrefetchFill, v, raw)
+		})
+		return false
 	}
 
 	sor := ReadSystemOfRecord(g.cfg.SoR)
-	ref, found, err := sor.PatientFHIRRefContext(ctx, member)
-	if err != nil {
-		status, msg := SoRFailureResponse(err)
-		return out, status, msg
-	}
 	sorID := ""
-	if found {
+	// sorNamed is whether the system of record answered for the patient;
+	// without its answer nothing can be obtained.
+	sorNamed := true
+	ref, found, err := sor.PatientFHIRRefContext(ctx, member)
+	if err == nil && found {
 		id, ok := strings.CutPrefix(ref, "Patient/")
 		if !ok || !fhirIDRE.MatchString(id) {
-			status, msg := SoRFailureResponse(&SoRReadError{Kind: SoRInvalidResponse})
+			err = &SoRReadError{Kind: SoRInvalidResponse}
+		} else {
+			sorID = id
+		}
+	}
+	if err != nil {
+		// A request carrying no coverage needs one obtained to be routed.
+		if !carriesCoverage || unfilled(true) {
+			status, msg := SoRFailureResponse(err)
 			return out, status, msg
 		}
-		sorID = id
+		sorNamed = false
 	}
 	fence := newPatientFence(shnsdk.MemberSystem, member, bases, sorID, member).forPrefetch()
+	// memberHeld reports, once, whether the system of record holds the member:
+	// only asked when it cannot name the patient (sorID == "").
+	var heldKnown, heldValue bool
+	memberHeld := func() (bool, error) {
+		if !heldKnown {
+			_, _, found, err := sor.ResolvePatientContext(ctx, member)
+			if err != nil {
+				return false, err
+			}
+			heldKnown, heldValue = true, found
+		}
+		return heldValue, nil
+	}
 
 	// Every member the request carries under prefetch — advertised or not,
 	// whatever its name — goes to the payer, so every one is fenced, and all
 	// of them before anything is obtained: a refused request searches nothing.
+	// The fence over values the request itself carries is the payload's own
+	// consistency (RulePatientMixed): not checked at none, recorded at observe,
+	// refused at strict.
 	out.values = map[string][]byte{}
 	if hasPrefetch {
+		checkKept := g.policy().Runs(KindContent, RulePatientMixed)
 		for _, m := range doc.Members(prefetch) {
 			start, end := doc.Span(m.Value)
 			value := raw[start:end]
-			if err := fence.check(value); err != nil {
-				return out, http.StatusForbidden, "prefetch " + m.Name + " refused: " + err.Error()
+			if checkKept {
+				if err := fence.check(value); err != nil && g.guard(ctx, KindContent, RulePatientMixed, raw) {
+					return out, http.StatusForbidden, "prefetch " + m.Name + " refused: " + err.Error()
+				}
 			}
 			out.values[m.Name] = value
 		}
@@ -318,15 +433,33 @@ func (g *Gateway) ingressEnsureSelfContainedContext(ctx context.Context, leg str
 				continue
 			}
 		}
+		if !sorNamed {
+			// Left out: the system of record could not answer for the patient
+			// (recorded once, above). The request carries its own coverage.
+			continue
+		}
 		if sorID == "" {
 			// A member the system of record does not hold — bound by member id
-			// alone under Config.AcceptUnknownMembers — has nothing to read: the
+			// and the Patient the request carries — has nothing to read: the
 			// patient and the coverage must come with the request, and a history
 			// key is left out with the reason recorded, as when the system names
-			// the patient differently. Without the seam a bound member the system
-			// cannot name is an inconsistent system of record, refused as before.
-			if key == prefetchPatientKey || key == "coverage" || !g.cfg.AcceptUnknownMembers {
-				return out, http.StatusUnprocessableEntity, "patient not found in system of record"
+			// the patient differently. A member the system holds but cannot name
+			// (or any member under Config.RequireKnownMembers) is an inconsistent
+			// system of record, refused.
+			inconsistent := g.cfg.RequireKnownMembers
+			if !inconsistent && key != prefetchPatientKey && key != "coverage" {
+				held, readErr := memberHeld()
+				if readErr != nil {
+					status, msg := SoRFailureResponse(readErr)
+					return out, status, msg
+				}
+				inconsistent = held
+			}
+			if key == prefetchPatientKey || key == "coverage" || inconsistent {
+				if key == "coverage" || unfilled(false) {
+					return out, http.StatusUnprocessableEntity, "patient not found in system of record"
+				}
+				continue
 			}
 			query, _ := SoRSearchQuery(prefetchSearchTypes[key], member)
 			g.recordPrefetch(leg, prefetchObtained{Key: key, Query: query, Outcome: SearchNotRun, Reason: historyMemberNotHeld})
@@ -338,7 +471,10 @@ func (g *Gateway) ingressEnsureSelfContainedContext(ctx context.Context, leg str
 			// coverage to the request's patient, so without them the request is
 			// refused before anything is read; a history value is left out.
 			if key == prefetchPatientKey || key == "coverage" {
-				return out, http.StatusUnprocessableEntity, patientNamedDifferently
+				if key == "coverage" || unfilled(false) {
+					return out, http.StatusUnprocessableEntity, patientNamedDifferently
+				}
+				continue
 			}
 			query, _ := SoRSearchQuery(prefetchSearchTypes[key], sorID)
 			g.recordPrefetch(leg, prefetchObtained{Key: key, Query: query, Outcome: SearchNotRun, Reason: historyNamedDifferently})
@@ -346,7 +482,14 @@ func (g *Gateway) ingressEnsureSelfContainedContext(ctx context.Context, leg str
 		}
 		value, outcome, status, msg := g.obtainPrefetch(ctx, leg, key, sorID, fence)
 		if status != 0 {
-			return out, status, msg
+			// The fill fence refuses at every level: SHN never inserts
+			// another patient's record. So does failing to obtain the
+			// coverage, which the request is routed by. Any other failure to
+			// fill refuses at strict; below strict that key is left out.
+			if msg == fillFencedBinary || msg == fillFencedOtherPatient || key == "coverage" || unfilled(true) {
+				return out, status, msg
+			}
+			continue
 		}
 		if value == nil {
 			if key == "coverage" {
@@ -403,7 +546,7 @@ const historyNamedDifferently = "patient named differently in the system of reco
 
 // historyMemberNotHeld is the recorded reason a history key is left out for a
 // member the system of record does not hold (bound by the member id and the Patient the
-// request carries under Config.AcceptUnknownMembers).
+// request carries).
 const historyMemberNotHeld = "member not held by the system of record"
 
 // coverageOmitted is the refusal for a request whose coverage the system of
@@ -418,6 +561,14 @@ func coverageOmitted(o SearchOutcome) (int, string) {
 	return http.StatusUnprocessableEntity, "coverage unreadable from system of record"
 }
 
+// The fill fence's refusals: this gateway never inserts, into a request it
+// carries, a record it read that is not the bound patient's own. That is SHN's
+// own edit to the message, so it refuses at every level.
+const (
+	fillFencedBinary       = "system of record returned a Binary resource"
+	fillFencedOtherPatient = "system of record returned another patient's resource"
+)
+
 // obtainPrefetch reads the value of an advertised prefetch key from the
 // system of record for the patient sorID, fences it, and records the
 // attempt (PrefetchObtainedEvent and a log line). It returns the value to
@@ -428,9 +579,9 @@ func (g *Gateway) obtainPrefetch(ctx context.Context, leg, key, sorID string, fe
 	refused := func(err error) ([]byte, SearchOutcome, int, string) {
 		var ce *CompartmentError
 		if errors.As(err, &ce) && ce.Reason == opaqueContentReason {
-			return nil, "", http.StatusBadGateway, "system of record returned a Binary resource"
+			return nil, "", http.StatusBadGateway, fillFencedBinary
 		}
-		return nil, "", http.StatusBadGateway, "system of record returned another patient's resource"
+		return nil, "", http.StatusBadGateway, fillFencedOtherPatient
 	}
 	if key == prefetchPatientKey {
 		query := "Patient/" + sorID

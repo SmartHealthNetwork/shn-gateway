@@ -86,9 +86,9 @@ func TestTask0_ConformantGoldensBind(t *testing.T) {
 
 	// --- CRD order-select golden binds (the shape the Originator reproduces at the CRD legs). ---
 	crdGolden := readConformantGolden(t, "crd-order-select-request.json")
-	srJSON, covJSON, status, msg := g.conformantCRDBindContext(context.Background(), crdGolden, pci)
-	if status != 0 {
-		t.Fatalf("conformant CRD golden rejected: status=%d (%s), want 0", status, msg)
+	srJSON, covJSON, bound, status, msg := g.conformantCRDBindContext(context.Background(), crdGolden)
+	if status != 0 || bound != pci {
+		t.Fatalf("conformant CRD golden rejected: status=%d (%s) pci=%q, want 0 bound to %q", status, msg, bound, pci)
 	}
 	if len(srJSON) == 0 || len(covJSON) == 0 {
 		t.Fatalf("CRD bind must return SR + Coverage for validation; srJSON=%d covJSON=%d", len(srJSON), len(covJSON))
@@ -384,7 +384,8 @@ func dropUpdateEntry(t *testing.T, bundleJSON []byte, rt string) []byte {
 }
 
 // TestConformantPASUpdateBind_FR32RejectionSet drives the golden's bind through
-// conformantPASUpdateBind and asserts each FR-32 arm + the wrong-patient arm 403s — the
+// conformantPASUpdateBind and asserts each FR-32 arm 403s (an update for another member binds to that
+// member) — the
 // "valid − one mutation → reject" discipline. Each row mutates exactly the field its arm checks,
 // so a row stays RED if you neuter that arm (non-vacuous).
 func TestConformantPASUpdateBind_FR32RejectionSet(t *testing.T) {
@@ -392,7 +393,7 @@ func TestConformantPASUpdateBind_FR32RejectionSet(t *testing.T) {
 	cases := []struct {
 		name       string
 		mutate     func(*testing.T, []byte) []byte
-		tokSubject func(*Gateway, string) string // returns the token subject; default = the bound pci
+		wantMember string // the member the payer binds on accept; default = the golden's
 		wantStatus int
 	}{
 		{
@@ -425,28 +426,31 @@ func TestConformantPASUpdateBind_FR32RejectionSet(t *testing.T) {
 			wantStatus: http.StatusForbidden,
 		},
 		{
-			name: "wrong-patient",
-			// Rebind the bundle onto MBR-NOTCOVERED (a DIFFERENT persona that DOES resolve) but keep
-			// the token subject pinned to MBR-COVERED's pci → conformantPASBind sees pci != tokSubject
-			// → 403. (Rebinding onto a non-persona member would 400 "unknown member", not the
-			// authority 403 we want to exercise here.)
+			name: "an update for another member binds to that member",
+			// The payer binds the member the update names by its own record,
+			// whatever the leg's token says; the FR-32 arms still refuse.
 			mutate: func(t *testing.T, b []byte) []byte {
 				return rebindPASPatient(t, b, "MBR-NOTCOVERED")
 			},
-			tokSubject: func(g *Gateway, defaultPCI string) string { return defaultPCI },
-			wantStatus: http.StatusForbidden,
+			wantMember: "MBR-NOTCOVERED",
+			wantStatus: 0,
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			g, pci := updateGatewayForTest(t)
-			tokSubject := pci
-			if tc.tokSubject != nil {
-				tokSubject = tc.tokSubject(g, pci)
-			}
-			_, status, msg := g.conformantPASUpdateBindContext(context.Background(), tc.mutate(t, append([]byte(nil), good...)), tokSubject)
+			_, bound, status, msg := g.conformantPASUpdateBindContext(context.Background(), tc.mutate(t, append([]byte(nil), good...)))
 			if status != tc.wantStatus {
 				t.Fatalf("%s: got %d (%s), want %d", tc.name, status, msg, tc.wantStatus)
+			}
+			if status == 0 {
+				want := pci
+				if tc.wantMember != "" {
+					want, _, _ = g.cfg.SoR.ResolvePatient(tc.wantMember)
+				}
+				if bound != want {
+					t.Fatalf("%s: bound to %q, want %q", tc.name, bound, want)
+				}
 			}
 		})
 	}
@@ -455,7 +459,7 @@ func TestConformantPASUpdateBind_FR32RejectionSet(t *testing.T) {
 	// everything would pass the rejection set vacuously.
 	t.Run("control-binds", func(t *testing.T) {
 		g, pci := updateGatewayForTest(t)
-		if _, status, msg := g.conformantPASUpdateBindContext(context.Background(), append([]byte(nil), good...), pci); status != 0 {
+		if _, bound, status, msg := g.conformantPASUpdateBindContext(context.Background(), append([]byte(nil), good...)); status != 0 || bound != pci {
 			t.Fatalf("unmutated conformant update golden rejected: status=%d (%s), want 0", status, msg)
 		}
 	})
@@ -664,9 +668,9 @@ func originatorBuiltConformantUpdateBundleCorrs(t *testing.T, brPayer bool, corr
 // Provenance does not target the supplemental data". Same absolutization-tolerance class as
 // pasMemberFromRef.
 func TestConformantPASUpdateBind_AcceptsAbsolutizedBrPayer(t *testing.T) {
-	g, pci := updateGatewayForTest(t)
+	g, _ := updateGatewayForTest(t)
 	brPayerBundle := originatorBuiltConformantUpdateBundleProfile(t, true)
-	if _, status, msg := g.conformantPASUpdateBindContext(context.Background(), brPayerBundle, pci); status != 0 {
+	if _, _, status, msg := g.conformantPASUpdateBindContext(context.Background(), brPayerBundle); status != 0 {
 		t.Fatalf("br-payer (absolutized) update bundle rejected: status=%d (%s), want 0", status, msg)
 	}
 }

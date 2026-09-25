@@ -43,8 +43,9 @@ const dtrPackageContentType = "application/fhir+json"
 // the provider.
 type dtrIngressRequest struct {
 	// request is the EHR's Parameters, exact or with the patient's Coverage
-	// (relay.EditDTRCoverageObtain) and, under Config.AcceptUnknownMembers, the
-	// provider's own Patient record (relay.EditDTRPatientObtain) appended.
+	// (relay.EditDTRCoverageObtain) and, only under the enrichment seam
+	// (Config.enrichDTRPatient), the provider's own Patient record
+	// (relay.EditDTRPatientObtain) appended.
 	request relay.Payload
 	// member is the patient every resource names; pci is the network's
 	// identifier for that patient.
@@ -58,6 +59,10 @@ type dtrIngressRequest struct {
 	// obtained holds what the system of record returned with an obtained
 	// Coverage: the records its search included (payor Organizations).
 	obtained [][]byte
+	// carried records the finding for a Patient left out below strict
+	// (RulePrefetchFill), once the request is routed: a request refused
+	// before it is carried records none.
+	carried carriedFindings
 }
 
 // dtrPackageParam is one top-level parameter of the request, read in place.
@@ -71,18 +76,23 @@ type dtrPackageParam struct {
 // without re-encoding them and prepares them for the network:
 //
 //   - the patient is the one every coverage beneficiary and order subject
-//     names; a request naming none is refused (422), one naming several is
-//     refused (403), and the patient must be known to the system of record
-//     (403 otherwise);
-//   - every resource the request carries, at the top level or in a part, is
-//     fenced to that patient by its binding path (403 on a mismatch);
+//     names; a request naming none is refused (422 or, when a coverage or
+//     order names no patient, 403), and the patient must be known to the
+//     system of record (403 otherwise): the subject, refused at every level;
+//   - a request naming several patients (403), a coverage or order naming
+//     none beside one that names the subject (403), and a resource the
+//     request carries, at the top level or in a part, that the fence does
+//     not bind to that patient by its binding path (403) are the payload's
+//     own consistency (RulePatientMixed): refused at strict, recorded and
+//     carried at observe, carried at none;
 //   - a request carrying no coverage parameter gains one: the patient's
 //     Coverage from the system of record's Coverage search (the
 //     dtr-coverage-obtain edit), recorded as a PrefetchObtainedEvent. It is
 //     refused when the system names the patient by another id (422), holds no
 //     Coverage (422), holds Coverages naming different payers (422), cannot
 //     search (422) or is unavailable (503); a Coverage about another patient
-//     is a 502.
+//     is a 502. The request is routed by that Coverage, so these refuse at
+//     every level.
 //
 // Nothing else changes: the EHR's parameters keep their order, repeats,
 // values (a canonical's |version included), meta and unknown members.
@@ -116,13 +126,46 @@ func (g *Gateway) prepareDTRPackageRequest(ctx context.Context, raw []byte) (dtr
 		return raw[s:e]
 	}
 
-	// The patient: every coverage beneficiary and order subject.
+	// boundElsewhere reports whether any coverage or order parameter names a
+	// patient. It is read once, when a parameter naming none is met.
+	var bound *bool
+	boundElsewhere := func() bool {
+		if bound == nil {
+			found := false
+			for _, p := range params {
+				if !p.hasRes || (p.name != "coverage" && p.name != "order") || doc.Kind(p.resource) != relay.KindObject {
+					continue
+				}
+				if _, ok := patientMember(patientRefOf(span(p.resource))); ok {
+					found = true
+					break
+				}
+			}
+			bound = &found
+		}
+		return *bound
+	}
+
+	// The patient: every coverage beneficiary and order subject. The
+	// request's subject is the patient its first coverage names, else its
+	// first order's (the coverage is the operation's input about the member
+	// the questionnaire is for); a request naming none cannot be bound
+	// (RuleSubjectPCI, refused at every level).
 	patients := map[string]bool{}
+	subject, coverageSubject := "", ""
 	hasCoverage := false
 	for _, p := range params {
 		// A coverage parameter is the EHR's own, whatever it carries, so the
 		// gateway never adds one beside it; one that carries no resource
 		// cannot be bound or routed and is refused.
+		//
+		// This check and the not-a-Coverage one below stay refusals at every
+		// level: the request is routed by the payer each Coverage names
+		// (dtrIngressRecipient) and its subject is read from the Coverage's
+		// beneficiary, so a coverage parameter that is not a Coverage is
+		// routing and subject, not the request's shape (RuleRequestShape).
+		// Carried, it would either be routed by nothing or have a Coverage
+		// from the system of record added beside the EHR's own.
 		if p.name == "coverage" && !p.hasRes {
 			return out, http.StatusBadRequest, "coverage parameter carries no resource"
 		}
@@ -139,26 +182,43 @@ func (g *Gateway) prepareDTRPackageRequest(ctx context.Context, raw []byte) (dtr
 			hasCoverage = true
 			out.coverages = append(out.coverages, span(p.resource))
 		}
-		ref := patientRefOf(span(p.resource))
-		if ref == "" {
-			return out, http.StatusForbidden, "questionnaire-package " + p.name + " names no patient"
-		}
-		member, ok := patientMember(ref)
+		member, ok := patientMember(patientRefOf(span(p.resource)))
 		if !ok {
-			return out, http.StatusForbidden, "questionnaire-package " + p.name + " names no patient"
+			// A coverage or order naming no patient beside one that names the
+			// subject is the payload's own consistency (RulePatientMixed): not
+			// checked at none, recorded at observe, refused at strict, and
+			// carried below strict behind the subject the others bind. When no
+			// coverage or order names a patient the subject cannot be read,
+			// which refuses at every level.
+			if !boundElsewhere() || g.guard(ctx, KindContent, RulePatientMixed, raw) {
+				return out, http.StatusForbidden, "questionnaire-package " + p.name + " names no patient"
+			}
+			continue
 		}
 		patients[member] = true
+		if subject == "" {
+			subject = member
+		}
+		if p.name == "coverage" && coverageSubject == "" {
+			coverageSubject = member
+		}
+	}
+	if coverageSubject != "" {
+		subject = coverageSubject
 	}
 	switch len(patients) {
 	case 0:
 		return out, http.StatusUnprocessableEntity, "cannot bind the request to a patient"
 	case 1:
 	default:
-		return out, http.StatusForbidden, "inconsistent patient reference in ingress payload"
+		// Another patient named inside one request: the payload's own
+		// consistency (RulePatientMixed). Below strict the request is carried
+		// bound to its subject.
+		if g.guard(ctx, KindContent, RulePatientMixed, raw) {
+			return out, http.StatusForbidden, "inconsistent patient reference in ingress payload"
+		}
 	}
-	for m := range patients {
-		out.member = m
-	}
+	out.member = subject
 	pci, found, err := g.resolveSubjectPCI(ctx, out.member, raw)
 	if err != nil {
 		status, msg := SoRFailureResponse(err)
@@ -172,7 +232,12 @@ func (g *Gateway) prepareDTRPackageRequest(ctx context.Context, raw []byte) (dtr
 	// names, so every resource is fenced to that id alone.
 	fence := newPatientFence(shnsdk.MemberSystem, out.member, nil, out.member)
 
-	// Every resource the request carries, at any depth of parts.
+	// Every resource the request carries, at any depth of parts. The fence
+	// over resources the request itself carries is the payload's own
+	// consistency (RulePatientMixed): not checked at none, recorded at
+	// observe, refused at strict; below strict the resource is carried as
+	// sent.
+	checkCarried := g.policy().Runs(KindContent, RulePatientMixed)
 	var walk func(arr relay.NodeID, path string) (int, string)
 	walk = func(arr relay.NodeID, path string) (int, string) {
 		if doc.Kind(arr) != relay.KindArray {
@@ -185,8 +250,10 @@ func (g *Gateway) prepareDTRPackageRequest(ctx context.Context, raw []byte) (dtr
 			name := path + docText(doc, p, "name")
 			if res, ok := doc.Member(p, "resource"); ok {
 				value := span(res)
-				if err := fence.check(value); err != nil {
-					return http.StatusForbidden, "parameter " + name + " refused: " + err.Error()
+				if checkCarried {
+					if err := fence.check(value); err != nil && g.guard(ctx, KindContent, RulePatientMixed, raw) {
+						return http.StatusForbidden, "parameter " + name + " refused: " + err.Error()
+					}
 				}
 				out.resources = append(out.resources, value)
 			}
@@ -214,6 +281,12 @@ func (g *Gateway) prepareDTRPackageRequest(ctx context.Context, raw []byte) (dtr
 		return append(e, '}')
 	}
 	if !hasCoverage {
+		// The Coverage obtained for a request that carries none is what the
+		// request is routed by (dtrIngressRecipient): without it there is no
+		// payer to carry the request to. Every failure to obtain it is
+		// therefore routing and refuses at every level, not a fill carried as
+		// sent below strict (RulePrefetchFill), which would only turn the
+		// system of record's own answer into "no coverage".
 		coverage, status, msg := g.obtainDTRCoverage(ctx, &out, fence)
 		if status != 0 {
 			return out, status, msg
@@ -221,10 +294,31 @@ func (g *Gateway) prepareDTRPackageRequest(ctx context.Context, raw []byte) (dtr
 		changes = append(changes, relay.Change{Edit: relay.EditDTRCoverageObtain, Ops: []relay.Op{doc.AppendElement(paramArr, element("coverage", coverage))}})
 		out.coverages = [][]byte{coverage}
 	}
-	if g.cfg.AcceptUnknownMembers && !carriesPatient(raw, out.member) {
+	// E-05 is an enrichment: off on native traffic until the participant opts in
+	// (Config.enrichDTRPatient, a seam tracked with the ENRICH_NATIVE_REQUESTS opt-in).
+	if g.cfg.enrichDTRPatient && !carriesPatient(raw, out.member) {
 		patient, status, msg := g.obtainDTRPatient(ctx, out.member, fence)
+		// The fill fence refuses at every level: SHN never inserts another
+		// patient's record. Any other failure to fill refuses at strict
+		// (RulePrefetchFill); below strict the request is carried without
+		// the Patient, binding by member id alone on both sides as it does
+		// when the system of record does not hold the patient, and the
+		// finding is recorded once the request is routed (carriedFindings),
+		// as the CDS Hooks ingress records its fill findings.
 		if status != 0 {
-			return out, status, msg
+			if msg == fillFencedBinary || msg == fillFencedOtherPatient {
+				return out, status, msg
+			}
+			pol := g.policy()
+			if pol.Decide(KindContent, RulePrefetchFill, VerdictUnavailable) == Refuse {
+				guardDefect(ctx, pol, g.emitFinding, KindContent, RulePrefetchFill, VerdictUnavailable, raw)
+				return out, status, msg
+			}
+			if pol.Runs(KindContent, RulePrefetchFill) {
+				out.carried = append(out.carried, func(routed context.Context) {
+					guardDefect(routed, pol, g.emitFinding, KindContent, RulePrefetchFill, VerdictUnavailable, raw)
+				})
+			}
 		}
 		if patient != nil {
 			changes = append(changes, relay.Change{Edit: relay.EditDTRPatientObtain, Ops: []relay.Op{doc.AppendElement(paramArr, element("referenced", patient))}})
@@ -246,7 +340,7 @@ func (g *Gateway) prepareDTRPackageRequest(ctx context.Context, raw []byte) (dtr
 }
 
 // obtainDTRPatient reads the Patient a request carrying none is sent with
-// under Config.AcceptUnknownMembers: the system of record's own record for
+// under Config.enrichDTRPatient: the system of record's own record for
 // the bound patient, by the reference the system names it by, recorded as a
 // PrefetchObtainedEvent (key patient, operation questionnaire-package). The
 // payer's side, which may not hold the member, derives the subject from
@@ -304,9 +398,9 @@ func (g *Gateway) obtainDTRPatient(ctx context.Context, member string, fence pat
 	if err := fence.check(patient); err != nil {
 		var ce *CompartmentError
 		if errors.As(err, &ce) && ce.Reason == opaqueContentReason {
-			return nil, http.StatusBadGateway, "system of record returned a Binary resource"
+			return nil, http.StatusBadGateway, fillFencedBinary
 		}
-		return nil, http.StatusBadGateway, "system of record returned another patient's resource"
+		return nil, http.StatusBadGateway, fillFencedOtherPatient
 	}
 	return patient, 0, ""
 }
@@ -364,7 +458,7 @@ func (g *Gateway) obtainDTRCoverage(ctx context.Context, out *dtrIngressRequest,
 	for _, m := range s.matches {
 		c := record(m)
 		if err := fence.check(c); err != nil {
-			return nil, http.StatusBadGateway, "system of record returned another patient's resource"
+			return nil, http.StatusBadGateway, fillFencedOtherPatient
 		}
 		covs = append(covs, c)
 	}

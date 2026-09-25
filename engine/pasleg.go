@@ -24,6 +24,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"strings"
 	"time"
 )
@@ -35,6 +36,10 @@ type pasLegKey struct{}
 type pasLeg struct {
 	requester string
 	notes     []string
+	// unread is the rule the payer's answer broke when the responder relayed
+	// it below strict without reading it for this gateway's own records
+	// (skipWrite); "" when the answer was read.
+	unread string
 }
 
 // withPASLeg attaches a carrier for this exchange, returning the context and the
@@ -71,6 +76,40 @@ func (l *pasLeg) note(kind string) {
 
 // noteOn is note on the carrier this context holds.
 func noteOn(ctx context.Context, kind string) { pasLegOf(ctx).note(kind) }
+
+// skipWrite records that the responder relayed the payer's answer, which broke
+// rule, without reading it for this gateway's own records, so the inbound
+// handler neither judges the answer again nor writes anything from it. A nil
+// carrier drops it, as note does.
+func (l *pasLeg) skipWrite(rule string) {
+	if l == nil || l.unread != "" {
+		return
+	}
+	l.unread = rule
+}
+
+// unreadRule is the rule the responder skipped the local write for, or "".
+func (l *pasLeg) unreadRule() string {
+	if l == nil {
+		return ""
+	}
+	return l.unread
+}
+
+// payerLocalWriteSkipped is the payer-side sibling of localWriteSkipped: the
+// payer gateway relayed its participant's answer on leg, which broke rule,
+// below strict, so it wrote nothing from it for its own records — no pend, no
+// decision and no EOB. The order of the writes an answer that is read makes is
+// unchanged; this one simply makes none. Metadata only: a log line and an
+// observer event (LocalWriteSkippedEvent), no payload.
+func (g *Gateway) payerLocalWriteSkipped(leg, correlationID, rule string) {
+	detail := "answer not read for the local record (" + rule + "); no pend, decision or EOB written"
+	log.Printf("gateway: %s: leg %s correlation %s: %s", LocalWriteSkippedEvent, leg, correlationID, detail)
+	g.observe(ObserverEvent{
+		Kind: LocalWriteSkippedEvent, Direction: "ingress", LegType: leg,
+		CorrelationID: correlationID, Detail: detail,
+	})
+}
 
 // RetryVersionConflictEvent is raised when an amendment was re-issued once after
 // the payer's own store refused the write its resolution timer had already made.

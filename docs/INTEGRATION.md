@@ -294,7 +294,7 @@ For a legacy or non-FHIR system of record (HL7v2, X12, SQL, SOAP), implement the
 `engine.SystemOfRecord` interface starting from the runnable scaffold. See
 [`connectors/scaffold/README.md`](../connectors/scaffold/README.md) for the
 step-by-step: copy `scaffold.go`, fill the read methods against your backend
-(deriving the patient identifier via `shnsdk.ResolvePCI`), and wire your
+(obtaining the network's opaque patient identifier from `shnsdk.ResolvePCI`), and wire your
 connector through the already-public `engine.Config.SoR` seam.
 
 ## System-of-record read failures
@@ -430,8 +430,9 @@ mode: every forwarded leg is still independently authorized, sealed, and audited
 The outbound subject fence (`fenceResponseSubject`) applies to all
 native-forwarded responses — including PAS submit/update when
 `PAYER_DAVINCI_PAS_NATIVE=true`. If the partner returns a response about a
-different patient than the request, the engine rejects it before sealing (a
-403, not a sealed foreign-patient leg).
+different patient than the request, the engine rejects it before sealing at
+enforcement `strict` (a 403, not a sealed foreign-patient leg); below `strict` it is
+relayed as sent and recorded as a finding at `observe`.
 
 ## Provider DTR population
 
@@ -467,23 +468,34 @@ across replicas (see [DEPLOYMENT.md](DEPLOYMENT.md), "Running more than one repl
 
 ## Conformance enforcement
 
-Every message your gateway sends or receives is checked against its FHIR profile —
-and, for a payer's CDS Hooks answer, against the CDS Hooks response rules. That
-check always runs. What happens when a check fails is `CONFORMANCE_ENFORCEMENT`, a
+Your gateway can check every message it sends or receives against its FHIR profile —
+and, for a payer's CDS Hooks answer, against the CDS Hooks response rules — along
+with the message's own consistency (for example, one patient throughout a request).
+Whether those checks run, and what a defect does, is `CONFORMANCE_ENFORCEMENT`, a
 setting on your own gateway:
 
-- `strict`: an invalid result refuses the message. A FHIR profile refusal names the
+- `none`: no payload conformance check runs and no finding is recorded. The message
+  relays as sent, apart from the gateway's registered edits (the callback removed,
+  prefetch and coverage obtained, and payer identity mapping; participant protocol
+  §7a.4).
+- `observe` (the default when the variable is unset): every check runs and each
+  defect is recorded as a finding — it does not stop the message, which is carried
+  as sent, apart from the gateway's registered edits. A validator that cannot be
+  reached is recorded the same way.
+- `strict`: a defect refuses the message. A FHIR profile refusal names the
   validator issues it was based on; a CDS Hooks response-rules refusal names the
   rule (and the violating path) as well.
-- `none` (the default when the variable is unset): every check still runs and every invalid result is still recorded as a
-  finding — it does not stop the message. The message relays as sent, except an
-  answer this gateway cannot read at all, and a payload this gateway itself
-  translated between IG lines, both of which refuse at every level regardless of
-  the setting.
 
 Any other value refuses to boot.
 
-**Reading a finding.** If you run the gateway yourself — through the SHN Kit or a
+Some checks are not about a payload's conformance and refuse at every level:
+authentication, authority (including a token presented with a request other than
+the one it was issued for), consent, the patient binding (each gateway identifies
+the member the request names by its own system), routing, replay, a repeated
+member name in any body, the contract line stamped on an answer's frame, and the
+check of a payload this gateway itself translated between IG lines.
+
+**Reading a finding.** At `observe` and `strict`, if you run the gateway yourself — through the SHN Kit or a
 self-hosted deployment — findings appear in your own gateway log and observer
 stream: look for the `conformance:` log line, or the `conformance.observed` event
 if you're watching the observer stream. If SHN hosts your gateway, ask your SHN
@@ -507,8 +519,10 @@ Load either with a single transaction POST to your FHIR base (run from the repo 
       --data-binary @seed/provider-personas.json \
       https://your-fhir-server/fhir
 
-The reference payer recognizes **only** the member ids in these bundles; a request
-for any other member is rejected by the gateway as an unknown member.
+The reference payer's system of record holds **only** the member ids in these bundles. A
+request for any other member is carried by default and bound by the member id and the
+Patient it carries (see CONFIGURATION, "Members your system of record does not hold"); the
+reference payer answers for that member from its own records, which hold nothing for it.
 
 ### Keep the provider-data Observations recent
 

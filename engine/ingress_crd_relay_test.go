@@ -280,33 +280,64 @@ func TestCRDIngress_UnknownService404(t *testing.T) {
 // description) still reaches the EHR byte-identical, and the violation is
 // recorded on the observer stream as a cds-envelope finding, whose="peer"
 // (this is a peer's answer, received over the network) and decision="relayed".
-func TestCRDIngress_RelaysAtNoneWithFinding(t *testing.T) {
-	env := newInProcessExchange(t)
-	env.originator.cfg.ConformanceEnforcement = EnforcementNone
-	var events []ObserverEvent
-	env.originator.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
-	env.payerReturns(LegResult{Response: testResponse([]byte(externalPayerDescriptionlessAnswer))})
+func TestCRDIngress_RelaysBelowStrict(t *testing.T) {
+	for _, level := range []ConformanceEnforcement{EnforcementObserve, EnforcementNone} {
+		t.Run(level.String(), func(t *testing.T) {
+			env := newInProcessExchange(t)
+			env.originator.cfg.ConformanceEnforcement = level
+			var events []ObserverEvent
+			env.originator.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
+			env.payerReturns(LegResult{Response: testResponse([]byte(externalPayerDescriptionlessAnswer))})
 
-	rec := ingressAt(t, env, "shn-order-select", conformantCRDRequest("MBR-COVERED"))
-	if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), []byte(externalPayerDescriptionlessAnswer)) {
-		t.Fatalf("at none the payer's answer must relay exactly: got %d %q, want 200 %q", rec.Code, rec.Body.Bytes(), externalPayerDescriptionlessAnswer)
-	}
-	var found bool
-	for _, e := range events {
-		if e.Kind != ConformanceObservedEvent {
-			continue
-		}
-		if strings.Contains(e.Detail, `"rule":"action.description"`) {
-			found = true
-			if !strings.Contains(e.Detail, `"whose":"peer"`) {
-				t.Fatalf("the provider ingress's finding must say whose=peer (a peer's answer), got: %s", e.Detail)
+			rec := ingressAt(t, env, "shn-order-select", conformantCRDRequest("MBR-COVERED"))
+			if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), []byte(externalPayerDescriptionlessAnswer)) {
+				t.Fatalf("at %s the payer's answer must relay exactly: got %d %q, want 200 %q", level, rec.Code, rec.Body.Bytes(), externalPayerDescriptionlessAnswer)
 			}
-			if !strings.Contains(e.Detail, `"decision":"relayed"`) || !strings.Contains(e.Detail, `"level":"none"`) {
-				t.Fatalf("finding must record relayed/none, got: %s", e.Detail)
+			var found bool
+			for _, e := range events {
+				if e.Kind != ConformanceObservedEvent {
+					continue
+				}
+				if strings.Contains(e.Detail, `"rule":"action.description"`) {
+					found = true
+					if !strings.Contains(e.Detail, `"whose":"peer"`) {
+						t.Fatalf("the provider ingress's finding must say whose=peer (a peer's answer), got: %s", e.Detail)
+					}
+					if !strings.Contains(e.Detail, `"decision":"relayed"`) || !strings.Contains(e.Detail, `"level":"observe"`) {
+						t.Fatalf("finding must record relayed/observe, got: %s", e.Detail)
+					}
+				}
 			}
-		}
+			if found != (level == EnforcementObserve) {
+				t.Fatalf("at %s cds-envelope finding observed = %v; observe records it, none runs no rule", level, found)
+			}
+		})
 	}
-	if !found {
-		t.Fatal("no cds-envelope finding observed for action.description — a hardcoded-strict policy at crdAnswerOutcome would refuse instead of reaching here")
+}
+
+// An unreadable payer answer is relayed exactly below strict and refused at
+// strict.
+func TestCRDIngress_UnreadableAnswerPerLevel(t *testing.T) {
+	const unreadable = `not json at all`
+	for _, tc := range []struct {
+		level ConformanceEnforcement
+		want  int
+	}{
+		{EnforcementStrict, http.StatusBadGateway},
+		{EnforcementObserve, http.StatusOK},
+		{EnforcementNone, http.StatusOK},
+	} {
+		t.Run(tc.level.String(), func(t *testing.T) {
+			env := newInProcessExchange(t)
+			env.originator.cfg.ConformanceEnforcement = tc.level
+			env.payerReturns(LegResult{Response: testResponse([]byte(unreadable))})
+			rec := ingressAt(t, env, "shn-order-select", conformantCRDRequest("MBR-COVERED"))
+			if rec.Code != tc.want {
+				t.Fatalf("at %s got %d %q, want %d", tc.level, rec.Code, rec.Body.Bytes(), tc.want)
+			}
+			if tc.want == http.StatusOK && rec.Body.String() != unreadable {
+				t.Fatalf("at %s the answer must relay exactly, got %q", tc.level, rec.Body.Bytes())
+			}
+		})
 	}
 }

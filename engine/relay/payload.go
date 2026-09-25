@@ -85,9 +85,9 @@ const (
 	EditDTRCoverageObtain EditID = "E-04"
 	// EditDTRPatientObtain adds the provider's own Patient record for the bound
 	// patient, as a referenced resource, to a questionnaire package request
-	// that carried no Patient — only under the connectathon seam that carries
-	// members a gateway does not hold, so the payer's side can bind the same
-	// subject from the request.
+	// that carried no Patient, so a payer that does not hold the member binds
+	// the same subject from the request. An enrichment: not applied to
+	// Da Vinci-native traffic unless the participant opts in.
 	EditDTRPatientObtain EditID = "E-05"
 )
 

@@ -28,79 +28,79 @@ func strangerPCI() string { return shnsdk.ResolvePCI(strangerMember, "", "") }
 
 // --- the helper itself -------------------------------------------------------------------
 
-func TestResolveSubjectPCI_UnknownMemberRefusedByDefault(t *testing.T) {
-	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
+func TestResolveSubjectPCI_UnknownMemberRefusedWhenKnownMembersRequired(t *testing.T) {
+	g := &Gateway{cfg: Config{SoR: newCensusSoR(), RequireKnownMembers: true}}
 	pci, found, err := g.resolveSubjectPCI(context.Background(), strangerMember, nil)
 	if err != nil || found || pci != "" {
-		t.Fatalf("default: got (%q, found=%v, err=%v), want not found and no pci", pci, found, err)
+		t.Fatalf("known members required: got (%q, found=%v, err=%v), want not found and no pci", pci, found, err)
 	}
 }
 
-func TestResolveSubjectPCI_UnknownMemberBindsByIDUnderSeam(t *testing.T) {
-	g := &Gateway{cfg: Config{SoR: newCensusSoR(), AcceptUnknownMembers: true}}
+func TestResolveSubjectPCI_UnknownMemberBindsByIDByDefault(t *testing.T) {
+	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
 	pci, found, err := g.resolveSubjectPCI(context.Background(), strangerMember, nil)
 	if err != nil || !found {
-		t.Fatalf("seam: got (found=%v, err=%v), want found", found, err)
+		t.Fatalf("default: got (found=%v, err=%v), want found", found, err)
 	}
 	if pci != strangerPCI() {
-		t.Fatalf("seam: pci = %q, want the id-derived %q", pci, strangerPCI())
+		t.Fatalf("default: pci = %q, want the id-derived %q", pci, strangerPCI())
 	}
 }
 
-// A member the system of record holds binds through it, seam or not: the seam never
-// replaces a resolved identity with the id-derived one.
-func TestResolveSubjectPCI_KnownMemberUnchangedUnderSeam(t *testing.T) {
+// A member the system of record holds binds through it, whatever the setting: carrying
+// unknown members never replaces a resolved identity with the id-derived one.
+func TestResolveSubjectPCI_KnownMemberUnchangedByDefault(t *testing.T) {
 	sor := newCensusSoR()
 	want, _, ok := sor.ResolvePatient("MBR-COVERED")
 	if !ok {
 		t.Fatal("fixture: MBR-COVERED must resolve")
 	}
-	g := &Gateway{cfg: Config{SoR: sor, AcceptUnknownMembers: true}}
+	g := &Gateway{cfg: Config{SoR: sor}}
 	pci, found, err := g.resolveSubjectPCI(context.Background(), "MBR-COVERED", nil)
 	if err != nil || !found || pci != want {
-		t.Fatalf("seam, known member: got (%q, found=%v, err=%v), want %q", pci, found, err, want)
+		t.Fatalf("default, known member: got (%q, found=%v, err=%v), want %q", pci, found, err, want)
 	}
 	if pci == shnsdk.ResolvePCI("MBR-COVERED", "", "") {
-		t.Fatal("seam, known member: bound by id alone instead of through the system of record")
+		t.Fatal("default, known member: bound by id alone instead of through the system of record")
 	}
 }
 
 // An unreadable system of record is never mistaken for a member it does not hold.
-func TestResolveSubjectPCI_ReadFailureSurfacesUnderSeam(t *testing.T) {
-	g := &Gateway{cfg: Config{SoR: failingSubjectSoR{newPrefetchSoR()}, AcceptUnknownMembers: true}}
+func TestResolveSubjectPCI_ReadFailureSurfacesByDefault(t *testing.T) {
+	g := &Gateway{cfg: Config{SoR: failingSubjectSoR{newPrefetchSoR()}}}
 	pci, found, err := g.resolveSubjectPCI(context.Background(), strangerMember, nil)
 	if err == nil || found || pci != "" {
-		t.Fatalf("seam, read failure: got (%q, found=%v, err=%v), want the read error", pci, found, err)
+		t.Fatalf("default, read failure: got (%q, found=%v, err=%v), want the read error", pci, found, err)
 	}
 }
 
 // --- the provider ingress legs ------------------------------------------------------------
 
-func TestIngressSubjectPCI_StrangerRefusedByDefault(t *testing.T) {
-	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
+func TestIngressSubjectPCI_StrangerRefusedWhenKnownMembersRequired(t *testing.T) {
+	g := &Gateway{cfg: Config{SoR: newCensusSoR(), RequireKnownMembers: true}}
 	ref := "Patient/" + strangerMember
 	_, status, msg := g.ingressCRDSubjectPCIContext(context.Background(), crdReqJSON(strangerMember, ref, ref))
 	if status != http.StatusBadRequest || msg != "unknown member" {
-		t.Fatalf("default CRD ingress: status=%d msg=%q, want 400 unknown member", status, msg)
+		t.Fatalf("known members required, CRD ingress: status=%d msg=%q, want 400 unknown member", status, msg)
 	}
 }
 
-func TestIngressSubjectPCI_StrangerBindsUnderSeam(t *testing.T) {
-	g := &Gateway{cfg: Config{SoR: newCensusSoR(), AcceptUnknownMembers: true}}
+func TestIngressSubjectPCI_StrangerBindsByDefault(t *testing.T) {
+	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
 	ref := "Patient/" + strangerMember
 	pci, status, msg := g.ingressCRDSubjectPCIContext(context.Background(), crdReqJSON(strangerMember, ref, ref))
 	if status != 0 {
-		t.Fatalf("seam CRD ingress: status=%d msg=%q, want bound", status, msg)
+		t.Fatalf("default CRD ingress: status=%d msg=%q, want bound", status, msg)
 	}
 	if pci != strangerPCI() {
-		t.Fatalf("seam CRD ingress: pci=%q, want %q", pci, strangerPCI())
+		t.Fatalf("default CRD ingress: pci=%q, want %q", pci, strangerPCI())
 	}
 }
 
-// Rejection row: the seam binds ONE stranger; a request that mixes the stranger with another
+// Rejection row: by default ONE stranger binds; a request that mixes the stranger with another
 // member — held or not — is still refused.
-func TestIngressSubjectPCI_MixedMembersStillRefusedUnderSeam(t *testing.T) {
-	g := &Gateway{cfg: Config{SoR: newCensusSoR(), AcceptUnknownMembers: true}}
+func TestIngressSubjectPCI_MixedMembersStillRefusedByDefault(t *testing.T) {
+	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
 	for name, req := range map[string][]byte{
 		"held member in the order":    crdReqJSON(strangerMember, "Patient/MBR-COVERED", "Patient/"+strangerMember),
 		"second stranger in coverage": crdReqJSON(strangerMember, "Patient/"+strangerMember, "Patient/eOTHER"),
@@ -116,58 +116,58 @@ func dtrPackageFor(member string) []byte {
 	return []byte(`{"resourceType":"Parameters","parameter":[{"name":"coverage","resource":{"resourceType":"Coverage","id":"c1","status":"active","beneficiary":{"reference":"Patient/` + member + `"},"payor":[{"identifier":{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00301"}}]}},{"name":"questionnaire","valueCanonical":"http://example.org/fhir/Questionnaire/HomeHealthAssessment"}]}`)
 }
 
-func TestIngressDTR_StrangerRefusedByDefault(t *testing.T) {
-	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
+func TestIngressDTR_StrangerRefusedWhenKnownMembersRequired(t *testing.T) {
+	g := &Gateway{cfg: Config{SoR: newCensusSoR(), RequireKnownMembers: true}}
 	_, status, msg := g.prepareDTRPackageRequest(context.Background(), dtrPackageFor(strangerMember))
 	if status != http.StatusForbidden || msg != "request patient does not resolve" {
-		t.Fatalf("default DTR ingress: status=%d msg=%q, want 403 request patient does not resolve", status, msg)
+		t.Fatalf("known members required, DTR ingress: status=%d msg=%q, want 403 request patient does not resolve", status, msg)
 	}
 }
 
-func TestIngressDTR_StrangerBindsUnderSeam(t *testing.T) {
-	g := &Gateway{cfg: Config{SoR: newCensusSoR(), AcceptUnknownMembers: true}}
+func TestIngressDTR_StrangerBindsByDefault(t *testing.T) {
+	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
 	out, status, msg := g.prepareDTRPackageRequest(context.Background(), dtrPackageFor(strangerMember))
 	if status != 0 {
-		t.Fatalf("seam DTR ingress: status=%d msg=%q, want bound", status, msg)
+		t.Fatalf("default DTR ingress: status=%d msg=%q, want bound", status, msg)
 	}
 	if out.pci != strangerPCI() || out.member != strangerMember {
-		t.Fatalf("seam DTR ingress: bound (%q, %q), want (%q, %q)", out.member, out.pci, strangerMember, strangerPCI())
+		t.Fatalf("default DTR ingress: bound (%q, %q), want (%q, %q)", out.member, out.pci, strangerMember, strangerPCI())
 	}
 }
 
-func TestIngressPAS_StrangerRefusedByDefault(t *testing.T) {
-	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
+func TestIngressPAS_StrangerRefusedWhenKnownMembersRequired(t *testing.T) {
+	g := &Gateway{cfg: Config{SoR: newCensusSoR(), RequireKnownMembers: true}}
 	_, status, msg := g.ingressPASNativeSubjectPCIContext(context.Background(), conformantPASBundleWithQR(t, strangerMember))
 	if status != http.StatusBadRequest || msg != "unknown member" {
-		t.Fatalf("default PAS ingress: status=%d msg=%q, want 400 unknown member", status, msg)
+		t.Fatalf("known members required, PAS ingress: status=%d msg=%q, want 400 unknown member", status, msg)
 	}
 }
 
-func TestIngressPAS_StrangerBindsUnderSeam(t *testing.T) {
-	g := &Gateway{cfg: Config{SoR: newCensusSoR(), AcceptUnknownMembers: true}}
+func TestIngressPAS_StrangerBindsByDefault(t *testing.T) {
+	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
 	pci, status, msg := g.ingressPASNativeSubjectPCIContext(context.Background(), conformantPASBundleWithQR(t, strangerMember))
 	if status != 0 || pci != strangerPCI() {
-		t.Fatalf("seam PAS ingress: status=%d msg=%q pci=%q, want bound to %q", status, msg, pci, strangerPCI())
+		t.Fatalf("default PAS ingress: status=%d msg=%q pci=%q, want bound to %q", status, msg, pci, strangerPCI())
 	}
 }
 
-// The inquiry ingress binds through the same helper: by default a stranger is refused at
-// the bind (400); under the seam it passes the bind and is refused where the control is,
+// The inquiry ingress binds through the same helper: a stranger is refused at
+// the bind (400) when known members are required; by default it passes the bind and is refused where the control is,
 // at routing (422, this fixture's Coverage names no payer), so the difference is the bind.
-func TestIngressInquire_StrangerBindsUnderSeam(t *testing.T) {
+func TestIngressInquire_StrangerBindsByDefault(t *testing.T) {
 	post := func(t *testing.T, seam bool, body []byte) *httptest.ResponseRecorder {
 		t.Helper()
-		g := &Gateway{cfg: Config{ingressAuthBypass: true, SoR: newCensusSoR(), Clock: fixedClock, AcceptUnknownMembers: seam}}
+		g := &Gateway{cfg: Config{ingressAuthBypass: true, SoR: newCensusSoR(), Clock: fixedClock, RequireKnownMembers: !seam}}
 		w := httptest.NewRecorder()
 		g.handlePASInquireIngress(w, httptest.NewRequest(http.MethodPost, "/Claim/$inquire", bytes.NewReader(body)))
 		return w
 	}
 	stranger := inquiryBundle(strangerMember, "", "TRN-1", "72148")
 	if w := post(t, false, stranger); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "unknown member") {
-		t.Fatalf("default inquiry ingress: status=%d body=%s, want 400 unknown member", w.Code, w.Body)
+		t.Fatalf("known members required, inquiry ingress: status=%d body=%s, want 400 unknown member", w.Code, w.Body)
 	}
 	if w := post(t, true, stranger); w.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("seam inquiry ingress: status=%d body=%s, want 422 (past the bind, refused at routing)", w.Code, w.Body)
+		t.Fatalf("default inquiry ingress: status=%d body=%s, want 422 (past the bind, refused at routing)", w.Code, w.Body)
 	}
 	// Rejection row: two members are still refused at the bind under the seam.
 	if w := post(t, true, inquiryBundle(strangerMember, "MBR-COVERED", "TRN-1", "72148")); w.Code != http.StatusForbidden {
@@ -175,54 +175,53 @@ func TestIngressInquire_StrangerBindsUnderSeam(t *testing.T) {
 	}
 }
 
-// --- the payer inbound legs: the token subject the ingress side derived must bind here -----
+// --- the payer inbound legs: the payer binds the member its request names by its own
+// system (the record it holds, else the Patient the request carries), whatever subject the
+// leg's token names; that binding is what it records the exchange under ---------------------
 
-func TestPayerCRDBind_StrangerBindsToDerivedSubjectUnderSeam(t *testing.T) {
-	g := &Gateway{cfg: Config{SoR: newCensusSoR(), AcceptUnknownMembers: true}}
-	_, _, status, msg := g.conformantCRDBindContext(context.Background(), conformantCRD(strangerMember, "72148"), strangerPCI())
-	if status != 0 {
-		t.Fatalf("seam payer CRD: status=%d msg=%q, want bound", status, msg)
+func TestPayerCRDBind_StrangerBindsToDerivedSubjectByDefault(t *testing.T) {
+	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
+	_, _, pci, status, msg := g.conformantCRDBindContext(context.Background(), conformantCRD(strangerMember, "72148"))
+	if status != 0 || pci != strangerPCI() {
+		t.Fatalf("default payer CRD: status=%d msg=%q pci=%q, want bound to %q", status, msg, pci, strangerPCI())
 	}
-	// Rejection row: a token for someone else still does not bind the stranger.
-	_, _, status, _ = g.conformantCRDBindContext(context.Background(), conformantCRD(strangerMember, "72148"), "pci:someone-else")
-	if status != http.StatusForbidden {
-		t.Fatalf("seam payer CRD, wrong token subject: status=%d, want 403", status)
-	}
-	// And without the seam the payer refuses the stranger as before.
-	g.cfg.AcceptUnknownMembers = false
-	_, _, status, _ = g.conformantCRDBindContext(context.Background(), conformantCRD(strangerMember, "72148"), strangerPCI())
+	// Requiring known members, the payer refuses the stranger.
+	g.cfg.RequireKnownMembers = true
+	_, _, _, status, _ = g.conformantCRDBindContext(context.Background(), conformantCRD(strangerMember, "72148"))
 	if status != http.StatusBadRequest {
-		t.Fatalf("default payer CRD: status=%d, want 400", status)
+		t.Fatalf("known members required, payer CRD: status=%d, want 400", status)
 	}
 }
 
-func TestPayerPASBind_StrangerBindsToDerivedSubjectUnderSeam(t *testing.T) {
-	g := &Gateway{cfg: Config{SoR: newCensusSoR(), AcceptUnknownMembers: true}}
+func TestPayerPASBind_StrangerBindsToDerivedSubjectByDefault(t *testing.T) {
+	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
 	bundle := conformantPASBundleWithQR(t, strangerMember)
-	memberRef, status, msg := g.conformantPASBindContext(context.Background(), bundle, strangerPCI())
-	if status != 0 || memberRef != "Patient/"+strangerMember {
-		t.Fatalf("seam payer PAS: status=%d msg=%q memberRef=%q, want bound", status, msg, memberRef)
+	memberRef, pci, status, msg := g.conformantPASBindContext(context.Background(), bundle)
+	if status != 0 || memberRef != "Patient/"+strangerMember || pci != strangerPCI() {
+		t.Fatalf("default payer PAS: status=%d msg=%q memberRef=%q pci=%q, want bound to %q", status, msg, memberRef, pci, strangerPCI())
 	}
-	if _, status, _ := g.conformantPASBindContext(context.Background(), bundle, "pci:someone-else"); status != http.StatusForbidden {
-		t.Fatalf("seam payer PAS, wrong token subject: status=%d, want 403", status)
-	}
-	g.cfg.AcceptUnknownMembers = false
-	if _, status, _ := g.conformantPASBindContext(context.Background(), bundle, strangerPCI()); status != http.StatusBadRequest {
-		t.Fatalf("default payer PAS: status=%d, want 400", status)
+	g.cfg.RequireKnownMembers = true
+	if _, _, status, _ := g.conformantPASBindContext(context.Background(), bundle); status != http.StatusBadRequest {
+		t.Fatalf("known members required, payer PAS: status=%d, want 400", status)
 	}
 }
 
-func TestPayerDTRBind_StrangerBindsToDerivedSubjectUnderSeam(t *testing.T) {
-	g := &Gateway{cfg: Config{SoR: newCensusSoR(), AcceptUnknownMembers: true}}
-	if status, msg := g.bindNextQuestionSubjectContext(context.Background(), "Patient/"+strangerMember, strangerPCI(), nil); status != 0 {
-		t.Fatalf("seam payer DTR: status=%d msg=%q, want bound", status, msg)
+func TestPayerDTRBind_StrangerBindsToDerivedSubjectByDefault(t *testing.T) {
+	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
+	if pci, status, msg := g.bindNextQuestionSubjectContext(context.Background(), "Patient/"+strangerMember, nil); status != 0 || pci != strangerPCI() {
+		t.Fatalf("default payer DTR: status=%d msg=%q pci=%q, want bound to %q", status, msg, pci, strangerPCI())
 	}
-	if status, _ := g.bindNextQuestionSubjectContext(context.Background(), "Patient/"+strangerMember, "pci:someone-else", nil); status != http.StatusForbidden {
-		t.Fatalf("seam payer DTR, wrong token subject: status=%d, want 403", status)
+	g.cfg.RequireKnownMembers = true
+	if _, status, _ := g.bindNextQuestionSubjectContext(context.Background(), "Patient/"+strangerMember, nil); status != http.StatusBadRequest {
+		t.Fatalf("known members required, payer DTR: status=%d, want 400", status)
 	}
-	g.cfg.AcceptUnknownMembers = false
-	if status, _ := g.bindNextQuestionSubjectContext(context.Background(), "Patient/"+strangerMember, strangerPCI(), nil); status != http.StatusBadRequest {
-		t.Fatalf("default payer DTR: status=%d, want 400", status)
+}
+
+// A payer bind with no member to bind refuses, whatever the posture.
+func TestBindInboundSubject_NoMemberRefused(t *testing.T) {
+	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
+	if pci, status, _ := g.bindInboundSubject(context.Background(), "", nil); status != http.StatusBadRequest || pci != "" {
+		t.Fatalf("no member: pci=%q status=%d, want 400", pci, status)
 	}
 }
 
@@ -247,7 +246,6 @@ func TestPrefetch_HistoryOmittedForMemberNotHeld(t *testing.T) {
 	env := newInProcessExchange(t)
 	env.originator.cfg.SoR = s.sor()
 	env.originator.cfg.Observer = obs.observe
-	env.originator.cfg.AcceptUnknownMembers = true
 	rec := httptest.NewRecorder()
 	env.originator.handleCRDIngress(rec, crdIngressPost(strangerEHRRequest(supported+`,"deviceHistory":null`)))
 	if rec.Code != http.StatusOK || env.routeHitCount() != 1 {
@@ -280,16 +278,16 @@ func TestPrefetch_HistoryOmittedForMemberNotHeld(t *testing.T) {
 			s := newPrefetchSoR()
 			env := newInProcessExchange(t)
 			env.originator.cfg.SoR = s.sor()
-			env.originator.cfg.AcceptUnknownMembers = true
 			rec := httptest.NewRecorder()
 			env.originator.handleCRDIngress(rec, crdIngressPost(body))
 			refusedBeforeTheNetwork(t, env, rec, http.StatusUnprocessableEntity, "patient not found in system of record")
 		})
 	}
-	t.Run("without the seam", func(t *testing.T) {
+	t.Run("known members required", func(t *testing.T) {
 		s := newPrefetchSoR()
 		env := newInProcessExchange(t)
 		env.originator.cfg.SoR = s.sor()
+		env.originator.cfg.RequireKnownMembers = true
 		rec := httptest.NewRecorder()
 		env.originator.handleCRDIngress(rec, crdIngressPost(strangerEHRRequest(supported)))
 		refusedBeforeTheNetwork(t, env, rec, http.StatusBadRequest, "unknown member")
@@ -363,22 +361,22 @@ func pasBundleWithPatient(t *testing.T, member, patient string, contained bool) 
 	return out
 }
 
-func TestResolveSubjectPCI_UnheldMemberBindsFromRequestPatientUnderSeam(t *testing.T) {
-	g := &Gateway{cfg: Config{SoR: newCensusSoR(), AcceptUnknownMembers: true}}
+func TestResolveSubjectPCI_UnheldMemberBindsFromRequestPatientByDefault(t *testing.T) {
+	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
 	payload := []byte(`{"prefetch":{"patient":` + requestPatient(strangerMember, "1962-03-11", "Nakamura") + `}}`)
 	pci, found, err := g.resolveSubjectPCI(context.Background(), strangerMember, payload)
 	if err != nil || !found {
-		t.Fatalf("seam, request patient: got (found=%v, err=%v), want found", found, err)
+		t.Fatalf("default, request patient: got (found=%v, err=%v), want found", found, err)
 	}
 	if want := shnsdk.ResolvePCI(strangerMember, "1962-03-11", "Nakamura"); pci != want {
-		t.Fatalf("seam, request patient: pci = %q, want the demographics-derived %q (bare id would be %q)", pci, want, strangerPCI())
+		t.Fatalf("default, request patient: pci = %q, want the demographics-derived %q (bare id would be %q)", pci, want, strangerPCI())
 	}
 }
 
 // Without both demographics in a Patient the request carries for THIS member, the
 // member binds by id alone, as before.
-func TestResolveSubjectPCI_RequestWithoutDemographicsBindsByIDUnderSeam(t *testing.T) {
-	g := &Gateway{cfg: Config{SoR: newCensusSoR(), AcceptUnknownMembers: true}}
+func TestResolveSubjectPCI_RequestWithoutDemographicsBindsByIDByDefault(t *testing.T) {
+	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
 	for name, payload := range map[string][]byte{
 		"no payload":          nil,
 		"no patient":          []byte(`{"prefetch":{"coverage":{"resourceType":"Coverage","id":"c1"}}}`),
@@ -400,8 +398,8 @@ func TestResolveSubjectPCI_RequestWithoutDemographicsBindsByIDUnderSeam(t *testi
 }
 
 // Two carried Patients for the member that agree bind as one.
-func TestResolveSubjectPCI_AgreeingRequestPatientsBindUnderSeam(t *testing.T) {
-	g := &Gateway{cfg: Config{SoR: newCensusSoR(), AcceptUnknownMembers: true}}
+func TestResolveSubjectPCI_AgreeingRequestPatientsBindByDefault(t *testing.T) {
+	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
 	payload := []byte(`{"prefetch":{"patient":` + requestPatient(strangerMember, "1962-03-11", "Nakamura") + `},"other":{"patient":` + requestPatient(strangerMember, "1962-03-11", "Nakamura") + `}}`)
 	pci, _, _ := g.resolveSubjectPCI(context.Background(), strangerMember, payload)
 	if want := shnsdk.ResolvePCI(strangerMember, "1962-03-11", "Nakamura"); pci != want {
@@ -415,7 +413,7 @@ func TestResolveSubjectPCI_AgreeingRequestPatientsBindUnderSeam(t *testing.T) {
 func TestResolveSubjectPCI_RequestPatientNeverOverridesHeldMember(t *testing.T) {
 	sor := newCensusSoR()
 	want, _, _ := sor.ResolvePatient("MBR-COVERED")
-	g := &Gateway{cfg: Config{SoR: sor, AcceptUnknownMembers: true}}
+	g := &Gateway{cfg: Config{SoR: sor}}
 	payload := []byte(`{"prefetch":{"patient":` + requestPatient("MBR-COVERED", "1900-01-01", "Other") + `}}`)
 	pci, found, err := g.resolveSubjectPCI(context.Background(), "MBR-COVERED", payload)
 	if err != nil || !found || pci != want {
@@ -425,44 +423,40 @@ func TestResolveSubjectPCI_RequestPatientNeverOverridesHeldMember(t *testing.T) 
 
 // The payer inbound legs bind an unheld member from the Patient where each leg carries
 // it: a CRD prefetch value (bare or searchset), a PAS bundle entry or a contained
-// resource, a questionnaire parameter. The bare id no longer matches once demographics
-// ride along, so a token derived by id alone is refused.
-func TestPayerBind_UnheldMemberBindsFromCarriedPatientUnderSeam(t *testing.T) {
+// resource, a questionnaire parameter.
+func TestPayerBind_UnheldMemberBindsFromCarriedPatientByDefault(t *testing.T) {
 	const birth, family = "1962-03-11", "Nakamura"
 	patient := requestPatient(strangerMember, birth, family)
 	want := shnsdk.ResolvePCI(strangerMember, birth, family)
-	g := &Gateway{cfg: Config{SoR: newCensusSoR(), AcceptUnknownMembers: true}}
+	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
 	ctx := context.Background()
 
-	bind := map[string]func(token string) (int, string){
-		"CRD prefetch patient, bare": func(token string) (int, string) {
-			_, _, status, msg := g.conformantCRDBindContext(ctx, conformantCRDWithPatient(strangerMember, "72148", patient), token)
-			return status, msg
+	bind := map[string]func() (string, int, string){
+		"CRD prefetch patient, bare": func() (string, int, string) {
+			_, _, pci, status, msg := g.conformantCRDBindContext(ctx, conformantCRDWithPatient(strangerMember, "72148", patient))
+			return pci, status, msg
 		},
-		"CRD prefetch patient, searchset": func(token string) (int, string) {
-			_, _, status, msg := g.conformantCRDBindContext(ctx, conformantCRDWithPatient(strangerMember, "72148", string(searchsetOf(matchOf(patient)))), token)
-			return status, msg
+		"CRD prefetch patient, searchset": func() (string, int, string) {
+			_, _, pci, status, msg := g.conformantCRDBindContext(ctx, conformantCRDWithPatient(strangerMember, "72148", string(searchsetOf(matchOf(patient)))))
+			return pci, status, msg
 		},
-		"PAS bundle entry": func(token string) (int, string) {
-			_, status, msg := g.conformantPASBindContext(ctx, pasBundleWithPatient(t, strangerMember, patient, false), token)
-			return status, msg
+		"PAS bundle entry": func() (string, int, string) {
+			_, pci, status, msg := g.conformantPASBindContext(ctx, pasBundleWithPatient(t, strangerMember, patient, false))
+			return pci, status, msg
 		},
-		"PAS contained in the Claim": func(token string) (int, string) {
-			_, status, msg := g.conformantPASBindContext(ctx, pasBundleWithPatient(t, strangerMember, patient, true), token)
-			return status, msg
+		"PAS contained in the Claim": func() (string, int, string) {
+			_, pci, status, msg := g.conformantPASBindContext(ctx, pasBundleWithPatient(t, strangerMember, patient, true))
+			return pci, status, msg
 		},
-		"DTR questionnaire parameter": func(token string) (int, string) {
+		"DTR questionnaire parameter": func() (string, int, string) {
 			body := []byte(`{"resourceType":"Parameters","parameter":[{"name":"patient","resource":` + patient + `}]}`)
-			return g.bindNextQuestionSubjectContext(ctx, "Patient/"+strangerMember, token, body)
+			return g.bindNextQuestionSubjectContext(ctx, "Patient/"+strangerMember, body)
 		},
 	}
 	for name, f := range bind {
 		t.Run(name, func(t *testing.T) {
-			if status, msg := f(want); status != 0 {
-				t.Fatalf("token derived from the carried demographics: status=%d msg=%q, want bound", status, msg)
-			}
-			if status, _ := f(strangerPCI()); status != http.StatusForbidden {
-				t.Fatalf("token derived by id alone while demographics ride along: status=%d, want 403", status)
+			if pci, status, msg := f(); status != 0 || pci != want {
+				t.Fatalf("status=%d msg=%q pci=%q, want bound to %q", status, msg, pci, want)
 			}
 		})
 	}
@@ -470,8 +464,8 @@ func TestPayerBind_UnheldMemberBindsFromCarriedPatientUnderSeam(t *testing.T) {
 
 // The provider ingress derives the same subject from the same carried Patient, so a
 // member neither side holds binds identically at both ends.
-func TestIngressSubjectPCI_UnheldMemberBindsFromCarriedPatientUnderSeam(t *testing.T) {
-	g := &Gateway{cfg: Config{SoR: newCensusSoR(), AcceptUnknownMembers: true}}
+func TestIngressSubjectPCI_UnheldMemberBindsFromCarriedPatientByDefault(t *testing.T) {
+	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
 	req := conformantCRDWithPatient(strangerMember, "72148", requestPatient(strangerMember, "1962-03-11", "Nakamura"))
 	pci, status, msg := g.ingressCRDSubjectPCIContext(context.Background(), req)
 	if status != 0 {
@@ -483,14 +477,15 @@ func TestIngressSubjectPCI_UnheldMemberBindsFromCarriedPatientUnderSeam(t *testi
 }
 
 // The pair this fixes: the provider side holds the member, the payer side does not. The
-// subject the provider derives from its record and the one the payer derives from the
-// carried Patient agree when the request agrees with the record — and a request that
-// disagrees with the holder's record is still refused at the payer (403).
+// payer binds the member by the Patient the request carries, as it would directly: to
+// the provider's subject when the request agrees with the provider's record, and to its
+// own derivation, not the provider's, when it disagrees. Either way the request reaches
+// the payer.
 func TestSubjectBind_HeldOnIngressUnheldOnPayer(t *testing.T) {
 	const member, birth, family = "MBR-COVERED", "1975-04-02", "Johansson" // the census record
 	ctx := context.Background()
-	provider := &Gateway{cfg: Config{SoR: newCensusSoR(), AcceptUnknownMembers: true}}
-	payer := &Gateway{cfg: Config{SoR: noMemberSoR{newPrefetchSoR()}, AcceptUnknownMembers: true}}
+	provider := &Gateway{cfg: Config{SoR: newCensusSoR()}}
+	payer := &Gateway{cfg: Config{SoR: noMemberSoR{newPrefetchSoR()}}}
 	recordPCI, _, _ := newCensusSoR().ResolvePatient(member)
 
 	agree := conformantCRDWithPatient(member, "72148", requestPatient(member, birth, family))
@@ -498,23 +493,26 @@ func TestSubjectBind_HeldOnIngressUnheldOnPayer(t *testing.T) {
 	if status != 0 || token != recordPCI {
 		t.Fatalf("provider bind: status=%d msg=%q pci=%q, want the record's %q", status, msg, token, recordPCI)
 	}
-	if _, _, status, msg := payer.conformantCRDBindContext(ctx, agree, token); status != 0 {
-		t.Fatalf("payer bind, request agrees with the provider's record: status=%d msg=%q, want bound", status, msg)
+	if _, _, pci, status, msg := payer.conformantCRDBindContext(ctx, agree); status != 0 || pci != recordPCI {
+		t.Fatalf("payer bind, request agrees with the provider's record: status=%d msg=%q pci=%q, want %q", status, msg, pci, recordPCI)
 	}
 
-	// Rejection row: the request's demographics disagree with the holder's record.
+	// The request's demographics disagree with the provider's record: the
+	// provider still binds through its record, and the payer, which does not
+	// hold the member, binds by what the request carries.
 	disagree := conformantCRDWithPatient(member, "72148", requestPatient(member, "1975-04-03", family))
 	token, status, _ = provider.ingressCRDSubjectPCIContext(ctx, disagree)
 	if status != 0 || token != recordPCI {
 		t.Fatalf("provider bind still through its record: status=%d pci=%q", status, token)
 	}
-	if _, _, status, msg := payer.conformantCRDBindContext(ctx, disagree, token); status != http.StatusForbidden || msg != "token subject does not match request patient" {
-		t.Fatalf("payer bind, request disagrees with the provider's record: status=%d msg=%q, want 403", status, msg)
+	want := shnsdk.ResolvePCI(member, "1975-04-03", family)
+	if _, _, pci, status, msg := payer.conformantCRDBindContext(ctx, disagree); status != 0 || pci != want {
+		t.Fatalf("payer bind, request disagrees with the provider's record: status=%d msg=%q pci=%q, want its own %q", status, msg, pci, want)
 	}
 
-	// Control: without the seam the payer refuses the member it does not hold, as before.
-	payer.cfg.AcceptUnknownMembers = false
-	if _, _, status, _ := payer.conformantCRDBindContext(ctx, agree, recordPCI); status != http.StatusBadRequest {
-		t.Fatalf("default payer bind: status=%d, want 400", status)
+	// Control: requiring known members, the payer refuses the member it does not hold.
+	payer.cfg.RequireKnownMembers = true
+	if _, _, _, status, _ := payer.conformantCRDBindContext(ctx, agree); status != http.StatusBadRequest {
+		t.Fatalf("known members required, payer bind: status=%d, want 400", status)
 	}
 }

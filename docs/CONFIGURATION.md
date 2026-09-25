@@ -33,18 +33,18 @@ through wiring your own systems, see [INTEGRATION.md](INTEGRATION.md).
 
 ## Validation (required to boot — FR-36) and conformance enforcement
 
-The gateway **refuses to start without a FHIR validator** — every resource is
-validated at your gateway's own edge before the leg proceeds, at every
-enforcement level. The published discovery descriptor does not advertise a
-validator, so you must supply one. What the gateway does with an invalid
-result is your choice:
+The gateway **refuses to start without a FHIR validator**, at every enforcement
+level. The published discovery descriptor does not advertise a validator, so you
+must supply one. Whether your gateway validates each resource at its own edge, and
+what it does with an invalid result, is your choice (`CONFORMANCE_ENFORCEMENT`
+below):
 
 | Env var | Description |
 |---|---|
 | `FHIR_VALIDATE_URL` | A FHIR `$validate` endpoint (a HAPI server with the Da Vinci CRD/DTR/PAS + US Core IGs loaded). The production path. |
 | `SHN_FAKE_VALIDATOR` | Set to `1` to use a no-op validator. **Dev only** — skips real profile validation. Use for a first wiring smoke test; never in production. |
 | `CDS_ADVERTISE_HOOKS` | Optional. A comma-separated list of the CDS Hooks your provider ingress advertises and dispatches, from `order-sign`, `order-select`, `order-dispatch`. Unset advertises every hook the network carries. Set it only to narrow: when no payer your gateway routes to carries a hook's leg, advertising it promises a service that can only fail at routing; a request to a service id you do not advertise is refused with `404` and the ids you offer. A hook the network does not carry refuses to boot. This is an interim override — the network does not yet carry a declaration of the hooks each payer offers, and the listing will derive from routing once it does. |
-| `CONFORMANCE_ENFORCEMENT` | `strict` or `none` (the default when unset). At `strict` an invalid result refuses the message, and the refusal names the rule and the issues it was based on. At `none` every check still runs and every invalid result is recorded as a finding in your gateway's log and observer stream, and the message is relayed as sent — except an answer this gateway cannot read at all, and a payload this gateway itself translated between IG lines, which refuse at every level. Any other value refuses to boot. |
+| `CONFORMANCE_ENFORCEMENT` | `none`, `observe` (the default when unset) or `strict`. At `none` no payload conformance check runs (no FHIR profile validation, no CDS Hooks response rules, no content checks) and no finding is recorded. At `observe` every check runs, each defect is recorded as a finding in your gateway's log and observer stream, and the message is carried as sent, apart from the gateway's registered edits (the callback removed, prefetch and coverage obtained, and payer identity mapping; participant protocol §7a.4); a validator that cannot be reached is recorded the same way. At `strict` a defect refuses the message, and the refusal names the rule and the issues it was based on; an unreachable validator refuses with `500`. Network rules refuse at every level: authentication, authority (including a token presented with a request other than the one it was issued for), consent, the patient binding (each gateway identifies the member the request names by its own system), routing, replay, a repeated member name in any body, the contract line stamped on an answer's frame, and the check of a payload this gateway itself translated between IG lines. Any other value refuses to boot. |
 
 If neither `FHIR_VALIDATE_URL` nor `SHN_FAKE_VALIDATOR` is set (and discovery
 advertises none), the gateway exits with `refusing to run without per-message
@@ -102,6 +102,17 @@ built-in decision policy — it answers Da Vinci legs by native-forwarding to yo
 Da Vinci endpoint (`PAYER_DAVINCI_BASE_URL`, required); see
 [INTEGRATION.md](INTEGRATION.md#payer-decisioning) for the config and the (advanced,
 Go-only) in-process alternative.
+
+## Members your system of record does not hold (every role)
+
+A Da Vinci CRD, DTR or PAS request can name a member your system of record does not hold,
+a patient from the other participant's own environment, for example. By default your
+gateway carries it; set `REQUIRE_KNOWN_MEMBERS=true` to have it refused instead.
+
+| Env var | Description |
+|---|---|
+| `REQUIRE_KNOWN_MEMBERS` | `true` or `false`; unset means `false`. By default a CRD, DTR or PAS subject your system of record does not hold is carried, identified by the member id and the Patient the request carries for it. Send the same Patient, unchanged, on every leg of one exchange: for a member the payer does not hold, a later leg that carries a different Patient, or none, is not matched to what an earlier leg recorded (an amendment is refused `409`; an inquiry's decision is not recorded). A receiving gateway handles the member the request names as it would directly, whether one side holds the member, both do, or neither does, and files what it records about the exchange under its own identification of that member. The provider's own Patient is not added to a `$questionnaire-package` request that carries none. A CRD request for a member your system does not hold leaves out history prefetch it cannot read, with the reason recorded. Set `true` to check members against your own system of record instead: such a subject is refused (`400 unknown member`; `403 request patient does not resolve` on a provider's `$questionnaire-package` request). Any other value refuses to boot. |
+| `SHN_ACCEPT_UNKNOWN_MEMBERS` | Deprecated; removed in a later release. Carrying members your system of record does not hold is the default, so the gateway only logs a warning when it is set. Set to anything but `0` or `false` together with `REQUIRE_KNOWN_MEMBERS=true`, it contradicts it and the gateway refuses to boot. |
 
 ## Networking
 
@@ -259,6 +270,16 @@ named by. No clinical content is stored.
   asked; this check does not refuse the same patient's submission under it. (The Hub
   refuses any reuse of an id within its two-hour replay window before this check is
   reached.)
+- **An answer the gateway could not read writes no row.** Below enforcement `strict`,
+  a payer answer your gateway cannot read, whose patient linkage is inconsistent, or
+  whose decision cannot be stated on an ExplanationOfBenefit is relayed to the requester
+  exactly as your system sent it, and nothing is recorded from it: no pend, no decision,
+  no ExplanationOfBenefit (the gateway emits `pa.local-write-skipped`). An amendment
+  whose prior authorization is pended in the ledger stays pended. A later amendment of a
+  submission whose answer was relayed this way finds no pended authorization and is
+  refused (`409 ClaimUpdate references no pending claim available for this patient`); a
+  later `Claim/$inquire` about it is relayed to your system and its answer to the
+  requester, and records no decision. At `strict` such an answer is refused instead.
 - **Without `SHN_STORE_DATABASE_URL` the ledger is in memory**, so it does not
   survive a restart: after one, a follow-up about an authorization pended before the
   restart cannot be resolved, and the requester submits again. Set the DSN for any
@@ -361,11 +382,12 @@ A `$questionnaire-package` request is forwarded as your EHR sent it: every param
 order and repeated as sent, a questionnaire canonical's `|version`, `context`, `meta` and any
 parameter the gateway does not know. Every resource in it (each `coverage`, each `order`,
 everything in `referenced` and in parameter parts) must be about one patient, the one its
-coverages and orders name (a request naming none is refused with 422, one naming another
-patient anywhere with 403), and all of its coverages must name one payer (422 otherwise).
-Name the patient with a relative reference (`Patient/<member id>`): a questionnaire request
-has no `fhirServer`, so an absolute Patient reference cannot be read as your EHR's and is
-refused (403). A `coverage` parameter is always your EHR's own: the gateway never adds one
+coverages and orders name (a request naming none is refused with 422; at enforcement
+`strict`, one naming another patient anywhere is refused with 403), and all of its coverages
+must name one payer (422 otherwise). Name the patient with a relative reference
+(`Patient/<member id>`): a questionnaire request has no `fhirServer`, so an absolute Patient
+reference cannot be read as your EHR's and, at `strict`, is refused (403). Below `strict` a
+resource naming another patient is carried as sent (recorded as a finding at `observe`). A `coverage` parameter is always your EHR's own: the gateway never adds one
 beside it, and a `coverage` parameter that carries no resource (only a reference, or
 nothing) is refused with `400 coverage parameter carries no resource`.
 When the request carries no `coverage` parameter, the gateway appends one parameter holding
@@ -385,8 +407,12 @@ DTR operations (upgrade required)`. The payer's answer is returned to your EHR e
 `GET /cds-services` lists one CDS service per hook: `shn-order-sign` (`order-sign`),
 `shn-order-select` (`order-select`) and `shn-order-dispatch` (`order-dispatch`). Post each
 request to the service for its hook (`POST /cds-services/shn-order-sign`): an id that is not
-listed is `404`, and a request whose `hook` is not the service's hook is `400`. The hook is
-never changed on the way to the payer. The payer's answer is returned to your EHR exactly as
+listed is `404`, and at enforcement `strict` a request whose `hook` is not the service's hook
+is `400`. Below `strict` it is carried as sent on the exchange of the service your EHR
+addressed, and the payer's gateway picks the payer's service by the request's own `hook`: it
+refuses, at every level, a hook that exchange does not carry. `shn-order-select` and
+`shn-order-sign` carry `order-select` and `order-sign`; `shn-order-dispatch` carries only
+`order-dispatch`. The hook is never changed on the way to the payer. The payer's answer is returned to your EHR exactly as
 the payer sent it once it meets the CDS Hooks response rules (see
 [CDS Hooks answers](#cds-hooks-answers)); `cards` may be empty, with the coverage information
 in `systemActions`. A payer that offers no service for your hook answers `422` with the hooks
@@ -394,7 +420,8 @@ it offers.
 
 `POST /Claim/$inquire` asks the payer for the decision on an authorization it pended.
 The inquiry is carried to the payer as your EHR sent it, bound to the one member every
-patient reference in it names (a Bundle naming two members is refused with 403) and
+patient reference in it names (at enforcement `strict` a Bundle naming two members is
+refused with 403; below `strict` it is bound to its Claim's patient) and
 routed by the Coverage it carries (a Coverage naming no payer the gateway can resolve
 is refused with 422, never defaulted). The payer's answer reaches your EHR exactly, in
 whichever shape the payer's prior-authorization line defines: the response Bundle
@@ -454,10 +481,6 @@ there too; the Claim's value wins over the header.
 Enabling the ingress without a base URL or at least one valid registered client is a
 hard startup error.
 
-| Test-lane only | Description |
-|---|---|
-| `SHN_ACCEPT_UNKNOWN_MEMBERS` | Off by default. When set, a CRD, DTR or PAS subject your system of record does not hold binds by member id plus the birth date and family name of the Patient the request carries for it (the id alone when it carries none) instead of being refused with `unknown member`. The other side of the exchange binds the same way from the same request, so a Patient that disagrees with a record it does hold is refused there. On a `$questionnaire-package` request that carries no Patient, a gateway that holds the member appends its own Patient record as a `referenced` parameter (registered edit E-05, only while this variable is set) so the other side can bind it the same way. It exists for a shared test lane whose roster cannot hold every partner's own test patients; a production gateway resolves every subject through its own system of record and must not set it. The gateway logs a warning at boot when it is on. |
-
 **This ingress is a private, within-boundary surface, not a public endpoint.** The
 gateway's only public-internet leg is the gateway↔Hub connection; every connection to
 your own systems — including this ingress — is private/within-boundary. Your EHR or
@@ -481,8 +504,10 @@ the payer resolves a dispatched order's supplier the same way), and `serviceHist
   Patient your connector names for the member, and adds it to the request's `prefetch`
   (nothing else in the request changes):
   - `patient` is read (`Patient/<id>`) and sent exactly as your server returned it. No such
-    Patient is a `422 patient not found in system of record`. (See the member id limitation
-    below for when nothing is obtained.)
+    Patient is a `422 patient not found in system of record` at enforcement `strict`; below
+    `strict` the key is left out (recorded as a finding at `observe`) and every other key,
+    `coverage` included, is still obtained. (See the member id limitation below for when
+    nothing is obtained.)
   - `coverage` and the history keys are searched (`<type>?patient=Patient/<id>`, the coverage
     search with `_include=Coverage:payor` and the device search with
     `_include=DeviceRequest:performer`, within the connector's search bounds). The value
@@ -500,21 +525,26 @@ the payer resolves a dispatched order's supplier the same way), and `serviceHist
     their resource type and id. A search with no match sends `null`.
   - A search your system of record cannot answer (unavailable, not supported, not a
     searchset, or over the bounds) leaves the key out. Without a coverage the request cannot
-    be routed, so it is refused: `503 coverage unavailable from system of record` when your
-    server is unavailable, otherwise a `422`. A missing history key is left for the payer to
-    decide on. A connector that does not implement search (the built-in FHIR connector
+    be routed, so it is refused at every level: `503 coverage unavailable from system of
+    record` when your server is unavailable, otherwise a `422`. A missing history key is left
+    for the payer to decide on. When your system of record cannot answer for the patient at
+    all, a request that carries no coverage is refused with that failure at every level; one
+    that carries its own coverage is refused at `strict` and, below `strict`, sent with its
+    own values and nothing obtained. A connector that does not implement search (the built-in FHIR connector
     does) can obtain only `patient`.
 - **Every value must be about the request's patient.** Each resource is checked against
   the patient by its FHIR Patient-compartment reference (for example
   `Coverage.beneficiary`, `ServiceRequest.subject`); a value holding another patient's
-  record is refused — `403` for a value your EHR sent, `502 system of record returned
-  another patient's resource` for one your system of record returned — and nothing is
-  sent. Absolute references on your EHR's `fhirServer` are read like relative ones, both here
+  record is refused — at enforcement `strict`, `403` for a value your EHR sent (below
+  `strict` it is sent as your EHR sent it, recorded as a finding at `observe`); at every
+  level, `502 system of record returned another patient's resource` for one your system of
+  record returned, and nothing is sent. Absolute references on your EHR's `fhirServer` are read like relative ones, both here
   and when the request's patient references (`context.patientId`, each draft order's subject,
   each prefetch resource's patient) are bound to one patient.
 - **No opaque content.** A `Binary` resource (a value, a Bundle entry or a contained
-  resource) is never sent in a prefetch value: `403` when your EHR sent it, `502 system of
-  record returned a Binary resource` when your system of record returned it.
+  resource) is never added to a prefetch value: `502 system of record returned a Binary
+  resource` at every level when your system of record returned it. One your EHR sent is
+  refused with `403` at enforcement `strict`, and sent as your EHR sent it below `strict`.
 - **The payer is found from the request.** A coverage your EHR sent that references its payor
   Organization is resolved against every prefetch value the request carries (a resource, or
   the entries of a Bundle value), whatever its key; your system of record is read for it only
@@ -533,9 +563,11 @@ use it. Values from your system of record name the patient by your server's own 
 so the gateway obtains values only when that id is the member id. When your server (as your
 connector reports it) names the patient differently:
 
-- a request that leaves out `patient` or `coverage` is refused before anything is read or
-  sent: `422 system of record names the patient differently from context.patientId; supply
-  patient and coverage prefetch in the request`;
+- a request that leaves out `coverage` is refused before anything is read or sent, at every
+  level (the request is routed by its coverage): `422 system of record names the patient
+  differently from context.patientId; supply patient and coverage prefetch in the request`.
+  One that carries its coverage and leaves out `patient` is refused the same way at
+  enforcement `strict`, and below `strict` is sent without it;
 - a history key the request leaves out is left out; nothing is searched, and the
   `prefetch.obtained` event records the outcome `not-run` with the reason `patient named
   differently in the system of record`. The request is sent.
@@ -661,14 +693,16 @@ your system when:
 Your CDS Hooks answer is relayed to the provider exactly as your system sent it once it meets the CDS Hooks 2.0 response rules and, at a CRD line, the CRD card
 rules (for example: `cards` is an array and may be empty; every card has a `summary` under 140
 characters, an `indicator`, and a `source` with a `label` and, at a CRD line, a `topic`; every
-action has a `type` and a `description`). An answer that breaks one is refused with 502
-`payer CRD response is not a valid CDS Hooks response: <rule> at <path>` rather than repaired,
-and the provider's gateway applies the same rules. Your gateway carries the answer with the
+action has a `type` and a `description`). At enforcement `strict` an answer that breaks one
+is refused with 502 `payer CRD response is not a valid CDS Hooks response: <rule> at <path>`
+rather than repaired, and the provider's gateway applies the same rules; below `strict` it is
+relayed exactly as your system sent it (recorded as a finding at `observe`). An answer that
+repeats a member name is refused at every level. Your gateway carries the answer with the
 media type your system sent (`application/json` when it sent none); the provider's gateway
 returns it to the EHR as `application/json`, the CDS Hooks media type. Coverage information belongs in a system
 action that updates the order; each FHIR resource your answer embeds is also validated at the
-routed CRD line, but only to record the outcome (the `crd.embedded.validated` observation):
-it never changes or refuses your answer. A non-2xx answer is relayed as your system's error.
+routed CRD line, but only to record the outcome (the `crd.embedded.validated` observation,
+at `observe` and `strict`): it never changes or refuses your answer. A non-2xx answer is relayed as your system's error.
 
 **Exactly-one-mode rule:** if `PAYER_DAVINCI_TOKEN_URL` is set, then
 `PAYER_DAVINCI_CLIENT_ID` must also be set, plus exactly one credential mode —
@@ -741,10 +775,17 @@ A request is refused with a clear error, never silently forwarded, when:
   else's request. The refusal names the identifier that arrived and the identities this
   gateway answers for (up to five, then a count of the rest), so a mismatch is diagnosable
   from the error alone;
-- its Coverages name more than one payer, or a Coverage payor or Claim insurer reference
-  resolves to no resource or to more than one (422, naming the reference). References are
-  matched exactly (a `fullUrl`, `Type/id`, or `#id` for a contained resource); a
-  version-specific (`_history`) reference is not resolved and is refused;
+- its Coverages name more than one payer, or a Coverage payor reference resolves to no
+  resource or to more than one (422, naming the reference). References are matched exactly
+  (a `fullUrl`, `Type/id`, or `#id` for a contained resource); a version-specific
+  (`_history`) reference is not resolved and is refused;
+- at `strict`, a PAS Claim `insurer` reference resolves to no resource or to more than one
+  (the same 422, naming the reference). Which payer answers is decided on the Coverages, so
+  below `strict` that insurer is left as sent (recorded as a finding at `observe`) and the
+  Coverages are re-stamped as usual;
+- a PAS submission or amendment carries no `Coverage` at all (400 `PAS bundle missing
+  Coverage.beneficiary`), at every level: there is no payor to re-stamp. Without the
+  mapping, such a Bundle is refused only at `strict`;
 - the identifier to re-stamp is covered by a signature inside the message (a
   `Bundle.signature`, a `Provenance` signature, or a `Signature` element) — 422
   `signed content cannot be edited (E-03, <signature>)`. The gateway never strips a
@@ -842,15 +883,17 @@ something a leg timeout unless its own leg deadline, or the caller's, ended the 
 
 The recipient gateway's **own verdict about a request** travels the same way. Once the
 leg is authenticated, any `4xx` the recipient writes about the request — a member it does
-not hold (`400 unknown member`), a request it cannot read, no order to decide on, a subject
-that does not match the token (`403`), a consent it cannot confirm, an ingress validation
+not hold when it requires known members (`400 unknown member`), a request it cannot read, no order to decide on, an eligibility
+subject that does not match the token (`403`), a consent it cannot confirm, an ingress validation
 failure at enforcement `strict` (`422 ingress validation failed`, issues echoed) — is its
 answer about the request, and a frame-capable requester receives it with that status and
 body. So is any `4xx` it writes about **its own participant's answer** after that system
-answered: a PAS response whose patient linkage is inconsistent or that names another
-patient (`403`), a questionnaire package that carries a subject (`403`), an answer that
-repeats a member name (`403`), an answer that fails validation at enforcement `strict`
-(`422`) — the recipient's gateway will not relay it, and the requester reads why. Only
+answered: an answer that repeats a member name (`403`, at every level), and at enforcement
+`strict` a PAS response whose patient linkage is inconsistent or that names another
+patient (`403`), a questionnaire package that carries a subject (`403`), or an answer that
+fails validation (`422`) — the recipient's gateway will not relay it, and the requester
+reads why. Below `strict` those answers are relayed as sent (recorded as a finding at
+`observe`). Only
 exchange machinery stays a bare non-`2xx`, which the Hub reports as `"hub
 routing failed"`: the checks that happen before any handler runs (a bad hop assertion, an
 envelope that fails to decode, a token that fails verification, a replay, an unknown

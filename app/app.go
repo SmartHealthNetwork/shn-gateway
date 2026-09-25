@@ -145,15 +145,17 @@ type config struct {
 	DemoEdgeCapture bool
 
 	// ConformanceEnforcement (CONFORMANCE_ENFORCEMENT) is this participant's
-	// choice about what its gateway does with a conformance defect it finds:
-	// "strict" (an invalid verdict refuses the message) or "none" (every
-	// crossing still validates and records a finding, nothing is refused for
-	// conformance and the message is relayed as sent). Absent means "none":
-	// loadConfig remaps it, and that remap is the ONLY place in the tree
-	// where a level that is not strict comes from an omission —
-	// engine.ConformanceEnforcement's zero value is strict everywhere else.
-	// Two classes refuse at every level regardless: a payload this gateway
-	// itself translated between IG lines, and an answer it cannot read at all.
+	// choice about which payload conformance checks its gateway runs and what
+	// a defect does: "none" (no payload conformance check runs and nothing is
+	// recorded), "observe" (every check runs, each defect is recorded as a
+	// finding and the message is relayed as sent) or "strict" (a defect
+	// refuses the message). Absent means "observe": loadConfig remaps it, and
+	// that remap is the ONLY place in the tree where a level that is not
+	// strict comes from an omission — engine.ConformanceEnforcement's zero
+	// value is strict everywhere else. Network rules (authentication,
+	// authority, consent, routing, replay, message integrity) and the check of
+	// a payload this gateway itself translated between IG lines refuse at
+	// every level.
 	ConformanceEnforcement engine.ConformanceEnforcement
 
 	// AdvertisedCDSHooks (CDS_ADVERTISE_HOOKS) narrows the CDS Hooks services
@@ -304,12 +306,17 @@ type config struct {
 	// Required when ProviderDavinciIngress is set.
 	ProviderDavinciIngressClientsFile string
 
-	// AcceptUnknownMembers is the connectathon test-lane seam: on the Da Vinci
-	// CRD/DTR/PAS legs, a subject the system of record does not hold binds by member id
-	// plus the demographics of the Patient the request carries (the id alone when it
-	// carries none) instead of being refused. Set by SHN_ACCEPT_UNKNOWN_MEMBERS (any non-empty
-	// value). Default off; never set on a production gateway — the boot log says so.
-	AcceptUnknownMembers bool
+	// RequireKnownMembers is the participant's opt-in to checking members: on the Da
+	// Vinci CRD/DTR/PAS legs, a subject its system of record does not hold is refused.
+	// By default (unset or "false") such a subject binds by member id plus the
+	// demographics of the Patient the request carries (the id alone when it carries
+	// none). Set by REQUIRE_KNOWN_MEMBERS ("true" or "false").
+	RequireKnownMembers bool
+	// acceptUnknownMembersAlias holds the deprecated SHN_ACCEPT_UNKNOWN_MEMBERS. Set,
+	// it asks for what is now the default, so it only warns; unless it reads "0"
+	// or "false", together with REQUIRE_KNOWN_MEMBERS=true it contradicts it, and
+	// loadConfig refuses to boot.
+	acceptUnknownMembersAlias string
 
 	// IngressBaseURL and IngressClients are resolved from ProviderDavinciIngressBaseURL
 	// + IngressClientsFile by loadConfig and passed directly into engine.Config.
@@ -516,7 +523,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 		ProviderDavinciIngressBaseURL:     getenv("PROVIDER_DAVINCI_INGRESS_BASE_URL"),
 		ProviderDavinciIngressClientsFile: getenv("INGRESS_CLIENTS_FILE"),
 
-		AcceptUnknownMembers: getenv("SHN_ACCEPT_UNKNOWN_MEMBERS") != "",
+		acceptUnknownMembersAlias: getenv("SHN_ACCEPT_UNKNOWN_MEMBERS"),
 
 		AuthzPubkeyURL:     getenv("AUTHZ_PUBKEY_URL"),
 		HubTransportKeyURL: getenv("HUB_TRANSPORT_KEY_URL"),
@@ -599,13 +606,15 @@ func loadConfig(getenv func(string) string) (config, error) {
 	// ordinary loadConfig bool idiom, matching every other config bool.
 	cfg.DemoEdgeCapture = getenv("SHN_DEMO_EDGE_CAPTURE") == "true"
 
-	// THE default: an absent CONFORMANCE_ENFORCEMENT means none. This is the
-	// ONLY place it happens. Everything else in the tree is strict by
+	// THE default: an absent CONFORMANCE_ENFORCEMENT means observe. Every
+	// check runs and each defect is recorded, and nothing is refused for
+	// conformance: a participant opts in to refusal (strict) or out of the
+	// checks (none). This is the ONLY place it happens. Everything else in the tree is strict by
 	// engine.ConformanceEnforcement's zero value, and every gate pins its
 	// level explicitly. A DEPLOYED gateway states its level explicitly too,
-	// but not always to strict: a lane a partner's bytes can reach runs none,
-	// so the partner sees their defect recorded rather than meeting a refusal
-	// produced by our configuration. Which lanes those are, and the evidence
+	// but not always to strict: a lane a partner's bytes can reach runs
+	// observe, so the partner sees their defect recorded rather than meeting a
+	// refusal produced by our configuration. Which lanes those are, and the evidence
 	// for each, is in test/invariants' TestInvariant_EveryGateRunsStrict.
 	if raw := getenv("CONFORMANCE_ENFORCEMENT"); raw != "" {
 		level, err := engine.ParseConformanceEnforcement(raw)
@@ -614,7 +623,20 @@ func loadConfig(getenv func(string) string) (config, error) {
 		}
 		cfg.ConformanceEnforcement = level
 	} else {
-		cfg.ConformanceEnforcement = engine.EnforcementNone
+		cfg.ConformanceEnforcement = engine.EnforcementObserve
+	}
+
+	// Members the system of record does not hold are carried unless the
+	// participant opts in to checking them. Only "true" and "false" are values.
+	switch raw := getenv("REQUIRE_KNOWN_MEMBERS"); raw {
+	case "", "false":
+	case "true":
+		cfg.RequireKnownMembers = true
+	default:
+		return config{}, fmt.Errorf("gateway: REQUIRE_KNOWN_MEMBERS must be true or false, got %q", raw)
+	}
+	if alias := cfg.acceptUnknownMembersAlias; cfg.RequireKnownMembers && alias != "" && alias != "0" && alias != "false" {
+		return config{}, fmt.Errorf("gateway: SHN_ACCEPT_UNKNOWN_MEMBERS and REQUIRE_KNOWN_MEMBERS=true contradict each other; remove SHN_ACCEPT_UNKNOWN_MEMBERS (deprecated: carrying unknown members is the default)")
 	}
 
 	if raw := getenv("CDS_ADVERTISE_HOOKS"); raw != "" {
@@ -1221,6 +1243,11 @@ func firstNonEmpty(vals ...string) string {
 // boot-time registry SNAPSHOT, and returns the handler WITHOUT serving, so the
 // boot gate can drive it.
 type built struct {
+	// requireKnownMembers is the known-member opt-in exactly as build() handed it
+	// to engine.New, recorded so this package's tests prove the variable reaches
+	// the engine without a published test accessor.
+	requireKnownMembers bool
+
 	diagnostic   *diagnosticSource
 	gateway      *engine.Gateway
 	addr         string
@@ -1549,8 +1576,8 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		// DemoEdgeCapture: false in every shipped deploy; SHN_DEMO_EDGE_CAPTURE
 		// is the sole non-test way to set it.
 		DemoEdgeCapture: cfg.DemoEdgeCapture,
-		// ConformanceEnforcement: none unless CONFORMANCE_ENFORCEMENT=strict
-		// (loadConfig above is what makes an absent value none).
+		// ConformanceEnforcement: observe unless CONFORMANCE_ENFORCEMENT says
+		// none or strict (loadConfig above is what makes an absent value observe).
 		ConformanceEnforcement: cfg.ConformanceEnforcement,
 		AdvertisedCDSHooks:     cfg.AdvertisedCDSHooks,
 		SoR:                    sor,
@@ -1714,9 +1741,12 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	gwCfg.IngressEnabled = cfg.ProviderDavinciIngress
 	gwCfg.IngressBaseURL = cfg.IngressBaseURL
 	gwCfg.IngressClients = cfg.IngressClients
-	gwCfg.AcceptUnknownMembers = cfg.AcceptUnknownMembers
-	if cfg.AcceptUnknownMembers {
-		log.Printf("gateway: WARNING: SHN_ACCEPT_UNKNOWN_MEMBERS is set — a Da Vinci CRD/DTR/PAS subject the system of record does not hold binds by member id plus the demographics of the Patient the request carries (test-lane seam); never set this on a production gateway")
+	gwCfg.RequireKnownMembers = cfg.RequireKnownMembers
+	if cfg.acceptUnknownMembersAlias != "" {
+		log.Printf("gateway: WARNING: SHN_ACCEPT_UNKNOWN_MEMBERS is deprecated and will be removed: carrying members the system of record does not hold is now the default; remove the variable (REQUIRE_KNOWN_MEMBERS=true opts in to refusing them)")
+	}
+	if cfg.RequireKnownMembers {
+		log.Printf("gateway: REQUIRE_KNOWN_MEMBERS=true — a Da Vinci CRD/DTR/PAS subject the system of record does not hold is refused")
 	}
 
 	if cfg.diagnostic != nil {
@@ -1835,6 +1865,8 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	})
 
 	b = built{
+		requireKnownMembers: gwCfg.RequireKnownMembers,
+
 		diagnostic:      cfg.diagnostic,
 		gateway:         gw,
 		addr:            cfg.Addr,

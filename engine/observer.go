@@ -72,13 +72,26 @@ import (
 //	                  (LegType = the leg, Direction = "sor", Op = the prefetch key,
 //	                  Detail = metadata-only JSON: key, source, query, outcome, reason,
 //	                  count, pages, retrievedAt — never a value or a resource)
+//	pa.local-write-skipped
+//	                  a provider ingress relayed a payer's PAS answer below strict
+//	                  that it could not read (answer.shape) or whose subjects do not
+//	                  bind (patient.answer), so its local record took nothing from
+//	                  it: the leg outcome is recorded "answered" (LocalWriteSkippedEvent;
+//	                  LegType = the leg, Direction = "originate", Detail = the rule;
+//	                  never a payload). A payer gateway emits the same event, with
+//	                  Direction = "ingress", when it relays its participant's PAS or
+//	                  inquiry answer below strict that it could not read
+//	                  (answer.shape), that breaks an EOB rule (eob.decision) or whose
+//	                  subjects do not bind (patient.answer): it writes no pend,
+//	                  decision or EOB from that answer
 //	peer.nonconformant
 //	                  a peer's message departed from what the operation it answers
 //	                  declares, and was read anyway (Op = the operation's answer,
 //	                  Counterpart = the peer, Detail = what the peer sent and what
 //	                  the definition names). Evidence only: the message was relayed
 //	                  unchanged and no decision reads this. The same sentence rides
-//	                  the answer's CertificationEvidence.Nonconformance.
+//	                  the answer's CertificationEvidence.Nonconformance. Not
+//	                  emitted at conformance level none, which checks nothing.
 //	sor.read          the gateway read its data source (Op = SystemOfRecord method,
 //	                  Detail = "found"/"not found"/coverage status or a safe failure category,
 //	                  Payload = the

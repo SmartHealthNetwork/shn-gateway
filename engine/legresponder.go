@@ -13,7 +13,9 @@ import (
 //
 // leg is the inbound TransactionType. corrID + subjectPCI are engine-owned,
 // leg-invariant authority outputs the connector needs for builders/Store keys
-// (subjectPCI is the token's PCI; the connector never resolves it). requestFHIR is
+// (subjectPCI is the payer's own binding of the member the request names — its record,
+// else the one derived from the request — never the leg token's subject; the connector
+// never resolves it). requestFHIR is
 // the already-opened, already-authority-fenced request plaintext.
 type LegResponder interface {
 	Handle(ctx context.Context, leg, corrID, subjectPCI string, requestFHIR []byte) (LegResult, error)

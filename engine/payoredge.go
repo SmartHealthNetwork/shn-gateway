@@ -11,8 +11,10 @@
 //     including an identity published by a DIFFERENT holder — or no readable payer, is
 //     refused with a legible 400-class LegResult, never a bare error (which the engine
 //     would answer with an opaque 500); Coverages naming different payers, and a
-//     reference that resolves to no resource or to several (a Coverage's payor, or a
-//     prior-authorization Claim's insurer), are refused with a 422.
+//     Coverage payor reference that resolves to no resource or to several, are refused
+//     with a 422. A prior-authorization Claim's insurer reference that resolves to no
+//     resource or to several is the request's own content (RuleInsurer): not checked
+//     at none, recorded at observe and left as sent, refused at strict with the same 422.
 //   - It changes only the payer identifier's system and value strings (inline on the
 //     Coverage's routing payor, payor[0], or on the Organization it references) and, for
 //     a prior-authorization request, the Claim insurer's when it names this payer (an
@@ -93,6 +95,24 @@ func (n *nativeResponder) ownPayerIdentities() []shnsdk.PayerIdentifier {
 	return own
 }
 
+// mapsPayerIdentity reports whether the payer identity mapping is configured: the
+// request this responder sends its payer's system is then addressed by the payer its
+// Coverages name.
+func (n *nativeResponder) mapsPayerIdentity() bool { return n.payorEdgeOwn != nil }
+
+// payerIdentityMapper is implemented by a responder that can map the payer identity
+// (nativeResponder).
+type payerIdentityMapper interface {
+	mapsPayerIdentity() bool
+}
+
+// mapsPayerIdentity reports whether this gateway's responder maps the payer identity of
+// the requests it sends its payer's system.
+func (g *Gateway) mapsPayerIdentity() bool {
+	m, ok := g.cfg.Responder.(payerIdentityMapper)
+	return ok && m.mapsPayerIdentity()
+}
+
 // OwnPayerIdentitiesForTest exposes the identities this responder answers for —
 // test-only introspection (the ConformanceLevelForTest pattern) proving the feed half
 // of "own" actually reached this responder, not just whatever options a caller
@@ -160,8 +180,10 @@ func payorEdgeRefusal(own []shnsdk.PayerIdentifier, got shnsdk.PayerIdentifier, 
 // payorEdgeRequest returns the request to send the payer's own system: the network's
 // request in exactly, or, when the mapping is configured and changes something, in with
 // the payer-identity edit applied. A refusal is returned as a LegResult (Status set); a
-// gateway fault as an error.
-func (n *nativeResponder) payorEdgeRequest(in relay.Body, carrier payorEdgeCarrier, contentType string) (relay.Payload, LegResult, error) {
+// gateway fault as an error. refusesInsurer decides a Claim insurer reference that does
+// not resolve (locatePayorEdge); nil refuses it, which is what a carrier with no Claim
+// passes.
+func (n *nativeResponder) payorEdgeRequest(in relay.Body, carrier payorEdgeCarrier, contentType string, refusesInsurer func() bool) (relay.Payload, LegResult, error) {
 	var none relay.Payload
 	if n.payorEdgeOwn == nil {
 		return relay.Exact(in, contentType), LegResult{}, nil
@@ -170,7 +192,7 @@ func (n *nativeResponder) payorEdgeRequest(in relay.Body, carrier payorEdgeCarri
 	if err != nil {
 		return none, LegResult{Status: http.StatusBadRequest, Message: "payer backend identity mapping: request is not one well-formed JSON document"}, nil
 	}
-	ops, err := locatePayorEdge(doc, carrier, n.ownPayerIdentities(), *n.payorEdgeBackend)
+	ops, err := locatePayorEdge(doc, carrier, n.ownPayerIdentities(), *n.payorEdgeBackend, refusesInsurer)
 	var refused *payorEdgeRefused
 	if errors.As(err, &refused) {
 		return none, refused.legResult(), nil

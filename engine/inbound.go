@@ -176,8 +176,10 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 	case "pas-claim":
 		// R8 re-home (FR-16/FR-27): fence BEFORE dispatch — an unattested
 		// clinician/patient QR item is nonconformant regardless of which handler
-		// would otherwise run.
-		if reason, ok := fenceAttestedItems(body); !ok {
+		// would otherwise run. The attestation is the QR's own content
+		// (RuleAttestation): not checked at none, recorded at observe and
+		// forwarded, refused at strict; the same on the two legs below.
+		if reason, ok := fenceAttestedItems(body); !ok && g.guard(r.Context(), KindContent, RuleAttestation, body) {
 			g.refuseInbound(w, r, legPASClaim, env, tok, answerTok, http.StatusForbidden, reason, nil)
 			return
 		}
@@ -185,7 +187,7 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 	case "pas-claim-update":
 		// R8 re-home (FR-16/FR-27): same fence as pas-claim above — the property
 		// belongs to any QR item, not only to amends.
-		if reason, ok := fenceAttestedItems(body); !ok {
+		if reason, ok := fenceAttestedItems(body); !ok && g.guard(r.Context(), KindContent, RuleAttestation, body) {
 			g.refuseInbound(w, r, legPASClaimUpdate, env, tok, answerTok, http.StatusForbidden, reason, nil)
 			return
 		}
@@ -196,7 +198,7 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 		// expected to pass — but the property belongs to any QR item wherever it
 		// arrives, and a fence that runs on two of three PAS legs is a gap waiting
 		// for the third to carry one.
-		if reason, ok := fenceAttestedItems(body); !ok {
+		if reason, ok := fenceAttestedItems(body); !ok && g.guard(r.Context(), KindContent, RuleAttestation, body) {
 			g.refuseInbound(w, r, legPASClaimInquire, env, tok, answerTok, http.StatusForbidden, reason, nil)
 			return
 		}
@@ -273,15 +275,15 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 	// (shnsdk.BuildEligibilityRequest — never a foreign relay, since only SHN gateways ever
 	// originate a substrate leg), so it is SHN-produced on every lane and always validates.
 	ingressValidator := g.validatorForContractLine(strings.SplitN(answerTok, "@", 2)[0], shnsdk.LineOf(answerTok))
-	if ingressValidator == nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "no FHIR validator lane configured for this leg (FR-36/FR-G29)"})
-		return
-	}
 	// Routed through the choke point so an invalid inbound request emits its
 	// conformance finding. handleInbound already tagged this leg's context
 	// (Whose "peer" — these are the requester's own bytes), so it is read as-is.
 	// This site's own status/message contract is preserved explicitly below.
 	if gr := g.validateGoverned(ctx, findingContextFrom(ctx), ingressValidator, cerJSON, "ingress", shnsdk.LineOf(answerTok), "", false); gr.Status != 0 {
+		if gr.NoLane {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "no FHIR validator lane configured for this leg (FR-36/FR-G29)"})
+			return
+		}
 		if gr.Status == http.StatusInternalServerError {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "validator unavailable"})
 			return
@@ -390,10 +392,6 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 	// here is always SHN-produced
 	// (shnsdk.BuildEligibilityResponse), so this was never in scope for the skip either way.
 	egressValidator := g.validatorForContractLine(strings.SplitN(answerTok, "@", 2)[0], shnsdk.LineOf(answerTok))
-	if egressValidator == nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "no FHIR validator lane configured for this leg (FR-36/FR-G29)"})
-		return
-	}
 	// Routed through the choke point so an invalid egress response still emits
 	// its conformance finding. responseFHIR is THIS gateway's own built answer,
 	// not the inbound request's bytes, so Whose is overridden to "own" (the
@@ -404,7 +402,11 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 	fc := findingContextFrom(ctx)
 	fc.Whose = "own"
 	if gr := g.validateGoverned(ctx, fc, egressValidator, responseFHIR, "egress", shnsdk.LineOf(answerTok), "", false); gr.Status != 0 {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": gr.Msg})
+		msg := gr.Msg
+		if gr.NoLane {
+			msg = "no FHIR validator lane configured for this leg (FR-36/FR-G29)"
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": msg})
 		return
 	}
 

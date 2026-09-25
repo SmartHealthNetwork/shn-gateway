@@ -132,29 +132,32 @@ The hosted evaluation payer's delay is fixed by SHN; to hold a pend, use your ow
 ## Conformance enforcement in this bundle
 
 The bundle passes `CONFORMANCE_ENFORCEMENT` through from your own environment, and sets
-nothing itself — so with nothing set the gateway runs the published default, `none`. Every
-message it sends or receives is still checked against its FHIR profile — and a
-payer's CDS Hooks answer against the CDS Hooks response rules — and every invalid result is
-still recorded as a finding in the gateway's log and observer stream. The message relays as
-sent rather than being refused. Two things refuse at every level regardless: an answer this
-gateway cannot read at all, and a payload this gateway itself translated between IG lines.
+nothing itself — so with nothing set the gateway runs the published default, `observe`. At
+`observe` every message is checked against its FHIR profile — and a payer's CDS Hooks answer
+against the CDS Hooks response rules — each defect is recorded as a finding in the gateway's
+log and observer stream, and the message relays as sent, apart from the gateway's registered
+edits (the callback removed, prefetch and coverage obtained, and payer identity mapping):
+nothing is refused for conformance.
+Network rules refuse at every level regardless: authentication, authority, consent, routing, replay, message integrity, and
+the check of a payload this gateway itself translated between IG lines.
 
 That default is deliberate. This is your evaluation, run on your machine, against your own
 systems and — with `PAYER_HOLDER_ID` above — your own payer. A refusal produced by a value we
 shipped inside a bundle you operate would read as a verdict on your conformance when all it
-states is how we configured the bundle. The findings tell you the same thing without stopping
-the run.
+states is how we configured the bundle.
 
-If you want your evaluation to refuse instead, set the level yourself:
+To run no payload check at all, set the level yourself to `none`: nothing is checked, no
+finding is recorded, and every message relays as sent, apart from the gateway's registered
+edits.
 
 ```sh
-SHN_SECRETS=/abs/path/to/my-provider-bundle CONFORMANCE_ENFORCEMENT=strict \
+SHN_SECRETS=/abs/path/to/my-provider-bundle CONFORMANCE_ENFORCEMENT=none \
   docker compose -f compose.eval.yml up --build
 ```
 
-`strict` and `none` are the only accepted values; any other refuses to boot. It is the same
-setting on the gateway you run in production — see
-[CONFIGURATION.md](../../docs/CONFIGURATION.md).
+Set `strict` instead if you want a message with a defect refused. `none`, `observe` and
+`strict` are the only accepted values; any other refuses to boot. It is the same setting on
+the gateway you run in production — see [CONFIGURATION.md](../../docs/CONFIGURATION.md).
 
 ## Production cutover
 

@@ -119,8 +119,8 @@ var relayEdits = []relayEdit{
 		Direction: relay.DirectionRequest,
 		Paths:     []string{"$.parameter"},
 		Kind:      editArrayAppend,
-		Precondition: "Only under the connectathon seam that carries members a gateway does not hold " +
-			"(SHN_ACCEPT_UNKNOWN_MEMBERS), only when the request carries no Patient resource for the bound " +
+		Precondition: "Only when the participant opts in to enrichment (not applied to Da Vinci-native " +
+			"traffic by default), only when the request carries no Patient resource for the bound " +
 			"patient anywhere in its parameters, and only when the provider's own system holds the patient " +
 			"under the id the request names; one {\"name\":\"referenced\",\"resource\":<Patient>} element is appended.",
 		Authority: "The provider's own system: its Patient record for the bound patient.",

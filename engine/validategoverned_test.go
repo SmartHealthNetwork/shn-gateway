@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -422,18 +423,16 @@ func drivePayerEligibilityEgress(t *testing.T, marker string) (int, string, []Ob
 // (pasretention_test.go) and by TestPinnedFindingContext_InboundEgress /
 // _InboundUpdateEgress, which pin its production finding tag.
 
-// At none an invalid verdict relays: no refusal, and the finding says so. This
-// is the none twin of TestValidateGovernedInvalidEmitsFindingAndRefuses.
-func TestValidateGovernedAtNoneRecordsAndRelays(t *testing.T) {
+func TestValidateGovernedAtObserveRecordsAndRelays(t *testing.T) {
 	const marker = "REJECTED-MARKER"
 	g, events, _ := findingGateway(t, &shnsdk.FakeValidator{RejectIfContains: marker})
-	g.cfg.ConformanceEnforcement = EnforcementNone
+	g.cfg.ConformanceEnforcement = EnforcementObserve
 	ctx := withFindingContext(context.Background(), findingContext{LegType: "pas-claim", Whose: "peer"})
 
 	status, msg := g.validateFHIR(ctx, []byte(`{"id":"`+marker+`"}`), "ingress", "")
 
 	if status != 0 {
-		t.Fatalf("at none an invalid verdict must not refuse, got %d %q", status, msg)
+		t.Fatalf("at observe an invalid verdict must not refuse, got %d %q", status, msg)
 	}
 	var finding *ObserverEvent
 	for i := range *events {
@@ -442,12 +441,63 @@ func TestValidateGovernedAtNoneRecordsAndRelays(t *testing.T) {
 		}
 	}
 	if finding == nil {
-		t.Fatal("at none the finding is the whole record: it must still be emitted")
+		t.Fatal("at observe the finding is the whole record: it must still be emitted")
 	}
-	for _, want := range []string{`"decision":"relayed"`, `"level":"none"`, `"kind":"fhir-ingress"`} {
+	for _, want := range []string{`"decision":"relayed"`, `"level":"observe"`, `"kind":"fhir-ingress"`} {
 		if !strings.Contains(finding.Detail, want) {
 			t.Fatalf("finding missing %s: %s", want, finding.Detail)
 		}
+	}
+	if strings.Contains(finding.Detail, `"verdict"`) {
+		t.Fatalf("an invalid verdict carries no verdict field: %s", finding.Detail)
+	}
+}
+
+// countingValidator counts Validate calls and rejects everything.
+type countingValidator struct{ calls int }
+
+func (c *countingValidator) Validate(context.Context, []byte, string) (shnsdk.Result, error) {
+	c.calls++
+	return shnsdk.Result{Valid: false, Issues: []string{"counted"}}, nil
+}
+
+// At none the check does not run: no validator call, no finding, no refusal,
+// on both directions, and a missing lane is not consulted either.
+func TestValidateGovernedAtNoneMakesNoCall(t *testing.T) {
+	for _, dir := range []string{"ingress", "egress"} {
+		v := &countingValidator{}
+		g, events, _ := findingGateway(t, v)
+		g.cfg.ConformanceEnforcement = EnforcementNone
+		if gr := g.validateGoverned(context.Background(), findingContext{LegType: "pas-claim"}, v, []byte(`{}`), dir, "", "", false); gr.Status != 0 {
+			t.Fatalf("%s at none must not refuse, got %+v", dir, gr)
+		}
+		if gr := g.validateGoverned(context.Background(), findingContext{LegType: "pas-claim"}, nil, []byte(`{}`), dir, "2.2", "", false); gr.Status != 0 {
+			t.Fatalf("%s at none must not refuse for a missing lane, got %+v", dir, gr)
+		}
+		if v.calls != 0 {
+			t.Fatalf("%s at none made %d validator calls, want 0", dir, v.calls)
+		}
+		for _, e := range *events {
+			if e.Kind == ConformanceObservedEvent || e.Kind == "validate.result" {
+				t.Fatalf("%s at none must emit nothing, got %+v", dir, e)
+			}
+		}
+	}
+}
+
+// SHN's own bridged edit is checked and refused at none too.
+func TestValidateGovernedBridgedRunsAtNone(t *testing.T) {
+	v := &countingValidator{}
+	g, _, _ := findingGateway(t, v)
+	g.cfg.ConformanceEnforcement = EnforcementNone
+	if gr := g.validateGoverned(context.Background(), findingContext{LegType: "pas-claim"}, v, []byte(`{}`), "egress", "2.1", "", true); gr.Status != http.StatusUnprocessableEntity {
+		t.Fatalf("a bridged payload must be refused at none, got %+v", gr)
+	}
+	if v.calls != 1 {
+		t.Fatalf("a bridged payload must be validated at none, got %d calls", v.calls)
+	}
+	if gr := g.validateGoverned(context.Background(), findingContext{LegType: "pas-claim"}, nil, []byte(`{}`), "egress", "2.1", "", true); gr.Status != http.StatusInternalServerError || !gr.NoLane {
+		t.Fatalf("a bridged payload with no lane must be refused at none, got %+v", gr)
 	}
 }
 
@@ -556,23 +606,48 @@ func TestValidateGovernedFindingPinsFullFieldSet(t *testing.T) {
 	}
 }
 
-// An outage is an outage at both levels: identical error, no finding.
-func TestValidateGovernedOutagesIdenticalAtBothLevels(t *testing.T) {
-	var got [2]struct {
-		status int
-		msg    string
-	}
-	for i, level := range []ConformanceEnforcement{EnforcementStrict, EnforcementNone} {
-		g, events, _ := findingGateway(t, &failingValidator{})
-		g.cfg.ConformanceEnforcement = level
-		got[i].status, got[i].msg = g.validateFHIR(context.Background(), []byte(`{}`), "ingress", "")
-		for _, e := range *events {
-			if e.Kind == ConformanceObservedEvent {
-				t.Fatalf("a validator outage at %s must emit no finding", level)
+// A check that could not run refuses at strict with the BASE status and text and
+// no finding; at observe it is recorded as unavailable and the message is
+// relayed; at none nothing runs.
+func TestValidateGovernedOutagesPerLevel(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		v    shnsdk.Validator
+		want govResult
+	}{
+		{"outage", &failingValidator{}, govResult{Status: http.StatusInternalServerError, Msg: "validator unavailable"}},
+		{"no lane", nil, govResult{Status: http.StatusInternalServerError, Msg: "no FHIR validator lane configured for contract line 2.2 (FR-36/FR-G29)", NoLane: true}},
+	} {
+		for _, level := range []ConformanceEnforcement{EnforcementStrict, EnforcementObserve, EnforcementNone} {
+			g, events, _ := findingGateway(t, tc.v)
+			g.cfg.ConformanceEnforcement = level
+			gr := g.validateGoverned(context.Background(), findingContext{LegType: "pas-claim", Whose: "peer"}, tc.v, []byte(`{}`), "ingress", "2.2", "", false)
+			var findings []ObserverEvent
+			for _, e := range *events {
+				if e.Kind == ConformanceObservedEvent {
+					findings = append(findings, e)
+				}
+			}
+			switch level {
+			case EnforcementStrict:
+				if !reflect.DeepEqual(gr, tc.want) || len(findings) != 0 {
+					t.Errorf("%s at strict = %+v with %d findings, want %+v and none", tc.name, gr, len(findings), tc.want)
+				}
+			case EnforcementObserve:
+				if gr.Status != 0 || len(findings) != 1 {
+					t.Errorf("%s at observe = %+v with %d findings, want relayed with one", tc.name, gr, len(findings))
+					continue
+				}
+				for _, want := range []string{`"verdict":"unavailable"`, `"decision":"relayed"`, `"level":"observe"`} {
+					if !strings.Contains(findings[0].Detail, want) {
+						t.Errorf("%s at observe: finding missing %s: %s", tc.name, want, findings[0].Detail)
+					}
+				}
+			case EnforcementNone:
+				if gr.Status != 0 || len(findings) != 0 {
+					t.Errorf("%s at none = %+v with %d findings, want relayed with none", tc.name, gr, len(findings))
+				}
 			}
 		}
-	}
-	if got[0] != got[1] {
-		t.Fatalf("a validator outage must read identically at both levels: %+v vs %+v", got[0], got[1])
 	}
 }

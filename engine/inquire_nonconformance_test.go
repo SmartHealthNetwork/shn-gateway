@@ -139,6 +139,21 @@ func TestPASInquire_NonconformantOutputNameReported(t *testing.T) {
 		return g.reportInquiryAnswerNonconformance(corr, partner, answer), seen
 	}
 
+	t.Run("nothing is reported at none, which checks nothing; observe reports", func(t *testing.T) {
+		for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve} {
+			var seen []ObserverEvent
+			g := &Gateway{cfg: Config{Clock: fixedClock, ConformanceEnforcement: level, Observer: func(e ObserverEvent) { seen = append(seen, e) }}}
+			stated := g.reportInquiryAnswerNonconformance(corr, partner, inquiryAnswerUnder(t, pasInquiryRecordedOutput))
+			want := 1
+			if level == EnforcementNone {
+				want = 0
+			}
+			if len(stated) != want || len(seen) != want {
+				t.Fatalf("at %s: stated %v, observed %+v, want %d of each", level, stated, seen, want)
+			}
+		}
+	})
+
 	t.Run("the reference payer's name is reported, naming both terms", func(t *testing.T) {
 		stated, seen := report(t, inquiryAnswerUnder(t, pasInquiryRecordedOutput))
 		if len(stated) != 1 {
