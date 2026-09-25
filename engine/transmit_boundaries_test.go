@@ -91,6 +91,23 @@ func assertLocalFault(t *testing.T, rec *httptest.ResponseRecorder) {
 	}
 }
 
+// assertFramedLocalFault: a fault after authentication is this gateway's
+// answer — framed to the requester, 500 with the ownership fault inside.
+func assertFramedLocalFault(t *testing.T, rec *httptest.ResponseRecorder, requester inboundTestRequester) {
+	t.Helper()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want the framed answer leg; body %s", rec.Code, rec.Body.String())
+	}
+	hdr, answer, err := shnsdk.DecodeHTTPFrame(openResponseLeg(t, requester, rec.Body.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]string
+	if hdr.Status != http.StatusInternalServerError || json.Unmarshal(answer, &body) != nil || body["error"] != errOwnershipFault {
+		t.Fatalf("framed %d %s, want 500 with the ownership fault", hdr.Status, answer)
+	}
+}
+
 // Requests to the network: roundTripInner, through OriginateLeg.
 func TestBoundaryRequestToNetworkRefusesUnpermittedPayloads(t *testing.T) {
 	bundle := `{"resourceType":"Bundle","type":"collection"}`
@@ -164,10 +181,8 @@ func TestBoundaryRequestToOwnSystemRefusesUnpermittedPayloads(t *testing.T) {
 			g, _ := newInboundTestGateway(t, true)
 			refused := &refusalCounter{}
 			g.cfg.Observer = refused.observe
-			rec := httptest.NewRecorder()
-			g.responderFailed(rec, "pas-claim", err)
-			if rec.Code != http.StatusInternalServerError || refused.count() != 1 {
-				t.Fatalf("status %d, refusals observed %d", rec.Code, refused.count())
+			if status, _ := g.responderFailure("pas-claim", err); status != http.StatusInternalServerError || refused.count() != 1 {
+				t.Fatalf("status %d, refusals observed %d", status, refused.count())
 			}
 		})
 	}
@@ -282,7 +297,7 @@ func TestBoundaryQuestionnaireAnswerMustBeRelayed(t *testing.T) {
 	r := newSignedInboundRequest(t, g, requester.ID)
 	r = r.WithContext(withRequestFrameOperation(r.Context(), shnsdk.FrameOperationQuestionnairePackage))
 	g.handleDTRInbound(rec, r, env, shnsdk.Token{Subject: coveredPCI(t, g)}, dtrFramedPackageFor(t, g), "")
-	assertLocalFault(t, rec)
+	assertFramedLocalFault(t, rec, requester)
 	if refused.count() == 0 {
 		t.Fatal("the refusal was not observed")
 	}

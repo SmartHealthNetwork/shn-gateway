@@ -275,8 +275,8 @@ func loadDeniedClaimResponseBytes(t *testing.T) []byte {
 // shnsdk.BuildConformantClaimUpdateBundle; related[prior] read via parseConformantPASUpdateFacts,
 // NOT the strict ParseClaimBundle the minimized leg uses) through the native-forward path and
 // proves the shadow FinalizeClaimUpdate survived the convergence: approved → verbatim + Finalize
-// Commit + armed Rollback; partner-500-after-Begin → 502 + Rollback (no strand); no prior pend →
-// 409; re-pend / non-approved → 422 + Rollback. NO EOB on the update leg.
+// Commit + armed Rollback; partner-500-after-Begin → relayed + Rollback (no strand); no prior
+// pend → forwarded anyway, owning no row. NO EOB on the update leg.
 func TestNativeUpdate_ApprovedFinalizes(t *testing.T) {
 	// The conformant update bundle's Claim.related[0].claim.identifier.value is the original
 	// submit's correlation id (convergence-pas-submit-0001), which is the BeginClaimUpdate key.
@@ -345,13 +345,16 @@ func TestNativeUpdate_ApprovedFinalizes(t *testing.T) {
 		}
 	})
 
-	t.Run("no prior pend -> 409 (derived-ledger fail-safe)", func(t *testing.T) {
-		srv := stubPartnerSrv(t, http.StatusOK, fixturePASResponse(t, []byte(`{"resourceType":"ClaimResponse","outcome":"complete","preAuthRef":"P-1"}`), true))
+	// The ledger records and never gates: an amendment this gateway holds no pend
+	// for still reaches the payer (nativepas_unbound_test.go has every state).
+	t.Run("no prior pend -> still reaches the payer, owns no row", func(t *testing.T) {
+		body := fixturePASResponse(t, []byte(`{"resourceType":"ClaimResponse","outcome":"complete","preAuthRef":"P-1"}`), true)
+		srv := stubPartnerSrv(t, http.StatusOK, body)
 		s := newCensusSoR() // NOT seeded
 		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", s, fixedClock)
-		res, _ := n.Handle(context.Background(), "pas-claim-update", "corr-1", pci, bundle)
-		if res.Status != http.StatusConflict {
-			t.Fatalf("divergence/no-pend must be 409, got %d", res.Status)
+		res, err := n.Handle(context.Background(), "pas-claim-update", "corr-1", pci, bundle)
+		if err != nil || res.Status != 0 || !bytes.Equal(responseBytes(res), body) || res.Rollback != nil {
+			t.Fatalf("no-pend amendment: err=%v status=%d rollback=%v", err, res.Status, res.Rollback != nil)
 		}
 	})
 

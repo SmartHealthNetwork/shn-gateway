@@ -265,8 +265,9 @@ func TestDTRNextQuestion_AnotherPatientsTokenHandsThePayerTheRoundsOwnPatient(t 
 
 // TestPASInquire_SystemOfRecordFailureIsTheGatewaysOwn5xx: an inquiry whose
 // member the payer's system of record cannot be read for is this gateway's own
-// failure, answered bare with the system-of-record status — not sealed as the
-// payer's answer about the request.
+// failure: its system-of-record status, framed as its answer so the requester
+// reads it, never the payer's answer about the request, and never the backend's
+// own error text.
 func TestPASInquire_SystemOfRecordFailureIsTheGatewaysOwn5xx(t *testing.T) {
 	g, requester := newInboundTestGateway(t, true)
 	g.cfg.SoR = routeFailureSoR{t: t, fail: "patient"}
@@ -276,11 +277,18 @@ func TestPASInquire_SystemOfRecordFailureIsTheGatewaysOwn5xx(t *testing.T) {
 	rec := httptest.NewRecorder()
 	g.handlePASInquireInbound(rec, newSignedInboundRequest(t, g, requester.ID), env,
 		shnsdk.Token{Subject: "pci:any", CorrelationID: env.Metadata.CorrelationID}, inquiryBundle("MBR-COVERED", "", "TRN-1", "72148"), "pa.pas@2.0")
-	want, _ := SoRFailureResponse(errors.New("private-upstream-sentinel"))
-	if rec.Code != want || rec.Code < http.StatusInternalServerError {
-		t.Fatalf("status %d %s, want the bare %d", rec.Code, rec.Body, want)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d %s, want the framed answer leg", rec.Code, rec.Body)
 	}
-	if bytes.Contains(rec.Body.Bytes(), []byte("private-upstream-sentinel")) {
-		t.Fatalf("the backend's own error text leaked: %s", rec.Body)
+	hdr, body, err := shnsdk.DecodeHTTPFrame(openResponseLeg(t, requester, rec.Body.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, wantMsg := SoRFailureResponse(errors.New("private-upstream-sentinel"))
+	if hdr.Status != want || want < http.StatusInternalServerError || !bytes.Contains(body, []byte(wantMsg)) {
+		t.Fatalf("framed %d %s, want %d %q", hdr.Status, body, want, wantMsg)
+	}
+	if bytes.Contains(body, []byte("private-upstream-sentinel")) || bytes.Contains(body, []byte("must not be asked")) {
+		t.Fatalf("the backend's own error text leaked, or the payer was asked: %s", body)
 	}
 }

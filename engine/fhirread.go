@@ -26,9 +26,7 @@ import (
 func ParseCoverageEligibilityResponsePatient(data []byte) (string, error) {
 	var probe struct {
 		ResourceType string `json:"resourceType"`
-		Patient      struct {
-			Reference string `json:"reference"`
-		} `json:"patient"`
+		Patient      map[string]json.RawMessage `json:"patient"`
 	}
 	if err := json.Unmarshal(data, &probe); err != nil {
 		return "", err
@@ -36,11 +34,29 @@ func ParseCoverageEligibilityResponsePatient(data []byte) (string, error) {
 	if probe.ResourceType != "CoverageEligibilityResponse" {
 		return "", fmt.Errorf("engine: expected CoverageEligibilityResponse, got %q", probe.ResourceType)
 	}
-	if probe.Patient.Reference == "" {
-		return "", fmt.Errorf("engine: CoverageEligibilityResponse missing patient.reference")
+	var ref string
+	if raw, ok := probe.Patient["reference"]; ok {
+		if err := json.Unmarshal(raw, &ref); err != nil {
+			return "", fmt.Errorf("engine: CoverageEligibilityResponse patient.reference is not a string")
+		}
 	}
-	return probe.Patient.Reference, nil
+	if ref == "" {
+		if len(probe.Patient) == 0 {
+			return "", errMissingEligibilityPatient
+		}
+		return "", errNoEligibilityPatientRef
+	}
+	return ref, nil
 }
+
+// A CoverageEligibilityResponse whose patient is missing (absent, null or
+// empty) cannot be read for its patient at all; one that names its patient
+// otherwise than by reference (an identifier only) is readable, and its
+// patient cannot be compared with a request's.
+var (
+	errMissingEligibilityPatient = errors.New("engine: CoverageEligibilityResponse missing patient.reference")
+	errNoEligibilityPatientRef   = errors.New("engine: CoverageEligibilityResponse names its patient by no reference")
+)
 
 // ErrNoPASResponsePatient is what ParsePASResponsePatients returns for a response
 // that carries NO ClaimResponse at all — the shape an inquiry that matched nothing

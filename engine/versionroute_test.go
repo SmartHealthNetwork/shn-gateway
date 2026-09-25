@@ -1175,6 +1175,7 @@ func TestD7CRDIngressRefusalNamesMissingLane(t *testing.T) {
 // credential.
 func TestD7CRDIngressArm3EdgeCaptureHoldsSentBytes(t *testing.T) {
 	env := newInProcessExchange(t)
+	env.originator.cfg.EnrichNativeRequests = true // the prefetch fill this row pins
 	d7SetPeerContractVersions(t, env, "pa.crd@2.2")
 	fake := shnsdk.NewFakeValidator()
 	env.originator.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"2.0": fake, "2.1": fake, "2.2": fake}

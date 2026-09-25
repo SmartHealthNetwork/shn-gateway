@@ -12,7 +12,7 @@ import (
 
 func TestGuardTable(t *testing.T) {
 	for rule := range networkRules {
-		for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve, EnforcementStrict} {
+		for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve, EnforcementStructural, EnforcementStrict} {
 			p := NewConformancePolicy(level)
 			if !p.Runs(KindNetwork, rule) || p.Decide(KindNetwork, rule, VerdictInvalid) != Refuse {
 				t.Errorf("network rule %q must run and refuse at %s", rule, level)
@@ -27,6 +27,7 @@ func TestGuardTable(t *testing.T) {
 		}{
 			{EnforcementNone, false, Record},
 			{EnforcementObserve, true, Record},
+			{EnforcementStructural, true, map[bool]Decision{true: Refuse, false: Record}[refusesAt(EnforcementStructural, rule)]},
 			{EnforcementStrict, true, Refuse},
 		} {
 			p := NewConformancePolicy(tc.level)
@@ -130,7 +131,7 @@ func TestGuardRuleMovesByTableAlone(t *testing.T) {
 		delete(networkRules, RulePatientMixed)
 		contentRules[RulePatientMixed] = true
 	}()
-	for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve, EnforcementStrict} {
+	for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve, EnforcementStructural, EnforcementStrict} {
 		var findings []ConformanceFinding
 		p := NewConformancePolicy(level)
 		if !p.Runs(KindContent, RulePatientMixed) {

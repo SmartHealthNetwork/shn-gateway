@@ -57,14 +57,15 @@ var relayEdits = []relayEdit{
 		Direction: relay.DirectionRequest,
 		Paths:     []string{"$.prefetch", "$.prefetch.<key>"},
 		Kind:      editInsertMember,
-		Precondition: "Only for a prefetch key the payer's service advertises and the request left out; " +
+		Precondition: "Only when the provider opts in to enrichment (ENRICH_NATIVE_REQUESTS; not applied by default), " +
+			"and only for a prefetch key the payer's service advertises and the request left out; " +
 			"$.prefetch itself is created when the request has none. A key the request carries is never changed.",
 		Authority: "The provider's own system, read over the gateway's authenticated connection. The patient " +
 			"is that system's bytes; a search is a searchset the gateway writes around that system's records " +
 			"(each matching or included record byte for byte, under a urn:uuid entry address the gateway " +
 			"assigns, with no links or addresses of that system); null when it holds nothing.",
-		Disclosure: "When a CDS Hooks request leaves out a prefetch value the payer's service asks for, the provider's " +
-			"gateway adds it from the provider's own system: the records exactly as that system holds them, in a " +
+		Disclosure: "When the provider has opted in to enrichment and a CDS Hooks request leaves out a prefetch value the " +
+			"payer's service asks for, the provider's gateway adds it from the provider's own system: the records exactly as that system holds them, in a " +
 			"searchset the gateway writes, never an address in that system; values the request carries are sent unchanged.",
 	},
 	{
@@ -105,11 +106,13 @@ var relayEdits = []relayEdit{
 		Direction: relay.DirectionRequest,
 		Paths:     []string{"$.parameter"},
 		Kind:      editArrayAppend,
-		Precondition: `Only when the request carries no "coverage" parameter; one {"name":"coverage","resource":…} ` +
-			"element is appended.",
+		Precondition: "Only when the provider opts in to enrichment (ENRICH_NATIVE_REQUESTS; not applied by default), " +
+			`and only when the request carries no "coverage" parameter; one {"name":"coverage","resource":…} ` +
+			"element is appended. Without the opt-in the Coverage is still read to choose the payer, and not appended.",
 		Authority: "The provider's own system: its Coverage for the bound patient.",
-		Disclosure: "When a questionnaire package request carries no coverage, the provider's gateway appends the " +
-			"patient's Coverage from the provider's own system; the rest of the request is sent unchanged.",
+		Disclosure: "When the provider has opted in to enrichment and a questionnaire package request carries no coverage, " +
+			"the provider's gateway appends the patient's Coverage from the provider's own system; the rest of the " +
+			"request is sent unchanged.",
 	},
 	{
 		ID:        relay.EditDTRPatientObtain,
@@ -119,14 +122,14 @@ var relayEdits = []relayEdit{
 		Direction: relay.DirectionRequest,
 		Paths:     []string{"$.parameter"},
 		Kind:      editArrayAppend,
-		Precondition: "Only when the participant opts in to enrichment (not applied to Da Vinci-native " +
-			"traffic by default), only when the request carries no Patient resource for the bound " +
+		Precondition: "Only when the provider opts in to enrichment (ENRICH_NATIVE_REQUESTS; not applied by default), " +
+			"only when the request carries no Patient resource for the bound " +
 			"patient anywhere in its parameters, and only when the provider's own system holds the patient " +
 			"under the id the request names; one {\"name\":\"referenced\",\"resource\":<Patient>} element is appended.",
 		Authority: "The provider's own system: its Patient record for the bound patient.",
-		Disclosure: "When a questionnaire package request carries no Patient and the provider's gateway is carrying " +
-			"members the payer may not hold, the provider's gateway appends the patient's own Patient record from " +
-			"the provider's system as a referenced resource; the rest of the request is sent unchanged.",
+		Disclosure: "When the provider has opted in to enrichment and a questionnaire package request carries no Patient, " +
+			"the provider's gateway appends the patient's own Patient record from the provider's system as a referenced " +
+			"resource, so a payer that does not hold the member can bind the same patient; the rest of the request is sent unchanged.",
 	},
 }
 

@@ -5,8 +5,9 @@ import "fmt"
 // ConformanceEnforcement is a participant's choice about what its own gateway
 // does with the messages it carries. none runs no conformance check at all and
 // relays; observe runs every check, records each defect as a finding and
-// relays; strict refuses a defect. SHN's own bridged edit is checked and
-// refused at every level.
+// relays; structural runs every check, refuses a message whose structure is broken
+// and records every other defect as observe does; strict refuses a defect.
+// SHN's own bridged edit is checked and refused at every level.
 //
 // The ZERO VALUE IS STRICT, deliberately: the default flip to none lives in
 // exactly one place, the gateway/app env loader, so no in-process construction
@@ -17,6 +18,7 @@ const (
 	EnforcementStrict ConformanceEnforcement = iota
 	EnforcementNone
 	EnforcementObserve
+	EnforcementStructural
 )
 
 func (e ConformanceEnforcement) String() string {
@@ -25,6 +27,8 @@ func (e ConformanceEnforcement) String() string {
 		return "none"
 	case EnforcementObserve:
 		return "observe"
+	case EnforcementStructural:
+		return "structural"
 	}
 	return "strict"
 }
@@ -43,22 +47,29 @@ func ParseConformanceEnforcement(s string) (ConformanceEnforcement, error) {
 		return EnforcementNone, nil
 	case "observe":
 		return EnforcementObserve, nil
+	case "structural":
+		return EnforcementStructural, nil
 	}
-	return EnforcementStrict, fmt.Errorf("CONFORMANCE_ENFORCEMENT must be none, observe or strict, got %q", s)
+	return EnforcementStrict, fmt.Errorf("CONFORMANCE_ENFORCEMENT must be none, observe, structural or strict, got %q", s)
 }
 
 // CheckKind and its four constants are already declared in finding.go — do
 // not redeclare them here.
 
-// Verdict is what the check saw. Decide is total over all three so the table
-// can be tested whole. VerdictUnavailable is a check that could not run: the
-// validator failed, or no validator lane serves the line.
+// Verdict is what the check saw. Decide is total over all four so the table
+// can be tested whole. VerdictInvalid is a defect that breaks the message's
+// structure, or one the check could not classify (fail closed).
+// VerdictUnavailable is a check that could not run: the validator failed, or
+// no validator lane serves the line. VerdictDeeper is a FHIR $validate whose
+// every defect the choke point classified as a deeper rule's (classifyFHIR):
+// the message is readable, and only strict refuses it.
 type Verdict int
 
 const (
 	VerdictValid Verdict = iota
 	VerdictInvalid
 	VerdictUnavailable
+	VerdictDeeper
 )
 
 // Decision is what the gateway does about an invalid verdict. Refuse is the
@@ -98,6 +109,20 @@ var unreadableCDSRules = map[string]bool{
 	"response.json":   true,
 	"response.object": true,
 	"line":            true,
+}
+
+// structuralCDSDeeperRules are the CDS Hooks error rules that judge a readable
+// answer's meaning (summary length, CRD topic, selection behavior, an action's
+// resource): recorded at structural. Every other error rule is structural in CDS
+// Hooks terms (an unreadable answer, or a required member missing or of the
+// wrong type) and refuses at structural, as does any rule the table does not name
+// (fail closed). SHOULD-level rules never reach Decide.
+var structuralCDSDeeperRules = map[string]bool{
+	"card.summary.length":                true,
+	"card.source.topic":                  true,
+	"card.selectionBehavior":             true,
+	"card.selectionBehavior.at-most-one": true,
+	"action.resource":                    true,
 }
 
 // cdsUnreadableRefusesBelowStrict is the table row for an unreadable CDS Hooks
@@ -146,9 +171,10 @@ const (
 	// Without a PCI the leg has no authority to carry, so this row cannot relay.
 	RuleSubjectPCI = "subject.pci"
 	// RuleSubjectToken: the request's patient is the patient the leg's token
-	// authorizes. The eligibility, federated-query and patient-authored DTR legs
-	// refuse a difference. The Da Vinci CRD, DTR and PAS legs do not compare
-	// them: the payer handles the member the request names as it would
+	// authorizes. The federated-query and patient-authored DTR legs, and
+	// eligibility a payer answers from its records, refuse a difference. The Da
+	// Vinci CRD, DTR and PAS legs, and eligibility carried to a payer's own
+	// endpoint, do not compare them: the payer handles the member the request names as it would
 	// directly, and keys everything it records about the exchange by its own
 	// binding of that member (bindInboundSubject), never by the token.
 	RuleSubjectToken = "subject.token"
@@ -162,7 +188,8 @@ const (
 const (
 	// RulePatientMixed: another patient referenced inside one request.
 	RulePatientMixed = "patient.mixed"
-	// RulePatientAnswer: an answer about a patient other than the request's.
+	// RulePatientAnswer: an answer about a patient other than the request's,
+	// or one that names its patient otherwise than by reference.
 	RulePatientAnswer = "patient.answer"
 	// RuleRequestShape: a request missing a required element or not the
 	// operation's shape.
@@ -185,6 +212,12 @@ const (
 )
 
 var networkRules = map[string]bool{RuleSubjectPCI: true, RuleSubjectToken: true, RuleDuplicateKey: true}
+
+// structuralContentRefuses are the content rules structural refuses: a request or an
+// answer this gateway cannot read is structurally broken. Every other content
+// rule judges consistency or a business rule and is recorded at structural. A rule
+// in neither table refuses at structural (fail closed).
+var structuralContentRefuses = map[string]bool{RuleRequestShape: true, RuleAnswerShape: true}
 
 var contentRules = map[string]bool{
 	RulePatientMixed: true, RulePatientAnswer: true, RuleRequestShape: true,
@@ -229,8 +262,31 @@ func (p ConformancePolicy) Decide(kind CheckKind, rule string, v Verdict) Decisi
 		return Refuse
 	case p.level == EnforcementStrict:
 		return Refuse
+	case p.level == EnforcementStructural:
+		return decideStructural(kind, rule, v)
 	case kind == KindCDSEnvelope && unreadableCDSRules[rule] && p.unreadableRefusesBelowStrict:
 		return Refuse
 	}
 	return Record
+}
+
+// decideStructural is structural's row of the table, below the rows that refuse at every
+// level. A check that could not run, and a FHIR defect classified as a deeper
+// rule's, are recorded. A structural or unclassified FHIR defect refuses; a CDS
+// Hooks or content rule refuses unless the table names it as recorded.
+func decideStructural(kind CheckKind, rule string, v Verdict) Decision {
+	if v == VerdictUnavailable || v == VerdictDeeper {
+		return Record
+	}
+	switch kind {
+	case KindCDSEnvelope:
+		if structuralCDSDeeperRules[rule] {
+			return Record
+		}
+	case KindContent:
+		if contentRules[rule] && !structuralContentRefuses[rule] {
+			return Record
+		}
+	}
+	return Refuse
 }

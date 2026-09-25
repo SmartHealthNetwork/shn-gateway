@@ -107,6 +107,17 @@ func (p *levelPayer) send(t *testing.T, leg, operation string, body []byte) paye
 // sendAs is send for a token whose subject is subject.
 func (p *levelPayer) sendAs(t *testing.T, leg, operation string, body []byte, subject string) payerAnswer {
 	t.Helper()
+	var headers map[string]string
+	if operation != "" {
+		headers = map[string]string{shnsdk.FrameHeaderOperation: operation}
+	}
+	return p.sendFramed(t, leg, headers, body, subject)
+}
+
+// sendFramed delivers body on leg in a request frame carrying headers (bare
+// when headers is nil), bound to subject.
+func (p *levelPayer) sendFramed(t *testing.T, leg string, headers map[string]string, body []byte, subject string) payerAnswer {
+	t.Helper()
 	p.partner.lastPath, p.partner.lastBody = "", nil
 	p.seq++
 	spec, ok := paCatalog[leg]
@@ -115,9 +126,9 @@ func (p *levelPayer) sendAs(t *testing.T, leg, operation string, body []byte, su
 	}
 	corr := fmt.Sprintf("corr-%s-%d", leg, p.seq)
 	payload := body
-	if operation != "" {
+	if headers != nil {
 		var err error
-		payload, err = shnsdk.EncodeHTTPFrameHeaders(http.StatusOK, map[string]string{shnsdk.FrameHeaderOperation: operation}, body)
+		payload, err = shnsdk.EncodeHTTPFrameHeaders(http.StatusOK, headers, body)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -212,6 +223,14 @@ func (p *levelPayer) wantFindings(t *testing.T, leg, rule, whose string) {
 				t.Fatalf("at observe nothing is refused, got %v", findingsText(fs))
 			}
 		}
+	case EnforcementStructural:
+		want := "relayed"
+		if refusesAt(p.level, rule) {
+			want = "refused"
+		}
+		if len(fs) == 0 || fs[0].Rule != rule || fs[0].Decision != want || fs[0].LegType != leg || fs[0].Whose != whose || fs[0].Seam != "payer-native" || fs[0].PayloadSHA256 == "" {
+			t.Fatalf("at structural want a %s %s finding on %s from %s, got %+v", want, rule, leg, whose, fs)
+		}
 	case EnforcementStrict:
 		if len(fs) == 0 || fs[0].Rule != rule || fs[0].Decision != "refused" || fs[0].LegType != leg {
 			t.Fatalf("at strict want a refused %s finding on %s, got %v", rule, leg, findingsText(fs))
@@ -225,7 +244,7 @@ func (p *levelPayer) wantFindings(t *testing.T, leg, rule, whose string) {
 // answer is relayed exactly.
 func (p *levelPayer) wantRequestRow(t *testing.T, leg string, got payerAnswer, body []byte, path, rule string, status int, msg string) {
 	t.Helper()
-	if p.level == EnforcementStrict {
+	if refusesAt(p.level, rule) {
 		p.wantRefused(t, got, status, msg)
 	} else {
 		if got.status != http.StatusOK || !got.framed {
@@ -249,7 +268,7 @@ func (p *levelPayer) wantAnswerRow(t *testing.T, leg string, got payerAnswer, pa
 	if p.partner.lastPath != path {
 		t.Fatalf("the request must be forwarded to %s, got %q", path, p.partner.lastPath)
 	}
-	if p.level == EnforcementStrict {
+	if refusesAt(p.level, rule) {
 		if got.status != status || !strings.Contains(string(got.body), msg) {
 			t.Fatalf("answer = %d %s, want %d naming %q", got.status, got.body, status, msg)
 		}
@@ -420,14 +439,13 @@ func TestLevelPayerDTR_AnswerContent(t *testing.T) {
 		rule            string
 		status          int
 		msg             string
-		framed          bool
 	}{
 		"next-question answer not a questionnaire-response": {shnsdk.FrameOperationNextQuestion, nextPath, []byte(nextQuestionQR(dtrFrameMember)), notQR,
-			RuleAnswerShape, http.StatusBadGateway, "next-question response is not a questionnaire-response", false},
+			RuleAnswerShape, http.StatusBadGateway, "next-question response is not a questionnaire-response"},
 		"next-question answer about another patient": {shnsdk.FrameOperationNextQuestion, nextPath, []byte(nextQuestionQR(dtrFrameMember)), otherPatient,
-			RulePatientAnswer, http.StatusForbidden, "response patient does not match request patient", true},
+			RulePatientAnswer, http.StatusForbidden, "response patient does not match request patient"},
 		"package Questionnaire carrying a subject": {shnsdk.FrameOperationQuestionnairePackage, packagePath, dtrPackage(resourceParam("coverage", dtrCoverage("cov-1", dtrFrameMember))), subjectQuestionnaire,
-			RuleAnswerShape, http.StatusForbidden, "questionnaire response unexpectedly carries a subject", true},
+			RuleAnswerShape, http.StatusForbidden, "questionnaire response unexpectedly carries a subject"},
 	}
 	for name, row := range rows {
 		for _, level := range allLevels {
@@ -436,8 +454,10 @@ func TestLevelPayerDTR_AnswerContent(t *testing.T) {
 				p.partner.respByPath[row.path] = row.answer
 				got := p.send(t, "dtr-questionnaire-fetch", row.operation, row.body)
 				p.wantAnswerRow(t, "dtr-questionnaire-fetch", got, row.path, row.answer, row.rule, row.status, row.msg)
-				if level == EnforcementStrict && got.framed != row.framed {
-					t.Fatalf("the strict refusal's wire shape changed: framed=%v, want %v", got.framed, row.framed)
+				// Every refusal — the payer gateway's own 502 included — reaches
+				// the requester framed, with its status.
+				if refusesAt(level, row.rule) && !got.framed {
+					t.Fatalf("the refusal at %s was not framed: status %d", level, got.status)
 				}
 			})
 		}

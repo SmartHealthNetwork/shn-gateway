@@ -5,6 +5,7 @@
 package engine
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -41,6 +42,25 @@ func TestParseCoverageEligibilityResponsePatient(t *testing.T) {
 	noPatRef := `{"resourceType":"CoverageEligibilityResponse","status":"active"}`
 	if _, err := ParseCoverageEligibilityResponsePatient([]byte(noPatRef)); err == nil {
 		t.Error("should reject a CER response missing patient.reference")
+	}
+
+	// A missing patient cannot be read for its patient; one named otherwise
+	// than by reference is readable, and its patient cannot be compared.
+	for patient, want := range map[string]error{
+		``:                            errMissingEligibilityPatient,
+		`,"patient":null`:             errMissingEligibilityPatient,
+		`,"patient":{}`:               errMissingEligibilityPatient,
+		`,"patient":{"reference":""}`: errNoEligibilityPatientRef,
+		`,"patient":{"identifier":{"system":"urn:shn:member","value":"M"}}`: errNoEligibilityPatientRef,
+	} {
+		_, err := ParseCoverageEligibilityResponsePatient([]byte(`{"resourceType":"CoverageEligibilityResponse"` + patient + `}`))
+		if !errors.Is(err, want) {
+			t.Errorf("patient %q: err = %v, want %v", patient, err, want)
+		}
+	}
+	if _, err := ParseCoverageEligibilityResponsePatient([]byte(`{"resourceType":"CoverageEligibilityResponse","patient":{"reference":7}}`)); err == nil ||
+		errors.Is(err, errNoEligibilityPatientRef) || errors.Is(err, errMissingEligibilityPatient) {
+		t.Errorf("a reference that is not a string cannot be read: %v", err)
 	}
 }
 

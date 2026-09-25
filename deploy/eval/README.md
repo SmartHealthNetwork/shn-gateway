@@ -136,7 +136,8 @@ nothing itself — so with nothing set the gateway runs the published default, `
 `observe` every message is checked against its FHIR profile — and a payer's CDS Hooks answer
 against the CDS Hooks response rules — each defect is recorded as a finding in the gateway's
 log and observer stream, and the message relays as sent, apart from the gateway's registered
-edits (the callback removed, prefetch and coverage obtained, and payer identity mapping):
+edits (the callback removed, prefetch and coverage obtained where the provider opts in with
+`ENRICH_NATIVE_REQUESTS=true`, and payer identity mapping):
 nothing is refused for conformance.
 Network rules refuse at every level regardless: authentication, authority, consent, routing, replay, message integrity, and
 the check of a payload this gateway itself translated between IG lines.

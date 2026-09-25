@@ -169,8 +169,9 @@ func (g *Gateway) handleCDSDiscovery(w http.ResponseWriter, r *http.Request) {
 // and the request's hook must be that service's hook (400 otherwise). The hook
 // picks the leg (order-sign and order-select ride crd-order-select;
 // order-dispatch rides crd-order-dispatch). The handler subject-binds the
-// request, carries the EHR's own bytes (with the callback removed and absent
-// prefetch obtained from the participant's system of record), threads a
+// request, carries the EHR's own bytes (with the callback removed and, when the
+// participant opts in to enrichment, absent prefetch obtained from its system
+// of record), threads a
 // metadata-only Exchange, and relays the payer's answer back to the EHR exactly
 // once it meets the CDS Hooks response rules.
 func (g *Gateway) handleCRDIngress(w http.ResponseWriter, r *http.Request) {
@@ -218,8 +219,8 @@ func (g *Gateway) handleCRDIngress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	member := g.memberForPCI(body)
-	// Keep the EHR's bytes; remove the callback and add the prefetch values
-	// it left out, from this participant's own system of record.
+	// Keep the EHR's bytes; remove the callback and, under enrichment, add the
+	// prefetch values it left out, from this participant's own system of record.
 	prepared, status, msg := g.ingressEnsureSelfContainedContext(r.Context(), legType, body, member)
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
@@ -313,10 +314,11 @@ func (g *Gateway) handleCRDIngress(w http.ResponseWriter, r *http.Request) {
 // handleDTRIngress terminates an EHR's $questionnaire-package request and
 // carries the EHR's own Parameters to the payer on the
 // dtr-questionnaire-fetch leg, naming the operation in the request frame:
-// exactly as sent, or with the patient's Coverage added from this
-// participant's system of record when the request carries none
-// (prepareDTRPackageRequest). Every resource is bound to one patient, the
-// request is routed by every coverage it carries, a payer that does not
+// exactly as sent, or, when the participant opts in to enrichment, with the
+// patient's Coverage and Patient added from its system of record when the
+// request carries none (prepareDTRPackageRequest). Every resource is bound to
+// one patient, the request is routed by every coverage it carries (or, when
+// it carries none, by the one its system of record holds), a payer that does not
 // accept framed DTR operations is refused before anything is sent, and the
 // payer's answer is relayed to the EHR exactly. The ingress does not invoke
 // the Populator: the EHR's own DTR application populates.
@@ -387,7 +389,8 @@ func (g *Gateway) handleDTRIngress(w http.ResponseWriter, r *http.Request) {
 	prepared.carried.record(r.Context())
 	ex := g.exchanges.Begin(workstreamPA)
 	content := Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route),
-		Payload: prepared.request, Carried: true, Operation: shnsdk.FrameOperationQuestionnairePackage}
+		Payload: prepared.request, Carried: true, Operation: shnsdk.FrameOperationQuestionnairePackage,
+		MediaType: carriedFHIRMediaType(r.Header.Get("Content-Type"))}
 	pkgJSON, err := g.OriginateLeg(r.Context(), r, recipient, legType, prepared.pci, child, "", content)
 	leg := Leg{Type: legType, Physics: paCatalog[legType].Physics, Content: content, Subjects: subjectsOf(prepared.pci)}
 	if err != nil {
@@ -493,12 +496,25 @@ func (g *Gateway) handlePASIngress(w http.ResponseWriter, r *http.Request) {
 	// Security: the pend is keyed by (subjectPCI, corr) where subjectPCI is this gateway's own
 	// binding of the member the request names (ingressPASNativeSubjectPCI above). A corr threads
 	// only to that member's pends — no cross-member hijack via a crafted identifier.
-	child := g.ingressCorrelation(w, r)
-	if fstatus == 0 && f.claimCorrelation != "" {
+	// The leg's id: the Claim's own urn:shn:correlation when it names one (the
+	// payer's key for this authorization); else the caller's trace value when
+	// that value is one of this Claim's own identifiers — the caller already
+	// uses it as the Claim's identity, and an amend names it in related[] — else
+	// a freshly minted id. A trace value that is not the Claim's identity never
+	// becomes the key, so reusing it cannot collide two claims at the payer.
+	var child string
+	switch trace := ingressTrace(r); {
+	case fstatus == 0 && f.claimCorrelation != "":
 		child = f.claimCorrelation
-		// The Claim's own correlation is the one this leg is logged under, so it is
-		// the one the caller is told.
-		w.Header().Set(CorrelationHeader, child)
+	case fstatus == 0 && trace != "" && slices.Contains(f.claimIdentifiers, trace):
+		child = trace
+	}
+	if child != "" {
+		// The Claim's identity is the leg's id and the value the caller is told.
+		stampIngressIDs(w, child, child)
+		noteIngressTrace(r, ingressTrace(r), child)
+	} else {
+		child = g.ingressCorrelation(w, r)
 	}
 	r = r.WithContext(withFindingContext(r.Context(), findingContext{
 		LegType: leg, CorrelationID: child, Seam: "provider-ingress", Whose: "own",

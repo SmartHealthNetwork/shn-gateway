@@ -14,8 +14,9 @@
 // working unchanged.
 //
 // The same carrier collects the leg's OBSERVER NOTES. A payer gateway's legs raise
-// facts an operator needs — a re-issue after the payer's own version conflict, a
-// ledger transition the payer's later word forced, a pend no follow-up can name —
+// facts an operator needs — an amendment that reached the payer without binding a
+// local pend, a ledger transition the payer's later word forced, a pend no
+// follow-up can name —
 // and the responder has no observer of its own. It appends the event kinds here;
 // the inbound handler emits them once the exchange is sealed, tied to its
 // correlation.
@@ -24,6 +25,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"strings"
 	"time"
@@ -40,7 +42,21 @@ type pasLeg struct {
 	// it below strict without reading it for this gateway's own records
 	// (skipWrite); "" when the answer was read.
 	unread string
+	// payerAnswered is set once the payer's own system answered the forward:
+	// from then on the payer may have acted on the request.
+	payerAnswered bool
 }
+
+// answered records that the payer's own system answered this exchange's
+// forward. A nil carrier drops it, as note does.
+func (l *pasLeg) answered() {
+	if l != nil {
+		l.payerAnswered = true
+	}
+}
+
+// afterPayerAnswered reports whether the payer's own system has answered.
+func (l *pasLeg) afterPayerAnswered() bool { return l != nil && l.payerAnswered }
 
 // withPASLeg attaches a carrier for this exchange, returning the context and the
 // carrier the caller reads its notes back from. requester is the VERIFIED
@@ -111,11 +127,41 @@ func (g *Gateway) payerLocalWriteSkipped(leg, correlationID, rule string) {
 	})
 }
 
-// RetryVersionConflictEvent is raised when an amendment was re-issued once after
-// the payer's own store refused the write its resolution timer had already made.
-// The message re-sent is the identical payload; the note says a second attempt
-// happened, which an operator reading one exchange would otherwise not see.
-const RetryVersionConflictEvent = "retry:version-conflict"
+// LocalWriteFailedEvent is emitted when a payer gateway relayed its participant's
+// answer but could not record it for its own records: the pend, the decision or
+// the decision EOB was not written. The ledger records and never gates, so the
+// answer reaches the requester either way. It carries the leg, the correlation
+// id and the kind of failure; never the answer and never the store's own text.
+const LocalWriteFailedEvent = "pa.local-write-failed"
+
+// payerLocalWriteFailed reports a record write that failed after the payer's
+// answer was sealed for the requester. Metadata only: a log line and an observer
+// event (LocalWriteFailedEvent).
+func (g *Gateway) payerLocalWriteFailed(leg, correlationID string, err error) {
+	detail := "the payer's answer was relayed but not recorded here: " + localWriteFailure(err)
+	log.Printf("gateway: %s: leg %s correlation %s: %s", LocalWriteFailedEvent, leg, correlationID, detail)
+	g.observe(ObserverEvent{
+		Kind: LocalWriteFailedEvent, Direction: "ingress", LegType: leg,
+		CorrelationID: correlationID, Detail: detail,
+	})
+}
+
+// localWriteFailure names why a record write failed, in the ledger's own terms.
+// A store's error text is not repeated: it can carry the values it refused.
+func localWriteFailure(err error) string {
+	switch {
+	case errors.Is(err, ErrPendKeyTooLong):
+		return "an identifier in the answer is longer than the ledger keeps"
+	case errors.Is(err, ErrPendRequesterMismatch):
+		return "the authorization is recorded under another requester"
+	case errors.Is(err, ErrPendRequesterRequired):
+		return "no requester to record the authorization under"
+	case errors.Is(err, ErrPendEOBInvalid):
+		return "the decision EOB could not be recorded"
+	default:
+		return "the store did not accept the write"
+	}
+}
 
 // pasAnswerKeys reads the lookup keys and the payer's own date out of a PAS
 // response Bundle: the payer's `ClaimResponse.identifier`s, the submitted

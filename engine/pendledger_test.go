@@ -243,10 +243,30 @@ func TestPendStateMachine_HelpersAreTotal(t *testing.T) {
 		{"in progress", PendStateInProgress, true, PendStateInProgress, false, PendRefusalInProgress},
 		{"decided", PendStateDecided, true, PendStateDecided, false, PendRefusalDecided},
 	} {
-		next, ok, why := PendBegin(row.cur, row.found)
+		now := time.Unix(5000, 0).UTC()
+		next, ok, why := PendBegin(PendRecord{State: row.cur, LastTransition: now}, row.found, now)
 		if next != row.next || ok != row.ok || why != row.why {
 			t.Errorf("%s: PendBegin = %q,%v,%q — want %q,%v,%q", row.name, next, ok, why, row.next, row.ok, row.why)
 		}
+	}
+
+	// An amendment's hold lapses after PendInProgressStale: a stranded row (its
+	// gateway stopped before releasing it) binds again and is re-pended again.
+	// Inside the bound it does neither, and a re-pend leaves its time alone.
+	held := time.Unix(5000, 0).UTC()
+	hold := PendRecord{State: PendStateInProgress, LastTransition: held}
+	inside, lapsed := held.Add(PendInProgressStale-time.Second), held.Add(PendInProgressStale)
+	if _, ok, why := PendBegin(hold, true, inside); ok || why != PendRefusalInProgress {
+		t.Errorf("a live hold was bound again: %v %q", ok, why)
+	}
+	if next, ok, _ := PendBegin(hold, true, lapsed); !ok || next != PendStateInProgress {
+		t.Errorf("a lapsed hold was not bound: %v %q", ok, next)
+	}
+	if next, tr := PendRePend(hold, true, inside, inside); next.State != PendStateInProgress || !next.LastTransition.Equal(held) || tr.Changed {
+		t.Errorf("a re-pend moved or refreshed a live hold: %+v %+v", next, tr)
+	}
+	if next, tr := PendRePend(hold, true, lapsed, lapsed); next.State != PendStatePended || !next.LastTransition.Equal(lapsed) || !tr.Changed {
+		t.Errorf("a re-pend left a lapsed hold in place: %+v %+v", next, tr)
 	}
 
 	// ONE meaning for "undated", across BOTH timestamp rules: not later. An
@@ -261,7 +281,7 @@ func TestPendStateMachine_HelpersAreTotal(t *testing.T) {
 		{"the same instant", decided.DecidedAt},
 		{"earlier", decided.DecidedAt.Add(-time.Hour)},
 	} {
-		next, tr := PendRePend(decided, true, row.when)
+		next, tr := PendRePend(decided, true, row.when, time.Unix(9000, 0).UTC())
 		if next.State != PendStateDecided || tr.Event != DecisionStaleAnswerEvent || tr.Changed {
 			t.Errorf("a %s re-pend of a decided claim = %+v,%+v — want the decision to stand", row.name, next, tr)
 		}
@@ -279,7 +299,7 @@ func TestPendStateMachine_HelpersAreTotal(t *testing.T) {
 		}
 	}
 	// A LATER re-pend is the one case that reopens a decision.
-	if next, tr := PendRePend(decided, true, decided.DecidedAt.Add(time.Hour)); next.State != PendStatePended || tr.Event != DecisionSupersededEvent || !tr.Changed {
+	if next, tr := PendRePend(decided, true, decided.DecidedAt.Add(time.Hour), time.Unix(9000, 0).UTC()); next.State != PendStatePended || tr.Event != DecisionSupersededEvent || !tr.Changed {
 		t.Errorf("a later re-pend of a decided claim = %+v,%+v", next, tr)
 	}
 }
@@ -308,5 +328,42 @@ func TestEOBRecord_ValidateRejections(t *testing.T) {
 	var none *EOBRecord
 	if err := none.Validate("PCI-A"); err != nil {
 		t.Errorf("a nil EOB was refused: %v", err)
+	}
+}
+
+// TestPendLedger_AStrandedHoldLapses: an amendment hold whose gateway never
+// released it lapses after PendInProgressStale. Before then a keyed or keyless
+// re-pend records without moving it; after, the re-pend moves it and a new
+// amendment binds.
+func TestPendLedger_AStrandedHoldLapses(t *testing.T) {
+	d := NewMemStore()
+	now := time.Date(2027, 4, 1, 0, 0, 0, 0, time.UTC)
+	d.now = func() time.Time { return now }
+	keys := PendKeys{RequesterHolder: "provider-a", PreAuthRef: "PA-1"}
+	if _, err := d.RecordPendedKeyed("PCI-A", "corr-A", now, keys); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _, _ := d.BeginClaimUpdateReason("PCI-A", "corr-A"); !ok {
+		t.Fatal("begin")
+	}
+	now = now.Add(PendInProgressStale - time.Second)
+	if _, err := d.RecordPendedKeyed("PCI-A", "corr-A", now, keys); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.RecordPendedClaim("PCI-A", "corr-A"); err != nil {
+		t.Fatal(err)
+	}
+	if rec, _, _ := d.PendRecordOf("PCI-A", "corr-A"); rec.State != PendStateInProgress {
+		t.Fatalf("a re-pend moved a live hold: %+v", rec)
+	}
+	now = now.Add(2 * time.Second) // past the bound from the Begin, not from the re-pends
+	if err := d.RecordPendedClaim("PCI-A", "corr-A"); err != nil {
+		t.Fatal(err)
+	}
+	if rec, _, _ := d.PendRecordOf("PCI-A", "corr-A"); rec.State != PendStatePended {
+		t.Fatalf("a lapsed hold was not re-pended: %+v", rec)
+	}
+	if ok, _, _ := d.BeginClaimUpdateReason("PCI-A", "corr-A"); !ok {
+		t.Fatal("a new amendment could not bind after the hold lapsed")
 	}
 }

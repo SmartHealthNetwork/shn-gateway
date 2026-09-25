@@ -54,6 +54,7 @@ type relaySubstrate struct {
 
 	mu        sync.Mutex
 	lastReq   []byte    // the last decrypted REQUEST payload (raw: framed or bare)
+	lastCorr  string    // the last request envelope's correlation id (the leg's id)
 	result    LegResult // seal target for /route; meaningful only when set==true
 	set       bool      // false until the test calls setResult (falls back to default success cards)
 	routeHits int       // count of handleRoute calls — the version-filter refusal test asserts this stays 0 (fail-closed BEFORE any Hub round-trip)
@@ -133,6 +134,9 @@ func (s *relaySubstrate) handleRoute(body []byte) (*http.Response, error) {
 	if err != nil {
 		return errResp("stub: decode envelope: " + err.Error()), nil
 	}
+	s.mu.Lock()
+	s.lastCorr = env.Metadata.CorrelationID
+	s.mu.Unlock()
 	if s.recipientEncPub != nil && s.recipientEncPriv != nil {
 		if plain, oerr := shnsdk.Open(env, s.recipientEncPub, s.recipientEncPriv); oerr == nil {
 			s.mu.Lock()
@@ -234,6 +238,14 @@ func (e *inProcessExchange) lastRequestPayload() []byte {
 	e.substrate.mu.Lock()
 	defer e.substrate.mu.Unlock()
 	return e.substrate.lastReq
+}
+
+// lastCorrelation is the correlation id the most recent /route envelope carried:
+// the id the leg was sent under.
+func (e *inProcessExchange) lastCorrelation() string {
+	e.substrate.mu.Lock()
+	defer e.substrate.mu.Unlock()
+	return e.substrate.lastCorr
 }
 
 // routeHitCount reads the fake Hub's /route call counter — used by the version-filter

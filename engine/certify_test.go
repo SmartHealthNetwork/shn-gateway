@@ -55,7 +55,7 @@ func (b *lockedBuffer) String() string {
 // (no validator call, no certify: line, no leg.certified event); at observe it
 // is.
 func TestCertificationEvidenceOnlyWhereChecksRun(t *testing.T) {
-	for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve} {
+	for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve, EnforcementStructural} {
 		t.Run(level.String(), func(t *testing.T) {
 			var calls atomic.Int32
 			v := certificationValidatorFunc(func(context.Context, []byte, string) (shnsdk.Result, error) {
@@ -88,9 +88,9 @@ func TestCertificationEvidenceOnlyWhereChecksRun(t *testing.T) {
 				if calls.Load() != 0 || certified != 0 || len(evidence) != 0 || lines {
 					t.Fatalf("at none no evidence is gathered: %d call(s), %d event(s), %d record(s), certify line %v", calls.Load(), certified, len(evidence), lines)
 				}
-			case EnforcementObserve:
+			case EnforcementObserve, EnforcementStructural:
 				if calls.Load() == 0 || certified != 1 || len(evidence) != 1 || !lines {
-					t.Fatalf("at observe evidence is gathered: %d call(s), %d event(s), %d record(s), certify line %v", calls.Load(), certified, len(evidence), lines)
+					t.Fatalf("at observe and structural evidence is gathered: %d call(s), %d event(s), %d record(s), certify line %v", calls.Load(), certified, len(evidence), lines)
 				}
 			}
 		})

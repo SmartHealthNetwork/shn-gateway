@@ -560,6 +560,10 @@ func (g *Gateway) selectResumeRoute(pinnedToken, recipient, legType string) (leg
 	}
 }
 
+// recipientRefusedPrefix is how the Hub names a forward the recipient's
+// gateway refused at its edge (4xx); the status follows in parentheses.
+const recipientRefusedPrefix = "forward to recipient failed: the recipient refused it "
+
 // relayOriginationError surfaces a recipient's framed non-2xx application answer
 // (a *RelayError from OriginateLeg, unwrapped through any %w chain) to the origination
 // caller byte-identically — the same verbatim relay the Da Vinci ingress handlers do,
@@ -583,10 +587,53 @@ func (g *Gateway) relayOriginationError(w http.ResponseWriter, err error) bool {
 		return true
 	}
 	// A Hub leg that produced no answer within the client's budget is a 504
-	// that says so (and how long the wait was); every other transport fault
-	// stays the generic 502 "hub routing failed" written by the caller.
+	// that says so (and how long the wait was).
 	if errors.Is(err, errHubTimeout) {
 		writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": err.Error()})
+		return true
+	}
+	// An authority denial — a policy or consent refusal at the Authorization
+	// Framework — is a 403, not a routing failure.
+	if errors.Is(err, errAuthorizationDenied) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": errAuthorizationDenied.Error()})
+		return true
+	}
+	// The Hub's own refusal is reported as the Hub answered it: its status and
+	// reason. A refusal after the recipient was reached says so instead,
+	// so the caller does not resend a request the payer may have acted on.
+	var refused *hubRefusalError
+	if errors.As(err, &refused) {
+		switch refused.delivered {
+		case "yes":
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "the recipient received this request and answered, but its answer was lost on the way back (" +
+				refused.reason + "); it may have acted on the request: check its outcome before resending"})
+		case "unknown":
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "the recipient may have received this request (" +
+				refused.reason + "): check its outcome before resending"})
+		default:
+			// The recipient's gateway refused the forward at its edge: say whose
+			// refusal it was, with its status and nothing of its body.
+			if code, ok := strings.CutPrefix(refused.reason, recipientRefusedPrefix); ok {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "the recipient's gateway refused the exchange " + code})
+				return true
+			}
+			// A Hub 409 (a replayed envelope) is reported as it is. Any other
+			// Hub 4xx is about this gateway's standing with the Hub (its
+			// registration, its token, its clock), not the caller's request, so
+			// the caller is told 502 with the Hub's reason.
+			status := refused.status
+			if status < 400 || status > 599 || (status/100 == 4 && status != http.StatusConflict) {
+				status = http.StatusBadGateway
+			}
+			writeJSON(w, status, map[string]string{"error": "hub refused the exchange: " + refused.reason})
+		}
+		return true
+	}
+	// The recipient answered, but its answer failed this gateway's checks.
+	var lost *answerLostError
+	if errors.As(err, &lost) {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "the recipient received this request and answered, but its answer could not be accepted (" +
+			lost.cause + "); it may have acted on the request: check its outcome before resending"})
 		return true
 	}
 	var re *RelayError
@@ -807,7 +854,7 @@ func (g *Gateway) handleScenario(w http.ResponseWriter, r *http.Request) {
 	// engine builds (shnsdk.BuildEligibilityRequest), never a relay of anyone else's bytes,
 	// on every origination lane. Only the ingress/egress legs a LegResponder (the payer
 	// content occupant — CRD/DTR/PAS) actually touches can carry reference-payer bytes;
-	// eligibility bypasses that occupant entirely (R11 — see gateway/engine/native.go's "NO
+	// eligibility never reaches that occupant's Handle (R11 — see gateway/engine/native.go's "NO
 	// coverage-eligibility arm" comment).
 	cerValidator := g.validatorForLine("")
 	// Routed through the choke point (validateGoverned) so the level decides
@@ -864,11 +911,11 @@ func (g *Gateway) handleScenario(w http.ResponseWriter, r *http.Request) {
 	// F7: lane-selected, still NOT g.validateFHIR — an invalid payer answer is a 502
 	// here (an UPSTREAM failure), not validateFHIR's 500/422. Version-neutral leg ⇒
 	// line "" ⇒ the canonical lane; a missing lane keeps THIS site's 502.
-	// Unconditional on purpose here too — crrJSON is the CoverageEligibilityResponse the
-	// PAYER's own handleEligibilityInbound built directly off
-	// its SoR's Coverage read (R11), on every lane, including provider-data/demo against the
-	// reference payer's own conformance-payer holder — it is SHN-produced content, never a
-	// relay of br-payer's/the mirror's foreign DTR/PAS bytes, so it always validates.
+	// Unconditional on purpose here too. crrJSON is the CoverageEligibilityResponse the
+	// payer's gateway built from its SoR's Coverage read (R11), or, for a payer that
+	// declares its own eligibility endpoint, the payer system's own answer relayed; either
+	// way it is a CoverageEligibilityResponse this requester validates as it would a direct
+	// answer.
 	crrValidator := g.validatorForLine("")
 	// Routed through the choke point so an invalid payer answer still emits its
 	// conformance finding. This site answers the scenario caller, which reads a
@@ -2861,15 +2908,17 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 		// custodian = facility.ID so the Authorization Framework gates consent for THIS source per leg (FR-25).
 		recordsJSON, err := g.OriginateLeg(ctx, r, facility.ID, "federated-query", res.pci, fqCorr, facility.ID, Content{WorkstreamType: workstreamPA, Payload: sealRequest(relay.BuilderSDKFederatedQuery, queryJSON, "application/fhir+json")})
 		if err != nil {
-			if g.relayOriginationError(w, err) {
-				return
-			}
 			// Distinguish a genuine consent DENIAL from an infrastructure/integrity
 			// failure. ONLY an authorization denial (the no-consent branch) leaves the PA
 			// validly pended; a facility outage, a tampered response, or a transport error
-			// is a real 502 and must NOT be misreported to the operator as "consent denied".
+			// is a real failure and must NOT be misreported to the operator as "consent
+			// denied". The denial is this flow's business outcome, so it is read before
+			// relayOriginationError, which answers a denial as a 403.
 			if errors.Is(err, errAuthorizationDenied) {
 				writeJSON(w, http.StatusOK, uc05Resp{PARequired: true, Pended: true, ConsentDenied: true, PendedItems: needed})
+				return
+			}
+			if g.relayOriginationError(w, err) {
 				return
 			}
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "federated query failed: " + err.Error()})

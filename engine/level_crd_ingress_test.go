@@ -12,15 +12,59 @@ import (
 // Per-level rows for the provider CRD ingress. None and observe refuse nothing
 // a participant's payload is judged by; network rules refuse at every level.
 
-var allLevels = []ConformanceEnforcement{EnforcementNone, EnforcementObserve, EnforcementStrict}
+var allLevels = []ConformanceEnforcement{EnforcementNone, EnforcementObserve, EnforcementStructural, EnforcementStrict}
 
-// levelIngressRow runs the provider CRD ingress at level and returns the
-// exchange, the EHR's answer and the content findings recorded.
+// refusesAt reports whether level refuses an invalid content defect of rule
+// (a check that could not finish is recorded below strict, whatever the rule):
+// strict
+// refuses every one; structural refuses only a request or an answer the
+// gateway cannot read, written out here rather than read from the
+// policy so these rows state the table they check; none and observe refuse
+// none.
+func refusesAt(level ConformanceEnforcement, rule string) bool {
+	switch level {
+	case EnforcementStrict:
+		return true
+	case EnforcementStructural:
+		return rule == RuleRequestShape || rule == RuleAnswerShape
+	}
+	return false
+}
+
+// wantContentFinding asserts the first content finding a row records at a
+// level that runs checks: refused or relayed as refusesAt says, naming rule.
+func wantContentFinding(t *testing.T, level ConformanceEnforcement, findings []ConformanceFinding, rule string) {
+	t.Helper()
+	want := "relayed"
+	if refusesAt(level, rule) {
+		want = "refused"
+	}
+	if len(findings) == 0 || findings[0].Rule != rule || findings[0].Decision != want {
+		t.Fatalf("at %s want a %s %s finding, got %+v", level, want, rule, findings)
+	}
+}
+
+// levelIngressRow runs the provider CRD ingress at level, with the
+// participant's default (no enrichment), and returns the exchange, the EHR's
+// answer and the content findings recorded.
 func levelIngressRow(t *testing.T, s *prefetchSoR, level ConformanceEnforcement, body []byte) (*inProcessExchange, *httptest.ResponseRecorder, []ConformanceFinding) {
+	t.Helper()
+	return levelIngressRowWith(t, s, level, body, false)
+}
+
+// levelFillRow is levelIngressRow with the participant opted in to
+// enrichment (Config.EnrichNativeRequests): the prefetch fill (E-02) runs.
+func levelFillRow(t *testing.T, s *prefetchSoR, level ConformanceEnforcement, body []byte) (*inProcessExchange, *httptest.ResponseRecorder, []ConformanceFinding) {
+	t.Helper()
+	return levelIngressRowWith(t, s, level, body, true)
+}
+
+func levelIngressRowWith(t *testing.T, s *prefetchSoR, level ConformanceEnforcement, body []byte, enrich bool) (*inProcessExchange, *httptest.ResponseRecorder, []ConformanceFinding) {
 	t.Helper()
 	env := newInProcessExchange(t)
 	env.originator.cfg.SoR = s.sor()
 	env.originator.cfg.ConformanceEnforcement = level
+	env.originator.cfg.EnrichNativeRequests = enrich
 	var findings []ConformanceFinding
 	env.originator.cfg.Observer = func(e ObserverEvent) {
 		if e.Kind != ConformanceObservedEvent {
@@ -49,7 +93,7 @@ func wantLevelOutcome(t *testing.T, level ConformanceEnforcement, env *inProcess
 // nothing.
 func wantLegLevelOutcome(t *testing.T, leg string, level ConformanceEnforcement, env *inProcessExchange, rec *httptest.ResponseRecorder, findings []ConformanceFinding, rule string, status int, msg string) {
 	t.Helper()
-	if level == EnforcementStrict {
+	if refusesAt(level, rule) {
 		refusedBeforeTheNetwork(t, env, rec, status, msg)
 	} else if rec.Code != http.StatusOK || env.routeHitCount() != 1 {
 		t.Fatalf("at %s the request must be carried: answer %d %s, network hits %d", level, rec.Code, rec.Body.String(), env.routeHitCount())
@@ -66,6 +110,11 @@ func wantLegLevelOutcome(t *testing.T, leg string, level ConformanceEnforcement,
 	case EnforcementObserve:
 		if len(findings) == 0 || findings[0].Rule != rule || findings[0].Decision != "relayed" || findings[0].LegType != leg {
 			t.Fatalf("at observe want a relayed %s finding on %s, got %+v", rule, leg, findings)
+		}
+	case EnforcementStructural:
+		wantContentFinding(t, level, findings, rule)
+		if !refusesAt(level, rule) && findings[0].LegType != leg {
+			t.Fatalf("at structural want the finding on %s, got %+v", leg, findings)
 		}
 	case EnforcementStrict:
 		if len(findings) == 0 || findings[0].Rule != rule || findings[0].Decision != "refused" {
@@ -99,7 +148,7 @@ func TestLevelCRDIngress_KeptPrefetchForAnotherPatient(t *testing.T) {
 		t.Run(level.String(), func(t *testing.T) {
 			env, rec, findings := levelIngressRow(t, newPrefetchSoR(), level, ehrRequest(supported+`,"serviceHistory":`+value))
 			wantLevelOutcome(t, level, env, rec, findings, RulePatientMixed, http.StatusForbidden, "prefetch serviceHistory refused")
-			if level != EnforcementStrict {
+			if !refusesAt(level, RulePatientMixed) {
 				if got, _ := valueOf(t, sentRequest(t, env), "prefetch", "serviceHistory"); got != value {
 					t.Fatalf("the EHR's value must be carried exactly, got %s", got)
 				}
@@ -131,6 +180,9 @@ func TestLevelCRDIngress_DraftOrderWithoutSubject(t *testing.T) {
 	}
 }
 
+// The fill rows below run with the participant opted in to enrichment
+// (levelFillRow); without it nothing is filled (TestLevelCRDIngress_DefaultFillsNothing).
+//
 // A prefetch value the system of record cannot supply (it names the patient
 // by another id): strict refuses; below strict that value is left out and the
 // request is carried with the EHR's own coverage (only the callback is
@@ -139,12 +191,12 @@ func TestLevelCRDIngress_FillFailsCarriesAsSent(t *testing.T) {
 	for _, level := range allLevels {
 		t.Run(level.String(), func(t *testing.T) {
 			s := namedDifferently(t)
-			env, rec, findings := levelIngressRow(t, s, level, ehrRequest(`"coverage":`+ehrCoverage))
+			env, rec, findings := levelFillRow(t, s, level, ehrRequest(`"coverage":`+ehrCoverage))
 			wantLevelOutcome(t, level, env, rec, findings, RulePrefetchFill, http.StatusUnprocessableEntity, patientNamedDifferently)
-			if level == EnforcementStrict {
+			if refusesAt(level, RulePrefetchFill) {
 				return
 			}
-			if level == EnforcementObserve {
+			if level == EnforcementObserve || level == EnforcementStructural {
 				wantRoutedCorrelation(t, env, findings[0])
 			}
 			sent := sentRequest(t, env)
@@ -181,6 +233,7 @@ func TestLevelCRDIngress_FillFindingOnlyOnceRouted(t *testing.T) {
 	env := newInProcessExchange(t)
 	env.originator.cfg.SoR = namedDifferently(t).sor()
 	env.originator.cfg.ConformanceEnforcement = EnforcementObserve
+	env.originator.cfg.EnrichNativeRequests = true
 	declareRecipientVersions(t, env, []string{"pa.pas@2.0"})
 	var findings []ConformanceFinding
 	env.originator.cfg.Observer = func(e ObserverEvent) {
@@ -209,9 +262,9 @@ func TestLevelCRDIngress_PatientFillFailsCoverageStillFills(t *testing.T) {
 			delete(s.reads, "Patient/"+prefetchSoRID)
 			page := searchPage(sorCoverage("cov-1", "00001"))
 			s.answer(t, "Coverage", page)
-			env, rec, findings := levelIngressRow(t, s, level, ehrRequest(""))
+			env, rec, findings := levelFillRow(t, s, level, ehrRequest(""))
 			wantLevelOutcome(t, level, env, rec, findings, RulePrefetchFill, http.StatusUnprocessableEntity, "patient not found in system of record")
-			if level == EnforcementStrict {
+			if refusesAt(level, RulePrefetchFill) {
 				return
 			}
 			sent := sentRequest(t, env)
@@ -236,12 +289,12 @@ func TestLevelCRDIngress_PatientUnnamedRequestCarriesCoverage(t *testing.T) {
 		t.Run(level.String(), func(t *testing.T) {
 			s := newPrefetchSoR()
 			s.refErr = sorErr
-			env, rec, findings := levelIngressRow(t, s, level, ehrRequest(`"coverage":`+ehrCoverage))
+			env, rec, findings := levelFillRow(t, s, level, ehrRequest(`"coverage":`+ehrCoverage))
 			wantLevelOutcome(t, level, env, rec, findings, RulePrefetchFill, wantStatus, wantMsg)
-			if level == EnforcementObserve && findings[0].Verdict != "unavailable" {
+			if (level == EnforcementObserve || level == EnforcementStructural) && findings[0].Verdict != "unavailable" {
 				t.Fatalf("the check could not run: want an unavailable finding, got %+v", findings[0])
 			}
-			if level == EnforcementStrict {
+			if refusesAt(level, RulePrefetchFill) {
 				return
 			}
 			sent := sentRequest(t, env)
@@ -288,7 +341,7 @@ func TestLevelCRDIngress_CoverageObtainFailureRefusesAtEveryLevel(t *testing.T) 
 	for name, row := range rows {
 		for _, level := range allLevels {
 			t.Run(name+"/"+level.String(), func(t *testing.T) {
-				env, rec, findings := levelIngressRow(t, row.sor(t), level, row.body)
+				env, rec, findings := levelFillRow(t, row.sor(t), level, row.body)
 				refusedBeforeTheNetwork(t, env, rec, row.status, row.msg)
 				if len(findings) != 0 {
 					t.Fatalf("a routing refusal records no content finding, got %+v", findings)
@@ -302,7 +355,7 @@ func TestLevelCRDIngress_CoverageObtainFailureRefusesAtEveryLevel(t *testing.T) 
 func TestLevelCRDIngress_FillSucceedsAtEveryLevel(t *testing.T) {
 	for _, level := range allLevels {
 		t.Run(level.String(), func(t *testing.T) {
-			env, rec, _ := levelIngressRow(t, newPrefetchSoR(), level, ehrRequest(`"coverage":`+ehrCoverage))
+			env, rec, _ := levelFillRow(t, newPrefetchSoR(), level, ehrRequest(`"coverage":`+ehrCoverage))
 			if rec.Code != http.StatusOK {
 				t.Fatalf("answer %d %s", rec.Code, rec.Body.String())
 			}
@@ -320,7 +373,7 @@ func TestLevelCRDIngress_FillFenceRefusesAtEveryLevel(t *testing.T) {
 		t.Run(level.String(), func(t *testing.T) {
 			s := newPrefetchSoR()
 			s.answer(t, "ServiceRequest", searchPage(sorRequest("h1", "Patient/"+prefetchSoRID), sorRequest("h2", "Patient/other")))
-			env, rec, _ := levelIngressRow(t, s, level, ehrRequest(supported))
+			env, rec, _ := levelFillRow(t, s, level, ehrRequest(supported))
 			refusedBeforeTheNetwork(t, env, rec, http.StatusBadGateway, fillFencedOtherPatient)
 		})
 	}
@@ -360,10 +413,10 @@ func TestLevelCRDIngress_ValueOfWrongTypeOffTheSubjectPath(t *testing.T) {
 			t.Run(name+"/"+level.String(), func(t *testing.T) {
 				env, rec, findings := crdIngressWithFindings(t, level, body)
 				wantLevelOutcome(t, level, env, rec, findings, RuleRequestShape, http.StatusBadRequest, "parse cds request failed")
-				if level == EnforcementObserve && len(findings) != 1 {
+				if (level == EnforcementObserve || level == EnforcementStructural) && len(findings) != 1 {
 					t.Fatalf("one defect is recorded once, got %+v", findings)
 				}
-				if level != EnforcementStrict && !bytes.Contains(sentRequest(t, env), []byte(row.new)) {
+				if !refusesAt(level, RuleRequestShape) && !bytes.Contains(sentRequest(t, env), []byte(row.new)) {
 					t.Fatalf("the value must be carried as sent:\n%s", sentRequest(t, env))
 				}
 			})

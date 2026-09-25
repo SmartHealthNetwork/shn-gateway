@@ -89,15 +89,15 @@ func wantAnswerLevelOutcome(t *testing.T, leg string, level ConformanceEnforceme
 	for _, f := range ev.findings {
 		got = append(got, f.Rule+"/"+f.Decision)
 	}
-	if level == EnforcementStrict {
+	if refusesAt(level, rule) {
 		if rec.Code != status || !strings.Contains(rec.Body.String(), msg) {
 			t.Fatalf("answer %d %s, want %d %q", rec.Code, rec.Body.String(), status, msg)
 		}
 		if len(ev.findings) == 0 || ev.findings[0].Rule != rule || ev.findings[0].Decision != "refused" {
-			t.Fatalf("at strict want a refused %s finding, got %v", rule, got)
+			t.Fatalf("at %s want a refused %s finding, got %v", level, rule, got)
 		}
 		if o := lastLegOutcome(t, env.originator); o != "error" {
-			t.Fatalf("at strict the leg is recorded error, got %q", o)
+			t.Fatalf("at %s the leg is recorded error, got %q", level, o)
 		}
 		if len(ev.skipped) != 0 {
 			t.Fatalf("a refused answer skips nothing, got %+v", ev.skipped)
@@ -112,9 +112,9 @@ func wantAnswerLevelOutcome(t *testing.T, leg string, level ConformanceEnforceme
 		if len(ev.findings) != 0 {
 			t.Fatalf("at none nothing is recorded, got %v", got)
 		}
-	case EnforcementObserve:
+	case EnforcementObserve, EnforcementStructural:
 		if len(ev.findings) != 1 || ev.findings[0].Rule != rule || ev.findings[0].Decision != "relayed" || ev.findings[0].LegType != leg || ev.findings[0].Whose != "peer" {
-			t.Fatalf("at observe want one relayed %s finding on %s from the peer, got %+v", rule, leg, ev.findings)
+			t.Fatalf("at %s want one relayed %s finding on %s from the peer, got %+v", level, rule, leg, ev.findings)
 		}
 	}
 	if o := lastLegOutcome(t, env.originator); o != "answered" {
@@ -156,7 +156,7 @@ func TestLevelPASIngress_AmendmentWithWrongTypedContentPicksTheUpdateLeg(t *test
 			}
 			legs := exs[len(exs)-1].Legs
 			want := "pas-claim-update"
-			if level == EnforcementStrict {
+			if refusesAt(level, RuleRequestShape) {
 				want = "pas-claim"
 			}
 			if got := legs[len(legs)-1].Type; got != want {
@@ -179,7 +179,7 @@ func TestLevelPASIngress_MissingOrder(t *testing.T) {
 		t.Run(level.String(), func(t *testing.T) {
 			env, rec, ev := levelPASRow(t, level, body, levelPASPayerAnswer)
 			wantLegLevelOutcome(t, "pas-claim", level, env, rec, ev.findings, RuleRequestShape, http.StatusBadRequest, "PAS bundle missing order (ServiceRequest or DeviceRequest)")
-			if level != EnforcementStrict {
+			if !refusesAt(level, RuleRequestShape) {
 				wantCarriedExactly(t, env, body)
 			}
 		})
@@ -194,7 +194,7 @@ func TestLevelPASIngress_CoverageWithoutBeneficiary(t *testing.T) {
 		t.Run(level.String(), func(t *testing.T) {
 			env, rec, ev := levelPASRow(t, level, body, levelPASPayerAnswer)
 			wantLegLevelOutcome(t, "pas-claim", level, env, rec, ev.findings, RuleRequestShape, http.StatusBadRequest, "PAS bundle missing Coverage.beneficiary")
-			if level != EnforcementStrict {
+			if !refusesAt(level, RuleRequestShape) {
 				wantCarriedExactly(t, env, body)
 			}
 		})
@@ -218,7 +218,7 @@ func TestLevelPASIngress_AnotherPatient(t *testing.T) {
 			t.Run(name+"/"+level.String(), func(t *testing.T) {
 				env, rec, ev := levelPASRow(t, level, body, levelPASPayerAnswer)
 				wantLegLevelOutcome(t, "pas-claim", level, env, rec, ev.findings, RulePatientMixed, http.StatusForbidden, "inconsistent patient in PAS bundle")
-				if level != EnforcementStrict {
+				if !refusesAt(level, RulePatientMixed) {
 					wantCarriedExactly(t, env, body)
 				}
 			})
@@ -233,7 +233,7 @@ func TestLevelPASIngress_QRWithoutSubject(t *testing.T) {
 		t.Run(level.String(), func(t *testing.T) {
 			env, rec, ev := levelPASRow(t, level, body, levelPASPayerAnswer)
 			wantLegLevelOutcome(t, "pas-claim", level, env, rec, ev.findings, RulePatientMixed, http.StatusForbidden, "PAS bundle QuestionnaireResponse missing subject")
-			if level != EnforcementStrict {
+			if !refusesAt(level, RulePatientMixed) {
 				wantCarriedExactly(t, env, body)
 			}
 		})
@@ -251,7 +251,7 @@ func TestLevelPASIngress_UnattestedItem(t *testing.T) {
 		t.Run(level.String(), func(t *testing.T) {
 			env, rec, ev := levelPASRow(t, level, body, levelPASPayerAnswer)
 			wantLegLevelOutcome(t, "pas-claim", level, env, rec, ev.findings, RuleAttestation, http.StatusForbidden, "is clinician-sourced (FR-17)")
-			if level != EnforcementStrict {
+			if !refusesAt(level, RuleAttestation) {
 				wantCarriedExactly(t, env, body)
 			}
 		})

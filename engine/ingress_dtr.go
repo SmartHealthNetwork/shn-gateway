@@ -1,9 +1,9 @@
 // ingress_dtr.go — the DTR $questionnaire-package ingress: the EHR's own
-// operation input (its Parameters) is carried to the payer exactly, or with
-// the registered edits that add, from this participant's system of record,
-// the patient's Coverage when the request carries none and — under the seam
-// that carries members a gateway does not hold — the patient's own record
-// when the request carries no Patient. The ingress
+// operation input (its Parameters) is carried to the payer exactly, or, when
+// the participant opts in to enrichment, with the registered edits that add,
+// from its system of record, the patient's Coverage when the request carries
+// none and the patient's own record when the request carries no Patient. The
+// ingress
 // binds every resource the request carries to one patient, routes by every
 // coverage, and names the operation in the request frame. It does not invoke
 // the Populator: the EHR's own DTR application populates.
@@ -42,16 +42,17 @@ const dtrPackageContentType = "application/fhir+json"
 // dtrIngressRequest is an EHR's $questionnaire-package request ready to leave
 // the provider.
 type dtrIngressRequest struct {
-	// request is the EHR's Parameters, exact or with the patient's Coverage
-	// (relay.EditDTRCoverageObtain) and, only under the enrichment seam
-	// (Config.enrichDTRPatient), the provider's own Patient record
-	// (relay.EditDTRPatientObtain) appended.
+	// request is the EHR's Parameters: exact, or, only when the participant
+	// opts in to enrichment (Config.EnrichNativeRequests), with the patient's
+	// Coverage (relay.EditDTRCoverageObtain) and the provider's own Patient
+	// record (relay.EditDTRPatientObtain) appended.
 	request relay.Payload
 	// member is the patient every resource names; pci is the network's
 	// identifier for that patient.
 	member, pci string
-	// coverages are the Coverage resources the request carries onward, in
-	// order: the EHR's, or the one obtained.
+	// coverages are the Coverage resources the request is routed by, in
+	// order: the EHR's, or the one obtained (carried onward only under
+	// enrichment).
 	coverages [][]byte
 	// resources are every resource parameter the EHR sent (top level and
 	// parts), for payor lookups.
@@ -85,12 +86,13 @@ type dtrPackageParam struct {
 //     not bind to that patient by its binding path (403) are the payload's
 //     own consistency (RulePatientMixed): refused at strict, recorded and
 //     carried at observe, carried at none;
-//   - a request carrying no coverage parameter gains one: the patient's
-//     Coverage from the system of record's Coverage search (the
-//     dtr-coverage-obtain edit), recorded as a PrefetchObtainedEvent. It is
-//     refused when the system names the patient by another id (422), holds no
-//     Coverage (422), holds Coverages naming different payers (422), cannot
-//     search (422) or is unavailable (503); a Coverage about another patient
+//   - a request carrying no coverage parameter is routed by the patient's
+//     Coverage from the system of record's Coverage search, recorded as a
+//     PrefetchObtainedEvent, and gains it (the dtr-coverage-obtain edit) only
+//     under enrichment. It is refused when the system holds no Coverage
+//     (422), holds Coverages naming different payers (422), cannot search
+//     (422) or is unavailable (503), and, under enrichment, when the system
+//     names the patient by another id (422); a Coverage about another patient
 //     is a 502. The request is routed by that Coverage, so these refuse at
 //     every level.
 //
@@ -287,16 +289,21 @@ func (g *Gateway) prepareDTRPackageRequest(ctx context.Context, raw []byte) (dtr
 		// therefore routing and refuses at every level, not a fill carried as
 		// sent below strict (RulePrefetchFill), which would only turn the
 		// system of record's own answer into "no coverage".
+		// It is appended to the request (E-04) only when the participant opts in
+		// to enrichment (Config.EnrichNativeRequests); without it the request is
+		// carried as sent and the Coverage is only routed by.
 		coverage, status, msg := g.obtainDTRCoverage(ctx, &out, fence)
 		if status != 0 {
 			return out, status, msg
 		}
-		changes = append(changes, relay.Change{Edit: relay.EditDTRCoverageObtain, Ops: []relay.Op{doc.AppendElement(paramArr, element("coverage", coverage))}})
+		if g.cfg.EnrichNativeRequests {
+			changes = append(changes, relay.Change{Edit: relay.EditDTRCoverageObtain, Ops: []relay.Op{doc.AppendElement(paramArr, element("coverage", coverage))}})
+		}
 		out.coverages = [][]byte{coverage}
 	}
-	// E-05 is an enrichment: off on native traffic until the participant opts in
-	// (Config.enrichDTRPatient, a seam tracked with the ENRICH_NATIVE_REQUESTS opt-in).
-	if g.cfg.enrichDTRPatient && !carriesPatient(raw, out.member) {
+	// E-05 is an enrichment: off on native traffic unless the participant opts in
+	// (Config.EnrichNativeRequests).
+	if g.cfg.EnrichNativeRequests && !carriesPatient(raw, out.member) {
 		patient, status, msg := g.obtainDTRPatient(ctx, out.member, fence)
 		// The fill fence refuses at every level: SHN never inserts another
 		// patient's record. Any other failure to fill refuses at strict
@@ -340,7 +347,7 @@ func (g *Gateway) prepareDTRPackageRequest(ctx context.Context, raw []byte) (dtr
 }
 
 // obtainDTRPatient reads the Patient a request carrying none is sent with
-// under Config.enrichDTRPatient: the system of record's own record for
+// under Config.EnrichNativeRequests: the system of record's own record for
 // the bound patient, by the reference the system names it by, recorded as a
 // PrefetchObtainedEvent (key patient, operation questionnaire-package). The
 // payer's side, which may not hold the member, derives the subject from
@@ -436,8 +443,15 @@ func (g *Gateway) obtainDTRCoverage(ctx context.Context, out *dtrIngressRequest,
 	switch {
 	case sorID == "":
 		return nil, http.StatusUnprocessableEntity, "patient not found in system of record"
-	case sorID != out.member:
+	case sorID != out.member && g.cfg.EnrichNativeRequests:
+		// An appended Coverage would name the patient by an id the request
+		// does not use.
 		return nil, http.StatusUnprocessableEntity, dtrCoverageNamedDifferently
+	case sorID != out.member:
+		// Read only to route by, never appended: the system's own id for the
+		// patient serves. In that system Patient/<member> is another patient
+		// (or none), so the Coverage is fenced to the system's id alone.
+		fence = newPatientFence(shnsdk.MemberSystem, out.member, nil, sorID)
 	}
 	s := runSoRSearch(ctx, g.cfg.SoR, "Coverage", sorID, false)
 	g.recordPrefetch(leg, prefetchObtained{Key: "coverage", Operation: shnsdk.FrameOperationQuestionnairePackage,

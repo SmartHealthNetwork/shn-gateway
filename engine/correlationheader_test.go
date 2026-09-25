@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -144,5 +145,92 @@ func TestIngressCorrelationHeader_ClaimCorrelationWins(t *testing.T) {
 	}
 	if got := w.Header().Get(CorrelationHeader); got != "claim-corr-77" {
 		t.Errorf("X-Correlation-Id=%q, want the Claim's own claim-corr-77", got)
+	}
+}
+
+// The caller's X-Correlation-Id is its trace value, never the leg's id: two
+// calls under one trace value are sent under two freshly minted leg ids (so a
+// reused trace id or a retry is never refused for it), and each answer returns
+// the caller's value with the leg's id beside it.
+func TestIngressCorrelation_CallerTraceIsNeverTheLegID(t *testing.T) {
+	env := newInProcessExchange(t)
+	n := 0
+	env.originator.cfg.CorrelationGen = func() string { n++; return fmt.Sprintf("leg-%04d", n) }
+	h := env.originator.withIngressCorrelation(env.originator.handleCRDIngress)
+	var legs []string
+	for range 2 {
+		r := env.crdIngressRequest(t)
+		r.Header.Set(CorrelationHeader, "caller-trace-1")
+		rec := httptest.NewRecorder()
+		h(rec, r)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+		}
+		if got := rec.Header().Get(CorrelationHeader); got != "caller-trace-1" {
+			t.Fatalf("X-Correlation-Id=%q, want the caller's own value", got)
+		}
+		leg := env.lastCorrelation()
+		if leg == "caller-trace-1" || !strings.HasPrefix(leg, "leg-") {
+			t.Fatalf("the leg was sent under %q: the caller's trace value must not be the leg's id", leg)
+		}
+		if got := rec.Header().Get(LegIDHeader); got != leg {
+			t.Fatalf("X-SHN-Leg-Id=%q, want the leg's id %q", got, leg)
+		}
+		legs = append(legs, leg)
+	}
+	if legs[0] == legs[1] {
+		t.Fatalf("two calls under one trace value shared leg id %q", legs[0])
+	}
+}
+
+// A PAS submit's Claim correlation (urn:shn:correlation) is the payer's key for
+// that authorization: the leg is sent under it, whatever trace value the caller
+// sent.
+func TestIngressCorrelation_ClaimCorrelationIsTheLegID(t *testing.T) {
+	env := newInProcessExchange(t)
+	env.originator.cfg.CorrelationGen = func() string { return "leg-corr-minted" }
+	claim := `"identifier":[{"system":"urn:shn:correlation","value":"claim-corr-88"}],`
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/Claim/$submit", strings.NewReader(pasIngressBundle("00001", claim)))
+	r.Header.Set(CorrelationHeader, "caller-header-2")
+	env.originator.withIngressCorrelation(env.originator.handlePASIngress)(w, r)
+	if env.routeHitCount() == 0 {
+		t.Fatalf("status=%d body=%s: the submit must be sent", w.Code, w.Body.String())
+	}
+	if got := env.lastCorrelation(); got != "claim-corr-88" {
+		t.Fatalf("the leg was sent under %q, want the Claim's claim-corr-88", got)
+	}
+	if got := w.Header().Get(LegIDHeader); got != "claim-corr-88" {
+		t.Fatalf("X-SHN-Leg-Id=%q", got)
+	}
+}
+
+// A caller that uses its own Claim identifier as its X-Correlation-Id (any
+// identifier system) keeps it as the payer's key, so an amend that names that
+// identifier in related[] binds as before; a trace value that is not one of the
+// Claim's identifiers never becomes the key.
+func TestIngressCorrelation_TraceThatIsTheClaimsIdentifierIsTheLegID(t *testing.T) {
+	for trace, want := range map[string]string{
+		"CLM-2026-0001": "CLM-2026-0001",   // the Claim's own identifier
+		"unrelated-t-1": "leg-corr-minted", // just a trace value
+	} {
+		t.Run(trace, func(t *testing.T) {
+			env := newInProcessExchange(t)
+			env.originator.cfg.CorrelationGen = func() string { return "leg-corr-minted" }
+			claim := `"identifier":[{"system":"http://example.org/claims","value":"CLM-2026-0001"}],`
+			w := httptest.NewRecorder()
+			r := httptest.NewRequest(http.MethodPost, "/Claim/$submit", strings.NewReader(pasIngressBundle("00001", claim)))
+			r.Header.Set(CorrelationHeader, trace)
+			env.originator.withIngressCorrelation(env.originator.handlePASIngress)(w, r)
+			if env.routeHitCount() == 0 {
+				t.Fatalf("status=%d body=%s: the submit must be sent", w.Code, w.Body.String())
+			}
+			if got := env.lastCorrelation(); got != want {
+				t.Fatalf("leg sent under %q, want %q", got, want)
+			}
+			if got := w.Header().Get(CorrelationHeader); got != trace {
+				t.Fatalf("X-Correlation-Id=%q, want the caller's %q", got, trace)
+			}
+		})
 	}
 }

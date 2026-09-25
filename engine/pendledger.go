@@ -70,10 +70,10 @@ const (
 	PendNoLookupKeysEvent = "pend.no-lookup-keys"
 )
 
-// PendRefusal says why a claim could not be bound for an amendment. A payer gateway
-// answers `409 claim already decided; amendment of a decided authorization is not
-// supported` for PendRefusalDecided and its own answers for the others, so the
-// reasons must stay distinguishable from one another.
+// PendRefusal says why an amendment could not bind a claim. The ledger records
+// and never gates: the amendment reaches the payer either way, and the reason is
+// noted for the operator (pend.amendment-unbound:<reason>), so the reasons stay
+// distinguishable from one another.
 type PendRefusal string
 
 const (
@@ -286,7 +286,9 @@ type PendRecord struct {
 	DecidedAt time.Time
 	// LastTransition is the store's own clock at the last ledger WRITE for this
 	// authorization — a pend, a re-pend or a decision, whether or not it changed
-	// the state. Retention counts from here, so an authorization the payer is still
+	// the state — except a re-pend that leaves a live amendment hold alone, which
+	// keeps the hold's time so a stranded hold lapses (PendInProgressStale).
+	// Retention counts from here, so an authorization the payer is still
 	// speaking about stays answerable, and a payer's own clock can neither shorten
 	// nor extend the period.
 	LastTransition time.Time
@@ -330,10 +332,10 @@ type PendTransition struct {
 // it with LedgerOf.
 //
 // Every write returns the TRANSITION it performed, and the amendment check returns
-// the REASON it refused, because the rules this ledger implements are stated in
+// the REASON it did not bind, because the rules this ledger implements are stated in
 // terms of both: which of the decision events a write raised, and whether an
-// amendment was refused because the authorization was already decided (a 409 that
-// says so) or because there was no such pended authorization at all. A caller
+// amendment did not bind because the authorization was already decided, held by
+// another amendment, or not pended here at all. A caller
 // cannot re-derive either by reading the row back — another leg may have moved it
 // in between — so the write reports it.
 type PendLedger interface {
@@ -406,42 +408,70 @@ func FallbackDecision(s Store, subjectPCI, corrID string) error {
 // way. The one place arrival order decides anything is between two decisions the
 // payer dated the SAME instant, where there is nothing else to go on.
 
-// PendBegin is the Begin transition: pended → in_progress, and a refusal with its
-// reason from anywhere else.
-func PendBegin(cur PendState, found bool) (next PendState, ok bool, why PendRefusal) {
+// PendInProgressStale is how long an amendment holds an authorization in
+// progress. No leg lasts nearly this long (the Hub's forward and a requester's
+// leg each wait 30 seconds), so a row still held after it was stranded: the
+// gateway serving the amendment stopped, or lost its store, before the release.
+// Past it, the hold lapses: a re-pend moves the row again and a new amendment
+// binds it. A re-pend never refreshes a live hold, so a stranded row ages out.
+const PendInProgressStale = 5 * time.Minute
+
+// inProgressHeld reports whether cur is an amendment's live hold at now.
+func inProgressHeld(cur PendRecord, now time.Time) bool {
+	return cur.State == PendStateInProgress && now.Sub(cur.LastTransition) < PendInProgressStale
+}
+
+// PendBegin is the Begin transition: pended → in_progress, a lapsed hold
+// (PendInProgressStale) → in_progress, and a refusal with its reason from
+// anywhere else.
+func PendBegin(cur PendRecord, found bool, now time.Time) (next PendState, ok bool, why PendRefusal) {
 	if !found {
 		return "", false, PendRefusalNotPended
 	}
-	switch cur {
+	switch cur.State {
 	case PendStatePended:
 		return PendStateInProgress, true, PendRefusalNone
 	case PendStateInProgress:
-		return cur, false, PendRefusalInProgress
+		if inProgressHeld(cur, now) {
+			return cur.State, false, PendRefusalInProgress
+		}
+		return PendStateInProgress, true, PendRefusalNone
 	case PendStateDecided:
-		return cur, false, PendRefusalDecided
+		return cur.State, false, PendRefusalDecided
 	}
 	// An unknown state is not a pended claim. A backend never writes one; this keeps
 	// the function total rather than trusting that.
-	return cur, false, PendRefusalNotPended
+	return cur.State, false, PendRefusalNotPended
 }
 
-// PendRePend is RecordPendedKeyed's state effect.
+// PendRePend is RecordPendedKeyed's state effect. It sets the row's
+// LastTransition to now, except on a live amendment hold, which it leaves as it
+// is.
 //
 // On a decided claim the payer's later word wins and its earlier word does not: the
 // row returns to pended only when the payer dated the re-pend after the decision,
 // and otherwise the decision stands. Either way the requester receives the payer's
 // bytes — that is the leg's job, not the ledger's.
-func PendRePend(cur PendRecord, found bool, created time.Time) (next PendRecord, tr PendTransition) {
+//
+// A re-pend never reopens an amendment in progress: the backend records its keys,
+// but only that amendment's own outcome (its release, its re-pend, or the payer's
+// decision) moves the row. A resent submission the payer pended again must not let
+// a second amendment bind while the first is still with the payer. A hold past
+// PendInProgressStale has lapsed and is re-pended like a pended row.
+func PendRePend(cur PendRecord, found bool, created, now time.Time) (next PendRecord, tr PendTransition) {
 	if !found {
-		return PendRecord{State: PendStatePended}, PendTransition{To: PendStatePended, Changed: true}
+		return PendRecord{State: PendStatePended, LastTransition: now}, PendTransition{To: PendStatePended, Changed: true}
 	}
+	if inProgressHeld(cur, now) {
+		return cur, PendTransition{From: PendStateInProgress, To: PendStateInProgress}
+	}
+	next = cur
+	next.LastTransition = now
 	if cur.State != PendStateDecided {
-		next = cur
 		next.State = PendStatePended
 		return next, PendTransition{From: cur.State, To: PendStatePended, Changed: cur.State != PendStatePended}
 	}
 	if created.After(cur.DecidedAt) {
-		next = cur
 		next.State = PendStatePended
 		// The decision is superseded, so it is no longer the row's answer: a later
 		// re-pend must be judged against the NEXT decision, not against this one.
@@ -449,7 +479,7 @@ func PendRePend(cur PendRecord, found bool, created time.Time) (next PendRecord,
 		return next, PendTransition{From: PendStateDecided, To: PendStatePended, Event: DecisionSupersededEvent, Changed: true}
 	}
 	// Not later (earlier, the same instant, or undated): the decision stands.
-	return cur, PendTransition{From: PendStateDecided, To: PendStateDecided, Event: DecisionStaleAnswerEvent}
+	return next, PendTransition{From: PendStateDecided, To: PendStateDecided, Event: DecisionStaleAnswerEvent}
 }
 
 // PendDecide is RecordDecision's state effect. decided is absorbing: a decision for

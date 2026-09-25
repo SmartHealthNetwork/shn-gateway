@@ -316,17 +316,23 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 		}
 	}()
 	if err != nil {
-		g.responderFailed(w, "pas-claim", err)
+		g.responderFailed(w, r, legPASClaim, env, tok, answerTok, err)
 		return
 	}
 	if result.Status != 0 {
+		// This gateway's own refusal (no body of the payer's) made after the
+		// payer's system answered says so; the payer's own answer is relayed as
+		// it is.
+		if result.Response.Ownership() == 0 && pasLeg.afterPayerAnswered() {
+			result.Message = withPayerAnsweredNote(result.Message)
+		}
 		g.respondLegError(w, r, "payer-coverage", "pas-response", "pas-claim",
 			env.Metadata.CorrelationID, result, tok.Subject, env.Metadata.Sender, "", answerTok)
 		return
 	}
 	responseFHIR, err := g.admit(result.Response, answerKey("pas-claim", relay.OutcomeAnswered))
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": errOwnershipFault})
+		g.refuseAfterPayerAnswered(w, r, pasLeg, legPASClaim, env, tok, answerTok, http.StatusInternalServerError, errOwnershipFault, nil)
 		return
 	}
 	// The direction flips here: everything validated below is THIS participant's own
@@ -342,7 +348,7 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 	// payer sent it and nothing is written from it (payerAnswerRead).
 	read := g.newPayerAnswerRead(r.Context(), result, responseFHIR, pasLeg.unreadRule())
 	if _, bad := validateNativePASResponse(responseFHIR); bad.Status != 0 && read.refusesUnreadable(RuleAnswerShape) {
-		g.refuseInbound(w, r, legPASClaim, env, tok, answerTok, bad.Status, bad.Message, nil)
+		g.refuseAfterPayerAnswered(w, r, pasLeg, legPASClaim, env, tok, answerTok, bad.Status, bad.Message, nil)
 		return
 	}
 	// (C) outbound fence — two-predicate, namespace-aware: member-fence
@@ -352,7 +358,7 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 	// fenced UNCONDITIONALLY (always built from the bound member). Re-adds the (C) fence the minimized
 	// pas-claim leg carries, before that leg is deleted (OWD-G6 prove-first).
 	if status, msg := g.fenceResponseSubjectWith("pas-claim", boundPatientRef, env.Metadata.CorrelationID, result, read.refuses); status != 0 {
-		g.refuseInbound(w, r, legPASClaim, env, tok, answerTok, status, msg, nil)
+		g.refuseAfterPayerAnswered(w, r, pasLeg, legPASClaim, env, tok, answerTok, status, msg, nil)
 		return
 	}
 	// Egress-$validate the RESPONSE iff !ResponseRelayed() (R-8: a verbatim foreign relay carries Da
@@ -362,7 +368,7 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 	// $validated unconditionally in the loop below.
 	status, msg = g.validatePASResult(r.Context(), result, answerTok, "pas-claim")
 	if status != 0 {
-		g.refuseInbound(w, r, legPASClaim, env, tok, answerTok, status, msg, nil)
+		g.refuseAfterPayerAnswered(w, r, pasLeg, legPASClaim, env, tok, answerTok, status, msg, nil)
 		return
 	}
 	// Egress-$validate the SHN-PRODUCED EOB side-effects before the Store write (FR-36). The relay
@@ -380,7 +386,7 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 	for _, b := range result.SideEffectFHIR {
 		status, msg, invalid := g.validateFHIRRecorded(r.Context(), b, "egress", "")
 		if status != 0 {
-			g.refuseInbound(w, r, legPASClaim, env, tok, answerTok, status, msg, nil)
+			g.refuseAfterPayerAnswered(w, r, pasLeg, legPASClaim, env, tok, answerTok, status, msg, nil)
 			return
 		}
 		if invalid {
@@ -405,26 +411,27 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
-	eobOwnedElsewhere := false
+	eobOwnedElsewhere, writeFailed := false, false
 	// An answer relayed unread writes nothing: the Commit is not run, and the
 	// deferred Rollback releases whatever the responder acquired, exactly as
 	// on any other exit that does not commit.
 	if read.read() && result.Commit != nil {
 		if err := result.Commit(); err != nil {
-			if !errors.Is(err, ErrEOBSubjectMismatch) {
-				// Store-write failure → 502 (parity with the minimized pas-claim RecordEOB/RecordPended 502).
-				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "holder write failed"})
-				return
+			// The payer has already answered, and the relay is not the ledger's
+			// to withhold: what could not be recorded is reported to the
+			// operator, and the payer's answer still reaches the requester.
+			if errors.Is(err, ErrEOBSubjectMismatch) {
+				// Another patient's EOB landed under this id after the
+				// pre-forward check: the decision is not recorded.
+				eobOwnedElsewhere = true
+			} else {
+				writeFailed = true
+				g.payerLocalWriteFailed("pas-claim", env.Metadata.CorrelationID, err)
 			}
-			// Another patient's EOB landed under this id after the pre-forward
-			// check. The payer has already answered, and the relay is not the
-			// ledger's to withhold: the decision is not recorded, the operator is
-			// told, and the payer's answer still reaches the requester.
-			eobOwnedElsewhere = true
 		}
 	}
-	committed = read.read()
-	if !committed {
+	committed = read.read() && !writeFailed
+	if !read.read() {
 		g.payerLocalWriteSkipped("pas-claim", env.Metadata.CorrelationID, read.unread)
 	}
 	for _, kind := range pasLeg.notes {
@@ -491,17 +498,23 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 		}
 	}()
 	if err != nil {
-		g.responderFailed(w, "pas-claim-update", err)
+		g.responderFailed(w, r, legPASClaimUpdate, env, tok, answerTok, err)
 		return
 	}
 	if result.Status != 0 {
+		// This gateway's own refusal (no body of the payer's) made after the
+		// payer's system answered says so; the payer's own answer is relayed as
+		// it is.
+		if result.Response.Ownership() == 0 && pasLeg.afterPayerAnswered() {
+			result.Message = withPayerAnsweredNote(result.Message)
+		}
 		g.respondLegError(w, r, "payer-coverage", "pas-update-response", "pas-claim-update",
 			env.Metadata.CorrelationID, result, tok.Subject, env.Metadata.Sender, "", answerTok)
 		return
 	}
 	responseFHIR, err := g.admit(result.Response, answerKey("pas-claim-update", relay.OutcomeAnswered))
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": errOwnershipFault})
+		g.refuseAfterPayerAnswered(w, r, pasLeg, legPASClaimUpdate, env, tok, answerTok, http.StatusInternalServerError, errOwnershipFault, nil)
 		return
 	}
 	// The direction flips here: everything validated below is THIS participant's own
@@ -517,7 +530,7 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 	// payer sent it and nothing is written from it (payerAnswerRead).
 	read := g.newPayerAnswerRead(r.Context(), result, responseFHIR, pasLeg.unreadRule())
 	if _, bad := validateNativePASResponse(responseFHIR); bad.Status != 0 && read.refusesUnreadable(RuleAnswerShape) {
-		g.refuseInbound(w, r, legPASClaimUpdate, env, tok, answerTok, bad.Status, bad.Message, nil)
+		g.refuseAfterPayerAnswered(w, r, pasLeg, legPASClaimUpdate, env, tok, answerTok, bad.Status, bad.Message, nil)
 		return
 	}
 	// (C) outbound fence — two-predicate, namespace-aware: member-fence
@@ -526,7 +539,7 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 	// keeps the leg symmetric with submit so the native relay (both flags set) stands the member-fence
 	// down. Re-adds the (C) fence before the minimized pas-claim-update leg is deleted (OWD-G6).
 	if status, msg := g.fenceResponseSubjectWith("pas-claim-update", boundPatientRef, env.Metadata.CorrelationID, result, read.refuses); status != 0 {
-		g.refuseInbound(w, r, legPASClaimUpdate, env, tok, answerTok, status, msg, nil)
+		g.refuseAfterPayerAnswered(w, r, pasLeg, legPASClaimUpdate, env, tok, answerTok, status, msg, nil)
 		return
 	}
 	// Egress-$validate the RESPONSE iff !ResponseRelayed() (R-8), mirror of the conformant submit
@@ -534,7 +547,7 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 	// (a relayed Response) is preserved bytes-only. Assembly is certified explicitly against PAS.
 	status, msg = g.validatePASResult(r.Context(), result, answerTok, "pas-claim-update")
 	if status != 0 {
-		g.refuseInbound(w, r, legPASClaimUpdate, env, tok, answerTok, status, msg, nil)
+		g.refuseAfterPayerAnswered(w, r, pasLeg, legPASClaimUpdate, env, tok, answerTok, status, msg, nil)
 		return
 	}
 	// Egress-$validate the SHN-PRODUCED side-effects before the Store write (FR-36). The update leg
@@ -546,7 +559,7 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 	for _, b := range result.SideEffectFHIR {
 		status, msg, invalid := g.validateFHIRRecorded(r.Context(), b, "egress", "")
 		if status != 0 {
-			g.refuseInbound(w, r, legPASClaimUpdate, env, tok, answerTok, status, msg, nil)
+			g.refuseAfterPayerAnswered(w, r, pasLeg, legPASClaimUpdate, env, tok, answerTok, status, msg, nil)
 			return
 		}
 		if invalid {
@@ -568,15 +581,18 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 	// An answer relayed unread writes nothing: the Commit is not run, and the
 	// deferred Rollback releases whatever the responder acquired, exactly as
 	// on any other exit that does not commit.
+	writeFailed := false
 	if read.read() && result.Commit != nil {
 		if err := result.Commit(); err != nil {
-			// FinalizeClaimUpdate store-write failure → 502 (parity with the minimized leg).
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "holder write failed (finalize update)"})
-			return
+			// The ledger records and never gates: the payer's answer still
+			// reaches the requester, the operator is told what was not
+			// recorded, and the deferred Rollback releases the claim.
+			writeFailed = true
+			g.payerLocalWriteFailed("pas-claim-update", env.Metadata.CorrelationID, err)
 		}
 	}
-	committed = read.read()
-	if !committed {
+	committed = read.read() && !writeFailed
+	if !read.read() {
 		g.payerLocalWriteSkipped("pas-claim-update", env.Metadata.CorrelationID, read.unread)
 	}
 	for _, kind := range pasLeg.notes {
@@ -633,6 +649,7 @@ type conformantUpdateFacts struct {
 	qrID               string   // QuestionnaireResponse.id (the QR-variant supplemental data)
 	relatedClaim       string   // Claim.related[0].claim.identifier.value (the amendment's distinguishing field, FR-21)
 	claimCorrelation   string   // Claim.identifier[].value where system=="urn:shn:correlation", or "" (Finding A: partner-supplied leg corr)
+	claimIdentifiers   []string // every Claim.identifier[].value of that same Claim
 }
 
 // parseConformantPASUpdateFacts is readConformantPASUpdateFacts refusing every
@@ -683,6 +700,8 @@ func readConformantPASUpdateFacts(bundleJSON []byte, refuses func(rule string) b
 		firstClaimCorr     string
 		sawClaim           bool
 		operativeClaimCorr string
+		firstClaimIDs      []string
+		operativeClaimIDs  []string
 		sawOperativeClaim  bool
 	)
 	for _, e := range probe.Entry {
@@ -722,19 +741,22 @@ func readConformantPASUpdateFacts(bundleJSON []byte, refuses func(rule string) b
 			// Finding A: surface the Claim's own urn:shn:correlation so handlePASIngress can key
 			// the pend on the partner-supplied identifier, enabling the submit→amend corr handoff.
 			corr := ""
+			var ids []string
 			for _, id := range c.Identifier {
-				if id.System == "urn:shn:correlation" && id.Value != "" {
+				if id.System == "urn:shn:correlation" && id.Value != "" && corr == "" {
 					corr = id.Value
-					break
+				}
+				if id.Value != "" {
+					ids = append(ids, id.Value)
 				}
 			}
 			if !sawClaim {
-				sawClaim, firstClaimCorr = true, corr
+				sawClaim, firstClaimCorr, firstClaimIDs = true, corr, ids
 			}
 			// The operative update Claim is the one carrying related[prior]; the sdk's prior-Claim
 			// entry carries none, so it can never claim this slot.
 			if len(c.Related) > 0 && !sawOperativeClaim {
-				sawOperativeClaim, operativeClaimCorr = true, corr
+				sawOperativeClaim, operativeClaimCorr, operativeClaimIDs = true, corr, ids
 				f.relatedClaim = c.Related[0].Claim.Identifier.Value
 			}
 		case "QuestionnaireResponse":
@@ -797,9 +819,9 @@ func readConformantPASUpdateFacts(bundleJSON []byte, refuses func(rule string) b
 		}
 	}
 	if sawOperativeClaim {
-		f.claimCorrelation = operativeClaimCorr
+		f.claimCorrelation, f.claimIdentifiers = operativeClaimCorr, operativeClaimIDs
 	} else {
-		f.claimCorrelation = firstClaimCorr
+		f.claimCorrelation, f.claimIdentifiers = firstClaimCorr, firstClaimIDs
 	}
 	return f, 0, ""
 }
@@ -973,4 +995,23 @@ func (a *payerAnswerRead) eobInvalid() {
 	if a.relayed && a.unread == "" {
 		a.unread = RuleEOBDecision
 	}
+}
+
+// notePayerAnswered is added to every refusal of this gateway's own on a PAS
+// submit or update once the payer's system has answered it — a failure of its
+// own, or its refusal of the payer's answer: the payer may have acted on the
+// request, so the requester checks its outcome before resending rather than
+// submitting it twice.
+const notePayerAnswered = "the payer's system received and answered this request: check its outcome before resending"
+
+func withPayerAnsweredNote(msg string) string { return msg + "; " + notePayerAnswered }
+
+// refuseAfterPayerAnswered is refuseInbound for a PAS submit or update once the
+// responder has returned. The note is added only when the payer's own system did
+// answer (an injected responder may never have contacted one).
+func (g *Gateway) refuseAfterPayerAnswered(w http.ResponseWriter, r *http.Request, pasLeg *pasLeg, leg inboundLeg, env shnsdk.Envelope, tok shnsdk.Token, answerTok string, status int, msg string, detail map[string]any) {
+	if pasLeg.afterPayerAnswered() {
+		msg = withPayerAnsweredNote(msg)
+	}
+	g.refuseInbound(w, r, leg, env, tok, answerTok, status, msg, detail)
 }

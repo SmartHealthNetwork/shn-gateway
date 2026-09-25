@@ -284,7 +284,7 @@ func (g *Gateway) handleCRDNativeInbound(w http.ResponseWriter, r *http.Request,
 	}
 	result, err := g.cfg.Responder.Handle(ctx, "crd-order-select", env.Metadata.CorrelationID, subjectPCI, reqJSON)
 	if err != nil {
-		g.responderFailed(w, "crd-order-select", err)
+		g.responderFailed(w, r, legCRDOrderSelect, env, tok, answerTok, err)
 		return
 	}
 	if result.Status != 0 {

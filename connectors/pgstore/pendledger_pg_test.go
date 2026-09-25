@@ -320,3 +320,37 @@ VALUES ($1, $2, $3, $4, $5, $6)`,
 		t.Fatalf("the database accepted a %d-byte key (max %d)", len(long), engine.MaxPendKeyBytes)
 	}
 }
+
+// TestPgPendLedger_AStrandedHoldLapses is the Postgres row for
+// engine.TestPendLedger_AStrandedHoldLapses, the keyless SQL included.
+func TestPgPendLedger_AStrandedHoldLapses(t *testing.T) {
+	now := time.Date(2027, 4, 1, 0, 0, 0, 0, time.UTC)
+	s := ledgerStore(t, func() time.Time { return now })
+	keys := engine.PendKeys{RequesterHolder: "provider-a", PreAuthRef: "PA-1"}
+	if _, err := s.RecordPendedKeyed("PCI-A", "corr-A", now, keys); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _, err := s.BeginClaimUpdateReason("PCI-A", "corr-A"); err != nil || !ok {
+		t.Fatalf("begin: %v %v", ok, err)
+	}
+	now = now.Add(engine.PendInProgressStale - time.Second)
+	if _, err := s.RecordPendedKeyed("PCI-A", "corr-A", now, keys); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordPendedClaim("PCI-A", "corr-A"); err != nil {
+		t.Fatal(err)
+	}
+	if rec, _, _ := s.PendRecordOf("PCI-A", "corr-A"); rec.State != engine.PendStateInProgress {
+		t.Fatalf("a re-pend moved a live hold: %+v", rec)
+	}
+	now = now.Add(2 * time.Second)
+	if err := s.RecordPendedClaim("PCI-A", "corr-A"); err != nil {
+		t.Fatal(err)
+	}
+	if rec, _, _ := s.PendRecordOf("PCI-A", "corr-A"); rec.State != engine.PendStatePended {
+		t.Fatalf("a lapsed hold was not re-pended: %+v", rec)
+	}
+	if ok, _, err := s.BeginClaimUpdateReason("PCI-A", "corr-A"); err != nil || !ok {
+		t.Fatalf("a new amendment could not bind after the hold lapsed: %v %v", ok, err)
+	}
+}

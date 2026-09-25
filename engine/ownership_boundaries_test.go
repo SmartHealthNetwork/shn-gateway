@@ -588,6 +588,8 @@ func probeWrapped(w probeWrapper) { _, _ = w.Write([]byte("x")) }`, nil,
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
+			// Each row parses and types its own copy of the package.
+			t.Parallel()
 			fset := token.NewFileSet()
 			files := parsePackageSources(t, fset, ".", map[string]string{"probe_extra.go": "package engine\n\n" + relayImport + "\n" + r.src + "\n"})
 			info := typedPackage(t, fset, files)

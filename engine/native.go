@@ -20,11 +20,14 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/SmartHealthNetwork/shn-gateway/connectors/smartauth"
 	"github.com/SmartHealthNetwork/shn-gateway/diagnostics"
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
@@ -47,6 +50,10 @@ type nativeResponder struct {
 	// evidence (resolvedURL) still takes precedence over either.
 	dtrBaseURL string
 	pasBaseURL string
+	// eligibilityURL is the payer's own coverage-eligibility endpoint, when it
+	// declares one (WithEligibilityURL). Empty: the payer's gateway answers
+	// eligibility from the payer's records itself.
+	eligibilityURL string
 	// crdServiceID and crdDispatchServiceID optionally name the partner's CDS service
 	// for the order-select and order-dispatch legs; empty selects the listed service
 	// whose hook is the request's hook (crdservice.go). Either way the service must be
@@ -145,6 +152,43 @@ type nativeResponder struct {
 // NativeOption configures optional nativeResponder behavior.
 type NativeOption func(*nativeResponder)
 
+// WithEligibilityURL declares the payer's own coverage-eligibility endpoint:
+// the absolute URL its system takes a POST of a CoverageEligibilityRequest on.
+// A coverage-eligibility request is then carried to it exactly and its answer
+// relayed, instead of being answered from the payer's records. Empty leaves
+// the gateway answering from the records.
+func WithEligibilityURL(eligibilityURL string) NativeOption {
+	return func(n *nativeResponder) { n.eligibilityURL = eligibilityURL }
+}
+
+// forwardsEligibility reports whether the payer declared its own eligibility
+// endpoint.
+func (n *nativeResponder) forwardsEligibility() bool { return n.eligibilityURL != "" }
+
+// forwardEligibility carries the network's coverage-eligibility request
+// exactly to the payer's own endpoint and returns its answer: a 2xx answer
+// relayed exactly, a non-2xx answer as the payer's error for verbatim relay,
+// or an error when the payer's system gave no answer. Nothing is answered in
+// the payer's place.
+func (n *nativeResponder) forwardEligibility(ctx context.Context, request []byte) (LegResult, error) {
+	in := relay.NewBody(request, relay.OriginPeerFrame)
+	up, bad, err := n.post(ctx, n.eligibilityURL, "", relay.Exact(in, "application/fhir+json"), "coverage-eligibility", "eligibility")
+	if err != nil {
+		return LegResult{}, err
+	}
+	if bad.Status != 0 {
+		return bad, nil
+	}
+	return LegResult{Response: relay.Exact(up.body, up.contentType)}, nil
+}
+
+// eligibilityForwarder is the occupant that carries coverage-eligibility to
+// the payer's own endpoint when the payer declared one.
+type eligibilityForwarder interface {
+	forwardsEligibility() bool
+	forwardEligibility(ctx context.Context, request []byte) (LegResult, error)
+}
+
 // WithCDSBaseURL overrides the base used for CDS Hooks (CRD) posts, for partners whose
 // CDS Hooks endpoint is NOT co-located with their FHIR base — e.g. br-payer serves CDS
 // Hooks at root /cds-services but FHIR ops under /fhir. Unset ⇒ CDS posts use the FHIR
@@ -171,6 +215,11 @@ func WithConformancePolicy(p ConformancePolicy) NativeOption {
 func (n *nativeResponder) ConformanceLevelForTest() ConformanceEnforcement {
 	return n.conformance.Level()
 }
+
+// EligibilityURLForTest reports the eligibility endpoint the payer declared
+// (WithEligibilityURL), so the build that wires it can be proven from another
+// package; empty when none was declared.
+func (n *nativeResponder) EligibilityURLForTest() string { return n.eligibilityURL }
 
 // bindFindingEmitter receives the engine's finding emitter after engine.New
 // builds the gateway. It cannot be a NativeOption: NewNativeResponder runs
@@ -534,11 +583,10 @@ func (n *nativeResponder) Handle(ctx context.Context, leg, corrID, subjectPCI st
 		}
 	}
 	// NOTE: there is deliberately NO "coverage-eligibility" arm here. Eligibility is a
-	// first-class engine handler (R11): handleEligibilityInbound answers it directly off
-	// the member's own Coverage in the payer's SoR and never routes it through a
-	// LegResponder, so a native arm for it was unreachable and retired with the in-process
-	// payer stub (§3.1/§3.2). A payer that wants a partner to decide eligibility deploys the
-	// standalone SDK Responder, whose Eligibility method is untouched.
+	// first-class engine handler (R11): handleEligibilityInbound answers it from the
+	// member's own Coverage in the payer's SoR, or, when the payer declares its own
+	// eligibility endpoint (WithEligibilityURL), carries it there through
+	// forwardEligibility. It never reaches Handle.
 	// The network's request, as it arrived. Each leg sends it exactly, or with only
 	// the registered payer-identity edit.
 	in := relay.NewBody(requestFHIR, relay.OriginPeerFrame)
@@ -641,8 +689,12 @@ func (n *nativeResponder) post(ctx context.Context, base, path string, p relay.P
 	if err != nil {
 		return upstreamReply{}, LegResult{}, fmt.Errorf("upstream payer %s request build failed: %w", label, err)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
+	// Each leg's own media type (or the sender's declared FHIR media type),
+	// as a direct client would send it — never application/json on a FHIR
+	// operation.
+	ct := nativeRequestMediaType(ctx, p)
+	req.Header.Set("Content-Type", ct)
+	req.Header.Set("Accept", acceptFor(ct))
 	n.applyBackendHeaders(req)
 	capture, _ := ctx.Value(nativeCertificationKey{}).(*nativeCertificationCapture)
 	if capture != nil {
@@ -651,10 +703,24 @@ func (n *nativeResponder) post(ctx context.Context, base, path string, p relay.P
 		capture.response = nil
 	}
 	n.emitDiagnostic(ctx, "native.request", body, 0, "", req, req.Header)
+	// Whether the request was written decides what a failure tells the
+	// requester: before, the payer's system never saw it; after, it may have
+	// acted on it.
+	var wrote atomic.Bool // once any attempt was written, it may have been received
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
+		WroteRequest: func(info httptrace.WroteRequestInfo) {
+			if info.Err == nil {
+				wrote.Store(true)
+			}
+		},
+	}))
 	resp, err := n.client.Do(req)
 	if err != nil {
-		return upstreamReply{}, LegResult{}, fmt.Errorf("upstream payer %s unreachable: %w", label, err)
+		// A request whose bearer could not be obtained was never sent.
+		sent := wrote.Load() && !smartauth.IsTokenAcquisitionError(err)
+		return upstreamReply{}, LegResult{}, &upstreamFailure{err: fmt.Errorf("upstream payer %s unreachable: %w", label, err), sent: sent}
 	}
+	pasLegOf(ctx).answered()
 	defer resp.Body.Close()
 	rb, err := io.ReadAll(io.LimitReader(resp.Body, maxPartnerBody))
 	n.emitDiagnostic(ctx, "native.response", rb, resp.StatusCode, diagnosticReadDetail(err, len(rb)), req, resp.Header)
@@ -662,7 +728,7 @@ func (n *nativeResponder) post(ctx context.Context, base, path string, p relay.P
 		capture.response = append([]byte(nil), rb...)
 	}
 	if err != nil {
-		return upstreamReply{}, LegResult{}, fmt.Errorf("upstream payer %s read failed: %w", label, err)
+		return upstreamReply{}, LegResult{}, &upstreamFailure{err: fmt.Errorf("upstream payer %s read failed: %w", label, err), sent: true}
 	}
 	return upstreamAnswer(resp, rb, label)
 }
@@ -676,7 +742,7 @@ func upstreamAnswer(resp *http.Response, rb []byte, label string) (upstreamReply
 	reply := upstreamReply{body: relay.NewBody(rb, relay.OriginUpstreamResponse), raw: rb, contentType: ct, declared: resp.Header.Get("Content-Type")}
 	if resp.StatusCode/100 != 2 {
 		if len(rb) > relayBodyCap { // headroom under MaxResponseBytes for seal + wrapper
-			return upstreamReply{}, LegResult{}, fmt.Errorf("upstream payer %s body too large to relay (%d bytes)", label, len(rb))
+			return upstreamReply{}, LegResult{}, &upstreamFailure{err: fmt.Errorf("upstream payer %s body too large to relay (%d bytes)", label, len(rb)), sent: true}
 		}
 		return reply, LegResult{Status: resp.StatusCode, Response: relay.Exact(reply.body, resp.Header.Get("Content-Type"))}, nil
 	}

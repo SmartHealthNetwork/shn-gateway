@@ -421,7 +421,7 @@ func TestDTRRelayedPackageUnstamped(t *testing.T) {
 // this test goes green-when-it-should-not — hence the paired 2.0 control.
 func TestDTREgressValidatesOnAnswerLine(t *testing.T) {
 	pkg := []byte(`{"resourceType":"Bundle","type":"collection","entry":[]}`)
-	run := func(t *testing.T, answerTok string) *httptest.ResponseRecorder {
+	run := func(t *testing.T, answerTok string) (*httptest.ResponseRecorder, inboundTestRequester) {
 		t.Helper()
 		g, requester := newInboundTestGateway(t, true)
 		g.cfg.Responder = dtrRelayResponder{body: pkg} // SHN-produced ⇒ egress-validated
@@ -440,21 +440,28 @@ func TestDTREgressValidatesOnAnswerLine(t *testing.T) {
 		r = r.WithContext(withRequestFrameOperation(r.Context(), shnsdk.FrameOperationQuestionnairePackage))
 		g.handleDTRInbound(rec, r, env, shnsdk.Token{Operation: "dtr-questionnaire-fetch", Subject: coveredPCI(t, g), CorrelationID: "corr-dtr-2"},
 			dtrFramedPackageFor(t, g), answerTok)
-		return rec
+		return rec, requester
 	}
 
 	t.Run("laned answer line validates and answers", func(t *testing.T) {
-		if rec := run(t, "pa.dtr@2.0"); rec.Code != 200 {
+		if rec, _ := run(t, "pa.dtr@2.0"); rec.Code != 200 {
 			t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 		}
 	})
 	t.Run("unlaned answer line fails closed", func(t *testing.T) {
-		rec := run(t, "pa.dtr@2.2")
-		if rec.Code != http.StatusInternalServerError {
-			t.Fatalf("status = %d, want 500 — a 2.2 package must NOT be validated on the 2.0 lane; body=%s", rec.Code, rec.Body.String())
+		rec, requester := run(t, "pa.dtr@2.2")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want the framed answer leg; body=%s", rec.Code, rec.Body.String())
 		}
-		if !strings.Contains(rec.Body.String(), "2.2") {
-			t.Fatalf("failure must name the missing lane: %s", rec.Body.String())
+		hdr, body, err := shnsdk.DecodeHTTPFrame(openResponseLeg(t, requester, rec.Body.Bytes()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if hdr.Status != http.StatusInternalServerError {
+			t.Fatalf("framed status = %d, want 500 — a 2.2 package must NOT be validated on the 2.0 lane; body=%s", hdr.Status, body)
+		}
+		if !strings.Contains(string(body), "2.2") {
+			t.Fatalf("failure must name the missing lane: %s", body)
 		}
 	})
 }

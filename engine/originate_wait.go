@@ -16,8 +16,7 @@
 // inquiries it may make.
 //
 // HERMETIC TIMING. The schedule lives in the two package-level variables below so
-// a test can set it to milliseconds, exactly as the update leg's re-issue delay is
-// set (nativepas_conflict.go). The DEADLINE comes from cfg.Clock, which is
+// a test can set it to milliseconds. The DEADLINE comes from cfg.Clock, which is
 // injected, so "the wait bound was reached" is a decision about the gateway's own
 // clock rather than about how long a test happened to run. Sleeps use a timer
 // together with the request context, so a cancelled request stops waiting at once.
@@ -1079,4 +1078,20 @@ func paInquireRespOf(d PASDecision) paInquireResp {
 		out.PayerResponse = json.RawMessage(d.PayerResponse)
 	}
 	return out
+}
+
+// sleepCtx waits d or until ctx is done, whichever comes first, returning ctx's error in
+// the latter case so a cancelled wait never proceeds.
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return ctx.Err()
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
 }

@@ -281,7 +281,9 @@ func TestCRDIngress_UnknownService404(t *testing.T) {
 // recorded on the observer stream as a cds-envelope finding, whose="peer"
 // (this is a peer's answer, received over the network) and decision="relayed".
 func TestCRDIngress_RelaysBelowStrict(t *testing.T) {
-	for _, level := range []ConformanceEnforcement{EnforcementObserve, EnforcementNone} {
+	// At structural the missing action description is a required member: that
+	// row checks the refusal and the refused finding, whose=peer.
+	for _, level := range []ConformanceEnforcement{EnforcementObserve, EnforcementNone, EnforcementStructural} {
 		t.Run(level.String(), func(t *testing.T) {
 			env := newInProcessExchange(t)
 			env.originator.cfg.ConformanceEnforcement = level
@@ -290,6 +292,22 @@ func TestCRDIngress_RelaysBelowStrict(t *testing.T) {
 			env.payerReturns(LegResult{Response: testResponse([]byte(externalPayerDescriptionlessAnswer))})
 
 			rec := ingressAt(t, env, "shn-order-select", conformantCRDRequest("MBR-COVERED"))
+			if level == EnforcementStructural {
+				if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "action.description") {
+					t.Fatalf("at structural a missing action description refuses: got %d %s", rec.Code, rec.Body.String())
+				}
+				var refused bool
+				for _, e := range events {
+					if e.Kind == ConformanceObservedEvent && strings.Contains(e.Detail, `"rule":"action.description"`) &&
+						strings.Contains(e.Detail, `"whose":"peer"`) && strings.Contains(e.Detail, `"decision":"refused"`) && strings.Contains(e.Detail, `"level":"structural"`) {
+						refused = true
+					}
+				}
+				if !refused {
+					t.Fatalf("at structural want a refused action.description finding, whose=peer, got %+v", events)
+				}
+				return
+			}
 			if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), []byte(externalPayerDescriptionlessAnswer)) {
 				t.Fatalf("at %s the payer's answer must relay exactly: got %d %q, want 200 %q", level, rec.Code, rec.Body.Bytes(), externalPayerDescriptionlessAnswer)
 			}
@@ -324,6 +342,7 @@ func TestCRDIngress_UnreadableAnswerPerLevel(t *testing.T) {
 		want  int
 	}{
 		{EnforcementStrict, http.StatusBadGateway},
+		{EnforcementStructural, http.StatusBadGateway},
 		{EnforcementObserve, http.StatusOK},
 		{EnforcementNone, http.StatusOK},
 	} {

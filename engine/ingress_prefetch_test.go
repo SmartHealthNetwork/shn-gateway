@@ -298,7 +298,14 @@ func names(ms []member) []string {
 	return out
 }
 
+// prefetchGateway is a provider gateway opted in to enrichment
+// (Config.EnrichNativeRequests), the prefetch fill (E-02) these rows pin.
+// carryGateway is the participant's default, which fills nothing.
 func prefetchGateway(s *prefetchSoR) *Gateway {
+	return &Gateway{cfg: Config{SoR: s.sor(), PayerRouter: nil, EnrichNativeRequests: true}}
+}
+
+func carryGateway(s *prefetchSoR) *Gateway {
 	return &Gateway{cfg: Config{SoR: s.sor(), PayerRouter: nil}}
 }
 
@@ -461,10 +468,24 @@ func TestPrefetch_MissingCoverageSearchsetFromSoR(t *testing.T) {
 
 // ingressRow runs the whole provider ingress for body against a system of
 // record, through the in-process network, and returns the EHR's answer.
+// ingressRow posts body to the provider CRD ingress of a gateway opted in to
+// enrichment (the prefetch fill these rows pin); carryRow does the same at the
+// participant's default, which fills nothing.
 func ingressRow(t *testing.T, s *prefetchSoR, body []byte) (*inProcessExchange, *httptest.ResponseRecorder) {
+	t.Helper()
+	return ingressRowWith(t, s, body, true)
+}
+
+func carryRow(t *testing.T, s *prefetchSoR, body []byte) (*inProcessExchange, *httptest.ResponseRecorder) {
+	t.Helper()
+	return ingressRowWith(t, s, body, false)
+}
+
+func ingressRowWith(t *testing.T, s *prefetchSoR, body []byte, enrich bool) (*inProcessExchange, *httptest.ResponseRecorder) {
 	t.Helper()
 	env := newInProcessExchange(t)
 	env.originator.cfg.SoR = s.sor()
+	env.originator.cfg.EnrichNativeRequests = enrich
 	rec := httptest.NewRecorder()
 	env.originator.handleCRDIngress(rec, crdIngressPost(body))
 	return env, rec
@@ -676,6 +697,7 @@ func TestPrefetch_HistoryBackendErrorOmittedAndRecorded(t *testing.T) {
 	s.searches["MedicationRequest"] = searchAnswer{err: errors.New("connection reset")}
 	obs := &observed{}
 	env := newInProcessExchange(t)
+	env.originator.cfg.EnrichNativeRequests = true // the prefetch fill this row pins
 	env.originator.cfg.SoR = s.sor()
 	env.originator.cfg.Observer = obs.observe
 	rec := httptest.NewRecorder()
@@ -843,9 +865,11 @@ func TestPrefetchProvenanceEmitted(t *testing.T) {
 		t.Fatalf("provenance leaked into the request: %s", sent)
 	}
 
-	// The coverage a questionnaire-package request is sent with (when the
+	// The coverage a questionnaire-package request is routed by (when the
 	// EHR sent none) is recorded the same way, naming the operation, whether
-	// the search found one, found none or could not run.
+	// the search found one, found none or could not run. It is read at the
+	// participant's default too, to route by, so this row runs without
+	// enrichment.
 	t.Run("questionnaire-package coverage", func(t *testing.T) {
 		body := ehrParams(ehrOrderParam("sr1", prefetchMember), dtrQuestionnaire)
 		query := "Coverage?patient=Patient%2Fexample&_include=Coverage%3Apayor"
@@ -864,7 +888,7 @@ func TestPrefetchProvenanceEmitted(t *testing.T) {
 					s.searches["Coverage"] = *row.answer
 				}
 				obs := &observed{}
-				g := prefetchGateway(s)
+				g := carryGateway(s)
 				g.cfg.Observer = obs.observe
 				g.cfg.Clock = fixedClock
 				_, _, _ = g.prepareDTRPackageRequest(context.Background(), body)
@@ -945,6 +969,7 @@ func TestPrefetch_PatientNamedDifferentlyRefused(t *testing.T) {
 			s := namedDifferently(t)
 			obs := &observed{}
 			env := newInProcessExchange(t)
+			env.originator.cfg.EnrichNativeRequests = true // the prefetch fill this row pins
 			env.originator.cfg.SoR = s.sor()
 			env.originator.cfg.Observer = obs.observe
 			rec := httptest.NewRecorder()
@@ -976,6 +1001,7 @@ func TestPrefetch_HistoryOmittedWhenPatientNamedDifferently(t *testing.T) {
 	s := namedDifferently(t)
 	obs := &observed{}
 	env := newInProcessExchange(t)
+	env.originator.cfg.EnrichNativeRequests = true // the prefetch fill this row pins
 	env.originator.cfg.SoR = s.sor()
 	env.originator.cfg.Observer = obs.observe
 	rec := httptest.NewRecorder()
@@ -1228,6 +1254,7 @@ func TestPrefetch_HeldButUnnamedMemberRefused(t *testing.T) {
 	for _, require := range []bool{false, true} {
 		t.Run(map[bool]string{false: "default", true: "known members required"}[require], func(t *testing.T) {
 			env := newInProcessExchange(t)
+			env.originator.cfg.EnrichNativeRequests = true // the prefetch fill this row pins
 			env.originator.cfg.SoR = unnamedMemberSoR{newPrefetchSoR()}
 			env.originator.cfg.RequireKnownMembers = require
 			rec := httptest.NewRecorder()

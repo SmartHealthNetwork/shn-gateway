@@ -291,12 +291,19 @@ var legOwnership = func() map[Key]Rule {
 		{"pas-claim-inquire", RoleRecipient, DirectionRequest, OutcomeCarried}: {
 			Allowed: []Ownership{OwnershipRelayed, OwnershipEdited}, Edits: payerIdentityMapped,
 		},
+		// A coverage-eligibility request goes to the payer's own system only when
+		// the payer declares its own eligibility endpoint, and then exactly.
+		{"coverage-eligibility", RoleRecipient, DirectionRequest, OutcomeCarried}: {Allowed: relayed},
 
-		// Recipient to the network, answering. Eligibility, patient-authored
-		// answers and data-request answers are the gateway's own messages;
-		// the others are the participant's answer, relayed, except where an
-		// interim builder still rebuilds it.
-		{"coverage-eligibility", RoleRecipient, DirectionResponse, OutcomeAnswered}:    {Allowed: authored, Builders: []BuilderID{BuilderSDKEligibility}},
+		// Recipient to the network, answering. Patient-authored answers and
+		// data-request answers are the gateway's own messages; eligibility is the
+		// gateway's own answer from the payer's records, or the payer's answer
+		// relayed when the payer declares its own endpoint; the others are the
+		// participant's answer, relayed, except where an interim builder still
+		// rebuilds it.
+		{"coverage-eligibility", RoleRecipient, DirectionResponse, OutcomeAnswered}: {
+			Allowed: []Ownership{OwnershipAuthored, OwnershipRelayed}, Builders: []BuilderID{BuilderSDKEligibility},
+		},
 		{"crd-order-dispatch", RoleRecipient, DirectionResponse, OutcomeAnswered}:      {Allowed: relayed},
 		{"crd-order-select", RoleRecipient, DirectionResponse, OutcomeAnswered}:        {Allowed: relayed},
 		{"dtr-questionnaire-fetch", RoleRecipient, DirectionResponse, OutcomeAnswered}: {Allowed: relayed},
@@ -308,10 +315,11 @@ var legOwnership = func() map[Key]Rule {
 		// listed: this leg has never rebuilt an answer, so nothing may author one.
 		{"pas-claim-inquire", RoleRecipient, DirectionResponse, OutcomeAnswered}: {Allowed: relayed},
 	}
-	// An application error from the participant's system is relayed. On
+	// An application error from the participant's system is relayed (for
+	// coverage-eligibility, from a payer that declares its own endpoint). On
 	// the recipient an interim builder still replaces an empty error body,
 	// and the bare error a requester that negotiated no frame receives.
-	for _, leg := range []string{"crd-order-dispatch", "crd-order-select", "dtr-questionnaire-fetch", "pas-claim", "pas-claim-inquire", "pas-claim-update"} {
+	for _, leg := range []string{"coverage-eligibility", "crd-order-dispatch", "crd-order-select", "dtr-questionnaire-fetch", "pas-claim", "pas-claim-inquire", "pas-claim-update"} {
 		m[Key{leg, RoleRecipient, DirectionResponse, OutcomeUpstreamError}] = Rule{
 			Allowed: either, Builders: []BuilderID{BuilderInterimEmptyErrorSubstitution},
 		}

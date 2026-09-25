@@ -618,7 +618,7 @@ func TestValidateGovernedOutagesPerLevel(t *testing.T) {
 		{"outage", &failingValidator{}, govResult{Status: http.StatusInternalServerError, Msg: "validator unavailable"}},
 		{"no lane", nil, govResult{Status: http.StatusInternalServerError, Msg: "no FHIR validator lane configured for contract line 2.2 (FR-36/FR-G29)", NoLane: true}},
 	} {
-		for _, level := range []ConformanceEnforcement{EnforcementStrict, EnforcementObserve, EnforcementNone} {
+		for _, level := range []ConformanceEnforcement{EnforcementStrict, EnforcementStructural, EnforcementObserve, EnforcementNone} {
 			g, events, _ := findingGateway(t, tc.v)
 			g.cfg.ConformanceEnforcement = level
 			gr := g.validateGoverned(context.Background(), findingContext{LegType: "pas-claim", Whose: "peer"}, tc.v, []byte(`{}`), "ingress", "2.2", "", false)
@@ -633,14 +633,14 @@ func TestValidateGovernedOutagesPerLevel(t *testing.T) {
 				if !reflect.DeepEqual(gr, tc.want) || len(findings) != 0 {
 					t.Errorf("%s at strict = %+v with %d findings, want %+v and none", tc.name, gr, len(findings), tc.want)
 				}
-			case EnforcementObserve:
+			case EnforcementObserve, EnforcementStructural:
 				if gr.Status != 0 || len(findings) != 1 {
-					t.Errorf("%s at observe = %+v with %d findings, want relayed with one", tc.name, gr, len(findings))
+					t.Errorf("%s at %s = %+v with %d findings, want relayed with one", tc.name, level, gr, len(findings))
 					continue
 				}
-				for _, want := range []string{`"verdict":"unavailable"`, `"decision":"relayed"`, `"level":"observe"`} {
+				for _, want := range []string{`"verdict":"unavailable"`, `"decision":"relayed"`, `"level":"` + level.String() + `"`} {
 					if !strings.Contains(findings[0].Detail, want) {
-						t.Errorf("%s at observe: finding missing %s: %s", tc.name, want, findings[0].Detail)
+						t.Errorf("%s at %s: finding missing %s: %s", tc.name, level, want, findings[0].Detail)
 					}
 				}
 			case EnforcementNone:

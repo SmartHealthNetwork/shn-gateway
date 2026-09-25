@@ -1,7 +1,7 @@
 // ingress_crd.go — CRD (CDS Hooks order-select) ingress: parse the conformant inbound request,
 // prove every patient reference resolves to ONE pci before any leg, and prepare the EHR's own
-// bytes for the network (the callback removed, absent prefetch obtained from the participant's
-// system of record). On the ingress the payload is EXTERNAL (the EHR), so cross-field patient
+// bytes for the network (the callback removed; absent prefetch obtained from the participant's
+// system of record only when it opts in to enrichment). On the ingress the payload is EXTERNAL (the EHR), so cross-field patient
 // consistency is not automatic the way it is for the /scenario Originator.
 package engine
 
@@ -220,10 +220,14 @@ func patientResourceID(resource json.RawMessage) string {
 // values it carries.
 type crdIngressRequest struct {
 	// request is the EHR's request, exact or with the registered edits:
-	// the callback removed and absent prefetch values added.
+	// the callback removed and, under enrichment, absent prefetch values
+	// added.
 	request relay.Payload
-	// values holds every prefetch value the request carries onward, kept or
-	// obtained, by key; a null value is the JSON literal null.
+	// values holds the prefetch values the request is routed by, by key: every
+	// value it carries, and each value obtained from the system of record. An
+	// obtained value is also carried onward only under enrichment
+	// (Config.EnrichNativeRequests); without it the only obtained value is the
+	// coverage, read to route by. A null value is the JSON literal null.
 	values map[string][]byte
 	// coverageFromSoR is true when the coverage value was read from the
 	// system of record rather than sent by the EHR.
@@ -283,7 +287,8 @@ type prefetchObtained struct {
 //   - Every prefetch member the request carries (a resource, a Bundle or
 //     null), advertised or not, is kept exactly, after the patient fence.
 //     All of them are fenced before anything is obtained.
-//   - Each advertised key the request leaves out is obtained from the
+//   - Only when the participant opts in (Config.EnrichNativeRequests), each
+//     advertised key the request leaves out is obtained from the
 //     participant's own system of record and inserted (the prefetch-obtain
 //     edit): the patient is read; the others are searched. A search with no
 //     match inserts null. A search the system cannot answer leaves the key
@@ -292,6 +297,10 @@ type prefetchObtained struct {
 //     nothing is obtained: an absent patient or coverage refuses the request
 //     with 422 before any read, and an absent history key is left out (the
 //     reason is recorded).
+//   - Without the opt-in (the default) nothing is inserted. A request that
+//     leaves out its coverage still has one searched for, only to route by,
+//     under the system's own id for the patient; it is refused as above when
+//     none can be found. No other key is read.
 //
 // Every value, kept or obtained, must be about the bound patient: a kept
 // value that is not is refused with 403 (at strict; RulePatientMixed), an
@@ -300,8 +309,9 @@ type prefetchObtained struct {
 // Obtaining the coverage is routing: the request is routed by it, so a
 // coverage the request leaves out and this gateway cannot obtain refuses the
 // request at every level, with the status strict has always given. Any other
-// value that cannot be obtained (RulePrefetchFill) refuses at strict; below
-// strict that key alone is left out and every other key is still obtained.
+// value that cannot be obtained under enrichment (RulePrefetchFill) refuses
+// at strict; below strict that key alone is left out and every other key is
+// still obtained.
 func (g *Gateway) ingressEnsureSelfContainedContext(ctx context.Context, leg string, raw []byte, member string) (crdIngressRequest, int, string) {
 	var out crdIngressRequest
 	body := relay.NewBody(raw, relay.OriginIngressRequest)
@@ -338,6 +348,12 @@ func (g *Gateway) ingressEnsureSelfContainedContext(ctx context.Context, leg str
 	if hasPrefetch {
 		_, carriesCoverage = doc.Member(prefetch, "coverage")
 	}
+	// enrich is the participant's opt-in to the prefetch fill (E-02,
+	// Config.EnrichNativeRequests). Without it nothing is inserted: the only
+	// value obtained from the system of record is the coverage the request is
+	// routed by, when the request does not carry one, and it is not added to
+	// the request.
+	enrich := g.cfg.EnrichNativeRequests
 	// unfilled decides a prefetch value other than the coverage that this
 	// gateway could not obtain from the participant's system of record
 	// (RulePrefetchFill), and reports whether the request is refused (strict,
@@ -380,7 +396,9 @@ func (g *Gateway) ingressEnsureSelfContainedContext(ctx context.Context, leg str
 	}
 	if err != nil {
 		// A request carrying no coverage needs one obtained to be routed.
-		if !carriesCoverage || unfilled(true) {
+		// Without enrichment nothing else is obtained, so a request that
+		// carries its coverage has nothing left unfilled.
+		if !carriesCoverage || (enrich && unfilled(true)) {
 			status, msg := SoRFailureResponse(err)
 			return out, status, msg
 		}
@@ -433,6 +451,11 @@ func (g *Gateway) ingressEnsureSelfContainedContext(ctx context.Context, leg str
 				continue
 			}
 		}
+		if !enrich && key != "coverage" {
+			// Not filled without the participant's opt-in: the request is
+			// carried without the key, and nothing is read for it.
+			continue
+		}
 		if !sorNamed {
 			// Left out: the system of record could not answer for the patient
 			// (recorded once, above). The request carries its own coverage.
@@ -465,11 +488,13 @@ func (g *Gateway) ingressEnsureSelfContainedContext(ctx context.Context, leg str
 			g.recordPrefetch(leg, prefetchObtained{Key: key, Query: query, Outcome: SearchNotRun, Reason: historyMemberNotHeld})
 			continue
 		}
-		if sorID != member {
+		if sorID != member && enrich {
 			// Values from the system of record would name the patient by an id
 			// the request does not use. The payer ties the patient and the
 			// coverage to the request's patient, so without them the request is
 			// refused before anything is read; a history value is left out.
+			// Without enrichment the coverage is only read to route by, never
+			// inserted, so the system's own id for the patient serves.
 			if key == prefetchPatientKey || key == "coverage" {
 				if key == "coverage" || unfilled(false) {
 					return out, http.StatusUnprocessableEntity, patientNamedDifferently
@@ -480,7 +505,14 @@ func (g *Gateway) ingressEnsureSelfContainedContext(ctx context.Context, leg str
 			g.recordPrefetch(leg, prefetchObtained{Key: key, Query: query, Outcome: SearchNotRun, Reason: historyNamedDifferently})
 			continue
 		}
-		value, outcome, status, msg := g.obtainPrefetch(ctx, leg, key, sorID, fence)
+		obtainFence := fence
+		if !enrich && sorID != member {
+			// Read only to route by, under the system's own id: in that system
+			// Patient/<member> is another patient (or none), so the coverage is
+			// fenced to the system's id alone.
+			obtainFence = newPatientFence(shnsdk.MemberSystem, member, bases, sorID).forPrefetch()
+		}
+		value, outcome, status, msg := g.obtainPrefetch(ctx, leg, key, sorID, obtainFence)
 		if status != 0 {
 			// The fill fence refuses at every level: SHN never inserts
 			// another patient's record. So does failing to obtain the
@@ -497,7 +529,9 @@ func (g *Gateway) ingressEnsureSelfContainedContext(ctx context.Context, leg str
 			}
 			continue
 		}
-		inserts = append(inserts, insert{key, value})
+		if enrich {
+			inserts = append(inserts, insert{key, value})
+		}
 		out.values[key] = value
 		if key == "coverage" {
 			out.coverageFromSoR = true

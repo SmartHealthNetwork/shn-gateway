@@ -24,8 +24,7 @@ import (
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
-// fastPASInquire compresses the inquiry schedule for a hermetic row, the same way
-// the update leg's re-issue delay is compressed (nativepas_conflict_test.go).
+// fastPASInquire compresses the inquiry schedule for a hermetic row.
 func fastPASInquire(t *testing.T) {
 	t.Helper()
 	first, cap := pasInquireFirstDelay, pasInquireBackoffCap

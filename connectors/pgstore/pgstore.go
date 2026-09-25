@@ -324,18 +324,24 @@ func (s *PgStore) AuthNumber(serviceRequestRef string) (string, bool) {
 // RecordPendedClaim records a pended claim with no lookup keys — the Store seam's
 // keyless pend. The conditional DO UPDATE is what makes `decided` absorbing here:
 // a claim the ledger already decided is left alone, and only a dated, keyed re-pend
-// (RecordPendedKeyed) can supersede a decision.
+// (RecordPendedKeyed) can supersede a decision. A live amendment hold keeps its
+// state and its time (engine.PendRePend): only its own outcome moves the row, and a
+// hold past engine.PendInProgressStale has lapsed.
 func (s *PgStore) RecordPendedClaim(subjectPCI, correlationID string) error {
 	s.maybePurge()
 	ctx, cancel := storeCtx()
 	defer cancel()
+	now := s.now()
 	_, err := s.pool.Exec(ctx, `
 INSERT INTO gw_pended_claim (holder_id, subject_pci, correlation_id, state, last_transition_at)
 VALUES ($1, $2, $3, 'pended', $4)
 ON CONFLICT (holder_id, subject_pci, correlation_id) DO UPDATE
-  SET state = 'pended', last_transition_at = $4
+  SET state = CASE WHEN gw_pended_claim.state = 'in_progress' AND gw_pended_claim.last_transition_at > $5
+                   THEN 'in_progress' ELSE 'pended' END,
+      last_transition_at = CASE WHEN gw_pended_claim.state = 'in_progress' AND gw_pended_claim.last_transition_at > $5
+                   THEN gw_pended_claim.last_transition_at ELSE $4 END
   WHERE gw_pended_claim.state <> 'decided'`,
-		s.holderID, subjectPCI, correlationID, s.now())
+		s.holderID, subjectPCI, correlationID, now, now.Add(-engine.PendInProgressStale))
 	if err != nil {
 		return fmt.Errorf("pgstore: RecordPendedClaim: %w", err)
 	}

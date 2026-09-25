@@ -18,10 +18,12 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/http/httptrace"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/SmartHealthNetwork/shn-gateway/diagnostics"
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
@@ -148,14 +150,17 @@ type Config struct {
 	// and the Patient the request carries (resolveSubjectPCI). Set from
 	// REQUIRE_KNOWN_MEMBERS (gateway/app).
 	RequireKnownMembers bool
-	// enrichDTRPatient turns on the E-05 own-Patient append on the native DTR
-	// ingress (prepareDTRPackageRequest). Off, the zero value: the provider's own
-	// Patient is not appended to a request that carries none (E-02 and E-04 are
-	// unaffected). Temporary seam, tracked with the ENRICH_NATIVE_REQUESTS
-	// participant opt-in: unexported and not wired from configuration, so it can
-	// only be off in a built gateway; it keeps the edit and its fences tested until
-	// that opt-in wires it.
-	enrichDTRPatient bool
+	// EnrichNativeRequests is the participant's opt-in to having its gateway add
+	// what a Da Vinci-native request leaves out, from the participant's own system
+	// of record. It gates the three native-ingress enrichments: the CDS
+	// Hooks prefetch fill (E-02), the questionnaire-package Coverage append (E-04)
+	// and the questionnaire-package Patient append (E-05). The default (false, the
+	// zero value) adds nothing: the request is carried as the participant's client
+	// sent it, apart from the callback strip (E-01). A Coverage the request does
+	// not carry is still read from the system of record to choose the payer, and
+	// is not inserted. Requests the gateway builds itself (origination) are
+	// unaffected. Set from ENRICH_NATIVE_REQUESTS (gateway/app).
+	EnrichNativeRequests bool
 	// Store is the gateway's own business state (auth numbers, pended-claim ledger,
 	// issued EOBs). Demo: in-memory stub; separated: holdersim; later: gateway Postgres.
 	Store Store
@@ -841,8 +846,9 @@ func (g *Gateway) Handler() http.Handler {
 		// (which would 502 on a stale patient submit). Internal — provider-gw is not public.
 		mux.HandleFunc("POST /scenario/reset", g.handleScenarioReset)
 		if g.cfg.IngressEnabled {
-			// Every ingress answer carries X-Correlation-Id (correlationheader.go):
-			// the id the leg is logged under, settled before the handler runs.
+			// Every ingress answer carries X-Correlation-Id and X-SHN-Leg-Id
+			// (correlationheader.go): the caller's trace value and the leg's id,
+			// settled before the handler runs.
 			mux.HandleFunc("GET /cds-services", g.withIngressCorrelation(g.handleCDSDiscovery))
 			mux.HandleFunc("POST /cds-services/{id}", g.observeIngress("crd-ingress", g.withIngressCorrelation(g.handleCRDIngress)))
 			mux.HandleFunc("POST /Questionnaire/$questionnaire-package", g.observeIngress("dtr-ingress", g.withIngressCorrelation(g.handleDTRIngress)))
@@ -1038,17 +1044,60 @@ var errHubUnreachable = errors.New("hub routing failed")
 // errors.Is; the value returned is a *hubTimeoutError carrying the budget.
 var errHubTimeout = errors.New("hub leg timed out")
 
+// HubDeliveredHeader is the header the Hub sets on every POST /route error,
+// saying whether the recipient's gateway received the request: "no" when the Hub
+// refused before forwarding or the recipient's gateway was not reached or
+// refused it at its edge; "yes" when it answered and the answer was lost on the
+// way back (a response the Hub could not read, verify, decode or audit);
+// "unknown" when it may have received the request (it answered 5xx, the
+// connection failed after the request was sent, or it did not answer in time).
+// An error without it did not come from the Hub's route handler, and a 5xx of
+// that kind is read as "unknown". internal/hubsvc sets it; the root module's
+// tests pin the two names equal.
+const HubDeliveredHeader = "X-SHN-Delivered"
+
+// hubRefusalError is the Hub's own non-2xx answer to POST /route: its status,
+// its reason ({"error": ...}) and whether the recipient was reached. The
+// requester reports it as it is instead of one generic routing failure.
+type hubRefusalError struct {
+	status    int
+	reason    string
+	delivered string // "" (not delivered), "yes" or "unknown" (HubDeliveredHeader)
+}
+
+func (e *hubRefusalError) Error() string {
+	return fmt.Sprintf("hub refused the exchange (%d): %s", e.status, e.reason)
+}
+
+// answerLostError is a leg the recipient answered whose answer this gateway
+// could not accept: a response leg that failed verification or decryption, or
+// a frame it could not decode. The recipient received the request and may have
+// acted on it, so it is reported as such — never as a routing
+// failure the caller might blindly resend.
+type answerLostError struct{ cause string }
+
+func (e *answerLostError) Error() string { return e.cause }
+
 // hubTimeoutError is the error a timed-out Hub leg returns. budget is the
 // gateway's own leg deadline when that is what ended the wait; zero when the
 // caller's request deadline ended it first, in which case no number is
 // claimed.
-type hubTimeoutError struct{ budget time.Duration }
+// sent says the request had been written to the Hub when the wait ended, so
+// the recipient may have received it.
+type hubTimeoutError struct {
+	budget time.Duration
+	sent   bool
+}
 
 func (e *hubTimeoutError) Error() string {
-	if e.budget <= 0 {
-		return errHubTimeout.Error()
+	msg := errHubTimeout.Error()
+	if e.budget > 0 {
+		msg = fmt.Sprintf("no answer on the hub leg within %s (hub leg timeout)", e.budget)
 	}
-	return fmt.Sprintf("no answer on the hub leg within %s (hub leg timeout)", e.budget)
+	if e.sent {
+		msg += "; the recipient may have received this request: check its outcome before resending"
+	}
+	return msg
 }
 
 func (e *hubTimeoutError) Is(target error) bool { return target == errHubTimeout }
@@ -1123,24 +1172,84 @@ func (g *Gateway) postEnvelope(ctx context.Context, client *http.Client, url str
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Holder-Assertion", assertionHeader)
 
+	// Whether the request was written decides what a transport failure means:
+	// before, nothing reached the Hub; after, it may have forwarded the request.
+	var wrote atomic.Bool // once any attempt was written, it may have been received
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
+		WroteRequest: func(info httptrace.WroteRequestInfo) {
+			if info.Err == nil {
+				wrote.Store(true)
+			}
+		},
+	}))
 	resp, err := client.Do(req)
 	if err != nil {
+		if wrote.Load() {
+			return shnsdk.Envelope{}, &hubSentError{err: err}
+		}
 		return shnsdk.Envelope{}, err
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, shnsdk.MaxResponseBytes))
-	if err != nil {
-		return shnsdk.Envelope{}, err
+	if err != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		// A Hub 200 comes only after the recipient answered and the Hub verified it.
+		return shnsdk.Envelope{}, &answerLostError{cause: "the Hub's answer could not be read"}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		if g.cfg.Diagnostic != nil {
 			headers, complete := diagnosticHeaders(resp.Header)
 			g.diagnosticEvent(ctx, diagnostics.Event{Kind: "leg.failed", Status: resp.StatusCode, Body: respBody, BodyComplete: len(respBody) < shnsdk.MaxResponseBytes, Headers: headers, HeadersComplete: complete, Detail: "Hub response"})
 		}
-		return shnsdk.Envelope{}, fmt.Errorf("gateway: hub returned %d: %s", resp.StatusCode, string(respBody))
+		return shnsdk.Envelope{}, hubRefusal(resp.StatusCode, respBody, resp.Header.Get(HubDeliveredHeader))
 	}
-	return shnsdk.DecodeEnvelope(respBody)
+	env, err := shnsdk.DecodeEnvelope(respBody)
+	if err != nil {
+		return shnsdk.Envelope{}, &answerLostError{cause: "the Hub's answer is not an envelope"}
+	}
+	return env, nil
+}
+
+// hubSentError is a POST to the Hub whose connection failed after the request
+// was written: the Hub may have forwarded it.
+type hubSentError struct{ err error }
+
+func (e *hubSentError) Error() string { return e.err.Error() }
+func (e *hubSentError) Unwrap() error { return e.err }
+
+// hubRefusal reads the Hub's {"error": ...} body (or names the status when
+// there is none) into a hubRefusalError.
+func hubRefusal(status int, body []byte, delivered string) *hubRefusalError {
+	var e struct {
+		Error string `json:"error"`
+	}
+	reason := ""
+	if json.Unmarshal(body, &e) == nil {
+		reason = strings.TrimSpace(e.Error)
+	}
+	if reason == "" {
+		reason = http.StatusText(status)
+	}
+	if len(reason) > 300 {
+		cut := 300
+		for cut > 0 && !utf8.RuneStart(reason[cut]) {
+			cut--
+		}
+		reason = reason[:cut]
+	}
+	switch delivered {
+	case "yes", "unknown":
+	case "no":
+		delivered = ""
+	default:
+		// Unmarked: not the Hub's route handler (a load balancer in front of
+		// it). A 5xx of that kind may have come after the Hub forwarded.
+		delivered = ""
+		if status >= 500 {
+			delivered = "unknown"
+		}
+	}
+	return &hubRefusalError{status: status, reason: reason, delivered: delivered}
 }
 
 // roundTrip performs one authorized sealed exchange with the counterpart
@@ -1192,6 +1301,11 @@ func (g *Gateway) roundTrip(ctx context.Context, r *http.Request, recipient, req
 			outcome = LegOutcomeDenied
 		case errors.Is(err, errHubUnreachable), errors.Is(err, errHubTimeout):
 			outcome = LegOutcomeUnreachable
+		default:
+			var refused *hubRefusalError
+			if errors.As(err, &refused) && refused.delivered == "" {
+				outcome = LegOutcomeUnreachable
+			}
 		}
 		g.diagnosticStage(ctx, "leg.failed", txType, nil, 0, err.Error())
 		g.legMetric(outcome)
@@ -1265,8 +1379,17 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 		return nil, errFramedDTRUnsupported
 	}
 	if content.Operation != "" || (content.ProfileID != "" && shnsdk.SupportsRequestFrameV1(recipientHolder.RequestFrames)) {
+		// The body's own media type (a CDS Hooks request is application/json),
+		// or the participant's declared FHIR media type when one was carried.
+		frameType := content.Payload.ContentType()
+		if frameType == "" {
+			frameType = mediaFHIRJSON
+		}
+		if content.MediaType != "" {
+			frameType = content.MediaType
+		}
 		headers := map[string]string{
-			"Content-Type":                    "application/fhir+json",
+			"Content-Type":                    frameType,
 			shnsdk.FrameHeaderContractVersion: content.ProfileID,
 		}
 		if content.Operation != "" {
@@ -1344,10 +1467,28 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 		hubClient = &untimed
 	}
 	respEnv, err := g.postEnvelope(legCtx, hubClient, g.cfg.HubURL+"/route", body, assertionHeader)
+	var refused *hubRefusalError
+	if errors.As(err, &refused) {
+		return nil, refused
+	}
+	var lost *answerLostError
+	if errors.As(err, &lost) {
+		return nil, lost
+	}
 	if err != nil {
+		var sent *hubSentError
+		wasSent := errors.As(err, &sent)
 		err = classifyHubLegError(ctx, legCtx, budget)
+		var timedOut *hubTimeoutError
+		if errors.As(err, &timedOut) {
+			timedOut.sent = wasSent
+		}
 		if errors.Is(err, errHubTimeout) {
 			log.Printf("gateway: hub leg %s to %q timed out: %s (correlation %s)", txType, recipient, err.Error(), correlationID)
+			return nil, err
+		}
+		if wasSent {
+			return nil, &hubRefusalError{status: http.StatusBadGateway, reason: "the connection to the Hub failed after the request was sent", delivered: "unknown"}
 		}
 		return nil, err
 	}
@@ -1357,7 +1498,7 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 	// and must come from the expected counterpart holder.
 	var respTok shnsdk.Token
 	if err := json.Unmarshal([]byte(respEnv.Metadata.AuthzToken), &respTok); err != nil {
-		return nil, fmt.Errorf("response leg authorization failed")
+		return nil, &answerLostError{cause: "response leg authorization failed"}
 	}
 	// H1: the response token's Holder must be the responder (the counterpart). The
 	// envelope Sender is asserted == recipient just below, so pinning the token's
@@ -1368,18 +1509,18 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 	// (H1).
 	if err := shnsdk.VerifyBound(respTok, g.cfg.AuthzPub, g.cfg.Clock(),
 		respFrame, respOp, correlationID, respEnv.Metadata.Sender, pci, sha256hex(respEnv.Ciphertext)); err != nil {
-		return nil, fmt.Errorf("response leg authorization failed")
+		return nil, &answerLostError{cause: "response leg authorization failed"}
 	}
 	if respEnv.Metadata.CorrelationID != correlationID {
-		return nil, fmt.Errorf("response correlation mismatch")
+		return nil, &answerLostError{cause: "response correlation mismatch"}
 	}
 	if respEnv.Metadata.Sender != recipient {
-		return nil, fmt.Errorf("response sender mismatch")
+		return nil, &answerLostError{cause: "response sender mismatch"}
 	}
 
 	respPayload, err := shnsdk.Open(respEnv, g.cfg.Identity.EncPub, g.cfg.Identity.EncPriv)
 	if err != nil {
-		return nil, fmt.Errorf("response decryption failed")
+		return nil, &answerLostError{cause: "response decryption failed"}
 	}
 	// A frame-negotiated recipient (registry messageFrames) seals
 	// EVERY application answer — any status — as a v1 message frame; surface non-2xx
@@ -1398,7 +1539,7 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 	if shnsdk.IsFramed(respPayload) {
 		hdr, body, ferr := shnsdk.DecodeHTTPFrame(respPayload)
 		if ferr != nil {
-			return nil, fmt.Errorf("response frame decode failed")
+			return nil, &answerLostError{cause: "response frame decode failed"}
 		}
 		if hdr.Status/100 != 2 {
 			return nil, &RelayError{Status: hdr.Status, Body: body, ContentType: hdr.Headers["Content-Type"], leg: txType}
@@ -1670,8 +1811,11 @@ func kindForDirection(dir string, bridged bool) CheckKind {
 // finding. Every invalid verdict emits its finding first, at every level that
 // runs the check, and only then is the decision acted on. A check that could
 // not run (validator outage, no lane for the line) refuses at strict and for a
-// bridged payload, with no finding; at observe it is recorded as unavailable
-// and the message is relayed.
+// bridged payload, with no finding; at observe and structural it is recorded as
+// unavailable and the message is relayed. An invalid verdict is classified
+// (classifyFHIR) before it is decided: at structural a structural or unclassified
+// defect refuses and a deeper one is recorded; a validator that answered
+// without reading the payload is unavailable at every level.
 func (g *Gateway) validateGoverned(ctx context.Context, fc findingContext, v shnsdk.Validator, resourceJSON []byte, dir, line, profile string, bridged bool) govResult {
 	kind := kindForDirection(dir, bridged)
 	pol := g.policy()
@@ -1697,14 +1841,18 @@ func (g *Gateway) validateGoverned(ctx context.Context, fc findingContext, v shn
 	if v == nil {
 		return unavailable(govResult{Status: http.StatusInternalServerError, Msg: "no FHIR validator lane configured for contract line " + line + " (FR-36/FR-G29)", NoLane: true})
 	}
-	res, err := v.Validate(ctx, resourceJSON, profile)
+	res, err := v.Validate(ctx, wrapValidateResource(resourceJSON), profile)
 	if err != nil {
 		return unavailable(govResult{Status: http.StatusInternalServerError, Msg: "validator unavailable"})
 	}
 	if res.Valid {
 		return govResult{}
 	}
-	decision := pol.Decide(kind, "", VerdictInvalid)
+	verdict := classifyFHIR(res, resourceJSON, line, profile)
+	if verdict == VerdictUnavailable {
+		return unavailable(govResult{Status: http.StatusInternalServerError, Msg: "validator unavailable"})
+	}
+	decision := pol.Decide(kind, "", verdict)
 	g.emitFinding(ConformanceFinding{
 		Kind:          string(kind),
 		Direction:     dir,

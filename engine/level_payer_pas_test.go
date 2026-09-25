@@ -37,7 +37,14 @@ func (p *levelPayer) eobCount() int {
 // leg naming rule and carrying no payload below strict, none at strict.
 func (p *levelPayer) wantSkipped(t *testing.T, leg, corr, rule string) {
 	t.Helper()
-	if p.level == EnforcementStrict {
+	p.wantSkippedWhen(t, leg, corr, rule, refusesAt(p.level, rule))
+}
+
+// wantSkippedWhen is wantSkipped for a row whose refusal the caller states:
+// an answer refused by its own FHIR check rather than by rule's content table.
+func (p *levelPayer) wantSkippedWhen(t *testing.T, leg, corr, rule string, refused bool) {
+	t.Helper()
+	if refused {
 		if len(p.skipped) != 0 {
 			t.Fatalf("a refused answer skips nothing, got %+v", p.skipped)
 		}
@@ -336,7 +343,8 @@ func TestLevelPayerPASUpdate_AnswerContent(t *testing.T) {
 // patient's record, so below strict the payer's bytes are relayed exactly and
 // no decision or EOB is written. On the amended re-POST the seeded prior
 // authorization stays pended. A later amended re-POST of a $submit whose
-// answer was relayed unread finds no pend (409), since none was written.
+// answer was relayed unread finds no pend, since none was written, and reaches
+// the payer all the same: the ledger records and never gates.
 func TestLevelPayerPAS_DecidedAnswerRelayedUnreadWritesNothing(t *testing.T) {
 	approved := fixturePASResponse(t, approvedClaimResponse(nil), true)
 	foreign := bytes.Replace(approved, []byte(`"entry":[`), []byte(`"entry":[{"fullUrl":"http://localhost:8081/fhir/Patient/Other","resource":{"resourceType":"Patient","id":"Other"}},`), 1)
@@ -346,7 +354,7 @@ func TestLevelPayerPAS_DecidedAnswerRelayedUnreadWritesNothing(t *testing.T) {
 	if pasResponseSubjectMismatch(foreign) == nil {
 		t.Fatal("fixture: the answer's subjects must not bind")
 	}
-	for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve} {
+	for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve, EnforcementStructural} {
 		t.Run("submit/"+level.String(), func(t *testing.T) {
 			p := newLevelPayer(t, level)
 			p.partner.respByPath[pasSubmitPath] = foreign
@@ -360,8 +368,11 @@ func TestLevelPayerPAS_DecidedAnswerRelayedUnreadWritesNothing(t *testing.T) {
 			}
 			request, related := updateBundle(t)
 			update := p.send(t, "pas-claim-update", "", request)
-			if update.status != http.StatusConflict || !strings.Contains(string(update.body), "ClaimUpdate references no pending claim") {
-				t.Fatalf("an amendment of an exchange whose answer was relayed unread finds no pend: %d %s (related %s)", update.status, update.body, related)
+			if update.status != http.StatusOK || !bytes.Equal(update.body, foreign) {
+				t.Fatalf("an amendment that finds no pend still reaches the payer and gets its answer: %d %s (related %s)", update.status, update.body, related)
+			}
+			if rec, found := p.pendOf(t, related); found {
+				t.Fatalf("the amendment's unread answer wrote a pend: %+v", rec)
 			}
 		})
 		t.Run("update/"+level.String(), func(t *testing.T) {
@@ -448,7 +459,9 @@ func TestLevelPayerPASSubmit_InvalidEOB(t *testing.T) {
 			}
 			rec, found := p.pendOf(t, got.corr)
 			switch level {
-			case EnforcementStrict:
+			// The fake validator's rejection carries no issue kind: it is
+			// unclassified, which structural refuses as strict does.
+			case EnforcementStrict, EnforcementStructural:
 				if got.status != http.StatusUnprocessableEntity || !strings.Contains(string(got.body), "egress validation failed") {
 					t.Fatalf("answer %d %s, want the 422", got.status, got.body)
 				}
@@ -480,9 +493,40 @@ func TestLevelPayerPASSubmit_InvalidEOB(t *testing.T) {
 				}
 				return
 			}
-			p.wantSkipped(t, "pas-claim", got.corr, RuleEOBDecision)
+			// The EOB's rejection is its own FHIR check's, refused at strict and,
+			// unclassified, at structural.
+			p.wantSkippedWhen(t, "pas-claim", got.corr, RuleEOBDecision, level == EnforcementStrict || level == EnforcementStructural)
 		})
 	}
+}
+
+// At structural the kind of FHIR issue decides. A decision EOB whose only
+// issue is a deeper one (a code outside its code list) is recorded, not
+// refused: the payer's answer is relayed exactly, and, as for any answer
+// whose own EOB failed, nothing is written from it.
+func TestLevelPayerPASSubmit_DeeperEOBAtStructural(t *testing.T) {
+	approved := fixturePASResponse(t, approvedClaimResponse(nil), true)
+	p := newLevelPayer(t, EnforcementStructural)
+	p.g.cfg.Validator = &shnsdk.FakeValidator{RejectIfContains: `"ExplanationOfBenefit"`,
+		RejectIssue: &shnsdk.Issue{Severity: "error", Code: "processing", MessageID: "Terminology_TX_NoValid_1_CC"}}
+	p.partner.respByPath[pasSubmitPath] = approved
+	got := p.send(t, "pas-claim", "", originatorBuiltConformantBundle(t, "MBR-COVERED"))
+	if got.status != http.StatusOK || !bytes.Equal(got.body, approved) {
+		t.Fatalf("a deeper EOB issue is recorded and the payer's answer relayed exactly: %d %s", got.status, got.body)
+	}
+	var eobFindings []ConformanceFinding
+	for _, f := range p.findings {
+		if f.Kind == string(KindFHIREgress) {
+			eobFindings = append(eobFindings, f)
+		}
+	}
+	if len(eobFindings) != 1 || eobFindings[0].Decision != "relayed" || eobFindings[0].Level != "structural" || eobFindings[0].LegType != "pas-claim" {
+		t.Fatalf("want one relayed EOB finding at structural on pas-claim, got %+v", eobFindings)
+	}
+	if _, found := p.pendOf(t, got.corr); found || p.eobCount() != 0 {
+		t.Fatalf("nothing may be written from an answer whose EOB failed: pend found=%v, %d EOB(s)", found, p.eobCount())
+	}
+	p.wantSkippedWhen(t, "pas-claim", got.corr, RuleEOBDecision, false)
 }
 
 // The validator cannot answer for the decision EOB this gateway builds. At
@@ -491,7 +535,7 @@ func TestLevelPayerPASSubmit_InvalidEOB(t *testing.T) {
 // its EOB are written, as at none. Strict answers 500, as it always has.
 func TestLevelPayerPASSubmit_EOBValidatorOutage(t *testing.T) {
 	approved := fixturePASResponse(t, approvedClaimResponse(nil), true)
-	for _, level := range []ConformanceEnforcement{EnforcementObserve, EnforcementStrict} {
+	for _, level := range []ConformanceEnforcement{EnforcementObserve, EnforcementStructural, EnforcementStrict} {
 		t.Run(level.String(), func(t *testing.T) {
 			p := newLevelPayer(t, level)
 			p.g.cfg.Validator = validatorFunc(func(b []byte) (shnsdk.Result, error) {
@@ -613,7 +657,11 @@ func TestLevelPayerInquire_AnswerContent(t *testing.T) {
 				p.seedInquiryPend(t, "corr-submit-1")
 				p.partner.respByPath[pasInquirePath] = row.answer
 				got := p.send(t, "pas-claim-inquire", "", inquiryBundle("MBR-COVERED", "", "TRN-1", "72148"))
+				refused := refusesAt(level, row.rule)
 				if row.rule == RuleEOBDecision {
+					// The EOB's rejection is its own FHIR check's: unclassified,
+					// so structural refuses it as strict does.
+					refused = level == EnforcementStrict || level == EnforcementStructural
 					// The EOB's own validation finding is the record (fhir-egress).
 					if level == EnforcementNone {
 						if rec, _ := p.pendOf(t, "corr-submit-1"); got.status != http.StatusOK || rec.State != PendStateDecided || p.eobCount() != 1 {
@@ -621,7 +669,7 @@ func TestLevelPayerInquire_AnswerContent(t *testing.T) {
 						}
 						return
 					}
-					if level == EnforcementStrict {
+					if refused {
 						if got.status != row.status || !strings.Contains(string(got.body), row.msg) {
 							t.Fatalf("answer %d %s", got.status, got.body)
 						}
@@ -631,7 +679,7 @@ func TestLevelPayerInquire_AnswerContent(t *testing.T) {
 				} else {
 					p.wantAnswerRow(t, "pas-claim-inquire", got, pasInquirePath, row.answer, row.rule, row.status, row.msg)
 				}
-				p.wantSkipped(t, "pas-claim-inquire", got.corr, row.rule)
+				p.wantSkippedWhen(t, "pas-claim-inquire", got.corr, row.rule, refused)
 				if rec, found := p.pendOf(t, "corr-submit-1"); !found || rec.State != PendStatePended || p.eobCount() != 0 {
 					t.Fatalf("nothing may be written from this answer: %+v, %d EOB(s)", rec, p.eobCount())
 				}

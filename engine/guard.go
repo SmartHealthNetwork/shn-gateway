@@ -7,9 +7,10 @@ import "context"
 // rule refuses at every level and records nothing: it is authority or message
 // integrity. A content
 // defect is not checked at none, is recorded as a finding at observe and
-// refuses at strict, recorded there too. A content check that could not finish
-// (VerdictUnavailable) is recorded as unavailable at observe and refuses at
-// strict. The finding carries the rule and the
+// refuses at strict, recorded there too; at structural a request or answer that
+// cannot be read refuses and every other content defect is recorded
+// (decideStructural). A content check that could not finish (VerdictUnavailable) is
+// recorded as unavailable at observe and structural and refuses at strict. The finding carries the rule and the
 // payload's hash, never payload text. emit may be nil.
 func guardDefect(ctx context.Context, pol ConformancePolicy, emit func(ConformanceFinding), kind CheckKind, rule string, v Verdict, payload []byte) bool {
 	if !pol.Runs(kind, rule) {

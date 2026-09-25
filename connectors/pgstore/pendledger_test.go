@@ -184,6 +184,44 @@ func pendLedgerChecks(t *testing.T, newLedger func(*testing.T) ledgerUnderTest) 
 		wantDecision(t, wantState(t, l, pciA, corrA, engine.PendStateDecided), engine.PendOutcomeApproved, tDecided)
 	})
 
+	// A re-pend never reopens an amendment in progress. The payer's later word
+	// about the authorization (a resent submission it pended again, or another
+	// amendment it pended) is recorded — its keys join the authorization's — but
+	// only the in-progress amendment's own outcome moves the row. Otherwise a
+	// second amendment could bind while the first is still with the payer.
+	t.Run("a re-pend leaves an amendment in progress", func(t *testing.T) {
+		l := newLedger(t)
+		pend(t, l, pciA, corrA, tPend, keys(requester))
+		if ok, _, err := l.BeginClaimUpdateReason(pciA, corrA); err != nil || !ok {
+			t.Fatalf("begin = %v,%v", ok, err)
+		}
+		later := keys(requester)
+		later.ClaimResponseIDs = []string{"urn:payer:claimresponse|CR-2"}
+		tr := pend(t, l, pciA, corrA, tLater, later)
+		if tr.From != engine.PendStateInProgress || tr.To != engine.PendStateInProgress || tr.Changed || tr.Event != "" {
+			t.Fatalf("re-pend during an amendment = %+v", tr)
+		}
+		wantState(t, l, pciA, corrA, engine.PendStateInProgress)
+		if ok, why, _ := l.BeginClaimUpdateReason(pciA, corrA); ok || why != engine.PendRefusalInProgress {
+			t.Fatalf("a second amendment bound during the first: %v,%q", ok, why)
+		}
+		// The re-pend's key was still recorded.
+		probe := engine.PendKeys{RequesterHolder: requester, ClaimResponseIDs: []string{"urn:payer:claimresponse|CR-2"}}
+		if subject, corr, found, _, err := l.LookupPended(requester, probe); err != nil || !found || subject != pciA || corr != corrA {
+			t.Fatalf("the re-pend's key was not recorded: %s %s %v %v", subject, corr, found, err)
+		}
+		// The keyless seam holds the same rule.
+		if err := l.RecordPendedClaim(pciA, corrA); err != nil {
+			t.Fatal(err)
+		}
+		wantState(t, l, pciA, corrA, engine.PendStateInProgress)
+		// The amendment's own outcome still moves it.
+		if err := l.ReleaseClaimUpdate(pciA, corrA); err != nil {
+			t.Fatal(err)
+		}
+		wantState(t, l, pciA, corrA, engine.PendStatePended)
+	})
+
 	// A claim the ledger never pended (an immediately approved submit) is still
 	// recorded as decided, so a later amendment is refused as decided and not as
 	// "never pended".

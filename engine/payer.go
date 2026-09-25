@@ -75,7 +75,7 @@ func (g *Gateway) handleDTRInbound(w http.ResponseWriter, r *http.Request, env s
 	result, err := g.cfg.Responder.Handle(ctx, "dtr-questionnaire-fetch", env.Metadata.CorrelationID, subjectPCI, reqJSON)
 	if err != nil {
 		// build/marshal fault (gateway's own) → 500
-		g.responderFailed(w, "dtr-questionnaire-fetch", err)
+		g.responderFailed(w, r, legDTR, env, tok, answerTok, err)
 		return
 	}
 	if result.Status != 0 {
@@ -86,7 +86,7 @@ func (g *Gateway) handleDTRInbound(w http.ResponseWriter, r *http.Request, env s
 	}
 	responseFHIR, err := g.admit(result.Response, answerKey("dtr-questionnaire-fetch", relay.OutcomeAnswered))
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": errOwnershipFault})
+		g.refuseInbound(w, r, legDTR, env, tok, answerTok, http.StatusInternalServerError, errOwnershipFault, nil)
 		return
 	}
 	// The direction flips here: the $questionnaire-package answer validated below is
@@ -508,6 +508,8 @@ func (g *Gateway) fenceResponseSubjectWith(leg, boundPatientRef, corrID string, 
 	}
 	switch leg {
 	case "coverage-eligibility":
+		// The answer this gateway built from the payer's records. A payer's own
+		// answer, relayed, is fenced by fenceEligibilityAnswer instead.
 		ref, err := ParseCoverageEligibilityResponsePatient(responseFHIR)
 		if err != nil {
 			return http.StatusInternalServerError, "parse response subject failed"

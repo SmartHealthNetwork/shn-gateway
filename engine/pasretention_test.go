@@ -8,6 +8,7 @@ import (
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -243,6 +244,7 @@ func TestPASInboundCommitOrdering(t *testing.T) {
 					request = originatorBuiltConformantUpdateBundle(t)
 				}
 				commits, rollbacks, observed, findings := 0, 0, 0, 0
+				var writeFailed []ObserverEvent
 				result := LegResult{Response: testResponse(assembled), ResponseSubjectForeign: true, Commit: func() error {
 					commits++
 					if mode == "store failure" {
@@ -276,6 +278,9 @@ func TestPASInboundCommitOrdering(t *testing.T) {
 						return
 					}
 					observed++
+					if e.Kind == LocalWriteFailedEvent {
+						writeFailed = append(writeFailed, e)
+					}
 					if commits != 1 {
 						t.Error("a leg note was observed before Commit")
 					}
@@ -309,22 +314,40 @@ func TestPASInboundCommitOrdering(t *testing.T) {
 					}
 					return
 				}
-				wantCommits := 0
 				if mode == "store failure" {
-					wantCommits = 1
+					// The ledger records and never gates: the payer's answer is
+					// relayed exactly, the claim is released, and the operator is
+					// told what was not recorded — never the store's own text.
+					if rec.Code != 200 || commits != 1 || rollbacks != 1 || len(writeFailed) != 1 {
+						t.Fatalf("status=%d commits=%d releases=%d write-failed events=%d", rec.Code, commits, rollbacks, len(writeFailed))
+					}
+					hdr, body, err := shnsdk.DecodeHTTPFrame(openResponseLeg(t, requester, rec.Body.Bytes()))
+					if err != nil || hdr.Status != 200 || !bytes.Equal(body, assembled) {
+						t.Fatalf("the payer's answer must reach the requester unchanged: %v %d", err, hdr.Status)
+					}
+					if strings.Contains(writeFailed[0].Detail, "store unavailable") || writeFailed[0].CorrelationID != env.Metadata.CorrelationID {
+						t.Fatalf("write-failed event %+v", writeFailed[0])
+					}
+					return
 				}
 				// A refusal about the produced answer is the payer's own verdict and
 				// travels framed (200 to the Hub, the refusal inside); machinery — a
-				// seal failure, a store failure, a responder fault — stays a raw non-2xx.
-				status := rec.Code
+				// seal failure, a responder fault — stays a raw non-2xx.
+				status, answer := rec.Code, rec.Body.Bytes()
 				if rec.Code == 200 {
-					hdr, _, err := shnsdk.DecodeHTTPFrame(openResponseLeg(t, requester, rec.Body.Bytes()))
+					hdr, body, err := shnsdk.DecodeHTTPFrame(openResponseLeg(t, requester, rec.Body.Bytes()))
 					if err != nil {
 						t.Fatalf("decode the framed refusal: %v (body %s)", err, rec.Body.String())
 					}
-					status = hdr.Status
+					status, answer = hdr.Status, body
 				}
-				if status/100 == 2 || commits != wantCommits || rollbacks != 1 || observed != 0 {
+				// This injected responder never contacted a payer, so no refusal
+				// says the payer answered (TestPASRefusalAfterThePayerAnsweredSaysSo
+				// has the rows where one did).
+				if bytes.Contains(answer, []byte(notePayerAnswered)) {
+					t.Fatalf("%s: a refusal claims the payer answered when no payer was asked: %d %s", mode, status, answer)
+				}
+				if status/100 == 2 || commits != 0 || rollbacks != 1 || observed != 0 {
 					t.Fatalf("status=%d commits=%d releases=%d events=%d", status, commits, rollbacks, observed)
 				}
 				// Only an invalid VERDICT is a conformance finding: an outage

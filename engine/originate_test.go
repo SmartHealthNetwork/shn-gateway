@@ -297,12 +297,17 @@ func (s *stubSubstrate) handleRoute(_ *http.Request, body []byte) (*http.Respons
 	}, nil
 }
 
+// errResp is the stub's refusal. On /route it stands for the Hub's own refusal
+// before forwarding, which the Hub marks as not delivered.
 func errResp(msg string) *http.Response {
 	b, _ := json.Marshal(map[string]string{"error": msg})
+	h := http.Header{}
+	h.Set("Content-Type", "application/json")
+	h.Set(HubDeliveredHeader, "no")
 	return &http.Response{
 		StatusCode: http.StatusInternalServerError,
 		Body:       io.NopCloser(bytes.NewReader(b)),
-		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Header:     h,
 	}
 }
 

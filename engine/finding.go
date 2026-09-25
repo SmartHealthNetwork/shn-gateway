@@ -79,7 +79,8 @@ const (
 	// KindContent is a check of the shape or internal consistency of a
 	// participant's message on a relay path (the contentRules). Like any
 	// conformance check it does not run at none, is recorded at observe and
-	// refuses at strict.
+	// refuses at strict; at structural only an unreadable request or answer
+	// refuses.
 	KindContent CheckKind = "content"
 )
 

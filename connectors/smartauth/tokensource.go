@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"strconv"
 	"strings"
@@ -171,7 +172,10 @@ func (s *TokenSource) fetch(ctx context.Context) (token string, ttl time.Duratio
 	if s.Scope != "" {
 		form.Set("scope", s.Scope)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.TokenURL, strings.NewReader(form.Encode()))
+	// The token request is this client's own, not the caller's: a trace the
+	// caller attached to its request (to learn whether that request was
+	// written) must not see the token request's events.
+	req, err := http.NewRequestWithContext(withoutClientTrace{ctx}, http.MethodPost, s.TokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
 		return "", 0, fmt.Errorf("smartauth: build token request: %w", err)
 	}
@@ -292,4 +296,19 @@ func (s *TokenSource) assertion() (string, error) {
 		return "", fmt.Errorf("smartauth: sign assertion: %w", err)
 	}
 	return signed, nil
+}
+
+// withoutClientTrace is ctx with any httptrace.ClientTrace hidden; every other
+// value, the deadline and cancellation pass through. It hides the request-level
+// hooks (WroteRequest, GotConn and the like); a caller's DNS and connect hooks,
+// which net/http also installs under an internal key, still see the token
+// endpoint's dial.
+type withoutClientTrace struct{ context.Context }
+
+func (c withoutClientTrace) Value(key any) any {
+	v := c.Context.Value(key)
+	if _, ok := v.(*httptrace.ClientTrace); ok {
+		return nil
+	}
+	return v
 }

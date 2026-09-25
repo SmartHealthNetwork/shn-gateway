@@ -120,7 +120,7 @@ func TestLevelPayerPAS_UnresolvedInsurer(t *testing.T) {
 					p.seedPend(t, related)
 				}
 				got := p.send(t, row.leg, "", row.body)
-				if level == EnforcementStrict {
+				if refusesAt(level, RuleInsurer) {
 					p.wantRefused(t, got, http.StatusUnprocessableEntity, row.msg)
 				} else {
 					if got.status != http.StatusOK || !got.framed {

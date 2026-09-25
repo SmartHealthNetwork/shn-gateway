@@ -152,17 +152,21 @@ ingress instead of `provider-data` origination. Your systems call the gateway
 directly, inside your own boundary; the gateway forwards your EHR's own request
 bytes through to the Hub. It removes `fhirServer` and `fhirAuthorization` (the
 payer never gets a route or a credential into your systems, and the gateway
-never calls `fhirServer`), and adds only the prefetch values the request leaves
-out, read from your own system of record — never made up. See
-[CDS Hooks prefetch](CONFIGURATION.md#cds-hooks-prefetch) for the rules. The
+never calls `fhirServer`), and by default adds nothing: send every prefetch value
+you want the payer to see. With `ENRICH_NATIVE_REQUESTS=true` it adds the prefetch
+values the request leaves out, read from your own system of record — never made up.
+See [CDS Hooks prefetch](CONFIGURATION.md#cds-hooks-prefetch) for the rules. The
 gateway's `GET /cds-services` lists one service per hook (`shn-order-sign`,
 `shn-order-select`, `shn-order-dispatch`); post each CDS Hooks request to the service
 for its hook. The payer's answer comes back exactly as the payer sent it.
-A `$questionnaire-package` request is carried as your EHR sent it, with your Coverage
-appended only when it carries none. A signature inside a message travels untouched;
+A `$questionnaire-package` request is carried as your EHR sent it; with
+`ENRICH_NATIVE_REQUESTS=true`, your Coverage and Patient are appended when it carries
+none. A Coverage a request leaves out is read from your system of record either way,
+to choose the payer. A signature inside a message travels untouched;
 HTTP-level signatures are not carried, so sign inside the payload when you need an
-end-to-end signature. The request's patient must be named by the network member id; see
-the member id limitation in [CDS Hooks prefetch](CONFIGURATION.md#cds-hooks-prefetch).
+end-to-end signature. To have values added, the request's patient must be named by the
+network member id; see the member id limitation in
+[CDS Hooks prefetch](CONFIGURATION.md#cds-hooks-prefetch).
 
 See [`PROVIDER_DAVINCI_INGRESS` and related variables in
 CONFIGURATION.md](CONFIGURATION.md#accept-da-vinci-requests-from-a-provider-ehr-provider-optional)
@@ -351,9 +355,10 @@ searchset it writes, however many pages there were: each matching and included r
 byte-for-byte copy of your server's record, under an entry `fullUrl` the gateway assigns;
 your server's links, entry addresses, search messages and `Bundle.total` are not used.
 
-A provider gateway uses the same search to obtain a CDS Hooks prefetch value (`coverage`
-and the history keys) the EHR's request leaves out; a connector without it cannot
-obtain them (see [CDS Hooks prefetch](CONFIGURATION.md#cds-hooks-prefetch)).
+A provider gateway uses the same search to find the coverage an EHR's request leaves
+out, to choose the payer, and, with `ENRICH_NATIVE_REQUESTS=true`, to obtain the CDS
+Hooks prefetch values (`coverage` and the history keys) it adds; a connector without it
+cannot obtain them (see [CDS Hooks prefetch](CONFIGURATION.md#cds-hooks-prefetch)).
 
 A facility gateway answers a clinical data request (CDex) from the same search:
 - **Records.** Every record of each requested type whose own date falls within the
@@ -393,8 +398,10 @@ there is no built-in/default decision policy any more, and a `role=payer` gatewa
 occupant configured **refuses to boot**. The published binary's occupant is
 **native-forward** (`PAYER_DAVINCI_BASE_URL`, below): every Da Vinci leg forwards to your
 own real payer endpoint. There is no config-only way to plug in custom in-process
-decisioning — coverage eligibility is answered separately, by the engine itself reading
-the member's Coverage record, not by any occupant.
+decisioning. Coverage eligibility is answered separately: by default the engine itself
+reads the member's Coverage record, not any occupant; a payer whose system has its own
+eligibility endpoint declares it with `PAYER_ELIGIBILITY_URL`, and the request is then
+carried there and your answer relayed.
 
 If you want the engine to answer PA legs from your own decision logic instead of
 forwarding to a separate Da Vinci endpoint, build a custom binary against the gateway
@@ -413,9 +420,11 @@ wrap it in your own `LegResponder` implementation if you want the engine to call
 ## Native-forward payer mode
 
 `PAYER_DAVINCI_BASE_URL` is **required** for `role=payer` — with it unset, boot fails
-closed (there is no in-process occupant to fall back to). With it set, **all five** Da
-Vinci payer legs (eligibility, CRD, DTR, PAS submit, PAS update) forward to your real
-partner Da Vinci endpoint over a SMART-authenticated client. `PAYER_DAVINCI_PAS_NATIVE`
+closed (there is no in-process occupant to fall back to). With it set, the Da Vinci payer
+legs (CRD, DTR, PAS submit, PAS update and inquiry) forward to your real partner Da Vinci
+endpoint over a SMART-authenticated client. Coverage eligibility forwards the same way only
+when you set `PAYER_ELIGIBILITY_URL`; otherwise the gateway answers it from your Coverage
+records. `PAYER_DAVINCI_PAS_NATIVE`
 still parses (back-compat) but is a no-op: PAS forwarding was never independently
 optional-off, since the in-process fallback it used to gate is deleted; setting it
 `false` only prints a warning that PAS forwards regardless.
@@ -427,12 +436,12 @@ to set up the `PAYER_DAVINCI_CLIENT_*` credentials.
 
 The engine continues to own authority enforcement regardless of native-forward
 mode: every forwarded leg is still independently authorized, sealed, and audited.
-The outbound subject fence (`fenceResponseSubject`) applies to all
-native-forwarded responses — including PAS submit/update when
-`PAYER_DAVINCI_PAS_NATIVE=true`. If the partner returns a response about a
-different patient than the request, the engine rejects it before sealing at
-enforcement `strict` (a 403, not a sealed foreign-patient leg); below `strict` it is
-relayed as sent and recorded as a finding at `observe`.
+A native-forwarded PAS or DTR answer, and a coverage-eligibility answer when you
+declare `PAYER_ELIGIBILITY_URL`, is checked for the patient it names. If your system
+returns an answer about a different patient than the request, the engine rejects it
+before sealing at enforcement `strict` (a 403, not a sealed foreign-patient leg);
+below `strict` it is relayed as sent, and recorded as a finding at `observe` and
+`structural`.
 
 ## Provider DTR population
 
@@ -468,20 +477,57 @@ across replicas (see [DEPLOYMENT.md](DEPLOYMENT.md), "Running more than one repl
 
 ## Conformance enforcement
 
-Your gateway can check every message it sends or receives against its FHIR profile —
-and, for a payer's CDS Hooks answer, against the CDS Hooks response rules — along
-with the message's own consistency (for example, one patient throughout a request).
-Whether those checks run, and what a defect does, is `CONFORMANCE_ENFORCEMENT`, a
-setting on your own gateway:
+Your gateway can check the FHIR resources it sends or receives with its `$validate`
+endpoint — and, for a payer's CDS Hooks answer, against the CDS Hooks response rules —
+along with the message's own consistency (for example, one patient throughout a
+request). What the FHIR check covers, per leg:
+
+- A resource is checked against the profiles it declares in its own `meta.profile`,
+  and otherwise against its base FHIR R4 definition only.
+- A few resources your gateway builds are checked against a named profile: the
+  DTR QuestionnaireResponse it sends (the DTR QuestionnaireResponse profile of
+  the leg's IG line), a QuestionnaireResponse it populates (base R4
+  QuestionnaireResponse), and a PAS inquiry it builds (the PAS inquiry
+  request-bundle profile of the line).
+- Of a CDS Hooks request, the draft order is validated, and on `order-select` and
+  `order-sign` the Coverage too.
+- A PAS request carried from your own system (the `$submit` ingress) is not
+  `$validate`d by either gateway; only the content checks and the network rules
+  apply to it. A PAS submit or update the gateway builds from your records is
+  validated: the Bundle for base R4 shape, and its QuestionnaireResponse
+  attachments against the DTR profile.
+- A payer's DTR questionnaire package is not validated.
+- Of coverage eligibility, both gateways validate the request and the answer: the
+  answer the payer's gateway builds from its records or, when the payer declares its
+  own endpoint (`PAYER_ELIGIBILITY_URL`), the payer system's answer.
+
+A level applies only to what these checks cover. Whether they run, and what a
+defect does, is `CONFORMANCE_ENFORCEMENT`, a setting on your own gateway:
 
 - `none`: no payload conformance check runs and no finding is recorded. The message
   relays as sent, apart from the gateway's registered edits (the callback removed,
-  prefetch and coverage obtained, and payer identity mapping; participant protocol
+  prefetch and coverage obtained when the provider opts in with
+  `ENRICH_NATIVE_REQUESTS=true`, and payer identity mapping; participant protocol
   §7a.4).
 - `observe` (the default when the variable is unset): every check runs and each
   defect is recorded as a finding — it does not stop the message, which is carried
   as sent, apart from the gateway's registered edits. A validator that cannot be
   reached is recorded the same way.
+- `structural` (v0.54.0 and later): every check runs; a message whose structure is
+  broken is refused as at `strict`, and every other defect is recorded as at
+  `observe`. Broken structure is a missing required element, an element the
+  resource does not define, a value of the wrong JSON type or one that cannot be
+  read, a CDS Hooks answer that cannot be read or lacks a required member, and a
+  request or answer the gateway cannot read. A FHIR issue is read by the
+  validator's message id: only invariants and a code outside its code list (a code
+  the bound value set or code system does not contain, or a code system the
+  validator cannot check, licensed ones included), as the validator's recognized
+  code-list issues report it, are recorded; every other FHIR profile issue
+  (cardinality, fixed and pattern values, slicing, extensions, lengths, any other
+  terminology issue, or one the gateway cannot classify) and every fatal issue
+  refuses. CDS Hooks summary length,
+  topic and selection behavior, another patient in one message, and the content
+  business rules are recorded. A validator that cannot be reached is recorded.
 - `strict`: a defect refuses the message. A FHIR profile refusal names the
   validator issues it was based on; a CDS Hooks response-rules refusal names the
   rule (and the violating path) as well.
@@ -495,7 +541,7 @@ the member the request names by its own system), routing, replay, a repeated
 member name in any body, the contract line stamped on an answer's frame, and the
 check of a payload this gateway itself translated between IG lines.
 
-**Reading a finding.** At `observe` and `strict`, if you run the gateway yourself — through the SHN Kit or a
+**Reading a finding.** At `observe`, `structural` and `strict`, if you run the gateway yourself — through the SHN Kit or a
 self-hosted deployment — findings appear in your own gateway log and observer
 stream: look for the `conformance:` log line, or the `conformance.observed` event
 if you're watching the observer stream. If SHN hosts your gateway, ask your SHN

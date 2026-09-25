@@ -22,12 +22,28 @@ func safeSoRError(err error) *SoRReadError {
 	}
 	return &SoRReadError{Kind: SoRInvalidResponse}
 }
+
+// writeSoRFailure answers a failed system-of-record read on a request this
+// participant sent (an ingress or origination route). A leg received from the
+// network answers through refuseSoRFailure instead.
 func writeSoRFailure(w http.ResponseWriter, err error) bool {
 	if err == nil {
 		return false
 	}
 	status, msg := SoRFailureResponse(err)
 	writeJSON(w, status, map[string]string{"error": msg})
+	return true
+}
+
+// refuseSoRFailure answers a failed system-of-record read on an inbound leg as
+// this participant's answer: framed to the requester with the safe
+// status and message, never the read error's own text.
+func (g *Gateway) refuseSoRFailure(w http.ResponseWriter, r *http.Request, leg inboundLeg, env shnsdk.Envelope, tok shnsdk.Token, answerTok string, err error) bool {
+	if err == nil {
+		return false
+	}
+	status, msg := SoRFailureResponse(err)
+	g.refuseInbound(w, r, leg, env, tok, answerTok, status, msg, nil)
 	return true
 }
 

@@ -21,8 +21,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
@@ -67,43 +69,66 @@ func (n *nativeResponder) handlePASClaimUpdateNative(ctx context.Context, corrID
 		return refused, nil
 	}
 	related := f.relatedClaim
-	claimed, why, err := n.beginClaimUpdate(subjectPCI, related)
-	if err != nil {
-		return LegResult{Status: http.StatusBadGateway, Message: "holder write failed (begin update)"}, nil
+	// The ledger records the amendment; it never decides whether the payer sees
+	// it. An amendment that binds the pend this gateway recorded owns that row
+	// until the payer answers. One that does not — no pend here, one the payer
+	// already decided, another amendment still with the payer, or a ledger that
+	// could not be read — is forwarded all the same, the payer decides, and the
+	// reason is noted for the operator. Its answer is recorded only onto the
+	// authorization this gateway already holds for the same requester, or for
+	// none (unboundRecordable): an unbound amendment never creates a row, so it
+	// can never make a correlation name a second authorization. An amendment of
+	// another requester's authorization binds nothing and writes nothing.
+	claimed, why := false, pendRefusalNoPriorClaim
+	recordable := false
+	if related != "" {
+		requester := requesterHolderOf(ctx)
+		if n.heldByAnotherRequester(subjectPCI, related, requester) {
+			// Another requester's authorization: never bound, never written.
+			why = pendRefusalOtherRequester
+		} else {
+			var err error
+			if claimed, why, err = n.beginClaimUpdate(subjectPCI, related); err != nil {
+				claimed, why = false, pendRefusalLedgerUnavailable
+			}
+			recordable = claimed || n.unboundRecordable(subjectPCI, related, requester)
+		}
 	}
-	if !claimed {
-		// Fail-safe: divergence, no prior pend, a concurrent amendment or an
-		// authorization the payer has already decided ⇒ 409 stating WHICH, never a
-		// silent transition. Amending an authorization the payer decided is the
-		// limitation this gateway discloses rather than papers over.
-		return LegResult{Status: http.StatusConflict, Message: claimUpdateRefusal(why)}, nil
+	var release func() error
+	if claimed {
+		// Once: a re-pend's Commit releases the claim itself, and the deferred
+		// Rollback must not release it again (another amendment may hold it by
+		// then).
+		var once sync.Once
+		var releaseErr error
+		release = func() error {
+			once.Do(func() {
+				if releaseErr = n.store.ReleaseClaimUpdate(subjectPCI, related); releaseErr != nil {
+					log.Printf("gateway: pas-claim-update: correlation %s: the amendment's claim could not be released: %v", corrID, releaseErr)
+				}
+			})
+			return releaseErr
+		}
+	} else {
+		log.Printf("gateway: pas-claim-update: correlation %s: amendment forwarded without binding a local pend (%s)", corrID, why)
+		noteOn(ctx, PendAmendmentUnboundEvent+":"+string(why))
 	}
-	release := func() { _ = n.store.ReleaseClaimUpdate(subjectPCI, related) }
+	var rollback func()
+	if release != nil {
+		rollback = func() { _ = release() }
+	}
 
 	// Endpoint evidence: prefer the probe-retained, same-origin-validated #<line> $submit
 	// endpoint for THIS routed pa.pas line (evidence absent ⇒ the PAS base, which is n.baseURL unless PAYER_DAVINCI_PAS_BASE_URL is set).
+	// Whatever the payer answers is relayed, a conflict included: whether and when
+	// to send the amendment again is the requester's decision.
 	submitURL := n.resolvedURL(ctx, "pa.pas", n.pasBase(), "/Claim/$submit")
 	up, bad, err := n.post(ctx, submitURL, "", forward, "pas-claim-update", "PAS update")
 	if err != nil {
-		return LegResult{Rollback: release}, err // post-Begin fault MUST still release the claim
-	}
-	if bad.Status == http.StatusConflict && isPayerVersionConflict(up.raw) {
-		// The payer's store refused the amendment's write because its own pend-resolution
-		// timer wrote the same ClaimResponse first (nativepas_conflict.go): the amendment was
-		// not persisted, so re-issue THE IDENTICAL payload exactly once after that write has
-		// landed. Whatever the re-issue answers takes the ordinary path below — relayed
-		// either way. The second attempt is recorded for the operator.
-		if werr := sleepCtx(ctx, payerVersionConflictRetryDelay); werr != nil {
-			return LegResult{Rollback: release}, werr
-		}
-		noteOn(ctx, RetryVersionConflictEvent)
-		up, bad, err = n.post(ctx, submitURL, "", forward, "pas-claim-update", "PAS update (re-issued after the payer's version conflict)")
-		if err != nil {
-			return LegResult{Rollback: release}, err
-		}
+		return LegResult{Rollback: rollback}, err // post-Begin fault MUST still release the claim
 	}
 	if bad.Status != 0 {
-		bad.Rollback = release // a post-Begin partner non-2xx MUST release the claim (relay path)
+		bad.Rollback = rollback // a post-Begin partner non-2xx MUST release the claim (relay path)
 		return bad, nil
 	}
 	// FR-G28: validate the complete partner Bundle without changing its bytes. A
@@ -114,20 +139,20 @@ func (n *nativeResponder) handlePASClaimUpdateNative(ctx context.Context, corrID
 	if lr.Status != 0 {
 		if n.refusesAnswer(ctx, RuleAnswerShape, up.raw) {
 			_, lr = validateRelayedPASResponse(corrID, "pas-claim-update", up.raw)
-			lr.Rollback = release
+			lr.Rollback = rollback
 			return lr, nil
 		}
-		return relayUnread(ctx, up, RuleAnswerShape, release), nil
+		return relayUnread(ctx, up, RuleAnswerShape, rollback), nil
 	}
 	// The answer is the payer's own bytes, whatever they say.
 	answer := LegResult{
 		ResponseSubjectForeign: true,
 		Response:               relay.Exact(up.body, "application/fhir+json"),
-		Rollback:               release,
+		Rollback:               rollback,
 	}
 	pended, _, err := shnsdk.ParsePendedResponse(response)
 	if err != nil {
-		return LegResult{Status: http.StatusBadGateway, Message: "upstream payer PAS update response unparseable", Rollback: release}, nil
+		return LegResult{Status: http.StatusBadGateway, Message: "upstream payer PAS update response unparseable", Rollback: rollback}, nil
 	}
 	requester := requesterHolderOf(ctx)
 	answerKeys, created := pasAnswerKeys(requester, response)
@@ -136,30 +161,45 @@ func (n *nativeResponder) handlePASClaimUpdateNative(ctx context.Context, corrID
 		// still bind, and the new response's identifiers join the ones already
 		// recorded. Release is the ledger's own transition here, not a rollback, so
 		// it runs as the Commit — the Rollback stays armed for the paths that never
-		// reach it.
-		answer.Commit = func() error {
-			if rerr := n.store.ReleaseClaimUpdate(subjectPCI, related); rerr != nil {
-				return rerr
+		// reach it. An amendment that did not bind releases nothing: the re-pend is
+		// recorded by the ledger's rules, which never reopen another amendment in
+		// progress.
+		if !recordable {
+			return answer, nil // relayed; there is no prior claim to key a record on
+		}
+		pend := recordPASPend(ctx, n.store, subjectPCI, related,
+			mergePendKeys(requester, answerKeys, pasRequestKeys(requestFHIR)), created)
+		answer.Commit = pend
+		if claimed {
+			answer.Commit = func() error {
+				if rerr := release(); rerr != nil {
+					// The hold stays (it lapses on its own), but the payer's
+					// re-pend is still recorded: its keys are indexed and the
+					// held state is left alone.
+					_ = pend()
+					return rerr
+				}
+				return pend()
 			}
-			return recordPASPend(ctx, n.store, subjectPCI, related,
-				mergePendKeys(requester, answerKeys, pasRequestKeys(requestFHIR)), created)()
 		}
 		return answer, nil
 	}
 	parsed, err := shnsdk.ParseClaimResponse(response)
 	if err != nil {
-		return LegResult{Status: http.StatusBadGateway, Message: "upstream payer PAS update response untranslatable", Rollback: release}, nil
+		return LegResult{Status: http.StatusBadGateway, Message: "upstream payer PAS update response untranslatable", Rollback: rollback}, nil
 	}
 	if parsed.Outcome == "denied" && payerStatedAuthNumber(response) != "" {
 		if n.refusesAnswer(ctx, RuleEOBDecision, up.raw) {
-			return LegResult{Status: http.StatusBadGateway, Message: "payer decision states both a denial and an authorization number", Rollback: release}, nil
+			return LegResult{Status: http.StatusBadGateway, Message: "payer decision states both a denial and an authorization number", Rollback: rollback}, nil
 		}
-		return relayUnread(ctx, up, RuleEOBDecision, release), nil
+		return relayUnread(ctx, up, RuleEOBDecision, rollback), nil
 	}
 	// A terminal decision on the update leg: relayed, and recorded as the decision
 	// the payer dated. No EOB on the update leg. Rollback stays armed so a
 	// post-Begin response-leg failure still releases.
-	answer.Commit = recordPASDecision(ctx, n.store, subjectPCI, related, pendOutcomeOf(parsed.Outcome), created, nil)
+	if recordable {
+		answer.Commit = recordPASDecision(ctx, n.store, subjectPCI, related, pendOutcomeOf(parsed.Outcome), created, nil)
+	}
 	return answer, nil
 }
 
@@ -177,18 +217,47 @@ func (n *nativeResponder) beginClaimUpdate(subjectPCI, related string) (bool, Pe
 	return false, PendRefusalNotPended, nil
 }
 
-// claimUpdateRefusal states why an amendment could not bind. The reasons stay
-// distinguishable: an authorization this payer has already decided is a different
-// answer from one it never pended, and a requester can act on the difference.
-func claimUpdateRefusal(why PendRefusal) string {
-	switch why {
-	case PendRefusalDecided:
-		return "claim already decided; amendment of a decided authorization is not supported"
-	case PendRefusalInProgress:
-		return "an amendment of this authorization is already in progress"
-	default:
-		return "ClaimUpdate references no pending claim available for this patient"
+// PendAmendmentUnboundEvent is noted when an amendment reached the payer without
+// binding a pend this gateway recorded; the reason (a PendRefusal, or
+// pendRefusalLedgerUnavailable) follows a colon. The payer's answer is relayed
+// and recorded either way.
+const PendAmendmentUnboundEvent = "pend.amendment-unbound"
+
+// The reasons an amendment did not bind beyond the ledger's own: the ledger
+// could not be read, or the update names no prior claim to bind.
+const (
+	pendRefusalLedgerUnavailable PendRefusal = "ledger-unavailable"
+	pendRefusalNoPriorClaim      PendRefusal = "no-prior-claim"
+	pendRefusalOtherRequester    PendRefusal = "other-requester"
+)
+
+// heldByAnotherRequester reports whether the authorization an amendment names is
+// recorded for a different requester. Such an amendment is forwarded all the
+// same, but binds and records nothing: one requester never moves another's
+// authorization.
+func (n *nativeResponder) heldByAnotherRequester(subjectPCI, related, requester string) bool {
+	ledger, ok := LedgerOf(n.store)
+	if !ok || requester == "" {
+		return false
 	}
+	rec, found, err := ledger.PendRecordOf(subjectPCI, related)
+	return err == nil && found && rec.RequesterHolder != "" && rec.RequesterHolder != requester
+}
+
+// unboundRecordable reports whether the payer's answer to an amendment that did
+// not bind may be recorded: only onto an authorization this gateway already
+// holds for this patient under that correlation, recorded for the same
+// requester (or for none). Anything else records nothing.
+func (n *nativeResponder) unboundRecordable(subjectPCI, related, requester string) bool {
+	ledger, ok := LedgerOf(n.store)
+	if !ok || requester == "" {
+		return false
+	}
+	rec, found, err := ledger.PendRecordOf(subjectPCI, related)
+	if err != nil || !found {
+		return false
+	}
+	return rec.RequesterHolder == "" || rec.RequesterHolder == requester
 }
 
 // pendOutcomeOf maps a parsed PAS decision to the ledger's outcome. Only approved

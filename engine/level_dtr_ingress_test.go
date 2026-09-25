@@ -20,16 +20,16 @@ const dtrLeg = "dtr-questionnaire-fetch"
 
 // levelDTRRow posts body to the provider DTR ingress at level, the payer
 // declaring framed operations and answering with packageAnswer, and returns
-// the exchange, the EHR's answer and the content findings recorded. seam
-// runs the ingress under the E-05 enrichment seam, with a system of
+// the exchange, the EHR's answer and the content findings recorded. enrich
+// runs the ingress with the participant opted in to enrichment (E-04, E-05), with a system of
 // record that derives the subject from its own Patient record.
-func levelDTRRow(t *testing.T, s *prefetchSoR, level ConformanceEnforcement, seam bool, body []byte) (*inProcessExchange, *httptest.ResponseRecorder, []ConformanceFinding) {
+func levelDTRRow(t *testing.T, s *prefetchSoR, level ConformanceEnforcement, enrich bool, body []byte) (*inProcessExchange, *httptest.ResponseRecorder, []ConformanceFinding) {
 	t.Helper()
 	env := newInProcessExchange(t)
 	env.originator.cfg.SoR = s.sor()
-	if seam {
+	if enrich {
 		env.originator.cfg.SoR = recordSoR{searchingPrefetchSoR{s}}
-		env.originator.cfg.enrichDTRPatient = true
+		env.originator.cfg.EnrichNativeRequests = true
 	}
 	env.originator.cfg.ConformanceEnforcement = level
 	var findings []ConformanceFinding
@@ -49,7 +49,7 @@ func levelDTRRow(t *testing.T, s *prefetchSoR, level ConformanceEnforcement, sea
 func wantDTRLevelOutcome(t *testing.T, level ConformanceEnforcement, env *inProcessExchange, rec *httptest.ResponseRecorder, findings []ConformanceFinding, body []byte, rule string, status int, msg string) {
 	t.Helper()
 	wantLegLevelOutcome(t, dtrLeg, level, env, rec, findings, rule, status, msg)
-	if level == EnforcementStrict {
+	if refusesAt(level, rule) {
 		return
 	}
 	if _, sent := sentOperation(t, env); !bytes.Equal(sent, body) {
@@ -109,7 +109,7 @@ func TestLevelDTRIngress_InconsistentPatient(t *testing.T) {
 // come in.
 func TestLevelDTRIngress_MixedRequestBindsTheCoverageSubject(t *testing.T) {
 	body := ehrParams(dtrOtherPatient(ehrOrderParam("sr0", prefetchMember)), ehrCoverageParam(prefetchMember, "00001"), dtrQuestionnaire)
-	for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve} {
+	for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve, EnforcementStructural} {
 		t.Run(level.String(), func(t *testing.T) {
 			g := prefetchGateway(newPrefetchSoR())
 			g.cfg.ConformanceEnforcement = level
@@ -145,7 +145,7 @@ func TestLevelDTRIngress_CarriedResourceFence(t *testing.T) {
 	}
 }
 
-// The Patient fill under the seam: a system of record that cannot supply the
+// The Patient fill under enrichment: a system of record that cannot supply the
 // patient's record refuses at strict; below strict the request is carried as
 // the EHR sent it, with nothing obtained.
 func TestLevelDTRIngress_PatientFillFailsCarriesAsSent(t *testing.T) {
@@ -174,7 +174,7 @@ func TestLevelDTRIngress_PatientFillFailsCarriesAsSent(t *testing.T) {
 				if level != EnforcementNone && findings[0].Verdict != "unavailable" {
 					t.Fatalf("a fill that could not complete is recorded as unavailable, got %+v", findings[0])
 				}
-				if level == EnforcementObserve {
+				if level == EnforcementObserve || level == EnforcementStructural {
 					wantRoutedCorrelation(t, env, findings[0])
 				}
 			})

@@ -17,6 +17,7 @@ import (
 	"net/http"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
+	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
 // transmitScope rides on a response writer and says which side of which leg
@@ -177,10 +178,46 @@ func sealRequest(id relay.BuilderID, b []byte, contentType string) relay.Payload
 // responderFailed answers a LegResponder error on leg with a 500. A request
 // the responder could not send to its own system because the ownership table
 // refused it is also reported on the observer seam.
-func (g *Gateway) responderFailed(w http.ResponseWriter, leg string, err error) {
+func (g *Gateway) responderFailed(w http.ResponseWriter, r *http.Request, leg inboundLeg, env shnsdk.Envelope, tok shnsdk.Token, answerTok string, err error) {
+	status, msg := g.responderFailure(leg.tx, err)
+	g.refuseInbound(w, r, leg, env, tok, answerTok, status, msg, nil)
+}
+
+// responderFailure decides how a LegResponder error on leg is answered, framed
+// as this gateway's answer: the requester sees whose failure it was —
+// the payer's system not answering (502) or this gateway's own fault (500) —
+// never the error's own text. An ownership refusal is observed here.
+func (g *Gateway) responderFailure(leg string, err error) (int, string) {
 	if isOwnershipFault(err) {
 		k := relay.Key{Leg: leg, Role: relay.RoleRecipient, Direction: relay.DirectionRequest, Outcome: relay.OutcomeCarried}
 		g.observe(ObserverEvent{Kind: relay.RefusedEvent, LegType: k.Leg, Direction: k.Role.String() + "-" + k.Direction.String(), Detail: err.Error()})
 	}
-	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "responder failed"})
+	var up *upstreamFailure
+	if errors.As(err, &up) {
+		if up.sent {
+			return http.StatusBadGateway, errUpstreamNoUsableAnswer
+		}
+		return http.StatusBadGateway, errUpstreamNotReached
+	}
+	return http.StatusInternalServerError, "responder failed"
 }
+
+// upstreamFailure is a native forward that got no usable answer from the
+// payer's own system. sent says the request was written to it: a connection
+// that failed after that, a read that failed, or a body too large to relay.
+// Before that (a dial, TLS or token failure) the payer's system never saw it.
+type upstreamFailure struct {
+	err  error
+	sent bool
+}
+
+func (e *upstreamFailure) Error() string { return e.err.Error() }
+func (e *upstreamFailure) Unwrap() error { return e.err }
+
+// What a requester is told when the payer's own system gave no answer this
+// gateway could carry: whether it never saw the request, or may have acted on
+// it.
+const (
+	errUpstreamNotReached     = "the payer's system could not be reached"
+	errUpstreamNoUsableAnswer = "the payer's system received this request but gave no answer this gateway could carry; it may have acted on it: check its outcome before resending"
+)

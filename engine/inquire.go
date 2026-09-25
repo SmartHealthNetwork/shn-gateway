@@ -1114,7 +1114,7 @@ func (g *Gateway) handlePASInquireInbound(w http.ResponseWriter, r *http.Request
 	// of the member the inquiry names, never by the token.
 	subjectPCI, status, msg := g.bindInboundSubject(r.Context(), facts.member, bundleJSON)
 	if status != 0 {
-		// A system-of-record failure is this gateway's own 5xx, written bare by
+		// A system-of-record failure is this gateway's own 5xx, framed by
 		// refuseInbound like every other leg's.
 		g.refuseInbound(w, r, legPASClaimInquire, env, tok, answerTok, status, msg, nil)
 		return
@@ -1140,7 +1140,7 @@ func (g *Gateway) handlePASInquireInbound(w http.ResponseWriter, r *http.Request
 		}
 	}()
 	if err != nil {
-		g.responderFailed(w, "pas-claim-inquire", err)
+		g.responderFailed(w, r, legPASClaimInquire, env, tok, answerTok, err)
 		return
 	}
 	if result.Status != 0 {
@@ -1150,7 +1150,7 @@ func (g *Gateway) handlePASInquireInbound(w http.ResponseWriter, r *http.Request
 	}
 	responseFHIR, err := g.admit(result.Response, answerKey("pas-claim-inquire", relay.OutcomeAnswered))
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": errOwnershipFault})
+		g.refuseInbound(w, r, legPASClaimInquire, env, tok, answerTok, http.StatusInternalServerError, errOwnershipFault, nil)
 		return
 	}
 	// The answer's content checks name it as the participant's own answer.
@@ -1231,23 +1231,25 @@ func (g *Gateway) handlePASInquireInbound(w http.ResponseWriter, r *http.Request
 		writeLeg(w, respBytes)
 		return
 	}
+	// The ledger records and never gates: a write that fails is reported to the
+	// operator, never swallowed, and the payer's answer still reaches the
+	// requester. The ledger's transitions are reported by the write itself, so
+	// one that failed reports none; the notes below are about the lookup, and
+	// stand either way.
+	writeFailed := false
 	if ledgerCommit != nil {
 		if err := ledgerCommit(); err != nil {
-			// The established holder-write contract for the PAS legs: a failed write
-			// is reported, never swallowed. The payer's bytes are not sent in that
-			// case, and the requester can ask again — an inquiry is a read, so
-			// repeating it is safe.
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "holder write failed"})
-			return
+			writeFailed = true
+			g.payerLocalWriteFailed("pas-claim-inquire", env.Metadata.CorrelationID, err)
 		}
 	}
-	if result.Commit != nil {
+	if !writeFailed && result.Commit != nil {
 		if err := result.Commit(); err != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "holder write failed"})
-			return
+			writeFailed = true
+			g.payerLocalWriteFailed("pas-claim-inquire", env.Metadata.CorrelationID, err)
 		}
 	}
-	committed = true
+	committed = !writeFailed
 	for _, e := range events {
 		g.observe(e)
 	}

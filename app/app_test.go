@@ -349,6 +349,58 @@ func TestBuildWiresKnownMemberOptInToGateway(t *testing.T) {
 	}
 }
 
+// TestBuildWiresEnrichmentOptInToGateway proves ENRICH_NATIVE_REQUESTS reaches
+// the engine.Config build() hands to engine.New, and that carrying a native
+// request as sent is the default. Deleting the
+// "gwCfg.EnrichNativeRequests = cfg.EnrichNativeRequests" line, or the env read
+// in loadConfig, leaves the "true" row red. That the engine honors the field is
+// proven by the engine's enrich_native_test.go rows. A value outside true/false
+// refuses to boot.
+func TestBuildWiresEnrichmentOptInToGateway(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		env     map[string]string
+		want    bool
+		wantErr string
+		wantLog string
+	}{
+		{name: "unset carries native requests as sent", wantLog: "ENRICH_NATIVE_REQUESTS=false"},
+		{name: "false carries native requests as sent", env: map[string]string{"ENRICH_NATIVE_REQUESTS": "false"}, wantLog: "ENRICH_NATIVE_REQUESTS=false"},
+		{name: "true opts in", env: map[string]string{"ENRICH_NATIVE_REQUESTS": "true"}, want: true, wantLog: "ENRICH_NATIVE_REQUESTS=true"},
+		{name: "other value refuses to boot", env: map[string]string{"ENRICH_NATIVE_REQUESTS": "yes"}, wantErr: "ENRICH_NATIVE_REQUESTS must be true or false"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			extra := map[string]string{"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate"}
+			for k, v := range tc.env {
+				extra[k] = v
+			}
+			var output bytes.Buffer
+			previous := log.Writer()
+			log.SetOutput(&output)
+			defer log.SetOutput(previous)
+			b, _, err := buildProviderForPopulate(t, extra)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("build err = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("build: %v", err)
+			}
+			if got := b.enrichNativeRequests; got != tc.want {
+				t.Errorf("Gateway enriches native requests = %v, want %v", got, tc.want)
+			}
+			if tc.wantLog != "" && !strings.Contains(output.String(), tc.wantLog) {
+				t.Errorf("boot log missing %q: %s", tc.wantLog, output.String())
+			}
+			if !tc.want && strings.Contains(output.String(), "ENRICH_NATIVE_REQUESTS=true") {
+				t.Errorf("boot log claims enrichment at the default: %s", output.String())
+			}
+		})
+	}
+}
+
 // TestBuildWiresConformanceEnforcementToNativeResponder proves build()'s
 // NativeOption list actually gives the native CRD responder the SAME
 // enforcement policy as the rest of the gateway (WithConformancePolicy,
@@ -2367,5 +2419,123 @@ func TestCheckTargets_PayerDavinciBackendHeaders(t *testing.T) {
 		if !seen[id] {
 			t.Errorf("control target %s missing", id)
 		}
+	}
+}
+
+// TestLoadConfig_PayerEligibilityURL: a payer declares its own eligibility
+// endpoint as an absolute http(s) URL on a payer gateway that forwards to its
+// payer's system; anything else refuses to boot. Unset is the default: the
+// gateway answers eligibility from the payer's records.
+func TestLoadConfig_PayerEligibilityURL(t *testing.T) {
+	base := func(extra map[string]string) map[string]string {
+		env := map[string]string{
+			"ROLE": "payer", "SHN_SECRETS": "/x", "SHN_DISCOVERY_URL": "https://d",
+			"PAYER_DAVINCI_BASE_URL": "https://payer.example",
+		}
+		for k, v := range extra {
+			env[k] = v
+		}
+		return env
+	}
+	for _, tc := range []struct {
+		name    string
+		env     map[string]string
+		want    string
+		wantErr string
+	}{
+		{name: "unset answers from the records", env: base(nil)},
+		{name: "declared", env: base(map[string]string{"PAYER_ELIGIBILITY_URL": "https://payer.example/fhir/CoverageEligibilityRequest/$submit"}),
+			want: "https://payer.example/fhir/CoverageEligibilityRequest/$submit"},
+		{name: "relative refuses", env: base(map[string]string{"PAYER_ELIGIBILITY_URL": "/CoverageEligibilityRequest"}), wantErr: "absolute http(s) URL"},
+		{name: "other scheme refuses", env: base(map[string]string{"PAYER_ELIGIBILITY_URL": "ftp://payer.example/elig"}), wantErr: "absolute http(s) URL"},
+		{name: "without the payer's base refuses", env: func() map[string]string {
+			e := base(map[string]string{"PAYER_ELIGIBILITY_URL": "https://payer.example/elig"})
+			delete(e, "PAYER_DAVINCI_BASE_URL")
+			return e
+		}(), wantErr: "requires PAYER_DAVINCI_BASE_URL"},
+		{name: "a provider gateway refuses", env: map[string]string{
+			"ROLE": "provider", "SHN_SECRETS": "/x", "SHN_DISCOVERY_URL": "https://d",
+			"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate",
+			"PAYER_ELIGIBILITY_URL":     "https://payer.example/elig",
+		}, wantErr: "payer gateway setting"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := loadConfig(func(k string) string { return tc.env[k] })
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			if cfg.PayerEligibilityURL != tc.want {
+				t.Fatalf("PayerEligibilityURL = %q, want %q", cfg.PayerEligibilityURL, tc.want)
+			}
+		})
+	}
+}
+
+// TestBuildWiresEligibilityURLToNativeResponder proves build() gives the
+// native responder the payer's declared eligibility endpoint and states the
+// posture on the boot line in both states. Deleting the WithEligibilityURL
+// append in build() leaves the declared row red.
+func TestBuildWiresEligibilityURLToNativeResponder(t *testing.T) {
+	payer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer payer.Close()
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	keyBody := fmt.Sprintf(`{"pubkey":%q}`, base64.StdEncoding.EncodeToString(pub))
+	keys := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(keyBody))
+	}))
+	defer keys.Close()
+	disc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"endpoints":{},"authzPublicKeyURL":%q,"hubTransportKeyURL":%q}`, keys.URL, keys.URL)
+	}))
+	defer disc.Close()
+	for _, tc := range []struct {
+		name, url, wantLog string
+	}{
+		{"unset", "", "PAYER_ELIGIBILITY_URL unset"},
+		{"declared", payer.URL + "/fhir/CoverageEligibilityRequest/$submit", "PAYER_ELIGIBILITY_URL set"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			id, err := shnsdk.GenerateIdentity("h-test-payer-eligibility-" + tc.name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := shnsdk.WriteBundle(dir, id, "payer", "https://holder.example"); err != nil {
+				t.Fatal(err)
+			}
+			env := map[string]string{
+				"ROLE": "payer", "SHN_SECRETS": dir, "SHN_DISCOVERY_URL": disc.URL, "SHN_FAKE_VALIDATOR": "1",
+				"FHIR_DATA_URL": "https://sor.example/fhir", "PAYER_DAVINCI_BASE_URL": payer.URL,
+				"PAYER_DAVINCI_CRD_SERVICE_ID": "svc", "PAYER_ELIGIBILITY_URL": tc.url,
+			}
+			var out bytes.Buffer
+			b, err := build(context.Background(), func(k string) string { return env[k] }, &out, nil)
+			if err != nil {
+				t.Fatalf("build: %v", err)
+			}
+			t.Cleanup(func() {
+				if b.gateway != nil {
+					_ = b.gateway.Close()
+				}
+			})
+			reader, ok := b.nativeResponder.(interface{ EligibilityURLForTest() string })
+			if !ok {
+				t.Fatalf("nativeResponder %T does not expose EligibilityURLForTest", b.nativeResponder)
+			}
+			if got := reader.EligibilityURLForTest(); got != tc.url {
+				t.Fatalf("native responder's eligibility URL = %q, want %q", got, tc.url)
+			}
+			if !strings.Contains(out.String(), tc.wantLog) {
+				t.Fatalf("boot output missing %q: %s", tc.wantLog, out.String())
+			}
+		})
 	}
 }

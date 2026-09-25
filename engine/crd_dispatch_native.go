@@ -215,7 +215,7 @@ func (g *Gateway) handleCRDDispatchInbound(w http.ResponseWriter, r *http.Reques
 	}
 	result, err := g.cfg.Responder.Handle(ctx, "crd-order-dispatch", env.Metadata.CorrelationID, subjectPCI, reqJSON)
 	if err != nil {
-		g.responderFailed(w, "crd-order-dispatch", err)
+		g.responderFailed(w, r, legCRDOrderDispatch, env, tok, answerTok, err)
 		return
 	}
 	if result.Status != 0 {

@@ -244,6 +244,7 @@ func TestPrefetch_HistoryOmittedForMemberNotHeld(t *testing.T) {
 	s := newPrefetchSoR()
 	obs := &observed{}
 	env := newInProcessExchange(t)
+	env.originator.cfg.EnrichNativeRequests = true // the prefetch fill this row pins
 	env.originator.cfg.SoR = s.sor()
 	env.originator.cfg.Observer = obs.observe
 	rec := httptest.NewRecorder()
@@ -273,6 +274,37 @@ func TestPrefetch_HistoryOmittedForMemberNotHeld(t *testing.T) {
 		"patient absent":  strangerEHRRequest(`"coverage":` + ehrCoverage),
 		"coverage absent": strangerEHRRequest(patientOnly),
 		"no prefetch":     strangerEHRRequest("-"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := newPrefetchSoR()
+			env := newInProcessExchange(t)
+			env.originator.cfg.EnrichNativeRequests = true
+			env.originator.cfg.SoR = s.sor()
+			rec := httptest.NewRecorder()
+			env.originator.handleCRDIngress(rec, crdIngressPost(body))
+			refusedBeforeTheNetwork(t, env, rec, http.StatusUnprocessableEntity, "patient not found in system of record")
+		})
+	}
+	// Without enrichment nothing is filled, so a request without the patient is
+	// carried as sent; one without the coverage still has nothing to be routed
+	// by and is refused.
+	t.Run("by default, patient absent is carried as sent", func(t *testing.T) {
+		s := newPrefetchSoR()
+		env := newInProcessExchange(t)
+		env.originator.cfg.SoR = s.sor()
+		body := strangerEHRRequest(`"coverage":` + ehrCoverage)
+		rec := httptest.NewRecorder()
+		env.originator.handleCRDIngress(rec, crdIngressPost(body))
+		if rec.Code != http.StatusOK || env.routeHitCount() != 1 {
+			t.Fatalf("answer %d %s", rec.Code, rec.Body.String())
+		}
+		if _, ok := valueOf(t, sentRequest(t, env), "prefetch", "patient"); ok {
+			t.Fatal("nothing may be added without enrichment")
+		}
+	})
+	for name, body := range map[string][]byte{
+		"by default, coverage absent": strangerEHRRequest(patientOnly),
+		"by default, no prefetch":     strangerEHRRequest("-"),
 	} {
 		t.Run(name, func(t *testing.T) {
 			s := newPrefetchSoR()

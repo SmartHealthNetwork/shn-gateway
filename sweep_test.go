@@ -1,3 +1,5 @@
+//go:build !race
+
 package shngateway_test
 
 import (

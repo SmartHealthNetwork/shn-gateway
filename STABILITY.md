@@ -48,8 +48,25 @@ asking for it (`Claim/$inquire`, leg type `pas-claim-inquire`).
 
 ## Conformance enforcement levels
 
-`CONFORMANCE_ENFORCEMENT` takes `none`, `observe` (the default when unset) or
-`strict` (see [docs/CONFIGURATION.md](docs/CONFIGURATION.md)).
+`CONFORMANCE_ENFORCEMENT` takes `none`, `observe` (the default when unset),
+`structural` or `strict` (see [docs/CONFIGURATION.md](docs/CONFIGURATION.md)).
+
+**New in v0.54.0** (v0.53.x and earlier refuse to boot on `structural`):
+
+- The new `structural` level runs every check, refuses a message whose structure is
+  broken with the status and body `strict` gives it, and records every other
+  defect as `observe` does. A FHIR validator issue is classified by the
+  validator's message id: only invariants and the validator's recognized issues
+  for a code outside its code list (licensed code systems included) are
+  recorded, and every other FHIR profile issue, any other terminology issue,
+  every fatal issue and an issue it cannot classify refuses. A validator that cannot run is recorded, not
+  refused.
+- A `Parameters` resource is now sent to the validator inside the operation's
+  `resource` parameter, so the validator reads it. A validator that answers that
+  it was given no resource (`HAPI-0992`) is treated as unavailable at every
+  level: `strict` refuses it with `500` (it was a `422` naming the validator's
+  text before), `observe` and `structural` record it as unavailable and relay.
+- Unset, `none`, `observe` and `strict` are otherwise unchanged.
 
 **Behavior change in v0.53.0** (v0.52.0 refuses to boot on `observe`):
 
@@ -68,9 +85,9 @@ asking for it (`Claim/$inquire`, leg type `pas-claim-inquire`).
 - The new `observe` level runs every check, records each defect as a finding (the
   `conformance:` log line and the `conformance.observed` event) and carries the
   message as sent, apart from the gateway's registered edits (the callback
-  removed, prefetch and coverage obtained, and payer identity mapping; see the
-  participant protocol §7a.4). Operators who want findings without refusals set
-  `observe`.
+  removed, prefetch and coverage obtained where the participant has opted in to
+  them, and payer identity mapping; see the participant protocol §7a.4).
+  Operators who want findings without refusals set `observe`.
 - A content defect (a request's or answer's own shape or internal consistency, a
   prefetch value the system of record cannot supply, an answer this gateway
   cannot read) refuses only at `strict`, with the status and body it has always
@@ -111,8 +128,9 @@ carried by default.**
 - The provider's own Patient append on `$questionnaire-package`, which earlier
   releases applied under `SHN_ACCEPT_UNKNOWN_MEMBERS`, is no longer applied: a
   request carrying no Patient is carried as sent. It returns as a participant
-  opt-in. The other registered edits (callback removed, prefetch obtained, coverage
-  obtained, payer identity mapping) are unchanged.
+  opt-in (`ENRICH_NATIVE_REQUESTS`, below). The other registered edits (callback
+  removed, prefetch obtained, coverage obtained, payer identity mapping) are
+  unchanged in this release.
 - The receiving gateway no longer compares the patient the leg's token names with
   the patient the request names on the CRD, DTR, PAS and inquiry legs: it handles
   the member the request names as it would directly. A request whose member the
@@ -141,6 +159,52 @@ carried by default.**
 - **Breaking (Go API):** a `LegResponder` on the payer's CRD, DTR, PAS and inquiry
   legs is handed the payer's own binding of the member the request names as its
   subject, not the leg token's subject.
+
+## Enrichment of native requests
+
+**Behavior change in v0.54.0: a Da Vinci-native request is carried as sent unless
+the participant opts in to enrichment.**
+
+- `ENRICH_NATIVE_REQUESTS` takes `true` or `false`; unset means `false`, and any
+  other value refuses to boot. It governs the provider ingress's three enrichments,
+  each read from the participant's own system of record: the CDS Hooks prefetch fill,
+  the `$questionnaire-package` Coverage append and the `$questionnaire-package`
+  Patient append (registered edits E-02, E-04 and E-05).
+- By default none of them runs. A CDS Hooks request is sent with only `fhirServer`
+  and `fhirAuthorization` removed; a `$questionnaire-package` request is sent
+  byte for byte. Earlier releases added the advertised prefetch values and the
+  Coverage a request left out without being asked; an EHR that relied on that now
+  sends them itself, or its gateway sets `ENRICH_NATIVE_REQUESTS=true`.
+- A coverage a request leaves out is still read from the system of record, to
+  choose the payer; it is not added to the request. That read is made under the
+  system's own Patient id, so a system that names the patient by another id no longer
+  refuses such a request by default, on the CDS Hooks and questionnaire-package
+  ingress alike (it still does under the opt-in). A request whose coverage cannot be found is refused as before.
+- With `ENRICH_NATIVE_REQUESTS=true` the three edits behave as in earlier releases,
+  and the Patient append no longer depends on the unknown-member setting.
+- Requests the gateway builds itself (`ORIGINATION_PROFILE`) are not affected.
+- **Go API (additive):** `engine.Config.EnrichNativeRequests`; its zero value adds
+  nothing.
+
+## Payer eligibility endpoint
+
+Added in v0.54.0.
+- `PAYER_ELIGIBILITY_URL` declares a payer's own coverage-eligibility endpoint. A
+  coverage-eligibility request is then carried to it exactly and the payer's answer relayed
+  (an error answer as the payer's error). No answer is built from the payer's records in its
+  place, whatever the payer's system answers or fails to answer.
+- Unset, the default, is unchanged: the gateway answers eligibility from the payer's records.
+- On the forwarded path the member is bound by the payer's own records and a token naming
+  another patient is not refused, as on the prior-authorization legs. An answer about another
+  patient, or naming its patient otherwise than by reference, is relayed below `strict` and
+  refused at `strict` (`RulePatientAnswer`); one that cannot be read as a
+  `CoverageEligibilityResponse`, or names no patient at all, is refused at `structural` and `strict` (`RuleAnswerShape`); one naming
+  the patient by the payer's own Patient id for that member is the same patient. A failed read
+  of the payer's records for that comparison refuses only at `strict`.
+- The request, and the payer's answer, are `$validate`d at the conformance level (no call at
+  `none`); the relayed PAS and questionnaire answers are not. A request the level refuses is
+  refused before the payer's system is called.
+- **Go API (additive):** `engine.WithEligibilityURL`, a `NativeOption`.
 
 ## Observational source certification
 
@@ -323,16 +387,68 @@ or global failure state is introduced.
   a timed-out leg is still `unreachable`. Every other Hub-leg transport fault keeps the
   generic `502`.
 
+**Breaking in v0.54.0** (wire behaviour — the outcome behind the Hub is reported, not `502 hub routing failed`):
+
+- An originating gateway no longer reports every failure behind the Hub as
+  `502 {"error":"hub routing failed"}`, which now means only that the Hub could not be
+  reached. Instead:
+  - the Hub's own refusal reads `hub refused the exchange: <reason>`: `409` for a replayed
+    envelope, `502` for every other Hub refusal;
+  - an Authorization Framework denial is `403 authorization denied`;
+  - a recipient gateway's edge refusal is `502 the recipient's gateway refused the exchange
+    (<status>)`;
+  - a leg the recipient may have received or answered is a `502` that says so and asks the
+    caller to check the outcome before resending.
+- A timed-out Hub leg whose request had already been sent adds `; the recipient may have
+  received this request: check its outcome before resending` to the `504` text.
+- A payer gateway's own failure after the leg is authenticated (its system not reached,
+  or reached with no usable answer; a system-of-record read that failed; a validator it
+  cannot reach) is framed as its answer, so the requester reads that status and message.
+  On a PAS submit or update, every refusal it makes after its payer's system answered
+  adds `the payer's system received and answered this request: check its outcome before
+  resending`.
+- `LegMetric`: a framed counterpart failure is `answered`, not `failed`. The counterpart
+  reports it, and it no longer counts toward the requester's leg errors.
+- The Hub (`POST /route`) marks every error `X-SHN-Delivered: no | yes | unknown`.
+
+**Breaking in v0.54.0** (a payer gateway's pend ledger records and never gates):
+
+- A payer gateway no longer refuses a PAS amendment itself. The `409`s for no pend
+  recorded, an authorization already decided, and another amendment in progress are gone.
+  Every amendment reaches the payer's system and its answer is relayed. The ledger
+  records that answer; an amendment that did not bind a local pend is noted
+  `pend.amendment-unbound:<reason>`.
+- A record that cannot be written after the payer answered no longer withholds the
+  answer (it was `502 holder write failed`). The gateway emits `pa.local-write-failed`.
+- The payer's own `409` version conflict is relayed; the gateway no longer re-sends the
+  amendment once. The `retry:version-conflict` observer note is gone.
+- `engine.PendBegin` and `engine.PendRePend` take the current `PendRecord` and the store's
+  clock (`PendBegin(cur PendRecord, found bool, now time.Time)`,
+  `PendRePend(cur PendRecord, found bool, created, now time.Time)`), so a backend applies
+  `engine.PendInProgressStale`. An amendment's hold lapses after it, and a re-pend leaves a
+  live hold, its time included, alone. A third-party `PendLedger` backend must pass both
+  and must not refresh `LastTransition` itself after `PendRePend`.
+
+**Breaking in v0.54.0** (a caller's `X-Correlation-Id` is a trace value, never spent):
+
+- At the Da Vinci ingress, the caller's `X-Correlation-Id` is a trace value. Each call's
+  leg is sent under a freshly minted id, or under the PAS Claim's `urn:shn:correlation`
+  (the payer's key for the authorization). A value equal to one of the Claim's own
+  identifiers is also kept as the leg id. Every answer still echoes the caller's value as
+  `X-Correlation-Id` and adds the leg's id as `X-SHN-Leg-Id`. The gateway logs the mapping.
+- Reusing an `X-Correlation-Id`, or retrying, is never refused. The Hub's replay guard
+  keys the envelope (its correlation id and ciphertext hash), so only a byte-identical
+  envelope is refused `409`, and every call is sealed afresh.
+
 **Breaking in this release** (wire behaviour — a correlation id belongs to one patient):
 
 - A payer gateway refuses a prior-authorization submission with `409` (`correlation id
   already names another patient's authorization`) before its payer's system is asked, in
   two cases: a decision EOB for another patient is filed under that correlation id, or
-  another patient's authorization is still awaiting its decision under it. A
-  submission of this kind that the Hub forwarded (one outside its two-hour replay window)
-  previously reached the payer. If the gateway cannot read its store to decide, it answers
-  the Hub `502 {"error":"holder read failed"}` without asking the payer; the requester
-  sees `502 hub routing failed`.
+  another patient's authorization is still awaiting its decision under it. Such a
+  submission previously reached the payer. If the gateway cannot read its store to
+  decide, it answers `502 {"error":"holder read failed"}` without asking the payer (framed
+  as its answer since v0.54.0; before that the requester saw `502 hub routing failed`).
 
 **Breaking in this release** (`Store` connectors):
 

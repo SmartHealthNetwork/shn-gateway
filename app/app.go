@@ -148,8 +148,9 @@ type config struct {
 	// choice about which payload conformance checks its gateway runs and what
 	// a defect does: "none" (no payload conformance check runs and nothing is
 	// recorded), "observe" (every check runs, each defect is recorded as a
-	// finding and the message is relayed as sent) or "strict" (a defect
-	// refuses the message). Absent means "observe": loadConfig remaps it, and
+	// finding and the message is relayed as sent), "structural" (every check runs,
+	// a message whose structure is broken is refused and every other defect is
+	// recorded as at observe) or "strict" (a defect refuses the message). Absent means "observe": loadConfig remaps it, and
 	// that remap is the ONLY place in the tree where a level that is not
 	// strict comes from an omission — engine.ConformanceEnforcement's zero
 	// value is strict everywhere else. Network rules (authentication,
@@ -261,11 +262,17 @@ type config struct {
 	// mapping seam is off (verbatim relay, the prior behavior).
 	PayerDavinciBackendHeadersRaw string
 	PayerDavinciBackendHeaders    http.Header
-	PayerDavinciPayorOwnRaw       string
-	PayerDavinciPayorBackendRaw   string
-	PayerDavinciPayorOwn          shnsdk.PayerIdentifier
-	PayerDavinciPayorBackend      shnsdk.PayerIdentifier
-	PayerDavinciPayorEdge         bool // true iff both env vars were set and parsed clean
+	// PayerEligibilityURL is the payer's own coverage-eligibility endpoint, when
+	// it declares one: the absolute URL its system takes a POST of a
+	// CoverageEligibilityRequest on. The request is then carried there exactly
+	// and the payer's answer relayed. Unset: the gateway answers eligibility
+	// from the payer's records. Set by PAYER_ELIGIBILITY_URL (payer role only).
+	PayerEligibilityURL         string
+	PayerDavinciPayorOwnRaw     string
+	PayerDavinciPayorBackendRaw string
+	PayerDavinciPayorOwn        shnsdk.PayerIdentifier
+	PayerDavinciPayorBackend    shnsdk.PayerIdentifier
+	PayerDavinciPayorEdge       bool // true iff both env vars were set and parsed clean
 
 	// OriginationProfile selects the per-UC origination lane: "" and "demo" keep the
 	// self-contained demo order shape; "provider-data" originates every UC off the
@@ -312,6 +319,13 @@ type config struct {
 	// demographics of the Patient the request carries (the id alone when it carries
 	// none). Set by REQUIRE_KNOWN_MEMBERS ("true" or "false").
 	RequireKnownMembers bool
+	// EnrichNativeRequests is the participant's opt-in to having its gateway add
+	// what a Da Vinci-native request leaves out, from its own system of record:
+	// the CDS Hooks prefetch fill (E-02) and the questionnaire-package Coverage
+	// (E-04) and Patient (E-05) appends. By default (unset or "false") a native
+	// request is carried as sent. Set by ENRICH_NATIVE_REQUESTS ("true" or
+	// "false").
+	EnrichNativeRequests bool
 	// acceptUnknownMembersAlias holds the deprecated SHN_ACCEPT_UNKNOWN_MEMBERS. Set,
 	// it asks for what is now the default, so it only warns; unless it reads "0"
 	// or "false", together with REQUIRE_KNOWN_MEMBERS=true it contradicts it, and
@@ -503,6 +517,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 		PayerDavinciContractVersions:  splitTrimmed(getenv("PAYER_DAVINCI_CONTRACT_VERSIONS")),
 		PayerDavinciStrictExtensions:  getenv("PAYER_DAVINCI_STRICT_EXTENSIONS") == "true",
 		PayerDavinciBackendHeadersRaw: getenv("PAYER_DAVINCI_BACKEND_HEADERS"),
+		PayerEligibilityURL:           getenv("PAYER_ELIGIBILITY_URL"),
 		PayerDavinciPayorOwnRaw:       getenv("PAYER_DAVINCI_PAYOR_OWN"),
 		PayerDavinciPayorBackendRaw:   getenv("PAYER_DAVINCI_PAYOR_BACKEND"),
 		OriginationProfile:            getenv("ORIGINATION_PROFILE"),
@@ -608,8 +623,8 @@ func loadConfig(getenv func(string) string) (config, error) {
 
 	// THE default: an absent CONFORMANCE_ENFORCEMENT means observe. Every
 	// check runs and each defect is recorded, and nothing is refused for
-	// conformance: a participant opts in to refusal (strict) or out of the
-	// checks (none). This is the ONLY place it happens. Everything else in the tree is strict by
+	// conformance: a participant opts in to refusal (structural for structure,
+	// strict for every defect) or out of the checks (none). This is the ONLY place it happens. Everything else in the tree is strict by
 	// engine.ConformanceEnforcement's zero value, and every gate pins its
 	// level explicitly. A DEPLOYED gateway states its level explicitly too,
 	// but not always to strict: a lane a partner's bytes can reach runs
@@ -637,6 +652,16 @@ func loadConfig(getenv func(string) string) (config, error) {
 	}
 	if alias := cfg.acceptUnknownMembersAlias; cfg.RequireKnownMembers && alias != "" && alias != "0" && alias != "false" {
 		return config{}, fmt.Errorf("gateway: SHN_ACCEPT_UNKNOWN_MEMBERS and REQUIRE_KNOWN_MEMBERS=true contradict each other; remove SHN_ACCEPT_UNKNOWN_MEMBERS (deprecated: carrying unknown members is the default)")
+	}
+
+	// A Da Vinci-native request is carried as sent unless the participant opts
+	// in to enrichment. Only "true" and "false" are values.
+	switch raw := getenv("ENRICH_NATIVE_REQUESTS"); raw {
+	case "", "false":
+	case "true":
+		cfg.EnrichNativeRequests = true
+	default:
+		return config{}, fmt.Errorf("gateway: ENRICH_NATIVE_REQUESTS must be true or false, got %q", raw)
 	}
 
 	if raw := getenv("CDS_ADVERTISE_HOOKS"); raw != "" {
@@ -719,6 +744,21 @@ func loadConfig(getenv func(string) string) (config, error) {
 	} {
 		if pair[1] != "" && cfg.PayerDavinciBaseURL == "" {
 			return config{}, fmt.Errorf("gateway: %s set requires PAYER_DAVINCI_BASE_URL", pair[0])
+		}
+	}
+
+	// A payer's own eligibility endpoint: an absolute http(s) URL, on a payer
+	// gateway that forwards to its payer's system (PAYER_DAVINCI_BASE_URL).
+	if u := cfg.PayerEligibilityURL; u != "" {
+		if cfg.Role != "payer" {
+			return config{}, fmt.Errorf("gateway: PAYER_ELIGIBILITY_URL is a payer gateway setting; this gateway's ROLE is %q", cfg.Role)
+		}
+		if cfg.PayerDavinciBaseURL == "" {
+			return config{}, fmt.Errorf("gateway: PAYER_ELIGIBILITY_URL set requires PAYER_DAVINCI_BASE_URL")
+		}
+		parsed, err := url.Parse(u)
+		if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
+			return config{}, fmt.Errorf("gateway: PAYER_ELIGIBILITY_URL must be an absolute http(s) URL, got %q", u)
 		}
 	}
 
@@ -1247,6 +1287,9 @@ type built struct {
 	// to engine.New, recorded so this package's tests prove the variable reaches
 	// the engine without a published test accessor.
 	requireKnownMembers bool
+	// enrichNativeRequests is the enrichment opt-in exactly as build() handed it
+	// to engine.New, recorded for the same reason.
+	enrichNativeRequests bool
 
 	diagnostic   *diagnosticSource
 	gateway      *engine.Gateway
@@ -1577,7 +1620,8 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		// is the sole non-test way to set it.
 		DemoEdgeCapture: cfg.DemoEdgeCapture,
 		// ConformanceEnforcement: observe unless CONFORMANCE_ENFORCEMENT says
-		// none or strict (loadConfig above is what makes an absent value observe).
+		// none, structural or strict (loadConfig above is what makes an absent value
+		// observe).
 		ConformanceEnforcement: cfg.ConformanceEnforcement,
 		AdvertisedCDSHooks:     cfg.AdvertisedCDSHooks,
 		SoR:                    sor,
@@ -1709,6 +1753,14 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 					func(note string) { fmt.Fprintf(stdout, "gateway: %s\n", note) }),
 			)
 		}
+		// Stated in both states, so a deployment's eligibility posture can be read
+		// from its boot line.
+		if cfg.PayerEligibilityURL != "" {
+			nativeOpts = append(nativeOpts, engine.WithEligibilityURL(cfg.PayerEligibilityURL))
+			fmt.Fprintf(stdout, "gateway: PAYER_ELIGIBILITY_URL set — a coverage-eligibility request is carried to the payer's own endpoint and its answer relayed\n")
+		} else {
+			fmt.Fprintf(stdout, "gateway: PAYER_ELIGIBILITY_URL unset — coverage eligibility is answered from the payer's records\n")
+		}
 		native := engine.NewNativeResponder(pdc, cfg.PayerDavinciBaseURL, cfg.PayerDavinciCRDServiceID, store, clock, nativeOpts...)
 		if discErr == nil {
 			native.PrimeCDSServices(cdsServices)
@@ -1742,6 +1794,14 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	gwCfg.IngressBaseURL = cfg.IngressBaseURL
 	gwCfg.IngressClients = cfg.IngressClients
 	gwCfg.RequireKnownMembers = cfg.RequireKnownMembers
+	gwCfg.EnrichNativeRequests = cfg.EnrichNativeRequests
+	// Stated in both states, so a deployment's enrichment posture can be read
+	// from its boot line.
+	if cfg.EnrichNativeRequests {
+		log.Printf("gateway: ENRICH_NATIVE_REQUESTS=true — a Da Vinci-native CRD or questionnaire-package request gains the prefetch, Coverage and Patient it leaves out, read from the system of record")
+	} else {
+		log.Printf("gateway: ENRICH_NATIVE_REQUESTS=false — a Da Vinci-native CRD or questionnaire-package request is carried as sent; a coverage it leaves out is read only to choose the payer")
+	}
 	if cfg.acceptUnknownMembersAlias != "" {
 		log.Printf("gateway: WARNING: SHN_ACCEPT_UNKNOWN_MEMBERS is deprecated and will be removed: carrying members the system of record does not hold is now the default; remove the variable (REQUIRE_KNOWN_MEMBERS=true opts in to refusing them)")
 	}
@@ -1865,7 +1925,8 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	})
 
 	b = built{
-		requireKnownMembers: gwCfg.RequireKnownMembers,
+		requireKnownMembers:  gwCfg.RequireKnownMembers,
+		enrichNativeRequests: gwCfg.EnrichNativeRequests,
 
 		diagnostic:      cfg.diagnostic,
 		gateway:         gw,

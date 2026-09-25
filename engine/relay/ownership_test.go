@@ -56,6 +56,7 @@ func pinnedOwnership() map[Key]Rule {
 		{"pas-claim-inquire", rq, resp, OutcomeUpstreamError}:       relayOnly,
 		{"pas-claim-update", rq, resp, OutcomeUpstreamError}:        relayOnly,
 
+		{"coverage-eligibility", rc, req, OutcomeCarried}:    relayOnly,
 		{"crd-order-dispatch", rc, req, OutcomeCarried}:      {Allowed: own(R, E), Edits: []EditID{"E-03"}},
 		{"crd-order-select", rc, req, OutcomeCarried}:        {Allowed: own(R, E), Edits: []EditID{"E-03"}},
 		{"dtr-questionnaire-fetch", rc, req, OutcomeCarried}: {Allowed: own(R, E), Edits: []EditID{"E-03"}},
@@ -63,7 +64,7 @@ func pinnedOwnership() map[Key]Rule {
 		{"pas-claim-inquire", rc, req, OutcomeCarried}:       {Allowed: own(R, E), Edits: []EditID{"E-03"}},
 		{"pas-claim-update", rc, req, OutcomeCarried}:        {Allowed: own(R, E), Edits: []EditID{"E-03"}},
 
-		{"coverage-eligibility", rc, resp, OutcomeAnswered}:    {Allowed: own(A), Builders: b("sdk-eligibility")},
+		{"coverage-eligibility", rc, resp, OutcomeAnswered}:    {Allowed: own(A, R), Builders: b("sdk-eligibility")},
 		{"crd-order-dispatch", rc, resp, OutcomeAnswered}:      relayOnly,
 		{"crd-order-select", rc, resp, OutcomeAnswered}:        relayOnly,
 		{"dtr-questionnaire-fetch", rc, resp, OutcomeAnswered}: relayOnly,
@@ -73,6 +74,7 @@ func pinnedOwnership() map[Key]Rule {
 		{"pas-claim-inquire", rc, resp, OutcomeAnswered}:       relayOnly,
 		{"pas-claim-update", rc, resp, OutcomeAnswered}:        {Allowed: own(R)},
 
+		{"coverage-eligibility", rc, resp, OutcomeUpstreamError}:    {Allowed: own(R, A), Builders: b("defect-empty-error-substitution")},
 		{"crd-order-dispatch", rc, resp, OutcomeUpstreamError}:      {Allowed: own(R, A), Builders: b("defect-empty-error-substitution")},
 		{"crd-order-select", rc, resp, OutcomeUpstreamError}:        {Allowed: own(R, A), Builders: b("defect-empty-error-substitution")},
 		{"dtr-questionnaire-fetch", rc, resp, OutcomeUpstreamError}: {Allowed: own(R, A), Builders: b("defect-empty-error-substitution")},

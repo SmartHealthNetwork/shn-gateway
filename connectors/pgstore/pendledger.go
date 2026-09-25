@@ -33,13 +33,14 @@ var _ engine.PendLedger = (*PgStore)(nil)
 // pre-upgrade / keyless-pend case (see the DDL), so they are read through
 // null-tolerant destinations.
 const pendRowSQL = `
-SELECT state, COALESCE(requester_holder, ''), COALESCE(outcome, ''), decided_at
+SELECT state, COALESCE(requester_holder, ''), COALESCE(outcome, ''), decided_at, last_transition_at
   FROM gw_pended_claim
  WHERE holder_id=$1 AND subject_pci=$2 AND correlation_id=$3`
 
 // readPendRow reads the row inside tx, taking its row lock so a concurrent leg
 // working the same authorization waits rather than racing. found=false when there
-// is no such row.
+// is no such row. LastTransition is read too: the state machine judges whether an
+// amendment's hold is still live by it (engine.PendInProgressStale).
 func readPendRow(ctx context.Context, tx pgx.Tx, holderID, subjectPCI, corrID string) (engine.PendRecord, bool, error) {
 	var (
 		rec       engine.PendRecord
@@ -47,7 +48,7 @@ func readPendRow(ctx context.Context, tx pgx.Tx, holderID, subjectPCI, corrID st
 		decidedAt *time.Time
 	)
 	err := tx.QueryRow(ctx, pendRowSQL+` FOR UPDATE`, holderID, subjectPCI, corrID).
-		Scan(&state, &rec.RequesterHolder, &rec.Outcome, &decidedAt)
+		Scan(&state, &rec.RequesterHolder, &rec.Outcome, &decidedAt, &rec.LastTransition)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return engine.PendRecord{}, false, nil
 	}
@@ -107,7 +108,7 @@ func (s *PgStore) BeginClaimUpdateReason(subjectPCI, corrID string) (bool, engin
 	if err != nil {
 		return false, engine.PendRefusalNone, fmt.Errorf("pgstore: BeginClaimUpdate: %w", err)
 	}
-	next, ok, why := engine.PendBegin(cur.State, found)
+	next, ok, why := engine.PendBegin(cur, found, s.now())
 	if !ok {
 		return false, why, nil
 	}
@@ -145,9 +146,8 @@ func (s *PgStore) RecordPendedKeyed(subjectPCI, corrID string, created time.Time
 	if found && cur.RequesterHolder != "" && cur.RequesterHolder != k.RequesterHolder {
 		return engine.PendTransition{}, engine.ErrPendRequesterMismatch
 	}
-	next, tr := engine.PendRePend(cur, found, created)
+	next, tr := engine.PendRePend(cur, found, created, s.now())
 	next.RequesterHolder = k.RequesterHolder
-	next.LastTransition = s.now()
 	if err := writePendRow(ctx, tx, s.holderID, subjectPCI, corrID, next); err != nil {
 		return engine.PendTransition{}, fmt.Errorf("pgstore: RecordPendedKeyed: %w", err)
 	}

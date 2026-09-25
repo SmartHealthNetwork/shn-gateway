@@ -208,11 +208,11 @@ func TestRespondLegErrorConnectorMisuse2xxRoutesToSuccess(t *testing.T) {
 
 // TestRespondLegErrorFramesSynthesizedErrorForCapableRequester: a NON-2xx answer with an
 // EMPTY Response (the shape most internal-rejection call sites carry — a DTR 400
-// "unknown questionnaire canonical" or a PAS 409 that sets only Message) frames a
+// "unknown questionnaire canonical", say, that sets only Message) frames a
 // synthesized {"error": Message} body as application/json, not an empty one.
 func TestRespondLegErrorFramesSynthesizedErrorForCapableRequester(t *testing.T) {
 	g, requester := newInboundTestGateway(t, true)
-	msg := "ClaimUpdate references no pending claim available for this patient"
+	msg := "unknown questionnaire canonical"
 	rec := httptest.NewRecorder()
 	r := newSignedInboundRequest(t, g, requester.ID)
 	g.respondLegError(rec, r, "payer-coverage", "crd-cards", "crd-order-select",

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"strings"
 	"testing"
 	"time"
@@ -39,6 +40,31 @@ func TestHubLegTimeout_NamesTheBudget(t *testing.T) {
 	wantOutcomes := []string{LegOutcomeRouted, LegOutcomeUnreachable}
 	if strings.Join(got, ",") != strings.Join(wantOutcomes, ",") {
 		t.Fatalf("outcomes=%v want %v", got, wantOutcomes)
+	}
+}
+
+// TestHubLegTimeout_AfterTheSendMayHaveBeenReceived: the request had been
+// written to the Hub when the budget ran out, so the Hub may have forwarded
+// it: the 504 still names the budget and says the recipient may have received
+// the request.
+func TestHubLegTimeout_AfterTheSendMayHaveBeenReceived(t *testing.T) {
+	gw, stub, _ := crdTestSystem(t, uc03Coverage())
+	stub.routeDelay = 5 * time.Second
+	wrote := diagnosticRoundTripper(func(r *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(r.URL.Path, "/route") {
+			if trace := httptrace.ContextClientTrace(r.Context()); trace != nil && trace.WroteRequest != nil {
+				trace.WroteRequest(httptrace.WroteRequestInfo{})
+			}
+		}
+		return stub.RoundTrip(r)
+	})
+	gw.cfg.Client = &http.Client{Transport: wrote, Timeout: 50 * time.Millisecond}
+
+	rec := callUC03(t, gw)
+
+	const want = `no answer on the hub leg within 50ms (hub leg timeout); the recipient may have received this request: check its outcome before resending`
+	if rec.Code != http.StatusGatewayTimeout || !strings.Contains(rec.Body.String(), want) {
+		t.Fatalf("status=%d body=%s, want 504 containing %q", rec.Code, rec.Body.String(), want)
 	}
 }
 

@@ -110,6 +110,9 @@ func (d *MemStore) RecordPendedClaim(subjectPCI, correlationID string) error {
 		if row.rec.State == PendStateDecided {
 			return nil // already decided
 		}
+		if inProgressHeld(row.rec, d.now()) {
+			return nil // never reopens a live amendment hold (PendRePend)
+		}
 		row.rec.State = PendStatePended
 		row.rec.LastTransition = d.now()
 		return nil
@@ -119,13 +122,13 @@ func (d *MemStore) RecordPendedClaim(subjectPCI, correlationID string) error {
 }
 
 // BeginClaimUpdate ATOMICALLY claims a pended claim for a ClaimUpdate: if it is
-// currently pended it transitions it to in-progress and returns true; otherwise
-// (never pended, already decided, or another update already in progress) it
-// returns false. This single test-and-set is the FR-6 current-state authority check
-// AND the mutual-exclusion that serializes concurrent updates for the same claim —
-// only one update can be in flight. The caller must pair it with a decision
-// (RecordDecision, or FinalizeClaimUpdate on a store-only path) or
-// ReleaseClaimUpdate. Safe for concurrent use.
+// currently pended (or its amendment hold has lapsed, PendInProgressStale) it
+// transitions it to in-progress and returns true; otherwise (never pended,
+// already decided, or another update's live hold) it returns false. The
+// test-and-set decides which amendment OWNS the row, never whether an amendment
+// reaches the payer: one that does not bind is forwarded all the same. The owner
+// pairs it with a decision (RecordDecision, or FinalizeClaimUpdate on a
+// store-only path) or ReleaseClaimUpdate. Safe for concurrent use.
 func (d *MemStore) BeginClaimUpdate(subjectPCI, correlationID string) (bool, error) {
 	ok, _, err := d.BeginClaimUpdateReason(subjectPCI, correlationID)
 	return ok, err
@@ -137,11 +140,11 @@ func (d *MemStore) BeginClaimUpdateReason(subjectPCI, correlationID string) (boo
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	row, found := d.pendedClaims[pendedKey(subjectPCI, correlationID)]
-	cur := PendState("")
+	var cur PendRecord
 	if found {
-		cur = row.rec.State
+		cur = row.rec
 	}
-	next, ok, why := PendBegin(cur, found)
+	next, ok, why := PendBegin(cur, found, d.now())
 	if ok {
 		row.rec.State = next
 		row.rec.LastTransition = d.now()
@@ -210,9 +213,8 @@ func (d *MemStore) RecordPendedKeyed(subjectPCI, corrID string, created time.Tim
 			return PendTransition{}, ErrPendRequesterMismatch
 		}
 	}
-	next, tr := PendRePend(cur, found, created)
+	next, tr := PendRePend(cur, found, created, d.now())
 	next.RequesterHolder = k.RequesterHolder
-	next.LastTransition = d.now()
 	d.upsertLocked(subjectPCI, corrID, next)
 	d.indexLocked(subjectPCI, corrID, k.RequesterHolder, refs)
 	// The UNION the authorization now has, not this response's contribution: a

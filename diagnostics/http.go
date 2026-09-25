@@ -2,6 +2,7 @@ package diagnostics
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -132,6 +133,8 @@ type captureState struct {
 	observed  int64
 	failed    bool
 	closed    bool
+	released  bool
+	truncated bool
 }
 
 func (s *captureState) add(p []byte) {
@@ -145,14 +148,10 @@ func (s *captureState) add(p []byte) {
 	}
 	s.observed += int64(len(p))
 	_, _ = s.hash.Write(p)
-	if !s.available {
+	if !s.available || s.truncated {
 		return
 	}
-	if s.data == nil && s.cap > 0 {
-		n, _ := s.budget.reserve(s.cap, s.cap)
-		s.held += n
-		s.data = make([]byte, 0, n)
-	}
+	s.grow(int64(len(p)))
 	n := int64(len(p))
 	remaining := int64(cap(s.data) - len(s.data))
 	if n > remaining {
@@ -160,24 +159,75 @@ func (s *captureState) add(p []byte) {
 	}
 	s.data = append(s.data, p[:n]...)
 	if n < int64(len(p)) {
+		// Once a byte is missed nothing later is kept, so a partial capture is
+		// always a prefix of the body and never joins bytes that were apart.
 		s.complete = false
+		s.truncated = true
 	}
 }
-func (s *captureState) digest() string {
+
+type captureSnapshot struct {
+	data     []byte
+	observed int64
+	complete bool
+	digest   string
+}
+
+// snapshot copies the captured prefix and its accounting under the lock.
+func (s *captureState) snapshot() captureSnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return hex.EncodeToString(s.hash.Sum(nil))
+	return captureSnapshot{data: bytes.Clone(s.data), observed: s.observed, complete: s.complete, digest: hex.EncodeToString(s.hash.Sum(nil))}
+}
+
+// grow reserves room for n more body bytes as they arrive, never more than the
+// body cap, so concurrent exchanges share the budget by the bytes they actually
+// carry. Capacity grows geometrically and the reservation always equals the
+// current allocation; the array a growth step replaces is not counted, so
+// transient heap use can reach about twice the reserved bytes. A released
+// state reserves nothing.
+func (s *captureState) grow(n int64) {
+	have := int64(cap(s.data))
+	need := int64(len(s.data)) + n
+	if need > s.cap {
+		need = s.cap
+	}
+	if s.released || need <= have {
+		return
+	}
+	want := 2 * have
+	if want < need {
+		want = need
+	}
+	if want > s.cap {
+		want = s.cap
+	}
+	got, _ := s.budget.reserve(want-have, s.cap-have)
+	if got == 0 {
+		return
+	}
+	s.held += got
+	data := make([]byte, len(s.data), have+got)
+	copy(data, s.data)
+	s.data = data
 }
 func (s *captureState) release() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.available {
+	if s.available && !s.released {
 		s.budget.release(s.held)
+		s.held = 0
 	}
+	s.released = true
 }
 func captureHeader(s *captureState, h http.Header) (http.Header, bool) {
 	if !s.available || h == nil {
 		return nil, h == nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.released {
+		return nil, false
 	}
 	out := make(http.Header)
 	var used int64
@@ -552,22 +602,29 @@ func ObserveHTTP(next http.Handler, emit func(Event) bool, info func(*http.Reque
 		// handler panic. An aborted response is incomplete and an uncommitted
 		// response has no inferred status or committed header snapshot.
 		defer func() {
+			ws.mu.Lock()
 			ws.complete = returned && !ow.writeFailed
+			ws.mu.Unlock()
 			if returned && ow.status == 0 {
 				ow.status = 200
 				ow.headers, ow.headersComplete = captureHeader(ws, w.Header())
 			}
 			if noRequestBody {
+				rs.mu.Lock()
 				rs.complete = true
+				rs.mu.Unlock()
 			}
 			if hi.CallID == "" {
 				hi.CallID = CallID(r.Context())
 			}
+			// The request body may still be read elsewhere (a proxy's transport
+			// can outlive the handler), so events are built from locked copies.
+			in, out := rs.snapshot(), ws.snapshot()
 			id, _ := r.Context().Value(identityKey).(requestIdentity)
-			fp := RequestFingerprint{Algorithm: "sha256-body-v1", Method: method, RequestURI: uri, BodySHA256: rs.digest(), ObservedBytes: rs.observed, Complete: rs.complete && rs.available}
-			req := Event{Time: start, Kind: hi.Kind, CallID: hi.CallID, CorrelationID: id.correlation, RequestCiphertextHash: id.hash, Sender: id.sender, Recipient: id.recipient, Method: method, URL: uri, Headers: requestHeaders, HeadersComplete: requestHeadersComplete, Body: rs.data, BodyComplete: rs.available && rs.complete && int64(len(rs.data)) == rs.observed, RequestFingerprint: fp, Status: ow.status, DurationNanos: safeNow(now).Sub(start).Nanoseconds()}
+			fp := RequestFingerprint{Algorithm: "sha256-body-v1", Method: method, RequestURI: uri, BodySHA256: in.digest, ObservedBytes: in.observed, Complete: in.complete && rs.available}
+			req := Event{Time: start, Kind: hi.Kind, CallID: hi.CallID, CorrelationID: id.correlation, RequestCiphertextHash: id.hash, Sender: id.sender, Recipient: id.recipient, Method: method, URL: uri, Headers: requestHeaders, HeadersComplete: requestHeadersComplete, Body: in.data, BodyComplete: rs.available && in.complete && int64(len(in.data)) == in.observed, RequestFingerprint: fp, Status: ow.status, DurationNanos: safeNow(now).Sub(start).Nanoseconds()}
 			safeEmit(emit, req)
-			resp := Event{Time: safeNow(now), Kind: hi.Kind + "-response", CallID: hi.CallID, Method: method, URL: uri, Headers: ow.headers, HeadersComplete: ow.headersComplete, Body: ws.data, BodyComplete: ws.available && ws.complete && int64(len(ws.data)) == ws.observed, RequestFingerprint: fp, Status: ow.status}
+			resp := Event{Time: safeNow(now), Kind: hi.Kind + "-response", CallID: hi.CallID, Method: method, URL: uri, Headers: ow.headers, HeadersComplete: ow.headersComplete, Body: out.data, BodyComplete: ws.available && out.complete && int64(len(out.data)) == out.observed, RequestFingerprint: fp, Status: ow.status}
 			safeEmit(emit, resp)
 		}()
 		next.ServeHTTP(wrapWriter(ow), r)

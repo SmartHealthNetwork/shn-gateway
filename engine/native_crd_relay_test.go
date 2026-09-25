@@ -425,7 +425,7 @@ func TestNativeCRD_EmbeddedValidationObservesOnly(t *testing.T) {
 func TestNativeCRD_EmbeddedValidationOnlyWhereChecksRun(t *testing.T) {
 	const covInfo = "ext-coverage-information"
 	answer := realCRDAnswer(t)
-	for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve} {
+	for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve, EnforcementStructural} {
 		for _, tail := range embeddedValidationTails {
 			t.Run(tail.leg+"/"+level.String(), func(t *testing.T) {
 				g, requester := newInboundTestGateway(t, true)
@@ -465,9 +465,9 @@ func TestNativeCRD_EmbeddedValidationOnlyWhereChecksRun(t *testing.T) {
 					if calls != 0 || embeddedEvents != 0 {
 						t.Fatalf("at none nothing is validated: %d validator call(s), %d %s event(s)", calls, embeddedEvents, CRDEmbeddedValidatedEvent)
 					}
-				case EnforcementObserve:
+				case EnforcementObserve, EnforcementStructural:
 					if embeddedCalls != 1 || embeddedEvents != 1 {
-						t.Fatalf("at observe the embedded resource is validated and recorded: %d call(s), %d event(s)", embeddedCalls, embeddedEvents)
+						t.Fatalf("at %s the embedded resource is validated and recorded: %d call(s), %d event(s)", level, embeddedCalls, embeddedEvents)
 					}
 				}
 			})
@@ -488,6 +488,7 @@ func TestCDSCertifierDescriptionMissing(t *testing.T) {
 		wantMsg    string
 	}{
 		{EnforcementStrict, http.StatusBadGateway, "action.description at systemActions[0].description"},
+		{EnforcementStructural, http.StatusBadGateway, "action.description at systemActions[0].description"},
 		{EnforcementObserve, 0, ""},
 		{EnforcementNone, 0, ""},
 	} {
@@ -542,6 +543,7 @@ func TestCDSCertifierUnreadableAnswerPerLevel(t *testing.T) {
 		wantFindings int
 	}{
 		{EnforcementStrict, http.StatusBadGateway, 1},
+		{EnforcementStructural, http.StatusBadGateway, 1},
 		{EnforcementObserve, 0, 1},
 		{EnforcementNone, 0, 0},
 	} {
@@ -579,7 +581,7 @@ func TestCDSCertifierAdvisoryRecordsAtBothLevels(t *testing.T) {
 		func(f ConformanceFinding) { t.Fatalf("at none no rule runs, got finding %+v", f) }, answer, "2.0", "peer"); got.Status != 0 {
 		t.Fatalf("at none nothing refuses, got %d", got.Status)
 	}
-	for _, level := range []ConformanceEnforcement{EnforcementStrict, EnforcementObserve} {
+	for _, level := range []ConformanceEnforcement{EnforcementStrict, EnforcementStructural, EnforcementObserve} {
 		t.Run(level.String(), func(t *testing.T) {
 			var findings []ConformanceFinding
 			got := certifyCDSHooksAnswer(context.Background(), NewConformancePolicy(level),
@@ -667,9 +669,12 @@ func TestNewBindsFindingEmitterToNativeResponder(t *testing.T) {
 // to it must both actually take effect, and the finding forwardCRD emits
 // must say "own" — the certified bytes are this gateway's OWN backend
 // answering, never a peer's — not the "peer" value that is only correct at
-// the provider-ingress certifier (crdAnswerOutcome).
+// the provider-ingress certifier (crdAnswerOutcome). At structural the same
+// answer refuses, since its missing action description is a required member.
 func TestForwardCRD_RelaysBelowStrict(t *testing.T) {
-	for _, level := range []ConformanceEnforcement{EnforcementObserve, EnforcementNone} {
+	// At structural the missing required member (action.description) refuses:
+	// that row checks the refusal and the refused finding, whose=own.
+	for _, level := range []ConformanceEnforcement{EnforcementObserve, EnforcementNone, EnforcementStructural} {
 		t.Run(level.String(), func(t *testing.T) {
 			p := newCDSPayer(t, referencePayerServices...)
 			p.respond(http.StatusOK, "application/json", []byte(externalPayerDescriptionlessAnswer))
@@ -700,6 +705,22 @@ func TestForwardCRD_RelaysBelowStrict(t *testing.T) {
 			res, err := n.Handle(context.Background(), "crd-order-select", "corr-own", "pci", cdsRequest("order-sign"))
 			if err != nil {
 				t.Fatalf("Handle: %v", err)
+			}
+			if level == EnforcementStructural {
+				if res.Status != http.StatusBadGateway || !strings.Contains(res.Message, "action.description") {
+					t.Fatalf("at structural a missing action description refuses, got %d %s", res.Status, res.Message)
+				}
+				var refused bool
+				for _, e := range events {
+					if e.Kind == ConformanceObservedEvent && strings.Contains(e.Detail, `"rule":"action.description"`) &&
+						strings.Contains(e.Detail, `"whose":"own"`) && strings.Contains(e.Detail, `"decision":"refused"`) && strings.Contains(e.Detail, `"level":"structural"`) {
+						refused = true
+					}
+				}
+				if !refused {
+					t.Fatalf("at structural want a refused action.description finding, whose=own, got %+v", events)
+				}
+				return
 			}
 			if res.Status != 0 {
 				t.Fatalf("at %s the payer's own backend's malformed answer must still relay, got %d %s", level, res.Status, res.Message)
@@ -733,7 +754,7 @@ func TestForwardCRD_RelaysBelowStrict(t *testing.T) {
 // read two ways cannot be carried faithfully.
 func TestCDSCertifierRepeatedMemberRefusesAtEveryLevel(t *testing.T) {
 	answer := []byte(`{"cards":[],"cards":[]}`)
-	for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve, EnforcementStrict} {
+	for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve, EnforcementStructural, EnforcementStrict} {
 		if got := certifyCDSHooksAnswer(context.Background(), NewConformancePolicy(level), nil, answer, "2.0", "peer"); got.Status != http.StatusBadGateway {
 			t.Errorf("%s: status %d, want 502", level, got.Status)
 		}

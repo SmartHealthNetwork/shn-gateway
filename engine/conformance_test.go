@@ -3,12 +3,16 @@ package engine
 import (
 	"strings"
 	"testing"
+
+	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
 // The whole table. At strict every invalid verdict refuses. At none no check
 // runs except SHN's own bridged edit, and at observe every check runs and only
 // that bridged edit refuses: an unreadable CDS Hooks answer is relayed below
-// strict.
+// strict. At structural every check runs and a structural defect refuses: an
+// unclassified FHIR defect, an unreadable CDS Hooks answer or one missing a
+// required member, and a request or answer that cannot be read.
 func TestConformancePolicyTable(t *testing.T) {
 	for _, tc := range []struct {
 		kind  CheckKind
@@ -31,6 +35,21 @@ func TestConformancePolicyTable(t *testing.T) {
 		{KindCDSEnvelope, "response.json", EnforcementObserve, true, Record},
 		{KindCDSEnvelope, "response.object", EnforcementObserve, true, Record},
 		{KindCDSEnvelope, "line", EnforcementObserve, true, Record},
+
+		{KindFHIRIngress, "", EnforcementStructural, true, Refuse},
+		{KindFHIREgress, "", EnforcementStructural, true, Refuse},
+		{KindFHIRBridged, "", EnforcementStructural, true, Refuse},
+		{KindCDSEnvelope, "action.description", EnforcementStructural, true, Refuse},
+		{KindCDSEnvelope, "card.summary", EnforcementStructural, true, Refuse},
+		{KindCDSEnvelope, "response.json", EnforcementStructural, true, Refuse},
+		{KindCDSEnvelope, "response.object", EnforcementStructural, true, Refuse},
+		{KindCDSEnvelope, "line", EnforcementStructural, true, Refuse},
+		{KindCDSEnvelope, "card.summary.length", EnforcementStructural, true, Record},
+		{KindCDSEnvelope, "card.source.topic", EnforcementStructural, true, Record},
+		{KindContent, RuleRequestShape, EnforcementStructural, true, Refuse},
+		{KindContent, RuleAnswerShape, EnforcementStructural, true, Refuse},
+		{KindContent, RulePatientMixed, EnforcementStructural, true, Record},
+		{KindNetwork, RuleSubjectToken, EnforcementStructural, true, Refuse},
 
 		{KindFHIRIngress, "", EnforcementNone, false, Record},
 		{KindFHIREgress, "", EnforcementNone, false, Record},
@@ -59,6 +78,9 @@ func TestConformancePolicyUnreadableCDSRow(t *testing.T) {
 		t.Fatal("an unreadable CDS Hooks answer is relayed at none and observe")
 	}
 	for _, refuses := range []bool{false, true} {
+		// Deliberately none and observe only: this row is the switch for the
+		// levels that relay an unreadable answer. Structural refuses it by its
+		// own table (TestConformancePolicyTable, TestStructuralClassifiesEveryCDSHooksRule).
 		for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve} {
 			p := newConformancePolicy(level, refuses)
 			for rule := range unreadableCDSRules {
@@ -84,7 +106,8 @@ func TestConformancePolicyUnreadableCDSRow(t *testing.T) {
 }
 
 // A check that could not run (validator outage, no lane for the line) refuses
-// only at strict and for SHN's own bridged edit; observe records it and relays.
+// only at strict and for SHN's own bridged edit; observe and structural record it
+// and relay.
 func TestConformancePolicyUnavailableVerdict(t *testing.T) {
 	for _, tc := range []struct {
 		kind  CheckKind
@@ -97,6 +120,9 @@ func TestConformancePolicyUnavailableVerdict(t *testing.T) {
 		{KindFHIRIngress, EnforcementObserve, Record},
 		{KindFHIREgress, EnforcementObserve, Record},
 		{KindFHIRBridged, EnforcementObserve, Refuse},
+		{KindFHIRIngress, EnforcementStructural, Record},
+		{KindFHIREgress, EnforcementStructural, Record},
+		{KindFHIRBridged, EnforcementStructural, Refuse},
 		{KindFHIRBridged, EnforcementNone, Refuse},
 	} {
 		if got := NewConformancePolicy(tc.level).Decide(tc.kind, "", VerdictUnavailable); got != tc.want {
@@ -109,7 +135,7 @@ func TestConformancePolicyUnavailableVerdict(t *testing.T) {
 // every kind.
 func TestConformancePolicyRunsKind(t *testing.T) {
 	for _, kind := range []CheckKind{KindFHIRIngress, KindFHIREgress, KindFHIRBridged, KindCDSEnvelope} {
-		for _, level := range []ConformanceEnforcement{EnforcementStrict, EnforcementObserve} {
+		for _, level := range []ConformanceEnforcement{EnforcementStrict, EnforcementStructural, EnforcementObserve} {
 			if !NewConformancePolicy(level).RunsKind(kind) {
 				t.Errorf("%s must run at %s", kind, level)
 			}
@@ -126,8 +152,8 @@ func TestConformancePolicyRunsKind(t *testing.T) {
 
 // A valid verdict decides nothing at any level.
 func TestConformancePolicyValidVerdictRecords(t *testing.T) {
-	for _, level := range []ConformanceEnforcement{EnforcementStrict, EnforcementObserve, EnforcementNone} {
-		for _, kind := range []CheckKind{KindFHIRIngress, KindFHIREgress, KindFHIRBridged, KindCDSEnvelope} {
+	for _, level := range []ConformanceEnforcement{EnforcementStrict, EnforcementStructural, EnforcementObserve, EnforcementNone} {
+		for _, kind := range []CheckKind{KindFHIRIngress, KindFHIREgress, KindFHIRBridged, KindCDSEnvelope, KindContent} {
 			if got := NewConformancePolicy(level).Decide(kind, "", VerdictValid); got != Record {
 				t.Errorf("a valid verdict must never refuse (%s at %s): %v", kind, level, got)
 			}
@@ -182,16 +208,17 @@ func TestDecisionZeroValueIsRefuse(t *testing.T) {
 }
 
 func TestParseConformanceEnforcement(t *testing.T) {
-	for in, want := range map[string]ConformanceEnforcement{"none": EnforcementNone, "observe": EnforcementObserve, "strict": EnforcementStrict} {
+	for in, want := range map[string]ConformanceEnforcement{"none": EnforcementNone, "observe": EnforcementObserve, "structural": EnforcementStructural, "strict": EnforcementStrict} {
 		got, err := ParseConformanceEnforcement(in)
 		if err != nil || got != want {
 			t.Errorf("ParseConformanceEnforcement(%q) = %v, %v", in, got, err)
 		}
 	}
-	for _, bad := range []string{"middle", "lenient", "NONE", "true", " none", "Observe", "basic"} {
+	// basic is not a level: no alias.
+	for _, bad := range []string{"middle", "lenient", "NONE", "true", " none", "Observe", "Structural", "structural ", "basic"} {
 		if _, err := ParseConformanceEnforcement(bad); err == nil {
 			t.Errorf("ParseConformanceEnforcement(%q) must be a boot error", bad)
-		} else if !strings.Contains(err.Error(), "none") || !strings.Contains(err.Error(), "observe") || !strings.Contains(err.Error(), "strict") {
+		} else if !strings.Contains(err.Error(), "none") || !strings.Contains(err.Error(), "observe") || !strings.Contains(err.Error(), "structural") || !strings.Contains(err.Error(), "strict") {
 			t.Errorf("the boot error must name every accepted value, got %v", err)
 		}
 	}
@@ -199,10 +226,117 @@ func TestParseConformanceEnforcement(t *testing.T) {
 
 // A level's name round-trips through the setting.
 func TestConformanceEnforcementStringRoundTrips(t *testing.T) {
-	for _, level := range []ConformanceEnforcement{EnforcementStrict, EnforcementObserve, EnforcementNone} {
+	for _, level := range []ConformanceEnforcement{EnforcementStrict, EnforcementStructural, EnforcementObserve, EnforcementNone} {
 		got, err := ParseConformanceEnforcement(level.String())
 		if err != nil || got != level {
 			t.Errorf("ParseConformanceEnforcement(%q) = %v, %v; want %v", level.String(), got, err, level)
+		}
+	}
+}
+
+// A FHIR defect the choke point classified as deeper is recorded below strict
+// and refused at strict; SHN's own bridged edit refuses whatever the class.
+func TestConformancePolicyDeeperVerdict(t *testing.T) {
+	for _, tc := range []struct {
+		kind  CheckKind
+		level ConformanceEnforcement
+		want  Decision
+	}{
+		{KindFHIRIngress, EnforcementStrict, Refuse},
+		{KindFHIREgress, EnforcementStrict, Refuse},
+		{KindFHIRIngress, EnforcementStructural, Record},
+		{KindFHIREgress, EnforcementStructural, Record},
+		{KindFHIRIngress, EnforcementObserve, Record},
+		{KindFHIRBridged, EnforcementStructural, Refuse},
+		{KindFHIRBridged, EnforcementObserve, Refuse},
+	} {
+		if got := NewConformancePolicy(tc.level).Decide(tc.kind, "", VerdictDeeper); got != tc.want {
+			t.Errorf("Decide(%s, deeper) at %s = %v, want %v", tc.kind, tc.level, got, tc.want)
+		}
+	}
+}
+
+// structuralCDSRefusedRules is every CDS Hooks error rule structural refuses: an
+// answer that cannot be read, or a required member missing or of the wrong
+// type. With structuralCDSDeeperRules it must cover every error rule the
+// SDK checks, so a rule the SDK adds is classified here before it ships.
+var structuralCDSRefusedRules = map[string]bool{
+	"response.json": true, "response.object": true, "line": true,
+	"response.cards": true, "response.systemActions": true,
+	"card.object": true, "card.uuid": true, "card.summary": true, "card.detail": true,
+	"card.indicator": true, "card.source": true, "card.source.label": true, "card.suggestions": true,
+	"suggestion.label": true, "suggestion.uuid": true, "suggestion.isRecommended": true, "suggestion.actions": true,
+	"action.object": true, "action.type": true, "action.description": true,
+	"card.links": true, "link.label": true, "link.url": true, "link.type": true, "link.appContext": true,
+	"card.overrideReasons": true, "overrideReason.display": true,
+}
+
+func TestStructuralClassifiesEveryCDSHooksRule(t *testing.T) {
+	p := NewConformancePolicy(EnforcementStructural)
+	seen := map[string]bool{}
+	for _, r := range shnsdk.CDSHooksRules() {
+		seen[r.ID] = true
+		structural, deeper := structuralCDSRefusedRules[r.ID], structuralCDSDeeperRules[r.ID]
+		if r.Severity != shnsdk.SeverityError {
+			if structural || deeper {
+				t.Errorf("%s is a recommendation, never refused, and must not be classified", r.ID)
+			}
+			continue
+		}
+		if structural == deeper {
+			t.Errorf("%s must be classified exactly once (structural %v, deeper %v)", r.ID, structural, deeper)
+			continue
+		}
+		want := Refuse
+		if deeper {
+			want = Record
+		}
+		if got := p.Decide(KindCDSEnvelope, r.ID, VerdictInvalid); got != want {
+			t.Errorf("structural: Decide(cds, %s) = %v, want %v", r.ID, got, want)
+		}
+	}
+	for id := range structuralCDSRefusedRules {
+		if !seen[id] {
+			t.Errorf("%s is classified but is not an SDK rule", id)
+		}
+	}
+	for id := range structuralCDSDeeperRules {
+		if !seen[id] {
+			t.Errorf("%s is classified but is not an SDK rule", id)
+		}
+	}
+	if got := p.Decide(KindCDSEnvelope, "card.someFutureRule", VerdictInvalid); got != Refuse {
+		t.Errorf("an unclassified CDS Hooks rule must refuse at structural, got %v", got)
+	}
+}
+
+// At structural a request or answer that cannot be read refuses and every other
+// content rule is recorded; a rule in neither table refuses (fail closed).
+func TestStructuralContentRules(t *testing.T) {
+	p := NewConformancePolicy(EnforcementStructural)
+	for rule := range contentRules {
+		want := Record
+		if rule == RuleRequestShape || rule == RuleAnswerShape {
+			want = Refuse
+		}
+		if got := p.Decide(KindContent, rule, VerdictInvalid); got != want {
+			t.Errorf("structural: Decide(content, %s) = %v, want %v", rule, got, want)
+		}
+		if got := p.Decide(KindContent, rule, VerdictUnavailable); got != Record {
+			t.Errorf("structural: an unavailable %s check must be recorded, got %v", rule, got)
+		}
+	}
+	for rule := range structuralContentRefuses {
+		if !contentRules[rule] {
+			t.Errorf("%s refuses at structural but is not a content rule", rule)
+		}
+	}
+	if got := p.Decide(KindContent, "content.someFutureRule", VerdictInvalid); got != Refuse {
+		t.Errorf("an unclassified content rule must refuse at structural, got %v", got)
+	}
+	for rule := range networkRules {
+		if got := p.Decide(KindNetwork, rule, VerdictInvalid); got != Refuse {
+			t.Errorf("structural: network rule %s must refuse, got %v", rule, got)
 		}
 	}
 }

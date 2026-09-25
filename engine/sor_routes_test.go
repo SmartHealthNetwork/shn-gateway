@@ -202,8 +202,9 @@ func TestSoRSubjectRouteFamilies(t *testing.T) {
 					}}
 				}
 				// The payer routes read the system of record at the bind only when
-				// the participant requires known members.
-				g := &Gateway{cfg: Config{SoR: sor, RequireKnownMembers: true}}
+				// the participant requires known members; the prefetch route reads
+				// it for the fill, which runs only under enrichment.
+				g := &Gateway{cfg: Config{SoR: sor, RequireKnownMembers: true, EnrichNativeRequests: true}}
 				var status int
 				var msg string
 				switch route {
@@ -311,41 +312,88 @@ func TestSoRReferenceCallbackStopsAndSanitizes(t *testing.T) {
 	}
 }
 
+// sorFailureRoutes are the payer-side inbound handlers that read the system of
+// record before they call a responder.
+var sorFailureRoutes = []string{"crd", "pas", "patient-dtr", "eligibility", "records"}
+
+// callSoRRoute sends route's request from sender straight to its inbound
+// handler.
+func callSoRRoute(t *testing.T, g *Gateway, route string, w http.ResponseWriter, r *http.Request, sender string) {
+	t.Helper()
+	env := shnsdk.Envelope{}
+	env.Metadata.Sender, env.Metadata.CorrelationID = sender, "corr-sor"
+	switch route {
+	case "crd":
+		g.handleCRDNativeInbound(w, r, env, shnsdk.Token{}, conformantCRD("MBR-COVERED", "72148"), "")
+	case "pas":
+		g.handlePASNativeInbound(w, r, env, shnsdk.Token{}, loadPASGolden(t, "MBR-COVERED"), "")
+	case "eligibility":
+		b, e := shnsdk.BuildEligibilityRequest("MBR-COVERED", "1234567890", time.Now())
+		if e != nil {
+			t.Fatal(e)
+		}
+		g.handleEligibilityInbound(w, r, env, shnsdk.Token{}, b, "")
+	case "records":
+		b, e := shnsdk.BuildCDexTaskDataRequest("Patient/MBR-COVERED", "DocumentReference", "2023-01-01", "2023-12-31", shnsdk.CDexTaskMeta{AuthoredOn: time.Unix(1700000000, 0), Requester: "provider", Owner: "facility"})
+		if e != nil {
+			t.Fatal(e)
+		}
+		env.Metadata.ConsentRef = "consent"
+		g.handleFederatedQueryInbound(w, r, env, shnsdk.Token{}, b, "")
+	case "patient-dtr":
+		g.handlePatientDTRInbound(w, r, env, shnsdk.Token{}, []byte(`{"patientRef":"Patient/MBR-COVERED"}`), "")
+	default:
+		t.Fatalf("unknown route %s", route)
+	}
+}
+
+// To a requester that does not decode frames, the failure is a bare status.
 func TestSoRNativeHandlersStopBeforeResponder(t *testing.T) {
 	s := scriptedReadSoR{t: t, base: ReadSystemOfRecord(newCensusSoR()), before: func(context.Context, string, string) error { return &SoRReadError{Kind: SoRAuthenticationFailed} }}
 	// A responder call would panic: failure must stop first. The payer reads its
 	// system of record at the bind when it requires known members.
-	g := &Gateway{cfg: Config{SoR: s, RequireKnownMembers: true}}
-	for _, route := range []string{"crd", "pas", "patient-dtr", "eligibility", "records"} {
+	g := &Gateway{cfg: Config{SoR: s, Reg: shnsdk.NewRegistry(), RequireKnownMembers: true}}
+	for _, route := range sorFailureRoutes {
 		t.Run(route, func(t *testing.T) {
 			w := httptest.NewRecorder()
-			r := httptest.NewRequest(http.MethodPost, "/substrate/inbound", nil)
-			switch route {
-			case "crd":
-				g.handleCRDNativeInbound(w, r, shnsdk.Envelope{}, shnsdk.Token{}, conformantCRD("MBR-COVERED", "72148"), "")
-			case "pas":
-				g.handlePASNativeInbound(w, r, shnsdk.Envelope{}, shnsdk.Token{}, loadPASGolden(t, "MBR-COVERED"), "")
-			case "eligibility":
-				b, e := shnsdk.BuildEligibilityRequest("MBR-COVERED", "1234567890", time.Now())
-				if e != nil {
-					t.Fatal(e)
-				}
-				g.handleEligibilityInbound(w, r, shnsdk.Envelope{}, shnsdk.Token{}, b, "")
-			case "records":
-				b, e := shnsdk.BuildCDexTaskDataRequest("Patient/MBR-COVERED", "DocumentReference", "2023-01-01", "2023-12-31", shnsdk.CDexTaskMeta{AuthoredOn: time.Unix(1700000000, 0), Requester: "provider", Owner: "facility"})
-				if e != nil {
-					t.Fatal(e)
-				}
-				env := shnsdk.Envelope{}
-				env.Metadata.ConsentRef = "consent"
-				g.handleFederatedQueryInbound(w, r, env, shnsdk.Token{}, b, "")
-			case "patient-dtr":
-				g.handlePatientDTRInbound(w, r, shnsdk.Envelope{}, shnsdk.Token{}, []byte(`{"patientRef":"Patient/MBR-COVERED"}`), "")
-			}
+			callSoRRoute(t, g, route, w, httptest.NewRequest(http.MethodPost, "/substrate/inbound", nil), "legacy-requester")
 			if w.Code != 502 {
 				t.Fatalf("status %d body %s", w.Code, w.Body.String())
 			}
 		})
+	}
+}
+
+// A payer gateway's system-of-record failure reaches a framing requester as
+// this participant's answer: framed, with the safe status and message,
+// where it used to go raw and surface as the Hub's forward failure. The
+// requester's FHIR ingress relays that answer as sent
+// (TestFHIRIngressPreservesFramedUpstreamFailure).
+func TestSoRFailureFramedToRequester(t *testing.T) {
+	for _, kind := range []SoRFailureKind{SoRAuthenticationFailed, SoRUnavailable} {
+		for _, route := range sorFailureRoutes {
+			t.Run(string(kind)+"/"+route, func(t *testing.T) {
+				g, requester := newInboundTestGateway(t, true)
+				g.cfg.RequireKnownMembers = true // the payer reads its system of record at the bind
+				g.cfg.SoR = scriptedReadSoR{t: t, base: ReadSystemOfRecord(newCensusSoR()), before: func(context.Context, string, string) error {
+					return &SoRReadError{Kind: kind}
+				}}
+				g.cfg.Responder = nil // a responder call would panic: failure must stop first
+				w := httptest.NewRecorder()
+				callSoRRoute(t, g, route, w, newSignedInboundRequest(t, g, requester.ID), requester.ID)
+				if w.Code != http.StatusOK {
+					t.Fatalf("status %d, want the framed answer leg; body %s", w.Code, w.Body.String())
+				}
+				hdr, body, err := shnsdk.DecodeHTTPFrame(openResponseLeg(t, requester, w.Body.Bytes()))
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantStatus, wantMsg := SoRFailureResponse(&SoRReadError{Kind: kind})
+				if hdr.Status != wantStatus || !strings.Contains(string(body), wantMsg) {
+					t.Fatalf("framed %d %s, want %d %q", hdr.Status, body, wantStatus, wantMsg)
+				}
+			})
+		}
 	}
 }
 
@@ -381,25 +429,6 @@ func TestSoRDispatchRefFailureNoLegs(t *testing.T) {
 				t.Fatalf("unexpected legs %+v", fixture.stub.legTypes)
 			}
 		})
-	}
-}
-
-func TestSoRFHIROperationEnvelope(t *testing.T) {
-	for _, kind := range []SoRFailureKind{SoRAuthenticationFailed, SoRUnavailable} {
-		s := scriptedReadSoR{t: t, base: ReadSystemOfRecord(newCensusSoR()), before: func(context.Context, string, string) error { return &SoRReadError{Kind: kind} }}
-		g := &Gateway{cfg: Config{SoR: s, RequireKnownMembers: true}} // reads its system of record at the bind
-		w := httptest.NewRecorder()
-		r := httptest.NewRequest("POST", "/fhir/Claim/$submit", nil)
-		g.handlePASNativeInbound(&fhirOperationWriter{w}, r, shnsdk.Envelope{}, shnsdk.Token{}, loadPASGolden(t, "MBR-COVERED"), "")
-		want, _ := SoRFailureResponse(&SoRReadError{Kind: kind})
-		assertFHIRIngressError(t, w, want)
-		code := "processing"
-		if want == 503 {
-			code = "transient"
-		}
-		if !strings.Contains(w.Body.String(), `"code":"`+code+`"`) {
-			t.Fatalf("wrong issue category %s", w.Body.String())
-		}
 	}
 }
 

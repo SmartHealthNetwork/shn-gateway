@@ -107,6 +107,9 @@ func TestEgressUnbridgedIsGovernedByTheLevel(t *testing.T) {
 		want  int
 	}{
 		{EnforcementStrict, http.StatusUnprocessableEntity},
+		// The fake validator's rejection carries no issue kind: unclassified,
+		// which structural refuses as strict does.
+		{EnforcementStructural, http.StatusUnprocessableEntity},
 		{EnforcementObserve, 0},
 		{EnforcementNone, 0},
 	} {

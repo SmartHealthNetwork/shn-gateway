@@ -761,6 +761,11 @@ func TestHandleUC05_FederatedQueryIngressValidatesOnDemoLane(t *testing.T) {
 // runs (it is not skipped) and an invalid verdict is RECORDED, not refused; at
 // none no check runs. Either way handleUC05 completes (200).
 func TestHandleUC05_FederatedQueryIngressRelaysBelowStrict(t *testing.T) {
+	// Deliberately observe and none: the fake validator's rejection carries no
+	// issue kind, which structural refuses as strict does. The structural row
+	// is test/adversarial TestAdversarial_ConformanceMutation_PerLevel,
+	// fhir-ingress/structural: this federated-query leg on the default lane.
+	// The demo-lane skip this test guards does not depend on the level.
 	for _, level := range []ConformanceEnforcement{EnforcementObserve, EnforcementNone} {
 		t.Run(level.String(), func(t *testing.T) {
 			gw, stub := newPendResumeFixture(t, pendFixtureOpts{

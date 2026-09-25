@@ -74,7 +74,7 @@ func TestLevelInquireIngress_RequestShape(t *testing.T) {
 			t.Run(name+"/"+level.String(), func(t *testing.T) {
 				env, rec, ev := levelInquireRow(t, level, row.body, levelInquiryPayerAnswer(t))
 				wantLegLevelOutcome(t, "pas-claim-inquire", level, env, rec, ev.findings, RuleRequestShape, http.StatusBadRequest, row.msg)
-				if level != EnforcementStrict {
+				if !refusesAt(level, RuleRequestShape) {
 					wantCarriedExactly(t, env, row.body)
 				}
 			})
@@ -89,7 +89,7 @@ func TestLevelInquireIngress_AnotherPatient(t *testing.T) {
 		t.Run(level.String(), func(t *testing.T) {
 			env, rec, ev := levelInquireRow(t, level, body, levelInquiryPayerAnswer(t))
 			wantLegLevelOutcome(t, "pas-claim-inquire", level, env, rec, ev.findings, RulePatientMixed, http.StatusForbidden, "inconsistent patient in PAS inquiry")
-			if level != EnforcementStrict {
+			if !refusesAt(level, RulePatientMixed) {
 				wantCarriedExactly(t, env, body)
 			}
 		})

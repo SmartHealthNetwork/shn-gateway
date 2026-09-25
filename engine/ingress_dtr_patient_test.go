@@ -30,16 +30,16 @@ func (s recordSoR) ResolvePatientContext(ctx context.Context, member string) (st
 }
 
 // defaultDTRGateway carries unknown members (the default) under the E-05
-// enrichment seam, over a system of record that derives the subject from its own
+// enrichment opt-in, over a system of record that derives the subject from its own
 // Patient record.
 func defaultDTRGateway(s *prefetchSoR) *Gateway {
 	g := prefetchGateway(s)
 	g.cfg.SoR = recordSoR{searchingPrefetchSoR{s}}
-	g.cfg.enrichDTRPatient = true // the enrichment seam these rows pin
+	g.cfg.EnrichNativeRequests = true // the enrichment opt-in these rows pin
 	return g
 }
 
-// Under the enrichment seam (Config.enrichDTRPatient) a
+// Under the enrichment opt-in (Config.EnrichNativeRequests) a
 // questionnaire-package request about a member the provider holds, carrying no
 // Patient, gains the provider's own Patient record as a referenced resource, so
 // a payer that does not hold the member derives the same subject from the
@@ -54,7 +54,7 @@ func TestDTRIngress_PatientObtainedUnderEnrichment(t *testing.T) {
 		obs := &observed{}
 		env := newInProcessExchange(t)
 		env.originator.cfg.SoR = recordSoR{searchingPrefetchSoR{s}}
-		env.originator.cfg.enrichDTRPatient = true
+		env.originator.cfg.EnrichNativeRequests = true
 		env.originator.cfg.Observer = obs.observe
 		env.originator.cfg.Clock = fixedClock
 		declareFramedDTR(t, env, true)
@@ -118,13 +118,13 @@ func TestDTRIngress_PatientObtainedUnderEnrichment(t *testing.T) {
 			})
 		}
 	})
-	// Native traffic is carried as sent: without the enrichment seam nothing is
+	// Native traffic is carried as sent: without the enrichment opt-in nothing is
 	// appended, whether or not the participant requires known members.
 	for _, require := range []bool{false, true} {
 		t.Run(map[bool]string{false: "by default a native request is carried as sent", true: "requiring known members, a native request is carried as sent"}[require], func(t *testing.T) {
 			s := newPrefetchSoR()
 			g := defaultDTRGateway(s)
-			g.cfg.enrichDTRPatient = false
+			g.cfg.EnrichNativeRequests = false
 			g.cfg.RequireKnownMembers = require
 			leftAlone(t, g, s, withCoverage)
 		})

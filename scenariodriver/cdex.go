@@ -13,7 +13,7 @@ import (
 // calls (BuildDiagnosticReport / BuildDocumentReference / BuildProvenanceWithIdentifier →
 // BuildRecordsBundle → BuildCDexQueryResult → ExtractCDexEvidence) to produce the federated
 // evidence that UC-05 retrieves and the orchestration carries onto the amended ClaimUpdate
-// (CXL-D11: CDex middle bracketed by SHN gateways, not real external CDex actors).
+// (the CDex middle is bracketed by SHN gateways, not real external CDex actors).
 // Returns the extracted DiagnosticReport + Provenance with the given now timestamp.
 func FacilityCDexEvidence(member string, now time.Time) (drJSON, provJSON []byte, err error) {
 	patientRef := "Patient/" + member

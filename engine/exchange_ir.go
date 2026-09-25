@@ -45,6 +45,11 @@ type Content struct {
 	// shnsdk.RequestFrameV1Op; any other recipient is refused before
 	// anything is sent (framedDTRRefusal).
 	Operation string
+	// MediaType is the participant's declared FHIR JSON media type for a
+	// carried request (mediatype.go), stamped as the request frame's
+	// Content-Type whenever the request is framed; "" keeps
+	// application/fhir+json.
+	MediaType string
 }
 
 // workstreamPA is the WorkstreamType tag for the Prior-Authorization module.

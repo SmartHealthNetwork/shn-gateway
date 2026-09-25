@@ -350,8 +350,10 @@ func TestDiagnosticHubRefusalRetainsActualStatusAndBytes(t *testing.T) {
 		return base.RoundTrip(r)
 	})
 	_, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "same", "", Content{WorkstreamType: workstreamPA, Payload: testRequest(env.crdReq)})
-	if !errors.Is(err, errHubUnreachable) {
-		t.Fatalf("caller error changed: %v", err)
+	// The caller sees the Hub's own refusal, not a generic routing failure.
+	var refused *hubRefusalError
+	if !errors.As(err, &refused) || refused.status != 409 || refused.reason != "replay detected" || refused.delivered != "" {
+		t.Fatalf("caller error: %v, want the Hub's 409 replay detected", err)
 	}
 	hash := ""
 	found := false
