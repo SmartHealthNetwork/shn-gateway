@@ -2,6 +2,8 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 
@@ -30,12 +32,37 @@ import (
 // A read failure is returned as is, with the flag set or not: an unreadable system of record
 // is never mistaken for a member it does not hold.
 func (g *Gateway) resolveSubjectPCI(ctx context.Context, member string, payload []byte) (pci string, found bool, readErr error) {
+	pci, _, found, readErr = g.resolveSubjectBinding(ctx, member, payload)
+	return pci, found, readErr
+}
+
+// resolveSubjectBinding is resolveSubjectPCI, also reporting whether the
+// system of record holds the member (held) or the identifier was derived.
+func (g *Gateway) resolveSubjectBinding(ctx context.Context, member string, payload []byte) (pci string, held, found bool, readErr error) {
 	pci, _, found, readErr = ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(ctx, member)
 	if readErr != nil || found || g.cfg.RequireKnownMembers {
-		return pci, found, readErr
+		return pci, found, found, readErr
 	}
 	demo, _ := carriedPatientDemographics(payload, member)
-	return shnsdk.ResolvePCI(member, demo.BirthDate, demo.FamilyName), true, nil
+	return derivedPCI(member, demo.BirthDate, demo.FamilyName), false, true, nil
+}
+
+// derivedPCIDomain separates a derived identifier's hash input from the one a
+// held member's identifier is made from (shnsdk.ResolvePCI), so the two can
+// never be equal.
+const derivedPCIDomain = "shn-derived-pci-v1\x00"
+
+// derivedPCI is the identifier a gateway binds a member its system of record
+// does not hold to, from the member id and the Patient the request carries
+// (FR-G61). It is made in its own namespace: a domain-separated hash of the
+// three facts exactly as sent (no case folding), so it can never equal a held
+// member's identifier, which is shnsdk.ResolvePCI over the lowercased facts —
+// a request naming "mbr-covered" does not alias the held MBR-COVERED — while
+// two gateways deriving from the same request still agree. It has the same
+// form as any network patient identifier ("pci:" and 32 hex digits).
+func derivedPCI(memberID, birthDate, familyName string) string {
+	sum := sha256.Sum256([]byte(derivedPCIDomain + memberID + "|" + birthDate + "|" + familyName))
+	return "pci:" + hex.EncodeToString(sum[:16])
 }
 
 // PatientDemographics reads the two demographics the patient identifier is derived from
@@ -151,7 +178,7 @@ func (g *Gateway) bindInboundSubject(ctx context.Context, member string, payload
 	if member == "" {
 		return "", http.StatusBadRequest, "unknown member"
 	}
-	pci, found, readErr := g.resolveSubjectPCI(ctx, member, payload)
+	pci, held, found, readErr := g.resolveSubjectBinding(ctx, member, payload)
 	if readErr != nil {
 		status, msg := SoRFailureResponse(readErr)
 		return "", status, msg
@@ -159,6 +186,7 @@ func (g *Gateway) bindInboundSubject(ctx context.Context, member string, payload
 	if !found || pci == "" {
 		return "", http.StatusBadRequest, "unknown member"
 	}
+	involvedCollectorFrom(ctx).bound(pci, held)
 	return pci, 0, ""
 }
 
@@ -171,9 +199,12 @@ func (g *Gateway) bindInboundSubject(ctx context.Context, member string, payload
 const SubjectBindingDiffersEvent = "subject.binding-differs"
 
 // noteSubjectBinding raises SubjectBindingDiffersEvent when pci, the payer's
-// binding, differs from the leg token's subject.
-func (g *Gateway) noteSubjectBinding(leg, corrID, tokenSubject, pci string) {
+// binding, differs from the leg token's subject. When the Hub reads the
+// involved list, that binding is also named on the answer's list (payer-held
+// or payer-derived), so the exchange is recorded under it too (involved.go).
+func (g *Gateway) noteSubjectBinding(ctx context.Context, leg, corrID, tokenSubject, pci string) {
 	if pci != "" && pci != tokenSubject {
 		g.observe(ObserverEvent{Kind: SubjectBindingDiffersEvent, Direction: "ingress", LegType: leg, CorrelationID: corrID})
+		involvedCollectorFrom(ctx).differs(pci)
 	}
 }

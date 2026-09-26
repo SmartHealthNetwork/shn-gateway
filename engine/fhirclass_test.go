@@ -150,6 +150,7 @@ func TestClassifyFHIRByMessageID(t *testing.T) {
 		// deeper; another terminology id (here, a relative system URI) is not.
 		{"a required Coding outside its value set", invalid(errIssue("Terminology_TX_NoValid_12", []string{"Patient.extension[0]"}, "x")), VerdictDeeper},
 		{"a required code value outside its value set", invalid(errIssue("Terminology_TX_NoValid_16", []string{"Coverage.costToBeneficiary[0].value.currency"}, "x")), VerdictDeeper},
+		{"a Coding whose code system the validator does not know", invalid(errIssue("Terminology_TX_System_Unknown", []string{"Questionnaire.extension[0].value.ofType(Coding)"}, "x")), VerdictDeeper},
 		{"a family member no lane has shown is structural", invalid(errIssue("Terminology_TX_NoValid_4", []string{"Coverage.type"}, "x")), VerdictInvalid},
 		{"another terminology id is structural", invalid(errIssue("Terminology_TX_System_Relative", []string{"Coverage.type"}, "x")), VerdictInvalid},
 		{"a terminology id with a suffix is structural", invalid(errIssue("Terminology_TX_NoValid_1_CC_Extra", []string{"Coverage.type"}, "x")), VerdictInvalid},

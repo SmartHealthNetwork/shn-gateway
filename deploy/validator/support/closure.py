@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Derive the validation closure of the cross-version canonicals SHN-built resources emit.
+"""Derive the validation closure of the cross-version and extension canonicals SHN-exchanged
+resources carry.
 
-The walk starts at SEEDS and follows, inside the digest-pinned archives named in sources.json
+The walk starts at SEEDS (sources.json "closure.seeds") and follows, inside the digest-pinned archives named in sources.json
 ("closure.archives"): baseDefinition, type.profile, binding.valueSet, element and resource
 extension urls, ValueSet.compose systems and included value sets, CodeSystem.supplements and
 CodeSystem.valueSet, and type.targetProfile at depth <= 1 (the seed's own value type and that
@@ -29,7 +30,11 @@ from pathlib import Path
 import tarfile
 
 ROOT = Path(__file__).parent
-SEEDS = ['http://hl7.org/fhir/5.0/StructureDefinition/extension-Claim.encounter']
+# The seeds are the canonicals SHN-built or SHN-relayed resources carry that no line's own packages
+# define: sources.json "closure.seeds" is the one list (the R5 Claim.encounter extension, and the
+# artifact-versionAlgorithm extension DTR Questionnaires carry, whose version-algorithm CodeSystem
+# the 2.0/2.1 lines otherwise cannot resolve).
+SEEDS = json.loads((ROOT / 'sources.json').read_text())['closure']['seeds']
 TARGET_DEPTH = 1
 FALLBACK_PREFIX = 'http://hl7.org/fhir/StructureDefinition/'
 

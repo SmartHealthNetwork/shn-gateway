@@ -537,6 +537,38 @@ func TestResolveDiscovery_ResolvesTrustPlanes(t *testing.T) {
 	}
 }
 
+// Whether the network's Hub reads the involved list is read from the
+// descriptor's hubAccepts: listed means on; absent, or another field only,
+// means off.
+func TestResolveDiscovery_HubAcceptsInvolved(t *testing.T) {
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	keyBody := fmt.Sprintf(`{"pubkey":%q}`, base64.StdEncoding.EncodeToString(pub))
+	keys := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(keyBody))
+	}))
+	defer keys.Close()
+	for _, tc := range []struct {
+		hubAccepts string
+		want       bool
+	}{
+		{`,"hubAccepts":["involved"]`, true},
+		{``, false},
+		{`,"hubAccepts":["somethingElse"]`, false},
+	} {
+		disc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprintf(w, `{"authzPublicKeyURL":%q,"hubTransportKeyURL":%q%s}`, keys.URL, keys.URL, tc.hubAccepts)
+		}))
+		_, ep, err := resolveDiscovery(context.Background(), shnsdk.NewClient(), config{DiscoveryURL: disc.URL})
+		disc.Close()
+		if err != nil {
+			t.Fatalf("resolveDiscovery: %v", err)
+		}
+		if ep.HubAcceptsInvolved != tc.want {
+			t.Fatalf("hubAccepts %q: HubAcceptsInvolved = %v, want %v", tc.hubAccepts, ep.HubAcceptsInvolved, tc.want)
+		}
+	}
+}
+
 func TestFetchEd25519Key_BadStatus(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)

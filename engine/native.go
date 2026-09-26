@@ -546,6 +546,7 @@ func (n *nativeResponder) resolvedURL(ctx context.Context, contract, base, path 
 }
 
 func (n *nativeResponder) Handle(ctx context.Context, leg, corrID, subjectPCI string, requestFHIR []byte) (LegResult, error) {
+	ctx = withResponderCorrelation(ctx, corrID)
 	// Foreign-peer version filter: same rule as the
 	// substrate OriginateLeg filter, sourced from the operator's per-peer
 	// declaration instead of the registry. Refuse-before-forward: a refused
@@ -714,10 +715,12 @@ func (n *nativeResponder) post(ctx context.Context, base, path string, p relay.P
 			}
 		},
 	}))
+	started := time.Now()
 	resp, err := n.client.Do(req)
 	if err != nil {
 		// A request whose bearer could not be obtained was never sent.
 		sent := wrote.Load() && !smartauth.IsTokenAcquisitionError(err)
+		logUpstreamAbandoned(ctx, label, leg, base+path, time.Since(started), sent)
 		return upstreamReply{}, LegResult{}, &upstreamFailure{err: fmt.Errorf("upstream payer %s unreachable: %w", label, err), sent: sent}
 	}
 	pasLegOf(ctx).answered()
@@ -728,9 +731,44 @@ func (n *nativeResponder) post(ctx context.Context, base, path string, p relay.P
 		capture.response = append([]byte(nil), rb...)
 	}
 	if err != nil {
+		logUpstreamAbandoned(ctx, label, leg, base+path, time.Since(started), true)
 		return upstreamReply{}, LegResult{}, &upstreamFailure{err: fmt.Errorf("upstream payer %s read failed: %w", label, err), sent: true}
 	}
 	return upstreamAnswer(resp, rb, label)
+}
+
+type responderCorrelationKey struct{}
+
+// withResponderCorrelation names the exchange a responder call serves, so a
+// line about that call can name it too.
+func withResponderCorrelation(ctx context.Context, corrID string) context.Context {
+	return context.WithValue(ctx, responderCorrelationKey{}, corrID)
+}
+
+// logUpstreamAbandoned writes the payer gateway's own line when its call to
+// its participant's system ended because the request it serves ended: most
+// often the requester stopped waiting (its hub-leg budget ran out, or it went
+// away), or this gateway is shutting down. Without it only the requester logs
+// the timeout, and the payer side's operator cannot see that an answer from
+// their system was abandoned. It names the elapsed time, the upstream host
+// (never the path or query), the leg, the correlation id and whether the
+// request was written; never a body, a header or a credential. A call that
+// failed while its request was still live is "unreachable", not this line.
+func logUpstreamAbandoned(ctx context.Context, label, leg, rawURL string, elapsed time.Duration, written bool) {
+	cause := ctx.Err()
+	if cause == nil {
+		return
+	}
+	host := ""
+	if u, err := url.Parse(rawURL); err == nil {
+		host = u.Hostname()
+	}
+	corr, _ := ctx.Value(responderCorrelationKey{}).(string)
+	wrote := "no"
+	if written {
+		wrote = "yes"
+	}
+	log.Printf("gateway: upstream payer %s call abandoned after %.1fs: the request it serves ended (%v) (host %s, leg %s, correlation %s, request written: %s)", label, elapsed.Seconds(), cause, host, leg, corr, wrote)
 }
 
 // upstreamAnswer classifies a read upstream response for post and get.

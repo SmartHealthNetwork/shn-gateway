@@ -111,7 +111,7 @@ gateway carries it; set `REQUIRE_KNOWN_MEMBERS=true` to have it refused instead.
 
 | Env var | Description |
 |---|---|
-| `REQUIRE_KNOWN_MEMBERS` | `true` or `false`; unset means `false`. By default a CRD, DTR or PAS subject your system of record does not hold (and, on a payer that declares its own eligibility endpoint with `PAYER_ELIGIBILITY_URL`, a coverage-eligibility subject) is carried, identified by the member id and the Patient the request carries for it. Send the same Patient, unchanged, on every leg of one exchange: for a member the payer does not hold, a later leg that carries a different Patient, or none, is not matched to what an earlier leg recorded (an amendment is refused `409`; an inquiry's decision is not recorded). A receiving gateway handles the member the request names as it would directly, whether one side holds the member, both do, or neither does, and files what it records about the exchange under its own identification of that member. Nothing is added to a request on the member's behalf unless the provider opts in with `ENRICH_NATIVE_REQUESTS=true` (see [Accept Da Vinci requests from a provider EHR](#accept-da-vinci-requests-from-a-provider-ehr-provider-optional)); with it, a CRD request for a member your system does not hold leaves out history prefetch it cannot read, with the reason recorded. Set `true` to check members against your own system of record instead: such a subject is refused (`400 unknown member`; `403 request patient does not resolve` on a provider's `$questionnaire-package` request). Any other value refuses to boot. |
+| `REQUIRE_KNOWN_MEMBERS` | `true` or `false`; unset means `false`. By default a CRD, DTR or PAS subject your system of record does not hold (and, on a payer that declares its own eligibility endpoint with `PAYER_ELIGIBILITY_URL`, a coverage-eligibility subject) is carried, identified by the member id and the Patient the request carries for it. Send the same Patient, unchanged, on every leg of one exchange: for a member the payer does not hold, a later leg that carries a different Patient, or none, is not matched to what an earlier leg recorded (an amendment still reaches the payer and its answer is relayed, but it binds and records nothing; an inquiry's decision is relayed but not recorded). A receiving gateway handles the member the request names as it would directly, whether one side holds the member, both do, or neither does, and files what it records about the exchange under its own identification of that member. That identification, for a member your system of record does not hold, is never the identifier of a member it does hold, so the exchange is never recorded under the wrong member; the bytes exchanged are the same. Nothing is added to a request on the member's behalf unless the provider opts in with `ENRICH_NATIVE_REQUESTS=true` (see [Accept Da Vinci requests from a provider EHR](#accept-da-vinci-requests-from-a-provider-ehr-provider-optional)); with it, a CRD request for a member your system does not hold leaves out history prefetch it cannot read, with the reason recorded. Set `true` to check members against your own system of record instead: such a subject is refused (`400 unknown member`; `403 request patient does not resolve` on a provider's `$questionnaire-package` request). Any other value refuses to boot. |
 | `SHN_ACCEPT_UNKNOWN_MEMBERS` | Deprecated; removed in a later release. Carrying members your system of record does not hold is the default, so the gateway only logs a warning when it is set. Set to anything but `0` or `false` together with `REQUIRE_KNOWN_MEMBERS=true`, it contradicts it and the gateway refuses to boot. |
 
 ## Networking
@@ -919,7 +919,14 @@ and the counterpart's own system together — and the published gateway's client
 **30 seconds**. When that budget runs out the caller receives `504
 {"error":"no answer on the hub leg within 30s (hub leg timeout)"}` (an
 `OperationOutcome` with issue code `timeout` on the FHIR operation routes), and the gateway
-logs one line naming the leg, the counterpart and the correlation id. When the request had
+logs one line naming the leg, the counterpart and the correlation id. On the other side, a
+payer gateway that is still waiting on its participant's system when the request it serves
+ends (the requester stopped waiting, or the payer gateway is shutting down) logs its own
+line: `gateway: upstream payer <leg label> call abandoned after <s>s: the request it serves
+ended (<cause>) (host <host>, leg <leg>, correlation <id>, request written: yes|no)`. The
+cause is usually `context canceled`, since the requester's side closes the call. It names the
+upstream host only, never the path, query, headers or body. It is distinct from `upstream
+payer … unreachable`, which is a call that failed while the request was still live. When the request had
 already been sent to the Hub, the text adds `; the recipient may have received this request:
 check its outcome before resending`, since the Hub may have forwarded it. An embedding that
 supplies its own `engine.Config.Client` sets the budget with that client's `Timeout`, which
@@ -1018,6 +1025,7 @@ support the native-reach and inbound-honor rules below.
 | `FHIR_VALIDATE_URL_2_2` | Optional **2.2** `$validate` address override. Compose default: `http://shn-validator-2-2:8080/fhir`. |
 | `FHIR_CERTIFY_URL_2_1` | Optional **2.1** `$validate` address for the certification evidence only. Never a routing lane. |
 | `FHIR_CERTIFY_URL_2_2` | Optional **2.2** `$validate` address for the certification evidence only. Never a routing lane. |
+| `FHIR_DEFAULT_VALIDATOR_LANES` | Unset, or `none`. `none` states that this gateway's network has no Compose default validator services, so the gateway never probes their names. A CRD, DTR or PAS line other than 2.0 then validates only through its own `FHIR_VALIDATE_URL_<line>` (routing) or `FHIR_CERTIFY_URL_<line>` (evidence), and a declared line without one refuses boot, naming the key. A single-line contract (`pa.pdex@2.1`) keeps riding the canonical validator, as it does with the default lanes. Any other value is a boot error. |
 
 A `FHIR_VALIDATE_URL_<line>` is a routing lane: setting it makes the line reachable in both
 directions (an inbound frame at that line is honoured, origination may target it). A
@@ -1035,9 +1043,17 @@ and FHIR_VALIDATE_URL_<line> are not configured; default lane qualification pend
 `… failed, retrying` after a failed attempt) and dials nothing for that exchange; routing's boot
 probe logs `validator_qualification` lines, and the evidence's loop logs a
 `certification_lane_qualification` line when an attempt's outcome changes (the first
-failure, then success), with the line, address and outcome. Where the
-default name does not resolve — any deployment that is not the Compose stack — set one of
-the two keys to get a verdict.
+failure, then success). Each line carries the lane's line, `base` address, the `host` it
+dials and its `state`. A `failed` line also carries a `reason` naming why, in the gateway's
+own words: `name does not resolve`, `name lookup failed`, `connection refused`,
+`metadata answered HTTP <status>`, `metadata is not an R4 CapabilityStatement`,
+`qualification corpus did not pass`, `no answer within the qualification budget`,
+`qualification stopped` or `qualification did not pass`. Never a validator's answer.
+Where the default name does not resolve (any deployment that is not the Compose stack), set
+one of the two keys for each line to get a verdict. Set `FHIR_DEFAULT_VALIDATOR_LANES=none`
+so the gateway never probes the default names at all. A line with neither key then records
+`certification validator unavailable: FHIR_CERTIFY_URL_<line> and FHIR_VALIDATE_URL_<line>
+are not configured, and this network has no default validator lanes`, and dials nothing.
 
 **One validator per line — this is not optional.** A FHIR server loads exactly **one**
 version of a given IG package, so a single HAPI cannot host CRD 2.0.1 and CRD 2.2.1 at the

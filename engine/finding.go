@@ -101,12 +101,40 @@ type ConformanceFinding struct {
 	Line          string   `json:"line,omitempty"`
 	Profile       string   `json:"profile,omitempty"`
 	Level         string   `json:"level"`
-	Verdict       string   `json:"verdict,omitempty"` // "unavailable" when the check could not run; absent for an invalid verdict
+	Verdict       string   `json:"verdict,omitempty"` // "unavailable" when the check could not run; "valid" when a candidate line after the first passed; absent for an invalid verdict
 	Decision      string   `json:"decision"`
 	Rule          string   `json:"rule,omitempty"`
 	Path          string   `json:"path,omitempty"`
 	PayloadSHA256 string   `json:"payloadSha256,omitempty"`
 	Issues        []string `json:"issues,omitempty"` // RAW diagnostics; see the struct comment — emitFinding redacts before either carrier sees this.
+	// DeclaredLine and Lines are set only by a candidate-line certification (a
+	// payer's answer checked against the lines this gateway supports): the line the
+	// leg was routed at — the payer's declared line, or this gateway's own line for
+	// a payer that declared none — and each line tried, in order, with its verdict.
+	// Neither carries a diagnostic.
+	DeclaredLine string               `json:"declaredLine,omitempty"`
+	Lines        []LineVerdictSummary `json:"lines,omitempty"`
+}
+
+// LineVerdictSummary is one line a candidate-line certification tried and what it
+// saw there: "valid", "structural", "deeper" or "unavailable". Line and verdict
+// only — never a validator diagnostic.
+type LineVerdictSummary struct {
+	Line    string `json:"line"`
+	Verdict string `json:"verdict"`
+}
+
+// findingVerdict is a verdict as a finding names it.
+func findingVerdict(v Verdict) string {
+	switch v {
+	case VerdictValid:
+		return "valid"
+	case VerdictDeeper:
+		return "deeper"
+	case VerdictUnavailable:
+		return "unavailable"
+	}
+	return "structural"
 }
 
 // emitFinding is the one place a governed check's finding is written to both

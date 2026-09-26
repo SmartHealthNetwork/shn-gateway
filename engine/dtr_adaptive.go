@@ -154,7 +154,7 @@ func (g *Gateway) nextQuestionLeg(ctx context.Context, r *http.Request, res crdD
 	x := ExchangeIdentity{CorrelationID: corr, LegType: "dtr-questionnaire-fetch", Counterpart: res.recipient}
 	adapted, _, aerr := g.egressAdapt(route, reqBytes, x)
 	if aerr != nil {
-		return nil, http.StatusBadGateway, aerr.Error(), aerr
+		return nil, adaptFailureStatus(aerr), aerr.Error(), aerr
 	}
 	body, oerr := g.OriginateLeg(ctx, r, res.recipient, "dtr-questionnaire-fetch", res.pci, corr, "",
 		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route),
@@ -171,7 +171,7 @@ func (g *Gateway) nextQuestionLeg(ctx context.Context, r *http.Request, res crdD
 	nqCtx := withFindingContext(ctx, findingContext{
 		LegType: "dtr-questionnaire-fetch", CorrelationID: corr, Seam: "originate", Whose: "peer",
 	})
-	if vstatus, vmsg := g.validateFHIRPayerIngress(nqCtx, body, res.dtrLine, "pa.dtr"); vstatus != 0 {
+	if vstatus, vmsg := g.validateFHIRPayerIngress(nqCtx, body, res.dtrLine, "pa.dtr", res.payer); vstatus != 0 {
 		return nil, vstatus, vmsg, nil
 	}
 	qr, items, perr := parseNextQuestionResponse(body)

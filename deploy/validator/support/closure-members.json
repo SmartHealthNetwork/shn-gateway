@@ -78,6 +78,12 @@
     "file": "StructureDefinition-alternate-reference.json"
   },
   {
+    "url": "http://hl7.org/fhir/StructureDefinition/artifact-versionAlgorithm",
+    "version": "5.3.0-ballot-tc1",
+    "resourceType": "StructureDefinition",
+    "file": "StructureDefinition-artifact-versionAlgorithm.json"
+  },
+  {
     "url": "http://hl7.org/fhir/StructureDefinition/package-source",
     "version": "5.3.0-ballot-tc1",
     "resourceType": "StructureDefinition",
@@ -96,6 +102,12 @@
     "file": "StructureDefinition-version-specific-use.json"
   },
   {
+    "url": "http://hl7.org/fhir/StructureDefinition/web-source",
+    "version": "5.3.0-ballot-tc1",
+    "resourceType": "StructureDefinition",
+    "file": "StructureDefinition-web-source.json"
+  },
+  {
     "url": "http://hl7.org/fhir/ValueSet/major-fhir-version",
     "version": "5.3.0-ballot-tc1",
     "resourceType": "ValueSet",
@@ -106,6 +118,12 @@
     "version": "5.3.0-ballot-tc1",
     "resourceType": "ValueSet",
     "file": "ValueSet-type-characteristics-code.json"
+  },
+  {
+    "url": "http://hl7.org/fhir/ValueSet/version-algorithm",
+    "version": "5.0.0",
+    "resourceType": "ValueSet",
+    "file": "ValueSet-version-algorithm.json"
   },
   {
     "url": "http://hl7.org/fhir/type-characteristics-code",
@@ -136,6 +154,12 @@
     "version": "0.1.0",
     "resourceType": "ValueSet",
     "file": "ValueSet-R5-virtual-service-type-for-R4.json"
+  },
+  {
+    "url": "http://hl7.org/fhir/version-algorithm",
+    "version": "5.0.0",
+    "resourceType": "CodeSystem",
+    "file": "CodeSystem-version-algorithm.json"
   },
   {
     "url": "http://hl7.org/fhir/virtual-service-type",

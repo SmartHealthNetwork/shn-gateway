@@ -19,6 +19,11 @@ import (
 
 const defaultLaneStartupBudget = 600 * time.Second
 
+// defaultValidatorLanesNone is FHIR_DEFAULT_VALIDATOR_LANES's one value: this
+// gateway's network has no Compose default validator services, so it never
+// probes their names. Unset keeps the default lanes.
+const defaultValidatorLanesNone = "none"
+
 // laneManager owns every default qualification worker for one gateway lifecycle.
 type laneManager struct {
 	defaults  map[string]*engine.DiscoveredLane
@@ -78,6 +83,12 @@ func discoverValidatorLanes(ctx context.Context, getenv func(string) string, dec
 		if getenv("SHN_FAKE_VALIDATOR") == "1" {
 			continue
 		}
+		if cfg.DefaultValidatorLanes == defaultValidatorLanesNone {
+			// A network without the Compose validator services (a hosted tenant):
+			// no default lane exists to probe, so none is created. A declared line
+			// then needs its FHIR_VALIDATE_URL_<line> (validatorLanesForDeclared).
+			continue
+		}
 		base := resolve(entry.line)
 		if err := checkValidatorLaneURL("default validator "+entry.line, base); err != nil {
 			return fail(err)
@@ -92,35 +103,49 @@ func discoverValidatorLanes(ctx context.Context, getenv func(string) string, dec
 	for line := range m.defaults {
 		delete(lanes, line)
 	}
+	// A single-line contract's line (pa.pdex@2.1) rides the canonical validator
+	// only as a fallback alias, which the engine never lends to a multi-line
+	// contract at that line. With default lanes the line's default was removed
+	// above; with none, validatorLanesForDeclared has already aliased it, and it
+	// must be marked the same way, or PA traffic at that line would validate
+	// against the canonical IG.
+	canonicalLine := shnsdk.LineOf(shnsdk.ContractPAPAS20)
+	explicit := map[string]string{"2.1": cfg.FHIRValidateURL21, "2.2": cfg.FHIRValidateURL22}
+	aliasOnly := func(line string) bool {
+		return cfg.DefaultValidatorLanes == defaultValidatorLanesNone && getenv("SHN_FAKE_VALIDATOR") != "1" && line != canonicalLine && explicit[line] == ""
+	}
 	for _, tok := range declared {
 		contract, line, _ := strings.Cut(tok, "@")
-		if len(linesPerContract[contract]) < 2 && lanes[line] == nil {
+		if len(linesPerContract[contract]) < 2 && (lanes[line] == nil || aliasOnly(line)) {
 			lanes[line] = canonical
 			m.fallbacks[line] = true
 		}
 	}
 	qualifyLane := func(line string, d *engine.DiscoveredLane) error {
 		started := time.Now()
-		emit := func(state string) {
-			// Only the synthetic default's identity and lifecycle timing are emitted;
-			// validator outcomes and error text never enter this serialized log path.
+		emit := func(state, reason string) {
+			// Only the synthetic default's identity, the host it dials, lifecycle
+			// timing and a failure's kind are emitted; validator outcomes and error
+			// text never enter this serialized log path (lanequalify.FailureReason).
 			event, _ := json.Marshal(struct {
 				Version    int     `json:"version"`
 				Line       string  `json:"line"`
 				Base       string  `json:"base"`
+				Host       string  `json:"host"`
 				State      string  `json:"state"`
+				Reason     string  `json:"reason,omitempty"`
 				At         string  `json:"at"`
 				DurationMS float64 `json:"duration_ms"`
-			}{1, line, resolve(line), state, time.Now().UTC().Format(time.RFC3339Nano), float64(time.Since(started)) / float64(time.Millisecond)})
+			}{1, line, resolve(line), lanequalify.Host(resolve(line)), state, reason, time.Now().UTC().Format(time.RFC3339Nano), float64(time.Since(started)) / float64(time.Millisecond)})
 			log.Printf("gateway: validator_qualification %s", event)
 		}
-		emit("started")
+		emit("started", "")
 		err := d.Qualify(startup, qualify)
 		state := "ready"
 		if err != nil {
 			state = "failed"
 		}
-		emit(state)
+		emit(state, lanequalify.FailureReason(err))
 		return err
 	}
 	// Declared defaults finish before admission. Explicit overrides retain their
@@ -149,6 +174,9 @@ func discoverValidatorLanes(ctx context.Context, getenv func(string) string, dec
 func qualifyDefaultLane(ctx context.Context, base, line string) error {
 	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	defer client.CloseIdleConnections()
+	// The last metadata attempt's outcome, so a lane that never answers fails
+	// naming why (its name does not resolve, it refuses), not only that time ran out.
+	var last error
 	for {
 		probeCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
 		req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, strings.TrimRight(base, "/")+"/metadata", nil)
@@ -157,6 +185,11 @@ func qualifyDefaultLane(ctx context.Context, base, line string) error {
 			return err
 		}
 		resp, err := client.Do(req)
+		if err != nil && ctx.Err() == nil {
+			// Kept only while the budget runs: the attempt the budget cuts off
+			// says nothing about the lane.
+			last = err
+		}
 		if err == nil {
 			body, readErr := io.ReadAll(io.LimitReader(resp.Body, (4<<20)+1))
 			resp.Body.Close()
@@ -167,17 +200,24 @@ func qualifyDefaultLane(ctx context.Context, base, line string) error {
 				}
 				if readErr != nil || len(body) > 4<<20 || json.Unmarshal(body, &metadata) != nil || metadata.ResourceType != "CapabilityStatement" || !strings.HasPrefix(metadata.FHIRVersion, "4.0.") {
 					cancel()
-					return fmt.Errorf("metadata is not an R4 CapabilityStatement")
+					return lanequalify.ErrNotR4Metadata
 				}
 				cancel()
-				return lanequalify.Warm(ctx, strings.TrimRight(base, "/"), line, nil)
+				if err := lanequalify.Warm(ctx, strings.TrimRight(base, "/"), line, nil); err != nil {
+					return fmt.Errorf("%w: %w", lanequalify.ErrCorpus, err)
+				}
+				return nil
 			}
+			last = &lanequalify.MetadataStatusError{Status: resp.StatusCode}
 		}
 		cancel()
 		timer := time.NewTimer(time.Second)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
+			if last != nil {
+				return fmt.Errorf("metadata unavailable: %w: %w", last, ctx.Err())
+			}
 			return fmt.Errorf("metadata unavailable: %w", ctx.Err())
 		case <-timer.C:
 		}

@@ -160,6 +160,85 @@ carried by default.**
   legs is handed the payer's own binding of the member the request names as its
   subject, not the leg token's subject.
 
+## Identifiers for members the system of record does not hold
+
+**Behavior change in v0.55.0.**
+
+- A member your system of record does not hold is carried, as before. The
+  network identifier the gateway gives such a member is now in its own
+  namespace, so it can never equal the identifier of a member your system of
+  record holds. Earlier releases could give such a member the identifier of a
+  member your system of record holds, and so file the exchange, and what the
+  payer recorded about it, under that member.
+- The bytes a provider and a payer exchange are unchanged. Only the network's
+  own identifiers differ: when the provider holds a member and the payer does
+  not, the two gateways now identify that person differently. Each gateway
+  files its own records under its own identifier; the network's audit records
+  the exchange under the identifier the request's authorization names.
+- A payer gateway raises `subject.binding-differs` on every exchange about a
+  member only one side's system of record holds, since the two identifiers now
+  always differ; earlier releases raised it there less often. Expect more of
+  these events after the upgrade. An exchange about a member neither side
+  holds, with the same Patient on both sides, raises none.
+- **Mixed releases:** a payer gateway before v0.53.0 still compares the token's
+  patient with its own binding. For a member the provider's system of record
+  does not hold, a v0.55.0 provider's identifier no longer equals the one such
+  a payer holds for that member, or derives for it under
+  `SHN_ACCEPT_UNKNOWN_MEMBERS`, so the request is refused `403 token subject
+  does not match request patient`.
+  Upgrade payer gateways before the provider gateways that send to them, as for
+  v0.53.0.
+- **Upgrade note (payer gateways).** A pended authorization recorded before the
+  upgrade for a member your system of record does not hold was filed under the
+  earlier identifier, so after the upgrade it is not found under the member's
+  new one. An amendment for it still reaches your system and your answer is
+  relayed, but it binds no pend and the gateway records nothing for it (it
+  notes `pend.amendment-unbound`); an inquiry's decision for it is relayed but
+  not recorded (it notes `pend.other-subject`). Before upgrading, let open
+  pended authorizations for members your system of record does not hold reach
+  a decision. Members it holds, and every exchange with no open pend, are
+  unaffected.
+- No configuration changes. `REQUIRE_KNOWN_MEMBERS=true` still refuses such a
+  member instead.
+- **Go API (additive):** `pgstore.OpenPends` and `pgstore.OpenPend`, which
+  list a payer's undecided pended authorizations for an operator. It only
+  reads, and never creates or alters the store's schema.
+
+## Patients an exchange involves
+
+**New in v0.55.0 (additive).**
+
+- When the network's discovery descriptor lists `involved` in `hubAccepts`,
+  each prior-authorization leg names, in its envelope's `involved` list, the
+  other patients it involves, each with its own token, so the network records
+  the exchange under each of them as well as the leg's own patient:
+  - on a request, every other member the request carries, identified through
+    your system of record as the leg's subject is (`request-named`);
+  - on a payer's answer, the payer's own binding of the member, when it differs
+    from the patient the leg's token names (`payer-held` or `payer-derived`).
+- It runs at every conformance level, `none` included: it is the network's
+  audit record, not a check of your payload. It never refuses a request, never
+  records a conformance finding, and never changes the bytes exchanged. On the
+  requester side it reads your system of record once for each distinct member
+  a request carries, up to 32.
+- The whole pass for one leg runs within 2 seconds (token requests four at a
+  time), so it cannot hold a leg past that.
+- A patient it cannot name is left out and the leg is sent as usual: past 16
+  patients, a system-of-record read that fails, a member not held under
+  `REQUIRE_KNOWN_MEMBERS=true`, a token that is refused, cannot be obtained,
+  or does not carry the involvement asked for, or one not named before the
+  2 seconds run out. Each raises the observer event
+  `involved.omitted` (Detail: the reason) and, with `METRICS_SERVICE` set,
+  counts in the EMF metric `InvolvedOmitted{reason}`.
+- The descriptor is read once, at start, and the boot line says which way it
+  went. A gateway started before the network lists `involved` sends nothing
+  until it restarts.
+- No configuration changes. Without `involved` in `hubAccepts` a leg carries
+  no list, reads nothing more, and requests no further token.
+- **Go API (additive):** `engine.Config.HubAcceptsInvolved`,
+  `engine.Config.InvolvedBudget` (zero selects 2 seconds) and
+  `engine.Config.InvolvedMetric`; `engine.InvolvedOmittedEvent`.
+
 ## Enrichment of native requests
 
 **Behavior change in v0.54.0: a Da Vinci-native request is carried as sent unless
@@ -222,7 +301,9 @@ alone, never a routing lane), then the routing lane `FHIR_VALIDATE_URL_<line>`, 
 Compose default only once it has qualified — by routing at boot or by the evidence's own
 background attempts afterwards, which never change routing's lanes; until then the line's
 verdict states that no lane is configured and the qualification's state, verbatim, and no
-exchange waits on or dials for a qualification. Embedders may
+exchange waits on or dials for a qualification. With `FHIR_DEFAULT_VALIDATOR_LANES=none`
+there is no Compose default: nothing is probed, and a line with neither key states that it
+is not configured and that the network has no default validator lanes. Embedders may
 supply independent clients through `Config.CertificationValidatorsByLine`; they must
 not share routing validators or qualification wrappers. Missing clients are recorded
 as unavailable. HTTP server execution failures are unavailable rather than conclusive

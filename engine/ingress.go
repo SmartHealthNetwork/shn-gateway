@@ -270,7 +270,7 @@ func (g *Gateway) handleCRDIngress(w http.ResponseWriter, r *http.Request) {
 	}
 	adapted, _, aerr := g.egressAdapt(route, sent, ExchangeIdentity{CorrelationID: child, LegType: legType, Counterpart: recipient})
 	if aerr != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": aerr.Error()})
+		writeJSON(w, adaptFailureStatus(aerr), map[string]string{"error": aerr.Error()})
 		return
 	}
 	if !bytes.Equal(adapted, sent) {
@@ -377,7 +377,7 @@ func (g *Gateway) handleDTRIngress(w http.ResponseWriter, r *http.Request) {
 	}
 	adapted, _, aerr := g.egressAdapt(route, sent, ExchangeIdentity{CorrelationID: child, LegType: legType, Counterpart: recipient})
 	if aerr != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": aerr.Error()})
+		writeJSON(w, adaptFailureStatus(aerr), map[string]string{"error": aerr.Error()})
 		return
 	}
 	if !bytes.Equal(adapted, sent) {

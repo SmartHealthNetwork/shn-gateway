@@ -81,6 +81,34 @@ Both were observed while recording, and neither is a rule of the operation:
    and the requesting provider. It reads the authorization and administration reference
    numbers from the Claim and from its items, so either line's placement is found.
 
+## questionnaire-package.json — the reference payer's answer to Questionnaire/$questionnaire-package
+
+Recorded 2026-09-25 from the pinned reference payer image tagged `a8bece4-pasgraph8-l8000p2-dtr1`
+(the same upstream commit plus the reviewed corrections, including the DTR 2.0.1 package
+corrections), answering the same request as `questionnaire-package-request.json` (JSON-equal): the payer's own
+prior-auth-required scenario request, a Coverage for a member the payer does not hold and the
+PriorAuthRequired canonical, no order. The payer answered HTTP 200.
+
+What it shows:
+
+* **The output parameter is named `PackageBundle`**, the slice name the DTR 2.0.1 and 2.1.0
+  output profile gives it. DTR 2.2.0 names it `packagebundle`.
+* **The Questionnaire carries a generated narrative** (`text`), which its declared
+  `dtr-std-questionnaire` profile requires at 2.0.1 and 2.1.0.
+* **The prepopulated QuestionnaireResponse for a member the payer does not hold has the id
+  `PriorAuthRequired-unresolved-member`**, a valid FHIR id; the entry fullUrl is built from it.
+* **That QuestionnaireResponse names the request's Coverage twice**: in `qr-coverage`, and in a
+  `qr-context` extension. The request carried no order, so there is no order context, and the
+  answer still has one `qr-context` where DTR 2.0.1 and 2.1.0 require at least two (one for the
+  Coverage, one for a Request resource or Encounter). That is the limit of a request with no
+  order: the payer has no Request resource to name, and none is invented.
+* **The `outcome` parameter carries the payer's warning** that no member matched, so no
+  demographic prepopulation was done.
+
+The previous recording (2026-06-19, upstream image) differed in exactly those four answers and
+in the Questionnaire's version-algorithm extension url, which an earlier correction in the
+series changed.
+
 ## The other files
 
 The coverage-requirements, documentation-templates and prior-authorization submit and

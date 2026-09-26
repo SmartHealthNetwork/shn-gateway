@@ -898,7 +898,7 @@ func TestTargetsBrPayer(t *testing.T) {
 // in plain validateFHIR.
 func TestValidateFHIR_IngressSkip_ProviderData(t *testing.T) {
 	g := &Gateway{cfg: Config{OriginationProfile: "provider-data", Validator: failIfCalledValidator{t}}}
-	if status, _ := g.validateFHIRPayerIngress(context.Background(), []byte(`{}`), "", "pa.dtr"); status != 0 {
+	if status, _ := g.validateFHIRPayerIngress(context.Background(), []byte(`{}`), "", "pa.dtr", shnsdk.CMSPayerIdentity); status != 0 {
 		t.Fatalf("provider-data payer-ingress must skip $validate (R-8); got status=%d", status)
 	}
 }
@@ -934,12 +934,12 @@ func (v *recordingValidator) Validate(_ context.Context, resourceJSON []byte, _ 
 // pins.
 //
 // This predicate answers only "does this LANE relay reference-payer bytes at all" — it is
-// the lane half of the R-8 skip decision, not the whole thing. The counterparty half (is
-// THIS leg's response actually from the
-// reference payer) lives entirely in which function a call site uses: validateFHIRPayerIngress
-// (payer-directed legs only) versus plain validateFHIR (everything else, including the UC-05
-// facility searchset — always validates regardless of what this predicate says about the
-// lane).
+// the lane half of the skip decision, not the whole thing. The counterparty half is the
+// leg's routed payer identity being one of the network's reference payers
+// (isReferencePayer), checked inside validateFHIRPayerIngress; and only payer-answer legs
+// call that function — everything else, including the UC-05 facility searchset, calls
+// plain validateFHIR, which always validates regardless of what this predicate says about
+// the lane.
 func TestRelaysReferencePayerBytes(t *testing.T) {
 	for _, p := range []string{"provider-data", "demo"} {
 		if !relaysReferencePayerBytes(p) {
@@ -967,7 +967,7 @@ func TestRelaysReferencePayerBytes(t *testing.T) {
 // function now, never plain validateFHIR.
 func TestValidateFHIR_IngressSkip_Demo(t *testing.T) {
 	g := &Gateway{cfg: Config{OriginationProfile: "demo", Validator: failIfCalledValidator{t}}}
-	if status, msg := g.validateFHIRPayerIngress(context.Background(), []byte(`{"resourceType":"Parameters"}`), "", "pa.dtr"); status != 0 {
+	if status, msg := g.validateFHIRPayerIngress(context.Background(), []byte(`{"resourceType":"Parameters"}`), "", "pa.dtr", shnsdk.CMSPayerIdentity); status != 0 {
 		t.Fatalf("demo-lane payer-ingress must skip $validate (R-8, post-retirement); got status=%d msg=%q", status, msg)
 	}
 }
@@ -998,7 +998,7 @@ func TestValidateFHIR_FacilityIngressStillFailsClosed_Demo(t *testing.T) {
 // $validate — the fix scopes the carve-out to payer-directed legs, it does not remove it.
 func TestValidateFHIR_PayerIngressStillSkips_Demo(t *testing.T) {
 	g := &Gateway{cfg: Config{OriginationProfile: "demo", Validator: failIfCalledValidator{t}}}
-	if status, msg := g.validateFHIRPayerIngress(context.Background(), []byte(`{"resourceType":"Bundle"}`), "", "pa.dtr"); status != 0 {
+	if status, msg := g.validateFHIRPayerIngress(context.Background(), []byte(`{"resourceType":"Bundle"}`), "", "pa.dtr", shnsdk.PayerIdentifier{System: shnsdk.CMSPayerIdentity.System, Value: "00301"}); status != 0 {
 		t.Fatalf("demo-lane payer-directed ingress must still skip $validate after the Finding-1 scope fix; got status=%d msg=%q", status, msg)
 	}
 }
@@ -1027,8 +1027,10 @@ func TestValidateFHIR_EgressStillFailsClosed_Demo(t *testing.T) {
 // anything unrecognized.
 func TestValidateFHIR_IngressStillFailsClosed_OtherLane(t *testing.T) {
 	v := &recordingValidator{valid: false}
-	g := &Gateway{cfg: Config{OriginationProfile: "unknown-lane", Validator: v}}
-	status, msg := g.validateFHIRPayerIngress(context.Background(), []byte(`{"resourceType":"Bundle"}`), "", "pa.dtr")
+	// The payer IS a reference payer: only the lane half of the skip is missing, and
+	// that alone keeps the check running. One lane, so one call.
+	g := &Gateway{cfg: Config{OriginationProfile: "unknown-lane", Validator: v, ValidatorsByLine: map[string]shnsdk.Validator{"2.0": v}}}
+	status, msg := g.validateFHIRPayerIngress(context.Background(), []byte(`{"resourceType":"Bundle"}`), "2.0", "pa.dtr", shnsdk.CMSPayerIdentity)
 	if status != http.StatusUnprocessableEntity {
 		t.Fatalf("non-reference-payer-lane payer-ingress with an invalid resource: status=%d, want %d; msg=%q", status, http.StatusUnprocessableEntity, msg)
 	}

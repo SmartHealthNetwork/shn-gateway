@@ -13,7 +13,8 @@
   ],
   "closure": {
     "seeds": [
-      "http://hl7.org/fhir/5.0/StructureDefinition/extension-Claim.encounter"
+      "http://hl7.org/fhir/5.0/StructureDefinition/extension-Claim.encounter",
+      "http://hl7.org/fhir/StructureDefinition/artifact-versionAlgorithm"
     ],
     "archives": [
       {
@@ -107,6 +108,12 @@
         "sha256": "1b57206b5ab17deabba92268b0bcddaea4bfc926d4f4bb430b7d60a824ffdeac"
       },
       {
+        "file": "StructureDefinition-artifact-versionAlgorithm.json",
+        "archive": "hl7.fhir.uv.extensions.r4-5.3.0-ballot-tc1.tgz",
+        "member": "package/StructureDefinition-artifact-versionAlgorithm.json",
+        "sha256": "e1ed03c654bbc9512ca82188505c069e5a1c237269299f1990aa4c9c89883657"
+      },
+      {
         "file": "StructureDefinition-package-source.json",
         "archive": "hl7.fhir.uv.extensions.r4-5.3.0-ballot-tc1.tgz",
         "member": "package/StructureDefinition-package-source.json",
@@ -125,6 +132,12 @@
         "sha256": "f15b72ffdd0beaef296044eb32c8235c31735fca9f6144dc5dc89840947ff062"
       },
       {
+        "file": "StructureDefinition-web-source.json",
+        "archive": "hl7.fhir.uv.extensions.r4-5.3.0-ballot-tc1.tgz",
+        "member": "package/StructureDefinition-web-source.json",
+        "sha256": "830ba3c19b4ddbc7620b20d3384c05c3b8c0e6ccd05c11536726c5dc317dcd8b"
+      },
+      {
         "file": "ValueSet-major-fhir-version.json",
         "archive": "hl7.fhir.uv.extensions.r4-5.3.0-ballot-tc1.tgz",
         "member": "package/ValueSet-major-fhir-version.json",
@@ -135,6 +148,12 @@
         "archive": "hl7.fhir.uv.extensions.r4-5.3.0-ballot-tc1.tgz",
         "member": "package/ValueSet-type-characteristics-code.json",
         "sha256": "aaef88689c6714692c9e2aa5d7b6a6c0217c256943b5ddf55e77e9ed47ab7753"
+      },
+      {
+        "file": "ValueSet-version-algorithm.json",
+        "archive": "hl7.fhir.uv.extensions.r4-5.3.0-ballot-tc1.tgz",
+        "member": "package/ValueSet-version-algorithm.json",
+        "sha256": "db2201a05810fc5439c16edabe405ecb10a35b15598892e4616d420e06ab0e35"
       },
       {
         "file": "CodeSystem-type-characteristics-code.json",
@@ -165,6 +184,12 @@
         "archive": "hl7.fhir.uv.xver-r5.r4-0.1.0.tgz",
         "member": "package/ValueSet-R5-virtual-service-type-for-R4.json",
         "sha256": "f6c2a4dcb44e175dda2a43950c4679e55b1bf3ca7615928c4aa0d3d9671eaa21"
+      },
+      {
+        "file": "CodeSystem-version-algorithm.json",
+        "archive": "hl7.fhir.uv.extensions.r4-5.3.0-ballot-tc1.tgz",
+        "member": "package/CodeSystem-version-algorithm.json",
+        "sha256": "bff85b1967aeaf1f4be608a479f2ba2529b8616d7c05ea499bd48be140998f45"
       },
       {
         "file": "CodeSystem-virtual-service-type.json",

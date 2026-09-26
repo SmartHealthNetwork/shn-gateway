@@ -42,8 +42,9 @@ func defaultDTRGateway(s *prefetchSoR) *Gateway {
 // Under the enrichment opt-in (Config.EnrichNativeRequests) a
 // questionnaire-package request about a member the provider holds, carrying no
 // Patient, gains the provider's own Patient record as a referenced resource, so
-// a payer that does not hold the member derives the same subject from the
-// request that the provider derived from its record.
+// a payer that does not hold the member can identify it from the request. The
+// payer's derived identifier is in its own namespace, so it differs from the
+// held identifier the provider's token names.
 func TestDTRIngress_PatientObtainedUnderEnrichment(t *testing.T) {
 	withCoverage := ehrParams(ehrOrderParam("sr1", prefetchMember), ehrCoverageParam(prefetchMember, "00001"), dtrQuestionnaire)
 	sorPatient := string(newPrefetchSoR().reads["Patient/"+prefetchSoRID])
@@ -88,10 +89,17 @@ func TestDTRIngress_PatientObtainedUnderEnrichment(t *testing.T) {
 			t.Fatalf("provenance %+v\nwant %+v", ev, wantEv)
 		}
 		// The payer, which does not hold the member, binds it by the Patient
-		// the request now carries: the same subject the provider derived.
+		// the request now carries, in the derived namespace (FR-G61): the
+		// identifier is its own, never the one the provider's record holds, and
+		// the bytes it received are the provider's.
 		payer := &Gateway{cfg: Config{SoR: noMemberSoR{newPrefetchSoR()}}}
-		if pci, status, msg := payer.bindPackageParameters(ctx, sent); status != 0 || pci != p.pci {
-			t.Fatalf("payer bind: %d %s pci=%q, want %q", status, msg, pci, p.pci)
+		demo, ok := PatientDemographics([]byte(sorPatient))
+		if !ok {
+			t.Fatal("fixture: the appended Patient carries its demographics")
+		}
+		want := derivedPCI(prefetchMember, demo.BirthDate, demo.FamilyName)
+		if pci, status, msg := payer.bindPackageParameters(ctx, sent); status != 0 || pci != want || pci == p.pci {
+			t.Fatalf("payer bind: %d %s pci=%q, want its own derived %q (not the provider's %q)", status, msg, pci, want, p.pci)
 		}
 	})
 

@@ -255,7 +255,9 @@ func TestQualificationEventsDescribeTerminalState(t *testing.T) {
 					Version  int     `json:"version"`
 					Line     string  `json:"line"`
 					Base     string  `json:"base"`
+					Host     string  `json:"host"`
 					State    string  `json:"state"`
+					Reason   string  `json:"reason"`
 					At       string  `json:"at"`
 					Duration float64 `json:"duration_ms"`
 				}
@@ -269,8 +271,17 @@ func TestQualificationEventsDescribeTerminalState(t *testing.T) {
 						want = "failed"
 					}
 				}
-				if event.Version != 1 || event.Line != "2.1" || event.Base != engine.DefaultLaneURL("2.1") || event.State != want || event.Duration < 0 {
+				if event.Version != 1 || event.Line != "2.1" || event.Base != engine.DefaultLaneURL("2.1") || event.Host != "shn-validator-2-1" || event.State != want || event.Duration < 0 {
 					t.Fatalf("event=%+v", event)
+				}
+				// A failure names why in the qualifier's own words; the failing
+				// qualifier's text never reaches the log (checked below).
+				wantReason := ""
+				if want == "failed" {
+					wantReason = "qualification did not pass"
+				}
+				if event.Reason != wantReason {
+					t.Fatalf("reason=%q, want %q", event.Reason, wantReason)
 				}
 				if _, err := time.Parse(time.RFC3339Nano, event.At); err != nil {
 					t.Fatal(err)
@@ -280,5 +291,134 @@ func TestQualificationEventsDescribeTerminalState(t *testing.T) {
 				t.Fatal("failure payload leaked")
 			}
 		})
+	}
+}
+
+// A network with no Compose default validator services (a hosted tenant):
+// FHIR_DEFAULT_VALIDATOR_LANES=none creates no default lane, so nothing probes
+// their names, and a declared line then needs its own FHIR_VALIDATE_URL_<line>.
+func TestNoDefaultLanesNeverProbes(t *testing.T) {
+	canonical := shnsdk.NewFakeValidator()
+	none := config{DefaultValidatorLanes: defaultValidatorLanesNone}
+	neverResolve := func(string) string { t.Fatal("a default lane name was resolved"); return "" }
+	neverQualify := func(context.Context, string, string) error { t.Fatal("a default lane was probed"); return nil }
+
+	lanes, m, err := discoverValidatorLanes(context.Background(), func(string) string { return "" }, nil, canonical, none, neverResolve, neverQualify)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Close()
+	if len(m.defaults) != 0 || lanes["2.1"] != nil || lanes["2.2"] != nil {
+		t.Fatalf("defaults=%d lanes=%v", len(m.defaults), lanes)
+	}
+
+	_, m, err = discoverValidatorLanes(context.Background(), func(string) string { return "" }, []string{"pa.crd@2.2"}, canonical, none, neverResolve, neverQualify)
+	m.Close()
+	if err == nil || !strings.Contains(err.Error(), "FHIR_VALIDATE_URL_2_2") {
+		t.Fatalf("a declared line with no lane must refuse boot naming its setting, got %v", err)
+	}
+
+	with := none
+	with.FHIRValidateURL22 = "http://validator-2-2.hosted.internal:8080/fhir"
+	lanes, m, err = discoverValidatorLanes(context.Background(), func(string) string { return "" }, []string{"pa.crd@2.2"}, canonical, with, neverResolve, neverQualify)
+	if err != nil || lanes["2.2"] == nil {
+		t.Fatalf("a configured line boots without probing: lanes=%v err=%v", lanes, err)
+	}
+	m.Close()
+}
+
+// Unset keeps the default lanes; the only other value boots is "none".
+func TestDefaultValidatorLanesValue(t *testing.T) {
+	for value, ok := range map[string]bool{"": true, "none": true, "off": false, "NONE": false, "compose": false} {
+		e := baseEnv(map[string]string{"FHIR_DEFAULT_VALIDATOR_LANES": value})
+		_, err := loadConfig(func(k string) string { return e[k] })
+		if (err == nil) != ok {
+			t.Errorf("FHIR_DEFAULT_VALIDATOR_LANES=%q: err=%v", value, err)
+		}
+		if err != nil && !strings.Contains(err.Error(), "FHIR_DEFAULT_VALIDATOR_LANES") {
+			t.Errorf("the refusal must name the setting: %v", err)
+		}
+	}
+}
+
+// With no default lanes, a line with no certification address is unavailable
+// in the evidence, naming what to configure, and nothing is dialed for it.
+func TestNoDefaultLanesCertificationNamesTheMissingLane(t *testing.T) {
+	cfg := config{DefaultValidatorLanes: defaultValidatorLanesNone, FHIRCertifyURL22: "http://validator-2-2.hosted.internal:8080/fhir"}
+	vs := certificationValidators(func(string) string { return "" }, cfg, "http://validator.hosted.internal:8080/fhir", nil, func(context.Context, string, string) error {
+		t.Fatal("a certification lane was probed")
+		return nil
+	})
+	_, err := vs["2.1"].Validate(context.Background(), []byte(`{}`), "profile")
+	var missing *engine.CertificationLaneUnavailable
+	if !errors.As(err, &missing) || !strings.Contains(err.Error(), "FHIR_CERTIFY_URL_2_1 and FHIR_VALIDATE_URL_2_1 are not configured") {
+		t.Fatalf("2.1 evidence: %v", err)
+	}
+	if vs["2.2"] == nil || vs["2.0"] == nil {
+		t.Fatal("configured lines keep their certification clients")
+	}
+	// Default lanes kept: an unconfigured line with no default gets no client,
+	// as before.
+	if vs := certificationValidators(func(string) string { return "" }, config{}, "http://validator:8080/fhir", nil, nil); vs["2.1"] != nil {
+		t.Fatal("unset changed the default-lane behavior")
+	}
+}
+
+// The real qualifier fails naming why: a refused connection, or a metadata
+// status, not only that its budget ran out.
+func TestDefaultLaneQualifierNamesWhy(t *testing.T) {
+	// The 503 server takes its port first, so the closed port cannot be reused
+	// by it.
+	unavailable := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) }))
+	defer unavailable.Close()
+	refused := httptest.NewServer(http.NotFoundHandler())
+	closed := refused.URL
+	refused.Close()
+	for base, want := range map[string]string{closed + "/fhir": "connection refused", unavailable.URL + "/fhir": "metadata answered HTTP 503"} {
+		ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+		err := qualifyDefaultLane(ctx, base, "2.1")
+		cancel()
+		if got := lanequalify.FailureReason(err); got != want {
+			t.Errorf("%s: reason %q, want %q (%v)", base, got, want, err)
+		}
+	}
+}
+
+// none never widens a line: a single-line contract's line (pa.pdex@2.1, in the
+// build's default declaration) rides the canonical validator as a fallback
+// alias exactly as it does with default lanes, so PA traffic at 2.1 stays
+// unlaned (the engine refuses it; TestDTRContextCannotUseSingleContractFallback)
+// rather than validating against the canonical IG.
+func TestNoDefaultLanesKeepsSingleLineAliasesFallbacks(t *testing.T) {
+	canonical := shnsdk.NewFakeValidator()
+	declared := shnsdk.SupportedContractVersions()
+	failing := func(context.Context, string, string) error { return errors.New("no default lane here") }
+	_, unset, err := discoverValidatorLanes(context.Background(), func(string) string { return "" }, declared, canonical, config{}, engine.DefaultLaneURL, failing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unset.Close()
+	_, none, err := discoverValidatorLanes(context.Background(), func(string) string { return "" }, declared, canonical, config{DefaultValidatorLanes: defaultValidatorLanesNone}, engine.DefaultLaneURL, failing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	none.Close()
+	if !unset.fallbacks["2.1"] || !none.fallbacks["2.1"] {
+		t.Fatalf("2.1 must be a fallback alias either way: unset=%v none=%v", unset.fallbacks, none.fallbacks)
+	}
+	for line := range unset.fallbacks {
+		if !none.fallbacks[line] {
+			t.Fatalf("none dropped the fallback mark on %s", line)
+		}
+	}
+	// A configured 2.1 lane is a real lane, never an alias.
+	laned := config{DefaultValidatorLanes: defaultValidatorLanesNone, FHIRValidateURL21: "http://validator-2-1.example:8080/fhir"}
+	_, m, err := discoverValidatorLanes(context.Background(), func(string) string { return "" }, declared, canonical, laned, engine.DefaultLaneURL, failing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Close()
+	if m.fallbacks["2.1"] {
+		t.Fatal("a configured 2.1 lane was marked a fallback")
 	}
 }

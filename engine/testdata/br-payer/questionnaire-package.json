@@ -7,7 +7,7 @@
   },
   "parameter": [
     {
-      "name": "packagebundle",
+      "name": "PackageBundle",
       "resource": {
         "resourceType": "Bundle",
         "meta": {
@@ -24,10 +24,14 @@
               "id": "PriorAuthRequired",
               "meta": {
                 "versionId": "1",
-                "lastUpdated": "2026-06-19T21:53:26.543+00:00",
+                "lastUpdated": "2026-09-25T23:03:04.266+00:00",
                 "profile": [
                   "http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/dtr-std-questionnaire"
                 ]
+              },
+              "text": {
+                "status": "generated",
+                "div": "<div xmlns=\"http://www.w3.org/1999/xhtml\"><p><b>Prior Authorization Acknowledgment</b></p><p>Questionnaire <code>http://example.org/fhir/Questionnaire/PriorAuthRequired</code>, status active.</p></div>"
               },
               "extension": [
                 {
@@ -52,7 +56,7 @@
                   ]
                 },
                 {
-                  "url": "http://hl7.org/fhir/5.0/StructureDefinition/extension-Questionnaire.versionAlgorithm[x]",
+                  "url": "http://hl7.org/fhir/StructureDefinition/artifact-versionAlgorithm",
                   "valueCoding": {
                     "system": "http://hl7.org/fhir/version-algorithm",
                     "code": "semver"
@@ -91,10 +95,10 @@
             }
           },
           {
-            "fullUrl": "http://localhost:8081/fhir/QuestionnaireResponse/PriorAuthRequired-__unresolved-member",
+            "fullUrl": "http://localhost:8081/fhir/QuestionnaireResponse/PriorAuthRequired-unresolved-member",
             "resource": {
               "resourceType": "QuestionnaireResponse",
-              "id": "PriorAuthRequired-__unresolved-member",
+              "id": "PriorAuthRequired-unresolved-member",
               "meta": {
                 "profile": [
                   "http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/dtr-questionnaireresponse"
@@ -118,6 +122,12 @@
                       }
                     ]
                   }
+                },
+                {
+                  "url": "http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/qr-context",
+                  "valueReference": {
+                    "reference": "Coverage/coverage-1"
+                  }
                 }
               ],
               "questionnaire": "http://example.org/fhir/Questionnaire/PriorAuthRequired",
@@ -125,7 +135,7 @@
               "subject": {
                 "reference": "Patient/example"
               },
-              "authored": "2026-06-19T21:54:27+00:00",
+              "authored": "2026-09-25T23:03:11+00:00",
               "item": [
                 {
                   "linkId": "1",

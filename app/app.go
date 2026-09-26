@@ -116,6 +116,12 @@ type config struct {
 	// lane once routing has qualified it (certificationValidators).
 	FHIRCertifyURL21 string
 	FHIRCertifyURL22 string
+	// DefaultValidatorLanes (FHIR_DEFAULT_VALIDATOR_LANES) is "" or "none".
+	// "none" states this gateway's network has no Compose default validator
+	// services: it creates no default lane, so it never probes their names,
+	// and a line without FHIR_VALIDATE_URL_<line> / FHIR_CERTIFY_URL_<line> is
+	// simply unconfigured. Unset keeps the default lanes.
+	DefaultValidatorLanes string
 	// ContractVersions is the operator-DECLARED exchange-contract token set
 	// (SHN_CONTRACT_VERSIONS, comma-separated). Boot-validated: token grammar +
 	// membership of shnsdk.NativeContractVersions(). Empty env ⇒ this build's
@@ -474,31 +480,32 @@ func loadConfig(getenv func(string) string) (config, error) {
 	}
 
 	cfg := config{
-		Role:              role,
-		Addr:              host + ":" + port,
-		SecretsDir:        secretsDir,
-		DiscoveryURL:      discoveryURL,
-		AuthzURL:          getenv("AUTHZ_URL"),
-		HubURL:            getenv("HUB_URL"),
-		ConsentURL:        getenv("CONSENT_URL"),
-		AuditURL:          getenv("AUDIT_URL"),
-		PHGURL:            getenv("PHG_URL"),
-		RegistrarURL:      getenv("REGISTRAR_URL"),
-		FHIRValidateURL:   getenv("FHIR_VALIDATE_URL"),
-		FHIRValidateURL21: getenv("FHIR_VALIDATE_URL_2_1"),
-		FHIRValidateURL22: getenv("FHIR_VALIDATE_URL_2_2"),
-		FHIRCertifyURL21:  getenv("FHIR_CERTIFY_URL_2_1"),
-		FHIRCertifyURL22:  getenv("FHIR_CERTIFY_URL_2_2"),
-		StoreDatabaseURL:  getenv("SHN_STORE_DATABASE_URL"),
-		NPI:               def("NPI", "1234567890"),
-		FHIRDataURL:       getenv("FHIR_DATA_URL"),
-		FHIRTokenURL:      getenv("FHIR_TOKEN_URL"),
-		FHIRClientID:      getenv("FHIR_CLIENT_ID"),
-		FHIRClientKey:     getenv("FHIR_CLIENT_KEY"),
-		FHIRClientAlg:     getenv("FHIR_CLIENT_ALG"),
-		FHIRClientScope:   def("FHIR_CLIENT_SCOPE", "system/*.read"),
-		FHIRClientKID:     getenv("FHIR_CLIENT_KID"),
-		FHIRClientSecret:  getenv("FHIR_CLIENT_SECRET"),
+		Role:                  role,
+		Addr:                  host + ":" + port,
+		SecretsDir:            secretsDir,
+		DiscoveryURL:          discoveryURL,
+		AuthzURL:              getenv("AUTHZ_URL"),
+		HubURL:                getenv("HUB_URL"),
+		ConsentURL:            getenv("CONSENT_URL"),
+		AuditURL:              getenv("AUDIT_URL"),
+		PHGURL:                getenv("PHG_URL"),
+		RegistrarURL:          getenv("REGISTRAR_URL"),
+		FHIRValidateURL:       getenv("FHIR_VALIDATE_URL"),
+		FHIRValidateURL21:     getenv("FHIR_VALIDATE_URL_2_1"),
+		FHIRValidateURL22:     getenv("FHIR_VALIDATE_URL_2_2"),
+		FHIRCertifyURL21:      getenv("FHIR_CERTIFY_URL_2_1"),
+		FHIRCertifyURL22:      getenv("FHIR_CERTIFY_URL_2_2"),
+		DefaultValidatorLanes: getenv("FHIR_DEFAULT_VALIDATOR_LANES"),
+		StoreDatabaseURL:      getenv("SHN_STORE_DATABASE_URL"),
+		NPI:                   def("NPI", "1234567890"),
+		FHIRDataURL:           getenv("FHIR_DATA_URL"),
+		FHIRTokenURL:          getenv("FHIR_TOKEN_URL"),
+		FHIRClientID:          getenv("FHIR_CLIENT_ID"),
+		FHIRClientKey:         getenv("FHIR_CLIENT_KEY"),
+		FHIRClientAlg:         getenv("FHIR_CLIENT_ALG"),
+		FHIRClientScope:       def("FHIR_CLIENT_SCOPE", "system/*.read"),
+		FHIRClientKID:         getenv("FHIR_CLIENT_KID"),
+		FHIRClientSecret:      getenv("FHIR_CLIENT_SECRET"),
 
 		PayerDavinciBaseURL:           getenv("PAYER_DAVINCI_BASE_URL"),
 		PayerDavinciCDSBaseURL:        getenv("PAYER_DAVINCI_CDS_BASE_URL"),
@@ -569,6 +576,9 @@ func loadConfig(getenv func(string) string) (config, error) {
 		if err := checkOptionalURL(pair[0], pair[1]); err != nil {
 			return config{}, fmt.Errorf("gateway: %w", err)
 		}
+	}
+	if cfg.DefaultValidatorLanes != "" && cfg.DefaultValidatorLanes != defaultValidatorLanesNone {
+		return config{}, fmt.Errorf("gateway: FHIR_DEFAULT_VALIDATOR_LANES=%q: the only value is %q (unset keeps the default lanes)", cfg.DefaultValidatorLanes, defaultValidatorLanesNone)
 	}
 	// A certification address is dialed like a lane: a hostless value refuses
 	// boot here, not per exchange behind a hashed error in the evidence.
@@ -1189,6 +1199,9 @@ type resolvedEndpoints struct {
 	Consent string
 	Audit   string
 	PHG     string
+	// HubAcceptsInvolved: the network's Hub reads an envelope's involved list
+	// (the descriptor lists it in hubAccepts). Read once, at start.
+	HubAcceptsInvolved bool
 }
 
 // resolveDiscovery fetches the /discovery descriptor and resolves the trust
@@ -1223,6 +1236,8 @@ func resolveDiscovery(ctx context.Context, c *http.Client, cfg config) (trustAnc
 		Consent:      disc.Endpoints.Consent,
 		Audit:        disc.Endpoints.Audit,
 		PHG:          disc.Endpoints.PHG,
+
+		HubAcceptsInvolved: disc.HubAcceptsField(shnsdk.HubAcceptsInvolved),
 	}
 	return ta, ep, nil
 }
@@ -1795,6 +1810,15 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	gwCfg.IngressClients = cfg.IngressClients
 	gwCfg.RequireKnownMembers = cfg.RequireKnownMembers
 	gwCfg.EnrichNativeRequests = cfg.EnrichNativeRequests
+	gwCfg.HubAcceptsInvolved = endpoints.HubAcceptsInvolved
+	// Stated in both states: whether this gateway names the other patients a
+	// prior-authorization exchange involves is the network's choice, read from
+	// its discovery descriptor when the gateway started.
+	if endpoints.HubAcceptsInvolved {
+		log.Printf("gateway: the network's Hub reads involved patients — each prior-authorization leg names the other patients it involves, identified through this participant's system of record, so the exchange is recorded under each of them")
+	} else {
+		log.Printf("gateway: the network's Hub does not list involved patients in hubAccepts — legs carry no involved list; restart the gateway after the network starts listing it")
+	}
 	// Stated in both states, so a deployment's enrichment posture can be read
 	// from its boot line.
 	if cfg.EnrichNativeRequests {
@@ -1836,6 +1860,7 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		gwCfg.LegMetric = legMetricHook(em, cfg.MetricsService, cfg.Role)
 		storeErr := storeErrorMetricHook(em, cfg.MetricsService)
 		gwCfg.StoreErrorMetric = storeErr
+		gwCfg.InvolvedMetric = involvedOmittedMetricHook(em, cfg.MetricsService)
 		// One counter, one `store` dimension, whichever layer noticed the failure.
 		for _, wire := range storeErrHooks {
 			wire(storeErr)
@@ -2477,9 +2502,13 @@ func certificationValidators(getenv func(string) string, cfg config, canonical s
 			continue
 		}
 		if endpoint == "" {
+			suffix := strings.ReplaceAll(line, ".", "_")
 			if d := defaults[line]; d != nil {
-				suffix := strings.ReplaceAll(line, ".", "_")
 				out[line] = engine.NewGatedCertificationValidator(d, qualify, "FHIR_CERTIFY_URL_"+suffix+" and FHIR_VALIDATE_URL_"+suffix+" are not configured")
+			} else if cfg.DefaultValidatorLanes == defaultValidatorLanesNone && line != "2.0" {
+				// No default lane exists to qualify: the evidence names the lane to
+				// configure, and nothing is ever dialed for it.
+				out[line] = unconfiguredCertification{reason: "FHIR_CERTIFY_URL_" + suffix + " and FHIR_VALIDATE_URL_" + suffix + " are not configured, and this network has no default validator lanes"}
 			}
 			continue
 		}
@@ -2569,4 +2598,12 @@ func parseBackendHeaders(raw string) (http.Header, error) {
 		return nil, fmt.Errorf("is set but names no header (got %q)", raw)
 	}
 	return h, nil
+}
+
+// unconfiguredCertification answers a line with no lane at all: the verdict
+// is unavailable, naming what to configure, and nothing is dialed.
+type unconfiguredCertification struct{ reason string }
+
+func (u unconfiguredCertification) Validate(context.Context, []byte, string) (shnsdk.Result, error) {
+	return shnsdk.Result{}, &engine.CertificationLaneUnavailable{Reason: u.reason}
 }

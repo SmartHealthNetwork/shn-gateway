@@ -12,7 +12,9 @@ import zipfile
 
 ROOT = Path(__file__).parent
 NAME = 'shn.fhir.validation-support'
-VERSION = '1.2.0'
+# 1.3.x and 1.4.x are not used: HAPI caches a package by id and version, and those numbers have
+# been used before, so a server that still holds one would never load this content.
+VERSION = '1.5.0'
 
 def verify_input(source, subdir=''):
     data = (ROOT / 'inputs' / subdir / source['file']).read_bytes()
@@ -118,7 +120,7 @@ def package_bytes():
         data[name] = content
     data['package.json'] = (json.dumps(dict(name=NAME, version=VERSION, type='fhir.ig',
         fhirVersions=['4.0.1'],
-        description='Offline CMS terminology and the validation closure of the R5 Claim.encounter extension, copied unchanged from the pinned cross-version and extensions packages',
+        description='Offline CMS terminology and the validation closures of the R5 Claim.encounter extension and the artifact-versionAlgorithm extension, copied unchanged from the pinned cross-version and extensions packages',
         dependencies={'hl7.fhir.r4.core': '4.0.1'}), indent=2) + '\n').encode()
     output = io.BytesIO()
     with gzip.GzipFile(fileobj=output, mode='wb', filename='', mtime=0) as gz:

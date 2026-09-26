@@ -467,6 +467,7 @@ func TestCertificationNativeRetryCaptureClearsResponse(t *testing.T) {
 		w.WriteHeader(409)
 		fmt.Fprint(w, `{"resourceType":"OperationOutcome","issue":[{"severity":"error"}]}`)
 	}))
+	defer srv.Close()
 	n := &nativeResponder{client: srv.Client()}
 	capture := &nativeCertificationCapture{}
 	ctx := context.WithValue(context.Background(), nativeCertificationKey{}, capture)
@@ -475,10 +476,13 @@ func TestCertificationNativeRetryCaptureClearsResponse(t *testing.T) {
 	if err != nil || bad.Status != 409 || len(capture.response) == 0 {
 		t.Fatal(bad, err, capture)
 	}
-	srv.Close()
 	second := []byte(`{"resourceType":"Claim","id":"second"}`)
-	_, _, err = n.post(ctx, srv.URL, "", testRequest(second), "pas-claim", "synthetic retry")
-	if err == nil || !bytes.Equal(capture.request, second) || capture.response != nil {
+	_, _, err = n.post(ctx, refusedURL, "", testRequest(second), "pas-claim", "synthetic retry")
+	var failure *upstreamFailure
+	if !errors.As(err, &failure) || failure.sent || !strings.HasPrefix(err.Error(), "upstream payer synthetic retry unreachable: ") {
+		t.Fatalf("retry error = %v, want an unsent dial failure", err)
+	}
+	if !bytes.Equal(capture.request, second) || capture.response != nil {
 		t.Fatal("stale attempt paired with failed retry", err, capture)
 	}
 }

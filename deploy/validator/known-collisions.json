@@ -5,12 +5,16 @@
     "2.1": [],
     "2.2": [
       "http://hl7.org/fhir/StructureDefinition/alternate-reference",
+      "http://hl7.org/fhir/StructureDefinition/artifact-versionAlgorithm",
       "http://hl7.org/fhir/StructureDefinition/package-source",
       "http://hl7.org/fhir/StructureDefinition/structuredefinition-type-characteristics",
       "http://hl7.org/fhir/StructureDefinition/version-specific-use",
+      "http://hl7.org/fhir/StructureDefinition/web-source",
       "http://hl7.org/fhir/ValueSet/major-fhir-version",
       "http://hl7.org/fhir/ValueSet/type-characteristics-code",
-      "http://hl7.org/fhir/type-characteristics-code"
+      "http://hl7.org/fhir/ValueSet/version-algorithm",
+      "http://hl7.org/fhir/type-characteristics-code",
+      "http://hl7.org/fhir/version-algorithm"
     ]
   }
 }

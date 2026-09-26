@@ -25,7 +25,7 @@ import (
 // response it returned. Exported because test/adversarial uses it directly.
 func ParseCoverageEligibilityResponsePatient(data []byte) (string, error) {
 	var probe struct {
-		ResourceType string `json:"resourceType"`
+		ResourceType string                     `json:"resourceType"`
 		Patient      map[string]json.RawMessage `json:"patient"`
 	}
 	if err := json.Unmarshal(data, &probe); err != nil {

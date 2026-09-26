@@ -268,7 +268,7 @@ func (g *Gateway) handleCRDNativeInbound(w http.ResponseWriter, r *http.Request,
 		g.refuseInbound(w, r, legCRDOrderSelect, env, tok, answerTok, status, msg, nil)
 		return
 	}
-	g.noteSubjectBinding("crd-order-select", env.Metadata.CorrelationID, tok.Subject, subjectPCI)
+	g.noteSubjectBinding(r.Context(), "crd-order-select", env.Metadata.CorrelationID, tok.Subject, subjectPCI)
 	// Below strict a request carried without an order has none to validate.
 	if len(srJSON) > 0 {
 		if status, msg := g.validateFHIR(ctx, srJSON, "ingress", ""); status != 0 {

@@ -128,7 +128,7 @@ func (g *Gateway) submitPASClaim(ctx context.Context, r *http.Request, pci strin
 	}
 	bundleJSON, _, aerr := g.egressAdapt(route, bundleJSON, ExchangeIdentity{CorrelationID: out.corr, LegType: "pas-claim", Counterpart: recipient})
 	if aerr != nil {
-		return out, http.StatusBadGateway, aerr.Error(), aerr
+		return out, adaptFailureStatus(aerr), aerr.Error(), aerr
 	}
 	// This helper owns the pas-claim leg wholesale — a single-shot submit+resolve —
 	// regardless of which caller's headline leg dispatched here, so it retags rather
@@ -156,7 +156,7 @@ func (g *Gateway) submitPASClaim(ctx context.Context, r *http.Request, pci strin
 	ctx = withFindingContext(ctx, findingContext{
 		LegType: "pas-claim", CorrelationID: out.corr, Seam: "originate", Whose: "peer",
 	})
-	if status, msg := g.validateFHIRPayerIngress(ctx, respJSON, targetLine, "pa.pas"); status != 0 {
+	if status, msg := g.validateFHIRPayerIngress(ctx, respJSON, targetLine, "pa.pas", payer); status != 0 {
 		return out, status, msg, nil
 	}
 	return out, 0, "", nil

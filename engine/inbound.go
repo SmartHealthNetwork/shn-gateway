@@ -105,6 +105,9 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 		Seam:          inboundSeamFor(env.Metadata.TransactionType),
 		Whose:         "peer",
 	}))
+	// The payer's own binding of the member, when it differs from the leg
+	// token's patient, is named on the answer's involved list (involved.go).
+	r = r.WithContext(g.withInvolvedCollector(r.Context(), env.Metadata.TransactionType))
 
 	// Per-hop transport auth: the Hub's X-Hub-Assertion was verified at the top of
 	// this handler; the bound authz token below is the AUTHORITY check (AI-11) —
@@ -454,11 +457,11 @@ func (g *Gateway) forwardEligibilityInbound(w http.ResponseWriter, r *http.Reque
 		g.refuseInbound(w, r, legEligibility, env, tok, answerTok, status, msg, nil)
 		return
 	}
-	g.noteSubjectBinding(leg, env.Metadata.CorrelationID, tok.Subject, pci)
+	g.noteSubjectBinding(r.Context(), leg, env.Metadata.CorrelationID, tok.Subject, pci)
 	if !g.validateEligibilityRequest(w, r, env, tok, cerJSON, answerTok) {
 		return
 	}
-	result, err := f.forwardEligibility(ctx, cerJSON)
+	result, err := f.forwardEligibility(withResponderCorrelation(ctx, env.Metadata.CorrelationID), cerJSON)
 	if err != nil {
 		g.responderFailed(w, r, legEligibility, env, tok, answerTok, err)
 		return

@@ -39,6 +39,14 @@ func storeErrorMetricHook(em *metrics.Emitter, service string) func(store string
 	}
 }
 
+// involvedOmittedMetricHook counts each involved patient a leg left out of its
+// list, by reason (engine.Config.InvolvedMetric).
+func involvedOmittedMetricHook(em *metrics.Emitter, service string) func(reason string) {
+	return func(reason string) {
+		em.EmitCount("InvolvedOmitted", 1, map[string]string{"Service": service, "reason": reason})
+	}
+}
+
 // storePoolStat is the slice of pgxpool.Stat this gateway reports. Named fields rather
 // than the pgxpool type so the emission is testable without a database (pgxpool.Stat's
 // fields are unexported and it can only be produced by a live pool).

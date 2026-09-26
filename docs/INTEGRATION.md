@@ -496,7 +496,31 @@ request). What the FHIR check covers, per leg:
   apply to it. A PAS submit or update the gateway builds from your records is
   validated: the Bundle for base R4 shape, and its QuestionnaireResponse
   attachments against the DTR profile.
-- A payer's DTR questionnaire package is not validated.
+- From shn-gateway v0.55.0, a payer's answer to a leg your provider gateway sends — the DTR
+  `$questionnaire-package` and `$next-question` answers and the PAS ClaimResponse
+  answers — is validated on ingress at your gateway's level, against the IG lines
+  your gateway supports: first the line the leg was sent at (the payer's declared
+  line, or your gateway's own line when the payer declared none), then the lines
+  the answer's versioned `meta.profile` names, then the lines its structural
+  markers point to, then 2.2, 2.1 and 2.0 where your gateway can validate them. It
+  is valid if it conforms to any, refused only when it conforms to none, and one
+  finding records the line the leg was sent at and each line tried with its
+  verdict (a finding that the answer was valid only on another line is not a
+  defect). If no line is valid and the line the leg was sent at, or a line the
+  answer names, could not be checked, the check is unavailable: recorded at
+  `observe` and `structural`, refused at `strict`. Each line beyond the one the leg
+  was sent at gets at most 2 seconds; one that does not answer in time is recorded
+  as unavailable for that line. An answer that names a supported line your gateway
+  has no validator for is recorded rather than refused at `structural`, because that
+  line could not be checked. When your gateway has no validator for the line the leg
+  was sent at, the first line it actually checks gets the same 2-second bound. At `strict` an answer whose check cannot run
+  is refused. SHN's reference payers, identified by payer identity
+  (`urn:oid:2.16.840.1.113883.6.300` `00001`, `00300`, `00301`, and SHN's two
+  bridging-demo payers under `urn:shn:demo-payer`, which front `00001`), answering a
+  gateway on the `provider-data` or `demo` lane are the exception: their answers
+  are not validated, because their packages do not yet conform (the 2.0 reference
+  payer's DTR package fails DTR 2.0.1). Judging a payer's confirmed line alone,
+  more strictly, may be introduced later.
 - Of coverage eligibility, both gateways validate the request and the answer: the
   answer the payer's gateway builds from its records or, when the payer declares its
   own endpoint (`PAYER_ELIGIBILITY_URL`), the payer system's answer.

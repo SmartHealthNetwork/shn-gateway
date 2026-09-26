@@ -145,8 +145,13 @@ func TestVerdictCommandRejectsTransportFailuresWithoutRetry(t *testing.T) {
 	for _, mode := range []string{"malformed", "missing-code", "ambiguous-outcome", "status", "redirect", "incomplete", "oversize", "timeout"} {
 		t.Run(mode, func(t *testing.T) {
 			var posts atomic.Int32
+			received := make(chan struct{}, 1)
 			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				posts.Add(1)
+				select {
+				case received <- struct{}{}:
+				default:
+				}
 				switch mode {
 				case "malformed":
 					fmt.Fprint(w, `{"resourceType":`)
@@ -166,22 +171,31 @@ func TestVerdictCommandRejectsTransportFailuresWithoutRetry(t *testing.T) {
 				case "oversize":
 					fmt.Fprint(w, cleanOutcome+strings.Repeat(" ", maxOutcomeBytes))
 				case "timeout":
+					// Hold the request until the client gives up, so the budget,
+					// not the server, ends it. The fallback only bounds a broken run.
 					select {
 					case <-r.Context().Done():
-					case <-time.After(100 * time.Millisecond):
+					case <-time.After(10 * time.Second):
 					}
 				}
 			}))
 			budget := "2s"
 			if mode == "timeout" {
-				budget = "20ms"
+				// Room for the dial on a loaded runner; the request is still
+				// held past the budget, so the budget always expires.
+				budget = "500ms"
 			}
 			args := []string{"verify-verdicts", "--base", s.URL, "--line", "2.2", "--pas-version", "2.2.1", "--budget", budget}
 			if got := verdictCommand(args, emptyEnv); got != 1 {
 				t.Fatalf("exit=%d", got)
 			}
+			select {
+			case <-received:
+			default:
+				t.Fatal("the request never reached the server: the failure did not come from the answer")
+			}
 			if posts.Load() != 1 {
-				t.Fatalf("posts=%d want 1", posts.Load())
+				t.Fatalf("posts=%d want 1 (no retry)", posts.Load())
 			}
 			s.Close()
 		})

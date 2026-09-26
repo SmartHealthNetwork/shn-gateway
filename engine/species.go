@@ -98,10 +98,28 @@ func candidateOrder(species string, payload []byte) []string {
 	if _, ok := profileFor(species, "2.0", ""); !ok {
 		return nil
 	}
+	return candidateLineOrder(payload)
+}
+
+// candidateLineOrder orders the Da Vinci lines 2.2, 2.1 and 2.0 for certifying
+// payload, whatever its species: first the lines a versioned meta.profile claims
+// (a PAS or DTR profile at that line's package version), then the lines a known
+// structural marker points to, then the rest, each group in 2.2, 2.1, 2.0 order.
+// It walks Bundle entries and Parameters parameter resources, so a DTR
+// $questionnaire-package answer is read through its PackageBundle.
+func candidateLineOrder(payload []byte) []string {
+	order, _ := answerLineClaims(payload)
+	return order
+}
+
+// answerLineClaims is candidateLineOrder's order together with the lines the
+// payload itself points to — by a versioned meta.profile or a structural marker.
+func answerLineClaims(payload []byte) ([]string, map[string]bool) {
 	order := []string{"2.2", "2.1", "2.0"}
+	claimed := map[string]bool{}
 	var r map[string]any
 	if json.Unmarshal(payload, &r) != nil {
-		return order
+		return order, claimed
 	}
 	claims := map[string]bool{}
 	markers := map[string]bool{}
@@ -144,6 +162,9 @@ func candidateOrder(species string, payload []byte) []string {
 			}
 		}
 		entries, _ := m["entry"].([]any)
+		if m["resourceType"] == "Parameters" {
+			entries, _ = m["parameter"].([]any)
+		}
 		for _, e := range entries {
 			entry, _ := e.(map[string]any)
 			resource, _ := entry["resource"].(map[string]any)
@@ -151,6 +172,12 @@ func candidateOrder(species string, payload []byte) []string {
 		}
 	}
 	walk(r)
+	for line := range claims {
+		claimed[line] = true
+	}
+	for line := range markers {
+		claimed[line] = true
+	}
 	out := make([]string, 0, 3)
 	for _, line := range order {
 		if claims[line] {
@@ -167,7 +194,7 @@ func candidateOrder(species string, payload []byte) []string {
 			out = append(out, line)
 		}
 	}
-	return out
+	return out, claimed
 }
 
 func certificationSource(certified []string, target string) string {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -162,10 +163,47 @@ func TestDTRContextCannotUseSingleContractFallback(t *testing.T) {
 	if status, _ := g.validateDTRQuestionnaireResponse(context.Background(), []byte(`{"resourceType":"QuestionnaireResponse"}`), "2.1"); status != http.StatusInternalServerError {
 		t.Fatalf("DTR context status=%d; unavailable PA lane borrowed PDex fallback", status)
 	}
-	if status, _ := g.validateFHIRPayerIngress(context.Background(), []byte(`{"resourceType":"Patient"}`), "2.1", "pa.dtr"); status != http.StatusInternalServerError {
-		t.Fatalf("DTR ingress status=%d", status)
+	// A payer's DTR answer routed at 2.1 is not certified on the borrowed fallback
+	// either: 2.1 is no candidate line, and the answer is judged on the one DTR lane
+	// this build really has.
+	lanes := g.candidateLanes("pa.dtr", "2.1", []byte(`{"resourceType":"Patient"}`))
+	if len(lanes) != 2 || lanes[0].Line != "2.1" || lanes[0].V != nil || lanes[1].Line != "2.0" || lanes[1].V == nil {
+		t.Fatalf("DTR ingress candidate lanes=%+v, want 2.1 unserved and the real 2.0 lane", lanes)
+	}
+	// At the call: the borrowed 2.1 fallback is never called, and with the routed
+	// line unserved and 2.0 failing, the answer is refused as the missing lane.
+	reg := shnsdk.NewRegistry()
+	g2 := &Gateway{cfg: Config{Reg: reg, ValidatorsByLine: map[string]shnsdk.Validator{
+		"2.0": &recordingValidator{valid: false}, "2.1": failIfCalledValidator{t},
+	}, CanonicalFallbackLines: map[string]bool{"2.1": true}}}
+	status, msg := g2.validateFHIRPayerIngress(context.Background(), []byte(`{"resourceType":"Patient"}`), "2.1", "pa.dtr",
+		shnsdk.PayerIdentifier{System: shnsdk.CMSPayerIdentity.System, Value: "00002"})
+	if status != http.StatusInternalServerError || !strings.Contains(msg, "no FHIR validator lane configured for contract line 2.1") {
+		t.Fatalf("DTR ingress status=%d %q, want the unserved 2.1 line refused as unavailable", status, msg)
 	}
 	if status, _ := g.validateFHIR(context.Background(), []byte(`{"resourceType":"Patient"}`), "egress", ""); status != 0 {
 		t.Fatalf("generic canonical status=%d", status)
+	}
+}
+
+// The lane shape a gateway with no default validator lanes has under the
+// build's default declaration: 2.0 on the canonical validator, and 2.1 on it
+// only as the single-line PDex contract's fallback alias. PA traffic at 2.1
+// has no lane and is refused; PDex at 2.1 keeps its alias.
+func TestNoDefaultLanesShapeRefusesPAAtTheAliasedLine(t *testing.T) {
+	canonical := shnsdk.NewFakeValidator()
+	g := &Gateway{cfg: Config{Validator: canonical, ValidatorsByLine: map[string]shnsdk.Validator{"2.0": canonical, "2.1": canonical}, CanonicalFallbackLines: map[string]bool{"2.1": true}}}
+	for _, leg := range []struct{ legType, token string }{{"pas-claim", "pa.pas@2.1"}, {"crd-order-select", "pa.crd@2.1"}} {
+		if _, _, status, _ := g.unframeRequest(leg.legType, framedRequest(t, leg.token, []byte(`{}`))); status != http.StatusUnprocessableEntity {
+			t.Errorf("%s frame answered %d; a line with only an alias has no PA lane", leg.token, status)
+		}
+	}
+	for _, contract := range []string{"pa.pas", "pa.crd", "pa.dtr"} {
+		if g.validatorForContractLine(contract, "2.1") != nil {
+			t.Errorf("%s@2.1 borrowed the canonical alias", contract)
+		}
+	}
+	if g.validatorForContractLine("pa.pdex", "2.1") == nil {
+		t.Error("pa.pdex@2.1 lost its canonical alias")
 	}
 }

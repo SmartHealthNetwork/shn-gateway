@@ -41,7 +41,7 @@ class SupportTests(unittest.TestCase):
             # The two CMS CodeSystems, the derived closure (closure.py) and the manifest.
             expected = sorted(['package/CodeSystem-cms-hcpcs.json', 'package/CodeSystem-cms-pos.json', 'package/package.json'] + ['package/' + m['file'] for m in members])
             self.assertEqual(names, expected)
-            self.assertEqual(len(members), 25)
+            self.assertEqual(len(members), 29)
             for m in members:
                 data = (ROOT / 'inputs' / 'closure' / m['file']).read_bytes()
                 self.assertEqual(hashlib.sha256(data).hexdigest(), m['sha256'], m['file'])
@@ -49,7 +49,7 @@ class SupportTests(unittest.TestCase):
                 self.assertIn(m['archive'], {a['file'] for a in sources['closure']['archives']})
                 self.assertTrue(m['member'].startswith('package/') and m['member'].endswith('/' + m['file']), m['member'])
             manifest = json.loads(archive.extractfile('package/package.json').read())
-            self.assertEqual((manifest['name'], manifest['version']), ('shn.fhir.validation-support', '1.2.0'))
+            self.assertEqual((manifest['name'], manifest['version']), ('shn.fhir.validation-support', '1.5.0'))
         listing = json.loads((ROOT / 'closure-members.json').read_text())
         self.assertEqual([row['file'] for row in listing], [m['file'] for m in members])
         self.assertEqual({row['resourceType'] for row in listing}, {'StructureDefinition', 'ValueSet', 'CodeSystem'})
@@ -59,10 +59,52 @@ class SupportTests(unittest.TestCase):
             resource = json.loads((ROOT / 'inputs' / 'closure' / row['file']).read_text())
             self.assertEqual((resource['url'], resource.get('version'), resource['resourceType']), (row['url'], row['version'], row['resourceType']), row['file'])
         self.assertEqual(gen.package_bytes(), gen.package_bytes())
-        self.assertEqual(gen.package_bytes(), (ROOT / 'shn.fhir.validation-support-1.2.0.tgz').read_bytes())
-        for old in ('1.0.0', '1.1.0'):
+        self.assertEqual(gen.package_bytes(), (ROOT / 'shn.fhir.validation-support-1.5.0.tgz').read_bytes())
+        # 1.3.x and 1.4.x are not used: HAPI caches a package by id and version, and those numbers
+        # have been used before. They stay absent, like every superseded archive.
+        for old in ('1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0'):
             self.assertFalse((ROOT / ('shn.fhir.validation-support-' + old + '.tgz')).exists(), 'older archives must be gone')
         self.assertFalse((ROOT / 'inputs' / 'StructureDefinition-ext-R5-Claim.encounter.json').exists())
+
+    def test_version_algorithm_code_system_is_the_archive_member(self):
+        """The 2.0 and 2.1 lines load no extensions package, so the version-algorithm CodeSystem a
+        DTR Questionnaire's artifact-versionAlgorithm extension codes from (valueCoding
+        http://hl7.org/fhir/version-algorithm#semver) reaches them only through this package. The
+        packaged bytes are the hl7.fhir.uv.extensions.r4 5.3.0-ballot-tc1 member, unchanged: the
+        digest below is that archive entry's SHA-256, pinned here independently of sources.json."""
+        spec = importlib.util.spec_from_file_location('support_generator', ROOT / 'generate.py')
+        gen = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(gen)
+        pinned = {
+            'CodeSystem-version-algorithm.json': 'bff85b1967aeaf1f4be608a479f2ba2529b8616d7c05ea499bd48be140998f45',
+        }
+        sources = json.loads((ROOT / 'sources.json').read_text())
+        self.assertIn('http://hl7.org/fhir/StructureDefinition/artifact-versionAlgorithm', sources['closure']['seeds'])
+        records = {m['file']: m for m in sources['closure']['members']}
+        with tarfile.open(fileobj=io.BytesIO((ROOT / 'shn.fhir.validation-support-1.5.0.tgz').read_bytes())) as archive:
+            for name, digest in pinned.items():
+                packaged = archive.extractfile('package/' + name).read()
+                self.assertEqual(hashlib.sha256(packaged).hexdigest(), digest, name)
+                self.assertEqual(records[name]['sha256'], digest, name)
+                self.assertEqual((records[name]['archive'], records[name]['member']),
+                                 ('hl7.fhir.uv.extensions.r4-5.3.0-ballot-tc1.tgz', 'package/' + name))
+            code_system = json.loads(archive.extractfile('package/CodeSystem-version-algorithm.json').read())
+            self.assertEqual((code_system['url'], code_system['content']), ('http://hl7.org/fhir/version-algorithm', 'complete'))
+            self.assertIn('semver', {c['code'] for c in code_system['concept']})
+            names = {m.name for m in archive.getmembers()}
+            for member in ('StructureDefinition-artifact-versionAlgorithm.json', 'ValueSet-version-algorithm.json'):
+                self.assertIn('package/' + member, names)
+        import os
+        directory = os.environ.get('SHN_IG_ARCHIVES')
+        if directory:
+            # With the pinned archive present, compare against the archive entry itself.
+            spec = importlib.util.spec_from_file_location('support_closure', ROOT / 'closure.py')
+            closure = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(closure)
+            source = closure.load_archives(directory)['hl7.fhir.uv.extensions.r4-5.3.0-ballot-tc1.tgz']
+            with tarfile.open(fileobj=io.BytesIO(source)) as upstream, tarfile.open(fileobj=io.BytesIO(gen.package_bytes())) as built:
+                for name in pinned:
+                    self.assertEqual(built.extractfile('package/' + name).read(), upstream.extractfile('package/' + name).read(), name)
 
     def test_closure_member_digest_is_load_bearing(self):
         spec = importlib.util.spec_from_file_location('support_generator', ROOT / 'generate.py')

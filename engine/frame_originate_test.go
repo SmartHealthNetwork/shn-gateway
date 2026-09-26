@@ -654,7 +654,8 @@ func TestLegOriginatedRouteChainOnArm3(t *testing.T) {
 // route.BuildLine -> egressAdapt -> [refuses here; OriginateLeg/roundTrip,
 // the only path that ever calls the fake Hub's /route, is never reached])
 // rather than a hand-rolled site call, so the zero-bytes property is
-// asserted against the genuine origination path, not a stub.
+// asserted against the genuine origination path, not a stub. The refusal
+// answers 422 (adaptFailureStatus).
 func TestTransformRefusalZeroBytes(t *testing.T) {
 	env := newInProcessExchange(t)
 	declareRecipientVersions(t, env, []string{"pa.pas@2.2"})
@@ -689,8 +690,10 @@ func TestTransformRefusalZeroBytes(t *testing.T) {
 	if !errors.As(err, &sce) {
 		t.Fatalf("want a *SemanticChangeError, got %T: %v", err, err)
 	}
-	if status != http.StatusBadGateway {
-		t.Fatalf("status = %d, want %d", status, http.StatusBadGateway)
+	// A bridging refusal is the legible 422 the compatibility matrix states,
+	// never the 502 a gateway fault answers.
+	if status != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d", status, http.StatusUnprocessableEntity)
 	}
 	if msg == "" {
 		t.Fatal("want a non-empty refusal message")

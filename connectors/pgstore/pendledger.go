@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	engine "github.com/SmartHealthNetwork/shn-gateway/engine"
 )
@@ -320,6 +321,47 @@ SELECT state, COALESCE(requester_holder, ''), COALESCE(outcome, ''), decided_at,
 	}
 	rec.LastTransition = lastChange
 	return rec, true, nil
+}
+
+// OpenPend is one pended authorization that has not been decided: the
+// patient identifier it is filed under, its correlation, the requester that
+// submitted it, and when it last changed.
+type OpenPend struct {
+	SubjectPCI      string
+	CorrelationID   string
+	RequesterHolder string
+	LastTransition  time.Time
+}
+
+// OpenPends lists holderID's pended authorizations that have no decision yet,
+// oldest first. It is an operator's read, not a request-path one: it lets a
+// payer see, before an upgrade that changes how a member its system of record
+// does not hold is identified, which open exchanges would no longer be found
+// afterwards. It only reads: unlike NewPgStore it never creates or alters the
+// schema, so it fails on a store that has none. A decision is judged by the
+// row's state, not its date: a payer may decide without dating it.
+func OpenPends(ctx context.Context, pool *pgxpool.Pool, holderID string) ([]OpenPend, error) {
+	rows, err := pool.Query(ctx, `
+SELECT subject_pci, correlation_id, COALESCE(requester_holder, ''), last_transition_at
+  FROM gw_pended_claim
+ WHERE holder_id=$1 AND state <> $2
+ ORDER BY last_transition_at, subject_pci, correlation_id`, holderID, string(engine.PendStateDecided))
+	if err != nil {
+		return nil, fmt.Errorf("pgstore: OpenPends: %w", err)
+	}
+	defer rows.Close()
+	var out []OpenPend
+	for rows.Next() {
+		var p OpenPend
+		if err := rows.Scan(&p.SubjectPCI, &p.CorrelationID, &p.RequesterHolder, &p.LastTransition); err != nil {
+			return nil, fmt.Errorf("pgstore: OpenPends: %w", err)
+		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("pgstore: OpenPends: %w", err)
+	}
+	return out, nil
 }
 
 // maybePurge sweeps this holder's ledger rows whose last transition is older than

@@ -2,10 +2,15 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -220,3 +225,50 @@ func TestGatedCertificationHonoursRoutingReadiness(t *testing.T) {
 		t.Fatalf("the client attempted %d qualifications of a lane routing had already qualified", got)
 	}
 }
+
+// A failed certification-lane qualification names the host it dialed and why,
+// never a bare "failed" and never the qualifier's error text.
+func TestCertificationQualificationLogNamesHostAndReason(t *testing.T) {
+	var out strings.Builder
+	var mu sync.Mutex
+	old := log.Writer()
+	log.SetOutput(writerFunc(func(p []byte) (int, error) { mu.Lock(); defer mu.Unlock(); return out.Write(p) }))
+	defer log.SetOutput(old)
+	missing := &net.DNSError{Err: "private resolver detail", Name: "shn-validator-2-1", IsNotFound: true}
+	lane := NewDiscoveredLane("2.1", "http://shn-validator-2-1:8080/fhir", shnsdk.NewOperationValidator("http://shn-validator-2-1:8080/fhir"))
+	v := newFastGated(lane, func(context.Context, string, string) error { return fmt.Errorf("metadata unavailable: %w", missing) }, "FHIR_CERTIFY_URL_2_1 and FHIR_VALIDATE_URL_2_1 are not configured")
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		mu.Lock()
+		logged := out.String()
+		mu.Unlock()
+		if strings.Contains(logged, "certification_lane_qualification") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no qualification event")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	v.Close()
+	mu.Lock()
+	logged := out.String()
+	mu.Unlock()
+	_, raw, _ := strings.Cut(logged, "gateway: certification_lane_qualification ")
+	var event struct {
+		Host, State, Reason string
+	}
+	if err := json.Unmarshal([]byte(strings.SplitN(raw, "\n", 2)[0]), &event); err != nil {
+		t.Fatal(err)
+	}
+	if event.Host != "shn-validator-2-1" || event.State != "failed" || event.Reason != "name does not resolve" {
+		t.Fatalf("event = %+v", event)
+	}
+	if strings.Contains(logged, "private resolver detail") {
+		t.Fatal("the qualifier's error text reached the log")
+	}
+}
+
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }

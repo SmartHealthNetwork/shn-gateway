@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -156,7 +157,11 @@ func TransformDTRForTest(from, to string, payload []byte, x ExchangeIdentity) ([
 //     single honest source for the now-required, singular-by-convention
 //     qr-coverage move — refuses (gated, typed SemanticChangeError; the
 //     multi-coverage case is the spec's canonical semantic-change refusal,
-//     TestDTRStep2122Up_MultiCoverageGated).
+//     TestDTRStep2122Up_MultiCoverageGated). A source that already carries a
+//     qr-coverage entry beside that one Coverage qr-context is folded when
+//     both name exactly the same Coverage and the context carries nothing
+//     else, and refused otherwise; dtrRelocateCoverageUp's doc comment has
+//     the rules.
 //   - intendedUse system move: DocReason's "withpa" concept moved CodeSystem
 //     (CRD 2.1.0's …/CodeSystem/temp -> CRD 2.2.1's …/CodeSystem/
 //     coverage-information-codes — DTRDef.IntendedUseCodeSystem, verified
@@ -229,7 +234,9 @@ func dtrStep2122Up(payload []byte, x ExchangeIdentity) ([]byte, LossReport, erro
 // of dtrStep2122Up: coverage/system/origin moves reversed (full — 2.1
 // tolerates a QR entry present in a package Bundle even though its own
 // profile only requires min=0, and its qr-context slice's cardinality,
-// min=2 unbounded max, tolerates one or more relocated coverage entries), and
+// min=2 unbounded max, tolerates one or more relocated coverage entries —
+// except where a Coverage qr-context already sits beside qr-coverage, which
+// dtrRelocateCoverageDown folds or refuses), and
 // any 2.2-only item.answer.value.extension:itemWeight carried into
 // shn-carried-content (no 2.1 slot — dtrItemWeightExt's doc comment).
 func dtrStep2122Down(payload []byte, x ExchangeIdentity) ([]byte, LossReport, error) {
@@ -272,7 +279,9 @@ func dtrStep2122Down(payload []byte, x ExchangeIdentity) ([]byte, LossReport, er
 
 	var carried []LossEntry
 	for _, qr := range resources["QuestionnaireResponse"] {
-		dtrRelocateCoverageDown(qr)
+		if err := dtrRelocateCoverageDown(qr, "2.2", "2.1"); err != nil {
+			return nil, LossReport{}, err
+		}
 		dtrRemapIntendedUseSystem(qr, def22.IntendedUseCodeSystem, def21.IntendedUseCodeSystem)
 		dtrRemapOriginCode(qr, def22.AutoOriginSourceCode, def21.AutoOriginSourceCode)
 		entries, err := dtrCarryItemWeight(qr)
@@ -314,56 +323,266 @@ func dtrStep2122Down(payload []byte, x ExchangeIdentity) ([]byte, LossReport, er
 // silently relocating all of them would assert a "these N coverages are
 // jointly the subject's coverage-information" reading the source payload
 // never actually declared.
+//
+// A source may already carry a qr-coverage entry beside its Coverage
+// qr-context (DTR 2.0.1 allows Coverage as a qr-context target, and a payer
+// can pre-populate both). The step then applies the one registered fold, and
+// refuses everything it cannot handle without loss or guessing:
+//   - every qr-coverage entry and the Coverage qr-context entry must name the
+//     SAME Coverage, compared as exact reference strings. Two different
+//     Coverages are refused as a multi-coverage source whichever slice either
+//     arrived in; references that are not exactly equal (absolute against
+//     relative, versioned, identifier-only) count as different. A qr-context
+//     entry naming a Coverage by anything but a relative Coverage/<id>
+//     reference (an absolute URL, or a reference typed Coverage) is refused
+//     as unresolvable, so it cannot pass beside a relative one unnoticed;
+//   - with no qr-coverage entry present, the single Coverage qr-context entry
+//     is relocated in place, as before;
+//   - with a qr-coverage entry present, the single Coverage qr-context entry
+//     is redundant and is removed (folded) — only when it equals that
+//     qr-coverage entry in everything but its url, so no content is lost;
+//     otherwise the step refuses. The qr-coverage entry keeps its position.
+//
+// The step then checks its own postcondition — one qr-coverage entry per
+// Coverage — because the 2.2 slice's 1..* cardinality would accept a
+// duplicate.
 func dtrRelocateCoverageUp(qr map[string]any, from, to string) error {
+	refuse := func(locus, detail string) error {
+		return &SemanticChangeError{
+			Contract: "pa.dtr", From: from, To: to, Direction: "up",
+			MissingElements: []string{"QuestionnaireResponse.extension:" + locus + " (" + detail + ")"},
+		}
+	}
 	extAny, _ := qr["extension"].([]any)
-	matchIdx := -1
-	count := 0
+	var coverageIdx, contextIdx []int
+	nonRelativeContext := false
+	identities := map[string]bool{}
+	identity := func(i int, em map[string]any) string {
+		if r := dtrExtReference(em); r != "" {
+			return r
+		}
+		return fmt.Sprintf("\x00unreferenced-%d", i) // each unreferenced entry is its own Coverage
+	}
 	for i, e := range extAny {
 		em, ok := e.(map[string]any)
 		if !ok {
 			continue
 		}
-		if url, _ := em["url"].(string); url != dtrQRContextExt {
-			continue
-		}
-		ref, _ := em["valueReference"].(map[string]any)
-		r, _ := ref["reference"].(string)
-		if strings.HasPrefix(r, "Coverage/") {
-			count++
-			matchIdx = i
+		url, _ := em["url"].(string)
+		switch {
+		case url == dtrQRCoverageExt:
+			coverageIdx = append(coverageIdx, i)
+			identities[identity(i, em)] = true
+		case url == dtrQRContextExt && strings.HasPrefix(dtrExtReference(em), "Coverage/"):
+			contextIdx = append(contextIdx, i)
+			identities[identity(i, em)] = true
+		case url == dtrQRContextExt && dtrNonRelativeCoverageRef(em):
+			nonRelativeContext = true
 		}
 	}
 	switch {
-	case count == 0:
-		return &SemanticChangeError{
-			Contract: "pa.dtr", From: from, To: to, Direction: "up",
-			MissingElements: []string{"QuestionnaireResponse.extension:qr-coverage (no Coverage-referencing qr-context entry found)"},
+	case nonRelativeContext:
+		return refuse("qr-coverage", "ambiguous: a qr-context entry names a Coverage by a reference that is not a relative Coverage/<id> reference, unresolvable source")
+	case len(contextIdx) == 0:
+		return refuse("qr-coverage", "no Coverage-referencing qr-context entry found")
+	case len(contextIdx) > 1:
+		return refuse("qr-coverage", fmt.Sprintf("ambiguous: %d Coverage-referencing qr-context entries, multi-coverage source", len(contextIdx)))
+	case len(identities) > 1:
+		return refuse("qr-coverage", "ambiguous: the qr-coverage and Coverage-referencing qr-context entries do not name exactly the same Coverage reference, multi-coverage or unresolvable source")
+	}
+	ctx := extAny[contextIdx[0]].(map[string]any)
+	if len(coverageIdx) == 0 {
+		ctx["url"] = dtrQRCoverageExt
+	} else {
+		if !dtrEqualExceptURL(ctx, extAny[coverageIdx[0]].(map[string]any)) {
+			return refuse("qr-context", "a Coverage-referencing qr-context entry repeats the qr-coverage reference but the two entries differ in content other than their url, so it cannot be folded without loss")
 		}
-	case count > 1:
-		return &SemanticChangeError{
-			Contract: "pa.dtr", From: from, To: to, Direction: "up",
-			MissingElements: []string{fmt.Sprintf("QuestionnaireResponse.extension:qr-coverage (ambiguous: %d Coverage-referencing qr-context entries, multi-coverage source)", count)},
+		kept := make([]any, 0, len(extAny)-1)
+		for i, e := range extAny {
+			if i != contextIdx[0] {
+				kept = append(kept, e)
+			}
+		}
+		qr["extension"] = kept
+		extAny = kept
+	}
+	// Postcondition: one qr-coverage entry per Coverage.
+	count := 0
+	for _, e := range extAny {
+		if em, ok := e.(map[string]any); ok && em["url"] == dtrQRCoverageExt {
+			count++
 		}
 	}
-	extAny[matchIdx].(map[string]any)["url"] = dtrQRCoverageExt
+	if count > 1 {
+		return refuse("qr-coverage", "more than one qr-coverage entry names the same Coverage; send one per Coverage")
+	}
 	return nil
+}
+
+// dtrEqualExceptURL reports whether two extension entries are equal in every
+// member but url.
+func dtrEqualExceptURL(a, b map[string]any) bool {
+	strip := func(m map[string]any) map[string]any {
+		out := make(map[string]any, len(m))
+		for k, v := range m {
+			if k != "url" {
+				out[k] = v
+			}
+		}
+		return out
+	}
+	return reflect.DeepEqual(strip(a), strip(b))
+}
+
+// dtrNonRelativeCoverageRef reports whether an extension entry references a
+// Coverage other than by a relative "Coverage/<id>" reference: an absolute
+// URL whose path names a Coverage, or any reference typed Coverage.
+func dtrNonRelativeCoverageRef(em map[string]any) bool {
+	r := dtrExtReference(em)
+	if strings.HasPrefix(r, "Coverage/") {
+		return false
+	}
+	ref, _ := em["valueReference"].(map[string]any)
+	typ, _ := ref["type"].(string)
+	return strings.Contains(r, "/Coverage/") || typ == "Coverage"
+}
+
+// dtrExtReference returns an extension entry's valueReference.reference, or "".
+func dtrExtReference(em map[string]any) string {
+	ref, _ := em["valueReference"].(map[string]any)
+	r, _ := ref["reference"].(string)
+	return r
 }
 
 // dtrRelocateCoverageDown is dtrRelocateCoverageUp's mirror: every
 // dtrQRCoverageExt entry's url is rewritten back to dtrQRContextExt in
-// place. Always succeeds (full) — 2.1's qr-context slice (min=2, unbounded
-// max) tolerates one or more relocated entries the same way it always has.
-func dtrRelocateCoverageDown(qr map[string]any) {
+// place. 2.1's qr-context slice (min=2, unbounded max) tolerates one or more
+// relocated entries the same way it always has.
+//
+// A 2.2 source may also carry a Coverage qr-context entry beside its
+// qr-coverage (the reference payer pre-populates both). Relocating then would
+// leave two Coverage qr-context entries at 2.1 — a duplicate the 2.1 slice
+// accepts and the 2.1->2.2 step refuses on the way back. The step applies the
+// same rules as the up direction:
+//   - a qr-context entry names a Coverage when its reference is a relative
+//     Coverage/<id>, or is exactly the reference of a qr-coverage entry,
+//     whatever its form (absolute, urn:uuid, contained);
+//   - with no such qr-context entry present, every qr-coverage entry is
+//     relocated in place, as before;
+//   - otherwise the single Coverage qr-context entry must name exactly the
+//     same Coverage reference as every qr-coverage entry and equal the
+//     qr-coverage entry in everything but its url; it is then removed
+//     (folded) and the qr-coverage entry relocated in its own position;
+//   - more than one Coverage qr-context entry, different or not exactly
+//     equal references, a qr-context entry naming a Coverage by any other
+//     non-relative reference, or a repeat that differs in other content is
+//     refused;
+//   - the result must carry one qr-context entry per Coverage: two
+//     qr-coverage entries naming the same Coverage — by the same reference,
+//     or with no reference and identical valueReference content — are
+//     refused, whatever form the reference takes.
+func dtrRelocateCoverageDown(qr map[string]any, from, to string) error {
+	refuse := func(detail string) error {
+		return &SemanticChangeError{
+			Contract: "pa.dtr", From: from, To: to, Direction: "down",
+			MissingElements: []string{"QuestionnaireResponse.extension:qr-context (" + detail + ")"},
+		}
+	}
 	extAny, _ := qr["extension"].([]any)
+	var coverageIdx, contextIdx []int
+	nonRelativeContext := false
+	identities := map[string]bool{}
+	identity := func(i int, em map[string]any) string {
+		if r := dtrExtReference(em); r != "" {
+			return r
+		}
+		return fmt.Sprintf("\x00unreferenced-%d", i) // each unreferenced entry is its own Coverage
+	}
+	coverageRefs := map[string]bool{}
 	for _, e := range extAny {
+		if em, ok := e.(map[string]any); ok && em["url"] == dtrQRCoverageExt {
+			if r := dtrExtReference(em); r != "" {
+				coverageRefs[r] = true
+			}
+		}
+	}
+	if !dtrHasExt(extAny, dtrQRCoverageExt) {
+		return nil
+	}
+	for i, e := range extAny {
 		em, ok := e.(map[string]any)
 		if !ok {
 			continue
 		}
-		if em["url"] == dtrQRCoverageExt {
-			em["url"] = dtrQRContextExt
+		url, _ := em["url"].(string)
+		r := dtrExtReference(em)
+		switch {
+		case url == dtrQRCoverageExt:
+			coverageIdx = append(coverageIdx, i)
+			identities[identity(i, em)] = true
+		case url == dtrQRContextExt && (strings.HasPrefix(r, "Coverage/") || coverageRefs[r]):
+			contextIdx = append(contextIdx, i)
+			identities[identity(i, em)] = true
+		case url == dtrQRContextExt && dtrNonRelativeCoverageRef(em):
+			nonRelativeContext = true
 		}
 	}
+	if len(contextIdx) > 0 || nonRelativeContext {
+		switch {
+		case nonRelativeContext:
+			return refuse("ambiguous: a qr-context entry names a Coverage by a reference that is not a relative Coverage/<id> reference, unresolvable source")
+		case len(contextIdx) > 1:
+			return refuse(fmt.Sprintf("ambiguous: %d Coverage-referencing qr-context entries beside qr-coverage, multi-coverage source", len(contextIdx)))
+		case len(identities) > 1:
+			return refuse("ambiguous: the qr-coverage and Coverage-referencing qr-context entries do not name exactly the same Coverage reference, multi-coverage or unresolvable source")
+		case !dtrEqualExceptURL(extAny[contextIdx[0]].(map[string]any), extAny[coverageIdx[0]].(map[string]any)):
+			return refuse("a Coverage-referencing qr-context entry repeats the qr-coverage reference but the two entries differ in content other than their url, so it cannot be folded without loss")
+		}
+		kept := make([]any, 0, len(extAny)-1)
+		for i, e := range extAny {
+			if i != contextIdx[0] {
+				kept = append(kept, e)
+			}
+		}
+		qr["extension"] = kept
+		extAny = kept
+	}
+	// Postcondition: one qr-context entry per Coverage. Every Coverage
+	// qr-context the result carries comes from a qr-coverage entry (a
+	// Coverage context beside one was folded or refused above), so the
+	// qr-coverage entries are keyed by reference — or, with none, by their
+	// whole valueReference — and a repeated key is refused.
+	seen := map[string]bool{}
+	for _, e := range extAny {
+		em, ok := e.(map[string]any)
+		if !ok || em["url"] != dtrQRCoverageExt {
+			continue
+		}
+		key := dtrExtReference(em)
+		if key == "" {
+			vr, err := json.Marshal(em["valueReference"])
+			if err != nil {
+				return fmt.Errorf("engine: dtrRelocateCoverageDown: key qr-coverage entry: %w", err)
+			}
+			key = "\x00valueReference:" + string(vr)
+		}
+		if seen[key] {
+			return refuse("more than one qr-context entry names the same Coverage; send one qr-coverage entry per Coverage")
+		}
+		seen[key] = true
+		em["url"] = dtrQRContextExt
+	}
+	return nil
+}
+
+// dtrHasExt reports whether any extension entry in exts carries url.
+func dtrHasExt(exts []any, url string) bool {
+	for _, e := range exts {
+		if em, ok := e.(map[string]any); ok && em["url"] == url {
+			return true
+		}
+	}
+	return false
 }
 
 // dtrRemapIntendedUseSystem rewrites the QuestionnaireResponse-level

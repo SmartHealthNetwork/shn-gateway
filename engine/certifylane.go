@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/SmartHealthNetwork/shn-gateway/internal/lanequalify"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -164,10 +165,12 @@ func (v *GatedCertificationValidator) attempt() bool {
 			Version    int     `json:"version"`
 			Line       string  `json:"line"`
 			Base       string  `json:"base"`
+			Host       string  `json:"host"`
 			State      string  `json:"state"`
+			Reason     string  `json:"reason,omitempty"`
 			At         string  `json:"at"`
 			DurationMS float64 `json:"duration_ms"`
-		}{1, v.lane.line, v.lane.Base(), state, v.now().UTC().Format(time.RFC3339Nano), float64(v.now().Sub(started)) / float64(time.Millisecond)})
+		}{1, v.lane.line, v.lane.Base(), lanequalify.Host(v.lane.Base()), state, lanequalify.FailureReason(err), v.now().UTC().Format(time.RFC3339Nano), float64(v.now().Sub(started)) / float64(time.Millisecond)})
 		log.Printf("gateway: certification_lane_qualification %s", event)
 	}
 	return err == nil

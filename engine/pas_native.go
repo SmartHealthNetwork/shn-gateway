@@ -288,7 +288,7 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 	// claim whose decision this gateway could not then record for this patient.
 	// Everything the payer records about the claim is keyed by its own binding
 	// of the member the claim names (bindInboundSubject), never by the token.
-	g.noteSubjectBinding("pas-claim", env.Metadata.CorrelationID, tok.Subject, subjectPCI)
+	g.noteSubjectBinding(r.Context(), "pas-claim", env.Metadata.CorrelationID, tok.Subject, subjectPCI)
 	if status, msg := g.correlationTaken(subjectPCI, env.Metadata.CorrelationID); status != 0 {
 		g.refuseInbound(w, r, legPASClaim, env, tok, answerTok, status, msg, nil)
 		return
@@ -473,7 +473,7 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 		g.refuseInbound(w, r, legPASClaimUpdate, env, tok, answerTok, status, msg, nil)
 		return
 	}
-	g.noteSubjectBinding("pas-claim-update", env.Metadata.CorrelationID, tok.Subject, subjectPCI)
+	g.noteSubjectBinding(r.Context(), "pas-claim-update", env.Metadata.CorrelationID, tok.Subject, subjectPCI)
 	capture := &nativeCertificationCapture{}
 	defer func() {
 		if capture.attempted {

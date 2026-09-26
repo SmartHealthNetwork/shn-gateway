@@ -197,10 +197,10 @@ func TestDTRValidationTransportAndRefusals(t *testing.T) {
 			if status, _ := g.validateDTRQuestionnaireResponse(context.Background(), []byte(contextQR), line); status != 422 {
 				t.Fatalf("invalid final status=%d", status)
 			}
-			server.Close()
-			g.cfg.ValidatorsByLine = map[string]shnsdk.Validator{line: shnsdk.NewOperationValidator(server.URL)}
-			if status, _ := g.validateDTRQuestionnaireResponse(context.Background(), []byte(contextQR), line); status != 500 {
-				t.Fatalf("outage status=%d", status)
+			outage := &shnsdk.OperationValidator{BaseURL: "http://validator.test/fhir", Client: unreachableClient(t, http.MethodPost, "/fhir/QuestionnaireResponse/$validate")}
+			g.cfg.ValidatorsByLine = map[string]shnsdk.Validator{line: outage}
+			if status, msg := g.validateDTRQuestionnaireResponse(context.Background(), []byte(contextQR), line); status != 500 || msg != "validator unavailable" {
+				t.Fatalf("outage = %d %q, want 500 %q", status, msg, "validator unavailable")
 			}
 		})
 	}

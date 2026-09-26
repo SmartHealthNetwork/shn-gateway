@@ -1120,7 +1120,7 @@ func (g *Gateway) handlePASInquireInbound(w http.ResponseWriter, r *http.Request
 		return
 	}
 	boundPatientRef := "Patient/" + facts.member
-	g.noteSubjectBinding("pas-claim-inquire", env.Metadata.CorrelationID, tok.Subject, subjectPCI)
+	g.noteSubjectBinding(r.Context(), "pas-claim-inquire", env.Metadata.CorrelationID, tok.Subject, subjectPCI)
 
 	capture := &nativeCertificationCapture{}
 	// The payer's own departures from the operation it answered, reported with the

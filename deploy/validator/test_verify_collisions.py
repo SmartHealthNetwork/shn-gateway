@@ -10,8 +10,10 @@ LINE = "Found multiple package versions for FHIR version: R4 and canonical URL: 
 
 
 # Verbatim from a 2.2 make-validate lane (HAPI 8.10.0, 2026-09-11): the line PATTERN must match.
-# The canonical it names is no longer a known 2.2 collision, which makes the verbatim line a
-# rejection row as captured; the acceptance row substitutes a canonical the inventory records.
+# The canonical it names is a known 2.2 collision again since the support package carries the
+# artifact-versionAlgorithm closure (the version-algorithm CodeSystem, byte-identical to the
+# extensions package's own entry), which makes the verbatim line the acceptance row as captured;
+# the rejection row substitutes a canonical the inventory does not record.
 CAPTURED = "2026-09-11T15:18:34.546Z  WARN 1 --- [hapi-fhir-jpaserver-starter] [nio-8080-exec-9] c.uhn.fhir.jpa.packages.JpaPackageCache  : Found multiple package versions for FHIR version: R4 and canonical URL: http://hl7.org/fhir/version-algorithm"
 CAPTURED_URL = "http://hl7.org/fhir/version-algorithm"
 
@@ -48,16 +50,17 @@ class CollisionScanTests(unittest.TestCase):
         self.assertEqual(run("2.0", "INFO nothing to see\n").returncode, 0)
 
     def test_pattern_matches_the_captured_engine_line(self):
-        self.assertNotIn(CAPTURED_URL, self.known["2.2"], "the captured canonical is outside the inventory today; if it returns, swap the roles below")
-        # the verbatim engine line names a canonical outside the inventory: red, naming it
+        self.assertIn(CAPTURED_URL, self.known["2.2"], "the captured canonical is a recorded 2.2 collision today; if it leaves the inventory, swap the roles below")
+        # the verbatim engine line names a recorded collision: green, counted
         result = run("2.2", CAPTURED + "\n")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn(CAPTURED_URL, result.stderr)
-        # the same engine line naming a recorded collision: green, counted
-        known = self.known["2.2"][0]
-        result = run("2.2", CAPTURED.replace(CAPTURED_URL, known) + "\n")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("1 hit(s) on 1 known canonical(s)", result.stdout)
+        # the same engine line naming a canonical outside the inventory: red, naming it
+        unknown = "http://example.org/not-in-the-inventory"
+        self.assertNotIn(unknown, self.known["2.2"])
+        result = run("2.2", CAPTURED.replace(CAPTURED_URL, unknown) + "\n")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(unknown, result.stderr)
 
     def test_a_known_canonical_of_another_line_is_not_known_here(self):
         url = self.known["2.2"][0]

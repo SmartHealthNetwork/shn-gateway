@@ -143,7 +143,7 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 	}
 	bundleJSON, pasReports, err := g.egressAdapt(route, bundleJSON, ExchangeIdentity{CorrelationID: pasCorr, LegType: "pas-claim", Counterpart: res.recipient})
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		writeJSON(w, adaptFailureStatus(err), map[string]string{"error": err.Error()})
 		return pendState{}, false
 	}
 	// This helper owns the pas-claim submit leg wholesale, on the correlation it
@@ -172,7 +172,7 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 	ctx = withFindingContext(ctx, findingContext{
 		LegType: "pas-claim", CorrelationID: pasCorr, Seam: "originate", Whose: "peer",
 	})
-	if status, msg := g.validateFHIRPayerIngress(ctx, pendedResp, targetLine, "pa.pas"); status != 0 {
+	if status, msg := g.validateFHIRPayerIngress(ctx, pendedResp, targetLine, "pa.pas", res.payer); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return pendState{}, false
 	}
@@ -427,7 +427,7 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 	}
 	updateBundle, _, err = g.egressAdapt(route, updateBundle, pasUpdateID)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		writeJSON(w, adaptFailureStatus(err), map[string]string{"error": err.Error()})
 		return false
 	}
 	if status, msg := g.validatePASAttachments(ctx, updateBundle, st.pasDTRLine, true); status != 0 {
@@ -450,7 +450,7 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 	ctx = withFindingContext(ctx, findingContext{
 		LegType: "pas-claim-update", CorrelationID: updateCorr, Seam: "originate", Whose: "peer",
 	})
-	if status, msg := g.validateFHIRPayerIngress(ctx, updateResp, targetLine, "pa.pas"); status != 0 {
+	if status, msg := g.validateFHIRPayerIngress(ctx, updateResp, targetLine, "pa.pas", st.payer); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return false
 	}
@@ -679,7 +679,7 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 	}
 	updateBundle, _, err = g.egressAdapt(route, updateBundle, pasUpdateID)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		writeJSON(w, adaptFailureStatus(err), map[string]string{"error": err.Error()})
 		return false
 	}
 	if status, msg := g.validatePASAttachments(ctx, updateBundle, st.pasDTRLine, true); status != 0 {
@@ -702,7 +702,7 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 	ctx = withFindingContext(ctx, findingContext{
 		LegType: "pas-claim-update", CorrelationID: updateCorr, Seam: "originate", Whose: "peer",
 	})
-	if status, msg := g.validateFHIRPayerIngress(ctx, updateResp, targetLine, "pa.pas"); status != 0 {
+	if status, msg := g.validateFHIRPayerIngress(ctx, updateResp, targetLine, "pa.pas", st.payer); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return false
 	}

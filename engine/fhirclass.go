@@ -93,17 +93,23 @@ var invariantMessageID = regexp.MustCompile(`^https?://[^\s#]+#[A-Za-z][A-Za-z0-
 // CodeableConcept under a required binding (NoValid_1_CC), a Coding under a
 // required binding whose code system the validator cannot check (NoValid_12;
 // no base or loaded-IG required Coding binding draws on a code system the
-// lanes load), a plain code (NoValid_16), and the
-// terminology service's own verdict passed through (an unknown code, or a
-// code system it cannot check). A member of the family that no lane produces
+// lanes load), a plain code (NoValid_16), a Coding whose code system the
+// validator does not know (System_Unknown: a system in the HL7 FHIR namespace
+// it has not loaded; that includes a misspelled HL7 system URL, which the
+// validator cannot tell apart from one it has not loaded, so it too is
+// recorded), and the terminology
+// service's own verdict passed through (an unknown code, or a code system it
+// cannot check). A member of the family that no lane produces
 // stays out until a lane shows it. Any other terminology message id (a
-// malformed system, a missing binding) refuses, like every id this table does
+// relative or malformed system, a near-miss of a known one, a value set used
+// as a system, a missing binding) refuses, like every id this table does
 // not name.
 var terminologyMessageIDs = map[string]bool{
 	"Terminology_PassThrough_TX_Message": true,
 	"Terminology_TX_NoValid_1_CC":        true,
 	"Terminology_TX_NoValid_12":          true,
 	"Terminology_TX_NoValid_16":          true,
+	"Terminology_TX_System_Unknown":      true,
 }
 
 // deeperMessageID reports whether a message id names a deeper rule: a

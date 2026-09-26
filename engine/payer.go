@@ -71,7 +71,7 @@ func (g *Gateway) handleDTRInbound(w http.ResponseWriter, r *http.Request, env s
 		subjectPCI = pci
 	}
 
-	g.noteSubjectBinding("dtr-questionnaire-fetch", env.Metadata.CorrelationID, tok.Subject, subjectPCI)
+	g.noteSubjectBinding(r.Context(), "dtr-questionnaire-fetch", env.Metadata.CorrelationID, tok.Subject, subjectPCI)
 	result, err := g.cfg.Responder.Handle(ctx, "dtr-questionnaire-fetch", env.Metadata.CorrelationID, subjectPCI, reqJSON)
 	if err != nil {
 		// build/marshal fault (gateway's own) → 500

@@ -4,8 +4,8 @@ This directory builds the IG-loaded HAPI sidecar shipped with the Smart Gateway.
 Each line's image bakes the `validator-sidecar` package set from
 `tools/contracts/manifest.json` — the line's Da Vinci IGs (line 2.2 also
 `hl7.fhir.uv.extensions.r4`) and the committed SHN packages, among them the
-validation-support package carrying the closure of the cross-version encounter
-extension copied unchanged from its pinned packages — every archive verified against its manifest digest at build time.
+validation-support package carrying the closures of the cross-version encounter
+extension and the `artifact-versionAlgorithm` extension copied unchanged from their pinned packages — every archive verified against its manifest digest at build time.
 The image starts `/healthcheck supervise` as PID 1. That supervisor owns one Java
 child and one finite, sequential readiness worker for the lifetime of the Java
 incarnation.

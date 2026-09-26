@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -24,7 +25,7 @@ func (failingSubjectSoR) ResolvePatientContext(context.Context, string) (string,
 	return "", Demo{}, false, &SoRReadError{Kind: SoRUnavailable}
 }
 
-func strangerPCI() string { return shnsdk.ResolvePCI(strangerMember, "", "") }
+func strangerPCI() string { return derivedPCI(strangerMember, "", "") }
 
 // --- the helper itself -------------------------------------------------------------------
 
@@ -60,7 +61,7 @@ func TestResolveSubjectPCI_KnownMemberUnchangedByDefault(t *testing.T) {
 	if err != nil || !found || pci != want {
 		t.Fatalf("default, known member: got (%q, found=%v, err=%v), want %q", pci, found, err, want)
 	}
-	if pci == shnsdk.ResolvePCI("MBR-COVERED", "", "") {
+	if pci == derivedPCI("MBR-COVERED", "", "") {
 		t.Fatal("default, known member: bound by id alone instead of through the system of record")
 	}
 }
@@ -400,7 +401,7 @@ func TestResolveSubjectPCI_UnheldMemberBindsFromRequestPatientByDefault(t *testi
 	if err != nil || !found {
 		t.Fatalf("default, request patient: got (found=%v, err=%v), want found", found, err)
 	}
-	if want := shnsdk.ResolvePCI(strangerMember, "1962-03-11", "Nakamura"); pci != want {
+	if want := derivedPCI(strangerMember, "1962-03-11", "Nakamura"); pci != want {
 		t.Fatalf("default, request patient: pci = %q, want the demographics-derived %q (bare id would be %q)", pci, want, strangerPCI())
 	}
 }
@@ -434,7 +435,7 @@ func TestResolveSubjectPCI_AgreeingRequestPatientsBindByDefault(t *testing.T) {
 	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
 	payload := []byte(`{"prefetch":{"patient":` + requestPatient(strangerMember, "1962-03-11", "Nakamura") + `},"other":{"patient":` + requestPatient(strangerMember, "1962-03-11", "Nakamura") + `}}`)
 	pci, _, _ := g.resolveSubjectPCI(context.Background(), strangerMember, payload)
-	if want := shnsdk.ResolvePCI(strangerMember, "1962-03-11", "Nakamura"); pci != want {
+	if want := derivedPCI(strangerMember, "1962-03-11", "Nakamura"); pci != want {
 		t.Fatalf("pci = %q, want %q", pci, want)
 	}
 }
@@ -459,7 +460,7 @@ func TestResolveSubjectPCI_RequestPatientNeverOverridesHeldMember(t *testing.T) 
 func TestPayerBind_UnheldMemberBindsFromCarriedPatientByDefault(t *testing.T) {
 	const birth, family = "1962-03-11", "Nakamura"
 	patient := requestPatient(strangerMember, birth, family)
-	want := shnsdk.ResolvePCI(strangerMember, birth, family)
+	want := derivedPCI(strangerMember, birth, family)
 	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
 	ctx := context.Background()
 
@@ -503,16 +504,16 @@ func TestIngressSubjectPCI_UnheldMemberBindsFromCarriedPatientByDefault(t *testi
 	if status != 0 {
 		t.Fatalf("status=%d msg=%q, want bound", status, msg)
 	}
-	if want := shnsdk.ResolvePCI(strangerMember, "1962-03-11", "Nakamura"); pci != want {
+	if want := derivedPCI(strangerMember, "1962-03-11", "Nakamura"); pci != want {
 		t.Fatalf("pci=%q, want %q", pci, want)
 	}
 }
 
-// The pair this fixes: the provider side holds the member, the payer side does not. The
-// payer binds the member by the Patient the request carries, as it would directly: to
-// the provider's subject when the request agrees with the provider's record, and to its
-// own derivation, not the provider's, when it disagrees. Either way the request reaches
-// the payer.
+// The provider side holds the member, the payer side does not. The payer binds the
+// member by the Patient the request carries, as it would directly, always in the
+// derived namespace (FR-G61): its identifier is never a held member's, so it differs
+// from the provider's subject even when the request agrees with the provider's record.
+// Either way the request reaches the payer.
 func TestSubjectBind_HeldOnIngressUnheldOnPayer(t *testing.T) {
 	const member, birth, family = "MBR-COVERED", "1975-04-02", "Johansson" // the census record
 	ctx := context.Background()
@@ -525,8 +526,8 @@ func TestSubjectBind_HeldOnIngressUnheldOnPayer(t *testing.T) {
 	if status != 0 || token != recordPCI {
 		t.Fatalf("provider bind: status=%d msg=%q pci=%q, want the record's %q", status, msg, token, recordPCI)
 	}
-	if _, _, pci, status, msg := payer.conformantCRDBindContext(ctx, agree); status != 0 || pci != recordPCI {
-		t.Fatalf("payer bind, request agrees with the provider's record: status=%d msg=%q pci=%q, want %q", status, msg, pci, recordPCI)
+	if _, _, pci, status, msg := payer.conformantCRDBindContext(ctx, agree); status != 0 || pci != derivedPCI(member, birth, family) || pci == recordPCI {
+		t.Fatalf("payer bind, request agrees with the provider's record: status=%d msg=%q pci=%q, want its own derived identifier, not the provider's %q", status, msg, pci, recordPCI)
 	}
 
 	// The request's demographics disagree with the provider's record: the
@@ -537,7 +538,7 @@ func TestSubjectBind_HeldOnIngressUnheldOnPayer(t *testing.T) {
 	if status != 0 || token != recordPCI {
 		t.Fatalf("provider bind still through its record: status=%d pci=%q", status, token)
 	}
-	want := shnsdk.ResolvePCI(member, "1975-04-03", family)
+	want := derivedPCI(member, "1975-04-03", family)
 	if _, _, pci, status, msg := payer.conformantCRDBindContext(ctx, disagree); status != 0 || pci != want {
 		t.Fatalf("payer bind, request disagrees with the provider's record: status=%d msg=%q pci=%q, want its own %q", status, msg, pci, want)
 	}
@@ -546,5 +547,56 @@ func TestSubjectBind_HeldOnIngressUnheldOnPayer(t *testing.T) {
 	payer.cfg.RequireKnownMembers = true
 	if _, _, _, status, _ := payer.conformantCRDBindContext(ctx, agree); status != http.StatusBadRequest {
 		t.Fatalf("known members required, payer bind: status=%d, want 400", status)
+	}
+}
+
+// A derived identifier lives in its own namespace (FR-G61): for a member the
+// system of record does not hold, no spelling of a held member's id, with that
+// member's own demographics, derives that member's identifier. So a request
+// naming "mbr-covered" cannot file anything under the held MBR-COVERED. The
+// derived identifier keeps the network identifier's form, and two gateways
+// deriving from the same request agree.
+func TestDerivedPCI_NeverEqualsAHeldMembersIdentifier(t *testing.T) {
+	const member, birth, family = "MBR-COVERED", "1975-04-02", "Johansson" // the census record
+	held, _, ok := newCensusSoR().ResolvePatient(member)
+	if !ok || held != shnsdk.ResolvePCI(member, birth, family) {
+		t.Fatalf("fixture: the held identifier is the SDK's %q", held)
+	}
+	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
+	for _, spelling := range []string{"mbr-covered", "Mbr-Covered", "MBR-covered", "mbr-COVERED"} {
+		body := conformantCRDWithPatient(spelling, "72148", requestPatient(spelling, birth, family))
+		pci, found, err := g.resolveSubjectPCI(context.Background(), spelling, body)
+		if err != nil || !found {
+			t.Fatalf("%s: bound %v %v", spelling, found, err)
+		}
+		if pci == held {
+			t.Fatalf("%s aliased the held %s: %s", spelling, member, pci)
+		}
+		if pci != derivedPCI(spelling, birth, family) {
+			t.Fatalf("%s: pci %q is not the derived identifier", spelling, pci)
+		}
+	}
+	// All in lower case: the facts as sent are then exactly what the held
+	// derivation hashes, so only the derived namespace keeps them apart.
+	lower := conformantCRDWithPatient("mbr-covered", "72148", requestPatient("mbr-covered", birth, "johansson"))
+	if pci, _, err := g.resolveSubjectPCI(context.Background(), "mbr-covered", lower); err != nil || pci == held {
+		t.Fatalf("an all-lower-case request aliased the held %s: %s %v", member, pci, err)
+	}
+	// The derivation does not fold case: facts differing only in case are
+	// different members.
+	if derivedPCI("MBR-X", "1980-01-01", "Doe") == derivedPCI("mbr-x", "1980-01-01", "doe") {
+		t.Fatal("the derived identifier must not fold case")
+	}
+	// The held member itself still binds through the record.
+	if pci, found, err := g.resolveSubjectPCI(context.Background(), member, nil); err != nil || !found || pci != held {
+		t.Fatalf("the held member binds through its record: %q %v %v", pci, found, err)
+	}
+	// Form, and agreement between two gateways deriving from the same facts.
+	d := derivedPCI("MBR-NOT-HELD", "1980-01-01", "Doe")
+	if !regexp.MustCompile(`^pci:[0-9a-f]{32}$`).MatchString(d) || d != derivedPCI("MBR-NOT-HELD", "1980-01-01", "Doe") {
+		t.Fatalf("derived identifier %q: wrong form or not deterministic", d)
+	}
+	if d == shnsdk.ResolvePCI("MBR-NOT-HELD", "1980-01-01", "Doe") {
+		t.Fatal("a derived identifier must not equal the held-member derivation of the same facts")
 	}
 }

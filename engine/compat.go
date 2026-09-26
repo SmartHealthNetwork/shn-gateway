@@ -84,6 +84,35 @@ var compatManifest = []CompatStep{
 	//     refusal (the spec's canonical example), typed SemanticChangeError;
 	//     rejection-tested (TestDTRStep2122Up_MultiCoverageGated).
 	// The published qr-coverage cardinality is 1..* at DTR 2.2.0; this transform currently refuses multiple Coverage entries, a remaining implementation limitation.
+	//   Up (2.1->2.2), QR content, one Coverage-referencing qr-context entry
+	//     equal (apart from its url) to an existing qr-coverage entry naming
+	//     exactly the same Coverage reference: FULL — the repeated qr-context
+	//     entry is folded (removed); the qr-coverage entry keeps its position
+	//     and nothing else changes
+	//     (TestDTRStep2122Up_CoverageContextEqualToQRCoverageFolded).
+	//   Up (2.1->2.2), QR content, the same repeat differing from the
+	//     qr-coverage entry in other content (on either side): GATED —
+	//     removing it could lose content
+	//     (TestDTRStep2122Up_FoldWouldLoseContentRefused,
+	//     TestDTRStep2122Up_FoldWithDifferingQRCoverageRefused).
+	//   Up (2.1->2.2), QR content, qr-coverage and Coverage qr-context entries
+	//     that do not all name exactly the same Coverage reference (different
+	//     Coverages in either slice, absolute against relative, identifier-only):
+	//     GATED — the multi-coverage refusal, whichever slice each arrives in
+	//     (TestDTRStep2122Up_CoverageContextDifferentFromQRCoverageRefused,
+	//     TestDTRStep2122Up_TwoQRCoveragesRefused).
+	//   Up (2.1->2.2), QR content, a qr-context entry naming a Coverage by
+	//     anything but a relative Coverage/<id> reference (an absolute URL, or
+	//     a reference typed Coverage): GATED — unresolvable, refused even
+	//     beside a relative Coverage context
+	//     (TestDTRStep2122Up_NonRelativeCoverageContextRefused); an absolute
+	//     reference to another resource type is an ordinary context
+	//     (TestDTRStep2122Up_AbsoluteNonCoverageContextKept).
+	//   Up (2.1->2.2), any QR whose result would name one Coverage in more
+	//     than one qr-coverage entry: GATED — the step checks one qr-coverage
+	//     entry per Coverage itself, because the 2.2 slice's 1..* cardinality
+	//     accepts a duplicate
+	//     (TestDTRStep2122Up_DuplicateQRCoveragePostconditionRefused).
 	//   Up (2.1->2.2), QR content, ZERO-coverage source (no
 	//     Coverage-referencing qr-context entry): GATED — same typed error,
 	//     symmetric defensive case (no honest source for the now-required
@@ -96,6 +125,20 @@ var compatManifest = []CompatStep{
 	//     narrative: GATED — older standard profiles require Questionnaire.text;
 	//     typed refusal, also preserved through composition to 2.0. Narrative
 	//     presence alone does not certify the remaining target constraints.
+	//   Down (2.2->2.1), QR content, a Coverage qr-context entry beside
+	//     qr-coverage: the mirror of the up rules. Equal apart from its url and
+	//     naming exactly the same Coverage reference: FULL — the repeat is
+	//     folded and the qr-coverage entry relocates in its own position
+	//     (TestDTRStep2122Down_CoverageContextEqualToQRCoverageFolded). A
+	//     different, non-relative, lossy or multiple Coverage context, and a
+	//     result naming one Coverage twice: GATED
+	//     (TestDTRStep2122Down_FoldRefusals). A repeat and a duplicate are
+	//     recognised whatever form the reference takes: an exact repeat in
+	//     qr-context folds, two qr-coverage entries naming one Coverage are
+	//     refused (TestDTRStep2122Down_AnyReferenceForm). With no Coverage
+	//     qr-context and no Coverage named twice, every qr-coverage entry
+	//     relocates in place as before
+	//     (TestDTRStep2122Down_PlainRelocationUnchanged).
 	//   Down (2.2->2.1):  FULL for QR content (moves reversed — 2.1's
 	//     qr-context slice, min=2 unbounded max, tolerates one or more
 	//     relocated entries) + CARRY for the one genuine 2.2-only element

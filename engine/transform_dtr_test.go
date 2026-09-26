@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
@@ -1093,7 +1094,10 @@ func TestDTRStep2122_AnswerlessNestedItemIsNoOp(t *testing.T) {
 // this repo, read by no test, for its whole life: captured evidence with no
 // guard behind it.
 //
-// The package now refuses its missing standard-Questionnaire narrative. The
+// The reference payer gives its standard Questionnaire a narrative, so the
+// whole captured package crosses the step; the same capture with that narrative
+// removed must still refuse (the one-mutation row on real bytes; the synthetic
+// rows live in transform_dtr_narrative_test.go). The
 // extracted QR retains a TRAVERSAL ONLY check, deliberately so. Every nested item in that capture carries
 // a linkId and nothing else — zero answers at every node — so the carry could be
 // completely broken and this test would still pass. Because the capture is
@@ -1136,11 +1140,30 @@ func TestDTRStep2122_CapturedRIRefusalAndQRTraverses(t *testing.T) {
 		t.Fatalf("captured RI package's QuestionnaireResponse nests only %d level(s) — this guard no longer guards anything", depth)
 	}
 
-	// The captured package lacks standard-profile narrative and must refuse.
-	out, _, err := dtrStep2122Down(bundle, corr)
+	// The captured standard Questionnaire carries the payer's own narrative, so the
+	// whole package crosses the step, and nothing answerless is carried.
+	if q := dtrCollectResources(top)["Questionnaire"]; len(q) != 1 || q[0]["text"] == nil {
+		t.Fatalf("captured RI package: want exactly 1 Questionnaire carrying text, got %d", len(q))
+	}
+	pkgDown, pkgReport, err := dtrStep2122Down(bundle, corr)
+	if err != nil || pkgDown == nil {
+		t.Fatalf("captured package with its narrative must cross the step: %v", err)
+	}
+	if len(pkgReport.Carried) != 0 {
+		t.Fatalf("answerless captured package carried something: %+v", pkgReport.Carried)
+	}
+	// The same capture minus that narrative refuses, with no output.
+	for _, q := range dtrCollectResources(top)["Questionnaire"] {
+		delete(q, "text")
+	}
+	noText, err := json.Marshal(top)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := dtrStep2122Down(noText, corr)
 	var sc *SemanticChangeError
 	if !errors.As(err, &sc) || len(sc.MissingElements) != 1 || sc.MissingElements[0] != "Questionnaire.text" || out != nil {
-		t.Fatalf("captured package must refuse without output: %v", err)
+		t.Fatalf("captured package minus its narrative must refuse without output: %v", err)
 	}
 	// Preserve the independent QR traversal obligation on the exact captured QR.
 	qrOnly, err := json.Marshal(qrs[0])
@@ -1185,5 +1208,421 @@ func dtrMaxItemDepth(node any) int {
 		return best
 	default:
 		return 0
+	}
+}
+
+// dtrQRWithExtensions builds a minimal 2.1-shaped QuestionnaireResponse
+// carrying exactly the given extension entries, in order.
+func dtrQRWithExtensions(t *testing.T, exts ...map[string]any) []byte {
+	t.Helper()
+	list := make([]any, len(exts))
+	for i, e := range exts {
+		list[i] = e
+	}
+	b, err := json.Marshal(map[string]any{
+		"resourceType": "QuestionnaireResponse", "id": "qr-overlap", "status": "completed",
+		"questionnaire": "http://smarthealth.network/fhir/Questionnaire/pa-lumbar-mri|1.0.0",
+		"subject":       map[string]any{"reference": "Patient/MBR-COVERED"},
+		"authored":      "2026-06-04T00:00:00Z",
+		"extension":     list,
+		"item":          []any{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func dtrRefExt(url, ref string) map[string]any {
+	return map[string]any{"url": url, "valueReference": map[string]any{"reference": ref}}
+}
+
+func dtrExtensionsOf(t *testing.T, qr []byte) []map[string]any {
+	t.Helper()
+	var doc struct {
+		Extension []map[string]any `json:"extension"`
+	}
+	if err := json.Unmarshal(qr, &doc); err != nil {
+		t.Fatal(err)
+	}
+	return doc.Extension
+}
+
+func dtrExtRef(e map[string]any) string {
+	ref, _ := e["valueReference"].(map[string]any)
+	r, _ := ref["reference"].(string)
+	return r
+}
+
+// A Coverage qr-context entry whose reference equals an existing qr-coverage
+// entry exactly is folded into it: the redundant context entry is removed,
+// the one qr-coverage entry stays where it was, and nothing else changes.
+func TestDTRStep2122Up_CoverageContextEqualToQRCoverageFolded(t *testing.T) {
+	in := dtrQRWithExtensions(t,
+		dtrRefExt(dtrQRCoverageExt, "Coverage/coverage-1"),
+		dtrRefExt(dtrQRContextExt, "Coverage/coverage-1"),
+		dtrRefExt(dtrQRContextExt, "DeviceRequest/dr-1"),
+	)
+	out, _, err := dtrStep2122Up(in, corr)
+	if err != nil {
+		t.Fatalf("want the redundant Coverage context folded, got %v", err)
+	}
+	got := dtrExtensionsOf(t, out)
+	if len(got) != 2 {
+		t.Fatalf("extensions = %v, want the qr-coverage entry and the non-Coverage context only", got)
+	}
+	if got[0]["url"] != dtrQRCoverageExt || dtrExtRef(got[0]) != "Coverage/coverage-1" {
+		t.Errorf("extension[0] = %v, want the existing qr-coverage entry unchanged in place", got[0])
+	}
+	if got[1]["url"] != dtrQRContextExt || dtrExtRef(got[1]) != "DeviceRequest/dr-1" {
+		t.Errorf("extension[1] = %v, want the non-Coverage qr-context entry unchanged", got[1])
+	}
+	// Nothing outside the removed entry differs.
+	var inDoc, outDoc map[string]any
+	_ = json.Unmarshal(in, &inDoc)
+	_ = json.Unmarshal(out, &outDoc)
+	delete(inDoc, "extension")
+	delete(outDoc, "extension")
+	if !reflect.DeepEqual(inDoc, outDoc) {
+		t.Errorf("the fold changed more than the redundant entry:\nin:  %v\nout: %v", inDoc, outDoc)
+	}
+}
+
+// A Coverage qr-context entry naming a DIFFERENT Coverage from an existing
+// qr-coverage entry is a two-Coverage source, refused exactly as two Coverage
+// qr-context entries are: the same meaning gets the same answer whichever
+// slice the second Coverage arrives in.
+func TestDTRStep2122Up_CoverageContextDifferentFromQRCoverageRefused(t *testing.T) {
+	in := dtrQRWithExtensions(t,
+		dtrRefExt(dtrQRCoverageExt, "Coverage/coverage-1"),
+		dtrRefExt(dtrQRContextExt, "Coverage/coverage-2"),
+	)
+	out, _, err := dtrStep2122Up(in, corr)
+	var scErr *SemanticChangeError
+	if !errors.As(err, &scErr) {
+		t.Fatalf("want *SemanticChangeError, got %v (out=%s)", err, out)
+	}
+	if scErr.Contract != "pa.dtr" || scErr.From != "2.1" || scErr.To != "2.2" || scErr.Direction != "up" {
+		t.Fatalf("unexpected error fields: %+v", scErr)
+	}
+	dtrAssertRefusal(t, scErr, "QuestionnaireResponse.extension:qr-coverage", "do not name exactly the same Coverage reference")
+	if out != nil {
+		t.Fatalf("a refused step must return nil output, got %q", out)
+	}
+}
+
+// The step checks its own postcondition — one qr-coverage entry per Coverage —
+// instead of relying on the 2.2 slice's 1..* cardinality, which a duplicate
+// satisfies. A source whose result would still name one Coverage twice is
+// refused.
+func TestDTRStep2122Up_DuplicateQRCoveragePostconditionRefused(t *testing.T) {
+	in := dtrQRWithExtensions(t,
+		dtrRefExt(dtrQRCoverageExt, "Coverage/coverage-1"),
+		dtrRefExt(dtrQRCoverageExt, "Coverage/coverage-1"),
+		dtrRefExt(dtrQRContextExt, "Coverage/coverage-1"),
+	)
+	out, _, err := dtrStep2122Up(in, corr)
+	var scErr *SemanticChangeError
+	if !errors.As(err, &scErr) {
+		t.Fatalf("want *SemanticChangeError, got %v (out=%s)", err, out)
+	}
+	dtrAssertRefusal(t, scErr, "QuestionnaireResponse.extension:qr-coverage", "more than one qr-coverage entry names the same Coverage")
+	if out != nil {
+		t.Fatalf("a refused step must return nil output, got %q", out)
+	}
+}
+
+// Today's single-context case is unchanged: with no qr-coverage entry present,
+// the one Coverage qr-context entry is relocated in place.
+func TestDTRStep2122Up_SingleCoverageContextRelocatedInPlace(t *testing.T) {
+	in := dtrQRWithExtensions(t,
+		dtrRefExt(dtrQRContextExt, "DeviceRequest/dr-1"),
+		dtrRefExt(dtrQRContextExt, "Coverage/coverage-1"),
+	)
+	out, _, err := dtrStep2122Up(in, corr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := dtrExtensionsOf(t, out)
+	if len(got) != 2 || got[0]["url"] != dtrQRContextExt || got[1]["url"] != dtrQRCoverageExt || dtrExtRef(got[1]) != "Coverage/coverage-1" {
+		t.Fatalf("extensions = %v, want the Coverage context relocated in place at index 1", got)
+	}
+}
+
+func dtrAssertRefusal(t *testing.T, scErr *SemanticChangeError, locus, detail string) {
+	t.Helper()
+	if scErr.Contract != "pa.dtr" || scErr.From != "2.1" || scErr.To != "2.2" || scErr.Direction != "up" {
+		t.Fatalf("unexpected error fields: %+v", scErr)
+	}
+	if len(scErr.MissingElements) != 1 || !strings.HasPrefix(scErr.MissingElements[0], locus+" (") || !strings.Contains(scErr.MissingElements[0], detail) {
+		t.Fatalf("MissingElements = %v, want one entry at %s naming %q", scErr.MissingElements, locus, detail)
+	}
+}
+
+func dtrRefuseCase(t *testing.T, locus, detail string, exts ...map[string]any) {
+	t.Helper()
+	out, _, err := dtrStep2122Up(dtrQRWithExtensions(t, exts...), corr)
+	var scErr *SemanticChangeError
+	if !errors.As(err, &scErr) {
+		t.Fatalf("want *SemanticChangeError, got %v (out=%s)", err, out)
+	}
+	dtrAssertRefusal(t, scErr, locus, detail)
+	if out != nil {
+		t.Fatalf("a refused step must return nil output, got %q", out)
+	}
+}
+
+// Two different Coverages are refused whichever slice either arrives in —
+// here both already sit in qr-coverage beside a context repeating one.
+func TestDTRStep2122Up_TwoQRCoveragesRefused(t *testing.T) {
+	dtrRefuseCase(t, "QuestionnaireResponse.extension:qr-coverage", "do not name exactly the same Coverage reference",
+		dtrRefExt(dtrQRCoverageExt, "Coverage/coverage-1"),
+		dtrRefExt(dtrQRCoverageExt, "Coverage/coverage-2"),
+		dtrRefExt(dtrQRContextExt, "Coverage/coverage-1"),
+	)
+}
+
+// Two Coverage contexts stay refused as before, even when both repeat the
+// existing qr-coverage entry.
+func TestDTRStep2122Up_TwoEqualContextsBesideQRCoverageRefused(t *testing.T) {
+	dtrRefuseCase(t, "QuestionnaireResponse.extension:qr-coverage", "ambiguous: 2 Coverage-referencing qr-context entries",
+		dtrRefExt(dtrQRCoverageExt, "Coverage/coverage-1"),
+		dtrRefExt(dtrQRContextExt, "Coverage/coverage-1"),
+		dtrRefExt(dtrQRContextExt, "Coverage/coverage-1"),
+	)
+}
+
+// A context that repeats the qr-coverage reference but carries other content
+// (here a display) cannot be folded without losing it, so it is refused.
+func TestDTRStep2122Up_FoldWouldLoseContentRefused(t *testing.T) {
+	ctx := dtrRefExt(dtrQRContextExt, "Coverage/coverage-1")
+	ctx["valueReference"].(map[string]any)["display"] = "Primary plan"
+	dtrRefuseCase(t, "QuestionnaireResponse.extension:qr-context", "cannot be folded without loss",
+		dtrRefExt(dtrQRCoverageExt, "Coverage/coverage-1"),
+		ctx,
+	)
+}
+
+// References are compared exactly: an absolute qr-coverage reference and a
+// relative context reference to what may be the same Coverage are not folded
+// by guesswork; the source is refused.
+func TestDTRStep2122Up_AbsoluteAndRelativeReferencesRefused(t *testing.T) {
+	dtrRefuseCase(t, "QuestionnaireResponse.extension:qr-coverage", "do not name exactly the same Coverage reference",
+		dtrRefExt(dtrQRCoverageExt, "http://payer.example/fhir/Coverage/coverage-1"),
+		dtrRefExt(dtrQRContextExt, "Coverage/coverage-1"),
+	)
+}
+
+// A qr-coverage entry with no reference (identifier only) cannot be matched
+// to the context, so the source is refused rather than guessed.
+func TestDTRStep2122Up_UnreferencedQRCoverageRefused(t *testing.T) {
+	unref := map[string]any{"url": dtrQRCoverageExt, "valueReference": map[string]any{"identifier": map[string]any{"system": "http://payer.example/member", "value": "m-1"}}}
+	dtrRefuseCase(t, "QuestionnaireResponse.extension:qr-coverage", "do not name exactly the same Coverage reference",
+		unref,
+		dtrRefExt(dtrQRContextExt, "Coverage/coverage-1"),
+	)
+}
+
+// A qr-context entry naming a Coverage by an absolute URL, or by any
+// reference typed Coverage that is not a relative Coverage/<id>, is refused
+// as unresolvable — beside a relative Coverage it would otherwise pass as a
+// non-Coverage context and carry a second Coverage through the bridge.
+func TestDTRStep2122Up_NonRelativeCoverageContextRefused(t *testing.T) {
+	const detail = "not a relative Coverage/<id> reference"
+	const locus = "QuestionnaireResponse.extension:qr-coverage"
+	typed := dtrRefExt(dtrQRContextExt, "urn:uuid:5b1d3c8e-0000-4000-8000-000000000002")
+	typed["valueReference"].(map[string]any)["type"] = "Coverage"
+	cases := map[string][]map[string]any{
+		"absolute beside fold": {
+			dtrRefExt(dtrQRCoverageExt, "Coverage/coverage-1"),
+			dtrRefExt(dtrQRContextExt, "Coverage/coverage-1"),
+			dtrRefExt(dtrQRContextExt, "http://payer.example/fhir/Coverage/coverage-2"),
+		},
+		"absolute before relocation": {
+			dtrRefExt(dtrQRContextExt, "http://payer.example/fhir/Coverage/coverage-2"),
+			dtrRefExt(dtrQRContextExt, "Coverage/coverage-1"),
+		},
+		"typed Coverage beside relocation": {
+			dtrRefExt(dtrQRContextExt, "Coverage/coverage-1"),
+			typed,
+		},
+		"absolute alone": {
+			dtrRefExt(dtrQRContextExt, "http://payer.example/fhir/Coverage/coverage-1"),
+		},
+	}
+	for name, exts := range cases {
+		t.Run(name, func(t *testing.T) { dtrRefuseCase(t, locus, detail, exts...) })
+	}
+}
+
+// The non-relative guard is scoped to Coverage: an absolute reference to some
+// other resource type beside the single relative Coverage context is an
+// ordinary qr-context entry and does not stop the relocation.
+func TestDTRStep2122Up_AbsoluteNonCoverageContextKept(t *testing.T) {
+	in := dtrQRWithExtensions(t,
+		dtrRefExt(dtrQRContextExt, "Coverage/coverage-1"),
+		dtrRefExt(dtrQRContextExt, "http://payer.example/fhir/DocumentReference/doc-1"),
+	)
+	out, _, err := dtrStep2122Up(in, corr)
+	if err != nil {
+		t.Fatalf("dtrStep2122Up: %v", err)
+	}
+	exts := dtrExtensionsOf(t, out)
+	if len(exts) != 2 || exts[0]["url"] != dtrQRCoverageExt || dtrExtRef(exts[0]) != "Coverage/coverage-1" ||
+		exts[1]["url"] != dtrQRContextExt || dtrExtRef(exts[1]) != "http://payer.example/fhir/DocumentReference/doc-1" {
+		t.Fatalf("extensions = %v, want the Coverage relocated in place and the DocumentReference context kept", exts)
+	}
+}
+
+// The fold's equality check is symmetric: extra content on the qr-coverage
+// entry refuses the fold as surely as extra content on the context does, and
+// the refusal says the two entries differ rather than blaming the context.
+func TestDTRStep2122Up_FoldWithDifferingQRCoverageRefused(t *testing.T) {
+	cov := dtrRefExt(dtrQRCoverageExt, "Coverage/coverage-1")
+	cov["valueReference"].(map[string]any)["display"] = "Primary plan"
+	dtrRefuseCase(t, "QuestionnaireResponse.extension:qr-context", "the two entries differ in content other than their url",
+		cov,
+		dtrRefExt(dtrQRContextExt, "Coverage/coverage-1"),
+	)
+}
+
+func dtrDownRefuseCase(t *testing.T, detail string, exts ...map[string]any) {
+	t.Helper()
+	out, _, err := dtrStep2122Down(dtrQRWithExtensions(t, exts...), corr)
+	var scErr *SemanticChangeError
+	if !errors.As(err, &scErr) {
+		t.Fatalf("want *SemanticChangeError, got %v (out=%s)", err, out)
+	}
+	if scErr.Contract != "pa.dtr" || scErr.From != "2.2" || scErr.To != "2.1" || scErr.Direction != "down" {
+		t.Fatalf("unexpected error fields: %+v", scErr)
+	}
+	const locus = "QuestionnaireResponse.extension:qr-context"
+	if len(scErr.MissingElements) != 1 || !strings.HasPrefix(scErr.MissingElements[0], locus+" (") || !strings.Contains(scErr.MissingElements[0], detail) {
+		t.Fatalf("MissingElements = %v, want one entry at %s naming %q", scErr.MissingElements, locus, detail)
+	}
+	if out != nil {
+		t.Fatalf("a refused step must return nil output, got %q", out)
+	}
+}
+
+// Down: a Coverage qr-context equal to the qr-coverage entry apart from its
+// url is folded — the repeat is removed and the qr-coverage entry relocates
+// in its own position, so 2.1 carries the Coverage once.
+func TestDTRStep2122Down_CoverageContextEqualToQRCoverageFolded(t *testing.T) {
+	in := dtrQRWithExtensions(t,
+		dtrRefExt(dtrQRCoverageExt, "Coverage/coverage-1"),
+		dtrRefExt(dtrQRContextExt, "DeviceRequest/dr-1"),
+		dtrRefExt(dtrQRContextExt, "Coverage/coverage-1"),
+	)
+	out, _, err := dtrStep2122Down(in, corr)
+	if err != nil {
+		t.Fatalf("dtrStep2122Down: %v", err)
+	}
+	exts := dtrExtensionsOf(t, out)
+	if len(exts) != 2 || exts[0]["url"] != dtrQRContextExt || dtrExtRef(exts[0]) != "Coverage/coverage-1" ||
+		exts[1]["url"] != dtrQRContextExt || dtrExtRef(exts[1]) != "DeviceRequest/dr-1" {
+		t.Fatalf("extensions = %v, want [qr-context Coverage/coverage-1, qr-context DeviceRequest/dr-1]", exts)
+	}
+}
+
+// Down with no Coverage qr-context present relocates every qr-coverage entry
+// in place, as before the fold existed — including two different Coverages.
+func TestDTRStep2122Down_PlainRelocationUnchanged(t *testing.T) {
+	in := dtrQRWithExtensions(t,
+		dtrRefExt(dtrQRContextExt, "DeviceRequest/dr-1"),
+		dtrRefExt(dtrQRCoverageExt, "Coverage/coverage-1"),
+		dtrRefExt(dtrQRCoverageExt, "Coverage/coverage-2"),
+	)
+	out, _, err := dtrStep2122Down(in, corr)
+	if err != nil {
+		t.Fatalf("dtrStep2122Down: %v", err)
+	}
+	exts := dtrExtensionsOf(t, out)
+	want := []string{"DeviceRequest/dr-1", "Coverage/coverage-1", "Coverage/coverage-2"}
+	if len(exts) != len(want) {
+		t.Fatalf("extensions = %v, want %v as qr-context", exts, want)
+	}
+	for i, r := range want {
+		if exts[i]["url"] != dtrQRContextExt || dtrExtRef(exts[i]) != r {
+			t.Fatalf("extensions = %v, want %v as qr-context in place", exts, want)
+		}
+	}
+}
+
+func TestDTRStep2122Down_FoldRefusals(t *testing.T) {
+	display := func(e map[string]any) map[string]any {
+		e["valueReference"].(map[string]any)["display"] = "Primary plan"
+		return e
+	}
+	typed := dtrRefExt(dtrQRContextExt, "urn:uuid:5b1d3c8e-0000-4000-8000-000000000002")
+	typed["valueReference"].(map[string]any)["type"] = "Coverage"
+	cases := []struct {
+		name, detail string
+		exts         []map[string]any
+	}{
+		{"context differs in content", "differ in content other than their url", []map[string]any{
+			dtrRefExt(dtrQRCoverageExt, "Coverage/coverage-1"), display(dtrRefExt(dtrQRContextExt, "Coverage/coverage-1"))}},
+		{"qr-coverage differs in content", "differ in content other than their url", []map[string]any{
+			display(dtrRefExt(dtrQRCoverageExt, "Coverage/coverage-1")), dtrRefExt(dtrQRContextExt, "Coverage/coverage-1")}},
+		{"different Coverage in context", "do not name exactly the same Coverage reference", []map[string]any{
+			dtrRefExt(dtrQRCoverageExt, "Coverage/coverage-1"), dtrRefExt(dtrQRContextExt, "Coverage/coverage-2")}},
+		{"absolute qr-coverage beside relative context", "do not name exactly the same Coverage reference", []map[string]any{
+			dtrRefExt(dtrQRCoverageExt, "http://payer.example/fhir/Coverage/coverage-1"), dtrRefExt(dtrQRContextExt, "Coverage/coverage-1")}},
+		{"two Coverage contexts", "2 Coverage-referencing qr-context entries beside qr-coverage", []map[string]any{
+			dtrRefExt(dtrQRCoverageExt, "Coverage/coverage-1"), dtrRefExt(dtrQRContextExt, "Coverage/coverage-1"), dtrRefExt(dtrQRContextExt, "Coverage/coverage-2")}},
+		{"absolute Coverage context", "not a relative Coverage/<id> reference", []map[string]any{
+			dtrRefExt(dtrQRCoverageExt, "Coverage/coverage-1"), dtrRefExt(dtrQRContextExt, "http://payer.example/fhir/Coverage/coverage-2")}},
+		{"typed Coverage context", "not a relative Coverage/<id> reference", []map[string]any{
+			dtrRefExt(dtrQRCoverageExt, "Coverage/coverage-1"), typed}},
+		{"duplicate qr-coverage, no context", "more than one qr-context entry names the same Coverage", []map[string]any{
+			dtrRefExt(dtrQRCoverageExt, "Coverage/coverage-1"), dtrRefExt(dtrQRCoverageExt, "Coverage/coverage-1")}},
+		{"duplicate qr-coverage beside an equal context", "more than one qr-context entry names the same Coverage", []map[string]any{
+			dtrRefExt(dtrQRCoverageExt, "Coverage/coverage-1"), dtrRefExt(dtrQRCoverageExt, "Coverage/coverage-1"), dtrRefExt(dtrQRContextExt, "Coverage/coverage-1")}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) { dtrDownRefuseCase(t, c.detail, c.exts...) })
+	}
+}
+
+// Down: a repeat and a duplicate are recognised whatever form the reference
+// takes, not only as a relative Coverage/<id>. An exact repeat in qr-context
+// folds; two qr-coverage entries naming one Coverage are refused, whether by
+// the same absolute, urn:uuid or contained reference, or by identical
+// reference-less content.
+func TestDTRStep2122Down_AnyReferenceForm(t *testing.T) {
+	const urn = "urn:uuid:5b1d3c8e-0000-4000-8000-000000000001"
+	idOnly := func() map[string]any {
+		return map[string]any{"url": dtrQRCoverageExt, "valueReference": map[string]any{
+			"type": "Coverage", "identifier": map[string]any{"system": "http://payer.example/member", "value": "m-1"}}}
+	}
+	for name, exts := range map[string][]map[string]any{
+		"absolute":                        {dtrRefExt(dtrQRCoverageExt, "http://payer.example/fhir/Coverage/c1"), dtrRefExt(dtrQRCoverageExt, "http://payer.example/fhir/Coverage/c1")},
+		"urn:uuid":                        {dtrRefExt(dtrQRCoverageExt, urn), dtrRefExt(dtrQRCoverageExt, urn)},
+		"contained":                       {dtrRefExt(dtrQRCoverageExt, "#cov1"), dtrRefExt(dtrQRCoverageExt, "#cov1")},
+		"no reference, identical content": {idOnly(), idOnly()},
+	} {
+		t.Run("duplicate "+name, func(t *testing.T) {
+			dtrDownRefuseCase(t, "more than one qr-context entry names the same Coverage", exts...)
+		})
+	}
+	for name, ref := range map[string]string{"urn:uuid": urn, "contained": "#cov1"} {
+		t.Run("repeat folds "+name, func(t *testing.T) {
+			out, _, err := dtrStep2122Down(dtrQRWithExtensions(t,
+				dtrRefExt(dtrQRCoverageExt, ref), dtrRefExt(dtrQRContextExt, "DeviceRequest/dr-1"), dtrRefExt(dtrQRContextExt, ref)), corr)
+			if err != nil {
+				t.Fatalf("dtrStep2122Down: %v", err)
+			}
+			exts := dtrExtensionsOf(t, out)
+			if len(exts) != 2 || exts[0]["url"] != dtrQRContextExt || dtrExtRef(exts[0]) != ref || dtrExtRef(exts[1]) != "DeviceRequest/dr-1" {
+				t.Fatalf("extensions = %v, want [qr-context %s, qr-context DeviceRequest/dr-1]", exts, ref)
+			}
+		})
+	}
+	// Two reference-less qr-coverage entries with different content are two
+	// Coverages, not a duplicate: both relocate.
+	other := idOnly()
+	other["valueReference"].(map[string]any)["identifier"].(map[string]any)["value"] = "m-2"
+	if _, _, err := dtrStep2122Down(dtrQRWithExtensions(t, idOnly(), other), corr); err != nil {
+		t.Fatalf("two different reference-less qr-coverage entries must relocate: %v", err)
 	}
 }

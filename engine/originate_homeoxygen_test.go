@@ -50,6 +50,9 @@ type homeOxygenSoR struct {
 
 	// coverages, when set, answer the member's Coverage search.
 	coverages [][]byte
+	// payer, when set, is the payer identity the member's Coverage names in place of
+	// shnsdk.CMSPayerIdentity.
+	payer shnsdk.PayerIdentifier
 
 	openOrderCalls   []string
 	resolveByRefCall []string
@@ -131,7 +134,11 @@ func (s *homeOxygenSoR) OpenCoverage(memberID string) ([]byte, bool) {
 	if memberID != s.member {
 		return nil, false
 	}
-	cov, err := shnsdk.BuildCoverageWithPayer("Patient/"+s.member, s.member, shnsdk.CMSPayerIdentity)
+	payer := shnsdk.CMSPayerIdentity
+	if s.payer != (shnsdk.PayerIdentifier{}) {
+		payer = s.payer
+	}
+	cov, err := shnsdk.BuildCoverageWithPayer("Patient/"+s.member, s.member, payer)
 	if err != nil {
 		return nil, false
 	}

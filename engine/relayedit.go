@@ -129,7 +129,7 @@ var relayEdits = []relayEdit{
 		Authority: "The provider's own system: its Patient record for the bound patient.",
 		Disclosure: "When the provider has opted in to enrichment and a questionnaire package request carries no Patient, " +
 			"the provider's gateway appends the patient's own Patient record from the provider's system as a referenced " +
-			"resource, so a payer that does not hold the member can bind the same patient; the rest of the request is sent unchanged.",
+			"resource, so a payer that does not hold the member can identify the patient the request names; the rest of the request is sent unchanged.",
 	},
 }
 

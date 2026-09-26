@@ -89,7 +89,7 @@ func originatedPackageRequest(line string, recs crdOriginRecords, order []byte, 
 func (g *Gateway) carryUnchanged(route legRoute, body []byte, correlationID, recipient string) (int, string) {
 	adapted, _, err := g.egressAdapt(route, body, ExchangeIdentity{CorrelationID: correlationID, LegType: "dtr-questionnaire-fetch", Counterpart: recipient})
 	if err != nil {
-		return http.StatusBadGateway, err.Error()
+		return adaptFailureStatus(err), err.Error()
 	}
 	if !bytes.Equal(adapted, body) {
 		return http.StatusBadGateway, "the questionnaire-package request cannot be carried to the payer's line unchanged"

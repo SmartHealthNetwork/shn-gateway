@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"net/url"
 	"strings"
 	"sync"
@@ -90,12 +91,49 @@ func TestFHIRMetadataWrongShape(t *testing.T) {
 	}
 }
 
-// 3. fhir-metadata unreachable (closed port): Detail begins "GET <target>/metadata:"
-// and never leaks a URL query or userinfo.
+// refusedURL is an address no server answers: port 0 is never held by a
+// listener, so the dial fails at once on every OS and nothing is written. A
+// server started and then closed is not a substitute, because the freed port
+// can be handed to the next listener.
+const refusedURL = "http://127.0.0.1:0"
+
+// refusedDial is how the transport's own dial error for refusedURL begins
+// (the OS reason that follows differs by platform and is never asserted).
+const refusedDial = "dial tcp 127.0.0.1:0: "
+
+// refusedURL itself: a request to it fails fast and is never written, on the
+// OS this test runs on. Only elapsed time and the write trace are asserted;
+// the OS reason for the failure differs by platform.
+func TestRefusedURLFailsFastWithoutWriting(t *testing.T) {
+	var wrote atomic.Bool
+	ctx := httptrace.WithClientTrace(context.Background(), &httptrace.ClientTrace{
+		WroteRequest: func(httptrace.WroteRequestInfo) { wrote.Store(true) },
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, refusedURL+"/metadata", nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	// A fresh transport with no proxy, so the dial is to refusedURL itself.
+	client := &http.Client{Transport: &http.Transport{}, Timeout: 5 * time.Second}
+	start := time.Now()
+	resp, err := client.Do(req)
+	elapsed := time.Since(start)
+	if err == nil {
+		_ = resp.Body.Close()
+		t.Fatalf("request to %s answered HTTP %d, want a dial failure", refusedURL, resp.StatusCode)
+	}
+	if wrote.Load() {
+		t.Fatalf("request to %s was written", refusedURL)
+	}
+	if elapsed >= 2*time.Second {
+		t.Fatalf("dial to %s took %s, want an immediate failure", refusedURL, elapsed)
+	}
+}
+
+// 3. fhir-metadata unreachable: Detail is "GET <target>/metadata: " followed
+// by the transport's dial error, and never leaks a URL query or userinfo.
 func TestFHIRMetadataUnreachable(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	target := srv.URL
-	srv.Close() // closed port: connections now refused
+	target := refusedURL
 
 	rn := NewRunner([]Target{{ID: "fhir", Kind: KindFHIRMetadata, URL: target}}, http.DefaultClient, time.Now)
 	results, err := rn.Run(context.Background())
@@ -106,9 +144,12 @@ func TestFHIRMetadataUnreachable(t *testing.T) {
 	if got.OK {
 		t.Errorf("OK = true, want false")
 	}
-	wantPrefix := fmt.Sprintf("GET %s/metadata:", targetOf(target))
+	wantPrefix := fmt.Sprintf("GET %s/metadata: %s", targetOf(target), refusedDial)
 	if !strings.HasPrefix(got.Detail, wantPrefix) {
 		t.Errorf("Detail = %q, want prefix %q", got.Detail, wantPrefix)
+	}
+	if got.Failure == nil || got.Failure.Code != FailUnreachable || !strings.HasPrefix(got.Failure.Hint, refusedDial) {
+		t.Errorf("failure = %+v, want code %q with hint prefix %q", got.Failure, FailUnreachable, refusedDial)
 	}
 	if strings.ContainsAny(got.Detail, "?@") {
 		t.Errorf("Detail leaks URL query/userinfo: %q", got.Detail)
@@ -125,12 +166,10 @@ func TestFHIRMetadataUnreachable(t *testing.T) {
 // credential-bearing and FAILS against the pre-fix code, which formatted
 // %v directly over the raw client.Do error.
 func TestFHIRMetadataUnreachableRedactsCredentials(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	closed, err := url.Parse(srv.URL)
+	closed, err := url.Parse(refusedURL)
 	if err != nil {
-		t.Fatalf("parse server URL: %v", err)
+		t.Fatalf("parse refused URL: %v", err)
 	}
-	srv.Close() // closed port: connections now refused
 
 	closed.User = url.UserPassword("svcuser", "hunter2")
 	closed.RawQuery = "apikey=SUPERSECRET"
@@ -157,8 +196,8 @@ func TestFHIRMetadataUnreachableRedactsCredentials(t *testing.T) {
 	if got.Failure == nil || got.Failure.Code != FailUnreachable {
 		t.Fatalf("failure = %+v, want code %q", got.Failure, FailUnreachable)
 	}
-	if got.Failure.Hint == "" {
-		t.Fatalf("transport-error hint empty, want the redacted dial error")
+	if !strings.HasPrefix(got.Failure.Hint, refusedDial) {
+		t.Fatalf("hint = %q, want the redacted dial error (prefix %q)", got.Failure.Hint, refusedDial)
 	}
 	for _, leak := range []string{"svcuser", "hunter2", "SUPERSECRET", "?", "@"} {
 		if strings.Contains(got.Failure.Hint, leak) {
@@ -609,12 +648,6 @@ func TestFailureClassification(t *testing.T) {
 		fmt.Fprint(w, `{"resourceType":"CapabilityStatement","fhirVersion":"4.0.1"}`)
 	}))
 	defer okCS.Close()
-	// A closed port (server started then immediately closed — the test-3
-	// idiom): dialing it fails with connection refused.
-	closed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	closedURL := closed.URL
-	closed.Close()
-
 	cases := []struct {
 		name     string
 		target   Target
@@ -635,8 +668,8 @@ func TestFailureClassification(t *testing.T) {
 			code: FailHTTPStatus, hint: "HTTP 502"},
 		{name: "reachable unparseable target", target: Target{ID: "m", Kind: KindReachable, URL: "://bad"},
 			code: FailInternal, hint: "missing protocol scheme"},
-		{name: "reachable closed port", target: Target{ID: "n", Kind: KindReachable, URL: closedURL},
-			code: FailUnreachable, hintOnly: "dial tcp"},
+		{name: "reachable refused address", target: Target{ID: "n", Kind: KindReachable, URL: refusedURL},
+			code: FailUnreachable, hintOnly: refusedDial},
 		{name: "token status error", target: Target{ID: "f", Kind: KindToken,
 			TokenFetch: func(context.Context) error { return &StatusError{Code: 401} }},
 			code: FailCredentialRejected, hint: "HTTP 401"},

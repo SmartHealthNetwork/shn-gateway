@@ -458,7 +458,7 @@ func (g *Gateway) inquireContinuation(ctx context.Context, r *http.Request, cont
 	}
 	adapted, _, aerr := g.egressAdapt(route, body, ExchangeIdentity{CorrelationID: corr, LegType: "pas-claim-inquire", Counterpart: cont.PayerHolder})
 	if aerr != nil {
-		return PASDecision{}, http.StatusBadGateway, aerr.Error(), aerr
+		return PASDecision{}, adaptFailureStatus(aerr), aerr.Error(), aerr
 	}
 	if !bytes.Equal(adapted, body) {
 		// The inquiry this gateway authored cannot be carried to the payer's

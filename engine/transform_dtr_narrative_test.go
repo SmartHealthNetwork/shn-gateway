@@ -45,7 +45,14 @@ func TestDTRStandardQuestionnaireNarrativeRefusal(t *testing.T) {
 					in, _ = json.Marshal(q)
 				}
 				if name == "captured-foreign" {
-					in = pasGolden(t, "2.2/questionnaire-package-pa-lumbar-mri.json")
+					// The reference payer's captured Questionnaire carries its narrative;
+					// the same package minus that narrative refuses.
+					var captured map[string]any
+					if err := json.Unmarshal(pasGolden(t, "2.2/questionnaire-package-pa-lumbar-mri.json"), &captured); err != nil {
+						t.Fatal(err)
+					}
+					delete(dtrCollectResources(captured)["Questionnaire"][0], "text")
+					in, _ = json.Marshal(captured)
 				}
 				saved := bytes.Clone(in)
 				out, reports, err := TransformDTRForTest("2.2", to, in, corr)
@@ -96,6 +103,28 @@ func TestDTRStandardQuestionnaireNarrativeSpecificity(t *testing.T) {
 				}
 			})
 		}
+	}
+	for _, to := range []string{"2.1", "2.0"} {
+		t.Run("captured-foreign-narrative/"+to, func(t *testing.T) {
+			in := pasGolden(t, "2.2/questionnaire-package-pa-lumbar-mri.json")
+			var p map[string]any
+			if err := json.Unmarshal(in, &p); err != nil {
+				t.Fatal(err)
+			}
+			want := dtrCollectResources(p)["Questionnaire"]
+			if len(want) != 1 || want[0]["text"] == nil {
+				t.Fatal("captured package no longer carries the payer's Questionnaire narrative")
+			}
+			out, _, err := TransformDTRForTest("2.2", to, in, corr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got map[string]any
+			json.Unmarshal(out, &got)
+			if !reflect.DeepEqual(want, dtrCollectResources(got)["Questionnaire"]) {
+				t.Fatal("Questionnaire content changed")
+			}
+		})
 	}
 	t.Run("QR-only", func(t *testing.T) {
 		in := pasGolden(t, "2.2/questionnaireresponse-autofill.json")

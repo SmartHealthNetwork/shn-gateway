@@ -109,7 +109,8 @@ func TestEveryLegHandlerSetsTheFindingContext(t *testing.T) {
 // and a new call must be classified deliberately, in this test, by whoever
 // adds it. Categories:
 //
-//	choke        — validateGoverned itself, the one place a verdict decides
+//	choke        — validateGovernedLines, the one place a verdict decides
+//	               (validateGoverned is its single-line form)
 //	observational — a validate whose outcome never changes the answer
 //	delegating   — a wrapper that forwards to another Validator
 //	appendix-b   — a site whose own parse error persists at every level (spec
@@ -159,7 +160,7 @@ func TestEveryLegHandlerSetsTheFindingContext(t *testing.T) {
 // and would need extending here if either subpackage ever validates FHIR
 // resources directly.
 var validateCallSites = map[string]string{
-	"gateway.go:validateGoverned":      "choke",
+	"gateway.go:validateGovernedLines": "choke",
 	"crd_native.go:observeCRDEmbedded": "observational",
 	"certify.go:collectCertification":  "observational",
 	"lanes.go:Validate":                "delegating",
@@ -339,7 +340,7 @@ func TestEveryValidateFHIREntryPointReachesTheChokePoint(t *testing.T) {
 			}
 			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
 				switch sel.Sel.Name {
-				case "validateGoverned", "validateFHIRAtProfile", "validateFHIRForContract":
+				case "validateGoverned", "validateGovernedLines", "validateFHIRAtProfile", "validateFHIRForContract":
 					reaches = true
 				}
 			}
@@ -420,5 +421,71 @@ func TestBridgedEgressSitesAreExactlyTheListedOnes(t *testing.T) {
 	sort.Strings(badArgs)
 	for _, msg := range badArgs {
 		t.Error(msg)
+	}
+}
+
+// payerAnswerIngressSites are the call lines of validateFHIRPayerIngress: the
+// ingress check of a payer's answer (DTR package, next-question, PAS
+// ClaimResponse) on a leg this gateway originated. Each passes the payer identity
+// the member's Coverage named, because whether the check is skipped depends on
+// whose answer it is. A new site must be added here deliberately.
+var payerAnswerIngressSites = map[string]int{
+	"originate.go":            8,
+	"originate_homeoxygen.go": 1,
+	"dtr_adaptive.go":         1,
+	"pas_tail.go":             1,
+	"originate_resume.go":     3,
+}
+
+// TestPayerAnswerIngressNamesTheRoutedPayer pins that every
+// validateFHIRPayerIngress call passes, as its payer, the flow's own routed payer
+// identity — a variable or field named payer, carried from the member's Coverage —
+// never a literal identity or a package-level value such as
+// shnsdk.CMSPayerIdentity, so the reference-payer skip is decided by the payer the
+// leg was actually routed by.
+func TestPayerAnswerIngressNamesTheRoutedPayer(t *testing.T) {
+	fset, files := engineFiles(t)
+	counts := map[string]int{}
+	for name, f := range files {
+		ast.Inspect(f, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "validateFHIRPayerIngress" {
+				return true
+			}
+			counts[filepath.Base(name)]++
+			pos := fset.Position(call.Pos())
+			if len(call.Args) != 5 {
+				t.Errorf("%s: validateFHIRPayerIngress has %d args, want 5", pos, len(call.Args))
+				return true
+			}
+			switch arg := call.Args[4].(type) {
+			case *ast.Ident:
+				if arg.Name == "payer" {
+					return true
+				}
+			case *ast.SelectorExpr:
+				if x, ok := arg.X.(*ast.Ident); ok && arg.Sel.Name == "payer" && x.Name != "shnsdk" {
+					return true
+				}
+			}
+			var buf strings.Builder
+			_ = printer.Fprint(&buf, fset, call.Args[4])
+			t.Errorf("%s: validateFHIRPayerIngress names payer %s, want the flow's routed payer identity (payer, res.payer, st.payer)", pos, buf.String())
+			return true
+		})
+	}
+	for name, want := range payerAnswerIngressSites {
+		if counts[name] != want {
+			t.Errorf("%s has %d payer-answer ingress checks, want %d — a new one must be added to payerAnswerIngressSites deliberately", name, counts[name], want)
+		}
+	}
+	for name, got := range counts {
+		if _, listed := payerAnswerIngressSites[name]; !listed {
+			t.Errorf("%s has %d payer-answer ingress checks but is not listed", name, got)
+		}
 	}
 }

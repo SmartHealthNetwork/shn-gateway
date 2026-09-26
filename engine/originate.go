@@ -24,12 +24,11 @@ import (
 // (br-payer) DIRECTLY over HTTP, which needs the contained-insurer / absolute-refs /
 // payer-org-entry / DTR-coverage handling every br-payer-shaped request/response requires.
 // provider-data is the sole origination lane that dials br-payer's own HTTP surface — it must
-// not regress the contained-payor → uniform-A3 bug. This predicate does NOT decide the R-8
-// ingress-$validate skip — see relaysReferencePayerBytes below: that concern is about WHOSE
-// bytes are being relayed, not about which lane makes the HTTP call. The demo lane relays the
-// SAME reference-payer bytes
-// (via the in-process mirror, internal/brpayermirror) without ever dialing br-payer itself, and
-// needs the skip too — a distinction this predicate alone can no longer express.
+// not regress the contained-payor → uniform-A3 bug. This predicate does NOT decide the
+// payer-answer ingress skip — see relaysReferencePayerBytes and validateFHIRPayerIngress:
+// that concern is about WHOSE bytes are being relayed, not about which lane makes the HTTP
+// call. The demo lane relays the SAME reference-payer bytes (via the in-process mirror,
+// internal/brpayermirror) without ever dialing br-payer itself.
 func targetsBrPayer(profile string) bool { return profile == "provider-data" }
 
 // isDemoProfile reports whether the origination profile is the family-keyed demo lane
@@ -39,36 +38,74 @@ func targetsBrPayer(profile string) bool { return profile == "provider-data" }
 // targetsBrPayer in HOW it reaches the reference payer (in-process mirror vs. a live HTTP
 // dial) — but NOT distinct on WHOSE bytes come back: since the in-process payer stub retired the
 // mirror relays the reference payer's OWN pinned bytes verbatim
-// (internal/brpayermirror/loopback.go), so this lane gets the SAME R-8 ingress-$validate skip
-// provider-data gets, for its payer-directed legs — see relaysReferencePayerBytes and
-// validateFHIRPayerIngress. The superseded claim that demo "does NOT get the skip" was true
-// only while the demo lane's payer content was still SHN's own in-process stub; it
-// no longer is.
+// (internal/brpayermirror/loopback.go), so this lane is treated as provider-data is: its
+// answers from a reference payer identity are not certified, and a partner payer's are — see
+// relaysReferencePayerBytes and validateFHIRPayerIngress.
 func isDemoProfile(profile string) bool { return profile == "demo" }
 
-// relaysReferencePayerBytes reports whether THIS lane's payer counterparty answers with the
-// reference payer's own bytes, relayed VERBATIM — never SHN-produced content — which is what
-// R-8 (FR-36) actually protects: SHN $validates only what it PRODUCES and hosts US Core
-// profiles only, so a real Da Vinci payer's own DTR $questionnaire-package / PAS ClaimResponse
-// bytes fail a US-Core-only validator by construction (foreign profiles, e.g.
-// dtr-std-questionnaire, are never fetchable — HAPI-0992 on a relayed Parameters wrapper is the
-// SAME class of failure, not a different one). Two origination lanes reach the reference payer
-// today: provider-data over a live HTTP dial to br-payer (targetsBrPayer), and demo through the
-// in-process mirror of it (isDemoProfile). NO profile == "" special case here any more:
-// gateway/app.go's loadConfig normalizes an unset ORIGINATION_PROFILE to "demo" ONCE, at the
-// config boundary, before this predicate — or any other reader of cfg.OriginationProfile —
-// ever sees it, so isDemoProfile alone is now sufficient. Adding profile == "" back here would
-// re-establish the exact "every predicate special-cases the unset default separately"
-// pattern that was retired: the empty-string trap independently bit two call sites (the
-// ingress-$validate skip, then the UC-08 not-covered→deny gate) before the fix moved to the
-// config boundary. This predicate answers only "does the LANE relay reference-payer bytes at
-// all" — the counterparty half (is THIS leg actually one of the payer-directed leg types) is
-// enforced by which validate function a call site uses; see validateFHIR's doc comment.
-// Egress (always SHN-produced, on every lane, at every call site) is UNAFFECTED — it keeps
-// validating unconditionally; a lane whose counterparty is genuinely SHN-produced (none exist
-// among provider-data/demo today, but a future one could) would keep validating ingress too.
+// relaysReferencePayerBytes reports whether THIS lane's payer counterparty is the
+// network's reference payer, answering with the reference implementation's own bytes
+// relayed verbatim. Two origination lanes reach it today: provider-data over a live
+// HTTP dial (targetsBrPayer), and demo through the in-process mirror of it
+// (isDemoProfile). An unset ORIGINATION_PROFILE is normalized to "demo" once, at the
+// config boundary (gateway/app.go loadConfig), so no profile == "" case belongs here.
+//
+// The lane decides how the PAS request is shaped for that counterparty (the contained
+// insurer, absolute references and payer Organization entry the reference payer
+// resolves). It is only HALF of the ingress-check skip: validateFHIRPayerIngress skips
+// a payer's answer only when this is true AND the payer identity the leg was routed by
+// is one of the network's reference payers (isReferencePayer). A partner payer reached
+// from either lane is governed at the gateway's conformance level like any other peer.
+// Egress is unaffected on every lane: SHN-built bytes are always validated.
 func relaysReferencePayerBytes(profile string) bool {
 	return targetsBrPayer(profile) || isDemoProfile(profile)
+}
+
+// referencePayerSystem is the payer-identifier namespace the reference payers claim
+// their identities under.
+const referencePayerSystem = "urn:oid:2.16.840.1.113883.6.300"
+
+// referencePayerIdentities is the network's published, closed set of reference payer
+// identities: 00001, the Da Vinci reference payer (shnsdk.CMSPayerIdentity); 00300,
+// the hosted conformance payer in front of it; and 00301, the hosted 2.2 reference
+// payer. A leg is routed by the payer identity the member's own Coverage names, so the
+// identity — not the holder that happens to answer for it — says whose answer it is.
+// Their DTR and PAS answers are the reference implementation's own bytes, which do not
+// yet conform (the 2.0 reference payer's DTR package fails DTR 2.0.1); a provider
+// gateway on a lane that relays them does not certify them (validateFHIRPayerIngress).
+// BridgeDemoPayerID and BridgeRefusePayerID, the two SHN-operated bridging-demo payers,
+// are in the set only because they relay the reference payer's content: each fronts
+// 00001 as its backend, so their answers are the same reference bytes under the demo
+// payer's own identity. They leave the set with the rest of it once the reference
+// content conforms.
+// The set changes only by a release of this rule, never by configuration.
+var referencePayerIdentities = map[shnsdk.PayerIdentifier]bool{
+	{System: referencePayerSystem, Value: "00001"}: true,
+	{System: referencePayerSystem, Value: "00300"}: true,
+	{System: referencePayerSystem, Value: "00301"}: true,
+	BridgeDemoPayerID:   true,
+	BridgeRefusePayerID: true,
+}
+
+// isReferencePayer reports whether payer is one of the network's reference payer
+// identities (referencePayerIdentities).
+func isReferencePayer(payer shnsdk.PayerIdentifier) bool { return referencePayerIdentities[payer] }
+
+// ReferencePayerIdentities returns the network's reference payer identities, sorted by
+// system then value — the identities whose answers a provider gateway relaying
+// reference-payer bytes does not certify. It is a copy: changing it changes nothing here.
+func ReferencePayerIdentities() []shnsdk.PayerIdentifier {
+	out := make([]shnsdk.PayerIdentifier, 0, len(referencePayerIdentities))
+	for p := range referencePayerIdentities {
+		out = append(out, p)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].System != out[j].System {
+			return out[i].System < out[j].System
+		}
+		return out[i].Value < out[j].Value
+	})
+	return out
 }
 
 // attestsOnHHA reports whether this deployment's UC-04/05/06/07 order is the G0151
@@ -177,6 +214,21 @@ func bridgeRefusalText(err error) (string, bool) {
 		return sce.Error(), true
 	}
 	return "", false
+}
+
+// adaptFailureStatus is the status an egressAdapt failure answers with on the
+// product paths. The typed *SemanticChangeError is a designed refusal: the
+// request cannot be carried to the recipient's line without changing what it
+// asserts, so nothing is sent and the caller gets the same legible 422 a
+// RouteRefusalError gets (no shared line). Any other failure (a parse error
+// inside a step, a disconnected chain, a Provenance that does not round-trip)
+// is this gateway's own fault and stays a 502.
+func adaptFailureStatus(err error) int {
+	var sce *SemanticChangeError
+	if errors.As(err, &sce) {
+		return http.StatusUnprocessableEntity
+	}
+	return http.StatusBadGateway
 }
 
 // writeBridgeRefusal writes the demo lane's structured 200 refusal body (task2 brief A3a):
@@ -1307,7 +1359,7 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 	// records, relayed as its system holds them and fenced to the member.
 	adaptedCRDReq, _, err := g.egressAdapt(crdRoute, crdReq, ExchangeIdentity{CorrelationID: crdCorr, LegType: "crd-order-select", Counterpart: recipient})
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		writeJSON(w, adaptFailureStatus(err), map[string]string{"error": err.Error()})
 		return crdDtrResult{}, false
 	}
 	crdRespJSON, err := g.OriginateLeg(ctx, r, recipient, "crd-order-select", pci, crdCorr, "",
@@ -1423,7 +1475,7 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 		ctx = withFindingContext(ctx, findingContext{
 			LegType: "dtr-questionnaire-fetch", CorrelationID: dtrCorr, Seam: "originate", Whose: "peer",
 		})
-		if status, msg := g.validateFHIRPayerIngress(ctx, packageJSON, res.dtrLine, "pa.dtr"); status != 0 {
+		if status, msg := g.validateFHIRPayerIngress(ctx, packageJSON, res.dtrLine, "pa.dtr", res.payer); status != 0 {
 			writeJSON(w, status, map[string]string{"error": msg})
 			return crdDtrResult{}, false
 		}
@@ -1829,7 +1881,7 @@ func (g *Gateway) originateNoPACRD(w http.ResponseWriter, r *http.Request, membe
 	// enforcement point is added or removed after egressAdapt.
 	adaptedReqJSON, _, err := g.egressAdapt(crdRoute, reqJSON, ExchangeIdentity{CorrelationID: correlationID, LegType: "crd-order-select", Counterpart: recipient})
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		writeJSON(w, adaptFailureStatus(err), map[string]string{"error": err.Error()})
 		return
 	}
 	respJSON, err := g.OriginateLeg(ctx, r, recipient, "crd-order-select", pci, correlationID, "",
@@ -2200,7 +2252,7 @@ func (g *Gateway) handleUC03Bridge(w http.ResponseWriter, r *http.Request, membe
 	ctx = withFindingContext(ctx, findingContext{
 		LegType: "pas-claim", CorrelationID: pasCorr, Seam: "originate", Whose: "peer",
 	})
-	if status, msg := g.validateFHIRPayerIngress(ctx, claimRespJSON, targetLine, "pa.pas"); status != 0 {
+	if status, msg := g.validateFHIRPayerIngress(ctx, claimRespJSON, targetLine, "pa.pas", res.payer); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
@@ -2311,7 +2363,7 @@ func (g *Gateway) handleUC07HCPCS(w http.ResponseWriter, r *http.Request) {
 	}
 	bundleJSON, _, err = g.egressAdapt(route, bundleJSON, ExchangeIdentity{CorrelationID: pasCorr, LegType: "pas-claim", Counterpart: res.recipient})
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		writeJSON(w, adaptFailureStatus(err), map[string]string{"error": err.Error()})
 		return
 	}
 	if status, msg := g.validatePASAttachments(ctx, bundleJSON, targetLine, res.qrSource != nil); status != 0 {
@@ -2334,7 +2386,7 @@ func (g *Gateway) handleUC07HCPCS(w http.ResponseWriter, r *http.Request) {
 	ctx = withFindingContext(ctx, findingContext{
 		LegType: "pas-claim", CorrelationID: pasCorr, Seam: "originate", Whose: "peer",
 	})
-	if status, msg := g.validateFHIRPayerIngress(ctx, claimRespJSON, targetLine, "pa.pas"); status != 0 {
+	if status, msg := g.validateFHIRPayerIngress(ctx, claimRespJSON, targetLine, "pa.pas", res.payer); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
@@ -2516,7 +2568,7 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 	}
 	bundleJSON, _, err = g.egressAdapt(route, bundleJSON, ExchangeIdentity{CorrelationID: pasCorr, LegType: "pas-claim", Counterpart: res.recipient})
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		writeJSON(w, adaptFailureStatus(err), map[string]string{"error": err.Error()})
 		return
 	}
 	if status, msg := g.validatePASAttachments(ctx, bundleJSON, targetLine, res.qrSource != nil); status != 0 {
@@ -2539,7 +2591,7 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 	ctx = withFindingContext(ctx, findingContext{
 		LegType: "pas-claim", CorrelationID: pasCorr, Seam: "originate", Whose: "peer",
 	})
-	if status, msg := g.validateFHIRPayerIngress(ctx, pendedResp, targetLine, "pa.pas"); status != 0 {
+	if status, msg := g.validateFHIRPayerIngress(ctx, pendedResp, targetLine, "pa.pas", res.payer); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
@@ -2616,7 +2668,7 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 	}
 	updateBundle, _, err = g.egressAdapt(route, updateBundle, ExchangeIdentity{CorrelationID: updateCorr, LegType: "pas-claim-update", Counterpart: res.recipient})
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		writeJSON(w, adaptFailureStatus(err), map[string]string{"error": err.Error()})
 		return
 	}
 	if status, msg := g.validatePASAttachments(ctx, updateBundle, targetLine, res.qrSource != nil); status != 0 {
@@ -2641,7 +2693,7 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 	ctx = withFindingContext(ctx, findingContext{
 		LegType: "pas-claim-update", CorrelationID: updateCorr, Seam: "originate", Whose: "peer",
 	})
-	if status, msg := g.validateFHIRPayerIngress(ctx, updateResp, targetLine, "pa.pas"); status != 0 {
+	if status, msg := g.validateFHIRPayerIngress(ctx, updateResp, targetLine, "pa.pas", res.payer); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
@@ -2850,7 +2902,7 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 	}
 	bundleJSON, _, err = g.egressAdapt(route, bundleJSON, ExchangeIdentity{CorrelationID: pasCorr, LegType: "pas-claim", Counterpart: res.recipient})
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		writeJSON(w, adaptFailureStatus(err), map[string]string{"error": err.Error()})
 		return
 	}
 	if status, msg := g.validatePASAttachments(ctx, bundleJSON, targetLine, res.qrSource != nil); status != 0 {
@@ -2873,7 +2925,7 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 	ctx = withFindingContext(ctx, findingContext{
 		LegType: "pas-claim", CorrelationID: pasCorr, Seam: "originate", Whose: "peer",
 	})
-	if status, msg := g.validateFHIRPayerIngress(ctx, pendedResp, targetLine, "pa.pas"); status != 0 {
+	if status, msg := g.validateFHIRPayerIngress(ctx, pendedResp, targetLine, "pa.pas", res.payer); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
@@ -2927,7 +2979,7 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 		// Ingress-validate the facility's searchset BEFORE trusting/extracting its
 		// resources (defense in depth — every resource crossing the substrate is validated).
 		// MUST stay plain validateFHIR, never validateFHIRPayerIngress: the facility is not
-		// the reference payer, so this leg's bytes are never eligible for the R-8 skip
+		// a payer, so this leg's bytes are never eligible for the reference-payer skip
 		// regardless of lane — this exact call site is the one that was once wrongly
 		// exempted, sharing the payer-directed skip with every other ingress leg on the
 		// same lane.
@@ -3000,7 +3052,7 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 	}
 	updateBundle, _, err = g.egressAdapt(route, updateBundle, ExchangeIdentity{CorrelationID: updateCorr, LegType: "pas-claim-update", Counterpart: res.recipient})
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		writeJSON(w, adaptFailureStatus(err), map[string]string{"error": err.Error()})
 		return
 	}
 	if status, msg := g.validatePASAttachments(ctx, updateBundle, targetLine, res.qrSource != nil); status != 0 {
@@ -3023,7 +3075,7 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 	ctx = withFindingContext(ctx, findingContext{
 		LegType: "pas-claim-update", CorrelationID: updateCorr, Seam: "originate", Whose: "peer",
 	})
-	if status, msg := g.validateFHIRPayerIngress(ctx, updateResp, targetLine, "pa.pas"); status != 0 {
+	if status, msg := g.validateFHIRPayerIngress(ctx, updateResp, targetLine, "pa.pas", res.payer); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
@@ -3155,7 +3207,7 @@ func (g *Gateway) handleUC08(w http.ResponseWriter, r *http.Request) {
 	}
 	bundleJSON, _, err = g.egressAdapt(route, bundleJSON, ExchangeIdentity{CorrelationID: pasCorr, LegType: "pas-claim", Counterpart: res.recipient})
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		writeJSON(w, adaptFailureStatus(err), map[string]string{"error": err.Error()})
 		return
 	}
 	if status, msg := g.validatePASAttachments(ctx, bundleJSON, targetLine, res.qrSource != nil); status != 0 {
@@ -3179,7 +3231,7 @@ func (g *Gateway) handleUC08(w http.ResponseWriter, r *http.Request) {
 	ctx = withFindingContext(ctx, findingContext{
 		LegType: "pas-claim", CorrelationID: pasCorr, Seam: "originate", Whose: "peer",
 	})
-	if status, msg := g.validateFHIRPayerIngress(ctx, claimRespJSON, targetLine, "pa.pas"); status != 0 {
+	if status, msg := g.validateFHIRPayerIngress(ctx, claimRespJSON, targetLine, "pa.pas", res.payer); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}

@@ -96,6 +96,24 @@ func TestStoreErrorMetricHook_EmitsStoreErrorWithStoreDim(t *testing.T) {
 	}
 }
 
+// An involved patient a leg left out counts once in InvolvedOmitted, with the
+// reason as a dimension, so an operator sees what the audit record lacks.
+func TestInvolvedOmittedMetricHook_EmitsReasonDim(t *testing.T) {
+	var buf bytes.Buffer
+	em := metrics.New(&buf, "SHN/Test", map[string]string{"Env": "test"}, func() time.Time { return time.Unix(0, 0) })
+
+	involvedOmittedMetricHook(em, "payer-gw")("authorization-refused")
+
+	lines := decodeEMFLines(t, &buf)
+	if len(lines) != 1 {
+		t.Fatalf("want 1 EMF line, got %d: %v", len(lines), lines)
+	}
+	m := lines[0]
+	if m["InvolvedOmitted"] != float64(1) || m["Service"] != "payer-gw" || m["reason"] != "authorization-refused" || m["Env"] != "test" {
+		t.Fatalf("InvolvedOmitted line wrong: %v", m)
+	}
+}
+
 // TestStorePoolMetric_EmitsOneGaugePerStat: the shared-state pool is the resource every
 // seam contends for, so its saturation must be visible BEFORE the store context starts
 // expiring. One StorePool gauge per stat, each carrying the stat name as a dimension on

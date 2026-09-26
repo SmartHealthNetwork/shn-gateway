@@ -197,7 +197,7 @@ func (g *Gateway) handleCRDDispatchInbound(w http.ResponseWriter, r *http.Reques
 		g.refuseInbound(w, r, legCRDOrderDispatch, env, tok, answerTok, status, msg, nil)
 		return
 	}
-	g.noteSubjectBinding("crd-order-dispatch", env.Metadata.CorrelationID, tok.Subject, subjectPCI)
+	g.noteSubjectBinding(r.Context(), "crd-order-dispatch", env.Metadata.CorrelationID, tok.Subject, subjectPCI)
 	// Ingress-$validate the resolved DeviceRequest (SHN-shaped order; US Core warns-passes an
 	// unprofiled type). We deliberately do NOT $validate the COVERAGE here: for order-dispatch the
 	// coverage rides as a PREFETCH BUNDLE whose entry fullUrls are the relative "Type/id" form

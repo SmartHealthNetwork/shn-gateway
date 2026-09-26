@@ -29,6 +29,10 @@ import (
 // test exercising the pended-claim ledger or the EOB store exercises the shipped code.
 type censusSoR struct {
 	*MemStore
+	// payer, when set, is the payer identity every member's Coverage names in place
+	// of the census default (and of censusPayerOverrides): a partner payer's identity
+	// for a row that must be routed by one.
+	payer *shnsdk.PayerIdentifier
 }
 
 var (
@@ -757,6 +761,9 @@ func (d *censusSoR) OpenCoverage(memberID string) ([]byte, bool) {
 	if p, ok := censusPayerOverrides[memberID]; ok {
 		payer = p
 	}
+	if d.payer != nil {
+		payer = *d.payer
+	}
 	cov, err := shnsdk.BuildCoverageWithPayer("Patient/"+memberID, memberID, payer)
 	if err != nil {
 		return nil, false
@@ -853,7 +860,11 @@ func (d *censusSoR) ResolveByReference(ref string) ([]byte, bool) {
 		})
 		return b, err == nil
 	}
-	for _, payer := range censusPayers() {
+	payers := censusPayers()
+	if d.payer != nil {
+		payers = append(payers, *d.payer)
+	}
+	for _, payer := range payers {
 		if ref == censusPayerOrgRef(payer) {
 			return censusPayerOrganization(payer)
 		}

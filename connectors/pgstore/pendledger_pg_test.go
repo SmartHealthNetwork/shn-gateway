@@ -354,3 +354,40 @@ func TestPgPendLedger_AStrandedHoldLapses(t *testing.T) {
 		t.Fatalf("a new amendment could not bind after the hold lapsed: %v %v", ok, err)
 	}
 }
+
+// OpenPends lists only this holder's undecided pends: a decided one (dated or
+// not), and one filed by another holder, are left out.
+func TestPgPendLedger_OpenPendsListsOnlyUndecided(t *testing.T) {
+	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
+	s := ledgerStore(t, func() time.Time { return now })
+	for _, corr := range []string{"open", "done", "undated"} {
+		if _, err := s.RecordPendedKeyed("PCI-"+corr, "corr-"+corr, now, engine.PendKeys{RequesterHolder: "provider-a"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.RecordDecision("PCI-done", "corr-done", "approved", now, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RecordDecision("PCI-undated", "corr-undated", "denied", time.Time{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	var decidedAt *time.Time
+	if err := s.pool.QueryRow(context.Background(),
+		`SELECT decided_at FROM gw_pended_claim WHERE holder_id=$1 AND correlation_id='corr-undated'`, s.holderID).Scan(&decidedAt); err != nil || decidedAt != nil {
+		t.Fatalf("the undated decision must be stored without a date to exercise the state check: %v %v", decidedAt, err)
+	}
+	other, err := NewPgStore(context.Background(), s.pool, "another-payer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := other.RecordPendedKeyed("PCI-other", "corr-other", now, engine.PendKeys{RequesterHolder: "provider-a"}); err != nil {
+		t.Fatal(err)
+	}
+	open, err := OpenPends(context.Background(), s.pool, s.holderID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(open) != 1 || open[0].SubjectPCI != "PCI-open" || open[0].CorrelationID != "corr-open" || open[0].RequesterHolder != "provider-a" {
+		t.Fatalf("open pends %+v, want only PCI-open/corr-open", open)
+	}
+}
