@@ -367,10 +367,6 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 		writeJSON(w, status, map[string]string{"error": msg})
 		return false
 	}
-	updateCorr := g.cfg.CorrelationGen()
-	ctx = withFindingContext(ctx, findingContext{
-		LegType: "pas-claim-update", CorrelationID: updateCorr, Seam: "originate", Whose: "own",
-	})
 	// UC-06: diagnosticReport=nil; the amended QR is the supplemental data.
 	// Resume RE-RUNS arm selection with the TARGET FIXED to the pin
 	// (selectResumeRoute): the amendment must answer
@@ -401,45 +397,54 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 		writeJSON(w, pstatus, map[string]string{"error": pmsg})
 		return false
 	}
-	updateBundle, err := buildAuthoredPASUpdate(route.BuildLine, shnsdk.ConformantClaimUpdateInputs{
-		QR: pasQR, SR: st.srJSON, Provider: pasProviderJSON, Coverage: st.coverage, Insurer: st.insurer, PatientRef: st.patientRef, CoverageRef: st.coverageRef, MemberID: st.member, MemberIDSystem: pasMemberSystem,
-		Provenance: provJSON, DiagnosticReport: nil, Corr: updateCorr, OriginalCorr: st.pasCorr, Created: g.cfg.Clock(),
-		ContainedInsurer: relaysReferencePayerBytes(g.cfg.OriginationProfile),
-		AbsoluteRefs:     relaysReferencePayerBytes(g.cfg.OriginationProfile),
-		PayerOrgEntry:    relaysReferencePayerBytes(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
-		Payer:            st.payer,
+	updateCorr, updateBundle, updateResp, handled, err := g.sendAmendment(st.recipient, func(updateCorr string) ([]byte, []byte, bool, error) {
+		ctx := withFindingContext(ctx, findingContext{
+			LegType: "pas-claim-update", CorrelationID: updateCorr, Seam: "originate", Whose: "own",
+		})
+		updateBundle, err := buildAuthoredPASUpdate(route.BuildLine, shnsdk.ConformantClaimUpdateInputs{
+			QR: pasQR, SR: st.srJSON, Provider: pasProviderJSON, Coverage: st.coverage, Insurer: st.insurer, PatientRef: st.patientRef, CoverageRef: st.coverageRef, MemberID: st.member, MemberIDSystem: pasMemberSystem,
+			Provenance: provJSON, DiagnosticReport: nil, Corr: updateCorr, OriginalCorr: st.pasCorr, Created: g.cfg.Clock(),
+			ContainedInsurer: relaysReferencePayerBytes(g.cfg.OriginationProfile),
+			AbsoluteRefs:     relaysReferencePayerBytes(g.cfg.OriginationProfile),
+			PayerOrgEntry:    relaysReferencePayerBytes(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
+			Payer:            st.payer,
+		})
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build update bundle failed"})
+			return nil, nil, true, nil
+		}
+		// Carry-intact guard: BEFORE the chain runs (pasStep2122Up's restore cannot itself tell
+		// "never carried" from "carried, then stripped"), refuse a payload that no
+		// longer bears content THIS pend's own loss record declares carried.
+		pasUpdateID := ExchangeIdentity{CorrelationID: updateCorr, LegType: "pas-claim-update", Counterpart: st.recipient}
+		if !g.guardPendCarry(w, st, route, updateBundle, pasUpdateID) {
+			return nil, nil, true, nil
+		}
+		updateBundle, err = g.completeAuthoredPASRequest(ctx, updateBundle, pasQR, st.srJSON, st.coverageRef, relaysReferencePayerBytes(g.cfg.OriginationProfile))
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "PAS evidence linkage failed"})
+			return nil, nil, true, nil
+		}
+		updateBundle, _, err = g.egressAdapt(route, updateBundle, pasUpdateID)
+		if err != nil {
+			writeJSON(w, adaptFailureStatus(err), map[string]string{"error": err.Error()})
+			return nil, nil, true, nil
+		}
+		if status, msg := g.validatePASAttachments(ctx, updateBundle, st.pasDTRLine, true); status != 0 {
+			writeJSON(w, status, map[string]string{"error": msg})
+			return nil, nil, true, nil
+		}
+		if status, msg := g.validateFHIREgressOrBridged(ctx, updateBundle, "pa.pas", targetLine, len(route.Chain) > 0); status != 0 {
+			writeJSON(w, status, map[string]string{"error": msg})
+			return nil, nil, true, nil
+		}
+		updateResp, err := g.OriginateLeg(ctx, r, st.recipient, "pas-claim-update", st.pci, updateCorr, "",
+			Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Payload: sealRequest(relay.BuilderSDKPASUpdate, updateBundle, "application/fhir+json")})
+		return updateBundle, updateResp, false, err
 	})
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build update bundle failed"})
+	if handled {
 		return false
 	}
-	// Carry-intact guard: BEFORE the chain runs (pasStep2122Up's restore cannot itself tell
-	// "never carried" from "carried, then stripped"), refuse a payload that no
-	// longer bears content THIS pend's own loss record declares carried.
-	pasUpdateID := ExchangeIdentity{CorrelationID: updateCorr, LegType: "pas-claim-update", Counterpart: st.recipient}
-	if !g.guardPendCarry(w, st, route, updateBundle, pasUpdateID) {
-		return false
-	}
-	updateBundle, err = g.completeAuthoredPASRequest(ctx, updateBundle, pasQR, st.srJSON, st.coverageRef, relaysReferencePayerBytes(g.cfg.OriginationProfile))
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "PAS evidence linkage failed"})
-		return false
-	}
-	updateBundle, _, err = g.egressAdapt(route, updateBundle, pasUpdateID)
-	if err != nil {
-		writeJSON(w, adaptFailureStatus(err), map[string]string{"error": err.Error()})
-		return false
-	}
-	if status, msg := g.validatePASAttachments(ctx, updateBundle, st.pasDTRLine, true); status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
-		return false
-	}
-	if status, msg := g.validateFHIREgressOrBridged(ctx, updateBundle, "pa.pas", targetLine, len(route.Chain) > 0); status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
-		return false
-	}
-	updateResp, err := g.OriginateLeg(ctx, r, st.recipient, "pas-claim-update", st.pci, updateCorr, "",
-		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Payload: sealRequest(relay.BuilderSDKPASUpdate, updateBundle, "application/fhir+json")})
 	if err != nil {
 		if g.relayOriginationError(w, err) {
 			return false
@@ -621,10 +626,6 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 		writeJSON(w, status, map[string]string{"error": msg})
 		return false
 	}
-	updateCorr := g.cfg.CorrelationGen()
-	ctx = withFindingContext(ctx, findingContext{
-		LegType: "pas-claim-update", CorrelationID: updateCorr, Seam: "originate", Whose: "own",
-	})
 	// Resume RE-RUNS arm selection with the TARGET FIXED to the pin
 	// (selectResumeRoute): the amendment must answer
 	// the pend it references (the pended-pin rule), but the declared/lane
@@ -654,44 +655,53 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 		writeJSON(w, pstatus, map[string]string{"error": pmsg})
 		return false
 	}
-	updateBundle, err := buildAuthoredPASUpdate(route.BuildLine, shnsdk.ConformantClaimUpdateInputs{
-		QR: pasQR, SR: st.srJSON, Provider: pasProviderJSON, Coverage: st.coverage, Insurer: st.insurer, PatientRef: st.patientRef, CoverageRef: st.coverageRef, MemberID: st.member, MemberIDSystem: pasMemberSystem,
-		Provenance: provJSON, DiagnosticReport: nil, Corr: updateCorr, OriginalCorr: st.pasCorr, Created: g.cfg.Clock(),
-		ContainedInsurer: relaysReferencePayerBytes(g.cfg.OriginationProfile),
-		AbsoluteRefs:     relaysReferencePayerBytes(g.cfg.OriginationProfile),
-		PayerOrgEntry:    relaysReferencePayerBytes(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
-		Payer:            st.payer,
+	updateCorr, updateBundle, updateResp, handled, err := g.sendAmendment(st.recipient, func(updateCorr string) ([]byte, []byte, bool, error) {
+		ctx := withFindingContext(ctx, findingContext{
+			LegType: "pas-claim-update", CorrelationID: updateCorr, Seam: "originate", Whose: "own",
+		})
+		updateBundle, err := buildAuthoredPASUpdate(route.BuildLine, shnsdk.ConformantClaimUpdateInputs{
+			QR: pasQR, SR: st.srJSON, Provider: pasProviderJSON, Coverage: st.coverage, Insurer: st.insurer, PatientRef: st.patientRef, CoverageRef: st.coverageRef, MemberID: st.member, MemberIDSystem: pasMemberSystem,
+			Provenance: provJSON, DiagnosticReport: nil, Corr: updateCorr, OriginalCorr: st.pasCorr, Created: g.cfg.Clock(),
+			ContainedInsurer: relaysReferencePayerBytes(g.cfg.OriginationProfile),
+			AbsoluteRefs:     relaysReferencePayerBytes(g.cfg.OriginationProfile),
+			PayerOrgEntry:    relaysReferencePayerBytes(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
+			Payer:            st.payer,
+		})
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build update bundle failed"})
+			return nil, nil, true, nil
+		}
+		// The same pre-chain carry-intact guard completeClinician's sibling
+		// leg runs — both resume sites, or the guard is only half wired.
+		pasUpdateID := ExchangeIdentity{CorrelationID: updateCorr, LegType: "pas-claim-update", Counterpart: st.recipient}
+		if !g.guardPendCarry(w, st, route, updateBundle, pasUpdateID) {
+			return nil, nil, true, nil
+		}
+		updateBundle, err = g.completeAuthoredPASRequest(ctx, updateBundle, pasQR, st.srJSON, st.coverageRef, relaysReferencePayerBytes(g.cfg.OriginationProfile))
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "PAS evidence linkage failed"})
+			return nil, nil, true, nil
+		}
+		updateBundle, _, err = g.egressAdapt(route, updateBundle, pasUpdateID)
+		if err != nil {
+			writeJSON(w, adaptFailureStatus(err), map[string]string{"error": err.Error()})
+			return nil, nil, true, nil
+		}
+		if status, msg := g.validatePASAttachments(ctx, updateBundle, st.pasDTRLine, true); status != 0 {
+			writeJSON(w, status, map[string]string{"error": msg})
+			return nil, nil, true, nil
+		}
+		if status, msg := g.validateFHIREgressOrBridged(ctx, updateBundle, "pa.pas", targetLine, len(route.Chain) > 0); status != 0 {
+			writeJSON(w, status, map[string]string{"error": msg})
+			return nil, nil, true, nil
+		}
+		updateResp, err := g.OriginateLeg(ctx, r, st.recipient, "pas-claim-update", st.pci, updateCorr, "",
+			Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Payload: sealRequest(relay.BuilderSDKPASUpdate, updateBundle, "application/fhir+json")})
+		return updateBundle, updateResp, false, err
 	})
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build update bundle failed"})
+	if handled {
 		return false
 	}
-	// The same pre-chain carry-intact guard completeClinician's sibling
-	// leg runs — both resume sites, or the guard is only half wired.
-	pasUpdateID := ExchangeIdentity{CorrelationID: updateCorr, LegType: "pas-claim-update", Counterpart: st.recipient}
-	if !g.guardPendCarry(w, st, route, updateBundle, pasUpdateID) {
-		return false
-	}
-	updateBundle, err = g.completeAuthoredPASRequest(ctx, updateBundle, pasQR, st.srJSON, st.coverageRef, relaysReferencePayerBytes(g.cfg.OriginationProfile))
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "PAS evidence linkage failed"})
-		return false
-	}
-	updateBundle, _, err = g.egressAdapt(route, updateBundle, pasUpdateID)
-	if err != nil {
-		writeJSON(w, adaptFailureStatus(err), map[string]string{"error": err.Error()})
-		return false
-	}
-	if status, msg := g.validatePASAttachments(ctx, updateBundle, st.pasDTRLine, true); status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
-		return false
-	}
-	if status, msg := g.validateFHIREgressOrBridged(ctx, updateBundle, "pa.pas", targetLine, len(route.Chain) > 0); status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
-		return false
-	}
-	updateResp, err := g.OriginateLeg(ctx, r, st.recipient, "pas-claim-update", st.pci, updateCorr, "",
-		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Payload: sealRequest(relay.BuilderSDKPASUpdate, updateBundle, "application/fhir+json")})
 	if err != nil {
 		if g.relayOriginationError(w, err) {
 			return false

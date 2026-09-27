@@ -25,7 +25,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/SmartHealthNetwork/shn-gateway/diagnostics"
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
@@ -249,7 +248,7 @@ type Config struct {
 	Observer func(ObserverEvent)
 	// Diagnostic is an optional prompt, concurrency-safe, nonblocking sink.
 	// It must reserve bounded memory before retaining event bytes. Nil disables it.
-	Diagnostic func(diagnostics.Event) bool
+	Diagnostic DiagnosticSink
 	// DiagnosticTraceKey verifies optional private ingress attribution, never authority.
 	DiagnosticTraceKey []byte
 	// LegMetric, when non-nil, receives one outcome string per origination-leg
@@ -1223,10 +1222,7 @@ func (g *Gateway) postEnvelope(ctx context.Context, client *http.Client, url str
 		return shnsdk.Envelope{}, &answerLostError{cause: "the Hub's answer could not be read"}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		if g.cfg.Diagnostic != nil {
-			headers, complete := diagnosticHeaders(resp.Header)
-			g.diagnosticEvent(ctx, diagnostics.Event{Kind: "leg.failed", Status: resp.StatusCode, Body: respBody, BodyComplete: len(respBody) < shnsdk.MaxResponseBytes, Headers: headers, HeadersComplete: complete, Detail: "Hub response"})
-		}
+		g.diagnosticHubRefusal(ctx, resp, respBody)
 		return shnsdk.Envelope{}, hubRefusal(resp.StatusCode, respBody, resp.Header.Get(HubDeliveredHeader))
 	}
 	env, err := shnsdk.DecodeEnvelope(respBody)
@@ -1449,7 +1445,7 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 	if leg, ok := ctx.Value(diagnosticLegKey{}).(*diagnosticLeg); ok {
 		leg.hash = sha256hex(env.Ciphertext)
 	}
-	g.diagnostic(diagnostics.Event{Kind: "leg.sealed", CallID: diagnostics.CallID(ctx), RequestFingerprint: diagnostics.IngressFingerprint(ctx), RequestCiphertextHash: sha256hex(env.Ciphertext), Sender: g.cfg.HolderID, Recipient: recipient, CorrelationID: correlationID, LegType: txType, ContractLine: content.ProfileID, Body: payload, BodyComplete: true})
+	g.diagnosticSealed(ctx, env, recipient, correlationID, txType, content.ProfileID, payload)
 	tok, err := g.authorize(r, reqFrame, op, pci, correlationID, custodian, sha256hex(env.Ciphertext))
 	if err != nil {
 		// Preserve a genuine authority DENIAL as the typed sentinel (UC-05's
@@ -1677,8 +1673,25 @@ func (g *Gateway) OriginateLeg(ctx context.Context, r *http.Request, recipient, 
 	if target, ok := ctx.Value(certificationTargetKey{}).(*string); ok {
 		*target = content.ProfileID
 	}
-	return g.roundTrip(ctx, r, recipient, spec.ReqFrame, spec.RespFrame, spec.Op, spec.RespOp, legType, spec.Scope, pci, correlationID, custodian, content)
+	answer, err := g.roundTrip(ctx, r, recipient, spec.ReqFrame, spec.RespFrame, spec.Op, spec.RespOp, legType, spec.Scope, pci, correlationID, custodian, content)
+	if err != nil || content.Carried || !originatedCRDLegs[legType] {
+		return answer, err
+	}
+	// A CRD answer to a leg this gateway originates is certified against the CDS
+	// Hooks response rules at the routed line and this gateway's own level, as a
+	// relayed one is (crdAnswerOutcome), before anything reads it. A carried leg
+	// (the Da Vinci ingress) certifies the answer itself, so it is not checked
+	// twice.
+	actx := withFindingContext(ctx, findingContext{LegType: legType, CorrelationID: correlationID, Seam: "originate", Whose: "peer"})
+	if refused := certifyCDSHooksAnswer(actx, g.policy(), g.emitFinding, answer, shnsdk.LineOf(content.ProfileID), "peer"); refused.Status != 0 {
+		return nil, errors.New(refused.Message)
+	}
+	return answer, nil
 }
+
+// originatedCRDLegs are the CRD legs whose originated answer OriginateLeg
+// certifies.
+var originatedCRDLegs = map[string]bool{"crd-order-select": true, "crd-order-dispatch": true}
 
 // validatorForLine resolves the $validate lane for a contract LINE ("2.0", "2.1",
 // "2.2"; "" = no line in play — a version-neutral leg or a non-contract resource).

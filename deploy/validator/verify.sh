@@ -36,10 +36,23 @@ RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/validator-verify.XXXXXXXX")"
 PREFIX="validator-verify-$(basename "${RUN_DIR}" | tr '[:upper:].' '[:lower:]-')"
 NET="${PREFIX}-net"
 OWNED=()
+BACKGROUND=()
 NETWORK_CREATED=0
 
 cleanup_all() {
   local ec=$?
+  # A lane's first use still running in the background stops before its
+  # container is removed under it, and a log no await printed (a cancel, a
+  # timeout, a foreground failure) is printed before the run directory goes.
+  if [ "${#BACKGROUND[@]}" -gt 0 ]; then
+    for p in "${BACKGROUND[@]}"; do kill "${p}" >/dev/null 2>&1 || true; done
+    wait >/dev/null 2>&1 || true
+  fi
+  for log in "${RUN_DIR}"/first-use-*.log; do
+    [ -e "${log}" ] && [ ! -e "${log%.log}.printed" ] || continue
+    echo "--- $(basename "${log}" .log) (interrupted) ---"
+    cat "${log}" || true
+  done
   if [ "${#OWNED[@]}" -gt 0 ]; then
     if [ "${ec}" -ne 0 ]; then
       for c in "${OWNED[@]}"; do docker logs "${c}" 2>&1 | tail -100 || true; done
@@ -120,20 +133,26 @@ verify_verdict_window() {
   done
 }
 
-# probe_line LINE IMAGE CONTAINER — boots IMAGE on the isolated network and
-# proves its Da Vinci profiles resolve, using that line's own probe fixtures
-# (testdata/<line>/ for the PAS/DTR pair; the top-level testdata/ PDex+CDex
-# probes are line-neutral and reused for every line — see testdata/README.md).
-probe_line() {
-  local line="$1" image="$2" container="$3"
-  local base="http://${container}:8080/fhir"
+# Lanes. The lines are pipelined: line N+1 boots while line
+# N runs its verdict window, so at most two lanes run at once. A lane's first
+# use (readiness, then the verdict window from the moment it is healthy) runs
+# as soon as that lane is up, as a background job with its own log; its closing
+# checks run in the foreground once the lane before it has finished. Every
+# per-lane file carries the line, so the two lanes never share one.
 
+# probe runs a curl helper ON the isolated network (the validator publishes no host port).
+probe() { docker run --rm --network "${NET}" -v "${DIR}/testdata:/golden:ro" "${CURL}" --connect-timeout 4 --max-time 30 "$@"; }
+
+# start_line LINE IMAGE CONTAINER — creates and starts IMAGE on the isolated
+# network in this shell (so the EXIT trap owns it), and starts its boot clock.
+start_line() {
+  local line="$1" image="$2" container="$3"
   local arch
   arch="$(docker image inspect -f '{{.Architecture}}' "${image}")"
-  (cd "${DIR}" && GOWORK=off CGO_ENABLED=0 GOOS=linux GOARCH="${arch}" go build -trimpath -o "${RUN_DIR}/runtime-probe" ./testdata/process-child)
-  chmod 755 "${RUN_DIR}" "${RUN_DIR}/runtime-probe"
+  (cd "${DIR}" && GOWORK=off CGO_ENABLED=0 GOOS=linux GOARCH="${arch}" go build -trimpath -o "${RUN_DIR}/runtime-probe-${line}" ./testdata/process-child)
+  chmod 755 "${RUN_DIR}" "${RUN_DIR}/runtime-probe-${line}"
   PYTHONDONTWRITEBYTECODE=1 python3 "${DIR}/test_verify_admission.py"
-  local create_args=(--name "${container}" --network "${NET}" -v "${RUN_DIR}/runtime-probe:/runtime-probe:ro")
+  local create_args=(--name "${container}" --network "${NET}" -v "${RUN_DIR}/runtime-probe-${line}:/runtime-probe:ro")
   if [ "${line}" = 2.1 ]; then
     # A real Spring file-source conflict must lose to the owned CLI suffix.
     # This is explicit verifier configuration, not a measured production sample.
@@ -141,13 +160,21 @@ probe_line() {
     chmod 644 "${RUN_DIR}/binding-conflict.properties"
     create_args+=(-v "${RUN_DIR}/binding-conflict.properties:/binding-conflict.properties:ro" -e SPRING_CONFIG_ADDITIONAL_LOCATION=file:/binding-conflict.properties)
   fi
-  local boot=${SECONDS}
+  echo "${SECONDS}" >"${RUN_DIR}/boot-${line}"
   docker create "${create_args[@]}" "${image}" >/dev/null
   OWNED+=("${container}")
   docker start "${container}" >/dev/null
+}
 
-  # probe runs a curl helper ON the isolated network (the validator publishes no host port).
-  probe() { docker run --rm --network "${NET}" -v "${DIR}/testdata:/golden:ro" "${CURL}" --connect-timeout 4 --max-time 30 "$@"; }
+# first_use LINE CONTAINER — readiness inside the startup budget, the earliest
+# admission samples, then the strict verdict window from the moment the lane is
+# healthy. It marks the window's start (window-LINE), which is when the next
+# lane may boot.
+first_use() {
+  local line="$1" container="$2"
+  local base="http://${container}:8080/fhir"
+  local boot
+  boot="$(cat "${RUN_DIR}/boot-${line}")"
 
   echo "waiting for ${container} readiness (line ${line}; ISOLATED; PID-1 warm-up budget 600s)..."
   local ready=0
@@ -178,17 +205,26 @@ probe_line() {
   # This earliest ordinary sample precedes all verifier cache seeding and must
   # retain the historical localhost worker authority throughout its full JSON.
   python3 "${DIR}/verify_admission.py" peer "${private_status}" "${RUN_DIR}/private-${line}.stderr" "${RUN_DIR}/peer-public-${line}.json"
+  : >"${RUN_DIR}/window-${line}"
   verify_verdict_window "${container}" "${line}" "${health_at}"
-  docker cp "${container}:/tmp/shn-validator-warm" "${RUN_DIR}/warm.json"
-  python3 "${DIR}/verify-state.py" ready "${line}" <"${RUN_DIR}/warm.json"
-  docker logs "${container}" >"${RUN_DIR}/warm-before.log" 2>&1
-  python3 "${DIR}/verify-state.py" logs "${line}" <"${RUN_DIR}/warm-before.log"
+}
+
+# closing_checks LINE CONTAINER — everything after the window: the warm-up and
+# composition records, the consumers' first-call budget, the resolution
+# witnesses, the admission samples and the logs; then the lane is removed.
+closing_checks() {
+  local line="$1" container="$2"
+  local base="http://${container}:8080/fhir"
+  docker cp "${container}:/tmp/shn-validator-warm" "${RUN_DIR}/warm-${line}.json"
+  python3 "${DIR}/verify-state.py" ready "${line}" <"${RUN_DIR}/warm-${line}.json"
+  docker logs "${container}" >"${RUN_DIR}/warm-before-${line}.log" 2>&1
+  python3 "${DIR}/verify-state.py" logs "${line}" <"${RUN_DIR}/warm-before-${line}.log"
   # The composition's cold cost is a declared number: the package cache indexes
   # exactly the StructureDefinitions the manifest declares for this line
   # (indexed-counts.json, generated from tools/contracts/manifest.json). A
   # different count is a composition change that must re-measure and re-declare.
   local indexed declared
-  indexed=$(grep -c 'Indexing StructureDefinition' "${RUN_DIR}/warm-before.log" || true)
+  indexed=$(grep -c 'Indexing StructureDefinition' "${RUN_DIR}/warm-before-${line}.log" || true)
   declared=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["lines"][sys.argv[2]])' "${DIR}/indexed-counts.json" "${line}")
   if [ "${indexed}" != "${declared}" ]; then
     echo "FAIL: line ${line}: the lane indexed ${indexed} StructureDefinitions at boot, the manifest declares ${declared} — a composition change re-measures and re-declares its cold cost (tools/contracts/manifest.json lines.${line}.indexedStructureDefinitions)"
@@ -297,38 +333,96 @@ print("OK: cold-profile Patient validate call answered")
   probe -fsS -D - -H 'Host: original.example:18089' -H 'Content-Type: application/fhir+json' --data-binary '{"resourceType":"Patient"}' "${base}/Patient" >"${RUN_DIR}/location-${line}.response"
   python3 "${DIR}/verify_admission.py" location "${RUN_DIR}/location-${line}.response"
   echo "actual public Host/base, forwarded-header equivalence, Location and peer isolation verified line=${line}"
-  docker logs "${container}" >"${RUN_DIR}/warm-after.log" 2>&1
-  python3 "${DIR}/verify-state.py" logs "${line}" <"${RUN_DIR}/warm-after.log"
+  docker logs "${container}" >"${RUN_DIR}/warm-after-${line}.log" 2>&1
+  python3 "${DIR}/verify-state.py" logs "${line}" <"${RUN_DIR}/warm-after-${line}.log"
   # Every "Found multiple package versions" HAPI logged must name a canonical the
   # closure inventory already records as carried by two loaded packages
   # (known-collisions.json, generated from tools/contracts/closure/<line>.json);
   # anything else is the nondeterministic resolution the closure gate excludes.
-  python3 "${DIR}/verify-collisions.py" "${line}" <"${RUN_DIR}/warm-after.log"
-  if grep -Ei 'HikariPool.*(timeout|timed out|exhaust)|OutOfMemoryError|Java heap space' "${RUN_DIR}/warm-after.log"; then
+  python3 "${DIR}/verify-collisions.py" "${line}" <"${RUN_DIR}/warm-after-${line}.log"
+  if grep -Ei 'HikariPool.*(timeout|timed out|exhaust)|OutOfMemoryError|Java heap space' "${RUN_DIR}/warm-after-${line}.log"; then
     echo "FAIL: line ${line}: pool or heap exhaustion"; exit 1
   fi
   echo "line ${line}: VALIDATOR OFFLINE VERIFY OK"
   docker rm -f "${container}" >/dev/null 2>&1 || true
 }
 
+# first_use_in_background LINE CONTAINER — runs first_use as a background job
+# logging to first-use-LINE.log, and records its pid in LANE_PID.
+first_use_in_background() {
+  local line="$1" container="$2"
+  (first_use "${line}" "${container}") >"${RUN_DIR}/first-use-${line}.log" 2>&1 &
+  LANE_PID=$!
+  BACKGROUND+=("${LANE_PID}")
+}
+
+# await_window_start LINE PID — returns once line LINE's verdict window has
+# started, or its first use has ended (a failure await_first_use reports).
+await_window_start() {
+  local line="$1" pid="$2"
+  while [ ! -e "${RUN_DIR}/window-${line}" ] && kill -0 "${pid}" 2>/dev/null; do sleep 1; done
+}
+
+# await_first_use LINE PID — waits for line LINE's first use, prints its log,
+# and fails the gate with its exit status if it failed.
+await_first_use() {
+  local line="$1" pid="$2" ec=0 kept=() p
+  wait "${pid}" || ec=$?
+  # A reaped pid leaves the EXIT trap's list: it may be reused.
+  for p in "${BACKGROUND[@]}"; do [ "${p}" = "${pid}" ] || kept+=("${p}"); done
+  BACKGROUND=("${kept[@]+"${kept[@]}"}")
+  cat "${RUN_DIR}/first-use-${line}.log"
+  : >"${RUN_DIR}/first-use-${line}.printed"
+  if [ "${ec}" -ne 0 ]; then
+    echo "FAIL: line ${line}: readiness or the strict verdict window failed (exit ${ec})"
+    exit "${ec}"
+  fi
+}
+
+# run_lanes LINE... — the pipeline. Line N+1 starts once line N's verdict
+# window has started; line N's closing checks run once its first use has
+# passed, and before line N+2 starts, so at most two lanes run at once.
+run_lanes() {
+  local lines=("$@") pids=() i line next
+  start_line "${lines[0]}" "${PREFIX}:${lines[0]}" "${PREFIX}-${lines[0]}"
+  first_use_in_background "${lines[0]}" "${PREFIX}-${lines[0]}"
+  pids+=("${LANE_PID}")
+  for i in "${!lines[@]}"; do
+    line="${lines[$i]}"
+    await_window_start "${line}" "${pids[$i]}"
+    # A lane that ended before its window failed: report it before booting another.
+    if [ "$((i + 1))" -lt "${#lines[@]}" ] && [ -e "${RUN_DIR}/window-${line}" ]; then
+      next="${lines[$((i + 1))]}"
+      start_line "${next}" "${PREFIX}:${next}" "${PREFIX}-${next}"
+      first_use_in_background "${next}" "${PREFIX}-${next}"
+      pids+=("${LANE_PID}")
+    fi
+    await_first_use "${line}" "${pids[$i]}"
+    closing_checks "${line}" "${PREFIX}-${line}"
+  done
+}
+
+# Every image is built first (the 2.1 and 2.2 builds reuse 2.0's layers, so they
+# take seconds), then the lanes run pipelined.
 # 2.0: unchanged default — build + probe, same bar as before the matrix.
 build_line 2.0 "${PREFIX}:2.0"
 bash "${DIR}/verify-process.sh" "${PREFIX}:2.0"
-probe_line 2.0 "${PREFIX}:2.0" "${PREFIX}-2.0"
-
 # 2.1: build asserted (proves the line's package set is baked correctly); probe
 # SKIPPED by default to keep this gate's wall-time bounded (three
 # offline-IG-indexing boots is the expensive part, not the build). Set
 # SHN_VALIDATOR_VERIFY_PROBE_2_1=1 to also probe it locally.
 build_line 2.1 "${PREFIX}:2.1"
+# 2.2: the RI-facing line — build + probe, same bar as 2.0.
+build_line 2.2 "${PREFIX}:2.2"
+
+LINES=(2.0)
 if [ "${SHN_VALIDATOR_VERIFY_PROBE_2_1:-0}" = "1" ]; then
-  probe_line 2.1 "${PREFIX}:2.1" "${PREFIX}-2.1"
+  LINES+=(2.1)
 else
   echo "line 2.1: build OK, probe SKIPPED (set SHN_VALIDATOR_VERIFY_PROBE_2_1=1 to probe locally)"
 fi
+LINES+=(2.2)
 
-# 2.2: the RI-facing line — build + probe, same bar as 2.0.
-build_line 2.2 "${PREFIX}:2.2"
-probe_line 2.2 "${PREFIX}:2.2" "${PREFIX}-2.2"
+run_lanes "${LINES[@]}"
 
 echo "VALIDATOR MATRIX OFFLINE VERIFY OK (2.0 + 2.2 probed; probe_2_1=${SHN_VALIDATOR_VERIFY_PROBE_2_1:-0}; strict_verdicts_through=100s; images=${PREFIX}:2.0|2.1|2.2)"

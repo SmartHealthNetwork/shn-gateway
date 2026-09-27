@@ -17,7 +17,7 @@ import (
 func TestSupervisorRequiresWorkerResultAndCurrentCompleteMarker(t *testing.T) {
 	for _, mode := range []string{"ready", "worker-error", "failed", "stale", "incomplete", "child-exit", "shutdown", "deadline"} {
 		t.Run(mode, func(t *testing.T) {
-			lane := newFakeLane(t)
+			lane := newFakeLane(t, "2.2")
 			cfg := supervisorTestConfig(t, lane.base())
 			cfg.startupBudget = 3 * time.Second
 			if mode == "deadline" {
@@ -138,7 +138,8 @@ func TestSupervisorRequiresWorkerResultAndCurrentCompleteMarker(t *testing.T) {
 }
 
 func TestSupervisorPublicBindFailurePrecedesChildLaunch(t *testing.T) {
-	lane := newFakeLane(t)
+	lane := newFakeLane(t, "2.2")
+	lane.partial() // nothing is asked
 	cfg := supervisorTestConfig(t, lane.base())
 	cfg.public = strings.TrimPrefix(lane.srv.URL, "http://")
 	cmd, _ := childCommand(t, "exit")
@@ -148,7 +149,10 @@ func TestSupervisorPublicBindFailurePrecedesChildLaunch(t *testing.T) {
 }
 
 func TestAdmissionLifetimeSurvivesSuccessfulStartupDeadline(t *testing.T) {
-	lane := newFakeLane(t)
+	// The whole corpus must succeed inside the budget: admission opens only
+	// after a complete warm-up, so a partial one fails this test regardless of
+	// the replay. The replayed warm-up takes about 0.13 s under -race.
+	lane := newFakeLane(t, "2.2")
 	cfg := supervisorTestConfig(t, lane.base())
 	cfg.startupBudget = 2 * time.Second
 	ctx, cancel := context.WithCancel(context.Background())
@@ -185,7 +189,7 @@ func TestAdmissionLifetimeSurvivesSuccessfulStartupDeadline(t *testing.T) {
 func TestSupervisorReservedListenerFailure(t *testing.T) {
 	for _, mode := range []string{"held-worker-result", "admitted-active-connection"} {
 		t.Run(mode, func(t *testing.T) {
-			lane := newFakeLane(t)
+			lane := newFakeLane(t, "2.2")
 			cfg := supervisorTestConfig(t, lane.base())
 			cfg.startupBudget = 10 * time.Second
 			ctx, cancel := context.WithCancel(context.Background())

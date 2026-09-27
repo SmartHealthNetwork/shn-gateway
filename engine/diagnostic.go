@@ -5,7 +5,13 @@ import (
 	"net/http"
 
 	"github.com/SmartHealthNetwork/shn-gateway/diagnostics"
+	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
+
+// DiagnosticSink receives diagnostic events (Config.Diagnostic,
+// WithNativeDiagnostic). The engine's uses of the diagnostics package live in
+// this file and observer.go, the capture call sites, so only they import it.
+type DiagnosticSink = func(diagnostics.Event) bool
 
 // diagnostic passes read-only bytes to the configured bounded sink. Sink faults
 // cannot escape into participant exchange handling.
@@ -34,9 +40,29 @@ func (g *Gateway) diagnosticEvent(ctx context.Context, e diagnostics.Event) {
 	g.diagnostic(e)
 }
 
+// diagnosticHubRefusal records the Hub's non-2xx answer to an origination leg.
+func (g *Gateway) diagnosticHubRefusal(ctx context.Context, resp *http.Response, respBody []byte) {
+	if g.cfg.Diagnostic == nil {
+		return
+	}
+	headers, complete := diagnosticHeaders(resp.Header)
+	g.diagnosticEvent(ctx, diagnostics.Event{Kind: "leg.failed", Status: resp.StatusCode, Body: respBody, BodyComplete: len(respBody) < shnsdk.MaxResponseBytes, Headers: headers, HeadersComplete: complete, Detail: "Hub response"})
+}
+
+// diagnosticSealed records an origination leg's payload as sealed for recipient.
+func (g *Gateway) diagnosticSealed(ctx context.Context, env shnsdk.Envelope, recipient, correlationID, txType, contractLine string, payload []byte) {
+	g.diagnostic(diagnostics.Event{Kind: "leg.sealed", CallID: diagnostics.CallID(ctx), RequestFingerprint: diagnostics.IngressFingerprint(ctx), RequestCiphertextHash: sha256hex(env.Ciphertext), Sender: g.cfg.HolderID, Recipient: recipient, CorrelationID: correlationID, LegType: txType, ContractLine: contractLine, Body: payload, BodyComplete: true})
+}
+
+// withDiagnosticIdentity attributes r's diagnostics to a verified inbound
+// envelope.
+func withDiagnosticIdentity(r *http.Request, env shnsdk.Envelope) *http.Request {
+	return r.WithContext(diagnostics.WithRequestIdentity(r.Context(), sha256hex(env.Ciphertext), env.Metadata.Sender, env.Metadata.Recipient, env.Metadata.CorrelationID))
+}
+
 // WithNativeDiagnostic observes native boundary stages. A nil sink disables it.
 // Sinks must be concurrency-safe and reserve bounded memory before retaining bytes.
-func WithNativeDiagnostic(sink func(diagnostics.Event) bool) NativeOption {
+func WithNativeDiagnostic(sink DiagnosticSink) NativeOption {
 	return func(n *nativeResponder) { n.diagnostic = sink }
 }
 func (n *nativeResponder) emitDiagnostic(ctx context.Context, kind string, body []byte, status int, detail string, r *http.Request, headers http.Header) {

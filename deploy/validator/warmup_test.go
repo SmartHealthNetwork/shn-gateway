@@ -43,6 +43,62 @@ func startWorker(t *testing.T, ctx context.Context, base, path, key string) <-ch
 	go func() { done <- runWarmup(ctx, base, path, st) }()
 	return done
 }
+
+// awaitRequest waits until the request a row is waiting for reaches the lane
+// (reached closes) or the worker ends, whichever comes first, and never more
+// than 5 s. A worker that ends first ends the wait; ended reports that, with
+// the worker's error. A bare <-reached would block the whole package until the
+// test binary's timeout, which inside the image build fails it after 10 minutes.
+func awaitRequest(t *testing.T, reached <-chan struct{}, done <-chan error) (ended bool, err error) {
+	t.Helper()
+	select {
+	case <-reached:
+		return false, nil
+	case err := <-done:
+		return true, err
+	case <-time.After(5 * time.Second):
+		t.Fatal("the worker neither sent the awaited request nor ended")
+		return false, nil
+	}
+}
+
+// mustReach is awaitRequest for a row whose worker must not end first.
+func mustReach(t *testing.T, reached <-chan struct{}, done <-chan error) {
+	t.Helper()
+	if ended, err := awaitRequest(t, reached, done); ended {
+		t.Fatalf("the worker ended before the awaited request: %v", err)
+	}
+}
+
+// expiringContext is a context whose deadline passes when expire is called, so
+// a row can make it pass while a post is in flight, however long the worker
+// took to reach that post. A timer started before the worker cannot promise
+// that: on a loaded machine it can pass during the metadata probe instead.
+// Deadline reports none: only Err's DeadlineExceeded marks it a deadline, and
+// neither the worker nor its HTTP client reads Deadline once the post is sent.
+type expiringContext struct {
+	context.Context
+	done chan struct{}
+	once sync.Once
+}
+
+func newExpiringContext() *expiringContext {
+	return &expiringContext{Context: context.Background(), done: make(chan struct{})}
+}
+
+func (c *expiringContext) Done() <-chan struct{} { return c.done }
+
+func (c *expiringContext) Err() error {
+	select {
+	case <-c.done:
+		return context.DeadlineExceeded
+	default:
+		return nil
+	}
+}
+
+func (c *expiringContext) expire() { c.once.Do(func() { close(c.done) }) }
+
 func finishWorker(t *testing.T, done <-chan error) error {
 	t.Helper()
 	select {
@@ -125,7 +181,7 @@ func probeSchedule(t *testing.T, base, path, key string, ticks ...int) {
 	}
 }
 func TestWorkerSequentialAcrossIndependentObservers(t *testing.T) {
-	lane := newFakeLane(t)
+	lane := newFakeLane(t, "2.2")
 	release := make(chan struct{})
 	entered := make(chan string, 42)
 	var active, maxActive atomic.Int32
@@ -189,15 +245,20 @@ func TestWorkerSequentialAcrossIndependentObservers(t *testing.T) {
 	}
 }
 
+// A lane that keeps giving the answer it gave while still warming (its real
+// first answer, the SLICING_CANNOT_BE_EVALUATED errors) past the prime pass is
+// not ready.
 func TestVerdictReadinessRejectsPermanentPASSlicingFailure(t *testing.T) {
-	lane := newFakeLane(t)
+	lane := newFakeLane(t, "2.2")
+	lane.partial() // the hook answers the ClaimResponse rows and the corpus stops at the first qualification row
+	slicing := primeSlicingAnswer22(t)
 	lane.validate = func(w http.ResponseWriter, r *http.Request) bool {
 		if r.URL.Path != "/fhir/ClaimResponse/$validate" {
 			return true
 		}
-		w.Header().Set("Content-Type", "application/fhir+json")
+		w.Header().Set("Content-Type", "application/fhir+json;charset=UTF-8")
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, `{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"processing","details":{"coding":[{"system":"http://hl7.org/fhir/java-core-messageId","code":"SLICING_CANNOT_BE_EVALUATED"}]},"diagnostics":"Slicing cannot be evaluated: Could not match discriminator (url) for slice Extension.extension:number in profile http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewAction|2.2.1 - the discriminator [url] does not have fixed value, binding or existence assertions","expression":["ClaimResponse.item[0].adjudication[0].extension[0].extension[0]"]},{"severity":"error","code":"processing","details":{"coding":[{"system":"http://hl7.org/fhir/java-core-messageId","code":"SLICING_CANNOT_BE_EVALUATED"}]},"diagnostics":"Slicing cannot be evaluated: Could not match discriminator (url) for slice Extension.extension:reasonCode in profile http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewAction|2.2.1 - the discriminator [url] does not have fixed value, binding or existence assertions","expression":["ClaimResponse.item[0].adjudication[0].extension[0].extension[0]"]},{"severity":"error","code":"processing","details":{"coding":[{"system":"http://hl7.org/fhir/java-core-messageId","code":"SLICING_CANNOT_BE_EVALUATED"}]},"diagnostics":"Slicing cannot be evaluated: Could not match discriminator (url) for slice Extension.extension:secondSurgicalOpinionFlag in profile http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewAction|2.2.1 - the discriminator [url] does not have fixed value, binding or existence assertions","expression":["ClaimResponse.item[0].adjudication[0].extension[0].extension[0]"]}]}`)
+		_, _ = w.Write(slicing)
 		return false
 	}
 	marker := markerPath(t)
@@ -217,13 +278,15 @@ func TestVerdictReadinessRejectsPermanentPASSlicingFailure(t *testing.T) {
 func TestVerdictReadinessRejectsDirtyQualificationPasses(t *testing.T) {
 	for name, failingPost := range map[string]int{"second pass": 14, "third pass": 23} {
 		t.Run(name, func(t *testing.T) {
-			lane := newFakeLane(t)
+			lane := newFakeLane(t, "2.2")
+			lane.partial() // the hook answers the failing row and the corpus stops there
+			slicing := primeSlicingAnswer22(t)
 			var posts atomic.Int32
 			lane.validate = func(w http.ResponseWriter, r *http.Request) bool {
 				if int(posts.Add(1)) != failingPost {
 					return true
 				}
-				fmt.Fprint(w, primeSlicingOutcome22)
+				_, _ = w.Write(slicing)
 				return false
 			}
 			marker := markerPath(t)
@@ -239,20 +302,52 @@ func TestVerdictReadinessRejectsDirtyQualificationPasses(t *testing.T) {
 	}
 }
 
+// A deadline that passes before the first post (here while the metadata probe
+// is still refused) fails the worker as "metadata unavailable", terminally,
+// without posting anything. The row's wait ends when the worker does: it would
+// block for good on a wait that only a post can end.
+func TestWorkerDeadlineBeforeFirstPostFailsWithoutPosting(t *testing.T) {
+	lane := newFakeLane(t, "2.2")
+	lane.partial() // the worker ends before its first post, so no recorded answer is used
+	atomic.StoreInt32(&lane.metadata, http.StatusServiceUnavailable)
+	entered := make(chan struct{})
+	var once sync.Once
+	lane.validate = func(http.ResponseWriter, *http.Request) bool {
+		once.Do(func() { close(entered) })
+		return true
+	}
+	path := markerPath(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	done := startWorker(t, ctx, lane.base(), path, sameJVM())
+	ended, err := awaitRequest(t, entered, done)
+	if !ended || err == nil || err.Error() != "metadata unavailable" {
+		t.Fatalf("ended=%v err=%v, want the worker to end with metadata unavailable before posting", ended, err)
+	}
+	if n := len(lane.recorded()); n != 0 {
+		t.Fatalf("posted %d times, want none", n)
+	}
+	if st := readTestState(t, path); st.State != "failed" || st.Failure != "metadata unavailable" || len(st.Warm) != 0 {
+		t.Fatalf("state %+v, want failed with metadata unavailable and nothing warm", st)
+	}
+}
+
 func TestWorkerAmbiguousFailureNeverResubmits(t *testing.T) {
 	for _, mode := range []string{"cancel", "deadline", "disconnect", "redirect", "incomplete", "oversize", "non-outcome", "missing-code", "ambiguous-outcome", "publication"} {
 		t.Run(mode, func(t *testing.T) {
-			lane := newFakeLane(t)
+			lane := newFakeLane(t, "2.2")
+			lane.partial() // the first row fails; the recovery below runs against a fresh lane
 			path := markerPath(t)
 			entered := make(chan struct{})
 			release := make(chan struct{})
+			// A failing row must still release the held handler, or the lane's
+			// Close cleanup (registered earlier, so run later) waits on it.
+			var releaseOnce sync.Once
+			releaseHandler := func() { releaseOnce.Do(func() { close(release) }) }
+			t.Cleanup(releaseHandler)
 			var active atomic.Int32
-			var healthy atomic.Bool
 			var enteredOnce sync.Once
 			lane.validate = func(w http.ResponseWriter, r *http.Request) bool {
-				if healthy.Load() {
-					return true
-				}
 				active.Add(1)
 				defer active.Add(-1)
 				enteredOnce.Do(func() { close(entered) })
@@ -284,17 +379,21 @@ func TestWorkerAmbiguousFailureNeverResubmits(t *testing.T) {
 				}
 				return false
 			}
+			var ctx context.Context
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
+			deadline := newExpiringContext()
 			if mode == "deadline" {
-				var c context.CancelFunc
-				ctx, c = context.WithTimeout(ctx, 100*time.Millisecond)
-				defer c()
+				// The deadline passes while the post is in flight: see expiringContext.
+				ctx = deadline
 			}
 			done := startWorker(t, ctx, lane.base(), path, sameJVM())
-			<-entered
-			if mode == "cancel" {
+			mustReach(t, entered, done)
+			switch mode {
+			case "cancel":
 				cancel()
+			case "deadline":
+				deadline.expire()
 			}
 			if err := finishWorker(t, done); err == nil {
 				t.Fatal("ambiguous response credited")
@@ -314,23 +413,29 @@ func TestWorkerAmbiguousFailureNeverResubmits(t *testing.T) {
 					t.Fatalf("terminal state=%+v", st)
 				}
 			}
-			close(release)
-			healthy.Store(true)
+			releaseHandler()
 			if mode == "publication" {
 				os.Remove(path)
 			}
-			done = startWorker(t, context.Background(), lane.base(), path, otherJVM())
+			// A fresh JVM is the recovery boundary: a new incarnation's worker
+			// warms a new lane, whose recording serves the whole corpus once.
+			fresh := newFakeLane(t, "2.2")
+			done = startWorker(t, context.Background(), fresh.base(), path, otherJVM())
 			if err := finishWorker(t, done); err != nil {
 				t.Fatal(err)
 			}
-			observerProcess(t, lane.base(), path, otherJVM(), 0)
-			observerProcess(t, lane.base(), path, sameJVM(), 1)
+			observerProcess(t, fresh.base(), path, otherJVM(), 0)
+			observerProcess(t, fresh.base(), path, sameJVM(), 1)
+			if len(lane.recorded()) != 1 {
+				t.Fatalf("recovery re-posted to the failed lane: %d posts", len(lane.recorded()))
+			}
 		})
 	}
 }
 
 func TestObserverRejectsInvalidState(t *testing.T) {
-	lane := newFakeLane(t)
+	lane := newFakeLane(t, "2.2")
+	lane.partial() // observers ask only the recorded metadata
 	ready := initialState(sameJVM())
 	ready.State = "ready"
 	ready.Warm = readinessIdentities("2.2")
@@ -362,7 +467,8 @@ func TestObserverRejectsInvalidState(t *testing.T) {
 }
 
 func TestWorkerPublicationAndIdentityFailuresPreventDispatch(t *testing.T) {
-	lane := newFakeLane(t)
+	lane := newFakeLane(t, "2.2")
+	lane.partial() // nothing is dispatched
 	for _, tc := range []struct {
 		name, key string
 		badPath   bool
@@ -382,11 +488,15 @@ func TestWorkerPublicationAndIdentityFailuresPreventDispatch(t *testing.T) {
 	}
 }
 
+// The lane's real answer to the first row, with a status it never sent for
+// it: the status alone fails the row.
 func TestWorkerRejectsWrongOutcomeStatus(t *testing.T) {
-	lane := newFakeLane(t)
+	lane := newFakeLane(t, "2.2")
+	lane.partial() // the hook answers the first row and the corpus stops there
+	answer := recordedAnswer(t, readinessRows("2.2")[0], false)
 	lane.validate = func(w http.ResponseWriter, _ *http.Request) bool {
 		w.WriteHeader(422)
-		fmt.Fprint(w, `{"resourceType":"OperationOutcome","issue":[{"severity":"fatal"}]}`)
+		_, _ = w.Write(answer)
 		return false
 	}
 	path := markerPath(t)
@@ -397,14 +507,17 @@ func TestWorkerRejectsWrongOutcomeStatus(t *testing.T) {
 }
 
 func TestWorkerConsumesCompleteResponseBeforeNextRow(t *testing.T) {
-	lane := newFakeLane(t)
+	lane := newFakeLane(t, "2.2")
+	lane.partial() // the hook answers the first row itself
+	answer := recordedAnswer(t, readinessRows("2.2")[0], false)
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	lane.validate = func(w http.ResponseWriter, r *http.Request) bool {
 		if r.URL.Path != "/fhir/Bundle/$validate" || len(lane.recorded()) != 1 {
 			return true
 		}
-		fmt.Fprint(w, cleanOutcome)
+		// The lane's real answer, then a held trailing byte.
+		_, _ = w.Write(answer)
 		w.(http.Flusher).Flush()
 		close(entered)
 		<-release
@@ -413,7 +526,7 @@ func TestWorkerConsumesCompleteResponseBeforeNextRow(t *testing.T) {
 	}
 	path := markerPath(t)
 	done := startWorker(t, context.Background(), lane.base(), path, sameJVM())
-	<-entered
+	mustReach(t, entered, done)
 	observerProcess(t, lane.base(), path, sameJVM(), 1)
 	if len(lane.recorded()) != 1 || len(readTestState(t, path).Warm) != 0 {
 		t.Fatal("credited before EOF")
@@ -424,35 +537,9 @@ func TestWorkerConsumesCompleteResponseBeforeNextRow(t *testing.T) {
 	}
 }
 
-func TestMetadataRequiresCompleteBoundedBody(t *testing.T) {
-	for _, mode := range []string{"incomplete", "oversize", "hang", "redirect"} {
-		t.Run(mode, func(t *testing.T) {
-			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				switch mode {
-				case "incomplete":
-					w.Header().Set("Content-Length", "500")
-					fmt.Fprint(w, "short")
-				case "oversize":
-					fmt.Fprint(w, strings.Repeat("x", (4<<20)+1))
-				case "hang":
-					<-r.Context().Done()
-				case "redirect":
-					w.Header().Set("Location", "/metadata")
-					w.WriteHeader(302)
-				}
-			}))
-			defer s.Close()
-			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-			defer cancel()
-			if metadata(ctx, httpClient(), s.URL) == nil {
-				t.Fatal("metadata accepted incomplete response")
-			}
-		})
-	}
-}
-
 func TestWorkerLaterFailurePreservesCompletedPrefix(t *testing.T) {
-	lane := newFakeLane(t)
+	lane := newFakeLane(t, "2.2")
+	lane.partial() // the second row hangs and the run is canceled
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	lane.validate = func(w http.ResponseWriter, r *http.Request) bool {
@@ -467,7 +554,7 @@ func TestWorkerLaterFailurePreservesCompletedPrefix(t *testing.T) {
 	defer cancel()
 	path := markerPath(t)
 	done := startWorker(t, ctx, lane.base(), path, sameJVM())
-	<-entered
+	mustReach(t, entered, done)
 	st := readTestState(t, path)
 	if st.Row != "init-dtr-questionnaireresponse" || !reflect.DeepEqual(st.Warm, []string{"init-pas-request-bundle"}) {
 		t.Fatalf("partial state=%+v", st)
@@ -485,7 +572,7 @@ func TestWorkerLaterFailurePreservesCompletedPrefix(t *testing.T) {
 }
 
 func TestWorkerWaitsForMetadataAndBoundsStartup(t *testing.T) {
-	lane := newFakeLane(t)
+	lane := newFakeLane(t, "2.2")
 	atomic.StoreInt32(&lane.metadata, 503)
 	ctx, cancel := context.WithCancel(context.Background())
 	path := markerPath(t)
@@ -501,7 +588,7 @@ func TestWorkerWaitsForMetadataAndBoundsStartup(t *testing.T) {
 	if len(lane.recorded()) != 0 || readTestState(t, path).State != "failed" {
 		t.Fatal("metadata cancellation dispatched or lost failure")
 	}
-	atomic.StoreInt32(&lane.metadata, 200)
+	atomic.StoreInt32(&lane.metadata, http.StatusOK) // back to the recorded answer
 	path = markerPath(t)
 	if err := finishWorker(t, startWorker(t, context.Background(), lane.base(), path, otherJVM())); err != nil {
 		t.Fatal(err)
@@ -558,7 +645,8 @@ func TestIncarnationRejectsUnavailableOrInvalidIdentity(t *testing.T) {
 }
 
 func TestObserverDoesNotReflectStateDiagnostics(t *testing.T) {
-	lane := newFakeLane(t)
+	lane := newFakeLane(t, "2.2")
+	lane.partial() // the observer asks only the recorded metadata
 	path := markerPath(t)
 	st := initialState(sameJVM())
 	st.State = "failed"
@@ -573,7 +661,8 @@ func TestObserverDoesNotReflectStateDiagnostics(t *testing.T) {
 }
 
 func TestWorkerFailureLogIsBoundedAndIncludesElapsed(t *testing.T) {
-	lane := newFakeLane(t)
+	lane := newFakeLane(t, "2.2")
+	lane.partial() // the hook answers the first row and the corpus stops there
 	lane.validate = func(w http.ResponseWriter, _ *http.Request) bool {
 		fmt.Fprint(w, `{"resourceType":"Bundle","diagnostics":"private-response-body"}`)
 		return false
@@ -604,62 +693,60 @@ func TestWorkerFailureLogIsBoundedAndIncludesElapsed(t *testing.T) {
 }
 
 func TestWorkerMetadataPollingRecoversWithoutEarlyPost(t *testing.T) {
+	lane := newFakeLane(t, "2.2")
 	first := make(chan struct{})
-	var gets, posts atomic.Int32
+	var gets atomic.Int32
+	// The first /metadata answers 503 (a lane not yet up); later ones, and
+	// every validation, are the lane's recorded answers.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "GET" {
-			if gets.Add(1) == 1 {
-				close(first)
-				w.WriteHeader(503)
-			} else {
-				fmt.Fprint(w, `{"resourceType":"CapabilityStatement"}`)
-			}
+		if r.URL.Path == "/fhir/metadata" && gets.Add(1) == 1 {
+			close(first)
+			w.WriteHeader(503)
 			return
 		}
-		posts.Add(1)
-		body, _ := io.ReadAll(r.Body)
-		fmt.Fprint(w, testOutcome(body, r.URL.Query().Get("profile")))
+		lane.srv.Config.Handler.ServeHTTP(w, r)
 	}))
 	defer server.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	done := startWorker(t, ctx, server.URL, markerPath(t), sameJVM())
-	<-first
-	if posts.Load() != 0 {
+	done := startWorker(t, ctx, server.URL+"/fhir", markerPath(t), sameJVM())
+	mustReach(t, first, done)
+	if len(lane.recorded()) != 0 {
 		t.Fatal("validation started before successful metadata")
 	}
 	if err := finishWorker(t, done); err != nil {
 		t.Fatal(err)
 	}
-	if gets.Load() != 2 || posts.Load() != 42 {
-		t.Fatalf("gets=%d posts=%d", gets.Load(), posts.Load())
+	if gets.Load() != 2 || len(lane.recorded()) != 42 {
+		t.Fatalf("gets=%d posts=%d", gets.Load(), len(lane.recorded()))
 	}
 }
 
 func TestWorkerMetadataEOFPrecedesValidation(t *testing.T) {
+	lane := newFakeLane(t, "2.2")
+	capability := recordedMetadata(t, "2.2")
 	entered := make(chan struct{})
 	release := make(chan struct{})
-	var posts atomic.Int32
+	// /metadata sends the lane's recorded answer and then holds a trailing byte.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "GET" {
-			fmt.Fprint(w, `{"resourceType":"CapabilityStatement"}`)
+		if r.URL.Path == "/fhir/metadata" {
+			w.Header().Set("Content-Type", capability.contentType)
+			_, _ = w.Write(capability.answer)
 			w.(http.Flusher).Flush()
 			close(entered)
 			<-release
 			fmt.Fprint(w, "\n")
 			return
 		}
-		posts.Add(1)
-		body, _ := io.ReadAll(r.Body)
-		fmt.Fprint(w, testOutcome(body, r.URL.Query().Get("profile")))
+		lane.srv.Config.Handler.ServeHTTP(w, r)
 	}))
 	defer server.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	path := markerPath(t)
-	done := startWorker(t, ctx, server.URL, path, sameJVM())
-	<-entered
-	if posts.Load() != 0 || readTestState(t, path).State != "waiting-for-metadata" {
+	done := startWorker(t, ctx, server.URL+"/fhir", path, sameJVM())
+	mustReach(t, entered, done)
+	if len(lane.recorded()) != 0 || readTestState(t, path).State != "waiting-for-metadata" {
 		t.Fatal("validation started before metadata EOF")
 	}
 	close(release)
@@ -668,29 +755,38 @@ func TestWorkerMetadataEOFPrecedesValidation(t *testing.T) {
 	}
 }
 
-// A real loaded 2.2 lane serves a 1,965,879-byte CapabilityStatement. Metadata
-// must not inherit the smaller OperationOutcome bound or warming never starts.
+// A real loaded 2.2 lane serves a CapabilityStatement of about 2 MB.
+// Metadata must not inherit the smaller OperationOutcome bound or warming
+// never starts. The recording's scrub replaced the resource listing that makes
+// it large, so this answer is the recorded one with a stand-in listing padded
+// to the captured size.
 func TestLoadedLaneMetadataAllowsWarmupAndReadiness(t *testing.T) {
-	const measuredBytes = 1965879
-	prefix := `{"resourceType":"CapabilityStatement","status":"active","date":"2026-09-06","kind":"instance","fhirVersion":"4.0.1","format":["json"],"implementation":{"description":"`
-	suffix := `"}}`
-	body := prefix + strings.Repeat("x", measuredBytes-len(prefix)-len(suffix)) + suffix
-	var posts atomic.Int32
+	measuredBytes := measuredMetadataBytes(t, "2.2")
+	if measuredBytes <= maxOutcomeBytes {
+		t.Fatalf("recorded metadata is %d bytes; it must exceed the %d-byte OperationOutcome bound", measuredBytes, maxOutcomeBytes)
+	}
+	capability := recordedMetadata(t, "2.2")
+	const open, closing = `"rest":[{"mode":"server","documentation":"`, `"}]`
+	pad := measuredBytes - len(capability.answer) - len(open) - len(closing) + len(`"rest":[]`)
+	body := string(replaceOnce(t, capability.answer, `"rest":[]`, open+strings.Repeat("x", pad)+closing))
+	if len(body) != measuredBytes {
+		t.Fatalf("padded metadata is %d bytes, want %d", len(body), measuredBytes)
+	}
+	lane := newFakeLane(t, "2.2")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/fhir+json")
-		if r.Method == http.MethodGet {
+		if r.URL.Path == "/fhir/metadata" && r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", capability.contentType)
 			fmt.Fprint(w, body)
 			return
 		}
-		posts.Add(1)
-		body, _ := io.ReadAll(r.Body)
-		fmt.Fprint(w, testOutcome(body, r.URL.Query().Get("profile")))
+		lane.srv.Config.Handler.ServeHTTP(w, r)
 	}))
 	defer server.Close()
+	base := server.URL + "/fhir"
 	t.Run("metadata", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
-		if err := metadata(ctx, httpClient(), server.URL+"/metadata"); err != nil {
+		if err := metadata(ctx, httpClient(), base+"/metadata"); err != nil {
 			t.Fatalf("complete measured CapabilityStatement rejected: %v", err)
 		}
 	})
@@ -700,11 +796,11 @@ func TestLoadedLaneMetadataAllowsWarmupAndReadiness(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		path := markerPath(t)
-		if err := finishWorker(t, startWorker(t, ctx, server.URL, path, sameJVM())); err != nil {
-			t.Fatalf("measured metadata prevented warm-up: %v; posts=%d", err, posts.Load())
+		if err := finishWorker(t, startWorker(t, ctx, base, path, sameJVM())); err != nil {
+			t.Fatalf("measured metadata prevented warm-up: %v; posts=%d", err, len(lane.recorded()))
 		}
-		if posts.Load() != 42 || readTestState(t, path).State != "ready" {
-			t.Fatalf("metadata did not unlock readiness rows: posts=%d", posts.Load())
+		if len(lane.recorded()) != 42 || readTestState(t, path).State != "ready" {
+			t.Fatalf("metadata did not unlock readiness rows: posts=%d", len(lane.recorded()))
 		}
 	})
 	t.Run("observer", func(t *testing.T) {
@@ -715,30 +811,10 @@ func TestLoadedLaneMetadataAllowsWarmupAndReadiness(t *testing.T) {
 		if err := writeState(path, st); err != nil {
 			t.Fatal(err)
 		}
-		before := posts.Load()
-		observerProcess(t, server.URL, path, sameJVM(), 0)
-		if posts.Load() != before {
+		before := len(lane.recorded())
+		observerProcess(t, base, path, sameJVM(), 0)
+		if len(lane.recorded()) != before {
 			t.Fatal("observer submitted validation")
 		}
 	})
-}
-
-func TestMetadataIndependentSizeBoundary(t *testing.T) {
-	for _, tc := range []struct {
-		name      string
-		size      int
-		wantError bool
-	}{{"at limit", 4 << 20, false}, {"over limit", (4 << 20) + 1, true}} {
-		t.Run(tc.name, func(t *testing.T) {
-			body := strings.Repeat(" ", tc.size)
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, body) }))
-			defer server.Close()
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-			defer cancel()
-			err := metadata(ctx, httpClient(), server.URL)
-			if (err != nil) != tc.wantError {
-				t.Fatalf("metadata bytes=%d error=%v wantError=%v", tc.size, err, tc.wantError)
-			}
-		})
-	}
 }

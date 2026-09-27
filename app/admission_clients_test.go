@@ -2,14 +2,9 @@ package app
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,25 +12,23 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SmartHealthNetwork/shn-gateway/internal/lanequalify"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
+// Each default client waits at a cold boundary, then qualifies against its own
+// lane the whole corpus once. Each client's lane is a real 2.1 lane replayed
+// strictly (lane-2.1-metadata and lane-2.1-warm beside the validator code). The
+// cold 503 is authored: a lane still booting refuses the connection, which is
+// no HTTP answer to record; the 503 stands for a public boundary not yet open.
 func TestIndependentDefaultClientsWaitThenEachQualifyCompleteCorpus(t *testing.T) {
-	var rows []struct {
-		Path, Profile, SHA256 string
-		Outcome               json.RawMessage
-	}
-	raw, err := os.ReadFile("testdata/qualification-2.1.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = json.Unmarshal(raw, &rows); err != nil {
-		t.Fatal(err)
-	}
 	const clients = 6
+	lanes := make([]*recordedLane, clients)
+	for id := range lanes {
+		lanes[id] = newRecordedLane(t, nil, "lane-2.1-metadata", "lane-2.1-warm")
+	}
 	var admitted atomic.Bool
 	var mu sync.Mutex
-	counts := make([]int, clients)
 	entered := make([]bool, clients)
 	cold := make(chan int, clients)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -58,26 +51,10 @@ func TestIndependentDefaultClientsWaitThenEachQualifyCompleteCorpus(t *testing.T
 			http.Error(w, "cold public boundary", 503)
 			return
 		}
-		if r.Method == http.MethodGet && parts[1] == "fhir/metadata" {
-			io.WriteString(w, `{"resourceType":"CapabilityStatement","fhirVersion":"4.0.1"}`)
-			return
-		}
-		mu.Lock()
-		index := counts[id]
-		counts[id]++
-		mu.Unlock()
-		if index >= len(rows) {
-			http.Error(w, "repeated corpus", 400)
-			return
-		}
-		row := rows[index]
-		body, e := io.ReadAll(r.Body)
-		sum := sha256.Sum256(body)
-		if e != nil || r.Method != http.MethodPost || "/"+parts[1] != row.Path || r.URL.Query().Get("profile") != row.Profile || hex.EncodeToString(sum[:]) != row.SHA256 {
-			http.Error(w, "wrong exact corpus request", 400)
-			return
-		}
-		w.Write(row.Outcome)
+		lane := r.Clone(r.Context())
+		lane.URL.Path = "/" + parts[1]
+		lane.URL.RawPath = ""
+		lanes[id].Config.Handler.ServeHTTP(w, lane)
 	}))
 	defer server.Close()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -105,13 +82,11 @@ func TestIndependentDefaultClientsWaitThenEachQualifyCompleteCorpus(t *testing.T
 			t.Fatal("client did not reach cold admission boundary")
 		}
 	}
-	mu.Lock()
-	for _, count := range counts {
-		if count != 0 {
-			t.Error("cold corpus request")
+	for id, lane := range lanes {
+		if lane.gets.Load()+lane.posts.Load() != 0 {
+			t.Errorf("client %d reached its lane while cold", id)
 		}
 	}
-	mu.Unlock()
 	select {
 	case e := <-results:
 		t.Fatalf("declared client returned while cold: %v", e)
@@ -129,9 +104,9 @@ func TestIndependentDefaultClientsWaitThenEachQualifyCompleteCorpus(t *testing.T
 		}
 	}
 	workers.Wait()
-	for id, count := range counts {
-		if count != len(rows) {
-			t.Fatalf("client %d submitted %d/%d rows", id, count, len(rows))
+	for id, lane := range lanes {
+		if int(lane.posts.Load()) != lanequalify.RowCount("2.1") || lane.gets.Load() != 1 {
+			t.Fatalf("client %d asked metadata %d times and submitted %d/%d rows", id, lane.gets.Load(), lane.posts.Load(), lanequalify.RowCount("2.1"))
 		}
 	}
 }

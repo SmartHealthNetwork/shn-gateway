@@ -114,9 +114,7 @@ func TestEligibility_DeclaredRelaysThePayersErrorWithoutFallback(t *testing.T) {
 // legs a payer's own system answers), and no answer is built from the payer's
 // records in its place.
 func TestEligibility_DeclaredWithoutAnAnswerHasNoFallback(t *testing.T) {
-	closed := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	closedURL := closed.URL
-	closed.Close()
+	closedURL := downEndpoint(t)
 	dropped := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.ReadAll(r.Body)
 		if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {

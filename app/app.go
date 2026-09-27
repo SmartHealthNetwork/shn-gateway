@@ -1357,6 +1357,9 @@ type built struct {
 	// certification is the evidence client map build handed the engine, kept
 	// so the app's own rows can read what was wired without an engine seam.
 	certification map[string]shnsdk.Validator
+	// warmCertification is whether Run warms the certification clients at boot
+	// (startWorkers): only where certification evidence is collected.
+	warmCertification bool
 
 	// keyRefresh is the shared ingress-key background reload
 	// ((*pgstore.IngressKeyStore).RunRefresh), non-nil only when
@@ -1971,6 +1974,10 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		lanes:           lanes,
 		poolStats:       poolStats,
 		certification:   gwCfg.CertificationValidatorsByLine,
+		// Certification evidence is collected at every level but none (the
+		// engine starts no certification worker there), so only then is there
+		// anything to warm.
+		warmCertification: gwCfg.ConformanceEnforcement != engine.EnforcementNone,
 	}
 	admitted = true
 	return b, nil
@@ -2084,6 +2091,11 @@ func (b built) startWorkers(parent context.Context) func() {
 	// Boot-time connectivity checks run without blocking listener startup;
 	// build() must return without waiting on partner endpoints.
 	start(func(ctx context.Context) { _, _ = b.checksRunner.Run(ctx) }) // results land in Last()
+	// The certification warm-up likewise runs beside the listener, never before
+	// it (warmCertification).
+	if b.warmCertification {
+		start(func(ctx context.Context) { warmCertification(ctx, b.certification) })
+	}
 	return func() {
 		cancel()
 		workers.Wait()
@@ -2512,10 +2524,19 @@ func certificationValidators(getenv func(string) string, cfg config, canonical s
 			}
 			continue
 		}
-		out[line] = engine.NewCertificationOperationValidator(endpoint)
+		out[line] = certificationClient(endpoint)
 	}
 	return out
 }
+
+// certificationClient builds the client for a certification endpoint configured
+// by address: certificationValidators' clients and each boot warm-up's own.
+// Its dedicated transport dials with its own dialer, never through
+// http.DefaultTransport, so a test that fixtures http.DefaultTransport
+// replaces this too; otherwise its fixture host is resolved on the live
+// network. A default lane's gated client builds its own in engine, and
+// dials only once that lane qualifies and a certification runs.
+var certificationClient = engine.NewCertificationOperationValidator
 
 // backendHeaderReserved are the header names PAYER_DAVINCI_BACKEND_HEADERS may
 // not set: the ones this gateway itself owns on a partner request, the

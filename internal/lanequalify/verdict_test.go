@@ -8,16 +8,161 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"strings"
 	"testing"
 )
 
-const cleanOutcome = `{"resourceType":"OperationOutcome","issue":[{"severity":"information","code":"informational","diagnostics":"Validation successful"}]}`
+// recordedExchange is one request a real validator lane was asked and its
+// answer, as the module's lane_replay_test.go loads it from
+// testdata/recordings (twin test files cannot import the recording helper).
+type recordedExchange struct {
+	method, path string
+	query        url.Values
+	body         []byte
+	status       int
+	contentType  string // the answer's
+	answer       []byte
+}
 
-const targetedNegativeOutcome = `{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"processing","details":{"coding":[{"system":"http://hl7.org/fhir/java-core-messageId","code":"Extension_EXT_Type"}]},"diagnostics":"The Extension 'http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewActionCode' definition allows for the types [CodeableConcept] but found type boolean","expression":["ClaimResponse.item[0].adjudication[0].extension[0].extension[0]"]},{"severity":"warning","code":"processing","diagnostics":"licensed terminology unavailable"}]}`
+// recordedAnswer is what the real lane of row.line answered to row's request
+// (testdata/recordings/lane-<line>-warm.json): its first answer when first is
+// set (on 2.2 a ClaimResponse decision form first met the lane still warming),
+// else its settled one.
+func recordedAnswer(t *testing.T, row warmup, first bool) []byte {
+	t.Helper()
+	body, err := fixtureBody(row)
+	if err != nil {
+		t.Fatalf("%s: %v", row.identity, err)
+	}
+	var found []byte
+	for _, ex := range laneRecording(t, "lane-"+row.line+"-warm") {
+		if ex.method != http.MethodPost || ex.path != "/fhir/"+row.resourceType+"/$validate" || !sameJSON(ex.body, body) {
+			continue
+		}
+		if row.profile == "" && len(ex.query) != 0 || row.profile != "" && !reflect.DeepEqual(ex.query, url.Values{"profile": {row.profile}}) {
+			continue
+		}
+		if ex.status != http.StatusOK {
+			t.Fatalf("%s on %s: recorded status %d", row.identity, row.line, ex.status)
+		}
+		found = append([]byte(nil), ex.answer...)
+		if first {
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("no recorded answer for %s on line %s", row.identity, row.line)
+	}
+	return found
+}
 
-const primeSlicingOutcome22 = `{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"processing","details":{"coding":[{"system":"http://hl7.org/fhir/java-core-messageId","code":"SLICING_CANNOT_BE_EVALUATED"}]},"diagnostics":"Slicing cannot be evaluated: Could not match discriminator (url) for slice Extension.extension:number in profile http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewAction|2.2.1 - the discriminator [url] does not have fixed value, binding or existence assertions","expression":["ClaimResponse.item[0].adjudication[0].extension[0].extension[0]"]}]}`
+// primeSlicingAnswer22 is the 2.2 lane's first answer to the versioned
+// approved ClaimResponse: the SLICING_CANNOT_BE_EVALUATED errors a prime row
+// tolerates and a qualification row refuses.
+func primeSlicingAnswer22(t *testing.T) []byte {
+	t.Helper()
+	answer := recordedAnswer(t, qualificationRows("2.2", "prime")[0], true)
+	if !bytes.Contains(answer, []byte("SLICING_CANNOT_BE_EVALUATED")) {
+		t.Fatal("the recorded first 2.2 answer no longer carries the slicing errors")
+	}
+	return answer
+}
+
+func sameJSON(a, b []byte) bool {
+	decode := func(raw []byte) (any, bool) {
+		var v any
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.UseNumber()
+		return v, dec.Decode(&v) == nil && !dec.More()
+	}
+	x, okA := decode(a)
+	y, okB := decode(b)
+	return okA && okB && reflect.DeepEqual(x, y)
+}
+
+// replaceOnce is a deliberate mutation of a recorded answer's bytes; old must
+// occur in it, so a mutation that stopped applying fails instead of passing
+// the unchanged answer.
+func replaceOnce(t *testing.T, raw []byte, old, replacement string) []byte {
+	t.Helper()
+	if !bytes.Contains(raw, []byte(old)) {
+		t.Fatalf("mutation target %q is not in the answer", old)
+	}
+	return bytes.Replace(raw, []byte(old), []byte(replacement), 1)
+}
+
+// mutateOutcome is a deliberate mutation of a recorded answer's issue list.
+// The answer is re-encoded; member order does not change a verdict.
+func mutateOutcome(t *testing.T, raw []byte, edit func(issues []any) []any) []byte {
+	t.Helper()
+	var outcome map[string]any
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&outcome); err != nil {
+		t.Fatal(err)
+	}
+	issues, ok := outcome["issue"].([]any)
+	if !ok {
+		t.Fatal("the answer has no issue list")
+	}
+	outcome["issue"] = edit(issues)
+	out, err := json.Marshal(outcome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// issueCoded is the one issue in issues whose message id is code.
+func issueCoded(t *testing.T, issues []any, code string) map[string]any {
+	t.Helper()
+	var found map[string]any
+	for _, value := range issues {
+		issue, _ := value.(map[string]any)
+		details, _ := issue["details"].(map[string]any)
+		codings, _ := details["coding"].([]any)
+		if len(codings) == 1 && codings[0].(map[string]any)["code"] == code {
+			if found != nil {
+				t.Fatalf("two issues coded %s", code)
+			}
+			found = issue
+		}
+	}
+	if found == nil {
+		t.Fatalf("no issue coded %s", code)
+	}
+	return found
+}
+
+// issueOf is a fresh decoded copy of the one issue in raw coded code.
+func issueOf(t *testing.T, raw []byte, code string) map[string]any {
+	t.Helper()
+	var outcome struct {
+		Issue []any `json:"issue"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&outcome); err != nil {
+		t.Fatal(err)
+	}
+	return issueCoded(t, outcome.Issue, code)
+}
+
+// codingOf is an issue's one message-id coding.
+func codingOf(issue map[string]any) map[string]any {
+	return issue["details"].(map[string]any)["coding"].([]any)[0].(map[string]any)
+}
+
+// editIssue changes the one issue coded code.
+func editIssue(t *testing.T, raw []byte, code string, edit func(issue map[string]any)) []byte {
+	t.Helper()
+	return mutateOutcome(t, raw, func(issues []any) []any {
+		edit(issueCoded(t, issues, code))
+		return issues
+	})
+}
 
 func TestReadinessRowsAreUniqueOrderedCorpus(t *testing.T) {
 	rows := readinessRows("2.2")
@@ -177,53 +322,74 @@ func TestClaimResponseFixtureRejectsWrongShapesAndProfiles(t *testing.T) {
 	}
 }
 
+// The verdicts the 2.2 lane really gave pass; each rejection row is either
+// one of those answers given to the wrong row, one deliberately mutated, or a
+// malformed body no lane sends.
 func TestStrictVerdictAssertions(t *testing.T) {
 	positive := qualificationRows("2.2", "qualify-1")[0]
 	prime := qualificationRows("2.2", "prime")[0]
 	negative := negativeRows("2.2")[0]
 	initialization := warmups("2.2")[0]
-	if err := assertVerdict(positive, 200, []byte(cleanOutcome)); err != nil {
-		t.Fatalf("clean positive: %v", err)
+	settled := recordedAnswer(t, positive, false)
+	slicing := primeSlicingAnswer22(t)
+	targeted := recordedAnswer(t, negative, false)
+	if err := assertVerdict(positive, 200, settled); err != nil {
+		t.Fatalf("recorded positive: %v", err)
 	}
-	if err := assertVerdict(prime, 200, []byte(primeSlicingOutcome22)); err != nil {
-		t.Fatalf("exact prime slicing allowance: %v", err)
+	if err := assertVerdict(prime, 200, slicing); err != nil {
+		t.Fatalf("recorded prime slicing allowance: %v", err)
 	}
-	if err := assertVerdict(negative, 200, []byte(targetedNegativeOutcome)); err != nil {
-		t.Fatalf("targeted negative: %v", err)
+	if err := assertVerdict(prime, 200, settled); err != nil {
+		t.Fatalf("recorded settled prime: %v", err)
 	}
+	if err := assertVerdict(negative, 200, targeted); err != nil {
+		t.Fatalf("recorded targeted negative: %v", err)
+	}
+	if err := assertVerdict(initialization, 200, recordedAnswer(t, initialization, false)); err != nil {
+		t.Fatalf("recorded initialization: %v", err)
+	}
+	extensionType := "Extension_EXT_Type"
 	cases := map[string]struct {
 		row    warmup
 		status int
-		body   string
+		body   []byte
 	}{
-		"wrong status":                   {positive, 422, cleanOutcome},
-		"malformed":                      {positive, 200, `{"resourceType":`},
-		"not outcome":                    {positive, 200, `{"resourceType":"Bundle","issue":[{"severity":"information"}]}`},
-		"missing issues":                 {positive, 200, `{"resourceType":"OperationOutcome"}`},
-		"empty issues":                   {positive, 200, `{"resourceType":"OperationOutcome","issue":[]}`},
-		"invalid severity":               {positive, 200, `{"resourceType":"OperationOutcome","issue":[{"severity":"success","code":"informational"}]}`},
-		"missing issue code":             {positive, 200, `{"resourceType":"OperationOutcome","issue":[{"severity":"information"}]}`},
-		"null issue code":                {positive, 200, `{"resourceType":"OperationOutcome","issue":[{"severity":"information","code":null}]}`},
-		"empty issue code":               {positive, 200, `{"resourceType":"OperationOutcome","issue":[{"severity":"information","code":""}]}`},
-		"unknown issue code":             {positive, 200, `{"resourceType":"OperationOutcome","issue":[{"severity":"information","code":"not-a-fhir-issue-type"}]}`},
-		"positive error":                 {positive, 200, `{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"processing","diagnostics":"bad"}]}`},
-		"positive slicing":               {positive, 200, primeSlicingOutcome22},
-		"missing profile":                {positive, 200, `{"resourceType":"OperationOutcome","issue":[{"severity":"warning","code":"processing","diagnostics":"Invalid profile. Failed to retrieve profile with url=http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claimresponse"}]}`},
-		"initialization missing profile": {initialization, 200, `{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"processing","diagnostics":"Invalid profile. Failed to retrieve profile with url=http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-pas-request-bundle"}]}`},
-		"dirty prime":                    {prime, 200, `{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"processing","diagnostics":"unrelated"}]}`},
-		"wrong prime slice":              {prime, 200, strings.Replace(primeSlicingOutcome22, "Extension.extension:number", "Extension.extension:unknown", 1)},
-		"wrong prime version":            {prime, 200, strings.Replace(primeSlicingOutcome22, "extension-reviewAction|2.2.1", "extension-reviewAction|2.1.0", 1)},
-		"clean negative":                 {negative, 200, cleanOutcome},
-		"wrong negative code":            {negative, 200, strings.Replace(targetedNegativeOutcome, "Extension_EXT_Type", "Wrong_Code", 2)},
-		"wrong negative coding system":   {negative, 200, strings.Replace(targetedNegativeOutcome, messageIDSystem, "http://example.test/wrong", 1)},
-		"wrong negative path":            {negative, 200, strings.Replace(targetedNegativeOutcome, "ClaimResponse.item[0]", "ClaimResponse.item[1]", 1)},
-		"wrong negative detail":          {negative, 200, strings.Replace(targetedNegativeOutcome, "found type boolean", "found type string", 1)},
-		"extra negative error":           {negative, 200, strings.Replace(targetedNegativeOutcome, `{"severity":"warning"`, `{"severity":"error"`, 1)},
-		"duplicate targeted error":       {negative, 200, strings.Replace(targetedNegativeOutcome, `,{"severity":"warning"`, `,{"severity":"error","code":"processing","details":{"coding":[{"system":"http://hl7.org/fhir/java-core-messageId","code":"Extension_EXT_Type"}]},"diagnostics":"The Extension 'http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewActionCode' definition allows for the types [CodeableConcept] but found type boolean","expression":["ClaimResponse.item[0].adjudication[0].extension[0].extension[0]"]},{"severity":"warning"`, 1)},
+		"wrong status":                   {positive, 422, settled},
+		"malformed":                      {positive, 200, []byte(`{"resourceType":`)},
+		"not outcome":                    {positive, 200, []byte(`{"resourceType":"Bundle","issue":[{"severity":"information"}]}`)},
+		"missing issues":                 {positive, 200, []byte(`{"resourceType":"OperationOutcome"}`)},
+		"empty issues":                   {positive, 200, []byte(`{"resourceType":"OperationOutcome","issue":[]}`)},
+		"invalid severity":               {positive, 200, []byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"success","code":"informational"}]}`)},
+		"missing issue code":             {positive, 200, []byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"information"}]}`)},
+		"null issue code":                {positive, 200, []byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"information","code":null}]}`)},
+		"empty issue code":               {positive, 200, []byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"information","code":""}]}`)},
+		"unknown issue code":             {positive, 200, []byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"information","code":"not-a-fhir-issue-type"}]}`)},
+		"positive error":                 {positive, 200, targeted},
+		"positive slicing":               {positive, 200, slicing},
+		"missing profile":                {positive, 200, []byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"warning","code":"processing","diagnostics":"Invalid profile. Failed to retrieve profile with url=http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claimresponse"}]}`)},
+		"initialization missing profile": {initialization, 200, []byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"processing","diagnostics":"Invalid profile. Failed to retrieve profile with url=http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-pas-request-bundle"}]}`)},
+		"dirty prime":                    {prime, 200, targeted},
+		"wrong prime slice":              {prime, 200, replaceOnce(t, slicing, "Extension.extension:number", "Extension.extension:unknown")},
+		"wrong prime version":            {prime, 200, replaceOnce(t, slicing, "extension-reviewAction|2.2.1", "extension-reviewAction|2.1.0")},
+		"clean negative":                 {negative, 200, settled},
+		"wrong negative code": {negative, 200, editIssue(t, targeted, extensionType, func(i map[string]any) {
+			codingOf(i)["code"] = "Wrong_Code"
+		})},
+		"wrong negative coding system": {negative, 200, editIssue(t, targeted, extensionType, func(i map[string]any) {
+			codingOf(i)["system"] = "http://example.test/wrong"
+		})},
+		"wrong negative path": {negative, 200, editIssue(t, targeted, extensionType, func(i map[string]any) {
+			i["expression"] = []any{"ClaimResponse.item[1].adjudication[0].extension[0].extension[0]"}
+		})},
+		"wrong negative detail": {negative, 200, replaceOnce(t, targeted, "found type boolean", "found type string")},
+		"extra negative error":  {negative, 200, replaceOnce(t, targeted, `"severity":"warning"`, `"severity":"error"`)},
+		"duplicate targeted error": {negative, 200, mutateOutcome(t, targeted, func(issues []any) []any {
+			return append(issues, issueCoded(t, issues, extensionType))
+		})},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			if err := assertVerdict(tc.row, tc.status, []byte(tc.body)); err == nil {
+			if err := assertVerdict(tc.row, tc.status, tc.body); err == nil {
 				t.Fatal("invalid verdict accepted")
 			}
 		})
@@ -233,24 +399,25 @@ func TestStrictVerdictAssertions(t *testing.T) {
 func TestStrictVerdictRejectsDuplicateAndAliasedMembers(t *testing.T) {
 	positive := qualificationRows("2.2", "qualify-1")[0]
 	negative := negativeRows("2.2")[0]
+	targeted := recordedAnswer(t, negative, false)
 	cases := map[string]struct {
 		row  warmup
-		body string
+		body []byte
 	}{
-		"duplicate top-level issue": {positive, `{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"processing"}],"issue":[{"severity":"information","code":"informational"}]}`},
-		"aliased top-level issue":   {positive, `{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"processing"}],"Issue":[{"severity":"information","code":"informational"}]}`},
-		"duplicate severity":        {positive, `{"resourceType":"OperationOutcome","issue":[{"severity":"error","severity":"information","code":"processing"}]}`},
-		"aliased severity":          {positive, `{"resourceType":"OperationOutcome","issue":[{"severity":"error","Severity":"information","code":"processing"}]}`},
-		"duplicate code":            {positive, `{"resourceType":"OperationOutcome","issue":[{"severity":"information","code":"invalid","code":"informational"}]}`},
-		"aliased code":              {positive, `{"resourceType":"OperationOutcome","issue":[{"severity":"information","code":"invalid","Code":"informational"}]}`},
-		"duplicate diagnostics":     {positive, `{"resourceType":"OperationOutcome","issue":[{"severity":"warning","code":"processing","diagnostics":"Failed to retrieve profile","diagnostics":"clean"}]}`},
-		"duplicate details":         {positive, `{"resourceType":"OperationOutcome","issue":[{"severity":"warning","code":"processing","details":{"coding":[{"system":"http://hl7.org/fhir/java-core-messageId","code":"SLICING_CANNOT_BE_EVALUATED"}]},"details":{}}]}`},
-		"duplicate expression":      {negative, strings.Replace(targetedNegativeOutcome, `"expression":["ClaimResponse.item[0]`, `"expression":["ClaimResponse.item[1].wrong"],"expression":["ClaimResponse.item[0]`, 1)},
-		"aliased coding system":     {negative, strings.Replace(targetedNegativeOutcome, `"system":"http://hl7.org/fhir/java-core-messageId"`, `"system":"wrong","System":"http://hl7.org/fhir/java-core-messageId"`, 1)},
+		"duplicate top-level issue": {positive, []byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"processing"}],"issue":[{"severity":"information","code":"informational"}]}`)},
+		"aliased top-level issue":   {positive, []byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"processing"}],"Issue":[{"severity":"information","code":"informational"}]}`)},
+		"duplicate severity":        {positive, []byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"error","severity":"information","code":"processing"}]}`)},
+		"aliased severity":          {positive, []byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"error","Severity":"information","code":"processing"}]}`)},
+		"duplicate code":            {positive, []byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"information","code":"invalid","code":"informational"}]}`)},
+		"aliased code":              {positive, []byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"information","code":"invalid","Code":"informational"}]}`)},
+		"duplicate diagnostics":     {positive, []byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"warning","code":"processing","diagnostics":"Failed to retrieve profile","diagnostics":"clean"}]}`)},
+		"duplicate details":         {positive, []byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"warning","code":"processing","details":{"coding":[{"system":"http://hl7.org/fhir/java-core-messageId","code":"SLICING_CANNOT_BE_EVALUATED"}]},"details":{}}]}`)},
+		"duplicate expression":      {negative, replaceOnce(t, targeted, `"expression":["ClaimResponse.item[0]`, `"expression":["ClaimResponse.item[1].wrong"],"expression":["ClaimResponse.item[0]`)},
+		"aliased coding system":     {negative, replaceOnce(t, targeted, `"system":"http://hl7.org/fhir/java-core-messageId"`, `"system":"wrong","System":"http://hl7.org/fhir/java-core-messageId"`)},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			if err := assertVerdict(tc.row, 200, []byte(tc.body)); err == nil {
+			if err := assertVerdict(tc.row, 200, tc.body); err == nil {
 				t.Fatal("ambiguous verdict accepted")
 			}
 		})
@@ -275,7 +442,9 @@ func TestStrictVerdictAcceptsFHIRR4IssueTypeCodes(t *testing.T) {
 }
 
 func TestSubmitValidationFailureCarriesTheWholeAnswerOnOneLine(t *testing.T) {
-	answer := strings.Replace(targetedNegativeOutcome, `,"issue":[`, ",\n\t\"issue\":[", 1) + strings.Repeat(" ", 3000)
+	// The 2.0 lane's real answer to the negative control, given to a positive
+	// row, with line breaks and tabs added to show they are folded.
+	answer := string(replaceOnce(t, recordedAnswer(t, negativeRows("2.0")[0], false), `,"issue":[`, ",\n\t\"issue\":[")) + strings.Repeat(" ", 3000)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/fhir+json")
 		w.WriteHeader(http.StatusOK)
@@ -315,10 +484,11 @@ func TestFullResponseCorpus(t *testing.T) {
 			if err := json.Unmarshal(body, &bundle); err != nil || bundle["resourceType"] != "Bundle" || len(bundle["entry"].([]any)) != 9 {
 				t.Fatalf("incomplete response: %s", row.identity)
 			}
+			// What the lane of line really answered this row passes.
+			if err := assertVerdict(row, 200, recordedAnswer(t, row, false)); err != nil {
+				t.Fatalf("%s %s: recorded answer refused: %v", line, row.identity, err)
+			}
 			if i == 0 {
-				if err := assertVerdict(row, 200, []byte(cleanOutcome)); err != nil {
-					t.Fatal(err)
-				}
 				continue
 			}
 			expected, err := fixtures.ReadFile(row.expectedOutcome)
@@ -329,7 +499,7 @@ func TestFullResponseCorpus(t *testing.T) {
 				t.Fatalf("%s: %v", row.identity, err)
 			}
 			for name, bad := range map[string][]byte{
-				"accepted invalid":   []byte(cleanOutcome),
+				"accepted invalid":   recordedAnswer(t, rows[0], false),
 				"wrong code":         bytes.ReplaceAll(expected, []byte("processing"), []byte("invalid")),
 				"wrong path":         bytes.ReplaceAll(expected, []byte("Bundle.entry[4]"), []byte("Bundle.entry[5]")),
 				"unknown definition": []byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"processing","diagnostics":"Unknown extension"}]}`),
@@ -343,24 +513,6 @@ func TestFullResponseCorpus(t *testing.T) {
 	if fullResponseRows("wrong") != nil {
 		t.Fatal("unknown lane admitted")
 	}
-}
-
-func supportTestOutcome(body []byte, profile string) string {
-	line := "2.2"
-	for candidate, version := range pasVersions {
-		if strings.HasSuffix(profile, "|"+version) {
-			line = candidate
-		}
-	}
-	controls := append(fullResponseRows(line)[1:], encounterRows(line)[1:]...)
-	for _, row := range controls {
-		mutated, _ := fixtureBody(row)
-		if bytes.Equal(body, mutated) {
-			raw, _ := fixtures.ReadFile(row.expectedOutcome)
-			return string(raw)
-		}
-	}
-	return ""
 }
 
 func TestFullResponseMutationsAreIsolated(t *testing.T) {
@@ -470,8 +622,9 @@ func TestSupportNegativeRequiresExactErrorMultiset(t *testing.T) {
 		}
 	}
 	row := fullResponseRows("2.0")[1]
+	answer := recordedAnswer(t, row, false)
 	row.expectedOutcome = "missing.json"
-	if assertVerdict(row, 200, []byte(cleanOutcome)) == nil {
+	if assertVerdict(row, 200, answer) == nil {
 		t.Fatal("missing expectation admitted")
 	}
 }
@@ -522,23 +675,39 @@ func TestEncounterRows(t *testing.T) {
 		if err := assertVerdict(rows[1], 200, expected); err != nil {
 			t.Fatalf("%s: exact target-type error refused: %v", line, err)
 		}
-		target := `{"severity":"error","code":"processing","details":{"coding":[{"system":"http://hl7.org/fhir/java-core-messageId","code":"Reference_REF_BadTargetType"}]},"diagnostics":"Invalid Resource target type. Found Patient, but expected one of ([Encounter])","expression":["Claim.extension[0].value.ofType(Reference)"]}`
-		unrelated := `{"severity":"error","code":"processing","details":{"coding":[{"system":"http://hl7.org/fhir/java-core-messageId","code":"Other"}]},"diagnostics":"unrelated","expression":["Claim"]}`
-		clean := `{"resourceType":"OperationOutcome","issue":[{"severity":"information","code":"informational","diagnostics":"All OK"}]}`
-		if err := assertVerdict(rows[1], 200, []byte(`{"resourceType":"OperationOutcome","issue":[`+target+`,`+unrelated+`]}`)); err == nil {
-			t.Fatalf("%s: an extra error was accepted", line)
+		// The lane's real answers to both rows pass; each rejection row
+		// mutates one of them.
+		const badTarget = "Reference_REF_BadTargetType"
+		refused := recordedAnswer(t, rows[1], false)
+		clean := recordedAnswer(t, rows[0], false)
+		if err := assertVerdict(rows[1], 200, refused); err != nil {
+			t.Fatalf("%s: recorded target-type answer refused: %v", line, err)
 		}
-		if err := assertVerdict(rows[1], 200, []byte(clean)); err == nil {
-			t.Fatalf("%s: a clean outcome was accepted for the target-type control", line)
+		if err := assertVerdict(rows[0], 200, clean); err != nil {
+			t.Fatalf("%s: recorded positive answer refused: %v", line, err)
 		}
-		if err := assertVerdict(rows[1], 200, []byte(`{"resourceType":"OperationOutcome","issue":[`+unrelated+`]}`)); err == nil {
-			t.Fatalf("%s: a different error was accepted", line)
+		unrelated := func(issue map[string]any) {
+			codingOf(issue)["code"] = "Other"
+			issue["diagnostics"] = "unrelated"
 		}
-		if err := assertVerdict(rows[0], 200, []byte(clean)); err != nil {
-			t.Fatalf("%s: clean positive refused: %v", line, err)
-		}
-		if err := assertVerdict(rows[0], 200, []byte(`{"resourceType":"OperationOutcome","issue":[`+target+`]}`)); err == nil {
-			t.Fatalf("%s: an error was accepted for the positive row", line)
+		for name, tc := range map[string]struct {
+			row  warmup
+			body []byte
+		}{
+			"an extra error": {rows[1], mutateOutcome(t, refused, func(issues []any) []any {
+				extra := issueOf(t, refused, badTarget)
+				unrelated(extra)
+				return append(issues, extra)
+			})},
+			"a clean outcome for the target-type control": {rows[1], clean},
+			"a different error":                           {rows[1], editIssue(t, refused, badTarget, unrelated)},
+			"the target-type error on the positive row": {rows[0], mutateOutcome(t, clean, func(issues []any) []any {
+				return append(issues, issueOf(t, refused, badTarget))
+			})},
+		} {
+			if err := assertVerdict(tc.row, 200, tc.body); err == nil {
+				t.Fatalf("%s: %s was accepted", line, name)
+			}
 		}
 	}
 }
@@ -558,23 +727,31 @@ func TestExplicitProfileRefusalRows(t *testing.T) {
 			if err := json.Unmarshal(body, &resource); err != nil || !hasExactProfile(resource, pasClaimResponseProfile) {
 				t.Fatal("explicit refusal must retain valid in-band profile")
 			}
-			outcome := fmt.Sprintf(`{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"processing","details":{"coding":[{"system":"%s","code":"Validation_VAL_Profile_Unknown"}]},"diagnostics":%q}]}`, messageIDSystem, "Invalid profile. Failed to retrieve explicitly requested profile with url="+row.profile)
-			if err := assertVerdict(row, 200, []byte(outcome)); err != nil {
-				t.Fatalf("%s intended absence refused: %v", row.identity, err)
+			// The lane's real refusal of the unavailable profile passes.
+			outcome := recordedAnswer(t, row, false)
+			if err := assertVerdict(row, 200, outcome); err != nil {
+				t.Fatalf("%s %s intended absence refused: %v", line, row.identity, err)
 			}
-			for _, invalid := range []string{
-				cleanOutcome,
-				strings.Replace(outcome, `"severity":"error"`, `"severity":"warning"`, 1),
-				strings.Replace(outcome, row.profile, "https://example.org/different", 1),
-				strings.Replace(outcome, "Validation_VAL_Profile_Unknown", "unrelated", 1),
-				strings.Replace(outcome, `"code":"processing"`, `"code":"exception"`, 1),
-				strings.Replace(outcome, "Invalid profile. Failed to retrieve explicitly requested profile with url=", "Resolver unavailable: ", 1),
+			unknown := "Validation_VAL_Profile_Unknown"
+			for name, invalid := range map[string][]byte{
+				// The same fixture validated against the resolvable profile, as a
+				// lane that ignored the requested one would answer.
+				"validated clean":  recordedAnswer(t, qualificationRows(line, "qualify-1")[0], false),
+				"warning severity": editIssue(t, outcome, unknown, func(i map[string]any) { i["severity"] = "warning" }),
+				"different profile": editIssue(t, outcome, unknown, func(i map[string]any) {
+					i["diagnostics"] = strings.Replace(i["diagnostics"].(string), row.profile, "https://example.org/different", 1)
+				}),
+				"unrelated code": editIssue(t, outcome, unknown, func(i map[string]any) { codingOf(i)["code"] = "unrelated" }),
+				"exception":      editIssue(t, outcome, unknown, func(i map[string]any) { i["code"] = "exception" }),
+				"resolver unavailable": editIssue(t, outcome, unknown, func(i map[string]any) {
+					i["diagnostics"] = strings.Replace(i["diagnostics"].(string), "Invalid profile. Failed to retrieve explicitly requested profile with url=", "Resolver unavailable: ", 1)
+				}),
 			} {
-				if err := assertVerdict(row, 200, []byte(invalid)); err == nil {
-					t.Fatalf("%s accepted missing or unrelated refusal: %s", row.identity, invalid)
+				if err := assertVerdict(row, 200, invalid); err == nil {
+					t.Fatalf("%s %s accepted a %s refusal", line, row.identity, name)
 				}
 			}
-			if err := assertVerdict(row, 500, []byte(outcome)); err == nil {
+			if err := assertVerdict(row, 500, outcome); err == nil {
 				t.Fatal("execution failure qualified as profile absence")
 			}
 		}
@@ -582,11 +759,4 @@ func TestExplicitProfileRefusalRows(t *testing.T) {
 	if explicitProfileRows("unknown") != nil {
 		t.Fatal("unknown lane accepted")
 	}
-}
-
-func explicitProfileTestOutcome(profile string) string {
-	if profile != pasClaimResponseProfile+"|9.9.9" && profile != "https://example.org/fhir/StructureDefinition/unavailable-profile" {
-		return ""
-	}
-	return fmt.Sprintf(`{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"processing","details":{"coding":[{"system":"%s","code":"Validation_VAL_Profile_Unknown"}]},"diagnostics":%q}]}`, messageIDSystem, "Invalid profile. Failed to retrieve explicitly requested profile with url="+profile)
 }

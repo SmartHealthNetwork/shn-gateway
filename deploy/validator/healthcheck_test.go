@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -14,17 +15,35 @@ import (
 	"time"
 )
 
-// fakeLane is a validator stand-in that serves /metadata and $validate the way
-// HAPI does at the wire: a 200 CapabilityStatement, and an OperationOutcome for
-// any $validate (HTTP 200 whatever the issues). validate is the per-request hook
-// (nil = warm: answer immediately); every $validate is recorded in posts.
+// fakeLane is a validator lane at the wire. By default it answers each request
+// with what a real lane of that line answered: GET /fhir/metadata with the
+// lane's recorded CapabilityStatement
+// (testdata/recordings/lane-<line>-metadata.json, served on every ask), and
+// every other request from testdata/recordings/lane-<line>-warm.json, replayed
+// strictly: a request the lane was never asked fails the test, and every
+// recorded answer must be used.
+// Two fault hooks cover what no capture holds. metadata is the status
+// /metadata answers with; any status but 200 replaces the recorded answer (a
+// lane not yet up). validate is the per-request hook (a hang, a redirect, an
+// oversized or non-OperationOutcome answer, a false verdict): returning false
+// means the hook already answered (or deliberately never will); returning true
+// passes the request on to the recording. A test that sets it, or stops the
+// corpus early, calls lane.partial(). Every request past /metadata is
+// recorded in posts, and one that arrives while another is still being
+// answered (from its arrival until its answer is written) counts in
+// overlaps; hold keeps each answer open that much longer after it is written,
+// so a client that sends before reading an answer to its end is caught.
 type fakeLane struct {
 	srv       *httptest.Server
-	metadata  int32 // HTTP status /metadata answers with
+	subset    func()
+	metadata  int32 // fault hook: HTTP status /metadata answers with; 200 = the recorded answer
 	validate  func(w http.ResponseWriter, r *http.Request) bool
 	postsMu   sync.Mutex
 	posts     []recordedPost
 	validates int32
+	active    atomic.Int32
+	overlaps  atomic.Int32
+	hold      atomic.Int64 // a time.Duration
 }
 
 type recordedPost struct {
@@ -32,28 +51,35 @@ type recordedPost struct {
 	body                    []byte
 }
 
-func testOutcome(body []byte, profile string) string {
-	if outcome := explicitProfileTestOutcome(profile); outcome != "" {
-		return outcome
-	}
-	if outcome := supportTestOutcome(body, ""); outcome != "" {
-		return outcome
-	}
-	if strings.Contains(string(body), `"valueBoolean":true`) {
-		return targetedNegativeOutcome
-	}
-	return cleanOutcome
+func newFakeLane(t *testing.T, line string) *fakeLane { return newLane(t, line, false) }
+
+// newWarmedFakeLane is the lane as a verification pass meets it, after the
+// warm-up. Verification asks 20 of the 42 recorded requests, so the rest go
+// unused.
+func newWarmedFakeLane(t *testing.T, line string) *fakeLane {
+	l := newLane(t, line, true)
+	l.partial()
+	return l
 }
 
-func newFakeLane(t *testing.T) *fakeLane {
+func newLane(t *testing.T, line string, warmed bool) *fakeLane {
 	t.Helper()
-	l := &fakeLane{metadata: http.StatusOK}
+	lane, subset := replayLane(t, line, warmed)
+	capability := recordedMetadata(t, line)
+	l := &fakeLane{subset: subset, metadata: http.StatusOK}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/fhir/metadata", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(int(atomic.LoadInt32(&l.metadata)))
-		_, _ = w.Write([]byte(`{"resourceType":"CapabilityStatement"}`))
+	mux.HandleFunc("/fhir/metadata", func(w http.ResponseWriter, r *http.Request) {
+		if status := atomic.LoadInt32(&l.metadata); status != http.StatusOK {
+			w.WriteHeader(int(status))
+			return
+		}
+		serveRecordedMetadata(t, w, r, capability)
 	})
 	mux.HandleFunc("/fhir/", func(w http.ResponseWriter, r *http.Request) {
+		if l.active.Add(1) != 1 {
+			l.overlaps.Add(1)
+		}
+		defer l.active.Add(-1)
 		atomic.AddInt32(&l.validates, 1)
 		body, _ := io.ReadAll(r.Body)
 		l.postsMu.Lock()
@@ -62,18 +88,38 @@ func newFakeLane(t *testing.T) *fakeLane {
 		if l.validate != nil && !l.validate(w, r) {
 			return
 		}
-		w.Header().Set("Content-Type", "application/fhir+json")
-		w.WriteHeader(http.StatusOK)
-		if outcome := supportTestOutcome(body, r.URL.Query().Get("profile")); outcome != "" {
-			_, _ = w.Write([]byte(outcome))
-		} else {
-			_, _ = w.Write([]byte(testOutcome(body, r.URL.Query().Get("profile"))))
+		req, err := http.NewRequestWithContext(r.Context(), r.Method, lane.URL+r.URL.RequestURI(), bytes.NewReader(body))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if contentType := r.Header.Get("Content-Type"); contentType != "" {
+			req.Header.Set("Content-Type", contentType)
+		}
+		resp, err := lane.Client().Do(req)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
+		w.WriteHeader(resp.StatusCode)
+		_, _ = io.Copy(w, resp.Body)
+		if hold := time.Duration(l.hold.Load()); hold > 0 {
+			// The answer's bytes are out; its end is not until the handler returns.
+			w.(http.Flusher).Flush()
+			time.Sleep(hold)
 		}
 	})
 	l.srv = httptest.NewServer(mux)
 	t.Cleanup(l.srv.Close)
 	return l
 }
+
+// partial marks a test whose validate hook answers rows itself, or whose run
+// asks fewer than all the recorded requests: the recorded answers for those
+// rows go unused.
+func (l *fakeLane) partial() { l.subset() }
 
 func (l *fakeLane) base() string { return l.srv.URL + "/fhir" }
 
@@ -99,7 +145,8 @@ func otherJVM() string { return "boot-a:9001" }
 
 func markerPath(t *testing.T) string { t.Helper(); return filepath.Join(t.TempDir(), "warm") }
 func TestCheckNon200(t *testing.T) {
-	lane := newFakeLane(t)
+	lane := newFakeLane(t, "2.2")
+	lane.partial() // no validation is asked
 	atomic.StoreInt32(&lane.metadata, http.StatusServiceUnavailable)
 	marker := markerPath(t)
 	if got := check(lane.base(), envLine("2.2"), marker, time.Second, sameJVM); got != 1 {
@@ -124,7 +171,8 @@ func TestCheckUnreachable(t *testing.T) {
 }
 
 func TestCheckMetadataHangIsNotReady(t *testing.T) {
-	lane := newFakeLane(t)
+	lane := newFakeLane(t, "2.2")
+	lane.partial() // no validation is asked
 	release := make(chan struct{})
 	mux := http.NewServeMux()
 	mux.HandleFunc("/fhir/metadata", func(w http.ResponseWriter, r *http.Request) {
@@ -235,7 +283,8 @@ func TestLineFromEnv(t *testing.T) {
 }
 
 func TestObserverNeverSubmitsWarmup(t *testing.T) {
-	lane := newFakeLane(t)
+	lane := newFakeLane(t, "2.2")
+	lane.partial() // an observer asks only the recorded metadata
 	got := check(lane.base(), envLine("2.2"), markerPath(t), time.Second, sameJVM)
 	if got != 1 || len(lane.recorded()) != 0 {
 		t.Fatalf("observer submitted or credited cold work: exit=%d posts=%d", got, len(lane.recorded()))

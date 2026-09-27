@@ -34,9 +34,13 @@ RUN --network=none case "$TARGETPLATFORM" in \
 FROM golang:1.23-alpine AS hc
 WORKDIR /src
 COPY go.mod *.go ./
-COPY verify-process.sh ./
 COPY testdata ./testdata
-RUN go test ./... && CGO_ENABLED=0 go build -o /healthcheck .
+# internal/ holds the recording replay helper the tests import.
+COPY internal ./internal
+# The module's tests run in CI's hermetic-modules shard (make
+# validator-module-tests), not here: a loaded build runner flaked their timing.
+# go vet compiles them.
+RUN go vet ./... && CGO_ENABLED=0 go build -o /healthcheck .
 
 # Stage: download the 2.0-line IG packages (network at BUILD time only).
 FROM alpine:3 AS igs-2.0

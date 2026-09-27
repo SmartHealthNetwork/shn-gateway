@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -167,7 +168,7 @@ func TestAdmissionBoundsPendingDialsAndJoinsCancellation(t *testing.T) {
 	a.admit()
 	c := admissionConn(t, a)
 	defer c.Close()
-	<-entered
+	awaitDial(t, entered, 5*time.Second)
 	extra := admissionConn(t, a)
 	_, err := extra.Read(make([]byte, 1))
 	extra.Close()
@@ -333,7 +334,7 @@ func TestAdmissionRevocationClosesLateDialWithoutForwarding(t *testing.T) {
 	a.admit()
 	c := admissionConn(t, a)
 	defer c.Close()
-	<-entered
+	awaitDial(t, entered, 5*time.Second)
 	a.revoke()
 	if a.count() != 1 {
 		t.Fatal("pending dial abandoned before join")
@@ -346,5 +347,45 @@ func TestAdmissionRevocationClosesLateDialWithoutForwarding(t *testing.T) {
 	}
 	if a.count() != 0 {
 		t.Fatal("late dial leaked slot")
+	}
+}
+
+// fataler is the part of testing.TB awaitDial fails through.
+type fataler interface {
+	Helper()
+	Fatalf(format string, args ...any)
+}
+
+// awaitDial waits for the backend dial to be reached, and fails the test,
+// rather than blocking the package until the test binary's timeout, when it
+// is not reached within the bound.
+func awaitDial(t fataler, entered <-chan struct{}, within time.Duration) bool {
+	t.Helper()
+	select {
+	case <-entered:
+		return true
+	case <-time.After(within):
+		t.Fatalf("the backend dial was not reached within %v", within)
+		return false
+	}
+}
+
+type recordedFatal struct{ msg string }
+
+func (*recordedFatal) Helper() {}
+func (r *recordedFatal) Fatalf(format string, args ...any) {
+	r.msg = fmt.Sprintf(format, args...)
+}
+
+// A dial that is never reached fails the wait instead of hanging it.
+func TestAwaitDialFailsInsteadOfHanging(t *testing.T) {
+	var r recordedFatal
+	if awaitDial(&r, make(chan struct{}), 10*time.Millisecond) || !strings.Contains(r.msg, "not reached") {
+		t.Fatalf("a dial never reached: reached=true or no failure (%q)", r.msg)
+	}
+	reached := make(chan struct{})
+	close(reached)
+	if !awaitDial(t, reached, time.Second) {
+		t.Fatal("a reached dial was not seen")
 	}
 }

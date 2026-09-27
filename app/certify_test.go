@@ -10,11 +10,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 
 	engine "github.com/SmartHealthNetwork/shn-gateway/engine"
+	"github.com/SmartHealthNetwork/shn-gateway/internal/testrecord"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -106,11 +109,28 @@ func TestCertifyURLRequiresHostAtBoot(t *testing.T) {
 	}
 }
 
-// build wires the lane manager's defaults into the certification clients: a
-// line with no address gets the gated default, at the Compose default
-// endpoint, from the same lane routing is qualifying. Passing nil at the build
-// call site leaves 2.2 with no client and this row red.
-func TestBuildWiresDefaultLanesIntoCertification(t *testing.T) {
+// unresolvedComposeLanes answers the default lanes' Compose names in
+// http.DefaultTransport, unresolved, for the rest of the test: the 2.2 default
+// lane's boot qualifier dials one, and it would otherwise be resolved on the
+// live network. Call it once, before any build, so no build's goroutine is
+// reading http.DefaultTransport when it is swapped or restored.
+func unresolvedComposeLanes(t *testing.T) {
+	t.Helper()
+	base := http.DefaultTransport
+	http.DefaultTransport = lifecycleTransport(func(r *http.Request) (*http.Response, error) {
+		if strings.HasPrefix(r.URL.Hostname(), "shn-validator-") {
+			return nil, fmt.Errorf("dial %s: no such host (fixture)", r.URL.Host)
+		}
+		return base.RoundTrip(r)
+	})
+	t.Cleanup(func() { http.DefaultTransport = base })
+}
+
+// buildForCertification builds a provider gateway with a configured 2.1
+// certification address and the 2.2 default lane, plus extra env. Its caller
+// runs unresolvedComposeLanes first.
+func buildForCertification(t *testing.T, extra map[string]string) built {
+	t.Helper()
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
 	keyBody := fmt.Sprintf(`{"pubkey":%q}`, base64.StdEncoding.EncodeToString(pub))
 	keys := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(keyBody)) }))
@@ -138,6 +158,9 @@ func TestBuildWiresDefaultLanesIntoCertification(t *testing.T) {
 		"FHIR_DATA_URL":             "https://sor.example/fhir",
 		"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate",
 	}
+	for k, v := range extra {
+		env[k] = v
+	}
 	b, err := build(context.Background(), func(k string) string { return env[k] }, io.Discard, nil)
 	if err != nil {
 		t.Fatalf("build: %v", err)
@@ -148,6 +171,16 @@ func TestBuildWiresDefaultLanesIntoCertification(t *testing.T) {
 			_ = b.gateway.Close()
 		}
 	})
+	return b
+}
+
+// build wires the lane manager's defaults into the certification clients: a
+// line with no address gets the gated default, at the Compose default
+// endpoint, from the same lane routing is qualifying. Passing nil at the build
+// call site leaves 2.2 with no client and this row red.
+func TestBuildWiresDefaultLanesIntoCertification(t *testing.T) {
+	unresolvedComposeLanes(t)
+	b := buildForCertification(t, nil)
 	gated, ok := b.certification["2.2"].(*engine.GatedCertificationValidator)
 	if !ok {
 		t.Fatalf("2.2 certification client = %#v, want the gated default wired from the lane manager", b.certification["2.2"])
@@ -160,16 +193,36 @@ func TestBuildWiresDefaultLanesIntoCertification(t *testing.T) {
 	}
 }
 
+// build asks for the boot certification warm-up exactly when certification
+// evidence is collected: at every level but none, where no certification
+// worker starts and nothing would use a warmed validator.
+func TestBuildWarmsCertificationOnlyWhenItRuns(t *testing.T) {
+	unresolvedComposeLanes(t)
+	for level, want := range map[string]bool{"": true, "observe": true, "structural": true, "strict": true, "none": false} {
+		b := buildForCertification(t, map[string]string{"CONFORMANCE_ENFORCEMENT": level})
+		if b.warmCertification != want {
+			t.Errorf("CONFORMANCE_ENFORCEMENT=%q: warmCertification %v, want %v", level, b.warmCertification, want)
+		}
+		if len(b.certification) == 0 {
+			t.Errorf("CONFORMANCE_ENFORCEMENT=%q: build handed the warm-up no certification clients", level)
+		}
+	}
+}
+
 // A default lane serves certification only once routing has qualified it. Before
 // that the client answers the lane-unavailable error naming the env to set, and
 // dials nothing; after qualification it certifies through its own client at the
-// lane's endpoint.
+// lane's endpoint, and records the lane's verdict: the lane is a real 2.2 lane
+// replayed strictly (../engine/testdata/recordings/lane-2.2-certify-literal.json),
+// which finds the literal Claim invalid.
 func TestCertificationDefaultLaneGatedOnQualification(t *testing.T) {
+	rec := testrecord.Load(t, filepath.Join("..", "engine", "testdata", "recordings", "lane-2.2-certify-literal.json"))
+	rec.Subset() // the lane's answer with no profile is not asked; hits bound the other
+	replay := rec.Server()
 	var hits int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&hits, 1)
-		w.Header().Set("Content-Type", "application/fhir+json")
-		_, _ = w.Write([]byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"information","code":"informational","diagnostics":"All OK"}]}`))
+		replay.Config.Handler.ServeHTTP(w, r)
 	}))
 	defer upstream.Close()
 	lane := engine.NewDiscoveredLane("2.2", upstream.URL+"/fhir", shnsdk.NewOperationValidator(upstream.URL+"/fhir"))
@@ -200,8 +253,8 @@ func TestCertificationDefaultLaneGatedOnQualification(t *testing.T) {
 		t.Fatal(err)
 	}
 	res, err := gated.Validate(context.Background(), []byte(`{"resourceType":"Claim"}`), "profile")
-	if err != nil || !res.Valid {
-		t.Fatalf("after qualification: res=%+v err=%v", res, err)
+	if err != nil || res.Valid || len(res.Issues) != 9 || !slices.Contains(res.Issues, "Invalid profile. Failed to retrieve explicitly requested profile with url=profile") {
+		t.Fatalf("after qualification: res=%+v err=%v, want the lane's invalid verdict (nine errors, the unknown profile among them)", res, err)
 	}
 	if atomic.LoadInt32(&hits) != 1 {
 		t.Fatalf("qualified lane dialed %d times, want 1", hits)

@@ -44,6 +44,11 @@ import (
 //	                  rendering as leg.originated's Route; nil for roundTrip's
 //	                  other leg.failed causes (auth denial, Hub unreachable, …),
 //	                  which carry no route story to report
+//	leg.resent        an amendment this gateway built for its participant (pas-claim-update)
+//	                  was answered 409 and is being sent once more (LegResentEvent;
+//	                  CorrelationID = the re-send's, Counterpart = the payer, Status = 409,
+//	                  Detail = JSON naming the refused attempt's refusedCorrelationId;
+//	                  each attempt keeps its own leg.originated/leg.response pair)
 //	leg.refused       version-matched routing found no shared contract line for the leg
 //	                  and refused before anything was sent (Detail = refusal message;
 //	                  Route.Own/Peer/BridgeIssue = the structured refusal, nil when the

@@ -51,6 +51,25 @@ asking for it (`Claim/$inquire`, leg type `pas-claim-inquire`).
 `CONFORMANCE_ENFORCEMENT` takes `none`, `observe` (the default when unset),
 `structural` or `strict` (see [docs/CONFIGURATION.md](docs/CONFIGURATION.md)).
 
+**Behavior change in v0.55.0: an unknown code system is recorded at `structural`.**
+
+- A coding whose code system the validator does not know
+  (`Terminology_TX_System_Unknown`) is now recorded at `structural`, like any
+  other code system the validator cannot check, when nothing else in the message
+  refuses at that level. Earlier releases refused it at `structural`.
+- The validator reports this issue as an error only for a system in the HL7 FHIR
+  namespace. That includes a misspelled HL7 system URL, which the validator
+  cannot tell apart from one it has not loaded, so it too is recorded.
+- `strict` still refuses it, and `observe` still records it.
+- The validator image built from v0.55.0's or a later `deploy/validator`
+  resolves the `version-algorithm` code system on the 2.0 and 2.1 lines, which
+  earlier images reported as an unknown code system. An image built before
+  v0.55.0 still reports it, and `strict` refuses it; rebuild the image with the
+  gateway.
+- In v0.55.0, apart from this and the provider's check of a payer's answers
+  (below), the four levels behave as in v0.54.0. v0.56.0 adds the check of a
+  CDS Hooks answer on the legs a provider originates (below).
+
 **New in v0.54.0** (v0.53.x and earlier refuse to boot on `structural`):
 
 - The new `structural` level runs every check, refuses a message whose structure is
@@ -160,6 +179,154 @@ carried by default.**
   legs is handed the payer's own binding of the member the request names as its
   subject, not the leg token's subject.
 
+## Amendments a provider's gateway builds, after a payer's 409
+
+**Behavior change in v0.56.0.**
+
+- When a provider's gateway builds a PAS amendment (`pas-claim-update`) for its
+  participant (the scenario flows, and resuming a pended request with a
+  clinician's or the patient's answers) and the payer answers `409` (a version
+  conflict: its store refused the amendment while it resolved the same claim,
+  and kept nothing), the gateway builds and sends the amendment once more under
+  a new correlation id, and relays the payer's answer to that one. A second
+  `409` is relayed as it came.
+- Each attempt is its own leg, with its own `leg.originated`/`leg.response`
+  pair and its own Hub records. The new `leg.resent` observer event
+  (`engine.LegResentEvent`) links them: its correlation id is the re-send's, and
+  its `Detail` names the refused attempt's (`refusedCorrelationId`).
+- An amendment the participant sends through the Da Vinci ingress is relayed as
+  before: its `409` reaches the participant, who decides whether to resend. A
+  payer's gateway relays its payer's `409` and never resends (v0.54.0, below).
+- No configuration changes. The Go API adds `engine.LegResentEvent`, the new
+  event's kind. An observer consumer that switches on `Kind` sees one new kind.
+
+## CDS Hooks answers on the legs a provider originates
+
+**Behavior change in v0.56.0.**
+
+- A provider's gateway checks the payer's CDS Hooks answer on a CRD leg it
+  originates itself (`order-sign`, `order-select` and `order-dispatch`) against
+  the CDS Hooks response rules, at its own conformance level, before it reads
+  the payer's coverage information from it. It already did so for an answer it
+  relays to its participant's own system through the Da Vinci ingress, and a
+  payer's gateway does so for its own system's answer.
+  - `none`: no check (a repeated member name, which is message integrity, is
+    still refused at every level).
+  - `observe`: each broken rule is recorded as a finding, and the exchange
+    continues.
+  - `structural`: a broken structure is refused (`502 payer CRD response is not
+    a valid CDS Hooks response: <rule>`); a card's summary length, CRD topic
+    and selection behavior, and an action's resource, are recorded.
+  - `strict`: any broken required rule is refused.
+- There is no exception for the network's reference payers: their gateways
+  already pass their own answers at `strict`. (The reference-payer exception
+  below applies only to their DTR and PAS answers.)
+- **Compatibility.** A provider gateway at `structural` or `strict` paired with
+  a payer whose CDS Hooks answers break a required rule, and whose own gateway
+  does not refuse them (it runs `none` or `observe`), now refuses those answers
+  on the legs it originates, where earlier releases read and acted on them.
+  Some payers' CRD answers today omit a member CDS Hooks requires (a system
+  action's `description`, or `cards` itself), so a provider at `structural` or
+  `strict` paired with such a payer sees `502` on these legs. This includes a
+  SHN Kit provider set to `structural` or `strict`, once the Kit pins v0.56.0 or
+  later; the Kit's default is the gateway's own, `observe`. At `observe`, the
+  hosted and Kit default, only new findings appear.
+- No configuration or Go API changes. An answer relayed through the Da Vinci
+  ingress is checked once, as before.
+
+## A payer's DTR and PAS answers on the legs a provider originates
+
+**Behavior change in v0.55.0.**
+
+- A provider's gateway builds and sends some legs itself, on its
+  `ORIGINATION_PROFILE` lane (`demo`, which is what unset means for
+  `ROLE=provider`, or `provider-data`). It now checks the payer's answer on
+  these legs at its own conformance level: the DTR `$questionnaire-package`
+  answer, the DTR `$next-question` answer, and the PAS ClaimResponse answer to a
+  submit or update, including on a resumed exchange. Earlier releases checked
+  no payer's answers on these lanes. From v0.56.0 the payer's CDS Hooks answer
+  on the CRD legs it originates is checked too (above).
+- **Not checked:** `$inquire` answers, and the answers a gateway relays to its
+  participant's own system through the Da Vinci ingress (the native PAS and
+  questionnaire relays), as before.
+- **Reference payers.** An answer is not checked only when both of these hold:
+  the gateway is on the `demo` or `provider-data` lane, and the payer identity
+  the member's Coverage names, which the leg was routed by, is one of SHN's
+  reference payers: `urn:oid:2.16.840.1.113883.6.300` `00001`, `00300` or
+  `00301`, or one of SHN's two bridging-demo payers under `urn:shn:demo-payer`
+  (`SHN-BRIDGE-DEMO`, `SHN-BRIDGE-REFUSE`), which front `00001`. Their packages
+  do not yet conform: the 2.0 reference payer's DTR package fails DTR 2.0.1. The
+  set changes only in a gateway release, never through configuration.
+- **Lines tried, in order.** Each answer is checked against the IG lines the
+  gateway can validate:
+  1. the line the leg was sent at: the payer's declared line, or the gateway's
+     own line when the payer declared none;
+  2. the lines the answer claims, first through a versioned `meta.profile`, then
+     through a line-specific structural marker;
+  3. the rest of 2.2, 2.1 and 2.0.
+
+  Each line is tried at most once, and only where the gateway has a validator
+  for it. A validator that serves several lines is called only once, so a
+  gateway with one validator for every line judges the answer once, at the line
+  the leg was sent at. The check stops at the first line where the answer is
+  valid, and a further line is tried only when the line before it was not
+  valid. The line the leg was sent at uses the validator client's own timeout;
+  every other line gets at most 2 seconds, and one that does not answer in time
+  counts as unavailable for that line. So when the gateway has no validator for
+  the line the leg was sent at, the first line it actually checks gets the
+  2-second bound.
+- **The verdict.** An answer that is valid on any line is valid. If no line is
+  valid, the check is unavailable when the line the leg was sent at, or a line
+  the answer claims, could not be checked (its validator did not answer, or the
+  gateway has none for it), and also when no line's validator answered.
+  Otherwise the verdict is the best one any line gave; a deeper-rule defect
+  beats a structural one.
+- **By level:**
+  - `none`: no validator call and no finding.
+  - `observe`: every outcome that is not valid is recorded, and the answer is
+    relayed.
+  - `structural`: a structural or unclassified defect is refused; a deeper-rule
+    defect and an unavailable check are recorded; the answer is otherwise
+    relayed.
+  - `strict`: every defect is refused, and an unavailable check is refused with
+    `500`.
+- **A refusal.** The gateway's own client receives `422 {"error":"ingress
+  validation failed: <issues>"}`, with the issues from the line that decided. An
+  unavailable check at `strict` answers `500` (`validator unavailable`, or a
+  message naming the line that has no validator lane). The payer has already
+  received the request and answered it.
+- **Findings.** An answer valid at the line the leg was sent at records nothing.
+  Any other checked answer records one conformance finding, except an
+  unavailable check at `strict`, which is refused without one. The finding
+  carries `declaredLine` (the line the leg was sent at), `lines` (each line
+  considered, in order, with its verdict: `valid`, `structural`, `deeper` or
+  `unavailable`; the line the leg was sent at, or a line the answer claims, that
+  has no validator is listed as `unavailable`, and no validator diagnostic
+  appears here) and `line` (the line the decision came from). An answer valid
+  only on a line after the one the leg was sent at gets one finding with
+  `verdict` `valid` and `decision` `record`; this is not a defect. When the
+  gateway has no validator for any of the lines, the answer is judged once, as
+  before this release, and its finding carries no `declaredLine` or `lines`.
+- **A known limit.** An answer valid on any supported line is relayed at every
+  level. For example, an answer sent at 2.2 that is structurally invalid at 2.2
+  but valid at 2.0 is relayed at `strict`. A payer's declared line may be the
+  gateway's default rather than the payer's own claim, and the network cannot
+  yet tell the two apart.
+- **Compatibility.** At the default level (`observe`) the check records findings
+  and refuses nothing; the validator calls add time. At `structural` a
+  structurally invalid answer is refused (`422`), and at `strict` any defect is
+  refused (`422`), as is an answer the validator cannot check (`500`). The check
+  is the provider's gateway's own and does not depend on the payer's release. A
+  provider's gateway before v0.55.0 on the `demo` or `provider-data` lane checks
+  no payer's answers.
+- No configuration changes. See also
+  [docs/INTEGRATION.md](docs/INTEGRATION.md#conformance-enforcement).
+- **Go API (additive):** `engine.ReferencePayerIdentities` (the identities above;
+  it returns a copy), `engine.ConformanceFinding.DeclaredLine`,
+  `engine.ConformanceFinding.Lines` and `engine.LineVerdictSummary`.
+  `engine.ConformanceFinding.Verdict` can now be `valid`, on a payer-answer
+  finding that is not a defect; the signatures are unchanged.
+
 ## Identifiers for members the system of record does not hold
 
 **Behavior change in v0.55.0.**
@@ -239,6 +406,110 @@ carried by default.**
   `engine.Config.InvolvedBudget` (zero selects 2 seconds) and
   `engine.Config.InvolvedMetric`; `engine.InvolvedOmittedEvent`.
 
+## Networks without default validator lanes
+
+**New in v0.55.0.**
+
+- `FHIR_DEFAULT_VALIDATOR_LANES` accepts unset or `none`; any other value
+  refuses to start (see [docs/CONFIGURATION.md](docs/CONFIGURATION.md)).
+  - Unset keeps the earlier behavior: the gateway probes the Compose default
+    validator names (`shn-validator-2-1`, `shn-validator-2-2`) for a line with no
+    address of its own.
+  - `none` states that this gateway's network has no such services. The gateway
+    creates no default lane and never probes their names.
+- With `none`, a CRD, DTR or PAS line other than 2.0 that `SHN_CONTRACT_VERSIONS`
+  declares needs its own `FHIR_VALIDATE_URL_<line>`; otherwise the gateway
+  refuses to start, naming the key. `FHIR_CERTIFY_URL_<line>` does not satisfy
+  that requirement. A line with neither key dials nothing for certification
+  evidence (Observational source certification, below). A single-line
+  contract's line (`pa.pdex@2.1`) still rides the canonical validator, as it
+  does with default lanes.
+- SHN Cloud sets `FHIR_DEFAULT_VALIDATOR_LANES=none` for hosted gateways on
+  v0.55.0 or later. It is not a tenant setting. A self-hosted gateway that
+  leaves it unset keeps the default lanes.
+- **Failed probes name their cause.** The `validator_qualification` and
+  `certification_lane_qualification` log lines now carry the `host` they dial,
+  and a `failed` line also carries a `reason`: `name does not resolve`,
+  `name lookup failed`, `connection refused`, `metadata answered HTTP <status>`,
+  `metadata is not an R4 CapabilityStatement`, `qualification corpus did not
+  pass`, `no answer within the qualification budget`, `qualification stopped`
+  or `qualification did not pass`. The line never includes error text or a
+  validator's answer. A lane that never answers keeps the cause of its last
+  failed attempt, so it still says why.
+- **Rolling back.** A gateway before v0.55.0 ignores
+  `FHIR_DEFAULT_VALIDATOR_LANES`: it probes the Compose default names again, and
+  its failed probes carry no `host` or `reason`.
+
+## Bridging refusals answer `422`
+
+**Behavior change in v0.55.0.**
+
+- When a request cannot be carried to the recipient's IG line without changing
+  what it asserts, the gateway refuses it and sends nothing. That refusal now
+  answers `422`, where it answered `502`. The body is unchanged:
+  `{"error":"shn: semantic-change refusal: …"}`.
+- On the wire, a leg is bridged only when the recipient's line is not one the
+  gateway carries natively. Every published line is native, so today this is
+  reachable only on a PAS submit or update the gateway builds itself while its
+  egress is narrowed with the demo-only `SHN_DEMO_EGRESS_NATIVE_LINES` (see
+  [docs/CONFIGURATION.md](docs/CONFIGURATION.md)). A DTR `$next-question` or
+  questionnaire-package fetch is carried to the payer's line unchanged, so it
+  never takes this refusal.
+- Any other failure while bridging is the gateway's own fault and stays `502`: a
+  step that cannot parse the payload, a missing chain, or a Provenance that does
+  not round-trip.
+- The bridging demo lane keeps its structured `200` refusal.
+
+## A Coverage named twice in a DTR QuestionnaireResponse
+
+**Behavior change in v0.55.0.**
+
+A DTR QuestionnaireResponse can name its Coverage both in `qr-coverage` and in a
+Coverage `qr-context` entry. When the gateway's transform chain bridges one
+between 2.1 and 2.2, in either direction:
+
+- **Fold.** A single Coverage `qr-context` entry is removed when it names exactly
+  the same Coverage reference as the `qr-coverage` entry and equals it apart from
+  its `url`. The `qr-coverage` entry keeps its position: going up it stays in
+  place, and going down it becomes the `qr-context` entry in place. Earlier
+  releases left two entries naming the same Coverage.
+- **Refused**, as a semantic-change refusal:
+  - two different Coverages, in either extension;
+  - references that are not exactly equal, such as an absolute and a relative
+    reference, or an identifier-only reference;
+  - going up, a `qr-context` entry that names a Coverage by anything but a
+    relative `Coverage/<id>` reference; going down, one that does so and does not
+    exactly repeat the `qr-coverage` reference;
+  - more than one Coverage `qr-context` entry;
+  - a repeat that differs from the `qr-coverage` entry in anything but its `url`;
+  - a result that would name one Coverage twice.
+- The 2.2 to 2.1 direction could not refuse before. It now refuses these shapes.
+- With no repeat present, the single Coverage entry is relocated in place, as
+  before.
+- **Where it runs.** No transmitted leg bridges a DTR QuestionnaireResponse
+  today: a DTR questionnaire fetch is carried to the payer's line unchanged, and
+  a PAS bundle's embedded QuestionnaireResponse is left as sent. The fold and its
+  refusals apply to the transform chain itself (`engine.RunTransformChain`, and
+  the observer listener's `POST /demo/transform`, which answers a refusal with
+  `422` and its own body).
+
+## When the requester stops waiting
+
+**New in v0.55.0.**
+
+- A payer's gateway still waiting on its payer's system when the request it
+  serves ends now logs its own line. The request ends when the requester stopped
+  waiting or when the payer's gateway is shutting down:
+
+  `gateway: upstream payer <leg label> call abandoned after <s>s: the request it serves ended (<cause>) (host <host>, leg <leg>, correlation <id>, request written: yes|no)`
+
+- It covers the CRD, DTR, PAS submit, update and inquiry calls, and the coverage
+  eligibility forward. It names the upstream host only, never the path, query,
+  headers or body. Earlier releases wrote no payer-side line for it.
+- It is written alongside the existing `upstream payer … unreachable` or
+  `read failed` error, when the request had already ended; those errors are
+  unchanged (see [docs/CONFIGURATION.md](docs/CONFIGURATION.md)).
+
 ## Enrichment of native requests
 
 **Behavior change in v0.54.0: a Da Vinci-native request is carried as sent unless
@@ -303,7 +574,11 @@ background attempts afterwards, which never change routing's lanes; until then t
 verdict states that no lane is configured and the qualification's state, verbatim, and no
 exchange waits on or dials for a qualification. With `FHIR_DEFAULT_VALIDATOR_LANES=none`
 there is no Compose default: nothing is probed, and a line with neither key states that it
-is not configured and that the network has no default validator lanes. Embedders may
+is not configured and that the network has no default validator lanes. From v0.56.0, where
+certification evidence is collected, `Run` also sends each certification address it was given
+one request at boot, off the request path and recording no evidence, so that a new process's
+first request to a validator is not a real certification's (docs/CONFIGURATION.md); the handler
+constructors do not. Embedders may
 supply independent clients through `Config.CertificationValidatorsByLine`; they must
 not share routing validators or qualification wrappers. Missing clients are recorded
 as unavailable. HTTP server execution failures are unavailable rather than conclusive
@@ -501,8 +776,9 @@ or global failure state is introduced.
   `pend.amendment-unbound:<reason>`.
 - A record that cannot be written after the payer answered no longer withholds the
   answer (it was `502 holder write failed`). The gateway emits `pa.local-write-failed`.
-- The payer's own `409` version conflict is relayed; the gateway no longer re-sends the
-  amendment once. The `retry:version-conflict` observer note is gone.
+- The payer's own `409` version conflict is relayed; the payer's gateway no longer re-sends
+  the amendment once. The `retry:version-conflict` observer note is gone. (From v0.56.0 the
+  provider's gateway, as the requester, re-sends an amendment it built once; see above.)
 - `engine.PendBegin` and `engine.PendRePend` take the current `PendRecord` and the store's
   clock (`PendBegin(cur PendRecord, found bool, now time.Time)`,
   `PendRePend(cur PendRecord, found bool, created, now time.Time)`), so a backend applies
@@ -685,7 +961,8 @@ with the SHN exchange protocol regardless of the gateway version it runs.
 
 ## Optional diagnostic events (evolving)
 
-`engine.Config.Diagnostic func(diagnostics.Event) bool` is a separate opt-in sink
+`engine.Config.Diagnostic` (an `engine.DiagnosticSink`, which is
+`func(diagnostics.Event) bool`) is a separate opt-in sink
 for raw HTTP and participant-stage observations. `DiagnosticTraceKey` verifies
 optional private ingress call attribution. `engine.WithNativeDiagnostic` adds the
 same sink to native forwarding. Nil disables each hook. Sinks run synchronously,

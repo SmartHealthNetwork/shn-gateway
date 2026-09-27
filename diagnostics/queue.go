@@ -26,6 +26,13 @@ type queuedEvent struct {
 	bytes     int64
 	delivered bool
 	deadline  time.Time
+	// bindingWait is the event's current binding_pending wait: it grows while
+	// the ingest holds the event pending, and leaves with the event.
+	bindingWait time.Duration
+	// notBefore is when a pending event is due again. Until then the
+	// publisher takes the events behind it: one event's wait never holds up
+	// the queue.
+	notBefore time.Time
 }
 type Queue struct {
 	mu                                      sync.Mutex
@@ -123,31 +130,83 @@ func (q *Queue) TryEmit(e Event) bool {
 
 func (q *Queue) Next(ctx context.Context) (Event, error) {
 	for {
-		q.mu.Lock()
-		for i := range q.items {
-			if !q.items[i].delivered {
-				q.items[i].delivered = true
-				e := q.items[i].event
-				for j := i + 1; j < len(q.items); j++ {
-					if !q.items[j].delivered {
-						select {
-						case q.ready <- struct{}{}:
-						default:
-						}
-						break
-					}
-				}
-				q.mu.Unlock()
-				return e, nil
-			}
+		e, ok, due := q.take(time.Now())
+		if ok {
+			return e, nil
 		}
-		q.mu.Unlock()
+		var later <-chan time.Time
+		var timer *time.Timer
+		if due > 0 {
+			timer = time.NewTimer(due)
+			later = timer.C
+		}
 		select {
 		case <-ctx.Done():
-			return Event{}, ctx.Err()
 		case <-q.ready:
+		case <-later:
+		}
+		if timer != nil {
+			timer.Stop()
+		}
+		if err := ctx.Err(); err != nil {
+			return Event{}, err
 		}
 	}
+}
+
+// take marks the first undelivered event due at now delivered and returns
+// it. With none due, it returns how long until the earliest undelivered
+// event is due, or zero when there is none.
+func (q *Queue) take(now time.Time) (Event, bool, time.Duration) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	var due time.Duration
+	for i := range q.items {
+		if q.items[i].delivered {
+			continue
+		}
+		if wait := q.items[i].notBefore.Sub(now); wait > 0 {
+			if due == 0 || wait < due {
+				due = wait
+			}
+			continue
+		}
+		q.items[i].delivered = true
+		for j := i + 1; j < len(q.items); j++ {
+			if !q.items[j].delivered {
+				select {
+				case q.ready <- struct{}{}:
+				default:
+				}
+				break
+			}
+		}
+		return q.items[i].event, true, 0
+	}
+	return Event{}, false, due
+}
+
+// waitDue waits d for the earliest pending event to fall due, returning early
+// when an event is emitted. It returns only once its watcher has stopped, so
+// the watcher can never take a signal meant for the publisher's next wait.
+func (q *Queue) waitDue(ctx context.Context, wait func(context.Context, time.Duration) error, d time.Duration) error {
+	wake, stop := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		select {
+		case <-q.ready:
+			stop()
+		case <-wake.Done():
+		}
+	}()
+	err := wait(wake, d)
+	stop()
+	<-done
+	if err != nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return nil
 }
 
 func (q *Queue) finish(sequence uint64, acknowledged, dropped bool) {
@@ -191,23 +250,33 @@ func (q *Queue) Health(now time.Time) Health {
 }
 
 // deferredBinding keeps the original queue reservation and absolute ownership
-// deadline while moving a dependency-blocked event behind already queued work.
-func (q *Queue) deferredBinding(sequence uint64) {
+// deadline while moving a dependency-blocked event behind already queued work,
+// due again after its binding wait (grown by nextRetryWait each time it is
+// held pending, spread by jitter, and never past its ownership deadline). It
+// returns the wait.
+func (q *Queue) deferredBinding(sequence uint64, now time.Time, jitter func(time.Duration) time.Duration) time.Duration {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	for i := range q.items {
 		if q.items[i].event.Sequence == sequence {
 			item := q.items[i]
 			item.delivered = false
+			item.bindingWait = nextRetryWait(item.bindingWait)
+			wait := jitter(item.bindingWait)
+			if left := item.deadline.Sub(now); !item.deadline.IsZero() && left < wait {
+				wait = max(left, 0)
+			}
+			item.notBefore = now.Add(wait)
 			copy(q.items[i:], q.items[i+1:])
 			q.items[len(q.items)-1] = item
 			select {
 			case q.ready <- struct{}{}:
 			default:
 			}
-			return
+			return wait
 		}
 	}
+	return 0
 }
 func (q *Queue) ownershipDeadline(sequence uint64, now time.Time) time.Time {
 	q.mu.Lock()

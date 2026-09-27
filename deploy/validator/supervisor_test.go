@@ -59,7 +59,7 @@ func childCommand(t *testing.T, mode string) (*exec.Cmd, *bufio.Reader) {
 	t.Helper()
 	cmd := exec.Command(os.Args[0], "-test.run=^TestJavaProcess$", "--", "literal space", "$JAVA_OPTS", "", "semi;colon")
 	// Race-instrumented helper exits must not add the race runtime's one-second
-	// exit sleep to the intentionally short injected shutdown budget.
+	// exit sleep to a stop budget (the forced-shutdown row's is short).
 	cmd.Env = append(os.Environ(), "SHN_TEST_CHILD="+mode, "JAVA_OPTS=-Xmx3072m", "JAVA_TOOL_OPTIONS=literal value", "GORACE=atexit_sleep_ms=0")
 	// The test owns these descriptors. Wait must not close the read
 	// end before the test consumes the child's final signal acknowledgement.
@@ -75,8 +75,18 @@ func childCommand(t *testing.T, mode string) (*exec.Cmd, *bufio.Reader) {
 	cmd.Stderr = os.Stderr
 	return cmd, bufio.NewReader(pipe)
 }
+
+// gracefulStopBudget is how long a test child may take to handle the
+// forwarded signal and exit before the supervisor kills it. The tests that
+// forward a signal are about forwarding and reaping, not about how fast a
+// loaded machine schedules the child: the hc build stage runs this suite while
+// the three line images build in parallel, where 100 ms was not enough and the
+// child was killed (137). A graceful test ends when the child exits, so the
+// budget costs nothing. The forced-shutdown test sets its own short budget.
+const gracefulStopBudget = 5 * time.Second
+
 func supervisorTestConfig(t *testing.T, base string) supervisorConfig {
-	return supervisorConfig{base: base, public: "127.0.0.1:0", marker: markerPath(t), line: "2.2", pasVersion: "2.2.1", key: sameJVM(), startupBudget: time.Second, stopBudget: 100 * time.Millisecond}
+	return supervisorConfig{base: base, public: "127.0.0.1:0", marker: markerPath(t), line: "2.2", pasVersion: "2.2.1", key: sameJVM(), startupBudget: time.Second, stopBudget: gracefulStopBudget}
 }
 func runChild(t *testing.T, ctx context.Context, cmd *exec.Cmd, cfg supervisorConfig, signals <-chan os.Signal) <-chan int {
 	t.Helper()
@@ -100,7 +110,9 @@ func childResult(t *testing.T, done <-chan int) int {
 	select {
 	case code := <-done:
 		return code
-	case <-time.After(5 * time.Second):
+	// Longer than the graceful budget, so a child killed at that budget
+	// reports its exit rather than racing this harness bound.
+	case <-time.After(gracefulStopBudget + 5*time.Second):
 		t.Fatal("supervisor did not terminate/reap child")
 		return -1
 	}
@@ -141,7 +153,8 @@ func TestSupervisorRefusesNonPID1WithoutEffects(t *testing.T) {
 	}
 }
 func TestSupervisorForwardsSignalAndReaps(t *testing.T) {
-	lane := newFakeLane(t)
+	lane := newFakeLane(t, "2.2")
+	lane.partial() // the child is stopped wherever the warm-up has got to
 	cfg := supervisorTestConfig(t, lane.base())
 	cmd, reader := childCommand(t, "wait")
 	signals := make(chan os.Signal, 1)
@@ -170,15 +183,27 @@ func TestSupervisorForwardsSignalAndReaps(t *testing.T) {
 func TestSupervisorCancellationAndForcedShutdown(t *testing.T) {
 	for _, mode := range []string{"wait", "ignore"} {
 		t.Run(mode, func(t *testing.T) {
-			lane := newFakeLane(t)
+			lane := newFakeLane(t, "2.2")
+			lane.partial() // the child is stopped wherever the warm-up has got to
 			cfg := supervisorTestConfig(t, lane.base())
+			if mode == "ignore" {
+				// The escalation itself: a child that ignores the signal is
+				// killed once its short budget runs out.
+				cfg.stopBudget = 100 * time.Millisecond
+			}
 			cmd, reader := childCommand(t, mode)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			done := runChild(t, ctx, cmd, cfg, make(chan os.Signal))
 			awaitChild(t, reader, cmd)
+			canceled := time.Now()
 			cancel()
 			got := childResult(t, done)
+			// The kill comes after the short budget, well before the graceful
+			// one: a slow escalation would pass the exit code alone.
+			if mode == "ignore" && time.Since(canceled) >= gracefulStopBudget/2 {
+				t.Fatalf("forced shutdown waited %v, the graceful budget, not its own", time.Since(canceled))
+			}
 			if mode == "wait" && got != 0 {
 				t.Fatalf("graceful exit=%d", got)
 			}
@@ -195,7 +220,8 @@ func TestSupervisorCancellationAndForcedShutdown(t *testing.T) {
 	}
 }
 func TestSupervisorChildExitAndStartupRefusals(t *testing.T) {
-	lane := newFakeLane(t)
+	lane := newFakeLane(t, "2.2")
+	lane.partial() // at most the exiting child's warm-up asks anything, and it stops early
 	for _, mode := range []string{"exit", "launch-failure", "marker-failure", "identity-failure", "missing-version", "wrong-version", "wrong-line", "canceled"} {
 		t.Run(mode, func(t *testing.T) {
 			cfg := supervisorTestConfig(t, lane.base())
@@ -235,7 +261,8 @@ func TestSupervisorChildExitAndStartupRefusals(t *testing.T) {
 	}
 }
 func TestSupervisorWarmupFailureKeepsChildAlive(t *testing.T) {
-	lane := newFakeLane(t)
+	lane := newFakeLane(t, "2.2")
+	lane.partial() // the hook answers the first row and the warm-up stops there
 	lane.validate = func(w http.ResponseWriter, _ *http.Request) bool { fmt.Fprint(w, "invalid"); return false }
 	cfg := supervisorTestConfig(t, lane.base())
 	cmd, reader := childCommand(t, "wait")
@@ -299,7 +326,8 @@ func TestSecondSupervisorProcessCannotLaunch(t *testing.T) {
 }
 
 func TestSupervisorReplacesSurvivingMarkerBeforeChildStarts(t *testing.T) {
-	lane := newFakeLane(t)
+	lane := newFakeLane(t, "2.2")
+	lane.partial() // metadata never comes up, so nothing is validated
 	atomic.StoreInt32(&lane.metadata, 503)
 	cfg := supervisorTestConfig(t, lane.base())
 	cfg.key = otherJVM()

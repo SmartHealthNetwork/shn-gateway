@@ -8,26 +8,31 @@ here and the bytes that came off the wire.
 
 ## pas-inquire-response.json — the reference payer's answer to Claim/$inquire
 
-Recorded 2026-09-18 from the pinned reference payer image `br-payer:a8bece4-pasgraph5-l8000p2`
+Recorded 2026-09-26 from the pinned reference payer image `br-payer:a8bece4-pasgraph8-l8000p2-dtr2`
 (upstream commit a8bece458cb31f151845db9ea5a892e398deef56 plus this repository's reviewed
-response-graph and questionnaire-version corrections), running under the opt-in two-reference-
-implementation compose stack, with the payer's own pended-resolution delay set to 3 seconds.
+correction series), run as one fresh container with the payer's own pended-resolution delay set
+to 3 seconds. The previous recording (2026-09-18, image `a8bece4-pasgraph5-l8000p2`, under the
+two-reference-implementation stack) differed from this one only in timestamps and generated
+identifiers, and in the payer's stored subscriber, whose member identifier the current series
+types v2-0203 `MB`.
 
 It is the payer's answer about the FIRST authorization a FRESH payer held — the case that used
 to be unmatchable (below) — and the recorder refuses to write this file unless the payer really
 holds none, so a later authorization cannot be mistaken for that proof.
 
-How it was captured, against that stack's payer FHIR base:
+How it was captured, against that payer's FHIR base:
 
 1. `POST Claim/$submit` with this repository's committed pended prior-authorization request
    golden (the home-oxygen E0424 order) — the payer answered A4 "Pending" with its own
    ClaimResponse id;
 2. `GET ClaimResponse/{id}` until the payer's own resolution timer flipped that claim to A1
    and minted its authorization number;
-3. `POST Claim/$inquire` with a prior-authorization inquiry request Bundle built from the
-   submitted bundle's own Patient, Coverage, Organizations and provider: an inquiry Claim
-   naming the same member, coverage, requested service and item trace number, plus the
-   payer's authorization number on the item, where PAS 2.0.1 and 2.1.0 place it;
+3. `POST Claim/$inquire` with a prior-authorization inquiry request Bundle built by the
+   published SDK (`BuildPASInquiryBundle`, line 2.0) from the submitted bundle's own Patient,
+   Coverage, Organizations and provider: an inquiry Claim naming the same member, coverage,
+   requested service and item trace number, with its own Claim identifier (the payer refuses
+   an inquiry without one), plus the payer's authorization number on the item, where PAS
+   2.0.1 and 2.1.0 place it;
 4. the answer, exactly as received and then re-indented, is this file. The payer answered
    HTTP 200 with `application/fhir+json;charset=UTF-8`.
 

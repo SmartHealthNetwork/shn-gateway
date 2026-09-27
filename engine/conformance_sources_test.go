@@ -163,9 +163,12 @@ var validateCallSites = map[string]string{
 	"gateway.go:validateGovernedLines": "choke",
 	"crd_native.go:observeCRDEmbedded": "observational",
 	"certify.go:collectCertification":  "observational",
-	"lanes.go:Validate":                "delegating",
-	"certifylane.go:Validate":          "delegating",
-	"observer.go:Validate":             "delegating",
+	// The boot warm-up (gateway/app) discards every verdict: it only reaches
+	// the certification endpoint before a real certification has to.
+	"../app/certifywarm.go:warmCertificationEndpoint": "observational",
+	"lanes.go:Validate":       "delegating",
+	"certifylane.go:Validate": "delegating",
+	"observer.go:Validate":    "delegating",
 	// EOBRecord.Validate (pendledger.go) checks the ledger row's own fields —
 	// an EOB id, non-empty bytes, and a subject matching the decision's — and
 	// never reaches a Validator. It is the one name collision in this

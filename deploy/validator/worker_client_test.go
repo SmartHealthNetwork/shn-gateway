@@ -37,7 +37,7 @@ func captureWorkerTransport(t *testing.T, server *httptest.Server) *http.Transpo
 func TestImageWorkerAuthorityAcrossFiniteCorpus(t *testing.T) {
 	for _, line := range []string{"2.0", "2.1", "2.2"} {
 		t.Run(line, func(t *testing.T) {
-			lane := newFakeLane(t)
+			lane := newFakeLane(t, line)
 			type capture struct {
 				host, method, path, query string
 				body                      []byte
@@ -162,7 +162,7 @@ func TestImageWorkerRefusesUnexpectedOriginBeforeDispatch(t *testing.T) {
 }
 
 func TestGenericWorkerKeepsItsAuthority(t *testing.T) {
-	lane := newFakeLane(t)
+	lane := newFakeLane(t, "2.2")
 	var hosts []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hosts = append(hosts, r.Host)
@@ -196,12 +196,13 @@ func TestImageWorkerTerminalFailuresDoNotReplay(t *testing.T) {
 			var posts int
 			var mu sync.Mutex
 			release := make(chan struct{})
+			capability := recordedMetadata(t, "2.2")
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.Host != "localhost:8080" {
 					t.Errorf("Host=%q", r.Host)
 				}
 				if r.URL.Path == "/fhir/metadata" {
-					w.Write([]byte(`{"resourceType":"CapabilityStatement"}`))
+					serveRecordedMetadata(t, w, r, capability) // the lane's real metadata answer; the fault is on the first row
 					return
 				}
 				io.Copy(io.Discard, r.Body)

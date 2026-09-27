@@ -143,49 +143,6 @@ var sweepAllowlist = map[string][]string{
 		"<a href=\"/medicare/coding-billing/medicare-fee-service-5010-d0\" class=\"menu-item-element\" aria-current=\"false\" tracking-data=\"a39716ab-8feb-4e68-ae06-15796975c7d8\" data-drupal-link-system-path=\"node/171736\">Medicare Fee-for-Service 5010 - D0</a>",
 		"<a href=\"/medicare/coordination-benefits-recovery/workers-comp-set-aside-arrangements\" class=\"menu-item-element\" aria-current=\"false\" tracking-data=\"88fc6d69-79bf-4221-bc9e-ca8b14657204\" data-drupal-link-system-path=\"node/176641\">Workers&#039; comp Medicare set aside arrangements</a>",
 	},
-	// Exact HAPI diagnostic identifies POS code 98, not an issue number.
-	"deploy/validator/testdata/pas-response-pos-errors.json": {
-		"\"diagnostics\": \"Unknown code 'https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set#98'\",",
-		"\"diagnostics\": \"None of the codings provided are in the value set 'X12 278 Health Care Service Location Type Value Set' (http://hl7.org/fhir/us/davinci-pas/ValueSet/X12278LocationType|2.0.1), and a coding from this value set is required) (codes = https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set#98)\",",
-	},
-	// Exact HAPI diagnostic identifies POS code 98, not an issue number.
-	"deploy/validator/testdata/2.1/pas-response-pos-errors.json": {
-		"\"diagnostics\": \"Unknown code 'https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set#98'\",",
-		"\"diagnostics\": \"None of the codings provided are in the value set 'X12 278 Health Care Service Location Type Value Set' (http://hl7.org/fhir/us/davinci-pas/ValueSet/X12278LocationType|2.1.0), and a coding from this value set is required) (codes = https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set#98)\",",
-	},
-	// Exact HAPI diagnostic identifies POS code 98, not an issue number.
-	"deploy/validator/testdata/2.2/pas-response-pos-errors.json": {
-		"\"diagnostics\": \"Unknown code 'https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set#98'\",",
-		"\"diagnostics\": \"None of the codings provided are in the value set 'X12 278 Health Care Service Location Type Value Set' (http://hl7.org/fhir/us/davinci-pas/ValueSet/X12278LocationType|2.2.1), and a coding from this value set is required) (codes = https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set#98)\",",
-	},
-	// Exact HAPI diagnostic identifies POS code 98, not an issue number.
-	"internal/lanequalify/testdata/pas-response-pos-errors.json": {
-		"\"diagnostics\": \"Unknown code 'https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set#98'\",",
-		"\"diagnostics\": \"None of the codings provided are in the value set 'X12 278 Health Care Service Location Type Value Set' (http://hl7.org/fhir/us/davinci-pas/ValueSet/X12278LocationType|2.0.1), and a coding from this value set is required) (codes = https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set#98)\",",
-	},
-	// Exact HAPI diagnostic identifies POS code 98, not an issue number.
-	"internal/lanequalify/testdata/2.1/pas-response-pos-errors.json": {
-		"\"diagnostics\": \"Unknown code 'https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set#98'\",",
-		"\"diagnostics\": \"None of the codings provided are in the value set 'X12 278 Health Care Service Location Type Value Set' (http://hl7.org/fhir/us/davinci-pas/ValueSet/X12278LocationType|2.1.0), and a coding from this value set is required) (codes = https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set#98)\",",
-	},
-	// Exact HAPI diagnostic identifies POS code 98, not an issue number.
-	"internal/lanequalify/testdata/2.2/pas-response-pos-errors.json": {
-		"\"diagnostics\": \"Unknown code 'https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set#98'\",",
-		"\"diagnostics\": \"None of the codings provided are in the value set 'X12 278 Health Care Service Location Type Value Set' (http://hl7.org/fhir/us/davinci-pas/ValueSet/X12278LocationType|2.2.1), and a coding from this value set is required) (codes = https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set#98)\",",
-	},
-	// The admission transcript repeats the same exact public CMS diagnostic.
-	"app/testdata/qualification-2.1.json": {
-		"\"diagnostics\": \"Unknown code 'https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set#98'\",",
-		"\"diagnostics\": \"None of the codings provided are in the value set 'X12 278 Health Care Service Location Type Value Set' (http://hl7.org/fhir/us/davinci-pas/ValueSet/X12278LocationType|2.1.0), and a coding from this value set is required) (codes = https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set#98)\",",
-	},
-
-	// The reference payer's own recorded Claim/$inquire answer: this is the
-	// generated narrative it sent, in which "#" separates a Patient identifier's
-	// system from its value. A recorded message is kept as the payer wrote it, so
-	// the line is allowed rather than reworded.
-	"engine/testdata/br-payer/pas-inquire-response.json": {
-		"\"div\": \"<div xml:lang=\\\"en\\\" xmlns=\\\"http://www.w3.org/1999/xhtml\\\" lang=\\\"en\\\"><p class=\\\"res-header-id\\\"><b>Generated Narrative: Patient SubscriberExample</b></p><a name=\\\"SubscriberExample\\\"> </a><a name=\\\"hcSubscriberExample\\\"> </a><div style=\\\"display: inline-block; background-color: #d9e0e7; padding: 6px; margin: 4px; border: 1px solid #8da1b4; border-radius: 5px; line-height: 60%\\\"><p style=\\\"margin-bottom: 0px\\\">Language: en</p><p style=\\\"margin-bottom: 0px\\\">Profile: <a href=\\\"StructureDefinition-profile-subscriber.html\\\">PAS Subscriber Patient</a></p></div><p style=\\\"border: 1px #661aff solid; background-color: #e6e6ff; padding: 10px;\\\">JOE SMITH  Male, DoB Unknown ( http://example.org/MIN#12345678901)</p><hr/><table class=\\\"grid\\\"><tr><td style=\\\"background-color: #f3f5da\\\" title=\\\"A patient's military status.\\\"><a href=\\\"StructureDefinition-extension-militaryStatus.html\\\">Military Status</a></td><td colspan=\\\"3\\\"><span title=\\\"Codes:{https://codesystem.x12.org/005010/584 RU}\\\">RU</span></td></tr></table></div>\"",
-	},
 
 	// ASCII uppercase range is Go syntax, not a decision label.
 	"engine/pasgraph.go": {
@@ -193,13 +150,13 @@ var sweepAllowlist = map[string][]string{
 	},
 }
 
-func TestSweepAllowanceRequiresExactDiagnosticLine(t *testing.T) {
-	allowed := sweepAllowlist["deploy/validator/testdata/2.1/pas-response-pos-errors.json"]
+func TestSweepAllowanceRequiresExactLine(t *testing.T) {
+	allowed := sweepAllowlist["engine/pasgraph.go"]
 	for _, line := range allowed {
 		if !sweepLineAllowed("  "+line+"  ", allowed) {
-			t.Fatal("exact diagnostic with indentation refused")
+			t.Fatal("exact allowed line with indentation refused")
 		}
-		for _, bad := range []string{strings.ReplaceAll(line, "#98", "#99"), strings.ReplaceAll(line, "Unknown code", "Changed diagnostic"), line + " internal issue #758", "issue #758 " + line} {
+		for _, bad := range []string{strings.ReplaceAll(line, "'A'", "'B'"), line + " // per slice 2a", "// see #1160 " + line} {
 			if bad != line && sweepLineAllowed(bad, allowed) {
 				t.Fatalf("allowance admitted changed or appended content: %s", bad)
 			}
@@ -477,7 +434,7 @@ func sweepTree(root string, re *regexp.Regexp, report func(rel string, line int,
 			if sweepLineAllowed(u.text, allowed) {
 				continue
 			}
-			for _, m := range dedupe(re.FindAllString(u.text, -1)) {
+			for _, m := range sweepFind(re, u.text) {
 				// A joined run re-reports what its own lines already named.
 				// Suppress only THAT token, not the whole unit.
 				if u.joined && anyReported(reported, u.start, u.end, m) {
@@ -722,6 +679,52 @@ func dedupe(matches []string) []string {
 	return out
 }
 
+// BEGIN coding-fragment rule. Kept byte-identical in gateway/sweep_test.go and
+// test/vocabsweep/kit_snapshot_sweep_test.go, and equivalent to assemble.sh's
+// STRIP_CODINGS program; test/vocabsweep pins all three.
+//
+// A validator's answer cites a FHIR coding as <system URL>#<code>
+// ("http://www.ama-assn.org/go/cpt#72148", an X12 code system's "#98"): the
+// digits are a code, not an issue reference, so the sweep strips the fragment
+// before matching. Not on a link into this project's own hosting (github.com,
+// an SHN domain), where a "#<n>" fragment can carry an internal reference. The
+// host is the authority after any userinfo, without its port or a trailing dot.
+// A span holding a second URL (two joined, or one in the other's query) is not
+// stripped, and a URL ends at ")" or a backtick, where markdown closes a link.
+var (
+	codingFragment = regexp.MustCompile(`(?i:https?)://([^\s"'<>/?#\\)\x60]+)([^\s"'<>#)\x60]*)(#[0-9]+)`)
+	portSuffix     = regexp.MustCompile(`:[0-9]*$`)
+	ownHost        = regexp.MustCompile(`(?:^|\.)(?:github\.com|smarthealthnetwork\.[a-z]+|smarthealth\.network|shn-preview\.org)$`)
+)
+
+// stripCodingFragments removes the "#<code>" of every FHIR coding in s whose
+// host is not this project's own.
+func stripCodingFragments(s string) string {
+	return codingFragment.ReplaceAllStringFunc(s, func(m string) string {
+		sub := codingFragment.FindStringSubmatch(m)
+		if strings.Count(m, "://") > 1 {
+			return m
+		}
+		host := strings.ToLower(sub[1])
+		if i := strings.LastIndexByte(host, '@'); i >= 0 {
+			host = host[i+1:]
+		}
+		host = strings.TrimSuffix(portSuffix.ReplaceAllString(host, ""), ".")
+		if ownHost.MatchString(host) {
+			return m
+		}
+		return strings.TrimSuffix(m, sub[3])
+	})
+}
+
+// END coding-fragment rule.
+
+// sweepFind is every distinct match of re in text once its FHIR codings are
+// stripped: what the tree walk reports.
+func sweepFind(re *regexp.Regexp, text string) []string {
+	return dedupe(re.FindAllString(stripCodingFragments(text), -1))
+}
+
 func sweepLineAllowed(line string, allowed []string) bool {
 	for _, sub := range allowed {
 		if strings.TrimSpace(line) == strings.TrimSpace(sub) {
@@ -729,4 +732,43 @@ func sweepLineAllowed(line string, allowed []string) bool {
 		}
 	}
 	return false
+}
+
+// A FHIR coding in a validator's answer, <system URL>#<code>, is a code, not an
+// issue reference, and passes; a "#<n>" anywhere else, or on a link into this
+// project's own hosting, is still caught.
+func TestCodingFragmentsAreNotIssueReferences(t *testing.T) {
+	re := regexp.MustCompile(internalTokenPattern)
+	for _, line := range []string{
+		`"diagnostics":"CodeSystem is unknown and can't be validated: http://www.ama-assn.org/go/cpt for 'http://www.ama-assn.org/go/cpt#72148'"`,
+		`(codes = https://codesystem.x12.org/005010/1365#3)`,
+		`Unknown code 'https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set#98'`,
+		`https://notgithub.com/cs#1160`,
+	} {
+		if m := sweepFind(re, line); len(m) != 0 {
+			t.Errorf("a FHIR coding was flagged as %q: %s", m, line)
+		}
+	}
+	for _, line := range []string{
+		`see https://github.com/SmartHealthNetwork/shn-gateway#1160`,
+		`http://example.org@github.com/x#1160`,
+		`https://github.com./x#1160`,
+		`https://github.com?x#1160`,
+		`https://github.com:443/x#1160`,
+		`https://github.com\x#1160`,
+		`http://smarthealth.network/x#1160`,
+		`http://a.org/x,https://github.com/y#1160`,
+		`http://a.org/x?next=https://github.com/y#1160`,
+		`[t](http://x.org)#1160`,
+		`https://smarthealthnetwork.org/partners#1160`,
+		`https://docs.SHN-preview.org/runbook#42`,
+		`fixed in #1160`,
+		`see #72148`,
+		`PR #12`,
+		`http://www.ama-assn.org/go/cpt#72148 (see #1160)`,
+	} {
+		if m := sweepFind(re, line); len(m) == 0 {
+			t.Errorf("an issue reference passed: %s", line)
+		}
+	}
 }

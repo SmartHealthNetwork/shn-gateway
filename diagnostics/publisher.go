@@ -7,7 +7,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"hash/fnv"
 	"io"
+	mathrand "math/rand/v2"
 	"net/http"
 	"net/url"
 	"time"
@@ -33,10 +35,52 @@ type PublisherConfig struct {
 	HealthURL   string
 	Key         []byte
 	Client      *http.Client
-	Clock       func() time.Time
-	Wait        func(context.Context, time.Duration) error
-	Heartbeat   time.Duration
+	// Clock and Wait must agree: a pending observation falls due by Clock,
+	// and the publisher waits for it through Wait. A Clock that Wait never
+	// advances leaves a pending observation waiting for good.
+	Clock     func() time.Time
+	Wait      func(context.Context, time.Duration) error
+	Heartbeat time.Duration
+	// Jitter spreads a retry wait of d over [d/2, d]. Nil means a source
+	// seeded from the publisher's identity: publishers retrying against one
+	// busy ingest never fall into step, and a publisher's schedule is
+	// reproducible.
+	Jitter func(time.Duration) time.Duration
 }
+
+// Retry waits: a failed attempt, or an observation the ingest holds as
+// binding_pending, waits from minRetryWait doubling to maxRetryWait. A pending
+// observation backs off too: re-posting it on a fixed short interval kept the
+// ingest's one admission slot busy exactly when its prerequisite's publisher,
+// at the cap, came back, so the prerequisite could not land.
+const (
+	minRetryWait = 50 * time.Millisecond
+	maxRetryWait = 500 * time.Millisecond
+)
+
+// nextRetryWait doubles a wait up to maxRetryWait; zero starts at minRetryWait.
+func nextRetryWait(d time.Duration) time.Duration {
+	if d <= 0 {
+		return minRetryWait
+	}
+	if d *= 2; d > maxRetryWait {
+		return maxRetryWait
+	}
+	return d
+}
+
+// seededJitter spreads d over [d/2, d] from a source seeded by seed.
+func seededJitter(seed uint64) func(time.Duration) time.Duration {
+	r := mathrand.New(mathrand.NewPCG(seed, seed^0x9e3779b97f4a7c15))
+	return func(d time.Duration) time.Duration {
+		if d <= 1 {
+			return d
+		}
+		half := d / 2
+		return half + time.Duration(r.Int64N(int64(d-half)+1))
+	}
+}
+
 type publishResult struct {
 	status   int
 	body     []byte
@@ -79,6 +123,11 @@ func RunPublisher(ctx context.Context, q *Queue, cfg PublisherConfig) error {
 	if len(cfg.Source) > maxPublisherIdentityBytes || len(cfg.Incarnation) > maxPublisherIdentityBytes {
 		return errors.New("diagnostics: publisher identity exceeds bound")
 	}
+	if cfg.Jitter == nil {
+		h := fnv.New64a()
+		_, _ = h.Write([]byte(cfg.Source + "\x00" + cfg.Incarnation))
+		cfg.Jitter = seededJitter(h.Sum64())
+	}
 	nextHeartbeat := cfg.Clock().Add(cfg.Heartbeat)
 	sendHeartbeat := func(ownershipDeadline time.Time) {
 		health := q.Health(cfg.Clock())
@@ -95,15 +144,27 @@ func RunPublisher(ctx context.Context, q *Queue, cfg PublisherConfig) error {
 			sendHeartbeat(time.Time{})
 			continue
 		}
-		nextCtx, stopNext := context.WithTimeout(ctx, untilHeartbeat)
-		e, err := q.Next(nextCtx)
-		stopNext()
-		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
-			sendHeartbeat(time.Time{})
+		e, ok, due := q.take(cfg.Clock())
+		if !ok && due > 0 {
+			// Every queued event is a pending observation not yet due: wait
+			// for the earliest, or a new event, or the heartbeat.
+			if err := q.waitDue(ctx, cfg.Wait, min(due, untilHeartbeat)); err != nil {
+				return err
+			}
 			continue
 		}
-		if err != nil {
-			return err
+		if !ok {
+			nextCtx, stopNext := context.WithTimeout(ctx, untilHeartbeat)
+			var err error
+			e, err = q.Next(nextCtx)
+			stopNext()
+			if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+				sendHeartbeat(time.Time{})
+				continue
+			}
+			if err != nil {
+				return err
+			}
 		}
 		e.Source = cfg.Source
 		e.Incarnation = cfg.Incarnation
@@ -111,7 +172,7 @@ func RunPublisher(ctx context.Context, q *Queue, cfg PublisherConfig) error {
 			e.Time = cfg.Clock()
 		}
 		deadline := q.ownershipDeadline(e.Sequence, cfg.Clock())
-		backoff := 50 * time.Millisecond
+		backoff := minRetryWait
 		for {
 			if err := ctx.Err(); err != nil {
 				q.Drop(e.Sequence)
@@ -159,18 +220,10 @@ func RunPublisher(ctx context.Context, q *Queue, cfg PublisherConfig) error {
 				if result.status == http.StatusConflict && result.complete && json.Unmarshal(result.body, &scope) == nil && scope.Code == "binding_pending" {
 					// A prerequisite can belong to this same source and be queued
 					// later (ingress completes after sealing). Yield ownership,
-					// not bytes or capacity, without renewing the bounded cap.
-					q.deferredBinding(e.Sequence)
-					wait := 50 * time.Millisecond
-					if left := deadline.Sub(cfg.Clock()); left < wait {
-						wait = left
-					}
-					if wait > 0 {
-						if err := cfg.Wait(ctx, wait); err != nil {
-							q.Drop(e.Sequence)
-							return err
-						}
-					}
+					// not bytes or capacity, without renewing the bounded cap:
+					// the event is due again after its binding wait, and the
+					// events behind it are published meanwhile.
+					q.deferredBinding(e.Sequence, cfg.Clock(), cfg.Jitter)
 					break
 				}
 				if result.status == http.StatusUnprocessableEntity && result.complete && json.Unmarshal(result.body, &scope) == nil && scope.Code == "scope_ignored" {
@@ -187,7 +240,7 @@ func RunPublisher(ctx context.Context, q *Queue, cfg PublisherConfig) error {
 				q.Drop(e.Sequence)
 				break
 			}
-			wait := backoff
+			wait := cfg.Jitter(backoff)
 			if wait > remaining {
 				wait = remaining
 			}
@@ -195,12 +248,7 @@ func RunPublisher(ctx context.Context, q *Queue, cfg PublisherConfig) error {
 				q.Drop(e.Sequence)
 				return err
 			}
-			if backoff < 500*time.Millisecond {
-				backoff *= 2
-				if backoff > 500*time.Millisecond {
-					backoff = 500 * time.Millisecond
-				}
-			}
+			backoff = nextRetryWait(backoff)
 		}
 	}
 }

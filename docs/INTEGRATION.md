@@ -491,6 +491,10 @@ request). What the FHIR check covers, per leg:
   request-bundle profile of the line).
 - Of a CDS Hooks request, the draft order is validated, and on `order-select` and
   `order-sign` the Coverage too.
+- From shn-gateway v0.56.0, a payer's CDS Hooks answer on a CRD leg your provider
+  gateway originates itself (`order-sign`, `order-select` and `order-dispatch`)
+  is checked against the CDS Hooks response rules at your gateway's level, as an
+  answer it relays through its Da Vinci ingress already is.
 - A PAS request carried from your own system (the `$submit` ingress) is not
   `$validate`d by either gateway; only the content checks and the network rules
   apply to it. A PAS submit or update the gateway builds from your records is
@@ -546,10 +550,11 @@ defect does, is `CONFORMANCE_ENFORCEMENT`, a setting on your own gateway:
   validator's message id: only invariants and a code outside its code list (a code
   the bound value set or code system does not contain, or a code system the
   validator cannot check, licensed ones included), as the validator's recognized
-  code-list issues report it, are recorded; every other FHIR profile issue
-  (cardinality, fixed and pattern values, slicing, extensions, lengths, any other
-  terminology issue, or one the gateway cannot classify) and every fatal issue
-  refuses. CDS Hooks summary length,
+  code-list issues report it, are recorded (from v0.55.0 that includes a code
+  system the validator does not know, `Terminology_TX_System_Unknown`); every
+  other FHIR profile issue (cardinality, fixed and pattern values, slicing,
+  extensions, lengths, any other terminology issue, or one the gateway cannot
+  classify) and every fatal issue refuses. CDS Hooks summary length,
   topic and selection behavior, another patient in one message, and the content
   business rules are recorded. A validator that cannot be reached is recorded.
 - `strict`: a defect refuses the message. A FHIR profile refusal names the

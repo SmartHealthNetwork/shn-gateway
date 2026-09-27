@@ -28,20 +28,19 @@ retract (
 )
 
 require (
-	github.com/SmartHealthNetwork/shn-sdk v0.58.0
+	github.com/SmartHealthNetwork/shn-sdk v0.58.1
 	github.com/golang-jwt/jwt/v5 v5.3.1
-	github.com/jackc/pgx/v5 v5.10.0
+	github.com/jackc/pgx/v5 v5.11.0
 	github.com/samply/golang-fhir-models/fhir-models v0.3.2
-	golang.org/x/crypto v0.56.0
+	golang.org/x/crypto v0.57.0
 )
 
 require (
-	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
-	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
-	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
-	golang.org/x/text v0.41.0 // indirect
+	github.com/stretchr/testify v1.12.1 // indirect
+	golang.org/x/sync v0.23.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
+	golang.org/x/text v0.42.0 // indirect
 )

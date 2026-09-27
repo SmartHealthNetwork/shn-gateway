@@ -81,7 +81,7 @@ func TestOriginateDecodesFramedError(t *testing.T) {
 func TestOriginateDecodesFramedSuccess(t *testing.T) {
 	env := newInProcessExchange(t)
 	advertiseRecipientFrameV1(t, env)
-	want := []byte(`{"resourceType":"Parameters","parameter":[{"name":"ok"}]}`)
+	want := []byte(`{"cards":[]}`)
 	frame, err := shnsdk.EncodeHTTPFrame(200, "application/fhir+json", want)
 	if err != nil {
 		t.Fatalf("EncodeHTTPFrame: %v", err)
@@ -129,7 +129,7 @@ func TestOriginateDecodesFramedErrorFromUnadvertisedRecipient(t *testing.T) {
 func TestOriginateStaleFeedFallback(t *testing.T) {
 	env := newInProcessExchange(t)
 	advertiseRecipientFrameV1(t, env) // recipient advertises v1...
-	bare := []byte(`{"resourceType":"Parameters","parameter":[{"name":"stale"}]}`)
+	bare := []byte(`{"cards":[],"systemActions":[]}`)
 	sealBare(env, bare) // ...but answers BARE JSON (stale-feed view)
 
 	var events []ObserverEvent
@@ -331,7 +331,7 @@ func TestOriginateRefusesUnsharedLine(t *testing.T) {
 func TestOriginatePinnedProfileIDSkipsSelection(t *testing.T) {
 	env := newInProcessExchange(t)
 	declareRecipientVersions(t, env, []string{"pa.crd@2.2"}) // would refuse if re-selected
-	env.payerReturns(LegResult{Status: 0, Response: testResponse([]byte(`{"resourceType":"Bundle","type":"collection"}`))})
+	env.payerReturns(LegResult{Status: 0, Response: testResponse([]byte(`{"cards":[]}`))})
 	if _, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "",
 		Content{WorkstreamType: workstreamPA, ProfileID: "pa.crd@2.0", Payload: testRequest(env.crdReq)}); err != nil {
 		t.Fatalf("pinned leg must not re-select: %v", err)
@@ -422,7 +422,7 @@ func TestOriginateRejectsStampMismatchAcrossLines(t *testing.T) {
 func TestOriginateAcceptsMatchingStamp(t *testing.T) {
 	env := newInProcessExchange(t)
 	advertiseRecipientFrameV1(t, env)
-	body := []byte(`{"resourceType":"Bundle","type":"collection"}`)
+	body := []byte(`{"cards":[]}`)
 	frame, _ := shnsdk.EncodeHTTPFrameHeaders(200, map[string]string{
 		"Content-Type":                    "application/fhir+json",
 		shnsdk.FrameHeaderContractVersion: "pa.crd@2.0",
@@ -440,7 +440,7 @@ func TestOriginateAcceptsMatchingStamp(t *testing.T) {
 func TestOriginateToleratesAbsentStamp(t *testing.T) {
 	env := newInProcessExchange(t)
 	advertiseRecipientFrameV1(t, env)
-	frame, _ := shnsdk.EncodeHTTPFrame(200, "application/fhir+json", []byte(`{"resourceType":"Bundle","type":"collection"}`))
+	frame, _ := shnsdk.EncodeHTTPFrame(200, "application/fhir+json", []byte(`{"cards":[]}`))
 	sealBare(env, frame)
 	if _, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "", Content{WorkstreamType: workstreamPA, Payload: testRequest(env.crdReq)}); err != nil {
 		t.Fatalf("absent stamp must be tolerated: %v", err)
@@ -479,7 +479,7 @@ func TestRelayErrorSurvivesHelperWrapping(t *testing.T) {
 // production's promotion of the CRD legs onto this primitive is covered separately).
 func TestLegOriginatedCarriesRoute(t *testing.T) {
 	env := newInProcessExchange(t)
-	env.payerReturns(LegResult{Status: 0, Response: testResponse([]byte(`{"resourceType":"Bundle","type":"collection"}`))})
+	env.payerReturns(LegResult{Status: 0, Response: testResponse([]byte(`{"cards":[]}`))})
 
 	var events []ObserverEvent
 	env.originator.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
@@ -527,7 +527,7 @@ func TestLegOriginatedCarriesRoute(t *testing.T) {
 // speculative/re-derived one).
 func TestOriginateLegFallbackOmitsRoute(t *testing.T) {
 	env := newInProcessExchange(t)
-	env.payerReturns(LegResult{Status: 0, Response: testResponse([]byte(`{"resourceType":"Parameters"}`))})
+	env.payerReturns(LegResult{Status: 0, Response: testResponse([]byte(`{"cards":[]}`))})
 
 	var events []ObserverEvent
 	env.originator.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
@@ -602,7 +602,7 @@ func TestLegRefusedCarriesStructuredRoute(t *testing.T) {
 // TestLegOriginatedCarriesRoute for why that legType, not "pas-claim".
 func TestLegOriginatedRouteChainOnArm3(t *testing.T) {
 	env := newInProcessExchange(t)
-	env.payerReturns(LegResult{Status: 0, Response: testResponse([]byte(`{"resourceType":"Bundle","type":"collection"}`))})
+	env.payerReturns(LegResult{Status: 0, Response: testResponse([]byte(`{"cards":[]}`))})
 
 	var events []ObserverEvent
 	env.originator.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }

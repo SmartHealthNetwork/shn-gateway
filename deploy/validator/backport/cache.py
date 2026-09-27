@@ -183,8 +183,11 @@ def ensure(source, cache_root, platform):
         # Keep failed output and its log outside runtime assets for diagnosis.
         temporary = Path(tempfile.mkdtemp(prefix="build-", dir=cache_root))
         staging = temporary / "output"
+        # The context is the source's parent, as for the validator image: the
+        # same COPY and RUN, so one daemon compiles the WAR once for both.
         command = ["docker", "build", "--platform", platform, "--progress", "plain",
-                   "--output", f"type=local,dest={staging}", str(source)]
+                   "-f", str(source / "Dockerfile"),
+                   "--output", f"type=local,dest={staging}", str(source.parent)]
         (temporary / "command.json").write_bytes(canonical(command))
         code = run_build(command)
         (temporary / "exit").write_text(str(code) + "\n")

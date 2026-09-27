@@ -69,6 +69,70 @@ type Health struct {
 	Pending          uint64    `json:"pending"`
 	Dropped          uint64    `json:"dropped"`
 	State            string    `json:"state"`
+	// The counts account for every sequenced event: each is acknowledged,
+	// discarded (the ingest declined it as out of scope), dropped (for a
+	// reason in DroppedBy) or still pending. LastAcknowledged is only the
+	// highest sequence acknowledged, so a declined event leaves it behind
+	// LastSequence. Empty counts are omitted: a publisher that does
+	// not keep them sends exactly what it sent before. The accounts ingest
+	// decodes a heartbeat strictly, so a publisher may send the counts only
+	// to an ingest that knows them, and an ingest must not be rolled back
+	// below them while a publisher sends them.
+	Acknowledged uint64     `json:"acknowledged,omitempty"`
+	Discarded    uint64     `json:"discarded,omitempty"`
+	DroppedBy    DropCounts `json:"droppedBy,omitzero"`
+}
+
+// DropCounts are a publisher's drops by why: its queue was full when the
+// event was emitted, its ownership window expired, it was too large to
+// publish, it could not be encoded, it was a test event that was not
+// accepted, or the publisher stopped with it undelivered.
+type DropCounts struct {
+	QueueFull   uint64 `json:"queueFull,omitempty"`
+	Expired     uint64 `json:"expired,omitempty"`
+	Oversized   uint64 `json:"oversized,omitempty"`
+	Unencodable uint64 `json:"unencodable,omitempty"`
+	Test        uint64 `json:"test,omitempty"`
+	Stopped     uint64 `json:"stopped,omitempty"`
+}
+
+// Counted reports whether h carries the counts.
+func (h Health) Counted() bool {
+	return h.Acknowledged != 0 || h.Discarded != 0 || h.DroppedBy != (DropCounts{})
+}
+
+// sum adds counts, reporting false on overflow.
+func sum(counts ...uint64) (uint64, bool) {
+	var total uint64
+	for _, n := range counts {
+		if total+n < total {
+			return 0, false
+		}
+		total += n
+	}
+	return total, true
+}
+
+// CountsAgree reports whether h's counts, when it carries them, account for
+// every sequenced event exactly once: acknowledged + discarded + dropped +
+// pending == lastSequence, with dropped split by reason, and acknowledged
+// consistent with the highest sequence acknowledged.
+func (h Health) CountsAgree() bool {
+	if !h.Counted() {
+		return true
+	}
+	d := h.DroppedBy
+	dropped, ok := sum(d.QueueFull, d.Expired, d.Oversized, d.Unencodable, d.Test, d.Stopped)
+	if !ok || dropped != h.Dropped {
+		return false
+	}
+	// Sequences are unique: n acknowledged events reach at least sequence n,
+	// and none acknowledged means none is the highest.
+	if h.Acknowledged > h.LastAcknowledged || (h.Acknowledged == 0 && h.LastAcknowledged != 0) {
+		return false
+	}
+	total, ok := sum(h.Acknowledged, h.Discarded, h.Dropped, h.Pending)
+	return ok && total == h.LastSequence
 }
 
 func Sign(key []byte, source, incarnation, timestamp string, body []byte) string {

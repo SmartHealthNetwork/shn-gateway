@@ -1709,8 +1709,8 @@ func TestApp_ChecksEndpoint_TokenGatedAndHealthUnaffected(t *testing.T) {
 		"SHN_FAKE_VALIDATOR":        "1",
 		"FHIR_DATA_URL":             fhirSrv.URL,
 		"CHECKS_TOKEN":              "t",
-		"AUDIT_URL":                 "http://127.0.0.1:1", // well-formed, unreachable
-		"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate",
+		"AUDIT_URL":                 "http://127.0.0.1:1",                               // well-formed, unreachable
+		"PROVIDER_DTR_POPULATE_URL": "https://127.0.0.1:1/fhir/Questionnaire/$populate", // probed: unreachable, never resolved
 	}
 	getenv := func(k string) string { return env[k] }
 
@@ -1835,7 +1835,7 @@ func TestProbeEvidenceReachesResponder(t *testing.T) {
 		"SHN_SECRETS":                  dir,
 		"SHN_DISCOVERY_URL":            disc.URL,
 		"SHN_FAKE_VALIDATOR":           "1",
-		"FHIR_DATA_URL":                "https://sor.example/fhir", // required on every role: the holder's own SoR
+		"FHIR_DATA_URL":                "https://127.0.0.1:1/fhir", // required on every role: the holder's own SoR; unreachable, never resolved
 		"PAYER_DAVINCI_BASE_URL":       payer.URL,
 		"PAYER_DAVINCI_CRD_SERVICE_ID": "svc", // names the payer's CDS service (the listing is read at boot, best effort)
 		"CHECKS_TOKEN":                 "t",

@@ -46,6 +46,7 @@ func TestCheckRereadsMarkerAfterPublicMetadata(t *testing.T) {
 			if err := writeState(path, st); err != nil {
 				t.Fatal(err)
 			}
+			capability := recordedMetadata(t, "2.2")
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch mutation {
 				case "failed":
@@ -59,7 +60,7 @@ func TestCheckRereadsMarkerAfterPublicMetadata(t *testing.T) {
 				if err := writeState(path, st); err != nil {
 					t.Error(err)
 				}
-				io.WriteString(w, `{"resourceType":"CapabilityStatement"}`)
+				serveRecordedMetadata(t, w, r, capability)
 			}))
 			defer srv.Close()
 			if check(srv.URL+"/fhir", envLine("2.2"), path, time.Second, sameJVM) != 1 {

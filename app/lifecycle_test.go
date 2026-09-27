@@ -5,7 +5,9 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -31,6 +33,7 @@ func lifecycleEnv(t *testing.T, failBuild bool) (map[string]string, <-chan struc
 	env["FHIR_VALIDATE_URL_2_2"] = "http://fixture.test/v22"
 	env["FHIR_DATA_URL"] = "http://fixture.test/fhir"
 	env["HOST"] = "127.0.0.1"
+	env["PORT"] = freePort(t) // not the default 8080, which another gateway or test run may hold
 	if failBuild {
 		env["REGISTRAR_URL"] = "http://fixture.test/registrar"
 	}
@@ -63,8 +66,39 @@ func lifecycleEnv(t *testing.T, failBuild bool) (map[string]string, <-chan struc
 		}
 		return &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
 	})
-	t.Cleanup(func() { finish(); http.DefaultTransport = old })
+	// The certification clients dial through this fixture too, never on their
+	// own: a real lookup of fixture.test is live network, and a synctest
+	// bubble can join a lookup an earlier test left running outside it.
+	oldClient := certificationClient
+	certificationClient = func(endpoint string) *shnsdk.OperationValidator {
+		return &shnsdk.OperationValidator{BaseURL: endpoint, Client: &http.Client{}} // http.DefaultTransport at request time
+	}
+	t.Cleanup(func() { finish(); http.DefaultTransport = old; certificationClient = oldClient })
 	return env, started, canceled, finish
+}
+
+// freePort is a loopback port the kernel just handed out.
+func freePort(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	return strconv.Itoa(l.Addr().(*net.TCPAddr).Port)
+}
+
+// awaitRunStarted waits for ch, or reports Run's own error if it returned
+// first (a bind failure, say) instead of timing out on ch.
+func awaitRunStarted(t *testing.T, ch, done <-chan struct{}, err *error, label string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-done:
+		t.Fatalf("Run returned before %s: %v", label, *err)
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timed out waiting for %s", label)
+	}
 }
 
 func awaitLifecycle(t *testing.T, ch <-chan struct{}, label string) {
@@ -160,7 +194,7 @@ func TestRunShutdownJoinsDefaultWorkers(t *testing.T) {
 	done := make(chan struct{})
 	var err error
 	go func() { err = Run(ctx, func(k string) string { return env[k] }, io.Discard); close(done) }()
-	awaitLifecycle(t, started, "Run default worker")
+	awaitRunStarted(t, started, done, &err, "Run default worker")
 	cancel()
 	awaitLifecycle(t, canceled, "Run cancellation")
 	select {
@@ -198,7 +232,7 @@ func TestRunShutdownJoinsBootChecks(t *testing.T) {
 		done := make(chan struct{})
 		var err error
 		go func() { err = Run(ctx, func(k string) string { return env[k] }, io.Discard); close(done) }()
-		awaitLifecycle(t, started, "boot connectivity request")
+		awaitRunStarted(t, started, done, &err, "boot connectivity request")
 		cancel()
 		awaitLifecycle(t, canceled, "boot connectivity cancellation")
 		synctest.Wait()

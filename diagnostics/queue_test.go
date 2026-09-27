@@ -99,3 +99,41 @@ func TestQueueCopiesHeaders(t *testing.T) {
 		t.Fatalf("header=%q", e.Headers.Get("Authorization"))
 	}
 }
+
+// While every queued event waits to fall due, an emitted event ends the wait.
+func TestQueueWaitDueEndsOnEmit(t *testing.T) {
+	q := NewQueue(Limits{})
+	done := make(chan error, 1)
+	go func() { done <- q.waitDue(context.Background(), waitContext, time.Hour) }()
+	q.TryEmit(Event{Kind: "new"})
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("an emitted event did not end the wait")
+	}
+}
+
+// A deferred event is not taken before it is due, and the events behind it are.
+func TestQueueTakesOnlyDueEvents(t *testing.T) {
+	q := NewQueue(Limits{})
+	q.TryEmit(Event{Kind: "pending"})
+	q.TryEmit(Event{Kind: "ready"})
+	now := time.Unix(0, 0)
+	first, _, _ := q.take(now)
+	q.ownershipDeadline(first.Sequence, now)
+	if w := q.deferredBinding(first.Sequence, now, func(d time.Duration) time.Duration { return d }); w != minRetryWait {
+		t.Fatalf("first binding wait = %v", w)
+	}
+	if e, ok, _ := q.take(now); !ok || e.Kind != "ready" {
+		t.Fatalf("take = %v %v, want the event behind the deferred one", e.Kind, ok)
+	}
+	if _, ok, due := q.take(now); ok || due != minRetryWait {
+		t.Fatalf("take before due = %v, %v", ok, due)
+	}
+	if e, ok, _ := q.take(now.Add(minRetryWait)); !ok || e.Kind != "pending" {
+		t.Fatalf("take when due = %v %v", e.Kind, ok)
+	}
+}

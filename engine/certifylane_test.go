@@ -1,14 +1,15 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net"
-	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,15 +19,17 @@ import (
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
-func gatedTestUpstream(t *testing.T, hits *int32) *httptest.Server {
+// gatedTestUpstream is a real validator lane of line, replayed strictly
+// (testdata/recordings/lane-<line>-certify-literal.json) and counting the
+// requests it is asked, with the errors it answers the literal Claim against
+// the profile "profile": the lane finds it invalid. A row certifies that request
+// at most once (its hits say so); the lane's answer with no profile is not asked.
+func gatedTestUpstream(t *testing.T, line string, hits *int32) (*httptest.Server, []string) {
 	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(hits, 1)
-		w.Header().Set("Content-Type", "application/fhir+json")
-		_, _ = w.Write([]byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"information","code":"informational","diagnostics":"All OK"}]}`))
-	}))
-	t.Cleanup(srv.Close)
-	return srv
+	rec := certifyRecording(t, "lane-"+line+"-certify-literal")
+	rec.Subset() // the no-profile request is not asked; hits bound the other
+	_, _, verdict := recordedAnswer(t, rec, "profile", literalClaim)
+	return countingLane(t, rec, hits), verdict
 }
 
 // loopStopped fails the row within seconds if the client's loop is still
@@ -64,7 +67,7 @@ func newFastGated(lane *DiscoveredLane, qualify LaneQualifier, reason string) *G
 // once; routing's lane stays untouched and the loop stops.
 func TestGatedCertificationQualifiesInBackgroundNeverOnTheExchange(t *testing.T) {
 	var hits int32
-	upstream := gatedTestUpstream(t, &hits)
+	upstream, verdict := gatedTestUpstream(t, "2.2", &hits)
 	release := make(chan struct{})
 	entered := make(chan struct{}, 8)
 	var attempts int32
@@ -84,7 +87,7 @@ func TestGatedCertificationQualifiesInBackgroundNeverOnTheExchange(t *testing.T)
 
 	<-entered // the loop's first attempt is inside the (blocked) qualifier
 	started := time.Now()
-	_, err := v.Validate(context.Background(), []byte(`{"resourceType":"Claim"}`), "profile")
+	_, err := v.Validate(context.Background(), literalClaim, "profile")
 	if elapsed := time.Since(started); elapsed > certificationCandidateTimeout {
 		t.Fatalf("the exchange waited %s on qualification; it must answer within the candidate bound", elapsed)
 	}
@@ -102,10 +105,10 @@ func TestGatedCertificationQualifiesInBackgroundNeverOnTheExchange(t *testing.T)
 	close(release)
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		res, err := v.Validate(context.Background(), []byte(`{"resourceType":"Claim"}`), "profile")
+		res, err := v.Validate(context.Background(), literalClaim, "profile")
 		if err == nil {
-			if !res.Valid || atomic.LoadInt32(&hits) != 1 {
-				t.Fatalf("after qualification: res=%+v hits=%d", res, hits)
+			if res.Valid || !reflect.DeepEqual(res.Issues, verdict) || atomic.LoadInt32(&hits) != 1 {
+				t.Fatalf("after qualification: res=%+v hits=%d, want the lane's invalid verdict from one request", res, hits)
 			}
 			break
 		}
@@ -128,7 +131,7 @@ func TestGatedCertificationQualifiesInBackgroundNeverOnTheExchange(t *testing.T)
 // retrying" meanwhile, and the exchange after the first success certifies.
 func TestGatedCertificationRetriesUntilTheValidatorComesUp(t *testing.T) {
 	var hits int32
-	upstream := gatedTestUpstream(t, &hits)
+	upstream, verdict := gatedTestUpstream(t, "2.1", &hits)
 	var up atomic.Bool
 	var attempts int32
 	qualifier := func(context.Context, string, string) error {
@@ -158,10 +161,10 @@ func TestGatedCertificationRetriesUntilTheValidatorComesUp(t *testing.T) {
 
 	up.Store(true)
 	for {
-		res, err := v.Validate(context.Background(), []byte(`{"resourceType":"Claim"}`), "profile")
+		res, err := v.Validate(context.Background(), literalClaim, "profile")
 		if err == nil {
-			if !res.Valid || atomic.LoadInt32(&hits) != 1 {
-				t.Fatalf("after the validator came up: res=%+v hits=%d", res, hits)
+			if res.Valid || !reflect.DeepEqual(res.Issues, verdict) || atomic.LoadInt32(&hits) != 1 {
+				t.Fatalf("after the validator came up: res=%+v hits=%d, want the lane's invalid verdict from one request", res, hits)
 			}
 			break
 		}
@@ -180,7 +183,7 @@ func TestGatedCertificationRetriesUntilTheValidatorComesUp(t *testing.T) {
 // disabled certification all rely on.
 func TestCloseCertificationClientsStopsGatedLoops(t *testing.T) {
 	var hits int32
-	upstream := gatedTestUpstream(t, &hits)
+	upstream, _ := gatedTestUpstream(t, "2.2", &hits)
 	block := make(chan struct{})
 	defer close(block)
 	qualifier := func(ctx context.Context, _, _ string) error {
@@ -198,13 +201,16 @@ func TestCloseCertificationClientsStopsGatedLoops(t *testing.T) {
 	if v.ctx.Err() == nil {
 		t.Fatal("the gated client's context was not cancelled")
 	}
+	if atomic.LoadInt32(&hits) != 0 {
+		t.Fatal("a closed client dialed the lane")
+	}
 }
 
 // A lane routing has already qualified needs no attempt of this client's own:
 // the loop sees it ready and stops, and the exchange certifies.
 func TestGatedCertificationHonoursRoutingReadiness(t *testing.T) {
 	var hits int32
-	upstream := gatedTestUpstream(t, &hits)
+	upstream, verdict := gatedTestUpstream(t, "2.2", &hits)
 	var attempts int32
 	never := func(context.Context, string, string) error {
 		atomic.AddInt32(&attempts, 1)
@@ -216,13 +222,35 @@ func TestGatedCertificationHonoursRoutingReadiness(t *testing.T) {
 	}
 	v := newFastGated(lane, never, "FHIR_CERTIFY_URL_2_2 and FHIR_VALIDATE_URL_2_2 are not configured")
 	defer v.Close()
-	res, err := v.Validate(context.Background(), []byte(`{"resourceType":"Claim"}`), "profile")
-	if err != nil || !res.Valid || atomic.LoadInt32(&hits) != 1 {
+	res, err := v.Validate(context.Background(), literalClaim, "profile")
+	if err != nil || res.Valid || !reflect.DeepEqual(res.Issues, verdict) || atomic.LoadInt32(&hits) != 1 {
 		t.Fatalf("with routing's lane ready: res=%+v err=%v hits=%d", res, err, hits)
 	}
 	loopStopped(t, v)
 	if got := atomic.LoadInt32(&attempts); got != 0 {
 		t.Fatalf("the client attempted %d qualifications of a lane routing had already qualified", got)
+	}
+}
+
+// Once qualified, the gated client certifies a real lane's clean answer: the
+// 2.1 lane's answer to the versioned approved ClaimResponse (warnings, no
+// error), asked with the request the lane recorded.
+func TestGatedCertificationCertifiesARealCleanAnswer(t *testing.T) {
+	rec, payload, profile, answers := recordedClaimResponseRow(t, "2.1")
+	if len(answers) == 0 || bytes.Contains(answers[0].Response.Body, []byte(`"severity":"error"`)) {
+		t.Fatal("the 2.1 lane's first recorded answer is no longer clean")
+	}
+	var hits int32
+	upstream := countingLane(t, rec, &hits)
+	lane := NewDiscoveredLane("2.1", upstream.URL+"/fhir", shnsdk.NewOperationValidator(upstream.URL+"/fhir"))
+	if err := lane.Qualify(context.Background(), func(context.Context, string, string) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	v := newFastGated(lane, nil, "FHIR_CERTIFY_URL_2_1 and FHIR_VALIDATE_URL_2_1 are not configured")
+	defer v.Close()
+	res, err := v.Validate(context.Background(), payload, profile)
+	if err != nil || !res.Valid || len(res.Issues) != 0 || atomic.LoadInt32(&hits) != 1 {
+		t.Fatalf("gated client: res=%+v err=%v hits=%d, want the lane's clean verdict from one request", res, err, hits)
 	}
 }
 

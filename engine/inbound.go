@@ -16,7 +16,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/SmartHealthNetwork/shn-gateway/diagnostics"
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
@@ -132,7 +131,7 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 	if leg, ok := r.Context().Value(diagnosticLegKey{}).(*diagnosticLeg); ok {
 		leg.hash, leg.sender, leg.recipient, leg.correlation = sha256hex(env.Ciphertext), env.Metadata.Sender, env.Metadata.Recipient, env.Metadata.CorrelationID
 	}
-	r = r.WithContext(diagnostics.WithRequestIdentity(r.Context(), sha256hex(env.Ciphertext), env.Metadata.Sender, env.Metadata.Recipient, env.Metadata.CorrelationID))
+	r = withDiagnosticIdentity(r, env)
 	g.diagnosticStage(r.Context(), "leg.verified", env.Metadata.TransactionType, nil, 0, "")
 	// Request framing: decrypt ONCE here, then resolve this leg's
 	// ANSWER LINE before any handler runs — a framed request states the line the

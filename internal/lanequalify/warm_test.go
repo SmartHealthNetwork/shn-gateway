@@ -17,12 +17,18 @@ import (
 	"unicode/utf8"
 )
 
-// fakeLane stands in for a HAPI validator at the wire: /metadata answers 200 and
-// every $validate answers an OperationOutcome (HTTP 200 whatever the issues).
-// respond is the per-request hook; returning false means the hook already
-// answered (or deliberately never will).
+// fakeLane is a validator lane at the wire. By default it answers each
+// $validate with what a real lane of that line answered to the same request
+// (testdata/recordings/lane-<line>-warm.json, replayed strictly: a request the
+// lane was never asked fails the test, and every recorded answer must be used).
+// respond is the per-request hook, for a fault no capture holds (a hang, an
+// answer that is not an OperationOutcome, a false verdict): returning false
+// means the hook already answered (or deliberately never will); returning true
+// passes the request on to the recording. A test that sets it calls
+// lane.partial(), since the rows it answers leave recorded answers unused.
 type fakeLane struct {
 	srv     *httptest.Server
+	subset  func()
 	respond func(w http.ResponseWriter, n int, body []byte) bool
 	mu      sync.Mutex
 	posts   []recordedPost
@@ -33,27 +39,22 @@ type recordedPost struct {
 	body          []byte
 }
 
-func testOutcome(body []byte, profile string) string {
-	if outcome := explicitProfileTestOutcome(profile); outcome != "" {
-		return outcome
-	}
-	if outcome := supportTestOutcome(body, ""); outcome != "" {
-		return outcome
-	}
-	if strings.Contains(string(body), `"valueBoolean":true`) {
-		return targetedNegativeOutcome
-	}
-	return cleanOutcome
+func newFakeLane(t *testing.T, line string) *fakeLane { return newLane(t, line, false) }
+
+// newWarmedFakeLane is the lane as a verification pass meets it, after the
+// warm-up. Verification asks 20 of the 42 recorded requests, so the rest go
+// unused.
+func newWarmedFakeLane(t *testing.T, line string) *fakeLane {
+	l := newLane(t, line, true)
+	l.partial()
+	return l
 }
 
-func newFakeLane(t *testing.T) *fakeLane {
+func newLane(t *testing.T, line string, warmed bool) *fakeLane {
 	t.Helper()
-	l := &fakeLane{}
+	lane, subset := replayLane(t, line, warmed)
+	l := &fakeLane{subset: subset}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/fhir/metadata", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"resourceType":"CapabilityStatement"}`))
-	})
 	mux.HandleFunc("/fhir/", func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		l.mu.Lock()
@@ -63,18 +64,30 @@ func newFakeLane(t *testing.T) *fakeLane {
 		if l.respond != nil && !l.respond(w, n, body) {
 			return
 		}
-		w.Header().Set("Content-Type", "application/fhir+json")
-		w.WriteHeader(http.StatusOK)
-		if outcome := supportTestOutcome(body, r.URL.Query().Get("profile")); outcome != "" {
-			_, _ = w.Write([]byte(outcome))
-		} else {
-			_, _ = w.Write([]byte(testOutcome(body, r.URL.Query().Get("profile"))))
+		req, err := http.NewRequestWithContext(r.Context(), r.Method, lane.URL+r.URL.RequestURI(), bytes.NewReader(body))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
 		}
+		req.Header.Set("Content-Type", r.Header.Get("Content-Type"))
+		resp, err := lane.Client().Do(req)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
+		w.WriteHeader(resp.StatusCode)
+		_, _ = io.Copy(w, resp.Body)
 	})
 	l.srv = httptest.NewServer(mux)
 	t.Cleanup(l.srv.Close)
 	return l
 }
+
+// partial marks a test whose respond hook answers rows itself, or whose run
+// stops early: the recorded answers for those rows go unused.
+func (l *fakeLane) partial() { l.subset() }
 
 func (l *fakeLane) base() string { return l.srv.URL + "/fhir" }
 
@@ -105,7 +118,7 @@ func (p *progressLog) snapshot() []string {
 func TestWarm_PostsTheFullCorpusInOrderAndReportsProgress(t *testing.T) {
 	for _, line := range []string{"2.0", "2.1", "2.2"} {
 		t.Run(line, func(t *testing.T) {
-			lane := newFakeLane(t)
+			lane := newFakeLane(t, line)
 			var progress progressLog
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
@@ -143,7 +156,8 @@ func TestWarm_PostsTheFullCorpusInOrderAndReportsProgress(t *testing.T) {
 // Rejection row: /metadata 200 with $validate hanging never
 // becomes ready — Warm returns at the budget, not after, and does not re-post.
 func TestWarm_HangingValidateFailsAtTheBudget(t *testing.T) {
-	lane := newFakeLane(t)
+	lane := newFakeLane(t, "2.0")
+	lane.partial()
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
 	lane.respond = func(w http.ResponseWriter, n int, _ []byte) bool {
@@ -174,7 +188,8 @@ func TestWarm_HangingValidateFailsAtTheBudget(t *testing.T) {
 // Rejection row: /metadata 200 with $validate answering something
 // other than an OperationOutcome is not ready.
 func TestWarm_NonOperationOutcomeIsNotReady(t *testing.T) {
-	lane := newFakeLane(t)
+	lane := newFakeLane(t, "2.0")
+	lane.partial()
 	lane.respond = func(w http.ResponseWriter, _ int, _ []byte) bool {
 		w.Header().Set("Content-Type", "application/fhir+json")
 		w.WriteHeader(http.StatusOK)
@@ -195,7 +210,8 @@ func TestWarm_NonOperationOutcomeIsNotReady(t *testing.T) {
 // Rejection row: a partial warm — one row still cold — is not
 // ready, and the rows that already answered are not re-posted while waiting.
 func TestWarm_PartialWarmIsNotReadyAndWarmRowsAreNotReposted(t *testing.T) {
-	lane := newFakeLane(t)
+	lane := newFakeLane(t, "2.1")
+	lane.partial()
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
 	const coldRow = 5
@@ -236,11 +252,13 @@ func TestWarm_PartialWarmIsNotReadyAndWarmRowsAreNotReposted(t *testing.T) {
 }
 
 // The twin must apply the image's verdict assertions, not merely accept an
-// OperationOutcome: a lane that keeps returning the reproduced line-2.2 slicing
-// failure past the initialization pass is not ready.
+// OperationOutcome: a lane that keeps returning the answer the 2.2 lane gave
+// while still warming (its recorded slicing failure) past the initialization
+// pass is not ready.
 func TestWarm_FalseSlicingVerdictAfterInitializationIsNotReady(t *testing.T) {
-	lane := newFakeLane(t)
-	lane.respond = respondClaimResponse(primeSlicingOutcome22)
+	lane := newFakeLane(t, "2.2")
+	lane.partial()
+	lane.respond = respondClaimResponse(string(primeSlicingAnswer22(t)))
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	err := Warm(ctx, lane.base(), "2.2", nil)
@@ -258,7 +276,8 @@ func TestWarm_FalseSlicingVerdictAfterInitializationIsNotReady(t *testing.T) {
 }
 
 func TestWarm_UnknownLinePostsNothing(t *testing.T) {
-	lane := newFakeLane(t)
+	lane := newFakeLane(t, "2.0")
+	lane.partial()
 	err := Warm(context.Background(), lane.base(), "9.9", nil)
 	if err == nil || !strings.Contains(err.Error(), "9.9") {
 		t.Fatalf("Warm = %v, want an unknown-line error naming the line", err)
@@ -287,7 +306,7 @@ func TestPASVersion_MatchesTheCorpusTable(t *testing.T) {
 // negative controls, no priming and no retry — the check a live gate runs the
 // instant a child reports ready.
 func TestVerify_RunsOneStrictPassAndTheNegativeControls(t *testing.T) {
-	lane := newFakeLane(t)
+	lane := newWarmedFakeLane(t, "2.2")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := Verify(ctx, lane.base(), "2.2"); err != nil {
@@ -320,11 +339,12 @@ func TestVerify_RunsOneStrictPassAndTheNegativeControls(t *testing.T) {
 }
 
 func TestVerify_FalseVerdictOnTheFirstRowIsTerminal(t *testing.T) {
-	lane := newFakeLane(t)
+	lane := newWarmedFakeLane(t, "2.2")
+	slicing := primeSlicingAnswer22(t)
 	lane.respond = func(w http.ResponseWriter, _ int, _ []byte) bool {
 		w.Header().Set("Content-Type", "application/fhir+json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(primeSlicingOutcome22))
+		_, _ = w.Write(slicing)
 		return false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -339,12 +359,15 @@ func TestVerify_FalseVerdictOnTheFirstRowIsTerminal(t *testing.T) {
 }
 
 func TestVerify_NegativeControlAcceptedCleanIsTerminal(t *testing.T) {
-	lane := newFakeLane(t)
+	lane := newWarmedFakeLane(t, "2.0")
+	// The lane's real answer to the unmutated fixture: a lane that accepts the
+	// type mutation answers as if it were not there.
+	accepted := recordedAnswer(t, qualificationRows("2.0", "verify")[0], false)
 	lane.respond = func(w http.ResponseWriter, _ int, body []byte) bool {
 		if strings.Contains(string(body), `"valueBoolean":true`) {
 			w.Header().Set("Content-Type", "application/fhir+json")
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(cleanOutcome)) // the mutation must be rejected, not accepted
+			_, _ = w.Write(accepted) // the mutation must be rejected, not accepted
 			return false
 		}
 		return true
@@ -361,8 +384,9 @@ func TestVerify_NegativeControlAcceptedCleanIsTerminal(t *testing.T) {
 // failure class AND the offending outcome's first error issue, so the child's
 // failure detail says what the validator actually answered.
 func TestWarm_FailureCarriesTheOffendingOutcome(t *testing.T) {
-	lane := newFakeLane(t)
-	lane.respond = respondClaimResponse(primeSlicingOutcome22)
+	lane := newFakeLane(t, "2.2")
+	lane.partial()
+	lane.respond = respondClaimResponse(string(primeSlicingAnswer22(t)))
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	err := Warm(ctx, lane.base(), "2.2", nil)
@@ -378,7 +402,8 @@ func TestWarm_FailureCarriesTheOffendingOutcome(t *testing.T) {
 
 // A non-outcome answer is excerpted, bounded, on one line.
 func TestWarm_FailureExcerptIsBoundedAndSingleLine(t *testing.T) {
-	lane := newFakeLane(t)
+	lane := newFakeLane(t, "2.0")
+	lane.partial()
 	big := "{\n\"resourceType\": \"Patient\",\n\"text\": \"" + strings.Repeat("x", 5000) + "\"\n}"
 	lane.respond = func(w http.ResponseWriter, _ int, _ []byte) bool {
 		w.Header().Set("Content-Type", "application/fhir+json")
@@ -403,7 +428,8 @@ func TestWarm_FailureExcerptIsBoundedAndSingleLine(t *testing.T) {
 // The readiness budget expiring mid-row is reported as the budget, not as a
 // transport fault.
 func TestWarm_BudgetExpiryNamesTheBudget(t *testing.T) {
-	lane := newFakeLane(t)
+	lane := newFakeLane(t, "2.0")
+	lane.partial()
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
 	lane.respond = func(http.ResponseWriter, int, []byte) bool { <-release; return false }
@@ -437,7 +463,8 @@ func TestWarm_FailureSummaryFindsTheErrorInALargeOutcome(t *testing.T) {
 	if len(big) < 4096 {
 		t.Fatalf("test outcome is %d bytes; it must exceed any small excerpt cap", len(big))
 	}
-	lane := newFakeLane(t)
+	lane := newFakeLane(t, "2.2")
+	lane.partial()
 	lane.respond = respondClaimResponse(big)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -456,11 +483,20 @@ func TestWarm_FailureSummaryFindsTheErrorInALargeOutcome(t *testing.T) {
 	}
 }
 
-// A positive row can fail on a warning-severity profile-resolution issue;
-// the summary then names that issue, not an unrelated first issue.
+// A ClaimResponse row can fail on a warning-severity profile-resolution issue
+// (added after the lane's real answer, whose own warnings come first); the
+// summary then names that issue, not an unrelated first issue.
 func TestWarm_FailureSummaryNamesTheSuspiciousWarning(t *testing.T) {
-	outcome := `{"resourceType":"OperationOutcome","issue":[{"severity":"information","code":"informational","diagnostics":"All OK"},{"severity":"warning","code":"processing","diagnostics":"Failed to retrieve profile http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claimresponse"}]}`
-	lane := newFakeLane(t)
+	row := qualificationRows("2.0", "prime")[0]
+	answer := recordedAnswer(t, row, false)
+	if err := assertVerdict(row, 200, answer); err != nil {
+		t.Fatalf("the recorded answer must pass unmutated: %v", err)
+	}
+	outcome := string(mutateOutcome(t, answer, func(issues []any) []any {
+		return append(issues, map[string]any{"severity": "warning", "code": "processing", "diagnostics": "Failed to retrieve profile http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claimresponse"})
+	}))
+	lane := newFakeLane(t, "2.0")
+	lane.partial()
 	lane.respond = respondClaimResponse(outcome)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -497,11 +533,14 @@ func respondClaimResponse(outcome string) func(w http.ResponseWriter, n int, bod
 }
 
 // A prime row tolerates the known 2.2 slicing error; when it fails on a
-// suspicious warning beside that tolerated error, the summary names the
-// warning, not the tolerated error.
+// suspicious warning beside that tolerated error (added to the lane's real
+// slicing answer), the summary names the warning, not the tolerated error.
 func TestWarm_FailureSummarySkipsTheToleratedPrimeSlicingError(t *testing.T) {
-	outcome := strings.TrimSuffix(primeSlicingOutcome22, `]}`) + `,{"severity":"warning","code":"processing","diagnostics":"Failed to retrieve profile http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claimresponse|2.2.1"}]}`
-	lane := newFakeLane(t)
+	outcome := string(mutateOutcome(t, primeSlicingAnswer22(t), func(issues []any) []any {
+		return append(issues, map[string]any{"severity": "warning", "code": "processing", "diagnostics": "Failed to retrieve profile http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claimresponse|2.2.1"})
+	}))
+	lane := newFakeLane(t, "2.2")
+	lane.partial()
 	lane.respond = respondClaimResponse(outcome)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -515,16 +554,20 @@ func TestWarm_FailureSummarySkipsTheToleratedPrimeSlicingError(t *testing.T) {
 }
 
 // A negative row expects exactly the targeted rejection; when it fails on a
-// second, non-targeted error, the summary names that error.
+// second, non-targeted error (added to the lane's real answer), the summary
+// names that error.
 func TestWarm_FailureSummarySkipsTheExpectedTargetedRejection(t *testing.T) {
-	extra := `,{"severity":"error","code":"invalid","diagnostics":"ClaimResponse.request: minimum required = 1, but only found 0"}`
-	outcome := strings.Replace(targetedNegativeOutcome, `,{"severity":"warning"`, extra+`,{"severity":"warning"`, 1)
-	lane := newFakeLane(t)
+	outcome := mutateOutcome(t, recordedAnswer(t, negativeRows("2.0")[0], false), func(issues []any) []any {
+		extra := map[string]any{"severity": "error", "code": "invalid", "diagnostics": "ClaimResponse.request: minimum required = 1, but only found 0"}
+		return append(issues[:1:1], append([]any{extra}, issues[1:]...)...)
+	})
+	lane := newFakeLane(t, "2.0")
+	lane.partial()
 	lane.respond = func(w http.ResponseWriter, _ int, body []byte) bool {
 		if strings.Contains(string(body), `"valueBoolean":true`) {
 			w.Header().Set("Content-Type", "application/fhir+json")
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(outcome))
+			_, _ = w.Write(outcome)
 			return false
 		}
 		return true
@@ -540,15 +583,17 @@ func TestWarm_FailureSummarySkipsTheExpectedTargetedRejection(t *testing.T) {
 	}
 }
 
-// A negative control accepted clean says so, rather than quoting an
-// informational issue.
+// A negative control accepted clean (answered as the lane really answers the
+// unmutated fixture) says so, rather than quoting one of its warnings.
 func TestWarm_NegativeAcceptedCleanSaysWhatWasExpected(t *testing.T) {
-	lane := newFakeLane(t)
+	lane := newFakeLane(t, "2.1")
+	lane.partial()
+	accepted := recordedAnswer(t, qualificationRows("2.1", "qualify-1")[0], false)
 	lane.respond = func(w http.ResponseWriter, _ int, body []byte) bool {
 		if strings.Contains(string(body), `"valueBoolean":true`) {
 			w.Header().Set("Content-Type", "application/fhir+json")
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(cleanOutcome))
+			_, _ = w.Write(accepted)
 			return false
 		}
 		return true
@@ -568,7 +613,8 @@ func TestWarm_NegativeAcceptedCleanSaysWhatWasExpected(t *testing.T) {
 // single-line.
 func TestWarm_FailureSummaryIsSingleLineAfterDecoding(t *testing.T) {
 	outcome := `{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"processing","diagnostics":"first line\nsecond line\ttabbed"}]}`
-	lane := newFakeLane(t)
+	lane := newFakeLane(t, "2.0")
+	lane.partial()
 	lane.respond = respondClaimResponse(outcome)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -578,16 +624,34 @@ func TestWarm_FailureSummaryIsSingleLineAfterDecoding(t *testing.T) {
 	}
 }
 
-// An initialization row tolerates conformance errors and fails only on a
-// suspicious profile-resolution issue; the summary names that issue.
+// An initialization row tolerates conformance errors (the lane's real answer
+// to the first row carries offline terminology errors) and fails only on a
+// suspicious profile-resolution issue, added here; the summary names that
+// issue.
 func TestWarm_FailureSummaryForInitializationSkipsToleratedErrors(t *testing.T) {
-	outcome := `{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"invalid","diagnostics":"Bundle.entry[2].resource: documented offline terminology error"},{"severity":"warning","code":"processing","diagnostics":"Failed to retrieve profile http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-pas-request-bundle"}]}`
-	lane := newFakeLane(t)
+	answer := recordedAnswer(t, warmups("2.0")[0], false)
+	if err := assertVerdict(warmups("2.0")[0], 200, answer); err != nil {
+		t.Fatalf("the recorded initialization answer must pass unmutated: %v", err)
+	}
+	var tolerated string // the first of the answer's own errors
+	outcome := mutateOutcome(t, answer, func(issues []any) []any {
+		for _, issue := range issues {
+			if tolerated == "" && issue.(map[string]any)["severity"] == "error" {
+				tolerated = issue.(map[string]any)["diagnostics"].(string)
+			}
+		}
+		if len(tolerated) < 40 {
+			t.Fatalf("the recorded initialization answer no longer carries a tolerated error: %q", tolerated)
+		}
+		return append(issues, map[string]any{"severity": "warning", "code": "processing", "diagnostics": "Failed to retrieve profile http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-pas-request-bundle"})
+	})
+	lane := newFakeLane(t, "2.0")
+	lane.partial()
 	lane.respond = func(w http.ResponseWriter, n int, _ []byte) bool {
 		if n == 1 {
 			w.Header().Set("Content-Type", "application/fhir+json")
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(outcome))
+			_, _ = w.Write(outcome)
 			return false
 		}
 		return true
@@ -598,17 +662,21 @@ func TestWarm_FailureSummaryForInitializationSkipsToleratedErrors(t *testing.T) 
 	if err == nil || !strings.Contains(err.Error(), "row 1/42 init-pas-request-bundle") {
 		t.Fatalf("Warm = %v, want the first initialization row to fail", err)
 	}
-	if !strings.Contains(err.Error(), "warning/processing: Failed to retrieve profile") || strings.Contains(err.Error(), "Bundle.entry[2]") {
+	if !strings.Contains(err.Error(), "warning/processing: Failed to retrieve profile") || strings.Contains(err.Error(), tolerated[:40]) {
 		t.Fatalf("error %q should name the suspicious warning, not the tolerated conformance error", err)
 	}
 }
 
-// A negative control that reports its expected rejection more than once
-// says so, rather than quoting the expected rejection as the reason.
+// A negative control that reports its expected rejection more than once (the
+// lane's real rejection, twice) says so, rather than quoting the expected
+// rejection as the reason.
 func TestWarm_NegativeReportedTwiceSaysSo(t *testing.T) {
-	targeted := targetedNegativeOutcome[strings.Index(targetedNegativeOutcome, `{"severity":"error"`):strings.Index(targetedNegativeOutcome, `,{"severity":"warning"`)]
-	outcome := `{"resourceType":"OperationOutcome","issue":[` + targeted + `,` + targeted + `]}`
-	lane := newFakeLane(t)
+	outcome := string(mutateOutcome(t, recordedAnswer(t, negativeRows("2.2")[0], false), func(issues []any) []any {
+		targeted := issueCoded(t, issues, "Extension_EXT_Type")
+		return []any{targeted, targeted}
+	}))
+	lane := newFakeLane(t, "2.2")
+	lane.partial()
 	lane.respond = func(w http.ResponseWriter, _ int, body []byte) bool {
 		if strings.Contains(string(body), `"valueBoolean":true`) {
 			w.Header().Set("Content-Type", "application/fhir+json")
@@ -632,7 +700,7 @@ func TestWarm_NegativeReportedTwiceSaysSo(t *testing.T) {
 func TestVerifyIncludesEncounterAndExplicitControls(t *testing.T) {
 	for _, line := range []string{"2.0", "2.1", "2.2"} {
 		t.Run(line, func(t *testing.T) {
-			lane := newFakeLane(t)
+			lane := newWarmedFakeLane(t, line)
 			var active atomic.Int32
 			lane.respond = func(w http.ResponseWriter, n int, body []byte) bool {
 				if active.Add(1) != 1 {
@@ -673,7 +741,7 @@ func TestVerifyRejectsFalseRestoredControlVerdicts(t *testing.T) {
 		for _, target := range []int{18, 19, 20} {
 			for _, severity := range []string{"information", "warning"} {
 				t.Run(fmt.Sprintf("%s/%d/%s", line, target, severity), func(t *testing.T) {
-					lane := newFakeLane(t)
+					lane := newWarmedFakeLane(t, line)
 					lane.respond = func(w http.ResponseWriter, n int, _ []byte) bool {
 						if n == target {
 							fmt.Fprintf(w, `{"resourceType":"OperationOutcome","issue":[{"severity":%q,"code":"processing"}]}`, severity)

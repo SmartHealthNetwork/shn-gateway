@@ -2,51 +2,79 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
-func verdictServer(t *testing.T) (*httptest.Server, *[]recordedPost) {
+// verdictLane is the lane of line as the command meets it: qualify runs on a
+// lane that has not validated yet (its prime rows get the lane's first
+// answers), verify-verdicts on one the warm-up already settled. Neither
+// command asks the four initialization rows, and verification asks 20 of the
+// 42 recorded requests, so the rest go unused. Requests must not overlap:
+// each answer is held open 1 ms after it is written, and a request that
+// arrives before the previous answer ended fails the test.
+func verdictLane(t *testing.T, line, command string) *fakeLane {
 	t.Helper()
-	var mu sync.Mutex
-	posts := []recordedPost{}
-	var active atomic.Int32
-	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if active.Add(1) != 1 {
-			t.Error("overlapping validation requests")
+	lane := newLane(t, line, command == "verify-verdicts")
+	lane.partial()
+	lane.hold.Store(int64(time.Millisecond))
+	t.Cleanup(func() {
+		if n := lane.overlaps.Load(); n != 0 {
+			t.Errorf("%d validation requests arrived while an earlier answer was still being sent", n)
 		}
-		defer active.Add(-1)
-		time.Sleep(time.Millisecond)
-		body, _ := io.ReadAll(r.Body)
-		mu.Lock()
-		posts = append(posts, recordedPost{path: r.URL.Path, profile: r.URL.Query().Get("profile"), rawQuery: r.URL.RawQuery, body: body})
-		mu.Unlock()
-		if outcome := explicitProfileTestOutcome(r.URL.Query().Get("profile")); outcome != "" {
-			fmt.Fprint(w, outcome)
-			return
+	})
+	return lane
+}
+
+// Rejection row for the overlap guard: a second request sent after the first
+// answer's bytes arrived, but before that answer ended, is counted.
+func TestFakeLaneCountsARequestSentBeforeTheLastAnswerEnded(t *testing.T) {
+	lane := newWarmedFakeLane(t, "2.2")
+	lane.hold.Store(int64(300 * time.Millisecond))
+	row := qualificationRows("2.2", "verify")[0]
+	body, err := fixtureBody(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	send := func(lane *fakeLane) *http.Response {
+		req, err := http.NewRequest(http.MethodPost, lane.base()+"/ClaimResponse/$validate?profile="+url.QueryEscape(row.profile), bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
 		}
-		if outcome := supportTestOutcome(body, r.URL.Query().Get("profile")); outcome != "" {
-			fmt.Fprint(w, outcome)
-			return
+		req.Header.Set("Content-Type", "application/fhir+json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
 		}
-		var resource map[string]any
-		_ = json.Unmarshal(body, &resource)
-		if strings.Contains(string(body), `"valueBoolean":true`) {
-			fmt.Fprint(w, targetedNegativeOutcome)
-			return
-		}
-		fmt.Fprint(w, cleanOutcome)
-	}))
-	t.Cleanup(s.Close)
-	return s, &posts
+		return resp
+	}
+	first := send(lane) // headers and body sent; the answer is still open
+	second := send(lane)
+	for _, resp := range []*http.Response{first, second} {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
+	if lane.overlaps.Load() == 0 {
+		t.Fatal("a request sent before the previous answer ended was not counted")
+	}
+	// Control: read to the end before sending, and nothing is counted.
+	calm := newWarmedFakeLane(t, "2.2")
+	calm.hold.Store(int64(time.Millisecond))
+	for i := 0; i < 2; i++ {
+		resp := send(calm)
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
+	if n := calm.overlaps.Load(); n != 0 {
+		t.Fatalf("sequential requests counted %d overlaps", n)
+	}
 }
 
 func emptyEnv(string) string { return "" }
@@ -54,15 +82,16 @@ func emptyEnv(string) string { return "" }
 func TestVerdictCommandsRunExactSerialCorpora(t *testing.T) {
 	for command, wantCount := range map[string]int{"qualify": 38, "verify-verdicts": 20} {
 		t.Run(command, func(t *testing.T) {
-			s, posts := verdictServer(t)
-			args := []string{command, "--base", s.URL + "/fhir", "--line", "2.2", "--pas-version", "2.2.1", "--budget", "5s"}
+			lane := verdictLane(t, "2.2", command)
+			args := []string{command, "--base", lane.base(), "--line", "2.2", "--pas-version", "2.2.1", "--budget", "5s"}
 			if got := verdictCommand(args, emptyEnv); got != 0 {
 				t.Fatalf("exit=%d", got)
 			}
-			if len(*posts) != wantCount {
-				t.Fatalf("posts=%d want %d", len(*posts), wantCount)
+			posts := lane.recorded()
+			if len(posts) != wantCount {
+				t.Fatalf("posts=%d want %d", len(posts), wantCount)
 			}
-			for i, post := range *posts {
+			for i, post := range posts {
 				wantPath := "/fhir/ClaimResponse/$validate"
 				if i >= wantCount-4 && i < wantCount-2 {
 					wantPath = "/fhir/Claim/$validate"
@@ -73,19 +102,19 @@ func TestVerdictCommandsRunExactSerialCorpora(t *testing.T) {
 					t.Fatalf("post[%d] path=%q", i, post.path)
 				}
 			}
-			if (*posts)[0].profile != pasClaimResponseProfile+"|2.2.1" || (*posts)[6].rawQuery != "" {
-				t.Fatalf("request forms not preserved: first=%q meta-query=%q", (*posts)[0].profile, (*posts)[6].rawQuery)
+			if posts[0].profile != pasClaimResponseProfile+"|2.2.1" || posts[6].rawQuery != "" {
+				t.Fatalf("request forms not preserved: first=%q meta-query=%q", posts[0].profile, posts[6].rawQuery)
 			}
 		})
 	}
 }
 
 func TestVerdictCommandDefaultsFromImageConfiguration(t *testing.T) {
-	s, posts := verdictServer(t)
+	lane := verdictLane(t, "2.1", "verify-verdicts")
 	getenv := func(key string) string {
 		switch key {
 		case "SHN_VALIDATOR_BASE":
-			return s.URL + "/fhir"
+			return lane.base()
 		case "SHN_IG_LINE":
 			return "2.1"
 		case pasVersionEnv:
@@ -93,13 +122,14 @@ func TestVerdictCommandDefaultsFromImageConfiguration(t *testing.T) {
 		}
 		return ""
 	}
-	if got := verdictCommand([]string{"verify-verdicts", "--budget", "5s"}, getenv); got != 0 || len(*posts) != 20 {
-		t.Fatalf("exit=%d posts=%d", got, len(*posts))
+	if got := verdictCommand([]string{"verify-verdicts", "--budget", "5s"}, getenv); got != 0 || len(lane.recorded()) != 20 {
+		t.Fatalf("exit=%d posts=%d", got, len(lane.recorded()))
 	}
 }
 
 func TestVerdictCommandRejectsConfigurationBeforePost(t *testing.T) {
-	s, posts := verdictServer(t)
+	lane := verdictLane(t, "2.2", "verify-verdicts")
+	s := lane.srv
 	cases := map[string][]string{
 		"missing version": {"verify-verdicts", "--base", s.URL, "--line", "2.2"},
 		"wrong version":   {"verify-verdicts", "--base", s.URL, "--line", "2.2", "--pas-version", "2.1.0"},
@@ -114,34 +144,41 @@ func TestVerdictCommandRejectsConfigurationBeforePost(t *testing.T) {
 	}
 	for name, args := range cases {
 		t.Run(name, func(t *testing.T) {
-			before := len(*posts)
+			before := len(lane.recorded())
 			if got := verdictCommand(args, emptyEnv); got != 1 {
 				t.Fatalf("exit=%d", got)
 			}
-			if len(*posts) != before {
+			if len(lane.recorded()) != before {
 				t.Fatal("invalid configuration submitted POST")
 			}
 		})
 	}
 }
 
+// The second row gets the lane's real answer for it with a status the lane
+// never sent: the command stops there.
 func TestVerdictCommandStopsAfterFirstBadOutcome(t *testing.T) {
-	var posts int
-	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		posts++
-		if posts == 2 {
-			w.WriteHeader(http.StatusUnprocessableEntity)
+	lane := newWarmedFakeLane(t, "2.2")
+	answer := recordedAnswer(t, qualificationRows("2.2", "verify")[1], false)
+	var posts atomic.Int32
+	lane.validate = func(w http.ResponseWriter, _ *http.Request) bool {
+		if posts.Add(1) != 2 {
+			return true
 		}
-		fmt.Fprint(w, cleanOutcome)
-	}))
-	defer s.Close()
-	args := []string{"verify-verdicts", "--base", s.URL, "--line", "2.2", "--pas-version", "2.2.1", "--budget", "5s"}
-	if got := verdictCommand(args, emptyEnv); got != 1 || posts != 2 {
-		t.Fatalf("exit=%d posts=%d", got, posts)
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = w.Write(answer)
+		return false
+	}
+	args := []string{"verify-verdicts", "--base", lane.base(), "--line", "2.2", "--pas-version", "2.2.1", "--budget", "5s"}
+	if got := verdictCommand(args, emptyEnv); got != 1 || posts.Load() != 2 {
+		t.Fatalf("exit=%d posts=%d", got, posts.Load())
 	}
 }
 
 func TestVerdictCommandRejectsTransportFailuresWithoutRetry(t *testing.T) {
+	// The first row's real answer on a lane the warm-up settled, under each
+	// fault; the malformed bodies are written by hand.
+	answer := string(recordedAnswer(t, qualificationRows("2.2", "verify")[0], false))
 	for _, mode := range []string{"malformed", "missing-code", "ambiguous-outcome", "status", "redirect", "incomplete", "oversize", "timeout"} {
 		t.Run(mode, func(t *testing.T) {
 			var posts atomic.Int32
@@ -161,15 +198,15 @@ func TestVerdictCommandRejectsTransportFailuresWithoutRetry(t *testing.T) {
 					fmt.Fprint(w, `{"resourceType":"OperationOutcome","issue":[{"severity":"error","Severity":"information","code":"processing","diagnostics":"unrelated validation failure"}]}`)
 				case "status":
 					w.WriteHeader(http.StatusUnprocessableEntity)
-					fmt.Fprint(w, cleanOutcome)
+					fmt.Fprint(w, answer)
 				case "redirect":
 					w.Header().Set("Location", "/elsewhere")
 					w.WriteHeader(http.StatusTemporaryRedirect)
 				case "incomplete":
-					w.Header().Set("Content-Length", "500")
-					fmt.Fprint(w, cleanOutcome)
+					w.Header().Set("Content-Length", fmt.Sprint(len(answer)+500))
+					fmt.Fprint(w, answer)
 				case "oversize":
-					fmt.Fprint(w, cleanOutcome+strings.Repeat(" ", maxOutcomeBytes))
+					fmt.Fprint(w, answer+strings.Repeat(" ", maxOutcomeBytes))
 				case "timeout":
 					// Hold the request until the client gives up, so the budget,
 					// not the server, ends it. The fallback only bounds a broken run.
@@ -222,17 +259,18 @@ func TestVerdictCommandsIncludeExplicitProfileControls(t *testing.T) {
 	for _, line := range []string{"2.0", "2.1", "2.2"} {
 		for _, command := range []string{"qualify", "verify-verdicts"} {
 			t.Run(line+"/"+command, func(t *testing.T) {
-				server, posts := verdictServer(t)
+				lane := verdictLane(t, line, command)
 				version, _ := pasVersion(line)
 				want := 20
 				if command == "qualify" {
 					want = 38
 				}
-				if code := verdictCommand([]string{command, "--base", server.URL + "/fhir", "--line", line, "--pas-version", version, "--budget", "5s"}, emptyEnv); code != 0 {
+				if code := verdictCommand([]string{command, "--base", lane.base(), "--line", line, "--pas-version", version, "--budget", "5s"}, emptyEnv); code != 0 {
 					t.Fatalf("exit %d", code)
 				}
-				if len(*posts) != want {
-					t.Fatalf("posts %d want %d", len(*posts), want)
+				posts := lane.recorded()
+				if len(posts) != want {
+					t.Fatalf("posts %d want %d", len(posts), want)
 				}
 				dir := "testdata/"
 				if line != "2.0" {
@@ -243,7 +281,7 @@ func TestVerdictCommandsIncludeExplicitProfileControls(t *testing.T) {
 					t.Fatal(err)
 				}
 				for i, profile := range []string{pasClaimResponseProfile + "|9.9.9", "https://example.org/fhir/StructureDefinition/unavailable-profile"} {
-					post := (*posts)[want-2+i]
+					post := posts[want-2+i]
 					if post.path != "/fhir/ClaimResponse/$validate" || post.profile != profile || !bytes.Equal(post.body, raw) || !bytes.Contains(post.body, []byte(`"`+pasClaimResponseProfile+`"`)) {
 						t.Fatalf("control %d changed: %+v", i, post)
 					}
@@ -258,38 +296,24 @@ func TestVerdictCommandsRejectFalseExplicitProfileVerdicts(t *testing.T) {
 			for target := 0; target < 2; target++ {
 				for _, severity := range []string{"information", "warning"} {
 					t.Run(fmt.Sprintf("%s/%s/%d/%s", line, command, target, severity), func(t *testing.T) {
-						posts := 0
-						server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-							posts++
-							body, _ := io.ReadAll(r.Body)
-							profile := r.URL.Query().Get("profile")
-							profiles := []string{pasClaimResponseProfile + "|9.9.9", "https://example.org/fhir/StructureDefinition/unavailable-profile"}
-							if profile == profiles[target] {
-								fmt.Fprintf(w, `{"resourceType":"OperationOutcome","issue":[{"severity":%q,"code":"processing"}]}`, severity)
-								return
+						lane := newLane(t, line, command == "verify-verdicts")
+						lane.partial() // the hook answers the targeted control and the command stops there
+						profiles := []string{pasClaimResponseProfile + "|9.9.9", "https://example.org/fhir/StructureDefinition/unavailable-profile"}
+						lane.validate = func(w http.ResponseWriter, r *http.Request) bool {
+							if r.URL.Query().Get("profile") != profiles[target] {
+								return true
 							}
-							if oo := explicitProfileTestOutcome(profile); oo != "" {
-								fmt.Fprint(w, oo)
-								return
-							}
-							if oo := supportTestOutcome(body, profile); oo != "" {
-								fmt.Fprint(w, oo)
-								return
-							}
-							if strings.Contains(string(body), `"valueBoolean":true`) {
-								fmt.Fprint(w, targetedNegativeOutcome)
-								return
-							}
-							fmt.Fprint(w, cleanOutcome)
-						}))
-						defer server.Close()
+							// A false verdict for an unavailable profile.
+							fmt.Fprintf(w, `{"resourceType":"OperationOutcome","issue":[{"severity":%q,"code":"processing"}]}`, severity)
+							return false
+						}
 						version, _ := pasVersion(line)
 						stop := 19 + target
 						if command == "qualify" {
 							stop = 37 + target
 						}
-						if code := verdictCommand([]string{command, "--base", server.URL + "/fhir", "--line", line, "--pas-version", version, "--budget", "5s"}, emptyEnv); code != 1 || posts != stop {
-							t.Fatalf("exit=%d posts=%d want=%d", code, posts, stop)
+						if code := verdictCommand([]string{command, "--base", lane.base(), "--line", line, "--pas-version", version, "--budget", "5s"}, emptyEnv); code != 1 || len(lane.recorded()) != stop {
+							t.Fatalf("exit=%d posts=%d want=%d", code, len(lane.recorded()), stop)
 						}
 					})
 				}

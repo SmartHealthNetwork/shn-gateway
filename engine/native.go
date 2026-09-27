@@ -28,7 +28,6 @@ import (
 	"time"
 
 	"github.com/SmartHealthNetwork/shn-gateway/connectors/smartauth"
-	"github.com/SmartHealthNetwork/shn-gateway/diagnostics"
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
@@ -38,7 +37,7 @@ const maxPartnerBody = 8 << 20 // 8 MiB cap on a partner response body
 const relayBodyCap = 6 << 20 // 6 MiB — headroom under the 8 MiB MaxResponseBytes for seal + wrapper
 
 type nativeResponder struct {
-	diagnostic func(diagnostics.Event) bool
+	diagnostic DiagnosticSink
 	client     *http.Client
 	baseURL    string // FHIR base ($questionnaire-package, $submit, CoverageEligibilityRequest)
 	cdsBaseURL string // CDS Hooks base (/cds-services/{id}); defaults to baseURL when co-located
