@@ -64,7 +64,7 @@ func TestHandleUC04_ProviderDataAttestsAndLeanTail(t *testing.T) {
 	// originate_members_test.go for the dedicated wiring guard.
 	for _, want := range []string{
 		`"pas-claim-update"`,
-		`ReadSystemOfRecord(g.cfg.SoR).SupplementalReportContext(ctx, member)`,
+		`g.supplementalReport(ctx, member, res.sorID)`,
 		"buildAuthoredPASUpdate",
 	} {
 		if !strings.Contains(fn, want) {

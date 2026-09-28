@@ -92,7 +92,7 @@ func TestObserve_StampsClockTime(t *testing.T) {
 // the DTR leg (which the stub errors) emits originated+failed. This covers
 // every origination leg in the engine — roundTrip is the single choke point.
 func TestObserver_OriginationLegEvents(t *testing.T) {
-	gw, _, _ := crdTestSystem(t, shnsdk.CardCoverage{Covered: shnsdk.CoveredCovered, PANeeded: shnsdk.PANeededAuthNeeded, Questionnaires: []string{"http://example.org/q"}})
+	gw, _, _ := uc03HandlerSystem(t, shnsdk.CardCoverage{Covered: shnsdk.CoveredCovered, PANeeded: shnsdk.PANeededAuthNeeded, Questionnaires: []string{"http://example.org/q"}})
 	var events []ObserverEvent
 	gw.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
 
@@ -295,7 +295,7 @@ func TestObserver_IngressEvents(t *testing.T) {
 // deterministic.
 func TestObserver_ConformanceNeutral(t *testing.T) {
 	run := func(withObserver bool) (int, string) {
-		gw, _, _ := crdTestSystem(t, shnsdk.CardCoverage{Covered: shnsdk.CoveredCovered, PANeeded: shnsdk.PANeededAuthNeeded, Questionnaires: []string{"http://example.org/q"}})
+		gw, stub, _ := uc03HandlerSystem(t, shnsdk.CardCoverage{Covered: shnsdk.CoveredCovered, PANeeded: shnsdk.PANeededAuthNeeded, Questionnaires: []string{"http://example.org/q"}})
 		gw.cfg.CorrelationGen = func() string { return "corr-fixed-0001" }
 		if withObserver {
 			gw.cfg.Observer = func(ObserverEvent) {}
@@ -305,6 +305,7 @@ func TestObserver_ConformanceNeutral(t *testing.T) {
 			gw.cfg.CorrelationGen = func() string { return "corr-fixed-0001" }
 		}
 		rec := callUC03(t, gw)
+		requireReachedOrigination(t, stub, rec)
 		return rec.Code, rec.Body.String()
 	}
 	offCode, offBody := run(false)
@@ -529,7 +530,7 @@ func TestObserver_SoRDecorationIdempotent(t *testing.T) {
 // invoked with a stub persona + the demo lumbar $questionnaire-package, and the
 // resulting ClinicalContext sor.read is required.
 func TestObserver_SoREventsInUC03(t *testing.T) {
-	gw, _, _ := crdTestSystem(t, shnsdk.CardCoverage{Covered: shnsdk.CoveredCovered, PANeeded: shnsdk.PANeededAuthNeeded, Questionnaires: []string{"http://example.org/q"}})
+	gw, _, _ := uc03HandlerSystem(t, shnsdk.CardCoverage{Covered: shnsdk.CoveredCovered, PANeeded: shnsdk.PANeededAuthNeeded, Questionnaires: []string{"http://example.org/q"}})
 	cfg := gw.cfg
 	cfg.Responder = nil
 	cfg.Populator = nil

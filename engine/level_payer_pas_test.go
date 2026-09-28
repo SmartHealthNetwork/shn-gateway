@@ -95,27 +95,69 @@ func TestLevelPayerPASSubmit_RequestContent(t *testing.T) {
 	}
 }
 
-// A clinician-sourced QuestionnaireResponse item without its FR-16/FR-17
-// attestation, on each PAS leg handleInbound fences.
-func TestLevelPayerPAS_UnattestedItem(t *testing.T) {
-	item, err := shnsdk.BuildManualAttestedItem("functional-status-oswestry", "42", shnsdk.Attestation{NPI: "1999999999", Text: "I attest these are my clinical findings.", When: "2026-06-04"})
+// unattestedItems are the two QuestionnaireResponse items the attestation
+// fence judges, each without the attestation it requires: a clinician-sourced
+// item (FR-16/FR-17) and a patient-reported one (FR-27), with the refusal
+// each draws at strict.
+func unattestedItems(t *testing.T) map[string]struct{ qr, msg string } {
+	t.Helper()
+	clinician, err := shnsdk.BuildManualAttestedItem("functional-status-oswestry", "42", shnsdk.Attestation{NPI: "1999999999", Text: "I attest these are my clinical findings.", When: "2026-06-04"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	qr := `{"resource":{"resourceType":"QuestionnaireResponse","subject":{"reference":"Patient/MBR-COVERED"},"item":[` + string(stripItemExtension(t, item)) + `]}}`
-	rows := map[string]struct {
-		leg, path string
-		body      []byte
-	}{
-		"pas-claim":         {"pas-claim", pasSubmitPath, []byte(levelPASBundleWithEntry(qr))},
-		"pas-claim-inquire": {"pas-claim-inquire", pasInquirePath, bytes.Replace(inquiryBundle("MBR-COVERED", "", "TRN-1", "72148"), []byte(`"entry":[`), []byte(`"entry":[`+qr+`,`), 1)},
+	patient, err := shnsdk.BuildPatientAttestedItem("functional-status-oswestry", "42", "Patient/MBR-COVERED", "2026-06-04")
+	if err != nil {
+		t.Fatal(err)
 	}
-	for name, row := range rows {
+	qr := func(item []byte) string {
+		return `{"resource":{"resourceType":"QuestionnaireResponse","subject":{"reference":"Patient/MBR-COVERED"},"item":[` + string(stripItemExtension(t, item)) + `]}}`
+	}
+	return map[string]struct{ qr, msg string }{
+		"clinician-sourced": {qr(clinician), "is clinician-sourced (FR-17)"},
+		"patient-reported":  {qr(patient), "is patient-reported (FR-17)"},
+	}
+}
+
+// A QuestionnaireResponse item without the attestation its source requires,
+// on each PAS leg handleInbound fences. The attestation is the item's own
+// content (qr.attestation): not checked at none, recorded and carried at
+// observe and structural, refused at strict.
+func TestLevelPayerPAS_UnattestedItem(t *testing.T) {
+	for kind, item := range unattestedItems(t) {
+		rows := map[string]struct {
+			leg, path string
+			body      []byte
+		}{
+			"pas-claim":         {"pas-claim", pasSubmitPath, []byte(levelPASBundleWithEntry(item.qr))},
+			"pas-claim-inquire": {"pas-claim-inquire", pasInquirePath, bytes.Replace(inquiryBundle("MBR-COVERED", "", "TRN-1", "72148"), []byte(`"entry":[`), []byte(`"entry":[`+item.qr+`,`), 1)},
+		}
+		for name, row := range rows {
+			for _, level := range allLevels {
+				t.Run(kind+"/"+name+"/"+level.String(), func(t *testing.T) {
+					p := newLevelPayer(t, level)
+					got := p.send(t, row.leg, "", row.body)
+					p.wantRequestRow(t, row.leg, got, row.body, row.path, RuleAttestation, http.StatusForbidden, item.msg)
+				})
+			}
+		}
+	}
+}
+
+// The same fence on the amended re-POST: an amendment carrying an item
+// without its attestation is carried below strict and refused at strict.
+func TestLevelPayerPASUpdate_UnattestedItem(t *testing.T) {
+	for kind, item := range unattestedItems(t) {
+		base, related := updateBundle(t)
+		body := bytes.Replace(base, []byte(`"entry":[`), []byte(`"entry":[`+item.qr+`,`), 1)
+		if bytes.Equal(body, base) {
+			t.Fatal("the amended re-POST has no entry list to add the item to")
+		}
 		for _, level := range allLevels {
-			t.Run(name+"/"+level.String(), func(t *testing.T) {
+			t.Run(kind+"/"+level.String(), func(t *testing.T) {
 				p := newLevelPayer(t, level)
-				got := p.send(t, row.leg, "", row.body)
-				p.wantRequestRow(t, row.leg, got, row.body, row.path, RuleAttestation, http.StatusForbidden, "is clinician-sourced (FR-17)")
+				p.seedPend(t, related)
+				got := p.send(t, "pas-claim-update", "", body)
+				p.wantRequestRow(t, "pas-claim-update", got, body, pasSubmitPath, RuleAttestation, http.StatusForbidden, item.msg)
 			})
 		}
 	}

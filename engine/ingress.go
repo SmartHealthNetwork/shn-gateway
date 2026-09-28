@@ -283,14 +283,17 @@ func (g *Gateway) handleCRDIngress(w http.ResponseWriter, r *http.Request) {
 	// One Exchange, one leg (the EHR owns grouping in pure pass-through).
 	ex := g.exchanges.Begin(workstreamPA)
 	request := prepared.request
-	respJSON, err := g.OriginateLeg(r.Context(), r, recipient, legType, pci, child, "",
+	// The media type the payer stated for its answer, relayed to the EHR with it.
+	var answerType string
+	respJSON, err := g.OriginateLeg(withAnswerMediaTypeSink(r.Context(), &answerType), r, recipient, legType, pci, child, "",
 		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Payload: request, Carried: true})
 	leg := Leg{Type: legType, Physics: paCatalog[legType].Physics,
 		Content: Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Payload: request, Carried: true}, Subjects: []string{pci}}
 	if err != nil {
 		g.recordLeg(ex.ID, leg.Project(child, "error"))
 		// The recipient answered non-2xx — relay its framed answer verbatim (Content-Type
-		// from the frame, default application/fhir+json) via the shared origination helper.
+		// from the frame; a non-empty answer stating none is application/fhir+json) via
+		// the shared origination helper.
 		if g.relayOriginationError(w, err) {
 			return
 		}
@@ -307,7 +310,8 @@ func (g *Gateway) handleCRDIngress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	g.recordLeg(ex.ID, leg.Project(child, outcome))
-	g.writePayload(w, http.StatusOK, "application/json", relay.Exact(relay.NewBody(respJSON, relay.OriginPeerFrame), "application/json"),
+	ct := cdsAnswerMediaType(answerType)
+	g.writePayload(w, http.StatusOK, ct, relay.Exact(relay.NewBody(respJSON, relay.OriginPeerFrame), ct),
 		relay.Key{Leg: legType, Role: relay.RoleRequester, Direction: relay.DirectionResponse, Outcome: relay.OutcomeAnswered})
 }
 
@@ -396,7 +400,8 @@ func (g *Gateway) handleDTRIngress(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		g.recordLeg(ex.ID, leg.Project(child, "error"))
 		// The recipient answered non-2xx — relay its framed answer verbatim (Content-Type
-		// from the frame, default application/fhir+json) via the shared origination helper.
+		// from the frame; a non-empty answer stating none is application/fhir+json) via
+		// the shared origination helper.
 		if g.relayOriginationError(w, err) {
 			return
 		}
@@ -553,7 +558,8 @@ func (g *Gateway) handlePASIngress(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		g.recordLeg(ex.ID, legProj.Project(child, "error"))
 		// The recipient answered non-2xx — relay its framed answer verbatim (Content-Type
-		// from the frame, default application/fhir+json) via the shared origination helper.
+		// from the frame; a non-empty answer stating none is application/fhir+json) via
+		// the shared origination helper.
 		if g.relayOriginationError(w, err) {
 			return
 		}

@@ -1,9 +1,10 @@
 # Validator lane recordings (certification)
 
 What a real HAPI validator lane answered to certification requests, captured on 2026-09-27 from
-the three local lanes `make validate` boots (the 2.0, 2.1 and 2.2 contract lines, each with its
-line's IG closure and the shared validation-support package; HAPI FHIR 8.10.0), through an
-exact-bytes recording proxy. The requests are the validator code's own: the certification client
+three local HAPI FHIR 8.10.0 validator lanes, one each for the 2.0, 2.1 and 2.2 contract lines,
+through an exact-bytes recording proxy. Each lane runs the digest-pinned engine and backported WAR
+the Smart Gateway's `deploy/validator` builds on, loaded with its line's IG closure and the shared
+validation-support package. The requests are the validator code's own: the certification client
 (`NewCertificationOperationValidator`) sent each one. No participant or patient data.
 
 - `lane-2.0-certify-literal.json`, `lane-2.1-certify-literal.json`,

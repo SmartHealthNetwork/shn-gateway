@@ -52,6 +52,31 @@ var (
 	legPatientDTR       = inboundLeg{"patient-authorship", "patient-dtr-response", "patient-dtr"}
 )
 
+// inboundLegs is every leg the inbound dispatcher serves, by transaction type.
+var inboundLegs = func() map[string]inboundLeg {
+	m := map[string]inboundLeg{}
+	for _, l := range []inboundLeg{legCRDOrderSelect, legCRDOrderDispatch, legPASClaim, legPASClaimUpdate, legPASClaimInquire,
+		legEligibility, legDTR, legFederatedQuery, legPatientDTR} {
+		m[l.tx] = l
+	}
+	return m
+}()
+
+// refuseInboundRequest answers a refusal the gateway writes about a request
+// before any leg handler runs, once the leg is authenticated and decrypted
+// (a request frame it cannot read, a contract line it cannot build, an
+// operation it does not define): the leg's own answer, framed like a
+// handler's refusal. A transaction type no leg serves is refused bare, as
+// the dispatcher refuses it.
+func (g *Gateway) refuseInboundRequest(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token, status int, msg string) {
+	leg, ok := inboundLegs[env.Metadata.TransactionType]
+	if !ok {
+		writeJSON(w, status, map[string]string{"error": msg})
+		return
+	}
+	g.refuseInbound(w, r, leg, env, tok, "", status, msg, nil)
+}
+
 // refuseInbound writes a refusal a handler makes once the leg is
 // authenticated. It travels through respondLegError like a responder's non-2xx
 // result — framed, 200 to the Hub, the payer gateway's status and message

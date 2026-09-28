@@ -46,6 +46,43 @@ asking for it (`Claim/$inquire`, leg type `pas-claim-inquire`).
   The bound and the schedule are now derived from each other and held together by a
   test, so they cannot drift apart again.
 
+## Origination profiles
+
+**Behavior change in v0.57.0.**
+
+- `ORIGINATION_PROFILE` takes `demo` or `provider-data`; unset means `demo` for
+  `ROLE=provider`. Any other value now refuses to boot, on every role, with
+  `gateway: invalid ORIGINATION_PROFILE "<value>" (must be demo|provider-data, or unset)`.
+  The value is matched exactly, so `Demo` or ` provider-data` refuses too.
+- Earlier releases accepted an unknown value, and a provider's gateway then built
+  the requests it originates on no known lane: its PAS request carried a payer
+  Organization that no system of record supplied. A deployment that boots on
+  v0.56.0 with an accepted value boots unchanged.
+- **Go API:** `engine.New` returns an error for a non-empty
+  `Config.OriginationProfile` that is not one of `engine.OriginationProfiles()`, on
+  every role, matched exactly:
+  `gateway: Config.OriginationProfile "<value>" is not an origination profile (must be demo|provider-data)`.
+- **Go API:** a provider built with an empty `Config.OriginationProfile` still
+  serves its Da Vinci ingress and relays, but refuses to originate. Every route that
+  originates (`POST /scenario/uc01` through `uc08`, `uc02-payerb`,
+  `uc02-unknownpayer`, `uc07hcpcs`, `homeoxygen`, `dispatch`, `uc06/start`,
+  `uc06/complete`, `uc07/start`, `uc07/complete` and `pa/inquire`) answers `503`,
+  `Cache-Control: no-store`, with
+  `{"error":"origination profile not set: set ORIGINATION_PROFILE (demo|provider-data)"}`,
+  before it reads, builds or sends anything. The routes that only touch the
+  gateway's own pended state (`uc06/cancel`, `uc07/cancel`, `uc07/pending`,
+  `reset`) serve as before. Earlier releases originated on no known lane instead. The
+  published binary never builds such a provider: it sets `demo` for an unset
+  `ORIGINATION_PROFILE`. Payer, facility and PHG gateways originate nothing and may
+  leave it empty.
+- A prior authorization a provider pended while it had a lane cannot be followed up
+  after it is rebuilt with an empty profile, even when its `Store` keeps the
+  continuation: `pa/inquire`, `uc06/complete` and `uc07/complete` refuse as above.
+  A parked UC-06 or UC-07 can still be cancelled, and the participant's own system
+  can still inquire through `POST /Claim/$inquire` on the ingress.
+- **Go API (additive):** `engine.OriginationProfiles` (the accepted values; it
+  returns a copy).
+
 ## Conformance enforcement levels
 
 `CONFORMANCE_ENFORCEMENT` takes `none`, `observe` (the default when unset),
@@ -178,6 +215,111 @@ carried by default.**
 - **Breaking (Go API):** a `LegResponder` on the payer's CRD, DTR, PAS and inquiry
   legs is handed the payer's own binding of the member the request names as its
   subject, not the leg token's subject.
+
+## The supplemental report on an amendment the gateway builds
+
+**Behavior change in v0.57.0.**
+
+- The `fhirsor` connector's `SupplementalReportContext` returns the report
+  exactly as the FHIR server holds it, its subject included. Earlier releases
+  replaced the report's `subject` with `{"reference":"Patient/<member id>"}`
+  in the connector, whatever patient it named.
+- When the gateway attaches that report to a PAS amendment it builds (UC-04),
+  the only change it makes to the report's content is registered edit E-06
+  (`evidence-subject-rekey`): `subject.reference` is re-pointed from the
+  Patient your system holds the member under to `Patient/<member id>`, and
+  only when the report names that Patient.
+- The amendment is a bundle the gateway builds with the SDK's PAS update
+  builder, which, as before, gives the report its bundle-local id, drops its
+  `meta.profile` and re-encodes it (member order and whitespace) as it places
+  it in the bundle.
+- The amendment is refused, and no amendment is sent, when the report has no
+  `subject.reference` (`422 supplemental report names no subject.reference`);
+  names any other subject (`422 supplemental report's subject is not the
+  member's patient in the system of record`); carries a signature that
+  covers the report (a `Signature` in the report itself, outside any resource
+  it contains, or a signed `Provenance` it contains that targets it: `422
+  signed content cannot be edited (E-06, <carrier>)`); or cannot be read as a
+  resource (`502 supplemental report is not a resource`). Earlier releases
+  rewrote the subject whatever the report named.
+- **Breaking for a custom connector** that copied the earlier `fhirsor`
+  behavior, rewriting the subject to `Patient/<member id>` while your system
+  holds the patient under another id: that report no longer names the
+  Patient your system holds, so the amendment is refused. Return the report
+  as your system holds it. A connector whose system holds the patient under
+  the member id, and returns the report naming `Patient/<member id>`, is
+  unaffected.
+- No configuration changes. Go API: `relay.EditEvidenceSubjectRekey` (`E-06`)
+  is added; nothing is removed.
+
+## Refusals of a request frame are framed
+
+**Behavior change in v0.57.0.**
+
+- A refusal the gateway writes about a request frame after the leg is
+  authenticated and decrypted, before any leg handler runs, is framed as its
+  answer with `200` to the Hub, like a leg handler's refusal. The refusals are:
+  a contract line it cannot build (`422`); one it has no validator lane for
+  (`422`); a claim on a version-neutral leg (`422`); a frame that does not
+  decode (`400 request frame decode failed`); and an operation header on a leg
+  that defines none (`400 operation header is not defined for this transaction
+  type`).
+- A frame-capable requester's gateway now relays the status and reason to its
+  participant. Earlier releases wrote these bare, and the Hub reported its
+  failed forward. A requester that negotiated no frame is unaffected.
+- The no-validator-lane reason no longer ends in the requirement identifiers
+  `(FR-36/FR-G29)`; it now reaches your participant, so it names only the
+  line and the refusal.
+- No configuration or Go API changes.
+
+## The payer's media type on a relayed answer
+
+**Behavior change in v0.57.0.**
+
+- A payer's gateway frames a success answer it relays from its payer's system
+  with the media type that system stated, instead of always
+  `application/fhir+json`, on every leg: a CDS Hooks answer, a questionnaire
+  package, a PAS answer to a claim, an amendment or an inquiry, and the
+  eligibility answer of a payer that declares its own endpoint. An answer the
+  gateway built, or one that states no type, is still framed
+  `application/fhir+json`.
+- The provider's CRD ingress writes the payer's stated type to the EHR (the
+  reference payer answers `text/json;charset=UTF-8`) instead of always
+  `application/json`. A CDS Hooks answer is never a FHIR resource, so one
+  framed `application/fhir+json` (as every payer gateway before v0.57.0 frames
+  it), stating no type, or stating one that does not parse as a media type is
+  still written as `application/json`.
+- The provider's DTR and PAS ingress still write `application/fhir+json` to
+  the EHR, the type of the FHIR resources they answer with, whatever type the
+  frame carries.
+- No configuration or Go API changes.
+
+## An empty application error body
+
+**Behavior change in v0.57.0.**
+
+- When a participant's system answers a leg non-2xx with an empty body, the
+  payer's gateway relays it as it came: the requester's gateway receives the
+  status, an empty body, and the media type the system stated (or none), and
+  writes the same to its participant. Earlier releases wrote
+  `{"error":"<leg>: recipient answered <status> with no error detail"}` in its
+  place, as `application/json`.
+- A non-empty answer is unchanged: its bytes and media type are relayed, and
+  one that states no media type is still read as `application/fhir+json`.
+- The gateway's own refusals (no answer from its system to relay) keep their
+  `{"error": …}` body, which names the leg and status when there is no reason
+  to give.
+- A requester that negotiated no frame still sees the Hub's failed forward. The
+  bare answer the Hub discards is the gateway's own refusal,
+  `{"error":"<leg>: recipient answered <status>; its answer is carried only in
+  a message frame"}`, never the participant's bytes: a bare answer reaches the
+  Hub unsealed. Earlier releases wrote a gateway `{"error": …}` body there
+  too, with other wording.
+- No configuration changes. The interim relay builder
+  `defect-empty-error-substitution` is retired, so no frame may carry the
+  gateway's own body in place of a participant's application error. Its
+  exported constant `relay.BuilderInterimEmptyErrorSubstitution` remains,
+  deprecated, so code naming it still compiles; `relay.Authored` refuses it.
 
 ## Amendments a provider's gateway builds, after a payer's 409
 
@@ -574,18 +716,67 @@ background attempts afterwards, which never change routing's lanes; until then t
 verdict states that no lane is configured and the qualification's state, verbatim, and no
 exchange waits on or dials for a qualification. With `FHIR_DEFAULT_VALIDATOR_LANES=none`
 there is no Compose default: nothing is probed, and a line with neither key states that it
-is not configured and that the network has no default validator lanes. From v0.56.0, where
-certification evidence is collected, `Run` also sends each certification address it was given
-one request at boot, off the request path and recording no evidence, so that a new process's
-first request to a validator is not a real certification's (docs/CONFIGURATION.md); the handler
-constructors do not. Embedders may
+is not configured and that the network has no default validator lanes. From v0.57.0 a 2.1 or
+2.2 address is gated too, on its own qualification by the same qualifier; a gated client
+starts nothing when constructed, and its qualification starts with the certification worker
+(`engine.GatedCertificationValidator.Start`), so at `CONFORMANCE_ENFORCEMENT=none` no lane is
+dialed:
+until it passes, the line's verdict is unavailable, "lane not qualified", and nothing is
+dialed for the exchange, so a validator still warming never answers a verdict. The gate
+re-qualifies after a lane stops answering: a qualified 2.1 or 2.2 lane (a default one too) that
+fails at the connection (it refuses, resets or closes it, cannot be reached, or does not answer
+within the certification's 2 s while the collection is still waiting; that certification is
+recorded expired, since the client's own limits are 2.5 s) is unqualified for certification
+until it passes again, "re-qualifying", and nothing is dialed meanwhile. A re-qualification
+starts at most once every 30 s; its attempts then follow the qualification's own schedule,
+which starts over with each re-qualification: each attempt lasts up to 60 s and repeats
+`GET /metadata` until it answers `200` (each request waits up to 4 s, then 1 s passes before
+the next; a `200` that is a readable R4 CapabilityStatement of at most 4 MiB leads to one run
+of the readiness corpus, any other `200` fails the attempt), and attempts are 15 s apart for
+the first hour after the loop starts, then 5 min apart. A validator that refuses the
+connection, does not resolve or answers another status therefore gets about one metadata
+request per second, and one that accepts the connection but never answers about one every
+5 s, for most of that first hour, and a 60 s burst of the same about every 6 min after it. The
+same schedule applies before a lane's first qualification. A 5xx or malformed answer marks only that
+certification unavailable, and the collection's own deadline or shutdown only that
+certification expired; either leaves the lane qualified. A lane restarted between certifications, with no
+failure in between, is not detected. The 2.0 line is
+not gated: it certifies on the gateway's own validator without this qualification, so a freshly
+started 2.0 validator can still answer a certification before it has warmed. From v0.56.0,
+where certification evidence is collected, `Run` also sends each certification address it was
+given one request at boot, off the request path and recording no evidence, so that a new
+process's first request to a validator is not a real certification's (docs/CONFIGURATION.md);
+from v0.57.0 it sends only the 2.0 validator it certifies against, since a 2.1 or 2.2 address's
+qualification already sends it the readiness corpus. The handler constructors do not. Embedders may
 supply independent clients through `Config.CertificationValidatorsByLine`; they must
-not share routing validators or qualification wrappers. Missing clients are recorded
-as unavailable. HTTP server execution failures are unavailable rather than conclusive
-invalidity. Logs beginning `certify: ` and `leg.certified` observer details contain
+not share routing validators or qualification wrappers. `engine.NewQualifiedCertificationValidator`
+gates such a client on a qualifier; `engine.QualifyValidatorLane` is the one the app uses.
+From v0.57.0 neither `engine.NewGatedCertificationValidator`
+nor `engine.NewQualifiedCertificationValidator` starts its qualification loop.
+`engine.New` calls `Start` on each when it starts its certification worker. An embedder that
+uses such a client without `engine.New` must call `Start` itself, or the lane never qualifies.
+From v0.57.0 such a client, never started and not closed, records every certification as
+unavailable, "certification validator unavailable: certification validator not started (call
+Start)", dials nothing, and logs one `gateway: certification_lane_not_started` line (with its
+`version`, `line`, `base`, `host` and `at`) at its first certification;
+`engine.CertificationNotStartedReason` is that reason. `engine.New` starts every client before
+its worker certifies anything, so a gateway built with it never records this.
+Missing clients are recorded as unavailable. HTTP server execution failures are unavailable
+rather than conclusive invalidity. From v0.57.0 an answer whose every error is terminology
+the validator could not check (a code system it does not hold, the required-binding miss on
+that element when the validator also says it could not expand the bound value set for want of
+each system the miss names, a Bundle entry's no-match summaries on any line when every other
+error on that entry is one of these, and on the 2.1 and 2.2 lines a PAS Claim entry's match of
+neither Claim profile, read as the structural level reads it: the no-match summaries naming
+both Claim profiles and the other profile's own cardinality minimums and maximums, attributed
+to it alone; the entry must itself carry such terminology) is unavailable, naming the
+code system, rather than invalid; any other error keeps it invalid. Only a valid verdict
+certifies. Logs beginning `certify: ` and `leg.certified` observer details contain
 JSON metadata, hashes and verdicts, without payload snapshots. External validator
 issues and errors are represented only by bounded counts, byte lengths and
-SHA-256 digests; diagnostic text is never retained or broadcast in evidence.
+SHA-256 digests; diagnostic text is never retained or broadcast in evidence, except that an
+unavailable verdict names a code system the validator could not check when it is an X12 code
+system canonical (any other by its size and SHA-256).
 
 Each gateway owns one worker, a 32-payload queue and a 256-record evidence ring.
 Candidates have a two-second limit, collection has a six-second limit, and queued

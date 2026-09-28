@@ -534,16 +534,26 @@ func recordedClaimResponseRow(t *testing.T, line string) (*testrecord.Recording,
 	return rec, []byte(row5.Request.Body), profile, answers
 }
 
-// What the collector records against real lanes today: each lane's own answer,
-// at its own line, to the payloads recorded in
+// x12ServiceType is the code system every synthetic PAS request bundle codes
+// its item's productOrService in (X12 278 service type), which no lane loads.
+const x12ServiceType = "https://codesystem.x12.org/005010/1365"
+
+// What the collector records against real lanes: each lane's own answer, at
+// its own line, to the payloads recorded in
 // testdata/recordings/lane-<line>-certify-collect.json. The literal Claim
 // lacks required elements and the sentinel Claim does not parse: invalid is
-// what they are. The synthetic PAS request bundles are a known gap. At its own
-// line each bundle's errors all come from terminology the lanes do not load (the
-// X12 code system; on 2.1 and 2.2 the Claim entry then matches neither Claim
-// profile, and the lane also reports the update profile's own mismatch).
-// Certification records them as invalid today, where unavailable is what they
-// are; this row flips when that is fixed.
+// what they are, on every lane. Each synthetic PAS request bundle at its own
+// line has only errors the lane could not check: the X12 code system it does
+// not load, the required-binding miss on that element, and on 2.1 and 2.2 the
+// Claim's match of neither Claim profile that follows (the no-match summaries
+// and the update profile's own Claim.related minimum). The lane gave no
+// verdict on the bundle, so it is unavailable, naming the code system. The
+// 2.1 bundle's answer from the 2.0 lane is the same X12 terminology alone,
+// so it too is unavailable. Every other bundle answer holds a verdict the lane
+// did reach: a missing required element or slice (the 2.0 bundle at 2.1 and
+// 2.2), a failed invariant (dtrx-1 on the questionnaire answers of the 2.1
+// bundle at 2.2 and of the 2.2 bundle at 2.0 and 2.1), and codes the lane
+// checked and did not find: invalid. Nothing is certified.
 func TestCertificationRecordsWhatRealLanesAnswer(t *testing.T) {
 	validators := map[string]shnsdk.Validator{}
 	for _, line := range []string{"2.0", "2.1", "2.2"} {
@@ -553,16 +563,23 @@ func TestCertificationRecordsWhatRealLanesAnswer(t *testing.T) {
 		validators[line] = v
 	}
 	g := certificationGatewayByLine(t, validators, nil)
-	payloads := [][]byte{literalClaim, sentinelClaim}
+	payloads := map[string][]byte{"literal": literalClaim, "sentinel": sentinelClaim}
 	for _, line := range []string{"2.0", "2.1", "2.2"} {
 		body, _, ok := lanequalify.CertificationRow(line)
 		if !ok {
 			t.Fatalf("no certification row for %s", line)
 		}
-		payloads = append(payloads, body)
+		payloads["bundle-"+line] = body
 	}
-	for i, payload := range payloads {
-		certificationSubmitPayload(g, fmt.Sprint(i), payload)
+	want := map[string]map[string]string{
+		"literal":    {"2.0": "invalid", "2.1": "invalid", "2.2": "invalid"},
+		"sentinel":   {"2.0": "invalid", "2.1": "invalid", "2.2": "invalid"},
+		"bundle-2.0": {"2.0": "unavailable", "2.1": "invalid", "2.2": "invalid"},
+		"bundle-2.1": {"2.0": "unavailable", "2.1": "unavailable", "2.2": "invalid"},
+		"bundle-2.2": {"2.0": "invalid", "2.1": "invalid", "2.2": "unavailable"},
+	}
+	for _, name := range []string{"literal", "sentinel", "bundle-2.0", "bundle-2.1", "bundle-2.2"} {
+		certificationSubmitPayload(g, name, payloads[name])
 	}
 	certificationFlush(t, g)
 	records := g.CertificationEvidenceForTest()
@@ -571,11 +588,16 @@ func TestCertificationRecordsWhatRealLanesAnswer(t *testing.T) {
 	}
 	for _, e := range records {
 		if len(e.Verdicts) != 3 || len(e.Certified) != 0 || e.SourceLine != "" {
-			t.Fatalf("%s: %+v", e.CorrelationID, e)
+			t.Fatalf("%s: %+v, want three verdicts and nothing certified", e.CorrelationID, e)
 		}
 		for _, v := range e.Verdicts {
-			if v.State != "invalid" || v.Valid || v.Error != "" || len(v.Issues) != 1 || !strings.HasPrefix(v.Issues[0], "validator issues count=") {
-				t.Fatalf("%s: verdict %+v, want the lane's invalid verdict", e.CorrelationID, v)
+			state := want[e.CorrelationID][v.Line]
+			reason := ""
+			if state == "unavailable" {
+				reason = "terminology unavailable: " + x12ServiceType
+			}
+			if v.State != state || v.Valid || v.Error != reason || len(v.Issues) != 1 || !strings.HasPrefix(v.Issues[0], "validator issues count=") {
+				t.Fatalf("%s at %s: verdict %+v, want %s %q with the lane's issues as metadata", e.CorrelationID, v.Line, v, state, reason)
 			}
 		}
 	}

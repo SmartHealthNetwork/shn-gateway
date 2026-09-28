@@ -95,9 +95,9 @@ build_line() {
   echo "built line=${line} image=${image} id=$(docker image inspect -f '{{.Id}}' "${image}")"
 }
 
-# The consumers' $validate client budget: the gateway's validator client and the
-# console's scenario proxy both give a $validate 30s. Every first-call timing below
-# must land under it or the readiness signal is not doing its job.
+# The consumers' $validate client budget: the gateway's validator client gives a
+# $validate 30s, and so does the network's own scenario tooling. Every first-call
+# timing below must land under it or the readiness signal is not doing its job.
 FIRST_VALIDATE_BUDGET_SECS=30
 
 # assert_under_budget LINE WHAT SECS — fails the gate when a fresh lane's first
@@ -221,13 +221,13 @@ closing_checks() {
   python3 "${DIR}/verify-state.py" logs "${line}" <"${RUN_DIR}/warm-before-${line}.log"
   # The composition's cold cost is a declared number: the package cache indexes
   # exactly the StructureDefinitions the manifest declares for this line
-  # (indexed-counts.json, generated from tools/contracts/manifest.json). A
+  # (indexed-counts.json, generated from the network's IG manifest). A
   # different count is a composition change that must re-measure and re-declare.
   local indexed declared
   indexed=$(grep -c 'Indexing StructureDefinition' "${RUN_DIR}/warm-before-${line}.log" || true)
   declared=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["lines"][sys.argv[2]])' "${DIR}/indexed-counts.json" "${line}")
   if [ "${indexed}" != "${declared}" ]; then
-    echo "FAIL: line ${line}: the lane indexed ${indexed} StructureDefinitions at boot, the manifest declares ${declared} — a composition change re-measures and re-declares its cold cost (tools/contracts/manifest.json lines.${line}.indexedStructureDefinitions)"
+    echo "FAIL: line ${line}: the lane indexed ${indexed} StructureDefinitions at boot, the manifest declares ${declared} — a composition change re-measures and re-declares its cold cost (the network's IG manifest, lines.${line}.indexedStructureDefinitions)"
     exit 1
   fi
   echo "indexed StructureDefinitions line=${line} count=${indexed} (declared ${declared})"
@@ -337,7 +337,7 @@ print("OK: cold-profile Patient validate call answered")
   python3 "${DIR}/verify-state.py" logs "${line}" <"${RUN_DIR}/warm-after-${line}.log"
   # Every "Found multiple package versions" HAPI logged must name a canonical the
   # closure inventory already records as carried by two loaded packages
-  # (known-collisions.json, generated from tools/contracts/closure/<line>.json);
+  # (known-collisions.json, generated from the network's IG closure inventory for the line);
   # anything else is the nondeterministic resolution the closure gate excludes.
   python3 "${DIR}/verify-collisions.py" "${line}" <"${RUN_DIR}/warm-after-${line}.log"
   if grep -Ei 'HikariPool.*(timeout|timed out|exhaust)|OutOfMemoryError|Java heap space' "${RUN_DIR}/warm-after-${line}.log"; then

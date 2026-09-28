@@ -107,7 +107,7 @@ func TestBuildPASSubmitBundle_ByteParity(t *testing.T) {
 		if err != nil {
 			t.Fatalf("buildPASSubmitBundle: %v", err)
 		}
-		want, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{Coverage: testMemberCoverage(member),
+		want, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{Coverage: testMemberCoverage(member), Insurer: testPayerOrganization(shnsdk.CMSPayerIdentity),
 			Provider:       testRequestingProvider(),
 			MemberIDSystem: shnsdk.MemberSystem,
 			QR:             qr, SR: order, PatientRef: patientRef, CoverageRef: coverageRef, MemberID: member,

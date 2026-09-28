@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -497,10 +498,26 @@ func TestDefaultValidatorLanesValue(t *testing.T) {
 // in the evidence, naming what to configure, and nothing is dialed for it.
 func TestNoDefaultLanesCertificationNamesTheMissingLane(t *testing.T) {
 	cfg := config{DefaultValidatorLanes: defaultValidatorLanesNone, FHIRCertifyURL22: "http://validator-2-2.hosted.internal:8080/fhir"}
-	vs := certificationValidators(func(string) string { return "" }, cfg, "http://validator.hosted.internal:8080/fhir", nil, func(context.Context, string, string) error {
-		t.Fatal("a certification lane was probed")
-		return nil
+	var mu sync.Mutex
+	var probed []string
+	vs := certificationValidators(func(string) string { return "" }, cfg, "http://validator.hosted.internal:8080/fhir", nil, func(ctx context.Context, base, _ string) error {
+		mu.Lock()
+		probed = append(probed, base)
+		mu.Unlock()
+		<-ctx.Done()
+		return ctx.Err()
 	})
+	defer func() {
+		engine.CloseCertificationClients(vs)
+		mu.Lock()
+		defer mu.Unlock()
+		// Only the configured 2.2 address is qualified; no default name is.
+		for _, base := range probed {
+			if base != "http://validator-2-2.hosted.internal:8080/fhir" {
+				t.Errorf("certification probed %s", base)
+			}
+		}
+	}()
 	_, err := vs["2.1"].Validate(context.Background(), []byte(`{}`), "profile")
 	var missing *engine.CertificationLaneUnavailable
 	if !errors.As(err, &missing) || !strings.Contains(err.Error(), "FHIR_CERTIFY_URL_2_1 and FHIR_VALIDATE_URL_2_1 are not configured") {

@@ -8,7 +8,9 @@ import (
 
 // sceneMember resolves the distinct provider-data member under provider-data, the
 // distinct demo member (§4.3) under demo, and the conformance-roster default member
-// for every other value.
+// when unset. New refuses any other value, and a provider with no profile refuses to
+// originate (requireOriginationProfile), so the default arm is reached by no route
+// today; the row pins the seam itself.
 func TestSceneMember_ProfileDispatch(t *testing.T) {
 	gp := &Gateway{cfg: Config{OriginationProfile: "provider-data"}}
 	if got := gp.sceneMember("MBR-UC04", "MBR-PD-UC04", "MBR-D-UC04"); got != "MBR-PD-UC04" {
@@ -17,10 +19,6 @@ func TestSceneMember_ProfileDispatch(t *testing.T) {
 	gd := &Gateway{cfg: Config{OriginationProfile: "demo"}}
 	if got := gd.sceneMember("MBR-UC04", "MBR-PD-UC04", "MBR-D-UC04"); got != "MBR-D-UC04" {
 		t.Fatalf("demo sceneMember = %q, want MBR-D-UC04", got)
-	}
-	gc := &Gateway{cfg: Config{OriginationProfile: "unknown-lane"}}
-	if got := gc.sceneMember("MBR-UC04", "MBR-PD-UC04", "MBR-D-UC04"); got != "MBR-UC04" {
-		t.Fatalf("unknown-lane sceneMember = %q, want MBR-UC04 (the default arm)", got)
 	}
 	// "" (absent OriginationProfile) reaches the same default arm at the ENGINE seam —
 	// never provider-data or demo by accident. (gateway/app normalizes "" to "demo" ONE
@@ -50,7 +48,7 @@ func TestHandleUC04_ThreadsSceneMember(t *testing.T) {
 	// resolved member MBR-CANARY-UC04) gets the original member's operative
 	// DiagnosticReport attached, and the payer's member fence rejects the ClaimUpdate
 	// bundle as an inconsistent-patient 403.
-	if !strings.Contains(fn, `ReadSystemOfRecord(g.cfg.SoR).SupplementalReportContext(ctx, member)`) {
+	if !strings.Contains(fn, `g.supplementalReport(ctx, member, res.sorID)`) {
 		t.Fatalf("handleUC04 does not pass the resolved member to SoR.SupplementalReport")
 	}
 	if strings.Contains(fn, `SupplementalReport("MBR-UC04")`) {
@@ -81,6 +79,7 @@ func TestIsDemoProfile(t *testing.T) {
 	if !isDemoProfile("demo") {
 		t.Fatal(`isDemoProfile("demo") = false, want true`)
 	}
+	// Predicate inputs only: New refuses "unknown-lane" (isOriginationProfile).
 	for _, p := range []string{"", "provider-data", "unknown-lane"} {
 		if isDemoProfile(p) {
 			t.Fatalf("isDemoProfile(%q) = true, want false", p)
@@ -102,7 +101,8 @@ func TestHandleUC08_ProceedOnNotCovered_DemoOptIn(t *testing.T) {
 	}
 	// REJECTION: no third posture silently rides the opt-in — a literal false stays the
 	// ONLY thing runCRDThenDTROrder's proceedOnNotCovered param sees for every profile
-	// that is neither provider-data nor demo.
+	// that is neither provider-data nor demo. New refuses such a profile, and a provider
+	// with none refuses to originate, so this pins the predicates, not a reachable lane.
 	if targetsBrPayer("unknown-lane") || isDemoProfile("unknown-lane") {
 		t.Fatal("an unrecognized profile must not opt into proceedOnNotCovered")
 	}

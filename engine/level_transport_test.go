@@ -88,12 +88,11 @@ func withReplaced(t *testing.T, body, old, new string) []byte {
 // content: below strict the insurer is left as sent and the Coverage is
 // mapped as usual; strict refuses it with the mapping's 422.
 func TestLevelPayerPAS_UnresolvedInsurer(t *testing.T) {
-	// The amendment fixture's own Claim.insurer names Organization/payer,
-	// which no entry of the bundle is.
+	// The amendment fixture names its payer's own entry; one mutation points its
+	// operative Claim's insurer at Organization/payer, which no entry of the
+	// bundle is.
 	update, related := updateBundle(t)
-	if !bytes.Contains(update, []byte(`"insurer":{"reference":"Organization/payer"}`)) {
-		t.Fatal("fixture: the amendment's insurer changed")
-	}
+	update = withReplaced(t, string(update), `"insurer":{"reference":"Organization/org-cms-payer"}`, `"insurer":{"reference":"Organization/payer"}`)
 	dup := `{"resource":{"resourceType":"Organization","id":"dup"}}`
 	rows := map[string]struct {
 		leg, path string

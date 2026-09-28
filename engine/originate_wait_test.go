@@ -1048,6 +1048,7 @@ func pasFollowSubmit(wait time.Duration) pasFollowInputs {
 		patientRef:   "Patient/" + pasFollowMember,
 		coverageRef:  "Coverage/" + pasFollowMember,
 		coverage:     testMemberCoverage(pasFollowMember),
+		insurer:      testPayerOrganization(shnsdk.CMSPayerIdentity),
 		member:       pasFollowMember,
 		memberSystem: shnsdk.MemberSystem,
 		recipient:    "payer",

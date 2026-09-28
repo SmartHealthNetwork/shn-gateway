@@ -355,11 +355,9 @@ func (s *SoR) obsBool(ctx context.Context, patientID, system, code string) (val 
 // member (FR-32), found by any code in shnsdk.ReportValueSet (imaging 18748-4 or operative
 // 11504-8 — Flag 3), to disambiguate it from the prior-imaging X-ray. Raw bytes to attach.
 //
-// The returned resource has its subject.reference rewritten to "Patient/<memberID>" so that
-// payer-side bundle-consistency checks (bindBundleSubject H2/H3) match the Claim patient
-// reference, which always uses the canonical member ID form. HAPI stores resources with
-// client-assigned scoped IDs (e.g. "Patient/pat-mbruc04-provider") that differ from the
-// member ID used throughout the substrate protocol layer.
+// The report is returned exactly as the server holds it, its subject included. The gateway
+// names the member's network patient in the report itself when it attaches it to a claim
+// update (a registered edit); the connector never rewrites a record.
 func (s *SoR) SupplementalReportContext(ctx context.Context, memberID string) ([]byte, bool, error) {
 	_, _, pid, ok, err := s.resolvePatient(ctx, memberID)
 	if err != nil {
@@ -381,7 +379,7 @@ func (s *SoR) SupplementalReportContext(ctx context.Context, memberID string) ([
 	if !found {
 		return nil, false, nil
 	}
-	return rewriteSubject(raw, "Patient/"+memberID), true, nil
+	return raw, true, nil
 }
 
 // FacilityRecordsContext returns the external facility's first record of each type for the member,
@@ -411,36 +409,6 @@ func (s *SoR) FacilityRecordsContext(ctx context.Context, memberID string) (map[
 		return nil, false, nil
 	}
 	return out, true, nil
-}
-
-// rewriteSubject returns resourceJSON with "subject":{"reference":"<ref>"} overwritten.
-// Used to normalize HAPI-internal patient IDs to the canonical "Patient/<memberID>" form
-// that the gateway uses for bundle-internal patient consistency checks
-// (the payer's bindBundleSubject, H2/H3).
-//
-// NOTE — two refs, two rules (do NOT "simplify" this away): only the SUBJECT is canonicalized.
-// The resource's OWN id is left untouched and stays server-assigned, because Flag 1 derives the
-// Provenance target from it via resourceRef (DiagnosticReport/<server-id>). So in the emitted
-// bundle a disclosed report carries subject=Patient/<memberID> (member-canonical, for H2/H3) AND
-// is targeted by Provenance as DiagnosticReport/<server-id> (server-canonical, for Flag 1).
-// Both coexist correctly; collapsing them re-breaks one of the two checks.
-//
-// If the JSON cannot be parsed or re-marshalled, the original bytes are returned unchanged
-// (fail-open: caller's validation will catch any downstream inconsistency). An absent subject
-// is ADDED, not skipped — moot in practice since US Core DiagnosticReport/DocumentReference
-// always carry one.
-func rewriteSubject(resourceJSON []byte, ref string) []byte {
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(resourceJSON, &m); err != nil {
-		return resourceJSON
-	}
-	sub, _ := json.Marshal(map[string]string{"reference": ref})
-	m["subject"] = json.RawMessage(sub)
-	out, err := json.Marshal(m)
-	if err != nil {
-		return resourceJSON
-	}
-	return out
 }
 
 // OpenOrder returns the member's open order resource bytes for headless origination (FR-A3).

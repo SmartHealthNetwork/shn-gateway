@@ -147,7 +147,7 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 	g.diagnosticStage(r.Context(), "recipient.opened", env.Metadata.TransactionType, payload, 0, "")
 	body, answerTok, status, msg := g.unframeRequestFrom(env.Metadata.Sender, env.Metadata.TransactionType, payload)
 	if status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
+		g.refuseInboundRequest(w, r, env, tok, status, msg)
 		return
 	}
 	// The answer line rides the request context so the payer's content seam
@@ -164,7 +164,7 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 	// rides the context too, for the same reason as the answer line.
 	operation, status, msg := inboundFrameOperation(env.Metadata.TransactionType, payload)
 	if status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
+		g.refuseInboundRequest(w, r, env, tok, status, msg)
 		return
 	}
 	r = r.WithContext(withRequestFrameOperation(r.Context(), operation))

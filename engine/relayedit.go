@@ -131,6 +131,27 @@ var relayEdits = []relayEdit{
 			"the provider's gateway appends the patient's own Patient record from the provider's system as a referenced " +
 			"resource, so a payer that does not hold the member can identify the patient the request names; the rest of the request is sent unchanged.",
 	},
+	{
+		ID:        relay.EditEvidenceSubjectRekey,
+		Name:      "evidence-subject-rekey",
+		Legs:      []string{"pas-claim-update"},
+		Role:      relay.RoleRequester,
+		Direction: relay.DirectionRequest,
+		Paths:     []string{"DiagnosticReport.subject.reference"},
+		Kind:      editReplaceValue,
+		Precondition: "Only on a claim update the provider's gateway builds for its own workflow, to the supplemental " +
+			"report it reads from the provider's own system, and only when that report's subject.reference names the " +
+			"Patient that system holds the member under and that Patient's id is not the member id. A report with no " +
+			"subject.reference, or one naming any other subject, is refused. A request the provider's own client sends " +
+			"is never edited this way.",
+		Authority: "The provider's own system: the Patient it holds the member under. The value written is the " +
+			"member's network patient reference, Patient/<member id>.",
+		Disclosure: "When a provider's gateway attaches a supplemental report from the provider's own system to a claim " +
+			"update it builds, and that system names the patient by its own id, the gateway changes only the report's " +
+			"subject.reference, to the member's network patient, and only when the report names that patient. The " +
+			"report is otherwise read exactly as the system holds it; the update bundle the gateway builds gives it its " +
+			"bundle-local id and no declared profile.",
+	},
 }
 
 // relayEditByID returns the registered edit with the given id.

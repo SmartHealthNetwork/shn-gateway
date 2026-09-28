@@ -680,7 +680,8 @@ func TestTransformRefusalZeroBytes(t *testing.T) {
 	source := newRawDTRBuildSource(qr, nil, shnsdk.QRContext{PatientRef: patientRef, CoverageRef: coverageRef, OrderRef: orderRef})
 	decision, status, msg, err := env.originator.submitClaimAndFollow(env.ctx, env.req, pasFollowInputs{
 		pci: "pci-1", orderJSON: order, source: source, patientRef: patientRef, memberSystem: shnsdk.MemberSystem,
-		coverageRef: coverageRef, coverage: testMemberCoverage(member), member: member, payer: shnsdk.CMSPayerIdentity, recipient: env.payerID,
+		coverageRef: coverageRef, coverage: testMemberCoverage(member), insurer: testPayerOrganization(shnsdk.CMSPayerIdentity),
+		member: member, payer: shnsdk.CMSPayerIdentity, recipient: env.payerID,
 	})
 	respJSON := decision.PayerResponse
 	if err == nil {

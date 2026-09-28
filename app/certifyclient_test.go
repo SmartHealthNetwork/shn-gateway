@@ -9,6 +9,7 @@ import (
 	"sync"
 	"testing"
 
+	engine "github.com/SmartHealthNetwork/shn-gateway/engine"
 	"github.com/SmartHealthNetwork/shn-gateway/internal/testrecord"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
@@ -61,6 +62,7 @@ func TestAddressConfiguredCertificationClientsUseTheConstructor(t *testing.T) {
 	built, _ := recordCertificationClients(t)
 	cfg := config{FHIRCertifyURL21: "http://certify21.test/fhir", FHIRValidateURL22: "http://validate22.test/fhir"}
 	got := certificationValidators(func(string) string { return "" }, cfg, "http://canonical.test/fhir", nil, nil)
+	defer engine.CloseCertificationClients(got)
 	want := []string{"http://canonical.test/fhir", "http://certify21.test/fhir", "http://validate22.test/fhir"}
 	if b := built(); !slices.Equal(b, want) {
 		t.Fatalf("certificationClient built %v, want %v", b, want)

@@ -19,7 +19,7 @@ func uc03Coverage() shnsdk.CardCoverage {
 // (routed+unreachable). roundTrip is the single choke point, so this covers
 // the emit sites for every origination leg in both lanes.
 func TestLegMetric_OriginationOutcomes(t *testing.T) {
-	gw, _, _ := crdTestSystem(t, uc03Coverage())
+	gw, _, _ := uc03HandlerSystem(t, uc03Coverage())
 	var got []string
 	gw.cfg.LegMetric = func(outcome string) { got = append(got, outcome) }
 
@@ -40,7 +40,7 @@ func TestLegMetric_OriginationOutcomes(t *testing.T) {
 // "denied", NOT "failed" — a policy denial (the canary's uc05-noconsent PASS
 // condition) must not ride the leg-error alarm.
 func TestLegMetric_DeniedOutcome(t *testing.T) {
-	gw, stub, _ := crdTestSystem(t, uc03Coverage())
+	gw, stub, _ := uc03HandlerSystem(t, uc03Coverage())
 	stub.denyAuthorize = true
 	var got []string
 	gw.cfg.LegMetric = func(outcome string) { got = append(got, outcome) }
@@ -61,7 +61,7 @@ func TestLegMetric_DeniedOutcome(t *testing.T) {
 // TestLegMetric_FailedOutcome: a non-403 authorize failure is an opaque
 // "failed" — neither denied nor unreachable.
 func TestLegMetric_FailedOutcome(t *testing.T) {
-	gw, stub, _ := crdTestSystem(t, uc03Coverage())
+	gw, stub, _ := uc03HandlerSystem(t, uc03Coverage())
 	stub.failAuthorize = true
 	var got []string
 	gw.cfg.LegMetric = func(outcome string) { got = append(got, outcome) }
@@ -81,9 +81,9 @@ func TestLegMetric_FailedOutcome(t *testing.T) {
 
 // TestLegMetric_NilIsNoop: the published-gateway default (no hook) must not panic.
 func TestLegMetric_NilIsNoop(t *testing.T) {
-	gw, _, _ := crdTestSystem(t, uc03Coverage())
-	gw.legMetric(LegOutcomeRouted) // must not panic
-	callUC03(t, gw)                // full drive with nil hook
+	gw, stub, _ := uc03HandlerSystem(t, uc03Coverage())
+	gw.legMetric(LegOutcomeRouted)                      // must not panic
+	requireReachedOrigination(t, stub, callUC03(t, gw)) // full drive with nil hook
 }
 
 // TestLegMetric_ConformanceNeutral: responses byte-identical hook-on vs hook-off
@@ -104,10 +104,11 @@ func TestLegMetric_ConformanceNeutral(t *testing.T) {
 // the brief's literal string return.
 func driveUC03Body(t *testing.T, hook bool) string {
 	t.Helper()
-	gw, _, _ := crdTestSystem(t, uc03Coverage())
+	gw, stub, _ := uc03HandlerSystem(t, uc03Coverage())
 	if hook {
 		gw.cfg.LegMetric = func(string) {}
 	}
 	rec := callUC03(t, gw)
+	requireReachedOrigination(t, stub, rec)
 	return rec.Body.String()
 }

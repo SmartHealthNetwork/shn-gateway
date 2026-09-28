@@ -83,7 +83,7 @@ func TestDiagnosticTraceUsesResolvedRole(t *testing.T) {
 	}
 	for _, role := range []string{"", "provider", "payer"} {
 		t.Run("role="+role, func(t *testing.T) {
-			env := map[string]string{"ORIGINATION_PROFILE": "relay-only", "ROLE": role, "SHN_SECRETS": t.TempDir(), "SHN_DISCOVERY_URL": "http://discovery.test", "DIAGNOSTIC_SINK_URL": "http://collector.test/events", "DIAGNOSTIC_SOURCE": "test", "DIAGNOSTIC_KEY_FILE": key, "DIAGNOSTIC_TRACE_KEY_FILE": key}
+			env := map[string]string{"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate", "ROLE": role, "SHN_SECRETS": t.TempDir(), "SHN_DISCOVERY_URL": "http://discovery.test", "DIAGNOSTIC_SINK_URL": "http://collector.test/events", "DIAGNOSTIC_SOURCE": "test", "DIAGNOSTIC_KEY_FILE": key, "DIAGNOSTIC_TRACE_KEY_FILE": key}
 			getenv := func(k string) string { return env[k] }
 			cfg, err := loadConfig(getenv)
 			if err != nil {

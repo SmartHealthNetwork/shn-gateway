@@ -1,9 +1,10 @@
 # Validator lane recordings
 
-What a real HAPI validator lane answered, captured on 2026-09-26 from the three local lanes
-`make validate` boots (the 2.0, 2.1 and 2.2 contract lines, each with its line's IG closure and
-the shared validation-support package), through an exact-bytes recording proxy. No participant
-or patient data.
+What a real HAPI validator lane answered, captured on 2026-09-26 from three local HAPI FHIR 8.10.0
+validator lanes, one each for the 2.0, 2.1 and 2.2 contract lines, through an exact-bytes
+recording proxy. Each lane runs the digest-pinned engine and backported WAR the Smart Gateway's
+`deploy/validator` builds on, loaded with its line's IG closure and the shared validation-support
+package. No participant or patient data.
 
 - `lane-2.0-warm.json`, `lane-2.1-warm.json`, `lane-2.2-warm.json`: the full readiness corpus
   (42 `$validate` requests per line) and each answer. The requests are the validator code's own:
@@ -37,5 +38,4 @@ local address the proxy reached that lane at (`localhost:8087`, `localhost:8086`
 `localhost:8098` for 2.0, 2.1 and 2.2). Besides those, the XHTML namespace of the statement's
 narrative, and IG and terminology canonical URLs, the recordings (requests and answers) name only
 addresses the fixtures carry: `example.org` (a deliberately unavailable profile),
-`shn.example`, `localhost:8081` and `smarthealth.network`. Nothing else is changed. The same
-files sit beside each copy of the validator code, which a fence keeps identical.
+`shn.example`, `localhost:8081` and `smarthealth.network`. Nothing else is changed.

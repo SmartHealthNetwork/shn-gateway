@@ -32,12 +32,7 @@ import (
 // checked against ("" for its own meta.profile). Nothing is logged; the
 // issues' text is read only to classify.
 func classifyFHIR(res shnsdk.Result, body []byte, line, profile string) Verdict {
-	var errs []fhirIssue
-	for _, d := range res.Details {
-		if d.Severity == "error" || d.Severity == "fatal" {
-			errs = append(errs, fhirIssue{Issue: d, entry: bundleEntryOf(d.Expression)})
-		}
-	}
+	errs := fhirErrors(res)
 	// An invalid result with no error or fatal detail is unclassified.
 	if len(errs) == 0 {
 		return VerdictInvalid
@@ -52,24 +47,50 @@ func classifyFHIR(res shnsdk.Result, body []byte, line, profile string) Verdict 
 		return VerdictUnavailable
 	}
 	for i := range errs {
-		errs[i].deeper = errs[i].Severity == "error" && deeperMessageID(errs[i].MessageID)
+		errs[i].excused = errs[i].Severity == "error" && deeperMessageID(errs[i].MessageID)
 	}
-	rescuePASClaimSliceMatch(errs, body, line, profile)
-	refineSummaries(errs)
-	for _, e := range errs {
-		if !e.deeper {
-			return VerdictInvalid
-		}
+	if !allExcused(errs, body, line, profile) {
+		return VerdictInvalid
 	}
 	return VerdictDeeper
 }
 
-// fhirIssue is one error or fatal issue as classifyFHIR reads it. entry is the
-// one Bundle.entry index its expressions name, or -1.
+// fhirIssue is one error or fatal issue as a reading of a $validate result
+// sees it. entry is the one Bundle.entry index its expressions name, or -1.
+// excused marks an issue the reading in progress does not count against the
+// payload: for classifyFHIR a deeper rule's, for certificationUnchecked
+// terminology the validator could not check; the summaries and slice-match
+// consequences that follow from such issues are then excused alike.
 type fhirIssue struct {
 	shnsdk.Issue
-	entry  int
-	deeper bool
+	entry   int
+	excused bool
+}
+
+// fhirErrors is every error and fatal issue of res, in order.
+func fhirErrors(res shnsdk.Result) []fhirIssue {
+	var errs []fhirIssue
+	for _, d := range res.Details {
+		if d.Severity == "error" || d.Severity == "fatal" {
+			errs = append(errs, fhirIssue{Issue: d, entry: bundleEntryOf(d.Expression)})
+		}
+	}
+	return errs
+}
+
+// allExcused extends the issues a reading has excused to the summaries and
+// PAS slice-match consequences that follow from them (rescuePASClaimSliceMatch,
+// refineSummaries), and reports whether every issue is then excused. The two
+// readings share it, so a summary follows from the same evidence in both.
+func allExcused(errs []fhirIssue, body []byte, line, profile string) bool {
+	rescuePASClaimSliceMatch(errs, body, line, profile)
+	refineSummaries(errs)
+	for _, e := range errs {
+		if !e.excused {
+			return false
+		}
+	}
+	return true
 }
 
 // hapiNoResourceSupplied is HAPI's answer when a $validate call carries no
@@ -152,25 +173,25 @@ func bundleEntryOf(exprs []string) int {
 	return entry
 }
 
-// refineSummaries reads a no-match summary as deeper when it is tied to one
-// Bundle entry and every other error issue on that entry is deeper: the
-// summary then reports nothing the entry's own issues do not. A summary with
-// no entry, or on an entry with no other error issue or with a structural
-// one, stays structural.
+// refineSummaries excuses a no-match summary when it is tied to one Bundle
+// entry and every other error issue on that entry is excused: the summary
+// then reports nothing the entry's own issues do not. A summary with no
+// entry, or on an entry with no other error issue or with one not excused,
+// stays counted.
 func refineSummaries(errs []fhirIssue) {
 	for i, e := range errs {
-		if e.deeper || e.Severity != "error" || !isNoMatchSummary(e.MessageID) || e.entry < 0 {
+		if e.excused || e.Severity != "error" || !isNoMatchSummary(e.MessageID) || e.entry < 0 {
 			continue
 		}
-		others, allDeeper := 0, true
+		others, allExcused := 0, true
 		for j, o := range errs {
 			if j == i || o.entry != e.entry || isNoMatchSummary(o.MessageID) {
 				continue
 			}
 			others++
-			allDeeper = allDeeper && o.deeper
+			allExcused = allExcused && o.excused
 		}
-		errs[i].deeper = others > 0 && allDeeper
+		errs[i].excused = others > 0 && allExcused
 	}
 }
 
@@ -197,22 +218,21 @@ var validatingAgainst = regexp.MustCompile(`\(validating against (\S+) \[[^\]]*\
 // "|version" if it carries one.
 var canonicalReference = regexp.MustCompile(`https?://[^\s,()\[\]]+`)
 
-// rescuePASClaimSliceMatch marks the slice-match consequences on a PAS 2.1 or
-// 2.2 request Bundle's Claim entries as deeper. It applies to one Claim entry
+// rescuePASClaimSliceMatch excuses the slice-match consequences on a PAS 2.1
+// or 2.2 request Bundle's Claim entries. It applies to one Claim entry
 // only when at least one no-match summary sits on that entry (the cascade is
 // present), and every error issue on that entry is one of:
 //   - a no-match summary naming exactly the two candidate profiles;
 //   - the sibling candidate's own cardinality requirement
 //     (Validation_VAL_Profile_Minimum or _Maximum) attributed only to that
 //     sibling, the candidate the Claim is not;
-//   - an issue of a recorded kind (deeper), whatever it is attributed to: the
+//   - an issue the reading already excused, whatever it is attributed to: the
 //     validator checks a Claim that declares its own profile against it
 //     directly, and those issues carry no attribution.
 //
-// Attribution matters only for the sibling's requirement. Any other
-// structural id on the entry, attributed or not, leaves the whole entry to
-// the ordinary reading, where the sibling's requirement is structural and
-// refuses.
+// Attribution matters only for the sibling's requirement. Any other issue on
+// the entry that is not excused, attributed or not, leaves the whole entry to
+// the ordinary reading, where the sibling's requirement counts.
 // Scope is closed: nothing outside this Bundle profile, these lines and this
 // slice is touched.
 func rescuePASClaimSliceMatch(errs []fhirIssue, body []byte, line, profile string) {
@@ -257,7 +277,7 @@ func rescuePASClaimSliceMatch(errs []fhirIssue, body []byte, line, profile strin
 			continue
 		}
 		for _, i := range onEntry {
-			errs[i].deeper = true
+			errs[i].excused = true
 		}
 	}
 }
@@ -275,7 +295,7 @@ func sliceMatchConsequence(iss fhirIssue, sibling string) bool {
 		}
 		return len(named) == 2 && named[pasClaimCanonical] && named[pasClaimUpdateCanonical]
 	}
-	if iss.deeper {
+	if iss.excused {
 		return true
 	}
 	if iss.MessageID != siblingMinimum && iss.MessageID != siblingMaximum {

@@ -147,7 +147,7 @@ func (n *nativeResponder) handlePASClaimUpdateNative(ctx context.Context, corrID
 	// The answer is the payer's own bytes, whatever they say.
 	answer := LegResult{
 		ResponseSubjectForeign: true,
-		Response:               relay.Exact(up.body, "application/fhir+json"),
+		Response:               relay.Exact(up.body, up.contentType),
 		Rollback:               rollback,
 	}
 	pended, _, err := shnsdk.ParsePendedResponse(response)
@@ -338,7 +338,7 @@ func (n *nativeResponder) handlePASClaimNative(ctx context.Context, corrID, subj
 	// The answer to send: the payer's Bundle, exactly.
 	answer := LegResult{
 		ResponseSubjectForeign: true,
-		Response:               relay.Exact(up.body, "application/fhir+json"),
+		Response:               relay.Exact(up.body, up.contentType),
 	}
 	pended, _, err := shnsdk.ParsePendedResponse(response)
 	if err != nil {
@@ -511,7 +511,7 @@ func relayUnread(ctx context.Context, up upstreamReply, rule string, rollback fu
 	pasLegOf(ctx).skipWrite(rule)
 	return LegResult{
 		ResponseSubjectForeign: true,
-		Response:               relay.Exact(up.body, "application/fhir+json"),
+		Response:               relay.Exact(up.body, up.contentType),
 		Rollback:               rollback,
 	}
 }

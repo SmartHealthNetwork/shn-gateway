@@ -98,3 +98,39 @@ func nativeRequestMediaType(ctx context.Context, p interface{ ContentType() stri
 	}
 	return ct
 }
+
+// answerMediaTypeKey carries a sink for the media type a recipient's framed
+// 2xx answer states, for a caller that relays that answer to its own
+// participant.
+type answerMediaTypeKey struct{}
+
+// withAnswerMediaTypeSink returns ctx carrying sink: the origination that
+// decodes a framed 2xx answer stores the answer's stated media type in it
+// ("" when the frame states none).
+func withAnswerMediaTypeSink(ctx context.Context, sink *string) context.Context {
+	return context.WithValue(ctx, answerMediaTypeKey{}, sink)
+}
+
+// noteAnswerMediaType stores ct in ctx's answer media type sink, if any.
+func noteAnswerMediaType(ctx context.Context, ct string) {
+	if sink, ok := ctx.Value(answerMediaTypeKey{}).(*string); ok && sink != nil {
+		*sink = ct
+	}
+}
+
+// cdsAnswerMediaType is the media type a CDS Hooks answer is written to the
+// EHR with: the one the payer's system stated. A payer gateway before
+// v0.57.0 framed every success as application/fhir+json whatever the payer
+// sent, and a CDS Hooks answer is never a FHIR resource, so that stamp, or
+// none, is read as unstated and written as application/json, as before. A
+// stated type that does not parse as a media type is not written as a header
+// either; it is written as application/json the same way.
+func cdsAnswerMediaType(stated string) string {
+	if stated == "" {
+		return mediaJSON
+	}
+	if mt, _, err := mime.ParseMediaType(stated); err != nil || mt == mediaFHIRJSON {
+		return mediaJSON
+	}
+	return stated
+}

@@ -2,8 +2,8 @@
 
 What a real multitenant HAPI data server answered this package's validator warm-up
 (`WarmValidate`), captured on 2026-09-26 (local time; timestamps inside the answers are UTC,
-2026-09-27) through an exact-bytes recording proxy from the data-plane HAPI that `make validate`
-boots (HAPI FHIR 8.10.0, URL-partitioned multitenant), freshly booted. The request body is the
+2026-09-27) through an exact-bytes recording proxy from a local HAPI FHIR 8.10.0 data server
+(URL-partitioned multitenant), freshly booted. The request body is the
 fixed US Core Patient in `warm.go`. No participant or patient data.
 
 - `warm-default.json`: `WarmValidate("DEFAULT")` twice on the freshly booted server. The first

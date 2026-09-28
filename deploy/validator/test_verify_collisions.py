@@ -9,7 +9,8 @@ SCRIPT = DIR / "verify-collisions.py"
 LINE = "Found multiple package versions for FHIR version: R4 and canonical URL: %s"
 
 
-# Verbatim from a 2.2 make-validate lane (HAPI 8.10.0, 2026-09-11): the line PATTERN must match.
+# Verbatim from a local 2.2 validator lane (HAPI 8.10.0, 2026-09-11), running the digest-pinned
+# engine and backported WAR this directory builds on: the line PATTERN must match.
 # The canonical it names is a known 2.2 collision again since the support package carries the
 # artifact-versionAlgorithm closure (the version-algorithm CodeSystem, byte-identical to the
 # extensions package's own entry), which makes the verbatim line the acceptance row as captured;

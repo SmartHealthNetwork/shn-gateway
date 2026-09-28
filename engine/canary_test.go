@@ -456,8 +456,9 @@ func newTestProviderGateway(t *testing.T) *Gateway {
 			EncPub:   encPub,
 			EncPriv:  encPriv,
 		},
-		SoR:       stub,
-		Store:     stub,
-		Validator: shnsdk.NewFakeValidator(),
+		SoR:                stub,
+		Store:              stub,
+		Validator:          shnsdk.NewFakeValidator(),
+		OriginationProfile: "demo",
 	})
 }

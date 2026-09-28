@@ -172,9 +172,13 @@ func TestPayerAnswerIngress_ReferencePayersAreNotCertified(t *testing.T) {
 }
 
 // The skip needs both halves: a reference payer reached from a lane that does not
-// relay reference bytes is certified like any payer.
+// relay reference bytes is certified like any payer. Every lane New accepts relays
+// them, and a provider with no profile refuses to originate
+// (requireOriginationProfile), so no route reaches this case today; the row pins the
+// rule for any later lane that does not relay reference bytes. What routes do reach —
+// a partner payer on either lane is certified — is TestPayerAnswerIngress_PartnerPayerLevelMatrix.
 func TestPayerAnswerIngress_ReferencePayerOffTheReferenceLanesIsCertified(t *testing.T) {
-	g, log, _ := payerIngressGateway(t, "unknown-lane", EnforcementStrict, allLinesFailed)
+	g, log, _ := payerIngressGateway(t, "", EnforcementStrict, allLinesFailed)
 	status, _ := g.validateFHIRPayerIngress(answerCtx("dtr-questionnaire-fetch"), []byte(answerBundle), "2.0", "pa.dtr", shnsdk.CMSPayerIdentity)
 	if status != http.StatusUnprocessableEntity || log.count() != 3 {
 		t.Fatalf("status %d after %d calls, want 422 after every line failed", status, log.count())

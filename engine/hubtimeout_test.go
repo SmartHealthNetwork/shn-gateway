@@ -19,7 +19,7 @@ import (
 // the caller reads 504 with the fact and the budget, and the leg outcome stays
 // "unreachable" (the leg did not complete).
 func TestHubLegTimeout_NamesTheBudget(t *testing.T) {
-	gw, stub, _ := crdTestSystem(t, uc03Coverage())
+	gw, stub, _ := uc03HandlerSystem(t, uc03Coverage())
 	stub.routeDelay = 5 * time.Second
 	gw.cfg.Client = &http.Client{Transport: stub, Timeout: 50 * time.Millisecond}
 	var got []string
@@ -48,7 +48,7 @@ func TestHubLegTimeout_NamesTheBudget(t *testing.T) {
 // it: the 504 still names the budget and says the recipient may have received
 // the request.
 func TestHubLegTimeout_AfterTheSendMayHaveBeenReceived(t *testing.T) {
-	gw, stub, _ := crdTestSystem(t, uc03Coverage())
+	gw, stub, _ := uc03HandlerSystem(t, uc03Coverage())
 	stub.routeDelay = 5 * time.Second
 	wrote := diagnosticRoundTripper(func(r *http.Request) (*http.Response, error) {
 		if strings.HasSuffix(r.URL.Path, "/route") {
@@ -74,7 +74,7 @@ func TestHubLegTimeout_AfterTheSendMayHaveBeenReceived(t *testing.T) {
 // claiming "within 5s" would be false; this row goes red if the caller-
 // deadline guard is dropped.
 func TestHubLegTimeout_CallerDeadlineFirst(t *testing.T) {
-	gw, stub, _ := crdTestSystem(t, uc03Coverage())
+	gw, stub, _ := uc03HandlerSystem(t, uc03Coverage())
 	stub.routeDelay = 5 * time.Second
 	gw.cfg.Client = &http.Client{Transport: stub, Timeout: 5 * time.Second}
 
@@ -108,7 +108,7 @@ func (timeoutShapedFault) Temporary() bool { return false }
 // gateway's own leg deadline never fired, so the Hub was not waited on. It stays
 // the generic 502, with no timeout wording and no number.
 func TestHubLegFault_TimeoutShapedFaultStaysRoutingFailed(t *testing.T) {
-	gw, stub, _ := crdTestSystem(t, uc03Coverage())
+	gw, stub, _ := uc03HandlerSystem(t, uc03Coverage())
 	stub.routeErr = timeoutShapedFault{}
 	gw.cfg.Client = &http.Client{Transport: stub, Timeout: 30 * time.Second}
 	var got []string
@@ -138,7 +138,7 @@ func TestHubLegFault_TimeoutShapedFaultStaysRoutingFailed(t *testing.T) {
 // own request deadline ends the wait → 504 "hub leg timed out", no number (no
 // budget of the gateway's ended the wait, so none is claimed).
 func TestHubLegTimeout_NoClientBudget(t *testing.T) {
-	gw, stub, _ := crdTestSystem(t, uc03Coverage())
+	gw, stub, _ := uc03HandlerSystem(t, uc03Coverage())
 	stub.routeDelay = 5 * time.Second
 	gw.cfg.Client = &http.Client{Transport: stub}
 
@@ -161,7 +161,7 @@ func TestHubLegTimeout_NoClientBudget(t *testing.T) {
 // keeps the generic 502 "hub routing failed" and the "unreachable" outcome —
 // the timeout branch takes nothing away from the existing contract.
 func TestHubLegFault_StaysRoutingFailed(t *testing.T) {
-	gw, stub, _ := crdTestSystem(t, uc03Coverage())
+	gw, stub, _ := uc03HandlerSystem(t, uc03Coverage())
 	stub.routeErr = errors.New("dial tcp: connection refused")
 	gw.cfg.Client = &http.Client{Transport: stub, Timeout: 50 * time.Millisecond}
 	var got []string

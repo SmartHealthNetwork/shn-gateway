@@ -50,13 +50,20 @@ const (
 // Interim builders name existing code paths that still rebuild a
 // participant's message instead of relaying it. Each is registered so that
 // such a path is visible and checked; each is removed once its path relays
-// the participant's bytes. BuilderInterimEmptyErrorSubstitution is the
-// recipient's own error body in place of the participant's application
-// error: for an empty error body, and for the bare error a requester that
-// negotiated no frame receives.
-const (
-	BuilderInterimEmptyErrorSubstitution BuilderID = "defect-empty-error-substitution"
-)
+// the participant's bytes. None remains: the last, the recipient's own error
+// body in place of a participant's empty or legacy-bare application error,
+// is retired. An empty error is relayed as it came, and a requester that
+// negotiated no frame, which cannot receive the participant's answer, gets
+// the gateway's own refusal, never a body standing in for that answer.
+
+// BuilderInterimEmptyErrorSubstitution named the recipient's own error body
+// written in place of a participant's empty or legacy-bare application
+// error.
+//
+// Deprecated: no path produces it since shn-gateway v0.57.0. It is not
+// registered, so Authored refuses it; it is kept only so code that names it
+// still compiles.
+const BuilderInterimEmptyErrorSubstitution BuilderID = "defect-empty-error-substitution"
 
 // builderTestInjected is reserved for payloads that tests inject. Authored
 // refuses it.
@@ -78,9 +85,7 @@ var registeredBuilders = []BuilderID{
 	BuilderDTRNextQuestion,
 }
 
-var interimBuilders = []BuilderID{
-	BuilderInterimEmptyErrorSubstitution,
-}
+var interimBuilders = []BuilderID{}
 
 // authoredBuilders is the closed set Authored accepts.
 var authoredBuilders = func() map[BuilderID]struct{} {

@@ -2,11 +2,11 @@
 //
 // A fake written by hand answers what its author imagined, and a fake more
 // lenient than the real service is green in CI and red live. A recording is
-// what the service actually answered. This package serves one recording as a
-// CLI command runner (Cmd) or an HTTP server (Server). Where the AWS SDK is a
-// dependency, awsconfig.go beside this file adds an SDK configuration aimed at
-// that server (AWSConfig), so the SDK's own deserializers and typed errors run
-// against the recorded wire bytes.
+// what the service actually answered. This package loads a recorded HTTP or
+// CLI exchange, checks it against the scrub rules below, and replays it as a
+// CLI command runner (Cmd) or an HTTP server (Server). Recordings of AWS API
+// answers are one kind it replays: an SDK client aimed at Server runs its own
+// deserializers and typed errors against the recorded wire bytes.
 //
 // Replay is strict:
 //   - a CLI request matches only an identical recorded argv; an HTTP request
@@ -37,7 +37,7 @@
 // listed in the recording's "allow" with a reason; an allowed value excuses
 // only an exactly equal match, never a longer value that contains it. A
 // twelve-digit run inside a decimal number (a mantissa, a metric value), a
-// longer token (a hex task id) or ending a UUID is not an account id. Log message bodies, and
+// longer token (a hex resource id) or ending a UUID is not an account id. Log message bodies, and
 // identifiers inside encoded payloads (base64, a JWT), cannot be recognised
 // mechanically: the capture replaces them and the scrub statement says so.
 // Every committed file under a testdata/recordings directory must pass these
@@ -47,7 +47,7 @@
 // reads, is replaced at capture and declared in scrubbed: Parse checks that the
 // declared place holds exactly the declared replacement.
 //
-// A state no capture can produce on demand (an alarm firing, a failed task)
+// A state no capture can produce on demand (a service reporting a failure)
 // is a derived recording: it names its source capture in derivedFrom and the
 // values it replaces in changed, and Parse verifies it equals the source apart
 // from exactly those values, so only a value is ever authored, never a shape.
@@ -61,10 +61,8 @@
 // token, cookie or API key header with a value, a bearer token, or an AWS
 // access key id.
 //
-// Each module that replays recordings has its own copy of this file, kept
-// identical to the others and alone in its package; it is internal to its
-// module and imported only by tests, never a published helper. awsconfig.go
-// has no copy where the AWS SDK is not a dependency.
+// The package is internal and imported only by tests; it is not a published
+// helper.
 package testrecord
 
 import (
@@ -103,7 +101,7 @@ type Recording struct {
 
 	// DerivedFrom names a captured recording in the same directory that this
 	// one repeats with only the values in Changed replaced: a state a capture
-	// cannot produce on demand (an alarm firing, a failed task), in a shape a
+	// cannot produce on demand (a service reporting a failure), in a shape a
 	// capture did produce. Changed maps a JSON pointer into the recording
 	// document to the value placed there. Parse verifies the derivation.
 	DerivedFrom string                     `json:"derivedFrom,omitempty"`
@@ -196,7 +194,7 @@ type Response struct {
 // DocumentationAccountID is the only AWS account id a recording may carry.
 const DocumentationAccountID = "111122223333"
 
-// DocumentationRDSID stands for the account-specific host id in an RDS
+// DocumentationRDSID stands for the account-specific host id in an AWS RDS
 // endpoint (<instance>.<id>.<region>.rds.amazonaws.com), which public DNS
 // resolves; a recording carries this one instead.
 const DocumentationRDSID = "abcdefghijkl"
@@ -818,7 +816,7 @@ func isHexByte(b byte) bool { return strings.IndexByte(hexBytes, b) >= 0 }
 func isWordByte(b byte) bool { return strings.IndexByte(wordBytes, b) >= 0 }
 
 // Join replays several recordings as one: a scenario built from the
-// recordings of its parts (the deploys, the alarms, a task's log). Each
+// recordings of its parts (one per service the scenario calls). Each
 // request must be recorded in exactly one of them, so which file answers is
 // never ambiguous, and the joined replay keeps every rule: unrecorded requests
 // fail, and every exchange of every part must be served unless the test calls

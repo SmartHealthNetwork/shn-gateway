@@ -24,6 +24,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -280,9 +281,12 @@ type config struct {
 	PayerDavinciPayorBackend    shnsdk.PayerIdentifier
 	PayerDavinciPayorEdge       bool // true iff both env vars were set and parsed clean
 
-	// OriginationProfile selects the per-UC origination lane: "" and "demo" keep the
+	// OriginationProfile selects the per-UC origination lane: "demo" keeps the
 	// self-contained demo order shape; "provider-data" originates every UC off the
 	// provider's seeded SoR and drives real reference-payer verdicts. ORIGINATION_PROFILE.
+	// Unset is normalized to "demo" on ROLE=provider, so after loadConfig "" survives
+	// only on the other roles, where it means no origination. Any other value refuses
+	// to boot (validOriginationProfile).
 	OriginationProfile string
 
 	// Optional native DTR population (provider-local). PROVIDER_DTR_NATIVE switches DTR
@@ -354,6 +358,14 @@ var validRoles = map[string]bool{
 	"payer":    true,
 	"facility": true,
 	"phg":      true,
+}
+
+// validOriginationProfile reports whether v is one of the ORIGINATION_PROFILE values
+// the engine accepts (engine.OriginationProfiles, the origination lanes). Unset is not
+// one; loadConfig normalizes an unset value to "demo" on ROLE=provider and leaves it
+// unset on every other role.
+func validOriginationProfile(v string) bool {
+	return slices.Contains(engine.OriginationProfiles(), v)
 }
 
 // contractVersionTokenRe mirrors the registrar admission grammar
@@ -570,6 +582,13 @@ func loadConfig(getenv func(string) string) (config, error) {
 	// for deployments that have no DTR/populate concept at all.
 	if cfg.Role == "provider" && cfg.OriginationProfile == "" {
 		cfg.OriginationProfile = "demo"
+	}
+	// Any other value is refused on every role. The engine's origination predicates
+	// compare the value exactly, so an unrecognised one (a retired lane, a typo, another
+	// case, stray whitespace) matched no lane and built its PAS request with a payer
+	// Organization the payer's own system never supplied, rather than failing.
+	if cfg.OriginationProfile != "" && !validOriginationProfile(cfg.OriginationProfile) {
+		return config{}, fmt.Errorf("gateway: invalid ORIGINATION_PROFILE %q (must be %s, or unset)", cfg.OriginationProfile, strings.Join(engine.OriginationProfiles(), "|"))
 	}
 
 	for _, pair := range optionalURLs(cfg) {
@@ -1891,8 +1910,8 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	gwCfg.CertificationValidatorsByLine = certificationValidators(getenv, cfg, firstNonEmpty(cfg.FHIRValidateURL, endpoints.FHIRValidate), lanes.defaults, qualifyDefaultLane)
 	gw, err := engine.New(gwCfg)
 	if err != nil {
-		// The gated clients' qualification loops started with the clients; no
-		// worker will ever own them.
+		// No worker will ever own the gated clients: close them (nothing has
+		// started their qualification loops, which start with the worker).
 		engine.CloseCertificationClients(gwCfg.CertificationValidatorsByLine)
 		return b, err
 	}
@@ -2493,14 +2512,19 @@ func populateFailureObserver(stdout io.Writer) func(engine.PopulateFailure) {
 // default has answered a qualification the line's evidence says no lane is
 // configured and nothing is dialed, because the default is a Compose service
 // name and in a deployment where it does not resolve every exchange would
-// otherwise record a hashed DNS failure as its verdict. A line with none of the
-// three has no client, which the collector records as unavailable. The canonical
-// line certifies on its own endpoint. Nothing here feeds routing: a
-// certify-only address is not a lane (validatorLanesForDeclared never reads it),
-// and the gated client's own late qualification never changes routing's lane.
-// The gated client runs its own background qualification loop from boot (qualify
-// is the same qualifier routing uses), so a validator that comes up after
-// routing's boot budget is certified against within one interval of coming up.
+// otherwise record a hashed DNS failure as its verdict. A 2.1 or 2.2 address is
+// gated the same way, on its own qualification by the same qualifier (a lane
+// still warming answers errors that are not a verdict on the payload); until it
+// passes the line's evidence says the lane is not qualified and nothing is
+// dialed. A line with none of the three has no client, which the collector
+// records as unavailable. The canonical line certifies on its own endpoint, the
+// gateway's own routing validator. Nothing here feeds routing: a certify-only
+// address is not a lane (validatorLanesForDeclared never reads it), and a gated
+// client's own qualification never changes routing's lanes. Each gated client
+// runs its own background qualification loop (qualify is the same qualifier
+// routing uses) from the certification worker's start, only where evidence is
+// collected, so a validator that comes up late is certified against within one
+// interval of coming up.
 func certificationValidators(getenv func(string) string, cfg config, canonical string, defaults map[string]*engine.DiscoveredLane, qualify engine.LaneQualifier) map[string]shnsdk.Validator {
 	endpoints := map[string]string{
 		"2.0": canonical,
@@ -2524,7 +2548,11 @@ func certificationValidators(getenv func(string) string, cfg config, canonical s
 			}
 			continue
 		}
-		out[line] = certificationClient(endpoint)
+		if line == "2.0" {
+			out[line] = certificationClient(endpoint)
+			continue
+		}
+		out[line] = engine.NewQualifiedCertificationValidator(line, certificationClient(endpoint), qualify)
 	}
 	return out
 }

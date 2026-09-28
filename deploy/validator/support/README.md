@@ -40,7 +40,7 @@ member whose own `version` matches; a pinned version no archive carries is recor
 such a core-namespace canonical to the loaded definition) and the loaded member is followed; a
 reference target the depth cut leaves is recorded under `cutReferenceTargets`; a canonical no
 archive carries under `unresolved`. The tolerance record is part of the committed output and
-the per-line closure inventories (`tools/contracts/closure/<line>.json`) declare the same holes.
+the network's per-line IG closure inventories declare the same holes.
 
 Each member is written to `inputs/closure/` byte-for-byte from the archive entry;
 `closure-members.json` lists them (url, version, resource type, file) and `sources.json`

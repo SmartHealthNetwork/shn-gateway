@@ -40,8 +40,9 @@ done
 
 # Drive all 8 UCs — every decision comes from YOUR deployed payer's br-payer, via the hosted Hub.
 if [ -d sdk ]; then
-  # Monorepo checkout: build send-test from the sibling sdk/ module (its own Go module, so it must
-  # run from inside it — a module-boundary crossing fails from the repo root).
+  # A checkout with the SDK's source beside it: build send-test from the sibling sdk/ module (its
+  # own Go module, so it must run from inside it — a module-boundary crossing fails from the
+  # checkout's root).
   ( cd sdk && go run ./cmd/shn send-test --gateway http://127.0.0.1:8080 )
 else
   # Standalone gateway bundle: use the installed shn CLI

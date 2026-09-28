@@ -61,6 +61,36 @@ func relaysReferencePayerBytes(profile string) bool {
 	return targetsBrPayer(profile) || isDemoProfile(profile)
 }
 
+// originationProfiles lists the origination lanes, one per lane predicate above:
+// isDemoProfile and targetsBrPayer. A value is a lane only if one of them names it
+// (isOriginationProfile), so this list cannot admit a value no lane recognises.
+var originationProfiles = []string{"demo", "provider-data"}
+
+// isOriginationProfile reports whether profile names an origination lane.
+func isOriginationProfile(profile string) bool {
+	return isDemoProfile(profile) || targetsBrPayer(profile)
+}
+
+// OriginationProfiles returns the values Config.OriginationProfile accepts (the
+// origination lanes), in a fixed order. It is a copy: changing it changes nothing here.
+func OriginationProfiles() []string {
+	return append([]string(nil), originationProfiles...)
+}
+
+// checkOriginationProfile is New's check of Config.OriginationProfile. A value that
+// names no lane is refused on every role: the origination paths compare it exactly, so
+// it would match none of them and build a PAS request carrying a payer Organization no
+// system of record supplied. Unset is not refused here: a provider with no profile
+// still relays, and its originating routes refuse instead (requireOriginationProfile).
+// The published binary reads an unset ORIGINATION_PROFILE as demo on the provider role
+// before it builds a Config.
+func checkOriginationProfile(profile string) error {
+	if profile != "" && !isOriginationProfile(profile) {
+		return fmt.Errorf("gateway: Config.OriginationProfile %q is not an origination profile (must be %s)", profile, strings.Join(originationProfiles, "|"))
+	}
+	return nil
+}
+
 // referencePayerSystem is the payer-identifier namespace the reference payers claim
 // their identities under.
 const referencePayerSystem = "urn:oid:2.16.840.1.113883.6.300"
@@ -692,8 +722,10 @@ func (g *Gateway) relayOriginationError(w http.ResponseWriter, err error) bool {
 	if !errors.As(err, &re) {
 		return false
 	}
+	// A non-empty answer that states no media type is read as FHIR JSON; an
+	// empty one keeps what the recipient stated, nothing included.
 	ct := re.ContentType
-	if ct == "" {
+	if ct == "" && len(re.Body) > 0 {
 		ct = "application/fhir+json"
 	}
 	// The recipient's answer, exactly as it arrived.
@@ -1084,8 +1116,12 @@ type crdDtrResult struct {
 	// made. The PAS builders need it: a payer matches a prior authorization on
 	// the member id.
 	memberSystem string
-	pci          string
-	filled       []FilledItem
+	// sorID is the id the participant's own system holds the member's Patient
+	// under, from the same one reading: the supplemental report's subject is
+	// checked against it (E-06), never against a second reading.
+	sorID  string
+	pci    string
+	filled []FilledItem
 	// payer is the member's REAL payer identity, parsed from the member's open Coverage
 	// (OpenCoverage → ParsePayerIdentifier) at the fresh origination site (FR-G40). It threads
 	// to the payer-org-emitting PAS builders so the payload's payer derives from the patient's
@@ -1393,7 +1429,7 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 			// handleUC08 asserts the PAS result is DENIED (502 on any approval), so a
 			// not-covered order can never yield an auth. Not-covered carries no questionnaire
 			// (NeedsDTR=false) → return the built order straight for the PAS submit.
-			return crdDtrResult{srJSON: srJSON, patientRef: patientRef, coverageRef: coverageRef, coverage: realCov, insurer: realPayerOrg, member: member, memberSystem: recs.memberSystem, pci: pci, payer: payer, recipient: recipient}, true
+			return crdDtrResult{srJSON: srJSON, patientRef: patientRef, coverageRef: coverageRef, coverage: realCov, insurer: realPayerOrg, member: member, memberSystem: recs.memberSystem, sorID: recs.sorID, pci: pci, payer: payer, recipient: recipient}, true
 		}
 		// AI-1: a coverage denial STOPS — never routes DTR/PAS. (adversarial Row 1)
 		// Explicit terminal stop; patient-facing denial UX is deferred.
@@ -1419,7 +1455,7 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 	// Both are live: the reference payer advertises one on the L8000 and G0151
 	// families (so both route DTR) and none on E0424, which is PA-decided off the
 	// request alone and goes straight to PAS.
-	res := crdDtrResult{srJSON: srJSON, patientRef: patientRef, coverageRef: coverageRef, coverage: realCov, insurer: realPayerOrg, member: member, memberSystem: recs.memberSystem, pci: pci, payer: payer, recipient: recipient,
+	res := crdDtrResult{srJSON: srJSON, patientRef: patientRef, coverageRef: coverageRef, coverage: realCov, insurer: realPayerOrg, member: member, memberSystem: recs.memberSystem, sorID: recs.sorID, pci: pci, payer: payer, recipient: recipient,
 		crdOrder: answer.updatedOrder, crdAssertionID: answer.assertionID}
 	if cov.NeedsDTR() {
 		canonical := shnsdk.StripCanonicalVersion(cov.Questionnaires[0])
@@ -2614,13 +2650,11 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 		LegType: "pas-claim-update", Seam: "originate", Whose: "own",
 	})
 
-	// Amend: attach the provider-LOCAL operative DiagnosticReport + Provenance.
-	drJSON, drOK, readErr := ReadSystemOfRecord(g.cfg.SoR).SupplementalReportContext(ctx, member)
-	if writeSoRFailure(w, readErr) {
-		return
-	}
-	if !drOK {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "no supplemental report"})
+	// Amend: attach the provider-LOCAL operative DiagnosticReport + Provenance,
+	// its subject naming the member's network patient (E-06).
+	drJSON, status, msg := g.supplementalReport(ctx, member, res.sorID)
+	if status != 0 {
+		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
 	if status, msg := g.validateFHIR(ctx, drJSON, "egress", ""); status != 0 {

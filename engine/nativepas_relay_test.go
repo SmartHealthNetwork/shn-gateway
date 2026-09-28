@@ -64,6 +64,13 @@ type stubAnswer struct {
 
 func newRecordingPayer(t *testing.T, answers ...stubAnswer) (*httptest.Server, *recordingPayer) {
 	t.Helper()
+	return newTypedRecordingPayer(t, "application/fhir+json", answers...)
+}
+
+// newTypedRecordingPayer is newRecordingPayer answering with the media type
+// contentType.
+func newTypedRecordingPayer(t *testing.T, contentType string, answers ...stubAnswer) (*httptest.Server, *recordingPayer) {
+	t.Helper()
 	p := &recordingPayer{answers: answers, t: t}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body := make([]byte, 0)
@@ -81,7 +88,7 @@ func newRecordingPayer(t *testing.T, answers ...stubAnswer) (*httptest.Server, *
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set("Content-Type", "application/fhir+json")
+		w.Header().Set("Content-Type", contentType)
 		w.WriteHeader(p.answers[i].status)
 		_, _ = w.Write([]byte(p.answers[i].body))
 	}))
@@ -136,7 +143,7 @@ func deviceRequestSubmitBundle(t *testing.T) []byte {
 	t.Helper()
 	dr := []byte(`{"resourceType":"DeviceRequest","id":"dr-x","status":"active","intent":"order","subject":{"reference":"Patient/MBR-COVERED"},"codeCodeableConcept":{"coding":[{"system":"http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets","code":"E0424","display":"Stationary compressed gaseous oxygen system"}]}}`)
 	b, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
-		Coverage: testMemberCoverage("MBR-COVERED"), Provider: testRequestingProvider(),
+		Coverage: testMemberCoverage("MBR-COVERED"), Insurer: testPayerOrganization(shnsdk.CMSPayerIdentity), Provider: testRequestingProvider(),
 		MemberIDSystem: shnsdk.MemberSystem, SR: dr,
 		PatientRef: "Patient/MBR-COVERED", CoverageRef: "Coverage/MBR-COVERED", MemberID: "MBR-COVERED",
 		Corr: "corr-dr-submit", Created: fixedClock(), Payer: shnsdk.CMSPayerIdentity,
@@ -571,4 +578,51 @@ func TestNativeUpdate_Transport500(t *testing.T) {
 	if res.Rollback == nil {
 		t.Fatal("a post-Begin fault must release the claim")
 	}
+}
+
+// TestNativePAS_PayerMediaTypeRelayed: a PAS answer the payer gateway relays
+// carries the media type the payer's system stated, on a decided submit, a
+// decided update and an answer relayed unread below strict.
+func TestNativePAS_PayerMediaTypeRelayed(t *testing.T) {
+	const stated = "application/json;charset=UTF-8"
+	t.Run("submit", func(t *testing.T) {
+		approved := relayDecidedAnswer(t, "cr-mt", "trace-mt", "AUTH-MT-1")
+		srv, _ := newTypedRecordingPayer(t, stated, stubAnswer{http.StatusOK, string(approved)})
+		n, ctx := relayResponder(t, srv, newCensusSoR())
+		res, err := n.Handle(ctx, "pas-claim", "corr-mt", "PCI-1", serviceRequestSubmitBundle(t, false))
+		if err != nil || res.Status != 0 {
+			t.Fatalf("submit: err=%v status=%d msg=%s", err, res.Status, res.Message)
+		}
+		relayedExactly(t, res, approved)
+		if got := res.Response.ContentType(); got != stated {
+			t.Fatalf("media type %q, want the payer's %q", got, stated)
+		}
+	})
+	t.Run("update", func(t *testing.T) {
+		approved := relayDecidedAnswer(t, "cr-mt-upd", "trace-mt-upd", "AUTH-MT-2")
+		srv, _ := newTypedRecordingPayer(t, stated, stubAnswer{http.StatusOK, string(approved)})
+		n, ctx, _, bundle, pci, _ := updateRelayLeg(t, srv)
+		res, err := n.Handle(ctx, "pas-claim-update", "corr-mt-upd", pci, bundle)
+		if err != nil || res.Status != 0 {
+			t.Fatalf("update: err=%v status=%d msg=%s", err, res.Status, res.Message)
+		}
+		relayedExactly(t, res, approved)
+		if got := res.Response.ContentType(); got != stated {
+			t.Fatalf("media type %q, want the payer's %q", got, stated)
+		}
+	})
+	t.Run("unread", func(t *testing.T) {
+		unreadable := []byte(`{"resourceType":"Bundle","type":"collection"}`)
+		srv, _ := newTypedRecordingPayer(t, stated, stubAnswer{http.StatusOK, string(unreadable)})
+		n, ctx := relayResponder(t, srv, newCensusSoR())
+		n.conformance = NewConformancePolicy(EnforcementObserve)
+		res, err := n.Handle(ctx, "pas-claim", "corr-mt-unread", "PCI-1", serviceRequestSubmitBundle(t, false))
+		if err != nil || res.Status != 0 {
+			t.Fatalf("submit: err=%v status=%d msg=%s", err, res.Status, res.Message)
+		}
+		relayedExactly(t, res, unreadable)
+		if got := res.Response.ContentType(); got != stated {
+			t.Fatalf("media type %q, want the payer's %q", got, stated)
+		}
+	})
 }

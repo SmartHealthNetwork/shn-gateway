@@ -16,8 +16,9 @@ import (
 // certification endpoint.
 const certificationWarmAttempts = 3
 
-// warmCertification sends each certification endpoint configured by address
-// one PAS request bundle at its line, against the versioned profile a
+// warmCertification sends each certification endpoint it may dial without a
+// qualification of its own (the 2.0 validator) one PAS request bundle at its
+// line, against the versioned profile a
 // certification of that bundle names, so a new gateway process's first
 // contact with a validator is not paid inside a real certification's
 // candidate budget. It runs off the request path (startWorkers), never gates
@@ -25,8 +26,9 @@ const certificationWarmAttempts = 3
 // own client built with the certification client's limits (never the engine's,
 // whose one connection a real certification may need), stops at an endpoint's
 // first answer, and logs one line per endpoint naming its host, whether it
-// answered, and after how many requests. A default lane is not warmed here: its
-// qualification already posts the readiness corpus to it.
+// answered, and after how many requests. A gated lane (a default, or a 2.1 or
+// 2.2 address) is not warmed here: its qualification already posts the
+// readiness corpus to it.
 func warmCertification(ctx context.Context, validators map[string]shnsdk.Validator) {
 	lines := make([]string, 0, len(validators))
 	for line := range validators {

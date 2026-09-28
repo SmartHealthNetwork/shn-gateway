@@ -100,6 +100,8 @@ var transmitBoundaries = map[string]boundaryRule{
 		reason: "the scenario's read of the patient view, which sends no body"},
 	"certificationTransport.RoundTrip": {kind: excluded,
 		reason: "the certification validator's transport: observational $validate of observed bytes, never an exchange"},
+	"QualifyValidatorLane": {kind: excluded,
+		reason: "a validator lane's qualification: a metadata read, then the readiness corpus's committed synthetic fixtures; never an exchange"},
 	"Gateway.handleIngressMetadata": {kind: excluded,
 		reason: "this gateway's own CapabilityStatement"},
 	"Gateway.handlePatientAccessMetadata": {kind: excluded,

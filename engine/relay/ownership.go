@@ -210,9 +210,8 @@ var legs = []string{
 }
 
 // legOwnership is the pinned table. It records what each transmit carries
-// today, including the paths that still rebuild a participant's message
-// under an interim builder; such a path is permitted only where it is
-// listed here.
+// today. A path that still rebuilt a participant's message would do so under
+// an interim builder, permitted only where it is listed here; none remains.
 //
 // Transmits that are not exchange legs are outside this table: the
 // gateway's discovery and conformance documents (CDS Services discovery,
@@ -299,8 +298,7 @@ var legOwnership = func() map[Key]Rule {
 		// data-request answers are the gateway's own messages; eligibility is the
 		// gateway's own answer from the payer's records, or the payer's answer
 		// relayed when the payer declares its own endpoint; the others are the
-		// participant's answer, relayed, except where an interim builder still
-		// rebuilds it.
+		// participant's answer, relayed.
 		{"coverage-eligibility", RoleRecipient, DirectionResponse, OutcomeAnswered}: {
 			Allowed: []Ownership{OwnershipAuthored, OwnershipRelayed}, Builders: []BuilderID{BuilderSDKEligibility},
 		},
@@ -315,14 +313,14 @@ var legOwnership = func() map[Key]Rule {
 		// listed: this leg has never rebuilt an answer, so nothing may author one.
 		{"pas-claim-inquire", RoleRecipient, DirectionResponse, OutcomeAnswered}: {Allowed: relayed},
 	}
-	// An application error from the participant's system is relayed (for
-	// coverage-eligibility, from a payer that declares its own endpoint). On
-	// the recipient an interim builder still replaces an empty error body,
-	// and the bare error a requester that negotiated no frame receives.
+	// An application error from the participant's system is relayed exactly
+	// as it answered (for coverage-eligibility, from a payer that declares its
+	// own endpoint), an empty body included, to a requester that negotiated a
+	// frame. A requester that did not cannot receive it: the gateway checks
+	// the error under this key, then answers with its own refusal under the
+	// refused key, so the participant's bytes never leave it unsealed.
 	for _, leg := range []string{"coverage-eligibility", "crd-order-dispatch", "crd-order-select", "dtr-questionnaire-fetch", "pas-claim", "pas-claim-inquire", "pas-claim-update"} {
-		m[Key{leg, RoleRecipient, DirectionResponse, OutcomeUpstreamError}] = Rule{
-			Allowed: either, Builders: []BuilderID{BuilderInterimEmptyErrorSubstitution},
-		}
+		m[Key{leg, RoleRecipient, DirectionResponse, OutcomeUpstreamError}] = Rule{Allowed: relayed}
 	}
 	// On the requester, an application error the recipient answered with is
 	// relayed to the participant's system exactly as it arrived.

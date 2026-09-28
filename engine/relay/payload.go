@@ -89,9 +89,14 @@ const (
 	// the same subject from the request. An enrichment: not applied to
 	// Da Vinci-native traffic unless the participant opts in.
 	EditDTRPatientObtain EditID = "E-05"
+	// EditEvidenceSubjectRekey re-points the subject.reference of the
+	// supplemental report a provider's gateway attaches to a claim update it
+	// builds, from its system of record's own Patient to the member's network
+	// patient, and only when the report names that Patient.
+	EditEvidenceSubjectRekey EditID = "E-06"
 )
 
-var editIDs = []EditID{EditCDSCallbackStrip, EditCDSPrefetchObtain, EditPayorEdgeRestamp, EditDTRCoverageObtain, EditDTRPatientObtain}
+var editIDs = []EditID{EditCDSCallbackStrip, EditCDSPrefetchObtain, EditPayorEdgeRestamp, EditDTRCoverageObtain, EditDTRPatientObtain, EditEvidenceSubjectRekey}
 
 // EditIDs returns every registered edit id, in order.
 func EditIDs() []EditID { return slices.Clone(editIDs) }

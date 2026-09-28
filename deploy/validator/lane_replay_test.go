@@ -167,8 +167,7 @@ func serveRecorded(w http.ResponseWriter, ex recordedExchange) {
 }
 
 // replayT stands in for the testing.T a replay reports through, so a
-// rejection row can see what the replay refused (as internal/testrecord's own
-// rejection rows do).
+// rejection row can see what the replay refused.
 type replayT struct {
 	mu       sync.Mutex
 	errors   []string

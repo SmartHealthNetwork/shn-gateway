@@ -5,8 +5,8 @@ usage: verify-collisions.py LINE   (stdin: docker logs)
 
 Every canonical HAPI names must be in known-collisions.json for LINE — the
 canonicals two loaded packages both carry, each same-version identical or
-tolerated with a reason in the manifest (tools/igclosuregen writes the file
-from the committed closure inventories). Any other canonical is the
+tolerated with a reason in the network's IG manifest (the file is generated
+from the network's per-line IG closure inventories). Any other canonical is the
 nondeterministic resolution the closure gate exists to exclude, observed at
 runtime, and fails the proof. A built image's warm-up may legitimately log no
 such line at all (the 2.0/2.1/2.2 images log none), so PATTERN is proven

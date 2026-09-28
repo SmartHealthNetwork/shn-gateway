@@ -8,7 +8,7 @@
 # services are served at root, e.g. `/cds-services/order-sign-crd`. The image
 # exposes container port 8081.
 #
-# This bundle ships as a snapshot of `gateway/` alone — there is no monorepo checkout to vendor
+# This bundle ships as the gateway module alone — there is no other checkout to vendor
 # br-payer from, so this script clones the upstream MIT source fresh from GitHub and checks
 # out the pinned commit before building. Image build only; no cert/UDAP logic (see gencerts.sh).
 #

@@ -55,6 +55,27 @@ func TestContractTokenForLeg_UnknownLegTypeErrors(t *testing.T) {
 	}
 }
 
+// The receiver's refusal of an unknown leg is framed to the requester, so it
+// is a fixed message that names no internal detail, bare or framed.
+func TestUnframeRequest_UnknownLegTypeRefusedPlainly(t *testing.T) {
+	g := &Gateway{cfg: Config{Reg: shnsdk.NewRegistry()}}
+	framed, err := shnsdk.EncodeHTTPFrame(200, "application/fhir+json", []byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, payload := range map[string][]byte{"bare": []byte(`{}`), "framed": framed} {
+		for _, unframe := range []func() ([]byte, string, int, string){
+			func() ([]byte, string, int, string) { return g.unframeRequest("no-such-leg", payload) },
+			func() ([]byte, string, int, string) { return g.unframeRequestFrom("prov-1", "no-such-leg", payload) },
+		} {
+			body, tok, status, msg := unframe()
+			if body != nil || tok != "" || status != http.StatusInternalServerError || msg != msgUnknownLeg {
+				t.Fatalf("%s: got (%s, %q, %d, %q), want the fixed 500 refusal", name, body, tok, status, msg)
+			}
+		}
+	}
+}
+
 func TestNativeResponder_UnknownLegTypeErrors(t *testing.T) {
 	n := &nativeResponder{declaredContractVersions: []string{"pa.pas@2.0"}}
 	if _, err := n.Handle(context.Background(), "no-such-leg", "corr", "pci", nil); err == nil {

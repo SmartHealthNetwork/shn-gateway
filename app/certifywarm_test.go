@@ -116,15 +116,20 @@ type writerFunc func([]byte) (int, error)
 
 func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
 
-// Each certification endpoint configured by address gets one PAS request
-// bundle for its line, against the versioned request-bundle profile, and one
-// log line saying it answered on the first request. Each endpoint is a real
-// lane of its line replayed strictly (testdata/recordings/lane-<line>-certify-warm.json):
-// any other request fails the row.
+// Each certification client that dials an address with no qualification of
+// its own gets one PAS request bundle for its line, against the versioned
+// request-bundle profile, and one log line saying it answered on the first
+// request. Each endpoint is a real lane of its line replayed strictly
+// (testdata/recordings/lane-<line>-certify-warm.json): any other request fails
+// the row.
 func TestWarmCertification_SendsOneBundlePerConfiguredEndpoint(t *testing.T) {
 	logs := captureWarmLog(t)
 	l20, l21, l22 := newRecordedLane(t, nil, "lane-2.0-certify-warm"), newRecordedLane(t, nil, "lane-2.1-certify-warm"), newRecordedLane(t, nil, "lane-2.2-certify-warm")
-	validators := certificationValidators(env(nil), config{FHIRCertifyURL21: l21.URL + "/fhir", FHIRCertifyURL22: l22.URL + "/fhir"}, l20.URL+"/fhir", nil, nil)
+	validators := map[string]shnsdk.Validator{
+		"2.0": engine.NewCertificationOperationValidator(l20.URL + "/fhir"),
+		"2.1": engine.NewCertificationOperationValidator(l21.URL + "/fhir"),
+		"2.2": engine.NewCertificationOperationValidator(l22.URL + "/fhir"),
+	}
 	defer engine.CloseCertificationClients(validators)
 
 	warmCertification(t.Context(), validators)
@@ -145,6 +150,29 @@ func TestWarmCertification_SendsOneBundlePerConfiguredEndpoint(t *testing.T) {
 		if e["state"] != "answered" || e["attempts"] != float64(1) || e["host"] != "127.0.0.1" {
 			t.Errorf("%s log %v, want answered after 1 request from host 127.0.0.1", line, e)
 		}
+	}
+}
+
+// Of the addresses a gateway is given, the warm-up sends its bundle only to the
+// 2.0 validator: a 2.1 or 2.2 address certifies only once it has passed its own
+// qualification, which posts the whole readiness corpus to it, so the warm-up
+// leaves it alone.
+func TestWarmCertification_SkipsAddressesQualifiedByTheCorpus(t *testing.T) {
+	logs := captureWarmLog(t)
+	l20, l21, l22 := newRecordedLane(t, nil, "lane-2.0-certify-warm"), newWarmLane(t, answers), newWarmLane(t, answers)
+	validators := certificationValidators(env(nil), config{FHIRCertifyURL21: l21.URL + "/fhir", FHIRValidateURL22: l22.URL + "/fhir"}, l20.URL+"/fhir", nil, nil)
+	defer engine.CloseCertificationClients(validators)
+
+	warmCertification(t.Context(), validators)
+
+	if got := l20.posts.Load(); got != 1 {
+		t.Errorf("2.0 validator got %d warm-up requests, want 1", got)
+	}
+	if got21, got22 := l21.got(), l22.got(); len(got21) != 0 || len(got22) != 0 {
+		t.Errorf("gated addresses got warm-up requests: 2.1 %+v, 2.2 %+v", got21, got22)
+	}
+	if got := logs(); len(got) != 1 || got["2.0"] == nil {
+		t.Errorf("logged %v, want one line, for 2.0", got)
 	}
 }
 
@@ -209,7 +237,7 @@ func TestWarmCertification_UsesItsOwnClientAndSkipsDefaultLanes(t *testing.T) {
 }
 
 // Shutdown interrupts a request in flight: the warm-up returns well inside the
-// certification client's 2 s timeout and says it stopped.
+// certification client's 2.5 s timeout and says it stopped.
 func TestWarmCertification_ShutdownInterruptsARequestInFlight(t *testing.T) {
 	logs := captureWarmLog(t)
 	received := make(chan struct{})
@@ -286,7 +314,7 @@ func TestStartWorkers_CertificationWarmDoesNotDelayStart(t *testing.T) {
 	var stop func()
 	select {
 	case stop = <-returned:
-	case <-time.After(time.Second): // well inside one 2 s certification request
+	case <-time.After(time.Second): // well inside one 2.5 s certification request
 		t.Fatal("startWorkers waited on the certification warm-up")
 	}
 	select {

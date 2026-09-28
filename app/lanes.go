@@ -4,9 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
 	"net/url"
 	"strings"
 	"sync"
@@ -169,57 +167,8 @@ func discoverValidatorLanes(ctx context.Context, getenv func(string) string, dec
 	return lanes, m, nil
 }
 
-// qualifyDefaultLane waits only for a bounded FHIR metadata response before the
-// single finite corpus. Metadata availability never grants lane readiness.
+// qualifyDefaultLane is the qualification a default lane passes before routing
+// admits it (engine.QualifyValidatorLane).
 func qualifyDefaultLane(ctx context.Context, base, line string) error {
-	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	defer client.CloseIdleConnections()
-	// The last metadata attempt's outcome, so a lane that never answers fails
-	// naming why (its name does not resolve, it refuses), not only that time ran out.
-	var last error
-	for {
-		probeCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
-		req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, strings.TrimRight(base, "/")+"/metadata", nil)
-		if err != nil {
-			cancel()
-			return err
-		}
-		resp, err := client.Do(req)
-		if err != nil && ctx.Err() == nil {
-			// Kept only while the budget runs: the attempt the budget cuts off
-			// says nothing about the lane.
-			last = err
-		}
-		if err == nil {
-			body, readErr := io.ReadAll(io.LimitReader(resp.Body, (4<<20)+1))
-			resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				var metadata struct {
-					ResourceType string `json:"resourceType"`
-					FHIRVersion  string `json:"fhirVersion"`
-				}
-				if readErr != nil || len(body) > 4<<20 || json.Unmarshal(body, &metadata) != nil || metadata.ResourceType != "CapabilityStatement" || !strings.HasPrefix(metadata.FHIRVersion, "4.0.") {
-					cancel()
-					return lanequalify.ErrNotR4Metadata
-				}
-				cancel()
-				if err := lanequalify.Warm(ctx, strings.TrimRight(base, "/"), line, nil); err != nil {
-					return fmt.Errorf("%w: %w", lanequalify.ErrCorpus, err)
-				}
-				return nil
-			}
-			last = &lanequalify.MetadataStatusError{Status: resp.StatusCode}
-		}
-		cancel()
-		timer := time.NewTimer(time.Second)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			if last != nil {
-				return fmt.Errorf("metadata unavailable: %w: %w", last, ctx.Err())
-			}
-			return fmt.Errorf("metadata unavailable: %w", ctx.Err())
-		case <-timer.C:
-		}
-	}
+	return engine.QualifyValidatorLane(ctx, base, line)
 }

@@ -12,6 +12,9 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"regexp"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,9 +22,15 @@ import (
 )
 
 const (
-	certificationQueueCapacity     = 32
-	certificationRingCapacity      = 256
-	certificationCandidateTimeout  = 2 * time.Second
+	certificationQueueCapacity    = 32
+	certificationRingCapacity     = 256
+	certificationCandidateTimeout = 2 * time.Second
+	// certificationClientTimeout bounds the certification client's own dial,
+	// handshake, response header and whole request. It is longer than a
+	// candidate's time, so a lane that does not answer is always cut off by
+	// the candidate's context first, and the certification is recorded
+	// expired, never by the client's own timer racing it.
+	certificationClientTimeout     = certificationCandidateTimeout + 500*time.Millisecond
 	certificationCollectionTimeout = 6 * time.Second
 	certificationQueueMaxAge       = 30 * time.Second
 )
@@ -121,6 +130,11 @@ func (g *Gateway) startCertification() {
 	w := &certificationWorker{queue: make([]certificationJob, 0, certificationQueueCapacity), notices: make([]certificationNotice, 0, certificationRingCapacity), wake: make(chan struct{}, 1), ctx: ctx, cancel: cancel, done: make(chan struct{}), changed: make(chan struct{}), validators: make(map[string]shnsdk.Validator)}
 	for line, v := range g.cfg.CertificationValidatorsByLine {
 		w.validators[line] = v
+		// A gated client qualifies its lane only now that evidence is
+		// collected; constructed, it dials nothing.
+		if gated, ok := v.(interface{ Start() }); ok {
+			gated.Start()
+		}
 	}
 	g.certification = w
 	go g.runCertification(w)
@@ -289,7 +303,10 @@ func (g *Gateway) collectCertification(w *certificationWorker, job certification
 			v.State = "unavailable"
 			v.Error = "certification validator unavailable"
 		default:
-			candidate, cancel := context.WithTimeout(ctx, certificationCandidateTimeout)
+			// The candidate carries the collection's own context, so a client can
+			// tell the candidate's time running out (the lane did not answer)
+			// from the collection's (the caller gave up).
+			candidate, cancel := context.WithTimeout(context.WithValue(ctx, certificationCollectionKey{}, ctx), certificationCandidateTimeout)
 			result, err := w.validators[line].Validate(candidate, job.payload, profile)
 			contextErr := candidate.Err()
 			cancel()
@@ -312,13 +329,196 @@ func (g *Gateway) collectCertification(w *certificationWorker, job certification
 				v.Valid = true
 				e.Certified = append(e.Certified, line)
 			default:
-				v.State = "invalid"
+				if systems, unchecked := certificationUnchecked(result, job.payload, line, profile); unchecked {
+					// The lane could not check the payload's terminology: no verdict
+					// on the payload, so unavailable, never invalid and never valid.
+					v.State = "unavailable"
+					v.Error = terminologyUnavailableReason(systems)
+				} else {
+					v.State = "invalid"
+				}
 			}
 		}
 		e.Verdicts = append(e.Verdicts, v)
 	}
 	e.SourceLine = certificationSource(e.Certified, e.TargetLine)
 	return e
+}
+
+// uncheckedCodeSystemShapes are the passed-through terminology verdicts that
+// say the validator could not check a code system at all: it does not hold
+// the code system, so it can neither expand a value set drawn from it nor
+// check a code in it. Each shape is the real lanes' own, on every PAS request
+// bundle (the licensed X12 code systems no lane loads), and on a 2.0 lane on a
+// CRD code system it does not load. Unknown code '<system>#<code>' is not one
+// of them: the validator holds that code system, and the code is not in it.
+var uncheckedCodeSystemShapes = []*regexp.Regexp{
+	regexp.MustCompile(`^CodeSystem is unknown and can't be validated: (\S+) for '`),
+	regexp.MustCompile(`^Unable to expand ValueSet because CodeSystem could not be found: (\S+?)(?: \(validating against |$)`),
+}
+
+// uncheckedCodeSystem is the code system an error issue says the validator
+// could not check, if it says so, and whether it says the validator could not
+// expand the bound value set for want of it (the second shape): only then is
+// the required-binding miss on that element undecidable too. "CodeSystem is
+// unknown" alone says only that the coding's own system is unknown; the value
+// set may be drawn from systems the validator holds, and a code from an
+// unknown system is then a miss it did decide.
+func uncheckedCodeSystem(iss shnsdk.Issue) (system string, unexpandable bool, ok bool) {
+	if iss.Severity != "error" || iss.MessageID != "Terminology_PassThrough_TX_Message" {
+		return "", false, false
+	}
+	for i, shape := range uncheckedCodeSystemShapes {
+		if m := shape.FindStringSubmatch(iss.Diagnostics); m != nil {
+			return m[1], i == 1, true
+		}
+	}
+	return "", false, false
+}
+
+// missedCodingsTail is how a required-binding miss's diagnostics end after its
+// code list: the list's own ")" and, when the validator checked the resource
+// against a profile it names, that attribution.
+var missedCodingsTail = regexp.MustCompile(`^(?s)(.*)\)(?: \(validating against \S+ \[[^\]]*\]\))?$`)
+
+// missedCodingSystems is the code system of every code a required-binding
+// miss on a CodeableConcept names: "... (codes = <system>#<code>[,
+// <system>#<code>]) [(validating against ...)]". The list runs to the ")"
+// that closes it at the end of the diagnostics, so a ")" inside a code stays
+// in the code. ok is false when the list cannot be read unambiguously: no list
+// or more than one, a tail in another shape, or a code without a system.
+func missedCodingSystems(diagnostics string) (systems []string, ok bool) {
+	const open = "(codes = "
+	if strings.Count(diagnostics, open) != 1 {
+		return nil, false
+	}
+	m := missedCodingsTail.FindStringSubmatch(diagnostics[strings.Index(diagnostics, open)+len(open):])
+	if m == nil || m[1] == "" {
+		return nil, false
+	}
+	for _, coding := range strings.Split(m[1], ", ") {
+		// A code is its system, "#" and the code: the last "#" ends the system,
+		// so a system canonical carrying a fragment keeps it.
+		hash := strings.LastIndex(coding, "#")
+		if hash <= 0 {
+			return nil, false
+		}
+		systems = append(systems, coding[:hash])
+	}
+	return systems, true
+}
+
+// certificationUnchecked reads an invalid certification result: true when
+// the lane could not check the payload's terminology and found nothing else.
+// Every error and fatal issue must be one of:
+//   - a passed-through verdict that the validator could not check a code
+//     system (uncheckedCodeSystem);
+//   - the required-binding miss that follows from it on the same element
+//     (Terminology_TX_NoValid_1_CC), when for every code it names the
+//     validator said on that element that it could not expand the bound value
+//     set for want of that code's system (missedCodingSystems);
+//   - a no-match summary or PAS slice-match consequence that follows from
+//     those alone, read exactly as the structural level reads them
+//     (allExcused), on an entry that carries such terminology itself.
+//
+// Anything else — a structural error, an invariant, a code the validator
+// checked and did not find, a binding miss on a code system it holds, a fatal
+// issue, an unidentified issue — keeps the answer a verdict: invalid. systems
+// is every code system the lane could not check, sorted.
+func certificationUnchecked(res shnsdk.Result, body []byte, line, profile string) (systems []string, ok bool) {
+	errs := fhirErrors(res)
+	if len(errs) == 0 {
+		return nil, false
+	}
+	unexpandableAt := map[string]map[string]bool{} // element → code systems a value set there could not be expanded for
+	named := map[string]bool{}
+	for i, e := range errs {
+		system, unexpandable, ok := uncheckedCodeSystem(e.Issue)
+		if !ok {
+			continue
+		}
+		if at := strings.Join(e.Expression, "\x00"); unexpandable {
+			if unexpandableAt[at] == nil {
+				unexpandableAt[at] = map[string]bool{}
+			}
+			unexpandableAt[at][system] = true
+		}
+		named[system] = true
+		errs[i].excused = true
+	}
+	for i, e := range errs {
+		if e.excused || e.Severity != "error" || e.MessageID != "Terminology_TX_NoValid_1_CC" || len(e.Expression) == 0 {
+			continue
+		}
+		systems, ok := missedCodingSystems(e.Diagnostics)
+		if !ok {
+			continue
+		}
+		atElement := unexpandableAt[strings.Join(e.Expression, "\x00")]
+		all := true
+		for _, system := range systems {
+			all = all && atElement[system]
+		}
+		errs[i].excused = all
+	}
+	// A summary or slice-match consequence is excused only by the unchecked
+	// terminology on its own entry: an entry with none has no such cause.
+	unchecked := map[int]bool{}
+	for _, e := range errs {
+		if e.excused {
+			unchecked[e.entry] = true
+		}
+	}
+	if !allExcused(errs, body, line, profile) {
+		return nil, false
+	}
+	for _, e := range errs {
+		if !unchecked[e.entry] {
+			return nil, false
+		}
+	}
+	for system := range named {
+		systems = append(systems, system)
+	}
+	sort.Strings(systems)
+	return systems, true
+}
+
+// terminologyUnavailableReason is the unavailable verdict's authored reason,
+// naming the code systems the lane could not check (namedCodeSystem). At
+// most two are named, so the reason stays under 256 bytes.
+func terminologyUnavailableReason(systems []string) string {
+	const maxNamed = 2
+	names := make([]string, 0, maxNamed)
+	for _, system := range systems {
+		if len(names) == maxNamed {
+			break
+		}
+		names = append(names, namedCodeSystem(system))
+	}
+	reason := "terminology unavailable: " + strings.Join(names, ", ")
+	if more := len(systems) - len(names); more > 0 {
+		reason += fmt.Sprintf(" and %d more", more)
+	}
+	return reason
+}
+
+// x12CodeSystem is the shape of an X12 code system canonical: X12's host and
+// two numeric segments (a version and a code list). Such a name identifies
+// public, licensed terminology and has room for nothing else.
+var x12CodeSystem = regexp.MustCompile(`^https://codesystem\.x12\.org/[0-9]{1,8}/[0-9]{1,8}$`)
+
+// namedCodeSystem is how an unavailable verdict names a code system. The name
+// comes from a validator's diagnostics, quoting the payload's own coding, so
+// it is written as it is only when it is an X12 code system canonical
+// (x12CodeSystem); any other is written as its size and digest, like every
+// other diagnostic the evidence keeps.
+func namedCodeSystem(system string) string {
+	if x12CodeSystem.MatchString(system) {
+		return system
+	}
+	hash := sha256.Sum256([]byte(system))
+	return fmt.Sprintf("code system bytes=%d sha256=%x", len(system), hash)
 }
 
 // External diagnostic strings can contain entire foreign resources. Retain only
@@ -398,11 +598,17 @@ func (g *Gateway) waitCertification(ctx context.Context) error {
 // server execution failures remain unavailable even when their OperationOutcome
 // parses as an invalid result under the separate routing client's contract.
 func NewCertificationOperationValidator(endpoint string) *shnsdk.OperationValidator {
-	transport := &http.Transport{Proxy: http.ProxyFromEnvironment, DialContext: (&net.Dialer{Timeout: certificationCandidateTimeout, KeepAlive: 30 * time.Second}).DialContext, MaxIdleConns: 1, MaxIdleConnsPerHost: 1, MaxConnsPerHost: 1, IdleConnTimeout: 30 * time.Second, TLSHandshakeTimeout: certificationCandidateTimeout, ResponseHeaderTimeout: certificationCandidateTimeout}
-	return &shnsdk.OperationValidator{BaseURL: endpoint, Client: &http.Client{Transport: certificationTransport{transport}, Timeout: certificationCandidateTimeout}}
+	dialer := &net.Dialer{Timeout: certificationClientTimeout, KeepAlive: 30 * time.Second}
+	transport := &http.Transport{Proxy: http.ProxyFromEnvironment, DialContext: dialer.DialContext, MaxIdleConns: 1, MaxIdleConnsPerHost: 1, MaxConnsPerHost: 1, IdleConnTimeout: 30 * time.Second, TLSHandshakeTimeout: certificationClientTimeout, ResponseHeaderTimeout: certificationClientTimeout}
+	return &shnsdk.OperationValidator{BaseURL: endpoint, Client: &http.Client{Transport: certificationTransport{inner: transport, dialer: dialer}, Timeout: certificationClientTimeout}}
 }
 
-type certificationTransport struct{ inner *http.Transport }
+// certificationTransport is the certification client's transport; dialer is
+// the one its inner transport dials with, kept so its limits can be read.
+type certificationTransport struct {
+	inner  *http.Transport
+	dialer *net.Dialer
+}
 
 func (t certificationTransport) CloseIdleConnections() { t.inner.CloseIdleConnections() }
 func (t certificationTransport) RoundTrip(r *http.Request) (*http.Response, error) {
@@ -441,6 +647,10 @@ func (t certificationTransport) RoundTrip(r *http.Request) (*http.Response, erro
 	response.Body = io.NopCloser(bytes.NewReader(raw))
 	return response, nil
 }
+
+// certificationCollectionKey carries a collection's own context (its deadline
+// and the worker's shutdown) on each candidate's context (callerGaveUp).
+type certificationCollectionKey struct{}
 
 // certificationTargetKey carries a write-only observation of the selected token
 // through the existing dispatch; the collector never supplies a routing input.

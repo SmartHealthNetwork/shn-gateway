@@ -235,7 +235,7 @@ See [INTEGRATION.md](INTEGRATION.md) for how these fit together.
 
 | Env var | Description |
 |---|---|
-| `ORIGINATION_PROFILE` | provider. Set to `provider-data` to originate every prior-auth UC off your seeded FHIR system of record and drive real payer verdicts — the config-only provider lane, no custom code. `demo` originates the shipped demo order set instead. Both lanes answer a REAL payer's questionnaire, so both require `PROVIDER_DTR_POPULATE_URL` (the operated `$populate` endpoint, validated at boot). |
+| `ORIGINATION_PROFILE` | provider. Set to `provider-data` to originate every prior-auth UC off your seeded FHIR system of record and drive real payer verdicts — the config-only provider lane, no custom code. `demo` originates the shipped demo order set instead. Both lanes answer a REAL payer's questionnaire, so both require `PROVIDER_DTR_POPULATE_URL` (the operated `$populate` endpoint, validated at boot). Unset means `demo`. From shn-gateway v0.57.0 any other value refuses to boot, on every role, with an error naming the accepted values; that includes `demo` or `provider-data` in another case or with surrounding whitespace, since the value is matched exactly. Earlier releases accepted an unknown value and built the requests the gateway originates on no known lane. |
 | `FHIR_DATA_URL` | FHIR R4 base URL for your system of record. **Required on every role.** The gateway reads its members, coverage and clinical facts from your own FHIR server; there is no built-in persona stub any more, so an unset value is a boot error naming this variable. |
 | `FHIR_TOKEN_URL` | SMART Backend Services token endpoint, if your FHIR server requires authenticated access. Requires the client credential block below. |
 | `FHIR_CLIENT_ID` | SMART client id. |
@@ -1034,10 +1034,20 @@ address for that line and changes nothing about routing, so a gateway can record
 verdicts while it stays a 2.0 gateway. The evidence uses, in order, `FHIR_CERTIFY_URL_<line>`,
 then `FHIR_VALIDATE_URL_<line>`, then the Compose default once it has qualified — by
 routing's attempt at boot, or by the evidence's own: the evidence tries the default in a
-background loop of its own (first attempt 15 s after boot, then every 15 s for the first
-hour, then every 5 min, stopping at the first success from either side), so a validator that
-comes up after boot is certified against within one interval of coming up, and routing's
-lanes never change because of it. No exchange waits on that: a line whose default has not
+background loop of its own, started only where certification evidence is collected (never
+at `CONFORMANCE_ENFORCEMENT=none`; first attempt 15 s after boot, stopping at the first
+success from either side), so a validator that comes up after boot is certified against
+within one interval of coming up, and routing's lanes never change because of it. What that
+loop sends a validator that is not up: each attempt lasts up to 60 s and, until the
+validator's `GET /metadata` answers `200`, repeats that request about once a second (each
+request waits up to 4 s, then 1 s passes before the next), so an address that refuses the
+connection, does not resolve or answers another status gets about one request per second,
+and one that accepts the connection but never answers about one every 5 s. Between attempts
+the loop pauses 15 s during the first hour after it starts, then 5 min. So for the first hour
+the validator gets requests during about 60 s of every 75 s, and afterwards during 60 s of
+about every 6 min. A metadata `200` ends the probing: when it is a readable R4
+CapabilityStatement of at most 4 MiB the attempt then posts the readiness corpus once, and
+passes or fails; any other `200` fails the attempt. No exchange waits on that: a line whose default has not
 qualified records its verdict as `certification validator unavailable: FHIR_CERTIFY_URL_<line>
 and FHIR_VALIDATE_URL_<line> are not configured; default lane qualification pending` (or
 `… failed, retrying` after a failed attempt) and dials nothing for that exchange; routing's boot
@@ -1049,6 +1059,37 @@ own words: `name does not resolve`, `name lookup failed`, `connection refused`,
 `metadata answered HTTP <status>`, `metadata is not an R4 CapabilityStatement`,
 `qualification corpus did not pass`, `no answer within the qualification budget`,
 `qualification stopped` or `qualification did not pass`. Never a validator's answer.
+From shn-gateway v0.57.0 an address set by either key for 2.1 or 2.2 is gated the same way,
+on its own qualification by the same corpus: a validator still warming answers errors about
+itself (on the 2.2 line, `SLICING_CANNOT_BE_EVALUATED` the first time it meets a PAS answer),
+not about the message. Its loop starts at boot where certification evidence is collected
+(never at `none`, where the address is never dialed), with no 15 s wait, and sends the same
+traffic on the same schedule afterwards (as described above); until an attempt passes, the line records `certification validator unavailable:
+lane not qualified; qualification pending` (or `…; qualification failed, retrying`) and dials
+nothing for that exchange, and the loop logs `certification_lane_qualification` lines as
+above. The gate re-qualifies after a lane stops answering: once a 2.1 or 2.2 lane (a default or an
+address) has qualified, a certification it fails at the connection (the lane refuses, resets or
+closes the connection, cannot be reached, or does not answer within the certification's 2 s
+while the collection is still waiting) records `… lane not qualified; re-qualifying`, or for a
+default lane `…; default lane re-qualifying`. A certification the lane did not answer in time is
+itself recorded `expired`, since the certification client's own limits are 2.5 s and the
+certification's 2 s always runs out first. Either way the lane is qualified again, routing's own
+qualification of a default lane no longer counting for the evidence; until that passes, the
+line records the same and dials nothing. A re-qualification starts at once, or 30 s after the
+previous one started if that was more recent. Only its start is limited: while the lane stays
+broken, its attempts follow the qualification's own schedule above, and that schedule starts
+over with each re-qualification: attempts of up to 60 s, probing metadata as described above, 15 s apart for the first hour after the
+re-qualification starts, then 5 min apart. An attempt whose metadata answers `200` with a readable R4
+CapabilityStatement runs the readiness corpus instead, so a lane that answers its metadata but fails the corpus is sent
+the corpus every 15 s or so for that hour. An answer, whatever it is, does not clear the qualification: a verdict,
+valid or invalid, is recorded as such, and a 5xx or an answer that is not an OperationOutcome
+marks only that certification `unavailable`. Nor does a certification abandoned because the
+collection's own time ran out (its 6 s, or its 30 s in the queue) or the gateway is shutting
+down: that certification is `expired`. A lane restarted between two certifications, with no failure in
+between, is not detected. The validator at such an address must pass the readiness corpus the packaged validator
+image passes; one that never does keeps the line `unavailable`. The qualification never makes
+a certify-only address a routing lane. The 2.0 line certifies on the gateway's own validator
+(`FHIR_VALIDATE_URL` or discovery) without this qualification.
 Where the default name does not resolve (any deployment that is not the Compose stack), set
 one of the two keys for each line to get a verdict. Set `FHIR_DEFAULT_VALIDATOR_LANES=none`
 so the gateway never probes the default names at all. A line with neither key then records
@@ -1066,7 +1107,32 @@ failed request is sent again right away, so an address that is not yet listening
 immediate refusals. It logs one `certification_warm` line per address with its `line`, the `host` it
 dials, `state` (`answered`, `unanswered` or `stopped`), `attempts` and `duration_ms`, never a
 validator's answer. A Compose default lane is not sent one: its qualification already sends it
-the readiness corpus.
+the readiness corpus. From shn-gateway v0.57.0 only the 2.0 validator is sent one: a 2.1 or 2.2
+address is gated on its own qualification, which already sends it the readiness corpus.
+
+A line's verdict in a `certify:` line is `valid`, `invalid`, `unavailable` or `expired`; only a
+`valid` line is listed in `certified`, and `sourceLine` is chosen from those alone. From
+shn-gateway v0.57.0, when every error a validator reports is terminology it could not check (a
+code system it does not hold, such as the licensed X12 code systems no validator lane loads:
+the passed-through "CodeSystem is unknown and can't be validated" and "Unable to expand
+ValueSet because CodeSystem could not be found"; the required-binding miss on that same
+element when that element also says the value set could not be expanded for want of the code
+system of each code the miss names; on any line, a Bundle entry's no-match summaries
+(`BUNDLE_BUNDLE_ENTRY_MULTIPLE_PROFILES_NO_MATCH`, `Validation_VAL_Profile_NoMatch`) when every
+other error on that entry is one of these; and on the 2.1 and 2.2 lines only, in a Bundle checked
+against or declaring the PAS request-bundle profile, on a Claim entry whose `meta.profile` names
+at most one of the two PAS Claim profiles and agrees with `Claim.related` (present on an
+update, absent on a submit), the Claim's match of neither Claim profile: the no-match summaries
+naming exactly those two profiles and the other profile's own cardinality minimums and
+maximums (on any element), attributed to it alone. In every case the entry must itself carry terminology the
+validator could not check), the verdict is `unavailable` with `error` `terminology unavailable: <code system>`,
+not `invalid`: the validator reached no verdict on the message. Any other error keeps it
+`invalid`: a structural error, a failed invariant, a code the validator checked and did not
+find (`Unknown code`), a required-binding miss on a code system it holds or under a value set
+it could expand (a code from a system it does not know, where the value set is drawn from
+systems it does), or a fatal issue. A
+code system is named as written only when it is an X12 code system canonical
+(`https://codesystem.x12.org/<version>/<list>`); any other is named by its size and SHA-256.
 
 **One validator per line — this is not optional.** A FHIR server loads exactly **one**
 version of a given IG package, so a single HAPI cannot host CRD 2.0.1 and CRD 2.2.1 at the
@@ -1077,7 +1143,8 @@ The gateway resolves explicit per-line override first, then the existing canonic
 endpoint, then the Compose default. Kit child ports and hosted service addresses
 continue to come from their existing launcher wiring; they need not use Compose DNS.
 Malformed override URLs refuse startup. Explicit endpoints keep their existing
-startup behavior; setting an override does not trigger synthetic qualification.
+startup behavior for routing; setting an override does not trigger synthetic qualification of
+the routing lane (the certification evidence qualifies a 2.1 or 2.2 address on its own, above).
 
 A newly defaulted declared CRD, DTR or PAS line must pass the complete finite
 synthetic qualification before the gateway serves traffic, even when it is the

@@ -1,7 +1,7 @@
 {
   "name": "upd-accept-prior-claim-entry",
   "family": "update-bind",
-  "description": "The reference-payer lane appends the prior Claim as a resolvable bundle entry after the operative update Claim; the member binds from the operative (first) Claim, and the patient-less prior entry must not clobber it.",
+  "description": "Every amendment appends the prior Claim as a resolvable bundle entry after the operative update Claim; the member binds from the operative (first) Claim, and the patient-less prior entry must not clobber it (here the QR-targeted variant with absolute references).",
   "expect": "accept",
   "tokenMember": "MBR-COVERED",
   "originalCorr": "twinfence-sub-0001",
@@ -174,9 +174,9 @@
           "code": {
             "coding": [
               {
+                "system": "http://www.ama-assn.org/go/cpt",
                 "code": "72148",
-                "display": "MRI lumbar spine w/o contrast",
-                "system": "http://www.ama-assn.org/go/cpt"
+                "display": "MRI lumbar spine w/o contrast"
               }
             ]
           },
@@ -186,8 +186,8 @@
             {
               "coding": [
                 {
-                  "code": "M51.16",
-                  "system": "http://hl7.org/fhir/sid/icd-10-cm"
+                  "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                  "code": "M51.16"
                 }
               ]
             }
@@ -384,38 +384,6 @@
         }
       },
       {
-        "fullUrl": "https://shn.example/fhir/DiagnosticReport/convergence-dr-operative",
-        "resource": {
-          "category": [
-            {
-              "coding": [
-                {
-                  "code": "RAD",
-                  "display": "Radiology",
-                  "system": "http://terminology.hl7.org/CodeSystem/v2-0074"
-                }
-              ]
-            }
-          ],
-          "code": {
-            "coding": [
-              {
-                "code": "72148",
-                "display": "operative report",
-                "system": "http://www.ama-assn.org/go/cpt"
-              }
-            ]
-          },
-          "effectiveDateTime": "2026-05-15",
-          "id": "convergence-dr-operative",
-          "resourceType": "DiagnosticReport",
-          "status": "final",
-          "subject": {
-            "reference": "https://shn.example/fhir/Patient/MBR-COVERED"
-          }
-        }
-      },
-      {
         "fullUrl": "https://shn.example/fhir/Provenance/convergence-prov",
         "resource": {
           "agent": [
@@ -430,7 +398,7 @@
           "resourceType": "Provenance",
           "target": [
             {
-              "reference": "https://shn.example/fhir/DiagnosticReport/convergence-dr-operative"
+              "reference": "https://shn.example/fhir/QuestionnaireResponse/convergence-qr-amended"
             }
           ]
         }

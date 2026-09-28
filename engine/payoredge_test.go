@@ -39,7 +39,7 @@ var crdPartnerCoverageCard = []byte(`{"cards":[],"systemActions":[{"type":"updat
 // originator uses, in either the SDK's default shape (contained payor Org, a Claim.insurer
 // that resolves to nothing in the Bundle) or the conformant PayerOrgEntry shape (a
 // resolvable Organization bundle entry shared by Coverage.payor AND Claim.insurer).
-func conformantSubmitBundle(t *testing.T, payer shnsdk.PayerIdentifier, payerOrgEntry bool) []byte {
+func conformantSubmitBundle(t *testing.T, payer shnsdk.PayerIdentifier, absolute bool) []byte {
 	t.Helper()
 	sr := []byte(`{"resourceType":"ServiceRequest","id":"sr-x","status":"active","intent":"order","subject":{"reference":"Patient/MBR-1"},"code":{"coding":[{"system":"http://www.ama-assn.org/go/cpt","code":"72148","display":"MRI lumbar spine w/o contrast"}]}}`)
 	b, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{Coverage: testMemberCoverage("MBR-1"),
@@ -47,9 +47,12 @@ func conformantSubmitBundle(t *testing.T, payer shnsdk.PayerIdentifier, payerOrg
 		MemberIDSystem: shnsdk.MemberSystem,
 		SR:             sr, PatientRef: "Patient/MBR-1", CoverageRef: "Coverage/MBR-1", MemberID: "MBR-1",
 		Corr: "corr-payoredge", Created: time.Unix(1700000000, 0).UTC(),
-		ContainedInsurer: payerOrgEntry, AbsoluteRefs: payerOrgEntry, PayerOrgEntry: payerOrgEntry,
-		Insurer: testPayerOrganization(payer),
-		Payer:   payer,
+		AbsoluteRefs: absolute,
+		// The payer as a resolvable entry: required under this module's shn-sdk pin
+		// before v0.59.0, and what every request carries from v0.59.0 on.
+		PayerOrgEntry: true,
+		Insurer:       testPayerOrganization(payer),
+		Payer:         payer,
 	})
 	if err != nil {
 		t.Fatalf("conformantSubmitBundle: %v", err)
@@ -144,30 +147,67 @@ func mapPASBundle(t *testing.T, bundle []byte, own, backend shnsdk.PayerIdentifi
 	return relay.BytesForTest(p), lr
 }
 
-// The SDK's default shape: the Claim.insurer reference ("Organization/payer") resolves to
-// nothing in the Bundle, so the request is refused naming it rather than mapped around it.
+// A requester's bundle whose Claim.insurer reference ("Organization/payer") resolves to
+// nothing in the Bundle — a valid request with that one reference changed — is refused
+// naming it rather than mapped around it.
 func TestPayorEdgePASBundle_UnresolvedInsurerRefused(t *testing.T) {
-	bundle := conformantSubmitBundle(t, ownIdentity, false)
+	bundle := []byte(strings.Replace(string(conformantSubmitBundle(t, ownIdentity, false)),
+		`"insurer":{"reference":"Organization/org-cms-payer"}`, `"insurer":{"reference":"Organization/payer"}`, 1))
+	if !bytes.Contains(bundle, []byte(`"Organization/payer"`)) {
+		t.Fatal("fixture: the insurer reference was not changed")
+	}
 	_, lr := mapPASBundle(t, bundle, ownIdentity, backendIdentity)
 	if lr.Status != 422 || !strings.Contains(lr.Message, `"Organization/payer"`) {
 		t.Fatalf("an unresolved insurer reference must be refused naming it, got %d %q", lr.Status, lr.Message)
 	}
 }
 
-// The contained shape: the Coverage and the Claim each contain the payer Organization, so
-// both contained identifiers are mapped.
-func TestPayorEdgePASBundle_ContainedShape_Maps(t *testing.T) {
-	sr := []byte(`{"resourceType":"ServiceRequest","id":"sr-x","status":"active","intent":"order","subject":{"reference":"Patient/MBR-1"},"code":{"coding":[{"system":"http://www.ama-assn.org/go/cpt","code":"72148","display":"MRI lumbar spine w/o contrast"}]}}`)
-	bundle, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{Coverage: testMemberCoverage("MBR-1"),
-		Provider:       testRequestingProvider(),
-		MemberIDSystem: shnsdk.MemberSystem,
-		SR:             sr, PatientRef: "Patient/MBR-1", CoverageRef: "Coverage/MBR-1", MemberID: "MBR-1",
-		Corr: "corr-payoredge", Created: time.Unix(1700000000, 0).UTC(),
-		ContainedInsurer: true, Payer: ownIdentity,
-	})
+// containedPayerShape is a requester's request that carries its payer Organization
+// INSIDE the Coverage and the Claim instead of as an entry: the entry is removed and
+// each of the two resources contains the record and names it "#<id>". A peer may
+// author that shape; the SDK does not.
+func containedPayerShape(t *testing.T, bundle []byte) []byte {
+	t.Helper()
+	var b map[string]any
+	if err := json.Unmarshal(bundle, &b); err != nil {
+		t.Fatal(err)
+	}
+	var org map[string]any
+	var kept []any
+	for _, e := range b["entry"].([]any) {
+		res := e.(map[string]any)["resource"].(map[string]any)
+		if res["resourceType"] == "Organization" && res["id"] == "org-cms-payer" {
+			org = res
+			continue
+		}
+		kept = append(kept, e)
+	}
+	if org == nil {
+		t.Fatal("fixture: no payer Organization entry to contain")
+	}
+	for _, e := range kept {
+		res := e.(map[string]any)["resource"].(map[string]any)
+		switch res["resourceType"] {
+		case "Coverage":
+			res["contained"] = []any{org}
+			res["payor"] = []any{map[string]any{"reference": "#org-cms-payer"}}
+		case "Claim":
+			res["contained"] = []any{org}
+			res["insurer"] = map[string]any{"reference": "#org-cms-payer"}
+		}
+	}
+	b["entry"] = kept
+	out, err := json.Marshal(b)
 	if err != nil {
 		t.Fatal(err)
 	}
+	return out
+}
+
+// The contained shape: the Coverage and the Claim each contain the payer Organization, so
+// both contained identifiers are mapped.
+func TestPayorEdgePASBundle_ContainedShape_Maps(t *testing.T) {
+	bundle := containedPayerShape(t, conformantSubmitBundle(t, ownIdentity, false))
 	out, lr := mapPASBundle(t, bundle, ownIdentity, backendIdentity)
 	if lr.Status != 0 {
 		t.Fatalf("refused: %d %s", lr.Status, lr.Message)
@@ -601,7 +641,7 @@ func TestNativeInquire_PayorEdge_SeamOffAndRestamp(t *testing.T) {
 // update golden for the QR/DiagnosticReport/Provenance entries — their content is
 // irrelevant to the payor-edge seam; only Coverage.payor/Claim.insurer (and
 // Claim.related[prior], which BeginClaimUpdate keys on) matter here.
-func conformantUpdateBundle(t *testing.T, payer shnsdk.PayerIdentifier, payerOrgEntry bool, corr, originalCorr string) []byte {
+func conformantUpdateBundle(t *testing.T, payer shnsdk.PayerIdentifier, absolute bool, corr, originalCorr string) []byte {
 	t.Helper()
 	const member = "MBR-1"
 	created := time.Unix(1700000000, 0).UTC()
@@ -642,10 +682,13 @@ func conformantUpdateBundle(t *testing.T, payer shnsdk.PayerIdentifier, payerOrg
 		QR:             qrJSON, SR: sr, PatientRef: ref, CoverageRef: "Coverage/" + member, MemberID: member,
 		Provenance: provJSON, DiagnosticReport: drJSON,
 		Corr: corr, OriginalCorr: originalCorr,
-		Created:          created,
-		ContainedInsurer: payerOrgEntry, AbsoluteRefs: payerOrgEntry, PayerOrgEntry: payerOrgEntry,
-		Insurer: testPayerOrganization(payer),
-		Payer:   payer,
+		Created:      created,
+		AbsoluteRefs: absolute,
+		// The payer as a resolvable entry: required under this module's shn-sdk pin
+		// before v0.59.0, and what every request carries from v0.59.0 on.
+		PayerOrgEntry: true,
+		Insurer:       testPayerOrganization(payer),
+		Payer:         payer,
 	})
 	if err != nil {
 		t.Fatalf("conformantUpdateBundle: %v", err)

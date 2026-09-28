@@ -910,7 +910,7 @@ func TestOwnershipAndIdentifiers(t *testing.T) {
 			t.Errorf("Ownership(%d) = %q, want %q", o, o.String(), want)
 		}
 	}
-	if got := EditIDs(); !slices.Equal(got, []EditID{"E-01", "E-02", "E-03", "E-04", "E-05"}) {
+	if got := EditIDs(); !slices.Equal(got, []EditID{"E-01", "E-02", "E-03", "E-04", "E-05", "E-06"}) {
 		t.Fatalf("EditIDs = %v", got)
 	}
 	ids := EditIDs()
@@ -931,7 +931,7 @@ func TestBuilderSetIsClosed(t *testing.T) {
 	if !slices.Equal(registeredBuilders, want) {
 		t.Fatalf("registeredBuilders = %v", registeredBuilders)
 	}
-	wantInterim := []BuilderID{"defect-empty-error-substitution"}
+	wantInterim := []BuilderID{}
 	if !slices.Equal(interimBuilders, wantInterim) {
 		t.Fatalf("interimBuilders = %v", interimBuilders)
 	}

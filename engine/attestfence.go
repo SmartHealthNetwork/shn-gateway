@@ -25,17 +25,23 @@
 // expected to pass there; running it anyway is what keeps the property attached
 // to the QR item rather than to the leg that happens to carry one today.
 //
-// PARITY WITH THE PUBLISHED RESPONDER, EXACTLY: the standalone SDK Responder
-// applies the identical CHECK (sdk/responder.go), from the same vector corpus,
-// on the two legs it fences — pas-claim and pas-claim-update. It does NOT fence
-// its inquiry handler, so on the inquiry leg the two sides DIVERGE, and this
-// engine is the stricter one. That is the safe direction (an unattested QR item
-// reaching a payer is the hazard; a fence that passes an inquiry carrying none
-// costs nothing), so the engine is not loosened to match. It is recorded here
-// rather than left to be discovered because the shared corpus cannot catch it:
-// the corpus pins what each fence DECIDES about a bundle, and this is a
-// difference in WHICH LEGS each side dispatches the fence on — a property of the
-// two dispatch switches, which no vector can reach.
+// The attestation is the item's own content, so the fence is a content rule
+// (RuleAttestation): not run at none, recorded and carried at observe and
+// structural, refused only at strict, on every leg it is dispatched on. A
+// gateway that builds the item for its participant is held to what it may
+// fill at every level when it builds it (the attesting NPI is read from the
+// participant's system or the build refuses), not by this fence.
+//
+// PARITY WITH THE PUBLISHED RESPONDER: the standalone SDK Responder applies
+// the identical CHECK (sdk/responder.go), from the same vector corpus. The two
+// sides do not yet agree on dispatch: the Responder refuses at every level on
+// pas-claim and pas-claim-update and does not fence pas-claim-inquire. Its
+// alignment to this gateway's dispatch by level, on all three legs, is the
+// SDK's change.
+// The shared corpus pins what each fence DECIDES about a bundle; which legs
+// each side dispatches it on, and at which levels, is a property of the two
+// dispatch switches, which no vector can reach, so it is held here and by
+// each side's own level rows.
 //
 // It checks the SAME extension URLs the SDK
 // builders (shnsdk.BuildManualAttestedItem / BuildPatientAttestedItem) write —

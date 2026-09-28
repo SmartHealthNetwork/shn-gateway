@@ -73,9 +73,10 @@ func rebindPASPatient(t *testing.T, bundleJSON []byte, newID string) []byte {
 // TestTask0_ConformantGoldensBind is the FIRST oracle of the PA-contract convergence:
 // the hand-derived demo-persona conformant CRD order-select + PAS $submit goldens that the
 // Originator must learn to reproduce MUST subject-bind through the conformant parsers
-// the payer-side already runs (conformantCRDBind / parseConformantPASSubjects). These goldens are
-// the byte-pinned target the SDK builders byte-match against; if they don't bind here,
-// nothing downstream can. (The SECOND oracle — make validate on the SHN-produced resources — is run
+// the payer-side already runs (conformantCRDBind / parseConformantPASSubjects). The PAS golden
+// is the byte-pinned target the SDK claim builder byte-matches against, and the CRD golden is
+// the inbound request an EHR sends from its own records; if they don't bind here, nothing
+// downstream can. (The SECOND oracle — make validate on the SHN-produced resources — is run
 // out-of-band.)
 func TestTask0_ConformantGoldensBind(t *testing.T) {
 	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
@@ -131,7 +132,7 @@ func originatorBuiltConformantBundle(t *testing.T, member string) []byte {
 	if err != nil {
 		t.Fatalf("FillQuestionnaire: %v", err)
 	}
-	got, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{Coverage: testMemberCoverage(member),
+	got, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{Coverage: testMemberCoverage(member), Insurer: testPayerOrganization(shnsdk.CMSPayerIdentity),
 		Provider:       testRequestingProvider(),
 		MemberIDSystem: shnsdk.MemberSystem,
 		QR:             qrJSON,
@@ -222,7 +223,7 @@ func TestParseConformantPASSubjects_AbsoluteRefs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FillQuestionnaire: %v", err)
 	}
-	got, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{Coverage: testMemberCoverage(member),
+	got, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{Coverage: testMemberCoverage(member), Insurer: testPayerOrganization(shnsdk.CMSPayerIdentity),
 		Provider:         testRequestingProvider(),
 		MemberIDSystem:   shnsdk.MemberSystem,
 		QR:               qrJSON,
@@ -554,7 +555,7 @@ func conformantPASBundlePended(t *testing.T, member string) []byte {
 	if err != nil {
 		t.Fatalf("FillQuestionnaire: %v", err)
 	}
-	got, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{Coverage: testMemberCoverage(member),
+	got, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{Coverage: testMemberCoverage(member), Insurer: testPayerOrganization(shnsdk.CMSPayerIdentity),
 		Provider:       testRequestingProvider(),
 		MemberIDSystem: shnsdk.MemberSystem,
 		QR:             qrJSON,
@@ -582,8 +583,9 @@ func originatorBuiltConformantUpdateBundle(t *testing.T) []byte {
 }
 
 // originatorBuiltConformantUpdateBundleProfile builds the same bundle; when brPayer==true it
-// sets the br-payer-targeting flags (ContainedInsurer/AbsoluteRefs/PayerOrgEntry) so the refs are
-// absolutized exactly as the provider-data lane produces them for a real Da Vinci payer.
+// sets the br-payer-targeting flags (ContainedInsurer/AbsoluteRefs) so the refs are absolutized
+// exactly as the provider-data lane produces them for a real Da Vinci payer. The payer rides as a
+// resolvable entry either way.
 func originatorBuiltConformantUpdateBundleProfile(t *testing.T, brPayer bool) []byte {
 	t.Helper()
 	return originatorBuiltConformantUpdateBundleCorrs(t, brPayer, "convergence-pas-update-0001", "convergence-pas-submit-0001")
@@ -592,7 +594,7 @@ func originatorBuiltConformantUpdateBundleProfile(t *testing.T, brPayer bool) []
 // originatorBuiltConformantUpdateBundleCorrs is originatorBuiltConformantUpdateBundleProfile with
 // caller-chosen correlations: corr is THIS amendment's own correlation (the operative update
 // Claim's urn:shn:correlation identifier) and originalCorr is the original submit's — Claim.related
-// [prior], and, on the PayerOrgEntry lane, the sole identifier of the prior-Claim bundle ENTRY the
+// [prior], and the sole identifier of the prior-Claim bundle ENTRY the
 // sdk appends AFTER the operative Claim. Distinct values let a test tell the two apart on the wire.
 func originatorBuiltConformantUpdateBundleCorrs(t *testing.T, brPayer bool, corr, originalCorr string) []byte {
 	t.Helper()
@@ -649,9 +651,12 @@ func originatorBuiltConformantUpdateBundleCorrs(t *testing.T, brPayer bool, corr
 		Created:          created,
 		ContainedInsurer: brPayer,
 		AbsoluteRefs:     brPayer,
-		PayerOrgEntry:    brPayer,
-		Insurer:          testPayerOrganization(shnsdk.CMSPayerIdentity),
-		Payer:            shnsdk.CMSPayerIdentity,
+		// The payer as a resolvable entry on both profiles: required under this
+		// module's shn-sdk pin before v0.59.0, and what every request carries from
+		// v0.59.0 on.
+		PayerOrgEntry: true,
+		Insurer:       testPayerOrganization(shnsdk.CMSPayerIdentity),
+		Payer:         shnsdk.CMSPayerIdentity,
 	})
 	if err != nil {
 		t.Fatalf("BuildConformantClaimUpdateBundle: %v", err)

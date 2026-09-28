@@ -16,8 +16,8 @@ bash gateway/deploy/eval/brprovider/build.sh build            # image:, must exi
 # the other two things that boot that same file — a partner's `docker compose up` (README)
 # and the partner's own payer self-test (payer/smoke.sh) — which take the published default
 # of observe and see a partner's defect recorded, not refused. Both halves are pinned by
-# test/invariants' TestInvariant_EveryGateRunsStrict; do not move this export into the
-# compose, and do not add one to payer/smoke.sh.
+# the platform's invariants; do not move this export into the compose, and do not add one
+# to payer/smoke.sh.
 export CONFORMANCE_ENFORCEMENT=strict
 compose="docker compose -f gateway/deploy/eval/compose.eval.yml"
 # Register teardown BEFORE `up` so a failing build/up (which set -e aborts on) still tears

@@ -1,8 +1,8 @@
 # FR-G3 config-only validator sidecar: hapiproject/hapi + all eight FHIR IGs baked
 # OFFLINE (downloaded at build time, loaded at runtime from file://, no registry
-# egress at boot). Same pinned HAPI engine our conformance gates use, so what we
-# test is what partners deploy. Single-tenant $validate
-# only — NOT a SoR (no URL_BASED partitioning).
+# egress at boot). The HAPI engine is the same digest-pinned one the network's
+# conformance testing runs, so what is tested is what partners deploy.
+# Single-tenant $validate only — NOT a SoR (no URL_BASED partitioning).
 #
 # ARG SHN_IG_LINE selects which contract line's IG set is baked: "2.0" (default —
 # CMS-0057-F-aligned, unchanged from before the contract-version matrix), "2.1",
@@ -37,9 +37,9 @@ COPY go.mod *.go ./
 COPY testdata ./testdata
 # internal/ holds the recording replay helper the tests import.
 COPY internal ./internal
-# The module's tests run in CI's hermetic-modules shard (make
-# validator-module-tests), not here: a loaded build runner flaked their timing.
-# go vet compiles them.
+# The image build vets the module's tests (go vet compiles them) but does not
+# run them: a loaded build runner flaked their timing. Run them with
+# `GOWORK=off go test ./...` in this directory.
 RUN go vet ./... && CGO_ENABLED=0 go build -o /healthcheck .
 
 # Stage: download the 2.0-line IG packages (network at BUILD time only).

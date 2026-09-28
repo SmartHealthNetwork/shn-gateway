@@ -14,6 +14,8 @@ import (
 	"time"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
+
+	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 )
 
 // inboundTestRequester bundles the requester holder id (respondLegError's `requester`
@@ -260,6 +262,60 @@ func TestRespondLegErrorBareForLegacyRequester(t *testing.T) {
 	if len(got) != 1 || got["error"] != msg {
 		t.Fatalf("legacy body = %v, want exactly {\"error\": %q}", got, msg)
 	}
+}
+
+// TestRespondLegErrorLegacyRequesterNeverGetsParticipantBytes: a participant's
+// application error is never written bare to a requester that negotiated no
+// frame, since a bare answer reaches the payload-blind Hub unsealed. The
+// requester gets the status and the gateway's own refusal instead, whatever
+// the participant's body; an error payload the table does not admit is still
+// a local fault.
+func TestRespondLegErrorLegacyRequesterNeverGetsParticipantBytes(t *testing.T) {
+	const marker = "member-000-SYNTHETIC"
+	for _, row := range []struct {
+		name string
+		body string
+		ct   string
+	}{
+		{"FHIR error", `{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"invalid","diagnostics":"` + marker + `"}]}`, "application/fhir+json"},
+		{"untyped error", `{"message":"` + marker + `"}`, ""},
+		{"empty error", "", "text/plain"},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			g, requester := newInboundTestGateway(t, false)
+			rec := httptest.NewRecorder()
+			p := relay.Exact(relay.NewBody([]byte(row.body), relay.OriginUpstreamResponse), row.ct)
+			g.respondLegError(rec, newSignedInboundRequest(t, g, requester.ID), "payer-coverage", "pas-response", "pas-claim",
+				"corr-1", LegResult{Status: http.StatusUnprocessableEntity, Response: p}, "pci-1", requester.ID, "", "")
+			if rec.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("to-Hub status = %d, want 422 (bare non-2xx)", rec.Code)
+			}
+			if strings.Contains(rec.Body.String(), marker) {
+				t.Fatalf("the participant's bytes reached the Hub unsealed: %s", rec.Body.String())
+			}
+			if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+				t.Fatalf("Content-Type = %q, want application/json (the gateway's refusal)", ct)
+			}
+			var got map[string]string
+			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+				t.Fatalf("legacy body not valid JSON: %v (%s)", err, rec.Body.String())
+			}
+			if want := "pas-claim: recipient answered 422; its answer is carried only in a message frame"; len(got) != 1 || got["error"] != want {
+				t.Fatalf("legacy body = %v, want exactly {\"error\": %q}", got, want)
+			}
+		})
+	}
+	t.Run("a payload the table does not admit", func(t *testing.T) {
+		g, requester := newInboundTestGateway(t, false)
+		rec := httptest.NewRecorder()
+		p, err := relay.Authored(relay.BuilderCDexFulfillment, []byte(`{"error":"x"}`), "application/json")
+		if err != nil {
+			t.Fatal(err)
+		}
+		g.respondLegError(rec, newSignedInboundRequest(t, g, requester.ID), "payer-coverage", "crd-cards", "crd-order-select",
+			"corr-1", LegResult{Status: http.StatusUnprocessableEntity, Response: p}, "pci-1", requester.ID, "", "")
+		assertLocalFault(t, rec)
+	})
 }
 
 // TestRespondLegErrorNeverEmptyMessage_Framed is the fail-closed guard's pin, frame-capable

@@ -74,13 +74,13 @@ func pinnedOwnership() map[Key]Rule {
 		{"pas-claim-inquire", rc, resp, OutcomeAnswered}:       relayOnly,
 		{"pas-claim-update", rc, resp, OutcomeAnswered}:        {Allowed: own(R)},
 
-		{"coverage-eligibility", rc, resp, OutcomeUpstreamError}:    {Allowed: own(R, A), Builders: b("defect-empty-error-substitution")},
-		{"crd-order-dispatch", rc, resp, OutcomeUpstreamError}:      {Allowed: own(R, A), Builders: b("defect-empty-error-substitution")},
-		{"crd-order-select", rc, resp, OutcomeUpstreamError}:        {Allowed: own(R, A), Builders: b("defect-empty-error-substitution")},
-		{"dtr-questionnaire-fetch", rc, resp, OutcomeUpstreamError}: {Allowed: own(R, A), Builders: b("defect-empty-error-substitution")},
-		{"pas-claim", rc, resp, OutcomeUpstreamError}:               {Allowed: own(R, A), Builders: b("defect-empty-error-substitution")},
-		{"pas-claim-inquire", rc, resp, OutcomeUpstreamError}:       {Allowed: own(R, A), Builders: b("defect-empty-error-substitution")},
-		{"pas-claim-update", rc, resp, OutcomeUpstreamError}:        {Allowed: own(R, A), Builders: b("defect-empty-error-substitution")},
+		{"coverage-eligibility", rc, resp, OutcomeUpstreamError}:    relayOnly,
+		{"crd-order-dispatch", rc, resp, OutcomeUpstreamError}:      relayOnly,
+		{"crd-order-select", rc, resp, OutcomeUpstreamError}:        relayOnly,
+		{"dtr-questionnaire-fetch", rc, resp, OutcomeUpstreamError}: relayOnly,
+		{"pas-claim", rc, resp, OutcomeUpstreamError}:               relayOnly,
+		{"pas-claim-inquire", rc, resp, OutcomeUpstreamError}:       relayOnly,
+		{"pas-claim-update", rc, resp, OutcomeUpstreamError}:        relayOnly,
 	}
 	for _, leg := range []string{"", "coverage-eligibility", "crd-order-dispatch", "crd-order-select",
 		"dtr-questionnaire-fetch", "federated-query", "patient-dtr", "pas-claim", "pas-claim-inquire", "pas-claim-update"} {
@@ -245,9 +245,11 @@ func TestCheckRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	interim, err := Authored(BuilderInterimEmptyErrorSubstitution, []byte(`{}`), fhirJSON)
-	if err != nil {
-		t.Fatal(err)
+	// The retired empty-error substitution can no longer author a payload:
+	// no answer relayed as a participant's application error may carry the
+	// recipient's own body in its place.
+	if _, err := Authored(BuilderInterimEmptyErrorSubstitution, []byte(`{}`), fhirJSON); err == nil {
+		t.Fatal("the retired interim builder defect-empty-error-substitution still authors a payload")
 	}
 	exact := Exact(body, fhirJSON)
 	injected := ForTest([]byte(`{"x":1}`), fhirJSON)
@@ -270,8 +272,6 @@ func TestCheckRows(t *testing.T) {
 		{"unknown key", unknown, exact, false},
 		{"test payload on an unknown key", unknown, injected, false},
 		{"authored at a relay transmit", relayKey, submit, false},
-		{"interim builder where not listed", relayKey, interim, false},
-		{"interim builder at an authored transmit that does not list it", authoredKey, interim, false},
 		{"builder not listed", authoredKey, update, false},
 		{"relayed at an authored transmit", authoredKey, exact, false},
 		{"edit not listed", edited, strip, false},

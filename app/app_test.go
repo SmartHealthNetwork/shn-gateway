@@ -1180,6 +1180,108 @@ func TestLoadConfig_UnsetOriginationProfileNormalizesToDemo(t *testing.T) {
 	}
 }
 
+// TestLoadConfig_RefusesUnknownOriginationProfile: ORIGINATION_PROFILE takes only the
+// lanes the engine implements. Any other value — a retired lane name, a typo, or a known
+// name in another case or with surrounding whitespace (the value is compared exactly,
+// never folded) — would reach the engine as a lane no origination path recognises, and
+// the PAS request it built would carry a payer Organization the payer's own system never
+// supplied. The gateway refuses to boot instead, on every role, naming the accepted
+// values. PROVIDER_DTR_POPULATE_URL is set so the refusal is this guard's, not the
+// operated-$populate requirement's.
+func TestLoadConfig_RefusesUnknownOriginationProfile(t *testing.T) {
+	unknown := []string{
+		"relay-only", "unknown-lane", "payer-data", "provider_data", "provider",
+		"Demo", "DEMO", "Provider-Data",
+		" demo", "demo ", "\tprovider-data\n", " ",
+	}
+	for _, role := range []string{"provider", "payer", "facility", "phg"} {
+		for _, v := range unknown {
+			t.Run(role+"/"+v, func(t *testing.T) {
+				e := map[string]string{
+					"ROLE":                      role,
+					"SHN_SECRETS":               "/x",
+					"SHN_DISCOVERY_URL":         "https://d",
+					"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate",
+					"ORIGINATION_PROFILE":       v,
+				}
+				_, err := loadConfig(env(e))
+				want := fmt.Sprintf("gateway: invalid ORIGINATION_PROFILE %q (must be demo|provider-data, or unset)", v)
+				if err == nil || err.Error() != want {
+					t.Fatalf("ORIGINATION_PROFILE=%q on ROLE=%s: err = %v, want %q", v, role, err, want)
+				}
+			})
+		}
+	}
+}
+
+// TestLoadConfig_AcceptedOriginationProfilesBoot: the accepted values, and unset, still
+// load on every role — unset on ROLE=provider as the normalized "demo", unset on any
+// other role as unset (those roles originate nothing).
+func TestLoadConfig_AcceptedOriginationProfilesBoot(t *testing.T) {
+	for _, tc := range []struct{ role, value, want string }{
+		{"provider", "", "demo"},
+		{"provider", "demo", "demo"},
+		{"provider", "provider-data", "provider-data"},
+		{"payer", "", ""},
+		{"payer", "demo", "demo"},
+		{"payer", "provider-data", "provider-data"},
+		{"facility", "", ""},
+		{"facility", "demo", "demo"},
+		{"facility", "provider-data", "provider-data"},
+		{"phg", "", ""},
+		{"phg", "demo", "demo"},
+		{"phg", "provider-data", "provider-data"},
+	} {
+		t.Run(tc.role+"/"+tc.value, func(t *testing.T) {
+			e := map[string]string{
+				"ROLE":                      tc.role,
+				"SHN_SECRETS":               "/x",
+				"SHN_DISCOVERY_URL":         "https://d",
+				"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate",
+			}
+			if tc.value != "" {
+				e["ORIGINATION_PROFILE"] = tc.value
+			}
+			cfg, err := loadConfig(env(e))
+			if err != nil {
+				t.Fatalf("ORIGINATION_PROFILE=%q on ROLE=%s: %v", tc.value, tc.role, err)
+			}
+			if cfg.OriginationProfile != tc.want {
+				t.Fatalf("OriginationProfile = %q, want %q", cfg.OriginationProfile, tc.want)
+			}
+		})
+	}
+}
+
+// TestLoadConfig_SetButEmptyOriginationProfileIsUnset documents ORIGINATION_PROFILE set
+// to the empty string: "demo" on ROLE=provider, unset on every other role, never
+// refused. getenv cannot tell set-but-empty from unset (the binary reads its
+// environment with os.Getenv, which returns "" for both), so this is the unset rule
+// stated for the deployment that writes ORIGINATION_PROFILE= explicitly.
+func TestLoadConfig_SetButEmptyOriginationProfileIsUnset(t *testing.T) {
+	for _, tc := range []struct{ role, want string }{
+		{"provider", "demo"},
+		{"payer", ""},
+	} {
+		t.Run(tc.role+"/set-but-empty", func(t *testing.T) {
+			e := map[string]string{
+				"ROLE":                      tc.role,
+				"SHN_SECRETS":               "/x",
+				"SHN_DISCOVERY_URL":         "https://d",
+				"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate",
+				"ORIGINATION_PROFILE":       "",
+			}
+			cfg, err := loadConfig(env(e))
+			if err != nil {
+				t.Fatalf("ORIGINATION_PROFILE=\"\" on ROLE=%s: %v", tc.role, err)
+			}
+			if cfg.OriginationProfile != tc.want {
+				t.Fatalf("OriginationProfile = %q, want %q", cfg.OriginationProfile, tc.want)
+			}
+		})
+	}
+}
+
 // TestLoadConfig_DispatchEnvVars: PAYER_DAVINCI_DISPATCH_SERVICE_ID is carried
 // into the config field WithCRDDispatchService reads (the crd-order-dispatch leg).
 func TestLoadConfig_DispatchEnvVars(t *testing.T) {

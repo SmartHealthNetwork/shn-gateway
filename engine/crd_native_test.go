@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
@@ -90,23 +91,30 @@ func TestConformantCRDBind_AcceptsDeviceRequest(t *testing.T) {
 	}
 }
 
-// TestConformantCRDBind_AcceptsOriginatorBuilt is the SECOND oracle (after the SDK
-// byte-match golden test): the payer-side conformantCRDBind accepts the request the
-// Originator's SDK builder (BuildConformantOrderSelectRequest + BuildCoverageWithPayer)
-// produces. This proves the producer↔consumer contract holds for the convergence shape
-// without re-running through the golden file.
+// TestConformantCRDBind_AcceptsOriginatorBuilt: the payer-side conformantCRDBind accepts
+// the order-select request a requester builds from its own records with the SDK
+// (BuildCRDRequest: its Patient, its Coverage search result, its order). This proves the
+// producer↔consumer contract holds for the convergence shape without the golden file.
 func TestConformantCRDBind_AcceptsOriginatorBuilt(t *testing.T) {
 	srJSON, err := shnsdk.BuildServiceRequest("72148", "MRI lumbar spine w/o contrast", "M51.16", "Patient/MBR-COVERED")
 	if err != nil {
 		t.Fatalf("BuildServiceRequest: %v", err)
 	}
+	srJSON = []byte(strings.Replace(string(srJSON), `{`, `{"id":"sr1",`, 1))
 	covJSON, err := shnsdk.BuildCoverageWithPayer("Patient/MBR-COVERED", "MBR-COVERED", shnsdk.CMSPayerIdentity)
 	if err != nil {
 		t.Fatalf("BuildCoverageWithPayer: %v", err)
 	}
-	reqJSON, err := shnsdk.BuildConformantOrderSelectRequest(srJSON, covJSON, "Patient/MBR-COVERED")
+	reqJSON, err := shnsdk.BuildCRDRequest(shnsdk.CRDRequestInputs{
+		Hook: "order-select", HookInstance: "5f0c3a8e-2b4d-4c6e-8a1f-3d9b7e5c1a20", UserID: "Practitioner/p1",
+		DraftOrders: []byte(`{"resourceType":"Bundle","type":"collection","entry":[{"fullUrl":"urn:uuid:sr1","resource":` + string(srJSON) + `}]}`),
+		Selections:  []string{"ServiceRequest/sr1"},
+		Patient: []byte(`{"resourceType":"Patient","id":"MBR-COVERED","identifier":[{"type":{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/v2-0203","code":"MB"}]},` +
+			`"system":"urn:shn:member","value":"MBR-COVERED"}],"name":[{"family":"Johansson"}],"gender":"unknown","birthDate":"1975-04-02"}`),
+		Coverage: []byte(`{"resourceType":"Bundle","type":"searchset","entry":[{"resource":` + string(covJSON) + `}]}`),
+	})
 	if err != nil {
-		t.Fatalf("BuildConformantOrderSelectRequest: %v", err)
+		t.Fatalf("BuildCRDRequest: %v", err)
 	}
 	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
 	if _, _, _, status, msg := g.conformantCRDBindContext(context.Background(), reqJSON); status != 0 {
