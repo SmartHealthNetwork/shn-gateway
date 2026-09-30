@@ -16,6 +16,7 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -133,7 +134,12 @@ type config struct {
 	// published CapabilityStatements / davinci-configuration, AND the registry
 	// declaration peers select this holder against.
 	ContractVersions []string
-	NPI              string
+	// ContractVersionsDerived: SHN_CONTRACT_VERSIONS was unset on a payer that
+	// forwards to its own system, so ContractVersions was derived from
+	// PAYER_DAVINCI_CONTRACT_VERSIONS (engine.DeriveDeclaredContractVersions).
+	// Boot refusals about the declared set then name where it came from.
+	ContractVersionsDerived bool
+	NPI                     string
 
 	// DemoEgressNativeLines (SHN_DEMO_EGRESS_NATIVE_LINES, kit-bridging demo
 	// only) narrows engine.Config.EgressNativeLines (D1c): restricts arm (2)'s
@@ -278,6 +284,12 @@ type config struct {
 	// for a system that validates that header its own way. Default: sent.
 	PayerDavinciBackendCorrelationOff bool
 	payerDavinciBackendCorrelationRaw string
+	// PayerDavinciBackendTimeout bounds each call to the payer's own system
+	// (PAYER_DAVINCI_BACKEND_TIMEOUT, default defaultPayerBackendTimeout): a
+	// system slower than that is answered this gateway's framed 504 while the
+	// requester's leg budget still has room to carry it.
+	PayerDavinciBackendTimeout    time.Duration
+	payerDavinciBackendTimeoutRaw string
 	// PayerEligibilityURL is the payer's own coverage-eligibility endpoint, when
 	// it declares one: the absolute URL its system takes a POST of a
 	// CoverageEligibilityRequest on. The request is then carried there exactly
@@ -474,6 +486,17 @@ var errNoSystemOfRecord = fmt.Errorf("gateway: FHIR_DATA_URL is required — the
 // every exchange behind PAYER_DAVINCI_BASE_URL.
 func payerNative(cfg config) bool { return cfg.Role == "payer" && cfg.PayerDavinciBaseURL != "" }
 
+// declaresAny reports whether a SHN_CONTRACT_VERSIONS value names any token;
+// one that names none means the build default (shnsdk.ParseDeclaredContractVersions).
+func declaresAny(csv string) bool {
+	for _, tok := range strings.Split(csv, ",") {
+		if strings.TrimSpace(tok) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // loadConfig reads the gateway's public configuration from getenv: the URL
 // checks, the ROLE/PORT bounds and the FHIR/SMART credential guards. The
 // public binary requires SHN_DISCOVERY_URL; it has no seed-manifest path.
@@ -557,6 +580,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 		PayerDavinciStrictExtensions:      getenv("PAYER_DAVINCI_STRICT_EXTENSIONS") == "true",
 		PayerDavinciBackendHeadersRaw:     getenv("PAYER_DAVINCI_BACKEND_HEADERS"),
 		payerDavinciBackendCorrelationRaw: getenv("PAYER_DAVINCI_BACKEND_CORRELATION"),
+		payerDavinciBackendTimeoutRaw:     getenv("PAYER_DAVINCI_BACKEND_TIMEOUT"),
 		PayerEligibilityURL:               getenv("PAYER_ELIGIBILITY_URL"),
 		PayerDavinciPayorOwnRaw:           getenv("PAYER_DAVINCI_PAYOR_OWN"),
 		PayerDavinciPayorBackendRaw:       getenv("PAYER_DAVINCI_PAYOR_BACKEND"),
@@ -773,6 +797,17 @@ func loadConfig(getenv func(string) string) (config, error) {
 	default:
 		return config{}, fmt.Errorf("gateway: PAYER_DAVINCI_BACKEND_CORRELATION must be on or off, got %q", cfg.payerDavinciBackendCorrelationRaw)
 	}
+	cfg.PayerDavinciBackendTimeout = defaultPayerBackendTimeout
+	if raw := cfg.payerDavinciBackendTimeoutRaw; raw != "" {
+		if cfg.PayerDavinciBaseURL == "" {
+			return config{}, fmt.Errorf("gateway: PAYER_DAVINCI_BACKEND_TIMEOUT set requires PAYER_DAVINCI_BASE_URL")
+		}
+		d, err := time.ParseDuration(raw)
+		if err != nil || d < minPayerBackendTimeout || d > maxPayerBackendTimeout {
+			return config{}, fmt.Errorf("gateway: PAYER_DAVINCI_BACKEND_TIMEOUT must be a duration from %s to %s (it leaves the requester's %s leg budget room to carry this gateway's answer), got %q", minPayerBackendTimeout, maxPayerBackendTimeout, requesterLegBudget, raw)
+		}
+		cfg.PayerDavinciBackendTimeout = d
+	}
 
 	// The operated $populate connector's credential block: same exactly-one-mode
 	// rule, same partial-block-is-a-misconfig posture. Zero creds is the
@@ -797,6 +832,27 @@ func loadConfig(getenv func(string) string) (config, error) {
 			if len(tok) < 3 || len(tok) > 48 || !contractVersionTokenRe.MatchString(tok) {
 				return config{}, fmt.Errorf("gateway: PAYER_DAVINCI_CONTRACT_VERSIONS token %q must match <contract>@<line> (e.g. pa.pas@2.0)", tok)
 			}
+		}
+	}
+
+	// FR-G48: a payer that forwards to its own system declares the lines that
+	// system speaks. With SHN_CONTRACT_VERSIONS unset and the system's own
+	// versions declared, the declaration is derived from them, not the build
+	// default: the forward refuses every leg that shares no line with the
+	// system, so the default would advertise lines this gateway then refuses.
+	// Explicit or derived, a declaration with no CRD, DTR or PAS line leaves the
+	// payer unreachable for prior authorization, and refuses boot.
+	if payerNative(cfg) {
+		if !declaresAny(getenv("SHN_CONTRACT_VERSIONS")) && len(cfg.PayerDavinciContractVersions) > 0 {
+			derived, err := engine.DeriveDeclaredContractVersions(cfg.PayerDavinciContractVersions)
+			if err != nil {
+				return config{}, fmt.Errorf("gateway: %w", err)
+			}
+			cfg.ContractVersions = derived
+			cfg.ContractVersionsDerived = true
+		}
+		if err := engine.RequireForwardedContractLine(cfg.ContractVersions); err != nil {
+			return config{}, fmt.Errorf("gateway: %w", err)
 		}
 	}
 
@@ -1069,7 +1125,8 @@ func optionalURLs(cfg config) [][2]string {
 // optionalURLs(cfg) — the exact table checkOptionalURL walks at boot, so a
 // target can never be added or dropped independently of that well-formedness
 // gate. Skips unset pairs. Kind overlay: the two FHIR-facing base URLs probe
-// as fhir-metadata (a live $/metadata fetch); the two SMART token endpoints
+// as fhir-metadata (a live $/metadata fetch, authenticated through
+// probeAuthClient when that base's own token URL is set); the SMART token endpoints
 // probe as a live credential check via a closure over the gateway's own
 // outbound token client (fhirTokenFetch/payerDavinciTokenFetch — reusing the
 // exact SMART config the traffic path authenticates with, never a second
@@ -1099,8 +1156,16 @@ func checkTargets(cfg config) []checks.Target {
 			t.Headers = cfg.PayerDavinciBackendHeaders
 		}
 		switch name {
-		case "FHIR_DATA_URL", "PAYER_DAVINCI_BASE_URL":
+		case "FHIR_DATA_URL":
 			t.Kind = checks.KindFHIRMetadata
+			if cfg.FHIRTokenURL != "" {
+				t.AuthClient = probeAuthClient(fhirSmartConfig(cfg))
+			}
+		case "PAYER_DAVINCI_BASE_URL":
+			t.Kind = checks.KindFHIRMetadata
+			if cfg.PayerDavinciTokenURL != "" {
+				t.AuthClient = probeAuthClient(payerDavinciSmartConfig(cfg))
+			}
 		case "FHIR_TOKEN_URL":
 			t.Kind = checks.KindToken
 			t.TokenFetch = fhirTokenFetch(cfg)
@@ -1155,6 +1220,87 @@ func classifyTokenErr(err error) error {
 	return err
 }
 
+// probeAuthClient is the client a fhir-metadata check of a partner base reads
+// through when the gateway's own calls to that base authenticate: the
+// same SMART config, so the check measures the request the gateway makes. It
+// is a client of its own, outside diagnostic capture: a check is not an
+// exchange. A token it cannot obtain reaches the checks package as the token
+// endpoint's status (*checks.StatusError) or checks.ErrCredential, never the
+// token endpoint's error text; a key that does not load fails every read the
+// same way (build() has already refused to serve on it).
+func probeAuthClient(sc smartauth.Config, err error) *http.Client {
+	if err == nil {
+		var hc *http.Client
+		if hc, err = smartauth.NewHTTPClient(sc); err == nil {
+			hc.Transport = probeCredentialTransport{base: hc.Transport}
+			return hc
+		}
+	}
+	return &http.Client{Transport: probeCredentialTransport{err: err}}
+}
+
+// probeCredentialTransport maps a failure to obtain the probe's token onto the
+// checks package's credential errors; err set ⇒ every request fails so.
+type probeCredentialTransport struct {
+	base http.RoundTripper
+	err  error
+}
+
+func (t probeCredentialTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.err != nil {
+		return nil, checks.ErrCredential
+	}
+	resp, err := t.base.RoundTrip(req)
+	if err != nil && smartauth.IsTokenAcquisitionError(err) {
+		var te *smartauth.TokenEndpointError
+		if errors.As(err, &te) {
+			return nil, &checks.StatusError{Code: te.StatusCode}
+		}
+		return nil, checks.ErrCredential
+	}
+	return resp, err
+}
+
+// fhirSmartConfig is the FHIR_* SMART config the system-of-record connector
+// authenticates with (fhirHTTPClient) and its checks reuse, without diagnostic
+// capture. Call it only when FHIR_TOKEN_URL is set.
+func fhirSmartConfig(cfg config) (smartauth.Config, error) {
+	sc := smartauth.Config{
+		TokenURL: cfg.FHIRTokenURL, ClientID: cfg.FHIRClientID, Scope: cfg.FHIRClientScope,
+		Observer: cfg.tokenNotes,
+	}
+	if cfg.FHIRClientSecret != "" {
+		sc.ClientSecret = cfg.FHIRClientSecret // client_secret_post; no key material
+		return sc, nil
+	}
+	key, err := loadSmartKey(cfg.FHIRClientKey, cfg.FHIRClientAlg)
+	if err != nil {
+		return sc, fmt.Errorf("load FHIR client key: %w", err)
+	}
+	sc.Alg, sc.Key, sc.KID = cfg.FHIRClientAlg, key, cfg.FHIRClientKID
+	return sc, nil
+}
+
+// payerDavinciSmartConfig is fhirSmartConfig's PAYER_DAVINCI_* counterpart:
+// the config the native-forward client (payerDavinciHTTPClient) authenticates
+// with. Call it only when PAYER_DAVINCI_TOKEN_URL is set.
+func payerDavinciSmartConfig(cfg config) (smartauth.Config, error) {
+	sc := smartauth.Config{
+		TokenURL: cfg.PayerDavinciTokenURL, ClientID: cfg.PayerDavinciClientID, Scope: cfg.PayerDavinciScope,
+		Observer: cfg.tokenNotes,
+	}
+	if cfg.PayerDavinciClientSecret != "" {
+		sc.ClientSecret = cfg.PayerDavinciClientSecret // client_secret_post; no key material
+		return sc, nil
+	}
+	key, err := loadSmartKey(cfg.PayerDavinciClientKey, cfg.PayerDavinciClientAlg)
+	if err != nil {
+		return sc, fmt.Errorf("load payer-davinci client key: %w", err)
+	}
+	sc.Alg, sc.Key, sc.KID = cfg.PayerDavinciClientAlg, key, cfg.PayerDavinciClientKID
+	return sc, nil
+}
+
 // fhirTokenFetch builds the /internal/checks credential-check closure for
 // FHIR_TOKEN_URL: a *smartauth.TokenSource built from the SAME Config
 // fhirHTTPClient authenticates the FHIR SoR connector with — the minimal
@@ -1176,15 +1322,9 @@ func classifyTokenErr(err error) error {
 // against the partner IdP — it, not caching here, is the partner-lockout
 // guard.
 func fhirTokenFetch(cfg config) func(context.Context) error {
-	sc := smartauth.Config{TokenURL: cfg.FHIRTokenURL, ClientID: cfg.FHIRClientID, Scope: cfg.FHIRClientScope, Observer: cfg.tokenNotes}
-	if cfg.FHIRClientSecret != "" {
-		sc.ClientSecret = cfg.FHIRClientSecret
-	} else {
-		key, err := loadSmartKey(cfg.FHIRClientKey, cfg.FHIRClientAlg)
-		if err != nil {
-			return func(context.Context) error { return err }
-		}
-		sc.Alg, sc.Key, sc.KID = cfg.FHIRClientAlg, key, cfg.FHIRClientKID
+	sc, err := fhirSmartConfig(cfg)
+	if err != nil {
+		return func(context.Context) error { return err }
 	}
 	return func(ctx context.Context) error {
 		return classifyTokenErr(errFromToken(&smartauth.TokenSource{Config: sc}, ctx))
@@ -1195,15 +1335,9 @@ func fhirTokenFetch(cfg config) func(context.Context) error {
 // mirroring payerDavinciHTTPClient's Config construction. Same fresh-
 // TokenSource-per-invocation rule applies (see fhirTokenFetch's doc).
 func payerDavinciTokenFetch(cfg config) func(context.Context) error {
-	sc := smartauth.Config{TokenURL: cfg.PayerDavinciTokenURL, ClientID: cfg.PayerDavinciClientID, Scope: cfg.PayerDavinciScope, Observer: cfg.tokenNotes}
-	if cfg.PayerDavinciClientSecret != "" {
-		sc.ClientSecret = cfg.PayerDavinciClientSecret
-	} else {
-		key, err := loadSmartKey(cfg.PayerDavinciClientKey, cfg.PayerDavinciClientAlg)
-		if err != nil {
-			return func(context.Context) error { return err }
-		}
-		sc.Alg, sc.Key, sc.KID = cfg.PayerDavinciClientAlg, key, cfg.PayerDavinciClientKID
+	sc, err := payerDavinciSmartConfig(cfg)
+	if err != nil {
+		return func(context.Context) error { return err }
 	}
 	return func(ctx context.Context) error {
 		return classifyTokenErr(errFromToken(&smartauth.TokenSource{Config: sc}, ctx))
@@ -1430,6 +1564,18 @@ type built struct {
 	// METRICS_SERVICE are set. Only Run starts it, for the same reason as keyRefresh.
 	poolStats func(context.Context)
 }
+
+// The payer gateway's deadline for its own system (PAYER_DAVINCI_BACKEND_TIMEOUT):
+// under the requester's leg budget (the SDK client's timeout every gateway's
+// Hub leg runs under) by enough that this gateway's framed answer still
+// reaches the requester through the Hub.
+var (
+	requesterLegBudget         = shnsdk.NewClient().Timeout
+	defaultPayerBackendTimeout = requesterLegBudget - 5*time.Second
+	maxPayerBackendTimeout     = requesterLegBudget - 2*time.Second
+)
+
+const minPayerBackendTimeout = time.Second
 
 // Shared-state pool sizing (see config.StoreMaxConns).
 const (
@@ -1810,6 +1956,13 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 			nativeOpts = append(nativeOpts, engine.WithBackendHeaders(cfg.PayerDavinciBackendHeaders))
 			fmt.Fprintf(stdout, "gateway: partner requests carry %d fixed header(s) (PAYER_DAVINCI_BACKEND_HEADERS)\n", len(cfg.PayerDavinciBackendHeaders))
 		}
+		// Every call to the payer's own system has a deadline under the
+		// requester's leg budget, so a slow system is answered, and recorded,
+		// as its own timeout rather than cut short when the requester leaves.
+		nativeOpts = append(nativeOpts, engine.WithBackendDeadline(cfg.PayerDavinciBackendTimeout))
+		if cfg.payerDavinciBackendTimeoutRaw != "" {
+			fmt.Fprintf(stdout, "gateway: partner requests time out after %s (PAYER_DAVINCI_BACKEND_TIMEOUT)\n", cfg.PayerDavinciBackendTimeout)
+		}
 		if cfg.PayerDavinciBackendCorrelationOff {
 			nativeOpts = append(nativeOpts, engine.WithoutBackendCorrelation())
 			fmt.Fprintf(stdout, "gateway: partner requests carry no X-Correlation-Id (PAYER_DAVINCI_BACKEND_CORRELATION=off)\n")
@@ -1997,6 +2150,11 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	}
 
 	fmt.Fprintf(stdout, "gateway: role=%s holder=%s listening on %s://%s\n", cfg.Role, bundle.Identity.HolderID, scheme, cfg.Addr)
+	if cfg.ContractVersionsDerived {
+		// Peers select against the registry entry, not this process, so the
+		// operator must see which set the entry has to declare.
+		fmt.Fprintf(stdout, "gateway: declaring %s, derived from PAYER_DAVINCI_CONTRACT_VERSIONS (SHN_CONTRACT_VERSIONS is unset); the registry entry peers select this gateway against must declare the same set\n", strings.Join(cfg.ContractVersions, ", "))
+	}
 	// The resolved level, on the operator log at boot: a fleet check reads it here
 	// rather than from the task definition, where an absent value and a delivered
 	// value the binary ignored would look the same.
@@ -2308,7 +2466,11 @@ func validatorLanesForDeclared(getenv func(string) string, declared []string, ca
 			// SHN_FAKE_VALIDATOR is a hermetic-test opt-in, and an operator reading a
 			// production boot failure must not be handed "disable FR-36" as a remedy.
 			envName := "FHIR_VALIDATE_URL_" + strings.ReplaceAll(line, ".", "_")
-			return nil, fmt.Errorf("gateway: SHN_CONTRACT_VERSIONS declares %s but no FHIR validator lane is configured for line %s: set %s to a $validate endpoint hosting that line's IG packages (one HAPI hosts exactly one version of an IG) — refusing to declare a line this gateway cannot validate (FR-36/FR-G29)", tok, line, envName)
+			source := "SHN_CONTRACT_VERSIONS"
+			if cfg.ContractVersionsDerived {
+				source = "the declaration derived from PAYER_DAVINCI_CONTRACT_VERSIONS (SHN_CONTRACT_VERSIONS is unset)"
+			}
+			return nil, fmt.Errorf("gateway: %s declares %s but no FHIR validator lane is configured for line %s: set %s to a $validate endpoint hosting that line's IG packages (one HAPI hosts exactly one version of an IG) — refusing to declare a line this gateway cannot validate (FR-36/FR-G29)", source, tok, line, envName)
 		}
 	}
 	// Lane map: widen beyond DECLARED — any NATIVE line of a multi-line contract with
@@ -2431,18 +2593,9 @@ func fhirHTTPClient(cfg config) (*http.Client, error) {
 	if cfg.FHIRTokenURL == "" {
 		return nil, nil // unauthenticated (the zero-config default)
 	}
-	sc := smartauth.Config{
-		TokenURL: cfg.FHIRTokenURL, ClientID: cfg.FHIRClientID, Scope: cfg.FHIRClientScope,
-		Observer: cfg.tokenNotes,
-	}
-	if cfg.FHIRClientSecret != "" {
-		sc.ClientSecret = cfg.FHIRClientSecret // client_secret_post; no key material
-	} else {
-		key, err := loadSmartKey(cfg.FHIRClientKey, cfg.FHIRClientAlg)
-		if err != nil {
-			return nil, fmt.Errorf("load FHIR client key: %w", err)
-		}
-		sc.Alg, sc.Key, sc.KID = cfg.FHIRClientAlg, key, cfg.FHIRClientKID
+	sc, err := fhirSmartConfig(cfg)
+	if err != nil {
+		return nil, err
 	}
 	cfg.diagnostic.smart(&sc)
 	hc, err := smartauth.NewHTTPClient(sc)
@@ -2461,18 +2614,9 @@ func payerDavinciHTTPClient(cfg config) (*http.Client, error) {
 	if cfg.PayerDavinciTokenURL == "" {
 		return nil, nil // unauthenticated (deliberate; warned at build)
 	}
-	sc := smartauth.Config{
-		TokenURL: cfg.PayerDavinciTokenURL, ClientID: cfg.PayerDavinciClientID, Scope: cfg.PayerDavinciScope,
-		Observer: cfg.tokenNotes,
-	}
-	if cfg.PayerDavinciClientSecret != "" {
-		sc.ClientSecret = cfg.PayerDavinciClientSecret // client_secret_post; no key material
-	} else {
-		key, err := loadSmartKey(cfg.PayerDavinciClientKey, cfg.PayerDavinciClientAlg)
-		if err != nil {
-			return nil, fmt.Errorf("load payer-davinci client key: %w", err)
-		}
-		sc.Alg, sc.Key, sc.KID = cfg.PayerDavinciClientAlg, key, cfg.PayerDavinciClientKID
+	sc, err := payerDavinciSmartConfig(cfg)
+	if err != nil {
+		return nil, err
 	}
 	cfg.diagnostic.smart(&sc)
 	hc, err := smartauth.NewHTTPClient(sc)

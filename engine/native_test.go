@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
@@ -38,6 +39,8 @@ type stubPartner struct {
 	respByPath    map[string][]byte
 	// calls counts every request the stub answered, listings included.
 	calls atomic.Int32
+	// delay holds each operation's answer back this long: a slow system.
+	delay time.Duration
 }
 
 func newStubPartner(t *testing.T) *stubPartner {
@@ -55,6 +58,13 @@ func newStubPartner(t *testing.T) *stubPartner {
 		s.lastPath = r.URL.Path
 		s.lastHeader = r.Header.Clone()
 		s.lastBody, _ = io.ReadAll(r.Body)
+		if s.delay > 0 {
+			select {
+			case <-time.After(s.delay):
+			case <-r.Context().Done():
+				return
+			}
+		}
 		if s.status/100 != 2 {
 			w.WriteHeader(s.status)
 			return

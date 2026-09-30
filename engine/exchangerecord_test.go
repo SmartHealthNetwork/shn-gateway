@@ -622,6 +622,23 @@ func inboundRequestWith(t *testing.T, p *levelPayer, leg string, inboundPayload 
 	return r
 }
 
+// A payer that requires known members (Config.RequireKnownMembers) refusing a
+// member its system does not hold refuses on a check it opted into: the
+// record names conformance, at every level.
+func TestExchangeRecord_InboundUnknownMemberIsConformance(t *testing.T) {
+	for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve, EnforcementStructural, EnforcementStrict} {
+		t.Run(level.String(), func(t *testing.T) {
+			p, got := newRecordingLevelPayer(t, level)
+			p.g.cfg.RequireKnownMembers = true
+			ans := p.send(t, "crd-order-select", "", conformantCRD("MBR-NOT-HELD", "72148"))
+			if ans.status != http.StatusBadRequest || !strings.Contains(string(ans.body), "unknown member") {
+				t.Fatalf("answer %d %s", ans.status, ans.body)
+			}
+			wantRefusal(t, got.only(t), ans.status, RefusedByPayerGateway, RefusalConformance)
+		})
+	}
+}
+
 // Every refusal before an inbound leg is opened names its network rule.
 func TestExchangeRecord_InboundRefusalRules(t *testing.T) {
 	rows := []struct {

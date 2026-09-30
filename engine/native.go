@@ -140,6 +140,10 @@ type nativeResponder struct {
 	// noBackendCorrelation: the leg's id is not sent as X-Correlation-Id
 	// (WithoutBackendCorrelation).
 	noBackendCorrelation bool
+	// backendDeadline bounds each call to the partner's system, measured
+	// from the leg's arrival at this gateway (WithBackendDeadline); 0 sets
+	// none of its own.
+	backendDeadline time.Duration
 
 	// conformance is the policy of the gateway this responder runs in, passed
 	// as an option because NewNativeResponder runs before engine.New. The zero
@@ -276,6 +280,19 @@ func WithBackendHeaders(h http.Header) NativeOption {
 // system that validates that header its own way. The default sends it.
 func WithoutBackendCorrelation() NativeOption {
 	return func(n *nativeResponder) { n.noBackendCorrelation = true }
+}
+
+// WithBackendDeadline bounds each call to the partner's system at d from the
+// leg's arrival at this gateway (PAYER_DAVINCI_BACKEND_TIMEOUT), so the work
+// before the call (the member's lookup, a listing read, a token) counts
+// against it too; a call outside an inbound leg counts from its own start. A
+// system that has not answered by then is the partner's timeout: the
+// requester is answered this gateway's own framed 504 while its leg budget
+// still has room to carry it, instead of the requester giving up first and
+// the call being cut short unanswered. d <= 0 sets no deadline of the
+// responder's own.
+func WithBackendDeadline(d time.Duration) NativeOption {
+	return func(n *nativeResponder) { n.backendDeadline = d }
 }
 
 // applyBackendHeaders adds the partner's fixed request headers to req.
@@ -691,8 +708,9 @@ func (n *nativeResponder) forwardDTROperation(ctx context.Context, contract stri
 // an HTTP response — any status — is the recipient's answer: 2xx →
 // (reply, LegResult{}, nil); non-2xx → (reply, LegResult{Status:<code>,
 // Response:<upstream body, relayed>}, nil) for verbatim relay. A NO-RESPONSE
-// fault (build/dial/read) is (upstreamReply{}, LegResult{}, error) → the
-// engine maps it to 500 → "hub routing failed".
+// fault (build/dial/read, or no answer by the responder's deadline) is
+// (upstreamReply{}, LegResult{}, error) → responderFailed answers it as this
+// gateway's own framed 502 or 504 (responderFailure).
 func (n *nativeResponder) post(ctx context.Context, base, path string, p relay.Payload, leg, label string) (upstreamReply, LegResult, error) {
 	k := relay.Key{Leg: leg, Role: relay.RoleRecipient, Direction: relay.DirectionRequest, Outcome: relay.OutcomeCarried}
 	body, err := relay.Transmit(p, relay.Check(k))
@@ -702,7 +720,29 @@ func (n *nativeResponder) post(ctx context.Context, base, path string, p relay.P
 		(*Gateway)(nil).ownershipRefused(k, err)
 		return upstreamReply{}, LegResult{}, fmt.Errorf("upstream payer %s request not sent: %w", label, err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+path, bytes.NewReader(body))
+	// The call runs under the responder's own deadline, when it has one;
+	// the request's end still cuts it short (callEndedClass reads which).
+	callCtx := ctx
+	if n.backendDeadline > 0 {
+		arrived, ok := legArrival(ctx)
+		if !ok {
+			arrived = time.Now()
+		}
+		var cancel context.CancelFunc
+		callCtx, cancel = context.WithDeadline(ctx, arrived.Add(n.backendDeadline))
+		defer cancel()
+	}
+	timedOut := func() bool {
+		return n.backendDeadline > 0 && ctx.Err() == nil && errors.Is(callCtx.Err(), context.DeadlineExceeded)
+	}
+	// The gateway's own work before the call (validation, the member's
+	// lookup) used the whole deadline: the payer's system is not asked, and
+	// its time is not its failure.
+	if timedOut() {
+		logDeadlineSpent(ctx, label, leg, n.backendDeadline)
+		return upstreamReply{}, LegResult{}, &deadlineSpent{deadline: n.backendDeadline}
+	}
+	req, err := http.NewRequestWithContext(callCtx, http.MethodPost, base+path, bytes.NewReader(body))
 	if err != nil {
 		return upstreamReply{}, LegResult{}, fmt.Errorf("upstream payer %s request build failed: %w", label, err)
 	}
@@ -744,9 +784,19 @@ func (n *nativeResponder) post(ctx context.Context, base, path string, p relay.P
 	}
 	resp, err := n.client.Do(req)
 	if err != nil {
-		x.backend(0, x.since(n.now, callStart), callEndedClass(ctx, backendClass(0, err)))
+		class := callEndedClass(callCtx, backendClass(0, err))
+		if timedOut() {
+			// Past the deadline whatever failed (a token endpoint as slow as
+			// the system itself): the system's timeout, not its credentials.
+			class = BackendTimeout
+		}
+		x.backend(0, x.since(n.now, callStart), class)
 		// A request whose bearer could not be obtained was never sent.
 		sent := wrote.Load() && !smartauth.IsTokenAcquisitionError(err)
+		if timedOut() {
+			logUpstreamTimedOut(ctx, label, leg, base+path, n.backendDeadline, sent)
+			return upstreamReply{}, LegResult{}, &upstreamFailure{err: fmt.Errorf("upstream payer %s did not answer within %s: %w", label, n.backendDeadline, err), sent: sent, timedOut: true}
+		}
 		logUpstreamAbandoned(ctx, label, leg, base+path, time.Since(started), sent)
 		return upstreamReply{}, LegResult{}, &upstreamFailure{err: fmt.Errorf("upstream payer %s unreachable: %w", label, err), sent: sent}
 	}
@@ -758,7 +808,15 @@ func (n *nativeResponder) post(ctx context.Context, base, path string, p relay.P
 		capture.response = append([]byte(nil), rb...)
 	}
 	if err != nil {
-		x.backend(resp.StatusCode, x.since(n.now, callStart), callEndedClass(ctx, bodyReadClass(err)))
+		class := callEndedClass(callCtx, bodyReadClass(err))
+		if timedOut() {
+			class = BackendTimeout
+		}
+		x.backend(resp.StatusCode, x.since(n.now, callStart), class)
+		if timedOut() {
+			logUpstreamTimedOut(ctx, label, leg, base+path, n.backendDeadline, true)
+			return upstreamReply{}, LegResult{}, &upstreamFailure{err: fmt.Errorf("upstream payer %s answer not read within %s: %w", label, n.backendDeadline, err), sent: true, timedOut: true}
+		}
 		logUpstreamAbandoned(ctx, label, leg, base+path, time.Since(started), true)
 		return upstreamReply{}, LegResult{}, &upstreamFailure{err: fmt.Errorf("upstream payer %s read failed: %w", label, err), sent: true}
 	}
@@ -822,6 +880,41 @@ func logUpstreamAbandoned(ctx context.Context, label, leg, rawURL string, elapse
 		wrote = "yes"
 	}
 	log.Printf("gateway: upstream payer %s call abandoned after %.1fs: the request it serves ended (%v) (host %s, leg %s, correlation %s, request written: %s)", label, elapsed.Seconds(), cause, host, leg, corr, wrote)
+}
+
+// deadlineSpent is a forward never sent: the responder's deadline had passed
+// before the call, spent on this gateway's own work. It is not the payer
+// system's failure.
+type deadlineSpent struct{ deadline time.Duration }
+
+func (e *deadlineSpent) Error() string {
+	return fmt.Sprintf("the deadline for the payer's system (%s) passed before the call was sent", e.deadline)
+}
+
+// logDeadlineSpent writes the payer gateway's line for a forward it never
+// sent because its own work before the call used the deadline.
+func logDeadlineSpent(ctx context.Context, label, leg string, deadline time.Duration) {
+	corr, _ := ctx.Value(responderCorrelationKey{}).(string)
+	log.Printf("gateway: upstream payer %s call not sent: this gateway's own work used its %s deadline for its system: answered 504 (leg %s, correlation %s)", label, deadline, leg, corr)
+}
+
+// logUpstreamTimedOut writes the payer gateway's own line when its call to
+// its participant's system ran past the responder's deadline: the system's
+// timeout, answered by this gateway as its own 504 while the requester was
+// still waiting. Like logUpstreamAbandoned it names the upstream host (never
+// the path or query), the leg and the correlation id, and whether the
+// request was written; never a body, a header or a credential.
+func logUpstreamTimedOut(ctx context.Context, label, leg, rawURL string, deadline time.Duration, written bool) {
+	host := ""
+	if u, err := url.Parse(rawURL); err == nil {
+		host = u.Hostname()
+	}
+	corr, _ := ctx.Value(responderCorrelationKey{}).(string)
+	wrote := "no"
+	if written {
+		wrote = "yes"
+	}
+	log.Printf("gateway: upstream payer %s call timed out after %s, this gateway's deadline for its system: answered 504 (host %s, leg %s, correlation %s, request written: %s)", label, deadline, host, leg, corr, wrote)
 }
 
 // upstreamAnswer classifies a read upstream response for post and get.
@@ -976,4 +1069,19 @@ func certifyCDSHooksAnswer(ctx context.Context, policy ConformancePolicy, emit f
 // absent one is itself the "no resolvable payor identifier" case, not a benign skip.
 func (n *nativeResponder) applyPayorEdgeToCRDRequest(in relay.Body) (relay.Payload, LegResult, error) {
 	return n.payorEdgeRequest(in, payorEdgeCRDRequest, "application/json", nil)
+}
+
+type legArrivalKey struct{}
+
+// withLegArrival notes when an inbound leg reached this gateway, the start
+// of the responder's deadline for its participant's system.
+func withLegArrival(ctx context.Context, at time.Time) context.Context {
+	return context.WithValue(ctx, legArrivalKey{}, at)
+}
+
+// legArrival is when the leg ctx serves reached this gateway, if it is an
+// inbound leg.
+func legArrival(ctx context.Context) (time.Time, bool) {
+	at, ok := ctx.Value(legArrivalKey{}).(time.Time)
+	return at, ok
 }

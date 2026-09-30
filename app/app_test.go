@@ -2703,3 +2703,44 @@ func TestLoadConfig_PayerDavinciBackendCorrelation(t *testing.T) {
 		}
 	}
 }
+
+// PAYER_DAVINCI_BACKEND_TIMEOUT is a duration under the requester's leg budget
+// by enough to carry this gateway's answer back; unset, the default leaves
+// five seconds of it.
+func TestLoadConfig_PayerDavinciBackendTimeout(t *testing.T) {
+	load := func(extra map[string]string) (config, error) {
+		env := map[string]string{"ROLE": "payer", "SHN_SECRETS": "/x", "SHN_DISCOVERY_URL": "https://d", "PAYER_DAVINCI_BASE_URL": "https://payer.example"}
+		for k, v := range extra {
+			env[k] = v
+		}
+		return loadConfig(func(k string) string { return env[k] })
+	}
+	if requesterLegBudget != 30*time.Second || defaultPayerBackendTimeout != 25*time.Second || maxPayerBackendTimeout != 28*time.Second {
+		t.Fatalf("budget %s, default %s, max %s: the docs name 30s, 25s and 28s", requesterLegBudget, defaultPayerBackendTimeout, maxPayerBackendTimeout)
+	}
+	for value, want := range map[string]time.Duration{"": 25 * time.Second, "10s": 10 * time.Second, "1s": time.Second, "28s": 28 * time.Second, "1m0s": 0} {
+		cfg, err := load(map[string]string{"PAYER_DAVINCI_BACKEND_TIMEOUT": value})
+		if want == 0 {
+			if err == nil {
+				t.Errorf("%q: booted with %s", value, cfg.PayerDavinciBackendTimeout)
+			}
+			continue
+		}
+		if err != nil || cfg.PayerDavinciBackendTimeout != want {
+			t.Errorf("%q: %s err=%v, want %s", value, cfg.PayerDavinciBackendTimeout, err, want)
+		}
+	}
+	for name, extra := range map[string]map[string]string{
+		"not a duration":         {"PAYER_DAVINCI_BACKEND_TIMEOUT": "25"},
+		"zero":                   {"PAYER_DAVINCI_BACKEND_TIMEOUT": "0s"},
+		"under a second":         {"PAYER_DAVINCI_BACKEND_TIMEOUT": "500ms"},
+		"no headroom":            {"PAYER_DAVINCI_BACKEND_TIMEOUT": "29s"},
+		"the whole budget":       {"PAYER_DAVINCI_BACKEND_TIMEOUT": "30s"},
+		"negative":               {"PAYER_DAVINCI_BACKEND_TIMEOUT": "-5s"},
+		"set without a base URL": {"PAYER_DAVINCI_BACKEND_TIMEOUT": "10s", "PAYER_DAVINCI_BASE_URL": ""},
+	} {
+		if _, err := load(extra); err == nil {
+			t.Errorf("%s: booted", name)
+		}
+	}
+}

@@ -177,7 +177,11 @@ func TestBuild_WritesAnAccessLinePerExchange(t *testing.T) {
 // PAYER_DAVINCI_BACKEND_CORRELATION=off reaches the payer's responder: the
 // built gateway says its partner requests carry no X-Correlation-Id, and
 // says nothing of it by default.
-func TestBuild_BackendCorrelationOffReachesTheResponder(t *testing.T) {
+// buildPayerAt builds a payer gateway whose own system is at payerSystem, with
+// extra environment on top of the minimal set; the gateway is closed at the
+// test's end.
+func buildPayerAt(t *testing.T, payerSystem string, extra map[string]string) (built, string) {
+	t.Helper()
 	dir := t.TempDir()
 	id, err := shnsdk.GenerateIdentity("h-payer")
 	if err != nil {
@@ -189,11 +193,33 @@ func TestBuild_BackendCorrelationOffReachesTheResponder(t *testing.T) {
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
 	keyBody := fmt.Sprintf(`{"pubkey":%q}`, base64.StdEncoding.EncodeToString(pub))
 	keys := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(keyBody)) }))
-	defer keys.Close()
+	t.Cleanup(keys.Close)
 	disc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, `{"endpoints":{},"authzPublicKeyURL":%q,"hubTransportKeyURL":%q}`, keys.URL, keys.URL)
 	}))
-	defer disc.Close()
+	t.Cleanup(disc.Close)
+	env := map[string]string{
+		"ROLE": "payer", "SHN_SECRETS": dir, "SHN_DISCOVERY_URL": disc.URL, "SHN_FAKE_VALIDATOR": "1",
+		"FHIR_DATA_URL": "https://fhir.test", "PAYER_DAVINCI_BASE_URL": payerSystem,
+	}
+	for k, v := range extra {
+		env[k] = v
+	}
+	var stdout bytes.Buffer
+	b, err := build(context.Background(), func(k string) string { return env[k] }, &stdout, nil)
+	if b.gateway != nil {
+		t.Cleanup(func() { _ = b.gateway.Close() })
+	}
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	return b, stdout.String()
+}
+
+// orderSelectHook is a minimal CRD order-select request.
+var orderSelectHook = []byte(`{"hook":"order-select","hookInstance":"d1577c69-dfbe-44ad-ba6d-3e05e953b2ea","context":{"userId":"Practitioner/p1","patientId":"p1","selections":["DeviceRequest/d1"],"draftOrders":{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"DeviceRequest","id":"d1","status":"draft","intent":"order","subject":{"reference":"Patient/p1"}}}]}}}`)
+
+func TestBuild_BackendCorrelationOffReachesTheResponder(t *testing.T) {
 	// The payer's system lists one CRD service and answers every hook with no
 	// cards, recording the X-Correlation-Id each hook call carried.
 	var mu sync.Mutex
@@ -210,25 +236,12 @@ func TestBuild_BackendCorrelationOffReachesTheResponder(t *testing.T) {
 		_, _ = w.Write([]byte(`{"cards":[]}`))
 	}))
 	defer payerSystem.Close()
-	hook := []byte(`{"hook":"order-select","hookInstance":"d1577c69-dfbe-44ad-ba6d-3e05e953b2ea","context":{"userId":"Practitioner/p1","patientId":"p1","selections":["DeviceRequest/d1"],"draftOrders":{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"DeviceRequest","id":"d1","status":"draft","intent":"order","subject":{"reference":"Patient/p1"}}}]}}}`)
 	for value, want := range map[string]string{"": "leg-0001", "on": "leg-0001", "off": ""} {
-		env := map[string]string{
-			"ROLE": "payer", "SHN_SECRETS": dir, "SHN_DISCOVERY_URL": disc.URL, "SHN_FAKE_VALIDATOR": "1",
-			"FHIR_DATA_URL": "https://fhir.test", "PAYER_DAVINCI_BASE_URL": payerSystem.URL,
-			"PAYER_DAVINCI_BACKEND_CORRELATION": value,
-		}
-		var stdout bytes.Buffer
-		b, err := build(context.Background(), func(k string) string { return env[k] }, &stdout, nil)
-		if b.gateway != nil {
-			_ = b.gateway.Close()
-		}
-		if err != nil {
-			t.Fatalf("%q: build: %v", value, err)
-		}
+		b, _ := buildPayerAt(t, payerSystem.URL, map[string]string{"PAYER_DAVINCI_BACKEND_CORRELATION": value})
 		mu.Lock()
 		sent = nil
 		mu.Unlock()
-		res, err := b.responder.Handle(context.Background(), "crd-order-select", "leg-0001", "", hook)
+		res, err := b.responder.Handle(context.Background(), "crd-order-select", "leg-0001", "", orderSelectHook)
 		mu.Lock()
 		got := slices.Clone(sent)
 		mu.Unlock()
@@ -238,5 +251,36 @@ func TestBuild_BackendCorrelationOffReachesTheResponder(t *testing.T) {
 		if got[0] != want {
 			t.Errorf("%q: the payer's system was sent X-Correlation-Id %q, want %q", value, got[0], want)
 		}
+	}
+}
+
+// PAYER_DAVINCI_BACKEND_TIMEOUT reaches the responder: a payer's system slower
+// than it fails the forward as its own timeout, well before its answer.
+func TestBuild_BackendTimeoutReachesTheResponder(t *testing.T) {
+	payerSystem := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			_, _ = w.Write([]byte(`{"services":[{"id":"crd-select","hook":"order-select"}]}`))
+			return
+		}
+		// Read the request first: net/http then ends r.Context() when the
+		// gateway gives up, and the stub returns with it.
+		_, _ = io.Copy(io.Discard, r.Body)
+		select {
+		case <-time.After(5 * time.Second):
+		case <-r.Context().Done():
+			return
+		}
+		_, _ = w.Write([]byte(`{"cards":[]}`))
+	}))
+	defer payerSystem.Close()
+	b, stdout := buildPayerAt(t, payerSystem.URL, map[string]string{"PAYER_DAVINCI_BACKEND_TIMEOUT": "1s"})
+	if !strings.Contains(stdout, "partner requests time out after 1s (PAYER_DAVINCI_BACKEND_TIMEOUT)") {
+		t.Errorf("boot does not say the timeout:\n%s", stdout)
+	}
+	start := time.Now()
+	_, err := b.responder.Handle(context.Background(), "crd-order-select", "leg-0001", "", orderSelectHook)
+	if waited := time.Since(start); err == nil || !strings.Contains(err.Error(), "did not answer within 1s") || waited > 4*time.Second {
+		t.Fatalf("after %s: %v, want the payer system's timeout at 1s", waited, err)
 	}
 }

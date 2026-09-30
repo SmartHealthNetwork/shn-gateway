@@ -187,7 +187,8 @@ func sealRequest(id relay.BuilderID, b []byte, contentType string) relay.Payload
 	return p
 }
 
-// responderFailed answers a LegResponder error on leg with a 500. A request
+// responderFailed answers a LegResponder error on leg as this gateway's own
+// framed failure (responderFailure: 502, 504 or 500). A request
 // the responder could not send to its own system because the ownership table
 // refused it is also reported on the observer seam.
 func (g *Gateway) responderFailed(w http.ResponseWriter, r *http.Request, leg inboundLeg, env shnsdk.Envelope, tok shnsdk.Token, answerTok string, err error) {
@@ -207,17 +208,27 @@ func (g *Gateway) responderFailed(w http.ResponseWriter, r *http.Request, leg in
 }
 
 // responderFailure decides how a LegResponder error on leg is answered, framed
-// as this gateway's answer: the requester sees whose failure it was —
-// the payer's system not answering (502) or this gateway's own fault (500) —
-// never the error's own text. An ownership refusal is observed here.
+// as this gateway's answer: the requester sees whose failure it was — the
+// payer's system not answering (502), or not answering within the
+// responder's deadline (504), or this gateway's own fault (500) — never the
+// error's own text. An ownership refusal is observed here.
 func (g *Gateway) responderFailure(leg string, err error) (int, string) {
 	if isOwnershipFault(err) {
 		k := relay.Key{Leg: leg, Role: relay.RoleRecipient, Direction: relay.DirectionRequest, Outcome: relay.OutcomeCarried}
 		g.observe(ObserverEvent{Kind: relay.RefusedEvent, LegType: k.Leg, Direction: k.Role.String() + "-" + k.Direction.String(), Detail: err.Error()})
 	}
+	var spent *deadlineSpent
+	if errors.As(err, &spent) {
+		return http.StatusGatewayTimeout, errDeadlineSpent
+	}
 	var up *upstreamFailure
 	if errors.As(err, &up) {
-		if up.sent {
+		switch {
+		case up.timedOut && up.sent:
+			return http.StatusGatewayTimeout, errUpstreamTimedOut
+		case up.timedOut:
+			return http.StatusGatewayTimeout, errUpstreamNotReachedInTime
+		case up.sent:
 			return http.StatusBadGateway, errUpstreamNoUsableAnswer
 		}
 		return http.StatusBadGateway, errUpstreamNotReached
@@ -232,6 +243,9 @@ func (g *Gateway) responderFailure(leg string, err error) (int, string) {
 type upstreamFailure struct {
 	err  error
 	sent bool
+	// timedOut: the call ran past the responder's own deadline
+	// (WithBackendDeadline) while the request was still live.
+	timedOut bool
 }
 
 func (e *upstreamFailure) Error() string { return e.err.Error() }
@@ -243,4 +257,10 @@ func (e *upstreamFailure) Unwrap() error { return e.err }
 const (
 	errUpstreamNotReached     = "the payer's system could not be reached"
 	errUpstreamNoUsableAnswer = "the payer's system received this request but gave no answer this gateway could carry; it may have acted on it: check its outcome before resending"
+	// A call past the payer gateway's deadline for its own system.
+	errUpstreamTimedOut         = "the payer's system received this request but did not answer in time; it may have acted on it: check its outcome before resending"
+	errUpstreamNotReachedInTime = "the payer's system could not be reached in time"
+	// The gateway's own work before the call used its deadline: nothing was
+	// sent to the payer's system.
+	errDeadlineSpent = "the payer's gateway ran out of time before it could send this request to the payer's system; the payer's system did not receive it"
 )

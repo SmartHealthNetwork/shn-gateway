@@ -184,6 +184,13 @@ func (g *Gateway) bindInboundSubject(ctx context.Context, member string, payload
 		return "", status, msg
 	}
 	if !found || pci == "" {
+		// A member not held is refused only by a participant that requires
+		// known members (resolveSubjectBinding derives a subject otherwise):
+		// a check it opted into, recorded as conformance. A system of record
+		// that reports a member without an identifier names no rule.
+		if !found && g.cfg.RequireKnownMembers {
+			exchangeOf(ctx).refusing(RefusalConformance)
+		}
 		return "", http.StatusBadRequest, "unknown member"
 	}
 	involvedCollectorFrom(ctx).bound(pci, held)

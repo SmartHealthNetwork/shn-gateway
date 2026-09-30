@@ -171,12 +171,19 @@ network, at every conformance level. There is nothing to configure:
   (your system of record reported itself unavailable, a search of it failed,
   your connector cancelled a read itself, or a call to your system was
   abandoned while the request it served was still live).
-- `cancelled` is a call cut short because the request it served ended: the
-  requester stopped waiting, or went away. This gateway cannot tell which.
-  Read it with `latencyMs`: a call cancelled at or near the requester's leg
-  budget (30 s by default) is your system answering too slowly for the
-  network, and a short one is the requester leaving early. Either way the
-  exchange is recorded as `other`, not as your system's error.
+- `timeout` on a forwarded operation is your system not answering within
+  this gateway's deadline for it (`PAYER_DAVINCI_BACKEND_TIMEOUT`, 25 s by
+  default, under the requester's 30 s leg budget). The deadline counts from
+  the leg's arrival, so this gateway's own work before the call (validation,
+  the member's lookup) counts against it: a `timeout` whose `latencyMs` is
+  well under the deadline means that work used most of it. The requester is
+  answered this gateway's own `504` while it is still waiting, and the
+  exchange is your system's upstream error. If that work used the whole
+  deadline, your system is not called: no backend call is recorded, the
+  exchange is `other`, and the `504` says your gateway ran out of time.
+- `cancelled` is a call cut short because the request it served ended before
+  that deadline: the requester stopped waiting, or went away. The exchange
+  is recorded as `other`, not as your system's error.
 - `malformed` is an answer this gateway could not read, whether it refused it
   or relayed it. A readable answer a conformance check found fault with is
   not malformed. At `none`, where no conformance check runs, an answer is
@@ -293,6 +300,25 @@ other endpoint URL you've set — the per-operation `PAYER_DAVINCI_DTR_BASE_URL`
 overrides](#advanced-overrides-rarely-needed) included — is checked with a plain
 reachability request. `PAYER_DIRECTORY` is a local file path, not a network
 endpoint, and is never probed.
+
+When a base the gateway calls with a credential is configured with one
+(`PAYER_DAVINCI_BASE_URL` with `PAYER_DAVINCI_TOKEN_URL`, `FHIR_DATA_URL` with
+`FHIR_TOKEN_URL`), its `$metadata` check authenticates the same way the
+gateway's own calls to it do, with the same credential settings and headers
+(through a client of its own, which keeps its own token), and passes or fails
+on that read. The check then repeats the read without the credential and
+records the answer as an informational `anonymous` object (`ok`, `detail`, and
+on a failed read `failure`) on the result; it never fails the check, and it
+follows the same redaction rule as `detail`. A base that refuses the anonymous
+read with `401` or `403` passes with a detail such as `CapabilityStatement
+(FHIR 4.0.1); the base answers /metadata only when authenticated (anonymous:
+HTTP 403)`; any other anonymous failure is named as `anonymous read: …`. The
+result's `latencyMs` covers both reads. A credential the gateway cannot obtain
+fails the check as `credential-rejected`; while it does, each run asks the
+token endpoint for it twice, once for the credential check and once for this
+read, and runs are held to the 30-second cooldown above. A base configured without a
+credential is read anonymously, as the gateway calls it, and carries no
+`anonymous` object.
 
 ## Connect your system of record
 
@@ -780,8 +806,9 @@ own way, set `PAYER_DAVINCI_BACKEND_CORRELATION=off` and it is not sent.
 | `PAYER_DAVINCI_PAS_NATIVE` | **No longer a switch.** PAS submit/update always forward to the payer's `/Claim/$submit` along with every other leg; there is no in-process PAS fallback to select. Setting it `false` logs a notice at boot and changes nothing. |
 | `PAYER_DAVINCI_CRD_SERVICE_ID` | Optional: names your CDS service for `order-select` and `order-sign` requests. Empty (the default) ⇒ each request goes to the one service your CDS service listing offers for the request's hook (see [CDS service selection](#cds-service-selection)). The named service must be in your listing and answer the request's hook; any other request is refused. |
 | `PAYER_DAVINCI_DISPATCH_SERVICE_ID` | Optional: names your CDS service for `order-dispatch` requests, with the same rules. Empty ⇒ the service your listing offers for `order-dispatch`. |
-| `PAYER_DAVINCI_CONTRACT_VERSIONS` | Declared Da Vinci contract versions for the partner payer, comma-separated `<contract>@<line>` tokens (e.g. `pa.pas@2.0, pa.crd@2.0`). Two things read this: the connectivity checks verify the partner's published capability against it (`version-drift` on disagreement, FR-G46), and native-forward routing refuses (before forwarding) any leg whose contract shares no line with it (FR-G48). Requires `PAYER_DAVINCI_BASE_URL`. Unset ⇒ native-forward legs are unfiltered (today's default) and the checks skip the drift comparison. |
+| `PAYER_DAVINCI_CONTRACT_VERSIONS` | Declared Da Vinci contract versions for the partner payer, comma-separated `<contract>@<line>` tokens (e.g. `pa.pas@2.0, pa.crd@2.0`). Two things read this: the connectivity checks verify the partner's published capability against it (`version-drift` on disagreement, FR-G46), and native-forward routing refuses (before forwarding) any leg whose contract shares no line with it (FR-G48). Requires `PAYER_DAVINCI_BASE_URL`. Unset ⇒ native-forward legs are unfiltered (today's default) and the checks skip the drift comparison. From shn-gateway v0.59.0 it is also this gateway's own declaration when `SHN_CONTRACT_VERSIONS` is unset (see [Exchange contract lines](#exchange-contract-lines-shn_contract_versions)); a value that names no `pa.crd`, `pa.dtr` or `pa.pas` line, or a `pa.crd`, `pa.dtr` or `pa.pas` line this build cannot exchange, then refuses boot. Editing it then changes the declaration, so the grow-only rule below applies to it too. |
 | `PAYER_DAVINCI_BACKEND_HEADERS` | Fixed request headers for a partner system that routes on one (a tenant or plan key its API gateway reads before any payload), as comma-separated `Name: value` pairs, e.g. `X-Route-Key: plan-7`. Sent on every request to the partner's bases — the CDS service listing read, each CRD post, the DTR and PAS operations (`$submit` and `$inquire`) and the connectivity probes — and **never** to `PAYER_DAVINCI_TOKEN_URL`. The message bytes are untouched: this is addressing for your own system, not a change to what the request asserts. Refused at boot: a pair that is not `name: value`, an empty name or value, a name or value that is not a valid HTTP field, a repeated name, and the names this gateway sets itself (`Authorization`, `Content-Type`, `Accept`, `Host`, `Content-Length`, `X-Correlation-Id`) or hop-by-hop names (`Connection`, `Transfer-Encoding`, `Upgrade`, …). A value cannot contain a comma. Requires `PAYER_DAVINCI_BASE_URL`. |
+| `PAYER_DAVINCI_BACKEND_TIMEOUT` | How long this gateway waits for your system on each operation it forwards, counted from the leg's arrival at this gateway, as a Go duration from `1s` to `28s` (from v0.59.0). Unset: `25s`, under the requester's 30 s leg budget by enough that a system slower than it is answered as its own timeout, this gateway's framed `504`, while the requester is still waiting, and recorded as your system's `timeout`. Any other value refuses the boot, as does setting it without `PAYER_DAVINCI_BASE_URL`. |
 | `PAYER_DAVINCI_BACKEND_CORRELATION` | Whether each operation forwarded to your system carries `X-Correlation-Id` with the leg's id. Unset (or `on`, the default): it does. `off`: no `X-Correlation-Id` is sent, for a system that validates that header its own way; nothing else changes. Any other value refuses the boot, as does `off` without `PAYER_DAVINCI_BASE_URL`. `PAYER_DAVINCI_BACKEND_HEADERS` can never name `X-Correlation-Id`, whatever this is set to. |
 | `PAYER_DAVINCI_STRICT_EXTENSIONS` | `true` to reserve the per-peer gated overlay (FR-G52) for this partner — a peer flagged this way would refuse a cross-version transform chain carrying or dropping its extensions instead of forwarding stripped or lossy content. **Currently DORMANT: setting it has no routing effect on this deployment.** The strict *consult* itself is already live where transforms are actually selected (route-layer chain selection, exercised by test-only seams), but the one peer this flag targets — the foreign Da Vinci partner reached through native-forward mode — is filtered through arm-1-only forwarding this slice (never through the chain-selection path), so the flag has nothing to gate yet. It goes live together with transform-at-the-native-forward-edge (not yet shipped; re-labeling another gateway's build product as a translated payload needs its own stamp/Provenance semantics worked out first). Default `false`. |
 
@@ -991,7 +1018,7 @@ gateway cannot reach the Hub, or its own build or dial fails) is not an applicat
 and surfaces as `"hub routing failed"`; the responding gateway's own failures are its
 answer (below).
 
-One transport fault is named rather than left generic: a Hub leg that produces **no answer
+Two timeouts are named rather than left generic. One is a Hub leg that produces **no answer
 within the wait your gateway gives it**. The originating gateway posts each exchange to the
 Hub with an HTTP client whose timeout is the leg's whole budget — Hub, counterpart gateway
 and the counterpart's own system together — and the published gateway's client waits
@@ -1005,7 +1032,20 @@ line: `gateway: upstream payer <leg label> call abandoned after <s>s: the reques
 ended (<cause>) (host <host>, leg <leg>, correlation <id>, request written: yes|no)`. The
 cause is usually `context canceled`, since the requester's side closes the call. It names the
 upstream host only, never the path, query, headers or body. It is distinct from `upstream
-payer … unreachable`, which is a call that failed while the request was still live. When the request had
+payer … unreachable`, which is a call that failed while the request was still live. The
+other timeout is a payer gateway's own, from v0.59.0: its participant's system did not
+answer within its deadline (`PAYER_DAVINCI_BACKEND_TIMEOUT`, 25 s by default, counted from
+the leg's arrival), so it answers the requester its own framed `504` while the requester is
+still waiting (`{"error":"the payer's system received this request but did not answer in
+time; it may have acted on it: check its outcome before resending"}`, or `… could not be
+reached in time` when the request was not sent), and logs `gateway: upstream payer <leg label>
+call timed out after <deadline>, this gateway's deadline for its system: answered 504 (host
+<host>, leg <leg>, correlation <id>, request written: yes|no)`. When the gateway's own work
+before the call used the whole deadline, it sends nothing to its system and answers `504
+{"error":"the payer's gateway ran out of time before it could send this request to the
+payer's system; the payer's system did not receive it"}`, logging `gateway: upstream payer
+<leg label> call not sent: this gateway's own work used its <deadline> deadline for its
+system: answered 504 (leg <leg>, correlation <id>)`. When the request had
 already been sent to the Hub, the text adds `; the recipient may have received this request:
 check its outcome before resending`, since the Hub may have forwarded it. An embedding that
 supplies its own `engine.Config.Client` sets the budget with that client's `Timeout`, which
@@ -1045,7 +1085,11 @@ reads why. Below `strict` those answers are relayed as sent (recorded as a findi
 authenticated (`5xx`): its participant's system that could not be reached
 (`502 {"error":"the payer's system could not be reached"}`) or that received the request
 and gave no answer it could carry (`502` saying the payer's system may have acted on it
-and to check the outcome before resending), a system-of-record read that failed (`502`,
+and to check the outcome before resending), a system that did not answer within that
+gateway's deadline for it (`504`, saying the same when the request was sent, or
+`504 {"error":"the payer's system could not be reached in time"}` when it was not), a
+deadline its own work used up before it could ask its system (`504` saying the payer's
+system did not receive the request), a system-of-record read that failed (`502`,
 or `503` while it is unavailable), a validator it cannot reach. (A record it cannot write
 after your system answered withholds nothing: the answer is relayed, and the gateway emits
 `pa.local-write-failed`.) On a PAS submit or update, any refusal the gateway makes after its payer's
@@ -1099,7 +1143,7 @@ support the native-reach and inbound-honor rules below.
 
 | Env var | Description |
 |---|---|
-| `SHN_CONTRACT_VERSIONS` | This gateway's own **declared** exchange-contract versions: comma-separated `<contract>@<line>` tokens, e.g. `pa.crd@2.2, pa.dtr@2.2, pa.pas@2.2`. Drives leg selection, the published `CapabilityStatement`s and `.well-known/davinci-configuration`, and the declaration peers route against. Must be a **subset of the native set** (`pa.crd@{2.0,2.1,2.2}`, `pa.dtr@{2.0,2.1,2.2}`, `pa.pas@{2.0,2.1,2.2}`, `pa.pdex@2.1`) — a token outside it is a boot error, not a routing outcome. Unset ⇒ the build default, the canonical `2.0` line (`pa.crd@2.0`, `pa.dtr@2.0`, `pa.pas@2.0`, `pa.pdex@2.1`). |
+| `SHN_CONTRACT_VERSIONS` | This gateway's own **declared** exchange-contract versions: comma-separated `<contract>@<line>` tokens, e.g. `pa.crd@2.2, pa.dtr@2.2, pa.pas@2.2`. Drives leg selection, the published `CapabilityStatement`s and `.well-known/davinci-configuration`, and the declaration peers route against. Must be a **subset of the native set** (`pa.crd@{2.0,2.1,2.2}`, `pa.dtr@{2.0,2.1,2.2}`, `pa.pas@{2.0,2.1,2.2}`, `pa.pdex@2.1`) — a token outside it is a boot error, not a routing outcome. Unset ⇒ the build default, the canonical `2.0` line (`pa.crd@2.0`, `pa.dtr@2.0`, `pa.pas@2.0`, `pa.pdex@2.1`). From shn-gateway v0.59.0, a payer that forwards to its own system (`PAYER_DAVINCI_BASE_URL`) and declares that system's versions (`PAYER_DAVINCI_CONTRACT_VERSIONS`) derives this set instead when it is unset: the system's `pa.crd`, `pa.dtr` and `pa.pas` lines, plus `pa.pdex@2.1`, which the gateway answers itself. The gateway logs `gateway: declaring <set>, derived from PAYER_DAVINCI_CONTRACT_VERSIONS` at boot; the registry entry peers select it against must declare the same set (see [Opting a line in](#opting-a-line-in), step 3). A derived line needs its validator lane exactly as a declared one does, and a system line this build cannot exchange refuses boot, naming it. Earlier releases declare the build default, which advertises lines the forward then refuses. From shn-gateway v0.59.0, any payer that forwards to its own system also refuses to boot when its declaration, set or derived, has no `pa.crd`, `pa.dtr` or `pa.pas` line: no provider could reach it for prior authorization. |
 | `FHIR_VALIDATE_URL_2_1` | Optional **2.1** `$validate` address override. Compose default: `http://shn-validator-2-1:8080/fhir`. |
 | `FHIR_VALIDATE_URL_2_2` | Optional **2.2** `$validate` address override. Compose default: `http://shn-validator-2-2:8080/fhir`. |
 | `FHIR_CERTIFY_URL_2_1` | Optional **2.1** `$validate` address for the certification evidence only. Never a routing lane. |
@@ -1262,9 +1306,15 @@ That canonical alias cannot satisfy a CRD, DTR or PAS `2.1` request. A qualified
    endpoint must complete synthetic qualification before boot succeeds. An explicit
    well-formed URL retains URL-only startup and can boot while unreachable; verify
    that endpoint operationally before advertising its line.
-3. **Re-register or rotate** (`shn rotate`) so the new declaration reaches the registrar.
+3. **Re-register or rotate** so the new declaration reaches the registrar.
    Declaration tracks the current build/config, and it is published at
-   registration/rotation — not continuously.
+   registration/rotation — not continuously. The registration or rotation must carry the
+   declared set: `shn register` and `shn rotate` send this build's default declaration
+   and do not yet take a declared set, so a gateway that declares any other set builds its
+   registration with the SDK's `Identity.RegistrationWithDeclared`. A gateway SHN hosts for you needs no
+   rotation: SHN's hosting service republishes a changed declaration itself, withdrawing a
+   dropped line before the new configuration rolls out and publishing a new line once the
+   gateway serving it is running.
 4. **Peers converge on their next registry poll.** Until they do, they are still selecting
    against your previous declaration.
 

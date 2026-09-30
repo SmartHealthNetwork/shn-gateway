@@ -1,5 +1,5 @@
-github.com/SmartHealthNetwork/shn-sdk v0.59.1 h1:6if0FEQUAybumFTisBaWFOJla9IMswICj2jhEH4VL+Q=
-github.com/SmartHealthNetwork/shn-sdk v0.59.1/go.mod h1:/tO7P2eTrLo1tsAdETap6/394UcdtdMpyXgYbLblKhc=
+github.com/SmartHealthNetwork/shn-sdk v0.59.2 h1:bDQyMLQkOqpWuWCuPtwzSrz+ZTsdH6nwU9IsjaV3Z1w=
+github.com/SmartHealthNetwork/shn-sdk v0.59.2/go.mod h1:/tO7P2eTrLo1tsAdETap6/394UcdtdMpyXgYbLblKhc=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/golang-jwt/jwt/v5 v5.3.1 h1:kYf81DTWFe7t+1VvL7eS+jKFVWaUnK9cB1qbwn63YCY=
 github.com/golang-jwt/jwt/v5 v5.3.1/go.mod h1:fxCRLWMO43lRc8nhHWY6LGqRcf+1gQWArsqaEUEa5bE=

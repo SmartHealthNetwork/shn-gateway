@@ -65,9 +65,9 @@ const backendOK = "ok"
 
 // backendNotAnError are the BackendCall classes that do not count in
 // BackendError: those in which the participant's system gave an answer of its
-// own, and a call the request's end cut short, which may be the requester
-// leaving early (BackendCall's cancelled series and its latency tell a
-// system answering too slowly apart). Every other class counts.
+// own, and a call the request's end cut short, the requester leaving before
+// the gateway's deadline for that system (a system slower than the deadline
+// is its timeout, which counts). Every other class counts.
 var backendNotAnError = map[string]bool{backendOK: true, engine.BackendHTTP3xx: true, engine.BackendHTTP4xx: true, engine.BackendCancelled: true}
 
 // exchangeSeriesBound is the most series exchangeMetricHook can report for one

@@ -89,7 +89,7 @@ type ExchangeRecord struct {
 	// RefusedBy and Rule say who refused and on which network rule
 	// (RefusalParties, RefusalRules); empty unless Outcome is ExchangeRefused.
 	// A facility's or a PHG's gateway refusing an inbound leg is recorded as
-	// ExchangeOther. RefusalLimit is reserved, and this release records an
+	// ExchangeOther. RefusalLimit is reserved, and from v0.58.0 the gateway records an
 	// Authorization Framework denial as RefusalAuthority, whatever its reason.
 	RefusedBy, Rule string
 	// Status is the status the requester received: the HTTP status of an
@@ -187,10 +187,9 @@ const (
 	BackendRead      = "read"
 	BackendMalformed = "malformed"
 	// BackendCancelled is a call cut short because the request it served
-	// ended: the requester stopped waiting or went away, which this gateway
-	// cannot tell apart. The call's latency can: one cut short at the
-	// requester's leg budget is the participant's system answering too
-	// slowly. The exchange is not recorded as an upstream error either way.
+	// ended: the requester stopped waiting or went away. A system slower
+	// than the responder's own deadline (WithBackendDeadline) is its
+	// timeout instead. The exchange is not recorded as an upstream error.
 	BackendCancelled = "cancelled"
 )
 

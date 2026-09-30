@@ -15,6 +15,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
@@ -23,6 +24,9 @@ import (
 // ---- Payer role ----
 
 func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
+	// The responder's deadline for its participant's system counts from here
+	// (WithBackendDeadline): wall time, as the requester's own budget runs.
+	r = r.WithContext(withLegArrival(r.Context(), time.Now()))
 	// Every answer written below is this gateway's answer as the leg's
 	// recipient; refusals before the leg is known are checked as such.
 	w, scope := g.withScope(w, relay.RoleRecipient)

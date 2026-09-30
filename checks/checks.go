@@ -52,6 +52,21 @@ type Result struct {
 	// body (REDACTION RULE) — with lists count-capped at capabilityListCap
 	// and total input bounded by maxBodyBytes.
 	Capability *Capability `json:"capability,omitempty"`
+	// Anonymous is informational: an authenticated fhir-metadata probe's same
+	// GET without the credential (Target.AuthClient). It never decides OK; a
+	// partner that answers /metadata only when authenticated is not failing.
+	// Present only on an authenticated probe; ADDITIVE on the wire, like
+	// Capability.
+	Anonymous *AnonymousRead `json:"anonymous,omitempty"`
+}
+
+// AnonymousRead is what an unauthenticated read of an authenticated target's
+// /metadata answered. Detail and Failure obey the REDACTION RULE, as
+// Result's do; Failure is present exactly when OK is false.
+type AnonymousRead struct {
+	OK      bool     `json:"ok"`
+	Detail  string   `json:"detail"`
+	Failure *Failure `json:"failure,omitempty"`
 }
 
 // Failure is Result's machine-readable failure classification. Code is a
@@ -248,7 +263,20 @@ type Target struct {
 	// partner system that routes on one is probed the way it is called).
 	// nil ⇒ none; the token probe never uses them.
 	Headers http.Header
+	// AuthClient, when set, is a client that authenticates the way the
+	// gateway's own calls to this target do. A fhir-metadata probe reads
+	// through it and passes or fails on that read; the runner's plain client
+	// then reads anonymously too, recorded as Result.Anonymous. A credential
+	// the client cannot obtain surfaces as a *StatusError (the token
+	// endpoint's status) or ErrCredential, so this package never sees the
+	// token endpoint's error text. nil ⇒ the probe reads anonymously, as
+	// the gateway's calls to an unauthenticated partner do.
+	AuthClient *http.Client
 }
+
+// ErrCredential is an AuthClient's report that it could not obtain its
+// credential for a reason other than a token endpoint status.
+var ErrCredential = errors.New("checks: credential unavailable")
 
 // withHeaders adds t.Headers to a probe request.
 func (t Target) withHeaders(req *http.Request) {
@@ -447,7 +475,7 @@ func (r *Runner) probe(ctx context.Context, t Target) Result {
 
 	switch t.Kind {
 	case KindFHIRMetadata:
-		res.OK, res.Detail, res.Failure, res.Capability = r.probeFHIRMetadata(pctx, t)
+		res.OK, res.Detail, res.Failure, res.Capability, res.Anonymous = r.probeFHIRMetadata(pctx, t)
 	case KindToken:
 		res.OK, res.Detail, res.Failure = r.probeToken(pctx, t.TokenFetch)
 	case KindReachable:
@@ -464,7 +492,37 @@ func (r *Runner) probe(ctx context.Context, t Target) Result {
 }
 
 // probeFHIRMetadata GETs <base>/metadata and expects a CapabilityStatement.
-func (r *Runner) probeFHIRMetadata(ctx context.Context, t Target) (bool, string, *Failure, *Capability) {
+// With t.AuthClient it reads authenticated, the way the gateway's own calls
+// do, and passes or fails on that read alone; the anonymous read that follows
+// is recorded, and named in Detail when the two disagree.
+func (r *Runner) probeFHIRMetadata(ctx context.Context, t Target) (bool, string, *Failure, *Capability, *AnonymousRead) {
+	if t.AuthClient == nil {
+		ok, detail, failure, cap := r.readMetadata(ctx, t, r.client)
+		return ok, detail, failure, cap, nil
+	}
+	ok, detail, failure, cap := r.readMetadata(ctx, t, t.AuthClient)
+	aok, adetail, afailure, _ := r.readMetadata(ctx, t, r.client)
+	switch {
+	case ok && !aok && refusesAnonymous(afailure):
+		detail += fmt.Sprintf("; the base answers /metadata only when authenticated (anonymous: %s)", adetail)
+	case ok && !aok:
+		// Not a refusal: the anonymous read failed for some other reason (it
+		// may only have run out of time), which says nothing about auth.
+		detail += "; anonymous read: " + adetail
+	case !ok && aok:
+		detail += "; an anonymous read answers a CapabilityStatement"
+	}
+	return ok, detail, failure, cap, &AnonymousRead{OK: aok, Detail: adetail, Failure: afailure}
+}
+
+// refusesAnonymous reports whether a failed anonymous read was the base
+// refusing a caller without a credential (HTTP 401 or 403).
+func refusesAnonymous(f *Failure) bool {
+	return f != nil && f.Code == FailHTTPStatus && (f.Hint == "HTTP 401" || f.Hint == "HTTP 403")
+}
+
+// readMetadata is one GET <base>/metadata through client.
+func (r *Runner) readMetadata(ctx context.Context, t Target, client *http.Client) (bool, string, *Failure, *Capability) {
 	base := t.URL
 	redacted := targetOf(base)
 
@@ -487,8 +545,16 @@ func (r *Runner) probeFHIRMetadata(ctx context.Context, t Target) (bool, string,
 			&Failure{Code: FailInternal, Hint: redactErr(err).Error()}, nil
 	}
 	t.withHeaders(req)
-	resp, err := r.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
+		var se *StatusError
+		if errors.As(err, &se) {
+			return false, fmt.Sprintf("credential check failed (HTTP %d)", se.Code),
+				&Failure{Code: FailCredentialRejected, Hint: fmt.Sprintf("HTTP %d", se.Code)}, nil
+		}
+		if errors.Is(err, ErrCredential) {
+			return false, "credential check failed", &Failure{Code: FailCredentialRejected}, nil
+		}
 		return false, fmt.Sprintf("GET %s/metadata: %v", redacted, redactErr(err)),
 			&Failure{Code: FailUnreachable, Hint: redactErr(err).Error()}, nil
 	}
@@ -594,8 +660,9 @@ func (r *Runner) probeDavinciConfig(ctx context.Context, t Target) (bool, string
 	// unpublished — HRex 1.2.0 requires plain-TLS readability, so 401/403 mean
 	// "not discoverable", not "broken". Tolerated like 404, with the HRex
 	// nonconformance NAMED in the detail so it surfaces without paging. The
-	// fhir-metadata probe deliberately keeps 401 as a failure — /metadata is
-	// core conformance surface. Flip this branch to FailHTTPStatus if the
+	// fhir-metadata probe deliberately keeps a 401 on the read the gateway
+	// makes (authenticated when a credential is configured) as a failure —
+	// /metadata is core conformance surface. Flip this branch to FailHTTPStatus if the
 	// posture is revisited; TestDavinciConfigProbe pins whichever stands.
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxBodyBytes))

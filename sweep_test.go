@@ -85,7 +85,9 @@ const internalTokenPattern = `S5b|Task[ -][0-9]|(?i:\btask-[0-9])|per the plan|M
 	// Un-hyphenated spellings that slipped through the original pattern (this task's own
 	// Finding 3): a bare task id (\bT[0-9]{1,2}\b — "T14"), "fix round N" without the
 	// hyphen "round-N" already catches, and "ruling YYYY-MM-DD" as its own citation form
-	// distinct from "spec YYYY-MM-DD" above.
+	// distinct from "spec YYYY-MM-DD" above. The bare task-id arm is this module's alone:
+	// the sdk builds ISO-8601 time literals ("T00:00:00Z") it would flag, and the root
+	// pin that keeps the two sweeps in step lists it as one-sided.
 	`|\bT[0-9]{1,2}\b|(?i:fix round [0-9])|(?i:ruling [0-9]{4}-[0-9]{2}-[0-9]{2})` +
 	// R9: the bare form of the single ruling number this whole task implements (round-11
 	// review NEW-3) — a leaked "R9" carries no "T14"/"ruling <date>" alongside it to catch
@@ -769,6 +771,78 @@ func TestCodingFragmentsAreNotIssueReferences(t *testing.T) {
 	} {
 		if m := sweepFind(re, line); len(m) == 0 {
 			t.Errorf("an issue reference passed: %s", line)
+		}
+	}
+}
+
+// relativeReleasePattern matches a release named only relative to its reader:
+// "this release" or "next release", also broken across a line or a comment's
+// line. The module ships its text in every later release too, where either
+// phrase names the wrong one; name the release ("From v0.59.0", "Breaking in
+// v0.52.0", "new in v0.19.0").
+const relativeReleasePattern = `(?i)\b(this|next)[\s/#*]+release\b`
+
+func TestReleasesAreNamed(t *testing.T) {
+	re := regexp.MustCompile(relativeReleasePattern)
+	err := filepath.WalkDir(".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", "node_modules", "testdata-cache":
+				return fs.SkipDir
+			}
+			return nil
+		}
+		rel := filepath.ToSlash(path)
+		if sweepSkipFiles[rel] {
+			return nil
+		}
+		b, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return rerr
+		}
+		if bytes.IndexByte(b, 0) >= 0 {
+			return nil // binary
+		}
+		for _, m := range re.FindAllIndex(b, -1) {
+			t.Errorf("%s:%d: %q names a release relative to its reader, and this module's text ships in every later release; name the release (\"From vX.Y.Z\", \"Breaking in vX.Y.Z\").",
+				rel, 1+bytes.Count(b[:m[0]], []byte("\n")), b[m[0]:m[1]])
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk module tree: %v", err)
+	}
+}
+
+// The rejection rows for relativeReleasePattern: each relative form is caught,
+// broken across a line or a comment's line too, and a named release, an
+// earlier or a later one are not.
+func TestRelativeReleasePattern(t *testing.T) {
+	re := regexp.MustCompile(relativeReleasePattern)
+	for _, s := range []string{
+		"**Breaking in this release** (payer wiring):",
+		"new in This Release and **evolving**",
+		"Next release: a `$metadata` check",
+		"is byte-identical to this release's",
+		"as\n  before this\n  release, and",
+		"\t// RefusalLimit is reserved, and this\n\t// release records",
+	} {
+		if !re.MatchString(s) {
+			t.Errorf("not caught: %q", s)
+		}
+	}
+	for _, s := range []string{
+		"**Breaking in v0.52.0** (`Store` connectors):",
+		"is byte-identical to an earlier release's",
+		"will be removed in a later release",
+		"releases before v0.59.0 ignore it",
+		"this releases nothing", // not the phrase
+	} {
+		if re.MatchString(s) {
+			t.Errorf("caught: %q", s)
 		}
 	}
 }

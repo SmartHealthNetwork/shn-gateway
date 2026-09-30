@@ -79,6 +79,10 @@ receives changes.
   `RefusalParties`, `RefusalRules`, `BackendErrorClasses`), each ending in
   `other`: a value the gateway cannot classify is recorded as `other`, never as
   a caller's string.
+- **Fixed in v0.59.0:** a payer that requires known members
+  (`REQUIRE_KNOWN_MEMBERS=true`) records its `400 unknown member` refusal on
+  `conformance`, the rule for a check a participant opted into. v0.58.0
+  recorded it on `other`.
 - A requester's gateway cannot tell a recipient gateway's refusal inside the
   answer's frame from the recipient's own system answering an error, so its
   record calls either one `upstream-error`; the answering gateway's record
@@ -106,20 +110,79 @@ receives changes.
   out of time `timeout`, whatever the participant's connector reported; a
   call or read abandoned while the request was still live (a connector
   cancelling its own read, a client its own attempt) is the system not
-  answering. The request ends when the requester stops waiting or goes
-  away, and the gateway cannot tell which: a `cancelled` call whose latency
-  reached the requester's leg budget (30 s by default) is the participant's
-  system answering too slowly for it. The exchange of a cut-short call is
+  answering. A forwarded operation that runs past the responder's own
+  deadline (`engine.WithBackendDeadline`, which the gateway sets from
+  `PAYER_DAVINCI_BACKEND_TIMEOUT`) is the participant's system's `timeout`,
+  and its exchange that system's upstream error. The exchange of a cut-short call is
   never an upstream error: a refusal it caused, the operation's or a later
   read's, is `other`. A system-of-record read that a
   check at `strict` needed and could not make refuses as that check's
   `conformance` refusal; the read is counted in `BackendCalls`, and, after
   the operation, is not the `Backend`.
-- `limit` is a reserved value, and this release records an Authorization
+- `limit` is reserved; from v0.58.0 the gateway records an Authorization
   Framework denial as `authority`, whatever its reason; a facility's `consent`
   refusals (a federated query without a consent reference, or one the consent
   service does not permit) are `consent`. A facility's or a PHG's gateway
   refusing a leg is refused by `other`.
+
+## The payer system's deadline (v0.59.0)
+
+- **Behavior change in v0.59.0:** a payer gateway waits for its participant's
+  system at most `PAYER_DAVINCI_BACKEND_TIMEOUT` (25 s by default), counted
+  from the leg's arrival at the gateway, on each operation it forwards: under
+  the requester's 30 s leg budget. A system slower than that is answered to
+  the requester as the gateway's own framed `504` (the system's timeout; the
+  message says whether the request was sent and may have been acted on),
+  where before the requester's own gateway's hub-leg timeout ran out first.
+  The access line records the call as `timeout` and the exchange as
+  `upstream-error`, so it counts in `BackendError`. The gateway logs one line
+  for it:
+
+  `gateway: upstream payer <leg label> call timed out after <deadline>, this gateway's deadline for its system: answered 504 (host <host>, leg <leg>, correlation <id>, request written: yes|no)`
+
+  If the gateway's own work before the call used the whole deadline, it sends
+  nothing to its system, records no backend call, settles the exchange as
+  `other`, and answers its own `504` saying the payer's system did not
+  receive the request.
+
+- **Upgrade effect:** a payer system that answers between the deadline (25 s)
+  and the requester's leg budget (30 s) could get its answer through before;
+  from v0.59.0 it gets the gateway's `504`. For a system that needs longer,
+  raise `PAYER_DAVINCI_BACKEND_TIMEOUT`, up to `28s`.
+- **Additive setting:** `PAYER_DAVINCI_BACKEND_TIMEOUT`, a duration from `1s`
+  to `28s`; any other value refuses the boot. Go API:
+  `engine.WithBackendDeadline(d)`; without it the responder sets no deadline
+  of its own, as before.
+
+## A payer's declaration follows its own system (v0.59.0)
+
+- **Behavior change in v0.59.0:** a payer gateway that forwards to its own
+  system (`PAYER_DAVINCI_BASE_URL`), with that system's versions declared
+  (`PAYER_DAVINCI_CONTRACT_VERSIONS`) and `SHN_CONTRACT_VERSIONS` unset, no
+  longer declares the build default. It declares its system's `pa.crd`,
+  `pa.dtr` and `pa.pas` lines, plus `pa.pdex@2.1`, which it answers itself,
+  and logs:
+
+  `gateway: declaring <set>, derived from PAYER_DAVINCI_CONTRACT_VERSIONS (SHN_CONTRACT_VERSIONS is unset); the registry entry peers select this gateway against must declare the same set`
+
+  Before, it declared the build default and refused (FR-G48) every leg whose
+  contract shares no line with its system, so a system on another line was
+  unreachable. An explicit `SHN_CONTRACT_VERSIONS` still wins.
+- **Upgrade effect:** such a payer's declared set can change. Its registry
+  entry must declare the new set (CONFIGURATION.md, "Opting a line in",
+  step 3), and a derived `2.1` or `2.2` line needs its validator lane
+  (`FHIR_VALIDATE_URL_<line>`), exactly as a declared one does.
+- **Breaking (configuration):** these now refuse to boot, naming what to set:
+  - a payer forwarding to its own system whose declaration, set or derived,
+    has no `pa.crd`, `pa.dtr` or `pa.pas` line (for example
+    `SHN_CONTRACT_VERSIONS=pa.pdex@2.1`);
+  - with `SHN_CONTRACT_VERSIONS` unset, a `PAYER_DAVINCI_CONTRACT_VERSIONS`
+    that names no `pa.crd`, `pa.dtr` or `pa.pas` line, or one this build
+    cannot exchange;
+  - with `SHN_CONTRACT_VERSIONS` unset, a derived line with no validator lane.
+- **Go API (additive):** `engine.DeriveDeclaredContractVersions(system)` (the
+  set such a payer declares) and `engine.RequireForwardedContractLine(declared)`
+  (the refusal above).
 
 ## Native PAS response contract
 
@@ -131,7 +194,7 @@ and stamps no contract line of its own on a message it did not produce. A payer
 that pends answers `pended`, and the requester obtains the determination by
 asking for it (`Claim/$inquire`, leg type `pas-claim-inquire`).
 
-**Breaking in this release** (the assembly path is gone):
+**Breaking in v0.46.0** (the assembly path is gone):
 
 - `engine.WithPendReQuery` is REMOVED. It configured the pend re-query the poll
   performed; there is no poll.
@@ -312,7 +375,7 @@ carried by default.**
   request carrying no Patient is carried as sent. It returns as a participant
   opt-in (`ENRICH_NATIVE_REQUESTS`, below). The other registered edits (callback
   removed, prefetch obtained, coverage obtained, payer identity mapping) are
-  unchanged in this release.
+  unchanged in v0.53.0.
 - The receiving gateway no longer compares the patient the leg's token names with
   the patient the request names on the CRD, DTR, PAS and inquiry legs: it handles
   the member the request names as it would directly. A request whose member the
@@ -574,7 +637,7 @@ carried by default.**
   only on a line after the one the leg was sent at gets one finding with
   `verdict` `valid` and `decision` `record`; this is not a defect. When the
   gateway has no validator for any of the lines, the answer is judged once, as
-  before this release, and its finding carries no `declaredLine` or `lines`.
+  before v0.55.0, and its finding carries no `declaredLine` or `lines`.
 - **A known limit.** An answer valid on any supported line is relayed at every
   level. For example, an answer sent at 2.2 that is structurally invalid at 2.2
   but valid at 2.0 is relayed at `strict`. A payer's declared line may be the
@@ -1010,7 +1073,7 @@ the acquisition boundary available when an outer client timeout replaces the
 returned error chain; resource timeouts remain transport failures. No client-wide
 or global failure state is introduced.
 
-**Breaking in this release** (payer wiring):
+**Breaking in v0.39.0** (payer wiring):
 
 - `engine.New` returns `(*Gateway, error)`. It errors — rather than starting — for the two
   conditions a deployment can hit with otherwise-valid config: a `role=payer` gateway with
@@ -1023,7 +1086,7 @@ or global failure state is introduced.
   in-process persona stub (`engine.StubHolderData`) is gone. Its Store half survives as
   `engine.NewMemStore` — the in-memory `Store` default, carrying no persona content.
 
-**Breaking in this release** (wire behaviour — new refusal class):
+**Breaking in v0.39.0** (wire behaviour — new refusal class):
 
 - **The gateway now enforces the FR-16 / FR-27 attestation requirements at the inbound
   gate, before dispatch, and answers `403`.** This runs on all three PAS entrances — the
@@ -1046,7 +1109,7 @@ or global failure state is introduced.
   `Config.Adjudicator` is unaffected in shape; what changes is that a nonconformant item is
   refused before any adjudication runs, rather than being handed to it.
 
-**Breaking in this release** (wire behaviour — a timed-out Hub leg answers `504`):
+**Breaking in v0.52.0** (wire behaviour — a timed-out Hub leg answers `504`):
 
 - An originating gateway whose Hub leg produces no answer within its HTTP client's
   timeout (`engine.Config.Client.Timeout`; 30 seconds in the published binary) no longer
@@ -1114,7 +1177,7 @@ or global failure state is introduced.
   keys the envelope (its correlation id and ciphertext hash), so only a byte-identical
   envelope is refused `409`, and every call is sealed afresh.
 
-**Breaking in this release** (wire behaviour — a correlation id belongs to one patient):
+**Breaking in v0.52.0** (wire behaviour — a correlation id belongs to one patient):
 
 - A payer gateway refuses a prior-authorization submission with `409` (`correlation id
   already names another patient's authorization`) before its payer's system is asked, in
@@ -1124,7 +1187,7 @@ or global failure state is introduced.
   decide, it answers `502 {"error":"holder read failed"}` without asking the payer (framed
   as its answer since v0.54.0; before that the requester saw `502 hub routing failed`).
 
-**Breaking in this release** (`Store` connectors):
+**Breaking in v0.52.0** (`Store` connectors):
 
 - `RecordEOB` and `RecordDecision` on `engine.MemStore` and `pgstore.PgStore` return
   `engine.ErrEOBSubjectMismatch` instead of replacing an EOB filed for another patient.
@@ -1147,7 +1210,7 @@ These surfaces are new and intentionally **not yet pinned to a stability tier**
 expected to change shape as their consumer matures:
 
 - **Observer stream** (`OBSERVER_ADDR`, `engine.Config.Observer`, `ObserverEvent` JSON,
-  `observer.Hub`): new in this release and **evolving** — field additions and event-kind
+  `observer.Hub`): new in v0.19.0 and **evolving** — field additions and event-kind
   additions may happen in minor releases. The SHN Kit's `shnkitd` daemon (`kit/relay`) is now
   this stream's first real consumer: a local desktop inspection tool that SSE-subscribes to a
   provider-role gateway child's `/events` and re-emits frames onto its own run-timeline bus,
@@ -1172,13 +1235,13 @@ expected to change shape as their consumer matures:
   egress leg's pre-seal before/after payload pair — never a wire exchange, never audited, and
   never checked by any conformance surface (see `docs/CONFIGURATION.md`, "Demo-only pre-seal
   edge capture"). It is populated only when the new env `SHN_DEMO_EDGE_CAPTURE`
-  (`engine.Config.DemoEdgeCapture`) is set, which as of this release also requires
+  (`engine.Config.DemoEdgeCapture`) is set, which also requires
   `OBSERVER_ADDR` to be set — otherwise the flag is gated off at config load rather than
   capturing into a store nothing could ever read. `POST /demo/transform`'s existing 200 and
-  422 response bodies also gain an additive `chain` field on this same release — the
+  422 response bodies also gain an additive `chain` field in v0.35.0 — the
   compatibility-chain hops the run walked (or attempted), in the same shape already published
   on observer events; every existing field on both responses is unchanged. New exported engine
-  surface backing this release, each its own release-notes bullet:
+  surface backing these v0.35.0 additions, each its own release-notes bullet:
 
   - `engine.ChainSteps(contract, from, to string) []ChainStep` — a read-only accessor reporting
     the compatibility chain `RunTransformChain` would walk, without running any step function.
@@ -1195,7 +1258,7 @@ expected to change shape as their consumer matures:
   Same evolving posture as the rest of this surface: consumers pin exact gateway versions.
 
 - **`scenariodriver`** (`Config`, `Driver`, transport methods, builders, `Cards`/`ParseCards`):
-  the UC-01…08 scenario-driving package. New in this release and **evolving** — signatures and
+  the UC-01…08 scenario-driving package. New in v0.19.0 and **evolving** — signatures and
   return shapes may change in minor releases as the SHN Kit's daemon and the live conformance
   gate exercise it further. Consumers pin exact gateway versions.
 
@@ -1223,7 +1286,7 @@ expected to change shape as their consumer matures:
   consumer on the old names updates the two call sites and re-pins.
 
 - **`LegMetric`** (`engine.Config.LegMetric func(outcome string)`, consts
-  `engine.LegOutcomeRouted/Answered/Denied/Unreachable/Failed`): new in this release and
+  `engine.LegOutcomeRouted/Answered/Denied/Unreachable/Failed`): new in v0.29.0 and
   **evolving** — a nil-safe hook that receives one outcome string per origination-leg event at
   the roundTrip choke point. Nil (the published-binary default) means no emission; the hook
   carries no payloads and is conformance-neutral (`TestLegMetric_ConformanceNeutral` — responses
@@ -1241,15 +1304,18 @@ expected to change shape as their consumer matures:
   `failure` since v0.33.0). Each result is `{id, target, ok, detail, checkedAt,
   latencyMs}` plus, on failing results only, `failure {code, hint}` with `code` drawn
   from a closed set (`unreachable`, `http-status`, `invalid-capability-statement`,
-  `credential-rejected`, `not-checked`, `internal`). Additive-only intent: existing keys
+  `credential-rejected`, `not-checked`, `internal`). From v0.59.0, a `$metadata` check of
+  a base configured with a credential reads authenticated and adds an informational
+  `anonymous {ok, detail, failure}` object, the same read without the credential, which
+  never decides `ok`. Additive-only intent: existing keys
   and `detail` strings are stable fallbacks; new keys may appear in 0.x minors — decode
   tolerantly, never with unknown-field rejection. See `docs/CONFIGURATION.md`
   ("Operational checks") for semantics and redaction guarantees.
 
-**Additive setting, next release: `PAYER_DAVINCI_BACKEND_HEADERS`** — fixed request headers
+**Additive setting, v0.49.0: `PAYER_DAVINCI_BACKEND_HEADERS`** — fixed request headers
 for a partner system that routes on one, sent on every request to the partner's bases and never
 to its token endpoint (`docs/CONFIGURATION.md`, native-forward payer mode). Unset ⇒ every request
-is byte-identical to this release's; the option adds headers only, never changes a body, and a
+is byte-identical to an earlier release's; the option adds headers only, never changes a body, and a
 deployment that does not set it is unaffected.
 
 ## Internal seams (not for partner use)
