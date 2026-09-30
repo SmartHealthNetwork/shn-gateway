@@ -1176,7 +1176,7 @@ func (g *Gateway) handlePASInquireInbound(w http.ResponseWriter, r *http.Request
 		// below exactly as the submit leg's decision EOB is.
 		ledgerCommit, events = g.inquiryLedgerEffect(env.Metadata.Sender, subjectPCI, boundPatientRef, env.Metadata.CorrelationID, facts, responseFHIR, &result)
 	}
-	if status, msg := g.fenceResponseSubjectWith("pas-claim-inquire", boundPatientRef, env.Metadata.CorrelationID, result, read.refuses); status != 0 {
+	if status, msg := g.fenceResponseSubjectWith(r.Context(), "pas-claim-inquire", boundPatientRef, env.Metadata.CorrelationID, result, read.refuses); status != 0 {
 		g.refuseInbound(w, r, legPASClaimInquire, env, tok, answerTok, status, msg, nil)
 		return
 	}
@@ -1474,10 +1474,12 @@ func (g *Gateway) handlePASInquireIngress(w http.ResponseWriter, r *http.Request
 	// defaulting to one.
 	recipient, _, status, msg := g.recipientForWith(pasBundleCoverage(body), bundleRefResolver(body))
 	if status != 0 {
+		exchangeOf(r.Context()).routed(status)
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
 	scope.leg = leg
+	exchangeOf(r.Context()).leg(leg)
 	ex := g.exchanges.Begin(workstreamPA)
 	child := g.ingressCorrelation(w, r)
 	requestObservation := append([]byte(nil), body...)
@@ -1515,7 +1517,7 @@ func (g *Gateway) handlePASInquireIngress(w http.ResponseWriter, r *http.Request
 	if bad := validatePASInquiryAnswer(answer); bad.Status != 0 {
 		// A repeated member name is read one way only (RuleDuplicateKey): it
 		// refuses at every level, with strict's refusal.
-		if errors.Is(scanMessage(answer), relay.ErrDuplicateKey) || g.guard(answerCtx, KindContent, RuleAnswerShape, answer) {
+		if repeatsAMember(answerCtx, answer) || g.guard(answerCtx, KindContent, RuleAnswerShape, answer) {
 			g.recordLeg(ex.ID, legProj.Project(child, "error"))
 			writeJSON(w, bad.Status, map[string]string{"error": bad.Message})
 			return

@@ -151,7 +151,9 @@ type preferredSoR struct {
 
 func TestSoRPrefersContextCapability(t *testing.T) {
 	sor := &preferredSoR{}
-	if ReadSystemOfRecord(sor) != sor {
+	// The reader notes each read on the call's exchange record around the
+	// connector's own context reads, never the legacy adapter's.
+	if r, ok := ReadSystemOfRecord(sor).(recordingSoR); !ok || r.inner != ContextSystemOfRecord(sor) {
 		t.Fatal("context capability replaced by legacy adapter")
 	}
 }

@@ -44,6 +44,7 @@ func (g *Gateway) refuseSoRFailure(w http.ResponseWriter, r *http.Request, leg i
 	}
 	status, msg := SoRFailureResponse(err)
 	g.refuseInbound(w, r, leg, env, tok, answerTok, status, msg, nil)
+	exchangeOf(r.Context()).sorFailure()
 	return true
 }
 

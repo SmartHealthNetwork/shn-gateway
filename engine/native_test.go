@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
@@ -35,12 +36,15 @@ type stubPartner struct {
 	lastBody      []byte
 	status        int
 	respByPath    map[string][]byte
+	// calls counts every request the stub answered, listings included.
+	calls atomic.Int32
 }
 
 func newStubPartner(t *testing.T) *stubPartner {
 	t.Helper()
 	s := &stubPartner{status: 200, respByPath: map[string][]byte{}}
 	s.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.calls.Add(1)
 		if r.Method == http.MethodGet && r.URL.Path == "/cds-services" {
 			// The CDS service listing the CRD legs read; the tests name the service.
 			s.listingHeader = r.Header.Clone()

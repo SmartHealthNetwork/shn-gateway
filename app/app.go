@@ -2,7 +2,8 @@
 // config-only, loads its `shn register` bundle (shnsdk.LoadBundle), resolves
 // trust anchors + endpoints + the FHIR validator URL from /discovery, populates
 // the peer Registry from the registrar /holders feed (the federation core),
-// requires a FHIR system of record (FHIR_DATA_URL) with an in-memory Store default, and defaults the validator to the
+// requires a FHIR system of record (FHIR_DATA_URL; a native-forward payer may keep none)
+// with an in-memory Store default, and defaults the validator to the
 // REAL operation-level validator FAIL-CLOSED. It reuses shn-sdk for all
 // participation and NEVER imports the private substrate's internal packages — the
 // gateway boundary fence (gateway/boundary_test.go) enforces this structurally (AI-11).
@@ -38,6 +39,7 @@ import (
 	fhirsor "github.com/SmartHealthNetwork/shn-gateway/connectors/fhirsor"
 	pgstore "github.com/SmartHealthNetwork/shn-gateway/connectors/pgstore"
 	smartauth "github.com/SmartHealthNetwork/shn-gateway/connectors/smartauth"
+	"github.com/SmartHealthNetwork/shn-gateway/diagnostics"
 	engine "github.com/SmartHealthNetwork/shn-gateway/engine"
 	observer "github.com/SmartHealthNetwork/shn-gateway/observer"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
@@ -47,7 +49,8 @@ import (
 
 // config is the collapsed PUBLIC config surface. Required:
 // SHN_DISCOVERY_URL (the single anchor), ROLE, SHN_SECRETS (the bundle dir), and
-// FHIR_DATA_URL (the holder's own FHIR system of record — every role; see build()).
+// FHIR_DATA_URL (the holder's own FHIR system of record — every role but a
+// native-forward payer, which may keep none; see build()).
 // A payer additionally requires its content occupant (PAYER_DAVINCI_BASE_URL, or an
 // injected Config.Responder). Everything else is discovery-resolved or an optional
 // override. The seed /
@@ -200,8 +203,9 @@ type config struct {
 	// was written, silently breaking response correlation.
 	ExchangeTTL time.Duration
 
-	// FHIR connector block. FHIRDataURL is REQUIRED on every role (there is no in-process
-	// persona stub to fall back on); the credential fields below are optional.
+	// FHIR connector block. FHIRDataURL is REQUIRED on every role but a native-forward payer
+	// (there is no in-process persona stub to fall back on); the credential
+	// fields below are optional.
 	FHIRDataURL      string
 	FHIRTokenURL     string
 	FHIRClientID     string
@@ -269,6 +273,11 @@ type config struct {
 	// mapping seam is off (verbatim relay, the prior behavior).
 	PayerDavinciBackendHeadersRaw string
 	PayerDavinciBackendHeaders    http.Header
+	// PayerDavinciBackendCorrelationOff stops the leg's id being sent to the
+	// payer's own system as X-Correlation-Id (PAYER_DAVINCI_BACKEND_CORRELATION=off),
+	// for a system that validates that header its own way. Default: sent.
+	PayerDavinciBackendCorrelationOff bool
+	payerDavinciBackendCorrelationRaw string
 	// PayerEligibilityURL is the payer's own coverage-eligibility endpoint, when
 	// it declares one: the absolute URL its system takes a POST of a
 	// CoverageEligibilityRequest on. The request is then carried there exactly
@@ -454,6 +463,17 @@ var removedSettings = []struct{ key, replacedBy string }{
 	{"PAYER_DAVINCI_DISPATCH_HOOK", "the request's hook is never changed; the payer's CDS service is chosen by the request's hook (PAYER_DAVINCI_DISPATCH_SERVICE_ID still names one)"},
 }
 
+// errNoSystemOfRecord refuses a gateway with no FHIR_DATA_URL that must read
+// its members from one: every role but a payer that forwards natively.
+var errNoSystemOfRecord = fmt.Errorf("gateway: FHIR_DATA_URL is required — the gateway reads its members, coverage and " +
+	"clinical facts from the holder's own FHIR system of record (the in-process persona stub is gone). " +
+	"Point it at your US Core server (e.g. http://hapi:8080/fhir), or at your tenant partition. " +
+	"Only a payer that forwards to its own system (PAYER_DAVINCI_BASE_URL) may run without one")
+
+// payerNative reports whether the gateway is a payer whose own system answers
+// every exchange behind PAYER_DAVINCI_BASE_URL.
+func payerNative(cfg config) bool { return cfg.Role == "payer" && cfg.PayerDavinciBaseURL != "" }
+
 // loadConfig reads the gateway's public configuration from getenv: the URL
 // checks, the ROLE/PORT bounds and the FHIR/SMART credential guards. The
 // public binary requires SHN_DISCOVERY_URL; it has no seed-manifest path.
@@ -519,27 +539,28 @@ func loadConfig(getenv func(string) string) (config, error) {
 		FHIRClientKID:         getenv("FHIR_CLIENT_KID"),
 		FHIRClientSecret:      getenv("FHIR_CLIENT_SECRET"),
 
-		PayerDavinciBaseURL:           getenv("PAYER_DAVINCI_BASE_URL"),
-		PayerDavinciCDSBaseURL:        getenv("PAYER_DAVINCI_CDS_BASE_URL"),
-		PayerDavinciDTRBaseURL:        getenv("PAYER_DAVINCI_DTR_BASE_URL"),
-		PayerDavinciPASBaseURL:        getenv("PAYER_DAVINCI_PAS_BASE_URL"),
-		PayerDavinciTokenURL:          getenv("PAYER_DAVINCI_TOKEN_URL"),
-		PayerDavinciClientID:          getenv("PAYER_DAVINCI_CLIENT_ID"),
-		PayerDavinciClientKey:         getenv("PAYER_DAVINCI_CLIENT_KEY"),
-		PayerDavinciClientAlg:         getenv("PAYER_DAVINCI_CLIENT_ALG"),
-		PayerDavinciScope:             def("PAYER_DAVINCI_SCOPE", "system/*.read"),
-		PayerDavinciClientKID:         getenv("PAYER_DAVINCI_CLIENT_KID"),
-		PayerDavinciClientSecret:      getenv("PAYER_DAVINCI_CLIENT_SECRET"),
-		PayerDavinciPASNative:         getenv("PAYER_DAVINCI_PAS_NATIVE") == "true",
-		PayerDavinciCRDServiceID:      getenv("PAYER_DAVINCI_CRD_SERVICE_ID"),
-		PayerDavinciDispatchServiceID: getenv("PAYER_DAVINCI_DISPATCH_SERVICE_ID"),
-		PayerDavinciContractVersions:  splitTrimmed(getenv("PAYER_DAVINCI_CONTRACT_VERSIONS")),
-		PayerDavinciStrictExtensions:  getenv("PAYER_DAVINCI_STRICT_EXTENSIONS") == "true",
-		PayerDavinciBackendHeadersRaw: getenv("PAYER_DAVINCI_BACKEND_HEADERS"),
-		PayerEligibilityURL:           getenv("PAYER_ELIGIBILITY_URL"),
-		PayerDavinciPayorOwnRaw:       getenv("PAYER_DAVINCI_PAYOR_OWN"),
-		PayerDavinciPayorBackendRaw:   getenv("PAYER_DAVINCI_PAYOR_BACKEND"),
-		OriginationProfile:            getenv("ORIGINATION_PROFILE"),
+		PayerDavinciBaseURL:               getenv("PAYER_DAVINCI_BASE_URL"),
+		PayerDavinciCDSBaseURL:            getenv("PAYER_DAVINCI_CDS_BASE_URL"),
+		PayerDavinciDTRBaseURL:            getenv("PAYER_DAVINCI_DTR_BASE_URL"),
+		PayerDavinciPASBaseURL:            getenv("PAYER_DAVINCI_PAS_BASE_URL"),
+		PayerDavinciTokenURL:              getenv("PAYER_DAVINCI_TOKEN_URL"),
+		PayerDavinciClientID:              getenv("PAYER_DAVINCI_CLIENT_ID"),
+		PayerDavinciClientKey:             getenv("PAYER_DAVINCI_CLIENT_KEY"),
+		PayerDavinciClientAlg:             getenv("PAYER_DAVINCI_CLIENT_ALG"),
+		PayerDavinciScope:                 def("PAYER_DAVINCI_SCOPE", "system/*.read"),
+		PayerDavinciClientKID:             getenv("PAYER_DAVINCI_CLIENT_KID"),
+		PayerDavinciClientSecret:          getenv("PAYER_DAVINCI_CLIENT_SECRET"),
+		PayerDavinciPASNative:             getenv("PAYER_DAVINCI_PAS_NATIVE") == "true",
+		PayerDavinciCRDServiceID:          getenv("PAYER_DAVINCI_CRD_SERVICE_ID"),
+		PayerDavinciDispatchServiceID:     getenv("PAYER_DAVINCI_DISPATCH_SERVICE_ID"),
+		PayerDavinciContractVersions:      splitTrimmed(getenv("PAYER_DAVINCI_CONTRACT_VERSIONS")),
+		PayerDavinciStrictExtensions:      getenv("PAYER_DAVINCI_STRICT_EXTENSIONS") == "true",
+		PayerDavinciBackendHeadersRaw:     getenv("PAYER_DAVINCI_BACKEND_HEADERS"),
+		payerDavinciBackendCorrelationRaw: getenv("PAYER_DAVINCI_BACKEND_CORRELATION"),
+		PayerEligibilityURL:               getenv("PAYER_ELIGIBILITY_URL"),
+		PayerDavinciPayorOwnRaw:           getenv("PAYER_DAVINCI_PAYOR_OWN"),
+		PayerDavinciPayorBackendRaw:       getenv("PAYER_DAVINCI_PAYOR_BACKEND"),
+		OriginationProfile:                getenv("ORIGINATION_PROFILE"),
 
 		ProviderDTRNative:      getenv("PROVIDER_DTR_NATIVE") == "true",
 		ProviderDTRPopulateURL: getenv("PROVIDER_DTR_POPULATE_URL"),
@@ -682,6 +703,11 @@ func loadConfig(getenv func(string) string) (config, error) {
 	if alias := cfg.acceptUnknownMembersAlias; cfg.RequireKnownMembers && alias != "" && alias != "0" && alias != "false" {
 		return config{}, fmt.Errorf("gateway: SHN_ACCEPT_UNKNOWN_MEMBERS and REQUIRE_KNOWN_MEMBERS=true contradict each other; remove SHN_ACCEPT_UNKNOWN_MEMBERS (deprecated: carrying unknown members is the default)")
 	}
+	// A payer that keeps no system of record (build refuses one on any
+	// other gateway) has no members to know: knowing them needs a store.
+	if cfg.FHIRDataURL == "" && payerNative(cfg) && cfg.RequireKnownMembers {
+		return config{}, fmt.Errorf("gateway: REQUIRE_KNOWN_MEMBERS=true needs FHIR_DATA_URL: with no system of record there are no members to know")
+	}
 
 	// A Da Vinci-native request is carried as sent unless the participant opts
 	// in to enrichment. Only "true" and "false" are values.
@@ -736,6 +762,16 @@ func loadConfig(getenv func(string) string) (config, error) {
 			return config{}, fmt.Errorf("gateway: PAYER_DAVINCI_BACKEND_HEADERS: %w", err)
 		}
 		cfg.PayerDavinciBackendHeaders = h
+	}
+	switch cfg.payerDavinciBackendCorrelationRaw {
+	case "", "on":
+	case "off":
+		if cfg.PayerDavinciBaseURL == "" {
+			return config{}, fmt.Errorf("gateway: PAYER_DAVINCI_BACKEND_CORRELATION=off requires PAYER_DAVINCI_BASE_URL")
+		}
+		cfg.PayerDavinciBackendCorrelationOff = true
+	default:
+		return config{}, fmt.Errorf("gateway: PAYER_DAVINCI_BACKEND_CORRELATION must be on or off, got %q", cfg.payerDavinciBackendCorrelationRaw)
 	}
 
 	// The operated $populate connector's credential block: same exactly-one-mode
@@ -1325,8 +1361,11 @@ type built struct {
 	// to engine.New, recorded for the same reason.
 	enrichNativeRequests bool
 
-	diagnostic   *diagnosticSource
-	gateway      *engine.Gateway
+	diagnostic *diagnosticSource
+	gateway    *engine.Gateway
+	// responder is the leg responder build() handed to engine.New (nil when
+	// none was), recorded so this package's tests can drive one leg through it.
+	responder    engine.LegResponder
 	addr         string
 	handler      http.Handler
 	reg          shnsdk.Registry // shared-reference value type; the poller mutates the same state the engine reads
@@ -1503,22 +1542,27 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	}
 
 	// SoR: the holder's own FHIR system of record. FAIL-CLOSED — there is no in-process
-	// persona census to fall back on any more (§4.1): a gateway with no FHIR_DATA_URL
-	// could only have answered out of a hardcoded demo roster, so an unset FHIR_DATA_URL is
-	// a boot error naming the env rather than a silent stub.
+	// persona census to fall back on any more (§4.1), so an unset FHIR_DATA_URL is a boot
+	// error naming the env rather than a silent stub. The one exception is a payer whose
+	// own system answers every exchange behind PAYER_DAVINCI_BASE_URL: it may keep no
+	// system of record at all, and binds each member from the request.
+	var sor engine.SystemOfRecord
 	if cfg.FHIRDataURL == "" {
-		return b, fmt.Errorf("gateway: FHIR_DATA_URL is required — the gateway reads its members, coverage and " +
-			"clinical facts from the holder's own FHIR system of record (the in-process persona stub is gone). " +
-			"Point it at your US Core server (e.g. http://hapi:8080/fhir), or at your tenant partition")
+		if !payerNative(cfg) {
+			return b, errNoSystemOfRecord
+		}
+		sor = engine.NoSystemOfRecord()
+		fmt.Fprintf(stdout, "gateway: no system of record (FHIR_DATA_URL unset): each member is bound from the request that names it, and eligibility is answered only through PAYER_ELIGIBILITY_URL\n")
+	} else {
+		hc, herr := fhirHTTPClient(cfg) // smartauth.NewHTTPClient when the SMART credential block is set, else nil (unauthenticated)
+		if herr != nil {
+			return b, herr
+		}
+		if hc == nil && cfg.diagnostic != nil {
+			hc = cfg.diagnostic.client(http.DefaultClient)
+		}
+		sor = fhirsor.NewFromURL(cfg.FHIRDataURL, hc)
 	}
-	hc, herr := fhirHTTPClient(cfg) // smartauth.NewHTTPClient when the SMART credential block is set, else nil (unauthenticated)
-	if herr != nil {
-		return b, herr
-	}
-	if hc == nil && cfg.diagnostic != nil {
-		hc = cfg.diagnostic.client(http.DefaultClient)
-	}
-	var sor engine.SystemOfRecord = fhirsor.NewFromURL(cfg.FHIRDataURL, hc)
 	// Store: the gateway's OWN business state (auth numbers, pended-claim ledger, EOBs).
 	// In-memory by default; the SHN_STORE_DATABASE_URL override below swaps in pgstore.
 	var store engine.Store = engine.NewMemStore()
@@ -1766,6 +1810,10 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 			nativeOpts = append(nativeOpts, engine.WithBackendHeaders(cfg.PayerDavinciBackendHeaders))
 			fmt.Fprintf(stdout, "gateway: partner requests carry %d fixed header(s) (PAYER_DAVINCI_BACKEND_HEADERS)\n", len(cfg.PayerDavinciBackendHeaders))
 		}
+		if cfg.PayerDavinciBackendCorrelationOff {
+			nativeOpts = append(nativeOpts, engine.WithoutBackendCorrelation())
+			fmt.Fprintf(stdout, "gateway: partner requests carry no X-Correlation-Id (PAYER_DAVINCI_BACKEND_CORRELATION=off)\n")
+		}
 		if cfg.diagnostic != nil {
 			nativeOpts = append(nativeOpts, engine.WithNativeDiagnostic(cfg.diagnostic.emit))
 		}
@@ -1790,11 +1838,13 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 					func(note string) { fmt.Fprintf(stdout, "gateway: %s\n", note) }),
 			)
 		}
-		// Stated in both states, so a deployment's eligibility posture can be read
+		// Stated in every state, so a deployment's eligibility posture can be read
 		// from its boot line.
 		if cfg.PayerEligibilityURL != "" {
 			nativeOpts = append(nativeOpts, engine.WithEligibilityURL(cfg.PayerEligibilityURL))
 			fmt.Fprintf(stdout, "gateway: PAYER_ELIGIBILITY_URL set — a coverage-eligibility request is carried to the payer's own endpoint and its answer relayed\n")
+		} else if cfg.FHIRDataURL == "" {
+			fmt.Fprintf(stdout, "gateway: PAYER_ELIGIBILITY_URL unset — with no system of record, a coverage-eligibility request is answered 501 \"coverage eligibility is not offered by this payer\"\n")
 		} else {
 			fmt.Fprintf(stdout, "gateway: PAYER_ELIGIBILITY_URL unset — coverage eligibility is answered from the payer's records\n")
 		}
@@ -1855,10 +1905,16 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		log.Printf("gateway: REQUIRE_KNOWN_MEMBERS=true — a Da Vinci CRD/DTR/PAS subject the system of record does not hold is refused")
 	}
 
+	var accessEmit func(diagnostics.Event) bool
 	if cfg.diagnostic != nil {
 		gwCfg.Diagnostic = cfg.diagnostic.emit
 		gwCfg.DiagnosticTraceKey = cfg.diagnostic.traceKey
+		accessEmit = cfg.diagnostic.emit
 	}
+	// One access line per exchange, always and at every conformance level
+	// (access.go); published to the diagnostic sink too when capture is
+	// configured.
+	access := accessHook(log.Printf, accessEmit, clock)
 	// Observer stream: hub + engine callback, only when configured. The demo
 	// endpoints (POST /demo/transform, GET /demo/capture/{correlationId})
 	// ride the SAME mux via composeObserverHandler — they inherit this
@@ -1877,9 +1933,11 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	// EMF leg metrics: opt-in via METRICS_SERVICE. EMF rides
 	// stdout → awslogs → CloudWatch; sdk/metrics is fire-and-forget and
 	// conformance-neutral (TestLegMetric_ConformanceNeutral).
+	var exchangeMetrics func(engine.ExchangeRecord)
 	if cfg.MetricsService != "" {
 		em := metrics.New(stdout, cfg.MetricsNamespace, map[string]string{"Env": cfg.MetricsEnv}, nil)
 		gwCfg.LegMetric = legMetricHook(em, cfg.MetricsService, cfg.Role)
+		exchangeMetrics = exchangeMetricHook(em, cfg.MetricsService)
 		storeErr := storeErrorMetricHook(em, cfg.MetricsService)
 		gwCfg.StoreErrorMetric = storeErr
 		gwCfg.InvolvedMetric = involvedOmittedMetricHook(em, cfg.MetricsService)
@@ -1902,6 +1960,9 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 			}, storePoolMetricInterval)
 		}
 	}
+
+	// Every consumer of the per-exchange record joins here.
+	gwCfg.ExchangeObserved = exchangeObservers(access, exchangeMetrics)
 
 	// gw is held as a named variable (rather than the previous inline
 	// engine.New(gwCfg).Handler()) so the observer mux composed just below
@@ -1974,6 +2035,7 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	b = built{
 		requireKnownMembers:  gwCfg.RequireKnownMembers,
 		enrichNativeRequests: gwCfg.EnrichNativeRequests,
+		responder:            gwCfg.Responder,
 
 		diagnostic:      cfg.diagnostic,
 		gateway:         gw,
@@ -2567,10 +2629,11 @@ func certificationValidators(getenv func(string) string, cfg config, canonical s
 var certificationClient = engine.NewCertificationOperationValidator
 
 // backendHeaderReserved are the header names PAYER_DAVINCI_BACKEND_HEADERS may
-// not set: the ones this gateway itself owns on a partner request, the
-// request-target fields, and the hop-by-hop set of RFC 9110 §7.6.1.
+// not set: the ones this gateway itself owns on a partner request (the leg's id
+// in X-Correlation-Id among them), the request-target fields, and the
+// hop-by-hop set of RFC 9110 §7.6.1.
 var backendHeaderReserved = map[string]bool{
-	"Authorization": true, "Content-Type": true, "Accept": true, "Host": true, "Content-Length": true,
+	"Authorization": true, "Content-Type": true, "Accept": true, "Host": true, "Content-Length": true, "X-Correlation-Id": true,
 	"Connection": true, "Keep-Alive": true, "Proxy-Authenticate": true, "Proxy-Authorization": true,
 	"Proxy-Connection": true, "Te": true, "Trailer": true, "Transfer-Encoding": true, "Upgrade": true,
 }

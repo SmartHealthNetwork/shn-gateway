@@ -85,6 +85,7 @@ func (g *Gateway) crdAnswerOutcome(ctx context.Context, respJSON []byte, line st
 		if g.policy().Decide(KindCDSEnvelope, "response.json", VerdictInvalid) == Record {
 			return "answered", 0, ""
 		}
+		exchangeOf(ctx).refusing(RefusalConformance)
 		return "", http.StatusBadGateway, "payer CRD response is not a valid CDS Hooks response: response.json"
 	}
 	cov, ok := obs.Primary()

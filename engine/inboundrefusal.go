@@ -27,8 +27,12 @@ import (
 
 // Named refusals shared by more than one handler.
 const (
-	refusalUnknownMember     = "unknown member"
-	refusalIngressValidation = "ingress validation failed"
+	refusalUnknownMember = "unknown member"
+	// refusalEligibilityNotOffered: a payer gateway that keeps no system of
+	// record and forwards no eligibility endpoint has nothing to answer
+	// eligibility from.
+	refusalEligibilityNotOffered = "coverage eligibility is not offered by this payer"
+	refusalIngressValidation     = "ingress validation failed"
 	// refusalDTRUnframed refuses a questionnaire request that names no
 	// operation: the older request envelope, which carried a canonical and a
 	// coverage in place of the operation's own input, is no longer accepted.
@@ -86,6 +90,9 @@ func (g *Gateway) refuseInboundRequest(w http.ResponseWriter, r *http.Request, e
 // echoes its issues) and must carry "error"; otherwise the body is
 // {"error": msg}.
 func (g *Gateway) refuseInbound(w http.ResponseWriter, r *http.Request, leg inboundLeg, env shnsdk.Envelope, tok shnsdk.Token, answerTok string, status int, msg string, detail map[string]any) {
+	if msg == errOwnershipFault {
+		defer exchangeOf(r.Context()).refused(RefusalFidelity)
+	}
 	result := LegResult{Status: status, Message: msg}
 	if detail != nil {
 		body, err := json.Marshal(detail)
@@ -96,7 +103,7 @@ func (g *Gateway) refuseInbound(w http.ResponseWriter, r *http.Request, leg inbo
 			}
 		}
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": errOwnershipFault})
+			writeOwnershipFault(w)
 			return
 		}
 	}

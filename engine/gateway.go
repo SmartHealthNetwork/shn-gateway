@@ -165,7 +165,8 @@ type Config struct {
 	// unaffected. Set from ENRICH_NATIVE_REQUESTS (gateway/app).
 	EnrichNativeRequests bool
 	// Store is the gateway's own business state (auth numbers, pended-claim ledger,
-	// issued EOBs). Demo: in-memory stub; separated: holdersim; later: gateway Postgres.
+	// issued EOBs). Required: New panics without one. The published gateway (gateway/app)
+	// sets NewMemStore, or gateway/connectors/pgstore when SHN_STORE_DATABASE_URL is set.
 	Store Store
 	// Adjudicator is the partner's decision surface (order-select/questionnaire/
 	// prior-auth; Eligibility is served by the standalone SDK Responder only — R11 makes
@@ -269,6 +270,14 @@ type Config struct {
 	// path. Additive instrumentation only: emission must not change exchange
 	// behavior (TestLegMetric_ConformanceNeutral). Carries NO payloads.
 	LegMetric func(outcome string)
+	// ExchangeObserved, when non-nil, receives one ExchangeRecord per call this
+	// gateway answers on a Da Vinci ingress route or on /substrate/inbound,
+	// after the answer is written — every refusal and a panicking handler
+	// included (exchangerecord.go). Metadata only, never a payload. MAY BE
+	// CALLED CONCURRENTLY; implementations must be goroutine-safe and must
+	// never block. A panic in it is recovered. nil (the default) records
+	// nothing. Additive instrumentation only: it never changes an answer.
+	ExchangeObserved func(ExchangeRecord)
 	// Replay is the one-time-use record behind the Hub-assertion jti, ingress
 	// client_assertion jti and patient-access correlationId guards. Nil selects a
 	// process-local record, correct only at one replica; a shared store makes the
@@ -879,10 +888,10 @@ func (g *Gateway) Handler() http.Handler {
 			// (correlationheader.go): the caller's trace value and the leg's id,
 			// settled before the handler runs.
 			mux.HandleFunc("GET /cds-services", g.withIngressCorrelation(g.handleCDSDiscovery))
-			mux.HandleFunc("POST /cds-services/{id}", g.observeIngress("crd-ingress", g.withIngressCorrelation(g.handleCRDIngress)))
-			mux.HandleFunc("POST /Questionnaire/$questionnaire-package", g.observeIngress("dtr-ingress", g.withIngressCorrelation(g.handleDTRIngress)))
-			mux.HandleFunc("POST /Claim/$submit", g.observeIngress("pas-ingress", g.withIngressCorrelation(g.handlePASIngress)))
-			mux.HandleFunc("POST /Claim/$inquire", g.observeIngress("pas-inquire-ingress", g.withIngressCorrelation(g.handlePASInquireIngress)))
+			mux.HandleFunc("POST /cds-services/{id}", g.ingressRoute(RouteCRD))
+			mux.HandleFunc("POST /Questionnaire/$questionnaire-package", g.ingressRoute(RouteDTR))
+			mux.HandleFunc("POST /Claim/$submit", g.ingressRoute(RoutePAS))
+			mux.HandleFunc("POST /Claim/$inquire", g.ingressRoute(RoutePASInquire))
 			// FR-37: the ingress edge's own CapabilityStatement (per-role
 			// statements — the payer's /metadata precedent at gateway.go:517).
 			mux.HandleFunc("GET /metadata", g.handleIngressMetadata)
@@ -897,7 +906,7 @@ func (g *Gateway) Handler() http.Handler {
 			}
 		}
 	case "payer":
-		mux.HandleFunc("POST /substrate/inbound", g.observeInbound(g.handleInbound))
+		mux.HandleFunc("POST /substrate/inbound", g.inboundRoute())
 		// FR-28: CMS-0057 Patient Access API — conformant FHIR search + instance read
 		// over the PDex PA EOB, gated by a patient-access authority token. Distinct
 		// from the sealed substrate legs. FR-37: the CapabilityStatement for this
@@ -906,9 +915,9 @@ func (g *Gateway) Handler() http.Handler {
 		mux.HandleFunc("GET /ExplanationOfBenefit", g.handlePatientAccessEOB)
 		mux.HandleFunc("GET /ExplanationOfBenefit/{id}", g.handlePatientAccessEOBByID)
 	case "facility":
-		mux.HandleFunc("POST /substrate/inbound", g.observeInbound(g.handleInbound))
+		mux.HandleFunc("POST /substrate/inbound", g.inboundRoute())
 	case "phg":
-		mux.HandleFunc("POST /substrate/inbound", g.observeInbound(g.handleInbound))
+		mux.HandleFunc("POST /substrate/inbound", g.inboundRoute())
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		done := g.operations.begin()
@@ -971,6 +980,7 @@ func (g *Gateway) ingressAuthRefused(w http.ResponseWriter, r *http.Request) boo
 		writeStoreUnavailable(w, "ingress key store unavailable")
 		return true
 	}
+	exchangeOf(r.Context()).refused(RefusalAuthentication)
 	writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "ingress authentication required"})
 	return true
 }
@@ -1123,6 +1133,10 @@ type hubRefusalError struct {
 	status    int
 	reason    string
 	delivered string // "" (not delivered), "yes" or "unknown" (HubDeliveredHeader)
+	// fromHub says the Hub's route handler wrote the answer: it carried
+	// HubDeliveredHeader. An answer without it came from in front of the Hub
+	// (a load balancer), or was built here for a failed connection.
+	fromHub bool
 }
 
 func (e *hubRefusalError) Error() string {
@@ -1299,11 +1313,13 @@ func hubRefusal(status int, body []byte, delivered string) *hubRefusalError {
 		}
 		reason = reason[:cut]
 	}
+	fromHub := true
 	switch delivered {
 	case "yes", "unknown":
 	case "no":
 		delivered = ""
 	default:
+		fromHub = false
 		// Unmarked: not the Hub's route handler (a load balancer in front of
 		// it). A 5xx of that kind may have come after the Hub forwarded.
 		delivered = ""
@@ -1311,7 +1327,7 @@ func hubRefusal(status int, body []byte, delivered string) *hubRefusalError {
 			delivered = "unknown"
 		}
 	}
-	return &hubRefusalError{status: status, reason: reason, delivered: delivered}
+	return &hubRefusalError{status: status, reason: reason, delivered: delivered, fromHub: fromHub}
 }
 
 // roundTrip performs one authorized sealed exchange with the counterpart
@@ -1342,7 +1358,13 @@ func (g *Gateway) roundTrip(ctx context.Context, r *http.Request, recipient, req
 	})
 	g.diagnosticStage(ctx, "leg.originated", txType, requestBytes, 0, "")
 	g.legMetric(LegOutcomeRouted)
+	x := exchangeOf(ctx)
+	x.peers(g.cfg.HolderID, recipient)
+	if content.Route != nil {
+		x.line(shnsdk.LineOf(content.Route.Token))
+	}
 	respPayload, err := g.roundTripInner(ctx, r, recipient, reqFrame, respFrame, op, respOp, txType, scope, pci, correlationID, custodian, content)
+	x.legOutcome(err)
 	if err != nil {
 		var re *RelayError
 		if errors.As(err, &re) {
@@ -1485,6 +1507,7 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 	if leg, ok := ctx.Value(diagnosticLegKey{}).(*diagnosticLeg); ok {
 		leg.hash = sha256hex(env.Ciphertext)
 	}
+	exchangeOf(ctx).requestHash(sha256hex(env.Ciphertext))
 	g.diagnosticSealed(ctx, env, recipient, correlationID, txType, content.ProfileID, payload)
 	tok, err := g.authorize(r, reqFrame, op, pci, correlationID, custodian, sha256hex(env.Ciphertext))
 	if err != nil {
@@ -1535,6 +1558,9 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 		hubClient = &untimed
 	}
 	respEnv, err := g.postEnvelope(legCtx, hubClient, g.cfg.HubURL+"/route", body, assertionHeader)
+	if err == nil {
+		exchangeOf(ctx).responseHash(sha256hex(respEnv.Ciphertext))
+	}
 	var refused *hubRefusalError
 	if errors.As(err, &refused) {
 		return nil, refused
@@ -1960,7 +1986,7 @@ func (g *Gateway) validateGovernedLines(ctx context.Context, fc findingContext, 
 		if pol.Decide(kind, "", VerdictUnavailable) == Refuse {
 			return refused
 		}
-		g.emitFinding(ConformanceFinding{
+		g.emitFindingIn(ctx, ConformanceFinding{
 			Kind: string(kind), Direction: dir, LegType: fc.LegType, CorrelationID: fc.CorrelationID,
 			Seam: fc.Seam, Whose: whose, Line: at, Profile: profile,
 			Level: pol.Level().String(), Verdict: "unavailable", Decision: Record.String(),
@@ -2003,7 +2029,7 @@ func (g *Gateway) validateGovernedLines(ctx context.Context, fc findingContext, 
 		if res.Valid {
 			if len(tried) > 0 {
 				note(lane.Line, VerdictValid)
-				g.emitFinding(ConformanceFinding{
+				g.emitFindingIn(ctx, ConformanceFinding{
 					Kind: string(kind), Direction: dir, LegType: fc.LegType, CorrelationID: fc.CorrelationID,
 					Seam: fc.Seam, Whose: whose, Line: lane.Line, Profile: profile,
 					Level: pol.Level().String(), Verdict: findingVerdict(VerdictValid), Decision: Record.String(),
@@ -2036,7 +2062,7 @@ func (g *Gateway) validateGovernedLines(ctx context.Context, fc findingContext, 
 		return unavailable(govResult{Status: http.StatusInternalServerError, Msg: "validator unavailable"}, line)
 	}
 	decision := pol.Decide(kind, "", bestVerdict)
-	g.emitFinding(ConformanceFinding{
+	g.emitFindingIn(ctx, ConformanceFinding{
 		Kind:          string(kind),
 		Direction:     dir,
 		LegType:       fc.LegType,
@@ -2941,6 +2967,7 @@ func (g *Gateway) buildResponseLeg(r *http.Request, respFrame, respOp, txType, i
 	payload, err := relay.Transmit(p, relay.Check(k))
 	if err != nil {
 		g.ownershipRefused(k, err)
+		exchangeOf(r.Context()).refusing(RefusalFidelity)
 		return nil, http.StatusInternalServerError, errOwnershipFault
 	}
 	if frame != nil {
@@ -2990,6 +3017,9 @@ func (g *Gateway) buildResponseLeg(r *http.Request, respFrame, respOp, txType, i
 	if err != nil {
 		return nil, http.StatusInternalServerError, "encode failed"
 	}
+	x := exchangeOf(r.Context())
+	x.responseHash(sha256hex(respEnv.Ciphertext))
+	x.decided(answerOutcome(k.Outcome), "", "")
 	return out, 0, ""
 }
 
@@ -3162,7 +3192,7 @@ func (g *Gateway) respondLegError(w http.ResponseWriter, r *http.Request, respFr
 		// unsealed.
 		if _, err := relay.Transmit(p, relay.Check(k)); err != nil {
 			g.ownershipRefused(k, err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": errOwnershipFault})
+			writeOwnershipFault(w)
 			return
 		}
 		gatewayRefusal, msg = true, fmt.Sprintf(msgUnframedRequester, txType, result.Status)
@@ -3178,7 +3208,7 @@ func (g *Gateway) respondLegError(w http.ResponseWriter, r *http.Request, respFr
 		sp, err := relay.Authored(relay.BuilderGatewayRefusal, body, "application/json")
 		if err != nil {
 			g.ownershipRefused(k, err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": errOwnershipFault})
+			writeOwnershipFault(w)
 			return
 		}
 		p = sp
@@ -3197,6 +3227,7 @@ func (g *Gateway) respondLegError(w http.ResponseWriter, r *http.Request, respFr
 		return
 	}
 	appStatus := result.Status
+	exchangeOf(r.Context()).answer(appStatus)
 	out, status, msg := g.buildResponseLeg(r, respFrame, respOp, txType, corrID, p, k, func(b []byte) ([]byte, error) {
 		return shnsdk.EncodeHTTPFrame(appStatus, ct, b)
 	}, subjectPCI, requester, consentRef)

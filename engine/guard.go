@@ -17,6 +17,7 @@ func guardDefect(ctx context.Context, pol ConformancePolicy, emit func(Conforman
 		return false
 	}
 	decision := pol.Decide(kind, rule, v)
+	recorded := false
 	if kind == KindContent && !networkRules[rule] && emit != nil {
 		fc := findingContextFrom(ctx)
 		f := ConformanceFinding{
@@ -28,7 +29,9 @@ func guardDefect(ctx context.Context, pol ConformancePolicy, emit func(Conforman
 			f.Verdict = "unavailable"
 		}
 		emit(f)
+		recorded = true
 	}
+	exchangeOf(ctx).checked(kind, rule, recorded, decision == Refuse)
 	return decision == Refuse
 }
 

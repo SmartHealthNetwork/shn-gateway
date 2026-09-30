@@ -2494,6 +2494,7 @@ func TestLoadConfig_PayerDavinciBackendHeaders(t *testing.T) {
 		{"content-type reserved", "content-type: text/plain", "reserved"},
 		{"accept reserved", "Accept: */*", "reserved"},
 		{"host reserved", "Host: other.example", "reserved"},
+		{"correlation id reserved", "x-correlation-id: fixed", "reserved"},
 		{"hop-by-hop connection", "Connection: close", "reserved"},
 		{"hop-by-hop transfer-encoding", "Transfer-Encoding: chunked", "reserved"},
 		{"hop-by-hop upgrade", "Upgrade: h2c", "reserved"},
@@ -2671,5 +2672,34 @@ func TestBuildWiresEligibilityURLToNativeResponder(t *testing.T) {
 				t.Fatalf("boot output missing %q: %s", tc.wantLog, out.String())
 			}
 		})
+	}
+}
+
+// PAYER_DAVINCI_BACKEND_CORRELATION: the leg's id goes to the payer's own
+// system as X-Correlation-Id unless the payer turns it off; any other value,
+// or off without the system it addresses, refuses the boot, and naming
+// X-Correlation-Id as a fixed header is refused whatever this is set to.
+func TestLoadConfig_PayerDavinciBackendCorrelation(t *testing.T) {
+	load := func(extra map[string]string) (config, error) {
+		env := map[string]string{"ROLE": "payer", "SHN_SECRETS": "/x", "SHN_DISCOVERY_URL": "https://d", "PAYER_DAVINCI_BASE_URL": "https://payer.example"}
+		for k, v := range extra {
+			env[k] = v
+		}
+		return loadConfig(func(k string) string { return env[k] })
+	}
+	for value, off := range map[string]bool{"": false, "on": false, "off": true} {
+		cfg, err := load(map[string]string{"PAYER_DAVINCI_BACKEND_CORRELATION": value})
+		if err != nil || cfg.PayerDavinciBackendCorrelationOff != off {
+			t.Errorf("%q: off=%v err=%v, want off=%v", value, cfg.PayerDavinciBackendCorrelationOff, err, off)
+		}
+	}
+	for name, extra := range map[string]map[string]string{
+		"not on or off":             {"PAYER_DAVINCI_BACKEND_CORRELATION": "false"},
+		"off without the base URL":  {"PAYER_DAVINCI_BACKEND_CORRELATION": "off", "PAYER_DAVINCI_BASE_URL": ""},
+		"a configured id, with off": {"PAYER_DAVINCI_BACKEND_CORRELATION": "off", "PAYER_DAVINCI_BACKEND_HEADERS": "X-Correlation-Id: fixed"},
+	} {
+		if _, err := load(extra); err == nil {
+			t.Errorf("%s: booted", name)
+		}
 	}
 }

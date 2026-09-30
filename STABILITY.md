@@ -16,6 +16,111 @@ rather than moving an existing tag.
 
 This gateway requires `shn-sdk` — see `go.mod` for the pinned version.
 
+## Access lines
+
+**New in v0.58.0.**
+
+- Every gateway writes one `gateway: access: <json>` line for each call it
+  answers on a Da Vinci ingress route or for a leg it receives from the
+  network, at every conformance level, with nothing to configure. The JSON is
+  `diagnostics.AccessLine`, the `ExchangeRecord` below with durations in
+  milliseconds (see [docs/CONFIGURATION.md](docs/CONFIGURATION.md), "Access
+  lines"). It is an **evolving** surface: fields and closed-set values may be
+  added in minor releases, so decode tolerantly.
+- With diagnostic collection configured, the same JSON is published as the
+  `Detail` of a metadata-only event of kind `diagnostics.KindAccess`
+  (`access`), which carries no body and no headers.
+- A payer's gateway sends `X-Correlation-Id` with the leg's id on each
+  operation it forwards to its payer's own system (not the CDS service
+  listing, the connectivity probes or token requests), when the id is one
+  token of letters, digits, `.`, `_` or `-`, up to 64 characters. The message
+  bytes are unchanged.
+- **Breaking (configuration):** `PAYER_DAVINCI_BACKEND_HEADERS` may no longer
+  name `X-Correlation-Id`; a gateway configured with it refuses to boot with
+  an error naming it, as for the other names the gateway sets itself. In the
+  Go API, `engine.WithBackendHeaders` drops the name: the header is only ever
+  the leg's id, or absent.
+- **Additive setting:** `PAYER_DAVINCI_BACKEND_CORRELATION=off` (Go API:
+  `engine.WithoutBackendCorrelation`) stops the header being sent, for a
+  payer system that validates `X-Correlation-Id` its own way. Unset or `on`
+  sends it; any other value refuses the boot.
+- `engine.ReadSystemOfRecord` now returns a wrapper that notes each read on
+  the exchange record; a caller that type-asserts its result to the connector
+  it was given no longer gets the connector back. `engine.NoSystemOfRecord()`,
+  which reads nothing, is returned as it was given.
+
+## One record per exchange
+
+**New in v0.58.0.** Go API only (additive); nothing a participant sends or
+receives changes.
+
+- `engine.Config.ExchangeObserved func(engine.ExchangeRecord)` receives one
+  record for every call a gateway answers on a Da Vinci ingress route or for
+  a leg it receives from the network, after the answer is written. That
+  includes every refusal, the earliest authentication refusal among them, and
+  a handler that panics. Nil (the default) records nothing.
+- A record is metadata only: the leg's correlation id, the caller's own
+  `X-Correlation-Id` when it differs, the pa-test door's verified call id, the
+  leg, the operation, the contract line, the two holders, the outcome and who
+  refused on which network rule, the status, the latency, a count of
+  conformance findings, and, on the answering side, the call to the
+  participant's own system (its status, latency and error class). It never
+  carries a message body or a patient identifier. The only header values it
+  carries are the caller's own `X-Correlation-Id`, which the ingress accepts
+  only as one bounded token, and the call id of a verified `X-SHN-Test-Trace`
+  proof; a leg id a message chose (a PAS Claim's own `urn:shn:correlation`) is
+  recorded as `sha256:<digest>` unless it is one bounded token too.
+- It also carries the sha256 of the request and answer envelopes'
+  ciphertext, the value the Hub's audit records carry as `payloadBundleHash`,
+  so a record joins the Hub's records for the same leg.
+- Direction, route, exchange, operation, outcome, refusing party, rule and
+  backend error class are closed sets (`engine.ExchangeDirections`,
+  `ExchangeRoutes`, `ExchangeKinds`, `ExchangeOperations`, `ExchangeOutcomes`,
+  `RefusalParties`, `RefusalRules`, `BackendErrorClasses`), each ending in
+  `other`: a value the gateway cannot classify is recorded as `other`, never as
+  a caller's string.
+- A requester's gateway cannot tell a recipient gateway's refusal inside the
+  answer's frame from the recipient's own system answering an error, so its
+  record calls either one `upstream-error`; the answering gateway's record
+  says which it was. A refusal the recipient's gateway gave at its edge, which
+  the Hub reports, is `refused` by `payer-gateway`.
+- On the answering side, a refusal of this gateway's own that names no rule,
+  given because its participant's system did not answer usably (a service
+  listing it could not read, or an error answer a requester without a message
+  frame cannot be sent), is recorded as `upstream-error`, with the failed call;
+  so is a read or search of its system of record that failed. Every read and
+  search of the participant's system of record on a leg it answers is a
+  backend call (status 0, with its latency), and so is a read of its CDS
+  service listing. `Backend` is the call the answer came from: the operation
+  forwarded to the participant's system, or, where none was, the last read; a
+  read after the operation (a check of its answer) is counted but does not
+  replace it. An answer is `malformed` only when this gateway cannot read it;
+  a readable answer a check found fault with keeps no class. At `none`, where
+  no conformance check runs, an answer is `malformed` only when the gateway
+  itself could not read it: one repeating a member name (the network's own
+  rule), the CDS service listing, a system-of-record read the connector
+  reports invalid (or fails without saying why), a search page, or a
+  facility's records out of shape (another patient's record, no Patient, a
+  record without an id or the same record twice). A call cut short because
+  the request it served ended has error class `cancelled`, and one that ran
+  out of time `timeout`, whatever the participant's connector reported; a
+  call or read abandoned while the request was still live (a connector
+  cancelling its own read, a client its own attempt) is the system not
+  answering. The request ends when the requester stops waiting or goes
+  away, and the gateway cannot tell which: a `cancelled` call whose latency
+  reached the requester's leg budget (30 s by default) is the participant's
+  system answering too slowly for it. The exchange of a cut-short call is
+  never an upstream error: a refusal it caused, the operation's or a later
+  read's, is `other`. A system-of-record read that a
+  check at `strict` needed and could not make refuses as that check's
+  `conformance` refusal; the read is counted in `BackendCalls`, and, after
+  the operation, is not the `Backend`.
+- `limit` is a reserved value, and this release records an Authorization
+  Framework denial as `authority`, whatever its reason; a facility's `consent`
+  refusals (a federated query without a consent reference, or one the consent
+  service does not permit) are `consent`. A facility's or a PHG's gateway
+  refusing a leg is refused by `other`.
+
 ## Native PAS response contract
 
 PAS operation responses must be complete Bundles containing exactly one
@@ -45,6 +150,27 @@ asking for it (`Claim/$inquire`, leg type `pas-claim-inquire`).
   every wait above that was already a no-op that reported itself as a longer one.
   The bound and the schedule are now derived from each other and held together by a
   test, so they cannot drift apart again.
+
+## A payer that keeps no system of record
+
+**Additive in v0.58.0.**
+
+- A payer whose own system answers every exchange (`ROLE=payer` with
+  `PAYER_DAVINCI_BASE_URL`) may leave `FHIR_DATA_URL` unset. Earlier releases refused
+  to boot without it on every role; every other gateway still does. A deployment that
+  boots on v0.57.0 boots unchanged.
+- Such a gateway binds each member from the request that names it, exactly as it binds
+  a member a system of record does not hold, and files its records under that binding.
+  It answers coverage eligibility only through `PAYER_ELIGIBILITY_URL`; without it an
+  eligibility request is answered `501` "coverage eligibility is not offered by this
+  payer", in the `{"error": …}` shape of every refusal the payer's gateway makes itself.
+  `REQUIRE_KNOWN_MEMBERS=true` without a system of record refuses to boot. Patient Access
+  returns no explanations of benefit on such a gateway: they are filed under its binding
+  of each member, never under the identifier a patient-access token names, as for any
+  member a system of record does not hold.
+- **Go API (additive):** `engine.NoSystemOfRecord()` (a `SystemOfRecord` that holds no
+  one; pass it as `Config.SoR`) and `engine.ErrNoSystemOfRecord` (the failure of a read
+  it cannot answer).
 
 ## Origination profiles
 
@@ -1105,6 +1231,11 @@ expected to change shape as their consumer matures:
   `METRICS_SERVICE` opt-in (see `docs/CONFIGURATION.md`). `Unreachable` means the Hub leg did not
   complete; it also covers a Hub refusal after an unverifiable recipient response envelope and
   does not prove the responder itself was unreachable. Requires `shn-sdk` ≥ v0.31.0.
+
+- **`ExchangeObserved`** (`engine.Config.ExchangeObserved func(engine.ExchangeRecord)`):
+  new in v0.58.0 and **evolving** — fields and closed-set values may be added in minor
+  releases; decode tolerantly. See "One record per exchange" above. Nil means no record; a
+  panic in it is recovered and never reaches the answer (`TestExchangeRecord_Panics`).
 
 - **`GET`/`POST /internal/checks` results** (evolving surface, since v0.32.0; structured
   `failure` since v0.33.0). Each result is `{id, target, ok, detail, checkedAt,

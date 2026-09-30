@@ -14,8 +14,9 @@
 > This bundle ships the real Smart Gateway image (`ROLE=payer`) alongside a
 > reference Da Vinci payer implementation (HL7-DaVinci's `br-payer`, built
 > from pinned upstream source) so you can see every prior-authorization use
-> case adjudicated by a genuine Da Vinci-conformant decisioning engine
-> instead of the gateway's built-in canned responses. When you're ready to
+> case adjudicated by a genuine Da Vinci-conformant decisioning engine: the
+> gateway has no payer of its own and forwards every prior-authorization
+> exchange to the payer's system. When you're ready to
 > connect your own adjudication system, see
 > [Production cutover](#production-cutover) below — the gateway you're
 > running here is the same gateway you run in production; only what's
@@ -36,15 +37,15 @@ no durable state of its own between requests, so the gateway runs on its
 in-memory Store. If your own adjudication system needs durable state, that
 lives in *it*, not in the gateway.
 
-> **This bundle's boot wiring is being re-cut and does not run as written.**
-> The gateway now requires a FHIR system of record on every role
-> (`FHIR_DATA_URL`) — the in-memory persona stub it used to fall back on when
-> that variable was unset has been removed, so a `ROLE=payer` container with no
-> `FHIR_DATA_URL` refuses to start rather than answering out of a built-in
-> roster. The compose file in this directory has not yet been updated to point
-> the payer at its own tenant. Until it is, use the
-> [Kit](https://github.com/SmartHealthNetwork/shn-kit) or a hosted evaluation
-> lane. This note will be removed when the bundle is re-cut.
+> **This bundle has not been re-run end to end since its boot wiring changed.**
+> From shn-gateway v0.58.0 a native-forward payer (`ROLE=payer` with
+> `PAYER_DAVINCI_BASE_URL`, as configured here) may run without `FHIR_DATA_URL`:
+> it keeps no system of record and binds each member from the request, which is
+> what this compose file relies on. Earlier releases refuse to start without
+> `FHIR_DATA_URL`. The bundle builds the gateway from this source tree, but until
+> it has been run against the network again, use the
+> [Kit](https://github.com/SmartHealthNetwork/shn-kit) or a hosted evaluation lane.
+> This note will be removed once it has.
 
 ## Prerequisite: an SHN developer account
 

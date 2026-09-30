@@ -2,7 +2,9 @@
 
 Every gateway role requires a real system of record — `FHIR_DATA_URL` is required at
 boot; there is no built-in in-process persona stub to fall back on for a no-backend
-first run any more. To carry **your** data, point the gateway at your systems through
+first run any more. The one exception, from shn-gateway v0.58.0, is a payer whose own
+system answers every exchange (native-forward mode, below): it may keep no system of
+record at all. To carry **your** data, point the gateway at your systems through
 connectors. This applies to both sides: a provider reads the clinical and coverage data
 it originates from; a payer's Da Vinci legs forward to the payer's own system by default
 (see [Payer decisioning](#payer-decisioning) — there is no built-in decision policy, and
@@ -424,7 +426,10 @@ closed (there is no in-process occupant to fall back to). With it set, the Da Vi
 legs (CRD, DTR, PAS submit, PAS update and inquiry) forward to your real partner Da Vinci
 endpoint over a SMART-authenticated client. Coverage eligibility forwards the same way only
 when you set `PAYER_ELIGIBILITY_URL`; otherwise the gateway answers it from your Coverage
-records. `PAYER_DAVINCI_PAS_NATIVE`
+records, or, if it keeps no system of record (`FHIR_DATA_URL` unset, from v0.58.0), answers
+`501` "coverage eligibility is not offered by this payer". A native-forward payer may leave
+`FHIR_DATA_URL` unset: its gateway then binds each member from the request that names it,
+as it binds any member a system of record does not hold. `PAYER_DAVINCI_PAS_NATIVE`
 still parses (back-compat) but is a no-op: PAS forwarding was never independently
 optional-off, since the in-process fallback it used to gate is deleted; setting it
 `false` only prints a warning that PAS forwards regardless.
@@ -448,7 +453,7 @@ below `strict` it is relayed as sent, and recorded as a finding at `observe` and
 On the **provider** side, the DTR leg fills the payer's questionnaire from the
 member's clinical data. By default the gateway uses a **managed** populator that
 fills a built-in questionnaire from your `FHIR_DATA_URL` system of record (there is
-no stub fallback — `FHIR_DATA_URL` is required for every role). To populate
+no stub fallback — `FHIR_DATA_URL` is required for every role but a native-forward payer). To populate
 **arbitrary** DTR questionnaires — the real Da
 Vinci DTR case, where questionnaires carry CQL expressions the gateway does not
 itself evaluate — forward population to an SDC `Questionnaire/$populate` engine

@@ -69,15 +69,23 @@ func DiscoverCDSServices(ctx context.Context, client *http.Client, base string, 
 	for k, v := range headers {
 		req.Header[k] = append([]string(nil), v...)
 	}
+	x := exchangeOf(ctx)
+	var started time.Time
+	if x != nil {
+		started = x.clock()
+	}
 	resp, err := client.Do(req)
 	if err != nil {
+		x.read(0, x.since(x.clock, started), callEndedClass(ctx, backendClass(0, err)))
 		return nil, fmt.Errorf("engine: GET %s: %w", url, err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxPartnerBody))
 	if err != nil {
+		x.read(resp.StatusCode, x.since(x.clock, started), callEndedClass(ctx, bodyReadClass(err)))
 		return nil, fmt.Errorf("engine: read %s: %w", url, err)
 	}
+	x.read(resp.StatusCode, x.since(x.clock, started), backendClass(resp.StatusCode, nil))
 	if resp.StatusCode/100 != 2 {
 		return nil, fmt.Errorf("engine: GET %s returned %s", url, resp.Status)
 	}
@@ -85,13 +93,16 @@ func DiscoverCDSServices(ctx context.Context, client *http.Client, base string, 
 		Services *[]CDSService `json:"services"`
 	}
 	if err := json.Unmarshal(body, &listing); err != nil {
+		x.malformed()
 		return nil, fmt.Errorf("engine: parse %s: %w", url, err)
 	}
 	if listing.Services == nil {
+		x.malformed()
 		return nil, fmt.Errorf("engine: %s lists no services array", url)
 	}
 	for i, s := range *listing.Services {
 		if s.ID == "" || s.Hook == "" {
+			x.malformed()
 			return nil, fmt.Errorf("engine: %s: service %d has no id or no hook", url, i)
 		}
 	}

@@ -82,6 +82,13 @@ func (g *Gateway) ownershipRefused(k relay.Key, err error) {
 // errOwnershipFault is the local-fault message a refused transmit answers.
 const errOwnershipFault = "gateway fault: payload not permitted on this leg"
 
+// writeOwnershipFault answers a payload the ownership table refused: this
+// gateway's fidelity refusal of its own transmit.
+func writeOwnershipFault(w http.ResponseWriter) {
+	exchangeOfWriter(w).refused(RefusalFidelity)
+	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": errOwnershipFault})
+}
+
 // isOwnershipFault reports whether err is a refusal by the ownership table
 // (or an unset payload).
 func isOwnershipFault(err error) bool {
@@ -107,8 +114,13 @@ func (g *Gateway) writePayload(w http.ResponseWriter, status int, contentType st
 	b, err := relay.Transmit(p, relay.Check(k))
 	if err != nil {
 		g.ownershipRefused(k, err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": errOwnershipFault})
+		writeOwnershipFault(w)
 		return
+	}
+	if k.Role == relay.RoleRecipient && k.Direction == relay.DirectionResponse {
+		// An answer to a requester without a message frame: its outcome is
+		// the one it was checked against.
+		exchangeOfWriter(w).decided(answerOutcome(k.Outcome), "", "")
 	}
 	if contentType != "" {
 		w.Header().Set("Content-Type", contentType)
@@ -181,6 +193,17 @@ func sealRequest(id relay.BuilderID, b []byte, contentType string) relay.Payload
 func (g *Gateway) responderFailed(w http.ResponseWriter, r *http.Request, leg inboundLeg, env shnsdk.Envelope, tok shnsdk.Token, answerTok string, err error) {
 	status, msg := g.responderFailure(leg.tx, err)
 	g.refuseInbound(w, r, leg, env, tok, answerTok, status, msg, nil)
+	// The answer is this gateway's, but the record says whose failure it was:
+	// its participant's system not answering usably is an upstream error.
+	var uf *upstreamFailure
+	switch x := exchangeOf(r.Context()); {
+	case isOwnershipFault(err):
+		x.refused(RefusalFidelity)
+	case errors.As(err, &uf):
+		x.decided(ExchangeUpstreamError, "", "")
+	default:
+		x.decided(ExchangeOther, "", "")
+	}
 }
 
 // responderFailure decides how a LegResponder error on leg is answered, framed

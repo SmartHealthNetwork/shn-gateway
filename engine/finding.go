@@ -137,6 +137,26 @@ func findingVerdict(v Verdict) string {
 	return "structural"
 }
 
+// emitFindingIn is emitFinding for a check made while answering a call: the
+// call's exchange record counts the finding too.
+func (g *Gateway) emitFindingIn(ctx context.Context, f ConformanceFinding) {
+	countingEmit(ctx, g.emitFinding)(f)
+}
+
+// countingEmit wraps a finding emitter so the exchange record of the call ctx
+// belongs to counts each finding it writes, and names the rule of one that
+// refuses. nil stays nil: an unwired emitter records nothing.
+func countingEmit(ctx context.Context, emit func(ConformanceFinding)) func(ConformanceFinding) {
+	x := exchangeOf(ctx)
+	if emit == nil || x == nil {
+		return emit
+	}
+	return func(f ConformanceFinding) {
+		emit(f)
+		x.checked(CheckKind(f.Kind), f.Rule, true, f.Decision == Refuse.String())
+	}
+}
+
 // emitFinding is the one place a governed check's finding is written to both
 // carriers, and the one place the redaction rule in ConformanceFinding's
 // comment is enforced: f.Issues arrives raw and is replaced with

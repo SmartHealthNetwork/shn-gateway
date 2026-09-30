@@ -161,7 +161,9 @@ func (p *levelPayer) sendFramed(t *testing.T, leg string, headers map[string]str
 	r := httptest.NewRequest(http.MethodPost, "/substrate/inbound", bytes.NewReader(raw))
 	r.Header.Set("X-Hub-Assertion", base64.StdEncoding.EncodeToString(as))
 	rec := httptest.NewRecorder()
-	p.g.handleInbound(rec, r)
+	// The route as mounted: the exchange record and the diagnostic observer
+	// around handleInbound (each a pass-through when unset).
+	p.g.inboundRoute()(rec, r)
 	if rec.Code != http.StatusOK {
 		return payerAnswer{status: rec.Code, body: rec.Body.Bytes(), corr: corr}
 	}

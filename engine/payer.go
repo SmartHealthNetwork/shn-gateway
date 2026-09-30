@@ -106,11 +106,11 @@ func (g *Gateway) handleDTRInbound(w http.ResponseWriter, r *http.Request, env s
 	if isNextQuestion {
 		// (C) for the adaptive round: the answered QuestionnaireResponse must be about the
 		// SAME patient the request carried — a partner (or a relay) must not swap the subject.
-		if status, msg := fenceNextQuestionSubjectWith(nextQuestionSubject, result, refuses); status != 0 {
+		if status, msg := fenceNextQuestionSubjectWith(r.Context(), nextQuestionSubject, result, refuses); status != 0 {
 			g.refuseInbound(w, r, legDTR, env, tok, answerTok, status, msg, nil)
 			return
 		}
-	} else if status, msg := g.fenceResponseSubjectWith("dtr-questionnaire-fetch", "", env.Metadata.CorrelationID, result, refuses); status != 0 {
+	} else if status, msg := g.fenceResponseSubjectWith(r.Context(), "dtr-questionnaire-fetch", "", env.Metadata.CorrelationID, result, refuses); status != 0 {
 		g.refuseInbound(w, r, legDTR, env, tok, answerTok, status, msg, nil)
 		return
 	}
@@ -436,7 +436,7 @@ func (g *Gateway) bindNextQuestionSubjectContext(ctx context.Context, subject st
 // non-2xx relay (result.Status set) carries no QuestionnaireResponse and passes through to
 // respondLegError untouched; an unparseable 2xx is refused (502) rather than relayed blind.
 func fenceNextQuestionSubject(requestSubject string, res LegResult) (int, string) {
-	return fenceNextQuestionSubjectWith(requestSubject, res, nil)
+	return fenceNextQuestionSubjectWith(context.Background(), requestSubject, res, nil)
 }
 
 // fenceNextQuestionSubjectWith is fenceNextQuestionSubject with the answer's
@@ -445,7 +445,7 @@ func fenceNextQuestionSubject(requestSubject string, res LegResult) (int, string
 // patient (RulePatientAnswer). A repeated member name refuses whatever refuses
 // answers. An answer whose defect does not refuse passes, to be relayed as the
 // payer sent it; one that cannot be read has no subject to compare.
-func fenceNextQuestionSubjectWith(requestSubject string, res LegResult, refuses func(rule string) bool) (int, string) {
+func fenceNextQuestionSubjectWith(ctx context.Context, requestSubject string, res LegResult, refuses func(rule string) bool) (int, string) {
 	if refuses == nil {
 		refuses = func(string) bool { return true }
 	}
@@ -461,7 +461,7 @@ func fenceNextQuestionSubjectWith(requestSubject string, res LegResult, refuses 
 	}
 	qr, _, err := parseNextQuestionResponse(responseFHIR)
 	if err != nil {
-		if errors.Is(scanMessage(responseFHIR), relay.ErrDuplicateKey) || refuses(RuleAnswerShape) {
+		if repeatsAMember(ctx, responseFHIR) || refuses(RuleAnswerShape) {
 			return http.StatusBadGateway, "next-question response is not a questionnaire-response"
 		}
 		return 0, ""
@@ -482,7 +482,7 @@ func fenceNextQuestionSubjectWith(requestSubject string, res LegResult, refuses 
 // Returns (0,"") on pass or (status, msg) to write. Per-leg arms are added as
 // each leg moves behind the seam.
 func (g *Gateway) fenceResponseSubject(leg, boundPatientRef, corrID string, res LegResult) (int, string) {
-	return g.fenceResponseSubjectWith(leg, boundPatientRef, corrID, res, nil)
+	return g.fenceResponseSubjectWith(context.Background(), leg, boundPatientRef, corrID, res, nil)
 }
 
 // fenceResponseSubjectWith is fenceResponseSubject with the answer's content
@@ -493,7 +493,7 @@ func (g *Gateway) fenceResponseSubject(leg, boundPatientRef, corrID string, res 
 // repeated member name, the bound-member comparison of an answer this gateway
 // built and the fence over this gateway's own side-effects refuse whatever
 // refuses answers.
-func (g *Gateway) fenceResponseSubjectWith(leg, boundPatientRef, corrID string, res LegResult, refuses func(rule string) bool) (int, string) {
+func (g *Gateway) fenceResponseSubjectWith(ctx context.Context, leg, boundPatientRef, corrID string, res LegResult, refuses func(rule string) bool) (int, string) {
 	if refuses == nil {
 		refuses = func(string) bool { return true }
 	}
@@ -503,7 +503,7 @@ func (g *Gateway) fenceResponseSubjectWith(leg, boundPatientRef, corrID string, 
 	}
 	// A response that repeats a member name can be read two ways; the fence
 	// would judge one of them and the requester might read the other.
-	if err := scanMessage(responseFHIR); errors.Is(err, relay.ErrDuplicateKey) {
+	if repeatsAMember(ctx, responseFHIR) {
 		return http.StatusForbidden, "response repeats a member name"
 	}
 	switch leg {

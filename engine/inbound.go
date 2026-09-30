@@ -45,17 +45,20 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 			writeStoreUnavailable(w, "one-time-use record unavailable")
 			return
 		}
+		exchangeOf(r.Context()).refused(RefusalAuthentication)
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "missing or invalid hub assertion"})
 		return
 	}
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, shnsdk.MaxRequestBytes))
 	if err != nil {
+		exchangeOf(r.Context()).refused(RefusalIntegrity)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "read body failed"})
 		return
 	}
 	env, err := shnsdk.DecodeEnvelope(body)
 	if err != nil {
+		exchangeOf(r.Context()).refused(RefusalIntegrity)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "decode envelope failed"})
 		return
 	}
@@ -68,10 +71,12 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 	// empty correlation. AuthorityFrame is required for the same defense-in-depth
 	// reason; the frame is additionally pinned to the literal "provider-tpo" below.
 	if env.Metadata.AuthorityFrame == "" {
+		exchangeOf(r.Context()).refused(RefusalIntegrity)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing authority frame"})
 		return
 	}
 	if env.Metadata.CorrelationID == "" {
+		exchangeOf(r.Context()).refused(RefusalIntegrity)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing correlation id"})
 		return
 	}
@@ -81,6 +86,7 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 	// authz token below is the AUTHORITY check (AI-11) — both are required, neither
 	// substitutes for the other.
 	if env.Metadata.Recipient != g.cfg.HolderID {
+		exchangeOf(r.Context()).refused(RefusalRouting)
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "envelope not addressed to this holder"})
 		return
 	}
@@ -91,10 +97,12 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 	// BEFORE any token verification — it is not part of the protocol surface.
 	spec, known := paCatalog[env.Metadata.TransactionType]
 	if !known {
+		exchangeOf(r.Context()).refused(RefusalRouting)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown transaction type"})
 		return
 	}
 	scope.leg = env.Metadata.TransactionType
+	exchangeOf(r.Context()).leg(env.Metadata.TransactionType)
 
 	// Every governed check this leg makes is reported as this leg: an inbound
 	// request's bytes are the peer's, at the seam certify.go already names.
@@ -113,6 +121,7 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 	// both are required, neither substitutes for the other.
 	var tok shnsdk.Token
 	if err := json.Unmarshal([]byte(env.Metadata.AuthzToken), &tok); err != nil {
+		exchangeOf(r.Context()).refused(RefusalAuthority)
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "invalid authz token"})
 		return
 	}
@@ -123,11 +132,16 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 	// routing using another holder's token.
 	if err := shnsdk.VerifyBound(tok, g.cfg.AuthzPub, g.cfg.Clock(),
 		spec.ReqFrame, spec.Op, env.Metadata.CorrelationID, env.Metadata.Sender, "", sha256hex(env.Ciphertext)); err != nil {
+		exchangeOf(r.Context()).refused(RefusalAuthority)
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "authz verification failed"})
 		return
 	}
 
 	// Only verified envelope metadata may provide cross-boundary attribution.
+	x := exchangeOf(r.Context())
+	x.correlation(env.Metadata.CorrelationID)
+	x.peers(env.Metadata.Sender, env.Metadata.Recipient)
+	x.requestHash(sha256hex(env.Ciphertext))
 	if leg, ok := r.Context().Value(diagnosticLegKey{}).(*diagnosticLeg); ok {
 		leg.hash, leg.sender, leg.recipient, leg.correlation = sha256hex(env.Ciphertext), env.Metadata.Sender, env.Metadata.Recipient, env.Metadata.CorrelationID
 	}
@@ -141,12 +155,14 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 	// and the handlers receive plaintext they no longer each decrypt.
 	payload, err := shnsdk.Open(env, g.cfg.Identity.EncPub, g.cfg.Identity.EncPriv)
 	if err != nil {
+		x.refused(RefusalIntegrity)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "decryption failed"})
 		return
 	}
 	g.diagnosticStage(r.Context(), "recipient.opened", env.Metadata.TransactionType, payload, 0, "")
 	body, answerTok, status, msg := g.unframeRequestFrom(env.Metadata.Sender, env.Metadata.TransactionType, payload)
 	if status != 0 {
+		x.refusing(frameRefusalRule(status))
 		g.refuseInboundRequest(w, r, env, tok, status, msg)
 		return
 	}
@@ -156,6 +172,7 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 	// explicitly for the frame stamp. The DECLARED SET rides alongside it so a
 	// builder that must fall back falls back to what this deployment declares, not
 	// to the library build constant (D1a).
+	x.line(shnsdk.LineOf(answerTok))
 	r = r.WithContext(withDeclaredContractVersions(withAnswerLine(r.Context(), answerTok), g.declaredContractVersions()))
 	// The media type the sender framed for a FHIR request rides the context to
 	// the native forward (mediatype.go).
@@ -164,9 +181,11 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 	// rides the context too, for the same reason as the answer line.
 	operation, status, msg := inboundFrameOperation(env.Metadata.TransactionType, payload)
 	if status != 0 {
+		x.refusing(frameRefusalRule(status))
 		g.refuseInboundRequest(w, r, env, tok, status, msg)
 		return
 	}
+	x.operation(operation)
 	r = r.WithContext(withRequestFrameOperation(r.Context(), operation))
 
 	g.diagnosticStage(r.Context(), "recipient.request", env.Metadata.TransactionType, body, 0, "")
@@ -254,6 +273,14 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// A payer gateway that keeps no system of record has no records
+	// to answer eligibility from itself: the operation is not offered, as a
+	// FHIR server without it would say. Not a network rule.
+	if !hasSystemOfRecord(g.cfg.SoR) {
+		g.refuseInbound(w, r, legEligibility, env, tok, answerTok, http.StatusNotImplemented, refusalEligibilityNotOffered, nil)
+		return
+	}
+
 	// H2a: bind the token's subject to the payload's patient. The token authorizes
 	// a specific PCI; resolving the CER's member must yield that same PCI. This
 	// stops a token authorizing patient A being paired with a payload for patient B.
@@ -266,6 +293,7 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if pci != tok.Subject {
+		exchangeOf(r.Context()).refusing(RefusalAuthority)
 		g.refuseInbound(w, r, legEligibility, env, tok, answerTok, http.StatusForbidden, "token subject does not match request patient", nil)
 		return
 	}
@@ -358,7 +386,7 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 		g.refuseInbound(w, r, legEligibility, env, tok, answerTok, http.StatusInternalServerError, errOwnershipFault, nil)
 		return
 	}
-	if status, msg := g.fenceResponseSubject("coverage-eligibility", boundPatientRef, env.Metadata.CorrelationID, result); status != 0 {
+	if status, msg := g.fenceResponseSubjectWith(r.Context(), "coverage-eligibility", boundPatientRef, env.Metadata.CorrelationID, result, nil); status != 0 {
 		g.refuseInbound(w, r, legEligibility, env, tok, answerTok, status, msg, nil)
 		return
 	}
@@ -522,7 +550,7 @@ func (g *Gateway) forwardEligibilityInbound(w http.ResponseWriter, r *http.Reque
 // unfinished: strict refuses with the system of record's failure, and observe
 // and structural record it unavailable and relay.
 func (g *Gateway) fenceEligibilityAnswer(ctx context.Context, responseFHIR []byte, member string) (int, string) {
-	if err := scanMessage(responseFHIR); errors.Is(err, relay.ErrDuplicateKey) {
+	if repeatsAMember(ctx, responseFHIR) {
 		return http.StatusForbidden, "response repeats a member name"
 	}
 	ref, err := ParseCoverageEligibilityResponsePatient(responseFHIR)
@@ -572,6 +600,7 @@ func (g *Gateway) handleFederatedQueryInbound(w http.ResponseWriter, r *http.Req
 
 	// (1) The leg MUST carry a consent reference.
 	if env.Metadata.ConsentRef == "" {
+		exchangeOf(r.Context()).refusing(RefusalConsent)
 		g.refuseInbound(w, r, legFederatedQuery, env, tok, answerTok, http.StatusForbidden, "federated query missing consent reference", nil)
 		return
 	}
@@ -595,6 +624,7 @@ func (g *Gateway) handleFederatedQueryInbound(w http.ResponseWriter, r *http.Req
 		return
 	}
 	if pci != tok.Subject {
+		exchangeOf(r.Context()).refusing(RefusalAuthority)
 		g.refuseInbound(w, r, legFederatedQuery, env, tok, answerTok, http.StatusForbidden, "token subject does not match queried patient", nil)
 		return
 	}
@@ -606,12 +636,14 @@ func (g *Gateway) handleFederatedQueryInbound(w http.ResponseWriter, r *http.Req
 	// (attribution integrity, FR-32/C11).
 	consentRef, status, msg := g.consentBackstop(ctx, pci, env.Metadata.Sender)
 	if status != 0 {
+		exchangeOf(r.Context()).refusing(RefusalConsent)
 		g.refuseInbound(w, r, legFederatedQuery, env, tok, answerTok, status, msg, nil)
 		return
 	}
 	// Defense in depth: the carried wire ref must match the authenticated one, so a
 	// forged Metadata.ConsentRef cannot diverge from the permit that authorized this.
 	if env.Metadata.ConsentRef != consentRef {
+		exchangeOf(r.Context()).refusing(RefusalConsent)
 		g.refuseInbound(w, r, legFederatedQuery, env, tok, answerTok, http.StatusForbidden, "consent reference mismatch", nil)
 		return
 	}
@@ -819,6 +851,7 @@ func (g *Gateway) handlePatientDTRInbound(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if pci != tok.Subject {
+		exchangeOf(r.Context()).refusing(RefusalAuthority)
 		g.refuseInbound(w, r, legPatientDTR, env, tok, answerTok, http.StatusForbidden, "token subject does not match patient", nil)
 		return
 	}

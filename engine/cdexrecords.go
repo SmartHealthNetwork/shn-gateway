@@ -65,8 +65,20 @@ func (g *Gateway) facilityRecordsBundle(ctx context.Context, member string, quer
 		if errors.As(err, &bound) {
 			return fail(http.StatusUnprocessableEntity, "records exceed the per-answer bound for "+bound.resourceType)
 		}
+		// The facility's own system failing to answer is an upstream
+		// failure on the exchange record, as on every other leg.
+		exchangeOf(ctx).sorFailure()
 		status, msg := SoRFailureResponse(err)
 		return fail(status, msg)
+	}
+	// badAnswer refuses with what the facility's own system returned out of
+	// shape: that system's malformed answer, an upstream failure on the
+	// exchange record.
+	badAnswer := func(msg string) ([]byte, relay.Payload, int, string) {
+		x := exchangeOf(ctx)
+		x.malformed()
+		x.decided(ExchangeUpstreamError, "", "")
+		return fail(http.StatusBadGateway, msg)
 	}
 	sor := ReadSystemOfRecord(g.cfg.SoR)
 	ref, found, err := sor.PatientFHIRRefContext(ctx, member)
@@ -78,11 +90,11 @@ func (g *Gateway) facilityRecordsBundle(ctx context.Context, member string, quer
 	}
 	sorID, ok := strings.CutPrefix(ref, "Patient/")
 	if !ok || !fhirIDRE.MatchString(sorID) {
-		return sorFail(&SoRReadError{Kind: SoRInvalidResponse})
+		return badAnswer((&SoRReadError{Kind: SoRInvalidResponse}).Error())
 	}
 	fence := newPatientFence(shnsdk.MemberSystem, member, nil, sorID, member)
 	anotherPatient := func() ([]byte, relay.Payload, int, string) {
-		return fail(http.StatusBadGateway, "system of record returned another patient's resource")
+		return badAnswer("system of record returned another patient's resource")
 	}
 	// The member's own Patient record must exist and be this member; only
 	// the identity binding below is sent.
@@ -91,7 +103,7 @@ func (g *Gateway) facilityRecordsBundle(ctx context.Context, member string, quer
 		return sorFail(err)
 	}
 	if !hasPatient {
-		return fail(http.StatusBadGateway, "the facility's system of record did not return the member's Patient")
+		return badAnswer("the facility's system of record did not return the member's Patient")
 	}
 	if fence.check(patient) != nil {
 		return anotherPatient()
@@ -123,10 +135,10 @@ func (g *Gateway) facilityRecordsBundle(ctx context.Context, member string, quer
 			}
 			key, ok := resourceRef(raw)
 			if !ok {
-				return fail(http.StatusBadGateway, "system of record returned a record without an id")
+				return badAnswer("system of record returned a record without an id")
 			}
 			if seen[key] {
-				return fail(http.StatusBadGateway, "system of record returned the same record twice")
+				return badAnswer("system of record returned the same record twice")
 			}
 			seen[key] = true
 			if status, msg := g.validateFHIR(ctx, raw, "egress", ""); status != 0 {

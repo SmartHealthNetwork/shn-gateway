@@ -137,6 +137,9 @@ type nativeResponder struct {
 	// builds its own request). Addressing for the participant's own system,
 	// never a change to the message: the body bytes are untouched. nil ⇒ none.
 	backendHeaders http.Header
+	// noBackendCorrelation: the leg's id is not sent as X-Correlation-Id
+	// (WithoutBackendCorrelation).
+	noBackendCorrelation bool
 
 	// conformance is the policy of the gateway this responder runs in, passed
 	// as an option because NewNativeResponder runs before engine.New. The zero
@@ -252,13 +255,27 @@ func WithPASBaseURL(pasBaseURL string) NativeOption {
 // WithBackendHeaders sets fixed request headers for a partner system that
 // routes on one (PAYER_DAVINCI_BACKEND_HEADERS). Every request to the partner's
 // bases carries them; the token endpoint never does. nil or empty ⇒ nothing added.
+// X-Correlation-Id is never one of them: on a request to the partner's system
+// it is only ever the leg's id, set by the gateway.
 func WithBackendHeaders(h http.Header) NativeOption {
 	return func(n *nativeResponder) {
 		if len(h) == 0 {
 			return
 		}
 		n.backendHeaders = h.Clone()
+		for k := range n.backendHeaders {
+			if strings.EqualFold(k, CorrelationHeader) {
+				delete(n.backendHeaders, k)
+			}
+		}
 	}
+}
+
+// WithoutBackendCorrelation stops the leg's id being sent to the partner's
+// system as X-Correlation-Id (PAYER_DAVINCI_BACKEND_CORRELATION=off), for a
+// system that validates that header its own way. The default sends it.
+func WithoutBackendCorrelation() NativeOption {
+	return func(n *nativeResponder) { n.noBackendCorrelation = true }
 }
 
 // applyBackendHeaders adds the partner's fixed request headers to req.
@@ -696,6 +713,11 @@ func (n *nativeResponder) post(ctx context.Context, base, path string, p relay.P
 	req.Header.Set("Content-Type", ct)
 	req.Header.Set("Accept", acceptFor(ct))
 	n.applyBackendHeaders(req)
+	if n.noBackendCorrelation {
+		req.Header.Del(CorrelationHeader)
+	} else {
+		setBackendCorrelation(ctx, req)
+	}
 	capture, _ := ctx.Value(nativeCertificationKey{}).(*nativeCertificationCapture)
 	if capture != nil {
 		capture.attempted = true
@@ -715,8 +737,14 @@ func (n *nativeResponder) post(ctx context.Context, base, path string, p relay.P
 		},
 	}))
 	started := time.Now()
+	x := exchangeOf(ctx)
+	var callStart time.Time
+	if x != nil {
+		callStart = n.now()
+	}
 	resp, err := n.client.Do(req)
 	if err != nil {
+		x.backend(0, x.since(n.now, callStart), callEndedClass(ctx, backendClass(0, err)))
 		// A request whose bearer could not be obtained was never sent.
 		sent := wrote.Load() && !smartauth.IsTokenAcquisitionError(err)
 		logUpstreamAbandoned(ctx, label, leg, base+path, time.Since(started), sent)
@@ -730,10 +758,36 @@ func (n *nativeResponder) post(ctx context.Context, base, path string, p relay.P
 		capture.response = append([]byte(nil), rb...)
 	}
 	if err != nil {
+		x.backend(resp.StatusCode, x.since(n.now, callStart), callEndedClass(ctx, bodyReadClass(err)))
 		logUpstreamAbandoned(ctx, label, leg, base+path, time.Since(started), true)
 		return upstreamReply{}, LegResult{}, &upstreamFailure{err: fmt.Errorf("upstream payer %s read failed: %w", label, err), sent: true}
 	}
+	x.backend(resp.StatusCode, x.since(n.now, callStart), backendClass(resp.StatusCode, nil))
 	return upstreamAnswer(resp, rb, label)
+}
+
+// now is the responder's clock; a responder built without the constructor
+// (tests) reads the wall clock.
+func (n *nativeResponder) now() time.Time {
+	if n.clock == nil {
+		return time.Now()
+	}
+	return n.clock()
+}
+
+// setBackendCorrelation names the leg on a request to the participant's own
+// system: X-Correlation-Id carries the leg's id, the id the network's records
+// and both gateways' access lines know the exchange by, so the participant's
+// logs join them. It is metadata about the request, as a participant's own
+// routing headers are: the message bytes are untouched, and a system that
+// ignores the header is sent exactly what it was sent before. An id that is
+// not one bounded token (a Claim may name its own) is not sent: a header is
+// never the reason the request fails.
+func setBackendCorrelation(ctx context.Context, req *http.Request) {
+	req.Header.Del(CorrelationHeader)
+	if corr, _ := ctx.Value(responderCorrelationKey{}).(string); correlationShape.MatchString(corr) {
+		req.Header.Set(CorrelationHeader, corr)
+	}
 }
 
 type responderCorrelationKey struct{}
@@ -848,6 +902,7 @@ func certifyCDSHooksAnswer(ctx context.Context, policy ConformancePolicy, emit f
 	if !policy.RunsKind(KindCDSEnvelope) {
 		return LegResult{}
 	}
+	emit = countingEmit(ctx, emit)
 	violations := shnsdk.CheckCDSHooksResponse(body, line)
 	if len(violations) == 0 {
 		return LegResult{}

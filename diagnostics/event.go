@@ -84,7 +84,8 @@ type Health struct {
 }
 
 // DropCounts are a publisher's drops by why: its queue was full when the
-// event was emitted, its ownership window expired, it was too large to
+// event was emitted (or, still undelivered, it was shed from a full queue to
+// admit an access event), its ownership window expired, it was too large to
 // publish, it could not be encoded, it was a test event that was not
 // accepted, or the publisher stopped with it undelivered.
 type DropCounts struct {

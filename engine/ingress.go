@@ -186,6 +186,8 @@ func (g *Gateway) handleCRDIngress(w http.ResponseWriter, r *http.Request) {
 	}
 	legType := svc.Leg
 	scope.leg = legType
+	exchangeOf(r.Context()).leg(legType)
+	exchangeOf(r.Context()).operation(svc.Hook)
 	// Tag the leg for every check before routing; the correlation id is added
 	// once the leg is routed.
 	r = r.WithContext(withFindingContext(r.Context(), findingContext{LegType: legType, Seam: "provider-ingress", Whose: "own"}))
@@ -228,6 +230,7 @@ func (g *Gateway) handleCRDIngress(w http.ResponseWriter, r *http.Request) {
 	}
 	recipient, status, msg := g.crdIngressRecipient(r.Context(), prepared)
 	if status != 0 {
+		exchangeOf(r.Context()).routed(status)
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
@@ -265,7 +268,7 @@ func (g *Gateway) handleCRDIngress(w http.ResponseWriter, r *http.Request) {
 	sent, terr := relay.Transmit(prepared.request, relay.Check(requestKey))
 	if terr != nil {
 		g.ownershipRefused(requestKey, terr)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": errOwnershipFault})
+		writeOwnershipFault(w)
 		return
 	}
 	adapted, _, aerr := g.egressAdapt(route, sent, ExchangeIdentity{CorrelationID: child, LegType: legType, Counterpart: recipient})
@@ -334,6 +337,8 @@ func (g *Gateway) handleDTRIngress(w http.ResponseWriter, r *http.Request) {
 	if g.ingressAuthRefused(w, r) {
 		return
 	}
+	// Named once the caller is authenticated, as on the other routes.
+	exchangeOf(r.Context()).leg(legType)
 	// Tag the leg for every check before routing; the correlation id is added
 	// once the leg is routed.
 	r = r.WithContext(withFindingContext(r.Context(), findingContext{LegType: legType, Seam: "provider-ingress", Whose: "own"}))
@@ -350,6 +355,7 @@ func (g *Gateway) handleDTRIngress(w http.ResponseWriter, r *http.Request) {
 	// Route by every coverage the request carries (FR-G40; no default).
 	recipient, status, msg := g.dtrIngressRecipient(r.Context(), prepared)
 	if status != 0 {
+		exchangeOf(r.Context()).routed(status)
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
@@ -376,7 +382,7 @@ func (g *Gateway) handleDTRIngress(w http.ResponseWriter, r *http.Request) {
 	sent, terr := relay.Transmit(prepared.request, relay.Check(requestKey))
 	if terr != nil {
 		g.ownershipRefused(requestKey, terr)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": errOwnershipFault})
+		writeOwnershipFault(w)
 		return
 	}
 	adapted, _, aerr := g.egressAdapt(route, sent, ExchangeIdentity{CorrelationID: child, LegType: legType, Counterpart: recipient})
@@ -474,10 +480,12 @@ func (g *Gateway) handlePASIngress(w http.ResponseWriter, r *http.Request) {
 	// hitting resolveRef.
 	recipient, _, status, msg := g.recipientForWith(pasBundleCoverage(body), bundleRefResolver(body))
 	if status != 0 {
+		exchangeOf(r.Context()).routed(status)
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
 	scope.leg = leg
+	exchangeOf(r.Context()).leg(leg)
 	// R8 re-home (FR-16/FR-27): fence at the provider-facing edge too, before this
 	// gateway ever originates the bundle onward — a nonconformant clinician/patient
 	// QR item is rejected here regardless of which leg it routes as (the property
@@ -580,7 +588,7 @@ func (g *Gateway) handlePASIngress(w http.ResponseWriter, r *http.Request) {
 	if _, bad := validateNativePASResponse(crJSON); bad.Status != 0 {
 		// A repeated member name is read one way only (RuleDuplicateKey): it
 		// refuses at every level, with strict's refusal.
-		if errors.Is(scanMessage(crJSON), relay.ErrDuplicateKey) || g.guard(answerCtx, KindContent, RuleAnswerShape, crJSON) {
+		if repeatsAMember(answerCtx, crJSON) || g.guard(answerCtx, KindContent, RuleAnswerShape, crJSON) {
 			g.recordLeg(ex.ID, legProj.Project(child, "error"))
 			writeJSON(w, bad.Status, map[string]string{"error": bad.Message})
 			return

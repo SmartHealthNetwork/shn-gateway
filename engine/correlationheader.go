@@ -51,6 +51,7 @@ func (g *Gateway) withIngressCorrelation(h http.HandlerFunc) http.HandlerFunc {
 			ids.trace = sent
 		}
 		stampIngressIDs(w, ids.trace, ids.leg)
+		exchangeOf(r.Context()).trace(ids.trace)
 		h(w, r.WithContext(context.WithValue(r.Context(), ingressCorrelationKey{}, ids)))
 	}
 }

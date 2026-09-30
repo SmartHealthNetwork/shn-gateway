@@ -660,11 +660,12 @@ const recipientRefusedPrefix = "forward to recipient failed: the recipient refus
 // it is answered 500 here, before any other mapping.
 func (g *Gateway) relayOriginationError(w http.ResponseWriter, err error) bool {
 	if isOwnershipFault(err) {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": errOwnershipFault})
+		writeOwnershipFault(w)
 		return true
 	}
 	var rre *RouteRefusalError
 	if errors.As(err, &rre) {
+		exchangeOfWriter(w).refused(RefusalRouting)
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": rre.Error()})
 		return true
 	}

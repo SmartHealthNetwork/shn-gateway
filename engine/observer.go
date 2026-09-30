@@ -264,6 +264,7 @@ func (g *Gateway) observeIngress(route string, h http.HandlerFunc) http.HandlerF
 			if len(g.cfg.DiagnosticTraceKey) > 0 {
 				id, _ = diagnostics.VerifyTraceProof(g.cfg.DiagnosticTraceKey, r.Header.Get("X-SHN-Test-Trace"), r.Method, r.URL.RequestURI(), g.cfg.Clock())
 			}
+			exchangeOf(r.Context()).callID(id)
 			r = r.WithContext(diagnostics.WithCallID(r.Context(), id))
 		}
 		var observerPanic any
@@ -498,9 +499,8 @@ func (o observingSoR) OpenCoverageContext(ctx context.Context, key string) ([][]
 func (o observingSoR) SearchPatientContext(ctx context.Context, resourceType, sorPatientID string, dates ...SearchDateRange) (SearchResult, error) {
 	searcher, ok := o.inner.(SearchSystemOfRecord)
 	if !ok {
-		err := &SearchError{Outcome: SearchUnsupported, Reason: "connector does not search"}
-		o.emit("SearchPatient", string(err.Outcome), nil)
-		return SearchResult{}, err
+		o.emit("SearchPatient", string(errNoSearch.Outcome), nil)
+		return SearchResult{}, errNoSearch
 	}
 	res, err := searcher.SearchPatientContext(ctx, resourceType, sorPatientID, dates...)
 	var se *SearchError

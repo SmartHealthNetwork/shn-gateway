@@ -43,9 +43,10 @@ type SystemOfRecord interface {
 
 // Store is the gateway's own durable business state (metadata/decision only —
 // AI-1-compatible: the payer tracking its own claims/EOBs/auth-numbers, never a
-// cross-holder clinical record). The partner does not implement this; today it is the
-// in-memory stub (demo) or delegated to holdersim (separated stack); a gateway-owned
-// Postgres implementation is a later edge slice.
+// cross-holder clinical record). The partner does not implement this. Config.Store is
+// required (New panics without one); the published gateway (gateway/app) sets
+// NewMemStore, or the Postgres store in gateway/connectors/pgstore when
+// SHN_STORE_DATABASE_URL is set.
 type Store interface {
 	StoreAuthNumber(serviceRequestRef, preAuthRef string) error
 	AuthNumber(serviceRequestRef string) (string, bool)

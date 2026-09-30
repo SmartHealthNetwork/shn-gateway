@@ -19,7 +19,6 @@ package engine
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -484,7 +483,7 @@ func payerStatedAuthNumber(body []byte) string {
 // the answer as the participant's own). A repeated member name is read one way
 // only and refuses at every level.
 func (n *nativeResponder) refusesAnswer(ctx context.Context, rule string, raw []byte) bool {
-	if errors.Is(scanMessage(raw), relay.ErrDuplicateKey) {
+	if repeatsAMember(ctx, raw) {
 		return true
 	}
 	fc := findingContextFrom(ctx)

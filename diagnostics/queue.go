@@ -3,6 +3,7 @@ package diagnostics
 import (
 	"context"
 	"net/http"
+	"slices"
 	"sync"
 	"time"
 )
@@ -15,6 +16,12 @@ const (
 	mapEntryCost        = 64
 	sliceEntryCost      = 24
 )
+
+// KindAccess is the metadata-only per-exchange access event. It is small and
+// exchange counts are built from it, so a full queue sheds other undelivered
+// events to admit it (TryEmit), never the reverse. An access event that
+// carries a body has no such priority.
+const KindAccess = "access"
 
 type Limits struct {
 	MaxEvents    int
@@ -113,7 +120,7 @@ func (q *Queue) TryEmit(e Event) bool {
 		}
 	}
 	cost := eventCost(costEvent)
-	if len(q.items) >= q.limits.MaxEvents || cost > q.limits.MaxBytes-q.retainedBytes {
+	if !q.fits(cost) && (e.Kind != KindAccess || len(e.Body) != 0 || !q.shedFor(cost)) {
 		q.dropped++
 		q.state = "degraded"
 		return false
@@ -125,6 +132,38 @@ func (q *Queue) TryEmit(e Event) bool {
 	case q.ready <- struct{}{}:
 	default:
 	}
+	return true
+}
+
+func (q *Queue) fits(cost int64) bool {
+	return len(q.items) < q.limits.MaxEvents && cost <= q.limits.MaxBytes-q.retainedBytes
+}
+
+// shedFor makes room for an access event of the given cost by shedding
+// undelivered non-access events, newest first. An event deferred while its
+// binding is pending sits at the tail, so it goes first; like an event whose
+// ownership window expires, it counts as dropped. It sheds nothing unless that
+// makes room: delivered events are in flight and access events are never
+// shed for one another.
+func (q *Queue) shedFor(cost int64) bool {
+	events, bytes := len(q.items), q.retainedBytes
+	var shed []int
+	for i := len(q.items) - 1; i >= 0 && (events >= q.limits.MaxEvents || cost > q.limits.MaxBytes-bytes); i-- {
+		if it := q.items[i]; !it.delivered && it.event.Kind != KindAccess {
+			shed = append(shed, i)
+			events--
+			bytes -= it.bytes
+		}
+	}
+	if events >= q.limits.MaxEvents || cost > q.limits.MaxBytes-bytes {
+		return false
+	}
+	for _, i := range shed { // descending, so earlier indexes stay valid
+		q.items = slices.Delete(q.items, i, i+1) // zeroes the vacated slot
+	}
+	q.retainedBytes = bytes
+	q.dropped += uint64(len(shed))
+	q.state = "degraded"
 	return true
 }
 

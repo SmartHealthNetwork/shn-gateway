@@ -357,7 +357,7 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 	// member namespace, both flags false, so it fences strict). The SHN-produced EOB side-effect is
 	// fenced UNCONDITIONALLY (always built from the bound member). Re-adds the (C) fence the minimized
 	// pas-claim leg carries, before that leg is deleted (OWD-G6 prove-first).
-	if status, msg := g.fenceResponseSubjectWith("pas-claim", boundPatientRef, env.Metadata.CorrelationID, result, read.refuses); status != 0 {
+	if status, msg := g.fenceResponseSubjectWith(r.Context(), "pas-claim", boundPatientRef, env.Metadata.CorrelationID, result, read.refuses); status != 0 {
 		g.refuseAfterPayerAnswered(w, r, pasLeg, legPASClaim, env, tok, answerTok, status, msg, nil)
 		return
 	}
@@ -538,7 +538,7 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 	// The update leg builds no EOB, so the SHN-produced-side-effect fence is a no-op here; the flag
 	// keeps the leg symmetric with submit so the native relay (both flags set) stands the member-fence
 	// down. Re-adds the (C) fence before the minimized pas-claim-update leg is deleted (OWD-G6).
-	if status, msg := g.fenceResponseSubjectWith("pas-claim-update", boundPatientRef, env.Metadata.CorrelationID, result, read.refuses); status != 0 {
+	if status, msg := g.fenceResponseSubjectWith(r.Context(), "pas-claim-update", boundPatientRef, env.Metadata.CorrelationID, result, read.refuses); status != 0 {
 		g.refuseAfterPayerAnswered(w, r, pasLeg, legPASClaimUpdate, env, tok, answerTok, status, msg, nil)
 		return
 	}
@@ -981,7 +981,7 @@ func (a *payerAnswerRead) refuses(rule string) bool {
 // refusesUnreadable is refuses for an answer this gateway cannot read: a
 // repeated member name is read one way only and refuses at every level.
 func (a *payerAnswerRead) refusesUnreadable(rule string) bool {
-	if errors.Is(scanMessage(a.answer), relay.ErrDuplicateKey) {
+	if repeatsAMember(a.ctx, a.answer) {
 		return true
 	}
 	return a.refuses(rule)

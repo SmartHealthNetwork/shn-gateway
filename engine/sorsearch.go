@@ -312,14 +312,61 @@ func runSoRSearch(ctx context.Context, sor SystemOfRecord, resourceType, sorPati
 	out := sorSearchset{Query: query}
 	searcher, ok := sor.(SearchSystemOfRecord)
 	if !ok {
-		out.Outcome, out.Reason = SearchUnsupported, "connector does not search"
+		out.Outcome, out.Reason = SearchUnsupported, searchReasonNoSearch
 		return out
 	}
+	// On a leg this gateway answers, the search is a read of its
+	// participant's system, noted on the exchange record like any other.
+	ctx, note := noteRead(ctx)
 	res, err := searcher.SearchPatientContext(ctx, resourceType, sorPatientID, dates...)
 	if err != nil {
-		return failedSearch(query, err)
+		out = failedSearch(query, err)
+	} else {
+		out = classifySearch(query, resourceType, res, assemble)
 	}
-	return classifySearch(query, resourceType, res, assemble)
+	// A connector that cannot search (a decorator in front of one says so
+	// without asking it) made no call. Only the engine's own errNoSearch
+	// says so: a connector answering unsupported after asking its system
+	// made a call.
+	if note != nil && !errors.Is(err, errNoSearch) {
+		note(searchClass(err, out))
+	}
+	return out
+}
+
+// The search reasons the engine itself names.
+const (
+	// searchReasonNoSearch: the configured connector cannot search.
+	searchReasonNoSearch = "connector does not search"
+	// searchReasonTimeBound: the search ran out of its own time
+	// (SoRSearchMaxDuration), a SearchUnavailable.
+	searchReasonTimeBound = "time bound"
+)
+
+// errNoSearch is a decorator's answer for a connector that cannot search,
+// given without asking it. It is compared by identity, so no connector's own
+// answer can be taken for it.
+var errNoSearch = &SearchError{Outcome: SearchUnsupported, Reason: searchReasonNoSearch}
+
+// searchClass is the backend class of a search. One that ended with the
+// request or its deadline is named by noteRead, which reads the request's
+// context; a connector's own cancellation, with the request still live, is
+// its system not answering. A search out of time is a timeout; else it is
+// classed by what it answered, a search that could not answer being other,
+// as an unavailable read is, and one whose answer could not be read
+// malformed.
+func searchClass(err error, s sorSearchset) string {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return ExchangeOther
+	case errors.Is(err, context.DeadlineExceeded), s.Outcome == SearchUnavailable && s.Reason == searchReasonTimeBound:
+		return BackendTimeout
+	case s.Outcome == SearchUnavailable:
+		return ExchangeOther
+	case s.Outcome == SearchMalformed:
+		return BackendMalformed
+	}
+	return ""
 }
 
 func failedSearch(query string, err error) sorSearchset {

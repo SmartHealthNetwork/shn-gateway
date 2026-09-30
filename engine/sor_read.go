@@ -52,11 +52,18 @@ func checkSystemOfRecordSignatures(sor SystemOfRecord) error {
 // ReadSystemOfRecord prefers contextual reads while retaining source compatibility
 // with existing connectors. Legacy calls cannot be interrupted once invoked, and
 // the adapter cannot recover errors already discarded by a legacy connector.
+//
+// A gateway that keeps no system of record (NoSystemOfRecord) reads nothing,
+// so its reader notes no call on the exchange record.
 func ReadSystemOfRecord(sor SystemOfRecord) ContextSystemOfRecord {
-	if reader, ok := sor.(ContextSystemOfRecord); ok {
+	reader, ok := sor.(ContextSystemOfRecord)
+	if !ok {
+		reader = legacySoRReader{sor: sor}
+	}
+	if !hasSystemOfRecord(sor) {
 		return reader
 	}
-	return legacySoRReader{sor: sor}
+	return recordingSoR{reader}
 }
 
 type legacySoRReader struct{ sor SystemOfRecord }
@@ -174,4 +181,136 @@ func SoRFailureResponse(err error) (int, string) {
 		return http.StatusBadGateway, readErr.Error()
 	}
 	return http.StatusBadGateway, (&SoRReadError{Kind: SoRInvalidResponse}).Error()
+}
+
+// recordingSoR notes each read of the participant's own system of record on
+// the call's exchange record when the call is a leg this gateway answers
+// (exchangerecord.go): a backend call with its latency and, when it failed,
+// its class. The reads a provider gateway makes for its own caller are not
+// the answering side's backend and are not noted. A read made inside another
+// noted read (a decorator reading through) is noted once.
+type recordingSoR struct{ inner ContextSystemOfRecord }
+
+type sorReadNotedKey struct{}
+
+// begin returns the context to read under and the function that notes the
+// read's result, or a nil function when the read is not noted.
+func (r recordingSoR) begin(ctx context.Context) (context.Context, func(error)) {
+	ctx, note := noteRead(ctx)
+	if note == nil {
+		return ctx, nil
+	}
+	return ctx, func(err error) { note(sorClass(err)) }
+}
+
+// readEndedClass is a failed read's class when the read ended with the
+// request it served (cancelled) or its deadline (timeout): a connector may
+// report either as its system being unavailable, without saying why.
+func readEndedClass(ctx context.Context, class string) string {
+	if class == "" {
+		return ""
+	}
+	switch {
+	case errors.Is(ctx.Err(), context.Canceled):
+		return BackendCancelled
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		return BackendTimeout
+	}
+	return class
+}
+
+// noteRead returns the context to read the participant's system of record
+// under and the function that notes the read with its class, or a nil
+// function when the read is not noted: the call is not a leg this gateway
+// answers, or the read runs inside one already noted.
+func noteRead(ctx context.Context) (context.Context, func(class string)) {
+	x := exchangeOf(ctx)
+	if x == nil || ctx.Value(sorReadNotedKey{}) != nil || !x.answering() {
+		return ctx, nil
+	}
+	start := x.clock()
+	return context.WithValue(ctx, sorReadNotedKey{}, true), func(class string) {
+		x.read(0, x.clock().Sub(start), readEndedClass(ctx, class))
+	}
+}
+
+func (r recordingSoR) ResolvePatientContext(ctx context.Context, key string) (string, Demo, bool, error) {
+	ctx, note := r.begin(ctx)
+	a, b, c, err := r.inner.ResolvePatientContext(ctx, key)
+	if note != nil {
+		note(err)
+	}
+	return a, b, c, err
+}
+
+func (r recordingSoR) PatientFHIRRefContext(ctx context.Context, key string) (string, bool, error) {
+	ctx, note := r.begin(ctx)
+	a, b, err := r.inner.PatientFHIRRefContext(ctx, key)
+	if note != nil {
+		note(err)
+	}
+	return a, b, err
+}
+
+func (r recordingSoR) CoverageInforceContext(ctx context.Context, key string) (bool, string, error) {
+	ctx, note := r.begin(ctx)
+	a, b, err := r.inner.CoverageInforceContext(ctx, key)
+	if note != nil {
+		note(err)
+	}
+	return a, b, err
+}
+
+func (r recordingSoR) ClinicalContextContext(ctx context.Context, key string) (shnsdk.ClinicalContext, bool, error) {
+	ctx, note := r.begin(ctx)
+	a, b, err := r.inner.ClinicalContextContext(ctx, key)
+	if note != nil {
+		note(err)
+	}
+	return a, b, err
+}
+
+func (r recordingSoR) SupplementalReportContext(ctx context.Context, key string) ([]byte, bool, error) {
+	ctx, note := r.begin(ctx)
+	a, b, err := r.inner.SupplementalReportContext(ctx, key)
+	if note != nil {
+		note(err)
+	}
+	return a, b, err
+}
+
+func (r recordingSoR) FacilityRecordsContext(ctx context.Context, key string) (map[string][]byte, bool, error) {
+	ctx, note := r.begin(ctx)
+	a, b, err := r.inner.FacilityRecordsContext(ctx, key)
+	if note != nil {
+		note(err)
+	}
+	return a, b, err
+}
+
+func (r recordingSoR) OpenOrderContext(ctx context.Context, key string) ([]byte, bool, error) {
+	ctx, note := r.begin(ctx)
+	a, b, err := r.inner.OpenOrderContext(ctx, key)
+	if note != nil {
+		note(err)
+	}
+	return a, b, err
+}
+
+func (r recordingSoR) OpenCoverageContext(ctx context.Context, key string) ([][]byte, error) {
+	ctx, note := r.begin(ctx)
+	a, err := r.inner.OpenCoverageContext(ctx, key)
+	if note != nil {
+		note(err)
+	}
+	return a, err
+}
+
+func (r recordingSoR) ResolveByReferenceContext(ctx context.Context, ref string) ([]byte, bool, error) {
+	ctx, note := r.begin(ctx)
+	a, b, err := r.inner.ResolveByReferenceContext(ctx, ref)
+	if note != nil {
+		note(err)
+	}
+	return a, b, err
 }

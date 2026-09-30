@@ -167,10 +167,15 @@ type facilitySoR struct {
 	searched  []string
 	noSearch  bool
 	searchErr error
-	legacy    map[string][]byte
+	// readErr fails the read of the member's Patient id.
+	readErr error
+	legacy  map[string][]byte
 }
 
 func (s *facilitySoR) PatientFHIRRefContext(_ context.Context, member string) (string, bool, error) {
+	if s.readErr != nil {
+		return "", false, s.readErr
+	}
 	if member != "MBR-UC05" {
 		return "", false, nil
 	}
