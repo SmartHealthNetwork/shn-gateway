@@ -163,7 +163,7 @@ func TestPASInquire_AnotherPatientsTokenDecidesNothingOfTheirs(t *testing.T) {
 			answer := inquiryFixture(t, "pas-inquiry-response-2.0.json")
 			g.cfg.Responder = pasResultResponder{result: LegResult{Response: testResponse(answer), ResponseSubjectForeign: true}}
 			pciA, _, _ := g.cfg.SoR.ResolvePatient("MBR-COVERED")
-			if _, err := store.RecordPendedKeyed(pciA, corr, fixedClock(), PendKeys{RequesterHolder: requester.ID, ClaimResponseIDs: []string{inquiryCRKey}}); err != nil {
+			if _, err := store.RecordPendedKeyed(pciA, corr, fixedClock(), PendKeys{RequesterHolder: requester.ID, ClaimResponseIDs: []string{inquiryCRKey}, ItemTraceNumbers: []string{inquiryTraceKey}}); err != nil {
 				t.Fatalf("A's pend: %v", err)
 			}
 

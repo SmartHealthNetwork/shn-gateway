@@ -182,9 +182,9 @@ func TestPgPendLedger_PurgeTakesTheKeysWithTheRow(t *testing.T) {
 	if keys != 0 {
 		t.Fatalf("%d lookup keys outlived their purged claim", keys)
 	}
-	_, _, found, _, err := s.LookupPended("provider-a", engine.PendKeys{RequesterHolder: "provider-a", PreAuthRef: "PA-1"})
-	if err != nil || found {
-		t.Fatalf("a purged claim is still findable: %v,%v", found, err)
+	m, err := s.LookupPended("provider-a", engine.PendKeys{RequesterHolder: "provider-a", PreAuthRef: "PA-1"}, nil)
+	if err != nil || m.Verdict != engine.PendMatchNone {
+		t.Fatalf("a purged claim is still findable: %+v,%v", m, err)
 	}
 }
 
@@ -219,7 +219,7 @@ FOR EACH ROW EXECUTE FUNCTION gw_eob_injected_failure()`,
 		_, _ = s.pool.Exec(ctx, `DROP FUNCTION IF EXISTS gw_eob_injected_failure()`)
 	})
 
-	_, err := s.RecordDecision("PCI-A", "corr-A", engine.PendOutcomeApproved, at,
+	_, err := s.RecordDecision("PCI-A", "corr-A", engine.PendOutcomeApproved, at, engine.PendKeys{},
 		&engine.EOBRecord{SubjectPCI: "PCI-A", EOBID: "eob-1", JSON: []byte(`{"resourceType":"ExplanationOfBenefit"}`)})
 	if err == nil {
 		t.Fatal("RecordDecision returned nil with the EOB write failing")
@@ -242,7 +242,7 @@ FOR EACH ROW EXECUTE FUNCTION gw_eob_injected_failure()`,
 	if _, err := s.pool.Exec(ctx, `DROP TRIGGER gw_eob_injected_failure ON gw_eob`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.RecordDecision("PCI-A", "corr-A", engine.PendOutcomeApproved, at,
+	if _, err := s.RecordDecision("PCI-A", "corr-A", engine.PendOutcomeApproved, at, engine.PendKeys{},
 		&engine.EOBRecord{SubjectPCI: "PCI-A", EOBID: "eob-1", JSON: []byte(`{"resourceType":"ExplanationOfBenefit"}`)}); err != nil {
 		t.Fatalf("RecordDecision after the failure was removed: %v", err)
 	}
@@ -365,10 +365,10 @@ func TestPgPendLedger_OpenPendsListsOnlyUndecided(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := s.RecordDecision("PCI-done", "corr-done", "approved", now, nil); err != nil {
+	if _, err := s.RecordDecision("PCI-done", "corr-done", "approved", now, engine.PendKeys{}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.RecordDecision("PCI-undated", "corr-undated", "denied", time.Time{}, nil); err != nil {
+	if _, err := s.RecordDecision("PCI-undated", "corr-undated", "denied", time.Time{}, engine.PendKeys{}, nil); err != nil {
 		t.Fatal(err)
 	}
 	var decidedAt *time.Time

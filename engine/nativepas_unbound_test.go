@@ -56,7 +56,7 @@ func TestNativeUpdate_ReachesThePayerWhateverTheLedgerHolds(t *testing.T) {
 	states := []ledgerState{
 		{"no pend here", PendRefusalNotPended, plain(func(*censusSoR) {})},
 		{"already decided", PendRefusalDecided, plain(func(s *censusSoR) {
-			if _, err := s.RecordDecision(pci, origCorr, PendOutcomeDenied, time.Unix(1000, 0).UTC(), nil); err != nil {
+			if _, err := s.RecordDecision(pci, origCorr, PendOutcomeDenied, time.Unix(1000, 0).UTC(), PendKeys{}, nil); err != nil {
 				t.Fatal(err)
 			}
 		})},
@@ -200,13 +200,13 @@ func TestNativeUpdate_UnboundAmendmentRecordsOnlyOntoItsOwnAuthorization(t *test
 	defer srv.Close()
 	t.Run("another requester's authorization", func(t *testing.T) {
 		s := newCensusSoR()
-		if _, err := s.RecordDecision("PCI-CONF-UPD", origCorr, PendOutcomeDenied, time.Unix(1000, 0).UTC(), nil); err != nil {
+		if _, err := s.RecordDecision("PCI-CONF-UPD", origCorr, PendOutcomeDenied, time.Unix(1000, 0).UTC(), PendKeys{}, nil); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := s.RecordPendedKeyed("PCI-CONF-UPD", origCorr, time.Unix(2000, 0).UTC(), PendKeys{RequesterHolder: "provider-a", PreAuthRef: "PA-1"}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.RecordDecision("PCI-CONF-UPD", origCorr, PendOutcomeDenied, time.Unix(3000, 0).UTC(), nil); err != nil {
+		if _, err := s.RecordDecision("PCI-CONF-UPD", origCorr, PendOutcomeDenied, time.Unix(3000, 0).UTC(), PendKeys{}, nil); err != nil {
 			t.Fatal(err)
 		}
 		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", s, fixedClock)

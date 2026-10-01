@@ -229,6 +229,18 @@ func pasRequestKeys(requestFHIR []byte) PendKeys {
 	return keys
 }
 
+// decisionKeys are the keys a payer DECISION is recorded under: the ones a pend
+// would be (the payer's answer and the requester's own submission, under the
+// requester), with the decision's authorization number as its preAuthRef. The
+// ledger indexes them all only for an authorization it had no row for.
+func decisionKeys(requester string, answerKeys PendKeys, requestFHIR []byte, authorizationNumber string) PendKeys {
+	keys := mergePendKeys(requester, answerKeys, pasRequestKeys(requestFHIR))
+	if authorizationNumber != "" {
+		keys.PreAuthRef = authorizationNumber
+	}
+	return keys
+}
+
 // mergePendKeys unions two key sets under one requester namespace.
 func mergePendKeys(requesterHolder string, a, b PendKeys) PendKeys {
 	out := PendKeys{RequesterHolder: requesterHolder, PreAuthRef: a.PreAuthRef}
@@ -262,6 +274,9 @@ func recordPASPend(ctx context.Context, store Store, subjectPCI, corrID string, 
 		if tr.Event != "" {
 			leg.note(tr.Event)
 		}
+		if tr.EOBRemoved {
+			leg.note(PendEOBRemovedEvent)
+		}
 		if tr.Keys == 0 {
 			// Nothing any follow-up can name this authorization by. The payer's
 			// bytes still relayed and the pend is still recorded, so an amendment on
@@ -280,7 +295,7 @@ func recordPASPend(ctx context.Context, store Store, subjectPCI, corrID string, 
 // does and the authorization is never re-pended by anything but a later payer
 // re-pend. A Store with no ledger follows FallbackDecision, and its EOB is written
 // on its own as it always was.
-func recordPASDecision(ctx context.Context, store Store, subjectPCI, corrID, outcome string, decidedAt time.Time, eob *EOBRecord) func() error {
+func recordPASDecision(ctx context.Context, store Store, subjectPCI, corrID, outcome string, decidedAt time.Time, keys PendKeys, eob *EOBRecord) func() error {
 	ledger, hasLedger := LedgerOf(store)
 	if !hasLedger {
 		return func() error {
@@ -294,12 +309,15 @@ func recordPASDecision(ctx context.Context, store Store, subjectPCI, corrID, out
 	}
 	leg := pasLegOf(ctx)
 	return func() error {
-		tr, err := ledger.RecordDecision(subjectPCI, corrID, outcome, decidedAt, eob)
+		tr, err := ledger.RecordDecision(subjectPCI, corrID, outcome, decidedAt, keys, eob)
 		if err != nil {
 			return err
 		}
 		if tr.Event != "" {
 			leg.note(tr.Event)
+		}
+		if tr.EOBRemoved {
+			leg.note(PendEOBRemovedEvent)
 		}
 		return nil
 	}

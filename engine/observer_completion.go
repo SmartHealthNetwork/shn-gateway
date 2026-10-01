@@ -76,5 +76,10 @@ func (g *Gateway) WaitObserverCompletion(ctx context.Context) error {
 	if err := g.waitCertification(ctx); err != nil {
 		return err
 	}
+	// At observe a check an operation queued emits its events after the
+	// operation itself has ended; they still belong to it.
+	if err := g.waitObserveChecks(ctx); err != nil {
+		return err
+	}
 	return ctx.Err()
 }

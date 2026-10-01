@@ -99,13 +99,436 @@ func TestCRDIngress_DefaultRoutesByCoverageItDoesNotInsert(t *testing.T) {
 	}
 }
 
+// The routing read at the default searches every Coverage the system of record
+// holds for the patient, with the payor include (unlike the coverage template,
+// status=active: what is read only to route by is never carried); a payor the
+// search did not include is resolved through the system of record, and the
+// request is routed by it and carried without the coverage.
+func TestCRDIngress_DefaultRoutingReadResolvesPayorFromTheSystem(t *testing.T) {
+	cov := "{ \"resourceType\" : \"Coverage\", \"id\" : \"cov-9\", \"status\" : \"active\",\n  \"beneficiary\" : { \"reference\" : \"Patient/" + prefetchSoRID + "\" },\n  \"payor\" : [ { \"reference\" : \"Organization/pay-9\" } ] }"
+	org := `{"resourceType":"Organization","id":"pay-9","identifier":[{"system":"` + shnsdk.CMSPayerIdentity.System + `","value":"00001"}]}`
+	s := newPrefetchSoR()
+	s.answer(t, "Coverage", searchPage(cov)) // the server did not include the payor
+	s.reads["Organization/pay-9"] = []byte(org)
+	body := ehrRequest(patientOnly)
+	env, rec := carryRow(t, s, body)
+	if rec.Code != http.StatusOK || env.routeHitCount() != 1 {
+		t.Fatalf("answer %d %s (network hits %d)", rec.Code, rec.Body.String(), env.routeHitCount())
+	}
+	wantCarriedLessCallback(t, body, sentRequest(t, env))
+	searched, read := s.calls()
+	if want := []string{routingCoverageQuery}; !slices.Equal(searched, want) {
+		t.Fatalf("searched %v, want %v", searched, want)
+	}
+	if !slices.Contains(read, "Organization/pay-9") {
+		t.Fatalf("read %v: want the payor resolved through the system of record", read)
+	}
+	t.Run("a payor the search included routes without another read", func(t *testing.T) {
+		s := newPrefetchSoR() // holds no Organization to read
+		s.answer(t, "Coverage", page("", "", sorEntry(cov), `{"fullUrl":"https://sor.example/fhir/Organization/pay-9","resource":`+org+`,"search":{"mode":"include"}}`))
+		env, rec := carryRow(t, s, body)
+		if rec.Code != http.StatusOK || env.routeHitCount() != 1 {
+			t.Fatalf("answer %d %s (network hits %d)", rec.Code, rec.Body.String(), env.routeHitCount())
+		}
+		if _, read := s.calls(); slices.Contains(read, "Organization/pay-9") {
+			t.Fatalf("the included payor was read again: %v", read)
+		}
+	})
+	t.Run("without the payor in the system nothing routes", func(t *testing.T) {
+		s := newPrefetchSoR()
+		s.answer(t, "Coverage", searchPage(cov))
+		env, rec := carryRow(t, s, body)
+		refusedBeforeTheNetwork(t, env, rec, http.StatusUnprocessableEntity, "no payer identifier on member coverage")
+	})
+}
+
+// routingCoverageQuery is the coverage search the gateway runs only to route by:
+// every Coverage, with its payor.
+const routingCoverageQuery = "Coverage?patient=Patient%2F" + prefetchSoRID + "&_include=Coverage%3Apayor"
+
+// sorCoverageStatus is sorCoverage with the given status.
+func sorCoverageStatus(id, payerValue, status string) string {
+	return strings.Replace(sorCoverage(id, payerValue), `"status" : "active"`, `"status" : "`+status+`"`, 1)
+}
+
+// The coverage read only to route by routes on the active Coverages when any
+// is active, else on the others when they name one payer, at the CDS Hooks and
+// questionnaire-package ingress alike (routingCoverageChoice). A stale
+// cancelled coverage naming another payer never makes routing ambiguous, and a
+// member whose coverage is no longer in force is still sent to its payer, which
+// answers that it does not cover the member.
+func TestDefaultRoutingReadRoutesOnActiveCoverageFirst(t *testing.T) {
+	const known, unknown = "00001", "99998" // the test router knows only 00001
+	for _, row := range []struct {
+		name   string
+		page   []byte
+		status int
+		msg    string
+		// crd is a CDS Hooks request's status where it differs: no coverage
+		// to route by is CDS Hooks' 412 (the service could not obtain the
+		// data it needs); $questionnaire-package keeps its 422.
+		crd int
+	}{
+		{"an active and a cancelled coverage naming another payer: the active one",
+			searchPage(sorCoverageStatus("cov-old", unknown, "cancelled"), sorCoverage("cov-1", known)), http.StatusOK, "", 0},
+		{"only cancelled coverages naming one payer",
+			searchPage(sorCoverageStatus("cov-1", known, "cancelled"), sorCoverageStatus("cov-2", known, "cancelled")), http.StatusOK, "", 0},
+		{"only cancelled coverages naming two payers",
+			searchPage(sorCoverageStatus("cov-1", known, "cancelled"), sorCoverageStatus("cov-2", unknown, "cancelled")), http.StatusUnprocessableEntity, "ambiguous coverage for routing", 0},
+		{"two active coverages naming two payers",
+			searchPage(sorCoverage("cov-1", known), sorCoverage("cov-2", unknown), sorCoverageStatus("cov-3", known, "cancelled")), http.StatusUnprocessableEntity, "ambiguous coverage for routing", 0},
+		{"no coverage", nil, http.StatusUnprocessableEntity, "no coverage in request or system of record", http.StatusPreconditionFailed},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			for _, ingress := range []struct {
+				name string
+				run  func(*prefetchSoR) (*inProcessExchange, *httptest.ResponseRecorder)
+			}{
+				{"CDS Hooks", func(s *prefetchSoR) (*inProcessExchange, *httptest.ResponseRecorder) {
+					return carryRow(t, s, ehrRequest(patientOnly))
+				}},
+				{"questionnaire-package", func(s *prefetchSoR) (*inProcessExchange, *httptest.ResponseRecorder) {
+					return dtrIngressRow(t, s, ehrParams(ehrOrderParam("sr1", prefetchMember), dtrQuestionnaire))
+				}},
+			} {
+				t.Run(ingress.name, func(t *testing.T) {
+					s := newPrefetchSoR()
+					if row.page != nil {
+						s.answer(t, "Coverage", row.page)
+					}
+					env, rec := ingress.run(s)
+					if row.status == http.StatusOK {
+						if rec.Code != http.StatusOK || env.routeHitCount() != 1 {
+							t.Fatalf("answer %d %s (network hits %d)", rec.Code, rec.Body.String(), env.routeHitCount())
+						}
+					} else {
+						status := row.status
+						if ingress.name == "CDS Hooks" && row.crd != 0 {
+							status = row.crd
+						}
+						refusedBeforeTheNetwork(t, env, rec, status, row.msg)
+					}
+					if searched, _ := s.calls(); !slices.Equal(searched, []string{routingCoverageQuery}) {
+						t.Fatalf("searched %v, want only %s", searched, routingCoverageQuery)
+					}
+				})
+			}
+		})
+	}
+	// Under enrichment the coverage is a value carried to the payer: it is the
+	// coverage template's search (status=active), not the routing choice. The
+	// request is still routed as above (TestEnrichedRoutesAsTheDefault).
+	t.Run("enriched: the carried coverage is the template's search", func(t *testing.T) {
+		s := newPrefetchSoR()
+		s.answer(t, "Coverage", searchPage(sorCoverage("cov-1", known)))
+		if _, rec := ingressRow(t, s, ehrRequest(patientOnly)); rec.Code != http.StatusOK {
+			t.Fatalf("answer %d %s", rec.Code, rec.Body.String())
+		}
+		if searched, _ := s.calls(); !slices.Contains(searched, "Coverage?patient=Patient%2F"+prefetchSoRID+"&status=active&_include=Coverage%3Apayor") {
+			t.Fatalf("searched %v", searched)
+		}
+	})
+}
+
+// enrichedCoverageQuery is the coverage template's search, the coverage value
+// carried under enrichment: the active Coverages, with their payors.
+const enrichedCoverageQuery = "Coverage?patient=Patient%2F" + prefetchSoRID + "&status=active&_include=Coverage%3Apayor"
+
+// sorPayorCoverage is a Coverage for the system of record's patient with
+// status, naming the Organization org as its payor.
+func sorPayorCoverage(id, status, org string) string {
+	return "{ \"resourceType\" : \"Coverage\", \"id\" : \"" + id + "\", \"status\" : \"" + status + "\",\n  \"beneficiary\" : { \"reference\" : \"Patient/" + prefetchSoRID +
+		"\" },\n  \"payor\" : [ { \"reference\" : \"Organization/" + org + "\" } ] }"
+}
+
+// includedPayer is the search entry of the payer Organization org, with the
+// payer identifier value, as a server includes it (_include=Coverage:payor).
+func includedPayer(org, value string) string {
+	return `{"fullUrl":"https://sor.example/fhir/Organization/` + org + `","resource":{"resourceType":"Organization","id":"` + org +
+		`","identifier":[{"system":"` + shnsdk.CMSPayerIdentity.System + `","value":"` + value + `"}]},"search":{"mode":"include"}}`
+}
+
+// Under enrichment the payer is still chosen from every Coverage, the active
+// ones first, as without it; the coverage carried is only the coverage
+// template's search (status=active). A member whose only Coverage is cancelled
+// is routed to that coverage's payer as at the default and carries null (CDS
+// Hooks) or no coverage parameter ($questionnaire-package): the opt-in never
+// makes a member less reachable. A member with an active Coverage at one payer
+// and a cancelled one at another is routed to the first and carries only the
+// active Coverage and its payor. A system that cannot answer the template's
+// search leaves the coverage out, and the request is routed by the routing
+// read with that read's every answer at the default: fenced, resolved
+// through the system of record, or refused.
+func TestEnrichedRoutesAsTheDefault(t *testing.T) {
+	const known, unknown = "00001", "99998" // the test router knows only 00001
+	cancelledOnly := func(t *testing.T) *prefetchSoR {
+		s := newPrefetchSoR()
+		s.answerQuery(t, enrichedCoverageQuery, "Coverage", page("", ""))
+		s.answerQuery(t, routingCoverageQuery, "Coverage", page("", "", sorEntry(sorPayorCoverage("cov-a", "cancelled", "pay-a")), includedPayer("pay-a", known)))
+		return s
+	}
+	activeAndStale := func(t *testing.T) *prefetchSoR {
+		s := newPrefetchSoR()
+		active, stale := sorPayorCoverage("cov-a", "active", "pay-a"), sorPayorCoverage("cov-b", "cancelled", "pay-b")
+		s.answerQuery(t, enrichedCoverageQuery, "Coverage", page("", "", sorEntry(active), includedPayer("pay-a", known)))
+		s.answerQuery(t, routingCoverageQuery, "Coverage", page("", "", sorEntry(stale), sorEntry(active), includedPayer("pay-b", unknown), includedPayer("pay-a", known)))
+		return s
+	}
+	// A server that does not apply the template's status filter answers it
+	// with every Coverage.
+	unfiltering := func(t *testing.T) *prefetchSoR {
+		s := newPrefetchSoR()
+		active, stale := sorPayorCoverage("cov-a", "active", "pay-a"), sorPayorCoverage("cov-b", "cancelled", "pay-b")
+		s.answer(t, "Coverage", page("", "", sorEntry(stale), sorEntry(active), includedPayer("pay-b", unknown), includedPayer("pay-a", known)))
+		return s
+	}
+	// A server that refuses the template's status-filtered search (a strict
+	// server's 400, which a connector reports as unsupported) answers the
+	// unfiltered routing read.
+	refusedThen := func(routing searchAnswer) *prefetchSoR {
+		s := newPrefetchSoR()
+		s.byQuery[enrichedCoverageQuery] = searchAnswer{err: &SearchError{Outcome: SearchUnsupported, Reason: "status filter not supported"}}
+		s.byQuery[routingCoverageQuery] = routing
+		return s
+	}
+	filterRefused := func(t *testing.T) *prefetchSoR {
+		return refusedThen(searchAnswer{res: resultOf(t, "Coverage", page("", "", sorEntry(sorPayorCoverage("cov-a", "active", "pay-a")), includedPayer("pay-a", known)))})
+	}
+	// When the template's search is refused, the request is routed by the
+	// routing read alone, and that read answers as it does at the default:
+	// another patient's Coverage is fenced; a payor named by reference only
+	// and not included is read from the system of record; a system that cannot
+	// answer, or holds no Coverage, refuses the request.
+	refusedThenOtherPatient := func(t *testing.T) *prefetchSoR {
+		other := strings.Replace(sorPayorCoverage("cov-a", "active", "pay-a"), "Patient/"+prefetchSoRID, "Patient/other", 1)
+		return refusedThen(searchAnswer{res: resultOf(t, "Coverage", page("", "", sorEntry(other), includedPayer("pay-a", known)))})
+	}
+	refusedThenPayorByReference := func(t *testing.T) *prefetchSoR {
+		s := refusedThen(searchAnswer{res: resultOf(t, "Coverage", searchPage(sorPayorCoverage("cov-a", "active", "pay-a")))}) // the payor not included
+		s.reads["Organization/pay-a"] = []byte(`{"resourceType":"Organization","id":"pay-a","identifier":[{"system":"` + shnsdk.CMSPayerIdentity.System + `","value":"` + known + `"}]}`)
+		return s
+	}
+	refusedThenUnavailable := func(*testing.T) *prefetchSoR {
+		return refusedThen(searchAnswer{err: &SearchError{Outcome: SearchUnavailable, Reason: "system of record unavailable"}})
+	}
+	refusedThenNone := func(t *testing.T) *prefetchSoR {
+		return refusedThen(searchAnswer{res: resultOf(t, "Coverage", page("", ""))})
+	}
+	coverageSearches := func(s *prefetchSoR) []string {
+		searched, _ := s.calls()
+		return slices.DeleteFunc(searched, func(q string) bool { return !strings.HasPrefix(q, "Coverage?") })
+	}
+
+	t.Run("CDS Hooks", func(t *testing.T) {
+		body := ehrRequest(patientOnly)
+		routed := func(t *testing.T, s *prefetchSoR, enrich bool) []byte {
+			t.Helper()
+			env, rec := ingressRowWith(t, s, body, enrich)
+			if rec.Code != http.StatusOK || env.routeHitCount() != 1 {
+				t.Fatalf("answer %d %s (network hits %d)", rec.Code, rec.Body.String(), env.routeHitCount())
+			}
+			return sentRequest(t, env)
+		}
+		t.Run("a cancelled-only member under enrichment is routed and carries null", func(t *testing.T) {
+			s := cancelledOnly(t)
+			sent := routed(t, s, true)
+			if v, ok := valueOf(t, sent, "prefetch", "coverage"); !ok || v != "null" {
+				t.Fatalf("prefetch.coverage = %q (present %v), want the template's search: null", v, ok)
+			}
+			if got := coverageSearches(s); !slices.Equal(got, []string{enrichedCoverageQuery, routingCoverageQuery}) {
+				t.Fatalf("coverage searches %v, want the template's search, then the routing read", got)
+			}
+		})
+		t.Run("the same member without enrichment is routed and carries nothing added", func(t *testing.T) {
+			s := cancelledOnly(t)
+			sent := routed(t, s, false)
+			wantCarriedLessCallback(t, body, sent)
+			if got := coverageSearches(s); !slices.Equal(got, []string{routingCoverageQuery}) {
+				t.Fatalf("coverage searches %v, want only the routing read", got)
+			}
+		})
+		t.Run("an active coverage and a stale one at another payer under enrichment: the active one only", func(t *testing.T) {
+			s := activeAndStale(t)
+			sent := routed(t, s, true)
+			v, ok := valueOf(t, sent, "prefetch", "coverage")
+			if !ok || !strings.Contains(v, `"cov-a"`) || !strings.Contains(v, `"pay-a"`) {
+				t.Fatalf("prefetch.coverage = %s, want the active Coverage and its payor", v)
+			}
+			if strings.Contains(v, `"cov-b"`) || strings.Contains(v, "pay-b") {
+				t.Fatalf("prefetch.coverage carries the stale coverage or its payer: %s", v)
+			}
+			// The template's search found a Coverage to route by: no second read.
+			if got := coverageSearches(s); !slices.Equal(got, []string{enrichedCoverageQuery}) {
+				t.Fatalf("coverage searches %v, want only the template's search", got)
+			}
+		})
+		t.Run("a server that refuses the template's search under enrichment: routed, the key left out", func(t *testing.T) {
+			s := filterRefused(t)
+			sent := routed(t, s, true)
+			if v, ok := valueOf(t, sent, "prefetch", "coverage"); ok {
+				t.Fatalf("prefetch.coverage = %s, want the key left out", v)
+			}
+			if got := coverageSearches(s); !slices.Equal(got, []string{enrichedCoverageQuery, routingCoverageQuery}) {
+				t.Fatalf("coverage searches %v, want the template's search, then the routing read", got)
+			}
+		})
+		t.Run("a server that does not filter by status: routed on the active one, carried as answered", func(t *testing.T) {
+			s := unfiltering(t)
+			sent := routed(t, s, true)
+			v, _ := valueOf(t, sent, "prefetch", "coverage")
+			if !strings.Contains(v, `"cov-a"`) || !strings.Contains(v, `"cov-b"`) {
+				t.Fatalf("prefetch.coverage = %s, want the system's answer to the template's search", v)
+			}
+		})
+		t.Run("the template's search refused, the routing read another patient's: fenced", func(t *testing.T) {
+			s := refusedThenOtherPatient(t)
+			env, rec := ingressRowWith(t, s, body, true)
+			refusedBeforeTheNetwork(t, env, rec, http.StatusBadGateway, fillFencedOtherPatient)
+			if got := coverageSearches(s); !slices.Equal(got, []string{enrichedCoverageQuery, routingCoverageQuery}) {
+				t.Fatalf("coverage searches %v, want the template's search, then the routing read", got)
+			}
+		})
+		t.Run("the template's search refused, the routing read naming its payor by reference: routed as the default", func(t *testing.T) {
+			for _, enrich := range []bool{true, false} {
+				s := refusedThenPayorByReference(t)
+				sent := routed(t, s, enrich)
+				if v, ok := valueOf(t, sent, "prefetch", "coverage"); ok {
+					t.Fatalf("enrich %v: prefetch.coverage = %s, want the key left out", enrich, v)
+				}
+				if _, read := s.calls(); !slices.Contains(read, "Organization/pay-a") {
+					t.Fatalf("enrich %v: read %v, want the payor resolved through the system of record", enrich, read)
+				}
+			}
+		})
+		t.Run("the template's search refused, the routing read unavailable: 503", func(t *testing.T) {
+			s := refusedThenUnavailable(t)
+			env, rec := ingressRowWith(t, s, body, true)
+			refusedBeforeTheNetwork(t, env, rec, http.StatusServiceUnavailable, "coverage unavailable from system of record")
+			if got := coverageSearches(s); !slices.Equal(got, []string{enrichedCoverageQuery, routingCoverageQuery}) {
+				t.Fatalf("coverage searches %v, want the template's search, then the routing read", got)
+			}
+		})
+		t.Run("the template's search refused, the routing read finding none: 412", func(t *testing.T) {
+			s := refusedThenNone(t)
+			env, rec := ingressRowWith(t, s, body, true)
+			refusedBeforeTheNetwork(t, env, rec, http.StatusPreconditionFailed, "no coverage in request or system of record")
+			if got := coverageSearches(s); !slices.Equal(got, []string{enrichedCoverageQuery, routingCoverageQuery}) {
+				t.Fatalf("coverage searches %v, want the template's search, then the routing read", got)
+			}
+		})
+	})
+
+	t.Run("questionnaire-package", func(t *testing.T) {
+		ownPatient := `{"name":"referenced","resource":{"resourceType":"Patient","id":"example"}}`
+		body := ehrParams(ehrOrderParam("sr1", prefetchMember), dtrQuestionnaire, ownPatient)
+		send := func(t *testing.T, s *prefetchSoR, enrich bool) (*inProcessExchange, *httptest.ResponseRecorder) {
+			t.Helper()
+			env := newInProcessExchange(t)
+			env.originator.cfg.SoR = s.sor()
+			env.originator.cfg.EnrichNativeRequests = enrich
+			declareFramedDTR(t, env, true)
+			env.payerReturns(LegResult{Response: testResponse(packageAnswer)})
+			return env, postDTRIngress(env, body)
+		}
+		post := func(t *testing.T, s *prefetchSoR, enrich bool) []byte {
+			t.Helper()
+			env, rec := send(t, s, enrich)
+			if rec.Code != http.StatusOK || env.routeHitCount() != 1 {
+				t.Fatalf("answer %d %s (network hits %d)", rec.Code, rec.Body.String(), env.routeHitCount())
+			}
+			_, sent := sentOperation(t, env)
+			return sent
+		}
+		t.Run("a cancelled-only member under enrichment is routed and nothing is appended", func(t *testing.T) {
+			s := cancelledOnly(t)
+			if sent := post(t, s, true); !bytes.Equal(sent, body) {
+				t.Fatalf("the EHR's request changed:\n%s", sent)
+			}
+			if got := coverageSearches(s); !slices.Equal(got, []string{enrichedCoverageQuery, routingCoverageQuery}) {
+				t.Fatalf("coverage searches %v, want the template's search, then the routing read", got)
+			}
+		})
+		t.Run("the same member without enrichment is routed and nothing is appended", func(t *testing.T) {
+			s := cancelledOnly(t)
+			if sent := post(t, s, false); !bytes.Equal(sent, body) {
+				t.Fatalf("the EHR's request changed:\n%s", sent)
+			}
+			if got := coverageSearches(s); !slices.Equal(got, []string{routingCoverageQuery}) {
+				t.Fatalf("coverage searches %v, want only the routing read", got)
+			}
+		})
+		t.Run("an active coverage and a stale one at another payer under enrichment: the active one is appended", func(t *testing.T) {
+			s := activeAndStale(t)
+			sent := post(t, s, true)
+			want := `{"name":"coverage","resource":` + sorPayorCoverage("cov-a", "active", "pay-a") + `}`
+			if !bytes.Contains(sent, []byte(want)) {
+				t.Fatalf("the active Coverage was not appended:\n%s", sent)
+			}
+			if bytes.Contains(sent, []byte(`"cov-b"`)) || bytes.Contains(sent, []byte("pay-b")) {
+				t.Fatalf("the stale coverage or its payer was carried:\n%s", sent)
+			}
+			if got := coverageSearches(s); !slices.Equal(got, []string{enrichedCoverageQuery}) {
+				t.Fatalf("coverage searches %v, want only the template's search", got)
+			}
+		})
+		t.Run("a server that refuses the template's search under enrichment: routed, nothing appended", func(t *testing.T) {
+			s := filterRefused(t)
+			if sent := post(t, s, true); !bytes.Equal(sent, body) {
+				t.Fatalf("the EHR's request changed:\n%s", sent)
+			}
+			if got := coverageSearches(s); !slices.Equal(got, []string{enrichedCoverageQuery, routingCoverageQuery}) {
+				t.Fatalf("coverage searches %v, want the template's search, then the routing read", got)
+			}
+		})
+		t.Run("a server that does not filter by status: routed on, and appending, the active one", func(t *testing.T) {
+			sent := post(t, unfiltering(t), true)
+			want := `{"name":"coverage","resource":` + sorPayorCoverage("cov-a", "active", "pay-a") + `}`
+			if !bytes.Contains(sent, []byte(want)) || bytes.Contains(sent, []byte(`"cov-b"`)) {
+				t.Fatalf("want only the active Coverage appended:\n%s", sent)
+			}
+		})
+		// A $questionnaire-package request keeps its own refusal for no
+		// coverage, 422, as at the default.
+		for _, row := range []struct {
+			name   string
+			sor    func(*testing.T) *prefetchSoR
+			status int
+			msg    string
+		}{
+			{"the template's search refused, the routing read another patient's: fenced", refusedThenOtherPatient, http.StatusBadGateway, fillFencedOtherPatient},
+			{"the template's search refused, the routing read unavailable: 503", refusedThenUnavailable, http.StatusServiceUnavailable, "coverage unavailable from system of record"},
+			{"the template's search refused, the routing read finding none: 422", refusedThenNone, http.StatusUnprocessableEntity, "no coverage in request or system of record"},
+		} {
+			t.Run(row.name, func(t *testing.T) {
+				s := row.sor(t)
+				env, rec := send(t, s, true)
+				refusedBeforeTheNetwork(t, env, rec, row.status, row.msg)
+				if got := coverageSearches(s); !slices.Equal(got, []string{enrichedCoverageQuery, routingCoverageQuery}) {
+					t.Fatalf("coverage searches %v, want the template's search, then the routing read", got)
+				}
+			})
+		}
+		t.Run("the template's search refused, the routing read naming its payor by reference: routed as the default", func(t *testing.T) {
+			for _, enrich := range []bool{true, false} {
+				s := refusedThenPayorByReference(t)
+				if sent := post(t, s, enrich); !bytes.Equal(sent, body) {
+					t.Fatalf("enrich %v: the EHR's request changed:\n%s", enrich, sent)
+				}
+				if _, read := s.calls(); !slices.Contains(read, "Organization/pay-a") {
+					t.Fatalf("enrich %v: read %v, want the payor resolved through the system of record", enrich, read)
+				}
+			}
+		})
+	})
+}
+
 // Without enrichment a coverage the system of record cannot supply still
 // leaves nothing to route by, so the request is refused before the network,
 // as under enrichment.
 func TestCRDIngress_DefaultRefusesWhenNoCoverageToRouteBy(t *testing.T) {
 	s := newPrefetchSoR() // holds no Coverage
 	env, rec := carryRow(t, s, ehrRequest(patientOnly))
-	refusedBeforeTheNetwork(t, env, rec, http.StatusUnprocessableEntity, "no coverage in request or system of record")
+	refusedBeforeTheNetwork(t, env, rec, http.StatusPreconditionFailed, "no coverage in request or system of record")
 }
 
 // onlyCoverageSearched reports whether the one search run was the coverage

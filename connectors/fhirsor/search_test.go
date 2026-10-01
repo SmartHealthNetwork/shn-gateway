@@ -105,7 +105,7 @@ func wantOutcome(t *testing.T, err error, want engine.SearchOutcome) {
 	}
 }
 
-func TestSearch_QueryIsExactlyTheTemplate(t *testing.T) {
+func TestSearch_QueryIsExactlySoRSearchQuery(t *testing.T) {
 	p := newPagedServer(t, servePages(func(_ string, i int) (string, bool) { return searchPage("", "", obs("o1")), i == 0 }))
 	if _, err := p.sor().SearchPatientContext(context.Background(), "Observation", "p1"); err != nil {
 		t.Fatal(err)
@@ -129,6 +129,35 @@ func TestSearch_CoverageIncludesPayor(t *testing.T) {
 	}
 	if len(res.Pages) != 1 || string(res.Pages[0]) != page || len(res.Entries) != 2 {
 		t.Fatalf("result %+v", res)
+	}
+}
+
+// A status narrowing (the one the gateway's search for a CDS Hooks prefetch
+// value carries, as its advertised template does) is sent as one
+// comma-separated list, before the include, exactly as SoRSearchQuery writes it.
+func TestSearch_StatusNarrowingIsSentAsTheTemplateWritesIt(t *testing.T) {
+	p := newPagedServer(t, servePages(func(_ string, i int) (string, bool) {
+		return `{"resourceType":"Bundle","type":"searchset"}`, i == 0
+	}))
+	if _, err := p.sor().SearchPatientContext(context.Background(), "DeviceRequest", "p1",
+		engine.SearchDateRange{Param: "status", AnyOf: []string{"active", "on-hold", "completed"}}); err != nil {
+		t.Fatal(err)
+	}
+	want := searchBasePath + "/DeviceRequest?patient=Patient%2Fp1&status=active,on-hold,completed&_include=DeviceRequest%3Aperformer"
+	if len(p.paths) != 1 || p.paths[0] != want {
+		t.Fatalf("requests = %q, want %q", p.paths, want)
+	}
+	if q, _ := engine.SoRSearchQuery("DeviceRequest", "p1", engine.SearchDateRange{Param: "status", AnyOf: []string{"active", "on-hold", "completed"}}); searchBasePath+"/"+q != want {
+		t.Fatalf("sent %q, SoRSearchQuery %q", want, q)
+	}
+	if _, err := p.sor().SearchPatientContext(context.Background(), "DeviceRequest", "p1",
+		engine.SearchDateRange{Param: "status", AnyOf: []string{"active,cancelled"}}); err == nil {
+		t.Fatal("a code carrying a list separator was accepted")
+	} else {
+		wantOutcome(t, err, engine.SearchMalformed)
+	}
+	if len(p.paths) != 1 {
+		t.Fatalf("an invalid narrowing was sent: %q", p.paths)
 	}
 }
 

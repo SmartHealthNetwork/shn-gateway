@@ -342,7 +342,7 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		if !ok {
-			g.refuseInbound(w, r, legEligibility, env, tok, answerTok, http.StatusUnprocessableEntity, "no payer identifier on member coverage", nil)
+			g.refuseInbound(w, r, legEligibility, env, tok, answerTok, http.StatusUnprocessableEntity, noPayerIdentifier, nil)
 			return
 		}
 	default:

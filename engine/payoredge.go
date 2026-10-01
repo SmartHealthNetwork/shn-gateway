@@ -24,6 +24,13 @@
 //     would change signed content is refused (422) rather than made.
 //   - A mapping to the identity the request already carries makes no edit: the request
 //     is sent exactly.
+//   - A CDS Hooks request that carries no Coverage at all has no payor to map, and is
+//     sent exactly: the network already routed it to this payer, and this payer's own
+//     system answers it. On a CDS Hooks request the mapping refuses a Coverage it
+//     cannot read or that names another payer, never the absence of one. A
+//     questionnaire request with no coverage parameter is sent exactly too. A
+//     prior-authorization Bundle names its payer on its Coverage, so one without a
+//     Coverage is refused.
 //
 // Coverage carriage spans the legs this mapping covers: both CRD legs,
 // crd-order-select and crd-order-dispatch (prefetch.coverage, a bare Coverage or a

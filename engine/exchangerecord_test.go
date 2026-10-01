@@ -425,8 +425,9 @@ func TestExchangeRecord_InboundEarlyRefusals(t *testing.T) {
 }
 
 // A check the participant opted into refuses at strict as conformance, with
-// its finding counted; below strict the same request is answered and the
-// finding is still counted.
+// its finding counted. At observe the same request is answered and the record
+// carries no count at all: the call's findings are captured as their own
+// events, some of them off the request path, so a count here would be partial.
 func TestExchangeRecord_InboundConformance(t *testing.T) {
 	const sr = `{"fullUrl":"urn:uuid:sr1","resource":{"resourceType":"ServiceRequest","id":"sr1","status":"draft","intent":"order","subject":{"reference":"Patient/MBR-COVERED"},"code":{"coding":[{"system":"http://www.ama-assn.org/go/cpt","code":"72148"}]}}}`
 	body := crdSelectWith(t, sr, ``)
@@ -435,7 +436,11 @@ func TestExchangeRecord_InboundConformance(t *testing.T) {
 			p, got := newRecordingLevelPayer(t, level)
 			ans := p.send(t, "crd-order-select", "", body)
 			rec := got.only(t)
-			if rec.Findings.Count == 0 || !slices.Contains(rec.Findings.Kinds, string(KindContent)) {
+			if level == EnforcementObserve {
+				if !rec.Findings.Deferred || rec.Findings.Count != 0 || rec.Findings.Refused || len(rec.Findings.Kinds) != 0 {
+					t.Fatalf("at observe the record defers its findings and counts none, got %+v", rec.Findings)
+				}
+			} else if rec.Findings.Deferred || rec.Findings.Count == 0 || !slices.Contains(rec.Findings.Kinds, string(KindContent)) {
 				t.Fatalf("findings = %+v", rec.Findings)
 			}
 			if level == EnforcementStrict {
@@ -561,8 +566,10 @@ func TestExchangeRecord_IngressRefusesTheAnswer(t *testing.T) {
 			w := httptest.NewRecorder()
 			env.originator.ingressRoute(RouteCRD)(w, env.crdIngressRequest(t))
 			rec := got.only(t)
-			if rec.Findings.Count == 0 {
-				t.Fatalf("answer %d %s; no finding counted: %+v", w.Code, w.Body.String(), rec)
+			// At observe the record defers its findings (they are captured as
+			// their own events); at strict the refusing finding is counted.
+			if level == EnforcementObserve && !rec.Findings.Deferred || level == EnforcementStrict && rec.Findings.Count == 0 {
+				t.Fatalf("answer %d %s; findings %+v at %s", w.Code, w.Body.String(), rec.Findings, level)
 			}
 			if level == EnforcementStrict {
 				wantRefusal(t, rec, w.Code, RefusedByProviderGateway, RefusalConformance)
@@ -1552,11 +1559,24 @@ func TestReadSystemOfRecord_NoSystemOfRecordAsGiven(t *testing.T) {
 // system failing: recorded at observe and relayed, its call has no class.
 func TestExchangeRecord_FindingOnReadableAnswerIsNotMalformed(t *testing.T) {
 	p, got := newRecordingLevelPayer(t, EnforcementObserve)
+	var mu sync.Mutex
+	findings := 0
+	p.g.cfg.Observer = func(e ObserverEvent) {
+		if e.Kind == ConformanceObservedEvent {
+			mu.Lock()
+			findings++
+			mu.Unlock()
+		}
+	}
 	p.partner.respByPath[crdSelectPath] = []byte(`{"cards":[{"summary":"` + strings.Repeat("s", 200) + `","indicator":"info"}]}`)
 	ans := p.send(t, "crd-order-select", "", conformantCRD("MBR-COVERED", "72148"))
 	rec := got.only(t)
-	if ans.status != http.StatusOK || rec.Findings.Count == 0 {
-		t.Fatalf("fixture: answer %d, %d finding(s); want a relayed answer with findings", ans.status, rec.Findings.Count)
+	p.g.drainObserveChecks()
+	mu.Lock()
+	n := findings
+	mu.Unlock()
+	if ans.status != http.StatusOK || n == 0 || !rec.Findings.Deferred {
+		t.Fatalf("fixture: answer %d, %d finding(s), record findings %+v; want a relayed answer with findings, deferred at observe", ans.status, n, rec.Findings)
 	}
 	if rec.Outcome != ExchangeAnswered || rec.Backend == nil || rec.Backend.ErrorClass != "" {
 		t.Fatalf("record %+v backend %+v", rec, rec.Backend)

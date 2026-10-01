@@ -271,24 +271,34 @@ func TestPrefetch_HistoryOmittedForMemberNotHeld(t *testing.T) {
 		}
 	}
 
-	for name, body := range map[string][]byte{
-		"patient absent":  strangerEHRRequest(`"coverage":` + ehrCoverage),
-		"coverage absent": strangerEHRRequest(patientOnly),
-		"no prefetch":     strangerEHRRequest("-"),
+	// Under enrichment the patient is filled first: at strict a patient the
+	// system of record cannot supply refuses. A coverage it cannot supply has
+	// nothing to route by, and the refusal names what to send. (The fhirServer
+	// read is off in these rows: fhirserver_read_test.go pins it.)
+	for name, row := range map[string]struct {
+		body   []byte
+		status int
+		msg    string
+	}{
+		"patient absent":  {strangerEHRRequest(`"coverage":` + ehrCoverage), http.StatusUnprocessableEntity, "patient not found in system of record"},
+		"coverage absent": {strangerEHRRequest(patientOnly), http.StatusPreconditionFailed, crdNoCoverageReadOff},
+		"no prefetch":     {strangerEHRRequest("-"), http.StatusUnprocessableEntity, "patient not found in system of record"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			s := newPrefetchSoR()
 			env := newInProcessExchange(t)
 			env.originator.cfg.EnrichNativeRequests = true
+			env.originator.cfg.FHIRServerRead = FHIRServerReadOff
 			env.originator.cfg.SoR = s.sor()
 			rec := httptest.NewRecorder()
-			env.originator.handleCRDIngress(rec, crdIngressPost(body))
-			refusedBeforeTheNetwork(t, env, rec, http.StatusUnprocessableEntity, "patient not found in system of record")
+			env.originator.handleCRDIngress(rec, crdIngressPost(row.body))
+			refusedBeforeTheNetwork(t, env, rec, row.status, row.msg)
 		})
 	}
 	// Without enrichment nothing is filled, so a request without the patient is
 	// carried as sent; one without the coverage still has nothing to be routed
-	// by and is refused.
+	// by and is refused with a reason that says so and names prefetch.coverage,
+	// never that the patient was not found.
 	t.Run("by default, patient absent is carried as sent", func(t *testing.T) {
 		s := newPrefetchSoR()
 		env := newInProcessExchange(t)
@@ -311,9 +321,13 @@ func TestPrefetch_HistoryOmittedForMemberNotHeld(t *testing.T) {
 			s := newPrefetchSoR()
 			env := newInProcessExchange(t)
 			env.originator.cfg.SoR = s.sor()
+			env.originator.cfg.FHIRServerRead = FHIRServerReadOff
 			rec := httptest.NewRecorder()
 			env.originator.handleCRDIngress(rec, crdIngressPost(body))
-			refusedBeforeTheNetwork(t, env, rec, http.StatusUnprocessableEntity, "patient not found in system of record")
+			refusedBeforeTheNetwork(t, env, rec, http.StatusPreconditionFailed, crdNoCoverageReadOff)
+			if searched, read := s.calls(); len(searched) != 0 || len(read) != 0 {
+				t.Fatalf("the system of record was read for a member it does not hold: searched %v, read %v", searched, read)
+			}
 		})
 	}
 	t.Run("known members required", func(t *testing.T) {

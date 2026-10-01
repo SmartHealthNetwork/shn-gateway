@@ -28,7 +28,7 @@ func guardDefect(ctx context.Context, pol ConformancePolicy, emit func(Conforman
 		if v == VerdictUnavailable {
 			f.Verdict = "unavailable"
 		}
-		emit(f)
+		emit(bindFinding(ctx, f))
 		recorded = true
 	}
 	exchangeOf(ctx).checked(kind, rule, recorded, decision == Refuse)

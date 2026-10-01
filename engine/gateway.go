@@ -10,6 +10,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -17,11 +18,14 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httptrace"
+	"net/netip"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -164,6 +168,23 @@ type Config struct {
 	// is not inserted. Requests the gateway builds itself (origination) are
 	// unaffected. Set from ENRICH_NATIVE_REQUESTS (gateway/app).
 	EnrichNativeRequests bool
+	// FHIRServerRead (CDS_FHIR_SERVER_READ) is how a provider gateway reads a
+	// CRD request's Coverage through the request's own fhirServer, only to
+	// route, when the request carries none for a member its system of record
+	// does not hold (or cannot name): FHIRServerReadPrivate ("" too, the
+	// default: the zero value reads), FHIRServerReadPublic, or
+	// FHIRServerReadOff, which never reads (fhirserver_read.go).
+	FHIRServerRead string
+	// fhirServerResolve, fhirServerRoots and fhirServerDialed replace the
+	// fhirServer read's resolver, TLS roots and dial hook in tests; the address
+	// check is never replaced.
+	fhirServerResolve func(ctx context.Context, host string) ([]netip.Addr, error)
+	fhirServerRoots   *x509.CertPool
+	fhirServerDialed  func(netip.AddrPort)
+	fhirServerDial    func(ctx context.Context, network, address string) (net.Conn, error)
+	// fhirServerBudget, when set, replaces the time every read for one
+	// request shares (fhirServerReadTimeout) in tests.
+	fhirServerBudget time.Duration
 	// Store is the gateway's own business state (auth numbers, pended-claim ledger,
 	// issued EOBs). Required: New panics without one. The published gateway (gateway/app)
 	// sets NewMemStore, or gateway/connectors/pgstore when SHN_STORE_DATABASE_URL is set.
@@ -396,6 +417,11 @@ type Gateway struct {
 	certification *certificationWorker
 	operations    operationTracker
 
+	// observeOnce/observeChecks: observe-level checks run off the request path
+	// (observe_async.go), started on first use.
+	observeOnce   sync.Once
+	observeChecks atomic.Pointer[observeChecks]
+
 	// fallbackContinuations is the in-memory prior-authorization continuation
 	// store used when the configured Store does not ship one (continuation.go).
 	// Every Store this repository ships does, so this is the seam for a
@@ -573,10 +599,14 @@ func New(cfg Config) (*Gateway, error) {
 	return g, nil
 }
 
+// noPayerIdentifier is the routing refusal for a Coverage whose payor names no
+// payer identifier that can be read.
+const noPayerIdentifier = "no payer identifier on member coverage"
+
 // recipientForWith resolves the payer holder for an exchange from a Coverage (FR-G40). resolveRef
 // resolves an EXTERNAL Coverage.payor Organization reference ("<Type>/<id>"): at origination that is
 // the provider SoR; on INGRESS it is the inbound payload's OWN resources — a conformant partner's
-// payor Organization lives in its bundle/prefetch/parameters, NOT the provider SoR (bundleRefResolver
+// payor Organization lives in its bundle/prefetch/parameters, NOT the provider SoR (bundleRefs
 // et al.). No default: any miss fails closed with a legible 422 (AI-G11 / OWD-G10). status==0 ⇒ ok.
 // It also returns the parsed PayerIdentifier so an origination site can REUSE it as the emitted payer
 // (one parse, one external-Org lookup) instead of re-parsing the same Coverage.
@@ -592,7 +622,7 @@ func (g *Gateway) recipientForWith(coverageJSON []byte, resolveRef func(string) 
 	case errors.Is(err, shnsdk.ErrAmbiguousCoveragePayer):
 		return "", shnsdk.PayerIdentifier{}, http.StatusUnprocessableEntity, "ambiguous coverage for routing: the coverage names more than one payer"
 	case err != nil:
-		return "", shnsdk.PayerIdentifier{}, http.StatusUnprocessableEntity, "no payer identifier on member coverage"
+		return "", shnsdk.PayerIdentifier{}, http.StatusUnprocessableEntity, noPayerIdentifier
 	}
 	holder, ok := g.cfg.PayerRouter.Resolve(parsed)
 	if !ok {
@@ -1089,6 +1119,17 @@ type authorizeResp struct {
 // they never report a facility outage or a tampered response as "consent denied".
 var errAuthorizationDenied = errors.New("authorization denied")
 
+// errAuthzUnreachable marks an authorize call the Authorization Framework
+// never answered: the connection was refused, reset or closed, or failed some
+// other way before any response, including no answer within the client's
+// timeout; or a 503 or 504, which the Framework never answers itself, so it
+// came from a proxy or load balancer in front of it with no Framework behind.
+// It is the network being unavailable, not an authority verdict, so the
+// provider's route answers its own 503 and the leg is not sent to the Hub; a
+// denial (errAuthorizationDenied) and any other answer keep their own
+// answers.
+var errAuthzUnreachable = errors.New("the authorization service could not be reached, so this leg was not sent to the payer")
+
 // LegOutcome values passed to Config.LegMetric: "routed" when an
 // origination leg is attempted, then exactly one terminal outcome.
 const (
@@ -1217,28 +1258,84 @@ func (g *Gateway) authorizeRequest(r *http.Request, req authorizeReq) (shnsdk.To
 	// H1: authenticate to the Authorization Framework with a holder assertion for
 	// the "authz" audience so the policy can bind authority to THIS holder. The
 	// provider authorizes as "provider", the payer as "payer" (via cfg.HolderID).
+	body, err := json.Marshal(req)
+	if err != nil {
+		return shnsdk.Token{}, err
+	}
+	// One retry, and only for a call authz cannot have received: a connection
+	// refused, reset or closed before the request was written. After
+	// the write authz may have decided and recorded the decision, and its
+	// decision record carries no correlation id a second decision could be
+	// attributed by, so that call is not repeated. An answer is never retried.
+	tok, retry, err := g.authorizeOnce(r.Context(), body)
+	if retry && r.Context().Err() == nil {
+		tok, _, err = g.authorizeOnce(r.Context(), body)
+	}
+	return tok, err
+}
+
+// authorizeOnce makes one authorize call, with its own holder assertion: authz
+// consumes each assertion's jti once, so a repeated call needs a fresh one. It
+// reports whether the call failed before its request was written in a way a
+// second attempt could clear.
+func (g *Gateway) authorizeOnce(ctx context.Context, body []byte) (shnsdk.Token, bool, error) {
+	// H1: authenticate to the Authorization Framework with a holder assertion for
+	// the "authz" audience so the policy can bind authority to THIS holder. The
+	// provider authorizes as "provider", the payer as "payer" (via cfg.HolderID).
 	assertion := shnsdk.IssueAssertion(g.cfg.HolderID, "authz", g.cfg.Identity.SignPriv, g.cfg.Clock(), time.Hour)
 	assertionJSON, err := json.Marshal(assertion)
 	if err != nil {
-		return shnsdk.Token{}, err
+		return shnsdk.Token{}, false, err
 	}
-	headers := map[string]string{
-		"X-Holder-Assertion": base64.StdEncoding.EncodeToString(assertionJSON),
-	}
-
-	var out authorizeResp
-	err = shnsdk.PostJSON(r.Context(), g.cfg.Client, g.cfg.AuthzURL+"/authorize", req, &out, headers)
+	var wrote atomic.Bool
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		WroteRequest: func(info httptrace.WroteRequestInfo) {
+			if info.Err == nil {
+				wrote.Store(true)
+			}
+		},
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, g.cfg.AuthzURL+"/authorize", bytes.NewReader(body))
 	if err != nil {
-		// A 403 is a policy/consent DENIAL (not a transport failure); surface it as
-		// the typed sentinel so callers can distinguish it from the Authorization
-		// Framework being unreachable or erroring (502-class).
-		var se *shnsdk.StatusError
-		if errors.As(err, &se) && se.Code == http.StatusForbidden {
-			return shnsdk.Token{}, errAuthorizationDenied
-		}
-		return shnsdk.Token{}, err
+		return shnsdk.Token{}, false, err
 	}
-	return out.Token, nil
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Holder-Assertion", base64.StdEncoding.EncodeToString(assertionJSON))
+	client := g.cfg.Client
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		retry := !wrote.Load() && (errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET) ||
+			errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF))
+		return shnsdk.Token{}, retry, fmt.Errorf("%w (%v)", errAuthzUnreachable, err)
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, shnsdk.MaxResponseBytes))
+	if err != nil {
+		return shnsdk.Token{}, false, fmt.Errorf("read authorize answer: %w", err)
+	}
+	// A 403 is a policy/consent DENIAL (not a transport failure); surface it as
+	// the typed sentinel so callers can distinguish it from the Authorization
+	// Framework being unreachable or erroring.
+	if resp.StatusCode == http.StatusForbidden {
+		return shnsdk.Token{}, false, errAuthorizationDenied
+	}
+	// The Framework never answers 503 or 504 itself: the proxy in front of it
+	// (a service mesh sidecar, a load balancer) had no Framework to reach. Not
+	// retried: the request reached that proxy.
+	if resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusGatewayTimeout {
+		return shnsdk.Token{}, false, fmt.Errorf("%w (the authorize call was answered %d)", errAuthzUnreachable, resp.StatusCode)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return shnsdk.Token{}, false, &shnsdk.StatusError{Code: resp.StatusCode, Body: string(respBody)}
+	}
+	var out authorizeResp
+	if err := json.Unmarshal(respBody, &out); err != nil {
+		return shnsdk.Token{}, false, fmt.Errorf("decode authorize answer: %w", err)
+	}
+	return out.Token, false, nil
 }
 
 // postEnvelope POSTs an encoded envelope and the holder assertion header to url,
@@ -1383,7 +1480,7 @@ func (g *Gateway) roundTrip(ctx context.Context, r *http.Request, recipient, req
 		switch {
 		case errors.Is(err, errAuthorizationDenied):
 			outcome = LegOutcomeDenied
-		case errors.Is(err, errHubUnreachable), errors.Is(err, errHubTimeout):
+		case errors.Is(err, errHubUnreachable), errors.Is(err, errHubTimeout), errors.Is(err, errAuthzUnreachable):
 			outcome = LegOutcomeUnreachable
 		default:
 			var refused *hubRefusalError
@@ -1516,6 +1613,11 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 		// other authorize failure stays an opaque "authorization failed".
 		if errors.Is(err, errAuthorizationDenied) {
 			return nil, errAuthorizationDenied
+		}
+		// Authz never answered: this leg was not sent. The cause rides along
+		// for the leg's own records; the caller's answer is the fixed text.
+		if errors.Is(err, errAuthzUnreachable) {
+			return nil, err
 		}
 		return nil, fmt.Errorf("authorization failed")
 	}
@@ -1814,12 +1916,14 @@ func (g *Gateway) validateFHIR(ctx context.Context, resourceJSON []byte, dir, li
 	return g.validateFHIRAtProfile(ctx, resourceJSON, dir, line, "")
 }
 
-// validateFHIRRecorded is validateFHIR that also reports whether an invalid
-// verdict was recorded and the message let through (below strict), for a
-// caller that must not act on a resource that failed: the payer PAS legs'
-// own decision EOBs, which below strict are then not written.
-func (g *Gateway) validateFHIRRecorded(ctx context.Context, resourceJSON []byte, dir, line string) (int, string, bool) {
-	gr := g.validateGoverned(ctx, findingContextFrom(ctx), g.validatorForLine(line), resourceJSON, dir, line, "", false)
+// validateFHIRDecisionEOB checks a payer's decision ExplanationOfBenefit and
+// reports whether an invalid one was recorded and let through (below strict),
+// for the payer PAS legs, which then do not write it (the decision-EOB rule). The leg acts on
+// the verdict, so the check stays on the request path at every level; at observe
+// the leg's whole loop of them shares one bounded budget (validateDecisionEOBs),
+// past which a check is unavailable and its decision written.
+func (g *Gateway) validateFHIRDecisionEOB(ctx context.Context, eobJSON []byte) (int, string, bool) {
+	gr := g.validateGoverned(withJudgedInline(ctx), findingContextFrom(ctx), g.validatorForLine(""), eobJSON, "egress", "", "", false)
 	status, msg := gr.refusal()
 	return status, msg, gr.Recorded
 }
@@ -1963,6 +2067,21 @@ func (g *Gateway) validateGoverned(ctx context.Context, fc findingContext, v shn
 // answered or, with no line valid, when a Decisive lane could not be judged. The
 // finding's Line names the line that verdict came from.
 func (g *Gateway) validateGovernedLines(ctx context.Context, fc findingContext, lanes []lineLane, resourceJSON []byte, dir, line, profile string, bridged, candidates bool) govResult {
+	// At observe the check can only record, so the leg does not wait for it: it
+	// is queued and its finding emitted when the validator answers. A bridged
+	// payload refuses at every level and stays here.
+	if !bridged && g.policy().Level() == EnforcementObserve && !judgedInline(ctx) {
+		g.enqueueObserveCheck(observeCheck{fc: fc, lanes: lanes, payload: resourceJSON, dir: dir, line: line, profile: profile, candidates: candidates,
+			binding: findingBindingFrom(ctx), tally: legTallyFrom(ctx)})
+		return govResult{}
+	}
+	return g.judgeLines(ctx, fc, lanes, resourceJSON, dir, line, profile, bridged, candidates)
+}
+
+// judgeLines runs a governed check and acts on its verdict: on the request path
+// for every level that can refuse, and on an observe worker for a check that can
+// only record (observe_async.go).
+func (g *Gateway) judgeLines(ctx context.Context, fc findingContext, lanes []lineLane, resourceJSON []byte, dir, line, profile string, bridged, candidates bool) govResult {
 	kind := kindForDirection(dir, bridged)
 	pol := g.policy()
 	if !pol.Runs(kind, "") {

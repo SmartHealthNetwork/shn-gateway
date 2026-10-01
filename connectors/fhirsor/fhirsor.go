@@ -44,6 +44,11 @@ func NewFromURL(baseURL string, hc *http.Client) *SoR {
 	return New(fhirclient.New(baseURL, hc))
 }
 
+var _ engine.SystemOfRecordFHIRBase = (*SoR)(nil)
+
+// FHIRBase is the FHIR base URL the SoR reads (engine.SystemOfRecordFHIRBase).
+func (s *SoR) FHIRBase() string { return s.fc.BaseURL() }
+
 // resolvePatient returns the parsed Patient and its server id, or ok=false. Shared
 // by ResolvePatient (demographics) and CoverageInforce (beneficiary lookup).
 // Searches by shnsdk.MemberSystem identifier; partition locality is enforced by the

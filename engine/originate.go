@@ -675,6 +675,12 @@ func (g *Gateway) relayOriginationError(w http.ResponseWriter, err error) bool {
 		writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": err.Error()})
 		return true
 	}
+	// The Authorization Framework not answering is the network being
+	// unavailable, not a verdict: this gateway's own 503, and nothing was sent.
+	if errors.Is(err, errAuthzUnreachable) {
+		writeUnavailable(w, errAuthzUnreachable.Error())
+		return true
+	}
 	// An authority denial — a policy or consent refusal at the Authorization
 	// Framework — is a 403, not a routing failure.
 	if errors.Is(err, errAuthorizationDenied) {
@@ -1300,7 +1306,7 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 	// payer identity feeds the egress builders so the payload's payer derives from the patient's
 	// real Coverage, not a synthetic CMS literal. realCov stays a LOCAL (never an egress payload,
 	// never stored on crdDtrResult); the recipient is resolved from it inline at this site.
-	realCov, found, status, msg := g.memberCoverage(ctx, member)
+	realCov, found, status, msg := g.memberRoutingCoverage(ctx, member)
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return crdDtrResult{}, false
@@ -1340,8 +1346,8 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 	// The CRD request carries the participant's own Patient and Coverage search
 	// result (originate_crd.go); an order read from the system of record names the
 	// patient the same way. The Coverage is read twice — above for routing
-	// (memberCoverage), here as the search result the request carries — so each
-	// read keeps its own refusal rules.
+	// (memberRoutingCoverage), here as the search result the request carries — so each
+	// read keeps its own refusal rules; both choose the same coverage (routingCoverageChoice).
 	recs, status, msg := g.originCRDRecords(ctx, "crd-order-select", member)
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
@@ -1852,7 +1858,7 @@ func (g *Gateway) originateNoPACRD(w http.ResponseWriter, r *http.Request, membe
 	}
 	// Read the member's OWN open Coverage as the routing/identity SOURCE (FR-G40).
 	// realCov stays a LOCAL (the recipient is resolved from it).
-	realCov, hasCov, status, msg := g.memberCoverage(ctx, member)
+	realCov, hasCov, status, msg := g.memberRoutingCoverage(ctx, member)
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
@@ -1876,8 +1882,8 @@ func (g *Gateway) originateNoPACRD(w http.ResponseWriter, r *http.Request, membe
 	// The CRD request carries the participant's own Patient and Coverage search
 	// result (originate_crd.go); an order read from the system of record names the
 	// patient the same way. The Coverage is read twice — above for routing
-	// (memberCoverage), here as the search result the request carries — so each
-	// read keeps its own refusal rules.
+	// (memberRoutingCoverage), here as the search result the request carries — so each
+	// read keeps its own refusal rules; both choose the same coverage (routingCoverageChoice).
 	recs, status, msg := g.originCRDRecords(ctx, "crd-order-select", member)
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})

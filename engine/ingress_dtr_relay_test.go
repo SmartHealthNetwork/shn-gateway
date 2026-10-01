@@ -231,7 +231,7 @@ func TestDTRIngress_CoverageObtainedOnlyWhenAbsent(t *testing.T) {
 		}
 		ev, ok := obs.prefetchOn(t, "dtr-questionnaire-fetch")["coverage"]
 		wantEv := prefetchObtained{Key: "coverage", Operation: shnsdk.FrameOperationQuestionnairePackage, Source: "system-of-record",
-			Query: "Coverage?patient=Patient%2Fexample&_include=Coverage%3Apayor", Outcome: SearchOK, Count: 1, Pages: 1, RetrievedAt: fixedClock().UTC()}
+			Query: "Coverage?patient=Patient%2Fexample&status=active&_include=Coverage%3Apayor", Outcome: SearchOK, Count: 1, Pages: 1, RetrievedAt: fixedClock().UTC()}
 		if !ok || ev != wantEv {
 			t.Fatalf("provenance %+v\nwant %+v", ev, wantEv)
 		}
@@ -244,6 +244,27 @@ func TestDTRIngress_CoverageObtainedOnlyWhenAbsent(t *testing.T) {
 	}
 	t.Run("no coverage in the system of record", func(t *testing.T) {
 		refused(t, newPrefetchSoR(), noCoverage, http.StatusUnprocessableEntity, "no coverage in request or system of record")
+	})
+	// A member the system of record does not hold has no coverage there to
+	// route by: the refusal says so and names the coverage parameter, never
+	// that the patient was not found. Nothing is searched, with or
+	// without enrichment.
+	t.Run("no coverage for a member the system of record does not hold", func(t *testing.T) {
+		stranger := ehrParams(ehrOrderParam("sr1", strangerMember), dtrQuestionnaire, `{"name":"context","valueString":"ctx-1"}`)
+		const want = "no coverage to route by: send the coverage parameter (this gateway's system of record names no patient for this member)"
+		s := newPrefetchSoR()
+		refused(t, s, stranger, http.StatusUnprocessableEntity, want)
+		if searched, read := s.calls(); len(searched) != 0 || len(read) != 0 {
+			t.Fatalf("the system of record was read for a member it does not hold: searched %v, read %v", searched, read)
+		}
+		s = newPrefetchSoR()
+		_, status, msg := prefetchGateway(s).prepareDTRPackageRequest(context.Background(), stranger)
+		if status != http.StatusUnprocessableEntity || msg != want {
+			t.Fatalf("under enrichment: %d %s", status, msg)
+		}
+		if searched, read := s.calls(); len(searched) != 0 || len(read) != 0 {
+			t.Fatalf("under enrichment the system of record was read: searched %v, read %v", searched, read)
+		}
 	})
 	t.Run("a coverage parameter without a resource is the EHR's, and refused", func(t *testing.T) {
 		// The system of record holds a Coverage the gateway would add to a

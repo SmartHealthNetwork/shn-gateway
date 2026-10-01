@@ -48,7 +48,6 @@ services:
       # Native-forward decisioning to the co-bundled br-payer (unauthenticated loopback).
       PAYER_DAVINCI_BASE_URL: http://br-payer:8081/fhir
       PAYER_DAVINCI_CDS_BASE_URL: http://br-payer:8081
-      PAYER_DAVINCI_PAS_NATIVE: "true"
       # CONFORMANCE_ENFORCEMENT is deliberately ABSENT, exactly as in the partner
       # install unit (../../bundle/compose.yml): YOU register and run this gateway, at
       # your own endpoint with your own secrets, so the level is your choice. Absent

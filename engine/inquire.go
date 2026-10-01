@@ -76,9 +76,28 @@ type pasInquiryFacts struct {
 
 type pasInquiryItemFact struct {
 	traceNumber string // "system|value", or "" when the line carries none
-	system      string
-	code        string
-	display     string
+	// authorizationNumber is the payer's authorization number the line asks
+	// about (its authorizationNumber extension), or "" when it states none.
+	authorizationNumber string
+	system              string
+	code                string
+	display             string
+}
+
+// aboutKeys are the keys the inquiry states about the authorization it asks
+// about: its lines' trace numbers and authorization numbers (PendAboutKeys).
+// An inquiry with a line that states neither names no authorization by that
+// line, so it states nothing to be about: its EOB coding could be that line's.
+func (f pasInquiryFacts) aboutKeys() []PendKeyRef {
+	var traces, numbers []string
+	for _, it := range f.items {
+		if it.traceNumber == "" && it.authorizationNumber == "" {
+			return nil
+		}
+		traces = append(traces, it.traceNumber)
+		numbers = append(numbers, it.authorizationNumber)
+	}
+	return PendAboutKeys(traces, numbers)
 }
 
 // parsePASInquiryFacts is readPASInquiryFacts refusing every defect it finds.
@@ -229,7 +248,8 @@ func readPASInquiryFacts(bundleJSON []byte, refuses func(rule string) bool) (pas
 		}
 		facts.member = patientMemberFromRef(claim.Patient.Reference)
 		for _, it := range claim.Item {
-			f := pasInquiryItemFact{traceNumber: identifierExtensionKey(it.Extension, pasExtItemTraceNumberURL)}
+			f := pasInquiryItemFact{traceNumber: identifierExtensionKey(it.Extension, pasExtItemTraceNumberURL),
+				authorizationNumber: stringExtensionValue(it.Extension, pasExtAuthorizationNumberURL)}
 			if len(it.ProductOrService.Coding) > 0 {
 				c := it.ProductOrService.Coding[0]
 				f.system, f.code, f.display = c.System, c.Code, c.Display
@@ -305,6 +325,26 @@ func identifierExtensionKey(exts []json.RawMessage, url string) string {
 			continue
 		}
 		return identifierKey(e.ValueIdentifier.System, e.ValueIdentifier.Value)
+	}
+	return ""
+}
+
+// pasExtAuthorizationNumberURL is the PAS item authorizationNumber extension: the
+// number the payer gave the line, which an inquiry may state.
+const pasExtAuthorizationNumberURL = "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-authorizationNumber"
+
+// stringExtensionValue reads the trimmed valueString of the named extension, ""
+// when absent.
+func stringExtensionValue(exts []json.RawMessage, url string) string {
+	for _, raw := range exts {
+		var e struct {
+			URL         string `json:"url"`
+			ValueString string `json:"valueString"`
+		}
+		if decodeMessage(raw, &e) != nil || e.URL != url {
+			continue
+		}
+		return strings.TrimSpace(e.ValueString)
 	}
 	return ""
 }
@@ -1201,15 +1241,14 @@ func (g *Gateway) handlePASInquireInbound(w http.ResponseWriter, r *http.Request
 	if !read.read() {
 		result.SideEffectFHIR = nil
 	}
-	for _, b := range result.SideEffectFHIR {
-		status, msg, invalid := g.validateFHIRRecorded(ctx, b, "egress", "")
-		if status != 0 {
-			g.refuseInbound(w, r, legPASClaimInquire, env, tok, answerTok, status, msg, nil)
-			return
-		}
-		if invalid {
-			read.eobInvalid()
-		}
+	// One budget for the leg's decision EOBs at observe (validateDecisionEOBs).
+	status, msg, invalid := g.validateDecisionEOBs(ctx, result.SideEffectFHIR)
+	if status != 0 {
+		g.refuseInbound(w, r, legPASClaimInquire, env, tok, answerTok, status, msg, nil)
+		return
+	}
+	if invalid {
+		read.eobInvalid()
 	}
 	// Stamp honesty, as on every relaying leg: a verbatim foreign relay is left
 	// unstamped, because this build did not produce the payer's bytes and cannot
@@ -1261,6 +1300,56 @@ func (g *Gateway) handlePASInquireInbound(w http.ResponseWriter, r *http.Request
 // different member binding than the inquiry's. No decision is recorded from it.
 const PendOtherSubjectEvent = "pend.other-subject"
 
+// PendInquiryUnmatchedEvent is the observer event an inquiry raises when any
+// ClaimResponse in the payer's answer could not be recorded against one
+// authorization. One event per inquiry, whose Detail counts them by
+// verdict ("no-strong-key=2 ambiguous=390"), and names the key kinds that
+// disagreed. The payer's answer is relayed either way.
+const PendInquiryUnmatchedEvent = "pend.inquiry-unmatched"
+
+// PendInquiryEOBWithheldEvent is the observer event an inquiry raises when it
+// records decisions without their ExplanationOfBenefit: the decision matched an
+// authorization by the payer's own key, but the inquiry's own lines (whose
+// product coding the EOB would state) do not name that authorization alone.
+// Detail counts them ("recorded-without-eob=2"). A later inquiry that does name
+// the authorization supplies the EOB (PendEOBWritable).
+const PendInquiryEOBWithheldEvent = "pend.inquiry-eob-withheld"
+
+// pendUnmatchedCount tallies an inquiry's unrecorded ClaimResponses by verdict.
+type pendUnmatchedCount struct {
+	n         map[PendMatchVerdict]int
+	disagreed map[string]bool
+}
+
+func (c *pendUnmatchedCount) add(m PendMatch) {
+	if c.n == nil {
+		c.n, c.disagreed = map[PendMatchVerdict]int{}, map[string]bool{}
+	}
+	c.n[m.Verdict]++
+	if m.Verdict == PendMatchDisagrees && m.Kind != "" {
+		c.disagreed[m.Kind] = true
+	}
+}
+
+// String is the event's Detail, in a fixed order; "" when nothing was unmatched.
+func (c *pendUnmatchedCount) String() string {
+	var parts []string
+	for _, v := range []PendMatchVerdict{PendMatchNoStrongKey, PendMatchNone, PendMatchAmbiguous, PendMatchDisagrees, PendMatchRequesterKeyOnly} {
+		if c.n[v] > 0 {
+			parts = append(parts, fmt.Sprintf("%s=%d", v, c.n[v]))
+		}
+	}
+	if len(c.disagreed) > 0 {
+		kinds := make([]string, 0, len(c.disagreed))
+		for k := range c.disagreed {
+			kinds = append(kinds, k)
+		}
+		sort.Strings(kinds)
+		parts = append(parts, "disagreed on "+strings.Join(kinds, ","))
+	}
+	return strings.Join(parts, " ")
+}
+
 // inquiryLedgerEffect derives this payer gateway's own pend-ledger effect from the
 // answer, and returns the write to run once the response leg is sealed plus the
 // observer events the ledger's transitions raised.
@@ -1293,17 +1382,25 @@ func (g *Gateway) inquiryLedgerEffect(requester, subject, boundPatientRef, legCo
 		corrID     string
 		outcome    string
 		decidedAt  time.Time
+		authNumber string
 		eob        *EOBRecord
 	}
 	var (
-		decisions []decision
-		events    []ObserverEvent
+		decisions  []decision
+		events     []ObserverEvent
+		unmatched  pendUnmatchedCount
+		withoutEOB int
 	)
+	about := facts.aboutKeys()
 	for _, ans := range readPASInquiryAnswers(requester, answer) {
-		if len(ProbePendKeys(ans.keys)) == 0 {
-			continue // the answer states nothing a follow-up could have named
+		if len(StrongPendProbe(ans.keys)) == 0 {
+			// Nothing the payer issued for one authorization alone, so nothing to
+			// search by. Counted, not consulted.
+			unmatched.add(PendMatch{Verdict: PendMatchNoStrongKey})
+			continue
 		}
-		subjectPCI, corrID, found, ambiguous, err := ledger.LookupPended(requester, ans.keys)
+		m, err := ledger.LookupPended(requester, ans.keys, about)
+		subjectPCI, corrID := m.SubjectPCI, m.CorrelationID
 		switch {
 		case err != nil:
 			// The ledger could not be consulted. The payer's answer still reaches
@@ -1313,7 +1410,11 @@ func (g *Gateway) inquiryLedgerEffect(requester, subject, boundPatientRef, legCo
 			events = append(events, ObserverEvent{Kind: "pend.lookup-unavailable", Direction: "ingress",
 				LegType: "pas-claim-inquire", CorrelationID: legCorrID, Op: "pas-inquire"})
 			continue
-		case ambiguous, !found:
+		case m.Verdict != PendMatchFound:
+			// No authorization this answer can be recorded against: none, more
+			// than one, or one that holds a key the answer contradicts. Counted
+			// and reported below; never a bare skip.
+			unmatched.add(m)
 			continue
 		case subjectPCI != subject:
 			// The payer's answer names an authorization this requester holds for
@@ -1328,6 +1429,18 @@ func (g *Gateway) inquiryLedgerEffect(requester, subject, boundPatientRef, legCo
 		if !decided {
 			continue // still pended, or an answer that states no decision
 		}
+		if !m.About {
+			// The decision is this authorization's, by the payer's own key, but the
+			// inquiry's lines may be another claim's: its own keys do not name this
+			// authorization alone. Its EOB would state the product coding of
+			// whatever the inquiry asked about, so the decision is recorded without
+			// one, and counted.
+			if _, has := g.cfg.Store.EOBByID(decisionEOBID(corrID)); !has {
+				withoutEOB++
+			}
+			decisions = append(decisions, decision{subjectPCI: subjectPCI, corrID: corrID, outcome: outcome, decidedAt: ans.created, authNumber: parsed.PreAuthRef})
+			continue
+		}
 		eob, eobErr := g.inquiryDecisionEOB(subjectPCI, corrID, boundPatientRef, facts, ans, parsed)
 		if eobErr != nil {
 			// The payer's own decision detail cannot be stated on a decision EOB.
@@ -1341,14 +1454,23 @@ func (g *Gateway) inquiryLedgerEffect(requester, subject, boundPatientRef, legCo
 		if eob != nil {
 			result.SideEffectFHIR = append(result.SideEffectFHIR, eob.JSON)
 		}
-		decisions = append(decisions, decision{subjectPCI: subjectPCI, corrID: corrID, outcome: outcome, decidedAt: ans.created, eob: eob})
+		decisions = append(decisions, decision{subjectPCI: subjectPCI, corrID: corrID, outcome: outcome, decidedAt: ans.created, authNumber: parsed.PreAuthRef, eob: eob})
+	}
+	if detail := unmatched.String(); detail != "" {
+		events = append(events, ObserverEvent{Kind: PendInquiryUnmatchedEvent, Direction: "ingress",
+			LegType: "pas-claim-inquire", CorrelationID: legCorrID, Op: "pas-inquire", Detail: detail})
+	}
+	if withoutEOB > 0 {
+		events = append(events, ObserverEvent{Kind: PendInquiryEOBWithheldEvent, Direction: "ingress",
+			LegType: "pas-claim-inquire", CorrelationID: legCorrID, Op: "pas-inquire",
+			Detail: fmt.Sprintf("recorded-without-eob=%d", withoutEOB)})
 	}
 	if len(decisions) == 0 {
 		return nil, events
 	}
 	commit := func() error {
 		for _, d := range decisions {
-			tr, err := ledger.RecordDecision(d.subjectPCI, d.corrID, d.outcome, d.decidedAt, d.eob)
+			tr, err := ledger.RecordDecision(d.subjectPCI, d.corrID, d.outcome, d.decidedAt, PendKeys{RequesterHolder: requester, PreAuthRef: d.authNumber}, d.eob)
 			if errors.Is(err, ErrEOBSubjectMismatch) {
 				// Another patient's EOB is filed under this authorization's EOB id
 				// (eobowner.go). Refusing the RECORD, not the relay, exactly as for
@@ -1363,6 +1485,10 @@ func (g *Gateway) inquiryLedgerEffect(requester, subject, boundPatientRef, legCo
 			}
 			if tr.Event != "" {
 				g.observe(ObserverEvent{Kind: tr.Event, Direction: "ingress", LegType: "pas-claim-inquire",
+					CorrelationID: legCorrID, Op: "pas-inquire", Detail: "authorization " + d.corrID})
+			}
+			if tr.EOBRemoved {
+				g.observe(ObserverEvent{Kind: PendEOBRemovedEvent, Direction: "ingress", LegType: "pas-claim-inquire",
 					CorrelationID: legCorrID, Op: "pas-inquire", Detail: "authorization " + d.corrID})
 			}
 		}
@@ -1472,7 +1598,7 @@ func (g *Gateway) handlePASInquireIngress(w http.ResponseWriter, r *http.Request
 	// Routed by the inquiry's OWN Coverage, the same rule the submit ingress
 	// follows: a Coverage naming no resolvable payer fails closed rather than
 	// defaulting to one.
-	recipient, _, status, msg := g.recipientForWith(pasBundleCoverage(body), bundleRefResolver(body))
+	recipient, _, status, msg := g.pasRecipient(body)
 	if status != 0 {
 		exchangeOf(r.Context()).routed(status)
 		writeJSON(w, status, map[string]string{"error": msg})

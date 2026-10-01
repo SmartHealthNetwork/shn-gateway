@@ -114,6 +114,12 @@ type ConformanceFinding struct {
 	// Neither carries a diagnostic.
 	DeclaredLine string               `json:"declaredLine,omitempty"`
 	Lines        []LineVerdictSummary `json:"lines,omitempty"`
+
+	// binding and tally are the call this finding belongs to, taken from the
+	// request's context where the finding was made (bindFinding); they are
+	// never marshalled.
+	binding findingBinding
+	tally   *legTally
 }
 
 // LineVerdictSummary is one line a candidate-line certification tried and what it
@@ -147,14 +153,24 @@ func (g *Gateway) emitFindingIn(ctx context.Context, f ConformanceFinding) {
 // belongs to counts each finding it writes, and names the rule of one that
 // refuses. nil stays nil: an unwired emitter records nothing.
 func countingEmit(ctx context.Context, emit func(ConformanceFinding)) func(ConformanceFinding) {
+	if emit == nil {
+		return nil
+	}
 	x := exchangeOf(ctx)
-	if emit == nil || x == nil {
-		return emit
-	}
 	return func(f ConformanceFinding) {
-		emit(f)
-		x.checked(CheckKind(f.Kind), f.Rule, true, f.Decision == Refuse.String())
+		emit(bindFinding(ctx, f))
+		if x != nil {
+			x.checked(CheckKind(f.Kind), f.Rule, true, f.Decision == Refuse.String())
+		}
 	}
+}
+
+// bindFinding ties a finding to the call ctx belongs to: its binding fields
+// and, at observe, its leg's tally.
+func bindFinding(ctx context.Context, f ConformanceFinding) ConformanceFinding {
+	f.binding = findingBindingFrom(ctx)
+	f.tally = legTallyFrom(ctx)
+	return f
 }
 
 // emitFinding is the one place a governed check's finding is written to both
@@ -179,6 +195,7 @@ func (g *Gateway) emitFinding(f ConformanceFinding) {
 		CorrelationID: f.CorrelationID,
 		Detail:        string(b),
 	})
+	g.diagnosticFinding(f, string(b))
 }
 
 // findingIssuesShown bounds the issue list a strict refusal body echoes, the

@@ -83,18 +83,19 @@ const internalTokenPattern = `S5b|Task[ -][0-9]|(?i:\btask-[0-9])|per the plan|M
 	`|ledger[ -][0-9]|(?i:ledger[ -]item[ -][0-9])|option[ -][A-Z] ruling|A′|\bA'[ .,)]|\bT-[0-9]\b|\b[SM]F[0-9]+\b` +
 	`|(?i:spec §|spec[ (]*[0-9]{4}-[0-9]{2}-[0-9]{2})` +
 	// Un-hyphenated spellings that slipped through the original pattern (this task's own
-	// Finding 3): a bare task id (\bT[0-9]{1,2}\b — "T14"), "fix round N" without the
+	// Finding 3): a bare task id ("T14", "T14:", "(T2)"), "fix round N" without the
 	// hyphen "round-N" already catches, and "ruling YYYY-MM-DD" as its own citation form
-	// distinct from "spec YYYY-MM-DD" above. The bare task-id arm is this module's alone:
-	// the sdk builds ISO-8601 time literals ("T00:00:00Z") it would flag, and the root
-	// pin that keeps the two sweeps in step lists it as one-sided.
-	`|\bT[0-9]{1,2}\b|(?i:fix round [0-9])|(?i:ruling [0-9]{4}-[0-9]{2}-[0-9]{2})` +
+	// distinct from "spec YYYY-MM-DD" above. The task-id arm stops short of an ISO-8601
+	// time ("T00:00:00Z", "T12:30"): a colon followed by a digit ends it, so the sdk,
+	// which builds such times, carries the same arm. It also matches an id ending the line,
+	// and, as \b did, not one followed by a letter or underscore ("T2DM").
+	`|\bT[0-9]{1,2}(?:[^:0-9A-Za-z_]|:[^0-9]|:?$)|(?i:fix round [0-9])|(?i:ruling [0-9]{4}-[0-9]{2}-[0-9]{2})` +
 	// R9: the bare form of the single ruling number this whole task implements (round-11
 	// review NEW-3) — a leaked "R9" carries no "T14"/"ruling <date>" alongside it to catch
 	// it via the arms above. Deliberately NOT a general \bR[0-9]{1,2}\b: this codebase's
 	// FHIR release name IS "R4" ("base R4", "FHIR R4") on every published edge (gateway.go,
 	// compat.go, transform_pas.go, …) — a blanket digit-class widening here would flag that
-	// PUBLIC vocabulary wholesale, unlike \bT[0-9]{1,2}\b and \bD[0-9]\b, which collide with
+	// PUBLIC vocabulary wholesale, unlike the bare task-id arm and \bD[0-9]\b, which collide with
 	// nothing live in this tree today. R9 alone has zero live occurrences outside this
 	// file's own rejection-test fixture (verified before adding), so it costs nothing to add
 	// narrowly; widen to another specific ruling number only when THAT number is confirmed
@@ -232,6 +233,13 @@ func TestInternalTokenPattern_DesignDocRefForms(t *testing.T) {
 		`// R9/T14 (ruling 2026-08-24): normalize the lane identity ONCE, here`,
 		`// caught the ingress-$validate skip missing it in fix round 3, then the UC-08`,
 		`// T14 (R-8 scope review, 2026-08-24): unconditional on purpose, not an oversight`,
+		// A bare task id before a parenthesis, a colon or a space.
+		`// T14: normalize the lane identity ONCE, here`,
+		`// TestVerify_RejectsBackwardsExpiry (T2): an assertion whose Expiry is not after`,
+		`// the T5 fix keeps the order code`,
+		// A bare task id ending the line, with or without a colon.
+		`// the lane identity is normalized once here, per T14`,
+		`// see T1:`,
 		// Bare R9, no accompanying T-id or "ruling <date>" on the same line (round-11
 		// review NEW-3): the form the arms above cannot see on their own.
 		`// R9 retires the in-process payer identity; every holder converges on one`,
@@ -288,10 +296,14 @@ func TestInternalTokenPattern_DesignDocRefForms(t *testing.T) {
 		// `Task[ -][0-9]` (as before) plus `(?i:\btask-[0-9])` — NOT a blanket
 		// case-insensitive widening, which would have swallowed this row.
 		`// the operator runs task 1 before task 2 during a cut`,
-		// Boundary for the widened bare-task-id arm (\bT[0-9]{1,2}\b): published UC-0X
+		// Boundary for the widened bare-task-id arm: published UC-0X
 		// scenario ids and FR-G*/AI-G*/OWD-G* requirement ids are partner-facing and must
 		// survive — none of them is a bare "T" followed only by digits.
 		`// UC-05 federated-query evidence and FR-G40's coverage-derived routing`,
+		// The bare task-id arm stops short of an ISO-8601 time, and of a term such as T2DM.
+		`When: when + "T00:00:00Z",`,
+		`// the window opens at T12:30 local time`,
+		`// a member with T2DM on the problem list`,
 		// Boundary for "fix round <digit>": ordinary prose that happens to contain the
 		// word "round" followed later by a digit, with no "fix" immediately before it,
 		// must survive.

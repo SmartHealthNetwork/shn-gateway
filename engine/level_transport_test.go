@@ -3,18 +3,22 @@ package engine
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
-// Per-level rows for three checks that sit beside routing and the payer
-// identity mapping: a Claim insurer reference the mapping cannot resolve, an
-// answer whose frame stamps a contract line other than the one its leg was
-// routed on, and a payer-side PAS request with no Coverage. Where the check
+// Per-level rows for checks that sit beside routing and the payer identity
+// mapping: a Claim insurer reference the mapping cannot resolve, an answer
+// whose frame stamps a contract line other than the one its leg was routed
+// on, a payer-side CRD request with no Coverage (which the mapping carries as
+// sent: it has no payor to map), and a payer-side PAS request with no
+// Coverage. Where the check
 // judges the participant's own content it is not checked at none, recorded at
 // observe and refused at strict with the status and body strict has always
 // given, and the message is carried or relayed exactly below strict. Where it
@@ -288,6 +292,109 @@ func TestLevelOriginate_AnswerStampedWithAnotherLineRefusesAtEveryLevel(t *testi
 			}
 		})
 	}
+}
+
+// ---- a CRD request with no Coverage ----
+
+// levelCRDSelectCoverage is conformantCRD's prefetch coverage member, and
+// levelCRDDispatchCoverage crdDispatchRequest's.
+const (
+	levelCRDSelectCoverage   = `"coverage":{"resourceType":"Coverage","id":"c1","beneficiary":{"reference":"Patient/MBR-COVERED"}}`
+	levelCRDDispatchCoverage = `,"coverage":{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"Coverage","id":"c1","status":"active","beneficiary":{"reference":"Patient/MBR-COVERED"},"payor":[{"reference":"Organization/o2"}]}}]}`
+	levelEmptySearchset      = `{"resourceType":"Bundle","type":"searchset","total":0,"entry":[]}`
+)
+
+// crdSelectWithoutPrefetch is conformantCRD with no prefetch member at all.
+func crdSelectWithoutPrefetch(t *testing.T) []byte {
+	t.Helper()
+	body := conformantCRD("MBR-COVERED", "72148")
+	i := bytes.Index(body, []byte(",\n      \"prefetch\":{"))
+	j := bytes.LastIndex(body, []byte("\n    }"))
+	if i < 0 || j < i {
+		t.Fatal("fixture: prefetch not found")
+	}
+	out := slices.Concat(body[:i], body[j:])
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(out, &probe); err != nil {
+		t.Fatalf("fixture: %v", err)
+	}
+	if _, ok := probe["prefetch"]; ok {
+		t.Fatal("fixture: prefetch still present")
+	}
+	return out
+}
+
+// With the payer identity mapping configured, a CRD request that carries no
+// Coverage at all has no payor to map: the network routed it to this payer,
+// so the mapping carries it to the payer's own system as sent, and that
+// system answers it. The mapping changes nothing about what the payer's own
+// conformance level decides: order-select reads its subject's coverage
+// beneficiary as the request's own shape (RuleRequestShape), so a payer that
+// opts in to structural or strict refuses it there exactly as it does
+// without the mapping; at none and observe it reaches the payer's system
+// byte for byte. order-dispatch reads no coverage it requires, so it is
+// carried as sent at every level.
+func TestLevelPayerCRD_NoCoverageWithIdentityMappingCarriedAsSent(t *testing.T) {
+	sel := map[string][]byte{
+		"no prefetch.coverage":   crdSelectWith(t, levelCRDSelectCoverage, `"other":{}`),
+		"prefetch.coverage null": crdSelectWith(t, levelCRDSelectCoverage, `"coverage":null`),
+		"an empty searchset":     crdSelectWith(t, levelCRDSelectCoverage, `"coverage":`+levelEmptySearchset),
+		"no prefetch":            crdSelectWithoutPrefetch(t),
+	}
+	for name, body := range sel {
+		for _, mapping := range []bool{true, false} {
+			for _, level := range allLevels {
+				t.Run(fmt.Sprintf("order-select/%s/mapping=%t/%s", name, mapping, level), func(t *testing.T) {
+					var opts []NativeOption
+					if mapping {
+						opts = withIdentityMapping()
+					}
+					p := newLevelPayer(t, level, opts...)
+					got := p.send(t, "crd-order-select", "", body)
+					p.wantRequestRow(t, "crd-order-select", got, body, crdSelectPath, RuleRequestShape, http.StatusBadRequest, "parse coverage beneficiary failed")
+				})
+			}
+		}
+	}
+	dispatch := map[string][]byte{
+		"no prefetch.coverage":   crdDispatchWith(t, levelCRDDispatchCoverage, ``),
+		"prefetch.coverage null": crdDispatchWith(t, levelCRDDispatchCoverage, `,"coverage":null`),
+		"an empty searchset":     crdDispatchWith(t, levelCRDDispatchCoverage, `,"coverage":`+levelEmptySearchset),
+	}
+	for name, body := range dispatch {
+		for _, level := range allLevels {
+			t.Run("order-dispatch/"+name+"/"+level.String(), func(t *testing.T) {
+				p := newLevelPayer(t, level, withIdentityMapping()...)
+				got := p.send(t, "crd-order-dispatch", "", body)
+				if got.status != http.StatusOK || !got.framed {
+					t.Fatalf("at %s the request must be carried: answer %d %s", level, got.status, got.body)
+				}
+				if p.partner.lastPath != crdDispatchPath || !bytes.Equal(p.partner.lastBody, body) {
+					t.Fatalf("at %s the payer's system must receive the request as sent at %s, got %s:\n%s", level, crdDispatchPath, p.partner.lastPath, p.partner.lastBody)
+				}
+				if want := p.partner.respByPath[crdDispatchPath]; !bytes.Equal(got.body, want) {
+					t.Fatalf("at %s the answer must be relayed exactly:\n got %s\nwant %s", level, got.body, want)
+				}
+				if fs := p.content(); len(fs) != 0 {
+					t.Fatalf("at %s nothing is recorded, got %v", level, findingsText(fs))
+				}
+			})
+		}
+	}
+}
+
+// The mapping still refuses, at every level, a Coverage whose payor it
+// cannot read and one naming another payer: present, it addresses the
+// request.
+func TestLevelPayerCRD_CoverageWithIdentityMappingRefusesAtEveryLevel(t *testing.T) {
+	foreign := `"coverage":{"resourceType":"Coverage","id":"c1","beneficiary":{"reference":"Patient/MBR-COVERED"},` +
+		`"payor":[{"identifier":{"system":"urn:oid:2.16.840.1.113883.6.300","value":"99999"}}]}`
+	runPayerNetworkRows(t, map[string]payerNetworkRow{
+		"order-select: a Coverage naming no payor": {leg: "crd-order-select", body: conformantCRD("MBR-COVERED", "72148"), opts: withIdentityMapping(),
+			status: http.StatusBadRequest, msg: "inbound Coverage carries no resolvable payor identifier"},
+		"order-select: a Coverage naming another payer": {leg: "crd-order-select", body: crdSelectWith(t, levelCRDSelectCoverage, foreign), opts: withIdentityMapping(),
+			status: http.StatusBadRequest, msg: "inbound Coverage payor urn:oid:2.16.840.1.113883.6.300|99999 does not match this gateway's own payer identity"},
+	})
 }
 
 // ---- a PAS request with no Coverage ----

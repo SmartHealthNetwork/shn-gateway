@@ -144,6 +144,7 @@ func (g *Gateway) startCertification() {
 // Observer callbacks are cooperative: they must return promptly. Owners stop
 // serving requests before closing and release callback barriers before joining.
 func (g *Gateway) Close() error {
+	g.closeObserveChecks()
 	w := g.certification
 	if w == nil {
 		return nil

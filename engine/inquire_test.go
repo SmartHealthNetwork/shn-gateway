@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -370,6 +371,10 @@ const (
 	inquiryRequester      = "provider"
 	inquiryOtherRequester = "provider-b"
 	inquiryCRKey          = "http://example.org/PATIENT_EVENT_TRACE_NUMBER|111099"
+	// inquiryTraceKey is the trace number the fixture inquiry's line states
+	// (inquiryBundle's "TRN-1"): a pend holding it, alone, is the authorization the
+	// inquiry asks about, so its decision's EOB may be stated from the inquiry's line.
+	inquiryTraceKey = "http://provider.example/trn|TRN-1"
 )
 
 func newInquiryLedgerFixture(t *testing.T, keys PendKeys) *inquiryLedgerFixture {
@@ -439,7 +444,7 @@ func pendedAnswer() []byte {
 // decision records that decision, with its ExplanationOfBenefit in the same
 // write. The EOB's product coding comes from the REQUESTER's own inquiry line.
 func TestPASInquire_LedgerDecidedOnMatch(t *testing.T) {
-	f := newInquiryLedgerFixture(t, PendKeys{RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{inquiryCRKey}})
+	f := newInquiryLedgerFixture(t, PendKeys{RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{inquiryCRKey}, ItemTraceNumbers: []string{inquiryTraceKey}})
 	if got := f.state(t).State; got != PendStatePended {
 		t.Fatalf("seeded state = %q, want pended", got)
 	}
@@ -569,8 +574,8 @@ func TestPASInquire_LedgerNeverMatchesTheInquirysOwnIdentifier(t *testing.T) {
 // otherwise carry an empty one.
 type unreadableLedger struct{ *MemStore }
 
-func (unreadableLedger) LookupPended(string, PendKeys) (string, string, bool, bool, error) {
-	return "", "", false, false, errors.New("pend index unavailable")
+func (unreadableLedger) LookupPended(string, PendKeys, []PendKeyRef) (PendMatch, error) {
+	return PendMatch{}, errors.New("pend index unavailable")
 }
 
 // TestPASInquire_LookupUnavailableNamesTheExchange: when the ledger cannot be
@@ -614,50 +619,362 @@ func TestPASInquire_LookupUnavailableNamesTheExchange(t *testing.T) {
 	}
 }
 
-// TestPASInquire_MatchesOnEveryPayerStatedKeyKind: the reader extracts four kinds
-// of lookup key, and the ledger effect must resolve on each of them. A regression
-// that narrowed key selection to the ClaimResponse identifier alone would
-// otherwise only surface against a live payer.
-func TestPASInquire_MatchesOnEveryPayerStatedKeyKind(t *testing.T) {
-	// One answer stating all four key kinds; each row seeds a pend on exactly ONE
-	// of them, so the row names which kind resolved it.
-	answer := []byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{
-		"resourceType":"ClaimResponse","outcome":"complete","created":"2026-09-17T00:00:00Z",
-		"patient":{"reference":"Patient/SubscriberExample"},
-		"identifier":[{"system":"http://payer.example/cr","value":"CR-9"}],
-		"request":{"identifier":{"system":"http://provider.example/claim","value":"SUB-9"}},
-		"preAuthRef":"AUTH-9",
-		"item":[{"itemSequence":1,
-		  "extension":[{"url":"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-itemTraceNumber",
-		    "valueIdentifier":{"system":"http://provider.example/trn","value":"TRN-9"}}],
-		  "adjudication":[{"extension":[{"url":"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewAction",
-		    "extension":[{"url":"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewActionCode",
-		      "valueCodeableConcept":{"coding":[{"system":"https://codesystem.x12.org/005010/306","code":"A1","display":"Certified in total"}]}}]}],
-		    "category":{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/adjudication","code":"submitted"}]}}]}]}}]}`)
+// TestPASInquire_SearchesByStrongKeysOnly: an answer stating all four key
+// kinds decides a pend keyed on either STRONG kind (the payer's own ClaimResponse
+// identifier, or its preAuthRef), and does NOT decide a pend keyed only on a weak
+// kind (the requester's request identifier, or an item trace number): those are
+// what reused example bodies share across claims, so they may confirm a match but
+// never make one. A regression to any-key matching would decide the weak rows.
+func TestPASInquire_SearchesByStrongKeysOnly(t *testing.T) {
+	answer := inquiryAnswerOf(t, inquiryCR{id: "http://payer.example/cr|CR-9", request: "http://provider.example/claim|SUB-9",
+		preAuthRef: "AUTH-9", traces: []string{"http://provider.example/trn|TRN-9"}, code: "A1"})
 	for _, tc := range []struct {
-		name string
-		keys PendKeys
+		name    string
+		keys    PendKeys
+		decided bool
 	}{
-		{"the identifier the payer echoed for the submitted claim", PendKeys{RequesterHolder: inquiryRequester, RequestIDs: []string{"http://provider.example/claim|SUB-9"}}},
-		{"the payer's own ClaimResponse identifier", PendKeys{RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{"http://payer.example/cr|CR-9"}}},
-		{"the authorization reference", PendKeys{RequesterHolder: inquiryRequester, PreAuthRef: "AUTH-9"}},
-		{"an item trace number", PendKeys{RequesterHolder: inquiryRequester, ItemTraceNumbers: []string{"http://provider.example/trn|TRN-9"}}},
+		{"the payer's own ClaimResponse identifier", PendKeys{RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{"http://payer.example/cr|CR-9"}}, true},
+		{"the authorization reference", PendKeys{RequesterHolder: inquiryRequester, PreAuthRef: "AUTH-9"}, true},
+		{"the identifier the payer echoed for the submitted claim", PendKeys{RequesterHolder: inquiryRequester, RequestIDs: []string{"http://provider.example/claim|SUB-9"}}, false},
+		{"an item trace number", PendKeys{RequesterHolder: inquiryRequester, ItemTraceNumbers: []string{"http://provider.example/trn|TRN-9"}}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newInquiryLedgerFixture(t, tc.keys)
-			f.apply(t, inquiryRequester, answer)
-			if got := f.state(t); got.State != PendStateDecided || got.Outcome != PendOutcomeApproved {
-				t.Fatalf("a pend keyed on %s was not decided: %+v", tc.name, got)
+			events := f.applyEvents(t, inquiryRequester, answer)
+			got := f.state(t)
+			if tc.decided {
+				if got.State != PendStateDecided || got.Outcome != PendOutcomeApproved {
+					t.Fatalf("a pend keyed on %s was not decided: %+v", tc.name, got)
+				}
+				wantNoUnmatched(t, events)
+				return
 			}
+			if got.State != PendStatePended {
+				t.Fatalf("a pend keyed only on %s was decided: %+v", tc.name, got)
+			}
+			wantUnmatched(t, events, "none=1")
 		})
 	}
-	// Non-vacuous control: a pend keyed on none of the four is not decided by the
-	// same answer, so each row above is the key it names and not a match on
-	// anything else.
+	// Non-vacuous control: a pend keyed on a strong key the answer does not state
+	// is not decided by the same answer, so each decided row above is the key it
+	// names and not a match on anything else.
 	f := newInquiryLedgerFixture(t, PendKeys{RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{"http://payer.example/cr|SOMETHING-ELSE"}})
 	f.apply(t, inquiryRequester, answer)
 	if got := f.state(t).State; got != PendStatePended {
 		t.Fatalf("control: an unrelated key was decided (%q) — the rows above prove nothing", got)
+	}
+}
+
+// inquiryCR is one ClaimResponse of a synthetic inquiry answer: its strong keys
+// (id, preAuthRef), its weak keys (request, traces), its review action code (A1
+// certified, A3 not certified, A4 pended) and its created date.
+type inquiryCR struct {
+	id, request, preAuthRef string
+	traces                  []string
+	code                    string
+	created                 string
+}
+
+// inquiryAnswerOf builds a 2.0.1/2.1.0-shape answer carrying the given
+// ClaimResponses, all about the fixture's member. Keys are "system|value".
+func inquiryAnswerOf(t *testing.T, crs ...inquiryCR) []byte {
+	t.Helper()
+	ident := func(key string) map[string]any {
+		sys, val, ok := strings.Cut(key, "|")
+		if !ok {
+			t.Fatalf("key %q is not system|value", key)
+		}
+		return map[string]any{"system": sys, "value": val}
+	}
+	var entries []any
+	for _, c := range crs {
+		created := c.created
+		if created == "" {
+			created = "2026-09-17T00:00:00Z"
+		}
+		outcome := "complete"
+		if c.code == "A4" {
+			outcome = "queued"
+		}
+		var itemExt []any
+		for _, tr := range c.traces {
+			itemExt = append(itemExt, map[string]any{
+				"url":             "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-itemTraceNumber",
+				"valueIdentifier": ident(tr)})
+		}
+		item := map[string]any{"itemSequence": 1, "adjudication": []any{map[string]any{
+			"extension": []any{map[string]any{
+				"url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewAction",
+				"extension": []any{map[string]any{
+					"url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewActionCode",
+					"valueCodeableConcept": map[string]any{"coding": []any{map[string]any{
+						"system": "https://codesystem.x12.org/005010/306", "code": c.code}}}}}}},
+			"category": map[string]any{"coding": []any{map[string]any{
+				"system": "http://terminology.hl7.org/CodeSystem/adjudication", "code": "submitted"}}}}}}
+		if len(itemExt) > 0 {
+			item["extension"] = itemExt
+		}
+		cr := map[string]any{"resourceType": "ClaimResponse", "outcome": outcome, "created": created,
+			"patient": map[string]any{"reference": "Patient/SubscriberExample"}, "item": []any{item}}
+		if c.id != "" {
+			cr["identifier"] = []any{ident(c.id)}
+		}
+		if c.request != "" {
+			cr["request"] = map[string]any{"identifier": ident(c.request)}
+		}
+		if c.preAuthRef != "" {
+			cr["preAuthRef"] = c.preAuthRef
+		}
+		entries = append(entries, map[string]any{"resource": cr})
+	}
+	b, err := json.Marshal(map[string]any{"resourceType": "Bundle", "type": "collection", "entry": entries})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// applyEvents is apply, returning the observer events the ledger effect raised.
+func (f *inquiryLedgerFixture) applyEvents(t *testing.T, requester string, answer []byte) []ObserverEvent {
+	t.Helper()
+	result := LegResult{}
+	commit, events := f.g.inquiryLedgerEffect(requester, f.subject, "Patient/MBR-COVERED", "corr-inquiry-leg", f.facts, answer, &result)
+	if commit != nil {
+		// The write reports what it changed through the gateway's observer.
+		f.g.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
+		defer func() { f.g.cfg.Observer = nil }()
+		if err := commit(); err != nil {
+			t.Fatalf("ledger write: %v", err)
+		}
+	}
+	return events
+}
+
+// withFacts is the fixture over the same store, inquiring by trace number trn
+// (system http://provider.example/trn) instead of the fixture's own.
+func (f *inquiryLedgerFixture) withFacts(t *testing.T, trn string) *inquiryLedgerFixture {
+	t.Helper()
+	facts, status, msg := parsePASInquiryFacts(inquiryBundle("MBR-COVERED", "", trn, "72148"))
+	if status != 0 {
+		t.Fatalf("fixture inquiry refused: %d %s", status, msg)
+	}
+	g := *f
+	g.facts = facts
+	return &g
+}
+
+// pend seeds another pended authorization of the fixture's member.
+func (f *inquiryLedgerFixture) pend(t *testing.T, corr string, keys PendKeys) {
+	t.Helper()
+	if _, err := f.store.RecordPendedKeyed(f.subject, corr, fixedClock(), keys); err != nil {
+		t.Fatalf("seed pend %s: %v", corr, err)
+	}
+}
+
+// stateOf reads one authorization's ledger row.
+func (f *inquiryLedgerFixture) stateOf(t *testing.T, corr string) PendRecord {
+	t.Helper()
+	rec, found, err := f.store.PendRecordOf(f.subject, corr)
+	if err != nil || !found {
+		t.Fatalf("ledger row %s: found=%v err=%v", corr, found, err)
+	}
+	return rec
+}
+
+// wantUnmatched asserts the inquiry raised exactly one pend.inquiry-unmatched
+// event, tied to the inquiry's own exchange, whose Detail is want.
+func wantUnmatched(t *testing.T, events []ObserverEvent, want string) {
+	t.Helper()
+	var got []ObserverEvent
+	for _, e := range events {
+		if e.Kind == PendInquiryUnmatchedEvent {
+			got = append(got, e)
+		}
+	}
+	if len(got) != 1 {
+		t.Fatalf("%d %s events, want 1: %+v", len(got), PendInquiryUnmatchedEvent, events)
+	}
+	if got[0].Detail != want || got[0].CorrelationID != "corr-inquiry-leg" || got[0].LegType != "pas-claim-inquire" {
+		t.Fatalf("%s = %+v, want Detail %q on the inquiry's exchange", PendInquiryUnmatchedEvent, got[0], want)
+	}
+}
+
+// wantNoUnmatched asserts the inquiry raised no pend.inquiry-unmatched event.
+func wantNoUnmatched(t *testing.T, events []ObserverEvent) {
+	t.Helper()
+	for _, e := range events {
+		if e.Kind == PendInquiryUnmatchedEvent {
+			t.Fatalf("unexpected %s: %+v", PendInquiryUnmatchedEvent, e)
+		}
+	}
+}
+
+// The example's item trace number, which every claim built from the IG example
+// shares, and two claims of one member that both carry it.
+const (
+	exampleTrace = "http://example.org/ITEM_TRACE_NUMBER|1"
+	corrClaimB   = "corr-claim-B"
+	corrClaimC   = "corr-claim-C"
+	crClaimB     = "http://example.org/PATIENT_EVENT_TRACE_NUMBER|B-1"
+	crClaimC     = "http://example.org/PATIENT_EVENT_TRACE_NUMBER|C-1"
+)
+
+// TestPASInquire_SharedTraceNumberDecidesOnlyTheNamedClaim: two pended
+// claims share the example's item trace number. A ClaimResponse naming one of them
+// by its strong key decides that one only; a ClaimResponse carrying only the
+// shared trace number decides neither, and is counted.
+func TestPASInquire_SharedTraceNumberDecidesOnlyTheNamedClaim(t *testing.T) {
+	f := newInquiryLedgerFixture(t, PendKeys{})
+	f.pend(t, corrClaimB, PendKeys{RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{crClaimB}, ItemTraceNumbers: []string{exampleTrace}})
+	f.pend(t, corrClaimC, PendKeys{RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{crClaimC}, ItemTraceNumbers: []string{exampleTrace}})
+
+	events := f.applyEvents(t, inquiryRequester, inquiryAnswerOf(t, inquiryCR{traces: []string{exampleTrace}, code: "A3"}))
+	for _, corr := range []string{corrClaimB, corrClaimC} {
+		if got := f.stateOf(t, corr).State; got != PendStatePended {
+			t.Fatalf("an answer naming no claim decided %s: %q", corr, got)
+		}
+	}
+	wantUnmatched(t, events, "no-strong-key=1")
+
+	events = f.applyEvents(t, inquiryRequester, inquiryAnswerOf(t, inquiryCR{id: crClaimB, preAuthRef: "AUTH-B", traces: []string{exampleTrace}, code: "A1"}))
+	if got := f.stateOf(t, corrClaimB); got.State != PendStateDecided || got.Outcome != PendOutcomeApproved {
+		t.Fatalf("claim B was not decided by its own ClaimResponse: %+v", got)
+	}
+	if got := f.stateOf(t, corrClaimC).State; got != PendStatePended {
+		t.Fatalf("claim B's ClaimResponse decided claim C: %q", got)
+	}
+	wantNoUnmatched(t, events)
+}
+
+// TestPASInquire_ForeignDecisionCannotFlipAClaim: claim B is decided
+// approved. A later-dated denial for claim C, which shares B's trace number and
+// request identifier but is not in this requester's ledger (another requester's
+// claim for the same example member, or one decided at submit), changes nothing of
+// B's: not its outcome and not its EOB.
+func TestPASInquire_ForeignDecisionCannotFlipAClaim(t *testing.T) {
+	f := newInquiryLedgerFixture(t, PendKeys{})
+	const request = "http://example.org/claim|111099"
+	f.pend(t, corrClaimB, PendKeys{RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{crClaimB}, RequestIDs: []string{request}, ItemTraceNumbers: []string{inquiryTraceKey}})
+	f.applyEvents(t, inquiryRequester, inquiryAnswerOf(t, inquiryCR{id: crClaimB, request: request, preAuthRef: "AUTH-B", traces: []string{inquiryTraceKey}, code: "A1", created: "2026-09-17T00:00:00Z"}))
+	approved, ok := f.store.EOBByID(decisionEOBID(corrClaimB))
+	if !ok {
+		t.Fatal("claim B's decision wrote no EOB")
+	}
+
+	events := f.applyEvents(t, inquiryRequester, inquiryAnswerOf(t, inquiryCR{id: crClaimC, request: request, traces: []string{inquiryTraceKey}, code: "A3", created: "2026-09-20T00:00:00Z"}))
+	got := f.stateOf(t, corrClaimB)
+	wantRecordedDecision(t, got, PendOutcomeApproved)
+	if eob, _ := f.store.EOBByID(decisionEOBID(corrClaimB)); !bytes.Equal(eob, approved) {
+		t.Fatalf("claim C's denial replaced claim B's EOB:\n got: %s\nwant: %s", eob, approved)
+	}
+	wantUnmatched(t, events, "none=1")
+}
+
+// wantRecordedDecision asserts a decided row with outcome.
+func wantRecordedDecision(t *testing.T, rec PendRecord, outcome string) {
+	t.Helper()
+	if rec.State != PendStateDecided || rec.Outcome != outcome {
+		t.Fatalf("ledger row = %+v, want decided %s", rec, outcome)
+	}
+}
+
+// TestPASInquire_LosingDecisionKeepsTheEOB: claim B is decided approved
+// by a later-dated answer. An earlier-dated denial for B itself loses (the payer's
+// later word stands), and it must not replace the EOB of the decision the ledger
+// keeps: the ledger and Patient Access would otherwise disagree.
+func TestPASInquire_LosingDecisionKeepsTheEOB(t *testing.T) {
+	f := newInquiryLedgerFixture(t, PendKeys{})
+	f.pend(t, corrClaimB, PendKeys{RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{crClaimB}, ItemTraceNumbers: []string{inquiryTraceKey}})
+	f.applyEvents(t, inquiryRequester, inquiryAnswerOf(t, inquiryCR{id: crClaimB, preAuthRef: "AUTH-B", code: "A1", created: "2026-09-20T00:00:00Z"}))
+	approved, ok := f.store.EOBByID(decisionEOBID(corrClaimB))
+	if !ok {
+		t.Fatal("claim B's decision wrote no EOB")
+	}
+	f.applyEvents(t, inquiryRequester, inquiryAnswerOf(t, inquiryCR{id: crClaimB, code: "A3", created: "2026-09-17T00:00:00Z"}))
+	wantRecordedDecision(t, f.stateOf(t, corrClaimB), PendOutcomeApproved)
+	if eob, _ := f.store.EOBByID(decisionEOBID(corrClaimB)); !bytes.Equal(eob, approved) {
+		t.Fatalf("a losing denial replaced the kept decision's EOB:\n got: %s\nwant: %s", eob, approved)
+	}
+}
+
+// TestPASInquire_SharedWeakKeyIsNotAmbiguous: two pended claims share the
+// example's trace number. An answer naming claim B by its strong key and its
+// request identifier, and stating the shared trace number too, decides B: a
+// shared weak key confirms and never makes a match ambiguous.
+func TestPASInquire_SharedWeakKeyIsNotAmbiguous(t *testing.T) {
+	f := newInquiryLedgerFixture(t, PendKeys{})
+	const requestB = "http://provider.example/claim|SUB-B"
+	f.pend(t, corrClaimB, PendKeys{RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{crClaimB}, RequestIDs: []string{requestB}, ItemTraceNumbers: []string{exampleTrace}})
+	f.pend(t, corrClaimC, PendKeys{RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{crClaimC}, RequestIDs: []string{"http://provider.example/claim|SUB-C"}, ItemTraceNumbers: []string{exampleTrace}})
+	events := f.applyEvents(t, inquiryRequester, inquiryAnswerOf(t, inquiryCR{id: crClaimB, request: requestB, preAuthRef: "AUTH-B", traces: []string{exampleTrace}, code: "A1"}))
+	wantRecordedDecision(t, f.stateOf(t, corrClaimB), PendOutcomeApproved)
+	if got := f.stateOf(t, corrClaimC).State; got != PendStatePended {
+		t.Fatalf("claim C was decided: %q", got)
+	}
+	wantNoUnmatched(t, events)
+}
+
+// TestPASInquire_AnotherRequestersClaimDecidesNothing: the payer's answer
+// to requester X carries a ClaimResponse about requester Y's claim C, which shares
+// X's claim B's trace number. X's lookup searches X's namespace by C's strong key,
+// finds nothing, and B is untouched.
+func TestPASInquire_AnotherRequestersClaimDecidesNothing(t *testing.T) {
+	f := newInquiryLedgerFixture(t, PendKeys{})
+	f.pend(t, corrClaimB, PendKeys{RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{crClaimB}, ItemTraceNumbers: []string{exampleTrace}})
+	f.pend(t, corrClaimC, PendKeys{RequesterHolder: inquiryOtherRequester, ClaimResponseIDs: []string{crClaimC}, ItemTraceNumbers: []string{exampleTrace}})
+	events := f.applyEvents(t, inquiryRequester, inquiryAnswerOf(t, inquiryCR{id: crClaimC, traces: []string{exampleTrace}, code: "A3"}))
+	for _, corr := range []string{corrClaimB, corrClaimC} {
+		if got := f.stateOf(t, corr).State; got != PendStatePended {
+			t.Fatalf("another requester's ClaimResponse decided %s: %q", corr, got)
+		}
+	}
+	wantUnmatched(t, events, "none=1")
+}
+
+// TestPASInquire_ADisagreeingKeyIsNoMatch: the strong key names claim B,
+// but the answer states an item trace number B does not hold, so the answer is
+// about another claim: B is untouched, and the event names the kind that
+// disagreed. A kind the row holds none of is not a disagreement: B holds no
+// preAuthRef (a payer states it on the decision, not on the pend), and an answer
+// stating one with B's own keys decides B.
+func TestPASInquire_ADisagreeingKeyIsNoMatch(t *testing.T) {
+	f := newInquiryLedgerFixture(t, PendKeys{})
+	f.pend(t, corrClaimB, PendKeys{RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{crClaimB}, ItemTraceNumbers: []string{"http://example.org/ITEM_TRACE_NUMBER|B"}})
+	events := f.applyEvents(t, inquiryRequester, inquiryAnswerOf(t, inquiryCR{id: crClaimB, traces: []string{"http://example.org/ITEM_TRACE_NUMBER|C"}, code: "A3"}))
+	if got := f.stateOf(t, corrClaimB).State; got != PendStatePended {
+		t.Fatalf("a disagreeing answer decided claim B: %q", got)
+	}
+	wantUnmatched(t, events, "disagrees=1 disagreed on "+PendKeyItemTraceNumber)
+
+	events = f.applyEvents(t, inquiryRequester, inquiryAnswerOf(t, inquiryCR{id: crClaimB, preAuthRef: "AUTH-B",
+		traces: []string{"http://example.org/ITEM_TRACE_NUMBER|B"}, code: "A1"}))
+	wantRecordedDecision(t, f.stateOf(t, corrClaimB), PendOutcomeApproved)
+	wantNoUnmatched(t, events)
+}
+
+// TestPASInquire_UnmatchedAreCountedByVerdict: one inquiry whose answer
+// carries a ClaimResponse of every kind that cannot be recorded raises ONE event
+// that counts each, never a bare skip, and still records the one it can.
+func TestPASInquire_UnmatchedAreCountedByVerdict(t *testing.T) {
+	f := newInquiryLedgerFixture(t, PendKeys{})
+	const sharedCR = "http://example.org/PATIENT_EVENT_TRACE_NUMBER|111099"
+	f.pend(t, corrClaimB, PendKeys{RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{crClaimB}, ItemTraceNumbers: []string{"http://example.org/ITEM_TRACE_NUMBER|B"}})
+	f.pend(t, "corr-reused-1", PendKeys{RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{sharedCR}})
+	f.pend(t, "corr-reused-2", PendKeys{RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{sharedCR}})
+	f.pend(t, corrClaimC, PendKeys{RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{crClaimC}})
+	events := f.applyEvents(t, inquiryRequester, inquiryAnswerOf(t,
+		inquiryCR{traces: []string{exampleTrace}, code: "A1"},                                           // no strong key
+		inquiryCR{id: "http://example.org/PATIENT_EVENT_TRACE_NUMBER|NOT-HERE", code: "A1"},             // none
+		inquiryCR{id: sharedCR, code: "A1"},                                                             // ambiguous
+		inquiryCR{id: crClaimB, traces: []string{"http://example.org/ITEM_TRACE_NUMBER|X"}, code: "A1"}, // disagrees
+		inquiryCR{id: crClaimC, preAuthRef: "AUTH-C", code: "A1"},                                       // found
+	))
+	wantUnmatched(t, events, "no-strong-key=1 none=1 ambiguous=1 disagrees=1 disagreed on "+PendKeyItemTraceNumber)
+	wantRecordedDecision(t, f.stateOf(t, corrClaimC), PendOutcomeApproved)
+	for _, corr := range []string{corrClaimB, "corr-reused-1", "corr-reused-2"} {
+		if got := f.stateOf(t, corr).State; got != PendStatePended {
+			t.Fatalf("%s was decided: %q", corr, got)
+		}
 	}
 }
 
@@ -1169,6 +1486,262 @@ func TestPASInquire_FixturesAreSynthetic(t *testing.T) {
 		assertJSONObject(t, raw)
 		if !bytes.Contains(raw, []byte("Synthetic relay fixture")) {
 			t.Errorf("%s does not say in its own narrative that it is synthetic", name)
+		}
+	}
+}
+
+// eob reads one authorization's decision EOB from the fixture store.
+func (f *inquiryLedgerFixture) eob(t *testing.T, corr string) ([]byte, bool) {
+	t.Helper()
+	return f.store.EOBByID(decisionEOBID(corr))
+}
+
+// wantEOBWithheld asserts the inquiry raised one pend.inquiry-eob-withheld
+// event counting n decisions, tied to the inquiry's own exchange.
+func wantEOBWithheld(t *testing.T, events []ObserverEvent, n int) {
+	t.Helper()
+	var got []ObserverEvent
+	for _, e := range events {
+		if e.Kind == PendInquiryEOBWithheldEvent {
+			got = append(got, e)
+		}
+	}
+	want := fmt.Sprintf("recorded-without-eob=%d", n)
+	if len(got) != 1 || got[0].Detail != want || got[0].CorrelationID != "corr-inquiry-leg" {
+		t.Fatalf("%s events = %+v, want one with Detail %q on the inquiry's exchange", PendInquiryEOBWithheldEvent, got, want)
+	}
+}
+
+// TestPASInquire_AnotherClaimsDecisionNeverTakesTheInquirysLines: an inquiry
+// asks about claim B by B's trace number, which claim C shares (both built from
+// one example body). The payer's answer carries C's decision. C's decision is
+// recorded, by C's own ClaimResponse identifier, but its EOB is not built: the
+// inquiry's line (B's product coding) does not name C alone, so C's EOB would
+// state B's code.
+func TestPASInquire_AnotherClaimsDecisionNeverTakesTheInquirysLines(t *testing.T) {
+	f := newInquiryLedgerFixture(t, PendKeys{})
+	f.pend(t, corrClaimB, PendKeys{RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{crClaimB}, ItemTraceNumbers: []string{inquiryTraceKey}})
+	f.pend(t, corrClaimC, PendKeys{RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{crClaimC}, ItemTraceNumbers: []string{inquiryTraceKey}})
+	events := f.applyEvents(t, inquiryRequester, inquiryAnswerOf(t, inquiryCR{id: crClaimC, preAuthRef: "AUTH-C", traces: []string{inquiryTraceKey}, code: "A1"}))
+	wantRecordedDecision(t, f.stateOf(t, corrClaimC), PendOutcomeApproved)
+	if eob, ok := f.eob(t, corrClaimC); ok {
+		t.Fatalf("claim C's decision EOB was built from the inquiry's line, which is claim B's: %s", eob)
+	}
+	if got := f.stateOf(t, corrClaimB).State; got != PendStatePended {
+		t.Fatalf("claim B was decided: %q", got)
+	}
+	wantEOBWithheld(t, events, 1)
+}
+
+// TestPASInquire_OmittedClaimLendsNoLines: an inquiry asks about claim D by D's
+// own trace number. The payer's answer omits D's ClaimResponse and carries claim
+// B's decision instead. B is decided by its own key, and gets no EOB: the
+// inquiry's line is D's, and B does not hold it (or, where B shares it with D,
+// does not hold it alone).
+func TestPASInquire_OmittedClaimLendsNoLines(t *testing.T) {
+	const traceD = "http://provider.example/trn|TRN-1"
+	for _, tc := range []struct {
+		name   string
+		traceB string
+	}{
+		{"B holds another trace number", "http://provider.example/trn|TRN-B"},
+		{"B shares D's trace number", traceD},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newInquiryLedgerFixture(t, PendKeys{})
+			f.pend(t, "corr-claim-D", PendKeys{RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{"http://example.org/PATIENT_EVENT_TRACE_NUMBER|D-1"}, ItemTraceNumbers: []string{traceD}})
+			f.pend(t, corrClaimB, PendKeys{RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{crClaimB}, ItemTraceNumbers: []string{tc.traceB}})
+			events := f.applyEvents(t, inquiryRequester, inquiryAnswerOf(t, inquiryCR{id: crClaimB, preAuthRef: "AUTH-B", traces: []string{tc.traceB}, code: "A1"}))
+			wantRecordedDecision(t, f.stateOf(t, corrClaimB), PendOutcomeApproved)
+			if eob, ok := f.eob(t, corrClaimB); ok {
+				t.Fatalf("claim B's EOB was built from claim D's inquiry: %s", eob)
+			}
+			wantEOBWithheld(t, events, 1)
+		})
+	}
+}
+
+// TestPASInquire_ALaterAttributableInquirySuppliesTheEOB: claim B's decision is
+// first learned from an inquiry about another claim, and recorded without an
+// EOB. A later inquiry about B itself, restating the same decision, writes B's
+// EOB: the decision the ledger keeps is the one it states.
+func TestPASInquire_ALaterAttributableInquirySuppliesTheEOB(t *testing.T) {
+	f := newInquiryLedgerFixture(t, PendKeys{})
+	f.pend(t, "corr-claim-D", PendKeys{RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{"http://example.org/PATIENT_EVENT_TRACE_NUMBER|D-1"}, ItemTraceNumbers: []string{inquiryTraceKey}})
+	f.pend(t, corrClaimB, PendKeys{RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{crClaimB}, ItemTraceNumbers: []string{"http://provider.example/trn|TRN-B"}})
+	answer := inquiryAnswerOf(t, inquiryCR{id: crClaimB, preAuthRef: "AUTH-B", traces: []string{"http://provider.example/trn|TRN-B"}, code: "A1"})
+	f.applyEvents(t, inquiryRequester, answer)
+	if _, ok := f.eob(t, corrClaimB); ok {
+		t.Fatal("the first inquiry was not about claim B, but wrote its EOB")
+	}
+
+	// The same answer, to an inquiry about B by B's own trace number.
+	about := f.withFacts(t, "TRN-B")
+	events := about.applyEvents(t, inquiryRequester, answer)
+	if _, ok := f.eob(t, corrClaimB); !ok {
+		t.Fatal("an inquiry about claim B restating its kept decision did not supply the EOB")
+	}
+	wantRecordedDecision(t, f.stateOf(t, corrClaimB), PendOutcomeApproved)
+	for _, e := range events {
+		if e.Kind == PendInquiryEOBWithheldEvent {
+			t.Fatalf("the attributable inquiry withheld an EOB: %+v", e)
+		}
+	}
+}
+
+// TestPASInquire_AnOlderAttributableAnswerDoesNotOverwrite: claim B's EOB states
+// the decision the ledger keeps. An attributable answer restating the same
+// outcome but dated earlier does not replace it.
+func TestPASInquire_AnOlderAttributableAnswerDoesNotOverwrite(t *testing.T) {
+	f := newInquiryLedgerFixture(t, PendKeys{})
+	f.pend(t, corrClaimB, PendKeys{RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{crClaimB}, ItemTraceNumbers: []string{inquiryTraceKey}})
+	f.applyEvents(t, inquiryRequester, inquiryAnswerOf(t, inquiryCR{id: crClaimB, preAuthRef: "AUTH-B-LATER", traces: []string{inquiryTraceKey}, code: "A1", created: "2026-09-20T00:00:00Z"}))
+	kept, ok := f.eob(t, corrClaimB)
+	if !ok {
+		t.Fatal("claim B's attributable decision wrote no EOB")
+	}
+	f.applyEvents(t, inquiryRequester, inquiryAnswerOf(t, inquiryCR{id: crClaimB, preAuthRef: "AUTH-B-EARLIER", traces: []string{inquiryTraceKey}, code: "A1", created: "2026-09-17T00:00:00Z"}))
+	if eob, _ := f.eob(t, corrClaimB); !bytes.Equal(eob, kept) {
+		t.Fatalf("an older answer replaced the kept decision's EOB:\n got: %s\nwant: %s", eob, kept)
+	}
+}
+
+// TestPASInquire_AnUnattributableFlipRemovesTheStaleEOB: claim B was decided
+// denied by an inquiry about B, with its EOB. A later-dated approval for B then
+// arrives in the answer to an inquiry about another claim, so it brings no EOB
+// of its own. The ledger keeps the approval, and B's denial EOB is removed:
+// Patient Access shows nothing for B rather than a denial the ledger no longer
+// keeps, until an inquiry about B supplies the approval's EOB.
+func TestPASInquire_AnUnattributableFlipRemovesTheStaleEOB(t *testing.T) {
+	f := newInquiryLedgerFixture(t, PendKeys{})
+	const traceB = "http://provider.example/trn|TRN-B"
+	f.pend(t, "corr-claim-D", PendKeys{RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{"http://example.org/PATIENT_EVENT_TRACE_NUMBER|D-1"}, ItemTraceNumbers: []string{inquiryTraceKey}})
+	f.pend(t, corrClaimB, PendKeys{RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{crClaimB}, ItemTraceNumbers: []string{traceB}})
+	aboutB := f.withFacts(t, "TRN-B")
+	aboutB.applyEvents(t, inquiryRequester, inquiryAnswerOf(t, inquiryCR{id: crClaimB, traces: []string{traceB}, code: "A3", created: "2026-09-17T00:00:00Z"}))
+	if _, ok := f.eob(t, corrClaimB); !ok {
+		t.Fatal("claim B's denial, from an inquiry about B, wrote no EOB")
+	}
+
+	// The approval, in an answer to the inquiry about D.
+	approval := inquiryAnswerOf(t, inquiryCR{id: crClaimB, preAuthRef: "AUTH-B", traces: []string{traceB}, code: "A1", created: "2026-09-20T00:00:00Z"})
+	wantEOBRemoved(t, f.applyEvents(t, inquiryRequester, approval), corrClaimB)
+	wantRecordedDecision(t, f.stateOf(t, corrClaimB), PendOutcomeApproved)
+	if eob, ok := f.eob(t, corrClaimB); ok {
+		t.Fatalf("Patient Access still serves claim B's denial after the ledger kept its approval: %s", eob)
+	}
+
+	// An inquiry about B restates the approval and supplies its EOB; nothing
+	// is removed.
+	wantEOBRemoved(t, aboutB.applyEvents(t, inquiryRequester, approval))
+	eob, ok := f.eob(t, corrClaimB)
+	if !ok || !bytes.Contains(eob, []byte("AUTH-B")) {
+		t.Fatalf("the inquiry about B did not supply the approval's EOB: %s (found=%v)", eob, ok)
+	}
+}
+
+// wantEOBRemoved asserts the inquiry raised exactly one pend.eob-removed event
+// per authorization in corrs, each tied to the inquiry's own exchange.
+func wantEOBRemoved(t *testing.T, events []ObserverEvent, corrs ...string) {
+	t.Helper()
+	var got []string
+	for _, e := range events {
+		if e.Kind == PendEOBRemovedEvent {
+			if e.CorrelationID != "corr-inquiry-leg" {
+				t.Fatalf("%s event on exchange %q, want the inquiry's own", PendEOBRemovedEvent, e.CorrelationID)
+			}
+			got = append(got, e.Detail)
+		}
+	}
+	var want []string
+	for _, c := range corrs {
+		want = append(want, "authorization "+c)
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("%s events = %q, want %q", PendEOBRemovedEvent, got, want)
+	}
+}
+
+// TestPASInquire_WithheldCountsOnlyAMissingEOB: a decision already filed with
+// its EOB, restated in an answer to an inquiry about another claim, is not
+// counted as withheld again.
+func TestPASInquire_WithheldCountsOnlyAMissingEOB(t *testing.T) {
+	f := newInquiryLedgerFixture(t, PendKeys{})
+	const traceB = "http://provider.example/trn|TRN-B"
+	f.pend(t, corrClaimB, PendKeys{RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{crClaimB}, ItemTraceNumbers: []string{traceB}})
+	answer := inquiryAnswerOf(t, inquiryCR{id: crClaimB, preAuthRef: "AUTH-B", traces: []string{traceB}, code: "A1"})
+	f.withFacts(t, "TRN-B").applyEvents(t, inquiryRequester, answer)
+	if _, ok := f.eob(t, corrClaimB); !ok {
+		t.Fatal("claim B's decision, from an inquiry about B, wrote no EOB")
+	}
+	for _, e := range f.applyEvents(t, inquiryRequester, answer) {
+		if e.Kind == PendInquiryEOBWithheldEvent {
+			t.Fatalf("a decision that has its EOB was counted as withheld: %+v", e)
+		}
+	}
+}
+
+// TestPASInquire_ANewClaimResponseForTheDecisionStillDecides: a payer that
+// issues a new ClaimResponse, with a new identifier, for its decision, and
+// repeats the authorization number it gave on the pend. The authorization
+// number names the claim, so the decision is recorded.
+func TestPASInquire_ANewClaimResponseForTheDecisionStillDecides(t *testing.T) {
+	f := newInquiryLedgerFixture(t, PendKeys{})
+	f.pend(t, corrClaimB, PendKeys{RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{crClaimB + "-PEND"}, PreAuthRef: "AUTH-B", ItemTraceNumbers: []string{inquiryTraceKey}})
+	events := f.applyEvents(t, inquiryRequester, inquiryAnswerOf(t, inquiryCR{id: crClaimB + "-DECISION", preAuthRef: "AUTH-B", traces: []string{inquiryTraceKey}, code: "A1"}))
+	wantRecordedDecision(t, f.stateOf(t, corrClaimB), PendOutcomeApproved)
+	wantNoUnmatched(t, events)
+}
+
+// TestPASInquire_AnEchoedClaimIdentifierNamesNoClaim: a payer that echoes the
+// submitted claim's identifier as its ClaimResponse identifier. Claim B is pended
+// under that echo; claim C, built from the same body and decided at submit, is
+// in no ledger row. The payer's answer carries C's denial, under the same echoed
+// identifier and trace number, with C's own authorization number. It must not be
+// recorded on B: the echo is the requester's identifier, not the payer's.
+func TestPASInquire_AnEchoedClaimIdentifierNamesNoClaim(t *testing.T) {
+	f := newInquiryLedgerFixture(t, PendKeys{})
+	const echoed = "http://example.org/PATIENT_EVENT_TRACE_NUMBER|111099"
+	f.pend(t, corrClaimB, PendKeys{RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{echoed}, RequestIDs: []string{echoed}, ItemTraceNumbers: []string{inquiryTraceKey}})
+	events := f.applyEvents(t, inquiryRequester, inquiryAnswerOf(t, inquiryCR{id: echoed, request: echoed, preAuthRef: "AUTH-C", traces: []string{inquiryTraceKey}, code: "A3"}))
+	if got := f.stateOf(t, corrClaimB).State; got != PendStatePended {
+		t.Fatalf("claim C's denial was recorded on claim B through the echoed identifier: %q", got)
+	}
+	wantUnmatched(t, events, "requester-key-only=1")
+}
+
+// TestPASInquire_ASubmitDecidedClaimLendsNoLines: claim D was decided at submit
+// (no pend), and claim B is pended; both carry the inquiry's trace number. An
+// inquiry about D is answered with B's decision under B's own key. B is decided,
+// but its EOB is not built from D's line: D's submit-time decision filed D's keys
+// too, so the inquiry's trace does not name B alone.
+func TestPASInquire_ASubmitDecidedClaimLendsNoLines(t *testing.T) {
+	f := newInquiryLedgerFixture(t, PendKeys{})
+	if _, err := f.store.RecordDecision(f.subject, "corr-claim-D", PendOutcomeDenied, fixedClock(),
+		PendKeys{RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{"http://example.org/PATIENT_EVENT_TRACE_NUMBER|D-1"}, ItemTraceNumbers: []string{inquiryTraceKey}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	f.pend(t, corrClaimB, PendKeys{RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{crClaimB}, ItemTraceNumbers: []string{inquiryTraceKey}})
+	events := f.applyEvents(t, inquiryRequester, inquiryAnswerOf(t, inquiryCR{id: crClaimB, preAuthRef: "AUTH-B", traces: []string{inquiryTraceKey}, code: "A1"}))
+	wantRecordedDecision(t, f.stateOf(t, corrClaimB), PendOutcomeApproved)
+	if eob, ok := f.eob(t, corrClaimB); ok {
+		t.Fatalf("claim B's EOB was built from the line of claim D, decided at submit: %s", eob)
+	}
+	wantEOBWithheld(t, events, 1)
+}
+
+// TestPASInquiryFacts_AnUnkeyedLineIsAboutNothing: an inquiry with a line that
+// states neither a trace number nor an authorization number states nothing to be
+// about, so no decision's EOB is built from its lines.
+func TestPASInquiryFacts_AnUnkeyedLineIsAboutNothing(t *testing.T) {
+	keyed := pasInquiryItemFact{traceNumber: inquiryTraceKey, code: "72148"}
+	unkeyed := pasInquiryItemFact{code: "99999"}
+	if got := (pasInquiryFacts{items: []pasInquiryItemFact{keyed}}).aboutKeys(); len(got) != 1 {
+		t.Fatalf("a keyed inquiry's about keys = %+v, want its trace number", got)
+	}
+	for _, items := range [][]pasInquiryItemFact{{unkeyed, keyed}, {keyed, unkeyed}, nil} {
+		if got := (pasInquiryFacts{items: items}).aboutKeys(); got != nil {
+			t.Fatalf("lines %+v: about keys = %+v, want none", items, got)
 		}
 	}
 }

@@ -106,8 +106,9 @@ func wantCorrelationTaken(t *testing.T, status int, body []byte) {
 
 // TestPASSubmit_CorrelationTakenRefusedBeforeThePayer: a submit whose correlation
 // id already names another patient's authorization — a decision EOB filed for
-// that patient, or that patient's authorization still awaiting its decision — is
-// the payer gateway's framed 409, and the payer is never asked.
+// that patient, or that patient's authorization in any state, decided included
+// whether or not its decision EOB still stands — is the payer gateway's framed
+// 409, and the payer is never asked.
 func TestPASSubmit_CorrelationTakenRefusedBeforeThePayer(t *testing.T) {
 	const corr = "corr-shared"
 	otherEOB := []byte(`{"resourceType":"ExplanationOfBenefit","id":"other"}`)
@@ -133,6 +134,23 @@ func TestPASSubmit_CorrelationTakenRefusedBeforeThePayer(t *testing.T) {
 				t.Fatalf("begin = %v,%v", claimed, err)
 			}
 		}},
+		{"another patient's decided authorization with no EOB", func(t *testing.T, s *censusSoR, other string) {
+			if _, err := s.RecordDecision(other, corr, PendOutcomeApproved, fixedClock(), PendKeys{}, nil); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"another patient's decision whose EOB was removed when its outcome changed", func(t *testing.T, s *censusSoR, other string) {
+			if _, err := s.RecordPendedKeyed(other, corr, fixedClock(), PendKeys{RequesterHolder: "requester", RequestIDs: []string{"urn:shn:claim|CLM-OTHER"}}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.RecordDecision(other, corr, PendOutcomeDenied, fixedClock(), PendKeys{}, &EOBRecord{SubjectPCI: other, EOBID: decisionEOBID(corr), JSON: otherEOB}); err != nil {
+				t.Fatal(err)
+			}
+			tr, err := s.RecordDecision(other, corr, PendOutcomeApproved, fixedClock().Add(time.Hour), PendKeys{}, nil)
+			if err != nil || !tr.EOBRemoved {
+				t.Fatalf("the flip = %+v,%v, want the denial's EOB removed", tr, err)
+			}
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			g, requester, store, calls := eobOwnerGateway(t)
@@ -154,8 +172,7 @@ func TestPASSubmit_CorrelationTakenRefusedBeforeThePayer(t *testing.T) {
 	}
 
 	// Controls: the same correlation id is not taken by the patient's OWN EOB
-	// or pend, nor by another patient's DECIDED authorization with no EOB — each
-	// reaches the payer and is answered.
+	// or pend — each reaches the payer and is answered.
 	for _, tc := range []struct {
 		name string
 		seed func(t *testing.T, s *censusSoR, self, other string)
@@ -170,9 +187,20 @@ func TestPASSubmit_CorrelationTakenRefusedBeforeThePayer(t *testing.T) {
 				t.Fatal(err)
 			}
 		}},
-		{"another patient's decided authorization with no EOB", func(t *testing.T, s *censusSoR, _, other string) {
-			if _, err := s.RecordDecision(other, corr, PendOutcomeApproved, fixedClock(), nil); err != nil {
+		{"one's own decided authorization with no EOB (a resubmission)", func(t *testing.T, s *censusSoR, self, _ string) {
+			if _, err := s.RecordDecision(self, corr, PendOutcomeApproved, fixedClock(), PendKeys{}, nil); err != nil {
 				t.Fatal(err)
+			}
+		}},
+		{"one's own decision whose EOB was removed when its outcome changed", func(t *testing.T, s *censusSoR, self, _ string) {
+			if _, err := s.RecordPendedKeyed(self, corr, fixedClock(), PendKeys{RequesterHolder: "requester", RequestIDs: []string{"urn:shn:claim|CLM-SELF"}}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.RecordDecision(self, corr, PendOutcomeDenied, fixedClock(), PendKeys{}, &EOBRecord{SubjectPCI: self, EOBID: decisionEOBID(corr), JSON: otherEOB}); err != nil {
+				t.Fatal(err)
+			}
+			if tr, err := s.RecordDecision(self, corr, PendOutcomeApproved, fixedClock().Add(time.Hour), PendKeys{}, nil); err != nil || !tr.EOBRemoved {
+				t.Fatalf("the flip = %+v,%v, want the denial's EOB removed", tr, err)
 			}
 		}},
 	} {
@@ -269,7 +297,7 @@ func TestPASSubmit_EOBTakenMidFlightRelaysUnrecorded(t *testing.T) {
 			}
 		},
 		commit: func(ctx context.Context, corrID, subjectPCI string) func() error {
-			return recordPASDecision(ctx, store, subjectPCI, corrID, PendOutcomeApproved, fixedClock(),
+			return recordPASDecision(ctx, store, subjectPCI, corrID, PendOutcomeApproved, fixedClock(), PendKeys{},
 				&EOBRecord{SubjectPCI: subjectPCI, EOBID: decisionEOBID(corrID), JSON: []byte(`{"resourceType":"ExplanationOfBenefit","id":"self"}`)})
 		},
 	}
@@ -323,7 +351,7 @@ func wantNotRecordedEvent(t *testing.T, events []ObserverEvent, leg, op, legCorr
 // payer's answer), the authorization stays pended, the other patient's EOB is
 // untouched, and the operator is told.
 func TestPASInquire_EOBTakenRelaysUnrecorded(t *testing.T) {
-	f := newInquiryLedgerFixture(t, PendKeys{RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{inquiryCRKey}})
+	f := newInquiryLedgerFixture(t, PendKeys{RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{inquiryCRKey}, ItemTraceNumbers: []string{inquiryTraceKey}})
 	const other = "pci:MBR-OTHER"
 	otherEOB := []byte(`{"resourceType":"ExplanationOfBenefit","id":"other"}`)
 	if err := f.store.RecordEOB(other, decisionEOBID(f.corr), otherEOB); err != nil {
@@ -354,7 +382,7 @@ func TestPASCorrelationCollision_InquiryNotStuck(t *testing.T) {
 	const corr = "corr-shared"
 	g, requester, store, calls := eobOwnerGateway(t)
 	pciA, pciB := memberPCI(t, g, "MBR-COVERED"), memberPCI(t, g, "MBR-UC04")
-	if _, err := store.RecordPendedKeyed(pciB, corr, fixedClock(), PendKeys{RequesterHolder: requester.ID, ClaimResponseIDs: []string{inquiryCRKey}}); err != nil {
+	if _, err := store.RecordPendedKeyed(pciB, corr, fixedClock(), PendKeys{RequesterHolder: requester.ID, ClaimResponseIDs: []string{inquiryCRKey}, ItemTraceNumbers: []string{inquiryTraceKey}}); err != nil {
 		t.Fatalf("B's pend: %v", err)
 	}
 

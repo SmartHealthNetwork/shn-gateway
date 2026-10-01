@@ -67,6 +67,11 @@ type patientFence struct {
 	run          *fenceRun
 }
 
+// fenceAnotherPatientReference is the refusal of a reference that names
+// another patient: a Patient id other than the bound one's, or the member
+// identifier with another member's value.
+const fenceAnotherPatientReference = "reference to another patient"
+
 // opaqueContentReason is the refusal of a Binary in a prefetch value.
 const opaqueContentReason = "opaque content is not carried in prefetch"
 
@@ -513,7 +518,7 @@ func (f patientFence) reference(v any, sc fenceScope) (bool, *refError) {
 		switch {
 		case sys == f.memberSystem && (declared == "" || declared == "Patient"):
 			if val != f.member {
-				return false, &refError{"reference to another patient"}
+				return false, &refError{fenceAnotherPatientReference}
 			}
 			return true, nil
 		case declared == "Patient":
@@ -536,7 +541,7 @@ func (f patientFence) reference(v any, sc fenceScope) (bool, *refError) {
 			return false, nil
 		}
 		if err := f.patient(res, isContained); err != nil {
-			return false, &refError{"reference to another patient"}
+			return false, &refError{fenceAnotherPatientReference}
 		}
 		return true, nil
 	}
@@ -599,7 +604,7 @@ func (f patientFence) reference(v any, sc fenceScope) (bool, *refError) {
 		}
 	}
 	if !f.ids[m[2]] {
-		return false, &refError{"reference to another patient"}
+		return false, &refError{fenceAnotherPatientReference}
 	}
 	return true, nil
 }

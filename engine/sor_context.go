@@ -72,14 +72,40 @@ func sorReferenceCallback(ctx context.Context, sor SystemOfRecord) (func(string)
 // member's payer is ambiguous and the answer is 422, never a guess.
 //
 // With several same-payer records the first one the system returned is used;
-// the routing identity is the same whichever is used. Gateway-originated CRD
-// requests are to carry the whole Coverage search result instead (a planned
-// change that keeps this routing rule).
+// the routing identity is the same whichever is used. Every Coverage counts
+// here, cancelled ones too. It is the read of eligibility, on both sides: the
+// UC-01 eligibility request this gateway originates and the payer side's
+// answer. The CRD, DTR and PAS legs this gateway originates, and the PAS
+// inquiry, read memberRoutingCoverage instead, which applies the routing
+// choice first.
 func (g *Gateway) memberCoverage(ctx context.Context, member string) (coverage []byte, found bool, status int, msg string) {
+	return g.chosenMemberCoverage(ctx, member, nil)
+}
+
+// memberRoutingCoverage is the Coverage a CRD request this gateway originates
+// for member is routed by: memberCoverage's rule over the Coverages
+// routingCoverageChoice picks (the active ones when any is active, else all
+// of them). It is the same choice as the coverage the request carries
+// (obtainRoutingCoverage), so every leg of the exchange (CRD, DTR, PAS) names
+// the same coverage.
+func (g *Gateway) memberRoutingCoverage(ctx context.Context, member string) (coverage []byte, found bool, status int, msg string) {
+	return g.chosenMemberCoverage(ctx, member, routingCoverageChoice)
+}
+
+// chosenMemberCoverage is the one read of a member's Coverage records: of
+// those choose picks (every one when choose is nil), the one to route on.
+func (g *Gateway) chosenMemberCoverage(ctx context.Context, member string, choose func([][]byte) []int) (coverage []byte, found bool, status int, msg string) {
 	covs, err := ReadSystemOfRecord(g.cfg.SoR).OpenCoverageContext(ctx, member)
 	if err != nil {
 		status, msg := SoRFailureResponse(err)
 		return nil, false, status, msg
+	}
+	if choose != nil {
+		all := covs
+		covs = nil
+		for _, i := range choose(all) {
+			covs = append(covs, all[i])
+		}
 	}
 	switch len(covs) {
 	case 0:
@@ -114,7 +140,7 @@ func (g *Gateway) recipientForSoR(ctx context.Context, coverage []byte) (string,
 		return "", shnsdk.PayerIdentifier{}, status, msg
 	}
 	if !ok {
-		return "", shnsdk.PayerIdentifier{}, http.StatusUnprocessableEntity, "no payer identifier on member coverage"
+		return "", shnsdk.PayerIdentifier{}, http.StatusUnprocessableEntity, noPayerIdentifier
 	}
 	holder, ok := g.cfg.PayerRouter.Resolve(parsed)
 	if !ok {

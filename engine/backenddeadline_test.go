@@ -210,10 +210,11 @@ func TestBackendDeadline_RequesterLeavingFirstIsCancelled(t *testing.T) {
 }
 
 // When the gateway's own work before the call (validation, the member's
-// lookup) used the whole deadline, the payer's system is not asked: nothing
-// is sent, no backend call is recorded (so BackendError does not count it),
-// and the requester reads that the payer's gateway ran out of time, never
-// that the payer's system did.
+// lookup) used the whole deadline, the operation is not sent, and the
+// requester reads that the payer's gateway ran out of time, never that the
+// payer's system did. Here nothing read the payer's system first, so no
+// backend call is recorded (and BackendError does not count it); a read that
+// ran first is still recorded (TestBackendDeadline_SpentAfterAReadRecordsTheLastRead).
 func TestBackendDeadline_SpentBeforeTheCallIsNotThePayers(t *testing.T) {
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -240,7 +241,7 @@ func TestBackendDeadline_SpentBeforeTheCallIsNotThePayers(t *testing.T) {
 }
 
 // Through the whole inbound path: a deadline the gateway's own work used up
-// (here, any work at all) leaves the payer's system unasked, and the exchange
+// (here, any work at all) means the operation is not sent, and the exchange
 // is the gateway's other, never the payer's upstream error.
 func TestBackendDeadline_SpentDeadlineSettlesAsOther(t *testing.T) {
 	p := newLevelPayer(t, EnforcementObserve)
@@ -264,5 +265,65 @@ func TestBackendDeadline_SpentDeadlineSettlesAsOther(t *testing.T) {
 	}
 	if b := rec.Backend; b != nil && (b.ErrorClass != "" || b.Status/100 != 2) {
 		t.Fatalf("backend %+v: only the listing's read may be recorded, never a failed forward", b)
+	}
+}
+
+// With a system of record, the member's lookup runs before the deadline is
+// found spent, and on crd-order-select so does the CDS service listing's read
+// when the listing is due: the operation is still not sent and the exchange
+// settles as other, but those reads are recorded. The last one is the
+// exchange's backend, in BackendCalls with the others. A usable read carries
+// no error class (BackendError does not count it). A listing whose re-read
+// fails, while the gateway uses the listing it last read, is a failed read:
+// that is the backend, and its class decides whether BackendError counts it
+// (gateway/app's hook: a 5xx, as here, does, and so does a 401 or 403;
+// another 4xx or a 3xx does not).
+func TestBackendDeadline_SpentAfterAReadRecordsTheLastRead(t *testing.T) {
+	for name, row := range map[string]struct {
+		listing             func(p *levelPayer, n *nativeResponder)
+		calls, partnerCalls int
+		status              int
+		class               string
+	}{
+		// The listing is read on the way: two reads, the listing last.
+		"the listing read after the member's lookup": {
+			listing: func(*levelPayer, *nativeResponder) {}, calls: 2, partnerCalls: 1, status: 200},
+		// The listing is fresh: only the member's lookup reads (status 0).
+		"only the member's lookup": {
+			listing: func(_ *levelPayer, n *nativeResponder) { n.PrimeCDSServices(stubCDSServices) },
+			calls:   1, partnerCalls: 0, status: 0},
+		// The listing is due, its re-read fails, and the listing last read is
+		// used: that failed read is the backend.
+		"a failed listing re-read, the cached listing used": {
+			listing: func(p *levelPayer, n *nativeResponder) {
+				n.PrimeCDSServices(stubCDSServices)
+				n.cds.read = fixedClock().Add(-2 * cdsServiceListingTTL)
+				p.partner.listingStatus = http.StatusServiceUnavailable
+			},
+			calls: 2, partnerCalls: 1, status: http.StatusServiceUnavailable, class: BackendHTTP5xx},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := newLevelPayer(t, EnforcementObserve)
+			n := p.g.cfg.Responder.(*nativeResponder)
+			row.listing(p, n)
+			WithBackendDeadline(time.Nanosecond)(n)
+			var got exchangeRecords
+			p.g.cfg.ExchangeObserved = got.observe
+			ans := p.sendAs(t, "crd-order-select", "", conformantCRD(dtrFrameMember, "72148"), p.pci)
+			if ans.status != http.StatusGatewayTimeout || !bytes.Contains(ans.body, []byte("did not receive it")) {
+				t.Fatalf("answer %d %s, want the payer gateway's spent deadline", ans.status, ans.body)
+			}
+			if p.partner.lastPath != "" || int(p.partner.calls.Load()) != row.partnerCalls {
+				t.Fatalf("the payer's system was asked %d times, last operation %q; want %d listing reads and no operation",
+					p.partner.calls.Load(), p.partner.lastPath, row.partnerCalls)
+			}
+			rec := got.only(t)
+			if rec.Outcome != ExchangeOther || rec.BackendCalls != row.calls || rec.BackendCalls < 1 {
+				t.Fatalf("record %s in %d backend calls, want other in %d", rec.Outcome, rec.BackendCalls, row.calls)
+			}
+			if b := rec.Backend; b == nil || b.Status != row.status || b.ErrorClass != row.class {
+				t.Fatalf("backend %+v, want the last read: status %d class %q", b, row.status, row.class)
+			}
+		})
 	}
 }

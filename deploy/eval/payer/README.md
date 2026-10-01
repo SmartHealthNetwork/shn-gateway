@@ -98,6 +98,10 @@ it — that's expected, not a bug.
 
 **Step 1 — build the reference payer.** This clones and builds `br-payer`
 from pinned upstream source; there's no published image to pull.
+The clone is kept in `/tmp/br-payer` (set `BRPAYER_CLONE_DIR` to keep it
+elsewhere). If your system's `/tmp` cleanup has emptied or pruned it, the
+script moves it aside to `/tmp/br-payer.broken-<time>-<pid>-<n>` and clones
+again; delete that directory once no build is using it.
 
 ```sh
 bash ../brpayer/build.sh build

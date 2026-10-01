@@ -50,9 +50,18 @@ type prefetchSoR struct {
 	noSearch
 	reads    map[string][]byte
 	searches map[string]searchAnswer
-	search   bool   // false: the connector cannot search
-	sorID    string // the system's id for prefetchMember, when not prefetchSoRID
-	refErr   error  // what naming prefetchMember fails with, when set
+	// byQuery answers one exact search (SoRSearchQuery) ahead of searches, as
+	// a server applying the query's status filter would.
+	byQuery map[string]searchAnswer
+	search  bool   // false: the connector cannot search
+	sorID   string // the system's id for prefetchMember, when not prefetchSoRID
+	refErr  error  // what naming prefetchMember fails with, when set
+	// readErrs is what reading a reference fails with
+	// (ResolveByReferenceContext), by reference; the read is still recorded.
+	readErrs map[string]error
+	// fhirBase is the system's FHIR base (SystemOfRecordFHIRBase); "" names
+	// none.
+	fhirBase string
 
 	mu       sync.Mutex
 	searched []string
@@ -67,6 +76,7 @@ func newPrefetchSoR() *prefetchSoR {
 			"Patient/" + prefetchSoRID: []byte("{ \"resourceType\" : \"Patient\",\n  \"id\" : \"" + prefetchSoRID + "\",\n  \"name\" : [ { \"family\" : \"Test\" } ], \"birthDate\" : \"1960-01-01\" }"),
 		},
 		searches: map[string]searchAnswer{},
+		byQuery:  map[string]searchAnswer{},
 		search:   true,
 	}
 }
@@ -129,9 +139,14 @@ func (s *prefetchSoR) ResolveByReferenceContext(_ context.Context, ref string) (
 	s.mu.Lock()
 	s.read = append(s.read, ref)
 	s.mu.Unlock()
+	if err := s.readErrs[ref]; err != nil {
+		return nil, false, err
+	}
 	b, ok := s.reads[ref]
 	return b, ok, nil
 }
+
+func (s *prefetchSoR) FHIRBase() string { return s.fhirBase }
 
 // noSearch has a search method at the census's depth, so neither is promoted.
 type noSearch struct{}
@@ -143,10 +158,19 @@ func (noSearch) SearchPatientContext(context.Context, string, string, ...SearchD
 // searchingPrefetchSoR is prefetchSoR with the optional search.
 type searchingPrefetchSoR struct{ *prefetchSoR }
 
-func (s searchingPrefetchSoR) SearchPatientContext(_ context.Context, resourceType, id string, _ ...SearchDateRange) (SearchResult, error) {
+// SearchPatientContext records the query a connector would send for the
+// search (SoRSearchQuery), and answers with the scripted result.
+func (s searchingPrefetchSoR) SearchPatientContext(_ context.Context, resourceType, id string, dates ...SearchDateRange) (SearchResult, error) {
+	q, err := SoRSearchQuery(resourceType, id, dates...)
+	if err != nil {
+		return SearchResult{}, err
+	}
 	s.mu.Lock()
-	s.searched = append(s.searched, resourceType+"?patient=Patient/"+id)
+	s.searched = append(s.searched, q)
 	s.mu.Unlock()
+	if a, ok := s.byQuery[q]; ok {
+		return a.res, a.err
+	}
 	if a, ok := s.searches[resourceType]; ok {
 		return a.res, a.err
 	}
@@ -173,6 +197,13 @@ func (s *prefetchSoR) calls() (searched, read []string) {
 func (s *prefetchSoR) answer(t *testing.T, resourceType string, pages ...[]byte) {
 	t.Helper()
 	s.searches[resourceType] = searchAnswer{res: resultOf(t, resourceType, pages...)}
+}
+
+// answerQuery scripts the one search query (as SoRSearchQuery writes it) of
+// resourceType with pages.
+func (s *prefetchSoR) answerQuery(t *testing.T, query, resourceType string, pages ...[]byte) {
+	t.Helper()
+	s.byQuery[query] = searchAnswer{res: resultOf(t, resourceType, pages...)}
 }
 
 // sorCoverage is a Coverage for the system of record's patient, in the
@@ -397,7 +428,7 @@ func TestPrefetch_MissingPatientReadFromSoR(t *testing.T) {
 	t.Run("member unknown to the system of record", func(t *testing.T) {
 		g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
 		_, status, msg := g.ingressEnsureSelfContainedContext(context.Background(), "crd-order-select", []byte(`{"hook":"order-select","context":{"patientId":"MBR-UNKNOWN"},"prefetch":{}}`), "MBR-UNKNOWN")
-		if status != http.StatusUnprocessableEntity || msg != "patient not found in system of record" {
+		if status != http.StatusPreconditionFailed || msg != crdNoCoverageToRouteBy {
 			t.Fatalf("got %d %s", status, msg)
 		}
 	})
@@ -450,7 +481,7 @@ func TestPrefetch_MissingCoverageSearchsetFromSoR(t *testing.T) {
 		if !p.coverageFromSoR {
 			t.Fatal("coverage not marked as read from the system of record")
 		}
-		if searched, _ := s.calls(); !slices.Contains(searched, "Coverage?patient=Patient/"+prefetchSoRID) {
+		if searched, _ := s.calls(); !slices.Contains(searched, "Coverage?patient=Patient%2F"+prefetchSoRID+"&status=active&_include=Coverage%3Apayor") {
 			t.Fatalf("searches = %v", searched)
 		}
 	})
@@ -511,11 +542,11 @@ func TestPrefetch_NoCoverage422(t *testing.T) {
 		t.Fatalf("coverage = %q, want null for no match", v)
 	}
 	env, rec := ingressRow(t, s, ehrRequest(patientOnly))
-	refusedBeforeTheNetwork(t, env, rec, http.StatusUnprocessableEntity, "no coverage in request or system of record")
+	refusedBeforeTheNetwork(t, env, rec, http.StatusPreconditionFailed, "no coverage in request or system of record")
 
 	t.Run("the EHR's own null", func(t *testing.T) {
 		env, rec := ingressRow(t, newPrefetchSoR(), ehrRequest(patientOnly+`,"coverage":null`))
-		refusedBeforeTheNetwork(t, env, rec, http.StatusUnprocessableEntity, "no coverage in request or system of record")
+		refusedBeforeTheNetwork(t, env, rec, http.StatusPreconditionFailed, "no coverage in request or system of record")
 	})
 }
 
@@ -606,8 +637,10 @@ func TestPrefetch_HistoryZeroMatchesInsertsNull(t *testing.T) {
 	}
 	searched, _ := s.calls()
 	wantSearched := []string{
-		"ServiceRequest?patient=Patient/example", "DeviceRequest?patient=Patient/example",
-		"MedicationRequest?patient=Patient/example", "QuestionnaireResponse?patient=Patient/example",
+		"ServiceRequest?patient=Patient%2Fexample&status=active,completed",
+		"DeviceRequest?patient=Patient%2Fexample&status=active,on-hold,completed&_include=DeviceRequest%3Aperformer",
+		"MedicationRequest?patient=Patient%2Fexample&status=active,completed",
+		"QuestionnaireResponse?patient=Patient%2Fexample&status=completed",
 	}
 	if !slices.Equal(searched, wantSearched) {
 		t.Fatalf("searched %v", searched)
@@ -840,10 +873,10 @@ func TestPrefetchProvenanceEmitted(t *testing.T) {
 	events := obs.prefetch(t)
 	want := map[string]prefetchObtained{
 		"patient":                {Query: "Patient/example", Outcome: SearchOK, Count: 1},
-		"serviceHistory":         {Query: "ServiceRequest?patient=Patient%2Fexample", Outcome: SearchOK, Count: 1, Pages: 1},
-		"deviceHistory":          {Query: "DeviceRequest?patient=Patient%2Fexample&_include=DeviceRequest%3Aperformer", Outcome: SearchZero, Pages: 1},
-		"medicationHistory":      {Query: "MedicationRequest?patient=Patient%2Fexample", Outcome: SearchZero, Pages: 1},
-		"questionnaireResponses": {Query: "QuestionnaireResponse?patient=Patient%2Fexample", Outcome: SearchZero, Pages: 1},
+		"serviceHistory":         {Query: "ServiceRequest?patient=Patient%2Fexample&status=active,completed", Outcome: SearchOK, Count: 1, Pages: 1},
+		"deviceHistory":          {Query: "DeviceRequest?patient=Patient%2Fexample&status=active,on-hold,completed&_include=DeviceRequest%3Aperformer", Outcome: SearchZero, Pages: 1},
+		"medicationHistory":      {Query: "MedicationRequest?patient=Patient%2Fexample&status=active,completed", Outcome: SearchZero, Pages: 1},
+		"questionnaireResponses": {Query: "QuestionnaireResponse?patient=Patient%2Fexample&status=completed", Outcome: SearchZero, Pages: 1},
 	}
 	if len(events) != len(want) {
 		t.Fatalf("events for %d keys, want %d: %+v", len(events), len(want), events)
@@ -872,6 +905,9 @@ func TestPrefetchProvenanceEmitted(t *testing.T) {
 	// enrichment.
 	t.Run("questionnaire-package coverage", func(t *testing.T) {
 		body := ehrParams(ehrOrderParam("sr1", prefetchMember), dtrQuestionnaire)
+		// Read only to route by: every Coverage, with its payor (the enriched
+		// read, the coverage template's search, is pinned in
+		// ingress_dtr_relay_test.go).
 		query := "Coverage?patient=Patient%2Fexample&_include=Coverage%3Apayor"
 		for _, row := range []struct {
 			name   string
@@ -1100,7 +1136,9 @@ func TestPrefetch_KeptValuesFencedBeforeAnySearch(t *testing.T) {
 // An obtained coverage carries the payor Organization the search included,
 // as an included record: the payer resolves the Coverage's payor from the
 // request (the provider's gateway does not read it again either), and no
-// address of the system of record is sent.
+// address of the system of record is sent. The search is narrowed as the
+// advertised template is (status=active) but, unlike the template, keeps its
+// include: the payer cannot fetch the payor itself once fhirServer is removed.
 func TestPrefetch_ObtainedCoverageCarriesIncludedPayor(t *testing.T) {
 	cov := "{ \"resourceType\" : \"Coverage\", \"id\" : \"cov-9\", \"status\" : \"active\",\n  \"beneficiary\" : { \"reference\" : \"Patient/" + prefetchSoRID + "\" },\n  \"payor\" : [ { \"reference\" : \"Organization/pay-9\" } ] }"
 	org := "{ \"resourceType\" : \"Organization\", \"id\" : \"pay-9\",\n  \"identifier\" : [ { \"system\" : \"" + shnsdk.CMSPayerIdentity.System + "\", \"value\" : \"00001\" } ] }"
@@ -1122,8 +1160,31 @@ func TestPrefetch_ObtainedCoverageCarriesIncludedPayor(t *testing.T) {
 		if !strings.Contains(v, org+`,"search":{"mode":"include"}`) || strings.Contains(v, "sor.example") {
 			t.Fatalf("coverage = %s: want the payor Organization exactly, as an included record, and no system of record address", v)
 		}
-		if _, read := s.calls(); slices.Contains(read, "Organization/pay-9") {
+		searched, read := s.calls()
+		if slices.Contains(read, "Organization/pay-9") {
 			t.Fatalf("the payor was read again from the system of record: %v", read)
+		}
+		if want := "Coverage?patient=Patient%2F" + prefetchSoRID + "&status=active&_include=Coverage%3Apayor"; !slices.Contains(searched, want) {
+			t.Fatalf("searches = %v, want the coverage template's filter with the payor include: %s", searched, want)
+		}
+	})
+	t.Run("an obtained device history carries the performer it included", func(t *testing.T) {
+		order := "{ \"resourceType\" : \"DeviceRequest\", \"id\" : \"dr-9\", \"status\" : \"on-hold\", \"intent\" : \"order\",\n  \"codeCodeableConcept\" : { \"text\" : \"oxygen\" },\n  \"subject\" : { \"reference\" : \"Patient/" + prefetchSoRID + "\" },\n  \"performer\" : { \"reference\" : \"Organization/sup-9\" } }"
+		supplier := "{ \"resourceType\" : \"Organization\", \"id\" : \"sup-9\", \"name\" : \"Supplier\" }"
+		s := newPrefetchSoR()
+		pg := page("", "", sorEntry(order), `{"fullUrl":"https://sor.example/fhir/Organization/sup-9","resource":`+supplier+`,"search":{"mode":"include"}}`)
+		s.answer(t, "DeviceRequest", pg)
+		env, rec := ingressRow(t, s, ehrRequest(supported))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("answer %d %s", rec.Code, rec.Body.String())
+		}
+		v, _ := valueOf(t, sentRequest(t, env), "prefetch", "deviceHistory")
+		if v != sorAssembly(t, "DeviceRequest", pg) || !strings.Contains(v, supplier+`,"search":{"mode":"include"}`) {
+			t.Fatalf("deviceHistory = %s: want the order and its performer exactly, as an included record", v)
+		}
+		want := "DeviceRequest?patient=Patient%2F" + prefetchSoRID + "&status=active,on-hold,completed&_include=DeviceRequest%3Aperformer"
+		if searched, _ := s.calls(); !slices.Contains(searched, want) {
+			t.Fatalf("searches = %v, want the device template's filter with the performer include: %s", searched, want)
 		}
 	})
 	t.Run("an included record about another patient is refused", func(t *testing.T) {
@@ -1183,10 +1244,18 @@ func TestPrefetch_PayorResolvedFromEveryValue(t *testing.T) {
 			}
 		})
 	}
+	// No value names it, the system of record (which names the patient by
+	// context.patientId) holds no such Organization, and the request names
+	// no fhirServer to read it on: refused, naming the remedy.
 	t.Run("no value names the payor", func(t *testing.T) {
 		body := ehrRequest(patientOnly + `,"coverage":` + cov + `,"serviceHistory":null,"deviceHistory":null,"medicationHistory":null,"questionnaireResponses":null`)
-		env, rec := ingressRow(t, newPrefetchSoR(), body)
-		refusedBeforeTheNetwork(t, env, rec, http.StatusUnprocessableEntity, "no payer identifier on member coverage")
+		body = bytes.Replace(body, []byte(`"fhirServer" : "https://ehr.example/fhir",`), nil, 1)
+		s := newPrefetchSoR()
+		env, rec := ingressRow(t, s, body)
+		refusedBeforeTheNetwork(t, env, rec, http.StatusUnprocessableEntity, noPayerSendPayor)
+		if _, read := s.calls(); !slices.Equal(read, []string{"Organization/pay-1"}) {
+			t.Fatalf("read %v, want the payor looked up in the system of record", read)
+		}
 	})
 }
 
@@ -1262,4 +1331,21 @@ func TestPrefetch_HeldButUnnamedMemberRefused(t *testing.T) {
 			refusedBeforeTheNetwork(t, env, rec, http.StatusUnprocessableEntity, "patient not found in system of record")
 		})
 	}
+	// Without enrichment, and without the coverage, there is nothing to route by:
+	// the refusal says so for a held member the system cannot name, as for one it
+	// does not hold, and nothing is read. (This connector cannot search; the rows
+	// for a member not held pin that nothing is searched. The fhirServer read is
+	// off here: fhirserver_read_test.go pins it.)
+	t.Run("coverage absent, by default", func(t *testing.T) {
+		s := newPrefetchSoR()
+		env := newInProcessExchange(t)
+		env.originator.cfg.SoR = unnamedMemberSoR{s}
+		env.originator.cfg.FHIRServerRead = FHIRServerReadOff
+		rec := httptest.NewRecorder()
+		env.originator.handleCRDIngress(rec, crdIngressPost(ehrRequest(patientOnly)))
+		refusedBeforeTheNetwork(t, env, rec, http.StatusPreconditionFailed, crdNoCoverageReadOff)
+		if _, read := s.calls(); len(read) != 0 {
+			t.Fatalf("read %v", read)
+		}
+	})
 }

@@ -260,7 +260,8 @@ const (
 	// A call past the payer gateway's deadline for its own system.
 	errUpstreamTimedOut         = "the payer's system received this request but did not answer in time; it may have acted on it: check its outcome before resending"
 	errUpstreamNotReachedInTime = "the payer's system could not be reached in time"
-	// The gateway's own work before the call used its deadline: nothing was
-	// sent to the payer's system.
+	// The gateway's own work before the call used its deadline: the operation
+	// was not sent to the payer's system (a read that ran first, such as the
+	// CDS service listing, may have reached it).
 	errDeadlineSpent = "the payer's gateway ran out of time before it could send this request to the payer's system; the payer's system did not receive it"
 )

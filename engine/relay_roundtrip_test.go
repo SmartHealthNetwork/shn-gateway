@@ -65,6 +65,14 @@ type relaySubstrate struct {
 	// leg (e.g. its authz token) without hand-rolling the seal/encode machinery
 	// itself. nil by default: additive, existing tests are unaffected.
 	mutateResp func([]byte) []byte
+
+	// authorizeFaults, if set, answers the next /authorize calls in order: one
+	// entry per call, consumed as it is used; a nil entry, an entry answering
+	// (nil, nil), or none left is the ordinary signed token. authorizeHits
+	// counts every /authorize call. Both are additive: nil by default,
+	// existing tests are unaffected.
+	authorizeFaults []func(*http.Request) (*http.Response, error)
+	authorizeHits   int
 }
 
 // setResult configures what the NEXT (and subsequent, until changed) /route
@@ -81,6 +89,18 @@ func (s *relaySubstrate) RoundTrip(req *http.Request) (*http.Response, error) {
 	body, _ := io.ReadAll(req.Body)
 	switch {
 	case strings.HasSuffix(path, "/authorize"):
+		s.mu.Lock()
+		s.authorizeHits++
+		var fault func(*http.Request) (*http.Response, error)
+		if len(s.authorizeFaults) > 0 {
+			fault, s.authorizeFaults = s.authorizeFaults[0], s.authorizeFaults[1:]
+		}
+		s.mu.Unlock()
+		if fault != nil {
+			if resp, err := fault(req); resp != nil || err != nil {
+				return resp, err
+			}
+		}
 		return s.handleAuthorize(body)
 	case strings.HasSuffix(path, "/route"):
 		return s.handleRoute(body)

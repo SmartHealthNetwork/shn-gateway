@@ -7,7 +7,6 @@ package engine
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -20,56 +19,12 @@ import (
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
-// resolverFromResources builds a resolveRef that matches "<Type>/<id>" against a flat list of FHIR
-// resource JSON blobs (a Bundle's entry.resource, a CDS Hooks prefetch value, or a Parameters
-// parameter.resource). It is the shared core of the inbound-payload payor resolvers: an EXTERNAL
-// Coverage.payor Organization a conformant partner references lives among THESE resources, not in the
-// provider SoR — resolving it here (not via SoR) is the Finding-1 fix. refs are unique (Type/id), so
-// the first match is deterministic regardless of the source's iteration order.
-func resolverFromResources(resources [][]byte) func(ref string) ([]byte, bool) {
-	return func(ref string) ([]byte, bool) {
-		for _, res := range resources {
-			var rt struct {
-				ResourceType string `json:"resourceType"`
-				ID           string `json:"id"`
-			}
-			if decodeMessage(res, &rt) != nil || rt.ResourceType == "" || rt.ID == "" {
-				continue
-			}
-			if rt.ResourceType+"/"+rt.ID == ref {
-				return res, true
-			}
-		}
-		return nil, false
-	}
-}
-
-// bundleRefResolver resolves "<Type>/<id>" against the entries of an inbound FHIR Bundle (payor
-// Organizations et al. live IN the partner's bundle, not the provider SoR). Used by the PAS ingress.
-func bundleRefResolver(bundleJSON []byte) func(ref string) ([]byte, bool) {
-	var b struct {
-		Entry []struct {
-			Resource json.RawMessage `json:"resource"`
-		} `json:"entry"`
-	}
-	if err := decodeMessage(bundleJSON, &b); err != nil {
-		return func(string) ([]byte, bool) { return nil, false }
-	}
-	resources := make([][]byte, 0, len(b.Entry))
-	for _, e := range b.Entry {
-		if len(e.Resource) > 0 {
-			resources = append(resources, e.Resource)
-		}
-	}
-	return resolverFromResources(resources)
-}
-
-// prefetchResources flattens a CDS Hooks request's prefetch values into a
-// resource list — an external payor Organization arrives as another prefetch
-// value (a resource, or an entry of a Bundle value), so the CRD ingress
-// resolves against it. Every value is read, whatever its key, in key order;
-// null values are skipped.
-func prefetchResources(prefetch map[string][]byte) [][]byte {
+// prefetchValues returns a CDS Hooks request's prefetch values in key order,
+// null values left out: an external payor Organization arrives as another
+// prefetch value (a resource, or an entry of a Bundle value), so the CRD
+// ingress resolves against them (carriedRefs). A request may carry the same
+// record under two keys.
+func prefetchValues(prefetch map[string][]byte) [][]byte {
 	keys := make([]string, 0, len(prefetch))
 	for k := range prefetch {
 		keys = append(keys, k)
@@ -82,20 +37,6 @@ func prefetchResources(prefetch map[string][]byte) [][]byte {
 			continue
 		}
 		out = append(out, v)
-		var b struct {
-			ResourceType string `json:"resourceType"`
-			Entry        []struct {
-				Resource json.RawMessage `json:"resource"`
-			} `json:"entry"`
-		}
-		if decodeMessage(v, &b) != nil || b.ResourceType != "Bundle" {
-			continue
-		}
-		for _, e := range b.Entry {
-			if len(e.Resource) > 0 {
-				out = append(out, e.Resource)
-			}
-		}
 	}
 	return out
 }
@@ -104,32 +45,68 @@ func prefetchResources(prefetch map[string][]byte) [][]byte {
 // carries (FR-G40; no default): a bare Coverage or a Bundle of Coverages that
 // name one payer. The payer's Organization is looked up among the request's
 // own prefetch values and, for a coverage read from the system of record, in
-// that system.
+// that system; for one read through the request's fhirServer, there (one
+// read, fhirServerPayor). For a coverage the EHR sent naming its payor by
+// reference alone (as the coverage template, which asks for no _include,
+// lets it), the Organization is read only to route (sentPayorResolver): a
+// payor nothing resolves is refused 422 with its reason and the remedy that
+// would resolve that reference (unresolvedPayor), a refused
+// fhirServer read of it with the read's status and reason under that
+// coverage's prefix (sentPayorRefusal), and a failed system-of-record read
+// with the system-of-record failure status.
 func (g *Gateway) crdIngressRecipient(ctx context.Context, prepared crdIngressRequest) (string, int, string) {
 	coverage, carried := prepared.values["coverage"]
 	switch {
 	case !carried && prepared.coverageStatus != 0:
 		return "", prepared.coverageStatus, prepared.coverageMsg
 	case !carried || string(bytes.TrimSpace(coverage)) == "null":
-		return "", http.StatusUnprocessableEntity, "no coverage in request or system of record"
+		// CDS Hooks' 412: the service could not obtain the data the request
+		// left out (a null coverage prefetch, or none the system holds).
+		return "", http.StatusPreconditionFailed, "no coverage in request or system of record"
 	}
-	local := resolverFromResources(prefetchResources(prepared.values))
-	resolve := local
-	readErr := new(error)
+	// The payor is resolved among the prefetch values first (a coverage the
+	// system of record supplied among them, with the records its search
+	// included), by fullUrl or Type/id; matches that do not name one payer
+	// are refused, never picked (bundleref.go).
+	refs := &payorRefs{local: carriedRefs(prefetchValues(prepared.values)), disagree: payorDisagreesInRequest}
 	if prepared.coverageFromSoR {
-		var fromSoR func(string) ([]byte, bool)
-		fromSoR, readErr = sorReferenceCallback(ctx, g.cfg.SoR)
-		resolve = func(ref string) ([]byte, bool) {
-			if b, ok := local(ref); ok {
-				return b, true
-			}
-			return fromSoR(ref)
-		}
+		refs.disagree = payorDisagreesWithSearch
 	}
-	recipient, _, status, msg := g.recipientForWith(coverage, resolve)
+	readErr := new(error)
+	fhirStatus, fhirMsg := new(int), new(string)
+	if prepared.fhirServer != nil {
+		// A payor the read through fhirServer did not resolve is read there
+		// once more: the only other place that coverage's references live.
+		refs.next, fhirStatus, fhirMsg = g.fhirServerPayor(ctx, prepared.fhirServer)
+	}
+	if prepared.coverageFromSoR {
+		refs.next, readErr = sorReferenceCallback(ctx, g.cfg.SoR)
+	}
+	sent := !prepared.coverageFromSoR && prepared.fhirServer == nil
+	unresolved := new(unresolvedPayor)
+	if sent {
+		// A coverage the EHR sent: a payor reference the request's own
+		// resources do not answer is read only to route (sentPayorResolver).
+		refs.next, unresolved, fhirStatus, fhirMsg, readErr = g.sentPayorResolver(ctx, prepared.sentPayor)
+	}
+	recipient, status, msg := g.recipientForCoverages(coverageResources(coverage), refs)
 	if *readErr != nil {
 		status, msg := SoRFailureResponse(*readErr)
 		return "", status, msg
+	}
+	if *fhirStatus != 0 {
+		if sent {
+			// The request carried a coverage: its refusal is that coverage's
+			// (no payer identifier), with the read's reason and status.
+			return "", *fhirStatus, sentPayorRefusal(*fhirMsg)
+		}
+		return "", *fhirStatus, *fhirMsg
+	}
+	if sent && msg == noPayerIdentifier {
+		// An Organization reference nothing resolved names the remedy that
+		// resolves it (unresolvedPayor); a resolved Organization with no
+		// payer identifier, or another kind of payor, keeps the bare text.
+		return "", status, unresolved.refusal(msg)
 	}
 	return recipient, status, msg
 }
@@ -225,6 +202,10 @@ func (g *Gateway) handleCRDIngress(w http.ResponseWriter, r *http.Request) {
 	// prefetch values it left out, from this participant's own system of record.
 	prepared, status, msg := g.ingressEnsureSelfContainedContext(r.Context(), legType, body, member)
 	if status != 0 {
+		if status == http.StatusPreconditionFailed {
+			// No coverage to route by could be obtained: a routing refusal.
+			exchangeOf(r.Context()).routed(status)
+		}
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
@@ -476,9 +457,9 @@ func (g *Gateway) handlePASIngress(w http.ResponseWriter, r *http.Request) {
 	// subject-bind above so a subject-divergent bundle still 403s before routing.
 	// Resolve an EXTERNAL Coverage.payor Organization against the inbound bundle's OWN entries
 	// (Finding 1): a conformant $submit carries the payor Org as a sibling bundle entry (br-payer's
-	// findInBundle form), NOT in the provider SoR. Contained / inline payor forms still route without
-	// hitting resolveRef.
-	recipient, _, status, msg := g.recipientForWith(pasBundleCoverage(body), bundleRefResolver(body))
+	// findInBundle form), NOT in the provider SoR; bundleref.go says which entry a reference
+	// names. Contained / inline payor forms still route without hitting resolveRef.
+	recipient, _, status, msg := g.pasRecipient(body)
 	if status != 0 {
 		exchangeOf(r.Context()).routed(status)
 		writeJSON(w, status, map[string]string{"error": msg})

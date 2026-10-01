@@ -24,7 +24,12 @@ import (
 // decisionEOBID is the id a payer decision's EOB is filed under. Every leg that
 // writes a decision EOB, and the check that refuses a collision before the payer
 // is asked, reads it from here, so the check names exactly the id the write would.
-func decisionEOBID(corrID string) string { return "eob-" + corrID }
+func decisionEOBID(corrID string) string { return DecisionEOBID(corrID) }
+
+// DecisionEOBID is the id of the decision EOB a payer gateway files for the
+// authorization it knows by corrID. A ledger backend removes it when it no
+// longer states the decision the ledger keeps (PendEOBStale).
+func DecisionEOBID(corrID string) string { return "eob-" + corrID }
 
 // EOBOwnerLookup is an OPTIONAL Store capability: which patient an EOB id is
 // already filed for. A Store without it skips the pre-forward check, and its
@@ -36,13 +41,18 @@ type EOBOwnerLookup interface {
 }
 
 // PendCorrelationLookup is an OPTIONAL Store capability: whether an authorization
-// the payer has not yet decided is pended under a correlation id for a patient
-// other than the one named. That authorization's decision EOB will be filed under
-// the same id, so a second patient's decision under that correlation would leave
-// the first patient's later decision unrecordable.
+// in any state (pended, in progress or decided) is filed under a correlation id
+// for a patient other than the one named. That authorization's decision EOB is
+// (or will be) filed under the same id, so a second patient's decision under
+// that correlation would leave the first patient's decision unrecordable; an EOB
+// that is gone (never written, or removed when the outcome changed) does not
+// free the id.
 type PendCorrelationLookup interface {
 	// PendedForOtherSubject reports a subject PCI other than subjectPCI with an
-	// undecided (pended or in-progress) authorization under corrID. found=false
+	// authorization under corrID, in any state: pended, in progress, or decided.
+	// A decided one counts even when its decision EOB is gone (a decision with
+	// no product coding never had one, and one whose outcome changed without an
+	// EOB had it removed), so the correlation id stays its patient's. found=false
 	// when there is none; the error is reserved for a store failure.
 	PendedForOtherSubject(corrID, subjectPCI string) (otherPCI string, found bool, err error)
 }
@@ -66,7 +76,7 @@ const (
 // payer is asked, an exchange whose correlation id already names another
 // patient's authorization — an EOB filed for another patient under the id this
 // exchange's decision would be filed under, or another patient's authorization
-// still awaiting its decision under this correlation id. Status 0 is "not taken".
+// under this correlation id in any state. Status 0 is "not taken".
 //
 // A store that cannot answer is an outage and is treated as the submit leg treats
 // every other store failure: a 502 that is the gateway's own fault, and the

@@ -401,6 +401,68 @@ func TestBuildWiresEnrichmentOptInToGateway(t *testing.T) {
 	}
 }
 
+// TestBuildWiresFHIRServerReadToGateway proves CDS_FHIR_SERVER_READ reaches
+// the engine.Config build() hands to engine.New, that the private read is the
+// default, and that the boot log states the mode. Deleting the
+// "gwCfg.FHIRServerRead = cfg.FHIRServerRead" line, or the env read in
+// loadConfig, leaves the public and off rows red. That the engine honors the
+// mode is proven by the engine's fhirserver_read_test.go rows. A value outside
+// private/public/off, or a read set explicitly on a gateway without the CRD
+// ingress, refuses to boot.
+func TestBuildWiresFHIRServerReadToGateway(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		env       map[string]string
+		noIngress bool
+		want      string
+		wantErr   string
+		wantLog   string
+	}{
+		{name: "unset reads privately", wantLog: "CDS_FHIR_SERVER_READ=private (the default)"},
+		{name: "private", env: map[string]string{"CDS_FHIR_SERVER_READ": "private"}, want: "private", wantLog: "CDS_FHIR_SERVER_READ=private"},
+		{name: "public", env: map[string]string{"CDS_FHIR_SERVER_READ": "public"}, want: "public", wantLog: "CDS_FHIR_SERVER_READ=public"},
+		{name: "off never reads", env: map[string]string{"CDS_FHIR_SERVER_READ": "off"}, want: "off", wantLog: "CDS_FHIR_SERVER_READ=off"},
+		{name: "the retired any refuses to boot", env: map[string]string{"CDS_FHIR_SERVER_READ": "any"}, wantErr: "CDS_FHIR_SERVER_READ must be private, public or off"},
+		{name: "other value refuses to boot", env: map[string]string{"CDS_FHIR_SERVER_READ": "true"}, wantErr: "CDS_FHIR_SERVER_READ must be private, public or off"},
+		{name: "a case variant refuses to boot", env: map[string]string{"CDS_FHIR_SERVER_READ": "Public"}, wantErr: "CDS_FHIR_SERVER_READ must be private, public or off"},
+		{name: "without the ingress refuses to boot", env: map[string]string{"CDS_FHIR_SERVER_READ": "public"}, noIngress: true, wantErr: "CDS_FHIR_SERVER_READ=public needs PROVIDER_DAVINCI_INGRESS"},
+		{name: "unset without the ingress boots", noIngress: true},
+		{name: "off without the ingress boots", env: map[string]string{"CDS_FHIR_SERVER_READ": "off"}, noIngress: true, want: "off"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			extra := map[string]string{"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate"}
+			if !tc.noIngress {
+				extra["PROVIDER_DAVINCI_INGRESS"] = "1"
+				extra["PROVIDER_DAVINCI_INGRESS_BASE_URL"] = "https://gw.test"
+				extra["INGRESS_CLIENTS_FILE"] = writeClientsFile(t, testValidClientsJSON(t))
+			}
+			for k, v := range tc.env {
+				extra[k] = v
+			}
+			var output bytes.Buffer
+			previous := log.Writer()
+			log.SetOutput(&output)
+			defer log.SetOutput(previous)
+			b, _, err := buildProviderForPopulate(t, extra)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("build err = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("build: %v", err)
+			}
+			if got := b.fhirServerRead; got != tc.want {
+				t.Errorf("Gateway fhirServer read = %q, want %q", got, tc.want)
+			}
+			if tc.wantLog != "" && !strings.Contains(output.String(), tc.wantLog) {
+				t.Errorf("boot log missing %q: %s", tc.wantLog, output.String())
+			}
+		})
+	}
+}
+
 // TestBuildWiresConformanceEnforcementToNativeResponder proves build()'s
 // NativeOption list actually gives the native CRD responder the SAME
 // enforcement policy as the rest of the gateway (WithConformancePolicy,
@@ -853,8 +915,8 @@ func TestDemoEgressNativeLinesEnv(t *testing.T) {
 
 // SHN_DEMO_EDGE_CAPTURE: unset ⇒ false; "true" WITH OBSERVER_ADDR set ⇒
 // true; any other value ⇒ false — the ordinary loadConfig bool idiom
-// (`== "true"`), matching every other config bool (PayerDavinciPASNative et
-// al.); unlike SHN_FAKE_VALIDATOR (build()-only, "1"), this one is a
+// (`== "true"`), matching every other config bool (PayerDavinciStrictExtensions
+// et al.); unlike SHN_FAKE_VALIDATOR (build()-only, "1"), this one is a
 // loadConfig-literal field like the rest. "true" WITHOUT OBSERVER_ADDR
 // gates the EFFECTIVE field back to false — the capture store is only ever
 // readable through the observer loopback listener, so capturing with no

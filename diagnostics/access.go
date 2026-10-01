@@ -64,8 +64,14 @@ type AccessBackend struct {
 }
 
 // AccessFindings summarizes the conformance findings a call's checks recorded.
+// At observe the count is not carried: Deferred is true, Count is always 0 and
+// Kinds empty, and each finding is its own KindConformanceFinding event, keyed by
+// the leg's correlation id, because a check at observe does not hold the call and
+// a count taken when the call ends would be partial. Refused is still carried: a
+// check that refuses is judged before the answer at every level.
 type AccessFindings struct {
-	Count   int      `json:"count"`
-	Refused bool     `json:"refused"`
-	Kinds   []string `json:"kinds,omitempty"`
+	Count    int      `json:"count"`
+	Refused  bool     `json:"refused"`
+	Kinds    []string `json:"kinds,omitempty"`
+	Deferred bool     `json:"deferred,omitempty"`
 }

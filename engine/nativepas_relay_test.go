@@ -217,11 +217,25 @@ func TestNativeSubmit_PendRelayedForDeviceRequest(t *testing.T) {
 	if got := ledgerState(t, store, "PCI-1", "corr-dme").State; got != PendStatePended {
 		t.Fatalf("ledger state = %q, want pended", got)
 	}
+	wantRecordedKeys(t, store, "urn:payer:response|resp-cr-dme", "urn:payer:trace|trace-dme", "corr-dme")
+}
+
+// wantRecordedKeys asserts the authorization is found by the payer's own
+// ClaimResponse identifier, and that it holds the trace number the payer echoed:
+// the same strong key with that trace number is found, and with another trace
+// number disagrees, which it could only do if a trace number was recorded.
+func wantRecordedKeys(t *testing.T, store Store, claimResponseID, trace, corr string) {
+	t.Helper()
 	ledger, _ := LedgerOf(store)
-	_, corr, found, ambiguous, lerr := ledger.LookupPended(relayRequester, PendKeys{
-		RequesterHolder: relayRequester, PreAuthRef: "", ItemTraceNumbers: []string{"urn:payer:trace|trace-dme"}})
-	if lerr != nil || ambiguous || !found || corr != "corr-dme" {
-		t.Fatalf("the pend is not findable by the trace number the payer echoed (found=%v ambiguous=%v corr=%q err=%v)", found, ambiguous, corr, lerr)
+	m, err := ledger.LookupPended(relayRequester, PendKeys{
+		RequesterHolder: relayRequester, ClaimResponseIDs: []string{claimResponseID}, ItemTraceNumbers: []string{trace}}, nil)
+	if err != nil || m.Verdict != PendMatchFound || m.CorrelationID != corr {
+		t.Fatalf("the pend is not found by the payer's identifiers (%+v err=%v), want %s", m, err, corr)
+	}
+	m, err = ledger.LookupPended(relayRequester, PendKeys{
+		RequesterHolder: relayRequester, ClaimResponseIDs: []string{claimResponseID}, ItemTraceNumbers: []string{"urn:payer:trace|another"}}, nil)
+	if err != nil || m.Verdict != PendMatchDisagrees || m.Kind != PendKeyItemTraceNumber {
+		t.Fatalf("the echoed trace number was not recorded: another trace number = %+v err=%v, want disagrees on %s", m, err, PendKeyItemTraceNumber)
 	}
 }
 
@@ -413,12 +427,8 @@ func TestNativeUpdate_RePendRelayedAndReleased(t *testing.T) {
 	if got := ledgerState(t, store, pci, origCorr).State; got != PendStatePended {
 		t.Fatalf("ledger state after a re-pend = %q, want pended", got)
 	}
-	ledger, _ := LedgerOf(store)
-	_, corr, found, _, lerr := ledger.LookupPended(relayRequester, PendKeys{
-		RequesterHolder: relayRequester, ItemTraceNumbers: []string{"urn:payer:trace|trace-rp"}})
-	if lerr != nil || !found || corr != origCorr {
-		t.Fatalf("the re-pend's own identifiers were not added to the authorization (found=%v corr=%q err=%v)", found, corr, lerr)
-	}
+	// The re-pend's own identifiers were added to the authorization.
+	wantRecordedKeys(t, store, "urn:payer:response|resp-cr-rp", "urn:payer:trace|trace-rp", origCorr)
 }
 
 // TestNativeUpdate_CarryForwardRePendRelayed: an amendment that asks for no
@@ -535,7 +545,7 @@ func TestNativeUpdate_DecidedClaimReachesThePayer(t *testing.T) {
 	answer := relayDecidedAnswer(t, "cr-decided", "trace-decided", "AUTH-DECIDED-2")
 	srv, payer := newRecordingPayer(t, stubAnswer{http.StatusOK, string(answer)})
 	n, ctx, store, bundle, pci, origCorr := updateRelayLeg(t, srv)
-	if _, err := store.RecordDecision(pci, origCorr, PendOutcomeApproved, payerCreated, nil); err != nil {
+	if _, err := store.RecordDecision(pci, origCorr, PendOutcomeApproved, payerCreated, PendKeys{}, nil); err != nil {
 		t.Fatalf("decide the claim: %v", err)
 	}
 	res, err := n.Handle(ctx, "pas-claim-update", "corr-decided", pci, bundle)

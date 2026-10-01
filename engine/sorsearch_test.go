@@ -537,8 +537,8 @@ func TestSoRSearch_ThroughObserver(t *testing.T) {
 // TestSoRSearchQuery_CoverageIncludesPayor: a Coverage search includes each
 // Coverage's payor Organization (a payer resolves the payor from the request
 // alone), a device search each order's performer (the supplier a dispatched
-// order names), and the advertised templates say so; other searches carry no
-// include.
+// order names); other searches carry no include. The advertised templates
+// carry none: an EHR is not asked for one (TestPrefetchSearchMatchesTemplate).
 func TestSoRSearchQuery_CoverageIncludesPayor(t *testing.T) {
 	q, err := SoRSearchQuery("Coverage", "p1")
 	if err != nil || q != "Coverage?patient=Patient%2Fp1&_include=Coverage%3Apayor" {
@@ -552,10 +552,48 @@ func TestSoRSearchQuery_CoverageIncludesPayor(t *testing.T) {
 			t.Fatalf("%s query %q", rt, q)
 		}
 	}
-	if got := prefetchTemplate("coverage"); got != "Coverage?patient=Patient/{{context.patientId}}&_include=Coverage:payor" {
-		t.Fatalf("coverage template %q", got)
+	for _, key := range []string{"coverage", "deviceHistory"} {
+		if got := prefetchTemplate(key); strings.Contains(got, "_include") {
+			t.Fatalf("%s template %q asks an EHR for an include", key, got)
+		}
 	}
-	if got := prefetchTemplate("deviceHistory"); got != "DeviceRequest?patient=Patient/{{context.patientId}}&_include=DeviceRequest:performer" {
-		t.Fatalf("device template %q", got)
+}
+
+// A token narrowing is sent as one comma-separated list (any of the codes),
+// after the patient and any date range and before the include; a narrowing
+// that is not a search parameter with codes only, or a code a query or token
+// list gives a meaning to, is refused before anything is sent.
+func TestSoRSearchQuery_TokenNarrowing(t *testing.T) {
+	for _, row := range []struct {
+		rt    string
+		dates []SearchDateRange
+		want  string
+	}{
+		{"Coverage", []SearchDateRange{{Param: "status", AnyOf: []string{"active"}}}, "Coverage?patient=Patient%2Fp1&status=active&_include=Coverage%3Apayor"},
+		{"DeviceRequest", []SearchDateRange{{Param: "status", AnyOf: []string{"active", "on-hold", "completed"}}}, "DeviceRequest?patient=Patient%2Fp1&status=active,on-hold,completed&_include=DeviceRequest%3Aperformer"},
+		{"ServiceRequest", []SearchDateRange{{Param: "status", AnyOf: []string{"active", "completed"}}, {Param: "authored", From: "2024-01-01"}}, "ServiceRequest?authored=ge2024-01-01&patient=Patient%2Fp1&status=active,completed"},
+	} {
+		if got, err := SoRSearchQuery(row.rt, "p1", row.dates...); err != nil || got != row.want {
+			t.Errorf("%s %+v: %q %v, want %q", row.rt, row.dates, got, err, row.want)
+		}
+	}
+	for _, bad := range []SearchDateRange{
+		{Param: "status", AnyOf: []string{"active,cancelled"}},
+		{Param: "status", AnyOf: []string{"active&_include=*"}},
+		{Param: "status", AnyOf: []string{"active|x"}},
+		{Param: "status", AnyOf: []string{`active\,x`}},
+		{Param: "status", AnyOf: []string{""}},
+		{Param: "status", AnyOf: []string{"-active"}},
+		{Param: "status", AnyOf: []string{"active"}, From: "2024"},
+		{Param: "status", AnyOf: []string{"active"}, To: "2024"},
+		{Param: "patient", AnyOf: []string{"p2"}},
+		{Param: "_include", AnyOf: []string{"Coverage"}},
+		{Param: "", AnyOf: []string{"active"}},
+	} {
+		if q, err := SoRSearchQuery("Coverage", "p1", bad); err == nil {
+			t.Errorf("narrowing %+v accepted: %q", bad, q)
+		} else if se := (*SearchError)(nil); !errors.As(err, &se) || se.Outcome != SearchMalformed {
+			t.Errorf("narrowing %+v: %v, want malformed", bad, err)
+		}
 	}
 }

@@ -197,7 +197,7 @@ func (n *nativeResponder) handlePASClaimUpdateNative(ctx context.Context, corrID
 	// the payer dated. No EOB on the update leg. Rollback stays armed so a
 	// post-Begin response-leg failure still releases.
 	if recordable {
-		answer.Commit = recordPASDecision(ctx, n.store, subjectPCI, related, pendOutcomeOf(parsed.Outcome), created, nil)
+		answer.Commit = recordPASDecision(ctx, n.store, subjectPCI, related, pendOutcomeOf(parsed.Outcome), created, decisionKeys(requester, answerKeys, requestFHIR, parsed.PreAuthRef), nil)
 	}
 	return answer, nil
 }
@@ -378,7 +378,7 @@ func (n *nativeResponder) handlePASClaimNative(ctx context.Context, corrID, subj
 	if cpt == "" {
 		// No recognized {CPT,HCPCS} product coding → no EOB side-effect (soft — the
 		// decision is still recorded, and nothing is invented to carry it).
-		answer.Commit = recordPASDecision(ctx, n.store, subjectPCI, corrID, outcome, created, nil)
+		answer.Commit = recordPASDecision(ctx, n.store, subjectPCI, corrID, outcome, created, decisionKeys(requester, answerKeys, requestFHIR, parsed.PreAuthRef), nil)
 		return answer, nil
 	}
 	eobJSON, err := n.projectDecisionEOB(corrID, "Patient/"+s.member, procSystem, cpt, cptDisplay, parsed)
@@ -396,7 +396,7 @@ func (n *nativeResponder) handlePASClaimNative(ctx context.Context, corrID, subj
 	}
 	eob := &EOBRecord{SubjectPCI: subjectPCI, EOBID: decisionEOBID(corrID), JSON: eobJSON}
 	answer.SideEffectFHIR = [][]byte{eobJSON}
-	answer.Commit = recordPASDecision(ctx, n.store, subjectPCI, corrID, outcome, created, eob)
+	answer.Commit = recordPASDecision(ctx, n.store, subjectPCI, corrID, outcome, created, decisionKeys(requester, answerKeys, requestFHIR, parsed.PreAuthRef), eob)
 	return answer, nil
 }
 

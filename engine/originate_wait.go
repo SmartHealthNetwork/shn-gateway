@@ -629,10 +629,16 @@ func (g *Gateway) inquiryRecords(ctx context.Context, cont Continuation) (shnsdk
 		return out, http.StatusBadGateway, "the system of record has no patient " + cont.SoRPatientID
 	}
 
-	// Through memberCoverage, the one reader of a member's Coverage: a member whose
-	// records name two payers is refused there rather than routed on whichever the
-	// system of record happened to list first.
-	coverage, hasCoverage, status, msg := g.memberCoverage(ctx, cont.MemberID)
+	// The Coverage the submission was built under: memberRoutingCoverage, the
+	// read every originated leg (CRD, DTR, PAS) names its coverage by. The
+	// active Coverages when any is active, so a stale cancelled coverage
+	// naming another payer neither makes the inquiry ambiguous nor, listed
+	// first, takes the place of the coverage the submission carried. Chosen
+	// records naming two payers are refused there rather than routed on
+	// whichever the system of record happened to list first. The continuation
+	// does not keep the submitted Coverage, so it is read again here, by the
+	// same rule.
+	coverage, hasCoverage, status, msg := g.memberRoutingCoverage(ctx, cont.MemberID)
 	if status != 0 {
 		return out, status, msg
 	}

@@ -172,11 +172,18 @@ const (
 	crdEmbeddedValidationTimeout = 5 * time.Second
 )
 
+// crdEmbedded is one resource a CRD answer embeds, and where.
+type crdEmbedded struct {
+	path     string
+	resource json.RawMessage
+}
+
 // observeCRDEmbedded validates each resource a CDS Hooks answer embeds (in a
 // system action, or in a card suggestion's action) at the served CRD line, and
 // records each outcome as a CRDEmbeddedValidatedEvent and a log line. Nothing
 // is refused: a payer's content that does not validate is the payer's to fix,
-// and the answer is relayed as it is.
+// and the answer is relayed as it is. At observe the answer does not wait for
+// it: the validation is queued with the gateway's other observe checks.
 func (g *Gateway) observeCRDEmbedded(ctx context.Context, leg, corr string, answer relay.Payload) {
 	if !g.policy().RunsKind(KindFHIREgress) {
 		return // none runs no conformance check, observational ones included
@@ -199,29 +206,39 @@ func (g *Gateway) observeCRDEmbedded(ctx context.Context, leg, corr string, answ
 	if decodeMessage(raw, &doc) != nil {
 		return
 	}
-	type embedded struct {
-		path     string
-		resource json.RawMessage
-	}
-	var found []embedded
+	var found []crdEmbedded
 	for i, a := range doc.SystemActions {
-		found = append(found, embedded{fmt.Sprintf("systemActions[%d].resource", i), a.Resource})
+		found = append(found, crdEmbedded{fmt.Sprintf("systemActions[%d].resource", i), a.Resource})
 	}
 	for i, c := range doc.Cards {
 		for j, s := range c.Suggestions {
 			for k, a := range s.Actions {
-				found = append(found, embedded{fmt.Sprintf("cards[%d].suggestions[%d].actions[%d].resource", i, j, k), a.Resource})
+				found = append(found, crdEmbedded{fmt.Sprintf("cards[%d].suggestions[%d].actions[%d].resource", i, j, k), a.Resource})
 			}
 		}
 	}
 	line := answerLineOr(ctx, "pa.crd")
 	validator := g.validatorForContractLine("pa.crd", line)
-	ctx, cancel := context.WithTimeout(ctx, crdEmbeddedValidationTimeout)
-	defer cancel()
 	if len(found) > crdEmbeddedValidationMax {
 		log.Printf("gateway: %s answer embeds %d resources; the first %d are validated", leg, len(found), crdEmbeddedValidationMax)
 		found = found[:crdEmbeddedValidationMax]
 	}
+	run := func(ctx context.Context) {
+		ctx, cancel := context.WithTimeout(ctx, crdEmbeddedValidationTimeout)
+		defer cancel()
+		g.validateCRDEmbedded(ctx, leg, corr, line, validator, found)
+	}
+	// It only records, so at observe the answer does not wait for it.
+	if g.policy().Level() == EnforcementObserve {
+		g.enqueueObserveCheck(observeCheck{run: run, binding: findingBindingFrom(ctx), tally: legTallyFrom(ctx)})
+		return
+	}
+	run(ctx)
+}
+
+// validateCRDEmbedded validates and records each embedded resource
+// observeCRDEmbedded found.
+func (g *Gateway) validateCRDEmbedded(ctx context.Context, leg, corr, line string, validator shnsdk.Validator, found []crdEmbedded) {
 	for _, e := range found {
 		if len(e.resource) == 0 || string(e.resource) == "null" {
 			continue

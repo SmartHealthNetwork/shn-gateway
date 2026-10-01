@@ -108,7 +108,12 @@ func (g *Gateway) originCRDRecords(ctx context.Context, leg, member string) (crd
 	if status != 0 {
 		return out, status, msg
 	}
-	coverage, outcome, status, msg := g.obtainPrefetch(ctx, leg, "coverage", sorID, fence)
+	// The coverage the request carries is the one it is routed by
+	// (memberRoutingCoverage's choice): every Coverage, the active ones when any
+	// is active, else the others. It is this gateway's own request, so the
+	// coverage template's status filter does not apply; every leg of the
+	// exchange names the same coverage.
+	coverage, outcome, status, msg := g.obtainRoutingCoverage(ctx, leg, sorID, fence)
 	switch {
 	case status != 0:
 		return out, status, msg
@@ -140,7 +145,7 @@ func (g *Gateway) originCRDRecords(ctx context.Context, leg, member string) (crd
 			continue
 		}
 		if out.renamed() {
-			query, _ := SoRSearchQuery(prefetchSearchTypes[key], sorID)
+			query := prefetchSearchQuery(key, sorID)
 			g.recordPrefetch(leg, prefetchObtained{Key: key, Query: query, Outcome: SearchNotRun, Reason: historyNamedDifferently})
 			continue
 		}

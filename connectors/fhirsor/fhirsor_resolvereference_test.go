@@ -53,3 +53,13 @@ func TestSoR_ResolveByReference_NotFound(t *testing.T) {
 		t.Fatalf("expected found=false for missing resource, got bytes: %s", raw)
 	}
 }
+
+// TestFHIRBase: the connector names the FHIR base it reads (the gateway
+// compares it with a CDS Hooks request's fhirServer to tell where a payor
+// reference's id belongs), with the trailing slash the client drops.
+func TestFHIRBase(t *testing.T) {
+	s := fhirsor.NewFromURL("https://sor.example/fhir/", nil)
+	if got := s.FHIRBase(); got != "https://sor.example/fhir" {
+		t.Fatalf("FHIRBase() = %q, want the configured base", got)
+	}
+}

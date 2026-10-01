@@ -41,8 +41,9 @@ func searchsetMatches(bundle []byte, resourceType string) ([][]byte, error) {
 
 // originatedPackageRequest builds the $questionnaire-package input the
 // gateway sends at DTR line for its own workflow:
-//   - every Coverage the system of record's search matched (recs, the patient
-//     named by the member id), each embedded byte for byte;
+//   - every Coverage the routing choice picked from the system of record's
+//     search (recs: the active ones, else all of them; the patient named by
+//     the member id), each embedded byte for byte;
 //   - order, the order as the payer returned it with its coverage information
 //     (or as sent when the payer returned none), embedded byte for byte;
 //   - the questionnaire canonical exactly as the payer stated it (a |version

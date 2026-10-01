@@ -658,7 +658,7 @@ func TestLevelPayerInquire_RequestContent(t *testing.T) {
 // payer's requester, so an inquiry answer read for the ledger decides it.
 func (p *levelPayer) seedInquiryPend(t *testing.T, corr string) {
 	t.Helper()
-	if _, err := p.store.RecordPendedKeyed(p.pci, corr, fixedClock(), PendKeys{RequesterHolder: p.requester.ID, ClaimResponseIDs: []string{inquiryCRKey}}); err != nil {
+	if _, err := p.store.RecordPendedKeyed(p.pci, corr, fixedClock(), PendKeys{RequesterHolder: p.requester.ID, ClaimResponseIDs: []string{inquiryCRKey}, ItemTraceNumbers: []string{inquiryTraceKey}}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -783,7 +783,8 @@ func TestLevelPayerInquire_AfterSkippedSubmit(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			p := newLevelPayer(t, tc.level)
 			p.partner.respByPath[pasSubmitPath] = tc.answer
-			submit := p.send(t, "pas-claim", "", originatorBuiltConformantBundle(t, "MBR-COVERED"))
+			submitted := originatorBuiltConformantBundle(t, "MBR-COVERED")
+			submit := p.send(t, "pas-claim", "", submitted)
 			if submit.status != http.StatusOK || !bytes.Equal(submit.body, tc.answer) {
 				t.Fatalf("submit answer %d %s", submit.status, submit.body)
 			}
@@ -791,7 +792,9 @@ func TestLevelPayerInquire_AfterSkippedSubmit(t *testing.T) {
 				t.Fatalf("submit skipped = %+v, want %v", p.skipped, tc.skipped)
 			}
 			p.partner.respByPath[pasInquirePath] = decided
-			inquiry := p.send(t, "pas-claim-inquire", "", inquiryBundle("MBR-COVERED", "", "TRN-1", "72148"))
+			// The inquiry asks about the claim just submitted, by that claim's own
+			// item trace number, as a requester's follow-up does.
+			inquiry := p.send(t, "pas-claim-inquire", "", inquiryAbout(t, submitted))
 			if inquiry.status != http.StatusOK || !bytes.Equal(inquiry.body, decided) {
 				t.Fatalf("the later inquiry must relay the payer's answer: %d %s", inquiry.status, inquiry.body)
 			}
@@ -812,4 +815,60 @@ func TestLevelPayerInquire_AfterSkippedSubmit(t *testing.T) {
 			}
 		})
 	}
+}
+
+// inquiryAbout is the fixture inquiry for MBR-COVERED, asking about the
+// submitted claim by its own item trace number.
+func inquiryAbout(t *testing.T, submitted []byte) []byte {
+	t.Helper()
+	return withSubmittedTrace(t, inquiryBundle("MBR-COVERED", "", "TRN-1", "72148"), submitted)
+}
+
+// withTrace replaces a fixture inquiry's "TRN-1" line trace number with
+// system|value.
+func withTrace(t *testing.T, inquiry []byte, system, value string) []byte {
+	t.Helper()
+	out := bytes.Replace(inquiry,
+		[]byte(`"system":"http://provider.example/trn","value":"TRN-1"`),
+		[]byte(`"system":"`+system+`","value":"`+value+`"`), 1)
+	if bytes.Contains(out, []byte(`"TRN-1"`)) {
+		t.Fatal("fixture: the inquiry's trace number was not replaced")
+	}
+	return out
+}
+
+// withSubmittedTrace replaces a fixture inquiry's "TRN-1" line trace number
+// with the submitted claim's own, so the inquiry asks about that claim.
+func withSubmittedTrace(t *testing.T, inquiry, submitted []byte) []byte {
+	t.Helper()
+	var b struct {
+		Entry []struct {
+			Resource struct {
+				ResourceType string `json:"resourceType"`
+				Item         []struct {
+					Extension []struct {
+						URL             string            `json:"url"`
+						ValueIdentifier map[string]string `json:"valueIdentifier"`
+					} `json:"extension"`
+				} `json:"item"`
+			} `json:"resource"`
+		} `json:"entry"`
+	}
+	if err := json.Unmarshal(submitted, &b); err != nil {
+		t.Fatalf("read the submission: %v", err)
+	}
+	for _, e := range b.Entry {
+		if e.Resource.ResourceType != "Claim" {
+			continue
+		}
+		for _, it := range e.Resource.Item {
+			for _, x := range it.Extension {
+				if x.URL == pasExtItemTraceNumberURL {
+					return withTrace(t, inquiry, x.ValueIdentifier["system"], x.ValueIdentifier["value"])
+				}
+			}
+		}
+	}
+	t.Fatal("fixture: the submission carries no item trace number")
+	return nil
 }

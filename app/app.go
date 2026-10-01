@@ -244,7 +244,10 @@ type config struct {
 	PayerDavinciScope        string
 	PayerDavinciClientKID    string
 	PayerDavinciClientSecret string // value, not a path (unlike *ClientKey)
-	PayerDavinciPASNative    bool
+	// PayerDavinciPASNativeSet is whether PAYER_DAVINCI_PAS_NATIVE is set at all:
+	// the key is no longer a switch, so its value changes nothing, and a gateway
+	// that sets it is told so at boot.
+	PayerDavinciPASNativeSet bool
 	// PayerDavinciCRDServiceID optionally names the partner's CDS service for the
 	// order-select leg (hooks order-select and order-sign). Empty ⇒ each request goes to
 	// the one service the partner's {CDS base}/cds-services listing offers for the
@@ -268,7 +271,7 @@ type config struct {
 	// (no Handle-filter consult, no behavior delta; see that field's
 	// comment in gateway/engine/native.go and g.strictPeer's comment in
 	// originate.go for why this flag has NO live routing effect anywhere
-	// today). PAS_NATIVE's bool-flag precedent.
+	// today).
 	PayerDavinciStrictExtensions bool
 
 	// PayerDavinciPayorOwnRaw / PayerDavinciPayorBackendRaw are the raw
@@ -357,6 +360,15 @@ type config struct {
 	// request is carried as sent. Set by ENRICH_NATIVE_REQUESTS ("true" or
 	// "false").
 	EnrichNativeRequests bool
+	// FHIRServerRead is how the gateway reads a CRD request's Coverage through
+	// the request's own fhirServer, only to route, when the request carries
+	// none and the system of record does not hold the member: "private" (the default, unset too: a
+	// server in the participant's own network or on the internet, never a
+	// loopback, link-local or metadata address), "public" (only a public
+	// server on 443, for a gateway whose network is not its participant's) or
+	// "off" (never). Set by CDS_FHIR_SERVER_READ; a value other than off needs
+	// PROVIDER_DAVINCI_INGRESS.
+	FHIRServerRead string
 	// acceptUnknownMembersAlias holds the deprecated SHN_ACCEPT_UNKNOWN_MEMBERS. Set,
 	// it asks for what is now the default, so it only warns; unless it reads "0"
 	// or "false", together with REQUIRE_KNOWN_MEMBERS=true it contradicts it, and
@@ -573,7 +585,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 		PayerDavinciScope:                 def("PAYER_DAVINCI_SCOPE", "system/*.read"),
 		PayerDavinciClientKID:             getenv("PAYER_DAVINCI_CLIENT_KID"),
 		PayerDavinciClientSecret:          getenv("PAYER_DAVINCI_CLIENT_SECRET"),
-		PayerDavinciPASNative:             getenv("PAYER_DAVINCI_PAS_NATIVE") == "true",
+		PayerDavinciPASNativeSet:          getenv("PAYER_DAVINCI_PAS_NATIVE") != "",
 		PayerDavinciCRDServiceID:          getenv("PAYER_DAVINCI_CRD_SERVICE_ID"),
 		PayerDavinciDispatchServiceID:     getenv("PAYER_DAVINCI_DISPATCH_SERVICE_ID"),
 		PayerDavinciContractVersions:      splitTrimmed(getenv("PAYER_DAVINCI_CONTRACT_VERSIONS")),
@@ -741,6 +753,18 @@ func loadConfig(getenv func(string) string) (config, error) {
 		cfg.EnrichNativeRequests = true
 	default:
 		return config{}, fmt.Errorf("gateway: ENRICH_NATIVE_REQUESTS must be true or false, got %q", raw)
+	}
+
+	// A CRD request's Coverage is read through its own fhirServer unless the
+	// participant turns the read off. Only the listed values are values.
+	if raw := getenv("CDS_FHIR_SERVER_READ"); raw != "" {
+		if !engine.ValidFHIRServerRead(raw) {
+			return config{}, fmt.Errorf("gateway: CDS_FHIR_SERVER_READ must be private, public or off, got %q", raw)
+		}
+		if raw != engine.FHIRServerReadOff && !cfg.ProviderDavinciIngress {
+			return config{}, fmt.Errorf("gateway: CDS_FHIR_SERVER_READ=%s needs PROVIDER_DAVINCI_INGRESS: the read serves only the provider's CRD ingress", raw)
+		}
+		cfg.FHIRServerRead = raw
 	}
 
 	if raw := getenv("CDS_ADVERTISE_HOOKS"); raw != "" {
@@ -1494,6 +1518,9 @@ type built struct {
 	// enrichNativeRequests is the enrichment opt-in exactly as build() handed it
 	// to engine.New, recorded for the same reason.
 	enrichNativeRequests bool
+	// fhirServerRead is the fhirServer read mode exactly as build() handed it
+	// to engine.New, recorded for the same reason.
+	fhirServerRead string
 
 	diagnostic *diagnosticSource
 	gateway    *engine.Gateway
@@ -1904,10 +1931,10 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		}
 		// PAS forwarding is no longer a switch: the split counterparty that used to keep the
 		// PAS pair on an in-process fallback is deleted (§3.2), so EVERY Da Vinci leg —
-		// PAS included — reaches PAYER_DAVINCI_BASE_URL. Say so loudly for a stack that
-		// still sets the old flag false, whose PAS legs just changed destination.
-		if !cfg.PayerDavinciPASNative {
-			fmt.Fprintln(stdout, "gateway: PAYER_DAVINCI_PAS_NATIVE is no longer a switch — every Da Vinci leg, PAS included, forwards to PAYER_DAVINCI_BASE_URL (the in-process payer is retired)")
+		// PAS included — reaches the payer's own system. Say so only to a stack that still
+		// sets the key, to any value.
+		if cfg.PayerDavinciPASNativeSet {
+			fmt.Fprintln(stdout, "gateway: PAYER_DAVINCI_PAS_NATIVE is set but is no longer a switch — PAS submit and update always forward to the payer's own system, like every other Da Vinci leg (the in-process payer is retired); remove it")
 		}
 		// FR-G26: the partner's CDS services are chosen per request by the request's hook
 		// (engine/crdservice.go). The listing is read here once, best effort, to report which
@@ -2035,6 +2062,7 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	gwCfg.IngressClients = cfg.IngressClients
 	gwCfg.RequireKnownMembers = cfg.RequireKnownMembers
 	gwCfg.EnrichNativeRequests = cfg.EnrichNativeRequests
+	gwCfg.FHIRServerRead = cfg.FHIRServerRead
 	gwCfg.HubAcceptsInvolved = endpoints.HubAcceptsInvolved
 	// Stated in both states: whether this gateway names the other patients a
 	// prior-authorization exchange involves is the network's choice, read from
@@ -2050,6 +2078,16 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		log.Printf("gateway: ENRICH_NATIVE_REQUESTS=true — a Da Vinci-native CRD or questionnaire-package request gains the prefetch, Coverage and Patient it leaves out, read from the system of record")
 	} else {
 		log.Printf("gateway: ENRICH_NATIVE_REQUESTS=false — a Da Vinci-native CRD or questionnaire-package request is carried as sent; a coverage it leaves out is read only to choose the payer")
+	}
+	if cfg.ProviderDavinciIngress {
+		switch cfg.FHIRServerRead {
+		case engine.FHIRServerReadPublic:
+			log.Printf("gateway: CDS_FHIR_SERVER_READ=public — a CRD request with no coverage, for a member the system of record does not hold, has its Coverage read through its own fhirServer (a public https server on port 443 only), only to choose the payer; nothing read is carried")
+		case engine.FHIRServerReadOff:
+			log.Printf("gateway: CDS_FHIR_SERVER_READ=off — the gateway never calls a request's fhirServer; a CRD request with no coverage to route by is refused (412)")
+		default:
+			log.Printf("gateway: CDS_FHIR_SERVER_READ=private (the default) — a CRD request with no coverage, for a member the system of record does not hold, has its Coverage read through its own fhirServer (an https server in this participant's network or on the internet, never a loopback, link-local or metadata address), only to choose the payer; nothing read is carried; CDS_FHIR_SERVER_READ=off turns it off")
+		}
 	}
 	if cfg.acceptUnknownMembersAlias != "" {
 		log.Printf("gateway: WARNING: SHN_ACCEPT_UNKNOWN_MEMBERS is deprecated and will be removed: carrying members the system of record does not hold is now the default; remove the variable (REQUIRE_KNOWN_MEMBERS=true opts in to refusing them)")
@@ -2193,6 +2231,7 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	b = built{
 		requireKnownMembers:  gwCfg.RequireKnownMembers,
 		enrichNativeRequests: gwCfg.EnrichNativeRequests,
+		fhirServerRead:       gwCfg.FHIRServerRead,
 		responder:            gwCfg.Responder,
 
 		diagnostic:      cfg.diagnostic,
@@ -2259,6 +2298,11 @@ func Run(ctx context.Context, getenv func(string) string, stdout io.Writer) erro
 	if err != nil {
 		return err
 	}
+	// The diagnostic publisher stops last: after the listener has shut down
+	// and the gateway has closed, so the events their final exchanges emit
+	// are delivered by its drain.
+	stopDiagnostic := b.startDiagnostic(ctx)
+	defer stopDiagnostic()
 	defer func() {
 		_ = b.gateway.Close()
 		b.lanes.Close()
@@ -2272,7 +2316,11 @@ func Run(ctx context.Context, getenv func(string) string, stdout io.Writer) erro
 	stopWorkers := b.startWorkers(ctx)
 	defer stopWorkers()
 	errc := make(chan error, 2)
-	main := serverFor(b.addr, b.handler, b.tlsCert)
+	// Requests in flight are counted, so a stop that has to cut them can let
+	// their handlers return, and emit their last events, before the
+	// diagnostic publisher drains.
+	var handlers sync.WaitGroup
+	main := serverFor(b.addr, countHandlers(b.handler, &handlers), b.tlsCert)
 	defer main.Close()
 	go func() {
 		if b.tlsCert != nil {
@@ -2295,10 +2343,55 @@ func Run(ctx context.Context, getenv func(string) string, stdout io.Writer) erro
 	case err := <-errc:
 		return err
 	case <-ctx.Done():
-		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		return main.Shutdown(shutdown)
+		return stopServing(main, &handlers, 5*time.Second, cutHandlerWait)
 	}
+}
+
+// cutHandlerWait bounds how long a stop waits for the handlers of requests it
+// cut to return.
+const cutHandlerWait = 2 * time.Second
+
+// countHandlers counts h's requests in flight in handlers.
+func countHandlers(h http.Handler, handlers *sync.WaitGroup) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handlers.Add(1)
+		defer handlers.Done()
+		h.ServeHTTP(w, r)
+	})
+}
+
+// stopServing shuts srv down, waiting up to grace for the requests in
+// flight. Past it, it cuts them and waits up to cutWait for their handlers
+// (counted in handlers) to return, so the events they emit on the way out
+// are queued before the diagnostic publisher, stopped after this, drains.
+// It returns Shutdown's error.
+func stopServing(srv *http.Server, handlers *sync.WaitGroup, grace, cutWait time.Duration) error {
+	shutdown, cancel := context.WithTimeout(context.Background(), grace)
+	defer cancel()
+	err := srv.Shutdown(shutdown)
+	if err != nil {
+		_ = srv.Close()
+		returned := make(chan struct{})
+		go func() { handlers.Wait(); close(returned) }()
+		select {
+		case <-returned:
+		case <-time.After(cutWait):
+		}
+	}
+	return err
+}
+
+// startDiagnostic runs the diagnostic publisher until the returned stop,
+// which ends it and waits for its drain. The publisher does not end with ctx:
+// a caller stops it once nothing more can emit.
+func (b built) startDiagnostic(ctx context.Context) func() {
+	if b.diagnostic == nil {
+		return func() {}
+	}
+	pubctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	done := make(chan struct{})
+	go func() { defer close(done); b.diagnostic.run(pubctx) }()
+	return func() { cancel(); <-done }
 }
 
 // startWorkers owns the goroutines that exist only while Run serves. Its
@@ -2309,9 +2402,6 @@ func (b built) startWorkers(parent context.Context) func() {
 	var workers sync.WaitGroup
 	start := func(run func(context.Context)) {
 		workers.Go(func() { run(ctx) })
-	}
-	if b.diagnostic != nil {
-		start(b.diagnostic.run)
 	}
 	if b.registrarURL != "" {
 		start(func(ctx context.Context) { pollFeed(ctx, b.client, b.registrarURL, b.reg, 3*time.Second, b.healthCell) })
@@ -2381,20 +2471,16 @@ func HandlerWithClock(ctx context.Context, getenv func(string) string, stdout io
 	if err != nil {
 		return nil, err
 	}
-	stopDiagnostic := func() {}
-	if b.diagnostic != nil {
-		pubctx, cancel := context.WithCancel(ctx)
-		done := make(chan struct{})
-		go func() { defer close(done); b.diagnostic.run(pubctx) }()
-		stopDiagnostic = func() { cancel(); <-done }
-	}
+	stopDiagnostic := b.startDiagnostic(ctx)
 	return &managedHandler{Handler: b.handler, close: func() {
-		stopDiagnostic()
 		_ = b.gateway.Close()
 		b.lanes.Close()
 		if b.closeStore != nil {
 			b.closeStore()
 		}
+		// Last, so the events emitted while the gateway and its lanes close
+		// are delivered by the publisher's drain.
+		stopDiagnostic()
 	}}, nil
 }
 

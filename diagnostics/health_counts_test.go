@@ -25,10 +25,12 @@ func TestHealthCountsAgree(t *testing.T) {
 		"an event unaccounted for":           {with(func(h *Health) { h.Acknowledged, h.Discarded = 719, 4 }), false},
 		"an event counted twice":             {with(func(h *Health) { h.Acknowledged, h.Discarded = 720, 5 }), false},
 		// Each count alone makes the counts present.
-		"only discards, disagreeing": {Health{LastSequence: 10, Discarded: 3}, false},
-		"only discards, agreeing":    {Health{LastSequence: 3, Discarded: 3}, true},
-		"only reasons, disagreeing":  {Health{LastSequence: 10, Dropped: 1, DroppedBy: DropCounts{Expired: 1}}, false},
-		"only reasons, agreeing":     {Health{LastSequence: 1, Dropped: 1, DroppedBy: DropCounts{Expired: 1}}, true},
+		"only discards, disagreeing":            {Health{LastSequence: 10, Discarded: 3}, false},
+		"only discards, agreeing":               {Health{LastSequence: 3, Discarded: 3}, true},
+		"only reasons, disagreeing":             {Health{LastSequence: 10, Dropped: 1, DroppedBy: DropCounts{Expired: 1}}, false},
+		"only reasons, agreeing":                {Health{LastSequence: 1, Dropped: 1, DroppedBy: DropCounts{Expired: 1}}, true},
+		"an invalid drop, agreeing":             {Health{LastSequence: 1, Dropped: 1, DroppedBy: DropCounts{Invalid: 1}}, true},
+		"an invalid drop left out of the drops": {Health{LastSequence: 1, Dropped: 1, DroppedBy: DropCounts{Expired: 1, Invalid: 1}}, false},
 		"drops without their reasons": {with(func(h *Health) {
 			h.Acknowledged, h.Discarded, h.Dropped = 702, 4, 18
 		}), false},

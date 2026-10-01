@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
+	"strings"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
@@ -26,6 +29,70 @@ type ContextSystemOfRecord interface {
 	OpenOrderContext(context.Context, string) ([]byte, bool, error)
 	OpenCoverageContext(context.Context, string) ([][]byte, error)
 	ResolveByReferenceContext(context.Context, string) ([]byte, bool, error)
+}
+
+// SystemOfRecordFHIRBase is optionally implemented by a system-of-record
+// connector that reads a FHIR server: FHIRBase is that server's base URL (the
+// built-in FHIR connector's FHIR_DATA_URL). The gateway reads it only to tell
+// whether a CDS Hooks request's fhirServer is that same server, so that a
+// payor Organization the EHR's own coverage names by reference alone
+// (Organization/<id>) is read where that id is the EHR's: in the system of
+// record when the request's fhirServer is the system's own base (or the
+// request names none), and only through fhirServer otherwise. A connector
+// that does not implement it, or returns "", is never the same server as a
+// fhirServer the request names.
+type SystemOfRecordFHIRBase interface {
+	FHIRBase() string
+}
+
+// sorFHIRBase is the configured system of record's FHIR base URL, or "" when
+// the connector does not name one (SystemOfRecordFHIRBase).
+func sorFHIRBase(sor SystemOfRecord) string {
+	if b, ok := sor.(SystemOfRecordFHIRBase); ok {
+		return b.FHIRBase()
+	}
+	return ""
+}
+
+// sameFHIRBase reports whether two FHIR base URLs name the same server and
+// base path: absolute http(s) URLs with no user information, query or
+// fragment and an ASCII host, equal once the scheme and host are lowercased,
+// the scheme's default port (443 for https, 80 for http) is dropped and any
+// trailing slash is trimmed from the path. An empty or unparsable URL is
+// never the same.
+func sameFHIRBase(a, b string) bool {
+	na, okA := normalFHIRBase(a)
+	nb, okB := normalFHIRBase(b)
+	return okA && okB && na == nb
+}
+
+func normalFHIRBase(raw string) (string, bool) {
+	u, err := url.Parse(raw)
+	if err != nil || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.Opaque != "" {
+		return "", false
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if (scheme != "https" && scheme != "http") || u.Hostname() == "" {
+		return "", false
+	}
+	// A non-ASCII host is never compared: simple case mapping can make two
+	// different internationalised names equal ("İ" lowercases to "i"), and
+	// only an equal base lets the system of record answer for fhirServer.
+	for _, r := range u.Hostname() {
+		if r > 0x7f {
+			return "", false
+		}
+	}
+	host, port := strings.ToLower(u.Hostname()), u.Port()
+	if (scheme == "https" && port == "443") || (scheme == "http" && port == "80") {
+		port = ""
+	}
+	if port != "" {
+		host = net.JoinHostPort(host, port)
+	} else if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	return scheme + "://" + host + strings.TrimRight(u.EscapedPath(), "/"), true
 }
 
 // ErrSystemOfRecordSignature: the configured connector has a method whose

@@ -35,7 +35,9 @@ func searchFailure(o engine.SearchOutcome, reason string) error {
 }
 
 // SearchPatientContext searches the system of record for one patient's
-// records of resourceType: exactly `<resourceType>?patient=Patient/<id>`.
+// records of resourceType: exactly the query engine.SoRSearchQuery returns
+// (`<resourceType>?patient=Patient/<id>`, each narrowing given, and the type's
+// include).
 //
 // Paging follows each page's next link only when the link has the configured
 // base URL's scheme, host and port, no user information, and a path at or

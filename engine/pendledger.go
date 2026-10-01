@@ -234,6 +234,272 @@ func ProbePendKeys(k PendKeys) []PendKeyRef {
 	return refs
 }
 
+// strongPendKind reports whether a key kind is one the PAYER issued for this
+// authorization alone: its own ClaimResponse identifier, or its pre-authorization
+// reference. The other two kinds are the requester's: a request
+// identifier and an item trace number are whatever the submission said, and
+// reused example bodies share them across claims, so they can confirm a match but
+// never make one.
+func strongPendKind(kind string) bool {
+	return kind == PendKeyClaimResponseIdentifier || kind == PendKeyPreAuthRef
+}
+
+// StrongPendProbe is the part of a follow-up's keys a lookup may SEARCH by: the
+// strong keys (strongPendKind) of ProbePendKeys. A backend probes with these and
+// nothing else; the weak keys are checked only against the one authorization a
+// strong key found (PendKeysAgree).
+func StrongPendProbe(k PendKeys) []PendKeyRef {
+	var out []PendKeyRef
+	for _, ref := range ProbePendKeys(k) {
+		if strongPendKind(ref.Kind) {
+			out = append(out, ref)
+		}
+	}
+	return out
+}
+
+// PendMatchVerdict is what a lookup found for one answer. Only
+// PendMatchFound names an authorization; every other verdict changes nothing and
+// says why.
+type PendMatchVerdict string
+
+const (
+	// PendMatchFound: exactly one authorization carries a strong key the answer
+	// states, and it agrees with every key the answer states.
+	PendMatchFound PendMatchVerdict = "found"
+	// PendMatchNoStrongKey: the answer states neither a ClaimResponse identifier
+	// nor a preAuthRef, so nothing may be searched by.
+	PendMatchNoStrongKey PendMatchVerdict = "no-strong-key"
+	// PendMatchNone: no authorization in the requester's namespace carries a
+	// strong key the answer states.
+	PendMatchNone PendMatchVerdict = "none"
+	// PendMatchAmbiguous: two or more authorizations carry a strong key the answer
+	// states (a payer that issued one ClaimResponse identifier or preAuthRef for
+	// two authorizations). The ledger will not guess.
+	PendMatchAmbiguous PendMatchVerdict = "ambiguous"
+	// PendMatchDisagrees: one authorization carries the strong key, but it holds
+	// keys of a kind the answer also states and none of them is the answer's.
+	// The answer is about another claim.
+	PendMatchDisagrees PendMatchVerdict = "disagrees"
+	// PendMatchRequesterKeyOnly: a stated ClaimResponse identifier would have
+	// found an authorization only as an echo of its own request identifier
+	// (EchoedClaimIdentifier), and nothing else found one: the payer echoed the
+	// requester's claim identifier, which claims built from one body share, so it
+	// cannot say which claim the answer is about. Only the payer's preAuthRef
+	// could.
+	PendMatchRequesterKeyOnly PendMatchVerdict = "requester-key-only"
+)
+
+// PendMatch is a lookup's answer: the authorization when Verdict is
+// PendMatchFound, and otherwise only the verdict (and, for PendMatchDisagrees,
+// the key kind that disagreed).
+type PendMatch struct {
+	SubjectPCI    string
+	CorrelationID string
+	Verdict       PendMatchVerdict
+	// Kind is the key kind that disagreed; empty for every other verdict.
+	Kind string
+	// About is true when the follow-up's own keys name this authorization alone:
+	// it holds every one of them, and no other authorization in the requester's
+	// namespace holds any (ResolvePendMatch). Only then may a decision learned
+	// from the follow-up be stated from the follow-up's own lines.
+	About bool
+}
+
+// PendCandidate is one authorization a strong-key probe found.
+type PendCandidate struct {
+	SubjectPCI    string
+	CorrelationID string
+}
+
+// ResolvePendMatch is the lookup's verdict, shared by every backend so they
+// cannot drift. A backend probes its index with StrongPendProbe(stated)
+// (distinct authorizations, two at most: one is the answer, two is ambiguous).
+// When there is exactly one, it reads the keys that one holds in the requester's
+// namespace (held) and, when the follow-up states keys of its own (about, from
+// PendAboutKeys), the distinct authorizations in that namespace holding any of
+// them, two at most (aboutHolders). It hands all of them here, inside the same
+// transaction or lock as the probe. held and aboutHolders are ignored unless
+// there is exactly one candidate.
+//
+// A backend leaves out of the probe any authorization a stated ClaimResponse
+// identifier finds only because it holds that identifier's value as one of its
+// own request identifiers (EchoedClaimIdentifier): the payer echoed the
+// requester's claim identifier, which claims built from one body share, so it
+// names no claim. echoed reports that the probe left one out; with no other
+// candidate the verdict is PendMatchRequesterKeyOnly.
+func ResolvePendMatch(stated PendKeys, about []PendKeyRef, candidates []PendCandidate, held []PendKeyRef, aboutHolders []PendCandidate, echoed bool) PendMatch {
+	if len(StrongPendProbe(stated)) == 0 {
+		return PendMatch{Verdict: PendMatchNoStrongKey}
+	}
+	switch len(candidates) {
+	case 0:
+		if echoed {
+			return PendMatch{Verdict: PendMatchRequesterKeyOnly}
+		}
+		return PendMatch{Verdict: PendMatchNone}
+	case 1:
+	default:
+		return PendMatch{Verdict: PendMatchAmbiguous}
+	}
+	if ok, kind := pendKeysAgree(held, stated, matchedByPreAuthRef(held, stated)); !ok {
+		return PendMatch{Verdict: PendMatchDisagrees, Kind: kind}
+	}
+	return PendMatch{SubjectPCI: candidates[0].SubjectPCI, CorrelationID: candidates[0].CorrelationID, Verdict: PendMatchFound,
+		About: pendAbout(about, held, candidates[0], aboutHolders)}
+}
+
+// pendAbout reports whether a follow-up's own keys name the matched
+// authorization alone: there is at least one, the authorization holds every one,
+// and it is the only authorization holding any.
+func pendAbout(about, held []PendKeyRef, match PendCandidate, aboutHolders []PendCandidate) bool {
+	if len(about) == 0 || len(aboutHolders) != 1 || aboutHolders[0] != match {
+		return false
+	}
+	holds := map[PendKeyRef]bool{}
+	for _, ref := range held {
+		holds[ref] = true
+	}
+	for _, ref := range about {
+		if !holds[ref] {
+			return false
+		}
+	}
+	return true
+}
+
+// PendAboutKeys bounds the keys a follow-up states about the authorization it
+// asks about (its items' trace numbers, as PendKeyItemTraceNumber, and the
+// authorization numbers the payer gave, as PendKeyPreAuthRef) as a probe's are,
+// deduplicated. They never search for a match; they only say whether the match
+// is the authorization the follow-up was about.
+func PendAboutKeys(traceNumbers, authorizationNumbers []string) []PendKeyRef {
+	refs := ProbePendKeys(PendKeys{ItemTraceNumbers: traceNumbers})
+	seen := map[PendKeyRef]bool{}
+	for _, ref := range refs {
+		seen[ref] = true
+	}
+	for _, n := range authorizationNumbers {
+		v := strings.TrimSpace(n)
+		ref := PendKeyRef{Kind: PendKeyPreAuthRef, Key: v}
+		if v == "" || len(v) > MaxPendKeyBytes || seen[ref] {
+			continue
+		}
+		seen[ref] = true
+		refs = append(refs, ref)
+	}
+	return refs
+}
+
+// PendEOBStale reports whether a ledger write leaves the authorization's
+// decision EOB stating a decision the ledger no longer keeps: the row was
+// decided before, and after the write it is not decided with that same outcome.
+// A backend that writes no EOB of its own in that write removes the old one
+// (DecisionEOBID), in the same transaction or lock.
+func PendEOBStale(cur PendRecord, found bool, next PendRecord) bool {
+	return found && cur.State == PendStateDecided && (next.State != PendStateDecided || next.Outcome != cur.Outcome)
+}
+
+// PendEOBWritable reports whether a decision's EOB may be written with it:
+// only when the decision the ledger keeps after the write (next) is this
+// answer's, the same outcome and dated no earlier. A losing or older answer
+// never replaces the EOB of the decision the ledger keeps; a later restatement
+// of the kept decision may supply the EOB an earlier answer could not.
+func PendEOBWritable(next PendRecord, outcome string, decidedAt time.Time) bool {
+	return next.State == PendStateDecided && next.Outcome == outcome && !decidedAt.Before(next.DecidedAt)
+}
+
+// PendKeysAgree reports whether an authorization holding held agrees with every
+// key an answer states, and the first kind that does not. For each key the answer
+// states: when the authorization holds keys of that kind, the answer's key must be
+// one of them; when it holds none of that kind, there is nothing to disagree with
+// (a payer states its preAuthRef on the decision, not on the pend it answered
+// first). Stated keys are bounded as a probe's are (ProbePendKeys).
+func PendKeysAgree(held []PendKeyRef, stated PendKeys) (bool, string) {
+	return pendKeysAgree(held, stated, false)
+}
+
+// matchedByPreAuthRef reports whether the authorization holds the preAuthRef the
+// answer states: the payer's own authorization number names it, so a
+// ClaimResponse identifier the answer states need not be one it holds (a payer
+// may issue a new ClaimResponse, with a new identifier, for its decision). Two
+// authorizations holding one preAuthRef never reach here: the probe answers
+// ambiguous.
+func matchedByPreAuthRef(held []PendKeyRef, stated PendKeys) bool {
+	for _, ref := range ProbePendKeys(PendKeys{PreAuthRef: stated.PreAuthRef}) {
+		for _, h := range held {
+			if h == ref {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// DecisionPendKeys is the keys RecordDecision indexes, under requesterHolder,
+// for a decision: every key of k for an authorization that had no ledger row
+// before it (found=false: decided at submit), the authorization number alone for
+// the kept decision of one that had (kept, PendEOBWritable), nothing otherwise
+// or without a requester. Oversized keys are dropped (ProbePendKeys).
+func DecisionPendKeys(found, kept bool, requesterHolder string, k PendKeys) []PendKeyRef {
+	switch {
+	case requesterHolder == "":
+		return nil
+	case !found:
+		return ProbePendKeys(k)
+	case kept:
+		return ProbePendKeys(PendKeys{PreAuthRef: k.PreAuthRef})
+	}
+	return nil
+}
+
+// EchoedClaimIdentifier reports whether a ClaimResponse identifier key is an
+// echo of the requester's claim identifier for an authorization holding held:
+// its value (the part after the first "|") is the value of one of the
+// authorization's request identifiers, whatever system the payer stated it
+// under. A probe never finds an authorization by such a key.
+func EchoedClaimIdentifier(claimResponseKey string, held []PendKeyRef) bool {
+	v := keyValue(claimResponseKey)
+	if v == "" {
+		return false
+	}
+	for _, ref := range held {
+		if ref.Kind == PendKeyRequestIdentifier && keyValue(ref.Key) == v {
+			return true
+		}
+	}
+	return false
+}
+
+// keyValue is the value half of a "system|value" key.
+func keyValue(key string) string {
+	if _, v, ok := strings.Cut(key, "|"); ok {
+		return v
+	}
+	return key
+}
+
+// pendKeysAgree is PendKeysAgree, leaving the ClaimResponse identifiers out when
+// skipClaimResponseIDs (matchedByPreAuthRef).
+func pendKeysAgree(held []PendKeyRef, stated PendKeys, skipClaimResponseIDs bool) (bool, string) {
+	if skipClaimResponseIDs {
+		stated.ClaimResponseIDs = nil
+	}
+	byKind := map[string]map[string]bool{}
+	for _, ref := range held {
+		if byKind[ref.Kind] == nil {
+			byKind[ref.Kind] = map[string]bool{}
+		}
+		byKind[ref.Kind][ref.Key] = true
+	}
+	for _, ref := range ProbePendKeys(stated) {
+		if kinds := byKind[ref.Kind]; kinds != nil && !kinds[ref.Key] {
+			return false, ref.Kind
+		}
+	}
+	return true, ""
+}
+
 func boundedKeys(in []string) []string {
 	var out []string
 	for _, v := range in {
@@ -325,7 +591,19 @@ type PendTransition struct {
 	// ADD discoverability: the bytes relayed and the pend recorded are the same
 	// either way. The gateway will not invent an identifier the payer did not send.
 	Keys int
+	// EOBRemoved is true when the write removed the authorization's decision EOB
+	// because it no longer stated the decision the ledger keeps (PendEOBStale).
+	// A leg reports it with PendEOBRemovedEvent.
+	EOBRemoved bool
 }
+
+// PendEOBRemovedEvent: a ledger write removed an authorization's decision EOB
+// because the decision it stated is no longer the one the ledger keeps (a
+// later-dated decision with another outcome came with no EOB of its own, or a
+// later-dated re-pend reopened the authorization). Patient Access then serves no
+// EOB for it rather than one that contradicts the ledger, until a decision
+// arrives with its EOB.
+const PendEOBRemovedEvent = "pend.eob-removed"
 
 // PendLedger is the keyed pend ledger a payer gateway keeps for the authorizations
 // it pends and decides. It is OPTIONAL: Store does not change, and a caller reaches
@@ -347,17 +625,41 @@ type PendLedger interface {
 	// the authorization.
 	RecordPendedKeyed(subjectPCI, corrID string, created time.Time, k PendKeys) (PendTransition, error)
 	// LookupPended resolves a follow-up's keys to the authorization they name,
-	// within requesterHolder's namespace and nowhere else. A decided claim is still
-	// found — an inquiry about it must resolve to the decision, not to "no such
-	// authorization". Two different authorizations matching one probe is
-	// ambiguous=true with found=false and no ledger change: the ledger will not
-	// guess which one the requester meant.
-	LookupPended(requesterHolder string, k PendKeys) (subjectPCI, corrID string, found, ambiguous bool, err error)
+	// within requesterHolder's namespace and nowhere else. It searches by
+	// the strong keys only (StrongPendProbe), and the one authorization they find
+	// must agree with every key k states (PendKeysAgree): the probe, the read of
+	// that authorization's keys and the verdict (ResolvePendMatch) run in one
+	// transaction or under one lock. A decided claim is still found — an inquiry
+	// about it must resolve to the decision, not to "no such authorization". Every
+	// verdict but PendMatchFound changes nothing: the ledger will not guess.
+	//
+	// about are the follow-up's own keys (PendAboutKeys): they never search, and
+	// only set PendMatch.About.
+	LookupPended(requesterHolder string, k PendKeys, about []PendKeyRef) (PendMatch, error)
 	// RecordDecision records the payer's terminal answer and its EOB as ONE write:
+	// a decision that names a requester (k.RequesterHolder) for an authorization
+	// filed under another requester is refused with ErrPendRequesterMismatch, as
+	// a re-pend is.
 	// if the EOB cannot be written, there is no decision. decidedAt is the payer's
 	// ClaimResponse.created. Idempotent for the same outcome; a different outcome
-	// keeps the one the payer dated later and reports DecisionConflictEvent.
-	RecordDecision(subjectPCI, corrID, outcome string, decidedAt time.Time, eob *EOBRecord) (PendTransition, error)
+	// keeps the one the payer dated later and reports DecisionConflictEvent. The
+	// EOB is written only when PendEOBWritable says the kept decision is this
+	// one, so a losing or older answer never replaces the EOB of the decision
+	// the ledger keeps.
+	//
+	// k names the decision: k.PreAuthRef is the payer's authorization number for
+	// it (the parsed preAuthRef), and k.RequesterHolder the requester it was
+	// decided for ("" when no requester is verified). For the kept decision of an
+	// authorization already in the ledger, the authorization number is indexed
+	// as a PendKeyPreAuthRef key under the authorization's own requester. A
+	// decision with no ledger row before it (a payer that decided at submit)
+	// becomes a row of k.RequesterHolder with every key of k indexed, so a later
+	// follow-up's lines are judged against it like any pended authorization's
+	// (PendMatch.About). Oversized keys are dropped, as a probe drops them. When
+	// the decision changes the kept outcome and brings no EOB of its own, the
+	// authorization's decision EOB (DecisionEOBID) is removed in the same write
+	// (PendEOBStale) and PendTransition.EOBRemoved says so.
+	RecordDecision(subjectPCI, corrID, outcome string, decidedAt time.Time, k PendKeys, eob *EOBRecord) (PendTransition, error)
 	// BeginClaimUpdateReason is Store.BeginClaimUpdate with the refusal reason: the
 	// atomic test-and-set that binds a pended authorization for one amendment, and
 	// says why when it will not.
@@ -498,8 +800,14 @@ func PendDecide(cur PendRecord, found bool, outcome string, decidedAt time.Time)
 	}
 	if cur.Outcome == outcome {
 		// Idempotent: the same answer relayed twice (duplicate terminal inquiries)
-		// is one decision.
-		return cur, PendTransition{From: PendStateDecided, To: PendStateDecided}
+		// is one decision. A later-dated restatement advances the date the
+		// decision is kept by, so an older restatement can never be the latest
+		// word on it (PendEOBWritable).
+		next = cur
+		if decidedAt.After(cur.DecidedAt) {
+			next.DecidedAt = decidedAt
+		}
+		return next, PendTransition{From: PendStateDecided, To: PendStateDecided}
 	}
 	tr = PendTransition{From: PendStateDecided, To: PendStateDecided, Event: DecisionConflictEvent}
 	if decidedAt.Before(cur.DecidedAt) {

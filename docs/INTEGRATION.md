@@ -121,8 +121,8 @@ Worth checking:
 - **Scope.** The gateway requests `*_SCOPE` (default `system/*.read`). Make sure
   it is a scope your server actually grants this client, in the scope syntax it
   expects. `system/*.read` covers the read-only legs (coverage eligibility, CRD,
-  DTR); if you turn on PAS native forwarding (`PAYER_DAVINCI_PAS_NATIVE=true`),
-  widen it to include the write a claim submission needs.
+  DTR); PAS submit and update always forward too, so on a payer gateway widen it
+  to include the write a claim submission needs.
 - **Optional `*_CLIENT_KID`.** Set it only if your server pins a specific key id
   in the assertion header.
 
@@ -153,8 +153,14 @@ point it at the gateway's own
 ingress instead of `provider-data` origination. Your systems call the gateway
 directly, inside your own boundary; the gateway forwards your EHR's own request
 bytes through to the Hub. It removes `fhirServer` and `fhirAuthorization` (the
-payer never gets a route or a credential into your systems, and the gateway
-never calls `fhirServer`), and by default adds nothing: send every prefetch value
+payer never gets a route or a credential into your systems; by default the
+gateway itself reads a coverage through `fhirServer`, your EHR's own FHIR server,
+only to choose the payer when the request carries none and your system of
+record does not hold the member, and carries nothing it read; your server must answer that
+read in JSON (`application/fhir+json` or `application/json`), with headers of at most 64 KiB
+and a body of at most 512 KiB; `CDS_FHIR_SERVER_READ=off` turns the read off: see
+[Reading the coverage through `fhirServer`](CONFIGURATION.md#reading-the-coverage-through-fhirserver)),
+and by default adds nothing: send every prefetch value
 you want the payer to see. With `ENRICH_NATIVE_REQUESTS=true` it adds the prefetch
 values the request leaves out, read from your own system of record — never made up.
 See [CDS Hooks prefetch](CONFIGURATION.md#cds-hooks-prefetch) for the rules. The
@@ -164,7 +170,13 @@ for its hook. The payer's answer comes back exactly as the payer sent it.
 A `$questionnaire-package` request is carried as your EHR sent it; with
 `ENRICH_NATIVE_REQUESTS=true`, your Coverage and Patient are appended when it carries
 none. A Coverage a request leaves out is read from your system of record either way,
-to choose the payer. A signature inside a message travels untouched;
+to choose the payer. A Coverage read only to choose the payer is not sent, so a CDS
+Hooks request with no `prefetch.coverage` reaches the payer with no Coverage, and gets
+whatever the payer's own system answers for it (a payer's gateway carries it as sent,
+even one that maps its payer identity, from v0.60.0; earlier releases of that mapping
+refused it `400`). Send `prefetch.coverage`, with a payor that names the payer (its
+identifier, or a payor Organization carrying it in the same prefetch), when you want
+the payer to decide on the member's coverage. A signature inside a message travels untouched;
 HTTP-level signatures are not carried, so sign inside the payload when you need an
 end-to-end signature. To have values added, the request's patient must be named by the
 network member id; see the member id limitation in
@@ -331,11 +343,22 @@ Do not include protected backend details in errors. The engine selects this opti
 interface automatically, including through its observer wrapper, and stops before
 using missing-data defaults or starting further exchange work when a read fails.
 
+A connector that reads a FHIR server can also implement `engine.SystemOfRecordFHIRBase`,
+whose `FHIRBase()` returns that server's base URL (the built-in FHIR connector returns its
+configured base). The gateway uses it only to decide where a payor `Organization/<id>` a
+CDS Hooks request names means something: when the request names no `fhirServer`, or one at
+the same base, and your connector names the patient by `context.patientId`, the reference is
+read from your connector (then through the `fhirServer` if your connector holds no such
+Organization); otherwise only through that `fhirServer`. A connector without it is treated
+as a different base. The full rules are in [CONFIGURATION.md](CONFIGURATION.md#cds-hooks-prefetch).
+
 `OpenCoverageContext` returns every Coverage record the member has, exactly as your
 system returned it (an empty result means none). The gateway decides what several
-records mean: when they do not all name one payer, the exchange is refused with
-`422 ambiguous coverage for routing` rather than routed on whichever record came
-first. The single-record `OpenCoverage` of the built-in FHIR connector answers only when
+records mean. For eligibility and on the payer's side, when they do not all name one
+payer, the exchange is refused with `422 ambiguous coverage for routing` rather than
+routed on whichever record came first. A CRD, DTR or PAS request the gateway originates,
+and the PAS inquiry, first choose the active records (or, when none is active, all of
+them), and are refused that way only when the chosen records do not all name one payer. The single-record `OpenCoverage` of the built-in FHIR connector answers only when
 exactly one record exists. The built-in FHIR connector reads the Coverages with its bounded
 patient search (below): every page, within the search bounds; a search over the bounds is a
 failed read (`SoRInvalidResponse`), never a partial answer.
@@ -348,8 +371,19 @@ absence. To migrate, return every matching Coverage as `[][]byte` (nil or empty 
 and the error as before.
 
 A connector can also implement `engine.SearchSystemOfRecord` to let the gateway search
-your FHIR server for one patient's records (`<type>?patient=Patient/<id>`, exactly as a
-CDS Hooks prefetch template asks). The built-in FHIR connector does: it refuses
+your FHIR server for one patient's records: it sends exactly the query
+`engine.SoRSearchQuery` returns for the arguments it is given
+(`<type>?patient=Patient/<id>`, each narrowing, and the type's include). From shn-gateway
+v0.60.0 a narrowing may also be a token filter (`engine.SearchDateRange` with `AnyOf`
+set, sent as `status=active,completed`; `AnyOf` is a slice, so a `SearchDateRange` cannot be
+compared with `==` or used as a map key: compare its fields, `AnyOf` with `slices.Equal`):
+the gateway's search for a CDS Hooks prefetch value narrows by the status the advertised
+template names, and keeps the
+`_include=Coverage:payor` or `_include=DeviceRequest:performer` the template leaves out
+(see [CDS Hooks prefetch](CONFIGURATION.md#cds-hooks-prefetch)). A connector that builds
+its own query instead must apply every narrowing it is given; one that ignored a status
+filter would hand the payer records the template excludes. The built-in FHIR connector
+searches through `engine.SoRSearchQuery`: it refuses
 redirects, follows `next` links only on the configured server and under its base path,
 stops on a repeated page, and stops at fixed bounds (10 pages, 200 entries, 4 MiB,
 5 seconds). It returns each page's bytes unchanged. The gateway sends the result as a
@@ -360,7 +394,13 @@ your server's links, entry addresses, search messages and `Bundle.total` are not
 A provider gateway uses the same search to find the coverage an EHR's request leaves
 out, to choose the payer, and, with `ENRICH_NATIVE_REQUESTS=true`, to obtain the CDS
 Hooks prefetch values (`coverage` and the history keys) it adds; a connector without it
-cannot obtain them (see [CDS Hooks prefetch](CONFIGURATION.md#cds-hooks-prefetch)).
+cannot obtain them (see [CDS Hooks prefetch](CONFIGURATION.md#cds-hooks-prefetch)). From
+shn-gateway v0.60.0 the coverage read only to choose the payer is given no status filter
+(every Coverage); the gateway routes on the active ones first. With
+`ENRICH_NATIVE_REQUESTS=true` the coverage it adds is the template's search
+(`status=active`); when that finds none the request carries `null` coverage, and when your
+server cannot answer it the `coverage` key is left out. Either way the request is routed by
+this read, the one that chooses the payer, as without the opt-in.
 
 A facility gateway answers a clinical data request (CDex) from the same search:
 - **Records.** Every record of each requested type whose own date falls within the
@@ -431,8 +471,10 @@ records, or, if it keeps no system of record (`FHIR_DATA_URL` unset, from v0.58.
 `FHIR_DATA_URL` unset: its gateway then binds each member from the request that names it,
 as it binds any member a system of record does not hold. `PAYER_DAVINCI_PAS_NATIVE`
 still parses (back-compat) but is a no-op: PAS forwarding was never independently
-optional-off, since the in-process fallback it used to gate is deleted; setting it
-`false` only prints a warning that PAS forwards regardless.
+optional-off, since the in-process fallback it used to gate is deleted. From
+shn-gateway v0.60.0, setting it to any value only prints a notice that PAS forwards
+regardless, and leaving it unset prints nothing; v0.39.0 through v0.59.x print a
+similar notice whenever it is not `true`, unset included.
 
 See [CONFIGURATION.md](CONFIGURATION.md#native-forward-payer-mode-payer_davinci_)
 for the full field reference, including the exactly-one-mode credential rule, and
@@ -545,7 +587,15 @@ defect does, is `CONFORMANCE_ENFORCEMENT`, a setting on your own gateway:
 - `observe` (the default when the variable is unset): every check runs and each
   defect is recorded as a finding — it does not stop the message, which is carried
   as sent, apart from the gateway's registered edits. A validator that cannot be
-  reached is recorded the same way.
+  reached is recorded the same way. From v0.60.0 a check that can only record
+  does not hold the message either: it is queued, and its finding is written
+  when the validator answers. Two kinds of check still wait: the check of a
+  payload this gateway itself translated between IG lines, which refuses at
+  every level, and a payer gateway's checks of the decision
+  ExplanationOfBenefits it builds from your system's answer, because whether each
+  decision is written depends on them. At `observe` all of one exchange's
+  decision checks share at most 2 seconds; a check that bound does not reach is
+  recorded as unavailable and its decision is written.
 - `structural` (v0.54.0 and later): every check runs; a message whose structure is
   broken is refused as at `strict`, and every other defect is recorded as at
   `observe`. Broken structure is a missing required element, an element the
@@ -578,7 +628,9 @@ check of a payload this gateway itself translated between IG lines.
 **Reading a finding.** At `observe`, `structural` and `strict`, if you run the gateway yourself — through the SHN Kit or a
 self-hosted deployment — findings appear in your own gateway log and observer
 stream: look for the `conformance:` log line, or the `conformance.observed` event
-if you're watching the observer stream. If SHN hosts your gateway, ask your SHN
+if you're watching the observer stream. At `observe` a finding can appear a few
+seconds after the exchange's own log lines, once the validator has answered. If
+SHN hosts your gateway, ask your SHN
 contact for a finding until partner login ships a self-serve view.
 
 ## Seed your own FHIR server

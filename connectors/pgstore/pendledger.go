@@ -148,6 +148,13 @@ func (s *PgStore) RecordPendedKeyed(subjectPCI, corrID string, created time.Time
 		return engine.PendTransition{}, engine.ErrPendRequesterMismatch
 	}
 	next, tr := engine.PendRePend(cur, found, created, s.now())
+	// A later-dated re-pend reopens a decided authorization: the decision's EOB
+	// no longer states what the ledger keeps (engine.PendEOBStale).
+	if engine.PendEOBStale(cur, found, next) {
+		if tr.EOBRemoved, err = removeEOB(ctx, tx, s.holderID, subjectPCI, engine.DecisionEOBID(corrID)); err != nil {
+			return engine.PendTransition{}, fmt.Errorf("pgstore: RecordPendedKeyed: %w", err)
+		}
+	}
 	next.RequesterHolder = k.RequesterHolder
 	if err := writePendRow(ctx, tx, s.holderID, subjectPCI, corrID, next); err != nil {
 		return engine.PendTransition{}, fmt.Errorf("pgstore: RecordPendedKeyed: %w", err)
@@ -182,57 +189,127 @@ SELECT count(*) FROM gw_pended_claim_key
 }
 
 // LookupPended resolves a follow-up's keys within one requester's namespace. See
-// engine.PendLedger. The probe is capped at two rows: one is the answer, two is
-// ambiguous, and nothing beyond that changes either verdict.
-func (s *PgStore) LookupPended(requesterHolder string, k engine.PendKeys) (string, string, bool, bool, error) {
+// engine.PendLedger. It probes by the strong keys only, capped at two
+// authorizations (one is the answer, two is ambiguous, and nothing beyond that
+// changes either verdict), reads the one candidate's keys, and lets
+// engine.ResolvePendMatch decide, all in one read-only transaction so the keys
+// judged are the ones the probe saw.
+func (s *PgStore) LookupPended(requesterHolder string, k engine.PendKeys, about []engine.PendKeyRef) (engine.PendMatch, error) {
 	if requesterHolder == "" {
-		return "", "", false, false, engine.ErrPendRequesterRequired
+		return engine.PendMatch{}, engine.ErrPendRequesterRequired
 	}
-	probes := pendProbes(k)
+	probes := pendProbes(engine.StrongPendProbe(k))
 	if len(probes.kinds) == 0 {
-		return "", "", false, false, nil
+		return engine.ResolvePendMatch(k, about, nil, nil, nil, false), nil
 	}
 	ctx, cancel := storeCtx()
 	defer cancel()
-	rows, err := s.pool.Query(ctx, `
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return engine.PendMatch{}, fmt.Errorf("pgstore: LookupPended: begin: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // read-only
+	// A ClaimResponse identifier never finds an authorization that holds its
+	// value as one of its own request identifiers (engine.EchoedClaimIdentifier).
+	rows, err := tx.Query(ctx, `
+SELECT DISTINCT k.subject_pci, k.correlation_id
+  FROM gw_pended_claim_key k
+ WHERE k.holder_id=$1 AND k.requester_holder=$2
+   AND (k.kind, k.key) IN (SELECT * FROM unnest($3::text[], $4::text[]))
+   AND NOT (`+echoedHit+`)
+ LIMIT 2`, s.holderID, requesterHolder, probes.kinds, probes.keys, engine.PendKeyClaimResponseIdentifier, engine.PendKeyRequestIdentifier)
+	if err != nil {
+		return engine.PendMatch{}, fmt.Errorf("pgstore: LookupPended: %w", err)
+	}
+	candidates, err := scanPendCandidates(rows)
+	if err != nil {
+		return engine.PendMatch{}, fmt.Errorf("pgstore: LookupPended: %w", err)
+	}
+	echoed := false
+	if len(candidates) == 0 {
+		if err := tx.QueryRow(ctx, `
+SELECT EXISTS (SELECT 1
+  FROM gw_pended_claim_key k
+ WHERE k.holder_id=$1 AND k.requester_holder=$2
+   AND (k.kind, k.key) IN (SELECT * FROM unnest($3::text[], $4::text[]))
+   AND `+echoedHit+`)`, s.holderID, requesterHolder, probes.kinds, probes.keys, engine.PendKeyClaimResponseIdentifier, engine.PendKeyRequestIdentifier).Scan(&echoed); err != nil {
+			return engine.PendMatch{}, fmt.Errorf("pgstore: LookupPended: echoes: %w", err)
+		}
+	}
+	var held []engine.PendKeyRef
+	if len(candidates) == 1 {
+		krows, err := tx.Query(ctx, `
+SELECT kind, key
+  FROM gw_pended_claim_key
+ WHERE holder_id=$1 AND requester_holder=$2 AND subject_pci=$3 AND correlation_id=$4`,
+			s.holderID, requesterHolder, candidates[0].SubjectPCI, candidates[0].CorrelationID)
+		if err != nil {
+			return engine.PendMatch{}, fmt.Errorf("pgstore: LookupPended: keys: %w", err)
+		}
+		for krows.Next() {
+			var ref engine.PendKeyRef
+			if err := krows.Scan(&ref.Kind, &ref.Key); err != nil {
+				krows.Close()
+				return engine.PendMatch{}, fmt.Errorf("pgstore: LookupPended: keys: %w", err)
+			}
+			held = append(held, ref)
+		}
+		krows.Close()
+		if err := krows.Err(); err != nil {
+			return engine.PendMatch{}, fmt.Errorf("pgstore: LookupPended: keys: %w", err)
+		}
+	}
+	var aboutHolders []engine.PendCandidate
+	if len(candidates) == 1 && len(about) > 0 {
+		a := pendProbes(about)
+		arows, err := tx.Query(ctx, `
 SELECT DISTINCT subject_pci, correlation_id
   FROM gw_pended_claim_key
  WHERE holder_id=$1 AND requester_holder=$2
    AND (kind, key) IN (SELECT * FROM unnest($3::text[], $4::text[]))
- LIMIT 2`, s.holderID, requesterHolder, probes.kinds, probes.keys)
-	if err != nil {
-		return "", "", false, false, fmt.Errorf("pgstore: LookupPended: %w", err)
-	}
-	defer rows.Close()
-	var found [][2]string
-	for rows.Next() {
-		var subject, corr string
-		if err := rows.Scan(&subject, &corr); err != nil {
-			return "", "", false, false, fmt.Errorf("pgstore: LookupPended: %w", err)
+ LIMIT 2`, s.holderID, requesterHolder, a.kinds, a.keys)
+		if err != nil {
+			return engine.PendMatch{}, fmt.Errorf("pgstore: LookupPended: about: %w", err)
 		}
-		found = append(found, [2]string{subject, corr})
+		if aboutHolders, err = scanPendCandidates(arows); err != nil {
+			return engine.PendMatch{}, fmt.Errorf("pgstore: LookupPended: about: %w", err)
+		}
 	}
-	if err := rows.Err(); err != nil {
-		return "", "", false, false, fmt.Errorf("pgstore: LookupPended: %w", err)
+	return engine.ResolvePendMatch(k, about, candidates, held, aboutHolders, echoed), nil
+}
+
+// echoedHit is true for a key row k (aliased k; $5 the ClaimResponse-identifier
+// kind, $6 the request-identifier kind) that is a ClaimResponse identifier whose
+// value is the value of one of the same authorization's request identifiers:
+// engine.EchoedClaimIdentifier in SQL. The value is the part after the first "|".
+const echoedHit = `k.kind=$5 AND EXISTS (SELECT 1 FROM gw_pended_claim_key r
+     WHERE r.holder_id=k.holder_id AND r.requester_holder=k.requester_holder
+       AND r.subject_pci=k.subject_pci AND r.correlation_id=k.correlation_id
+       AND r.kind=$6
+       AND position('|' in k.key) < length(k.key)
+       AND substring(r.key from position('|' in r.key)+1) = substring(k.key from position('|' in k.key)+1))`
+
+// scanPendCandidates reads (subject_pci, correlation_id) rows and closes them.
+func scanPendCandidates(rows pgx.Rows) ([]engine.PendCandidate, error) {
+	defer rows.Close()
+	var out []engine.PendCandidate
+	for rows.Next() {
+		var c engine.PendCandidate
+		if err := rows.Scan(&c.SubjectPCI, &c.CorrelationID); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
 	}
-	switch len(found) {
-	case 0:
-		return "", "", false, false, nil
-	case 1:
-		return found[0][0], found[0][1], true, false, nil
-	default:
-		return "", "", false, true, nil
-	}
+	return out, rows.Err()
 }
 
 // pendProbes flattens the probe keys into the two parallel arrays the lookup's
-// unnest takes.
-func pendProbes(k engine.PendKeys) struct{ kinds, keys []string } {
+// unnest takes. The refs are already bounded (engine.StrongPendProbe drops a key
+// the record side would have refused, so it matches nothing rather than failing
+// the follow-up).
+func pendProbes(refs []engine.PendKeyRef) struct{ kinds, keys []string } {
 	var out struct{ kinds, keys []string }
-	// A key the record side would have refused (oversized) can never be stored, so
-	// LookupPended drops it rather than failing the follow-up — engine.PendKeys
-	// does that filtering for both backends.
-	for _, ref := range engine.ProbePendKeys(k) {
+	for _, ref := range refs {
 		out.kinds = append(out.kinds, ref.Kind)
 		out.keys = append(out.keys, ref.Key)
 	}
@@ -245,7 +322,7 @@ func pendProbes(k engine.PendKeys) struct{ kinds, keys []string } {
 // The decision and the EOB are ONE transaction: if the EOB write fails, the
 // decision rolls back with it, so the ledger never says "decided" about an
 // authorization whose EOB is missing.
-func (s *PgStore) RecordDecision(subjectPCI, corrID, outcome string, decidedAt time.Time, eob *engine.EOBRecord) (engine.PendTransition, error) {
+func (s *PgStore) RecordDecision(subjectPCI, corrID, outcome string, decidedAt time.Time, k engine.PendKeys, eob *engine.EOBRecord) (engine.PendTransition, error) {
 	if err := engine.ValidatePendDecision(outcome); err != nil {
 		return engine.PendTransition{}, err
 	}
@@ -263,13 +340,44 @@ func (s *PgStore) RecordDecision(subjectPCI, corrID, outcome string, decidedAt t
 	if err != nil {
 		return engine.PendTransition{}, fmt.Errorf("pgstore: RecordDecision: %w", err)
 	}
+	if found && cur.RequesterHolder != "" && k.RequesterHolder != "" && cur.RequesterHolder != k.RequesterHolder {
+		return engine.PendTransition{}, engine.ErrPendRequesterMismatch
+	}
 	next, tr := engine.PendDecide(cur, found, outcome, decidedAt)
 	next.RequesterHolder = cur.RequesterHolder
+	if !found {
+		next.RequesterHolder = k.RequesterHolder
+	}
 	next.LastTransition = s.now()
 	if err := writePendRow(ctx, tx, s.holderID, subjectPCI, corrID, next); err != nil {
 		return engine.PendTransition{}, fmt.Errorf("pgstore: RecordDecision: %w", err)
 	}
-	if eob != nil {
+	kept := engine.PendEOBWritable(next, outcome, decidedAt)
+	// The EOB states the decision the ledger keeps, so it is written only when
+	// that decision is this answer's (engine.PendEOBWritable): a losing or older
+	// answer leaves the kept decision's EOB as it is. An outcome that changes
+	// with no EOB of its own removes the one that stated the old outcome
+	// (engine.PendEOBStale).
+	if eob == nil || !kept {
+		if engine.PendEOBStale(cur, found, next) {
+			if tr.EOBRemoved, err = removeEOB(ctx, tx, s.holderID, subjectPCI, engine.DecisionEOBID(corrID)); err != nil {
+				return engine.PendTransition{}, fmt.Errorf("pgstore: RecordDecision: %w", err)
+			}
+		}
+	}
+	// The decision's keys under its requester (engine.DecisionPendKeys): every
+	// key for an authorization decided with no row before it, the kept
+	// decision's authorization number otherwise.
+	for _, ref := range engine.DecisionPendKeys(found, kept, next.RequesterHolder, k) {
+		if _, err := tx.Exec(ctx, `
+INSERT INTO gw_pended_claim_key (holder_id, requester_holder, kind, key, subject_pci, correlation_id)
+VALUES ($1, $2, $3, $4, $5, $6)
+ON CONFLICT DO NOTHING`,
+			s.holderID, next.RequesterHolder, ref.Kind, ref.Key, subjectPCI, corrID); err != nil {
+			return engine.PendTransition{}, fmt.Errorf("pgstore: RecordDecision: key %s: %w", ref.Kind, err)
+		}
+	}
+	if eob != nil && kept {
 		var recordedID string
 		err := tx.QueryRow(ctx, `
 INSERT INTO gw_eob (holder_id, eob_id, subject_pci, eob_json)
@@ -289,6 +397,17 @@ RETURNING eob_id`,
 		return engine.PendTransition{}, fmt.Errorf("pgstore: RecordDecision: commit: %w", err)
 	}
 	return tr, nil
+}
+
+// removeEOB removes the EOB filed under eobID for subjectPCI inside tx,
+// reporting whether there was one. An id filed for another patient is not this
+// patient's to remove.
+func removeEOB(ctx context.Context, tx pgx.Tx, holderID, subjectPCI, eobID string) (bool, error) {
+	tag, err := tx.Exec(ctx, `DELETE FROM gw_eob WHERE holder_id=$1 AND eob_id=$2 AND subject_pci=$3`, holderID, eobID, subjectPCI)
+	if err != nil {
+		return false, fmt.Errorf("remove EOB: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 // PendRecordOf reads one ledger row. See engine.PendLedger. Unlike Store's

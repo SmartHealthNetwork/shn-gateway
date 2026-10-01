@@ -113,6 +113,7 @@ func uc06Pend(t *testing.T, profile string, payer shnsdk.PayerIdentifier, level 
 	gw, _ := newPendResumeFixture(t, pendFixtureOpts{member: "MBR-UC06", birthDate: "1969-07-21", familyName: "Reyes", pendedItem: "functional-status"})
 	routeIdentityTo(t, &gw.cfg, payer)
 	gw.cfg.OriginationProfile, gw.cfg.ConformanceEnforcement, gw.cfg.Validator, gw.cfg.Observer = profile, level, v, observe
+	defer gw.drainObserveChecks() // observe-level checks run off the request path
 	rec := httptest.NewRecorder()
 	if _, ok := gw.scenarioToPend(rec, httptest.NewRequest(http.MethodPost, "/scenario/uc06", nil), "uc06", "MBR-UC06"); ok {
 		return http.StatusOK, rec.Body.String()
@@ -136,6 +137,7 @@ func homeOxygen(t *testing.T, profile string, payer shnsdk.PayerIdentifier, leve
 			routeIdentityTo(t, c, payer)
 			c.OriginationProfile, c.ConformanceEnforcement, c.Validator, c.Observer = profile, level, v, observe
 		})
+	defer fix.gw.drainObserveChecks()
 	rec := httptest.NewRecorder()
 	fix.gw.handleHomeOxygen(rec, httptest.NewRequest(http.MethodPost, "/scenario/homeoxygen", nil))
 	return rec.Code, rec.Body.String()
@@ -148,6 +150,7 @@ func uc05(t *testing.T, profile string, payer shnsdk.PayerIdentifier, level Conf
 		pendedItem: "operative-diagnostic-report", extraRoles: map[string]string{"facility": "metro-spine"}})
 	routeIdentityTo(t, &gw.cfg, payer)
 	gw.cfg.OriginationProfile, gw.cfg.ConformanceEnforcement, gw.cfg.Validator, gw.cfg.Observer = profile, level, v, observe
+	defer gw.drainObserveChecks() // observe-level checks run off the request path
 	rec := httptest.NewRecorder()
 	gw.handleUC05(rec, httptest.NewRequest(http.MethodPost, "/scenario/uc05", nil))
 	return rec.Code, rec.Body.String()
@@ -160,6 +163,7 @@ func nextQuestion(t *testing.T, profile string, payer shnsdk.PayerIdentifier, le
 	declareFramedDTR(t, env, true)
 	env.originator.cfg.OriginationProfile, env.originator.cfg.ConformanceEnforcement = profile, level
 	env.originator.cfg.Validator, env.originator.cfg.Observer = v, observe
+	defer env.originator.drainObserveChecks()
 	route, err := env.originator.selectLegLine(env.payerID, "dtr-questionnaire-fetch", "corr-0")
 	if err != nil {
 		t.Fatal(err)
@@ -233,8 +237,10 @@ func TestPayerAnswerFlows_PartnerPayerIsGovernedAtItsLevel(t *testing.T) {
 				name := flow.name + "/" + profile + "/" + row.level.String() + "/" + [...]string{"valid", "structural", "deeper", "outage", "no-resource"}[row.verdict]
 				t.Run(name, func(t *testing.T) {
 					v := &answerValidator{verdict: row.verdict, leg: flow.leg, shapes: flow.shapes}
+					var mu sync.Mutex
 					var events []ObserverEvent
-					status, body := flow.run(t, profile, partnerPayerID, row.level, v, func(e ObserverEvent) { events = append(events, e) })
+					// Observe checks report from a worker as well as the leg's goroutine.
+					status, body := flow.run(t, profile, partnerPayerID, row.level, v, func(e ObserverEvent) { mu.Lock(); events = append(events, e); mu.Unlock() })
 					if status != row.want.status || row.want.msg != "" && !strings.Contains(body, row.want.msg) {
 						t.Fatalf("status %d %s, want %d naming %q", status, body, row.want.status, row.want.msg)
 					}
@@ -272,8 +278,9 @@ func TestPayerAnswerFlows_ReferencePayersAreNotCertified(t *testing.T) {
 				for _, level := range everyLevel {
 					t.Run(flow.name+"/"+profile+"/"+payer.Value+"/"+level.String(), func(t *testing.T) {
 						v := &answerValidator{verdict: scriptStructural, leg: flow.leg, shapes: flow.shapes}
+						var mu sync.Mutex
 						var events []ObserverEvent
-						status, body := flow.run(t, profile, payer, level, v, func(e ObserverEvent) { events = append(events, e) })
+						status, body := flow.run(t, profile, payer, level, v, func(e ObserverEvent) { mu.Lock(); events = append(events, e); mu.Unlock() })
 						if status != http.StatusOK {
 							t.Fatalf("status %d %s, want the reference answer relayed", status, body)
 						}

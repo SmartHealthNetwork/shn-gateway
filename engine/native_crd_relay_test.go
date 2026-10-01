@@ -460,6 +460,9 @@ func TestNativeCRD_EmbeddedValidationOnlyWhereChecksRun(t *testing.T) {
 				if err != nil || hdr.Status != http.StatusOK || !bytes.Equal(body, answer) {
 					t.Fatalf("the answer must be relayed: %v %d %s", err, hdr.Status, body)
 				}
+				g.drainObserveChecks() // at observe the validation runs off the request path
+				mu.Lock()
+				defer mu.Unlock()
 				switch level {
 				case EnforcementNone:
 					if calls != 0 || embeddedEvents != 0 {

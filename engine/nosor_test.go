@@ -246,10 +246,24 @@ func runPayerLeg(t *testing.T, sor SystemOfRecord, c payerLegCase) legRun {
 	if err := p.g.waitCertification(ctx); err != nil {
 		t.Fatalf("certification evidence did not arrive: %v", err)
 	}
+	// An observe-level check runs off the request path, so its events are read
+	// once the queue is idle, and they may land anywhere among the leg's own:
+	// the leg's events keep their order, and the queued checks' events follow
+	// them, sorted, so two runs compare equal whatever the interleaving.
+	p.g.drainObserveChecks()
 	mu.Lock()
 	defer mu.Unlock()
 	run.status, run.framed, run.body = got.status, got.framed, got.body
-	run.events = slices.Clone(run.events)
+	var inline, queued []string
+	for _, e := range run.events {
+		if strings.HasPrefix(e, CRDEmbeddedValidatedEvent+"/") || strings.HasPrefix(e, ConformanceObservedEvent+"/") {
+			queued = append(queued, e)
+		} else {
+			inline = append(inline, e)
+		}
+	}
+	slices.Sort(queued)
+	run.events = append(inline, queued...)
 	run.authorized = slices.Clone(run.authorized)
 	if c.ledger != nil {
 		run.ledger = c.ledger(t, p, got.corr)
@@ -476,7 +490,9 @@ func TestNoSystemOfRecord_InquiryWithoutTheSubmitsPatientIsRelayed(t *testing.T)
 			}
 
 			p.partner.respByPath[pasInquirePath] = decided
-			inquiry := p.sendAs(t, "pas-claim-inquire", "", tc.inquiry, nosorTokenSubject)
+			// Asked by the trace number the payer's pend named for the claim (the
+			// submission carries none), so the inquiry is about that claim.
+			inquiry := p.sendAs(t, "pas-claim-inquire", "", withTrace(t, tc.inquiry, "http://example.org/ITEM_TRACE_NUMBER", "prior-auth-required-trace"), nosorTokenSubject)
 			if inquiry.status != http.StatusOK || !inquiry.framed || !bytes.Equal(inquiry.body, decided) {
 				t.Fatalf("the inquiry must relay the payer's answer exactly: %d %s", inquiry.status, inquiry.body)
 			}

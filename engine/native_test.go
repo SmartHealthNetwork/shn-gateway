@@ -41,6 +41,9 @@ type stubPartner struct {
 	calls atomic.Int32
 	// delay holds each operation's answer back this long: a slow system.
 	delay time.Duration
+	// listingStatus, when set, is the CDS service listing's status: a listing
+	// the payer's system fails to give.
+	listingStatus int
 }
 
 func newStubPartner(t *testing.T) *stubPartner {
@@ -51,6 +54,10 @@ func newStubPartner(t *testing.T) *stubPartner {
 		if r.Method == http.MethodGet && r.URL.Path == "/cds-services" {
 			// The CDS service listing the CRD legs read; the tests name the service.
 			s.listingHeader = r.Header.Clone()
+			if s.listingStatus != 0 {
+				w.WriteHeader(s.listingStatus)
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{"services": stubCDSServices})
 			return

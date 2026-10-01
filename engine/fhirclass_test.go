@@ -470,6 +470,7 @@ func TestValidateGovernedStructural(t *testing.T) {
 		g, captured := findingsGateway(tc.level)
 		v := &capturingValidator{res: tc.res}
 		gr := g.validateGoverned(context.Background(), findingContext{LegType: "test"}, v, coverage, "ingress", "2.0", "", false)
+		g.drainObserveChecks()
 		findings := *captured
 		if gr.Status != tc.status {
 			t.Errorf("%s: status %d, want %d (%s)", tc.name, gr.Status, tc.status, gr.Msg)
@@ -500,6 +501,7 @@ func TestValidateGovernedWrapsParameters(t *testing.T) {
 	g, captured := findingsGateway(EnforcementObserve)
 	v := &capturingValidator{res: invalid(errIssue("Terminology_TX_NoValid_1_CC", nil, "x"))}
 	g.validateGoverned(context.Background(), findingContext{LegType: "test"}, v, params, "ingress", "2.0", "", false)
+	g.drainObserveChecks()
 	findings := *captured
 	if !strings.HasPrefix(string(v.sent), `{"resourceType":"Parameters","parameter":[{"name":"resource","resource":{"resourceType":"Parameters"`) {
 		t.Fatalf("the validator must receive the wrapped Parameters, got %s", v.sent)

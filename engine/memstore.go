@@ -214,6 +214,11 @@ func (d *MemStore) RecordPendedKeyed(subjectPCI, corrID string, created time.Tim
 		}
 	}
 	next, tr := PendRePend(cur, found, created, d.now())
+	// A later-dated re-pend reopens a decided authorization: the decision's EOB
+	// no longer states what the ledger keeps (PendEOBStale).
+	if PendEOBStale(cur, found, next) {
+		tr.EOBRemoved = d.removeEOBLocked(subjectPCI, DecisionEOBID(corrID))
+	}
 	next.RequesterHolder = k.RequesterHolder
 	d.upsertLocked(subjectPCI, corrID, next)
 	d.indexLocked(subjectPCI, corrID, k.RequesterHolder, refs)
@@ -228,34 +233,70 @@ func (d *MemStore) RecordPendedKeyed(subjectPCI, corrID string, created time.Tim
 
 // LookupPended resolves a follow-up's keys within one requester's namespace. See
 // PendLedger.
-func (d *MemStore) LookupPended(requesterHolder string, k PendKeys) (string, string, bool, bool, error) {
+func (d *MemStore) LookupPended(requesterHolder string, k PendKeys, about []PendKeyRef) (PendMatch, error) {
 	if requesterHolder == "" {
-		return "", "", false, false, ErrPendRequesterRequired
+		return PendMatch{}, ErrPendRequesterRequired
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	hits := map[string]bool{}
-	for _, ref := range ProbePendKeys(k) {
+	echoed := false
+	for _, ref := range StrongPendProbe(k) {
 		for key := range d.pendedKeys[pendIndexKey{requesterHolder: requesterHolder, kind: ref.Kind, key: ref.Key}] {
+			if ref.Kind == PendKeyClaimResponseIdentifier && EchoedClaimIdentifier(ref.Key, d.heldLocked(key, requesterHolder)) {
+				echoed = true
+				continue
+			}
 			hits[key] = true
 		}
 	}
-	if len(hits) == 0 {
-		return "", "", false, false, nil
-	}
-	if len(hits) > 1 {
-		// Two authorizations share a key: the ledger will not guess which one the
-		// requester meant, and it changes nothing.
-		return "", "", false, true, nil
-	}
+	var (
+		candidates   []PendCandidate
+		held         []PendKeyRef
+		aboutHolders []PendCandidate
+	)
 	for key := range hits {
 		row := d.pendedClaims[key]
 		if row == nil { // an index entry outliving its row cannot happen; stay total
-			return "", "", false, false, nil
+			continue
 		}
-		return row.subjectPCI, row.correlationID, true, false, nil
+		candidates = append(candidates, PendCandidate{SubjectPCI: row.subjectPCI, CorrelationID: row.correlationID})
+		for idx := range row.keys {
+			if idx.requesterHolder == requesterHolder {
+				held = append(held, PendKeyRef{Kind: idx.kind, Key: idx.key})
+			}
+		}
 	}
-	return "", "", false, false, nil
+	if len(candidates) == 1 && len(about) > 0 {
+		holders := map[string]bool{}
+		for _, ref := range about {
+			for key := range d.pendedKeys[pendIndexKey{requesterHolder: requesterHolder, kind: ref.Kind, key: ref.Key}] {
+				holders[key] = true
+			}
+		}
+		for key := range holders {
+			if row := d.pendedClaims[key]; row != nil {
+				aboutHolders = append(aboutHolders, PendCandidate{SubjectPCI: row.subjectPCI, CorrelationID: row.correlationID})
+			}
+		}
+	}
+	return ResolvePendMatch(k, about, candidates, held, aboutHolders, echoed), nil
+}
+
+// heldLocked is the keys the authorization filed under key holds in the
+// requester's namespace.
+func (d *MemStore) heldLocked(key, requesterHolder string) []PendKeyRef {
+	row := d.pendedClaims[key]
+	if row == nil {
+		return nil
+	}
+	var held []PendKeyRef
+	for idx := range row.keys {
+		if idx.requesterHolder == requesterHolder {
+			held = append(held, PendKeyRef{Kind: idx.kind, Key: idx.key})
+		}
+	}
+	return held
 }
 
 // RecordDecision records the payer's terminal answer and its EOB as one write. See
@@ -264,7 +305,7 @@ func (d *MemStore) LookupPended(requesterHolder string, k PendKeys) (string, str
 // The decision and the EOB land together or not at all. In memory that means both
 // guards run BEFORE any state changes and both writes then happen under one hold of
 // the mutex; the durable backend runs the same two writes in one transaction.
-func (d *MemStore) RecordDecision(subjectPCI, corrID, outcome string, decidedAt time.Time, eob *EOBRecord) (PendTransition, error) {
+func (d *MemStore) RecordDecision(subjectPCI, corrID, outcome string, decidedAt time.Time, k PendKeys, eob *EOBRecord) (PendTransition, error) {
 	if err := ValidatePendDecision(outcome); err != nil {
 		return PendTransition{}, err
 	}
@@ -273,20 +314,38 @@ func (d *MemStore) RecordDecision(subjectPCI, corrID, outcome string, decidedAt 
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if eob != nil {
-		if err := d.recordEOBLocked(eob.SubjectPCI, eob.EOBID, eob.JSON); err != nil {
-			return PendTransition{}, err
-		}
-	}
 	row, found := d.pendedClaims[pendedKey(subjectPCI, corrID)]
 	var cur PendRecord
 	if found {
 		cur = row.rec
+		if cur.RequesterHolder != "" && k.RequesterHolder != "" && cur.RequesterHolder != k.RequesterHolder {
+			return PendTransition{}, ErrPendRequesterMismatch
+		}
 	}
 	next, tr := PendDecide(cur, found, outcome, decidedAt)
+	kept := PendEOBWritable(next, outcome, decidedAt)
+	// The EOB states the decision the ledger keeps, so it is written only when
+	// that decision is this answer's (PendEOBWritable): a losing or older answer
+	// leaves the kept decision's EOB as it is. Written before the row, so a
+	// refused EOB leaves no decision. An outcome that changes with no EOB of its
+	// own removes the one that stated the old outcome (PendEOBStale).
+	switch {
+	case eob != nil && kept:
+		if err := d.recordEOBLocked(eob.SubjectPCI, eob.EOBID, eob.JSON); err != nil {
+			return PendTransition{}, err
+		}
+	case PendEOBStale(cur, found, next):
+		tr.EOBRemoved = d.removeEOBLocked(subjectPCI, DecisionEOBID(corrID))
+	}
 	next.RequesterHolder = cur.RequesterHolder
+	if !found {
+		next.RequesterHolder = k.RequesterHolder
+	}
 	next.LastTransition = d.now()
 	d.upsertLocked(subjectPCI, corrID, next)
+	if refs := DecisionPendKeys(found, kept, next.RequesterHolder, k); len(refs) > 0 {
+		d.indexLocked(subjectPCI, corrID, next.RequesterHolder, refs)
+	}
 	return tr, nil
 }
 
@@ -403,6 +462,25 @@ func (d *MemStore) maybePurgeLocked() {
 	}
 }
 
+// removeEOBLocked removes the EOB filed under eobID for subjectPCI, reporting
+// whether there was one. An id filed for another patient is not this patient's
+// to remove.
+func (d *MemStore) removeEOBLocked(subjectPCI, eobID string) bool {
+	if owner, seen := d.eobOwnerByID[eobID]; !seen || owner != subjectPCI {
+		return false
+	}
+	delete(d.eobOwnerByID, eobID)
+	delete(d.eobByID, eobID)
+	ids := d.eobIDsByPCI[subjectPCI][:0]
+	for _, id := range d.eobIDsByPCI[subjectPCI] {
+		if id != eobID {
+			ids = append(ids, id)
+		}
+	}
+	d.eobIDsByPCI[subjectPCI] = ids
+	return true
+}
+
 // recordEOBLocked stores a COPY of the bytes under eobID, appending the id to the
 // patient's list only the first time that id is seen — a re-recorded id is ONE EOB,
 // exactly as it is one row in the durable store.
@@ -437,7 +515,7 @@ func (d *MemStore) EOBOwner(eobID string) (string, bool, error) {
 	return owner, found, nil
 }
 
-// PendedForOtherSubject reports a patient other than subjectPCI with an undecided
+// PendedForOtherSubject reports a patient other than subjectPCI with an
 // authorization under corrID. See PendCorrelationLookup. When more than one
 // qualifies the least PCI is reported, so the answer does not depend on map order.
 func (d *MemStore) PendedForOtherSubject(corrID, subjectPCI string) (string, bool, error) {
@@ -445,7 +523,7 @@ func (d *MemStore) PendedForOtherSubject(corrID, subjectPCI string) (string, boo
 	defer d.mu.Unlock()
 	other, found := "", false
 	for _, row := range d.pendedClaims {
-		if row.correlationID != corrID || row.subjectPCI == subjectPCI || row.rec.State == PendStateDecided {
+		if row.correlationID != corrID || row.subjectPCI == subjectPCI {
 			continue
 		}
 		if !found || row.subjectPCI < other {

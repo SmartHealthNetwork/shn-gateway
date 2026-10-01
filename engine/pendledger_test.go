@@ -200,12 +200,23 @@ func TestPendLedger_KeyedLookupIgnoresAnOversizedProbe(t *testing.T) {
 	for i := range long {
 		long[i] = 'x'
 	}
-	_, _, found, ambiguous, err := d.LookupPended("provider-a", PendKeys{
+	// An oversized strong key is dropped from the probe, so it searches by
+	// nothing; an oversized weak key beside a real strong key confirms nothing,
+	// and the claim is found by the strong key.
+	m, err := d.LookupPended("provider-a", PendKeys{
+		RequesterHolder:  "provider-a",
+		ClaimResponseIDs: []string{string(long)},
+	}, nil)
+	if err != nil || m.Verdict != PendMatchNoStrongKey {
+		t.Fatalf("lookup with an oversized strong probe = %+v,%v", m, err)
+	}
+	m, err = d.LookupPended("provider-a", PendKeys{
 		RequesterHolder: "provider-a",
+		PreAuthRef:      "PA-1",
 		RequestIDs:      []string{string(long)},
-	})
-	if err != nil || found || ambiguous {
-		t.Fatalf("lookup with an oversized probe = %v,%v,%v", found, ambiguous, err)
+	}, nil)
+	if err != nil || m.Verdict != PendMatchFound {
+		t.Fatalf("lookup with an oversized weak probe = %+v,%v", m, err)
 	}
 }
 
@@ -220,9 +231,9 @@ func TestPendLedger_ResetClearsTheLedger(t *testing.T) {
 	if _, ok, err := d.PendRecordOf("PCI-A", "corr-A"); ok || err != nil {
 		t.Fatalf("PendRecordOf after Reset = %v,%v", ok, err)
 	}
-	_, _, found, _, err := d.LookupPended("provider-a", PendKeys{RequesterHolder: "provider-a", PreAuthRef: "PA-1"})
-	if err != nil || found {
-		t.Fatalf("lookup after Reset = %v,%v", found, err)
+	m, err := d.LookupPended("provider-a", PendKeys{RequesterHolder: "provider-a", PreAuthRef: "PA-1"}, nil)
+	if err != nil || m.Verdict != PendMatchNone {
+		t.Fatalf("lookup after Reset = %+v,%v", m, err)
 	}
 }
 
@@ -365,5 +376,36 @@ func TestPendLedger_AStrandedHoldLapses(t *testing.T) {
 	}
 	if ok, _, _ := d.BeginClaimUpdateReason("PCI-A", "corr-A"); !ok {
 		t.Fatal("a new amendment could not bind after the hold lapsed")
+	}
+}
+
+// TestResolvePendMatch_Verdicts pins the shared verdict every backend returns,
+// as one table, so a third-party PendLedger that calls it gets the same
+// answers the built-in stores do.
+func TestResolvePendMatch_Verdicts(t *testing.T) {
+	strong := PendKeys{RequesterHolder: "provider-a", ClaimResponseIDs: []string{"urn:payer:cr|CR-1"}, ItemTraceNumbers: []string{"urn:shn:trace|TRACE-1"}}
+	one := []PendCandidate{{SubjectPCI: "PCI-A", CorrelationID: "corr-A"}}
+	two := append(one, PendCandidate{SubjectPCI: "PCI-A", CorrelationID: "corr-B"})
+	held := []PendKeyRef{{Kind: PendKeyClaimResponseIdentifier, Key: "urn:payer:cr|CR-1"}, {Kind: PendKeyItemTraceNumber, Key: "urn:shn:trace|TRACE-1"}}
+	for _, tc := range []struct {
+		name       string
+		stated     PendKeys
+		candidates []PendCandidate
+		held       []PendKeyRef
+		want       PendMatch
+	}{
+		{"no strong key, whatever was found", PendKeys{RequesterHolder: "provider-a", RequestIDs: []string{"urn:shn:claim|C-1"}, ItemTraceNumbers: []string{"urn:shn:trace|TRACE-1"}}, one, held,
+			PendMatch{Verdict: PendMatchNoStrongKey}},
+		{"nothing found", strong, nil, nil, PendMatch{Verdict: PendMatchNone}},
+		{"two found", strong, two, held, PendMatch{Verdict: PendMatchAmbiguous}},
+		{"one found, agreeing", strong, one, held, PendMatch{SubjectPCI: "PCI-A", CorrelationID: "corr-A", Verdict: PendMatchFound}},
+		{"one found, a stated kind it holds none of", PendKeys{RequesterHolder: "provider-a", ClaimResponseIDs: []string{"urn:payer:cr|CR-1"}, PreAuthRef: "PA-9"}, one, held,
+			PendMatch{SubjectPCI: "PCI-A", CorrelationID: "corr-A", Verdict: PendMatchFound}},
+		{"one found, disagreeing", PendKeys{RequesterHolder: "provider-a", ClaimResponseIDs: []string{"urn:payer:cr|CR-1"}, ItemTraceNumbers: []string{"urn:shn:trace|TRACE-9"}}, one, held,
+			PendMatch{Verdict: PendMatchDisagrees, Kind: PendKeyItemTraceNumber}},
+	} {
+		if got := ResolvePendMatch(tc.stated, nil, tc.candidates, tc.held, nil, false); got != tc.want {
+			t.Errorf("%s: ResolvePendMatch = %+v, want %+v", tc.name, got, tc.want)
+		}
 	}
 }

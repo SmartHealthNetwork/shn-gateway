@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -567,10 +568,185 @@ func TestPayorEdge_CRDBundlePrefetch(t *testing.T) {
 		n, p := crdResponder(t, WithPayorEdgeIdentity(payorNPI, payorMapped))
 		assertRefused(t, handleCRD(t, n, body), p, http.StatusBadRequest, "does not match")
 	})
-	t.Run("a Bundle with no Coverage is refused", func(t *testing.T) {
+	t.Run("a Bundle with no Coverage is sent exactly", func(t *testing.T) {
 		empty := replaceValue(t, body, []byte(`{"resourceType":"Bundle","type":"collection","entry":[]}`), "prefetch", "coverage")
 		n, p := crdResponder(t, WithPayorEdgeIdentity(shnsdk.CMSPayerIdentity, payorMapped))
-		assertRefused(t, handleCRD(t, n, empty), p, http.StatusBadRequest, "no resolvable payor identifier")
+		if res := handleCRD(t, n, empty); res.Status != 0 {
+			t.Fatalf("status %d: %s", res.Status, res.Message)
+		}
+		assertSent(t, p, empty)
+	})
+}
+
+// A CDS Hooks request that carries no Coverage at all has no payor to map:
+// the network routed it to this payer, so the mapping sends it to the
+// payer's own system exactly as it arrived, and that system answers it. The
+// mapping still refuses a Coverage whose payor it cannot read and one naming
+// another payer, and still maps one naming this payer.
+func TestPayorEdge_CRDWithoutCoverage(t *testing.T) {
+	body := unsignedCRDRequest(t)
+	carried := map[string][]byte{
+		"no prefetch.coverage":   withoutMember(t, body, "coverage", "prefetch"),
+		"no prefetch":            withoutMember(t, body, "prefetch"),
+		"prefetch.coverage null": replaceValue(t, body, []byte(`null`), "prefetch", "coverage"),
+		"prefetch null":          replaceValue(t, body, []byte(`null`), "prefetch"),
+		"an empty searchset":     replaceValue(t, body, []byte(`{"resourceType":"Bundle","type":"searchset","total":0}`), "prefetch", "coverage"),
+		"a searchset with a null entry": replaceValue(t, body, []byte(`{"resourceType":"Bundle","type":"searchset","total":0,"entry":null}`),
+			"prefetch", "coverage"),
+		"a searchset with no entries": replaceValue(t, body, []byte(`{"resourceType":"Bundle","type":"searchset","total":0,"entry":[]}`),
+			"prefetch", "coverage"),
+		"a searchset holding only an OperationOutcome": replaceValue(t, body, []byte(`{"resourceType":"Bundle","type":"searchset","total":0,"entry":[`+
+			`{"resource":{"resourceType":"OperationOutcome","issue":[{"severity":"information","code":"not-found"}]},"search":{"mode":"outcome"}}]}`), "prefetch", "coverage"),
+	}
+	for name, req := range carried {
+		t.Run("carried as sent: "+name, func(t *testing.T) {
+			n, p := crdResponder(t, WithPayorEdgeIdentity(shnsdk.CMSPayerIdentity, payorMapped))
+			if res := handleCRD(t, n, req); res.Status != 0 {
+				t.Fatalf("status %d: %s", res.Status, res.Message)
+			}
+			assertSent(t, p, req)
+		})
+	}
+
+	// A Coverage, or something else where the Coverage is read, that names no
+	// payor the mapping can read is refused as before.
+	unreadable := map[string][]byte{
+		"a Coverage with no payor": withoutMember(t, body, "payor", jsonPath("prefetch.coverage.entry.0.resource")...),
+		"a payor with neither identifier nor reference": replaceValue(t, body, []byte(`[{"display":"Some payer"}]`),
+			jsonPath("prefetch.coverage.entry.0.resource.payor")...),
+		"a bare Coverage with no payor": replaceValue(t, body, []byte(`{"resourceType":"Coverage","status":"active","beneficiary":{"reference":"Patient/example"}}`),
+			"prefetch", "coverage"),
+		"prefetch.coverage that is not an object": replaceValue(t, body, []byte(`"Coverage/coverage-1"`), "prefetch", "coverage"),
+		"prefetch that is not an object":          replaceValue(t, body, []byte(`[]`), "prefetch"),
+	}
+	for name, req := range unreadable {
+		t.Run("refused: "+name, func(t *testing.T) {
+			n, p := crdResponder(t, WithPayorEdgeIdentity(shnsdk.CMSPayerIdentity, payorMapped))
+			assertRefused(t, handleCRD(t, n, req), p, http.StatusBadRequest,
+				"inbound Coverage carries no resolvable payor identifier")
+		})
+	}
+
+	// Only an empty prefetch.coverage, with no Coverage anywhere else in the
+	// request, is the absence of a Coverage. A coverage Bundle holding
+	// anything but OperationOutcome entries, or a Coverage elsewhere in the
+	// request, is answered as before: the mapping finds no Coverage it can
+	// read in prefetch.coverage, and refuses.
+	foreign := `{"resourceType":"Coverage","id":"foreign-cov","status":"active","beneficiary":{"reference":"Patient/example"},` +
+		`"payor":[{"identifier":{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00002"}}]}`
+	untyped := `{"id":"foreign-cov","status":"active","beneficiary":{"reference":"Patient/example"},` +
+		`"payor":[{"identifier":{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00002"}}]}`
+	emptySearch := replaceValue(t, body, []byte(`{"resourceType":"Bundle","type":"searchset","total":0,"entry":[]}`), "prefetch", "coverage")
+	noCoverageKey := withoutMember(t, body, "coverage", "prefetch")
+	notEmpty := map[string][]byte{
+		"a batch-response whose entry is a searchset holding a Coverage": replaceValue(t, body, []byte(
+			`{"resourceType":"Bundle","type":"batch-response","entry":[{"resource":{"resourceType":"Bundle","type":"searchset","total":1,`+
+				`"entry":[{"resource":`+foreign+`,"search":{"mode":"match"}}]},"response":{"status":"200 OK"}}]}`), "prefetch", "coverage"),
+		"a searchset entry that is a Coverage without resourceType": replaceValue(t, body, []byte(
+			`{"resourceType":"Bundle","type":"searchset","total":1,"entry":[{"resource":`+untyped+`,"search":{"mode":"match"}}]}`),
+			"prefetch", "coverage"),
+		"a searchset entry that is a Patient containing a Coverage": replaceValue(t, body, []byte(
+			`{"resourceType":"Bundle","type":"searchset","total":1,"entry":[{"resource":{"resourceType":"Patient","id":"example",`+
+				`"contained":[`+foreign+`]},"search":{"mode":"match"}}]}`), "prefetch", "coverage"),
+		"a coverage Bundle whose entry is an object": replaceValue(t, body, []byte(
+			`{"resourceType":"Bundle","type":"searchset","total":1,"entry":{"resource":`+foreign+`}}`), "prefetch", "coverage"),
+		"a coverage Bundle whose entry resource is not an object": replaceValue(t, body, []byte(
+			`{"resourceType":"Bundle","type":"searchset","total":1,"entry":[{"resource":"Coverage/foreign-cov"}]}`), "prefetch", "coverage"),
+		"no prefetch.coverage and a Coverage in a searchset under prefetch.serviceHistory": replaceValue(t, noCoverageKey, []byte(
+			`{"resourceType":"Bundle","type":"searchset","total":1,"entry":[{"resource":`+foreign+`,"search":{"mode":"match"}}]}`),
+			"prefetch", "serviceHistory"),
+		"no prefetch.coverage and a Coverage under prefetch.Coverage": insertIntoObject(t, noCoverageKey, `"Coverage":`+foreign+`,`, "prefetch"),
+		"an empty searchset and a Coverage in a searchset under prefetch.serviceHistory": replaceValue(t, emptySearch, []byte(
+			`{"resourceType":"Bundle","type":"searchset","total":1,"entry":[{"resource":`+foreign+`,"search":{"mode":"match"}}]}`),
+			"prefetch", "serviceHistory"),
+		"no prefetch.coverage and a context.draftOrders entry that is a Coverage": insertIntoObject(t, noCoverageKey,
+			`{"resource":`+foreign+`},`, jsonPath("context.draftOrders.entry")...),
+		"no prefetch and a context.draftOrders entry that is a Coverage": insertIntoObject(t, withoutMember(t, body, "prefetch"),
+			`{"resource":`+foreign+`},`, jsonPath("context.draftOrders.entry")...),
+		"an empty searchset and a context.draftOrders order containing a Coverage": insertIntoObject(t, emptySearch,
+			`"contained":[`+foreign+`],`, jsonPath("context.draftOrders.entry.0.resource")...),
+
+		// A backend whose JSON reader folds case reads these as Coverages.
+		"no prefetch.coverage and a Coverage under prefetch.Coverage with a lowercase resourcetype member": insertIntoObject(t, noCoverageKey,
+			`"Coverage":`+strings.Replace(foreign, `"resourceType"`, `"resourcetype"`, 1)+`,`, "prefetch"),
+		// The walk covers the whole body, the root included: a Coverage under a
+		// member the mapping has no name for, and a request whose root is itself
+		// a Coverage.
+		"no prefetch and a Coverage under an unknown top-level member": insertIntoObject(t, withoutMember(t, body, "prefetch"),
+			`"zz":{"x":`+foreign+`},`),
+		"no prefetch and a root whose resourceType is Coverage": insertIntoObject(t, withoutMember(t, body, "prefetch"),
+			`"resourceType":"Coverage","payor":[{"identifier":{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00002"}}],`),
+		// Only the whole-body walk sees these: no prefetch slot is present.
+		"no prefetch and a context.draftOrders entry with a lowercase resourcetype member": insertIntoObject(t, withoutMember(t, body, "prefetch"),
+			`{"resource":`+strings.Replace(foreign, `"resourceType"`, `"resourcetype"`, 1)+`},`, jsonPath("context.draftOrders.entry")...),
+		"no prefetch and a context.draftOrders entry whose resourceType member uses a long s": insertIntoObject(t, withoutMember(t, body, "prefetch"),
+			`{"resource":`+strings.Replace(foreign, `"resourceType"`, "\"re\u017fourceType\"", 1)+`},`, jsonPath("context.draftOrders.entry")...),
+		"no prefetch and a context.draftOrders entry whose resourceType is coverage": insertIntoObject(t, withoutMember(t, body, "prefetch"),
+			`{"resource":`+strings.Replace(foreign, `"Coverage"`, `"coverage"`, 1)+`},`, jsonPath("context.draftOrders.entry")...),
+		// A slot named in another case is not an empty slot: a backend whose
+		// reader folds case reads it, and the Coverage under it has no
+		// resourceType for the whole-body walk to find.
+		"a Coverage with no resourceType under Prefetch.coverage": insertIntoObject(t, withoutMember(t, body, "prefetch"),
+			`"Prefetch":{"coverage":`+untyped+`},`),
+		"no prefetch.coverage and a Coverage with no resourceType under prefetch.Coverage": insertIntoObject(t, noCoverageKey,
+			`"Coverage":`+untyped+`,`, "prefetch"),
+		"a coverage Bundle whose Entry holds a Coverage with no resourceType": replaceValue(t, body, []byte(
+			`{"resourceType":"Bundle","type":"searchset","total":1,"Entry":[{"resource":`+untyped+`}]}`), "prefetch", "coverage"),
+		// A coverage Bundle holding no Coverage but something other than
+		// OperationOutcome entries is not an empty slot: it goes through the
+		// mapping, which finds no Coverage it can read, and refuses.
+		"a coverage Bundle whose entry is an object holding an OperationOutcome": replaceValue(t, body, []byte(
+			`{"resourceType":"Bundle","type":"searchset","entry":{"resource":{"resourceType":"OperationOutcome","issue":[]}}}`), "prefetch", "coverage"),
+		"a coverage searchset whose entry is a Patient": replaceValue(t, body, []byte(
+			`{"resourceType":"Bundle","type":"searchset","total":1,"entry":[{"resource":{"resourceType":"Patient","id":"example"}}]}`), "prefetch", "coverage"),
+		"a batch-response wrapping an empty searchset": replaceValue(t, body, []byte(
+			`{"resourceType":"Bundle","type":"batch-response","entry":[{"resource":{"resourceType":"Bundle","type":"searchset","total":0,"entry":[]},"response":{"status":"200 OK"}}]}`), "prefetch", "coverage"),
+	}
+	for name, req := range notEmpty {
+		t.Run("refused: "+name, func(t *testing.T) {
+			n, p := crdResponder(t, WithPayorEdgeIdentity(shnsdk.CMSPayerIdentity, payorMapped))
+			assertRefused(t, handleCRD(t, n, req), p, http.StatusBadRequest,
+				"inbound Coverage carries no resolvable payor identifier")
+		})
+	}
+
+	t.Run("refused: a request that is not an object", func(t *testing.T) {
+		for _, root := range []string{`[]`, `null`, `"prefetch"`} {
+			ops, err := locatePayorEdge(payorDoc(t, []byte(root)), payorEdgeCRDRequest,
+				[]shnsdk.PayerIdentifier{shnsdk.CMSPayerIdentity}, payorMapped, nil)
+			var refused *payorEdgeRefused
+			if ops != nil || !errors.As(err, &refused) || refused.status != http.StatusBadRequest ||
+				!strings.Contains(refused.message, "inbound Coverage carries no resolvable payor identifier") {
+				t.Fatalf("%s: got %v, %v", root, ops, err)
+			}
+		}
+	})
+
+	t.Run("refused: a Coverage naming another payer", func(t *testing.T) {
+		n, p := crdResponder(t, WithPayorEdgeIdentity(payorNPI, payorMapped))
+		assertRefused(t, handleCRD(t, n, body), p, http.StatusBadRequest,
+			"inbound Coverage payor urn:oid:2.16.840.1.113883.6.300|00001 does not match this gateway's own payer identity")
+	})
+
+	t.Run("mapped: a Coverage naming this payer", func(t *testing.T) {
+		n, p := crdResponder(t, WithPayorEdgeIdentity(shnsdk.CMSPayerIdentity, payorMapped))
+		if res := handleCRD(t, n, body); res.Status != 0 {
+			t.Fatalf("status %d: %s", res.Status, res.Message)
+		}
+		assertSent(t, p, expectEdits(t, body,
+			tokenEdit{"prefetch.coverage.entry.1.resource.identifier.0.system", payorMapped.System},
+			tokenEdit{"prefetch.coverage.entry.1.resource.identifier.0.value", payorMapped.Value},
+		))
+	})
+
+	// A prior-authorization Bundle names its payer on its Coverage: one with
+	// no Coverage is still refused.
+	t.Run("refused: a PAS Bundle with no Coverage", func(t *testing.T) {
+		n, _ := crdResponder(t, WithPayorEdgeIdentity(shnsdk.CMSPayerIdentity, payorMapped))
+		_, lr := requestOwnership(t, n, []byte(`{"resourceType":"Bundle","type":"collection","entry":[]}`), payorEdgePASBundle)
+		if lr.Status != http.StatusBadRequest || !strings.Contains(lr.Message, "inbound Coverage carries no resolvable payor identifier") {
+			t.Fatalf("got %d %q", lr.Status, lr.Message)
+		}
 	})
 }
 

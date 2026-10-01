@@ -736,8 +736,10 @@ func (n *nativeResponder) post(ctx context.Context, base, path string, p relay.P
 		return n.backendDeadline > 0 && ctx.Err() == nil && errors.Is(callCtx.Err(), context.DeadlineExceeded)
 	}
 	// The gateway's own work before the call (validation, the member's
-	// lookup) used the whole deadline: the payer's system is not asked, and
-	// its time is not its failure.
+	// lookup) used the whole deadline: the operation is not sent, and the
+	// time is not the payer's system's failure. A read of that system that
+	// ran first (the member's lookup, the CDS service listing) is still
+	// recorded, and the last one is the exchange's backend.
 	if timedOut() {
 		logDeadlineSpent(ctx, label, leg, n.backendDeadline)
 		return upstreamReply{}, LegResult{}, &deadlineSpent{deadline: n.backendDeadline}
@@ -1065,8 +1067,14 @@ func certifyCDSHooksAnswer(ctx context.Context, policy ConformancePolicy, emit f
 // prefetch.coverage (a bare Coverage or a Bundle) to n.payorEdgeBackend, ONLY when they
 // name an identity this gateway owns (ownPayerIdentities: the identities this holder
 // publishes on the network feed, union the configured one). Unconfigured, the request is
-// sent exactly. Configured, a request with no prefetch.coverage at all refuses too — an
-// absent one is itself the "no resolvable payor identifier" case, not a benign skip.
+// sent exactly. Configured, a request that carries no Coverage at all has no payor to map
+// and is sent exactly too: the network routed it here, and this payer's own system
+// answers it. That is a request whose prefetch is absent or null, whose prefetch.coverage
+// is absent or null, or whose prefetch.coverage Bundle's entry is absent, null or only
+// OperationOutcomes,
+// and no Coverage anywhere else in the body (relaylocate.go, carriesNoCoverage). A
+// Coverage naming no readable payor, or another payer, is refused, and so is a request
+// whose only Coverage is outside prefetch.coverage.
 func (n *nativeResponder) applyPayorEdgeToCRDRequest(in relay.Body) (relay.Payload, LegResult, error) {
 	return n.payorEdgeRequest(in, payorEdgeCRDRequest, "application/json", nil)
 }

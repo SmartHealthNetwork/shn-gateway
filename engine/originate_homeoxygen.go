@@ -113,7 +113,7 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member 
 	// Read the member's OWN open Coverage as the routing/identity SOURCE (FR-G40): the dispatch leg's
 	// payer identity derives from the patient's real Coverage, not a synthetic CMS literal. realCov
 	// stays a LOCAL (the recipient is resolved from it); the per-leg emit shapes are unchanged.
-	realCov, hasCov, status, msg := g.memberCoverage(r.Context(), member)
+	realCov, hasCov, status, msg := g.memberRoutingCoverage(r.Context(), member)
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return dispatchResult{}, false
@@ -141,9 +141,9 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member 
 
 	// The order-dispatch request carries the participant's own Patient, Coverage
 	// search result and history (originate_crd.go); the order names the patient
-	// the same way. The Coverage is read twice — above for routing (memberCoverage),
+	// the same way. The Coverage is read twice — above for routing (memberRoutingCoverage),
 	// here as the search result the request carries — so each read keeps its own
-	// refusal rules.
+	// refusal rules; both choose the same coverage (routingCoverageChoice).
 	recs, status, msg := g.originCRDRecords(ctx, "crd-order-dispatch", member)
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})

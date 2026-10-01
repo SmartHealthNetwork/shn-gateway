@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
@@ -19,11 +20,12 @@ import (
 // resource type. The gateway uses it to obtain CDS Hooks prefetch values the
 // requesting system left out.
 //
-// SearchPatientContext runs exactly `<resourceType>?patient=Patient/<id>`
-// (SoRSearchQuery), with the includes searchIncludes names for the type (a
-// Coverage search includes each Coverage's payor Organization) and, for each
-// date range given, the range on its date search parameter, against the system
-// of record; follows the server's paging
+// SearchPatientContext runs exactly the query SoRSearchQuery returns for its
+// arguments: `<resourceType>?patient=Patient/<id>`, with each narrowing given
+// (a date range on a date search parameter, or the codes a token search
+// parameter such as status may take) and the includes searchIncludes names
+// for the type (a Coverage search includes each Coverage's payor
+// Organization), against the system of record; follows the server's paging
 // within the bounds below; and returns the raw bytes of every page with the
 // span of every entry. A classified failure is returned as a *SearchError. A
 // search that finds nothing is a result with no entries, not an error.
@@ -31,13 +33,18 @@ type SearchSystemOfRecord interface {
 	SearchPatientContext(ctx context.Context, resourceType, sorPatientID string, dates ...SearchDateRange) (SearchResult, error)
 }
 
-// SearchDateRange narrows a search to records whose Param date search
-// parameter falls within [From, To] (FHIR dates, either may be empty). The
-// server's date matching only narrows the search; the gateway still selects
-// records by their own dates.
+// SearchDateRange narrows a search. With AnyOf empty, it narrows to records
+// whose Param date search parameter falls within [From, To] (FHIR dates,
+// either may be empty); the server's date matching only narrows the search,
+// and the gateway still selects records by their own dates. With AnyOf set,
+// it narrows to records whose Param token search parameter is any of those
+// codes (`Param=a,b`), and From and To are empty: the gateway's search for a
+// CDS Hooks prefetch value narrows by status exactly as the template it
+// advertises for that value does.
 type SearchDateRange struct {
 	Param    string
 	From, To string
+	AnyOf    []string
 }
 
 // Search bounds. They are fixed. Exceeding the page, entry or size bound
@@ -227,29 +234,61 @@ var (
 	fhirIDRE      = regexp.MustCompile(`^[A-Za-z0-9\-.]{1,64}$`)
 	searchParamRE = regexp.MustCompile(`^[a-z][a-z-]{0,63}$`)
 	fhirDateRE    = regexp.MustCompile(`^[0-9]{4}(-[0-9]{2}(-[0-9]{2})?)?$`)
+	// searchCodeRE is a code a token narrowing may name: never a character
+	// the query or a token list gives a meaning (& = , | \ $ and the like).
+	searchCodeRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.-]{0,63}$`)
 )
 
 // searchIncludes are the _include values a search of a type carries. A payer
 // resolves what a record references from the request alone (it has no route
-// into the provider's system), so a Coverage search includes the payor
-// Organization, and a DeviceRequest search each order's performer (the
-// supplier a dispatched order names).
+// into the provider's system, and fhirServer is removed before the network),
+// so a Coverage search includes the payor Organization, and a DeviceRequest
+// search each order's performer (the supplier a dispatched order names). A
+// value the gateway obtains is carried to the payer, so dropping the include
+// would lose those records silently. The advertised prefetch templates carry
+// no include (prefetchTemplate): CDS Hooks does not list _include among the
+// query features a client supports, so an EHR is not asked for one.
 var searchIncludes = map[string]string{
 	"Coverage":      "Coverage:payor",
 	"DeviceRequest": "DeviceRequest:performer",
 }
 
-// SoRSearchQuery returns the relative search a connector runs, exactly the
-// advertised prefetch template with the patient filled in, or an error when
-// either input is not a FHIR type name or id.
+// SoRSearchQuery returns the relative search a connector runs for a patient's
+// records of resourceType, narrowed as given, or an error when an input is not
+// a FHIR type name, id, search parameter, date or code. The patient is named
+// `patient=Patient/<id>`; each date range is `<param>=ge<from>&<param>=le<to>`;
+// each token narrowing is `<param>=<code>,<code>` (a list is any of them); the
+// type's include (searchIncludes) comes last. The gateway's search for a CDS
+// Hooks prefetch value narrows by the status its advertised template names
+// (prefetchSearchFilters), so the two differ only in the include and the
+// patient reference's type prefix. The one exception is the coverage the
+// gateway routes by (read only to route a request that carries none, or
+// carried by a request it originates itself), which asks for every Coverage
+// (obtainRoutingCoverage).
 func SoRSearchQuery(resourceType, sorPatientID string, dates ...SearchDateRange) (string, error) {
 	bad := &SearchError{Outcome: SearchMalformed, Reason: "invalid search input"}
 	if !searchTypeRE.MatchString(resourceType) || !fhirIDRE.MatchString(sorPatientID) {
 		return "", bad
 	}
 	q := url.Values{"patient": {"Patient/" + sorPatientID}}
+	var tokens string
 	for _, d := range dates {
-		if !searchParamRE.MatchString(d.Param) || d.Param == "patient" || (d.From != "" && !fhirDateRE.MatchString(d.From)) || (d.To != "" && !fhirDateRE.MatchString(d.To)) {
+		if !searchParamRE.MatchString(d.Param) || d.Param == "patient" {
+			return "", bad
+		}
+		if len(d.AnyOf) > 0 {
+			if d.From != "" || d.To != "" {
+				return "", bad
+			}
+			for _, c := range d.AnyOf {
+				if !searchCodeRE.MatchString(c) {
+					return "", bad
+				}
+			}
+			tokens += "&" + d.Param + "=" + strings.Join(d.AnyOf, ",")
+			continue
+		}
+		if (d.From != "" && !fhirDateRE.MatchString(d.From)) || (d.To != "" && !fhirDateRE.MatchString(d.To)) {
 			return "", bad
 		}
 		if d.From != "" {
@@ -259,7 +298,7 @@ func SoRSearchQuery(resourceType, sorPatientID string, dates ...SearchDateRange)
 			q.Add(d.Param, "le"+d.To)
 		}
 	}
-	query := resourceType + "?" + q.Encode()
+	query := resourceType + "?" + q.Encode() + tokens
 	if inc, ok := searchIncludes[resourceType]; ok {
 		query += "&_include=" + url.QueryEscape(inc)
 	}
@@ -293,12 +332,14 @@ type searchMatch struct {
 	page, start, end int
 }
 
-// searchSystemOfRecord runs a bounded patient search through sor and
-// classifies the answer. It re-checks everything a connector reports: the
-// bounds, each page's shape, and that the reported entry spans are exactly
-// the entries each page holds.
+// searchSystemOfRecord runs the bounded patient search for a CDS Hooks
+// prefetch value of resourceType through sor, narrowed as the advertised
+// template for that value narrows it (prefetchSearchFilters), and classifies
+// the answer. It re-checks everything a connector reports: the bounds, each
+// page's shape, and that the reported entry spans are exactly the entries
+// each page holds.
 func searchSystemOfRecord(ctx context.Context, sor SystemOfRecord, resourceType, sorPatientID string) sorSearchset {
-	return runSoRSearch(ctx, sor, resourceType, sorPatientID, true)
+	return runSoRSearch(ctx, sor, resourceType, sorPatientID, true, prefetchSearchFilters(resourceType)...)
 }
 
 // runSoRSearch is searchSystemOfRecord; assemble=false skips building the

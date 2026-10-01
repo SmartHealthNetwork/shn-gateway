@@ -103,8 +103,9 @@ func TestScenario_AmbiguousCoverageRefused(t *testing.T) {
 	}
 }
 
-// Every engine read of a member's Coverage goes through memberCoverage, so
-// none can pick one of several Coverages on its own.
+// Every engine read of a member's Coverage goes through memberCoverage (or
+// memberRoutingCoverage, the same read and rule over routingCoverageChoice's
+// Coverages), so none can pick one of several Coverages on its own.
 func TestMemberCoverage_OnlyReader(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	if err != nil {

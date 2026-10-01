@@ -109,7 +109,7 @@ func TestEveryLegHandlerSetsTheFindingContext(t *testing.T) {
 // and a new call must be classified deliberately, in this test, by whoever
 // adds it. Categories:
 //
-//	choke        — validateGovernedLines, the one place a verdict decides
+//	choke        — judgeLines (behind validateGovernedLines), the one place a verdict decides
 //	               (validateGoverned is its single-line form)
 //	observational — a validate whose outcome never changes the answer
 //	delegating   — a wrapper that forwards to another Validator
@@ -160,9 +160,9 @@ func TestEveryLegHandlerSetsTheFindingContext(t *testing.T) {
 // and would need extending here if either subpackage ever validates FHIR
 // resources directly.
 var validateCallSites = map[string]string{
-	"gateway.go:validateGovernedLines": "choke",
-	"crd_native.go:observeCRDEmbedded": "observational",
-	"certify.go:collectCertification":  "observational",
+	"gateway.go:judgeLines":             "choke",
+	"crd_native.go:validateCRDEmbedded": "observational",
+	"certify.go:collectCertification":   "observational",
 	// The boot warm-up (gateway/app) discards every verdict: it only reaches
 	// the certification endpoint before a real certification has to.
 	"../app/certifywarm.go:warmCertificationEndpoint": "observational",
@@ -185,7 +185,7 @@ var validateCallSites = map[string]string{
 var validateFHIREntryPoints = []string{
 	"gateway.go:validateFHIR", "gateway.go:validateFHIRAtProfile",
 	"gateway.go:validateFHIRForContract", "gateway.go:validateFHIRPayerIngress",
-	"gateway.go:validateFHIREgressOrBridged", "gateway.go:validateFHIRRecorded",
+	"gateway.go:validateFHIREgressOrBridged", "gateway.go:validateFHIRDecisionEOB",
 }
 
 // A note for whoever next counts call sites here, so they don't redo the work this
@@ -209,7 +209,7 @@ var validateFHIREntryPoints = []string{
 // site in TestEveryValidateCallIsClassified.
 func TestValidateFHIRCallSiteFloor(t *testing.T) {
 	const (
-		wantTotal       = 51
+		wantTotal       = 49
 		wantDelegations = 2 // the wrappers' own internal delegations, both in gateway.go
 	)
 	_, files := engineFiles(t, ".")
@@ -343,7 +343,7 @@ func TestEveryValidateFHIREntryPointReachesTheChokePoint(t *testing.T) {
 			}
 			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
 				switch sel.Sel.Name {
-				case "validateGoverned", "validateGovernedLines", "validateFHIRAtProfile", "validateFHIRForContract":
+				case "validateGoverned", "validateGovernedLines", "judgeLines", "validateFHIRAtProfile", "validateFHIRForContract":
 					reaches = true
 				}
 			}

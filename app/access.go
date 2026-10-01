@@ -19,7 +19,7 @@ func accessLineFor(r engine.ExchangeRecord) diagnostics.AccessLine {
 		ContractLine: r.ContractLine, Sender: r.Sender, Recipient: r.Recipient,
 		RequestCiphertextHash: r.RequestCiphertextHash, ResponseCiphertextHash: r.ResponseCiphertextHash,
 		Outcome: r.Outcome, Status: r.Status, LatencyMs: r.Latency.Milliseconds(),
-		Findings: diagnostics.AccessFindings{Count: r.Findings.Count, Refused: r.Findings.Refused, Kinds: r.Findings.Kinds},
+		Findings: diagnostics.AccessFindings{Count: r.Findings.Count, Refused: r.Findings.Refused, Kinds: r.Findings.Kinds, Deferred: r.Findings.Deferred},
 	}
 	if r.Outcome == engine.ExchangeRefused {
 		line.Refusal = &diagnostics.AccessRefusal{By: r.RefusedBy, Rule: r.Rule}

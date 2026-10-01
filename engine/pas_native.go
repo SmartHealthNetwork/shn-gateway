@@ -176,29 +176,6 @@ func readConformantPASSubjects(bundleJSON []byte, coverageAddresses bool, refuse
 	return s, 0, ""
 }
 
-// pasBundleCoverage returns the FIRST Coverage resource in a conformant PAS Claim Bundle, or nil
-// when none is present (routing then fails closed at recipientFor → 422). Engine-local; the PAS
-// ingress derives the payer HOLDER from the inbound bundle's Coverage — no default (FR-G40).
-func pasBundleCoverage(bundleJSON []byte) []byte {
-	var probe struct {
-		Entry []struct {
-			Resource json.RawMessage `json:"resource"`
-		} `json:"entry"`
-	}
-	if err := decodeMessage(bundleJSON, &probe); err != nil {
-		return nil
-	}
-	for _, e := range probe.Entry {
-		var rt struct {
-			ResourceType string `json:"resourceType"`
-		}
-		if decodeMessage(e.Resource, &rt) == nil && rt.ResourceType == "Coverage" {
-			return e.Resource
-		}
-	}
-	return nil
-}
-
 // pasMemberFromRef returns the bare member id from a Patient reference, tolerating BOTH a
 // relative ref ("Patient/MBR") and an absolute fullUrl ("https://host/base/Patient/MBR").
 // The br-payer-targeting lane (provider-data) absolutizes bundle refs (so br-payer resolves them);
@@ -383,15 +360,14 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 	if !read.read() {
 		result.SideEffectFHIR = nil
 	}
-	for _, b := range result.SideEffectFHIR {
-		status, msg, invalid := g.validateFHIRRecorded(r.Context(), b, "egress", "")
-		if status != 0 {
-			g.refuseAfterPayerAnswered(w, r, pasLeg, legPASClaim, env, tok, answerTok, status, msg, nil)
-			return
-		}
-		if invalid {
-			read.eobInvalid()
-		}
+	// One budget for the leg's decision EOBs at observe (validateDecisionEOBs).
+	status, msg, invalid := g.validateDecisionEOBs(r.Context(), result.SideEffectFHIR)
+	if status != 0 {
+		g.refuseAfterPayerAnswered(w, r, pasLeg, legPASClaim, env, tok, answerTok, status, msg, nil)
+		return
+	}
+	if invalid {
+		read.eobInvalid()
 	}
 	// Build the response leg BEFORE committing payer state so a response-leg
 	// failure (unknown requester, seal, encode) cannot orphan the EOB / pended-claim ledger.
@@ -556,15 +532,14 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 	if !read.read() {
 		result.SideEffectFHIR = nil
 	}
-	for _, b := range result.SideEffectFHIR {
-		status, msg, invalid := g.validateFHIRRecorded(r.Context(), b, "egress", "")
-		if status != 0 {
-			g.refuseAfterPayerAnswered(w, r, pasLeg, legPASClaimUpdate, env, tok, answerTok, status, msg, nil)
-			return
-		}
-		if invalid {
-			read.eobInvalid()
-		}
+	// One budget for the leg's decision EOBs at observe (validateDecisionEOBs).
+	status, msg, invalid := g.validateDecisionEOBs(r.Context(), result.SideEffectFHIR)
+	if status != 0 {
+		g.refuseAfterPayerAnswered(w, r, pasLeg, legPASClaimUpdate, env, tok, answerTok, status, msg, nil)
+		return
+	}
+	if invalid {
+		read.eobInvalid()
 	}
 	// Build the response leg BEFORE committing payer state so a response-leg
 	// failure cannot orphan the claim acquired in BeginClaimUpdate (the deferred Rollback releases it).

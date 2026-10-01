@@ -125,6 +125,430 @@ receives changes.
   service does not permit) are `consent`. A facility's or a PHG's gateway
   refusing a leg is refused by `other`.
 
+## Observe checks do not hold the message (v0.60.0)
+
+- **Behavior change in v0.60.0:** at `observe` (the default level), a payload
+  check that can only record (`$validate` of a request or answer, and the CRD
+  answer's embedded resources) is queued and does not hold the message; its
+  finding is written when the validator answers. The answer's bytes and status
+  are unchanged. The queue is bounded: a check that finds it full is dropped and
+  logged (`gateway: observe check dropped`). `structural` and `strict` still wait
+  for every check, because they refuse on it, and a payload this gateway
+  translated between IG lines is checked before the answer at every level.
+- A payer gateway's checks of the decision ExplanationOfBenefits it builds still
+  run before the answer, because whether each decision is written depends on
+  them. At `observe` all of one exchange's decision checks share one fixed
+  2-second budget; a check the budget does not reach is recorded as unavailable
+  and its decision written. At `structural` and `strict` they are not bounded.
+- `Gateway.Close` flushes the queue, waiting at most 10 seconds before it cancels
+  the validator calls still running (each is recorded as unavailable).
+  `WaitObserverCompletion` waits for the checks an operation queued.
+- **Access lines:** at `observe`, `findings` carries `"deferred": true` with no
+  count (`count` 0, `kinds` left out); `refused` is still carried.
+  `AccessFindings.Deferred` and `FindingSummary.Deferred` are new fields; nothing
+  is removed. Read a call's findings from its `conformance:` lines.
+- **Diagnostic collection:** each finding is also captured as a
+  `diagnostics.KindConformanceFinding` event (metadata only, bound to its call
+  like the gateway's other events), and at `observe` each exchange is closed by
+  one `diagnostics.KindConformanceResult` event with its finding count
+  (`truncated` past `diagnostics.FindingEventsPerLeg`, 32, findings captured on
+  their own; `incomplete` when a check's finding was not recorded, because it was
+  dropped or failed while running).
+- `Gateway.WaitObserveChecksForTest` is test support for harnesses that read
+  findings; it is not a stable API.
+
+## A coverage read through the request's fhirServer (v0.60.0)
+
+- **Behavior change in v0.60.0 (on by default):** a CDS Hooks request that
+  carries no `prefetch.coverage`, for a member the provider's system of record
+  does not hold, and that names `fhirServer`, has its coverage read through that
+  server, only to choose the payer, instead of being refused. One
+  `GET {fhirServer}/Coverage?patient={context.patientId}` (no status filter, no
+  `_include`; one page), with the request's `fhirAuthorization` token as a
+  Bearer credential when it carries one. It routes on the active Coverages when
+  any is active, otherwise on the others when they name one payer (two payers
+  among the chosen Coverages are `422 ambiguous coverage for routing`). A
+  Coverage whose `status` cannot be read (not a string) counts as not active,
+  as on the system-of-record path. When a
+  chosen Coverage names its payor only as
+  `Organization/<id>` on that server and the answer does not resolve it, one
+  more read, `GET {fhirServer}/Organization/<id>`, with the same token and
+  checks: at most two reads a request. Before, the gateway never called
+  `fhirServer`.
+- `CDS_FHIR_SERVER_READ` takes `private` (the default; unset is the same),
+  `public` or `off`. `private` reads an `https` server in the participant's own
+  network or on the internet: any port at a private address, port 443 at a
+  public one, and never an address no mode reads (loopback, link-local with the
+  cloud metadata and credential endpoints, `fd00:ec2::254`, `fd00:ec2::23`, `fd20:ce::254`, `100.100.100.200`, unspecified,
+  multicast, broadcast, `0.0.0.0/8`, `240.0.0.0/4`, `::/96`, a zoned address,
+  or a NAT64 or 6to4 address embedding one). `public` reads only an `https`
+  server on port 443 at a public address. `off` is the opt-out: the gateway
+  never calls `fhirServer`, and a request with no coverage to route by is
+  refused `412` (v0.59.0 answered `422`). Any other value refuses
+  to boot, and so does a value other than `off` set without
+  `PROVIDER_DAVINCI_INGRESS`; unset needs no ingress. A gateway SHN hosts runs
+  `public` (or `off`, if its tenant sets that).
+- Nothing either read returns is carried: the request is sent as the EHR sent
+  it, with `fhirServer` and `fhirAuthorization` still removed (E-01, unchanged).
+- The read is fenced in every mode: an `https` base URL with no query, fragment
+  or credentials; the mode's address rules on an address literal, on every
+  resolved address and again on the address connected to; no redirects, no
+  proxy, verified TLS (1.2 or later); 2 s to connect, 2 s for TLS, one 4 s
+  budget for both reads, at most 512 KiB an answer; a Coverage `searchset`
+  about the request's patient, and the Organization asked for. Each refusal
+  begins `no coverage to route by: ` and names its reason. See
+  CONFIGURATION.md, "Reading the coverage through `fhirServer`".
+- **Behavior change in v0.60.0: a CRD request the provider gateway cannot
+  obtain a coverage to route by for is answered `412`** (CDS Hooks: the service
+  could not obtain the data it needs), on the CDS Hooks ingress only. That is
+  `no coverage in request or system of record` (a `null` coverage prefetch, or
+  none the system of record holds; `422` before), the request for a member the
+  system of record does not hold (`422 patient not found in system of record`
+  before; now `412 no coverage to route by: send prefetch.coverage or
+  fhirServer (this gateway's system of record names no patient for this
+  member)` when it names no `fhirServer`, and `412 no coverage to route by: send
+  prefetch.coverage (this gateway's system of record names no patient for this
+  member, and it does not read fhirServer)` under `off`), and every refusal of
+  the read, including no Coverage for the patient and no Organization for the payor
+  (`404` or `410`). A Coverage naming another patient and an answer that is
+  not the payor Organization are `502` at every enforcement level;
+  routing ambiguity stays `422` (two payor Organizations by reference alone,
+  `ambiguous coverage for routing`, a payer id no route registers, `no payer
+  identifier on member coverage`, which a payor reference to another server, a
+  versioned one, or an Organization with no payer identifier also gets); a
+  malformed request keeps its `400` or `422`; DTR and PAS never answer a `412`
+  of their own. The exchange record records each `412` as the provider
+  gateway's refusal, rule `routing`.
+- **Changed text in v0.60.0:** a DTR `$questionnaire-package` request for a
+  member the system of record does not hold, with no `coverage` parameter, is
+  still refused `422`, now with `no coverage to route by: send the coverage
+  parameter (this gateway's system of record names no patient for this
+  member)`, where it was `patient not found in system of record`. A client
+  matching the text exactly should match the new text; `patient not found in
+  system of record` is still answered under `ENRICH_NATIVE_REQUESTS=true` at
+  `strict` when the system of record names the member's Patient but returns no
+  such Patient.
+- Each read is recorded as its own `prefetch.obtained` event with key
+  `coverage` and `source` `fhirServer` (its path and query, never the host);
+  every other `prefetch.obtained` event keeps `source` `system-of-record`.
+
+## A CRD request with no Coverage at a payer that maps its identity (v0.60.0)
+
+- **Behavior change in v0.60.0:** at a payer gateway running payer backend
+  identity mapping (`PAYER_DAVINCI_PAYOR_OWN` with `PAYER_DAVINCI_PAYOR_BACKEND`),
+  a CDS Hooks request (`order-select`, `order-sign`, `order-dispatch`) that
+  carries no Coverage at all has no payor to map: it is forwarded to the
+  payer's own system exactly as it arrived, and that system answers it. Such a
+  request has a `prefetch`, or `prefetch.coverage`, that is absent or `null`,
+  or a `prefetch.coverage` Bundle whose `entry` is absent, `null`, or holds
+  only entries whose `resource` is an `OperationOutcome`; and no
+  `"resourceType": "Coverage"` object anywhere else in the request (another
+  prefetch member, `context`, a nested Bundle, a contained resource), the
+  `resourceType` member matched without regard to case in its name and its
+  value, and a `prefetch`, `coverage` or `entry` member named in another case
+  counting as present. v0.59.0
+  and earlier refused it `400 payer backend identity mapping: inbound Coverage
+  carries no resolvable payor identifier (…)`. A provider gateway sends such a
+  request when it routes by a Coverage it read only to choose the payer
+  (above), and carries nothing it read.
+- **Unchanged:** a Coverage whose payor cannot be read, a `prefetch` or
+  `prefetch.coverage` that is present but not a JSON object, a coverage Bundle
+  with any other entry, and a request whose only Coverage is outside
+  `prefetch.coverage` are refused with that `400`; a Coverage naming another
+  payer with `400 … does not match …`; Coverages naming two payers and an
+  unresolved payor reference with `422`; a Coverage naming the payer is
+  re-stamped as before. The payer's own level still decides: an `order-select`
+  or `order-sign` request whose coverage beneficiary cannot be read is the
+  request's own shape, refused at `structural` and `strict` and carried below.
+  A DTR request with no coverage parameter was already forwarded as it arrived;
+  a PAS Bundle with no Coverage is still refused.
+
+## An Authorization Framework that does not answer (v0.60.0)
+
+- **Behavior change in v0.60.0:** when the Authorization Framework gives a
+  request leg no answer (the connection to `POST {authz}/authorize` is refused,
+  reset or closed, or fails some other way before any response; no answer
+  within the client timeout; or a `503` or `504`, which the Framework never
+  answers itself, from a proxy or load balancer in front of it), the
+  originating gateway answers its own `503`, uncacheable:
+  `{"error":"the authorization service could not be reached, so this leg was not sent to the payer"}`
+  (an `OperationOutcome` with issue code `transient` on the FHIR operation
+  routes). Before, it was `502 {"error":"authorization failed"}`. The leg is
+  not sent to the Hub. The exchange record's outcome is `unreachable`, with no
+  refusing party, and `LegMetric` counts the leg `unreachable`, not `failed`.
+- The gateway makes the call once more, with a fresh holder assertion (the
+  Framework accepts each assertion once), only when the first attempt failed
+  with a refused, reset or closed connection before its request was written.
+  After the write the Framework may already have decided and recorded its
+  decision, so that call is not repeated.
+- **Unchanged:** a `403` from the Framework is `403 authorization denied`
+  (`LegMetric` `denied`); any other status from it, or an answer the gateway
+  cannot read, is `502 authorization failed` (`failed`). Neither is retried.
+  A payer gateway signing its answer's leg gets the same single retry; a
+  failure there is still its `502 authorization failed` to the Hub.
+
+## The PAS payor reference (v0.60.0)
+
+- **Behavior change in v0.60.0:** the Da Vinci ingress (`Claim/$submit`,
+  `Claim/$inquire`) resolves the first Coverage's `payor` reference among the
+  Bundle's entries. An absolute reference (a URL, or a `urn:uuid`) names the
+  entry whose `fullUrl` equals it, as FHIR resolves it in a Bundle, and a
+  relative `Organization/<id>` names the entry with that type and id,
+  whatever its `fullUrl`. Before, only the relative form resolved, so a Bundle
+  referencing its payor Organization by `fullUrl` was refused
+  `422 no payer identifier on member coverage`; it now routes. A reference
+  several entries answer routes when every one is an Organization naming the
+  same payer identifier (a Bundle that repeats its payor, as before); when
+  they name different payers, or one names none, it is refused, where before
+  the first one was taken when it named a payer. A reference no entry
+  answers is still refused:
+  the gateway never reads the payor from outside the Bundle. A payer
+  gateway's identity mapping matches payor and insurer references the same
+  way, and still refuses a reference several entries answer, as before.
+- The `no payer identifier on member coverage` refusal on these routes now
+  adds, after `: `, which part failed, when the gateway can tell (an
+  unreadable body or Coverage, or a payor Organization that carries an
+  identifier with both a system and a value but cannot otherwise be read, such
+  as one with a non-string `id`, keeps the bare text). It echoes nothing the
+  request carried.
+  A client matching the text exactly should match its prefix. The reasons (the
+  first is seen on `$inquire`: a `$submit` Bundle with no Coverage is refused
+  `400 PAS bundle missing Coverage.beneficiary` before routing):
+  - `the Bundle carries no Coverage`
+  - `the Coverage names no payor`
+  - `Coverage.payor carries neither a reference nor an identifier with both a system and a value`
+  - `Coverage.payor names a contained resource the Coverage does not contain`
+  - `Coverage.payor matches more than one entry of the Bundle, and they do not name one payer`
+  - `Coverage.payor is an absolute reference that is no entry's fullUrl: the payor Organization must be an entry of the Bundle`
+  - `Coverage.payor is a relative reference that matches no entry of the Bundle: the payor Organization must be an entry of the Bundle`
+  - `Coverage.payor references a resource that is not an Organization`
+  - `the contained payor Organization carries no identifier with both a system and a value, such as a NAIC code or payer id`
+  - `the payor Organization in the Bundle carries no identifier with both a system and a value, such as a NAIC code or payer id`
+
+## The CRD and DTR payor reference (v0.60.0)
+
+- **Behavior change in v0.60.0:** the CDS Hooks and
+  `Questionnaire/$questionnaire-package` ingresses resolve every Coverage
+  `payor` reference among the resources the request carries (every prefetch
+  value, or every resource parameter, and the entries of each that is a
+  Bundle) by the PAS rule: an absolute reference (a URL, or a `urn:uuid`)
+  names the Bundle entry whose `fullUrl` equals it, and a relative
+  `Organization/<id>` names the resource with that type and id. Before, an
+  absolute reference resolved only to an entry of the coverage value itself
+  (a Bundle of Coverages carrying its payor), so one naming another prefetch
+  value's or parameter's entry was refused `422 no payer identifier on member
+  coverage` (or, for a coverage read from the system of record or through
+  `fhirServer`, looked up there); it now routes on the request's own
+  Organization.
+- A reference several of those resources answer routes when every one is an
+  Organization naming the same payer identifier (the same Organization under
+  two prefetch keys, as before). When they name different payers, or one
+  names none, the request is refused at every level with `422 no payer
+  identifier on member coverage: Coverage.payor matches more than one
+  resource of the request, and they do not name one payer`, and the payor is
+  never read from the system of record or `fhirServer` instead. Before, the
+  first one was taken: the coverage value's own entry, then the first in key
+  (CRD) or parameter (DTR) order.
+- A CDS Hooks coverage value is read by its exact member names: a value whose
+  `resourceType`, `entry` or an entry's `resource` (or that resource's
+  `resourceType`) is written in another case holds no Coverage to route by,
+  and neither does a value that is neither a Coverage nor a Bundle. Such a
+  request is refused `422 no payer identifier on member coverage` (at
+  `strict`, a `resourceType` or an entry's `resource` written in another case
+  is refused first, `403`). Before, these
+  members were read in any case, and a value with a `payor` but no
+  `resourceType` was routed.
+- For a coverage the system of record supplied, the records its Coverage
+  search returned are resolved among together with the request's resources,
+  and a disagreement among them is refused with `… Coverage.payor matches more
+  than one resource of the request and the system of record's Coverage search,
+  and they do not name one payer`. Several Coverages a DTR search returns are
+  checked for one payer the same way, refused as before with `422 ambiguous
+  coverage for routing: …` when they do not name one.
+- A DTR request with no coverage, routed by the system of record's Coverage
+  without `ENRICH_NATIVE_REQUESTS`, resolves that Coverage's payor reference
+  among the request's resources and the records the search included, then in
+  the system of record, as it does under the opt-in. Before, it was looked up
+  only among the request's own resources and refused `422 no payer identifier
+  on member coverage`. A reference nothing answers is resolved as before.
+- A client matching these refusals' text exactly should match its prefix.
+
+## CDS Hooks prefetch templates (v0.60.0)
+
+- **Behavior change in v0.60.0:** the CRD discovery's prefetch templates
+  (`GET /cds-services`, every service) are the Da Vinci reference payer's
+  order-sign templates: `coverage` is
+  `Coverage?patient={{context.patientId}}&status=active`, `serviceHistory`
+  `ServiceRequest?patient={{context.patientId}}&status=active,completed`,
+  `deviceHistory`
+  `DeviceRequest?patient={{context.patientId}}&status=active,on-hold,completed`,
+  `medicationHistory`
+  `MedicationRequest?patient={{context.patientId}}&status=active,completed`
+  and `questionnaireResponses`
+  `QuestionnaireResponse?patient={{context.patientId}}&status=completed`;
+  `patient` is unchanged (`Patient/{{context.patientId}}`). Before, each named
+  the patient `Patient/{{context.patientId}}`, had no status filter, and the
+  coverage and device templates asked for `_include=Coverage:payor` and
+  `_include=DeviceRequest:performer`. CDS Hooks 2.0 does not list `_include`
+  among the query features a client supports, so an EHR that left out a key it
+  could not fulfil can now send it. What the payer receives from an EHR that
+  fulfils the templates is only its active coverage and its active or completed
+  orders (active, on hold or completed device orders; completed
+  questionnaire responses), without the payor Organization or the device
+  performer unless the EHR adds them.
+- The gateway's own search of its participant's system of record for the same
+  values (the fill under `ENRICH_NATIVE_REQUESTS=true`, including the
+  `$questionnaire-package` Coverage it appends, and the history values of a CRD
+  request it originates) uses the same status filter, read from the same
+  table, and keeps its includes: a value it reads is carried to the payer,
+  which cannot fetch the payor Organization or a device order's performer
+  itself once `fhirServer` is removed. The query is
+  `<type>?patient=Patient/<id>&status=<codes>` (with
+  `&_include=Coverage:payor` or `&_include=DeviceRequest:performer`). A filled
+  value is what the system of record answers that search, so a server that
+  applies the filter no longer returns a record the template excludes (a
+  cancelled coverage, a draft or cancelled order, an in-progress questionnaire
+  response); the gateway does not filter the answer again by status. A member
+  with no active Coverage has `null` filled coverage (and no `coverage`
+  parameter is appended to a `$questionnaire-package` request); the request
+  is still routed, by the routing read below, as without the opt-in. So is a
+  request whose system of record cannot answer the filtered search: the
+  filled coverage is left out and the routing read chooses the payer.
+- The coverage the gateway chooses a payer by is the one exception on the
+  filter, the same everywhere: a CDS Hooks or `$questionnaire-package` request
+  that carries none (read only to route by, not added; under the opt-in, read
+  when the filled search finds no Coverage or cannot be answered, and
+  otherwise the filled search routed by the same rule), a CRD request the
+  gateway originates (its own request, nothing filled into a partner's
+  message) and the inquiry about a pended prior authorization it submitted. It reads every Coverage
+  (`Coverage?patient=Patient/<id>&_include=Coverage:payor`) and routes on the
+  active ones when any is active, so a stale cancelled coverage naming another
+  payer no longer makes routing ambiguous (before, every Coverage counted, and
+  two payers was a `422`); when none is active, on the others, provided they
+  name one payer (`422 ambiguous coverage for routing` otherwise), so the
+  payer of a coverage no longer in force is still the one that answers. An
+  originated request carries the Coverages it is routed by, with their payors
+  (a payor only a Coverage not chosen names is left out), and its
+  `$questionnaire-package` and PAS legs, and an inquiry about a pended PAS
+  submission, name the same coverage (before, every Coverage counted for both,
+  so a stale one at another payer refused them `422 ambiguous coverage for
+  routing`, and a cancelled one listed first was the one they named).
+- A coverage the EHR itself sent that names its payor Organization by
+  reference alone, which the request does not resolve (what an EHR fulfilling
+  the coverage template exactly sends), has that Organization read only to
+  choose the payer; nothing is added to or changed in what is carried.
+  `Organization/<id>` is an id on the EHR's server, so a CDS Hooks request
+  reads it where that server is: when the request names no `fhirServer`, or
+  one at the system of record's own FHIR base (compared with the scheme and
+  host lowercased, the default port dropped and a trailing slash trimmed),
+  from the system of record when that system names the patient by
+  `context.patientId`, otherwise (or when that system holds no such
+  Organization) once through that `fhirServer`; when the request's
+  `fhirServer` is at another base, only once through it, never from the
+  system of record. The read through `fhirServer` uses its
+  `fhirAuthorization` token, within the fhirServer read's checks and budget,
+  and not with `CDS_FHIR_SERVER_READ=off`. It is recorded as a
+  `prefetch.obtained` event with key `coverage`, `source` `fhirServer` and
+  `reason` `payor Organization of the coverage the EHR sent` (followed by the
+  read's reason when refused), and logged as that read. Its refusals keep the
+  fhirServer read's statuses (`412` for none there or a refused token, `502`
+  for an answer that is not the Organization), with the read's reason after
+  `no payer identifier on member coverage: ` instead of `no coverage to route
+  by: `, since the request carried a coverage (for example `412 no payer
+  identifier on member coverage: fhirServer holds no Organization for the
+  coverage's payor`). A failed read of the Organization in the system of
+  record is the system-of-record failure (`503 system of record
+  unavailable`, or `502` for an answer it cannot read), and `fhirServer` is
+  then not read. A `$questionnaire-package`
+  request, which names no `fhirServer`, reads it only from the system of
+  record, when that system names the patient by the request's member id; a
+  system that cannot name the patient counts as one that does not hold it,
+  so that request is refused `422` with the reason and remedy below, as a CDS Hooks
+  request naming no `fhirServer` is. A reference written on another server,
+  versioned, with a fragment, a leading slash or a dot segment is never read.
+  Before, such a request was
+  refused `422 no payer identifier on member coverage`, except a
+  `$questionnaire-package` request the gateway edited (under
+  `ENRICH_NATIVE_REQUESTS`, its Patient appended), whose payor reference,
+  written any way, was read from the system of record: a reference written
+  any way but `Organization/<id>` (versioned, with a fragment or a query,
+  for example) is now refused there as everywhere (the default refused it
+  already). It still is refused when
+  nothing can read the payor, now in the form of the PAS refusals above:
+  the prefix, `: ` and the reason, and only for a payor nothing could
+  resolve (not the request, the system of record or the `fhirServer` read)
+  the remedy after the reason. The message keeps its prefix, so a matcher on
+  it still matches. The remedy is added only for a reference to an
+  Organization, and is the one that resolves that reference; an unresolved
+  payor of another kind (a RelatedPerson, a Patient) keeps the bare refusal,
+  and so does a resolved payor Organization that carries no payer
+  identifier. Every other refusal of the payor read is one of these texts:
+  - `no payer identifier on member coverage: Coverage.payor is a reference to an Organization the gateway could not read; send the payor Organization with the coverage, or a payor identifier`
+    (`422`; CDS Hooks and `$questionnaire-package`; a reference written
+    `Organization/<id>`, which the Organization sent with the coverage
+    resolves)
+  - `no payer identifier on member coverage: Coverage.payor is a reference to an Organization the gateway could not resolve; send the payor Organization as a Bundle entry whose fullUrl is that reference, or a payor identifier`
+    (`422`; CDS Hooks and `$questionnaire-package`; an absolute reference
+    that a Bundle entry's `fullUrl` can be, with no `/_history/`, query,
+    fragment or dot segment, which an entry with that `fullUrl` of a Bundle
+    the request carries resolves)
+  - `no payer identifier on member coverage: Coverage.payor is a reference to an Organization the gateway does not read; send a payor identifier with the coverage`
+    (`422`; CDS Hooks and `$questionnaire-package`; any other reference to an
+    Organization: versioned, with a fragment, a leading slash or a dot
+    segment)
+  - `no payer identifier on member coverage: the request's coverages name more than one payor Organization by reference alone`
+    (`422`; CDS Hooks, two different Organizations by reference alone left
+    for the `fhirServer` read)
+  - on CDS Hooks, a refused `fhirServer` read of the payor Organization, `412`
+    except the last, which is `502`:
+    - `no payer identifier on member coverage: fhirServer is not an absolute base URL (no query or fragment)`
+    - `no payer identifier on member coverage: fhirServer must be https`
+    - `no payer identifier on member coverage: fhirServer must not carry credentials`
+    - `no payer identifier on member coverage: fhirAuthorization is not a bearer token`
+    - `no payer identifier on member coverage: fhirServer's address is one a gateway never reads (loopback, link-local, metadata or reserved)`
+    - `no payer identifier on member coverage: fhirServer at a public address must use port 443`
+    - `no payer identifier on member coverage: fhirServer must use port 443`
+    - `no payer identifier on member coverage: fhirServer's address is not public`
+    - `no payer identifier on member coverage: fhirServer's host did not resolve`
+    - `no payer identifier on member coverage: fhirServer redirected; redirects are not followed`
+    - `no payer identifier on member coverage: fhirServer's TLS could not be verified`
+    - `no payer identifier on member coverage: fhirServer could not be reached`
+    - `no payer identifier on member coverage: fhirServer did not answer in time`
+    - `no payer identifier on member coverage: fhirServer's answer exceeds 512 KiB`
+    - `no payer identifier on member coverage: fhirServer refused the fhirAuthorization token`
+    - `no payer identifier on member coverage: fhirServer answered with an error`
+    - `no payer identifier on member coverage: fhirServer holds no Organization for the coverage's payor`
+    - `no payer identifier on member coverage: fhirServer's answer is not the payor Organization`
+  A resolved payor Organization that carries no payer identifier keeps the
+  bare `422 no payer identifier on member coverage`.
+- Under the earlier templates `_include=Coverage:payor` brought the
+  Organization with the coverage, so such a request was routed with no read;
+  an EHR that fulfils the templates exactly is now refused when neither the
+  system of record nor the `fhirServer` read resolves the payor. A payor
+  identifier avoids that, and so does the payor Organization sent with the
+  coverage where its reference resolves: beside it for `Organization/<id>`,
+  or as an entry of a Bundle the request carries whose `fullUrl` is the
+  absolute reference.
+- **Unchanged:** the gateway's search for a gateway-originated order (a draft
+  order), the Coverage read for eligibility (UC-01) and on the payer side, and
+  a facility's clinical data search are not narrowed by status.
+- **Breaking (Go API):** `engine.SearchDateRange.AnyOf` is a slice, so
+  `SearchDateRange` is no longer comparable: code that compares two values
+  with `==` or keys a map by one does not build. Compare the fields instead,
+  `AnyOf` with `slices.Equal`. A narrowing with
+  `AnyOf` set is a token filter (`Param=a,b`, any of the codes) that
+  `engine.SoRSearchQuery` writes after the patient and any date range and
+  before the include; a code holding a character a query or token list gives a
+  meaning to is refused (`SearchMalformed`). A connector that sends
+  `engine.SoRSearchQuery`'s query (the built-in FHIR connector does) needs no
+  change; one that builds its own query must apply it.
+- **Go API (additive):** `engine.SystemOfRecordFHIRBase`, an optional
+  connector interface: `FHIRBase()` names the FHIR base the connector reads,
+  compared with a CDS Hooks request's `fhirServer` as above (`fhirsor.SoR`
+  implements it with its configured base). A connector that does not implement it is never at the
+  same base: a sent payor is then read in its system of record only for a
+  request naming no `fhirServer`.
+
 ## The payer system's deadline (v0.59.0)
 
 - **Behavior change in v0.59.0:** a payer gateway waits for its participant's
@@ -140,10 +564,12 @@ receives changes.
 
   `gateway: upstream payer <leg label> call timed out after <deadline>, this gateway's deadline for its system: answered 504 (host <host>, leg <leg>, correlation <id>, request written: yes|no)`
 
-  If the gateway's own work before the call used the whole deadline, it sends
-  nothing to its system, records no backend call, settles the exchange as
-  `other`, and answers its own `504` saying the payer's system did not
-  receive the request.
+  If the gateway's own work before the call used the whole deadline, it does
+  not send the operation to its system. The access line records the exchange
+  as `other` and no call of the forwarded operation; if a read ran before it,
+  such as the member's lookup or the CDS service listing, the last one is
+  still its `backend`. The gateway answers its own `504` saying the payer's
+  system did not receive the request.
 
 - **Upgrade effect:** a payer system that answers between the deadline (25 s)
   and the requester's leg budget (30 s) could get its answer through before;
@@ -1147,6 +1573,75 @@ or global failure state is introduced.
   reports it, and it no longer counts toward the requester's leg errors.
 - The Hub (`POST /route`) marks every error `X-SHN-Delivered: no | yes | unknown`.
 
+**Breaking in v0.60.0** (`Store` connectors: an inquiry answer decides only the claim it names):
+
+- `engine.PendLedger.LookupPended` is `LookupPended(requesterHolder string, k engine.PendKeys,
+  about []engine.PendKeyRef) (engine.PendMatch, error)` instead of returning
+  `(subjectPCI, corrID string, found, ambiguous bool, err error)`. `PendMatch` carries the
+  authorization when its `Verdict` is `engine.PendMatchFound`, and otherwise why none was
+  named: `PendMatchNoStrongKey`, `PendMatchNone`, `PendMatchAmbiguous`,
+  `PendMatchDisagrees` (with the disagreeing key `Kind`) or `PendMatchRequesterKeyOnly`.
+- A lookup now **searches by the strong keys only**, the payer's own ClaimResponse
+  identifier and its preAuthRef (`engine.StrongPendProbe`). A request identifier or an item
+  trace number no longer finds an authorization on its own: reused example claims share
+  them, and matching on one recorded one claim's decision on another. The one authorization
+  a strong key finds must agree with every key the answer states, of each kind it holds
+  (`engine.PendKeysAgree`), except that a match by the payer's preAuthRef does not require the
+  ClaimResponse identifier to agree: a payer may issue a new ClaimResponse for its decision.
+  Two authorizations holding one preAuthRef are ambiguous. A ClaimResponse identifier whose
+  value is the value of one of an authorization's own request identifiers, whatever system
+  it is stated under, is the requester's claim identifier echoed by the payer
+  (`engine.EchoedClaimIdentifier`): it never finds that authorization, and when it is all
+  that would have, the lookup answers `PendMatchRequesterKeyOnly` and records nothing.
+- `about` are the follow-up's own keys (`engine.PendAboutKeys`: its lines' trace numbers and
+  authorization numbers). They never search. `PendMatch.About` is true only when the match
+  holds every one of them and no other authorization in the requester's namespace holds
+  any; only then is a decision's EOB built from the follow-up's own lines. A follow-up with a
+  line that states neither has no `about` keys.
+- A third-party `PendLedger` backend must, inside one transaction or lock: probe its index
+  with `engine.StrongPendProbe(k)` (at most two distinct authorizations), leaving out an
+  authorization a ClaimResponse identifier finds only as an echo of its own request
+  identifier (and noting that it did); when there is exactly one, read the keys it holds in
+  the requester's namespace and the distinct authorizations holding any `about` key (at
+  most two); and return `engine.ResolvePendMatch(k, about, candidates, held, aboutHolders,
+  echoed)`. Reuse
+  `ResolvePendMatch` rather than reimplementing the verdict, so a custom backend answers as
+  `MemStore` and `PgStore` do.
+- `RecordDecision` is `RecordDecision(subjectPCI, corrID, outcome string, decidedAt time.Time,
+  k engine.PendKeys, eob *engine.EOBRecord)`: `k` carries the requester and the decision's
+  keys, `k.PreAuthRef` its authorization number. It writes the decision's EOB only when
+  `engine.PendEOBWritable` says the decision the ledger keeps after the write is this one: the
+  same outcome, dated no earlier. A losing or older decision no longer replaces the kept
+  decision's EOB; a later restatement of the kept decision may supply an EOB an earlier answer
+  could not, and advances the date the decision is kept by. When the write changes the kept
+  outcome and brings no EOB of its own, the decision EOB (`engine.DecisionEOBID`) is removed in
+  the same write (`engine.PendEOBStale`) and `PendTransition.EOBRemoved` says so; a
+  `RecordPendedKeyed` re-pend that supersedes a decision removes it the same way. The keys
+  `engine.DecisionPendKeys` names are indexed under the authorization's requester in the
+  same write: the kept decision's authorization number for an authorization already in the
+  ledger, and every key of `k` for one decided with no row before it (a payer that decided at
+  submit), which then belongs to `k.RequesterHolder`. A decision that names a requester for
+  an authorization filed under another requester is refused with
+  `engine.ErrPendRequesterMismatch`, as a re-pend is. A custom backend must apply the same
+  rules.
+- A payer gateway's inquiry emits one `pend.inquiry-unmatched` observer event counting, by
+  verdict, every ClaimResponse in the answer it could not record (before, those were skipped
+  silently), and one `pend.inquiry-eob-withheld` event counting the decisions it recorded
+  without an EOB because the inquiry's own lines do not name the authorization alone and it
+  has none yet. A ledger write that removes a stale decision EOB emits `pend.eob-removed`. The
+  payer's answer is relayed unchanged either way.
+- `engine.PendCorrelationLookup.PendedForOtherSubject` reports another patient's authorization
+  under the correlation id in any state, decided included. A payer gateway therefore refuses
+  (`409`) a submission for one patient under a correlation id another patient's decided
+  authorization holds even when that decision has no EOB (one with no product coding, or one
+  removed when its outcome changed); before, only an EOB filed for that patient or an
+  undecided authorization refused it. A custom store implementing the capability must count
+  decided rows too.
+- **Upgrading.** A ledger is not rewritten on upgrade. Decisions and EOBs it stored before
+  v0.60.0 keep their state, including a decision an earlier answer filed on the wrong claim, and
+  a decision recorded at submit before v0.60.0 holds no keys for a later inquiry to find it by.
+  Inquiries from v0.60.0 on are judged under these rules.
+
 **Breaking in v0.54.0** (a payer gateway's pend ledger records and never gates):
 
 - A payer gateway no longer refuses a PAS amendment itself. The `409`s for no pend
@@ -1358,6 +1853,60 @@ may be called concurrently, must return promptly without blocking, and must
 reserve bounded memory before copying read-only event bytes. Sink panics are
 contained. The app supplies the bounded `diagnostics.Queue` publisher and owns its
 shutdown in both `Run` and the closable `Handler` constructors.
+
+A `diagnostics.Queue` counts each sequenced event once as it leaves, and its
+`Health` carries the counts (additive, omitted when zero): `acknowledged`,
+`discarded` (declined as out of scope, or withheld by kind) and `droppedBy`, the drops by reason
+(`queueFull`, `expired`, `oversized`, `unencodable`, `test`, `stopped`, and the
+new `invalid`). `Health.CountsAgree` counts `invalid` among the drops.
+`Queue.Drop` counts an expiry. The publisher drops an event as `invalid`, without
+retrying it, when the ingest answers `400 invalid_event` or `409 conflict`; an
+older publisher retried it until its ownership window ran out. An accounts
+service older than these counts refuses a heartbeat that carries them.
+
+`diagnostics.PublisherConfig.BatchURL` (additive; empty keeps one event per
+request) names an ingest's batch endpoint. With it set, the first heartbeat is
+sent at once, and once the ingest answers a heartbeat with the header
+`X-SHN-Evidence-Batch` (`diagnostics.HeaderEvidenceBatch`) the publisher posts
+up to 256 due events, bounded by 1 MiB of retained cost, in one request signed over its
+whole body as `{"events":[…]}`, and settles each by the ingest's per-event
+result (`accepted`, `binding_pending`, `scope_ignored`, `kind_not_admitted`,
+`invalid`, `conflict`, `unavailable`). An event the ingest could not take now,
+or a batch it refused whole, is due again after a backoff until each event's
+own ownership window runs out; a test event the ingest did not take is not
+retried. A `413` halves later batches, which grow back as batches settle in
+full; a `413` for one event alone drops it as `oversized`. A sink that never sends that header (a
+participant's own sink, or an ingest older than batches) gets one event per
+request, as before. A batch answered 404 or 405, or with a success without one
+result for each event in order, falls back to one event per request until a
+heartbeat's answer carries the header again. The app sets `BatchURL` to its
+sink URL's path plus `/batch` and `Drain` to 10 s, and its queue holds 4,096
+events.
+
+`diagnostics.PublisherConfig.Drain` (additive; zero keeps stopping at once)
+bounds a final delivery after the publisher's context ends: it keeps sending
+what is queued, an event or batch in flight at the stop included, until the
+queue is empty or `Drain` has passed, then counts what is left as dropped
+(`stopped`) and sends a last heartbeat with the counts. An event emitted after
+the drain has ended is neither delivered nor counted; the app stops the
+publisher last, after its listener has shut down and the gateway has closed. A
+request still running when the listener's 5 s shutdown grace ends is cut, and
+its handler has up to 2 s more to return, and emit, before the publisher stops.
+
+A batch result of `kind_not_admitted` (the ingest never admits that kind from
+this publisher) withholds the kind: its later events are counted as discarded,
+and as `suppressed` in `Health` (additive, part of `discarded`), without being
+sent, until ten minutes later, when its events go to the ingest again and its
+answer decides afresh. No other result withholds a kind, and a sink that never
+answers `kind_not_admitted` (one that does not take batches) gets every kind.
+Events of the kind already queued when it is withheld are still sent.
+`Health.CountsAgree` refuses `suppressed` above `discarded`, or without the
+other counts. `Queue.TryEmit` returns `true` for an event of a withheld kind: it is
+counted, not queued. `RunPublisher` uses `PublisherConfig.Clock` as the queue's
+clock, read from emitting goroutines with the queue locked, so a `Clock` must be
+safe for concurrent use and must not call into the queue. A collector that decodes
+heartbeats strictly must know `invalid` and `suppressed` before a publisher sends
+them.
 
 `diagnostics.IngressFingerprint(ctx)` snapshots the handler-consumed ingress hash;
 it never reads the body. `diagnostics.IngressBody(ctx)` exposes a synchronous read-only view of the bounded

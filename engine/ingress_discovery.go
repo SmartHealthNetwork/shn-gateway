@@ -3,7 +3,8 @@
 // hook the network carries. What is advertised is exactly what is dispatched
 // (TestCDSDiscovery_MatchesDispatch). The prefetch templates are the pinned PA set;
 // for a key the EHR leaves out, the ingress obtains the value from the participant's
-// own system of record with the same search (ingress_crd.go).
+// own system of record with a search narrowed the same way, which keeps the includes
+// the template leaves out (ingress_crd.go, sorsearch.go).
 package engine
 
 import (
@@ -154,7 +155,7 @@ var pinnedPrefetchKeys = []string{
 const prefetchPatientKey = "patient"
 
 // prefetchSearchTypes maps each advertised search key to the resource type its template
-// searches: `<type>?patient=Patient/{{context.patientId}}`.
+// searches: `<type>?patient={{context.patientId}}&status=<codes>`.
 var prefetchSearchTypes = map[string]string{
 	"coverage":               "Coverage",
 	"serviceHistory":         "ServiceRequest",
@@ -163,14 +164,56 @@ var prefetchSearchTypes = map[string]string{
 	"questionnaireResponses": "QuestionnaireResponse",
 }
 
-// prefetchTemplate is the advertised template for key.
+// prefetchStatus is the status each advertised search narrows to, by resource type: the
+// Da Vinci reference payer's order-sign templates (CRD 2.2.1's example). It is the one
+// table both the advertised template (prefetchTemplate) and the gateway's own search of
+// its participant's system for the same value (prefetchSearchFilters) read, so what an
+// EHR is asked for and what the gateway reads for it select the same records. The coverage
+// the gateway routes by is not a filled value (it is read only to route, or carried by the
+// gateway's own originated request): it asks for every Coverage and routes on the active
+// ones first (obtainRoutingCoverage, routingCoverageChoice).
+var prefetchStatus = map[string][]string{
+	"Coverage":              {"active"},
+	"ServiceRequest":        {"active", "completed"},
+	"DeviceRequest":         {"active", "on-hold", "completed"},
+	"MedicationRequest":     {"active", "completed"},
+	"QuestionnaireResponse": {"completed"},
+}
+
+// prefetchSearchFilters is the narrowing of the gateway's search for a prefetch value of
+// resourceType: the status its advertised template names (none for a type no template
+// searches).
+func prefetchSearchFilters(resourceType string) []SearchDateRange {
+	codes, ok := prefetchStatus[resourceType]
+	if !ok {
+		return nil
+	}
+	return []SearchDateRange{{Param: "status", AnyOf: codes}}
+}
+
+// prefetchSearchQuery is the search the gateway runs for the advertised search key, for
+// the system of record's patient sorID ("" when an input is invalid).
+func prefetchSearchQuery(key, sorID string) string {
+	rt := prefetchSearchTypes[key]
+	q, _ := SoRSearchQuery(rt, sorID, prefetchSearchFilters(rt)...)
+	return q
+}
+
+// prefetchTemplate is the advertised template for key. A search template names the patient
+// by the bare id and narrows by the status prefetchStatus names, and carries no _include:
+// CDS Hooks 2.0 does not list _include among the query features a client supports, so an
+// EHR is not asked for one. The gateway's own search for the same value (SoRSearchQuery,
+// prefetchSearchFilters) narrows the same way but keeps its include (searchIncludes): a
+// value it obtains is carried to the payer, which cannot fetch the payor Organization or a
+// device order's performer itself once fhirServer is removed.
 func prefetchTemplate(key string) string {
 	if key == prefetchPatientKey {
 		return "Patient/{{context.patientId}}"
 	}
-	t := prefetchSearchTypes[key] + "?patient=Patient/{{context.patientId}}"
-	if inc, ok := searchIncludes[prefetchSearchTypes[key]]; ok {
-		t += "&_include=" + inc
+	rt := prefetchSearchTypes[key]
+	t := rt + "?patient={{context.patientId}}"
+	for _, f := range prefetchSearchFilters(rt) {
+		t += "&" + f.Param + "=" + strings.Join(f.AnyOf, ",")
 	}
 	return t
 }

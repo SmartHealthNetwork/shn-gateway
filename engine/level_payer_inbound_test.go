@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -46,6 +47,9 @@ type levelPayer struct {
 	findings  []ConformanceFinding
 	skipped   []ObserverEvent
 	seq       int
+	// mu guards findings and skipped: at observe a queued check reports from a
+	// worker as well as from the leg's goroutine.
+	mu sync.Mutex
 }
 
 // newLevelPayer builds the payer at level. opts are extra native-forward
@@ -75,6 +79,8 @@ func newLevelPayer(t *testing.T, level ConformanceEnforcement, opts ...NativeOpt
 	}
 	lp := &levelPayer{g: g, requester: requester, partner: p, store: store, level: level, hubPriv: hubPriv, authzPriv: authzPriv, pci: pci}
 	g.cfg.Observer = func(e ObserverEvent) {
+		lp.mu.Lock()
+		defer lp.mu.Unlock()
 		switch e.Kind {
 		case ConformanceObservedEvent:
 			var f ConformanceFinding
@@ -164,6 +170,9 @@ func (p *levelPayer) sendFramed(t *testing.T, leg string, headers map[string]str
 	// The route as mounted: the exchange record and the diagnostic observer
 	// around handleInbound (each a pass-through when unset).
 	p.g.inboundRoute()(rec, r)
+	// At observe a payload check runs off the request path: wait for the
+	// leg's queued checks, so a test reads every finding the leg produced.
+	p.g.drainObserveChecks()
 	if rec.Code != http.StatusOK {
 		return payerAnswer{status: rec.Code, body: rec.Body.Bytes(), corr: corr}
 	}

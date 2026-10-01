@@ -52,6 +52,10 @@ below. Keys are generated client-side and never leave your machine.
 
 **Step 1 — build the reference requester.** This clones and builds
 `br-provider` from pinned upstream source; there's no published image to pull.
+The clone is kept in `/tmp/br-provider` (set `BRPROVIDER_CLONE_DIR` to keep it
+elsewhere). If your system's `/tmp` cleanup has emptied or pruned it, the
+script moves it aside to `/tmp/br-provider.broken-<time>-<pid>-<n>` and clones
+again; delete that directory once no build is using it.
 
 ```sh
 bash brprovider/build.sh build

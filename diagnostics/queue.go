@@ -23,6 +23,25 @@ const (
 // carries a body has no such priority.
 const KindAccess = "access"
 
+// KindConformanceFinding is one conformance finding a gateway's checks recorded:
+// metadata only (the finding as its log line has it), keyed by the leg's
+// correlation id, with no body. At observe a payload check runs off the request
+// path, so its finding is not on the call's access line; the stats join these
+// events to the exchange instead. It has no shedding priority: a full queue
+// sheds it before an access event.
+const KindConformanceFinding = "conformance.finding"
+
+// KindConformanceResult closes one leg's findings at observe: its detail is
+// {"count":N}, plus "truncated" when per-finding events were capped at
+// FindingEventsPerLeg and "incomplete" when a check's finding was not recorded
+// (dropped unrun, or failed while running). Until it arrives, a leg whose
+// access line defers its findings has an unknown count, never zero.
+const KindConformanceResult = "conformance.result"
+
+// FindingEventsPerLeg caps how many KindConformanceFinding events one leg
+// captures; its KindConformanceResult still counts every finding.
+const FindingEventsPerLeg = 32
+
 type Limits struct {
 	MaxEvents    int
 	MaxBytes     int64
@@ -47,8 +66,18 @@ type Queue struct {
 	retainedBytes                           int64
 	limits                                  Limits
 	nextSequence, lastAcknowledged, dropped uint64
-	state                                   string
-	ready                                   chan struct{}
+	// Every sequenced event is counted once, as it leaves the queue:
+	// acknowledged, discarded or dropped (by reason).
+	acknowledged, discarded uint64
+	droppedBy               DropCounts
+	// suppressedKinds holds the kinds the ingest does not admit from this
+	// publisher, each until it is probed again; suppressed counts the
+	// events discarded for it without being sent.
+	suppressedKinds map[string]time.Time
+	suppressed      uint64
+	clock           func() time.Time
+	state           string
+	ready           chan struct{}
 }
 
 func NewQueue(l Limits) *Queue {
@@ -112,6 +141,16 @@ func (q *Queue) TryEmit(e Event) bool {
 	defer q.mu.Unlock()
 	q.nextSequence++
 	e.Sequence = q.nextSequence
+	if probeAt, ok := q.suppressedKinds[e.Kind]; ok {
+		if q.now().Before(probeAt) {
+			q.discarded++
+			q.suppressed++
+			return true
+		}
+		// The suppression is over: this event and those after it go to the
+		// ingest again, which says whether the kind is still not admitted.
+		delete(q.suppressedKinds, e.Kind)
+	}
 	costEvent := e
 	if int64(len(costEvent.Body)) > q.limits.MaxBodyBytes {
 		costEvent.Body = costEvent.Body[:q.limits.MaxBodyBytes]
@@ -122,6 +161,7 @@ func (q *Queue) TryEmit(e Event) bool {
 	cost := eventCost(costEvent)
 	if !q.fits(cost) && (e.Kind != KindAccess || len(e.Body) != 0 || !q.shedFor(cost)) {
 		q.dropped++
+		q.droppedBy.add(queueFull)
 		q.state = "degraded"
 		return false
 	}
@@ -163,6 +203,9 @@ func (q *Queue) shedFor(cost int64) bool {
 	}
 	q.retainedBytes = bytes
 	q.dropped += uint64(len(shed))
+	for range shed {
+		q.droppedBy.add(queueFull)
+	}
 	q.state = "degraded"
 	return true
 }
@@ -211,6 +254,10 @@ func (q *Queue) take(now time.Time) (Event, bool, time.Duration) {
 			continue
 		}
 		q.items[i].delivered = true
+		if q.items[i].event.Time.IsZero() {
+			// Stamped once, so a resent event carries the same bytes.
+			q.items[i].event.Time = now
+		}
 		for j := i + 1; j < len(q.items); j++ {
 			if !q.items[j].delivered {
 				select {
@@ -223,6 +270,112 @@ func (q *Queue) take(now time.Time) (Event, bool, time.Duration) {
 		return q.items[i].event, true, 0
 	}
 	return Event{}, false, due
+}
+
+// kindReprobe is how long a kind the ingest does not admit is withheld
+// before an event of it is sent again: the ingest's admission can widen with
+// a deploy, and a long-running publisher must find that out.
+const kindReprobe = 10 * time.Minute
+
+// suppressKind withholds kind until kindReprobe from now.
+func (q *Queue) suppressKind(kind string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.suppressedKinds == nil {
+		q.suppressedKinds = map[string]time.Time{}
+	}
+	q.suppressedKinds[kind] = q.now().Add(kindReprobe)
+}
+
+// setClock sets the queue's clock; nil is the wall clock.
+func (q *Queue) setClock(clock func() time.Time) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.clock = clock
+}
+
+func (q *Queue) now() time.Time {
+	if q.clock == nil {
+		return time.Now()
+	}
+	return q.clock()
+}
+
+// takeBatch marks up to max due undelivered events, in queue order,
+// delivered and returns them, stopping before an event that would take their
+// summed cost past maxCost; the first due event is always taken. With none
+// due, it returns how long until the earliest undelivered event is due, or
+// zero when there is none.
+func (q *Queue) takeBatch(now time.Time, max int, maxCost int64) ([]Event, time.Duration) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	var out []Event
+	var cost int64
+	var due time.Duration
+	for i := range q.items {
+		it := &q.items[i]
+		if it.delivered {
+			continue
+		}
+		if wait := it.notBefore.Sub(now); wait > 0 {
+			if due == 0 || wait < due {
+				due = wait
+			}
+			continue
+		}
+		if len(out) == max || (len(out) > 0 && cost+it.bytes > maxCost) {
+			break
+		}
+		it.delivered = true
+		if it.event.Time.IsZero() {
+			// Stamped once, so a resent event carries the same bytes.
+			it.event.Time = now
+		}
+		cost += it.bytes
+		out = append(out, it.event)
+	}
+	if len(out) > 0 {
+		return out, 0
+	}
+	return nil, due
+}
+
+// empty reports whether no event is queued.
+func (q *Queue) empty() bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return len(q.items) == 0
+}
+
+// dropRemaining drops every queued event for reason.
+func (q *Queue) dropRemaining(reason dropReason) {
+	q.mu.Lock()
+	var seqs []uint64
+	for _, it := range q.items {
+		seqs = append(seqs, it.event.Sequence)
+	}
+	q.mu.Unlock()
+	for _, s := range seqs {
+		q.dropFor(s, reason)
+	}
+}
+
+// retryAt makes a delivered event due again at notBefore, in its place and
+// with its ownership deadline kept.
+func (q *Queue) retryAt(sequence uint64, notBefore time.Time) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for i := range q.items {
+		if q.items[i].event.Sequence == sequence {
+			q.items[i].delivered = false
+			q.items[i].notBefore = notBefore
+			select {
+			case q.ready <- struct{}{}:
+			default:
+			}
+			return
+		}
+	}
 }
 
 // waitDue waits d for the earliest pending event to fall due, returning early
@@ -248,7 +401,53 @@ func (q *Queue) waitDue(ctx context.Context, wait func(context.Context, time.Dur
 	return nil
 }
 
-func (q *Queue) finish(sequence uint64, acknowledged, dropped bool) {
+// outcome is how an event leaves the queue.
+type outcome int
+
+const (
+	acknowledged outcome = iota
+	discarded
+	dropped
+)
+
+// dropReason names the DropCounts field a drop is counted in.
+type dropReason int
+
+const (
+	notDropped dropReason = iota
+	queueFull
+	expired
+	oversized
+	unencodable
+	testNotAccepted
+	stopped
+	invalid
+	// dropReasons is one past the last reason.
+	dropReasons
+)
+
+func (d *DropCounts) add(r dropReason) {
+	switch r {
+	case queueFull:
+		d.QueueFull++
+	case expired:
+		d.Expired++
+	case oversized:
+		d.Oversized++
+	case unencodable:
+		d.Unencodable++
+	case testNotAccepted:
+		d.Test++
+	case stopped:
+		d.Stopped++
+	case invalid:
+		d.Invalid++
+	}
+}
+
+// finish removes an event and counts how it left, once: an event already
+// gone is not counted again.
+func (q *Queue) finish(sequence uint64, how outcome, reason dropReason) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	for i := range q.items {
@@ -257,11 +456,17 @@ func (q *Queue) finish(sequence uint64, acknowledged, dropped bool) {
 			copy(q.items[i:], q.items[i+1:])
 			q.items[len(q.items)-1] = queuedEvent{}
 			q.items = q.items[:len(q.items)-1]
-			if acknowledged && sequence > q.lastAcknowledged {
-				q.lastAcknowledged = sequence
-			}
-			if dropped {
+			switch how {
+			case acknowledged:
+				q.acknowledged++
+				if sequence > q.lastAcknowledged {
+					q.lastAcknowledged = sequence
+				}
+			case discarded:
+				q.discarded++
+			case dropped:
 				q.dropped++
+				q.droppedBy.add(reason)
 				q.state = "degraded"
 			}
 			break
@@ -279,13 +484,21 @@ func (q *Queue) finish(sequence uint64, acknowledged, dropped bool) {
 		}
 	}
 }
-func (q *Queue) Acknowledge(sequence uint64) { q.finish(sequence, true, false) }
-func (q *Queue) Drop(sequence uint64)        { q.finish(sequence, false, true) }
-func (q *Queue) discard(sequence uint64)     { q.finish(sequence, false, false) }
+func (q *Queue) Acknowledge(sequence uint64) { q.finish(sequence, acknowledged, notDropped) }
+
+// Drop drops an event whose ownership window ran out.
+func (q *Queue) Drop(sequence uint64) { q.dropFor(sequence, expired) }
+
+func (q *Queue) dropFor(sequence uint64, reason dropReason) { q.finish(sequence, dropped, reason) }
+func (q *Queue) discard(sequence uint64)                    { q.finish(sequence, discarded, notDropped) }
+
+// Health is the queue's heartbeat: its sequence, what is pending, and how
+// every sequenced event left it.
 func (q *Queue) Health(now time.Time) Health {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	return Health{Time: now, LastSequence: q.nextSequence, LastAcknowledged: q.lastAcknowledged, Pending: uint64(len(q.items)), Dropped: q.dropped, State: q.state}
+	return Health{Time: now, LastSequence: q.nextSequence, LastAcknowledged: q.lastAcknowledged, Pending: uint64(len(q.items)), Dropped: q.dropped, State: q.state,
+		Acknowledged: q.acknowledged, Discarded: q.discarded, DroppedBy: q.droppedBy, Suppressed: q.suppressed}
 }
 
 // deferredBinding keeps the original queue reservation and absolute ownership

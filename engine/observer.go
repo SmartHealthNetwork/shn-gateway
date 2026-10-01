@@ -73,10 +73,13 @@ import (
 //	ingress.responded the ingress call was answered (Detail = HTTP status, Payload = response body)
 //	validate.result   a $validate ran (Detail = "valid" | "invalid" | "validator unavailable")
 //	prefetch.obtained the provider ingress tried to obtain a CDS Hooks prefetch value the
-//	                  request left out from the participant's system of record
-//	                  (LegType = the leg, Direction = "sor", Op = the prefetch key,
-//	                  Detail = metadata-only JSON: key, source, query, outcome, reason,
-//	                  count, pages, retrievedAt — never a value or a resource)
+//	                  request left out from the participant's own systems: its system of
+//	                  record (source "system-of-record") or, for the coverage it routes
+//	                  by, the EHR server the request names (source "fhirServer", when
+//	                  Config.FHIRServerRead is on) (LegType = the leg, Direction = "sor",
+//	                  Op = the prefetch key, Detail = metadata-only JSON: key, source,
+//	                  query, outcome, reason, count, pages, retrievedAt — never a value,
+//	                  a resource or a host)
 //	pa.local-write-skipped
 //	                  a provider ingress relayed a payer's PAS answer below strict
 //	                  that it could not read (answer.shape) or whose subjects do not
@@ -514,6 +517,10 @@ func (o observingSoR) SearchPatientContext(ctx context.Context, resourceType, so
 	}
 	return res, err
 }
+
+// FHIRBase passes the configured connector's FHIR base through (""
+// when it names none); it reads nothing, so it emits nothing.
+func (o observingSoR) FHIRBase() string { return sorFHIRBase(o.inner) }
 
 func (o observingSoR) ResolveByReference(key string) ([]byte, bool) {
 	a, found, _ := o.ResolveByReferenceContext(context.Background(), key)

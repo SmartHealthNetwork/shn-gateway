@@ -70,8 +70,9 @@ type Health struct {
 	Dropped          uint64    `json:"dropped"`
 	State            string    `json:"state"`
 	// The counts account for every sequenced event: each is acknowledged,
-	// discarded (the ingest declined it as out of scope), dropped (for a
-	// reason in DroppedBy) or still pending. LastAcknowledged is only the
+	// discarded (the ingest declined it as out of scope, or the publisher
+	// withheld its kind), dropped (for a reason in DroppedBy) or still
+	// pending. LastAcknowledged is only the
 	// highest sequence acknowledged, so a declined event leaves it behind
 	// LastSequence. Empty counts are omitted: a publisher that does
 	// not keep them sends exactly what it sent before. The accounts ingest
@@ -81,13 +82,18 @@ type Health struct {
 	Acknowledged uint64     `json:"acknowledged,omitempty"`
 	Discarded    uint64     `json:"discarded,omitempty"`
 	DroppedBy    DropCounts `json:"droppedBy,omitzero"`
+	// Suppressed counts the discarded events the publisher never sent: their
+	// kind is one the ingest said it does not admit from this publisher
+	// (kind_not_admitted). It is part of Discarded.
+	Suppressed uint64 `json:"suppressed,omitempty"`
 }
 
 // DropCounts are a publisher's drops by why: its queue was full when the
 // event was emitted (or, still undelivered, it was shed from a full queue to
 // admit an access event), its ownership window expired, it was too large to
 // publish, it could not be encoded, it was a test event that was not
-// accepted, or the publisher stopped with it undelivered.
+// accepted, the publisher stopped with it undelivered, or the ingest refused
+// it for good as invalid or as conflicting with an event it already holds.
 type DropCounts struct {
 	QueueFull   uint64 `json:"queueFull,omitempty"`
 	Expired     uint64 `json:"expired,omitempty"`
@@ -95,6 +101,7 @@ type DropCounts struct {
 	Unencodable uint64 `json:"unencodable,omitempty"`
 	Test        uint64 `json:"test,omitempty"`
 	Stopped     uint64 `json:"stopped,omitempty"`
+	Invalid     uint64 `json:"invalid,omitempty"`
 }
 
 // Counted reports whether h carries the counts.
@@ -120,10 +127,13 @@ func sum(counts ...uint64) (uint64, bool) {
 // consistent with the highest sequence acknowledged.
 func (h Health) CountsAgree() bool {
 	if !h.Counted() {
-		return true
+		return h.Suppressed == 0
+	}
+	if h.Suppressed > h.Discarded {
+		return false
 	}
 	d := h.DroppedBy
-	dropped, ok := sum(d.QueueFull, d.Expired, d.Oversized, d.Unencodable, d.Test, d.Stopped)
+	dropped, ok := sum(d.QueueFull, d.Expired, d.Oversized, d.Unencodable, d.Test, d.Stopped, d.Invalid)
 	if !ok || dropped != h.Dropped {
 		return false
 	}

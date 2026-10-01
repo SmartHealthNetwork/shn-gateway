@@ -875,6 +875,153 @@ func TestOriginator_ProviderAnInquiryCannotCarryIsRefusedByName(t *testing.T) {
 	}
 }
 
+// The inquiry names the coverage the submission was built under, the routing
+// choice (memberRoutingCoverage): the active Coverages when any is active. A
+// stale cancelled Coverage the system of record also holds neither makes the
+// inquiry ambiguous nor takes the active one's place.
+func TestOriginator_InquiryNamesTheCoverageTheSubmissionCarried(t *testing.T) {
+	t.Run("a stale cancelled coverage at another payer: the inquiry goes out with the active one", func(t *testing.T) {
+		persona := newPendingPersonaSoR(t)
+		persona.byRef["Organization/org-other-payer"] = []byte(`{"resourceType":"Organization","id":"org-other-payer",` +
+			`"identifier":[{"system":"` + otherPayer.System + `","value":"` + otherPayer.Value + `"}]}`)
+		active := persona.byRef["Coverage/cov-mbrpdpend"]
+		stale := personaCoverage("cov-mbrpdpend-old", "org-other-payer")
+		gw, stub := pasFollowSystemWithSoR(t, "pended", withCoverages(persona, stale, active), persona)
+		stub.inquireAnswer = "approved"
+		stub.submitCorr = "corr-pending"
+
+		req := httptest.NewRequest(http.MethodPost, "/scenario/pa/inquire", nil)
+		out, status, msg, err := gw.inquireContinuation(req.Context(), req, pendingPersonaContinuation())
+		if status != 0 || err != nil {
+			t.Fatalf("the inquiry must go out: %d %q %v", status, msg, err)
+		}
+		if out.Decision != PASDecisionApproved {
+			t.Fatalf("decision = %q", out.Decision)
+		}
+		inquiries := stub.sent["pas-claim-inquire"]
+		if len(inquiries) != 1 {
+			t.Fatalf("%d inquiries reached the payer", len(inquiries))
+		}
+		if got := sentCoverages(t, inquiries[0]); len(got) != 1 || got[0] != canonicalJSON(t, active) {
+			t.Fatalf("the inquiry carried %v, want only the active Coverage %s", got, active)
+		}
+		if strings.Contains(string(inquiries[0]), "cov-mbrpdpend-old") || strings.Contains(string(inquiries[0]), "org-other-payer") {
+			t.Fatalf("the inquiry carries the stale coverage or its payer: %s", inquiries[0])
+		}
+	})
+
+	t.Run("one payer, the cancelled coverage listed first: the inquiry carries the submitted coverage", func(t *testing.T) {
+		fastPASInquire(t)
+		follow := newPASFollowSoR()
+		active, _ := follow.OpenCoverage(pasFollowMember)
+		lapsed := []byte(`{"resourceType":"Coverage","id":"cov-follow-lapsed","status":"cancelled",` +
+			`"beneficiary":{"reference":"Patient/` + pasFollowMember + `"},` +
+			`"subscriberId":"` + pasFollowMember + `",` +
+			`"payor":[{"reference":"Organization/payer-follow"}]}`)
+		sor := withCoverages(follow, lapsed, active)
+		gw, stub := pasFollowSystemWithSoR(t, "pended", sor, follow)
+		stub.inquireAnswer = "approved"
+
+		// Every origination site builds its PAS submission under
+		// memberRoutingCoverage's Coverage (crdDtrResult.coverage).
+		submitted, found, status, msg := gw.memberRoutingCoverage(context.Background(), pasFollowMember)
+		if !found || status != 0 {
+			t.Fatalf("routing coverage: %v %d %q", found, status, msg)
+		}
+		insurer, status, msg := gw.memberPayerOrganization(context.Background(), submitted)
+		if status != 0 {
+			t.Fatalf("payer organization: %d %q", status, msg)
+		}
+		in := pasFollowSubmit(PASWaitMax)
+		in.coverage, in.insurer = submitted, insurer
+		req := httptest.NewRequest(http.MethodPost, "/scenario/uc03", nil)
+		out, status, msg, err := gw.submitClaimAndFollow(req.Context(), req, in)
+		if status != 0 || err != nil {
+			t.Fatalf("%d %q %v", status, msg, err)
+		}
+		if out.Decision != PASDecisionApproved || out.Inquiries != 1 {
+			t.Fatalf("decision %q after %d inquiries, want the approval the inquiry found", out.Decision, out.Inquiries)
+		}
+		claims, inquiries := stub.sent["pas-claim"], stub.sent["pas-claim-inquire"]
+		if len(claims) != 1 || len(inquiries) != 1 {
+			t.Fatalf("%d submissions and %d inquiries reached the payer", len(claims), len(inquiries))
+		}
+		sub, inq := sentCoverages(t, claims[0]), sentCoverages(t, inquiries[0])
+		if len(sub) != 1 || len(inq) != 1 {
+			t.Fatalf("the submission carried %d Coverages and the inquiry %d, want one each", len(sub), len(inq))
+		}
+		if inq[0] != sub[0] {
+			t.Fatalf("the inquiry carried\n%s\nthe submission carried\n%s", inq[0], sub[0])
+		}
+		if !strings.Contains(sub[0], `"cov-follow"`) {
+			t.Fatalf("the submission carried %s, want the active Coverage", sub[0])
+		}
+	})
+}
+
+// personaCoverage is a cancelled Coverage for the pending persona naming org
+// as its payor.
+func personaCoverage(id, org string) []byte {
+	return []byte(`{"resourceType":"Coverage","id":"` + id + `","status":"cancelled",` +
+		`"beneficiary":{"reference":"Patient/` + pendingPersonaMember + `"},` +
+		`"subscriberId":"` + pendingPersonaMember + `",` +
+		`"payor":[{"reference":"Organization/` + org + `"}]}`)
+}
+
+// coveragesHeld is a system of record whose member holds the Coverage records
+// given, in that order; every other read is the inner system's.
+type coveragesHeld struct {
+	SystemOfRecord
+	ContextSystemOfRecord
+	covs [][]byte
+}
+
+func (s coveragesHeld) OpenCoverageContext(context.Context, string) ([][]byte, error) {
+	return s.covs, nil
+}
+
+func withCoverages(inner SystemOfRecord, covs ...[]byte) coveragesHeld {
+	return coveragesHeld{SystemOfRecord: inner, ContextSystemOfRecord: ReadSystemOfRecord(inner), covs: covs}
+}
+
+// sentCoverages is every Coverage a sent PAS Bundle carries (canonicalJSON).
+func sentCoverages(t *testing.T, bundle []byte) []string {
+	t.Helper()
+	var b struct {
+		Entry []struct {
+			Resource json.RawMessage `json:"resource"`
+		} `json:"entry"`
+	}
+	if err := json.Unmarshal(bundle, &b); err != nil {
+		t.Fatalf("sent bundle: %v", err)
+	}
+	var out []string
+	for _, e := range b.Entry {
+		var head struct {
+			ResourceType string `json:"resourceType"`
+		}
+		if json.Unmarshal(e.Resource, &head) == nil && head.ResourceType == "Coverage" {
+			out = append(out, canonicalJSON(t, e.Resource))
+		}
+	}
+	return out
+}
+
+// canonicalJSON is b re-encoded with its object members in key order, so two
+// encodings of one record compare equal.
+func canonicalJSON(t *testing.T, b []byte) string {
+	t.Helper()
+	var v any
+	if err := json.Unmarshal(b, &v); err != nil {
+		t.Fatalf("canonical: %v", err)
+	}
+	out, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("canonical: %v", err)
+	}
+	return string(out)
+}
+
 // --- the seeded pending persona, as its own fixture ---
 
 const (
@@ -1143,6 +1290,10 @@ type pasFollowStub struct {
 	// identifiers for the authorization derive from it, and an inquiry's answer
 	// carries those, not the inquiry's own.
 	submitCorr string
+	// payerEncPub and payerEncPriv are the payer's sealing keys, so the stub
+	// opens what the gateway sent it; sent holds each opened request, by leg.
+	payerEncPub, payerEncPriv *[32]byte
+	sent                      map[string][][]byte
 }
 
 // inquiryResponseBundle wraps a payer answer in the response Bundle the 2.0 and
@@ -1175,6 +1326,13 @@ func (s *pasFollowStub) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	corrID := env.Metadata.CorrelationID
 	leg := env.Metadata.TransactionType
+	if s.payerEncPriv != nil {
+		plain, err := shnsdk.Open(env, s.payerEncPub, s.payerEncPriv)
+		if err != nil {
+			return errResp("stub: open: " + err.Error()), nil
+		}
+		s.sent[leg] = append(s.sent[leg], plain)
+	}
 	var payload []byte
 	var op string
 	switch leg {
@@ -1248,7 +1406,7 @@ func pasFollowSystemWithSoR(t *testing.T, submitAnswer string, sor SystemOfRecor
 	provEncPub, provEncPriv := genKeyPair(t)
 	var provSignPriv ed25519.PrivateKey
 	_, provSignPriv = genED25519(t)
-	payerEncPub, _ := genKeyPair(t)
+	payerEncPub, payerEncPriv := genKeyPair(t)
 	payerSignPub, _ := genED25519(t)
 
 	clock := func() time.Time { return time.Unix(1700000000, 0).UTC() }
@@ -1259,6 +1417,9 @@ func pasFollowSystemWithSoR(t *testing.T, submitAnswer string, sor SystemOfRecor
 		submitAnswer:  submitAnswer,
 		inquireAnswer: "pended",
 		line:          "2.0",
+		payerEncPub:   payerEncPub,
+		payerEncPriv:  payerEncPriv,
+		sent:          map[string][][]byte{},
 	}
 
 	reg := shnsdk.NewRegistry()

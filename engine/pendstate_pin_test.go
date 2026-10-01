@@ -37,6 +37,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -775,8 +776,9 @@ func TestHandleUC05_FederatedQueryIngressRelaysBelowStrict(t *testing.T) {
 			})
 			gw.cfg.OriginationProfile = "demo"
 			gw.cfg.ConformanceEnforcement = level
+			var mu sync.Mutex
 			var events []ObserverEvent
-			gw.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
+			gw.cfg.Observer = func(e ObserverEvent) { mu.Lock(); events = append(events, e); mu.Unlock() }
 			gw.cfg.Validator = &shnsdk.FakeValidator{RejectIfContains: federatedQueryIngressMutationMarker}
 			stub.overrideResponse = func(legType string, payload []byte) []byte {
 				if legType != "federated-query" {
@@ -788,6 +790,9 @@ func TestHandleUC05_FederatedQueryIngressRelaysBelowStrict(t *testing.T) {
 
 			rec := httptest.NewRecorder()
 			gw.handleUC05(rec, httptest.NewRequest(http.MethodPost, "/scenario/uc05", nil))
+			gw.drainObserveChecks() // at observe the checks run off the request path
+			mu.Lock()
+			defer mu.Unlock()
 
 			if !legAttempted(stub.legTypes, "federated-query") {
 				t.Fatalf("federated-query leg never ran (legs: %v); status=%d body=%s", stub.legTypes, rec.Code, rec.Body.String())

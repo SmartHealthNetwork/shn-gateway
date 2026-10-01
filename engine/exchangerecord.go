@@ -124,6 +124,12 @@ type FindingSummary struct {
 	Refused bool
 	// Kinds are the distinct CheckKind values recorded, in first-seen order.
 	Kinds []string
+	// Deferred says the call's findings are not counted here: at observe a
+	// payload check runs off the request path, so a count taken when the call
+	// ends would be partial. Count and Kinds are then empty, and each finding is
+	// captured as its own event, keyed by the leg's correlation id. Refused stays
+	// meaningful: a check that refuses is judged inline at every level.
+	Deferred bool
 }
 
 // ExchangeOther is the value recorded for anything a closed list does not name.
@@ -228,6 +234,9 @@ type exchangeRecorderKey struct{}
 type exchangeRecorder struct {
 	mu  sync.Mutex
 	rec ExchangeRecord
+	// tally follows the leg's findings at observe (finding_tally.go); nil at
+	// every other level.
+	tally *legTally
 	// outcome/party/rule are the settled outcome, set by decided.
 	outcome, party, rule string
 	// appStatus is the status inside an inbound answer's frame.
@@ -311,10 +320,11 @@ func (x *exchangeRecorder) decided(outcome, by, rule string) {
 }
 
 // routed notes a payer-routing answer: the 422 a request is answered when its
-// coverage names no payer the network registers. Any other status is left to
-// the answer.
+// coverage names no payer the network registers, and the 412 a CRD request is
+// answered when no coverage to route by could be obtained. Any other status is
+// left to the answer.
 func (x *exchangeRecorder) routed(status int) {
-	if status == http.StatusUnprocessableEntity {
+	if status == http.StatusUnprocessableEntity || status == http.StatusPreconditionFailed {
 		x.refused(RefusalRouting)
 	}
 }
@@ -674,7 +684,7 @@ func (x *exchangeRecorder) legOutcome(err error) {
 		x.decided(ExchangeUpstreamError, "", "")
 	case errors.Is(err, errAuthorizationDenied):
 		x.decided(ExchangeRefused, RefusedByAuthorizationFramework, RefusalAuthority)
-	case errors.Is(err, errHubUnreachable), errors.Is(err, errHubTimeout):
+	case errors.Is(err, errHubUnreachable), errors.Is(err, errHubTimeout), errors.Is(err, errAuthzUnreachable):
 		x.decided(ExchangeUnreachable, "", "")
 	case errors.As(err, &hr):
 		x.decided(hubRefusalOutcome(hr))
@@ -764,6 +774,9 @@ func (g *Gateway) recordExchange(route, direction string, h http.HandlerFunc) ht
 			return
 		}
 		x := &exchangeRecorder{self: g.exchangeParty(direction), now: g.exchangeClock}
+		if g.policy().Level() == EnforcementObserve {
+			x.tally = &legTally{}
+		}
 		x.rec.Start = g.exchangeClock()
 		x.rec.Direction = closed(ExchangeDirections, direction)
 		x.rec.Route = closed(ExchangeRoutes, route)
@@ -813,6 +826,12 @@ func (g *Gateway) emitExchange(x *exchangeRecorder, w *exchangeWriter, panicked 
 	x.mu.Lock()
 	rec := x.rec
 	rec.Findings.Kinds = slices.Clone(rec.Findings.Kinds)
+	// At observe the count and kinds are deferred (checks run off the request
+	// path), but a check that refuses is always judged inline, so Refused is known.
+	if g.policy().Level() == EnforcementObserve {
+		rec.Findings = FindingSummary{Deferred: true, Refused: rec.Findings.Refused}
+	}
+	tally := x.tally
 	if rec.Backend != nil {
 		b := *rec.Backend
 		rec.Backend = &b
@@ -874,6 +893,11 @@ func (g *Gateway) emitExchange(x *exchangeRecorder, w *exchangeWriter, panicked 
 	}
 	if rec.Backend != nil && rec.Backend.ErrorClass != "" {
 		rec.Backend.ErrorClass = closed(BackendErrorClasses, rec.Backend.ErrorClass)
+	}
+	if tally != nil {
+		// Deferred, so the leg's result is captured even when an exchange
+		// observer panics.
+		defer tally.end(g, rec)
 	}
 	g.cfg.ExchangeObserved(rec)
 }

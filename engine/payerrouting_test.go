@@ -37,14 +37,14 @@ func TestRecipientForResolvesAndFailsClosed(t *testing.T) {
 	}
 }
 
-// TestBundleRefResolver proves the inbound-payload resolver matches a present "<Type>/<id>" against
+// TestBundleRefsResolver proves the PAS Bundle resolver matches a present "<Type>/<id>" against
 // an inbound Bundle's entries and misses an absent one (the Finding-1 fix core).
-func TestBundleRefResolver(t *testing.T) {
+func TestBundleRefsResolver(t *testing.T) {
 	bundle := []byte(`{"resourceType":"Bundle","entry":[
 		{"resource":{"resourceType":"Organization","id":"payer-org","identifier":[{"system":"s","value":"v"}]}},
 		{"resource":{"resourceType":"Patient","id":"p-1"}}
 	]}`)
-	r := bundleRefResolver(bundle)
+	r := readBundleRefs(bundle).resolver()
 	got, ok := r("Organization/payer-org")
 	if !ok {
 		t.Fatal("present ref did not resolve")
@@ -60,7 +60,7 @@ func TestBundleRefResolver(t *testing.T) {
 		t.Fatal("absent ref must miss")
 	}
 	// A malformed bundle yields a resolver that always misses (fail-closed, never panics).
-	if _, ok := bundleRefResolver([]byte("not json"))("Organization/x"); ok {
+	if _, ok := readBundleRefs([]byte("not json")).resolver()("Organization/x"); ok {
 		t.Fatal("malformed bundle must miss")
 	}
 }
@@ -81,7 +81,7 @@ func externalPayorPASBundle(system, value string, withOrg bool) []byte {
 }
 
 // TestPASIngressExternalPayorEntryRoutes is the Finding-1 regression guard: the inbound PAS-ingress
-// routing expression — recipientForWith(pasBundleCoverage(body), bundleRefResolver(body)) — resolves
+// routing expression — pasRecipient(body) — resolves
 // an EXTERNAL bundle-entry payor Organization against the inbound bundle (NOT the provider SoR) and
 // routes to the mapped holder; the SAME bundle without the sibling Organization, or with an unmapped
 // identifier, fails closed 422 with no route. Before the fix this used the provider SoR resolver and
@@ -91,7 +91,7 @@ func TestPASIngressExternalPayorEntryRoutes(t *testing.T) {
 
 	// External entry-form carrying CMSPayerIdentity (00001 → payer-a in the 2-entry directory).
 	bundle := externalPayorPASBundle(shnsdk.CMSPayerIdentity.System, shnsdk.CMSPayerIdentity.Value, true)
-	recipient, pid, status, msg := gw.recipientForWith(pasBundleCoverage(bundle), bundleRefResolver(bundle))
+	recipient, pid, status, msg := gw.pasRecipient(bundle)
 	if status != 0 {
 		t.Fatalf("external entry-form must route, got (%d,%q)", status, msg)
 	}
@@ -104,14 +104,14 @@ func TestPASIngressExternalPayorEntryRoutes(t *testing.T) {
 
 	// SAME bundle WITHOUT the sibling Organization → the external ref cannot resolve → 422, no route.
 	noOrg := externalPayorPASBundle(shnsdk.CMSPayerIdentity.System, shnsdk.CMSPayerIdentity.Value, false)
-	if r, _, s, _ := gw.recipientForWith(pasBundleCoverage(noOrg), bundleRefResolver(noOrg)); s != http.StatusUnprocessableEntity || r != "" {
+	if r, _, s, _ := gw.pasRecipient(noOrg); s != http.StatusUnprocessableEntity || r != "" {
 		t.Fatalf("missing payor Organization must fail closed 422 with no route, got (%q,%d)", r, s)
 	}
 
 	// Present Organization but an UNMAPPED identifier (00099) → resolves the Org but no directory
 	// entry → 422 "no registered payer".
 	unmapped := externalPayorPASBundle(shnsdk.CMSPayerIdentity.System, "00099", true)
-	if _, _, s, m := gw.recipientForWith(pasBundleCoverage(unmapped), bundleRefResolver(unmapped)); s != http.StatusUnprocessableEntity || !strings.Contains(m, "no registered payer") {
+	if _, _, s, m := gw.pasRecipient(unmapped); s != http.StatusUnprocessableEntity || !strings.Contains(m, "no registered payer") {
 		t.Fatalf("unmapped identifier must 422 no-registered-payer, got (%d,%q)", s, m)
 	}
 }

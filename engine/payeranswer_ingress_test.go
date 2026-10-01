@@ -158,7 +158,7 @@ func TestPayerAnswerIngress_ReferencePayersAreNotCertified(t *testing.T) {
 			for _, level := range everyLevel {
 				g, log, findings := payerIngressGateway(t, profile, level, allLinesFailed)
 				for _, leg := range []struct{ legType, contract string }{{"dtr-questionnaire-fetch", "pa.dtr"}, {"pas-claim", "pa.pas"}, {"pas-claim-update", "pa.pas"}} {
-					status, msg := g.validateFHIRPayerIngress(answerCtx(leg.legType), []byte(answerBundle), "2.0", leg.contract, payer)
+					status, msg := drainedPayerIngress(g, answerCtx(leg.legType), []byte(answerBundle), "2.0", leg.contract, payer)
 					if status != 0 {
 						t.Errorf("%s/%s/%s %s: status %d %q, want the reference answer relayed", profile, payer.Value, level, leg.legType, status, msg)
 					}
@@ -179,7 +179,7 @@ func TestPayerAnswerIngress_ReferencePayersAreNotCertified(t *testing.T) {
 // a partner payer on either lane is certified — is TestPayerAnswerIngress_PartnerPayerLevelMatrix.
 func TestPayerAnswerIngress_ReferencePayerOffTheReferenceLanesIsCertified(t *testing.T) {
 	g, log, _ := payerIngressGateway(t, "", EnforcementStrict, allLinesFailed)
-	status, _ := g.validateFHIRPayerIngress(answerCtx("dtr-questionnaire-fetch"), []byte(answerBundle), "2.0", "pa.dtr", shnsdk.CMSPayerIdentity)
+	status, _ := drainedPayerIngress(g, answerCtx("dtr-questionnaire-fetch"), []byte(answerBundle), "2.0", "pa.dtr", shnsdk.CMSPayerIdentity)
 	if status != http.StatusUnprocessableEntity || log.count() != 3 {
 		t.Fatalf("status %d after %d calls, want 422 after every line failed", status, log.count())
 	}
@@ -245,7 +245,7 @@ func TestPayerAnswerIngress_PartnerPayerLevelMatrix(t *testing.T) {
 				for _, level := range everyLevel {
 					w := row.want[level]
 					g, log, findings := payerIngressGateway(t, profile, level, map[string]scriptedVerdict{"2.0": row.verdict})
-					status, msg := g.validateFHIRPayerIngress(answerCtx("pas-claim"), []byte(answerBundle), "2.0", "pa.pas", payer)
+					status, msg := drainedPayerIngress(g, answerCtx("pas-claim"), []byte(answerBundle), "2.0", "pa.pas", payer)
 					name := profile + "/" + payer.System + "|" + payer.Value + "/" + row.name + "/" + level.String()
 					if status != w.status || w.msg != "" && !strings.HasPrefix(msg, w.msg) {
 						t.Errorf("%s: status %d %q, want %d %q", name, status, msg, w.status, w.msg)
@@ -286,7 +286,7 @@ func TestPayerAnswerIngress_DeclaredLineFailedButValidOnAnother(t *testing.T) {
 		for _, level := range []ConformanceEnforcement{EnforcementStructural, EnforcementStrict} {
 			verdicts := map[string]scriptedVerdict{"2.0": scriptStructural, "2.1": scriptValid, "2.2": scriptValid}
 			g, log, findings := payerIngressGateway(t, profile, level, verdicts)
-			status, msg := g.validateFHIRPayerIngress(answerCtx("dtr-questionnaire-fetch"), []byte(answerBundle), "2.0", "pa.dtr", partner)
+			status, msg := drainedPayerIngress(g, answerCtx("dtr-questionnaire-fetch"), []byte(answerBundle), "2.0", "pa.dtr", partner)
 			if status != 0 {
 				t.Errorf("%s/%s: status %d %q, want relayed", profile, level, status, msg)
 			}
@@ -307,7 +307,7 @@ func TestPayerAnswerIngress_DeclaredTwoZeroAnswersTwoOne(t *testing.T) {
 	for _, profile := range providerLanes {
 		for _, level := range []ConformanceEnforcement{EnforcementStructural, EnforcementStrict} {
 			g, _, findings := payerIngressGateway(t, profile, level, map[string]scriptedVerdict{"2.0": scriptStructural, "2.1": scriptValid})
-			if status, msg := g.validateFHIRPayerIngress(answerCtx("pas-claim"), []byte(answerBundle), "2.0", "pa.pas", partner); status != 0 {
+			if status, msg := drainedPayerIngress(g, answerCtx("pas-claim"), []byte(answerBundle), "2.0", "pa.pas", partner); status != 0 {
 				t.Errorf("%s/%s: status %d %q, want relayed", profile, level, status, msg)
 			}
 			want := []LineVerdictSummary{{"2.0", "structural"}, {"2.1", "valid"}}
@@ -321,7 +321,7 @@ func TestPayerAnswerIngress_DeclaredTwoZeroAnswersTwoOne(t *testing.T) {
 // A valid first line makes no further call and records nothing.
 func TestPayerAnswerIngress_FirstValidLineEndsTheCheck(t *testing.T) {
 	g, log, findings := payerIngressGateway(t, "demo", EnforcementStrict, map[string]scriptedVerdict{"2.2": scriptStructural, "2.1": scriptStructural, "2.0": scriptValid})
-	if status, _ := g.validateFHIRPayerIngress(answerCtx("pas-claim"), []byte(answerBundle), "2.0", "pa.pas", partner); status != 0 {
+	if status, _ := drainedPayerIngress(g, answerCtx("pas-claim"), []byte(answerBundle), "2.0", "pa.pas", partner); status != 0 {
 		t.Fatalf("status %d, want relayed", status)
 	}
 	if log.count() != 1 || len(*findings) != 0 {
@@ -342,7 +342,7 @@ func TestPayerAnswerIngress_StructuralOnEveryLine(t *testing.T) {
 			{EnforcementStrict, 422, "refused"},
 		} {
 			g, log, findings := payerIngressGateway(t, profile, tc.level, allLinesFailed)
-			status, msg := g.validateFHIRPayerIngress(answerCtx("pas-claim-update"), []byte(answerBundle), "2.0", "pa.pas", partner)
+			status, msg := drainedPayerIngress(g, answerCtx("pas-claim-update"), []byte(answerBundle), "2.0", "pa.pas", partner)
 			if status != tc.status || tc.status != 0 && !strings.HasPrefix(msg, "ingress validation failed") {
 				t.Errorf("%s/%s: status %d %q, want %d", profile, tc.level, status, msg, tc.status)
 			}
@@ -383,7 +383,7 @@ func TestPayerAnswerIngress_BestVerdictDecides(t *testing.T) {
 			{EnforcementStrict, 422, "refused"},
 		} {
 			g, _, findings := payerIngressGateway(t, profile, tc.level, verdicts)
-			status, _ := g.validateFHIRPayerIngress(answerCtx("dtr-questionnaire-fetch"), []byte(answerBundle), "2.0", "pa.dtr", partner)
+			status, _ := drainedPayerIngress(g, answerCtx("dtr-questionnaire-fetch"), []byte(answerBundle), "2.0", "pa.dtr", partner)
 			if status != tc.status {
 				t.Errorf("%s/%s: status %d, want %d", profile, tc.level, status, tc.status)
 			}
@@ -409,7 +409,7 @@ func TestPayerAnswerIngress_NoLaneAnswers(t *testing.T) {
 			{EnforcementStrict, 500, "validator unavailable"},
 		} {
 			g, log, findings := payerIngressGateway(t, profile, tc.level, outage)
-			status, msg := g.validateFHIRPayerIngress(answerCtx("pas-claim"), []byte(answerBundle), "2.0", "pa.pas", partner)
+			status, msg := drainedPayerIngress(g, answerCtx("pas-claim"), []byte(answerBundle), "2.0", "pa.pas", partner)
 			if status != tc.status || msg != tc.msg {
 				t.Errorf("%s/%s: %d %q, want %d %q", profile, tc.level, status, msg, tc.status, tc.msg)
 			}
@@ -435,7 +435,7 @@ func TestPayerAnswerIngress_NoLaneAnswers(t *testing.T) {
 		status int
 	}{{EnforcementObserve, 0}, {EnforcementStructural, 0}, {EnforcementStrict, 500}} {
 		g, _, findings := payerIngressGateway(t, "provider-data", tc.level, nil)
-		status, msg := g.validateFHIRPayerIngress(answerCtx("pas-claim"), []byte(answerBundle), "2.0", "pa.pas", partner)
+		status, msg := drainedPayerIngress(g, answerCtx("pas-claim"), []byte(answerBundle), "2.0", "pa.pas", partner)
 		if status != tc.status {
 			t.Errorf("no lanes/%s: %d %q, want %d", tc.level, status, msg, tc.status)
 		}
@@ -466,7 +466,7 @@ func TestPayerAnswerIngress_CandidateOrder(t *testing.T) {
 		{"2.1", answerBundle, []string{"2.1", "2.2", "2.0"}},
 	} {
 		g, log, _ := payerIngressGateway(t, "provider-data", EnforcementObserve, allLinesFailed)
-		g.validateFHIRPayerIngress(answerCtx("dtr-questionnaire-fetch"), []byte(tc.body), tc.routed, "pa.dtr", partner)
+		drainedPayerIngress(g, answerCtx("dtr-questionnaire-fetch"), []byte(tc.body), tc.routed, "pa.dtr", partner)
 		if got := log.lines(); !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("routed %s: lines tried %v, want %v", tc.routed, got, tc.want)
 		}
@@ -477,7 +477,7 @@ func TestPayerAnswerIngress_CandidateOrder(t *testing.T) {
 // candidate: only laned lines are tried.
 func TestPayerAnswerIngress_TriesOnlyLanedLines(t *testing.T) {
 	g, log, findings := payerIngressGateway(t, "provider-data", EnforcementStructural, map[string]scriptedVerdict{"2.2": scriptStructural, "2.0": scriptDeeper})
-	status, _ := g.validateFHIRPayerIngress(answerCtx("pas-claim"), []byte(answerBundle), "2.0", "pa.pas", partner)
+	status, _ := drainedPayerIngress(g, answerCtx("pas-claim"), []byte(answerBundle), "2.0", "pa.pas", partner)
 	if status != 0 || !reflect.DeepEqual(log.lines(), []string{"2.0", "2.2"}) {
 		t.Fatalf("status %d, lines %v", status, log.lines())
 	}
@@ -503,7 +503,7 @@ func TestPayerAnswerIngress_RoutedLineUnavailableDecidesUnavailable(t *testing.T
 			{EnforcementStrict, 500, "validator unavailable"},
 		} {
 			g, log, findings := payerIngressGateway(t, profile, tc.level, verdicts)
-			status, msg := g.validateFHIRPayerIngress(answerCtx("pas-claim"), []byte(answerBundle), "2.2", "pa.pas", partner)
+			status, msg := drainedPayerIngress(g, answerCtx("pas-claim"), []byte(answerBundle), "2.2", "pa.pas", partner)
 			if status != tc.status || msg != tc.msg {
 				t.Errorf("%s/%s: %d %q, want %d %q", profile, tc.level, status, msg, tc.status, tc.msg)
 			}
@@ -535,7 +535,7 @@ func TestPayerAnswerIngress_ClaimedLineWithNoLaneDecidesUnavailable(t *testing.T
 		status int
 	}{{EnforcementStructural, 0}, {EnforcementStrict, 500}} {
 		g, log, findings := payerIngressGateway(t, "demo", tc.level, map[string]scriptedVerdict{"2.2": scriptStructural, "2.1": scriptStructural})
-		status, msg := g.validateFHIRPayerIngress(answerCtx("dtr-questionnaire-fetch"), []byte(claimed20), "2.2", "pa.dtr", partner)
+		status, msg := drainedPayerIngress(g, answerCtx("dtr-questionnaire-fetch"), []byte(claimed20), "2.2", "pa.dtr", partner)
 		if status != tc.status {
 			t.Errorf("%s: %d %q, want %d", tc.level, status, msg, tc.status)
 		}
@@ -566,7 +566,7 @@ func TestPayerAnswerIngress_UnclaimedLineOutageDoesNotRescue(t *testing.T) {
 		certificationDTR + `dtr-std-questionnaire|` + d20.PackageVersion + `"]}}}]}`
 	for _, level := range []ConformanceEnforcement{EnforcementStructural, EnforcementStrict} {
 		g, _, findings := payerIngressGateway(t, "provider-data", level, map[string]scriptedVerdict{"2.2": scriptOutage, "2.1": scriptStructural, "2.0": scriptStructural})
-		status, msg := g.validateFHIRPayerIngress(answerCtx("dtr-questionnaire-fetch"), []byte(claimed20), "2.1", "pa.dtr", partner)
+		status, msg := drainedPayerIngress(g, answerCtx("dtr-questionnaire-fetch"), []byte(claimed20), "2.1", "pa.dtr", partner)
 		if status != http.StatusUnprocessableEntity || !strings.HasPrefix(msg, "ingress validation failed") {
 			t.Errorf("%s: %d %q, want refused as structural", level, status, msg)
 		}
@@ -594,7 +594,7 @@ func TestPayerAnswerIngress_SharedValidatorIsCalledOnce(t *testing.T) {
 			}
 		},
 	}}
-	g.validateFHIRPayerIngress(answerCtx("pas-claim"), []byte(answerBundle), "2.0", "pa.pas", partner)
+	drainedPayerIngress(g, answerCtx("pas-claim"), []byte(answerBundle), "2.0", "pa.pas", partner)
 	if got := log.lines(); !reflect.DeepEqual(got, []string{"2.0+2.2", "2.1"}) {
 		t.Fatalf("calls %v, want the shared validator once and the other once", got)
 	}
@@ -615,7 +615,7 @@ func TestPayerAnswerIngress_RoutedLineWithNoLane(t *testing.T) {
 			status int
 		}{{EnforcementObserve, 0}, {EnforcementStructural, 0}, {EnforcementStrict, 500}} {
 			g, log, findings := payerIngressGateway(t, profile, tc.level, map[string]scriptedVerdict{"2.2": scriptStructural, "2.0": scriptStructural})
-			status, msg := g.validateFHIRPayerIngress(answerCtx("pas-claim"), []byte(answerBundle), "2.1", "pa.pas", partner)
+			status, msg := drainedPayerIngress(g, answerCtx("pas-claim"), []byte(answerBundle), "2.1", "pa.pas", partner)
 			if status != tc.status {
 				t.Errorf("%s/%s: %d %q, want %d", profile, tc.level, status, msg, tc.status)
 			}
@@ -635,7 +635,7 @@ func TestPayerAnswerIngress_RoutedLineWithNoLane(t *testing.T) {
 			}
 		}
 		g, _, findings := payerIngressGateway(t, profile, EnforcementStrict, map[string]scriptedVerdict{"2.2": scriptValid, "2.0": scriptStructural})
-		if status, msg := g.validateFHIRPayerIngress(answerCtx("pas-claim"), []byte(answerBundle), "2.1", "pa.pas", partner); status != 0 {
+		if status, msg := drainedPayerIngress(g, answerCtx("pas-claim"), []byte(answerBundle), "2.1", "pa.pas", partner); status != 0 {
 			t.Errorf("%s: valid at 2.2 with no 2.1 lane: %d %q, want relayed", profile, status, msg)
 		}
 		if len(*findings) != 1 || (*findings)[0].Verdict != "valid" || (*findings)[0].Line != "2.2" {
@@ -660,7 +660,7 @@ func TestPayerAnswerIngress_HungExtraLaneIsBounded(t *testing.T) {
 	done := make(chan outcome, 1)
 	start := time.Now()
 	go func() {
-		status, msg := g.validateFHIRPayerIngress(answerCtx("pas-claim"), []byte(answerBundle), "2.0", "pa.pas", partner)
+		status, msg := drainedPayerIngress(g, answerCtx("pas-claim"), []byte(answerBundle), "2.0", "pa.pas", partner)
 		done <- outcome{status, msg}
 	}()
 	var got outcome
@@ -691,7 +691,7 @@ func TestPayerAnswerIngress_LinesCarryNoDiagnostics(t *testing.T) {
 			details = append(details, e.Detail)
 		}
 	}
-	g.validateFHIRPayerIngress(answerCtx("pas-claim"), []byte(answerBundle), "2.0", "pa.pas", partner)
+	drainedPayerIngress(g, answerCtx("pas-claim"), []byte(answerBundle), "2.0", "pa.pas", partner)
 	if len(details) != 1 {
 		t.Fatalf("%d findings", len(details))
 	}
@@ -712,7 +712,7 @@ func TestPayerAnswerIngress_ParametersPackageIsWrapped(t *testing.T) {
 		{answerBundle, answerBundle},
 	} {
 		g, log, _ := payerIngressGateway(t, "provider-data", EnforcementObserve, map[string]scriptedVerdict{"2.0": scriptValid, "2.1": scriptValid, "2.2": scriptValid})
-		g.validateFHIRPayerIngress(answerCtx("dtr-questionnaire-fetch"), []byte(tc.body), "2.0", "pa.dtr", partner)
+		drainedPayerIngress(g, answerCtx("dtr-questionnaire-fetch"), []byte(tc.body), "2.0", "pa.dtr", partner)
 		if log.count() != 1 || string(log.calls[0].Body) != tc.want {
 			t.Fatalf("validator received %d calls, first %s; want %s", log.count(), log.calls, tc.want)
 		}
@@ -727,7 +727,7 @@ func TestPayerAnswerIngress_BridgeDemoPayersAreNotCertified(t *testing.T) {
 			for _, level := range everyLevel {
 				g, log, findings := payerIngressGateway(t, profile, level, allLinesFailed)
 				for _, leg := range []struct{ legType, contract string }{{"dtr-questionnaire-fetch", "pa.dtr"}, {"pas-claim", "pa.pas"}, {"pas-claim-update", "pa.pas"}} {
-					if status, msg := g.validateFHIRPayerIngress(answerCtx(leg.legType), []byte(answerBundle), "2.0", leg.contract, payer); status != 0 {
+					if status, msg := drainedPayerIngress(g, answerCtx(leg.legType), []byte(answerBundle), "2.0", leg.contract, payer); status != 0 {
 						t.Errorf("%s/%s/%s %s: status %d %q, want relayed", profile, payer.Value, level, leg.legType, status, msg)
 					}
 				}
@@ -764,4 +764,13 @@ func TestReferencePayerIdentities(t *testing.T) {
 			t.Errorf("%+v is not a reference payer", p)
 		}
 	}
+}
+
+// drainedPayerIngress is validateFHIRPayerIngress followed by draining the
+// observe-level checks it may have queued, so a test reads every
+// finding the check produced at any level.
+func drainedPayerIngress(g *Gateway, ctx context.Context, body []byte, line, contract string, payer shnsdk.PayerIdentifier) (int, string) {
+	status, msg := g.validateFHIRPayerIngress(ctx, body, line, contract, payer)
+	g.drainObserveChecks()
+	return status, msg
 }

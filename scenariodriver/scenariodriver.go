@@ -274,6 +274,9 @@ func (d *Driver) RunConsoleScenario(jsonBody string) (HTTPResult, error) {
 // Status is "approved" | "denied" — a pended/failed authorization renders as
 // not-approved with Error set describing why, never a literal "pended" status.
 type AuthorizationView struct {
+	// EOBId is the decision ExplanationOfBenefit's id, which a payer gateway
+	// names after the authorization's correlation ("eob-<correlation>").
+	EOBId  string `json:"eobId"`
 	Status string `json:"status"`
 	Title  string `json:"title"`
 	Error  string `json:"error"`

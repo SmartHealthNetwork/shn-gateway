@@ -273,6 +273,37 @@ func TestExchangeMetricHook(t *testing.T) {
 			backendErr: true,
 		},
 		{
+			// The payer gateway's own work spent its deadline and the operation
+			// was not sent: the backend is the last read, here the CDS service
+			// listing, which answered.
+			name: "deadline spent after a usable read",
+			rec: engine.ExchangeRecord{Direction: engine.DirectionInbound, Exchange: "crd-order-select", Outcome: engine.ExchangeOther, Latency: 25 * time.Second,
+				Backend: &engine.BackendCall{Status: 200, Latency: 80 * time.Millisecond}},
+			wantLines: map[string]map[string]string{
+				"Exchange":        {"direction": "inbound", "exchange": "crd-order-select", "outcome": "other"},
+				"ExchangeLatency": {"direction": "inbound", "exchange": "crd-order-select"},
+				"BackendCall":     {"exchange": "crd-order-select", "class": "ok"},
+				"BackendLatency":  {"exchange": "crd-order-select"},
+			},
+			exchangeLat: 25000,
+		},
+		{
+			// The same, when the listing's re-read failed and the gateway used
+			// the listing it last read: that failed read is the backend, and it
+			// counts in BackendError although the operation was never sent.
+			name: "deadline spent after a failed listing re-read",
+			rec: engine.ExchangeRecord{Direction: engine.DirectionInbound, Exchange: "crd-order-select", Outcome: engine.ExchangeOther, Latency: 25 * time.Second,
+				Backend: &engine.BackendCall{Status: 503, Latency: 80 * time.Millisecond, ErrorClass: engine.BackendHTTP5xx}},
+			wantLines: map[string]map[string]string{
+				"Exchange":        {"direction": "inbound", "exchange": "crd-order-select", "outcome": "other"},
+				"ExchangeLatency": {"direction": "inbound", "exchange": "crd-order-select"},
+				"BackendCall":     {"exchange": "crd-order-select", "class": "http-5xx"},
+				"BackendLatency":  {"exchange": "crd-order-select"},
+			},
+			backendErr:  true,
+			exchangeLat: 25000,
+		},
+		{
 			name: "refused before the backend",
 			rec: engine.ExchangeRecord{Direction: engine.DirectionIngress, Exchange: "pas-claim", Outcome: engine.ExchangeRefused, RefusedBy: engine.RefusedByProviderGateway, Rule: engine.RefusalAuthentication,
 				Operation: "order-sign", Sender: "holder-a", Recipient: "holder-b", CorrelationID: "leg-1", Trace: "trace-1"},

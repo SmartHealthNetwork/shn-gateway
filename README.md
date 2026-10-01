@@ -54,7 +54,9 @@ flowchart LR
   HUB --> GW2
 ```
 
-The **only** public-internet leg in this picture is gateway↔Hub. Your EHR/FHIR
+The **only** public-internet leg in this picture is gateway↔Hub (a provider gateway
+also reads a coverage, only to route, through the `fhirServer` a CDS Hooks request names
+when that server is on the internet; `CDS_FHIR_SERVER_READ=off` turns the read off). Your EHR/FHIR
 system of record, your keys, and (on the payer side) your adjudicator all talk
 to your own gateway privately, inside your boundary — the Hub never sees them,
 and neither does your counterpart's gateway.
@@ -233,7 +235,9 @@ authenticated via SMART Backend Services from a set of clients you
 pre-register in `INGRESS_CLIENTS_FILE`. This is an equally supported,
 goal-state path — not a fallback. **This ingress is a private,
 within-boundary surface**, exactly like your FHIR system of record: the
-gateway's only public-internet leg is the gateway↔Hub connection (§1); your
+gateway's only public-internet leg is the gateway↔Hub connection (§1; apart from the
+coverage read through a request's `fhirServer`, on by default, `CDS_FHIR_SERVER_READ=off`
+to turn it off); your
 EHR calls this ingress from inside your own network, never across the public
 internet. See
 [`docs/INTEGRATION.md`](docs/INTEGRATION.md#native-da-vinci-ingress) for the
@@ -347,7 +351,7 @@ role-specific — is [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md).
 | `refusing to run without per-message validation (FR-36)` at startup | No validator configured and discovery advertises none. Set `FHIR_VALIDATE_URL`, or `SHN_FAKE_VALIDATOR=1` for a dev smoke. |
 | `fetch discovery: …` / `fetch hub transport key: …` at startup | `SHN_DISCOVERY_URL` unreachable, or the gateway can't reach the hosts discovery resolves (Hub, Authorization Framework, registrar, …). Confirm `curl $SHN_DISCOVERY_URL` works from the gateway's network. |
 | Provider originate returns `recipient "…" not in registry` | The payer holder resolved from the member's Coverage (feed `payerIds`, or your `PAYER_DIRECTORY` override) isn't a registered holder, or the registrar feed hasn't propagated yet. Confirm the counterpart appears in `shn clients` / the `/holders` feed. |
-| Provider originate returns `422 no payer identifier on member coverage` / `no registered payer for identifier …` | Coverage-derived routing found no route (FR-G41; no default): the member's Coverage carries no parseable payor identity, or no `role=payer` holder in the feed claims that identity (and no `PAYER_DIRECTORY` override maps it). Ensure the target payer holder published that `{system,value}` in its feed `payerIds` (payer-onboarding path), or set a `PAYER_DIRECTORY` override row. A payer that acquired the identity after onboarding — an EHR-assigned payer id, a merger, a new line of business — publishes it without re-onboarding: a hosted payer updates its tenant's `payerIds` and the control plane converges the feed entry; any payer can re-declare through the accounts front door once an operator has vouched for the identity. Payer identities are operator-attested, so a holder cannot add one with its own key. An identity claimed by **two** holders also fails closed (ambiguous — `AI-G12`). |
+| Provider originate returns `422 no payer identifier on member coverage` / `no registered payer for identifier …` | Coverage-derived routing found no route (FR-G41; no default): the member's Coverage carries no parseable payor identity, or no `role=payer` holder in the feed claims that identity (and no `PAYER_DIRECTORY` override maps it). Ensure the target payer holder published that `{system,value}` in its feed `payerIds` (payer-onboarding path), or set a `PAYER_DIRECTORY` override row. A payer that acquired the identity after onboarding — an EHR-assigned payer id, a merger, a new line of business — publishes it without re-onboarding: a hosted payer updates its tenant's `payerIds` and the control plane converges the feed entry; any payer can re-declare through the accounts front door once an operator has vouched for the identity. Payer identities are operator-attested, so a holder cannot add one with its own key. An identity claimed by **two** holders also fails closed (ambiguous — `AI-G12`). On the Da Vinci ingress (`Claim/$submit`, `Claim/$inquire`), from v0.60.0 the `no payer identifier` refusal adds which part of the Bundle failed, after a colon: `Coverage.payor` is a relative reference that matches no entry, an absolute reference that is no entry's `fullUrl`, or a reference several entries answer without naming one payer; or the payor Organization carries no identifier with both a system and a value (a NAIC code or payer id). The payor Organization must be an entry of the Bundle: the gateway resolves the reference among the Bundle's entries only, an absolute reference (a URL, or `urn:uuid`) to the entry whose `fullUrl` equals it, and a relative `Organization/<id>` to the one entry with that type and id; a reference several entries answer routes only when they all name the same payer identifier. |
 | Provider originate returns `502 {"error":"engine: $populate upstream failed"}` | Inspect the holder-local `gateway: populate_failure` record below to distinguish the failing population boundary. |
 | Provider originate returns `502` (routing / response sender mismatch) | The counterpart isn't reachable or didn't respond as itself. Check the payer gateway is running and its registered `--base-url` resolves publicly to it. |
 | Provider originate returns `502 {"error":"authorization denied"}` | Wrong bundle for the role. This gateway is `ROLE=provider` and *originates* the request, so its `SHN_SECRETS` must be a `--role provider` bundle — authority binds to the caller's **registered role**, and a payer bundle can't originate a provider leg (the Authorization Framework denies it). Register a provider client and mount that bundle. A payer self-test needs two registrations — see [Point it at your own payer](deploy/eval/README.md#point-it-at-your-own-payer-payer-self-test). |

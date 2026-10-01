@@ -37,10 +37,16 @@ func newDiagnosticSource(getenv func(string) string, role string, out io.Writer,
 		fmt.Fprintln(out, "gateway: diagnostic capture unavailable: key unavailable")
 		return nil
 	}
-	health := *u
+	health, batch := *u, *u
 	health.Path = path.Join(path.Dir(u.Path), "health")
 	health.RawPath = ""
-	d := &diagnosticSource{queue: diagnostics.NewQueue(diagnostics.Limits{MaxEvents: 512, MaxBytes: 64 << 20}), budget: diagnostics.NewCaptureBudget(16<<20, 8), publisher: diagnostics.PublisherConfig{Source: source, URL: u.String(), HealthURL: health.String(), Key: key, Clock: clock, Client: &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}}
+	batch.Path = path.Join(u.Path, "batch")
+	batch.RawPath = ""
+	// The queue holds about 50 s of three times a busy payer's measured
+	// event rate; batched delivery drains it, and a sink that does not take
+	// batches gets one event per request. At a stop it delivers what is
+	// queued for up to 10 s, within a task's stop timeout.
+	d := &diagnosticSource{queue: diagnostics.NewQueue(diagnostics.Limits{MaxEvents: 4096, MaxBytes: 64 << 20}), budget: diagnostics.NewCaptureBudget(16<<20, 8), publisher: diagnostics.PublisherConfig{Source: source, URL: u.String(), HealthURL: health.String(), BatchURL: batch.String(), Drain: 10 * time.Second, Key: key, Clock: clock, Client: &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}}
 	if role == "provider" && getenv("DIAGNOSTIC_TRACE_KEY_FILE") != "" {
 		d.traceKey, err = readDiagnosticKey(getenv("DIAGNOSTIC_TRACE_KEY_FILE"))
 		if err != nil {

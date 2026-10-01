@@ -51,6 +51,7 @@ func TestValidateGovernedInvalidEmitsFindingAndRefuses(t *testing.T) {
 	})
 
 	status, msg := g.validateFHIR(ctx, []byte(`{"resourceType":"Coverage","id":"`+marker+`"}`), "ingress", "")
+	g.drainObserveChecks()
 
 	if status != http.StatusUnprocessableEntity {
 		t.Fatalf("an invalid verdict must refuse 422 today, got %d %q", status, msg)
@@ -87,6 +88,7 @@ func TestValidateGovernedInvalidEmitsFindingAndRefuses(t *testing.T) {
 func TestValidateGovernedValidEmitsNothing(t *testing.T) {
 	g, events, _ := findingGateway(t, shnsdk.NewFakeValidator())
 	status, _ := g.validateFHIR(context.Background(), []byte(`{"resourceType":"Coverage"}`), "ingress", "")
+	g.drainObserveChecks()
 	if status != 0 {
 		t.Fatalf("a valid verdict must not refuse, got %d", status)
 	}
@@ -102,6 +104,7 @@ func TestValidateGovernedValidEmitsNothing(t *testing.T) {
 func TestValidateGovernedOutagesAreNotFindings(t *testing.T) {
 	g, events, _ := findingGateway(t, nil)
 	status, msg := g.validateFHIR(context.Background(), []byte(`{}`), "egress", "2.0")
+	g.drainObserveChecks()
 	if status != http.StatusInternalServerError || !strings.Contains(msg, "no FHIR validator lane configured") {
 		t.Fatalf("an unlaned line keeps its error, got %d %q", status, msg)
 	}
@@ -430,6 +433,7 @@ func TestValidateGovernedAtObserveRecordsAndRelays(t *testing.T) {
 	ctx := withFindingContext(context.Background(), findingContext{LegType: "pas-claim", Whose: "peer"})
 
 	status, msg := g.validateFHIR(ctx, []byte(`{"id":"`+marker+`"}`), "ingress", "")
+	g.drainObserveChecks()
 
 	if status != 0 {
 		t.Fatalf("at observe an invalid verdict must not refuse, got %d %q", status, msg)
@@ -622,6 +626,7 @@ func TestValidateGovernedOutagesPerLevel(t *testing.T) {
 			g, events, _ := findingGateway(t, tc.v)
 			g.cfg.ConformanceEnforcement = level
 			gr := g.validateGoverned(context.Background(), findingContext{LegType: "pas-claim", Whose: "peer"}, tc.v, []byte(`{}`), "ingress", "2.2", "", false)
+			g.drainObserveChecks()
 			var findings []ObserverEvent
 			for _, e := range *events {
 				if e.Kind == ConformanceObservedEvent {

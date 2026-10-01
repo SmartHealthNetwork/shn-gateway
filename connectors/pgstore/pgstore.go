@@ -142,6 +142,9 @@ CREATE TABLE IF NOT EXISTS gw_pended_claim_key (
         REFERENCES gw_pended_claim (holder_id, subject_pci, correlation_id) ON DELETE CASCADE,
     CHECK (octet_length(key) <= 512)
 );
+-- The keys one authorization holds: the lookup's agreement and echo checks, the
+-- pend's key count and the retention purge's cascade read them by authorization.
+CREATE INDEX IF NOT EXISTS gw_pended_claim_key_by_claim ON gw_pended_claim_key (holder_id, subject_pci, correlation_id, requester_holder);
 -- gw_pa_continuation is the server-held prior-authorization continuation
 -- (engine.ContinuationStore): the metadata a provider gateway's own originator
 -- flows need to inquire again about an authorization a payer pended. Shared
@@ -434,16 +437,16 @@ func (s *PgStore) EOBOwner(eobID string) (string, bool, error) {
 	return owner, true, nil
 }
 
-// PendedForOtherSubject reports a patient other than subjectPCI with an undecided
-// authorization under corrID. See engine.PendCorrelationLookup. The least PCI is
-// reported when more than one qualifies, as the in-memory store does.
+// PendedForOtherSubject reports a patient other than subjectPCI with an
+// authorization under corrID, in any state. See engine.PendCorrelationLookup. The
+// least PCI is reported when more than one qualifies, as the in-memory store does.
 func (s *PgStore) PendedForOtherSubject(corrID, subjectPCI string) (string, bool, error) {
 	ctx, cancel := storeCtx()
 	defer cancel()
 	var other string
 	err := s.pool.QueryRow(ctx, `
 SELECT subject_pci FROM gw_pended_claim
- WHERE holder_id=$1 AND correlation_id=$2 AND subject_pci <> $3 AND state <> 'decided'
+ WHERE holder_id=$1 AND correlation_id=$2 AND subject_pci <> $3
  ORDER BY subject_pci
  LIMIT 1`, s.holderID, corrID, subjectPCI).Scan(&other)
 	if errors.Is(err, pgx.ErrNoRows) {
