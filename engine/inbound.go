@@ -193,6 +193,8 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 	r = r.WithContext(withRequestFrameOperation(r.Context(), operation))
 
 	g.diagnosticStage(r.Context(), "recipient.request", env.Metadata.TransactionType, body, 0, "")
+	// The leg is verified and open: what follows is its answer.
+	x.unwrapDone()
 	switch env.Metadata.TransactionType {
 	case "coverage-eligibility":
 		g.handleEligibilityInbound(w, r, env, tok, body, answerTok)

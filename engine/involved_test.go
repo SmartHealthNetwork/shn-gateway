@@ -134,8 +134,9 @@ func heldPCI(t *testing.T, member string) string {
 	return pci
 }
 
-// A request naming two members besides its subject, one held and one not, by a
-// Patient it carries and by a relative reference.
+// A request naming members besides its subject, held (MBR-OX, and MBR-PAYERB
+// by a versioned reference) and not, by a Patient it carries and by relative
+// and absolute references.
 func involvedRequest() []byte {
 	return []byte(`{"resourceType":"Bundle","entry":[
 	 {"resource":{"resourceType":"Claim","patient":{"reference":"Patient/MBR-COVERED"},"subject":{"reference":"Patient/MBR-OX"}}},
@@ -149,12 +150,13 @@ func involvedRequest() []byte {
 
 // The members a request names, read as the leg's own subject binding reads
 // them: each carried Patient's id (no fullUrl here), and each Patient
-// reference by what the leg's reader returns — everything after the last
-// "Patient/" on PAS, CRD and inquiry, the id without a version suffix on the
-// DTR package. A Patient's member identifier is not read. Sorted, each once.
+// reference by the id it names, without a version suffix, on every leg.
+// A Patient's member identifier is not read. Sorted, each once.
 func TestCarriedMembers_ReadsMembersAsEachLegsSubjectBindingDoes(t *testing.T) {
 	for leg, want := range map[string][]string{
-		"pas-claim":               {"ABSOLUTE", "MBR-COVERED", "MBR-OX", "MBR-PAYERB/_history/2", "p-other"},
+		"pas-claim":               {"ABSOLUTE", "MBR-COVERED", "MBR-OX", "MBR-PAYERB", "p-other"},
+		"pas-claim-inquire":       {"ABSOLUTE", "MBR-COVERED", "MBR-OX", "MBR-PAYERB", "p-other"},
+		"crd-order-select":        {"ABSOLUTE", "MBR-COVERED", "MBR-OX", "MBR-PAYERB", "p-other"},
 		"dtr-questionnaire-fetch": {"ABSOLUTE", "MBR-COVERED", "MBR-OX", "MBR-PAYERB", "p-other"},
 	} {
 		if got := carriedMembers(involvedRequest(), leg); !slices.Equal(got, want) {
@@ -241,7 +243,7 @@ func TestRequestNamedPatients_NamesEveryOtherPatient(t *testing.T) {
 	want := []involvedPatient{
 		{pci: derivedPCI("ABSOLUTE", "", ""), involvement: shnsdk.InvolvementRequestNamed},
 		{pci: heldPCI(t, "MBR-OX"), involvement: shnsdk.InvolvementRequestNamed},
-		{pci: derivedPCI("MBR-PAYERB/_history/2", "", ""), involvement: shnsdk.InvolvementRequestNamed},
+		{pci: heldPCI(t, "MBR-PAYERB"), involvement: shnsdk.InvolvementRequestNamed},
 		{pci: derivedPCI("p-other", "1980-01-01", "Other"), involvement: shnsdk.InvolvementRequestNamed},
 	}
 	byPCI := func(a, b involvedPatient) int { return strings.Compare(a.pci, b.pci) }
@@ -285,6 +287,49 @@ func TestRequestNamedPatients_ReadsNothingUnlessTheHubReadsTheList(t *testing.T)
 	}
 }
 
+// A base whose path contains /_history/ is part of the reference, not a
+// version: the member it names is read, on every leg that drops a version.
+func TestCarriedMembers_HistoryInTheBaseIsNoVersion(t *testing.T) {
+	req := []byte(`{"resourceType":"Bundle","entry":[
+	 {"resource":{"resourceType":"Observation","subject":{"reference":"https://ehr.example/_history/fhir/Patient/MBR-OX"}}},
+	 {"resource":{"resourceType":"Observation","subject":{"reference":"https://ehr.example/_history/fhir/Patient/MBR-PAYERB/_history/2"}}}
+	]}`)
+	for _, leg := range []string{"pas-claim", "pas-claim-inquire", "crd-order-select", "dtr-questionnaire-fetch"} {
+		if got, want := carriedMembers(req, leg), []string{"MBR-OX", "MBR-PAYERB"}; !slices.Equal(got, want) {
+			t.Errorf("%s: members %v, want %v", leg, got, want)
+		}
+	}
+}
+
+// The request's own patient, named by a versioned reference, is the leg's
+// subject and is not named again: a version suffix names the same
+// patient, never a phantom other one.
+func TestRequestNamedPatients_OwnVersionedReferenceNamesNoOne(t *testing.T) {
+	req := []byte(`{"resourceType":"Bundle","entry":[
+	 {"resource":{"resourceType":"Claim","patient":{"reference":"Patient/MBR-COVERED/_history/2"}}},
+	 {"resource":{"resourceType":"Coverage","beneficiary":{"reference":"https://ehr.example/fhir/Patient/MBR-COVERED/_history/3"}}}
+	]}`)
+	// A CRD request names its patient by the hook's patientId; its draft
+	// order and coverage may name it by versioned references.
+	crd := []byte(`{"hook":"order-select","context":{"patientId":"MBR-COVERED","draftOrders":{"resourceType":"Bundle","entry":[
+	 {"resource":{"resourceType":"ServiceRequest","id":"sr-1","status":"draft","intent":"order","subject":{"reference":"Patient/MBR-COVERED/_history/2"}}}]}},
+	 "prefetch":{"coverage":{"resourceType":"Bundle","type":"searchset","entry":[{"resource":{"resourceType":"Coverage","id":"cov-1","beneficiary":{"reference":"https://ehr.example/fhir/Patient/MBR-COVERED/_history/3"}}}]}}}`)
+	for leg, body := range map[string][]byte{"pas-claim": req, "pas-claim-update": req, "pas-claim-inquire": req, "crd-order-select": crd} {
+		t.Run(leg, func(t *testing.T) {
+			g, _, sor, omitted := involvedGateway(t, true)
+			if got := g.requestNamedPatients(context.Background(), leg, "corr-1", body, heldPCI(t, "MBR-COVERED")); len(got) != 0 {
+				t.Fatalf("named %v, want no one", got)
+			}
+			if len(*omitted) != 0 {
+				t.Fatalf("left out %v, want nothing", *omitted)
+			}
+			if sor.count() == 0 {
+				t.Fatal("no system-of-record read: the row proves nothing")
+			}
+		})
+	}
+}
+
 // A member that cannot be identified is left out, with the reason, and the
 // others are still named.
 func TestRequestNamedPatients_LeavesOutWhatCannotBeIdentified(t *testing.T) {
@@ -302,11 +347,18 @@ func TestRequestNamedPatients_LeavesOutWhatCannotBeIdentified(t *testing.T) {
 		g, _, _, omitted := involvedGateway(t, true)
 		g.cfg.RequireKnownMembers = true
 		got := g.requestNamedPatients(context.Background(), "pas-claim", "corr-1", involvedRequest(), heldPCI(t, "MBR-COVERED"))
-		if len(got) != 1 || got[0].pci != heldPCI(t, "MBR-OX") {
-			t.Fatalf("named %v, want only the held MBR-OX", got)
+		pcis := []string{}
+		for _, p := range got {
+			pcis = append(pcis, p.pci)
 		}
-		if !slices.Equal(*omitted, []string{involvedOmitUnknown, involvedOmitUnknown, involvedOmitUnknown}) {
-			t.Fatalf("omitted %v, want three unknown members", *omitted)
+		want := []string{heldPCI(t, "MBR-OX"), heldPCI(t, "MBR-PAYERB")}
+		slices.Sort(pcis)
+		slices.Sort(want)
+		if !slices.Equal(pcis, want) {
+			t.Fatalf("named %v, want only the held MBR-OX and MBR-PAYERB (by its versioned reference)", got)
+		}
+		if !slices.Equal(*omitted, []string{involvedOmitUnknown, involvedOmitUnknown}) {
+			t.Fatalf("omitted %v, want two unknown members", *omitted)
 		}
 	})
 	t.Run("more members than are read", func(t *testing.T) {

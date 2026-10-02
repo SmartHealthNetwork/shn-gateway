@@ -697,8 +697,11 @@ func coverage(d *splice.Doc) coverageMap {
 	return c
 }
 
+// stripHistory drops a trailing `/_history/<version>` (one segment) from ref.
+// A base whose path contains `/_history/` elsewhere is kept: it is part of the
+// reference, never its version.
 func stripHistory(ref string) string {
-	if i := strings.Index(ref, "/_history/"); i >= 0 {
+	if i := strings.LastIndex(ref, "/_history/"); i >= 0 && !strings.Contains(ref[i+len("/_history/"):], "/") {
 		return ref[:i]
 	}
 	return ref

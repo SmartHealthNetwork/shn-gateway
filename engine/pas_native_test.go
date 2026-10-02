@@ -41,10 +41,10 @@ func loadPASGolden(t *testing.T, member string) []byte {
 	return rebindPASPatient(t, raw, member)
 }
 
-// rebindPASPatient sets the Patient.id STRUCTURALLY (the golden is pretty-printed `"id": "…"` with
-// a space, so a raw string-replace would no-op), then string-replaces every Patient/<oldID>
-// reference on the freshly-marshaled (spacing-normalized) JSON. IDENTICAL to the tworilive copy
-// — different package, same logic, so the same golden yields the same bundle everywhere.
+// rebindPASPatient sets the Patient.id and its member identifier naming oldID STRUCTURALLY (the
+// golden is pretty-printed `"id": "…"` with a space, so a raw string-replace would no-op), then
+// string-replaces every Patient/<oldID> reference on the freshly-marshaled (spacing-normalized)
+// JSON.
 func rebindPASPatient(t *testing.T, bundleJSON []byte, newID string) []byte {
 	t.Helper()
 	var b map[string]any
@@ -58,6 +58,14 @@ func rebindPASPatient(t *testing.T, bundleJSON []byte, newID string) []byte {
 		if r != nil && r["resourceType"] == "Patient" {
 			oldID, _ = r["id"].(string)
 			r["id"] = newID // structural set — spacing-proof
+			// The member identifier is the Patient's too: a Patient for newID
+			// carrying oldID's would be another member's (patient.mixed).
+			ids, _ := r["identifier"].([]any)
+			for _, id := range ids {
+				if m, ok := id.(map[string]any); ok && m["system"] == shnsdk.MemberSystem && m["value"] == oldID {
+					m["value"] = newID
+				}
+			}
 		}
 	}
 	if oldID == "" {
@@ -191,13 +199,41 @@ func originatorBuiltInquiryBundle(t *testing.T, member string) []byte {
 // segment is returned unchanged (so ResolvePatient fails closed → unknown member).
 func TestPasMemberFromRef(t *testing.T) {
 	cases := map[string]string{
-		"Patient/MBR-COVERED":                          "MBR-COVERED",
-		"https://shn.example/fhir/Patient/MBR-COVERED": "MBR-COVERED",
-		"urn:uuid:no-patient-segment":                  "urn:uuid:no-patient-segment",
+		"Patient/MBR-COVERED":                                     "MBR-COVERED",
+		"https://shn.example/fhir/Patient/MBR-COVERED":            "MBR-COVERED",
+		"urn:uuid:no-patient-segment":                             "urn:uuid:no-patient-segment",
+		"Patient/MBR-COVERED/_history/2":                          "MBR-COVERED",
+		"https://shn.example/fhir/Patient/MBR-COVERED/_history/2": "MBR-COVERED",
+		// Only a trailing version is dropped: a base whose path contains
+		// /_history/ is part of the reference.
+		"https://ehr.example/_history/fhir/Patient/MBR-OX":            "MBR-OX",
+		"https://ehr.example/_history/fhir/Patient/MBR-OX/_history/3": "MBR-OX",
 	}
 	for in, want := range cases {
 		if got := pasMemberFromRef(in); got != want {
 			t.Errorf("pasMemberFromRef(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// splitHistory reads only a trailing one-segment version: the rule every
+// reader that drops a version shares (stripHistoryRef).
+func TestSplitHistory(t *testing.T) {
+	for _, tc := range []struct {
+		ref, base, version string
+		versioned          bool
+	}{
+		{"Patient/p", "Patient/p", "", false},
+		{"Patient/p/_history/2", "Patient/p", "2", true},
+		{"https://h/fhir/Patient/p/_history/2", "https://h/fhir/Patient/p", "2", true},
+		{"https://h/_history/fhir/Patient/p", "https://h/_history/fhir/Patient/p", "", false},
+		{"https://h/_history/fhir/Patient/p/_history/7", "https://h/_history/fhir/Patient/p", "7", true},
+		{"Patient/p/_history/2/x", "Patient/p/_history/2/x", "", false},
+		{"Patient/p/_history/", "Patient/p", "", true},
+	} {
+		base, version, versioned := splitHistory(tc.ref)
+		if base != tc.base || version != tc.version || versioned != tc.versioned {
+			t.Errorf("splitHistory(%q) = %q, %q, %v; want %q, %q, %v", tc.ref, base, version, versioned, tc.base, tc.version, tc.versioned)
 		}
 	}
 }

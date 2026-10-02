@@ -164,6 +164,9 @@ type crdEmbeddedValidation struct {
 	ResourceType string `json:"resourceType"`
 	Line         string `json:"line"`
 	Outcome      string `json:"outcome"` // valid | invalid | unavailable
+	// Ms is the time the $validate call took (to its failure for an
+	// unavailable one; 0 with no validator).
+	Ms int64 `json:"ms"`
 }
 
 // Bounds of the embedded validation one answer gets.
@@ -228,6 +231,8 @@ func (g *Gateway) observeCRDEmbedded(ctx context.Context, leg, corr string, answ
 		defer cancel()
 		g.validateCRDEmbedded(ctx, leg, corr, line, validator, found)
 	}
+	// Queueing it at observe is the validate stage's too.
+	defer exchangeOf(ctx).validation()()
 	// It only records, so at observe the answer does not wait for it.
 	if g.policy().Level() == EnforcementObserve {
 		g.enqueueObserveCheck(observeCheck{run: run, binding: findingBindingFrom(ctx), tally: legTallyFrom(ctx)})
@@ -252,7 +257,9 @@ func (g *Gateway) validateCRDEmbedded(ctx context.Context, leg, corr, line strin
 		case validator == nil:
 			v.Outcome = "unavailable"
 		default:
+			start := g.exchangeClock()
 			res, err := validator.Validate(ctx, e.resource, "")
+			v.Ms = g.exchangeClock().Sub(start).Milliseconds()
 			switch {
 			case err != nil:
 				v.Outcome = "unavailable"

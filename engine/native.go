@@ -766,7 +766,10 @@ func (n *nativeResponder) post(ctx context.Context, base, path string, p relay.P
 		capture.request = append([]byte(nil), body...)
 		capture.response = nil
 	}
-	n.emitDiagnostic(ctx, "native.request", body, 0, "", req, req.Header)
+	// The forward's event names the registered edits it is sent with (the
+	// payer identity mapping); the record names them once the bytes are sent
+	// (below).
+	n.emitDiagnosticDetail(ctx, "native.request", body, true, 0, relayEditsDetail(p.Edits()), req, req.Header)
 	// Whether the request was written decides what a failure tells the
 	// requester: before, the payer's system never saw it; after, it may have
 	// acted on it.
@@ -795,6 +798,10 @@ func (n *nativeResponder) post(ctx context.Context, base, path string, p relay.P
 		x.backend(0, x.since(n.now, callStart), class)
 		// A request whose bearer could not be obtained was never sent.
 		sent := wrote.Load() && !smartauth.IsTokenAcquisitionError(err)
+		if sent {
+			// Written before the call failed: the edits were sent.
+			x.edits(p.Edits())
+		}
 		if timedOut() {
 			logUpstreamTimedOut(ctx, label, leg, base+path, n.backendDeadline, sent)
 			return upstreamReply{}, LegResult{}, &upstreamFailure{err: fmt.Errorf("upstream payer %s did not answer within %s: %w", label, n.backendDeadline, err), sent: sent, timedOut: true}
@@ -802,6 +809,8 @@ func (n *nativeResponder) post(ctx context.Context, base, path string, p relay.P
 		logUpstreamAbandoned(ctx, label, leg, base+path, time.Since(started), sent)
 		return upstreamReply{}, LegResult{}, &upstreamFailure{err: fmt.Errorf("upstream payer %s unreachable: %w", label, err), sent: sent}
 	}
+	// The payer's system answered: the edits the forward carried were sent.
+	x.edits(p.Edits())
 	pasLegOf(ctx).answered()
 	defer resp.Body.Close()
 	rb, err := io.ReadAll(io.LimitReader(resp.Body, maxPartnerBody))

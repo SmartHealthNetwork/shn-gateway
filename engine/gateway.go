@@ -162,18 +162,21 @@ type Config struct {
 	// of record. It gates the three native-ingress enrichments: the CDS
 	// Hooks prefetch fill (E-02), the questionnaire-package Coverage append (E-04)
 	// and the questionnaire-package Patient append (E-05). The default (false, the
-	// zero value) adds nothing: the request is carried as the participant's client
-	// sent it, apart from the callback strip (E-01). A Coverage the request does
-	// not carry is still read from the system of record to choose the payer, and
-	// is not inserted. Requests the gateway builds itself (origination) are
+	// zero value) adds nothing from the system of record: the request is carried
+	// as the participant's client sent it, apart from the callback strip (E-01)
+	// and the coverage carry (E-07) that follows a fhirServer read. A Coverage the
+	// request does not carry is still read from the system of record to choose
+	// the payer, and is not inserted. Requests the gateway builds itself (origination) are
 	// unaffected. Set from ENRICH_NATIVE_REQUESTS (gateway/app).
 	EnrichNativeRequests bool
 	// FHIRServerRead (CDS_FHIR_SERVER_READ) is how a provider gateway reads a
-	// CRD request's Coverage through the request's own fhirServer, only to
-	// route, when the request carries none for a member its system of record
-	// does not hold (or cannot name): FHIRServerReadPrivate ("" too, the
-	// default: the zero value reads), FHIRServerReadPublic, or
-	// FHIRServerReadOff, which never reads (fhirserver_read.go).
+	// CRD request's Coverage through the request's own fhirServer, to route
+	// by, when the request carries none for a member its system of record
+	// does not hold (or cannot name); what routing used is then carried as
+	// prefetch.coverage (E-07, fhirserver_carry.go): FHIRServerReadPrivate
+	// ("" too, the default: the zero value reads), FHIRServerReadPublic, or
+	// FHIRServerReadOff, which never reads and carries nothing
+	// (fhirserver_read.go).
 	FHIRServerRead string
 	// fhirServerResolve, fhirServerRoots and fhirServerDialed replace the
 	// fhirServer read's resolver, TLS roots and dial hook in tests; the address
@@ -1309,7 +1312,7 @@ func (g *Gateway) authorizeOnce(ctx context.Context, body []byte) (shnsdk.Token,
 	if err != nil {
 		retry := !wrote.Load() && (errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET) ||
 			errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF))
-		return shnsdk.Token{}, retry, fmt.Errorf("%w (%v)", errAuthzUnreachable, err)
+		return shnsdk.Token{}, retry, fmt.Errorf("%w (%w)", errAuthzUnreachable, err)
 	}
 	defer resp.Body.Close()
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, shnsdk.MaxResponseBytes))
@@ -1605,7 +1608,10 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 		leg.hash = sha256hex(env.Ciphertext)
 	}
 	exchangeOf(ctx).requestHash(sha256hex(env.Ciphertext))
-	g.diagnosticSealed(ctx, env, recipient, correlationID, txType, content.ProfileID, payload)
+	// The sealed leg's event names the registered edits the request was
+	// sealed with; the record names them once the leg is sent (below).
+	edits := content.Payload.Edits()
+	g.diagnosticSealed(ctx, env, recipient, correlationID, txType, content.ProfileID, payload, edits)
 	tok, err := g.authorize(r, reqFrame, op, pci, correlationID, custodian, sha256hex(env.Ciphertext))
 	if err != nil {
 		// Preserve a genuine authority DENIAL as the typed sentinel (UC-05's
@@ -1660,20 +1666,29 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 		hubClient = &untimed
 	}
 	respEnv, err := g.postEnvelope(legCtx, hubClient, g.cfg.HubURL+"/route", body, assertionHeader)
+	// The registered edits the request was sent with are recorded once the
+	// bytes have left this gateway: the Hub answered (any answer, a refusal or
+	// one that could not be read included), or the connection failed after
+	// the request was written. A leg refused before the POST, or whose POST
+	// failed before it was written, names none (the ingress's own check of
+	// the same payload is not a send either).
+	var refused *hubRefusalError
+	var lost *answerLostError
+	var sent *hubSentError
+	wasSent := errors.As(err, &sent)
+	if err == nil || errors.As(err, &refused) || errors.As(err, &lost) || wasSent {
+		exchangeOf(ctx).edits(edits)
+	}
 	if err == nil {
 		exchangeOf(ctx).responseHash(sha256hex(respEnv.Ciphertext))
 	}
-	var refused *hubRefusalError
-	if errors.As(err, &refused) {
+	if refused != nil {
 		return nil, refused
 	}
-	var lost *answerLostError
-	if errors.As(err, &lost) {
+	if lost != nil {
 		return nil, lost
 	}
 	if err != nil {
-		var sent *hubSentError
-		wasSent := errors.As(err, &sent)
 		err = classifyHubLegError(ctx, legCtx, budget)
 		var timedOut *hubTimeoutError
 		if errors.As(err, &timedOut) {
@@ -2051,6 +2066,7 @@ var payerAnswerCandidateTimeout = certificationCandidateTimeout
 // defect refuses and a deeper one is recorded; a validator that answered without
 // reading the payload is unavailable at every level.
 func (g *Gateway) validateGoverned(ctx context.Context, fc findingContext, v shnsdk.Validator, resourceJSON []byte, dir, line, profile string, bridged bool) govResult {
+	defer exchangeOf(ctx).validation()()
 	return g.validateGovernedLines(ctx, fc, []lineLane{{Line: line, V: v}}, resourceJSON, dir, line, profile, bridged, false)
 }
 
@@ -2067,6 +2083,7 @@ func (g *Gateway) validateGoverned(ctx context.Context, fc findingContext, v shn
 // answered or, with no line valid, when a Decisive lane could not be judged. The
 // finding's Line names the line that verdict came from.
 func (g *Gateway) validateGovernedLines(ctx context.Context, fc findingContext, lanes []lineLane, resourceJSON []byte, dir, line, profile string, bridged, candidates bool) govResult {
+	defer exchangeOf(ctx).validation()()
 	// At observe the check can only record, so the leg does not wait for it: it
 	// is queued and its finding emitted when the validator answers. A bridged
 	// payload refuses at every level and stays here.
@@ -2092,13 +2109,16 @@ func (g *Gateway) judgeLines(ctx context.Context, fc findingContext, lanes []lin
 		whose = "network"
 	}
 	var tried []LineVerdictSummary
+	// spent is the time this check's validator calls took, the lanes tried
+	// together.
+	var spent time.Duration
 	declaredLine := ""
 	if candidates {
 		declaredLine = line
 	}
-	note := func(l string, v Verdict) {
+	note := func(l string, v Verdict, took time.Duration) {
 		if candidates {
-			tried = append(tried, LineVerdictSummary{Line: l, Verdict: findingVerdict(v)})
+			tried = append(tried, LineVerdictSummary{Line: l, Verdict: findingVerdict(v), Ms: took.Milliseconds()})
 		}
 	}
 	unavailable := func(refused govResult, at string) govResult {
@@ -2110,6 +2130,7 @@ func (g *Gateway) judgeLines(ctx context.Context, fc findingContext, lanes []lin
 			Seam: fc.Seam, Whose: whose, Line: at, Profile: profile,
 			Level: pol.Level().String(), Verdict: "unavailable", Decision: Record.String(),
 			PayloadSHA256: sha256hex(resourceJSON), DeclaredLine: declaredLine, Lines: tried,
+			ValidatorMs: spent.Milliseconds(),
 		})
 		return govResult{}
 	}
@@ -2124,7 +2145,7 @@ func (g *Gateway) judgeLines(ctx context.Context, fc findingContext, lanes []lin
 	)
 	for _, lane := range lanes {
 		if lane.V == nil {
-			note(lane.Line, VerdictUnavailable)
+			note(lane.Line, VerdictUnavailable, 0)
 			if lane.Decisive {
 				decisiveUnjudged = true
 				if noLaneLine == "" {
@@ -2138,27 +2159,31 @@ func (g *Gateway) judgeLines(ctx context.Context, fc findingContext, lanes []lin
 		if lane.Extra {
 			callCtx, cancel = context.WithTimeout(ctx, payerAnswerCandidateTimeout)
 		}
+		callStart := g.exchangeClock()
 		res, err := lane.V.Validate(callCtx, wrapValidateResource(resourceJSON), profile)
+		took := g.exchangeClock().Sub(callStart)
+		spent += took
 		cancel()
 		if err != nil {
-			note(lane.Line, VerdictUnavailable)
+			note(lane.Line, VerdictUnavailable, took)
 			decisiveUnjudged = decisiveUnjudged || lane.Decisive
 			continue
 		}
 		if res.Valid {
 			if len(tried) > 0 {
-				note(lane.Line, VerdictValid)
+				note(lane.Line, VerdictValid, took)
 				g.emitFindingIn(ctx, ConformanceFinding{
 					Kind: string(kind), Direction: dir, LegType: fc.LegType, CorrelationID: fc.CorrelationID,
 					Seam: fc.Seam, Whose: whose, Line: lane.Line, Profile: profile,
 					Level: pol.Level().String(), Verdict: findingVerdict(VerdictValid), Decision: Record.String(),
 					PayloadSHA256: sha256hex(resourceJSON), DeclaredLine: declaredLine, Lines: tried,
+					ValidatorMs: spent.Milliseconds(),
 				})
 			}
 			return govResult{}
 		}
 		verdict := classifyFHIR(res, resourceJSON, lane.Line, profile)
-		note(lane.Line, verdict)
+		note(lane.Line, verdict, took)
 		if verdict == VerdictUnavailable {
 			decisiveUnjudged = decisiveUnjudged || lane.Decisive
 			continue
@@ -2196,6 +2221,7 @@ func (g *Gateway) judgeLines(ctx context.Context, fc findingContext, lanes []lin
 		Issues:        best.Issues,
 		DeclaredLine:  declaredLine,
 		Lines:         tried,
+		ValidatorMs:   spent.Milliseconds(),
 	})
 	if decision == Record {
 		return govResult{Recorded: true}
@@ -3083,6 +3109,7 @@ func answerLineOr(ctx context.Context, contract string) string {
 // payer-originated push needs no retrofit: buildResponseLeg already replies to
 // whoever sent the inbound envelope.
 func (g *Gateway) buildResponseLeg(r *http.Request, respFrame, respOp, txType, inboundCorrID string, p relay.Payload, k relay.Key, frame func([]byte) ([]byte, error), subjectPCI, requester, consentRef string) (out []byte, status int, msg string) {
+	defer exchangeOf(r.Context()).stage(func(s *LegStages, d time.Duration) { s.Seal += d })()
 	payload, err := relay.Transmit(p, relay.Check(k))
 	if err != nil {
 		g.ownershipRefused(k, err)
@@ -3119,6 +3146,11 @@ func (g *Gateway) buildResponseLeg(r *http.Request, respFrame, respOp, txType, i
 	// the requester can verify the response leg is authorized for this exchange.
 	respTok, err := g.authorize(r, respFrame, respOp, subjectPCI, inboundCorrID, "", sha256hex(respEnv.Ciphertext))
 	if err != nil {
+		// The answer was decided and cannot be sent: say why, under the leg's
+		// id, without the error's text (the Hub's answer is unchanged).
+		class := answerErrorClass(r.Context(), err)
+		exchangeOf(r.Context()).answerError(class)
+		log.Printf("gateway: %s answer not authorized: %s (correlation %s)", txType, class, boundedID(inboundCorrID))
 		return nil, http.StatusBadGateway, "authorization failed"
 	}
 	respTokStr, err := tokenJSON(respTok)

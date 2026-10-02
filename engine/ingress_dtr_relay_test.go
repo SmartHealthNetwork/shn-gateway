@@ -299,37 +299,24 @@ func TestDTRIngress_CoverageObtainedOnlyWhenAbsent(t *testing.T) {
 		s.answer(t, "Coverage", searchPage(sorCov, sorCoverage("cov-2", "00078")))
 		refused(t, s, noCoverage, http.StatusUnprocessableEntity, "ambiguous coverage")
 	})
-	// Under enrichment an appended Coverage would name the patient by an id
-	// the request does not use, so the request is refused before any search.
-	t.Run("a system naming the patient differently, under enrichment", func(t *testing.T) {
-		s := newPrefetchSoR()
-		s.sorID = "sor-9"
-		s.answer(t, "Coverage", searchPage(sorCov))
-		env := newInProcessExchange(t)
-		env.originator.cfg.SoR = s.sor()
-		env.originator.cfg.EnrichNativeRequests = true
-		declareFramedDTR(t, env, true)
-		env.payerReturns(LegResult{Response: testResponse(packageAnswer)})
-		refusedBeforeTheNetwork(t, env, postDTRIngress(env, noCoverage), http.StatusUnprocessableEntity, dtrCoverageNamedDifferently)
-		if searched, _ := s.calls(); len(searched) != 0 {
-			t.Fatalf("searched %v", searched)
-		}
-	})
-	// By default the Coverage is only routed by, never appended, so the
-	// system's own id for the patient serves: the request is routed and
-	// carried exactly as the EHR sent it.
-	t.Run("a system naming the patient differently, by default", func(t *testing.T) {
-		s := newPrefetchSoR()
-		s.sorID = "sor-9"
-		s.answer(t, "Coverage", searchPage(strings.ReplaceAll(sorCov, "Patient/"+prefetchSoRID, "Patient/sor-9")))
-		env, rec := dtrIngressRow(t, s, noCoverage)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("answer %d %s", rec.Code, rec.Body.String())
-		}
-		if _, sent := sentOperation(t, env); !bytes.Equal(sent, noCoverage) {
-			t.Fatalf("the EHR's request changed:\n%s", sent)
-		}
-	})
+	// The Coverage is only routed by, never appended, so the system's own id
+	// for the patient serves, with or without the opt-in: the request is
+	// routed and carried exactly as the EHR sent it (at every level:
+	// TestDTRIngress_OptInRoutesAPatientNamedByAnotherIDAsTheDefault).
+	for _, enrich := range []bool{false, true} {
+		t.Run("a system naming the patient differently, "+optInLabel(enrich), func(t *testing.T) {
+			s := newPrefetchSoR()
+			s.sorID = "sor-9"
+			s.answer(t, "Coverage", searchPage(strings.ReplaceAll(sorCov, "Patient/"+prefetchSoRID, "Patient/sor-9")))
+			env, rec := dtrIngressRowWith(t, s, noCoverage, EnforcementStrict, enrich)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("answer %d %s", rec.Code, rec.Body.String())
+			}
+			if _, sent := sentOperation(t, env); !bytes.Equal(sent, noCoverage) {
+				t.Fatalf("the EHR's request changed:\n%s", sent)
+			}
+		})
+	}
 	t.Run("a coverage about another patient", func(t *testing.T) {
 		s := newPrefetchSoR()
 		s.answer(t, "Coverage", searchPage(strings.Replace(sorCov, "Patient/"+prefetchSoRID, "Patient/other", 1)))

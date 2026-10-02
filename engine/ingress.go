@@ -103,9 +103,10 @@ func (g *Gateway) crdIngressRecipient(ctx context.Context, prepared crdIngressRe
 		return "", *fhirStatus, *fhirMsg
 	}
 	if sent && msg == noPayerIdentifier {
-		// An Organization reference nothing resolved names the remedy that
-		// resolves it (unresolvedPayor); a resolved Organization with no
-		// payer identifier, or another kind of payor, keeps the bare text.
+		// An Organization or urn reference nothing resolved names the
+		// remedy that resolves it (unresolvedPayor); another kind of payor
+		// keeps the bare text. A resolved payor with no payer identifier
+		// already says why (recipientForCoverages).
 		return "", status, unresolved.refusal(msg)
 	}
 	return recipient, status, msg
@@ -146,7 +147,8 @@ func (g *Gateway) handleCDSDiscovery(w http.ResponseWriter, r *http.Request) {
 // and the request's hook must be that service's hook (400 otherwise). The hook
 // picks the leg (order-sign and order-select ride crd-order-select;
 // order-dispatch rides crd-order-dispatch). The handler subject-binds the
-// request, carries the EHR's own bytes (with the callback removed and, when the
+// request, carries the EHR's own bytes (with the callback removed, a coverage
+// read through the removed fhirServer to route by carried and, when the
 // participant opts in to enrichment, absent prefetch obtained from its system
 // of record), threads a
 // metadata-only Exchange, and relays the payer's answer back to the EHR exactly
@@ -212,6 +214,14 @@ func (g *Gateway) handleCRDIngress(w http.ResponseWriter, r *http.Request) {
 	recipient, status, msg := g.crdIngressRecipient(r.Context(), prepared)
 	if status != 0 {
 		exchangeOf(r.Context()).routed(status)
+		writeJSON(w, status, map[string]string{"error": msg})
+		return
+	}
+	// A coverage read through the request's own fhirServer is carried
+	// (E-07) once routing has used it: the request is built now, after any
+	// payor Organization read routing made. A request refused above builds
+	// nothing and sends nothing.
+	if status, msg := g.carryFHIRServerCoverage(&prepared); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}

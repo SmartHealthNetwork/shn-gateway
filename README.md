@@ -55,7 +55,7 @@ flowchart LR
 ```
 
 The **only** public-internet leg in this picture is gateway↔Hub (a provider gateway
-also reads a coverage, only to route, through the `fhirServer` a CDS Hooks request names
+also reads a coverage to route by, through the `fhirServer` a CDS Hooks request names
 when that server is on the internet; `CDS_FHIR_SERVER_READ=off` turns the read off). Your EHR/FHIR
 system of record, your keys, and (on the payer side) your adjudicator all talk
 to your own gateway privately, inside your boundary — the Hub never sees them,

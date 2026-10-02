@@ -52,6 +52,8 @@ func TestNamedBy(t *testing.T) {
 		{"https://ehr.example/fhir/Organization/pay-2", true},
 		{"Organization/pay-2/_history/1", true},
 		{"https://ehr.example/fhir/Organization/pay-2/_history/1", true},
+		// A base whose path contains /_history/ is part of the reference.
+		{"https://ehr.example/_history/fhir/Organization/pay-2", true},
 		{"Organization/pay-22", false},
 		{"Organization/pay-22/_history/1", false},
 		{"https://ehr.example/fhir/xOrganization/pay-2", false},

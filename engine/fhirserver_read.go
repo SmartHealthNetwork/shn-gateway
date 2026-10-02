@@ -20,17 +20,20 @@ import (
 )
 
 // Reading the Coverage through the request's own fhirServer (CDS Hooks): the
-// one thing a provider gateway reads from a CDS client's server, and only to
-// route. When a CRD request carries no coverage prefetch for a member the
+// one thing a provider gateway reads from a CDS client's server, to route by.
+// When a CRD request carries no coverage prefetch for a member the
 // provider's system of record does not hold, and names its EHR's FHIR server
 // (fhirServer, with fhirAuthorization), the gateway searches that member's
 // Coverage there, as a CRD service the EHR called directly would, and
 // routes by it. A Coverage whose payor is an Organization reference the answer
 // does not resolve (the search asks for no _include, which CDS Hooks does not
 // ask a client to support) takes one more read, of that Organization: at most
-// two reads a request, within one time budget. Nothing read is added to the
-// request, and fhirServer and fhirAuthorization are still removed before the
-// network.
+// two reads a request, within one time budget. fhirServer and
+// fhirAuthorization are still removed before the network (E-01), so once the
+// request is routed the records routing used (the chosen Coverages and their
+// payor Organization) are carried as prefetch.coverage, in a searchset the
+// gateway writes with none of the server's addresses (E-07,
+// fhirserver_carry.go): the payer has no other way to read them.
 //
 // The read goes to a URL a request names, so it is fenced in every mode: an
 // https base with no query, fragment or credentials; an address the mode
@@ -363,9 +366,9 @@ func (r fhirServerReader) client() *http.Client {
 			// dialed.
 			// Temporary seam: the public mode reads SHN's own public names too
 			// (a refusal of them is tracked in the SHN platform repository). It
-			// stays additive: at most two GETs a request, their answers never
-			// carried, the request's own token only, and nothing inside a VPC
-			// reachable.
+			// stays additive: at most two GETs a request, only the records
+			// routing used carried (E-07, never an address in the server), the
+			// request's own token only, and nothing inside a VPC reachable.
 			for _, a := range addrs {
 				if ok, msg := r.readable(a, port); !ok {
 					return nil, &fhirServerAddrError{msg: msg}
@@ -564,8 +567,8 @@ func (r fhirServerReader) get(ctx context.Context, target *url.URL, auth fhirSer
 // routingCoverages is the searchset a request is routed by: its Coverages
 // as routingCoverageChoice picks them (the active ones when any is active,
 // else all of them), with every other entry (the payor Organizations) kept.
-// The answer is never carried, so the rebuilt Bundle is only what routing
-// reads.
+// The rebuilt Bundle is only what routing reads; what is carried is written
+// from the answer's own bytes (fhirServerCoverageValue).
 func routingCoverages(searchset []byte) []byte {
 	var bundle struct {
 		Entry []json.RawMessage `json:"entry"`

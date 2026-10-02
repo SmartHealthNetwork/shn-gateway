@@ -992,14 +992,22 @@ func namedDifferently(t *testing.T) *prefetchSoR {
 }
 
 // TestPrefetch_PatientNamedDifferentlyRefused: when the system of record
-// names the patient by an id other than context.patientId, a request whose
-// patient or coverage would have to come from it is refused before anything
-// is read or sent; a request carrying every key is unaffected.
+// names the patient by an id other than context.patientId, a request under
+// the opt-in whose patient would have to come from it is refused (strict)
+// before anything is read or sent: the system cannot supply the patient under
+// the request's id. A request that carries its patient and leaves out only
+// its coverage is routed by the coverage read only to route by, under the
+// system's own id, as without the opt-in, and the coverage is not filled; a
+// request carrying every key is unaffected. Every level:
+// TestLevelCRDIngress_OptInPatientNamedByAnotherIDLeftOut and
+// TestCRDIngress_OptInRoutesAPatientNamedByAnotherIDAsTheDefault.
 func TestPrefetch_PatientNamedDifferentlyRefused(t *testing.T) {
+	if want := "system of record names the patient differently from context.patientId; supply the patient prefetch in the request"; patientNamedDifferently != want {
+		t.Fatalf("refusal %q, want %q", patientNamedDifferently, want)
+	}
 	for name, body := range map[string][]byte{
-		"patient absent":  ehrRequest(`"coverage":` + ehrCoverage),
-		"coverage absent": ehrRequest(patientOnly),
-		"no prefetch":     ehrRequest("-"),
+		"patient absent": ehrRequest(`"coverage":` + ehrCoverage),
+		"no prefetch":    ehrRequest("-"),
 	} {
 		t.Run(name, func(t *testing.T) {
 			s := namedDifferently(t)
@@ -1019,6 +1027,35 @@ func TestPrefetch_PatientNamedDifferentlyRefused(t *testing.T) {
 			}
 		})
 	}
+	t.Run("coverage absent", func(t *testing.T) {
+		s := namedDifferently(t)
+		obs := &observed{}
+		env := newInProcessExchange(t)
+		env.originator.cfg.EnrichNativeRequests = true // the prefetch fill this row pins
+		env.originator.cfg.SoR = s.sor()
+		env.originator.cfg.Observer = obs.observe
+		rec := httptest.NewRecorder()
+		body := ehrRequest(patientOnly)
+		env.originator.handleCRDIngress(rec, crdIngressPost(body))
+		if rec.Code != http.StatusOK || env.routeHitCount() != 1 {
+			t.Fatalf("answer %d %s", rec.Code, rec.Body.String())
+		}
+		if got := names(membersOf(t, sentRequest(t, env), "prefetch")); !slices.Equal(got, []string{"patient"}) {
+			t.Fatalf("prefetch keys %v, want only the EHR's: the coverage is not filled", got)
+		}
+		if searched, read := s.calls(); !slices.Equal(searched, []string{"Coverage?patient=Patient%2Fpat-elsewhere&_include=Coverage%3Apayor"}) || len(read) != 0 {
+			t.Fatalf("searched %v, read %v: want only the routing read under the system's id", searched, read)
+		}
+		events := obs.prefetch(t)
+		if e := events["coverage"]; e.Outcome != SearchOK || e.Query != "Coverage?patient=Patient%2Fpat-elsewhere&_include=Coverage%3Apayor" {
+			t.Fatalf("coverage recorded as %+v, want the routing read", e)
+		}
+		for _, k := range []string{"serviceHistory", "deviceHistory", "medicationHistory", "questionnaireResponses"} {
+			if e := events[k]; e.Outcome != SearchNotRun || e.Reason != historyNamedDifferently {
+				t.Errorf("%s recorded as %+v", k, e)
+			}
+		}
+	})
 	t.Run("every key supplied", func(t *testing.T) {
 		s := newPrefetchSoR()
 		s.sorID = "pat-elsewhere"

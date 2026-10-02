@@ -240,9 +240,6 @@ func RunPublisher(ctx context.Context, q *Queue, cfg PublisherConfig) error {
 			}
 			e.Source = cfg.Source
 			e.Incarnation = cfg.Incarnation
-			if e.Time.IsZero() {
-				e.Time = cfg.Clock()
-			}
 			deadline := q.ownershipDeadline(e.Sequence, cfg.Clock())
 			// expire drops the event, as expired, once its ownership window has
 			// run out.

@@ -295,8 +295,11 @@ func consistentPASGraphSubjects(g *pasGraph, expected string) bool {
 
 // subjectMismatch is the first subject in the graph, in Bundle order, that does
 // not bind to expected — nil when every subject does and a Patient entry is that
-// patient. A subject under an entry identified by a URN is read by the same
-// identity rule as the closure walk (subjectIdentity), so a ClaimResponse that
+// patient. An entry-level Coverage's party (entryCoverageParties) is another
+// person: its identity is not checked, and only that Coverage's subscriber or
+// policyHolder naming it is exempt from binding as a typed Patient reference.
+// A subject under an entry identified by a URN is read by the same identity
+// rule as the closure walk (subjectIdentity), so a ClaimResponse that
 // names its patient "Patient/x" from under a urn:uuid binds to the Bundle's one
 // Patient whose RESTful identity ends in it.
 func (g *pasGraph) subjectMismatch(expected string) *pasSubjectRefusal {
@@ -343,11 +346,17 @@ func (g *pasGraph) subjectMismatch(expected string) *pasSubjectRefusal {
 	}
 
 	found := false
-	var visit func(any, *pasGraphEntry, int, string) *pasSubjectRefusal
-	visit = func(v any, owner *pasGraphEntry, depth int, path string) *pasSubjectRefusal {
+	// role is what v is to an entry-level Coverage's party rule
+	// (entryCoverageParties): a party is another person, so its identity is
+	// not checked (the rule itself requires that it holds as a contained
+	// resource); the slot naming it is the one typed Patient reference that
+	// names someone other than the patient.
+	var visit func(v any, owner *pasGraphEntry, depth int, path string, role coveragePartyRole) *pasSubjectRefusal
+	visit = func(v any, owner *pasGraphEntry, depth int, path string, role coveragePartyRole) *pasSubjectRefusal {
 		switch x := v.(type) {
 		case map[string]any:
-			if typ, ok := x["resourceType"].(string); ok && typ == "Patient" {
+			rt, isResource := x["resourceType"].(string)
+			if role != roleCoverageParty && isResource && rt == "Patient" {
 				identity := owner.fullURL
 				if depth > 0 {
 					id, ok := x["id"].(string)
@@ -375,19 +384,34 @@ func (g *pasGraph) subjectMismatch(expected string) *pasSubjectRefusal {
 			// A typed Patient Reference is also subject-bearing in polymorphic
 			// paths (e.g. actor or extension.valueReference). Do not let an
 			// identifier-only form bypass binding simply because its role differs.
-			if typ, ok := x["type"].(string); ok && (typ == "Patient" || typ == "http://hl7.org/fhir/StructureDefinition/Patient") {
+			// The one exception is an entry-level Coverage's slot naming its own
+			// party: that reference names another person, never the patient.
+			if typ, ok := x["type"].(string); ok && (typ == "Patient" || typ == "http://hl7.org/fhir/StructureDefinition/Patient") && role != roleCoveragePartySlot {
 				if r := boundReference(x, owner, path); r != nil {
 					return r
 				}
 			}
+			var parties entryParties
+			if depth == 0 && isResource && rt == "Coverage" {
+				parties = entryCoverageParties(x)
+			}
 			for _, field := range pasSortedKeys(x) {
-				if r := visit(x[field], owner, depth+1, pasReferencePath(path, field)); r != nil {
+				fieldPath := pasReferencePath(path, field)
+				if list, ok := x[field].([]any); ok && field == "contained" && parties.any() {
+					for i, c := range list {
+						if r := visit(c, owner, depth+2, pasReferencePath(fieldPath, strconv.Itoa(i)), parties.roleOf(i)); r != nil {
+							return r
+						}
+					}
+					continue
+				}
+				if r := visit(x[field], owner, depth+1, fieldPath, parties.slotRole(field, x[field])); r != nil {
 					return r
 				}
 			}
 		case []any:
 			for i, child := range x {
-				if r := visit(child, owner, depth+1, pasReferencePath(path, strconv.Itoa(i))); r != nil {
+				if r := visit(child, owner, depth+1, pasReferencePath(path, strconv.Itoa(i)), roleNone); r != nil {
 					return r
 				}
 			}
@@ -395,7 +419,7 @@ func (g *pasGraph) subjectMismatch(expected string) *pasSubjectRefusal {
 		return nil
 	}
 	for _, entry := range g.ordered() {
-		if r := visit(entry.resource, entry, 0, ""); r != nil {
+		if r := visit(entry.resource, entry, 0, "", roleNone); r != nil {
 			return r
 		}
 	}
@@ -442,8 +466,5 @@ func (g *pasGraph) subjectIdentity(owner *pasGraphEntry, ref string) (string, st
 			ref = base.String()
 		}
 	}
-	if pos := strings.Index(ref, "/_history/"); pos >= 0 {
-		ref = ref[:pos]
-	}
-	return ref, ""
+	return stripHistoryRef(ref), ""
 }

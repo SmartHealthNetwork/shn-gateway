@@ -58,6 +58,9 @@ type pasGraphRefusal struct {
 	Target    string `json:"target"`    // the resource type the reference names, or "contained resource"
 	Reference string `json:"reference"` // the reference string, exactly as the payer wrote it
 	Why       string `json:"why"`
+	// holder is the resource type of the Owner ("Bundle" for Bundle or entry
+	// metadata), carried so a reader need not parse it back from the label.
+	holder string
 }
 
 func (r *pasGraphRefusal) Error() string {
@@ -82,20 +85,28 @@ func pasGraphStructural(format string, args ...any) error {
 
 // pasReferenceTarget reads the resource type a reference names: "Patient" from
 // "Patient/p", ".../Patient/p" or "Patient/p/_history/2"; "contained resource"
-// for a local "#id".
+// for a local "#id"; "resource" when the segment before the id is no type name
+// (a malformed "Patient/p/_history/2/x").
 func pasReferenceTarget(ref string) string {
 	if strings.HasPrefix(ref, "#") {
 		return "contained resource"
 	}
-	trimmed := ref
-	if pos := strings.Index(trimmed, "/_history/"); pos >= 0 {
-		trimmed = trimmed[:pos]
-	}
+	trimmed := stripHistoryRef(ref)
 	parts := strings.Split(strings.TrimSuffix(trimmed, "/"), "/")
-	if len(parts) >= 2 && parts[len(parts)-2] != "" && !strings.Contains(parts[len(parts)-2], ":") {
+	if len(parts) >= 2 && pasResourceTypeName(parts[len(parts)-2]) {
 		return parts[len(parts)-2]
 	}
 	return "resource"
+}
+
+// resourceType is the entry's resource type, "Bundle" for Bundle or entry
+// metadata (a nil entry), as label names it.
+func (e *pasGraphEntry) resourceType() string {
+	if e == nil {
+		return "Bundle"
+	}
+	typ, _ := e.resource["resourceType"].(string)
+	return typ
 }
 
 func (e *pasGraphEntry) label() string {
@@ -132,7 +143,11 @@ type pasGraph struct {
 	resources, refs int
 }
 
-func readPASGraph(raw []byte) (*pasGraph, error) {
+func readPASGraph(raw []byte) (*pasGraph, error) { return readPASGraphOf(raw, true) }
+
+// readPASGraphOf reads a response graph, requiring its one ClaimResponse only
+// when needResponse is set.
+func readPASGraphOf(raw []byte, needResponse bool) (*pasGraph, error) {
 	if len(raw) > pasGraphMaxBytes {
 		return nil, pasGraphError()
 	}
@@ -198,7 +213,7 @@ func readPASGraph(raw []byte) (*pasGraph, error) {
 			g.response = entry
 		}
 	}
-	if g.response == nil {
+	if g.response == nil && needResponse {
 		return nil, pasGraphStructural("the Bundle carries no ClaimResponse")
 	}
 	return g, nil
@@ -293,7 +308,7 @@ func (g *pasGraph) walkWithReferencePolicy(v any, owner *pasGraphEntry, containe
 				return pasGraphStructural("the Bundle carries more than %d references", pasGraphMaxReferences)
 			}
 			if why := g.resolve(s, owner, contained, inContained); why != "" && !policy.allows(owner, path, x) {
-				return &pasGraphRefusal{Owner: owner.label(), Path: path, Target: pasReferenceTarget(s), Reference: s, Why: why}
+				return &pasGraphRefusal{Owner: owner.label(), Path: path, Target: pasReferenceTarget(s), Reference: s, Why: why, holder: owner.resourceType()}
 			}
 		}
 		for _, key := range pasSortedKeys(x) {
@@ -372,10 +387,9 @@ func (g *pasGraph) resolve(ref string, owner *pasGraphEntry, contained map[strin
 		}
 	}
 	version := ""
-	if pos := strings.Index(full, "/_history/"); pos >= 0 {
-		version = full[pos+10:]
-		full = full[:pos]
-		if version == "" || strings.Contains(version, "/") {
+	if base, v, versioned := splitHistory(full); versioned {
+		full, version = base, v
+		if version == "" {
 			return "names no usable version"
 		}
 	}
@@ -406,8 +420,8 @@ func (g *pasGraph) resolve(ref string, owner *pasGraphEntry, contained map[strin
 func (g *pasGraph) resolveUnderURN(ref string, owner *pasGraphEntry) (string, string) {
 	where := "is relative under " + owner.label() + ", which is identified by a URN, and "
 	trimmed, version := ref, ""
-	if pos := strings.Index(ref, "/_history/"); pos >= 0 {
-		trimmed, version = ref[:pos], ref[pos:]
+	if base, v, versioned := splitHistory(ref); versioned {
+		trimmed, version = base, "/_history/"+v
 	}
 	parts := strings.Split(trimmed, "/")
 	if len(parts) != 2 || parts[0] == "" || strings.Contains(parts[0], ":") || !pasSafeResourceID(parts[1]) {

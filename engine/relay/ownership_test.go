@@ -22,8 +22,8 @@ func pinnedOwnership() map[Key]Rule {
 	refusal := Rule{Allowed: own(A), Builders: b("gateway-refusal")}
 	relayOnly := Rule{Allowed: own(R)}
 	m := map[Key]Rule{
-		{"crd-order-dispatch", rq, req, OutcomeCarried}:      {Allowed: own(R, E), Edits: []EditID{"E-01", "E-02"}},
-		{"crd-order-select", rq, req, OutcomeCarried}:        {Allowed: own(R, E), Edits: []EditID{"E-01", "E-02"}},
+		{"crd-order-dispatch", rq, req, OutcomeCarried}:      {Allowed: own(R, E), Edits: []EditID{"E-01", "E-02", "E-07"}},
+		{"crd-order-select", rq, req, OutcomeCarried}:        {Allowed: own(R, E), Edits: []EditID{"E-01", "E-02", "E-07"}},
 		{"dtr-questionnaire-fetch", rq, req, OutcomeCarried}: {Allowed: own(R, E), Edits: []EditID{"E-04", "E-05"}},
 		{"pas-claim", rq, req, OutcomeCarried}:               relayOnly,
 		{"pas-claim-inquire", rq, req, OutcomeCarried}:       relayOnly,
@@ -462,6 +462,60 @@ func TestForTestAdmittedOnlyInTests(t *testing.T) {
 		}
 		if !strings.Contains(string(out), "panic: "+c.msg) || strings.Contains(string(out), "returned") {
 			t.Fatalf("%s: want a panic, got\n%s", c.arg, out)
+		}
+	}
+}
+
+// The coverage carry (E-07) is admitted only where a provider's gateway
+// carries its participant's CDS Hooks request to the network: a payload
+// claiming it on any other transmit, another leg's request included, is
+// refused, and nothing is sent.
+func TestCoverageCarryOnlyOnTheCRDRequestTransmit(t *testing.T) {
+	body := NewBody([]byte(`{"hook":"order-select","prefetch":{}}`), OriginIngressRequest)
+	d := mustDoc(t, body)
+	prefetch, ok := d.Member(d.Root(), "prefetch")
+	if !ok {
+		t.Fatal("no prefetch")
+	}
+	carry, err := Apply(body, "application/json", EditCDSCoverageCarry,
+		d.InsertMember(prefetch, "coverage", []byte(`{"resourceType":"Bundle","type":"searchset","total":0,"entry":[]}`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := carry.Edits(); !slices.Equal(got, []EditID{EditCDSCoverageCarry}) {
+		t.Fatalf("edits %v", got)
+	}
+	crdRequest := func(k Key) bool {
+		return k.Role == RoleRequester && k.Direction == DirectionRequest && k.Outcome == OutcomeCarried &&
+			(k.Leg == "crd-order-dispatch" || k.Leg == "crd-order-select")
+	}
+	admitted := 0
+	for k := range LegOwnership() {
+		err := Check(k)(carry)
+		switch {
+		case crdRequest(k) && err != nil:
+			t.Errorf("%s refused the coverage carry: %v", k, err)
+		case crdRequest(k):
+			admitted++
+		case err == nil:
+			t.Errorf("%s admitted the coverage carry", k)
+		}
+	}
+	if admitted != 2 {
+		t.Fatalf("admitted on %d transmits, want the two CRD request transmits", admitted)
+	}
+	for _, k := range []Key{
+		{"dtr-questionnaire-fetch", RoleRequester, DirectionRequest, OutcomeCarried},
+		{"pas-claim", RoleRequester, DirectionRequest, OutcomeCarried},
+		{"crd-order-select", RoleRecipient, DirectionRequest, OutcomeCarried},
+	} {
+		err := Check(k)(carry)
+		var oe *OwnershipError
+		if !errors.As(err, &oe) || oe.Key != k {
+			t.Fatalf("%s: want an *OwnershipError, got %v", k, err)
+		}
+		if _, terr := Transmit(carry, Check(k)); terr == nil {
+			t.Fatalf("%s: Transmit sent the refused payload", k)
 		}
 	}
 }

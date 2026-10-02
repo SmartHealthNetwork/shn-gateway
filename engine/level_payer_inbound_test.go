@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
@@ -44,9 +45,11 @@ type levelPayer struct {
 	hubPriv   ed25519.PrivateKey
 	authzPriv ed25519.PrivateKey
 	pci       string
-	findings  []ConformanceFinding
-	skipped   []ObserverEvent
-	seq       int
+	// ctx, when set, is the context each leg is delivered under.
+	ctx      context.Context
+	findings []ConformanceFinding
+	skipped  []ObserverEvent
+	seq      int
 	// mu guards findings and skipped: at observe a queued check reports from a
 	// worker as well as from the leg's goroutine.
 	mu sync.Mutex
@@ -166,6 +169,9 @@ func (p *levelPayer) sendFramed(t *testing.T, leg string, headers map[string]str
 	}
 	r := httptest.NewRequest(http.MethodPost, "/substrate/inbound", bytes.NewReader(raw))
 	r.Header.Set("X-Hub-Assertion", base64.StdEncoding.EncodeToString(as))
+	if p.ctx != nil {
+		r = r.WithContext(p.ctx)
+	}
 	rec := httptest.NewRecorder()
 	// The route as mounted: the exchange record and the diagnostic observer
 	// around handleInbound (each a pass-through when unset).

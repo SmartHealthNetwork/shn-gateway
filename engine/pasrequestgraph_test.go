@@ -150,7 +150,7 @@ func TestAuthoredPASOptionalEvidenceScope(t *testing.T) {
 				for _, absolute := range []bool{false, true} {
 					t.Run(fmt.Sprintf("%s/%s/%s/%t", line, orderType, optionalType, absolute), func(t *testing.T) {
 						in := attachmentInputs(orderType, line, absolute)
-						in.SR = bytes.ReplaceAll(in.SR, []byte("Patient/MBR-PD-UC04"), []byte(in.PatientRef))
+						in.SR = bytes.ReplaceAll(in.SR, []byte("Patient/MBR-COVERED"), []byte(in.PatientRef))
 						qc := contextInputs()
 						qc.PatientRef = in.PatientRef
 						qc.CoverageRef = in.CoverageRef
@@ -293,7 +293,7 @@ func optionalRequestGraph(t *testing.T, body []byte) *pasGraph {
 
 func TestAuthoredPASReferenceOccurrenceRefusals(t *testing.T) {
 	in := attachmentInputs("ServiceRequest", "2.2", false)
-	in.SR = bytes.ReplaceAll(in.SR, []byte("Patient/MBR-PD-UC04"), []byte(in.PatientRef))
+	in.SR = bytes.ReplaceAll(in.SR, []byte("Patient/MBR-COVERED"), []byte(in.PatientRef))
 	qc := contextInputs()
 	qc.PatientRef = in.PatientRef
 	qc.CoverageRef = in.CoverageRef
@@ -370,7 +370,7 @@ func TestAuthoredPASOptionalContextKeepsNestedReferencesStrict(t *testing.T) {
 	for _, kind := range []string{"ServiceRequest", "DeviceRequest"} {
 		t.Run(kind, func(t *testing.T) {
 			in := attachmentInputs("ServiceRequest", "2.2", false)
-			in.SR = bytes.ReplaceAll(in.SR, []byte("Patient/MBR-PD-UC04"), []byte(in.PatientRef))
+			in.SR = bytes.ReplaceAll(in.SR, []byte("Patient/MBR-COVERED"), []byte(in.PatientRef))
 			qc := contextInputs()
 			qc.PatientRef = in.PatientRef
 			qc.CoverageRef = in.CoverageRef
@@ -403,7 +403,7 @@ func TestAuthoredPASOptionalContextNeedsActiveIdentities(t *testing.T) {
 	for _, missing := range []string{"ServiceRequest/source-order", "Coverage/cov-MBR-OX"} {
 		t.Run(missing, func(t *testing.T) {
 			in := attachmentInputs("ServiceRequest", "2.2", false)
-			in.SR = bytes.ReplaceAll(in.SR, []byte("Patient/MBR-PD-UC04"), []byte(in.PatientRef))
+			in.SR = bytes.ReplaceAll(in.SR, []byte("Patient/MBR-COVERED"), []byte(in.PatientRef))
 			qc := contextInputs()
 			qc.PatientRef = in.PatientRef
 			qc.CoverageRef = in.CoverageRef
@@ -453,7 +453,7 @@ func TestAuthoredPASOptionalPolicyRejectsDotSegments(t *testing.T) {
 			for _, id := range []string{".", "..", ".clinical", "..clinical", "a..b", "a-b"} {
 				t.Run(line+"/"+kind+"/"+id, func(t *testing.T) {
 					in := attachmentInputs("ServiceRequest", line, false)
-					in.SR = bytes.ReplaceAll(in.SR, []byte("Patient/MBR-PD-UC04"), []byte(in.PatientRef))
+					in.SR = bytes.ReplaceAll(in.SR, []byte("Patient/MBR-COVERED"), []byte(in.PatientRef))
 					qc := contextInputs()
 					qc.PatientRef = in.PatientRef
 					qc.CoverageRef = in.CoverageRef

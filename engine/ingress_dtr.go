@@ -94,13 +94,12 @@ type dtrPackageParam struct {
 //   - a request carrying no coverage parameter is routed by the patient's
 //     Coverage from the system of record's Coverage search, recorded as a
 //     PrefetchObtainedEvent, and gains it (the dtr-coverage-obtain edit) only
-//     under enrichment. It is refused when the system holds no Coverage
+//     under enrichment, and only when the system names the patient by the
+//     request's member id. It is refused when the system holds no Coverage
 //     (422), when the Coverages it chooses (routingCoverageChoice) name
 //     different payers (422), when it cannot search (422) or is unavailable
-//     (503), and, under enrichment, when the system
-//     names the patient by another id (422); a Coverage about another patient
-//     is a 502. The request is routed by that Coverage, so these refuse at
-//     every level.
+//     (503); a Coverage about another patient is a 502. The request is
+//     routed by that Coverage, so these refuse at every level.
 //
 // Nothing else changes: the EHR's parameters keep their order, repeats,
 // values (a canonical's |version included), meta and unknown members.
@@ -296,7 +295,8 @@ func (g *Gateway) prepareDTRPackageRequest(ctx context.Context, raw []byte) (dtr
 		// sent below strict (RulePrefetchFill), which would only turn the
 		// system of record's own answer into "no coverage".
 		// It is appended to the request (E-04) only when the participant opts in
-		// to enrichment (Config.EnrichNativeRequests) and the coverage
+		// to enrichment (Config.EnrichNativeRequests), the system of record
+		// names the patient by the request's member id and the coverage
 		// template's search finds one; otherwise the request is carried as
 		// sent and the Coverage is only routed by.
 		appended, routed, status, msg := g.obtainDTRCoverage(ctx, &out, fence)
@@ -419,10 +419,6 @@ func (g *Gateway) obtainDTRPatient(ctx context.Context, member string, fence pat
 	return patient, 0, ""
 }
 
-// dtrCoverageNamedDifferently refuses a request without coverage whose
-// patient the system of record names by another id.
-const dtrCoverageNamedDifferently = "system of record names the patient differently from the request; supply the coverage parameter in the request"
-
 // dtrNoCoverageToRouteBy refuses a request without coverage for a member the
 // system of record names no patient for (one it does not hold, or holds but
 // cannot name): nothing to route by. It names what the participant sends
@@ -441,8 +437,10 @@ const dtrNoCoverageToRouteBy = "no coverage to route by: send the coverage param
 // finds none (a member with no active coverage), or the system cannot answer
 // it, nothing is appended, and the request is routed as without enrichment,
 // by the routing read, and refused only when that read fails too: the opt-in
-// never leaves a member with less to route by than the default, except when
-// the system of record names the patient by another id (refused above). Read
+// never leaves a member with less to route by than the default. A system that
+// names the patient by another id has nothing to append (a Coverage it holds
+// names the patient by an id the request does not use): the request is routed
+// by the routing read under the system's id, as without enrichment. Read
 // only to route by, the search asks for every Coverage with its payor.
 //
 // Either way the request is routed on the Coverages routingCoverageChoice
@@ -470,14 +468,12 @@ func (g *Gateway) obtainDTRCoverage(ctx context.Context, out *dtrIngressRequest,
 	switch {
 	case sorID == "":
 		return nil, nil, http.StatusUnprocessableEntity, dtrNoCoverageToRouteBy
-	case sorID != out.member && g.cfg.EnrichNativeRequests:
-		// An appended Coverage would name the patient by an id the request
-		// does not use.
-		return nil, nil, http.StatusUnprocessableEntity, dtrCoverageNamedDifferently
 	case sorID != out.member:
-		// Read only to route by, never appended: the system's own id for the
-		// patient serves. In that system Patient/<member> is another patient
-		// (or none), so the Coverage is fenced to the system's id alone.
+		// Read only to route by, never appended, with or without enrichment
+		// (an appended Coverage would name the patient by an id the request
+		// does not use): the system's own id for the patient serves. In that
+		// system Patient/<member> is another patient (or none), so the
+		// Coverage is fenced to the system's id alone.
 		fence = newPatientFence(shnsdk.MemberSystem, out.member, nil, sorID)
 	}
 	search := func(filters ...SearchDateRange) sorSearchset {
@@ -486,7 +482,7 @@ func (g *Gateway) obtainDTRCoverage(ctx context.Context, out *dtrIngressRequest,
 			Query: s.Query, Outcome: s.Outcome, Reason: s.Reason, Count: s.Count, Pages: s.Pages})
 		return s
 	}
-	if g.cfg.EnrichNativeRequests {
+	if g.cfg.EnrichNativeRequests && sorID == out.member {
 		s := search(prefetchSearchFilters("Coverage")...)
 		switch s.Outcome {
 		case SearchOK:
@@ -595,9 +591,9 @@ func (g *Gateway) dtrIngressRecipient(ctx context.Context, prepared dtrIngressRe
 		}
 		if msg == noPayerIdentifier {
 			// An Organization reference nothing resolved names the remedy
-			// that resolves it (unresolvedPayor); a resolved Organization
-			// with no payer identifier, or another kind of payor, keeps the
-			// bare text.
+			// that resolves it (unresolvedPayor); another kind of payor
+			// keeps the bare text. A resolved payor with no payer
+			// identifier already says why (recipientForCoverages).
 			return "", status, unresolved.refusal(msg)
 		}
 		if status != 0 {

@@ -1,9 +1,11 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/SmartHealthNetwork/shn-gateway/diagnostics"
 	"io"
 	"net"
@@ -200,14 +202,19 @@ func TestStopServingDeliversTheEventsOfCutRequests(t *testing.T) {
 	pubStopped := make(chan struct{})
 	var mu sync.Mutex
 	var kinds []string
+	// Like the network's ingest, an event is stored once by its source,
+	// incarnation and sequence: delivery is at least once, and a resend of
+	// the same bytes is answered as the first was (diagnostics' resend rows).
+	stored := map[string][]byte{}
 	held := true
 	ingest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/health") {
 			w.WriteHeader(204)
 			return
 		}
+		raw, _ := io.ReadAll(r.Body)
 		var e diagnostics.Event
-		_ = json.NewDecoder(r.Body).Decode(&e)
+		_ = json.Unmarshal(raw, &e)
 		mu.Lock()
 		first := held
 		held = false
@@ -219,9 +226,21 @@ func TestStopServingDeliversTheEventsOfCutRequests(t *testing.T) {
 			w.WriteHeader(503)
 			return
 		}
+		key := fmt.Sprintf("%s/%s/%d", e.Source, e.Incarnation, e.Sequence)
 		mu.Lock()
+		defer mu.Unlock()
+		if prev, ok := stored[key]; ok {
+			if !bytes.Equal(prev, raw) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(409)
+				_, _ = w.Write([]byte(`{"code":"conflict"}`))
+				return
+			}
+			w.WriteHeader(204)
+			return
+		}
+		stored[key] = raw
 		kinds = append(kinds, e.Kind)
-		mu.Unlock()
 		w.WriteHeader(204)
 	}))
 	defer ingest.Close()

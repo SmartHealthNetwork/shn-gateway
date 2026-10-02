@@ -19,7 +19,8 @@ func accessLineFor(r engine.ExchangeRecord) diagnostics.AccessLine {
 		ContractLine: r.ContractLine, Sender: r.Sender, Recipient: r.Recipient,
 		RequestCiphertextHash: r.RequestCiphertextHash, ResponseCiphertextHash: r.ResponseCiphertextHash,
 		Outcome: r.Outcome, Status: r.Status, LatencyMs: r.Latency.Milliseconds(),
-		Findings: diagnostics.AccessFindings{Count: r.Findings.Count, Refused: r.Findings.Refused, Kinds: r.Findings.Kinds, Deferred: r.Findings.Deferred},
+		Findings:   diagnostics.AccessFindings{Count: r.Findings.Count, Refused: r.Findings.Refused, Kinds: r.Findings.Kinds, Deferred: r.Findings.Deferred},
+		RelayEdits: r.Edits, HubDelivered: r.HubDelivered,
 	}
 	if r.Outcome == engine.ExchangeRefused {
 		line.Refusal = &diagnostics.AccessRefusal{By: r.RefusedBy, Rule: r.Rule}
@@ -27,6 +28,14 @@ func accessLineFor(r engine.ExchangeRecord) diagnostics.AccessLine {
 	if b := r.Backend; b != nil {
 		line.Backend = &diagnostics.AccessBackend{Status: b.Status, LatencyMs: b.Latency.Milliseconds(), ErrorClass: b.ErrorClass, Calls: r.BackendCalls}
 	}
+	if st := r.Stages; st != nil {
+		line.Stages = &diagnostics.AccessStages{
+			UnwrapMs: st.Unwrap.Milliseconds(), ReadsMs: st.Reads.Milliseconds(), ForwardMs: st.Forward.Milliseconds(),
+			ValidateMs: st.Validate.Milliseconds(), SealMs: st.Seal.Milliseconds(), LedgerMs: st.Ledger.Milliseconds(),
+			WriteMs: st.Write.Milliseconds(),
+		}
+	}
+	line.AnswerError = r.AnswerError
 	return line
 }
 

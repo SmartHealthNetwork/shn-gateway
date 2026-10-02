@@ -22,6 +22,13 @@ func TestIngressBypass_AbsentFromProductionWiring(t *testing.T) {
 				t.Errorf("%s references %q — the ingress auth bypass must be build-time-absent", path, forbidden)
 			}
 		}
+		// Nor the fhirServer read's test seam: a deployed gateway reads with
+		// the system resolver and roots only.
+		for _, forbidden := range []string{"WithFHIRServerTrustForTest", "fhirServerRoots", "fhirServerResolve", "fhirServerDial"} {
+			if strings.Contains(string(src), forbidden) {
+				t.Errorf("%s references %q — the fhirServer test seam must be build-time-absent", path, forbidden)
+			}
+		}
 	}
 }
 

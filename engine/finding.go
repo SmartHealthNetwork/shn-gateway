@@ -114,6 +114,10 @@ type ConformanceFinding struct {
 	// Neither carries a diagnostic.
 	DeclaredLine string               `json:"declaredLine,omitempty"`
 	Lines        []LineVerdictSummary `json:"lines,omitempty"`
+	// ValidatorMs is the time the check's $validate calls took, every line
+	// tried together (to its failure, for one that could not be judged); 0
+	// for a check that called no validator.
+	ValidatorMs int64 `json:"validatorMs,omitempty"`
 
 	// binding and tally are the call this finding belongs to, taken from the
 	// request's context where the finding was made (bindFinding); they are
@@ -123,11 +127,15 @@ type ConformanceFinding struct {
 }
 
 // LineVerdictSummary is one line a candidate-line certification tried and what it
-// saw there: "valid", "structural", "deeper" or "unavailable". Line and verdict
-// only — never a validator diagnostic.
+// saw there: "valid", "structural", "deeper" or "unavailable", and how long
+// that line's $validate call took. Never a validator diagnostic.
 type LineVerdictSummary struct {
 	Line    string `json:"line"`
 	Verdict string `json:"verdict"`
+	// Ms is the time this line's $validate call took (to its failure for an
+	// unavailable one); absent for a line with no validator lane, or a call
+	// under a millisecond.
+	Ms int64 `json:"ms,omitempty"`
 }
 
 // findingVerdict is a verdict as a finding names it.

@@ -59,3 +59,96 @@ func TestInspectNativePASResponsePreservesIngressContract(t *testing.T) {
 		}
 	}
 }
+
+// NativePASUnresolvedReference names the reference the response graph rule
+// refuses, by the type of the resource holding it, never by that resource's
+// id or the address the reference resolved to.
+func TestNativePASUnresolvedReferenceNamesTheReference(t *testing.T) {
+	encode := func(b map[string]any) []byte { raw, _ := json.Marshal(b); return raw }
+	open := assemblySmallGraph()
+	open["entry"] = open["entry"].([]any)[:1]
+	holder, element, reference, ok := NativePASUnresolvedReference(encode(open))
+	if !ok || holder != "ClaimResponse" || element != "/patient" || reference != "Patient/p" {
+		t.Fatalf("open graph: %q %q %q %v", holder, element, reference, ok)
+	}
+	meta := assemblySmallGraph()
+	meta["signature"] = map[string]any{"who": map[string]any{"reference": "Organization/signer"}}
+	if holder, element, reference, ok = NativePASUnresolvedReference(encode(meta)); !ok || holder != "Bundle" || element != "/signature/who" || reference != "Organization/signer" {
+		t.Fatalf("Bundle metadata: %q %q %q %v", holder, element, reference, ok)
+	}
+	idless := assemblySmallGraph()
+	idless["entry"] = idless["entry"].([]any)[:1]
+	first := idless["entry"].([]any)[0].(map[string]any)
+	first["fullUrl"] = "urn:uuid:9d2c1b7e-0000-4000-8000-000000000001"
+	delete(first["resource"].(map[string]any), "id")
+	first["resource"].(map[string]any)["patient"] = map[string]any{"reference": "urn:uuid:9d2c1b7e-0000-4000-8000-000000000002"}
+	if holder, _, _, ok = NativePASUnresolvedReference(encode(idless)); !ok || holder != "ClaimResponse" {
+		t.Fatalf("id-less holder: %q %v", holder, ok)
+	}
+	// A graph that resolves, and one refused for a reason that names no
+	// reference, name none.
+	for name, b := range map[string][]byte{"closed": encode(assemblySmallGraph()), "not a Bundle": []byte(`{"resourceType":"Parameters"}`)} {
+		if h, e, r, ok := NativePASUnresolvedReference(b); ok || h != "" || e != "" || r != "" {
+			t.Fatalf("%s: %q %q %q %v", name, h, e, r, ok)
+		}
+	}
+}
+
+// The exported subject rule is the inquiry leg's own: one patient across every
+// response Bundle reads consistent, two do not.
+func TestConsistentPASInquiryAnswerSubjectsIsTheLegRule(t *testing.T) {
+	bundle := func(id, min string) map[string]any {
+		return map[string]any{"resourceType": "Bundle", "type": "collection", "entry": []any{
+			map[string]any{"fullUrl": "https://payer.test/fhir/ClaimResponse/cr-" + id, "resource": map[string]any{"resourceType": "ClaimResponse", "id": "cr-" + id, "patient": map[string]any{"reference": "Patient/" + id}}},
+			map[string]any{"fullUrl": "https://payer.test/fhir/Patient/" + id, "resource": map[string]any{"resourceType": "Patient", "id": id, "identifier": []any{map[string]any{"system": "http://example.org/MIN", "value": min}}}},
+		}}
+	}
+	answer := func(bs ...map[string]any) []byte {
+		var params []any
+		for _, b := range bs {
+			params = append(params, map[string]any{"name": "return", "resource": b})
+		}
+		raw, _ := json.Marshal(map[string]any{"resourceType": "Parameters", "parameter": params})
+		return raw
+	}
+	one, two := answer(bundle("p", "1"), bundle("q", "1")), answer(bundle("p", "1"), bundle("q", "2"))
+	if !ConsistentPASInquiryAnswerSubjects(one) || ConsistentPASInquiryAnswerSubjects(two) {
+		t.Fatalf("one patient %v, two patients %v", ConsistentPASInquiryAnswerSubjects(one), ConsistentPASInquiryAnswerSubjects(two))
+	}
+	if got, want := ConsistentPASInquiryAnswerSubjects(two), consistentPASInquiryAnswerSubjects(two); got != want {
+		t.Fatal("the export is not the leg's rule")
+	}
+}
+
+// The response graph rule holds for a Bundle with no ClaimResponse as for one
+// with: a collection, every entry a resource under an absolute fullUrl, every
+// reference resolving.
+func TestCheckNativePASGraphWithoutClaimResponse(t *testing.T) {
+	encode := func(b map[string]any) []byte { raw, _ := json.Marshal(b); return raw }
+	patient := func() map[string]any {
+		return map[string]any{"fullUrl": "https://payer.test/fhir/Patient/p", "resource": map[string]any{"resourceType": "Patient", "id": "p"}}
+	}
+	bundle := func(typ string, entries ...any) map[string]any {
+		return map[string]any{"resourceType": "Bundle", "type": typ, "entry": entries}
+	}
+	if err := CheckNativePASGraphWithoutClaimResponse(encode(bundle("collection", patient()))); err != nil {
+		t.Fatalf("a closed Bundle: %v", err)
+	}
+	dangling := patient()
+	dangling["resource"].(map[string]any)["managingOrganization"] = map[string]any{"reference": "Organization/o"}
+	for name, b := range map[string][]byte{
+		"a ClaimResponse":      encode(assemblySmallGraph()),
+		"not a collection":     encode(bundle("searchset", patient())),
+		"an entry no fullUrl":  encode(bundle("collection", map[string]any{"resource": map[string]any{"resourceType": "Patient", "id": "p"}})),
+		"an entry no resource": encode(bundle("collection", map[string]any{"fullUrl": "https://payer.test/fhir/Patient/p"})),
+		"a dangling reference": encode(bundle("collection", dangling)),
+		"no entry":             encode(bundle("collection")),
+	} {
+		if CheckNativePASGraphWithoutClaimResponse(b) == nil {
+			t.Errorf("%s: read", name)
+		}
+	}
+	if holder, element, reference, ok := NativePASUnresolvedReference(encode(bundle("collection", dangling))); !ok || holder != "Patient" || element != "/managingOrganization" || reference != "Organization/o" {
+		t.Fatalf("the dangling reference named %q %q %q %v", holder, element, reference, ok)
+	}
+}

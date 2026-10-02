@@ -224,6 +224,35 @@ network, at every conformance level. There is nothing to configure:
 
   A read of your system of record that a `strict` check needed and could not
   make refuses as that check's conformance refusal, counted in `calls`.
+- From shn-gateway v0.61.0, on a leg from the network, `stages` says where the
+  leg's time went, in milliseconds:
+  - `unwrapMs`: verifying the leg and opening its envelope, up to its
+    dispatch (for a leg refused before it, the call's time in no other stage);
+  - `readsMs`: every read of your own system (your system of record and your
+    CDS service listing);
+  - `forwardMs`: every call forwarding the operation to your system;
+  - `validateMs`: the `$validate` checks the answer waits for (at `observe`
+    a check that only records runs after the answer: only queueing it is
+    counted, and its own time is its finding's `validatorMs`);
+  - `sealMs`: sealing the answer and authorizing it with the Authorization
+    Framework, the tokens for the other patients the answer involves and the
+    answer's diagnostic capture included;
+  - `ledgerMs`: the pend ledger's work: its lookups, the claim an update
+    takes (and its release when the update is not recorded), an inquiry's
+    effect derived from the payer's answer, and its writes;
+  - `writeMs`: handing the answer to the HTTP server (a small answer reaches
+    the Hub after the call is recorded).
+
+  The stages do not overlap, and their sum is at most `latencyMs`; the rest
+  is the gateway's own handling between them. Durations only.
+- From shn-gateway v0.61.0, when the answer to a leg (your system's, or this
+  gateway's own refusal) could not be authorized, the requester is still
+  answered `502 authorization failed`, and the access line's `answerError`
+  says why: `cancelled` (the request ended first: the requester had gone),
+  `timeout` (the authorize call ran out of time), `auth` (the Authorization
+  Framework denied it), `unreachable` (it never answered) or `other`. The
+  gateway also logs `gateway: <exchange> answer not authorized: <class>
+  (correlation <leg id>)`.
 - `findings` counts the conformance findings the call's checks recorded; each
   finding keeps its own `gateway: conformance:` line. From v0.60.0, at `observe`
   the line carries `"deferred": true` instead of a count (`count` reads 0 and
@@ -231,12 +260,56 @@ network, at every conformance level. There is nothing to configure:
   ends would be partial. `refused` is still carried, because a check that refuses
   is judged before the answer at every level. Read the call's findings from its
   `conformance:` lines, by its correlation id.
+  From v0.61.0 a finding from a check that called the validator carries
+  `validatorMs`: the time its `$validate` calls took, every line tried
+  together (an outage's included, up to its failure), and each entry of its
+  `lines` carries `ms`, that line's own call's time, so a line's lane is timed
+  apart from the others. Each is rounded down to whole milliseconds on its
+  own and left out when that is 0, so the lines' `ms` need not add up to
+  `validatorMs`.
+  `validatorMs` is always a finding's whole check; `ms` is always one
+  `$validate` call, here and on a `crd.embedded.validated` observation.
+  At `observe` this is the check's time after the answer, which the leg's
+  `stages` do not hold.
 - `requestCiphertextHash` and `responseCiphertextHash` are the hashes the
   network's audit records carry for the same leg.
+- `relayEdits` (from v0.61.0) names the registered edits this gateway made to
+  the bytes it sent on the leg, by id (`E-01` …), in the order made, each once:
+  on a call from your own system, the request as sent to the network (for
+  example `["E-01","E-07"]`: `fhirServer` and `fhirAuthorization` removed, and
+  the coverage read through `fhirServer` carried); on a leg from the network,
+  the request as forwarded to your system (`["E-03"]`: your payer identity
+  mapped). Only the ids: never a value an edit removed or wrote. The ids are
+  named once the request has left the gateway: the receiver answered (with
+  anything, a refusal included), or the connection failed after the request
+  was written. A request that was never sent names none: one refused before it
+  was sent (by routing, or by the network's authorization), one whose
+  connection could not be made, or one whose bearer token could not be
+  obtained. A leg whose message was carried exactly has no `relayEdits` key.
+- With diagnostic collection configured, the captured request names the ids it
+  was built with, as its `Detail`, before it is sent: `leg.sealed` once the
+  request is sealed, before the network's authorization is asked, and
+  `native.request` just before the forward to your system. So a captured
+  request can name edits its access line does not: a leg the network's
+  authorization denies, or a forward that never reached your system.
+- `hubDelivered` (from v0.61.0), on a call from your own system whose leg the
+  Hub answered with an error, is the Hub's own word on whether the
+  recipient's gateway received the leg, from the `X-SHN-Delivered` header on
+  that answer: `no` (the Hub refused before forwarding, or the recipient's
+  gateway was not reached or refused the leg at its edge), `yes` (the
+  recipient's gateway answered, and its answer was lost on the way back), or
+  `unknown` (it may have received the leg: it answered 5xx, the connection
+  failed after the request was sent, or it did not answer in time). The key
+  is absent when the leg drew no error answer from the Hub itself: for
+  example, it was answered, it never reached the Hub, no answer came back
+  from the Hub, or the error came from something in front of the Hub. This
+  gateway never infers it. When a call makes more than one leg, it is the
+  last leg's; a leg from the network never carries it.
 
 A line never carries a message body or a patient identifier; of the header
-values it saw, it carries only your caller's own `trace` and, on the
-provider test endpoint, its verified call id.
+values it saw, it carries only your caller's own `trace`, on the provider
+test endpoint its verified call id, and, from v0.61.0, the Hub's
+`X-SHN-Delivered` as `hubDelivered` (only as `no`, `yes` or `unknown`).
 The full field list is `diagnostics.AccessLine` (see [STABILITY.md](../STABILITY.md),
 "Access lines"). With optional diagnostic collection configured (below), each
 line is also published there.
@@ -564,14 +637,17 @@ Requirements Discovery), `Questionnaire/$questionnaire-package` (DTR), `Claim/$s
 authorization it pended) — and forwards them through to the Hub. A CDS Hooks request is forwarded as your EHR
 sent it, with `fhirServer` and `fhirAuthorization` removed; the payer never gets a callback
 into your systems. By default the gateway itself reads your EHR's FHIR server through
-`fhirServer` in two cases only, both only to choose the payer, and carries nothing it reads: a
-request with no coverage to route by, for a member your system of record does not hold (a
-Coverage search, and at most one read of its payor Organization; see
-[Reading the coverage through `fhirServer`](#reading-the-coverage-through-fhirserver)), and a
-coverage your EHR sent that names its payor Organization by reference alone, which the request
-does not resolve, for any member: unless that `fhirServer` is your system of record's own FHIR
-base and your system resolves it (one read of that Organization; see
-[CDS Hooks prefetch](#cds-hooks-prefetch)). Set `CDS_FHIR_SERVER_READ=off` to turn both off. By default nothing is added to a request your EHR sends: set
+`fhirServer` in two cases only, both to choose the payer: a request with no coverage to route
+by, for a member your system of record does not hold (a Coverage search, and at most one read
+of its payor Organization; from v0.61.0 the records the payer was chosen by are then carried
+as the request's `prefetch.coverage`, since the payer cannot read them once `fhirServer` is
+removed; see [Reading the coverage through `fhirServer`](#reading-the-coverage-through-fhirserver)),
+and a coverage your EHR sent that names its payor Organization by reference alone, which the
+request does not resolve, for any member: unless that `fhirServer` is your system of record's
+own FHIR base and your system resolves it (one read of that Organization, only to choose the
+payer and never carried; see [CDS Hooks prefetch](#cds-hooks-prefetch)). Set
+`CDS_FHIR_SERVER_READ=off` to turn both off; then nothing is read or carried. Apart from that
+carried coverage, nothing is added to a request your EHR sends by default: set
 `ENRICH_NATIVE_REQUESTS=true` to have the gateway add what a request leaves out from
 **your own system of record** (see [CDS Hooks prefetch](#cds-hooks-prefetch) and the
 `$questionnaire-package` Coverage and Patient below).
@@ -633,7 +709,9 @@ the template's search), as without the opt-in; it is refused as above only when 
 fails too (see
 [Payer backend identity mapping](#payer-backend-identity-mapping) for what that means for a
 payer that maps its identity). An appended Coverage must name the patient the request names,
-so under the opt-in a system that names the patient by another id is refused (422). Also
+so when your system names the patient by another id nothing is appended: from v0.61.0 the
+request is routed by the read that chooses the payer, under your system's own id, exactly as
+without the opt-in (before v0.61.0 it was refused, 422). Also
 under the opt-in, when the request carries no Patient for the patient anywhere in its
 parameters and your system of record holds the patient under the id the request names, the
 gateway appends that Patient, exactly as your system returned it,
@@ -715,8 +793,8 @@ asked, so give each authorization its own Claim correlation.
 | `PROVIDER_DAVINCI_INGRESS` | Set to `1` to mount the ingress on the provider gateway. |
 | `PROVIDER_DAVINCI_INGRESS_BASE_URL` | The gateway's public base URL — the SMART audience the gateway pins and the token endpoint it advertises. **Required** when the ingress is enabled. |
 | `INGRESS_CLIENTS_FILE` | Path to a JSON array of registered inbound clients: `[{"client_id":"…","alg":"ES384","public_key_pem":"-----BEGIN PUBLIC KEY-----…","scopes":["system/Davinci.write"]}]`. **Required** (≥1 client) when the ingress is enabled. |
-| `CDS_FHIR_SERVER_READ` | `private`, `public` or `off`; unset means `private`. How the gateway reads, only to choose the payer, through a CDS Hooks request's own `fhirServer`: the Coverage when the request carries none and your system of record does not hold the member (see [Reading the coverage through `fhirServer`](#reading-the-coverage-through-fhirserver)), and the payor Organization a coverage your EHR sent names by reference alone when the request does not resolve it, for any member, unless the request's `fhirServer` is your system of record's own FHIR base and your system resolves it (see [CDS Hooks prefetch](#cds-hooks-prefetch)). `private` (the default) reads an `https` server in your own network or on the internet, never a loopback, link-local, metadata or reserved address; `public` reads only an `https` server on port 443 at a public address; `off` never calls `fhirServer`. Any other value refuses to boot, and so does a value other than `off` set without `PROVIDER_DAVINCI_INGRESS` (unset needs no ingress). A gateway SHN hosts runs `public`, or `off` if you set it (see the section). |
-| `ENRICH_NATIVE_REQUESTS` | `true` or `false`; unset means `false`. By default a Da Vinci request your EHR sends is carried as sent (apart from the CDS Hooks callback, which is always removed): nothing is added to it. Set `true` to have the gateway add what a request leaves out, read from your own system of record: each advertised CDS Hooks prefetch value (see [CDS Hooks prefetch](#cds-hooks-prefetch)), and the patient's Coverage and Patient on a `$questionnaire-package` request that carries none. Either way, a coverage a request leaves out is read from your system of record to choose the payer (or, unless `CDS_FHIR_SERVER_READ=off`, through the request's own `fhirServer` for a member that system does not hold). Requests the gateway builds itself (`ORIGINATION_PROFILE`) are not affected. Any other value refuses to boot. |
+| `CDS_FHIR_SERVER_READ` | `private`, `public` or `off`; unset means `private`. How the gateway reads, to choose the payer, through a CDS Hooks request's own `fhirServer`: the Coverage when the request carries none and your system of record does not hold the member (from v0.61.0 what that read routed by is carried as the request's `prefetch.coverage`; see [Reading the coverage through `fhirServer`](#reading-the-coverage-through-fhirserver)), and the payor Organization a coverage your EHR sent names by reference alone when the request does not resolve it, for any member, unless the request's `fhirServer` is your system of record's own FHIR base and your system resolves it (see [CDS Hooks prefetch](#cds-hooks-prefetch)). `private` (the default) reads an `https` server in your own network or on the internet, never a loopback, link-local, metadata or reserved address; `public` reads only an `https` server on port 443 at a public address; `off` never calls `fhirServer`, and carries nothing. Any other value refuses to boot, and so does a value other than `off` set without `PROVIDER_DAVINCI_INGRESS` (unset needs no ingress). A gateway SHN hosts runs `public`, or `off` if you set it (see the section). |
+| `ENRICH_NATIVE_REQUESTS` | `true` or `false`; unset means `false`. By default a Da Vinci request your EHR sends is carried as sent (apart from the CDS Hooks callback, which is always removed, and, from v0.61.0, the coverage read through that callback's `fhirServer` to route by, which is then carried): nothing else is added to it. Set `true` to have the gateway add what a request leaves out, read from your own system of record: each advertised CDS Hooks prefetch value (see [CDS Hooks prefetch](#cds-hooks-prefetch)), and the patient's Coverage and Patient on a `$questionnaire-package` request that carries none. Either way, a coverage a request leaves out is read from your system of record to choose the payer (or, unless `CDS_FHIR_SERVER_READ=off`, through the request's own `fhirServer` for a member that system does not hold). Requests the gateway builds itself (`ORIGINATION_PROFILE`) are not affected. Any other value refuses to boot. |
 
 Enabling the ingress without a base URL or at least one valid registered client is a
 hard startup error.
@@ -792,11 +870,14 @@ For each key:
   one whose `prefetch.coverage` is `null`, or for whose member your system holds no Coverage,
   is refused `412 no coverage in request or system of record`. One that leaves out the coverage
   of a member your system does not hold has nothing there to be routed by: by default its
-  coverage is read through the request's own `fhirServer` instead, only to route (see
+  coverage is read through the request's own `fhirServer` instead, to route by, and from
+  v0.61.0 carried as `prefetch.coverage` once the request is routed (see
   [Reading the coverage through `fhirServer`](#reading-the-coverage-through-fhirserver)), and a
   request that names no `fhirServer` is refused with `412 no coverage to route by: send
   prefetch.coverage or fhirServer (this gateway's system of record names no patient for this
-  member)`. The payer then receives a request without the
+  member)`. A coverage read through `fhirServer` is carried to the payer from v0.61.0 (see
+  that section); a coverage read from your system of record is not. Otherwise the payer
+  receives a request without the
   coverage, as it would from your EHR directly; a payer's gateway that runs `strict` refuses
   such a request (`400`), and its answer is relayed to your EHR. So send every prefetch value
   you want the payer to see.
@@ -847,7 +928,14 @@ For each key:
   level, `502 system of record returned another patient's resource` for one your system of
   record returned, and nothing is sent. Absolute references on your EHR's `fhirServer` are read like relative ones, both here
   and when the request's patient references (`context.patientId`, each draft order's subject,
-  each prefetch resource's patient) are bound to one patient.
+  each prefetch resource's patient) are bound to one patient. From shn-gateway v0.61.0 one
+  other person's record passes this check: a dependent's Coverage may name the parent, its
+  `subscriber` or `policyHolder`, as a contained `Patient` (carrying an MRN, or the parent's
+  own member identifier). It is part of the Coverage and is carried with it byte for byte; the
+  Coverage's `beneficiary` must still be the request's patient, the contained Patient must be
+  referenced by those two slots' own references only, and it may contain nothing. It is never
+  read as the patient: a gateway deriving the identity of a member its system of record does not
+  hold reads the member's own Patient.
 - **No opaque content.** A `Binary` resource (a value, a Bundle entry or a contained
   resource) is never added to a prefetch value: `502 system of record returned a Binary
   resource` at every level when your system of record returned it. One your EHR sent is
@@ -911,13 +999,21 @@ For each key:
     does not, since that resolves `Organization/<id>` only;
   - any other reference to an Organization (versioned, with a fragment, a leading slash or a
     dot segment): `422 no payer identifier on member coverage: Coverage.payor is a reference to
-    an Organization the gateway does not read; send a payor identifier with the coverage`.
+    an Organization the gateway does not read; send a payor identifier with the coverage`;
+  - from shn-gateway v0.61.0, a `urn:uuid:` or `urn:oid:` reference: `422 no payer identifier
+    on member coverage: Coverage.payor is a urn reference no Bundle entry's fullUrl matches;
+    send the payor Organization as a Bundle entry whose fullUrl is that reference, or a payor
+    identifier`.
 
-  A payor that is not a reference to an Organization (a `RelatedPerson`, a `Patient`) keeps
-  the bare `422 no payer identifier on member coverage`, and so does an Organization that was
-  resolved but carries no payer identifier. Every one of these refusals is `no payer
-  identifier on member coverage`, `: ` and the reason, as a PAS Bundle's is ("A PAS Bundle's
-  payor", under [Per-role](#per-role)); only the last three add a remedy, after the reason.
+  A payor of another kind that nothing resolves (a `RelatedPerson`, a `Patient`) keeps the
+  bare `422 no payer identifier on member coverage`. From shn-gateway v0.61.0 a payor
+  reference that resolved, wherever it was read, to a resource naming no payer identifier is
+  refused with its reason: `the payor Organization carries no identifier with both a system
+  and a value, such as a NAIC code or payer id`, or `Coverage.payor references a resource
+  that is not an Organization` (v0.60.0 answers the bare text). Every one of these refusals is
+  `no payer identifier on member coverage`, `: ` and the reason, as a PAS Bundle's is ("A PAS
+  Bundle's payor", under [Per-role](#per-role)); only the references nothing resolved add a
+  remedy, after the reason.
   Under the earlier templates `_include=Coverage:payor`
   brought the Organization with the coverage, so such a request was routed with no read. Now
   it is routed only when your system of record resolves the payor as above or the `fhirServer`
@@ -950,14 +1046,21 @@ the patient's network member id, and the request's own patient references (the o
 subject, the coverage's beneficiary) must use it. Values from your system of record name the
 patient by your server's own Patient id, so the gateway adds values only when that id is the
 member id. (By default nothing is added, and the coverage read to route by is searched under
-your server's own Patient id, so this limitation does not apply.) When your server (as your
-connector reports it) names the patient differently:
+your server's own Patient id, so this limitation does not apply.) The opt-in never leaves a
+member with less to route by than the default; a prefetch value it cannot fill is decided by
+`strict` (below). When your server (as your connector reports it)
+names the patient differently:
 
-- a request that leaves out `coverage` is refused before anything is read or sent, at every
-  level (the request is routed by its coverage): `422 system of record names the patient
-  differently from context.patientId; supply patient and coverage prefetch in the request`.
-  One that carries its coverage and leaves out `patient` is refused the same way at
-  enforcement `strict`, and below `strict` is sent without it;
+- a request that leaves out `coverage` is routed as without the opt-in (from v0.61.0; before,
+  it was refused `422`): the coverage is searched under your server's own Patient id, only to
+  choose the payer, and is not added to the request. A Coverage that search returns about
+  another patient (one naming `Patient/<member id>`, which on your server is another patient)
+  is refused `502`, as without the opt-in;
+- a request that leaves out `patient` is refused before anything is read or sent at
+  enforcement `strict`: `422 system of record names the patient differently from
+  context.patientId; supply the patient prefetch in the request` (before v0.61.0 the text
+  ended `supply patient and coverage prefetch in the request`). Below `strict` it is sent
+  without it, and its coverage, if it leaves that out too, is read to route by as above;
 - a history key the request leaves out is left out; nothing is searched, and the
   `prefetch.obtained` event records the outcome `not-run` with the reason `patient named
   differently in the system of record`. The request is sent.
@@ -1002,15 +1105,19 @@ active ones, or, when none is active, several others) refuses the request (422).
 A CDS Hooks request that carries no `prefetch.coverage`, for a member your system of record
 does not hold, has nothing in your system to route by. By default the gateway then reads that
 member's coverage through the EHR FHIR server the request names (`fhirServer`, with its
-`fhirAuthorization` token), as a CRD service your EHR called directly would, only to choose the
-payer. Nothing it reads is carried. `CDS_FHIR_SERVER_READ` sets where it may read, or turns the
-read off:
+`fhirAuthorization` token), as a CRD service your EHR called directly would, to choose the
+payer. Because `fhirServer` and `fhirAuthorization` are removed before the network, the payer
+cannot read that coverage itself, so from v0.61.0 the gateway carries the records the payer was
+chosen by as the request's `prefetch.coverage` (registered edit E-07; before v0.61.0 nothing it
+read was carried, and a payer that needs the coverage, such as the Da Vinci reference payer,
+answered `400`). `CDS_FHIR_SERVER_READ` sets where it may read, or turns the read off, and then
+nothing is read or carried:
 
 | Value | What the gateway reads |
 |---|---|
 | `private` (the default; unset is the same) | An `https` server in your own network or on the internet: on any port at a private address (RFC 1918, IPv6 unique-local, carrier-grade NAT and the like), on port 443 at a public one. Never an address no mode reads: loopback, link-local (the cloud metadata and credential endpoints `169.254.169.254` and `169.254.170.2` included), `fd00:ec2::254`, `fd00:ec2::23`, `fd20:ce::254`, `100.100.100.200`, unspecified, multicast, broadcast, `0.0.0.0/8`, `240.0.0.0/4`, `::/96`, a zoned address, or a NAT64 or 6to4 address embedding any of these. |
 | `public` | Only an `https` server on port 443 at a public address: never a private, carrier-grade NAT, documentation or benchmarking address, nor any of the above. For a gateway whose own network is not its participant's: every gateway SHN hosts or runs uses it. |
-| `off` | Nothing: the gateway never calls `fhirServer`, and such a request is refused `412 no coverage to route by: send prefetch.coverage (this gateway's system of record names no patient for this member, and it does not read fhirServer)`. |
+| `off` | Nothing: the gateway never calls `fhirServer`, carries nothing, and such a request is refused `412 no coverage to route by: send prefetch.coverage (this gateway's system of record names no patient for this member, and it does not read fhirServer)`. |
 
 Any other value refuses to boot, and so does `private` or `public` set without
 `PROVIDER_DAVINCI_INGRESS` (left unset, the key needs no ingress). With the read on, a request
@@ -1025,7 +1132,7 @@ for this member, and it does not read fhirServer)`.
 the tenant's key to `off`, never to `private`. Gateway releases before v0.60.0 ignore the key and
 never read `fhirServer`.
 
-- **A Coverage search, only to route.** `GET {fhirServer}/Coverage?patient={context.patientId}`
+- **A Coverage search, to route by.** `GET {fhirServer}/Coverage?patient={context.patientId}`
   (no status filter, and no `_include`: CDS Hooks does not ask a client to support it; one page) with
   `Accept: application/fhir+json`, and `Authorization: Bearer <access_token>` when the
   request carries `fhirAuthorization` (its `token_type` must be `Bearer`, its `access_token`
@@ -1049,8 +1156,38 @@ never read `fhirServer`.
   is an Organization that carries no payer identifier. (The same single read resolves the
   payor of a coverage your EHR sent; see [CDS Hooks prefetch](#cds-hooks-prefetch).) So your FHIR server must allow a
   Coverage search and an Organization read with the token.
-- **Nothing read is carried.** The request is sent as your EHR sent it, with `fhirServer` and
-  `fhirAuthorization` still removed; the payer never sees either read or its answer.
+- **What routing used is carried (from v0.61.0).** Once the request is routed, the gateway
+  adds `prefetch.coverage` (creating `prefetch` when the request has none): a `searchset` it
+  writes, with a `match` entry for each Coverage the payer was chosen by (the active ones, else
+  all of them, in your server's order) and an `include` entry for the payor Organization the
+  payer was chosen by for each of them (the first payor, as routing reads it; one with a payor
+  identifier of its own needs none), whether your server's search returned it or the gateway
+  read it. Each
+  resource is exactly the bytes your server returned; each entry's `fullUrl` is a `urn:uuid:`
+  the gateway assigns, with one exception: an included Organization that a carried Coverage
+  names by an absolute reference on the request's `fhirServer` base (compared with the scheme
+  and host lowercased, the default port dropped and a trailing slash trimmed) has that
+  reference, exactly as the Coverage writes it, as its `fullUrl`, so the payer resolves it
+  in the `searchset` (the reference is already in the Coverage's own bytes). A record has at
+  most one such reference: a search entry answers an absolute reference only when its `fullUrl`
+  is that reference, and the Organization read only the reference written on the `fhirServer`
+  base itself, so two chosen Coverages that write the Organization's address differently each
+  resolve their own record, and both are carried, each under the reference that resolved it.
+  If your server's entry addresses use another base than the `fhirServer` URL it hands out, a
+  Coverage whose absolute payor reference is on that other base has its Organization carried
+  under a `urn:uuid:`, which that reference does not resolve: the payer may answer `400` (or
+  `422` from a payer gateway that maps its identity), where v0.60.0 carried no coverage. `total`
+  is the number of Coverages. The records are byte for byte, so any reference a record holds (an absolute
+  one on your server included) is carried as written. Nothing else of your server's answer
+  is carried: not its links, its entry addresses (`fullUrl`s on your server), its Bundle `id` or
+  `meta`, nor its `OperationOutcome` entries, nor a Coverage that was not chosen or an
+  Organization only such a Coverage names. Everything carried passes the same patient check as
+  the read: another patient's record is never carried. The rest of the request is your EHR's,
+  byte for byte, with `fhirServer` and `fhirAuthorization` still removed. A request refused
+  while routing carries nothing and is not sent. A request that carries a `coverage` prefetch
+  key, even `null`, is never given another, and a coverage your system of record supplied, or
+  the payor Organization read for a coverage your EHR sent, is never carried this way. Before
+  v0.61.0 nothing read was carried.
 - **Checked in every mode.** An `https` base URL with no query, fragment or credentials, and
   a port from 1 to 65535 when it names one; the mode's address rules applied to an address
   literal, to every address the host resolves to, and again to the address the connection is
@@ -1103,7 +1240,7 @@ Organization by reference alone`):
 | `fhirServer's answer exceeds 512 KiB` | 412 |
 | `fhirServer refused the fhirAuthorization token` (a `401` or `403`) | 412 |
 | `fhirServer answered with an error` (any other status but `200`, a `404` on the Coverage search included) | 412 |
-| `fhirServer's answer is not a Coverage searchset` (not JSON, not a `searchset` Bundle, an entry that is not a Coverage, Organization or OperationOutcome, or one the patient check cannot use, such as a repeated `fullUrl`, a contained resource with no `id`, or a patient it cannot identify as the request's) | 412 |
+| `fhirServer's answer is not a Coverage searchset` (not JSON, not a `searchset` Bundle, an entry that is not a Coverage, Organization or OperationOutcome, or one the patient check cannot use, such as a repeated `fullUrl`, a contained resource with no `id`, or a patient it cannot identify as the request's; from shn-gateway v0.61.0 a dependent's Coverage naming the parent as a contained `Patient` in its `subscriber` or `policyHolder` only is used) | 412 |
 | `fhirServer holds no Coverage for the patient` | 412 |
 | `fhirServer holds no Organization for the coverage's payor` (a `404` or `410` on the Organization read) | 412 |
 | `fhirServer returned another patient's coverage` (a Coverage whose patient reference names another patient: another `Patient` id, or the member identifier with another member's value) | 502 |
@@ -1222,7 +1359,8 @@ media type your system sent (`application/json` when it sent none); the provider
 returns it to the EHR as `application/json`, the CDS Hooks media type. Coverage information belongs in a system
 action that updates the order; each FHIR resource your answer embeds is also validated at the
 routed CRD line, but only to record the outcome (the `crd.embedded.validated` observation,
-at `observe` and `strict`): it never changes or refuses your answer. A non-2xx answer is relayed as your system's error.
+at `observe` and `strict`; from v0.61.0 it carries `ms`, the time the `$validate` call took): it
+never changes or refuses your answer. A non-2xx answer is relayed as your system's error.
 
 **Exactly-one-mode rule:** if `PAYER_DAVINCI_TOKEN_URL` is set, then
 `PAYER_DAVINCI_CLIENT_ID` must also be set, plus exactly one credential mode —
@@ -1325,8 +1463,11 @@ present but not a JSON object, a coverage Bundle with any other entry, and a req
 only Coverage is outside `prefetch.coverage` are refused with the 400 above. Releases
 before v0.60.0 refused such a CDS Hooks request with that 400
 (`inbound Coverage carries no resolvable payor identifier`). A requester's gateway sends one
-when it chose your gateway by a Coverage it read only to route (its own system of record, or
-from v0.60.0 the EHR's `fhirServer`) and carried nothing it read. A DTR request with no
+when it chose your gateway by a Coverage it read only to route (its own system of record, or,
+from v0.60.0 and before v0.61.0, the EHR's `fhirServer`) and carried nothing it read. From
+v0.61.0 a coverage the requester's gateway read through the EHR's `fhirServer` is carried as a
+`searchset` with `urn:uuid:` entries (an included Organization that a Coverage names by an
+absolute reference has that reference as its `fullUrl`), which your gateway maps like any other. A DTR request with no
 coverage parameter is forwarded as it arrived too. Your conformance level still applies:
 an `order-select` or `order-sign` request whose coverage beneficiary cannot be read is the
 request's own shape, refused at `structural` and `strict` and carried below.
@@ -1476,7 +1617,9 @@ answer about the request, and a frame-capable requester receives it with that st
 body. So is any `4xx` it writes about **its own participant's answer** after that system
 answered: an answer that repeats a member name (`403`, at every level), and at enforcement
 `strict` a PAS response whose patient linkage is inconsistent or that names another
-patient (`403`), a questionnaire package that carries a subject (`403`), or an answer that
+patient (`403`; from v0.61.0 the parent a dependent's Coverage entry names as a contained
+`Patient` in its `subscriber` or `policyHolder` is part of that Coverage, not another
+patient), a questionnaire package that carries a subject (`403`), or an answer that
 fails validation (`422`) — the recipient's gateway will not relay it, and the requester
 reads why. Below `strict` those answers are relayed as sent (recorded as a finding at
 `observe`). As of v0.54.0 so are the recipient gateway's **own failures** once the leg is
@@ -1944,7 +2087,9 @@ Request handlers enqueue to a bounded queue (4,096 observations, 64 MiB retained
 8 MiB maximum retained body per event). Each publication attempt has a bounded
 30-second ownership window so evidence waiting for another source's prerequisite
 can arrive without holding a request open. HTTP capture separately limits concurrent
-buffering and marks unread, aborted, limited or failed bodies partial. Publishing
+buffering and marks unread, aborted, limited or failed bodies partial. A body the
+capture limits left out or cut says so in the observation's `detail` (`body not
+kept: capture budget`, `body capture partial: capture budget`; see STABILITY.md). Publishing
 runs in the background with bounded retries; overload and collector failures can
 leave gaps, and each heartbeat counts how every observation left the queue
 (acknowledged, discarded, or dropped by reason).

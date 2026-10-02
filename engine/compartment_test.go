@@ -91,7 +91,9 @@ func TestPatientFence_Refuses(t *testing.T) {
 		"sibling parent patient": `{"resourceType":"Bundle","type":"searchset","entry":[` +
 			`{"resource":{"resourceType":"Coverage","id":"c","beneficiary":{"reference":"Patient/p1"},"subscriber":{"reference":"urn:uuid:66666666-6666-6666-6666-666666666666"}}},` +
 			`{"fullUrl":"urn:uuid:66666666-6666-6666-6666-666666666666","resource":{"resourceType":"Patient","id":"parent","identifier":[{"system":"urn:shn:member","value":"MBR-2"}]}}]}`,
-		"contained parent patient": `{"resourceType":"Coverage","id":"c","contained":[{"resourceType":"Patient","id":"parent"}],"beneficiary":{"reference":"Patient/p1"},"subscriber":{"reference":"#parent"}}`,
+		// A Coverage's party is carried only when its subscriber or
+		// policyHolder alone references it (TestPatientFence_CoverageParty).
+		"contained parent patient referenced elsewhere": `{"resourceType":"Coverage","id":"c","contained":[{"resourceType":"Patient","id":"parent"}],"beneficiary":{"reference":"Patient/p1"},"subscriber":{"reference":"#parent"},"payor":[{"reference":"#parent"}]}`,
 		// A Provenance is bound through its targets, each resolved in the
 		// same document and itself fenced.
 		"provenance, unresolvable target": `{"resourceType":"Provenance","id":"pv","target":[{"reference":"Observation/o"}],"recorded":"2026-09-17T00:00:00Z","agent":[{"who":{"reference":"Practitioner/dr"}}]}`,
@@ -289,5 +291,106 @@ func TestPatientFence_PrefetchRefusesBinary(t *testing.T) {
 				t.Fatalf("records fence: %v", err)
 			}
 		})
+	}
+}
+
+// depCoverage is a dependent's Coverage for the bound patient p1 whose parent
+// is a contained Patient carrying only an MRN, referenced from the slots
+// named (subscriber, policyHolder), plus any further members.
+func depCoverage(slots []string, extra string) string {
+	c := `{"resourceType":"Coverage","id":"c","contained":[{"resourceType":"Patient","id":"parent","identifier":[{"system":"urn:oid:1.2.3.4.5","value":"MRN-9"}],"name":[{"family":"Parent"}]}],` +
+		`"beneficiary":{"reference":"Patient/p1"},"relationship":{"coding":[{"code":"child"}]},"payor":[{"reference":"Organization/payer"}]`
+	for _, s := range slots {
+		c += `,"` + s + `":{"reference":"#parent"}`
+	}
+	return c + extra + `}`
+}
+
+// A Coverage's party, a contained Patient that only the Coverage's
+// subscriber or policyHolder references (by the slot's own reference),
+// whatever identifiers it carries, is carried as part of the Coverage: its
+// identity is not checked, but it is fenced as any contained resource
+// otherwise is. The beneficiary still binds the Coverage, and a contained
+// RelatedPerson is bound by its own patient reference.
+func TestPatientFence_CoverageParty(t *testing.T) {
+	allows := map[string]string{
+		"subscriber only":   depCoverage([]string{"subscriber"}, ""),
+		"policyHolder only": depCoverage([]string{"policyHolder"}, ""),
+		"both slots":        depCoverage([]string{"subscriber", "policyHolder"}, ""),
+		"in a searchset":    `{"resourceType":"Bundle","type":"searchset","entry":[{"resource":` + depCoverage([]string{"subscriber", "policyHolder"}, "") + `}]}`,
+		// A contained parent with no identifier at all, the subscriber's.
+		// The parent's own member identifier does not make it the patient.
+		"a parent carrying another member's identifier": strings.Replace(depCoverage([]string{"subscriber"}, ""), `{"system":"urn:oid:1.2.3.4.5","value":"MRN-9"}`, `{"system":"urn:shn:member","value":"MBR-2"}`, 1),
+		"a parent with no identifier":                   `{"resourceType":"Coverage","id":"c","contained":[{"resourceType":"Patient","id":"parent"}],"beneficiary":{"reference":"Patient/p1"},"subscriber":{"reference":"#parent"}}`,
+		// A parent RelatedPerson is bound by its own patient reference.
+		"a RelatedPerson naming the dependent": `{"resourceType":"Coverage","id":"c","contained":[{"resourceType":"RelatedPerson","id":"parent","patient":{"reference":"Patient/p1"}}],"beneficiary":{"reference":"Patient/p1"},"subscriber":{"reference":"#parent"}}`,
+		"a contained beneficiary beside it": strings.Replace(strings.Replace(depCoverage([]string{"subscriber"}, ""),
+			`"contained":[`, `"contained":[{"resourceType":"Patient","id":"me","identifier":[{"system":"urn:shn:member","value":"MBR-1"}]},`, 1),
+			`"beneficiary":{"reference":"Patient/p1"}`, `"beneficiary":{"reference":"#me"}`, 1),
+	}
+	for name, value := range allows {
+		t.Run("allows/"+name, func(t *testing.T) {
+			if err := testFence().forPrefetch().check([]byte(value)); err != nil {
+				t.Fatalf("refused: %v", err)
+			}
+		})
+	}
+	refuses := map[string]string{
+		"also the payor":        depCoverage([]string{"subscriber"}, `,"insurer":{"reference":"#parent"}`),
+		"also in payor's list":  strings.Replace(depCoverage([]string{"subscriber"}, ""), `"payor":[{"reference":"Organization/payer"}]`, `"payor":[{"reference":"#parent"}]`, 1),
+		"also the beneficiary":  strings.Replace(depCoverage([]string{"subscriber"}, ""), `"beneficiary":{"reference":"Patient/p1"}`, `"beneficiary":{"reference":"#parent"}`, 1),
+		"also in an extension":  depCoverage([]string{"subscriber"}, `,"extension":[{"url":"http://example.org/x","valueReference":{"reference":"#parent"}}]`),
+		"no slot references it": depCoverage(nil, ""),
+		// Another contained resource naming the parent, even where it binds
+		// nothing (an Observation's performer), makes it no party only.
+		"another contained refers":       strings.Replace(depCoverage([]string{"subscriber"}, ""), `"name":[{"family":"Parent"}]}]`, `"name":[{"family":"Parent"}]},{"resourceType":"Observation","id":"o","subject":{"reference":"Patient/p1"},"performer":[{"reference":"#parent"}]}]`, 1),
+		"beneficiary unbound":            strings.Replace(depCoverage([]string{"subscriber"}, ""), `"beneficiary":{"reference":"Patient/p1"}`, `"beneficiary":{"display":"Child"}`, 1),
+		"beneficiary another":            strings.Replace(depCoverage([]string{"subscriber"}, ""), `"beneficiary":{"reference":"Patient/p1"}`, `"beneficiary":{"reference":"Patient/p2"}`, 1),
+		"a standalone parent entry":      `{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"Coverage","id":"c","beneficiary":{"reference":"Patient/p1"},"subscriber":{"reference":"Patient/parent"}}},{"resource":{"resourceType":"Patient","id":"parent","identifier":[{"system":"urn:oid:1.2.3.4.5","value":"MRN-9"}]}}]}`,
+		"a RelatedPerson naming another": `{"resourceType":"Coverage","id":"c","contained":[{"resourceType":"RelatedPerson","id":"parent","patient":{"reference":"Patient/p2"}}],"beneficiary":{"reference":"Patient/p1"},"subscriber":{"reference":"#parent"}}`,
+		// Only a Coverage has a party: a member named like its slots on
+		// another resource is no slot.
+		"a slot-named member elsewhere": `{"resourceType":"Claim","id":"cl","contained":[{"resourceType":"Patient","id":"parent","identifier":[{"system":"urn:oid:1.2.3.4.5","value":"MRN-9"}]}],"patient":{"reference":"Patient/p1"},"subscriber":{"reference":"#parent"}}`,
+		// The party is still fenced as a contained resource: it contains
+		// nothing (no Binary, no other patient's record), and its identifiers
+		// are a list.
+		"a party containing a Binary":                 strings.Replace(depCoverage([]string{"subscriber"}, ""), `"name":[{"family":"Parent"}]}`, `"name":[{"family":"Parent"}],"contained":[{"resourceType":"Binary","id":"b","contentType":"application/pdf","data":"AA=="}]}`, 1),
+		"a party containing another patient's record": strings.Replace(depCoverage([]string{"subscriber"}, ""), `"name":[{"family":"Parent"}]}`, `"name":[{"family":"Parent"}],"contained":[{"resourceType":"Observation","id":"o","subject":{"reference":"Patient/p2"}}]}`, 1),
+		"a party whose identifier is not a list":      strings.Replace(depCoverage([]string{"subscriber"}, ""), `"identifier":[{"system":"urn:oid:1.2.3.4.5","value":"MRN-9"}]`, `"identifier":"junk"`, 1),
+		// Only the slot's own reference names a party: one deeper in the
+		// slot (an extension) is elsewhere.
+		"further patients named inside the slot": `{"resourceType":"Coverage","id":"c","contained":[{"resourceType":"Patient","id":"a"},{"resourceType":"Patient","id":"b","identifier":[{"system":"urn:shn:member","value":"MBR-2"}]}],"beneficiary":{"reference":"Patient/p1"},"subscriber":{"reference":"#a","extension":[{"url":"http://x","valueReference":{"reference":"#b"}}]}}`,
+		"the party also named inside its slot":   `{"resourceType":"Coverage","id":"c","contained":[{"resourceType":"Patient","id":"a"}],"beneficiary":{"reference":"Patient/p1"},"subscriber":{"reference":"#a","extension":[{"url":"http://x","valueReference":{"reference":"#a"}}]}}`,
+		"not a Coverage":                         `{"resourceType":"Claim","id":"cl","contained":[{"resourceType":"Patient","id":"parent","identifier":[{"system":"urn:oid:1.2.3.4.5","value":"MRN-9"}]}],"patient":{"reference":"Patient/p1"},"payee":{"party":{"reference":"#parent"}}}`,
+		"a non-Patient in the slot":              strings.Replace(depCoverage([]string{"subscriber"}, ""), `"resourceType":"Patient","id":"parent"`, `"resourceType":"Observation","id":"parent"`, 1),
+	}
+	for name, value := range refuses {
+		t.Run("refuses/"+name, func(t *testing.T) {
+			if err := testFence().forPrefetch().check([]byte(value)); err == nil {
+				t.Fatal("allowed")
+			}
+		})
+	}
+	// The beneficiary naming another patient is the Coverage's own refusal,
+	// the one the routing read answers 502 for, whatever the party.
+	var ce *CompartmentError
+	err := testFence().check([]byte(strings.Replace(depCoverage([]string{"subscriber", "policyHolder"}, ""), `"beneficiary":{"reference":"Patient/p1"}`, `"beneficiary":{"reference":"Patient/p2"}`, 1)))
+	if !errors.As(err, &ce) || ce.ResourceType != "Coverage" || ce.Reason != fenceAnotherPatientReference {
+		t.Fatalf("beneficiary naming another patient: %v", err)
+	}
+}
+
+// A facility's disclosed records are fenced without the party rule: a
+// Coverage's contained parent there is another patient, as before.
+func TestPatientFence_RecordsFencesCarryNoParty(t *testing.T) {
+	dep := depCoverage([]string{"subscriber"}, "")
+	if err := testFence().check([]byte(dep)); err != nil {
+		t.Fatalf("the prefetch fence refused a dependent's Coverage: %v", err)
+	}
+	if err := testFence().withoutParties().check([]byte(dep)); err == nil {
+		t.Fatal("a records fence carried a Coverage's contained parent")
+	}
+	if err := requesterRecordsFence("p1").check([]byte(dep)); err == nil {
+		t.Fatal("the requester's records fence carried a Coverage's contained parent")
 	}
 }

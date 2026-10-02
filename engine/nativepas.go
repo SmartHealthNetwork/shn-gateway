@@ -81,6 +81,8 @@ func (n *nativeResponder) handlePASClaimUpdateNative(ctx context.Context, corrID
 	claimed, why := false, pendRefusalNoPriorClaim
 	recordable := false
 	if related != "" {
+		// The pend ledger's reads and the claim it takes are its stage.
+		stopLedger := exchangeOf(ctx).stage(addLedger)
 		requester := requesterHolderOf(ctx)
 		if n.heldByAnotherRequester(subjectPCI, related, requester) {
 			// Another requester's authorization: never bound, never written.
@@ -92,6 +94,7 @@ func (n *nativeResponder) handlePASClaimUpdateNative(ctx context.Context, corrID
 			}
 			recordable = claimed || n.unboundRecordable(subjectPCI, related, requester)
 		}
+		stopLedger()
 	}
 	var release func() error
 	if claimed {

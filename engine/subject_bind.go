@@ -120,7 +120,9 @@ func carriesPatient(payload []byte, member string) bool {
 
 // forEachCarriedPatient calls fn for every Patient resource the request carries for the
 // member, at any depth. A Patient is the member's when its id or its member identifier is
-// the member id. An empty or unreadable request carries none.
+// the member id. A Coverage's party (shnsdk.CoverageParty: the parent a dependent's Coverage names
+// as a contained Patient in its subscriber or policyHolder) is another person, never the
+// member, whatever it carries. An empty or unreadable request carries none.
 func forEachCarriedPatient(payload []byte, member string, fn func(patient map[string]any)) {
 	var doc any
 	if len(payload) == 0 || json.Unmarshal(payload, &doc) != nil {
@@ -133,7 +135,19 @@ func forEachCarriedPatient(payload []byte, member string, fn func(patient map[st
 			if v["resourceType"] == "Patient" && patientIsMember(v, member) {
 				fn(v)
 			}
-			for _, child := range v {
+			for k, child := range v {
+				// A Coverage's party (shnsdk.CoverageParty, which answers for
+				// a Coverage only) is skipped; a contained that is not a list
+				// is walked whole.
+				if list, ok := child.([]any); ok && k == "contained" {
+					for _, c := range list {
+						if cr, ok := c.(map[string]any); ok && shnsdk.CoverageParty(v, cr) {
+							continue
+						}
+						walk(c)
+					}
+					continue
+				}
 				walk(child)
 			}
 		case []any:

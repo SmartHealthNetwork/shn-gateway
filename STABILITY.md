@@ -67,12 +67,17 @@ receives changes.
   participant's own system (its status, latency and error class). It never
   carries a message body or a patient identifier. The only header values it
   carries are the caller's own `X-Correlation-Id`, which the ingress accepts
-  only as one bounded token, and the call id of a verified `X-SHN-Test-Trace`
-  proof; a leg id a message chose (a PAS Claim's own `urn:shn:correlation`) is
+  only as one bounded token, the call id of a verified `X-SHN-Test-Trace`
+  proof, and, from v0.61.0, the Hub's `X-SHN-Delivered` on its error answer
+  to a leg (`HubDelivered`, only as `no`, `yes` or `unknown`); a leg id a message chose (a PAS Claim's own `urn:shn:correlation`) is
   recorded as `sha256:<digest>` unless it is one bounded token too.
 - It also carries the sha256 of the request and answer envelopes'
   ciphertext, the value the Hub's audit records carry as `payloadBundleHash`,
   so a record joins the Hub's records for the same leg.
+- From v0.61.0 it names the registered edits (`Edits`: `E-01` …) the gateway
+  applied to the bytes it transmitted on the leg, in transmit order: ids only,
+  each once, only for bytes sent (the receiver answered, or the connection
+  failed after the request was written). Not a metric dimension.
 - Direction, route, exchange, operation, outcome, refusing party, rule and
   backend error class are closed sets (`engine.ExchangeDirections`,
   `ExchangeRoutes`, `ExchangeKinds`, `ExchangeOperations`, `ExchangeOutcomes`,
@@ -124,6 +129,405 @@ receives changes.
   refusals (a federated query without a consent reference, or one the consent
   service does not permit) are `consent`. A facility's or a PHG's gateway
   refusing a leg is refused by `other`.
+
+## Another patient inside a PAS request (v0.61.0)
+
+- **Behavior change in v0.61.0, at `strict` (`patient.mixed`):** a PAS
+  `$submit`, amendment or `$inquire` is read for another patient everywhere in
+  it (the Bundle's own elements, every entry, every contained resource and
+  every element nested in them), not only in its entries' own `patient`,
+  `subject` and `beneficiary`:
+  - a `Patient` entry is the request's patient by its id or the member
+    identifier; a `fullUrl` naming the member does not make it so;
+  - a contained `Patient` is the request's patient by the member identifier
+    (its id is local);
+  - a `Patient`, entry or contained, carrying another member's member
+    identifier is another patient, whatever else it carries, unless it is a
+    Coverage's party (below), whose own identity is not checked;
+  - a literal reference names the patient whose `Patient/<id>` it names,
+    compared without any `/_history/<version>`, under any base;
+  - a reference whose identifier is in the member system (`urn:shn:member`)
+    names that member, in any element, whatever its `type` and beside a
+    literal reference or not;
+  - any other reference that names a patient by identifier alone, in a
+    subject element (`patient`, `subject`, `beneficiary`, `for`,
+    `subjectReference`, `patientReference`) or with `type` `Patient`, must
+    carry an identifier of the request's patient: the member identifier or
+    one its `Patient` entry carries;
+  - a Coverage's party (the parent a dependent's Coverage, an entry of the
+    Bundle, names as a contained `Patient` through its `subscriber` or
+    `policyHolder`; a Coverage carried inside another resource has none) is not
+    itself read as the request's patient, but what it references is; the
+    slot's own reference, and an identifier beside it that the party
+    carries, name the party;
+  - the parent carried any other way is another patient: a `subscriber` or
+    `policyHolder` naming the parent as a literal `Patient/<parent>`, and a
+    `Patient` entry of its own for the parent, even one the member's
+    Coverage names. The PAS IG allows the subscriber as a Bundle entry, so
+    such a request is refused at `strict` though it is conformant; carry
+    the parent contained in the Coverage instead.
+
+  Such a request is refused `403 inconsistent patient in PAS bundle`
+  (`403 inconsistent patient in PAS inquiry` for an inquiry) at `strict`, by
+  the provider's gateway before it is routed and by the payer's gateway before
+  your system sees it; recorded and carried at `observe` and `structural`; not
+  checked at `none`. Before, a request whose Coverage contained a resource
+  naming another member (a `RelatedPerson`, a `Patient`, or a reference by
+  identifier) was carried at every level.
+- **Unchanged:** an order, Coverage, QuestionnaireResponse or
+  DiagnosticReport entry naming another patient is refused as before, and a
+  contained `RelatedPerson` whose `patient` is the request's patient is
+  carried.
+
+## A dependent's Coverage passes the patient check (v0.61.0)
+
+- **Behavior change in v0.61.0:** the check that a Coverage is the request's
+  patient's accepts a dependent's Coverage that names the parent, its
+  subscriber or policyHolder, as a contained `Patient`, whatever identifiers
+  that Patient carries (an MRN, or the parent's own member identifier). Such a
+  Patient is a party to the coverage, part of the Coverage record itself: it
+  is carried byte for byte with the Coverage and never binds or routes
+  anything; the Coverage's `beneficiary` still binds it to the request's
+  patient. It is accepted only when the slot's own reference (`subscriber`,
+  `policyHolder` or both) names it, its `id` is one no other resource in the
+  Coverage's `contained` list has, nothing else in the Coverage references it
+  (not the beneficiary, the payor, an extension, even one inside the slot, or
+  another contained resource), it holds as a contained resource (it contains
+  nothing, and its `identifier`, if present, is a list), and every member the
+  rule reads is spelled exactly (no `Reference` in the slot, no
+  `ResourceType`, `Id`, `Contained` or `Identifier` in the party, no
+  `ResourceType`, `Subscriber`, `PolicyHolder` or `Contained` beside the
+  Coverage's own). The gateway decides it by shn-sdk's
+  `CoverageParty`. Any other contained Patient is checked as the
+  request's patient, as before. A gateway
+  that derives the identity of a member its system of record does not hold
+  never reads it (the member's own carried Patient is read, as before), and
+  the patients a request names for the Hub's involved list never include it.
+  Both read a contained Patient that is no party (one whose `id` another
+  contained resource shares included) as before, so the rule can only take
+  patients off the involved list, never add any. Before,
+  every contained Patient had to be the request's patient, so such a Coverage
+  was refused.
+- It applies wherever a Coverage is checked: the coverage read through the
+  request's `fhirServer` (routed, and carried as `prefetch.coverage`; before,
+  `412 no coverage to route by: fhirServer's answer is not a Coverage
+  searchset`), the system of record's Coverage read (routed, and under
+  `ENRICH_NATIVE_REQUESTS` carried when that system names the patient by the
+  member id; before, `502 system of record returned another patient's
+  resource`), a `prefetch.coverage` the EHR sent (before,
+  refused `403` at `strict`), and the `$questionnaire-package` coverage, sent or
+  obtained.
+- **Behavior change in v0.61.0:** the same party passes the check that a PAS
+  answer names one patient (rule `patient.answer`), on a `Claim/$submit` answer
+  (an amendment's included) and a `Claim/$inquire` answer, at the payer's
+  gateway and at the provider's. A Coverage entry of the answer that names the
+  parent this way carries it as part of the Coverage: the parent is not read as
+  a second patient, and the slot naming it (`subscriber`, `policyHolder`, typed
+  `Patient` or not) is not read as a reference to the patient. The party is
+  decided by the same rule (`CoverageParty`, as the shn-sdk PAS response check
+  decides it), and only a Coverage that is itself an entry of the answer has
+  one. The check a
+  provider's gateway applies to the PAS request it completes from its system
+  of record (`ORIGINATION_PROFILE=provider-data`) reads the party the same
+  way. Before, such an answer was refused at `strict` (`403` at
+  the payer's gateway, `502` at the provider's, both `PAS response has
+  inconsistent patient linkage` on `Claim/$submit` and `PAS inquiry answer has
+  inconsistent patient linkage` on `Claim/$inquire`), and below `strict` relayed
+  unread, recorded as `patient.answer` at `observe` and `structural`, with no
+  pend, decision or ExplanationOfBenefit written from it. Now it is read and
+  relayed at every level, and written from as any readable answer is.
+- **Unchanged:** a Coverage whose beneficiary names another patient (`502 …
+  another patient's coverage` on the `fhirServer` read); a contained
+  `RelatedPerson`, bound by its own `patient` reference as before; another
+  Patient carried as a standalone entry; and a contained Patient referenced
+  from anywhere but those two slots, all refused as before. The check a
+  requester applies to a facility's disclosed records accepts no such party. In
+  a PAS answer, a contained Patient no slot names, a party also named elsewhere
+  (an extension, even one inside the slot, the beneficiary, the payor), a
+  contained Patient whose `id` another contained resource shares, one that
+  contains anything, whose `identifier` is not a list or that spells a member
+  the rule reads in another case, a parent carried as its own entry, and a
+  Patient contained in a Coverage that is not itself an entry are another
+  patient, as before. On a `Claim/$submit` answer, one whose `id` another
+  contained resource shares, or that contains anything, is refused first by
+  the answer's graph check (`answer.shape`).
+
+## A versioned Patient reference names the patient it versions (v0.61.0)
+
+- **Behavior change in v0.61.0, at every level:** a versioned reference,
+  `Patient/<id>/_history/<version>` (relative, or absolute under any base),
+  names the patient `<id>`, as the same reference without the version does.
+  Only a trailing `/_history/<version>` is a version: a base whose path
+  contains `/_history/` is part of the reference.
+  - A PAS `$submit`, amendment or `$inquire` is bound to the member its
+    `Claim.patient` names, versioned or not. The order's, Coverage's,
+    QuestionnaireResponse's and DiagnosticReport's subjects (and, on an
+    inquiry, every `patient`, `subject`, `beneficiary` and `for`) are compared
+    with it without the version.
+  - The patients a prior-authorization request names for the Hub's involved
+    list are read the same way. Another member named by a versioned
+    reference is named, and a versioned reference to the request's own
+    patient never names that patient a second time.
+
+  Before, the version was read as part of the member id: a versioned
+  `Claim.patient` named no member your system of record holds, and a
+  versioned reference to the request's own patient was another patient to
+  the PAS patient check. Another member named by a versioned reference was
+  left off the involved list, or named under an identity derived from the
+  versioned id. The `$questionnaire-package` request already read a versioned
+  reference this way.
+- The member is bound by its id. The version is not compared with the
+  `Patient` entry the request carries.
+- **Unchanged:** the CRD legs' own patient check (`patient.mixed`) compares an
+  order's subject and a Coverage's beneficiary with the hook's `patientId` as
+  written, version included. A versioned reference to the hook's own patient
+  is another patient there: refused at `strict`, recorded at `observe` and
+  `structural`.
+
+## A payor that names no payer, and a urn payor reference (v0.61.0)
+
+- **Behavior change in v0.61.0:** on the CDS Hooks and
+  `Questionnaire/$questionnaire-package` ingresses, a Coverage whose payor
+  reference resolved (among the request's resources, from the system of
+  record, or through `fhirServer`) to a resource that names no payer
+  identifier is refused with the reason after `no payer identifier on member
+  coverage: `, as a PAS Bundle's is: `the payor Organization carries no
+  identifier with both a system and a value, such as a NAIC code or payer id`,
+  or `Coverage.payor references a resource that is not an Organization`. In
+  v0.60.0 both were the bare `422 no payer identifier on member coverage`.
+- A coverage the EHR sent whose payor is a `urn:uuid:` or `urn:oid:` reference
+  that nothing resolves is refused `422 no payer identifier on member
+  coverage: Coverage.payor is a urn reference no Bundle entry's fullUrl
+  matches; send the payor Organization as a Bundle entry whose fullUrl is that
+  reference, or a payor identifier`; the payor Organization as an entry, with
+  that `fullUrl`, of a Bundle the request carries routes it. In v0.60.0 it
+  was the bare refusal.
+- The message keeps its prefix, so a matcher on it still matches. A payor of
+  another kind that nothing resolves (a `RelatedPerson`, a `Patient`) keeps
+  the bare refusal.
+
+## A request fingerprint is whole when its body is not kept (v0.61.0)
+
+- **Behavior change in v0.61.0:** `RequestFingerprint.Complete` means the
+  fingerprint's hash saw every byte of the request body. It no longer also
+  requires the body to have been kept. Before, an exchange the capture budget
+  had no room for (`diagnostics.NewCaptureBudget`'s concurrent exchanges, all
+  in use) recorded a whole hash but `Complete: false`, so
+  `diagnostics.FingerprintLink` could not match it to the other end of the
+  same forward. A fingerprint whose hash missed bytes (the handler stopped
+  reading, the read failed, the body was cut off) is still incomplete.
+  `Event.BodyComplete` is unchanged: it still says whether the body itself
+  was kept.
+- It applies wherever a fingerprint is recorded: on an observed request and
+  its answer, on a forwarded request (`diagnostics.ObserveTransport`), and in
+  `diagnostics.IngressFingerprint`, which the gateway stamps on its
+  `leg.sealed` and `leg.failed` records. The gateway observes its own ingress
+  with the package's default budget (8 concurrent exchanges a process), so a
+  gateway past that many concurrent requests is the one this changes.
+
+## Where a leg's time went, and why its answer was not authorized (v0.61.0)
+
+- **Additive:** the access line of a leg from the network carries `stages`
+  (`diagnostics.AccessStages`): the milliseconds spent unwrapping the leg,
+  reading the participant's own system, forwarding the operation to it,
+  validating synchronously, sealing and authorizing the answer, in the pend
+  ledger, and writing the answer. Before, it carried the total and one
+  `backend` call, the forward replacing the read before it. The stages do not
+  overlap and sum to at most `latencyMs`. No metric dimension changes.
+- **Additive:** when the answer to a leg (the participant's system's, or the
+  gateway's own refusal) cannot be authorized, the access line's
+  `answerError` names why
+  (`cancelled`, `timeout`, `auth`, `unreachable`, `other`;
+  `engine.AnswerErrorClasses`), and the gateway logs one line naming the
+  class and the leg's id. Before, nothing said why. The answer to the Hub is
+  unchanged: `502 authorization failed`.
+- **Additive:** a conformance finding from a check that called the validator
+  carries `validatorMs`, the time its `$validate` calls took, every line tried
+  together, and each entry of its `lines` carries `ms`, that line's own call's
+  time. Each is rounded down to whole milliseconds on its own and left out
+  when that is 0, so the lines' `ms` need not add up to `validatorMs`. At
+  `observe` they are the only record of a deferred check's time.
+  Likewise a `crd.embedded.validated` observation carries `ms`, its
+  `$validate` call's time.
+- **Go API (additive):** `engine.ExchangeRecord.Stages` (`engine.LegStages`)
+  and `engine.ExchangeRecord.AnswerError`, `engine.AnswerErrorClasses`;
+  `engine.ConformanceFinding.ValidatorMs`, `engine.LineVerdictSummary.Ms` (a
+  `LineVerdictSummary` literal without field names no longer compiles: name
+  its fields);
+  `diagnostics.AccessLine.Stages` (`diagnostics.AccessStages`) and
+  `diagnostics.AccessLine.AnswerError`.
+
+## The coverage read through the request's fhirServer is carried (v0.61.0)
+
+- **Behavior change in v0.61.0 (on by default; not an enrichment opt-in):** when
+  a provider's gateway routes a CDS Hooks request by the coverage it read
+  through the request's own `fhirServer` (the request carries no
+  `prefetch.coverage` key, the system of record names no patient for the
+  member, and `CDS_FHIR_SERVER_READ` is not `off`), it carries that coverage as
+  `prefetch.coverage`, creating `prefetch` when the request has none. This is a
+  new registered edit, E-07 (`cds-callback-coverage-carry`), on the
+  `crd-order-dispatch` and `crd-order-select` requests a provider's gateway
+  carries. It compensates for E-01: with `fhirServer` and `fhirAuthorization`
+  removed, the payer cannot read that coverage itself, and a payer that needs
+  it (the Da Vinci reference payer answers `400` without one) can now decide.
+  In v0.60.0 nothing either read returned was carried.
+- The value is a `searchset` the gateway writes (as for the system-of-record
+  fill, E-02): a `match` entry for each Coverage routing chose (the active ones,
+  else all of them), in the server's order, and an `include` entry for the
+  payor Organization routing resolved for each of them (by routing's own rule:
+  the first payor, read only when it carries no identifier of its own), whether
+  the server's search returned it (resolved by `fullUrl` or
+  `Organization/<id>`) or the gateway read it
+  (`GET {fhirServer}/Organization/<id>`); a second payor, or an Organization
+  routing did not resolve, is never included. Each resource is the server's
+  bytes exactly; each `fullUrl` is a `urn:uuid:` the gateway assigns, except an
+  included Organization that a carried Coverage names by an absolute reference
+  on the request's `fhirServer` base (the base compared with the scheme and
+  host lowercased, the default port dropped and a trailing slash trimmed):
+  its `fullUrl` is that reference, exactly as the Coverage writes it and
+  already in the Coverage's own bytes, so the reference resolves in the
+  `searchset`. Each included record has at most one such reference: a search
+  entry answers an absolute reference only when its `fullUrl` is that
+  reference, and the Organization read only the reference written on the
+  `fhirServer` base itself, so two chosen Coverages writing an Organization's
+  address differently each resolve their own record, and both records are
+  carried, each with the reference that resolved it. A relative reference
+  resolves by type and id either way. `total` is
+  the number of Coverages. The records are byte for byte, so any reference a
+  record holds (an absolute one on the server included) is carried as written.
+  Nothing else of the server's answer is carried: no link, no entry address of
+  the server's, no Bundle `id` or `meta`, no
+  `OperationOutcome`, no Coverage routing did not choose and no Organization
+  only such a Coverage names. What is carried is checked against the request's
+  patient again (another patient's record refuses the request `502` at every
+  level, as the read already does).
+- The request is built once it is routed: a request refused while routing (an
+  ambiguous coverage, no payer identifier, an unregistered payer, a refused
+  Organization read) carries nothing and is not sent, as before. The rest of the
+  request is the EHR's bytes, with `fhirServer` and `fhirAuthorization` removed.
+- Unchanged: a `coverage` prefetch key the EHR sends, even `null`, is never
+  changed or replaced; with `CDS_FHIR_SERVER_READ=off`, or no `fhirServer`,
+  nothing is read or carried and the request is refused `412` as in v0.60.0; a
+  coverage read from the system of record is carried only under
+  `ENRICH_NATIVE_REQUESTS=true` (E-02); the payor Organization read for a
+  coverage the EHR sent is never carried.
+- **Payers:** a CDS Hooks request may now arrive with a gateway-written coverage
+  `searchset`, recognisable by its `urn:uuid:` entries, where v0.60.0 sent none.
+  A payer gateway that maps its payer identity maps it like any other coverage.
+  An EHR server whose entry addresses use another base than the `fhirServer`
+  URL it hands out may see a payer answer `400` (or `422` from a payer gateway
+  that maps its identity) for a Coverage whose absolute payor reference is on
+  that other base, where v0.60.0 carried no coverage: that Organization is
+  carried under a `urn:uuid:`, which the reference does not resolve.
+- **Go API:** `relay.EditCDSCoverageCarry` (`E-07`) is new, and the ownership
+  table admits it on the two CRD request transmits a provider's gateway carries.
+  `engine.WithFHIRServerTrustForTest` is test support (it panics outside a test
+  binary); it is not a stable API.
+- **Additive (records and diagnostics):** the registered edits a gateway applies
+  to the bytes it transmits on a leg are now named, E-07 among them. The access
+  line gains `relayEdits` (`diagnostics.AccessLine.RelayEdits`) and the exchange
+  record `engine.ExchangeRecord.Edits`: the edit ids (`E-01` …), in transmit
+  order, each once, only ids the registry holds, and only for bytes sent (a
+  provider's request to the network, a payer's forward to its own system):
+  the receiver answered, with anything (a refusal or an unreadable answer
+  included), or the connection failed after the request was written. A request
+  never sent names none: refused before it was sent (by routing or by the
+  Authorization Framework), a connection that could not be made, or a bearer
+  token that could not be obtained. Ids only, never a value an edit removed
+  or wrote. A line whose leg carried its message exactly has no `relayEdits` key,
+  so it is the v0.60.0 line byte for byte. With diagnostic collection configured,
+  the `leg.sealed` event of a provider's request and the `native.request` event
+  of a payer's forward carry the ids the request was built with as their `Detail`
+  (`diagnostics.RelayEditsDetail`, `{"relayEdits":[…]}`), captured before the
+  send: a `leg.sealed` once the request is sealed, before the Authorization
+  Framework is asked, and a `native.request` just before the forward. So the
+  event can name edits the record does not, for a request then never sent; a
+  transmit with no edit has no `Detail`, as before. `engine.RelayEditName` and
+  `engine.RelayEditReceivedBy` read the registry: an edit's registered name, and
+  the party whose received bytes it changes (a requester's request edit reaches
+  the recipient; the payer identity mapping, E-03, reaches no other party). An
+  edit made inside a request a gateway builds itself (the supplemental report's
+  subject, E-06) is not named: that request is the gateway's own, not a relayed
+  one.
+
+## A patient the system of record names by another id, under the opt-in (v0.61.0)
+
+- **Behavior change in v0.61.0 (`ENRICH_NATIVE_REQUESTS=true` only):** when
+  the provider's system of record names the patient by an id other than the
+  request's member id (`context.patientId` on CDS Hooks, the patient the
+  coverage and orders name on `$questionnaire-package`), a CDS Hooks request
+  that carries its `patient` but no `prefetch.coverage`, and a
+  `$questionnaire-package` request that carries no `coverage` parameter, are
+  routed as without the opt-in: by the coverage read from the system of record
+  under its own Patient id only to choose the payer (every Coverage, routed on
+  the active ones, else the others), fenced to that id alone, so a Coverage it
+  returns naming `Patient/<member id>` (another patient there) is refused `502`
+  at every level. Nothing is added: no `prefetch.coverage` (E-02), no
+  `coverage` parameter (E-04) and, as before, no `referenced` Patient (E-05);
+  a value from that system would name the patient by an id the request does
+  not use. In v0.60.0 both requests were refused `422` (`system of record names
+  the patient differently from context.patientId; supply patient and coverage
+  prefetch in the request` on CDS Hooks, `system of record names the patient
+  differently from the request; supply the coverage parameter in the request`
+  on `$questionnaire-package`), where the same request without the opt-in was
+  routed. The opt-in never leaves a member with less to route by than the
+  default; a prefetch value it cannot fill is still decided by `strict`, below.
+- A CDS Hooks request under the opt-in that leaves out `patient` is still
+  refused `422` at `strict` before anything is read (the patient cannot be
+  supplied under the request's id) and, below `strict`, sent without it, as in
+  v0.60.0; a coverage it also leaves out is then read to route by, as above.
+  The refusal's text is now `system of record names the patient differently
+  from context.patientId; supply the patient prefetch in the request`; a client
+  matching the text up to the semicolon keeps matching. History keys are left
+  out with the `not-run` reason `patient named differently in the system of
+  record`, unchanged.
+- The `$questionnaire-package` refusal `system of record names the patient
+  differently from the request; supply the coverage parameter in the request`
+  is gone: no request is refused with it.
+
+## A body the capture budget left out says so (v0.61.0)
+
+- **Additive (diagnostics):** an observed exchange's event (`diagnostics.ObserveHTTP`,
+  `diagnostics.ObserveTransport`) now says when the capture budget, not the
+  body cap, kept its body from being captured whole. Its `Detail` is
+  `diagnostics.BodyNotKeptCaptureBudget` (`body not kept: capture budget`)
+  when the exchange found no free capture session, so neither its headers nor
+  its body were kept, and `diagnostics.BodyPartialCaptureBudget`
+  (`body capture partial: capture budget`) when the budget's bytes ran out
+  part way, so a prefix was kept. `BodyComplete` is false in both cases, as
+  before. A body cut by the body cap, or captured whole, carries no such
+  detail. Only a body's loss is named: headers cut short by the budget show
+  only as `HeadersComplete` false. An event whose body the queue's retained-body
+  limit later cuts keeps the budget's detail rather than `body capture
+  partial: retention cap reached`.
+- **Go API (additive):** `diagnostics.BodyNotKeptCaptureBudget` and
+  `diagnostics.BodyPartialCaptureBudget`.
+
+## The Hub's word on whether a leg was delivered (v0.61.0)
+
+- **Additive:** the access line of a call from a participant's own system
+  whose leg the Hub answered with an error carries `hubDelivered`: the value
+  of the Hub's `X-SHN-Delivered` header on that answer
+  (`engine.HubDeliveredHeader`), which says whether the recipient's gateway
+  received the leg:
+  - `no`: the Hub refused before forwarding, or the recipient's gateway was
+    not reached or refused the leg at its edge;
+  - `yes`: the recipient's gateway answered, and its answer was lost on the
+    way back (the Hub could not read, verify, decode or audit it);
+  - `unknown`: the recipient's gateway may have received it (it answered
+    5xx, the connection failed after the request was sent, or it did not
+    answer in time).
+- The key is absent when the leg drew no error answer from the Hub's route
+  handler: for example, the leg was answered, it never reached the Hub, no
+  answer came back from the Hub (a timeout, or a connection that failed after
+  the request was sent), or the error came from in front of the Hub (no
+  `X-SHN-Delivered`, or a value other than these three). The gateway never infers it. When a call makes more than one leg,
+  it is the last leg's. A leg from the network never carries it.
+- Unchanged: what the caller is answered, the line's `outcome` and
+  `refusal`, and the metrics (it is not a metric dimension).
+- **Go API (additive):** `engine.ExchangeRecord.HubDelivered` and
+  `diagnostics.AccessLine.HubDelivered` (JSON `hubDelivered`, omitted when
+  empty).
 
 ## Observe checks do not hold the message (v0.60.0)
 
@@ -190,6 +594,7 @@ receives changes.
   `public` (or `off`, if its tenant sets that).
 - Nothing either read returns is carried: the request is sent as the EHR sent
   it, with `fhirServer` and `fhirAuthorization` still removed (E-01, unchanged).
+  From v0.61.0 the coverage read is carried (E-07; see that section).
 - The read is fenced in every mode: an `https` base URL with no query, fragment
   or credentials; the mode's address rules on an address literal, on every
   resolved address and again on the address connected to; no redirects, no
@@ -250,7 +655,8 @@ receives changes.
   and earlier refused it `400 payer backend identity mapping: inbound Coverage
   carries no resolvable payor identifier (…)`. A provider gateway sends such a
   request when it routes by a Coverage it read only to choose the payer
-  (above), and carries nothing it read.
+  (above), and carries nothing it read (from v0.61.0, a coverage read through
+  `fhirServer` is carried, E-07).
 - **Unchanged:** a Coverage whose payor cannot be read, a `prefetch` or
   `prefetch.coverage` that is present but not a JSON object, a coverage Bundle
   with any other entry, and a request whose only Coverage is outside
@@ -481,8 +887,9 @@ receives changes.
   it still matches. The remedy is added only for a reference to an
   Organization, and is the one that resolves that reference; an unresolved
   payor of another kind (a RelatedPerson, a Patient) keeps the bare refusal,
-  and so does a resolved payor Organization that carries no payer
-  identifier. Every other refusal of the payor read is one of these texts:
+  and so, in v0.60.0, does a resolved payor Organization that carries no
+  payer identifier (v0.61.0 gives its reason, above). Every other refusal of
+  the payor read is one of these texts:
   - `no payer identifier on member coverage: Coverage.payor is a reference to an Organization the gateway could not read; send the payor Organization with the coverage, or a payor identifier`
     (`422`; CDS Hooks and `$questionnaire-package`; a reference written
     `Organization/<id>`, which the Organization sent with the coverage
@@ -519,8 +926,9 @@ receives changes.
     - `no payer identifier on member coverage: fhirServer answered with an error`
     - `no payer identifier on member coverage: fhirServer holds no Organization for the coverage's payor`
     - `no payer identifier on member coverage: fhirServer's answer is not the payor Organization`
-  A resolved payor Organization that carries no payer identifier keeps the
-  bare `422 no payer identifier on member coverage`.
+  In v0.60.0 a resolved payor Organization that carries no payer identifier
+  keeps the bare `422 no payer identifier on member coverage`; v0.61.0 gives
+  its reason (above).
 - Under the earlier templates `_include=Coverage:payor` brought the
   Organization with the coverage, so such a request was routed with no read;
   an EHR that fulfils the templates exactly is now refused when neither the
@@ -1278,15 +1686,17 @@ the participant opts in to enrichment.**
   the `$questionnaire-package` Coverage append and the `$questionnaire-package`
   Patient append (registered edits E-02, E-04 and E-05).
 - By default none of them runs. A CDS Hooks request is sent with only `fhirServer`
-  and `fhirAuthorization` removed; a `$questionnaire-package` request is sent
-  byte for byte. Earlier releases added the advertised prefetch values and the
+  and `fhirAuthorization` removed (from v0.61.0, and with the coverage read
+  through that `fhirServer` to route by carried, E-07); a
+  `$questionnaire-package` request is sent byte for byte. Earlier releases added the advertised prefetch values and the
   Coverage a request left out without being asked; an EHR that relied on that now
   sends them itself, or its gateway sets `ENRICH_NATIVE_REQUESTS=true`.
 - A coverage a request leaves out is still read from the system of record, to
   choose the payer; it is not added to the request. That read is made under the
   system's own Patient id, so a system that names the patient by another id no longer
   refuses such a request by default, on the CDS Hooks and questionnaire-package
-  ingress alike (it still does under the opt-in). A request whose coverage cannot be found is refused as before.
+  ingress alike (nor, from v0.61.0, under the opt-in: see "A patient the system of
+  record names by another id, under the opt-in"). A request whose coverage cannot be found is refused as before.
 - With `ENRICH_NATIVE_REQUESTS=true` the three edits behave as in earlier releases,
   and the Patient append no longer depends on the unknown-member setting.
 - Requests the gateway builds itself (`ORIGINATION_PROFILE`) are not affected.

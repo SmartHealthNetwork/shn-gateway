@@ -268,7 +268,7 @@ func TestPayerAnswerIngress_PartnerPayerLevelMatrix(t *testing.T) {
 						f.CorrelationID != "corr-answer" || f.Seam != "originate" || f.Kind != string(KindFHIRIngress) || f.Line != "2.0" || f.Level != level.String() {
 						t.Errorf("%s: finding %+v", name, f)
 					}
-					if f.DeclaredLine != "2.0" || !reflect.DeepEqual(f.Lines, []LineVerdictSummary{{"2.0", w.line}}) {
+					if f.DeclaredLine != "2.0" || !reflect.DeepEqual(f.Lines, []LineVerdictSummary{{Line: "2.0", Verdict: w.line}}) {
 						t.Errorf("%s: finding names routed line %q and lines %+v", name, f.DeclaredLine, f.Lines)
 					}
 				}
@@ -293,7 +293,7 @@ func TestPayerAnswerIngress_DeclaredLineFailedButValidOnAnother(t *testing.T) {
 			if got := log.lines(); !reflect.DeepEqual(got, []string{"2.0", "2.2"}) {
 				t.Errorf("%s/%s: lines tried %v, want the routed 2.0 then 2.2", profile, level, got)
 			}
-			want := []LineVerdictSummary{{"2.0", "structural"}, {"2.2", "valid"}}
+			want := []LineVerdictSummary{{Line: "2.0", Verdict: "structural"}, {Line: "2.2", Verdict: "valid"}}
 			if len(*findings) != 1 || (*findings)[0].DeclaredLine != "2.0" || (*findings)[0].Verdict != "valid" || !reflect.DeepEqual((*findings)[0].Lines, want) {
 				t.Errorf("%s/%s: findings %+v, want one naming 2.0 with lines %+v", profile, level, *findings, want)
 			}
@@ -310,7 +310,7 @@ func TestPayerAnswerIngress_DeclaredTwoZeroAnswersTwoOne(t *testing.T) {
 			if status, msg := drainedPayerIngress(g, answerCtx("pas-claim"), []byte(answerBundle), "2.0", "pa.pas", partner); status != 0 {
 				t.Errorf("%s/%s: status %d %q, want relayed", profile, level, status, msg)
 			}
-			want := []LineVerdictSummary{{"2.0", "structural"}, {"2.1", "valid"}}
+			want := []LineVerdictSummary{{Line: "2.0", Verdict: "structural"}, {Line: "2.1", Verdict: "valid"}}
 			if len(*findings) != 1 || (*findings)[0].DeclaredLine != "2.0" || (*findings)[0].Line != "2.1" || !reflect.DeepEqual((*findings)[0].Lines, want) {
 				t.Errorf("%s/%s: findings %+v, want lines %+v", profile, level, *findings, want)
 			}
@@ -360,7 +360,7 @@ func TestPayerAnswerIngress_StructuralOnEveryLine(t *testing.T) {
 				continue
 			}
 			f := (*findings)[0]
-			want := []LineVerdictSummary{{"2.0", "structural"}, {"2.2", "structural"}, {"2.1", "structural"}}
+			want := []LineVerdictSummary{{Line: "2.0", Verdict: "structural"}, {Line: "2.2", Verdict: "structural"}, {Line: "2.1", Verdict: "structural"}}
 			if f.Decision != tc.decision || f.DeclaredLine != "2.0" || !reflect.DeepEqual(f.Lines, want) {
 				t.Errorf("%s/%s: finding %+v", profile, tc.level, f)
 			}
@@ -422,7 +422,7 @@ func TestPayerAnswerIngress_NoLaneAnswers(t *testing.T) {
 				}
 				continue
 			}
-			want := []LineVerdictSummary{{"2.0", "unavailable"}, {"2.2", "unavailable"}, {"2.1", "unavailable"}}
+			want := []LineVerdictSummary{{Line: "2.0", Verdict: "unavailable"}, {Line: "2.2", Verdict: "unavailable"}, {Line: "2.1", Verdict: "unavailable"}}
 			if len(*findings) != 1 || (*findings)[0].Verdict != "unavailable" || !reflect.DeepEqual((*findings)[0].Lines, want) {
 				t.Errorf("%s/%s: findings %+v", profile, tc.level, *findings)
 			}
@@ -481,7 +481,7 @@ func TestPayerAnswerIngress_TriesOnlyLanedLines(t *testing.T) {
 	if status != 0 || !reflect.DeepEqual(log.lines(), []string{"2.0", "2.2"}) {
 		t.Fatalf("status %d, lines %v", status, log.lines())
 	}
-	if len(*findings) != 1 || (*findings)[0].DeclaredLine != "2.0" || !reflect.DeepEqual((*findings)[0].Lines, []LineVerdictSummary{{"2.0", "deeper"}, {"2.2", "structural"}}) {
+	if len(*findings) != 1 || (*findings)[0].DeclaredLine != "2.0" || !reflect.DeepEqual((*findings)[0].Lines, []LineVerdictSummary{{Line: "2.0", Verdict: "deeper"}, {Line: "2.2", Verdict: "structural"}}) {
 		t.Fatalf("findings %+v", *findings)
 	}
 }
@@ -516,7 +516,7 @@ func TestPayerAnswerIngress_RoutedLineUnavailableDecidesUnavailable(t *testing.T
 				}
 				continue
 			}
-			want := []LineVerdictSummary{{"2.2", "unavailable"}, {"2.1", "structural"}, {"2.0", "structural"}}
+			want := []LineVerdictSummary{{Line: "2.2", Verdict: "unavailable"}, {Line: "2.1", Verdict: "structural"}, {Line: "2.0", Verdict: "structural"}}
 			if len(*findings) != 1 || (*findings)[0].Verdict != "unavailable" || (*findings)[0].Decision != "relayed" || !reflect.DeepEqual((*findings)[0].Lines, want) {
 				t.Errorf("%s/%s: findings %+v, want one unavailable listing %+v", profile, tc.level, *findings, want)
 			}
@@ -549,7 +549,7 @@ func TestPayerAnswerIngress_ClaimedLineWithNoLaneDecidesUnavailable(t *testing.T
 			t.Errorf("%s: lines tried %v", tc.level, got)
 		}
 		if tc.status == 0 {
-			want := []LineVerdictSummary{{"2.2", "structural"}, {"2.0", "unavailable"}, {"2.1", "structural"}}
+			want := []LineVerdictSummary{{Line: "2.2", Verdict: "structural"}, {Line: "2.0", Verdict: "unavailable"}, {Line: "2.1", Verdict: "structural"}}
 			if len(*findings) != 1 || (*findings)[0].Verdict != "unavailable" || !reflect.DeepEqual((*findings)[0].Lines, want) {
 				t.Errorf("%s: findings %+v, want one unavailable listing %+v", tc.level, *findings, want)
 			}
@@ -570,7 +570,7 @@ func TestPayerAnswerIngress_UnclaimedLineOutageDoesNotRescue(t *testing.T) {
 		if status != http.StatusUnprocessableEntity || !strings.HasPrefix(msg, "ingress validation failed") {
 			t.Errorf("%s: %d %q, want refused as structural", level, status, msg)
 		}
-		want := []LineVerdictSummary{{"2.1", "structural"}, {"2.0", "structural"}, {"2.2", "unavailable"}}
+		want := []LineVerdictSummary{{Line: "2.1", Verdict: "structural"}, {Line: "2.0", Verdict: "structural"}, {Line: "2.2", Verdict: "unavailable"}}
 		if len(*findings) != 1 || (*findings)[0].Decision != "refused" || !reflect.DeepEqual((*findings)[0].Lines, want) {
 			t.Errorf("%s: findings %+v, want one refused listing %+v", level, *findings, want)
 		}
@@ -598,7 +598,7 @@ func TestPayerAnswerIngress_SharedValidatorIsCalledOnce(t *testing.T) {
 	if got := log.lines(); !reflect.DeepEqual(got, []string{"2.0+2.2", "2.1"}) {
 		t.Fatalf("calls %v, want the shared validator once and the other once", got)
 	}
-	want := []LineVerdictSummary{{"2.0", "structural"}, {"2.1", "structural"}}
+	want := []LineVerdictSummary{{Line: "2.0", Verdict: "structural"}, {Line: "2.1", Verdict: "structural"}}
 	if len(findings) != 1 || !reflect.DeepEqual(findings[0].Lines, want) {
 		t.Fatalf("findings %+v, want lines %+v with no phantom 2.2", findings, want)
 	}
@@ -628,7 +628,7 @@ func TestPayerAnswerIngress_RoutedLineWithNoLane(t *testing.T) {
 				}
 				continue
 			}
-			want := []LineVerdictSummary{{"2.1", "unavailable"}, {"2.2", "structural"}, {"2.0", "structural"}}
+			want := []LineVerdictSummary{{Line: "2.1", Verdict: "unavailable"}, {Line: "2.2", Verdict: "structural"}, {Line: "2.0", Verdict: "structural"}}
 			if len(*findings) != 1 || (*findings)[0].Verdict != "unavailable" || (*findings)[0].Decision != "relayed" ||
 				(*findings)[0].Line != "2.1" || (*findings)[0].DeclaredLine != "2.1" || !reflect.DeepEqual((*findings)[0].Lines, want) {
 				t.Errorf("%s/%s: findings %+v, want one unavailable at 2.1 listing %+v", profile, tc.level, *findings, want)
@@ -675,7 +675,7 @@ func TestPayerAnswerIngress_HungExtraLaneIsBounded(t *testing.T) {
 	if got.status != 0 {
 		t.Fatalf("status %d %q, want relayed on 2.1", got.status, got.msg)
 	}
-	want := []LineVerdictSummary{{"2.0", "structural"}, {"2.2", "unavailable"}, {"2.1", "valid"}}
+	want := []LineVerdictSummary{{Line: "2.0", Verdict: "structural"}, {Line: "2.2", Verdict: "unavailable"}, {Line: "2.1", Verdict: "valid"}}
 	if len(*findings) != 1 || !reflect.DeepEqual((*findings)[0].Lines, want) {
 		t.Fatalf("findings %+v, want lines %+v", *findings, want)
 	}

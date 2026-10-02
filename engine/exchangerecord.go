@@ -20,7 +20,7 @@ package engine
 //
 // The facts are noted where the engine learns them (the leg's round trip, the
 // response leg it builds, the call to its participant's own system, a check
-// that refuses) on a recorder the wrapper puts on the request context. A
+// that refuses, the registered edits a transmit applied) on a recorder the wrapper puts on the request context. A
 // recorder that is absent (ExchangeObserved unset, or a handler driven without
 // the wrapper) makes every note a no-op.
 
@@ -105,8 +105,62 @@ type ExchangeRecord struct {
 	// every call made.
 	Backend      *BackendCall
 	BackendCalls int
+	// Stages is the time an inbound leg spent in each stage of its answer
+	// (LegStages); nil on an ingress call.
+	Stages *LegStages
+	// AnswerError is why an inbound leg's answer (the participant's, or this
+	// gateway's own refusal) could not be authorized (AnswerErrorClasses);
+	// empty otherwise.
+	AnswerError string
 	// Findings summarizes the conformance findings the call's checks recorded.
 	Findings FindingSummary
+	// Edits are the ids of the registered edits (relay.EditIDs: E-01 …) this
+	// gateway applied to the bytes it transmitted on the leg, in transmit
+	// order, each once: on an ingress call, the request it sealed for the
+	// network; on an inbound leg, its forward to its participant's own
+	// system. Only registered ids, and only for bytes sent (the receiver
+	// answered, with anything, or the connection failed after the request was
+	// written): a request refused before it was sent, or whose connection or
+	// bearer could not be obtained, names none, nor does one carried exactly.
+	// Metadata only (never a value an edit removed or wrote); not a metric
+	// dimension.
+	Edits []string
+	// HubDelivered is the Hub's own word on whether the recipient's gateway
+	// received an ingress call's leg, read from the HubDeliveredHeader of the
+	// Hub's error answer to the leg: "no", "yes" or "unknown". Empty when the
+	// leg drew no error answer from the Hub's route handler (it was answered,
+	// it never reached the Hub, or the error came from in front of it): this
+	// gateway never infers it. Always empty on an inbound leg.
+	HubDelivered string
+}
+
+// LegStages is the time an inbound leg spent in each stage of its answer,
+// durations only. The stages do not overlap; what is not in one (dispatch,
+// framing, fencing) is the rest of the call's Latency.
+type LegStages struct {
+	// Unwrap is verifying the Hub's assertion and the leg's authority and
+	// opening the request envelope, up to the leg's dispatch (for a leg
+	// refused before it, the call's time in no other stage).
+	Unwrap time.Duration
+	// Reads is every read of the participant's own system (its system of
+	// record, its CDS service listing); Forward is every call forwarding the
+	// operation to it (BackendCalls counts both).
+	Reads, Forward time.Duration
+	// Validate is the $validate checks the answer waits for, and queueing an
+	// observe check it does not wait for (its own time is the finding's
+	// ValidatorMs).
+	Validate time.Duration
+	// Seal is sealing the answer and authorizing it with the Authorization
+	// Framework, the involved patients' tokens and its diagnostic capture
+	// included.
+	Seal time.Duration
+	// Ledger is the pend ledger's work for the answer: its lookups, the claim
+	// an update takes (BeginClaimUpdate) and its release when the update is
+	// not recorded, an inquiry's effect derived from the payer's answer, and
+	// its writes.
+	Ledger time.Duration
+	// Write is handing the answer to the HTTP server.
+	Write time.Duration
 }
 
 // BackendCall is one call to the participant's own system.
@@ -217,6 +271,12 @@ var (
 	RefusalParties      = []string{RefusedByProviderGateway, RefusedByHub, RefusedByAuthorizationFramework, RefusedByPayerGateway, ExchangeOther}
 	RefusalRules        = []string{RefusalAuthentication, RefusalAuthority, RefusalConsent, RefusalRouting, RefusalReplay, RefusalIntegrity, RefusalAudit, RefusalFidelity, RefusalConformance, RefusalLimit, ExchangeOther}
 	BackendErrorClasses = []string{BackendTimeout, BackendConnect, BackendTLS, BackendAuth, BackendHTTP3xx, BackendHTTP4xx, BackendHTTP5xx, BackendRead, BackendMalformed, BackendCancelled, ExchangeOther}
+	// AnswerErrorClasses say why an inbound leg's answer could not be
+	// authorized: the request ended before it (cancelled: the requester was
+	// gone), the authorize call ran out of time (timeout), the Authorization
+	// Framework denied it (auth) or never answered it (unreachable), or
+	// another failure (other).
+	AnswerErrorClasses = []string{BackendCancelled, BackendTimeout, BackendAuth, ExchangeUnreachable, ExchangeOther}
 )
 
 // closed returns v when list names it, else ExchangeOther.
@@ -254,6 +314,11 @@ type exchangeRecorder struct {
 	cut bool
 	// now is the gateway's clock.
 	now func() time.Time
+	// unwrapped is set once the leg's Unwrap stage has ended.
+	unwrapped bool
+	// validating counts the synchronous validations in progress, so a
+	// nested one is timed once.
+	validating int
 }
 
 func exchangeOf(ctx context.Context) *exchangeRecorder {
@@ -316,6 +381,22 @@ func (x *exchangeRecorder) decided(outcome, by, rule string) {
 			by, rule = "", ""
 		}
 		x.outcome, x.party, x.rule, x.guardRule = outcome, by, rule, ""
+	})
+}
+
+// edits notes the registered edits applied to bytes this gateway sent on the
+// leg, once they were sent: an id the registry does not hold
+// is never recorded, and one already recorded is not recorded again.
+func (x *exchangeRecorder) edits(ids []relay.EditID) {
+	if len(ids) == 0 {
+		return
+	}
+	x.with(func() {
+		for _, id := range ids {
+			if slices.Contains(relay.EditIDs(), id) && !slices.Contains(x.rec.Edits, string(id)) {
+				x.rec.Edits = append(x.rec.Edits, string(id))
+			}
+		}
 	})
 }
 
@@ -425,6 +506,9 @@ func (x *exchangeRecorder) backend(status int, latency time.Duration, class stri
 	x.with(func() {
 		x.rec.BackendCalls++
 		x.rec.Backend = &BackendCall{Status: status, Latency: latency, ErrorClass: class}
+		if x.rec.Stages != nil {
+			x.rec.Stages.Forward += latency
+		}
 		x.forwarded = true
 		x.cut = x.cut || class == BackendCancelled
 	})
@@ -439,10 +523,95 @@ func (x *exchangeRecorder) read(status int, latency time.Duration, class string)
 	x.with(func() {
 		x.rec.BackendCalls++
 		x.cut = x.cut || class == BackendCancelled
+		if x.rec.Stages != nil {
+			x.rec.Stages.Reads += latency
+		}
 		if !x.forwarded {
 			x.rec.Backend = &BackendCall{Status: status, Latency: latency, ErrorClass: class}
 		}
 	})
+}
+
+// stage times one stage of an inbound leg's answer: it returns the call that
+// ends it, adding the time between to the stage add names. A nil recorder,
+// or an ingress call's, times nothing and reads no clock.
+func (x *exchangeRecorder) stage(add func(*LegStages, time.Duration)) func() {
+	if x == nil {
+		return func() {}
+	}
+	var timed bool
+	x.with(func() { timed = x.rec.Stages != nil })
+	if !timed {
+		return func() {}
+	}
+	start := x.clock()
+	return func() {
+		d := x.clock().Sub(start)
+		x.with(func() { add(x.rec.Stages, d) })
+	}
+}
+
+// addLedger adds a pend ledger read or write to its stage.
+func addLedger(s *LegStages, d time.Duration) { s.Ledger += d }
+
+// answerErrorClass is the class of an inbound leg's failed answer
+// authorization (AnswerErrorClasses): the request ending first is cancelled
+// whatever the call returned, since the requester had gone.
+func answerErrorClass(ctx context.Context, err error) string {
+	var ne net.Error
+	switch {
+	case errors.Is(ctx.Err(), context.Canceled):
+		return BackendCancelled
+	case errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout()):
+		return BackendTimeout
+	case errors.Is(err, errAuthorizationDenied):
+		return BackendAuth
+	case errors.Is(err, errAuthzUnreachable):
+		return ExchangeUnreachable
+	}
+	return ExchangeOther
+}
+
+// validation times a synchronous validation: one nested inside another is
+// not timed again.
+func (x *exchangeRecorder) validation() func() {
+	if x == nil {
+		return func() {}
+	}
+	outer := false
+	x.with(func() {
+		outer = x.validating == 0
+		x.validating++
+	})
+	stop := func() {}
+	if outer {
+		stop = x.stage(func(s *LegStages, d time.Duration) { s.Validate += d })
+	}
+	return func() {
+		stop()
+		x.with(func() { x.validating-- })
+	}
+}
+
+// unwrapDone ends the leg's Unwrap stage: from the call's arrival to its
+// dispatch.
+func (x *exchangeRecorder) unwrapDone() {
+	if x == nil {
+		return
+	}
+	now := x.clock()
+	x.with(func() {
+		if x.rec.Stages != nil && !x.unwrapped {
+			x.rec.Stages.Unwrap = now.Sub(x.rec.Start)
+			x.unwrapped = true
+		}
+	})
+}
+
+// answerError records why an inbound leg's answer could not be authorized
+// (AnswerErrorClasses).
+func (x *exchangeRecorder) answerError(class string) {
+	x.with(func() { x.rec.AnswerError = closed(AnswerErrorClasses, class) })
 }
 
 // clock is the time the recorder reads latencies by: the gateway's own.
@@ -677,6 +846,16 @@ func (x *exchangeRecorder) legOutcome(err error) {
 	var re *RelayError
 	var hr *hubRefusalError
 	var lost *answerLostError
+	// The Hub's delivery value, as its route handler stated it, for this leg
+	// only: a later leg's answer replaces an earlier one's.
+	delivered := ""
+	if errors.As(err, &hr) && hr.fromHub {
+		delivered = hr.delivered
+		if delivered == "" {
+			delivered = "no"
+		}
+	}
+	x.with(func() { x.rec.HubDelivered = delivered })
 	switch {
 	case err == nil:
 		x.decided(ExchangeAnswered, "", "")
@@ -740,6 +919,11 @@ func (w *exchangeWriter) WriteHeader(code int) {
 	w.ResponseWriter.WriteHeader(code)
 }
 
+func (w *exchangeWriter) Write(b []byte) (int, error) {
+	defer w.x.stage(func(s *LegStages, d time.Duration) { s.Write += d })()
+	return w.ResponseWriter.Write(b)
+}
+
 func (w *exchangeWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 // ingressRoutes are the Da Vinci ingress handlers, with the observer tag each
@@ -788,6 +972,7 @@ func (g *Gateway) recordExchange(route, direction string, h http.HandlerFunc) ht
 			x.rec.Sender = g.cfg.HolderID
 		} else {
 			x.rec.Recipient = g.cfg.HolderID
+			x.rec.Stages = &LegStages{}
 		}
 		ew := &exchangeWriter{ResponseWriter: w, x: x}
 		panicked := true
@@ -826,6 +1011,7 @@ func (g *Gateway) emitExchange(x *exchangeRecorder, w *exchangeWriter, panicked 
 	x.mu.Lock()
 	rec := x.rec
 	rec.Findings.Kinds = slices.Clone(rec.Findings.Kinds)
+	rec.Edits = slices.Clone(rec.Edits)
 	// At observe the count and kinds are deferred (checks run off the request
 	// path), but a check that refuses is always judged inline, so Refused is known.
 	if g.policy().Level() == EnforcementObserve {
@@ -836,12 +1022,23 @@ func (g *Gateway) emitExchange(x *exchangeRecorder, w *exchangeWriter, panicked 
 		b := *rec.Backend
 		rec.Backend = &b
 	}
+	unwrapped := x.unwrapped
+	if rec.Stages != nil {
+		s := *rec.Stages
+		rec.Stages = &s
+	}
 	outcome, by, rule, appStatus, guardRule := x.outcome, x.party, x.rule, x.appStatus, x.guardRule
 	backendFailed := rec.Backend != nil && rec.Backend.ErrorClass != "" && rec.Backend.ErrorClass != BackendCancelled
 	backendCancelled := x.cut
 	x.mu.Unlock()
 
 	rec.Latency = g.exchangeClock().Sub(rec.Start)
+	if rec.Stages != nil && !unwrapped {
+		// Refused before its dispatch with an answer it did not seal: the
+		// call's time in no other stage was the unwrap.
+		st := rec.Stages
+		st.Unwrap = max(0, rec.Latency-(st.Reads+st.Forward+st.Validate+st.Seal+st.Ledger+st.Write))
+	}
 	rec.Status = w.status
 	if rec.Status == 0 && !panicked {
 		rec.Status = http.StatusOK // a handler that wrote nothing answered 200

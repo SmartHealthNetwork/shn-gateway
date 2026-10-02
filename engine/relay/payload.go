@@ -94,9 +94,14 @@ const (
 	// builds, from its system of record's own Patient to the member's network
 	// patient, and only when the report names that Patient.
 	EditEvidenceSubjectRekey EditID = "E-06"
+	// EditCDSCoverageCarry carries, as a CDS Hooks request's
+	// prefetch.coverage, the Coverage the provider's gateway read through the
+	// request's own fhirServer to route by, compensating for the callback
+	// strip (EditCDSCallbackStrip), which leaves the payer no way to read it.
+	EditCDSCoverageCarry EditID = "E-07"
 )
 
-var editIDs = []EditID{EditCDSCallbackStrip, EditCDSPrefetchObtain, EditPayorEdgeRestamp, EditDTRCoverageObtain, EditDTRPatientObtain, EditEvidenceSubjectRekey}
+var editIDs = []EditID{EditCDSCallbackStrip, EditCDSPrefetchObtain, EditPayorEdgeRestamp, EditDTRCoverageObtain, EditDTRPatientObtain, EditEvidenceSubjectRekey, EditCDSCoverageCarry}
 
 // EditIDs returns every registered edit id, in order.
 func EditIDs() []EditID { return slices.Clone(editIDs) }

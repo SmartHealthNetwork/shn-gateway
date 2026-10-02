@@ -182,10 +182,10 @@ func TestPASIngressPayorReference_RefusalSaysWhy(t *testing.T) {
 			payorCoverage("", "")),
 			"the Coverage names no payor"},
 		"a contained reference to a resource that is not an Organization": {payorBundle(
-			strings.Replace(payorCoverage("", payorRef("#payer-org")), `"payor"`, `"contained":[{"resourceType":"Patient","id":"payer-org"}],"payor"`, 1)),
+			strings.Replace(payorCoverage("", payorRef("#payer-org")), `"payor"`, `"contained":[{"resourceType":"Location","id":"payer-org"}],"payor"`, 1)),
 			"Coverage.payor references a resource that is not an Organization"},
 		"a contained Organization sharing its id with another contained resource": {payorBundle(
-			strings.Replace(payorCoverage("", payorRef("#payer-org")), `"payor"`, `"contained":[{"resourceType":"Patient","id":"payer-org"},{"resourceType":"Organization","id":"payer-org"}],"payor"`, 1)),
+			strings.Replace(payorCoverage("", payorRef("#payer-org")), `"payor"`, `"contained":[{"resourceType":"Location","id":"payer-org"},{"resourceType":"Organization","id":"payer-org"}],"payor"`, 1)),
 			"the contained payor Organization carries no identifier with both a system and a value, such as a NAIC code or payer id"},
 		"a payor with neither a reference nor a whole identifier": {payorBundle(
 			payorCoverage("", `{"identifier":{"value":"00001"}}`)),

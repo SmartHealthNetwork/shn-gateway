@@ -155,12 +155,19 @@ directly, inside your own boundary; the gateway forwards your EHR's own request
 bytes through to the Hub. It removes `fhirServer` and `fhirAuthorization` (the
 payer never gets a route or a credential into your systems; by default the
 gateway itself reads a coverage through `fhirServer`, your EHR's own FHIR server,
-only to choose the payer when the request carries none and your system of
-record does not hold the member, and carries nothing it read; your server must answer that
+to choose the payer when the request carries none and your system of record does
+not hold the member, and from shn-gateway v0.61.0 carries what it routed by as the
+request's `prefetch.coverage`: your server's Coverage records and the payor Organization
+routing resolved for them,
+byte for byte (so any reference they hold, an absolute one on your server included, is
+carried as written), in a `searchset` the gateway writes with `urn:uuid:` entry addresses and
+none of your server's links or entry addresses outside those records (except that the payor
+Organization your Coverage names by an absolute reference on your `fhirServer` base gets that
+reference, already in the Coverage, as its `fullUrl`) (before v0.61.0 it carried nothing it read); your server must answer that
 read in JSON (`application/fhir+json` or `application/json`), with headers of at most 64 KiB
 and a body of at most 512 KiB; `CDS_FHIR_SERVER_READ=off` turns the read off: see
 [Reading the coverage through `fhirServer`](CONFIGURATION.md#reading-the-coverage-through-fhirserver)),
-and by default adds nothing: send every prefetch value
+and by default adds nothing else: send every prefetch value
 you want the payer to see. With `ENRICH_NATIVE_REQUESTS=true` it adds the prefetch
 values the request leaves out, read from your own system of record — never made up.
 See [CDS Hooks prefetch](CONFIGURATION.md#cds-hooks-prefetch) for the rules. The
@@ -170,8 +177,10 @@ for its hook. The payer's answer comes back exactly as the payer sent it.
 A `$questionnaire-package` request is carried as your EHR sent it; with
 `ENRICH_NATIVE_REQUESTS=true`, your Coverage and Patient are appended when it carries
 none. A Coverage a request leaves out is read from your system of record either way,
-to choose the payer. A Coverage read only to choose the payer is not sent, so a CDS
-Hooks request with no `prefetch.coverage` reaches the payer with no Coverage, and gets
+to choose the payer. A Coverage read from your system of record only to choose the payer
+is not sent, so a CDS Hooks request with no `prefetch.coverage`, for a member your system
+of record holds, reaches the payer with no Coverage (one read through `fhirServer` is
+carried, as above), and gets
 whatever the payer's own system answers for it (a payer's gateway carries it as sent,
 even one that maps its payer identity, from v0.60.0; earlier releases of that mapping
 refused it `400`). Send `prefetch.coverage`, with a payor that names the payer (its

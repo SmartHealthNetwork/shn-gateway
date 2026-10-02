@@ -503,10 +503,15 @@ var assembleFaultHook func([]byte)
 
 // assemblyEntry is one record an assembled searchset carries: the span of
 // its resource in the search's pages, and its search mode ("match" or
-// "include").
+// "include"). fullURL, when set, is the entry's fullUrl in place of the
+// urn:uuid entryURN derives; only the coverage carry (E-07) sets it, for an
+// included Organization a carried Coverage names by an absolute reference on
+// the request's own fhirServer (fhirServerCarriedEntries). Every other path
+// leaves it empty, so its bytes are unchanged.
 type assemblyEntry struct {
-	res  EntrySpan
-	mode string
+	res     EntrySpan
+	mode    string
+	fullURL string
 }
 
 // assembleSoRSearchset writes the searchset the gateway sends for a search it
@@ -520,10 +525,14 @@ type assemblyEntry struct {
 // declared as an embed, which relay.Authored verifies. Nothing else of the
 // server's answer is carried: not its links, its entry addresses, its
 // Bundle id or meta, nor its messages about the search (OperationOutcome
-// entries). The payer is never handed an address in the provider's system.
+// entries). The records are carried as written, references included; nothing
+// outside them hands the payer an address in the provider's system (an
+// explicit fullUrl, below, is a reference a carried record already holds).
 // Each entry's fullUrl is a urn:uuid the gateway derives from the record and
-// its position (the same search answer gives the same bytes). total is the
-// number of match entries.
+// its position (the same search answer gives the same bytes), unless the
+// entry names its own (assemblyEntry.fullURL: only the coverage carry, E-07,
+// for an included Organization a carried Coverage already names by that
+// absolute reference). total is the number of match entries.
 func assembleSoRSearchset(pages [][]byte, entries []assemblyEntry, total int) (value []byte, sealed relay.Payload, err error) {
 	bodies := make([]relay.Body, len(pages))
 	for i, p := range pages {
@@ -545,7 +554,11 @@ func assembleSoRSearchset(pages [][]byte, entries []assemblyEntry, total int) (v
 		if i > 0 {
 			b = append(b, ',')
 		}
-		b = append(b, `{"fullUrl":"`+entryURN(i, record)+`","resource":`...)
+		fullURL := `"` + entryURN(i, record) + `"`
+		if e.fullURL != "" {
+			fullURL = string(jsonString(e.fullURL))
+		}
+		b = append(b, `{"fullUrl":`+fullURL+`,"resource":`...)
 		embeds = append(embeds, relay.Embed{Source: bodies[r.Page], Start: r.Start, End: r.End, At: len(b)})
 		b = append(b, record...)
 		b = append(b, `,"search":{"mode":"`+e.mode+`"}}`...)

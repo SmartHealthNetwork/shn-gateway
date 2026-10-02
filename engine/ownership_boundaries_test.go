@@ -84,6 +84,7 @@ var transmitBoundaries = map[string]boundaryRule{
 	// Sends that are not exchange messages.
 	"Gateway.observeIngress": {kind: excluded, reason: "transparent HTTP observation delegates to the original ingress handler; no payload is authored or transmitted here"},
 	"Gateway.observeInbound": {kind: excluded, reason: "transparent HTTP observation delegates to the independently checked inbound handler; no payload is authored or transmitted here"},
+	"exchangeWriter.Write":   {kind: excluded, reason: "the exchange record's transparent response writer: it times the write of bytes its handler's own checked transmit wrote, and authors nothing"},
 	"writeLocalJSON": {kind: excluded,
 		reason: "a successful local API answer (a scenario or console summary built from decoded values)"},
 	"Gateway.authorizeOnce": {kind: excluded,
@@ -95,7 +96,7 @@ var transmitBoundaries = map[string]boundaryRule{
 	"DiscoverCDSServices": {kind: excluded,
 		reason: "a CDS Services discovery read that sends no body"},
 	"fhirServerReader.get": {kind: excluded,
-		reason: "a Coverage search, and at most one payor Organization read, on the CDS client's own fhirServer, only to route: it sends no body, only the client's own token back to the server that issued it"},
+		reason: "a Coverage search, and at most one payor Organization read, on the CDS client's own fhirServer, to route by: it sends no body, only the client's own token back to the server that issued it; what routing used is carried only inside the CDS Hooks request's registered edit E-07"},
 	"nativePopulator.post": {kind: excluded,
 		reason: "a call to the participant's own pre-population service with a request this gateway builds; no peer is on the wire"},
 	"Gateway.handleUC08": {kind: excluded,

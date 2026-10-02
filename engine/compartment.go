@@ -41,6 +41,11 @@ func (e *CompartmentError) Error() string {
 //   - Other references in the resource (Coverage.subscriber, a Claim payee,
 //     an Observation performer, and so on) are not binding: they may name
 //     another person, and they are not resolved.
+//   - The one other person's record the fence carries is a Coverage's
+//     party: a Patient contained in a Coverage that only the Coverage's
+//     subscriber or policyHolder names, by the slot's own reference
+//     (shnsdk.CoverageParty). The Coverage is still bound by its beneficiary like
+//     any other; a standalone entry for another Patient is still refused.
 //   - A resource of any other R4 type is allowed; an unknown type is refused.
 //
 // A binding reference resolves as:
@@ -64,7 +69,10 @@ type patientFence struct {
 	ids          map[string]bool
 	// refuseOpaque refuses every Binary resource (forPrefetch).
 	refuseOpaque bool
-	run          *fenceRun
+	// noParties fences a Coverage's party like any other contained Patient
+	// (withoutParties).
+	noParties bool
+	run       *fenceRun
 }
 
 // fenceAnotherPatientReference is the refusal of a reference that names
@@ -80,6 +88,17 @@ const opaqueContentReason = "opaque content is not carried in prefetch"
 // the fence cannot read for the patient.
 func (f patientFence) forPrefetch() patientFence {
 	f.refuseOpaque = true
+	return f
+}
+
+// withoutParties is the fence that carries no Coverage's party: every
+// contained Patient must be the bound patient, as before the party rule. It
+// is the requester's fence over a facility's disclosed records
+// (requesterRecordsFence), which the party rule does not cover. (A facility's
+// own fence reads only the member's Patient and the records queried, never a
+// Coverage, so a party never reaches it.)
+func (f patientFence) withoutParties() patientFence {
+	f.noParties = true
 	return f
 }
 
@@ -192,6 +211,9 @@ type fenceScope struct {
 	container map[string]any
 	contained map[string]map[string]any
 	entries   *docIndex
+	// parties are the contained ids that are the container Coverage's
+	// parties (shnsdk.CoverageParty).
+	parties map[string]bool
 }
 
 // resource fences res. parent is the scope of the resource that contains
@@ -258,12 +280,30 @@ func (f patientFence) resourceOnce(res map[string]any, entries *docIndex, parent
 			order = append(order, cr)
 		}
 		for _, cr := range order {
+			// Only a Coverage has a party (shnsdk.CoverageParty decides it,
+			// the Coverage check included). The mark the run put on res and
+			// on the contained resources fenced so far is no reference, and
+			// the rule ignores it.
+			if !f.noParties && shnsdk.CoverageParty(res, cr) {
+				if sc.parties == nil {
+					sc.parties = map[string]bool{}
+				}
+				id, _ := cr["id"].(string)
+				sc.parties[id] = true
+			}
 			if err := f.resource(cr, entries, &sc, depth+1); err != nil {
 				return err
 			}
 		}
 	}
 	if rt == "Patient" {
+		if id, _ := res["id"].(string); parent != nil && parent.parties[id] {
+			// A Coverage's party is another person, so its identity is not
+			// checked. shnsdk.CoverageParty names it only when it holds as a
+			// contained resource: it contains nothing, its identifier is a
+			// list, and it spells the members the rule reads exactly.
+			return nil
+		}
 		return f.patient(res, parent != nil)
 	}
 	if rt == "Provenance" {
@@ -614,5 +654,5 @@ func (f patientFence) reference(v any, sc fenceScope) (bool, *refError) {
 // patient reference, which names either the member itself or a Patient the
 // facility carried in the same Bundle with the member identifier.
 func requesterRecordsFence(member string) patientFence {
-	return newPatientFence(shnsdk.MemberSystem, member, nil, member)
+	return newPatientFence(shnsdk.MemberSystem, member, nil, member).withoutParties()
 }

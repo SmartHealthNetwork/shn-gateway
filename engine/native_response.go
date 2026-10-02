@@ -62,6 +62,55 @@ func InspectNativePASResponse(body []byte) (NativePASFacts, error) {
 	}, nil
 }
 
+// NativePASUnresolvedReference names the first reference the response graph
+// rule (FR-G28) finds a native PAS response Bundle does not resolve: the
+// resource type of the entry holding it ("Bundle" for Bundle or entry
+// metadata), the element within that resource, and the reference exactly as
+// the payer wrote it. ok is false when the graph resolves, and when the Bundle
+// is refused for a reason that names no reference. It states why
+// InspectNativePASResponse refused a Bundle; it decides nothing more, and it
+// names no other value from the Bundle: neither the holder's id nor the address
+// the reference resolved to.
+func NativePASUnresolvedReference(body []byte) (holder, element, reference string, ok bool) {
+	g, err := readPASGraphOf(body, false)
+	if err != nil {
+		return "", "", "", false
+	}
+	r := pasGraphRefusalOf(g.validate())
+	if r == nil {
+		return "", "", "", false
+	}
+	return r.holder, r.Path, r.Reference, true
+}
+
+// CheckNativePASGraphWithoutClaimResponse applies the response graph rule to a
+// PAS response Bundle that carries no ClaimResponse, as an inquiry response
+// Bundle may: a collection whose every entry carries a resource under an
+// absolute fullUrl, and whose every reference resolves in it. It returns nil
+// when that holds, and refuses a Bundle that carries a ClaimResponse (read
+// such a Bundle with InspectNativePASResponse). NativePASUnresolvedReference
+// names the reference a refusal is about. It reads; it decides nothing for the
+// relay.
+func CheckNativePASGraphWithoutClaimResponse(body []byte) error {
+	g, err := readPASGraphOf(body, false)
+	if err != nil {
+		return err
+	}
+	if g.response != nil {
+		return pasGraphStructural("the Bundle carries a ClaimResponse")
+	}
+	return g.validate()
+}
+
+// ConsistentPASInquiryAnswerSubjects reports whether every patient a PAS
+// inquiry answer names, in every response Bundle and at every depth, is the
+// same one: the subject rule the inquiry leg applies to a payer's answer
+// (RulePatientAnswer). An answer that names none is consistent, and one that
+// cannot be read is not. It reads; it decides nothing for the relay.
+func ConsistentPASInquiryAnswerSubjects(answer []byte) bool {
+	return consistentPASInquiryAnswerSubjects(answer)
+}
+
 // firstIdentifierKey is the resource's first identifier as "system|value" (or
 // the bare value when it has no system), "" when it states none usable.
 func firstIdentifierKey(r map[string]any) string {

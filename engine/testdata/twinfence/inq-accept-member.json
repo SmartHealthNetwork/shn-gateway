@@ -1,0 +1,153 @@
+{
+  "name": "inq-accept-member",
+  "family": "inquiry-bind",
+  "description": "A conformant inquiry for the member binds clean.",
+  "expect": "accept",
+  "tokenMember": "MBR-COVERED",
+  "bundle": {
+    "resourceType": "Bundle",
+    "identifier": {
+      "system": "urn:shn:pas:inquiry",
+      "value": "inq-twinfence"
+    },
+    "type": "collection",
+    "timestamp": "2026-06-04T00:00:00Z",
+    "entry": [
+      {
+        "fullUrl": "https://shn.example/fhir/Claim/inquiry-twinfence",
+        "resource": {
+          "resourceType": "Claim",
+          "id": "inquiry-twinfence",
+          "identifier": [
+            {
+              "system": "urn:shn:pas:inquiry",
+              "value": "inq-twinfence"
+            }
+          ],
+          "status": "active",
+          "type": {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/claim-type",
+                "code": "professional"
+              }
+            ]
+          },
+          "use": "preauthorization",
+          "patient": {
+            "reference": "https://shn.example/fhir/Patient/MBR-COVERED"
+          },
+          "created": "2026-06-04T00:00:00Z",
+          "insurer": {
+            "reference": "https://shn.example/fhir/Organization/org-cms-payer"
+          },
+          "provider": {
+            "reference": "https://shn.example/fhir/Organization/provider"
+          },
+          "priority": {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/processpriority",
+                "code": "normal"
+              }
+            ]
+          },
+          "insurance": [
+            {
+              "sequence": 1,
+              "focal": true,
+              "coverage": {
+                "reference": "https://shn.example/fhir/Coverage/cov-twinfence"
+              }
+            }
+          ],
+          "item": [
+            {
+              "extension": [
+                {
+                  "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-itemTraceNumber",
+                  "valueIdentifier": {
+                    "system": "urn:shn:pas:item-trace",
+                    "value": "twinfence.1"
+                  }
+                }
+              ],
+              "sequence": 1,
+              "productOrService": {
+                "coding": [
+                  {
+                    "system": "http://www.ama-assn.org/go/cpt",
+                    "code": "72148"
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      {
+        "fullUrl": "https://shn.example/fhir/Patient/MBR-COVERED",
+        "resource": {
+          "id": "MBR-COVERED",
+          "identifier": [
+            {
+              "system": "urn:shn:member",
+              "type": {
+                "coding": [
+                  {
+                    "code": "MB",
+                    "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                  }
+                ]
+              },
+              "value": "MBR-COVERED"
+            }
+          ],
+          "resourceType": "Patient"
+        }
+      },
+      {
+        "fullUrl": "https://shn.example/fhir/Coverage/cov-twinfence",
+        "resource": {
+          "beneficiary": {
+            "reference": "Patient/MBR-COVERED"
+          },
+          "id": "cov-twinfence",
+          "payor": [
+            {
+              "reference": "Organization/org-cms-payer"
+            }
+          ],
+          "resourceType": "Coverage",
+          "status": "active"
+        }
+      },
+      {
+        "fullUrl": "https://shn.example/fhir/Organization/provider",
+        "resource": {
+          "id": "provider",
+          "identifier": [
+            {
+              "system": "http://hl7.org/fhir/sid/us-npi",
+              "value": "1234567893"
+            }
+          ],
+          "resourceType": "Organization"
+        }
+      },
+      {
+        "fullUrl": "https://shn.example/fhir/Organization/org-cms-payer",
+        "resource": {
+          "id": "org-cms-payer",
+          "identifier": [
+            {
+              "system": "urn:oid:2.16.840.1.113883.6.300",
+              "value": "00001"
+            }
+          ],
+          "resourceType": "Organization"
+        }
+      }
+    ]
+  }
+}

@@ -225,15 +225,16 @@ var legOwnership = func() map[Key]Rule {
 	m := map[Key]Rule{
 		// Requester to the network, carrying its participant's request.
 		// A prior-authorization Bundle is relayed exactly; a CDS Hooks
-		// request is relayed exactly or with the callback removed and absent
-		// prefetch values added; a questionnaire package request is relayed
+		// request is relayed exactly or with the callback removed, absent
+		// prefetch values added under the enrichment opt-in, and the coverage
+		// read through the removed fhirServer to route by carried; a questionnaire package request is relayed
 		// exactly or with the patient's Coverage added when it carries none (and,
 		// under the unknown-member seam, the provider's own Patient record).
 		{"crd-order-dispatch", RoleRequester, DirectionRequest, OutcomeCarried}: {
-			Allowed: []Ownership{OwnershipRelayed, OwnershipEdited}, Edits: []EditID{EditCDSCallbackStrip, EditCDSPrefetchObtain},
+			Allowed: []Ownership{OwnershipRelayed, OwnershipEdited}, Edits: []EditID{EditCDSCallbackStrip, EditCDSPrefetchObtain, EditCDSCoverageCarry},
 		},
 		{"crd-order-select", RoleRequester, DirectionRequest, OutcomeCarried}: {
-			Allowed: []Ownership{OwnershipRelayed, OwnershipEdited}, Edits: []EditID{EditCDSCallbackStrip, EditCDSPrefetchObtain},
+			Allowed: []Ownership{OwnershipRelayed, OwnershipEdited}, Edits: []EditID{EditCDSCallbackStrip, EditCDSPrefetchObtain, EditCDSCoverageCarry},
 		},
 		{"dtr-questionnaire-fetch", RoleRequester, DirectionRequest, OutcomeCarried}: {
 			Allowed: []Ownership{OwnershipRelayed, OwnershipEdited}, Edits: []EditID{EditDTRCoverageObtain, EditDTRPatientObtain},

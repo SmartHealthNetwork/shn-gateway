@@ -54,8 +54,57 @@ func TestAccessLineFor(t *testing.T) {
 
 	answered := engine.ExchangeRecord{Direction: engine.DirectionIngress, Route: engine.RouteCRD, Exchange: "crd-order-select", Outcome: engine.ExchangeAnswered, Status: 200}
 	line := accessLineFor(answered)
-	if line.Refusal != nil || line.Backend != nil {
+	if line.Refusal != nil || line.Backend != nil || line.RelayEdits != nil {
 		t.Fatalf("an answered ingress call rendered %+v", line)
+	}
+
+	// The registered edits the leg was transmitted with are named last, as
+	// ids, in transmit order; a line with none is the line above, byte for
+	// byte (the golden holds no relayEdits key).
+	edited := refusedRecord()
+	edited.Edits = []string{"E-01", "E-07"}
+	b, err = json.Marshal(accessLineFor(edited))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wantEdited := strings.TrimSuffix(want, "}") + `,"relayEdits":["E-01","E-07"]}`; string(b) != wantEdited {
+		t.Fatalf("access line with edits\n got %s\nwant %s", b, wantEdited)
+	}
+
+	// The Hub's delivery value on an ingress leg's error answer is its own
+	// key, named last; a line without one holds no hubDelivered key (the
+	// golden above).
+	for _, v := range []string{"no", "yes", "unknown"} {
+		hub := refusedRecord()
+		hub.HubDelivered = v
+		b, err = json.Marshal(accessLineFor(hub))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if wantHub := strings.TrimSuffix(want, "}") + `,"hubDelivered":"` + v + `"}`; string(b) != wantHub {
+			t.Fatalf("access line with the Hub's delivery value\n got %s\nwant %s", b, wantHub)
+		}
+	}
+
+	// An inbound leg's stages render each in its own key, in milliseconds,
+	// and the reason its answer could not be authorized follows them; the
+	// golden above holds neither key.
+	staged := refusedRecord()
+	staged.Stages = &engine.LegStages{
+		Unwrap: 1 * time.Millisecond, Reads: 2 * time.Millisecond, Forward: 3 * time.Millisecond, Validate: 4 * time.Millisecond,
+		Seal: 5 * time.Millisecond, Ledger: 6 * time.Millisecond, Write: 7*time.Millisecond + 900*time.Microsecond,
+	}
+	staged.AnswerError = "timeout"
+	b, err = json.Marshal(accessLineFor(staged))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const stages = `"stages":{"unwrapMs":1,"readsMs":2,"forwardMs":3,"validateMs":4,"sealMs":5,"ledgerMs":6,"writeMs":7},"answerError":"timeout",`
+	if wantStaged := strings.Replace(want, `"findings":`, stages+`"findings":`, 1); string(b) != wantStaged {
+		t.Fatalf("access line with stages\n got %s\nwant %s", b, wantStaged)
+	}
+	if b, err = json.Marshal(accessLineFor(answered)); err != nil || bytes.Contains(b, []byte(`"stages"`)) || bytes.Contains(b, []byte(`"answerError"`)) {
+		t.Fatalf("an ingress call rendered stages or an answer error: %s %v", b, err)
 	}
 }
 

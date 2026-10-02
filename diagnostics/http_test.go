@@ -209,14 +209,17 @@ func TestUnavailableCaptureSlotForwardsConcurrentRequests(t *testing.T) {
 	wg.Wait()
 	eventsMu.Lock()
 	defer eventsMu.Unlock()
-	partials := 0
+	// A request with no capture slot keeps no body, but its fingerprint still
+	// covers every byte it carried.
+	unkept := 0
 	for _, e := range events {
-		if e.Kind == "http-request" && e.URL == "/rejected" && !e.RequestFingerprint.Complete && len(e.Body) == 0 {
-			partials++
+		fp := e.RequestFingerprint
+		if e.Kind == "http-request" && e.URL == "/rejected" && !e.BodyComplete && len(e.Body) == 0 && fp.Complete && fp.ObservedBytes == int64(len("secret")) && fp.BodySHA256 == digestOf("secret") {
+			unkept++
 		}
 	}
-	if partials != 200 {
-		t.Fatalf("partial requests=%d", partials)
+	if unkept != 200 {
+		t.Fatalf("requests without a slot reporting an unkept body and a whole fingerprint=%d, want 200", unkept)
 	}
 }
 

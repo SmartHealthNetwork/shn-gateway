@@ -1,7 +1,8 @@
 // ingress_crd.go — CRD (CDS Hooks order-select) ingress: parse the conformant inbound request,
 // prove every patient reference resolves to ONE pci before any leg, and prepare the EHR's own
 // bytes for the network (the callback removed; absent prefetch obtained from the participant's
-// system of record only when it opts in to enrichment). On the ingress the payload is EXTERNAL (the EHR), so cross-field patient
+// system of record only when it opts in to enrichment; a coverage read through the removed
+// fhirServer to route by carried). On the ingress the payload is EXTERNAL (the EHR), so cross-field patient
 // consistency is not automatic the way it is for the /scenario Originator.
 package engine
 
@@ -221,8 +222,10 @@ func patientResourceID(resource json.RawMessage) string {
 // values it carries.
 type crdIngressRequest struct {
 	// request is the EHR's request, exact or with the registered edits:
-	// the callback removed and, under enrichment, absent prefetch values
-	// added.
+	// the callback removed, under enrichment absent prefetch values added,
+	// and a coverage read through fhirServer carried. It is unset while
+	// carry is set: that request is built once routed
+	// (carryFHIRServerCoverage).
 	request relay.Payload
 	// values holds the prefetch values the request is routed by, by key: every
 	// value it carries, and each value obtained from the system of record. An
@@ -241,6 +244,9 @@ type crdIngressRequest struct {
 	// fhirServer: a payor Organization that read does not resolve is read
 	// there once more, within the same time budget.
 	fhirServer *fhirServerRouting
+	// carry is set with fhirServer: what the request is built from once it
+	// is routed, the read's records carried as prefetch.coverage (E-07).
+	carry *coverageCarry
 	// sentPayor is where a payor Organization that a coverage the EHR sent
 	// names by reference alone, and that the request does not resolve, is
 	// read, only to route (sentPayorResolver).
@@ -302,10 +308,13 @@ type prefetchObtained struct {
 //     edit): the payer never receives a route or a credential into the
 //     provider's system. The gateway calls fhirServer (unless its
 //     participant turns the read off, Config.FHIRServerRead) in two cases
-//     only, both only to route, and never carries the answers: when the
-//     request carries no coverage and the system of record names no patient
-//     for the member (a Coverage search and at most one payor Organization
-//     read), and when a coverage the request carries names its payor
+//     only, both to route by: when the request carries no coverage and the
+//     system of record names no patient for the member (a Coverage search
+//     and at most one payor Organization read, whose records routing used
+//     are then carried as prefetch.coverage, E-07, because the strip leaves
+//     the payer no way to read them; the request is built once it is routed,
+//     carryFHIRServerCoverage), and, only to route and never carried, when a
+//     coverage the request carries names its payor
 //     Organization by reference alone and nothing the request carries
 //     resolves it, for any member, unless fhirServer is the system of record's own FHIR base and that system
 //     names the patient by context.patientId and holds the Organization (one
@@ -327,14 +336,18 @@ type prefetchObtained struct {
 //     coverage. The request is refused (coverageStatus) only when the
 //     routing read fails too.
 //     When the system of record's Patient id is not context.patientId,
-//     nothing is obtained: an absent patient or coverage refuses the request
-//     with 422 before any read, and an absent history key is left out (the
-//     reason is recorded).
-//   - Without the opt-in (the default) nothing is inserted. A request that
-//     leaves out its coverage still has one searched for, only to route by,
-//     under the system's own id for the patient (obtainRoutingCoverage: every
-//     Coverage, routed on the active ones, else on the others); it is refused
-//     as above when none can be found. No other key is read.
+//     nothing is inserted: an absent patient cannot be obtained
+//     (RulePrefetchFill: 422 at strict before any read, left out below), an
+//     absent history key is left out (the reason is recorded), and an absent
+//     coverage is read only to route by, as without the opt-in, and not
+//     inserted.
+//   - Without the opt-in (the default) nothing is inserted from the system of
+//     record. A request that leaves out its coverage still has one searched
+//     for, only to route by, under the system's own id for the patient
+//     (obtainRoutingCoverage: every Coverage, routed on the active ones, else
+//     on the others); it is refused as above when none can be found. No
+//     other key is read. The coverage read through fhirServer is the one
+//     value carried by default (E-07, above).
 //
 // Every value, kept or obtained, must be about the bound patient: a kept
 // value that is not is refused with 403 (at strict; RulePatientMixed), an
@@ -519,6 +532,9 @@ func (g *Gateway) ingressEnsureSelfContainedContext(ctx context.Context, leg str
 		value []byte
 	}
 	var inserts []insert
+	// fhirServerAnswer is the searchset the read through fhirServer returned,
+	// exactly: what E-07 carries from, once the request is routed.
+	var fhirServerAnswer []byte
 	for _, key := range pinnedPrefetchKeys {
 		if hasPrefetch {
 			if _, ok := doc.Member(prefetch, key); ok {
@@ -555,7 +571,7 @@ func (g *Gateway) ingressEnsureSelfContainedContext(ctx context.Context, leg str
 			if key == "coverage" {
 				// Nothing to route by in the request or the system of record:
 				// read it through the request's own fhirServer when this
-				// gateway does (only to route; nothing is added), or refuse.
+				// gateway does (routed by, then carried: E-07), or refuse.
 				switch {
 				case !g.readsFHIRServer():
 					return out, fhirServerRefused, crdNoCoverageReadOff
@@ -564,12 +580,13 @@ func (g *Gateway) ingressEnsureSelfContainedContext(ctx context.Context, leg str
 				}
 				fhirServer.patient = member
 				routing := &fhirServerRouting{leg: leg, read: fhirServer, deadline: time.Now().Add(g.fhirServerBudget())}
-				value, status, msg := g.coverageFromFHIRServer(ctx, routing, fence)
+				value, answer, status, msg := g.coverageFromFHIRServer(ctx, routing, fence)
 				if status != 0 {
 					return out, status, msg
 				}
 				out.values[key] = value
 				out.fhirServer = routing
+				fhirServerAnswer = answer
 				continue
 			}
 			if key == prefetchPatientKey || inconsistent {
@@ -582,15 +599,18 @@ func (g *Gateway) ingressEnsureSelfContainedContext(ctx context.Context, leg str
 			g.recordPrefetch(leg, prefetchObtained{Key: key, Query: query, Outcome: SearchNotRun, Reason: historyMemberNotHeld})
 			continue
 		}
-		if sorID != member && enrich {
-			// Values from the system of record would name the patient by an id
-			// the request does not use. The payer ties the patient and the
-			// coverage to the request's patient, so without them the request is
-			// refused before anything is read; a history value is left out.
-			// Without enrichment the coverage is only read to route by, never
-			// inserted, so the system's own id for the patient serves.
-			if key == prefetchPatientKey || key == "coverage" {
-				if key == "coverage" || unfilled(false) {
+		// fill is whether a value read for this key is inserted (E-02): only
+		// under the opt-in, and only when the system of record names the
+		// patient by context.patientId: a value from a system that names the
+		// patient by another id names it by an id the request does not use.
+		fill := enrich && sorID == member
+		if !fill && key != "coverage" {
+			// Under the opt-in, a system that names the patient by another id
+			// cannot supply the patient the payer ties to the request's
+			// patient: RulePrefetchFill decides it (refused at strict, left
+			// out below). A history value is left out, the reason recorded.
+			if key == prefetchPatientKey {
+				if unfilled(false) {
 					return out, http.StatusUnprocessableEntity, patientNamedDifferently
 				}
 				continue
@@ -600,19 +620,22 @@ func (g *Gateway) ingressEnsureSelfContainedContext(ctx context.Context, leg str
 			continue
 		}
 		obtainFence := fence
-		if !enrich && sorID != member {
-			// Read only to route by, under the system's own id: in that system
-			// Patient/<member> is another patient (or none), so the coverage is
-			// fenced to the system's id alone.
+		if sorID != member {
+			// Read only to route by, under the system's own id, with or
+			// without the opt-in: in that system Patient/<member> is another
+			// patient (or none), so the coverage is fenced to the system's id
+			// alone.
 			obtainFence = newPatientFence(shnsdk.MemberSystem, member, bases, sorID).forPrefetch()
 		}
 		var value []byte
 		var outcome SearchOutcome
 		var status int
 		var msg string
-		if !enrich {
+		if !fill {
 			// The coverage read only to route by (the one key read without
-			// the opt-in): every Coverage, routed on routingCoverageChoice's.
+			// the opt-in, and the one read under it when the system names the
+			// patient by another id): every Coverage, routed on
+			// routingCoverageChoice's, never inserted.
 			value, outcome, status, msg = g.obtainRoutingCoverage(ctx, leg, sorID, obtainFence)
 		} else {
 			value, outcome, status, msg = g.obtainPrefetch(ctx, leg, key, sorID, obtainFence)
@@ -627,7 +650,7 @@ func (g *Gateway) ingressEnsureSelfContainedContext(ctx context.Context, leg str
 			}
 			continue
 		}
-		if value == nil && enrich && key == "coverage" {
+		if value == nil && fill && key == "coverage" {
 			// The system could not answer the template's search: the key is
 			// left out, as a history the system cannot search is, and the
 			// request is routed by the routing read, as without the opt-in.
@@ -647,10 +670,10 @@ func (g *Gateway) ingressEnsureSelfContainedContext(ctx context.Context, leg str
 			}
 			continue
 		}
-		if enrich {
+		if fill {
 			inserts = append(inserts, insert{key, value})
 		}
-		if enrich && key == "coverage" {
+		if fill && key == "coverage" {
 			// The coverage carried under the opt-in is the template's search
 			// (status=active), as the system answered it. When that search
 			// found a Coverage the request is routed on its routing choice
@@ -658,8 +681,7 @@ func (g *Gateway) ingressEnsureSelfContainedContext(ctx context.Context, leg str
 			// would; when it found none (a member with no active coverage), on
 			// the routing read (obtainRoutingCoverage), and the value carried
 			// stays null. The opt-in never leaves a member with less to route
-			// by than the default, except when the system of record names the
-			// patient by another id (refused above, patientNamedDifferently).
+			// by than the default.
 			if string(value) == "null" {
 				value, outcome, status, msg = g.obtainRoutingCoverage(ctx, leg, sorID, obtainFence)
 				if status != 0 {
@@ -682,18 +704,26 @@ func (g *Gateway) ingressEnsureSelfContainedContext(ctx context.Context, leg str
 	if len(strip) > 0 {
 		changes = append(changes, relay.Change{Edit: relay.EditCDSCallbackStrip, Ops: strip})
 	}
+	target, hasTarget := prefetch, hasPrefetch
 	if len(inserts) > 0 {
 		var ops []relay.Op
-		target := prefetch
-		if !hasPrefetch {
+		if !hasTarget {
 			op, h := doc.EnsureObjectMember(root, "prefetch")
 			ops = append(ops, op)
-			target = relay.NodeID(h)
+			target, hasTarget = relay.NodeID(h), true
 		}
 		for _, in := range inserts {
 			ops = append(ops, doc.InsertMember(target, in.key, in.value))
 		}
 		changes = append(changes, relay.Change{Edit: relay.EditCDSPrefetchObtain, Ops: ops})
+	}
+	if out.fhirServer != nil {
+		// The coverage read through fhirServer is carried (E-07) once the
+		// request is routed: routing may read its payor Organization there
+		// too, and only what routing used is carried. Nothing is built yet.
+		out.carry = &coverageCarry{body: body, doc: doc, root: root, prefetch: target, hasPrefetch: hasTarget,
+			changes: changes, answer: fhirServerAnswer, fence: fence}
+		return out, 0, ""
 	}
 	if len(changes) == 0 {
 		out.request = relay.Exact(body, "application/json")
@@ -710,10 +740,12 @@ func (g *Gateway) ingressEnsureSelfContainedContext(ctx context.Context, leg str
 	return out, 0, ""
 }
 
-// patientNamedDifferently refuses a request whose absent patient or coverage
-// would have to come from a system of record that names the patient by an id
-// other than context.patientId.
-const patientNamedDifferently = "system of record names the patient differently from context.patientId; supply patient and coverage prefetch in the request"
+// patientNamedDifferently refuses, under the opt-in at strict
+// (RulePrefetchFill), a request whose absent patient would have to come from a
+// system of record that names the patient by an id other than
+// context.patientId. Its coverage needs no such refusal: it is read only to
+// route by, under the system's own id, as without the opt-in.
+const patientNamedDifferently = "system of record names the patient differently from context.patientId; supply the patient prefetch in the request"
 
 // crdNoCoverageToRouteBy refuses a request that carries no coverage and names
 // no fhirServer, for a member the system of record names no patient for (one
@@ -877,12 +909,16 @@ func (g *Gateway) readsFHIRServer() bool {
 // fhirServerRouting is a coverage read through the request's own fhirServer:
 // the read, the leg it serves and the deadline every read for it shares.
 // sentPayor marks the read of the payor Organization of a coverage the EHR
-// itself sent (sentPayorResolver), recorded and logged as that.
+// itself sent (sentPayorResolver), recorded and logged as that. payor is the
+// payor Organization fhirServerPayor read, exactly as the server answered,
+// once routing read one: for a coverage read through fhirServer it is carried
+// with it (E-07); for a coverage the EHR sent it is never carried.
 type fhirServerRouting struct {
 	leg       string
 	read      fhirServerRead
 	deadline  time.Time
 	sentPayor bool
+	payor     []byte
 }
 
 // fhirServerBudget is the time every read through fhirServer for one request
@@ -902,12 +938,15 @@ func (g *Gateway) fhirServerReader() fhirServerReader {
 // coverageFromFHIRServer searches the bound patient's Coverage through
 // the request's own fhirServer (fhirserver_read.go), fences it to the patient
 // and records the read (a prefetch.obtained event with source fhirServer, and
-// a log line naming only the host). It returns the searchset to route by, or
-// a refusal: nothing it returns is added to the request.
-func (g *Gateway) coverageFromFHIRServer(ctx context.Context, routing *fhirServerRouting, fence patientFence) ([]byte, int, string) {
+// a log line naming only the host). It returns the searchset to route by
+// (routingCoverages) and the answer exactly as the server returned it, or a
+// refusal. Neither is added to the request as it is: once the request is
+// routed, the records routing used are carried in a searchset the gateway
+// writes (E-07, carryFHIRServerCoverage).
+func (g *Gateway) coverageFromFHIRServer(ctx context.Context, routing *fhirServerRouting, fence patientFence) ([]byte, []byte, int, string) {
 	ctx, cancel := context.WithDeadline(ctx, routing.deadline)
 	defer cancel()
-	log.Printf("gateway: coverage to route by: reading it through fhirServer %s (only to route; nothing is added)", fhirServerHost(routing.read.base))
+	log.Printf("gateway: coverage to route by: reading it through fhirServer %s (to route by; carried as prefetch.coverage once routed)", fhirServerHost(routing.read.base))
 	value, count, query, status, msg := g.fhirServerReader().read(ctx, routing.read)
 	switch {
 	case status != 0:
@@ -930,15 +969,16 @@ func (g *Gateway) coverageFromFHIRServer(ctx context.Context, routing *fhirServe
 	}
 	g.recordFHIRServerRead(routing, query, status, msg, count)
 	if status != 0 {
-		return nil, status, msg
+		return nil, nil, status, msg
 	}
-	return routingCoverages(value), 0, ""
+	return routingCoverages(value), value, 0, ""
 }
 
 // fhirServerPayor returns the resolver of a payor Organization the coverage
 // read did not resolve: one read of it on the request's fhirServer, within the
-// coverage read's deadline, recorded like it. A second Organization, or a
-// refused read, resolves nothing and leaves the refusal in *status and *msg.
+// coverage read's deadline, recorded like it, and kept as routing.payor. A
+// second Organization, or a refused read, resolves nothing and leaves the
+// refusal in *status and *msg.
 func (g *Gateway) fhirServerPayor(ctx context.Context, routing *fhirServerRouting) (resolve func(string) ([]byte, bool), status *int, msg *string) {
 	status, msg = new(int), new(string)
 	var readID string
@@ -968,6 +1008,7 @@ func (g *Gateway) fhirServerPayor(ctx context.Context, routing *fhirServerRoutin
 			return nil, false
 		}
 		org = value
+		routing.payor = value
 		return org, true
 	}
 	return resolve, status, msg
@@ -1003,12 +1044,15 @@ type sentPayorRead struct {
 //   - noPayerIdentifierOnlyRef, for any other reference to an Organization
 //     (versioned, with a fragment, a leading slash or a dot segment): no
 //     valid resource the EHR sends with it resolves it, so only a payor
-//     identifier.
+//     identifier;
+//   - noPayerUnresolvedURN, for a urn:uuid or urn:oid reference, which only
+//     an entry of a Bundle the request carries with that fullUrl resolves.
 const (
 	noPayerSendPayor         = noPayerIdentifier + ": Coverage.payor is a reference to an Organization the gateway could not read; send the payor Organization with the coverage, or a payor identifier"
 	noPayerUnreadRef         = noPayerIdentifier + ": Coverage.payor is a reference to an Organization the gateway could not resolve; send the payor Organization as a Bundle entry whose fullUrl is that reference, or a payor identifier"
 	noPayerIdentifierOnlyRef = noPayerIdentifier + ": Coverage.payor is a reference to an Organization the gateway does not read; send a payor identifier with the coverage"
 	noPayerSentTwoRefs       = noPayerIdentifier + ": the request's coverages name more than one payor Organization by reference alone"
+	noPayerUnresolvedURN     = noPayerIdentifier + ": Coverage.payor is a urn reference no Bundle entry's fullUrl matches; send the payor Organization as a Bundle entry whose fullUrl is that reference, or a payor identifier"
 )
 
 // unresolvedPayor classifies the last payor reference a sent-payor resolver
@@ -1018,8 +1062,8 @@ type unresolvedPayor int
 
 const (
 	// payorNoRemedy: no reference went unresolved, or the one that did is
-	// not a reference to an Organization (a RelatedPerson, a Patient, a
-	// urn:uuid): the refusal stays the bare noPayerIdentifier.
+	// not a reference to an Organization (a RelatedPerson, a Patient): the
+	// refusal stays the bare noPayerIdentifier.
 	payorNoRemedy unresolvedPayor = iota
 	// payorRelativeOrganization: "Organization/<id>" (payorOrganizationID
 	// with no base), which the payor Organization sent with the coverage
@@ -1032,6 +1076,10 @@ const (
 	// payorOtherOrganization: any other reference to an Organization
 	// (namesOrganization). Nothing sent with the coverage resolves it.
 	payorOtherOrganization
+	// payorURNEntry: a urn:uuid or urn:oid reference, which names no type;
+	// only an entry with that fullUrl of a Bundle the request carries
+	// resolves it (carriedRefs, entryAnswers).
+	payorURNEntry
 )
 
 // classifyUnresolvedPayor is the class of a payor reference nothing resolved.
@@ -1044,14 +1092,16 @@ func classifyUnresolvedPayor(ref string) unresolvedPayor {
 		return payorFullURLOrganization
 	case namesOrganization(ref):
 		return payorOtherOrganization
+	case strings.HasPrefix(ref, "urn:uuid:") || strings.HasPrefix(ref, "urn:oid:"):
+		return payorURNEntry
 	}
 	return payorNoRemedy
 }
 
 // refusal is the answer to a sent coverage refused msg: the remedy for an
 // Organization reference nothing resolved, when msg is the bare refusal of a
-// coverage without a payer; otherwise msg itself (a resolved Organization
-// with no payer identifier keeps the bare text).
+// coverage without a payer; otherwise msg itself (a resolved payor with no
+// payer identifier already carries its reason, recipientForCoverages).
 func (u unresolvedPayor) refusal(msg string) string {
 	if msg != noPayerIdentifier {
 		return msg
@@ -1063,6 +1113,8 @@ func (u unresolvedPayor) refusal(msg string) string {
 		return noPayerUnreadRef
 	case payorOtherOrganization:
 		return noPayerIdentifierOnlyRef
+	case payorURNEntry:
+		return noPayerUnresolvedURN
 	}
 	return msg
 }

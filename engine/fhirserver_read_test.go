@@ -505,9 +505,10 @@ func (s *syncBuffer) String() string {
 
 // A CRD request with no coverage for a member the system of record does not
 // hold, naming its EHR's fhirServer, is routed by the Coverage read there.
-// Nothing is added to what is carried: no coverage prefetch, and fhirServer
-// and fhirAuthorization still removed. The read is recorded with its source,
-// and its log names the host, never the token.
+// What routing used is carried as prefetch.coverage (E-07), after the EHR's
+// own prefetch, and fhirServer and fhirAuthorization are still removed: no
+// token and no address on the EHR's server is carried. The read is recorded
+// with its source, and its log names the host, never the token.
 func TestCRDIngressRoutesByTheCoverageReadThroughFHIRServer(t *testing.T) {
 	e := newEHRServer(t, ehrAnswer(200, "application/fhir+json", coverageSearchset(strangerMember, "00001")))
 	env, obs := fhirServerEnv(t, e, "")
@@ -521,8 +522,8 @@ func TestCRDIngressRoutesByTheCoverageReadThroughFHIRServer(t *testing.T) {
 		t.Fatalf("fhirServer read %d times with %q", e.calls.Load(), e.auth.Load())
 	}
 	sent := sentRequest(t, env)
-	if got := names(membersOf(t, sent, "prefetch")); strings.Join(got, ",") != "patient" {
-		t.Fatalf("prefetch carried %v, want only the EHR's patient: nothing read is added", got)
+	if got := names(membersOf(t, sent, "prefetch")); strings.Join(got, ",") != "patient,coverage" {
+		t.Fatalf("prefetch carried %v, want the EHR's patient and the coverage read", got)
 	}
 	for _, key := range []string{"fhirServer", "fhirAuthorization", "ehr-secret-token", "example.com"} {
 		if bytes.Contains(sent, []byte(key)) {
@@ -635,7 +636,8 @@ func payorOrganization(id, payerValue string) string {
 // A Coverage naming its payor by reference alone (the search asks for no
 // _include) is routed by one more read, of that Organization, on the same
 // server with the same token. Two Coverages naming the same Organization take
-// that one read. Nothing either read returns is carried.
+// that one read. Both reads' records are carried (E-07), the Organization
+// once; no token and no address on the server is.
 func TestCRDIngressRoutesByThePayorOrganizationReadThroughFHIRServer(t *testing.T) {
 	for name, search := range map[string]string{"one coverage": bareRefSearchset("o1"), "two naming the same": bareRefSearchset("o1", "o1")} {
 		t.Run(name, func(t *testing.T) {
@@ -662,10 +664,15 @@ func TestCRDIngressRoutesByThePayorOrganizationReadThroughFHIRServer(t *testing.
 				t.Fatalf("read %v, want %v", paths, want)
 			}
 			sent := sentRequest(t, env)
-			for _, key := range []string{"Organization", "00001", "fhirServer", "ehr-secret-token"} {
+			for _, key := range []string{"fhirServer", "fhirAuthorization", "ehr-secret-token", "example.com"} {
 				if bytes.Contains(sent, []byte(key)) {
 					t.Fatalf("the carried request holds %q", key)
 				}
+			}
+			got := carriedSearchsetOf(t, sent)
+			if want := strings.Count(search, `"resourceType":"Coverage"`); got.total != want || len(got.matches) != want ||
+				len(got.includes) != 1 || got.includes[0] != payorOrganization("o1", "00001") {
+				t.Fatalf("carried %+v, want %d matches and the Organization read once", got, want)
 			}
 			if ev := obs.prefetch(t)["coverage"]; ev.Source != sourceFHIRServer || ev.Query != "/fhir/Organization/o1" || ev.Outcome != SearchOK {
 				t.Fatalf("recorded %+v", ev)
@@ -788,7 +795,7 @@ func TestCRDIngressFHIRServerRefusals(t *testing.T) {
 		"a versioned Organization reference": {FHIRServerReadPrivate, ehrRoutes(bareRefSearchset("Organization/o1/_history/2"), ehrAnswer(200, "application/json", payorOrganization("o1", "00001"))),
 			1, 422, "no payer identifier on member coverage"},
 		"an Organization with no payer identifier": {FHIRServerReadPrivate, ehrRoutes(bareRefSearchset("o1"), ehrAnswer(200, "application/json", `{"resourceType":"Organization","id":"o1","name":"Payer One"}`)),
-			2, 422, "no payer identifier on member coverage"},
+			2, 422, noPayerOrganizationNoIdentifier},
 		"coverages naming two payers": {FHIRServerReadPrivate, ehrAnswer(200, "application/json", `{"resourceType":"Bundle","type":"searchset","entry":[`+
 			`{"resource":{"resourceType":"Coverage","id":"c9","status":"active","beneficiary":{"reference":"Patient/`+strangerMember+`"},"payor":[{"identifier":{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00001"}}]}},`+
 			`{"resource":{"resourceType":"Coverage","id":"c8","status":"active","beneficiary":{"reference":"Patient/`+strangerMember+`"},"payor":[{"identifier":{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00002"}}]}}]}`),

@@ -277,6 +277,11 @@ func readPASInquiryFacts(bundleJSON []byte, refuses func(rule string) bool) (pas
 	if (len(members) != 1 || !members[facts.member]) && refuses(RulePatientMixed) {
 		return pasInquiryFacts{}, http.StatusForbidden, "inconsistent patient in PAS inquiry"
 	}
+	// And no resource it carries, contained or nested, is or names another
+	// patient, as on the submit legs (pasCarriesAnotherPatient).
+	if pasCarriesAnotherPatient(bundleJSON, facts.member) && refuses(RulePatientMixed) {
+		return pasInquiryFacts{}, http.StatusForbidden, "inconsistent patient in PAS inquiry"
+	}
 	return facts, 0, ""
 }
 
@@ -545,6 +550,14 @@ func (g *Gateway) reportInquiryAnswerNonconformance(corrID, counterpart string, 
 // through: one inquiry asks about one member's authorizations, so an answer that
 // names two is not an answer to it.
 //
+// A dependent's Coverage names the parent as its subscriber or policyHolder, a
+// Patient contained in the Coverage: that Coverage's party (entryCoverageParties)
+// is another person, so it is not one of the answer's patients. A contained
+// Patient that does not hold as a contained resource is no party, so it is one
+// of them.
+// Only a Coverage that is itself an entry has a party, and only its slot naming
+// that party is exempt from binding as a typed Patient reference.
+//
 // The identities are compared with EACH OTHER, not with this network's member id:
 // a payer answers in its own patient namespace. The caller applies the
 // bound-member comparison only where the answer is this gateway's own.
@@ -795,11 +808,21 @@ func (s *inquiryPatientScope) crossBundleKey(identity string) string {
 // address. It reports false when a subject member names nobody readable.
 func (s *inquiryPatientScope) collect(bundle map[string]any, members map[string]bool) bool {
 	readable := true
-	var walk func(v any, owner string, depth int)
-	walk = func(v any, owner string, depth int) {
+	// lone: the document walked is not a Bundle (a lone ClaimResponse, or a
+	// Parameters return that is not a Bundle), so nothing it holds is an
+	// entry of the answer and a Coverage it is has no party.
+	lone := false
+	// role is what v is to an entry-level Coverage's party rule
+	// (entryCoverageParties), as in the submission walk: a party is another
+	// person, so it names no patient here (the rule itself requires that it
+	// holds as a contained resource); the slot naming it is the one typed
+	// Patient reference that names no patient.
+	var walk func(v any, owner string, depth int, role coveragePartyRole)
+	walk = func(v any, owner string, depth int, role coveragePartyRole) {
 		switch v := v.(type) {
 		case map[string]any:
-			if rt, _ := v["resourceType"].(string); rt == "Patient" {
+			rt, isResource := v["resourceType"].(string)
+			if role != roleCoverageParty && rt == "Patient" {
 				// A Patient entry IS its address; a contained Patient belongs to
 				// the resource containing it. FHIR requires a contained resource to
 				// carry an id, so one without an id is malformed and gets an
@@ -813,8 +836,9 @@ func (s *inquiryPatientScope) collect(bundle map[string]any, members map[string]
 			}
 			// A typed Patient reference binds wherever it sits, not only in a
 			// subject member: a polymorphic path (an actor, an extension's
-			// valueReference) names a patient just as plainly.
-			if typ, _ := v["type"].(string); typ == "Patient" || typ == "http://hl7.org/fhir/StructureDefinition/Patient" {
+			// valueReference) names a patient just as plainly. The one
+			// exception is an entry-level Coverage's slot naming its own party.
+			if typ, _ := v["type"].(string); (typ == "Patient" || typ == "http://hl7.org/fhir/StructureDefinition/Patient") && role != roleCoveragePartySlot {
 				if id := s.referenceIdentity(v, owner); id != "" {
 					members[id] = true
 				} else {
@@ -823,6 +847,10 @@ func (s *inquiryPatientScope) collect(bundle map[string]any, members map[string]
 					// submission walk refuses this too.
 					readable = false
 				}
+			}
+			var parties entryParties
+			if depth == 0 && !lone && isResource && rt == "Coverage" {
+				parties = entryCoverageParties(v)
 			}
 			for key, val := range v {
 				if inquirySubjectFields[key] {
@@ -843,11 +871,17 @@ func (s *inquiryPatientScope) collect(bundle map[string]any, members map[string]
 						members[id] = true
 					}
 				}
-				walk(val, owner, depth+1)
+				if list, ok := val.([]any); ok && key == "contained" && parties.any() {
+					for i, c := range list {
+						walk(c, owner, depth+2, parties.roleOf(i))
+					}
+					continue
+				}
+				walk(val, owner, depth+1, parties.slotRole(key, val))
 			}
 		case []any:
 			for _, e := range v {
-				walk(e, owner, depth+1)
+				walk(e, owner, depth+1, roleNone)
 			}
 		}
 	}
@@ -868,14 +902,15 @@ func (s *inquiryPatientScope) collect(bundle map[string]any, members map[string]
 			id, _ := res["id"].(string)
 			owner = typ + "/" + id
 		}
-		walk(res, owner, 0)
+		walk(res, owner, 0, roleNone)
 	}
 	// A document that is not a Bundle (a lone ClaimResponse) has no entries; walk
 	// it as its own owner so its references are still read.
 	if len(entries) == 0 {
 		if rt, _ := bundle["resourceType"].(string); rt != "" && rt != "Bundle" {
 			id, _ := bundle["id"].(string)
-			walk(bundle, rt+"/"+id, 0)
+			lone = true
+			walk(bundle, rt+"/"+id, 0, roleNone)
 		}
 	}
 	// A Bundle whose addresses are not unique is unreadable: see the type.
@@ -911,13 +946,23 @@ func (s *inquiryPatientScope) referenceIdentity(ref map[string]any, owner string
 	return ""
 }
 
-// stripHistoryRef drops a `/_history/…` suffix: a version-specific reference
-// names the same resource as the version-less one.
+// stripHistoryRef drops a `/_history/<version>` suffix: a version-specific
+// reference names the same resource as the version-less one.
 func stripHistoryRef(ref string) string {
-	if i := strings.Index(ref, "/_history/"); i >= 0 {
-		return ref[:i]
+	base, _, _ := splitHistory(ref)
+	return base
+}
+
+// splitHistory reads a trailing `/_history/<version>` off ref: its last
+// segment pair, with a version that is one segment. A base whose path
+// contains `/_history/` elsewhere is part of the reference, never its version,
+// so "https://host/_history/fhir/Patient/p" is unversioned.
+func splitHistory(ref string) (base, version string, versioned bool) {
+	i := strings.LastIndex(ref, "/_history/")
+	if i < 0 || strings.Contains(ref[i+len("/_history/"):], "/") {
+		return ref, "", false
 	}
-	return ref
+	return ref[:i], ref[i+len("/_history/"):], true
 }
 
 // patientIdentifierKeys are every business identifier a Patient states, as scope
@@ -1176,7 +1221,10 @@ func (g *Gateway) handlePASInquireInbound(w http.ResponseWriter, r *http.Request
 	committed := false
 	defer func() {
 		if !committed && result.Rollback != nil {
+			// Releasing the claim is the pend ledger's write.
+			stopLedger := exchangeOf(r.Context()).stage(addLedger)
 			result.Rollback()
+			stopLedger()
 		}
 	}()
 	if err != nil {
@@ -1214,7 +1262,9 @@ func (g *Gateway) handlePASInquireInbound(w http.ResponseWriter, r *http.Request
 		// The ledger effect, derived from the answer. The EOBs it produces join the
 		// gateway's own side-effects, so they are member-fenced and egress-$validated
 		// below exactly as the submit leg's decision EOB is.
+		stop := exchangeOf(r.Context()).stage(addLedger)
 		ledgerCommit, events = g.inquiryLedgerEffect(env.Metadata.Sender, subjectPCI, boundPatientRef, env.Metadata.CorrelationID, facts, responseFHIR, &result)
+		stop()
 	}
 	if status, msg := g.fenceResponseSubjectWith(r.Context(), "pas-claim-inquire", boundPatientRef, env.Metadata.CorrelationID, result, read.refuses); status != 0 {
 		g.refuseInbound(w, r, legPASClaimInquire, env, tok, answerTok, status, msg, nil)
@@ -1276,6 +1326,7 @@ func (g *Gateway) handlePASInquireInbound(w http.ResponseWriter, r *http.Request
 	// one that failed reports none; the notes below are about the lookup, and
 	// stand either way.
 	writeFailed := false
+	stopLedger := exchangeOf(r.Context()).stage(addLedger)
 	if ledgerCommit != nil {
 		if err := ledgerCommit(); err != nil {
 			writeFailed = true
@@ -1288,6 +1339,7 @@ func (g *Gateway) handlePASInquireInbound(w http.ResponseWriter, r *http.Request
 			g.payerLocalWriteFailed("pas-claim-inquire", env.Metadata.CorrelationID, err)
 		}
 	}
+	stopLedger()
 	committed = !writeFailed
 	for _, e := range events {
 		g.observe(e)

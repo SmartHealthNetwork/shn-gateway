@@ -547,23 +547,29 @@ func TestPASGraphRefusalNamesTheReference(t *testing.T) {
 	}{
 		{"relative to no entry", func(b, cr, p map[string]any) {
 			cr["insurer"] = map[string]any{"reference": "Organization/new"}
-		}, pasGraphRefusal{Owner: "entry 0 (ClaimResponse/cr)", Path: "/insurer", Target: "Organization", Reference: "Organization/new", Why: "resolves to https://payer.test/fhir/Organization/new, which is no entry of the Bundle"}},
+		}, pasGraphRefusal{Owner: "entry 0 (ClaimResponse/cr)", Path: "/insurer", Target: "Organization", Reference: "Organization/new", Why: "resolves to https://payer.test/fhir/Organization/new, which is no entry of the Bundle", holder: "ClaimResponse"}},
 		{"absolute foreign", func(b, cr, p map[string]any) {
 			cr["patient"] = map[string]any{"reference": "https://shn.example/fhir/Patient/MBR-COVERED"}
-		}, pasGraphRefusal{Owner: "entry 0 (ClaimResponse/cr)", Path: "/patient", Target: "Patient", Reference: "https://shn.example/fhir/Patient/MBR-COVERED", Why: "is no entry of the Bundle"}},
+		}, pasGraphRefusal{Owner: "entry 0 (ClaimResponse/cr)", Path: "/patient", Target: "Patient", Reference: "https://shn.example/fhir/Patient/MBR-COVERED", Why: "is no entry of the Bundle", holder: "ClaimResponse"}},
 		{"nested element", func(b, cr, p map[string]any) {
 			cr["item"] = []any{map[string]any{"extension": []any{map[string]any{"url": "x", "valueReference": map[string]any{"reference": "ServiceRequest/9"}}}}}
-		}, pasGraphRefusal{Owner: "entry 0 (ClaimResponse/cr)", Path: "/item/0/extension/0/valueReference", Target: "ServiceRequest", Reference: "ServiceRequest/9", Why: "resolves to https://payer.test/fhir/ServiceRequest/9, which is no entry of the Bundle"}},
+		}, pasGraphRefusal{Owner: "entry 0 (ClaimResponse/cr)", Path: "/item/0/extension/0/valueReference", Target: "ServiceRequest", Reference: "ServiceRequest/9", Why: "resolves to https://payer.test/fhir/ServiceRequest/9, which is no entry of the Bundle", holder: "ClaimResponse"}},
 		{"missing contained", func(b, cr, p map[string]any) {
 			p["managingOrganization"] = map[string]any{"reference": "#absent"}
-		}, pasGraphRefusal{Owner: "entry 1 (Patient/p)", Path: "/managingOrganization", Target: "contained resource", Reference: "#absent", Why: "names no resource contained in entry 1 (Patient/p)"}},
+		}, pasGraphRefusal{Owner: "entry 1 (Patient/p)", Path: "/managingOrganization", Target: "contained resource", Reference: "#absent", Why: "names no resource contained in entry 1 (Patient/p)", holder: "Patient"}},
 		{"wrong version", func(b, cr, p map[string]any) {
 			p["meta"] = map[string]any{"versionId": "3"}
 			cr["patient"] = map[string]any{"reference": "Patient/p/_history/2"}
-		}, pasGraphRefusal{Owner: "entry 0 (ClaimResponse/cr)", Path: "/patient", Target: "Patient", Reference: "Patient/p/_history/2", Why: "names version 2, which entry 1 (Patient/p) does not hold"}},
+		}, pasGraphRefusal{Owner: "entry 0 (ClaimResponse/cr)", Path: "/patient", Target: "Patient", Reference: "Patient/p/_history/2", Why: "names version 2, which entry 1 (Patient/p) does not hold", holder: "ClaimResponse"}},
+		{"a base whose path contains /_history/", func(b, cr, p map[string]any) {
+			cr["patient"] = map[string]any{"reference": "https://payer.test/_history/fhir/Patient/p"}
+		}, pasGraphRefusal{Owner: "entry 0 (ClaimResponse/cr)", Path: "/patient", Target: "Patient", Reference: "https://payer.test/_history/fhir/Patient/p", Why: "is no entry of the Bundle", holder: "ClaimResponse"}},
+		{"a malformed version", func(b, cr, p map[string]any) {
+			cr["patient"] = map[string]any{"reference": "Patient/p/_history/2/x"}
+		}, pasGraphRefusal{Owner: "entry 0 (ClaimResponse/cr)", Path: "/patient", Target: "resource", Reference: "Patient/p/_history/2/x", Why: "resolves to https://payer.test/fhir/Patient/p/_history/2/x, which is no entry of the Bundle", holder: "ClaimResponse"}},
 		{"Bundle metadata", func(b, cr, p map[string]any) {
 			b["signature"] = map[string]any{"who": map[string]any{"reference": "Organization/signer"}, "data": "c2lnbmF0dXJl"}
-		}, pasGraphRefusal{Owner: "Bundle", Path: "/signature/who", Target: "Organization", Reference: "Organization/signer", Why: "is relative, and Bundle metadata has no base to resolve it against"}},
+		}, pasGraphRefusal{Owner: "Bundle", Path: "/signature/who", Target: "Organization", Reference: "Organization/signer", Why: "is relative, and Bundle metadata has no base to resolve it against", holder: "Bundle"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

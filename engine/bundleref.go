@@ -294,17 +294,21 @@ const (
 // local answers without naming one payer resolves to nothing and is never
 // looked up further, so no other source picks a payer the request leaves in
 // doubt; disagreed records it, and disagree is the refusal's reason.
+// resolved holds the resource the last reference resolved to, from any
+// source, so a refusal can say why it names no payer.
 type payorRefs struct {
 	local     []bundleRefEntry
 	disagree  string
 	next      func(ref string) ([]byte, bool)
 	disagreed bool
+	resolved  []byte
 }
 
 func (p *payorRefs) resolve(ref string) ([]byte, bool) {
 	res, how := resolveAmong(p.local, ref)
 	switch {
 	case how == refResolved:
+		p.resolved = res
 		return res, true
 	case how == refAmbiguous:
 		p.disagreed = true
@@ -312,7 +316,11 @@ func (p *payorRefs) resolve(ref string) ([]byte, bool) {
 	case p.next == nil:
 		return nil, false
 	}
-	return p.next(ref)
+	res, ok := p.next(ref)
+	if ok {
+		p.resolved = res
+	}
+	return res, ok
 }
 
 // coverageResources returns the Coverages a coverage value holds: the value
@@ -361,17 +369,25 @@ func coverageResources(coverage []byte) [][]byte {
 // Coverages (they must name one payer), each Coverage read alone, so that
 // every payor reference resolves through refs and none among a Bundle's
 // entries without the agreement rule. A payor refs leaves in doubt is
-// refused with refs' reason.
+// refused with refs' reason, and one that resolved to a resource naming no
+// payer identifier with the reason organizationMiss gives (as a PAS
+// Bundle's is); any other payor without one keeps the bare refusal.
 func (g *Gateway) recipientForCoverages(covs [][]byte, refs *payorRefs) (string, int, string) {
 	if g.cfg.PayerRouter == nil {
 		return "", http.StatusUnprocessableEntity, "no payer router configured"
 	}
 	var first shnsdk.PayerIdentifier
 	for i, c := range covs {
+		refs.resolved = nil
 		pid, err := shnsdk.ParseCoveragePayer(c, refs.resolve)
 		switch {
 		case err != nil && refs.disagreed:
 			return "", http.StatusUnprocessableEntity, noPayerIdentifier + ": " + refs.disagree
+		case err != nil && refs.resolved != nil:
+			if why := organizationMiss(refs.resolved, "the payor Organization"); why != "" {
+				return "", http.StatusUnprocessableEntity, noPayerIdentifier + ": " + why
+			}
+			return "", http.StatusUnprocessableEntity, noPayerIdentifier
 		case err != nil:
 			return "", http.StatusUnprocessableEntity, noPayerIdentifier
 		case i > 0 && pid != first:

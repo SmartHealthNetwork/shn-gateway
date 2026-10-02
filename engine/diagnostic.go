@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"slices"
 
 	"github.com/SmartHealthNetwork/shn-gateway/diagnostics"
+	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -121,9 +123,30 @@ func (g *Gateway) diagnosticHubRefusal(ctx context.Context, resp *http.Response,
 	g.diagnosticEvent(ctx, diagnostics.Event{Kind: "leg.failed", Status: resp.StatusCode, Body: respBody, BodyComplete: len(respBody) < shnsdk.MaxResponseBytes, Headers: headers, HeadersComplete: complete, Detail: "Hub response"})
 }
 
-// diagnosticSealed records an origination leg's payload as sealed for recipient.
-func (g *Gateway) diagnosticSealed(ctx context.Context, env shnsdk.Envelope, recipient, correlationID, txType, contractLine string, payload []byte) {
-	g.diagnostic(diagnostics.Event{Kind: "leg.sealed", CallID: diagnostics.CallID(ctx), RequestFingerprint: diagnostics.IngressFingerprint(ctx), RequestCiphertextHash: sha256hex(env.Ciphertext), Sender: g.cfg.HolderID, Recipient: recipient, CorrelationID: correlationID, LegType: txType, ContractLine: contractLine, Body: payload, BodyComplete: true})
+// diagnosticSealed records an origination leg's payload as sealed for
+// recipient, naming the registered edits it was transmitted with.
+func (g *Gateway) diagnosticSealed(ctx context.Context, env shnsdk.Envelope, recipient, correlationID, txType, contractLine string, payload []byte, edits []relay.EditID) {
+	g.diagnostic(diagnostics.Event{Kind: "leg.sealed", CallID: diagnostics.CallID(ctx), RequestFingerprint: diagnostics.IngressFingerprint(ctx), RequestCiphertextHash: sha256hex(env.Ciphertext), Sender: g.cfg.HolderID, Recipient: recipient, CorrelationID: correlationID, LegType: txType, ContractLine: contractLine, Body: payload, BodyComplete: true, Detail: relayEditsDetail(edits)})
+}
+
+// relayEditsDetail is the Detail of a captured transmit that applied edits
+// (diagnostics.RelayEditsDetail): their registered ids, each once, in order;
+// "" when it applied none, so such a transmit is captured as before.
+func relayEditsDetail(edits []relay.EditID) string {
+	var ids []string
+	for _, id := range edits {
+		if slices.Contains(relay.EditIDs(), id) && !slices.Contains(ids, string(id)) {
+			ids = append(ids, string(id))
+		}
+	}
+	if len(ids) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(diagnostics.RelayEditsDetail{RelayEdits: ids})
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 // withDiagnosticIdentity attributes r's diagnostics to a verified inbound
@@ -138,11 +161,17 @@ func WithNativeDiagnostic(sink DiagnosticSink) NativeOption {
 	return func(n *nativeResponder) { n.diagnostic = sink }
 }
 func (n *nativeResponder) emitDiagnostic(ctx context.Context, kind string, body []byte, status int, detail string, r *http.Request, headers http.Header) {
+	n.emitDiagnosticDetail(ctx, kind, body, detail == "", status, detail, r, headers)
+}
+
+// emitDiagnosticDetail is emitDiagnostic for an event whose detail is not a
+// note on its body's completeness (a forward naming its edits).
+func (n *nativeResponder) emitDiagnosticDetail(ctx context.Context, kind string, body []byte, complete bool, status int, detail string, r *http.Request, headers http.Header) {
 	if n.diagnostic == nil {
 		return
 	}
 	defer func() { _ = recover() }()
-	e := diagnostics.RequestIdentity(ctx, diagnostics.Event{Time: n.clock(), Kind: kind, Body: body, BodyComplete: detail == "", Status: status, Detail: detail, Method: r.Method, URL: r.URL.String()})
+	e := diagnostics.RequestIdentity(ctx, diagnostics.Event{Time: n.clock(), Kind: kind, Body: body, BodyComplete: complete, Status: status, Detail: detail, Method: r.Method, URL: r.URL.String()})
 	e.Headers, e.HeadersComplete = diagnosticHeaders(headers)
 	n.diagnostic(e)
 }

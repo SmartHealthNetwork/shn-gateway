@@ -25,7 +25,7 @@ func pasTailServiceRequest() []byte {
 	// ServiceRequest, unlike a DeviceRequest's single reference — and it names
 	// the participant's own requesting-provider record, which every lane's system
 	// of record holds.
-	return []byte(`{"resourceType":"ServiceRequest","id":"sr-x","status":"active","intent":"order","subject":{"reference":"Patient/MBR-PD-UC04"},"performer":[{"reference":"` + OrderingProviderRef + `"}],"code":{"coding":[{"system":"http://www.ama-assn.org/go/cpt","code":"72148","display":"MRI lumbar spine w/o contrast"}]}}`)
+	return []byte(`{"resourceType":"ServiceRequest","id":"sr-x","status":"active","intent":"order","subject":{"reference":"Patient/MBR-COVERED"},"performer":[{"reference":"` + OrderingProviderRef + `"}],"code":{"coding":[{"system":"http://www.ama-assn.org/go/cpt","code":"72148","display":"MRI lumbar spine w/o contrast"}]}}`)
 }
 
 // TestBuildPASSubmitBundle_ByteParity is the load-bearing extraction guard: the shared lean

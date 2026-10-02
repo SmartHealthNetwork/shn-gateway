@@ -23,6 +23,17 @@ type CaptureBudget struct {
 
 var defaultCaptureBudget = NewCaptureBudget(16<<20, 8)
 
+// The Detail an observed exchange's event carries when the capture budget,
+// not the body cap, kept its body from being captured whole, so a body the
+// budget left out is told apart from one cut by the body cap. A capture that
+// found no free slot keeps neither headers nor any body, and says so even
+// when the exchange had no body; one that found a slot but not enough bytes
+// keeps a prefix.
+const (
+	BodyNotKeptCaptureBudget = "body not kept: capture budget"
+	BodyPartialCaptureBudget = "body capture partial: capture budget"
+)
+
 const maxCapturedHeaderBytes int64 = 64 << 10
 
 func NewCaptureBudget(maxBytes int64, maxConcurrent int) *CaptureBudget {
@@ -135,6 +146,20 @@ type captureState struct {
 	closed    bool
 	released  bool
 	truncated bool
+	// short: the budget's bytes, not the body cap, ended the capture.
+	short bool
+}
+
+// budgetDetail is the Detail the state's event carries for the budget, or
+// none. The caller holds s.mu.
+func (s *captureState) budgetDetail() string {
+	switch {
+	case !s.available:
+		return BodyNotKeptCaptureBudget
+	case s.short:
+		return BodyPartialCaptureBudget
+	}
+	return ""
 }
 
 func (s *captureState) add(p []byte) {
@@ -163,6 +188,7 @@ func (s *captureState) add(p []byte) {
 		// always a prefix of the body and never joins bytes that were apart.
 		s.complete = false
 		s.truncated = true
+		s.short = int64(cap(s.data)) < s.cap
 	}
 }
 
@@ -171,13 +197,14 @@ type captureSnapshot struct {
 	observed int64
 	complete bool
 	digest   string
+	detail   string
 }
 
 // snapshot copies the captured prefix and its accounting under the lock.
 func (s *captureState) snapshot() captureSnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return captureSnapshot{data: bytes.Clone(s.data), observed: s.observed, complete: s.complete, digest: hex.EncodeToString(s.hash.Sum(nil))}
+	return captureSnapshot{data: bytes.Clone(s.data), observed: s.observed, complete: s.complete, digest: hex.EncodeToString(s.hash.Sum(nil)), detail: s.budgetDetail()}
 }
 
 // grow reserves room for n more body bytes as they arrive, never more than the
@@ -589,7 +616,7 @@ func ObserveHTTP(next http.Handler, emit func(Event) bool, info func(*http.Reque
 		r = r.WithContext(context.WithValue(r.Context(), ingressKey, func() RequestFingerprint {
 			rs.mu.Lock()
 			defer rs.mu.Unlock()
-			return RequestFingerprint{Algorithm: "sha256-body-v1", Method: method, RequestURI: uri, BodySHA256: hex.EncodeToString(rs.hash.Sum(nil)), ObservedBytes: rs.observed, Complete: (noRequestBody || rs.complete) && !rs.failed && rs.available}
+			return RequestFingerprint{Algorithm: "sha256-body-v1", Method: method, RequestURI: uri, BodySHA256: hex.EncodeToString(rs.hash.Sum(nil)), ObservedBytes: rs.observed, Complete: (noRequestBody || rs.complete) && !rs.failed}
 		}))
 		r = r.WithContext(context.WithValue(r.Context(), ingressBodyKey, func() []byte {
 			rs.mu.Lock()
@@ -621,10 +648,10 @@ func ObserveHTTP(next http.Handler, emit func(Event) bool, info func(*http.Reque
 			// can outlive the handler), so events are built from locked copies.
 			in, out := rs.snapshot(), ws.snapshot()
 			id, _ := r.Context().Value(identityKey).(requestIdentity)
-			fp := RequestFingerprint{Algorithm: "sha256-body-v1", Method: method, RequestURI: uri, BodySHA256: in.digest, ObservedBytes: in.observed, Complete: in.complete && rs.available}
-			req := Event{Time: start, Kind: hi.Kind, CallID: hi.CallID, CorrelationID: id.correlation, RequestCiphertextHash: id.hash, Sender: id.sender, Recipient: id.recipient, Method: method, URL: uri, Headers: requestHeaders, HeadersComplete: requestHeadersComplete, Body: in.data, BodyComplete: rs.available && in.complete && int64(len(in.data)) == in.observed, RequestFingerprint: fp, Status: ow.status, DurationNanos: safeNow(now).Sub(start).Nanoseconds()}
+			fp := RequestFingerprint{Algorithm: "sha256-body-v1", Method: method, RequestURI: uri, BodySHA256: in.digest, ObservedBytes: in.observed, Complete: in.complete}
+			req := Event{Time: start, Kind: hi.Kind, CallID: hi.CallID, CorrelationID: id.correlation, RequestCiphertextHash: id.hash, Sender: id.sender, Recipient: id.recipient, Method: method, URL: uri, Headers: requestHeaders, HeadersComplete: requestHeadersComplete, Body: in.data, BodyComplete: rs.available && in.complete && int64(len(in.data)) == in.observed, RequestFingerprint: fp, Status: ow.status, DurationNanos: safeNow(now).Sub(start).Nanoseconds(), Detail: in.detail}
 			safeEmit(emit, req)
-			resp := Event{Time: safeNow(now), Kind: hi.Kind + "-response", CallID: hi.CallID, Method: method, URL: uri, Headers: ow.headers, HeadersComplete: ow.headersComplete, Body: out.data, BodyComplete: ws.available && out.complete && int64(len(out.data)) == out.observed, RequestFingerprint: fp, Status: ow.status}
+			resp := Event{Time: safeNow(now), Kind: hi.Kind + "-response", CallID: hi.CallID, Method: method, URL: uri, Headers: ow.headers, HeadersComplete: ow.headersComplete, Body: out.data, BodyComplete: ws.available && out.complete && int64(len(out.data)) == out.observed, RequestFingerprint: fp, Status: ow.status, Detail: out.detail}
 			safeEmit(emit, resp)
 		}()
 		next.ServeHTTP(wrapWriter(ow), r)
@@ -695,7 +722,7 @@ func (t *observedTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		responseOnce.Do(func() {
 			fp := t.fingerprint(requestSnapshot, rs)
 			responseState.mu.Lock()
-			e := Event{Time: safeNow(t.now), Kind: "http-response", CallID: CallID(requestSnapshot.Context()), Method: requestSnapshot.Method, URL: requestURI(requestSnapshot), Headers: responseHeaders, HeadersComplete: responseHeadersComplete, Body: responseState.data, BodyComplete: responseState.available && responseState.complete && int64(len(responseState.data)) == responseState.observed, Status: status, RequestFingerprint: fp}
+			e := Event{Time: safeNow(t.now), Kind: "http-response", CallID: CallID(requestSnapshot.Context()), Method: requestSnapshot.Method, URL: requestURI(requestSnapshot), Headers: responseHeaders, HeadersComplete: responseHeadersComplete, Body: responseState.data, BodyComplete: responseState.available && responseState.complete && int64(len(responseState.data)) == responseState.observed, Status: status, RequestFingerprint: fp, Detail: responseState.budgetDetail()}
 			responseState.mu.Unlock()
 			safeEmit(t.emit, RequestIdentity(requestSnapshot.Context(), e))
 			done()
@@ -715,11 +742,11 @@ func (t *observedTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 func (t *observedTransport) fingerprint(r *http.Request, s *captureState) RequestFingerprint {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return RequestFingerprint{Algorithm: "sha256-body-v1", Method: r.Method, RequestURI: requestURI(r), BodySHA256: hex.EncodeToString(s.hash.Sum(nil)), ObservedBytes: s.observed, Complete: s.complete && s.available && !s.failed}
+	return RequestFingerprint{Algorithm: "sha256-body-v1", Method: r.Method, RequestURI: requestURI(r), BodySHA256: hex.EncodeToString(s.hash.Sum(nil)), ObservedBytes: s.observed, Complete: s.complete && !s.failed}
 }
 func (t *observedTransport) event(r *http.Request, headers http.Header, headersComplete bool, start time.Time, s *captureState) Event {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	fp := RequestFingerprint{Algorithm: "sha256-body-v1", Method: r.Method, RequestURI: requestURI(r), BodySHA256: hex.EncodeToString(s.hash.Sum(nil)), ObservedBytes: s.observed, Complete: s.complete && s.available && !s.failed}
-	return Event{Time: start, Kind: "http-request", CallID: CallID(r.Context()), Method: r.Method, URL: requestURI(r), Headers: headers, HeadersComplete: headersComplete, Body: s.data, BodyComplete: s.available && s.complete && !s.failed && int64(len(s.data)) == s.observed, RequestFingerprint: fp, DurationNanos: safeNow(t.now).Sub(start).Nanoseconds()}
+	fp := RequestFingerprint{Algorithm: "sha256-body-v1", Method: r.Method, RequestURI: requestURI(r), BodySHA256: hex.EncodeToString(s.hash.Sum(nil)), ObservedBytes: s.observed, Complete: s.complete && !s.failed}
+	return Event{Time: start, Kind: "http-request", CallID: CallID(r.Context()), Method: r.Method, URL: requestURI(r), Headers: headers, HeadersComplete: headersComplete, Body: s.data, BodyComplete: s.available && s.complete && !s.failed && int64(len(s.data)) == s.observed, RequestFingerprint: fp, DurationNanos: safeNow(t.now).Sub(start).Nanoseconds(), Detail: s.budgetDetail()}
 }

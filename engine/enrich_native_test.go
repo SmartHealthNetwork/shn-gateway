@@ -68,9 +68,8 @@ func TestCRDIngress_DefaultRoutesByCoverageItDoesNotInsert(t *testing.T) {
 			s.answer(t, "Coverage", searchPage(sorCoverage("cov-1", "00001")))
 			return s
 		}, ehrRequest(patientOnly), []string{"patient"}},
-		// Under enrichment this request is refused (patientNamedDifferently),
-		// because an inserted coverage would name the patient by another id.
-		// Read only to route by, the system's own id serves.
+		// Read only to route by, the system's own id serves; so it does under
+		// enrichment (TestCRDIngress_OptInRoutesAPatientNamedByAnotherIDAsTheDefault).
 		"the system of record names the patient differently": {namedDifferently, ehrRequest(patientOnly), []string{"patient"}},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -253,7 +252,7 @@ func includedPayer(org, value string) string {
 // template's search (status=active). A member whose only Coverage is cancelled
 // is routed to that coverage's payer as at the default and carries null (CDS
 // Hooks) or no coverage parameter ($questionnaire-package): the opt-in never
-// makes a member less reachable. A member with an active Coverage at one payer
+// leaves a member with less to route by. A member with an active Coverage at one payer
 // and a cancelled one at another is routed to the first and carries only the
 // active Coverage and its payor. A system that cannot answer the template's
 // search leaves the coverage out, and the request is routed by the routing
@@ -600,25 +599,190 @@ func TestCRDIngress_DefaultRecordsOnlyTheRoutingRead(t *testing.T) {
 	}
 }
 
-// The routing-only coverage read under the system's own id is fenced to that
-// id alone: in a system that names the patient differently, Patient/<member
-// id> is another patient, so a Coverage naming it is refused before the
-// network (502), at the CDS Hooks and questionnaire-package ingress alike.
-func TestDefaultRoutingReadFencedToTheSystemsOwnID(t *testing.T) {
-	t.Run("CDS Hooks", func(t *testing.T) {
-		s := namedDifferently(t)
-		s.answer(t, "Coverage", searchPage(sorCoverage("cov-1", "00001"))) // names Patient/example
-		env, rec := carryRow(t, s, ehrRequest(patientOnly))
-		refusedBeforeTheNetwork(t, env, rec, http.StatusBadGateway, fillFencedOtherPatient)
-	})
-	t.Run("questionnaire-package", func(t *testing.T) {
-		body := ehrParams(ehrOrderParam("sr1", prefetchMember), dtrQuestionnaire)
+// routingCoverageQueryFor is routingCoverageQuery under the system's own id
+// for the patient.
+func routingCoverageQueryFor(sorID string) string {
+	return strings.Replace(routingCoverageQuery, "Patient%2F"+prefetchSoRID, "Patient%2F"+sorID, 1)
+}
+
+// optInLabel names a row's enrichment setting.
+func optInLabel(enrich bool) string {
+	if enrich {
+		return "opt-in"
+	}
+	return "default"
+}
+
+// The coverage read only to route by, under the system's own id, is fenced to
+// that id alone, with or without the opt-in: in a system that names the
+// patient differently, Patient/<member id> is another patient, so a Coverage
+// naming it is refused before the network (502), at the CDS Hooks and
+// questionnaire-package ingress alike, at every level.
+func TestRoutingReadFencedToTheSystemsOwnID(t *testing.T) {
+	for _, enrich := range []bool{false, true} {
+		for _, level := range allLevels {
+			name := optInLabel(enrich) + "/" + level.String()
+			t.Run("CDS Hooks/"+name, func(t *testing.T) {
+				s := namedDifferently(t)
+				s.answer(t, "Coverage", searchPage(sorCoverage("cov-1", "00001"))) // names Patient/example
+				env, rec, _ := levelIngressRowWith(t, s, level, ehrRequest(patientOnly), enrich)
+				refusedBeforeTheNetwork(t, env, rec, http.StatusBadGateway, fillFencedOtherPatient)
+				if searched, read := s.calls(); !slices.Equal(searched, []string{routingCoverageQueryFor("pat-elsewhere")}) || len(read) != 0 {
+					t.Fatalf("searched %v, read %v: want only the routing read under the system's id", searched, read)
+				}
+			})
+			t.Run("questionnaire-package/"+name, func(t *testing.T) {
+				body := ehrParams(ehrOrderParam("sr1", prefetchMember), dtrQuestionnaire)
+				s := newPrefetchSoR()
+				s.sorID = "sor-9"
+				s.answer(t, "Coverage", searchPage(sorCoverage("cov-1", shnsdk.CMSPayerIdentity.Value))) // names Patient/example
+				env, rec := dtrIngressRowWith(t, s, body, level, enrich)
+				refusedBeforeTheNetwork(t, env, rec, http.StatusBadGateway, fillFencedOtherPatient)
+				if searched, read := s.calls(); !slices.Equal(searched, []string{routingCoverageQueryFor("sor-9")}) || len(read) != 0 {
+					t.Fatalf("searched %v, read %v: want only the routing read under the system's id", searched, read)
+				}
+			})
+		}
+	}
+}
+
+// The opt-in never leaves a member with less to route by than the default. A system
+// of record that names the patient by an id other than context.patientId
+// cannot fill the coverage: the value would name the patient by an id the
+// request does not use. So, under the opt-in as without it, a CDS Hooks
+// request that carries its patient and no coverage is routed by the coverage
+// read only to route by, under the system's own id (fenced to that id alone:
+// TestRoutingReadFencedToTheSystemsOwnID), and carried with only the callback
+// removed: no coverage is filled, and no finding is recorded, at every level.
+func TestCRDIngress_OptInRoutesAPatientNamedByAnotherIDAsTheDefault(t *testing.T) {
+	body := ehrRequest(patientOnly)
+	for _, enrich := range []bool{false, true} {
+		for _, level := range allLevels {
+			t.Run(optInLabel(enrich)+"/"+level.String(), func(t *testing.T) {
+				s := namedDifferently(t)
+				env, rec, findings := levelIngressRowWith(t, s, level, body, enrich)
+				if rec.Code != http.StatusOK || env.routeHitCount() != 1 {
+					t.Fatalf("answer %d %s (network hits %d)", rec.Code, rec.Body.String(), env.routeHitCount())
+				}
+				sent := sentRequest(t, env)
+				wantCarriedLessCallback(t, body, sent)
+				if got := names(membersOf(t, sent, "prefetch")); !slices.Equal(got, []string{"patient"}) {
+					t.Fatalf("prefetch keys %v, want only the EHR's patient: the coverage is not filled", got)
+				}
+				if searched, read := s.calls(); !slices.Equal(searched, []string{routingCoverageQueryFor("pat-elsewhere")}) || len(read) != 0 {
+					t.Fatalf("searched %v, read %v: want only the routing read under the system's id", searched, read)
+				}
+				if len(findings) != 0 {
+					t.Fatalf("nothing was left unfilled that the request needs, got findings %+v", findings)
+				}
+				g := carryGateway(namedDifferently(t))
+				g.cfg.EnrichNativeRequests = enrich
+				p, _ := mustPrepare(t, g, body)
+				if got := p.request.Edits(); !slices.Equal(got, []relay.EditID{relay.EditCDSCallbackStrip}) {
+					t.Fatalf("edits %v, want only the callback strip", got)
+				}
+				if !p.coverageFromSoR || p.values["coverage"] == nil {
+					t.Fatal("the request must be routed by the coverage read from the system of record")
+				}
+			})
+		}
+	}
+}
+
+// Under the opt-in, a CDS Hooks request that also leaves out its patient asks
+// for a value the system cannot supply under context.patientId
+// (RulePrefetchFill): strict refuses before anything is read, as it always
+// has; below strict the patient is left out and the request is routed by the
+// routing read under the system's own id, as without the opt-in, with nothing
+// added.
+func TestLevelCRDIngress_OptInPatientNamedByAnotherIDLeftOut(t *testing.T) {
+	for name, body := range map[string][]byte{"no prefetch": ehrRequest("-"), "an empty prefetch": ehrRequest("")} {
+		for _, level := range allLevels {
+			t.Run(name+"/"+level.String(), func(t *testing.T) {
+				s := namedDifferently(t)
+				env, rec, findings := levelFillRow(t, s, level, body)
+				wantLevelOutcome(t, level, env, rec, findings, RulePrefetchFill, http.StatusUnprocessableEntity, patientNamedDifferently)
+				searched, read := s.calls()
+				if refusesAt(level, RulePrefetchFill) {
+					if len(searched) != 0 || len(read) != 0 {
+						t.Fatalf("a refused request read the system of record: searched %v, read %v", searched, read)
+					}
+					return
+				}
+				wantCarriedLessCallback(t, body, sentRequest(t, env))
+				if !slices.Equal(searched, []string{routingCoverageQueryFor("pat-elsewhere")}) || len(read) != 0 {
+					t.Fatalf("searched %v, read %v: want only the routing read under the system's id", searched, read)
+				}
+			})
+		}
+	}
+}
+
+// Without the opt-in, the same request (no patient and no coverage, for a
+// member the system of record names by another id) is routed at every level
+// with no finding: nothing is filled, and the system of record is read only
+// to route by, under its own id.
+func TestLevelCRDIngress_PatientNamedByAnotherIDRoutedWithoutTheOptIn(t *testing.T) {
+	for name, body := range map[string][]byte{"no prefetch": ehrRequest("-"), "an empty prefetch": ehrRequest("")} {
+		for _, level := range allLevels {
+			t.Run(name+"/"+level.String(), func(t *testing.T) {
+				s := namedDifferently(t)
+				env, rec, findings := levelIngressRowWith(t, s, level, body, false)
+				if rec.Code != http.StatusOK || env.routeHitCount() != 1 {
+					t.Fatalf("answer %d %s", rec.Code, rec.Body.String())
+				}
+				if len(findings) != 0 {
+					t.Fatalf("findings %+v, want none", findings)
+				}
+				wantCarriedLessCallback(t, body, sentRequest(t, env))
+				searched, read := s.calls()
+				if !slices.Equal(searched, []string{routingCoverageQueryFor("pat-elsewhere")}) || len(read) != 0 {
+					t.Fatalf("searched %v, read %v: want only the routing read under the system's id", searched, read)
+				}
+			})
+		}
+	}
+}
+
+// $questionnaire-package: the opt-in never leaves a member with less to route by
+// than the default. A system of record that names the patient by another id can
+// supply no Coverage to append (it would name the patient by an id the
+// request does not use) and no Patient (E-05 needs the member id). So, under
+// the opt-in as without it, a request carrying no coverage parameter is
+// routed by the routing read under the system's own id (fenced to that id
+// alone: TestRoutingReadFencedToTheSystemsOwnID) and carried exactly as the
+// EHR sent it, at every level.
+func TestDTRIngress_OptInRoutesAPatientNamedByAnotherIDAsTheDefault(t *testing.T) {
+	body := ehrParams(ehrOrderParam("sr1", prefetchMember), dtrQuestionnaire)
+	sor := func(t *testing.T) *prefetchSoR {
 		s := newPrefetchSoR()
 		s.sorID = "sor-9"
-		s.answer(t, "Coverage", searchPage(sorCoverage("cov-1", shnsdk.CMSPayerIdentity.Value))) // names Patient/example
-		env, rec := dtrIngressRow(t, s, body)
-		refusedBeforeTheNetwork(t, env, rec, http.StatusBadGateway, fillFencedOtherPatient)
-	})
+		s.answer(t, "Coverage", searchPage(strings.ReplaceAll(sorCoverage("cov-1", shnsdk.CMSPayerIdentity.Value), "Patient/"+prefetchSoRID, "Patient/sor-9")))
+		return s
+	}
+	for _, enrich := range []bool{false, true} {
+		for _, level := range allLevels {
+			t.Run(optInLabel(enrich)+"/"+level.String(), func(t *testing.T) {
+				s := sor(t)
+				env, rec := dtrIngressRowWith(t, s, body, level, enrich)
+				if rec.Code != http.StatusOK || env.routeHitCount() != 1 {
+					t.Fatalf("answer %d %s (network hits %d)", rec.Code, rec.Body.String(), env.routeHitCount())
+				}
+				if _, sent := sentOperation(t, env); !bytes.Equal(sent, body) {
+					t.Fatalf("the EHR's request changed:\n%s", sent)
+				}
+				if searched, read := s.calls(); !slices.Equal(searched, []string{routingCoverageQueryFor("sor-9")}) || len(read) != 0 {
+					t.Fatalf("searched %v, read %v: want only the routing read under the system's id", searched, read)
+				}
+				g := carryGateway(sor(t))
+				g.cfg.EnrichNativeRequests = enrich
+				p, status, msg := g.prepareDTRPackageRequest(context.Background(), body)
+				if status != 0 || p.request.Ownership() != relay.OwnershipRelayed || len(p.request.Edits()) != 0 {
+					t.Fatalf("%d %s: ownership %v, edits %v; want the EHR's request relayed exactly", status, msg, p.request.Ownership(), p.request.Edits())
+				}
+			})
+		}
+	}
 }
 
 // A request that carries its coverage has nothing filled by default, so a

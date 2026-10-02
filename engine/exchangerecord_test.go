@@ -90,6 +90,11 @@ func wantClosed(t *testing.T, rec ExchangeRecord) {
 			t.Errorf("Findings.Kinds names %q, not a CheckKind", k)
 		}
 	}
+	for i, id := range rec.Edits {
+		if !slices.Contains(relay.EditIDs(), relay.EditID(id)) || slices.Index(rec.Edits, id) != i {
+			t.Errorf("Edits %v: %q is not a registered edit, or is repeated", rec.Edits, id)
+		}
+	}
 }
 
 func wantRefusal(t *testing.T, rec ExchangeRecord, status int, by, rule string) {
@@ -158,6 +163,11 @@ func TestExchangeRecord_IngressAnsweredAndUpstreamError(t *testing.T) {
 		r.Exchange != "crd-order-select" || r.Operation != "order-select" || r.Sender != "provider" || r.Recipient != "payer" ||
 		r.CorrelationID != "leg-corr-0077" || r.Trace != "caller-trace-0077" || r.Backend != nil {
 		t.Fatalf("answered record = %+v", r)
+	}
+	// Stages describe the answer to a leg from the network, not a call this
+	// gateway's own participant made.
+	if r.Stages != nil || r.AnswerError != "" {
+		t.Fatalf("an ingress call carries stages %+v, answer error %q", r.Stages, r.AnswerError)
 	}
 	if !sha256Hex.MatchString(r.RequestCiphertextHash) || !sha256Hex.MatchString(r.ResponseCiphertextHash) {
 		t.Fatalf("ciphertext hashes %q / %q, want sha256 hex (the Hub's payloadBundleHash join)", r.RequestCiphertextHash, r.ResponseCiphertextHash)
@@ -1114,6 +1124,48 @@ func TestHubRefusalOutcome_Transport(t *testing.T) {
 	x.legOutcome(&answerLostError{cause: "the Hub's answer could not be read"})
 	if x.outcome != ExchangeOther {
 		t.Errorf("an unreadable Hub answer settled %q, want other", x.outcome)
+	}
+}
+
+// The record carries the Hub's own delivery value from its error answer to the
+// leg, one row per reason the Hub's forward fails with (hubsvc forwardFailure)
+// and its refusal before forwarding, read through hubRefusal as the leg reads
+// the answer. An answer the Hub's route handler did not write, and a leg that
+// never drew one, carry none: the gateway does not infer it.
+func TestExchangeRecorder_HubDelivered(t *testing.T) {
+	hub := func(status int, reason, header string) error {
+		return hubRefusal(status, []byte(`{"error":"`+reason+`"}`), header)
+	}
+	for name, row := range map[string]struct {
+		err  error
+		want string
+	}{
+		"recipient answered 5xx":         {hub(502, "forward to recipient failed: the recipient answered 503", "unknown"), "unknown"},
+		"recipient refused it":           {hub(502, "forward to recipient failed: the recipient refused it (403)", "no"), "no"},
+		"recipient's answer unreadable":  {hub(502, "forward to recipient failed: the recipient's answer could not be read", "yes"), "yes"},
+		"recipient did not answer":       {hub(502, "forward to recipient failed: the recipient did not answer in time", "unknown"), "unknown"},
+		"connection failed after send":   {hub(502, "forward to recipient failed: the connection failed after the request was sent", "unknown"), "unknown"},
+		"recipient could not be reached": {hub(502, "forward to recipient failed: the recipient could not be reached", "no"), "no"},
+		"refused before forwarding":      {hub(403, "replay detected", "no"), "no"},
+		"response leg refused":           {hub(502, "response leg authorization failed", "yes"), "yes"},
+		"load balancer 5xx, unmarked":    {hubRefusal(502, []byte("<html>Bad Gateway</html>"), ""), ""},
+		"load balancer 4xx, unmarked":    {hubRefusal(403, []byte("Forbidden"), ""), ""},
+		"hub unreachable":                {errHubUnreachable, ""},
+		"hub leg timed out":              {&hubTimeoutError{}, ""},
+		"answered":                       {nil, ""},
+	} {
+		x := &exchangeRecorder{self: RefusedByProviderGateway}
+		x.legOutcome(row.err)
+		if x.rec.HubDelivered != row.want {
+			t.Errorf("%s: hubDelivered %q, want %q", name, x.rec.HubDelivered, row.want)
+		}
+	}
+	// A later leg's answer replaces an earlier one's value.
+	x := &exchangeRecorder{self: RefusedByProviderGateway}
+	x.legOutcome(hub(502, "forward to recipient failed: the recipient did not answer in time", "unknown"))
+	x.legOutcome(nil)
+	if x.rec.HubDelivered != "" {
+		t.Errorf("an answered later leg kept hubDelivered %q", x.rec.HubDelivered)
 	}
 }
 

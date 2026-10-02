@@ -910,7 +910,7 @@ func TestOwnershipAndIdentifiers(t *testing.T) {
 			t.Errorf("Ownership(%d) = %q, want %q", o, o.String(), want)
 		}
 	}
-	if got := EditIDs(); !slices.Equal(got, []EditID{"E-01", "E-02", "E-03", "E-04", "E-05", "E-06"}) {
+	if got := EditIDs(); !slices.Equal(got, []EditID{"E-01", "E-02", "E-03", "E-04", "E-05", "E-06", "E-07"}) {
 		t.Fatalf("EditIDs = %v", got)
 	}
 	ids := EditIDs()

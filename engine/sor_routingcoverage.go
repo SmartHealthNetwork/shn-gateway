@@ -163,9 +163,7 @@ func namedBy(refs []string, name string) bool {
 		return false
 	}
 	for _, r := range refs {
-		if base, _, versioned := strings.Cut(r, "/_history/"); versioned {
-			r = base
-		}
+		r = stripHistoryRef(r)
 		if r == name || strings.HasSuffix(r, "/"+name) {
 			return true
 		}

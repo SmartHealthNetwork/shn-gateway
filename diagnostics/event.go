@@ -45,15 +45,24 @@ type Event struct {
 	Detail                string             `json:"detail,omitempty"`
 }
 
+// RequestFingerprint identifies a request's body by a hash of the bytes the
+// observer saw, so the two ends of one forward can be matched without
+// comparing bodies.
 type RequestFingerprint struct {
 	Algorithm     string `json:"algorithm"`
 	Method        string `json:"method"`
 	RequestURI    string `json:"requestURI"`
 	BodySHA256    string `json:"bodySHA256"`
 	ObservedBytes int64  `json:"observedBytes"`
-	Complete      bool   `json:"complete"`
+	// Complete reports that the hash saw every byte of the body, whether or
+	// not the capture budget kept the body itself (Event.BodyComplete says
+	// that). A handler that stopped reading, a read that failed, or a body
+	// cut off leaves it false.
+	Complete bool `json:"complete"`
 }
 
+// FingerprintLink reports whether a and b are the same request body: both
+// complete, by the same algorithm, method and URI, over the same bytes.
 func FingerprintLink(a, b RequestFingerprint) bool {
 	return a.Complete && b.Complete && a.Algorithm == "sha256-body-v1" &&
 		b.Algorithm == a.Algorithm && a.Method == b.Method && a.RequestURI == b.RequestURI &&

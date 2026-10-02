@@ -257,6 +257,37 @@ func TestPASInquire_SubjectBoundOverEveryPatient(t *testing.T) {
 	}
 }
 
+// A versioned reference names the patient it versions, as the SDK
+// Responder's inquiry reader reads it: an inquiry naming the member by
+// versioned references binds that member, and one whose Coverage names another
+// member by a versioned reference is still refused.
+func TestPASInquire_VersionedReferencesNameTheMember(t *testing.T) {
+	base := string(inquiryBundle("MBR-COVERED", "", "TRN-1", "72148"))
+	for _, tc := range []struct {
+		name, old, new string
+		status         int
+	}{
+		{"a versioned Claim.patient", `"patient":{"reference":"Patient/MBR-COVERED"}`, `"patient":{"reference":"Patient/MBR-COVERED/_history/2"}`, 0},
+		{"an absolute versioned beneficiary", `"beneficiary":{"reference":"Patient/MBR-COVERED"}`, `"beneficiary":{"reference":"https://ehr.example/fhir/Patient/MBR-COVERED/_history/2"}`, 0},
+		{"a Claim.patient under a base whose path contains /_history/", `"patient":{"reference":"Patient/MBR-COVERED"}`, `"patient":{"reference":"https://ehr.example/_history/fhir/Patient/MBR-COVERED"}`, 0},
+		{"another member by a versioned beneficiary", `"beneficiary":{"reference":"Patient/MBR-COVERED"}`, `"beneficiary":{"reference":"Patient/MBR-NOTCOVERED/_history/2"}`, http.StatusForbidden},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := strings.Replace(base, tc.old, tc.new, 1)
+			if body == base {
+				t.Fatalf("fixture: %q not replaced", tc.old)
+			}
+			facts, status, msg := parsePASInquiryFacts([]byte(body))
+			if status != tc.status {
+				t.Fatalf("status=%d %q, want %d", status, msg, tc.status)
+			}
+			if status == 0 && facts.member != "MBR-COVERED" {
+				t.Fatalf("bound member %q, want MBR-COVERED", facts.member)
+			}
+		})
+	}
+}
+
 // inquiryBundleNoItems is an inquiry that asks by the authorization number alone:
 // the later prior-authorization lines carry that number on the inquiry Claim
 // itself rather than on an item, so this Bundle names no item at all and is a

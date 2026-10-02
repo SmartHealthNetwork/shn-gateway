@@ -180,6 +180,24 @@ func TestLevelCRDIngress_DraftOrderWithoutSubject(t *testing.T) {
 	}
 }
 
+// The CRD legs' own patient check compares a draft order's subject with the
+// hook's patientId as written, version included: a versioned reference to the
+// hook's own patient is another patient there (refused at strict, recorded at
+// observe and structural, not checked at none), though the involved list
+// reads it as the hook's patient (carriedMembers).
+func TestLevelCRDIngress_VersionedOwnDraftOrderSubject(t *testing.T) {
+	body := bytes.Replace(ehrRequest(supported), []byte(`"subject" : { "reference" : "Patient/example" }`), []byte(`"subject" : { "reference" : "Patient/example/_history/2" }`), 1)
+	if bytes.Equal(body, ehrRequest(supported)) {
+		t.Fatal("fixture: the draft order's subject was not versioned")
+	}
+	for _, level := range allLevels {
+		t.Run(level.String(), func(t *testing.T) {
+			env, rec, findings := levelIngressRow(t, newPrefetchSoR(), level, body)
+			wantLevelOutcome(t, level, env, rec, findings, RulePatientMixed, http.StatusForbidden, "inconsistent patient reference in ingress payload")
+		})
+	}
+}
+
 // The fill rows below run with the participant opted in to enrichment
 // (levelFillRow); without it nothing is filled (TestLevelCRDIngress_DefaultFillsNothing).
 //
@@ -324,7 +342,6 @@ func TestLevelCRDIngress_CoverageObtainFailureRefusesAtEveryLevel(t *testing.T) 
 		status int
 		msg    string
 	}{
-		"the system of record names the patient differently": {namedDifferently, ehrRequest(patientOnly), http.StatusUnprocessableEntity, patientNamedDifferently},
 		"the system of record cannot answer for the patient": {func(*testing.T) *prefetchSoR {
 			s := newPrefetchSoR()
 			s.refErr = sorErr

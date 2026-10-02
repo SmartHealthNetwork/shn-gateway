@@ -40,6 +40,7 @@ func TestSentPayorRefusalTexts(t *testing.T) {
 		{noPayerIdentifierOnlyRef, prefix + "Coverage.payor is a reference to an Organization the gateway does not read; send a payor identifier with the coverage"},
 		{noPayerSentTwoRefs, twoRefs},
 		{sentPayorRefusal(fhirServerTwoPayors), twoRefs},
+		{noPayerUnresolvedURN, prefix + "Coverage.payor is a urn reference no Bundle entry's fullUrl matches; send the payor Organization as a Bundle entry whose fullUrl is that reference, or a payor identifier"},
 	}
 	// The payor Organization read through the request's fhirServer: its
 	// reason, without "no coverage to route by: ", and no remedy.
@@ -458,7 +459,7 @@ func nullFHIRServer(body []byte) []byte {
 // 412. The request carried a coverage, so each reason follows the prefix of a
 // coverage without a payer, never "no coverage to route by". Two different
 // Organizations by reference alone are a 422 after one read; an Organization
-// with no payer identifier is the plain 422.
+// with no payer identifier is a 422 that says so.
 func TestCRDIngressSentBarePayorReadRefusals(t *testing.T) {
 	for name, row := range map[string]struct {
 		coverage string
@@ -482,7 +483,7 @@ func TestCRDIngressSentBarePayorReadRefusals(t *testing.T) {
 		"two Organizations by reference alone": {bareRefSearchset("o1", "o2"), ehrAnswer(200, "application/json", payorOrganization("o1", "00001")),
 			1, 422, noPayerSentTwoRefs},
 		"an Organization with no payer identifier": {sentBareCoverage(strangerMember, "Organization/o1"), ehrAnswer(200, "application/json", `{"resourceType":"Organization","id":"o1","name":"Payer One"}`),
-			1, 422, noPayerIdentifier},
+			1, 422, noPayerOrganizationNoIdentifier},
 	} {
 		for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve, EnforcementStructural, EnforcementStrict} {
 			t.Run(name+"/"+level.String(), func(t *testing.T) {
@@ -730,19 +731,97 @@ func TestDTRIngressResolvesASentBarePayorThroughTheSystemOfRecord(t *testing.T) 
 					other := ehrParams(`{"name":"coverage","resource":`+sentBareCoverage(prefetchMember, ref)+`}`, dtrQuestionnaire)
 					env, rec := dtrIngressRowWith(t, s, other, level, enrich)
 					refusedWith(t, env, rec, http.StatusUnprocessableEntity, want)
-					if _, read := s.calls(); slices.ContainsFunc(read, func(r string) bool { return strings.Contains(r, "Organization") }) {
-						t.Fatalf("system of record read %v, want no Organization read", read)
+					// Under the opt-in the one read is the Patient appended
+					// (E-05); never the payor.
+					var wantRead []string
+					if enrich {
+						wantRead = []string{"Patient/" + prefetchSoRID}
+					}
+					if searched, read := s.calls(); !slices.Equal(read, wantRead) || len(searched) != 0 {
+						t.Fatalf("system of record read %v, searched %v; want read %v, no search", read, searched, wantRead)
 					}
 				})
 			}
 		}
 	}
 	// Under the opt-in, a held member whose system of record lacks the
-	// Organization is refused with the remedy too.
-	t.Run("opt-in, held, no such Organization", func(t *testing.T) {
-		env, rec := dtrIngressRowWith(t, newPrefetchSoR(), body, EnforcementStrict, true)
-		refusedWith(t, env, rec, http.StatusUnprocessableEntity, noPayerSendPayor)
-	})
+	// Organization is refused with the remedy too, at every level, after
+	// reading the Patient appended (E-05) and the payor.
+	for _, level := range allLevels {
+		t.Run("opt-in, held, no such Organization/"+level.String(), func(t *testing.T) {
+			s := newPrefetchSoR()
+			env, rec := dtrIngressRowWith(t, s, body, level, true)
+			refusedWith(t, env, rec, http.StatusUnprocessableEntity, noPayerSendPayor)
+			if searched, read := s.calls(); !slices.Equal(read, []string{"Patient/" + prefetchSoRID, "Organization/o1"}) || len(searched) != 0 {
+				t.Fatalf("system of record read %v, searched %v; want the Patient and the payor read, no search", read, searched)
+			}
+		})
+	}
+}
+
+// Under the opt-in, a coverage the EHR sent naming its payor as
+// "Organization/<id>" alone resolves through the system of record exactly as
+// at the default: the Organization is read only to route by, the request is
+// routed, and the EHR's coverage is carried as sent, at every level. On CDS
+// Hooks (no fhirServer, so the system of record is where the id is read) the
+// history keys the request left out are filled; on $questionnaire-package the
+// patient's own Patient is appended (E-05) after the EHR's parameters. Nothing
+// the routing read returned is added.
+func TestSentBarePayorResolvesThroughTheSystemOfRecordUnderTheOptIn(t *testing.T) {
+	for _, level := range allLevels {
+		t.Run("CDS Hooks/"+level.String(), func(t *testing.T) {
+			s := sentPayorSoR("", "00001")
+			body := sentCoverageRequest(prefetchMember, "", sentBareCoverage(prefetchMember, "Organization/o1"))
+			env, rec, _ := levelIngressRowWith(t, s, level, body, true)
+			if rec.Code != http.StatusOK || env.routeHitCount() != 1 {
+				t.Fatalf("answer %d %s", rec.Code, rec.Body.String())
+			}
+			searched, read := s.calls()
+			if !slices.Equal(read, []string{"Organization/o1"}) {
+				t.Fatalf("system of record read %v, want the payor once", read)
+			}
+			if slices.ContainsFunc(searched, func(q string) bool { return strings.HasPrefix(q, "Coverage?") }) {
+				t.Fatalf("searched %v: the request carries its coverage", searched)
+			}
+			sent := sentRequest(t, env)
+			for _, key := range []string{"patient", "coverage"} {
+				want, _ := valueOf(t, body, "prefetch", key)
+				if got, ok := valueOf(t, sent, "prefetch", key); !ok || got != want {
+					t.Fatalf("carried prefetch.%s %q, want the EHR's bytes %q", key, got, want)
+				}
+			}
+			if got := names(membersOf(t, sent, "prefetch")); !slices.Equal(got, []string{"patient", "coverage", "serviceHistory", "deviceHistory", "medicationHistory", "questionnaireResponses"}) {
+				t.Fatalf("prefetch keys %v, want the EHR's and the filled histories", got)
+			}
+			for _, key := range []string{`"resourceType":"Organization"`, "00001", "ehr-secret-token"} {
+				if bytes.Contains(sent, []byte(key)) {
+					t.Fatalf("the carried request holds %q: something read only to route by was added", key)
+				}
+			}
+		})
+		t.Run("questionnaire-package/"+level.String(), func(t *testing.T) {
+			s := newPrefetchSoR()
+			s.reads["Organization/o1"] = []byte(payorOrganization("o1", "00001"))
+			body := ehrParams(`{"name":"coverage","resource":`+sentBareCoverage(prefetchMember, "Organization/o1")+`}`, dtrQuestionnaire)
+			env, rec := dtrIngressRowWith(t, s, body, level, true)
+			if rec.Code != http.StatusOK || env.routeHitCount() != 1 {
+				t.Fatalf("answer %d %s", rec.Code, rec.Body.String())
+			}
+			if searched, read := s.calls(); !slices.Equal(read, []string{"Patient/" + prefetchSoRID, "Organization/o1"}) || len(searched) != 0 {
+				t.Fatalf("system of record read %v, searched %v; want the Patient appended and the payor, no search", read, searched)
+			}
+			_, sent := sentOperation(t, env)
+			k := bytes.LastIndex(body, []byte("\n  ]"))
+			if !bytes.HasPrefix(sent, body[:k]) || !bytes.HasSuffix(sent, body[k:]) {
+				t.Fatalf("the EHR's bytes changed:\n%s", sent)
+			}
+			added := string(sent[k : len(sent)-(len(body)-k)])
+			if !strings.Contains(added, `{"name":"referenced","resource":`+string(s.reads["Patient/"+prefetchSoRID])+`}`) ||
+				strings.Contains(added, "Organization") || strings.Contains(added, "Coverage") {
+				t.Fatalf("added %q, want only the patient's own Patient", added)
+			}
+		})
+	}
 }
 
 // dtrIngressRowAt is dtrIngressRow at a conformance level: a routing refusal
@@ -778,15 +857,14 @@ func TestObservingSoRPassesTheFHIRBase(t *testing.T) {
 	}
 }
 
-// Only an Organization reference nothing could read gets the remedy: a sent
-// coverage whose payor is another kind of reference (a self-pay
-// RelatedPerson, a Patient, a urn:uuid, a RelatedPerson on a host named
-// Organization) that the request does not resolve is
+// Only an Organization or urn reference nothing could read gets a remedy: a
+// sent coverage whose payor is another kind of reference (a self-pay
+// RelatedPerson, a Patient, a RelatedPerson on a host named Organization)
+// that the request does not resolve is
 // refused with the bare text, on CDS Hooks and on $questionnaire-package, at
 // every level, with no read.
 func TestSentBarePayorOfAnotherKindKeepsTheBareRefusal(t *testing.T) {
-	for _, ref := range []string{"RelatedPerson/r1", "Patient/nobody", "urn:uuid:7c0e3b4a-1f0d-4b55-9a1e-3c2f1d0e9b77",
-		"https://Organization/fhir/RelatedPerson/r1"} {
+	for _, ref := range []string{"RelatedPerson/r1", "Patient/nobody", "https://Organization/fhir/RelatedPerson/r1"} {
 		for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve, EnforcementStructural, EnforcementStrict} {
 			t.Run("CDS Hooks/"+ref+"/"+level.String(), func(t *testing.T) {
 				e, paths := recordingEHR(t, ehrAnswer(200, "application/fhir+json", payorOrganization("o1", "00001")))
@@ -861,17 +939,171 @@ func TestAbsoluteOrganizationRef(t *testing.T) {
 	}
 }
 
-// A payor the request itself resolves, to an Organization that carries no
-// payer identifier, was resolved: the refusal is the bare text, never the
-// remedy for a reference nothing could read.
-func TestDTRIngressResolvedPayorWithoutIdentifierKeepsTheBareRefusal(t *testing.T) {
-	org := `{"name":"referenced","resource":{"resourceType":"Organization","id":"o1","name":"Payer One"}}`
-	body := ehrParams(`{"name":"coverage","resource":`+sentBareCoverage(prefetchMember, "Organization/o1")+`}`, org, dtrQuestionnaire)
+// noPayerOrganizationNoIdentifier and noPayerNotAnOrganization are the
+// refusals of a payor reference that resolved to a resource naming no payer
+// identifier, pinned as partner-visible text (organizationMiss).
+const (
+	noPayerOrganizationNoIdentifier = noPayerIdentifier + ": the payor Organization carries no identifier with both a system and a value, such as a NAIC code or payer id"
+	noPayerNotAnOrganization        = noPayerIdentifier + ": Coverage.payor references a resource that is not an Organization"
+)
+
+// A payor the request itself resolves, to a resource that names no payer
+// identifier, was resolved: the refusal says why, as a PAS Bundle's does, and
+// never names the remedy for a reference nothing could read. On
+// $questionnaire-package and on CDS Hooks, at every level, before the
+// network.
+func TestIngressResolvedPayorWithoutIdentifierSaysWhy(t *testing.T) {
+	const urn = "urn:uuid:7c0e3b4a-1f0d-4b55-9a1e-3c2f1d0e9b77"
+	noID := `{"resourceType":"Organization","id":"o1","name":"Payer One"}`
+	practitioner := `{"resourceType":"Practitioner","id":"p1"}`
+	inBundle := func(fullURL, res string) string {
+		return `{"resourceType":"Bundle","type":"collection","entry":[{"fullUrl":"` + fullURL + `","resource":` + res + `}]}`
+	}
+	for name, row := range map[string]struct {
+		ref, res, msg string
+	}{
+		"an Organization with no payer identifier":      {"Organization/o1", noID, noPayerOrganizationNoIdentifier},
+		"an Organization by fullUrl with no identifier": {urn, inBundle(urn, noID), noPayerOrganizationNoIdentifier},
+		"a resource that is not an Organization":        {urn, inBundle(urn, practitioner), noPayerNotAnOrganization},
+	} {
+		for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve, EnforcementStructural, EnforcementStrict} {
+			t.Run("questionnaire-package/"+name+"/"+level.String(), func(t *testing.T) {
+				body := ehrParams(`{"name":"coverage","resource":`+sentBareCoverage(prefetchMember, row.ref)+`}`,
+					`{"name":"referenced","resource":`+row.res+`}`, dtrQuestionnaire)
+				env, rec := dtrIngressRowAt(t, newPrefetchSoR(), body, level)
+				refusedWith(t, env, rec, http.StatusUnprocessableEntity, row.msg)
+			})
+			t.Run("CDS Hooks/"+name+"/"+level.String(), func(t *testing.T) {
+				env := newInProcessExchange(t)
+				env.originator.cfg.SoR = newPrefetchSoR().sor()
+				env.originator.cfg.ConformanceEnforcement = level
+				body := sentCoverageRequest(prefetchMember, "", sentBareCoverage(prefetchMember, row.ref))
+				body = bytes.Replace(body, []byte(`"coverage":`), []byte(`"payer":`+row.res+`,"coverage":`), 1)
+				rec := httptest.NewRecorder()
+				env.originator.handleCRDIngress(rec, crdIngressPost(body))
+				refusedWith(t, env, rec, http.StatusUnprocessableEntity, row.msg)
+			})
+		}
+	}
+}
+
+// A payor that resolved to an Organization whose identifier this gateway
+// reads but routing cannot (its id is not a string) gives no reason the
+// gateway cannot name: the refusal is the bare text, on both ingresses, at
+// every level, as a PAS Bundle's is.
+func TestIngressResolvedPayorUnnamedReasonKeepsTheBareRefusal(t *testing.T) {
+	const urn = "urn:uuid:7c0e3b4a-1f0d-4b55-9a1e-3c2f1d0e9b77"
+	odd := `{"resourceType":"Organization","id":9,"identifier":[{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00001"}]}`
+	bundle := `{"resourceType":"Bundle","type":"collection","entry":[{"fullUrl":"` + urn + `","resource":` + odd + `}]}`
+	bare := func(t *testing.T, env *inProcessExchange, rec *httptest.ResponseRecorder) {
+		t.Helper()
+		refusedWith(t, env, rec, http.StatusUnprocessableEntity, noPayerIdentifier)
+		if strings.Contains(rec.Body.String(), noPayerIdentifier+":") {
+			t.Fatalf("a reason the gateway cannot name is not guessed: %s", rec.Body.String())
+		}
+	}
 	for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve, EnforcementStructural, EnforcementStrict} {
-		t.Run(level.String(), func(t *testing.T) {
-			env, rec := dtrIngressRowAt(t, newPrefetchSoR(), body, level)
-			refusedWith(t, env, rec, http.StatusUnprocessableEntity, noPayerIdentifier)
+		t.Run("CDS Hooks/"+level.String(), func(t *testing.T) {
+			env := newInProcessExchange(t)
+			env.originator.cfg.SoR = newPrefetchSoR().sor()
+			env.originator.cfg.ConformanceEnforcement = level
+			body := sentCoverageRequest(prefetchMember, "", sentBareCoverage(prefetchMember, urn))
+			body = bytes.Replace(body, []byte(`"coverage":`), []byte(`"organizations":`+bundle+`,"coverage":`), 1)
+			rec := httptest.NewRecorder()
+			env.originator.handleCRDIngress(rec, crdIngressPost(body))
+			bare(t, env, rec)
 		})
+		t.Run("questionnaire-package/"+level.String(), func(t *testing.T) {
+			body := ehrParams(`{"name":"coverage","resource":`+sentBareCoverage(prefetchMember, urn)+`}`,
+				`{"name":"referenced","resource":`+bundle+`}`, dtrQuestionnaire)
+			env, rec := dtrIngressRowAt(t, newPrefetchSoR(), body, level)
+			bare(t, env, rec)
+		})
+	}
+}
+
+// A Coverage the system of record supplied, whose payor that system resolves
+// to an Organization with no payer identifier, or to a resource that is not
+// an Organization, is refused with the reason, on CDS Hooks and
+// $questionnaire-package, at every level.
+func TestSystemCoveragePayorWithoutIdentifierSaysWhy(t *testing.T) {
+	cov := strings.Replace(refCoverage(prefetchSoRID, "Organization/pay-9"), `"id":"c1"`, `"id":"cov-9"`, 1)
+	for name, row := range map[string]struct{ res, msg string }{
+		"an Organization with no payer identifier": {`{"resourceType":"Organization","id":"pay-9","name":"Payer"}`, noPayerOrganizationNoIdentifier},
+		"a resource that is not an Organization":   {`{"resourceType":"Practitioner","id":"pay-9"}`, noPayerNotAnOrganization},
+	} {
+		for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve, EnforcementStructural, EnforcementStrict} {
+			sor := func() *prefetchSoR {
+				s := newPrefetchSoR()
+				s.answer(t, "Coverage", page("", "", sorEntry(cov)))
+				s.reads["Organization/pay-9"] = []byte(row.res)
+				return s
+			}
+			t.Run("CDS Hooks/"+name+"/"+level.String(), func(t *testing.T) {
+				s := sor()
+				env, rec, _ := levelIngressRowWith(t, s, level, ehrRequest(patientOnly), false)
+				refusedWith(t, env, rec, http.StatusUnprocessableEntity, row.msg)
+				if read := payorReads(s); len(read) != 1 {
+					t.Fatalf("read %v, want the payor read once from the system of record", read)
+				}
+			})
+			t.Run("questionnaire-package/"+name+"/"+level.String(), func(t *testing.T) {
+				s := sor()
+				env, rec := dtrPayorRow(t, s, level, false, dtrPayorParams(""))
+				refusedWith(t, env, rec, http.StatusUnprocessableEntity, row.msg)
+			})
+		}
+	}
+}
+
+// A urn:uuid or urn:oid payor reference nothing resolves names the remedy
+// that resolves it: the payor Organization as an entry, with that fullUrl, of
+// a Bundle the request carries. Sending it so routes the request. On
+// CDS Hooks and $questionnaire-package, at every level.
+func TestSentBarePayorURNNamesTheFullURLRemedy(t *testing.T) {
+	for _, ref := range []string{"urn:uuid:7c0e3b4a-1f0d-4b55-9a1e-3c2f1d0e9b77", "urn:oid:2.16.840.1.113883.3.9999"} {
+		org := `{"resourceType":"Bundle","type":"collection","entry":[{"fullUrl":"` + ref + `","resource":` + payorOrganization("o1", "00001") + `}]}`
+		for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve, EnforcementStructural, EnforcementStrict} {
+			t.Run("CDS Hooks/"+ref+"/"+level.String(), func(t *testing.T) {
+				for _, sent := range []bool{false, true} {
+					// A fhirServer and a system of record that would answer
+					// are both present: a urn reference is read from neither.
+					e, paths := recordingEHR(t, ehrAnswer(200, "application/fhir+json", payorOrganization("o1", "00001")))
+					env, _ := fhirServerEnv(t, e, "")
+					env.originator.cfg.ConformanceEnforcement = level
+					s := newPrefetchSoR()
+					s.fhirBase = e.base // the system of record is at the request's fhirServer: it would be read
+					s.reads["Organization/o1"] = []byte(payorOrganization("o1", "00001"))
+					env.originator.cfg.SoR = s.sor()
+					body := sentCoverageRequest(prefetchMember, e.base, sentBareCoverage(prefetchMember, ref))
+					if sent {
+						body = bytes.Replace(body, []byte(`"coverage":`), []byte(`"organizations":`+org+`,"coverage":`), 1)
+					}
+					rec := httptest.NewRecorder()
+					env.originator.handleCRDIngress(rec, crdIngressPost(body))
+					if !sent {
+						refusedWith(t, env, rec, http.StatusUnprocessableEntity, noPayerUnresolvedURN)
+					} else if rec.Code != http.StatusOK || env.routeHitCount() != 1 {
+						t.Fatalf("with the remedy applied: answer %d %s, %d sent", rec.Code, rec.Body.String(), env.routeHitCount())
+					}
+					if got := paths(); len(got) != 0 {
+						t.Fatalf("fhirServer read %v for a urn reference", got)
+					}
+					if read := payorReads(s); len(read) != 0 {
+						t.Fatalf("the system of record was read %v for a urn reference", read)
+					}
+				}
+			})
+			t.Run("questionnaire-package/"+ref+"/"+level.String(), func(t *testing.T) {
+				cov := `{"name":"coverage","resource":` + sentBareCoverage(prefetchMember, ref) + `}`
+				env, rec := dtrIngressRowAt(t, newPrefetchSoR(), ehrParams(cov, dtrQuestionnaire), level)
+				refusedWith(t, env, rec, http.StatusUnprocessableEntity, noPayerUnresolvedURN)
+				env, rec = dtrIngressRowAt(t, newPrefetchSoR(), ehrParams(cov, `{"name":"referenced","resource":`+org+`}`, dtrQuestionnaire), level)
+				if rec.Code != http.StatusOK || env.routeHitCount() != 1 {
+					t.Fatalf("with the remedy applied: answer %d %s, %d sent", rec.Code, rec.Body.String(), env.routeHitCount())
+				}
+			})
+		}
 	}
 }
 
@@ -915,6 +1147,9 @@ func TestSentBarePayorWithTheOrganizationBesideAnUnreadReference(t *testing.T) {
 				if got := paths(); len(got) != 0 {
 					t.Fatalf("fhirServer read %v, want none", got)
 				}
+				if searched, read := s.calls(); len(read) != 0 || len(searched) != 0 {
+					t.Fatalf("system of record read %v, searched %v; want neither", read, searched)
+				}
 			})
 		}
 	}
@@ -931,8 +1166,8 @@ func TestSentBarePayorWithTheOrganizationBesideAnUnreadReference(t *testing.T) {
 					`{"name":"payor","resource":`+org+`}`, dtrQuestionnaire)
 				env, rec := dtrIngressRowAt(t, s, body, level)
 				refusedWith(t, env, rec, http.StatusUnprocessableEntity, want)
-				if _, read := s.calls(); slices.ContainsFunc(read, func(r string) bool { return strings.Contains(r, "Organization") }) {
-					t.Fatalf("system of record read %v, want no Organization read", read)
+				if searched, read := s.calls(); len(read) != 0 || len(searched) != 0 {
+					t.Fatalf("system of record read %v, searched %v; want neither", read, searched)
 				}
 			})
 		}
@@ -1007,8 +1242,8 @@ func TestSentBarePayorRemediesRoute(t *testing.T) {
 				if rec.Code != http.StatusOK {
 					t.Fatalf("answer %d %s", rec.Code, rec.Body.String())
 				}
-				if _, read := s.calls(); slices.ContainsFunc(read, func(r string) bool { return strings.Contains(r, "Organization") }) {
-					t.Fatalf("system of record read %v, want no Organization read", read)
+				if searched, read := s.calls(); len(read) != 0 || len(searched) != 0 {
+					t.Fatalf("system of record read %v, searched %v; want neither", read, searched)
 				}
 				if _, sent := sentOperation(t, env); !bytes.Equal(sent, body) {
 					t.Fatalf("carried %s, want the EHR's bytes exactly", sent)

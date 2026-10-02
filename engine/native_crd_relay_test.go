@@ -337,12 +337,19 @@ func TestNativeCRD_EmbeddedValidationObservesOnly(t *testing.T) {
 				g, requester := newInboundTestGateway(t, true)
 				p := newCDSPayer(t, referencePayerServices...)
 				g.cfg.Responder = NewNativeResponder(p.srv.Client(), p.srv.URL, "", nil, nil)
+				// The clock moves only while the embedded order is validated,
+				// so its event carries exactly that call's time.
+				clock := &testClock{now: time.Date(2026, 10, 7, 14, 0, 0, 0, time.UTC)}
+				g.cfg.Clock = clock.Now
 				var mu sync.Mutex
 				var validated [][]byte
 				g.cfg.Validator = validatorFunc(func(b []byte) (shnsdk.Result, error) {
 					mu.Lock()
 					validated = append(validated, bytes.Clone(b))
 					mu.Unlock()
+					if bytes.Contains(b, []byte(covInfo)) {
+						clock.Add(7 * time.Millisecond)
+					}
 					return verdict.v(b)
 				})
 				var events []ObserverEvent
@@ -386,7 +393,7 @@ func TestNativeCRD_EmbeddedValidationObservesOnly(t *testing.T) {
 					}
 					got = append(got, v)
 				}
-				want := []crdEmbeddedValidation{{Path: "systemActions[0].resource", ResourceType: "DeviceRequest", Line: answerLineOr(context.Background(), "pa.crd"), Outcome: verdict.outcome}}
+				want := []crdEmbeddedValidation{{Path: "systemActions[0].resource", ResourceType: "DeviceRequest", Line: answerLineOr(context.Background(), "pa.crd"), Outcome: verdict.outcome, Ms: 7}}
 				if !slices.Equal(got, want) {
 					t.Fatalf("recorded %+v, want %+v", got, want)
 				}
