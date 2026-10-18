@@ -141,9 +141,14 @@ Approval isn't instant. None of the following needs an account:
   contract this gateway implements.
 - Skim [§5 Choose your path](#5-choose-your-path) for your role, so you know
   what you're configuring once you're in.
-- Clone this repository and build the gateway image
-  (`docker build -t shn-gateway .`) — it's a public image; no invite needed to
-  pull or build it.
+- Pull the published gateway image,
+  `ghcr.io/smarthealthnetwork/shn-gateway:<version>`: no invite needed. Every
+  published image is signed; verify it before you run it with
+  `cosign verify --certificate-identity https://github.com/SmartHealthNetwork/shn-platform/.github/workflows/publish-image.yml@refs/heads/main --certificate-oidc-issuer https://token.actions.githubusercontent.com ghcr.io/smarthealthnetwork/shn-gateway:<version>`.
+  From v1.0.0 it runs on linux/amd64 and linux/arm64, and each image carries a
+  signed SPDX SBOM. To build it yourself instead, clone this repository and run
+  `docker build -t shn-gateway .` with BuildKit, Docker's default builder since
+  Engine 23.
 - Pre-stage your configuration against
   [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) — which env vars you'll
   set, where your FHIR system of record lives.
@@ -301,9 +306,11 @@ it were registered. So the self-test is:
    `shn register --role payer` (§3) — a laptop-only URL can't register.
 3. **Drive it from a provider originator.** Run the provider evaluation bundle
    (§4) with `PAYER_HOLDER_ID` set to your payer's holder id, and drive it
-   with `shn send-test --gateway <provider-url>` — a thin CLI in `shn-sdk`
-   that fires all eight `/scenario/ucNN` routes and tabulates pass/fail. Every
-   decision in the result comes from **your** payer.
+   with `shn send-test --gateway <provider-url> --discovery <accounts-url>` — a thin
+   CLI in `shn-sdk` that fires all eight `/scenario/ucNN` routes and tabulates
+   pass/fail. From shn-gateway v0.62.0 each route takes the persona the network's
+   discovery descriptor states, which `--discovery` sends (shn-sdk v0.62.0 or later).
+   Every decision in the result comes from **your** payer.
 
 Full bundle detail and the reachability options:
 [`deploy/eval/payer/README.md`](deploy/eval/payer/README.md); full
@@ -349,10 +356,10 @@ role-specific — is [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md).
 | Symptom | Cause and fix |
 |---|---|
 | `refusing to run without per-message validation (FR-36)` at startup | No validator configured and discovery advertises none. Set `FHIR_VALIDATE_URL`, or `SHN_FAKE_VALIDATOR=1` for a dev smoke. |
-| `fetch discovery: …` / `fetch hub transport key: …` at startup | `SHN_DISCOVERY_URL` unreachable, or the gateway can't reach the hosts discovery resolves (Hub, Authorization Framework, registrar, …). Confirm `curl $SHN_DISCOVERY_URL` works from the gateway's network. |
+| `fetch discovery: …` / `fetch authz pubkey: …` / `fetch hub transport key: …` at startup | `SHN_DISCOVERY_URL` unreachable, or the gateway can't reach the hosts discovery resolves (Hub, Authorization Framework, registrar, …). Each of these fetches is tried again when the connection is refused, reset or closed before an answer, or the answer is `502`, `503` or `504`: after 1, 2 and 4 seconds and then every 8 seconds, with no new try more than 60 seconds into the fetch (each try has its own 30-second bound), so a plane that is restarting does not fail the boot; the error is the last try's. A name that does not resolve, a try that times out, a TLS certificate or protocol failure and every other answer fail the boot at once. Confirm `curl $SHN_DISCOVERY_URL` works from the gateway's network. |
 | Provider originate returns `recipient "…" not in registry` | The payer holder resolved from the member's Coverage (feed `payerIds`, or your `PAYER_DIRECTORY` override) isn't a registered holder, or the registrar feed hasn't propagated yet. Confirm the counterpart appears in `shn clients` / the `/holders` feed. |
 | Provider originate returns `422 no payer identifier on member coverage` / `no registered payer for identifier …` | Coverage-derived routing found no route (FR-G41; no default): the member's Coverage carries no parseable payor identity, or no `role=payer` holder in the feed claims that identity (and no `PAYER_DIRECTORY` override maps it). Ensure the target payer holder published that `{system,value}` in its feed `payerIds` (payer-onboarding path), or set a `PAYER_DIRECTORY` override row. A payer that acquired the identity after onboarding — an EHR-assigned payer id, a merger, a new line of business — publishes it without re-onboarding: a hosted payer updates its tenant's `payerIds` and the control plane converges the feed entry; any payer can re-declare through the accounts front door once an operator has vouched for the identity. Payer identities are operator-attested, so a holder cannot add one with its own key. An identity claimed by **two** holders also fails closed (ambiguous — `AI-G12`). On the Da Vinci ingress (`Claim/$submit`, `Claim/$inquire`), from v0.60.0 the `no payer identifier` refusal adds which part of the Bundle failed, after a colon: `Coverage.payor` is a relative reference that matches no entry, an absolute reference that is no entry's `fullUrl`, or a reference several entries answer without naming one payer; or the payor Organization carries no identifier with both a system and a value (a NAIC code or payer id). The payor Organization must be an entry of the Bundle: the gateway resolves the reference among the Bundle's entries only, an absolute reference (a URL, or `urn:uuid`) to the entry whose `fullUrl` equals it, and a relative `Organization/<id>` to the one entry with that type and id; a reference several entries answer routes only when they all name the same payer identifier. |
-| Provider originate returns `502 {"error":"engine: $populate upstream failed"}` | Inspect the holder-local `gateway: populate_failure` record below to distinguish the failing population boundary. |
+| Provider originate returns `502 {"error":"$populate upstream failed"}` | Inspect the holder-local `gateway: populate_failure` record below to distinguish the failing population boundary. |
 | Provider originate returns `502` (routing / response sender mismatch) | The counterpart isn't reachable or didn't respond as itself. Check the payer gateway is running and its registered `--base-url` resolves publicly to it. |
 | Provider originate returns `502 {"error":"authorization denied"}` | Wrong bundle for the role. This gateway is `ROLE=provider` and *originates* the request, so its `SHN_SECRETS` must be a `--role provider` bundle — authority binds to the caller's **registered role**, and a payer bundle can't originate a provider leg (the Authorization Framework denies it). Register a provider client and mount that bundle. A payer self-test needs two registrations — see [Point it at your own payer](deploy/eval/README.md#point-it-at-your-own-payer-payer-self-test). |
 | Payer never receives a delivery | The Hub can't reach the payer's `--base-url`. It must be a public https endpoint fronting the gateway (see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)) and must not redirect on `/substrate/inbound`. Re-check the tunnel/load balancer. |

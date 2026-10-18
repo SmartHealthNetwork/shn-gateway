@@ -309,9 +309,17 @@ func (g *Gateway) prepareDTRPackageRequest(ctx context.Context, raw []byte) (dtr
 		out.coverages = [][]byte{routed}
 	}
 	// E-05 is an enrichment: off on native traffic unless the participant opts in
-	// (Config.EnrichNativeRequests).
-	if g.cfg.EnrichNativeRequests && !carriesPatient(raw, out.member) {
-		patient, status, msg := g.obtainDTRPatient(ctx, out.member, fence)
+	// (Config.EnrichNativeRequests), made through the enrichment hook.
+	if hook := g.enrichment(); hook != nil && !carriesPatient(raw, out.member) {
+		patient, status, msg := hook.dtrPatient(ctx, out.member, fence)
+		if status == 0 && patient != nil {
+			// The fill fence is the core's: what the hook read is fenced
+			// again before it is inserted.
+			if err := fence.check(patient); err != nil {
+				patient = nil
+				status, msg = fillFenceRefusal(err)
+			}
+		}
 		// The fill fence refuses at every level: SHN never inserts another
 		// patient's record. Any other failure to fill refuses at strict
 		// (RulePrefetchFill); below strict the request is carried without
@@ -351,72 +359,6 @@ func (g *Gateway) prepareDTRPackageRequest(ctx context.Context, raw []byte) (dtr
 		return out, http.StatusInternalServerError, "prepare questionnaire-package request failed"
 	}
 	return out, 0, ""
-}
-
-// obtainDTRPatient reads the Patient a request carrying none is sent with
-// under Config.EnrichNativeRequests: the system of record's own record for
-// the bound patient, by the reference the system names it by, recorded as a
-// PrefetchObtainedEvent (key patient, operation questionnaire-package). The
-// payer's side, which may not hold the member, derives the subject from
-// this record exactly as this side derives it from the same record. Nothing
-// is added when the system does not hold the patient, or names it by another
-// id (the request's references would not resolve to it): the request is sent
-// as it is and binds by member id alone on both sides. A record about another
-// patient, or not a Patient, is refused.
-func (g *Gateway) obtainDTRPatient(ctx context.Context, member string, fence patientFence) ([]byte, int, string) {
-	const leg = "dtr-questionnaire-fetch"
-	ref, found, err := ReadSystemOfRecord(g.cfg.SoR).PatientFHIRRefContext(ctx, member)
-	if err != nil {
-		status, msg := SoRFailureResponse(err)
-		return nil, status, msg
-	}
-	if !found {
-		return nil, 0, ""
-	}
-	id, ok := strings.CutPrefix(ref, "Patient/")
-	if !ok || !fhirIDRE.MatchString(id) {
-		status, msg := SoRFailureResponse(&SoRReadError{Kind: SoRInvalidResponse})
-		return nil, status, msg
-	}
-	if id != member {
-		return nil, 0, ""
-	}
-	query := "Patient/" + id
-	record := func(outcome SearchOutcome, reason string, count int) {
-		g.recordPrefetch(leg, prefetchObtained{Key: prefetchPatientKey, Operation: shnsdk.FrameOperationQuestionnairePackage,
-			Query: query, Outcome: outcome, Reason: reason, Count: count})
-	}
-	patient, found, err := ReadSystemOfRecord(g.cfg.SoR).ResolveByReferenceContext(ctx, query)
-	if err != nil {
-		status, msg := SoRFailureResponse(err)
-		outcome := SearchMalformed
-		if status == http.StatusServiceUnavailable {
-			outcome = SearchUnavailable
-		}
-		record(outcome, string(safeSoRError(err).Kind), 0)
-		return nil, status, msg
-	}
-	if !found {
-		record(SearchZero, "", 0)
-		return nil, http.StatusUnprocessableEntity, "patient not found in system of record"
-	}
-	var head struct {
-		ResourceType string `json:"resourceType"`
-	}
-	if decodeMessage(patient, &head) != nil || head.ResourceType != "Patient" {
-		record(SearchMalformed, "not a Patient", 0)
-		status, msg := SoRFailureResponse(&SoRReadError{Kind: SoRInvalidResponse})
-		return nil, status, msg
-	}
-	record(SearchOK, "", 1)
-	if err := fence.check(patient); err != nil {
-		var ce *CompartmentError
-		if errors.As(err, &ce) && ce.Reason == opaqueContentReason {
-			return nil, http.StatusBadGateway, fillFencedBinary
-		}
-		return nil, http.StatusBadGateway, fillFencedOtherPatient
-	}
-	return patient, 0, ""
 }
 
 // dtrNoCoverageToRouteBy refuses a request without coverage for a member the
@@ -482,20 +424,17 @@ func (g *Gateway) obtainDTRCoverage(ctx context.Context, out *dtrIngressRequest,
 			Query: s.Query, Outcome: s.Outcome, Reason: s.Reason, Count: s.Count, Pages: s.Pages})
 		return s
 	}
-	if g.cfg.EnrichNativeRequests && sorID == out.member {
-		s := search(prefetchSearchFilters("Coverage")...)
-		switch s.Outcome {
-		case SearchOK:
+	if hook := g.enrichment(); hook != nil && sorID == out.member {
+		if s := search(hook.dtrCoverageFilters()...); s.Outcome == SearchOK {
 			coverage, status, msg := g.dtrRoutingCoverage(ctx, out, fence, s)
 			if status != 0 {
 				return nil, nil, status, msg
 			}
 			return coverage, coverage, 0, ""
-		default:
-			// No active coverage, or a system that could not answer the
-			// template's search: nothing is appended, and the request is
-			// routed by the routing read below, as without the opt-in.
 		}
+		// No active coverage, or a system that could not answer the
+		// template's search: nothing is appended, and the request is routed
+		// by the routing read below, as without the opt-in.
 	}
 	s := search()
 	switch s.Outcome {

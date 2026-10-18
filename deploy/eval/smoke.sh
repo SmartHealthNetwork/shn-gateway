@@ -25,43 +25,53 @@ compose="docker compose -f gateway/deploy/eval/compose.eval.yml"
 trap '$compose down -v' EXIT
 $compose up -d --build
 
+# Every scenario request carries the persona the network's discovery descriptor states for
+# its route on this gateway's lane (provider-data): member, order and claim facts
+# (persona_body.sh). The smoke states none of them; the descriptor is the one the gateway
+# itself reads (compose.eval.yml's SHN_DISCOVERY_URL).
+desc=$(mktemp)
+curl -fsS "${SHN_DISCOVERY_URL:-https://accounts.shn-preview.org/discovery}" -o "$desc"
+body() { gateway/deploy/eval/persona_body.sh "$desc" "$1" provider-data "$2" "${3:-{\}}"; }
+
 # Readiness = retry the first real scenario until it returns well-formed JSON.
 # (No GET /healthz exists; a successful uc01 POST proves gateway up + seeded + routing —
-# see gateway/engine/originate.go's handleScenario / gateway/engine/gateway.go's route
-# table, which mounts ONLY POST /scenario/ucNN.)
+# see gateway/engine/originate.go's handleScenario / gateway/engine/originate_routes.go's
+# route declarations, which mount ONLY POST /scenario/ucNN.)
 ready=0
 for i in $(seq 1 90); do
   if curl -fsS -X POST localhost:8080/scenario/uc01 -H 'Content-Type: application/json' \
-       -d '{"branch":"covered"}' | jq -e '.covered==true' >/dev/null 2>&1; then ready=1; break; fi
+       -d "$(body uc01 0 '{"branch":"covered"}')" | jq -e '.covered==true' >/dev/null 2>&1; then ready=1; break; fi
   sleep 10
 done
 [ "$ready" = 1 ] || { echo "gateway never became ready"; exit 1; }
 
 fail=0
-check() { # label  body  jq-predicate
+check() { # route  descriptor-scenario  amend(0|1)  route-keys  jq-predicate
   # Guard the assignment: under set -e a failing curl (a 4xx/5xx from a regressed UC, or a
   # connection error) would otherwise abort the whole script here — skipping the remaining
   # UCs AND the mandatory conformant-lane cert checks below. Record it and keep going.
-  if ! out=$(curl -fsS -X POST "localhost:8080/scenario/$1" -H 'Content-Type: application/json' -d "${2:-{}}"); then
-    echo "✗ $1: request failed"; fail=1; return
+  local req
+  if ! req=$(body "$2" "$3" "$4"); then echo "✗ $2: the descriptor states no persona facts"; fail=1; return; fi
+  if ! out=$(curl -fsS -X POST "localhost:8080/scenario/$1" -H 'Content-Type: application/json' -d "$req"); then
+    echo "✗ $2: request failed"; fail=1; return
   fi
-  if echo "$out" | jq -e "$3" >/dev/null 2>&1; then echo "✓ $1"; else echo "✗ $1: $out"; fail=1; fi
+  if echo "$out" | jq -e "$5" >/dev/null 2>&1; then echo "✓ $2"; else echo "✗ $2: $out"; fail=1; fi
 }
 # Assertions against the REAL structs (engine/originate*.go / originate_resume.go).
 # Branch-body keys verified against the real handlers: handleScenario
 # (uc01) switches on req.Branch == "covered"/"notcovered" (originate.go:151-159); handleUC05
 # switches on "", "consent", "noconsent" (originate.go:1181-1187). uc02/03/04/06/07/08 don't
 # read the body at all, so "{}" is inert.
-check uc01 '{"branch":"covered"}'    '.covered==true'
-check uc01 '{"branch":"notcovered"}' '.covered==false'
-check uc02 '{}'                      '.paRequired==false'
-check uc03 '{}'                      '.paRequired==true and (.authNumber|length>0)'
-check uc04 '{}'                      '(.authNumber|length>0)'
-check uc05 '{}'                      '(.authNumber|length>0)'
-check uc05 '{"branch":"noconsent"}'  '.consentDenied==true'
-check uc06 '{}'                      '(.authNumber|length>0) and .attested==true'
-check uc07 '{}'                      '(.authNumber|length>0) and .attested==true'
-check uc08 '{}'                      '.denied==true'
+check uc01 uc01            0 '{"branch":"covered"}'    '.covered==true'
+check uc01 uc01-notcovered 0 '{"branch":"notcovered"}' '.covered==false'
+check uc02 uc02            0 '{}'                      '.paRequired==false'
+check uc03 uc03            0 '{}'                      '.paRequired==true and (.authNumber|length>0)'
+check uc04 uc04            1 '{}'                      '(.authNumber|length>0)'
+check uc05 uc05            1 '{}'                      '(.authNumber|length>0)'
+check uc05 uc05-noconsent  1 '{"branch":"noconsent"}'  '.consentDenied==true'
+check uc06 uc06            1 '{}'                      '(.authNumber|length>0) and .attested==true'
+check uc07 uc07            1 '{}'                      '(.authNumber|length>0) and .attested==true'
+check uc08 uc08            0 '{}'                      '.denied==true'
 
 # ── Conformant lane: exercise the GENERATED cert end to end ──
 # A broken cert generator must fail HERE, not silently on a partner's first boot.

@@ -107,7 +107,7 @@ func TestFenceResponseSubject_Eligibility(t *testing.T) {
 	t0 := time.Date(2026, 6, 3, 12, 0, 0, 0, time.UTC)
 
 	// The swap: a CRR built for Patient/Y, fenced against a request bound to Patient/X.
-	crrForY, err := shnsdk.BuildEligibilityResponse("corr-1", "Patient/Y", true, "", shnsdk.PayerIdentifier{}, t0)
+	crrForY, err := shnsdk.BuildEligibilityResponseExact("corr-1", "Patient/Y", true, "", shnsdk.CMSPayerIdentity, t0)
 	if err != nil {
 		t.Fatalf("BuildEligibilityResponse: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestFenceResponseSubject_Eligibility(t *testing.T) {
 	}
 
 	// Non-vacuous control: a CRR correctly built for the SAME bound patient passes (0).
-	crrForX, err := shnsdk.BuildEligibilityResponse("corr-1", "Patient/X", true, "", shnsdk.PayerIdentifier{}, t0)
+	crrForX, err := shnsdk.BuildEligibilityResponseExact("corr-1", "Patient/X", true, "", shnsdk.CMSPayerIdentity, t0)
 	if err != nil {
 		t.Fatalf("BuildEligibilityResponse: %v", err)
 	}
@@ -167,8 +167,9 @@ func TestFenceResponseSubject_RepeatedMemberRefused(t *testing.T) {
 					t.Fatal("mutation did not apply")
 				}
 				status, msg := g.fenceResponseSubject(r.leg, r.bound, "", res(body))
-				if status != http.StatusForbidden || msg != "response repeats a member name" {
-					t.Fatalf("got %d %q, want 403 repeated member", status, msg)
+				// The refusal names the repeated member, so the payer can fix it.
+				if status != http.StatusForbidden || !strings.HasPrefix(msg, "response repeats the JSON member ") || !strings.HasSuffix(msg, ": it can be read two ways, so it is not carried") {
+					t.Fatalf("got %d %q, want 403 naming the repeated member", status, msg)
 				}
 			})
 		}

@@ -297,8 +297,10 @@ func TestPASSubmit_EOBTakenMidFlightRelaysUnrecorded(t *testing.T) {
 			}
 		},
 		commit: func(ctx context.Context, corrID, subjectPCI string) func() error {
+			// Admitted as the gate admits a valid EOB: this row is about the
+			// EOB id's owner, not the EOB's validation.
 			return recordPASDecision(ctx, store, subjectPCI, corrID, PendOutcomeApproved, fixedClock(), PendKeys{},
-				&EOBRecord{SubjectPCI: subjectPCI, EOBID: decisionEOBID(corrID), JSON: []byte(`{"resourceType":"ExplanationOfBenefit","id":"self"}`)})
+				&EOBRecord{SubjectPCI: subjectPCI, EOBID: decisionEOBID(corrID), JSON: []byte(`{"resourceType":"ExplanationOfBenefit","id":"self"}`), admitted: true})
 		},
 	}
 	status, body := submitAs(t, g, requester, "MBR-COVERED", corr)
@@ -398,6 +400,7 @@ func TestPASCorrelationCollision_InquiryNotStuck(t *testing.T) {
 	}
 	result := LegResult{}
 	commit, _ := g.inquiryLedgerEffect(requester.ID, pciB, "Patient/MBR-UC04", "corr-inquiry-leg", facts, decidedAnswer(t), &result)
+	admitDecisionEOBs(&result)
 	if commit == nil {
 		t.Fatal("B's inquiry produced no ledger write")
 	}

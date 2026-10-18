@@ -2373,15 +2373,44 @@ func startRefresh(t *testing.T, s *IngressKeyStore, onErr func(string)) {
 	t.Cleanup(func() { cancel(); <-done })
 }
 
-// settleReload returns once the reload in flight, if any, has run its completion section:
-// afterNextReload's signal hangs off rows.Close, which runs after the cache merge but
-// BEFORE reloadLocked's completion stamps the outcome and reads the injected clock, so a
-// row that advances a plain fixedClock right after the signal races that read. Waiting
-// on the latch (or observing it cleared under mu) is the happens-before edge.
+// settleReload returns once the reload in flight, if any, has run its completion section
+// AND its wrapper has released reloadMu: afterNextReload's signal hangs off rows.Close,
+// which runs after the cache merge but BEFORE reloadLocked's completion stamps the outcome
+// and reads the injected clock, so a row that advances a plain fixedClock right after the
+// signal races that read. Waiting on the latch (or observing it cleared under mu) is the
+// happens-before edge for the completion.
+//
+// The latch closes inside the completion, before the wrapper's releaseReload, so the
+// reload still holds reloadMu for a moment after it. A row that opens the throttle and
+// sends requests inside that moment has each of them find reloadMu held, decline, and
+// kick the refresh loop, whose wake then runs the reload the row meant a request to run:
+// every miss answers with the one query parked, because that query is the loop's. In
+// production the completion re-stamps the throttle, so nothing can be due in that
+// moment; only a row's clock jump opens it. Taking and releasing reloadMu waits it out.
 func settleReload(s *IngressKeyStore) {
 	if l := s.inFlight(); l != nil {
 		<-l.done
 	}
+	s.reloadMu.Lock()
+	s.reloadMu.Unlock() // an empty section: waiting for the lock is the point
+}
+
+// settleReload does not return while the reload it settles still holds reloadMu, the
+// moment between the latch closing and the wrapper's release. Failing direction
+// only: a settle that returned early is seen at once, and a correct one cannot return
+// before the release.
+func TestIngressKeyPg_SettleReloadWaitsForTheReleaseOfReloadMu(t *testing.T) {
+	s := NewIngressKeyStore(nil, "holder", time.Now) // no DB call on this path
+	s.reloadMu.Lock()                                // the wrapper, after its latch closed
+	returned := make(chan struct{})
+	go func() { settleReload(s); close(returned) }()
+	select {
+	case <-returned:
+		t.Fatal("settleReload returned while the settled reload still held reloadMu")
+	case <-time.After(50 * time.Millisecond):
+	}
+	s.releaseReload()
+	mustSignal(t, returned, "settleReload once reloadMu is released")
 }
 
 // reloadSignalDB counts SELECT round trips and closes a channel once a reload has read its

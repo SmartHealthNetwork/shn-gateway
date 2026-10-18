@@ -85,15 +85,24 @@ func originatedPackageRequest(line string, recs crdOriginRecords, order []byte, 
 }
 
 // carryUnchanged walks a questionnaire request the gateway built to the
-// payer's line (route): the walk changes no byte of it, and a walk that would
-// change one is refused (502) rather than sent.
-func (g *Gateway) carryUnchanged(route legRoute, body []byte, correlationID, recipient string) (int, string) {
-	adapted, _, err := g.egressAdapt(route, body, ExchangeIdentity{CorrelationID: correlationID, LegType: "dtr-questionnaire-fetch", Counterpart: recipient})
+// payer's line (route) and returns the route to send it on: route itself when
+// the walk changes no byte of it. A walk that would change one is not applied:
+// the request is carried as built, at its build line (asSent), and the carry
+// is recorded (OriginateLeg); the participant's own setting
+// (RequireSharedLine) refuses it as routing (422) instead.
+func (g *Gateway) carryUnchanged(route legRoute, body []byte, correlationID, recipient string) (legRoute, int, string) {
+	adapted, _, record, err := g.egressWalk(route, body, ExchangeIdentity{CorrelationID: correlationID, LegType: "dtr-questionnaire-fetch", Counterpart: recipient})
 	if err != nil {
-		return adaptFailureStatus(err), err.Error()
+		return legRoute{}, adaptFailureStatus(err), err.Error()
 	}
 	if !bytes.Equal(adapted, body) {
-		return http.StatusBadGateway, "the questionnaire-package request cannot be carried to the payer's line unchanged"
+		if g.cfg.RequireSharedLine {
+			return legRoute{}, http.StatusUnprocessableEntity, "the questionnaire-package request cannot be carried to the payer's line unchanged"
+		}
+		return route.asSent(), 0, ""
 	}
-	return 0, ""
+	if err := record(); err != nil {
+		return legRoute{}, adaptFailureStatus(err), err.Error()
+	}
+	return route, 0, ""
 }

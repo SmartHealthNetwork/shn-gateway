@@ -141,8 +141,28 @@ func fixturePASResponse(t *testing.T, decision []byte, bundle bool) []byte {
 	}
 	cr["patient"] = map[string]any{"reference": "Patient/p"}
 	cr["request"] = map[string]any{"reference": "Claim/c"}
+	// A ClaimResponse states its created and insurer (both 1..1 in R4): a
+	// decision fixture that leaves them out is given the payer's, so the
+	// decision EOB has its sources. A row about their absence builds
+	// its answer without this helper.
+	if cr["created"] == nil {
+		cr["created"] = "2026-06-03T00:00:00Z"
+	}
+	if cr["insurer"] == nil {
+		cr["insurer"] = map[string]any{}
+	}
 	if cr["insurer"] != nil {
 		cr["insurer"] = map[string]any{"reference": "Organization/insurer"}
+	}
+	// A payer answers the request's item (sequence 1 in every fixture
+	// request): a decision fixture that states no item is given one answering
+	// it with only its submitted entry (no review action, so the decision
+	// read is unchanged), so the decision EOB has the payer's item to carry.
+	// A row about an answer that answers no item builds it without this
+	// helper.
+	if cr["item"] == nil {
+		cr["item"] = []any{map[string]any{"itemSequence": 1, "adjudication": []any{map[string]any{
+			"category": map[string]any{"coding": []any{map[string]any{"system": "http://terminology.hl7.org/CodeSystem/adjudication", "code": "submitted"}}}}}}}
 	}
 	if cr["requestor"] != nil {
 		cr["requestor"] = map[string]any{"reference": "Organization/requestor"}

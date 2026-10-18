@@ -150,7 +150,12 @@ func TestCRDIngress_RelaysExactly(t *testing.T) {
 				Error string `json:"error"`
 			}
 			_ = json.Unmarshal(rec.Body.Bytes(), &body)
-			if rec.Code != http.StatusBadGateway || !strings.HasPrefix(body.Error, "payer CRD response is not a valid CDS Hooks response: ") || !strings.Contains(body.Error, r.rule) {
+			want := strings.HasPrefix(body.Error, "payer CRD response is not a valid CDS Hooks response: ") && strings.Contains(body.Error, r.rule)
+			if r.rule == "response.json" {
+				// A repeated member name is named, with where, so the payer can fix it.
+				want = strings.HasPrefix(body.Error, `payer CRD response repeats the JSON member "cards" in the top-level object`)
+			}
+			if rec.Code != http.StatusBadGateway || !want {
 				t.Fatalf("EHR got %d %s", rec.Code, rec.Body.String())
 			}
 			if bytes.Contains(rec.Body.Bytes(), []byte(r.answer)) {

@@ -61,7 +61,8 @@ func TestSelectLegLineOrBridgeRefuse_RouteRefusalError(t *testing.T) {
 	reg := shnsdk.NewRegistry()
 	reg.Set("bridge-demo-refuse-gw", shnsdk.RegistryEntry{ID: "bridge-demo-refuse-gw", Role: "payer",
 		ContractVersions: []string{shnsdk.ContractPAPAS22}})
-	g := &Gateway{cfg: Config{Reg: reg, DeclaredContractVersions: []string{shnsdk.ContractPAPAS20}}}
+	// The selection-time refusal is the participant's own setting (RequireSharedLine); by default the pair is carried (line_carry_test.go).
+	g := &Gateway{cfg: Config{Reg: reg, DeclaredContractVersions: []string{shnsdk.ContractPAPAS20}, RequireSharedLine: true}}
 
 	rec := httptest.NewRecorder()
 	route, ok := g.selectLegLineOrBridgeRefuse(rec, "bridge-demo-refuse-gw", "pas-claim", "corr-2")

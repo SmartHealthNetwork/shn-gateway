@@ -119,7 +119,7 @@ func TestTask0_ConformantGoldensBind(t *testing.T) {
 }
 
 // originatorBuiltConformantBundle builds the LEAN conformant $submit bundle the way the
-// Originator does — via the additive shnsdk.BuildConformantClaimBundle, demo
+// Originator does — via the additive shnsdk.BuildConformantClaimBundleExact, demo
 // persona only (Linda Johansson / MBR-COVERED, CPT 72148, M51.16), no br-payer foreign
 // seed. The QR's qr-context refs point at the bundle-local Coverage/SR (internally
 // consistent).
@@ -140,7 +140,7 @@ func originatorBuiltConformantBundle(t *testing.T, member string) []byte {
 	if err != nil {
 		t.Fatalf("FillQuestionnaire: %v", err)
 	}
-	got, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{Coverage: testMemberCoverage(member), Insurer: testPayerOrganization(shnsdk.CMSPayerIdentity),
+	got, err := shnsdk.BuildConformantClaimBundleExact(shnsdk.ConformantClaimInputs{PASClaimFacts: testClaimFacts(), Coverage: testMemberCoverage(member), Insurer: testPayerOrganization(shnsdk.CMSPayerIdentity),
 		Provider:       testRequestingProvider(),
 		MemberIDSystem: shnsdk.MemberSystem,
 		QR:             qrJSON,
@@ -259,7 +259,7 @@ func TestParseConformantPASSubjects_AbsoluteRefs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FillQuestionnaire: %v", err)
 	}
-	got, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{Coverage: testMemberCoverage(member), Insurer: testPayerOrganization(shnsdk.CMSPayerIdentity),
+	got, err := shnsdk.BuildConformantClaimBundleExact(shnsdk.ConformantClaimInputs{PASClaimFacts: testClaimFacts(), Coverage: testMemberCoverage(member), Insurer: testPayerOrganization(shnsdk.CMSPayerIdentity),
 		Provider:         testRequestingProvider(),
 		MemberIDSystem:   shnsdk.MemberSystem,
 		QR:               qrJSON,
@@ -283,7 +283,7 @@ func TestParseConformantPASSubjects_AbsoluteRefs(t *testing.T) {
 }
 
 // TestParseConformantPASSubjects_AcceptsOriginatorBuilt: the payer-side bind accepts the
-// LEAN conformant $submit bundle the Originator builds (shnsdk.BuildConformantClaimBundle)
+// LEAN conformant $submit bundle the Originator builds (shnsdk.BuildConformantClaimBundleExact)
 // — it three-way subject-binds to the member, exactly like the golden. This is the
 // builder↔parser contract: if the Originator-built bytes don't bind here, nothing
 // downstream (an in-process responder / a real br-payer) sees them.
@@ -591,7 +591,7 @@ func conformantPASBundlePended(t *testing.T, member string) []byte {
 	if err != nil {
 		t.Fatalf("FillQuestionnaire: %v", err)
 	}
-	got, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{Coverage: testMemberCoverage(member), Insurer: testPayerOrganization(shnsdk.CMSPayerIdentity),
+	got, err := shnsdk.BuildConformantClaimBundleExact(shnsdk.ConformantClaimInputs{PASClaimFacts: testClaimFacts(), Coverage: testMemberCoverage(member), Insurer: testPayerOrganization(shnsdk.CMSPayerIdentity),
 		Provider:       testRequestingProvider(),
 		MemberIDSystem: shnsdk.MemberSystem,
 		QR:             qrJSON,
@@ -610,7 +610,7 @@ func conformantPASBundlePended(t *testing.T, member string) []byte {
 }
 
 // originatorBuiltConformantUpdateBundle builds a LEAN conformant amended re-POST bundle via
-// shnsdk.BuildConformantClaimUpdateBundle — demo persona only (Linda Johansson / MBR-COVERED,
+// shnsdk.BuildConformantClaimUpdateBundleExact — demo persona only (Linda Johansson / MBR-COVERED,
 // CPT 72148, M51.16). The QR/DR/Provenance are read from the golden (the amended QR is not
 // reproducible via a standard FillQuestionnaire call; the builder stamps ids/strips meta.profile
 // idempotently). Mirrors the sdk-side conformantUpdateInputsFromGolden helper.
@@ -672,7 +672,7 @@ func originatorBuiltConformantUpdateBundleCorrs(t *testing.T, brPayer bool, corr
 	if err != nil {
 		t.Fatalf("BuildServiceRequest: %v", err)
 	}
-	got, err := shnsdk.BuildConformantClaimUpdateBundle(shnsdk.ConformantClaimUpdateInputs{Coverage: testMemberCoverage(member),
+	got, err := shnsdk.BuildConformantClaimUpdateBundleExact(shnsdk.ConformantClaimUpdateInputs{PASClaimFacts: testClaimFacts(), CertificationType: testCertificationType(), PriorClaim: testPriorClaim(), Coverage: testMemberCoverage(member),
 		Provider:         testRequestingProvider(),
 		MemberIDSystem:   shnsdk.MemberSystem,
 		QR:               qrJSON,
@@ -717,7 +717,7 @@ func TestConformantPASUpdateBind_AcceptsAbsolutizedBrPayer(t *testing.T) {
 }
 
 // TestParseConformantPASUpdate_AcceptsOriginatorBuilt: the payer-side conformant parser accepts the
-// Originator-built amended re-POST bundle (shnsdk.BuildConformantClaimUpdateBundle). This is the
+// Originator-built amended re-POST bundle (shnsdk.BuildConformantClaimUpdateBundleExact). This is the
 // builder↔parser contract for the update leg: if the Originator-built bytes don't bind here,
 // nothing downstream (an in-process responder / a real br-payer) sees them. Mirrors
 // TestParseConformantPASSubjects_AcceptsOriginatorBuilt for the submit leg.

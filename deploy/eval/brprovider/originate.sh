@@ -115,6 +115,7 @@ endpoint="${BRPROVIDER_BFF_URL}/api/cds-services/shn-order-sign?server=${server_
 # BEFORE the diagnostic below — masking a reachability problem as a generic cert failure
 # (this is exactly what hid the pfx-permission bug during bring-up). Surface it instead.
 resp_file="$(mktemp)"
+trap 'rm -f "$resp_file"' EXIT
 if ! http_status=$(curl -s -o "$resp_file" -w '%{http_code}' --connect-timeout 5 --max-time 30 \
   -X POST "$endpoint" -H 'Content-Type: application/json' -H 'X-Bypass-Auth: true' -d "$req_body"); then
   echo "✗ conformant ${UC}: could not reach br-provider BFF at ${BRPROVIDER_BFF_URL} (is it up?)" >&2

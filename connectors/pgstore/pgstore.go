@@ -176,6 +176,7 @@ CREATE TABLE IF NOT EXISTS gw_pa_continuation (
     claim_identifier        TEXT NOT NULL,
     claim_type              TEXT NOT NULL,
     claim_priority          TEXT NOT NULL,
+    claim_created           TEXT NOT NULL DEFAULT '',
     item_trace_numbers      TEXT[] NOT NULL DEFAULT '{}',
     payer_claimresponse_ids TEXT[] NOT NULL DEFAULT '{}',
     payer_preauth_ref       TEXT NOT NULL,
@@ -185,6 +186,12 @@ CREATE TABLE IF NOT EXISTS gw_pa_continuation (
     PRIMARY KEY (holder_id, continuation_id)
 );
 CREATE INDEX IF NOT EXISTS gw_pa_continuation_retention ON gw_pa_continuation (holder_id, updated_at);
+-- claim_created is the submitted Claim's created, exactly as sent: an
+-- amendment restates the submission with it. A table an earlier release created
+-- gains it here, by ADD COLUMN IF NOT EXISTS; a row written before it reads
+-- back '' and an amendment built from such a row is refused, never given the
+-- amendment's own time.
+ALTER TABLE gw_pa_continuation ADD COLUMN IF NOT EXISTS claim_created TEXT NOT NULL DEFAULT '';
 -- gw_pa_continuation_item is the item map: one row per line the submission
 -- carried, with the sequence it was submitted under, the product it asked for,
 -- its date of service and the trace number the payer echoes. It is what a later

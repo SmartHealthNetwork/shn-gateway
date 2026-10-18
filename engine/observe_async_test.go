@@ -203,19 +203,19 @@ func TestDecisionEOBCheckIsBoundedAtObserve(t *testing.T) {
 	g, events := observeGateway(t, EnforcementObserve, v)
 	ctx := withFindingContext(context.Background(), findingContext{LegType: "pas-claim", CorrelationID: "corr-eob", Seam: "payer-native", Whose: "self"})
 
-	var status int
-	var msg string
+	var detail string
 	var invalid bool
 	start := time.Now()
 	within(t, 5*time.Second, "the decision-EOB check at observe", func() {
-		status, msg, invalid = g.validateDecisionEOBs(ctx, [][]byte{[]byte(`{"resourceType":"ExplanationOfBenefit"}`)})
+		detail = g.validateDecisionEOBs(ctx, [][]byte{[]byte(`{"resourceType":"ExplanationOfBenefit"}`)})[0]
+		invalid = detail != ""
 	})
 	took := time.Since(start)
 	if took < decisionEOBObserveDeadline || took > decisionEOBObserveDeadline+time.Second {
 		t.Fatalf("the decision-EOB check waits for its deadline and no longer, took %s", took)
 	}
-	if status != 0 || invalid {
-		t.Fatalf("a missed deadline is unavailable: relayed and written, got status %d %q invalid=%v", status, msg, invalid)
+	if invalid {
+		t.Fatalf("a missed deadline is unavailable: relayed and written, got not written (%q)", detail)
 	}
 	got := observedFindings(events, "corr-eob")
 	if len(got) != 1 || !strings.Contains(got[0], `"verdict":"unavailable"`) {
@@ -238,15 +238,18 @@ func TestDecisionEOBBudgetIsPerLegAtObserve(t *testing.T) {
 	for i := range eobs {
 		eobs[i] = []byte(`{"resourceType":"ExplanationOfBenefit"}`)
 	}
-	var status int
 	var invalid bool
 	start := time.Now()
-	within(t, 5*time.Second, "300 decision-EOB checks at observe", func() { status, _, invalid = g.validateDecisionEOBs(ctx, eobs) })
+	within(t, 5*time.Second, "300 decision-EOB checks at observe", func() {
+		for _, d := range g.validateDecisionEOBs(ctx, eobs) {
+			invalid = invalid || d != ""
+		}
+	})
 	if took := time.Since(start); took > decisionEOBObserveDeadline+time.Second {
 		t.Fatalf("300 decision EOBs took %s; the leg's budget is %s once", took, decisionEOBObserveDeadline)
 	}
-	if status != 0 || invalid {
-		t.Fatalf("decisions past the budget are relayed and written, got status %d invalid=%v", status, invalid)
+	if invalid {
+		t.Fatal("decisions past the budget are relayed and written, got not written")
 	}
 	got := observedFindings(events, "corr-many")
 	if len(got) != len(eobs) {
@@ -260,8 +263,9 @@ func TestDecisionEOBBudgetIsPerLegAtObserve(t *testing.T) {
 }
 
 // The budget is observe's alone: at strict and structural the decision EOB still
-// waits for the validator and refuses on an invalid verdict, however long it takes.
-func TestDecisionEOBIsUnboundedWhereItRefuses(t *testing.T) {
+// waits for the validator's verdict, however long it takes, and an invalid one
+// is not written (it never refuses the decision).
+func TestDecisionEOBIsUnboundedWhereItIsDecisive(t *testing.T) {
 	saved := decisionEOBObserveDeadline
 	decisionEOBObserveDeadline = 50 * time.Millisecond
 	t.Cleanup(func() { decisionEOBObserveDeadline = saved })
@@ -279,9 +283,10 @@ func TestDecisionEOBIsUnboundedWhereItRefuses(t *testing.T) {
 			})
 			g, _ := observeGateway(t, level, slow)
 			ctx := withFindingContext(context.Background(), findingContext{LegType: "pas-claim", CorrelationID: "corr-strict-eob", Seam: "payer-native", Whose: "self"})
-			status, _, _ := g.validateDecisionEOBs(ctx, [][]byte{[]byte(`{"resourceType":"ExplanationOfBenefit"}`)})
-			if status != http.StatusUnprocessableEntity {
-				t.Fatalf("at %s a slow validator's invalid verdict refuses 422, not a deadline's unavailable; got %d", level, status)
+			detail := g.validateDecisionEOBs(ctx, [][]byte{[]byte(`{"resourceType":"ExplanationOfBenefit"}`)})[0]
+			invalid := detail != ""
+			if !invalid || !strings.HasPrefix(detail, "decision EOB not written: it fails its own validation") {
+				t.Fatalf("at %s a slow validator's invalid verdict is waited for and the EOB not written, not a deadline's unavailable; got %v %q", level, invalid, detail)
 			}
 		})
 	}
@@ -318,9 +323,9 @@ func TestObserverCompletionWaitsForQueuedChecks(t *testing.T) {
 func TestDecisionEOBInvalidInTimeIsNotWrittenAtObserve(t *testing.T) {
 	g, events := observeGateway(t, EnforcementObserve, &shnsdk.FakeValidator{RejectIfContains: "ExplanationOfBenefit"})
 	ctx := withFindingContext(context.Background(), findingContext{LegType: "pas-claim", CorrelationID: "corr-eob2", Seam: "payer-native", Whose: "self"})
-	status, _, recorded := g.validateFHIRDecisionEOB(ctx, []byte(`{"resourceType":"ExplanationOfBenefit"}`))
-	if status != 0 || !recorded {
-		t.Fatalf("an invalid decision EOB at observe is relayed and marked recorded (not written), got status %d recorded=%v", status, recorded)
+	notWritten, detail := g.validateFHIRDecisionEOB(ctx, []byte(`{"resourceType":"ExplanationOfBenefit"}`))
+	if !notWritten || !strings.HasPrefix(detail, "decision EOB not written: it fails its own validation") {
+		t.Fatalf("an invalid decision EOB at observe is not written and named, got %v %q", notWritten, detail)
 	}
 	if got := observedFindings(events, "corr-eob2"); len(got) != 1 {
 		t.Fatalf("its finding is emitted before the answer, got %v", got)

@@ -10,12 +10,11 @@ package engine
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"strings"
-
-	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
 // isPackageBundleParameter reports whether name is the $questionnaire-package
@@ -119,17 +118,86 @@ const (
 // a rule that is wrong about it (measured 2026-09-19: three of four submissions
 // to the 2.2 reference payer refused, no record of which reference dangled).
 func validateNativePASResponse(body []byte) ([]byte, LegResult) {
-	if err := validatePASBundleGraph(body); err != nil {
-		return nil, fail502("invalid native PAS response Bundle: " + strings.TrimPrefix(err.Error(), "engine: "))
+	return validateNativePASResponseAt(body, "")
+}
+
+// answerLineRead is how a payer's answer read at its candidate lines (FR-G29's
+// rule, valid on any line is valid): the line it is read at, and every line
+// tried before it and what the answer met there.
+type answerLineRead struct {
+	Line  string
+	Tried []LineVerdictSummary
+}
+
+// readAtCandidateLines reads an answer at the first of lines whose rule it
+// meets, else at the first line, whose refusal then stands. No line reads it
+// by the line-less rule.
+func readAtCandidateLines(lines []string, meets func(line string) bool) answerLineRead {
+	var tried []LineVerdictSummary
+	for _, line := range lines {
+		if meets(line) {
+			return answerLineRead{Line: line, Tried: append(tried, LineVerdictSummary{Line: line, Verdict: findingVerdict(VerdictValid)})}
+		}
+		tried = append(tried, LineVerdictSummary{Line: line, Verdict: findingVerdict(VerdictInvalid)})
 	}
-	pended, _, err := shnsdk.ParsePendedResponse(body)
-	if err != nil {
-		return nil, fail502("invalid native PAS response decision")
+	if len(lines) > 0 {
+		return answerLineRead{Line: lines[0], Tried: tried}
 	}
-	if !pended {
-		if _, err := shnsdk.ParseClaimResponse(body); err != nil {
+	return answerLineRead{}
+}
+
+// laterLineFinding is the finding an answer read at a candidate line after
+// the first records (FR-G29 records the same of a $validate verdict): the rule
+// held on that line after the earlier ones failed. ok is false when the answer
+// was read at its first line, or at none.
+func laterLineFinding(fc findingContext, level string, rule string, read answerLineRead, payload []byte) (ConformanceFinding, bool) {
+	if len(read.Tried) < 2 || read.Tried[len(read.Tried)-1].Verdict != findingVerdict(VerdictValid) {
+		return ConformanceFinding{}, false
+	}
+	return ConformanceFinding{
+		Kind: string(KindContent), Rule: rule, LegType: fc.LegType, CorrelationID: fc.CorrelationID,
+		Seam: fc.Seam, Whose: fc.Whose, Line: read.Line, Level: level,
+		Verdict: findingVerdict(VerdictValid), Decision: Record.String(),
+		PayloadSHA256: sha256hex(payload), DeclaredLine: read.Tried[0].Line, Lines: read.Tried,
+	}, true
+}
+
+// pasAnswerRead is answerGraphRead for an answer on the leg token names
+// ("pa.pas@2.2"), over this gateway's candidate lines for it; the zero read
+// when the token names no line.
+func (g *Gateway) pasAnswerRead(token string, body []byte) answerLineRead {
+	contract, line, ok := strings.Cut(token, "@")
+	if !ok || line == "" {
+		return answerLineRead{}
+	}
+	return answerGraphRead(g.answerCandidateLines(contract, line, body), body)
+}
+
+// answerGraphRead is how a PAS $submit or amendment answer reads at its
+// candidate lines (answerCandidates, FR-G29's order): at the first whose graph
+// rule (validateAnswerAt) and decision contract it meets. The patient walk
+// reads the answer at the same line (pasAnswerSubjectMismatch).
+func answerGraphRead(lines []string, body []byte) answerLineRead {
+	return readAtCandidateLines(lines, func(line string) bool {
+		_, lr := validateNativePASResponseAt(body, line)
+		return lr.Status == 0
+	})
+}
+
+// validateNativePASResponseAt is validateNativePASResponse for an answer
+// exchanged at IG line: its graph is read by that line's rule
+// (validateAnswerAt), the decision contract as at every line.
+// It reads by the one per-line definition (InspectNativePASResponseAt).
+func validateNativePASResponseAt(body []byte, line string) ([]byte, LegResult) {
+	// A repeated member name is named, with where, so the payer can fix it.
+	if dup, ok := repeatedMember(body); ok {
+		return nil, LegResult{Status: http.StatusBadGateway, Message: "payer PAS response repeats " + dup + ": it can be read two ways, so it is not carried"}
+	}
+	if _, err := inspectNativePASAnswerAt(body, line); err != nil {
+		if errors.Is(err, errNativePASDecision) {
 			return nil, fail502("invalid native PAS response decision")
 		}
+		return nil, fail502("invalid native PAS response Bundle: " + strings.TrimPrefix(err.Error(), "engine: "))
 	}
 	return body, LegResult{}
 }
@@ -164,7 +232,13 @@ func RefusePASResponseSubjectsForTest(corrID, leg string, body []byte) (int, str
 // not relayed and the requester cannot read for itself which subject did not
 // bind.
 func refusePASResponseSubjects(corrID, leg string, status int, body []byte) (int, string) {
-	r := pasResponseSubjectMismatch(body)
+	return refusePASResponseSubjectsAt(corrID, leg, "", status, body)
+}
+
+// refusePASResponseSubjectsAt is refusePASResponseSubjects for an answer
+// exchanged at IG line (pasAnswerSubjectMismatch).
+func refusePASResponseSubjectsAt(corrID, leg, line string, status int, body []byte) (int, string) {
+	r := pasAnswerSubjectMismatch(body, line)
 	if r == nil {
 		return 0, ""
 	}
@@ -179,10 +253,10 @@ func refusePASResponseSubjects(corrID, leg string, status int, body []byte) (int
 // back. The payer's bytes are what a requester would have needed to read the
 // refusal, and a refused answer is not relayed — so the record of what was
 // refused, and why, has to be made here or nowhere.
-func validateRelayedPASResponse(corrID, leg string, body []byte) ([]byte, LegResult) {
-	response, lr := validateNativePASResponse(body)
+func validateRelayedPASResponse(corrID, leg, line string, body []byte) ([]byte, LegResult) {
+	response, lr := validateNativePASResponseAt(body, line)
 	if lr.Status != 0 {
-		logPASResponseRefused(corrID, leg, lr, body)
+		logPASResponseRefused(corrID, leg, line, lr, body)
 	}
 	return response, lr
 }
@@ -203,9 +277,9 @@ type pasResponseRefusal struct {
 // logged (an answer can carry member data); the reference that dangled is, as
 // the payer wrote it, because it is the one fact that settles whether the payer's
 // answer is incomplete or the rule is wrong.
-func logPASResponseRefused(corrID, leg string, lr LegResult, body []byte) {
+func logPASResponseRefused(corrID, leg, line string, lr LegResult, body []byte) {
 	rec := pasResponseRefusal{CorrelationID: corrID, LegType: leg, Status: lr.Status, Reason: lr.Message, Entries: pasEntryCount(body), Bytes: len(body)}
-	if err := validatePASBundleGraph(body); err != nil {
+	if err := validatePASBundleGraphAt(body, line); err != nil {
 		rec.Reference = pasGraphRefusalOf(err)
 	}
 	logPASResponseRefusal(rec)
@@ -233,5 +307,5 @@ func pasEntryCount(body []byte) int {
 // fail502 builds the fail-closed LegResult (502) for a partner answer that does not
 // meet its contract.
 func fail502(msg string) LegResult {
-	return LegResult{Status: http.StatusBadGateway, Message: "engine: " + msg}
+	return LegResult{Status: http.StatusBadGateway, Message: msg}
 }

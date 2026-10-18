@@ -64,7 +64,7 @@ func levelIngressRowWith(t *testing.T, s *prefetchSoR, level ConformanceEnforcem
 	env := newInProcessExchange(t)
 	env.originator.cfg.SoR = s.sor()
 	env.originator.cfg.ConformanceEnforcement = level
-	env.originator.cfg.EnrichNativeRequests = enrich
+	optInEnrichment(env.originator, enrich)
 	var findings []ConformanceFinding
 	env.originator.cfg.Observer = func(e ObserverEvent) {
 		if e.Kind != ConformanceObservedEvent {
@@ -246,12 +246,14 @@ func wantRoutedCorrelation(t *testing.T, env *inProcessExchange, f ConformanceFi
 }
 
 // A request whose fill failed and that is refused before it is carried (here
-// by routing: the payer declares no pa.crd line) records no fill finding.
+// by routing: the payer declares no pa.crd line, and the participant opted in
+// to refusing such a pair) records no fill finding.
 func TestLevelCRDIngress_FillFindingOnlyOnceRouted(t *testing.T) {
 	env := newInProcessExchange(t)
 	env.originator.cfg.SoR = namedDifferently(t).sor()
 	env.originator.cfg.ConformanceEnforcement = EnforcementObserve
-	env.originator.cfg.EnrichNativeRequests = true
+	optInEnrichment(env.originator, true)
+	env.originator.cfg.RequireSharedLine = true
 	declareRecipientVersions(t, env, []string{"pa.pas@2.0"})
 	var findings []ConformanceFinding
 	env.originator.cfg.Observer = func(e ObserverEvent) {
@@ -468,5 +470,27 @@ func TestLevelCRDIngress_NetworkRulesRefuseAtEveryLevel(t *testing.T) {
 				refusedBeforeTheNetwork(t, env, rec, row.status, row.msg)
 			})
 		}
+	}
+}
+
+// A payer CRD answer that repeats a member name is read one way only: refused
+// at every level, and the refusal names the repeated member and where, so the
+// payer can fix it.
+func TestLevelCRDIngress_AnswerDuplicateKeyNamesTheMember(t *testing.T) {
+	answer := bytes.Replace(realCRDAnswer(t), []byte(`"type": "update",`), []byte(`"type": "update", "type": "update",`), 1)
+	if bytes.Equal(answer, realCRDAnswer(t)) {
+		t.Fatal("fixture: no member name repeated")
+	}
+	const want = `payer CRD response repeats the JSON member \"type\" in systemActions[0]: it can be read two ways, so it is not carried`
+	for _, level := range allLevels {
+		t.Run(level.String(), func(t *testing.T) {
+			env := newInProcessExchange(t)
+			env.originator.cfg.ConformanceEnforcement = level
+			env.payerReturns(LegResult{Response: testResponse(answer)})
+			rec := ingressAt(t, env, "shn-order-select", conformantCRDRequest("MBR-COVERED"))
+			if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), want) {
+				t.Fatalf("answer %d %s, want 502 %q", rec.Code, rec.Body.String(), want)
+			}
+		})
 	}
 }

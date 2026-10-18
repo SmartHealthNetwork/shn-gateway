@@ -29,7 +29,7 @@ func levelDTRRow(t *testing.T, s *prefetchSoR, level ConformanceEnforcement, enr
 	env.originator.cfg.SoR = s.sor()
 	if enrich {
 		env.originator.cfg.SoR = recordSoR{searchingPrefetchSoR{s}}
-		env.originator.cfg.EnrichNativeRequests = true
+		optInEnrichment(env.originator, true)
 	}
 	env.originator.cfg.ConformanceEnforcement = level
 	var findings []ConformanceFinding

@@ -51,8 +51,8 @@ func TestNativeSubmit_DeniedEOBCarriesOnlyPayerNotes(t *testing.T) {
 	}
 	denial := func(t *testing.T, notes []shnsdk.PASProcessNote) []byte {
 		t.Helper()
-		b, err := shnsdk.BuildDeniedResponseWithNotesAtLine("2.0", "Patient/MBR-COVERED", "corr-notes",
-			"Não atende à política <de> imagem & revisão", notes, fixedClock())
+		b, err := shnsdk.BuildDeniedResponseWithNotesAtLineExact("2.0", "Patient/MBR-COVERED", "corr-notes",
+			"Não atende à política <de> imagem & revisão", notes, testAnswerRequest, fixedClock())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -75,7 +75,7 @@ func TestNativeSubmit_DeniedEOBCarriesOnlyPayerNotes(t *testing.T) {
 		if got := eobProcessNotes(t, eob); got != nil {
 			t.Fatalf("EOB notes = %q, want none", got)
 		}
-		for _, invented := range []string{"Appeal window", "peer-to-peer", shnsdk.EOBAppealNote} {
+		for _, invented := range []string{"Appeal window", "peer-to-peer"} {
 			if strings.Contains(string(eob), invented) {
 				t.Fatalf("the EOB carries text the payer never sent (%q)", invented)
 			}
@@ -87,7 +87,7 @@ func TestNativeSubmit_DeniedEOBCarriesOnlyPayerNotes(t *testing.T) {
 		if got := eobProcessNotes(t, eob); !slices.Equal(got, []string{"approved note"}) {
 			t.Fatalf("approved EOB notes = %q, want the payer's [\"approved note\"]", got)
 		}
-		for _, invented := range []string{"Appeal window", "peer-to-peer", shnsdk.EOBAppealNote} {
+		for _, invented := range []string{"Appeal window", "peer-to-peer"} {
 			if strings.Contains(string(eob), invented) {
 				t.Fatalf("the approved EOB carries text the payer never sent (%q)", invented)
 			}

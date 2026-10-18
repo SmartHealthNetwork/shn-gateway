@@ -160,7 +160,7 @@ func TestPASInquire_AnotherPatientsTokenDecidesNothingOfTheirs(t *testing.T) {
 			var events []ObserverEvent
 			g.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
 			store := g.cfg.Store.(*censusSoR)
-			answer := inquiryFixture(t, "pas-inquiry-response-2.0.json")
+			answer := decidedAnswer(t) // its item echoes the inquiry line's TRN-1
 			g.cfg.Responder = pasResultResponder{result: LegResult{Response: testResponse(answer), ResponseSubjectForeign: true}}
 			pciA, _, _ := g.cfg.SoR.ResolvePatient("MBR-COVERED")
 			if _, err := store.RecordPendedKeyed(pciA, corr, fixedClock(), PendKeys{RequesterHolder: requester.ID, ClaimResponseIDs: []string{inquiryCRKey}, ItemTraceNumbers: []string{inquiryTraceKey}}); err != nil {

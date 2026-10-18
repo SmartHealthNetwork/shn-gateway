@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine"
+	"github.com/SmartHealthNetwork/shn-gateway/internal/fhirclient"
 )
 
 var _ engine.SearchSystemOfRecord = (*SoR)(nil)
@@ -121,8 +122,8 @@ func (s *SoR) SearchPatientContext(ctx context.Context, resourceType, sorPatient
 	return res, nil
 }
 
-// searchPage GETs one page, reading at most limit bytes. A failure is
-// classified: the search's own deadline is the time bound (unavailable); a transport
+// searchPage GETs one page, reading at most limit bytes, trying once more
+// as fhirclient.Do does. A failure is classified: the search's own deadline is the time bound (unavailable); a transport
 // failure, a caller cancellation or an error status the server may recover
 // from is unavailable; any other error status means the server does not
 // support the search; a redirect is malformed.
@@ -133,7 +134,7 @@ func (s *SoR) searchPage(parent, ctx context.Context, hc *http.Client, target st
 	}
 	req.Header.Set("Accept", "application/fhir+json")
 	timedOut := func() bool { return ctx.Err() != nil && parent.Err() == nil }
-	resp, err := hc.Do(req)
+	resp, err := fhirclient.Do(hc, req)
 	if err != nil {
 		switch {
 		case errors.Is(err, errRedirectRefused):

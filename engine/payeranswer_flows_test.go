@@ -115,7 +115,7 @@ func uc06Pend(t *testing.T, profile string, payer shnsdk.PayerIdentifier, level 
 	gw.cfg.OriginationProfile, gw.cfg.ConformanceEnforcement, gw.cfg.Validator, gw.cfg.Observer = profile, level, v, observe
 	defer gw.drainObserveChecks() // observe-level checks run off the request path
 	rec := httptest.NewRecorder()
-	if _, ok := gw.scenarioToPend(rec, httptest.NewRequest(http.MethodPost, "/scenario/uc06", nil), "uc06", "MBR-UC06"); ok {
+	if _, ok := gw.scenarioToPend(rec, httptest.NewRequest(http.MethodPost, "/scenario/uc06", strings.NewReader(testStatedBody(gw, "MBR-UC06", "", false))), "uc06", "MBR-UC06"); ok {
 		return http.StatusOK, rec.Body.String()
 	}
 	return rec.Code, rec.Body.String()
@@ -139,7 +139,7 @@ func homeOxygen(t *testing.T, profile string, payer shnsdk.PayerIdentifier, leve
 		})
 	defer fix.gw.drainObserveChecks()
 	rec := httptest.NewRecorder()
-	fix.gw.handleHomeOxygen(rec, httptest.NewRequest(http.MethodPost, "/scenario/homeoxygen", nil))
+	fix.gw.handleHomeOxygen(rec, httptest.NewRequest(http.MethodPost, "/scenario/homeoxygen", strings.NewReader(testRouteBody(fix.gw, "/scenario/homeoxygen", ""))))
 	return rec.Code, rec.Body.String()
 }
 
@@ -152,7 +152,7 @@ func uc05(t *testing.T, profile string, payer shnsdk.PayerIdentifier, level Conf
 	gw.cfg.OriginationProfile, gw.cfg.ConformanceEnforcement, gw.cfg.Validator, gw.cfg.Observer = profile, level, v, observe
 	defer gw.drainObserveChecks() // observe-level checks run off the request path
 	rec := httptest.NewRecorder()
-	gw.handleUC05(rec, httptest.NewRequest(http.MethodPost, "/scenario/uc05", nil))
+	gw.handleUC05(rec, httptest.NewRequest(http.MethodPost, "/scenario/uc05", strings.NewReader(testRouteBody(gw, "/scenario/uc05", ""))))
 	return rec.Code, rec.Body.String()
 }
 

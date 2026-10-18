@@ -203,20 +203,19 @@ func routedToken(t *testing.T, env *inProcessExchange, leg string) string {
 
 const stampMismatch = "response contract version mismatch"
 
-// The contract-line stamp on an answer's frame is SHN's own frame metadata,
-// set only on an answer an SHN gateway built: a network rule. An answer
-// stamped with a line other than the one its leg was routed on refuses at
-// every level with the 502 strict has always given, on every provider ingress
-// (including those that relay the answer exactly), and records no content
-// finding.
-func TestLevelProviderIngress_AnswerStampedWithAnotherLineRefusesAtEveryLevel(t *testing.T) {
+// stampRow is one provider ingress driven with an answer stamped with another
+// line than its leg routed.
+type stampRow struct {
+	leg    string
+	answer func(*testing.T) []byte
+	setup  func(*testing.T, *inProcessExchange)
+	send   func(*testing.T, *inProcessExchange) *httptest.ResponseRecorder
+}
+
+// providerIngressStampRows are the provider ingresses an answer reaches.
+func providerIngressStampRows() map[string]stampRow {
 	dtrBody := ehrParams(ehrOrderParam("sr1", prefetchMember), ehrCoverageParam(prefetchMember, "00001"), dtrQuestionnaire)
-	rows := map[string]struct {
-		leg    string
-		answer func(*testing.T) []byte
-		setup  func(*testing.T, *inProcessExchange)
-		send   func(*testing.T, *inProcessExchange) *httptest.ResponseRecorder
-	}{
+	return map[string]stampRow{
 		"PAS submit": {"pas-claim", func(*testing.T) []byte { return levelPASPayerAnswer }, nil,
 			func(t *testing.T, env *inProcessExchange) *httptest.ResponseRecorder {
 				rec := httptest.NewRecorder()
@@ -242,11 +241,24 @@ func TestLevelProviderIngress_AnswerStampedWithAnotherLineRefusesAtEveryLevel(t 
 				return postDTRIngress(env, dtrBody)
 			}},
 	}
+}
+
+// The contract-line stamp on an answer's frame is SHN's own frame metadata,
+// set only on an answer an SHN gateway built. An answer stamped with a line
+// other than the one its leg was routed on is relayed and recorded by default
+// (TestLevelProviderIngress_AnswerStampedWithAnotherLineIsRelayedAtEveryLevel).
+// Under the participant's own setting (RequireSharedLine) it refuses at every
+// level with the 502 strict has always given, on every provider ingress
+// (including those that relay the answer exactly), and records no content
+// finding.
+func TestLevelProviderIngress_AnswerStampedWithAnotherLineRefusesAtEveryLevel(t *testing.T) {
+	rows := providerIngressStampRows()
 	for name, row := range rows {
 		for _, level := range allLevels {
 			t.Run(name+"/"+level.String(), func(t *testing.T) {
 				env := newInProcessExchange(t)
 				env.originator.cfg.ConformanceEnforcement = level
+				env.originator.cfg.RequireSharedLine = true
 				if row.setup != nil {
 					row.setup(t, env)
 				}
@@ -256,6 +268,13 @@ func TestLevelProviderIngress_AnswerStampedWithAnotherLineRefusesAtEveryLevel(t 
 				rec := row.send(t, env)
 				if env.routeHitCount() != 1 {
 					t.Fatalf("the request must be carried once, network hits %d", env.routeHitCount())
+				}
+				// The payer answered, so it may have acted: the refusal says
+				// so, and to check before resending, as every refusal of an
+				// answer does.
+				if !strings.Contains(rec.Body.String(), "the recipient received this request and answered") ||
+					!strings.Contains(rec.Body.String(), "it may have acted on the request: check its outcome before resending") {
+					t.Errorf("the refusal does not say the payer may have acted: %s", rec.Body)
 				}
 				if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), stampMismatch) {
 					t.Fatalf("answer %d %s, want 502 %q", rec.Code, rec.Body.String(), stampMismatch)
@@ -280,6 +299,7 @@ func TestLevelOriginate_AnswerStampedWithAnotherLineRefusesAtEveryLevel(t *testi
 		t.Run(level.String(), func(t *testing.T) {
 			env := newInProcessExchange(t)
 			env.originator.cfg.ConformanceEnforcement = level
+			env.originator.cfg.RequireSharedLine = true
 			ev := observeLevelEvents(env.originator)
 			sealBare(env, stampedAnswer(t, "pa.crd@2.0", []byte(`{"cards":[]}`)))
 			_, err := env.originator.OriginateLeg(env.ctx, env.req, env.payerID, "crd-order-select", "pci-1", "corr-1", "",
@@ -421,7 +441,7 @@ func TestLevelPayerPAS_NoCoverage(t *testing.T) {
 					p.seedPend(t, related)
 				}
 				got := p.send(t, row.leg, "", row.body)
-				p.wantRequestRow(t, row.leg, got, row.body, pasSubmitPath, RuleRequestShape, http.StatusBadRequest, "PAS bundle missing Coverage.beneficiary")
+				p.wantRequestRow(t, row.leg, got, row.body, pasSubmitPath, RuleRequestShape, http.StatusBadRequest, "PAS bundle carries no Coverage")
 			})
 		}
 	}
@@ -434,9 +454,9 @@ func TestLevelPayerPAS_NoCoverageWithIdentityMappingRefusesAtEveryLevel(t *testi
 	update, _ := updateBundle(t, "Coverage")
 	runPayerNetworkRows(t, map[string]payerNetworkRow{
 		"submit": {leg: "pas-claim", body: []byte(levelPASBundleWithout(t, levelPASCoverageEntry)), opts: withIdentityMapping(),
-			status: http.StatusBadRequest, msg: "PAS bundle missing Coverage.beneficiary"},
+			status: http.StatusBadRequest, msg: "PAS bundle carries no Coverage"},
 		"amendment": {leg: "pas-claim-update", body: update, opts: withIdentityMapping(),
-			status: http.StatusBadRequest, msg: "PAS bundle missing Coverage.beneficiary"},
+			status: http.StatusBadRequest, msg: "PAS bundle carries no Coverage"},
 		"inquiry": {leg: "pas-claim-inquire", body: bundleWithout(t, []byte(levelInquiry(t, "MBR-COVERED", "")), "Coverage"), opts: withIdentityMapping(),
 			status: http.StatusBadRequest, msg: "inbound Coverage carries no resolvable payor identifier"},
 	})
@@ -457,7 +477,7 @@ func TestLevelPayerPASResponder_NoCoverageWithIdentityMappingRefusesAtEveryLevel
 			if err != nil {
 				t.Fatal(err)
 			}
-			if res.Status != http.StatusBadRequest || res.Message != "PAS bundle missing Coverage.beneficiary" {
+			if res.Status != http.StatusBadRequest || res.Message != "PAS bundle carries no Coverage" {
 				t.Fatalf("got %d %q", res.Status, res.Message)
 			}
 			if p.lastPath != "" {
@@ -477,8 +497,8 @@ func TestLevelProviderPAS_NoCoverageRefusesAtEveryLevel(t *testing.T) {
 		status int
 		msg    string
 	}{
-		"submit":    {"/Claim/$submit", []byte(levelPASBundleWithout(t, levelPASCoverageEntry)), http.StatusBadRequest, "PAS bundle missing Coverage.beneficiary"},
-		"amendment": {"/Claim/$submit", update, http.StatusBadRequest, "PAS bundle missing Coverage.beneficiary"},
+		"submit":    {"/Claim/$submit", []byte(levelPASBundleWithout(t, levelPASCoverageEntry)), http.StatusBadRequest, "PAS bundle carries no Coverage"},
+		"amendment": {"/Claim/$submit", update, http.StatusBadRequest, "PAS bundle carries no Coverage"},
 		"inquiry":   {"/Claim/$inquire", bundleWithout(t, []byte(levelInquiry(t, "MBR-COVERED", "")), "Coverage"), http.StatusUnprocessableEntity, "no payer identifier on member coverage"},
 	}
 	for name, row := range rows {

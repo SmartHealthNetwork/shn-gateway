@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -136,7 +137,7 @@ func TestOriginatedCRD_UserIDIsTheOrderingClinician(t *testing.T) {
 			})
 			g.cfg.NPI = row.npi
 			rec := httptest.NewRecorder()
-			g.runCRDThenDTROrder(rec, httptest.NewRequest(http.MethodPost, "/", nil), prefetchMember, "", "", "", "", false)
+			g.runCRDThenDTROrder(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(testStatedBody(g, prefetchMember, "", false))), prefetchMember, "", "", "", "", false)
 			reqs := payer.sent("crd-order-select")
 			if row.userID == "" {
 				if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "order names no requester; configure NPI") || len(reqs) != 0 {
@@ -195,11 +196,13 @@ func TestAttestingNPI(t *testing.T) {
 }
 
 // TestEligibilityRequestProvider: the eligibility request names the provider
-// only when an NPI is configured; nothing stands in for it.
+// only when an NPI is configured, and the payer the member's coverage names as
+// its insurer; nothing stands in for either.
 func TestEligibilityRequestProvider(t *testing.T) {
+	payer := shnsdk.PayerIdentifier{System: "urn:oid:2.16.840.1.113883.6.300", Value: "00402"}
 	for _, npi := range []string{"1234567890", ""} {
 		g := &Gateway{cfg: Config{NPI: npi, Clock: fixedClock}}
-		b, err := g.eligibilityRequest("MBR-1")
+		b, err := g.eligibilityRequest("MBR-1", payer)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -217,5 +220,12 @@ func TestEligibilityRequestProvider(t *testing.T) {
 		if string(cer["resourceType"]) != `"CoverageEligibilityRequest"` || string(cer["patient"]) != `{"reference":"Patient/MBR-1"}` {
 			t.Fatalf("request %s", b)
 		}
+		if string(cer["insurer"]) != `{"identifier":{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00402"}}` {
+			t.Fatalf("insurer %s, want the routed payer", cer["insurer"])
+		}
+	}
+	g := &Gateway{cfg: Config{NPI: "1234567890", Clock: fixedClock}}
+	if b, err := g.eligibilityRequest("MBR-1", shnsdk.PayerIdentifier{}); !errors.Is(err, shnsdk.ErrPayerRecordAbsent) || b != nil {
+		t.Fatalf("no payer: err=%v built=%s, want a refusal", err, b)
 	}
 }

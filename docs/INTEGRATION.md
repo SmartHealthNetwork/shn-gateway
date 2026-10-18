@@ -284,8 +284,10 @@ Four steps, all on your side:
      --data-binary @pas-bundle.json
    ```
 
-   The header is exactly `Authorization: Bearer <token>` (canonical casing, one
-   space). A missing or rejected bearer returns `401` with the body
+   The header is `Authorization: Bearer <token>`. From shn-gateway v0.62.0 the
+   scheme is matched without regard to case (RFC 7235), so the token answer's
+   `token_type` (`bearer`) can be used as it is; earlier releases accept only
+   `Bearer`. A missing or rejected bearer returns `401` with the body
    FHIR `OperationOutcome`, whose issue diagnostic is
    `ingress authentication required`.
 
@@ -342,7 +344,18 @@ and CDS Hooks endpoints keep their existing response families. A recipient failu
 relayed through the Hub keeps the Hub's generic failure response. Raw backend responses,
 URLs, member identifiers and token details are not exposed in these new error messages.
 Check backend credentials and service health before changing a patient's identifier.
-A 503 does not promise an automatic retry or make repeating a clinical write safe.
+
+The built-in FHIR connector sends a read (a GET) once more after 250 ms when the first
+try fails within 1 s with no answer (the connection refused, reset or closed) or with
+502, 503 or 504, and the request's deadline leaves time for the pause. A server, or the
+proxy in front of it, that is moving to a new task fails at once and often answers the
+next try. A slower failure is not tried again, so the answer reaches the requester within
+its own wait. A SMART token request that gets no answer is tried again the same way, with
+the read, under a new token request. Every other answer, a 4xx among them, is the answer at
+once, and the second try's answer is classified as in the table above. A connector you
+supply through `engine.Config.SoR` keeps its own behaviour.
+The gateway's own 503 does not promise an automatic retry or make repeating a clinical
+write safe.
 
 Custom connectors can additionally implement `engine.ContextSystemOfRecord`. Its nine
 `Context`-suffixed read methods accept the request context and return an error as their
@@ -631,8 +644,9 @@ Some checks are not about a payload's conformance and refuse at every level:
 authentication, authority (including a token presented with a request other than
 the one it was issued for), consent, the patient binding (each gateway identifies
 the member the request names by its own system), routing, replay, a repeated
-member name in any body, the contract line stamped on an answer's frame, and the
-check of a payload this gateway itself translated between IG lines.
+member name in any body, and the check of a payload this gateway itself translated
+between IG lines. From v0.62.0 an answer stamped with another contract line than its
+leg was routed at is relayed, and refused only under `REQUIRE_SHARED_LINE=true`.
 
 **Reading a finding.** At `observe`, `structural` and `strict`, if you run the gateway yourself — through the SHN Kit or a
 self-hosted deployment — findings appear in your own gateway log and observer

@@ -11,9 +11,9 @@ import (
 	"time"
 )
 
-// A capture that finds no free slot keeps neither headers nor body, and both
-// of its events say the budget left the body out: on a handler and on a
-// transport alike.
+// A capture that finds no free slot keeps no body (and no header but a trace
+// proof, slotless_trace_test.go), and both of its events say the budget left
+// the body out: on a handler and on a transport alike.
 func TestBudgetDetailNamesABodyTheBudgetLeftOut(t *testing.T) {
 	budget := NewCaptureBudget(1<<20, 1)
 	_, _, releaseHolder := captureSession(budget, 1024) // another exchange holds the only slot

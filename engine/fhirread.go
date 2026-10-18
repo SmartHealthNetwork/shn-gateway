@@ -264,9 +264,22 @@ func (r *pasSubjectRefusal) Error() string { return r.Why }
 // stated with the closure walk's own wording; a ClaimResponse without a patient
 // reference (absent, or an empty string) is refused at that guard.
 func pasResponseSubjectMismatch(raw []byte) *pasSubjectRefusal {
+	return pasAnswerSubjectMismatch(raw, "")
+}
+
+// pasAnswerSubjectMismatch is pasResponseSubjectMismatch for an answer
+// exchanged at IG line. The graph is read by that line's own rule
+// (validateAnswerAt) first, the same rule answer.shape reads it by, so a graph
+// the line lets go unresolved is never refused here as a patient's. At 2.1.0,
+// which lets an answer return anything the request sent as a reference only,
+// a subject no entry resolves binds by the patient its Patient/<id> names, and
+// the Bundle need not carry the ClaimResponse's patient; a Patient it does
+// carry must still be that patient.
+func pasAnswerSubjectMismatch(raw []byte, line string) *pasSubjectRefusal {
 	g, err := readPASGraph(raw)
 	if err == nil {
-		err = g.validate()
+		err = g.validateAnswerAt(line)
+		g.openSubjects = line == "2.1"
 	}
 	if err != nil {
 		r := &pasSubjectRefusal{Why: "the response graph does not close: " + strings.TrimPrefix(strings.TrimPrefix(err.Error(), "engine: "), "PAS response graph: ")}
@@ -281,6 +294,14 @@ func pasResponseSubjectMismatch(raw []byte) *pasSubjectRefusal {
 		return &pasSubjectRefusal{Owner: g.response.label(), Path: "/patient", Why: g.response.label() + " names no patient by reference"}
 	}
 	expected, why := g.subjectIdentity(g.response, ref)
+	if why != "" && g.openSubjects {
+		if tail := patientTail(ref); tail != "" && g.namesNoEntry(tail) {
+			expected, why = tail, ""
+		}
+	}
+	if why == "" && expected == "" {
+		why = "names no patient identity"
+	}
 	if why != "" {
 		return &pasSubjectRefusal{Owner: g.response.label(), Path: "/patient", Reference: ref, Why: fmt.Sprintf("%s /patient %q %s", g.response.label(), ref, why)}
 	}
@@ -336,10 +357,18 @@ func (g *pasGraph) subjectMismatch(expected string) *pasSubjectRefusal {
 			return &pasSubjectRefusal{Owner: owner.label(), Path: path, Expected: expected, Why: owner.label() + " " + path + " names a subject without a reference"}
 		}
 		identity, why := g.subjectIdentity(owner, literal)
+		if why != "" && g.openSubjects {
+			if tail := patientTail(literal); tail != "" && g.namesNoEntry(tail) {
+				if tail == patientTail(expected) {
+					return nil
+				}
+				return &pasSubjectRefusal{Owner: owner.label(), Path: path, Reference: literal, Expected: expected, Why: fmt.Sprintf("%s %s names %q, which no entry of the Bundle resolves and which is not the ClaimResponse's patient %s", owner.label(), path, literal, expected)}
+			}
+		}
 		if why != "" {
 			return &pasSubjectRefusal{Owner: owner.label(), Path: path, Reference: literal, Expected: expected, Why: fmt.Sprintf("%s %s names %q, which %s", owner.label(), path, literal, why)}
 		}
-		if identity != expected {
+		if !g.sameSubject(identity, expected) {
 			return &pasSubjectRefusal{Owner: owner.label(), Path: path, Reference: literal, Identity: identity, Expected: expected, Why: fmt.Sprintf("%s %s names %q (%s), which is not the ClaimResponse's patient %s", owner.label(), path, literal, identity, expected)}
 		}
 		return nil
@@ -365,7 +394,7 @@ func (g *pasGraph) subjectMismatch(expected string) *pasSubjectRefusal {
 					}
 					identity += "#" + id
 				}
-				if identity != expected {
+				if !g.sameSubject(identity, expected) {
 					if depth == 0 {
 						return &pasSubjectRefusal{Owner: owner.label(), Identity: identity, Expected: expected, Why: fmt.Sprintf("%s is a Patient that is not the ClaimResponse's patient %s", owner.label(), expected)}
 					}
@@ -423,10 +452,65 @@ func (g *pasGraph) subjectMismatch(expected string) *pasSubjectRefusal {
 			return r
 		}
 	}
-	if !found {
+	if !found && !g.openSubjects {
 		return &pasSubjectRefusal{Expected: expected, Why: "no entry of the Bundle is the ClaimResponse's patient " + expected}
 	}
 	return nil
+}
+
+// sameSubject reports whether identity is the patient expected names. An
+// identity is that patient when it is the same identity; and, for an answer
+// whose ClaimResponse names its patient by a reference no entry resolves
+// (openSubjects), when it is that patient's Patient/<id>.
+//
+// The identities bound by a Patient/<id> alone must be one identity: the first
+// so bound is the patient's, and another (the same id at another base) is
+// another patient.
+func (g *pasGraph) sameSubject(identity, expected string) bool {
+	if identity == expected {
+		return true
+	}
+	if !g.openSubjects || !strings.HasPrefix(expected, "Patient/") || patientTail(identity) != expected {
+		return false
+	}
+	if g.tailIdentity == "" {
+		g.tailIdentity = identity
+	}
+	return identity == g.tailIdentity
+}
+
+// namesNoEntry reports whether no entry of the Bundle has a RESTful identity
+// ending in tail ("Patient/<id>"): a reference by it resolves to nothing, as
+// opposed to one that resolves to more than one entry, which is refused at
+// every line.
+func (g *pasGraph) namesNoEntry(tail string) bool {
+	for url := range g.byURL {
+		if strings.HasSuffix(url, "/"+tail) {
+			return false
+		}
+	}
+	return true
+}
+
+// patientTail is the patient a literal reference names by its last
+// Patient/<id>, without a trailing version: "Patient/<id>", or "" when it
+// names no Patient.
+func patientTail(ref string) string {
+	ref = stripHistoryRef(ref)
+	i := strings.LastIndex(ref, "Patient/")
+	if i < 0 || (i > 0 && ref[i-1] != '/') {
+		return ""
+	}
+	// A relative reference names a Patient only as "Patient/<id>": in
+	// "Group/Patient/x" the segment before the id is no Patient type.
+	if u, err := url.Parse(ref); err == nil && !u.IsAbs() && i != 0 {
+		return ""
+	}
+	id := ref[i+len("Patient/"):]
+	if id == "" || strings.ContainsAny(id, "/#?") {
+		return ""
+	}
+	return "Patient/" + id
 }
 
 // subjectIdentity is the versionless identity a subject reference denotes when

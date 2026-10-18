@@ -250,7 +250,7 @@ func TestExchangeRecord_RequesterEdits(t *testing.T) {
 			s := newPrefetchSoR()
 			env := newInProcessExchange(t)
 			env.originator.cfg.SoR = s.sor()
-			env.originator.cfg.EnrichNativeRequests = enrich
+			optInEnrichment(env.originator, enrich)
 			got, events := recording(env)
 			if rec := ingressCRD(env, ehrRequest(`"coverage":`+ehrCoverage)); rec.Code != http.StatusOK {
 				t.Fatalf("enrich %v: answer %d %s", enrich, rec.Code, rec.Body.String())
@@ -295,7 +295,7 @@ func TestExchangeRecord_RequesterEdits(t *testing.T) {
 				row.setup(t, s)
 				env := newInProcessExchange(t)
 				env.originator.cfg.SoR = row.sor(s)
-				env.originator.cfg.EnrichNativeRequests = enrich
+				optInEnrichment(env.originator, enrich)
 				declareFramedDTR(t, env, true)
 				env.payerReturns(LegResult{Response: testResponse(packageAnswer)})
 				got, events := recording(env)
@@ -396,6 +396,7 @@ func TestRelayEditReceivedByTable(t *testing.T) {
 		relay.EditDTRPatientObtain:     {"dtr-patient-obtain", relay.RoleRecipient},
 		relay.EditEvidenceSubjectRekey: {"evidence-subject-rekey", relay.RoleRecipient},
 		relay.EditCDSCoverageCarry:     {"cds-callback-coverage-carry", relay.RoleRecipient},
+		relay.EditDTRAnswerLineNames:   {"dtr-answer-line-names", 0},
 	}
 	ids := relay.EditIDs()
 	if len(ids) != len(want) {

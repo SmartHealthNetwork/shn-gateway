@@ -32,7 +32,8 @@ func TestAdaptFailureStatus(t *testing.T) {
 }
 
 // TestEveryEgressAdaptSiteAnswersThroughAdaptFailureStatus fences the call
-// sites: an egressAdapt failure is answered with adaptFailureStatus (or, on the
+// sites: an egressAdapt (or egressWalk) failure, and the failure of an
+// egressWalk's deferred record, is answered with adaptFailureStatus (or, on the
 // bridging demo lane only, reshaped by bridgeRefusalText), never a status
 // written by hand. The provider ingress sites cannot raise a typed refusal
 // today (the CDS Hooks request is line-inert, the questionnaire-package fetch
@@ -43,7 +44,7 @@ func TestEveryEgressAdaptSiteAnswersThroughAdaptFailureStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sites, bridged := 0, 0
+	sites, bridged, records := 0, 0, 0
 	for _, f := range files {
 		if strings.HasSuffix(f, "_test.go") {
 			continue
@@ -53,8 +54,21 @@ func TestEveryEgressAdaptSiteAnswersThroughAdaptFailureStatus(t *testing.T) {
 			t.Fatal(err)
 		}
 		lines := strings.Split(string(src), "\n")
+		inAdapt := false // egressAdapt's own body passes the walk's errors to its callers
 		for i, line := range lines {
-			if !strings.Contains(line, "g.egressAdapt(") {
+			if strings.HasPrefix(line, "func ") {
+				inAdapt = strings.HasPrefix(line, "func (g *Gateway) egressAdapt(")
+			}
+			if inAdapt {
+				continue
+			}
+			if strings.Contains(line, "record(); err != nil") || strings.Contains(line, "recordWalk(); err != nil") {
+				records++
+				if window := strings.Join(lines[i:min(i+4, len(lines))], "\n"); !strings.Contains(window, "adaptFailureStatus(") {
+					t.Errorf("%s:%d: the egressWalk record failure is not answered through adaptFailureStatus:\n%s", f, i+1, window)
+				}
+			}
+			if !strings.Contains(line, "g.egressAdapt(") && !strings.Contains(line, "g.egressWalk(") {
 				continue
 			}
 			sites++
@@ -67,9 +81,13 @@ func TestEveryEgressAdaptSiteAnswersThroughAdaptFailureStatus(t *testing.T) {
 			}
 		}
 	}
-	// The scan must be able to match: the engine has 19 call sites today.
+	// The scan must be able to match: the engine has 19 call sites today, four
+	// of them egressWalk sites that record their walk only when they apply it.
 	if sites < 19 {
-		t.Fatalf("found %d egressAdapt call sites, want the engine's full set (19 or more)", sites)
+		t.Fatalf("found %d egressAdapt and egressWalk call sites, want the engine's full set (19 or more)", sites)
+	}
+	if records < 4 {
+		t.Fatalf("found %d egressWalk record calls, want one per egressWalk site (4 or more)", records)
 	}
 	// Only the bridging demo lane reshapes a refusal into its structured 200.
 	if bridged != 1 {

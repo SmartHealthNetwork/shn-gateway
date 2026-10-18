@@ -72,6 +72,11 @@ type ExchangeRecord struct {
 	Operation string
 	// ContractLine is the IG line the leg ran at, when one was settled.
 	ContractLine string
+	// AnswerLine is, on an ingress call, the contract token of the IG line the
+	// answer this gateway wrote back to its own participant is written in: the
+	// routed line when the answer was carried as sent, or the line a bridge
+	// wrote it at (E-08). Recorded by the DTR ingress; "" elsewhere.
+	AnswerLine string
 	// Sender and Recipient are the leg's holder ids. This gateway's own is
 	// always set (the sender of an ingress call, the recipient of an inbound
 	// leg); the other side's is set once the leg is verified, so an inbound
@@ -125,6 +130,13 @@ type ExchangeRecord struct {
 	// Metadata only (never a value an edit removed or wrote); not a metric
 	// dimension.
 	Edits []string
+	// LineCarried says where the leg was carried between two IG lines with
+	// nothing translated, the network's default (LineCarriedValues, each at
+	// most once): LineCarriedRequest when the request went to, or came from,
+	// a participant that shares no declared line with this one;
+	// LineCarriedAnswer when the answer was stamped with another line than
+	// the leg routed. Empty when it was not. Not a metric dimension.
+	LineCarried []string
 	// HubDelivered is the Hub's own word on whether the recipient's gateway
 	// received an ingress call's leg, read from the HubDeliveredHeader of the
 	// Hub's error answer to the leg: "no", "yes" or "unknown". Empty when the
@@ -309,6 +321,10 @@ type exchangeRecorder struct {
 	// forwarded is set once the operation has been forwarded to the
 	// participant's own system (backend); reads after it do not replace it.
 	forwarded bool
+	// forwardTracked says every forward of the operation to the participant's
+	// own system goes through backend: set by the built-in native responder,
+	// whose forward is recorded; a connector's own calls are not.
+	forwardTracked bool
 	// cut is set when any call to the participant's system was cut short
 	// because the request ended, the Backend or a read after it.
 	cut bool
@@ -387,6 +403,11 @@ func (x *exchangeRecorder) decided(outcome, by, rule string) {
 // edits notes the registered edits applied to bytes this gateway sent on the
 // leg, once they were sent: an id the registry does not hold
 // is never recorded, and one already recorded is not recorded again.
+// answerLine records the line the answer the gateway wrote back is written in.
+func (x *exchangeRecorder) answerLine(token string) {
+	x.with(func() { x.rec.AnswerLine = token })
+}
+
 func (x *exchangeRecorder) edits(ids []relay.EditID) {
 	if len(ids) == 0 {
 		return
@@ -512,6 +533,25 @@ func (x *exchangeRecorder) backend(status int, latency time.Duration, class stri
 		x.forwarded = true
 		x.cut = x.cut || class == BackendCancelled
 	})
+}
+
+// trackForward notes that the operation's forward to the participant's own
+// system, if any, is recorded (backend): only the built-in native responder,
+// whose one forward is, says so.
+func (x *exchangeRecorder) trackForward() {
+	x.with(func() { x.forwardTracked = true })
+}
+
+// forwardedToSystem reports whether the operation was forwarded to the
+// participant's own system, and whether that is known: only when the forward
+// is tracked (trackForward). A connector that calls its system itself, or an
+// exchange with no recorder, cannot tell.
+func (x *exchangeRecorder) forwardedToSystem() (forwarded, known bool) {
+	if x == nil {
+		return false, false
+	}
+	x.with(func() { forwarded, known = x.forwarded, x.forwarded || x.forwardTracked })
+	return forwarded, known
 }
 
 // read notes one read of the participant's own system: of its system of
@@ -698,6 +738,8 @@ func refusalRuleFor(kind CheckKind, rule string) string {
 	case kind == KindFHIRBridged:
 		return RefusalFidelity
 	case rule == RuleSubjectPCI, rule == RuleSubjectToken:
+		// No site routes these through the guard. The federated-query bind
+		// records its refusal as consent itself (handleFederatedQueryInbound).
 		return RefusalAuthority
 	case rule == RuleDuplicateKey:
 		return RefusalIntegrity
@@ -870,6 +912,8 @@ func (x *exchangeRecorder) legOutcome(err error) {
 	case errors.As(err, &lost) && lost.cause == "the Hub's answer could not be read":
 		// A read that failed on the way back: transport, not integrity.
 		x.decided(ExchangeOther, "", "")
+	case errors.As(err, &lost) && lost.rule != "":
+		x.decided(ExchangeRefused, "", lost.rule)
 	case errors.As(err, &lost):
 		x.decided(ExchangeRefused, "", RefusalIntegrity)
 	default:

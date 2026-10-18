@@ -123,19 +123,25 @@ func (s *Scaffold) ResolveByReference(_ string) ([]byte, bool) { return nil, fal
 
 // OpenCoverage returns the member's Coverage record — the routing/identity SOURCE the gateway reads
 // at every origination site (FR-G40: the payer the exchange routes to, and the payer identity the
-// payload carries, both derive from this). The demo persona models a contained-payor Coverage naming
-// the CMS payer (shnsdk.CMSPayerIdentity), the same shape the substrate stub uses, so the scaffold
-// boots and runs UC-01/UC-03 out of the box.
-// TODO(partner): return the member's REAL Coverage record bytes from your system of record. Its
-// payor must name a payer your gateway's PAYER_DIRECTORY routes (contained Organization, an external
-// Organization resolvable via ResolveByReference, or an inline payor identifier).
+// payload carries, both derive from this).
+// TODO(partner): return the member's REAL Coverage record bytes from your system of record, and
+// delete scaffoldCoverage. Its payor must name a payer your gateway's PAYER_DIRECTORY routes
+// (contained Organization, an external Organization resolvable via ResolveByReference, or an
+// inline payor identifier).
 func (s *Scaffold) OpenCoverage(memberID string) ([]byte, bool) {
 	if memberID != scaffoldMember {
 		return nil, false
 	}
-	cov, err := shnsdk.BuildCoverageWithPayer("Patient/"+memberID, memberID, shnsdk.CMSPayerIdentity)
-	if err != nil {
-		return nil, false
-	}
-	return cov, true
+	return []byte(scaffoldCoverage), true
 }
+
+// scaffoldCoverage is a PLACEHOLDER record for the scaffold's one demo member, so the
+// scaffold boots and runs UC-01/UC-03 out of the box: a contained payor naming the CMS
+// payer identity (urn:oid:2.16.840.1.113883.6.300|00001). It is not your member's coverage.
+// TODO(partner): replace it with the Coverage your own system holds; it must never reach a
+// real exchange.
+const scaffoldCoverage = `{"resourceType":"Coverage","id":"scaffold-coverage","status":"active",` +
+	`"contained":[{"resourceType":"Organization","id":"payer","identifier":[{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00001"}],"name":"REPLACE WITH YOUR PAYER'S NAME"}],` +
+	`"beneficiary":{"reference":"Patient/` + scaffoldMember + `"},"payor":[{"reference":"#payer"}],` +
+	`"relationship":{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/subscriber-relationship","code":"self"}]},` +
+	`"identifier":[{"type":{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/v2-0203","code":"MB"}]},"system":"urn:shn:coverage","value":"` + scaffoldMember + `"}]}`

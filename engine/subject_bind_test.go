@@ -245,7 +245,7 @@ func TestPrefetch_HistoryOmittedForMemberNotHeld(t *testing.T) {
 	s := newPrefetchSoR()
 	obs := &observed{}
 	env := newInProcessExchange(t)
-	env.originator.cfg.EnrichNativeRequests = true // the prefetch fill this row pins
+	optInEnrichment(env.originator, true) // the prefetch fill this row pins
 	env.originator.cfg.SoR = s.sor()
 	env.originator.cfg.Observer = obs.observe
 	rec := httptest.NewRecorder()
@@ -287,7 +287,7 @@ func TestPrefetch_HistoryOmittedForMemberNotHeld(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			s := newPrefetchSoR()
 			env := newInProcessExchange(t)
-			env.originator.cfg.EnrichNativeRequests = true
+			optInEnrichment(env.originator, true)
 			env.originator.cfg.FHIRServerRead = FHIRServerReadOff
 			env.originator.cfg.SoR = s.sor()
 			rec := httptest.NewRecorder()

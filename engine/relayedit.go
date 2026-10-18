@@ -183,6 +183,31 @@ var relayEdits = []relayEdit{
 			"included Organization a Coverage names by an absolute reference on that server has that reference as its " +
 			"entry address.",
 	},
+	{
+		ID:        relay.EditDTRAnswerLineNames,
+		Name:      "dtr-answer-line-names",
+		Legs:      []string{"dtr-questionnaire-fetch"},
+		Role:      relay.RoleRequester,
+		Direction: relay.DirectionResponse,
+		Paths:     []string{"$.parameter[<i>].name", "$.parameter[<i>].resource.entry[<j>].resource (a QuestionnaireResponse)"},
+		Kind:      editReplaceValue,
+		Precondition: "Always (not an enrichment opt-in), and only when the requesting gateway declares exactly one DTR " +
+			"line, every line-specific parameter name in the payer's answer belongs to the other DTR name family " +
+			"(PackageBundle and operationOutcome: DTR 2.0.1 and 2.1.0; packagebundle: DTR 2.2.0), and the answer " +
+			"validates at its own line. The answer must then validate at the requester's line, or it is refused at " +
+			"every level, as it is when a registered pa.dtr step refuses. outcome, every line's OperationDefinition " +
+			"name, and return are never renamed.",
+		Authority: "The DTR IG's own output Parameters profiles: each name is the one the requester's line gives the " +
+			"same parameter. Each package QuestionnaireResponse is the output of the registered pa.dtr compatibility " +
+			"steps (the compat manifest's chain between the two lines) for the payer's own response, each step " +
+			"reported under its own module with its loss report. Nothing is read from any participant.",
+		Disclosure: "When a payer's questionnaire package answer names its package or outcome parameter as another DTR " +
+			"line does than the one the provider's gateway declares, the gateway renames those parameters to the " +
+			"provider's line's names (PackageBundle and packagebundle, operationOutcome and outcome), and carries each " +
+			"QuestionnaireResponse in the package across the lines through the network's registered DTR steps (the " +
+			"Coverage context's place and the intended-use code system); every other byte is the payer's. An answer " +
+			"that cannot be valid at the provider's line is refused, never filled.",
+	},
 }
 
 // relayEditByID returns the registered edit with the given id.

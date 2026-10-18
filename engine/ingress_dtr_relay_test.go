@@ -200,7 +200,7 @@ func TestDTRIngress_CoverageObtainedOnlyWhenAbsent(t *testing.T) {
 		s.answer(t, "Coverage", page("", "", sorEntry(sorCov), includeEntry(`{"resourceType":"Organization","id":"org-1","name":"Payer"}`)))
 		obs := &observed{}
 		env := newInProcessExchange(t)
-		env.originator.cfg.EnrichNativeRequests = true // the Coverage append this row pins
+		optInEnrichment(env.originator, true) // the Coverage append this row pins
 		env.originator.cfg.SoR = s.sor()
 		env.originator.cfg.Observer = obs.observe
 		env.originator.cfg.Clock = fixedClock

@@ -11,8 +11,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-
-	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
 // contractLineSet collapses a declared token list to the SET of lines for one
@@ -183,6 +181,13 @@ func (g *Gateway) selectLegToken(recipient, legType string) (string, error) {
 		peer = entry.ContractVersions
 	}
 	tok, refused := selectContractToken(own, peer, len(peer) > 0, contract)
+	if refused && !g.cfg.RequireSharedLine {
+		// No shared line: carried at this gateway's own line by default
+		// (linecarry.go), unless this build declares none for the contract.
+		if route, ok := carriedRoute(own, contract); ok {
+			return route.Token, nil
+		}
+	}
 	if refused {
 		return "", &RouteRefusalError{
 			Contract:  contract,
@@ -225,7 +230,7 @@ func (g *Gateway) declaredContractVersions() []string {
 	if len(g.cfg.DeclaredContractVersions) > 0 {
 		return g.cfg.DeclaredContractVersions
 	}
-	return shnsdk.SupportedContractVersions()
+	return DefaultContractVersions()
 }
 
 // contractTokenForLeg is the responder-side frame stamp for a legType:

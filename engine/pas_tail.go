@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -46,7 +47,11 @@ import (
 // own system. It rides the bundle as a resolvable entry that Claim.provider
 // names, because a payer matches a later inquiry on the member id plus the
 // ordering or rendering provider identifier.
-func buildPASSubmitBundle(line string, brPayer bool, orderJSON, qrJSON, providerJSON, coverageJSON, insurerJSON []byte, memberSystem, patientRef, coverageRef, member, corr string, created time.Time, payer shnsdk.PayerIdentifier) ([]byte, error) {
+//
+// facts are the request's own facts as the origination request stated them
+// (originationClaimInput); the SDK builder refuses a required one they do not
+// state.
+func buildPASSubmitBundle(line string, brPayer bool, orderJSON, qrJSON, providerJSON, coverageJSON, insurerJSON []byte, memberSystem, patientRef, coverageRef, member, corr string, created time.Time, payer shnsdk.PayerIdentifier, facts shnsdk.PASClaimFacts) ([]byte, error) {
 	return buildAuthoredPASSubmit(line, shnsdk.ConformantClaimInputs{
 		QR: qrJSON, SR: orderJSON, Provider: providerJSON, Coverage: coverageJSON, Insurer: insurerJSON, PatientRef: patientRef, CoverageRef: coverageRef, MemberID: member, MemberIDSystem: memberSystem,
 		Corr: corr, Created: created,
@@ -55,7 +60,8 @@ func buildPASSubmitBundle(line string, brPayer bool, orderJSON, qrJSON, provider
 		PayerOrgEntry:    brPayer, // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
 		// The payer identity derives from the member's REAL Coverage (threaded in from the fresh
 		// origination site), not a synthetic CMS literal (FR-G40).
-		Payer: payer,
+		Payer:         payer,
+		PASClaimFacts: facts,
 	})
 }
 
@@ -114,8 +120,22 @@ func (g *Gateway) submitPASClaim(ctx context.Context, r *http.Request, pci strin
 	if status != 0 {
 		return out, status, msg, nil
 	}
-	bundleJSON, err := buildPASSubmitBundle(route.BuildLine, relaysReferencePayerBytes(g.cfg.OriginationProfile), orderJSON, qrJSON, providerJSON, coverageJSON, insurerJSON, memberSystem, patientRef, coverageRef, member, out.corr, g.cfg.Clock(), payer)
+	// The request's own facts, exactly as the request to this route states
+	// them; the builder refuses a required one it does not state.
+	claimIn, err := claimInputOf(r)
 	if err != nil {
+		return out, http.StatusBadRequest, err.Error(), nil
+	}
+	// The facts are stated for the order this claim is about, or refused.
+	if status, msg := statedOrderCheck(claimIn, orderJSON); status != 0 {
+		return out, status, msg, nil
+	}
+	facts := claimIn.facts()
+	bundleJSON, err := buildPASSubmitBundle(route.BuildLine, relaysReferencePayerBytes(g.cfg.OriginationProfile), orderJSON, qrJSON, providerJSON, coverageJSON, insurerJSON, memberSystem, patientRef, coverageRef, member, out.corr, g.cfg.Clock(), payer, facts)
+	if err != nil {
+		if errors.Is(err, shnsdk.ErrPASClaimFactAbsent) || errors.Is(err, shnsdk.ErrPASClaimFactInvalid) {
+			return out, http.StatusUnprocessableEntity, err.Error(), nil
+		}
 		return out, http.StatusInternalServerError, "build bundle failed: " + err.Error(), nil
 	}
 	bundleJSON, err = retainPASSubmitSupplier(bundleJSON, supplierJSON)

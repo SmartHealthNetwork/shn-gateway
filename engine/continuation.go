@@ -190,6 +190,11 @@ type Continuation struct {
 	// builder does not need them.
 	ClaimType     string
 	ClaimPriority string
+	// ClaimCreated is the submitted Claim's created, exactly as sent:
+	// the recorded submission an amendment restates. A continuation written
+	// before the gateway recorded it has none, and an amendment built from it is refused
+	// (shnsdk.PASPriorClaim) rather than given the amendment's own time.
+	ClaimCreated string
 	// ItemTraceNumbers are the submitted item trace numbers, in submission
 	// order. They are the same values Items carries; both are stored because the
 	// durable schema keeps the lines in a child table and the submitted list on
@@ -508,6 +513,7 @@ func ContinuationFacts(c Continuation, sdk shnsdk.PriorAuthContinuation) Continu
 	c.Line, c.PayerHolder, c.MemberID, c.ProviderNPI = sdk.Line, sdk.PayerHolder, sdk.MemberID, sdk.ProviderNPI
 	c.ClaimType = codingKey(sdk.ClaimType.System, sdk.ClaimType.Code)
 	c.ClaimPriority = codingKey(sdk.Priority.System, sdk.Priority.Code)
+	c.ClaimCreated = sdk.Created
 	c.ClaimIdentifier = ""
 	if len(sdk.ClaimIdentifiers) > 0 {
 		c.ClaimIdentifier = identifierKey(sdk.ClaimIdentifiers[0].System, sdk.ClaimIdentifiers[0].Value)
@@ -549,6 +555,7 @@ func (c Continuation) SDKContinuation() shnsdk.PriorAuthContinuation {
 		PreAuthRef:  c.PayerPreAuthRef,
 		ClaimType:   codingOfKey(c.ClaimType),
 		Priority:    codingOfKey(c.ClaimPriority),
+		Created:     c.ClaimCreated,
 	}
 	if id, ok := identifierOfKey(c.ClaimIdentifier); ok {
 		out.ClaimIdentifiers = append(out.ClaimIdentifiers, id)

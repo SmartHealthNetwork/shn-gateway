@@ -224,7 +224,12 @@ func TestNativeCRD_MalformedEnvelopeRefused(t *testing.T) {
 				}
 				res, p, _ := relayCase(t, leg, hook, "application/json", []byte(r.answer))
 				const prefix = "payer CRD response is not a valid CDS Hooks response: "
-				if res.Status != http.StatusBadGateway || !strings.HasPrefix(res.Message, prefix) || !strings.Contains(res.Message, r.rule) {
+				// A repeated member name is named, with where, so the payer can fix it.
+				want := res.Status == http.StatusBadGateway && strings.HasPrefix(res.Message, prefix) && strings.Contains(res.Message, r.rule)
+				if r.rule == "response.json" {
+					want = res.Status == http.StatusBadGateway && res.Message == `payer CRD response repeats the JSON member "cards" in the top-level object: it can be read two ways, so it is not carried`
+				}
+				if !want {
 					t.Fatalf("got %d %q", res.Status, res.Message)
 				}
 				if res.Response.Ownership() != 0 {

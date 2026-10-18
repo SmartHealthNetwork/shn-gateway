@@ -10,7 +10,7 @@
 //
 // The partner Bundle is validated as a complete response graph without changing
 // its bytes (validateNativePASResponse, FR-G28), and the payer gateway's own pend
-// ledger plus its locally-projected PDex EOB are derived from the answer
+// ledger plus its locally-projected decision EOB are derived from the answer
 // (ownership #1) — Store side-effects, orthogonal to the relay. This file owns the
 // shnsdk imports; native.go's read-only legs stay shnsdk-free. The PAS response is
 // parsed with the SAME exported parsers the originator uses
@@ -22,9 +22,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"strings"
 	"sync"
-	"time"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
@@ -137,10 +135,13 @@ func (n *nativeResponder) handlePASClaimUpdateNative(ctx context.Context, corrID
 	// refusal is logged here, with the correlation id and the reference that
 	// dangled, before the framed error goes back. Below strict an answer this
 	// gateway cannot read is relayed exactly and nothing is written from it.
-	response, lr := validateNativePASResponse(up.raw)
+	read := answerGraphRead(answerCandidateLinesFrom(ctx, up.raw), up.raw)
+	answerLine := read.Line
+	n.recordLaterLine(ctx, RuleAnswerShape, read, up.raw)
+	response, lr := validateNativePASResponseAt(up.raw, answerLine)
 	if lr.Status != 0 {
 		if n.refusesAnswer(ctx, RuleAnswerShape, up.raw) {
-			_, lr = validateRelayedPASResponse(corrID, "pas-claim-update", up.raw)
+			_, lr = validateRelayedPASResponse(corrID, "pas-claim-update", answerLine, up.raw)
 			lr.Rollback = rollback
 			return lr, nil
 		}
@@ -191,10 +192,8 @@ func (n *nativeResponder) handlePASClaimUpdateNative(ctx context.Context, corrID
 		return LegResult{Status: http.StatusBadGateway, Message: "upstream payer PAS update response untranslatable", Rollback: rollback}, nil
 	}
 	if parsed.Outcome == "denied" && payerStatedAuthNumber(response) != "" {
-		if n.refusesAnswer(ctx, RuleEOBDecision, up.raw) {
-			return LegResult{Status: http.StatusBadGateway, Message: "payer decision states both a denial and an authorization number", Rollback: rollback}, nil
-		}
-		return relayUnread(ctx, up, RuleEOBDecision, rollback), nil
+		// As on the submit leg: relayed at every level, nothing written.
+		return relayDecisionUnrecorded(ctx, up, rollback), nil
 	}
 	// A terminal decision on the update leg: relayed, and recorded as the decision
 	// the payer dated. No EOB on the update leg. Rollback stays armed so a
@@ -329,10 +328,13 @@ func (n *nativeResponder) handlePASClaimNative(ctx context.Context, corrID, subj
 	// the framed error goes back — the bytes themselves are not relayed. Below
 	// strict an answer this gateway cannot read is relayed exactly and nothing is
 	// written from it.
-	response, lr := validateNativePASResponse(up.raw)
+	read := answerGraphRead(answerCandidateLinesFrom(ctx, up.raw), up.raw)
+	answerLine := read.Line
+	n.recordLaterLine(ctx, RuleAnswerShape, read, up.raw)
+	response, lr := validateNativePASResponseAt(up.raw, answerLine)
 	if lr.Status != 0 {
 		if n.refusesAnswer(ctx, RuleAnswerShape, up.raw) {
-			_, lr = validateRelayedPASResponse(corrID, "pas-claim", up.raw)
+			_, lr = validateRelayedPASResponse(corrID, "pas-claim", answerLine, up.raw)
 			return lr, nil
 		}
 		return relayUnread(ctx, up, RuleAnswerShape, nil), nil
@@ -363,19 +365,14 @@ func (n *nativeResponder) handlePASClaimNative(ctx context.Context, corrID, subj
 		return LegResult{Status: http.StatusBadGateway, Message: "upstream payer PAS submit response untranslatable"}, nil
 	}
 	// A decision that reads as a denial yet states an authorization number in the
-	// ClaimResponse's own preAuthRef field is contradictory: it may be a partial
-	// certification, whose authorization a denial reading would discard. These
-	// bytes do not say which, and a denial projected over an authorization the
-	// payer issued would reach the member as a refusal of covered care, so refuse
-	// the leg instead of choosing. A payer that states the number on its review
-	// action is read as the partial certification it is; this refusal is only for
-	// the placement the decision reader cannot yet tell apart, and it goes away
-	// once that reader takes both placements.
+	// ClaimResponse's own preAuthRef field may be a partial certification, whose
+	// authorization a denial reading would discard. These bytes do not say
+	// which, so this gateway's reading cannot hold the decision. That is a limit
+	// of this gateway's own record, never a reason to refuse the payer's decision:
+	// it is relayed exactly at every level, nothing is written from it (no
+	// decision, no EOB), and the operator is told why.
 	if parsed.Outcome == "denied" && payerStatedAuthNumber(response) != "" {
-		if n.refusesAnswer(ctx, RuleEOBDecision, up.raw) {
-			return LegResult{Status: http.StatusBadGateway, Message: "payer decision states both a denial and an authorization number"}, nil
-		}
-		return relayUnread(ctx, up, RuleEOBDecision, nil), nil
+		return relayDecisionUnrecorded(ctx, up, nil), nil
 	}
 	outcome := pendOutcomeOf(parsed.Outcome)
 	if cpt == "" {
@@ -384,87 +381,37 @@ func (n *nativeResponder) handlePASClaimNative(ctx context.Context, corrID, subj
 		answer.Commit = recordPASDecision(ctx, n.store, subjectPCI, corrID, outcome, created, decisionKeys(requester, answerKeys, requestFHIR, parsed.PreAuthRef), nil)
 		return answer, nil
 	}
-	eobJSON, err := n.projectDecisionEOB(corrID, "Patient/"+s.member, procSystem, cpt, cptDisplay, parsed)
+	eobJSON, err := n.projectDecisionEOB(corrID, "Patient/"+s.member, procSystem, cpt, cptDisplay, parsed,
+		decisionEOBSource{request: requestFHIR, itemIndex: -1, claimResponse: firstClaimResponse(up.raw), answer: up.raw})
 	if err != nil {
-		// The projection states the payer's own decision detail — its review
-		// action, its reason codes and its notes. Detail the decision resource
-		// cannot carry (a reason code outside the bound code systems, a note
-		// type outside the resource's) is upstream content, so refuse loudly
-		// (502) rather than drop it or substitute a code the payer never sent.
-		// Below strict the payer's answer is relayed and nothing is written.
-		if n.refusesAnswer(ctx, RuleEOBDecision, up.raw) {
-			return LegResult{Status: http.StatusBadGateway, Message: "payer decision detail cannot be stated on a decision EOB"}, nil
-		}
-		return relayUnread(ctx, up, RuleEOBDecision, nil), nil
+		// The EOB cannot state the decision as its sources do (eobNotWritten):
+		// a required element absent at its source, or payer detail the resource
+		// cannot carry as written. This is this gateway's own record, not a
+		// judgement of the payer's answer, so it refuses at no level: the
+		// decision relays and is recorded without an EOB, and the operator is
+		// told which detail.
+		noteDetailOn(ctx, DecisionEOBNotWrittenEvent, err.Error())
+		answer.Commit = recordPASDecision(ctx, n.store, subjectPCI, corrID, outcome, created, decisionKeys(requester, answerKeys, requestFHIR, parsed.PreAuthRef), nil)
+		return answer, nil
 	}
 	eob := &EOBRecord{SubjectPCI: subjectPCI, EOBID: decisionEOBID(corrID), JSON: eobJSON}
 	answer.SideEffectFHIR = [][]byte{eobJSON}
+	answer.decisionEOBs = []*EOBRecord{eob}
 	answer.Commit = recordPASDecision(ctx, n.store, subjectPCI, corrID, outcome, created, decisionKeys(requester, answerKeys, requestFHIR, parsed.PreAuthRef), eob)
 	return answer, nil
 }
 
-// projectDecisionEOB synthesises the gateway-local PDex EOB SINGLE-SOURCED from the
-// partner's decision: AuthNumber is the partner's parsed preAuthRef (never
-// minted), CPTCode + CPTDisplay are the Claim's ServiceRequest procedure (never
-// hardcoded), ProcedureSystem flows from the order so a HCPCS order yields a
-// HCPCS-system EOB (FR-28), ProcessNotes are only the notes the payer's own
-// decision carries, typed as it typed them (FR-22), and a denial states the
-// payer's own review action and reason codes instead of a reason code the
-// payer never sent. Reason codes the payer supplied on a decision that is NOT a
-// denial are detail the resource cannot state, so they are refused here rather
-// than dropped — the projection either states the payer's own detail in full or
-// refuses. No engine guard on the construction itself — it makes the
-// single-sourcing true; the adversarial row makes a mint/pin loud.
-func (n *nativeResponder) projectDecisionEOB(corrID, patientRef, procSystem, cpt, cptDisplay string, parsed shnsdk.PriorAuthResult) ([]byte, error) {
-	return decisionEOB(n.clock, corrID, patientRef, procSystem, cpt, cptDisplay, parsed)
-}
-
-// decisionEOB is the projection itself, shared by every leg that records a payer
-// decision: the submit leg, and the inquiry leg that learns a decision later
-// (inquire.go). One projection means the two legs cannot state a payer's own
-// decision differently.
-func decisionEOB(clock func() time.Time, corrID, patientRef, procSystem, cpt, cptDisplay string, parsed shnsdk.PriorAuthResult) ([]byte, error) {
-	decision, authNumber := shnsdk.PADecisionApproved, parsed.PreAuthRef
-	// The EOB carries only the notes the payer's own decision carries (never a
-	// fixed appeal text): a non-nil, possibly empty list, each note typed as
-	// the payer typed it.
-	notes := parsed.ProcessNotes
-	if notes == nil {
-		notes = []shnsdk.PASProcessNote{}
-	}
-	// A denial states the payer's own decision: one denialreason for each
-	// reason code the payer supplied, plus its review action (or, when it
-	// stated none, the X12 code of the denial itself). A non-nil list is what
-	// states the decision, so the projection never carries the fixed reason
-	// code the payer did not send.
-	var denialReasons []shnsdk.PASCoding
-	if parsed.Outcome == "denied" {
-		decision, authNumber = shnsdk.PADecisionDenied, ""
-		denialReasons = parsed.DenialReasons
-		if denialReasons == nil {
-			denialReasons = []shnsdk.PASCoding{}
-		}
-	} else if len(parsed.DenialReasons) > 0 {
-		// The decision resource states reason codes only on a denial, so reason
-		// codes the payer supplied on a decision that is not a denial are detail
-		// this projection cannot state. Refuse them here rather than build an EOB
-		// that silently omits the payer's own lines.
-		return nil, fmt.Errorf("reason codes on a decision that is not a denial")
-	}
-	return shnsdk.BuildPADecisionEOB(shnsdk.PADecisionEOBParams{
-		ID:              decisionEOBID(corrID),
-		PatientRef:      patientRef,
-		CoverageRef:     "Coverage/" + strings.TrimPrefix(patientRef, "Patient/"),
-		CPTCode:         cpt,
-		CPTDisplay:      cptDisplay,
-		ProcedureSystem: procSystem,
-		Decision:        decision,
-		AuthNumber:      authNumber,
-		Created:         clock(),
-		ProcessNotes:    notes,
-		ReviewAction:    parsed.ReviewAction,
-		DenialReasons:   denialReasons,
-	})
+// projectDecisionEOB builds the gateway-local decision EOB from the payer's
+// decision and the request it answers (decisioneob.go): AuthNumber is the
+// payer's parsed preAuthRef (never minted), CPTCode + CPTDisplay are the
+// Claim's ServiceRequest procedure (never hardcoded), ProcedureSystem flows
+// from the order so a HCPCS order yields a HCPCS-system EOB (FR-28),
+// ProcessNotes are only the notes the payer's own decision carries, typed as
+// it typed them (FR-22), the item's adjudication is the payer's own (its review
+// action re-expressed in the EOB's own extension), and every other element is read from the request Claim or the payer's
+// ClaimResponse. The resource claims no profile.
+func (n *nativeResponder) projectDecisionEOB(corrID, patientRef, procSystem, cpt, cptDisplay string, parsed shnsdk.PriorAuthResult, src decisionEOBSource) ([]byte, error) {
+	return decisionEOB(corrID, patientRef, procSystem, cpt, cptDisplay, parsed, src)
 }
 
 // payerStatedAuthNumber reads the authorization number the payer's own
@@ -494,6 +441,20 @@ func (n *nativeResponder) refusesAnswer(ctx context.Context, rule string, raw []
 	return guardDefect(withFindingContext(ctx, fc), n.conformance, n.emitFinding, KindContent, rule, VerdictInvalid, raw)
 }
 
+// recordLaterLine records that the payer's answer met rule only on a
+// candidate line after its first (laterLineFinding), as its own content,
+// wherever the level runs the rule.
+func (n *nativeResponder) recordLaterLine(ctx context.Context, rule string, read answerLineRead, raw []byte) {
+	if n.emitFinding == nil || !n.conformance.Runs(KindContent, rule) {
+		return
+	}
+	fc := findingContextFrom(ctx)
+	fc.Whose = "own"
+	if f, ok := laterLineFinding(fc, n.conformance.Level().String(), rule, read, raw); ok {
+		countingEmit(ctx, n.emitFinding)(f)
+	}
+}
+
 // refusesRequest decides a defect of rule in the request this payer received
 // (raw), when called: the request is the requester's content, so the rule is
 // not checked at none, recorded at observe and refused at strict, and the
@@ -502,6 +463,18 @@ func (n *nativeResponder) refusesRequest(ctx context.Context, rule string, raw [
 	return func() bool {
 		return guardDefect(ctx, n.conformance, n.emitFinding, KindContent, rule, VerdictInvalid, raw)
 	}
+}
+
+// decisionReadAsDenialWithAuthNumber is the finding detail for a payer
+// decision this gateway's reading cannot hold.
+const decisionReadAsDenialWithAuthNumber = "decision not recorded: the decision reads as a denial yet its ClaimResponse states preAuthRef; no decision or EOB written"
+
+// relayDecisionUnrecorded relays a payer decision this gateway's own reading
+// cannot hold, exactly and at every level: nothing is written from it, and the
+// leg notes why (pend.decision-not-recorded). It never refuses the decision.
+func relayDecisionUnrecorded(ctx context.Context, up upstreamReply, rollback func()) LegResult {
+	noteDetailOn(ctx, pendDecisionNotRecordedEvent, decisionReadAsDenialWithAuthNumber)
+	return relayUnread(ctx, up, RuleEOBDecision, rollback)
 }
 
 // relayUnread is the payer's answer relayed exactly as it arrived, not read for

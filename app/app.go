@@ -129,7 +129,7 @@ type config struct {
 	DefaultValidatorLanes string
 	// ContractVersions is the operator-DECLARED exchange-contract token set
 	// (SHN_CONTRACT_VERSIONS, comma-separated). Boot-validated: token grammar +
-	// membership of shnsdk.NativeContractVersions(). Empty env ⇒ this build's
+	// membership of engine.NativeContractVersions(). Empty env ⇒ this build's
 	// default declaration. Single-sourced (D1a): it drives leg selection, the
 	// published CapabilityStatements / davinci-configuration, AND the registry
 	// declaration peers select this holder against.
@@ -146,7 +146,7 @@ type config struct {
 	// native-reach view so transform chains can fire against skewed peers, the
 	// same seam the cross-line pair test suite uses. Empty env ⇒ nil (unset —
 	// the production default: full native reach). Boot-validated: every token
-	// must be a line of shnsdk.NativeContractVersions(). Loud by name and by
+	// must be a line of engine.NativeContractVersions(). Loud by name and by
 	// boot log — never set in any shipped deploy config.
 	DemoEgressNativeLines []string
 
@@ -287,6 +287,11 @@ type config struct {
 	// for a system that validates that header its own way. Default: sent.
 	PayerDavinciBackendCorrelationOff bool
 	payerDavinciBackendCorrelationRaw string
+	// PatientAccessOff leaves the payer's Patient Access API unmounted
+	// (PATIENT_ACCESS_API=off; unset or "on" mounts it). A temporary seam: the
+	// Patient Access API is being removed, and its removal deletes this setting
+	// with it. engine.Config.PatientAccessOff.
+	PatientAccessOff bool
 	// PayerDavinciBackendTimeout bounds each call to the payer's own system
 	// (PAYER_DAVINCI_BACKEND_TIMEOUT, default defaultPayerBackendTimeout): a
 	// system slower than that is answered this gateway's framed 504 while the
@@ -353,6 +358,11 @@ type config struct {
 	// demographics of the Patient the request carries (the id alone when it carries
 	// none). Set by REQUIRE_KNOWN_MEMBERS ("true" or "false").
 	RequireKnownMembers bool
+	// RequireSharedLine is the participant's opt-in to refusing, as routing, a
+	// pair that shares no declared IG line. By default (unset or "false") such
+	// a pair's messages are carried as sent and recorded. Set by
+	// REQUIRE_SHARED_LINE ("true" or "false").
+	RequireSharedLine bool
 	// EnrichNativeRequests is the participant's opt-in to having its gateway add
 	// what a Da Vinci-native request leaves out, from its own system of record:
 	// the CDS Hooks prefetch fill (E-02) and the questionnaire-package Coverage
@@ -499,7 +509,7 @@ var errNoSystemOfRecord = fmt.Errorf("gateway: FHIR_DATA_URL is required — the
 func payerNative(cfg config) bool { return cfg.Role == "payer" && cfg.PayerDavinciBaseURL != "" }
 
 // declaresAny reports whether a SHN_CONTRACT_VERSIONS value names any token;
-// one that names none means the build default (shnsdk.ParseDeclaredContractVersions).
+// one that names none means the build default (engine.ParseDeclaredContractVersions).
 func declaresAny(csv string) bool {
 	for _, tok := range strings.Split(csv, ",") {
 		if strings.TrimSpace(tok) != "" {
@@ -672,7 +682,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 	// D1a: the operator-declared contract set, boot-validated ONCE here (grammar +
 	// membership of NativeContractVersions) so a typo'd or unbuildable token is a
 	// refusal to start, never a peer-visible declaration this build cannot honor.
-	declared, derr := shnsdk.ParseDeclaredContractVersions(getenv("SHN_CONTRACT_VERSIONS"))
+	declared, derr := engine.ParseDeclaredContractVersions(getenv("SHN_CONTRACT_VERSIONS"))
 	if derr != nil {
 		return config{}, fmt.Errorf("gateway: SHN_CONTRACT_VERSIONS: %w", derr)
 	}
@@ -683,7 +693,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 	// Loud by name and by log — never set in any shipped deploy config.
 	if raw := strings.TrimSpace(getenv("SHN_DEMO_EGRESS_NATIVE_LINES")); raw != "" {
 		native := map[string]bool{}
-		for _, tok := range shnsdk.NativeContractVersions() {
+		for _, tok := range engine.NativeContractVersions() {
 			native[shnsdk.LineOf(tok)] = true
 		}
 		for _, l := range strings.Split(raw, ",") {
@@ -743,6 +753,16 @@ func loadConfig(getenv func(string) string) (config, error) {
 	// other gateway) has no members to know: knowing them needs a store.
 	if cfg.FHIRDataURL == "" && payerNative(cfg) && cfg.RequireKnownMembers {
 		return config{}, fmt.Errorf("gateway: REQUIRE_KNOWN_MEMBERS=true needs FHIR_DATA_URL: with no system of record there are no members to know")
+	}
+
+	// A pair that shares no declared IG line is carried unless the participant
+	// opts in to refusing it. Only "true" and "false" are values.
+	switch raw := getenv("REQUIRE_SHARED_LINE"); raw {
+	case "", "false":
+	case "true":
+		cfg.RequireSharedLine = true
+	default:
+		return config{}, fmt.Errorf("gateway: REQUIRE_SHARED_LINE must be true or false, got %q", raw)
 	}
 
 	// A Da Vinci-native request is carried as sent unless the participant opts
@@ -890,6 +910,19 @@ func loadConfig(getenv func(string) string) (config, error) {
 		if pair[1] != "" && cfg.PayerDavinciBaseURL == "" {
 			return config{}, fmt.Errorf("gateway: %s set requires PAYER_DAVINCI_BASE_URL", pair[0])
 		}
+	}
+
+	// The payer's Patient Access API is mounted unless the payer turns it off.
+	// Only "on" and "off" are values, and only a payer gateway serves it.
+	switch raw := getenv("PATIENT_ACCESS_API"); raw {
+	case "":
+	case "on", "off":
+		if cfg.Role != "payer" {
+			return config{}, fmt.Errorf("gateway: PATIENT_ACCESS_API is a payer gateway setting; this gateway's ROLE is %q", cfg.Role)
+		}
+		cfg.PatientAccessOff = raw == "off"
+	default:
+		return config{}, fmt.Errorf("gateway: PATIENT_ACCESS_API must be on or off, got %q", raw)
 	}
 
 	// A payer's own eligibility endpoint: an absolute http(s) URL, on a payer
@@ -1423,6 +1456,11 @@ type resolvedEndpoints struct {
 // Mirrors cmd/gateway/main.go resolveIdentity's discovery branch using public
 // shnsdk symbols only. FAIL-CLOSED: an unreachable discovery / key fetch errors.
 func resolveDiscovery(ctx context.Context, c *http.Client, cfg config) (trustAnchors, resolvedEndpoints, error) {
+	return resolveDiscoveryWaiting(ctx, bootClient(c, bootFetchWaits, bootFetchBudget), cfg)
+}
+
+// resolveDiscoveryWaiting is resolveDiscovery with c already the boot client.
+func resolveDiscoveryWaiting(ctx context.Context, c *http.Client, cfg config) (trustAnchors, resolvedEndpoints, error) {
 	var ta trustAnchors
 	var ep resolvedEndpoints
 
@@ -1515,6 +1553,9 @@ type built struct {
 	// to engine.New, recorded so this package's tests prove the variable reaches
 	// the engine without a published test accessor.
 	requireKnownMembers bool
+	// requireSharedLine is the shared-line opt-in exactly as build() handed it
+	// to engine.New, recorded for the same reason.
+	requireSharedLine bool
 	// enrichNativeRequests is the enrichment opt-in exactly as build() handed it
 	// to engine.New, recorded for the same reason.
 	enrichNativeRequests bool
@@ -1858,6 +1899,7 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		HubTransportPub:         trust.HubTransportPub,
 		HubURL:                  firstNonEmpty(cfg.HubURL, endpoints.Hub),
 		Reg:                     reg, // populated by the snapshot above
+		RegistryRefresh:         registryRefresh(client, registrarURL, reg),
 		Validator:               validator,
 		ValidatorsByLine:        validatorLanes,
 		DefaultValidatorsByLine: lanes.defaults,
@@ -1962,6 +2004,10 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 			engine.WithPASBaseURL(cfg.PayerDavinciPASBaseURL),
 			engine.WithCRDDispatchService(cfg.PayerDavinciDispatchServiceID),
 			engine.WithDeclaredContractVersions(cfg.PayerDavinciContractVersions),
+			// A leg whose contract shares no line with the partner's declared
+			// set is forwarded as sent unless the participant opts in to
+			// refusing it.
+			engine.WithRequireSharedLine(cfg.RequireSharedLine),
 			// The foreign-peer filter's OWN half is this deployment's declared
 			// set — the same accessor selection, the CapabilityStatements and the
 			// registry declaration read — never the library build constant.
@@ -2061,7 +2107,12 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	gwCfg.IngressBaseURL = cfg.IngressBaseURL
 	gwCfg.IngressClients = cfg.IngressClients
 	gwCfg.RequireKnownMembers = cfg.RequireKnownMembers
+	gwCfg.RequireSharedLine = cfg.RequireSharedLine
 	gwCfg.EnrichNativeRequests = cfg.EnrichNativeRequests
+	gwCfg.PatientAccessOff = cfg.PatientAccessOff
+	if cfg.PatientAccessOff {
+		log.Printf("gateway: PATIENT_ACCESS_API=off — GET /metadata and GET /ExplanationOfBenefit are not served; liveness is GET /health")
+	}
 	gwCfg.FHIRServerRead = cfg.FHIRServerRead
 	gwCfg.HubAcceptsInvolved = endpoints.HubAcceptsInvolved
 	// Stated in both states: whether this gateway names the other patients a
@@ -2094,6 +2145,9 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	}
 	if cfg.RequireKnownMembers {
 		log.Printf("gateway: REQUIRE_KNOWN_MEMBERS=true — a Da Vinci CRD/DTR/PAS subject the system of record does not hold is refused")
+	}
+	if cfg.RequireSharedLine {
+		log.Printf("gateway: REQUIRE_SHARED_LINE=true — a pair that shares no declared IG line is refused as routing")
 	}
 
 	var accessEmit func(diagnostics.Event) bool
@@ -2230,6 +2284,7 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 
 	b = built{
 		requireKnownMembers:  gwCfg.RequireKnownMembers,
+		requireSharedLine:    gwCfg.RequireSharedLine,
 		enrichNativeRequests: gwCfg.EnrichNativeRequests,
 		fhirServerRead:       gwCfg.FHIRServerRead,
 		responder:            gwCfg.Responder,
@@ -2508,10 +2563,12 @@ func Handler(ctx context.Context, getenv func(string) string, stdout io.Writer) 
 // validator with the line-specific cardinality and binding checks.
 // Scope: only MULTI-LINE contracts (pa.crd/pa.dtr/pa.pas — those whose native set
 // carries more than one line) can produce line-varying payloads and therefore need
-// per-line lanes. A single-line contract (pa.pdex, native at 2.1 only) has nothing
-// to choose between and rides the canonical lane, exactly as it did before this
-// slice. That scoping is DERIVED from NativeContractVersions(), not hardcoded, so a
-// contract that gains a second line automatically starts demanding lanes.
+// per-line lanes. A single-line contract has nothing to choose between and rides
+// the canonical lane. No native contract is single-line today (pa.pdex was, until
+// no gateway declared it), so ParseDeclaredContractVersions refuses any declared
+// token this branch would alias. That scoping is DERIVED from
+// NativeContractVersions(), not hardcoded, so a contract that gains a second line
+// automatically starts demanding lanes.
 func validatorLanesForDeclared(getenv func(string) string, declared []string, canonical shnsdk.Validator, cfg config) (map[string]shnsdk.Validator, error) {
 	fake := getenv("SHN_FAKE_VALIDATOR") == "1"
 	// The canonical line — the one FHIR_VALIDATE_URL has always served — is the line
@@ -2520,7 +2577,7 @@ func validatorLanesForDeclared(getenv func(string) string, declared []string, ca
 	urlForLine := map[string]string{"2.1": cfg.FHIRValidateURL21, "2.2": cfg.FHIRValidateURL22}
 
 	linesPerContract := map[string]map[string]bool{}
-	for _, tok := range shnsdk.NativeContractVersions() {
+	for _, tok := range engine.NativeContractVersions() {
 		contract, line, ok := strings.Cut(tok, "@")
 		if !ok {
 			continue
@@ -2592,8 +2649,8 @@ func validatorLanesForDeclared(getenv func(string) string, declared []string, ca
 			}
 		}
 	}
-	// A single-line contract's line may be absent from lanes (pa.pdex@2.1 when 2.1 is
-	// not otherwise declared). engine.validatorForLine treats an ABSENT line in a
+	// A single-line contract's line may be absent from lanes (a line not otherwise
+	// declared; no native contract is single-line today). engine.validatorForLine treats an ABSENT line in a
 	// non-empty lane map as unlaned, so map it to the canonical lane explicitly.
 	for _, tok := range declared {
 		contract, line, ok := strings.Cut(tok, "@")
@@ -2643,6 +2700,21 @@ func convergeRegistry(ctx context.Context, c *http.Client, registrarURL string, 
 		n++
 	}
 	return n, nil
+}
+
+// registryRefresh is the engine's on-miss registry refresh: one read of the
+// registrar feed into reg, the same read pollFeed makes on its interval. nil
+// without a registrar (a static registry has nothing to re-read). It and the
+// poller may converge reg at the same time; a read older than the other's
+// writes is overwritten again by the next poll.
+func registryRefresh(c *http.Client, registrarURL string, reg shnsdk.Registry) func(context.Context) error {
+	if registrarURL == "" {
+		return nil
+	}
+	return func(ctx context.Context) error {
+		_, err := convergeRegistry(ctx, c, registrarURL, reg)
+		return err
+	}
 }
 
 // pollFeed re-converges the registry on an interval (post-boot peer registration/

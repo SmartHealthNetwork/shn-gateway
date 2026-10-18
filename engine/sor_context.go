@@ -48,6 +48,36 @@ func (g *Gateway) refuseSoRFailure(w http.ResponseWriter, r *http.Request, leg i
 	return true
 }
 
+// memberRecordsUnreadable reports a system-of-record failure that only a
+// member the system holds records for can produce: its records for the member
+// answered out of shape (SoRFailureResponse's invalid response, for example
+// two Patients for one member). An outage or a failed authentication meets
+// every member's read alike, so it says nothing about any one patient.
+func memberRecordsUnreadable(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var readErr *SoRReadError
+	if errors.As(err, &readErr) && readErr != nil {
+		return readErr.Kind == SoRInvalidResponse
+	}
+	return true
+}
+
+// refuseUnreadableMember answers a bind whose member's records are out of
+// shape (memberRecordsUnreadable) with the leg's own patient-match refusal,
+// the answer a member this participant does not hold gets, so the answer does
+// not say it holds records for that patient; the exchange record keeps its
+// system's failure.
+func (g *Gateway) refuseUnreadableMember(w http.ResponseWriter, r *http.Request, leg inboundLeg, env shnsdk.Envelope, tok shnsdk.Token, answerTok, msg string, err error) bool {
+	if !memberRecordsUnreadable(err) {
+		return false
+	}
+	g.refuseInbound(w, r, leg, env, tok, answerTok, http.StatusForbidden, msg, nil)
+	exchangeOf(r.Context()).sorFailure()
+	return true
+}
+
 // Reference callbacks are scoped to one SDK invocation. Once a read fails,
 // further callback calls do no work; callers check the captured error first.
 func sorReferenceCallback(ctx context.Context, sor SystemOfRecord) (func(string) ([]byte, bool), *error) {

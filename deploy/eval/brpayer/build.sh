@@ -50,9 +50,22 @@ move_aside() {
 }
 
 clone_new() {
-  local tmp status
+  local tmp status stale pid
   mkdir -p "$(dirname "${SRC}")" || return
-  tmp=$(mktemp -d "${SRC}.cloning.XXXXXX") || return
+  # The sibling's name carries this shell's pid. A clone killed part way leaves its sibling
+  # behind, so each new clone first removes any whose process is gone; a live one is another
+  # caller's clone in progress. Only where ps -p lists both this shell and pid 1: with no ps, one
+  # without -p, or one that cannot see other processes, every process would look gone, so none
+  # is removed.
+  ps -p "$$" >/dev/null 2>&1 && ps -p 1 >/dev/null 2>&1 &&
+  for stale in "${SRC}".cloning.*; do
+    [ -d "${stale}" ] || continue
+    pid=${stale#"${SRC}".cloning.}
+    pid=${pid%%.*}
+    case ${pid} in '' | *[!0-9]*) continue ;; esac
+    ps -p "${pid}" >/dev/null 2>&1 || rm -rf "${stale}" || true
+  done
+  tmp=$(mktemp -d "${SRC}.cloning.$$.XXXXXX") || return
   git clone --no-checkout "${REPO_URL}" "${tmp}" || {
     status=$?
     rm -rf "${tmp}"

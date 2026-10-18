@@ -32,7 +32,7 @@ const homeOxygenMember = "MBR-OX"
 
 // handleHomeOxygen originates the HomeOxygen PA off the member's seeded DeviceRequest.
 func (g *Gateway) handleHomeOxygen(w http.ResponseWriter, r *http.Request) {
-	member, ok := g.scenarioMember(w, r, homeOxygenMember, homeOxygenMember, homeOxygenMember) // homeOxygenMember = "MBR-OX"
+	member, ok := g.scenarioMember(w, r, "homeoxygen")
 	if !ok {
 		return
 	}
@@ -136,6 +136,13 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member 
 	realPayerOrg, status, msg := g.memberPayerOrganization(ctx, realCov)
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
+		return dispatchResult{}, false
+	}
+	// The request states its claim facts for this order, and every fact the
+	// PAS build at the routed line requires, or it is refused here, before the
+	// order-dispatch and questionnaire legs, exactly as the build would refuse
+	// it (pasOriginationBeforeAnyLeg).
+	if !g.pasOriginationBeforeAnyLeg(w, r, recipient, orderJSON) {
 		return dispatchResult{}, false
 	}
 
@@ -252,10 +259,12 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member 
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "build questionnaire-package request failed: " + err.Error()})
 		return dispatchResult{}, false
 	}
-	if status, msg := g.carryUnchanged(route, dtrReq, dtrCorr, recipient); status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
+	sendRoute, carryStatus, carryMsg := g.carryUnchanged(route, dtrReq, dtrCorr, recipient)
+	if carryStatus != 0 {
+		writeJSON(w, carryStatus, map[string]string{"error": carryMsg})
 		return dispatchResult{}, false
 	}
+	route = sendRoute
 	packageJSON, err := g.OriginateLeg(ctx, r, recipient, "dtr-questionnaire-fetch", pci, dtrCorr, "",
 		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Payload: dtrPayload,
 			Operation: shnsdk.FrameOperationQuestionnairePackage})
@@ -370,6 +379,7 @@ func (g *Gateway) handleDispatch(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Member string `json:"member"`
 	}
+	r = ensureOriginationClaimInput(r)
 	if r.Body != nil {
 		_ = json.NewDecoder(r.Body).Decode(&req) // lenient like the sibling handlers
 	}

@@ -288,6 +288,20 @@ func (s *ingressAuthServer) handleToken(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+// bearerToken is the token of an Authorization header in the bearer scheme,
+// and whether there is one. The scheme is case-insensitive (RFC 7235 §2.1):
+// the token answer names it "bearer", so a client that builds its header from
+// that answer is a caller like any other. A wrong scheme, a scheme with
+// no separating space and an empty token are none.
+func bearerToken(h string) (string, bool) {
+	const scheme = "Bearer "
+	if len(h) < len(scheme) || !strings.EqualFold(h[:len(scheme)], scheme) {
+		return "", false
+	}
+	raw := strings.TrimSpace(h[len(scheme):])
+	return raw, raw != ""
+}
+
 // signBearer signs a bearer with an ALREADY-RESOLVED signing key and stamps its kid in
 // the header, so a sibling replica behind the same store can resolve the verification key
 // for it. Pure CPU: the key is passed in and the result is returned to the caller, which
@@ -324,14 +338,10 @@ func scopeAllowed(requested string, allowed []string) bool {
 // resolved is never admitted. The outage is counted here, at the one place that knows a
 // store call failed.
 func (s *ingressAuthServer) verifyBearer(r *http.Request) (ok bool, unavailable bool) {
-	h := r.Header.Get("Authorization")
-	// Strict canonical casing is intentional: SMART Backend Services clients send
-	// canonical "Bearer "; the case-insensitive variant isn't worth the cost (mirrors
-	// the smartauthproxy sister).
-	if !strings.HasPrefix(h, "Bearer ") {
+	raw, present := bearerToken(r.Header.Get("Authorization"))
+	if !present {
 		return false, false
 	}
-	raw := strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
 	storeDown := false
 	_, err := jwt.Parse(raw, func(tok *jwt.Token) (any, error) {
 		if tok.Method.Alg() != jwt.SigningMethodES384.Alg() {
@@ -387,11 +397,10 @@ func audUnder(aud, base string) bool {
 // Authority is edge-only (never reaches authorize()); org-level TPO; scope is advisory and
 // NOT enforced on either path. A registered client implicitly gains both auth modes.
 func (s *ingressAuthServer) verifyDirectBearer(r *http.Request) bool {
-	h := r.Header.Get("Authorization")
-	if !strings.HasPrefix(h, "Bearer ") {
+	raw, present := bearerToken(r.Header.Get("Authorization"))
+	if !present {
 		return false
 	}
-	raw := strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
 
 	// Peek iss (unverified) → select the registered key + alg. An issued ephemeral bearer
 	// has no iss, so it fails here — keeping the two paths disjoint.

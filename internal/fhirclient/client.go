@@ -4,11 +4,14 @@ package fhirclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	fhir "github.com/samply/golang-fhir-models/fhir-models/fhir"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
+	"syscall"
+	"time"
 )
 
 const maxBodyBytes = 8 << 20
@@ -53,7 +56,7 @@ func (c *Client) get(ctx context.Context, path string) ([]byte, int, error) {
 		return nil, 0, &InvalidResponseError{}
 	}
 	req.Header.Set("Accept", "application/fhir+json")
-	resp, err := c.hc.Do(req)
+	resp, err := Do(c.hc, req)
 	if err != nil {
 		return nil, 0, &TransportError{err}
 	}
@@ -69,6 +72,67 @@ func (c *Client) get(ctx context.Context, path string) ([]byte, int, error) {
 		return nil, 0, &InvalidResponseError{}
 	}
 	return body, resp.StatusCode, nil
+}
+
+// RetryPause is how long a read waits before its one more try.
+const RetryPause = 250 * time.Millisecond
+
+// RetryWithin is how soon a first try must have failed to be tried again.
+const RetryWithin = time.Second
+
+// Do sends req, a GET, with hc, and sends it once more after RetryPause when
+// the first try failed within RetryWithin with no answer (the connection
+// refused, reset or closed) or with 502, 503 or 504, and req's deadline
+// leaves more than the pause. A system of record rolling to a new task, or
+// the proxy in front of it with no task to reach for a moment, fails at once
+// and often answers the next try; a GET changes nothing, so trying it again
+// is safe. A slower failure is not tried again: a second wait would hold the
+// caller's own answer past the time its requester gives it. Any other answer
+// or failure, a 4xx among them, is returned as it came, and a second failure
+// is the answer.
+func Do(hc *http.Client, req *http.Request) (*http.Response, error) {
+	began := time.Now()
+	resp, err := hc.Do(req)
+	if time.Since(began) > RetryWithin || !again(req.Context(), resp, err) {
+		return resp, err
+	}
+	if resp != nil {
+		// Closed unread: a body that stalls would hold the try up, and a
+		// connection to a server mid-roll is not worth keeping.
+		resp.Body.Close()
+	}
+	pause := time.NewTimer(RetryPause)
+	defer pause.Stop()
+	select {
+	case <-req.Context().Done():
+		return nil, req.Context().Err()
+	case <-pause.C:
+	}
+	return hc.Do(req.Clone(req.Context()))
+}
+
+// Windows reports a refused or reset connection by its own codes, which its
+// syscall.ECONNREFUSED and ECONNRESET do not match; no other system uses them.
+const (
+	wsaConnRefused = syscall.Errno(10061)
+	wsaConnReset   = syscall.Errno(10054)
+)
+
+// again reports whether a GET's first try may be made again.
+func again(ctx context.Context, resp *http.Response, err error) bool {
+	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) <= RetryPause {
+		return false
+	}
+	if err != nil {
+		return errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET) ||
+			errors.Is(err, wsaConnRefused) || errors.Is(err, wsaConnReset) ||
+			errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+	}
+	switch resp.StatusCode {
+	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	}
+	return false
 }
 
 // ValidateResource checks identity and JSON shape; it does not certify a FHIR profile.

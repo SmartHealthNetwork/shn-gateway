@@ -24,7 +24,7 @@ const eligibilityPath = "/CoverageEligibilityRequest/$submit"
 // eligibilityRequest is the requester's coverage-eligibility request for member.
 func eligibilityRequest(t *testing.T, member string) []byte {
 	t.Helper()
-	b, err := shnsdk.BuildEligibilityRequest(member, "1234567890", fixedClock())
+	b, err := shnsdk.BuildEligibilityRequestExact(member, "1234567890", shnsdk.CMSPayerIdentity, fixedClock())
 	if err != nil {
 		t.Fatal(err)
 	}

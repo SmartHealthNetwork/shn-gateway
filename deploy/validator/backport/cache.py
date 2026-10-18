@@ -11,13 +11,13 @@ import sys
 import tempfile
 import zipfile
 
-ENGINE = "hapiproject/hapi@sha256:1be4d7ffe7a35a9fb46151851e5a20b25c5016f16c8ef8b59b0c807ad06a40c1"
+ENGINE = "hapiproject/hapi@sha256:0ff86aac4c7bd13a1ee226444a70263bb46ed1c28ef543c30a44f865b80ca04e"
 COMPILER = "eclipse-temurin:21.0.11_10-jdk-jammy@sha256:dbfd085220ae632a0830166e443747d1ee89e9038d92e3b48c3e5e9d8292b9a7"
-JAR_ENTRY = "WEB-INF/lib/hapi-fhir-validation-8.10.0.jar"
+JAR_ENTRY = "WEB-INF/lib/hapi-fhir-validation-8.12.0.jar"
 CLASS_ENTRY = "org/hl7/fhir/common/hapi/validation/validator/ValidatorWrapper.class"
 SOURCES = {
-    "linux/arm64": ("sha256:ac871f44ee311bdd4d3533f7ea9e81b3a744ca709726b74d5a97d29663a7916c", "94a8a650d470060025ef8c1c404b5451a9b91efa860a118e69bbdcda3c8221e4", "378563064"),
-    "linux/amd64": ("sha256:f4aa83b7102a52f19a42c4c27c5f63fa3d1ded4f393c7083e53a39dc37b2a4c5", "378be32e09f643db6c01c703851e5a639d9ea17ebf7a0aafeeefaa66a0452009", "378563063"),
+    "linux/arm64": ("sha256:4d59628d42b3556b2dcd274d26054a43ba53697ebdae0fd71e6a5475065ed22d", "d784462f9a5de7385c4f6b2fcfeec3d7d2316270d5bb2e6fb73cb6ed0c5de749", "388197072"),
+    "linux/amd64": ("sha256:88489ad986f38d35ec0e216a0660db42cb55329275efdc5913dfe1d2f2afbe53", "a256639a442672571f948bb6502788ae5a93b2be92bf64cb7e97f7104ac3f678", "388197072"),
 }
 COMPILERS = {
     "linux/arm64": "sha256:4cc4a72887c92db0128b0725443a80291171759f9731300c12a63403504f76c3",
@@ -69,8 +69,8 @@ def expected_fields(source, platform, compiler_platform):
         "format": "explicit-profile-backport-v1", "upstream_image": ENGINE,
         "hapi_source_platform": platform, "hapi_source_child": child,
         "input_war_sha256": war, "input_war_size": size,
-        "input_jar_sha256": "cf4d24f810bcd29760296fc5f9f5908196e4253755d8194afd610dc456009deb",
-        "input_class_sha256": "b7055a835c7fdae7b3e6834d63743b912394fa631feda3bde015c3f8ed1edf0c",
+        "input_jar_sha256": "d6ff8774a4de5dd2156d903e260ea3c1dc734f58b2bb759f3f249cb52bec7fd4",
+        "input_class_sha256": "e7f50925b9703e25bf1ef1d461f22381ab8e1a3a28b990ab2ff0c6e83bdba4ce",
         "upstream_source_sha256": file_hash(source / "upstream/ValidatorWrapper.java"),
         "patched_source_sha256": file_hash(source / "src/ValidatorWrapper.java"),
         "source_manifest_sha256": file_hash(source / "provenance.json"),
@@ -129,7 +129,7 @@ def verify(source, output, platform, compiler_platform):
     if file_hash(output / "classpath.sha256") != recorded["classpath_sha256"]:
         raise ValueError("classpath inventory changed")
     war = output / "main.war"
-    jar = output / "hapi-fhir-validation-8.10.0.jar"
+    jar = output / "hapi-fhir-validation-8.12.0.jar"
     if file_hash(war) != outputs["output_war_sha256"] or file_hash(jar) != outputs["output_jar_sha256"]:
         raise ValueError("cached output bytes changed")
     with zipfile.ZipFile(war) as archive:

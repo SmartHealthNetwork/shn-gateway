@@ -44,9 +44,9 @@ func TestBuildPopulateFailureEvidence(t *testing.T) {
 		body, record, public string
 		calls                int32
 	}{
-		{"token refusal", 401, 200, "", `gateway: populate_failure {"version":1,"stage":"token_acquisition","reason":"other","status":0}`, `{"error":"engine: $populate upstream failed"}` + "\n", 0},
-		{"population status", 200, 503, "CANARY-POPULATION-BODY", `gateway: populate_failure {"version":1,"stage":"http_status","reason":"non_2xx","status":503}`, `{"error":"engine: $populate upstream failed"}` + "\n", 1},
-		{"foreign subject", 200, 200, `{"resourceType":"QuestionnaireResponse","subject":{"reference":"Patient/CANARY-FOREIGN"},"questionnaire":"https://example.test/CANARY-CANONICAL"}`, "", `{"error":"engine: populated QR subject does not match patient"}` + "\n", 1},
+		{"token refusal", 401, 200, "", `gateway: populate_failure {"version":1,"stage":"token_acquisition","reason":"other","status":0}`, `{"error":"$populate upstream failed"}` + "\n", 0},
+		{"population status", 200, 503, "CANARY-POPULATION-BODY", `gateway: populate_failure {"version":1,"stage":"http_status","reason":"non_2xx","status":503}`, `{"error":"$populate upstream failed"}` + "\n", 1},
+		{"foreign subject", 200, 200, `{"resourceType":"QuestionnaireResponse","subject":{"reference":"Patient/CANARY-FOREIGN"},"questionnaire":"https://example.test/CANARY-CANONICAL"}`, "", `{"error":"populated QR subject does not match patient"}` + "\n", 1},
 		{"foreign canonical", 200, 200, `{"resourceType":"QuestionnaireResponse","subject":{"reference":"Patient/CANARY-STORE"},"questionnaire":"https://example.test/CANARY-FOREIGN"}`, "", `{"error":"populated QR questionnaire does not match canonical"}` + "\n", 1},
 	} {
 		t.Run(row.name, func(t *testing.T) {
@@ -74,7 +74,7 @@ func TestBuildPopulateFailureEvidence(t *testing.T) {
 			out := &populateOutput{}
 			handler := populateFailureApp(t, map[string]string{"PROVIDER_DTR_POPULATE_URL": pop.URL + "/CANARY-URL", "PROVIDER_DTR_POPULATE_TOKEN_URL": token.URL + "/CANARY-TOKEN-URL", "PROVIDER_DTR_POPULATE_CLIENT_ID": "CANARY-CLIENT", "PROVIDER_DTR_POPULATE_CLIENT_SECRET": "CANARY-SECRET"}, out)
 			rr := httptest.NewRecorder()
-			handler.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/scenario/uc08", strings.NewReader(`{}`)))
+			handler.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/scenario/uc08", strings.NewReader(populateFailureBody(t))))
 			if rr.Code != 502 || rr.Body.String() != row.public {
 				t.Fatalf("public response=%d %q, want 502 %q", rr.Code, rr.Body.String(), row.public)
 			}
@@ -374,8 +374,31 @@ func TestBuildPopulateFailureEvidenceWriterFailurePreservesResponse(t *testing.T
 	defer srv.Close()
 	h := populateFailureApp(t, map[string]string{"PROVIDER_DTR_POPULATE_URL": srv.URL}, populateFailingWriter{})
 	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/scenario/uc08", strings.NewReader(`{}`)))
-	if rr.Code != 502 || rr.Body.String() != `{"error":"engine: $populate upstream failed"}`+"\n" || calls.Load() != 1 {
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/scenario/uc08", strings.NewReader(populateFailureBody(t))))
+	if rr.Code != 502 || rr.Body.String() != `{"error":"$populate upstream failed"}`+"\n" || calls.Load() != 1 {
 		t.Fatalf("status=%d body=%q calls=%d", rr.Code, rr.Body.String(), calls.Load())
 	}
+}
+
+// populateFailureBody is the UC-08 origination request a driver sends: the
+// member the route resolves on the demo lane (an unset ORIGINATION_PROFILE is
+// normalized to demo), the order it holds and the claim facts stated for it —
+// the PAS IG medical services example's codes.
+func populateFailureBody(t *testing.T) string {
+	t.Helper()
+	member := ""
+	for _, p := range engine.ScenarioRoster() {
+		if p.Scenario == "uc08" && p.Lane == engine.LaneDemo && p.PersonaSet == "" {
+			member = p.Member
+		}
+	}
+	if member == "" {
+		t.Fatal("no uc08 demo persona in the roster")
+	}
+	return `{"member":"` + member + `","order":{"system":"http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets","code":"J3490"},` +
+		`"claimFacts":{"claimType":{"system":"http://terminology.hl7.org/CodeSystem/claim-type","code":"professional"},` +
+		`"priority":{"system":"http://terminology.hl7.org/CodeSystem/processpriority","code":"normal"},` +
+		`"serviceCategory":{"system":"https://codesystem.x12.org/005010/1365","code":"1","display":"Medical Care"},` +
+		`"placeOfService":{"system":"https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set","code":"11"},` +
+		`"requestType":{"system":"https://codesystem.x12.org/005010/1525","code":"IN","display":"Initial Medical Services Reservation"}}}`
 }

@@ -349,6 +349,58 @@ func TestBuildWiresKnownMemberOptInToGateway(t *testing.T) {
 	}
 }
 
+// TestBuildWiresSharedLineOptInToGateway proves REQUIRE_SHARED_LINE reaches
+// the engine.Config build() hands to engine.New, and that carrying a pair
+// that shares no IG line is the default. Deleting the
+// "gwCfg.RequireSharedLine = cfg.RequireSharedLine" line, or the env read in
+// loadConfig, leaves the "true" row red. That the engine honors the field is
+// proven by the engine's line_carry_test.go rows. A value outside true/false
+// refuses to boot.
+func TestBuildWiresSharedLineOptInToGateway(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		env     map[string]string
+		want    bool
+		wantErr string
+		wantLog string
+	}{
+		{name: "unset carries"},
+		{name: "false carries", env: map[string]string{"REQUIRE_SHARED_LINE": "false"}},
+		{name: "true opts in", env: map[string]string{"REQUIRE_SHARED_LINE": "true"}, want: true, wantLog: "REQUIRE_SHARED_LINE=true"},
+		{name: "other value refuses to boot", env: map[string]string{"REQUIRE_SHARED_LINE": "yes"}, wantErr: "REQUIRE_SHARED_LINE must be true or false"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			extra := map[string]string{"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate"}
+			for k, v := range tc.env {
+				extra[k] = v
+			}
+			var output bytes.Buffer
+			previous := log.Writer()
+			log.SetOutput(&output)
+			defer log.SetOutput(previous)
+			b, _, err := buildProviderForPopulate(t, extra)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("build err = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("build: %v", err)
+			}
+			if got := b.requireSharedLine; got != tc.want {
+				t.Errorf("Gateway requires a shared line = %v, want %v", got, tc.want)
+			}
+			if tc.wantLog != "" && !strings.Contains(output.String(), tc.wantLog) {
+				t.Errorf("boot log missing %q: %s", tc.wantLog, output.String())
+			}
+			if !tc.want && strings.Contains(output.String(), "REQUIRE_SHARED_LINE=true") {
+				t.Errorf("boot log claims the opt-in unset: %s", output.String())
+			}
+		})
+	}
+}
+
 // TestBuildWiresEnrichmentOptInToGateway proves ENRICH_NATIVE_REQUESTS reaches
 // the engine.Config build() hands to engine.New, and that carrying a native
 // request as sent is the default. Deleting the
@@ -1699,8 +1751,9 @@ func TestLoadConfig_FHIRMixedModesIsError(t *testing.T) {
 
 // buildEnvWithBundle writes a real registration bundle with the given role into a
 // temp dir and returns the minimal env for build(). SHN_DISCOVERY_URL points at a
-// closed local port so build() fails fast at discovery AFTER the bundle checks —
-// hermetic, no live network.
+// closed local port — hermetic, no live network. A caller that reaches
+// discovery points it at a server instead (unreachableDiscovery): a refused
+// boot fetch is tried again.
 func buildEnvWithBundle(t *testing.T, bundleRole, envRole string) map[string]string {
 	t.Helper()
 	dir := t.TempDir()
@@ -1731,10 +1784,20 @@ func TestBuild_RoleBundleMismatchFailsFast(t *testing.T) {
 	}
 }
 
+// unreachableDiscovery is a discovery URL whose server answers 404, which the
+// boot fetch does not try again, so build() fails fast at discovery.
+func unreachableDiscovery(t *testing.T) string {
+	t.Helper()
+	srv := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
 func TestBuild_RoleBundleMatchPassesCheck(t *testing.T) {
 	env := buildEnvWithBundle(t, "provider", "provider")
+	env["SHN_DISCOVERY_URL"] = unreachableDiscovery(t)
 	_, err := build(context.Background(), func(k string) string { return env[k] }, io.Discard, nil)
-	// build() then fails at discovery (closed port) — but NOT with the role error.
+	// build() then fails at discovery (404) — but NOT with the role error.
 	if err == nil || strings.Contains(err.Error(), "registered as") {
 		t.Fatalf("matching role must pass the bundle check, got %v", err)
 	}
@@ -1742,6 +1805,7 @@ func TestBuild_RoleBundleMatchPassesCheck(t *testing.T) {
 
 func TestBuild_EmptyBundleRoleSkipsCheck(t *testing.T) {
 	env := buildEnvWithBundle(t, "", "provider")
+	env["SHN_DISCOVERY_URL"] = unreachableDiscovery(t)
 	_, err := build(context.Background(), func(k string) string { return env[k] }, io.Discard, nil)
 	if err == nil || strings.Contains(err.Error(), "registered as") {
 		t.Fatalf("pre-role-stamp bundle must skip the check, got %v", err)
@@ -2730,6 +2794,11 @@ func TestBuildWiresEligibilityURLToNativeResponder(t *testing.T) {
 			if got := reader.EligibilityURLForTest(); got != tc.url {
 				t.Fatalf("native responder's eligibility URL = %q, want %q", got, tc.url)
 			}
+			// REQUIRE_SHARED_LINE is unset here: the forward carries a partner
+			// that shares no line (TestBuildWiresSharedLineOptInToNativeResponder).
+			if lined, ok := b.nativeResponder.(interface{ RequireSharedLineForTest() bool }); !ok || lined.RequireSharedLineForTest() {
+				t.Fatalf("native responder requires a shared line by default (%T, %v)", b.nativeResponder, ok)
+			}
 			if !strings.Contains(out.String(), tc.wantLog) {
 				t.Fatalf("boot output missing %q: %s", tc.wantLog, out.String())
 			}
@@ -2804,5 +2873,216 @@ func TestLoadConfig_PayerDavinciBackendTimeout(t *testing.T) {
 		if _, err := load(extra); err == nil {
 			t.Errorf("%s: booted", name)
 		}
+	}
+}
+
+// TestLoadConfig_PatientAccessAPI: a payer's Patient Access API is mounted
+// unless PATIENT_ACCESS_API=off; any other value, or the setting on a gateway
+// that is not a payer, refuses to boot.
+func TestLoadConfig_PatientAccessAPI(t *testing.T) {
+	load := func(extra map[string]string) (config, error) {
+		env := map[string]string{"ROLE": "payer", "SHN_SECRETS": "/x", "SHN_DISCOVERY_URL": "https://d", "PAYER_DAVINCI_BASE_URL": "https://payer.example"}
+		for k, v := range extra {
+			env[k] = v
+		}
+		return loadConfig(func(k string) string { return env[k] })
+	}
+	for value, off := range map[string]bool{"": false, "on": false, "off": true} {
+		cfg, err := load(map[string]string{"PATIENT_ACCESS_API": value})
+		if err != nil || cfg.PatientAccessOff != off {
+			t.Errorf("%q: off=%v err=%v, want off=%v", value, cfg.PatientAccessOff, err, off)
+		}
+	}
+	for name, tc := range map[string]struct {
+		env     map[string]string
+		wantErr string
+	}{
+		"not on or off": {map[string]string{"PATIENT_ACCESS_API": "false"}, "must be on or off"},
+		"off on a provider gateway": {map[string]string{
+			"ROLE": "provider", "PAYER_DAVINCI_BASE_URL": "", "PATIENT_ACCESS_API": "off",
+			"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate",
+		}, "payer gateway setting"},
+		"on on a provider gateway": {map[string]string{
+			"ROLE": "provider", "PAYER_DAVINCI_BASE_URL": "", "PATIENT_ACCESS_API": "on",
+			"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate",
+		}, "payer gateway setting"},
+	} {
+		if _, err := load(tc.env); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+			t.Errorf("%s: err = %v, want %q", name, err, tc.wantErr)
+		}
+	}
+}
+
+// TestBuildPatientAccessOffKeepsHealth proves, on the handler build() serves,
+// that PATIENT_ACCESS_API=off leaves the payer's Patient Access routes
+// unmounted while GET /health still answers: liveness never depends on
+// Patient Access. Deleting the gwCfg.PatientAccessOff wiring, or the
+// engine's guard around the routes, leaves the off row red.
+func TestBuildPatientAccessOffKeepsHealth(t *testing.T) {
+	payer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer payer.Close()
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	keyBody := fmt.Sprintf(`{"pubkey":%q}`, base64.StdEncoding.EncodeToString(pub))
+	keys := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(keyBody))
+	}))
+	defer keys.Close()
+	disc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"endpoints":{},"authzPublicKeyURL":%q,"hubTransportKeyURL":%q}`, keys.URL, keys.URL)
+	}))
+	defer disc.Close()
+	for _, tc := range []struct {
+		name, value string
+		off         bool
+	}{
+		{"unset mounts Patient Access", "", false},
+		{"on mounts Patient Access", "on", false},
+		{"off leaves it unmounted", "off", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			id, err := shnsdk.GenerateIdentity("h-test-payer-patient-access")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := shnsdk.WriteBundle(dir, id, "payer", "https://holder.example"); err != nil {
+				t.Fatal(err)
+			}
+			env := map[string]string{
+				"ROLE": "payer", "SHN_SECRETS": dir, "SHN_DISCOVERY_URL": disc.URL, "SHN_FAKE_VALIDATOR": "1",
+				"FHIR_DATA_URL": "https://sor.example/fhir", "PAYER_DAVINCI_BASE_URL": payer.URL,
+				"PAYER_DAVINCI_CRD_SERVICE_ID": "svc", "PATIENT_ACCESS_API": tc.value,
+			}
+			var out bytes.Buffer
+			previous := log.Writer()
+			log.SetOutput(&out)
+			defer log.SetOutput(previous)
+			b, err := build(context.Background(), func(k string) string { return env[k] }, &out, nil)
+			if err != nil {
+				t.Fatalf("build: %v", err)
+			}
+			t.Cleanup(func() {
+				if b.gateway != nil {
+					_ = b.gateway.Close()
+				}
+			})
+			get := func(path string) *httptest.ResponseRecorder {
+				rec := httptest.NewRecorder()
+				b.handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+				return rec
+			}
+			health := get("/health")
+			var payload struct {
+				Status string `json:"status"`
+			}
+			if health.Code != http.StatusOK || json.Unmarshal(health.Body.Bytes(), &payload) != nil || payload.Status != "ok" {
+				t.Fatalf("GET /health = %d %s, want 200 with status ok", health.Code, health.Body.String())
+			}
+			metadata := get("/metadata")
+			eob := get("/ExplanationOfBenefit?patient=pci:00")
+			eobByID := get("/ExplanationOfBenefit/eob-1")
+			if tc.off {
+				for path, rec := range map[string]*httptest.ResponseRecorder{"/metadata": metadata, "/ExplanationOfBenefit": eob, "/ExplanationOfBenefit/{id}": eobByID} {
+					if rec.Code != http.StatusNotFound {
+						t.Errorf("GET %s = %d with Patient Access off, want 404", path, rec.Code)
+					}
+				}
+				if !strings.Contains(out.String(), "PATIENT_ACCESS_API=off") {
+					t.Errorf("boot log does not state Patient Access is off: %s", out.String())
+				}
+				return
+			}
+			if metadata.Code != http.StatusOK || !strings.Contains(metadata.Body.String(), `"resourceType":"CapabilityStatement"`) {
+				t.Errorf("GET /metadata = %d %s, want the Patient Access CapabilityStatement", metadata.Code, metadata.Body.String())
+			}
+			for path, rec := range map[string]*httptest.ResponseRecorder{"/ExplanationOfBenefit": eob, "/ExplanationOfBenefit/{id}": eobByID} {
+				if rec.Code == http.StatusNotFound && !strings.Contains(rec.Body.String(), "resourceType") {
+					t.Errorf("GET %s = 404 from the router with Patient Access on, want the token-gated read", path)
+				}
+			}
+			if strings.Contains(out.String(), "PATIENT_ACCESS_API=off") {
+				t.Errorf("boot log claims Patient Access is off: %s", out.String())
+			}
+		})
+	}
+}
+
+// The engine's on-miss registry refresh reads the registrar feed into the
+// gateway's registry, as the poller does; without a registrar there is none.
+func TestRegistryRefresh_ReadsTheFeed(t *testing.T) {
+	if registryRefresh(http.DefaultClient, "", shnsdk.NewRegistry()) != nil {
+		t.Fatal("a refresh was wired without a registrar")
+	}
+	var enc [32]byte
+	enc[0] = 5
+	holder := shnsdk.Holder{ID: "provider-new", Role: "provider", EncPub: base64.StdEncoding.EncodeToString(enc[:]), BaseURL: "https://provider-new.example"}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode([]shnsdk.Holder{holder})
+	}))
+	defer srv.Close()
+	reg := shnsdk.NewRegistry()
+	if err := registryRefresh(http.DefaultClient, srv.URL, reg)(context.Background()); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if _, ok := reg.Lookup("provider-new"); !ok {
+		t.Fatal("the refresh did not read the newly registered holder")
+	}
+	srv.Close()
+	if err := registryRefresh(http.DefaultClient, srv.URL, reg)(context.Background()); err == nil {
+		t.Fatal("a refresh against an unreachable registrar reported success")
+	}
+}
+
+// TestBuildWiresSharedLineOptInToNativeResponder proves REQUIRE_SHARED_LINE
+// reaches the payer's native responder as well as engine.Config, so the
+// forward to the payer's own system refuses a partner that shares no line
+// only when the participant opts in. Deleting the WithRequireSharedLine append
+// in build() leaves the "true" row red; unset is checked in
+// TestBuildWiresEligibilityURLToNativeResponder.
+func TestBuildWiresSharedLineOptInToNativeResponder(t *testing.T) {
+	payer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer payer.Close()
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	keyBody := fmt.Sprintf(`{"pubkey":%q}`, base64.StdEncoding.EncodeToString(pub))
+	keys := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(keyBody))
+	}))
+	defer keys.Close()
+	disc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"endpoints":{},"authzPublicKeyURL":%q,"hubTransportKeyURL":%q}`, keys.URL, keys.URL)
+	}))
+	defer disc.Close()
+	dir := t.TempDir()
+	id, err := shnsdk.GenerateIdentity("h-test-payer-shared-line")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := shnsdk.WriteBundle(dir, id, "payer", "https://holder.example"); err != nil {
+		t.Fatal(err)
+	}
+	env := map[string]string{
+		"ROLE": "payer", "SHN_SECRETS": dir, "SHN_DISCOVERY_URL": disc.URL, "SHN_FAKE_VALIDATOR": "1",
+		"FHIR_DATA_URL": "https://sor.example/fhir", "PAYER_DAVINCI_BASE_URL": payer.URL,
+		"PAYER_DAVINCI_CRD_SERVICE_ID": "svc", "REQUIRE_SHARED_LINE": "true",
+	}
+	b, err := build(context.Background(), func(k string) string { return env[k] }, io.Discard, nil)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	t.Cleanup(func() {
+		if b.gateway != nil {
+			_ = b.gateway.Close()
+		}
+	})
+	reader, ok := b.nativeResponder.(interface{ RequireSharedLineForTest() bool })
+	if !ok {
+		t.Fatalf("nativeResponder %T does not expose RequireSharedLineForTest", b.nativeResponder)
+	}
+	if !reader.RequireSharedLineForTest() || !b.requireSharedLine {
+		t.Fatalf("REQUIRE_SHARED_LINE=true reached the responder %v, the gateway %v; want both", reader.RequireSharedLineForTest(), b.requireSharedLine)
 	}
 }

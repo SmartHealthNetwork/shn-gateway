@@ -173,7 +173,7 @@ func TestObserver_ValidateEvents(t *testing.T) {
 		}
 	})
 	rec := httptest.NewRecorder()
-	fix.gw.handleDispatch(rec, httptest.NewRequest(http.MethodPost, "/scenario/dispatch", strings.NewReader(`{"member":"MBR-OX"}`)))
+	fix.gw.handleDispatch(rec, httptest.NewRequest(http.MethodPost, "/scenario/dispatch", strings.NewReader(testRouteBody(fix.gw, "/scenario/dispatch", `"member":"MBR-OX"`))))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("dispatch %d %s", rec.Code, rec.Body.String())
 	}

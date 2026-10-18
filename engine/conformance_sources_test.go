@@ -104,7 +104,7 @@ func TestEveryLegHandlerSetsTheFindingContext(t *testing.T) {
 	}
 }
 
-// Every runtime $validate in this package is in exactly one of five
+// Every runtime $validate in this package is in exactly one of six
 // categories. The allowlist is the truth: "a single function" is not claimed,
 // and a new call must be classified deliberately, in this test, by whoever
 // adds it. Categories:
@@ -118,6 +118,10 @@ func TestEveryLegHandlerSetsTheFindingContext(t *testing.T) {
 //	               validateFHIR* entries, covered by the second test below.
 //	               Keep the category so a future direct-Validator site of that
 //	               shape has an honest home.
+//	edit-evidence — a registered edit's own precondition: its verdict decides only
+//	               whether SHN makes the edit (an answer it does not evidence is
+//	               carried as sent), never refuses and records no finding; every
+//	               refusal the edit makes goes through the choke point
 //	not-fhir     — a method that merely SHARES the name Validate and checks no
 //	               FHIR at all. The census matches call shape, not types (see
 //	               the limits paragraph below), so a name collision needs an
@@ -169,6 +173,10 @@ var validateCallSites = map[string]string{
 	"lanes.go:Validate":       "delegating",
 	"certifylane.go:Validate": "delegating",
 	"observer.go:Validate":    "delegating",
+	// E-08's source evidence: an answer valid at its own DTR line is renamed,
+	// any other is carried as sent; the renamed answer's check and a carried
+	// answer's report both go through judgeLines.
+	"dtr_answer_bridge.go:dtrAnswerValidAt": "edit-evidence",
 	// EOBRecord.Validate (pendledger.go) checks the ledger row's own fields —
 	// an EOB id, non-empty bytes, and a subject matching the decision's — and
 	// never reaches a Validator. It is the one name collision in this
@@ -301,7 +309,7 @@ func TestEveryValidateCallIsClassified(t *testing.T) {
 	}
 	sort.Strings(unclassified)
 	if len(unclassified) > 0 {
-		t.Errorf("a runtime $validate must be classified in validateCallSites (choke / observational / delegating / appendix-b):\n  %s",
+		t.Errorf("a runtime $validate must be classified in validateCallSites (choke / observational / delegating / appendix-b / edit-evidence / not-fhir):\n  %s",
 			strings.Join(unclassified, "\n  "))
 	}
 	for key := range validateCallSites {

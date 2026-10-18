@@ -38,8 +38,8 @@ func TestDeclaredSetEnv(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if strings.Join(cfg.ContractVersions, ",") != strings.Join(shnsdk.SupportedContractVersions(), ",") {
-			t.Fatalf("declared = %v, want the build default %v", cfg.ContractVersions, shnsdk.SupportedContractVersions())
+		if strings.Join(cfg.ContractVersions, ",") != strings.Join(engine.DefaultContractVersions(), ",") {
+			t.Fatalf("declared = %v, want the build default %v", cfg.ContractVersions, engine.DefaultContractVersions())
 		}
 	})
 	t.Run("junk token refuses boot", func(t *testing.T) {
@@ -109,7 +109,7 @@ func TestConfiguredValidatorLaneFailClosed(t *testing.T) {
 				return "1"
 			}
 			return ""
-		}, shnsdk.NativeContractVersions(), canonical, config{})
+		}, engine.NativeContractVersions(), canonical, config{})
 		if err != nil {
 			t.Fatalf("SHN_FAKE_VALIDATOR must keep every line laned (harness/e2e): %v", err)
 		}
@@ -124,16 +124,16 @@ func TestConfiguredValidatorLaneFailClosed(t *testing.T) {
 	})
 
 	t.Run("the DEFAULT declaration needs no new env", func(t *testing.T) {
-		// The pre-multi-line deployment ran ONE validator. pa.pdex@2.1 is a SINGLE-line
-		// contract, so it rides the canonical lane rather than demanding a 2.1 HAPI —
-		// otherwise every existing deployment would refuse to start.
+		// The pre-multi-line deployment ran ONE validator. The default declaration is
+		// every PA contract at the canonical line and nothing else (no pa.pdex@2.1:
+		// no gateway declares it), so it demands no other lane and aliases none.
 		lanes, err := validatorLanesForDeclared(func(string) string { return "" },
-			shnsdk.SupportedContractVersions(), canonical, config{FHIRValidateURL: "http://v/fhir"})
+			engine.DefaultContractVersions(), canonical, config{FHIRValidateURL: "http://v/fhir"})
 		if err != nil {
 			t.Fatalf("the default declaration must boot with only FHIR_VALIDATE_URL: %v", err)
 		}
-		if lanes["2.1"] != canonical {
-			t.Fatalf("pa.pdex@2.1 must ride the canonical lane, got %v", lanes["2.1"])
+		if len(lanes) != 1 || lanes["2.0"] != canonical {
+			t.Fatalf("lanes = %v, want only the canonical 2.0 lane", lanes)
 		}
 	})
 }
@@ -147,8 +147,11 @@ func TestConfiguredValidatorLaneFailClosed(t *testing.T) {
 // of the guard: linesPerContract is keyed by NativeContractVersions() (a
 // package-level constant), not by what's declared, so pa.crd/pa.dtr/pa.pas —
 // each natively tri-line — were never actually skippable by the len(...)<2
-// check; only a GENUINELY single-native-line contract (pa.pdex, one native
-// token) is. These cases lock that guarantee down with an explicit test.
+// check; only a GENUINELY single-native-line contract is. None is native
+// today: pa.pdex@2.1 was, and ParseDeclaredContractVersions now refuses it, so
+// the last case injects it directly to keep the single-line rule pinned for a
+// contract that is ever native at one line. These cases lock that guarantee
+// down with an explicit test.
 func TestConfiguredValidatorLaneSingleLineDeclaration(t *testing.T) {
 	canonical := shnsdk.NewFakeValidator()
 

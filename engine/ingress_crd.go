@@ -421,11 +421,12 @@ func (g *Gateway) ingressEnsureSelfContainedContext(ctx context.Context, leg str
 		_, carriesCoverage = doc.Member(prefetch, "coverage")
 	}
 	// enrich is the participant's opt-in to the prefetch fill (E-02,
-	// Config.EnrichNativeRequests). Without it nothing is inserted: the only
-	// value obtained from the system of record is the coverage the request is
-	// routed by, when the request does not carry one, and it is not added to
-	// the request.
-	enrich := g.cfg.EnrichNativeRequests
+	// Config.EnrichNativeRequests), made through the enrichment hook. Without
+	// it nothing is inserted: the only value obtained from the system of
+	// record is the coverage the request is routed by, when the request does
+	// not carry one, and it is not added to the request.
+	hook := g.enrichment()
+	enrich := hook != nil
 	// unfilled decides a prefetch value other than the coverage that this
 	// gateway could not obtain from the participant's system of record
 	// (RulePrefetchFill), and reports whether the request is refused (strict,
@@ -638,7 +639,15 @@ func (g *Gateway) ingressEnsureSelfContainedContext(ctx context.Context, leg str
 			// routingCoverageChoice's, never inserted.
 			value, outcome, status, msg = g.obtainRoutingCoverage(ctx, leg, sorID, obtainFence)
 		} else {
-			value, outcome, status, msg = g.obtainPrefetch(ctx, leg, key, sorID, obtainFence)
+			value, outcome, status, msg = hook.prefetchValue(ctx, leg, key, sorID, obtainFence)
+			if status == 0 && value != nil {
+				// The fill fence is the core's: what the hook read is fenced
+				// again before it is inserted.
+				if err := obtainFence.check(value); err != nil {
+					value = nil
+					status, msg = fillFenceRefusal(err)
+				}
+			}
 		}
 		if status != 0 {
 			// The fill fence refuses at every level: SHN never inserts
@@ -787,65 +796,6 @@ const (
 	fillFencedBinary       = "system of record returned a Binary resource"
 	fillFencedOtherPatient = "system of record returned another patient's resource"
 )
-
-// obtainPrefetch reads the value of an advertised prefetch key from the
-// system of record for the patient sorID, fences it, and records the
-// attempt (PrefetchObtainedEvent and a log line). It returns the value to
-// insert (the JSON literal null for a search with no match), or nil with the
-// search outcome when the key is left out; a non-zero status refuses the
-// request.
-func (g *Gateway) obtainPrefetch(ctx context.Context, leg, key, sorID string, fence patientFence) ([]byte, SearchOutcome, int, string) {
-	refused := func(err error) ([]byte, SearchOutcome, int, string) {
-		status, msg := fillFenceRefusal(err)
-		return nil, "", status, msg
-	}
-	if key == prefetchPatientKey {
-		query := "Patient/" + sorID
-		patient, found, err := ReadSystemOfRecord(g.cfg.SoR).ResolveByReferenceContext(ctx, query)
-		if err != nil {
-			status, msg := SoRFailureResponse(err)
-			outcome := SearchMalformed
-			if status == http.StatusServiceUnavailable {
-				outcome = SearchUnavailable
-			}
-			g.recordPrefetch(leg, prefetchObtained{Key: key, Query: query, Outcome: outcome, Reason: string(safeSoRError(err).Kind)})
-			return nil, "", status, msg
-		}
-		if !found {
-			g.recordPrefetch(leg, prefetchObtained{Key: key, Query: query, Outcome: SearchZero})
-			return nil, "", http.StatusUnprocessableEntity, "patient not found in system of record"
-		}
-		var head struct {
-			ResourceType string `json:"resourceType"`
-		}
-		if decodeMessage(patient, &head) != nil || head.ResourceType != "Patient" {
-			g.recordPrefetch(leg, prefetchObtained{Key: key, Query: query, Outcome: SearchMalformed, Reason: "not a Patient"})
-			status, msg := SoRFailureResponse(&SoRReadError{Kind: SoRInvalidResponse})
-			return nil, "", status, msg
-		}
-		g.recordPrefetch(leg, prefetchObtained{Key: key, Query: query, Outcome: SearchOK, Count: 1})
-		if err := fence.check(patient); err != nil {
-			return refused(err)
-		}
-		return patient, SearchOK, 0, ""
-	}
-	resourceType, ok := prefetchSearchTypes[key]
-	if !ok {
-		return nil, SearchUnsupported, 0, ""
-	}
-	s := searchSystemOfRecord(ctx, g.cfg.SoR, resourceType, sorID)
-	g.recordPrefetch(leg, prefetchObtained{Key: key, Query: s.Query, Outcome: s.Outcome, Reason: s.Reason, Count: s.Count, Pages: s.Pages})
-	switch s.Outcome {
-	case SearchOK:
-		if err := fence.check(s.Value); err != nil {
-			return refused(err)
-		}
-		return s.Value, SearchOK, 0, ""
-	case SearchZero:
-		return []byte("null"), SearchZero, 0, ""
-	}
-	return nil, s.Outcome, 0, ""
-}
 
 // fillFenceRefusal is the refusal for a record the fill fence refused.
 func fillFenceRefusal(err error) (int, string) {

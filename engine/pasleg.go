@@ -38,6 +38,8 @@ type pasLegKey struct{}
 type pasLeg struct {
 	requester string
 	notes     []string
+	// detailed are the notes raised with a detail (noteDetail).
+	detailed []pasLegNote
 	// unread is the rule the payer's answer broke when the responder relayed
 	// it below strict without reading it for this gateway's own records
 	// (skipWrite); "" when the answer was read.
@@ -92,6 +94,23 @@ func (l *pasLeg) note(kind string) {
 
 // noteOn is note on the carrier this context holds.
 func noteOn(ctx context.Context, kind string) { pasLegOf(ctx).note(kind) }
+
+// pasLegNote is an observer event the leg raised with a detail: what an
+// operator needs to know about it beyond its kind (metadata only, never a
+// payload value).
+type pasLegNote struct{ kind, detail string }
+
+// noteDetail records one observer event with its detail for the inbound
+// handler to emit. A nil carrier drops it, as note does.
+func (l *pasLeg) noteDetail(kind, detail string) {
+	if l == nil || kind == "" {
+		return
+	}
+	l.detailed = append(l.detailed, pasLegNote{kind: kind, detail: detail})
+}
+
+// noteDetailOn is noteDetail on the carrier this context holds.
+func noteDetailOn(ctx context.Context, kind, detail string) { pasLegOf(ctx).noteDetail(kind, detail) }
 
 // skipWrite records that the responder relayed the payer's answer, which broke
 // rule, without reading it for this gateway's own records, so the inbound
@@ -294,22 +313,21 @@ func recordPASPend(ctx context.Context, store Store, subjectPCI, corrID string, 
 // same write. `decided` is absorbing, so a denial finalizes exactly as an approval
 // does and the authorization is never re-pended by anything but a later payer
 // re-pend. A Store with no ledger follows FallbackDecision, and its EOB is written
-// on its own as it always was.
+// on its own as it always was. The EOB is written only once the decision EOB
+// gate admitted it (eobToWrite); otherwise the decision is recorded without one.
 func recordPASDecision(ctx context.Context, store Store, subjectPCI, corrID, outcome string, decidedAt time.Time, keys PendKeys, eob *EOBRecord) func() error {
 	ledger, hasLedger := LedgerOf(store)
 	if !hasLedger {
 		return func() error {
-			if eob != nil {
-				if err := store.RecordEOB(eob.SubjectPCI, eob.EOBID, eob.JSON); err != nil {
-					return err
-				}
+			if err := recordAdmittedEOB(store, eob); err != nil {
+				return err
 			}
 			return FallbackDecision(store, subjectPCI, corrID)
 		}
 	}
 	leg := pasLegOf(ctx)
 	return func() error {
-		tr, err := ledger.RecordDecision(subjectPCI, corrID, outcome, decidedAt, keys, eob)
+		tr, err := ledger.RecordDecision(subjectPCI, corrID, outcome, decidedAt, keys, eobToWrite(eob))
 		if err != nil {
 			return err
 		}

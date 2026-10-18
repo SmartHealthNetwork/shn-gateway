@@ -5,6 +5,7 @@
 package engine
 
 import (
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -21,7 +22,7 @@ func TestParseCoverageEligibilityResponsePatient(t *testing.T) {
 	t0 := time.Date(2026, 6, 3, 12, 0, 0, 0, time.UTC)
 
 	// Round-trip: builder-produced response → parse → full patient ref.
-	b, err := shnsdk.BuildEligibilityResponse("corr-1", "Patient/MBR-COVERED", true, "", shnsdk.PayerIdentifier{}, t0)
+	b, err := shnsdk.BuildEligibilityResponseExact("corr-1", "Patient/MBR-COVERED", true, "", shnsdk.CMSPayerIdentity, t0)
 	if err != nil {
 		t.Fatalf("BuildEligibilityResponse: %v", err)
 	}
@@ -72,7 +73,7 @@ func TestParsePASResponsePatients(t *testing.T) {
 	created := time.Date(2026, 6, 4, 0, 0, 0, 0, time.UTC)
 
 	// approved: bare ClaimResponse.
-	approved, err := shnsdk.BuildClaimResponse("PA-abc123", "2026-12-31", "Patient/MBR-COVERED", "corr-1", created)
+	approved, err := shnsdk.BuildClaimResponseExact("PA-abc123", "2026-12-31", "Patient/MBR-COVERED", "corr-1", testAnswerRequest, created)
 	if err != nil {
 		t.Fatalf("BuildClaimResponse: %v", err)
 	}
@@ -98,7 +99,7 @@ func TestParsePASResponsePatients(t *testing.T) {
 	}
 
 	// denied: bare ClaimResponse.
-	denied, err := shnsdk.BuildDeniedResponse("Patient/MBR-UC08", "corr-3", "not medically necessary", created)
+	denied, err := shnsdk.BuildDeniedResponseExact("Patient/MBR-UC08", "corr-3", "not medically necessary", testAnswerRequest, created)
 	if err != nil {
 		t.Fatalf("BuildDeniedResponse: %v", err)
 	}
@@ -191,15 +192,19 @@ func TestPackageQuestionnaireHasSubject_ParametersWrapper(t *testing.T) {
 // TestParseEOBPatient round-trips a BuildPADecisionEOB EOB through parseEOBPatient
 // and asserts the rejections (wrong resourceType, missing patient, malformed).
 func TestParseEOBPatient(t *testing.T) {
-	created := time.Date(2026, 6, 4, 0, 0, 0, 0, time.UTC)
-	eob, err := shnsdk.BuildPADecisionEOB(shnsdk.PADecisionEOBParams{
-		ID:          "eob-corr-1",
-		PatientRef:  "Patient/MBR-COVERED",
-		CoverageRef: "Coverage/MBR-COVERED",
-		CPTCode:     "72148",
-		Decision:    shnsdk.PADecisionApproved,
-		AuthNumber:  "PA-abc123",
-		Created:     created,
+	focal := true
+	eob, err := shnsdk.BuildPADecisionEOBExact(shnsdk.PADecisionEOBExactParams{
+		ID:           "eob-corr-1",
+		PatientRef:   "Patient/MBR-COVERED",
+		ClaimType:    json.RawMessage(`{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/claim-type","code":"professional"}]}`),
+		Created:      "2026-06-04T00:00:00Z",
+		Insurer:      shnsdk.PADecisionEOBReference{Reference: "Organization/org-payer"},
+		Provider:     shnsdk.PADecisionEOBReference{Reference: "Practitioner/pr-1"},
+		Insurance:    []shnsdk.PADecisionEOBInsurance{{Focal: &focal, Coverage: shnsdk.PADecisionEOBReference{Reference: "Coverage/cov-1"}}},
+		Outcome:      "complete",
+		ItemSequence: 1,
+		CPTCode:      "72148",
+		PreAuthRefs:  []string{"PA-abc123"},
 	})
 	if err != nil {
 		t.Fatalf("BuildPADecisionEOB: %v", err)

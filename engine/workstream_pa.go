@@ -7,12 +7,15 @@
 // sibling module with its own catalog; Layers 1-2 do not change.
 package engine
 
+import "net/http"
+
 // legSpec is the per-leg-type contract: the authority/transport literals that were
 // formerly passed positionally at each roundTrip call site (origination) and held
 // in the now-deleted inboundReqOp map (fulfillment). ReqFrame is the originator's authority frame
 // ("provider-tpo" for every PA leg today); RespFrame is the responder's. Op/RespOp
 // are the request/response authority operations. Scope is the policy-derived
-// min-necessary scope label (documentary; authz derives the real scope). Physics is
+// min-necessary scope label (documentary; authz derives the real scope, and the
+// network's lockstep conformance check pins this label to it). Physics is
 // the Layer-2 leg classification — recorded now, load-bearing later
 // (notification/async are headroom; no PA scenario exercises them).
 type legSpec struct {
@@ -40,7 +43,7 @@ type legSpec struct {
 var paCatalog = map[string]legSpec{
 	"coverage-eligibility": {
 		ReqFrame: "provider-tpo", RespFrame: "payer-coverage",
-		Op: "eligibility-inquiry", RespOp: "eligibility-response", Scope: "eligibility-scope",
+		Op: "eligibility-inquiry", RespOp: "eligibility-response", Scope: "eligibility-only",
 		Physics:  LegPhysics{Kind: KindRequestResponse, Effect: EffectReadOnly, Timing: TimingSync, Locality: LocalitySubstrate},
 		Contract: "",
 	},
@@ -112,4 +115,52 @@ var paCatalog = map[string]legSpec{
 		Physics:  LegPhysics{Kind: KindRequestResponse, Effect: EffectReadOnly, Timing: TimingSync, Locality: LocalitySubstrate},
 		Contract: "pa.pas",
 	},
+}
+
+// paRoutes are the PA workstream's participant-facing routes for role: the
+// provider's Da Vinci ingress, which carries its participant's own requests,
+// and the payer's Patient Access API.
+func (g *Gateway) paRoutes(role string) []mountedRoute {
+	var out []mountedRoute
+	route := func(pattern string, h http.HandlerFunc) {
+		out = append(out, mountedRoute{pattern: pattern, handler: h})
+	}
+	switch role {
+	case "provider":
+		if !g.cfg.IngressEnabled {
+			return nil
+		}
+		// Every ingress answer carries X-Correlation-Id and X-SHN-Leg-Id
+		// (correlationheader.go): the caller's trace value and the leg's id,
+		// settled before the handler runs.
+		route("GET /cds-services", g.withIngressCorrelation(g.handleCDSDiscovery))
+		route("POST /cds-services/{id}", g.ingressRoute(RouteCRD))
+		route("POST /Questionnaire/$questionnaire-package", g.ingressRoute(RouteDTR))
+		route("POST /Claim/$submit", g.ingressRoute(RoutePAS))
+		route("POST /Claim/$inquire", g.ingressRoute(RoutePASInquire))
+		// FR-37: the ingress edge's own CapabilityStatement (per-role
+		// statements — the payer's /metadata precedent).
+		route("GET /metadata", g.handleIngressMetadata)
+		if g.ingressAuth != nil {
+			route("POST /oauth/token", g.ingressAuth.handleToken)
+			route("GET /.well-known/smart-configuration", g.ingressAuth.handleSmartConfig)
+		}
+		if g.cfg.IngressBaseURL != "" {
+			// HRex 1.2.0 endpoint discovery:
+			// version-specific endpoint codes for the Da Vinci-facing edge.
+			route("GET /.well-known/davinci-configuration", g.handleDavinciConfiguration)
+		}
+	case "payer":
+		if g.cfg.PatientAccessOff {
+			return nil
+		}
+		// FR-28: CMS-0057 Patient Access API — conformant FHIR search + instance read
+		// over the decision EOB, gated by a patient-access authority token. Distinct
+		// from the sealed substrate legs. FR-37: the CapabilityStatement for this
+		// surface is published at the standard FHIR /metadata endpoint.
+		route("GET /metadata", g.handlePatientAccessMetadata)
+		route("GET /ExplanationOfBenefit", g.handlePatientAccessEOB)
+		route("GET /ExplanationOfBenefit/{id}", g.handlePatientAccessEOBByID)
+	}
+	return out
 }

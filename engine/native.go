@@ -69,6 +69,11 @@ type nativeResponder struct {
 	// forward at own line, never refuse (the same pre-contract tolerance the
 	// substrate filter applies).
 	declaredContractVersions []string
+	// requireSharedLine is the participant's opt-in (REQUIRE_SHARED_LINE,
+	// WithRequireSharedLine) to refusing a leg whose contract shares no line
+	// with declaredContractVersions. Unset, such a leg is forwarded as sent and
+	// recorded.
+	requireSharedLine bool
 	// ownContractVersions is THIS deployment's declared token set — the same
 	// SHN_CONTRACT_VERSIONS accessor the substrate filter, the published
 	// CapabilityStatements and the registry declaration read (D1a). It is the
@@ -227,6 +232,11 @@ func (n *nativeResponder) ConformanceLevelForTest() ConformanceEnforcement {
 // package; empty when none was declared.
 func (n *nativeResponder) EligibilityURLForTest() string { return n.eligibilityURL }
 
+// RequireSharedLineForTest reports whether the participant's REQUIRE_SHARED_LINE
+// reached this responder (WithRequireSharedLine), so the build that wires it
+// can be proven from another package.
+func (n *nativeResponder) RequireSharedLineForTest() bool { return n.requireSharedLine }
+
 // bindFindingEmitter receives the engine's finding emitter after engine.New
 // builds the gateway. It cannot be a NativeOption: NewNativeResponder runs
 // before engine.New, so no gateway exists when the options are applied.
@@ -315,6 +325,14 @@ func WithDeclaredContractVersions(tokens []string) NativeOption {
 	return func(n *nativeResponder) { n.declaredContractVersions = tokens }
 }
 
+// WithRequireSharedLine is the participant's opt-in to refusing, as routing,
+// a leg whose contract shares no line with the partner's declared tokens
+// (WithDeclaredContractVersions). Unset, such a leg is forwarded as sent and
+// recorded.
+func WithRequireSharedLine(on bool) NativeOption {
+	return func(n *nativeResponder) { n.requireSharedLine = on }
+}
+
 // WithOwnContractVersions supplies THIS deployment's declared contract tokens —
 // the "own" half of the foreign-peer filter, and the
 // sibling of WithDeclaredContractVersions, which supplies the PEER's half. Without
@@ -363,7 +381,7 @@ func (n *nativeResponder) ownDeclared() []string {
 	if len(n.ownContractVersions) > 0 {
 		return n.ownContractVersions
 	}
-	return shnsdk.SupportedContractVersions()
+	return DefaultContractVersions()
 }
 
 var _ LegResponder = (*nativeResponder)(nil)
@@ -580,6 +598,9 @@ func (n *nativeResponder) resolvedURL(ctx context.Context, contract, base, path 
 
 func (n *nativeResponder) Handle(ctx context.Context, leg, corrID, subjectPCI string, requestFHIR []byte) (LegResult, error) {
 	ctx = withResponderCorrelation(ctx, corrID)
+	// Its one forward to the payer's system is recorded, so a failure can say
+	// whether the system was asked.
+	exchangeOf(ctx).trackForward()
 	// Foreign-peer version filter: same rule as the
 	// substrate OriginateLeg filter, sourced from the operator's per-peer
 	// declaration instead of the registry. Refuse-before-forward: a refused
@@ -605,7 +626,17 @@ func (n *nativeResponder) Handle(ctx context.Context, leg, corrID, subjectPCI st
 		// D1a: the DECLARED set, not the library build constant — a deployment that
 		// declares 2.2 must be willing to forward to a 2.2-only partner.
 		own := n.ownDeclared()
-		if _, refused := selectContractToken(own, n.declaredContractVersions, true, contract); refused {
+		if _, refused := selectContractToken(own, n.declaredContractVersions, true, contract); refused && !n.requireSharedLine {
+			// No shared line: forwarded as sent by default, and recorded
+			// (linecarry.go). Only the participant's own setting refuses.
+			noteLineCarried(ctx, LineCarriedRequest, ObserverEvent{
+				Direction: "ingress", LegType: leg, CorrelationID: corrID, Counterpart: "partner Da Vinci endpoint",
+				Detail: "forwarded as sent; partner Da Vinci endpoint declares " +
+					declaredOrNone(sortedTokens(contract, contractLineSet(n.declaredContractVersions, contract))) +
+					"; this gateway speaks " + strings.Join(sortedTokens(contract, contractLineSet(own, contract)), ","),
+			})
+		} else if refused {
+			exchangeOf(ctx).refusing(RefusalRouting)
 			return LegResult{
 				Status: http.StatusUnprocessableEntity,
 				Message: (&RouteRefusalError{
@@ -1000,8 +1031,9 @@ func certifyCDSHooksAnswer(ctx context.Context, policy ConformancePolicy, emit f
 	// A repeated member name is message integrity (RuleDuplicateKey), refused at
 	// every level: an answer that can be read two ways cannot be carried
 	// faithfully.
-	if errors.Is(scanMessage(body), relay.ErrDuplicateKey) && guardDefect(ctx, policy, emit, KindNetwork, RuleDuplicateKey, VerdictInvalid, body) {
-		return LegResult{Status: http.StatusBadGateway, Message: "payer CRD response is not a valid CDS Hooks response: response.json"}
+	// The refusal names the repeated member and where, so the payer can fix it.
+	if dup, ok := repeatedMember(body); ok && guardDefect(ctx, policy, emit, KindNetwork, RuleDuplicateKey, VerdictInvalid, body) {
+		return LegResult{Status: http.StatusBadGateway, Message: "payer CRD response repeats " + dup + ": it can be read two ways, so it is not carried"}
 	}
 	if !policy.RunsKind(KindCDSEnvelope) {
 		return LegResult{}

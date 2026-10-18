@@ -120,6 +120,13 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 		writeJSON(w, pstatus, map[string]string{"error": pmsg})
 		return pendState{}, false
 	}
+	// The request's own facts, exactly as the request to this route states
+	// them; the builder refuses a required one it does not state.
+	claimIn, inOK := claimInputForOrder(w, r, res.srJSON)
+	if !inOK {
+		return pendState{}, false
+	}
+	claimFacts := claimIn.facts()
 	bundleJSON, err := buildAuthoredPASSubmit(route.BuildLine, shnsdk.ConformantClaimInputs{
 		QR: pasQR, SR: res.srJSON, Provider: pasProviderJSON, Coverage: res.coverage, Insurer: res.insurer, PatientRef: res.patientRef, CoverageRef: res.coverageRef, MemberID: res.member, MemberIDSystem: pasMemberSystem,
 		Corr: pasCorr, Created: g.cfg.Clock(),
@@ -127,9 +134,17 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 		AbsoluteRefs:     relaysReferencePayerBytes(g.cfg.OriginationProfile),
 		PayerOrgEntry:    relaysReferencePayerBytes(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
 		Payer:            res.payer,
+		PASClaimFacts:    claimFacts,
 	})
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build bundle failed: " + err.Error()})
+		pasBuildFailure(w, err, "build bundle failed: "+err.Error())
+		return pendState{}, false
+	}
+	// The submission the resume amendment restates, recorded off the bytes it
+	// built and pinned in the pend state.
+	submitted, err := recordPASSubmission(bundleJSON)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return pendState{}, false
 	}
 	// pasReports is the pended leg's own loss record: its Carried entries are
@@ -181,6 +196,7 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "expected pended response"})
 		return pendState{}, false
 	}
+	submitted.pend = pendedResp
 	needed := neededItemCodes(neededItems)
 	return pendState{
 		scenario:          scenario,
@@ -209,6 +225,8 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 		// so the resume leg can refuse a payload that no longer bears it. Empty
 		// for every flow this build originates today — see carriedEntriesFrom.
 		carriedEntries: carriedEntriesFrom(pasReports),
+		claimFacts:     claimFacts,
+		submitted:      submitted,
 	}, true
 }
 
@@ -269,17 +287,20 @@ func (g *Gateway) handleUC06(w http.ResponseWriter, r *http.Request) {
 		Answer string `json:"answer"`
 		NPI    string `json:"npi"`
 	}
+	r = ensureOriginationClaimInput(r)
 	if _, err := shnsdk.DecodeJSONBody(w, r, &body); err != nil && !errors.Is(err, io.EOF) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request"})
 		return
 	}
-	member, ok := g.scenarioMember(w, r, "MBR-UC06", "MBR-PD-UC06", "MBR-D-UC06")
+	member, ok := g.scenarioMember(w, r, "uc06")
 	if !ok {
 		return
 	}
 	r = r.WithContext(withFindingContext(r.Context(), findingContext{
 		LegType: "pas-claim", Seam: "originate", Whose: "own",
 	}))
+	// The single call resumes its own pend with an amendment in this request.
+	r = routeSendsAmendment(r)
 	st, ok := g.scenarioToPend(w, r, "uc06", member)
 	if !ok {
 		return
@@ -310,6 +331,12 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 	srRef, refOK := resourceRef(st.srJSON)
 	if !refOK {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "the member's open order carries no identity in the system of record"})
+		return false
+	}
+	// Everything the amendment's build needs from the resume request, read
+	// and checked before anything is built or sent.
+	amend, ok := g.resumeAmendmentOrFail(w, r, st)
+	if !ok {
 		return false
 	}
 	linkID := oswestryLinkID
@@ -368,19 +395,8 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 		return false
 	}
 	// UC-06: diagnosticReport=nil; the amended QR is the supplemental data.
-	// Resume RE-RUNS arm selection with the TARGET FIXED to the pin
-	// (selectResumeRoute): the amendment must answer
-	// the pend it references (the pended-pin rule), but the declared/lane
-	// sets may have grown since origination, so native reach can now beat a
-	// chain even at resume.
-	route, rerr := g.selectResumeRoute(st.pasToken, st.recipient, "pas-claim-update")
-	if rerr != nil {
-		if g.relayOriginationError(w, rerr) {
-			return false
-		}
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": rerr.Error()})
-		return false
-	}
+	// The route resumeAmendmentOrFail selected at the pin.
+	route := amend.route
 	targetLine := shnsdk.LineOf(route.Token)
 	pasQR, err := amendedSource.buildAtLine(st.pasDTRLine)
 	if err != nil {
@@ -408,9 +424,23 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 			AbsoluteRefs:     relaysReferencePayerBytes(g.cfg.OriginationProfile),
 			PayerOrgEntry:    relaysReferencePayerBytes(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
 			Payer:            st.payer,
+			// The amendment states the facts the resume request states, or —
+			// when it states none — the facts the pended submission's request
+			// stated (the requester's own earlier statement, pinned at
+			// run-to-PENDED); its certificationType is always the resume
+			// request's (the builder refuses one required and not stated). The
+			// prior Claim it restates is the recorded submission's, read off the
+			// bytes the submission built — never a constant; the infoChanged
+			// marker is derived from it by the builder.
+			PASClaimFacts:     amend.facts,
+			CertificationType: amend.certificationType,
+			PriorClaim:        st.submitted.prior,
+			// The payer's own pend: the amended QR is linked to the items it
+			// asks the QR for, and to no other.
+			Pend: st.submitted.pendFor(targetLine),
 		})
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build update bundle failed"})
+			pasBuildFailure(w, err, "build update bundle failed")
 			return nil, nil, true, nil
 		}
 		// Carry-intact guard: BEFORE the chain runs (pasStep2122Up's restore cannot itself tell
@@ -504,6 +534,7 @@ func (g *Gateway) handleUC07(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Answer string `json:"answer"`
 	}
+	r = ensureOriginationClaimInput(r)
 	if tooLarge, err := shnsdk.DecodeJSONBody(w, r, &body); err != nil && !errors.Is(err, io.EOF) {
 		if tooLarge {
 			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
@@ -512,13 +543,15 @@ func (g *Gateway) handleUC07(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request"})
 		return
 	}
-	member, ok := g.scenarioMember(w, r, "MBR-UC07", "MBR-PD-UC07", "MBR-D-UC07")
+	member, ok := g.scenarioMember(w, r, "uc07")
 	if !ok {
 		return
 	}
 	r = r.WithContext(withFindingContext(r.Context(), findingContext{
 		LegType: "pas-claim", Seam: "originate", Whose: "own",
 	}))
+	// The single call resumes its own pend with an amendment in this request.
+	r = routeSendsAmendment(r)
 	st, ok := g.scenarioToPend(w, r, "uc07", member)
 	if !ok {
 		return
@@ -548,6 +581,13 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 	srRef, refOK := resourceRef(st.srJSON)
 	if !refOK {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "the member's open order carries no identity in the system of record"})
+		return false
+	}
+	// Everything the amendment's build needs from the resume request, read
+	// and checked before anything is built or sent — before the patient-DTR
+	// exchange too, so a resume the amendment cannot be built for sends no leg.
+	amend, ok := g.resumeAmendmentOrFail(w, r, st)
+	if !ok {
 		return false
 	}
 	linkID := oswestryLinkID
@@ -626,19 +666,8 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 		writeJSON(w, status, map[string]string{"error": msg})
 		return false
 	}
-	// Resume RE-RUNS arm selection with the TARGET FIXED to the pin
-	// (selectResumeRoute): the amendment must answer
-	// the pend it references (the pended-pin rule), but the declared/lane
-	// sets may have grown since origination, so native reach can now beat a
-	// chain even at resume.
-	route, rerr := g.selectResumeRoute(st.pasToken, st.recipient, "pas-claim-update")
-	if rerr != nil {
-		if g.relayOriginationError(w, rerr) {
-			return false
-		}
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": rerr.Error()})
-		return false
-	}
+	// The route resumeAmendmentOrFail selected at the pin.
+	route := amend.route
 	targetLine := shnsdk.LineOf(route.Token)
 	pasQR, err := amendedSource.buildAtLine(st.pasDTRLine)
 	if err != nil {
@@ -666,9 +695,23 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 			AbsoluteRefs:     relaysReferencePayerBytes(g.cfg.OriginationProfile),
 			PayerOrgEntry:    relaysReferencePayerBytes(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
 			Payer:            st.payer,
+			// The amendment states the facts the resume request states, or —
+			// when it states none — the facts the pended submission's request
+			// stated (the requester's own earlier statement, pinned at
+			// run-to-PENDED); its certificationType is always the resume
+			// request's (the builder refuses one required and not stated). The
+			// prior Claim it restates is the recorded submission's, read off the
+			// bytes the submission built — never a constant; the infoChanged
+			// marker is derived from it by the builder.
+			PASClaimFacts:     amend.facts,
+			CertificationType: amend.certificationType,
+			PriorClaim:        st.submitted.prior,
+			// The payer's own pend: the amended QR is linked to the items it
+			// asks the QR for, and to no other.
+			Pend: st.submitted.pendFor(targetLine),
 		})
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build update bundle failed"})
+			pasBuildFailure(w, err, "build update bundle failed")
 			return nil, nil, true, nil
 		}
 		// The same pre-chain carry-intact guard completeClinician's sibling
@@ -763,7 +806,7 @@ type startResp struct {
 
 // handleUC06Start runs UC-06 to PENDED and parks it under a resume token.
 func (g *Gateway) handleUC06Start(w http.ResponseWriter, r *http.Request) {
-	member, ok := g.scenarioMember(w, r, "MBR-UC06", "MBR-PD-UC06", "MBR-D-UC06")
+	member, ok := g.scenarioMember(w, r, "uc06")
 	if !ok {
 		return
 	}
@@ -780,7 +823,7 @@ func (g *Gateway) handleUC06Start(w http.ResponseWriter, r *http.Request) {
 
 // handleUC07Start runs UC-07 to PENDED and parks it under a resume token.
 func (g *Gateway) handleUC07Start(w http.ResponseWriter, r *http.Request) {
-	member, ok := g.scenarioMember(w, r, "MBR-UC07", "MBR-PD-UC07", "MBR-D-UC07")
+	member, ok := g.scenarioMember(w, r, "uc07")
 	if !ok {
 		return
 	}
@@ -807,6 +850,7 @@ type resumeReq struct {
 // it parked so the operator can retry).
 func (g *Gateway) handleUC06Complete(w http.ResponseWriter, r *http.Request) {
 	var body resumeReq
+	r = ensureOriginationClaimInput(r)
 	if _, err := shnsdk.DecodeJSONBody(w, r, &body); err != nil && !errors.Is(err, io.EOF) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request"})
 		return
@@ -827,6 +871,7 @@ func (g *Gateway) handleUC06Complete(w http.ResponseWriter, r *http.Request) {
 // handleUC07Complete resumes a parked UC-07 PA with the patient's attestation.
 func (g *Gateway) handleUC07Complete(w http.ResponseWriter, r *http.Request) {
 	var body resumeReq
+	r = ensureOriginationClaimInput(r)
 	if _, err := shnsdk.DecodeJSONBody(w, r, &body); err != nil && !errors.Is(err, io.EOF) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request"})
 		return
@@ -848,6 +893,7 @@ func (g *Gateway) handleUC07Complete(w http.ResponseWriter, r *http.Request) {
 // demo just abandons it). Idempotent — dropping an absent token is still 200.
 func (g *Gateway) handleScenarioCancel(w http.ResponseWriter, r *http.Request) {
 	var body resumeReq
+	r = ensureOriginationClaimInput(r)
 	if _, err := shnsdk.DecodeJSONBody(w, r, &body); err != nil && !errors.Is(err, io.EOF) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request"})
 		return

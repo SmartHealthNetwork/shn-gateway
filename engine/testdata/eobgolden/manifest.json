@@ -1,0 +1,34 @@
+[
+  {
+    "name": "eob-approved.json",
+    "corrId": "approved",
+    "member": "BeneficiaryExample",
+    "request": "eob-approved.request.json",
+    "answer": "eob-approved.answer.json",
+    "eob": "eob-approved.json"
+  },
+  {
+    "name": "eob-pa-denied-uc08.json",
+    "corrId": "denied",
+    "member": "MBR-COVERED",
+    "request": "eob-pa-denied-uc08.request.json",
+    "answer": "eob-pa-denied-uc08.answer.json",
+    "eob": "eob-pa-denied-uc08.json"
+  },
+  {
+    "name": "synthetic-eob-pa-denied-carc.json",
+    "corrId": "denied-carc",
+    "member": "MBR-COVERED",
+    "request": "synthetic-eob-pa-denied-carc.request.json",
+    "answer": "synthetic-eob-pa-denied-carc.answer.json",
+    "eob": "synthetic-eob-pa-denied-carc.json"
+  },
+  {
+    "name": "synthetic-eob-approved-header-additem.json",
+    "corrId": "approved-header-additem",
+    "member": "BeneficiaryExample",
+    "request": "synthetic-eob-approved-header-additem.request.json",
+    "answer": "synthetic-eob-approved-header-additem.answer.json",
+    "eob": "synthetic-eob-approved-header-additem.json"
+  }
+]

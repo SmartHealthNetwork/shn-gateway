@@ -148,7 +148,7 @@ func TestPinnedFindingContext_CRDEgress(t *testing.T) {
 	env.originator.cfg.OriginationProfile = "demo"
 
 	rec := httptest.NewRecorder()
-	env.originator.handleUC02(rec, httptest.NewRequest(http.MethodPost, "/scenario/uc02", nil))
+	env.originator.handleUC02(rec, httptest.NewRequest(http.MethodPost, "/scenario/uc02", strings.NewReader(testRouteBody(env.originator, "/scenario/uc02", ""))))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("want 200, got %d body=%s", rec.Code, rec.Body.String())
@@ -179,7 +179,7 @@ func TestPinnedFindingContext_UC01EligibilityEgress(t *testing.T) {
 	env.payerReturns(LegResult{Response: testResponse([]byte(`{"resourceType":"CoverageEligibilityResponse"}`))})
 
 	rec := httptest.NewRecorder()
-	env.originator.handleScenario(rec, httptest.NewRequest(http.MethodPost, "/scenario/uc01", strings.NewReader(`{"branch":"covered"}`)))
+	env.originator.handleScenario(rec, httptest.NewRequest(http.MethodPost, "/scenario/uc01", strings.NewReader(testRouteBody(env.originator, "/scenario/uc01", `"branch":"covered"`))))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("want 200, got %d body=%s", rec.Code, rec.Body.String())
@@ -460,7 +460,7 @@ func TestPinnedFindingContext_DTRAndPAS(t *testing.T) {
 	gw.cfg.Validator = spy
 
 	rec := httptest.NewRecorder()
-	gw.handleUC04(rec, httptest.NewRequest(http.MethodPost, "/scenario/uc04", nil))
+	gw.handleUC04(rec, httptest.NewRequest(http.MethodPost, "/scenario/uc04", strings.NewReader(testRouteBody(gw, "/scenario/uc04", ""))))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("want 200, got %d body=%s", rec.Code, rec.Body.String())
 	}
@@ -694,7 +694,7 @@ func TestPinnedFindingContext_FederatedQueryIngress(t *testing.T) {
 	gw.cfg.Validator = spy
 
 	rec := httptest.NewRecorder()
-	gw.handleUC05(rec, httptest.NewRequest(http.MethodPost, "/scenario/uc05", nil))
+	gw.handleUC05(rec, httptest.NewRequest(http.MethodPost, "/scenario/uc05", strings.NewReader(testRouteBody(gw, "/scenario/uc05", ""))))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("want 200, got %d body=%s", rec.Code, rec.Body.String())
 	}

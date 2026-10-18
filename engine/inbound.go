@@ -30,6 +30,10 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 	// Every answer written below is this gateway's answer as the leg's
 	// recipient; refusals before the leg is known are checked as such.
 	w, scope := g.withScope(w, relay.RoleRecipient)
+	// Only the requester guard below may state that this gateway took no
+	// action on a leg (NotActedHeader); every other answer is stripped of it.
+	fence := &notActedFence{ResponseWriter: w}
+	w = fence
 	// Per-hop transport auth: verify the Hub's X-Hub-Assertion FIRST, header only,
 	// before the body is read or the envelope decoded — an unauthenticated caller
 	// never reaches the decoder. Sig + issuer pin ("hub") + audience (this holder)
@@ -151,6 +155,17 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 	}
 	r = withDiagnosticIdentity(r, env)
 	g.diagnosticStage(r.Context(), "leg.verified", env.Metadata.TransactionType, nil, 0, "")
+	// The answer is sealed to the requester's registered key, so a requester
+	// this gateway's registry does not hold yet cannot be answered. It is
+	// resolved here, before the leg is opened or any handler acts on it: a
+	// requester still unknown after one bounded refresh is refused, retryably,
+	// with nothing done (requester.go). Routing and addressing, the same at
+	// every conformance level.
+	if !g.requesterKnown(r.Context(), env.Metadata.Sender) {
+		x.refused(RefusalRouting)
+		refuseRequesterUnknown(w, fence)
+		return
+	}
 	// Request framing: decrypt ONCE here, then resolve this leg's
 	// ANSWER LINE before any handler runs — a framed request states the line the
 	// originator built at (honored iff native∩laned, else a legible 422), a bare
@@ -164,11 +179,22 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	g.diagnosticStage(r.Context(), "recipient.opened", env.Metadata.TransactionType, payload, 0, "")
-	body, answerTok, status, msg := g.unframeRequestFrom(env.Metadata.Sender, env.Metadata.TransactionType, payload)
+	body, answerTok, carried, status, msg := g.unframeRequestFrom(env.Metadata.Sender, env.Metadata.TransactionType, payload)
 	if status != 0 {
 		x.refusing(frameRefusalRule(status))
 		g.refuseInboundRequest(w, r, env, tok, status, msg)
 		return
+	}
+	// A responder that carries across lines on this leg raises the same event
+	// as the gateway does (linecarry.go).
+	r = r.WithContext(withLineObserver(r.Context(), g.observe))
+	if carried != "" {
+		// The request claims a line this gateway cannot answer at: carried to
+		// the participant and answered at the line a bare request gets.
+		noteLineCarried(r.Context(), LineCarriedRequest, ObserverEvent{
+			Direction: "ingress", LegType: env.Metadata.TransactionType, CorrelationID: env.Metadata.CorrelationID,
+			Counterpart: env.Metadata.Sender, Detail: "request claims " + boundedLine(carried) + "; answered at " + answeredAt(answerTok),
+		})
 	}
 	// The answer line rides the request context so the payer's content seam
 	// (LegResponder — a PUBLIC partner-implementable interface) can build at it
@@ -178,6 +204,11 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 	// to the library build constant (D1a).
 	x.line(shnsdk.LineOf(answerTok))
 	r = r.WithContext(withDeclaredContractVersions(withAnswerLine(r.Context(), answerTok), g.declaredContractVersions()))
+	if contract, line, ok := strings.Cut(answerTok, "@"); ok && line != "" {
+		r = r.WithContext(withAnswerCandidateLines(r.Context(), func(payload []byte) []string {
+			return g.answerCandidateLines(contract, line, payload)
+		}))
+	}
 	// The media type the sender framed for a FHIR request rides the context to
 	// the native forward (mediatype.go).
 	r = r.WithContext(withRequestMediaType(r.Context(), inboundFrameMediaType(payload)))
@@ -266,7 +297,9 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 	// the holder boundary for the (shared) validator. The Parse* helpers operate on
 	// un-$validate'd JSON and return errors (not panics) on malformed input, so a
 	// malformed payload fails closed with 400 before $validate — nothing leaks.
-	member, err := shnsdk.ParseEligibilityRequestMember(cerJSON)
+	// The member the request's patient names, in any reference form
+	// (patientref.go).
+	member, err := eligibilityRequestMember(cerJSON)
 	if err != nil {
 		g.refuseInbound(w, r, legEligibility, env, tok, answerTok, http.StatusBadRequest, "parse member failed", nil)
 		return
@@ -287,9 +320,13 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// H2a: bind the token's subject to the payload's patient. The token authorizes
-	// a specific PCI; resolving the CER's member must yield that same PCI. This
-	// stops a token authorizing patient A being paired with a payload for patient B.
+	// The payer answers about the member the request names, from its own
+	// records: a member they do not hold is its own answer (unknown member).
+	// A token naming another patient is carried, as on the prior-authorization
+	// legs: authority here is the operation's, no consent is checked, and the
+	// two sides' records may legitimately bind one person differently. The
+	// payer's binding is observed and named on the answer's involved list
+	// (noteSubjectBinding).
 	pci, _, found, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(r.Context(), member)
 	if g.refuseSoRFailure(w, r, legEligibility, env, tok, answerTok, readErr) {
 		return
@@ -298,11 +335,8 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 		g.refuseInbound(w, r, legEligibility, env, tok, answerTok, http.StatusBadRequest, refusalUnknownMember, nil)
 		return
 	}
-	if pci != tok.Subject {
-		exchangeOf(r.Context()).refusing(RefusalAuthority)
-		g.refuseInbound(w, r, legEligibility, env, tok, answerTok, http.StatusForbidden, "token subject does not match request patient", nil)
-		return
-	}
+	involvedCollectorFrom(ctx).bound(pci, true)
+	g.noteSubjectBinding(ctx, "coverage-eligibility", env.Metadata.CorrelationID, tok.Subject, pci)
 
 	// Only AFTER the subject binds is the request validated
 	// (validateEligibilityRequest).
@@ -374,7 +408,7 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 			return
 		}
 	}
-	crrJSON, err := shnsdk.BuildEligibilityResponse(env.Metadata.CorrelationID, boundPatientRef, inforce, reason, insurer, g.cfg.Clock())
+	crrJSON, err := shnsdk.BuildEligibilityResponseExact(env.Metadata.CorrelationID, boundPatientRef, inforce, reason, insurer, g.cfg.Clock())
 	if err != nil {
 		// Build/marshal fault (gateway's own) → 500, parity with today's
 		// StatusInternalServerError build-failure paths. NOT 502.
@@ -405,7 +439,7 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 	// !Valid answer is a 500, not a 422, and that distinction is the contract.
 	// Egress is unconditional by definition (R-8 is an ingress-only carve-out) — crrJSON
 	// here is always SHN-produced
-	// (shnsdk.BuildEligibilityResponse), so this was never in scope for the skip either way.
+	// (shnsdk.BuildEligibilityResponseExact), so this was never in scope for the skip either way.
 	egressValidator := g.validatorForContractLine(strings.SplitN(answerTok, "@", 2)[0], shnsdk.LineOf(answerTok))
 	// Routed through the choke point so an invalid egress response still emits
 	// its conformance finding. responseFHIR is THIS gateway's own built answer,
@@ -447,7 +481,7 @@ func (g *Gateway) validateEligibilityRequest(w http.ResponseWriter, r *http.Requ
 	// Unconditional on purpose, not an oversight — this is the PAYER'S side of the SAME
 	// eligibility exchange originate.go's two UC-01 sites
 	// cover; cerJSON here is the REQUEST the requesting gateway's own engine built
-	// (shnsdk.BuildEligibilityRequest — never a foreign relay, since only SHN gateways ever
+	// (shnsdk.BuildEligibilityRequestExact — never a foreign relay, since only SHN gateways ever
 	// originate a substrate leg), so it is SHN-produced on every lane and always validates.
 	ingressValidator := g.validatorForContractLine(strings.SplitN(answerTok, "@", 2)[0], shnsdk.LineOf(answerTok))
 	// Routed through the choke point so an invalid inbound request emits its
@@ -557,7 +591,8 @@ func (g *Gateway) forwardEligibilityInbound(w http.ResponseWriter, r *http.Reque
 // and structural record it unavailable and relay.
 func (g *Gateway) fenceEligibilityAnswer(ctx context.Context, responseFHIR []byte, member string) (int, string) {
 	if repeatsAMember(ctx, responseFHIR) {
-		return http.StatusForbidden, "response repeats a member name"
+		dup, _ := repeatedMember(responseFHIR)
+		return http.StatusForbidden, "response repeats " + dup + ": it can be read two ways, so it is not carried"
 	}
 	ref, err := ParseCoverageEligibilityResponsePatient(responseFHIR)
 	if errors.Is(err, errNoEligibilityPatientRef) {
@@ -613,25 +648,30 @@ func (g *Gateway) handleFederatedQueryInbound(w http.ResponseWriter, r *http.Req
 
 	// (4) Narrowness: parse + validate the query shape BEFORE any disclosure. A
 	// missing/disallowed type or absent patient fails here (no bulk, FR-26).
-	parsed, err := shnsdk.ParseCDexTaskDataRequest(queryJSON)
+	// Task.for and the query's patient are read in the relative form, so an
+	// absolute or contained reference names its patient as a relative one does
+	// (patientref.go).
+	parsed, err := shnsdk.ParseCDexTaskDataRequest(relativeCDexPatients(queryJSON))
 	if err != nil {
 		g.refuseInbound(w, r, legFederatedQuery, env, tok, answerTok, http.StatusForbidden, "query rejected: "+err.Error(), nil)
 		return
 	}
 
-	// (3) Bind the token subject to the queried patient.
+	// (3) Bind the token subject to the queried patient. The Authorization
+	// Framework checked consent for the token's patient, so a queried patient
+	// this facility cannot identify as that one is refused on consent at every
+	// level. One it does not hold reads the same as one that is someone else,
+	// so the refusal does not tell the requester whether the facility holds
+	// the queried patient.
 	member := strings.TrimPrefix(parsed.PatientRef, "Patient/")
 	pci, _, found, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(r.Context(), member)
-	if g.refuseSoRFailure(w, r, legFederatedQuery, env, tok, answerTok, readErr) {
+	if g.refuseUnreadableMember(w, r, legFederatedQuery, env, tok, answerTok, refusalPatientNotConsented, readErr) ||
+		g.refuseSoRFailure(w, r, legFederatedQuery, env, tok, answerTok, readErr) {
 		return
 	}
-	if !found {
-		g.refuseInbound(w, r, legFederatedQuery, env, tok, answerTok, http.StatusBadRequest, refusalUnknownMember, nil)
-		return
-	}
-	if pci != tok.Subject {
-		exchangeOf(r.Context()).refusing(RefusalAuthority)
-		g.refuseInbound(w, r, legFederatedQuery, env, tok, answerTok, http.StatusForbidden, "token subject does not match queried patient", nil)
+	if !found || pci != tok.Subject {
+		exchangeOf(r.Context()).refusing(RefusalConsent)
+		g.refuseInbound(w, r, legFederatedQuery, env, tok, answerTok, http.StatusForbidden, refusalPatientNotConsented, nil)
 		return
 	}
 
@@ -846,19 +886,23 @@ func (g *Gateway) handlePatientDTRInbound(w http.ResponseWriter, r *http.Request
 		return
 	}
 	// H2: bind the token subject to the patient the request names (the patient whose
-	// authorship the Trust surface is exercising).
+	// authorship the Trust surface is exercising). The PHG signs as that patient, so
+	// it must be the one the leg's authority names: any other is refused at every
+	// level. One the PHG does not hold reads the same as one that is someone else,
+	// so the refusal does not tell the requester whether the PHG holds the patient.
 	member := strings.TrimPrefix(req.PatientRef, "Patient/")
+	if member == "" {
+		g.refuseInbound(w, r, legPatientDTR, env, tok, answerTok, http.StatusBadRequest, refusalPatientDTRNoPatient, nil)
+		return
+	}
 	pci, _, found, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(r.Context(), member)
-	if g.refuseSoRFailure(w, r, legPatientDTR, env, tok, answerTok, readErr) {
+	if g.refuseUnreadableMember(w, r, legPatientDTR, env, tok, answerTok, refusalPatientNotAuthorized, readErr) ||
+		g.refuseSoRFailure(w, r, legPatientDTR, env, tok, answerTok, readErr) {
 		return
 	}
-	if !found {
-		g.refuseInbound(w, r, legPatientDTR, env, tok, answerTok, http.StatusBadRequest, refusalUnknownMember, nil)
-		return
-	}
-	if pci != tok.Subject {
+	if !found || pci != tok.Subject {
 		exchangeOf(r.Context()).refusing(RefusalAuthority)
-		g.refuseInbound(w, r, legPatientDTR, env, tok, answerTok, http.StatusForbidden, "token subject does not match patient", nil)
+		g.refuseInbound(w, r, legPatientDTR, env, tok, answerTok, http.StatusForbidden, refusalPatientNotAuthorized, nil)
 		return
 	}
 

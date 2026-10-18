@@ -36,6 +36,7 @@ RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/validator-verify.XXXXXXXX")"
 PREFIX="validator-verify-$(basename "${RUN_DIR}" | tr '[:upper:].' '[:lower:]-')"
 NET="${PREFIX}-net"
 OWNED=()
+BUILT=()
 BACKGROUND=()
 NETWORK_CREATED=0
 
@@ -60,6 +61,9 @@ cleanup_all() {
     for c in "${OWNED[@]}"; do docker rm -f "${c}" >/dev/null 2>&1 || true; done
   fi
   if [ "${NETWORK_CREATED}" = 1 ]; then docker network rm "${NET}" >/dev/null 2>&1 || true; fi
+  # The images this run built carry its own prefix and are used by nothing
+  # after it, so they go with it, by the exact tags it built.
+  if [ "${#BUILT[@]}" -gt 0 ]; then docker image rm "${BUILT[@]}" >/dev/null 2>&1 || true; fi
   rm -rf "${RUN_DIR}"
   exit "${ec}"
 }
@@ -77,11 +81,45 @@ fi
 docker network create --internal "${NET}" >/dev/null
 NETWORK_CREATED=1
 
+# assert_effective_heap IMAGE — the image keeps a 1 GiB maximum heap under both memory
+# shapes SHN's hosted validators run with: 4 GiB with no heap option, and 8 GiB with
+# JAVA_TOOL_OPTIONS=-Xmx1024m. It runs the image's own Java with its own environment,
+# so a base that sets a heap option, or a JVM whose ergonomics change, fails here. The
+# CPU count changes the collector, not the heap, so the check sets none.
+assert_effective_heap() {
+  local image="$1" shape mem env got host out="${RUN_DIR}/heap.txt"
+  host="$(docker info --format '{{.MemTotal}}')" || {
+    echo "FAIL: docker info could not read the Docker host's memory" >&2
+    return 1
+  }
+  # A limit at or above the host's memory is no limit: the JVM sizes from the host.
+  if [ "${host:-0}" -le "$((4 * 1024 * 1024 * 1024))" ]; then
+    echo "FAIL: the Docker host has ${host:-unknown} bytes of memory; measuring the 4 GiB lane shape needs more than 4 GiB" >&2
+    return 1
+  fi
+  for shape in "4g UNSET=" "8g JAVA_TOOL_OPTIONS=-Xmx1024m"; do
+    read -r mem env <<<"${shape}"
+    docker run --rm --network none --memory "${mem}" --env "${env}" \
+      --entrypoint java "${image}" -XX:+PrintFlagsFinal -version >"${out}" 2>&1 || {
+      echo "FAIL: ${image}: java -XX:+PrintFlagsFinal under ${mem} (${env}) did not run:" >&2
+      cat "${out}" >&2
+      return 1
+    }
+    got="$(awk '$2 == "MaxHeapSize" {print $4}' "${out}")"
+    if [ "${got}" != "1073741824" ]; then
+      echo "FAIL: ${image} under ${mem} (${env}): MaxHeapSize=${got:-unread}, want 1073741824 (the lanes' 1 GiB heap)" >&2
+      return 1
+    fi
+  done
+  echo "heap OK: ${image} keeps a 1 GiB MaxHeapSize under every lane's memory"
+}
+
 # build_line LINE IMAGE — builds the per-line sidecar image (network at BUILD
 # time only, for the IG package downloads baked into the image).
 build_line() {
   local line="$1" image="$2"
   echo "building ${image} (SHN_IG_LINE=${line})..."
+  BUILT+=("${image}")
   docker build --build-arg "SHN_IG_LINE=${line}" -t "${image}" "${DIR}"
   local base platform
   base="$(awk '/^FROM hapiproject\/hapi@/{print $2; exit}' "${DIR}/Dockerfile")"
@@ -406,14 +444,17 @@ run_lanes() {
 # take seconds), then the lanes run pipelined.
 # 2.0: unchanged default — build + probe, same bar as before the matrix.
 build_line 2.0 "${PREFIX}:2.0"
+assert_effective_heap "${PREFIX}:2.0"
 bash "${DIR}/verify-process.sh" "${PREFIX}:2.0"
 # 2.1: build asserted (proves the line's package set is baked correctly); probe
 # SKIPPED by default to keep this gate's wall-time bounded (three
 # offline-IG-indexing boots is the expensive part, not the build). Set
 # SHN_VALIDATOR_VERIFY_PROBE_2_1=1 to also probe it locally.
 build_line 2.1 "${PREFIX}:2.1"
+assert_effective_heap "${PREFIX}:2.1"
 # 2.2: the RI-facing line — build + probe, same bar as 2.0.
 build_line 2.2 "${PREFIX}:2.2"
+assert_effective_heap "${PREFIX}:2.2"
 
 LINES=(2.0)
 if [ "${SHN_VALIDATOR_VERIFY_PROBE_2_1:-0}" = "1" ]; then
@@ -425,4 +466,4 @@ LINES+=(2.2)
 
 run_lanes "${LINES[@]}"
 
-echo "VALIDATOR MATRIX OFFLINE VERIFY OK (2.0 + 2.2 probed; probe_2_1=${SHN_VALIDATOR_VERIFY_PROBE_2_1:-0}; strict_verdicts_through=100s; images=${PREFIX}:2.0|2.1|2.2)"
+echo "VALIDATOR MATRIX OFFLINE VERIFY OK (2.0 + 2.2 probed; probe_2_1=${SHN_VALIDATOR_VERIFY_PROBE_2_1:-0}; strict_verdicts_through=100s; images ${PREFIX}:2.0|2.1|2.2 removed on exit)"

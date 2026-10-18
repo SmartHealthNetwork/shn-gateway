@@ -296,6 +296,53 @@ func TestCertificationQualificationLogNamesHostAndReason(t *testing.T) {
 	}
 }
 
+// The qualification event names its line and state in a fixed form: a
+// deployment's readiness check reads it from the gateway's log to know when a
+// started gateway may certify a line, since nothing else states it. A
+// failure, then the success, each log once.
+func TestCertificationQualificationLogStatesLineAndState(t *testing.T) {
+	var out strings.Builder
+	var mu sync.Mutex
+	old := log.Writer()
+	log.SetOutput(writerFunc(func(p []byte) (int, error) { mu.Lock(); defer mu.Unlock(); return out.Write(p) }))
+	defer log.SetOutput(old)
+	var attempts int32
+	qualify := func(context.Context, string, string) error {
+		if atomic.AddInt32(&attempts, 1) < 3 {
+			return &net.DNSError{Err: "no such host", Name: "shn-validator-2-2", IsNotFound: true}
+		}
+		return nil
+	}
+	lane := NewDiscoveredLane("2.2", "http://shn-validator-2-2:8080/fhir", shnsdk.NewOperationValidator("http://shn-validator-2-2:8080/fhir"))
+	v := newFastGated(lane, qualify, "FHIR_CERTIFY_URL_2_2 and FHIR_VALIDATE_URL_2_2 are not configured")
+	waitQualified(t, v)
+	v.Close()
+	mu.Lock()
+	logged := out.String()
+	mu.Unlock()
+	type event struct {
+		Version int    `json:"version"`
+		Line    string `json:"line"`
+		State   string `json:"state"`
+	}
+	var events []event
+	for _, l := range strings.Split(logged, "\n") {
+		_, raw, ok := strings.Cut(l, "gateway: certification_lane_qualification ")
+		if !ok {
+			continue
+		}
+		var e event
+		if err := json.Unmarshal([]byte(raw), &e); err != nil {
+			t.Fatalf("not one JSON object after the event name: %q", l)
+		}
+		events = append(events, e)
+	}
+	want := []event{{1, "2.2", "failed"}, {1, "2.2", "ready"}}
+	if fmt.Sprint(events) != fmt.Sprint(want) {
+		t.Fatalf("events = %+v, want %+v (log %q)", events, want, logged)
+	}
+}
+
 type writerFunc func([]byte) (int, error)
 
 func (f writerFunc) Write(p []byte) (int, error) { return f(p) }

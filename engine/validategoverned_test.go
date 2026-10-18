@@ -280,7 +280,7 @@ func driveUC01EligibilityEgress(t *testing.T, marker string) (int, string, []Obs
 	env.originator.cfg.Validator = &shnsdk.FakeValidator{RejectIfContains: marker}
 	env.originator.cfg.NPI = marker
 	rec := httptest.NewRecorder()
-	env.originator.handleScenario(rec, httptest.NewRequest(http.MethodPost, "/scenario/uc01", strings.NewReader(`{"branch":"covered"}`)))
+	env.originator.handleScenario(rec, httptest.NewRequest(http.MethodPost, "/scenario/uc01", strings.NewReader(testRouteBody(env.originator, "/scenario/uc01", `"branch":"covered"`))))
 	return rec.Code, rec.Body.String(), events
 }
 
@@ -301,7 +301,7 @@ func driveEligibilityResponseIngress(t *testing.T, marker string) (int, string, 
 	crrJSON := []byte(`{"resourceType":"CoverageEligibilityResponse","marker":"` + marker + `"}`)
 	env.payerReturns(LegResult{Response: testResponse(crrJSON)})
 	rec := httptest.NewRecorder()
-	env.originator.handleScenario(rec, httptest.NewRequest(http.MethodPost, "/scenario/uc01", strings.NewReader(`{"branch":"covered"}`)))
+	env.originator.handleScenario(rec, httptest.NewRequest(http.MethodPost, "/scenario/uc01", strings.NewReader(testRouteBody(env.originator, "/scenario/uc01", `"branch":"covered"`))))
 	return rec.Code, rec.Body.String(), events
 }
 
@@ -319,6 +319,12 @@ func buildEligibilityInboundRequest(t *testing.T, gw *Gateway, cerJSON []byte, c
 	authzPub, authzPriv := genED25519(t)
 	gw.cfg.HubTransportPub = hubPub
 	gw.cfg.AuthzPub = authzPub
+	// The requester is a registered holder that does not decode message
+	// frames, so a refusal reaches it as a bare status (PARTICIPANT_PROTOCOL
+	// §6.2 step 9) — the status each migrated site is pinned at. An
+	// unregistered one is refused before the leg opens (requester.go).
+	reqEncPub, _ := genKeyPair(t)
+	gw.cfg.Reg.Set("requester", shnsdk.RegistryEntry{ID: "requester", Role: "provider", EncPub: reqEncPub})
 
 	const member = "MBR-COVERED"
 	pci, _, found := gw.cfg.SoR.ResolvePatient(member)

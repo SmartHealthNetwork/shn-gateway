@@ -16,7 +16,7 @@ func accessLineFor(r engine.ExchangeRecord) diagnostics.AccessLine {
 	line := diagnostics.AccessLine{
 		Time: r.Start.UTC(), CorrelationID: r.CorrelationID, Trace: r.Trace, CallID: r.CallID,
 		Direction: r.Direction, Route: r.Route, Exchange: r.Exchange, Operation: r.Operation,
-		ContractLine: r.ContractLine, Sender: r.Sender, Recipient: r.Recipient,
+		ContractLine: r.ContractLine, AnswerLine: r.AnswerLine, LineCarried: r.LineCarried, Sender: r.Sender, Recipient: r.Recipient,
 		RequestCiphertextHash: r.RequestCiphertextHash, ResponseCiphertextHash: r.ResponseCiphertextHash,
 		Outcome: r.Outcome, Status: r.Status, LatencyMs: r.Latency.Milliseconds(),
 		Findings:   diagnostics.AccessFindings{Count: r.Findings.Count, Refused: r.Findings.Refused, Kinds: r.Findings.Kinds, Deferred: r.Findings.Deferred},

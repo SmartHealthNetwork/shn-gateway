@@ -302,7 +302,7 @@ func TestPASWait_TheBoundIsReachable(t *testing.T) {
 // be given a different one without being told.
 func TestPASWaitOf_ReadsTheCallersBound(t *testing.T) {
 	waitFor := func(query string) (time.Duration, bool) {
-		return pasWaitOf(httptest.NewRequest(http.MethodPost, "/scenario/uc03"+query, nil))
+		return pasWaitOf(httptest.NewRequest(http.MethodPost, "/scenario/uc03"+query, strings.NewReader(testClaimBody(""))))
 	}
 	if d, ok := waitFor(""); !ok || d != PASWaitDefault {
 		t.Fatalf("absent = %v %v, want the route default", d, ok)
@@ -446,7 +446,7 @@ func TestOriginator_SubmitFollowReturnsPayerDecision(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			gw, _ := pasFollowSystem(t, tc.answer)
-			req := httptest.NewRequest(http.MethodPost, "/scenario/uc03", nil)
+			req := httptest.NewRequest(http.MethodPost, "/scenario/uc03", strings.NewReader(testOrderBody(pasFollowSubmit(0).orderJSON, "")))
 			out, status, msg, err := gw.submitClaimAndFollow(req.Context(), req, pasFollowSubmit(0))
 			if status != 0 || err != nil {
 				t.Fatalf("a payer determination is never an error return: %d %q %v", status, msg, err)
@@ -512,7 +512,7 @@ func TestOriginator_PendThenInquireApproved(t *testing.T) {
 	fastPASInquire(t)
 	gw, stub := pasFollowSystem(t, "pended")
 	stub.inquireAnswer = "approved"
-	req := httptest.NewRequest(http.MethodPost, "/scenario/uc03", nil)
+	req := httptest.NewRequest(http.MethodPost, "/scenario/uc03", strings.NewReader(testOrderBody(pasFollowSubmit(0).orderJSON, "")))
 
 	out, status, msg, err := gw.submitClaimAndFollow(req.Context(), req, pasFollowSubmit(PASWaitMax))
 	if status != 0 || err != nil {
@@ -548,7 +548,7 @@ func TestOriginator_PendThenInquireApproved(t *testing.T) {
 // would quietly run at its own line and pass.
 func TestOriginator_InquiryRunsAtTheLineTheSubmissionRanAt(t *testing.T) {
 	gw, stub := pasFollowSystem(t, "pended")
-	req := httptest.NewRequest(http.MethodPost, "/scenario/uc03", nil)
+	req := httptest.NewRequest(http.MethodPost, "/scenario/uc03", strings.NewReader(testOrderBody(pasFollowSubmit(0).orderJSON, "")))
 	out, status, msg, err := gw.submitClaimAndFollow(req.Context(), req, pasFollowSubmit(0))
 	if status != 0 || err != nil {
 		t.Fatalf("%d %q %v", status, msg, err)
@@ -676,7 +676,7 @@ func TestPAInquireRoute_ContinuesToTheDecision(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			gw, stub := pasFollowSystem(t, "pended")
-			req := httptest.NewRequest(http.MethodPost, "/scenario/uc03", nil)
+			req := httptest.NewRequest(http.MethodPost, "/scenario/uc03", strings.NewReader(testOrderBody(pasFollowSubmit(0).orderJSON, "")))
 			pend, status, msg, err := gw.submitClaimAndFollow(req.Context(), req, pasFollowSubmit(0))
 			if status != 0 || err != nil {
 				t.Fatalf("submit: %d %q %v", status, msg, err)
@@ -752,7 +752,7 @@ func TestPAInquireRoute_ContinuesToTheDecision(t *testing.T) {
 func TestPAInquireRoute_FollowsAStillPendedDecision(t *testing.T) {
 	fastPASInquire(t)
 	gw, stub := pasFollowSystem(t, "pended")
-	req := httptest.NewRequest(http.MethodPost, "/scenario/uc03", nil)
+	req := httptest.NewRequest(http.MethodPost, "/scenario/uc03", strings.NewReader(testRouteBody(gw, "/scenario/uc03", "")))
 	pend, status, msg, err := gw.submitClaimAndFollow(req.Context(), req, pasFollowSubmit(0))
 	if status != 0 || err != nil {
 		t.Fatalf("submit: %d %q %v", status, msg, err)
@@ -785,7 +785,7 @@ func TestPAInquireRoute_FollowsAStillPendedDecision(t *testing.T) {
 // since changed is REPORTED, and the inquiry is not sent.
 func TestPAInquireRoute_OrderChanged409(t *testing.T) {
 	gw, stub := pasFollowSystem(t, "pended")
-	req := httptest.NewRequest(http.MethodPost, "/scenario/uc03", nil)
+	req := httptest.NewRequest(http.MethodPost, "/scenario/uc03", strings.NewReader(testRouteBody(gw, "/scenario/uc03", "")))
 	out, status, msg, err := gw.submitClaimAndFollow(req.Context(), req, pasFollowSubmit(0))
 	if status != 0 || err != nil {
 		t.Fatalf("%d %q %v", status, msg, err)
@@ -934,7 +934,7 @@ func TestOriginator_InquiryNamesTheCoverageTheSubmissionCarried(t *testing.T) {
 		}
 		in := pasFollowSubmit(PASWaitMax)
 		in.coverage, in.insurer = submitted, insurer
-		req := httptest.NewRequest(http.MethodPost, "/scenario/uc03", nil)
+		req := httptest.NewRequest(http.MethodPost, "/scenario/uc03", strings.NewReader(testOrderBody(in.orderJSON, "")))
 		out, status, msg, err := gw.submitClaimAndFollow(req.Context(), req, in)
 		if status != 0 || err != nil {
 			t.Fatalf("%d %q %v", status, msg, err)
@@ -1379,9 +1379,9 @@ func (s *pasFollowStub) pasAnswer(kind, corrID string) ([]byte, error) {
 	patientRef := "Patient/" + pasFollowMember
 	switch kind {
 	case "approved":
-		return shnsdk.BuildClaimResponse("AUTH-FOLLOW-1", "2030-01-01", patientRef, corrID, s.clock())
+		return shnsdk.BuildClaimResponseExact("AUTH-FOLLOW-1", "2030-01-01", patientRef, corrID, testAnswerRequest, s.clock())
 	case "denied":
-		return shnsdk.BuildDeniedResponseAtLine(s.line, patientRef, corrID, "Conservative therapy is not documented.", s.clock())
+		return shnsdk.BuildDeniedResponseAtLineExact(s.line, patientRef, corrID, "Conservative therapy is not documented.", testAnswerRequest, s.clock())
 	case "pended":
 		return testPendedResponse(patientRef, corrID, "operative-diagnostic-report", s.clock())
 	}

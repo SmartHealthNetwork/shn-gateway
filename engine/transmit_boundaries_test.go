@@ -181,7 +181,7 @@ func TestBoundaryRequestToOwnSystemRefusesUnpermittedPayloads(t *testing.T) {
 			g, _ := newInboundTestGateway(t, true)
 			refused := &refusalCounter{}
 			g.cfg.Observer = refused.observe
-			if status, _ := g.responderFailure("pas-claim", err); status != http.StatusInternalServerError || refused.count() != 1 {
+			if status, _ := g.responderFailure(context.Background(), "pas-claim", err); status != http.StatusInternalServerError || refused.count() != 1 {
 				t.Fatalf("status %d, refusals observed %d", status, refused.count())
 			}
 		})

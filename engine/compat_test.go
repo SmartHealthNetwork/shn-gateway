@@ -87,14 +87,14 @@ func TestCompatManifestCoversAdjacentNativeSteps(t *testing.T) {
 			}
 		}
 	}
-	if !sawSingleLineContract {
-		t.Fatal("expected at least one single-line native contract (pa.pdex@2.1) to exercise the rowless-tolerance pin — did NativeContractVersions() change shape?")
+	// No native contract is single-line today: pa.pdex was, and no gateway
+	// declares it now (its decision EOB is base FHIR R4, not PDex). A contract
+	// that becomes native at one line is tolerated rowless by the loop above.
+	if sawSingleLineContract {
+		t.Fatalf("a single-line native contract appeared (%v): confirm it is meant to ride rowless, then update this pin", contracts)
 	}
-
-	// pa.pdex specifically, by name, per the brief's explicit callout.
-	pdexLines := nativeLinesForContract("pa.pdex")
-	if len(pdexLines) != 1 || pdexLines[0] != "2.1" {
-		t.Fatalf("pa.pdex: want exactly one native line (2.1), got %v", pdexLines)
+	if pdexLines := nativeLinesForContract("pa.pdex"); len(pdexLines) != 0 {
+		t.Fatalf("pa.pdex: want no native line (no gateway declares it), got %v", pdexLines)
 	}
 
 	for _, s := range compatManifest {
@@ -108,13 +108,13 @@ func TestCompatManifestCoversAdjacentNativeSteps(t *testing.T) {
 }
 
 // TestNativeContractVersionsSanity guards the premise the two tests above
-// build on: this package's understanding of shnsdk.NativeContractVersions()
+// build on: this package's understanding of NativeContractVersions()
 // tokens (contract@line grammar) still parses the way nativeContracts /
 // nativeLinesForContract assume.
 func TestNativeContractVersionsSanity(t *testing.T) {
-	toks := shnsdk.NativeContractVersions()
+	toks := NativeContractVersions()
 	if len(toks) == 0 {
-		t.Fatal("shnsdk.NativeContractVersions() returned nothing")
+		t.Fatal("NativeContractVersions() returned nothing")
 	}
 	for _, tok := range toks {
 		if shnsdk.LineOf(tok) == "" {

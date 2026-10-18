@@ -313,7 +313,7 @@ func TestCertificationTerminologyUnavailableIsOnlyTerminology(t *testing.T) {
 				// (the lane's own, from the 2.0 bundle it was asked at this line)
 				// leaves the no-match summaries counting too.
 				rows["a summary on an entry with a structural sibling"] = func(o outcomeIssues) outcomeIssues {
-					return append(o, outcomeIssues{all.find(t, "Validation_VAL_Profile_Minimum", "Claim.item.location[x]: minimum required = 1, but only found 0 (from http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claim|")}.clone(t)[0])
+					return append(o, outcomeIssues{all.find(t, "Validation_VAL_Profile_Minimum", "Claim.item.extension: minimum required = 2, but only found 1 (from http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claim|")}.clone(t)[0])
 				}
 				// The Claim's no-match summaries and the update profile's own
 				// requirement, with nothing on the entry the lane could not check:
@@ -467,7 +467,7 @@ func TestMissedCodingSystems(t *testing.T) {
 // attributed to that profile alone. The base is each lane's recorded answer to
 // its own line's request bundle (a submit, so the other profile is
 // profile-claim-update); the added issue is the lane's own
-// Claim.item.location[x] minimum attributed only to profile-claim-update (from
+// Claim.item.extension minimum attributed only to profile-claim-update (from
 // the 2.0 bundle it was asked at this line). Attributed to both profiles, the
 // same miss is the Claim's own and keeps the answer invalid.
 func TestCertificationClaimExceptionScope(t *testing.T) {
@@ -487,14 +487,14 @@ func TestCertificationClaimExceptionScope(t *testing.T) {
 				}
 			}
 			update := "(validating against http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claim-update|"
-			miss := outcomeIssues{all.find(t, "Validation_VAL_Profile_Minimum", "Claim.item.location[x]: minimum required = 1, but only found 0 (from http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claim-update|")}.clone(t)[0]
+			miss := outcomeIssues{all.find(t, "Validation_VAL_Profile_Minimum", "Claim.item.extension: minimum required = 2, but only found 1 (from http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claim-update|")}.clone(t)[0]
 			if d := issueDiagnostics(miss); strings.Count(d, "(validating against ") != 1 || !strings.Contains(d, update) {
 				t.Fatalf("the recorded miss is no longer attributed to profile-claim-update alone: %q", d)
 			}
 
 			got, unchecked := certifyAt(t, serveOutcome(t, append(base.clone(t), miss)), line, payload)
 			if got.State != "unavailable" || !unchecked {
-				t.Fatalf("the other profile's own location[x] minimum: %+v unchecked=%v, want unavailable", got, unchecked)
+				t.Fatalf("the other profile's own item.extension minimum: %+v unchecked=%v, want unavailable", got, unchecked)
 			}
 
 			both := outcomeIssues{miss}.clone(t)[0]

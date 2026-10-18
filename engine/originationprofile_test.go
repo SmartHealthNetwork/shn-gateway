@@ -4,10 +4,13 @@ import (
 	"fmt"
 	"go/ast"
 	"go/parser"
+	"go/printer"
 	"go/token"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -98,7 +101,7 @@ func TestOriginationProfiles_AreTheLanes(t *testing.T) {
 
 // originatingRoutes are the provider routes that build and send a request of this
 // gateway's own. TestScenarioRoutes_EveryRouteIsClassified keeps this list and
-// Handler's wiring the same.
+// the route declarations the same.
 var originatingRoutes = []string{
 	"POST /scenario/uc01",
 	"POST /scenario/uc02",
@@ -232,7 +235,7 @@ func TestOriginatingRoutes_RunOnEveryLane(t *testing.T) {
 			g, stub, counter, events := unsetProfileProvider(t, false)
 			g.cfg.OriginationProfile = profile
 			aimStubAt(t, stub, "MBR-D-UC03")
-			rec := serve(g, "POST /scenario/uc03", "")
+			rec := serve(g, "POST /scenario/uc03", testRouteBody(g, "/scenario/uc03", ""))
 			if strings.Contains(rec.Body.String(), "origination profile not set") {
 				t.Fatalf("%s: uc03 refused as unset: %d %s", profile, rec.Code, rec.Body.String())
 			}
@@ -271,16 +274,36 @@ var otherRoleRoutes = map[string][]string{
 	"phg":      {"POST /substrate/inbound"},
 }
 
-// Every route this package registers is registered in (*Gateway).Handler, under one
-// role, with a literal pattern, and is classified here. The whole package is parsed
-// (every non-test file): a Handle or HandleFunc call whose first argument is a string
-// literal anywhere outside Handler fails, and inside Handler the ServeMux may be passed
-// to Handle and HandleFunc only, so no helper can register routes on it. A provider
-// route counts as guarded only when its handler argument is a call to originates
-// (bound once, to requireOriginationProfile) or to g.requireOriginationProfile itself.
-// Every originating route is guarded; no other route is. A new route, however it is
-// written (Handle or HandleFunc, on one line or several, in any file), cannot join
-// either set silently.
+// Every route this package mounts is declared by one piece of the gateway for
+// a role (AI-G10) and is classified here, both by reading the source and by
+// running the declarations.
+//
+// By source (every non-test file of the package):
+//   - a Handle or HandleFunc call with a pattern and a handler fails anywhere
+//     outside (*Gateway).routes, and inside it the ServeMux is passed to
+//     HandleFunc once and to nothing else, so no helper mounts a route on it;
+//     Handler is exactly handlerBody, the routes mux served under the
+//     operation count, so it answers no path of its own;
+//   - routes mounts exactly the declarations coreRoutes, paRoutes and
+//     originationRoutes, each called with the role, and mountedRoute is named
+//     nowhere but its type, routes and those declarations;
+//   - requireOriginationProfile is called once in the package, by routes, on
+//     the routes declared as originating;
+//   - in a declaration every route pattern is a string literal, given to a
+//     local closure or as a mountedRoute's pattern, and it is declared
+//     originating (through a closure that builds originating routes, or
+//     originates: true) exactly when it is classified as originating; a
+//     declaration names no other string but a role and "", and reads no
+//     gateway state but the conditions routeConditions drives (routeGates).
+//
+// By running every declaration for every role, under every condition that
+// gates a route: every originating route is declared originating and no other
+// route is, a route a role mounts is declared once, each piece declares only
+// its own routes (the core its inbound, on-behalf building /scenario/*, the
+// PA adapter the rest), and every pattern a piece's source names is mounted
+// by that piece under some driven condition, so a route under a condition
+// this test does not drive fails it. A new route, however it is written,
+// cannot join either set silently.
 func TestScenarioRoutes_EveryRouteIsClassified(t *testing.T) {
 	fset := token.NewFileSet()
 	entries, err := os.ReadDir(".")
@@ -303,7 +326,182 @@ func TestScenarioRoutes_EveryRouteIsClassified(t *testing.T) {
 		t.Fatalf("parsed %d files; the package has more", len(files))
 	}
 
-	want := map[string]bool{} // "role pattern" -> guarded
+	declarations := map[string]string{"coreRoutes": "core", "paRoutes": "pa", "originationRoutes": "origination"}
+	originating := map[string]bool{}
+	for _, r := range originatingRoutes {
+		originating[r] = true
+	}
+	classified := map[string]bool{}
+	for _, r := range slices.Concat(originatingRoutes, localScenarioRoutes, providerOtherRoutes) {
+		classified[r] = true
+	}
+	for _, routes := range otherRoleRoutes {
+		for _, r := range routes {
+			classified[r] = true
+		}
+	}
+	gatewayFields := map[string]bool{}
+	for _, file := range files {
+		ast.Inspect(file, func(n ast.Node) bool {
+			if ts, ok := n.(*ast.TypeSpec); ok && ts.Name.Name == "Gateway" {
+				if st, ok := ts.Type.(*ast.StructType); ok {
+					for _, f := range st.Fields.List {
+						for _, id := range f.Names {
+							gatewayFields[id.Name] = true
+						}
+					}
+				}
+			}
+			return true
+		})
+	}
+	if !gatewayFields["cfg"] || !gatewayFields["ingressAuth"] {
+		t.Fatalf("the Gateway struct's fields were not found: %v", gatewayFields)
+	}
+
+	isRegistration := func(call *ast.CallExpr) bool {
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		return ok && (sel.Sel.Name == "Handle" || sel.Sel.Name == "HandleFunc") && len(call.Args) == 2
+	}
+	var literals []declaredRoute
+	routesFuncs, handlers, muxRegistrations, guards, mountLists := 0, 0, 0, 0, 0
+	mounted := map[string]bool{}
+	for _, file := range files {
+		for _, decl := range file.Decls {
+			fn, _ := decl.(*ast.FuncDecl)
+			method, recv := gatewayMethod(fn)
+			if method == "routes" {
+				routesFuncs++
+			}
+			if method == "Handler" {
+				handlers++
+				var body strings.Builder
+				if err := printer.Fprint(&body, fset, fn.Body); err != nil {
+					t.Fatal(err)
+				}
+				// Comments are not parsed; the blank lines they leave are dropped.
+				printed := body.String()
+				for strings.Contains(printed, "\n\n") {
+					printed = strings.ReplaceAll(printed, "\n\n", "\n")
+				}
+				if want := strings.ReplaceAll(handlerBody, "g.", recv+"."); printed != want {
+					t.Errorf("%s: Handler is not exactly the routes mux served under the operation count; declare a route instead of answering in it:\n%s", fset.Position(fn.Pos()), body.String())
+				}
+			}
+			if piece, ok := declarations[method]; ok {
+				literals = append(literals, readRouteDeclaration(t, fset, fn, recv, piece, gatewayFields)...)
+			}
+			var stack []ast.Node
+			ast.Inspect(decl, func(n ast.Node) bool {
+				if n == nil {
+					stack = stack[:len(stack)-1]
+					return true
+				}
+				stack = append(stack, n)
+				switch x := n.(type) {
+				case *ast.TypeSpec:
+					if x.Name.Name == "mountedRoute" {
+						// Its own name is not a use.
+						ast.Inspect(x.Type, func(m ast.Node) bool {
+							if id, ok := m.(*ast.Ident); ok && id.Name == "mountedRoute" {
+								t.Errorf("%s: mountedRoute names itself", fset.Position(id.Pos()))
+							}
+							return true
+						})
+						return false
+					}
+				case *ast.Ident:
+					if x.Name == "mountedRoute" && method != "routes" && declarations[method] == "" {
+						t.Errorf("%s: mountedRoute is named outside its type, routes and the route declarations", fset.Position(x.Pos()))
+					}
+				case *ast.SelectorExpr:
+					if x.Sel.Name == "requireOriginationProfile" {
+						if call, isCall := stack[len(stack)-2].(*ast.CallExpr); !isCall || call.Fun != x || method != "routes" {
+							t.Errorf("%s: requireOriginationProfile is used outside routes", fset.Position(x.Pos()))
+						}
+						guards++
+					}
+				case *ast.CompositeLit:
+					if method != "routes" {
+						break
+					}
+					outer, ok := x.Type.(*ast.ArrayType)
+					if !ok {
+						break
+					}
+					inner, ok := outer.Elt.(*ast.ArrayType)
+					if !ok {
+						break
+					}
+					if id, ok := inner.Elt.(*ast.Ident); !ok || id.Name != "mountedRoute" {
+						break
+					}
+					mountLists++
+					for _, elt := range x.Elts {
+						name, ok := declarationCall(elt, recv)
+						if !ok {
+							t.Errorf("%s: routes mounts something other than a declaration called with the role", fset.Position(elt.Pos()))
+							continue
+						}
+						mounted[name] = true
+					}
+				case *ast.CallExpr:
+					pos := fset.Position(x.Pos())
+					if method != "routes" {
+						if isRegistration(x) {
+							t.Errorf("%s: a route is mounted outside (*Gateway).routes", pos)
+						}
+						break
+					}
+					if isRegistration(x) {
+						muxRegistrations++
+						break
+					}
+					for _, a := range x.Args {
+						if id, ok := a.(*ast.Ident); ok && id.Name == "mux" {
+							t.Errorf("%s: routes passes its ServeMux to a call other than Handle or HandleFunc", pos)
+						}
+					}
+				}
+				return true
+			})
+		}
+	}
+	if routesFuncs != 1 || handlers != 1 {
+		t.Errorf("found %d (*Gateway).routes and %d (*Gateway).Handler methods, want 1 of each", routesFuncs, handlers)
+	}
+	if muxRegistrations != 1 {
+		t.Errorf("routes mounts through %d Handle/HandleFunc calls, want the one loop's", muxRegistrations)
+	}
+	if mountLists != 1 {
+		t.Errorf("routes builds %d lists of declarations, want one", mountLists)
+	}
+	if guards != 1 {
+		t.Errorf("requireOriginationProfile is called %d times in the package, want once (by routes)", guards)
+	}
+	for name := range declarations {
+		if !mounted[name] {
+			t.Errorf("routes does not mount the %s declaration", name)
+		}
+	}
+	for name := range mounted {
+		if declarations[name] == "" {
+			t.Errorf("routes mounts %s, which is not a classified declaration", name)
+		}
+	}
+	if len(literals) == 0 {
+		t.Fatal("no route pattern was read from the declarations")
+	}
+	for _, l := range literals {
+		switch {
+		case !classified[l.pattern]:
+			t.Errorf("%s: %s is declared but not classified (add it to a route list here)", l.pos, l.pattern)
+		case l.originates != originating[l.pattern]:
+			t.Errorf("%s: %s is declared originating=%v but classified originating=%v", l.pos, l.pattern, l.originates, originating[l.pattern])
+		}
+	}
+
+	want := map[string]bool{} // "role pattern" -> originates
 	for _, r := range originatingRoutes {
 		want["provider "+r] = true
 	}
@@ -315,156 +513,317 @@ func TestScenarioRoutes_EveryRouteIsClassified(t *testing.T) {
 			want[role+" "+r] = false
 		}
 	}
-
-	isGuard := func(e ast.Expr) bool {
-		call, ok := e.(*ast.CallExpr)
-		if !ok {
-			return false
-		}
-		switch fn := call.Fun.(type) {
-		case *ast.Ident:
-			return fn.Name == "originates"
-		case *ast.SelectorExpr:
-			return fn.Sel.Name == "requireOriginationProfile"
-		}
-		return false
-	}
-	isRoleSwitch := func(sw *ast.SwitchStmt) bool {
-		sel, ok := sw.Tag.(*ast.SelectorExpr)
-		return ok && sel.Sel.Name == "Role"
-	}
-	isGatewayHandler := func(fn *ast.FuncDecl) bool {
-		if fn == nil || fn.Name.Name != "Handler" || fn.Recv == nil || len(fn.Recv.List) != 1 {
-			return false
-		}
-		star, ok := fn.Recv.List[0].Type.(*ast.StarExpr)
-		if !ok {
-			return false
-		}
-		id, ok := star.X.(*ast.Ident)
-		return ok && id.Name == "Gateway"
-	}
-	isRegistration := func(call *ast.CallExpr) (string, bool) {
-		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok || (sel.Sel.Name != "Handle" && sel.Sel.Name != "HandleFunc") {
-			return "", false
-		}
-		return sel.Sel.Name, true
-	}
-	isStringLit := func(e ast.Expr) bool {
-		lit, ok := e.(*ast.BasicLit)
-		return ok && lit.Kind == token.STRING
-	}
-
 	got := map[string]bool{}
-	bindings, handlers := 0, 0
-	for _, file := range files {
-		var stack []ast.Node
-		ast.Inspect(file, func(n ast.Node) bool {
-			if n == nil {
-				stack = stack[:len(stack)-1]
-				return true
-			}
-			stack = append(stack, n)
-			var fn *ast.FuncDecl
-			for i := len(stack) - 1; i >= 0 && fn == nil; i-- {
-				fn, _ = stack[i].(*ast.FuncDecl)
-			}
-			inHandler := isGatewayHandler(fn)
-			if d, ok := n.(*ast.FuncDecl); ok && isGatewayHandler(d) {
-				handlers++
-			}
-			if as, ok := n.(*ast.AssignStmt); ok && inHandler {
-				for i, lhs := range as.Lhs {
-					if id, ok := lhs.(*ast.Ident); ok && id.Name == "originates" {
-						sel, ok := as.Rhs[i].(*ast.SelectorExpr)
-						if !ok || sel.Sel.Name != "requireOriginationProfile" {
-							t.Errorf("%s: originates is bound to something other than requireOriginationProfile", fset.Position(as.Pos()))
-						}
-						bindings++
+	produced := map[string]bool{} // "piece pattern"
+	for _, role := range []string{"provider", "payer", "facility", "phg"} {
+		for _, c := range everyRouteCondition() {
+			g := routeGateway(role, c)
+			seen := map[string]string{}
+			for piece, declared := range map[string][]mountedRoute{
+				"core": g.coreRoutes(role), "pa": g.paRoutes(role), "origination": g.originationRoutes(role),
+			} {
+				for _, rt := range declared {
+					key := role + " " + rt.pattern
+					if other, dup := seen[rt.pattern]; dup {
+						t.Errorf("%s under %s is declared by %s and %s", key, c, other, piece)
 					}
-				}
-			}
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			pos := fset.Position(call.Pos())
-			method, registers := isRegistration(call)
-			if !inHandler {
-				if registers && len(call.Args) > 0 && isStringLit(call.Args[0]) {
-					t.Errorf("%s: a route is registered outside (*Gateway).Handler", pos)
-				}
-				return true
-			}
-			if !registers {
-				for _, a := range call.Args {
-					if id, ok := a.(*ast.Ident); ok && id.Name == "mux" {
-						t.Errorf("%s: Handler passes its ServeMux to a call other than Handle or HandleFunc", pos)
+					seen[rt.pattern] = piece
+					produced[piece+" "+rt.pattern] = true
+					scenario := strings.Contains(rt.pattern, " /scenario/")
+					inbound := rt.pattern == "POST /substrate/inbound"
+					if (piece == "origination") != scenario || (piece == "core") != inbound {
+						t.Errorf("%s is declared by %s, which does not own it", key, piece)
 					}
-				}
-				return true
-			}
-			var roles []string
-			for i := len(stack) - 2; i > 1; i-- {
-				cc, ok := stack[i].(*ast.CaseClause)
-				if !ok {
-					continue
-				}
-				if sw, ok := stack[i-2].(*ast.SwitchStmt); ok && isRoleSwitch(sw) {
-					for _, e := range cc.List {
-						if lit, ok := e.(*ast.BasicLit); ok {
-							if v, err := strconv.Unquote(lit.Value); err == nil {
-								roles = append(roles, v)
-							}
-						}
+					if rt.handler == nil {
+						t.Errorf("%s is declared with no handler", key)
 					}
-					break
+					if prev, ok := got[key]; ok && prev != rt.originates {
+						t.Errorf("%s is originating under one condition and not under another", key)
+					}
+					got[key] = rt.originates
 				}
 			}
-			if len(roles) == 0 {
-				t.Errorf("%s: a route is registered outside the role switch", pos)
-				return true
-			}
-			if len(call.Args) != 2 {
-				t.Errorf("%s: %s with %d arguments", pos, method, len(call.Args))
-				return true
-			}
-			if !isStringLit(call.Args[0]) {
-				t.Errorf("%s: route pattern is not a string literal", pos)
-				return true
-			}
-			pattern, _ := strconv.Unquote(call.Args[0].(*ast.BasicLit).Value)
-			for _, role := range roles {
-				key := role + " " + pattern
-				if _, dup := got[key]; dup {
-					t.Errorf("%s: %s registered twice", pos, key)
-				}
-				got[key] = isGuard(call.Args[1])
-			}
-			return true
-		})
+		}
 	}
-	if handlers != 1 {
-		t.Errorf("found %d (*Gateway).Handler methods, want 1", handlers)
-	}
-	if bindings != 1 {
-		t.Errorf("originates is bound %d times in Handler, want once", bindings)
-	}
-	for key, guarded := range got {
+	for key, originates := range got {
 		w, listed := want[key]
 		switch {
 		case !listed:
-			t.Errorf("%s is registered but not classified (add it to a route list here)", key)
-		case w && !guarded:
-			t.Errorf("%s originates but is not wired through requireOriginationProfile", key)
-		case !w && guarded:
-			t.Errorf("%s does not originate but is wired through requireOriginationProfile", key)
+			t.Errorf("%s is declared but not classified (add it to a route list here)", key)
+		case w && !originates:
+			t.Errorf("%s originates but is not declared originating (mounted behind requireOriginationProfile)", key)
+		case !w && originates:
+			t.Errorf("%s does not originate but is declared originating", key)
 		}
 	}
 	for key := range want {
 		if _, ok := got[key]; !ok {
-			t.Errorf("%s is classified but Handler does not register it", key)
+			t.Errorf("%s is classified but no declaration mounts it", key)
+		}
+	}
+	for _, l := range literals {
+		if !produced[l.piece+" "+l.pattern] {
+			t.Errorf("%s: %s declares %s under a role or condition this test does not drive, or this test does not run the %s declaration", l.pos, l.piece, l.pattern, l.piece)
 		}
 	}
 }
+
+// declaredRoute is one route pattern a declaration's source names: the piece
+// that declares it, where, and whether it is declared originating.
+type declaredRoute struct {
+	piece, pattern, pos string
+	originates          bool
+}
+
+// routeRoles are the roles a route declaration may name; routeGates the
+// gateway state it may read (its own fields, and its config's), which are
+// the conditions routeGateway sets.
+var (
+	routeRoles      = map[string]bool{"provider": true, "payer": true, "facility": true, "phg": true}
+	routeGates      = map[string]bool{"cfg.IngressEnabled": true, "cfg.IngressBaseURL": true, "cfg.PatientAccessOff": true, "ingressAuth": true}
+	routePatternLit = regexp.MustCompile(`^(GET|POST|PUT|PATCH|DELETE) /`)
+)
+
+// readRouteDeclaration reads the route patterns a declaration's source names,
+// failing t on anything the classifier cannot read: a pattern that is not a
+// string literal, an originates value that is not a literal, a string that is
+// neither a pattern, a role nor "", or gateway state other than the gates.
+func readRouteDeclaration(t *testing.T, fset *token.FileSet, fn *ast.FuncDecl, recv, piece string, gatewayFields map[string]bool) []declaredRoute {
+	t.Helper()
+	at := func(n ast.Node) string { return fset.Position(n.Pos()).String() }
+	// closures are the declaration's local route builders, by name: whether
+	// the routes each builds are originating.
+	closures := map[string]bool{}
+	// consumed are the pattern literals read as a closure's argument or a
+	// mountedRoute's pattern.
+	consumed := map[*ast.BasicLit]bool{}
+	var out []declaredRoute
+	// routeLiteral reads one mountedRoute literal: its originates value, and
+	// its pattern, which is param inside a closure and a literal elsewhere.
+	routeLiteral := func(lit *ast.CompositeLit, param string) (originates bool) {
+		for _, e := range lit.Elts {
+			kv, ok := e.(*ast.KeyValueExpr)
+			if !ok {
+				t.Errorf("%s: a mountedRoute in %s is not written with field names", at(e), fn.Name.Name)
+				continue
+			}
+			key, _ := kv.Key.(*ast.Ident)
+			switch {
+			case key == nil:
+			case key.Name == "originates":
+				id, ok := kv.Value.(*ast.Ident)
+				if !ok || (id.Name != "true" && id.Name != "false") {
+					t.Errorf("%s: %s declares originates other than as a literal", at(kv.Value), fn.Name.Name)
+				}
+				originates = ok && id.Name == "true"
+			case key.Name == "pattern":
+				if param != "" {
+					if id, ok := kv.Value.(*ast.Ident); !ok || id.Name != param {
+						t.Errorf("%s: a route closure in %s builds a pattern other than its parameter", at(kv.Value), fn.Name.Name)
+					}
+					continue
+				}
+				bl, ok := kv.Value.(*ast.BasicLit)
+				if !ok || bl.Kind != token.STRING {
+					t.Errorf("%s: %s declares a route pattern that is not a string literal", at(kv.Value), fn.Name.Name)
+					continue
+				}
+				consumed[bl] = true
+			}
+		}
+		return originates
+	}
+	isRouteLit := func(n ast.Node) (*ast.CompositeLit, bool) {
+		lit, ok := n.(*ast.CompositeLit)
+		if !ok {
+			return nil, false
+		}
+		id, ok := lit.Type.(*ast.Ident)
+		return lit, ok && id.Name == "mountedRoute"
+	}
+	// The closures first, so a call to one is read wherever it appears.
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		as, ok := n.(*ast.AssignStmt)
+		if !ok || len(as.Lhs) != 1 || len(as.Rhs) != 1 {
+			return true
+		}
+		name, okName := as.Lhs[0].(*ast.Ident)
+		fl, okFn := as.Rhs[0].(*ast.FuncLit)
+		if !okName || !okFn {
+			return true
+		}
+		param := ""
+		if ps := fl.Type.Params.List; len(ps) > 0 && len(ps[0].Names) > 0 {
+			param = ps[0].Names[0].Name
+		}
+		builds := 0
+		ast.Inspect(fl.Body, func(m ast.Node) bool {
+			if lit, ok := isRouteLit(m); ok {
+				builds++
+				closures[name.Name] = routeLiteral(lit, param)
+			}
+			return true
+		})
+		if builds > 1 {
+			t.Errorf("%s: route closure %s builds %d routes, want one", at(as), name.Name, builds)
+		}
+		return true
+	})
+	var stack []ast.Node
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if n == nil {
+			stack = stack[:len(stack)-1]
+			return true
+		}
+		stack = append(stack, n)
+		switch x := n.(type) {
+		case *ast.FuncLit:
+			// A closure's body was read above.
+			if as, ok := stack[len(stack)-2].(*ast.AssignStmt); ok && len(as.Rhs) == 1 && as.Rhs[0] == x {
+				if id, ok := as.Lhs[0].(*ast.Ident); ok {
+					if _, isClosure := closures[id.Name]; isClosure {
+						stack = stack[:len(stack)-1]
+						return false
+					}
+				}
+			}
+		case *ast.CompositeLit:
+			// A mountedRoute literal, written with its type or as an element
+			// of a []mountedRoute.
+			lits := []*ast.CompositeLit{}
+			if lit, ok := isRouteLit(x); ok {
+				lits = append(lits, lit)
+			}
+			if arr, ok := x.Type.(*ast.ArrayType); ok {
+				if id, ok := arr.Elt.(*ast.Ident); ok && id.Name == "mountedRoute" {
+					for _, e := range x.Elts {
+						if el, ok := e.(*ast.CompositeLit); ok && el.Type == nil {
+							lits = append(lits, el)
+						}
+					}
+				}
+			}
+			for _, lit := range lits {
+				originates := routeLiteral(lit, "")
+				for _, e := range lit.Elts {
+					if kv, ok := e.(*ast.KeyValueExpr); ok {
+						if key, _ := kv.Key.(*ast.Ident); key != nil && key.Name == "pattern" {
+							if bl, ok := kv.Value.(*ast.BasicLit); ok {
+								v, _ := strconv.Unquote(bl.Value)
+								out = append(out, declaredRoute{piece: piece, pattern: v, pos: at(bl), originates: originates})
+							}
+						}
+					}
+				}
+			}
+		case *ast.CallExpr:
+			id, ok := x.Fun.(*ast.Ident)
+			if !ok {
+				break
+			}
+			originates, isClosure := closures[id.Name]
+			if !isClosure {
+				break
+			}
+			if len(x.Args) == 0 {
+				t.Errorf("%s: %s is called with no pattern", at(x), id.Name)
+				break
+			}
+			bl, ok := x.Args[0].(*ast.BasicLit)
+			if !ok || bl.Kind != token.STRING {
+				t.Errorf("%s: %s declares a route pattern that is not a string literal", at(x.Args[0]), fn.Name.Name)
+				break
+			}
+			consumed[bl] = true
+			v, _ := strconv.Unquote(bl.Value)
+			out = append(out, declaredRoute{piece: piece, pattern: v, pos: at(bl), originates: originates})
+		case *ast.BasicLit:
+			if x.Kind != token.STRING {
+				break
+			}
+			v, _ := strconv.Unquote(x.Value)
+			switch {
+			case routePatternLit.MatchString(v):
+				// Checked below: a pattern must be consumed.
+			case v != "" && !routeRoles[v]:
+				t.Errorf("%s: %s names %q, which is neither a route pattern, a role nor \"\"", at(x), fn.Name.Name, v)
+			}
+		case *ast.SelectorExpr:
+			// <recv>.<field> and <recv>.cfg.<field>: only the gates are read.
+			if r, ok := x.X.(*ast.Ident); ok && r.Name == recv && gatewayFields[x.Sel.Name] {
+				parent, _ := stack[len(stack)-2].(*ast.SelectorExpr)
+				switch {
+				case x.Sel.Name == "cfg" && (parent == nil || parent.X != x):
+					t.Errorf("%s: %s reads %s.cfg whole", at(x), fn.Name.Name, recv)
+				case x.Sel.Name != "cfg" && !routeGates[x.Sel.Name]:
+					t.Errorf("%s: %s reads %s.%s, which routeConditions does not drive", at(x), fn.Name.Name, recv, x.Sel.Name)
+				}
+			}
+			if inner, ok := x.X.(*ast.SelectorExpr); ok {
+				if r, ok := inner.X.(*ast.Ident); ok && r.Name == recv && inner.Sel.Name == "cfg" && !routeGates["cfg."+x.Sel.Name] {
+					t.Errorf("%s: %s reads %s.cfg.%s, which routeConditions does not drive", at(x), fn.Name.Name, recv, x.Sel.Name)
+				}
+			}
+		}
+		return true
+	})
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if bl, ok := n.(*ast.BasicLit); ok && bl.Kind == token.STRING {
+			if v, _ := strconv.Unquote(bl.Value); routePatternLit.MatchString(v) && !consumed[bl] {
+				t.Errorf("%s: %s names the pattern %s other than as a route closure's argument or a mountedRoute's pattern", at(bl), fn.Name.Name, v)
+			}
+		}
+		return true
+	})
+	return out
+}
+
+// gatewayMethod is fn's name and its receiver's name, when fn is a method of
+// *Gateway.
+func gatewayMethod(fn *ast.FuncDecl) (name, recv string) {
+	if fn == nil || fn.Recv == nil || len(fn.Recv.List) != 1 {
+		return "", ""
+	}
+	star, ok := fn.Recv.List[0].Type.(*ast.StarExpr)
+	if !ok {
+		return "", ""
+	}
+	if id, ok := star.X.(*ast.Ident); !ok || id.Name != "Gateway" {
+		return "", ""
+	}
+	if names := fn.Recv.List[0].Names; len(names) == 1 {
+		recv = names[0].Name
+	}
+	return fn.Name.Name, recv
+}
+
+// declarationCall is the name of the declaration e calls, when e is
+// <recv>.<name>(role).
+func declarationCall(e ast.Expr, recv string) (string, bool) {
+	call, ok := e.(*ast.CallExpr)
+	if !ok || len(call.Args) != 1 {
+		return "", false
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return "", false
+	}
+	r, ok := sel.X.(*ast.Ident)
+	arg, okArg := call.Args[0].(*ast.Ident)
+	if !ok || r.Name != recv || !okArg || arg.Name != "role" {
+		return "", false
+	}
+	return sel.Sel.Name, true
+}
+
+// handlerBody is (*Gateway).Handler's whole body: it takes the routes mux and
+// serves every request through it, counting the operation. Anything else it
+// did would answer a path no declaration classifies.
+const handlerBody = `{
+	mux := g.routes()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		done := g.operations.begin()
+		defer done()
+		mux.ServeHTTP(w, r)
+	})
+}`

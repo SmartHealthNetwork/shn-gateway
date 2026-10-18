@@ -45,7 +45,7 @@ func (s *noOrderSoR) SearchPatientContext(context.Context, string, string, ...Se
 func TestHandleUC02_ProviderData_NoSeededOrder_FailsClosed(t *testing.T) {
 	g := &Gateway{cfg: Config{OriginationProfile: "provider-data", SoR: &noOrderSoR{newCensusSoR()}}}
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/scenario/uc02", strings.NewReader("{}"))
+	req := httptest.NewRequest(http.MethodPost, "/scenario/uc02", strings.NewReader(testRouteBody(g, "/scenario/uc02", "")))
 	g.handleUC02(rec, req)
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("UC-02 provider-data, no seeded order: status=%d (%s), want 502 — must fail closed, never originate a literal order", rec.Code, rec.Body.String())

@@ -45,13 +45,13 @@ func TestBuildPASSubmitBundle_ByteParity(t *testing.T) {
 
 	t.Run("DeviceRequest (HomeOxygen) -> byte-identical, no infoChanged", func(t *testing.T) {
 		order := pasTailDeviceRequest()
-		got, err := buildPASSubmitBundle("2.0", true, order, qr, testRequestingProvider(), testMemberCoverage(member), testPayerOrganization(shnsdk.CMSPayerIdentity), shnsdk.MemberSystem, patientRef, coverageRef, member, corr, pasTailClock(), shnsdk.CMSPayerIdentity)
+		got, err := buildPASSubmitBundle("2.0", true, order, qr, testRequestingProvider(), testMemberCoverage(member), testPayerOrganization(shnsdk.CMSPayerIdentity), shnsdk.MemberSystem, patientRef, coverageRef, member, corr, pasTailClock(), shnsdk.CMSPayerIdentity, testClaimFacts())
 		if err != nil {
 			t.Fatalf("buildPASSubmitBundle: %v", err)
 		}
 		// The existing HomeOxygen path builds this EXACT call (relaysReferencePayerBytes(provider-data)=true,
 		// no InfoChanged set → default false).
-		want, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{Insurer: testPayerOrganization(shnsdk.CMSPayerIdentity), Coverage: testMemberCoverage(member),
+		want, err := shnsdk.BuildConformantClaimBundleExact(shnsdk.ConformantClaimInputs{PASClaimFacts: testClaimFacts(), Insurer: testPayerOrganization(shnsdk.CMSPayerIdentity), Coverage: testMemberCoverage(member),
 			Provider:       testRequestingProvider(),
 			MemberIDSystem: shnsdk.MemberSystem,
 			QR:             qr, SR: order, PatientRef: patientRef, CoverageRef: coverageRef, MemberID: member,
@@ -72,11 +72,11 @@ func TestBuildPASSubmitBundle_ByteParity(t *testing.T) {
 
 	t.Run("ServiceRequest single-shot -> byte-identical, no infoChanged", func(t *testing.T) {
 		order := pasTailServiceRequest()
-		got, err := buildPASSubmitBundle("2.0", true, order, qr, testRequestingProvider(), testMemberCoverage(member), testPayerOrganization(shnsdk.CMSPayerIdentity), shnsdk.MemberSystem, patientRef, coverageRef, member, corr, pasTailClock(), shnsdk.CMSPayerIdentity)
+		got, err := buildPASSubmitBundle("2.0", true, order, qr, testRequestingProvider(), testMemberCoverage(member), testPayerOrganization(shnsdk.CMSPayerIdentity), shnsdk.MemberSystem, patientRef, coverageRef, member, corr, pasTailClock(), shnsdk.CMSPayerIdentity, testClaimFacts())
 		if err != nil {
 			t.Fatalf("buildPASSubmitBundle: %v", err)
 		}
-		want, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{Insurer: testPayerOrganization(shnsdk.CMSPayerIdentity), Coverage: testMemberCoverage(member),
+		want, err := shnsdk.BuildConformantClaimBundleExact(shnsdk.ConformantClaimInputs{PASClaimFacts: testClaimFacts(), Insurer: testPayerOrganization(shnsdk.CMSPayerIdentity), Coverage: testMemberCoverage(member),
 			Provider:       testRequestingProvider(),
 			MemberIDSystem: shnsdk.MemberSystem,
 			QR:             qr, SR: order, PatientRef: patientRef, CoverageRef: coverageRef, MemberID: member,
@@ -103,11 +103,11 @@ func TestBuildPASSubmitBundle_ByteParity(t *testing.T) {
 		// it is what keeps a lane that does NOT relay reference-payer bytes byte-identical — this
 		// row pins that the SHN-native shape it would produce keeps its pre-existing bytes.
 		order := pasTailServiceRequest()
-		got, err := buildPASSubmitBundle("2.0", false, order, qr, testRequestingProvider(), testMemberCoverage(member), testPayerOrganization(shnsdk.CMSPayerIdentity), shnsdk.MemberSystem, patientRef, coverageRef, member, corr, pasTailClock(), shnsdk.CMSPayerIdentity)
+		got, err := buildPASSubmitBundle("2.0", false, order, qr, testRequestingProvider(), testMemberCoverage(member), testPayerOrganization(shnsdk.CMSPayerIdentity), shnsdk.MemberSystem, patientRef, coverageRef, member, corr, pasTailClock(), shnsdk.CMSPayerIdentity, testClaimFacts())
 		if err != nil {
 			t.Fatalf("buildPASSubmitBundle: %v", err)
 		}
-		want, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{Coverage: testMemberCoverage(member), Insurer: testPayerOrganization(shnsdk.CMSPayerIdentity),
+		want, err := shnsdk.BuildConformantClaimBundleExact(shnsdk.ConformantClaimInputs{PASClaimFacts: testClaimFacts(), Coverage: testMemberCoverage(member), Insurer: testPayerOrganization(shnsdk.CMSPayerIdentity),
 			Provider:       testRequestingProvider(),
 			MemberIDSystem: shnsdk.MemberSystem,
 			QR:             qr, SR: order, PatientRef: patientRef, CoverageRef: coverageRef, MemberID: member,
@@ -128,7 +128,7 @@ func TestBuildPASSubmitBundle_ByteParity(t *testing.T) {
 // extension code, NOT category.text). This is the resolution-site check submitClaimAndFollow
 // reuses.
 func TestClassifyResolution_RealA1(t *testing.T) {
-	a1, err := shnsdk.BuildClaimResponse("AUTH-A1-1", "2030-01-01", "Patient/MBR-OX", "corr-a1", pasTailClock())
+	a1, err := shnsdk.BuildClaimResponseExact("AUTH-A1-1", "2030-01-01", "Patient/MBR-OX", "corr-a1", testAnswerRequest, pasTailClock())
 	if err != nil {
 		t.Fatalf("BuildClaimResponse: %v", err)
 	}

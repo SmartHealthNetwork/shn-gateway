@@ -108,10 +108,65 @@ func TestResponderFailure_TimeoutIsA504(t *testing.T) {
 		"no usable answer":       {&upstreamFailure{err: errors.New("x"), sent: true}, http.StatusBadGateway, errUpstreamNoUsableAnswer},
 		"not reached":            {&upstreamFailure{err: errors.New("x")}, http.StatusBadGateway, errUpstreamNotReached},
 	} {
-		if status, msg := g.responderFailure("crd-order-select", row.err); status != row.status || msg != row.msg {
+		if status, msg := g.responderFailure(context.Background(), "crd-order-select", row.err); status != row.status || msg != row.msg {
 			t.Errorf("%s: %d %q, want %d %q", name, status, msg, row.status, row.msg)
 		}
 	}
+}
+
+// The payer's gateway's own failure says whether the request had been
+// forwarded to the payer's system, which then may have acted on it. Only the
+// built-in native responder, answering the leg itself, knows: a connector,
+// one wrapping it included, may call its system on its own, and an exchange
+// with no record cannot tell.
+func TestResponderOwnFailureSaysWhetherTheSystemWasAsked(t *testing.T) {
+	const (
+		before  = "the payer's gateway failed before forwarding this request to the payer's system"
+		after   = "the payer's gateway failed after forwarding this request to the payer's system, which may have acted on it: check its outcome before resending"
+		unknown = "the payer's gateway failed, and whether the payer's system received this request is not known: check its outcome before resending"
+	)
+	native := NewNativeResponder(http.DefaultClient, "http://payer.invalid", "shn-order-select", nil, fixedClock)
+	fail := func(t *testing.T, responder LegResponder, x *exchangeRecorder) string {
+		t.Helper()
+		ctx := context.Background()
+		if x != nil {
+			ctx = context.WithValue(ctx, exchangeRecorderKey{}, x)
+		}
+		// A leg the responder does not know fails before anything is sent.
+		_, err := responder.Handle(ctx, "no-such-leg", "corr-1", "pci-1", []byte(`{}`))
+		if err == nil {
+			t.Fatal("an unknown leg did not fail")
+		}
+		status, msg := (&Gateway{cfg: Config{Responder: responder}}).responderFailure(ctx, "no-such-leg", err)
+		if status != http.StatusInternalServerError {
+			t.Fatalf("status %d", status)
+		}
+		return msg
+	}
+	if got := fail(t, native, &exchangeRecorder{}); got != before {
+		t.Errorf("the native responder, before its forward: %q, want %q", got, before)
+	}
+	if got := fail(t, wrappingResponder{native}, &exchangeRecorder{}); got != unknown {
+		t.Errorf("a connector wrapping it: %q, want %q", got, unknown)
+	}
+	if got := fail(t, native, nil); got != unknown {
+		t.Errorf("no record: %q, want %q", got, unknown)
+	}
+	// After the forward: the native responder's own record of it.
+	forwarded := &exchangeRecorder{}
+	forwarded.trackForward()
+	forwarded.backend(200, 0, "")
+	ctx := context.WithValue(context.Background(), exchangeRecorderKey{}, forwarded)
+	if _, msg := (&Gateway{cfg: Config{Responder: native}}).responderFailure(ctx, "pas-claim", errors.New("mapping the answer failed")); msg != after {
+		t.Errorf("after the forward: %q, want %q", msg, after)
+	}
+}
+
+// wrappingResponder is a connector that wraps the native responder.
+type wrappingResponder struct{ inner LegResponder }
+
+func (w wrappingResponder) Handle(ctx context.Context, leg, corrID, subjectPCI string, requestFHIR []byte) (LegResult, error) {
+	return w.inner.Handle(ctx, leg, corrID, subjectPCI, requestFHIR)
 }
 
 // forwardOnce posts one CRD hook through n inside a recorded inbound exchange
@@ -181,7 +236,7 @@ func TestBackendDeadline_SlowTokenIsATimeout(t *testing.T) {
 	if !errors.As(err, &up) || !up.timedOut || up.sent {
 		t.Fatalf("%v, want a timeout before the request was sent", err)
 	}
-	if status, msg := (&Gateway{}).responderFailure("crd-order-select", err); status != http.StatusGatewayTimeout || msg != errUpstreamNotReachedInTime {
+	if status, msg := (&Gateway{}).responderFailure(context.Background(), "crd-order-select", err); status != http.StatusGatewayTimeout || msg != errUpstreamNotReachedInTime {
 		t.Fatalf("answered %d %q", status, msg)
 	}
 	if rec.Backend == nil || rec.Backend.ErrorClass != BackendTimeout {
@@ -235,7 +290,7 @@ func TestBackendDeadline_SpentBeforeTheCallIsNotThePayers(t *testing.T) {
 	if rec.Backend != nil || rec.BackendCalls != 0 {
 		t.Fatalf("backend %+v in %d calls, want none", rec.Backend, rec.BackendCalls)
 	}
-	if status, msg := (&Gateway{}).responderFailure("crd-order-select", err); status != http.StatusGatewayTimeout || msg != errDeadlineSpent {
+	if status, msg := (&Gateway{}).responderFailure(context.Background(), "crd-order-select", err); status != http.StatusGatewayTimeout || msg != errDeadlineSpent {
 		t.Fatalf("answered %d %q", status, msg)
 	}
 }

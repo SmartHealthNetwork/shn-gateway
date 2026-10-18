@@ -479,8 +479,11 @@ func TestInvolvedCollector_NamesADifferingPayerBinding(t *testing.T) {
 	if involvedCollectorFrom(ctx) != nil {
 		t.Fatal("no collector when the Hub does not read the list")
 	}
-	if involvedCollectorFrom(g.withInvolvedCollector(context.Background(), "coverage-eligibility")) != nil {
-		t.Fatal("no collector on a leg that is not a prior-authorization leg")
+	if involvedCollectorFrom(g.withInvolvedCollector(context.Background(), "coverage-eligibility")) == nil {
+		t.Fatal("no collector on eligibility, whose answer names the payer's binding")
+	}
+	if involvedCollectorFrom(g.withInvolvedCollector(context.Background(), "federated-query")) != nil {
+		t.Fatal("a collector on a leg whose answer names no payer binding")
 	}
 	off.noteSubjectBinding(ctx, "pas-claim", "corr-1", "pci:token", held) // nil-safe
 }

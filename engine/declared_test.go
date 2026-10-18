@@ -4,8 +4,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-
-	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
 // TestForwardedContracts pins the contracts a payer's native responder
@@ -22,25 +20,27 @@ func TestForwardedContracts(t *testing.T) {
 }
 
 // TestDeriveDeclaredContractVersions: a payer whose own system
-// declares its versions declares those lines for every forwarded contract,
-// plus the build default's pa.pdex line, in native order.
+// declares its versions declares those lines for every forwarded contract, in
+// native order, and nothing else: the build default adds no pa.pdex line, even
+// when the payer's own system names one.
 func TestDeriveDeclaredContractVersions(t *testing.T) {
-	pdex := shnsdk.ContractPAPDex21
 	for _, tc := range []struct {
 		name    string
 		backend []string
 		want    []string
 	}{
 		{"a 2.2 system", []string{"pa.crd@2.2", "pa.dtr@2.2", "pa.pas@2.2"},
-			[]string{"pa.crd@2.2", "pa.dtr@2.2", "pa.pas@2.2", pdex}},
+			[]string{"pa.crd@2.2", "pa.dtr@2.2", "pa.pas@2.2"}},
 		{"order, repeats and spaces do not matter", []string{" pa.pas@2.2", "pa.crd@2.2", "pa.pas@2.2", "pa.dtr@2.2 "},
-			[]string{"pa.crd@2.2", "pa.dtr@2.2", "pa.pas@2.2", pdex}},
+			[]string{"pa.crd@2.2", "pa.dtr@2.2", "pa.pas@2.2"}},
 		{"several lines", []string{"pa.pas@2.2", "pa.pas@2.0", "pa.crd@2.0"},
-			[]string{"pa.crd@2.0", "pa.pas@2.0", "pa.pas@2.2", pdex}},
+			[]string{"pa.crd@2.0", "pa.pas@2.0", "pa.pas@2.2"}},
 		{"a partial system declares only what it speaks", []string{"pa.pas@2.1"},
-			[]string{"pa.pas@2.1", pdex}},
+			[]string{"pa.pas@2.1"}},
 		{"another contract's token is not a forwarded line", []string{"pa.pas@2.0", "pa.pdex@9.9", "x.y@1"},
-			[]string{"pa.pas@2.0", pdex}},
+			[]string{"pa.pas@2.0"}},
+		{"a system's own PDex line is not declared", []string{"pa.crd@2.0", "pa.dtr@2.0", "pa.pas@2.0", "pa.pdex@2.1"},
+			[]string{"pa.crd@2.0", "pa.dtr@2.0", "pa.pas@2.0"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := DeriveDeclaredContractVersions(tc.backend)
@@ -84,10 +84,10 @@ func TestDeriveDeclaredContractVersions_Refuses(t *testing.T) {
 // TestRequireForwardedContractLine: a declaration with no CRD, DTR or PAS
 // line is refused; one with any is not.
 func TestRequireForwardedContractLine(t *testing.T) {
-	if err := RequireForwardedContractLine([]string{shnsdk.ContractPAPDex21}); err == nil || !strings.Contains(err.Error(), "no CRD, DTR or PAS line") {
+	if err := RequireForwardedContractLine([]string{"pa.pdex@2.1"}); err == nil || !strings.Contains(err.Error(), "no CRD, DTR or PAS line") {
 		t.Fatalf("pdex-only declaration: err = %v", err)
 	}
-	for _, ok := range [][]string{shnsdk.SupportedContractVersions(), {"pa.dtr@2.2"}, {" pa.crd@2.0", "pa.pdex@2.1"}} {
+	for _, ok := range [][]string{DefaultContractVersions(), {"pa.dtr@2.2"}, {" pa.crd@2.0", "pa.pdex@2.1"}} {
 		if err := RequireForwardedContractLine(ok); err != nil {
 			t.Fatalf("%q refused: %v", ok, err)
 		}

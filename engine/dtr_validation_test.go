@@ -140,7 +140,7 @@ func TestDTRResumeValidationAndRefusals(t *testing.T) {
 				gw.cfg.Validator = NewLineFakeValidator("2.0")
 				gw.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"2.0": NewLineFakeValidator("2.0"), "2.2": recorder}
 				before := httptest.NewRecorder()
-				request := httptest.NewRequest(http.MethodPost, "/scenario/"+scenario, nil)
+				request := httptest.NewRequest(http.MethodPost, "/scenario/"+scenario, strings.NewReader(testStatedBody(gw, opts.member, "", false)))
 				st, ok := gw.scenarioToPend(before, request, scenario, opts.member)
 				if !ok {
 					t.Fatalf("pend: %d %s", before.Code, before.Body.String())
@@ -163,8 +163,15 @@ func TestDTRResumeValidationAndRefusals(t *testing.T) {
 				if strings.Contains(mode, "rejection") {
 					want = 422
 				}
-				if mode == "validator outage" || mode == "missing lane" {
+				if mode == "validator outage" {
 					want = 500
+				}
+				if mode == "missing lane" {
+					// Without the pinned line's lane the amendment has no route:
+					// the resume refuses that (422, the route refusal) before it
+					// builds, validates or sends anything — the UC-07 patient-DTR
+					// exchange included.
+					want = 422
 				}
 				if mode == "target missing" {
 					want = 422
@@ -219,7 +226,7 @@ func TestDTRResumeIndependentPinsAndRefusals(t *testing.T) {
 				original := &dtrRecordingValidator{base: shnsdk.NewFakeValidator()}
 				target := &dtrRecordingValidator{base: shnsdk.NewFakeValidator()}
 				gw.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"2.0": original, "2.2": target}
-				request := httptest.NewRequest(http.MethodPost, "/scenario/"+scenario, nil)
+				request := httptest.NewRequest(http.MethodPost, "/scenario/"+scenario, strings.NewReader(testStatedBody(gw, opts.member, "", false)))
 				before := httptest.NewRecorder()
 				st, ok := gw.scenarioToPend(before, request, scenario, opts.member)
 				if !ok {

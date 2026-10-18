@@ -138,7 +138,7 @@ func (s *homeOxygenSoR) OpenCoverage(memberID string) ([]byte, bool) {
 	if s.payer != (shnsdk.PayerIdentifier{}) {
 		payer = s.payer
 	}
-	cov, err := shnsdk.BuildCoverageWithPayer("Patient/"+s.member, s.member, payer)
+	cov, err := containedPayorCoverage("Patient/"+s.member, s.member, payer)
 	if err != nil {
 		return nil, false
 	}
@@ -436,7 +436,7 @@ func TestHandleHomeOxygen(t *testing.T) {
 		Client:             &http.Client{Transport: stub},
 	})
 
-	req := httptest.NewRequest(http.MethodPost, "/scenario/homeoxygen", nil)
+	req := httptest.NewRequest(http.MethodPost, "/scenario/homeoxygen", strings.NewReader(testRouteBody(gw, "/scenario/homeoxygen", "")))
 	rec := httptest.NewRecorder()
 	gw.handleHomeOxygen(rec, req)
 
@@ -545,7 +545,7 @@ func buildHomeOxygenSupplier(id string) ([]byte, error) {
 // TestHandler_HomeOxygenRouteRegistered asserts that the provider-role Handler() mux
 // routes POST /scenario/homeoxygen (returns something other than 404 / method-not-allowed).
 // It does NOT drive the full chain — that is TestHomeOxygen — this is a registration probe
-// that catches a missing mux.HandleFunc("POST /scenario/homeoxygen", ...) at build time.
+// that catches a missing originationRoutes declaration of POST /scenario/homeoxygen.
 func TestHandler_HomeOxygenRouteRegistered(t *testing.T) {
 	_, signPriv := genED25519(t)
 	encPub, encPriv := genKeyPair(t)
@@ -564,7 +564,7 @@ func TestHandler_HomeOxygenRouteRegistered(t *testing.T) {
 		Validator: shnsdk.NewFakeValidator(),
 	})
 	h := gw.Handler()
-	req := httptest.NewRequest(http.MethodPost, "/scenario/homeoxygen", strings.NewReader("{}"))
+	req := httptest.NewRequest(http.MethodPost, "/scenario/homeoxygen", strings.NewReader(testRouteBody(gw, "/scenario/homeoxygen", "")))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code == http.StatusNotFound || rec.Code == http.StatusMethodNotAllowed {

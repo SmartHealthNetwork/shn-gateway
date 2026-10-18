@@ -367,7 +367,7 @@ func newInProcessExchange(t *testing.T) *inProcessExchange {
 	gw := mustNew(t, cfg)
 
 	ctx := context.Background()
-	req := httptest.NewRequest(http.MethodPost, "/", nil).WithContext(ctx)
+	req := withOriginationClaimInput(httptest.NewRequest(http.MethodPost, "/", strings.NewReader(testOrderBody(pasTailServiceRequest(), "")))).WithContext(ctx)
 
 	return &inProcessExchange{
 		originator: gw,

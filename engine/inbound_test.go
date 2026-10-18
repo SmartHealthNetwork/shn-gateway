@@ -84,7 +84,7 @@ func TestEligibilityInbound_CoverageDerivedInsurer(t *testing.T) {
 	}
 
 	now := time.Date(2026, 6, 3, 12, 0, 0, 0, time.UTC)
-	cerJSON, err := shnsdk.BuildEligibilityRequest(member, "1234567890", now)
+	cerJSON, err := shnsdk.BuildEligibilityRequestExact(member, "1234567890", shnsdk.CMSPayerIdentity, now)
 	if err != nil {
 		t.Fatalf("BuildEligibilityRequest: %v", err)
 	}
@@ -189,7 +189,7 @@ func TestEligibilityInbound_NoCoverageRow_AnswersNotCoveredWithSelfInsurer(t *te
 	}
 
 	now := time.Date(2026, 6, 3, 12, 0, 0, 0, time.UTC)
-	cerJSON, err := shnsdk.BuildEligibilityRequest(member, "1234567890", now)
+	cerJSON, err := shnsdk.BuildEligibilityRequestExact(member, "1234567890", shnsdk.CMSPayerIdentity, now)
 	if err != nil {
 		t.Fatalf("BuildEligibilityRequest: %v", err)
 	}

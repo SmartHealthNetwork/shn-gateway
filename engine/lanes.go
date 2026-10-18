@@ -126,7 +126,7 @@ func QualifyValidatorLane(ctx context.Context, base, line string) error {
 
 func nativeContractLineCount(contract string) int {
 	lines := map[string]bool{}
-	for _, tok := range shnsdk.NativeContractVersions() {
+	for _, tok := range NativeContractVersions() {
 		c, l, ok := strings.Cut(tok, "@")
 		if ok && c == contract {
 			lines[l] = true

@@ -11,6 +11,7 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log"
@@ -192,7 +193,7 @@ func sealRequest(id relay.BuilderID, b []byte, contentType string) relay.Payload
 // the responder could not send to its own system because the ownership table
 // refused it is also reported on the observer seam.
 func (g *Gateway) responderFailed(w http.ResponseWriter, r *http.Request, leg inboundLeg, env shnsdk.Envelope, tok shnsdk.Token, answerTok string, err error) {
-	status, msg := g.responderFailure(leg.tx, err)
+	status, msg := g.responderFailure(r.Context(), leg.tx, err)
 	g.refuseInbound(w, r, leg, env, tok, answerTok, status, msg, nil)
 	// The answer is this gateway's, but the record says whose failure it was:
 	// its participant's system not answering usably is an upstream error.
@@ -211,8 +212,10 @@ func (g *Gateway) responderFailed(w http.ResponseWriter, r *http.Request, leg in
 // as this gateway's answer: the requester sees whose failure it was — the
 // payer's system not answering (502), or not answering within the
 // responder's deadline (504), or this gateway's own fault (500) — never the
-// error's own text. An ownership refusal is observed here.
-func (g *Gateway) responderFailure(leg string, err error) (int, string) {
+// error's own text. This gateway's own fault says whether the request had
+// been forwarded to the payer's system, which then may have acted on it. An
+// ownership refusal is observed here.
+func (g *Gateway) responderFailure(ctx context.Context, leg string, err error) (int, string) {
 	if isOwnershipFault(err) {
 		k := relay.Key{Leg: leg, Role: relay.RoleRecipient, Direction: relay.DirectionRequest, Outcome: relay.OutcomeCarried}
 		g.observe(ObserverEvent{Kind: relay.RefusedEvent, LegType: k.Leg, Direction: k.Role.String() + "-" + k.Direction.String(), Detail: err.Error()})
@@ -233,8 +236,29 @@ func (g *Gateway) responderFailure(leg string, err error) (int, string) {
 		}
 		return http.StatusBadGateway, errUpstreamNotReached
 	}
-	return http.StatusInternalServerError, "responder failed"
+	// Whether the request was forwarded is known only when the built-in
+	// native responder answers the leg itself: a connector, one that wraps it
+	// included, may call its system on its own.
+	forwarded, known := exchangeOf(ctx).forwardedToSystem()
+	if _, native := g.cfg.Responder.(*nativeResponder); !native && !forwarded {
+		known = false
+	}
+	switch {
+	case !known:
+		return http.StatusInternalServerError, errResponderFailedUnknown
+	case forwarded:
+		return http.StatusInternalServerError, errResponderFailedAfterForward
+	}
+	return http.StatusInternalServerError, errResponderFailedBeforeForward
 }
+
+// The payer's gateway's own failures, by whether the request had been
+// forwarded to the payer's system: after, it may have acted on it.
+const (
+	errResponderFailedBeforeForward = "the payer's gateway failed before forwarding this request to the payer's system"
+	errResponderFailedAfterForward  = "the payer's gateway failed after forwarding this request to the payer's system, which may have acted on it: check its outcome before resending"
+	errResponderFailedUnknown       = "the payer's gateway failed, and whether the payer's system received this request is not known: check its outcome before resending"
+)
 
 // upstreamFailure is a native forward that got no usable answer from the
 // payer's own system. sent says the request was written to it: a connection

@@ -150,7 +150,7 @@ func responderFailureIs(t *testing.T, n *nativeResponder, want string) {
 	if err == nil {
 		t.Fatal("want a forward failure")
 	}
-	status, msg := (&Gateway{}).responderFailure("pas-claim", err)
+	status, msg := (&Gateway{}).responderFailure(context.Background(), "pas-claim", err)
 	if status != http.StatusBadGateway || msg != want {
 		t.Fatalf("got %d %q, want 502 %q", status, msg, want)
 	}

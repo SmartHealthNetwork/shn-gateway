@@ -35,7 +35,7 @@ func newCoveragesSoR(err error, covs ...[]byte) coveragesSoR {
 
 func coverageFor(t *testing.T, id string, payer shnsdk.PayerIdentifier) []byte {
 	t.Helper()
-	b, err := shnsdk.BuildCoverageWithPayer("Patient/MBR-COVERED", id, payer)
+	b, err := containedPayorCoverage("Patient/MBR-COVERED", id, payer)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestScenario_AmbiguousCoverageRefused(t *testing.T) {
 		}
 		g := &Gateway{cfg: Config{SoR: s, PayerRouter: payerRouterFor(t, "payer")}}
 		w := httptest.NewRecorder()
-		g.handleScenario(w, httptest.NewRequest("POST", "/scenario", strings.NewReader(`{"branch":"covered"}`)))
+		g.handleScenario(w, httptest.NewRequest("POST", "/scenario", strings.NewReader(testRouteBody(g, "/scenario/uc01", `"branch":"covered"`))))
 		if w.Code != http.StatusUnprocessableEntity || !strings.Contains(w.Body.String(), "ambiguous coverage") {
 			t.Fatalf("observed=%v: %d %s", observed, w.Code, w.Body.String())
 		}

@@ -49,7 +49,7 @@ func TestRouteSoRFailure(t *testing.T) {
 				}
 				g := &Gateway{cfg: Config{SoR: sor}}
 				w := httptest.NewRecorder()
-				r := httptest.NewRequest("POST", "/scenario", strings.NewReader(`{"branch":"covered"}`))
+				r := httptest.NewRequest("POST", "/scenario", strings.NewReader(`{"branch":"covered","member":"MBR-COVERED"}`))
 				g.handleScenario(w, r)
 				want := 502
 				if fail == "coverage" {
@@ -205,6 +205,7 @@ func TestSoRSubjectRouteFamilies(t *testing.T) {
 				// the participant requires known members; the prefetch route reads
 				// it for the fill, which runs only under enrichment.
 				g := &Gateway{cfg: Config{SoR: sor, RequireKnownMembers: true, EnrichNativeRequests: true}}
+				g.installEnrichment()
 				var status int
 				var msg string
 				switch route {
@@ -328,7 +329,7 @@ func callSoRRoute(t *testing.T, g *Gateway, route string, w http.ResponseWriter,
 	case "pas":
 		g.handlePASNativeInbound(w, r, env, shnsdk.Token{}, loadPASGolden(t, "MBR-COVERED"), "")
 	case "eligibility":
-		b, e := shnsdk.BuildEligibilityRequest("MBR-COVERED", "1234567890", time.Now())
+		b, e := shnsdk.BuildEligibilityRequestExact("MBR-COVERED", "1234567890", shnsdk.CMSPayerIdentity, time.Now())
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -418,7 +419,7 @@ func TestSoRDispatchRefFailureNoLegs(t *testing.T) {
 			fixture.gw.cfg.SoR = sor
 			fixture.gw.cfg.Populator = nil // Any population after the failed ref lookup is a test failure.
 			w := httptest.NewRecorder()
-			r := httptest.NewRequest("POST", "/scenario/dispatch", strings.NewReader(`{"member":"MBR-OX"}`))
+			r := httptest.NewRequest("POST", "/scenario/dispatch", strings.NewReader(testRouteBody(fixture.gw, "/scenario/dispatch", `"member":"MBR-OX"`)))
 			fixture.gw.handleDispatch(w, r)
 			if w.Code != 503 {
 				t.Fatalf("status %d %s", w.Code, w.Body.String())

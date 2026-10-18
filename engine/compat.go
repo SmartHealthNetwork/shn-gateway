@@ -17,8 +17,6 @@ package engine
 import (
 	"sort"
 	"strings"
-
-	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
 // compatManifest is the compatibility table. CRD rows ship fully wired
@@ -196,16 +194,16 @@ var compatManifest = []CompatStep{
 	//   Row worst-of-four = CARRY (matches the row Class below).
 	{Contract: "pa.pas", From: "2.1", To: "2.2", Class: StepCarry, Up: pasStep2122Up, Down: pasStep2122Down},
 
-	// pa.pdex has exactly one native line (2.1) — zero adjacent pairs, no rows
-	// (tolerated rowless, pinned explicitly by TestCompatManifestCoversAdjacentNativeSteps).
+	// No other contract is native: pa.pdex is not declared by any gateway
+	// (its Patient Access decision EOB is base FHIR R4, not PDex).
 }
 
 // nativeContracts returns the distinct contract names (the part before "@")
-// across shnsdk.NativeContractVersions(), sorted.
+// across NativeContractVersions(), sorted.
 func nativeContracts() []string {
 	seen := map[string]bool{}
 	var out []string
-	for _, tok := range shnsdk.NativeContractVersions() {
+	for _, tok := range NativeContractVersions() {
 		contract, _, ok := strings.Cut(tok, "@")
 		if !ok || contract == "" || seen[contract] {
 			continue
@@ -222,7 +220,7 @@ func nativeContracts() []string {
 // helper rather than relying on the "2.0" < "2.1" < "2.2" lexical accident).
 func nativeLinesForContract(contract string) []string {
 	var lines []string
-	for _, tok := range shnsdk.NativeContractVersions() {
+	for _, tok := range NativeContractVersions() {
 		c, line, ok := strings.Cut(tok, "@")
 		if !ok || c != contract || line == "" {
 			continue

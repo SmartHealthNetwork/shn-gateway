@@ -171,12 +171,14 @@ const (
 	// Without a PCI the leg has no authority to carry, so this row cannot relay.
 	RuleSubjectPCI = "subject.pci"
 	// RuleSubjectToken: the request's patient is the patient the leg's token
-	// authorizes. The federated-query and patient-authored DTR legs, and
-	// eligibility a payer answers from its records, refuse a difference. The Da
-	// Vinci CRD, DTR and PAS legs, and eligibility carried to a payer's own
-	// endpoint, do not compare them: the payer handles the member the request names as it would
-	// directly, and keys everything it records about the exchange by its own
-	// binding of that member (bindInboundSubject), never by the token.
+	// authorizes. The federated-query leg refuses a difference on consent (the
+	// consent checked was the token's patient's) and the patient-authored DTR
+	// leg on authority (the PHG signs as the token's patient); a patient either
+	// does not hold is refused the same way. The Da Vinci CRD, DTR and PAS legs
+	// and eligibility do not compare them: the payer handles the member the
+	// request names as it would directly, keys everything it records about the
+	// exchange by its own binding of that member (bindInboundSubject), never by
+	// the token, and names that binding on its answer (noteSubjectBinding).
 	RuleSubjectToken = "subject.token"
 	// RuleDuplicateKey: a repeated JSON member name, exactly or under case
 	// folding, anywhere in a body the gateway reads.

@@ -180,8 +180,9 @@ func TestNativeForwardVersionFilter(t *testing.T) {
 	defer partner.Close()
 
 	// Declared 2.2-only: the CRD leg (pa.crd, own 2.0) refuses without forwarding.
+	// Refused under the participant's own setting (RequireSharedLine); by default the pair is carried (line_carry_test.go).
 	n := NewNativeResponder(partner.Client(), partner.URL, "svc", nil, nil,
-		WithDeclaredContractVersions([]string{"pa.crd@2.2", "pa.crd@2.2"})) // duplicate on purpose
+		WithDeclaredContractVersions([]string{"pa.crd@2.2", "pa.crd@2.2"}), WithRequireSharedLine(true)) // duplicate on purpose
 	res, err := n.Handle(context.Background(), "crd-order-select", "corr", "pci", cdsRequest("order-select"))
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
@@ -253,7 +254,7 @@ func TestNativeForwardStaysArm1(t *testing.T) {
 	// pa.crd@2.2 only) — 2.2 IS this build's native set, an arm-2/3-worthy
 	// peer. Handle must refuse, never native-reach or chain.
 	nRefuse := NewNativeResponder(p.srv.Client(), p.srv.URL, "svc", nil, nil,
-		WithDeclaredContractVersions([]string{"pa.crd@2.2"}))
+		WithDeclaredContractVersions([]string{"pa.crd@2.2"}), WithRequireSharedLine(true))
 	req := []byte(`{"hook":"order-select"}`)
 	res, err := nRefuse.Handle(context.Background(), "crd-order-select", "corr-refuse", "pci", req)
 	if err != nil {

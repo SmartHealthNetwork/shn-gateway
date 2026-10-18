@@ -29,11 +29,19 @@ bash gateway/deploy/eval/brprovider/build.sh build
 # only — the gateway hard-depends on gencerts for INGRESS_CLIENTS_FILE, so gencerts can't be profiled out).
 SHN_SECRETS="$SHN_SECRETS_PROVIDER" PAYER_HOLDER_ID="$PAYER_HOLDER_ID" $prov up -d --build
 
+# Every scenario request carries the persona the network's discovery descriptor states for
+# its route on the gateway's lane (provider-data) — member, order and claim facts — never a
+# value of this script's own (../persona_body.sh). Same descriptor the gateway reads.
+disc_url="${SHN_DISCOVERY_URL:-https://accounts.shn-preview.org/discovery}"
+desc=$(mktemp)
+curl -fsS "$disc_url" -o "$desc"
+
 # Readiness: the provider gateway (uc01 POST) — folds in seed + routing.
 ready=0
 for _ in $(seq 1 90); do
   if curl -fsS -X POST localhost:8080/scenario/uc01 -H 'Content-Type: application/json' \
-       -d '{"branch":"covered"}' | jq -e '.covered==true' >/dev/null 2>&1; then ready=1; break; fi
+       -d "$(gateway/deploy/eval/persona_body.sh "$desc" uc01 provider-data 0 '{"branch":"covered"}')" \
+       | jq -e '.covered==true' >/dev/null 2>&1; then ready=1; break; fi
   sleep 10
 done
 [ "$ready" = 1 ] || { echo "uc01 never succeeded — the provider originator didn't come up, OR your deployed payer holder ($PAYER_HOLDER_ID) isn't reachable/registered"; exit 1; }
@@ -43,9 +51,9 @@ if [ -d sdk ]; then
   # A checkout with the SDK's source beside it: build send-test from the sibling sdk/ module (its
   # own Go module, so it must run from inside it — a module-boundary crossing fails from the
   # checkout's root).
-  ( cd sdk && go run ./cmd/shn send-test --gateway http://127.0.0.1:8080 )
+  ( cd sdk && go run ./cmd/shn send-test --gateway http://127.0.0.1:8080 --discovery "${disc_url%/discovery}" )
 else
   # Standalone gateway bundle: use the installed shn CLI
   # (go install github.com/SmartHealthNetwork/shn-sdk/cmd/shn@latest).
-  shn send-test --gateway http://127.0.0.1:8080
+  shn send-test --gateway http://127.0.0.1:8080 --discovery "${disc_url%/discovery}"
 fi

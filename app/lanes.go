@@ -53,7 +53,7 @@ func discoverValidatorLanes(ctx context.Context, getenv func(string) string, dec
 	m := &laneManager{defaults: map[string]*engine.DiscoveredLane{}, fallbacks: map[string]bool{}, cancel: cancel}
 	fail := func(err error) (map[string]shnsdk.Validator, *laneManager, error) { m.Close(); return nil, nil, err }
 	linesPerContract := map[string]map[string]bool{}
-	for _, tok := range shnsdk.NativeContractVersions() {
+	for _, tok := range engine.NativeContractVersions() {
 		contract, line, _ := strings.Cut(tok, "@")
 		if linesPerContract[contract] == nil {
 			linesPerContract[contract] = map[string]bool{}
@@ -101,7 +101,7 @@ func discoverValidatorLanes(ctx context.Context, getenv func(string) string, dec
 	for line := range m.defaults {
 		delete(lanes, line)
 	}
-	// A single-line contract's line (pa.pdex@2.1) rides the canonical validator
+	// A single-line contract's line (none is native today) rides the canonical validator
 	// only as a fallback alias, which the engine never lends to a multi-line
 	// contract at that line. With default lanes the line's default was removed
 	// above; with none, validatorLanesForDeclared has already aliased it, and it

@@ -2,7 +2,12 @@
 
 What a real HAPI validator lane answered, captured on 2026-09-26 from three local HAPI FHIR 8.10.0
 validator lanes, one each for the 2.0, 2.1 and 2.2 contract lines, through an exact-bytes
-recording proxy. Each lane runs the digest-pinned engine and backported WAR the Smart Gateway's
+recording proxy. The exchange whose request is the line's synthetic PAS request bundle was
+captured again on 2026-10-06, the same way from lanes of the same pinned images, when that bundle
+changed; every other exchange is the 2026-09-26 capture, and the 2026-10-06 run's answers to their
+requests were byte-identical to its settled answers (that run met an already-warm 2.2 lane, so the
+two first-validation answers described below did not recur).
+Each lane runs the digest-pinned engine and backported WAR the Smart Gateway's
 `deploy/validator` builds on, loaded with its line's IG closure and the shared validation-support
 package. No participant or patient data.
 

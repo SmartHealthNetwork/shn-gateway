@@ -4,8 +4,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -25,55 +23,9 @@ func TestCanaryTwins_CoverEveryConformanceScenarioMember(t *testing.T) {
 	}
 }
 
-// scenarioMemberCallRe matches one scenarioMember call site and captures its three
-// member arguments, in sceneMember's own argument order (default, provider-data, demo).
-// An argument is either a quoted member id or a named constant holding one, both of
-// which appear at today's call sites.
-var scenarioMemberCallRe = regexp.MustCompile(`g\.scenarioMember\(w, r, ([^,)]+), ([^,)]+), ([^,)]+)\)`)
-
-// memberConstRe matches a package-level member-id constant so a call site that names
-// one instead of spelling the id inline still yields a member to check.
-var memberConstRe = regexp.MustCompile(`(?m)^\s*(?:const\s+)?([A-Za-z_][A-Za-z0-9_]*)\s+=\s+"(MBR-[A-Z0-9-]+)"`)
-
-// sceneArms names the three sceneMember arms in the order the call sites spell them,
-// so a failure says WHICH lane resolves the twin-less member.
+// sceneArms names the three sceneMember arms, so a failure says WHICH lane
+// resolves the twin-less member.
 var sceneArms = [3]string{"default", "provider-data", "demo"}
-
-// funcHeaderRe matches a top-level Gateway-method definition line, e.g.
-// `func (g *Gateway) handleUC03Bridge(w http.ResponseWriter, r *http.Request, member string) {`.
-// Used to chunk a source file into per-function bodies (so a scenarioMember call site can be
-// attributed to its enclosing function) and to find CALL SITES of a parameterized scenario
-// handler by name.
-var funcHeaderRe = regexp.MustCompile(`(?m)^func \(g \*Gateway\) (\w+)\(`)
-
-// handlerCallSiteRe(name) matches a call site of a Gateway method shaped
-// `g.NAME(w, r, ARG)` — the shape a parameterized scenario handler's own dispatcher uses
-// (task2 brief's handleUC03Bridge: handleUC03's branch switch calls it once per branch with
-// a literal member id). Built per-name rather than one generic regex so the capture stays
-// anchored to the SPECIFIC function scenarioMemberLiterals is resolving.
-func handlerCallSiteRe(name string) *regexp.Regexp {
-	return regexp.MustCompile(`g\.` + regexp.QuoteMeta(name) + `\(w, r, ([^,)]+)\)`)
-}
-
-// funcChunks splits src into (name, body) pairs at each top-level `func (g *Gateway) NAME(`
-// header — an approximation (no real Go parsing) that is exact for this package's actual
-// style (one such header per line, never nested). Text before the first header (imports,
-// package-level vars/consts) is not attributed to any function; scenarioMember is never
-// called from package scope, so nothing of interest lives there.
-func funcChunks(src string) map[string]string {
-	idx := funcHeaderRe.FindAllStringSubmatchIndex(src, -1)
-	chunks := map[string]string{}
-	for i, m := range idx {
-		start := m[0]
-		end := len(src)
-		if i+1 < len(idx) {
-			end = idx[i+1][0]
-		}
-		name := src[m[2]:m[3]]
-		chunks[name] = src[start:end]
-	}
-	return chunks
-}
 
 // canaryTwinlessMembers are the scenario members that deliberately carry NO canary
 // twin, each with the reason it is exempt. scenarioMember's fail-closed 400 is the
@@ -105,120 +57,20 @@ var canaryTwinlessMembers = map[string]string{
 // canary at all, rather than a canary with missing twins.
 const canaryTwinlessPrefix = "MBR-PD-"
 
-// scenarioMemberLiterals returns, for every scenarioMember call site in this package's
-// non-test sources, the member literal in each of the three arms.
+// scenarioMemberLiterals returns, for every scenario the /scenario/* routes
+// resolve (scenarioMembers, the one table scenarioMember reads), the member on
+// each of the three arms.
 func scenarioMemberLiterals(t *testing.T) map[string][]string {
 	t.Helper()
-	ents, err := os.ReadDir(".")
-	if err != nil {
-		t.Fatalf("read package dir: %v", err)
-	}
-	sources := map[string]string{}
-	for _, e := range ents {
-		name := e.Name()
-		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		src, err := os.ReadFile(name)
-		if err != nil {
-			t.Fatalf("read %s: %v", name, err)
-		}
-		sources[name] = string(src)
-	}
-	memberConsts := map[string]string{}
-	for _, text := range sources {
-		for _, m := range memberConstRe.FindAllStringSubmatch(text, -1) {
-			memberConsts[m[1]] = m[2]
-		}
-	}
-
-	// resolveArg resolves one scenarioMember argument to a member literal — a quoted
-	// literal or a named package-level constant. "" (not ok) for anything else, including
-	// a bare handler-parameter identifier (resolved separately, below).
-	resolveArg := func(arg string) (string, bool) {
-		arg = strings.TrimSpace(arg)
-		switch {
-		case strings.HasPrefix(arg, `"`) && strings.HasSuffix(arg, `"`):
-			return strings.Trim(arg, `"`), true
-		case memberConsts[arg] != "":
-			return memberConsts[arg], true
-		default:
-			return "", false
-		}
-	}
-
 	byMember := map[string][]string{}
-	calls, read := 0, 0
-	for _, text := range sources {
-		// Count the call sites independently of the capture: a reformatted or
-		// wrapped call site that the regexp cannot read would otherwise shrink
-		// this guard's input silently, which is the exact failure mode it exists
-		// to prevent.
-		calls += strings.Count(text, "g.scenarioMember(w, r,")
-		chunks := funcChunks(text)
-		for _, m := range scenarioMemberCallRe.FindAllStringSubmatch(text, -1) {
-			args := [3]string{}
-			ok := true
-			for i := range args {
-				v, resolved := resolveArg(m[i+1])
-				if !resolved {
-					ok = false
-					continue
-				}
-				args[i] = v
-			}
-			if ok {
-				read++
-				for i, arm := range sceneArms {
-					byMember[args[i]] = appendUnique(byMember[args[i]], arm)
-				}
-				continue
-			}
-			// Indirect (shared-body) case: task2 brief's handleUC03Bridge pattern — all
-			// three arguments are the SAME bare identifier, a handler parameter rather
-			// than a literal/const. Find the enclosing function (funcChunks) and, from
-			// its OWN name, every call site elsewhere that passes it a literal/const
-			// member id (g.NAME(w, r, ARG)) — each such caller feeds all three arms,
-			// exactly as if it had called scenarioMember directly.
-			raw0 := strings.TrimSpace(m[1])
-			if raw0 == "" || raw0 != strings.TrimSpace(m[2]) || raw0 != strings.TrimSpace(m[3]) {
-				continue // genuinely unresolvable — leaves read < calls, failing loudly below
-			}
-			enclosing := ""
-			for name, body := range chunks {
-				if strings.Contains(body, m[0]) {
-					enclosing = name
-					break
-				}
-			}
-			if enclosing == "" {
-				continue
-			}
-			var callerMembers []string
-			for _, other := range sources {
-				for _, cm := range handlerCallSiteRe(enclosing).FindAllStringSubmatch(other, -1) {
-					if v, resolved := resolveArg(cm[1]); resolved {
-						callerMembers = appendUnique(callerMembers, v)
-					}
-				}
-			}
-			if len(callerMembers) == 0 {
-				continue // no resolvable caller found — leaves read < calls, failing loudly below
-			}
-			read++
-			for _, member := range callerMembers {
-				for _, arm := range sceneArms {
-					byMember[member] = appendUnique(byMember[member], arm)
-				}
-			}
+	for _, scenario := range sortedKeys(scenarioMembers) {
+		m := scenarioMembers[scenario]
+		for i, member := range [3]string{m.conformance, m.providerData, m.demo} {
+			byMember[member] = appendUnique(byMember[member], sceneArms[i])
 		}
 	}
-	if calls == 0 {
-		t.Fatal("no scenarioMember call sites found — the scan broke or the seam was renamed")
-	}
-	if read != calls {
-		t.Fatalf("scanned %d scenarioMember call sites but could only resolve the members of %d — "+
-			"a call site this guard cannot read is a member it cannot check", calls, read)
+	if len(byMember) == 0 {
+		t.Fatal("scenarioMembers resolves no member")
 	}
 	return byMember
 }
@@ -314,17 +166,18 @@ func sortedKeys[V any](m map[string]V) []string {
 // member, driven through the real sceneMember/scenarioMember pair on a demo-profile
 // gateway with a canary persona set.
 func TestScenarioMember_DemoArmResolvesTwins(t *testing.T) {
-	byMember := scenarioMemberLiterals(t)
 	g := &Gateway{cfg: Config{OriginationProfile: "demo"}}
-	r := httptest.NewRequest(http.MethodPost, "/scenario/x?personaSet=canary", nil)
 
-	for _, member := range sortedKeys(byMember) {
+	for _, scenario := range sortedKeys(scenarioMembers) {
+		member := scenarioMembers[scenario].demo
 		want, ok := CanaryTwins[member]
 		if !ok {
 			continue // direction 1 above already reported it
 		}
+		r := httptest.NewRequest(http.MethodPost, "/scenario/x?personaSet=canary",
+			strings.NewReader(testClaimBody(`"member":"`+want+`"`)))
 		w := httptest.NewRecorder()
-		got, ok := g.scenarioMember(w, r, member, member, member)
+		got, ok := g.scenarioMember(w, r, scenario)
 		if !ok {
 			t.Errorf("%s under personaSet=canary: failed closed %d %s", member, w.Code, strings.TrimSpace(w.Body.String()))
 			continue
@@ -382,7 +235,7 @@ func TestScenario_PersonaSetRejections(t *testing.T) {
 		t.Fatalf("twin-less member under canary: got %d, want 400", resp.StatusCode)
 	}
 	// control: personaSet absent keeps working (any status but 400-personaSet).
-	resp := post("/scenario/uc03", `{}`)
+	resp := post("/scenario/uc03", testRouteBody(g, "/scenario/uc03", ""))
 	if resp.StatusCode == http.StatusBadRequest {
 		t.Fatalf("control uc03 without personaSet unexpectedly 400")
 	}
@@ -422,7 +275,7 @@ func TestScenario_UC03BridgeBranches(t *testing.T) {
 		// The branch is KNOWN: it must not 400 on the branch check itself (this
 		// fixture has no PayerRouter at all, so it 422s downstream for every member —
 		// the point here is ruling OUT a 400 from the switch).
-		if resp := post("/scenario/uc03", `{"branch":"`+tc.branch+`"}`); resp.StatusCode == http.StatusBadRequest {
+		if resp := post("/scenario/uc03", testRouteBody(g, "/scenario/uc03", `"branch":"`+tc.branch+`"`)); resp.StatusCode == http.StatusBadRequest {
 			body, _ := io.ReadAll(resp.Body)
 			t.Fatalf("known branch %s unexpectedly 400: %s", tc.branch, body)
 		}

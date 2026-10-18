@@ -2,7 +2,7 @@
 // (UC-01…08) against a Smart Gateway's edges: the Da Vinci ingress (CRD /
 // DTR $questionnaire-package / PAS $submit, UDAP B2B direct bearer), a real
 // br-provider BFF (origination + SDC populate), the provider-data
-// /scenario/* origination routes, the ops console, and the patient surface.
+// /scenario/* origination routes and the patient surface.
 // It is the importable core of the live conformance gate (FR-G28) and the
 // scenario-driving engine the SHN Kit's daemon consumes. Transport methods
 // return errors and raw results — assertions and environment gating stay

@@ -25,8 +25,10 @@ type LineFakeCall struct {
 // PAS checks item details, update relationships, response request references,
 // and, at 2.2, ClaimTypes, AdditionalInformation document cardinality, request
 // ClaimFirst, response identifiers and outcomes. DTR checks QR context and item
-// minima before 2.2, coverage at 2.2, and any supplied answer information-origin
-// source at 2.2. Optional slices are not synthesized or required.
+// minima before 2.2, coverage at 2.2, any supplied answer information-origin
+// source at 2.2, and, against the $questionnaire-package output profile, the
+// line's package and outcome parameters and the package's Questionnaire and
+// QuestionnaireResponse entries. Optional slices are not synthesized or required.
 // Unknown extensions and elements outside this scope are tolerated.
 // Use NewLineFakeValidator to fix the validation line for its lifetime.
 type LineFakeValidator struct {
@@ -50,6 +52,9 @@ func NewLineFakeValidator(line string) *LineFakeValidator {
 // The profile selects PAS request/response Bundle and Claim update semantics.
 func (v *LineFakeValidator) Validate(_ context.Context, payload []byte, profile string) (shnsdk.Result, error) {
 	resource, err := decodeLineFake(v.line, payload)
+	if err == nil && profile == "" {
+		resource = unwrapLineFakeValidate(resource)
+	}
 	var issues []string
 	if err != nil {
 		issues = []string{err.Error()}
@@ -82,7 +87,7 @@ func lineMinimaIssues(line string, payload []byte) []string {
 	if err != nil {
 		return []string{err.Error()}
 	}
-	return lineFakeResourceIssues(line, resource, "")
+	return lineFakeResourceIssues(line, unwrapLineFakeValidate(resource), "")
 }
 
 func decodeLineFake(line string, payload []byte) (map[string]any, error) {
@@ -106,6 +111,25 @@ func decodeLineFake(line string, payload []byte) (map[string]any, error) {
 		return nil, fmt.Errorf("line %s: expected JSON resource object", line)
 	}
 	return resource, nil
+}
+
+// unwrapLineFakeValidate reads a $validate invocation with no ?profile= as HAPI
+// does: a Parameters whose one parameter is "resource" is the request wrapping
+// the resource to check (wrapValidateResource), and the check is of that
+// resource. With a ?profile= HAPI judges the Parameters it was sent, wrapper or
+// not, so Validate unwraps only when the profile is empty.
+func unwrapLineFakeValidate(resource map[string]any) map[string]any {
+	if resource["resourceType"] != "Parameters" {
+		return resource
+	}
+	params := lineFakeObjects(resource["parameter"])
+	if len(params) != 1 || params[0]["name"] != "resource" {
+		return resource
+	}
+	if inner := lineFakeObject(params[0]["resource"]); inner != nil {
+		return inner
+	}
+	return resource
 }
 
 const (
@@ -235,6 +259,70 @@ func lineFakeResourceIssues(line string, resource map[string]any, profile string
 				default:
 					issue("ClaimResponse.outcome")
 				}
+			}
+		case "Parameters":
+			// Scoped by the explicit profile or the resource's own meta.profile (a
+			// wrapped check asserts an explicit profile there: validateRequest).
+			scoped := p == lineFakeDTR+"dtr-qpackage-output-parameters"
+			if declared, ok := lineFakeObject(r["meta"])["profile"].([]any); ok {
+				for _, value := range declared {
+					if value, ok := value.(string); ok && canonicalOf(value) == lineFakeDTR+"dtr-qpackage-output-parameters" {
+						scoped = true
+					}
+				}
+			}
+			if !scoped {
+				break
+			}
+			// The $questionnaire-package output profile: the line's own parameter
+			// names, the package's cardinality (1..* at 2.0.1, 0..* after) and the
+			// outcome's (0..* at 2.0.1, 0..1 after); each package a Bundle whose
+			// Questionnaire and QuestionnaireResponse entries the line's
+			// DTR-QPackageBundle bounds. Parameters of another line's names are
+			// open slicing's unsliced extras: allowed, and counted for nothing.
+			pkgName, outcomeName := "PackageBundle", "operationOutcome"
+			if line == "2.2" {
+				pkgName, outcomeName = "packagebundle", "outcome"
+			}
+			packages, outcomes := 0, 0
+			for i, param := range lineFakeObjects(r["parameter"]) {
+				switch param["name"] {
+				case pkgName:
+					packages++
+					bundle := lineFakeObject(param["resource"])
+					path := fmt.Sprintf("Parameters.parameter[%d].resource", i)
+					if bundle["resourceType"] != "Bundle" {
+						issue(path)
+						continue
+					}
+					questionnaires, responses := 0, 0
+					for _, e := range lineFakeObjects(bundle["entry"]) {
+						switch lineFakeObject(e["resource"])["resourceType"] {
+						case "Questionnaire":
+							questionnaires++
+						case "QuestionnaireResponse":
+							responses++
+						}
+					}
+					switch dtr.QuestionnairePackageReturnShape {
+					case "qr-optional":
+						if questionnaires != 1 || responses > 1 {
+							issue(path + ".entry")
+						}
+					case "qr-required":
+						if questionnaires != 1 || responses != 1 {
+							issue(path + ".entry")
+						}
+					}
+				case outcomeName:
+					outcomes++
+				}
+			}
+			if line == "2.0" && packages < 1 {
+				issue("Parameters.parameter:" + pkgName)
+			}
+			if line != "2.0" && outcomes > 1 {
+				issue("Parameters.parameter:" + outcomeName)
 			}
 		case "QuestionnaireResponse":
 			scoped := false

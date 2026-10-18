@@ -43,7 +43,7 @@ The new process must complete fresh warm-up even if its temporary marker survive
 Compose does not automatically replace an unhealthy validator.
 
 ## What runs
-- **validator** — `hapiproject/hapi` with US Core 6.1.0 + Da Vinci CRD/DTR/PAS 2.0.1 +
+- **validator** — the HAPI FHIR 8.12.0 engine on distroless Java with US Core 6.1.0 + Da Vinci CRD/DTR/PAS 2.0.1 +
   PDex 2.1.0 + CDex 2.1.0 + HRex 1.1.0 + SDC 3.0.0 loaded; serves fail-closed per-message
   `$validate` (FR-G29).
 - **gateway** — the Smart Gateway image; `FHIR_VALIDATE_URL` points at the local sidecar

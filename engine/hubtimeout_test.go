@@ -80,7 +80,7 @@ func TestHubLegTimeout_CallerDeadlineFirst(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	req := httptest.NewRequest(http.MethodPost, "/scenario/uc03", nil).WithContext(ctx)
+	req := httptest.NewRequest(http.MethodPost, "/scenario/uc03", strings.NewReader(testRouteBody(gw, "/scenario/uc03", ""))).WithContext(ctx)
 	rec := httptest.NewRecorder()
 	gw.Handler().ServeHTTP(rec, req)
 
@@ -144,7 +144,7 @@ func TestHubLegTimeout_NoClientBudget(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	req := httptest.NewRequest(http.MethodPost, "/scenario/uc03", nil).WithContext(ctx)
+	req := httptest.NewRequest(http.MethodPost, "/scenario/uc03", strings.NewReader(testRouteBody(gw, "/scenario/uc03", ""))).WithContext(ctx)
 	rec := httptest.NewRecorder()
 	gw.Handler().ServeHTTP(rec, req)
 

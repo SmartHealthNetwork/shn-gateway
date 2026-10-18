@@ -36,7 +36,7 @@ func TestLanesDiscoveredAtDefaultAddresses(t *testing.T) {
 		}
 	})
 	t.Run("fake mode keeps distinct deterministic lines", func(t *testing.T) {
-		lanes, m, err := discoverValidatorLanes(context.Background(), func(string) string { return "1" }, shnsdk.NativeContractVersions(), canonical, config{}, func(string) string { t.Fatal("fake mode resolved DNS"); return "" }, func(context.Context, string, string) error { t.Fatal("fake mode qualified"); return nil })
+		lanes, m, err := discoverValidatorLanes(context.Background(), func(string) string { return "1" }, engine.NativeContractVersions(), canonical, config{}, func(string) string { t.Fatal("fake mode resolved DNS"); return "" }, func(context.Context, string, string) error { t.Fatal("fake mode qualified"); return nil })
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -48,7 +48,9 @@ func TestLanesDiscoveredAtDefaultAddresses(t *testing.T) {
 			assertLineFake(t, lanes[line], line)
 		}
 	})
-	for _, declared := range [][]string{shnsdk.SupportedContractVersions(), {"pa.pdex@2.1"}, {"pa.crd@2.2"}} {
+	// pa.pdex@2.1 stands in for a single-native-line contract: none is native
+	// today and the declared-set parser refuses it, so it is injected directly.
+	for _, declared := range [][]string{{"pa.crd@2.0", "pa.pdex@2.1"}, {"pa.pdex@2.1"}, {"pa.crd@2.2"}} {
 		for _, fail := range []bool{false, true} {
 			t.Run(strings.Join(declared, ",")+map[bool]string{true: " unavailable", false: " reachable"}[fail], func(t *testing.T) {
 				entered, release := make(chan struct{}, 2), make(chan struct{})
@@ -551,14 +553,27 @@ func TestDefaultLaneQualifierNamesWhy(t *testing.T) {
 	}
 }
 
-// none never widens a line: a single-line contract's line (pa.pdex@2.1, in the
-// build's default declaration) rides the canonical validator as a fallback
-// alias exactly as it does with default lanes, so PA traffic at 2.1 stays
-// unlaned (the engine refuses it; TestDTRContextCannotUseSingleContractFallback)
-// rather than validating against the canonical IG.
+// none never widens a line: a single-line contract's line rides the canonical
+// validator as a fallback alias exactly as it does with default lanes, so PA
+// traffic at 2.1 stays unlaned (the engine refuses it;
+// TestDTRContextCannotUseSingleContractFallback) rather than validating against
+// the canonical IG. No contract is single-line in the native set today (the
+// build default marks no alias, pinned below), so pa.pdex@2.1, which the
+// declared-set parser refuses, is injected directly as the single-line stand-in.
 func TestNoDefaultLanesKeepsSingleLineAliasesFallbacks(t *testing.T) {
 	canonical := shnsdk.NewFakeValidator()
-	declared := shnsdk.SupportedContractVersions()
+	failingDefault := func(context.Context, string, string) error { return errors.New("no default lane here") }
+	for _, cfg := range []config{{}, {DefaultValidatorLanes: defaultValidatorLanesNone}} {
+		_, d, err := discoverValidatorLanes(context.Background(), func(string) string { return "" }, engine.DefaultContractVersions(), canonical, cfg, engine.DefaultLaneURL, failingDefault)
+		if err != nil {
+			t.Fatal(err)
+		}
+		d.Close()
+		if len(d.fallbacks) != 0 {
+			t.Fatalf("the build default declaration marked a fallback alias: %v", d.fallbacks)
+		}
+	}
+	declared := []string{shnsdk.ContractPACRD20, shnsdk.ContractPADTR20, shnsdk.ContractPAPAS20, "pa.pdex@2.1"}
 	failing := func(context.Context, string, string) error { return errors.New("no default lane here") }
 	_, unset, err := discoverValidatorLanes(context.Background(), func(string) string { return "" }, declared, canonical, config{}, engine.DefaultLaneURL, failing)
 	if err != nil {

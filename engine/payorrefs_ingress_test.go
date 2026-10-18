@@ -313,7 +313,7 @@ func dtrPayorRow(t *testing.T, s *prefetchSoR, level ConformanceEnforcement, enr
 	env := newInProcessExchange(t)
 	env.originator.cfg.SoR = s.sor()
 	env.originator.cfg.ConformanceEnforcement = level
-	env.originator.cfg.EnrichNativeRequests = enrich
+	optInEnrichment(env.originator, enrich)
 	declareFramedDTR(t, env, true)
 	env.payerReturns(LegResult{Response: testResponse(packageAnswer)})
 	return env, postDTRIngress(env, body)

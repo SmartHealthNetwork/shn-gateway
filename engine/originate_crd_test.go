@@ -222,7 +222,7 @@ func TestOriginatedCRD_UsesSoRPatientAndCoverage(t *testing.T) {
 				return 0, payerAnswerFor(t, order, shnsdk.CoveredCovered, shnsdk.PANeededNoAuth, "")
 			})
 			rec := httptest.NewRecorder()
-			g.originateNoPACRD(rec, httptest.NewRequest(http.MethodPost, "/scenario/uc02", nil), prefetchMember)
+			g.originateNoPACRD(rec, httptest.NewRequest(http.MethodPost, "/scenario/uc02", strings.NewReader(testRouteBody(g, "/scenario/uc02", ""))), prefetchMember)
 			if rec.Code != http.StatusOK {
 				t.Fatalf("status %d %s", rec.Code, rec.Body)
 			}
@@ -290,7 +290,7 @@ func TestOriginatedCRD_UsesSoRPatientAndCoverage(t *testing.T) {
 				mutate(&sor)
 				g, payer := originGateway(t, "provider-data", sor, nil, func(string, []byte) (int, []byte) { return 0, nil })
 				rec := httptest.NewRecorder()
-				g.originateNoPACRD(rec, httptest.NewRequest(http.MethodPost, "/scenario/uc02", nil), prefetchMember)
+				g.originateNoPACRD(rec, httptest.NewRequest(http.MethodPost, "/scenario/uc02", strings.NewReader(testRouteBody(g, "/scenario/uc02", ""))), prefetchMember)
 				if rec.Code < 400 {
 					t.Fatalf("status %d %s", rec.Code, rec.Body)
 				}
@@ -330,14 +330,14 @@ func TestOriginatedCRD_NoCallbackFields(t *testing.T) {
 			g, payer := originGateway(t, "provider-data", sor, nil, func(string, []byte) (int, []byte) {
 				return 0, payerAnswerFor(t, order, shnsdk.CoveredNotCovered, "", "")
 			})
-			g.runCRDThenDTROrder(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/", nil), prefetchMember, "", "", "", "", false)
+			g.runCRDThenDTROrder(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/", strings.NewReader(testStatedBody(g, prefetchMember, "", false))), prefetchMember, "", "", "", "", false)
 			return payer.sent("crd-order-select")
 		},
 		"order-dispatch": func() [][]byte {
 			g, payer := originGateway(t, "provider-data", dsor, nil, func(string, []byte) (int, []byte) {
 				return 0, payerAnswerFor(t, dorder, shnsdk.CoveredNotCovered, "", "")
 			})
-			g.originateDispatch(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/", nil), prefetchMember)
+			g.originateDispatch(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/", strings.NewReader(testStatedBody(g, prefetchMember, "", false))), prefetchMember)
 			return payer.sent("crd-order-dispatch")
 		},
 	} {
@@ -377,7 +377,7 @@ func TestOriginatedCRD_HookMatchesWorkflow(t *testing.T) {
 		g, payer := originGateway(t, "provider-data", sor, nil, func(string, []byte) (int, []byte) {
 			return 0, payerAnswerFor(t, order, shnsdk.CoveredNotCovered, "", "")
 		})
-		g.runCRDThenDTROrder(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/", nil), prefetchMember, "", "", "", "", false)
+		g.runCRDThenDTROrder(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/", strings.NewReader(testStatedBody(g, prefetchMember, "", false))), prefetchMember, "", "", "", "", false)
 		sent := decodeSent(t, payer.sent("crd-order-select")[0])
 		if sent.Hook != "order-sign" || sent.Context.Selections != nil || sent.Context.UserID != "Practitioner/1234567890" {
 			t.Fatalf("hook %q selections %v user %q", sent.Hook, sent.Context.Selections, sent.Context.UserID)
@@ -387,7 +387,7 @@ func TestOriginatedCRD_HookMatchesWorkflow(t *testing.T) {
 		g, payer := originGateway(t, "provider-data", dsor, nil, func(string, []byte) (int, []byte) {
 			return 0, payerAnswerFor(t, dorder, shnsdk.CoveredNotCovered, "", "")
 		})
-		g.originateDispatch(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/", nil), prefetchMember)
+		g.originateDispatch(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/", strings.NewReader(testStatedBody(g, prefetchMember, "", false))), prefetchMember)
 		sent := decodeSent(t, payer.sent("crd-order-dispatch")[0])
 		if sent.Hook != "order-dispatch" || len(sent.Context.DispatchedOrders) != 1 || sent.Context.DispatchedOrders[0] != "DeviceRequest/dr-5" || sent.Context.Performer != "Organization/sup-1" {
 			t.Fatalf("request %+v", sent.Context)
@@ -410,7 +410,7 @@ func TestOriginatedCRD_HookMatchesWorkflow(t *testing.T) {
 			return 0, payerAnswerFor(t, horder, shnsdk.CoveredNotCovered, "", "")
 		})
 		rec := httptest.NewRecorder()
-		g.originateDispatch(rec, httptest.NewRequest(http.MethodPost, "/", nil), prefetchMember)
+		g.originateDispatch(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(testStatedBody(g, prefetchMember, "", false))), prefetchMember)
 		if rec.Code != http.StatusUnprocessableEntity || !bytes.Contains(rec.Body.Bytes(), []byte("the system of record's device history does not hold the dispatched order DeviceRequest/dr-5")) {
 			t.Fatalf("got %d %s", rec.Code, rec.Body)
 		}
@@ -424,7 +424,7 @@ func TestOriginatedCRD_HookMatchesWorkflow(t *testing.T) {
 			return http.StatusUnprocessableEntity, refusal
 		})
 		rec := httptest.NewRecorder()
-		g.runCRDThenDTROrder(rec, httptest.NewRequest(http.MethodPost, "/", nil), prefetchMember, "", "", "", "", false)
+		g.runCRDThenDTROrder(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(testStatedBody(g, prefetchMember, "", false))), prefetchMember, "", "", "", "", false)
 		if rec.Code != http.StatusUnprocessableEntity || !bytes.Contains(rec.Body.Bytes(), []byte("no CDS service for hook order-sign")) {
 			t.Fatalf("got %d %s", rec.Code, rec.Body)
 		}
@@ -468,7 +468,7 @@ func TestRunCRDThenDTR_UsesPayerUpdatedOrder(t *testing.T) {
 		return 0, answer
 	})
 	rec := httptest.NewRecorder()
-	g.runCRDThenDTROrder(rec, httptest.NewRequest(http.MethodPost, "/", nil), prefetchMember, "", "", "", "", false)
+	g.runCRDThenDTROrder(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(testStatedBody(g, prefetchMember, "", false))), prefetchMember, "", "", "", "", false)
 	fetches := payer.sent("dtr-questionnaire-fetch")
 	if len(fetches) != 1 || !bytes.Contains(fetches[0], []byte(canonical)) {
 		t.Fatalf("questionnaire requests %q, want one for the canonical the payer's order carries (status %d %s)", fetches, rec.Code, rec.Body)
@@ -491,7 +491,7 @@ func TestRunCRDThenDTR_UsesPayerUpdatedOrder(t *testing.T) {
 			}
 			return 0, legacy
 		})
-		g.runCRDThenDTROrder(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/", nil), prefetchMember, "", "", "", "", false)
+		g.runCRDThenDTROrder(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/", strings.NewReader(testStatedBody(g, prefetchMember, "", false))), prefetchMember, "", "", "", "", false)
 		if len(pop.got) != 1 || !bytes.Equal(pop.got[0].Order, order) {
 			t.Fatalf("questionnaire step got %+v, want the order sent", pop.got)
 		}

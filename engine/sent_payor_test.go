@@ -179,7 +179,7 @@ func TestCRDIngressResolvesASentBarePayorThroughFHIRServer(t *testing.T) {
 			t.Run(name+"/enrich="+map[bool]string{false: "off", true: "on"}[enrich], func(t *testing.T) {
 				e, paths := recordingEHR(t, ehrAnswer(200, "application/fhir+json", payorOrganization("o1", "00001")))
 				env, obs := fhirServerEnv(t, e, "")
-				env.originator.cfg.EnrichNativeRequests = enrich
+				optInEnrichment(env.originator, enrich)
 				logged := captureLog(t)
 				body := sentCoverageRequest(strangerMember, e.base, form(e.base))
 				rec := httptest.NewRecorder()
@@ -837,7 +837,7 @@ func dtrIngressRowWith(t *testing.T, s *prefetchSoR, body []byte, level Conforma
 	env := newInProcessExchange(t)
 	env.originator.cfg.SoR = s.sor()
 	env.originator.cfg.ConformanceEnforcement = level
-	env.originator.cfg.EnrichNativeRequests = enrich
+	optInEnrichment(env.originator, enrich)
 	declareFramedDTR(t, env, true)
 	env.payerReturns(LegResult{Response: testResponse(packageAnswer)})
 	return env, postDTRIngress(env, body)

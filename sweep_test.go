@@ -147,6 +147,13 @@ var sweepAllowlist = map[string][]string{
 		"<a href=\"/medicare/coordination-benefits-recovery/workers-comp-set-aside-arrangements\" class=\"menu-item-element\" aria-current=\"false\" tracking-data=\"88fc6d69-79bf-4221-bc9e-ca8b14657204\" data-drupal-link-system-path=\"node/176641\">Workers&#039; comp Medicare set aside arrangements</a>",
 	},
 
+	// The certificate identity a partner verifies the image's signature against is the
+	// publish workflow's own URL, which names the repository it runs in: a fact to verify,
+	// not internal vocabulary.
+	"README.md": {
+		"`cosign verify --certificate-identity https://github.com/SmartHealthNetwork/shn-platform/.github/workflows/publish-image.yml@refs/heads/main --certificate-oidc-issuer https://token.actions.githubusercontent.com ghcr.io/smarthealthnetwork/shn-gateway:<version>`.",
+	},
+
 	// ASCII uppercase range is Go syntax, not a decision label.
 	"engine/pasgraph.go": {
 		"if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '.') {",

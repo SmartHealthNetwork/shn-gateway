@@ -4,12 +4,15 @@
 # version tracks gateway/go.mod), so there is no local replace. Our cloud deploy
 # builds this exact artifact (dogfood); the local separated smoke stack builds the
 # same binary from the workspace instead (deploy/multiprocess/Dockerfile, gateway-ws).
-FROM golang:1.26 AS builder
+# The builder runs on the build's own platform and compiles for the target one, so one build
+# makes the linux/amd64 and linux/arm64 images of the published release without emulation.
+FROM --platform=$BUILDPLATFORM golang:1.26.9@sha256:f1f0bcc2c524a3ced375fcb4d1ecb7aa371aa7070e112599aaca45cc02d0101b AS builder
+ARG TARGETOS TARGETARCH
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/gateway ./cmd/gateway
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags='-s -w' -o /out/gateway ./cmd/gateway
 
 # Distroless static NONROOT (uid/gid 65532): no shell (keep healthchecks binary/none),
 # CA certs for outbound HTTPS. The runtime reads its key bundle from the mounted

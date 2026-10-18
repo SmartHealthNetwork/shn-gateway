@@ -56,7 +56,9 @@ import (
 //	leg.downgrade     the recipient advertises frame v1 but answered bare; processed as
 //	                  legacy (stale-feed downgrade) (Detail = downgrade message)
 //	leg.transformed   a cross-version transform chain bridged the leg to the peer's
-//	                  contract line before it was sent (Detail = comma-joined module
+//	                  contract line before it was sent, or (Direction "answer") a
+//	                  payer's questionnaire package answer to this gateway's own
+//	                  DTR line before its participant got it (Detail = comma-joined module
 //	                  chain summary, e.g. "pa.pas 2.0->2.1, pa.pas 2.1->2.2"). Note: the
 //	                  Provenance + LossReport this describes ride INSIDE the transformed
 //	                  payload itself (or observer-only where the target profile can't
@@ -108,7 +110,7 @@ type ObserverEvent struct {
 	Time           time.Time       `json:"time"`
 	Kind           string          `json:"kind"`
 	LegType        string          `json:"legType,omitempty"`
-	Direction      string          `json:"direction,omitempty"` // "originate" | "ingress" | "validate" | "sor"
+	Direction      string          `json:"direction,omitempty"` // "originate" | "ingress" | "validate" | "sor" | "answer"
 	CorrelationID  string          `json:"correlationId,omitempty"`
 	Counterpart    string          `json:"counterpart,omitempty"`
 	AuthorityFrame string          `json:"authorityFrame,omitempty"`

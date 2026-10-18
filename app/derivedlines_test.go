@@ -24,7 +24,7 @@ func nativePayerEnv(extra map[string]string) map[string]string {
 
 const system22 = "pa.crd@2.2, pa.dtr@2.2, pa.pas@2.2"
 
-var derived22 = []string{shnsdk.ContractPACRD22, shnsdk.ContractPADTR22, shnsdk.ContractPAPAS22, shnsdk.ContractPAPDex21}
+var derived22 = []string{shnsdk.ContractPACRD22, shnsdk.ContractPADTR22, shnsdk.ContractPAPAS22}
 
 // TestDerivedDeclaration: with SHN_CONTRACT_VERSIONS unset, a payer
 // forwarding to a system that declares its versions declares that system's
@@ -59,7 +59,7 @@ func TestDerivedDeclaration(t *testing.T) {
 	})
 	t.Run("no system versions keeps the default", func(t *testing.T) {
 		cfg := load(t, nativePayerEnv(nil))
-		if !slices.Equal(cfg.ContractVersions, shnsdk.SupportedContractVersions()) || cfg.ContractVersionsDerived {
+		if !slices.Equal(cfg.ContractVersions, engine.DefaultContractVersions()) || cfg.ContractVersionsDerived {
 			t.Fatalf("declared %q (derived %v), want the build default", cfg.ContractVersions, cfg.ContractVersionsDerived)
 		}
 	})
@@ -78,8 +78,12 @@ func TestDerivedDeclaration_BootRefusals(t *testing.T) {
 			[]string{"pa.pas@3.0", "SHN_CONTRACT_VERSIONS"}},
 		{"system declares no PA line", map[string]string{"PAYER_DAVINCI_CONTRACT_VERSIONS": "pa.pdex@2.1"},
 			[]string{"no CRD, DTR or PAS line"}},
-		{"explicit declaration with no PA line", map[string]string{"SHN_CONTRACT_VERSIONS": "pa.pdex@2.1"},
-			[]string{"SHN_CONTRACT_VERSIONS", "no CRD, DTR or PAS line"}},
+		// No gateway declares pa.pdex@2.1: an explicit declared set that still
+		// names it refuses to boot and says to remove it, whatever else it names.
+		{"explicit declaration naming only the retired pa.pdex@2.1", map[string]string{"SHN_CONTRACT_VERSIONS": "pa.pdex@2.1"},
+			[]string{"SHN_CONTRACT_VERSIONS", `"pa.pdex@2.1"`, "remove it from the declared set"}},
+		{"explicit full declaration still naming pa.pdex@2.1", map[string]string{"SHN_CONTRACT_VERSIONS": "pa.crd@2.0, pa.dtr@2.0, pa.pas@2.0, pa.pdex@2.1"},
+			[]string{"SHN_CONTRACT_VERSIONS", `"pa.pdex@2.1"`, "remove it from the declared set"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env := nativePayerEnv(tc.env)
@@ -94,8 +98,15 @@ func TestDerivedDeclaration_BootRefusals(t *testing.T) {
 			}
 		})
 	}
-	t.Run("a provider's pdex-only declaration is not refused", func(t *testing.T) {
-		env := baseEnv(map[string]string{"SHN_CONTRACT_VERSIONS": "pa.pdex@2.1"})
+	t.Run("a provider whose declaration still names pa.pdex@2.1 is refused too", func(t *testing.T) {
+		env := baseEnv(map[string]string{"SHN_CONTRACT_VERSIONS": "pa.crd@2.0, pa.dtr@2.0, pa.pas@2.0, pa.pdex@2.1"})
+		_, err := loadConfig(func(k string) string { return env[k] })
+		if err == nil || !strings.Contains(err.Error(), "remove it from the declared set") {
+			t.Fatalf("provider boot: %v", err)
+		}
+	})
+	t.Run("a provider's declaration without pa.pdex@2.1 boots", func(t *testing.T) {
+		env := baseEnv(map[string]string{"SHN_CONTRACT_VERSIONS": "pa.crd@2.0, pa.dtr@2.0, pa.pas@2.0"})
 		if _, err := loadConfig(func(k string) string { return env[k] }); err != nil {
 			t.Fatalf("provider refused: %v", err)
 		}

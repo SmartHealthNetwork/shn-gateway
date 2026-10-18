@@ -35,10 +35,11 @@ func levelInquiryWith(t *testing.T, old, new string) string {
 }
 
 // levelInquiryPayerAnswer is a readable answer naming one patient: the
-// published 2.0 inquiry response.
+// published 2.0 inquiry response, its item echoing the inquiry line's trace
+// number (TRN-1) as the payer answering that line does.
 func levelInquiryPayerAnswer(t *testing.T) []byte {
 	t.Helper()
-	return inquiryFixture(t, "pas-inquiry-response-2.0.json")
+	return answerEchoingTrace(t, inquiryFixture(t, "pas-inquiry-response-2.0.json"), "http://provider.example/trn", "TRN-1")
 }
 
 func levelInquireRow(t *testing.T, level ConformanceEnforcement, body string, answer []byte) (*inProcessExchange, *httptest.ResponseRecorder, *levelIngressEvents) {
@@ -133,7 +134,9 @@ func TestLevelInquireIngress_AnswerDuplicateKeyRefusesAtEveryLevel(t *testing.T)
 	for _, level := range allLevels {
 		t.Run(level.String(), func(t *testing.T) {
 			env, rec, ev := levelInquireRow(t, level, levelInquiry(t, "MBR-COVERED", ""), answer)
-			wantAnswerRefusedAtEveryLevel(t, env, rec, ev, http.StatusBadGateway, "invalid prior-authorization inquiry answer")
+			// The refusal names the repeated member and where, so the payer
+			// can fix it.
+			wantAnswerRefusedAtEveryLevel(t, env, rec, ev, http.StatusBadGateway, `payer inquiry answer repeats the JSON member \"language\" in the top-level object: it can be read two ways, so it is not carried`)
 		})
 	}
 }
@@ -178,7 +181,9 @@ func TestLevelInquireIngress_NetworkRulesRefuseAtEveryLevel(t *testing.T) {
 		"no Claim.patient":                 {strings.Replace(base, `"patient":{"reference":"Patient/MBR-COVERED"},`, ``, 1), http.StatusBadRequest, "PAS inquiry Claim missing patient", nil},
 		"unknown member":                   {strings.ReplaceAll(base, "MBR-COVERED", "MBR-NOBODY"), http.StatusBadRequest, "unknown member", nil},
 		"no registered payer":              {strings.Replace(base, `"value":"00001"`, `"value":"99999"`, 1), http.StatusUnprocessableEntity, "no registered payer for identifier", nil},
+		// Under the participant's own setting; by default the pair is carried.
 		"route": {base, http.StatusUnprocessableEntity, "no shared contract line", func(t *testing.T, env *inProcessExchange) {
+			env.originator.cfg.RequireSharedLine = true
 			declareRecipientVersions(t, env, []string{"pa.crd@2.0"})
 		}},
 	}

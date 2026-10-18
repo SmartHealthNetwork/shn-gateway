@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"hash/fnv"
 	"io"
+	"math/rand/v2"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -77,15 +80,76 @@ func lifecycleEnv(t *testing.T, failBuild bool) (map[string]string, <-chan struc
 	return env, started, canceled, finish
 }
 
-// freePort is a loopback port the kernel just handed out.
+// The loopback ports freePort chooses from: below the ephemeral range of Linux
+// (32768-60999) and of macOS (49152-65535).
+const (
+	freePortLow  = 20000
+	freePortHigh = 32767
+)
+
+// freePort is a loopback port, probed free, for Run to bind. Run binds PORT
+// itself, after building the gateway, so a test can only hand it a number and
+// release the port until then. A port the kernel hands out for 127.0.0.1:0 sits
+// in the ephemeral range, where any other socket on the machine (an outgoing
+// connection's own port, another listener on port 0) can take it in that window.
+// A port below every ephemeral range is taken only by a socket bound to it by
+// number. The probe order is seeded by the process and the test, so two
+// processes, or two tests, start from different ports; two calls in one test
+// return the same port while it is free.
 func freePort(t *testing.T) string {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(t.Name()))
+	r := rand.New(rand.NewPCG(uint64(os.Getpid()), h.Sum64()))
+	var last error
+	for range 200 {
+		port := freePortLow + r.IntN(freePortHigh-freePortLow+1)
+		l, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+		if err != nil {
+			last = err
+			continue
+		}
+		_ = l.Close()
+		return strconv.Itoa(port)
 	}
-	defer l.Close()
-	return strconv.Itoa(l.Addr().(*net.TCPAddr).Port)
+	t.Fatalf("freePort: no free port in %d-%d after 200 probes; last: %v", freePortLow, freePortHigh, last)
+	return ""
+}
+
+func TestFreePortIsBelowEveryEphemeralRange(t *testing.T) {
+	ephemeral := [][2]int{{32768, 60999}, {49152, 65535}} // Linux, macOS
+	// The range this machine actually uses, where it says: a host that widens
+	// its ephemeral range over freePort's makes freePort unsafe there.
+	if b, err := os.ReadFile("/proc/sys/net/ipv4/ip_local_port_range"); err == nil {
+		var lo, hi int
+		if _, err := fmt.Sscan(string(b), &lo, &hi); err != nil {
+			t.Fatalf("read ip_local_port_range %q: %v", b, err)
+		}
+		if lo <= freePortHigh && hi >= freePortLow {
+			t.Fatalf("this host's ephemeral range %d-%d overlaps freePort's %d-%d", lo, hi, freePortLow, freePortHigh)
+		}
+	}
+	seen := map[int]bool{}
+	for i := range 50 {
+		t.Run(strconv.Itoa(i), func(t *testing.T) {
+			port, err := strconv.Atoi(freePort(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if port < freePortLow || port > freePortHigh {
+				t.Fatalf("freePort = %d, want %d-%d", port, freePortLow, freePortHigh)
+			}
+			for _, r := range ephemeral {
+				if port >= r[0] && port <= r[1] {
+					t.Fatalf("freePort = %d, inside the ephemeral range %d-%d", port, r[0], r[1])
+				}
+			}
+			seen[port] = true
+		})
+	}
+	if len(seen) < 2 {
+		t.Errorf("freePort gave %d distinct ports over 50 tests, want the probe order to vary by test", len(seen))
+	}
 }
 
 // awaitRunStarted waits for ch, or reports Run's own error if it returned

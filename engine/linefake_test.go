@@ -499,3 +499,65 @@ func TestLineFake_InquiryClaimNotHeldToSubmitItemDetail(t *testing.T) {
 		}
 	}
 }
+
+// dtrPackageAnswer is a $questionnaire-package answer: one package parameter
+// named pkgName whose Bundle holds the given entry resource types, and each
+// outcome parameter named in outcomes.
+func dtrPackageAnswer(pkgName string, entries []string, outcomes ...string) []byte {
+	var es []any
+	for _, rt := range entries {
+		es = append(es, lfObject{"resource": lfObject{"resourceType": rt}})
+	}
+	params := []any{}
+	if pkgName != "" {
+		params = append(params, lfObject{"name": pkgName, "resource": lfObject{"resourceType": "Bundle", "type": "collection", "entry": es}})
+	}
+	for _, o := range outcomes {
+		params = append(params, lfObject{"name": o, "resource": lfObject{"resourceType": "OperationOutcome", "issue": []any{}}})
+	}
+	b, _ := json.Marshal(lfObject{"resourceType": "Parameters", "parameter": params})
+	return b
+}
+
+// The $questionnaire-package output profile at each line (the package facts in
+// test/sdkparity/linefake_rules_test.go): the line's own names, the package's
+// and the outcome's cardinality, and the package Bundle's Questionnaire and
+// QuestionnaireResponse entries. Without the profile nothing is checked.
+func TestLineFakeDTRPackageAnswer(t *testing.T) {
+	const out = lfDTR + "dtr-qpackage-output-parameters"
+	q, qr := "Questionnaire", "QuestionnaireResponse"
+	for _, row := range []struct {
+		name, line, profile string
+		answer              []byte
+		valid               bool
+	}{
+		{"2.0 package, no entries", "2.0", out, dtrPackageAnswer("PackageBundle", nil), true},
+		{"2.0 no package", "2.0", out, dtrPackageAnswer("", nil, "operationOutcome"), false},
+		{"2.0 another line's package name only", "2.0", out, dtrPackageAnswer("packagebundle", []string{q, qr}), false},
+		{"2.0 several outcomes", "2.0", out, dtrPackageAnswer("PackageBundle", []string{q}, "operationOutcome", "operationOutcome"), true},
+		{"2.0 package not a Bundle", "2.0", out, []byte(`{"resourceType":"Parameters","parameter":[{"name":"PackageBundle","resource":{"resourceType":"Questionnaire"}}]}`), false},
+		{"2.1 Questionnaire, no response", "2.1", out, dtrPackageAnswer("PackageBundle", []string{q}), true},
+		{"2.1 no Questionnaire", "2.1", out, dtrPackageAnswer("PackageBundle", []string{qr}), false},
+		{"2.1 two responses", "2.1", out, dtrPackageAnswer("PackageBundle", []string{q, qr, qr}), false},
+		{"2.1 outcome only", "2.1", out, dtrPackageAnswer("", nil, "operationOutcome"), true},
+		{"2.1 two outcomes", "2.1", out, dtrPackageAnswer("PackageBundle", []string{q}, "operationOutcome", "operationOutcome"), false},
+		{"2.2 Questionnaire and response", "2.2", out, dtrPackageAnswer("packagebundle", []string{q, qr, "Library"}), true},
+		{"2.2 no response", "2.2", out, dtrPackageAnswer("packagebundle", []string{q}), false},
+		{"2.2 two Questionnaires", "2.2", out, dtrPackageAnswer("packagebundle", []string{q, q, qr}), false},
+		{"2.2 outcome only", "2.2", out, dtrPackageAnswer("", nil, "outcome"), true},
+		{"2.2 two outcomes", "2.2", out, dtrPackageAnswer("", nil, "outcome", "outcome"), false},
+		{"2.2 another line's names are unsliced extras", "2.2", out, dtrPackageAnswer("PackageBundle", []string{q}, "operationOutcome", "operationOutcome"), true},
+		{"versioned profile", "2.2", out + "|2.2.0", dtrPackageAnswer("packagebundle", []string{q}), false},
+		{"no profile: unchecked", "2.0", "", dtrPackageAnswer("", nil), true},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			res, err := NewLineFakeValidator(row.line).Validate(context.Background(), row.answer, row.profile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Valid != row.valid {
+				t.Fatalf("valid=%v, want %v: %v", res.Valid, row.valid, res.Issues)
+			}
+		})
+	}
+}

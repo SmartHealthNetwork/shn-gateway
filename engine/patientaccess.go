@@ -26,7 +26,7 @@ import (
 // patient-access-token gated.
 func (g *Gateway) handlePatientAccessMetadata(w http.ResponseWriter, _ *http.Request) {
 	// D1a: declared-set-driven, through the single accessor (see handleIngressMetadata).
-	cs, err := shnsdk.BuildPatientAccessCapabilityStatement(g.cfg.Clock(), g.declaredContractVersions())
+	cs, err := shnsdk.BuildPatientAccessCapabilityStatementExact(g.cfg.Clock(), g.declaredContractVersions())
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build capabilitystatement failed"})
 		return

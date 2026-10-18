@@ -456,18 +456,25 @@ func (g *Gateway) inquireContinuation(ctx context.Context, r *http.Request, cont
 	if err != nil {
 		return PASDecision{}, http.StatusBadGateway, "build the prior-authorization inquiry: " + err.Error(), err
 	}
-	adapted, _, aerr := g.egressAdapt(route, body, ExchangeIdentity{CorrelationID: corr, LegType: "pas-claim-inquire", Counterpart: cont.PayerHolder})
+	adapted, _, recordWalk, aerr := g.egressWalk(route, body, ExchangeIdentity{CorrelationID: corr, LegType: "pas-claim-inquire", Counterpart: cont.PayerHolder})
 	if aerr != nil {
 		return PASDecision{}, adaptFailureStatus(aerr), aerr.Error(), aerr
 	}
 	if !bytes.Equal(adapted, body) {
 		// The inquiry this gateway authored cannot be carried to the payer's
 		// line unchanged. The sealed payload is the bytes the builder produced,
-		// so sending it after the chain changed them would transmit one message
+		// so sending what the chain made of them would transmit one message
 		// under a seal that describes another. A byte comparison, not a length
 		// one: a chain that swapped a value for another of the same width is the
-		// case a length check would wave through.
-		return PASDecision{}, http.StatusBadGateway, "the prior-authorization inquiry cannot be carried to the payer's line unchanged", nil
+		// case a length check would wave through. The inquiry is carried as
+		// built, at its build line, and the carry recorded (OriginateLeg); the
+		// participant's own setting refuses it as routing instead.
+		if g.cfg.RequireSharedLine {
+			return PASDecision{}, http.StatusUnprocessableEntity, "the prior-authorization inquiry cannot be carried to the payer's line unchanged", nil
+		}
+		route = route.asSent()
+	} else if err := recordWalk(); err != nil {
+		return PASDecision{}, adaptFailureStatus(err), err.Error(), err
 	}
 	// An inquiry is certified against the INQUIRY profiles, never the submit
 	// ones. Its Claim is profile-claim-inquiry, which states none of the

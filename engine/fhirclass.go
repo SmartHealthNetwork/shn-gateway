@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bytes"
 	"encoding/json"
 	"regexp"
 	"strconv"
@@ -391,7 +392,9 @@ func canonicalOf(ref string) string {
 // Temporary seam: shnsdk.OperationValidator should wrap it itself (tracked in
 // the SHN platform repository). Remove this once a released SDK does; the
 // wrapped request is the same either way, so removing it changes nothing a
-// sender sees.
+// sender sees. A check against an explicit profile must then still assert the
+// profile in the wrapped copy's meta.profile and send no ?profile=
+// (validateRequest).
 func wrapValidateResource(body []byte) []byte {
 	var probe struct {
 		ResourceType string `json:"resourceType"`
@@ -421,6 +424,42 @@ func ClassifyFHIRForTest(res shnsdk.Result, body []byte, line, profile string) s
 		return "unavailable"
 	}
 	return "structural"
+}
+
+// validateRequest is the request a check of body against profile sends this
+// gateway's validator: the body and profile to give Validate. A Parameters is
+// wrapped (wrapValidateResource). Against an explicit profile, the wrapped copy
+// asserts that profile as its own meta.profile, in place of any it declares,
+// and no ?profile= is sent: HAPI reads a ?profile= as naming the request's
+// Parameters, so it would judge the wrapper, whose one parameter is named
+// "resource", instead of the resource inside it. Like the wrap, this changes
+// only the request to this gateway's own validator, never a relayed byte; a
+// finding's PayloadSHA256 is still the checked body's.
+func validateRequest(body []byte, profile string) ([]byte, string) {
+	wrapped := wrapValidateResource(body)
+	if profile == "" || bytes.Equal(wrapped, body) {
+		return wrapped, profile
+	}
+	var top map[string]json.RawMessage
+	if json.Unmarshal(body, &top) != nil {
+		return wrapped, profile
+	}
+	meta := map[string]json.RawMessage{}
+	if m, ok := top["meta"]; ok && json.Unmarshal(m, &meta) != nil {
+		return wrapped, profile
+	}
+	if meta == nil { // "meta": null
+		meta = map[string]json.RawMessage{}
+	}
+	p, _ := json.Marshal([]string{profile})
+	meta["profile"] = p
+	m, _ := json.Marshal(meta)
+	top["meta"] = m
+	asserted, err := json.Marshal(top)
+	if err != nil {
+		return wrapped, profile
+	}
+	return wrapValidateResource(asserted), ""
 }
 
 // WrapValidateResourceForTest is wrapValidateResource, for the same tests.

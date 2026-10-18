@@ -81,7 +81,7 @@ func (r approvingPASResponder) Handle(_ context.Context, leg, corrID, _ string, 
 	if line == "" {
 		line = "2.0"
 	}
-	crJSON, err := shnsdk.BuildClaimResponseAtLine(line, "AUTH-0001", now.Add(24*time.Hour).Format(time.RFC3339), "Patient/"+s.member, corrID, now)
+	crJSON, err := shnsdk.BuildClaimResponseAtLineExact(line, "AUTH-0001", now.Add(24*time.Hour).Format(time.RFC3339), "Patient/"+s.member, corrID, testAnswerRequest, now)
 	if err != nil {
 		return LegResult{}, err
 	}
@@ -95,7 +95,7 @@ func (r approvingPASResponder) Handle(_ context.Context, leg, corrID, _ string, 
 		cr,
 		{"resourceType": "Patient", "id": s.member},
 		{"resourceType": "Claim", "id": "fixture-request", "patient": map[string]any{"reference": "Patient/" + s.member}},
-		{"resourceType": "Organization", "id": "payer"},
+		{"resourceType": "Organization", "id": "org-cms-payer"},
 	}
 	entries := []any{}
 	for _, resource := range resources {
@@ -500,7 +500,7 @@ var censusPersonas = map[string]censusPersona{
 	// seedCoverage) already covers both. Demo values are copied VERBATIM from
 	// internal/fhirseed/fhirseed.go's demographics table (the single seed source of truth) —
 	// they MUST match exactly, or the payer-computed PCI would diverge from the
-	// provider-computed one and the bind would 403 "token subject does not match" instead.
+	// provider-computed one and the payer would bind the member to another patient.
 	// No clinical context: the order-dispatch leg never reads ClinicalContext (mirrors
 	// MBR-PAYERB/MBR-PAYERUNKNOWN's shape above, not the CPT-lumbar personas').
 	"MBR-OX": {
@@ -522,7 +522,7 @@ var censusPersonas = map[string]censusPersona{
 	// hermetic provider-data harness. Demo values are copied VERBATIM from
 	// internal/fhirseed/fhirseed.go's demographics table (the single seed source of truth) —
 	// they MUST match exactly, or the payer-computed PCI diverges from the provider-computed
-	// one and the bind 403s "token subject does not match". No clinical context: the HHA lane
+	// one and the payer binds the member to another patient. No clinical context: the HHA lane
 	// attests from the seeded order, never from ClinicalContext.
 	"MBR-PD-UC04": {
 		demo:    Demo{BirthDate: "1949-03-22", FamilyName: "Castellano-HomeHealth"},
@@ -621,7 +621,7 @@ func (d *censusSoR) SupplementalReport(memberID string) ([]byte, bool) {
 	if memberID != "MBR-UC04" {
 		return nil, false
 	}
-	raw, err := shnsdk.BuildDiagnosticReport("dr-uc04-operative", "Patient/MBR-UC04", "72148", "MRI lumbar spine w/o contrast")
+	raw, err := testOwnReport("dr-uc04-operative", "Patient/MBR-UC04", "72148", "MRI lumbar spine w/o contrast")
 	if err != nil {
 		return nil, false
 	}
@@ -764,7 +764,7 @@ func (d *censusSoR) OpenCoverage(memberID string) ([]byte, bool) {
 	if d.payer != nil {
 		payer = *d.payer
 	}
-	cov, err := shnsdk.BuildCoverageWithPayer("Patient/"+memberID, memberID, payer)
+	cov, err := containedPayorCoverage("Patient/"+memberID, memberID, payer)
 	if err != nil {
 		return nil, false
 	}
@@ -925,7 +925,7 @@ func (d *censusSoR) FacilityRecords(memberID string) (map[string][]byte, bool) {
 		return nil, false
 	}
 	patientRef := "Patient/MBR-UC05"
-	dr, err := shnsdk.BuildDiagnosticReport("dr-uc05-operative", patientRef, "72148", "Operative report — lumbar microdiscectomy")
+	dr, err := testOwnReport("dr-uc05-operative", patientRef, "72148", "Operative report — lumbar microdiscectomy")
 	if err != nil {
 		return nil, false
 	}

@@ -1,5 +1,5 @@
 # gateway/Dockerfile.evalseed — builds the eval-bundle seed init binary.
-FROM golang:1.26 AS build
+FROM golang:1.26.9@sha256:f1f0bcc2c524a3ced375fcb4d1ecb7aa371aa7070e112599aaca45cc02d0101b AS build
 WORKDIR /src
 COPY . .
 RUN CGO_ENABLED=0 go build -o /evalseed ./cmd/evalseed

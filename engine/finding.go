@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+
+	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 )
 
 // findingContextKey carries the leg metadata a conformance finding needs from
@@ -24,6 +26,11 @@ type findingContext struct {
 	CorrelationID string
 	Seam          string
 	Whose         string
+	// Edit and SourceSHA256 are set for the check of a payload a registered
+	// edit changed: the edit, and the sha256 of the payload as it arrived,
+	// before the edit (the finding's PayloadSHA256 is the edited payload's).
+	Edit         relay.EditID
+	SourceSHA256 string
 }
 
 // withFindingContext tags ctx with the leg metadata for every governed check
@@ -92,21 +99,26 @@ const (
 // a future call site) that serializes it directly, or logs f.Issues on its
 // own, leaks a diagnostic that can contain an entire foreign resource (§5).
 type ConformanceFinding struct {
-	Kind          string   `json:"kind"`
-	Direction     string   `json:"direction,omitempty"`
-	LegType       string   `json:"legType"`
-	CorrelationID string   `json:"correlationId,omitempty"`
-	Seam          string   `json:"seam,omitempty"`
-	Whose         string   `json:"whose,omitempty"`
-	Line          string   `json:"line,omitempty"`
-	Profile       string   `json:"profile,omitempty"`
-	Level         string   `json:"level"`
-	Verdict       string   `json:"verdict,omitempty"` // "unavailable" when the check could not run; "valid" when a candidate line after the first passed; absent for an invalid verdict
-	Decision      string   `json:"decision"`
-	Rule          string   `json:"rule,omitempty"`
-	Path          string   `json:"path,omitempty"`
-	PayloadSHA256 string   `json:"payloadSha256,omitempty"`
-	Issues        []string `json:"issues,omitempty"` // RAW diagnostics; see the struct comment — emitFinding redacts before either carrier sees this.
+	Kind          string `json:"kind"`
+	Direction     string `json:"direction,omitempty"`
+	LegType       string `json:"legType"`
+	CorrelationID string `json:"correlationId,omitempty"`
+	Seam          string `json:"seam,omitempty"`
+	Whose         string `json:"whose,omitempty"`
+	Line          string `json:"line,omitempty"`
+	Profile       string `json:"profile,omitempty"`
+	Level         string `json:"level"`
+	Verdict       string `json:"verdict,omitempty"` // "unavailable" when the check could not run; "valid" when a candidate line after the first passed; absent for an invalid verdict
+	Decision      string `json:"decision"`
+	Rule          string `json:"rule,omitempty"`
+	Path          string `json:"path,omitempty"`
+	PayloadSHA256 string `json:"payloadSha256,omitempty"`
+	// Edit and SourcePayloadSHA256 are set on the check of a payload a
+	// registered edit changed: the edit's id, and the sha256 of the payload as
+	// it arrived, before the edit. Neither carries a payload.
+	Edit                string   `json:"edit,omitempty"`
+	SourcePayloadSHA256 string   `json:"sourcePayloadSha256,omitempty"`
+	Issues              []string `json:"issues,omitempty"` // RAW diagnostics; see the struct comment — emitFinding redacts before either carrier sees this.
 	// DeclaredLine and Lines are set only by a candidate-line certification (a
 	// payer's answer checked against the lines this gateway supports): the line the
 	// leg was routed at — the payer's declared line, or this gateway's own line for
@@ -176,6 +188,9 @@ func countingEmit(ctx context.Context, emit func(ConformanceFinding)) func(Confo
 // bindFinding ties a finding to the call ctx belongs to: its binding fields
 // and, at observe, its leg's tally.
 func bindFinding(ctx context.Context, f ConformanceFinding) ConformanceFinding {
+	if fc := findingContextFrom(ctx); fc.Edit != "" {
+		f.Edit, f.SourcePayloadSHA256 = string(fc.Edit), fc.SourceSHA256
+	}
 	f.binding = findingBindingFrom(ctx)
 	f.tally = legTallyFrom(ctx)
 	return f

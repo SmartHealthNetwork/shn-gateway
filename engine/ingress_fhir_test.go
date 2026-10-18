@@ -189,6 +189,9 @@ func TestFHIRIngressExchangeFailures(t *testing.T) {
 				case "unframed transport":
 					env.substrate.mutateResp = func([]byte) []byte { return []byte(`{`) }
 				case "unsupported contract":
+					// Refused only under the participant's own setting; by
+					// default the pair is carried (line_carry_test.go).
+					env.originator.cfg.RequireSharedLine = true
 					declareRecipientVersions(t, env, []string{"pa.crd@2.0"})
 				case "payer absent":
 					requestBody = strings.ReplaceAll(body, `,"payor":[{"identifier":{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00001"}}]`, "")

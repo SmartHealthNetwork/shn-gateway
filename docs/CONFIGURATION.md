@@ -44,7 +44,7 @@ below):
 | `FHIR_VALIDATE_URL` | A FHIR `$validate` endpoint (a HAPI server with the Da Vinci CRD/DTR/PAS + US Core IGs loaded). The production path. |
 | `SHN_FAKE_VALIDATOR` | Set to `1` to use a no-op validator. **Dev only** — skips real profile validation. Use for a first wiring smoke test; never in production. |
 | `CDS_ADVERTISE_HOOKS` | Optional. A comma-separated list of the CDS Hooks your provider ingress advertises and dispatches, from `order-sign`, `order-select`, `order-dispatch`. Unset advertises every hook the network carries. Set it only to narrow: when no payer your gateway routes to carries a hook's leg, advertising it promises a service that can only fail at routing; a request to a service id you do not advertise is refused with `404` and the ids you offer. A hook the network does not carry refuses to boot. This is an interim override — the network does not yet carry a declaration of the hooks each payer offers, and the listing will derive from routing once it does. |
-| `CONFORMANCE_ENFORCEMENT` | `none`, `observe` (the default when unset), `structural` or `strict`. A level applies only to what each leg's check covers (a resource's declared profiles, else its base FHIR R4 definition; a carried PAS request is not `$validate`d): see [INTEGRATION.md](INTEGRATION.md#conformance-enforcement). At `none` no payload conformance check runs (no FHIR profile validation, no CDS Hooks response rules, no content checks) and no finding is recorded. At `observe` every check runs, each defect is recorded as a finding in your gateway's log and observer stream, and the message is carried as sent, apart from the gateway's registered edits (the callback removed, payer identity mapping, and, when the provider opts in with `ENRICH_NATIVE_REQUESTS=true`, prefetch and coverage obtained; participant protocol §7a.4); a validator that cannot be reached is recorded the same way. From v0.60.0, at `observe` a check that can only record does not hold the message: it is queued, and its finding is written when the validator answers. The queue is bounded: a check that finds it full is dropped, and the gateway logs `gateway: observe check dropped` (on the 1st, 2nd, 4th, 8th… drop). Two kinds of check still wait: the check of a payload this gateway itself translated between IG lines, which refuses at every level, and a payer gateway's checks of the decision ExplanationOfBenefits it builds from its system's answer, because whether each decision is written depends on them. At `observe` all of one exchange's decision checks share at most 2 seconds, a fixed bound; a check that bound does not reach is recorded as unavailable and its decision is written. At `structural` every check runs, a message whose structure is broken (a missing required element, an element the resource does not define, a value of the wrong JSON type or one that cannot be read, a CDS Hooks answer that cannot be read or lacks a required member, a request or answer the gateway cannot read, or a validator result the gateway cannot classify) is refused as at `strict`, and every other defect is recorded as at `observe`. Of FHIR profile issues, only invariants and the validator's recognized issues for a code outside its code list (licensed code systems included) are recorded. From v0.55.0 that includes a code system the validator does not know (`Terminology_TX_System_Unknown`, which it reports as an error only for a system in the HL7 FHIR namespace, a misspelled HL7 system URL included): an unknown code system is recorded and the message relayed when nothing else in it refuses at this level, where earlier releases refused it. Any other terminology issue refuses, and every other FHIR profile issue and every fatal issue refuses; an unreachable validator is recorded. At `strict` a defect refuses the message, and the refusal names the rule and the issues it was based on; an unreachable validator refuses with `500`. A gateway at `observe` waits up to 10 seconds on stop for its queued checks, after its listener's 5-second shutdown and up to 2 seconds for the handlers it cuts, so give its container a stop timeout above about 17 seconds (Docker's default is 10); a gateway stopped sooner loses the findings of the checks still queued. Network rules refuse at every level: authentication, authority (including a token presented with a request other than the one it was issued for), consent, the patient binding (each gateway identifies the member the request names by its own system), routing, replay, a repeated member name in any body, the contract line stamped on an answer's frame, and the check of a payload this gateway itself translated between IG lines. Any other value refuses to boot. |
+| `CONFORMANCE_ENFORCEMENT` | `none`, `observe` (the default when unset), `structural` or `strict`. A level applies only to what each leg's check covers (a resource's declared profiles, else its base FHIR R4 definition; a carried PAS request is not `$validate`d): see [INTEGRATION.md](INTEGRATION.md#conformance-enforcement). At `none` no payload conformance check runs (no FHIR profile validation, no CDS Hooks response rules, no content checks) and no finding is recorded. At `observe` every check runs, each defect is recorded as a finding in your gateway's log and observer stream, and the message is carried as sent, apart from the gateway's registered edits (the callback removed, payer identity mapping, and, when the provider opts in with `ENRICH_NATIVE_REQUESTS=true`, prefetch and coverage obtained; participant protocol §7a.4); a validator that cannot be reached is recorded the same way. From v0.60.0, at `observe` a check that can only record does not hold the message: it is queued, and its finding is written when the validator answers. The queue is bounded: a check that finds it full is dropped, and the gateway logs `gateway: observe check dropped` (on the 1st, 2nd, 4th, 8th… drop). Two kinds of check still wait: the check of a payload this gateway itself translated between IG lines, which refuses at every level, and a payer gateway's checks of the decision ExplanationOfBenefits it builds from its system's answer, because whether each decision is written depends on them. At `observe` all of one exchange's decision checks share at most 2 seconds, a fixed bound; a check that bound does not reach is recorded as unavailable and its decision is written. At `structural` every check runs, a message whose structure is broken (a missing required element, an element the resource does not define, a value of the wrong JSON type or one that cannot be read, a CDS Hooks answer that cannot be read or lacks a required member, a request or answer the gateway cannot read, or a validator result the gateway cannot classify) is refused as at `strict`, and every other defect is recorded as at `observe`. Of FHIR profile issues, only invariants and the validator's recognized issues for a code outside its code list (licensed code systems included) are recorded. From v0.55.0 that includes a code system the validator does not know (`Terminology_TX_System_Unknown`, which it reports as an error only for a system in the HL7 FHIR namespace, a misspelled HL7 system URL included): an unknown code system is recorded and the message relayed when nothing else in it refuses at this level, where earlier releases refused it. Any other terminology issue refuses, and every other FHIR profile issue and every fatal issue refuses; an unreachable validator is recorded. At `strict` a defect refuses the message, and the refusal names the rule and the issues it was based on; an unreachable validator refuses with `500`. A gateway at `observe` waits up to 10 seconds on stop for its queued checks, after its listener's 5-second shutdown and up to 2 seconds for the handlers it cuts, so give its container a stop timeout above about 17 seconds (Docker's default is 10); a gateway stopped sooner loses the findings of the checks still queued. From v0.62.0, a payer's PAS `$submit` or amendment answer the gateway cannot read (`answer.shape`) is read by the graph rule of its IG line (PAS 2.0.1: every reference resolves, the request Claim's included; 2.1.0: only that `ClaimResponse.request` names the request Claim; 2.2.1: every reference resolves except one to the request Claim, which `request` must name), at the answer's candidate lines, in the order its FHIR profile is certified at, at the routed line and the lines the gateway has a validator lane for (a validator serving several lines judges an answer once, at the first of them): valid on any line is valid, and an answer read at a line after the first is recorded at that line. So a gateway with a 2.1 validator lane carries any PAS answer that names its request Claim, however incomplete for 2.0.1 or 2.2.1, and a rule only one line states (PAS 2.2.1's inquiry-answer rule that a ClaimResponse name its Claim or give a Data Absent Reason) refuses only where every candidate line carries it (gateway STABILITY.md, "A PAS answer is read at its IG line"). Network rules refuse at every level: authentication, authority (including a token presented with a request other than the one it was issued for), consent, the patient binding (each gateway identifies the member the request names by its own system), routing, replay, a repeated member name in any body, and the check of a payload this gateway itself translated between IG lines. From v0.62.0 an answer whose frame states another contract line than its leg was routed at is relayed, and refused only under `REQUIRE_SHARED_LINE=true`. Any other value refuses to boot. |
 
 If neither `FHIR_VALIDATE_URL` nor `SHN_FAKE_VALIDATOR` is set (and discovery
 advertises none), the gateway exits with `refusing to run without per-message
@@ -71,6 +71,7 @@ See [`deploy/bundle/README.md`](../deploy/bundle/README.md).
 
 | Env var | Applies to | Description |
 |---|---|---|
+| `PATIENT_ACCESS_API` | payer | `off` leaves the Patient Access API unmounted: `GET /metadata` and `GET /ExplanationOfBenefit` answer `404`, and nothing else changes. Unset or `on` (the default) serves it. Any other value, or any value on another role, refuses to boot. The gateway's liveness is `GET /health` on every role, whichever this is. Temporary: the Patient Access API is being removed, and this setting goes with it. |
 | `PAYER_DIRECTORY` | provider | **Static override.** Path to a JSON file mapping a member's Coverage payor identity (`{"system","value"}`) to the payer holder id you originate to. When set, it takes precedence over the default feed-derived routing described below — use it for bootstrap/testing, or when you route to a payer that does not publish its identity in the network feed. Example row: `[{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00001","holderId":"payer"}]`. |
 
 **Payer routing is coverage-derived, off the network feed by default (FR-G41).** A provider
@@ -279,7 +280,10 @@ network, at every conformance level. There is nothing to configure:
   example `["E-01","E-07"]`: `fhirServer` and `fhirAuthorization` removed, and
   the coverage read through `fhirServer` carried); on a leg from the network,
   the request as forwarded to your system (`["E-03"]`: your payer identity
-  mapped). Only the ids: never a value an edit removed or wrote. The ids are
+  mapped); and, from v0.62.0, on a call from your own system, the answer as
+  given to your system (`["E-08"]`: a questionnaire package answer's parameter
+  names renamed to your DTR line's). Only the ids: never a value an edit
+  removed or wrote. The ids are
   named once the request has left the gateway: the receiver answered (with
   anything, a refusal included), or the connection failed after the request
   was written. A request that was never sent names none: one refused before it
@@ -541,6 +545,42 @@ the gateway does not re-send an amendment for the requester.
   answer), or a later re-pend reopens the authorization, the old decision's EOB is removed
   and the gateway emits `pend.eob-removed`: the member sees no EOB for it until a decision
   arrives with one.
+- **A decision's ExplanationOfBenefit states only what your answer and the request
+  supply.** From v0.62.0 its `created`, `insurer` and `outcome` are your ClaimResponse's
+  (on an inquiry, the ClaimResponse that carried the decision), its `type`, `provider`,
+  `insurance` and item `sequence` are the request Claim's, its `preAuthRef` is your own
+  authorization numbers as stated (your `preAuthRef`, then the review action `number` on
+  the item's adjudication, on your header `adjudication` and on each carried `addItem`'s
+  adjudication, each once),
+  and its item adjudication is your ClaimResponse's `item.adjudication` for that item:
+  category, amount and reasons value for value, and your PAS review action re-expressed
+  value for value in the PDex review action extension, the one defined for the
+  ExplanationOfBenefit adjudication context (a review action on your header `adjudication`
+  or an `addItem` for the item is carried the same way). The EOB item is the request item
+  that codes the order, its `productOrService` as written, and only that item's
+  adjudication is carried (on an inquiry, your ClaimResponse item with the same trace
+  number). The request item's `net` is added as
+  `submitted` only when you stated no `submitted` entry. A provider, insurer or coverage is
+  stated by the identifier its reference or its Bundle entry carries, else by the literal
+  reference. The EOB is base FHIR R4 and claims no PDex profile, and the Patient Access
+  statement no longer claims the PDex profile or guide: PDex's closed adjudication slicing
+  cannot carry an amountless decision without an amount you never stated. For the same
+  reason no gateway declares the `pa.pdex@2.1` contract line (`SHN_CONTRACT_VERSIONS`
+  below).
+- **Your decision is never refused over this gateway's record of it.** From v0.62.0, when
+  the EOB cannot state your decision as you wrote it (an element it requires is absent, a
+  `processNote` type outside `NoteType`, a review action sub-extension with no counterpart
+  in the EOB's extension, no item of your ClaimResponse answering the request item that
+  codes the order (on submit, none states that item's sequence; on an inquiry, none echoes
+  the line's trace number), or an `addItem` for that item that also names another item
+  sequence), your decision is relayed exactly and recorded with no EOB, and the gateway
+  emits `pa.decision-eob-not-written` naming the detail. A decision that reads
+  as a denial yet states a top-level `preAuthRef` is relayed exactly and nothing is written
+  from it (`pend.decision-not-recorded`). Before v0.62.0 strict answered both with 502. A
+  decision EOB that fails its own validation, or whose validation cannot run at strict,
+  is not written either; your decision is relayed exactly and recorded without it, and
+  `pa.decision-eob-not-written` names the failure. Before v0.62.0 strict answered 422
+  (or 500). No event or log line about the EOB echoes a value you stated.
 - **Without `SHN_STORE_DATABASE_URL` the ledger is in memory**, so it does not
   survive a restart: after one, a follow-up about an authorization pended before the
   restart cannot be resolved, and the requester submits again. Set the DSN for any
@@ -719,7 +759,20 @@ as one `referenced` parameter (a Patient about another patient is refused with 5
 level; one your system cannot supply is refused at `strict` and left out below it). The request is sent to the payer's gateway naming the operation, which a payer
 gateway accepts only when it declares the framed-operation capability (`v1op`); a payer that
 does not is refused before anything is sent with 502 `payer gateway does not support framed
-DTR operations (upgrade required)`. The payer's answer is returned to your EHR exactly.
+DTR operations (upgrade required)`. The payer's answer is returned to your EHR exactly, with
+one exception from v0.62.0: when `SHN_CONTRACT_VERSIONS` declares exactly one DTR line and
+the payer answers in the other DTR line's parameter names, the gateway renames them to your
+line's (registered edit E-08): `PackageBundle` (DTR 2.0.1 and 2.1.0) and `packagebundle`
+(2.2.0) for the package, and toward 2.2.0, `operationOutcome` to `outcome`, and carries
+the package's QuestionnaireResponse across the lines through the registered DTR steps (the
+Coverage context's place and the intended-use code system). Every other byte is the payer's.
+It does so only when the answer is valid at its own line; otherwise the answer is
+returned as sent (and judged as a payer's answer at your conformance level). An answer that
+cannot be valid at your line (a 2.0.1 package with no QuestionnaireResponse, which 2.2.0
+requires, several outcomes toward 2.2.0, or a Questionnaire written for another line) is
+refused at every level, the
+refusal saying the payer answered: the gateway never fills. Declaring several DTR lines
+keeps every answer exact, since the gateway cannot know which names your EHR reads.
 
 `GET /cds-services` lists one CDS service per hook: `shn-order-sign` (`order-sign`),
 `shn-order-select` (`order-select`) and `shn-order-dispatch` (`order-dispatch`). Post each
@@ -1192,7 +1245,13 @@ never read `fhirServer`.
   a port from 1 to 65535 when it names one; the mode's address rules applied to an address
   literal, to every address the host resolves to, and again to the address the connection is
   made to, which is only one that was checked. At most two reads a request. Redirects are never
-  followed, no proxy is used, TLS (1.2 or later) is verified, each connection has 2 s to
+  followed, no proxy is used, TLS (1.2 or later) is verified against the system's trusted
+  certificate authorities. An EHR server whose certificate a private CA signs is trusted by
+  adding that CA to them: on Linux (the gateway's image), its certificate in a directory named
+  in `SSL_CERT_DIR` beside the system's own, for example
+  `SSL_CERT_DIR=/etc/ssl/certs:/etc/ehr-ca`; on macOS or Windows, the system's trust store.
+  Every TLS connection the gateway makes then trusts it, and verification cannot be turned
+  off. Each connection has 2 s to
   connect and 2 s for TLS, both reads share one 4 s budget, and each answer may be at most
   512 KiB, with its headers at most 64 KiB (an answer whose headers are larger reads as not
   reached). Each read asks for `application/fhir+json` and accepts an answer whose
@@ -1308,7 +1367,7 @@ own way, set `PAYER_DAVINCI_BACKEND_CORRELATION=off` and it is not sent.
 | `PAYER_DAVINCI_PAS_NATIVE` | **No longer a switch.** PAS submit/update always forward to the payer's `/Claim/$submit` along with every other leg; there is no in-process PAS fallback to select. Setting it to any value changes nothing. From shn-gateway v0.60.0, a gateway that sets it, to any value, logs `gateway: PAYER_DAVINCI_PAS_NATIVE is set but is no longer a switch` at boot, and one that leaves it unset logs nothing about it; remove it. Releases v0.39.0 through v0.59.x log a similar notice whenever it is not `true`, unset included. |
 | `PAYER_DAVINCI_CRD_SERVICE_ID` | Optional: names your CDS service for `order-select` and `order-sign` requests. Empty (the default) ⇒ each request goes to the one service your CDS service listing offers for the request's hook (see [CDS service selection](#cds-service-selection)). The named service must be in your listing and answer the request's hook; any other request is refused. |
 | `PAYER_DAVINCI_DISPATCH_SERVICE_ID` | Optional: names your CDS service for `order-dispatch` requests, with the same rules. Empty ⇒ the service your listing offers for `order-dispatch`. |
-| `PAYER_DAVINCI_CONTRACT_VERSIONS` | Declared Da Vinci contract versions for the partner payer, comma-separated `<contract>@<line>` tokens (e.g. `pa.pas@2.0, pa.crd@2.0`). Two things read this: the connectivity checks verify the partner's published capability against it (`version-drift` on disagreement, FR-G46), and native-forward routing refuses (before forwarding) any leg whose contract shares no line with it (FR-G48). Requires `PAYER_DAVINCI_BASE_URL`. Unset ⇒ native-forward legs are unfiltered (today's default) and the checks skip the drift comparison. From shn-gateway v0.59.0 it is also this gateway's own declaration when `SHN_CONTRACT_VERSIONS` is unset (see [Exchange contract lines](#exchange-contract-lines-shn_contract_versions)); a value that names no `pa.crd`, `pa.dtr` or `pa.pas` line, or a `pa.crd`, `pa.dtr` or `pa.pas` line this build cannot exchange, then refuses boot. Editing it then changes the declaration, so the grow-only rule below applies to it too. |
+| `PAYER_DAVINCI_CONTRACT_VERSIONS` | Declared Da Vinci contract versions for the partner payer, comma-separated `<contract>@<line>` tokens (e.g. `pa.pas@2.0, pa.crd@2.0`). Two things read this: the connectivity checks verify the partner's published capability against it (`version-drift` on disagreement, FR-G46), and native-forward routing refuses (before forwarding) any leg whose contract shares no line with it (FR-G48); from shn-gateway v0.62.0 only with `REQUIRE_SHARED_LINE=true`, and by default such a leg is forwarded as sent and the carry recorded. Requires `PAYER_DAVINCI_BASE_URL`. Unset ⇒ native-forward legs are unfiltered (today's default) and the checks skip the drift comparison. From shn-gateway v0.59.0 it is also this gateway's own declaration when `SHN_CONTRACT_VERSIONS` is unset (see [Exchange contract lines](#exchange-contract-lines-shn_contract_versions)); a value that names no `pa.crd`, `pa.dtr` or `pa.pas` line, or a `pa.crd`, `pa.dtr` or `pa.pas` line this build cannot exchange, then refuses boot. Editing it then changes the declaration, so the grow-only rule below applies to it too. |
 | `PAYER_DAVINCI_BACKEND_HEADERS` | Fixed request headers for a partner system that routes on one (a tenant or plan key its API gateway reads before any payload), as comma-separated `Name: value` pairs, e.g. `X-Route-Key: plan-7`. Sent on every request to the partner's bases — the CDS service listing read, each CRD post, the DTR and PAS operations (`$submit` and `$inquire`) and the connectivity probes — and **never** to `PAYER_DAVINCI_TOKEN_URL`. The message bytes are untouched: this is addressing for your own system, not a change to what the request asserts. Refused at boot: a pair that is not `name: value`, an empty name or value, a name or value that is not a valid HTTP field, a repeated name, and the names this gateway sets itself (`Authorization`, `Content-Type`, `Accept`, `Host`, `Content-Length`, `X-Correlation-Id`) or hop-by-hop names (`Connection`, `Transfer-Encoding`, `Upgrade`, …). A value cannot contain a comma. Requires `PAYER_DAVINCI_BASE_URL`. |
 | `PAYER_DAVINCI_BACKEND_TIMEOUT` | How long this gateway waits for your system on each operation it forwards, counted from the leg's arrival at this gateway, as a Go duration from `1s` to `28s` (from v0.59.0). Unset: `25s`, under the requester's 30 s leg budget by enough that a system slower than it is answered as its own timeout, this gateway's framed `504`, while the requester is still waiting, and recorded as your system's `timeout`. Any other value refuses the boot, as does setting it without `PAYER_DAVINCI_BASE_URL`. |
 | `PAYER_DAVINCI_BACKEND_CORRELATION` | Whether each operation forwarded to your system carries `X-Correlation-Id` with the leg's id. Unset (or `on`, the default): it does. `off`: no `X-Correlation-Id` is sent, for a system that validates that header its own way; nothing else changes. Any other value refuses the boot, as does `off` without `PAYER_DAVINCI_BASE_URL`. `PAYER_DAVINCI_BACKEND_HEADERS` can never name `X-Correlation-Id`, whatever this is set to. |
@@ -1610,8 +1669,8 @@ the recipient received the request, or may have, and may have acted on it.
 
 The recipient gateway's **own verdict about a request** travels the same way. Once the
 leg is authenticated, any `4xx` the recipient writes about the request — a member it does
-not hold when it requires known members (`400 unknown member`), a request it cannot read, no order to decide on, an eligibility
-subject that does not match the token (`403`), a consent it cannot confirm, an ingress validation
+not hold when it requires known members (`400 unknown member`), a request it cannot read, no order to decide on, a federated query or
+patient-authored DTR request whose patient cannot be matched to the token's (`403`), a consent it cannot confirm, an ingress validation
 failure at enforcement `strict` (`422 ingress validation failed`, issues echoed) — is its
 answer about the request, and a frame-capable requester receives it with that status and
 body. So is any `4xx` it writes about **its own participant's answer** after that system
@@ -1677,19 +1736,27 @@ names none — the older questionnaire request — is refused with `400` naming 
 ## Exchange contract lines (`SHN_CONTRACT_VERSIONS`)
 
 The gateway BUILDS every prior-authorization contract at three Da Vinci generations —
-CRD/DTR/PAS at `2.0.x`, `2.1.x`, and `2.2.x` (plus PDex `2.1.x`). That is its **native**
+CRD/DTR/PAS at `2.0.x`, `2.1.x`, and `2.2.x`. That is its **native**
 capability. What it **declares** to the network is a separate, operator-chosen subset, and
 the declared set is the starting point for routing; qualified native lanes also
 support the native-reach and inbound-honor rules below.
 
+From shn-gateway v0.62.0, a peer whose lines share none with yours is carried by default, as if
+your two systems were integrated directly: your gateway sends at its own line when nothing
+reaches the peer's, answers a request claiming a line it cannot answer at as it answers one
+claiming none, and relays an answer stamped with another line than the leg routed. Each is
+recorded (the `contract.line-carried` observer event and the exchange record's
+`LineCarried`). Set `REQUIRE_SHARED_LINE=true` to have such a pair refused instead.
+
 | Env var | Description |
 |---|---|
-| `SHN_CONTRACT_VERSIONS` | This gateway's own **declared** exchange-contract versions: comma-separated `<contract>@<line>` tokens, e.g. `pa.crd@2.2, pa.dtr@2.2, pa.pas@2.2`. Drives leg selection, the published `CapabilityStatement`s and `.well-known/davinci-configuration`, and the declaration peers route against. Must be a **subset of the native set** (`pa.crd@{2.0,2.1,2.2}`, `pa.dtr@{2.0,2.1,2.2}`, `pa.pas@{2.0,2.1,2.2}`, `pa.pdex@2.1`) — a token outside it is a boot error, not a routing outcome. Unset ⇒ the build default, the canonical `2.0` line (`pa.crd@2.0`, `pa.dtr@2.0`, `pa.pas@2.0`, `pa.pdex@2.1`). From shn-gateway v0.59.0, a payer that forwards to its own system (`PAYER_DAVINCI_BASE_URL`) and declares that system's versions (`PAYER_DAVINCI_CONTRACT_VERSIONS`) derives this set instead when it is unset: the system's `pa.crd`, `pa.dtr` and `pa.pas` lines, plus `pa.pdex@2.1`, which the gateway answers itself. The gateway logs `gateway: declaring <set>, derived from PAYER_DAVINCI_CONTRACT_VERSIONS` at boot; the registry entry peers select it against must declare the same set (see [Opting a line in](#opting-a-line-in), step 3). A derived line needs its validator lane exactly as a declared one does, and a system line this build cannot exchange refuses boot, naming it. Earlier releases declare the build default, which advertises lines the forward then refuses. From shn-gateway v0.59.0, any payer that forwards to its own system also refuses to boot when its declaration, set or derived, has no `pa.crd`, `pa.dtr` or `pa.pas` line: no provider could reach it for prior authorization. |
+| `REQUIRE_SHARED_LINE` | `true` or `false`; unset means `false`. From shn-gateway v0.62.0. Set `true` and your gateway refuses, as `routing`, a pair that shares no declared IG line: a leg to a peer that no shared line, native reach or transform chain reaches (`422 no shared contract line …`); a leg forwarded to your own Da Vinci system (`PAYER_DAVINCI_CONTRACT_VERSIONS`) on the same terms; a request whose frame claims a line your gateway cannot build or validate at (`422 request declares contract version …`); a request whose walk to the payer's line would change it, from your own EHR (CDS Hooks or questionnaire-package) or built by your gateway (questionnaire-package, PAS inquiry) (`422 … cannot be carried to the payer's line unchanged`); and a 2xx answer stamped with another line than the leg routed (`502 … response contract version mismatch …`). Unset, each is carried and recorded. It never changes the line a pair that shares one routes at. Before v0.62.0 every one of these was refused. Any other value refuses to boot. |
+| `SHN_CONTRACT_VERSIONS` | This gateway's own **declared** exchange-contract versions: comma-separated `<contract>@<line>` tokens, e.g. `pa.crd@2.2, pa.dtr@2.2, pa.pas@2.2`. Drives leg selection, the published `CapabilityStatement`s and `.well-known/davinci-configuration`, and the declaration peers route against. Must be a **subset of the native set** (`pa.crd@{2.0,2.1,2.2}`, `pa.dtr@{2.0,2.1,2.2}`, `pa.pas@{2.0,2.1,2.2}`) — a token outside it is a boot error, not a routing outcome. From shn-gateway v0.62.0 no gateway declares `pa.pdex@2.1`: the payer gateway's Patient Access decision ExplanationOfBenefit is base FHIR R4, not PDex, and a set still naming it refuses boot with an error saying to remove it (remove it before upgrading; earlier releases boot without it too). Unset ⇒ the build default, the canonical `2.0` line (`pa.crd@2.0`, `pa.dtr@2.0`, `pa.pas@2.0`; before v0.62.0 also `pa.pdex@2.1`). From shn-gateway v0.59.0, a payer that forwards to its own system (`PAYER_DAVINCI_BASE_URL`) and declares that system's versions (`PAYER_DAVINCI_CONTRACT_VERSIONS`) derives this set instead when it is unset: the system's `pa.crd`, `pa.dtr` and `pa.pas` lines (before v0.62.0, plus `pa.pdex@2.1`). The gateway logs `gateway: declaring <set>, derived from PAYER_DAVINCI_CONTRACT_VERSIONS` at boot; the registry entry peers select it against must declare the same set (see [Opting a line in](#opting-a-line-in), step 3). A derived line needs its validator lane exactly as a declared one does, and a system line this build cannot exchange refuses boot, naming it. Earlier releases declare the build default, which advertises lines the forward then refuses. From shn-gateway v0.59.0, any payer that forwards to its own system also refuses to boot when its declaration, set or derived, has no `pa.crd`, `pa.dtr` or `pa.pas` line: no provider could reach it for prior authorization. |
 | `FHIR_VALIDATE_URL_2_1` | Optional **2.1** `$validate` address override. Compose default: `http://shn-validator-2-1:8080/fhir`. |
 | `FHIR_VALIDATE_URL_2_2` | Optional **2.2** `$validate` address override. Compose default: `http://shn-validator-2-2:8080/fhir`. |
 | `FHIR_CERTIFY_URL_2_1` | Optional **2.1** `$validate` address for the certification evidence only. Never a routing lane. |
 | `FHIR_CERTIFY_URL_2_2` | Optional **2.2** `$validate` address for the certification evidence only. Never a routing lane. |
-| `FHIR_DEFAULT_VALIDATOR_LANES` | Unset, or `none`. `none` states that this gateway's network has no Compose default validator services, so the gateway never probes their names. A CRD, DTR or PAS line other than 2.0 then validates only through its own `FHIR_VALIDATE_URL_<line>` (routing) or `FHIR_CERTIFY_URL_<line>` (evidence), and a declared line without its own `FHIR_VALIDATE_URL_<line>` refuses boot, naming the key (a `FHIR_CERTIFY_URL_<line>` does not count). A single-line contract (`pa.pdex@2.1`) keeps riding the canonical validator, as it does with the default lanes. Any other value is a boot error. |
+| `FHIR_DEFAULT_VALIDATOR_LANES` | Unset, or `none`. `none` states that this gateway's network has no Compose default validator services, so the gateway never probes their names. A CRD, DTR or PAS line other than 2.0 then validates only through its own `FHIR_VALIDATE_URL_<line>` (routing) or `FHIR_CERTIFY_URL_<line>` (evidence), and a declared line without its own `FHIR_VALIDATE_URL_<line>` refuses boot, naming the key (a `FHIR_CERTIFY_URL_<line>` does not count). A single-line contract would keep riding the canonical validator, as it does with the default lanes; no native contract is single-line from v0.62.0 (`pa.pdex@2.1` was). Any other value is a boot error. |
 
 A `FHIR_VALIDATE_URL_<line>` is a routing lane: setting it makes the line reachable in both
 directions (an inbound frame at that line is honoured, origination may target it). A
@@ -1832,9 +1899,9 @@ workers. Embedders using `Handler` or `HandlerWithClock` must close the returned
 `HandlerForTestWithClock` and invoke their cleanup before releasing dependencies.
 Ordinary validation verdicts do not change synthetic readiness.
 
-PDex has one native line and retains its canonical/configured compatibility.
-That canonical alias cannot satisfy a CRD, DTR or PAS `2.1` request. A qualified
-`2.1` default can serve those contracts while PDex still uses its canonical endpoint.
+A single-line contract would retain a canonical/configured compatibility alias, and
+that alias could not satisfy a CRD, DTR or PAS request at its numeric line. No native
+contract is single-line from v0.62.0: PDex was, and no gateway declares it now.
 
 ### Opting a line in
 
@@ -1865,8 +1932,9 @@ an inbound request's declared line whenever it can both natively build and valid
 it — a wider predicate than its own declared set — so in-flight and stale-routed legs are
 answered correctly rather than refused. Configured explicit lanes and successfully
 qualified default lanes can cover undeclared native lines, widening this honor window.
-An unavailable default never grants admission, and the PDex canonical compatibility
-alias cannot satisfy a CRD, DTR or PAS request at the same numeric line.
+An unavailable default never grants admission, and a single-line contract's canonical
+compatibility alias (none is native from v0.62.0) cannot satisfy a CRD, DTR or PAS request
+at the same numeric line.
 
 **Declared-set changes must grow, never swap or shrink.** Adding a line is safe in either
 rollout order. **Removing** one is a breaking operation: a pended prior-authorization pins
@@ -1897,8 +1965,9 @@ qualification. Both make the line available in these two directions:
 Lanes obey the same grow-only discipline as declared lines, for the identical pend-stranding
 reason: a resumed pended exchange needs its pinned line's lane to remain configured for as long
 as the pend can still be amended. Do not remove a `FHIR_VALIDATE_URL_<line>` env var while any
-pend may still be pinned to that line, declared or not. A single-line contract (`pa.pdex`) has
-nothing to opt into — it has only one native line and always rides the canonical lane.
+pend may still be pinned to that line, declared or not. A single-line contract would have
+nothing to opt into — it has only one native line and always rides the canonical lane; none is
+native from v0.62.0 (`pa.pdex` was, and no gateway declares it now).
 
 ### CLOSED — DTR at line 2.2 on the built-in payer responder
 

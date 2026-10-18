@@ -45,14 +45,14 @@ func attachmentInputs(orderType, line string, absolute bool) shnsdk.ConformantCl
 		oldID = "dr-ox"
 	}
 	order = bytes.Replace(order, []byte(oldID), []byte("source-order"), 1)
-	return shnsdk.ConformantClaimInputs{Insurer: testPayerOrganization(shnsdk.CMSPayerIdentity), Coverage: testMemberCoverage("MBR-OX"), QR: attachmentQRFixture(orderType, line), SR: order, Provider: testRequestingProvider(), MemberIDSystem: shnsdk.MemberSystem,
+	return shnsdk.ConformantClaimInputs{PASClaimFacts: testClaimFacts(), Insurer: testPayerOrganization(shnsdk.CMSPayerIdentity), Coverage: testMemberCoverage("MBR-OX"), QR: attachmentQRFixture(orderType, line), SR: order, Provider: testRequestingProvider(), MemberIDSystem: shnsdk.MemberSystem,
 		PatientRef: "Patient/MBR-OX", CoverageRef: "Coverage/source-coverage", MemberID: "MBR-OX",
 		Corr: "synthetic-submit", Created: pasTailClock(), AbsoluteRefs: absolute, PayerOrgEntry: true, Payer: shnsdk.CMSPayerIdentity}
 }
 
 func attachmentUpdateInputs(line string, absolute, diagnostic bool) shnsdk.ConformantClaimUpdateInputs {
 	in := attachmentInputs("ServiceRequest", line, absolute)
-	out := shnsdk.ConformantClaimUpdateInputs{Insurer: testPayerOrganization(in.Payer), Coverage: testMemberCoverage(in.MemberID), QR: in.QR, SR: in.SR, Provider: in.Provider, MemberIDSystem: in.MemberIDSystem, PatientRef: in.PatientRef, CoverageRef: in.CoverageRef,
+	out := shnsdk.ConformantClaimUpdateInputs{PASClaimFacts: testClaimFacts(), CertificationType: testCertificationType(), PriorClaim: testPriorClaim(), Insurer: testPayerOrganization(in.Payer), Coverage: testMemberCoverage(in.MemberID), QR: in.QR, SR: in.SR, Provider: in.Provider, MemberIDSystem: in.MemberIDSystem, PatientRef: in.PatientRef, CoverageRef: in.CoverageRef,
 		MemberID: in.MemberID, Corr: "synthetic-update", OriginalCorr: in.Corr, Created: in.Created,
 		AbsoluteRefs: absolute, PayerOrgEntry: true, Payer: in.Payer,
 		Provenance: []byte(`{"resourceType":"Provenance","id":"source-prov","recorded":"2023-11-14T22:13:20Z","target":[{"reference":"QuestionnaireResponse/source-qr"}],"agent":[{"who":{"identifier":{"system":"http://hl7.org/fhir/sid/us-npi","value":"1234567890"}}}],"opaque":{"preserve":"attribution"}}`)}
@@ -253,7 +253,7 @@ func TestAuthoredPASSubmitPreservesAttachment(t *testing.T) {
 				t.Run(fmt.Sprintf("%s/%s/absolute=%t", line, typ, absolute), func(t *testing.T) {
 					in := attachmentInputs(typ, line, absolute)
 					qrBefore, orderBefore := bytes.Clone(in.QR), bytes.Clone(in.SR)
-					sdkBody, err := shnsdk.BuildConformantClaimBundleAtLine(line, in)
+					sdkBody, err := shnsdk.BuildConformantClaimBundleAtLineExact(line, in)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -278,7 +278,7 @@ func TestAuthoredPASUpdatePreservesAttachment(t *testing.T) {
 				t.Run(fmt.Sprintf("%s/absolute=%t/diagnostic=%t", line, absolute, diagnostic), func(t *testing.T) {
 					in := attachmentUpdateInputs(line, absolute, diagnostic)
 					before, _ := json.Marshal(in)
-					sdkBody, err := shnsdk.BuildConformantClaimUpdateBundleAtLine(line, in)
+					sdkBody, err := shnsdk.BuildConformantClaimUpdateBundleAtLineExact(line, in)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -327,7 +327,7 @@ func TestAuthoredPASOptionalAttachmentParity(t *testing.T) {
 		for _, qr := range [][]byte{nil, []byte(`{"resourceType":"QuestionnaireResponse","status":"completed","subject":{"reference":"Patient/MBR-OX"}}`)} {
 			in := attachmentInputs("ServiceRequest", "2.0", absolute)
 			in.QR = qr
-			want, err := shnsdk.BuildConformantClaimBundleAtLine("2.0", in)
+			want, err := shnsdk.BuildConformantClaimBundleAtLineExact("2.0", in)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -344,13 +344,13 @@ func TestAuthoredPASOptionalAttachmentParity(t *testing.T) {
 
 func TestAuthoredPASUnsupportedLinePreservesSDKError(t *testing.T) {
 	in := attachmentInputs("DeviceRequest", "2.0", true)
-	_, want := shnsdk.BuildConformantClaimBundleAtLine("9.9", in)
+	_, want := shnsdk.BuildConformantClaimBundleAtLineExact("9.9", in)
 	_, got := authoredSubmitUnderTest("9.9", in)
 	if want == nil || got == nil || got.Error() != want.Error() {
 		t.Fatalf("submit error=%v want %v", got, want)
 	}
 	update := attachmentUpdateInputs("2.0", true, false)
-	_, want = shnsdk.BuildConformantClaimUpdateBundleAtLine("9.9", update)
+	_, want = shnsdk.BuildConformantClaimUpdateBundleAtLineExact("9.9", update)
 	_, got = authoredUpdateUnderTest("9.9", update)
 	if want == nil || got == nil || got.Error() != want.Error() {
 		t.Fatalf("update error=%v want %v", got, want)
@@ -464,7 +464,7 @@ func testAuthoredPASFinalOutgoing(t *testing.T, optionalType string) {
 		Client:             &http.Client{Transport: stub},
 	})
 
-	req := httptest.NewRequest(http.MethodPost, "/scenario/homeoxygen", nil)
+	req := httptest.NewRequest(http.MethodPost, "/scenario/homeoxygen", strings.NewReader(testRouteBody(gw, "/scenario/homeoxygen", "")))
 	rec := httptest.NewRecorder()
 	gw.handleHomeOxygen(rec, req)
 	if rec.Code != http.StatusOK {
@@ -556,7 +556,7 @@ func TestAuthoredPASRejectsInvalidInputs(t *testing.T) {
 
 func TestAuthoredPASAssembledIdentityRefusals(t *testing.T) {
 	in := attachmentInputs("DeviceRequest", "2.2", true)
-	body, err := shnsdk.BuildConformantClaimBundleAtLine("2.2", in)
+	body, err := shnsdk.BuildConformantClaimBundleAtLineExact("2.2", in)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -666,7 +666,7 @@ func TestAuthoredPASAssembledIdentityRefusals(t *testing.T) {
 
 func TestAuthoredPASUsesActualAssemblyIdentities(t *testing.T) {
 	in := attachmentInputs("DeviceRequest", "2.2", true)
-	body, err := shnsdk.BuildConformantClaimBundleAtLine("2.2", in)
+	body, err := shnsdk.BuildConformantClaimBundleAtLineExact("2.2", in)
 	if err != nil {
 		t.Fatal(err)
 	}

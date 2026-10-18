@@ -5,8 +5,8 @@
 # registered — compose.eval.yml), a request bearing NO / a wrong bearer to a Da Vinci
 # ingress route must be 401 — never silently accepted.
 #
-# /Claim/$submit is handlePASIngress (gateway/engine/gateway.go, mounted only when
-# g.cfg.IngressEnabled), which calls g.ingressAuthOK(r) FIRST and 401s before any body
+# /Claim/$submit is handlePASIngress (gateway/engine/workstream_pa.go's paRoutes, mounted
+# only when g.cfg.IngressEnabled), which calls g.ingressAuthOK(r) FIRST and 401s before any body
 # parsing (gateway/engine/ingress.go). So 401 here proves the route exists AND is
 # auth-gated — a 404 would mean the ingress never mounted (a config regression), not
 # "correctly rejected".

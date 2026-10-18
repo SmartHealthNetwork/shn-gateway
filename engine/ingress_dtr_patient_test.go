@@ -35,7 +35,7 @@ func (s recordSoR) ResolvePatientContext(ctx context.Context, member string) (st
 func defaultDTRGateway(s *prefetchSoR) *Gateway {
 	g := prefetchGateway(s)
 	g.cfg.SoR = recordSoR{searchingPrefetchSoR{s}}
-	g.cfg.EnrichNativeRequests = true // the enrichment opt-in these rows pin
+	optInEnrichment(g, true) // the enrichment opt-in these rows pin
 	return g
 }
 
@@ -55,7 +55,7 @@ func TestDTRIngress_PatientObtainedUnderEnrichment(t *testing.T) {
 		obs := &observed{}
 		env := newInProcessExchange(t)
 		env.originator.cfg.SoR = recordSoR{searchingPrefetchSoR{s}}
-		env.originator.cfg.EnrichNativeRequests = true
+		optInEnrichment(env.originator, true)
 		env.originator.cfg.Observer = obs.observe
 		env.originator.cfg.Clock = fixedClock
 		declareFramedDTR(t, env, true)
@@ -132,7 +132,7 @@ func TestDTRIngress_PatientObtainedUnderEnrichment(t *testing.T) {
 		t.Run(map[bool]string{false: "by default a native request is carried as sent", true: "requiring known members, a native request is carried as sent"}[require], func(t *testing.T) {
 			s := newPrefetchSoR()
 			g := defaultDTRGateway(s)
-			g.cfg.EnrichNativeRequests = false
+			optInEnrichment(g, false)
 			g.cfg.RequireKnownMembers = require
 			leftAlone(t, g, s, withCoverage)
 		})

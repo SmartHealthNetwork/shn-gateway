@@ -46,10 +46,16 @@ type levelPayer struct {
 	authzPriv ed25519.PrivateKey
 	pci       string
 	// ctx, when set, is the context each leg is delivered under.
-	ctx      context.Context
+	ctx context.Context
+	// preWrite, when set, runs on each leg's response writer before the
+	// route does: a header something ahead of the handler set.
+	preWrite func(http.ResponseWriter)
 	findings []ConformanceFinding
 	skipped  []ObserverEvent
-	seq      int
+	// sideRecord are the events naming what this gateway's own decision record
+	// could not hold (pa.decision-eob-not-written, pend.decision-not-recorded).
+	sideRecord []ObserverEvent
+	seq        int
 	// mu guards findings and skipped: at observe a queued check reports from a
 	// worker as well as from the leg's goroutine.
 	mu sync.Mutex
@@ -92,6 +98,8 @@ func newLevelPayer(t *testing.T, level ConformanceEnforcement, opts ...NativeOpt
 			}
 		case LocalWriteSkippedEvent:
 			lp.skipped = append(lp.skipped, e)
+		case DecisionEOBNotWrittenEvent, pendDecisionNotRecordedEvent:
+			lp.sideRecord = append(lp.sideRecord, e)
 		}
 	}
 	return lp
@@ -104,6 +112,8 @@ type payerAnswer struct {
 	body   []byte
 	framed bool
 	corr   string
+	// header is the payer gateway's HTTP answer's header (the Hub's view).
+	header http.Header
 }
 
 // send delivers body on leg through handleInbound, bound to the covered
@@ -173,6 +183,9 @@ func (p *levelPayer) sendFramed(t *testing.T, leg string, headers map[string]str
 		r = r.WithContext(p.ctx)
 	}
 	rec := httptest.NewRecorder()
+	if p.preWrite != nil {
+		p.preWrite(rec)
+	}
 	// The route as mounted: the exchange record and the diagnostic observer
 	// around handleInbound (each a pass-through when unset).
 	p.g.inboundRoute()(rec, r)
@@ -180,13 +193,13 @@ func (p *levelPayer) sendFramed(t *testing.T, leg string, headers map[string]str
 	// leg's queued checks, so a test reads every finding the leg produced.
 	p.g.drainObserveChecks()
 	if rec.Code != http.StatusOK {
-		return payerAnswer{status: rec.Code, body: rec.Body.Bytes(), corr: corr}
+		return payerAnswer{status: rec.Code, body: rec.Body.Bytes(), corr: corr, header: rec.Result().Header}
 	}
 	hdr, answer, err := shnsdk.DecodeHTTPFrame(openResponseLeg(t, p.requester, rec.Body.Bytes()))
 	if err != nil {
 		t.Fatalf("decode response frame: %v", err)
 	}
-	return payerAnswer{status: hdr.Status, body: answer, framed: true, corr: corr}
+	return payerAnswer{status: hdr.Status, body: answer, framed: true, corr: corr, header: rec.Result().Header}
 }
 
 // content returns the content-rule findings recorded, as rule/decision.

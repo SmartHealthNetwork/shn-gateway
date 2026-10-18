@@ -1,0 +1,252 @@
+{
+  "entry": [
+    {
+      "fullUrl": "https://shn.example/fhir/Claim/convergence-claim",
+      "resource": {
+        "created": "2026-09-19T23:06:07Z",
+        "id": "convergence-claim",
+        "identifier": [
+          {
+            "system": "urn:shn:correlation",
+            "value": "inferno-00301-deny-1789859167799875000"
+          }
+        ],
+        "insurance": [
+          {
+            "coverage": {
+              "reference": "https://shn.example/fhir/Coverage/cov-mbr-covered"
+            },
+            "focal": true,
+            "sequence": 1
+          }
+        ],
+        "insurer": {
+          "reference": "https://shn.example/fhir/Organization/org-cms-payer"
+        },
+        "item": [
+          {
+            "category": {
+              "coding": [
+                {
+                  "code": "1",
+                  "display": "Medical Care",
+                  "system": "https://codesystem.x12.org/005010/1365"
+                }
+              ]
+            },
+            "extension": [
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService",
+                "valueReference": {
+                  "reference": "https://shn.example/fhir/ServiceRequest/convergence-sr"
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-certificationType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "I",
+                      "display": "Initial",
+                      "system": "https://codesystem.x12.org/005010/1322"
+                    }
+                  ]
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceItemRequestType",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "IN",
+                      "display": "Initial Medical Services Reservation",
+                      "system": "https://codesystem.x12.org/005010/1525"
+                    }
+                  ]
+                }
+              },
+              {
+                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-itemTraceNumber",
+                "valueIdentifier": {
+                  "system": "urn:shn:pas:item-trace",
+                  "value": "inferno-00301-deny-1789859167799875000.1"
+                }
+              }
+            ],
+            "locationCodeableConcept": {
+              "coding": [
+                {
+                  "code": "11",
+                  "system": "https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set"
+                }
+              ]
+            },
+            "productOrService": {
+              "coding": [
+                {
+                  "code": "J3490",
+                  "display": "Unclassified drugs",
+                  "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
+                }
+              ]
+            },
+            "sequence": 1
+          }
+        ],
+        "patient": {
+          "reference": "https://shn.example/fhir/Patient/MBR-COVERED"
+        },
+        "priority": {
+          "coding": [
+            {
+              "code": "normal"
+            }
+          ]
+        },
+        "provider": {
+          "reference": "https://shn.example/fhir/Organization/test-requesting-provider"
+        },
+        "resourceType": "Claim",
+        "status": "active",
+        "type": {
+          "coding": [
+            {
+              "code": "professional",
+              "system": "http://terminology.hl7.org/CodeSystem/claim-type"
+            }
+          ]
+        },
+        "use": "preauthorization"
+      }
+    },
+    {
+      "fullUrl": "https://shn.example/fhir/Patient/MBR-COVERED",
+      "resource": {
+        "id": "MBR-COVERED",
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-COVERED"
+          }
+        ],
+        "resourceType": "Patient"
+      }
+    },
+    {
+      "fullUrl": "https://shn.example/fhir/Coverage/cov-mbr-covered",
+      "resource": {
+        "beneficiary": {
+          "reference": "Patient/MBR-COVERED"
+        },
+        "id": "cov-mbr-covered",
+        "identifier": [
+          {
+            "system": "urn:shn:coverage",
+            "type": {
+              "coding": [
+                {
+                  "code": "MB",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "MBR-COVERED"
+          }
+        ],
+        "payor": [
+          {
+            "identifier": {
+              "system": "urn:oid:2.16.840.1.113883.6.300",
+              "value": "00301"
+            },
+            "reference": "https://shn.example/fhir/Organization/org-cms-payer"
+          }
+        ],
+        "relationship": {
+          "coding": [
+            {
+              "code": "self",
+              "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship"
+            }
+          ]
+        },
+        "resourceType": "Coverage",
+        "status": "active"
+      }
+    },
+    {
+      "fullUrl": "https://shn.example/fhir/ServiceRequest/convergence-sr",
+      "resource": {
+        "code": {
+          "coding": [
+            {
+              "code": "J3490",
+              "display": "Unclassified drugs",
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
+            }
+          ]
+        },
+        "id": "convergence-sr",
+        "intent": "order",
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "code": "J44.9",
+                "system": "http://hl7.org/fhir/sid/icd-10-cm"
+              }
+            ]
+          }
+        ],
+        "resourceType": "ServiceRequest",
+        "status": "draft",
+        "subject": {
+          "reference": "Patient/MBR-COVERED"
+        }
+      }
+    },
+    {
+      "fullUrl": "https://shn.example/fhir/Organization/test-requesting-provider",
+      "resource": {
+        "id": "test-requesting-provider",
+        "identifier": [
+          {
+            "system": "http://hl7.org/fhir/sid/us-npi",
+            "value": "1417947384"
+          }
+        ],
+        "name": "Test Requesting Provider",
+        "resourceType": "Organization"
+      }
+    },
+    {
+      "fullUrl": "https://shn.example/fhir/Organization/org-cms-payer",
+      "resource": {
+        "id": "org-cms-payer",
+        "identifier": [
+          {
+            "system": "urn:oid:2.16.840.1.113883.6.300",
+            "value": "00301"
+          }
+        ],
+        "name": "Centers for Medicare and Medicaid Services",
+        "resourceType": "Organization"
+      }
+    }
+  ],
+  "identifier": {
+    "system": "urn:shn:pas:bundle",
+    "value": "km-repeat-1789867274749733000"
+  },
+  "resourceType": "Bundle",
+  "timestamp": "2026-09-19T23:06:07Z",
+  "type": "collection"
+}

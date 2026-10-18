@@ -31,8 +31,23 @@ type AccessLine struct {
 	Exchange     string `json:"exchange"`
 	Operation    string `json:"operation,omitempty"`
 	ContractLine string `json:"contractLine,omitempty"`
-	Sender       string `json:"sender,omitempty"`
-	Recipient    string `json:"recipient,omitempty"`
+	// AnswerLine is, on an ingress call, the contract token of the IG line
+	// the answer this gateway wrote back to its own participant is written in
+	// ("pa.pas@2.2"): the routed line when the counterpart's answer was carried
+	// as sent, or the line a version bridge wrote it at. A reader of
+	// retained evidence judges a line-dependent answer at it. Absent on an
+	// inbound leg, and from a gateway that does not record it; a reader then
+	// keeps its own reading of the line (the leg's seal).
+	AnswerLine string `json:"answerLine,omitempty"`
+	// LineCarried says where the leg was carried between two IG lines with
+	// nothing translated, the network's default from shn-gateway v0.62.0
+	// (engine.LineCarriedValues): "request" when the request went to, or came
+	// from, a participant that shares no declared line with this one;
+	// "answer" when the answer was stamped with another line than the leg
+	// routed. Absent when it was not.
+	LineCarried []string `json:"lineCarried,omitempty"`
+	Sender      string   `json:"sender,omitempty"`
+	Recipient   string   `json:"recipient,omitempty"`
 	// RequestCiphertextHash and ResponseCiphertextHash equal the Hub audit
 	// records' payloadBundleHash for the same leg.
 	RequestCiphertextHash  string `json:"requestCiphertextHash,omitempty"`

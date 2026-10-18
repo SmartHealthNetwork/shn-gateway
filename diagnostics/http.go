@@ -26,9 +26,9 @@ var defaultCaptureBudget = NewCaptureBudget(16<<20, 8)
 // The Detail an observed exchange's event carries when the capture budget,
 // not the body cap, kept its body from being captured whole, so a body the
 // budget left out is told apart from one cut by the body cap. A capture that
-// found no free slot keeps neither headers nor any body, and says so even
-// when the exchange had no body; one that found a slot but not enough bytes
-// keeps a prefix.
+// found no free slot keeps no body and no header but the door's trace proof
+// (slotlessHeader), and says so even when the exchange had no body; one that
+// found a slot but not enough bytes keeps a prefix.
 const (
 	BodyNotKeptCaptureBudget = "body not kept: capture budget"
 	BodyPartialCaptureBudget = "body capture partial: capture budget"
@@ -247,9 +247,26 @@ func (s *captureState) release() {
 	}
 	s.released = true
 }
+
+// traceHeader carries the door's trace proof, the one header the evidence
+// linkers read from a provider's ingress (patevidence ProviderIngressLinked).
+const traceHeader = "X-SHN-Test-Trace"
+
+// maxSlotlessTraceBytes bounds the trace proof an event with no capture slot
+// keeps. A proof is base64 of its call id, method, request URI, time and
+// signature, so it grows with the request URI: the test endpoint's routes are
+// far below the bound. A plain request URI of more than about 1.3 KiB makes a
+// proof past it, which is not kept, and each "&", "<" or ">" in the URI counts
+// as six bytes there (JSON escapes them), so a long query string reaches it
+// sooner.
+const maxSlotlessTraceBytes = 2 << 10
+
 func captureHeader(s *captureState, h http.Header) (http.Header, bool) {
-	if !s.available || h == nil {
-		return nil, h == nil
+	if h == nil {
+		return nil, true
+	}
+	if !s.available {
+		return slotlessHeader(h)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -280,6 +297,22 @@ func captureHeader(s *captureState, h http.Header) (http.Header, bool) {
 		out[strings.Clone(k)] = copied
 	}
 	return out, true
+}
+
+// slotlessHeader is what an exchange with no capture slot keeps of its
+// headers: the door's trace proof alone, its first value, when it is within
+// maxSlotlessTraceBytes, so the ingress still links to its door call.
+// It reserves nothing from the budget, so each such event (a request, or a
+// response that carries the header back) holds at most that much header
+// capture. It is complete only when that is every header.
+func slotlessHeader(h http.Header) (http.Header, bool) {
+	v := h.Get(traceHeader)
+	if v == "" || len(v) > maxSlotlessTraceBytes {
+		return nil, false
+	}
+	out := http.Header{}
+	out.Set(traceHeader, strings.Clone(v))
+	return out, len(h) == 1 && len(h.Values(traceHeader)) == 1
 }
 
 type observedReadCloser struct {

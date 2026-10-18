@@ -81,7 +81,7 @@ func originDrive(t *testing.T, sor SystemOfRecord) (selectRec, signRec *httptest
 		return 0, payerAnswerFor(t, order, shnsdk.CoveredCovered, shnsdk.PANeededNoAuth, "")
 	})
 	selectRec = httptest.NewRecorder()
-	g.originateNoPACRD(selectRec, httptest.NewRequest(http.MethodPost, "/scenario/uc02", nil), prefetchMember)
+	g.originateNoPACRD(selectRec, httptest.NewRequest(http.MethodPost, "/scenario/uc02", strings.NewReader(testRouteBody(g, "/scenario/uc02", ""))), prefetchMember)
 
 	g, signPayer = originGateway(t, "provider-data", sor, &capturePopulator{}, func(tx string, _ []byte) (int, []byte) {
 		if tx == "dtr-questionnaire-fetch" {
@@ -90,7 +90,7 @@ func originDrive(t *testing.T, sor SystemOfRecord) (selectRec, signRec *httptest
 		return 0, payerAnswerFor(t, order, shnsdk.CoveredCovered, shnsdk.PANeededAuthNeeded, canonical)
 	})
 	signRec = httptest.NewRecorder()
-	g.runCRDThenDTROrder(signRec, httptest.NewRequest(http.MethodPost, "/", nil), prefetchMember, "", "", "", "", false)
+	g.runCRDThenDTROrder(signRec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(testStatedBody(g, prefetchMember, "", false))), prefetchMember, "", "", "", "", false)
 	return selectRec, signRec, selectPayer, signPayer
 }
 
@@ -113,7 +113,7 @@ func dispatchDrive(t *testing.T, sor coveragesOriginSoR) (*httptest.ResponseReco
 		return 0, []byte(`{"cards":[]}`)
 	})
 	rec := httptest.NewRecorder()
-	g.runCRDDispatch(rec, httptest.NewRequest(http.MethodPost, "/", nil), prefetchMember,
+	g.runCRDDispatch(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(testOrderBody(order, ""))), prefetchMember,
 		dispatchOrder{orderJSON: order, supplierJSON: supplier, orderRef: "DeviceRequest/dr-ox", performerRef: performer})
 	return rec, payer
 }

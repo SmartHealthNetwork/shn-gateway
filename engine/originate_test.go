@@ -266,7 +266,7 @@ func (s *stubSubstrate) handleRoute(_ *http.Request, body []byte) (*http.Respons
 		if s.pasDenialRationale == "" {
 			return errResp("stub: unexpected leg 1 (no pasDenialRationale configured)"), nil
 		}
-		respPayload, err = shnsdk.BuildDeniedResponseAtLine(s.pasLine, "Patient/"+s.pci, corrID, s.pasDenialRationale, s.clock())
+		respPayload, err = shnsdk.BuildDeniedResponseAtLineExact(s.pasLine, "Patient/"+s.pci, corrID, s.pasDenialRationale, testAnswerRequest, s.clock())
 		if err != nil {
 			return errResp("stub: BuildDeniedResponseAtLine: " + err.Error()), nil
 		}
@@ -402,7 +402,7 @@ func requireReachedOrigination(t *testing.T, stub *stubSubstrate, rec *httptest.
 // returns the recorded response.
 func callUC03(t *testing.T, gw *Gateway) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/scenario/uc03", nil)
+	req := httptest.NewRequest(http.MethodPost, "/scenario/uc03", strings.NewReader(testRouteBody(gw, "/scenario/uc03", "")))
 	rec := httptest.NewRecorder()
 	gw.Handler().ServeHTTP(rec, req)
 	return rec
@@ -412,7 +412,11 @@ func callUC03(t *testing.T, gw *Gateway) *httptest.ResponseRecorder {
 // (handleUC03's branch switch).
 func callUC03Branch(t *testing.T, gw *Gateway, branch string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/scenario/uc03", strings.NewReader(`{"branch":"`+branch+`"}`))
+	body := `{"branch":"` + branch + `"}`
+	if branch == "" || strings.HasPrefix(branch, "bridge-") {
+		body = testRouteBody(gw, "/scenario/uc03", `"branch":"`+branch+`"`)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/scenario/uc03", strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	gw.Handler().ServeHTTP(rec, req)
 	return rec
@@ -527,7 +531,7 @@ func aimStubAt(t *testing.T, stub *stubSubstrate, member string) {
 func callRunCRDThenDTROrder(t *testing.T, gw *Gateway, stub *stubSubstrate) *httptest.ResponseRecorder {
 	t.Helper()
 	aimStubAt(t, stub, runCRDThenDTROrderTestMember)
-	req := httptest.NewRequest(http.MethodPost, "/scenario/uc03", nil)
+	req := httptest.NewRequest(http.MethodPost, "/scenario/uc03", strings.NewReader(testClaimBody(`"order":{"system":"`+runCRDThenDTROrderTestSystem+`","code":"`+runCRDThenDTROrderTestCode+`"}`)))
 	rec := httptest.NewRecorder()
 	gw.runCRDThenDTROrder(rec, req, runCRDThenDTROrderTestMember, runCRDThenDTROrderTestSystem, runCRDThenDTROrderTestCode, runCRDThenDTROrderTestDisplay, runCRDThenDTROrderTestDx, false)
 	return rec
@@ -578,7 +582,7 @@ func TestRunCRDThenDTROrder_NotCovered_ProceedFlag(t *testing.T) {
 	t.Run("default-stops", func(t *testing.T) {
 		gw, stub, _ := crdTestSystem(t, notCovered)
 		aimStubAt(t, stub, member)
-		req := httptest.NewRequest(http.MethodPost, "/scenario/uc08", nil)
+		req := httptest.NewRequest(http.MethodPost, "/scenario/uc08", strings.NewReader(testClaimBody(`"order":{"system":"`+sys+`","code":"`+code+`"}`)))
 		rec := httptest.NewRecorder()
 		_, ok := gw.runCRDThenDTROrder(rec, req, member, sys, code, disp, dx, false)
 		if ok {
@@ -593,7 +597,7 @@ func TestRunCRDThenDTROrder_NotCovered_ProceedFlag(t *testing.T) {
 	t.Run("optin-proceeds", func(t *testing.T) {
 		gw, stub, _ := crdTestSystem(t, notCovered)
 		aimStubAt(t, stub, member)
-		req := httptest.NewRequest(http.MethodPost, "/scenario/uc08", nil)
+		req := httptest.NewRequest(http.MethodPost, "/scenario/uc08", strings.NewReader(testClaimBody(`"order":{"system":"`+sys+`","code":"`+code+`"}`)))
 		rec := httptest.NewRecorder()
 		res, ok := gw.runCRDThenDTROrder(rec, req, member, sys, code, disp, dx, true)
 		if !ok {
@@ -636,7 +640,7 @@ func TestHandleUC08_DemoLane_ProceedsPastNotCoveredToDeny(t *testing.T) {
 	stub.pasDenialRationale = rationale
 	stub.pasLine = highestLine(contractLineSet(gw.declaredContractVersions(), "pa.pas"))
 
-	req := httptest.NewRequest(http.MethodPost, "/scenario/uc08", nil)
+	req := httptest.NewRequest(http.MethodPost, "/scenario/uc08", strings.NewReader(testRouteBody(gw, "/scenario/uc08", "")))
 	rec := httptest.NewRecorder()
 	gw.handleUC08(rec, req)
 
@@ -756,7 +760,7 @@ func TestRunCRDThenDTR_NoDocSkipsDTR(t *testing.T) {
 	// This one needs the PAS leg actually attempted (not just runCRDThenDTROrder's own
 	// return), so it drives the tail itself — the direct-call analog of what handleUC03's
 	// (pre-R3) HTTP handler used to do after the prefix returned ok.
-	req := httptest.NewRequest(http.MethodPost, "/scenario/uc03", nil)
+	req := httptest.NewRequest(http.MethodPost, "/scenario/uc03", strings.NewReader(testClaimBody(`"order":{"system":"`+runCRDThenDTROrderTestSystem+`","code":"`+runCRDThenDTROrderTestCode+`"}`)))
 	rec := httptest.NewRecorder()
 	aimStubAt(t, stub, runCRDThenDTROrderTestMember)
 	res, ok := gw.runCRDThenDTROrder(rec, req, runCRDThenDTROrderTestMember, runCRDThenDTROrderTestSystem, runCRDThenDTROrderTestCode, runCRDThenDTROrderTestDisplay, runCRDThenDTROrderTestDx, false)
@@ -881,7 +885,7 @@ func TestClassifyResolution(t *testing.T) {
 // resolvable named payer (contained #cms-payer), not the dangling Organization/payer —
 // a real Da Vinci payer (br-payer) 400s "lacks valid payer identifier" otherwise.
 func TestRunCRDThenDTROrder_NamesPayer(t *testing.T) {
-	covJSON, err := shnsdk.BuildCoverageWithPayer("Patient/MBR-COVERED", "MBR-COVERED", shnsdk.CMSPayerIdentity)
+	covJSON, err := containedPayorCoverage("Patient/MBR-COVERED", "MBR-COVERED", shnsdk.CMSPayerIdentity)
 	if err != nil {
 		t.Fatalf("BuildCoverageWithPayer: %v", err)
 	}
@@ -889,7 +893,7 @@ func TestRunCRDThenDTROrder_NamesPayer(t *testing.T) {
 		t.Fatalf("expected contained #cms-payer payer reference, got: %s", covJSON)
 	}
 	// guard: the bare builder (what we are replacing) must NOT name a resolvable payer
-	bare, _ := shnsdk.BuildCoverage("Patient/MBR-COVERED", "MBR-COVERED")
+	bare, _ := shnsdk.BuildCoverageExact("Patient/MBR-COVERED", "MBR-COVERED", shnsdk.CMSPayerIdentity)
 	if strings.Contains(string(bare), "#cms-payer") {
 		t.Fatal("bare BuildCoverage unexpectedly names cms-payer; the distinction this task relies on is gone")
 	}

@@ -37,8 +37,11 @@ func TestHandleUC04_ThreadsSceneMember(t *testing.T) {
 		t.Fatalf("read source: %v", err)
 	}
 	fn := extractFunc(t, string(src), "handleUC04")
-	if !strings.Contains(fn, `g.scenarioMember(w, r, "MBR-UC04", "MBR-PD-UC04", "MBR-D-UC04")`) {
-		t.Fatalf("handleUC04 does not thread scenarioMember(MBR-UC04, MBR-PD-UC04, MBR-D-UC04)")
+	if !strings.Contains(fn, `g.scenarioMember(w, r, "uc04")`) {
+		t.Fatalf("handleUC04 does not resolve its member through scenarioMember(%q)", "uc04")
+	}
+	if m := scenarioMembers["uc04"]; m.conformance != "MBR-UC04" || m.providerData != "MBR-PD-UC04" || m.demo != "MBR-D-UC04" {
+		t.Fatalf("scenarioMembers[uc04] = %+v, want MBR-UC04/MBR-PD-UC04/MBR-D-UC04", m)
 	}
 	if strings.Contains(fn, `runCRDThenDTROrder(w, r, "MBR-UC04"`) {
 		t.Fatalf("handleUC04 still passes the MBR-UC04 literal to runCRDThenDTROrder — must pass the sceneMember result")
@@ -64,8 +67,11 @@ func TestHandleUC08_ThreadsSceneMember(t *testing.T) {
 		t.Fatalf("read source: %v", err)
 	}
 	fn := extractFunc(t, string(src), "handleUC08")
-	if !strings.Contains(fn, `g.scenarioMember(w, r, "MBR-UC08", "MBR-PD-UC08", "MBR-D-UC08")`) {
-		t.Fatalf("handleUC08 does not thread scenarioMember(MBR-UC08, MBR-PD-UC08, MBR-D-UC08)")
+	if !strings.Contains(fn, `g.scenarioMember(w, r, "uc08")`) {
+		t.Fatalf("handleUC08 does not resolve its member through scenarioMember(%q)", "uc08")
+	}
+	if m := scenarioMembers["uc08"]; m.conformance != "MBR-UC08" || m.providerData != "MBR-PD-UC08" || m.demo != "MBR-D-UC08" {
+		t.Fatalf("scenarioMembers[uc08] = %+v, want MBR-UC08/MBR-PD-UC08/MBR-D-UC08", m)
 	}
 	if strings.Contains(fn, `runCRDThenDTROrder(w, r, "MBR-UC08"`) {
 		t.Fatalf("handleUC08 still passes the MBR-UC08 literal to runCRDThenDTROrder — must pass the sceneMember result")

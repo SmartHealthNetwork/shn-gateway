@@ -416,10 +416,23 @@ type involvedCollector struct {
 
 type involvedCollectorKey struct{}
 
-// withInvolvedCollector gives a payer's prior-authorization leg a collector
-// when the Hub reads the involved list; otherwise ctx is returned as is.
+// answerInvolvedLegs are the legs whose answer names the payer's own binding
+// of the member when it differs from the leg token's patient: the
+// prior-authorization legs, and eligibility, whose request names only the
+// leg's own patient.
+var answerInvolvedLegs = func() map[string]bool {
+	m := map[string]bool{"coverage-eligibility": true}
+	for leg := range involvedLegs {
+		m[leg] = true
+	}
+	return m
+}()
+
+// withInvolvedCollector gives a payer leg that names its own binding a
+// collector when the Hub reads the involved list; otherwise ctx is returned
+// as is.
 func (g *Gateway) withInvolvedCollector(ctx context.Context, leg string) context.Context {
-	if !g.cfg.HubAcceptsInvolved || !involvedLegs[leg] {
+	if !g.cfg.HubAcceptsInvolved || !answerInvolvedLegs[leg] {
 		return ctx
 	}
 	return context.WithValue(ctx, involvedCollectorKey{}, &involvedCollector{held: map[string]bool{}})

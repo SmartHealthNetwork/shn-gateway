@@ -424,7 +424,7 @@ func TestEnrichedRoutesAsTheDefault(t *testing.T) {
 			t.Helper()
 			env := newInProcessExchange(t)
 			env.originator.cfg.SoR = s.sor()
-			env.originator.cfg.EnrichNativeRequests = enrich
+			optInEnrichment(env.originator, enrich)
 			declareFramedDTR(t, env, true)
 			env.payerReturns(LegResult{Response: testResponse(packageAnswer)})
 			return env, postDTRIngress(env, body)
@@ -676,7 +676,7 @@ func TestCRDIngress_OptInRoutesAPatientNamedByAnotherIDAsTheDefault(t *testing.T
 					t.Fatalf("nothing was left unfilled that the request needs, got findings %+v", findings)
 				}
 				g := carryGateway(namedDifferently(t))
-				g.cfg.EnrichNativeRequests = enrich
+				optInEnrichment(g, enrich)
 				p, _ := mustPrepare(t, g, body)
 				if got := p.request.Edits(); !slices.Equal(got, []relay.EditID{relay.EditCDSCallbackStrip}) {
 					t.Fatalf("edits %v, want only the callback strip", got)
@@ -775,7 +775,7 @@ func TestDTRIngress_OptInRoutesAPatientNamedByAnotherIDAsTheDefault(t *testing.T
 					t.Fatalf("searched %v, read %v: want only the routing read under the system's id", searched, read)
 				}
 				g := carryGateway(sor(t))
-				g.cfg.EnrichNativeRequests = enrich
+				optInEnrichment(g, enrich)
 				p, status, msg := g.prepareDTRPackageRequest(context.Background(), body)
 				if status != 0 || p.request.Ownership() != relay.OwnershipRelayed || len(p.request.Edits()) != 0 {
 					t.Fatalf("%d %s: ownership %v, edits %v; want the EHR's request relayed exactly", status, msg, p.request.Ownership(), p.request.Edits())

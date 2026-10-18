@@ -17,7 +17,7 @@ func TestCompletePatient_ProviderData_RejectsOrderWithoutID(t *testing.T) {
 		Clock:              func() time.Time { return time.Unix(0, 0).UTC() },
 	}}
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/scenario/uc07/complete", nil)
+	r := httptest.NewRequest(http.MethodPost, "/scenario/uc07/complete", strings.NewReader(testRouteBody(g, "/scenario/uc07/complete", "")))
 	st := pendState{scenario: "uc07", srJSON: []byte(`{"resourceType":"ServiceRequest","status":"active"}`)} // no id
 
 	if ok := g.completePatient(w, r, st, ""); ok {
@@ -39,7 +39,7 @@ func TestCompleteClinician_ProviderData_RejectsOrderWithoutID(t *testing.T) {
 		Clock:              func() time.Time { return time.Unix(0, 0).UTC() },
 	}}
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/scenario/uc06/complete", nil)
+	r := httptest.NewRequest(http.MethodPost, "/scenario/uc06/complete", strings.NewReader(testRouteBody(g, "/scenario/uc06/complete", "")))
 	st := pendState{scenario: "uc06", srJSON: []byte(`{"resourceType":"ServiceRequest","status":"active"}`)} // no id
 
 	if ok := g.completeClinician(w, r, st, "", ""); ok {

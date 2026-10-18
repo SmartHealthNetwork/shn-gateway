@@ -146,3 +146,70 @@ func TestIngressAnswerThatFailsVerificationIsReportedAsDelivered(t *testing.T) {
 		t.Fatalf("got %d %s", rec.Code, rec.Body.String())
 	}
 }
+
+// The recipient gateway's not-acted refusal, relayed by the Hub as a 503 not
+// delivered carrying NotActedHeader, reaches the caller as a retryable 503
+// that says nothing was done and when to resend. Each row that misses one
+// condition (another status, another delivery value, another header value) is
+// reported as it was before.
+func TestIngressReportsTheRecipientsNotActedRefusal(t *testing.T) {
+	const reason = `{"error":"forward to recipient failed: the recipient does not know the sender yet and took no action; resend with a freshly sealed envelope"}`
+	notActed := func(status int, delivered, value, retryAfter string) http.Header {
+		h := http.Header{}
+		h.Set("Content-Type", "application/json")
+		h.Set(HubDeliveredHeader, delivered)
+		h.Set(NotActedHeader, value)
+		if retryAfter != "" {
+			h.Set("Retry-After", retryAfter)
+		}
+		return h
+	}
+	rows := map[string]struct {
+		status     int
+		header     http.Header
+		wantStatus int
+		contains   string
+		retryAfter string
+	}{
+		"relayed attestation": {503, notActed(503, "no", NotActedRequesterUnknown, "5"),
+			http.StatusServiceUnavailable, errRecipientNotYetKnowing + "; resend after 5s", "5"},
+		"no Retry-After": {503, notActed(503, "no", NotActedRequesterUnknown, ""),
+			http.StatusServiceUnavailable, "resend after 3s", "3"},
+		"Retry-After out of range": {503, notActed(503, "no", NotActedRequesterUnknown, "600"),
+			http.StatusServiceUnavailable, "resend after 3s", "3"},
+		"Retry-After not a number": {503, notActed(503, "no", NotActedRequesterUnknown, "Fri, 31 Dec 1999 23:59:59 GMT"),
+			http.StatusServiceUnavailable, "resend after 3s", "3"},
+		"another header value": {503, notActed(503, "no", "something-else", "5"),
+			http.StatusServiceUnavailable, "hub refused the exchange: forward to recipient failed", ""},
+		"not a 503": {502, notActed(502, "no", NotActedRequesterUnknown, "5"),
+			http.StatusBadGateway, "hub refused the exchange: forward to recipient failed", ""},
+		"delivery unknown": {503, notActed(503, "unknown", NotActedRequesterUnknown, "5"),
+			http.StatusBadGateway, "the recipient may have received this request", ""},
+		"not from the Hub": {503, func() http.Header {
+			h := notActed(503, "", NotActedRequesterUnknown, "5")
+			h.Del(HubDeliveredHeader)
+			return h
+		}(),
+			http.StatusBadGateway, "the recipient may have received this request", ""},
+	}
+	for name, row := range rows {
+		t.Run(name, func(t *testing.T) {
+			env := newInProcessExchange(t)
+			base := env.originator.cfg.Client.Transport
+			env.originator.cfg.Client.Transport = diagnosticRoundTripper(func(r *http.Request) (*http.Response, error) {
+				if !strings.HasSuffix(r.URL.Path, "/route") {
+					return base.RoundTrip(r)
+				}
+				return &http.Response{StatusCode: row.status, Body: io.NopCloser(strings.NewReader(reason)), Header: row.header.Clone()}, nil
+			})
+			rec := httptest.NewRecorder()
+			env.originator.withIngressCorrelation(env.originator.handleCRDIngress)(rec, env.crdIngressRequest(t))
+			if rec.Code != row.wantStatus || !strings.Contains(rec.Body.String(), row.contains) {
+				t.Fatalf("got %d %s, want %d containing %q", rec.Code, rec.Body.String(), row.wantStatus, row.contains)
+			}
+			if got := rec.Header().Get("Retry-After"); got != row.retryAfter {
+				t.Errorf("Retry-After = %q, want %q", got, row.retryAfter)
+			}
+		})
+	}
+}

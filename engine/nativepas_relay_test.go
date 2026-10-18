@@ -142,7 +142,7 @@ func relayDecidedAnswer(t *testing.T, id, trace, preAuthRef string) []byte {
 func deviceRequestSubmitBundle(t *testing.T) []byte {
 	t.Helper()
 	dr := []byte(`{"resourceType":"DeviceRequest","id":"dr-x","status":"active","intent":"order","subject":{"reference":"Patient/MBR-COVERED"},"codeCodeableConcept":{"coding":[{"system":"http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets","code":"E0424","display":"Stationary compressed gaseous oxygen system"}]}}`)
-	b, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
+	b, err := shnsdk.BuildConformantClaimBundleExact(shnsdk.ConformantClaimInputs{PASClaimFacts: testClaimFacts(),
 		Coverage: testMemberCoverage("MBR-COVERED"), Insurer: testPayerOrganization(shnsdk.CMSPayerIdentity), Provider: testRequestingProvider(),
 		MemberIDSystem: shnsdk.MemberSystem, SR: dr,
 		PatientRef: "Patient/MBR-COVERED", CoverageRef: "Coverage/MBR-COVERED", MemberID: "MBR-COVERED",
@@ -211,6 +211,7 @@ func TestNativeSubmit_PendRelayedForDeviceRequest(t *testing.T) {
 	if res.Commit == nil {
 		t.Fatal("a pend must be recorded so a follow-up can resolve it")
 	}
+	admitDecisionEOBs(&res)
 	if err := res.Commit(); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
@@ -260,6 +261,7 @@ func TestNativeSubmit_PendRelayedForInfoChanged(t *testing.T) {
 	if res.Commit == nil {
 		t.Fatal("a pend must be recorded so a follow-up can resolve it")
 	}
+	admitDecisionEOBs(&res)
 	if err := res.Commit(); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
@@ -319,6 +321,7 @@ func TestNativeSubmit_DenialRelayed(t *testing.T) {
 	if res.Commit == nil {
 		t.Fatal("a decision must be recorded")
 	}
+	admitDecisionEOBs(&res)
 	if err := res.Commit(); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
@@ -347,6 +350,7 @@ func TestNativeSubmit_ApprovalRelayed(t *testing.T) {
 	if res.Commit == nil {
 		t.Fatal("a decision must be recorded")
 	}
+	admitDecisionEOBs(&res)
 	if err := res.Commit(); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
@@ -375,7 +379,7 @@ func TestNoInfoChangedInjectedOnFreshSubmit(t *testing.T) {
 				built, err := buildPASSubmitBundle("2.0", brPayer, row.order, nil,
 					testRequestingProvider(), testMemberCoverage("MBR-COVERED"), testPayerOrganization(shnsdk.CMSPayerIdentity),
 					shnsdk.MemberSystem, "Patient/MBR-COVERED", "Coverage/MBR-COVERED", "MBR-COVERED",
-					"corr-fresh", fixedClock(), shnsdk.CMSPayerIdentity)
+					"corr-fresh", fixedClock(), shnsdk.CMSPayerIdentity, testClaimFacts())
 				if err != nil {
 					t.Fatalf("build: %v", err)
 				}
@@ -421,6 +425,7 @@ func TestNativeUpdate_RePendRelayedAndReleased(t *testing.T) {
 	if res.Commit == nil {
 		t.Fatal("a re-pend must release the claim and refresh its keys")
 	}
+	admitDecisionEOBs(&res)
 	if err := res.Commit(); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
@@ -446,6 +451,7 @@ func TestNativeUpdate_CarryForwardRePendRelayed(t *testing.T) {
 	relayedExactly(t, res, repend)
 	payer.refuseAnyPoll(t)
 	if res.Commit != nil {
+		admitDecisionEOBs(&res)
 		if err := res.Commit(); err != nil {
 			t.Fatalf("commit: %v", err)
 		}
@@ -470,6 +476,7 @@ func TestNativeUpdate_DenialRelayedAndDecided(t *testing.T) {
 	if res.Commit == nil {
 		t.Fatal("a decision must be recorded")
 	}
+	admitDecisionEOBs(&res)
 	if err := res.Commit(); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
@@ -497,6 +504,7 @@ func TestNativeUpdate_ApprovalRelayedAndDecided(t *testing.T) {
 	if res.Commit == nil || res.Rollback == nil {
 		t.Fatal("a decided update commits the decision and keeps Rollback armed")
 	}
+	admitDecisionEOBs(&res)
 	if err := res.Commit(); err != nil {
 		t.Fatalf("commit: %v", err)
 	}

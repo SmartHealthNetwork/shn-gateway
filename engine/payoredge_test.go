@@ -42,7 +42,7 @@ var crdPartnerCoverageCard = []byte(`{"cards":[],"systemActions":[{"type":"updat
 func conformantSubmitBundle(t *testing.T, payer shnsdk.PayerIdentifier, absolute bool) []byte {
 	t.Helper()
 	sr := []byte(`{"resourceType":"ServiceRequest","id":"sr-x","status":"active","intent":"order","subject":{"reference":"Patient/MBR-1"},"code":{"coding":[{"system":"http://www.ama-assn.org/go/cpt","code":"72148","display":"MRI lumbar spine w/o contrast"}]}}`)
-	b, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{Coverage: testMemberCoverage("MBR-1"),
+	b, err := shnsdk.BuildConformantClaimBundleExact(shnsdk.ConformantClaimInputs{PASClaimFacts: testClaimFacts(), Coverage: testMemberCoverage("MBR-1"),
 		Provider:       testRequestingProvider(),
 		MemberIDSystem: shnsdk.MemberSystem,
 		SR:             sr, PatientRef: "Patient/MBR-1", CoverageRef: "Coverage/MBR-1", MemberID: "MBR-1",
@@ -298,7 +298,7 @@ func TestNativeResponder_PayorEdge_CRD_SeamOff(t *testing.T) {
 	p := newStubPartner(t)
 	p.respByPath["/cds-services/order-sign"] = crdPartnerCoverageCard
 	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "order-sign", nil, nil)
-	cov, err := shnsdk.BuildCoverageWithPayer("Patient/p1", "MBR-1", ownIdentity)
+	cov, err := containedPayorCoverage("Patient/p1", "MBR-1", ownIdentity)
 	if err != nil {
 		t.Fatalf("BuildCoverageWithPayer: %v", err)
 	}
@@ -324,7 +324,7 @@ func TestNativeResponder_PayorEdge_CRD_MismatchRefuses(t *testing.T) {
 	p := newStubPartner(t)
 	p.respByPath["/cds-services/order-sign"] = []byte(`{"cards":[]}`)
 	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "order-sign", nil, nil, WithPayorEdgeIdentity(ownIdentity, backendIdentity))
-	cov, err := shnsdk.BuildCoverageWithPayer("Patient/p1", "MBR-1", foreignIdentity)
+	cov, err := containedPayorCoverage("Patient/p1", "MBR-1", foreignIdentity)
 	if err != nil {
 		t.Fatalf("BuildCoverageWithPayer: %v", err)
 	}
@@ -366,7 +366,7 @@ func TestNativeResponder_PayorEdge_CRD_OwnIdentityRestamps(t *testing.T) {
 	p := newStubPartner(t)
 	p.respByPath["/cds-services/order-sign"] = crdPartnerCoverageCard
 	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "order-sign", nil, nil, WithPayorEdgeIdentity(ownIdentity, backendIdentity))
-	cov, err := shnsdk.BuildCoverageWithPayer("Patient/p1", "MBR-1", ownIdentity)
+	cov, err := containedPayorCoverage("Patient/p1", "MBR-1", ownIdentity)
 	if err != nil {
 		t.Fatalf("BuildCoverageWithPayer: %v", err)
 	}
@@ -410,7 +410,7 @@ func dtrPackageWithCoverage(cov []byte) []byte {
 // TestNativeResponder_PayorEdge_DTR_SeamOffAndRestamp covers the DTR leg's (c) seam-off
 // and (d) own-identity-restamp rows in one table, mirroring the CRD coverage above.
 func TestNativeResponder_PayorEdge_DTR_SeamOffAndRestamp(t *testing.T) {
-	cov, err := shnsdk.BuildCoverageWithPayer("Patient/p1", "MBR-1", ownIdentity)
+	cov, err := containedPayorCoverage("Patient/p1", "MBR-1", ownIdentity)
 	if err != nil {
 		t.Fatalf("BuildCoverageWithPayer: %v", err)
 	}
@@ -445,7 +445,7 @@ func TestNativeResponder_PayorEdge_DTR_SeamOffAndRestamp(t *testing.T) {
 
 	t.Run("mismatch refuses before forwarding", func(t *testing.T) {
 		p := newStubPartner(t)
-		foreignCov, ferr := shnsdk.BuildCoverageWithPayer("Patient/p1", "MBR-1", foreignIdentity)
+		foreignCov, ferr := containedPayorCoverage("Patient/p1", "MBR-1", foreignIdentity)
 		if ferr != nil {
 			t.Fatalf("BuildCoverageWithPayer: %v", ferr)
 		}
@@ -676,7 +676,7 @@ func conformantUpdateBundle(t *testing.T, payer shnsdk.PayerIdentifier, absolute
 	}
 	ref := "Patient/" + member
 	sr := []byte(`{"resourceType":"ServiceRequest","id":"sr-x","status":"active","intent":"order","subject":{"reference":"` + ref + `"},"code":{"coding":[{"system":"http://www.ama-assn.org/go/cpt","code":"72148","display":"MRI lumbar spine w/o contrast"}]}}`)
-	b, err := shnsdk.BuildConformantClaimUpdateBundle(shnsdk.ConformantClaimUpdateInputs{Coverage: testMemberCoverage(member),
+	b, err := shnsdk.BuildConformantClaimUpdateBundleExact(shnsdk.ConformantClaimUpdateInputs{PASClaimFacts: testClaimFacts(), CertificationType: testCertificationType(), PriorClaim: testPriorClaim(), Coverage: testMemberCoverage(member),
 		Provider:       testRequestingProvider(),
 		MemberIDSystem: shnsdk.MemberSystem,
 		QR:             qrJSON, SR: sr, PatientRef: ref, CoverageRef: "Coverage/" + member, MemberID: member,

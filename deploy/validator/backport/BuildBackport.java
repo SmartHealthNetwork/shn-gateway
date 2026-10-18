@@ -22,11 +22,11 @@ import java.util.zip.ZipOutputStream;
 
 /** Replaces one verified class in one verified nested JAR without runtime overlays. */
 public final class BuildBackport {
-    static final String JAR = "WEB-INF/lib/hapi-fhir-validation-8.10.0.jar";
+    static final String JAR = "WEB-INF/lib/hapi-fhir-validation-8.12.0.jar";
     static final String CLASS = "org/hl7/fhir/common/hapi/validation/validator/ValidatorWrapper";
-    static final String ARM_WAR_SHA = "94a8a650d470060025ef8c1c404b5451a9b91efa860a118e69bbdcda3c8221e4";
-    static final String JAR_SHA = "cf4d24f810bcd29760296fc5f9f5908196e4253755d8194afd610dc456009deb";
-    static final String CLASS_SHA = "b7055a835c7fdae7b3e6834d63743b912394fa631feda3bde015c3f8ed1edf0c";
+    static final String ARM_WAR_SHA = "d784462f9a5de7385c4f6b2fcfeec3d7d2316270d5bb2e6fb73cb6ed0c5de749";
+    static final String JAR_SHA = "d6ff8774a4de5dd2156d903e260ea3c1dc734f58b2bb759f3f249cb52bec7fd4";
+    static final String CLASS_SHA = "e7f50925b9703e25bf1ef1d461f22381ab8e1a3a28b990ab2ff0c6e83bdba4ce";
     static final String SOURCE_SHA = "5050c7693096e31a9f26c9fbd68c60780bd16db7fc51b404a2095e9b95568be0";
     static final String COMPILER = "eclipse-temurin:21.0.11_10-jdk-jammy@sha256:dbfd085220ae632a0830166e443747d1ee89e9038d92e3b48c3e5e9d8292b9a7";
     static final Map<String, String> PLATFORMS = Map.of(
@@ -35,8 +35,8 @@ public final class BuildBackport {
 
     record SourceTuple(String platform, String child, String warHash, long size) {}
     static final Map<String, SourceTuple> SOURCES = Map.of(
-        "linux/arm64", new SourceTuple("linux/arm64", "sha256:ac871f44ee311bdd4d3533f7ea9e81b3a744ca709726b74d5a97d29663a7916c", ARM_WAR_SHA, 378563064),
-        "linux/amd64", new SourceTuple("linux/amd64", "sha256:f4aa83b7102a52f19a42c4c27c5f63fa3d1ded4f393c7083e53a39dc37b2a4c5", "378be32e09f643db6c01c703851e5a639d9ea17ebf7a0aafeeefaa66a0452009", 378563063));
+        "linux/arm64", new SourceTuple("linux/arm64", "sha256:4d59628d42b3556b2dcd274d26054a43ba53697ebdae0fd71e6a5475065ed22d", ARM_WAR_SHA, 388197072),
+        "linux/amd64", new SourceTuple("linux/amd64", "sha256:88489ad986f38d35ec0e216a0660db42cb55329275efdc5913dfe1d2f2afbe53", "a256639a442672571f948bb6502788ae5a93b2be92bf64cb7e97f7104ac3f678", 388197072));
     static SourceTuple requireTuple(String platform, String child, String hash, long size) throws IOException {
         SourceTuple tuple = SOURCES.get(platform);
         if (tuple == null || !tuple.child().equals(child) || !tuple.warHash().equals(hash) || tuple.size() != size)
@@ -136,7 +136,7 @@ public final class BuildBackport {
             verifyDelta(war, newWar, JAR, jarBytes);
             Map<String, String> provenance = new TreeMap<>();
             provenance.put("format", "explicit-profile-backport-v1");
-            provenance.put("upstream_image", "hapiproject/hapi@sha256:1be4d7ffe7a35a9fb46151851e5a20b25c5016f16c8ef8b59b0c807ad06a40c1");
+            provenance.put("upstream_image", "hapiproject/hapi@sha256:0ff86aac4c7bd13a1ee226444a70263bb46ed1c28ef543c30a44f865b80ca04e");
             provenance.put("hapi_source_platform", inputTuple.platform()); provenance.put("hapi_source_child", inputTuple.child());
             provenance.put("input_war_size", Long.toString(inputTuple.size()));
             provenance.put("input_war_sha256", inputTuple.warHash()); provenance.put("input_jar_sha256", JAR_SHA);
@@ -155,7 +155,7 @@ public final class BuildBackport {
             key.keySet().removeIf(k -> k.startsWith("output_"));
             provenance.put("build_key", hash(json(key).getBytes(StandardCharsets.UTF_8)));
             Files.createDirectory(output);
-            Files.copy(newWar, output.resolve("main.war")); Files.copy(newJar, output.resolve("hapi-fhir-validation-8.10.0.jar"));
+            Files.copy(newWar, output.resolve("main.war")); Files.copy(newJar, output.resolve("hapi-fhir-validation-8.12.0.jar"));
             Files.writeString(output.resolve("provenance.json"), json(provenance));
             Files.writeString(output.resolve("classpath.sha256"), String.join("\n", classpath) + "\n");
             copyTree(logs, output.resolve("evidence"));

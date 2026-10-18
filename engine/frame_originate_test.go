@@ -229,7 +229,7 @@ func TestDispatchRelaysFramedRecipientError(t *testing.T) {
 	fix.stub.frameErrLeg = "crd-order-dispatch"
 	fix.stub.frameErrStatus, fix.stub.frameErrCT, fix.stub.frameErrBody = status, ct, body
 
-	req := httptest.NewRequest(http.MethodPost, "/scenario/dispatch", bytes.NewBufferString(`{"member":"MBR-OX"}`))
+	req := httptest.NewRequest(http.MethodPost, "/scenario/dispatch", bytes.NewBufferString(testRouteBody(fix.gw, "/scenario/dispatch", `"member":"MBR-OX"`)))
 	rec := httptest.NewRecorder()
 	fix.gw.handleDispatch(rec, req)
 
@@ -244,7 +244,7 @@ func TestScenarioRelaysFramedRecipientError(t *testing.T) {
 	status, ct, body := framedErrorFixture()
 	env.payerReturns(LegResult{Status: status, Response: testResponse(body)})
 
-	req := httptest.NewRequest(http.MethodPost, "/scenario/uc03", nil)
+	req := httptest.NewRequest(http.MethodPost, "/scenario/uc03", strings.NewReader(testRouteBody(env.originator, "/scenario/uc03", "")))
 	rec := httptest.NewRecorder()
 	env.originator.handleUC03(rec, req)
 
@@ -263,7 +263,7 @@ func TestPASTailRelaysFramedRecipientError(t *testing.T) {
 	fix.stub.frameErrLeg = "pas-claim"
 	fix.stub.frameErrStatus, fix.stub.frameErrCT, fix.stub.frameErrBody = status, ct, body
 
-	req := httptest.NewRequest(http.MethodPost, "/scenario/homeoxygen", nil)
+	req := httptest.NewRequest(http.MethodPost, "/scenario/homeoxygen", strings.NewReader(testRouteBody(fix.gw, "/scenario/homeoxygen", "")))
 	rec := httptest.NewRecorder()
 	fix.gw.handleHomeOxygen(rec, req)
 
@@ -291,6 +291,7 @@ func declareRecipientVersions(t *testing.T, e *inProcessExchange, tokens []strin
 // (no seal, no authorize, no Hub round-trip).
 func TestOriginateRefusesUnsharedLine(t *testing.T) {
 	env := newInProcessExchange(t)
+	env.originator.cfg.RequireSharedLine = true // by default the pair is carried (line_carry_test.go)
 	declareRecipientVersions(t, env, []string{"pa.crd@2.2"})
 
 	var events []ObserverEvent
@@ -373,6 +374,7 @@ func TestScenarioRefusalWrites422(t *testing.T) {
 // in-seal tamper case the wire mutator table cannot express).
 func TestOriginateRejectsStampMismatch(t *testing.T) {
 	env := newInProcessExchange(t)
+	env.originator.cfg.RequireSharedLine = true // by default the answer is relayed and recorded (line_carry_test.go)
 	advertiseRecipientFrameV1(t, env)
 	body := []byte(`{"resourceType":"Bundle","type":"collection"}`) // any valid JSON — OriginateLeg returns the raw body to direct callers; there is no crdCards fixture field (cards are built inline in the fake substrate)
 	frame, err := shnsdk.EncodeHTTPFrameHeaders(200, map[string]string{
@@ -398,6 +400,7 @@ func TestOriginateRejectsStampMismatch(t *testing.T) {
 // routed line is unambiguous.
 func TestOriginateRejectsStampMismatchAcrossLines(t *testing.T) {
 	env := newInProcessExchange(t)
+	env.originator.cfg.RequireSharedLine = true // by default the answer is relayed and recorded (line_carry_test.go)
 	advertiseRecipientFrameV1(t, env)
 	frame, err := shnsdk.EncodeHTTPFrameHeaders(200, map[string]string{
 		"Content-Type":                    "application/fhir+json",
@@ -558,6 +561,7 @@ func TestOriginateLegFallbackOmitsRoute(t *testing.T) {
 // wire-contract pin TestOriginateRefusesUnsharedLine already covers).
 func TestLegRefusedCarriesStructuredRoute(t *testing.T) {
 	env := newInProcessExchange(t)
+	env.originator.cfg.RequireSharedLine = true // by default the pair is carried (line_carry_test.go)
 	declareRecipientVersions(t, env, []string{"pa.crd@2.2"})
 
 	var events []ObserverEvent

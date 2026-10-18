@@ -333,7 +333,9 @@ func names(ms []member) []string {
 // (Config.EnrichNativeRequests), the prefetch fill (E-02) these rows pin.
 // carryGateway is the participant's default, which fills nothing.
 func prefetchGateway(s *prefetchSoR) *Gateway {
-	return &Gateway{cfg: Config{SoR: s.sor(), PayerRouter: nil, EnrichNativeRequests: true}}
+	g := &Gateway{cfg: Config{SoR: s.sor(), PayerRouter: nil, EnrichNativeRequests: true}}
+	g.installEnrichment()
+	return g
 }
 
 func carryGateway(s *prefetchSoR) *Gateway {
@@ -516,7 +518,7 @@ func ingressRowWith(t *testing.T, s *prefetchSoR, body []byte, enrich bool) (*in
 	t.Helper()
 	env := newInProcessExchange(t)
 	env.originator.cfg.SoR = s.sor()
-	env.originator.cfg.EnrichNativeRequests = enrich
+	optInEnrichment(env.originator, enrich)
 	rec := httptest.NewRecorder()
 	env.originator.handleCRDIngress(rec, crdIngressPost(body))
 	return env, rec
@@ -730,7 +732,7 @@ func TestPrefetch_HistoryBackendErrorOmittedAndRecorded(t *testing.T) {
 	s.searches["MedicationRequest"] = searchAnswer{err: errors.New("connection reset")}
 	obs := &observed{}
 	env := newInProcessExchange(t)
-	env.originator.cfg.EnrichNativeRequests = true // the prefetch fill this row pins
+	optInEnrichment(env.originator, true) // the prefetch fill this row pins
 	env.originator.cfg.SoR = s.sor()
 	env.originator.cfg.Observer = obs.observe
 	rec := httptest.NewRecorder()
@@ -1013,7 +1015,7 @@ func TestPrefetch_PatientNamedDifferentlyRefused(t *testing.T) {
 			s := namedDifferently(t)
 			obs := &observed{}
 			env := newInProcessExchange(t)
-			env.originator.cfg.EnrichNativeRequests = true // the prefetch fill this row pins
+			optInEnrichment(env.originator, true) // the prefetch fill this row pins
 			env.originator.cfg.SoR = s.sor()
 			env.originator.cfg.Observer = obs.observe
 			rec := httptest.NewRecorder()
@@ -1031,7 +1033,7 @@ func TestPrefetch_PatientNamedDifferentlyRefused(t *testing.T) {
 		s := namedDifferently(t)
 		obs := &observed{}
 		env := newInProcessExchange(t)
-		env.originator.cfg.EnrichNativeRequests = true // the prefetch fill this row pins
+		optInEnrichment(env.originator, true) // the prefetch fill this row pins
 		env.originator.cfg.SoR = s.sor()
 		env.originator.cfg.Observer = obs.observe
 		rec := httptest.NewRecorder()
@@ -1074,7 +1076,7 @@ func TestPrefetch_HistoryOmittedWhenPatientNamedDifferently(t *testing.T) {
 	s := namedDifferently(t)
 	obs := &observed{}
 	env := newInProcessExchange(t)
-	env.originator.cfg.EnrichNativeRequests = true // the prefetch fill this row pins
+	optInEnrichment(env.originator, true) // the prefetch fill this row pins
 	env.originator.cfg.SoR = s.sor()
 	env.originator.cfg.Observer = obs.observe
 	rec := httptest.NewRecorder()
@@ -1360,7 +1362,7 @@ func TestPrefetch_HeldButUnnamedMemberRefused(t *testing.T) {
 	for _, require := range []bool{false, true} {
 		t.Run(map[bool]string{false: "default", true: "known members required"}[require], func(t *testing.T) {
 			env := newInProcessExchange(t)
-			env.originator.cfg.EnrichNativeRequests = true // the prefetch fill this row pins
+			optInEnrichment(env.originator, true) // the prefetch fill this row pins
 			env.originator.cfg.SoR = unnamedMemberSoR{newPrefetchSoR()}
 			env.originator.cfg.RequireKnownMembers = require
 			rec := httptest.NewRecorder()

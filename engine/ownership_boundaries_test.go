@@ -85,6 +85,7 @@ var transmitBoundaries = map[string]boundaryRule{
 	"Gateway.observeIngress": {kind: excluded, reason: "transparent HTTP observation delegates to the original ingress handler; no payload is authored or transmitted here"},
 	"Gateway.observeInbound": {kind: excluded, reason: "transparent HTTP observation delegates to the independently checked inbound handler; no payload is authored or transmitted here"},
 	"exchangeWriter.Write":   {kind: excluded, reason: "the exchange record's transparent response writer: it times the write of bytes its handler's own checked transmit wrote, and authors nothing"},
+	"notActedFence.Write":    {kind: excluded, reason: "the inbound route's transparent response writer: it removes the reserved not-acted header from an answer its handler's own checked transmit wrote, and authors nothing"},
 	"writeLocalJSON": {kind: excluded,
 		reason: "a successful local API answer (a scenario or console summary built from decoded values)"},
 	"Gateway.authorizeOnce": {kind: excluded,

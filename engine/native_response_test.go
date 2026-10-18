@@ -3,6 +3,7 @@ package engine
 import (
 	"bytes"
 	"encoding/json"
+	"os"
 	"testing"
 )
 
@@ -150,5 +151,83 @@ func TestCheckNativePASGraphWithoutClaimResponse(t *testing.T) {
 	}
 	if holder, element, reference, ok := NativePASUnresolvedReference(encode(bundle("collection", dangling))); !ok || holder != "Patient" || element != "/managingOrganization" || reference != "Organization/o" {
 		t.Fatalf("the dangling reference named %q %q %q %v", holder, element, reference, ok)
+	}
+}
+
+// The exported inquiry answer rule is the gateway's own: for every inquiry
+// answer fixture, and the shapes derived from the reference payer's answer
+// below, at every line and at a line the rule does not know, it reads exactly
+// as validatePASInquiryAnswerAt does.
+func TestPASInquiryAnswerReadsAtIsTheGatewaysRule(t *testing.T) {
+	read := func(path string) []byte {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+	recorded := read("testdata/br-payer/pas-inquire-response.json")
+	// derive is the reference payer's recorded answer with each response
+	// Bundle's ClaimResponse edited by edit and, when bare, with only its
+	// ClaimResponse and CommunicationRequest entries kept: the shape the 2.2
+	// reference payer's inquiry path returns (PasResponseBuilder
+	// buildInquiryResponse, wrapInResponseBundle with no request Bundle).
+	derive := func(bare bool, edit func(cr map[string]any)) []byte {
+		var doc map[string]any
+		if err := json.Unmarshal(recorded, &doc); err != nil {
+			t.Fatal(err)
+		}
+		for _, p := range doc["parameter"].([]any) {
+			b := p.(map[string]any)["resource"].(map[string]any)
+			var kept []any
+			for _, e := range b["entry"].([]any) {
+				r := e.(map[string]any)["resource"].(map[string]any)
+				switch r["resourceType"] {
+				case "ClaimResponse":
+					edit(r)
+					kept = append(kept, e)
+				case "CommunicationRequest":
+					kept = append(kept, e)
+				default:
+					if !bare {
+						kept = append(kept, e)
+					}
+				}
+			}
+			b["entry"] = kept
+		}
+		raw, _ := json.Marshal(doc)
+		return raw
+	}
+	keep := func(map[string]any) {}
+	answers := map[string][]byte{
+		"br-payer pas-inquire-response": recorded,
+		"br-payer pas-inquire-no-match": read("testdata/br-payer/pas-inquire-no-match.json"),
+		"relayfidelity 2.0":             read("testdata/relayfidelity/valid/pas-inquiry-response-2.0.json"),
+		"relayfidelity 2.2":             read("testdata/relayfidelity/valid/pas-inquiry-response-2.2.json"),
+		"ClaimResponse only":            derive(true, keep),
+		"request naming no Claim":       derive(true, func(cr map[string]any) { cr["request"] = map[string]any{"reference": "Patient/x"} }),
+		"request with a data-absent-reason": derive(true, func(cr map[string]any) {
+			cr["request"] = map[string]any{"extension": []any{map[string]any{"url": "http://hl7.org/fhir/StructureDefinition/data-absent-reason", "valueCode": "unknown"}}}
+		}),
+		"not an answer": []byte(`{"resourceType":"Patient","id":"x"}`),
+	}
+	refused := 0
+	for name, body := range answers {
+		for _, line := range []string{"2.0", "2.1", "2.2", "", "2.3"} {
+			ok, detail := PASInquiryAnswerReadsAt(body, line)
+			want := validatePASInquiryAnswerAt(body, line)
+			if ok != (want.Status == 0) || detail != want.Message {
+				t.Errorf("%s at %q: got %v %q, the rule says %d %q", name, line, ok, detail, want.Status, want.Message)
+			}
+			if !ok {
+				refused++
+			}
+		}
+	}
+	// The rows reach both branches: the 2.2 refusal of a request naming no
+	// Claim, and the shape refusal at every line.
+	if ok, _ := PASInquiryAnswerReadsAt(answers["request naming no Claim"], "2.2"); ok || refused != 6 {
+		t.Fatalf("refused %d answer-lines, want 6 (one at 2.2, five of the non-answer)", refused)
 	}
 }

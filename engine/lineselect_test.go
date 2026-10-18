@@ -64,14 +64,9 @@ func TestUnframeRequest_UnknownLegTypeRefusedPlainly(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, payload := range map[string][]byte{"bare": []byte(`{}`), "framed": framed} {
-		for _, unframe := range []func() ([]byte, string, int, string){
-			func() ([]byte, string, int, string) { return g.unframeRequest("no-such-leg", payload) },
-			func() ([]byte, string, int, string) { return g.unframeRequestFrom("prov-1", "no-such-leg", payload) },
-		} {
-			body, tok, status, msg := unframe()
-			if body != nil || tok != "" || status != http.StatusInternalServerError || msg != msgUnknownLeg {
-				t.Fatalf("%s: got (%s, %q, %d, %q), want the fixed 500 refusal", name, body, tok, status, msg)
-			}
+		body, tok, _, status, msg := g.unframeRequestFrom("prov-1", "no-such-leg", payload)
+		if body != nil || tok != "" || status != http.StatusInternalServerError || msg != msgUnknownLeg {
+			t.Fatalf("%s: got (%s, %q, %d, %q), want the fixed 500 refusal", name, body, tok, status, msg)
 		}
 	}
 }
@@ -87,7 +82,7 @@ func TestNativeResponder_UnknownLegTypeErrors(t *testing.T) {
 
 func TestDeclaredContractVersionsAccessor(t *testing.T) {
 	g := &Gateway{cfg: Config{Reg: shnsdk.NewRegistry()}}
-	if got := g.declaredContractVersions(); len(got) != len(shnsdk.SupportedContractVersions()) {
+	if got := g.declaredContractVersions(); len(got) != len(DefaultContractVersions()) {
 		t.Fatalf("default declared set = %v, want the build default", got)
 	}
 	reg := shnsdk.NewRegistry()
@@ -171,8 +166,8 @@ func TestFramedRequestHonored(t *testing.T) {
 	fake := shnsdk.NewFakeValidator()
 	g := d9Gateway(map[string]shnsdk.Validator{"2.0": fake, "2.1": fake, "2.2": fake}, nil)
 	body := []byte(`{"resourceType":"Bundle"}`)
-	got, answer, status, msg := g.unframeRequest("pas-claim", framedRequest(t, "pa.pas@2.2", body))
-	if status != 0 {
+	got, answer, carried, status, msg := g.unframeRequestFrom("requester", "pas-claim", framedRequest(t, "pa.pas@2.2", body))
+	if status != 0 || carried != "" {
 		t.Fatalf("honored request refused: %d %s", status, msg)
 	}
 	if answer != "pa.pas@2.2" {
@@ -183,9 +178,12 @@ func TestFramedRequestHonored(t *testing.T) {
 	}
 }
 
+// With the participant's opt-in (RequireSharedLine): by default the claim is
+// carried (line_carry_test.go).
 func TestFramedRequestUnknownLineRefused(t *testing.T) {
 	g := d9Gateway(nil, nil)
-	_, _, status, msg := g.unframeRequest("pas-claim", framedRequest(t, "pa.pas@9.9", []byte(`{}`)))
+	g.cfg.RequireSharedLine = true
+	_, _, _, status, msg := g.unframeRequestFrom("requester", "pas-claim", framedRequest(t, "pa.pas@9.9", []byte(`{}`)))
 	if status != http.StatusUnprocessableEntity {
 		t.Fatalf("status = %d, want 422", status)
 	}
@@ -196,8 +194,10 @@ func TestFramedRequestUnknownLineRefused(t *testing.T) {
 
 func TestFramedRequestWrongContractRefused(t *testing.T) {
 	g := d9Gateway(nil, nil)
-	// A pa.crd token on a pa.pas leg is a category error, not a line question.
-	_, _, status, msg := g.unframeRequest("pas-claim", framedRequest(t, "pa.crd@2.0", []byte(`{}`)))
+	g.cfg.RequireSharedLine = true
+	// A pa.crd token on a pa.pas leg names no line of the leg's contract, so
+	// this gateway cannot answer at it: under the setting it is refused.
+	_, _, _, status, msg := g.unframeRequestFrom("requester", "pas-claim", framedRequest(t, "pa.crd@2.0", []byte(`{}`)))
 	if status != http.StatusUnprocessableEntity || !strings.Contains(msg, "pa.crd@2.0") {
 		t.Fatalf("cross-contract claim = (%d,%q), want a 422 naming the token", status, msg)
 	}
@@ -208,8 +208,9 @@ func TestFramedRequestWrongContractRefused(t *testing.T) {
 func TestFramedRequestCertifyOnlyClientStillRefused(t *testing.T) {
 	fake := shnsdk.NewFakeValidator()
 	g := d9Gateway(map[string]shnsdk.Validator{"2.0": fake}, nil)
+	g.cfg.RequireSharedLine = true
 	g.cfg.CertificationValidatorsByLine = map[string]shnsdk.Validator{"2.0": fake, "2.2": fake}
-	_, _, status, msg := g.unframeRequest("pas-claim", framedRequest(t, "pa.pas@2.2", []byte(`{}`)))
+	_, _, _, status, msg := g.unframeRequestFrom("requester", "pas-claim", framedRequest(t, "pa.pas@2.2", []byte(`{}`)))
 	if status != http.StatusUnprocessableEntity {
 		t.Fatalf("status = %d, want 422 — a certify-only client must not honour an inbound 2.2 frame", status)
 	}
@@ -222,7 +223,8 @@ func TestFramedRequestNativeButUnlanedRefused(t *testing.T) {
 	fake := shnsdk.NewFakeValidator()
 	// 2.2 is natively buildable but this deployment configured no 2.2 lane.
 	g := d9Gateway(map[string]shnsdk.Validator{"2.0": fake}, nil)
-	_, _, status, msg := g.unframeRequest("pas-claim", framedRequest(t, "pa.pas@2.2", []byte(`{}`)))
+	g.cfg.RequireSharedLine = true
+	_, _, _, status, msg := g.unframeRequestFrom("requester", "pas-claim", framedRequest(t, "pa.pas@2.2", []byte(`{}`)))
 	if status != http.StatusUnprocessableEntity {
 		t.Fatalf("status = %d, want 422", status)
 	}
@@ -237,7 +239,7 @@ func TestBareRequestTolerated(t *testing.T) {
 	g := d9Gateway(nil, []string{"pa.pas@2.0", "pa.pas@2.2"})
 	g.cfg.DeclaredContractVersions = []string{"pa.pas@2.0", "pa.pas@2.2"}
 	body := []byte(`{"resourceType":"Bundle"}`)
-	got, answer, status, msg := g.unframeRequestFrom("requester", "pas-claim", body)
+	got, answer, _, status, msg := g.unframeRequestFrom("requester", "pas-claim", body)
 	if status != 0 {
 		t.Fatalf("bare request refused: %d %s", status, msg)
 	}
@@ -249,18 +251,20 @@ func TestBareRequestTolerated(t *testing.T) {
 	}
 	// A SILENT sender (no declaration) falls back to this build's own canonical line.
 	g2 := d9Gateway(nil, nil)
-	if _, answer, status, _ := g2.unframeRequestFrom("requester", "pas-claim", body); status != 0 || answer != "pa.pas@2.0" {
+	if _, answer, _, status, _ := g2.unframeRequestFrom("requester", "pas-claim", body); status != 0 || answer != "pa.pas@2.0" {
 		t.Fatalf("silent sender = (%q,%d), want pa.pas@2.0 / 0", answer, status)
 	}
 	// A version-neutral leg is never framed and never gets an answer token.
-	if _, answer, status, _ := g2.unframeRequestFrom("requester", "federated-query", body); status != 0 || answer != "" {
+	if _, answer, _, status, _ := g2.unframeRequestFrom("requester", "federated-query", body); status != 0 || answer != "" {
 		t.Fatalf("version-neutral leg = (%q,%d), want \"\" / 0", answer, status)
 	}
 }
 
+// Under the participant's own setting (RequireSharedLine); by default the pair is carried (line_carry_test.go).
 func TestTamperedRequestFrameRefused(t *testing.T) {
 	fake := shnsdk.NewFakeValidator()
 	g := d9Gateway(map[string]shnsdk.Validator{"2.0": fake, "2.2": fake}, nil)
+	g.cfg.RequireSharedLine = true
 	frame := framedRequest(t, "pa.pas@2.2", []byte(`{"resourceType":"Bundle"}`))
 	// One mutation on an otherwise-valid framed request: flip the claimed token
 	// to a line no build speaks. The receiver must refuse, never fall back.
@@ -268,7 +272,7 @@ func TestTamperedRequestFrameRefused(t *testing.T) {
 	if string(frame) == string(tampered) {
 		t.Fatal("fixture bug: tampered frame is identical")
 	}
-	_, _, status, msg := g.unframeRequest("pas-claim", tampered)
+	_, _, _, status, msg := g.unframeRequestFrom("requester", "pas-claim", tampered)
 	if status != http.StatusUnprocessableEntity || !strings.Contains(msg, "pa.pas@4.7") {
 		t.Fatalf("tampered token = (%d,%q), want a 422 naming it", status, msg)
 	}
@@ -506,7 +510,7 @@ func TestNativeForwardFilterUsesDeclaredSet(t *testing.T) {
 	// cannot read the partner's CDS service listing — a clearly different outcome
 	// from the 422 refuse-before-forward, and it sends zero bytes anywhere.
 	newResponder := func(own []string) LegResponder {
-		opts := []NativeOption{WithDeclaredContractVersions(peer)}
+		opts := []NativeOption{WithDeclaredContractVersions(peer), WithRequireSharedLine(true)}
 		if own != nil {
 			opts = append(opts, WithOwnContractVersions(own))
 		}
@@ -533,7 +537,7 @@ func TestNativeForwardFilterUsesDeclaredSet(t *testing.T) {
 	})
 	t.Run("accessor mirrors the gateway's empty-means-default rule", func(t *testing.T) {
 		n := &nativeResponder{}
-		if strings.Join(n.ownDeclared(), ",") != strings.Join(shnsdk.SupportedContractVersions(), ",") {
+		if strings.Join(n.ownDeclared(), ",") != strings.Join(DefaultContractVersions(), ",") {
 			t.Fatalf("unset ownContractVersions must fall back to the build default, got %v", n.ownDeclared())
 		}
 	})

@@ -130,6 +130,617 @@ receives changes.
   service does not permit) are `consent`. A facility's or a PHG's gateway
   refusing a leg is refused by `other`.
 
+## A payer's Patient Access API can be turned off (v0.62.0)
+
+- `PATIENT_ACCESS_API=off` on a payer gateway leaves its Patient Access API unmounted:
+  `GET /metadata` and `GET /ExplanationOfBenefit[/{id}]` answer `404`, and nothing else
+  changes. Unset or `on`, the default, serves it as before. Any other value, or any value on
+  another role, refuses to boot.
+- `GET /health` answers on every role either way. It is the gateway's liveness, and it never
+  depends on the Patient Access API.
+- Temporary: the Patient Access API is being removed in a later release, and this setting goes
+  with it.
+- **Go API (additive):** `engine.Config.PatientAccessOff`; its zero value serves the routes.
+
+## One patient-match rule on eligibility, federated query and patient-authored DTR (v0.62.0)
+
+- **Behavior change in v0.62.0 (eligibility):** a payer's gateway no longer
+  compares the patient an eligibility leg's token names with the member the
+  request names. A request whose token names another patient was refused
+  `403 token subject does not match request patient` at every level when the
+  gateway answered from its system of record. It is now answered about the
+  member the request names, at every level, as on the CRD, DTR, PAS and inquiry
+  legs and on a payer that declares its own eligibility endpoint. The gateway
+  emits `subject.binding-differs`, and, when the Hub reads the involved list,
+  names its own binding of the member on the answer (`payer-held`, or
+  `payer-derived` for a member a payer that declares its own eligibility
+  endpoint does not hold), on both eligibility paths. A member the system of record does not hold is still
+  answered `400 unknown member`.
+- **Behavior change in v0.62.0 (federated query):** a queried patient the
+  facility's gateway does not hold, and one whose identifier is not the
+  token's patient's, are refused alike at every level: `403 the queried patient
+  cannot be matched to the patient the leg's consent covers` (was `400 unknown
+  member` and `403 token subject does not match queried patient`), so the
+  refusal does not say whether the facility holds the patient. A member whose
+  records the facility's system answers out of shape (two Patients for one
+  member, say) gets the same answer (was `502 system of record returned an
+  invalid response`), and the exchange record keeps that system's failure; an
+  outage still answers `503`. The exchange record names the refusal's rule as
+  consent (was authority).
+- **Behavior change in v0.62.0 (patient-authored DTR):** the same for the
+  patient the PHG's gateway would sign as: `403 the patient cannot be matched
+  to the patient the leg's authority names` (was `400 unknown member` and `403
+  token subject does not match patient`), recorded as authority, and the same
+  for a member whose records are out of shape. A request
+  naming no patient is refused `400 patient-dtr request names no patient` (was
+  `400 unknown member`).
+- No Go API changes.
+
+## A patient reference is read in every form on eligibility and federated query (v0.62.0)
+
+- **Behavior change in v0.62.0:** a coverage-eligibility request's `patient`,
+  and a federated query's `Task.for` and its query's `patient` parameter, are
+  read in every reference form: relative (`Patient/<id>`), absolute
+  (`https://…/Patient/<id>`, with or without `/_history/<version>`) and
+  contained (`#<id>`, naming the contained Patient, whose member is the one
+  `urn:shn:member` identifier it carries; its id is local to the request and
+  is never read as a member). Before, an absolute or
+  contained reference was read as a literal member id on eligibility (`400
+  unknown member`, or a binding derived from the literal on a payer's own
+  endpoint) and refused on federated query (`403 query rejected: cdex:
+  Task.for missing/invalid`, or a query patient that did not match Task.for).
+  The bytes carried are unchanged.
+- Only a well-formed reference is resolved: an optional `http(s)` base, then
+  `Patient/<id>` with a FHIR id, then an optional `/_history/<version>`; or
+  `#<id>`. A contained reference that names no contained Patient, or more
+  than one (an id the request does not carry or carries twice, a contained
+  resource that is not a Patient, a contained Patient with no single member
+  identifier), names no patient and is refused: `400 parse member failed` on
+  eligibility, where a payer forwarding to its own endpoint carried it before;
+  `403 query rejected: …` on federated query, before any record is read. On
+  eligibility a contained Patient's member identifier is read whatever its
+  shape, as an identifier value; the federated query writes only one in a
+  FHIR id's shape into its query, and leaves any other as sent, refused as
+  before. Any other reference is read as before: on eligibility as the
+  member that follows `Patient/` (a bare id, an id outside a FHIR id's shape,
+  a trailing path); on federated query, refused as before (a trailing path
+  or operation, an escaped character, a percent-encoded reference, another
+  resource type).
+- A request this gateway cannot read strictly (a repeated member name, one
+  that matches a FHIR name only by case folding, or another shape the strict
+  reader does not accept) is read exactly as before, so no two readers of it
+  see two patients and nothing it answered before is refused.
+- No Go API changes.
+
+## A pair that shares no IG line is carried by default (v0.62.0)
+
+- **Behavior change in v0.62.0 (requests):** a leg to a peer that shares no
+  declared line, and that no native reach or transform chain reaches, is
+  carried at this gateway's own highest declared line, exactly as built,
+  where it was refused `422 no shared contract line …`. This includes a PAS
+  Bundle carried from a provider's own system. A CDS Hooks request from a
+  provider's own system whose walk to the payer's line would change it is
+  carried as sent, at the line it is in (was `502 the CDS Hooks request
+  cannot be carried to the payer's line unchanged`). A payer gateway forwards
+  to its own Da Vinci system when that system's declared lines
+  (`PAYER_DAVINCI_CONTRACT_VERSIONS`) share none with its own (was `422`).
+- **Behavior change in v0.62.0 (claims and stamps):** a request frame
+  claiming a line this gateway cannot build or validate at is answered as a
+  bare request is (was `422 request declares contract version …`), and a
+  claim on a version-neutral leg is ignored (was `422`). A 2xx answer stamped
+  with another line than the leg routed is relayed (was `502 … response
+  contract version mismatch …`).
+- **Behavior change in v0.62.0 (recorded):** each carry raises the observer
+  event `contract.line-carried` (`engine.LineCarriedEvent`), whose detail
+  names the lines, and the exchange record's `LineCarried` lists where it
+  happened (`request`, `answer`); the access line carries it as
+  `lineCarried`. A line a peer's frame states is named in them only in a
+  token's shape. A walk to the peer's line that is not applied records no
+  `leg.transformed` and no transform Provenance.
+- **The participant's setting:** `REQUIRE_SHARED_LINE=true`
+  (`engine.Config.RequireSharedLine`; `engine.WithRequireSharedLine` on the
+  native responder) refuses each of these as before, except a request whose walk
+  to the payer's line would change it, which it refuses `422 … cannot be carried to
+  the payer's line unchanged` (was `502`). Where the call keeps an
+  exchange record (a Da Vinci ingress or an inbound leg), the refusals are
+  recorded as `routing`, the answer-stamp refusal included (v0.61.0 recorded
+  it as `other`). A claim on a version-neutral leg is ignored either way. It
+  never changes the line a pair that shares one routes at.
+- Unchanged: a gated transform chain's refusal to make a lossy edit of a
+  message this gateway builds (`422`, the fidelity of its own edits), and a
+  pend's follow-up, which is never re-selected: it goes at the pend's line,
+  or is refused when nothing reaches that line.
+- **Go API (additive):** `engine.Config.RequireSharedLine`,
+  `engine.WithRequireSharedLine`, `engine.LineCarriedEvent`,
+  `engine.LineCarriedRequest`, `engine.LineCarriedAnswer`,
+  `engine.LineCarriedValues`, `engine.ExchangeRecord.LineCarried`,
+  `diagnostics.AccessLine.LineCarried`.
+
+## A requester the answering gateway does not know yet (v0.62.0)
+
+- **Behavior change in v0.62.0 (inbound):** the answering gateway resolves a
+  leg's requester in its registry before acting on the leg, right after the
+  leg's authority verifies. On a miss it re-reads the registrar feed once
+  (`Config.RegistryRefresh`; one read shared by concurrent legs, bounded to
+  2 seconds). A requester still unknown is refused before any handler runs,
+  at every conformance level, with `503 {"error":"requester not yet in this
+  gateway's registry"}` (uncacheable), `Retry-After: 3` and
+  `X-SHN-Not-Acted: requester-unknown`: nothing is adjudicated or sent and no
+  decision is recorded; the exchange record keeps the refusal, as `routing`.
+  It used to act on the leg and then answer `500 requester not in
+  registry`, which the Hub relayed as a recipient `5xx`. Every refusal ahead
+  of it (the Hub assertion, the envelope, the authority) is unchanged.
+- `X-SHN-Not-Acted` is reserved: the gateway removes it from every other
+  answer on its inbound route, so neither a handler nor a connector can state
+  on the gateway's behalf that it took no action.
+- **Behavior change in v0.62.0 (origination):** a Hub `503` not delivered that
+  relays `X-SHN-Not-Acted: requester-unknown` (the recipient's gateway did not
+  know this one yet) is answered to the caller as this gateway's own `503`,
+  uncacheable, with the relayed `Retry-After` (a whole number of seconds from
+  1 to 60, else 3) and `the recipient's gateway has not read this gateway's
+  registration yet and took no action on this leg; resend after <n>s` (an
+  OperationOutcome with code `transient` on a FHIR operation route). It
+  speaks for that leg: on a route that sends several legs, the earlier ones
+  may have been answered. The leg is `unreachable`, as every Hub refusal not
+  delivered is.
+- **Go API (additive):** `engine.Config.RegistryRefresh`, which the
+  application layer sets to its registrar feed read when a registrar is
+  configured; `engine.NotActedHeader` and `engine.NotActedRequesterUnknown`.
+
+## Refusal texts name the condition, and whether the payer may have acted (v0.62.0)
+
+- **Behavior change in v0.62.0 (refusal texts):** the statuses are unchanged;
+  a client that matches these texts exactly should match the new ones.
+  - A PAS Bundle with no Coverage entry at all: `400 PAS bundle carries no
+    Coverage` (was `PAS bundle missing Coverage.beneficiary`, which a Coverage
+    with no beneficiary keeps). The shn-sdk Responder says the same from
+    the SDK release after shn-sdk v0.62.0.
+  - An answer that repeats a JSON member name, refused at every level, names
+    the member and the object that repeats it (at most 64 characters of each
+    name; a name that is not a plain identifier is quoted, `["a.b"]`):
+    `502 payer CRD response repeats the JSON member "<name>" in <where>: it
+    can be read two ways, so it is not carried` (was `payer CRD response is
+    not a valid CDS Hooks response: response.json`); the same for `payer PAS
+    response` (was `engine: invalid native PAS response Bundle: invalid or
+    incomplete PAS response graph`), followed by `; the payer's system
+    received and answered this request: check its outcome before resending`
+    whichever gateway refuses it; for `payer inquiry answer` (was `engine:
+    invalid prior-authorization inquiry answer`); `403 response repeats …` (was
+    `response repeats a member name`); and `502 next-question response repeats
+    …` (was `next-question response is not a questionnaire-response`).
+  - An answer whose frame declares another contract line than the leg was
+    routed at: `502 the recipient received this request and answered, but its
+    answer could not be accepted (response contract version mismatch: frame
+    declares <token>, leg routed <token>); it may have acted on the request:
+    check its outcome before resending`, on every provider ingress (was the
+    bare `response contract version mismatch: …`), when the participant sets
+    `REQUIRE_SHARED_LINE=true`; by default the answer is relayed (see "A pair
+    that shares no IG line is carried by default"). The exchange record counts
+    the refusal on routing.
+  - The payer gateway's own failure (was `500 responder failed`) says whether
+    it had forwarded the request to the payer's system: `the payer's gateway
+    failed before forwarding this request to the payer's system`, `… after
+    forwarding this request to the payer's system, which may have acted on it:
+    check its outcome before resending`, or, when it cannot tell (a connector
+    that calls its system itself, one wrapping the native responder
+    included, or a gateway that keeps no exchange record: no access log and
+    no metrics), `the payer's gateway failed, and whether the payer's system
+    received this request is not known: check its outcome before resending`.
+- No Go API changes.
+
+## A questionnaire package answer crosses a DTR line under its requester's names (v0.62.0)
+
+- **Behavior change in v0.62.0 (relay):** a provider's gateway that declares
+  exactly one DTR line renames the line-specific parameter names of a payer's
+  `$questionnaire-package` answer to its own line's before the answer reaches
+  its participant's system. DTR 2.0.1 and 2.1.0 name the package
+  `PackageBundle` and the outcome `operationOutcome` (the output profile's
+  name); DTR 2.2.0 names them `packagebundle` and `outcome`. Toward 2.2.0 both
+  are renamed; toward 2.0.1 or 2.1.0 only the package is (`outcome` is every
+  line's OperationDefinition name). `return` is never renamed. Each package
+  QuestionnaireResponse crosses the lines through the registered `pa.dtr`
+  compatibility steps along the manifest's chain (its Coverage between
+  `qr-context` and `qr-coverage`, its intended-use code system, its origin
+  code), each step reported under its own module on a `leg.transformed`
+  event with the transform Provenance, and is spliced back into the payer's
+  own bytes; every other byte is the payer's. This is a new registered edit,
+  E-08 (`dtr-answer-line-names`),
+  on the `dtr-questionnaire-fetch` answer a requester's gateway gives its own
+  participant. It is made only when every line-specific name in the answer
+  belongs to the other line, and the answer is valid at its own line against
+  the DTR output Parameters profile. That check runs at every level as the
+  edit's own precondition, and records nothing.
+- **New refusal, at every level:** the renamed answer must be valid at the
+  requester's line (a bridged check, `fhir-bridged`). An answer that is not is
+  refused, its text saying the payer answered but its answer cannot be carried
+  into the gateway's DTR line: a DTR 2.0.1 package with no QuestionnaireResponse
+  (required at 2.2.0), several outcomes toward 2.2.0 (which allows one), or a
+  Questionnaire, Library or ValueSet whose content differs by line, which no
+  step rewrites. A registered step that refuses the QuestionnaireResponse
+  refuses the answer the same way. The gateway never fills. The finding names the edit (`edit`) and carries the
+  SHA-256 of the payer's answer (`sourcePayloadSha256`) beside that of the
+  renamed answer (`payloadSha256`); the leg is recorded `error`.
+- **Behavior change (observe and above, cross-line answers only):** an answer
+  that is not valid at its own line is not renamed. It is carried as sent, and the payer-answer check
+  reports it by level, as for the gateway's own DTR fetch: nothing at none,
+  a finding at observe, decided by its defect at structural, refused at
+  strict. Before, such an answer was carried unchecked at every level, as an
+  answer in the requester's own line names still is.
+- **Unchanged:** a gateway that declares several DTR lines carries every
+  answer exactly, since it cannot know which names its participant's system
+  reads; so does a gateway whose answer is already in its own line's names.
+- **Additive (access line):** `diagnostics.AccessLine.AnswerLine` (JSON
+  `answerLine`, omitted when empty) is, on an ingress call, the contract token
+  of the IG line the answer the gateway wrote back is written in. From v0.62.0
+  the provider's DTR ingress records it: the routed line when it carried the
+  payer's answer as sent, its own line when E-08 carried it across. Evidence
+  then judges the answer at the line it is written in, not the line its leg was
+  sealed at (`engine.ExchangeRecord.AnswerLine` carries it to the line).
+- **Go API:** `relay.EditDTRAnswerLineNames` (`E-08`) is new, and the ownership
+  table admits it on the `dtr-questionnaire-fetch` requester answer.
+  `engine.ConformanceFinding` gains `Edit` and `SourcePayloadSHA256` (both
+  omitempty), set only on the check of a payload a registered edit changed.
+  `engine.LineFakeValidator` checks the DTR output Parameters profile's package
+  and outcome cardinalities, and reads a wrapped `$validate` request as HAPI
+  does: it judges the wrapped resource when no profile is passed, and the
+  wrapper when one is.
+- **Fix (validation):** a check of a `Parameters` against an explicit profile
+  now judges the `Parameters` itself. It used to send the wrapped request with
+  `?profile=`, which HAPI reads as naming the wrapper, so it judged the
+  wrapper. The check now asserts the profile as the wrapped copy's own
+  `meta.profile`. Only the request to the gateway's own validator changes. No
+  earlier check of a `Parameters` passed an explicit profile.
+
+## A decision EOB states only what the payer's answer and the request supply (v0.62.0)
+
+- **Behavior change in v0.62.0:** the ExplanationOfBenefit a payer gateway records for a
+  payer's prior-authorization decision (the Patient Access record, never sent to a peer)
+  reads every element from a source, carried as written: `type`, `provider`, `insurance`
+  (`focal`, `coverage`), the item's `sequence` and `net` from the request Claim (on an
+  inquiry, the inquiry's Claim); `created`, `insurer` and `outcome` from the ClaimResponse
+  that carried the decision. Before, it wrote `type` `professional`, the gateway clock as
+  `created`, `Organization/payer`, `Practitioner/reviewer-uc08`, `Coverage/<member>` with
+  `focal` true, `outcome` `complete`, item `sequence` 1 and a `submitted` `0 USD`
+  adjudication.
+- **The item's adjudication is the payer's own:** the ClaimResponse's `item.adjudication`
+  entries for that item, each with its category, its amount only where the payer stated
+  one, and its reasons value for value (the EOB re-marshals them, so `<`, `>` and `&` may
+  be escaped; no value changes). The payer's review action (PAS
+  `extension-reviewAction`, defined only for ClaimResponse and Claim) is re-expressed value
+  for value in `http://hl7.org/fhir/us/davinci-pdex/StructureDefinition/extension-reviewAction`,
+  the one defined for the ExplanationOfBenefit adjudication context, through one registered
+  table (`extension-reviewActionCode`, `number`, `reasonCode`, `secondSurgicalOpinionFlag`;
+  every value copied exactly). A payer sub-extension that table does not map writes no EOB
+  and is named in `pa.decision-eob-not-written` by its position only ("decision EOB not
+  written: review action sub-extension 2 has no counterpart in the EOB review action"); no
+  finding, event or log line echoes a value the payer stated. A review action on the
+  ClaimResponse's header `adjudication` or on an `addItem` for the item is carried onto the
+  EOB's header `adjudication` and `addItem` the same way. The EOB item is the request item
+  that codes the order (on an inquiry, the line whose trace number the payer echoed), its
+  `productOrService` carried as that item wrote it; the payer's adjudication paired with it
+  is only that item's (on an inquiry, the ClaimResponse item carrying the same trace
+  number), never another item's. A request with no item coding the order writes no EOB, and
+  so does a decision no payer item answers that request item with: on submit, no
+  ClaimResponse item states that item's sequence; on an inquiry, no ClaimResponse item echoes
+  the trace number of the line (an answer that echoes none pairs with no line). An EOB that
+  carried the request item without the payer's decision on it would read as an approval
+  whatever the payer decided, so the decision is recorded without one and
+  `pa.decision-eob-not-written` names the position only ("no item of the payer's
+  ClaimResponse answers the sequence of the request Claim item that states the decision's
+  product coding"; "… carries the item trace number of the inquiry line the decision
+  answers"). No
+  code system is defaulted, and a `processNote` carries its `number` only when the payer
+  stated one. The request item's `net` is added as a
+  `submitted` adjudication only when the payer stated no `submitted` entry of its own;
+  with neither, the item carries no adjudication. No amount, review action (no `A3`),
+  reason code or note is ever added.
+- **`preAuthRef` is the payer's own authorization numbers as stated:** its
+  `ClaimResponse.preAuthRef`, then each review action `number` on the item's adjudication,
+  on the header adjudication and on each carried `addItem`'s adjudication, each once,
+  whatever the decision. `outcome` is the ClaimResponse's.
+- **Which `addItem`s are carried:** a payer `addItem` with no `itemSequence` (the claim as a
+  whole), or one whose `itemSequence` names the request item (by its own sequence, or by
+  the sequence of the payer item that answered it). The EOB carries that one item under the
+  request item's sequence, so an `addItem` tied to it that also names any other sequence
+  writes no EOB, and `pa.decision-eob-not-written` names it by position ("addItem 1 of the
+  payer's ClaimResponse names an item sequence the EOB does not carry"); an `addItem` for
+  another item is not this decision's. R4 names `ClaimResponse.addItem.subdetailSequence`
+  `ExplanationOfBenefit.addItem.subDetailSequence`: the member is carried under the EOB's
+  name, its value as written.
+- **The EOB claims no profile, and the Patient Access CapabilityStatement no longer
+  claims PDex:** it drops `supportedProfile` `pdex-priorauthorization` for
+  `ExplanationOfBenefit` and its `implementationGuide` (the PDex 2.1.0 canonical). PDex
+  2.1.0's closed adjudication slicing requires an amount, a reason or units on every
+  adjudication, so it cannot carry a payer's amountless decision (the reference payer's
+  `submitted` entry carrying only its review action) without an amount the payer never
+  stated. The EOB is base FHIR R4; it uses the PDex review action extension only because
+  that is the one defined for its adjudication context, and carries no `meta.profile`. A
+  Patient Access client that selected EOBs by that profile or guide should read them as
+  base R4 ExplanationOfBenefit. No gateway declares the `pa.pdex@2.1` contract line
+  either (next section).
+- **Partner-visible loosening: a payer decision this gateway used to refuse with
+  502 is now relayed, at every conformance level.** The decision is never refused over this
+  gateway's own record of it:
+  - a decision whose detail the EOB cannot carry as written (a `processNote` typed outside
+    `NoteType`, an unmapped review action sub-extension) is relayed exactly and recorded
+    without an EOB, with `pa.decision-eob-not-written` naming the detail. Before, strict
+    answered 502 and lower levels relayed it and wrote nothing.
+  - a decision that reads as a denial yet states a top-level `ClaimResponse.preAuthRef`
+    (possibly a partial certification) is relayed exactly on `$submit` and on the amended
+    re-POST, and on `$inquire` the same; nothing is written from it (no decision, no EOB),
+    and the gateway emits `pend.decision-not-recorded` saying so. Before, strict answered
+    502. The decision reader still reads the reference payer's own denial shape (`A2` with
+    no review action `number`) with a top-level `preAuthRef` as a denial, so that answer is
+    relayed and nothing is written (that reading stays open).
+  - review reasons in any code system, a denial reason in the payer's own system, an `A6`
+    review action, and reason codes on an approval are carried on the EOB as the payer
+    stated them (before, the first and last were refused).
+  - a decision EOB that fails its own validation no longer refuses the payer's decision at
+    strict (before: 422, or 500 when the validator could not answer). The EOB is this
+    gateway's side record, neither the participant's payload nor an edit on the wire, which
+    are what strict governs. At every level that checks it, and whether the payer's answer
+    was relayed or produced by this gateway, the decision is relayed exactly and recorded,
+    the EOB is not written, the EOB's validation finding is recorded as relayed, and
+    `pa.decision-eob-not-written` names the failure by its first issue's code, message id
+    and expression ("decision EOB not written: it fails its own validation (...)"), or says
+    its validation could not run, which leaves the EOB unwritten only at `strict`: below
+    `strict` that EOB is written, and at every level the check is recorded as an
+    `unavailable` finding. On `$inquire` each decision stands on its own: one EOB not written never
+    keeps the answer's other decisions or their EOBs. Strict still refuses a participant's
+    own non-conformant payload as before, during a validator outage included.
+- A provider, insurer or coverage reference is stated by `Reference.identifier` when the
+  source reference carries one or the resource it names in the source Bundle does (an NPI
+  first, then a member identifier, else its first identifier), with the source's `display`;
+  otherwise by the literal reference as written.
+- An element the EOB requires that its source does not state (an unreadable request Claim;
+  a request Claim without `type`, `provider`, `insurance` or the item's `sequence`; a
+  ClaimResponse without `created`, `insurer` or `outcome`) writes no EOB. The decision is
+  still relayed exactly and recorded, at every conformance level, and the gateway emits
+  `engine.DecisionEOBNotWrittenEvent` (`pa.decision-eob-not-written`), whose detail names the
+  element and its source. No Go API is removed; `engine.DecisionEOBNotWrittenEvent` is new.
+
+## No gateway declares `pa.pdex@2.1` (v0.62.0)
+
+- **Breaking (configuration), upgrade step:** remove `pa.pdex@2.1` from
+  `SHN_CONTRACT_VERSIONS` before upgrading (on a hosted tenant, before rolling it to
+  v0.62.0). A gateway whose declared set still names it refuses to boot: `gateway:
+  SHN_CONTRACT_VERSIONS: contract-version token "pa.pdex@2.1" is no longer declared by
+  any gateway: the Patient Access API's decision ExplanationOfBenefit is base FHIR R4 and
+  does not meet Da Vinci PDex 2.1, so a declaration must not claim it: remove it from the
+  declared set (SHN_CONTRACT_VERSIONS)`. The set without it boots on an earlier release
+  too, so the step can be taken first. A hosted tenant's saved `SHN_CONTRACT_VERSIONS`
+  takes the same step before the tenant is rolled to v0.62.0. SHN's own platform gateways (the
+  bridge demo gateways and the provider test gateway) run the image built from the merge, so their declared sets drop the line in
+  this same change. The refusal is the declared-set rule a gateway
+  already applies (a declared token must be one this build can honour): a published
+  declaration must not claim a conformance the gateway's output does not meet.
+- The decision EOB is base FHIR R4 and the Patient Access CapabilityStatement claims no
+  PDex (previous section), so the line no longer describes anything a gateway does. It
+  leaves the native set and the build default: unset, `SHN_CONTRACT_VERSIONS` declares
+  `pa.crd@2.0, pa.dtr@2.0, pa.pas@2.0`, and a payer that derives its declaration from
+  `PAYER_DAVINCI_CONTRACT_VERSIONS` declares that system's CRD, DTR and PAS lines and
+  nothing else (a PDex line the system names is still not a forwarded line). Discovery's
+  `bridgedContractVersions` is the SDK's native set, so it names `pa.pdex@2.1` until the
+  SDK release after shn-sdk v0.62.0 drops it. Patient Access is not a network leg, so
+  no exchange, route or line selection changes.
+- The connectivity checks still read a payer system's own PDex publication
+  (`/us/davinci-pdex/` canonicals, `davinci_pdex_patient_endpoint`) as `pa.pdex`; with no
+  `pa.pdex` line declared, such a publication is not version drift.
+- Go API: shn-sdk v0.62.0 still names `pa.pdex@2.1` (`shnsdk.ContractPAPDex21`, in
+  `NativeContractVersions` and `SupportedContractVersions`, and accepted by
+  `ParseDeclaredContractVersions`); the SDK release after v0.62.0 drops it. The gateway's
+  own native set and default omit it, and its declared-set rule refuses it, whatever the
+  SDK names. **Go API (additive):** `engine.NativeContractVersions`,
+  `engine.DefaultContractVersions` and `engine.ParseDeclaredContractVersions`, the SDK's
+  native set, default and parser without `pa.pdex@2.1`, and `engine.ErrPDexUndeclared`, the
+  parser's refusal of a set naming it.
+
+## An origination route states the Claim's request facts (v0.62.0)
+
+- **Breaking in v0.62.0:** every prior-authorization origination route (`POST /scenario/*`
+  that sends a PAS submission or amendment, including `/scenario/uc06/complete` and
+  `/scenario/uc07/complete`) now takes the Claim's request facts from its JSON request
+  body, beside the route's existing keys, and carries each exactly as stated:
+
+  ```json
+  {"claimFacts": {"claimType": {Coding}, "priority": {Coding}, "serviceCategory": {Coding},
+                  "placeOfService": {Coding}, "requestType": {Coding}},
+   "certificationType": {Coding}}
+  ```
+
+  `claimType` is `Claim.type` (claim-type), `priority` is `Claim.priority`, `serviceCategory`
+  is `Claim.item.category` (X12 1365), `placeOfService` is `Claim.item.location[x]` (CMS place
+  of service) and `requestType` is the item's `requestType` extension (X12 1525);
+  `certificationType` (X12 1322) is the amendment's, on a route that sends one. Before, the
+  gateway wrote the same constants on every Claim: `professional`, priority `normal` with no
+  system, X12 1365 `1` Medical Care, place of service `11` and request type `IN`, and
+  certificationType `I` on every amendment.
+- **What a caller must change:** state `claimFacts` on every origination request, and
+  `certificationType` on a request that sends an amendment at PAS 2.1 or 2.2. The gateway reads
+  these facts from nowhere else — not the order, not an Encounter, not configuration — and
+  supplies none of them. A resume request (`/complete`) that states no `claimFacts` amends with
+  the facts the pended submission's request stated; its `certificationType` is always its own.
+- **Refusal:** a fact the PAS Claim profile snapshot requires at the line and the request does
+  not state is refused with 422 before any leg of the request is sent (no coverage check, no
+  order-dispatch, no questionnaire fetch, no claim), on the order-dispatch routes
+  (`/scenario/homeoxygen`, `/scenario/dispatch`, `/scenario/uc03`) as on the others: `Claim.type`, `Claim.priority` and `Claim.item.category` at
+  every line; `Claim.item.location[x]` and `requestType` at 2.1 and 2.2; the amendment's
+  `certificationType` at 2.1 and 2.2 on a route that amends in the same request (the UC-04
+  in-flow amendment, consented UC-05, the single-call `/scenario/uc06` and `/scenario/uc07`).
+  The line is the one the submission's route selection picks, and the check is the SDK
+  builder's own rule (`shnsdk.CheckPASClaimFactsAtLine`, `CheckPASUpdateFactsAtLine`). A
+  resume request (`/complete`) is checked the same way before its first leg, the UC-07
+  patient-DTR exchange included: its member, its order, and the amendment's facts and
+  `certificationType` at the pinned line. A fact stated as JSON `null` is absent. At 2.0 a
+  stated place of service, request type or amendment `certificationType` is carried (each
+  0..1 on `Claim.item` there) and an unstated one is omitted; a submission states no
+  certificationType at 2.0 (its `I` Initial is written from 2.1). The body is the SDK builder's text, for example
+  `{"error":"shnsdk: conformant submit: Claim.type absent at its source, so the request is not
+  built: SHN's build never supplies a value the requester's own system does not state
+  (fidelity of SHN's own build) (expected from the requester's ClaimType)"}`. A stated coding
+  with no code or system, or from a system the element does not draw from, is refused 422 the
+  same way ("not a coding this Claim element can carry"). A body that is not JSON is 400.
+- **An amendment's PAS `infoChanged` marker is derived, not stated.** Every amendment the
+  gateway sends used to carry `infoChanged` `changed` on every item. It now carries the
+  marker only on an item that differs from the recorded submission (`changed`) or that the
+  submission had no item for (`added`), read off the bytes the submission sent; an item
+  re-sent exactly as submitted carries none (the extension's context is `Claim.item`, so the
+  amendment's new documentation is not marked). Every in-flow amendment (UC-04, UC-05) and
+  every resume that states the pended submission's facts re-sends its item unchanged, so its
+  item is not marked `changed`; it is marked `added` only where the amendment links its
+  attached answer to it (next point: the UC-06 and UC-07 resumes at PAS 2.0 and 2.1, when
+  the payer's pend names the need), and otherwise carries no `infoChanged`. The reference
+  payer re-evaluates only items that carry it, and answers an amendment whose items carry
+  none with the decision it holds for the item. The prior-Claim entry restates the
+  submission's type and priority as sent, every member of each coding.
+- **An amendment links its attached answer to the item the payer asked for it about.** The
+  gateway keeps the payer's pended answer with the submission record. When a
+  pended-response `Task` names an item's line with a need the amendment's attached answer
+  meets (the report's code is the requested attachment code, or the amended
+  QuestionnaireResponse answers the requested questionnaire), the amendment's Claim gains a
+  `supportingInfo` entry (PASTempCodes `additionalInformation`, referencing the answer), the
+  item an `informationSequence` pointing at it, and the item `infoChanged` `added`. Nothing
+  else is linked or marked, and nothing is linked on an amendment that reaches the payer at
+  PAS 2.2 (bridged or built there), whose `supportingInfo` slice requires an X12 PWK01 report
+  type no source states. On the hermetic stack the UC-04 and UC-05 amendments' reports answer
+  no need the payer's pend names, so they link nothing; the UC-06 and UC-07 amended
+  QuestionnaireResponse answers the questionnaire the pend asks item 1 for, so at PAS 2.0
+  and 2.1 item 1 is linked and carries `infoChanged` `added`, and the payer re-evaluates it.
+- **The request names its member and order.** Every origination route's body also carries
+  `"member"` (the member the route originates for) and, on a route that builds a PAS claim,
+  `"order": {"system": ..., "code": ...}` (the product coding of the order the claim facts are
+  stated for). The route still resolves its member by scenario, lane and `?personaSet` (see
+  `engine.ScenarioRoster()`, which lists every scenario, lane, persona set, member and product);
+  the request must name that member. Refusals, before any leg: no `member` → 400; another
+  member → 422 `this route originates for <resolved>; the request names <member>`; no `order`
+  → 400; an order the member does not hold in the system of record → 422 `the request states
+  its claim facts for order <system>|<code> and the member's open order is <system>|<code>: SHN
+  does not build a claim carrying facts stated for an order the member does not hold (fidelity
+  of SHN's own build)`. `/scenario/uc06/complete` and `/scenario/uc07/complete` name the pend's
+  member and order; `GET /scenario/uc07/pending` returns them (`member`, `order`) for a caller
+  that holds only the patient. `/scenario/uc01` (eligibility) needs only `member`;
+  `/scenario/dispatch` already took `member`.
+- An amendment's prior-Claim entry restates the recorded submission's own `type`, `priority`
+  and `created` (read off the bytes the submission sent), never the amendment's time. The
+  durable continuation records the submitted Claim's `created` (`claim_created`, added to an
+  existing pgstore table as `TEXT NOT NULL DEFAULT ''`); an amendment built from a
+  continuation recorded before v0.62.0 is refused rather than restating the amendment's time.
+- **Additive (`engine`):** `ScenarioPersona` and `ScenarioRoster()` (every scenario, lane,
+  persona set, member and product a `/scenario/*` route resolves), the lane names
+  `LaneConformance`, `LaneDemo` and `LaneProviderData`, and `Continuation.ClaimCreated` (the
+  submitted Claim's `created`, as sent).
+- **Additive (`scenariodriver`):** `ScenarioRouteInput`, `ScenarioRouteBody`, `ScenarioKey`,
+  `PersonaRouteBody` and `ErrNoScenarioPersona` build an origination route's request body from
+  the persona the network's discovery descriptor states (its member, order, claim facts and,
+  for an amending route, the amendment's certificationType), refusing a route the descriptor
+  states no persona for.
+- Release order: shn-sdk first (the builders and `PASClaimFacts`), then this gateway, then the
+  Kit.
+
+## Refusal texts carry no internal prefix (v0.62.0)
+
+- **Behavior change in v0.62.0 (refusal texts):** a payer gateway's `502`
+  refusals of a payer answer it cannot carry (`invalid native PAS response
+  Bundle: …`, `invalid native PAS response decision`, `invalid
+  prior-authorization inquiry answer…`) and a provider gateway's `502`
+  answers to a failed `$populate` (`$populate upstream failed`, `populated QR
+  subject does not match patient`, `no clinical context for member`) no
+  longer begin with `engine: `. The status codes and the rest of each text
+  are unchanged; a client that matched the prefix should match the text after
+  it. No Go API changes.
+
+## An exchange with no capture slot keeps its trace proof (v0.62.0)
+
+- **Behavior change in v0.62.0 (diagnostics):** an observed exchange that
+  finds no free capture session (`diagnostics.BodyNotKeptCaptureBudget`)
+  still keeps no body, and now keeps one header: the `X-SHN-Test-Trace`
+  proof a test endpoint sends, its first value, when it is at most 2 KiB (a
+  proof grows with its request URI: one for a plain URI of more than about
+  1.3 KiB is past it and not kept, and each `&`, `<` or `>` in the URI
+  counts six bytes, so a long query string reaches it sooner). Its other
+  headers are dropped as before, and `HeadersComplete` is false unless that
+  header, with one value, was its only one. A provider gateway's ingress
+  past its capture budget so keeps the proof the evidence needs to link the
+  call to the test endpoint's, as it did with a session. The proof takes
+  nothing from the capture budget's bytes, so each such event holds at most
+  2 KiB of header capture. No Go API changes.
+
+## A PAS answer is read at its IG line (v0.62.0)
+
+- **Behavior change in v0.62.0 (`answer.shape`, opt-in):** a payer's PAS
+  `$submit` or amendment answer is read by the graph rule of its IG line, as
+  each line's specification states it, instead of by PAS 2.0.1's at every
+  line:
+  - **2.0.1:** every reference the answer makes resolves to an entry, a
+    contained resource of its owner, or a version the Bundle holds, the
+    request Claim's included (unchanged);
+  - **2.1.0:** an answer need carry only its ClaimResponse and what the
+    decision made or changed, so its `ClaimResponse.request` must name the
+    request Claim, by a reference to a Claim or by an identifier with a
+    value, and no reference need resolve;
+  - **2.2.1:** `ClaimResponse.request` must name the request Claim, by a
+    reference to a Claim or by an identifier with a value; a reference to
+    that Claim need not resolve, and every other reference must.
+
+  At every line the Bundle carries one ClaimResponse, every entry is
+  identified by an absolute `fullUrl`, and no reference is empty.
+- **The answer is read at its candidate lines,** in the order a payer's
+  answer is certified at (FR-G29): the line the leg was routed at, then the
+  lines the answer claims, then 2.2, 2.1 and 2.0. It is read only at the
+  routed line and at lines this gateway has a validator lane for, the lines
+  its certification can find it valid at: a validator that serves several
+  lines judges an answer once, at the first of them, so a gateway whose one
+  validator serves every line reads an answer at its routed line only. Valid
+  on any line is valid. An answer read at a line after the first is recorded at
+  that line (`verdict` `valid`, `line`, `declaredLine`, `lines`), at
+  `observe`, `structural` and `strict`. Two consequences:
+  - a gateway with a 2.1 lane carries any answer that names its request
+    Claim, however incomplete for 2.0.1 or 2.2.1; a gateway judging answers
+    at 2.0.1 alone still refuses one missing a resource it references;
+  - a rule only one line states (PAS 2.2.1 §spec-44, below) refuses only on
+    a gateway whose candidate lines all carry it.
+- **`$inquire` answers:** an inquiry answer's graph is not read at any line;
+  it may name a Claim it does not carry. At 2.2.1 (§spec-44) each
+  ClaimResponse it carries names the Claim it answers, by a reference to a
+  Claim or by an identifier with a value, or gives a Data Absent Reason on
+  its `request`. One that does
+  neither is `answer.shape` on a gateway whose candidate lines are 2.2 only.
+- **The patient check (`patient.answer`)** reads an answer at the line its
+  graph rule held on, or, when it held on none, at the routed line. At 2.0.1
+  and 2.2.1 it reads as before. At 2.1.0 a
+  subject no entry resolves binds by the patient its `Patient/<id>` names,
+  and the Bundle need not carry the ClaimResponse's patient; a Patient it
+  carries, and every subject, must still be that patient, one identity (the
+  same id at another base is another patient), and a reference that resolves
+  to more than one entry is refused at every line.
+- `answer.shape` stays as it was otherwise: relayed unread at `none` and
+  `observe` (recorded at `observe`, nothing written from the answer),
+  refused at `structural` and `strict`.
+- **Additive (Go API):** `engine.PASInquiryAnswerReadsAt(body, line) (ok
+  bool, detail string)` is the rule above for a `$inquire` answer at IG line
+  `2.0`, `2.1` or `2.2`, exactly as the gateway reads one at that line: `ok`
+  when the answer meets it, else `detail`, the refusal. It judges at the one
+  line it is given; the gateway itself carries an answer that is valid at
+  any of its candidate lines. It is exported so a reader of
+  retained evidence judges an inquiry answer as the gateway does; it reads
+  and decides nothing for the relay. Nothing the gateway relays or refuses
+  changes.
+- **Additive (Go API):** `engine.NativePASRefusalCause(body) string` and
+  `engine.NativePASGraphRefusalCause(body) string` name why
+  `InspectNativePASResponse` and `CheckNativePASGraphWithoutClaimResponse`
+  refuse a Bundle, as one cause of the closed set
+  `engine.NativePASRefusalCauses` (the `PASRefusal*` constants), and `""`
+  when they read it. A cause names why, never a value from the Bundle, so a
+  reader of retained evidence can say why an answer was not read. They read
+  and decide nothing for the relay; the refusal texts are unchanged.
+- **Additive (Go API):** `engine.InspectNativePASResponseAt(body, line)`,
+  `engine.NativePASRefusalCauseAt(body, line)` and
+  `engine.NativePASUnresolvedReferenceAt(body, line)` read a PAS `$submit` or
+  amendment answer at IG line `2.0`, `2.1` or `2.2` (any other, or none, as
+  2.0.1) exactly as the gateway checks one there: they and the gateway's own
+  check share one per-line definition. The line-less readers are these at no
+  line. Nothing the gateway relays or refuses changes.
+
 ## Another patient inside a PAS request (v0.61.0)
 
 - **Behavior change in v0.61.0, at `strict` (`patient.mixed`):** a PAS

@@ -4,15 +4,14 @@ import (
 	"fmt"
 	"slices"
 	"strings"
-
-	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
 // forwardedContracts are the exchange contracts a payer gateway's native
 // responder carries to the payer's own system (PAYER_DAVINCI_BASE_URL): every
-// contract in the PA leg catalog. The other contracts a gateway declares
-// (pa.pdex) are answered by the gateway itself, whatever the payer's system
-// speaks.
+// contract in the PA leg catalog. A contract a gateway declares outside the
+// catalog would be answered by the gateway itself, whatever the payer's system
+// speaks; none is native today (pa.pdex is declared by no gateway: its
+// Patient Access decision EOB is base FHIR R4, not PDex).
 func forwardedContracts() map[string]bool {
 	out := map[string]bool{}
 	for _, spec := range paCatalog {
@@ -33,7 +32,7 @@ func forwardedContracts() map[string]bool {
 //
 // The result is the backend's lines for every forwarded contract (pa.crd,
 // pa.dtr, pa.pas), plus the build default's lines for every other contract
-// (pa.pdex@2.1, which the gateway answers itself), in NativeContractVersions
+// (none today: the build default declares no pa.pdex line), in NativeContractVersions
 // order, so the same backend set always derives the same declaration. A
 // backend token of another contract is not a forwarded line and does not
 // change the result.
@@ -48,7 +47,7 @@ func forwardedContracts() map[string]bool {
 // entry cannot disagree.
 func DeriveDeclaredContractVersions(backend []string) ([]string, error) {
 	forwarded := forwardedContracts()
-	native := shnsdk.NativeContractVersions()
+	native := NativeContractVersions()
 	chosen := map[string]bool{}
 	for _, raw := range backend {
 		tok := strings.TrimSpace(raw)
@@ -64,7 +63,7 @@ func DeriveDeclaredContractVersions(backend []string) ([]string, error) {
 	if len(chosen) == 0 {
 		return nil, fmt.Errorf("PAYER_DAVINCI_CONTRACT_VERSIONS (%s) declares no CRD, DTR or PAS line, so no provider could reach this payer for prior authorization: declare the payer system's lines there, or set SHN_CONTRACT_VERSIONS", strings.Join(backend, ", "))
 	}
-	for _, tok := range shnsdk.SupportedContractVersions() {
+	for _, tok := range DefaultContractVersions() {
 		if contract, _, _ := strings.Cut(tok, "@"); !forwarded[contract] {
 			chosen[tok] = true
 		}

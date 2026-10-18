@@ -37,6 +37,18 @@ const (
 	// operation: the older request envelope, which carried a canonical and a
 	// coverage in place of the operation's own input, is no longer accepted.
 	refusalDTRUnframed = "questionnaire request names no operation: send the questionnaire-package or next-question operation's own input in a request frame naming it"
+	// refusalPatientNotConsented refuses a federated query whose patient
+	// cannot be matched to the patient the leg's consent was checked for:
+	// one the facility does not hold, or one whose identifier is not the
+	// token's. Both read the same, so the refusal does not say which.
+	refusalPatientNotConsented = "the queried patient cannot be matched to the patient the leg's consent covers"
+	// refusalPatientNotAuthorized refuses a patient-authored DTR request
+	// whose patient cannot be matched to the patient the leg's authority
+	// names, in the same way.
+	refusalPatientNotAuthorized = "the patient cannot be matched to the patient the leg's authority names"
+	// refusalPatientDTRNoPatient refuses a patient-authored DTR request that
+	// names no patient.
+	refusalPatientDTRNoPatient = "patient-dtr request names no patient"
 )
 
 // inboundLeg names the response frame, operation and transaction type an

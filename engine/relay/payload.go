@@ -99,9 +99,14 @@ const (
 	// request's own fhirServer to route by, compensating for the callback
 	// strip (EditCDSCallbackStrip), which leaves the payer no way to read it.
 	EditCDSCoverageCarry EditID = "E-07"
+	// EditDTRAnswerLineNames renames the parameters of a questionnaire
+	// package answer whose names belong to another DTR line than the one the
+	// requesting participant speaks, to that line's names, so its system finds
+	// the package and the outcome under the names its line gives them.
+	EditDTRAnswerLineNames EditID = "E-08"
 )
 
-var editIDs = []EditID{EditCDSCallbackStrip, EditCDSPrefetchObtain, EditPayorEdgeRestamp, EditDTRCoverageObtain, EditDTRPatientObtain, EditEvidenceSubjectRekey, EditCDSCoverageCarry}
+var editIDs = []EditID{EditCDSCallbackStrip, EditCDSPrefetchObtain, EditPayorEdgeRestamp, EditDTRCoverageObtain, EditDTRPatientObtain, EditEvidenceSubjectRekey, EditCDSCoverageCarry, EditDTRAnswerLineNames}
 
 // EditIDs returns every registered edit id, in order.
 func EditIDs() []EditID { return slices.Clone(editIDs) }

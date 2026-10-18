@@ -252,7 +252,8 @@ func (g *Gateway) handleCRDIngress(w http.ResponseWriter, r *http.Request) {
 	// Validation posture UNCHANGED: this driver $validates nothing on egress (it
 	// relays a partner's envelope), and the promotion adds no enforcement point.
 	// The CDS Hooks request is the same at every line, so the walk changes no
-	// byte; a walk that would change one is refused rather than sent. The walk
+	// byte; a walk that would change one is not applied: the request is carried
+	// as sent. The walk
 	// reads the bytes this gateway sends (the callback removed, obtained
 	// prefetch added), never the EHR's raw request.
 	requestKey := relay.Key{Leg: legType, Role: relay.RoleRequester, Direction: relay.DirectionRequest, Outcome: relay.OutcomeCarried}
@@ -262,13 +263,24 @@ func (g *Gateway) handleCRDIngress(w http.ResponseWriter, r *http.Request) {
 		writeOwnershipFault(w)
 		return
 	}
-	adapted, _, aerr := g.egressAdapt(route, sent, ExchangeIdentity{CorrelationID: child, LegType: legType, Counterpart: recipient})
+	adapted, _, recordWalk, aerr := g.egressWalk(route, sent, ExchangeIdentity{CorrelationID: child, LegType: legType, Counterpart: recipient})
 	if aerr != nil {
 		writeJSON(w, adaptFailureStatus(aerr), map[string]string{"error": aerr.Error()})
 		return
 	}
 	if !bytes.Equal(adapted, sent) {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "the CDS Hooks request cannot be carried to the payer's line unchanged"})
+		// No certified translation of the EHR's own bytes reaches the payer's
+		// line: they are carried as sent, at the line they are in, and the
+		// carry is recorded (OriginateLeg). The participant's own setting
+		// refuses the pair as routing instead.
+		if g.cfg.RequireSharedLine {
+			exchangeOf(r.Context()).routed(http.StatusUnprocessableEntity)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "the CDS Hooks request cannot be carried to the payer's line unchanged"})
+			return
+		}
+		route = route.asSent()
+	} else if err := recordWalk(); err != nil {
+		writeJSON(w, adaptFailureStatus(err), map[string]string{"error": err.Error()})
 		return
 	}
 	// The request is routed and carried: record the prefetch values it is
@@ -318,7 +330,9 @@ func (g *Gateway) handleCRDIngress(w http.ResponseWriter, r *http.Request) {
 // one patient, the request is routed by every coverage it carries (or, when
 // it carries none, by the one its system of record holds), a payer that does not
 // accept framed DTR operations is refused before anything is sent, and the
-// payer's answer is relayed to the EHR exactly. The ingress does not invoke
+// payer's answer is relayed to the EHR exactly, or, from a payer answering in
+// another DTR line's names, carried across to this gateway's one declared line
+// (carryDTRAnswer, E-08). The ingress does not invoke
 // the Populator: the EHR's own DTR application populates.
 func (g *Gateway) handleDTRIngress(w http.ResponseWriter, r *http.Request) {
 	const legType = "dtr-questionnaire-fetch"
@@ -359,8 +373,8 @@ func (g *Gateway) handleDTRIngress(w http.ResponseWriter, r *http.Request) {
 	// Select-before-send: the routed line is stamped on the request frame and
 	// picks nothing in the EHR's bytes, which are carried as they are at every
 	// line. The walk to the payer's line changes no byte of a questionnaire
-	// request (envelopeEgressLegs); a walk that would change one is refused
-	// rather than sent.
+	// request (envelopeEgressLegs); a walk that would change one is not
+	// applied: the request is carried as sent.
 	child := g.ingressCorrelation(w, r)
 	route, ok := g.selectLegLineOrFail(w, recipient, legType, child)
 	if !ok {
@@ -376,13 +390,24 @@ func (g *Gateway) handleDTRIngress(w http.ResponseWriter, r *http.Request) {
 		writeOwnershipFault(w)
 		return
 	}
-	adapted, _, aerr := g.egressAdapt(route, sent, ExchangeIdentity{CorrelationID: child, LegType: legType, Counterpart: recipient})
+	adapted, _, recordWalk, aerr := g.egressWalk(route, sent, ExchangeIdentity{CorrelationID: child, LegType: legType, Counterpart: recipient})
 	if aerr != nil {
 		writeJSON(w, adaptFailureStatus(aerr), map[string]string{"error": aerr.Error()})
 		return
 	}
 	if !bytes.Equal(adapted, sent) {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "the questionnaire-package request cannot be carried to the payer's line unchanged"})
+		// No certified translation of the EHR's own bytes reaches the payer's
+		// line: they are carried as sent, at the line they are in, and the
+		// carry is recorded (OriginateLeg). The participant's own setting
+		// refuses the pair as routing instead.
+		if g.cfg.RequireSharedLine {
+			exchangeOf(r.Context()).routed(http.StatusUnprocessableEntity)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "the questionnaire-package request cannot be carried to the payer's line unchanged"})
+			return
+		}
+		route = route.asSent()
+	} else if err := recordWalk(); err != nil {
+		writeJSON(w, adaptFailureStatus(err), map[string]string{"error": err.Error()})
 		return
 	}
 	// The request is routed and carried: record the Patient it is carried
@@ -405,10 +430,22 @@ func (g *Gateway) handleDTRIngress(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
+	// The answer reaches the EHR as it arrived, or, from a payer on another
+	// DTR line, under this gateway's line's parameter names (E-08).
+	answer, wrote, status, msg := g.carryDTRAnswer(r.Context(), pkgJSON, route.Token,
+		ExchangeIdentity{CorrelationID: child, LegType: legType, Counterpart: recipient})
+	if status != 0 {
+		g.recordLeg(ex.ID, leg.Project(child, "error"))
+		writeJSON(w, status, map[string]string{"error": msg})
+		return
+	}
 	g.recordLeg(ex.ID, leg.Project(child, "ok"))
-	g.writePayload(w, http.StatusOK, "application/fhir+json",
-		relay.Exact(relay.NewBody(pkgJSON, relay.OriginPeerFrame), "application/fhir+json"),
-		relay.Key{Leg: legType, Role: relay.RoleRequester, Direction: relay.DirectionResponse, Outcome: relay.OutcomeAnswered})
+	g.writePayload(w, http.StatusOK, "application/fhir+json", answer, dtrAnswerKey)
+	exchangeOf(r.Context()).edits(answer.Edits())
+	// The line the answer is written in, as carryDTRAnswer wrote it: the routed
+	// one, or this gateway's own when E-08 carried it across, so evidence judges
+	// the answer at its own line.
+	exchangeOf(r.Context()).answerLine(wrote)
 }
 
 // subjectsOf returns a 1-element subjects slice for a non-empty pci, else nil.
@@ -576,21 +613,32 @@ func (g *Gateway) handlePASIngress(w http.ResponseWriter, r *http.Request) {
 	// which never acts on an answer it could not read.
 	answerCtx := withFindingContext(r.Context(), findingContext{LegType: leg, CorrelationID: child, Seam: "provider-ingress", Whose: "peer"})
 	unread := ""
-	if _, bad := validateNativePASResponse(crJSON); bad.Status != 0 {
+	read := g.pasAnswerRead(observedTarget, crJSON)
+	answerLine := read.Line
+	if f, ok := laterLineFinding(findingContextFrom(answerCtx), g.policy().Level().String(), RuleAnswerShape, read, crJSON); ok && g.policy().Runs(KindContent, RuleAnswerShape) {
+		g.emitFindingIn(answerCtx, f)
+	}
+	if _, bad := validateNativePASResponseAt(crJSON, answerLine); bad.Status != 0 {
 		// A repeated member name is read one way only (RuleDuplicateKey): it
 		// refuses at every level, with strict's refusal.
 		if repeatsAMember(answerCtx, crJSON) || g.guard(answerCtx, KindContent, RuleAnswerShape, crJSON) {
 			g.recordLeg(ex.ID, legProj.Project(child, "error"))
-			writeJSON(w, bad.Status, map[string]string{"error": bad.Message})
+			msg := bad.Message
+			// The payer answered, so it may have acted on the submission: as
+			// the payer's gateway says when it refuses its own system's answer.
+			if _, dup := repeatedMember(crJSON); dup {
+				msg = withPayerAnsweredNote(msg)
+			}
+			writeJSON(w, bad.Status, map[string]string{"error": msg})
 			return
 		}
 		unread = RuleAnswerShape
 	}
 	// An answer that cannot be read has no subjects to bind; the rule above
 	// already covers it.
-	if unread == "" && pasResponseSubjectMismatch(crJSON) != nil {
+	if unread == "" && pasAnswerSubjectMismatch(crJSON, answerLine) != nil {
 		if g.guard(answerCtx, KindContent, RulePatientAnswer, crJSON) {
-			status, msg := refusePASResponseSubjects(ex.ID, "pas-claim", http.StatusBadGateway, crJSON)
+			status, msg := refusePASResponseSubjectsAt(ex.ID, "pas-claim", answerLine, http.StatusBadGateway, crJSON)
 			g.recordLeg(ex.ID, legProj.Project(child, "error"))
 			writeJSON(w, status, map[string]string{"error": msg})
 			return

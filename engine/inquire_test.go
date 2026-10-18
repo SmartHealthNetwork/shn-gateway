@@ -213,12 +213,17 @@ func inquiryBundle(member, coverageMember, trn, code string) []byte {
 		"entry":[
 		  {"fullUrl":"urn:uuid:claim","resource":{"resourceType":"Claim","use":"preauthorization",
 		    "identifier":[{"system":"http://provider.example/inq","value":"INQUIRY-TRN"}],
+		    "type":{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/claim-type","code":"professional"}]},
 		    "patient":{"reference":"Patient/` + member + `"},
+		    "provider":{"reference":"urn:uuid:provider-org"},
+		    "insurance":[{"sequence":1,"focal":true,"coverage":{"reference":"urn:uuid:coverage"}}],
 		    "item":[{"sequence":1,
 		      "productOrService":{"coding":[{"system":"http://www.ama-assn.org/go/cpt","code":"` + code + `","display":"MRI lumbar spine"}]},
 		      "extension":[{"url":"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-itemTraceNumber",
 		        "valueIdentifier":{"system":"http://provider.example/trn","value":"` + trn + `"}}]}]}},
 		  {"fullUrl":"urn:uuid:patient","resource":{"resourceType":"Patient","id":"` + member + `"}},
+		  {"fullUrl":"urn:uuid:provider-org","resource":{"resourceType":"Organization",
+		    "identifier":[{"system":"http://hl7.org/fhir/sid/us-npi","value":"1215930367"}]}},
 		  {"fullUrl":"urn:uuid:coverage","resource":{"resourceType":"Coverage",
 		    "beneficiary":{"reference":"Patient/` + coverageMember + `"}}}]}`)
 }
@@ -340,6 +345,7 @@ func TestPASInquire_ByAuthorizationNumberWithNoItems(t *testing.T) {
 	}
 	result := LegResult{}
 	commit, _ := g.inquiryLedgerEffect(inquiryRequester, subject, "Patient/MBR-COVERED", "corr-inquiry-leg", facts, decidedAnswer(t), &result)
+	admitDecisionEOBs(&result)
 	if commit == nil {
 		t.Fatal("an item-less inquiry produced no ledger write")
 	}
@@ -443,6 +449,7 @@ func (f *inquiryLedgerFixture) apply(t *testing.T, requester string, answer []by
 	t.Helper()
 	result := LegResult{}
 	commit, _ := f.g.inquiryLedgerEffect(requester, f.subject, "Patient/MBR-COVERED", "corr-inquiry-leg", f.facts, answer, &result)
+	admitDecisionEOBs(&result)
 	if commit != nil {
 		if err := commit(); err != nil {
 			t.Fatalf("ledger write: %v", err)
@@ -453,10 +460,46 @@ func (f *inquiryLedgerFixture) apply(t *testing.T, requester string, answer []by
 
 // decidedAnswer is the synthetic 2.0.1/2.1.0-shape answer, whose ClaimResponse
 // states the payer's approval (review action A1) and carries the identifier the
-// pend was keyed on.
+// pend was keyed on. Its item echoes the fixture inquiry line's trace number
+// (TRN-1), as a payer answering that line does: the decision EOB pairs the
+// payer's item with the inquiry line by that number only.
 func decidedAnswer(t *testing.T) []byte {
 	t.Helper()
-	return inquiryFixture(t, "pas-inquiry-response-2.0.json")
+	return answerEchoingTrace(t, inquiryFixture(t, "pas-inquiry-response-2.0.json"), "http://provider.example/trn", "TRN-1")
+}
+
+// answerEchoingTrace adds, to every ClaimResponse item of a published inquiry
+// answer fixture, the item trace number the fixture inquiry line states, as
+// the payer answering that line echoes it. It inserts the extension ahead of
+// the item's own itemRequestedServiceDate extension and leaves every other
+// byte as the fixture writes it (rows edit the answer's text).
+func answerEchoingTrace(t *testing.T, answer []byte, system, value string) []byte {
+	t.Helper()
+	const anchor = `"url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-itemRequestedServiceDate"`
+	ext := `{"url":"` + pasExtItemTraceNumberURL + `","valueIdentifier":{"system":"` + system + `","value":"` + value + `"}},`
+	text := string(answer)
+	var out strings.Builder
+	echoed := 0
+	for {
+		i := strings.Index(text, anchor)
+		if i < 0 {
+			break
+		}
+		open := strings.LastIndexByte(text[:i], '{')
+		out.WriteString(text[:open])
+		out.WriteString(ext)
+		out.WriteString(text[open : i+len(anchor)])
+		text = text[i+len(anchor):]
+		echoed++
+	}
+	out.WriteString(text)
+	if echoed == 0 {
+		t.Fatal("answer fixture: no ClaimResponse item to echo the trace number on")
+	}
+	if !json.Valid([]byte(out.String())) {
+		t.Fatal("answer fixture: the echoed answer is not JSON")
+	}
+	return []byte(out.String())
 }
 
 // pendedAnswer states a re-pend for the same authorization: the same lookup key,
@@ -628,6 +671,7 @@ func TestPASInquire_LookupUnavailableNamesTheExchange(t *testing.T) {
 	const legCorr = "corr-inquiry-leg-42"
 	result := LegResult{}
 	commit, events := g.inquiryLedgerEffect(inquiryRequester, "pci:MBR-COVERED", "Patient/MBR-COVERED", legCorr, facts, decidedAnswer(t), &result)
+	admitDecisionEOBs(&result)
 	if commit != nil {
 		t.Fatal("an unreadable ledger produced a write")
 	}
@@ -746,6 +790,7 @@ func inquiryAnswerOf(t *testing.T, crs ...inquiryCR) []byte {
 			item["extension"] = itemExt
 		}
 		cr := map[string]any{"resourceType": "ClaimResponse", "outcome": outcome, "created": created,
+			"insurer": map[string]any{"reference": "Organization/InsurerExample"},
 			"patient": map[string]any{"reference": "Patient/SubscriberExample"}, "item": []any{item}}
 		if c.id != "" {
 			cr["identifier"] = []any{ident(c.id)}
@@ -770,6 +815,7 @@ func (f *inquiryLedgerFixture) applyEvents(t *testing.T, requester string, answe
 	t.Helper()
 	result := LegResult{}
 	commit, events := f.g.inquiryLedgerEffect(requester, f.subject, "Patient/MBR-COVERED", "corr-inquiry-leg", f.facts, answer, &result)
+	admitDecisionEOBs(&result)
 	if commit != nil {
 		// The write reports what it changed through the gateway's observer.
 		f.g.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
@@ -916,12 +962,12 @@ func wantRecordedDecision(t *testing.T, rec PendRecord, outcome string) {
 func TestPASInquire_LosingDecisionKeepsTheEOB(t *testing.T) {
 	f := newInquiryLedgerFixture(t, PendKeys{})
 	f.pend(t, corrClaimB, PendKeys{RequesterHolder: inquiryRequester, ClaimResponseIDs: []string{crClaimB}, ItemTraceNumbers: []string{inquiryTraceKey}})
-	f.applyEvents(t, inquiryRequester, inquiryAnswerOf(t, inquiryCR{id: crClaimB, preAuthRef: "AUTH-B", code: "A1", created: "2026-09-20T00:00:00Z"}))
+	f.applyEvents(t, inquiryRequester, inquiryAnswerOf(t, inquiryCR{id: crClaimB, preAuthRef: "AUTH-B", traces: []string{inquiryTraceKey}, code: "A1", created: "2026-09-20T00:00:00Z"}))
 	approved, ok := f.store.EOBByID(decisionEOBID(corrClaimB))
 	if !ok {
 		t.Fatal("claim B's decision wrote no EOB")
 	}
-	f.applyEvents(t, inquiryRequester, inquiryAnswerOf(t, inquiryCR{id: crClaimB, code: "A3", created: "2026-09-17T00:00:00Z"}))
+	f.applyEvents(t, inquiryRequester, inquiryAnswerOf(t, inquiryCR{id: crClaimB, traces: []string{inquiryTraceKey}, code: "A3", created: "2026-09-17T00:00:00Z"}))
 	wantRecordedDecision(t, f.stateOf(t, corrClaimB), PendOutcomeApproved)
 	if eob, _ := f.store.EOBByID(decisionEOBID(corrClaimB)); !bytes.Equal(eob, approved) {
 		t.Fatalf("a losing denial replaced the kept decision's EOB:\n got: %s\nwant: %s", eob, approved)
@@ -1404,6 +1450,7 @@ func TestPASInquire_OtherSubjectNoLedgerChange(t *testing.T) {
 	}
 	result := LegResult{}
 	commit, _ := g.inquiryLedgerEffect(inquiryRequester, "pci:MBR-COVERED", "Patient/MBR-COVERED", "corr-inquiry-leg", facts, decidedAnswer(t), &result)
+	admitDecisionEOBs(&result)
 	if commit != nil {
 		t.Fatal("an answer about another patient's authorization produced a ledger write")
 	}
@@ -1423,6 +1470,7 @@ func TestPASInquire_NoLedgerNoEffect(t *testing.T) {
 	}
 	result := LegResult{}
 	commit, events := g.inquiryLedgerEffect(inquiryRequester, "pci:MBR-COVERED", "Patient/MBR-COVERED", "corr-inquiry-leg", facts, decidedAnswer(t), &result)
+	admitDecisionEOBs(&result)
 	if commit != nil || len(events) != 0 || len(result.SideEffectFHIR) != 0 {
 		t.Fatalf("a store with no ledger produced an effect: commit=%v events=%d sideEffects=%d", commit != nil, len(events), len(result.SideEffectFHIR))
 	}
@@ -1442,14 +1490,14 @@ func TestPASInquire_ItemLineForTheAnswer(t *testing.T) {
 		{traceNumber: "s|TRN-1", code: "72148"},
 		{traceNumber: "s|TRN-2", code: "E0424"},
 	}}
-	if got := inquiryItemFor(facts, []string{"s|TRN-2"}).code; got != "E0424" {
-		t.Errorf("echoed TRN-2 selected %q, want E0424", got)
+	if got, trace := inquiryItemFor(facts, []string{"s|TRN-2"}); got.code != "E0424" || trace != "s|TRN-2" {
+		t.Errorf("echoed TRN-2 selected %q by %q, want E0424 by s|TRN-2", got.code, trace)
 	}
-	if got := inquiryItemFor(facts, nil).code; got != "72148" {
-		t.Errorf("an answer echoing no trace number selected %q, want the first line", got)
+	if got, trace := inquiryItemFor(facts, nil); got.code != "72148" || trace != "" {
+		t.Errorf("an answer echoing no trace number selected %q by %q, want the first line by none", got.code, trace)
 	}
-	if got := inquiryItemFor(pasInquiryFacts{}, nil).code; got != "" {
-		t.Errorf("an inquiry with no line selected %q", got)
+	if got, _ := inquiryItemFor(pasInquiryFacts{}, nil); got.code != "" {
+		t.Errorf("an inquiry with no line selected %q", got.code)
 	}
 }
 

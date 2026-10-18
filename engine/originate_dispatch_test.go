@@ -182,7 +182,7 @@ func decisionFields(t *testing.T, body []byte) map[string]any {
 // is a same-member, same-canned-substrate comparison, not a shared-state one.
 func TestHandleDispatch_Parity(t *testing.T) {
 	hoFix := newMBROXDispatchFixture(t)
-	hoReq := httptest.NewRequest(http.MethodPost, "/scenario/homeoxygen", nil)
+	hoReq := httptest.NewRequest(http.MethodPost, "/scenario/homeoxygen", strings.NewReader(testRouteBody(hoFix.gw, "/scenario/homeoxygen", "")))
 	hoRec := httptest.NewRecorder()
 	hoFix.gw.handleHomeOxygen(hoRec, hoReq)
 	if hoRec.Code != http.StatusOK {
@@ -190,7 +190,7 @@ func TestHandleDispatch_Parity(t *testing.T) {
 	}
 
 	dispFix := newMBROXDispatchFixture(t)
-	dispReq := httptest.NewRequest(http.MethodPost, "/scenario/dispatch", bytes.NewBufferString(`{"member":"MBR-OX"}`))
+	dispReq := httptest.NewRequest(http.MethodPost, "/scenario/dispatch", bytes.NewBufferString(testRouteBody(dispFix.gw, "/scenario/dispatch", `"member":"MBR-OX"`)))
 	dispRec := httptest.NewRecorder()
 	dispFix.gw.handleDispatch(dispRec, dispReq)
 	if dispRec.Code != http.StatusOK {
@@ -230,7 +230,7 @@ func TestHandleDispatch_ArbitraryMember(t *testing.T) {
 	}
 	fix := newDispatchFixture(t, member, demo, orderJSON, performerRef, supplierJSON)
 
-	req := httptest.NewRequest(http.MethodPost, "/scenario/dispatch", bytes.NewBufferString(`{"member":"`+member+`"}`))
+	req := httptest.NewRequest(http.MethodPost, "/scenario/dispatch", bytes.NewBufferString(testRouteBody(fix.gw, "/scenario/dispatch", `"member":"`+member+`"`)))
 	rec := httptest.NewRecorder()
 	fix.gw.handleDispatch(rec, req)
 
@@ -267,28 +267,28 @@ func dispatchBadRequestFixture(t *testing.T) *dispatchFixture {
 func TestHandleDispatch_BadRequest(t *testing.T) {
 	t.Run("nil body", func(t *testing.T) {
 		fix := dispatchBadRequestFixture(t)
-		req := httptest.NewRequest(http.MethodPost, "/scenario/dispatch", nil)
+		req := httptest.NewRequest(http.MethodPost, "/scenario/dispatch", strings.NewReader(testRouteBody(fix.gw, "/scenario/dispatch", "")))
 		rec := httptest.NewRecorder()
 		fix.gw.handleDispatch(rec, req)
 		assertMemberRequired400(t, rec)
 	})
 	t.Run("empty object", func(t *testing.T) {
 		fix := dispatchBadRequestFixture(t)
-		req := httptest.NewRequest(http.MethodPost, "/scenario/dispatch", bytes.NewBufferString(`{}`))
+		req := httptest.NewRequest(http.MethodPost, "/scenario/dispatch", strings.NewReader(testRouteBody(fix.gw, "/scenario/dispatch", "")))
 		rec := httptest.NewRecorder()
 		fix.gw.handleDispatch(rec, req)
 		assertMemberRequired400(t, rec)
 	})
 	t.Run("empty member", func(t *testing.T) {
 		fix := dispatchBadRequestFixture(t)
-		req := httptest.NewRequest(http.MethodPost, "/scenario/dispatch", bytes.NewBufferString(`{"member":""}`))
+		req := httptest.NewRequest(http.MethodPost, "/scenario/dispatch", bytes.NewBufferString(testRouteBody(fix.gw, "/scenario/dispatch", `"member":""`)))
 		rec := httptest.NewRecorder()
 		fix.gw.handleDispatch(rec, req)
 		assertMemberRequired400(t, rec)
 	})
 	t.Run("unknown extra fields are lenient", func(t *testing.T) {
 		fix := dispatchBadRequestFixture(t)
-		req := httptest.NewRequest(http.MethodPost, "/scenario/dispatch", bytes.NewBufferString(`{"member":"MBR-OX","extra":"whatever"}`))
+		req := httptest.NewRequest(http.MethodPost, "/scenario/dispatch", bytes.NewBufferString(testRouteBody(fix.gw, "/scenario/dispatch", `"member":"MBR-OX","extra":"whatever"`)))
 		rec := httptest.NewRecorder()
 		fix.gw.handleDispatch(rec, req)
 		if rec.Code != http.StatusOK {
@@ -315,7 +315,7 @@ func assertMemberRequired400(t *testing.T, rec *httptest.ResponseRecorder) {
 // (originateDispatch's existing ResolvePatient failure path).
 func TestHandleDispatch_UnknownMember(t *testing.T) {
 	fix := newMBROXDispatchFixture(t)
-	req := httptest.NewRequest(http.MethodPost, "/scenario/dispatch", bytes.NewBufferString(`{"member":"MBR-NOPE"}`))
+	req := httptest.NewRequest(http.MethodPost, "/scenario/dispatch", bytes.NewBufferString(testRouteBody(fix.gw, "/scenario/dispatch", `"member":"MBR-NOPE"`)))
 	rec := httptest.NewRecorder()
 	fix.gw.handleDispatch(rec, req)
 
@@ -387,7 +387,7 @@ func TestDispatch_DTRPackageRequestFollowsSelectedLine(t *testing.T) {
 				cfg.Reg.Set("payer", entry)
 			})
 			rec := httptest.NewRecorder()
-			fix.gw.handleDispatch(rec, httptest.NewRequest(http.MethodPost, "/scenario/dispatch", bytes.NewBufferString(`{"member":"MBR-OX"}`)))
+			fix.gw.handleDispatch(rec, httptest.NewRequest(http.MethodPost, "/scenario/dispatch", bytes.NewBufferString(testRouteBody(fix.gw, "/scenario/dispatch", `"member":"MBR-OX"`))))
 			if rec.Code != row.status {
 				t.Fatalf("want %d, got %d body=%s", row.status, rec.Code, rec.Body.String())
 			}
@@ -477,7 +477,7 @@ func TestHandler_DispatchRouteRegistered(t *testing.T) {
 		Validator: shnsdk.NewFakeValidator(),
 	})
 	h := gw.Handler()
-	req := httptest.NewRequest(http.MethodPost, "/scenario/dispatch", bytes.NewBufferString(`{}`))
+	req := httptest.NewRequest(http.MethodPost, "/scenario/dispatch", strings.NewReader(testRouteBody(gw, "/scenario/dispatch", "")))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code == http.StatusNotFound || rec.Code == http.StatusMethodNotAllowed {

@@ -35,7 +35,7 @@ var _ engine.ContinuationStore = (*PgStore)(nil)
 // continuationRowSQL reads one continuation by its binding.
 const continuationRowSQL = `
 SELECT continuation_id, payer_holder, line, correlation_id, subject_pci, member_id,
-       sor_patient_id, order_ref, provider_npi, claim_identifier, claim_type, claim_priority,
+       sor_patient_id, order_ref, provider_npi, claim_identifier, claim_type, claim_priority, claim_created,
        item_trace_numbers, payer_claimresponse_ids, payer_preauth_ref, last_outcome, created_at, updated_at
   FROM gw_pa_continuation
  WHERE holder_id=$1 AND continuation_id=$2`
@@ -90,9 +90,9 @@ func (s *PgStore) PutContinuation(c engine.Continuation) (engine.Continuation, e
 	if _, err := tx.Exec(ctx, `
 INSERT INTO gw_pa_continuation (holder_id, continuation_id, payer_holder, line, correlation_id,
     subject_pci, member_id, sor_patient_id, order_ref, provider_npi, claim_identifier,
-    claim_type, claim_priority, item_trace_numbers, payer_claimresponse_ids, payer_preauth_ref,
+    claim_type, claim_priority, claim_created, item_trace_numbers, payer_claimresponse_ids, payer_preauth_ref,
     last_outcome, created_at, updated_at)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
 ON CONFLICT (holder_id, continuation_id) DO UPDATE
   SET payer_holder = EXCLUDED.payer_holder,
       line = EXCLUDED.line,
@@ -105,13 +105,14 @@ ON CONFLICT (holder_id, continuation_id) DO UPDATE
       claim_identifier = EXCLUDED.claim_identifier,
       claim_type = EXCLUDED.claim_type,
       claim_priority = EXCLUDED.claim_priority,
+      claim_created = EXCLUDED.claim_created,
       item_trace_numbers = EXCLUDED.item_trace_numbers,
       payer_claimresponse_ids = EXCLUDED.payer_claimresponse_ids,
       payer_preauth_ref = EXCLUDED.payer_preauth_ref,
       last_outcome = EXCLUDED.last_outcome,
       updated_at = EXCLUDED.updated_at`,
 		c.Holder, c.ID, c.PayerHolder, c.Line, c.CorrID, c.SubjectPCI, c.MemberID,
-		c.SoRPatientID, c.OrderRef, c.ProviderNPI, c.ClaimIdentifier, c.ClaimType, c.ClaimPriority,
+		c.SoRPatientID, c.OrderRef, c.ProviderNPI, c.ClaimIdentifier, c.ClaimType, c.ClaimPriority, c.ClaimCreated,
 		textArray(c.ItemTraceNumbers), textArray(c.PayerClaimResponseIDs),
 		c.PayerPreAuthRef, c.LastOutcome, c.CreatedAt, c.UpdatedAt); err != nil {
 		return engine.Continuation{}, fmt.Errorf("pgstore: PutContinuation: %w", err)
@@ -155,7 +156,7 @@ func (s *PgStore) ReadContinuation(holder, id string) (engine.Continuation, engi
 	c := engine.Continuation{Holder: holder}
 	err := s.pool.QueryRow(ctx, continuationRowSQL, holder, id).Scan(
 		&c.ID, &c.PayerHolder, &c.Line, &c.CorrID, &c.SubjectPCI, &c.MemberID,
-		&c.SoRPatientID, &c.OrderRef, &c.ProviderNPI, &c.ClaimIdentifier, &c.ClaimType, &c.ClaimPriority,
+		&c.SoRPatientID, &c.OrderRef, &c.ProviderNPI, &c.ClaimIdentifier, &c.ClaimType, &c.ClaimPriority, &c.ClaimCreated,
 		&c.ItemTraceNumbers, &c.PayerClaimResponseIDs, &c.PayerPreAuthRef,
 		&c.LastOutcome, &c.CreatedAt, &c.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {

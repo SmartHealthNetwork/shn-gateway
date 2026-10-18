@@ -324,7 +324,9 @@ func TestLevelPASIngress_AnswerDuplicateKeyRefusesAtEveryLevel(t *testing.T) {
 	for _, level := range allLevels {
 		t.Run(level.String(), func(t *testing.T) {
 			env, rec, ev := levelPASRow(t, level, pasIngressBundle("00001", ""), answer)
-			wantAnswerRefusedAtEveryLevel(t, env, rec, ev, http.StatusBadGateway, "invalid native PAS response Bundle")
+			// The refusal names the repeated member and where, so the payer
+			// can fix it, and says the payer may have acted on the submission.
+			wantAnswerRefusedAtEveryLevel(t, env, rec, ev, http.StatusBadGateway, `payer PAS response repeats the JSON member \"outcome\" in entry[0].resource: it can be read two ways, so it is not carried; the payer's system received and answered this request: check its outcome before resending`)
 		})
 	}
 }
@@ -363,10 +365,12 @@ func TestLevelPASIngress_NetworkRulesRefuseAtEveryLevel(t *testing.T) {
 		"not a Bundle":        {`{"resourceType":"Parameters"}`, http.StatusBadRequest, "PAS request is not a Bundle", nil},
 		"unreadable entry":    {strings.Replace(base, `"resourceType":"Patient","id":"MBR-COVERED"`, `"resourceType":7,"id":"MBR-COVERED"`, 1), http.StatusBadRequest, "parse bundle entry failed", nil},
 		"no Claim.patient":    {strings.Replace(base, `"resourceType":"Claim","patient":{"reference":"Patient/MBR-COVERED"}`, `"resourceType":"Claim"`, 1), http.StatusBadRequest, "PAS bundle missing Claim.patient", nil},
-		"no Coverage":         {levelPASBundleWithout(t, `,{"resource":{"resourceType":"Coverage","id":"cov1","beneficiary":{"reference":"Patient/MBR-COVERED"},"payor":[{"identifier":{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00001"}}]}}`), http.StatusBadRequest, "PAS bundle missing Coverage.beneficiary", nil},
+		"no Coverage":         {levelPASBundleWithout(t, `,{"resource":{"resourceType":"Coverage","id":"cov1","beneficiary":{"reference":"Patient/MBR-COVERED"},"payor":[{"identifier":{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00001"}}]}}`), http.StatusBadRequest, "PAS bundle carries no Coverage", nil},
 		"unknown member":      {strings.ReplaceAll(base, "MBR-COVERED", "MBR-NOBODY"), http.StatusBadRequest, "unknown member", nil},
 		"no registered payer": {pasIngressBundle("99999", ""), http.StatusUnprocessableEntity, "no registered payer for identifier", nil},
+		// Under the participant's own setting; by default the pair is carried.
 		"route": {base, http.StatusUnprocessableEntity, "no shared contract line", func(t *testing.T, env *inProcessExchange) {
+			env.originator.cfg.RequireSharedLine = true
 			declareRecipientVersions(t, env, []string{"pa.crd@2.0"})
 		}},
 	}

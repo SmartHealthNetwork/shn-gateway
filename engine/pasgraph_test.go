@@ -684,7 +684,7 @@ func TestNativePASResponseRefusalIsObservable(t *testing.T) {
 	log.SetOutput(&logged)
 	defer log.SetOutput(prev)
 
-	kept, lr := validateRelayedPASResponse("corr-closed", "pas-claim", closed)
+	kept, lr := validateRelayedPASResponse("corr-closed", "pas-claim", "", closed)
 	if lr.Status != 0 || !bytes.Equal(kept, closed) {
 		t.Fatalf("closed graph refused or altered: %+v", lr)
 	}
@@ -692,7 +692,7 @@ func TestNativePASResponseRefusalIsObservable(t *testing.T) {
 		t.Fatalf("a relayed answer was logged as refused: %s", logged.String())
 	}
 
-	kept, lr = validateRelayedPASResponse("corr-open", "pas-claim", open)
+	kept, lr = validateRelayedPASResponse("corr-open", "pas-claim", "", open)
 	if kept != nil || lr.Status != http.StatusBadGateway {
 		t.Fatalf("open graph relayed: %+v", lr)
 	}
@@ -719,5 +719,119 @@ func TestNativePASResponseRefusalIsObservable(t *testing.T) {
 	// answer's Patient entry, must not be.
 	if strings.Contains(line, "SMITH") || strings.Contains(line, "Generated Narrative") {
 		t.Fatalf("the payer's bytes reached the log: %q", line)
+	}
+}
+
+// TestValidatePASBundleGraphAt drives the per-line answer graph rule (FR-G28):
+// 2.0.1 requires every reference to resolve; 2.1.0 requires only that
+// ClaimResponse.request names the request Claim; 2.2.1 lets the request Claim,
+// and only it, go unresolved when ClaimResponse.request names it. An unknown
+// line reads as 2.0.1. The structural rules hold at every line.
+func TestValidatePASBundleGraphAt(t *testing.T) {
+	dropEntry := func(typ string) func(b map[string]any) {
+		return func(b map[string]any) {
+			var kept []any
+			for _, e := range b["entry"].([]any) {
+				if e.(map[string]any)["resource"].(map[string]any)["resourceType"] != typ {
+					kept = append(kept, e)
+				}
+			}
+			b["entry"] = kept
+		}
+	}
+	response := func(b map[string]any) map[string]any {
+		return b["entry"].([]any)[0].(map[string]any)["resource"].(map[string]any)
+	}
+	addTask := func(reason string) func(b map[string]any) {
+		return func(b map[string]any) {
+			b["entry"] = append(b["entry"].([]any), map[string]any{"fullUrl": "https://payer.test/fhir/Task/t", "resource": map[string]any{
+				"resourceType": "Task", "id": "t", "status": "requested", "intent": "order",
+				"for": map[string]any{"reference": "Patient/p"}, "reasonReference": map[string]any{"reference": reason}}})
+		}
+	}
+	both := func(fs ...func(map[string]any)) func(map[string]any) {
+		return func(b map[string]any) {
+			for _, f := range fs {
+				f(b)
+			}
+		}
+	}
+	type want struct{ v20, v21, v22 bool } // true: the graph is read
+	for _, row := range []struct {
+		name   string
+		mutate func(map[string]any)
+		want   want
+	}{
+		{"complete", func(map[string]any) {}, want{true, true, true}},
+		{"the request Claim omitted", dropEntry("Claim"), want{false, true, true}},
+		{"the request Claim omitted, request by an absolute reference", both(dropEntry("Claim"), func(b map[string]any) {
+			response(b)["request"] = map[string]any{"reference": "https://payer.test/fhir/Claim/c"}
+		}), want{false, true, true}},
+		{"the request Claim omitted, request by identifier only", both(dropEntry("Claim"), func(b map[string]any) {
+			response(b)["request"] = map[string]any{"identifier": map[string]any{"system": "urn:example:claims", "value": "c-1"}}
+		}), want{true, true, true}},
+		{"request names no Claim", func(b map[string]any) { delete(response(b), "request") }, want{true, false, false}},
+		{"request's identifier has no value", func(b map[string]any) {
+			response(b)["request"] = map[string]any{"identifier": map[string]any{"system": "urn:example:claims"}}
+		}, want{true, false, false}},
+		{"the Patient omitted", dropEntry("Patient"), want{false, true, false}},
+		{"the request Claim omitted, a Task naming the same Claim", both(dropEntry("Claim"), addTask("Claim/c")), want{false, true, true}},
+		{"the request Claim omitted, a Task naming it absolutely", both(dropEntry("Claim"), addTask("https://payer.test/fhir/Claim/c/_history/1")), want{false, true, true}},
+		{"a Task naming another Claim", addTask("Claim/other"), want{false, true, false}},
+		{"an empty reference", func(b map[string]any) { response(b)["insurer"] = map[string]any{"reference": ""} }, want{false, false, false}},
+		// ClaimResponse.request names a Claim or nothing: naming another
+		// resource exempts nothing, and names no request Claim.
+		{"request names an Organization the Bundle does not carry", func(b map[string]any) {
+			response(b)["request"] = map[string]any{"reference": "Organization/ins"}
+			response(b)["insurer"] = map[string]any{"reference": "Organization/ins"}
+		}, want{false, false, false}},
+		// A urn:uuid reference carries no type: it names a Claim when the
+		// entry it names is one.
+		{"request names the Claim by its urn:uuid fullUrl", func(b map[string]any) {
+			for _, e := range b["entry"].([]any) {
+				if em := e.(map[string]any); em["resource"].(map[string]any)["resourceType"] == "Claim" {
+					em["fullUrl"] = "urn:uuid:20000000-0000-4000-8000-000000000002"
+					delete(em["resource"].(map[string]any), "id")
+				}
+			}
+			response(b)["request"] = map[string]any{"reference": "urn:uuid:20000000-0000-4000-8000-000000000002"}
+		}, want{true, true, true}},
+		{"request names a urn:uuid entry that is an Organization", func(b map[string]any) {
+			b["entry"] = append(b["entry"].([]any), map[string]any{"fullUrl": "urn:uuid:20000000-0000-4000-8000-000000000003", "resource": map[string]any{"resourceType": "Organization", "name": "x"}})
+			response(b)["request"] = map[string]any{"reference": "urn:uuid:20000000-0000-4000-8000-000000000003"}
+		}, want{true, false, false}},
+		// An identifier names the Claim beside a reference to something else;
+		// that reference is exempted from nothing.
+		{"request names an Organization by reference and the Claim by identifier", func(b map[string]any) {
+			response(b)["request"] = map[string]any{"reference": "Organization/ins", "identifier": map[string]any{"system": "urn:example:claims", "value": "c-1"}}
+		}, want{false, true, false}},
+		{"request's identifier is blank", func(b map[string]any) {
+			response(b)["request"] = map[string]any{"identifier": map[string]any{"system": "urn:example:claims", "value": " "}}
+		}, want{true, false, false}},
+	} {
+		b := assemblySmallGraph()
+		row.mutate(b)
+		raw, err := json.Marshal(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for line, read := range map[string]bool{"2.0": row.want.v20, "2.1": row.want.v21, "2.2": row.want.v22, "": row.want.v20, "9.9": row.want.v20} {
+			t.Run(row.name+"/"+line, func(t *testing.T) {
+				err := validatePASBundleGraphAt(raw, line)
+				if read && err != nil {
+					t.Fatalf("refused: %v", err)
+				}
+				if !read && err == nil {
+					t.Fatal("read a graph the line refuses")
+				}
+			})
+		}
+	}
+	// The line-less rule is 2.0.1's.
+	b := assemblySmallGraph()
+	dropEntry("Claim")(b)
+	raw, _ := json.Marshal(b)
+	if validatePASBundleGraph(raw) == nil {
+		t.Fatal("the line-less rule read a graph missing its request Claim")
 	}
 }

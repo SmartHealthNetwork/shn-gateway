@@ -82,7 +82,7 @@ func TestDispatchPASSuppliesActualOrganization(t *testing.T) {
 	validator := &recordingValidator{valid: true}
 	fixture := newDispatchFixtureWith(t, "MBR-OX", Demo{BirthDate: "1958-07-14", FamilyName: "Okafor-Oxygen"}, order, "Organization/org-dme-ox", supplier, func(c *Config) { c.Validator = validator })
 	rec := httptest.NewRecorder()
-	fixture.gw.handleDispatch(rec, httptest.NewRequest(http.MethodPost, "/scenario/dispatch", bytes.NewBufferString(`{"member":"MBR-OX"}`)))
+	fixture.gw.handleDispatch(rec, httptest.NewRequest(http.MethodPost, "/scenario/dispatch", bytes.NewBufferString(testRouteBody(fixture.gw, "/scenario/dispatch", `"member":"MBR-OX"`))))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("dispatch: %d %s", rec.Code, rec.Body.String())
 	}

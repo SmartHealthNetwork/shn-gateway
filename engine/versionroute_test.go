@@ -129,7 +129,7 @@ func TestSelectLegToken_RefusalIsLegible(t *testing.T) {
 	reg := shnsdk.NewRegistry()
 	reg.Set("payer-x", shnsdk.RegistryEntry{ID: "payer-x", Role: "payer",
 		ContractVersions: []string{"pa.pas@2.2", "pa.pas@2.2"}}) // duplicate on purpose
-	g := &Gateway{cfg: Config{Reg: reg}}
+	g := &Gateway{cfg: Config{Reg: reg, RequireSharedLine: true}}
 
 	tok, err := g.selectLegToken("payer-x", "pas-claim")
 	if tok != "" || err == nil {
@@ -173,7 +173,9 @@ func TestPendStatePinsContractLine(t *testing.T) {
 	// mechanics; THIS test proves the pendState carriage).
 	reg := shnsdk.NewRegistry()
 	reg.Set("payer-x", shnsdk.RegistryEntry{ID: "payer-x", Role: "payer", ContractVersions: []string{"pa.pas@2.0"}})
-	g := &Gateway{cfg: Config{Reg: reg}, pending: map[string]pendState{}}
+	// The participant refuses pairs with no shared line, so a fresh selection
+	// after the drift refuses; by default it would be carried at 2.0.
+	g := &Gateway{cfg: Config{Reg: reg, RequireSharedLine: true}, pending: map[string]pendState{}}
 	tok, err := g.selectLegToken("payer-x", "pas-claim")
 	if err != nil || tok != "pa.pas@2.0" {
 		t.Fatalf("select: (%q, %v)", tok, err)
@@ -200,7 +202,7 @@ func TestSelectLegToken_RefusalContractNotDeclared(t *testing.T) {
 	reg := shnsdk.NewRegistry()
 	reg.Set("payer-y", shnsdk.RegistryEntry{ID: "payer-y", Role: "payer",
 		ContractVersions: []string{"pa.crd@2.0"}}) // declares ONLY a different contract
-	g := &Gateway{cfg: Config{Reg: reg}}
+	g := &Gateway{cfg: Config{Reg: reg, RequireSharedLine: true}}
 
 	_, err := g.selectLegToken("payer-y", "pas-claim")
 	if err == nil {
@@ -245,6 +247,9 @@ func TestSelectRoutePrefersDeclaredThenNativeReachThenChain(t *testing.T) {
 			// A certification-only client for 2.2 is evidence, not a lane: it must
 			// not make 2.2 reachable.
 			CertificationValidatorsByLine: map[string]shnsdk.Validator{"2.0": fake, "2.2": fake},
+			// The participant refuses pairs nothing bridges; by default the
+			// leg is carried at 2.0 (line_carry_test.go).
+			RequireSharedLine: true,
 		}}
 		_, err := g.selectLegRoute("payer-22", "pas-claim")
 		if err == nil {
@@ -419,6 +424,7 @@ func TestStrictPeerRefusesCarryChain(t *testing.T) {
 			ValidatorsByLine:  map[string]shnsdk.Validator{"2.0": fake, "2.1": fake},
 			EgressNativeLines: []string{"2.0"}, // D1c: force arm 3 (2.1 is otherwise arm-2 native reach)
 			StrictPeerForTest: true,            // test-only: strictPeer is hardwired false in production
+			RequireSharedLine: true,            // by default the leg is carried at 2.0
 		}}
 		_, err := g.selectLegRoute("payer-21", "pas-claim")
 		if err == nil {
@@ -473,6 +479,8 @@ func TestStrictPeerRefusesCarryChain(t *testing.T) {
 // TestSelectRouteRefusalNamesBridgeIngredient (arm (4)): no chain
 // / missing target lane / gated-peer each produce a DISTINCT legible
 // message — the RouteRefusalError grammar extension.
+// Under the participant's own setting (RequireSharedLine); by default the leg
+// is carried (line_carry_test.go).
 func TestSelectRouteRefusalNamesBridgeIngredient(t *testing.T) {
 	fake := shnsdk.NewFakeValidator()
 
@@ -481,7 +489,8 @@ func TestSelectRouteRefusalNamesBridgeIngredient(t *testing.T) {
 		reg.Set("payer-22", shnsdk.RegistryEntry{ID: "payer-22", Role: "payer", ContractVersions: []string{"pa.pas@2.2"}})
 		g := &Gateway{cfg: Config{
 			Reg: reg, DeclaredContractVersions: []string{"pa.pas@2.0"},
-			ValidatorsByLine: map[string]shnsdk.Validator{"2.0": fake},
+			ValidatorsByLine:  map[string]shnsdk.Validator{"2.0": fake},
+			RequireSharedLine: true,
 		}}
 		_, err := g.selectLegRoute("payer-22", "pas-claim")
 		assertBridgeIssue(t, err, "no configured validator lane for line 2.2")
@@ -494,7 +503,8 @@ func TestSelectRouteRefusalNamesBridgeIngredient(t *testing.T) {
 		reg.Set("payer-99", shnsdk.RegistryEntry{ID: "payer-99", Role: "payer", ContractVersions: []string{"pa.pas@9.9"}})
 		g := &Gateway{cfg: Config{
 			Reg: reg, DeclaredContractVersions: []string{"pa.pas@2.0"},
-			ValidatorsByLine: map[string]shnsdk.Validator{"2.0": fake, "9.9": fake},
+			ValidatorsByLine:  map[string]shnsdk.Validator{"2.0": fake, "9.9": fake},
+			RequireSharedLine: true,
 		}}
 		_, err := g.selectLegRoute("payer-99", "pas-claim")
 		assertBridgeIssue(t, err, "no transform chain bridges to line 9.9")
@@ -551,7 +561,8 @@ func TestOriginateLegFallbackStaysIntersectionOnly(t *testing.T) {
 	fake := shnsdk.NewFakeValidator()
 	g := &Gateway{cfg: Config{
 		Reg: reg, DeclaredContractVersions: []string{"pa.pas@2.0"},
-		ValidatorsByLine: map[string]shnsdk.Validator{"2.0": fake, "2.2": fake},
+		ValidatorsByLine:  map[string]shnsdk.Validator{"2.0": fake, "2.2": fake},
+		RequireSharedLine: true, // by default the fallback carries at 2.0 (line_carry_test.go), never 2.2
 	}, pending: map[string]pendState{}}
 
 	_, err := g.OriginateLeg(context.Background(), nil, "payer-22", "pas-claim", "pci-1", "corr-1", "",
@@ -900,6 +911,7 @@ func (c *countingExchangeStore) Begin(workstream string) *Exchange {
 // event, and the Exchange store never Begins.
 func TestD7CRDIngressRoutingRefusalCreatesNoExchangeRecord(t *testing.T) {
 	env := newInProcessExchange(t)
+	env.originator.cfg.RequireSharedLine = true     // by default the pair is carried (line_carry_test.go)
 	d7SetPeerContractVersions(t, env, "pa.pas@2.0") // declares, but no pa.crd line at all
 	evs := d7CaptureEvents(env)
 	spy := &countingExchangeStore{ExchangeStore: env.originator.exchanges}
@@ -1070,9 +1082,11 @@ func TestD7CRDIngressArm3IdentityChainKeepsEgressBytes(t *testing.T) {
 // TestD7CRDIngressRefusesAWalkThatChangesBytes is the rejection row for the
 // ingress's walk-equality guard: the CDS Hooks request is carried unchanged
 // to the payer's line, so a translation step on the route that changes any
-// byte (here one byte of the request, or trailing whitespace) makes the
-// ingress refuse (502) before anything reaches the Hub. The pa.crd row is
-// swapped for the length of the test only.
+// byte (here one byte of the request, or trailing whitespace) is never
+// applied. With the participant's own setting (RequireSharedLine) the ingress
+// refuses (422, routing) before anything reaches the Hub; by default the
+// request is carried as sent (line_carry_test.go). The pa.crd row is swapped
+// for the length of the test only.
 func TestD7CRDIngressRefusesAWalkThatChangesBytes(t *testing.T) {
 	for _, row := range []struct {
 		name   string
@@ -1109,6 +1123,9 @@ func TestD7CRDIngressRefusesAWalkThatChangesBytes(t *testing.T) {
 			}
 
 			env := newInProcessExchange(t)
+			// The participant refuses pairs nothing certified bridges; by
+			// default the request is carried as sent (line_carry_test.go).
+			env.originator.cfg.RequireSharedLine = true
 			d7SetPeerContractVersions(t, env, "pa.crd@2.2")
 			fake := shnsdk.NewFakeValidator()
 			env.originator.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"2.0": fake, "2.1": fake, "2.2": fake}
@@ -1121,8 +1138,8 @@ func TestD7CRDIngressRefusesAWalkThatChangesBytes(t *testing.T) {
 			if walked != 1 {
 				t.Fatalf("the swapped step ran %d times, want 1 — the row did not exercise the arm-3 walk", walked)
 			}
-			if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "the CDS Hooks request cannot be carried to the payer's line unchanged") {
-				t.Fatalf("ingress = %d %s, want 502 naming the unchanged-carry refusal", rec.Code, rec.Body.String())
+			if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "the CDS Hooks request cannot be carried to the payer's line unchanged") {
+				t.Fatalf("ingress = %d %s, want 422 naming the unchanged-carry refusal", rec.Code, rec.Body.String())
 			}
 			if n := len(d7EventsOfKind(*evs, "leg.originated")); n != 0 {
 				t.Fatalf("got %d leg.originated events, want 0", n)
@@ -1142,6 +1159,7 @@ func TestD7CRDIngressRefusesAWalkThatChangesBytes(t *testing.T) {
 // never named an ingredient.
 func TestD7CRDIngressRefusalNamesMissingLane(t *testing.T) {
 	env := newInProcessExchange(t)
+	env.originator.cfg.RequireSharedLine = true // by default the pair is carried (line_carry_test.go)
 	d7SetPeerContractVersions(t, env, "pa.crd@2.2")
 	fake := shnsdk.NewFakeValidator()
 	env.originator.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"2.0": fake} // 2.2 deliberately UNLANED
@@ -1175,7 +1193,7 @@ func TestD7CRDIngressRefusalNamesMissingLane(t *testing.T) {
 // credential.
 func TestD7CRDIngressArm3EdgeCaptureHoldsSentBytes(t *testing.T) {
 	env := newInProcessExchange(t)
-	env.originator.cfg.EnrichNativeRequests = true // the prefetch fill this row pins
+	optInEnrichment(env.originator, true) // the prefetch fill this row pins
 	d7SetPeerContractVersions(t, env, "pa.crd@2.2")
 	fake := shnsdk.NewFakeValidator()
 	env.originator.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"2.0": fake, "2.1": fake, "2.2": fake}

@@ -1,0 +1,73 @@
+SHN FHIR validator image
+========================
+
+This image is the FHIR $validate sidecar of the SHN Smart Gateway. Its source is the
+`deploy/validator/` directory of https://github.com/SmartHealthNetwork/shn-gateway.
+The parts SHN wrote are licensed under the Apache License 2.0
+(`third-party-licenses/Apache-2.0.txt`). This directory is `/licenses/` in the image.
+
+What the image contains, and under which terms
+----------------------------------------------
+
+1. Base layers: `gcr.io/distroless/java21-debian13:nonroot`, pinned by digest, the
+   base the `hapiproject/hapi` image is built on. Nothing in it changes; the image adds
+   only the files items 2 to 4 name and this directory. It is a distroless Debian base
+   with the Eclipse Temurin 21 Java runtime (GPLv2 with the Classpath Exception).
+   Each Debian package's copyright file is under `/usr/share/doc/` in the image, and
+   the Java runtime's own notices are in its `legal/` directory under `/usr/lib/jvm/`.
+   Corresponding source: Debian at https://sources.debian.org and Temurin at
+   https://adoptium.net.
+
+2. The HAPI FHIR JPA server (`/app/main.war`, Apache-2.0). One class is changed:
+   `org.hl7.fhir.common.hapi.validation.validator.ValidatorWrapper`, in the
+   `hapi-fhir-validation` 8.12.0 jar inside the WAR, is rebuilt from its upstream
+   source with a change applied, under Apache-2.0 like the upstream class. The change,
+   its source and its build are in `deploy/validator/backport/` of the source
+   repository, and `/app/backport-provenance.json` records the upstream and rebuilt
+   artifacts' digests. `THIRD_PARTY_NOTICES.md` beside this file lists the third-party
+   libraries inside the WAR that need a notice, and says which those are. HAPI's own
+   jars carry HL7's terminology package (`hl7.terminology`, CC0-1.0) as HL7 publishes
+   it, including a fragment of SNODENT (166 concepts; SNODENT is the American Dental
+   Association's) and code system definitions for other systems without their content.
+
+3. `/healthcheck`: the validator's supervisor and readiness probe, written by SHN
+   (Apache-2.0) and built with the Go standard library (BSD-3-Clause,
+   `Go-LICENSE.txt`).
+
+4. FHIR packages in `/packages/`, shipped byte-for-byte as published:
+   - HL7 implementation guide packages (US Core, Da Vinci CRD, DTR, PAS, PDex, CDex,
+     HRex, SDC and, on the 2.2 line, the R4 extensions pack), from
+     packages.simplifier.net, each released by HL7 under CC0-1.0. Terminology from
+     other code systems that they carry stays under its owners' terms (see
+     "Terminology" below).
+   - `shn.fhir.carry`, written by SHN (Apache-2.0).
+   - `shn.fhir.validation-support`, assembled by SHN (Apache-2.0). It carries the
+     HCPCS Level II and Place of Service code systems, built from the Centers for
+     Medicare & Medicaid Services' public files, and resources copied unchanged from
+     HL7's `hl7.fhir.uv.xver-r5.r4` 0.1.0 and `hl7.fhir.uv.extensions.r4`
+     5.3.0-ballot-tc1 packages (CC0-1.0).
+
+Terminology
+-----------
+
+The HL7 packages, in `/packages/` and inside HAPI's own jars, carry content from
+other code systems, which stays under its owners' terms:
+
+- This material contains content from LOINC (http://loinc.org). LOINC is copyright
+  © Regenstrief Institute, Inc. and the Logical Observation Identifiers Names and
+  Codes (LOINC) Committee and is available at no cost under the license at
+  http://loinc.org/license. LOINC® is a registered United States trademark of
+  Regenstrief Institute, Inc.
+- SNOMED CT content is copyright SNOMED International. HL7 distributes it under its
+  agreement with SNOMED International; using SNOMED CT in your own systems requires
+  a licence from SNOMED International or its member in your country.
+
+No CPT code set, and no value set that lists CPT codes, is included. Individual CPT
+codes appear only as examples, a few with display text: inside HL7's packages, and in
+the supervisor's synthetic self-test fixtures. CPT is a registered trademark of the
+American Medical Association.
+
+No X12 code lists are included. Individual X12 code values appear only as examples,
+inside HL7's packages and in the supervisor's synthetic self-test fixtures.
+
+No CDT (dental procedure) codes are included.

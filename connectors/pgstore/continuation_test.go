@@ -76,6 +76,7 @@ func TestContinuation_NoClinicalColumns(t *testing.T) {
 		"subject_pci": true, "member_id": true, "sor_patient_id": true, // the patient, three ways
 		"order_ref": true, "provider_npi": true, // what was asked, and who asked
 		"claim_identifier": true, "claim_type": true, "claim_priority": true,
+		"claim_created":      true, // the submitted Claim's created, as sent: a timestamp, not content
 		"item_trace_numbers": true, "payer_claimresponse_ids": true, "payer_preauth_ref": true,
 		"last_outcome": true, "created_at": true, "updated_at": true,
 	}
@@ -123,6 +124,7 @@ func durableSample(holder string) engine.Continuation {
 		ClaimIdentifier:  "urn:shn:claim|claim-1",
 		ClaimType:        "http://terminology.hl7.org/CodeSystem/claim-type|professional",
 		ClaimPriority:    "http://terminology.hl7.org/CodeSystem/processpriority|normal",
+		ClaimCreated:     "2027-03-30T12:00:00Z",
 		ItemTraceNumbers: []string{"urn:shn:trace|corr-1-1"},
 		Items: []engine.ContinuationItem{{
 			Sequence: 1, ProductCode: "hcpcs|E0424", ServiceDate: "2027-04-01",
@@ -157,6 +159,7 @@ func TestContinuation_SurvivesRestart(t *testing.T) {
 	}
 	if got.OrderRef != "ServiceRequest/sr-1" || got.PayerPreAuthRef != "PA-0001" ||
 		got.ClaimType != "http://terminology.hl7.org/CodeSystem/claim-type|professional" ||
+		got.ClaimCreated != "2027-03-30T12:00:00Z" ||
 		got.Items[0].AuthorizationNumber != "REF-BB-1" || got.Items[0].AdministrationReferenceNumber != "REF-NT-1" ||
 		len(got.Items) != 1 || got.Items[0].ProductCode != "hcpcs|E0424" ||
 		len(got.ItemTraceNumbers) != 1 || got.ItemTraceNumbers[0] != "urn:shn:trace|corr-1-1" {

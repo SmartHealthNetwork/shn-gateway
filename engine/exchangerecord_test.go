@@ -95,6 +95,11 @@ func wantClosed(t *testing.T, rec ExchangeRecord) {
 			t.Errorf("Edits %v: %q is not a registered edit, or is repeated", rec.Edits, id)
 		}
 	}
+	for i, where := range rec.LineCarried {
+		if !slices.Contains(LineCarriedValues, where) || slices.Index(rec.LineCarried, where) != i {
+			t.Errorf("LineCarried %v: %q is not in its closed list, or is repeated", rec.LineCarried, where)
+		}
+	}
 }
 
 func wantRefusal(t *testing.T, rec ExchangeRecord, status int, by, rule string) {
@@ -934,7 +939,12 @@ func TestExchangeRecord_InboundSystemOfRecordFailure(t *testing.T) {
 	}
 }
 
-// A token for another patient than the request names is an authority refusal.
+// A token for another patient than an eligibility request names is carried:
+// the payer answers about the member the request names, and the record says
+// answered (TestEligibility_RecordsTokenSubjectDifferenceIsCarried). The
+// legs that still bind the token's patient record their refusal as consent
+// or authority (TestFederatedQuery_PatientNotTheConsentedOneIsRefused,
+// TestPatientDTR_PatientNotTheAuthorizedOneIsRefused).
 func TestExchangeRecord_InboundSubjectBinding(t *testing.T) {
 	p, got := newRecordingLevelPayer(t, EnforcementObserve)
 	cer := []byte(`{"resourceType":"CoverageEligibilityRequest","status":"active","purpose":["benefits"],` +
@@ -943,16 +953,17 @@ func TestExchangeRecord_InboundSubjectBinding(t *testing.T) {
 	w := httptest.NewRecorder()
 	p.g.inboundRoute()(w, buildEligibilityInboundRequest(t, p.g, cer, "corr-subject"))
 	rec := got.only(t)
-	if rec.Outcome != ExchangeRefused || rec.RefusedBy != RefusedByPayerGateway || rec.Rule != RefusalAuthority {
-		t.Fatalf("record %s %s/%s status %d", rec.Outcome, rec.RefusedBy, rec.Rule, rec.Status)
+	if rec.Outcome != ExchangeAnswered || rec.Rule != "" || rec.Status != http.StatusOK {
+		t.Fatalf("record %s %s/%s status %d, want answered", rec.Outcome, rec.RefusedBy, rec.Rule, rec.Status)
 	}
 }
 
-// A request frame naming a line the payer does not serve is routing; one it
-// cannot read is message integrity.
+// A request frame naming a line the payer does not serve is routing under
+// the participant's own setting (RequireSharedLine); by default the pair is carried (line_carry_test.go); one it cannot read is message integrity.
 func TestExchangeRecord_InboundFrameRefusals(t *testing.T) {
 	t.Run("unserved line", func(t *testing.T) {
 		p, got := newRecordingLevelPayer(t, EnforcementObserve)
+		p.g.cfg.RequireSharedLine = true
 		ans := p.sendFramed(t, "crd-order-select", map[string]string{shnsdk.FrameHeaderContractVersion: "pa.crd@9.9.9"}, conformantCRD("MBR-COVERED", "72148"), p.pci)
 		wantRefusal(t, got.only(t), ans.status, RefusedByPayerGateway, RefusalRouting)
 	})
@@ -1115,6 +1126,9 @@ func TestHubRefusalOutcome_Transport(t *testing.T) {
 		"load balancer, not forwarded":    {&hubRefusalError{status: 403, reason: "Forbidden"}, ExchangeUnreachable},
 		"load balancer 5xx":               {hubRefusal(502, []byte("<html>Bad Gateway</html>"), ""), ExchangeOther},
 		"hub, marked":                     {hubRefusal(502, []byte(`{"error":"payload hash mismatch"}`), "no"), ExchangeRefused},
+		// The recipient's gateway refused before acting (it does not know the
+		// sender yet): the leg did not complete and nothing was done.
+		"recipient took no action": {hubRefusal(503, []byte(`{"error":"forward to recipient failed: the recipient does not know the sender yet and took no action; resend with a freshly sealed envelope"}`), "no"), ExchangeUnreachable},
 	} {
 		if got, _, _ := hubRefusalOutcome(row.e); got != row.outcome {
 			t.Errorf("%s: outcome %q, want %q", name, got, row.outcome)
@@ -1124,6 +1138,16 @@ func TestHubRefusalOutcome_Transport(t *testing.T) {
 	x.legOutcome(&answerLostError{cause: "the Hub's answer could not be read"})
 	if x.outcome != ExchangeOther {
 		t.Errorf("an unreadable Hub answer settled %q, want other", x.outcome)
+	}
+	// An answer whose frame declares another contract line than the leg was
+	// routed at is refused on message integrity, as an answer frame that
+	// cannot be decoded is.
+	for _, cause := range []string{"response contract version mismatch: frame declares pa.pas@2.2, leg routed pa.pas@2.0", "response frame decode failed"} {
+		x := &exchangeRecorder{self: RefusedByProviderGateway}
+		x.legOutcome(&answerLostError{cause: cause})
+		if x.outcome != ExchangeRefused || x.rule != RefusalIntegrity {
+			t.Errorf("%s settled %q (rule %q), want refused on integrity", cause, x.outcome, x.rule)
+		}
 	}
 }
 
@@ -1146,6 +1170,7 @@ func TestExchangeRecorder_HubDelivered(t *testing.T) {
 		"recipient did not answer":       {hub(502, "forward to recipient failed: the recipient did not answer in time", "unknown"), "unknown"},
 		"connection failed after send":   {hub(502, "forward to recipient failed: the connection failed after the request was sent", "unknown"), "unknown"},
 		"recipient could not be reached": {hub(502, "forward to recipient failed: the recipient could not be reached", "no"), "no"},
+		"recipient took no action":       {hub(503, "forward to recipient failed: the recipient does not know the sender yet and took no action; resend with a freshly sealed envelope", "no"), "no"},
 		"refused before forwarding":      {hub(403, "replay detected", "no"), "no"},
 		"response leg refused":           {hub(502, "response leg authorization failed", "yes"), "yes"},
 		"load balancer 5xx, unmarked":    {hubRefusal(502, []byte("<html>Bad Gateway</html>"), ""), ""},
@@ -2076,9 +2101,10 @@ func TestExchangeRecord_NoSystemOfRecordNotesNoRead(t *testing.T) {
 			})
 		}
 		// Refused after the member is bound and before anything is
-		// forwarded: no contract line is shared.
+		// forwarded: no contract line is shared, and the participant opted in
+		// to refusing such a pair.
 		t.Run("refused before forwarding/"+level.String(), func(t *testing.T) {
-			p := newLevelPayer(t, level, WithDeclaredContractVersions([]string{"pa.pas@2.0"}))
+			p := newLevelPayer(t, level, WithDeclaredContractVersions([]string{"pa.pas@2.0"}), WithRequireSharedLine(true))
 			p.g.cfg.SoR = NoSystemOfRecord()
 			var got exchangeRecords
 			p.g.cfg.ExchangeObserved = got.observe
@@ -2086,9 +2112,11 @@ func TestExchangeRecord_NoSystemOfRecordNotesNoRead(t *testing.T) {
 			if ans.status != http.StatusUnprocessableEntity {
 				t.Fatalf("answer %d %s, want the version route's 422", ans.status, ans.body)
 			}
-			if rec := got.only(t); rec.Backend != nil || rec.BackendCalls != 0 {
+			rec := got.only(t)
+			if rec.Backend != nil || rec.BackendCalls != 0 {
 				t.Fatalf("backend %+v in %d calls, want none", rec.Backend, rec.BackendCalls)
 			}
+			wantRefusal(t, rec, http.StatusUnprocessableEntity, RefusedByPayerGateway, RefusalRouting)
 		})
 	}
 }

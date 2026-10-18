@@ -83,7 +83,7 @@ func (s *authoredQRSoR) ClinicalContext(memberID string) (shnsdk.ClinicalContext
 
 func (s *authoredQRSoR) OpenCoverage(memberID string) ([]byte, bool) {
 	if _, ok := s.extraPersonas[memberID]; ok {
-		cov, err := shnsdk.BuildCoverageWithPayer("Patient/"+memberID, memberID, shnsdk.CMSPayerIdentity)
+		cov, err := containedPayorCoverage("Patient/"+memberID, memberID, shnsdk.CMSPayerIdentity)
 		if err != nil {
 			return nil, false
 		}
@@ -451,7 +451,7 @@ func TestAuthoredQRBuiltAtSelectedLine(t *testing.T) {
 		orderJSON := buildAuthoredQROrderWithID(t, "sr-uc06-authoredqr", "Patient/"+member, uc06.System, uc06.Code, uc06.Display, uc06.Dx)
 		gw, stub, capture := newAuthoredQRPendFixture(t, member, demo, orderJSON, "functional-status")
 
-		req := httptest.NewRequest(http.MethodPost, "/scenario/uc06", nil)
+		req := httptest.NewRequest(http.MethodPost, "/scenario/uc06", strings.NewReader(testOrderBody(orderJSON, `"member":"`+member+`"`)))
 		rec := httptest.NewRecorder()
 		if _, ok := gw.scenarioToPend(rec, req, "uc06", member); !ok {
 			t.Fatalf("scenarioToPend failed: %d %s", rec.Code, rec.Body.String())
@@ -477,7 +477,7 @@ func TestAuthoredQRBuiltAtSelectedLine(t *testing.T) {
 		orderJSON := buildAuthoredQROrderWithID(t, "sr-uc04-authoredqr", "Patient/"+member, uc04.System, uc04.Code, uc04.Display, uc04.Dx)
 		gw, stub, capture := newAuthoredQRSingleShotFixture(t, member, demo, orderJSON)
 
-		req := httptest.NewRequest(http.MethodPost, "/scenario/uc04", nil)
+		req := httptest.NewRequest(http.MethodPost, "/scenario/uc04", strings.NewReader(testOrderBody(orderJSON, `"member":"`+member+`"`)))
 		rec := httptest.NewRecorder()
 		gw.handleUC04(rec, req)
 		if rec.Code != http.StatusOK {

@@ -858,6 +858,7 @@ func TestVersionDriftClassification(t *testing.T) {
 	}
 	pas20 := "http://hl7.org/fhir/us/davinci-pas/ImplementationGuide/hl7.fhir.us.davinci-pas|2.0.1"
 	pas22 := "http://hl7.org/fhir/us/davinci-pas/ImplementationGuide/hl7.fhir.us.davinci-pas|2.2.1"
+	pdex21 := "http://hl7.org/fhir/us/davinci-pdex/ImplementationGuide/hl7.fhir.us.davinci-pdex|2.1.0"
 	cases := []struct {
 		name     string
 		handler  http.HandlerFunc
@@ -870,6 +871,12 @@ func TestVersionDriftClassification(t *testing.T) {
 		{"no declaration → no drift possible", metadataWith(pas22), nil, true, ""},
 		{"declared contract absent from evidence → tolerated", metadataWith(pas20), []string{"pa.crd@2.0"}, true, ""},
 		{"evidence contract absent from declaration → tolerated", metadataWith(pas20), []string{"pa.dtr@2.0"}, true, ""},
+		// No gateway declares a pa.pdex line: a payer system that
+		// publishes PDex against a CRD/DTR/PAS-only declaration is not drift.
+		{"published PDex against a declaration with no pa.pdex line → tolerated", metadataWith(pdex21), []string{"pa.crd@2.0", "pa.dtr@2.0", "pa.pas@2.0"}, true, ""},
+		// The reverse map still reads a peer's own PDex publication: a payer
+		// system's declared PDex line that its publication contradicts drifts.
+		{"payer system's declared PDex line differs from its published line", metadataWith(pdex21), []string{"pa.pdex@2.0"}, false, FailVersionDrift},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

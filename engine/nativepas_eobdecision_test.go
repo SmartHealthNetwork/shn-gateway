@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -63,6 +64,8 @@ func eobReviewDecision(t *testing.T, eob []byte) (string, string, bool) {
 	t.Helper()
 	for _, adj := range eobAdjudications(t, eob) {
 		for _, ext := range adj.Extension {
+			// The payer's own review action, re-expressed value for value in
+			// the EOB's own extension.
 			if ext.URL != "http://hl7.org/fhir/us/davinci-pdex/StructureDefinition/extension-reviewAction" {
 				continue
 			}
@@ -220,8 +223,8 @@ func reviewActionExt(code, display, reasonSystem, reasonCode string) string {
 // send.
 func TestNativeSubmit_DeniedEOBStatesThePayersOwnDecision(t *testing.T) {
 	t.Run("no reason code from the payer, no reason code on the EOB", func(t *testing.T) {
-		denial, err := shnsdk.BuildDeniedResponseWithNotesAtLine("2.0", "Patient/MBR-COVERED", "corr-decision",
-			"Not covered under the member's plan.", nil, fixedClock())
+		denial, err := shnsdk.BuildDeniedResponseWithNotesAtLineExact("2.0", "Patient/MBR-COVERED", "corr-decision",
+			"Not covered under the member's plan.", nil, testAnswerRequest, fixedClock())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -229,12 +232,27 @@ func TestNativeSubmit_DeniedEOBStatesThePayersOwnDecision(t *testing.T) {
 		if reasons := eobDenialReasons(t, eob); len(reasons) != 0 {
 			t.Errorf("EOB states reason codes the payer never sent: %v", reasons)
 		}
+		// The payer's own adjudication is carried byte for byte: its
+		// amountless "submitted" entry with its A3. No amount is added.
 		code, display, ok := eobReviewDecision(t, eob)
-		if !ok || code != "A3" {
-			t.Fatalf("EOB review decision = %q (present=%v), want the payer's A3", code, ok)
+		if !ok || code != "A3" || display != "Not Certified" {
+			t.Fatalf("EOB review decision = %q %q (present=%v), want the payer's A3 Not Certified", code, display, ok)
 		}
-		if display != "Not Certified" {
-			t.Errorf("EOB review decision display = %q, want the payer's own", display)
+		if bytes.Contains(eob, []byte(`"amount"`)) {
+			t.Fatalf("EOB states an amount the payer's denial did not supply: %s", eob)
+		}
+	})
+
+	t.Run("the payer's own amount carries its review decision", func(t *testing.T) {
+		eob := projectedEOB(t, withItemAmount(deniedClaimResponse(reviewActionExt("A3", "Not Certified", "", ""), nil), `{"value":125.5,"currency":"USD"}`))
+		code, display, ok := eobReviewDecision(t, eob)
+		if !ok || code != "A3" || display != "Not Certified" {
+			t.Fatalf("EOB review decision = %q %q (present=%v), want the payer's A3 Not Certified", code, display, ok)
+		}
+		// The fixture is re-marshalled from a map, so its keys are sorted: the
+		// payer's bytes here are {"currency","value"}, carried as they are.
+		if !bytes.Contains(eob, []byte(`"amount":{"currency":"USD","value":125.5}`)) {
+			t.Fatalf("EOB does not carry the payer's own amount exactly: %s", eob)
 		}
 	})
 
@@ -259,8 +277,8 @@ func TestNativeSubmit_DeniedEOBStatesThePayersOwnDecision(t *testing.T) {
 	})
 
 	t.Run("the payer's own review decision, not ours", func(t *testing.T) {
-		eob := projectedEOB(t, deniedClaimResponse(
-			reviewActionExt("A2", "Not Certified", shnsdk.X12ReviewDecisionReasonSystem, "0X"), nil))
+		eob := projectedEOB(t, withItemAmount(deniedClaimResponse(
+			reviewActionExt("A2", "Not Certified", shnsdk.X12ReviewDecisionReasonSystem, "0X"), nil), `{"value":0,"currency":"USD"}`))
 		code, _, ok := eobReviewDecision(t, eob)
 		if !ok || code != "A2" {
 			t.Fatalf("EOB review decision = %q (present=%v), want the payer's A2", code, ok)
@@ -268,25 +286,52 @@ func TestNativeSubmit_DeniedEOBStatesThePayersOwnDecision(t *testing.T) {
 	})
 }
 
-// TestNativeSubmit_DecisionDetailTheEOBCannotCarryIsRefused: decision detail a
-// decision EOB cannot state — here a review reason coded in a system the
-// resource does not bind — is refused loudly (502) rather than dropped or
-// replaced with a code the payer never sent.
-func TestNativeSubmit_DecisionDetailTheEOBCannotCarryIsRefused(t *testing.T) {
-	res := projectFromDecision(t, deniedClaimResponse(
-		reviewActionExt("A3", "Not Certified", "http://example.org/reasons", "9"), nil))
-	if res.Status != http.StatusBadGateway {
-		t.Fatalf("status = %d (%s), want 502", res.Status, res.Message)
+// TestNativeSubmit_DecisionDetailTheEOBCannotCarryIsRelayed: decision
+// detail a decision EOB cannot carry as written — here a note typed outside
+// the resource's required NoteType binding — never refuses the payer's
+// decision: it is relayed exactly and recorded, no EOB is written, and the leg
+// names the detail. A review reason in any system is carried as written.
+func TestNativeSubmit_DecisionDetailTheEOBCannotCarryIsRelayed(t *testing.T) {
+	decision := withNote(deniedClaimResponse(reviewActionExt("A3", "Not Certified", "", ""), nil), "email", "Reply by email.")
+	body := fixturePASResponse(t, decision, true)
+	srv := stubPartnerSrv(t, http.StatusOK, body)
+	n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", newCensusSoR(), fixedClock)
+	ctx, leg := withPASLeg(context.Background(), "provider")
+	res, err := n.Handle(ctx, "pas-claim", "corr-decision", "PCI-1", originatorBuiltConformantBundle(t, "MBR-COVERED"))
+	if err != nil || res.Status != 0 || !bytes.Equal(responseBytes(res), body) {
+		t.Fatalf("the payer's decision must be relayed exactly: err=%v status=%d (%s)", err, res.Status, res.Message)
 	}
-	if len(res.SideEffectFHIR) != 0 {
-		t.Fatalf("a refused projection still stored %d EOB(s)", len(res.SideEffectFHIR))
+	if len(res.SideEffectFHIR) != 0 || res.Commit == nil {
+		t.Fatalf("want the decision recorded with no EOB: %d EOB(s), commit=%v", len(res.SideEffectFHIR), res.Commit != nil)
 	}
+	want := "decision EOB not written: process note 1 type is not display, print or printoper"
+	if len(leg.detailed) != 1 || leg.detailed[0].kind != DecisionEOBNotWrittenEvent || leg.detailed[0].detail != want {
+		t.Fatalf("notes = %+v, want %s %q", leg.detailed, DecisionEOBNotWrittenEvent, want)
+	}
+	eob := projectedEOB(t, deniedClaimResponse(reviewActionExt("A3", "Not Certified", "http://example.org/reasons", "9"), nil))
+	if !bytes.Contains(eob, []byte(`{"url":"reasonCode","valueCodeableConcept":{"coding":[{"code":"9","system":"http://example.org/reasons"}]}}`)) {
+		t.Fatalf("the payer's review reason is not carried as written: %s", eob)
+	}
+}
+
+// withNote adds a processNote the payer typed as given.
+func withNote(claimResponse []byte, typ, text string) []byte {
+	var cr map[string]any
+	if err := json.Unmarshal(claimResponse, &cr); err != nil {
+		panic(err)
+	}
+	cr["processNote"] = []any{map[string]any{"number": 1, "type": typ, "text": text}}
+	b, err := json.Marshal(cr)
+	if err != nil {
+		panic(err)
+	}
+	return b
 }
 
 // TestNativeSubmit_ApprovedEOBStatesThePayersDecision: an approval carries the
 // payer's own notes and its own review decision, and states no denial reason.
 func TestNativeSubmit_ApprovedEOBStatesThePayersDecision(t *testing.T) {
-	eob := projectedEOB(t, approvedClaimResponse(nil))
+	eob := projectedEOB(t, withItemAmount(approvedClaimResponse(nil), `{"value":980,"currency":"USD"}`))
 	if got := eobProcessNotes(t, eob); len(got) != 1 || got[0] != "Approved for 12 visits." {
 		t.Errorf("approved EOB notes = %q, want the payer's own note", got)
 	}
@@ -297,48 +342,78 @@ func TestNativeSubmit_ApprovedEOBStatesThePayersDecision(t *testing.T) {
 	if reasons := eobDenialReasons(t, eob); len(reasons) != 0 {
 		t.Errorf("approved EOB states denial reasons: %v", reasons)
 	}
+
+	// An approval whose payer stated no amount carries its amountless entry
+	// with its A1, exactly; no amount is added.
+	bare := projectedEOB(t, approvedClaimResponse(nil))
+	if code, _, ok := eobReviewDecision(t, bare); !ok || code != "A1" {
+		t.Fatalf("approved EOB review decision = %q (present=%v), want the payer's A1: %s", code, ok, bare)
+	}
+	if bytes.Contains(bare, []byte(`"amount"`)) || !bytes.Contains(bare, []byte(`"preAuthRef":["PA-DECISION"]`)) {
+		t.Fatalf("approved EOB with no amount anywhere: %s", bare)
+	}
 }
 
-// TestNativeSubmit_ApprovalReasonCodesAreRefused: a decision EOB states reason
-// codes only on a denial, so an approval whose ClaimResponse carries one states
-// detail the resource cannot hold. It is refused loudly (502) — the payer's own
-// reason line is never dropped to make the projection fit.
-func TestNativeSubmit_ApprovalReasonCodesAreRefused(t *testing.T) {
+// withItemAmount states an amount on the ClaimResponse item's first
+// adjudication: the payer's own adjudicated figure.
+func withItemAmount(claimResponse []byte, amount string) []byte {
+	var cr map[string]any
+	if err := json.Unmarshal(claimResponse, &cr); err != nil {
+		panic(err)
+	}
+	item := cr["item"].([]any)[0].(map[string]any)
+	adj := item["adjudication"].([]any)
+	adj[0].(map[string]any)["amount"] = json.RawMessage(amount)
+	b, err := json.Marshal(cr)
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
+// TestNativeSubmit_ApprovalReasonCodesAreCarried: an approval whose
+// ClaimResponse carries reason codes has them carried exactly as the payer
+// wrote them: the EOB claims no profile that would forbid them, and the
+// payer's own reason line is never dropped.
+func TestNativeSubmit_ApprovalReasonCodesAreCarried(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		reason map[string]any
+		want   string
 	}{
-		{"remittance advice remark", map[string]any{"system": shnsdk.RARCSystem, "code": "N130"}},
-		{"claim adjustment reason", map[string]any{"system": shnsdk.CARCSystem, "code": "197", "display": "Precertification absent"}},
+		{"remittance advice remark", map[string]any{"system": shnsdk.RARCSystem, "code": "N130"}, `"reason":{"coding":[{"code":"N130","system":"` + shnsdk.RARCSystem + `"}]}`},
+		{"claim adjustment reason", map[string]any{"system": shnsdk.CARCSystem, "code": "197", "display": "Precertification absent"}, `"reason":{"coding":[{"code":"197","display":"Precertification absent","system":"` + shnsdk.CARCSystem + `"}]}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			res := projectFromDecision(t, approvedClaimResponse([]map[string]any{tc.reason}))
-			if res.Status != http.StatusBadGateway {
-				t.Fatalf("status = %d (%s), want 502", res.Status, res.Message)
-			}
-			if len(res.SideEffectFHIR) != 0 {
-				t.Fatalf("a refused projection still stored %d EOB(s)", len(res.SideEffectFHIR))
+			eob := projectedEOB(t, approvedClaimResponse([]map[string]any{tc.reason}))
+			if !bytes.Contains(eob, []byte(tc.want)) {
+				t.Fatalf("the payer's reason is not carried as written (%s): %s", tc.want, eob)
 			}
 		})
 	}
 }
 
-// TestNativeSubmit_DenialStatingAnAuthorizationNumberIsRefused: a payer answer
-// that reads as a denial yet states an authorization number in its own
-// preAuthRef field is contradictory — it may be a partial certification whose
-// authorization a denial reading would discard. The gateway cannot tell the two
-// apart, so it refuses (502) rather than state a denial over an authorization
-// the payer may have issued.
-func TestNativeSubmit_DenialStatingAnAuthorizationNumberIsRefused(t *testing.T) {
+// TestNativeSubmit_DenialStatingAnAuthorizationNumberIsRelayed: a
+// payer answer that reads as a denial yet states an authorization number in
+// its own preAuthRef field may be a partial certification; this gateway's
+// reading cannot tell, so it writes nothing from it (no decision, no EOB) —
+// and relays the payer's decision exactly, naming why. It never refuses it.
+func TestNativeSubmit_DenialStatingAnAuthorizationNumberIsRelayed(t *testing.T) {
 	for _, reviewAction := range []string{"A2", "A3"} {
 		t.Run(reviewAction, func(t *testing.T) {
-			denial := deniedClaimResponse(reviewActionExt(reviewAction, "Not Certified", "", ""), nil)
-			res := projectFromDecision(t, withPreAuthRef(denial, "PA-PARTIAL"))
-			if res.Status != http.StatusBadGateway {
-				t.Fatalf("status = %d (%s), want 502", res.Status, res.Message)
+			body := fixturePASResponse(t, withPreAuthRef(deniedClaimResponse(reviewActionExt(reviewAction, "Not Certified", "", ""), nil), "PA-PARTIAL"), true)
+			srv := stubPartnerSrv(t, http.StatusOK, body)
+			n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", newCensusSoR(), fixedClock)
+			ctx, leg := withPASLeg(context.Background(), "provider")
+			res, err := n.Handle(ctx, "pas-claim", "corr-decision", "PCI-1", originatorBuiltConformantBundle(t, "MBR-COVERED"))
+			if err != nil || res.Status != 0 || !bytes.Equal(responseBytes(res), body) {
+				t.Fatalf("the payer's decision must be relayed exactly: err=%v status=%d (%s)", err, res.Status, res.Message)
 			}
-			if len(res.SideEffectFHIR) != 0 {
-				t.Fatalf("a refused projection still stored %d EOB(s)", len(res.SideEffectFHIR))
+			if len(res.SideEffectFHIR) != 0 || res.Commit != nil {
+				t.Fatalf("nothing may be written: %d EOB(s), commit=%v", len(res.SideEffectFHIR), res.Commit != nil)
+			}
+			if leg.unreadRule() != RuleEOBDecision || len(leg.detailed) != 1 || leg.detailed[0].kind != pendDecisionNotRecordedEvent || leg.detailed[0].detail != decisionReadAsDenialWithAuthNumber {
+				t.Fatalf("leg unread=%q notes=%+v, want the decision named as not recorded", leg.unreadRule(), leg.detailed)
 			}
 		})
 	}

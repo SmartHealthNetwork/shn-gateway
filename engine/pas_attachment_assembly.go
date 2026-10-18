@@ -15,7 +15,7 @@ import (
 // buildAuthoredPASSubmit preserves the holder-authored attachment while the
 // SDK owns the PAS envelope and its final resource identities.
 func buildAuthoredPASSubmit(line string, in shnsdk.ConformantClaimInputs) ([]byte, error) {
-	body, err := shnsdk.BuildConformantClaimBundleAtLine(line, in)
+	body, err := shnsdk.BuildConformantClaimBundleAtLineExact(line, in)
 	if err != nil || len(in.QR) == 0 {
 		return body, err
 	}
@@ -23,7 +23,7 @@ func buildAuthoredPASSubmit(line string, in shnsdk.ConformantClaimInputs) ([]byt
 }
 
 func buildAuthoredPASUpdate(line string, in shnsdk.ConformantClaimUpdateInputs) ([]byte, error) {
-	body, err := shnsdk.BuildConformantClaimUpdateBundleAtLine(line, in)
+	body, err := shnsdk.BuildConformantClaimUpdateBundleAtLineExact(line, in)
 	if err != nil {
 		return nil, err
 	}

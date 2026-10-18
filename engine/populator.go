@@ -53,17 +53,17 @@ type PopulateContext struct {
 
 // errNoClinicalContext is a sentinel so the consumer maps "no clinical data for member"
 // to 502 (a data fault), distinct from a managed fill marshal error (500).
-var errNoClinicalContext = errors.New("engine: no clinical context for member")
+var errNoClinicalContext = errors.New("no clinical context for member")
 
 // errPopulateUpstream is a sentinel: a native $populate transport error, non-2xx, or
 // unparsable response. The consumer maps it to 502. Defined here (the seam file) so
 // statusForPopulateErr (originate.go) can reference it before nativepopulate.go exists.
-var errPopulateUpstream = errors.New("engine: $populate upstream failed")
+var errPopulateUpstream = errors.New("$populate upstream failed")
 
 // errPopulateForeignSubject is the native foreign-subject fence: the operated engine returned a QR
 // about a patient other than the one we asked to populate. Maps to 502. The message is kept stable
 // ("...subject does not match...") since it is the participant-visible rejection reason.
-var errPopulateForeignSubject = errors.New("engine: populated QR subject does not match patient")
+var errPopulateForeignSubject = errors.New("populated QR subject does not match patient")
 
 // managedPopulator is the in-house backend: today's ClinicalContext + FillQuestionnaire,
 // byte-preserved behind the seam. The demo GREEN-KEEPER — FillQuestionnaire fails

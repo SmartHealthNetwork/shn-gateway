@@ -1,4 +1,5 @@
-# FR-G3 config-only validator sidecar: hapiproject/hapi + all eight FHIR IGs baked
+# FR-G3 config-only validator sidecar: the digest-pinned hapiproject/hapi engine's WAR
+# (backported) on the pinned distroless Java base, + all eight FHIR IGs baked
 # OFFLINE (downloaded at build time, loaded at runtime from file://, no registry
 # egress at boot). The HAPI engine is the same digest-pinned one the network's
 # conformance testing runs, so what is tested is what partners deploy.
@@ -20,18 +21,18 @@ ARG SHN_IG_LINE=2.0
 # is "can validate": PID 1 owns one sequential warm-up worker and withholds public
 # forwarding until it succeeds on Java's private loopback endpoint. Ordinary probes
 # only observe public metadata and the marker. SHN_IG_LINE selects embedded fixtures.
-FROM hapiproject/hapi@sha256:1be4d7ffe7a35a9fb46151851e5a20b25c5016f16c8ef8b59b0c807ad06a40c1 AS backport-engine
+FROM hapiproject/hapi@sha256:0ff86aac4c7bd13a1ee226444a70263bb46ed1c28ef543c30a44f865b80ca04e AS backport-engine
 FROM eclipse-temurin:21.0.11_10-jdk-jammy@sha256:dbfd085220ae632a0830166e443747d1ee89e9038d92e3b48c3e5e9d8292b9a7 AS backport
 ARG TARGETPLATFORM
 COPY --from=backport-engine /app/main.war /input/main.war
 COPY backport /src
 RUN --network=none case "$TARGETPLATFORM" in \
-      linux/arm64) source_child=sha256:ac871f44ee311bdd4d3533f7ea9e81b3a744ca709726b74d5a97d29663a7916c; compiler_child=sha256:4cc4a72887c92db0128b0725443a80291171759f9731300c12a63403504f76c3 ;; \
-      linux/amd64) source_child=sha256:f4aa83b7102a52f19a42c4c27c5f63fa3d1ded4f393c7083e53a39dc37b2a4c5; compiler_child=sha256:ea0e59a081c886d919b177b7006ac02fbdc64e8ab7cae724e2afd62de42d6892 ;; \
+      linux/arm64) source_child=sha256:4d59628d42b3556b2dcd274d26054a43ba53697ebdae0fd71e6a5475065ed22d; compiler_child=sha256:4cc4a72887c92db0128b0725443a80291171759f9731300c12a63403504f76c3 ;; \
+      linux/amd64) source_child=sha256:88489ad986f38d35ec0e216a0660db42cb55329275efdc5913dfe1d2f2afbe53; compiler_child=sha256:ea0e59a081c886d919b177b7006ac02fbdc64e8ab7cae724e2afd62de42d6892 ;; \
       *) exit 2 ;; \
     esac && /src/build.sh /input/main.war /out "$TARGETPLATFORM" "$source_child" "$compiler_child"
 
-FROM golang:1.23-alpine AS hc
+FROM golang:1.26.9-alpine@sha256:cdfd4fe2da6b225d8b40c6b7a105736e548e83ff56d5d8f9394446eeb5eb84e0 AS hc
 WORKDIR /src
 COPY go.mod *.go ./
 COPY testdata ./testdata
@@ -119,13 +120,23 @@ RUN curl --retry 5 --retry-delay 5 --retry-all-errors -fLSso hl7.fhir.us.core-7.
 COPY shnig/shn.fhir.carry-1.0.0.tgz /packages/shn.fhir.carry-1.0.0.tgz
 COPY support/shn.fhir.validation-support-1.5.0.tgz /packages/shn.fhir.validation-support-1.5.0.tgz
 
+# Stage: the runtime every lane runs on — the pinned distroless Java 21 base upstream
+# builds hapiproject/hapi on (same JRE and env), without upstream's bundled extras
+# (an unused OpenTelemetry agent jar carries a CRITICAL advisory). Distroless
+# defaults differ from upstream's, so the user and directory are restated here once.
+FROM gcr.io/distroless/java21-debian13:nonroot@sha256:0a1f5a75661918de9c0813f287f651c3bf2d6dd752eada5f084eb0c1f14ced9e AS hapi-runtime
+USER 65532:65532
+WORKDIR /app
+
 # Stage: 2.0-line HAPI validator with its IGs baked + loaded from file:// (offline at runtime).
-FROM hapiproject/hapi@sha256:1be4d7ffe7a35a9fb46151851e5a20b25c5016f16c8ef8b59b0c807ad06a40c1 AS hapi-2.0
+FROM hapi-runtime AS hapi-2.0
 COPY --from=backport /out/main.war /app/main.war
 COPY --from=backport /out/provenance.json /app/backport-provenance.json
 LABEL org.shn.validator.backport.class="51c76b59364b8927a40efb29232945289974ff540b53b623adc9031886bb47f5"
 COPY --from=hc /healthcheck /healthcheck
-# Preserve the pinned base image's literal Java argv, inherited env/user/workdir.
+# The image is published: its licences and notices ship with it (licenses/NOTICE).
+COPY licenses /licenses
+# The pinned engine's literal Java argv; env, user and workdir come from hapi-runtime.
 ENTRYPOINT ["/healthcheck", "supervise", "java", "--class-path", "/app/main.war", "-Dloader.path=main.war!/WEB-INF/classes/,main.war!/WEB-INF/,/app/extra-classes", "org.springframework.boot.loader.PropertiesLauncher"]
 COPY --from=igs-2.0 /packages /packages
 ENV SHN_IG_LINE=2.0 \
@@ -161,12 +172,14 @@ ENV SHN_IG_LINE=2.0 \
     hapi.fhir.implementationguides.validationsupport.version=1.5.0
 
 # Stage: 2.1-line HAPI validator with its IGs baked + loaded from file:// (offline at runtime).
-FROM hapiproject/hapi@sha256:1be4d7ffe7a35a9fb46151851e5a20b25c5016f16c8ef8b59b0c807ad06a40c1 AS hapi-2.1
+FROM hapi-runtime AS hapi-2.1
 COPY --from=backport /out/main.war /app/main.war
 COPY --from=backport /out/provenance.json /app/backport-provenance.json
 LABEL org.shn.validator.backport.class="51c76b59364b8927a40efb29232945289974ff540b53b623adc9031886bb47f5"
 COPY --from=hc /healthcheck /healthcheck
-# Preserve the pinned base image's literal Java argv, inherited env/user/workdir.
+# The image is published: its licences and notices ship with it (licenses/NOTICE).
+COPY licenses /licenses
+# The pinned engine's literal Java argv; env, user and workdir come from hapi-runtime.
 ENTRYPOINT ["/healthcheck", "supervise", "java", "--class-path", "/app/main.war", "-Dloader.path=main.war!/WEB-INF/classes/,main.war!/WEB-INF/,/app/extra-classes", "org.springframework.boot.loader.PropertiesLauncher"]
 COPY --from=igs-2.1 /packages /packages
 ENV SHN_IG_LINE=2.1 \
@@ -202,12 +215,14 @@ ENV SHN_IG_LINE=2.1 \
     hapi.fhir.implementationguides.validationsupport.version=1.5.0
 
 # Stage: 2.2-line HAPI validator with its IGs baked + loaded from file:// (offline at runtime).
-FROM hapiproject/hapi@sha256:1be4d7ffe7a35a9fb46151851e5a20b25c5016f16c8ef8b59b0c807ad06a40c1 AS hapi-2.2
+FROM hapi-runtime AS hapi-2.2
 COPY --from=backport /out/main.war /app/main.war
 COPY --from=backport /out/provenance.json /app/backport-provenance.json
 LABEL org.shn.validator.backport.class="51c76b59364b8927a40efb29232945289974ff540b53b623adc9031886bb47f5"
 COPY --from=hc /healthcheck /healthcheck
-# Preserve the pinned base image's literal Java argv, inherited env/user/workdir.
+# The image is published: its licences and notices ship with it (licenses/NOTICE).
+COPY licenses /licenses
+# The pinned engine's literal Java argv; env, user and workdir come from hapi-runtime.
 ENTRYPOINT ["/healthcheck", "supervise", "java", "--class-path", "/app/main.war", "-Dloader.path=main.war!/WEB-INF/classes/,main.war!/WEB-INF/,/app/extra-classes", "org.springframework.boot.loader.PropertiesLauncher"]
 COPY --from=igs-2.2 /packages /packages
 ENV SHN_IG_LINE=2.2 \

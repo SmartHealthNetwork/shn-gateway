@@ -114,7 +114,7 @@ func TestNativeSubmit_ConformantRecordsEOB(t *testing.T) {
 		// normalized from the prior https:// (a behavior-update, not s/https/http/). The EOB is now
 		// built and carries coding.system == HCPCS (no longer the "soft" no-EOB).
 		hcpcs := []byte(`{"resourceType":"Bundle","type":"collection","entry":[
-			{"resource":{"resourceType":"Claim","patient":{"reference":"Patient/MBR-COVERED"}}},
+			{"resource":` + eobSourceClaim("MBR-COVERED", "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets", "E0424") + `},
 			{"resource":{"resourceType":"ServiceRequest","subject":{"reference":"Patient/MBR-COVERED"},"code":{"coding":[{"system":"http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets","code":"E0424","display":"Stationary Oxygen System"}]}}},
 			{"resource":{"resourceType":"Coverage","beneficiary":{"reference":"Patient/MBR-COVERED"}}},
 			{"resource":{"resourceType":"QuestionnaireResponse","subject":{"reference":"Patient/MBR-COVERED"}}}
@@ -179,7 +179,7 @@ func TestNativeSubmit_ConformantRecordsEOB(t *testing.T) {
 func serviceRequestSubmitBundle(t *testing.T, infoChanged bool) []byte {
 	t.Helper()
 	sr := []byte(`{"resourceType":"ServiceRequest","id":"sr-x","status":"active","intent":"order","subject":{"reference":"Patient/MBR-COVERED"},"code":{"coding":[{"system":"http://www.ama-assn.org/go/cpt","code":"72148","display":"MRI lumbar spine w/o contrast"}]}}`)
-	b, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{Coverage: testMemberCoverage("MBR-COVERED"), Insurer: testPayerOrganization(shnsdk.CMSPayerIdentity),
+	b, err := shnsdk.BuildConformantClaimBundleExact(shnsdk.ConformantClaimInputs{PASClaimFacts: testClaimFacts(), Coverage: testMemberCoverage("MBR-COVERED"), Insurer: testPayerOrganization(shnsdk.CMSPayerIdentity),
 		Provider:       testRequestingProvider(),
 		MemberIDSystem: shnsdk.MemberSystem,
 		SR:             sr, PatientRef: "Patient/MBR-COVERED", CoverageRef: "Coverage/MBR-COVERED", MemberID: "MBR-COVERED",
@@ -203,7 +203,7 @@ func TestNativePAS_EOBSystemTracksOrder(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			bundle := []byte(`{"resourceType":"Bundle","type":"collection","entry":[
-				{"resource":{"resourceType":"Claim","patient":{"reference":"Patient/MBR-COVERED"}}},
+				{"resource":` + eobSourceClaim("MBR-COVERED", tc.system, tc.code) + `},
 				{"resource":{"resourceType":"ServiceRequest","subject":{"reference":"Patient/MBR-COVERED"},"code":{"coding":[{"system":"` + tc.system + `","code":"` + tc.code + `","display":"` + tc.display + `"}]}}},
 				{"resource":{"resourceType":"Coverage","beneficiary":{"reference":"Patient/MBR-COVERED"}}},
 				{"resource":{"resourceType":"QuestionnaireResponse","subject":{"reference":"Patient/MBR-COVERED"}}}
@@ -262,7 +262,7 @@ func stripInfoChangedExtension(t *testing.T, bundleJSON []byte) []byte {
 // denial (reviewActionCode A3) — the still-insufficient/denied update path.
 func loadDeniedClaimResponseBytes(t *testing.T) []byte {
 	t.Helper()
-	b, err := shnsdk.BuildDeniedResponse("Patient/MBR-COVERED", "partner", "denied for test", fixedClock())
+	b, err := shnsdk.BuildDeniedResponseExact("Patient/MBR-COVERED", "partner", "denied for test", testAnswerRequest, fixedClock())
 	if err != nil {
 		t.Fatalf("loadDeniedClaimResponseBytes BuildDeniedResponse: %v", err)
 	}
@@ -272,7 +272,7 @@ func loadDeniedClaimResponseBytes(t *testing.T) []byte {
 // TestNativeUpdate_ApprovedFinalizes is the CONFORMANT native update responder
 // (handlePASClaimUpdateNative, the pas-claim-update leg) — the Phase-B analog of
 // TestNativePAS_Update. It drives a CONFORMANT amended re-POST bundle (built by
-// shnsdk.BuildConformantClaimUpdateBundle; related[prior] read via parseConformantPASUpdateFacts,
+// shnsdk.BuildConformantClaimUpdateBundleExact; related[prior] read via parseConformantPASUpdateFacts,
 // NOT the strict ParseClaimBundle the minimized leg uses) through the native-forward path and
 // proves the shadow FinalizeClaimUpdate survived the convergence: approved → verbatim + Finalize
 // Commit + armed Rollback; partner-500-after-Begin → relayed + Rollback (no strand); no prior
@@ -441,6 +441,7 @@ func TestNativeUpdate_AmendAfterResolution(t *testing.T) {
 			if res.Commit == nil {
 				t.Fatal("a re-pend must return the authorization to pended")
 			}
+			admitDecisionEOBs(&res)
 			if err := res.Commit(); err != nil {
 				t.Fatalf("commit: %v", err)
 			}

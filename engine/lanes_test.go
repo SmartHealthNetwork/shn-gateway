@@ -76,13 +76,15 @@ func TestUnavailableDefaultsCannotRouteOrHonorFrames(t *testing.T) {
 		if _, ok := g.selectNativeReachRoute("pa.dtr", map[string]bool{"2.1": true}); ok {
 			t.Fatal("unavailable default entered routing")
 		}
-		_, _, status, _ := g.unframeRequest("dtr-questionnaire-fetch", framedRequest(t, "pa.dtr@2.1", []byte(`{}`)))
-		if status != http.StatusUnprocessableEntity {
-			t.Fatalf("unqualified frame status=%d", status)
+		// An unqualified lane is never answered at: the claim is carried as
+		// a bare request is (the participant's own setting refuses it).
+		_, tok, carried, status, _ := g.unframeRequestFrom("requester", "dtr-questionnaire-fetch", framedRequest(t, "pa.dtr@2.1", []byte(`{}`)))
+		if status != 0 || tok == "pa.dtr@2.1" || carried != "pa.dtr@2.1" {
+			t.Fatalf("unqualified frame = (%d, %q, carried %q), want carried and not answered at its line", status, tok, carried)
 		}
-		_, _, status, _ = g.unframeRequest("pas-claim", framedRequest(t, "pa.pas@2.0", []byte(`{}`)))
-		if status != 0 {
-			t.Fatalf("canonical frame status=%d", status)
+		_, tok, _, status, _ = g.unframeRequestFrom("requester", "pas-claim", framedRequest(t, "pa.pas@2.0", []byte(`{}`)))
+		if status != 0 || tok != "pa.pas@2.0" {
+			t.Fatalf("canonical frame = (%d, %q), want answered at pa.pas@2.0", status, tok)
 		}
 	}
 	if requests.Load() != 0 {
@@ -189,13 +191,13 @@ func TestDTRContextCannotUseSingleContractFallback(t *testing.T) {
 // The lane shape a gateway with no default validator lanes has under the
 // build's default declaration: 2.0 on the canonical validator, and 2.1 on it
 // only as the single-line PDex contract's fallback alias. PA traffic at 2.1
-// has no lane and is refused; PDex at 2.1 keeps its alias.
+// has no lane and is never answered at it; PDex at 2.1 keeps its alias.
 func TestNoDefaultLanesShapeRefusesPAAtTheAliasedLine(t *testing.T) {
 	canonical := shnsdk.NewFakeValidator()
-	g := &Gateway{cfg: Config{Validator: canonical, ValidatorsByLine: map[string]shnsdk.Validator{"2.0": canonical, "2.1": canonical}, CanonicalFallbackLines: map[string]bool{"2.1": true}}}
+	g := &Gateway{cfg: Config{Reg: shnsdk.NewRegistry(), Validator: canonical, ValidatorsByLine: map[string]shnsdk.Validator{"2.0": canonical, "2.1": canonical}, CanonicalFallbackLines: map[string]bool{"2.1": true}}}
 	for _, leg := range []struct{ legType, token string }{{"pas-claim", "pa.pas@2.1"}, {"crd-order-select", "pa.crd@2.1"}} {
-		if _, _, status, _ := g.unframeRequest(leg.legType, framedRequest(t, leg.token, []byte(`{}`))); status != http.StatusUnprocessableEntity {
-			t.Errorf("%s frame answered %d; a line with only an alias has no PA lane", leg.token, status)
+		if _, tok, carried, _, _ := g.unframeRequestFrom("requester", leg.legType, framedRequest(t, leg.token, []byte(`{}`))); tok == leg.token || carried != leg.token {
+			t.Errorf("%s frame answered at %q (carried %q); a line with only an alias has no PA lane", leg.token, tok, carried)
 		}
 	}
 	for _, contract := range []string{"pa.pas", "pa.crd", "pa.dtr"} {

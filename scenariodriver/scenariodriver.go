@@ -20,24 +20,29 @@ import (
 
 // Config wires a Driver to a running SHN Kit deployment: the Da Vinci ingress it
 // authenticates against (UDAP B2B direct bearer), plus the unauthenticated
-// gateway-edge surfaces (provider-data origination, ops console, patient surface).
+// gateway-edge surfaces (provider-data origination, patient surface).
 type Config struct {
-	IngressURL      string           // host-published Da Vinci ingress, e.g. http://localhost:8091
-	IngressBase     string           // config-pinned IngressBaseURL — every minted aud must be under it
-	ClientID        string           // registered UDAP B2B client_id (JWT iss)
-	Key             *rsa.PrivateKey  // RS384 signing key for the direct bearer
-	BFFURL          string           // br-provider single-port host base (BFF + FHIR)
-	ProviderDataURL string           // provider-data origination gateway base (/scenario/* routes)
-	ConsoleURL      string           // ops console base (optional)
-	PHGURL          string           // patient surface base (optional)
-	HTTP            *http.Client     // nil → http.DefaultClient
-	Now             func() time.Time // nil → time.Now (bearer iat/exp + jti)
+	IngressURL      string          // host-published Da Vinci ingress, e.g. http://localhost:8091
+	IngressBase     string          // config-pinned IngressBaseURL — every minted aud must be under it
+	ClientID        string          // registered UDAP B2B client_id (JWT iss)
+	Key             *rsa.PrivateKey // RS384 signing key for the direct bearer
+	BFFURL          string          // br-provider single-port host base (BFF + FHIR)
+	ProviderDataURL string          // provider-data origination gateway base (/scenario/* routes)
+	// ConsoleURL is the ops console base (optional).
+	//
+	// Deprecated: the ops console and its /api/run route are being retired.
+	// Drive a provider gateway's /scenario/* routes with
+	// RunProviderDataScenario instead. ConsoleURL is removed in v1.0.0.
+	ConsoleURL string
+	PHGURL     string           // patient surface base (optional)
+	HTTP       *http.Client     // nil → http.DefaultClient
+	Now        func() time.Time // nil → time.Now (bearer iat/exp + jti)
 }
 
 // Driver drives a live SHN Kit deployment end to end: it mints the same UDAP B2B
 // direct bearer a real holder BFF would send, POSTs conformant Da Vinci requests to
 // the ingress, and reads back the gateway-edge surfaces (provider-data origination,
-// ops console, patient-surface) — the transport core the Kit desktop app and its
+// patient-surface) — the transport core the Kit desktop app and its
 // scenario runners drive.
 type Driver struct {
 	cfg Config
@@ -266,6 +271,10 @@ func (d *Driver) ContinuePA(jsonBody string) (HTTPResult, error) {
 }
 
 // RunConsoleScenario POSTs a scenario request to the ops console's /api/run route.
+//
+// Deprecated: the ops console and its /api/run route are being retired. Use
+// RunProviderDataScenario against a provider gateway's /scenario/* routes.
+// RunConsoleScenario is removed in v1.0.0.
 func (d *Driver) RunConsoleScenario(jsonBody string) (HTTPResult, error) {
 	return d.postJSON(d.cfg.ConsoleURL, "/api/run", jsonBody)
 }

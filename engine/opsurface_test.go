@@ -4,7 +4,7 @@ import "testing"
 
 // TestPALegOperations_MatchesCatalog pins the exported operation-binding
 // accessor fresh against the live catalog: every catalog row is projected
-// exactly (frames + ops), no row is dropped, none invented. The cross-domain
+// exactly (frames, ops and scope), no row is dropped, none invented. The cross-domain
 // lockstep conformance check reads the other trust domains' copies through
 // accessors like this one, so a stale projection here would let real drift
 // hide behind a green cross-check.
@@ -20,9 +20,9 @@ func TestPALegOperations_MatchesCatalog(t *testing.T) {
 			continue
 		}
 		if b.RequestFrame != spec.ReqFrame || b.RequestOp != spec.Op ||
-			b.ResponseFrame != spec.RespFrame || b.ResponseOp != spec.RespOp {
-			t.Errorf("PALegOperations[%q] = %+v, want {%s %s %s %s}",
-				legType, b, spec.ReqFrame, spec.Op, spec.RespFrame, spec.RespOp)
+			b.ResponseFrame != spec.RespFrame || b.ResponseOp != spec.RespOp || b.Scope != spec.Scope {
+			t.Errorf("PALegOperations[%q] = %+v, want {%s %s %s %s %s}",
+				legType, b, spec.ReqFrame, spec.Op, spec.RespFrame, spec.RespOp, spec.Scope)
 		}
 	}
 }

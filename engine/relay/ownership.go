@@ -259,13 +259,17 @@ var legOwnership = func() map[Key]Rule {
 		{"pas-claim-update", RoleRequester, DirectionRequest, OutcomeOriginated}:  {Allowed: authored, Builders: []BuilderID{BuilderSDKPASUpdate}},
 
 		// Requester to its participant's system: the recipient's answer,
-		// exactly as it arrived.
-		{"crd-order-dispatch", RoleRequester, DirectionResponse, OutcomeAnswered}:      {Allowed: relayed},
-		{"crd-order-select", RoleRequester, DirectionResponse, OutcomeAnswered}:        {Allowed: relayed},
-		{"dtr-questionnaire-fetch", RoleRequester, DirectionResponse, OutcomeAnswered}: {Allowed: relayed},
-		{"pas-claim", RoleRequester, DirectionResponse, OutcomeAnswered}:               {Allowed: relayed},
-		{"pas-claim-inquire", RoleRequester, DirectionResponse, OutcomeAnswered}:       {Allowed: relayed},
-		{"pas-claim-update", RoleRequester, DirectionResponse, OutcomeAnswered}:        {Allowed: relayed},
+		// exactly as it arrived, apart from one IG-line bridge.
+		{"crd-order-dispatch", RoleRequester, DirectionResponse, OutcomeAnswered}: {Allowed: relayed},
+		{"crd-order-select", RoleRequester, DirectionResponse, OutcomeAnswered}:   {Allowed: relayed},
+		// A questionnaire package answer from another DTR line reaches the
+		// requester's system under its own line's parameter names.
+		{"dtr-questionnaire-fetch", RoleRequester, DirectionResponse, OutcomeAnswered}: {
+			Allowed: []Ownership{OwnershipRelayed, OwnershipEdited}, Edits: []EditID{EditDTRAnswerLineNames},
+		},
+		{"pas-claim", RoleRequester, DirectionResponse, OutcomeAnswered}:         {Allowed: relayed},
+		{"pas-claim-inquire", RoleRequester, DirectionResponse, OutcomeAnswered}: {Allowed: relayed},
+		{"pas-claim-update", RoleRequester, DirectionResponse, OutcomeAnswered}:  {Allowed: relayed},
 
 		// Recipient to its participant's system, carrying the network's
 		// request. A prior-authorization Bundle and a CDS Hooks request are

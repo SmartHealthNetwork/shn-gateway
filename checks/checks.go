@@ -111,8 +111,10 @@ const capabilityListCap = 32
 // inverse of gateway/engine's hrexCodeForContract; extend BOTH sides together
 // for any new contract. Deliberately asymmetric on pa.pdex: this reverse/
 // probe side includes it because probing reads any peer's own publication,
-// while the engine's forward map deliberately omits pa.pdex — see that map's
-// comment for why.
+// while no gateway declares or publishes a pa.pdex line of its own (its
+// decision EOB is base FHIR R4, not PDex). driftAgainstDeclared compares only
+// contracts both sides name, so a peer's PDex publication against a
+// declaration with no pa.pdex line is attribution, never drift.
 var davinciContractByIG = map[string]string{
 	"/us/davinci-crd/":  "pa.crd",
 	"/us/davinci-dtr/":  "pa.dtr",
@@ -616,10 +618,9 @@ func (r *Runner) readMetadata(ctx context.Context, t Target, client *http.Client
 
 // contractByHRexCode is the inverse of gateway/engine's hrexCodeForContract
 // (extend BOTH sides together for any new contract): HRex endpoint-code base
-// → SHN contract name. Deliberately asymmetric on pa.pdex: this reverse/
-// probe side includes it because probing reads any peer's own publication,
-// while the engine's forward map deliberately omits pa.pdex — see that map's
-// comment for why.
+// → SHN contract name. Deliberately asymmetric on pa.pdex, as
+// davinciContractByIG is: probing reads any peer's own publication, while no
+// gateway declares or publishes a pa.pdex line of its own.
 var contractByHRexCode = map[string]string{
 	"davinci_crd_hook_endpoint":       "pa.crd",
 	"davinci_dtr_qpackage_endpoint":   "pa.dtr",

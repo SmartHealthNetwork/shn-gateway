@@ -71,7 +71,7 @@ func TestLevelPayerCRD_NetworkRulesRefuseAtEveryLevel(t *testing.T) {
 			status: http.StatusBadRequest, msg: "parse cds request failed"},
 		"order-dispatch: duplicate key": {leg: "crd-order-dispatch", body: crdDispatchWith(t, `"performer":"Organization/o1"`, `"performer":"Organization/o1","performer":5`),
 			status: http.StatusBadRequest, msg: "parse cds request failed"},
-		"order-select: version route": {leg: "crd-order-select", body: sel, opts: []NativeOption{WithDeclaredContractVersions([]string{"pa.pas@2.0"})},
+		"order-select: version route": {leg: "crd-order-select", body: sel, opts: []NativeOption{WithDeclaredContractVersions([]string{"pa.pas@2.0"}), WithRequireSharedLine(true)},
 			status: http.StatusUnprocessableEntity, msg: "no shared contract line for pa.crd"},
 	})
 }
@@ -128,7 +128,7 @@ func TestLevelPayerPAS_NetworkRulesRefuseAtEveryLevel(t *testing.T) {
 			status: http.StatusBadRequest, msg: "parse update Claim entry failed"},
 		"submit: foreign payer": {leg: "pas-claim", body: []byte(pasIngressBundle("99999", "")), opts: []NativeOption{WithPayorEdgeIdentity(cms, backend)},
 			status: http.StatusBadRequest, msg: "does not match this gateway's own payer identit"},
-		"submit: version route": {leg: "pas-claim", body: []byte(base), opts: []NativeOption{WithDeclaredContractVersions([]string{"pa.crd@2.0"})},
+		"submit: version route": {leg: "pas-claim", body: []byte(base), opts: []NativeOption{WithDeclaredContractVersions([]string{"pa.crd@2.0"}), WithRequireSharedLine(true)},
 			status: http.StatusUnprocessableEntity, msg: "no shared contract line for pa.pas"},
 		"inquiry Claim naming no patient": {leg: "pas-claim-inquire", body: bytes.Replace(inquiryBundle("MBR-COVERED", "", "TRN-1", "72148"), []byte(`"patient":{"reference":"Patient/MBR-COVERED"},`), nil, 1),
 			status: http.StatusBadRequest, msg: "PAS inquiry Claim missing patient"},
@@ -155,13 +155,13 @@ func TestLevelPayer_AnswerDuplicateKeyRefusesAtEveryLevel(t *testing.T) {
 		msg                  string
 	}{
 		"PAS answer": {"pas-claim", "", pasSubmitPath, originatorBuiltConformantBundle(t, "MBR-COVERED"), dupPAS,
-			http.StatusBadGateway, "invalid native PAS response Bundle"},
+			http.StatusBadGateway, `payer PAS response repeats the JSON member \"type\" in the top-level object: it can be read two ways, so it is not carried; the payer's system received and answered this request: check its outcome before resending`},
 		"inquiry answer": {"pas-claim-inquire", "", pasInquirePath, inquiryBundle("MBR-COVERED", "", "TRN-1", "72148"), dupInquiry,
-			http.StatusBadGateway, "invalid prior-authorization inquiry answer"},
+			http.StatusBadGateway, `payer inquiry answer repeats the JSON member \"Type\" in the top-level object: it can be read two ways, so it is not carried`},
 		"package answer": {"dtr-questionnaire-fetch", shnsdk.FrameOperationQuestionnairePackage, packagePath, dtrPackage(resourceParam("coverage", dtrCoverage("cov-1", dtrFrameMember))), dupPackage,
-			http.StatusForbidden, "response repeats a member name"},
+			http.StatusForbidden, `response repeats the JSON member \"type\" in the top-level object: it can be read two ways, so it is not carried`},
 		"next-question answer": {"dtr-questionnaire-fetch", shnsdk.FrameOperationNextQuestion, nextPath, []byte(nextQuestionQR(dtrFrameMember)), dupNext,
-			http.StatusBadGateway, "next-question response is not a questionnaire-response"},
+			http.StatusBadGateway, `next-question response repeats the JSON member \"resourceType\" in the top-level object: it can be read two ways, so it is not carried`},
 	}
 	for name, row := range rows {
 		for _, level := range allLevels {

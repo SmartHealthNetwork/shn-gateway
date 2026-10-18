@@ -90,14 +90,19 @@ func TestOriginatedCRD_AnswerCertifiedAtTheProvidersLevel(t *testing.T) {
 			g.cfg.Observer = found.observe
 
 			rec := httptest.NewRecorder()
-			g.originateNoPACRD(rec, httptest.NewRequest(http.MethodPost, "/scenario/uc02", nil), prefetchMember)
+			g.originateNoPACRD(rec, httptest.NewRequest(http.MethodPost, "/scenario/uc02", strings.NewReader(testRouteBody(g, "/scenario/uc02", ""))), prefetchMember)
 			if rec.Code != tc.wantStatus {
 				t.Fatalf("status %d, want %d: %s", rec.Code, tc.wantStatus, rec.Body)
 			}
 			if len(payer.sent("crd-order-select")) != 1 {
 				t.Fatal("the originated CRD leg was not sent")
 			}
-			if tc.wantStatus == http.StatusBadGateway && !strings.Contains(rec.Body.String(), "payer CRD response is not a valid CDS Hooks response") {
+			wantText := "payer CRD response is not a valid CDS Hooks response"
+			if tc.dupKey {
+				// A repeated member name is named, so the payer can fix it.
+				wantText = `payer CRD response repeats the JSON member \"cards\" in the top-level object`
+			}
+			if tc.wantStatus == http.StatusBadGateway && !strings.Contains(rec.Body.String(), wantText) {
 				t.Fatalf("a refusal must name the CDS Hooks rules: %s", rec.Body)
 			}
 			found.mu.Lock()

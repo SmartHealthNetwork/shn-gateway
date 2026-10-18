@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strings"
 
@@ -143,7 +144,7 @@ func readConformantPASSubjects(bundleJSON []byte, coverageAddresses bool, refuse
 	// request's own shape where it does not; a Coverage without a beneficiary
 	// is the request's own shape.
 	if !haveCov && (coverageAddresses || refuses(RuleRequestShape)) {
-		return conformantPASSubjects{}, http.StatusBadRequest, "PAS bundle missing Coverage.beneficiary"
+		return conformantPASSubjects{}, http.StatusBadRequest, "PAS bundle carries no Coverage"
 	}
 	if haveCov && covBene == "" && refuses(RuleRequestShape) {
 		return conformantPASSubjects{}, http.StatusBadRequest, "PAS bundle missing Coverage.beneficiary"
@@ -579,7 +580,7 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 	// this gateway cannot read, or whose subjects do not bind, is relayed as the
 	// payer sent it and nothing is written from it (payerAnswerRead).
 	read := g.newPayerAnswerRead(r.Context(), result, responseFHIR, pasLeg.unreadRule())
-	if _, bad := validateNativePASResponse(responseFHIR); bad.Status != 0 && read.refusesUnreadable(RuleAnswerShape) {
+	if _, bad := validateNativePASResponseAt(responseFHIR, g.pasAnswerRead(answerTok, responseFHIR).Line); bad.Status != 0 && read.refusesUnreadable(RuleAnswerShape) {
 		g.refuseAfterPayerAnswered(w, r, pasLeg, legPASClaim, env, tok, answerTok, bad.Status, bad.Message, nil)
 		return
 	}
@@ -606,24 +607,15 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 	// Egress-$validate the SHN-PRODUCED EOB side-effects before the Store write (FR-36). The relay
 	// RESPONSE itself is NOT $validated (R-8 — it may be a foreign RI's Da Vinci payload); a verbatim
 	// relay carries no side-effect, so this loop runs only for a non-relaying responder (matches the minimized pas-claim case).
-	// The EOB is PDex, not pa.pas: its shape does not vary with the PAS line, so it validates on the
+	// The EOB is base R4, not pa.pas: its shape does not vary with the PAS line, so it validates on the
 	// canonical lane (line "") — passing the PAS answer line here would demand a PAS lane for a
 	// resource that lane does not govern.
 	//
-	// Below strict an EOB built from a relayed answer that is invalid is recorded,
-	// the payer's answer is relayed, and nothing is written (RuleEOBDecision).
-	if !read.read() {
-		result.SideEffectFHIR = nil
-	}
-	// One budget for the leg's decision EOBs at observe (validateDecisionEOBs).
-	status, msg, invalid := g.validateDecisionEOBs(r.Context(), result.SideEffectFHIR)
-	if status != 0 {
-		g.refuseAfterPayerAnswered(w, r, pasLeg, legPASClaim, env, tok, answerTok, status, msg, nil)
-		return
-	}
-	if invalid {
-		read.eobInvalid()
-	}
+	// The decision EOB gate (gateDecisionEOBs), at every level and whoever
+	// produced the answer: an EOB that fails its own validation is not
+	// written, its decision is recorded, the payer's answer is relayed
+	// exactly, and the operator is told why.
+	g.gateDecisionEOBs(r.Context(), "pas-claim", env.Metadata.CorrelationID, &result, read, false)
 	// Build the response leg BEFORE committing payer state so a response-leg
 	// failure (unknown requester, seal, encode) cannot orphan the EOB / pended-claim ledger.
 	//
@@ -671,6 +663,11 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 	for _, kind := range pasLeg.notes {
 		g.observe(ObserverEvent{Kind: kind, Direction: "ingress", LegType: "pas-claim",
 			CorrelationID: env.Metadata.CorrelationID, Counterpart: env.Metadata.Sender})
+	}
+	for _, n := range pasLeg.detailed {
+		log.Printf("gateway: %s: leg pas-claim correlation %s: %s", n.kind, env.Metadata.CorrelationID, n.detail)
+		g.observe(ObserverEvent{Kind: n.kind, Direction: "ingress", LegType: "pas-claim",
+			CorrelationID: env.Metadata.CorrelationID, Counterpart: env.Metadata.Sender, Detail: n.detail})
 	}
 	if eobOwnedElsewhere {
 		g.reportEOBOwnedElsewhere("pas-claim", "pas-submit", env.Metadata.CorrelationID, env.Metadata.CorrelationID)
@@ -766,7 +763,7 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 	// this gateway cannot read, or whose subjects do not bind, is relayed as the
 	// payer sent it and nothing is written from it (payerAnswerRead).
 	read := g.newPayerAnswerRead(r.Context(), result, responseFHIR, pasLeg.unreadRule())
-	if _, bad := validateNativePASResponse(responseFHIR); bad.Status != 0 && read.refusesUnreadable(RuleAnswerShape) {
+	if _, bad := validateNativePASResponseAt(responseFHIR, g.pasAnswerRead(answerTok, responseFHIR).Line); bad.Status != 0 && read.refusesUnreadable(RuleAnswerShape) {
 		g.refuseAfterPayerAnswered(w, r, pasLeg, legPASClaimUpdate, env, tok, answerTok, bad.Status, bad.Message, nil)
 		return
 	}
@@ -790,18 +787,7 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 	// Egress-$validate the SHN-PRODUCED side-effects before the Store write (FR-36). The update leg
 	// builds NO EOB, so SideEffectFHIR is empty and this loop is a structural no-op (F-PB-R8); the
 	// relay RESPONSE itself is NOT $validated (it may be a foreign RI's Da Vinci payload, R-8).
-	if !read.read() {
-		result.SideEffectFHIR = nil
-	}
-	// One budget for the leg's decision EOBs at observe (validateDecisionEOBs).
-	status, msg, invalid := g.validateDecisionEOBs(r.Context(), result.SideEffectFHIR)
-	if status != 0 {
-		g.refuseAfterPayerAnswered(w, r, pasLeg, legPASClaimUpdate, env, tok, answerTok, status, msg, nil)
-		return
-	}
-	if invalid {
-		read.eobInvalid()
-	}
+	g.gateDecisionEOBs(r.Context(), "pas-claim-update", env.Metadata.CorrelationID, &result, read, false)
 	// Build the response leg BEFORE committing payer state so a response-leg
 	// failure cannot orphan the claim acquired in BeginClaimUpdate (the deferred Rollback releases it).
 	// Stamp honesty, mirror of the submit leg above: a VERBATIM FOREIGN RELAY is left UNSTAMPED (the stamp
@@ -837,6 +823,11 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 	for _, kind := range pasLeg.notes {
 		g.observe(ObserverEvent{Kind: kind, Direction: "ingress", LegType: "pas-claim-update",
 			CorrelationID: env.Metadata.CorrelationID, Counterpart: env.Metadata.Sender})
+	}
+	for _, n := range pasLeg.detailed {
+		log.Printf("gateway: %s: leg pas-claim-update correlation %s: %s", n.kind, env.Metadata.CorrelationID, n.detail)
+		g.observe(ObserverEvent{Kind: n.kind, Direction: "ingress", LegType: "pas-claim-update",
+			CorrelationID: env.Metadata.CorrelationID, Counterpart: env.Metadata.Sender, Detail: n.detail})
 	}
 	writeLeg(w, respBytes)
 }
@@ -1226,12 +1217,13 @@ func (a *payerAnswerRead) refusesUnreadable(rule string) bool {
 	return a.refuses(rule)
 }
 
-// eobInvalid marks a relayed answer whose decision EOB, built by this gateway
-// from it, failed validation and was let through (below strict): the answer is
-// relayed and nothing is written (RuleEOBDecision). The EOB's own finding was
-// recorded by the validation.
-func (a *payerAnswerRead) eobInvalid() {
-	if a.relayed && a.unread == "" {
+// sideEffectInvalid marks an answer whose side-effect FHIR, supplied by an
+// injected responder's own Commit rather than built here as a decision EOB,
+// failed its validation: that Commit cannot be split, so nothing is written
+// from the answer (RuleEOBDecision), whoever produced it. The answer is still
+// relayed. The side effect's own finding was recorded by the validation.
+func (a *payerAnswerRead) sideEffectInvalid() {
+	if a.unread == "" {
 		a.unread = RuleEOBDecision
 	}
 }

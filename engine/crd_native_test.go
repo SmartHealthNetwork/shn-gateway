@@ -101,7 +101,7 @@ func TestConformantCRDBind_AcceptsOriginatorBuilt(t *testing.T) {
 		t.Fatalf("BuildServiceRequest: %v", err)
 	}
 	srJSON = []byte(strings.Replace(string(srJSON), `{`, `{"id":"sr1",`, 1))
-	covJSON, err := shnsdk.BuildCoverageWithPayer("Patient/MBR-COVERED", "MBR-COVERED", shnsdk.CMSPayerIdentity)
+	covJSON, err := containedPayorCoverage("Patient/MBR-COVERED", "MBR-COVERED", shnsdk.CMSPayerIdentity)
 	if err != nil {
 		t.Fatalf("BuildCoverageWithPayer: %v", err)
 	}

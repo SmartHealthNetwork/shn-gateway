@@ -71,6 +71,30 @@ func TestAccessLineFor(t *testing.T) {
 		t.Fatalf("access line with edits\n got %s\nwant %s", b, wantEdited)
 	}
 
+	// The line the answer was written in follows the routed line; a line
+	// with none holds no answerLine key (the golden above).
+	written := refusedRecord()
+	written.AnswerLine = "pa.dtr@2.2"
+	b, err = json.Marshal(accessLineFor(written))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wantWritten := strings.Replace(want, `"contractLine":"2.1",`, `"contractLine":"2.1","answerLine":"pa.dtr@2.2",`, 1); string(b) != wantWritten {
+		t.Fatalf("access line with the answer's line\n got %s\nwant %s", b, wantWritten)
+	}
+
+	// Where the leg was carried between two lines follows the answer's line;
+	// a line with none holds no lineCarried key (the golden above).
+	carried := refusedRecord()
+	carried.LineCarried = []string{engine.LineCarriedRequest, engine.LineCarriedAnswer}
+	b, err = json.Marshal(accessLineFor(carried))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wantCarried := strings.Replace(want, `"contractLine":"2.1",`, `"contractLine":"2.1","lineCarried":["request","answer"],`, 1); string(b) != wantCarried {
+		t.Fatalf("access line with the line carry\n got %s\nwant %s", b, wantCarried)
+	}
+
 	// The Hub's delivery value on an ingress leg's error answer is its own
 	// key, named last; a line without one holds no hubDelivered key (the
 	// golden above).

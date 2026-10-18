@@ -6,8 +6,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
 // TestBuildDavinciConfiguration pins the HRex 1.2.0 well-known document
@@ -18,7 +16,7 @@ import (
 // with zero new code. pa.pdex is EXCLUDED: the patient-access endpoint lives
 // on the payer edge, which has no self base URL yet (see plan Deferred).
 func TestBuildDavinciConfiguration(t *testing.T) {
-	b, err := buildDavinciConfiguration("https://gw.example/fhir", "prov-1", shnsdk.SupportedContractVersions())
+	b, err := buildDavinciConfiguration("https://gw.example/fhir", "prov-1", DefaultContractVersions())
 	if err != nil {
 		t.Fatalf("buildDavinciConfiguration: %v", err)
 	}

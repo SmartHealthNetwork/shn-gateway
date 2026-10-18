@@ -129,7 +129,7 @@ func TestSeededPersona_SubmitAndInquiryNameTheSameProvider(t *testing.T) {
 			// The submission, built exactly as every shipped originator lane
 			// builds it (those lanes all relay reference-payer bytes).
 			submit, err := buildPASSubmitBundle("2.0", true, order, nil, provider, coverage, insurer, shnsdk.MemberSystem,
-				"Patient/"+member, "Coverage/"+member, member, "corr-"+member, created, shnsdk.CMSPayerIdentity)
+				"Patient/"+member, "Coverage/"+member, member, "corr-"+member, created, shnsdk.CMSPayerIdentity, testClaimFacts())
 			if err != nil {
 				t.Fatalf("build the submission: %v", err)
 			}
@@ -203,7 +203,7 @@ func TestOriginator_SubmitRefusesAnOrderNamingNoCarryableProvider(t *testing.T) 
 			in := pasFollowSubmit(0)
 			in.orderJSON = []byte(tc.order)
 
-			req := httptest.NewRequest(http.MethodPost, "/scenario/uc03", nil)
+			req := httptest.NewRequest(http.MethodPost, "/scenario/uc03", strings.NewReader(testOrderBody(in.orderJSON, "")))
 			_, status, msg, _ := gw.submitClaimAndFollow(req.Context(), req, in)
 			if status == 0 {
 				t.Fatal("a request that would identify no provider must be refused, not sent")

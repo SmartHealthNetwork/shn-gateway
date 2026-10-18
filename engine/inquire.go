@@ -72,9 +72,14 @@ const pasExtItemTraceNumberURL = "http://hl7.org/fhir/us/davinci-pas/StructureDe
 type pasInquiryFacts struct {
 	member string
 	items  []pasInquiryItemFact
+	// request is the inquiry Bundle these facts were read from: a decision
+	// EOB the inquiry records reads its Claim (decisioneob.go).
+	request []byte
 }
 
 type pasInquiryItemFact struct {
+	// index is the line's position in the inquiry Claim's items.
+	index       int
 	traceNumber string // "system|value", or "" when the line carries none
 	// authorizationNumber is the payer's authorization number the line asks
 	// about (its authorizationNumber extension), or "" when it states none.
@@ -247,8 +252,8 @@ func readPASInquiryFacts(bundleJSON []byte, refuses func(rule string) bool) (pas
 			return pasInquiryFacts{}, http.StatusBadRequest, "PAS inquiry Claim missing patient"
 		}
 		facts.member = patientMemberFromRef(claim.Patient.Reference)
-		for _, it := range claim.Item {
-			f := pasInquiryItemFact{traceNumber: identifierExtensionKey(it.Extension, pasExtItemTraceNumberURL),
+		for i, it := range claim.Item {
+			f := pasInquiryItemFact{index: i, traceNumber: identifierExtensionKey(it.Extension, pasExtItemTraceNumberURL),
 				authorizationNumber: stringExtensionValue(it.Extension, pasExtAuthorizationNumberURL)}
 			if len(it.ProductOrService.Coding) > 0 {
 				c := it.ProductOrService.Coding[0]
@@ -260,6 +265,7 @@ func readPASInquiryFacts(bundleJSON []byte, refuses func(rule string) bool) (pas
 	if !claimSeen || facts.member == "" {
 		return pasInquiryFacts{}, http.StatusBadRequest, "PAS inquiry Bundle missing Claim.patient"
 	}
+	facts.request = bundleJSON
 	// An inquiry that names NO item line is accepted. A requester may ask by the
 	// authorization number alone — which the later prior-authorization lines carry
 	// on the inquiry Claim itself, not on an item — so a Bundle with no items is a
@@ -372,6 +378,9 @@ type inquiryAnswerResponse struct {
 	raw     []byte
 	keys    PendKeys
 	created time.Time
+	// bundle is the response Bundle the ClaimResponse came in, nil when it
+	// came bare: the references its decision EOB states resolve there.
+	bundle []byte
 }
 
 // validatePASInquiryAnswer checks that a 2xx answer is one of the shapes the
@@ -386,6 +395,10 @@ type inquiryAnswerResponse struct {
 // about whether the answer can be read at all. The deviation is reported by the
 // caller, on its own seam.
 func validatePASInquiryAnswer(body []byte) LegResult {
+	// A repeated member name is named, with where, so the payer can fix it.
+	if dup, ok := repeatedMember(body); ok {
+		return LegResult{Status: http.StatusBadGateway, Message: "payer inquiry answer repeats " + dup + ": it can be read two ways, so it is not carried"}
+	}
 	kind, returns, _, err := inquiryAnswerShape(body)
 	if err != nil {
 		return fail502("invalid prior-authorization inquiry answer")
@@ -403,6 +416,85 @@ func validatePASInquiryAnswer(body []byte) LegResult {
 		return LegResult{}
 	}
 	return fail502("invalid prior-authorization inquiry answer")
+}
+
+// validatePASInquiryAnswerAt is validatePASInquiryAnswer for an answer
+// exchanged at IG line. An inquiry answer's graph is not closed at any line:
+// it may name a Claim it does not carry. At 2.2.1 (§spec-44) every
+// ClaimResponse it carries names the Claim it answers, by a reference to a
+// Claim or by an identifier with a value, or says why it cannot by a Data
+// Absent Reason on its request;
+// 2.0.1 and 2.1.0 state no such rule.
+func validatePASInquiryAnswerAt(body []byte, line string) LegResult {
+	if lr := validatePASInquiryAnswer(body); lr.Status != 0 || line != "2.2" {
+		return lr
+	}
+	kind, returns, _, _ := inquiryAnswerShape(body)
+	bundles := returns
+	if kind == "Bundle" {
+		bundles = []json.RawMessage{body}
+	}
+	for _, raw := range bundles {
+		var b struct {
+			Entry []struct {
+				FullURL  string         `json:"fullUrl"`
+				Resource map[string]any `json:"resource"`
+			} `json:"entry"`
+		}
+		if json.Unmarshal(raw, &b) != nil {
+			continue
+		}
+		types := map[string]string{}
+		for _, e := range b.Entry {
+			if rt, _ := e.Resource["resourceType"].(string); e.FullURL != "" {
+				types[stripHistoryRef(e.FullURL)] = rt
+			}
+		}
+		entryType := func(ref string) string { return types[stripHistoryRef(ref)] }
+		for i, e := range b.Entry {
+			if e.Resource["resourceType"] == "ClaimResponse" && !claimResponseNamesItsClaim(e.Resource, entryType) {
+				return fail502(fmt.Sprintf("invalid prior-authorization inquiry answer: entry %d (ClaimResponse) names no Claim and gives no data-absent-reason for it (PAS 2.2.1)", i))
+			}
+		}
+	}
+	return LegResult{}
+}
+
+// claimResponseNamesItsClaim reports whether a ClaimResponse's request names
+// its Claim (claimResponseRequestNamesClaim), or carries a Data Absent Reason
+// saying why it does not.
+func claimResponseNamesItsClaim(cr map[string]any, entryType func(ref string) string) bool {
+	if claimResponseRequestNamesClaim(cr, entryType) {
+		return true
+	}
+	request, _ := cr["request"].(map[string]any)
+	exts, _ := request["extension"].([]any)
+	for _, x := range exts {
+		if m, _ := x.(map[string]any); m["url"] == "http://hl7.org/fhir/StructureDefinition/data-absent-reason" {
+			return true
+		}
+	}
+	return false
+}
+
+// inquiryAnswerRead is how an inquiry answer reads at its candidate lines
+// (FR-G29's order): at the first whose rule (validatePASInquiryAnswerAt) it
+// meets.
+func inquiryAnswerRead(lines []string, body []byte) answerLineRead {
+	return readAtCandidateLines(lines, func(line string) bool {
+		return validatePASInquiryAnswerAt(body, line).Status == 0
+	})
+}
+
+// pasInquiryAnswerRead is inquiryAnswerRead over this gateway's candidate
+// lines for an answer on the leg token names; the zero read when it names no
+// line.
+func (g *Gateway) pasInquiryAnswerRead(token string, body []byte) answerLineRead {
+	contract, line, ok := strings.Cut(token, "@")
+	if !ok || line == "" {
+		return answerLineRead{}
+	}
+	return inquiryAnswerRead(g.answerCandidateLines(contract, line, body), body)
 }
 
 // The output parameter a `Claim/$inquire` answer carries its response Bundles
@@ -1070,7 +1162,9 @@ func readPASInquiryAnswers(requesterHolder string, body []byte) []inquiryAnswerR
 			if decodeMessage(e.Resource, &head) != nil || head.ResourceType != "ClaimResponse" {
 				continue
 			}
-			out = append(out, claimResponseLookup(requesterHolder, e.Resource))
+			a := claimResponseLookup(requesterHolder, e.Resource)
+			a.bundle = body
+			out = append(out, a)
 		}
 		return out
 	case "ClaimResponse":
@@ -1245,7 +1339,11 @@ func (g *Gateway) handlePASInquireInbound(w http.ResponseWriter, r *http.Request
 	ownFC := findingContextFrom(r.Context())
 	ownFC.Whose = "own"
 	read := g.newPayerAnswerRead(withFindingContext(r.Context(), ownFC), result, responseFHIR, "")
-	if bad := validatePASInquiryAnswer(responseFHIR); bad.Status != 0 && read.refusesUnreadable(RuleAnswerShape) {
+	inquiryRead := g.pasInquiryAnswerRead(answerTok, responseFHIR)
+	if f, ok := laterLineFinding(ownFC, g.policy().Level().String(), RuleAnswerShape, inquiryRead, responseFHIR); ok && g.policy().Runs(KindContent, RuleAnswerShape) {
+		g.emitFindingIn(r.Context(), f)
+	}
+	if bad := validatePASInquiryAnswerAt(responseFHIR, inquiryRead.Line); bad.Status != 0 && read.refusesUnreadable(RuleAnswerShape) {
 		g.refuseInbound(w, r, legPASClaimInquire, env, tok, answerTok, bad.Status, bad.Message, nil)
 		return
 	}
@@ -1285,21 +1383,11 @@ func (g *Gateway) handlePASInquireInbound(w http.ResponseWriter, r *http.Request
 		g.refuseInbound(w, r, legPASClaimInquire, env, tok, answerTok, status, msg, nil)
 		return
 	}
-	// Below strict an EOB built from a relayed answer that is invalid is
-	// recorded, the payer's answer is relayed, and nothing is written
-	// (RuleEOBDecision). An answer not read writes no EOB to validate.
-	if !read.read() {
-		result.SideEffectFHIR = nil
-	}
-	// One budget for the leg's decision EOBs at observe (validateDecisionEOBs).
-	status, msg, invalid := g.validateDecisionEOBs(ctx, result.SideEffectFHIR)
-	if status != 0 {
-		g.refuseInbound(w, r, legPASClaimInquire, env, tok, answerTok, status, msg, nil)
-		return
-	}
-	if invalid {
-		read.eobInvalid()
-	}
+	// The decision EOB gate (gateDecisionEOBs): each decision's EOB that
+	// fails its own validation is not written, at every level; that decision
+	// is still recorded, the answer's other decisions keep theirs, and the
+	// payer's answer is relayed exactly. An answer not read writes nothing.
+	g.gateDecisionEOBs(ctx, "pas-claim-inquire", env.Metadata.CorrelationID, &result, read, true)
 	// Stamp honesty, as on every relaying leg: a verbatim foreign relay is left
 	// unstamped, because this build did not produce the payer's bytes and cannot
 	// vouch for the line they were built at. The answer's media type is the payer's
@@ -1481,6 +1569,17 @@ func (g *Gateway) inquiryLedgerEffect(requester, subject, boundPatientRef, legCo
 		if !decided {
 			continue // still pended, or an answer that states no decision
 		}
+		if outcome == PendOutcomeDenied && ans.keys.PreAuthRef != "" {
+			// As on the submit leg: a decision read as a denial that states an
+			// authorization number in the ClaimResponse's own preAuthRef may
+			// be a partial certification. This gateway's reading cannot hold
+			// it, so nothing is recorded (no decision, no EOB) and the
+			// operator is told why. The payer's answer is relayed regardless.
+			events = append(events, ObserverEvent{Kind: pendDecisionNotRecordedEvent, Direction: "ingress",
+				LegType: "pas-claim-inquire", CorrelationID: legCorrID, Op: "pas-inquire",
+				Detail: "authorization " + corrID + ": " + decisionReadAsDenialWithAuthNumber})
+			continue
+		}
 		if !m.About {
 			// The decision is this authorization's, by the payer's own key, but the
 			// inquiry's lines may be another claim's: its own keys do not name this
@@ -1495,16 +1594,18 @@ func (g *Gateway) inquiryLedgerEffect(requester, subject, boundPatientRef, legCo
 		}
 		eob, eobErr := g.inquiryDecisionEOB(subjectPCI, corrID, boundPatientRef, facts, ans, parsed)
 		if eobErr != nil {
-			// The payer's own decision detail cannot be stated on a decision EOB.
-			// Refusing the RECORD, not the relay: the answer still reaches the
-			// requester, and nothing half-stated is written.
-			events = append(events, ObserverEvent{Kind: pendDecisionNotRecordedEvent, Direction: "ingress",
+			// The EOB cannot state the decision as its sources do (eobNotWritten):
+			// the decision is recorded without an EOB, nothing is filled in or
+			// dropped, and the operator is told which detail and where.
+			events = append(events, ObserverEvent{Kind: DecisionEOBNotWrittenEvent, Direction: "ingress",
 				LegType: "pas-claim-inquire", CorrelationID: legCorrID, Op: "pas-inquire",
 				Detail: "authorization " + corrID + ": " + eobErr.Error()})
+			decisions = append(decisions, decision{subjectPCI: subjectPCI, corrID: corrID, outcome: outcome, decidedAt: ans.created, authNumber: parsed.PreAuthRef})
 			continue
 		}
 		if eob != nil {
 			result.SideEffectFHIR = append(result.SideEffectFHIR, eob.JSON)
+			result.decisionEOBs = append(result.decisionEOBs, eob)
 		}
 		decisions = append(decisions, decision{subjectPCI: subjectPCI, corrID: corrID, outcome: outcome, decidedAt: ans.created, authNumber: parsed.PreAuthRef, eob: eob})
 	}
@@ -1522,7 +1623,7 @@ func (g *Gateway) inquiryLedgerEffect(requester, subject, boundPatientRef, legCo
 	}
 	commit := func() error {
 		for _, d := range decisions {
-			tr, err := ledger.RecordDecision(d.subjectPCI, d.corrID, d.outcome, d.decidedAt, PendKeys{RequesterHolder: requester, PreAuthRef: d.authNumber}, d.eob)
+			tr, err := ledger.RecordDecision(d.subjectPCI, d.corrID, d.outcome, d.decidedAt, PendKeys{RequesterHolder: requester, PreAuthRef: d.authNumber}, eobToWrite(d.eob))
 			if errors.Is(err, ErrEOBSubjectMismatch) {
 				// Another patient's EOB is filed under this authorization's EOB id
 				// (eobowner.go). Refusing the RECORD, not the relay, exactly as for
@@ -1572,16 +1673,21 @@ func inquiryDecisionOf(raw []byte) (string, shnsdk.PriorAuthResult, bool) {
 
 // inquiryDecisionEOB projects the decision EOB that is written in the SAME write
 // as the decision. Its product coding comes from the REQUESTER's own inquiry —
-// the item line whose trace number the payer echoed, else the first line it asked
-// about — never from a code this gateway chose. A line with no recognizable
+// the item line whose trace number the payer echoed — never from a code this
+// gateway chose. An answer that echoes no line's trace number pairs its item
+// decision with no line: no EOB is written (decisionEOB names why). A line with no recognizable
 // product coding yields no EOB, exactly as a submit with none does: the decision
-// is still recorded, and nothing is invented to carry it.
+// is still recorded, and nothing is invented to carry it. The rest of the EOB is
+// read from the inquiry's Claim (type, provider, insurance, that line) and from
+// the ClaimResponse that carried the decision (its created, insurer, outcome,
+// amounts), never from this gateway's clock.
 func (g *Gateway) inquiryDecisionEOB(subjectPCI, corrID, boundPatientRef string, facts pasInquiryFacts, ans inquiryAnswerResponse, parsed shnsdk.PriorAuthResult) (*EOBRecord, error) {
-	item := inquiryItemFor(facts, ans.keys.ItemTraceNumbers)
+	item, trace := inquiryItemFor(facts, ans.keys.ItemTraceNumbers)
 	if item.code == "" {
 		return nil, nil
 	}
-	eobJSON, err := decisionEOB(g.cfg.Clock, corrID, boundPatientRef, item.system, item.code, item.display, parsed)
+	eobJSON, err := decisionEOB(corrID, boundPatientRef, item.system, item.code, item.display, parsed,
+		decisionEOBSource{request: facts.request, itemIndex: item.index, itemTrace: trace, inquiry: true, claimResponse: ans.raw, answer: ans.bundle})
 	if err != nil {
 		return nil, err
 	}
@@ -1589,19 +1695,21 @@ func (g *Gateway) inquiryDecisionEOB(subjectPCI, corrID, boundPatientRef string,
 }
 
 // inquiryItemFor picks the inquiry line an answer is about: the line whose trace
-// number the answer echoed, else the first line the inquiry asked about.
-func inquiryItemFor(facts pasInquiryFacts, answerTraceNumbers []string) pasInquiryItemFact {
+// number the answer echoed, with that trace number, else the first line the
+// inquiry asked about and no trace number (no ClaimResponse item is then
+// matched to it: decisionEOB pairs by trace number only).
+func inquiryItemFor(facts pasInquiryFacts, answerTraceNumbers []string) (pasInquiryItemFact, string) {
 	for _, tn := range answerTraceNumbers {
 		for _, it := range facts.items {
 			if it.traceNumber != "" && it.traceNumber == tn {
-				return it
+				return it, tn
 			}
 		}
 	}
 	if len(facts.items) > 0 {
-		return facts.items[0]
+		return facts.items[0], ""
 	}
-	return pasInquiryItemFact{}
+	return pasInquiryItemFact{}, ""
 }
 
 // ---- the provider gateway's ingress ----
@@ -1692,7 +1800,11 @@ func (g *Gateway) handlePASInquireIngress(w http.ResponseWriter, r *http.Request
 	// could not read.
 	answerCtx := withFindingContext(r.Context(), findingContext{LegType: leg, CorrelationID: child, Seam: "provider-ingress", Whose: "peer"})
 	unread := ""
-	if bad := validatePASInquiryAnswer(answer); bad.Status != 0 {
+	inquiryRead := g.pasInquiryAnswerRead(observedTarget, answer)
+	if f, ok := laterLineFinding(findingContextFrom(answerCtx), g.policy().Level().String(), RuleAnswerShape, inquiryRead, answer); ok && g.policy().Runs(KindContent, RuleAnswerShape) {
+		g.emitFindingIn(answerCtx, f)
+	}
+	if bad := validatePASInquiryAnswerAt(answer, inquiryRead.Line); bad.Status != 0 {
 		// A repeated member name is read one way only (RuleDuplicateKey): it
 		// refuses at every level, with strict's refusal.
 		if repeatsAMember(answerCtx, answer) || g.guard(answerCtx, KindContent, RuleAnswerShape, answer) {

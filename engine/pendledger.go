@@ -517,6 +517,31 @@ type EOBRecord struct {
 	SubjectPCI string
 	EOBID      string
 	JSON       []byte
+	// admitted is set only by the decision EOB gate (Gateway.gateDecisionEOBs)
+	// once the EOB passed its own validation; an EOB the gate did not admit is
+	// never written (eobToWrite).
+	admitted bool
+}
+
+// eobToWrite is the EOB a decision write may carry: e when the decision EOB
+// gate admitted it, nil otherwise (the decision is then recorded without an
+// EOB). Every write of a decision EOB in this package goes through it
+// (TestDecisionEOBWritesGoThroughTheGate).
+func eobToWrite(e *EOBRecord) *EOBRecord {
+	if e == nil || !e.admitted {
+		return nil
+	}
+	return e
+}
+
+// recordAdmittedEOB writes a decision EOB on its own (a Store with no pend
+// ledger), only when the gate admitted it.
+func recordAdmittedEOB(store Store, e *EOBRecord) error {
+	w := eobToWrite(e)
+	if w == nil {
+		return nil
+	}
+	return store.RecordEOB(w.SubjectPCI, w.EOBID, w.JSON)
 }
 
 // Validate refuses an EOB the ledger cannot write. A nil receiver is "this decision

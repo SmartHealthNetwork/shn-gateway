@@ -454,8 +454,11 @@ func TestNoSystemOfRecord_InquiryWithoutTheSubmitsPatientIsRelayed(t *testing.T)
 	}
 	pendedTrace := assemblyRealPending[start+len(traceSystem):]
 	pendedTrace = pendedTrace[:strings.IndexByte(pendedTrace, '"')]
-	decided := bytes.Replace(decidedAnswer(t), []byte(`"value": "111099"`), []byte(`"value": "`+pendedTrace+`"`), 1)
-	if bytes.Equal(decided, decidedAnswer(t)) {
+	// Its item echoes the trace number the inquiry asks by, as the payer
+	// answering that line does.
+	echoing := answerEchoingTrace(t, inquiryFixture(t, "pas-inquiry-response-2.0.json"), "http://example.org/ITEM_TRACE_NUMBER", "prior-auth-required-trace")
+	decided := bytes.Replace(echoing, []byte(`"value": "111099"`), []byte(`"value": "`+pendedTrace+`"`), 1)
+	if bytes.Equal(decided, echoing) {
 		t.Fatal("fixture: the inquiry answer's identifier was not replaced")
 	}
 	carried := requestPatient(strangerMember, nosorBirth, nosorFamily)

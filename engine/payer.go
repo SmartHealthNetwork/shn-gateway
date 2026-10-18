@@ -461,7 +461,12 @@ func fenceNextQuestionSubjectWith(ctx context.Context, requestSubject string, re
 	}
 	qr, _, err := parseNextQuestionResponse(responseFHIR)
 	if err != nil {
-		if repeatsAMember(ctx, responseFHIR) || refuses(RuleAnswerShape) {
+		// A repeated member name is named, with where, so the payer can fix it.
+		if repeatsAMember(ctx, responseFHIR) {
+			dup, _ := repeatedMember(responseFHIR)
+			return http.StatusBadGateway, "next-question response repeats " + dup + ": it can be read two ways, so it is not carried"
+		}
+		if refuses(RuleAnswerShape) {
 			return http.StatusBadGateway, "next-question response is not a questionnaire-response"
 		}
 		return 0, ""
@@ -504,7 +509,8 @@ func (g *Gateway) fenceResponseSubjectWith(ctx context.Context, leg, boundPatien
 	// A response that repeats a member name can be read two ways; the fence
 	// would judge one of them and the requester might read the other.
 	if repeatsAMember(ctx, responseFHIR) {
-		return http.StatusForbidden, "response repeats a member name"
+		dup, _ := repeatedMember(responseFHIR)
+		return http.StatusForbidden, "response repeats " + dup + ": it can be read two ways, so it is not carried"
 	}
 	switch leg {
 	case "coverage-eligibility":
@@ -533,8 +539,9 @@ func (g *Gateway) fenceResponseSubjectWith(ctx context.Context, leg, boundPatien
 		}
 		_ = json.Unmarshal(responseFHIR, &responseShape)
 		if res.ResponseSubjectForeign || responseShape.ResourceType == "Bundle" {
-			if pasResponseSubjectMismatch(responseFHIR) != nil && refuses(RulePatientAnswer) {
-				return refusePASResponseSubjects(corrID, leg, http.StatusForbidden, responseFHIR)
+			answerLine := answerGraphRead(answerCandidateLinesFrom(ctx, responseFHIR), responseFHIR).Line
+			if pasAnswerSubjectMismatch(responseFHIR, answerLine) != nil && refuses(RulePatientAnswer) {
+				return refusePASResponseSubjectsAt(corrID, leg, answerLine, http.StatusForbidden, responseFHIR)
 			}
 		}
 		if !res.ResponseSubjectForeign {

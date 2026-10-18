@@ -25,7 +25,7 @@ class CacheTest(unittest.TestCase):
         for name in ("BuildBackport.java", "src/ValidatorWrapper.java", "upstream/ValidatorWrapper.java"):
             p = self.root / name; p.parent.mkdir(exist_ok=True); p.write_text(name)
         self.cls = b"synthetic pinned class bytes"
-        self.jar = self.out / "hapi-fhir-validation-8.10.0.jar"
+        self.jar = self.out / "hapi-fhir-validation-8.12.0.jar"
         with zipfile.ZipFile(self.jar, "w") as z:
             z.writestr(cache.CLASS_ENTRY, self.cls)
         with zipfile.ZipFile(self.out / "main.war", "w") as z:
