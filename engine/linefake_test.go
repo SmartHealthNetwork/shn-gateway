@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"sync"
 	"testing"
@@ -165,6 +166,44 @@ func TestLineFakeGuardMutations(t *testing.T) {
 					lfCheck(t, r.earlier, m, r.profile)
 					if r.earlier == "2.1" {
 						lfCheck(t, "2.0", m, r.profile)
+					}
+				}
+			})
+		}
+	}
+}
+
+// profile-pas-request-bundle's entry:Claim slice is 1..1 at PAS 2.0.1 and 1..2 from 2.1.0, where
+// an update carries the prior Claim it names: a second Claim is refused at 2.0 alone, and a third
+// at every line. A Claim from the 2.2 golden passes every line's minima here, so the Claim count
+// is the only thing that varies.
+func TestLineFakeRequestClaimSlice(t *testing.T) {
+	withClaims := func(n int) lfObject {
+		b := lfBundle(lfClaim(t))
+		entries := b["entry"].([]any)
+		for i := 1; i < n; i++ {
+			c := lfClaim(t)
+			c["id"] = fmt.Sprintf("prior-%d", i)
+			entries = append(entries, lfObject{"resource": c})
+		}
+		b["entry"] = entries
+		return b
+	}
+	for _, row := range []struct {
+		claims  int
+		refused map[string]bool
+	}{
+		{1, map[string]bool{}},
+		{2, map[string]bool{"2.0": true}},
+		{3, map[string]bool{"2.0": true, "2.1": true, "2.2": true}},
+	} {
+		for _, line := range []string{"2.0", "2.1", "2.2"} {
+			t.Run(fmt.Sprintf("%d Claims/%s", row.claims, line), func(t *testing.T) {
+				for _, profile := range []string{"", lfPAS + "profile-pas-request-bundle"} {
+					if row.refused[line] {
+						lfCheck(t, line, withClaims(row.claims), profile, "Bundle.entry:Claim")
+					} else {
+						lfCheck(t, line, withClaims(row.claims), profile)
 					}
 				}
 			})

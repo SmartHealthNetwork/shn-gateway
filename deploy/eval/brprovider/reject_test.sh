@@ -7,7 +7,7 @@
 #
 # /Claim/$submit is handlePASIngress (gateway/engine/workstream_pa.go's paRoutes, mounted
 # only when g.cfg.IngressEnabled), which calls g.ingressAuthOK(r) FIRST and 401s before any body
-# parsing (gateway/engine/ingress.go). So 401 here proves the route exists AND is
+# parsing (gateway/engine/workstream_pa_ingress.go). So 401 here proves the route exists AND is
 # auth-gated — a 404 would mean the ingress never mounted (a config regression), not
 # "correctly rejected".
 set -euo pipefail

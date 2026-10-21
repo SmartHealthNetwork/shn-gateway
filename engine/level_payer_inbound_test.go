@@ -52,10 +52,13 @@ type levelPayer struct {
 	preWrite func(http.ResponseWriter)
 	findings []ConformanceFinding
 	skipped  []ObserverEvent
-	// sideRecord are the events naming what this gateway's own decision record
-	// could not hold (pa.decision-eob-not-written, pend.decision-not-recorded).
+	// sideRecord are the events naming a decision this gateway's own record
+	// could not hold (pend.decision-not-recorded).
 	sideRecord []ObserverEvent
 	seq        int
+	// corr, when set, is the correlation id every leg carries instead of a
+	// fresh one: a requester reusing its own trace id.
+	corr string
 	// mu guards findings and skipped: at observe a queued check reports from a
 	// worker as well as from the leg's goroutine.
 	mu sync.Mutex
@@ -98,7 +101,7 @@ func newLevelPayer(t *testing.T, level ConformanceEnforcement, opts ...NativeOpt
 			}
 		case LocalWriteSkippedEvent:
 			lp.skipped = append(lp.skipped, e)
-		case DecisionEOBNotWrittenEvent, pendDecisionNotRecordedEvent:
+		case pendDecisionNotRecordedEvent:
 			lp.sideRecord = append(lp.sideRecord, e)
 		}
 	}
@@ -139,11 +142,14 @@ func (p *levelPayer) sendFramed(t *testing.T, leg string, headers map[string]str
 	t.Helper()
 	p.partner.lastPath, p.partner.lastBody = "", nil
 	p.seq++
-	spec, ok := paCatalog[leg]
+	spec, ok := legSpecFor(leg)
 	if !ok {
 		t.Fatalf("no catalog entry for %s", leg)
 	}
 	corr := fmt.Sprintf("corr-%s-%d", leg, p.seq)
+	if p.corr != "" {
+		corr = p.corr
+	}
 	payload := body
 	if headers != nil {
 		var err error
@@ -308,7 +314,7 @@ func (p *levelPayer) wantAnswerRow(t *testing.T, leg string, got payerAnswer, pa
 	p.wantFindings(t, leg, rule, "own")
 }
 
-// ---- CRD order-select (crd_native.go) ----
+// ---- CRD order-select (workstream_pa_crd_inbound.go) ----
 
 func crdSelectWith(t *testing.T, old, new string) []byte {
 	t.Helper()
@@ -361,7 +367,7 @@ func TestLevelPayerCRDSelect_RequestContent(t *testing.T) {
 	}
 }
 
-// ---- CRD order-dispatch (crd_dispatch_native.go) ----
+// ---- CRD order-dispatch (workstream_pa_crd_dispatch_inbound.go) ----
 
 const crdDispatchRequest = `{"hook":"order-dispatch","hookInstance":"h-1","context":{"patientId":"MBR-COVERED","dispatchedOrders":["DeviceRequest/dr1"],"performer":"Organization/o1"},` +
 	`"prefetch":{"deviceHistory":{"resourceType":"Bundle","type":"collection","entry":[{"fullUrl":"DeviceRequest/dr1","resource":{"resourceType":"DeviceRequest","id":"dr1","status":"active","intent":"order",` +
@@ -415,7 +421,7 @@ func TestLevelPayerCRDDispatch_RequestContent(t *testing.T) {
 	}
 }
 
-// ---- DTR (payer.go) ----
+// ---- DTR (workstream_pa_dtr_inbound.go) ----
 
 func dtrPackage(params ...string) []byte {
 	return dtrParams(append(params, questionnaireParam)...)

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"net/http"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 )
@@ -32,30 +33,36 @@ type LegResult struct {
 	// On a non-2xx Status, a set Response is the participant's application
 	// error, relayed; an unset Response means the gateway (or the connector)
 	// refuses, and Message is the refusal text.
-	Response       relay.Payload
-	SideEffectFHIR [][]byte     // payer-local FHIR to persist (EOB); engine egress-$validates each before Commit
-	Status         int          // connector-signalled HTTP outcome (409/422); 0 = proceed
-	Message        string       // body for a non-zero Status
-	Commit         func() error // NON-FHIR durable state (Store writes); fired after buildResponseLeg, before writeLeg; error => 502
-	Rollback       func()       // undo a claim acquired in Handle; engine arms defer-rollback-unless-committed
-	// decisionEOBs are the decision EOBs this gateway built for the answer
-	// (their bytes are in SideEffectFHIR). The gateway's decision EOB gate
-	// validates each and admits only those that pass; a decision write
-	// carries only an admitted one.
-	decisionEOBs []*EOBRecord
+	Response relay.Payload
+	// AnswerStatus is the 2xx status the participant's system answered a
+	// relayed Response with, carried to the requester as it was given. 0 is
+	// 200, and an answer this gateway built is always 200.
+	AnswerStatus int
+	Status       int          // connector-signalled HTTP outcome (409/422); 0 = proceed
+	Message      string       // body for a non-zero Status
+	Commit       func() error // NON-FHIR durable state (Store writes); fired after buildResponseLeg, before writeLeg; error => 502
+	Rollback     func()       // undo a claim acquired in Handle; engine arms defer-rollback-unless-committed
 	// ResponseSubjectForeign identifies the payer's patient namespace. The full
 	// graph must remain internally subject-consistent; it is not compared with
-	// the request's SHN member id. Locally produced EOBs remain member-fenced.
+	// the request's SHN member id.
 	ResponseSubjectForeign bool
 }
 
 // ResponseRelayed reports whether the answer is the participant's own message
 // (relayed, possibly with registered edits) rather than one this gateway
-// built. Relayed bytes are neither certified nor stamped by this gateway;
-// locally produced side-effects still are.
+// built. Relayed bytes are neither certified nor stamped by this gateway.
 func (r LegResult) ResponseRelayed() bool {
 	o := r.Response.Ownership()
 	return o == relay.OwnershipRelayed || o == relay.OwnershipEdited
+}
+
+// answerStatus is the status the answer is framed with: the participant's own
+// 2xx for an answer relayed from its system, 200 for one this gateway built.
+func (r LegResult) answerStatus() int {
+	if r.ResponseRelayed() && r.AnswerStatus/100 == 2 {
+		return r.AnswerStatus
+	}
+	return http.StatusOK
 }
 
 // ResponseContentType is the answer's media type.

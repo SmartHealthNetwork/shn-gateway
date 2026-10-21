@@ -62,7 +62,6 @@ func TestLocalWriteFailure_NamesTheClassNeverTheText(t *testing.T) {
 		{fmt.Errorf("wrapped: %w", ErrPendKeyTooLong), "longer than the ledger keeps"},
 		{fmt.Errorf("wrapped: %w", ErrPendRequesterMismatch), "another requester"},
 		{ErrPendRequesterRequired, "no requester"},
-		{fmt.Errorf("wrapped: %w", ErrPendEOBInvalid), "decision EOB"},
 		{errors.New("pgx: duplicate key value (subject_pci)=(pci:private)"), "the store did not accept the write"},
 	} {
 		got := localWriteFailure(row.err)

@@ -138,7 +138,7 @@ func TestDTRResumeValidationAndRefusals(t *testing.T) {
 				// ordering; full line conformance runs in the native exchange harness.
 				recorder := &dtrRecordingValidator{base: shnsdk.NewFakeValidator()}
 				gw.cfg.Validator = NewLineFakeValidator("2.0")
-				gw.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"2.0": NewLineFakeValidator("2.0"), "2.2": recorder}
+				gw.cfg.ValidatorsByContractLine = contractLanes(map[string]shnsdk.Validator{"2.0": NewLineFakeValidator("2.0"), "2.2": recorder})
 				before := httptest.NewRecorder()
 				request := httptest.NewRequest(http.MethodPost, "/scenario/"+scenario, strings.NewReader(testStatedBody(gw, opts.member, "", false)))
 				st, ok := gw.scenarioToPend(before, request, scenario, opts.member)
@@ -151,7 +151,14 @@ func TestDTRResumeValidationAndRefusals(t *testing.T) {
 				recorder.calls = nil
 				recorder.mode = mode
 				if mode == "missing lane" {
-					delete(gw.cfg.ValidatorsByLine, "2.2")
+					// A declared line losing its lane mid-pend is a state the gateway
+					// cannot boot in at a level that checks. The pinned line is the
+					// only one declared, so there is no other line to carry at and
+					// the resume refuses the route either way; REQUIRE_SHARED_LINE
+					// states the refusal this row reads (resumecarry_test.go has the
+					// carries).
+					dropLaneLine(gw.cfg.ValidatorsByContractLine, "2.2")
+					gw.cfg.RequireSharedLine = true
 				}
 				after := httptest.NewRecorder()
 				if scenario == "uc06" {
@@ -225,7 +232,7 @@ func TestDTRResumeIndependentPinsAndRefusals(t *testing.T) {
 				gw, stub := newPendResumeFixture(t, opts)
 				original := &dtrRecordingValidator{base: shnsdk.NewFakeValidator()}
 				target := &dtrRecordingValidator{base: shnsdk.NewFakeValidator()}
-				gw.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"2.0": original, "2.2": target}
+				gw.cfg.ValidatorsByContractLine = contractLanes(map[string]shnsdk.Validator{"2.0": original, "2.2": target})
 				request := httptest.NewRequest(http.MethodPost, "/scenario/"+scenario, strings.NewReader(testStatedBody(gw, opts.member, "", false)))
 				before := httptest.NewRecorder()
 				st, ok := gw.scenarioToPend(before, request, scenario, opts.member)
@@ -254,9 +261,9 @@ func TestDTRResumeIndependentPinsAndRefusals(t *testing.T) {
 				case "target outage":
 					target.mode = "validator outage"
 				case "original missing":
-					delete(gw.cfg.ValidatorsByLine, "2.0")
+					dropLaneLine(gw.cfg.ValidatorsByContractLine, "2.0")
 				case "target missing":
-					delete(gw.cfg.ValidatorsByLine, "2.2")
+					dropLaneLine(gw.cfg.ValidatorsByContractLine, "2.2")
 				}
 				after := httptest.NewRecorder()
 				if scenario == "uc06" {

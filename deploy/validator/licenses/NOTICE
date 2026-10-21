@@ -35,7 +35,7 @@ What the image contains, and under which terms
    `Go-LICENSE.txt`).
 
 4. FHIR packages in `/packages/`, shipped byte-for-byte as published:
-   - HL7 implementation guide packages (US Core, Da Vinci CRD, DTR, PAS, PDex, CDex,
+   - HL7 implementation guide packages (US Core, Da Vinci CRD, DTR, PAS, CDex,
      HRex, SDC and, on the 2.2 line, the R4 extensions pack), from
      packages.simplifier.net, each released by HL7 under CC0-1.0. Terminology from
      other code systems that they carry stays under its owners' terms (see

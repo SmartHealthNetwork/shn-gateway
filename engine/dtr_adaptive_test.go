@@ -276,7 +276,7 @@ func TestNextQuestion_FramedWhenCapable(t *testing.T) {
 		t.Helper()
 		env := newInProcessExchange(t)
 		declareFramedDTR(t, env, capable)
-		route, err := env.originator.selectLegLine(env.payerID, "dtr-questionnaire-fetch", "corr-0")
+		route, err := env.originator.selectLegLine(env.payerID, "dtr-questionnaire-fetch", "corr-0", "")
 		if err != nil {
 			t.Fatal(err)
 		}

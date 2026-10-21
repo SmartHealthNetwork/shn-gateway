@@ -106,7 +106,6 @@ func TestPACatalog_Contracts(t *testing.T) {
 		"crd-order-select":        "pa.crd",
 		"crd-order-dispatch":      "pa.crd",
 		"dtr-questionnaire-fetch": "pa.dtr",
-		"federated-query":         "",
 		"patient-dtr":             "",
 		"pas-claim":               "pa.pas",
 		"pas-claim-update":        "pa.pas",
@@ -175,7 +174,7 @@ func TestPendStatePinsContractLine(t *testing.T) {
 	reg.Set("payer-x", shnsdk.RegistryEntry{ID: "payer-x", Role: "payer", ContractVersions: []string{"pa.pas@2.0"}})
 	// The participant refuses pairs with no shared line, so a fresh selection
 	// after the drift refuses; by default it would be carried at 2.0.
-	g := &Gateway{cfg: Config{Reg: reg, RequireSharedLine: true}, pending: map[string]pendState{}}
+	g := &Gateway{cfg: Config{Reg: reg, RequireSharedLine: true}}
 	tok, err := g.selectLegToken("payer-x", "pas-claim")
 	if err != nil || tok != "pa.pas@2.0" {
 		t.Fatalf("select: (%q, %v)", tok, err)
@@ -229,9 +228,9 @@ func TestSelectRoutePrefersDeclaredThenNativeReachThenChain(t *testing.T) {
 	t.Run("arm 2: native reach when 2.2 is laned", func(t *testing.T) {
 		g := &Gateway{cfg: Config{
 			Reg: reg, DeclaredContractVersions: []string{"pa.pas@2.0"},
-			ValidatorsByLine: map[string]shnsdk.Validator{"2.0": fake, "2.2": fake},
+			ValidatorsByContractLine: contractLanes(map[string]shnsdk.Validator{"2.0": fake, "2.2": fake}),
 		}}
-		route, err := g.selectLegRoute("payer-22", "pas-claim")
+		route, err := g.selectLegRoute("payer-22", "pas-claim", "")
 		if err != nil {
 			t.Fatalf("want a route, got refusal: %v", err)
 		}
@@ -243,15 +242,16 @@ func TestSelectRoutePrefersDeclaredThenNativeReachThenChain(t *testing.T) {
 	t.Run("same minus the 2.2 lane: refuses naming the missing lane", func(t *testing.T) {
 		g := &Gateway{cfg: Config{
 			Reg: reg, DeclaredContractVersions: []string{"pa.pas@2.0"},
-			ValidatorsByLine: map[string]shnsdk.Validator{"2.0": fake}, // no 2.2 lane
+			ValidatorsByContractLine: contractLanes(map[string]shnsdk.Validator{"2.0": fake}), // no 2.2 lane
 			// A certification-only client for 2.2 is evidence, not a lane: it must
 			// not make 2.2 reachable.
 			CertificationValidatorsByLine: map[string]shnsdk.Validator{"2.0": fake, "2.2": fake},
 			// The participant refuses pairs nothing bridges; by default the
 			// leg is carried at 2.0 (line_carry_test.go).
 			RequireSharedLine: true,
+			TranslateIGLines:  true, // module 2 names what its reach misses
 		}}
-		_, err := g.selectLegRoute("payer-22", "pas-claim")
+		_, err := g.selectLegRoute("payer-22", "pas-claim", "")
 		if err == nil {
 			t.Fatal("want refusal — 2.2 is native but unlaned, no bridge available")
 		}
@@ -266,19 +266,20 @@ func TestSelectRoutePrefersDeclaredThenNativeReachThenChain(t *testing.T) {
 
 	t.Run("same with the lane but native restricted (D1c): arm 3 chain", func(t *testing.T) {
 		g := &Gateway{cfg: Config{
-			Reg: reg, DeclaredContractVersions: []string{"pa.pas@2.0"},
-			ValidatorsByLine:  map[string]shnsdk.Validator{"2.0": fake, "2.1": fake, "2.2": fake},
-			EgressNativeLines: []string{"2.0"}, // D1c: restrict arm (2)'s view away from 2.2
+			Reg: reg, DeclaredContractVersions: []string{"pa.pas@2.1"},
+			ValidatorsByContractLine: contractLanes(map[string]shnsdk.Validator{"2.0": fake, "2.1": fake, "2.2": fake}),
+			TranslateIGLines:         true,
+			EgressNativeLines:        []string{"2.1"}, // D1c: restrict arm (2)'s view away from 2.2
 		}}
-		route, err := g.selectLegRoute("payer-22", "pas-claim")
+		route, err := g.selectLegRoute("payer-22", "pas-claim", "")
 		if err != nil {
 			t.Fatalf("want a chained route, got refusal: %v", err)
 		}
-		if route.Token != "pa.pas@2.2" || route.BuildLine != "2.0" {
-			t.Fatalf("route = %+v, want Token=pa.pas@2.2 BuildLine=2.0", route)
+		if route.Token != "pa.pas@2.2" || route.BuildLine != "2.1" {
+			t.Fatalf("route = %+v, want Token=pa.pas@2.2 BuildLine=2.1", route)
 		}
-		if len(route.Chain) != 2 {
-			t.Fatalf("want a 2-hop pa.pas 2.0->2.2 chain, got %d steps: %+v", len(route.Chain), route.Chain)
+		if len(route.Chain) != 1 {
+			t.Fatalf("want a 1-hop pa.pas 2.1->2.2 chain, got %d steps: %+v", len(route.Chain), route.Chain)
 		}
 	})
 }
@@ -299,9 +300,9 @@ func TestSelectRouteNativeReachHighestAmongMultipleDeclaredPeerLines(t *testing.
 	t.Run("both peer lines laned: highest (2.2) wins", func(t *testing.T) {
 		g := &Gateway{cfg: Config{
 			Reg: reg, DeclaredContractVersions: []string{"pa.pas@2.0"},
-			ValidatorsByLine: map[string]shnsdk.Validator{"2.0": fake, "2.1": fake, "2.2": fake},
+			ValidatorsByContractLine: contractLanes(map[string]shnsdk.Validator{"2.0": fake, "2.1": fake, "2.2": fake}),
 		}}
-		route, err := g.selectLegRoute("payer-2122", "pas-claim")
+		route, err := g.selectLegRoute("payer-2122", "pas-claim", "")
 		if err != nil {
 			t.Fatalf("want a route, got refusal: %v", err)
 		}
@@ -313,11 +314,11 @@ func TestSelectRouteNativeReachHighestAmongMultipleDeclaredPeerLines(t *testing.
 	t.Run("control: the 2.2 lane absent, falls back to the next-highest declared+laned line (2.1)", func(t *testing.T) {
 		g := &Gateway{cfg: Config{
 			Reg: reg, DeclaredContractVersions: []string{"pa.pas@2.0"},
-			ValidatorsByLine: map[string]shnsdk.Validator{"2.0": fake, "2.1": fake}, // no 2.2 lane
+			ValidatorsByContractLine: contractLanes(map[string]shnsdk.Validator{"2.0": fake, "2.1": fake}), // no 2.2 lane
 			// A certification-only client for 2.2 does not make it a lane either.
 			CertificationValidatorsByLine: map[string]shnsdk.Validator{"2.0": fake, "2.1": fake, "2.2": fake},
 		}}
-		route, err := g.selectLegRoute("payer-2122", "pas-claim")
+		route, err := g.selectLegRoute("payer-2122", "pas-claim", "")
 		if err != nil {
 			t.Fatalf("want a route, got refusal: %v", err)
 		}
@@ -359,10 +360,11 @@ func TestSelectRouteChainRankingFixedTargetPrefersShorterChain(t *testing.T) {
 		reg.Set("payer-22only", shnsdk.RegistryEntry{ID: "payer-22only", Role: "payer", ContractVersions: []string{"pa.pas@2.2"}})
 		g := &Gateway{cfg: Config{
 			Reg: reg, DeclaredContractVersions: []string{"pa.pas@2.0", "pa.pas@2.1"},
-			ValidatorsByLine:  map[string]shnsdk.Validator{"2.0": fake, "2.1": fake, "2.2": fake},
-			EgressNativeLines: []string{"2.0", "2.1"}, // D1c: restrict arm (2)'s view away from 2.2, forcing arm (3)
+			ValidatorsByContractLine: contractLanes(map[string]shnsdk.Validator{"2.0": fake, "2.1": fake, "2.2": fake}),
+			TranslateIGLines:         true,
+			EgressNativeLines:        []string{"2.0", "2.1"}, // D1c: restrict arm (2)'s view away from 2.2, forcing arm (3)
 		}}
-		route, err := g.selectLegRoute("payer-22only", "pas-claim")
+		route, err := g.selectLegRoute("payer-22only", "pas-claim", "")
 		if err != nil {
 			t.Fatalf("want a chained route, got refusal: %v", err)
 		}
@@ -379,10 +381,11 @@ func TestSelectRouteChainRankingFixedTargetPrefersShorterChain(t *testing.T) {
 		reg.Set("payer-crd22only", shnsdk.RegistryEntry{ID: "payer-crd22only", Role: "payer", ContractVersions: []string{"pa.crd@2.2"}})
 		g := &Gateway{cfg: Config{
 			Reg: reg, DeclaredContractVersions: []string{"pa.crd@2.0", "pa.crd@2.1"},
-			ValidatorsByLine:  map[string]shnsdk.Validator{"2.0": fake, "2.1": fake, "2.2": fake},
-			EgressNativeLines: []string{"2.0", "2.1"}, // D1c: forces arm (3) despite 2.2 being native
+			ValidatorsByContractLine: contractLanes(map[string]shnsdk.Validator{"2.0": fake, "2.1": fake, "2.2": fake}),
+			TranslateIGLines:         true,
+			EgressNativeLines:        []string{"2.0", "2.1"}, // D1c: forces arm (3) despite 2.2 being native
 		}}
-		route, err := g.selectLegRoute("payer-crd22only", "crd-order-select")
+		route, err := g.selectLegRoute("payer-crd22only", "crd-order-select", "")
 		if err != nil {
 			t.Fatalf("want a chained route, got refusal: %v", err)
 		}
@@ -400,7 +403,7 @@ func TestSelectRouteChainRankingFixedTargetPrefersShorterChain(t *testing.T) {
 // g.strictPeer, via the real g.selectLegRoute — not the exported
 // SelectChainRouteForTest wrapper TestAdversarial_StrictPeerRefusesChainAtSelection
 // already covers. strictPeer is production-dormant BY DESIGN (always false —
-// see its comment, originate.go), so the strict input
+// see its comment, linereach.go), so the strict input
 // here is injected through Config.StrictPeerForTest, a TEST-ONLY
 // seam — never through a config path any real deployment can set. Combined
 // with the EgressNativeLines seam to force arm (3) to fire even
@@ -416,17 +419,18 @@ func TestStrictPeerRefusesCarryChain(t *testing.T) {
 	// overlay.
 	fake := shnsdk.NewFakeValidator()
 	gatedReg := shnsdk.NewRegistry()
-	gatedReg.Set("payer-21", shnsdk.RegistryEntry{ID: "payer-21", Role: "payer", ContractVersions: []string{"pa.pas@2.1"}})
+	gatedReg.Set("payer-20", shnsdk.RegistryEntry{ID: "payer-20", Role: "payer", ContractVersions: []string{"pa.pas@2.0"}})
 
 	t.Run("strict ON (test seam): a carry/gated-worst chain refuses, naming the overlay", func(t *testing.T) {
 		g := &Gateway{cfg: Config{
-			Reg: gatedReg, DeclaredContractVersions: []string{"pa.pas@2.0"},
-			ValidatorsByLine:  map[string]shnsdk.Validator{"2.0": fake, "2.1": fake},
-			EgressNativeLines: []string{"2.0"}, // D1c: force arm 3 (2.1 is otherwise arm-2 native reach)
-			StrictPeerForTest: true,            // test-only: strictPeer is hardwired false in production
-			RequireSharedLine: true,            // by default the leg is carried at 2.0
+			Reg: gatedReg, DeclaredContractVersions: []string{"pa.pas@2.1"},
+			ValidatorsByContractLine: contractLanes(map[string]shnsdk.Validator{"2.0": fake, "2.1": fake}),
+			TranslateIGLines:         true,
+			EgressNativeLines:        []string{"2.1"}, // D1c: force arm 3 (2.0 is otherwise arm-2 native reach)
+			StrictPeerForTest:        true,            // test-only: strictPeer is hardwired false in production
+			RequireSharedLine:        true,            // by default the leg is carried at 2.1
 		}}
-		_, err := g.selectLegRoute("payer-21", "pas-claim")
+		_, err := g.selectLegRoute("payer-20", "pas-claim", "")
 		if err == nil {
 			t.Fatal("want a strict refusal, got a route")
 		}
@@ -441,18 +445,19 @@ func TestStrictPeerRefusesCarryChain(t *testing.T) {
 
 	t.Run("control: strict OFF (the real production default), the SAME chain succeeds", func(t *testing.T) {
 		g := &Gateway{cfg: Config{
-			Reg: gatedReg, DeclaredContractVersions: []string{"pa.pas@2.0"},
-			ValidatorsByLine:  map[string]shnsdk.Validator{"2.0": fake, "2.1": fake},
-			EgressNativeLines: []string{"2.0"},
+			Reg: gatedReg, DeclaredContractVersions: []string{"pa.pas@2.1"},
+			ValidatorsByContractLine: contractLanes(map[string]shnsdk.Validator{"2.0": fake, "2.1": fake}),
+			TranslateIGLines:         true,
+			EgressNativeLines:        []string{"2.1"},
 			// StrictPeerForTest left at its zero value (false) — this IS
 			// what every real deployment sees (strictPeer is unconditional).
 		}}
-		route, err := g.selectLegRoute("payer-21", "pas-claim")
+		route, err := g.selectLegRoute("payer-20", "pas-claim", "")
 		if err != nil {
 			t.Fatalf("want a route, got refusal: %v", err)
 		}
-		if route.Token != "pa.pas@2.1" || route.BuildLine != "2.0" {
-			t.Fatalf("route = %+v, want Token=pa.pas@2.1 BuildLine=2.0", route)
+		if route.Token != "pa.pas@2.0" || route.BuildLine != "2.1" {
+			t.Fatalf("route = %+v, want Token=pa.pas@2.0 BuildLine=2.1 (the gated row taken downward)", route)
 		}
 	})
 
@@ -462,11 +467,12 @@ func TestStrictPeerRefusesCarryChain(t *testing.T) {
 		crdReg.Set("payer-crd21", shnsdk.RegistryEntry{ID: "payer-crd21", Role: "payer", ContractVersions: []string{"pa.crd@2.1"}})
 		g := &Gateway{cfg: Config{
 			Reg: crdReg, DeclaredContractVersions: []string{"pa.crd@2.0"},
-			ValidatorsByLine:  map[string]shnsdk.Validator{"2.0": fake, "2.1": fake},
-			EgressNativeLines: []string{"2.0"},
-			StrictPeerForTest: true,
+			ValidatorsByContractLine: contractLanes(map[string]shnsdk.Validator{"2.0": fake, "2.1": fake}),
+			TranslateIGLines:         true,
+			EgressNativeLines:        []string{"2.0"},
+			StrictPeerForTest:        true,
 		}}
-		route, err := g.selectLegRoute("payer-crd21", "crd-order-select")
+		route, err := g.selectLegRoute("payer-crd21", "crd-order-select", "")
 		if err != nil {
 			t.Fatalf("want a route (full-only chain, strict must not refuse it), got refusal: %v", err)
 		}
@@ -489,10 +495,11 @@ func TestSelectRouteRefusalNamesBridgeIngredient(t *testing.T) {
 		reg.Set("payer-22", shnsdk.RegistryEntry{ID: "payer-22", Role: "payer", ContractVersions: []string{"pa.pas@2.2"}})
 		g := &Gateway{cfg: Config{
 			Reg: reg, DeclaredContractVersions: []string{"pa.pas@2.0"},
-			ValidatorsByLine:  map[string]shnsdk.Validator{"2.0": fake},
-			RequireSharedLine: true,
+			ValidatorsByContractLine: contractLanes(map[string]shnsdk.Validator{"2.0": fake}),
+			RequireSharedLine:        true,
+			TranslateIGLines:         true,
 		}}
-		_, err := g.selectLegRoute("payer-22", "pas-claim")
+		_, err := g.selectLegRoute("payer-22", "pas-claim", "")
 		assertBridgeIssue(t, err, "no configured validator lane for line 2.2")
 	})
 
@@ -503,10 +510,11 @@ func TestSelectRouteRefusalNamesBridgeIngredient(t *testing.T) {
 		reg.Set("payer-99", shnsdk.RegistryEntry{ID: "payer-99", Role: "payer", ContractVersions: []string{"pa.pas@9.9"}})
 		g := &Gateway{cfg: Config{
 			Reg: reg, DeclaredContractVersions: []string{"pa.pas@2.0"},
-			ValidatorsByLine:  map[string]shnsdk.Validator{"2.0": fake, "9.9": fake},
-			RequireSharedLine: true,
+			ValidatorsByContractLine: contractLanes(map[string]shnsdk.Validator{"2.0": fake, "9.9": fake}),
+			RequireSharedLine:        true,
+			TranslateIGLines:         true,
 		}}
-		_, err := g.selectLegRoute("payer-99", "pas-claim")
+		_, err := g.selectLegRoute("payer-99", "pas-claim", "")
 		assertBridgeIssue(t, err, "no transform chain bridges to line 9.9")
 	})
 
@@ -515,20 +523,28 @@ func TestSelectRouteRefusalNamesBridgeIngredient(t *testing.T) {
 		// non-stub chain a strict peer must refuse. strict is the arm-3 INPUT
 		// (dormant plumbing in production — no call site sets it
 		// true yet); selectChainRoute is exercised directly.
-		laned := func(l string) bool { return true }
+		laned := func(string) string { return "" }
 		_, issue, ok := selectChainRoute("pa.pas",
-			map[string]bool{"2.0": true}, map[string]bool{"2.1": true}, true, laned)
+			map[string]bool{"2.1": true}, map[string]bool{"2.0": true}, true, laned)
 		if ok {
 			t.Fatal("want a strict refusal, got a route")
 		}
 		if !strings.Contains(issue, "refused for this peer (gated overlay") {
 			t.Fatalf("issue = %q, missing the gated-peer bridge phrase", issue)
 		}
-		// Non-strict: the SAME gated-class chain is a valid (worst-ranked) route.
+		// Non-strict: the SAME gated-class chain, taken downward, is a valid
+		// (worst-ranked) route.
 		route, _, ok := selectChainRoute("pa.pas",
+			map[string]bool{"2.1": true}, map[string]bool{"2.0": true}, false, laned)
+		if !ok || route.Token != "pa.pas@2.0" {
+			t.Fatalf("non-strict: want the gated chain selected downward, got %+v ok=%v", route, ok)
+		}
+		// Taken upward it can only refuse, so it is never planned, and the
+		// issue says why.
+		_, issue, ok = selectChainRoute("pa.pas",
 			map[string]bool{"2.0": true}, map[string]bool{"2.1": true}, false, laned)
-		if !ok || route.Token != "pa.pas@2.1" {
-			t.Fatalf("non-strict: want the gated chain selected, got %+v ok=%v", route, ok)
+		if ok || !strings.Contains(issue, "no certified translation to line 2.1 (its chain needs the gated pa.pas 2.0 to 2.1 step)") {
+			t.Fatalf("upward gated: ok=%v issue %q, want no route naming the gated step", ok, issue)
 		}
 	})
 }
@@ -561,9 +577,9 @@ func TestOriginateLegFallbackStaysIntersectionOnly(t *testing.T) {
 	fake := shnsdk.NewFakeValidator()
 	g := &Gateway{cfg: Config{
 		Reg: reg, DeclaredContractVersions: []string{"pa.pas@2.0"},
-		ValidatorsByLine:  map[string]shnsdk.Validator{"2.0": fake, "2.2": fake},
-		RequireSharedLine: true, // by default the fallback carries at 2.0 (line_carry_test.go), never 2.2
-	}, pending: map[string]pendState{}}
+		ValidatorsByContractLine: contractLanes(map[string]shnsdk.Validator{"2.0": fake, "2.2": fake}),
+		RequireSharedLine:        true, // by default the fallback carries at 2.0 (line_carry_test.go), never 2.2
+	}}
 
 	_, err := g.OriginateLeg(context.Background(), nil, "payer-22", "pas-claim", "pci-1", "corr-1", "",
 		Content{WorkstreamType: workstreamPA, ProfileID: "", Payload: testRequest([]byte(`{}`))})
@@ -588,9 +604,10 @@ func TestEgressNativeLinesDoesNotAffectSharedDeclaredLine(t *testing.T) {
 	reg.Set("payer-20", shnsdk.RegistryEntry{ID: "payer-20", Role: "payer", ContractVersions: []string{"pa.pas@2.0"}})
 	g := &Gateway{cfg: Config{
 		Reg: reg, DeclaredContractVersions: []string{"pa.pas@2.0"},
+		TranslateIGLines:  true,
 		EgressNativeLines: []string{"2.1"}, // 2.0 deliberately NOT in the narrowed view
 	}}
-	route, err := g.selectLegRoute("payer-20", "pas-claim")
+	route, err := g.selectLegRoute("payer-20", "pas-claim", "")
 	if err != nil {
 		t.Fatalf("want a route, got refusal: %v", err)
 	}
@@ -609,10 +626,11 @@ func TestSelectResumeRouteUnderNarrowing(t *testing.T) {
 	t.Run("knob permits the pinned line: native resume, no chain", func(t *testing.T) {
 		g := &Gateway{cfg: Config{
 			DeclaredContractVersions: []string{"pa.pas@2.0"},
-			ValidatorsByLine:         map[string]shnsdk.Validator{"2.0": fake},
+			ValidatorsByContractLine: contractLanes(map[string]shnsdk.Validator{"2.0": fake}),
+			TranslateIGLines:         true,
 			EgressNativeLines:        []string{"2.0"},
 		}}
-		route, err := g.selectResumeRoute("pa.pas@2.0", "payer-20", "pas-claim-update")
+		route, err := g.selectResumeRoute("pa.pas@2.0", "payer-20", "pas-claim-update", "")
 		if err != nil {
 			t.Fatalf("want a route, got refusal: %v", err)
 		}
@@ -629,10 +647,11 @@ func TestSelectResumeRouteUnderNarrowing(t *testing.T) {
 	t.Run("the knob excludes the pinned line but it is still declared: native resume", func(t *testing.T) {
 		g := &Gateway{cfg: Config{
 			DeclaredContractVersions: []string{"pa.pas@2.0"},
-			ValidatorsByLine:         map[string]shnsdk.Validator{"2.0": fake, "2.2": fake},
+			ValidatorsByContractLine: contractLanes(map[string]shnsdk.Validator{"2.0": fake, "2.2": fake}),
+			TranslateIGLines:         true,
 			EgressNativeLines:        []string{"2.2"}, // 2.0 (the pin) is NOT in the native-reach view
 		}}
-		route, err := g.selectResumeRoute("pa.pas@2.0", "payer-20", "pas-claim-inquire")
+		route, err := g.selectResumeRoute("pa.pas@2.0", "payer-20", "pas-claim-inquire", "")
 		if err != nil {
 			t.Fatalf("want the declared pinned line, got refusal: %v", err)
 		}
@@ -643,15 +662,21 @@ func TestSelectResumeRouteUnderNarrowing(t *testing.T) {
 
 	// REJECTION: the widening above is scoped to a pinned line this gateway
 	// still declares AND still has a lane for. Neither holding, and with no
-	// chain to it, the resume is refused — it does not fall back to some other
-	// line and call it the same authorization.
+	// chain to it, the resume is not taken at the pin. Here this gateway also
+	// declares no line of the pin's contract at all, so there is no line of its
+	// own to carry the follow-up at either, and it is refused
+	// (resumecarry_test.go has the carries).
 	t.Run("a pinned line this gateway neither declares nor can reach is refused", func(t *testing.T) {
+		reg := shnsdk.NewRegistry()
+		reg.Set("payer-20", shnsdk.RegistryEntry{ID: "payer-20", Role: "payer", ContractVersions: []string{"pa.dtr@2.2"}})
 		g := &Gateway{cfg: Config{
 			DeclaredContractVersions: []string{"pa.pas@2.0"},
-			ValidatorsByLine:         map[string]shnsdk.Validator{"2.0": fake},
+			ValidatorsByContractLine: contractLanes(map[string]shnsdk.Validator{"2.0": fake}),
+			TranslateIGLines:         true,
 			EgressNativeLines:        []string{"2.0"},
+			Reg:                      reg,
 		}}
-		if route, err := g.selectResumeRoute("pa.dtr@2.2", "payer-20", "pas-claim-inquire"); err == nil {
+		if route, err := g.selectResumeRoute("pa.dtr@2.2", "payer-20", "pas-claim-inquire", ""); err == nil {
 			t.Fatalf("want a refusal for a pin this gateway cannot reach, got route %+v", route)
 		}
 	})
@@ -659,10 +684,11 @@ func TestSelectResumeRouteUnderNarrowing(t *testing.T) {
 	t.Run("knob excludes the pinned line: falls to the chain block", func(t *testing.T) {
 		g := &Gateway{cfg: Config{
 			DeclaredContractVersions: []string{"pa.pas@2.1"},
-			ValidatorsByLine:         map[string]shnsdk.Validator{"2.0": fake, "2.1": fake},
+			ValidatorsByContractLine: contractLanes(map[string]shnsdk.Validator{"2.0": fake, "2.1": fake}),
+			TranslateIGLines:         true,
 			EgressNativeLines:        []string{"2.1"}, // 2.0 (the pin) is NOT in view
 		}}
-		route, err := g.selectResumeRoute("pa.pas@2.0", "payer-20", "pas-claim-update")
+		route, err := g.selectResumeRoute("pa.pas@2.0", "payer-20", "pas-claim-update", "")
 		if err != nil {
 			t.Fatalf("want a chained route, got refusal: %v", err)
 		}
@@ -671,6 +697,43 @@ func TestSelectResumeRouteUnderNarrowing(t *testing.T) {
 		}
 		if len(route.Chain) != 1 {
 			t.Fatalf("want the 1-step 2.1->2.0 chain, got %d steps: %+v", len(route.Chain), route.Chain)
+		}
+	})
+
+	// The strict overlay holds at resume too: the only reach to the pinned
+	// line is pa.pas's gated 2.1->2.0 step, so a strict peer's resume never
+	// takes it. By default the follow-up is carried at this gateway's own line,
+	// naming the pin; under REQUIRE_SHARED_LINE it is refused, naming the pin
+	// and the missing bridge exactly. The case above is its control: the same
+	// chain, strict off, succeeds.
+	t.Run("a strict peer refuses the gated chain to the pinned line", func(t *testing.T) {
+		reg := shnsdk.NewRegistry()
+		reg.Set("payer-20", shnsdk.RegistryEntry{ID: "payer-20", Role: "payer", ContractVersions: []string{"pa.pas@2.0"}})
+		g := &Gateway{cfg: Config{
+			DeclaredContractVersions: []string{"pa.pas@2.1"},
+			ValidatorsByContractLine: contractLanes(map[string]shnsdk.Validator{"2.0": fake, "2.1": fake}),
+			TranslateIGLines:         true,
+			EgressNativeLines:        []string{"2.1"},
+			StrictPeerForTest:        true,
+			Reg:                      reg,
+		}}
+		if route, err := g.selectResumeRoute("pa.pas@2.0", "payer-20", "pas-claim-update", ""); err != nil ||
+			route.Token != "pa.pas@2.1" || route.Chain != nil || route.Pinned != "pa.pas@2.0" {
+			t.Fatalf("default: %+v, %v, want carried at pa.pas@2.1 with no chain, naming the pin", route, err)
+		}
+		g.cfg.RequireSharedLine = true
+		route, err := g.selectResumeRoute("pa.pas@2.0", "payer-20", "pas-claim-update", "")
+		var rre *RouteRefusalError
+		if !errors.As(err, &rre) {
+			t.Fatalf("want a *RouteRefusalError, got route %+v, err %v", route, err)
+		}
+		want := RouteRefusalError{
+			Contract: "pa.pas", LegType: "pas-claim-update", Recipient: "payer-20",
+			Own: []string{"pa.pas@2.1"}, Peer: []string{"pa.pas@2.0"},
+			BridgeIssue: "no bridge to the pinned line 2.0 remains available",
+		}
+		if !reflect.DeepEqual(*rre, want) {
+			t.Fatalf("refusal = %+v, want %+v", *rre, want)
 		}
 	})
 }
@@ -696,8 +759,8 @@ func TestLegRecordStaysVersionFree(t *testing.T) {
 // --- select-before-build promotion: the CRD/DTR sites promoted off OriginateLeg's
 // arm-1-only backfill onto select-before-build. Five sites were promoted by the
 // site census (2026-08-14): crd-order-select ×2 + crd-order-dispatch
-// (originate.go, originate_homeoxygen.go) and the DaVinciIngress driver's
-// crd-order-select + dtr-questionnaire-fetch (ingress.go). The ingress PAS site
+// (module1_originate.go, module1_originate_homeoxygen.go) and the DaVinciIngress driver's
+// crd-order-select + dtr-questionnaire-fetch (workstream_pa_ingress.go). The ingress PAS site
 // stays on the fallback (forward-edge deferral — see its site comment).
 // TestOriginateLegFallbackStaysIntersectionOnly is deliberately UNTOUCHED: the
 // fallback keeps its signed arm-1-only semantics; D-7 moved callers OFF it, it
@@ -799,14 +862,14 @@ func TestD7PromotedSitesPreserveIntersectingTopologies(t *testing.T) {
 				// Every line laned, so arms 2/3 are fully ARMED — the fence is
 				// only meaningful if the widened path COULD have chosen
 				// differently and still doesn't.
-				ValidatorsByLine: map[string]shnsdk.Validator{"2.0": fake, "2.1": fake, "2.2": fake},
+				ValidatorsByContractLine: contractLanes(map[string]shnsdk.Validator{"2.0": fake, "2.1": fake, "2.2": fake}),
 			}}
 			for _, legType := range legTypes {
 				legacy, lerr := g.selectLegToken("payer", legType)
 				if lerr != nil {
 					t.Fatalf("%s: legacy backfill refused an intersecting topology: %v", legType, lerr)
 				}
-				route, rerr := g.selectLegRoute("payer", legType)
+				route, rerr := g.selectLegRoute("payer", legType, "")
 				if rerr != nil {
 					t.Fatalf("%s: promoted path refused a topology the backfill routed: %v", legType, rerr)
 				}
@@ -838,10 +901,10 @@ func TestD7CRDArm2ReachesSkewedPeer(t *testing.T) {
 	reg.Set("payer-crd22", shnsdk.RegistryEntry{ID: "payer-crd22", Role: "payer", ContractVersions: []string{"pa.crd@2.2"}})
 	g := &Gateway{cfg: Config{
 		Reg: reg, DeclaredContractVersions: []string{"pa.crd@2.0"},
-		ValidatorsByLine: map[string]shnsdk.Validator{"2.0": fake, "2.2": fake},
+		ValidatorsByContractLine: contractLanes(map[string]shnsdk.Validator{"2.0": fake, "2.2": fake}),
 	}}
 	for _, legType := range []string{"crd-order-select", "crd-order-dispatch"} {
-		route, err := g.selectLegRoute("payer-crd22", legType)
+		route, err := g.selectLegRoute("payer-crd22", legType, "")
 		if err != nil {
 			t.Fatalf("%s: want an arm-2 route to the 2.2-only peer, got refusal: %v", legType, err)
 		}
@@ -852,7 +915,7 @@ func TestD7CRDArm2ReachesSkewedPeer(t *testing.T) {
 }
 
 // TestD7CRDIngressRoutesSkewedPeerInsteadOfRefusing is the INGRESS-LEVEL skew
-// pin required by the census adjudication (site 4, ingress.go's
+// pin required by the census adjudication (site 4, workstream_pa_ingress.go's
 // handleCRDIngress). Before the promotion this drive 422'd on OriginateLeg's
 // arm-1-only backfill; after it, the partner's CDS Hooks request reaches a
 // pa.crd@2.2-only peer, stamped at the routed line. pa.crd bytes are LINE-INERT
@@ -904,9 +967,9 @@ func (c *countingExchangeStore) Begin(workstream string) *Exchange {
 }
 
 // TestD7CRDIngressRoutingRefusalCreatesNoExchangeRecord pins the ingress
-// site's selection-precedes-Begin ordering (ingress.go's own comment:
+// site's selection-precedes-Begin ordering (workstream_pa_ingress.go's own comment:
 // "Selection precedes the exchange so a refusal costs no Exchange record" —
-// console-visible behavior, previously unpinned): a peer
+// operator-visible behavior, previously unpinned): a peer
 // declaring NO pa.crd line refuses with the legible 422 + a leg.refused
 // event, and the Exchange store never Begins.
 func TestD7CRDIngressRoutingRefusalCreatesNoExchangeRecord(t *testing.T) {
@@ -984,14 +1047,15 @@ func TestD7CRDArm3IdentityChainIsBytePreserving(t *testing.T) {
 	var evs []ObserverEvent
 	g := &Gateway{cfg: Config{
 		Reg: reg, DeclaredContractVersions: []string{"pa.crd@2.0"},
-		ValidatorsByLine:  map[string]shnsdk.Validator{"2.0": fake, "2.1": fake, "2.2": fake},
-		EgressNativeLines: []string{"2.0"}, // D1c: hold arm 2 away from 2.2 so arm 3 must bridge
-		HolderID:          "provider",
-		Clock:             func() time.Time { return time.Unix(1700000000, 0).UTC() },
-		Observer:          func(e ObserverEvent) { evs = append(evs, e) },
+		ValidatorsByContractLine: contractLanes(map[string]shnsdk.Validator{"2.0": fake, "2.1": fake, "2.2": fake}),
+		TranslateIGLines:         true,
+		EgressNativeLines:        []string{"2.0"}, // D1c: hold arm 2 away from 2.2 so arm 3 must bridge
+		HolderID:                 "provider",
+		Clock:                    func() time.Time { return time.Unix(1700000000, 0).UTC() },
+		Observer:                 func(e ObserverEvent) { evs = append(evs, e) },
 	}}
 
-	route, err := g.selectLegRoute("payer-crd22", "crd-order-select")
+	route, err := g.selectLegRoute("payer-crd22", "crd-order-select", "")
 	if err != nil {
 		t.Fatalf("want an arm-3 chained route, got refusal: %v", err)
 	}
@@ -1042,8 +1106,9 @@ func TestD7CRDIngressArm3IdentityChainKeepsEgressBytes(t *testing.T) {
 		if arm3 {
 			d7SetPeerContractVersions(t, env, "pa.crd@2.2")
 			fake := shnsdk.NewFakeValidator()
-			env.originator.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"2.0": fake, "2.1": fake, "2.2": fake}
+			env.originator.cfg.ValidatorsByContractLine = contractLanes(map[string]shnsdk.Validator{"2.0": fake, "2.1": fake, "2.2": fake})
 			env.originator.cfg.EgressNativeLines = []string{"2.0"} // D1c: force arm 3
+			env.originator.cfg.TranslateIGLines = true
 		} else {
 			d7SetPeerContractVersions(t, env, "pa.crd@2.0")
 		}
@@ -1128,8 +1193,9 @@ func TestD7CRDIngressRefusesAWalkThatChangesBytes(t *testing.T) {
 			env.originator.cfg.RequireSharedLine = true
 			d7SetPeerContractVersions(t, env, "pa.crd@2.2")
 			fake := shnsdk.NewFakeValidator()
-			env.originator.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"2.0": fake, "2.1": fake, "2.2": fake}
+			env.originator.cfg.ValidatorsByContractLine = contractLanes(map[string]shnsdk.Validator{"2.0": fake, "2.1": fake, "2.2": fake})
 			env.originator.cfg.EgressNativeLines = []string{"2.0"} // D1c: force arm 3 through the swapped row
+			env.originator.cfg.TranslateIGLines = true
 			evs := d7CaptureEvents(env)
 
 			rec := httptest.NewRecorder()
@@ -1160,9 +1226,10 @@ func TestD7CRDIngressRefusesAWalkThatChangesBytes(t *testing.T) {
 func TestD7CRDIngressRefusalNamesMissingLane(t *testing.T) {
 	env := newInProcessExchange(t)
 	env.originator.cfg.RequireSharedLine = true // by default the pair is carried (line_carry_test.go)
+	env.originator.cfg.TranslateIGLines = true  // module 2 names what its reach misses
 	d7SetPeerContractVersions(t, env, "pa.crd@2.2")
 	fake := shnsdk.NewFakeValidator()
-	env.originator.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"2.0": fake} // 2.2 deliberately UNLANED
+	env.originator.cfg.ValidatorsByContractLine = contractLanes(map[string]shnsdk.Validator{"2.0": fake}) // 2.2 deliberately UNLANED
 	evs := d7CaptureEvents(env)
 
 	rec := httptest.NewRecorder()
@@ -1196,8 +1263,9 @@ func TestD7CRDIngressArm3EdgeCaptureHoldsSentBytes(t *testing.T) {
 	optInEnrichment(env.originator, true) // the prefetch fill this row pins
 	d7SetPeerContractVersions(t, env, "pa.crd@2.2")
 	fake := shnsdk.NewFakeValidator()
-	env.originator.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"2.0": fake, "2.1": fake, "2.2": fake}
+	env.originator.cfg.ValidatorsByContractLine = contractLanes(map[string]shnsdk.Validator{"2.0": fake, "2.1": fake, "2.2": fake})
 	env.originator.cfg.EgressNativeLines = []string{"2.0"} // D1c: force arm 3
+	env.originator.cfg.TranslateIGLines = true
 	env.originator.cfg.DemoEdgeCapture = true
 	s := newPrefetchSoR()
 	s.answer(t, "ServiceRequest", searchPage(sorRequest("h1", "Patient/"+prefetchSoRID)))

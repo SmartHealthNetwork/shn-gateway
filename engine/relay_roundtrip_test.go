@@ -72,7 +72,10 @@ type relaySubstrate struct {
 	// counts every /authorize call. Both are additive: nil by default,
 	// existing tests are unaffected.
 	authorizeFaults []func(*http.Request) (*http.Response, error)
-	authorizeHits   int
+	// authorizedSubjects is the subject of every token the stub signed, in
+	// order: the patient each leg was authorized for.
+	authorizedSubjects []string
+	authorizeHits      int
 }
 
 // setResult configures what the NEXT (and subsequent, until changed) /route
@@ -97,6 +100,7 @@ func (s *relaySubstrate) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 		s.mu.Unlock()
 		if fault != nil {
+			req.Body = io.NopCloser(bytes.NewReader(body)) // the fault may read what was asked
 			if resp, err := fault(req); resp != nil || err != nil {
 				return resp, err
 			}
@@ -118,6 +122,9 @@ func (s *relaySubstrate) handleAuthorize(body []byte) (*http.Response, error) {
 		PayloadHash   string `json:"payloadHash"`
 	}
 	_ = json.Unmarshal(body, &req)
+	s.mu.Lock()
+	s.authorizedSubjects = append(s.authorizedSubjects, req.SubjectPCI)
+	s.mu.Unlock()
 	tok := shnsdk.Token{
 		Operation:     req.Operation,
 		Scope:         "crd-context",
@@ -173,6 +180,12 @@ func (s *relaySubstrate) handleRoute(body []byte) (*http.Response, error) {
 
 	var respPayload []byte
 	switch {
+	case set && lr.AnswerStatus != 0:
+		// The wire form a payer gateway framing its system's own 2xx sends.
+		respPayload, err = shnsdk.EncodeHTTPFrame(lr.AnswerStatus, lr.Response.ContentType(), responseBytes(lr))
+		if err != nil {
+			return errResp("stub: EncodeHTTPFrame: " + err.Error()), nil
+		}
 	case !set || lr.Status == 0 || lr.Status/100 == 2:
 		if responseBytes(lr) != nil {
 			respPayload = responseBytes(lr)
@@ -202,17 +215,20 @@ func (s *relaySubstrate) handleRoute(body []byte) (*http.Response, error) {
 		Timestamp:       s.clock().UTC().Format(time.RFC3339),
 		CorrelationID:   env.Metadata.CorrelationID,
 	}
-	// R3: the response Operation is contract-keyed per leg TYPE (workstream_pa.go's
-	// paCatalog) — echo the REQUEST leg's own expected RespOp (e.g. "crd-dispatch-cards"
+	// R3: the response Operation is contract-keyed per leg TYPE (the leg's
+	// workstream catalog, legSpecFor) — echo the REQUEST leg's own expected RespOp (e.g. "crd-dispatch-cards"
 	// for crd-order-dispatch) rather than the literal frozen to crd-order-select's shape;
 	// a mismatched Operation fails the response-leg contract check before a framed error
 	// ever gets a chance to relay.
-	respOp := "crd-cards"
-	if spec, ok := paCatalog[env.Metadata.TransactionType]; ok {
-		respOp = spec.RespOp
+	// The response frame is the leg's too: a facility discloses
+	// (facility-disclosure) where a payer answers on coverage.
+	respOp, respFrame := "crd-cards", "payer-coverage"
+	if spec, ok := legSpecFor(env.Metadata.TransactionType); ok {
+		respOp, respFrame = spec.RespOp, spec.RespFrame
 	}
+	meta.AuthorityFrame = respFrame
 	out, err := sealForProvider(meta, respPayload, s.providerEncPub, s.authzPriv,
-		env.Metadata.CorrelationID, respOp, "payer-coverage", env.Metadata.Recipient, reqTok.Subject, s.clock())
+		env.Metadata.CorrelationID, respOp, respFrame, env.Metadata.Recipient, reqTok.Subject, s.clock())
 	if err != nil {
 		return errResp("stub: sealForProvider: " + err.Error()), nil
 	}
@@ -244,8 +260,9 @@ type inProcessExchange struct {
 
 // payerReturns configures the fake Hub's response leg: a non-2xx lr.Status is
 // sealed as a v1 message frame (the wire form a frame-capable payer's
-// respondLegError produces); a zero/2xx Status seals responseBytes(lr) verbatim (or
-// the harness's default success cards if Response is also unset).
+// respondLegError produces); a set lr.AnswerStatus seals responseBytes(lr) in a
+// frame stating that status; otherwise a zero/2xx Status seals responseBytes(lr)
+// verbatim (or the harness's default success cards if Response is also unset).
 func (e *inProcessExchange) payerReturns(lr LegResult) {
 	e.substrate.setResult(lr)
 }

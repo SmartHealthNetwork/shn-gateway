@@ -195,6 +195,23 @@ func lineFakeResourceIssues(line string, resource map[string]any, profile string
 			if line == "2.2" && request && (len(entries) == 0 || lineFakeObject(entries[0]["resource"])["resourceType"] != "Claim") {
 				issue("Bundle.ClaimFirst")
 			}
+			// profile-pas-request-bundle's entry:Claim slice is 1..1 at PAS 2.0.1 and 1..2 from
+			// 2.1.0, where an update carries the prior Claim it names (sdk/linedef.go's
+			// UpdateCarriesPriorClaim).
+			if request {
+				claims, most := 0, 2
+				if line == "2.0" {
+					most = 1
+				}
+				for _, e := range entries {
+					if lineFakeObject(e["resource"])["resourceType"] == "Claim" {
+						claims++
+					}
+				}
+				if claims > most {
+					issue("Bundle.entry:Claim")
+				}
+			}
 			if pas.ResponseBundleIdentifierRequired && response && r["identifier"] == nil {
 				issue("Bundle.identifier")
 			}
@@ -396,14 +413,4 @@ func lineFakeExtensions(resource map[string]any, url string) []map[string]any {
 		}
 	}
 	return found
-}
-
-// lineFakeInquiryProfile reports whether p names one of the PAS INQUIRY profiles
-// — its request Bundle or its Claim. See the Claim.item note above.
-func lineFakeInquiryProfile(p string) bool {
-	switch p {
-	case lineFakePAS + "profile-pas-inquiry-request-bundle", lineFakePAS + "profile-claim-inquiry":
-		return true
-	}
-	return false
 }

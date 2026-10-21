@@ -413,7 +413,7 @@ func callUC03(t *testing.T, gw *Gateway) *httptest.ResponseRecorder {
 func callUC03Branch(t *testing.T, gw *Gateway, branch string) *httptest.ResponseRecorder {
 	t.Helper()
 	body := `{"branch":"` + branch + `"}`
-	if branch == "" || strings.HasPrefix(branch, "bridge-") {
+	if branch == "" || branch == "bridge-demo" || branch == "line-carry" {
 		body = testRouteBody(gw, "/scenario/uc03", `"branch":"`+branch+`"`)
 	}
 	req := httptest.NewRequest(http.MethodPost, "/scenario/uc03", strings.NewReader(body))
@@ -423,8 +423,8 @@ func callUC03Branch(t *testing.T, gw *Gateway, branch string) *httptest.Response
 }
 
 // TestHandleUC03Bridge_SelectsMember pins the member half of the sanctioned handleUC03
-// branch switch for BOTH bridge arms (task2 brief A3a added "bridge-demo" alongside the
-// pre-existing "bridge-refuse", both now sharing handleUC03Bridge's one body), observed
+// branch switch for BOTH bridge arms ("bridge-demo" and "line-carry", sharing
+// handleUC03Bridge's one body), observed
 // the way this file's existing tests observe row behavior (legAttempted/stub.legTypes) —
 // a fresh crdTestSystem fixture per branch, matching the file's one-test-one-fixture idiom
 // (stub.legTypes accumulates for the fixture's lifetime, so branches must not share one).
@@ -438,7 +438,7 @@ func callUC03Branch(t *testing.T, gw *Gateway, branch string) *httptest.Response
 // identifier, with NO leg attempted, proves the branch switch resolved the RIGHT member
 // for each branch (and not MBR-COVERED, which DOES clear this same gate — see the ""
 // case below and every unbranched callUC03 test in this file). This is deliberately NOT a
-// full run: bridge-demo's approval and bridge-refuse's PAS-leg refusal only fire against
+// full run: bridge-demo's approval and line-carry's carried submission only happen against
 // the real deployed bridge-peer holders, which this hermetic unit fixture does not stand
 // up — driving further would just hit the SAME unregistered-payer wall for a different
 // reason.
@@ -447,7 +447,7 @@ func TestHandleUC03Bridge_SelectsMember(t *testing.T) {
 		branch, member string
 	}{
 		{"bridge-demo", "SHN-BRIDGE-DEMO"},
-		{"bridge-refuse", "SHN-BRIDGE-REFUSE"},
+		{"line-carry", "SHN-BRIDGE-REFUSE"},
 	} {
 		t.Run(tc.branch+": fails closed at routing, no leg attempted", func(t *testing.T) {
 			gw, stub, _ := uc03HandlerSystem(t, shnsdk.CardCoverage{Covered: shnsdk.CoveredCovered, PANeeded: shnsdk.PANeededAuthNeeded})
@@ -1014,7 +1014,7 @@ func TestValidateFHIR_IngressSkip_Demo(t *testing.T) {
 // ingress call on the demo lane; a facility leg on the demo lane silently went unvalidated.
 // Calling plain
 // validateFHIR (never validateFHIRPayerIngress) is what every non-payer-directed ingress
-// call site (originate.go's UC-05 federated-query read) now does.
+// call site (module1_originate.go's UC-05 federated-query read) now does.
 func TestValidateFHIR_FacilityIngressStillFailsClosed_Demo(t *testing.T) {
 	v := &recordingValidator{valid: false}
 	g := &Gateway{cfg: Config{OriginationProfile: "demo", Validator: v}}
@@ -1065,7 +1065,7 @@ func TestValidateFHIR_IngressStillFailsClosed_OtherLane(t *testing.T) {
 	v := &recordingValidator{valid: false}
 	// The payer IS a reference payer: only the lane half of the skip is missing, and
 	// that alone keeps the check running. One lane, so one call.
-	g := &Gateway{cfg: Config{OriginationProfile: "", Validator: v, ValidatorsByLine: map[string]shnsdk.Validator{"2.0": v}}}
+	g := &Gateway{cfg: Config{OriginationProfile: "", Validator: v, ValidatorsByContractLine: contractLanes(map[string]shnsdk.Validator{"2.0": v})}}
 	status, msg := g.validateFHIRPayerIngress(context.Background(), []byte(`{"resourceType":"Bundle"}`), "2.0", "pa.dtr", shnsdk.CMSPayerIdentity)
 	if status != http.StatusUnprocessableEntity {
 		t.Fatalf("non-reference-payer-lane payer-ingress with an invalid resource: status=%d, want %d; msg=%q", status, http.StatusUnprocessableEntity, msg)

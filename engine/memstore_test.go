@@ -1,8 +1,8 @@
 // memstore_test.go — the Store-half rows, re-homed verbatim from the retired
 // holderdata_test.go when StubHolderData split (§4.1). Same assertions, same
 // concurrency shapes; only the constructor changed (NewStubHolderData → NewMemStore),
-// because the auth-number store, the pended-claim ledger and the EOB store never had
-// anything to do with the deleted persona census.
+// because the auth-number store and the pended-claim ledger never had anything to
+// do with the deleted persona census.
 package engine
 
 import (
@@ -176,66 +176,5 @@ func TestMemStore_Reset(t *testing.T) {
 	}
 	if ok, _ := d.BeginClaimUpdate("pci:1", "corr-2"); !ok {
 		t.Error("the store must still accept new state after Reset")
-	}
-}
-
-// TestEOBReaders_ReturnDefensiveCopies verifies that EOBByID and EOBsForPatient
-// return defensive copies so a caller cannot mutate stored state (review #5).
-func TestEOBReaders_ReturnDefensiveCopies(t *testing.T) {
-	d := NewMemStore()
-	pci := "pci:test-eob-copy"
-	orig := []byte(`{"resourceType":"ExplanationOfBenefit","id":"eob-x"}`)
-	if err := d.RecordEOB(pci, "eob-x", orig); err != nil {
-		t.Fatalf("RecordEOB: %v", err)
-	}
-
-	// EOBByID: mutating the returned bytes must not change stored state.
-	got, ok := d.EOBByID("eob-x")
-	if !ok {
-		t.Fatal("EOBByID not found")
-	}
-	got[0] = 'X'
-	again, _ := d.EOBByID("eob-x")
-	if again[0] == 'X' {
-		t.Fatal("EOBByID returned a mutable reference to stored bytes")
-	}
-
-	// EOBsForPatient: mutating the returned slice/elements must not change state.
-	list, ok := d.EOBsForPatient(pci)
-	if !ok || len(list) != 1 {
-		t.Fatalf("EOBsForPatient = %d (ok=%v), want 1", len(list), ok)
-	}
-	list[0][0] = 'Y'
-	list = append(list, []byte("junk"))
-	_ = list
-	after, _ := d.EOBsForPatient(pci)
-	if len(after) != 1 {
-		t.Fatalf("stored slice grew to %d after caller append — not a copy", len(after))
-	}
-	if after[0][0] == 'Y' {
-		t.Fatal("EOBsForPatient returned mutable references to stored bytes")
-	}
-}
-
-// TestEOBStore verifies the payer-side PA-decision EOB store (UC-08, FR-28):
-// RecordEOB → EOBsForPatient + EOBByID; Reset clears the store.
-func TestEOBStore(t *testing.T) {
-	d := NewMemStore()
-	if _, ok := d.EOBByID("eob-uc08"); ok {
-		t.Fatal("EOBByID on empty store returned ok")
-	}
-	if err := d.RecordEOB("pci:abc", "eob-uc08", []byte(`{"resourceType":"ExplanationOfBenefit","id":"eob-uc08"}`)); err != nil {
-		t.Fatalf("RecordEOB: %v", err)
-	}
-	got, ok := d.EOBsForPatient("pci:abc")
-	if !ok || len(got) != 1 {
-		t.Fatalf("EOBsForPatient = %v, %v; want one EOB", len(got), ok)
-	}
-	if _, ok := d.EOBByID("eob-uc08"); !ok {
-		t.Fatal("EOBByID after record returned not-ok")
-	}
-	d.Reset()
-	if _, ok := d.EOBsForPatient("pci:abc"); ok {
-		t.Fatal("EOBsForPatient after Reset returned ok")
 	}
 }

@@ -155,13 +155,13 @@ var sweepAllowlist = map[string][]string{
 	},
 
 	// ASCII uppercase range is Go syntax, not a decision label.
-	"engine/pasgraph.go": {
+	"internal/pasgraph/graph.go": {
 		"if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '.') {",
 	},
 }
 
 func TestSweepAllowanceRequiresExactLine(t *testing.T) {
-	allowed := sweepAllowlist["engine/pasgraph.go"]
+	allowed := sweepAllowlist["internal/pasgraph/graph.go"]
 	for _, line := range allowed {
 		if !sweepLineAllowed("  "+line+"  ", allowed) {
 			t.Fatal("exact allowed line with indentation refused")

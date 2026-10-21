@@ -5,7 +5,9 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -24,15 +26,24 @@ import (
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
+// shutdownMember is the member the delivered CRD order-select names. Only the
+// order's own $validate carries it in a ServiceRequest, which is how the
+// validator stub tells that call from every other.
+const shutdownMember = "MBR-shutdown"
+
 // shutdownFlush is a payer gateway's surroundings at observe: a validator
-// that holds one check until released, and a diagnostic ingest that records
-// the kind of every event it receives.
+// that holds one governed check until released, a diagnostic ingest that
+// records the kind of every event it receives, and the network a sealed leg
+// arrives through (the Hub's and the Authorization Framework's key, and a
+// registrar that lists the requester).
 type shutdownFlush struct {
 	env       map[string]string
 	heartbeat chan struct{}
 	held      chan struct{}
 	release   func()
-	authzPriv ed25519.PrivateKey
+	netPriv   ed25519.PrivateKey // signs the Hub assertion and the leg's token
+	payer     shnsdk.Identity
+	requester shnsdk.Identity
 	mu        sync.Mutex
 	kinds     []string
 	findings  []string // each conformance finding's detail
@@ -68,9 +79,11 @@ func newShutdownFlush(t *testing.T) *shutdownFlush {
 	}))
 	t.Cleanup(ingest.Close)
 
-	// The validator holds the canonical lane's $validate of the patient-access
-	// searchset until released, then finds it invalid. Every other call (the
-	// lanes' qualification and warm-up) is answered at once.
+	// The validator holds the payer's observe-level ingress check of the
+	// order the CRD request carries — the canonical lane's
+	// POST /fhir/ServiceRequest/$validate whose body names shutdownMember —
+	// until released, then finds it invalid. Every other call (the Coverage's
+	// check, the lanes' qualification and warm-up) is answered at once.
 	release := make(chan struct{})
 	var heldOnce, releaseOnce sync.Once
 	f.release = func() { releaseOnce.Do(func() { close(release) }) }
@@ -81,7 +94,7 @@ func newShutdownFlush(t *testing.T) *shutdownFlush {
 			return
 		}
 		body, _ := io.ReadAll(r.Body)
-		if r.URL.Path == "/fhir/Bundle/$validate" && bytes.Contains(body, []byte(`"searchset"`)) {
+		if r.URL.Path == "/fhir/ServiceRequest/$validate" && bytes.Contains(body, []byte(shutdownMember)) {
 			heldOnce.Do(func() { close(f.held) })
 			select {
 			case <-release:
@@ -96,33 +109,65 @@ func newShutdownFlush(t *testing.T) *shutdownFlush {
 	t.Cleanup(validator.Close)
 	t.Cleanup(f.release) // runs before validator.Close: a failure must not leave the held call hanging
 
-	authzPub, authzPriv, _ := ed25519.GenerateKey(rand.Reader)
-	f.authzPriv = authzPriv
-	keyBody := fmt.Sprintf(`{"pubkey":%q}`, base64.StdEncoding.EncodeToString(authzPub))
+	// One key stands for both the Hub and the Authorization Framework:
+	// discovery names it for both.
+	netPub, netPriv, _ := ed25519.GenerateKey(rand.Reader)
+	f.netPriv = netPriv
+	keyBody := fmt.Sprintf(`{"pubkey":%q}`, base64.StdEncoding.EncodeToString(netPub))
 	keys := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(keyBody)) }))
 	t.Cleanup(keys.Close)
+	// The Authorization Framework grants the payer's answer whatever it asks for.
+	authz := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req shnsdk.AuthorizeRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"token": f.sign(shnsdk.Token{
+			Operation: req.Operation, Subject: req.SubjectPCI, Frame: req.Frame, Holder: f.payer.HolderID,
+			CorrelationID: req.CorrelationID, PayloadHash: req.PayloadHash, Expiry: time.Now().Add(time.Hour),
+		})})
+	}))
+	t.Cleanup(authz.Close)
 	disc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, `{"endpoints":{},"authzPublicKeyURL":%q,"hubTransportKeyURL":%q}`, keys.URL, keys.URL)
+		fmt.Fprintf(w, `{"endpoints":{"authz":%q},"authzPublicKeyURL":%q,"hubTransportKeyURL":%q}`, authz.URL, keys.URL, keys.URL)
 	}))
 	t.Cleanup(disc.Close)
-	// The payer's own systems and the audit plane: a patient-access read
-	// reaches only the audit plane; the boot checks may probe the others.
-	system := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"services":[]}`))
-	}))
-	t.Cleanup(system.Close)
-	audit := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{}`))
-	}))
-	t.Cleanup(audit.Close)
-
-	dir := t.TempDir()
-	id, err := shnsdk.GenerateIdentity("h-payer-shutdown")
+	var err error
+	if f.requester, err = shnsdk.GenerateIdentity("h-provider-shutdown"); err != nil {
+		t.Fatal(err)
+	}
+	// The registrar's feed lists the requester, whose key the answer is sealed to.
+	holders, err := json.Marshal([]shnsdk.Holder{{
+		ID: f.requester.HolderID, Role: "provider", BaseURL: "https://provider.example",
+		EncPub:  base64.StdEncoding.EncodeToString(f.requester.EncPub[:]),
+		SignPub: base64.StdEncoding.EncodeToString(f.requester.SignPub),
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := shnsdk.WriteBundle(dir, id, "payer", "https://holder.example"); err != nil {
+	registrar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(holders)
+	}))
+	t.Cleanup(registrar.Close)
+	// The payer's own CDS service, which the gateway forwards the leg to: its
+	// discovery lists the service, and it answers with no cards.
+	system := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			_, _ = w.Write([]byte(`{"services":[{"id":"svc","hook":"order-select"}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"cards":[]}`))
+	}))
+	t.Cleanup(system.Close)
+
+	dir := t.TempDir()
+	if f.payer, err = shnsdk.GenerateIdentity("h-payer-shutdown"); err != nil {
+		t.Fatal(err)
+	}
+	if err := shnsdk.WriteBundle(dir, f.payer, "payer", "https://holder.example"); err != nil {
 		t.Fatal(err)
 	}
 	key := filepath.Join(t.TempDir(), "key")
@@ -131,37 +176,81 @@ func newShutdownFlush(t *testing.T) *shutdownFlush {
 	}
 	f.env = map[string]string{
 		"ROLE": "payer", "SHN_SECRETS": dir, "SHN_DISCOVERY_URL": disc.URL,
-		"CONFORMANCE_ENFORCEMENT": "observe",
-		"FHIR_VALIDATE_URL":       validator.URL + "/fhir",
-		"FHIR_VALIDATE_URL_2_1":   validator.URL + "/fhir21",
-		"FHIR_VALIDATE_URL_2_2":   validator.URL + "/fhir22",
-		"FHIR_DATA_URL":           system.URL + "/fhir",
-		"PAYER_DAVINCI_BASE_URL":  system.URL,
-		"AUDIT_URL":               audit.URL,
-		"DIAGNOSTIC_SINK_URL":     ingest.URL + "/internal/pa-test/observations",
-		"DIAGNOSTIC_SOURCE":       "configured-test-payer",
-		"DIAGNOSTIC_KEY_FILE":     key,
+		"REGISTRAR_URL":                registrar.URL,
+		"CONFORMANCE_ENFORCEMENT":      "observe",
+		"FHIR_VALIDATE_URL":            validator.URL + "/fhir",
+		"FHIR_VALIDATE_URL_2_1":        validator.URL + "/fhir21",
+		"FHIR_VALIDATE_URL_2_2":        validator.URL + "/fhir22",
+		"PAYER_DAVINCI_BASE_URL":       system.URL,
+		"PAYER_DAVINCI_CRD_SERVICE_ID": "svc",
+		"DIAGNOSTIC_SINK_URL":          ingest.URL + "/internal/pa-test/observations",
+		"DIAGNOSTIC_SOURCE":            "configured-test-payer",
+		"DIAGNOSTIC_KEY_FILE":          key,
 	}
 	return f
 }
 
 func (f *shutdownFlush) getenv(k string) string { return f.env[k] }
 
-// read is one patient-access read, whose searchset is checked at observe off
-// the request path.
-func (f *shutdownFlush) read(target string) *http.Request {
-	tok := shnsdk.Token{
-		Operation: "patient-access-read", Scope: "patient-access-only", Subject: "p-shutdown-1",
-		Frame: "patient-access", Holder: "phg", CorrelationID: "corr-shutdown-1",
-		Expiry: time.Now().Add(time.Hour),
-	}
+// sign signs tok as the Authorization Framework does.
+func (f *shutdownFlush) sign(tok shnsdk.Token) shnsdk.Token {
+	tok.Signature = nil
 	unsigned, _ := json.Marshal(tok)
-	tok.Signature = ed25519.Sign(f.authzPriv, unsigned)
-	raw, _ := json.Marshal(tok)
-	req := httptest.NewRequest(http.MethodGet, target+"/ExplanationOfBenefit?patient=p-shutdown-1", nil)
-	req.RequestURI = ""
-	req.Header.Set("Authorization", "Bearer "+base64.StdEncoding.EncodeToString(raw))
-	return req
+	tok.Signature = ed25519.Sign(f.netPriv, unsigned)
+	return tok
+}
+
+// shutdownCRDRequest is a CRD order-select whose order, coverage and context
+// all name shutdownMember.
+const shutdownCRDRequest = `{"hook":"order-select","hookInstance":"hi-shutdown",` +
+	`"context":{"userId":"Practitioner/p1","patientId":"` + shutdownMember + `",` +
+	`"draftOrders":{"resourceType":"Bundle","type":"collection","entry":[{"fullUrl":"urn:uuid:sr1","resource":` +
+	`{"resourceType":"ServiceRequest","id":"sr1","status":"draft","intent":"order","subject":{"reference":"Patient/` + shutdownMember + `"},` +
+	`"code":{"coding":[{"system":"http://www.ama-assn.org/go/cpt","code":"72148"}]}}}]},"selections":["ServiceRequest/sr1"]},` +
+	`"prefetch":{"coverage":{"resourceType":"Coverage","id":"c1","beneficiary":{"reference":"Patient/` + shutdownMember + `"}}}}`
+
+// deliver is one CRD order-select leg the Hub forwards to the payer gateway at
+// base: sealed to the payer, authorized by a token bound to its ciphertext,
+// and carrying the Hub's assertion. The payer checks the order at observe off
+// the request path, forwards the leg to its system and answers.
+func (f *shutdownFlush) deliver(t *testing.T, base string) {
+	t.Helper()
+	now := time.Now()
+	corr := "corr-shutdown-" + randHex(t, 4)
+	env, err := shnsdk.Seal(shnsdk.Metadata{
+		Sender: f.requester.HolderID, Recipient: f.payer.HolderID, TransactionType: "crd-order-select",
+		AuthorityFrame: "provider-tpo", Timestamp: now.Format(time.RFC3339), CorrelationID: corr,
+	}, []byte(shutdownCRDRequest), f.payer.EncPub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(env.Ciphertext)
+	tok := shnsdk.Token{
+		Operation: "crd-order-select", Scope: "crd-context", Subject: shnsdk.ResolvePCI(shutdownMember, "1970-01-01", "Shutdown"),
+		Frame: "provider-tpo", Holder: f.requester.HolderID, CorrelationID: corr,
+		PayloadHash: hex.EncodeToString(digest[:]), Expiry: now.Add(time.Hour),
+	}
+	tokJSON, _ := json.Marshal(f.sign(tok))
+	env.Metadata.AuthzToken = string(tokJSON)
+	raw, err := shnsdk.EncodeEnvelope(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	as, _ := json.Marshal(shnsdk.IssueAssertion("hub", f.payer.HolderID, f.netPriv, now, time.Minute))
+	req, err := http.NewRequest(http.MethodPost, base+"/substrate/inbound", bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Hub-Assertion", base64.StdEncoding.EncodeToString(as))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("crd-order-select leg = %d %s, want 200 with its check queued", resp.StatusCode, body)
+	}
 }
 
 func awaitFlush(t *testing.T, ch <-chan struct{}, d time.Duration, label string) {
@@ -221,12 +310,10 @@ func TestShutdownDeliversTheFindingsItFlushes(t *testing.T) {
 		}
 		closer := h.(io.Closer)
 		t.Cleanup(func() { f.release(); _ = closer.Close() }) // idempotent; joins the runtime if the test fails early
+		srv := httptest.NewServer(h)
+		t.Cleanup(srv.Close)
 		awaitFlush(t, f.heartbeat, 5*time.Second, "the publisher's first heartbeat")
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, f.read(""))
-		if rec.Code != http.StatusOK {
-			t.Fatalf("patient-access read = %d %s, want 200 with its check queued", rec.Code, rec.Body)
-		}
+		f.deliver(t, srv.URL)
 		f.deliversFlushedFinding(t, func() <-chan struct{} {
 			done := make(chan struct{})
 			go func() { _ = closer.Close(); close(done) }()
@@ -245,7 +332,7 @@ func TestShutdownDeliversTheFindingsItFlushes(t *testing.T) {
 		t.Cleanup(func() { cancel(); f.release(); <-done })
 		awaitFlush(t, f.heartbeat, 5*time.Second, "the publisher's first heartbeat")
 		// The listener starts after the publisher; Run says nothing when it is
-		// up, so the read waits, bounded, for it to accept.
+		// up, so the leg waits, bounded, for it to accept.
 		deadline := time.Now().Add(5 * time.Second)
 		for {
 			c, err := net.Dial("tcp", addr)
@@ -263,15 +350,7 @@ func TestShutdownDeliversTheFindingsItFlushes(t *testing.T) {
 			}
 			time.Sleep(10 * time.Millisecond)
 		}
-		resp, err := http.DefaultClient.Do(f.read("http://" + addr))
-		if err != nil {
-			t.Fatal(err)
-		}
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("patient-access read = %d %s, want 200 with its check queued", resp.StatusCode, body)
-		}
+		f.deliver(t, "http://"+addr)
 		f.deliversFlushedFinding(t, func() <-chan struct{} { cancel(); return done })
 		if runErr != nil {
 			t.Fatalf("Run: %v", runErr)

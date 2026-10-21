@@ -64,7 +64,7 @@ func TestDirectBearer_Accepted_ES384(t *testing.T) {
 	now := ingressFixedClock()()
 	aud := testIngressBaseURL + "/cds-services/order-sign-crd"
 	tok := signJWT(t, jwt.SigningMethodES384, key, directClaims("br-provider", aud, now))
-	if !s.verifyDirectBearer(directBearerReq(tok)) {
+	if _, ok := s.verifyDirectBearer(directBearerReq(tok)); !ok {
 		t.Fatal("valid ES384 direct bearer rejected")
 	}
 }
@@ -75,7 +75,7 @@ func TestDirectBearer_Accepted_RS384(t *testing.T) {
 	now := ingressFixedClock()()
 	aud := testIngressBaseURL + "/Questionnaire/$questionnaire-package"
 	tok := signJWT(t, jwt.SigningMethodRS384, key, directClaims("br-provider", aud, now))
-	if !s.verifyDirectBearer(directBearerReq(tok)) {
+	if _, ok := s.verifyDirectBearer(directBearerReq(tok)); !ok {
 		t.Fatal("valid RS384 direct bearer rejected")
 	}
 }
@@ -99,13 +99,13 @@ func TestDirectBearer_Disjoint(t *testing.T) {
 	}
 	issuedReq, _ := http.NewRequest(http.MethodPost, testIngressBaseURL+"/cds-services/x", nil)
 	issuedReq.Header.Set("Authorization", "Bearer "+issued)
-	if s.verifyDirectBearer(issuedReq) {
+	if _, ok := s.verifyDirectBearer(issuedReq); ok {
 		t.Error("issued ephemeral bearer wrongly accepted by the direct path (it has no iss)")
 	}
 
 	aud := testIngressBaseURL + "/cds-services/order-sign-crd"
 	direct := signJWT(t, jwt.SigningMethodES384, key, directClaims("br-provider", aud, now))
-	if ok, unavailable := s.verifyBearer(directBearerReq(direct)); ok || unavailable {
+	if _, ok, unavailable := s.verifyBearer(directBearerReq(direct)); ok || unavailable {
 		t.Errorf("direct bearer through verifyBearer = ok:%v unavailable:%v; want a plain refusal (foreign key, not a store outage)", ok, unavailable)
 	}
 }
@@ -155,7 +155,7 @@ func TestDirectBearer_Rejections(t *testing.T) {
 		})},
 	}
 	for _, row := range rows {
-		if s.verifyDirectBearer(directBearerReq(row.tok)) {
+		if _, ok := s.verifyDirectBearer(directBearerReq(row.tok)); ok {
 			t.Errorf("%s: direct bearer wrongly ACCEPTED", row.name)
 		}
 	}
@@ -170,10 +170,10 @@ func TestDirectBearer_JTIReusableWithinExp(t *testing.T) {
 	now := ingressFixedClock()()
 	aud := testIngressBaseURL + "/cds-services/order-sign-crd"
 	tok := signJWT(t, jwt.SigningMethodES384, key, directClaims("br-provider", aud, now))
-	if !s.verifyDirectBearer(directBearerReq(tok)) {
+	if _, ok := s.verifyDirectBearer(directBearerReq(tok)); !ok {
 		t.Fatal("first presentation rejected")
 	}
-	if !s.verifyDirectBearer(directBearerReq(tok)) {
+	if _, ok := s.verifyDirectBearer(directBearerReq(tok)); !ok {
 		t.Error("second presentation of the same jti rejected — should be reusable within exp (baseline)")
 	}
 }

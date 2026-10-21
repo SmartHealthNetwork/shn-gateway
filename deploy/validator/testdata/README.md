@@ -1,7 +1,7 @@
 # Offline-proof probe fixtures
 
-Vendored copies of the four initialization resources used by `verify.sh` to prove the validator
-resolves the Da Vinci PAS/DTR/PDex/CDex profiles **offline** (the network is
+Vendored copies of the three initialization resources used by `verify.sh` to prove the validator
+resolves the Da Vinci PAS/DTR/CDex profiles **offline** (the network is
 isolated during the proof) and to characterize slicing/discriminator outcomes, including the
 exact informational messages permitted by open slicing. These initialization checks are distinct
 from the strict PAS verdict qualification: each line also vendors approved, denied and pended PAS
@@ -10,7 +10,7 @@ the PAS/DTR initialization pairs and PAS response copies to remain byte-identica
 registered source fixtures.
 Everything stays here so the proof runs from a bare clone of the published gateway repo.
 
-The same four (per line) begin the image's readiness sequence: `healthcheck.go`
+The same three (per line) begin the image's readiness sequence: `healthcheck.go`
 embeds this directory (`//go:embed`, copied into the `hc` build stage by the
 Dockerfile). The PID-1 supervisor follows them with fixed PAS priming, two clean
 qualification passes and targeted negative controls. It does this sequentially once per
@@ -25,7 +25,7 @@ derived from the corresponding approved resource by changing the nested
 the specific profile type rejection, not a parser error or an arbitrary server
 failure.
 
-The four initialization fixtures retain a different contract. They prove profile
+The three initialization fixtures retain a different contract. They prove profile
 resolution and fence slicing/discriminator failures, while documented offline
 terminology errors are reported separately. The PAS request Bundle legitimately
 contains non-Claim entries under its open `Bundle.entry` slice; the verifier counts
@@ -39,11 +39,10 @@ fixtures, and this finite set is not a claim about every resource accepted by HA
 `2.1/` and `2.2/` vendor the PAS/DTR-line-bearing initialization pair
 (`claim-bundle.json`, `questionnaireresponse-autofill.json`) and the three PAS
 ClaimResponse verdict fixtures from that line's matching corpus, used by `verify.sh`'s
-per-line probe against the matching `hapi-<line>` sidecar image. The PDex EOB
-and CDex Task probes (`eob-approved.json`, `cdex-task-data-request.json`) stay
-in this top-level directory and are reused for every line — PDex/CDex are
-line-neutral (a single native line each; see the manifest's `shared` block),
-so there is no per-line variant to vendor.
+per-line probe against the matching `hapi-<line>` sidecar image. The CDex Task
+probe (`cdex-task-data-request.json`) stays in this top-level directory and is
+reused for every line — CDex is line-neutral (a single native line; see the
+manifest's `shared` block), so there is no per-line variant to vendor.
 
 ## Encounter rows
 

@@ -1,5 +1,5 @@
 # FR-G3 config-only validator sidecar: the digest-pinned hapiproject/hapi engine's WAR
-# (backported) on the pinned distroless Java base, + all eight FHIR IGs baked
+# (backported) on the pinned distroless Java base, + all seven FHIR IGs baked
 # OFFLINE (downloaded at build time, loaded at runtime from file://, no registry
 # egress at boot). The HAPI engine is the same digest-pinned one the network's
 # conformance testing runs, so what is tested is what partners deploy.
@@ -32,7 +32,7 @@ RUN --network=none case "$TARGETPLATFORM" in \
       *) exit 2 ;; \
     esac && /src/build.sh /input/main.war /out "$TARGETPLATFORM" "$source_child" "$compiler_child"
 
-FROM golang:1.26.9-alpine@sha256:cdfd4fe2da6b225d8b40c6b7a105736e548e83ff56d5d8f9394446eeb5eb84e0 AS hc
+FROM golang:1.26.10-alpine@sha256:9ce231b28998b32e116927c61aa5c406183061d4f3f2d61b292c88e7f6bdf7ca AS hc
 WORKDIR /src
 COPY go.mod *.go ./
 COPY testdata ./testdata
@@ -55,8 +55,6 @@ RUN curl --retry 5 --retry-delay 5 --retry-all-errors -fLSso hl7.fhir.us.core-6.
  && echo "a2840c31da3277d7b78c74baf65bcbeee97ddfe4f956810bffd79d9cfe5c64f0  hl7.fhir.us.davinci-dtr-2.0.1.tgz" | sha256sum -c \
  && curl --retry 5 --retry-delay 5 --retry-all-errors -fLSso hl7.fhir.us.davinci-pas-2.0.1.tgz https://packages.simplifier.net/hl7.fhir.us.davinci-pas/2.0.1 \
  && echo "1ba4159f2a1ea000dfb1685601bfc902c603a1c59ce2127118ee0a7aec694218  hl7.fhir.us.davinci-pas-2.0.1.tgz" | sha256sum -c \
- && curl --retry 5 --retry-delay 5 --retry-all-errors -fLSso hl7.fhir.us.davinci-pdex-2.1.0.tgz https://packages.simplifier.net/hl7.fhir.us.davinci-pdex/2.1.0 \
- && echo "da9e8b3a1e702e911a4473545e22e753d3219d2374ddd7889994ae0e38929571  hl7.fhir.us.davinci-pdex-2.1.0.tgz" | sha256sum -c \
  && curl --retry 5 --retry-delay 5 --retry-all-errors -fLSso hl7.fhir.uv.sdc-3.0.0.tgz https://packages.simplifier.net/hl7.fhir.uv.sdc/3.0.0 \
  && echo "be5c3f0a7f82e072b40739e05fb68f3e58e44c9bd040cd901b1b55c62f23dca2  hl7.fhir.uv.sdc-3.0.0.tgz" | sha256sum -c \
  && curl --retry 5 --retry-delay 5 --retry-all-errors -fLSso hl7.fhir.us.davinci-cdex-2.1.0.tgz https://packages.simplifier.net/hl7.fhir.us.davinci-cdex/2.1.0 \
@@ -84,8 +82,6 @@ RUN curl --retry 5 --retry-delay 5 --retry-all-errors -fLSso hl7.fhir.us.core-7.
  && echo "4e6e1b3c26b41d75433cb3c16345272b59ec40d00667245d07610b74779df640  hl7.fhir.us.davinci-dtr-2.1.0.tgz" | sha256sum -c \
  && curl --retry 5 --retry-delay 5 --retry-all-errors -fLSso hl7.fhir.us.davinci-pas-2.1.0.tgz https://packages.simplifier.net/hl7.fhir.us.davinci-pas/2.1.0 \
  && echo "a0daef9c5acf6954c15ebd713477ce49962e56c0c2ac4362d1381aee8f7892df  hl7.fhir.us.davinci-pas-2.1.0.tgz" | sha256sum -c \
- && curl --retry 5 --retry-delay 5 --retry-all-errors -fLSso hl7.fhir.us.davinci-pdex-2.1.0.tgz https://packages.simplifier.net/hl7.fhir.us.davinci-pdex/2.1.0 \
- && echo "da9e8b3a1e702e911a4473545e22e753d3219d2374ddd7889994ae0e38929571  hl7.fhir.us.davinci-pdex-2.1.0.tgz" | sha256sum -c \
  && curl --retry 5 --retry-delay 5 --retry-all-errors -fLSso hl7.fhir.uv.sdc-3.0.0.tgz https://packages.simplifier.net/hl7.fhir.uv.sdc/3.0.0 \
  && echo "be5c3f0a7f82e072b40739e05fb68f3e58e44c9bd040cd901b1b55c62f23dca2  hl7.fhir.uv.sdc-3.0.0.tgz" | sha256sum -c \
  && curl --retry 5 --retry-delay 5 --retry-all-errors -fLSso hl7.fhir.us.davinci-cdex-2.1.0.tgz https://packages.simplifier.net/hl7.fhir.us.davinci-cdex/2.1.0 \
@@ -107,8 +103,6 @@ RUN curl --retry 5 --retry-delay 5 --retry-all-errors -fLSso hl7.fhir.us.core-7.
  && echo "027894027a86e3a250252ac61476f82ca509a2ed04dbd4bad0816d2e24f204ea  hl7.fhir.us.davinci-dtr-2.2.0.tgz" | sha256sum -c \
  && curl --retry 5 --retry-delay 5 --retry-all-errors -fLSso hl7.fhir.us.davinci-pas-2.2.1.tgz https://packages.simplifier.net/hl7.fhir.us.davinci-pas/2.2.1 \
  && echo "da2aac8e480ce66fe27812af18e3c9bc190b08a33d5d7e1c850caf9097fb210e  hl7.fhir.us.davinci-pas-2.2.1.tgz" | sha256sum -c \
- && curl --retry 5 --retry-delay 5 --retry-all-errors -fLSso hl7.fhir.us.davinci-pdex-2.1.0.tgz https://packages.simplifier.net/hl7.fhir.us.davinci-pdex/2.1.0 \
- && echo "da9e8b3a1e702e911a4473545e22e753d3219d2374ddd7889994ae0e38929571  hl7.fhir.us.davinci-pdex-2.1.0.tgz" | sha256sum -c \
  && curl --retry 5 --retry-delay 5 --retry-all-errors -fLSso hl7.fhir.uv.sdc-4.0.0.tgz https://packages.simplifier.net/hl7.fhir.uv.sdc/4.0.0 \
  && echo "d785be8474c7ec7988e32e326430d9ca4aeb2cac4a1f195022e4d6f7dc5c5291  hl7.fhir.uv.sdc-4.0.0.tgz" | sha256sum -c \
  && curl --retry 5 --retry-delay 5 --retry-all-errors -fLSso hl7.fhir.us.davinci-cdex-2.1.0.tgz https://packages.simplifier.net/hl7.fhir.us.davinci-cdex/2.1.0 \
@@ -130,6 +124,9 @@ WORKDIR /app
 
 # Stage: 2.0-line HAPI validator with its IGs baked + loaded from file:// (offline at runtime).
 FROM hapi-runtime AS hapi-2.0
+# The HAPI starter serves an MCP server by default (/mcp/messages, /sse), a second way into
+# the FHIR server that nothing here uses: it stays off.
+ENV SPRING_AI_MCP_SERVER_ENABLED=false
 COPY --from=backport /out/main.war /app/main.war
 COPY --from=backport /out/provenance.json /app/backport-provenance.json
 LABEL org.shn.validator.backport.class="51c76b59364b8927a40efb29232945289974ff540b53b623adc9031886bb47f5"
@@ -152,9 +149,6 @@ ENV SHN_IG_LINE=2.0 \
     hapi.fhir.implementationguides.pas.packageUrl=file:///packages/hl7.fhir.us.davinci-pas-2.0.1.tgz \
     hapi.fhir.implementationguides.pas.name=hl7.fhir.us.davinci-pas \
     hapi.fhir.implementationguides.pas.version=2.0.1 \
-    hapi.fhir.implementationguides.pdex.packageUrl=file:///packages/hl7.fhir.us.davinci-pdex-2.1.0.tgz \
-    hapi.fhir.implementationguides.pdex.name=hl7.fhir.us.davinci-pdex \
-    hapi.fhir.implementationguides.pdex.version=2.1.0 \
     hapi.fhir.implementationguides.sdc.packageUrl=file:///packages/hl7.fhir.uv.sdc-3.0.0.tgz \
     hapi.fhir.implementationguides.sdc.name=hl7.fhir.uv.sdc \
     hapi.fhir.implementationguides.sdc.version=3.0.0 \
@@ -173,6 +167,8 @@ ENV SHN_IG_LINE=2.0 \
 
 # Stage: 2.1-line HAPI validator with its IGs baked + loaded from file:// (offline at runtime).
 FROM hapi-runtime AS hapi-2.1
+# MCP server off, as in the 2.0 stage.
+ENV SPRING_AI_MCP_SERVER_ENABLED=false
 COPY --from=backport /out/main.war /app/main.war
 COPY --from=backport /out/provenance.json /app/backport-provenance.json
 LABEL org.shn.validator.backport.class="51c76b59364b8927a40efb29232945289974ff540b53b623adc9031886bb47f5"
@@ -195,9 +191,6 @@ ENV SHN_IG_LINE=2.1 \
     hapi.fhir.implementationguides.pas.packageUrl=file:///packages/hl7.fhir.us.davinci-pas-2.1.0.tgz \
     hapi.fhir.implementationguides.pas.name=hl7.fhir.us.davinci-pas \
     hapi.fhir.implementationguides.pas.version=2.1.0 \
-    hapi.fhir.implementationguides.pdex.packageUrl=file:///packages/hl7.fhir.us.davinci-pdex-2.1.0.tgz \
-    hapi.fhir.implementationguides.pdex.name=hl7.fhir.us.davinci-pdex \
-    hapi.fhir.implementationguides.pdex.version=2.1.0 \
     hapi.fhir.implementationguides.sdc.packageUrl=file:///packages/hl7.fhir.uv.sdc-3.0.0.tgz \
     hapi.fhir.implementationguides.sdc.name=hl7.fhir.uv.sdc \
     hapi.fhir.implementationguides.sdc.version=3.0.0 \
@@ -216,6 +209,8 @@ ENV SHN_IG_LINE=2.1 \
 
 # Stage: 2.2-line HAPI validator with its IGs baked + loaded from file:// (offline at runtime).
 FROM hapi-runtime AS hapi-2.2
+# MCP server off, as in the 2.0 stage.
+ENV SPRING_AI_MCP_SERVER_ENABLED=false
 COPY --from=backport /out/main.war /app/main.war
 COPY --from=backport /out/provenance.json /app/backport-provenance.json
 LABEL org.shn.validator.backport.class="51c76b59364b8927a40efb29232945289974ff540b53b623adc9031886bb47f5"
@@ -238,9 +233,6 @@ ENV SHN_IG_LINE=2.2 \
     hapi.fhir.implementationguides.pas.packageUrl=file:///packages/hl7.fhir.us.davinci-pas-2.2.1.tgz \
     hapi.fhir.implementationguides.pas.name=hl7.fhir.us.davinci-pas \
     hapi.fhir.implementationguides.pas.version=2.2.1 \
-    hapi.fhir.implementationguides.pdex.packageUrl=file:///packages/hl7.fhir.us.davinci-pdex-2.1.0.tgz \
-    hapi.fhir.implementationguides.pdex.name=hl7.fhir.us.davinci-pdex \
-    hapi.fhir.implementationguides.pdex.version=2.1.0 \
     hapi.fhir.implementationguides.sdc.packageUrl=file:///packages/hl7.fhir.uv.sdc-4.0.0.tgz \
     hapi.fhir.implementationguides.sdc.name=hl7.fhir.uv.sdc \
     hapi.fhir.implementationguides.sdc.version=4.0.0 \

@@ -1,0 +1,225 @@
+unlaned | pa.crd@ | contract-line canonical | serves true | line canonical
+unlaned | pa.crd@2.0 | contract-line canonical | serves true | line -
+unlaned | pa.crd@2.1 | contract-line canonical | serves true | line -
+unlaned | pa.crd@2.2 | contract-line canonical | serves true | line -
+unlaned | pa.crd@9.9 | contract-line canonical | serves true | line -
+unlaned | pa.dtr@ | contract-line canonical | serves true | line canonical
+unlaned | pa.dtr@2.0 | contract-line canonical | serves true | line -
+unlaned | pa.dtr@2.1 | contract-line canonical | serves true | line -
+unlaned | pa.dtr@2.2 | contract-line canonical | serves true | line -
+unlaned | pa.dtr@9.9 | contract-line canonical | serves true | line -
+unlaned | pa.pas@ | contract-line canonical | serves true | line canonical
+unlaned | pa.pas@2.0 | contract-line canonical | serves true | line -
+unlaned | pa.pas@2.1 | contract-line canonical | serves true | line -
+unlaned | pa.pas@2.2 | contract-line canonical | serves true | line -
+unlaned | pa.pas@9.9 | contract-line canonical | serves true | line -
+unlaned | pa.pdex@ | contract-line canonical | serves true | line canonical
+unlaned | pa.pdex@2.0 | contract-line canonical | serves true | line -
+unlaned | pa.pdex@2.1 | contract-line canonical | serves true | line -
+unlaned | pa.pdex@2.2 | contract-line canonical | serves true | line -
+unlaned | pa.pdex@9.9 | contract-line canonical | serves true | line -
+unlaned | x.unknown@ | contract-line canonical | serves true | line canonical
+unlaned | x.unknown@2.0 | contract-line canonical | serves true | line -
+unlaned | x.unknown@2.1 | contract-line canonical | serves true | line -
+unlaned | x.unknown@2.2 | contract-line canonical | serves true | line -
+unlaned | x.unknown@9.9 | contract-line canonical | serves true | line -
+explicit lanes | pa.crd@ | contract-line canonical | serves true | line canonical
+explicit lanes | pa.crd@2.0 | contract-line canonical | serves true | line -
+explicit lanes | pa.crd@2.1 | contract-line explicit-2.1 | serves true | line -
+explicit lanes | pa.crd@2.2 | contract-line explicit-2.2 | serves true | line -
+explicit lanes | pa.crd@9.9 | contract-line - | serves false | line -
+explicit lanes | pa.dtr@ | contract-line canonical | serves true | line canonical
+explicit lanes | pa.dtr@2.0 | contract-line canonical | serves true | line -
+explicit lanes | pa.dtr@2.1 | contract-line explicit-2.1 | serves true | line -
+explicit lanes | pa.dtr@2.2 | contract-line explicit-2.2 | serves true | line -
+explicit lanes | pa.dtr@9.9 | contract-line - | serves false | line -
+explicit lanes | pa.pas@ | contract-line canonical | serves true | line canonical
+explicit lanes | pa.pas@2.0 | contract-line canonical | serves true | line -
+explicit lanes | pa.pas@2.1 | contract-line explicit-2.1 | serves true | line -
+explicit lanes | pa.pas@2.2 | contract-line explicit-2.2 | serves true | line -
+explicit lanes | pa.pas@9.9 | contract-line - | serves false | line -
+explicit lanes | pa.pdex@ | contract-line canonical | serves true | line canonical
+explicit lanes | pa.pdex@2.0 | contract-line - | serves false | line -
+explicit lanes | pa.pdex@2.1 | contract-line - | serves false | line -
+explicit lanes | pa.pdex@2.2 | contract-line - | serves false | line -
+explicit lanes | pa.pdex@9.9 | contract-line - | serves false | line -
+explicit lanes | x.unknown@ | contract-line canonical | serves true | line canonical
+explicit lanes | x.unknown@2.0 | contract-line - | serves false | line -
+explicit lanes | x.unknown@2.1 | contract-line - | serves false | line -
+explicit lanes | x.unknown@2.2 | contract-line - | serves false | line -
+explicit lanes | x.unknown@9.9 | contract-line - | serves false | line -
+explicit 2.1 only | pa.crd@ | contract-line canonical | serves true | line canonical
+explicit 2.1 only | pa.crd@2.0 | contract-line canonical | serves true | line -
+explicit 2.1 only | pa.crd@2.1 | contract-line explicit-2.1 | serves true | line -
+explicit 2.1 only | pa.crd@2.2 | contract-line - | serves false | line -
+explicit 2.1 only | pa.crd@9.9 | contract-line - | serves false | line -
+explicit 2.1 only | pa.dtr@ | contract-line canonical | serves true | line canonical
+explicit 2.1 only | pa.dtr@2.0 | contract-line canonical | serves true | line -
+explicit 2.1 only | pa.dtr@2.1 | contract-line explicit-2.1 | serves true | line -
+explicit 2.1 only | pa.dtr@2.2 | contract-line - | serves false | line -
+explicit 2.1 only | pa.dtr@9.9 | contract-line - | serves false | line -
+explicit 2.1 only | pa.pas@ | contract-line canonical | serves true | line canonical
+explicit 2.1 only | pa.pas@2.0 | contract-line canonical | serves true | line -
+explicit 2.1 only | pa.pas@2.1 | contract-line explicit-2.1 | serves true | line -
+explicit 2.1 only | pa.pas@2.2 | contract-line - | serves false | line -
+explicit 2.1 only | pa.pas@9.9 | contract-line - | serves false | line -
+explicit 2.1 only | pa.pdex@ | contract-line canonical | serves true | line canonical
+explicit 2.1 only | pa.pdex@2.0 | contract-line - | serves false | line -
+explicit 2.1 only | pa.pdex@2.1 | contract-line - | serves false | line -
+explicit 2.1 only | pa.pdex@2.2 | contract-line - | serves false | line -
+explicit 2.1 only | pa.pdex@9.9 | contract-line - | serves false | line -
+explicit 2.1 only | x.unknown@ | contract-line canonical | serves true | line canonical
+explicit 2.1 only | x.unknown@2.0 | contract-line - | serves false | line -
+explicit 2.1 only | x.unknown@2.1 | contract-line - | serves false | line -
+explicit 2.1 only | x.unknown@2.2 | contract-line - | serves false | line -
+explicit 2.1 only | x.unknown@9.9 | contract-line - | serves false | line -
+default lanes ready | pa.crd@ | contract-line canonical | serves true | line canonical
+default lanes ready | pa.crd@2.0 | contract-line canonical | serves true | line -
+default lanes ready | pa.crd@2.1 | contract-line default-2.1-ready | serves true | line -
+default lanes ready | pa.crd@2.2 | contract-line default-2.2-ready | serves true | line -
+default lanes ready | pa.crd@9.9 | contract-line - | serves false | line -
+default lanes ready | pa.dtr@ | contract-line canonical | serves true | line canonical
+default lanes ready | pa.dtr@2.0 | contract-line canonical | serves true | line -
+default lanes ready | pa.dtr@2.1 | contract-line default-2.1-ready | serves true | line -
+default lanes ready | pa.dtr@2.2 | contract-line default-2.2-ready | serves true | line -
+default lanes ready | pa.dtr@9.9 | contract-line - | serves false | line -
+default lanes ready | pa.pas@ | contract-line canonical | serves true | line canonical
+default lanes ready | pa.pas@2.0 | contract-line canonical | serves true | line -
+default lanes ready | pa.pas@2.1 | contract-line default-2.1-ready | serves true | line -
+default lanes ready | pa.pas@2.2 | contract-line default-2.2-ready | serves true | line -
+default lanes ready | pa.pas@9.9 | contract-line - | serves false | line -
+default lanes ready | pa.pdex@ | contract-line canonical | serves true | line canonical
+default lanes ready | pa.pdex@2.0 | contract-line - | serves false | line -
+default lanes ready | pa.pdex@2.1 | contract-line - | serves false | line -
+default lanes ready | pa.pdex@2.2 | contract-line - | serves false | line -
+default lanes ready | pa.pdex@9.9 | contract-line - | serves false | line -
+default lanes ready | x.unknown@ | contract-line canonical | serves true | line canonical
+default lanes ready | x.unknown@2.0 | contract-line - | serves false | line -
+default lanes ready | x.unknown@2.1 | contract-line - | serves false | line -
+default lanes ready | x.unknown@2.2 | contract-line - | serves false | line -
+default lanes ready | x.unknown@9.9 | contract-line - | serves false | line -
+default lanes warming | pa.crd@ | contract-line canonical | serves true | line canonical
+default lanes warming | pa.crd@2.0 | contract-line canonical | serves true | line -
+default lanes warming | pa.crd@2.1 | contract-line - | serves false | line -
+default lanes warming | pa.crd@2.2 | contract-line - | serves false | line -
+default lanes warming | pa.crd@9.9 | contract-line - | serves false | line -
+default lanes warming | pa.dtr@ | contract-line canonical | serves true | line canonical
+default lanes warming | pa.dtr@2.0 | contract-line canonical | serves true | line -
+default lanes warming | pa.dtr@2.1 | contract-line - | serves false | line -
+default lanes warming | pa.dtr@2.2 | contract-line - | serves false | line -
+default lanes warming | pa.dtr@9.9 | contract-line - | serves false | line -
+default lanes warming | pa.pas@ | contract-line canonical | serves true | line canonical
+default lanes warming | pa.pas@2.0 | contract-line canonical | serves true | line -
+default lanes warming | pa.pas@2.1 | contract-line - | serves false | line -
+default lanes warming | pa.pas@2.2 | contract-line - | serves false | line -
+default lanes warming | pa.pas@9.9 | contract-line - | serves false | line -
+default lanes warming | pa.pdex@ | contract-line canonical | serves true | line canonical
+default lanes warming | pa.pdex@2.0 | contract-line - | serves false | line -
+default lanes warming | pa.pdex@2.1 | contract-line - | serves false | line -
+default lanes warming | pa.pdex@2.2 | contract-line - | serves false | line -
+default lanes warming | pa.pdex@9.9 | contract-line - | serves false | line -
+default lanes warming | x.unknown@ | contract-line canonical | serves true | line canonical
+default lanes warming | x.unknown@2.0 | contract-line - | serves false | line -
+default lanes warming | x.unknown@2.1 | contract-line - | serves false | line -
+default lanes warming | x.unknown@2.2 | contract-line - | serves false | line -
+default lanes warming | x.unknown@9.9 | contract-line - | serves false | line -
+single-line alias, default ready | pa.crd@ | contract-line canonical | serves true | line canonical
+single-line alias, default ready | pa.crd@2.0 | contract-line canonical | serves true | line -
+single-line alias, default ready | pa.crd@2.1 | contract-line default-2.1-ready | serves true | line -
+single-line alias, default ready | pa.crd@2.2 | contract-line - | serves false | line -
+single-line alias, default ready | pa.crd@9.9 | contract-line - | serves false | line -
+single-line alias, default ready | pa.dtr@ | contract-line canonical | serves true | line canonical
+single-line alias, default ready | pa.dtr@2.0 | contract-line canonical | serves true | line -
+single-line alias, default ready | pa.dtr@2.1 | contract-line default-2.1-ready | serves true | line -
+single-line alias, default ready | pa.dtr@2.2 | contract-line - | serves false | line -
+single-line alias, default ready | pa.dtr@9.9 | contract-line - | serves false | line -
+single-line alias, default ready | pa.pas@ | contract-line canonical | serves true | line canonical
+single-line alias, default ready | pa.pas@2.0 | contract-line canonical | serves true | line -
+single-line alias, default ready | pa.pas@2.1 | contract-line default-2.1-ready | serves true | line -
+single-line alias, default ready | pa.pas@2.2 | contract-line - | serves false | line -
+single-line alias, default ready | pa.pas@9.9 | contract-line - | serves false | line -
+single-line alias, default ready | pa.pdex@ | contract-line canonical | serves true | line canonical
+single-line alias, default ready | pa.pdex@2.0 | contract-line - | serves false | line -
+single-line alias, default ready | pa.pdex@2.1 | contract-line - | serves false | line -
+single-line alias, default ready | pa.pdex@2.2 | contract-line - | serves false | line -
+single-line alias, default ready | pa.pdex@9.9 | contract-line - | serves false | line -
+single-line alias, default ready | x.unknown@ | contract-line canonical | serves true | line canonical
+single-line alias, default ready | x.unknown@2.0 | contract-line - | serves false | line -
+single-line alias, default ready | x.unknown@2.1 | contract-line - | serves false | line -
+single-line alias, default ready | x.unknown@2.2 | contract-line - | serves false | line -
+single-line alias, default ready | x.unknown@9.9 | contract-line - | serves false | line -
+single-line alias, no default | pa.crd@ | contract-line canonical | serves true | line canonical
+single-line alias, no default | pa.crd@2.0 | contract-line canonical | serves true | line -
+single-line alias, no default | pa.crd@2.1 | contract-line - | serves false | line -
+single-line alias, no default | pa.crd@2.2 | contract-line - | serves false | line -
+single-line alias, no default | pa.crd@9.9 | contract-line - | serves false | line -
+single-line alias, no default | pa.dtr@ | contract-line canonical | serves true | line canonical
+single-line alias, no default | pa.dtr@2.0 | contract-line canonical | serves true | line -
+single-line alias, no default | pa.dtr@2.1 | contract-line - | serves false | line -
+single-line alias, no default | pa.dtr@2.2 | contract-line - | serves false | line -
+single-line alias, no default | pa.dtr@9.9 | contract-line - | serves false | line -
+single-line alias, no default | pa.pas@ | contract-line canonical | serves true | line canonical
+single-line alias, no default | pa.pas@2.0 | contract-line canonical | serves true | line -
+single-line alias, no default | pa.pas@2.1 | contract-line - | serves false | line -
+single-line alias, no default | pa.pas@2.2 | contract-line - | serves false | line -
+single-line alias, no default | pa.pas@9.9 | contract-line - | serves false | line -
+single-line alias, no default | pa.pdex@ | contract-line canonical | serves true | line canonical
+single-line alias, no default | pa.pdex@2.0 | contract-line - | serves false | line -
+single-line alias, no default | pa.pdex@2.1 | contract-line - | serves false | line -
+single-line alias, no default | pa.pdex@2.2 | contract-line - | serves false | line -
+single-line alias, no default | pa.pdex@9.9 | contract-line - | serves false | line -
+single-line alias, no default | x.unknown@ | contract-line canonical | serves true | line canonical
+single-line alias, no default | x.unknown@2.0 | contract-line - | serves false | line -
+single-line alias, no default | x.unknown@2.1 | contract-line - | serves false | line -
+single-line alias, no default | x.unknown@2.2 | contract-line - | serves false | line -
+single-line alias, no default | x.unknown@9.9 | contract-line - | serves false | line -
+canonical only, at none | pa.crd@ | contract-line canonical | serves true | line canonical
+canonical only, at none | pa.crd@2.0 | contract-line canonical | serves true | line -
+canonical only, at none | pa.crd@2.1 | contract-line - | serves false | line -
+canonical only, at none | pa.crd@2.2 | contract-line - | serves false | line -
+canonical only, at none | pa.crd@9.9 | contract-line - | serves false | line -
+canonical only, at none | pa.dtr@ | contract-line canonical | serves true | line canonical
+canonical only, at none | pa.dtr@2.0 | contract-line canonical | serves true | line -
+canonical only, at none | pa.dtr@2.1 | contract-line - | serves false | line -
+canonical only, at none | pa.dtr@2.2 | contract-line - | serves false | line -
+canonical only, at none | pa.dtr@9.9 | contract-line - | serves false | line -
+canonical only, at none | pa.pas@ | contract-line canonical | serves true | line canonical
+canonical only, at none | pa.pas@2.0 | contract-line canonical | serves true | line -
+canonical only, at none | pa.pas@2.1 | contract-line - | serves false | line -
+canonical only, at none | pa.pas@2.2 | contract-line - | serves false | line -
+canonical only, at none | pa.pas@9.9 | contract-line - | serves false | line -
+canonical only, at none | pa.pdex@ | contract-line canonical | serves true | line canonical
+canonical only, at none | pa.pdex@2.0 | contract-line - | serves false | line -
+canonical only, at none | pa.pdex@2.1 | contract-line - | serves false | line -
+canonical only, at none | pa.pdex@2.2 | contract-line - | serves false | line -
+canonical only, at none | pa.pdex@9.9 | contract-line - | serves false | line -
+canonical only, at none | x.unknown@ | contract-line canonical | serves true | line canonical
+canonical only, at none | x.unknown@2.0 | contract-line - | serves false | line -
+canonical only, at none | x.unknown@2.1 | contract-line - | serves false | line -
+canonical only, at none | x.unknown@2.2 | contract-line - | serves false | line -
+canonical only, at none | x.unknown@9.9 | contract-line - | serves false | line -
+no validator, at none | pa.crd@ | contract-line - | serves false | line -
+no validator, at none | pa.crd@2.0 | contract-line - | serves true | line -
+no validator, at none | pa.crd@2.1 | contract-line - | serves false | line -
+no validator, at none | pa.crd@2.2 | contract-line - | serves false | line -
+no validator, at none | pa.crd@9.9 | contract-line - | serves false | line -
+no validator, at none | pa.dtr@ | contract-line - | serves false | line -
+no validator, at none | pa.dtr@2.0 | contract-line - | serves true | line -
+no validator, at none | pa.dtr@2.1 | contract-line - | serves false | line -
+no validator, at none | pa.dtr@2.2 | contract-line - | serves false | line -
+no validator, at none | pa.dtr@9.9 | contract-line - | serves false | line -
+no validator, at none | pa.pas@ | contract-line - | serves false | line -
+no validator, at none | pa.pas@2.0 | contract-line - | serves true | line -
+no validator, at none | pa.pas@2.1 | contract-line - | serves false | line -
+no validator, at none | pa.pas@2.2 | contract-line - | serves false | line -
+no validator, at none | pa.pas@9.9 | contract-line - | serves false | line -
+no validator, at none | pa.pdex@ | contract-line - | serves false | line -
+no validator, at none | pa.pdex@2.0 | contract-line - | serves false | line -
+no validator, at none | pa.pdex@2.1 | contract-line - | serves false | line -
+no validator, at none | pa.pdex@2.2 | contract-line - | serves false | line -
+no validator, at none | pa.pdex@9.9 | contract-line - | serves false | line -
+no validator, at none | x.unknown@ | contract-line - | serves false | line -
+no validator, at none | x.unknown@2.0 | contract-line - | serves false | line -
+no validator, at none | x.unknown@2.1 | contract-line - | serves false | line -
+no validator, at none | x.unknown@2.2 | contract-line - | serves false | line -
+no validator, at none | x.unknown@9.9 | contract-line - | serves false | line -

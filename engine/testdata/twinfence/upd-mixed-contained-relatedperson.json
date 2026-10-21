@@ -126,8 +126,7 @@
                 "identifier": {
                   "system": "urn:shn:correlation",
                   "value": "twinfence-sub-0001"
-                },
-                "reference": "Claim/convergence-claim"
+                }
               }
             }
           ],
@@ -384,56 +383,6 @@
           ],
           "name": "Centers for Medicare and Medicaid Services",
           "resourceType": "Organization"
-        }
-      },
-      {
-        "fullUrl": "https://shn.example/fhir/Claim/convergence-claim",
-        "resource": {
-          "created": "2026-06-01T12:00:00Z",
-          "id": "convergence-claim",
-          "identifier": [
-            {
-              "system": "urn:shn:correlation",
-              "value": "twinfence-sub-0001"
-            }
-          ],
-          "insurance": [
-            {
-              "coverage": {
-                "reference": "Coverage/cov-twinfence"
-              },
-              "focal": true,
-              "sequence": 1
-            }
-          ],
-          "insurer": {
-            "reference": "Organization/org-cms-payer"
-          },
-          "patient": {
-            "reference": "Patient/MBR-COVERED"
-          },
-          "priority": {
-            "coding": [
-              {
-                "code": "normal",
-                "system": "http://terminology.hl7.org/CodeSystem/processpriority"
-              }
-            ]
-          },
-          "provider": {
-            "reference": "Organization/provider"
-          },
-          "resourceType": "Claim",
-          "status": "active",
-          "type": {
-            "coding": [
-              {
-                "code": "professional",
-                "system": "http://terminology.hl7.org/CodeSystem/claim-type"
-              }
-            ]
-          },
-          "use": "preauthorization"
         }
       },
       {

@@ -23,12 +23,8 @@ func pgStore(t *testing.T) storeUnderTest {
 	return s
 }
 
-// parityChecks runs the id contract both impls must satisfy identically —
-// including a REPLAYED eob id, which the in-memory store used to double-count while
-// PgStore deduped. That divergence is closed (MemStore holds the EOB ids in record
-// order and the bytes by id, exactly as the durable store's primary key does), so
-// the replay is exercised here rather than avoided: a mirror that is more
-// permissive than the oracle is hermetic green and live red.
+// parityChecks runs the Store contract both impls must satisfy identically: a
+// mirror that is more permissive than the oracle is hermetic green and live red.
 func parityChecks(t *testing.T, s storeUnderTest) {
 	t.Helper()
 	// auth number
@@ -59,23 +55,6 @@ func parityChecks(t *testing.T, s storeUnderTest) {
 	}
 	if ok, _ := s.BeginClaimUpdate("p", "c"); ok {
 		t.Fatal("Begin after finalize = true")
-	}
-	// EOB
-	_ = s.RecordEOB("pX", "eob-a", []byte(`{"n":1}`))
-	_ = s.RecordEOB("pX", "eob-b", []byte(`{"n":2}`))
-	if got, ok := s.EOBsForPatient("pX"); !ok || len(got) != 2 {
-		t.Fatalf("EOBsForPatient = %d,%v", len(got), ok)
-	}
-	if b, ok := s.EOBByID("eob-a"); !ok || string(b) != `{"n":1}` {
-		t.Fatalf("EOBByID = %q,%v", b, ok)
-	}
-	// A replayed id is ONE EOB on both backends, carrying the newest bytes.
-	_ = s.RecordEOB("pX", "eob-a", []byte(`{"n":3}`))
-	if got, ok := s.EOBsForPatient("pX"); !ok || len(got) != 2 {
-		t.Fatalf("EOBsForPatient after a replay = %d,%v, want 2", len(got), ok)
-	}
-	if b, ok := s.EOBByID("eob-a"); !ok || string(b) != `{"n":3}` {
-		t.Fatalf("EOBByID after a replay = %q,%v", b, ok)
 	}
 }
 

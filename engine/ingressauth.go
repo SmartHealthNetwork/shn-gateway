@@ -53,6 +53,11 @@ type IngressClientRegistration struct {
 	Alg          string   // "ES384" | "RS384"
 	PublicKeyPEM []byte   // PEM SubjectPublicKeyInfo
 	Scopes       []string // permitted scopes
+	// Module marks the client as a registered module ingress client of that
+	// compiled-in module (ModuleIDs; moduleclient.go): its requests are the
+	// gateway's own messages, each naming its builder in BuilderHeader. Empty
+	// for a native client, the participant's own system.
+	Module string
 }
 
 type ingressAuthServer struct {
@@ -87,6 +92,9 @@ func newIngressAuthServer(baseURL string, clients map[string]IngressClientRegist
 	}
 	if now == nil {
 		now = time.Now
+	}
+	if err := checkModuleRegistrations(clients); err != nil {
+		return nil, err
 	}
 	s := &ingressAuthServer{
 		baseURL: strings.TrimRight(baseURL, "/"),
@@ -337,13 +345,14 @@ func scopeAllowed(requested string, allowed []string) bool {
 // credential. The refusal itself is the same either way: a bearer whose kid cannot be
 // resolved is never admitted. The outage is counted here, at the one place that knows a
 // store call failed.
-func (s *ingressAuthServer) verifyBearer(r *http.Request) (ok bool, unavailable bool) {
+func (s *ingressAuthServer) verifyBearer(r *http.Request) (client string, ok bool, unavailable bool) {
 	raw, present := bearerToken(r.Header.Get("Authorization"))
 	if !present {
-		return false, false
+		return "", false, false
 	}
 	storeDown := false
-	_, err := jwt.Parse(raw, func(tok *jwt.Token) (any, error) {
+	claims := jwt.MapClaims{}
+	_, err := jwt.ParseWithClaims(raw, claims, func(tok *jwt.Token) (any, error) {
 		if tok.Method.Alg() != jwt.SigningMethodES384.Alg() {
 			return nil, fmt.Errorf("alg")
 		}
@@ -373,9 +382,14 @@ func (s *ingressAuthServer) verifyBearer(r *http.Request) (ok bool, unavailable 
 		jwt.WithTimeFunc(s.now))
 	if err != nil && storeDown {
 		s.noteStoreError(storeErrIngressKey)
-		return false, true
+		return "", false, true
 	}
-	return err == nil, false
+	if err != nil {
+		return "", false, false
+	}
+	// The client the gateway issued the bearer to (signBearer).
+	client, _ = claims["client_id"].(string)
+	return client, true, false
 }
 
 // audUnder reports whether aud is the config base itself or a path strictly under it.
@@ -396,26 +410,26 @@ func audUnder(aud, base string) bool {
 // It touches no shared store, so it keeps answering through a key-store outage.
 // Authority is edge-only (never reaches authorize()); org-level TPO; scope is advisory and
 // NOT enforced on either path. A registered client implicitly gains both auth modes.
-func (s *ingressAuthServer) verifyDirectBearer(r *http.Request) bool {
+func (s *ingressAuthServer) verifyDirectBearer(r *http.Request) (string, bool) {
 	raw, present := bearerToken(r.Header.Get("Authorization"))
 	if !present {
-		return false
+		return "", false
 	}
 
 	// Peek iss (unverified) → select the registered key + alg. An issued ephemeral bearer
 	// has no iss, so it fails here — keeping the two paths disjoint.
 	var unv jwt.MapClaims
 	if _, _, err := jwt.NewParser().ParseUnverified(raw, &unv); err != nil {
-		return false
+		return "", false
 	}
 	clientID, _ := unv["iss"].(string)
 	if clientID == "" {
-		return false
+		return "", false
 	}
 	reg, ok := s.clients[clientID]
 	pub := s.pubKeys[clientID]
 	if !ok || pub == nil {
-		return false
+		return "", false
 	}
 
 	// alg PINNED to the registration (no alg confusion); exp required; signature vs the
@@ -427,20 +441,20 @@ func (s *ingressAuthServer) verifyDirectBearer(r *http.Request) bool {
 		jwt.WithExpirationRequired(),
 		jwt.WithTimeFunc(s.now),
 	).ParseWithClaims(raw, claims, func(*jwt.Token) (any, error) { return pub, nil }); err != nil {
-		return false
+		return "", false
 	}
 	// sub is OPTIONAL: br-provider's CDS client JWT omits it (verified against the real
 	// token — it emits iss/aud/exp/iat/jti only). RFC 7523 client auth identifies the
 	// client by iss, which we verify against the REGISTERED key; an absent sub is accepted,
 	// but a PRESENT sub that differs from iss is rejected (no identity confusion).
 	if sub, present := claims["sub"].(string); present && sub != clientID {
-		return false
+		return "", false
 	}
 	// aud path-boundary-pinned to the config base (never r.Host). At least one aud entry
 	// must be the base or a path under it.
 	auds, err := claims.GetAudience()
 	if err != nil {
-		return false
+		return "", false
 	}
 	audOK := false
 	for _, a := range auds {
@@ -450,21 +464,21 @@ func (s *ingressAuthServer) verifyDirectBearer(r *http.Request) bool {
 		}
 	}
 	if !audOK {
-		return false
+		return "", false
 	}
 	// exp capped to <= now + maxAssertionLifetime (same as the assertion path).
 	expTime, err := claims.GetExpirationTime()
 	if err != nil || expTime == nil || expTime.Time.After(s.now().Add(maxAssertionLifetime)) {
-		return false
+		return "", false
 	}
 	// jti PRESENCE required but NOT one-time-use: a presented bearer is reusable within its
 	// exp, matching the replayable issued bearer (single-use would wedge
 	// br-provider's discovery-GET-then-hook-POST with one JWT and buys no security over the
 	// existing replayable-bearer posture).
 	if jtiVal, _ := claims["jti"].(string); jtiVal == "" {
-		return false
+		return "", false
 	}
-	return true
+	return clientID, true
 }
 
 func (s *ingressAuthServer) handleSmartConfig(w http.ResponseWriter, r *http.Request) {

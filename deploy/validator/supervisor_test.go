@@ -369,7 +369,7 @@ func TestLifecycleVerifierKeepsExactCorpusAndChildTests(t *testing.T) {
 	if childTests < 0 || build < 0 || childTests > build {
 		t.Fatal("controlled child tests must run before cross-build")
 	}
-	const vector = `s["posts"]==["Bundle","QuestionnaireResponse","ExplanationOfBenefit","Task"]+["ClaimResponse"]*30+["Bundle"]*4+["Claim"]*2+["ClaimResponse"]*2`
+	const vector = `s["posts"]==["Bundle","QuestionnaireResponse","Task"]+["ClaimResponse"]*30+["Bundle"]*4+["Claim"]*2+["ClaimResponse"]*2`
 	const profiles = `s["profiles"][-2:]==["http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claimresponse|9.9.9","https://example.org/fhir/StructureDefinition/unavailable-profile"]`
 	for _, guard := range []string{vector, profiles, `len(s["profiles"])==len(s["posts"])`, `s["maximum"]==1`} {
 		if !strings.Contains(script, guard) {

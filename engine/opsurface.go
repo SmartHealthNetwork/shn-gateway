@@ -1,21 +1,15 @@
-// opsurface.go — read-only export of the PA workstream catalog's operation
-// bindings. The other trust domains keep independent copies of these bindings
-// by design (the Hub is payload-blind and must not import this engine; the
-// published SDK is the partner-facing surface and imports neither), so a
-// divergence on a shared TransactionType would surface only as a live 400/403.
-// This accessor exists so a network-side lockstep conformance check can pin
-// those copies against this catalog — the same read-only-accessor precedent as
-// ChainSteps. It exposes only the wire-contract bindings (frames, operations and
-// the minimum-necessary scope the authorization policy signs for them); physics
-// and contract line stay internal.
+// opsurface.go — the operation surface of every compiled-in workstream: each
+// leg type's wire-contract operation binding, which the network-side lockstep
+// conformance check pins the Hub's, the SDK's and the accounts service's
+// copies against. A workstream's catalog fills it; PA's own accessor is in
+// workstream_pa_opsurface.go.
 package engine
 
-// PALegOperation is one leg type's wire-contract operation binding: the
-// authority frame and operation of the request leg and of the response leg,
-// and the minimum-necessary scope label both legs carry. The authorization
-// policy is the authority for Scope (it is the value signed into tokens and
-// audit records); the catalog mirrors it.
-type PALegOperation struct {
+// LegOperation is one leg type's wire-contract operation binding, whichever
+// workstream's catalog holds the leg: the authority frame and operation of the
+// request leg and of the response leg, and the minimum-necessary scope label
+// both legs carry.
+type LegOperation struct {
 	RequestFrame  string
 	RequestOp     string
 	ResponseFrame string
@@ -23,19 +17,23 @@ type PALegOperation struct {
 	Scope         string
 }
 
-// PALegOperations returns a fresh copy of the PA workstream catalog's
-// operation bindings, keyed by envelope TransactionType — the exact frames and
-// operations OriginateLeg stamps and handleInbound enforces, and each leg's
-// documentary Scope label. Mutating the returned map never touches the catalog.
-func PALegOperations() map[string]PALegOperation {
-	out := make(map[string]PALegOperation, len(paCatalog))
-	for legType, spec := range paCatalog {
-		out[legType] = PALegOperation{
-			RequestFrame:  spec.ReqFrame,
-			RequestOp:     spec.Op,
-			ResponseFrame: spec.RespFrame,
-			ResponseOp:    spec.RespOp,
-			Scope:         spec.Scope,
+// LegOperations returns a fresh copy of every compiled-in workstream
+// catalog's operation bindings, keyed by envelope TransactionType: PA's and
+// FQS's in a release build (PALegOperations, FQSLegOperations), and a test
+// profile's beside them in a build that compiles one in. Transaction types are
+// unique across the compiled-in catalogs, so no workstream's row overwrites
+// another's.
+func LegOperations() map[string]LegOperation {
+	out := map[string]LegOperation{}
+	for _, c := range workstreamCatalogs() {
+		for legType, spec := range c {
+			out[legType] = LegOperation{
+				RequestFrame:  spec.ReqFrame,
+				RequestOp:     spec.Op,
+				ResponseFrame: spec.RespFrame,
+				ResponseOp:    spec.RespOp,
+				Scope:         spec.Scope,
+			}
 		}
 	}
 	return out

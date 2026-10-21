@@ -42,7 +42,7 @@ type recordedPost struct {
 func newFakeLane(t *testing.T, line string) *fakeLane { return newLane(t, line, false) }
 
 // newWarmedFakeLane is the lane as a verification pass meets it, after the
-// warm-up. Verification asks 20 of the 42 recorded requests, so the rest go
+// warm-up. Verification asks 20 of the 41 recorded requests, so the rest go
 // unused.
 func newWarmedFakeLane(t *testing.T, line string) *fakeLane {
 	l := newLane(t, line, true)
@@ -126,8 +126,8 @@ func TestWarm_PostsTheFullCorpusInOrderAndReportsProgress(t *testing.T) {
 				t.Fatalf("Warm: %v", err)
 			}
 			rows := readinessRows(line)
-			if len(rows) != 42 || RowCount(line) != 42 {
-				t.Fatalf("readiness corpus for %s has %d rows (RowCount %d), want the 42-row contract", line, len(rows), RowCount(line))
+			if len(rows) != 41 || RowCount(line) != 41 {
+				t.Fatalf("readiness corpus for %s has %d rows (RowCount %d), want the 41-row contract", line, len(rows), RowCount(line))
 			}
 			posts := lane.recorded()
 			if len(posts) != len(rows) {
@@ -143,11 +143,11 @@ func TestWarm_PostsTheFullCorpusInOrderAndReportsProgress(t *testing.T) {
 			if len(lines) != len(rows) {
 				t.Fatalf("progress reported %d times, want once per row (%d): %v", len(lines), len(rows), lines)
 			}
-			if !strings.Contains(lines[0], "1/42") || !strings.Contains(lines[0], rows[0].identity) {
-				t.Errorf("first progress line %q should name row 1/42 %s", lines[0], rows[0].identity)
+			if !strings.Contains(lines[0], "1/41") || !strings.Contains(lines[0], rows[0].identity) {
+				t.Errorf("first progress line %q should name row 1/41 %s", lines[0], rows[0].identity)
 			}
-			if !strings.Contains(lines[41], "42/42") || !strings.Contains(lines[41], rows[41].identity) {
-				t.Errorf("last progress line %q should name row 42/42 %s", lines[41], rows[41].identity)
+			if !strings.Contains(lines[40], "41/41") || !strings.Contains(lines[40], rows[40].identity) {
+				t.Errorf("last progress line %q should name row 41/41 %s", lines[40], rows[40].identity)
 			}
 		})
 	}
@@ -174,8 +174,8 @@ func TestWarm_HangingValidateFailsAtTheBudget(t *testing.T) {
 	if elapsed := time.Since(started); elapsed > 3*time.Second {
 		t.Fatalf("Warm took %s to give up on a hanging row; it must return at the readiness budget", elapsed)
 	}
-	if !strings.Contains(err.Error(), readinessRows("2.0")[0].identity) || !strings.Contains(err.Error(), "1/42") {
-		t.Errorf("error %q should name the hanging row 1/42 %s", err, readinessRows("2.0")[0].identity)
+	if !strings.Contains(err.Error(), readinessRows("2.0")[0].identity) || !strings.Contains(err.Error(), "1/41") {
+		t.Errorf("error %q should name the hanging row 1/41 %s", err, readinessRows("2.0")[0].identity)
 	}
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("error %q should carry the budget expiry (context.DeadlineExceeded)", err)
@@ -268,10 +268,10 @@ func TestWarm_FalseSlicingVerdictAfterInitializationIsNotReady(t *testing.T) {
 	if !strings.Contains(err.Error(), "qualify-1-versioned-approved") {
 		t.Errorf("error %q should name the first qualification row that returned the false verdict", err)
 	}
-	// Four initialization rows + nine prime rows tolerated the slicing error;
+	// Three initialization rows + nine prime rows tolerated the slicing error;
 	// the first qualification row is terminal.
-	if got := len(lane.recorded()); got != 14 {
-		t.Errorf("posted %d rows, want 14 (4 init + 9 prime + the failing qualify-1 row)", got)
+	if got := len(lane.recorded()); got != 13 {
+		t.Errorf("posted %d rows, want 13 (3 init + 9 prime + the failing qualify-1 row)", got)
 	}
 }
 
@@ -475,8 +475,8 @@ func TestWarm_FailureSummaryFindsTheErrorInALargeOutcome(t *testing.T) {
 	// The error issue is the tolerated prime slicing diagnostic, so the nine
 	// prime rows pass and the first strict qualification row is the one that
 	// fails — the summary must still surface the buried error.
-	if !strings.Contains(err.Error(), "row 14/42 qualify-1-versioned-approved") || !strings.Contains(err.Error(), "error/processing: Slicing cannot be evaluated") {
-		t.Fatalf("error %q should fail on row 14/42 and name the error issue buried after the warnings", err)
+	if !strings.Contains(err.Error(), "row 13/41 qualify-1-versioned-approved") || !strings.Contains(err.Error(), "error/processing: Slicing cannot be evaluated") {
+		t.Fatalf("error %q should fail on row 13/41 and name the error issue buried after the warnings", err)
 	}
 	if strings.Contains(err.Error(), "Could not confirm") || len(err.Error()) > 700 || strings.Contains(err.Error(), "\n") {
 		t.Fatalf("error %q should be the bounded, single-line error issue, not the warnings", err)
@@ -659,7 +659,7 @@ func TestWarm_FailureSummaryForInitializationSkipsToleratedErrors(t *testing.T) 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	err := Warm(ctx, lane.base(), "2.0", nil)
-	if err == nil || !strings.Contains(err.Error(), "row 1/42 init-pas-request-bundle") {
+	if err == nil || !strings.Contains(err.Error(), "row 1/41 init-pas-request-bundle") {
 		t.Fatalf("Warm = %v, want the first initialization row to fail", err)
 	}
 	if !strings.Contains(err.Error(), "warning/processing: Failed to retrieve profile") || strings.Contains(err.Error(), tolerated[:40]) {

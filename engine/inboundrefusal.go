@@ -32,7 +32,10 @@ const (
 	// record and forwards no eligibility endpoint has nothing to answer
 	// eligibility from.
 	refusalEligibilityNotOffered = "coverage eligibility is not offered by this payer"
-	refusalIngressValidation     = "ingress validation failed"
+	// refusalEligibilityBatchNotAnswered: a payer gateway answering
+	// eligibility from the payer's records answers one request at a time.
+	refusalEligibilityBatchNotAnswered = "this payer answers coverage eligibility from its records one request at a time, so it does not answer a batch of requests: this is the payer's answer, not a network refusal"
+	refusalIngressValidation           = "ingress validation failed"
 	// refusalDTRUnframed refuses a questionnaire request that names no
 	// operation: the older request envelope, which carried a canonical and a
 	// coverage in place of the operation's own input, is no longer accepted.
@@ -56,27 +59,22 @@ const (
 // paths already pass to respondLeg / respondLegError.
 type inboundLeg struct{ frame, op, tx string }
 
-var (
-	legCRDOrderSelect   = inboundLeg{"payer-coverage", "crd-cards", "crd-order-select"}
-	legCRDOrderDispatch = inboundLeg{"payer-coverage", "crd-dispatch-cards", "crd-order-dispatch"}
-	legPASClaim         = inboundLeg{"payer-coverage", "pas-response", "pas-claim"}
-	legPASClaimUpdate   = inboundLeg{"payer-coverage", "pas-update-response", "pas-claim-update"}
-	legPASClaimInquire  = inboundLeg{"payer-coverage", "pas-inquire-response", "pas-claim-inquire"}
-	legEligibility      = inboundLeg{"payer-coverage", "eligibility-response", "coverage-eligibility"}
-	legDTR              = inboundLeg{"payer-coverage", "dtr-questionnaire", "dtr-questionnaire-fetch"}
-	legFederatedQuery   = inboundLeg{"facility-disclosure", "federated-query-response", "federated-query"}
-	legPatientDTR       = inboundLeg{"patient-authorship", "patient-dtr-response", "patient-dtr"}
-)
+// inboundLegs is every leg the inbound dispatcher serves, by transaction
+// type: each compiled-in workstream's catalog leg, answered on its response
+// frame and operation (PA's are its named legs, TestInboundLegsCoverCatalog).
+var inboundLegs = inboundLegsOf(workstreamCatalogs())
 
-// inboundLegs is every leg the inbound dispatcher serves, by transaction type.
-var inboundLegs = func() map[string]inboundLeg {
+// inboundLegsOf is the inbound legs of catalogs, each answered on its catalog
+// row's response frame and operation.
+func inboundLegsOf(catalogs []map[string]legSpec) map[string]inboundLeg {
 	m := map[string]inboundLeg{}
-	for _, l := range []inboundLeg{legCRDOrderSelect, legCRDOrderDispatch, legPASClaim, legPASClaimUpdate, legPASClaimInquire,
-		legEligibility, legDTR, legFederatedQuery, legPatientDTR} {
-		m[l.tx] = l
+	for _, c := range catalogs {
+		for tx, spec := range c {
+			m[tx] = inboundLeg{spec.RespFrame, spec.RespOp, tx}
+		}
 	}
 	return m
-}()
+}
 
 // refuseInboundRequest answers a refusal the gateway writes about a request
 // before any leg handler runs, once the leg is authenticated and decrypted

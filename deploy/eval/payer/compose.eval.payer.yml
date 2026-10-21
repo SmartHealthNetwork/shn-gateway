@@ -14,6 +14,8 @@ services:
   validator:
     build: { context: ../.., dockerfile: eval/hapi/Dockerfile }   # reuse the eval-hapi image (US Core + Da Vinci incl PAS 2.0.1)
     environment:
+      # The HAPI starter serves an MCP server by default (/mcp/messages, /sse); it stays off.
+      SPRING_AI_MCP_SERVER_ENABLED: "false"
       hapi.fhir.tenant_identification_strategy: URL_BASED
       hapi.fhir.partitioning.partitioning_include_in_search_hashes: "false"
       hapi.fhir.partitioning.allow_references_across_partitions: "false"
@@ -27,6 +29,8 @@ services:
   br-payer:
     image: br-payer:a8bece4          # built by ../brpayer/build.sh FIRST (image:, not build:)
     environment:
+      # The HAPI starter serves an MCP server by default (/mcp/messages, /sse); it stays off.
+      SPRING_AI_MCP_SERVER_ENABLED: "false"
       # Test-speed setting: a pended prior authorization resolves to a decision after this
       # many seconds. A real payer pends for hours or days. Raise it to exercise your
       # client's "still pended, check again later" path (see ../README.md, "Pended decisions").

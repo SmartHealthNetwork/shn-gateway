@@ -119,9 +119,9 @@ func CloseCertificationClients(clients map[string]shnsdk.Validator) {
 }
 
 func (g *Gateway) startCertification() {
-	// At none no conformance check runs, so no certification evidence is
-	// gathered either.
-	if g.cfg.certificationDisabled || !g.policy().RunsKind(KindFHIRIngress) {
+	// Certification evidence is gathered only for payload checks that consume
+	// lanes: at none there are none.
+	if g.cfg.certificationDisabled || !payloadChecksConsumeLanes(g.conformance().Level()) {
 		// No worker will own the clients: stop any gated loop now.
 		CloseCertificationClients(g.cfg.CertificationValidatorsByLine)
 		return
@@ -144,17 +144,26 @@ func (g *Gateway) startCertification() {
 // Observer callbacks are cooperative: they must return promptly. Owners stop
 // serving requests before closing and release callback barriers before joining.
 func (g *Gateway) Close() error {
-	g.closeObserveChecks()
-	w := g.certification
+	g.conformance().close()
+	for _, l := range g.explicitLanes {
+		l.close()
+	}
+	return nil
+}
+
+// close drains module 3's work: it flushes the observe queue and joins the
+// certification worker.
+func (m gatewayConformance) close() {
+	m.g.closeObserveChecks()
+	w := m.g.certification
 	if w == nil {
-		return nil
+		return
 	}
 	w.mu.Lock()
 	w.closed = true
 	w.cancel()
 	w.mu.Unlock()
 	<-w.done
-	return nil
 }
 
 func (g *Gateway) enqueueCertification(job certificationJob) {
@@ -173,7 +182,7 @@ func (g *Gateway) enqueueCertification(job certificationJob) {
 	e.PayloadSHA256 = hex.EncodeToString(hash[:])
 	e.Certified = []string{}
 	e.Verdicts = []LaneVerdict{}
-	if _, ok := shnsdk.PASLineDef(e.TargetLine); !ok {
+	if _, ok := profileFor(e.Species, e.TargetLine, ""); !ok {
 		e.TargetLine = ""
 	}
 	job.evidence = e
@@ -329,6 +338,11 @@ func (g *Gateway) collectCertification(w *certificationWorker, job certification
 				v.State = "valid"
 				v.Valid = true
 				e.Certified = append(e.Certified, line)
+			case validatorDidNotJudge(fhirErrors(result)):
+				// The lane reached no verdict on the payload: it stopped without
+				// one, or read no payload.
+				v.State = "unavailable"
+				v.Error = "certification validator did not judge the payload"
 			default:
 				if systems, unchecked := certificationUnchecked(result, job.payload, line, profile); unchecked {
 					// The lane could not check the payload's terminology: no verdict
@@ -657,18 +671,18 @@ type certificationCollectionKey struct{}
 // through the existing dispatch; the collector never supplies a routing input.
 type certificationTargetKey struct{}
 
-// certificationPair certifies both halves of one exchange. responseNonconformance,
+// certify is module 3's certification of both halves of one exchange. responseNonconformance,
 // when non-empty, is carried on the RESPONSE half's evidence: it describes the
 // answer that was received, so it belongs with that answer's record and nowhere
 // else.
-func (g *Gateway) certificationPair(leg, seam, corr, target string, request, response []byte, responseNonconformance ...string) {
+func (m gatewayConformance) certify(leg, seam, corr, target string, request, response []byte, responseNonconformance ...string) {
 	for _, part := range []struct {
 		direction      string
 		payload        []byte
 		nonconformance []string
 	}{{"request", request, nil}, {"response", response, responseNonconformance}} {
 		if len(part.payload) > 0 {
-			g.enqueueCertification(certificationJob{evidence: CertificationEvidence{LegType: leg, Seam: seam, CorrelationID: corr, TargetLine: target, Direction: part.direction, Nonconformance: part.nonconformance}, payload: part.payload})
+			m.g.enqueueCertification(certificationJob{evidence: CertificationEvidence{LegType: leg, Seam: seam, CorrelationID: corr, TargetLine: target, Direction: part.direction, Nonconformance: part.nonconformance}, payload: part.payload})
 		}
 	}
 }

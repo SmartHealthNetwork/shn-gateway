@@ -71,6 +71,28 @@ func TestAccessLineFor(t *testing.T) {
 		t.Fatalf("access line with edits\n got %s\nwant %s", b, wantEdited)
 	}
 
+	// Each body's ownership, builder and edits follow, in that order; a line
+	// with none holds none of their keys (the golden above).
+	bodies := refusedRecord()
+	bodies.Edits, bodies.Ownership, bodies.RequestEdits = []string{"E-01", "E-08"}, "edited", []string{"E-01"}
+	bodies.AnswerOwnership, bodies.AnswerEdits = "edited", []string{"E-08"}
+	b, err = json.Marshal(accessLineFor(bodies))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wantBodies := strings.TrimSuffix(want, "}") + `,"relayEdits":["E-01","E-08"],"ownership":"edited","requestEdits":["E-01"],"answerOwnership":"edited","answerEdits":["E-08"]}`; string(b) != wantBodies {
+		t.Fatalf("access line with each body's ownership\n got %s\nwant %s", b, wantBodies)
+	}
+	refusal := refusedRecord()
+	refusal.AnswerOwnership, refusal.AnswerBuilder = "authored", "gateway-refusal"
+	b, err = json.Marshal(accessLineFor(refusal))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wantRefusal := strings.TrimSuffix(want, "}") + `,"answerOwnership":"authored","answerBuilder":"gateway-refusal"}`; string(b) != wantRefusal {
+		t.Fatalf("access line with the gateway's own answer\n got %s\nwant %s", b, wantRefusal)
+	}
+
 	// The line the answer was written in follows the routed line; a line
 	// with none holds no answerLine key (the golden above).
 	written := refusedRecord()

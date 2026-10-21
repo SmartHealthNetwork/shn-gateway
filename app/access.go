@@ -20,7 +20,8 @@ func accessLineFor(r engine.ExchangeRecord) diagnostics.AccessLine {
 		RequestCiphertextHash: r.RequestCiphertextHash, ResponseCiphertextHash: r.ResponseCiphertextHash,
 		Outcome: r.Outcome, Status: r.Status, LatencyMs: r.Latency.Milliseconds(),
 		Findings:   diagnostics.AccessFindings{Count: r.Findings.Count, Refused: r.Findings.Refused, Kinds: r.Findings.Kinds, Deferred: r.Findings.Deferred},
-		RelayEdits: r.Edits, HubDelivered: r.HubDelivered,
+		RelayEdits: r.Edits, Ownership: r.Ownership, Builder: r.Builder, HubDelivered: r.HubDelivered,
+		RequestEdits: r.RequestEdits, AnswerOwnership: r.AnswerOwnership, AnswerBuilder: r.AnswerBuilder, AnswerEdits: r.AnswerEdits,
 	}
 	if r.Outcome == engine.ExchangeRefused {
 		line.Refusal = &diagnostics.AccessRefusal{By: r.RefusedBy, Rule: r.Rule}

@@ -315,17 +315,44 @@ func fenceNoPartyReason(t *testing.T, value []byte, i int) string {
 	return "another patient"
 }
 
+// ruleNameInAnotherCase reports whether any object in v has a member
+// spelling, in another case, a name shnsdk.CoverageParty reads.
+func ruleNameInAnotherCase(v any) bool {
+	switch x := v.(type) {
+	case map[string]any:
+		for k, c := range x {
+			for _, n := range []string{"resourceType", "contained", "subscriber", "policyHolder", "reference", "id", "identifier"} {
+				if k != n && strings.EqualFold(k, n) {
+					return true
+				}
+			}
+			if ruleNameInAnotherCase(c) {
+				return true
+			}
+		}
+	case []any:
+		for _, c := range x {
+			if ruleNameInAnotherCase(c) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // foldedDuplicateMember reports whether any object in v has two members
 // whose names are equal under case folding.
 func foldedDuplicateMember(v any) bool {
 	switch x := v.(type) {
 	case map[string]any:
-		seen := map[string]bool{}
+		var seen []string
 		for k, c := range x {
-			if seen[strings.ToLower(k)] {
-				return true
+			for _, s := range seen {
+				if strings.EqualFold(s, k) {
+					return true
+				}
 			}
-			seen[strings.ToLower(k)] = true
+			seen = append(seen, k)
 			if foldedDuplicateMember(c) {
 				return true
 			}
@@ -343,8 +370,12 @@ func foldedDuplicateMember(v any) bool {
 // The two walks that skip a party (the involved list's and the subject
 // derivation's) skip exactly the resource the rule names, the Coverage alone
 // or as a Bundle entry, on every leg: they reach the probe inside every
-// other resource. A resource the rule names no party is walked, which can
-// only add to what the walks find.
+// other resource. A resource the rule names no party is walked by the
+// involved list's walk, which can only add to what it finds. The subject
+// derivation reads a member-bearing Patient only when the walk can decide it
+// is the member: once a Coverage's party slot may name a Patient (its
+// undecided, pinned by the derivation rows), only a Patient that Coverage's
+// beneficiary names is read, and the probe is none.
 func TestCoverageParty_WalkersAgree(t *testing.T) {
 	for _, r := range sdkCoveragePartyRows(t) {
 		t.Run(r.Name, func(t *testing.T) {
@@ -365,6 +396,13 @@ func TestCoverageParty_WalkersAgree(t *testing.T) {
 				}
 				walked := false
 				forEachCarriedPatient(payload, "zz-probe", func(p map[string]any) { walked = walked || p["id"] == "zz-probe" })
+				var doc any
+				if err := json.Unmarshal(mustJSON(t, cov), &doc); err != nil {
+					t.Fatal(err)
+				}
+				if foldedDuplicateMember(cov) || ruleNameInAnotherCase(cov) || anyCoverageUndecided(doc) {
+					wantWalked = false
+				}
 				if walked != wantWalked {
 					t.Fatalf("%s, forEachCarriedPatient: walked %v, want %v", shape, walked, wantWalked)
 				}
@@ -373,10 +411,13 @@ func TestCoverageParty_WalkersAgree(t *testing.T) {
 	}
 }
 
-// A contained that is not a list is walked whole, as before the rule: the
-// rule answers only for a resource in a Coverage's contained list. The
-// involved list names the object-shaped Patient, and the subject derivation
-// reads it.
+// A contained that is not a list is walked whole by the involved list, as
+// before the rule: the rule answers only for a resource in a Coverage's
+// contained list. The subject derivation reads an object-shaped contained as
+// the one resource a lenient reader reads it as, so a Patient a party slot
+// names there by "#id" is the Coverage's party, never the member; one inside a
+// non-resource object, which no beneficiary names, cannot be decided to be the
+// member either.
 func TestCoverageParty_WalkersWalkAContainedThatIsNotAList(t *testing.T) {
 	for name, coverage := range map[string]string{
 		"an object":               `{"resourceType":"Coverage","id":"c","contained":{"resourceType":"Patient","id":"parent","identifier":[{"system":"` + shnsdk.MemberSystem + `","value":"zz-probe"}]},"subscriber":{"reference":"#parent"},"beneficiary":{"reference":"Patient/p1"}}`,
@@ -394,8 +435,9 @@ func TestCoverageParty_WalkersWalkAContainedThatIsNotAList(t *testing.T) {
 					t.Fatalf("%s: carriedMembers %v does not name the walked Patient", leg, got)
 				}
 			}
-			if !carriesPatient([]byte(coverage), "zz-probe") {
-				t.Fatal("forEachCarriedPatient skipped an object-shaped contained Patient")
+			party := true // the subscriber "#parent" may name the Patient, which no beneficiary names
+			if carriesPatient([]byte(coverage), "zz-probe") == party || carriesMembersParty([]byte(coverage), "zz-probe", false) != party {
+				t.Fatalf("party %v: carriesPatient %v, carriesMembersParty %v", party, carriesPatient([]byte(coverage), "zz-probe"), carriesMembersParty([]byte(coverage), "zz-probe", false))
 			}
 		})
 	}
@@ -448,10 +490,16 @@ func TestCoverageParty_DuplicateIDRows(t *testing.T) {
 			if !walked {
 				t.Fatal("carriedMembers skipped a resource sharing its id")
 			}
+			// The subject derivation reads no Patient the Coverage's beneficiary
+			// does not name once a party slot may name a Patient.
+			var doc any
+			if err := json.Unmarshal(payload, &doc); err != nil {
+				t.Fatal(err)
+			}
 			walked = false
 			forEachCarriedPatient(payload, "zz-probe", func(p map[string]any) { walked = walked || p["id"] == "zz-probe" })
-			if !walked {
-				t.Fatal("forEachCarriedPatient skipped a resource sharing its id")
+			if walked == anyCoverageUndecided(doc) {
+				t.Fatalf("forEachCarriedPatient walked %v, with a party slot that may name a Patient %v", walked, anyCoverageUndecided(doc))
 			}
 			if cr["resourceType"] == "Patient" {
 				// Both copies are walked: a Patient either contains is named
@@ -488,4 +536,16 @@ func TestCoverageParty_DuplicateIDRows(t *testing.T) {
 func anyList(v any) []any {
 	l, _ := v.([]any)
 	return l
+}
+
+// anyCoverageUndecided reports whether some Coverage doc carries has a party
+// slot that may name a Patient: the probe, never a beneficiary, is then never
+// read as the member.
+func anyCoverageUndecided(doc any) bool {
+	for _, c := range partySlotsOf(doc).coverages {
+		if c.undecided {
+			return true
+		}
+	}
+	return false
 }

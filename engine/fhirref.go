@@ -3,6 +3,7 @@ package engine
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 )
 
 // resourceRef extracts a "<resourceType>/<id>" reference from a FHIR resource's JSON, so a
@@ -36,4 +37,23 @@ func orderRefOrFail(w http.ResponseWriter, order []byte) (string, bool) {
 		return "", false
 	}
 	return ref, true
+}
+
+// stripHistoryRef drops a `/_history/<version>` suffix: a version-specific
+// reference names the same resource as the version-less one.
+func stripHistoryRef(ref string) string {
+	base, _, _ := splitHistory(ref)
+	return base
+}
+
+// splitHistory reads a trailing `/_history/<version>` off ref: its last
+// segment pair, with a version that is one segment. A base whose path
+// contains `/_history/` elsewhere is part of the reference, never its version,
+// so "https://host/_history/fhir/Patient/p" is unversioned.
+func splitHistory(ref string) (base, version string, versioned bool) {
+	i := strings.LastIndex(ref, "/_history/")
+	if i < 0 || strings.Contains(ref[i+len("/_history/"):], "/") {
+		return ref, "", false
+	}
+	return ref[:i], ref[i+len("/_history/"):], true
 }

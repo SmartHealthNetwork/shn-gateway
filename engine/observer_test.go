@@ -192,9 +192,9 @@ func TestObserver_ValidateEvents(t *testing.T) {
 }
 
 // TestObserver_ValidateEventsFromPerLineLanes is the rejection test for the
-// per-line lane observer gap: once ValidatorsByLine is
-// non-empty, validatorForLine resolves EVERY line-scoped $validate through that
-// map and never through cfg.Validator — so a New that decorated only
+// per-line lane observer gap: once ValidatorsByContractLine is
+// non-empty, validatorForContractLine resolves EVERY line-scoped $validate through
+// that map and never through cfg.Validator — so a New that decorated only
 // cfg.Validator emitted NO validate.result for any version-bearing leg while
 // still emitting them for the line-less calls, i.e. the observer stream
 // silently under-reported validation. The mutation this fences: drop the lane
@@ -213,21 +213,21 @@ func TestObserver_ValidateEventsFromPerLineLanes(t *testing.T) {
 	stub := newCensusSoR()
 	var seen []ObserverEvent
 	g := mustNew(t, Config{
-		Role:             "provider",
-		HolderID:         "provider",
-		Identity:         shnsdk.Identity{HolderID: "provider", SignPriv: signPriv},
-		SoR:              stub,
-		Store:            stub,
-		Validator:        fake,
-		ValidatorsByLine: lanes,
-		Clock:            func() time.Time { return time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC) },
-		Observer:         func(e ObserverEvent) { seen = append(seen, e) },
+		Role:                     "provider",
+		HolderID:                 "provider",
+		Identity:                 shnsdk.Identity{HolderID: "provider", SignPriv: signPriv},
+		SoR:                      stub,
+		Store:                    stub,
+		Validator:                fake,
+		ValidatorsByContractLine: contractLanes(lanes),
+		Clock:                    func() time.Time { return time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC) },
+		Observer:                 func(e ObserverEvent) { seen = append(seen, e) },
 	})
 
 	body := []byte(`{"resourceType":"Patient"}`)
 	for _, line := range []string{"2.0", "2.2", ""} {
-		if status, msg := g.validateFHIR(context.Background(), body, "egress", line); status != 0 {
-			t.Fatalf("validateFHIR(line=%q) = (%d,%q), want ok", line, status, msg)
+		if status, msg := g.validateFHIRForContract(context.Background(), body, "egress", "pa.pas", line, ""); status != 0 {
+			t.Fatalf("validateFHIRForContract(pa.pas, line=%q) = (%d,%q), want ok", line, status, msg)
 		}
 	}
 	if len(seen) != 3 {
@@ -244,6 +244,58 @@ func TestObserver_ValidateEventsFromPerLineLanes(t *testing.T) {
 		if _, wrapped := v.(observingValidator); wrapped {
 			t.Errorf("New decorated the CALLER's lane map in place (line %s)", line)
 		}
+	}
+}
+
+// TestObserver_DiscoveredLaneObservedWhenItServes: New leaves a discovered
+// lane undecorated in the lane map (a wrapper would hide the *DiscoveredLane
+// that validatorForContractLine checks for readiness), and readyLane decorates
+// it when it serves. The mutations this fences: New wrapping it, which serves a
+// warming lane (the warming row resolves a validator); readyLane returning the
+// bare lane, which drops its validate.result (the qualified row emits none).
+func TestObserver_DiscoveredLaneObservedWhenItServes(t *testing.T) {
+	_, signPriv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("sign keypair: %v", err)
+	}
+	stub := newCensusSoR()
+	fake := shnsdk.NewFakeValidator()
+	lane := NewDiscoveredLane("2.2", "http://validator-2.2.invalid/fhir", shnsdk.NewFakeValidator())
+	var seen []ObserverEvent
+	g := mustNew(t, Config{
+		Role:                     "provider",
+		HolderID:                 "provider",
+		Identity:                 shnsdk.Identity{HolderID: "provider", SignPriv: signPriv},
+		SoR:                      stub,
+		Store:                    stub,
+		Validator:                fake,
+		ValidatorsByContractLine: map[string]shnsdk.Validator{"pa.pas@2.0": fake, "pa.pas@2.2": lane},
+		Clock:                    func() time.Time { return time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC) },
+		Observer:                 func(e ObserverEvent) { seen = append(seen, e) },
+	})
+	if got := g.cfg.ValidatorsByContractLine["pa.pas@2.2"]; got != lane {
+		t.Fatalf("New stored %T for the discovered lane, want the *DiscoveredLane itself", got)
+	}
+
+	// Warming: no validator, the line is not served.
+	if v := g.validatorForContractLine("pa.pas", "2.2"); v != nil {
+		t.Fatalf("a warming discovered lane resolved %T, want none", v)
+	}
+	if g.servesLine("pa.pas", "2.2") {
+		t.Fatal("a warming discovered lane is served")
+	}
+
+	// Qualified: it resolves observed, and its $validate emits.
+	lane.ready.Store(true)
+	v := g.validatorForContractLine("pa.pas", "2.2")
+	if o, ok := v.(observingValidator); !ok || o.inner != lane {
+		t.Fatalf("a qualified discovered lane resolved %#v, want observingValidator{inner: lane}", v)
+	}
+	if status, msg := g.validateFHIRForContract(context.Background(), []byte(`{"resourceType":"Patient"}`), "egress", "pa.pas", "2.2", ""); status != 0 {
+		t.Fatalf("validateFHIRForContract(pa.pas, 2.2) = (%d,%q), want ok", status, msg)
+	}
+	if len(seen) != 1 || seen[0].Kind != "validate.result" {
+		t.Fatalf("events for one $validate through a qualified discovered lane = %+v, want one validate.result", seen)
 	}
 }
 
@@ -524,7 +576,7 @@ func TestObserver_SoRDecorationIdempotent(t *testing.T) {
 // the DTR leg by design (observer_test.go:95), which short-circuits before
 // runCRDThenDTROrder reaches the Populator — so the UC-03 drive itself is
 // asserted only for the sor.read ops it genuinely makes (ResolvePatient et
-// al., originate.go:352). The non-negotiable half of the capture-site pin —
+// al., module1_originate.go:352). The non-negotiable half of the capture-site pin —
 // a populator-driven read emits through the decorated SoR — is then asserted
 // directly: g2.cfg.Populator is in-package, so its Populate entry point is
 // invoked with a stub persona + the demo lumbar $questionnaire-package, and the

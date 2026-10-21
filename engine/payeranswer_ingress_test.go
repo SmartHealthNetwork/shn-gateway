@@ -30,6 +30,7 @@ const (
 	scriptOutage     // the validator call fails
 	scriptNoResource // the validator answered without reading the payload
 	scriptHang       // the validator answers only when its context ends
+	scriptNoVerdict  // the validator stopped without a verdict
 )
 
 // laneCall is one call a scripted lane received.
@@ -92,6 +93,8 @@ func scriptedResult(v scriptedVerdict) (shnsdk.Result, error) {
 		return shnsdk.Result{}, errors.New("validator down")
 	case scriptNoResource:
 		return invalid(errIssue("", nil, hapi0992)), nil
+	case scriptNoVerdict:
+		return invalid(errIssue("", nil, hapi0389)), nil
 	}
 	return shnsdk.Result{Valid: true}, nil
 }
@@ -107,14 +110,14 @@ func payerIngressGateway(t *testing.T, profile string, level ConformanceEnforcem
 	}
 	var findings []ConformanceFinding
 	g := &Gateway{cfg: Config{
-		Role:                   "provider",
-		HolderID:               "provider",
-		OriginationProfile:     profile,
-		ConformanceEnforcement: level,
-		Reg:                    shnsdk.NewRegistry(),
-		Validator:              lanes["2.0"],
-		ValidatorsByLine:       lanes,
-		Clock:                  func() time.Time { return time.Unix(0, 0).UTC() },
+		Role:                     "provider",
+		HolderID:                 "provider",
+		OriginationProfile:       profile,
+		ConformanceEnforcement:   level,
+		Reg:                      shnsdk.NewRegistry(),
+		Validator:                lanes["2.0"],
+		ValidatorsByContractLine: contractLanes(lanes),
+		Clock:                    func() time.Time { return time.Unix(0, 0).UTC() },
 		Observer: func(e ObserverEvent) {
 			var f ConformanceFinding
 			if e.Kind == ConformanceObservedEvent && json.Unmarshal([]byte(e.Detail), &f) == nil {
@@ -126,7 +129,7 @@ func payerIngressGateway(t *testing.T, profile string, level ConformanceEnforcem
 		// No lane at all: a configured-but-empty lane map, so no line falls back
 		// to a canonical validator.
 		g.cfg.Validator = nil
-		g.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"9.9": nil}
+		g.cfg.ValidatorsByContractLine = contractLanes(map[string]shnsdk.Validator{"9.9": nil})
 	}
 	return g, log, &findings
 }
@@ -221,6 +224,12 @@ func TestPayerAnswerIngress_PartnerPayerLevelMatrix(t *testing.T) {
 			EnforcementStrict:     {500, "validator unavailable", 1, "", "", ""},
 		}},
 		{"validator answered without reading the payload", scriptNoResource, map[ConformanceEnforcement]want{
+			EnforcementNone:       {0, "", 0, "", "", ""},
+			EnforcementObserve:    {0, "", 1, "relayed", "unavailable", "unavailable"},
+			EnforcementStructural: {0, "", 1, "relayed", "unavailable", "unavailable"},
+			EnforcementStrict:     {500, "validator unavailable", 1, "", "", ""},
+		}},
+		{"validator stopped without a verdict", scriptNoVerdict, map[ConformanceEnforcement]want{
 			EnforcementNone:       {0, "", 0, "", "", ""},
 			EnforcementObserve:    {0, "", 1, "relayed", "unavailable", "unavailable"},
 			EnforcementStructural: {0, "", 1, "relayed", "unavailable", "unavailable"},
@@ -585,8 +594,8 @@ func TestPayerAnswerIngress_SharedValidatorIsCalledOnce(t *testing.T) {
 	var findings []ConformanceFinding
 	g := &Gateway{cfg: Config{
 		OriginationProfile: "demo", ConformanceEnforcement: EnforcementObserve, Reg: shnsdk.NewRegistry(),
-		Clock:            func() time.Time { return time.Unix(0, 0).UTC() },
-		ValidatorsByLine: map[string]shnsdk.Validator{"2.0": shared, "2.2": shared, "2.1": other},
+		Clock:                    func() time.Time { return time.Unix(0, 0).UTC() },
+		ValidatorsByContractLine: contractLanes(map[string]shnsdk.Validator{"2.0": shared, "2.2": shared, "2.1": other}),
 		Observer: func(e ObserverEvent) {
 			var f ConformanceFinding
 			if e.Kind == ConformanceObservedEvent && json.Unmarshal([]byte(e.Detail), &f) == nil {

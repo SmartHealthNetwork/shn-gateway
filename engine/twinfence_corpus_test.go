@@ -14,12 +14,12 @@ import (
 // of the published SDK Responder:
 //
 //   - the FR-16/FR-27 attestation conformance fence (fenceAttestedItems,
-//     attestfence.go);
+//     workstream_pa_conformance_attest.go);
 //   - the FR-32 supplemental-data / subject-bind fence on the conformant
-//     pas-claim-update leg (conformantPASUpdateBind, pas_native.go), which
+//     pas-claim-update leg (conformantPASUpdateBind, workstream_pa_pas_inbound.go), which
 //     reads the whole request for another patient (pasCarriesAnotherPatient);
 //     and
-//   - the PAS inquiry's subject read (readPASInquiryFacts, inquire.go).
+//   - the PAS inquiry's subject read (readPASInquiryFacts, workstream_pa_inquire.go).
 //
 // The vectors are minted by the substrate's vector generator and committed
 // byte-identically here and in the SDK module (sdk/testdata/twinfence); each

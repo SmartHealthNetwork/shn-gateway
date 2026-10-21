@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -261,6 +262,8 @@ var providerOtherRoutes = []string{
 	"POST /Questionnaire/$questionnaire-package",
 	"POST /Claim/$submit",
 	"POST /Claim/$inquire",
+	"POST /CoverageEligibilityRequest/$submit",
+	"POST /Task",
 	"GET /metadata",
 	"POST /oauth/token",
 	"GET /.well-known/smart-configuration",
@@ -269,7 +272,7 @@ var providerOtherRoutes = []string{
 
 // otherRoleRoutes are the routes of the roles that originate nothing.
 var otherRoleRoutes = map[string][]string{
-	"payer":    {"POST /substrate/inbound", "GET /metadata", "GET /ExplanationOfBenefit", "GET /ExplanationOfBenefit/{id}"},
+	"payer":    {"POST /substrate/inbound"},
 	"facility": {"POST /substrate/inbound"},
 	"phg":      {"POST /substrate/inbound"},
 }
@@ -284,26 +287,37 @@ var otherRoleRoutes = map[string][]string{
 //     HandleFunc once and to nothing else, so no helper mounts a route on it;
 //     Handler is exactly handlerBody, the routes mux served under the
 //     operation count, so it answers no path of its own;
-//   - routes mounts exactly the declarations coreRoutes, paRoutes and
-//     originationRoutes, each called with the role, and mountedRoute is named
-//     nowhere but its type, routes and those declarations;
+//   - routes mounts exactly coreRoutes, workstreamRoutes (every compiled-in
+//     workstream adapter's routes: the PA adapter's are paRoutes, the
+//     Federated Query Services adapter's fqsRoutes) and originationRoutes,
+//     each called with the role, and mountedRoute is named nowhere but its
+//     type, routes, the declarations coreRoutes, paRoutes, fqsRoutes and
+//     originationRoutes, and the signatures of workstreamRoutes, the workstream
+//     interface's routes method and its adapters' routes methods; and the
+//     bodies of workstreamRoutes and of each adapter's routes method are
+//     exactly workstreamRoutesBody and adapterRoutesBody, so the registry
+//     decides nothing about which routes mount;
 //   - requireOriginationProfile is called once in the package, by routes, on
-//     the routes declared as originating;
+//     the routes declared as originating, and requireScenarioCaller once, by
+//     routes, on the routes declared as the operator surface;
 //   - in a declaration every route pattern is a string literal, given to a
 //     local closure or as a mountedRoute's pattern, and it is declared
 //     originating (through a closure that builds originating routes, or
-//     originates: true) exactly when it is classified as originating; a
-//     declaration names no other string but a role and "", and reads no
-//     gateway state but the conditions routeConditions drives (routeGates).
+//     originates: true) exactly when it is classified as originating, and
+//     declared the operator surface (operator: true) exactly when on-behalf
+//     building declares it; a declaration names no other string but a role
+//     and "", and reads no gateway state but the conditions routeConditions
+//     drives (routeGates).
 //
 // By running every declaration for every role, under every condition that
 // gates a route: every originating route is declared originating and no other
-// route is, a route a role mounts is declared once, each piece declares only
-// its own routes (the core its inbound, on-behalf building /scenario/*, the
-// PA adapter the rest), and every pattern a piece's source names is mounted
-// by that piece under some driven condition, so a route under a condition
-// this test does not drive fails it. A new route, however it is written,
-// cannot join either set silently.
+// route is, every /scenario route and no other is mounted behind
+// requireScenarioCaller, a route a role mounts is declared once, each piece
+// declares only its own routes (the core its inbound, on-behalf building
+// /scenario/*, the workstream adapters the rest), and every pattern a
+// piece's source names is mounted by that piece under some driven condition,
+// so a route under a condition this test does not drive fails it. A new route, however
+// it is written, cannot join any of these sets silently.
 func TestScenarioRoutes_EveryRouteIsClassified(t *testing.T) {
 	fset := token.NewFileSet()
 	entries, err := os.ReadDir(".")
@@ -313,7 +327,7 @@ func TestScenarioRoutes_EveryRouteIsClassified(t *testing.T) {
 	var files []*ast.File
 	for _, e := range entries {
 		name := e.Name()
-		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") || !inThisBuild(t, ".", name) {
 			continue
 		}
 		f, err := parser.ParseFile(fset, name, nil, 0)
@@ -326,7 +340,10 @@ func TestScenarioRoutes_EveryRouteIsClassified(t *testing.T) {
 		t.Fatalf("parsed %d files; the package has more", len(files))
 	}
 
-	declarations := map[string]string{"coreRoutes": "core", "paRoutes": "pa", "originationRoutes": "origination"}
+	declarations := map[string]string{"coreRoutes": "core", "paRoutes": "pa", "fqsRoutes": "fqs", "originationRoutes": "origination"}
+	// mountable are what routes mounts: the core's and on-behalf building's
+	// declarations, and the workstream registry's routes.
+	mountable := map[string]bool{"coreRoutes": true, "workstreamRoutes": true, "originationRoutes": true}
 	originating := map[string]bool{}
 	for _, r := range originatingRoutes {
 		originating[r] = true
@@ -364,7 +381,8 @@ func TestScenarioRoutes_EveryRouteIsClassified(t *testing.T) {
 		return ok && (sel.Sel.Name == "Handle" || sel.Sel.Name == "HandleFunc") && len(call.Args) == 2
 	}
 	var literals []declaredRoute
-	routesFuncs, handlers, muxRegistrations, guards, mountLists := 0, 0, 0, 0, 0
+	routesFuncs, handlers, muxRegistrations, mountLists, registryBodies, adapterBodies := 0, 0, 0, 0, 0, 0
+	guards := map[string]int{}
 	mounted := map[string]bool{}
 	for _, file := range files {
 		for _, decl := range file.Decls {
@@ -391,6 +409,25 @@ func TestScenarioRoutes_EveryRouteIsClassified(t *testing.T) {
 			if piece, ok := declarations[method]; ok {
 				literals = append(literals, readRouteDeclaration(t, fset, fn, recv, piece, gatewayFields)...)
 			}
+			// signature is where mountedRoute may be named as a type alone: the
+			// registry's routes and the workstream adapters' routes methods,
+			// whose bodies are pinned.
+			var signature ast.Node
+			adapterRoutes := fn != nil && fn.Name.Name == "routes" && fn.Recv != nil && len(fn.Recv.List) == 1 && receiverType(fn) != "Gateway"
+			if method == "workstreamRoutes" {
+				signature = fn.Type
+				registryBodies++
+				if err := bodyIs(fset, fn, strings.ReplaceAll(workstreamRoutesBody, "g,", recv+",")); err != nil {
+					t.Errorf("%s: workstreamRoutes %v", fset.Position(fn.Pos()), err)
+				}
+			}
+			if adapterRoutes {
+				signature = fn.Type
+				adapterBodies++
+				if err := adapterRoutesIs(fset, fn); err != nil {
+					t.Errorf("%s: a workstream adapter's routes %v", fset.Position(fn.Pos()), err)
+				}
+			}
 			var stack []ast.Node
 			ast.Inspect(decl, func(n ast.Node) bool {
 				if n == nil {
@@ -400,6 +437,24 @@ func TestScenarioRoutes_EveryRouteIsClassified(t *testing.T) {
 				stack = append(stack, n)
 				switch x := n.(type) {
 				case *ast.TypeSpec:
+					if x.Name.Name == "workstream" {
+						// The adapter interface may name mountedRoute in its
+						// routes method's signature alone.
+						if it, ok := x.Type.(*ast.InterfaceType); ok {
+							for _, m := range it.Methods.List {
+								if len(m.Names) == 1 && m.Names[0].Name == "routes" {
+									continue
+								}
+								ast.Inspect(m.Type, func(n ast.Node) bool {
+									if id, ok := n.(*ast.Ident); ok && id.Name == "mountedRoute" {
+										t.Errorf("%s: mountedRoute is named in a workstream method other than routes", fset.Position(id.Pos()))
+									}
+									return true
+								})
+							}
+							return false
+						}
+					}
 					if x.Name.Name == "mountedRoute" {
 						// Its own name is not a use.
 						ast.Inspect(x.Type, func(m ast.Node) bool {
@@ -411,15 +466,16 @@ func TestScenarioRoutes_EveryRouteIsClassified(t *testing.T) {
 						return false
 					}
 				case *ast.Ident:
-					if x.Name == "mountedRoute" && method != "routes" && declarations[method] == "" {
+					inSignature := signature != nil && x.Pos() >= signature.Pos() && x.End() <= signature.End()
+					if x.Name == "mountedRoute" && method != "routes" && declarations[method] == "" && !inSignature {
 						t.Errorf("%s: mountedRoute is named outside its type, routes and the route declarations", fset.Position(x.Pos()))
 					}
 				case *ast.SelectorExpr:
-					if x.Sel.Name == "requireOriginationProfile" {
+					if x.Sel.Name == "requireOriginationProfile" || x.Sel.Name == "requireScenarioCaller" {
 						if call, isCall := stack[len(stack)-2].(*ast.CallExpr); !isCall || call.Fun != x || method != "routes" {
-							t.Errorf("%s: requireOriginationProfile is used outside routes", fset.Position(x.Pos()))
+							t.Errorf("%s: %s is used outside routes", fset.Position(x.Pos()), x.Sel.Name)
 						}
-						guards++
+						guards[x.Sel.Name]++
 					}
 				case *ast.CompositeLit:
 					if method != "routes" {
@@ -467,6 +523,9 @@ func TestScenarioRoutes_EveryRouteIsClassified(t *testing.T) {
 			})
 		}
 	}
+	if registryBodies != 1 || adapterBodies != len(workstreams) {
+		t.Errorf("found %d workstreamRoutes and %d adapter routes methods, want 1 and %d (one per compiled-in workstream)", registryBodies, adapterBodies, len(workstreams))
+	}
 	if routesFuncs != 1 || handlers != 1 {
 		t.Errorf("found %d (*Gateway).routes and %d (*Gateway).Handler methods, want 1 of each", routesFuncs, handlers)
 	}
@@ -476,16 +535,18 @@ func TestScenarioRoutes_EveryRouteIsClassified(t *testing.T) {
 	if mountLists != 1 {
 		t.Errorf("routes builds %d lists of declarations, want one", mountLists)
 	}
-	if guards != 1 {
-		t.Errorf("requireOriginationProfile is called %d times in the package, want once (by routes)", guards)
+	for _, g := range []string{"requireOriginationProfile", "requireScenarioCaller"} {
+		if guards[g] != 1 {
+			t.Errorf("%s is called %d times in the package, want once (by routes)", g, guards[g])
+		}
 	}
-	for name := range declarations {
+	for name := range mountable {
 		if !mounted[name] {
-			t.Errorf("routes does not mount the %s declaration", name)
+			t.Errorf("routes does not mount %s", name)
 		}
 	}
 	for name := range mounted {
-		if declarations[name] == "" {
+		if !mountable[name] {
 			t.Errorf("routes mounts %s, which is not a classified declaration", name)
 		}
 	}
@@ -498,6 +559,8 @@ func TestScenarioRoutes_EveryRouteIsClassified(t *testing.T) {
 			t.Errorf("%s: %s is declared but not classified (add it to a route list here)", l.pos, l.pattern)
 		case l.originates != originating[l.pattern]:
 			t.Errorf("%s: %s is declared originating=%v but classified originating=%v", l.pos, l.pattern, l.originates, originating[l.pattern])
+		case l.operator != (l.piece == "origination"):
+			t.Errorf("%s: %s is declared operator=%v, but every /scenario route, and only those, is the operator surface", l.pos, l.pattern, l.operator)
 		}
 	}
 
@@ -518,9 +581,14 @@ func TestScenarioRoutes_EveryRouteIsClassified(t *testing.T) {
 	for _, role := range []string{"provider", "payer", "facility", "phg"} {
 		for _, c := range everyRouteCondition() {
 			g := routeGateway(role, c)
+			// The registry mounts exactly the adapters' declarations, in
+			// registry order: PA's, then Federated Query Services'.
+			if reg, adapters := g.workstreamRoutes(role), slices.Concat(g.paRoutes(role), g.fqsRoutes(role)); !sameRoutes(reg, adapters) {
+				t.Errorf("%s under %s: the workstream registry mounts %v, the adapters declare %v", role, c, routePatterns(reg), routePatterns(adapters))
+			}
 			seen := map[string]string{}
 			for piece, declared := range map[string][]mountedRoute{
-				"core": g.coreRoutes(role), "pa": g.paRoutes(role), "origination": g.originationRoutes(role),
+				"core": g.coreRoutes(role), "pa": g.paRoutes(role), "fqs": g.fqsRoutes(role), "origination": g.originationRoutes(role),
 			} {
 				for _, rt := range declared {
 					key := role + " " + rt.pattern
@@ -529,13 +597,16 @@ func TestScenarioRoutes_EveryRouteIsClassified(t *testing.T) {
 					}
 					seen[rt.pattern] = piece
 					produced[piece+" "+rt.pattern] = true
-					scenario := strings.Contains(rt.pattern, " /scenario/")
+					scenario := strings.Contains(rt.pattern, "/scenario")
 					inbound := rt.pattern == "POST /substrate/inbound"
 					if (piece == "origination") != scenario || (piece == "core") != inbound {
 						t.Errorf("%s is declared by %s, which does not own it", key, piece)
 					}
 					if rt.handler == nil {
 						t.Errorf("%s is declared with no handler", key)
+					}
+					if rt.operator != (piece == "origination") {
+						t.Errorf("%s under %s is mounted operator=%v, want it behind requireScenarioCaller exactly when it is /scenario", key, c, rt.operator)
 					}
 					if prev, ok := got[key]; ok && prev != rt.originates {
 						t.Errorf("%s is originating under one condition and not under another", key)
@@ -568,11 +639,33 @@ func TestScenarioRoutes_EveryRouteIsClassified(t *testing.T) {
 	}
 }
 
+// sameRoutes reports whether a and b declare the same patterns, in order, the
+// same ones originating and the same ones the operator surface.
+func sameRoutes(a, b []mountedRoute) bool {
+	return slices.EqualFunc(a, b, func(x, y mountedRoute) bool {
+		return x.pattern == y.pattern && x.originates == y.originates && x.operator == y.operator && (x.handler == nil) == (y.handler == nil)
+	})
+}
+
+func routePatterns(rs []mountedRoute) []string {
+	var out []string
+	for _, r := range rs {
+		out = append(out, r.pattern)
+	}
+	return out
+}
+
+// routeFlags are what a mountedRoute literal declares about its route: that it
+// originates, and that it is the operator surface.
+type routeFlags struct{ originates, operator bool }
+
 // declaredRoute is one route pattern a declaration's source names: the piece
-// that declares it, where, and whether it is declared originating.
+// that declares it, where, and whether it is declared originating and the
+// operator surface.
 type declaredRoute struct {
 	piece, pattern, pos string
 	originates          bool
+	operator            bool
 }
 
 // routeRoles are the roles a route declaration may name; routeGates the
@@ -580,27 +673,28 @@ type declaredRoute struct {
 // the conditions routeGateway sets.
 var (
 	routeRoles      = map[string]bool{"provider": true, "payer": true, "facility": true, "phg": true}
-	routeGates      = map[string]bool{"cfg.IngressEnabled": true, "cfg.IngressBaseURL": true, "cfg.PatientAccessOff": true, "ingressAuth": true}
+	routeGates      = map[string]bool{"cfg.IngressEnabled": true, "cfg.IngressBaseURL": true, "ingressAuth": true}
 	routePatternLit = regexp.MustCompile(`^(GET|POST|PUT|PATCH|DELETE) /`)
 )
 
 // readRouteDeclaration reads the route patterns a declaration's source names,
 // failing t on anything the classifier cannot read: a pattern that is not a
-// string literal, an originates value that is not a literal, a string that is
-// neither a pattern, a role nor "", or gateway state other than the gates.
+// string literal, an originates or operator value that is not a literal, a
+// string that is neither a pattern, a role nor "", or gateway state other than
+// the gates.
 func readRouteDeclaration(t *testing.T, fset *token.FileSet, fn *ast.FuncDecl, recv, piece string, gatewayFields map[string]bool) []declaredRoute {
 	t.Helper()
 	at := func(n ast.Node) string { return fset.Position(n.Pos()).String() }
 	// closures are the declaration's local route builders, by name: whether
-	// the routes each builds are originating.
-	closures := map[string]bool{}
+	// the routes each builds are originating and the operator surface.
+	closures := map[string]routeFlags{}
 	// consumed are the pattern literals read as a closure's argument or a
 	// mountedRoute's pattern.
 	consumed := map[*ast.BasicLit]bool{}
 	var out []declaredRoute
-	// routeLiteral reads one mountedRoute literal: its originates value, and
-	// its pattern, which is param inside a closure and a literal elsewhere.
-	routeLiteral := func(lit *ast.CompositeLit, param string) (originates bool) {
+	// routeLiteral reads one mountedRoute literal: its originates and operator
+	// values, and its pattern, which is param inside a closure and a literal elsewhere.
+	routeLiteral := func(lit *ast.CompositeLit, param string) (flags routeFlags) {
 		for _, e := range lit.Elts {
 			kv, ok := e.(*ast.KeyValueExpr)
 			if !ok {
@@ -610,12 +704,16 @@ func readRouteDeclaration(t *testing.T, fset *token.FileSet, fn *ast.FuncDecl, r
 			key, _ := kv.Key.(*ast.Ident)
 			switch {
 			case key == nil:
-			case key.Name == "originates":
+			case key.Name == "originates" || key.Name == "operator":
 				id, ok := kv.Value.(*ast.Ident)
 				if !ok || (id.Name != "true" && id.Name != "false") {
-					t.Errorf("%s: %s declares originates other than as a literal", at(kv.Value), fn.Name.Name)
+					t.Errorf("%s: %s declares %s other than as a literal", at(kv.Value), fn.Name.Name, key.Name)
 				}
-				originates = ok && id.Name == "true"
+				if key.Name == "originates" {
+					flags.originates = ok && id.Name == "true"
+				} else {
+					flags.operator = ok && id.Name == "true"
+				}
 			case key.Name == "pattern":
 				if param != "" {
 					if id, ok := kv.Value.(*ast.Ident); !ok || id.Name != param {
@@ -631,7 +729,7 @@ func readRouteDeclaration(t *testing.T, fset *token.FileSet, fn *ast.FuncDecl, r
 				consumed[bl] = true
 			}
 		}
-		return originates
+		return flags
 	}
 	isRouteLit := func(n ast.Node) (*ast.CompositeLit, bool) {
 		lit, ok := n.(*ast.CompositeLit)
@@ -704,13 +802,13 @@ func readRouteDeclaration(t *testing.T, fset *token.FileSet, fn *ast.FuncDecl, r
 				}
 			}
 			for _, lit := range lits {
-				originates := routeLiteral(lit, "")
+				flags := routeLiteral(lit, "")
 				for _, e := range lit.Elts {
 					if kv, ok := e.(*ast.KeyValueExpr); ok {
 						if key, _ := kv.Key.(*ast.Ident); key != nil && key.Name == "pattern" {
 							if bl, ok := kv.Value.(*ast.BasicLit); ok {
 								v, _ := strconv.Unquote(bl.Value)
-								out = append(out, declaredRoute{piece: piece, pattern: v, pos: at(bl), originates: originates})
+								out = append(out, declaredRoute{piece: piece, pattern: v, pos: at(bl), originates: flags.originates, operator: flags.operator})
 							}
 						}
 					}
@@ -721,7 +819,7 @@ func readRouteDeclaration(t *testing.T, fset *token.FileSet, fn *ast.FuncDecl, r
 			if !ok {
 				break
 			}
-			originates, isClosure := closures[id.Name]
+			flags, isClosure := closures[id.Name]
 			if !isClosure {
 				break
 			}
@@ -736,7 +834,7 @@ func readRouteDeclaration(t *testing.T, fset *token.FileSet, fn *ast.FuncDecl, r
 			}
 			consumed[bl] = true
 			v, _ := strconv.Unquote(bl.Value)
-			out = append(out, declaredRoute{piece: piece, pattern: v, pos: at(bl), originates: originates})
+			out = append(out, declaredRoute{piece: piece, pattern: v, pos: at(bl), originates: flags.originates, operator: flags.operator})
 		case *ast.BasicLit:
 			if x.Kind != token.STRING {
 				break
@@ -816,6 +914,85 @@ func declarationCall(e ast.Expr, recv string) (string, bool) {
 	return sel.Sel.Name, true
 }
 
+// workstreamRoutesBody is (*Gateway).workstreamRoutes' whole body: every
+// compiled-in adapter's routes, in registry order, and nothing else.
+const workstreamRoutesBody = `{
+	for _, w := range workstreams {
+		out = append(out, w.routes(g, role)...)
+	}
+	return out
+}`
+
+// adapterRoutesBody is a workstream adapter's whole routes method: its
+// classified declaration, called with the role. %s are the method's gateway
+// and role parameters and the declaration's name.
+const adapterRoutesBody = `{
+	return %s.%s(%s)
+}`
+
+// adapterDeclarations are the classified declarations an adapter's routes
+// method may return.
+var adapterDeclarations = []string{"paRoutes", "fqsRoutes"}
+
+// adapterNoRoutesBody is the routes body of a workstream with no
+// participant-facing route (the toy test profile).
+const adapterNoRoutesBody = `{
+	return nil
+}`
+
+// receiverType is the base type name of fn's receiver.
+func receiverType(fn *ast.FuncDecl) string {
+	t := fn.Recv.List[0].Type
+	if star, ok := t.(*ast.StarExpr); ok {
+		t = star.X
+	}
+	if id, ok := t.(*ast.Ident); ok {
+		return id.Name
+	}
+	return ""
+}
+
+// bodyIs reports whether fn's body is exactly want, token for token (spacing
+// and comments aside).
+func bodyIs(fset *token.FileSet, fn *ast.FuncDecl, want string) error {
+	var body strings.Builder
+	if err := printer.Fprint(&body, fset, fn.Body); err != nil {
+		return err
+	}
+	if strings.Join(strings.Fields(body.String()), " ") != strings.Join(strings.Fields(want), " ") {
+		return fmt.Errorf("is not exactly:\n%s\ngot:\n%s", want, body.String())
+	}
+	return nil
+}
+
+// adapterRoutesIs reports whether fn, a workstream adapter's routes method,
+// returns one classified declaration called with its role parameter and does
+// nothing else.
+func adapterRoutesIs(fset *token.FileSet, fn *ast.FuncDecl) error {
+	var params []string
+	for _, f := range fn.Type.Params.List {
+		for _, id := range f.Names {
+			params = append(params, id.Name)
+		}
+	}
+	if len(params) != 2 {
+		return fmt.Errorf("takes %d named parameters, want the gateway and the role", len(params))
+	}
+	// A workstream with no participant-facing routes mounts none.
+	if bodyIs(fset, fn, adapterNoRoutesBody) == nil {
+		return nil
+	}
+	var errs []error
+	for _, decl := range adapterDeclarations {
+		err := bodyIs(fset, fn, fmt.Sprintf(adapterRoutesBody, params[0], decl, params[1]))
+		if err == nil {
+			return nil
+		}
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
+
 // handlerBody is (*Gateway).Handler's whole body: it takes the routes mux and
 // serves every request through it, counting the operation. Anything else it
 // did would answer a path no declaration classifies.
@@ -827,3 +1004,63 @@ const handlerBody = `{
 		mux.ServeHTTP(w, r)
 	})
 }`
+
+// TestRouteFence_RegistryBodiesArePinned: the registry and an adapter's routes
+// method pass the fence only exactly as pinned. A body that gates the routes
+// on gateway state, rewrites a pattern or swaps a handler is refused, whatever
+// conditions the behavioural walk drives.
+func TestRouteFence_RegistryBodiesArePinned(t *testing.T) {
+	parse := func(src string) *ast.FuncDecl {
+		t.Helper()
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, "probe.go", "package engine\n\n"+src, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return f.Decls[0].(*ast.FuncDecl)
+	}
+	fset := token.NewFileSet()
+	registry := func(body string) error {
+		return bodyIs(fset, parse("func (g *Gateway) workstreamRoutes(role string) (out []mountedRoute) "+body), workstreamRoutesBody)
+	}
+	adapter := func(body string) error {
+		return adapterRoutesIs(fset, parse("func (paWorkstream) routes(g *Gateway, role string) []mountedRoute "+body))
+	}
+	if err := registry("{\n\t// every adapter\n\tfor _, w := range workstreams { out = append(out, w.routes(g, role)...) }\n\treturn out\n}"); err != nil {
+		t.Errorf("the pinned registry body, respaced and commented, is refused: %v", err)
+	}
+	if err := adapter("{ return g.paRoutes(role) }"); err != nil {
+		t.Errorf("the pinned adapter body is refused: %v", err)
+	}
+	for name, err := range map[string]error{
+		"the registry swaps a handler": registry(`{
+	for _, w := range workstreams { out = append(out, w.routes(g, role)...) }
+	for i := range out { out[i].handler = g.handleCDSDiscovery }
+	return out
+}`),
+		"the registry gates on gateway state": registry(`{
+	if g.cfg.HubAcceptsInvolved { return nil }
+	for _, w := range workstreams { out = append(out, w.routes(g, role)...) }
+	return out
+}`),
+		"the registry skips an adapter": registry(`{
+	for _, w := range workstreams[1:] { out = append(out, w.routes(g, role)...) }
+	return out
+}`),
+		"the adapter gates on gateway state": adapter(`{
+	if g.cfg.HubAcceptsInvolved { return nil }
+	return g.paRoutes(role)
+}`),
+		"the adapter rewrites a pattern": adapter(`{
+	r := g.paRoutes(role)
+	if g.cfg.HubAcceptsInvolved { r[0].pattern = "GET /evil" }
+	return r
+}`),
+		"the adapter returns another declaration": adapter(`{ return g.originationRoutes(role) }`),
+		"the adapter passes another role":         adapter(`{ return g.paRoutes("provider") }`),
+	} {
+		if err == nil {
+			t.Errorf("%s: the fence accepts it", name)
+		}
+	}
+}

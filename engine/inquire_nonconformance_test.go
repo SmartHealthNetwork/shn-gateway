@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
+
+	"github.com/SmartHealthNetwork/shn-gateway/internal/pasgraph"
 )
 
 // The Da Vinci reference payer answers `Claim/$inquire` with a `Parameters` whose
@@ -72,8 +74,8 @@ func TestPASInquire_ReadsEitherOutputParameterName(t *testing.T) {
 		read   bool
 		reason string
 	}{
-		{pasInquiryDeclaredOutput, true, "the name every published operation definition declares"},
-		{pasInquiryRecordedOutput, true, "the name the Da Vinci reference payer records against"},
+		{pasgraph.InquiryDeclaredOutput, true, "the name every published operation definition declares"},
+		{pasgraph.InquiryRecordedOutput, true, "the name the Da Vinci reference payer records against"},
 		{"bundle", false, "a name no definition declares and no payer has been recorded sending"},
 	} {
 		t.Run(row.name, func(t *testing.T) {
@@ -143,7 +145,7 @@ func TestPASInquire_NonconformantOutputNameReported(t *testing.T) {
 		for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve, EnforcementStructural} {
 			var seen []ObserverEvent
 			g := &Gateway{cfg: Config{Clock: fixedClock, ConformanceEnforcement: level, Observer: func(e ObserverEvent) { seen = append(seen, e) }}}
-			stated := g.reportInquiryAnswerNonconformance(corr, partner, inquiryAnswerUnder(t, pasInquiryRecordedOutput))
+			stated := g.reportInquiryAnswerNonconformance(corr, partner, inquiryAnswerUnder(t, pasgraph.InquiryRecordedOutput))
 			want := 1
 			if level == EnforcementNone {
 				want = 0
@@ -155,7 +157,7 @@ func TestPASInquire_NonconformantOutputNameReported(t *testing.T) {
 	})
 
 	t.Run("the reference payer's name is reported, naming both terms", func(t *testing.T) {
-		stated, seen := report(t, inquiryAnswerUnder(t, pasInquiryRecordedOutput))
+		stated, seen := report(t, inquiryAnswerUnder(t, pasgraph.InquiryRecordedOutput))
 		if len(stated) != 1 {
 			t.Fatalf("stated %d departures, want exactly one: %v", len(stated), stated)
 		}
@@ -168,11 +170,11 @@ func TestPASInquire_NonconformantOutputNameReported(t *testing.T) {
 			{"the certification sentence", stated[0]},
 			{"the observer event", seen[0].Detail},
 		} {
-			if !strings.Contains(where.text, pasInquiryRecordedOutput) {
-				t.Errorf("%s does not name what the payer sent (%s): %q", where.label, pasInquiryRecordedOutput, where.text)
+			if !strings.Contains(where.text, pasgraph.InquiryRecordedOutput) {
+				t.Errorf("%s does not name what the payer sent (%s): %q", where.label, pasgraph.InquiryRecordedOutput, where.text)
 			}
-			if !strings.Contains(where.text, pasInquiryDeclaredOutput) {
-				t.Errorf("%s does not name what the operation declares (%s): %q", where.label, pasInquiryDeclaredOutput, where.text)
+			if !strings.Contains(where.text, pasgraph.InquiryDeclaredOutput) {
+				t.Errorf("%s does not name what the operation declares (%s): %q", where.label, pasgraph.InquiryDeclaredOutput, where.text)
 			}
 		}
 		if seen[0].Detail != stated[0] {
@@ -198,7 +200,7 @@ func TestPASInquire_NonconformantOutputNameReported(t *testing.T) {
 		if len(stated) != 1 || len(seen) != 1 {
 			t.Fatalf("an unread output parameter was not reported: stated=%v observed=%+v", stated, seen)
 		}
-		if !strings.Contains(stated[0], "bundle") || !strings.Contains(stated[0], pasInquiryDeclaredOutput) {
+		if !strings.Contains(stated[0], "bundle") || !strings.Contains(stated[0], pasgraph.InquiryDeclaredOutput) {
 			t.Errorf("the report names %q; it must name what the payer sent AND what the operation declares", stated[0])
 		}
 		if !strings.Contains(stated[0], "does not read") {
@@ -220,7 +222,7 @@ func TestPASInquire_NonconformantOutputNameReported(t *testing.T) {
 	})
 
 	t.Run("a conformant answer reports nothing", func(t *testing.T) {
-		stated, seen := report(t, inquiryAnswerUnder(t, pasInquiryDeclaredOutput))
+		stated, seen := report(t, inquiryAnswerUnder(t, pasgraph.InquiryDeclaredOutput))
 		if len(stated) != 0 || len(seen) != 0 {
 			t.Fatalf("a conformant answer was reported as nonconformant: stated=%v observed=%+v", stated, seen)
 		}
@@ -235,9 +237,9 @@ func TestPASInquire_NonconformantOutputNameReported(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := pasInquiryOutputDeviations(real); len(got) != 1 || got[0] != pasInquiryRecordedOutput {
+		if got := pasInquiryOutputDeviations(real); len(got) != 1 || got[0] != pasgraph.InquiryRecordedOutput {
 			t.Fatalf("the recorded reference-payer answer deviates as %v, want [%s] — if this changed, the addendum and the reader's closed set both need revisiting",
-				got, pasInquiryRecordedOutput)
+				got, pasgraph.InquiryRecordedOutput)
 		}
 		if len(readPASInquiryAnswers(inquiryRequester, real)) == 0 {
 			t.Error("the recorded reference-payer answer yields no ClaimResponse: its decision would reach the requester and be recorded nowhere")
@@ -256,7 +258,7 @@ func TestPASInquire_NonconformanceRidesCertificationEvidence(t *testing.T) {
 	}), func(e ObserverEvent) { seen = append(seen, e) })
 
 	const sentence = "prior-authorization inquiry answer carries its response bundle under output parameter responseBundle; the operation declares return"
-	g.certificationPair("pas-claim-inquire", "payer-native", "corr-inquiry-cert", "2.0",
+	g.conformance().certify("pas-claim-inquire", "payer-native", "corr-inquiry-cert", "2.0",
 		[]byte(`{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"Claim"}}]}`),
 		[]byte(`{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"ClaimResponse"}}]}`),
 		sentence)

@@ -7,12 +7,14 @@ import (
 	"testing"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
+
+	"github.com/SmartHealthNetwork/shn-gateway/internal/pasgraph"
 )
 
 // The PAS answer checks decide a Coverage's party by shnsdk.CoverageParty,
 // for the contained list of a Coverage that is an entry of the answer: the
 // $submit answer's subject rule (subjectMismatch), the inquiry answer's
-// (inquiryPatientScope.collect) and the request graph a provider gateway
+// (pasgraph.InquiryScopeSubjects) and the request graph a provider gateway
 // completes from its system of record (retainPASRequestEvidence). These rows
 // run each of them over every row of the shared table
 // (testdata/coverageparty/rows.json), the row's Coverage made the answer's
@@ -200,7 +202,7 @@ func TestCoverageParty_InquiryAnswerAgrees(t *testing.T) {
 					t.Fatal(err)
 				}
 				scopes := 0
-				for _, bundle := range inquiryAnswerScopes(doc) {
+				for _, bundle := range pasgraph.InquiryAnswerScopes(doc) {
 					for _, e := range answerEntries(bundle) {
 						res, _ := e["resource"].(map[string]any)
 						if id, _ := res["id"].(string); id != "InsuranceExample" {
@@ -208,8 +210,7 @@ func TestCoverageParty_InquiryAnswerAgrees(t *testing.T) {
 						}
 						scopes++
 						owner, _ := e["fullUrl"].(string)
-						members := map[string]bool{}
-						newInquiryPatientScope(bundle).collect(bundle, members)
+						members, _ := pasgraph.InquiryScopeSubjects(bundle)
 						if read, want := members[askedIdentity(t, r, owner)], kind == rowSecondPatient; read != want {
 							t.Fatalf("the walk read the resource asked about as a patient: %v, want %v (%v)", read, want, members)
 						}

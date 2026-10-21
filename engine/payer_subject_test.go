@@ -33,10 +33,10 @@ func (c subjectCapture) Handle(ctx context.Context, leg, corrID, subjectPCI stri
 
 // TestPASSubmit_AnotherPatientsTokenFilesNothingUnderIt: A's token with B's
 // claim. The payer is asked about B, under B's binding; the decision it files
-// (as the native responder files one, under the subject it is handed) is B's,
-// and A's Patient Access read returns nothing.
+// (as the native responder files one, under the subject it is handed) is B's
+// ledger row, and nothing is filed under A.
 func TestPASSubmit_AnotherPatientsTokenFilesNothingUnderIt(t *testing.T) {
-	g, requester, store, _ := eobOwnerGateway(t)
+	g, requester, store, _ := countingPayerGateway(t)
 	pciA, pciB := memberPCI(t, g, "MBR-COVERED"), memberPCI(t, g, "MBR-UC04")
 	var subjects []string
 	var events []ObserverEvent
@@ -45,7 +45,8 @@ func TestPASSubmit_AnotherPatientsTokenFilesNothingUnderIt(t *testing.T) {
 		inner: approvingPASResponder{clock: g.cfg.Clock}, calls: new(int),
 		commit: func(_ context.Context, corrID, subjectPCI string) func() error {
 			return func() error {
-				return store.RecordEOB(subjectPCI, decisionEOBID(corrID), []byte(`{"resourceType":"ExplanationOfBenefit","id":"decision"}`))
+				_, err := testLedger(store).RecordDecision(subjectPCI, corrID, PendOutcomeApproved, fixedClock(), PendKeys{RequesterHolder: requester.ID})
+				return err
 			}
 		},
 	}}
@@ -74,45 +75,11 @@ func TestPASSubmit_AnotherPatientsTokenFilesNothingUnderIt(t *testing.T) {
 	if countEvents(events, SubjectBindingDiffersEvent) != 1 {
 		t.Fatalf("events = %+v, want one %s", events, SubjectBindingDiffersEvent)
 	}
-	if got, found := store.EOBsForPatient(pciA); found || len(got) != 0 {
-		t.Fatalf("A's Patient Access read returns %d EOBs from B's claim", len(got))
+	if got, found, err := testLedger(store).PendRecordOf(pciA, corr); err != nil || found {
+		t.Fatalf("B's claim filed a ledger row under A: %+v (found=%v err=%v)", got, found, err)
 	}
-	if got, found := store.EOBsForPatient(pciB); !found || len(got) != 1 {
-		t.Fatalf("B's decision filed %d EOBs under B (found=%v), want 1", len(got), found)
-	}
-}
-
-// TestPASSubmit_CorrelationCheckedAgainstTheClaimsOwnPatient: the correlation
-// check asks whether the id names another patient than the one the claim is
-// for. A's token does not make B's claim A's: B's claim under a correlation id
-// A's pended authorization holds is refused before the payer is asked.
-func TestPASSubmit_CorrelationCheckedAgainstTheClaimsOwnPatient(t *testing.T) {
-	const corr = "corr-a-pended"
-	g, requester, store, calls := eobOwnerGateway(t)
-	pciA := memberPCI(t, g, "MBR-COVERED")
-	if _, err := store.RecordPendedKeyed(pciA, corr, fixedClock(), PendKeys{RequesterHolder: requester.ID, RequestIDs: []string{"urn:shn:claim|CLM-A"}}); err != nil {
-		t.Fatalf("A's pend: %v", err)
-	}
-	bundle := conformantPASBundleWithQR(t, "MBR-UC04")
-	env, err := shnsdk.Seal(shnsdk.Metadata{
-		Sender: requester.ID, Recipient: "payer", TransactionType: "pas-claim", AuthorityFrame: "payer-coverage",
-		Timestamp: g.cfg.Clock().Format(time.RFC3339), CorrelationID: corr,
-	}, bundle, g.cfg.Identity.EncPub)
-	if err != nil {
-		t.Fatalf("seal: %v", err)
-	}
-	rec := httptest.NewRecorder()
-	g.handlePASNativeInbound(rec, newSignedInboundRequest(t, g, requester.ID), env, shnsdk.Token{Operation: "pas-submit", Subject: pciA, CorrelationID: corr}, bundle, "pa.pas@2.0")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status %d %s, want the framed refusal", rec.Code, rec.Body)
-	}
-	hdr, body, err := shnsdk.DecodeHTTPFrame(openResponseLeg(t, requester, rec.Body.Bytes()))
-	if err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	wantCorrelationTaken(t, hdr.Status, body)
-	if *calls != 0 {
-		t.Fatalf("the payer was asked %d times", *calls)
+	if got, found, err := testLedger(store).PendRecordOf(pciB, corr); err != nil || !found || got.State != PendStateDecided || got.Outcome != PendOutcomeApproved {
+		t.Fatalf("B's decision under B = %+v (found=%v err=%v), want decided/approved", got, found, err)
 	}
 }
 
@@ -143,8 +110,8 @@ func TestPASUpdate_AnotherPatientsTokenHandsThePayerTheUpdatesOwnPatient(t *test
 // TestPASInquire_AnotherPatientsTokenDecidesNothingOfTheirs: A's authorization
 // is pended; an inquiry about B arrives under A's token and the payer's answer
 // states a decision under A's authorization's key. The answer is relayed, and
-// nothing is recorded: A's authorization stays pended and A gains no EOB naming
-// B. The control, A's own inquiry under A's token, records the decision, so the
+// nothing is recorded: A's authorization stays pended with no outcome. The
+// control, A's own inquiry under A's token, records the decision, so the
 // row can fail.
 func TestPASInquire_AnotherPatientsTokenDecidesNothingOfTheirs(t *testing.T) {
 	const corr = "corr-a-pended"
@@ -163,7 +130,7 @@ func TestPASInquire_AnotherPatientsTokenDecidesNothingOfTheirs(t *testing.T) {
 			answer := decidedAnswer(t) // its item echoes the inquiry line's TRN-1
 			g.cfg.Responder = pasResultResponder{result: LegResult{Response: testResponse(answer), ResponseSubjectForeign: true}}
 			pciA, _, _ := g.cfg.SoR.ResolvePatient("MBR-COVERED")
-			if _, err := store.RecordPendedKeyed(pciA, corr, fixedClock(), PendKeys{RequesterHolder: requester.ID, ClaimResponseIDs: []string{inquiryCRKey}, ItemTraceNumbers: []string{inquiryTraceKey}}); err != nil {
+			if _, err := testLedger(store).RecordPendedKeyed(pciA, corr, fixedClock(), PendKeys{RequesterHolder: requester.ID, ClaimResponseIDs: []string{inquiryCRKey}, ItemTraceNumbers: []string{inquiryTraceKey}}); err != nil {
 				t.Fatalf("A's pend: %v", err)
 			}
 
@@ -179,19 +146,18 @@ func TestPASInquire_AnotherPatientsTokenDecidesNothingOfTheirs(t *testing.T) {
 			if err != nil || !bytes.Equal(body, answer) {
 				t.Fatalf("the payer's answer was not relayed as sent (err=%v)", err)
 			}
-			pend, _, _ := store.PendRecordOf(pciA, corr)
-			eobs, _ := store.EOBsForPatient(pciA)
+			pend, _, _ := testLedger(store).PendRecordOf(pciA, corr)
 			if tc.decided {
-				if pend.State != PendStateDecided || len(eobs) != 1 {
-					t.Fatalf("control: A's authorization %+v with %d EOBs, want decided with its EOB", pend, len(eobs))
+				if pend.State != PendStateDecided || pend.Outcome != PendOutcomeApproved {
+					t.Fatalf("control: A's authorization %+v, want decided/approved", pend)
 				}
 				if n := countEvents(events, PendOtherSubjectEvent) + countEvents(events, SubjectBindingDiffersEvent); n != 0 {
 					t.Fatalf("control raised %d subject events", n)
 				}
 				return
 			}
-			if pend.State != PendStatePended || len(eobs) != 0 {
-				t.Fatalf("B's inquiry changed A's records: authorization %+v, %d EOBs", pend, len(eobs))
+			if pend.State != PendStatePended || pend.Outcome != "" || !pend.DecidedAt.IsZero() {
+				t.Fatalf("B's inquiry changed A's records: authorization %+v", pend)
 			}
 			// The operator is told both that the leg is attributed to another
 			// patient and that the answer named an authorization it was not about.
@@ -215,7 +181,7 @@ func countEvents(events []ObserverEvent, kind string) int {
 // TestPASSubmit_OwnTokenRaisesNoBindingEvent: the event is about a difference;
 // a claim under its own patient's token raises none.
 func TestPASSubmit_OwnTokenRaisesNoBindingEvent(t *testing.T) {
-	g, requester, _, _ := eobOwnerGateway(t)
+	g, requester, _, _ := countingPayerGateway(t)
 	var events []ObserverEvent
 	g.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
 	if status, body := submitAs(t, g, requester, "MBR-UC04", "corr-own-token"); status != http.StatusOK {
@@ -291,4 +257,75 @@ func TestPASInquire_SystemOfRecordFailureIsTheGatewaysOwn5xx(t *testing.T) {
 	if bytes.Contains(body, []byte("private-upstream-sentinel")) || bytes.Contains(body, []byte("must not be asked")) {
 		t.Fatalf("the backend's own error text leaked, or the payer was asked: %s", body)
 	}
+}
+
+// countingPASResponder counts the payer's pas-claim answers — a call here is the
+// payer acting on the claim — and can run a write while the payer answers
+// (another exchange landing mid-flight) and attach the leg's own ledger Commit.
+type countingPASResponder struct {
+	inner  LegResponder
+	calls  *int
+	during func(corrID string)
+	commit func(ctx context.Context, corrID, subjectPCI string) func() error
+}
+
+func (r countingPASResponder) Handle(ctx context.Context, leg, corrID, subjectPCI string, requestFHIR []byte) (LegResult, error) {
+	*r.calls++
+	if r.during != nil {
+		r.during(corrID)
+	}
+	result, err := r.inner.Handle(ctx, leg, corrID, subjectPCI, requestFHIR)
+	if err == nil && r.commit != nil {
+		result.Commit = r.commit(ctx, corrID, subjectPCI)
+	}
+	return result, err
+}
+
+func memberPCI(t *testing.T, g *Gateway, member string) string {
+	t.Helper()
+	pci, _, ok := g.cfg.SoR.ResolvePatient(member)
+	if !ok {
+		t.Fatalf("%s not resolvable in the census fixture", member)
+	}
+	return pci
+}
+
+// submitAs drives the conformant submit leg for member under corrID and returns
+// the status and body the requester receives: the framed application answer, or
+// the raw non-2xx of a gateway fault.
+func submitAs(t *testing.T, g *Gateway, requester inboundTestRequester, member, corrID string) (int, []byte) {
+	t.Helper()
+	bundle := conformantPASBundleWithQR(t, member)
+	env, err := shnsdk.Seal(shnsdk.Metadata{
+		Sender: requester.ID, Recipient: "payer", TransactionType: "pas-claim", AuthorityFrame: "payer-coverage",
+		Timestamp: g.cfg.Clock().Format(time.RFC3339), CorrelationID: corrID,
+	}, bundle, g.cfg.Identity.EncPub)
+	if err != nil {
+		t.Fatalf("seal: %v", err)
+	}
+	tok := shnsdk.Token{Operation: "pas-submit", Subject: memberPCI(t, g, member), CorrelationID: corrID}
+	rec := httptest.NewRecorder()
+	g.handlePASNativeInbound(rec, newSignedInboundRequest(t, g, requester.ID), env, tok, bundle, "pa.pas@2.0")
+	if rec.Code != http.StatusOK {
+		return rec.Code, rec.Body.Bytes()
+	}
+	hdr, body, err := shnsdk.DecodeHTTPFrame(openResponseLeg(t, requester, rec.Body.Bytes()))
+	if err != nil {
+		t.Fatalf("decode the framed answer: %v", err)
+	}
+	return hdr.Status, body
+}
+
+// countingPayerGateway is a payer gateway over the census fixture, its store, and a
+// counter of the payer's answers.
+func countingPayerGateway(t *testing.T) (*Gateway, inboundTestRequester, *censusSoR, *int) {
+	t.Helper()
+	g, requester := newInboundTestGateway(t, true)
+	store, ok := g.cfg.Store.(*censusSoR)
+	if !ok {
+		t.Fatalf("fixture store is %T", g.cfg.Store)
+	}
+	calls := new(int)
+	g.cfg.Responder = countingPASResponder{inner: approvingPASResponder{clock: g.cfg.Clock}, calls: calls}
+	return g, requester, store, calls
 }

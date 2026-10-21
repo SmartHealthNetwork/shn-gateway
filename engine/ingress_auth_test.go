@@ -21,6 +21,7 @@ func TestIngressHandlers_FailClosedWithoutBypass(t *testing.T) {
 		{"crd", g.handleCRDIngress},
 		{"dtr", g.handleDTRIngress},
 		{"pas", g.handlePASIngress},
+		{"federated-query", g.handleFederatedQueryIngress},
 	}
 	for _, tc := range handlers {
 		req := httptest.NewRequest(http.MethodPost, "/", nil)

@@ -91,9 +91,10 @@ import (
 //	                  never a payload). A payer gateway emits the same event, with
 //	                  Direction = "ingress", when it relays its participant's PAS or
 //	                  inquiry answer below strict that it could not read
-//	                  (answer.shape), that breaks an EOB rule (eob.decision) or whose
-//	                  subjects do not bind (patient.answer): it writes no pend,
-//	                  decision or EOB from that answer
+//	                  (answer.shape), whose decision its record cannot hold
+//	                  (eob.decision) or whose subjects do not bind
+//	                  (patient.answer): it writes no pend or decision from that
+//	                  answer
 //	peer.nonconformant
 //	                  a peer's message departed from what the operation it answers
 //	                  declares, and was read anyway (Op = the operation's answer,
@@ -137,6 +138,9 @@ type RouteInfo struct {
 	Own         []string    `json:"own,omitempty"`         // refusals only
 	Peer        []string    `json:"peer,omitempty"`        // refusals only
 	BridgeIssue string      `json:"bridgeIssue,omitempty"` // refusals only
+	// Pinned is the pend's pin a follow-up was carried away from, when nothing
+	// reaches the pinned line any more; empty otherwise.
+	Pinned string `json:"pinned,omitempty"`
 }
 
 // ChainStep is one hop of a RouteInfo.Chain, mirroring one CompatStep of the
@@ -161,6 +165,7 @@ func routeInfoFor(route legRoute) *RouteInfo {
 		Token:     route.Token,
 		BuildLine: route.BuildLine,
 		Chain:     chainStepsFrom(route.BuildLine, route.Chain),
+		Pinned:    route.Pinned,
 	}
 }
 
@@ -243,6 +248,9 @@ func (v observingValidator) Ready() bool {
 	return true
 }
 
+// laneReachable delegates module 2's reachability of the lane (lanehealth.go).
+func (v observingValidator) laneReachable() bool { return laneReachable(v.inner) }
+
 func (v observingValidator) Validate(ctx context.Context, resourceJSON []byte, profile string) (shnsdk.Result, error) {
 	res, err := v.inner.Validate(ctx, resourceJSON, profile)
 	detail := "valid"
@@ -254,6 +262,16 @@ func (v observingValidator) Validate(ctx context.Context, resourceJSON []byte, p
 	}
 	v.g.observe(ObserverEvent{Kind: "validate.result", Direction: "validate", Payload: json.RawMessage(resourceJSON), Detail: detail})
 	return res, err
+}
+
+// ingressDiagnosticKind is the diagnostic kind of a call an ingress route of
+// a gateway in role received (request) or answered: "<role>.ingress.request"
+// or "<role>.ingress.response". A provider is the role that serves one today.
+func ingressDiagnosticKind(role string, request bool) string {
+	if request {
+		return role + ".ingress.request"
+	}
+	return role + ".ingress.response"
 }
 
 // observeIngress tees only bytes consumed by the handler. Authentication and
@@ -307,11 +325,7 @@ func (g *Gateway) observeIngress(route string, h http.HandlerFunc) http.HandlerF
 			}
 			observed := e
 			observed.Sender = g.cfg.HolderID
-			if e.Kind == "ingress.received" {
-				observed.Kind = "provider.ingress.request"
-			} else {
-				observed.Kind = "provider.ingress.response"
-			}
+			observed.Kind = ingressDiagnosticKind(g.cfg.Role, e.Kind == "ingress.received")
 			g.diagnostic(observed)
 			if g.cfg.Observer != nil && e.Kind == "ingress.responded" {
 				detail := strconv.Itoa(e.Status)

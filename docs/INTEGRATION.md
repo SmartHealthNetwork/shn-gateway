@@ -594,9 +594,23 @@ request). What the FHIR check covers, per leg:
   are not validated, because their packages do not yet conform (the 2.0 reference
   payer's DTR package fails DTR 2.0.1). Judging a payer's confirmed line alone,
   more strictly, may be introduced later.
-- Of coverage eligibility, both gateways validate the request and the answer: the
-  answer the payer's gateway builds from its records or, when the payer declares its
-  own endpoint (`PAYER_ELIGIBILITY_URL`), the payer system's answer.
+- From shn-gateway v0.63.0, a payer's answer to a PAS submission, amendment or inquiry your
+  provider gateway carries for your own system through its Da Vinci ingress (`$submit`,
+  `$inquire`) is validated the same way, at the same lines and level: refused `502`
+  ("ingress validation failed") where it would be refused, and `500` at `strict` when the
+  check cannot run. No reference payer's carried answer is exempt. Before v0.63.0 such an
+  answer was read only by the content rules (its answer graph and its patient linkage), so
+  one that conformed to no IG line was carried at every level.
+- Of coverage eligibility, the payer's gateway validates the request, and both gateways
+  validate the answer: the answer the payer's gateway builds from its records or, when
+  the payer declares its own endpoint (`PAYER_ELIGIBILITY_URL`), the payer system's
+  answer. The requesting gateway validates a request it builds itself too; a request a
+  provider's own system sends (`CoverageEligibilityRequest/$submit` on the Da Vinci
+  ingress, from v0.63.0) is carried as sent.
+- Of a federated query, the facility's gateway validates the answer it builds, and the
+  requesting gateway validates the answer it receives: to a query it builds itself, and to a
+  query a provider's own system sends (`POST /Task` on the Da Vinci ingress, the CDex
+  task-based data request, from v0.63.0), whose Task is carried as sent.
 
 A level applies only to what these checks cover. Whether they run, and what a
 defect does, is `CONFORMANCE_ENFORCEMENT`, a setting on your own gateway:
@@ -611,13 +625,12 @@ defect does, is `CONFORMANCE_ENFORCEMENT`, a setting on your own gateway:
   as sent, apart from the gateway's registered edits. A validator that cannot be
   reached is recorded the same way. From v0.60.0 a check that can only record
   does not hold the message either: it is queued, and its finding is written
-  when the validator answers. Two kinds of check still wait: the check of a
-  payload this gateway itself translated between IG lines, which refuses at
-  every level, and a payer gateway's checks of the decision
-  ExplanationOfBenefits it builds from your system's answer, because whether each
-  decision is written depends on them. At `observe` all of one exchange's
-  decision checks share at most 2 seconds; a check that bound does not reach is
-  recorded as unavailable and its decision is written.
+  when the validator answers. From v0.63.0 one kind of check still waits: the
+  check of a payload this gateway itself translated between IG lines, which
+  refuses at every level. Before v0.63.0 a payer gateway's checks of the
+  decision ExplanationOfBenefits it built from your system's answer also waited,
+  sharing at most 2 seconds per exchange at `observe`; from v0.63.0 it builds
+  none.
 - `structural` (v0.54.0 and later): every check runs; a message whose structure is
   broken is refused as at `strict`, and every other defect is recorded as at
   `observe`. Broken structure is a missing required element, an element the

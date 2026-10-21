@@ -56,6 +56,15 @@ func TestDeclaredSetEnv(t *testing.T) {
 			t.Fatalf("want a boot refusal naming the unbuildable token, got %v", err)
 		}
 	})
+	t.Run("pa.pdex@2.1 refuses boot with its own reason", func(t *testing.T) {
+		const want = `gateway: SHN_CONTRACT_VERSIONS: contract-version token "pa.pdex@2.1" is no longer declared by any gateway: a gateway serves no Patient Access API and builds no PDex resource, so a declaration must not claim it: remove it from the declared set (SHN_CONTRACT_VERSIONS)`
+		for _, csv := range []string{"pa.pdex@2.1", "pa.crd@2.0, pa.dtr@2.0, pa.pas@2.0, pa.pdex@2.1", "pa.pas@9.9,pa.pdex@2.1"} {
+			e := baseEnv(map[string]string{"SHN_CONTRACT_VERSIONS": csv})
+			if _, err := loadConfig(func(k string) string { return e[k] }); err == nil || err.Error() != want {
+				t.Errorf("%q: boot refusal %v, want %q", csv, err, want)
+			}
+		}
+	})
 	t.Run("valid subset is carried", func(t *testing.T) {
 		e := baseEnv(map[string]string{"SHN_CONTRACT_VERSIONS": "pa.crd@2.2, pa.dtr@2.2 ,pa.pas@2.2"})
 		cfg, err := loadConfig(func(k string) string { return e[k] })
@@ -281,7 +290,7 @@ func TestSelectValidatorCanonicalLineFake(t *testing.T) {
 			return "1"
 		}
 		return ""
-	}, "")
+	}, "", engine.EnforcementObserve)
 	if err != nil {
 		t.Fatal(err)
 	}

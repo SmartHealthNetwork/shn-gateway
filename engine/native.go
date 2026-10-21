@@ -3,8 +3,8 @@
 // SMART-authenticated *http.Client and returns the partner's FHIR. The engine still
 // owns authority (the (A)/(B) inbound fences + the (C) outbound subject fence, now
 // defending a real party), sealing, edge $validate, and audit (AI-11). The PAS legs
-// (nativepas.go) reuse the originator's PUBLISHED shnsdk parsers; the CRD legs send the
-// request to the partner service chosen by its hook (crdservice.go) and relay the
+// (workstream_pa_pas_forward.go) reuse the originator's PUBLISHED shnsdk parsers; the CRD legs send the
+// request to the partner service chosen by its hook (workstream_pa_cds_services.go) and relay the
 // partner's CDS Hooks answer exactly once it passes the CDS Hooks response rules
 // (shnsdk.CheckCDSHooksResponse). It implements the internal, unstable
 // engine.LegResponder (STABILITY: connectors/* is the supported surface); it
@@ -18,7 +18,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
@@ -35,6 +34,39 @@ import (
 const maxPartnerBody = 8 << 20 // 8 MiB cap on a partner response body
 
 const relayBodyCap = 6 << 20 // 6 MiB — headroom under the 8 MiB MaxResponseBytes for seal + wrapper
+
+// The two CDS service listing types below are the PA adapter's forward state,
+// held by the core responder until the responder is constructed per workstream
+// (tracked in the SHN platform repository as "The native responder is
+// constructed per workstream: the CDS service listing leaves core
+// native.go"). Only PA code uses them: the PA adapter's CRD forward and the
+// payer responder's CDS listing wiring in package app.
+
+// CDSService is one entry of a CDS service listing.
+type CDSService struct {
+	ID   string `json:"id"`
+	Hook string `json:"hook"`
+}
+
+// cdsServiceListing caches the payer's listing. A listing younger than
+// cdsServiceListingTTL is used as is; an older one is read again. One read
+// runs at a time and nobody holds the lock while it runs: requests that still
+// have a listing younger than cdsServiceListingMaxAge use it meanwhile, and
+// requests without one wait for the read. A failed read keeps the last listing
+// (up to cdsServiceListingMaxAge) and is remembered for
+// cdsServiceListingRetryAfter.
+type cdsServiceListing struct {
+	mu       sync.Mutex
+	services []CDSService
+	read     time.Time
+	failed   time.Time
+	err      error
+	// reading is closed when the read in progress ends; nil when none runs.
+	reading chan struct{}
+	// joined, when set, is called each time a request starts waiting for the
+	// read in progress.
+	joined func()
+}
 
 type nativeResponder struct {
 	diagnostic DiagnosticSink
@@ -55,13 +87,13 @@ type nativeResponder struct {
 	eligibilityURL string
 	// crdServiceID and crdDispatchServiceID optionally name the partner's CDS service
 	// for the order-select and order-dispatch legs; empty selects the listed service
-	// whose hook is the request's hook (crdservice.go). Either way the service must be
+	// whose hook is the request's hook (workstream_pa_cds_services.go). Either way the service must be
 	// listed for the request's hook.
 	crdServiceID         string
 	crdDispatchServiceID string
 	// cds caches the partner's CDS service listing.
 	cds   cdsServiceListing
-	store Store // gateway-owned shadow ledger + EOB Store for the PAS legs (nil ⇒ read-only only)
+	store Store // gateway-owned shadow ledger Store for the PAS legs (nil ⇒ read-only only)
 	clock func() time.Time
 	// declaredContractVersions is the operator-declared token set for the
 	// foreign partner (PAYER_DAVINCI_CONTRACT_VERSIONS) — the peer-config
@@ -163,108 +195,10 @@ type nativeResponder struct {
 // NativeOption configures optional nativeResponder behavior.
 type NativeOption func(*nativeResponder)
 
-// WithEligibilityURL declares the payer's own coverage-eligibility endpoint:
-// the absolute URL its system takes a POST of a CoverageEligibilityRequest on.
-// A coverage-eligibility request is then carried to it exactly and its answer
-// relayed, instead of being answered from the payer's records. Empty leaves
-// the gateway answering from the records.
-func WithEligibilityURL(eligibilityURL string) NativeOption {
-	return func(n *nativeResponder) { n.eligibilityURL = eligibilityURL }
-}
-
-// forwardsEligibility reports whether the payer declared its own eligibility
-// endpoint.
-func (n *nativeResponder) forwardsEligibility() bool { return n.eligibilityURL != "" }
-
-// forwardEligibility carries the network's coverage-eligibility request
-// exactly to the payer's own endpoint and returns its answer: a 2xx answer
-// relayed exactly, a non-2xx answer as the payer's error for verbatim relay,
-// or an error when the payer's system gave no answer. Nothing is answered in
-// the payer's place.
-func (n *nativeResponder) forwardEligibility(ctx context.Context, request []byte) (LegResult, error) {
-	in := relay.NewBody(request, relay.OriginPeerFrame)
-	up, bad, err := n.post(ctx, n.eligibilityURL, "", relay.Exact(in, "application/fhir+json"), "coverage-eligibility", "eligibility")
-	if err != nil {
-		return LegResult{}, err
-	}
-	if bad.Status != 0 {
-		return bad, nil
-	}
-	return LegResult{Response: relay.Exact(up.body, up.contentType)}, nil
-}
-
-// eligibilityForwarder is the occupant that carries coverage-eligibility to
-// the payer's own endpoint when the payer declared one.
-type eligibilityForwarder interface {
-	forwardsEligibility() bool
-	forwardEligibility(ctx context.Context, request []byte) (LegResult, error)
-}
-
-// WithCDSBaseURL overrides the base used for CDS Hooks (CRD) posts, for partners whose
-// CDS Hooks endpoint is NOT co-located with their FHIR base — e.g. br-payer serves CDS
-// Hooks at root /cds-services but FHIR ops under /fhir. Unset ⇒ CDS posts use the FHIR
-// baseURL (co-located default, the prior behavior). FR-G28 / OWD-G8.
-func WithCDSBaseURL(cdsBaseURL string) NativeOption {
-	return func(n *nativeResponder) {
-		if cdsBaseURL != "" {
-			n.cdsBaseURL = cdsBaseURL
-		}
-	}
-}
-
-// WithConformancePolicy gives the responder the enforcement policy of the
-// gateway it runs in. Unset ⇒ the zero value, strict.
-func WithConformancePolicy(p ConformancePolicy) NativeOption {
-	return func(n *nativeResponder) { n.conformance = p }
-}
-
-// ConformanceLevelForTest exposes this responder's own configured enforcement
-// level — test-only introspection (the EndpointEvidenceForTest pattern)
-// proving a WithConformancePolicy option (or its absence, which leaves the
-// zero value, strict) actually reached this responder, not just whatever
-// engine.Config a caller assembled.
-func (n *nativeResponder) ConformanceLevelForTest() ConformanceEnforcement {
-	return n.conformance.Level()
-}
-
-// EligibilityURLForTest reports the eligibility endpoint the payer declared
-// (WithEligibilityURL), so the build that wires it can be proven from another
-// package; empty when none was declared.
-func (n *nativeResponder) EligibilityURLForTest() string { return n.eligibilityURL }
-
 // RequireSharedLineForTest reports whether the participant's REQUIRE_SHARED_LINE
 // reached this responder (WithRequireSharedLine), so the build that wires it
 // can be proven from another package.
 func (n *nativeResponder) RequireSharedLineForTest() bool { return n.requireSharedLine }
-
-// bindFindingEmitter receives the engine's finding emitter after engine.New
-// builds the gateway. It cannot be a NativeOption: NewNativeResponder runs
-// before engine.New, so no gateway exists when the options are applied.
-func (n *nativeResponder) bindFindingEmitter(emit func(ConformanceFinding)) { n.emitFinding = emit }
-
-// WithDTRBaseURL overrides the base used for the DTR forwards
-// (/Questionnaire/$questionnaire-package and $next-question), for partners whose DTR
-// endpoint is NOT co-located with their PAS/FHIR base. Unset ⇒ DTR posts use
-// the FHIR baseURL (co-located default, the prior behavior).
-func WithDTRBaseURL(dtrBaseURL string) NativeOption {
-	return func(n *nativeResponder) {
-		if dtrBaseURL != "" {
-			n.dtrBaseURL = dtrBaseURL
-		}
-	}
-}
-
-// WithPASBaseURL overrides the base used for the PAS forwards (/Claim/$submit for
-// submit and update; a later PAS operation belongs here too), for partners whose PAS
-// endpoint is NOT co-located with their DTR/FHIR base. Unset ⇒ PAS posts use
-// the FHIR baseURL (co-located default, the prior behavior).
-func WithPASBaseURL(pasBaseURL string) NativeOption {
-	return func(n *nativeResponder) {
-		if pasBaseURL != "" {
-			n.pasBaseURL = pasBaseURL
-		}
-	}
-}
 
 // WithBackendHeaders sets fixed request headers for a partner system that
 // routes on one (PAYER_DAVINCI_BACKEND_HEADERS). Every request to the partner's
@@ -312,12 +246,6 @@ func (n *nativeResponder) applyBackendHeaders(req *http.Request) {
 	}
 }
 
-// WithCRDDispatchService names the partner's CDS service for the crd-order-dispatch
-// leg. Empty (the default) selects the listed service for the order-dispatch hook.
-func WithCRDDispatchService(serviceID string) NativeOption {
-	return func(n *nativeResponder) { n.crdDispatchServiceID = serviceID }
-}
-
 // WithDeclaredContractVersions supplies the operator-declared contract tokens
 // for the partner endpoint; legs whose contract shares no line refuse legibly
 // instead of forwarding (the foreign-endpoint filter).
@@ -351,13 +279,6 @@ func WithStrictExtensions(on bool) NativeOption {
 	return func(n *nativeResponder) { n.strictExtensions = on }
 }
 
-// WithEndpointEvidenceObserver supplies the endpoint-evidence same-origin-drop note sink
-// (see endpointEvidenceObserver's field comment). Unset ⇒ silent drops (still
-// dropped — this only affects observability, never the trust decision).
-func WithEndpointEvidenceObserver(f func(note string)) NativeOption {
-	return func(n *nativeResponder) { n.endpointEvidenceObserver = f }
-}
-
 // WithPayorEdgeIdentity turns on the payer-edge identity mapping seam (payoredge.go):
 // own is the configured half of this deployment's payer identity (the assertion side —
 // WithPayorEdgePublishedIdentities supplies the other half, the identities this holder
@@ -386,26 +307,13 @@ func (n *nativeResponder) ownDeclared() []string {
 
 var _ LegResponder = (*nativeResponder)(nil)
 
-// EndpointEvidenceSetter is the sink app.go's checks-runner→responder
-// evidence hook targets: implemented by *nativeResponder (SetEndpointEvidence,
-// below). A separate, narrower interface from LegResponder (a stable public
-// partner-implementable seam) on purpose — this is app-internal wiring
-// plumbing between the checks runner and the ONE responder that can act on
-// probe evidence, not part of the payer-content contract every LegResponder
-// implements.
-type EndpointEvidenceSetter interface {
-	SetEndpointEvidence(evidence map[string]string)
-}
-
-var _ EndpointEvidenceSetter = (*nativeResponder)(nil)
-
 // NewNativeResponder builds the native-forward Responder over a ready *http.Client
 // (in production a smartauth bearer client; in tests a fixed-bearer client).
 // crdServiceID optionally names the partner's CDS service for the order-select leg
 // ("" selects the listed service for the request's hook; FR-G26). store is the
 // gateway-owned Store the PAS legs
-// use (pended ledger + EOB); a nil store is valid for a read-only-only native
-// responder. clock is used for the gateway-projected EOB `created`; nil ⇒ time.Now.
+// use (the pend ledger); a nil store is valid for a read-only-only native
+// responder. clock is the responder's own clock; nil ⇒ time.Now.
 //
 // Returns the concrete *nativeResponder (not the LegResponder interface): every
 // existing caller assigns the result to a LegResponder-typed slot or field (still
@@ -423,177 +331,6 @@ func NewNativeResponder(client *http.Client, baseURL, crdServiceID string, store
 		o(n)
 	}
 	return n
-}
-
-// SetEndpointEvidence WHOLESALE-replaces the responder's per-line endpoint
-// evidence (HRex per-version endpoint selection): app.go's checks-runner
-// hook feeds it the davinci-config probe's
-// retained "<contract>@<line>" -> URL map (checks.Capability.EndpointURLs)
-// once per completed checks cycle. No TTL — this cycle's evidence replaces
-// last cycle's outright; a token absent this time is simply gone (never
-// sticky), and an empty/nil map clears everything back to the configured
-// base.
-//
-// SAME-ORIGIN TRUST RULE (binding project ruling): an entry is honored IFF its
-// scheme+host+port equal those of the base ITS CONTRACT forwards to
-// (contractBase: the DTR base for pa.dtr, the PAS base for pa.pas, the
-// shared base otherwise — each of which IS the shared base unless a
-// per-operation base is configured). Judged per contract base, never
-// the shared base alone: a split-base partner must not be fenced out of its
-// own published DTR endpoint (TestEndpointEvidenceFenceJudgedPerContractBase).
-// A probe-published cross-origin
-// endpoint is NEVER a target a PHI-bearing submission follows — a
-// misconfigured or compromised davinci-configuration document must not be
-// able to redirect traffic off the operator-configured partner.
-// Non-same-origin (or unparseable) entries are DROPPED HERE, AT SET TIME —
-// never stored, never resolved later — each noted via
-// endpointEvidenceObserver (TestEndpointEvidenceSameOriginEnforced is the
-// rejection test).
-func (n *nativeResponder) SetEndpointEvidence(evidence map[string]string) {
-	kept := make(map[string]string, len(evidence))
-	for tok, u := range evidence {
-		contract, _, _ := strings.Cut(tok, "@")
-		baseOrigin, baseOK := originOf(n.contractBase(contract))
-		entryOrigin, ok := originOf(u)
-		if !baseOK || !ok || entryOrigin != baseOrigin {
-			if n.endpointEvidenceObserver != nil {
-				n.endpointEvidenceObserver(fmt.Sprintf(
-					"engine: endpoint evidence for %q dropped (not same-origin as the configured base %s): %s",
-					tok, baseOrigin, redactURLForLog(u)))
-			}
-			continue
-		}
-		kept[tok] = u
-	}
-	n.evMu.Lock()
-	n.endpointEvidence = kept
-	n.evMu.Unlock()
-}
-
-// EndpointEvidenceForTest returns a copy of the currently-held endpoint
-// evidence — a READ-ONLY test-observation seam (the repo's *ForTest
-// precedent: TransformPASForTest, SelectChainRouteForTest,
-// NormalizePASResponseForTest), used by gateway/app's
-// TestProbeEvidenceReachesResponder to prove evidence that arrived through
-// the REAL checksRunner.Run → OnResults → SetEndpointEvidence wiring landed
-// here — never a second, test-only write path.
-func (n *nativeResponder) EndpointEvidenceForTest() map[string]string {
-	n.evMu.RLock()
-	defer n.evMu.RUnlock()
-	out := make(map[string]string, len(n.endpointEvidence))
-	for k, v := range n.endpointEvidence {
-		out[k] = v
-	}
-	return out
-}
-
-// defaultPortForScheme is the scheme's implicit port ("" for a scheme with
-// none) — RFC 3986 §6.2.3: "http://x" and "http://x:80" name the SAME
-// origin. Without this, a same-origin comparison done by exact string
-// equality (the original shape) drops ALL evidence the moment the operator
-// base and the partner-published URL disagree on whether to spell out the
-// scheme's own default port — a common, unremarkable config shape, not an
-// attack — silently disabling endpoint evidence for that deployment while looking, in the
-// logs, exactly like a real cross-origin rejection.
-func defaultPortForScheme(scheme string) string {
-	switch scheme {
-	case "http":
-		return "80"
-	case "https":
-		return "443"
-	default:
-		return ""
-	}
-}
-
-// originOf reduces raw to its normalized "scheme://host:port" origin — an
-// explicit port equal to the scheme's default is treated identically to no
-// port at all (defaultPortForScheme). ok is false for an unparseable URL or
-// one missing a scheme/host (never same-origin to anything).
-func originOf(raw string) (string, bool) {
-	u, err := url.Parse(raw)
-	if err != nil || u.Scheme == "" || u.Hostname() == "" {
-		return "", false
-	}
-	port := u.Port()
-	if port == "" {
-		port = defaultPortForScheme(u.Scheme)
-	}
-	host := u.Hostname()
-	if port != "" {
-		host = net.JoinHostPort(host, port)
-	}
-	return u.Scheme + "://" + host, true
-}
-
-// redactURLForLog keeps only scheme+host+port for a log line (the REDACTION
-// RULE this codebase applies to every operator-visible string derived from
-// partner input — checks.targetOf's exact precedent): a rejected entry's
-// path/query is peer-published, untrusted, and never surfaced verbatim.
-func redactURLForLog(raw string) string {
-	if origin, ok := originOf(raw); ok {
-		return origin
-	}
-	return "(unparseable)"
-}
-
-// dtrBase / pasBase are the per-operation bases with their fallback applied:
-// the configured DTR/PAS base when set, the shared base otherwise. Every DTR
-// and PAS forward reads through these (never the raw fields), so a responder
-// built without the constructor defaults still forwards to the shared base.
-func (n *nativeResponder) dtrBase() string {
-	if n.dtrBaseURL != "" {
-		return n.dtrBaseURL
-	}
-	return n.baseURL
-}
-
-func (n *nativeResponder) pasBase() string {
-	if n.pasBaseURL != "" {
-		return n.pasBaseURL
-	}
-	return n.baseURL
-}
-
-// contractBase is the configured base a contract's operations forward to: the
-// DTR base for pa.dtr, the PAS base for pa.pas, the shared base for everything
-// else. Each per-operation base defaults to the shared base, so a
-// deployment that sets neither resolves every contract to baseURL exactly as
-// before. It is the base the same-origin fence judges evidence against AND the
-// fallback resolvedURL appends the operation path to.
-func (n *nativeResponder) contractBase(contract string) string {
-	switch contract {
-	case "pa.dtr":
-		return n.dtrBase()
-	case "pa.pas":
-		return n.pasBase()
-	}
-	return n.baseURL
-}
-
-// resolvedURL is the per-line endpoint resolution: the post URL for a leg
-// routed at contract@line, preferring same-origin-validated probe evidence
-// over the configured base+path. contract == "" (version-neutral leg) or no
-// answer line resolved on ctx, or no evidence for that exact token, all fall
-// back to base+path UNCHANGED — the fence (TestNativeForwardSelectsLineEndpoint's
-// byte-identical case). Read under RLock; SetEndpointEvidence is the sole
-// writer (wholesale replace under Lock) — concurrency-clean under -race.
-func (n *nativeResponder) resolvedURL(ctx context.Context, contract, base, path string) string {
-	def := base + path
-	if contract == "" {
-		return def
-	}
-	line := answerLineOr(ctx, contract)
-	if line == "" {
-		return def
-	}
-	n.evMu.RLock()
-	u, ok := n.endpointEvidence[contract+"@"+line]
-	n.evMu.RUnlock()
-	if !ok {
-		return def
-	}
-	return u
 }
 
 func (n *nativeResponder) Handle(ctx context.Context, leg, corrID, subjectPCI string, requestFHIR []byte) (LegResult, error) {
@@ -647,55 +384,22 @@ func (n *nativeResponder) Handle(ctx context.Context, leg, corrID, subjectPCI st
 			}, nil
 		}
 	}
-	// NOTE: there is deliberately NO "coverage-eligibility" arm here. Eligibility is a
-	// first-class engine handler (R11): handleEligibilityInbound answers it from the
-	// member's own Coverage in the payer's SoR, or, when the payer declares its own
-	// eligibility endpoint (WithEligibilityURL), carries it there through
-	// forwardEligibility. It never reaches Handle.
-	// The network's request, as it arrived. Each leg sends it exactly, or with only
-	// the registered payer-identity edit.
+	// The network's request, as it arrived. The workstream declaring the leg
+	// sends it to the participant's own system (forwardFor): exactly, or with
+	// only its registered edits.
 	in := relay.NewBody(requestFHIR, relay.OriginPeerFrame)
-	switch leg {
-	case "crd-order-select", "crd-order-dispatch":
-		return n.forwardCRD(ctx, contract, leg, in)
-
-	case "dtr-questionnaire-fetch":
-		// A request frame that names the operation carries that operation's own input,
-		// which is sent to the payer's system exactly (or with only the payer identity
-		// mapped). A request that names none is refused.
-		switch op := RequestFrameOperation(ctx); op {
-		case shnsdk.FrameOperationQuestionnairePackage:
-			return n.forwardDTROperation(ctx, contract, in, "/Questionnaire/$questionnaire-package", payorEdgeDTRParameters, leg, "DTR")
-		case shnsdk.FrameOperationNextQuestion:
-			return n.forwardDTROperation(ctx, contract, in, "/Questionnaire/$next-question", 0, leg, "DTR next-question")
-		case "":
-			// The older request envelope, which carried a canonical and a coverage
-			// in place of the operation's own input, is no longer read.
-			return LegResult{Status: http.StatusBadRequest, Message: refusalDTRUnframed}, nil
-		default:
-			return LegResult{Status: http.StatusBadRequest, Message: "unsupported DTR operation"}, nil
-		}
-
-	case "pas-claim":
-		res, err := n.handlePASClaimNative(ctx, corrID, subjectPCI, in, requestFHIR)
-		return res, err
-
-	case "pas-claim-update":
-		res, err := n.handlePASClaimUpdateNative(ctx, corrID, subjectPCI, in, requestFHIR)
-		return res, err
-
-	case "pas-claim-inquire":
-		// A read of the payer's own record about an authorization it pended
-		// (inquire.go). It acquires no claim and writes nothing here: the ledger
-		// effect is derived by the payer gateway from the answer.
-		return n.handlePASInquireNative(ctx, contract, in, requestFHIR)
-
-	default:
-		// The br-payer-targeting lane routes the read-only + PAS legs here; this is defensive
-		// for an unrouted leg.
-		return LegResult{}, fmt.Errorf("engine: nativeResponder: unhandled leg %q", leg)
+	if forward := forwardFor(leg); forward != nil {
+		return forward(n, ctx, contract, leg, corrID, subjectPCI, in, requestFHIR)
 	}
+	// The br-payer-targeting lane routes the read-only + PAS legs here; this is defensive
+	// for an unrouted leg.
+	return LegResult{}, fmt.Errorf("engine: nativeResponder: unhandled leg %q", leg)
 }
+
+// forwardHandler sends one leg the native responder has admitted (the core's
+// version rule) to the participant's own system and answers with its reply:
+// in is the network's request as it arrived, contract the leg's contract.
+type forwardHandler func(n *nativeResponder, ctx context.Context, contract, leg, corrID, subjectPCI string, in relay.Body, requestFHIR []byte) (LegResult, error)
 
 // upstreamReply is a 2xx or non-2xx answer from the participant's own
 // system: its bytes as they arrived, sealed (body) and as read by this
@@ -707,30 +411,8 @@ type upstreamReply struct {
 	contentType string
 	// declared is the Content-Type the upstream sent ("" when it sent none).
 	declared string
-}
-
-// forwardDTROperation sends a framed DTR operation's own input to the payer's
-// system at path and relays the answer exactly. When carrier is set, the
-// payer identity of every coverage in the input is mapped (when the mapping
-// is configured) and nothing else changes.
-func (n *nativeResponder) forwardDTROperation(ctx context.Context, contract string, in relay.Body, path string, carrier payorEdgeCarrier, leg, label string) (LegResult, error) {
-	const fhirJSON = "application/fhir+json"
-	request := relay.Exact(in, fhirJSON)
-	if carrier != 0 {
-		mapped, lr, err := n.payorEdgeRequest(in, carrier, fhirJSON, nil)
-		if err != nil || lr.Status != 0 {
-			return lr, err
-		}
-		request = mapped
-	}
-	up, bad, err := n.post(ctx, n.resolvedURL(ctx, contract, n.dtrBase(), path), "", request, leg, label)
-	if err != nil {
-		return LegResult{}, err // no-response fault → engine 500 → "hub routing failed"
-	}
-	if bad.Status != 0 {
-		return bad, nil // upstream non-2xx → relayable LegResult (Response carries the body)
-	}
-	return LegResult{Response: relay.Exact(up.body, up.contentType)}, nil
+	// status is the HTTP status the system answered with.
+	status int
 }
 
 // post forwards the request p on leg to base+path, after checking p against
@@ -831,7 +513,7 @@ func (n *nativeResponder) post(ctx context.Context, base, path string, p relay.P
 		sent := wrote.Load() && !smartauth.IsTokenAcquisitionError(err)
 		if sent {
 			// Written before the call failed: the edits were sent.
-			x.edits(p.Edits())
+			x.sent(p)
 		}
 		if timedOut() {
 			logUpstreamTimedOut(ctx, label, leg, base+path, n.backendDeadline, sent)
@@ -841,7 +523,7 @@ func (n *nativeResponder) post(ctx context.Context, base, path string, p relay.P
 		return upstreamReply{}, LegResult{}, &upstreamFailure{err: fmt.Errorf("upstream payer %s unreachable: %w", label, err), sent: sent}
 	}
 	// The payer's system answered: the edits the forward carried were sent.
-	x.edits(p.Edits())
+	x.sent(p)
 	pasLegOf(ctx).answered()
 	defer resp.Body.Close()
 	rb, err := io.ReadAll(io.LimitReader(resp.Body, maxPartnerBody))
@@ -965,7 +647,7 @@ func upstreamAnswer(resp *http.Response, rb []byte, label string) (upstreamReply
 	if ct == "" {
 		ct = "application/fhir+json"
 	}
-	reply := upstreamReply{body: relay.NewBody(rb, relay.OriginUpstreamResponse), raw: rb, contentType: ct, declared: resp.Header.Get("Content-Type")}
+	reply := upstreamReply{body: relay.NewBody(rb, relay.OriginUpstreamResponse), raw: rb, contentType: ct, declared: resp.Header.Get("Content-Type"), status: resp.StatusCode}
 	if resp.StatusCode/100 != 2 {
 		if len(rb) > relayBodyCap { // headroom under MaxResponseBytes for seal + wrapper
 			return upstreamReply{}, LegResult{}, &upstreamFailure{err: fmt.Errorf("upstream payer %s body too large to relay (%d bytes)", label, len(rb)), sent: true}
@@ -973,151 +655,6 @@ func upstreamAnswer(resp *http.Response, rb []byte, label string) (upstreamReply
 		return reply, LegResult{Status: resp.StatusCode, Response: relay.Exact(reply.body, resp.Header.Get("Content-Type"))}, nil
 	}
 	return reply, LegResult{}, nil
-}
-
-// forwardCRD sends a CDS Hooks request to the partner service chosen by its hook:
-// exactly as the network carried it, or with only the payer identity of its
-// prefetch coverage mapped (when that mapping is configured). The hook and every
-// other byte are never changed. The partner's answer is relayed exactly, with its
-// own media type, once it passes the CDS Hooks response rules at the served CRD
-// line; an answer that breaks one is refused (502) rather than repaired, and a
-// non-2xx answer is relayed as the partner's error.
-func (n *nativeResponder) forwardCRD(ctx context.Context, contract, leg string, in relay.Body) (LegResult, error) {
-	serviceID, refused, err := n.selectCRDService(ctx, leg, in)
-	if err != nil || refused.Status != 0 {
-		return refused, err
-	}
-	request, refused, err := n.applyPayorEdgeToCRDRequest(in)
-	if err != nil || refused.Status != 0 {
-		return refused, err
-	}
-	up, bad, err := n.post(ctx, n.cdsBaseURL, "/cds-services/"+serviceID, request, leg, "CRD")
-	if err != nil {
-		return LegResult{}, err // no-response fault → engine 500 → "hub routing failed"
-	}
-	if bad.Status != 0 {
-		return bad, nil // upstream non-2xx → relayable LegResult (Response carries the body)
-	}
-	if refused := certifyCDSHooksAnswer(ctx, n.conformance, n.emitFinding, up.raw, answerLineOr(ctx, contract), "own"); refused.Status != 0 {
-		return refused, nil
-	}
-	// A CDS Hooks answer is JSON: one sent without a media type is carried as
-	// application/json.
-	ct := up.declared
-	if ct == "" {
-		ct = "application/json"
-	}
-	return LegResult{Response: relay.Exact(up.body, ct)}, nil
-}
-
-// certifyCDSHooksAnswer applies the CDS Hooks response rules (and, at a CRD
-// line, the CRD card rules) to a participant's answer. It never changes the
-// answer. At none no rule runs. At every other level each violation is
-// recorded as a finding; whether a refusing violation actually refuses is the
-// receiving participant's choice, which the policy holds. A SHOULD-level
-// finding is logged and the answer passes, as before.
-//
-// whose classifies WHOSE SYSTEM the certified bytes came from, for the
-// finding: "own" when the bytes are this gateway's own backend answering
-// (forwardCRD, certifying before it ever relays to a peer) or "peer" when
-// they are a peer's answer received over the network (crdAnswerOutcome).
-// This is independent of the refusal MESSAGE, which always names the
-// participant the requester asked ("payer") regardless of which side is
-// doing the certifying — a requester reading a refusal never sees "own".
-//
-// emit may be nil: a responder the engine never wired still certifies and
-// still refuses at strict, it simply records nothing.
-func certifyCDSHooksAnswer(ctx context.Context, policy ConformancePolicy, emit func(ConformanceFinding), body []byte, line, whose string) LegResult {
-	// A repeated member name is message integrity (RuleDuplicateKey), refused at
-	// every level: an answer that can be read two ways cannot be carried
-	// faithfully.
-	// The refusal names the repeated member and where, so the payer can fix it.
-	if dup, ok := repeatedMember(body); ok && guardDefect(ctx, policy, emit, KindNetwork, RuleDuplicateKey, VerdictInvalid, body) {
-		return LegResult{Status: http.StatusBadGateway, Message: "payer CRD response repeats " + dup + ": it can be read two ways, so it is not carried"}
-	}
-	if !policy.RunsKind(KindCDSEnvelope) {
-		return LegResult{}
-	}
-	emit = countingEmit(ctx, emit)
-	violations := shnsdk.CheckCDSHooksResponse(body, line)
-	if len(violations) == 0 {
-		return LegResult{}
-	}
-	fc := findingContextFrom(ctx)
-	var refusing, advisory []string
-	var refuse bool
-	for _, v := range violations {
-		if !policy.Runs(KindCDSEnvelope, v.Rule) {
-			continue
-		}
-		desc := v.Rule
-		if v.Path != "" {
-			desc += " at " + v.Path
-		}
-		if v.Severity != shnsdk.SeverityError {
-			// One finding per violation (§5), advisory included: a SHOULD-level
-			// finding never refuses, but it is still something the participant
-			// should be able to read back.
-			advisory = append(advisory, desc)
-			if emit != nil {
-				emit(ConformanceFinding{
-					Kind: string(KindCDSEnvelope), Direction: "validate",
-					LegType: fc.LegType, CorrelationID: fc.CorrelationID, Seam: fc.Seam,
-					Whose: whose, Line: line,
-					Level: policy.Level().String(), Decision: Record.String(),
-					Rule: v.Rule, Path: v.Path,
-					PayloadSHA256: sha256hex(body),
-				})
-			}
-			continue
-		}
-		decision := policy.Decide(KindCDSEnvelope, v.Rule, VerdictInvalid)
-		if decision == Refuse {
-			refuse = true
-			refusing = append(refusing, desc)
-		}
-		if emit != nil {
-			emit(ConformanceFinding{
-				Kind: string(KindCDSEnvelope), Direction: "validate",
-				LegType: fc.LegType, CorrelationID: fc.CorrelationID, Seam: fc.Seam,
-				Whose: whose, Line: line,
-				Level: policy.Level().String(), Decision: decision.String(),
-				Rule: v.Rule, Path: v.Path,
-				PayloadSHA256: sha256hex(body),
-			})
-		}
-	}
-	if len(advisory) > 0 {
-		log.Printf("gateway: payer CRD response: CDS Hooks recommendations not met: %s", strings.Join(advisory, "; "))
-	}
-	if !refuse {
-		return LegResult{}
-	}
-	const shown = 5
-	if len(refusing) > shown {
-		refusing = append(refusing[:shown], fmt.Sprintf("and %d more", len(refusing)-shown))
-	}
-	return LegResult{
-		Status:  http.StatusBadGateway,
-		Message: "payer CRD response is not a valid CDS Hooks response: " + strings.Join(refusing, "; "),
-	}
-}
-
-// applyPayorEdgeToCRDRequest is the CRD legs' payer-edge identity mapping
-// (payoredge.go): maps the payer identity of every Coverage in the CDS Hooks request's
-// prefetch.coverage (a bare Coverage or a Bundle) to n.payorEdgeBackend, ONLY when they
-// name an identity this gateway owns (ownPayerIdentities: the identities this holder
-// publishes on the network feed, union the configured one). Unconfigured, the request is
-// sent exactly. Configured, a request that carries no Coverage at all has no payor to map
-// and is sent exactly too: the network routed it here, and this payer's own system
-// answers it. That is a request whose prefetch is absent or null, whose prefetch.coverage
-// is absent or null, or whose prefetch.coverage Bundle's entry is absent, null or only
-// OperationOutcomes,
-// and no Coverage anywhere else in the body (relaylocate.go, carriesNoCoverage). A
-// Coverage naming no readable payor, or another payer, is refused, and so is a request
-// whose only Coverage is outside prefetch.coverage.
-func (n *nativeResponder) applyPayorEdgeToCRDRequest(in relay.Body) (relay.Payload, LegResult, error) {
-	return n.payorEdgeRequest(in, payorEdgeCRDRequest, "application/json", nil)
 }
 
 type legArrivalKey struct{}

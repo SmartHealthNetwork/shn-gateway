@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"maps"
 	"slices"
 	"testing"
 
@@ -46,6 +45,8 @@ func TestRelayEditRegistryPinned(t *testing.T) {
 			[]string{"$.prefetch", "$.prefetch.coverage"}, "insert-member"},
 		{"E-08", "dtr-answer-line-names", []string{"dtr-questionnaire-fetch"}, relay.RoleRequester, relay.DirectionResponse,
 			[]string{"$.parameter[<i>].name", "$.parameter[<i>].resource.entry[<j>].resource (a QuestionnaireResponse)"}, "replace-value"},
+		{"E-09", "registered-transform", []string{"pas-claim", "pas-claim-update"}, relay.RoleRequester, relay.DirectionRequest,
+			[]string{"$ (the whole Bundle)"}, "registered-transform"},
 	}
 	if len(relayEdits) != len(want) {
 		t.Fatalf("registry has %d edits, want %d", len(relayEdits), len(want))
@@ -64,7 +65,7 @@ func TestRelayEditRegistryPinned(t *testing.T) {
 			t.Errorf("%s: lookup failed", e.ID)
 		}
 	}
-	if _, ok := relayEditByID("E-09"); ok {
+	if _, ok := relayEditByID("E-10"); ok {
 		t.Fatal("an unregistered id resolved")
 	}
 	// The registry and the relay package agree on the closed id set.
@@ -78,7 +79,7 @@ func TestRelayEditRegistryPinned(t *testing.T) {
 	// Every declared leg is a catalog leg.
 	for _, e := range relayEdits {
 		for _, leg := range e.Legs {
-			if _, ok := paCatalog[leg]; !ok {
+			if _, ok := legSpecFor(leg); !ok {
 				t.Errorf("%s: unknown leg %q", e.ID, leg)
 			}
 		}
@@ -89,7 +90,7 @@ func TestRelayEditRegistryPinned(t *testing.T) {
 // the catalog defines, and every catalog leg has a refusal and a requester
 // request row, so no leg can transmit outside the table.
 func TestLegOwnershipCoversCatalog(t *testing.T) {
-	catalog := slices.Sorted(maps.Keys(paCatalog))
+	catalog := catalogLegs()
 	if !slices.Equal(relay.Legs(), catalog) {
 		t.Fatalf("table legs %v, catalog legs %v", relay.Legs(), catalog)
 	}

@@ -4,7 +4,7 @@
 # the validator runs on an --internal docker network (no egress), so if any IG — or
 # a transitive dependency — were not baked, $validate?profile=<canonical> reports
 # "Invalid profile. Failed to retrieve profile with url=...". Pass criterion: all
-# four Da Vinci profiles (PAS/DTR/PDex/CDex) RESOLVE with the network isolated. A bare
+# three Da Vinci profiles (PAS/DTR/CDex) RESOLVE with the network isolated. A bare
 # OperationOutcome is NOT sufficient — HAPI returns one even when the profile
 # silently failed to load. After health, the same strict PAS verdict corpus is
 # asserted repeatedly through the historical 100-second first-use window.
@@ -275,8 +275,8 @@ closing_checks() {
   # (golden | resourceType | Da Vinci canonical) — these canonicals must resolve
   # against this line's baked IGs; the check is profile RESOLUTION, not a bare
   # 200. The PAS/DTR entries use that line's own vendored golden (testdata/<line>/
-  # for 2.1/2.2; the top-level testdata/ pair for 2.0, unchanged); the PDex/CDex
-  # entries are line-neutral (single native line each) and always the top-level copy.
+  # for 2.1/2.2; the top-level testdata/ pair for 2.0, unchanged); the CDex
+  # entry is line-neutral (a single native line) and always the top-level copy.
   local pas_dtr_dir="."
   if [ "${line}" = "2.1" ] || [ "${line}" = "2.2" ]; then
     pas_dtr_dir="${line}"
@@ -284,7 +284,6 @@ closing_checks() {
   local probes=(
     "${pas_dtr_dir}/claim-bundle.json|Bundle|http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-pas-request-bundle"
     "${pas_dtr_dir}/questionnaireresponse-autofill.json|QuestionnaireResponse|http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/dtr-questionnaireresponse"
-    "eob-approved.json|ExplanationOfBenefit|http://hl7.org/fhir/us/davinci-pdex/StructureDefinition/pdex-priorauthorization"
     "cdex-task-data-request.json|Task|http://hl7.org/fhir/us/davinci-cdex/StructureDefinition/cdex-task-data-request"
   )
   for p in "${probes[@]}"; do
@@ -354,6 +353,17 @@ print("OK: cold-profile Patient validate call answered")
       -H 'Content-Type: application/fhir+json' --data-binary "@/golden/2.2/questionnaireresponse-autofill.json" \
       | python3 "${DIR}/verify-witness.py" clean "line 2.2 DTR QuestionnaireResponse golden with |5.3.0-ballot-tc1 references"
   fi
+  # The HAPI starter's MCP server is off (ENV SPRING_AI_MCP_SERVER_ENABLED=false in each
+  # line's stage): its endpoint answers 404 like any unmapped path, where a running MCP
+  # servlet answers a GET with 400.
+  local mcp
+  mcp="$(probe -s -o /dev/null -w '%{http_code}' -H 'Accept: text/event-stream, application/json' "http://${container}:8080/mcp/messages")"
+  if [ "${mcp}" != 404 ]; then
+    echo "FAIL: ${line}: /mcp/messages answered ${mcp}, want 404 (the MCP server must be off)" >&2
+    exit 1
+  fi
+  echo "OK: ${line}: MCP server off (/mcp/messages answers 404)"
+
   # Ordinary metadata is globally cached by HAPI. Preserve this late sample
   # before any no-cache probe can replace the worker/observer's cached statement.
   probe -fsS -H 'Host: original.example:18089' "${base}/metadata" >"${RUN_DIR}/metadata-host-${line}.json"

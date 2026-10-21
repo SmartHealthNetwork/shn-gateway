@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -27,7 +28,8 @@ var fixedEgressClock = func() time.Time { return time.Date(2026, 8, 12, 12, 0, 0
 func TestEgressAdaptNilChainIsPassthrough(t *testing.T) {
 	var observed []ObserverEvent
 	g := &Gateway{cfg: Config{
-		HolderID: "test-holder", Clock: fixedEgressClock,
+		TranslateIGLines: true,
+		HolderID:         "test-holder", Clock: fixedEgressClock,
 		Observer: func(e ObserverEvent) { observed = append(observed, e) },
 	}}
 	route := legRoute{Token: "pa.pas@2.0", BuildLine: "2.0", Chain: nil}
@@ -47,54 +49,35 @@ func TestEgressAdaptNilChainIsPassthrough(t *testing.T) {
 	}
 }
 
-// TestEgressAdaptValidatesAtTargetLane: a chain output deliberately
-// corrupted by a stub step must fail the caller's EXISTING
-// validateFHIR(..., "egress", LineOf(route.Token)) at the TARGET lane —
-// transformed-output-invalid is a hard failure at that surface, never a
-// silent seal (the spec's own rejection row). This test proves the SURFACE
-// (egressAdapt's output fails validate); "nothing seals" is proven at every
-// one of the nine select-before-build call sites by the ordinary
-// `if status, msg := g.validateFHIR(...); status != 0 { writeJSON(...); return
-// }` early-return that immediately follows the egressAdapt call there (e.g.
-// originate.go's handleUC03/handleUC07HCPCS/handleUC04/handleUC05/handleUC08,
-// pas_tail.go's submitClaimAndResolve, originate_resume.go's scenarioToPend/
-// completeClinician/completePatient) — the SAME pattern every one of those
-// sites already used for its own build errors, unchanged by egress adaptation.
+// TestEgressAdaptValidatesAtTargetLane: a registered walk whose output is not
+// valid at the TARGET lane fails egressBuild's bridged check there, at every
+// level — transformed-output-invalid is a hard failure at that surface, never
+// a silent seal (the spec's own rejection row), and nothing is sealed. A walk
+// by a step the compat manifest does not register is refused before it is
+// certified (TestEgressBuild_TheTransformRefuses).
 func TestEgressAdaptValidatesAtTargetLane(t *testing.T) {
-	const corruptMarker = "CORRUPTED-BY-STUB-STEP"
-	corrupt := func(payload []byte, x ExchangeIdentity) ([]byte, LossReport, error) {
-		return []byte(`{"resourceType":"Bundle","` + corruptMarker + `":true}`),
-			LossReport{Module: "pa.pas 2.0->2.1", Source: "2.0", Target: "2.1"}, nil
-	}
-	step := CompatStep{Contract: "pa.pas", From: "2.0", To: "2.1", Class: StepFull, Up: corrupt, Down: corrupt}
-	route := legRoute{Token: "pa.pas@2.1", BuildLine: "2.0", Chain: []CompatStep{step}}
-
-	g := &Gateway{cfg: Config{
-		HolderID: "test-holder", Clock: fixedEgressClock,
-		Validator:        shnsdk.NewFakeValidator(),
-		ValidatorsByLine: map[string]shnsdk.Validator{"2.0": shnsdk.NewFakeValidator(), "2.1": &shnsdk.FakeValidator{RejectIfContains: corruptMarker}},
-	}}
-
-	adapted, _, err := g.egressAdapt(route, []byte(`{"resourceType":"Bundle"}`), ExchangeIdentity{CorrelationID: "corr-2"})
-	if err != nil {
-		t.Fatalf("egressAdapt itself must not error on a structurally-valid (if semantically corrupted) stub output: %v", err)
-	}
-	// These bytes are this participant's own registered edit, so the check
-	// refuses at every level — which is why one row covers both rather than
-	// a strict row plus a relaxed twin.
-	for _, level := range []ConformanceEnforcement{EnforcementStrict, EnforcementNone} {
+	route, in := pasWalk(t)
+	// These bytes are SHN's own registered edit, so the check refuses at every
+	// level.
+	for _, level := range allLevels {
+		g := walkGateway(&shnsdk.FakeValidator{RejectIfContains: `"ClaimResponse"`})
 		g.cfg.ConformanceEnforcement = level
-		status, msg := g.validateFHIREgressOrBridged(context.Background(), adapted, "pa.pas", shnsdk.LineOf(route.Token), true)
-		if status == 0 {
-			t.Fatalf("at %s a corrupted chain output must still fail the target-lane validate — nothing may seal", level)
+		built, status, msg, err := g.egressBuild(context.Background(), route, ExchangeIdentity{CorrelationID: "corr-2", LegType: "pas-claim"}, moduleBuild{
+			Builder: relay.BuilderSDKPASSubmit, ContentType: "application/fhir+json", Body: in, Contract: "pa.pas",
+		})
+		if err != nil {
+			t.Fatalf("at %s the walk itself must not error: %v", level, err)
 		}
-		if msg == "" {
-			t.Fatalf("at %s the refusal must say why", level)
+		if status == 0 || msg == "" || strings.Contains(msg, "could not verify") {
+			t.Fatalf("at %s: %d %q, want the target-lane check's refusal", level, status, msg)
+		}
+		if built.Payload.Ownership() != 0 {
+			t.Fatalf("at %s a refused walk was sealed: %v", level, built.Payload)
 		}
 	}
 }
 
-// The same call with bridged=false is an ordinary egress check, governed by
+// The same build with no chain is an ordinary egress check, governed by
 // the level: strict refuses it (422), observe records and relays it (0) and
 // none does not check it (0) —
 // asserting the exact status at each level, not just "non-zero", is what
@@ -114,13 +97,18 @@ func TestEgressUnbridgedIsGovernedByTheLevel(t *testing.T) {
 		{EnforcementNone, 0},
 	} {
 		g := &Gateway{cfg: Config{
-			HolderID: "test-holder", Clock: fixedEgressClock,
-			ConformanceEnforcement: tc.level,
-			Validator:              shnsdk.NewFakeValidator(),
-			ValidatorsByLine:       map[string]shnsdk.Validator{"2.1": &shnsdk.FakeValidator{RejectIfContains: marker}},
+			TranslateIGLines: true,
+			HolderID:         "test-holder", Clock: fixedEgressClock,
+			ConformanceEnforcement:   tc.level,
+			Validator:                shnsdk.NewFakeValidator(),
+			ValidatorsByContractLine: contractLanes(map[string]shnsdk.Validator{"2.1": &shnsdk.FakeValidator{RejectIfContains: marker}}),
 		}}
-		status, _ := g.validateFHIREgressOrBridged(context.Background(),
-			[]byte(`{"resourceType":"Bundle","`+marker+`":true}`), "pa.pas", "2.1", false)
+		_, status, _, err := g.egressBuild(context.Background(), legRoute{Token: "pa.pas@2.1", BuildLine: "2.1"}, ExchangeIdentity{CorrelationID: "corr-2"}, moduleBuild{
+			Builder: relay.BuilderSDKPASSubmit, ContentType: "application/fhir+json", Body: []byte(`{"resourceType":"Bundle","` + marker + `":true}`), Contract: "pa.pas",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
 		if status != tc.want {
 			t.Fatalf("at %s an unbridged egress defect got status %d, want %d", tc.level, status, tc.want)
 		}
@@ -145,7 +133,8 @@ func TestEgressAdaptStampsTargetToken(t *testing.T) {
 	in := pasGolden(t, "claimresponse-approved.json") // real 2.0 golden, bare ClaimResponse
 	var observed []ObserverEvent
 	g := &Gateway{cfg: Config{
-		HolderID: "test-holder", Clock: fixedEgressClock,
+		TranslateIGLines: true,
+		HolderID:         "test-holder", Clock: fixedEgressClock,
 		Observer: func(e ObserverEvent) { observed = append(observed, e) },
 	}}
 
@@ -211,7 +200,8 @@ func TestEgressAdaptFillsPromisedFields(t *testing.T) {
 
 	var observed []ObserverEvent
 	g := &Gateway{cfg: Config{
-		HolderID: "test-holder", Clock: fixedEgressClock,
+		TranslateIGLines: true,
+		HolderID:         "test-holder", Clock: fixedEgressClock,
 		Observer: func(e ObserverEvent) { observed = append(observed, e) },
 	}}
 
@@ -260,7 +250,8 @@ func TestEgressAdaptFillsPromisedFieldsChainInvoking(t *testing.T) {
 
 	var observed []ObserverEvent
 	g := &Gateway{cfg: Config{
-		HolderID: "test-holder", Clock: fixedEgressClock,
+		TranslateIGLines: true,
+		HolderID:         "test-holder", Clock: fixedEgressClock,
 		Observer: func(e ObserverEvent) { observed = append(observed, e) },
 	}}
 
@@ -308,7 +299,8 @@ func TestEnvelopeLegChainIsByteIdenticalPassThrough(t *testing.T) {
 
 	var observed []ObserverEvent
 	g := &Gateway{cfg: Config{
-		HolderID: "test-holder", Clock: fixedEgressClock,
+		TranslateIGLines: true,
+		HolderID:         "test-holder", Clock: fixedEgressClock,
 		Observer: func(e ObserverEvent) { observed = append(observed, e) },
 	}}
 
@@ -388,7 +380,8 @@ func TestEgressAdaptRefusalEmitsLegFailed(t *testing.T) {
 
 	var observed []ObserverEvent
 	g := &Gateway{cfg: Config{
-		HolderID: "test-holder", Clock: fixedEgressClock,
+		TranslateIGLines: true,
+		HolderID:         "test-holder", Clock: fixedEgressClock,
 		Observer: func(e ObserverEvent) { observed = append(observed, e) },
 	}}
 
@@ -469,7 +462,8 @@ func TestEgressAdapt_EdgeCaptureRecordsPreSealPair(t *testing.T) {
 	in := []byte(`{"hook":"order-select","hookInstance":"hi-1","context":{"patientId":"MBR-COVERED"}}`)
 
 	g := &Gateway{cfg: Config{
-		HolderID: "test-holder", Clock: fixedEgressClock,
+		TranslateIGLines: true,
+		HolderID:         "test-holder", Clock: fixedEgressClock,
 		DemoEdgeCapture: true,
 	}}
 	x := ExchangeIdentity{CorrelationID: newCorrelationID(), LegType: "crd-order-select", Counterpart: "payer-crd22"}
@@ -524,7 +518,8 @@ func TestEgressAdapt_EdgeCaptureOffIsConformanceNeutral(t *testing.T) {
 
 	run := func(withCapture bool) (out []byte, id string, g *Gateway) {
 		g = &Gateway{cfg: Config{
-			HolderID: "test-holder", Clock: fixedEgressClock,
+			TranslateIGLines: true,
+			HolderID:         "test-holder", Clock: fixedEgressClock,
 			DemoEdgeCapture: withCapture,
 		}}
 		id = newCorrelationID()
@@ -566,7 +561,8 @@ func TestEgressAdapt_EnvelopeLegCaptureIsByteIdentical(t *testing.T) {
 	orig := append([]byte(nil), golden...)
 
 	g := &Gateway{cfg: Config{
-		HolderID: "test-holder", Clock: fixedEgressClock,
+		TranslateIGLines: true,
+		HolderID:         "test-holder", Clock: fixedEgressClock,
 		DemoEdgeCapture: true,
 	}}
 	x := ExchangeIdentity{CorrelationID: newCorrelationID(), LegType: "dtr-questionnaire-fetch", Counterpart: "payer"}
@@ -611,7 +607,8 @@ func TestEgressAdapt_RefusedLegCapturesNothing(t *testing.T) {
 	in := []byte(`{"resourceType":"Claim","id":"c1"}`) // pasStep2021Up refuses unconditionally
 
 	g := &Gateway{cfg: Config{
-		HolderID: "test-holder", Clock: fixedEgressClock,
+		TranslateIGLines: true,
+		HolderID:         "test-holder", Clock: fixedEgressClock,
 		DemoEdgeCapture: true,
 	}}
 	x := ExchangeIdentity{CorrelationID: newCorrelationID(), LegType: "pas-claim", Counterpart: "payer-x"}
@@ -632,7 +629,8 @@ func TestEgressAdapt_RefusedLegCapturesNothing(t *testing.T) {
 // enough on its own to produce an entry.
 func TestEgressAdapt_ChainlessRouteCapturesNothing(t *testing.T) {
 	g := &Gateway{cfg: Config{
-		HolderID: "test-holder", Clock: fixedEgressClock,
+		TranslateIGLines: true,
+		HolderID:         "test-holder", Clock: fixedEgressClock,
 		DemoEdgeCapture: true,
 	}}
 	route := legRoute{Token: "pa.pas@2.0", BuildLine: "2.0", Chain: nil}
@@ -663,7 +661,8 @@ func TestEgressAdapt_EdgeCaptureConcurrentRecordAndRead(t *testing.T) {
 	in := []byte(`{"hook":"order-select","hookInstance":"hi-1","context":{"patientId":"MBR-COVERED"}}`)
 
 	g := &Gateway{cfg: Config{
-		HolderID: "test-holder", Clock: fixedEgressClock,
+		TranslateIGLines: true,
+		HolderID:         "test-holder", Clock: fixedEgressClock,
 		DemoEdgeCapture: true,
 	}}
 

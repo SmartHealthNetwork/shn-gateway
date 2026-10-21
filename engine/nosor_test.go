@@ -271,17 +271,16 @@ func runPayerLeg(t *testing.T, sor SystemOfRecord, c payerLegCase) legRun {
 	return run
 }
 
-// pendLedger reports the pend row for (pci, corr) and the EOBs filed under
-// pci, as a leg's ledger inspector.
+// pendLedger reports the pend row for (pci, corr), as a leg's ledger
+// inspector.
 func pendLedger(pci string, corr func(legCorr string) string) func(t *testing.T, p *levelPayer, legCorr string) string {
 	return func(t *testing.T, p *levelPayer, legCorr string) string {
 		t.Helper()
-		rec, found, err := p.store.PendRecordOf(pci, corr(legCorr))
+		rec, found, err := testLedger(p.store).PendRecordOf(pci, corr(legCorr))
 		if err != nil {
 			t.Fatalf("read ledger: %v", err)
 		}
-		eobs, _ := p.store.EOBsForPatient(pci)
-		return fmt.Sprintf("pend found=%v state=%s outcome=%s; %d EOB(s)", found, rec.State, rec.Outcome, len(eobs))
+		return fmt.Sprintf("pend found=%v state=%s outcome=%s", found, rec.State, rec.Outcome)
 	}
 }
 
@@ -349,7 +348,7 @@ func TestNoSystemOfRecord_PayerLegsAnswerAsAStoreHoldingNobody(t *testing.T) {
 			body: []byte(nextQuestionQR(strangerMember)), answers: map[string][]byte{nextPath: nextAnswer}, want: nextAnswer, subject: byID},
 		{name: "PAS $submit", leg: "pas-claim", body: pasBundleWithPatient(t, strangerMember, carried, false),
 			ledger: pendLedger(derived, func(corr string) string { return corr }),
-			want:   []byte(assemblyRealPending), subject: derived, wantLedger: "pend found=true state=" + string(PendStatePended) + " outcome=; 0 EOB(s)"},
+			want:   []byte(assemblyRealPending), subject: derived, wantLedger: "pend found=true state=" + string(PendStatePended) + " outcome="},
 		{name: "PAS update", leg: "pas-claim-update", body: update,
 			answers: map[string][]byte{pasSubmitPath: approved},
 			setup: func(t *testing.T, p *levelPayer) {
@@ -360,9 +359,9 @@ func TestNoSystemOfRecord_PayerLegsAnswerAsAStoreHoldingNobody(t *testing.T) {
 			},
 			ledger: pendLedger(updateSubject, func(string) string { return related }),
 			want:   approved, subject: updateSubject,
-			// The update leg decides the pend and builds no EOB
+			// The update leg decides the pend
 			// (TestNativeUpdate_ApprovalRelayedAndDecided).
-			wantLedger: "pend found=true state=" + string(PendStateDecided) + " outcome=" + string(PendOutcomeApproved) + "; 0 EOB(s)"},
+			wantLedger: "pend found=true state=" + string(PendStateDecided) + " outcome=" + string(PendOutcomeApproved)},
 		// The inquiry carries a Patient with no demographics: it binds by the
 		// member id alone, over either store.
 		{name: "PAS $inquire", leg: "pas-claim-inquire", body: inquiryBundle(strangerMember, "", "TRN-1", "72148"),
@@ -440,8 +439,8 @@ func containsSuffix(list []string, suffix string) bool {
 // Patient with no demographics, so it binds by the member id alone
 // (derivedPCI(member, "", "")). The two keys differ, so the inquiry's decision
 // does not reach the submit's pend: the payer's answer is still relayed
-// exactly, the pend stays pended under the submit's key, and no EOB is filed
-// under either. The control, an inquiry carrying the same Patient, decides the
+// exactly, the pend stays pended under the submit's key, and nothing is
+// recorded under the inquiry's key or the token's subject. The control, an inquiry carrying the same Patient, decides the
 // pend, so the row can fail.
 func TestNoSystemOfRecord_InquiryWithoutTheSubmitsPatientIsRelayed(t *testing.T) {
 	// The inquiry answer decides the authorization the pended $submit answer
@@ -485,10 +484,10 @@ func TestNoSystemOfRecord_InquiryWithoutTheSubmitsPatientIsRelayed(t *testing.T)
 			if submit.status != http.StatusOK || !bytes.Equal(submit.body, []byte(assemblyRealPending)) {
 				t.Fatalf("submit answer %d %s", submit.status, submit.body)
 			}
-			if rec, found, err := p.store.PendRecordOf(submitKey, submit.corr); err != nil || !found || rec.State != PendStatePended {
+			if rec, found, err := testLedger(p.store).PendRecordOf(submitKey, submit.corr); err != nil || !found || rec.State != PendStatePended {
 				t.Fatalf("the submit's pend is filed under the key derived from its Patient: found=%v %+v err=%v", found, rec, err)
 			}
-			if _, found, _ := p.store.PendRecordOf(nosorTokenSubject, submit.corr); found {
+			if _, found, _ := testLedger(p.store).PendRecordOf(nosorTokenSubject, submit.corr); found {
 				t.Fatal("a pend was filed under the token's subject")
 			}
 
@@ -499,29 +498,27 @@ func TestNoSystemOfRecord_InquiryWithoutTheSubmitsPatientIsRelayed(t *testing.T)
 			if inquiry.status != http.StatusOK || !inquiry.framed || !bytes.Equal(inquiry.body, decided) {
 				t.Fatalf("the inquiry must relay the payer's answer exactly: %d %s", inquiry.status, inquiry.body)
 			}
-			rec, found, err := p.store.PendRecordOf(submitKey, submit.corr)
+			rec, found, err := testLedger(p.store).PendRecordOf(submitKey, submit.corr)
 			if err != nil || !found {
 				t.Fatalf("the submit's pend is gone: found=%v err=%v", found, err)
 			}
-			submitEOBs, _ := p.store.EOBsForPatient(submitKey)
-			inquiryEOBs, _ := p.store.EOBsForPatient(inquiryKey)
-			tokenEOBs, _ := p.store.EOBsForPatient(nosorTokenSubject)
-			if len(tokenEOBs) != 0 {
-				t.Fatalf("%d EOB(s) filed under the token's subject", len(tokenEOBs))
+			for _, key := range []string{inquiryKey, nosorTokenSubject} {
+				for _, corr := range []string{submit.corr, inquiry.corr} {
+					if got, found, err := testLedger(p.store).PendRecordOf(key, corr); err != nil || found {
+						t.Fatalf("a row was recorded under %q for %q: found=%v %+v err=%v", key, corr, found, got, err)
+					}
+				}
 			}
 			if tc.decides {
-				if rec.State != PendStateDecided || len(submitEOBs) != 1 || len(inquiryEOBs) != 0 {
-					t.Fatalf("control: want the submit's pend decided with its EOB, got %+v, %d EOB(s) under the submit's key, %d under the inquiry's", rec, len(submitEOBs), len(inquiryEOBs))
+				if rec.State != PendStateDecided || rec.Outcome == "" {
+					t.Fatalf("control: want the submit's pend decided, got %+v", rec)
 				}
 				return
 			}
 			// The inquiry is bound under another key than the submit's pend:
 			// its decision lands nowhere.
-			if rec.State != PendStatePended || len(submitEOBs) != 0 || len(inquiryEOBs) != 0 {
-				t.Fatalf("want the submit's pend still pended and no EOB, got %+v, %d EOB(s) under the submit's key, %d under the inquiry's", rec, len(submitEOBs), len(inquiryEOBs))
-			}
-			if _, found, _ := p.store.PendRecordOf(inquiryKey, submit.corr); found {
-				t.Fatal("a pend appeared under the inquiry's key")
+			if rec.State != PendStatePended || rec.Outcome != "" {
+				t.Fatalf("want the submit's pend still pended, got %+v", rec)
 			}
 		})
 	}

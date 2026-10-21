@@ -28,7 +28,7 @@ func uc06RouteFixture(t *testing.T, line string) (*Gateway, *pendResumeSubstrate
 	gw, stub := newPendResumeFixture(t, opts)
 	if line != "2.0" {
 		gw.cfg.Validator = NewLineFakeValidator("2.0")
-		gw.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"2.0": NewLineFakeValidator("2.0"), line: NewLineFakeValidator(line)}
+		gw.cfg.ValidatorsByContractLine = contractLanes(map[string]shnsdk.Validator{"2.0": NewLineFakeValidator("2.0"), line: NewLineFakeValidator(line)})
 	}
 	return gw, stub
 }
@@ -277,7 +277,7 @@ func uc07RouteFixture(t *testing.T, line string) (*Gateway, *pendResumeSubstrate
 	gw, stub := newPendResumeFixture(t, opts)
 	if line != "2.0" {
 		gw.cfg.Validator = NewLineFakeValidator("2.0")
-		gw.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"2.0": NewLineFakeValidator("2.0"), line: NewLineFakeValidator(line)}
+		gw.cfg.ValidatorsByContractLine = contractLanes(map[string]shnsdk.Validator{"2.0": NewLineFakeValidator("2.0"), line: NewLineFakeValidator(line)})
 	}
 	return gw, stub
 }
@@ -354,7 +354,7 @@ func TestUC05_AmendmentCertificationTypeRefusedBeforeAnyLeg(t *testing.T) {
 			gw, stub := newPendResumeFixture(t, opts)
 			gw.cfg.OriginationProfile = "demo"
 			gw.cfg.Validator = NewLineFakeValidator("2.0")
-			gw.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"2.0": NewLineFakeValidator("2.0"), line: NewLineFakeValidator(line)}
+			gw.cfg.ValidatorsByContractLine = contractLanes(map[string]shnsdk.Validator{"2.0": NewLineFakeValidator("2.0"), line: NewLineFakeValidator(line)})
 			body := editBody(t, testRouteBody(gw, "/scenario/uc05", ""), func(m map[string]json.RawMessage) { delete(m, "certificationType") })
 			rec := httptest.NewRecorder()
 			gw.handleUC05(rec, withOriginationClaimInput(httptest.NewRequest(http.MethodPost, "/scenario/uc05", strings.NewReader(body))))

@@ -166,13 +166,13 @@ func editIssue(t *testing.T, raw []byte, code string, edit func(issue map[string
 
 func TestReadinessRowsAreUniqueOrderedCorpus(t *testing.T) {
 	rows := readinessRows("2.2")
-	if len(rows) != 42 {
-		t.Fatalf("rows=%d want 42", len(rows))
+	if len(rows) != 41 {
+		t.Fatalf("rows=%d want 41", len(rows))
 	}
-	if rows[38].identity != "encounter-positive" || rows[39].identity != "encounter-target-type" {
-		t.Fatalf("the encounter rows must retain their positions: %q %q", rows[38].identity, rows[39].identity)
+	if rows[37].identity != "encounter-positive" || rows[38].identity != "encounter-target-type" {
+		t.Fatalf("the encounter rows must retain their positions: %q %q", rows[37].identity, rows[38].identity)
 	}
-	wantPrefix := []string{"init-pas-request-bundle", "init-dtr-questionnaireresponse", "init-pdex-explanationofbenefit", "init-cdex-task"}
+	wantPrefix := []string{"init-pas-request-bundle", "init-dtr-questionnaireresponse", "init-cdex-task"}
 	for i, want := range wantPrefix {
 		if rows[i].identity != want {
 			t.Fatalf("row[%d]=%q want %q", i, rows[i].identity, want)

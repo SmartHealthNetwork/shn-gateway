@@ -194,7 +194,7 @@ func (d *Driver) PopulateViaBRProvider(p DTRPackage) ([]byte, error) {
 // lives at parameter[name=="packagebundle"].resource (a conformant Da Vinci payer's
 // $questionnaire-package response shape, which the gateway relays VERBATIM on ingress). A
 // Parameters wrapper carrying no packagebundle parameter errors rather than silently yielding no
-// entries. Mirrors gateway/engine/davincimap.go's unwrapQuestionnairePackage and
+// entries. Mirrors gateway/engine/workstream_pa_davincimap.go's unwrapQuestionnairePackage and
 // sdk's ExtractQuestionnaireFromPackage/unwrapPackageParameters — same shape, no fourth variant.
 func PackageEntries(body []byte) ([]json.RawMessage, error) {
 	bundle, err := packageBundleBytes(body)

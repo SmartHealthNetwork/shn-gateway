@@ -293,13 +293,13 @@ func (c guardValidations) Validate(ctx context.Context, b []byte, profile string
 // called, nothing is validated and the gateway makes no call of its own,
 // whatever the leg's body.
 func TestRequesterGuard_EveryLegRefusedBeforeItsHandler(t *testing.T) {
-	for leg := range paCatalog {
+	for _, leg := range networkLegs() {
 		t.Run(leg, func(t *testing.T) {
 			p, ct := guardPayer(t, EnforcementStrict)
 			var validations atomic.Int32
 			p.g.cfg.Validator = guardValidations{p.g.cfg.Validator, &validations}
-			for line, v := range p.g.cfg.ValidatorsByLine {
-				p.g.cfg.ValidatorsByLine[line] = guardValidations{v, &validations}
+			for key, v := range p.g.cfg.ValidatorsByContractLine {
+				p.g.cfg.ValidatorsByContractLine[key] = guardValidations{v, &validations}
 			}
 			p.g.cfg.Reg.Delete(p.requester.ID)
 			wantRequesterUnknown(t, p.send(t, leg, "", []byte(`{"resourceType":"Bundle","type":"collection","entry":[]}`)))

@@ -205,7 +205,7 @@ func TestSoRSubjectRouteFamilies(t *testing.T) {
 				// the participant requires known members; the prefetch route reads
 				// it for the fill, which runs only under enrichment.
 				g := &Gateway{cfg: Config{SoR: sor, RequireKnownMembers: true, EnrichNativeRequests: true}}
-				g.installEnrichment()
+				g.states = workstreamGatewayStates(g)
 				var status int
 				var msg string
 				switch route {

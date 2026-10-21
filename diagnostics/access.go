@@ -72,6 +72,26 @@ type AccessLine struct {
 	// named only once the bytes were sent (engine.ExchangeRecord.Edits). Ids only: never a value an edit
 	// removed or wrote. Absent when the leg carried its message exactly.
 	RelayEdits []string `json:"relayEdits,omitempty"`
+	// Ownership is whose message the request the gateway sent on the leg was
+	// (engine.ExchangeRecord.Ownership): relayed, edited or authored; it says
+	// nothing of the answer, though RelayEdits may name an answer's edit
+	// (E-08). Builder is the registered builder of a request the gateway built:
+	// authored, or edited when the registered transform (E-09) carried it to
+	// the peer's IG line. Names only. Both are absent when no request was sent,
+	// and Builder unless the request was the gateway's own. Evolving.
+	Ownership string `json:"ownership,omitempty"`
+	Builder   string `json:"builder,omitempty"`
+	// RequestEdits are the RelayEdits applied to the request Ownership
+	// describes, and AnswerEdits those applied to the answer the gateway
+	// wrote (engine.ExchangeRecord.RequestEdits, AnswerEdits): RelayEdits is
+	// the two together. AnswerOwnership and AnswerBuilder are Ownership and
+	// Builder for that answer (engine.ExchangeRecord.AnswerOwnership,
+	// AnswerBuilder): authored by gateway-refusal for every refusal the
+	// gateway writes. Each is absent when empty. Evolving.
+	RequestEdits    []string `json:"requestEdits,omitempty"`
+	AnswerOwnership string   `json:"answerOwnership,omitempty"`
+	AnswerBuilder   string   `json:"answerBuilder,omitempty"`
+	AnswerEdits     []string `json:"answerEdits,omitempty"`
 	// HubDelivered is the Hub's own word, on its error answer to an ingress
 	// call's leg, on whether the recipient's gateway received the request
 	// (engine.ExchangeRecord.HubDelivered): "no", "yes" or "unknown". Absent

@@ -5,7 +5,6 @@ import (
 	"context"
 	"log"
 	"math/bits"
-	"strings"
 	"sync"
 	"time"
 )
@@ -29,16 +28,6 @@ const (
 // before cancelling the validator calls still running; a cancelled call is
 // recorded as unavailable, so a stuck validator cannot hold a shutdown.
 var observeFlushTimeout = 10 * time.Second
-
-// decisionEOBObserveDeadline bounds, at observe, the checks that stay on the
-// request path at every level: the decision ExplanationOfBenefits a payer gateway
-// builds from its participant's answer, whose verdicts decide whether each
-// decision is written (the decision-EOB rule). It is one budget for all of a
-// leg's decision EOBs; a check the budget does not reach in time is unavailable,
-// recorded as such, and its decision written, as for any validator outage. It is
-// a fixed bound, documented in CONFIGURATION.md, not a setting; a test may
-// shorten it.
-var decisionEOBObserveDeadline = 2 * time.Second
 
 // observeCheck is one queued check: everything validateGovernedLines needs,
 // captured when the leg asked for it. payload is the queue's own copy.
@@ -186,7 +175,7 @@ func (g *Gateway) runObserveCheck(base context.Context, c observeCheck) {
 		c.run(ctx)
 		return
 	}
-	g.judgeLines(ctx, c.fc, c.lanes, c.payload, c.dir, c.line, c.profile, false, c.candidates)
+	g.judgeLines(ctx, g.conformance(), c.fc, c.lanes, c.payload, c.dir, c.line, c.profile, false, c.candidates)
 }
 
 // closeObserveChecks flushes the queue: no new check is accepted, and it returns
@@ -244,101 +233,6 @@ func (g *Gateway) waitObserveChecks(ctx context.Context) error {
 	}
 	q.mu.Unlock()
 	return ctx.Err()
-}
-
-// judgedInlineKey marks a check whose verdict the leg acts on below strict, so
-// it stays on the request path at observe too (validateFHIRDecisionEOB).
-type judgedInlineKey struct{}
-
-func withJudgedInline(ctx context.Context) context.Context {
-	return context.WithValue(ctx, judgedInlineKey{}, true)
-}
-
-func judgedInline(ctx context.Context) bool {
-	v, _ := ctx.Value(judgedInlineKey{}).(bool)
-	return v
-}
-
-// validateDecisionEOBs checks a leg's decision ExplanationOfBenefits in order.
-// At observe the whole loop shares one budget (decisionEOBObserveDeadline): an
-// EOB the budget does not reach is recorded as unavailable and may be written,
-// never skipped. It never refuses. For each EOB it returns "" when the EOB may
-// be written, else why not (validateFHIRDecisionEOB).
-func (g *Gateway) validateDecisionEOBs(ctx context.Context, eobs [][]byte) []string {
-	if g.policy().Level() == EnforcementObserve && len(eobs) > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, decisionEOBObserveDeadline)
-		defer cancel()
-	}
-	out := make([]string, len(eobs))
-	for i, b := range eobs {
-		if nw, d := g.validateFHIRDecisionEOB(ctx, b); nw {
-			out[i] = d
-		}
-	}
-	return out
-}
-
-// gateDecisionEOBs is the one gate every decision EOB passes before it may be
-// written, at every level and whoever produced the answer (relayed or this
-// gateway's own). Each decision EOB this gateway built for the answer
-// (result.decisionEOBs) is validated; one that passes is admitted
-// (eobToWrite), one that does not is not written, and the operator is told
-// why (pa.decision-eob-not-written). Its decision is still recorded, and one
-// EOB that may not be written never keeps another decision on the leg from
-// its own. The payer's decision is never refused over it.
-//
-// Side-effect FHIR an injected responder supplied on its own (not a decision
-// EOB this gateway built) is written by that responder's Commit, which cannot
-// be split: one that fails its validation writes nothing from the answer.
-// An answer not read writes nothing, so nothing is checked.
-func (g *Gateway) gateDecisionEOBs(ctx context.Context, leg, correlationID string, result *LegResult, read *payerAnswerRead, perAuthorization bool) {
-	if !read.read() {
-		result.SideEffectFHIR = nil
-		return
-	}
-	built := map[*byte]bool{}
-	var all [][]byte
-	for _, rec := range result.decisionEOBs {
-		if len(rec.JSON) > 0 {
-			built[&rec.JSON[0]] = true
-		}
-		all = append(all, rec.JSON)
-	}
-	var own [][]byte
-	for _, b := range result.SideEffectFHIR {
-		if len(b) == 0 || !built[&b[0]] {
-			own = append(own, b)
-		}
-	}
-	verdicts := g.validateDecisionEOBs(ctx, append(all, own...))
-	for i, rec := range result.decisionEOBs {
-		if verdicts[i] == "" {
-			rec.admitted = true
-			continue
-		}
-		detail := verdicts[i]
-		if perAuthorization {
-			detail = "authorization " + strings.TrimPrefix(rec.EOBID, "eob-") + ": " + detail
-		}
-		g.reportDecisionEOBNotWritten(leg, correlationID, detail)
-	}
-	for _, d := range verdicts[len(result.decisionEOBs):] {
-		if d != "" {
-			g.reportDecisionEOBNotWritten(leg, correlationID, d)
-			read.sideEffectInvalid()
-			return
-		}
-	}
-}
-
-// reportDecisionEOBNotWritten tells the operator a leg's decision EOB was not
-// written because it failed its own validation: a log line and an observer
-// event (DecisionEOBNotWrittenEvent) naming the failure. Metadata only.
-func (g *Gateway) reportDecisionEOBNotWritten(leg, correlationID, detail string) {
-	log.Printf("gateway: %s: leg %s correlation %s: %s", DecisionEOBNotWrittenEvent, leg, correlationID, detail)
-	g.observe(ObserverEvent{Kind: DecisionEOBNotWrittenEvent, Direction: "ingress", LegType: leg,
-		CorrelationID: correlationID, Detail: detail})
 }
 
 // drainObserveChecks waits until no check is queued or running: for tests that

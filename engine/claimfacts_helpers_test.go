@@ -91,7 +91,7 @@ func testRouteBody(g *Gateway, path, extra string) string {
 			scenario = "uc01-notcovered"
 		case seg == "uc05" && stated.Branch == "noconsent":
 			scenario = "uc05-noconsent"
-		case seg == "uc03" && strings.HasPrefix(stated.Branch, "bridge-"):
+		case seg == "uc03" && (stated.Branch == "bridge-demo" || stated.Branch == "line-carry"):
 			scenario = "uc03-" + stated.Branch
 		}
 		m, ok := scenarioMembers[scenario]

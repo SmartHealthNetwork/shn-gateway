@@ -1,21 +1,22 @@
 # Validator lane recordings (default-lane qualification, certification warm-up)
 
-What a real HAPI validator lane answered, captured on 2026-09-27 from three local HAPI FHIR 8.10.0
-validator lanes, one each for the 2.0, 2.1 and 2.2 contract lines, through an exact-bytes
-recording proxy. The exchanges whose request is a synthetic PAS request bundle were captured again
-on 2026-10-06, the same way from lanes of the same pinned images, when those bundles changed; the
-other exchanges are the 2026-09-27 capture, and the 2026-10-06 run's answers to their requests were
-byte-identical to it.
+What a real HAPI validator lane answered, through an exact-bytes recording proxy, from three local
+validator lanes, one each for the 2.0, 2.1 and 2.2 contract lines. The `asked` recordings were
+captured on 2026-10-19 from HAPI FHIR 8.12.0 lanes, once the PDex IG had left the lanes; their
+requests were sent by the Kit's copy of the qualifier (`kit/validatorwarm`), which the platform
+repository fences byte-identical to the gateway's. The `certify-warm` recordings are the 2026-09-27
+capture from HAPI FHIR 8.10.0 lanes, their request-bundle exchange captured again on 2026-10-06 the
+same way when that bundle changed.
 Each lane runs the digest-pinned engine and backported WAR the Smart Gateway's
 `deploy/validator` builds on, loaded with its line's IG closure and the shared validation-support
-package. The requests are the validator code's own: the gateway's default-lane qualifier and its
-boot certification warm-up ran against each lane. Every request body is a committed synthetic
+package. The requests are the validator code's own: the default-lane qualifier (as above) and the
+gateway's boot certification warm-up ran against each lane. Every request body is a committed synthetic
 fixture. No participant or patient data.
 
 - `lane-2.0-asked-2.1.json`, `lane-2.0-asked-2.2.json`, `lane-2.1-asked-2.0.json`,
   `lane-2.1-asked-2.2.json`, `lane-2.2-asked-2.0.json`, `lane-2.2-asked-2.1.json`: a lane
-  qualified as a line it does not serve (`lane-<lane>-asked-<line>`). The qualifier's four
-  initialization rows for the asked line and its first decision row (row 5 of 42, the versioned
+  qualified as a line it does not serve (`lane-<lane>-asked-<line>`). The qualifier's three
+  initialization rows for the asked line and its first decision row (row 4 of 41, the versioned
   approved ClaimResponse at the asked line's PAS version), which the lane refuses, so the
   qualification stops there. The refusals are the lane's own: `processing` with the message id
   `Validation_VAL_Profile_Unknown` (the asked PAS version is not loaded), and on the 2.1 and 2.2

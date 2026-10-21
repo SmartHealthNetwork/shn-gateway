@@ -276,7 +276,7 @@ func TestOriginationAmendment_CertificationTypeIsTheRequests(t *testing.T) {
 	}
 	// Every amendment the gateway sends states the certificationType of the
 	// request that sends it, and nothing else.
-	for _, f := range []string{"originate.go", "originate_resume.go"} {
+	for _, f := range []string{"module1_originate.go", "module1_originate_resume.go"} {
 		src, err := os.ReadFile(f)
 		if err != nil {
 			t.Fatal(err)
@@ -319,7 +319,10 @@ func TestRecordPASSubmission_AmendmentRestatesTheRecordedSubmission(t *testing.T
 		if err != nil {
 			t.Fatalf("%s: %v", line, err)
 		}
-		if !bytes.Contains(upd, []byte(`"created":"2026-05-01T09:30:00Z"`)) {
+		// From PAS 2.1 the update carries the prior Claim, restating the submission; PAS
+		// 2.0's update names it by identifier and restates nothing (the line is compared
+		// here, not the SDK's PASDef flag, which this module's pinned shn-sdk predates).
+		if line != "2.0" && !bytes.Contains(upd, []byte(`"created":"2026-05-01T09:30:00Z"`)) {
 			t.Fatalf("%s: the prior-Claim entry does not restate the submission's own created", line)
 		}
 		// The amendment re-sends the submitted item exactly as it was: no
@@ -393,14 +396,15 @@ func TestPASBuildFailure_NamesTheFidelityRefusal(t *testing.T) {
 // TestRecordPASSubmission_RestatesTheSubmittedCodingsAsSent: the prior-Claim
 // entry an amendment carries restates the submitted Claim's type and priority
 // exactly as the submission sent them — every member of the coding (here its
-// version and userSelected), never rebuilt from system and code.
+// version and userSelected), never rebuilt from system and code. At PAS 2.2, a
+// line whose update carries the prior Claim.
 func TestRecordPASSubmission_RestatesTheSubmittedCodingsAsSent(t *testing.T) {
 	const statedType = `{"system":"http://terminology.hl7.org/CodeSystem/claim-type","version":"4.0.1","code":"professional","userSelected":true}`
 	member := "MBR-COVERED"
 	order := pasTailServiceRequest()
 	facts := testClaimFacts()
 	facts.ClaimType = json.RawMessage(statedType)
-	sub, err := buildPASSubmitBundle("2.0", false, order, nil, testRequestingProvider(), testMemberCoverage(member),
+	sub, err := buildPASSubmitBundle("2.2", false, order, nil, testRequestingProvider(), testMemberCoverage(member),
 		testPayerOrganization(shnsdk.CMSPayerIdentity), shnsdk.MemberSystem, "Patient/"+member, "Coverage/"+member, member,
 		"corr-sub", time.Date(2026, 5, 1, 9, 30, 0, 0, time.UTC), shnsdk.CMSPayerIdentity, facts)
 	if err != nil {
@@ -410,9 +414,9 @@ func TestRecordPASSubmission_RestatesTheSubmittedCodingsAsSent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	in := attachmentUpdateInputs("2.0", false, false)
+	in := attachmentUpdateInputs("2.2", false, false)
 	in.PriorClaim, in.SR, in.OriginalCorr = rec.prior, order, "corr-sub"
-	upd, err := shnsdk.BuildConformantClaimUpdateBundleAtLineExact("2.0", in)
+	upd, err := shnsdk.BuildConformantClaimUpdateBundleAtLineExact("2.2", in)
 	if err != nil {
 		t.Fatal(err)
 	}

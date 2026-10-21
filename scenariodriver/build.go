@@ -228,10 +228,13 @@ func BuildPASBundle(golden []byte, member string) ([]byte, error) {
 	return AddRoutablePayor(rebound)
 }
 
-// InjectShnCorrelation surgically adds a Claim.identifier entry {system:"urn:shn:correlation",
-// value:corr} to a PAS Bundle JSON via one-pass map edit. Deterministic. Enables the submit→amend
-// correlation handoff: SHN keys the pend on the partner-supplied corr so the follow-up amended
-// re-POST can reference it via Claim.related[prior].
+// InjectShnCorrelation sets the Claim's identifier to {system:"urn:shn:correlation", value:corr}
+// in a PAS Bundle JSON via one-pass map edit. Deterministic. Enables the submit→amend correlation
+// handoff: SHN keys the pend on the partner-supplied corr so the follow-up amended re-POST can
+// reference it via Claim.related[prior]. It replaces the Claim's identifier rather than adding
+// one: the goldens are PAS 2.0.1, where a Claim carries exactly one (profile-claim and
+// profile-claim-update, Claim.identifier 1..1), and the payer echoes the Claim into its answer,
+// so a second identifier makes both the request and the answer non-conformant.
 func InjectShnCorrelation(bundleJSON []byte, corr string) ([]byte, error) {
 	var b map[string]any
 	if err := json.Unmarshal(bundleJSON, &b); err != nil {
@@ -241,11 +244,10 @@ func InjectShnCorrelation(bundleJSON []byte, corr string) ([]byte, error) {
 	for _, e := range entries {
 		res, _ := e.(map[string]any)["resource"].(map[string]any)
 		if res != nil && res["resourceType"] == "Claim" {
-			existing, _ := res["identifier"].([]any)
-			res["identifier"] = append(existing, map[string]any{
+			res["identifier"] = []any{map[string]any{
 				"system": "urn:shn:correlation",
 				"value":  corr,
-			})
+			}}
 			break
 		}
 	}

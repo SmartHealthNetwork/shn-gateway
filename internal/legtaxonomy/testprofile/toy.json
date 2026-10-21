@@ -1,0 +1,19 @@
+{
+  "workstream": "toy",
+  "taxonomyVersion": 1,
+  "legs": [
+    {
+      "transactionType": "toy-echo",
+      "stagedName": "toy.toy-echo",
+      "physics": "request-response",
+      "request": {"frame": "provider-tpo", "roles": ["provider"], "operation": "toy-ask"},
+      "response": {"frame": "toy-answer", "roles": ["payer"], "operation": "toy-answer"},
+      "scope": "toy-only",
+      "payloadBinding": "required",
+      "consent": null,
+      "observe": true,
+      "frameOperations": [],
+      "advertise": true
+    }
+  ]
+}

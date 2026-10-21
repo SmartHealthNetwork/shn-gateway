@@ -15,7 +15,7 @@ func TestCRDIngress_RecipientNon2xx_SurfacesVerbatim(t *testing.T) {
 	oo := `{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"processing"}]}`
 	env.payerReturns(LegResult{Status: 502, Response: testResponse([]byte(oo))})
 	rec := httptest.NewRecorder()
-	env.originator.handleCRDIngress(rec, env.crdIngressRequest(t)) // the real ingress handler (ingress.go:96)
+	env.originator.handleCRDIngress(rec, env.crdIngressRequest(t)) // the real ingress handler (workstream_pa_ingress.go:96)
 	if rec.Code != 502 {
 		t.Fatalf("ingress status = %d, want 502 (the payer's real status)", rec.Code)
 	}

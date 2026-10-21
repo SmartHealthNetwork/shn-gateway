@@ -142,9 +142,9 @@ func fixturePASResponse(t *testing.T, decision []byte, bundle bool) []byte {
 	cr["patient"] = map[string]any{"reference": "Patient/p"}
 	cr["request"] = map[string]any{"reference": "Claim/c"}
 	// A ClaimResponse states its created and insurer (both 1..1 in R4): a
-	// decision fixture that leaves them out is given the payer's, so the
-	// decision EOB has its sources. A row about their absence builds
-	// its answer without this helper.
+	// decision fixture that leaves them out is given the payer's, as a real
+	// answer states them. A row about their absence builds its answer
+	// without this helper.
 	if cr["created"] == nil {
 		cr["created"] = "2026-06-03T00:00:00Z"
 	}
@@ -157,7 +157,7 @@ func fixturePASResponse(t *testing.T, decision []byte, bundle bool) []byte {
 	// A payer answers the request's item (sequence 1 in every fixture
 	// request): a decision fixture that states no item is given one answering
 	// it with only its submitted entry (no review action, so the decision
-	// read is unchanged), so the decision EOB has the payer's item to carry.
+	// read is unchanged), as a real answer does.
 	// A row about an answer that answers no item builds it without this
 	// helper.
 	if cr["item"] == nil {
@@ -214,7 +214,7 @@ func TestPASResultCertification(t *testing.T) {
 	for _, mode := range []string{"relayed", "produced", "produced invalid", "produced unavailable", "missing lane"} {
 		t.Run(mode, func(t *testing.T) {
 			validator := &pasAssemblyValidator{valid: true}
-			g := &Gateway{cfg: Config{HolderID: "payer", Clock: fixedClock, ValidatorsByLine: map[string]shnsdk.Validator{"2.0": validator}}}
+			g := &Gateway{cfg: Config{HolderID: "payer", Clock: fixedClock, ValidatorsByContractLine: contractLanes(map[string]shnsdk.Validator{"2.0": validator})}}
 			result := LegResult{Response: testResponse(raw), ResponseSubjectForeign: true}
 			switch mode {
 			case "relayed":
@@ -224,7 +224,7 @@ func TestPASResultCertification(t *testing.T) {
 			case "produced unavailable":
 				validator.err = fmt.Errorf("unavailable")
 			case "missing lane":
-				g.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"2.1": validator}
+				g.cfg.ValidatorsByContractLine = contractLanes(map[string]shnsdk.Validator{"2.1": validator})
 			}
 			status, _ := g.validatePASResult(context.Background(), result, "pa.pas@2.0", "pas-claim")
 			switch mode {
@@ -285,7 +285,7 @@ func TestPASInboundCommitOrdering(t *testing.T) {
 				if mode == "validator unavailable" {
 					validator.err = fmt.Errorf("validator unavailable")
 				}
-				g.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"2.0": validator}
+				g.cfg.ValidatorsByContractLine = contractLanes(map[string]shnsdk.Validator{"2.0": validator})
 				g.cfg.Observer = func(e ObserverEvent) {
 					// A conformance finding is not a leg note. validateGoverned
 					// emits it AT the invalid verdict — necessarily before any

@@ -27,6 +27,8 @@ func pinnedOwnership() map[Key]Rule {
 		{"dtr-questionnaire-fetch", rq, req, OutcomeCarried}: {Allowed: own(R, E), Edits: []EditID{"E-04", "E-05"}},
 		{"pas-claim", rq, req, OutcomeCarried}:               relayOnly,
 		{"pas-claim-inquire", rq, req, OutcomeCarried}:       relayOnly,
+		{"coverage-eligibility", rq, req, OutcomeCarried}:    relayOnly,
+		{"federated-query", rq, req, OutcomeCarried}:         relayOnly,
 		{"pas-claim-update", rq, req, OutcomeCarried}:        relayOnly,
 
 		{"coverage-eligibility", rq, req, OutcomeOriginated}:    {Allowed: own(A), Builders: b("sdk-eligibility")},
@@ -35,15 +37,17 @@ func pinnedOwnership() map[Key]Rule {
 		{"dtr-questionnaire-fetch", rq, req, OutcomeOriginated}: {Allowed: own(A), Builders: b("sdk-dtr-package", "dtr-next-question")},
 		{"federated-query", rq, req, OutcomeOriginated}:         {Allowed: own(A), Builders: b("sdk-federated-query")},
 		{"patient-dtr", rq, req, OutcomeOriginated}:             {Allowed: own(A), Builders: b("sdk-patient-dtr")},
-		{"pas-claim", rq, req, OutcomeOriginated}:               {Allowed: own(A), Builders: b("sdk-pas-submit")},
+		{"pas-claim", rq, req, OutcomeOriginated}:               {Allowed: own(A, E), Edits: []EditID{"E-09"}, Builders: b("sdk-pas-submit")},
 		{"pas-claim-inquire", rq, req, OutcomeOriginated}:       {Allowed: own(A), Builders: b("sdk-pas-inquiry")},
-		{"pas-claim-update", rq, req, OutcomeOriginated}:        {Allowed: own(A), Builders: b("sdk-pas-update")},
+		{"pas-claim-update", rq, req, OutcomeOriginated}:        {Allowed: own(A, E), Edits: []EditID{"E-09"}, Builders: b("sdk-pas-update")},
 
 		{"crd-order-dispatch", rq, resp, OutcomeAnswered}:      relayOnly,
 		{"crd-order-select", rq, resp, OutcomeAnswered}:        relayOnly,
 		{"dtr-questionnaire-fetch", rq, resp, OutcomeAnswered}: {Allowed: own(R, E), Edits: []EditID{"E-08"}},
 		{"pas-claim", rq, resp, OutcomeAnswered}:               relayOnly,
 		{"pas-claim-inquire", rq, resp, OutcomeAnswered}:       relayOnly,
+		{"coverage-eligibility", rq, resp, OutcomeAnswered}:    relayOnly,
+		{"federated-query", rq, resp, OutcomeAnswered}:         relayOnly,
 		{"pas-claim-update", rq, resp, OutcomeAnswered}:        relayOnly,
 
 		{"coverage-eligibility", rq, resp, OutcomeUpstreamError}:    relayOnly,
@@ -96,6 +100,9 @@ func ruleEqual(a, b Rule) bool {
 
 func TestLegOwnershipTablePinned(t *testing.T) {
 	got, want := LegOwnership(), pinnedOwnership()
+	for k, r := range profileOwnership() {
+		want[k] = r
+	}
 	for k, w := range want {
 		g, ok := got[k]
 		if !ok {

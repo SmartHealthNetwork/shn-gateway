@@ -87,7 +87,7 @@ So the case for configuring TLS is defense in depth and your own network policy
 database configured, every replica of a holder shares the ingress bearer signing key
 (rotated daily; issued bearers carry a `kid`; kept only where the Da Vinci ingress is
 enabled — a gateway that mounts no token endpoint stores no key), the one-time-use records behind
-`client_assertion` `jti`, Hub assertions and patient-access tokens, and the exchange
+`client_assertion` `jti` and Hub assertions, and the exchange
 correlation records (kept for `EXCHANGE_TTL`, default 7 days). A token issued by one
 replica verifies at any other; a replayed assertion is refused at any replica; a
 restart or a rolling deploy keeps outstanding tokens valid.
@@ -160,19 +160,18 @@ bearer. On `$submit` and `$questionnaire-package`, this is a FHIR
 `OperationOutcome` with media type `application/fhir+json`; CDS Hooks routes retain
 the JSON `{"error":"ingress key store unavailable"}` envelope.
 
-The one-time-use records are consulted on two more paths, and both **refuse, fail-closed,**
+The one-time-use records are consulted on one more path, which **refuses, fail-closed,**
 for the duration of a database outage: every Hub-authenticated delivery at
-`/substrate/inbound` and every patient-access read check their record before the request
-is served. Those legs are refused rather than served on a record the gateway could not
-verify. They answer `503` rather than a denial, which makes the *cause* truthful — the
-sender is not told its Hub assertion or its patient-access token was bad — but **the
-request does not survive**: the Hub does not retry a forward, so it turns the `503` into
-its own `502 "forward to recipient failed"` and audits the leg as failed. A database blip
-at the recipient loses that delivery. Both paths resume as soon as the database returns.
-The retry rule is the same on these two as on the token endpoint — a retry needs a fresh
-credential (a new Hub assertion, a new patient-access read), because a `503` here can also
-be a record whose write was committed but not acknowledged. Nothing retries them today:
-the Hub does not re-forward, and the patient-access read is the caller's to repeat.
+`/substrate/inbound` checks its record before the request is served. Such a leg is
+refused rather than served on a record the gateway could not verify. It answers `503`
+rather than a denial, which makes the *cause* truthful — the sender is not told its Hub
+assertion was bad — but **the request does not survive**: the Hub does not retry a
+forward, so it turns the `503` into its own `502 "forward to recipient failed"` and audits
+the leg as failed. A database blip at the recipient loses that delivery. The path resumes
+as soon as the database returns. The retry rule is the same as on the token endpoint — a
+retry needs a fresh credential (a new Hub assertion), because a `503` here can also be a
+record whose write was committed but not acknowledged. Nothing retries it today: the Hub
+does not re-forward.
 Without `SHN_STORE_DATABASE_URL` the same records are kept in each process and no
 database is involved.
 
@@ -260,8 +259,9 @@ The demo `/scenario/*` routes keep their two-phase session in the process that s
 them. A `/scenario/reset` therefore clears the holder's shared exchange records
 everywhere and the demo session state of the replica that received the call — one more
 reason to put those routes behind a single instance. They are mounted on the **provider**
-role only, which is why: the reset carries no credential of its own, and the payer role's
-mux is a public FHIR surface.
+role only, which is why: the reset carries no credential of the network's (with
+`SCENARIO_CALLERS_FILE` set it is admitted only from a caller the file names, as every
+`/scenario` route is), and the payer role's mux is a public FHIR surface.
 
 If the shared exchange records cannot be cleared — the database is unreachable —
 `/scenario/reset` answers `503` with `{"error":"exchange store reset failed"}` rather than

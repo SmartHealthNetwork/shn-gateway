@@ -70,9 +70,10 @@ const MaxReplayKeyBytes = 512
 // expiresAt = now + its own window, unchanged from the single-process guards these
 // replace — so neither the mirror nor the oracle carries a window of its own to drift.
 const (
-	ReplayScopeIngressJTI    = "ingress-jti"    // client_assertion jti, per client_id, ingressJTIWindow
-	ReplayScopeHubJTI        = "hub-jti"        // X-Hub-Assertion jti, shnsdk.MaxAssertionTTL
-	ReplayScopePatientAccess = "patient-access" // patient-access correlationId, paReplayWindow
+	ReplayScopeIngressJTI = "ingress-jti" // client_assertion jti, per client_id, ingressJTIWindow
+	ReplayScopeHubJTI     = "hub-jti"     // X-Hub-Assertion jti, shnsdk.MaxAssertionTTL
+	// ReplayScopeScenarioJTI ("scenario-jti", per caller label, until the
+	// assertion's expiry) is declared beside requireScenarioCaller.
 )
 
 // kidHexLen is the wire shape of a bearer kid: 32 lowercase hex characters (16
@@ -150,7 +151,7 @@ const memReplayPurgeInterval = time.Minute
 // and this is the bound that keeps it finite.
 //
 // 1<<20 per scope is far above anything a deployment reaches: the widest window is the
-// patient-access hour, and a million distinct correlationIds an hour at ONE replica is
+// Hub assertion's hour, and a million distinct jtis an hour at ONE replica is
 // orders of magnitude past this product's traffic. Reaching it means something is wrong.
 // At the ceiling the store fails CLOSED — (replay=true, err) naming the scope — because a
 // store that cannot record cannot tell a first use from a replay, and that pair is exactly
@@ -189,7 +190,7 @@ func NewInMemoryReplayStore() ReplayStore {
 // 1<<20 records per scope; every shipped construction goes through NewInMemoryReplayStore.
 func newMemReplayStore(max int) *memReplayStore {
 	s := &memReplayStore{scopes: map[string]*memReplayScope{}}
-	for _, scope := range []string{ReplayScopeIngressJTI, ReplayScopeHubJTI, ReplayScopePatientAccess} {
+	for _, scope := range []string{ReplayScopeIngressJTI, ReplayScopeHubJTI, ReplayScopeScenarioJTI} {
 		s.scopes[scope] = &memReplayScope{max: max, seen: map[string]time.Time{}}
 	}
 	return s

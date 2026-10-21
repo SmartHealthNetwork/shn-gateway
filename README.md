@@ -234,8 +234,12 @@ See [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md#per-role).
 **Already Da Vinci-conformant? Point your EHR at the gateway's own ingress
 instead.** Set `PROVIDER_DAVINCI_INGRESS=1` and the gateway accepts native CDS
 Hooks order-select (CRD), `Questionnaire/$questionnaire-package` (DTR),
-`Claim/$submit` (PAS) and `Claim/$inquire` (the follow-up that asks a payer for
-the decision on an authorization it pended) directly from your EHR or reference implementation,
+`Claim/$submit` (PAS), `Claim/$inquire` (the follow-up that asks a payer for
+the decision on an authorization it pended) and, from v0.63.0,
+`CoverageEligibilityRequest/$submit` (a coverage eligibility request) and
+`POST /Task` (a consented federated query, the Da Vinci CDex task-based data
+request) directly
+from your EHR or reference implementation,
 authenticated via SMART Backend Services from a set of clients you
 pre-register in `INGRESS_CLIENTS_FILE`. This is an equally supported,
 goal-state path — not a fallback. **This ingress is a private,
@@ -248,21 +252,32 @@ internet. See
 [`docs/INTEGRATION.md`](docs/INTEGRATION.md#native-da-vinci-ingress) for the
 full setup.
 
-Verify a provider is wired correctly with a real round trip:
+Verify a provider is wired correctly with a real round trip. Create the caller
+that drives its scenarios once, then run all eight use cases signed as it, with
+the `shn` CLI from [`shn-sdk`](https://github.com/SmartHealthNetwork/shn-sdk):
 
 ```sh
-curl -s -X POST localhost:8080/scenario/uc01 \
-  -H 'Content-Type: application/json' -d '{"branch":"covered"}'
-# → {"covered":true,"reason":""}
-
-curl -s -X POST localhost:8080/scenario/uc03 \
-  -H 'Content-Type: application/json' -d '{}'
-# → {"paRequired":true,"authNumber":"…","validUntil":"…"}
+shn scenario-key --bundle /path/to/your-bundle
+shn send-test --gateway http://127.0.0.1:8080 --discovery https://accounts.shn-preview.org \
+  --scenario-key ./scenario-caller-send-test.sign --bundle /path/to/your-bundle
 ```
+
+`shn scenario-key` writes the caller's key (readable by you only; keep it out of
+the bundle) and adds the caller to `scenario-callers.json` in your bundle; point
+`SCENARIO_CALLERS_FILE` at that file and restart the gateway. To call one route
+with any HTTP client, `shn scenario-sign` prints the `X-Holder-Assertion` header
+that signs it ([`deploy/eval/README.md`](deploy/eval/README.md) shows a `curl`).
+A payer's pend is its answer: from shn-sdk v0.63.0, `send-test` follows each pend to
+the payer's decision through `POST /scenario/pa/inquire` for up to 60 seconds
+(`--follow`), and reports a scenario still pended at that bound as pended, not as a
+failure.
 
 These `/scenario/ucNN` routes are an **operator surface for driving and
 testing your own gateway** — never expose them on the public internet; the
-Hub never calls them. Full field reference:
+Hub never calls them. Name the callers they admit with `SCENARIO_CALLERS_FILE`
+and they refuse every other caller. With it unset they authenticate no caller
+and the gateway logs a warning at boot; a later release refuses every
+`/scenario` call when no callers file is set. Full field reference:
 [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md); full integration
 walkthrough: [`docs/INTEGRATION.md`](docs/INTEGRATION.md).
 
@@ -270,8 +285,7 @@ walkthrough: [`docs/INTEGRATION.md`](docs/INTEGRATION.md).
 
 A payer gateway is a **responder**: `ROLE=payer` mounts
 `POST /substrate/inbound` — where the Hub delivers exchanges for you to
-adjudicate, authenticating every call — plus the CMS-0057 Patient Access
-surface (`GET /metadata`, `GET /ExplanationOfBenefit`). (`facility` and `phg`
+adjudicate, authenticating every call. (`facility` and `phg`
 are the same responder shape, for federated-query and patient-directed
 exchanges respectively.)
 
@@ -306,10 +320,13 @@ it were registered. So the self-test is:
    `shn register --role payer` (§3) — a laptop-only URL can't register.
 3. **Drive it from a provider originator.** Run the provider evaluation bundle
    (§4) with `PAYER_HOLDER_ID` set to your payer's holder id, and drive it
-   with `shn send-test --gateway <provider-url> --discovery <accounts-url>` — a thin
-   CLI in `shn-sdk` that fires all eight `/scenario/ucNN` routes and tabulates
-   pass/fail. From shn-gateway v0.62.0 each route takes the persona the network's
-   discovery descriptor states, which `--discovery` sends (shn-sdk v0.62.0 or later).
+   with `shn send-test --gateway <provider-url> --discovery <accounts-url>
+   --scenario-key <key> --bundle <provider bundle>` — a thin CLI in `shn-sdk` that
+   fires all eight `/scenario/ucNN` routes, signed as the provider bundle's
+   `/scenario` caller (its step 0, `shn scenario-key`), and tabulates pass/fail,
+   following each pend to your payer's decision (shn-sdk v0.63.0 or later).
+   From shn-gateway v0.62.0 each route takes the persona the network's discovery
+   descriptor states, which `--discovery` sends (shn-sdk v0.62.0 or later).
    Every decision in the result comes from **your** payer.
 
 Full bundle detail and the reachability options:
@@ -329,8 +346,10 @@ different build.
   anchor that resolves the Hub, Authorization Framework, registrar, and every
   trust anchor. Point it at the production discovery endpoint and nothing
   else about the gateway changes.
-- **Co-locate your validator.** The gateway refuses to start without a FHIR
-  `$validate` endpoint (FR-36). Run it as a sidecar inside your own boundary
+- **Co-locate your validator.** At every conformance level that checks a
+  payload, the gateway refuses to start without a FHIR `$validate` endpoint
+  (FR-36); only `CONFORMANCE_ENFORCEMENT=none`, which checks none, starts
+  without one. Run it as a sidecar inside your own boundary
   so PHI-bearing resources never leave it to be validated —
   [`deploy/bundle/`](deploy/bundle/README.md) ships this wiring ready-made.
 - **Run as non-root.** The published image runs as uid/gid 65532
@@ -355,7 +374,8 @@ role-specific — is [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md).
 
 | Symptom | Cause and fix |
 |---|---|
-| `refusing to run without per-message validation (FR-36)` at startup | No validator configured and discovery advertises none. Set `FHIR_VALIDATE_URL`, or `SHN_FAKE_VALIDATOR=1` for a dev smoke. |
+| `refusing to run without per-message validation (FR-36)` at startup | No validator configured and discovery advertises none. Run the IG-loaded `$validate` beside the gateway and set `FHIR_VALIDATE_URL` to it: [`deploy/bundle/`](deploy/bundle/README.md) ships that pairing, and [`deploy/eval/`](deploy/eval/README.md) runs a first end-to-end test with a real validator. A validator is needed at every `CONFORMANCE_ENFORCEMENT` level that checks a payload; from v0.63.0 a gateway at `none` starts without one ([CONFIGURATION.md](docs/CONFIGURATION.md#running-at-none-without-a-validator)). |
+| `SHN_FAKE_VALIDATOR is set, but a released gateway has no validator test double` at startup | From v0.63.0 a released gateway refuses `SHN_FAKE_VALIDATOR` set to any value: the stand-in it selected accepted almost everything, and it remains only in SHN's own test builds. Unset it, and configure a validator or run at `CONFORMANCE_ENFORCEMENT=none` as in the row above. |
 | `fetch discovery: …` / `fetch authz pubkey: …` / `fetch hub transport key: …` at startup | `SHN_DISCOVERY_URL` unreachable, or the gateway can't reach the hosts discovery resolves (Hub, Authorization Framework, registrar, …). Each of these fetches is tried again when the connection is refused, reset or closed before an answer, or the answer is `502`, `503` or `504`: after 1, 2 and 4 seconds and then every 8 seconds, with no new try more than 60 seconds into the fetch (each try has its own 30-second bound), so a plane that is restarting does not fail the boot; the error is the last try's. A name that does not resolve, a try that times out, a TLS certificate or protocol failure and every other answer fail the boot at once. Confirm `curl $SHN_DISCOVERY_URL` works from the gateway's network. |
 | Provider originate returns `recipient "…" not in registry` | The payer holder resolved from the member's Coverage (feed `payerIds`, or your `PAYER_DIRECTORY` override) isn't a registered holder, or the registrar feed hasn't propagated yet. Confirm the counterpart appears in `shn clients` / the `/holders` feed. |
 | Provider originate returns `422 no payer identifier on member coverage` / `no registered payer for identifier …` | Coverage-derived routing found no route (FR-G41; no default): the member's Coverage carries no parseable payor identity, or no `role=payer` holder in the feed claims that identity (and no `PAYER_DIRECTORY` override maps it). Ensure the target payer holder published that `{system,value}` in its feed `payerIds` (payer-onboarding path), or set a `PAYER_DIRECTORY` override row. A payer that acquired the identity after onboarding — an EHR-assigned payer id, a merger, a new line of business — publishes it without re-onboarding: a hosted payer updates its tenant's `payerIds` and the control plane converges the feed entry; any payer can re-declare through the accounts front door once an operator has vouched for the identity. Payer identities are operator-attested, so a holder cannot add one with its own key. An identity claimed by **two** holders also fails closed (ambiguous — `AI-G12`). On the Da Vinci ingress (`Claim/$submit`, `Claim/$inquire`), from v0.60.0 the `no payer identifier` refusal adds which part of the Bundle failed, after a colon: `Coverage.payor` is a relative reference that matches no entry, an absolute reference that is no entry's `fullUrl`, or a reference several entries answer without naming one payer; or the payor Organization carries no identifier with both a system and a value (a NAIC code or payer id). The payor Organization must be an entry of the Bundle: the gateway resolves the reference among the Bundle's entries only, an absolute reference (a URL, or `urn:uuid`) to the entry whose `fullUrl` equals it, and a relative `Organization/<id>` to the one entry with that type and id; a reference several entries answer routes only when they all name the same payer identifier. |

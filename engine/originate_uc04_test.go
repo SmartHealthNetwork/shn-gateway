@@ -11,7 +11,7 @@ import (
 // order ref — while every other lane keeps its operative-DiagnosticReport amendment tail
 // byte-unchanged. Static source guard (the live e2e/tworilive gate exercises the runtime path).
 func TestHandleUC04_ProviderDataAttestsAndLeanTail(t *testing.T) {
-	src, err := os.ReadFile("originate.go")
+	src, err := os.ReadFile("module1_originate.go")
 	if err != nil {
 		t.Fatalf("read source: %v", err)
 	}

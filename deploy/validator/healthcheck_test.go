@@ -54,7 +54,7 @@ type recordedPost struct {
 func newFakeLane(t *testing.T, line string) *fakeLane { return newLane(t, line, false) }
 
 // newWarmedFakeLane is the lane as a verification pass meets it, after the
-// warm-up. Verification asks 20 of the 42 recorded requests, so the rest go
+// warm-up. Verification asks 20 of the 41 recorded requests, so the rest go
 // unused.
 func newWarmedFakeLane(t *testing.T, line string) *fakeLane {
 	l := newLane(t, line, true)
@@ -233,8 +233,8 @@ func TestWarmupsPerLine(t *testing.T) {
 	}
 	for line, want := range cases {
 		rows := warmups(line)
-		if len(rows) != 4 {
-			t.Fatalf("line %q: %d warm-up rows, want 4 (PAS bundle, DTR QR, PDex EOB, CDex Task)", line, len(rows))
+		if len(rows) != 3 {
+			t.Fatalf("line %q: %d warm-up rows, want 3 (PAS bundle, DTR QR, CDex Task)", line, len(rows))
 		}
 		byType := map[string]warmup{}
 		for _, row := range rows {
@@ -261,8 +261,8 @@ func TestWarmupsPerLine(t *testing.T) {
 				t.Fatalf("line %q: %s warm-up uses %s, want %s", line, rt, byType[rt].file, file)
 			}
 		}
-		if byType["ExplanationOfBenefit"].file != "testdata/eob-approved.json" || byType["Task"].file != "testdata/cdex-task-data-request.json" {
-			t.Fatalf("line %q: PDex/CDex rows must be the line-neutral top-level fixtures: %+v", line, rows)
+		if byType["Task"].file != "testdata/cdex-task-data-request.json" {
+			t.Fatalf("line %q: the CDex row must be the line-neutral top-level fixture: %+v", line, rows)
 		}
 	}
 }

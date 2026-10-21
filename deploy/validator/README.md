@@ -36,6 +36,17 @@ JDK argument-file indirection and JVM-option-embedded Spring JSON are unsupporte
 Use `SPRING_APPLICATION_JSON` for structured JSON instead. Unrelated environment
 and JVM option bytes are preserved; `JAVA_OPTS` is not expanded by this literal launch.
 
+The HAPI JPA starter this image runs turns on a Spring AI MCP server by default, on
+`/mcp/messages` and `/sse`: a second way into the FHIR server, which nothing in the sidecar
+uses. Each line's image sets `SPRING_AI_MCP_SERVER_ENABLED=false`, so `/mcp/messages`
+answers `404` like any unmapped path, and `verify.sh` checks it. The published images
+(`ghcr.io/smarthealthnetwork/shn-validator`) carry the setting from `2.0-26a7c6ca61d9`,
+`2.1-26a7c6ca61d9` and `2.2-26a7c6ca61d9` on. An image published earlier, tagged
+`<line>-a519ffe2beec` or `<line>-2bea25734d47`, still serves the endpoint. If you run one,
+move to your line's current tag, or set `SPRING_AI_MCP_SERVER_ENABLED=false` in its
+environment (the supervisor passes the environment through to Java unchanged). Either way,
+keep the sidecar off any published port, as `deploy/bundle/compose.yml` does.
+
 After admission, TCP streams preserve the original HTTP bytes, Host, profile query,
 response status, headers and body without replay or URL rewriting. Up to 256 pending
 or established connection pairs are allowed; excess connections close before a
@@ -46,9 +57,9 @@ Shutdown revokes public admission before signaling Java, cancels and joins forwa
 and the worker, and retains the 20-second child-stop bound. The worker's 600-second
 startup deadline does not terminate an already qualified service.
 
-Readiness has two parts. The worker first submits the four initialization fixtures
-that exercise PAS request Bundle, DTR QuestionnaireResponse, PDex
-ExplanationOfBenefit and CDex Task profile resolution. It then submits approved,
+Readiness has two parts. The worker first submits the three initialization fixtures
+that exercise PAS request Bundle, DTR QuestionnaireResponse and CDex Task profile
+resolution. It then submits approved,
 denied and extracted pended PAS ClaimResponses in versioned, unversioned and
 resource `meta.profile` request forms. One initialization pass, two strict clean
 passes and three targeted type-error controls are followed by a complete PAS response
@@ -62,7 +73,7 @@ with a Patient in the Encounter's place is refused for the target type. Two fina
 rows retain a valid in-band ClaimResponse profile while explicitly requesting an
 unavailable version and a nonexistent canonical. Each requires the exact requested-
 profile ERROR and message identity; a clean or warning-only result cannot qualify.
-All 42 rows must complete before the marker is published. Each support control requires exactly
+All 41 rows must complete before the marker is published. Each support control requires exactly
 the expected errors its pinned outcome lists (severity, code, message identity,
 diagnostic and path); unrelated errors, unknown definitions and missing errors fail. The initialization pass has the only narrow allowance for the reproduced
 PAS `extension-reviewAction` slicing diagnostics; later slicing diagnostics fail the
@@ -101,7 +112,7 @@ profile version and canonical while preserving the valid in-band profile.
 `verify.sh` builds fresh per-line source images on an internal Docker network. Once
 each image first reports healthy, it runs `verify-verdicts` immediately and at
 five-second intervals through at least 100 seconds. It separately characterizes the
-four initialization profiles: unresolved profiles and slicing or discriminator
+three initialization profiles: unresolved profiles and slicing or discriminator
 failure diagnostics at any severity fail. The PAS request Bundle's two exact
 informational open-slice explanations are counted separately; changes to their
 severity, issue code, message identity, profile, diagnostic shape or Bundle entry
@@ -111,7 +122,7 @@ verdicts. The never-touched US Core Patient latency, image configuration and Lin
 process lifecycle checks remain separate assertions.
 
 The corpus is deliberately finite. It establishes the listed PAS outcomes and
-request forms plus the four named profile-resolution fixtures for the selected
+request forms plus the three named profile-resolution fixtures for the selected
 line. It does not certify arbitrary FHIR resources. A local source-image pass also
 does not prove that a published image or a deployed digest contains the same bytes.
 

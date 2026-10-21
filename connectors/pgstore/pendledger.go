@@ -1,6 +1,6 @@
 // pendledger.go — the durable half of the payer pend ledger (engine.PendLedger):
-// the keyed lookup, the absorbing decided state, the atomic decision-plus-EOB write
-// and the bounded six-month retention sweep.
+// the keyed lookup, the absorbing decided state, the atomic decision-plus-keys
+// write and the bounded six-month retention sweep.
 //
 // It runs the SAME pure state-machine helpers the in-memory store runs
 // (engine.PendBegin / PendRePend / PendDecide), so the two backends cannot drift:
@@ -148,13 +148,6 @@ func (s *PgStore) RecordPendedKeyed(subjectPCI, corrID string, created time.Time
 		return engine.PendTransition{}, engine.ErrPendRequesterMismatch
 	}
 	next, tr := engine.PendRePend(cur, found, created, s.now())
-	// A later-dated re-pend reopens a decided authorization: the decision's EOB
-	// no longer states what the ledger keeps (engine.PendEOBStale).
-	if engine.PendEOBStale(cur, found, next) {
-		if tr.EOBRemoved, err = removeEOB(ctx, tx, s.holderID, subjectPCI, engine.DecisionEOBID(corrID)); err != nil {
-			return engine.PendTransition{}, fmt.Errorf("pgstore: RecordPendedKeyed: %w", err)
-		}
-	}
 	next.RequesterHolder = k.RequesterHolder
 	if err := writePendRow(ctx, tx, s.holderID, subjectPCI, corrID, next); err != nil {
 		return engine.PendTransition{}, fmt.Errorf("pgstore: RecordPendedKeyed: %w", err)
@@ -194,13 +187,13 @@ SELECT count(*) FROM gw_pended_claim_key
 // changes either verdict), reads the one candidate's keys, and lets
 // engine.ResolvePendMatch decide, all in one read-only transaction so the keys
 // judged are the ones the probe saw.
-func (s *PgStore) LookupPended(requesterHolder string, k engine.PendKeys, about []engine.PendKeyRef) (engine.PendMatch, error) {
+func (s *PgStore) LookupPended(requesterHolder string, k engine.PendKeys) (engine.PendMatch, error) {
 	if requesterHolder == "" {
 		return engine.PendMatch{}, engine.ErrPendRequesterRequired
 	}
 	probes := pendProbes(engine.StrongPendProbe(k))
 	if len(probes.kinds) == 0 {
-		return engine.ResolvePendMatch(k, about, nil, nil, nil, false), nil
+		return engine.ResolvePendMatch(k, nil, nil, false), nil
 	}
 	ctx, cancel := storeCtx()
 	defer cancel()
@@ -259,23 +252,7 @@ SELECT kind, key
 			return engine.PendMatch{}, fmt.Errorf("pgstore: LookupPended: keys: %w", err)
 		}
 	}
-	var aboutHolders []engine.PendCandidate
-	if len(candidates) == 1 && len(about) > 0 {
-		a := pendProbes(about)
-		arows, err := tx.Query(ctx, `
-SELECT DISTINCT subject_pci, correlation_id
-  FROM gw_pended_claim_key
- WHERE holder_id=$1 AND requester_holder=$2
-   AND (kind, key) IN (SELECT * FROM unnest($3::text[], $4::text[]))
- LIMIT 2`, s.holderID, requesterHolder, a.kinds, a.keys)
-		if err != nil {
-			return engine.PendMatch{}, fmt.Errorf("pgstore: LookupPended: about: %w", err)
-		}
-		if aboutHolders, err = scanPendCandidates(arows); err != nil {
-			return engine.PendMatch{}, fmt.Errorf("pgstore: LookupPended: about: %w", err)
-		}
-	}
-	return engine.ResolvePendMatch(k, about, candidates, held, aboutHolders, echoed), nil
+	return engine.ResolvePendMatch(k, candidates, held, echoed), nil
 }
 
 // echoedHit is true for a key row k (aliased k; $5 the ClaimResponse-identifier
@@ -316,17 +293,15 @@ func pendProbes(refs []engine.PendKeyRef) struct{ kinds, keys []string } {
 	return out
 }
 
-// RecordDecision records the payer's terminal answer and its EOB as one write. See
-// engine.PendLedger.
+// RecordDecision records the payer's terminal answer and its keys as one write.
+// See engine.PendLedger.
 //
-// The decision and the EOB are ONE transaction: if the EOB write fails, the
+// The decision and its keys are ONE transaction: if a key write fails, the
 // decision rolls back with it, so the ledger never says "decided" about an
-// authorization whose EOB is missing.
-func (s *PgStore) RecordDecision(subjectPCI, corrID, outcome string, decidedAt time.Time, k engine.PendKeys, eob *engine.EOBRecord) (engine.PendTransition, error) {
+// authorization a follow-up cannot name by the authorization number it was
+// decided under.
+func (s *PgStore) RecordDecision(subjectPCI, corrID, outcome string, decidedAt time.Time, k engine.PendKeys) (engine.PendTransition, error) {
 	if err := engine.ValidatePendDecision(outcome); err != nil {
-		return engine.PendTransition{}, err
-	}
-	if err := eob.Validate(subjectPCI); err != nil {
 		return engine.PendTransition{}, err
 	}
 	ctx, cancel := storeCtx()
@@ -352,19 +327,9 @@ func (s *PgStore) RecordDecision(subjectPCI, corrID, outcome string, decidedAt t
 	if err := writePendRow(ctx, tx, s.holderID, subjectPCI, corrID, next); err != nil {
 		return engine.PendTransition{}, fmt.Errorf("pgstore: RecordDecision: %w", err)
 	}
-	kept := engine.PendEOBWritable(next, outcome, decidedAt)
-	// The EOB states the decision the ledger keeps, so it is written only when
-	// that decision is this answer's (engine.PendEOBWritable): a losing or older
-	// answer leaves the kept decision's EOB as it is. An outcome that changes
-	// with no EOB of its own removes the one that stated the old outcome
-	// (engine.PendEOBStale).
-	if eob == nil || !kept {
-		if engine.PendEOBStale(cur, found, next) {
-			if tr.EOBRemoved, err = removeEOB(ctx, tx, s.holderID, subjectPCI, engine.DecisionEOBID(corrID)); err != nil {
-				return engine.PendTransition{}, fmt.Errorf("pgstore: RecordDecision: %w", err)
-			}
-		}
-	}
+	// Only the decision the ledger keeps indexes its authorization number
+	// (engine.PendDecisionKept): a losing or older answer adds none.
+	kept := engine.PendDecisionKept(next, outcome, decidedAt)
 	// The decision's keys under its requester (engine.DecisionPendKeys): every
 	// key for an authorization decided with no row before it, the kept
 	// decision's authorization number otherwise.
@@ -377,37 +342,10 @@ ON CONFLICT DO NOTHING`,
 			return engine.PendTransition{}, fmt.Errorf("pgstore: RecordDecision: key %s: %w", ref.Kind, err)
 		}
 	}
-	if eob != nil && kept {
-		var recordedID string
-		err := tx.QueryRow(ctx, `
-INSERT INTO gw_eob (holder_id, eob_id, subject_pci, eob_json)
-VALUES ($1, $2, $3, $4)
-ON CONFLICT (holder_id, eob_id) DO UPDATE SET eob_json = EXCLUDED.eob_json
-WHERE gw_eob.subject_pci = EXCLUDED.subject_pci
-RETURNING eob_id`,
-			s.holderID, eob.EOBID, eob.SubjectPCI, eob.JSON).Scan(&recordedID)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return engine.PendTransition{}, engine.ErrEOBSubjectMismatch
-		}
-		if err != nil {
-			return engine.PendTransition{}, fmt.Errorf("pgstore: RecordDecision: EOB: %w", err)
-		}
-	}
 	if err := tx.Commit(ctx); err != nil {
 		return engine.PendTransition{}, fmt.Errorf("pgstore: RecordDecision: commit: %w", err)
 	}
 	return tr, nil
-}
-
-// removeEOB removes the EOB filed under eobID for subjectPCI inside tx,
-// reporting whether there was one. An id filed for another patient is not this
-// patient's to remove.
-func removeEOB(ctx context.Context, tx pgx.Tx, holderID, subjectPCI, eobID string) (bool, error) {
-	tag, err := tx.Exec(ctx, `DELETE FROM gw_eob WHERE holder_id=$1 AND eob_id=$2 AND subject_pci=$3`, holderID, eobID, subjectPCI)
-	if err != nil {
-		return false, fmt.Errorf("remove EOB: %w", err)
-	}
-	return tag.RowsAffected() > 0, nil
 }
 
 // PendRecordOf reads one ledger row. See engine.PendLedger. Unlike Store's

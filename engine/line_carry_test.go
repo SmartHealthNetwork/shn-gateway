@@ -226,6 +226,9 @@ func swapStep(t *testing.T, contract string) *int {
 	saved := compatManifest[idx]
 	t.Cleanup(func() { compatManifest[idx] = saved })
 	var walked int
+	// The stand-in changes bytes but is not gated: module 2 plans a walk up
+	// through it (a gated row taken upward is never planned, gatedUpward).
+	compatManifest[idx].Class = StepFull
 	compatManifest[idx].Up = func(p []byte, x ExchangeIdentity) ([]byte, LossReport, error) {
 		walked++
 		return append(bytes.Clone(p), '\n'), LossReport{Module: contract + " 2.0->2.1", Source: "2.0", Target: "2.1"}, nil
@@ -260,8 +263,9 @@ func TestLineCarry_NativeRequestAWalkWouldChangeIsCarriedAsSent(t *testing.T) {
 						if row.setup != nil {
 							row.setup(t, env)
 						}
-						env.originator.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"2.0": fake, "2.1": fake}
+						env.originator.cfg.ValidatorsByContractLine = contractLanes(map[string]shnsdk.Validator{"2.0": fake, "2.1": fake})
 						env.originator.cfg.EgressNativeLines = []string{"2.0"} // the 2.1 route walks the swapped step
+						env.originator.cfg.TranslateIGLines = true
 					}
 					var transformed int
 					walking := row
@@ -347,8 +351,8 @@ func TestLineCarry_BuiltQuestionnaireRequestAWalkWouldChange(t *testing.T) {
 	}
 	body := []byte(`{"resourceType":"Parameters"}`)
 	newGateway := func(require bool) (*Gateway, *int) {
-		g := &Gateway{cfg: Config{HolderID: "provider", Clock: func() time.Time { return time.Unix(1700000000, 0).UTC() },
-			ValidatorsByLine: map[string]shnsdk.Validator{"2.0": fake, "2.1": fake}, RequireSharedLine: require}}
+		g := &Gateway{cfg: Config{TranslateIGLines: true, HolderID: "provider", Clock: func() time.Time { return time.Unix(1700000000, 0).UTC() },
+			ValidatorsByContractLine: contractLanes(map[string]shnsdk.Validator{"2.0": fake, "2.1": fake}), RequireSharedLine: require}}
 		return g, countTransformed(g)
 	}
 	walkSeesBytes(t, envelopeEgressLegs, "dtr-questionnaire-fetch")
@@ -397,8 +401,9 @@ func TestLineCarry_DispatchQuestionnaireAWalkWouldChange(t *testing.T) {
 				cfg.OriginationProfile = ""
 				cfg.RequireSharedLine = require
 				cfg.DeclaredContractVersions = []string{shnsdk.ContractPACRD20, shnsdk.ContractPADTR20, shnsdk.ContractPAPAS20}
-				cfg.ValidatorsByLine = map[string]shnsdk.Validator{"2.0": fake, "2.1": fake}
+				cfg.ValidatorsByContractLine = contractLanes(map[string]shnsdk.Validator{"2.0": fake, "2.1": fake})
 				cfg.EgressNativeLines = []string{"2.0"} // the payer's 2.1 is reached through the swapped step
+				cfg.TranslateIGLines = true
 				entry, ok := cfg.Reg.Lookup("payer")
 				if !ok {
 					t.Fatal("fixture registry has no payer entry")
@@ -457,8 +462,9 @@ func TestLineCarry_OrderQuestionnaireAWalkWouldChange(t *testing.T) {
 			gw.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
 			gw.cfg.RequireSharedLine = require
 			gw.cfg.DeclaredContractVersions = []string{shnsdk.ContractPACRD20, shnsdk.ContractPADTR20, shnsdk.ContractPAPAS20}
-			gw.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"2.0": fake, "2.1": fake}
+			gw.cfg.ValidatorsByContractLine = contractLanes(map[string]shnsdk.Validator{"2.0": fake, "2.1": fake})
 			gw.cfg.EgressNativeLines = []string{"2.0"}
+			gw.cfg.TranslateIGLines = true
 			entry, ok := gw.cfg.Reg.Lookup("payer")
 			if !ok {
 				t.Fatal("payer not registered")
@@ -507,8 +513,9 @@ func TestLineCarry_BuiltInquiryAWalkWouldChange(t *testing.T) {
 			walked := swapStep(t, "pa.pas")
 			gw, stub := pendingPersonaSystem(t)
 			fake := shnsdk.NewFakeValidator()
-			gw.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"2.0": fake, "2.1": fake}
+			gw.cfg.ValidatorsByContractLine = contractLanes(map[string]shnsdk.Validator{"2.0": fake, "2.1": fake})
 			gw.cfg.EgressNativeLines = []string{"2.0"} // the 2.1 pin walks the swapped step
+			gw.cfg.TranslateIGLines = true
 			gw.cfg.RequireSharedLine = require
 			// The payer reads request frames, so the line the inquiry claims is on the wire.
 			entry, ok := gw.cfg.Reg.Lookup("payer")

@@ -332,19 +332,12 @@ type searchMatch struct {
 	page, start, end int
 }
 
-// searchSystemOfRecord runs the bounded patient search for a CDS Hooks
-// prefetch value of resourceType through sor, narrowed as the advertised
-// template for that value narrows it (prefetchSearchFilters), and classifies
-// the answer. It re-checks everything a connector reports: the bounds, each
-// page's shape, and that the reported entry spans are exactly the entries
-// each page holds.
-func searchSystemOfRecord(ctx context.Context, sor SystemOfRecord, resourceType, sorPatientID string) sorSearchset {
-	return runSoRSearch(ctx, sor, resourceType, sorPatientID, true, prefetchSearchFilters(resourceType)...)
-}
-
-// runSoRSearch is searchSystemOfRecord; assemble=false skips building the
-// joined searchset (Value and Payload stay empty) for callers that use only
-// the match entries.
+// runSoRSearch runs the bounded patient search of resourceType through sor,
+// narrowed by the given filters (dates or status tokens), and classifies the
+// answer. It re-checks everything a connector reports: the bounds, each
+// page's shape, and that the reported entry spans are exactly the entries each
+// page holds. assemble=false skips building the joined searchset (Value and
+// Payload stay empty) for callers that use only the match entries.
 func runSoRSearch(ctx context.Context, sor SystemOfRecord, resourceType, sorPatientID string, assemble bool, dates ...SearchDateRange) sorSearchset {
 	query, err := SoRSearchQuery(resourceType, sorPatientID, dates...)
 	if err != nil {

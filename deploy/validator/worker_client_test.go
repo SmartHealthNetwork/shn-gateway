@@ -174,7 +174,7 @@ func TestGenericWorkerKeepsItsAuthority(t *testing.T) {
 	if err := runWarmup(ctx, server.URL+"/fhir", markerPath(t), initialState(sameJVM())); err != nil {
 		t.Fatal(err)
 	}
-	if len(hosts) != 43 {
+	if len(hosts) != 42 {
 		t.Fatalf("requests=%d", len(hosts))
 	}
 	for _, host := range hosts {

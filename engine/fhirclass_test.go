@@ -192,6 +192,39 @@ func TestClassifyFHIRNoResourceSuppliedIsUnavailable(t *testing.T) {
 	}
 }
 
+// hapi0389 is HAPI's answer when its validator stopped without a verdict, as
+// the real 2.1 lane gave it for a PAS request Bundle declaring its profile
+// (its trailing list of what the validator had found, shortened).
+const hapi0389 = `HAPI-0389: Failed to call access method: java.lang.Error: failed to validate, but no errors. profile = http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claim-update|2.1.0, issues = INFORMATION @ Bundle.entry[0].resource/*Claim/convergence-claim-update*/.patient (line 1, col1867): Details for https://shn.example/fhir/Patient/MBR-D-UC04 matching against profile …`
+
+// A validator that stopped without a verdict is unavailable, never a defect of
+// the sender's message and never a sign it is valid: it checked no other
+// entry. Any other issue beside it is read as usual.
+func TestClassifyFHIRValidatorDidNotFinishIsUnavailable(t *testing.T) {
+	bundle := []byte(`{"resourceType":"Bundle","meta":{"profile":["http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-pas-request-bundle"]},"type":"collection","entry":[{"resource":{"resourceType":"Claim"}}]}`)
+	for _, tc := range []struct {
+		name string
+		res  shnsdk.Result
+		want Verdict
+	}{
+		{"HAPI-0389 alone", invalid(errIssue("", nil, hapi0389)), VerdictUnavailable},
+		{"HAPI-0389 fatal", invalid(shnsdk.Issue{Severity: "fatal", Diagnostics: hapi0389}), VerdictUnavailable},
+		{"HAPI-0389 twice", invalid(errIssue("", nil, hapi0389), errIssue("", nil, hapi0389)), VerdictUnavailable},
+		{"HAPI-0389 beside HAPI-0992", invalid(errIssue("", nil, hapi0389), errIssue("", nil, hapi0992)), VerdictUnavailable},
+		{"HAPI-0389 beside a structural error", invalid(errIssue("", nil, hapi0389), errIssue("Validation_VAL_Profile_Minimum", []string{"Bundle.entry[1].resource"}, "ServiceRequest.status: minimum required = 1, but only found 0")), VerdictInvalid},
+		{"HAPI-0389 beside a deeper error", invalid(errIssue("", nil, hapi0389), errIssue("Terminology_TX_NoValid_1_CC", []string{"Bundle.entry[0].resource.code"}, "x")), VerdictInvalid},
+		{"HAPI-0389 with a message id", invalid(errIssue("Some_ID", nil, hapi0389)), VerdictInvalid},
+		{"another access failure", invalid(errIssue("", nil, "HAPI-0389: Failed to call access method: java.lang.NullPointerException")), VerdictInvalid},
+		{"HAPI-0389's text after another", invalid(errIssue("", nil, "Unrecognized property 'x': "+hapi0389)), VerdictInvalid},
+	} {
+		for _, line := range []string{"2.0", "2.1", "2.2"} {
+			if got := classifyFHIR(tc.res, bundle, line, ""); got != tc.want {
+				t.Errorf("%s at %s: %s, want %s", tc.name, line, verdictName(got), verdictName(tc.want))
+			}
+		}
+	}
+}
+
 // The no-match summary refinement, outside the PAS rule's scope: a summary is
 // deeper only when it is tied to one entry and every other error there is
 // deeper.

@@ -32,9 +32,30 @@ func TestBuildAmendedRePOST(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Two Claims: the amend Claim + the physically-included prior clone (br-payer requires it).
-	if got := countClaims(t, out); got != 2 {
-		t.Fatalf("claims in amend bundle = %d, want 2 (amend + prior clone)", got)
+	// One Claim: PAS 2.0.1's request Bundle allows one, so the update names its prior by
+	// identifier and does not carry it.
+	if got := countClaims(t, out); got != 1 {
+		t.Fatalf("claims in amend bundle = %d, want 1 (the update alone)", got)
+	}
+	var b struct {
+		Entry []struct{ Resource map[string]any }
+	}
+	if err := json.Unmarshal(out, &b); err != nil {
+		t.Fatal(err)
+	}
+	claim := b.Entry[0].Resource
+	if claim["resourceType"] != "Claim" {
+		t.Fatalf("entry[0] is %v, want the update Claim", claim["resourceType"])
+	}
+	if prof := claim["meta"].(map[string]any)["profile"].([]any); len(prof) != 1 || prof[0] != pasProfileClaimUpdate {
+		t.Fatalf("update Claim declares %v, want %s", prof, pasProfileClaimUpdate)
+	}
+	rel := claim["related"].([]any)[0].(map[string]any)["claim"].(map[string]any)
+	if _, ok := rel["reference"]; ok {
+		t.Fatalf("related claim carries a reference %v, want the identifier alone", rel["reference"])
+	}
+	if id := rel["identifier"].(map[string]any); id["system"] != "urn:shn:correlation" || id["value"] != "corr-submit" {
+		t.Fatalf("related claim identifier %v, want urn:shn:correlation|corr-submit", id)
 	}
 	for _, want := range []string{`"corr-submit"`, `"corr-amend"`, `"prior"`,
 		`"QuestionnaireResponse"`, `"Provenance"`, `Patient/MBR-COVERED`,

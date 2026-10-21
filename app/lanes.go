@@ -60,10 +60,14 @@ func discoverValidatorLanes(ctx context.Context, getenv func(string) string, dec
 		}
 		linesPerContract[contract][line] = true
 	}
+	// required are the declared default lanes boot waits for. Where no payload
+	// check consumes a lane, none is waited for: every default qualifies in the
+	// background, and a declared line is served before its lane qualifies, or
+	// if it never does.
 	required := map[string]bool{}
 	for _, tok := range declared {
 		contract, line, _ := strings.Cut(tok, "@")
-		if len(linesPerContract[contract]) > 1 {
+		if len(linesPerContract[contract]) > 1 && payloadChecksConsumeLanes(cfg.ConformanceEnforcement) {
 			required[line] = true
 		}
 	}
@@ -78,13 +82,14 @@ func discoverValidatorLanes(ctx context.Context, getenv func(string) string, dec
 			}
 			continue
 		}
-		if getenv("SHN_FAKE_VALIDATOR") == "1" {
+		if fakeValidator(getenv) {
 			continue
 		}
 		if cfg.DefaultValidatorLanes == defaultValidatorLanesNone {
 			// A network without the Compose validator services (a hosted tenant):
 			// no default lane exists to probe, so none is created. A declared line
-			// then needs its FHIR_VALIDATE_URL_<line> (validatorLanesForDeclared).
+			// then needs its FHIR_VALIDATE_URL_<line> (validatorLanesForDeclared),
+			// except at none.
 			continue
 		}
 		base := resolve(entry.line)
@@ -107,14 +112,14 @@ func discoverValidatorLanes(ctx context.Context, getenv func(string) string, dec
 	// above; with none, validatorLanesForDeclared has already aliased it, and it
 	// must be marked the same way, or PA traffic at that line would validate
 	// against the canonical IG.
-	canonicalLine := shnsdk.LineOf(shnsdk.ContractPAPAS20)
+	canonicalLine := shnsdk.LineOf(engine.CanonicalContractVersion())
 	explicit := map[string]string{"2.1": cfg.FHIRValidateURL21, "2.2": cfg.FHIRValidateURL22}
 	aliasOnly := func(line string) bool {
-		return cfg.DefaultValidatorLanes == defaultValidatorLanesNone && getenv("SHN_FAKE_VALIDATOR") != "1" && line != canonicalLine && explicit[line] == ""
+		return cfg.DefaultValidatorLanes == defaultValidatorLanesNone && !fakeValidator(getenv) && line != canonicalLine && explicit[line] == ""
 	}
 	for _, tok := range declared {
 		contract, line, _ := strings.Cut(tok, "@")
-		if len(linesPerContract[contract]) < 2 && (lanes[line] == nil || aliasOnly(line)) {
+		if len(linesPerContract[contract]) < 2 && (lanes[line] == nil || aliasOnly(line)) && canonical != nil {
 			lanes[line] = canonical
 			m.fallbacks[line] = true
 		}

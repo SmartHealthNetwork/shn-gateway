@@ -154,11 +154,13 @@ func TestExchangeRecord_FramedRefusalBeforeDispatch(t *testing.T) {
 	}
 }
 
-// A PAS inquiry at structural spends time in every stage: its synchronous
-// validation of the request and the decision's EOB, and the pend ledger's
-// lookup and writes, as well as the reads, the forward and the seal. The
-// stages never add up to more than the call.
-func TestExchangeRecord_LegStagesValidateAndLedger(t *testing.T) {
+// A PAS inquiry at structural spends time in the pend ledger's lookup and
+// writes, as well as the reads, the forward and the seal. It runs no
+// synchronous check: the payer's answer is relayed, not certified, and the
+// gateway builds nothing from it (a check's own time is
+// TestExchangeRecord_LegStagesValidateExactly). The stages never add up to
+// more than the call.
+func TestExchangeRecord_LegStagesLedger(t *testing.T) {
 	p, got := steppingPayer(t, EnforcementStructural)
 	p.seedInquiryPend(t, "corr-submit-1")
 	p.partner.respByPath[pasInquirePath] = decidedAnswer(t)
@@ -168,7 +170,7 @@ func TestExchangeRecord_LegStagesValidateAndLedger(t *testing.T) {
 	}
 	rec := got.only(t)
 	st := rec.Stages
-	if st == nil || st.Unwrap <= 0 || st.Forward <= 0 || st.Validate <= 0 || st.Seal <= 0 || st.Ledger <= 0 || st.Write <= 0 {
+	if st == nil || st.Unwrap <= 0 || st.Forward <= 0 || st.Validate != 0 || st.Seal <= 0 || st.Ledger <= 0 || st.Write <= 0 {
 		t.Fatalf("stages %+v", st)
 	}
 	if sum := stagesSum(st); sum > rec.Latency {
@@ -242,21 +244,23 @@ func TestExchangeRecord_NoAnswerErrorWhenAuthorized(t *testing.T) {
 }
 
 // timedLedger is the test system of record whose pend ledger takes lookup to
-// look an authorization up and record to record a decision.
+// look an authorization up and record to record a decision. It holds the whole
+// ledger, so the two it times are its own.
 type timedLedger struct {
 	*censusSoR
+	PendLedger
 	clock          *testClock
 	lookup, record time.Duration
 }
 
-func (l timedLedger) LookupPended(requesterHolder string, k PendKeys, about []PendKeyRef) (PendMatch, error) {
+func (l timedLedger) LookupPended(requesterHolder string, k PendKeys) (PendMatch, error) {
 	l.clock.Add(l.lookup)
-	return l.censusSoR.LookupPended(requesterHolder, k, about)
+	return l.PendLedger.LookupPended(requesterHolder, k)
 }
 
-func (l timedLedger) RecordDecision(subjectPCI, corrID, outcome string, decidedAt time.Time, k PendKeys, eob *EOBRecord) (PendTransition, error) {
+func (l timedLedger) RecordDecision(subjectPCI, corrID, outcome string, decidedAt time.Time, k PendKeys) (PendTransition, error) {
 	l.clock.Add(l.record)
-	return l.censusSoR.RecordDecision(subjectPCI, corrID, outcome, decidedAt, k, eob)
+	return l.PendLedger.RecordDecision(subjectPCI, corrID, outcome, decidedAt, k)
 }
 
 // A PAS inquiry's ledger stage is its lookup of the authorization the answer
@@ -268,7 +272,7 @@ func TestExchangeRecord_LegStagesLedgerExactly(t *testing.T) {
 	p.g.cfg.Clock = clock.Now
 	p.g.cfg.Responder.(*nativeResponder).clock = clock.Now
 	p.seedInquiryPend(t, "corr-submit-1")
-	p.g.cfg.Store = timedLedger{censusSoR: p.store, clock: clock, lookup: lookup, record: record}
+	p.g.cfg.Store = timedLedger{censusSoR: p.store, PendLedger: testLedger(p.store), clock: clock, lookup: lookup, record: record}
 	p.partner.respByPath[pasInquirePath] = decidedAnswer(t)
 	ans := p.send(t, "pas-claim-inquire", "", inquiryBundle("MBR-COVERED", "", "TRN-1", "72148"))
 	if ans.status != http.StatusOK {
@@ -281,16 +285,18 @@ func TestExchangeRecord_LegStagesLedgerExactly(t *testing.T) {
 }
 
 // timedClaim is the test system of record whose claim on the authorization
-// an amendment names takes claim, and releasing it takes release.
+// an amendment names takes claim, and releasing it takes release. It holds the
+// whole ledger, so the claim it times is its own.
 type timedClaim struct {
 	*censusSoR
+	PendLedger
 	clock          *testClock
 	claim, release time.Duration
 }
 
 func (l timedClaim) BeginClaimUpdateReason(subjectPCI, related string) (bool, PendRefusal, error) {
 	l.clock.Add(l.claim)
-	return l.censusSoR.BeginClaimUpdateReason(subjectPCI, related)
+	return l.PendLedger.BeginClaimUpdateReason(subjectPCI, related)
 }
 
 func (l timedClaim) ReleaseClaimUpdate(subjectPCI, related string) error {
@@ -309,7 +315,7 @@ func TestExchangeRecord_LegStagesUpdateClaimExactly(t *testing.T) {
 	n.clock = clock.Now
 	request, related := updateBundle(t)
 	p.seedPend(t, related)
-	n.store = timedClaim{censusSoR: p.store, clock: clock, claim: claim}
+	n.store = timedClaim{censusSoR: p.store, PendLedger: testLedger(p.store), clock: clock, claim: claim}
 	ans := p.send(t, "pas-claim-update", "", request)
 	if ans.status != http.StatusOK {
 		t.Fatalf("answer %d %s", ans.status, ans.body)
@@ -332,7 +338,7 @@ func TestExchangeRecord_LegStagesUpdateReleaseExactly(t *testing.T) {
 	n.clock = clock.Now
 	request, related := updateBundle(t)
 	p.seedPend(t, related)
-	n.store = timedClaim{censusSoR: p.store, clock: clock, claim: claim, release: release}
+	n.store = timedClaim{censusSoR: p.store, PendLedger: testLedger(p.store), clock: clock, claim: claim, release: release}
 	inner := p.partner.srv.Config.Handler
 	p.partner.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == pasSubmitPath {
@@ -506,10 +512,16 @@ func TestFindingCarriesEachLinesValidatorTime(t *testing.T) {
 			clock := &testClock{now: g.cfg.Clock()}
 			g.cfg.Clock = clock.Now
 			var calls atomic.Int32
-			for line, v := range g.cfg.ValidatorsByLine {
-				g.cfg.ValidatorsByLine[line] = timedValidator{inner: v, clock: clock, d: took[line], calls: &calls}
+			// One timed validator per line, shared by every contract at it.
+			timed := map[string]shnsdk.Validator{}
+			for key, v := range g.cfg.ValidatorsByContractLine {
+				line := shnsdk.LineOf(key)
+				if timed[line] == nil {
+					timed[line] = timedValidator{inner: v, clock: clock, d: took[line], calls: &calls}
+				}
+				g.cfg.ValidatorsByContractLine[key] = timed[line]
 			}
-			g.cfg.Validator = g.cfg.ValidatorsByLine["2.0"]
+			g.cfg.Validator = timed["2.0"]
 			if status, msg := drainedPayerIngress(g, answerCtx("pas-claim"), []byte(answerBundle), "2.0", "pa.pas", partner); status != 0 {
 				t.Fatalf("status %d %q, want relayed", status, msg)
 			}
@@ -535,7 +547,7 @@ func TestExchangeRecord_LegStagesInquiryExactly(t *testing.T) {
 	p.seedInquiryPend(t, "corr-submit-1")
 	var calls atomic.Int32
 	p.g.cfg.Validator = timedValidator{inner: p.g.cfg.Validator, clock: clock, d: check, calls: &calls}
-	p.g.cfg.Store = timedLedger{censusSoR: p.store, clock: clock, lookup: lookup, record: record}
+	p.g.cfg.Store = timedLedger{censusSoR: p.store, PendLedger: testLedger(p.store), clock: clock, lookup: lookup, record: record}
 	// The partner and the Authorization Framework move this clock too.
 	inner := p.partner.srv.Config.Handler
 	var reads, authorizations atomic.Int32

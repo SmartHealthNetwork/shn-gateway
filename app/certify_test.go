@@ -286,9 +286,9 @@ func TestCertificationAddressGatedOnItsOwnQualification(t *testing.T) {
 		warmReplay.Config.Handler.ServeHTTP(w, r)
 	}))
 	defer lane.Close()
-	row := warm.Exchanges[4] // the versioned approved ClaimResponse, first asked while warming
+	row := warm.Exchanges[3] // the versioned approved ClaimResponse, first asked while warming
 	payload, profile := []byte(row.Request.Body), row.Request.Query["profile"][0]
-	if !strings.Contains(string(warm.Exchanges[4].Response.Body), "SLICING_CANNOT_BE_EVALUATED") || strings.Contains(string(warm.Exchanges[5].Response.Body), `"severity":"error"`) {
+	if !strings.Contains(string(warm.Exchanges[3].Response.Body), "SLICING_CANNOT_BE_EVALUATED") || strings.Contains(string(warm.Exchanges[4].Response.Body), `"severity":"error"`) {
 		t.Fatal("the recording no longer holds the warming answer followed by the settled one")
 	}
 

@@ -41,7 +41,7 @@ type PopulateContext struct {
 	Authored time.Time
 	// Line is the DTR contract line ("2.0"/"2.1"/"2.2") the fetched
 	// $questionnaire-package was pulled at — selected once at the DTR-fetch leg
-	// (originate.go's select-before-build, F7) and threaded here so the QR the
+	// (module1_originate.go's select-before-build, F7) and threaded here so the QR the
 	// Populator builds matches the wire shape the fetch already committed to
 	// (closes an earlier KNOWN GAP where every authored QR was frozen
 	// at 2.0 regardless of the selected line). Empty delegates to "2.0" — the
@@ -57,7 +57,7 @@ var errNoClinicalContext = errors.New("no clinical context for member")
 
 // errPopulateUpstream is a sentinel: a native $populate transport error, non-2xx, or
 // unparsable response. The consumer maps it to 502. Defined here (the seam file) so
-// statusForPopulateErr (originate.go) can reference it before nativepopulate.go exists.
+// statusForPopulateErr (module1_originate.go) can reference it before nativepopulate.go exists.
 var errPopulateUpstream = errors.New("$populate upstream failed")
 
 // errPopulateForeignSubject is the native foreign-subject fence: the operated engine returned a QR

@@ -12,6 +12,9 @@ services:
       context: ../validator
       dockerfile: Dockerfile
     # Co-located $validate; not published externally. Healthcheck gates gateway start.
+    environment:
+      # The HAPI starter serves an MCP server by default (/mcp/messages, /sse); it stays off.
+      SPRING_AI_MCP_SERVER_ENABLED: "false"
     healthcheck:
       test: ["CMD", "/healthcheck"]
       interval: 15s

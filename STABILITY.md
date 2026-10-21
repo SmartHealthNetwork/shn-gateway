@@ -124,11 +124,869 @@ receives changes.
   check at `strict` needed and could not make refuses as that check's
   `conformance` refusal; the read is counted in `BackendCalls`, and, after
   the operation, is not the `Backend`.
-- `limit` is reserved; from v0.58.0 the gateway records an Authorization
+- `limit` is recorded for a coverage eligibility batch of more requests than
+  a gateway reads in one batch (from v0.63.0); from v0.58.0 the gateway records an Authorization
   Framework denial as `authority`, whatever its reason; a facility's `consent`
   refusals (a federated query without a consent reference, or one the consent
   service does not permit) are `consent`. A facility's or a PHG's gateway
   refusing a leg is refused by `other`.
+
+## A validator that stops without a verdict is unavailable (v0.63.0)
+
+- **Behavior change in v0.63.0 (conformance):** a FHIR validator that stops without a verdict
+  (`HAPI-0389: … failed to validate, but no errors.`) is read as unavailable, as one that
+  was given no resource to read (`HAPI-0992`) already is. It is never read as a structural
+  defect.
+  - **Where it happens:** on PAS 2.1 and 2.2 request Bundles that declare
+    `profile-pas-request-bundle`, matching the Claim entry against the two profiles its slice
+    allows can end the validation there, with no other entry checked. A PAS request Bundle
+    that declares no profile is checked whole, as before.
+  - **Each level** now does what it does for a check that cannot run:
+    - `none` does not run the check;
+    - `observe` and `structural` carry the message and record an `unavailable` finding;
+    - `strict` refuses `500` as unavailable.
+  - **Before v0.63.0,** such a Bundle read as structural, valid or not:
+    - `structural` and `strict` refused it `422`;
+    - `observe` recorded it as a structural defect.
+  - **Both directions:** a valid Bundle of that shape is no longer refused at `structural`.
+    A broken one is no longer refused there either, because the validator did not check it.
+- **Behavior change in v0.63.0 (a bridged check):** module 2 decides a translated message's
+  check at every level, and refuses a check that cannot run. So a translated PAS 2.1 or 2.2
+  request Bundle that declares the profile and stops the validator is now refused `500
+  validator unavailable`, where before v0.63.0 it was refused `422 egress validation failed`
+  with the validator's issues.
+- **Behavior change in v0.63.0 (certification evidence):** the same answer on a certification
+  lane, or one that read no payload, is recorded `unavailable` ("certification validator did
+  not judge the payload"), not `invalid`.
+
+## A Coverage's subscriber, policyholder or payor is never taken for the member (v0.63.0)
+
+- **Breaking (behaviour), a fix:** a gateway that derives a patient identifier for a member
+  its system of record does not hold reads the member's Patient the request carries. A
+  Patient that a Coverage in the request names as its `subscriber`, `policyHolder` or `payor`
+  (a parent who holds or pays for a dependent's coverage), other than the Coverage's own
+  `beneficiary`, is another person and is never read as the member, however the slot names
+  it and wherever the request carries it:
+  - by `#id`, beside the Coverage among the same resource's contained resources or in the
+    Coverage's own (a `contained` that is a single object is read as the one resource a
+    lenient reader reads it as);
+  - by a Patient reference to its id (an id-less Patient in a Bundle entry has the id its
+    RESTful `fullUrl` names) or by a Bundle entry's `fullUrl`;
+  - by a logical reference to an identifier it carries (one with no system names the value in
+    any system);
+  - with the slot holding a Reference or a list of them, and with a slot, a reference or the
+    Coverage's `resourceType` spelled in another case, as a reader that ignores case reads
+    it.
+
+  A Coverage whose `beneficiary.reference` names the Patient makes no party of it: a
+  subscriber covered by the Coverage is its member. The tie holds only where every reader
+  reads the request alike: a `beneficiary` that is not one Reference ties nothing, and no
+  beneficiary ties a Patient in a request whose FHIR resources spell a name a reference is
+  resolved by (`resourceType`, `id`, `fullUrl`, `resource`, `entry`, `parameter`,
+  `contained`, `beneficiary`, `reference`) in another case, or nest contained resources.
+  Members outside any resource, such as a vendor's own in a CDS Hooks request's `extension`,
+  are no FHIR names and are not read. A Patient with a server of its own (an entry's RESTful
+  `fullUrl`) is named as a Bundle resolves the reference: an absolute reference names only
+  the entry whose `fullUrl` it is, and a relative one resolves against the RESTful base of
+  the Coverage's entry; an entry whose `fullUrl` names another id than its Patient's is
+  named by none. A Patient under a `urn:uuid` is named by that `fullUrl`, or by its type and
+  id only through a relative reference that no RESTful base resolves, and one with no URL of
+  its own (carried outside an entry, such as a CRD prefetch Patient, or in an entry without
+  a `fullUrl`) is named by its type and id. A reference by type and id names no Patient when
+  the request carries different Patients under that id, contained or not, since some readers
+  resolve a reference by type and id to a contained resource too. A contained Patient is
+  named only by its `#id`, a `#id` names a resource only among those contained with the
+  Coverage (its own, or its container's when it is contained itself), and an id two of those
+  resources share names neither. Only a Bundle's entries have a `fullUrl` a reference
+  resolves by, and a Coverage's references resolve among its own Bundle's entries: an object
+  elsewhere holding `fullUrl` and `resource` is no entry, and an entry of another Bundle is
+  named only by the RESTful URL it is, while no different Patient is carried under its id,
+  though a slot that may name a Patient, or names an identifier it carries, still may be it.
+  A Coverage carried in no Bundle names a Patient by its type and id. Where the request
+  carries a Coverage, a Patient in an entry whose `fullUrl` (versions, the case of its
+  scheme and host, and a default port aside) an entry holding a different resource has, in
+  its Bundle or another, is never read as the member. Patients are told apart by the facts a
+  patient identifier is derived from (birth date and family name), each as the Patient
+  carries it or not: versions of one person's record, or copies of one entry, are one, and
+  Patients carrying different facts are told apart, whichever they lack. A reference nested
+  within the beneficiary, such as an extension's or an identifier's assigner, ties nothing,
+  and neither does a beneficiary spelled in another case. A Patient's id equal to the member
+  id is no such tie, since the member may have been read from an identifier, and a contained
+  resource's id is local to its container, never a member id. When the involved list looks
+  up another patient a request names by a Patient's id, that Patient is the record of the
+  very person looked up and is read as theirs.
+
+  Where a Coverage's party slot may name a Patient (a reference, other than the Coverage's
+  own beneficiary reference itself, that names no resource the request carries as another
+  type, or an identifier in no system or the member system), a Patient bearing the member's
+  id or number is read as the member only when that Coverage's `beneficiary` names it: any
+  other is one the gateway cannot decide is the member, wherever the request carries it, and
+  is never read as the member. Another Coverage naming it as its beneficiary does not decide
+  it. A payor naming an Organization does not make it so.
+
+  Before, such a parent carrying the member's family-level member number could be read as
+  the member, so the dependent's exchange was authorized, recorded and filed under the
+  identifier the parent's own requests derive.
+- **New refusal:** a request that carries no Patient for the member with a birth date and
+  name, and carries such a party under the member's own member number, is refused at every
+  level, by each gateway, before anything is sent:
+  `400 cannot identify the patient: the request carries no Patient for its member with a
+  birth date and name, and its member number is shared with another person it carries (a
+  coverage's subscriber, policyholder or payor)`, recorded as `authority`. The number is shared,
+  so the member id alone would identify no one patient.
+- A request carrying the member's own Patient is bound from it, on both gateways. A request
+  naming no party is bound as before, from the member id alone when it carries no Patient;
+  a member the system of record holds is bound through it, as before. The involved list names
+  a party under its own identity, from its own record, and leaves out a member it cannot
+  identify (`unknown-member`).
+
+## A carried PAS answer is validated at the provider ingress (v0.63.0)
+
+- **Behaviour change:** a payer's answer to a PAS `$submit` (a submission or an amendment) or
+  `$inquire` that a provider gateway carries for its own participant's system through its Da
+  Vinci ingress is `$validate`d at the gateway's conformance level, against the candidate
+  IG lines its answers to the legs it originates are certified against (the routed line
+  first, valid on any line is valid). Not at all at `none`; recorded at `observe`; at
+  `structural` refused for a structural issue and recorded for a deeper one; refused at
+  `strict`, where a check that cannot run is refused `500`. A refused answer is answered
+  `502 {"error":"ingress validation failed"}`, as the provider ingress refuses its other
+  carried answers, and recorded as a `fhir-ingress` finding from the peer, refused by the
+  provider gateway under the `conformance` rule. Before, such an answer was read only by
+  the content rules (its IG line's answer graph and its patient linkage), so one that
+  conformed to no line was carried at every level with no finding.
+- Unlike the answers to legs the gateway originates on the `provider-data` or `demo` lane,
+  no reference payer's carried answer is exempt: a participant that sets a level has every
+  answer it receives judged.
+- It is payload conformance, the participant's own opt-in: a gateway at `none` carries the
+  answer exactly as before.
+- **Behaviour change (Go API, `scenariodriver`, Evolving):** `InjectShnCorrelation`,
+  `BuildAmendedRePOST` and `BuildFederatedAmendedRePOST` set the PAS Claim's one identifier
+  to its `urn:shn:correlation` instead of adding it beside the Claim's own identifier, and an
+  amendment is the update Claim alone: it declares `profile-claim-update`, its
+  `related[0].claim` names the submission by that correlation identifier, with no
+  `reference`, and the Bundle carries no prior Claim. PAS 2.0.1 allows a Claim one identifier
+  and a request Bundle one Claim, and the goldens these build from are PAS 2.0.1; before, the
+  Bundles they built were not conformant at 2.0.1.
+- **Behaviour change (Go API, `scenariodriver`, Evolving):** the `Provenance` that
+  `BuildAmendedRePOST` and `BuildFederatedAmendedRePOST` add carries `recorded` (1..1 in base
+  R4), the Bundle's own `timestamp`. A golden with no `timestamp` is refused. Before, the
+  Provenance had no `recorded`, so it was not valid R4.
+
+## A carried Patient's demographics are read by exact member names (v0.63.0)
+
+- **Behaviour change:** a gateway that derives a patient identifier for a member its system of
+  record does not hold (from the member id and the birth date and family name of the
+  member's Patient the request carries) reads that Patient by its exact member names, as
+  every reader of the request does. A Patient naming its `birthDate`, `name` or `family`
+  only in another case has no demographics, and neither does a request whose FHIR resources
+  repeat a member name, exactly or in another case (a vendor's own members outside any
+  resource, such as in a CDS Hooks request's `extension`, are no FHIR names and are not
+  read). A Coverage's contained resources named only in another case are no resources, so a
+  parent its `subscriber` or `policyHolder` names there is never read as the member; nor is
+  a parent in a Coverage that spells, in another case, a name the party rule reads
+  (`resourceType`, `contained`, `subscriber`, `policyHolder`, `reference`, `id`,
+  `identifier`), which that rule then names no party in though a reader that ignores case
+  would: no Patient is read from such a Coverage's contained resources. Before, these names
+  were read whatever their case, and such a parent's birth date and name could be read as
+  the member's.
+- The member a request names is bound as before; only the demographics an identifier is
+  derived from change, and only for such requests. A provider gateway opted in to
+  enrichment (`ENRICH_NATIVE_REQUESTS`) reads whether a DTR request carries the member's
+  Patient the same way, so for such a request it may add the member's Patient from its
+  system of record.
+- **Behaviour change (Go API):** `engine.PatientDemographics` reads through the gateway's
+  strict reader: by exact member names, and no demographics in a Patient that repeats a
+  member name or that is past that reader's limits (not well-formed UTF-8 or a lone
+  surrogate escape, nesting past 64 levels, more than 1,000,000 tokens). A holder's own
+  record read through it (the `fhirsor` connector) is read the same way.
+
+## A participant's 2xx answer reaches the other participant with its status (v0.63.0)
+
+- **Behaviour change:** a payer's system that answers a relayed request with a 2xx other
+  than `200` (a `201 Created` FAIS eligibility answer, a `202 Accepted`, a `204 No Content`)
+  is answered to the provider's system with that status, on every Da Vinci ingress route
+  (CRD, DTR `$questionnaire-package`, PAS `Claim/$submit` and `Claim/$inquire`,
+  `CoverageEligibilityRequest/$submit`), at every level. Before v0.63.0 every relayed
+  success was written `200`. The bytes are unchanged, as before. The federated query
+  (`POST /Task`) follows the same rule; its answer is always built by the facility's
+  gateway, so it is `200`.
+- The payer gateway frames its system's own status in the answer frame, which has always
+  carried a status, and, for a requester that decodes frames, records it on the leg
+  (`ExchangeRecord.Status`). An answer the gateway built itself is `200`.
+- **Additive in both directions:** a requester before v0.63.0 reads any 2xx frame as a
+  success and writes `200`, as it always did; a payer gateway before v0.63.0 frames every
+  success `200`, which a v0.63.0 requester writes as `200`. An unframed answer is `200`.
+- **New refusal:** a frame stating `204` that carries a body is not read, at every level:
+  the requester's gateway answers `502` and records `integrity`.
+- A `204` answer has no body: wherever a level judges an answer's content, it judges an
+  empty one exactly as it judged an empty `200`.
+- **Additive (Go API):** `engine.LegResult.AnswerStatus`, the 2xx status a connector's
+  relayed answer was given (`0` is `200`). `scenariodriver.Driver.SubmitPAS` reads the
+  outcome of any 2xx answer, not only a `200`.
+
+## Validator lanes are keyed by contract line (v0.63.0)
+
+- **Additive (Go API):**
+  - `engine.Config.ValidatorsByContractLine` holds the `$validate` lanes keyed by contract-version token (`"pa.pas@2.0"`). A value may be an `*engine.DiscoveredLane`, which serves once it has qualified.
+  - `engine.ContractLineLanes` derives that map from per-line lanes.
+  - `engine.CanonicalContractVersion` names the contract version the canonical validator (`FHIR_VALIDATE_URL`) resolves: `pa.pas@2.0`.
+- **Deprecated (Go API):** `engine.Config.ValidatorsByLine`, `CanonicalFallbackLines` and `DefaultValidatorsByLine`. When a caller sets them and not `ValidatorsByContractLine`, `New` derives the contract-line lanes they name, with the same resolution as before, except that `pa.pdex`, which no leg uses, resolves no lane. They stay until v1.0.0.
+- **The gateway's routing is unchanged:**
+  - every contract it declares resolves the same lane at every line as before;
+  - a single-line contract still borrows the canonical validator;
+  - a multi-line contract still never does.
+- `engine.ContractLineLanes` derives lanes for the contracts this gateway builds natively
+  (`engine.NativeContractVersions`: CRD, DTR and PAS) and those its `declared` argument
+  names, whatever the linked shn-sdk lists. `pa.pdex`, which no gateway declares, has no
+  lane, as any contract the gateway does not build; no exchange validates on it.
+- The per-line settings (`FHIR_VALIDATE_URL`, `FHIR_VALIDATE_URL_2_1`, `FHIR_VALIDATE_URL_2_2`) are unchanged.
+
+## The gateway's contract sets come from its workstreams (v0.63.0)
+
+- **Additive (Go API):** `engine.LegOperations` returns every compiled-in workstream's leg operations as `engine.LegOperation` rows, as `engine.PALegOperations` returns PA's as `engine.PALegOperation` rows (the same fields). A released gateway compiles in PA and Federated Query Services (below), so it returns the two workstreams' operations together.
+- `engine.NativeContractVersions`, `DefaultContractVersions` and `ParseDeclaredContractVersions` read the compiled-in workstreams' contract lines, not the SDK's alone. A released gateway's sets are unchanged: the SDK's native and default sets without `pa.pdex@2.1`, in the SDK's order. The one visible difference is the error for a declared token the gateway cannot build: it lists the gateway's own native set, without `pa.pdex@2.1`, where the SDK's listed it.
+- A test build with the `shn_toyworkstream` tag compiles in a second workstream, a test profile, to prove a second workstream is carried. A released gateway is never built with it.
+
+## The federated query is the Federated Query Services workstream's leg (v0.63.0)
+
+- **Narrowed (Go API):** `engine.PALegOperations` no longer returns `federated-query`. The network's leg taxonomy has a second workstream, Federated Query Services (`fqs`), and the federated query is its leg. `engine.FQSLegOperations` returns it, and `engine.LegOperations` still returns every leg, the federated query included. A caller that read the federated query from `PALegOperations` reads it from either of those.
+- **Additive (Go API):** `engine.FQSLegOperations` returns the federated query's binding as an `engine.LegOperation` row, as `engine.PALegOperations` returns PA's.
+- **The leg is unchanged on the wire:** its transaction type, its operations (`federated-query-submit`, `federated-query-response`), its frames, the roles that hold them, its minimum-necessary scope (`named-docs-only`) and its consent check. A Smart Gateway sends, answers and carries it as before, and the provider ingress's `POST /Task` route is unchanged.
+- The discovery descriptor's `operations[]` is unchanged, in content and order.
+
+## A provider's own system sends a coverage eligibility request (v0.63.0)
+
+- **Addition in v0.63.0:** the provider gateway's Da Vinci ingress serves `POST
+  /CoverageEligibilityRequest/$submit`, the base FHIR R4 operation (IHE FAIS ITI-124), under
+  the same SMART Backend Services auth as the other ingress routes. The body is any of the
+  operation's inputs: the `CoverageEligibilityRequest`; a `Bundle` carrying one request with the
+  resources it references (IHE FAIS's CoverageEligibilityRequest Bundle); a `Bundle` that is a
+  batch of requests, each alone or in such a Bundle; or a `Parameters` whose one `resource`
+  parameter holds any of these. A `Bundle` that is neither form is refused `400`, as is one
+  whose entries cannot be read one way only (an entry's `resource`, `fullUrl`, `resourceType`
+  or `id` written in another case or with another JSON type, or an entry with no typed
+  resource).
+  - **Carried.** It goes to the payer on the `coverage-eligibility` leg exactly as sent, in the
+    form it was sent, and the payer's answer is relayed exactly.
+  - **Routing.** Each request is routed by its `insurer` (an identifier, or an Organization it
+    carries), or failing that by the first payor of each Coverage it carries and names in
+    `insurance`: every one must name a payer, all the same one. References resolve among the
+    resources the request carries: a `#id` among the referring resource's contained resources,
+    any other reference among the entries of a Bundle carrying the request. A relative
+    `Organization/<id>` or `Coverage/<id>` that nothing carried answers is read from the
+    participant's system of record, only to route, when that system names the request's patient
+    by its member id; a failed read is that system's failure (`502`, `503` unavailable).
+    Refused `422`: no payer identifier (`no payer to route the eligibility request
+    by: …`, naming the coverage that names none when there is one, or the insurer, coverage or
+    payor reference nothing resolved and what resolves it), coverages naming different
+    payers (`the eligibility request names more than one payer: …`), a contained id it is
+    routed by that more than one contained resource has, or a reference more than one Bundle
+    entry answers (`ambiguous reference for routing: …`), and an unregistered payer (`no
+    registered payer for identifier …`).
+  - **The answer.** Relayed exactly; refused `502` at every level when it repeats a member
+    name; refused `502` at `structural` and `strict` (recorded at `observe`) when it is not a
+    `CoverageEligibilityResponse` naming its patient, or a `Bundle` of them; and `$validate`d
+    at the provider's conformance level, as the answer to an eligibility request the gateway
+    builds is (a validator the gateway cannot reach refuses `500` at `strict`).
+  - **A batch.** One exchange to one payer: a batch whose requests name more than one payer is
+    refused `422 the eligibility requests name more than one payer: …`. The exchange's patient
+    is the first request's in document order; every other request's patient is named on the
+    exchange's involved list.
+  - **Recorded.** The exchange record's route is `eligibility`, a new value in `ExchangeRoutes`.
+- **Payer side.** A payer gateway reads every input form as the requests it holds. Answering from
+  its records, it answers one request (alone, in a FAIS Bundle, or in a `Parameters`) about that
+  request's member, and a batch `501 this payer answers coverage eligibility from its records
+  one request at a time, so it does not answer a batch of requests: this is the payer's answer,
+  not a network refusal`. Forwarding to its
+  own endpoint, it carries any form as received, binds each request's member, and reads a
+  `Bundle` answer as its responses (its entries read by their exact member names; an entry
+  carrying only its outcome is no response).
+  A payer gateway before v0.63.0, or an shn-sdk Responder before shn-sdk v0.63.0, answers it
+  `400 parse member failed`. From shn-sdk v0.63.0 a Responder reads every form, and refuses
+  it, as a payer gateway answering from its records does.
+- **Not advertised yet.** The ingress `CapabilityStatement` does not list the operation until
+  the shn-sdk release that follows shn-gateway v0.62.0. The gateway serves it before then.
+- **Go API (additive):** `engine.RouteEligibility`.
+
+## An eligibility request is read one way only (v0.63.0)
+
+- **Breaking (behaviour):** a payer gateway reads an inbound `CoverageEligibilityRequest` sent
+  alone, or in a `Parameters`, by its exact member names, as it already read the `Bundle`
+  forms. Before v0.63.0 it read such a request by a reading that ignores the case of member
+  names and takes the last of a repeated one, and answered about the member that reading
+  found, where a reader taking names exactly found another patient, or none.
+  - A request that repeats a member name, exactly or in another case, anywhere in the body, is
+    refused at every level: `400 eligibility request repeats the JSON member "<name>" in
+    <where>: it can be read two ways, so it is not read`, recorded as `integrity`.
+  - A request that names only in another case a member its patient is read through (its
+    `resourceType`, a `Parameters`' `parameter`, the `name` of any of its parameters or the
+    `resource` of its `resource` parameter, its `patient`, the patient's `reference`, or, for
+    a `#id` patient reference, its `contained`) names no patient: refused at every level, `400
+    eligibility request names "<member>" for "<name>": member names are case-sensitive, so the
+    request names no patient to bind`, recorded as `authority`. A `Parameters`' other
+    parameters are carried as sent, however they spell any member other than `name`.
+  - A request's `contained` resources are read for its patient only through a `#id` reference:
+    a payer gateway carries a request naming its patient otherwise whatever case its
+    `contained` is named in, as before.
+  - Before, these were answered about the member the folded reading found, or refused `400
+    parse member failed`. A Bundle entry whose own members are named in another case is
+    refused as before.
+  - The provider gateway's ingress refuses the same requests, before anything is sent, with the
+    same texts and rules, where it refused them `400 parse eligibility request failed: …` or
+    `400 parse member failed`, or carried a request naming its patient only in another case.
+  - None of these texts carries a value from the request. A request that reads one way only is
+    read as before.
+  - A body the strict reader refuses for its own limits (not well-formed UTF-8 or a lone
+    surrogate escape, nesting past 64 levels, more tokens than its bound) is still read when it
+    reads one way only, by its exact member names, as a body the strict reader reads: its
+    patient reference names its member in every form (an absolute or versioned reference, as
+    a relative one), and a `#id` one resolves through the contained resources so named. In
+    such a body a repeated member name is refused as message integrity (`… repeats a member
+    name: …`); a type, patient, reference or, for a `#id` reference, `contained` named only in
+    another case is refused as `authority` (`400 eligibility request names its type or patient
+    only in another case: member names are case-sensitive, so the request names no patient to
+    bind`); and a `#id` reference no contained Patient answers is refused as below. Other
+    members are read as before. The provider gateway's ingress routes only a body the strict
+    reader reads, so it refuses such a body before anything is sent: with these texts where its
+    patient cannot be read, and otherwise `400 parse eligibility request failed`.
+  - In a body the strict reader refuses for not well-formed UTF-8 or a lone surrogate escape,
+    the reader that reads it replaces each such byte or escape with U+FFFD, so member values
+    that differ on the wire would bind as one. A member value read from such a byte or escape
+    (the patient reference itself on the literal path, or the contained Patient's member
+    identifier value on the contained path) names no patient one way only: each gateway refuses
+    it at every level, before anything is read for the patient, as `authority` (`400 eligibility
+    request names its patient by a value carrying a replaced character (not well-formed UTF-8 or
+    a lone surrogate escape): readers read it two ways, so the request names no patient to
+    bind`). A member value carrying U+FFFD as sent is read as before, wherever else such a body
+    is not well-formed.
+  - A `#id` patient reference that no contained Patient answers names no patient, including one
+    whose `contained` is not a list of resources (an object, a string): each gateway refuses it
+    `400 parse member failed` at every level, and never binds the reference's own text.
+
+## A batch of coverage eligibility requests carries at most 17 (v0.63.0)
+
+- **Part of the v0.63.0 addition** (the provider gateway's coverage eligibility ingress, and a
+  payer gateway reading the operation's `Bundle` forms, are new in v0.63.0): an input of
+  `CoverageEligibilityRequest/$submit` that submits more than 17 requests, in any form, is
+  refused at every level, before anything is read from it:
+  `413 the batch carries <n> coverage eligibility requests; a gateway reads at most 17 in one batch, so send them in batches of at most 17`, recorded as `limit`. The provider gateway refuses it at
+  its ingress before routing it; a payer gateway refuses it on the leg before its system is
+  called.
+- **Why 17:** the exchange's patient and the 16 other patients the Hub records one leg under (its
+  involved list). A larger batch could not be recorded under every patient it names. The gateway
+  derives the bound from that size, so the two cannot differ.
+- Send a larger set of requests as several batches. A request alone, or a FAIS Bundle carrying
+  one, is unaffected.
+
+## The pend ledger has its own package (v0.63.0)
+
+- **Additive (Go API):** package `pa/pend`
+  (`github.com/SmartHealthNetwork/shn-gateway/pa/pend`) holds the Prior
+  Authorization workstream's payer pend ledger: the `PendLedger` interface a
+  store implements, its records, keys, states, refusals and errors, and the
+  state machine and matching rules (`PendBegin`, `PendRePend`, `PendDecide`,
+  `ResolvePendMatch` and the rest), with `InProgressHeld`, which a store's own
+  re-pend uses. It imports no engine package. Every name and every error text
+  is unchanged.
+- **Deprecated (Go API):** the `engine` names (`engine.PendLedger`,
+  `engine.PendKeys` and the rest) stay until v1.0.0. Each type is an alias of
+  the `pend` type, so a store whose methods name the engine's types still
+  implements `pend.PendLedger`, and each constant, error and function is the
+  `pend` one or forwards to it.
+- `engine.LedgerOf` and `engine.FallbackDecision` stay in `engine` and are not
+  deprecated: they read the engine's `Store`.
+- Nothing the gateway relays, refuses or stores changes.
+
+## The in-memory store keeps the pend ledger and continuations as Prior Authorization's own state (v0.63.0)
+
+- **Breaking (Go API):** `*engine.MemStore` no longer has the pend ledger's or
+  the continuation store's methods: `RecordPendedKeyed`, `LookupPended`,
+  `RecordDecision`, `PendRecordOf`, `BeginClaimUpdateReason`,
+  `PutContinuation`, `ReadContinuation` and `Durable`. It keeps the ledger and
+  the continuation store as the Prior Authorization workstream's own state, so
+  it no longer implements `engine.PendLedger` (`pend.PendLedger`) or
+  `engine.ContinuationStore`. It still implements `engine.Store`, every method
+  unchanged.
+- **Migrating:** reach them through `engine.LedgerOf(store)` and
+  `engine.ContinuationsOf(store)`. Both answer for a `*engine.MemStore` and for
+  a type that embeds one, as they do for a store that implements the interfaces
+  itself, such as the Postgres store. A type assertion of a `*engine.MemStore`
+  to `engine.PendLedger` or `engine.ContinuationStore` is now false, and
+  `var _ engine.PendLedger = (*engine.MemStore)(nil)` no longer compiles.
+- **Breaking (Go API), for a type that embeds `*engine.MemStore` and declares
+  some of those methods itself** (to time or fail one of them, say): it no
+  longer implements the interface, so its own methods would be skipped for the
+  embedded store's. `engine.New` refuses such a store as `Config.Store`,
+  returning an error naming the type and the method, so the gateway does not
+  start. `engine.LedgerOf` and `engine.ContinuationsOf` answer none for it
+  rather than the embedded store's, and never panic. Implement the whole
+  interface, forwarding the rest to what `LedgerOf` or `ContinuationsOf`
+  answers for the embedded store.
+- Nothing the gateway relays, refuses or stores changes. The ledger, its
+  rules and retention, and the continuation store are the same code. `Reset`
+  clears the auth numbers, the ledger and the continuations as before, each
+  under its own lock rather than all under one.
+
+## The PAS answer readers have their own package (v0.63.0)
+
+- **Additive (Go API):** package `pa/pasanswer`
+  (`github.com/SmartHealthNetwork/shn-gateway/pa/pasanswer`) holds the Prior
+  Authorization workstream's readers of a native PAS answer:
+  `NativePASFacts`, `InspectNativePASResponse`, `InspectNativePASResponseAt`,
+  the `PASRefusal*` constants, `NativePASRefusalCauses`,
+  `NativePASRefusalCause`, `NativePASRefusalCauseAt`,
+  `NativePASGraphRefusalCause`, `NativePASUnresolvedReference`,
+  `NativePASUnresolvedReferenceAt` and
+  `CheckNativePASGraphWithoutClaimResponse`. It imports no engine package.
+  Each reads exactly as before, by the one definition the gateway reads an
+  answer by; the refusal texts and causes are unchanged.
+- **Deprecated (Go API):** the `engine` names of these readers
+  (`engine.InspectNativePASResponse` and the rest) forward to `pasanswer`
+  and stay until v1.0.0. `engine.NativePASFacts` keeps its own type, field
+  for field the same as `pasanswer.NativePASFacts`, and converts to it
+  (`pasanswer.NativePASFacts(f)`); each `engine.PASRefusal*` constant is the
+  `pasanswer` one, so code naming either compiles and reads the same.
+- **Additive (Go API):** `pasanswer.InquiryAnswerReadsAt(body, line) (ok
+  bool, detail string)` and `pasanswer.ConsistentInquiryAnswerSubjects(answer)
+  bool` are the gateway's readers of a PAS `$inquire` answer: the rule it
+  reads the answer by at an IG line, and its subject rule (`patient.answer`).
+  The inquiry leg and these readers share one definition, so each reads
+  exactly as before.
+- **Deprecated (Go API):** `engine.PASInquiryAnswerReadsAt` and
+  `engine.ConsistentPASInquiryAnswerSubjects` forward to them and stay until
+  v1.0.0.
+- Nothing the gateway relays or refuses changes.
+
+## The exchange record vocabulary has its own package (v0.63.0)
+
+- **Additive (Go API):** package `recording`
+  (`github.com/SmartHealthNetwork/shn-gateway/recording`) holds the network's
+  exchange record vocabulary: `ExchangeOther`, the directions, outcomes,
+  refusing parties, refusal rules and backend error classes, and their closed
+  lists (`ExchangeDirections`, `ExchangeOutcomes`, `RefusalParties`,
+  `RefusalRules`, `BackendErrorClasses`, `AnswerErrorClasses`). It names no
+  workstream and imports no engine package, so a reader of recorded exchanges
+  can use the gateway's own words without importing the engine. Every value is
+  unchanged.
+- **Deprecated (Go API):** the `engine` names (`engine.RefusalRules`,
+  `engine.ExchangeOther` and the rest) stay until the engine package split,
+  before v1.0.0. Each constant is the `recording` one, and each list is the
+  same slice.
+- `engine.ExchangeKinds`, `engine.ExchangeRoutes` and
+  `engine.ExchangeOperations` stay in `engine` and are not deprecated: the
+  compiled-in workstreams declare them.
+- Nothing the gateway records changes.
+
+## The exchange kinds and routes come from the workstreams (v0.63.0)
+
+- `engine.ExchangeKinds` and `engine.ExchangeRoutes` are derived from the
+  workstreams compiled into the gateway: the legs of their catalogs, and their
+  ingress routes with the inbound route. The values are unchanged; their order
+  is not part of the API, so read them as sets.
+- A gateway's ingress diagnostic events are named for its role
+  (`provider.ingress.request`, `provider.ingress.response` on a provider, the
+  only role with an ingress), as before.
+
+## The relay ownership table is registered by the workstreams (v0.63.0)
+
+- `relay.Check`, `relay.LegOwnership` and `relay.Legs` read the ownership
+  table the gateway engine's workstreams register when the engine package
+  loads, through the new `relay.RegisterOwnership`. A gateway's table is
+  unchanged.
+- **Behaviour change for a program that imports `engine/relay` without the
+  engine.** No workstream is registered there, so the table is empty:
+  `relay.Legs` is nil, `relay.LegOwnership` is empty, and `relay.Check`
+  refuses every payload with an `*OwnershipError` that matches both
+  `relay.ErrNoOwnershipRegistered` and `relay.ErrOwnershipRefused`. Link the
+  engine (`import _ "github.com/SmartHealthNetwork/shn-gateway/engine"`) to
+  read the gateway's table.
+- `relay.RegisterOwnership` is called once, by the engine. A second call, or
+  a call after the table was read, panics.
+
+## A provider's own system sends a consented federated query (v0.63.0)
+
+- **Addition in v0.63.0:** the provider gateway's Da Vinci ingress serves `POST /Task`, the Da
+  Vinci CDex task-based data request a data consumer sends a data source
+  (<https://hl7.org/fhir/us/davinci-cdex/task-based-approach.html>), under the same SMART Backend
+  Services auth as the other ingress routes. The body is a `cdex-task-data-request` Task with one
+  `data-query` input.
+  - **Carried.** It goes to the facility on the `federated-query` leg exactly as sent, and the
+    facility's answer (a facility's gateway answers with the request Task fulfilled with the
+    records) is relayed exactly.
+  - **Routing.** It is routed by its `owner`, a holder identifier
+    (`http://smarthealth.network/ids/holder`), with no default. Refused `422`, saying what is
+    missing: an owner naming no holder identifier, a value of another type among them (`no
+    facility to route the federated query to: the Task's owner names no holder identifier …`), a
+    holder the network does not register, and a holder that is not a facility.
+  - **The patient.** `Task.for` is read as the facility reads it, so consent is checked for the
+    patient the facility discloses for. Refused `400` (`federated query rejected: …`): a Task that
+    is not a data request for one patient's named documents, or that a FHIR reader could read
+    another way (a member repeated, or named only in another case, the owner's among them).
+  - **Consent.** The Authorization Framework checks consent for that patient with the owner as
+    custodian (`403 authorization denied` without it); the facility's gateway then applies its own
+    backstop and binds the queried patient to the consented one, and its refusal is relayed
+    exactly.
+  - **What the network guarantees.** Consent is enforced where the disclosure is made: the
+    facility's gateway checks it with its own backstop, binds the queried patient to the
+    consented one, and builds the answer it serves from its system of record from that
+    patient's records alone, at every level. The network does not guarantee that a facility's
+    own system, answering through its gateway, discloses records about one patient only.
+  - **The answer.** Relayed exactly; refused `502` at every level when it repeats a member name;
+    refused `502` at `strict` (recorded at `observe` and `structural`, relayed at `none`) when it
+    reads as about a patient other than the queried one (`RulePatientAnswer`), a best-effort
+    check of the answer Task's own patient and of every resource it contains that judges no free
+    text or encoded data; refused `502` at `structural`
+    and `strict` (recorded at `observe`) when it is not a Task fulfilled with a records Bundle (a
+    data-query output naming a Bundle it contains; the answer is not compared with the request); and `$validate`d at the provider's conformance level (a validator the gateway cannot
+    reach, or has no lane for, refuses `500` at `strict`).
+  - **Recorded.** The exchange record's route is `federated-query`, a new value in
+    `ExchangeRoutes`.
+- **Not advertised yet.** The ingress `CapabilityStatement` does not list the interaction until a
+  later shn-sdk release. The gateway serves it before then.
+- **Go API (additive):** `engine.RouteFederatedQuery`; `scenariodriver.Driver.SendFederatedQuery`.
+
+## A released gateway refuses the validator test double (v0.63.0)
+
+- **Breaking (configuration):** a released gateway (the published image, a
+  `go install` of `cmd/gateway`, or any untagged `go build`) refuses to boot
+  when `SHN_FAKE_VALIDATOR` is set to any value, at every
+  `CONFORMANCE_ENFORCEMENT` level and whatever validator is configured beside
+  it: `gateway: SHN_FAKE_VALIDATOR is set, but a released gateway has no
+  validator test double: refusing to boot rather than appear to validate what
+  it never checked (FR-36)`, followed by the supported path. Before v0.63.0,
+  `SHN_FAKE_VALIDATOR=1` replaced every validator with a stand-in that checked
+  a few PAS and DTR rules and accepted everything else.
+- **What to do instead:** unset it, run the IG-loaded `$validate` beside the
+  gateway and point `FHIR_VALIDATE_URL` at it. `deploy/bundle/compose.yml`
+  ships that pairing, and `deploy/eval` runs a first end-to-end test with a
+  real validator. Or, if your gateway is to check no payload, set
+  `CONFORMANCE_ENFORCEMENT=none`, which from v0.63.0 needs no validator (the
+  next section). Every other level still needs one
+  ([CONFIGURATION.md](docs/CONFIGURATION.md#validation-required-to-boot--fr-36-and-conformance-enforcement)).
+- The stand-in remains only in SHN's own test builds: a Go test binary, or a
+  build tagged `shn_testdouble`, which logs a warning at boot whenever it runs.
+- Nothing the gateway relays or refuses changes.
+
+## A gateway at `none` starts without a validator (v0.63.0)
+
+- **Change (configuration):** a gateway at `CONFORMANCE_ENFORCEMENT=none` starts
+  with no validator at all: no `FHIR_VALIDATE_URL`, no `FHIR_VALIDATE_URL_<line>`
+  for a line it declares, no default validator lane. It logs `gateway: no FHIR
+  validator: …` at boot. Before v0.63.0 it refused to boot, as every level still does
+  that checks a payload (`observe`, the default, `structural` and `strict`).
+- **The boot refusals name it:** with no validator, or a declared line with no
+  lane, the refusal at those levels now ends `or set CONFORMANCE_ENFORCEMENT=none to
+  check no payload (this gateway then needs no validator)`, and so does the
+  `SHN_FAKE_VALIDATOR` refusal (previous section), which still holds at `none`.
+- **What it does without one:** it checks nothing, as at `none` with a validator. It
+  builds and answers at every line it declares, honors a request that states one, and
+  resumes a pended prior authorization at its pinned line. It never translates between
+  IG lines: a peer that shares no declared line is carried as sent at its own line, or
+  refused as `routing` under `REQUIRE_SHARED_LINE=true`
+  ([CONFIGURATION.md](docs/CONFIGURATION.md#running-at-none-without-a-validator)).
+- **With a validator, at `none`:** routing is unchanged, except that a declared Compose
+  default lane is qualified in the background instead of before traffic, and a line
+  the gateway declares is honored and resumed at with or without its lane.
+- Nothing changes at any other level.
+
+## A payer's Patient Access API is removed (v0.63.0)
+
+- **Breaking (behavior):** a payer gateway no longer serves the CMS-0057 Patient Access API.
+  `GET /metadata`, `GET /ExplanationOfBenefit` and `GET /ExplanationOfBenefit/{id}` answer
+  `404` on a payer, as any route the gateway does not serve. Nothing else a payer serves
+  changes, and `GET /health` remains every role's liveness.
+- **Breaking (configuration):** the gateway no longer reads `AUDIT_URL` or `PHG_URL`, nor
+  the `audit` and `phg` endpoints of network discovery; their only use was the Patient
+  Access read's audit record and the provider scenario's read of the patient view below.
+  `PATIENT_ACCESS_API` (v0.62.0, below) is gone with the routes it switched. A value still
+  set for any of the three is read by nothing: the gateway, of any role, boots as before and
+  logs one boot warning per setting, `gateway: WARNING: <setting> is set but no longer read:
+  shn-gateway v0.63.0 removed …`, naming what the setting served (the Patient Access API,
+  its audit record, or the provider gateway's read of the PHG's denial view).
+- **Breaking (provider scenario answer):** the UC-08 denial scenario's answer no longer
+  carries `patientDenialReason`, `patientDenialReasonDisplay`, `patientDenialReasonSystem`
+  or `patientAppeal`, which the provider gateway read from the PHG's denial view. The
+  denial itself (`denied`, `rationale`) is answered as before.
+- A payer gateway no longer builds or stores a decision ExplanationOfBenefit either (see "A
+  payer gateway builds no decision EOB" below).
+- The boot refusal for a declared `pa.pdex@2.1` now says a gateway serves no Patient Access
+  API and builds no PDex resource, rather than naming the Patient Access API's
+  ExplanationOfBenefit.
+- **Go API (breaking):** removed `engine.Config.AuditURL`, `engine.Config.PHGURL`,
+  `engine.Config.PatientAccessOff`, `engine.ReplayScopePatientAccess`, `scenariodriver.Driver.GetAuthorizations` and
+  `scenariodriver.AuthorizationView`. The one-time-use record no longer has a
+  `patient-access` scope, so a replay store need not admit it.
+
+## A certification lane that answers slowly keeps its qualification (v0.63.0)
+
+- **Change (behaviour):** a qualified certification lane that does not answer a
+  certification within its 2 s, while the collection is still waiting, no longer loses its
+  qualification. That certification is still recorded `expired`. The lane is asked for its
+  `GET /metadata` once, within 4 s, on a connection of its own, at most once every 30 s, and
+  is re-qualified only when that goes unanswered; an answer of any status keeps it
+  qualified. Before v0.63.0 every such timeout re-qualified the lane, and the line's
+  certifications read `… re-qualifying`, dialing nothing, until a corpus run passed. A lane
+  that fails at the connection (refused, reset or closed, or unreachable) re-qualifies as
+  before.
+- **Addition (log):** `certification_lane_timeout_check`, one line per check, with `version`,
+  `line`, `host`, `answered`, `at` and `duration_ms`. A check cut short by shutdown logs
+  nothing.
+
+## Translating between IG lines is the participant's opt-in (v0.63.0)
+
+- **Addition (configuration):** `TRANSLATE_IG_LINES` (`true` or `false`; unset means
+  `false`, any other value refuses boot), and `engine.Config.TranslateIGLines`. When it is on
+  the boot log says `TRANSLATE_IG_LINES=true`.
+- **Change (behaviour):** unset, a gateway translates nothing between IG lines. It never
+  walks a transform chain (arm 3) and never renames a questionnaire package answer (E-08). A
+  pair that shares no line is built natively at a line the peer declares where the gateway
+  can (arm 2, unchanged), and otherwise carried as sent and recorded. Before v0.63.0 every
+  gateway translated. A deployment that relies on translation sets `TRANSLATE_IG_LINES=true`.
+- **Change (behaviour):** with it on, module 2 never plans a chain that takes a gated step
+  upward (pa.pas 2.0 to 2.1, whose step refuses every Claim). That pair is carried as sent and
+  recorded, or refused as `routing` under `REQUIRE_SHARED_LINE=true`, naming the gated step.
+  Before v0.63.0 it was refused `422` at apply time (`semantic-change refusal`). A gated step
+  taken downward still plans.
+- **Change (behaviour):** with it on, module 2 plans no chain to an explicitly configured lane
+  (`FHIR_VALIDATE_URL_<line>`, or `FHIR_VALIDATE_URL` at its own line) that has failed at the
+  connection. The leg is carried as sent
+  and recorded, or refused as `routing` under `REQUIRE_SHARED_LINE=true`, naming the lane,
+  until the lane answers its `GET /metadata` again: every 30 s for an hour, then every 5
+  minutes. A lane that only failed to answer in time is asked once, and stays in use if it
+  answers. The exchange that finds a lane down after its chain was planned is still refused
+  `500`. Before v0.63.0 every such exchange was. The log lines
+  `validator_lane_unreachable` and `validator_lane_reachable` are new. Governed checks and
+  arm 2 call the lane exactly as before.
+- **Change (origination API):** `/scenario/uc03`'s bridge exhibit branch `bridge-refuse` is
+  now `line-carry`. Its persona key is `uc03-line-carry` (in `engine.ScenarioRoster` and the
+  accounts descriptor); its member and payer are unchanged. Both bridge branches answer with
+  `pasRoute`, the PAS leg's route (`engine.RouteInfo`). `bridge-refuse` answers `400`, as
+  any unknown branch does.
+
+## A request the gateway carries to the payer's PAS line keeps its builder (v0.63.0)
+
+- **Change (record):** a PAS submission or update the gateway builds and carries to a
+  payer's PAS line through the registered transform chain is sealed as the builder's
+  message then registered edit E-09 (`registered-transform`). It is recorded as
+  `ownership: edited`, with its `builder` and `relayEdits` `["E-09"]`; before v0.63.0
+  it was recorded as `authored`, with no edit. The bytes sent are unchanged.
+- **Change (behaviour):** before such a request is sealed, the gateway runs the compat
+  manifest's own steps again on the request as built. They must make the same bytes
+  twice, and only steps the manifest registers may be named. A request that fails
+  that check is refused `500`, recorded as a `fidelity` refusal, at every level, and
+  nothing is sent. The check at the payer's line still follows, at every level.
+- **Go API (additive):**
+  - `relay.EditRegisteredTransform` (`E-09`).
+  - `relay.Transformed(src, id, out, rederive)` seals a transform's output as `src`,
+    an authored payload, then the edit, after running `rederive` twice. Its errors
+    are `relay.ErrVerifyMismatch`, `relay.ErrInvalidEdit` and `relay.ErrUnknownEdit`,
+    and the scan errors (`relay.ErrInvalidJSON`, a duplicate member name) for
+    malformed output.
+  - `relay.Payload.Builder` also names the builder of a payload `Transformed` made.
+  - `relay.ApplyChanges` refuses E-09 (`relay.ErrInvalidEdit`).
+  - The ownership check refuses a transformed payload that names no builder, or one
+    that names a builder the transmit does not list, and an edited payload that
+    names a builder without a transform.
+  - `engine.ExchangeRecord.Builder` and `diagnostics.AccessLine.Builder` name the
+    builder of a transformed request too.
+
+## A module ingress client's request is the gateway's own (v0.63.0)
+
+- **Addition (configuration):** an `INGRESS_CLIENTS_FILE` entry may carry
+  `"module": "on-behalf"`, registering that client as a module ingress client: a
+  module that builds Da Vinci requests on the participant's behalf and sends them
+  to the provider ingress. An unknown module, or a `builders` key on any entry,
+  refuses to boot. Unmarked clients are the participant's own system, as before.
+- **Change (behaviour):** a module client's request names its registered builder in
+  the `SHN-Builder` header. It is sealed as the gateway's own message by that
+  builder, sent as built, and recorded so. The gateway refuses (`422`, recorded as a
+  `fidelity` refusal, at every level, before any leg is sent):
+  - a native client that sends `SHN-Builder`;
+  - a module client that names no builder, or repeats the header;
+  - a builder that is not the module's or does not build the leg's request;
+  - a module request the gateway would have to edit.
+
+  A native client's request is carried as before.
+- **Addition (record):** `engine.ExchangeRecord.Ownership` (`relayed`, `edited`,
+  `authored`; the closed list `engine.ExchangeOwnerships`) and `Builder`: whose
+  message the request the gateway sent on the leg was. They are on the access line as
+  `ownership` and `builder` (omitted when empty). They are Evolving
+  until the network's Audit Plane carries the same content-free record in the
+  v1.0.0 signable-content change.
+- **Go API (additive):** `engine.BuilderHeader`, `engine.ModuleOnBehalf`,
+  `engine.ModuleIDs`, `engine.ModuleBuilders`,
+  `engine.IngressClientRegistration.Module`, `engine.ExchangeRecord.Ownership` and
+  `Builder`, `engine.ExchangeOwnerships`, `engine.Content.OnBehalf`,
+  `diagnostics.AccessLine.Ownership` and `Builder`.
+
+## Each body the gateway transmits is recorded on its own (v0.63.0)
+
+- **Addition (record):** `engine.ExchangeRecord.AnswerOwnership` and `AnswerBuilder`
+  (the closed lists `engine.ExchangeOwnerships` and the registered builders): whose
+  message the answer the gateway wrote on the call was, as `Ownership` and `Builder`
+  say of the request. Every refusal the gateway writes is `authored` by
+  `gateway-refusal`, one written before any leg was opened included.
+- **Addition (record):** `engine.ExchangeRecord.RequestEdits` and `AnswerEdits`: the
+  ids in `Edits`, split by the body each edit was made to. `Edits` is unchanged.
+- **Addition (access line):** `answerOwnership`, `answerBuilder`, `requestEdits` and
+  `answerEdits` (omitted when empty).
+- All of these are Evolving until the network's Audit Plane carries the same
+  content-free record, one for each body, in the v1.0.0 signable-content change.
+- **Go API (additive):** `engine.ExchangeRecord.AnswerOwnership`, `AnswerBuilder`,
+  `RequestEdits` and `AnswerEdits`; `diagnostics.AccessLine.RequestEdits`,
+  `AnswerOwnership`, `AnswerBuilder` and `AnswerEdits`.
+
+## A pended request's follow-up is carried when its pinned line has no reach (v0.63.0)
+
+- **Change (behaviour):** an amendment or inquiry the gateway builds itself
+  about a pended prior authorization, on its participant's behalf, whose pinned
+  line nothing reaches any more (its lane removed,
+  the line no longer declared, or, after a restart, a default lane not yet
+  qualified again) is built at a line the gateway declares (one the payer also
+  declares, else the gateway's highest) and carried as sent to the pend's payer,
+  about the same pend, at every conformance level. An amendment's attached
+  QuestionnaireResponse is built at the DTR line paired with that line. Before
+  v0.63.0 it was refused `422 … no bridge to the pinned line … remains
+  available`. An amendment's pend is held in memory and does not outlive a
+  restart, so the restart cases reach the inquiry about a continuation.
+- **Not affected:** your system's own amendment (`POST /Claim/$submit`) and
+  inquiry (`POST /Claim/$inquire`) are carried exactly as sent, as before; they
+  carry no pin and are never rebuilt at another line.
+- **Recorded:** the observer event `contract.line-carried`, whose detail names
+  the pinned line, and the route's `pinned` on `leg.originated`.
+- **The opt-in:** `REQUIRE_SHARED_LINE=true` refuses it as before, as `routing`.
+  A pend or payer that cannot be resolved is refused as before, at every level.
+- **Go API (additive):** `engine.RouteInfo.Pinned`.
+
+## A PAS submission under another patient's correlation id is carried (v0.63.0)
+
+- **Breaking (behavior):** a payer gateway's PAS submit leg no longer refuses a
+  submission whose correlation id another patient's authorization already uses. It is
+  carried to the payer and its answer relayed, at every conformance level, like any other
+  submission. The `409 correlation id already names another patient's authorization` and
+  the `502 holder read failed` the leg answered, before forwarding, when its store could
+  not say whether the id was taken, are no longer answered.
+- **Why:** nothing is shared between two patients' authorizations under one correlation
+  id. The ledger keys each authorization by the payer's own binding of the member the
+  request names as well as the correlation id, an amendment binds only its own patient's
+  pend, and an inquiry matches on the identifiers the payer issued and records nothing for
+  another patient (`pend.other-subject`). The refusal named no network primitive: the
+  requester's own id, sealed afresh and carrying its own authority, is routed by the Hub
+  on purpose.
+- **Store outage:** the submit leg reads nothing from the store before forwarding. A store
+  that cannot be written when the answer comes back is reported as `pa.local-write-failed`,
+  and the payer's answer is still relayed.
+- **Go API:** the gateway no longer calls `engine.EOBOwnerLookup`,
+  `engine.PendCorrelationLookup` or `engine.DecisionEOBID`, and v0.63.0 removes them with
+  the built-in stores' implementations (see "The gateway store's EOB API is removed"
+  below).
+- The v0.60.0 and v0.52.0 entries below that describe the refusal stay as the history of
+  those releases.
+
+## A payer gateway builds no decision EOB (v0.63.0)
+
+- **Breaking (behavior):** a payer gateway no longer builds, validates or stores a decision
+  ExplanationOfBenefit when it records the payer's decision, on the PAS submit leg or from an
+  inquiry's answer. The decision itself is recorded on the pend ledger as before (decided,
+  with the payer's outcome and date), and the payer's answer is relayed exactly as before.
+  The store's ExplanationOfBenefit table is no longer written or read. Nothing removes a row
+  an earlier release wrote: those rows stay until a later release drops the table on first
+  boot (see "The gateway store's EOB API is removed" below).
+- **Breaking (observer events):** `pa.decision-eob-not-written`, `pend.inquiry-eob-withheld`
+  and `pend.eob-removed` are no longer emitted. `pend.decision-not-recorded` is no longer
+  raised with the detail `eob id belongs to another patient`: a decision under a correlation
+  id another patient's decision already used is recorded on its own patient's row (see "A PAS
+  submission under another patient's correlation id is carried" above). The details of
+  `pa.local-write-skipped` and of `pend.decision-not-recorded` for a denial that states
+  `preAuthRef` now end `no pend or decision written` and `no decision written`.
+- **Breaking (injected responders):** a `LegResponder` no longer returns side-effect FHIR for
+  the gateway to validate and fence (`LegResult.SideEffectFHIR` is gone). A responder records
+  what it keeps through its `Commit`, as the built-in responder does.
+- **Behavior (observe):** at observe, every governed FHIR check now runs off the request path
+  (queued, its finding emitted when the validator answers) except a bridged payload's, which
+  refuses at every level. The decision EOB check was the one check that stayed on the request
+  path at observe, under a 2-second budget; that budget is gone with it.
+- **Go API (breaking):** removed `engine.DecisionEOBNotWrittenEvent`,
+  `engine.PendInquiryEOBWithheldEvent`, `engine.PendEOBRemovedEvent` and the field
+  `engine.LegResult.SideEffectFHIR`. The store's EOB API goes too, in the next section.
+- The v0.62.0 and older entries below that describe the decision EOB stay as the history of
+  those releases.
+
+## The gateway store's EOB API is removed (v0.63.0)
+
+- **Behavior:** the gateway store no longer reads or writes its ExplanationOfBenefit table.
+  The Postgres store still creates the table, empty, on a database that lacks it, and
+  nothing removes a row an earlier release wrote: those rows stay until a later release
+  drops the table on first boot. Nothing a participant sees changes: with the Patient
+  Access API, the correlation-id refusal and the decision EOB gone (above), no route,
+  answer or event read the table.
+- **Inquiry match:** an inquiry's pend match no longer weighs which authorization the
+  inquiry's own lines (their trace numbers and authorization numbers) name. That told only
+  the decision EOB what to state; the match and its verdict are unchanged.
+- **Go API (breaking)**, as gorelease reports it against v0.62.0:
+  - `engine`, removed: `Store.RecordEOB`, `Store.EOBsForPatient`, `Store.EOBByID`,
+    `EOBRecord`, `ErrPendEOBInvalid`, `ErrEOBSubjectMismatch`,
+    `DecisionEOBID`, `EOBOwnerLookup`, `PendCorrelationLookup`, `PendEOBStale`,
+    `PendEOBWritable`, `PendAboutKeys`, `PendMatch.About`, `PendTransition.EOBRemoved`,
+    `(*MemStore).RecordEOB`, `(*MemStore).EOBsForPatient`, `(*MemStore).EOBByID`,
+    `(*MemStore).EOBOwner` and `(*MemStore).PendedForOtherSubject`.
+  - `engine`, changed: `PendLedger.RecordDecision` and `(*MemStore).RecordDecision` lose
+    their last parameter, `eob *EOBRecord`: `RecordDecision(subjectPCI, corrID, outcome
+    string, decidedAt time.Time, k PendKeys) (PendTransition, error)`.
+    `PendLedger.LookupPended` and `(*MemStore).LookupPended` lose `about []PendKeyRef`:
+    `LookupPended(requesterHolder string, k PendKeys) (PendMatch, error)`.
+    `ResolvePendMatch` loses `about []PendKeyRef` and `aboutHolders []PendCandidate`:
+    `ResolvePendMatch(stated PendKeys, candidates []PendCandidate, held []PendKeyRef,
+    echoed bool) PendMatch`.
+  - `connectors/pgstore`, removed: `(*PgStore).RecordEOB`, `(*PgStore).EOBsForPatient`,
+    `(*PgStore).EOBByID`, `(*PgStore).EOBOwner` and `(*PgStore).PendedForOtherSubject`;
+    changed: `(*PgStore).RecordDecision` and `(*PgStore).LookupPended`, as on `MemStore`.
+  - Renamed: `engine.PendEOBWritable` → `engine.PendDecisionKept`, with the same parameters
+    and result. It decides whether the decision the ledger keeps after a write is this
+    answer's, so whether its authorization number is indexed (`DecisionPendKeys`).
+- **Go API (additive):** `engine.PendDecisionKept`.
+- **Migrating:** a third-party ledger (an implementation of `engine.PendLedger`) drops the
+  `eob` argument from `RecordDecision` and writes or removes no EOB, drops the `about`
+  argument from `LookupPended` and no longer reads which authorizations hold those keys,
+  calls `engine.PendDecisionKept` where it called `engine.PendEOBWritable` and stops calling
+  `engine.PendEOBStale`; it, and any other caller of `ResolvePendMatch`, calls
+  `engine.ResolvePendMatch(stated, candidates, held, echoed)`, the old call without its
+  `about` and `aboutHolders` arguments. Nothing replaces them: they only set
+  `PendMatch.About`, which only the decision EOB read, and the verdict is reached as before.
+  A custom `Store` need no longer implement `RecordEOB`, `EOBsForPatient` or `EOBByID`.
+  A ledger left on the old signatures still compiles, because the gateway finds the ledger
+  by a runtime type check on the store, but it no longer implements `engine.PendLedger`, and
+  the PAS legs then record through the ledger-less fallback without saying so. Add
+  `var _ engine.PendLedger = (*YourStore)(nil)` beside the implementation, so the compiler
+  refuses the old signatures.
+- The "Breaking in v0.60.0" and "Breaking in v0.52.0" entries under "Supported seams"
+  below, which tell a custom ledger to call `PendEOBWritable`, `PendEOBStale` and
+  `ResolvePendMatch` with `about`, or describe `EOBOwnerLookup`, `PendCorrelationLookup`
+  and `ErrEOBSubjectMismatch`, stay as the history of those releases.
+
+## The validator image loads no PDex IG (v0.63.0)
+
+- **Breaking (deployment):** the validator image built from v0.63.0's or a
+  later `deploy/validator` no longer loads the Da Vinci PDex 2.1.0 IG, and its
+  readiness corpus no longer validates a PDex ExplanationOfBenefit. The corpus
+  is 41 rows, three of them profile-resolution rows. No gateway builds a PDex
+  resource from v0.63.0, and none declares a PDex contract line from v0.62.0.
+- **Upgrade the gateway before the image, or with it.** A gateway qualifies a
+  default validator lane by running the same corpus before it routes to it, and
+  qualifies a 2.1 or 2.2 lane given by address (`FHIR_VALIDATE_URL_<line>` or
+  `FHIR_CERTIFY_URL_<line>`) the same way before it certifies on it. A v0.62.x
+  gateway still runs the PDex row, which fails against an image built from
+  v0.63.0, so:
+  - a default lane it declares fails its boot, and any other default lane never
+    becomes ready;
+  - a lane given by address still routes, but its certification never
+    qualifies, so no certification evidence is collected for that line.
+
+  A v0.63.0 gateway qualifies an earlier image, which still loads the IG,
+  because it asks one row fewer.
+- `verify.sh` now expects 274, 292 and 1030 indexed StructureDefinitions on the
+  2.0, 2.1 and 2.2 lines (37 fewer each).
+- Nothing a gateway relays or refuses changes.
 
 ## A payer's Patient Access API can be turned off (v0.62.0)
 
@@ -209,7 +1067,9 @@ receives changes.
 - A request this gateway cannot read strictly (a repeated member name, one
   that matches a FHIR name only by case folding, or another shape the strict
   reader does not accept) is read exactly as before, so no two readers of it
-  see two patients and nothing it answered before is refused.
+  see two patients and nothing it answered before is refused. From v0.63.0
+  an eligibility request that repeats a member name, or names one only in
+  another case, is refused ("An eligibility request is read one way only").
 - No Go API changes.
 
 ## A pair that shares no IG line is carried by default (v0.62.0)
@@ -740,6 +1600,10 @@ receives changes.
   2.0.1) exactly as the gateway checks one there: they and the gateway's own
   check share one per-line definition. The line-less readers are these at no
   line. Nothing the gateway relays or refuses changes.
+- These readers now live in `pa/pasanswer` (`engine.PASInquiryAnswerReadsAt`
+  as `pasanswer.InquiryAnswerReadsAt`); the `engine` names are deprecated
+  forwarders that stay until v1.0.0 (see "The PAS answer readers have their
+  own package").
 
 ## Another patient inside a PAS request (v0.61.0)
 
@@ -2360,10 +3224,11 @@ dialed:
 until it passes, the line's verdict is unavailable, "lane not qualified", and nothing is
 dialed for the exchange, so a validator still warming never answers a verdict. The gate
 re-qualifies after a lane stops answering: a qualified 2.1 or 2.2 lane (a default one too) that
-fails at the connection (it refuses, resets or closes it, cannot be reached, or does not answer
-within the certification's 2 s while the collection is still waiting; that certification is
-recorded expired, since the client's own limits are 2.5 s) is unqualified for certification
-until it passes again, "re-qualifying", and nothing is dialed meanwhile. A re-qualification
+fails at the connection (it refuses, resets or closes it, or cannot be reached) is unqualified
+for certification until it passes again, "re-qualifying", and nothing is dialed meanwhile. A
+lane that does not answer within the certification's 2 s while the collection is still waiting
+(that certification is recorded expired, since the client's own limits are 2.5 s) is asked for
+its metadata once, and re-qualifies only if that goes unanswered (v0.63.0, above). A re-qualification
 starts at most once every 30 s; its attempts then follow the qualification's own schedule,
 which starts over with each re-qualification: each attempt lasts up to 60 s and repeats
 `GET /metadata` until it answers `200` (each request waits up to 4 s, then 1 s passes before
@@ -2772,6 +3637,29 @@ expected to change shape as their consumer matures:
   - `Config.DemoEdgeCapture bool` — the config field `SHN_DEMO_EDGE_CAPTURE` parses into.
 
   Same evolving posture as the rest of this surface: consumers pin exact gateway versions.
+
+- **`scenarioauth`** (`AudiencePrefix`/`AudienceFor`, `HeaderName`, `PathPrefix`, `TTL`, `MaxIssueSkew`, the `Caller*` labels,
+  `Binding`/`BindingHash`, `Sign`, `Transport`, `Client`, `KeyEnv`/`KeyFileEnv`/`GatewayEnv`, `ErrNoGateway`, `ParseKey`, `ParseCallers`,
+  `LoadKeyFile`, `KeyFromEnv`, `ClientFromEnv`, `SignerOf`, `StartupLine`, `Caller`, `Verify`): new in v0.63.0.
+  It authenticates a caller of a provider gateway's `/scenario` routes. A request carries an
+  `X-Holder-Assertion` for the gateway it is sent to (audience `scenario:` and that gateway's holder
+  id), signed with the caller's own Ed25519 key under its label, valid for at most one minute. The
+  assertion is bound to the request's method, target (path and query) and body. A caller signs
+  through the `Transport`, naming the gateway it calls; `ClientFromEnv` reads it from
+  `SCENARIO_GATEWAY` and refuses a key without it (`ErrNoGateway`). `Verify` admits only the
+  callers, by label and public key, that the gateway passes it, and only for the gateway's own
+  holder id, so an assertion for one gateway is refused at every other. A signed request goes out
+  on a connection of its own (a copy of the base `*http.Transport` with keep-alives off), so Go's
+  transport never resends an assertion the gateway may already have spent; a base of another kind
+  is used as it is, and its retries are its own. The wire format, in the
+  SDK's `docs/PARTICIPANT_PROTOCOL.md` (§3.4a), is the contract, not this package: the `shn`
+  CLI's `scenario-key`, `scenario-sign` and `send-test` implement it too, and what they write
+  and sign is tested against this package's `Verify` and key reader. A provider gateway checks
+  these assertions when `SCENARIO_CALLERS_FILE` names its callers (`engine.Config.ScenarioCallers`,
+  also new in v0.63.0; see `docs/CONFIGURATION.md`), and records each one used in its replay
+  store under `engine.ReplayScopeScenarioJTI` (new in v0.63.0), so a replay store that admits
+  named scopes must admit that one. **Evolving**: consumers pin exact
+  gateway versions.
 
 - **`scenariodriver`** (`Config`, `Driver`, transport methods, builders, `Cards`/`ParseCards`):
   the UC-01…08 scenario-driving package. New in v0.19.0 and **evolving** — signatures and

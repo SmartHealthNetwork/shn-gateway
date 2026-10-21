@@ -257,8 +257,8 @@ func TestRequestNamedPatients_NamesEveryOtherPatient(t *testing.T) {
 	}
 }
 
-// With the Hub not reading the list, and on a leg that is not a
-// prior-authorization request, the pass reads nothing and names no one.
+// With the Hub not reading the list, and on a leg whose request names no
+// other patient (a federated query), the pass reads nothing and names no one.
 func TestRequestNamedPatients_ReadsNothingUnlessTheHubReadsTheList(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -266,7 +266,7 @@ func TestRequestNamedPatients_ReadsNothingUnlessTheHubReadsTheList(t *testing.T)
 		leg        string
 	}{
 		{"hub does not read the list", false, "pas-claim"},
-		{"not a prior-authorization request leg", true, "coverage-eligibility"},
+		{"a leg naming no other patient", true, "federated-query"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			g, authz, sor, _ := involvedGateway(t, tc.hubAccepts)
@@ -341,6 +341,35 @@ func TestRequestNamedPatients_LeavesOutWhatCannotBeIdentified(t *testing.T) {
 		}
 		if want := []string{involvedOmitUnreadable, involvedOmitUnreadable, involvedOmitUnreadable, involvedOmitUnreadable, involvedOmitUnreadable}; !slices.Equal(*omitted, want) {
 			t.Fatalf("omitted %v, want %v", *omitted, want)
+		}
+	})
+	t.Run("a member whose number a Coverage's party carries", func(t *testing.T) {
+		g, _, _, omitted := involvedGateway(t, true)
+		payload := []byte(`{"resourceType":"Bundle","entry":[
+		 {"resource":{"resourceType":"Claim","patient":{"reference":"Patient/MBR-COVERED"},"subject":{"reference":"Patient/eFAM"}}},
+		 {"resource":{"resourceType":"Coverage","beneficiary":{"reference":"Patient/eFAM"},"subscriber":{"reference":"Patient/parent-x"}}},
+		 {"resource":{"resourceType":"Patient","id":"parent-x","identifier":[{"system":"` + shnsdk.MemberSystem + `","value":"eFAM"}],"birthDate":"1970-01-01","name":[{"family":"Parentname"}]}}
+		]}`)
+		// The party is named under its own identity, from its own record; the
+		// member whose number it carries cannot be identified and is left out.
+		got := g.requestNamedPatients(context.Background(), "pas-claim", "corr-1", payload, heldPCI(t, "MBR-COVERED"))
+		if len(got) != 1 || got[0].pci != derivedPCI("parent-x", "1970-01-01", "Parentname") {
+			t.Fatalf("named %v, want only the party, under its own identity", got)
+		}
+		if !slices.Equal(*omitted, []string{involvedOmitUnknown}) {
+			t.Fatalf("omitted %v, want the member it cannot identify", *omitted)
+		}
+	})
+	t.Run("a dependent's Coverage naming the parent", func(t *testing.T) {
+		g, _, _, omitted := involvedGateway(t, true)
+		payload := []byte(`{"resourceType":"Bundle","entry":[
+		 {"resource":{"resourceType":"Claim","patient":{"reference":"Patient/MBR-COVERED"}}},
+		 {"resource":{"resourceType":"Coverage","beneficiary":{"reference":"Patient/MBR-COVERED"},"subscriber":{"reference":"Patient/parent-x"}}},
+		 {"resource":{"resourceType":"Patient","id":"parent-x","birthDate":"1970-01-01","name":[{"family":"Parentname"}]}}
+		]}`)
+		got := g.requestNamedPatients(context.Background(), "pas-claim", "corr-1", payload, heldPCI(t, "MBR-COVERED"))
+		if len(got) != 1 || got[0].pci != derivedPCI("parent-x", "1970-01-01", "Parentname") || len(*omitted) != 0 {
+			t.Fatalf("named %v, omitted %v; want the parent named under its own identity", got, *omitted)
 		}
 	})
 	t.Run("known members required", func(t *testing.T) {

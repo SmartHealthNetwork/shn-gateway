@@ -23,9 +23,9 @@ const replayPurgeInterval = time.Minute
 // so an unknown scope is a replay here too — decided before any statement runs, so a
 // scope string the engine never emits cannot drive database work.
 var replayScopes = map[string]bool{
-	engine.ReplayScopeIngressJTI:    true,
-	engine.ReplayScopeHubJTI:        true,
-	engine.ReplayScopePatientAccess: true,
+	engine.ReplayScopeIngressJTI:  true,
+	engine.ReplayScopeHubJTI:      true,
+	engine.ReplayScopeScenarioJTI: true,
 }
 
 // ReplayStore is the Postgres one-time-use record shared by every replica of a

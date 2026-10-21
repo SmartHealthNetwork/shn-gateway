@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/SmartHealthNetwork/shn-gateway/internal/pasgraph"
 )
 
 // A dependent's PAS answer carries the Coverage the payer answered for, and
@@ -310,7 +312,7 @@ func TestDependentAnswer_OnlyThePartysIDMustBeUnique(t *testing.T) {
 				if err := json.Unmarshal(answer, &doc); err != nil {
 					t.Fatal(err)
 				}
-				if p := entryCoverageParties(answerEntryOf(t, doc, "Coverage")); !p.any() || p.roleOf(0) != roleCoverageParty {
+				if p := pasgraph.EntryCoverageParties(answerEntryOf(t, doc, "Coverage")); !p.Any() || p.RoleOf(0) != pasgraph.RoleCoverageParty {
 					t.Fatalf("%s: the Coverage has no party", fixture)
 				}
 			}
@@ -350,11 +352,11 @@ func TestDependentSubmitAnswer_RuleFencesTheParty(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			expected, why := g.subjectIdentity(g.response, "Patient/SubscriberExample")
+			expected, why := g.SubjectIdentity(g.Response, "Patient/SubscriberExample")
 			if why != "" {
 				t.Fatal(why)
 			}
-			if r := g.subjectMismatch(expected); r == nil || !strings.Contains(r.Why, row.want) {
+			if r := pasGraphSubjectMismatch(g, expected); r == nil || !strings.Contains(r.Why, row.want) {
 				t.Fatalf("got %+v, want %q", r, row.want)
 			}
 		})
@@ -363,8 +365,8 @@ func TestDependentSubmitAnswer_RuleFencesTheParty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	expected, _ := g.subjectIdentity(g.response, "Patient/SubscriberExample")
-	if r := g.subjectMismatch(expected); r != nil {
+	expected, _ := g.SubjectIdentity(g.Response, "Patient/SubscriberExample")
+	if r := pasGraphSubjectMismatch(g, expected); r != nil {
 		t.Fatalf("the control is refused: %s", r.Why)
 	}
 }

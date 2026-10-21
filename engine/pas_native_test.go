@@ -302,11 +302,11 @@ func TestParseConformantPASSubjects_AcceptsOriginatorBuilt(t *testing.T) {
 
 // TestTask0B_ConformantUpdateGoldenBinds is the update-golden oracle, pointed at the
 // PRODUCTION parseConformantPASUpdateFacts (the throwaway task0bUpdateFacts spike
-// helper was promoted into pas_native.go and deleted). The hand-derived demo-persona conformant amended
+// helper was promoted into workstream_pa_pas_inbound.go and deleted). The hand-derived demo-persona conformant amended
 // re-POST golden (UC-04 operative-DR variant) MUST (a) subject-bind through the SAME tolerant
 // parser the conformant submit leg runs (parseConformantPASSubjects → member==MBR-COVERED) AND
 // (b) satisfy the FR-32 Provenance/DR facts the inbound gate enforces (mirror of
-// payer.go:393-424): Claim.related[prior] present, Provenance has ≥1 agent, Provenance targets the
+// workstream_pa_dtr_inbound.go:393-424): Claim.related[prior] present, Provenance has ≥1 agent, Provenance targets the
 // EXACT supplemental DiagnosticReport by id. (The make-validate oracle is run out-of-band.)
 func TestTask0B_ConformantUpdateGoldenBinds(t *testing.T) {
 	golden := readConformantGolden(t, "pas-update-request.json")
@@ -345,7 +345,7 @@ func TestTask0B_ConformantUpdateGoldenBinds(t *testing.T) {
 	if !f.hasDR || f.diagnosticReportID == "" {
 		t.Fatal("FR-32 (DR variant): the supplemental DiagnosticReport must carry an id")
 	}
-	// The DR-variant FR-32 arm (payer.go:402-407): Provenance.target references DiagnosticReport/<id>.
+	// The DR-variant FR-32 arm (workstream_pa_dtr_inbound.go:402-407): Provenance.target references DiagnosticReport/<id>.
 	wantTarget := "DiagnosticReport/" + f.diagnosticReportID
 	targeted := false
 	for _, ref := range f.provenanceTargets {

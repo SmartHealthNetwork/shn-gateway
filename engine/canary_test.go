@@ -242,9 +242,9 @@ func TestScenario_PersonaSetRejections(t *testing.T) {
 }
 
 // TestScenario_UC03BridgeBranches pins the sanctioned handleUC03 branch switch for BOTH
-// bridge arms (task2 brief A3a added "bridge-demo" alongside the pre-existing
-// "bridge-refuse"): "" (or an absent body) keeps working exactly like before;
-// "bridge-demo"/"bridge-refuse" are each a KNOWN branch (never 400 on the branch
+// bridge arms ("bridge-demo" and "line-carry"): "" (or an absent body) keeps working
+// exactly like before; "bridge-demo"/"line-carry" are each a KNOWN branch (never 400 on
+// the branch
 // itself); an unrecognized branch 400s (uc01's idiom); and ?personaSet=canary combined
 // with either bridge branch fails closed 400 naming the branch's own member —
 // deliberately NOT via a new CanaryTwins entry (the reviewer's ruling: a canary twin for
@@ -270,7 +270,7 @@ func TestScenario_UC03BridgeBranches(t *testing.T) {
 
 	for _, tc := range []struct{ branch, member string }{
 		{"bridge-demo", "MBR-BRIDGE-DEMO"},
-		{"bridge-refuse", "MBR-BRIDGE-REFUSE"},
+		{"line-carry", "MBR-BRIDGE-REFUSE"},
 	} {
 		// The branch is KNOWN: it must not 400 on the branch check itself (this
 		// fixture has no PayerRouter at all, so it 422s downstream for every member —

@@ -1,21 +1,20 @@
 # Validator lane recordings
 
-What a real HAPI validator lane answered, captured on 2026-09-26 from three local HAPI FHIR 8.10.0
-validator lanes, one each for the 2.0, 2.1 and 2.2 contract lines, through an exact-bytes
-recording proxy. The exchange whose request is the line's synthetic PAS request bundle was
-captured again on 2026-10-06, the same way from lanes of the same pinned images, when that bundle
-changed; every other exchange is the 2026-09-26 capture, and the 2026-10-06 run's answers to their
-requests were byte-identical to its settled answers (that run met an already-warm 2.2 lane, so the
-two first-validation answers described below did not recur).
+What a real HAPI validator lane answered, through an exact-bytes recording proxy. The warm
+recordings were captured on 2026-10-19 from three local HAPI FHIR 8.12.0 validator lanes, one each
+for the 2.0, 2.1 and 2.2 contract lines, each freshly restarted, once the PDex IG had left the
+lanes. The metadata and error recordings are the 2026-09-26 capture from HAPI FHIR 8.10.0 lanes,
+which also loaded the PDex IG; nothing in them names it.
 Each lane runs the digest-pinned engine and backported WAR the Smart Gateway's
 `deploy/validator` builds on, loaded with its line's IG closure and the shared validation-support
 package. No participant or patient data.
 
 - `lane-2.0-warm.json`, `lane-2.1-warm.json`, `lane-2.2-warm.json`: the full readiness corpus
-  (42 `$validate` requests per line) and each answer. The requests are the validator code's own:
-  its readiness warm-up ran against each lane, and then its verification pass; every request
-  body is a committed synthetic fixture. A request whose last answers were byte-identical is
-  kept once and marked `repeat`. An earlier, different answer stays in order: on the 2.2 lane
+  (41 `$validate` requests per line) and each answer. The requests are the validator code's own,
+  sent by the Kit's copy of it (`kit/validatorwarm`), which the platform repository fences
+  byte-identical to the image's: its readiness warm-up ran against each lane, and then its
+  verification pass; every request body is a committed synthetic fixture. A request whose
+  last answers were byte-identical is kept once and marked `repeat`. An earlier, different answer stays in order: on the 2.2 lane
   the first validation of each of two ClaimResponse profile forms (versioned and unversioned)
   reported extra `SLICING_CANNOT_BE_EVALUATED` issues (6 issues, then 3 on every later
   request), the lane still warming.

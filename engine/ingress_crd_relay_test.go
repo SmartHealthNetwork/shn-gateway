@@ -279,7 +279,7 @@ func TestCRDIngress_UnknownService404(t *testing.T) {
 }
 
 // TestCRDIngress_RelaysAtNoneWithFinding is the observable-behaviour proof
-// that crdAnswerOutcome's use of g.policy() — not a hardcoded strict
+// that crdAnswerOutcome's use of g.conformance() — not a hardcoded strict
 // policy — is what the wire actually does: at ConformanceEnforcement=none, a
 // payer answer that breaks a non-structural CDS Hooks rule (an action with no
 // description) still reaches the EHR byte-identical, and the violation is

@@ -1,0 +1,4 @@
+# README step 0 writes the /scenario caller's key here: a credential, never committed.
+scenario-caller-*.sign
+# The discovery descriptor the README's signed curl downloads.
+discovery.json

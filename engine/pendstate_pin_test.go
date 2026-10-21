@@ -12,7 +12,7 @@
 //	handleUC05         (in-request pend→update)    — MID-REQUEST drift + federation
 //
 // These round trips replaced the lexical source-guards that used to stand in for
-// the last three: they grepped originate.go/originate_resume.go for the literal
+// the last three: they grepped module1_originate.go/module1_originate_resume.go for the literal
 // `ProfileID: st.pasToken` / `ProfileID: pasToken` references, which caught a
 // deleted wiring line but could never catch a pin that was passed and then
 // ignored. What survives from those guards is the SELECT-BEFORE-BUILD
@@ -433,7 +433,7 @@ func assertClaimedVersions(t *testing.T, stub *pendResumeSubstrate, legType stri
 // pas-claim-update leg then survives a MID-PEND registry drift to an
 // incompatible declared line — which a fresh selectLegToken call (proven right
 // alongside it) now refuses. If the pin were dropped anywhere on this path
-// (gateway.go's pendState.pasToken field, scenarioToPend's selection/storage, or
+// (module1_pending.go's pendState.pasToken field, scenarioToPend's selection/storage, or
 // completeClinician's Content.ProfileID), OriginateLeg would re-select on the
 // resume leg, hit the drifted registry, and this test would fail closed with a
 // RouteRefusalError surfaced as a 502 — not a silent pass.
@@ -609,6 +609,7 @@ func TestCompletePatient_ChainResumeRunsEgressAdapt(t *testing.T) {
 	// native view to {2.1} so only arm (3) (the transform chain) can bridge it.
 	driftRegistryTo(t, gw, "payer", []string{shnsdk.ContractPACRD21, shnsdk.ContractPADTR21, shnsdk.ContractPAPAS22})
 	gw.cfg.EgressNativeLines = []string{"2.1"}
+	gw.cfg.TranslateIGLines = true
 
 	var transformed int
 	gw.cfg.Observer = func(e ObserverEvent) {
@@ -708,7 +709,7 @@ func TestHandleUC05_PinsBothLegsAcrossMidRequestDrift(t *testing.T) {
 const federatedQueryIngressMutationMarker = "UC05_FQ_INGRESS_MUTATION_MARKER"
 
 // TestHandleUC05_FederatedQueryIngressValidatesOnDemoLane is NEW-2's call-site
-// guard: Finding 1's original defect (originate.go's UC-05 facility federated-query
+// guard: Finding 1's original defect (module1_originate.go's UC-05 facility federated-query
 // leg calling validateFHIRPayerIngress instead of plain validateFHIR) was only
 // caught by gateway.go-level unit tests exercising the two validate functions
 // directly — go test ./engine/ stayed green if that ONE call site regressed back to
@@ -811,7 +812,7 @@ func TestHandleUC05_FederatedQueryIngressRelaysBelowStrict(t *testing.T) {
 				t.Fatalf("at %s the corrupted federated-query answer must relay (not refused): status=%d body=%s", level, rec.Code, rec.Body.String())
 			}
 			// AuthNumber discriminates the approved branch from pended/consent-denied
-			// (unlike FacilityID, which is a registry lookup by role — originate.go's
+			// (unlike FacilityID, which is a registry lookup by role — module1_originate.go's
 			// "facility, fok := g.cfg.Reg.LookupByRole" then "FacilityID: facility.ID"
 			// — known before the leg runs and identical regardless of what the record
 			// contains, so it proves nothing about the evidence itself).
@@ -918,7 +919,7 @@ func assertInRequestPendResumePinned(t *testing.T, gw *Gateway, stub *pendResume
 
 // ---- The pended-flow carry-intact guard ----
 //
-// The pended-line pin's sibling (gateway.go's pendState.carriedEntries): the
+// The pended-line pin's sibling (module1_pending.go's pendState.carriedEntries): the
 // down-leg's declared Carried entries are pinned beside the routed token so a
 // RESTORING resume chain has an independent record to verify the payload
 // against BEFORE pasStep2122Up would silently no-op over an already-absent
@@ -940,6 +941,7 @@ func upChainPendFixture(t *testing.T, opts pendFixtureOpts) (*Gateway, *pendResu
 	gw, stub := newPendResumeFixture(t, opts)
 	driftRegistryTo(t, gw, "payer", []string{shnsdk.ContractPACRD21, shnsdk.ContractPADTR21, shnsdk.ContractPAPAS22})
 	gw.cfg.EgressNativeLines = []string{"2.1"}
+	gw.cfg.TranslateIGLines = true
 	return gw, stub
 }
 
@@ -954,6 +956,7 @@ func downChainPendFixture(t *testing.T, opts pendFixtureOpts) (*Gateway, *pendRe
 	gw, stub := newPendResumeFixture(t, opts)
 	driftRegistryTo(t, gw, "payer", []string{shnsdk.ContractPACRD21, shnsdk.ContractPADTR21, shnsdk.ContractPAPAS21})
 	gw.cfg.EgressNativeLines = []string{"2.2"}
+	gw.cfg.TranslateIGLines = true
 	return gw, stub
 }
 
@@ -1235,18 +1238,18 @@ func TestCarriedEntriesFrom(t *testing.T) {
 // exception assertBuildsAfterLineSelection is (below), for the same reason,
 // and it retires the day a real carrying payload exists to drive.
 func TestScenarioToPend_ThreadsChainCarriedEntriesIntoThePendRecord(t *testing.T) {
-	src, err := os.ReadFile("originate_resume.go")
+	src, err := os.ReadFile("module1_originate_resume.go")
 	if err != nil {
 		t.Fatalf("read source: %v", err)
 	}
 	fn := extractFunc(t, string(src), "scenarioToPend")
-	if strings.Contains(fn, ", _, err = g.egressAdapt(") {
-		t.Fatal("scenarioToPend DISCARDS egressAdapt's LossReports — the pended leg's Carried entries are the " +
-			"pend record's only input, so discarding them leaves the resume guard nothing to verify against")
-	}
-	adaptAt := strings.Index(fn, "g.egressAdapt(route, bundleJSON,")
+	adaptAt := strings.Index(fn, "g.sendLeg(ctx, r, legSend{")
 	if adaptAt < 0 {
-		t.Fatal("scenarioToPend no longer runs its pas-claim leg through g.egressAdapt")
+		t.Fatal("scenarioToPend no longer runs its pas-claim leg through g.sendLeg")
+	}
+	if !strings.Contains(fn[adaptAt:], "pasReports := sent.Reports") || !strings.Contains(fn, "carriedEntries: carriedEntriesFrom(pasReports)") {
+		t.Fatal("scenarioToPend DISCARDS the walk's LossReports — the pended leg's Carried entries are the " +
+			"pend record's only input, so discarding them leaves the resume guard nothing to verify against")
 	}
 	pinAt := strings.Index(fn, "carriedEntries: carriedEntriesFrom(")
 	if pinAt < 0 {
@@ -1273,7 +1276,7 @@ func TestScenarioToPend_ThreadsChainCarriedEntriesIntoThePendRecord(t *testing.T
 
 func assertBuildsAfterLineSelection(t *testing.T, fn, fnName string) {
 	t.Helper()
-	sel := `route, ok := g.selectLegLineOrFail(w, res.recipient, "pas-claim", pasCorr)`
+	sel := `route, ok := g.selectLegLineOrFail(w, res.recipient, "pas-claim", pasCorr, relay.BuilderSDKPASSubmit)`
 	selAt := strings.Index(fn, sel)
 	if selAt < 0 {
 		t.Fatalf("%s does not pre-select the pas-claim line via g.selectLegLineOrFail before its pas-claim leg", fnName)
@@ -1293,7 +1296,7 @@ func assertBuildsAfterLineSelection(t *testing.T, fn, fnName string) {
 }
 
 func TestHandleUC04_SelectsLineBeforeBuilding(t *testing.T) {
-	src, err := os.ReadFile("originate.go")
+	src, err := os.ReadFile("module1_originate.go")
 	if err != nil {
 		t.Fatalf("read source: %v", err)
 	}
@@ -1301,7 +1304,7 @@ func TestHandleUC04_SelectsLineBeforeBuilding(t *testing.T) {
 }
 
 func TestHandleUC05_SelectsLineBeforeBuilding(t *testing.T) {
-	src, err := os.ReadFile("originate.go")
+	src, err := os.ReadFile("module1_originate.go")
 	if err != nil {
 		t.Fatalf("read source: %v", err)
 	}

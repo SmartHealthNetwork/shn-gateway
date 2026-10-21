@@ -275,7 +275,7 @@ func postIngress(t *testing.T, srv *httptest.Server, bearer, path, body string) 
 // pgMultiPASBundle is the minimum conformant-shaped PAS submit that reaches the
 // ingress's exchange seam: one Claim, one order and one Coverage, all bound to the same
 // member, with an inline payor identity the PAYER_DIRECTORY resolves. It reaches the
-// exchange seam (ingress.go's Begin precedes leg selection on this route), origination
+// exchange seam (workstream_pa_ingress.go's Begin precedes leg selection on this route), origination
 // then fails closed at the registry lookup, and the handler records exactly one leg and
 // answers 502.
 func pgMultiPASBundle() string {

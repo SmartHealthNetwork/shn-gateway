@@ -3,12 +3,8 @@ package engine
 import (
 	"context"
 	"encoding/json"
-	"errors"
-	"io"
 	"log"
-	"net"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/SmartHealthNetwork/shn-gateway/internal/lanequalify"
@@ -102,6 +98,15 @@ type GatedCertificationValidator struct {
 	looping, closed bool
 	// requalified is when the last re-qualification was scheduled to start.
 	requalified time.Time
+	// probe asks the lane for its metadata once, on a connection of its own
+	// (laneAnswers); tests replace it. checking: a check a timeout started is
+	// running. checked is when a timeout last started one.
+	// requalifications counts re-qualifications, so a check that a newer
+	// one overtook does not re-qualify the lane again.
+	probe            func(context.Context) error
+	checking         bool
+	checked          time.Time
+	requalifications int
 	// started: Start has run; nothing is attempted before it.
 	started bool
 	// unstartedLogged: the one certification_lane_not_started line has been
@@ -152,11 +157,13 @@ func NewQualifiedCertificationValidator(line string, client *shnsdk.OperationVal
 // without starting its attempts.
 func newGatedCertification(lane *DiscoveredLane, client *shnsdk.OperationValidator, qualify LaneQualifier, reason string) *GatedCertificationValidator {
 	ctx, cancel := context.WithCancel(context.Background())
+	own := ownConnectionClient()
 	return &GatedCertificationValidator{
 		lane: lane, client: client, qualify: qualify, reason: reason,
 		now: time.Now, delay: certificationRequalifyDelay, interval: certificationRequalifyInterval,
 		eager: certificationRequalifyEager, idle: certificationRequalifyIdle, minRequalify: certificationRequalifyMinInterval,
 		ctx: ctx, cancel: cancel,
+		probe: func(ctx context.Context) error { return laneAnswers(ctx, own, client.BaseURL) },
 	}
 }
 
@@ -192,16 +199,19 @@ func (v *GatedCertificationValidator) startLocked(wait time.Duration) {
 // instead, dials nothing, and logs one certification_lane_not_started line, at
 // its first certification.
 //
-// A qualified lane that stops answering at the connection (laneStopped) may
-// have restarted, and a restarted lane is warming again. That failure clears
-// the qualification, routing's included for this client, and qualifies the
-// lane again, at most once per minRequalify; that certification and every one
+// A qualified lane that fails at the connection (laneUnreachable) may have
+// restarted, and a restarted lane is warming again. That failure clears the
+// qualification, routing's included for this client, and qualifies the lane
+// again, at most once per minRequalify; that certification and every one
 // until an attempt passes are unavailable, naming the re-qualification, and
-// nothing is dialed for them. Any other failure (a 5xx, an answer that is not
-// an OperationOutcome, the caller's own deadline) marks only that
-// certification unavailable, and an answer that is a verdict, valid or
-// invalid, changes nothing. A lane restarted between two certifications,
-// with no failure in between, is not detected.
+// nothing is dialed for them. A lane that did not answer in time
+// (laneTimedOut) may only be busy: that certification fails as it did, and
+// the lane is asked for its metadata (timedOut), re-qualifying only if it
+// does not answer. Any other failure (a 5xx, an answer that is not an
+// OperationOutcome, the caller's own deadline) marks only that certification
+// unavailable, and an answer that is a verdict, valid or invalid, changes
+// nothing. A lane restarted between two certifications, with no failure in
+// between, is not detected.
 func (v *GatedCertificationValidator) Validate(ctx context.Context, body []byte, profile string) (shnsdk.Result, error) {
 	v.mu.Lock()
 	if !v.started && !v.closed {
@@ -227,11 +237,14 @@ func (v *GatedCertificationValidator) Validate(ctx context.Context, body []byte,
 	v.mu.Unlock()
 	if ready {
 		res, err := v.client.Validate(ctx, body, profile)
-		if err == nil || !laneStopped(ctx, err) {
-			return res, err
+		switch laneFailureOf(ctx, err) {
+		case laneUnreachable:
+			v.requalify()
+			return shnsdk.Result{}, &CertificationLaneUnavailable{Reason: v.reason + "; " + v.requalifying}
+		case laneTimedOut:
+			v.timedOut()
 		}
-		v.requalify()
-		return shnsdk.Result{}, &CertificationLaneUnavailable{Reason: v.reason + "; " + v.requalifying}
+		return res, err
 	}
 	state := v.pending
 	switch {
@@ -243,24 +256,54 @@ func (v *GatedCertificationValidator) Validate(ctx context.Context, body []byte,
 	return shnsdk.Result{}, &CertificationLaneUnavailable{Reason: v.reason + "; " + state}
 }
 
-// laneStopped reports whether err is the lane failing at the connection: it
-// refused, reset or closed the connection, could not be reached, or did not
-// answer in time while the caller was still waiting. A lane that answered at
-// all (any status, any body) has not stopped, and a caller that gave up
-// (callerGaveUp) says nothing about the lane.
-func laneStopped(ctx context.Context, err error) bool {
-	if callerGaveUp(ctx) {
-		return false
+// timedOut checks a qualified lane that did not answer in time, at most once
+// per minRequalify: one metadata request on a connection of its own, which a
+// certification queued on the client's one connection does not wait behind.
+// The lane re-qualifies unless it answers; an answer of any status leaves it
+// qualified. The outcome is logged (certification_lane_timeout_check).
+func (v *GatedCertificationValidator) timedOut() {
+	v.mu.Lock()
+	now := v.now()
+	if v.closed || v.stale || v.checking || (!v.checked.IsZero() && now.Before(v.checked.Add(v.minRequalify))) {
+		v.mu.Unlock()
+		return
 	}
-	var answered *certificationHTTPError
-	if errors.As(err, &answered) {
-		return false
-	}
-	var op *net.OpError
-	var timeout net.Error
-	return errors.As(err, &op) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
-		errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET) ||
-		(errors.As(err, &timeout) && timeout.Timeout())
+	v.checking, v.checked = true, now
+	generation := v.requalifications
+	v.wg.Add(1)
+	v.mu.Unlock()
+	go func() {
+		defer v.wg.Done()
+		// checking clears only once the outcome is applied, so a check is
+		// never seen finished before its re-qualification.
+		defer func() {
+			v.mu.Lock()
+			v.checking = false
+			v.mu.Unlock()
+		}()
+		started := v.now()
+		err := v.probe(v.ctx)
+		if v.ctx.Err() != nil {
+			return // closed while checking
+		}
+		event, _ := json.Marshal(struct {
+			Version    int     `json:"version"`
+			Line       string  `json:"line"`
+			Host       string  `json:"host"`
+			Answered   bool    `json:"answered"`
+			At         string  `json:"at"`
+			DurationMS float64 `json:"duration_ms"`
+		}{1, v.lane.line, lanequalify.Host(v.client.BaseURL), err == nil, v.now().UTC().Format(time.RFC3339Nano), float64(v.now().Sub(started)) / float64(time.Millisecond)})
+		log.Printf("gateway: certification_lane_timeout_check %s", event)
+		if err != nil {
+			v.mu.Lock()
+			overtaken := v.requalifications != generation
+			v.mu.Unlock()
+			if !overtaken {
+				v.requalify()
+			}
+		}
+	}()
 }
 
 // callerGaveUp reports whether the caller stopped waiting for the lane. Under
@@ -288,6 +331,7 @@ func (v *GatedCertificationValidator) requalify() {
 		return
 	}
 	v.stale, v.ready, v.failures = true, false, 0
+	v.requalifications++
 	now := v.now()
 	wait := time.Duration(0)
 	if !v.requalified.IsZero() {

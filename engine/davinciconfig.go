@@ -16,8 +16,8 @@ const shnParticipantIDSystem = "urn:shn:participant-id"
 // hrexCodeForContract maps an SHN contract name to its HRex 1.2.0 endpoint
 // code (CodeSystem hrex-endpoint-name; version-specific form is
 // "<code>#<major.minor>"). pa.pdex is deliberately absent HERE — no gateway
-// declares a pa.pdex line: its Patient Access decision EOB is base FHIR R4,
-// not PDex. The checks prober holds the reverse map, which reads peers' own
+// declares a pa.pdex line: none serves a Patient Access API or builds a
+// PDex resource. The checks prober holds the reverse map, which reads peers' own
 // publications; extend BOTH or neither for any contract a gateway declares.
 var hrexCodeForContract = map[string]string{
 	"pa.crd": "davinci_crd_hook_endpoint",

@@ -1,0 +1,110 @@
+{
+  "workstream": "pa",
+  "taxonomyVersion": 1,
+  "legs": [
+    {
+      "transactionType": "coverage-eligibility",
+      "stagedName": "pa.coverage-eligibility",
+      "physics": "request-response",
+      "request": {"frame": "provider-tpo", "roles": ["provider"], "operation": "eligibility-inquiry"},
+      "response": {"frame": "payer-coverage", "roles": ["payer"], "operation": "eligibility-response"},
+      "scope": "eligibility-only",
+      "payloadBinding": "required",
+      "consent": null,
+      "observe": false,
+      "frameOperations": [],
+      "advertise": true
+    },
+    {
+      "transactionType": "crd-order-select",
+      "stagedName": "pa.crd-order-select",
+      "physics": "request-response",
+      "request": {"frame": "provider-tpo", "roles": ["provider"], "operation": "crd-order-select"},
+      "response": {"frame": "payer-coverage", "roles": ["payer"], "operation": "crd-cards"},
+      "scope": "crd-context",
+      "payloadBinding": "required",
+      "consent": null,
+      "observe": true,
+      "frameOperations": [],
+      "advertise": true
+    },
+    {
+      "transactionType": "crd-order-dispatch",
+      "stagedName": "pa.crd-order-dispatch",
+      "physics": "request-response",
+      "request": {"frame": "provider-tpo", "roles": ["provider"], "operation": "crd-order-dispatch"},
+      "response": {"frame": "payer-coverage", "roles": ["payer"], "operation": "crd-dispatch-cards"},
+      "scope": "crd-context",
+      "payloadBinding": "required",
+      "consent": null,
+      "observe": true,
+      "frameOperations": [],
+      "advertise": true
+    },
+    {
+      "transactionType": "dtr-questionnaire-fetch",
+      "stagedName": "pa.dtr-questionnaire-fetch",
+      "physics": "request-response",
+      "request": {"frame": "provider-tpo", "roles": ["provider"], "operation": "dtr-questionnaire-fetch"},
+      "response": {"frame": "payer-coverage", "roles": ["payer"], "operation": "dtr-questionnaire"},
+      "scope": "questionnaire-only",
+      "payloadBinding": "required",
+      "consent": null,
+      "observe": true,
+      "frameOperations": ["questionnaire-package", "next-question"],
+      "advertise": true
+    },
+    {
+      "transactionType": "pas-claim",
+      "stagedName": "pa.pas-claim",
+      "physics": "request-response",
+      "request": {"frame": "provider-tpo", "roles": ["provider"], "operation": "pas-submit"},
+      "response": {"frame": "payer-coverage", "roles": ["payer"], "operation": "pas-response"},
+      "scope": "pas-bundle",
+      "payloadBinding": "required",
+      "consent": null,
+      "observe": true,
+      "frameOperations": [],
+      "advertise": true
+    },
+    {
+      "transactionType": "pas-claim-update",
+      "stagedName": "pa.pas-claim-update",
+      "physics": "request-response",
+      "request": {"frame": "provider-tpo", "roles": ["provider"], "operation": "pas-update-submit"},
+      "response": {"frame": "payer-coverage", "roles": ["payer"], "operation": "pas-update-response"},
+      "scope": "pas-update-bundle",
+      "payloadBinding": "required",
+      "consent": null,
+      "observe": true,
+      "frameOperations": [],
+      "advertise": true
+    },
+    {
+      "transactionType": "pas-claim-inquire",
+      "stagedName": "pa.pas-claim-inquire",
+      "physics": "request-response",
+      "request": {"frame": "provider-tpo", "roles": ["provider"], "operation": "pas-inquire"},
+      "response": {"frame": "payer-coverage", "roles": ["payer"], "operation": "pas-inquire-response"},
+      "scope": "pas-inquire-bundle",
+      "payloadBinding": "required",
+      "consent": null,
+      "observe": true,
+      "frameOperations": [],
+      "advertise": true
+    },
+    {
+      "transactionType": "patient-dtr",
+      "stagedName": "pa.patient-dtr",
+      "physics": "request-response",
+      "request": {"frame": "provider-tpo", "roles": ["provider"], "operation": "patient-dtr-request"},
+      "response": {"frame": "patient-authorship", "roles": ["phg"], "operation": "patient-dtr-response"},
+      "scope": "patient-authorship-only",
+      "payloadBinding": "required",
+      "consent": null,
+      "observe": false,
+      "frameOperations": [],
+      "advertise": true
+    }
+  ]
+}

@@ -211,7 +211,6 @@ func TestNativeSubmit_PendRelayedForDeviceRequest(t *testing.T) {
 	if res.Commit == nil {
 		t.Fatal("a pend must be recorded so a follow-up can resolve it")
 	}
-	admitDecisionEOBs(&res)
 	if err := res.Commit(); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
@@ -229,12 +228,12 @@ func wantRecordedKeys(t *testing.T, store Store, claimResponseID, trace, corr st
 	t.Helper()
 	ledger, _ := LedgerOf(store)
 	m, err := ledger.LookupPended(relayRequester, PendKeys{
-		RequesterHolder: relayRequester, ClaimResponseIDs: []string{claimResponseID}, ItemTraceNumbers: []string{trace}}, nil)
+		RequesterHolder: relayRequester, ClaimResponseIDs: []string{claimResponseID}, ItemTraceNumbers: []string{trace}})
 	if err != nil || m.Verdict != PendMatchFound || m.CorrelationID != corr {
 		t.Fatalf("the pend is not found by the payer's identifiers (%+v err=%v), want %s", m, err, corr)
 	}
 	m, err = ledger.LookupPended(relayRequester, PendKeys{
-		RequesterHolder: relayRequester, ClaimResponseIDs: []string{claimResponseID}, ItemTraceNumbers: []string{"urn:payer:trace|another"}}, nil)
+		RequesterHolder: relayRequester, ClaimResponseIDs: []string{claimResponseID}, ItemTraceNumbers: []string{"urn:payer:trace|another"}})
 	if err != nil || m.Verdict != PendMatchDisagrees || m.Kind != PendKeyItemTraceNumber {
 		t.Fatalf("the echoed trace number was not recorded: another trace number = %+v err=%v, want disagrees on %s", m, err, PendKeyItemTraceNumber)
 	}
@@ -261,7 +260,6 @@ func TestNativeSubmit_PendRelayedForInfoChanged(t *testing.T) {
 	if res.Commit == nil {
 		t.Fatal("a pend must be recorded so a follow-up can resolve it")
 	}
-	admitDecisionEOBs(&res)
 	if err := res.Commit(); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
@@ -302,8 +300,8 @@ func TestNativeSubmit_PendWithUnusableTransmissionIdentifiersRelayed(t *testing.
 }
 
 // TestNativeSubmit_DenialRelayed: the payer denied at submit. The denial reaches
-// the requester unchanged, the ledger records the decision, and the decision EOB
-// is written in the same write.
+// the requester unchanged, the ledger records the decision, and no
+// ExplanationOfBenefit is written.
 func TestNativeSubmit_DenialRelayed(t *testing.T) {
 	denied := fixturePASResponse(t, loadDeniedClaimResponseBytes(t), true)
 	srv, payer := newRecordingPayer(t, stubAnswer{http.StatusOK, string(denied)})
@@ -315,22 +313,15 @@ func TestNativeSubmit_DenialRelayed(t *testing.T) {
 	}
 	relayedExactly(t, res, denied)
 	payer.refuseAnyPoll(t)
-	if len(res.SideEffectFHIR) != 1 {
-		t.Fatalf("a denial states the payer's own decision on one EOB; got %d side-effects", len(res.SideEffectFHIR))
-	}
 	if res.Commit == nil {
 		t.Fatal("a decision must be recorded")
 	}
-	admitDecisionEOBs(&res)
 	if err := res.Commit(); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
 	rec := ledgerState(t, store, "PCI-1", "corr-deny")
 	if rec.State != PendStateDecided || rec.Outcome != PendOutcomeDenied {
 		t.Fatalf("ledger = %q/%q, want decided/denied", rec.State, rec.Outcome)
-	}
-	if _, ok := store.EOBByID("eob-corr-deny"); !ok {
-		t.Fatal("the decision EOB was not written with the decision")
 	}
 }
 
@@ -350,7 +341,6 @@ func TestNativeSubmit_ApprovalRelayed(t *testing.T) {
 	if res.Commit == nil {
 		t.Fatal("a decision must be recorded")
 	}
-	admitDecisionEOBs(&res)
 	if err := res.Commit(); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
@@ -401,7 +391,7 @@ func updateRelayLeg(t *testing.T, srv *httptest.Server) (*nativeResponder, conte
 	const origCorr = "convergence-pas-submit-0001"
 	const pci = "PCI-CONF-UPD"
 	store := newCensusSoR()
-	if _, err := store.RecordPendedKeyed(pci, origCorr, payerCreated.Add(-time.Hour), PendKeys{
+	if _, err := testLedger(store).RecordPendedKeyed(pci, origCorr, payerCreated.Add(-time.Hour), PendKeys{
 		RequesterHolder: relayRequester, RequestIDs: []string{"urn:shn:corr|" + origCorr}}); err != nil {
 		t.Fatalf("seed the pend: %v", err)
 	}
@@ -425,7 +415,6 @@ func TestNativeUpdate_RePendRelayedAndReleased(t *testing.T) {
 	if res.Commit == nil {
 		t.Fatal("a re-pend must release the claim and refresh its keys")
 	}
-	admitDecisionEOBs(&res)
 	if err := res.Commit(); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
@@ -451,7 +440,6 @@ func TestNativeUpdate_CarryForwardRePendRelayed(t *testing.T) {
 	relayedExactly(t, res, repend)
 	payer.refuseAnyPoll(t)
 	if res.Commit != nil {
-		admitDecisionEOBs(&res)
 		if err := res.Commit(); err != nil {
 			t.Fatalf("commit: %v", err)
 		}
@@ -476,16 +464,12 @@ func TestNativeUpdate_DenialRelayedAndDecided(t *testing.T) {
 	if res.Commit == nil {
 		t.Fatal("a decision must be recorded")
 	}
-	admitDecisionEOBs(&res)
 	if err := res.Commit(); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
 	rec := ledgerState(t, store, pci, origCorr)
 	if rec.State != PendStateDecided || rec.Outcome != PendOutcomeDenied {
 		t.Fatalf("ledger = %q/%q, want decided/denied", rec.State, rec.Outcome)
-	}
-	if len(res.SideEffectFHIR) != 0 {
-		t.Fatalf("the update leg builds no EOB; got %d side-effects", len(res.SideEffectFHIR))
 	}
 }
 
@@ -504,7 +488,6 @@ func TestNativeUpdate_ApprovalRelayedAndDecided(t *testing.T) {
 	if res.Commit == nil || res.Rollback == nil {
 		t.Fatal("a decided update commits the decision and keeps Rollback armed")
 	}
-	admitDecisionEOBs(&res)
 	if err := res.Commit(); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
@@ -553,7 +536,7 @@ func TestNativeUpdate_DecidedClaimReachesThePayer(t *testing.T) {
 	answer := relayDecidedAnswer(t, "cr-decided", "trace-decided", "AUTH-DECIDED-2")
 	srv, payer := newRecordingPayer(t, stubAnswer{http.StatusOK, string(answer)})
 	n, ctx, store, bundle, pci, origCorr := updateRelayLeg(t, srv)
-	if _, err := store.RecordDecision(pci, origCorr, PendOutcomeApproved, payerCreated, PendKeys{}, nil); err != nil {
+	if _, err := testLedger(store).RecordDecision(pci, origCorr, PendOutcomeApproved, payerCreated, PendKeys{}); err != nil {
 		t.Fatalf("decide the claim: %v", err)
 	}
 	res, err := n.Handle(ctx, "pas-claim-update", "corr-decided", pci, bundle)

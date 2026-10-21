@@ -104,12 +104,29 @@ const (
 	// requesting participant speaks, to that line's names, so its system finds
 	// the package and the outcome under the names its line gives them.
 	EditDTRAnswerLineNames EditID = "E-08"
+	// EditRegisteredTransform carries a message the gateway built itself (an
+	// OwnershipAuthored payload) to the peer's IG line through the registered
+	// compatibility steps between the two lines. It rewrites the whole body,
+	// is verified by running the steps again (Transformed), and keeps the
+	// builder: the result is the builder's message, then this edit.
+	EditRegisteredTransform EditID = "E-09"
 )
 
-var editIDs = []EditID{EditCDSCallbackStrip, EditCDSPrefetchObtain, EditPayorEdgeRestamp, EditDTRCoverageObtain, EditDTRPatientObtain, EditEvidenceSubjectRekey, EditCDSCoverageCarry, EditDTRAnswerLineNames}
+var editIDs = []EditID{EditCDSCallbackStrip, EditCDSPrefetchObtain, EditPayorEdgeRestamp, EditDTRCoverageObtain, EditDTRPatientObtain, EditEvidenceSubjectRekey, EditCDSCoverageCarry, EditDTRAnswerLineNames, EditRegisteredTransform}
+
+// transformEdits are the registered edits made by Transformed, never by
+// ApplyChanges: whole-body rewrites of the gateway's own message, each kept
+// with its builder.
+var transformEdits = []EditID{EditRegisteredTransform}
 
 // EditIDs returns every registered edit id, in order.
 func EditIDs() []EditID { return slices.Clone(editIDs) }
+
+// TransformEditIDs returns the registered edits a payload keeps its builder
+// through (transformEdits), in order. The SDK publishes the same set as
+// shnsdk.BuilderKeepingEdits, for the Audit Plane's bound on a module
+// record's builder; test/sdkparity holds the two equal.
+func TransformEditIDs() []EditID { return slices.Clone(transformEdits) }
 
 // Payload is a message a gateway may send. Make one with Exact, Apply,
 // ApplyChanges or Authored; read its bytes only through Transmit.
@@ -144,7 +161,9 @@ func (p Payload) Edits() []EditID {
 	return slices.Clone(p.c.edits)
 }
 
-// Builder returns the builder id of an OwnershipAuthored payload.
+// Builder returns the builder id of an OwnershipAuthored payload, and of an
+// OwnershipEdited payload Transformed made from one: the builder whose message
+// it is, before the edit.
 func (p Payload) Builder() BuilderID {
 	if p.c == nil {
 		return ""
@@ -249,6 +268,9 @@ func ApplyChanges(body Body, contentType string, changes ...Change) (Payload, er
 		if !slices.Contains(editIDs, c.Edit) {
 			return Payload{}, fmt.Errorf("%w: %q", ErrUnknownEdit, c.Edit)
 		}
+		if slices.Contains(transformEdits, c.Edit) {
+			return Payload{}, fmt.Errorf("%w: %s is made only by Transformed", ErrInvalidEdit, c.Edit)
+		}
 	}
 	src := body.bytes()
 	doc, err := scan(src)
@@ -311,6 +333,57 @@ func ApplyChanges(body Body, contentType string, changes ...Change) (Payload, er
 		return Payload{}, fmt.Errorf("%w: output changed but no operation did", ErrVerifyMismatch)
 	}
 	return Payload{c: &sealed{b: seal(out), own: OwnershipEdited, edits: applied, contentType: contentType}}, nil
+}
+
+// Transformed seals out as src, a message the gateway built (OwnershipAuthored),
+// carried through the registered transform id: OwnershipEdited, with id as its
+// one edit and src's builder kept.
+//
+// rederive is the registered steps the transform names, run over src's bytes.
+// out is checked against them, independently of the code that produced it:
+// rederive runs twice, and both runs must equal out byte for byte. A
+// difference between the runs is a step that is not deterministic, and a
+// difference from out is output the steps did not make; either is
+// ErrVerifyMismatch. src that is not OwnershipAuthored, or an id that is not a
+// registered transform, is ErrInvalidEdit (ErrUnknownEdit for an id that is
+// not registered at all). When out equals src's bytes no edit was made: src is
+// returned and the steps are not run. Otherwise a JSON body out must be one
+// well-formed document (see Decode).
+func Transformed(src Payload, id EditID, out []byte, rederive func([]byte) ([]byte, error)) (Payload, error) {
+	switch {
+	case !slices.Contains(editIDs, id):
+		return Payload{}, fmt.Errorf("%w: %q", ErrUnknownEdit, id)
+	case !slices.Contains(transformEdits, id):
+		return Payload{}, fmt.Errorf("%w: %s is not a registered transform", ErrInvalidEdit, id)
+	case src.Ownership() != OwnershipAuthored:
+		return Payload{}, fmt.Errorf("%w: %s transforms only the gateway's own message, not %s", ErrInvalidEdit, id, src.Ownership())
+	case rederive == nil:
+		return Payload{}, fmt.Errorf("%w: %s names no steps to verify it against", ErrInvalidEdit, id)
+	}
+	in := src.c.b.get()
+	if bytes.Equal(out, in) {
+		return src, nil
+	}
+	first, err := rederive(bytes.Clone(in))
+	if err != nil {
+		return Payload{}, fmt.Errorf("%w: %s: the registered steps refused: %v", ErrVerifyMismatch, id, err)
+	}
+	second, err := rederive(bytes.Clone(in))
+	if err != nil {
+		return Payload{}, fmt.Errorf("%w: %s: the registered steps refused on a second run: %v", ErrVerifyMismatch, id, err)
+	}
+	if !bytes.Equal(first, second) {
+		return Payload{}, fmt.Errorf("%w: %s: the registered steps are not deterministic", ErrVerifyMismatch, id)
+	}
+	if !bytes.Equal(first, out) {
+		return Payload{}, fmt.Errorf("%w: %s: the output is not what the registered steps make", ErrVerifyMismatch, id)
+	}
+	if mt, _, err := mime.ParseMediaType(src.c.contentType); err == nil && (mt == "application/json" || strings.HasSuffix(mt, "+json")) && len(out) > 0 {
+		if _, err := scan(out); err != nil {
+			return Payload{}, err
+		}
+	}
+	return Payload{c: &sealed{b: seal(bytes.Clone(out)), own: OwnershipEdited, edits: []EditID{id}, builder: src.c.builder, contentType: src.c.contentType}}, nil
 }
 
 // Embed declares that b[At:At+(End-Start)] is a copy of Source's bytes

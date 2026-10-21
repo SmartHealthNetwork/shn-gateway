@@ -1,16 +1,14 @@
-// inbound.go — recipient-side envelope dispatch and the facility / PHG responders
-// plus shared inbound helpers. Part of package gateway (the Smart Gateway runs
-// every holder role; this file is the inbound-dispatch, facility-disclosure, and
-// patient-authorship surface). Behavior-preserving split of gateway.go (finding C);
-// no logic change. See gateway.go for the package doc.
+// inbound.go — recipient-side envelope dispatch: the core's checks on an
+// inbound leg, the hand-off to its workstream's answer, and the shared inbound
+// helpers (the consent backstop, the Hub's assertion). The legs' own handlers
+// are their workstreams' (the PA adapter's workstream_pa_*.go). See gateway.go
+// for the package doc.
 package engine
 
 import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -20,8 +18,6 @@ import (
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
-
-// ---- Payer role ----
 
 func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 	// The responder's deadline for its participant's system counts from here
@@ -100,10 +96,10 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// FulfillLeg dispatch: the inbound leg's expected request op + authority frame come
-	// from the SAME PA catalog the origination side reads (workstream_pa.go), so the two
-	// edges cannot drift. An unknown legType has no catalog entry and is rejected 400
-	// BEFORE any token verification — it is not part of the protocol surface.
-	spec, known := paCatalog[env.Metadata.TransactionType]
+	// from the SAME compiled-in catalogs the origination side reads (workstreams.go), so
+	// the two edges cannot drift. An unknown legType has no catalog entry and is rejected
+	// 400 BEFORE any token verification — it is not part of the protocol surface.
+	spec, known := legSpecFor(env.Metadata.TransactionType)
 	if !known {
 		exchangeOf(r.Context()).refused(RefusalRouting)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown transaction type"})
@@ -117,7 +113,7 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 	r = r.WithContext(withFindingContext(r.Context(), findingContext{
 		LegType:       env.Metadata.TransactionType,
 		CorrelationID: env.Metadata.CorrelationID,
-		Seam:          inboundSeamFor(env.Metadata.TransactionType),
+		Seam:          spec.Seam,
 		Whose:         "peer",
 	}))
 	// The payer's own binding of the member, when it differs from the leg
@@ -212,8 +208,9 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 	// The media type the sender framed for a FHIR request rides the context to
 	// the native forward (mediatype.go).
 	r = r.WithContext(withRequestMediaType(r.Context(), inboundFrameMediaType(payload)))
-	// A request frame may name the DTR operation its body is the input of. It
-	// rides the context too, for the same reason as the answer line.
+	// A request frame may name the operation its body is the input of
+	// (legSpec.OperationHeader). It rides the context too, for the same reason
+	// as the answer line.
 	operation, status, msg := inboundFrameOperation(env.Metadata.TransactionType, payload)
 	if status != 0 {
 		x.refusing(frameRefusalRule(status))
@@ -226,608 +223,25 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 	g.diagnosticStage(r.Context(), "recipient.request", env.Metadata.TransactionType, body, 0, "")
 	// The leg is verified and open: what follows is its answer.
 	x.unwrapDone()
-	switch env.Metadata.TransactionType {
-	case "coverage-eligibility":
-		g.handleEligibilityInbound(w, r, env, tok, body, answerTok)
-	case "crd-order-select":
-		g.handleCRDNativeInbound(w, r, env, tok, body, answerTok)
-	case "crd-order-dispatch":
-		g.handleCRDDispatchInbound(w, r, env, tok, body, answerTok)
-	case "dtr-questionnaire-fetch":
-		g.handleDTRInbound(w, r, env, tok, body, answerTok)
-	case "pas-claim":
-		// R8 re-home (FR-16/FR-27): fence BEFORE dispatch — an unattested
-		// clinician/patient QR item is nonconformant regardless of which handler
-		// would otherwise run. The attestation is the QR's own content
-		// (RuleAttestation): not checked at none, recorded at observe and
-		// forwarded, refused at strict; the same on the two legs below.
-		if reason, ok := fenceAttestedItems(body); !ok && g.guard(r.Context(), KindContent, RuleAttestation, body) {
-			g.refuseInbound(w, r, legPASClaim, env, tok, answerTok, http.StatusForbidden, reason, nil)
-			return
-		}
-		g.handlePASNativeInbound(w, r, env, tok, body, answerTok)
-	case "pas-claim-update":
-		// R8 re-home (FR-16/FR-27): same fence as pas-claim above — the property
-		// belongs to any QR item, not only to amends.
-		if reason, ok := fenceAttestedItems(body); !ok && g.guard(r.Context(), KindContent, RuleAttestation, body) {
-			g.refuseInbound(w, r, legPASClaimUpdate, env, tok, answerTok, http.StatusForbidden, reason, nil)
-			return
-		}
-		g.handlePASUpdateNativeInbound(w, r, env, tok, body, answerTok)
-	case "pas-claim-inquire":
-		// R8 re-home (FR-16/FR-27): the same fence as the two legs above. An
-		// inquiry's profile gives it no QuestionnaireResponse, so the fence is
-		// expected to pass — but the property belongs to any QR item wherever it
-		// arrives, and a fence that runs on two of three PAS legs is a gap waiting
-		// for the third to carry one.
-		if reason, ok := fenceAttestedItems(body); !ok && g.guard(r.Context(), KindContent, RuleAttestation, body) {
-			g.refuseInbound(w, r, legPASClaimInquire, env, tok, answerTok, http.StatusForbidden, reason, nil)
-			return
-		}
-		g.handlePASInquireInbound(w, r, env, tok, body, answerTok)
-	case "federated-query":
-		g.handleFederatedQueryInbound(w, r, env, tok, body, answerTok)
-	case "patient-dtr":
-		g.handlePatientDTRInbound(w, r, env, tok, body, answerTok)
+	if answer := answerFor(env.Metadata.TransactionType); answer != nil {
+		answer(g, w, r, env, tok, body, answerTok)
+		return
 	}
+	// A leg every check above admitted, with no handler to answer it: this
+	// gateway's own failure, never the requester's, so it names no refusal
+	// rule. It is answered rather than dropped: a handler that wrote nothing
+	// would answer 200 and record the leg answered. Every leg the compiled-in
+	// workstreams declare has a handler (TestInbound_EveryLegHasAnAnswerHandler).
+	g.refuseInboundRequest(w, r, env, tok, http.StatusInternalServerError, errNoAnswerHandler+" "+env.Metadata.TransactionType)
 }
 
-// inboundSeamFor names the seam a finding belongs to, matching the seam
-// strings certificationPair already records ("payer-native",
-// "provider-ingress").
-func inboundSeamFor(legType string) string {
-	switch legType {
-	case "federated-query":
-		return "facility-inbound"
-	case "patient-dtr":
-		return "phg-inbound"
-	default:
-		return "payer-native"
-	}
-}
+// answerHandler answers one verified, open inbound leg: body is its
+// decrypted request and answerTok the contract line it is answered at.
+type answerHandler func(g *Gateway, w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token, body []byte, answerTok string)
 
-// handleEligibilityInbound is the UC-01 coverage-eligibility inbound logic,
-// unchanged from the original handleInbound body.
-func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token, cerJSON []byte, answerTok string) {
-	ctx := r.Context()
-
-	// Data minimization at the holder boundary: bind the token subject to the
-	// payload's patient via a CHEAP json.Unmarshal-level parse BEFORE any external
-	// $validate. A wrong-patient payload must be rejected here so it never leaves
-	// the holder boundary for the (shared) validator. The Parse* helpers operate on
-	// un-$validate'd JSON and return errors (not panics) on malformed input, so a
-	// malformed payload fails closed with 400 before $validate — nothing leaks.
-	// The member the request's patient names, in any reference form
-	// (patientref.go).
-	member, err := eligibilityRequestMember(cerJSON)
-	if err != nil {
-		g.refuseInbound(w, r, legEligibility, env, tok, answerTok, http.StatusBadRequest, "parse member failed", nil)
-		return
-	}
-
-	// A payer that declares its own eligibility endpoint answers the request
-	// itself, as it would a direct one (forwardEligibilityInbound).
-	if f, ok := g.cfg.Responder.(eligibilityForwarder); ok && f.forwardsEligibility() {
-		g.forwardEligibilityInbound(w, r, env, tok, cerJSON, answerTok, member, f)
-		return
-	}
-
-	// A payer gateway that keeps no system of record has no records
-	// to answer eligibility from itself: the operation is not offered, as a
-	// FHIR server without it would say. Not a network rule.
-	if !hasSystemOfRecord(g.cfg.SoR) {
-		g.refuseInbound(w, r, legEligibility, env, tok, answerTok, http.StatusNotImplemented, refusalEligibilityNotOffered, nil)
-		return
-	}
-
-	// The payer answers about the member the request names, from its own
-	// records: a member they do not hold is its own answer (unknown member).
-	// A token naming another patient is carried, as on the prior-authorization
-	// legs: authority here is the operation's, no consent is checked, and the
-	// two sides' records may legitimately bind one person differently. The
-	// payer's binding is observed and named on the answer's involved list
-	// (noteSubjectBinding).
-	pci, _, found, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(r.Context(), member)
-	if g.refuseSoRFailure(w, r, legEligibility, env, tok, answerTok, readErr) {
-		return
-	}
-	if !found {
-		g.refuseInbound(w, r, legEligibility, env, tok, answerTok, http.StatusBadRequest, refusalUnknownMember, nil)
-		return
-	}
-	involvedCollectorFrom(ctx).bound(pci, true)
-	g.noteSubjectBinding(ctx, "coverage-eligibility", env.Metadata.CorrelationID, tok.Subject, pci)
-
-	// Only AFTER the subject binds is the request validated
-	// (validateEligibilityRequest).
-	if !g.validateEligibilityRequest(w, r, env, tok, cerJSON, answerTok) {
-		return
-	}
-
-	boundPatientRef := "Patient/" + member
-
-	// Coverage-derived direct read (R11): eligibility is a data-plane
-	// read of the payer's OWN SoR, not adjudication, so it is answered directly —
-	// NEVER through the injected Adjudicator/Responder occupant (which is consulted
-	// only for the PA legs: OrderSelect/Questionnaire/PriorAuth). One Coverage read
-	// feeds both facts, the payer twin of FR-G40's "one payer fact, read once":
-	// CoverageInforce is the verdict, OpenCoverage's payor (parsed the SAME way the
-	// origination-side machinery does, gateway.go's recipientForWith /
-	// shnsdk.ParsePayerIdentifier) is the insurer identity — replacing the
-	// hardcoded Organization/payer literal BuildEligibilityResponse used to stamp.
-	inforce, reason, readErr := ReadSystemOfRecord(g.cfg.SoR).CoverageInforceContext(r.Context(), member)
-	if g.refuseSoRFailure(w, r, legEligibility, env, tok, answerTok, readErr) {
-		return
-	}
-	coverageJSON, hasCoverage, status, msg := g.memberCoverage(r.Context(), member)
-	if status != 0 {
-		g.refuseInbound(w, r, legEligibility, env, tok, answerTok, status, msg, nil)
-		return
-	}
-	var insurer shnsdk.PayerIdentifier
-	switch {
-	case hasCoverage:
-		// The member HAS a Coverage record: its own payor is the insurer. An
-		// unresolvable payor on an EXISTING Coverage fails closed (R4:
-		// CoverageEligibilityResponse.insurer is 1..1) — a hollow or
-		// stale-literal response is never built.
-		var ok bool
-		resolve, readErr := sorReferenceCallback(ctx, g.cfg.SoR)
-		insurer, ok = shnsdk.ParsePayerIdentifier(coverageJSON, resolve)
-		if g.refuseSoRFailure(w, r, legEligibility, env, tok, answerTok, *readErr) {
-			return
-		}
-		if !ok {
-			g.refuseInbound(w, r, legEligibility, env, tok, answerTok, http.StatusUnprocessableEntity, noPayerIdentifier, nil)
-			return
-		}
-	default:
-		// No Coverage row at all (a genuinely unenrolled member, or the
-		// MBR-UC04/MBR-UC08-class fixture gap — the member itself already resolved,
-		// via ResolvePatient above, so this is a Coverage absence, not an unknown
-		// member) is the PRE-EXISTING business answer: a valid not-covered response
-		// (CoverageInforce already returns (false,"") for this case — no disposition
-		// text, matching the pre-promotion behavior), never a 422. There is no
-		// member Coverage to name an insurer from, so this reads the payer's OWN
-		// well-known Organization instead (Organization/payer — the same literal
-		// every other payor reference in this codebase already resolves against,
-		// seeded with an identifier by internal/fhirseed) — one self-read, not a
-		// fabricated identity.
-		orgJSON, orgFound, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolveByReferenceContext(r.Context(), "Organization/payer")
-		if g.refuseSoRFailure(w, r, legEligibility, env, tok, answerTok, readErr) {
-			return
-		}
-		if !orgFound {
-			g.refuseInbound(w, r, legEligibility, env, tok, answerTok, http.StatusUnprocessableEntity, "payer's own well-known Organization is not on file", nil)
-			return
-		}
-		var ok bool
-		insurer, ok = shnsdk.ParseOrganizationIdentifier(orgJSON)
-		if !ok {
-			g.refuseInbound(w, r, legEligibility, env, tok, answerTok, http.StatusUnprocessableEntity, "payer's own well-known Organization has no identifier", nil)
-			return
-		}
-	}
-	crrJSON, err := shnsdk.BuildEligibilityResponseExact(env.Metadata.CorrelationID, boundPatientRef, inforce, reason, insurer, g.cfg.Clock())
-	if err != nil {
-		// Build/marshal fault (gateway's own) → 500, parity with today's
-		// StatusInternalServerError build-failure paths. NOT 502.
-		g.refuseInbound(w, r, legEligibility, env, tok, answerTok, http.StatusInternalServerError, "build eligibility response failed", nil)
-		return
-	}
-	answer, err := relay.Authored(relay.BuilderSDKEligibility, crrJSON, "application/fhir+json")
-	if err != nil {
-		g.refuseInbound(w, r, legEligibility, env, tok, answerTok, http.StatusInternalServerError, "build eligibility response failed", nil)
-		return
-	}
-	result := LegResult{Response: answer}
-	responseFHIR, err := g.admit(result.Response, answerKey("coverage-eligibility", relay.OutcomeAnswered))
-	if err != nil {
-		g.refuseInbound(w, r, legEligibility, env, tok, answerTok, http.StatusInternalServerError, errOwnershipFault, nil)
-		return
-	}
-	if status, msg := g.fenceResponseSubjectWith(r.Context(), "coverage-eligibility", boundPatientRef, env.Metadata.CorrelationID, result, nil); status != 0 {
-		g.refuseInbound(w, r, legEligibility, env, tok, answerTok, status, msg, nil)
-		return
-	}
-	// Egress $validate, behavior-identical to the pre-seam inline path: validator
-	// error → 500 "validator unavailable"; !Valid → 500 "egress validation failed".
-	// (NOT g.validateFHIR, which returns 422 on !Valid — that would change the
-	// failure-path contract.)
-	// F7: per-line lane selection, same "" (version-neutral) line as the ingress site
-	// above — and, as the note says, deliberately NOT g.validateFHIR: this site's
-	// !Valid answer is a 500, not a 422, and that distinction is the contract.
-	// Egress is unconditional by definition (R-8 is an ingress-only carve-out) — crrJSON
-	// here is always SHN-produced
-	// (shnsdk.BuildEligibilityResponseExact), so this was never in scope for the skip either way.
-	egressValidator := g.validatorForContractLine(strings.SplitN(answerTok, "@", 2)[0], shnsdk.LineOf(answerTok))
-	// Routed through the choke point so an invalid egress response still emits
-	// its conformance finding. responseFHIR is THIS gateway's own built answer,
-	// not the inbound request's bytes, so Whose is overridden to "own" (the
-	// context the handler entry tagged names the peer's inbound leg). Both
-	// outcomes here answer 500 (unchanged from before the migration) — the
-	// choke point's own message already matches this site's literals
-	// byte-for-byte in both cases, so it is relayed directly.
-	fc := findingContextFrom(ctx)
-	fc.Whose = "own"
-	if gr := g.validateGoverned(ctx, fc, egressValidator, responseFHIR, "egress", shnsdk.LineOf(answerTok), "", false); gr.Status != 0 {
-		msg := gr.Msg
-		if gr.NoLane {
-			msg = "no FHIR validator lane configured for this leg (FR-36/FR-G29)"
-		}
-		g.refuseInbound(w, r, legEligibility, env, tok, answerTok, http.StatusInternalServerError, msg, nil)
-		return
-	}
-
-	g.respondLeg(w, r, "payer-coverage", "eligibility-response", "coverage-eligibility", env.Metadata.CorrelationID, result.Response, tok.Subject, env.Metadata.Sender, "", answerTok)
-}
-
-// validateEligibilityRequest ingress-validates a coverage-eligibility request,
-// once its subject is bound, and writes the refusal when it fails (false).
-func (g *Gateway) validateEligibilityRequest(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token, cerJSON []byte, answerTok string) bool {
-	ctx := r.Context()
-	// Only AFTER the subject binds do we ingress-validate the clinical payload via
-	// the external $validate — fail-closed as before.
-	//
-	// F7: the lane is selected per LINE like every other validate, but this
-	// site deliberately does NOT route through g.validateFHIR — its failure contract
-	// (422 on !Valid, with the choke point's bounded govResult.Issues echoed)
-	// differs from validateFHIR's, and unifying them would change the wire.
-	// The line comes from the same
-	// shnsdk.LineOf(answerTok) call every other site uses — it is not special-cased
-	// here — and it evaluates to "" (the canonical lane) because coverage-eligibility
-	// is version-neutral (paCatalog Contract ""), so answerTok itself is always "".
-	// A nil lane keeps THIS site's 500 rather than borrowing another's.
-	// Unconditional on purpose, not an oversight — this is the PAYER'S side of the SAME
-	// eligibility exchange originate.go's two UC-01 sites
-	// cover; cerJSON here is the REQUEST the requesting gateway's own engine built
-	// (shnsdk.BuildEligibilityRequestExact — never a foreign relay, since only SHN gateways ever
-	// originate a substrate leg), so it is SHN-produced on every lane and always validates.
-	ingressValidator := g.validatorForContractLine(strings.SplitN(answerTok, "@", 2)[0], shnsdk.LineOf(answerTok))
-	// Routed through the choke point so an invalid inbound request emits its
-	// conformance finding. handleInbound already tagged this leg's context
-	// (Whose "peer" — these are the requester's own bytes), so it is read as-is.
-	// This site's own status/message contract is preserved explicitly below.
-	if gr := g.validateGoverned(ctx, findingContextFrom(ctx), ingressValidator, cerJSON, "ingress", shnsdk.LineOf(answerTok), "", false); gr.Status != 0 {
-		if gr.NoLane {
-			g.refuseInbound(w, r, legEligibility, env, tok, answerTok, http.StatusInternalServerError, "no FHIR validator lane configured for this leg (FR-36/FR-G29)", nil)
-			return false
-		}
-		if gr.Status == http.StatusInternalServerError {
-			g.refuseInbound(w, r, legEligibility, env, tok, answerTok, http.StatusInternalServerError, "validator unavailable", nil)
-			return false
-		}
-		// The issues echo is now BOUNDED (findingIssuesShown + "and N more"),
-		// where it was unbounded before the migration — see the PR body.
-		g.refuseInbound(w, r, legEligibility, env, tok, answerTok, http.StatusUnprocessableEntity, refusalIngressValidation,
-			map[string]any{"error": refusalIngressValidation, "issues": gr.Issues})
-		return false
-	}
-	return true
-
-}
-
-// forwardEligibilityInbound carries a coverage-eligibility request to the
-// payer's own endpoint, when the payer declares one, and relays its answer as
-// it would reach a direct requester. The member the request names is bound by
-// this payer's own records (bindInboundSubject), and a token naming another
-// patient is observed rather than refused (noteSubjectBinding). The request is
-// validated at this gateway's conformance level and sent exactly. A non-2xx
-// answer is relayed as the payer's error. A 2xx answer is the payer's content,
-// fenced (fenceEligibilityAnswer) and $validate'd at the level. Nothing is answered from the payer's records in the payer's place,
-// whatever the payer's system answers or fails to answer.
-func (g *Gateway) forwardEligibilityInbound(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token, cerJSON []byte, answerTok, member string, f eligibilityForwarder) {
-	ctx := r.Context()
-	const leg = "coverage-eligibility"
-	pci, status, msg := g.bindInboundSubject(ctx, member, cerJSON)
-	if status != 0 {
-		g.refuseInbound(w, r, legEligibility, env, tok, answerTok, status, msg, nil)
-		return
-	}
-	g.noteSubjectBinding(r.Context(), leg, env.Metadata.CorrelationID, tok.Subject, pci)
-	if !g.validateEligibilityRequest(w, r, env, tok, cerJSON, answerTok) {
-		return
-	}
-	result, err := f.forwardEligibility(withResponderCorrelation(ctx, env.Metadata.CorrelationID), cerJSON)
-	if err != nil {
-		g.responderFailed(w, r, legEligibility, env, tok, answerTok, err)
-		return
-	}
-	if result.Status != 0 {
-		g.respondLegError(w, r, "payer-coverage", "eligibility-response", leg, env.Metadata.CorrelationID, result, tok.Subject, env.Metadata.Sender, "", answerTok)
-		return
-	}
-	// The table lets this leg's answer be authored (the records path builds
-	// it); a forwarded answer is only ever the payer's own, relayed.
-	k := answerKey(leg, relay.OutcomeAnswered)
-	responseFHIR, err := g.admit(result.Response, k)
-	if err == nil && result.Response.Ownership() != relay.OwnershipRelayed {
-		err = fmt.Errorf("%s answer from a declared eligibility endpoint is %s, want relayed", leg, result.Response.Ownership())
-		g.ownershipRefused(k, err)
-	}
-	if err != nil {
-		g.refuseInbound(w, r, legEligibility, env, tok, answerTok, http.StatusInternalServerError, errOwnershipFault, nil)
-		return
-	}
-	// The answer is this participant's own content, relayed.
-	fc := findingContextFrom(ctx)
-	fc.Whose = "own"
-	ctx = withFindingContext(ctx, fc)
-	if status, msg := g.fenceEligibilityAnswer(ctx, responseFHIR, member); status != 0 {
-		g.refuseInbound(w, r, legEligibility, env, tok, answerTok, status, msg, nil)
-		return
-	}
-	validator := g.validatorForContractLine(strings.SplitN(answerTok, "@", 2)[0], shnsdk.LineOf(answerTok))
-	if gr := g.validateGoverned(ctx, fc, validator, responseFHIR, "egress", shnsdk.LineOf(answerTok), "", false); gr.Status != 0 {
-		// A validator this gateway cannot reach is this gateway's own fault
-		// (500), as on the records path; an answer the validator refused is
-		// the payer's (502).
-		if gr.Status == http.StatusInternalServerError {
-			msg := gr.Msg
-			if gr.NoLane {
-				msg = "no FHIR validator lane configured for this leg (FR-36/FR-G29)"
-			}
-			g.refuseInbound(w, r, legEligibility, env, tok, answerTok, http.StatusInternalServerError, msg, nil)
-		} else {
-			g.refuseInbound(w, r, legEligibility, env, tok, answerTok, http.StatusBadGateway, "payer eligibility answer refused: "+gr.Msg, nil)
-		}
-		return
-	}
-	g.respondLeg(w, r, "payer-coverage", "eligibility-response", leg, env.Metadata.CorrelationID, result.Response, tok.Subject, env.Metadata.Sender, "", answerTok)
-}
-
-// fenceEligibilityAnswer fences a payer's own coverage-eligibility answer
-// about member, relayed. A repeated member name refuses at every level (the
-// answer could be read two ways). The rest is the payer's content and refuses
-// only where the conformance level says so. An answer that cannot be read as a
-// CoverageEligibilityResponse (RuleAnswerShape, 502) is recorded at observe and
-// refused at structural and strict. One naming a patient other than the
-// request's, or naming its patient by no reference (RulePatientAnswer, 403),
-// is recorded at observe and structural and refused at strict. The payer's own
-// Patient for member (the record its binding read) is the same patient named
-// by the payer's own id. It is read only when the answer names another patient
-// and the check runs (never at none). A failed read leaves the check
-// unfinished: strict refuses with the system of record's failure, and observe
-// and structural record it unavailable and relay.
-func (g *Gateway) fenceEligibilityAnswer(ctx context.Context, responseFHIR []byte, member string) (int, string) {
-	if repeatsAMember(ctx, responseFHIR) {
-		dup, _ := repeatedMember(responseFHIR)
-		return http.StatusForbidden, "response repeats " + dup + ": it can be read two ways, so it is not carried"
-	}
-	ref, err := ParseCoverageEligibilityResponsePatient(responseFHIR)
-	if errors.Is(err, errNoEligibilityPatientRef) {
-		if g.guard(ctx, KindContent, RulePatientAnswer, responseFHIR) {
-			return http.StatusForbidden, "payer eligibility answer names no patient by reference"
-		}
-		return 0, ""
-	}
-	if err != nil {
-		if g.guard(ctx, KindContent, RuleAnswerShape, responseFHIR) {
-			return http.StatusBadGateway, "payer eligibility answer names no readable patient"
-		}
-		return 0, ""
-	}
-	if ref == "Patient/"+member || !g.policy().Runs(KindContent, RulePatientAnswer) {
-		return 0, ""
-	}
-	own, found, readErr := ReadSystemOfRecord(g.cfg.SoR).PatientFHIRRefContext(ctx, member)
-	if readErr != nil {
-		if g.guardUnavailable(ctx, KindContent, RulePatientAnswer, responseFHIR) {
-			return SoRFailureResponse(readErr)
-		}
-		return 0, ""
-	}
-	if (!found || ref != own) && g.guard(ctx, KindContent, RulePatientAnswer, responseFHIR) {
-		return http.StatusForbidden, "response patient does not match request patient"
-	}
-	return 0, ""
-}
-
-// handleFederatedQueryInbound is the facility source-side handler (UC-05, consent
-// backstop). The Hub-verified request token is already bound (handleInbound), but
-// the facility re-enforces, independently: (1) the leg carries a consent ref; (2)
-// consentsvc confirms a TREAT permit whose custodian is THIS facility and whose
-// recipient is the requester (defense in depth, AI-10/AI-13); (3) the token
-// subject binds to the queried patient; (4) the query is NARROW — named allowed
-// types only, never bulk (FR-26, AI-1). It then returns ONLY the named records
-// with a source Provenance whose .policy cites the consent (FR-32).
-//
-// DEF-10: single-step federated query (query and response in one Hub round-trip)
-// is the connectathon topology; an async/paged query is an additive fast-follow
-// (AI-9 holds: the consent check + narrowness enforcement here are unchanged when
-// adding pagination, so no one-way door is taken).
-func (g *Gateway) handleFederatedQueryInbound(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token, queryJSON []byte, answerTok string) {
-	ctx := r.Context()
-
-	// (1) The leg MUST carry a consent reference.
-	if env.Metadata.ConsentRef == "" {
-		exchangeOf(r.Context()).refusing(RefusalConsent)
-		g.refuseInbound(w, r, legFederatedQuery, env, tok, answerTok, http.StatusForbidden, "federated query missing consent reference", nil)
-		return
-	}
-
-	// (4) Narrowness: parse + validate the query shape BEFORE any disclosure. A
-	// missing/disallowed type or absent patient fails here (no bulk, FR-26).
-	// Task.for and the query's patient are read in the relative form, so an
-	// absolute or contained reference names its patient as a relative one does
-	// (patientref.go).
-	parsed, err := shnsdk.ParseCDexTaskDataRequest(relativeCDexPatients(queryJSON))
-	if err != nil {
-		g.refuseInbound(w, r, legFederatedQuery, env, tok, answerTok, http.StatusForbidden, "query rejected: "+err.Error(), nil)
-		return
-	}
-
-	// (3) Bind the token subject to the queried patient. The Authorization
-	// Framework checked consent for the token's patient, so a queried patient
-	// this facility cannot identify as that one is refused on consent at every
-	// level. One it does not hold reads the same as one that is someone else,
-	// so the refusal does not tell the requester whether the facility holds
-	// the queried patient.
-	member := strings.TrimPrefix(parsed.PatientRef, "Patient/")
-	pci, _, found, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(r.Context(), member)
-	if g.refuseUnreadableMember(w, r, legFederatedQuery, env, tok, answerTok, refusalPatientNotConsented, readErr) ||
-		g.refuseSoRFailure(w, r, legFederatedQuery, env, tok, answerTok, readErr) {
-		return
-	}
-	if !found || pci != tok.Subject {
-		exchangeOf(r.Context()).refusing(RefusalConsent)
-		g.refuseInbound(w, r, legFederatedQuery, env, tok, answerTok, http.StatusForbidden, refusalPatientNotConsented, nil)
-		return
-	}
-
-	// (2) Consent backstop: independently confirm the four-way permit AND learn the
-	// authenticated consent reference the consent service reports. The facility
-	// refuses to release even if a bad token reached it. The returned ref —
-	// not the provider-supplied wire field — is what anchors the Provenance below
-	// (attribution integrity, FR-32/C11).
-	consentRef, status, msg := g.consentBackstop(ctx, pci, env.Metadata.Sender)
-	if status != 0 {
-		exchangeOf(r.Context()).refusing(RefusalConsent)
-		g.refuseInbound(w, r, legFederatedQuery, env, tok, answerTok, status, msg, nil)
-		return
-	}
-	// Defense in depth: the carried wire ref must match the authenticated one, so a
-	// forged Metadata.ConsentRef cannot diverge from the permit that authorized this.
-	if env.Metadata.ConsentRef != consentRef {
-		exchangeOf(r.Context()).refusing(RefusalConsent)
-		g.refuseInbound(w, r, legFederatedQuery, env, tok, answerTok, http.StatusForbidden, "consent reference mismatch", nil)
-		return
-	}
-
-	// The direction flips here: everything validated from this point on — the
-	// facility's own held records, its authored Patient identity binding, its
-	// authored Provenance, and the sealed fulfillment answer below — is THIS
-	// participant's own build, not the peer's request handleInbound tagged the
-	// context with. facilityRecordsBundle takes ctx directly, so this one retag
-	// covers all of its internal checks too.
-	fc := findingContextFrom(ctx)
-	fc.Whose = "own"
-	ctx = withFindingContext(ctx, fc)
-	// Disclose ONLY the named records for THIS member (minimum-necessary): every
-	// record of each named type within the stated dates, exactly as the system
-	// of record holds them, with the member's Patient and a source Provenance
-	// per record citing the AUTHENTICATED consent ref (FR-24/FR-32/C11).
-	inner, _, status, msg := g.facilityRecordsBundle(ctx, member, parsed.Queries, consentRef)
-	if status != 0 {
-		g.refuseInbound(w, r, legFederatedQuery, env, tok, answerTok, status, msg, nil)
-		return
-	}
-	// The answer extends the payer's own request Task and embeds the records
-	// Bundle exactly; every copied span is declared and verified when sealed.
-	answer, fulfilled, err := sealCDexFulfillment(queryJSON, inner)
-	var refused *cdexRequestRefused
-	if errors.As(err, &refused) {
-		g.refuseInbound(w, r, legFederatedQuery, env, tok, answerTok, http.StatusUnprocessableEntity, refused.reason, nil)
-		return
-	}
-	if err != nil {
-		g.refuseInbound(w, r, legFederatedQuery, env, tok, answerTok, http.StatusInternalServerError, "build cdex result failed", nil)
-		return
-	}
-	if status, msg := g.validateFHIR(ctx, fulfilled, "egress", ""); status != 0 {
-		g.refuseInbound(w, r, legFederatedQuery, env, tok, answerTok, status, msg, nil)
-		return
-	}
-	g.respondLeg(w, r, "facility-disclosure", "federated-query-response", "federated-query", env.Metadata.CorrelationID, answer, tok.Subject, env.Metadata.Sender, consentRef, answerTok)
-}
-
-// sealCDexFulfillment fulfills the payer's CDex request Task with the
-// facility's records Bundle and seals the result as the registered
-// cdex-fulfillment answer. Every part the fulfillment copies from the request
-// or the records is declared as an embed, so sealing verifies it is
-// byte-identical to its source. It returns the answer and its bytes (for the
-// egress validation the gateway runs before sending).
-//
-// A request Task the fulfillment cannot extend (not one well-formed Task,
-// signed, or in a status that does not allow fulfillment) is the requester's
-// and is returned as a *cdexRequestRefused; any other error is a fault in the
-// facility's own build.
-func sealCDexFulfillment(requestTask, records []byte) (relay.Payload, []byte, error) {
-	var none relay.Payload
-	task := relay.NewBody(requestTask, relay.OriginPeerFrame)
-	if !cdexRequestShapeOK(task) {
-		return none, nil, &cdexRequestRefused{reason: "federated query refused: the request is not one well-formed Task"}
-	}
-	f, err := shnsdk.BuildCDexFulfillment(requestTask, records)
-	switch {
-	case errors.Is(err, shnsdk.ErrCDexSignedContent):
-		return none, nil, &cdexRequestRefused{reason: "federated query refused: the request Task carries signed content, which a fulfillment cannot extend", err: err}
-	case errors.Is(err, shnsdk.ErrCDexTaskStatus):
-		return none, nil, &cdexRequestRefused{reason: "federated query refused: the request Task's status does not allow fulfillment", err: err}
-	case err != nil:
-		return none, nil, err
-	}
-	held := relay.NewBody(records, relay.OriginUpstreamResponse)
-	embeds := make([]relay.Embed, 0, len(f.Copied))
-	for _, c := range f.Copied {
-		src := task
-		if c.FromRecords {
-			src = held
-		}
-		embeds = append(embeds, relay.Embed{Source: src, Start: c.Start, End: c.End, At: c.At})
-	}
-	p, err := relay.Authored(relay.BuilderCDexFulfillment, f.Task, "application/fhir+json", embeds...)
-	if err != nil {
-		return none, nil, err
-	}
-	return p, f.Task, nil
-}
-
-// cdexRequestRefused is a request Task the facility cannot fulfil because of
-// the Task itself; reason names the refusal without echoing the Task.
-type cdexRequestRefused struct {
-	reason string
-	err    error
-}
-
-func (e *cdexRequestRefused) Error() string { return e.reason }
-
-func (e *cdexRequestRefused) Unwrap() error { return e.err }
-
-// cdexRequestShapeOK reports whether task is one well-formed JSON document
-// (no repeated member names) that is a Task whose contained and output, when
-// present, are arrays: the shape a fulfillment extends.
-func cdexRequestShapeOK(task relay.Body) bool {
-	d, err := relay.Doc(task)
-	if err != nil || d.Kind(d.Root()) != relay.KindObject {
-		return false
-	}
-	rt, ok := d.Member(d.Root(), "resourceType")
-	if !ok || d.Kind(rt) != relay.KindString {
-		return false
-	}
-	if v, err := d.StringValue(rt); err != nil || v != "Task" {
-		return false
-	}
-	for _, key := range []string{"contained", "output"} {
-		if v, ok := d.Member(d.Root(), key); ok && d.Kind(v) != relay.KindArray {
-			return false
-		}
-	}
-	return true
-}
-
-// recordClinicalDate pulls the date a facility record is selected on for FR-24
-// (and ordered by as evidence): DiagnosticReport.effectiveDateTime, else the
-// end of DiagnosticReport.effectivePeriod, else its start; or
-// DocumentReference.date. "" if absent.
-func recordClinicalDate(resJSON []byte) string {
-	var r struct {
-		EffectiveDateTime string `json:"effectiveDateTime"`
-		EffectivePeriod   struct {
-			Start string `json:"start"`
-			End   string `json:"end"`
-		} `json:"effectivePeriod"`
-		Date string `json:"date"`
-	}
-	_ = json.Unmarshal(resJSON, &r)
-	for _, d := range []string{r.EffectiveDateTime, r.EffectivePeriod.End, r.EffectivePeriod.Start} {
-		if d != "" {
-			return d
-		}
-	}
-	return r.Date
-}
+// errNoAnswerHandler opens the answer to a leg the gateway admitted and has no
+// handler for.
+const errNoAnswerHandler = "no answer handler for leg"
 
 // consentBackstop independently confirms a TREAT permit (custodian = this
 // facility, recipient = requester) via the Trust-operated consent service and
@@ -857,79 +271,6 @@ func (g *Gateway) consentBackstop(ctx context.Context, pci, requester string) (s
 		return "", http.StatusForbidden, "no active consent for this disclosure"
 	}
 	return out.ConsentRef, 0, ""
-}
-
-// patientDTRRequest is the provider→PHG ask: please have the patient author + attest
-// this questionnaire item. It carries the patient's raw answer (entered at the patient
-// surface) + the item link id + the patient ref. The PHG applies the patient
-// attestation (the questionnaireresponse-signature) on the patient's authority.
-type patientDTRRequest struct {
-	LinkID     string `json:"linkId"`
-	Answer     string `json:"answer"`
-	PatientRef string `json:"patientRef"`
-}
-
-// patientDTRResponse carries the patient-authored, attested QR item back to the provider.
-type patientDTRResponse struct {
-	AttestedItem json.RawMessage `json:"attestedItem"`
-}
-
-// handlePatientDTRInbound is the Trust-operated PHG responder (UC-07). It binds the
-// token subject to the patient, builds the patient-authored attested item REQUEST-
-// SCOPED (questionnaireresponse-signature, who=Patient), and responds on the
-// patient-authorship frame. The PHG persists NOTHING (OWD-8/AI-3): the patient's
-// answer arrives in the request and the attested item leaves in the response.
-func (g *Gateway) handlePatientDTRInbound(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token, reqJSON []byte, answerTok string) {
-	var req patientDTRRequest
-	if err := decodeMessage(reqJSON, &req); err != nil {
-		g.refuseInbound(w, r, legPatientDTR, env, tok, answerTok, http.StatusBadRequest, "parse patient-dtr request failed", nil)
-		return
-	}
-	// H2: bind the token subject to the patient the request names (the patient whose
-	// authorship the Trust surface is exercising). The PHG signs as that patient, so
-	// it must be the one the leg's authority names: any other is refused at every
-	// level. One the PHG does not hold reads the same as one that is someone else,
-	// so the refusal does not tell the requester whether the PHG holds the patient.
-	member := strings.TrimPrefix(req.PatientRef, "Patient/")
-	if member == "" {
-		g.refuseInbound(w, r, legPatientDTR, env, tok, answerTok, http.StatusBadRequest, refusalPatientDTRNoPatient, nil)
-		return
-	}
-	pci, _, found, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(r.Context(), member)
-	if g.refuseUnreadableMember(w, r, legPatientDTR, env, tok, answerTok, refusalPatientNotAuthorized, readErr) ||
-		g.refuseSoRFailure(w, r, legPatientDTR, env, tok, answerTok, readErr) {
-		return
-	}
-	if !found || pci != tok.Subject {
-		exchangeOf(r.Context()).refusing(RefusalAuthority)
-		g.refuseInbound(w, r, legPatientDTR, env, tok, answerTok, http.StatusForbidden, refusalPatientNotAuthorized, nil)
-		return
-	}
-
-	// #5: the Trust signer validates the answer against the item's constraint
-	// before attesting — it must not sign a non-conformant patient answer. This
-	// is the authoritative, un-bypassable guard (AI-10 fiduciary surface).
-	if err := shnsdk.ValidatePatientAnswer(req.LinkID, req.Answer); err != nil {
-		g.refuseInbound(w, r, legPatientDTR, env, tok, answerTok, http.StatusBadRequest, "invalid patient answer: "+err.Error(), nil)
-		return
-	}
-
-	attested, err := shnsdk.BuildPatientAttestedItem(req.LinkID, req.Answer, req.PatientRef, g.cfg.Clock().Format("2006-01-02"))
-	if err != nil {
-		g.refuseInbound(w, r, legPatientDTR, env, tok, answerTok, http.StatusInternalServerError, "build patient-attested item failed", nil)
-		return
-	}
-	respJSON, err := json.Marshal(patientDTRResponse{AttestedItem: attested})
-	if err != nil {
-		g.refuseInbound(w, r, legPatientDTR, env, tok, answerTok, http.StatusInternalServerError, "marshal response failed", nil)
-		return
-	}
-	answer, err := relay.Authored(relay.BuilderSDKPatientDTR, respJSON, "application/json")
-	if err != nil {
-		g.refuseInbound(w, r, legPatientDTR, env, tok, answerTok, http.StatusInternalServerError, "marshal response failed", nil)
-		return
-	}
-	g.respondLeg(w, r, "patient-authorship", "patient-dtr-response", "patient-dtr", env.Metadata.CorrelationID, answer, tok.Subject, env.Metadata.Sender, "", answerTok)
 }
 
 // verifyHubAssertion checks the X-Hub-Assertion header: a shnsdk.Assertion

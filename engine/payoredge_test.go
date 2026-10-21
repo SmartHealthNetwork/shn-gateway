@@ -701,7 +701,7 @@ func conformantUpdateBundle(t *testing.T, payer shnsdk.PayerIdentifier, absolute
 // Handle(ctx, "pas-claim-update", ...) through the seam and asserts AFFIRMATIVELY on the
 // bytes the backend receives, plus the A1 refusal on the same leg — and, uniquely to the
 // update leg, that a refusal never consumes the pended claim (the guard runs BEFORE
-// BeginClaimUpdate, per nativepas.go's ordering comment).
+// BeginClaimUpdate, per workstream_pa_pas_forward.go's ordering comment).
 func TestNativeUpdate_PayorEdge_SeamOffAndRestamp(t *testing.T) {
 	approvedBody := []byte(`{"resourceType":"ClaimResponse","outcome":"complete","preAuthRef":"P-1","preAuthPeriod":{"end":"2030-01-01"}}`)
 	approvedBody = fixturePASResponse(t, approvedBody, true)
@@ -762,7 +762,7 @@ func TestNativeUpdate_PayorEdge_SeamOffAndRestamp(t *testing.T) {
 		if p.lastBody != nil {
 			t.Fatalf("mismatched payor must refuse BEFORE forwarding any bytes; partner received: %s", p.lastBody)
 		}
-		// The A1 guard must run BEFORE BeginClaimUpdate (nativepas.go's ordering — a
+		// The A1 guard must run BEFORE BeginClaimUpdate (workstream_pa_pas_forward.go's ordering — a
 		// regression that moved it after Begin would strand or double-consume the pend):
 		// the pended claim must still be claimable after the refusal.
 		claimed, err := s.BeginClaimUpdate(pci, origCorr)

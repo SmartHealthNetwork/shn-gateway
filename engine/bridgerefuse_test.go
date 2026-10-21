@@ -37,7 +37,7 @@ func TestSelectLegLineOrBridgeRefuse_Success(t *testing.T) {
 	g := &Gateway{cfg: Config{Reg: reg, DeclaredContractVersions: []string{shnsdk.ContractPAPAS20}}}
 
 	rec := httptest.NewRecorder()
-	route, ok := g.selectLegLineOrBridgeRefuse(rec, "bridge-demo-gw", "pas-claim", "corr-1")
+	route, ok := g.selectLegLineOrBridgeRefuse(rec, "bridge-demo-gw", "pas-claim", "corr-1", "")
 	if !ok {
 		t.Fatalf("want ok=true, got false (body=%s)", rec.Body.String())
 	}
@@ -62,10 +62,10 @@ func TestSelectLegLineOrBridgeRefuse_RouteRefusalError(t *testing.T) {
 	reg.Set("bridge-demo-refuse-gw", shnsdk.RegistryEntry{ID: "bridge-demo-refuse-gw", Role: "payer",
 		ContractVersions: []string{shnsdk.ContractPAPAS22}})
 	// The selection-time refusal is the participant's own setting (RequireSharedLine); by default the pair is carried (line_carry_test.go).
-	g := &Gateway{cfg: Config{Reg: reg, DeclaredContractVersions: []string{shnsdk.ContractPAPAS20}, RequireSharedLine: true}}
+	g := &Gateway{cfg: Config{Reg: reg, DeclaredContractVersions: []string{shnsdk.ContractPAPAS20}, RequireSharedLine: true, TranslateIGLines: true}}
 
 	rec := httptest.NewRecorder()
-	route, ok := g.selectLegLineOrBridgeRefuse(rec, "bridge-demo-refuse-gw", "pas-claim", "corr-2")
+	route, ok := g.selectLegLineOrBridgeRefuse(rec, "bridge-demo-refuse-gw", "pas-claim", "corr-2", "")
 	if ok {
 		t.Fatalf("want ok=false (a designed refusal), got route=%+v", route)
 	}
@@ -97,7 +97,7 @@ func TestSelectLegLineOrBridgeRefuse_RouteRefusalError(t *testing.T) {
 func TestSelectLegLineOrBridgeRefuse_OnlyRouteRefusalErrorReshapes(t *testing.T) {
 	g := &Gateway{cfg: Config{Reg: shnsdk.NewRegistry()}}
 	rec := httptest.NewRecorder()
-	_, ok := g.selectLegLineOrBridgeRefuse(rec, "bridge-demo-refuse-gw", "not-a-real-legtype", "corr-3")
+	_, ok := g.selectLegLineOrBridgeRefuse(rec, "bridge-demo-refuse-gw", "not-a-real-legtype", "corr-3", "")
 	if ok {
 		t.Fatal("want ok=false for an unknown legType")
 	}
@@ -188,7 +188,7 @@ func TestHandleUC03BridgeEgressAdapt_SemanticChangeErrorReshapesTo200(t *testing
 	// honest 2.1-mandatory source for it (transform_pas_test.go's own control fixture).
 	payload := pasGolden(t, "conformant/pas-submit-request.json")
 
-	g := &Gateway{}
+	g := &Gateway{cfg: Config{TranslateIGLines: true}}
 	_, _, err := g.egressAdapt(route, payload, ExchangeIdentity{CorrelationID: "corr-bridge-refuse", LegType: "pas-claim", Counterpart: "bridge-demo-refuse-gw"})
 	if err == nil {
 		t.Fatal("want a semantic-change refusal from the real 2.0->2.2 chain, got success")

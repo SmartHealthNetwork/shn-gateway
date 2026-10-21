@@ -72,7 +72,9 @@ func TestCompatManifestCoversAdjacentNativeSteps(t *testing.T) {
 		lines := nativeLinesForContract(c)
 		if len(lines) < 2 {
 			// Rowless-tolerated: pin it explicitly rather than silently skipping.
-			sawSingleLineContract = true
+			// A test profile's one-line contract (the toy's) is single-line by
+			// design.
+			sawSingleLineContract = sawSingleLineContract || !profileContracts()[c]
 			for _, s := range compatManifest {
 				if s.Contract == c {
 					t.Errorf("single-line contract %q (lines=%v) is tolerated ROWLESS, but compatManifest has a row: %+v", c, lines, s)
@@ -88,7 +90,7 @@ func TestCompatManifestCoversAdjacentNativeSteps(t *testing.T) {
 		}
 	}
 	// No native contract is single-line today: pa.pdex was, and no gateway
-	// declares it now (its decision EOB is base FHIR R4, not PDex). A contract
+	// declares it now (no gateway builds a PDex resource). A contract
 	// that becomes native at one line is tolerated rowless by the loop above.
 	if sawSingleLineContract {
 		t.Fatalf("a single-line native contract appeared (%v): confirm it is meant to ride rowless, then update this pin", contracts)
@@ -185,8 +187,8 @@ func TestDEFG15_ChainArmDormantWhileEveryPublishedLineIsNative(t *testing.T) {
 			reg := shnsdk.NewRegistry()
 			reg.Set("peer", shnsdk.RegistryEntry{ID: "peer", Role: "payer",
 				ContractVersions: []string{contract + "@" + line}})
-			g := &Gateway{cfg: Config{Reg: reg, ValidatorsByLine: lanes}}
-			route, err := g.selectLegRoute("peer", legType)
+			g := &Gateway{cfg: Config{Reg: reg, ValidatorsByContractLine: contractLanes(lanes)}}
+			route, err := g.selectLegRoute("peer", legType, "")
 			if err != nil {
 				t.Errorf("%s to a peer declaring only %s@%s: refused (%v) — every published line must route natively", legType, contract, line, err)
 				continue

@@ -12,9 +12,12 @@ package engine
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
@@ -97,14 +100,21 @@ var idShape = regexp.MustCompile(`^` + fhirID + `$`)
 
 // eligibilityRequestMember is the member a CoverageEligibilityRequest's
 // patient names, in any reference form. The SDK's reader reads the request
-// first, so a request it refuses is refused as before and one it reads is
-// read; the patient reference is then resolved in its well-formed forms. A
-// request this gateway cannot read strictly (a repeated or case-folded member
-// name, or any other shape the strict decode does not accept), and a
-// reference that is neither well-formed nor contained, keep the SDK's
-// reading, so nothing it read before is read differently or refused. An
-// error is a request the SDK's reader refuses, or a contained reference that
-// names no contained Patient or more than one.
+// first, so a request it refuses is refused as before; the request is then
+// read by its exact member names, and its patient reference resolved in its
+// well-formed forms. A reference that is neither well-formed nor contained
+// keeps the SDK's reading. A request the strict reader refuses for its own
+// limits (not well-formed UTF-8 or a lone surrogate escape, or past its depth
+// or token bound) is read so too when it reads one way only: it repeats no
+// member name and names its patient's reference, and the contained resources
+// a "#id" reference names, exactly. An error
+// is a request the SDK's reader refuses, one this gateway cannot read one way
+// only (a repeated member name, or a member named only in another case: a
+// reader taking names exactly finds another patient, or none), or a contained
+// reference that names no contained Patient or more than one (contained
+// resources of another JSON type hold none), or, in a body past the strict
+// reader's limits, a member value read from a byte or escape a reader replaces
+// (errReplacedCharacter).
 func eligibilityRequestMember(cer []byte) (string, error) {
 	literal, err := shnsdk.ParseEligibilityRequestMember(cer)
 	if err != nil {
@@ -114,13 +124,139 @@ func eligibilityRequestMember(cer []byte) (string, error) {
 		Patient struct {
 			Reference string `json:"reference"`
 		} `json:"patient"`
-		Contained []any `json:"contained"`
 	}
-	if decodeMessage(cer, &req) != nil {
-		return literal, nil
+	if err := decodeMessage(cer, &req); err != nil {
+		if readsTwoWays(err) || repeatsAName(cer) {
+			return "", fmt.Errorf("the request's patient cannot be read one way only: %w", err)
+		}
+		ref, ok := exactPatientReference(cer)
+		if !ok || strings.TrimPrefix(ref, "Patient/") != literal {
+			return "", fmt.Errorf("the request's patient: %w", errNamedInAnotherCase)
+		}
+		// A body that repeats no member name reads one way by its exact
+		// member names, so a "#id" reference resolves through the contained
+		// resources so named, as it does in a body the strict reader reads.
+		contained, err := exactContainedFor(cer, ref)
+		if errors.Is(err, errNamedInAnotherCase) {
+			return "", fmt.Errorf("the request's patient: %w", err)
+		}
+		member, err := containedRequestMember(ref, contained, literal)
+		// This reader replaces each byte of not-well-formed UTF-8, and each lone surrogate
+		// escape, with U+FFFD: a member value read from such a byte or escape may have been
+		// sent as any of several values another reader keeps apart. One carrying U+FFFD as
+		// sent is read one way, wherever else the body is not well-formed.
+		if err == nil && strings.ContainsRune(member, utf8.RuneError) && memberValueReplaced(cer, ref) {
+			return "", fmt.Errorf("the request's patient: %w", errReplacedCharacter)
+		}
+		return member, err
 	}
 	ref := req.Patient.Reference
-	if member, ok := patientRefMember(ref, containedObjects(req.Contained)); ok {
+	contained, err := eligibilityContainedFor(cer, ref)
+	if err != nil && readsTwoWays(err) {
+		return "", fmt.Errorf("the request's patient cannot be read one way only: %w", err)
+	}
+	// Contained resources of another JSON type hold no contained Patient.
+	return containedRequestMember(ref, contained, literal)
+}
+
+// errReplacedCharacter is a request whose member value carries U+FFFD in a body that is not
+// well-formed UTF-8 or carries a lone surrogate escape: the reader that reads such a body
+// replaces each such byte or escape with U+FFFD, so values that differ on the wire would
+// bind as one member, and another reader keeps them apart.
+var errReplacedCharacter = errors.New("a member value carries a replaced character")
+
+// memberValueReplaced reports whether the bytes a request's member value is read from carry
+// a character a reader replaces, read as the member is read, by exact member names: its
+// patient reference ref's own, or, for a "#id" reference, the non-blank member identifier
+// values of the contained Patient it names. Anything the member is not read from (another
+// field, a value of another JSON type) is not looked at.
+func memberValueReplaced(cer []byte, ref string) bool {
+	object := func(raw json.RawMessage) map[string]json.RawMessage {
+		var m map[string]json.RawMessage
+		if json.Unmarshal(raw, &m) != nil {
+			return nil
+		}
+		return m
+	}
+	list := func(raw json.RawMessage) []json.RawMessage {
+		var l []json.RawMessage
+		if json.Unmarshal(raw, &l) != nil {
+			return nil
+		}
+		return l
+	}
+	str := func(raw json.RawMessage) (string, bool) {
+		var v string
+		return v, len(raw) > 0 && raw[0] == '"' && json.Unmarshal(raw, &v) == nil
+	}
+	req := object(cer)
+	id, local := strings.CutPrefix(ref, "#")
+	if !local {
+		return replacesCharacters(object(req["patient"])["reference"])
+	}
+	for _, raw := range list(req["contained"]) {
+		patient := object(raw)
+		if rt, _ := str(patient["resourceType"]); rt != "Patient" {
+			continue
+		}
+		if pid, _ := str(patient["id"]); pid != id {
+			continue
+		}
+		for _, x := range list(patient["identifier"]) {
+			identifier := object(x)
+			if system, _ := str(identifier["system"]); system != shnsdk.MemberSystem {
+				continue
+			}
+			if v, ok := str(identifier["value"]); ok && v != "" && replacesCharacters(identifier["value"]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// replacesCharacters reports whether body is one a reader replaces characters of: not
+// well-formed UTF-8, or carrying a \u escape of a lone surrogate.
+func replacesCharacters(body []byte) bool {
+	if !utf8.Valid(body) {
+		return true
+	}
+	surrogate := func(i int) (rune, bool) {
+		if i+6 > len(body) || body[i] != '\\' || body[i+1] != 'u' {
+			return 0, false
+		}
+		v, err := strconv.ParseUint(string(body[i+2:i+6]), 16, 16)
+		return rune(v), err == nil
+	}
+	for i := 0; i < len(body); i++ {
+		if body[i] != '\\' {
+			continue
+		}
+		r, ok := surrogate(i)
+		if !ok {
+			i++ // another escape: skip its character, so "\\u…" is read as written
+			continue
+		}
+		switch {
+		case r >= 0xD800 && r <= 0xDBFF:
+			if lo, ok := surrogate(i + 6); ok && lo >= 0xDC00 && lo <= 0xDFFF {
+				i += 11
+				continue
+			}
+			return true
+		case r >= 0xDC00 && r <= 0xDFFF:
+			return true
+		}
+		i += 5
+	}
+	return false
+}
+
+// containedRequestMember is the member a request's patient reference ref
+// names, with contained its contained resources read by their exact member
+// names and literal the SDK's reading of ref.
+func containedRequestMember(ref string, contained []any, literal string) (string, error) {
+	if member, ok := patientRefMember(ref, containedObjects(contained)); ok {
 		return member, nil
 	}
 	// A contained reference that names no contained Patient, or more than
@@ -133,81 +269,61 @@ func eligibilityRequestMember(cer []byte) (string, error) {
 	return literal, nil
 }
 
-// cdexTaskView is the federated-query Task as the SDK's reader
-// (shnsdk.ParseCDexTaskDataRequest) reads it: the same fields. It is decoded
-// strictly (decodeMessage), so only a Task with no repeated member name and
-// every name exact is rewritten; for such a Task every reader, the SDK's
-// included, reads the same values. Re-encoding this view, not the whole
-// document, hands that reader exactly those values.
-type cdexTaskView struct {
-	ResourceType string `json:"resourceType"`
-	Code         struct {
-		Coding []cdexCoding `json:"coding"`
-	} `json:"code"`
-	For struct {
-		Reference string `json:"reference"`
-	} `json:"for"`
-	Input []struct {
-		Type struct {
-			Coding []cdexCoding `json:"coding"`
-		} `json:"type"`
-		ValueString string `json:"valueString"`
-	} `json:"input"`
-}
-
-// cdexCoding is a Coding as the SDK's reader takes it. The view names its
-// members exactly, so the strict decode accepts the FHIR names and refuses
-// any that only fold to them; the SDK's reader matches these names too.
-type cdexCoding struct {
-	System string `json:"system"`
-	Code   string `json:"code"`
-}
-
-// relativeCDexPatients returns, for reading only, the federated-query Task as
-// the SDK's reader sees it, with Task.for and each query's patient parameter
-// in the relative form ("Patient/<member>") when they are well-formed
-// references, so the narrowness check compares one patient however each was
-// written. Anything else is left as sent, for the check to refuse. A Task
-// whose member names are ambiguous (repeated, or matching a field only by case
-// folding) is returned as sent, so the check reads it exactly as before: only
-// an unambiguous Task, which every reader reads alike, is rewritten. The Task
-// this gateway was sent is never changed.
-func relativeCDexPatients(task []byte) []byte {
-	var view cdexTaskView
-	if decodeMessage(task, &view) != nil {
-		return task
+// eligibilityContainedFor is a request's contained resources, read by their
+// exact member name, when its patient reference ref is a "#id" one: only that
+// reference is read through them. Any other reference reads none, so how the
+// request names its contained resources does not change which patient it
+// names.
+func eligibilityContainedFor(request []byte, ref string) ([]any, error) {
+	if !strings.HasPrefix(ref, "#") {
+		return nil, nil
 	}
-	var holder struct {
+	var c struct {
 		Contained []any `json:"contained"`
 	}
-	if decodeMessage(task, &holder) != nil {
-		return task
+	if err := decodeMessage(request, &c); err != nil {
+		return nil, err
 	}
-	relative := func(ref string) string {
-		// Only a member in an id's shape is written into Patient/<member>
-		// and the query: anything else is left as sent, for the check.
-		if member, ok := patientRefMember(ref, containedObjects(holder.Contained)); ok && idShape.MatchString(member) {
-			return "Patient/" + member
-		}
-		return ref
+	return c.Contained, nil
+}
+
+// exactContainedFor is eligibilityContainedFor for a body the strict reader
+// refuses for its own limits: the contained resources read by their exact
+// member names, as encoding/json reads the body into maps. The caller has
+// found no repeated member name, so the reading is the body's one reading.
+// Contained resources named only in another case are errNamedInAnotherCase,
+// as the strict reader refuses them; ones of another JSON type are none.
+func exactContainedFor(request []byte, ref string) ([]any, error) {
+	if !strings.HasPrefix(ref, "#") {
+		return nil, nil
 	}
-	view.For.Reference = relative(view.For.Reference)
-	for i, in := range view.Input {
-		path, params, found := strings.Cut(in.ValueString, "?")
-		if !found {
-			continue
-		}
-		pairs := strings.Split(params, "&")
-		for j, pair := range pairs {
-			if v, isPatient := strings.CutPrefix(pair, "patient="); isPatient {
-				pairs[j] = "patient=" + relative(v)
+	var top map[string]json.RawMessage
+	if json.Unmarshal(request, &top) != nil {
+		return nil, nil
+	}
+	raw, ok := top["contained"]
+	if !ok {
+		for name := range top {
+			if strings.EqualFold(name, "contained") {
+				return nil, errNamedInAnotherCase
 			}
 		}
-		view.Input[i].ValueString = path + "?" + strings.Join(pairs, "&")
+		return nil, nil
 	}
-	out, err := json.Marshal(view)
-	if err != nil {
-		return task
+	var contained []any
+	if json.Unmarshal(raw, &contained) != nil {
+		return nil, nil
 	}
-	return out
+	return contained, nil
+}
+
+// exactPatientReference is a request's patient reference read by its exact
+// member names, as encoding/json reads the body. ok is false when the body
+// names none so.
+func exactPatientReference(cer []byte) (ref string, ok bool) {
+	var top, patient map[string]json.RawMessage
+	if json.Unmarshal(cer, &top) != nil || json.Unmarshal(top["patient"], &patient) != nil || json.Unmarshal(patient["reference"], &ref) != nil {
+		return "", false
+	}
+	return ref, true
 }

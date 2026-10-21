@@ -68,7 +68,7 @@ func replayRows(t *testing.T, mk func() engine.ReplayStore) {
 	})
 	t.Run("scope and client are structural", func(t *testing.T) {
 		s := mk()
-		if check(t, s, engine.ReplayScopeHubJTI, "", "k", t0, t0.Add(w)) || check(t, s, engine.ReplayScopePatientAccess, "", "k", t0, t0.Add(w)) {
+		if check(t, s, engine.ReplayScopeHubJTI, "", "k", t0, t0.Add(w)) || check(t, s, engine.ReplayScopeIngressJTI, "", "k", t0, t0.Add(w)) {
 			t.Fatal("scopes share records")
 		}
 		if check(t, s, engine.ReplayScopeIngressJTI, "a", "j", t0, t0.Add(w)) || check(t, s, engine.ReplayScopeIngressJTI, "b", "j", t0, t0.Add(w)) {
@@ -242,11 +242,11 @@ func TestReplayParity_Pg(t *testing.T) {
 	})
 }
 
-// All three guards (client_assertion jti, Hub assertion jti, patient-access correlationId)
-// are one-time-use ACROSS replicas: spent at A, refused at B. The engine-level version
-// of the same fact for the ingress scope is gateway/app TestPgMulti_AssertionReplayedAtBIs401;
-// the Hub and patient-access scopes reach the store through the engine's
-// two-instance hermetic rows (replay_shared_test.go).
+// Both guards (client_assertion jti, Hub assertion jti) are one-time-use ACROSS
+// replicas: spent at A, refused at B. The engine-level version of the same fact for
+// the ingress scope is gateway/app TestPgMulti_AssertionReplayedAtBIs401; the Hub
+// scope reaches the store through the engine's two-instance hermetic rows
+// (replay_shared_test.go).
 func TestReplayPg_SharedAcrossInstances(t *testing.T) {
 	pool := testPool(t)
 	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
@@ -256,7 +256,7 @@ func TestReplayPg_SharedAcrossInstances(t *testing.T) {
 	for _, tc := range []struct{ scope, client string }{
 		{engine.ReplayScopeIngressJTI, "br-provider"},
 		{engine.ReplayScopeHubJTI, ""},
-		{engine.ReplayScopePatientAccess, ""},
+		{engine.ReplayScopeScenarioJTI, "monitor"},
 	} {
 		if check(t, a, tc.scope, tc.client, "key-1", now, now.Add(time.Hour)) {
 			t.Fatalf("%s: A first use reported as replay", tc.scope)

@@ -2,7 +2,6 @@ package engine
 
 import (
 	"bytes"
-	"context"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -253,25 +252,31 @@ func TestSubjectDerivationNeverReadsACoveragesParty(t *testing.T) {
 		payload string
 		want    string
 	}{
-		"the parent alone":         {`{"prefetch":{"coverage":` + coverage + `}}`, derivedPCI(strangerMember, "", "")},
+		// The parent alone carries the member's number and the request no
+		// Patient of the member's own: the member cannot be identified.
+		"the parent alone":         {`{"prefetch":{"coverage":` + coverage + `}}`, ""},
 		"the parent and the child": {`{"prefetch":{"patient":` + child + `,"coverage":` + coverage + `}}`, derivedPCI(strangerMember, "2015-06-01", "Childname")},
-		"in a searchset":           {`{"prefetch":{"coverage":{"resourceType":"Bundle","type":"searchset","entry":[{"resource":` + coverage + `}]}}}`, derivedPCI(strangerMember, "", "")},
+		"in a searchset":           {`{"prefetch":{"coverage":{"resourceType":"Bundle","type":"searchset","entry":[{"resource":` + coverage + `}]}}}`, ""},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if d, ok := carriedPatientDemographics([]byte(row.payload), strangerMember); ok && d.FamilyName == "Parentname" {
-				t.Fatalf("the parent's demographics were read: %+v", d)
-			}
-			pci, found, err := g.resolveSubjectPCI(context.Background(), strangerMember, []byte(row.payload))
-			if err != nil || !found || pci != row.want {
-				t.Fatalf("pci %q (found %v, err %v), want %q", pci, found, err, row.want)
-			}
+			wantNoParent(t, g, row.payload, row.want)
 		})
 	}
 	// The same contained Patient named from anywhere but the party slots is
 	// read as before: it is no party.
-	notParty := strings.Replace(coverage, `"policyHolder":{"reference":"#parent"},`, `"payor":[{"reference":"#parent"}],`, 1)
+	notParty := strings.Replace(coverage, `"subscriber":{"reference":"#parent"},"policyHolder":{"reference":"#parent"},`, `"contract":[{"reference":"#parent"}],`, 1)
+	if notParty == coverage {
+		t.Fatal("fixture: the party slots were not found")
+	}
 	if d, ok := carriedPatientDemographics([]byte(`{"prefetch":{"coverage":`+notParty+`}}`), strangerMember); !ok || d.FamilyName != "Parentname" {
 		t.Fatalf("a contained Patient that is no party: %+v %v", d, ok)
+	}
+	// One a party slot names is never read as the member, though another
+	// element names it too, which the party rule reads as naming no party: the
+	// walk cannot decide it is the member.
+	alsoContract := strings.Replace(coverage, `"policyHolder":{"reference":"#parent"},`, `"contract":[{"reference":"#parent"}],`, 1)
+	if d, ok := carriedPatientDemographics([]byte(`{"prefetch":{"coverage":`+alsoContract+`}}`), strangerMember); ok && d.FamilyName == "Parentname" {
+		t.Fatalf("a contained Patient the subscriber names was read as the member: %+v", d)
 	}
 }
 

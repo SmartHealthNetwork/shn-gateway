@@ -597,3 +597,11 @@ func TestSoRSearchQuery_TokenNarrowing(t *testing.T) {
 		}
 	}
 }
+
+// searchSystemOfRecord runs the bounded patient search for a CDS Hooks
+// prefetch value of resourceType through sor, narrowed as the advertised
+// template for that value narrows it (prefetchSearchFilters), and classifies
+// the answer (runSoRSearch), as obtainPrefetch does.
+func searchSystemOfRecord(ctx context.Context, sor SystemOfRecord, resourceType, sorPatientID string) sorSearchset {
+	return runSoRSearch(ctx, sor, resourceType, sorPatientID, true, prefetchSearchFilters(resourceType)...)
+}

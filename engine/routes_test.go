@@ -22,6 +22,8 @@ var (
 		"POST /Questionnaire/$questionnaire-package",
 		"POST /Claim/$submit",
 		"POST /Claim/$inquire",
+		"POST /CoverageEligibilityRequest/$submit",
+		"POST /Task",
 		"GET /metadata",
 	}
 	// ingressAuthRoutePatterns are mounted with the ingress's own
@@ -33,23 +35,16 @@ var (
 	// davinciConfigRoutePatterns are mounted when the ingress names its base
 	// URL.
 	davinciConfigRoutePatterns = []string{"GET /.well-known/davinci-configuration"}
-	// patientAccessRoutePatterns are the payer's Patient Access API, mounted
-	// unless it is turned off; the payer's other route is its inbound.
-	patientAccessRoutePatterns = []string{
-		"GET /metadata",
-		"GET /ExplanationOfBenefit",
-		"GET /ExplanationOfBenefit/{id}",
-	}
 )
 
 // routeConditions is one combination of the configuration that gates a route.
 type routeConditions struct {
-	ingress, ingressAuth, baseURL, patientAccessOff bool
+	ingress, ingressAuth, baseURL bool
 }
 
 func (c routeConditions) String() string {
 	var on []string
-	for name, set := range map[string]bool{"ingress": c.ingress, "ingressAuth": c.ingressAuth, "baseURL": c.baseURL, "patientAccessOff": c.patientAccessOff} {
+	for name, set := range map[string]bool{"ingress": c.ingress, "ingressAuth": c.ingressAuth, "baseURL": c.baseURL} {
 		if set {
 			on = append(on, name)
 		}
@@ -61,11 +56,11 @@ func (c routeConditions) String() string {
 	return strings.Join(on, "+")
 }
 
-// everyRouteCondition is every combination of the four conditions.
+// everyRouteCondition is every combination of the three conditions.
 func everyRouteCondition() []routeConditions {
 	var out []routeConditions
-	for bits := range 16 {
-		out = append(out, routeConditions{bits&1 != 0, bits&2 != 0, bits&4 != 0, bits&8 != 0})
+	for bits := range 8 {
+		out = append(out, routeConditions{bits&1 != 0, bits&2 != 0, bits&4 != 0})
 	}
 	return out
 }
@@ -86,12 +81,7 @@ func wantRoutes(role string, c routeConditions) []string {
 				want = append(want, davinciConfigRoutePatterns...)
 			}
 		}
-	case "payer":
-		want = append(want, "POST /substrate/inbound")
-		if !c.patientAccessOff {
-			want = append(want, patientAccessRoutePatterns...)
-		}
-	case "facility", "phg":
+	case "payer", "facility", "phg":
 		want = append(want, "POST /substrate/inbound")
 	}
 	slices.Sort(want)
@@ -113,7 +103,7 @@ func everyKnownRoute() []string {
 // routeGateway is a gateway with only what mounting its routes reads: role
 // and the gating configuration. Nothing is served through it.
 func routeGateway(role string, c routeConditions) *Gateway {
-	g := &Gateway{cfg: Config{Role: role, IngressEnabled: c.ingress, PatientAccessOff: c.patientAccessOff}}
+	g := &Gateway{cfg: Config{Role: role, IngressEnabled: c.ingress}}
 	if c.ingressAuth {
 		g.ingressAuth = &ingressAuthServer{}
 	}
@@ -164,14 +154,7 @@ func TestRoutes_PinnedSetsAreTheClassifiedRoutes(t *testing.T) {
 	if !slices.Equal(split, other) {
 		t.Fatalf("the provider's ingress routes split by condition\n  %v\nare not providerOtherRoutes\n  %v", split, other)
 	}
-	payer := slices.Concat([]string{"POST /substrate/inbound"}, patientAccessRoutePatterns)
-	slices.Sort(payer)
-	classified := slices.Clone(otherRoleRoutes["payer"])
-	slices.Sort(classified)
-	if !slices.Equal(payer, classified) {
-		t.Fatalf("the payer's routes\n  %v\nare not the classified\n  %v", payer, classified)
-	}
-	for _, role := range []string{"facility", "phg"} {
+	for _, role := range []string{"payer", "facility", "phg"} {
 		if want := wantRoutes(role, routeConditions{}); !slices.Equal(want, otherRoleRoutes[role]) {
 			t.Fatalf("%s routes %v, classified %v", role, want, otherRoleRoutes[role])
 		}

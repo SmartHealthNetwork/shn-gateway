@@ -24,7 +24,7 @@
 # sdk/fixtures/providerdata/uc02.json's seeded persona (identifier urn:shn:member|MBR-PD-UC02,
 # loaded by evalseed) and gateway/scenariodriver's PersonaOrders["noPA"] code. The
 # member must resolve via the gateway's real FHIR SoR ResolvePatient (gateway/engine/
-# ingress_crd.go's subject fence: g.cfg.SoR.ResolvePatient searches the seeded HAPI by that
+# workstream_pa_crd_ingress.go's subject fence: g.cfg.SoR.ResolvePatient searches the seeded HAPI by that
 # identifier) — an unseeded/misspelled member 403s "unknown member" here, not 401, so a 403
 # means "check the seed", not "check the cert".
 # Coverage.payor: CMSPayerIdentity (urn:oid:2.16.840.1.113883.6.300|00001) — routes via

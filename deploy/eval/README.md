@@ -15,7 +15,7 @@ Four containers, wired together with one shared cert volume:
 
 | Service | Role |
 |---|---|
-| `hapi` | A FHIR server, pre-loaded with the US Core + Da Vinci CDex/HRex/PAS implementation guides, standing in for your provider system of record. Seeded on boot with realistic member and order data. |
+| `hapi` | A FHIR server, pre-loaded with the US Core, SDC and Da Vinci CDex, HRex, CRD, DTR and PAS implementation guides, standing in for your provider system of record and validating what the gateway sends, its QuestionnaireResponses against DTR's profile included. It carries the 2.0 line's guides: a payer self-test against a payer on another line sees the gateway's QuestionnaireResponse profile reported as unknown (a finding at the default `observe`, a refusal at `strict`). Seeded on boot with realistic member and order data. |
 | `gateway` | The real `shn-gateway` image, configured with `ROLE=provider`, pointed at the seeded `hapi` for both data and DTR questionnaire population. |
 | `br-provider` | A reference Da Vinci requester application (HL7-DaVinci's `br-provider`, built from pinned upstream source) that originates prior-authorization requests through the gateway's Da Vinci ingress, so you can see the conformant lane work with a real client, not just synthetic calls. |
 | `gencerts` | A one-shot init step that generates the certificate pair `br-provider` and the gateway's ingress use to authenticate each other. Generated fresh on first boot — no key material is ever committed to this repository. |
@@ -48,7 +48,23 @@ shn register --accounts https://accounts.shn-preview.org \
 Keep the resulting directory — its path is what you'll pass as `SHN_SECRETS`
 below. Keys are generated client-side and never leave your machine.
 
-## Run it — two steps
+## Run it — three steps
+
+**Step 0 — create the caller that drives the scenarios** (once). The gateway runs
+the eight use cases through its `/scenario` routes, and it admits a request there
+only from a caller your bundle names, signed with that caller's own key. From
+this directory:
+
+```sh
+shn scenario-key --bundle /abs/path/to/my-provider-bundle
+```
+
+This writes the caller's key to `./scenario-caller-send-test.sign`, readable by
+you only, and adds the caller to `scenario-callers.json` in your bundle, which
+the gateway reads at boot. The key is a credential: keep it out of the bundle
+and out of version control. To replace it, run the command again with `--force`
+and restart the gateway. A bundle without `scenario-callers.json` stops the
+gateway at boot, naming the file.
 
 **Step 1 — build the reference requester.** This clones and builds
 `br-provider` from pinned upstream source; there's no published image to pull.
@@ -71,6 +87,49 @@ SHN_SECRETS=/abs/path/to/my-provider-bundle docker compose -f compose.eval.yml u
 Once everything reports ready, the gateway is listening at
 `http://127.0.0.1:8080` and the reference requester's UI at
 `http://127.0.0.1:8082`.
+
+### Drive the scenarios
+
+Run all eight use cases, signed as the caller from step 0:
+
+```sh
+shn send-test --gateway http://127.0.0.1:8080 --discovery https://accounts.shn-preview.org \
+  --scenario-key ./scenario-caller-send-test.sign --bundle /abs/path/to/my-provider-bundle
+```
+
+**A pend is a valid answer.** The evaluation payer pends some prior authorizations
+when they're submitted and decides them later, as a real payer may. A
+scenario route answers with the payer's first answer: for a pend, that's
+`"decision":"pended"` plus a `continuation`. `shn send-test` then follows each pend to
+the payer's decision through the gateway's `POST /scenario/pa/inquire`, for up to 60
+seconds per scenario (`--follow <seconds>`; `--follow 0` reports each pend as the
+payer answered it). A scenario still pended at that bound is reported as pended, with
+its continuation, and is neither a pass nor a failure. A scenario the gateway refuses is
+reported with its HTTP status and the refusal's body, which says why. Its exit status is 0 when every
+scenario passed, 1 when one failed or the run could not start, 2 when the command was
+misused, and 3 when none failed but one was still pended (the run then ends
+`SEND-TEST PENDED`). To
+follow a pend yourself, post `{"continuation":"<id>"}` to `/scenario/pa/inquire`, or
+ask a scenario route to follow the decision before it answers with `?wait=<seconds>`
+(at most 30). The query is part of what the caller's signature covers.
+
+To call one route with any HTTP client, `shn scenario-sign` prints the
+`X-Holder-Assertion` header that signs it. An assertion is for one request,
+valid for a minute, and the body you send must be the body you signed. Each
+route takes the persona the network's descriptor states for it, which
+`persona_body.sh` reads:
+
+```sh
+curl -fsS https://accounts.shn-preview.org/discovery -o discovery.json
+body=$(bash persona_body.sh discovery.json uc01 provider-data 0 '{"branch":"covered"}')
+curl -fsS -X POST http://127.0.0.1:8080/scenario/uc01 -H 'Content-Type: application/json' \
+  -H "X-Holder-Assertion: $(shn scenario-sign --key ./scenario-caller-send-test.sign \
+      --bundle /abs/path/to/my-provider-bundle POST /scenario/uc01 "$body")" \
+  --data-raw "$body"
+```
+
+A request that is not signed, or signed by a caller the bundle does not name, is
+refused `401 {"error":"unauthorized caller"}`.
 
 ### First-run cost — be aware before you start
 
@@ -122,9 +181,8 @@ bundle does the same (`PAS_PENDED_RESOLUTION_DELAY_SECONDS: "3"` in
 The consequence for your client: if every pend you ever see resolves inside one interaction,
 your "still pended, check again later" path is never exercised, and a client that waits a pend
 out will work here and fail against a real payer. To exercise that path, run the payer bundle
-with the delay raised — a pend is then held for that long, an inquiry for the claim returns the
-pended state until it resolves, and the gateway's operator console shows the exchange pended
-throughout:
+with the delay raised — a pend is then held for that long, and an inquiry for the claim returns
+the pended state until it resolves:
 
 ```yaml
 # payer/compose.eval.payer.yml — hold a pend for ten minutes instead of three seconds

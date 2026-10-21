@@ -53,19 +53,37 @@ type boundaryRule struct {
 	// noSink marks a listed transmit that sends nothing itself (it builds
 	// what its callers send).
 	noSink bool
+	// body is which body a transmit sends, and so which record it makes
+	// once it is sent (TestEveryAnswerTransmitRecordsTheAnswer).
+	body transmitBody
 }
+
+// transmitBody is the body a listed transmit sends.
+type transmitBody int
+
+const (
+	// sendsRequest: a request to the network or to the participant's own
+	// system; recorded by exchangeRecorder.sent.
+	sendsRequest transmitBody = iota + 1
+	// sendsAnswer: an answer, to the network or to the participant's own
+	// system, every refusal included; recorded by exchangeRecorder.answered.
+	sendsAnswer
+	// readsOnly: the engine's own read of a payload before its transmit;
+	// records nothing.
+	readsOnly
+)
 
 const engineImportPath = "github.com/SmartHealthNetwork/shn-gateway/engine"
 
 var transmitBoundaries = map[string]boundaryRule{
 	// Requests to the network, and the envelope that carries them.
-	"Gateway.roundTripInner": {kind: transmits, noSink: true},
+	"Gateway.roundTripInner": {kind: transmits, noSink: true, body: sendsRequest},
 	"Gateway.postEnvelope": {kind: excluded, callers: []string{"Gateway.roundTripInner"},
 		reason: "posts the sealed envelope roundTripInner built from its checked request"},
 	// Requests to the participant's own system.
-	"nativeResponder.post": {kind: transmits},
+	"nativeResponder.post": {kind: transmits, body: sendsRequest},
 	// Answers to the network.
-	"Gateway.buildResponseLeg": {kind: transmits, noSink: true},
+	"Gateway.buildResponseLeg": {kind: transmits, noSink: true, body: sendsAnswer},
 	"writeLeg": {kind: excluded,
 		callers: []string{"Gateway.respondLeg", "Gateway.respondLegError", "Gateway.handlePASNativeInbound", "Gateway.handlePASUpdateNativeInbound", "Gateway.handlePASInquireInbound"},
 		reason:  "writes the sealed envelope buildResponseLeg built from its checked answer"},
@@ -76,10 +94,10 @@ var transmitBoundaries = map[string]boundaryRule{
 	"Gateway.handlePASInquireInbound":      {kind: sealsVia, via: "Gateway.buildResponseLeg"},
 	// Answers to the participant's own system (the ingress writers, the
 	// relayed application errors) and every refusal.
-	"Gateway.writePayload": {kind: transmits},
-	"writeJSON":            {kind: transmits},
+	"Gateway.writePayload": {kind: transmits, body: sendsAnswer},
+	"writeJSON":            {kind: transmits, body: sendsAnswer},
 	// The engine's own reads of a payload before its transmit.
-	"Gateway.admit": {kind: transmits, noSink: true},
+	"Gateway.admit": {kind: transmits, noSink: true, body: readsOnly},
 
 	// Sends that are not exchange messages.
 	"Gateway.observeIngress": {kind: excluded, reason: "transparent HTTP observation delegates to the original ingress handler; no payload is authored or transmitted here"},
@@ -87,11 +105,9 @@ var transmitBoundaries = map[string]boundaryRule{
 	"exchangeWriter.Write":   {kind: excluded, reason: "the exchange record's transparent response writer: it times the write of bytes its handler's own checked transmit wrote, and authors nothing"},
 	"notActedFence.Write":    {kind: excluded, reason: "the inbound route's transparent response writer: it removes the reserved not-acted header from an answer its handler's own checked transmit wrote, and authors nothing"},
 	"writeLocalJSON": {kind: excluded,
-		reason: "a successful local API answer (a scenario or console summary built from decoded values)"},
+		reason: "a successful local API answer (a scenario route's summary built from decoded values)"},
 	"Gateway.authorizeOnce": {kind: excluded,
 		reason: "the authorization request: frame, operation, subject, payload hash and any involvement, never the payload"},
-	"Gateway.auditPatientAccess": {kind: excluded,
-		reason: "the Patient Access audit record: metadata only"},
 	"Gateway.consentBackstop": {kind: excluded,
 		reason: "the consent check request: subject, purpose, custodian and recipient, never the payload"},
 	"DiscoverCDSServices": {kind: excluded,
@@ -100,16 +116,14 @@ var transmitBoundaries = map[string]boundaryRule{
 		reason: "a Coverage search, and at most one payor Organization read, on the CDS client's own fhirServer, to route by: it sends no body, only the client's own token back to the server that issued it; what routing used is carried only inside the CDS Hooks request's registered edit E-07"},
 	"nativePopulator.post": {kind: excluded,
 		reason: "a call to the participant's own pre-population service with a request this gateway builds; no peer is on the wire"},
-	"Gateway.handleUC08": {kind: excluded,
-		reason: "the scenario's read of the patient view, which sends no body"},
 	"certificationTransport.RoundTrip": {kind: excluded,
 		reason: "the certification validator's transport: observational $validate of observed bytes, never an exchange"},
 	"QualifyValidatorLane": {kind: excluded,
 		reason: "a validator lane's qualification: a metadata read, then the readiness corpus's committed synthetic fixtures; never an exchange"},
+	"laneAnswers": {kind: excluded,
+		reason: "whether an explicit validator lane can be reached: a metadata read with no body; never an exchange"},
 	"Gateway.handleIngressMetadata": {kind: excluded,
 		reason: "this gateway's own CapabilityStatement"},
-	"Gateway.handlePatientAccessMetadata": {kind: excluded,
-		reason: "this gateway's own Patient Access CapabilityStatement"},
 	"Gateway.handleCDSDiscovery": {kind: excluded,
 		reason: "this gateway's own CDS Services discovery document"},
 	"Gateway.handleDavinciConfiguration": {kind: excluded,
@@ -120,8 +134,6 @@ var transmitBoundaries = map[string]boundaryRule{
 		reason: "the ingress authorization server's token response"},
 	"ingressAuthServer.handleSmartConfig": {kind: excluded,
 		reason: "the ingress authorization server's SMART configuration"},
-	"Gateway.serveEOB": {kind: excluded,
-		reason: "the payer's own records to a patient app on the token-gated Patient Access API; no network leg"},
 }
 
 // writerUsersThatSendNothing are functions of other packages that take a
@@ -143,7 +155,11 @@ func typedPackage(t *testing.T, fset *token.FileSet, files []*ast.File) *types.I
 	if err != nil {
 		t.Fatal("go tool not available: the boundary check cannot type the package")
 	}
-	out, err := exec.Command(gobin, "list", "-export", "-deps", "-f", "{{.ImportPath}}={{.Export}}", ".").Output()
+	args := []string{"list", "-export", "-deps", "-f", "{{.ImportPath}}={{.Export}}"}
+	if len(thisBuildTags) > 0 {
+		args = append(args, "-tags", strings.Join(thisBuildTags, ","))
+	}
+	out, err := exec.Command(gobin, append(args, ".")...).Output()
 	if err != nil {
 		t.Fatalf("go list -export: %v", err)
 	}
@@ -401,6 +417,9 @@ func checkTransmitBoundaries(fset *token.FileSet, files []*ast.File, info *types
 		if len(sinks[k]) == 0 && !r.noSink {
 			problems = append(problems, fmt.Sprintf("%s is listed but sends nothing; remove it", k))
 		}
+		if r.body == readsOnly && len(sinks[k]) > 0 {
+			problems = append(problems, fmt.Sprintf("%s reads a payload only, but sends bytes: %s", k, strings.Join(sinks[k], "; ")))
+		}
 		switch r.kind {
 		case transmits:
 			if !transmitCalls[k] {
@@ -468,7 +487,7 @@ func parsePackageSources(t *testing.T, fset *token.FileSet, dir string, extra ma
 	var files []*ast.File
 	for _, e := range ents {
 		n := e.Name()
-		if e.IsDir() || !strings.HasSuffix(n, ".go") || strings.HasSuffix(n, "_test.go") {
+		if e.IsDir() || !strings.HasSuffix(n, ".go") || strings.HasSuffix(n, "_test.go") || !inThisBuild(t, dir, n) {
 			continue
 		}
 		f, err := parser.ParseFile(fset, filepath.Join(dir, n), nil, parser.SkipObjectResolution)
@@ -589,6 +608,15 @@ func probeWrapped(w probeWrapper) { _, _ = w.Write([]byte("x")) }`, nil,
 		{"a missing entry", ``,
 			func(r map[string]boundaryRule) { r["probeGone"] = boundaryRule{kind: transmits} },
 			"probeGone is listed but not defined"},
+		{"a read that sends", `func probeReadSends(w http.ResponseWriter, p relay.Payload) {
+	b, err := relay.Transmit(p, nil)
+	if err == nil {
+		_, _ = w.Write(b)
+	}
+}`, func(r map[string]boundaryRule) {
+			r["probeReadSends"] = boundaryRule{kind: transmits, noSink: true, body: readsOnly}
+		},
+			"probeReadSends reads a payload only, but sends bytes"},
 		{"a new pre-leg refusal row", `func probeUnestablished() string { return relay.LegUnestablished }`, nil,
 			"relay.LegUnestablished is named by"},
 	}

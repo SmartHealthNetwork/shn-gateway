@@ -96,42 +96,44 @@ func TestPostCRD_BearerAndAud(t *testing.T) {
 	}
 }
 
-// TestSubmitPAS_ParsesOutcome: 200 A1 body → Approved+PreAuthRef; non-200 → raw only.
+// TestSubmitPAS_ParsesOutcome: a 2xx A1 body → Approved+PreAuthRef, whatever
+// 2xx the payer answered with; a non-2xx → raw only.
 // The approved shape is a BARE ClaimResponse with explicit preAuthRef + outcome
 // "complete" (shnsdk.ParseClaimResponse's explicit-signal contract; a pended
 // response is a Bundle detected by ParsePendedResponse instead).
 func TestSubmitPAS_ParsesOutcome(t *testing.T) {
 	a1 := `{"resourceType":"ClaimResponse","status":"active","outcome":"complete","preAuthRef":"AUTH-0001"}`
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/Claim/$submit" {
-			t.Errorf("path = %s", r.URL.Path)
+	for _, status := range []int{http.StatusOK, http.StatusCreated, http.StatusAccepted, http.StatusUnprocessableEntity} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/Claim/$submit" {
+				t.Errorf("path = %s", r.URL.Path)
+			}
+			w.WriteHeader(status)
+			w.Write([]byte(a1))
+		}))
+		d, _ := testDriver(t, srv)
+		out, err := d.SubmitPAS([]byte(`{}`))
+		srv.Close()
+		if err != nil {
+			t.Fatal(err)
 		}
-		w.Write([]byte(a1))
-	}))
-	defer srv.Close()
-	d, _ := testDriver(t, srv)
-	out, err := d.SubmitPAS([]byte(`{}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !out.Approved || out.PreAuthRef != "AUTH-0001" || out.Pended {
-		t.Fatalf("outcome = %+v, want approved AUTH-0001 not-pended", out)
+		if out.Status != status || string(out.Body) != a1 {
+			t.Fatalf("%d: status %d body %s", status, out.Status, out.Body)
+		}
+		read := status/100 == 2
+		if out.Approved != read || (out.PreAuthRef == "AUTH-0001") != read || out.Pended {
+			t.Fatalf("%d: outcome = %+v, want read %v", status, out, read)
+		}
 	}
 }
 
 func TestPHGClients(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/personas":
+		if r.URL.Path == "/personas" {
 			json.NewEncoder(w).Encode([]map[string]string{
 				{"label": "Linda Johansson — covered", "pci": "pci-1"},
 				{"label": "Maria Reyes — not covered", "pci": "pci-2"},
 			})
-		case "/authorizations":
-			if r.URL.Query().Get("pci") != "pci-1" {
-				t.Errorf("pci = %s", r.URL.Query().Get("pci"))
-			}
-			json.NewEncoder(w).Encode([]AuthorizationView{{Status: "approved", Title: "Home oxygen"}})
 		}
 	}))
 	defer srv.Close()
@@ -142,10 +144,6 @@ func TestPHGClients(t *testing.T) {
 	}
 	if _, err := d.ResolvePersonaPCI("Nobody"); err == nil {
 		t.Fatal("want error when no persona matches")
-	}
-	views, err := d.GetAuthorizations("pci-1")
-	if err != nil || len(views) != 1 || views[0].Status != "approved" {
-		t.Fatalf("views = %+v err=%v", views, err)
 	}
 }
 

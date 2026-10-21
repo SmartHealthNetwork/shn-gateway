@@ -258,9 +258,11 @@ func TestPASOriginationsCheckFactsBeforeAnyLeg(t *testing.T) {
 // the line the submission's selection builds at (selectLegRoute), and the
 // amendment is built at the line the resume's selection picks for the
 // submission's pin (selectResumeRoute). Within one request both read the same
-// declared, lane and narrowing state, so over every such state the two build
-// lines are the same line, or the resume refuses the route outright (never a
-// facts refusal at some other line).
+// declared, lane and narrowing state, so over every state a gateway can boot
+// in (gateway/app refuses a declared line with no lane at every level that
+// checks) the two build lines are the same line, or the resume refuses the
+// route outright (never a facts refusal at some other line), and the resume is
+// never carried away from the pin it was just given.
 func TestSingleCallAmendmentLine_IsTheSubmissionsBuildLine(t *testing.T) {
 	lines := []string{"2.0", "2.1", "2.2"}
 	var subsets [][]string
@@ -287,6 +289,9 @@ func TestSingleCallAmendmentLine_IsTheSubmissionsBuildLine(t *testing.T) {
 			for _, laned := range subsets[1:] {
 				for _, narrow := range append([][]string{nil}, subsets...) {
 					for _, strict := range []bool{false, true} {
+						if slices.ContainsFunc(own, func(l string) bool { return !slices.Contains(laned, l) }) {
+							continue // a declared line with no lane: this gateway does not boot
+						}
 						byLine := map[string]shnsdk.Validator{}
 						for _, l := range laned {
 							byLine[l] = fake
@@ -296,15 +301,16 @@ func TestSingleCallAmendmentLine_IsTheSubmissionsBuildLine(t *testing.T) {
 						g := &Gateway{cfg: Config{
 							DeclaredContractVersions: tokens(own),
 							Reg:                      reg,
-							ValidatorsByLine:         byLine,
+							ValidatorsByContractLine: contractLanes(byLine),
+							TranslateIGLines:         true,
 							EgressNativeLines:        narrow,
 							StrictPeerForTest:        strict,
 						}}
-						route, err := g.selectLegRoute("payer", "pas-claim")
+						route, err := g.selectLegRoute("payer", "pas-claim", "")
 						if err != nil {
 							continue
 						}
-						resumed, err := g.selectResumeRoute(route.Token, "payer", "pas-claim-update")
+						resumed, err := g.selectResumeRoute(route.Token, "payer", "pas-claim-update", "")
 						if err != nil {
 							continue
 						}
@@ -313,6 +319,10 @@ func TestSingleCallAmendmentLine_IsTheSubmissionsBuildLine(t *testing.T) {
 							chained++
 						} else if !slices.Contains(own, route.BuildLine) {
 							nativeReach++
+						}
+						if resumed.Pinned != "" {
+							t.Errorf("own %v peer %v laned %v narrow %v strict %v: the resume was carried away from the pin %s it was just given",
+								own, peer, laned, narrow, strict, resumed.Pinned)
 						}
 						if resumed.BuildLine != route.BuildLine {
 							t.Errorf("own %v peer %v laned %v narrow %v strict %v: the submission builds at %s (%s) and the amendment at %s",

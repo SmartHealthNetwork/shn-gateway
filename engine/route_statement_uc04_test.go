@@ -28,7 +28,7 @@ func uc04RouteFixture(t *testing.T, line string) (*Gateway, *pendResumeSubstrate
 	gw, stub := newPendResumeFixture(t, opts)
 	if line != "2.0" {
 		gw.cfg.Validator = NewLineFakeValidator("2.0")
-		gw.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"2.0": NewLineFakeValidator("2.0"), line: NewLineFakeValidator(line)}
+		gw.cfg.ValidatorsByContractLine = contractLanes(map[string]shnsdk.Validator{"2.0": NewLineFakeValidator("2.0"), line: NewLineFakeValidator(line)})
 	}
 	return gw, stub
 }

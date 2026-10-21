@@ -16,8 +16,8 @@ import (
 // verdictLane is the lane of line as the command meets it: qualify runs on a
 // lane that has not validated yet (its prime rows get the lane's first
 // answers), verify-verdicts on one the warm-up already settled. Neither
-// command asks the four initialization rows, and verification asks 20 of the
-// 42 recorded requests, so the rest go unused. Requests must not overlap:
+// command asks the three initialization rows, and verification asks 20 of the
+// 41 recorded requests, so the rest go unused. Requests must not overlap:
 // each answer is held open 1 ms after it is written, and a request that
 // arrives before the previous answer ended fails the test.
 func verdictLane(t *testing.T, line, command string) *fakeLane {

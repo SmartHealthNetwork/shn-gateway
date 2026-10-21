@@ -482,23 +482,24 @@ func eligibilityAmbiguous(t *testing.T, member, last string) []byte {
 	return bytes.Replace(body, rel, append(append([]byte{}, rel...), []byte(`,"patient":{"reference":"`+last+`"}`)...), 1)
 }
 
-// An eligibility request whose member names are ambiguous is read by the
-// SDK's reader exactly as before: answered about its member when the last
-// patient is relative, and the payer's unknown member when the last one is
-// absolute (which that reader takes literally). A body that is no
+// An eligibility request whose patient is named twice is read two ways and
+// refused, whichever form the second reference takes (no longer the SDK's
+// reading of the last one), as message integrity. A body that is no
 // CoverageEligibilityRequest names no member. At every level.
-func TestEligibility_AmbiguousOrWrongRequestIsReadAsBefore(t *testing.T) {
+func TestEligibility_AmbiguousOrWrongRequestIsRefused(t *testing.T) {
 	for _, level := range eligibilityLevels {
 		t.Run(level.String(), func(t *testing.T) {
+			for _, last := range []string{"Patient/" + dtrFrameMember, "https://provider.example/fhir/Patient/" + dtrFrameMember} {
+				p := eligibilityPayer(t, level, false)
+				var got exchangeRecords
+				p.g.cfg.ExchangeObserved = got.observe
+				ans := p.sendAs(t, "coverage-eligibility", "", eligibilityAmbiguous(t, dtrFrameMember, last), p.pci)
+				if ans.status != http.StatusBadRequest || !strings.Contains(string(ans.body), `eligibility request repeats the JSON member \"patient\" in the top-level object: it can be read two ways`) {
+					t.Fatalf("last %s: %d %s, want 400 naming the repeated member", last, ans.status, ans.body)
+				}
+				wantRefusal(t, got.only(t), http.StatusBadRequest, RefusedByPayerGateway, RefusalIntegrity)
+			}
 			p := eligibilityPayer(t, level, false)
-			rel := p.sendAs(t, "coverage-eligibility", "", eligibilityAmbiguous(t, dtrFrameMember, "Patient/"+dtrFrameMember), p.pci)
-			if ref, err := ParseCoverageEligibilityResponsePatient(rel.body); rel.status != http.StatusOK || err != nil || ref != "Patient/"+dtrFrameMember {
-				t.Fatalf("relative last: %d %s, want answered about the member", rel.status, rel.body)
-			}
-			abs := p.sendAs(t, "coverage-eligibility", "", eligibilityAmbiguous(t, dtrFrameMember, "https://provider.example/fhir/Patient/"+dtrFrameMember), p.pci)
-			if abs.status != http.StatusBadRequest || strings.TrimSpace(string(abs.body)) != `{"error":"unknown member"}` {
-				t.Fatalf("absolute last: %d %s, want the payer's 400 unknown member, as before", abs.status, abs.body)
-			}
 			notCER := bytes.Replace(eligibilityRequest(t, dtrFrameMember), []byte(`"CoverageEligibilityRequest"`), []byte(`"Claim"`), 1)
 			wrong := p.sendAs(t, "coverage-eligibility", "", notCER, p.pci)
 			if wrong.status != http.StatusBadRequest || !strings.Contains(string(wrong.body), "parse member failed") {
@@ -549,6 +550,113 @@ func TestEligibility_StrictlyUnreadableRequestIsReadAsBefore(t *testing.T) {
 					t.Fatalf("answer %d %s, want answered about the member as before", ans.status, ans.body)
 				}
 			})
+		}
+	}
+}
+
+// A request the strict reader cannot read for its own limits is still read
+// one way only, by each gateway: one that also repeats a member name is
+// refused as message integrity, and one naming its type or patient only in
+// another case is refused, never bound (the patient-match rule), at every
+// level.
+func TestEligibility_StrictlyUnreadableRequestReadTwoWaysIsRefused(t *testing.T) {
+	const patient = `"patient":{"reference":"Patient/` + dtrFrameMember + `"}`
+	limits := map[string]string{
+		"invalid UTF-8 in another field": "\"\xff\"",
+		"nesting past the strict bound":  strings.Repeat("[", 70) + strings.Repeat("]", 70),
+	}
+	mutations := []struct {
+		name, find, replace string
+		repeats             bool
+	}{
+		{"patient repeated", patient, patient + `,"patient":{"reference":"Patient/` + anotherHeldMember + `"}`, true},
+		{"patient repeated under case folding", patient, patient + `,"PATIENT":{"reference":"Patient/` + anotherHeldMember + `"}`, true},
+		{"patient named in another case", `"patient":`, `"Patient":`, false},
+		{"reference named in another case", `"reference":"Patient/`, `"Reference":"Patient/`, false},
+		{"type named in another case", `"resourceType":`, `"ResourceType":`, false},
+	}
+	for limit, raw := range limits {
+		for _, m := range mutations {
+			body := eligibilityRequest(t, dtrFrameMember)
+			body = append(append(append([]byte{}, body[:len(body)-1]...), []byte(`,"note":`+raw)...), '}')
+			mutated := bytes.Replace(body, []byte(m.find), []byte(m.replace), 1)
+			if bytes.Equal(mutated, body) {
+				t.Fatalf("%s: the mutation did not apply", m.name)
+			}
+			for _, level := range eligibilityLevels {
+				t.Run(limit+"/"+m.name+"/"+level.String(), func(t *testing.T) {
+					p := eligibilityPayer(t, level, false)
+					var got exchangeRecords
+					p.g.cfg.ExchangeObserved = got.observe
+					ans := p.sendAs(t, "coverage-eligibility", "", mutated, p.pci)
+					want, rule := "member names are case-sensitive, so the request names no patient to bind", RefusalAuthority
+					if m.repeats {
+						want, rule = "eligibility request repeats the JSON member", RefusalIntegrity
+					}
+					if ans.status != http.StatusBadRequest || !strings.Contains(string(ans.body), want) {
+						t.Fatalf("answer %d %s, want 400 %s", ans.status, ans.body, want)
+					}
+					wantRefusal(t, got.only(t), http.StatusBadRequest, RefusedByPayerGateway, rule)
+				})
+				t.Run("provider/"+limit+"/"+m.name+"/"+level.String(), func(t *testing.T) {
+					want, rule := "member names are case-sensitive, so the request names no patient to bind", RefusalAuthority
+					if m.repeats {
+						want, rule = "eligibility request repeats the JSON member", RefusalIntegrity
+					}
+					env, rec, x := runEligibilityIngress(t, level, mutated, nil)
+					refusedBeforeTheNetwork(t, env, rec, http.StatusBadRequest, want)
+					wantRefusal(t, x, http.StatusBadRequest, RefusedByProviderGateway, rule)
+				})
+			}
+		}
+	}
+}
+
+// A repeat the strict reader never reaches (its limit comes first in the
+// body) is still found and refused as message integrity; the refusal says a
+// member name is repeated, since only that reader names which.
+func TestEligibility_RepeatPastTheStrictReadersLimitIsRefused(t *testing.T) {
+	const patient = `"patient":{"reference":"Patient/` + dtrFrameMember + `"}`
+	cer := eligibilityRequest(t, dtrFrameMember)
+	body := append([]byte("{\"note\":\"\xff\","), cer[1:]...)
+	body = bytes.Replace(body, []byte(patient), []byte(patient+`,"patient":{"reference":"Patient/`+anotherHeldMember+`"}`), 1)
+	for _, level := range eligibilityLevels {
+		t.Run(level.String(), func(t *testing.T) {
+			p := eligibilityPayer(t, level, false)
+			var got exchangeRecords
+			p.g.cfg.ExchangeObserved = got.observe
+			ans := p.sendAs(t, "coverage-eligibility", "", body, p.pci)
+			if ans.status != http.StatusBadRequest || !strings.Contains(string(ans.body), "eligibility request repeats a member name: it can be read two ways") {
+				t.Fatalf("answer %d %s, want 400 naming a repeated member name", ans.status, ans.body)
+			}
+			wantRefusal(t, got.only(t), http.StatusBadRequest, RefusedByPayerGateway, RefusalIntegrity)
+		})
+	}
+}
+
+// repeatsAName finds a repeated member name wherever encoding/json reads a
+// body the strict reader refuses for its own limits, and nothing else.
+func TestRepeatsAName_PastTheStrictReadersLimits(t *testing.T) {
+	deep := strings.Repeat("[", 70) + strings.Repeat("]", 70)
+	for body, want := range map[string]bool{
+		`{"a":1,"a":2}`:                                  true,
+		`{"a":1,"A":2}`:                                  true,
+		`{"x":` + deep + `,"k":1,"k":2}`:                 true,
+		`{"x":` + deep + `,"k":1,"K":2}`:                 true,
+		`{"x":` + deep + `,"o":{"k":1,"k":2}}`:           true,
+		`{"x":` + deep + `,"a":[{"k":1},{"k":2,"K":3}]}`: true,
+		`{"x":` + deep + `,"\u0041":1,"a":2}`:            true,
+		"{\"x\":\"\xff\",\"k\":1,\"k\":2}":               true,
+		`{"x":` + deep + `,"k":1}`:                       false,
+		`{"x":` + deep + `,"a":[{"k":1},{"k":2}]}`:       false,
+		`{"x":` + deep + `,"o":{"k":1},"p":{"k":2}}`:     false,
+		`{"x":` + deep + `,"k":{"k":1}}`:                 false,
+		"{\"x\":\"\xff\",\"k\":1}":                       false,
+		`{"a":1,"b":2}`:                                  false,
+		`{`:                                              false,
+	} {
+		if got := repeatsAName([]byte(body)); got != want {
+			t.Errorf("repeatsAName(%q) = %v, want %v", body, got, want)
 		}
 	}
 }

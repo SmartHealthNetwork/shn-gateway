@@ -157,6 +157,116 @@ func TestInjectShnCorrelation(t *testing.T) {
 	}
 }
 
+// claimIdentifiers returns each Claim entry's identifiers in a PAS Bundle.
+func claimIdentifiers(t *testing.T, bundle []byte) [][]map[string]any {
+	t.Helper()
+	var b struct {
+		Entry []struct {
+			Resource struct {
+				ResourceType string           `json:"resourceType"`
+				Identifier   []map[string]any `json:"identifier"`
+			} `json:"resource"`
+		} `json:"entry"`
+	}
+	if err := json.Unmarshal(bundle, &b); err != nil {
+		t.Fatal(err)
+	}
+	var out [][]map[string]any
+	for _, e := range b.Entry {
+		if e.Resource.ResourceType == "Claim" {
+			out = append(out, e.Resource.Identifier)
+		}
+	}
+	return out
+}
+
+// A PAS 2.0.1 Claim carries exactly one identifier (profile-claim and profile-claim-update,
+// Claim.identifier 1..1), and the payer echoes the Claim into its answer. So every
+// Claim the driver builds with a correlation, the submission's and an amendment's and
+// its prior's, carries exactly one: its urn:shn:correlation.
+func TestCorrelatedClaimsCarryOneIdentifier(t *testing.T) {
+	submit, err := BuildPASBundle(PASPendGolden(), "MBR-COVERED")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if submit, err = InjectShnCorrelation(submit, "corr-submit"); err != nil {
+		t.Fatal(err)
+	}
+	dr := []byte(`{"resourceType":"DiagnosticReport","id":"report","subject":{"reference":"Patient/MBR-COVERED"}}`)
+	amend, err := BuildAmendedRePOST("MBR-COVERED", "corr-submit", "corr-amend")
+	if err != nil {
+		t.Fatal(err)
+	}
+	federated, err := BuildFederatedAmendedRePOST("MBR-COVERED", "corr-submit", "corr-amend", dr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range []struct {
+		name   string
+		bundle []byte
+		want   []string // each Claim's one correlation, in entry order
+	}{
+		{"submit", submit, []string{"corr-submit"}},
+		{"amend", amend, []string{"corr-amend"}},
+		{"federated amend", federated, []string{"corr-amend"}},
+	} {
+		claims := claimIdentifiers(t, row.bundle)
+		if len(claims) != len(row.want) {
+			t.Fatalf("%s: %d Claims, want %d", row.name, len(claims), len(row.want))
+		}
+		for i, ids := range claims {
+			if len(ids) != 1 || ids[0]["system"] != "urn:shn:correlation" || ids[0]["value"] != row.want[i] {
+				t.Fatalf("%s: Claim %d identifiers %v, want exactly one urn:shn:correlation %q", row.name, i, ids, row.want[i])
+			}
+		}
+	}
+}
+
+// Provenance.recorded is 1..1 in base R4, so each amendment's Provenance records an
+// instant: the Bundle's own timestamp, read from the golden it is built from, which
+// keeps the driver's Bundles deterministic.
+func TestAmendmentProvenanceRecordsTheBundleTimestamp(t *testing.T) {
+	dr := []byte(`{"resourceType":"DiagnosticReport","id":"report","subject":{"reference":"Patient/MBR-COVERED"}}`)
+	amend, err := BuildAmendedRePOST("MBR-COVERED", "corr-submit", "corr-amend")
+	if err != nil {
+		t.Fatal(err)
+	}
+	federated, err := BuildFederatedAmendedRePOST("MBR-COVERED", "corr-submit", "corr-amend", dr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, bundle := range map[string][]byte{"amend": amend, "federated amend": federated} {
+		var b struct {
+			Timestamp string `json:"timestamp"`
+			Entry     []struct {
+				Resource struct {
+					ResourceType string `json:"resourceType"`
+					Recorded     string `json:"recorded"`
+				} `json:"resource"`
+			} `json:"entry"`
+		}
+		if err := json.Unmarshal(bundle, &b); err != nil {
+			t.Fatal(err)
+		}
+		var recorded []string
+		for _, e := range b.Entry {
+			if e.Resource.ResourceType == "Provenance" {
+				recorded = append(recorded, e.Resource.Recorded)
+			}
+		}
+		if b.Timestamp == "" || len(recorded) != 1 || recorded[0] != b.Timestamp {
+			t.Fatalf("%s: Provenance recorded %q, want one Provenance recording the Bundle timestamp %q", name, recorded, b.Timestamp)
+		}
+	}
+}
+
+// A golden with no timestamp gives the Provenance nothing to record: refused, never minted.
+func TestBundleTimestampRefusesAMissingTimestamp(t *testing.T) {
+	if _, err := bundleTimestamp(map[string]any{"resourceType": "Bundle"}); err == nil {
+		t.Fatal("a Bundle with no timestamp must be refused")
+	}
+}
+
 func TestBuildQuestionnairePackageRequest(t *testing.T) {
 	out, err := BuildQuestionnairePackageRequest("http://example.org/Questionnaire/q1|1.0", "MBR-COVERED")
 	if err != nil {

@@ -4,9 +4,9 @@ Synthetic FHIR resources the Kit posts to a packaged HAPI validator before it
 counts the child ready (see `../warm.go`). Every file is a copy of the
 validator container image's own readiness fixture of the same name, and the
 platform repository fences the two sets to byte equality: change the image's
-copy and refresh this one in the same change. Per contract line, the four
-initialization fixtures (PAS request Bundle, DTR QuestionnaireResponse, PDex
-ExplanationOfBenefit, CDex Task) exercise profile resolution; the approved,
+copy and refresh this one in the same change. Per contract line, the three
+initialization fixtures (PAS request Bundle, DTR QuestionnaireResponse, CDex
+Task) exercise profile resolution; the approved,
 denied and pended PAS ClaimResponses are the strict verdict corpus, and the
 negative control is derived from the approved fixture at run time by
 replacing the nested `extension-reviewActionCode` CodeableConcept with a

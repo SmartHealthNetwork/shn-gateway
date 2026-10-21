@@ -51,7 +51,7 @@ func countRows(t *testing.T, pool *pgxpool.Pool, sql string, args ...any) int {
 func exchangeRows(t *testing.T, mk func(now func() time.Time) resettableExchangeStore) {
 	t0 := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
 	t.Run("patient-agnostic leg (nil Subjects) round-trips", func(t *testing.T) {
-		// ingress.go records the DTR $questionnaire-package leg with Subjects: subjectsOf("")
+		// workstream_pa_ingress.go records the DTR $questionnaire-package leg with Subjects: subjectsOf("")
 		// == nil. pgx encodes a nil []string as SQL NULL; the pg store must coalesce it, and
 		// both backends must hand it back the same way (empty ⇒ nil).
 		now, _ := fixedClock(t0)

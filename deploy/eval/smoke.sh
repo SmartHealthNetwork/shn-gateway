@@ -19,10 +19,23 @@ bash gateway/deploy/eval/brprovider/build.sh build            # image:, must exi
 # the platform's invariants; do not move this export into the compose, and do not add one
 # to payer/smoke.sh.
 export CONFORMANCE_ENFORCEMENT=strict
+# The gateway's /scenario routes admit only the callers its bundle's scenario-callers.json
+# names (compose.eval.yml's SCENARIO_CALLERS_FILE). This gate makes its caller the way the
+# README's step 0 tells a partner to, `shn scenario-key --bundle`, on a copy of the
+# provisioned bundle, so the bundle itself is never written; every request below is signed.
+work=$(mktemp -d)
+# The copy holds the bundle's private keys: remove it on every exit from here on.
+trap 'rm -rf "$work"' EXIT
+mkdir "$work/bundle" && cp -R "$SHN_SECRETS"/. "$work/bundle"
+if [ -d sdk ]; then ( cd sdk && go build -o "$work/shn" ./cmd/shn ); else cp "$(command -v shn)" "$work/shn"; fi
+"$work/shn" scenario-key --bundle "$work/bundle" --out "$work"
+export SHN_SECRETS="$work/bundle"
+# sign ROUTE BODY prints the assertion for one request; each request needs its own (one use).
+sign() { "$work/shn" scenario-sign --key "$work/scenario-caller-send-test.sign" --bundle "$SHN_SECRETS" POST "/scenario/$1" "$2"; }
 compose="docker compose -f gateway/deploy/eval/compose.eval.yml"
 # Register teardown BEFORE `up` so a failing build/up (which set -e aborts on) still tears
 # down any containers that did start — otherwise leaked containers wedge the next run's ports.
-trap '$compose down -v' EXIT
+trap '$compose down -v; rm -rf "$work"' EXIT
 $compose up -d --build
 
 # Every scenario request carries the persona the network's discovery descriptor states for
@@ -35,32 +48,49 @@ body() { gateway/deploy/eval/persona_body.sh "$desc" "$1" provider-data "$2" "${
 
 # Readiness = retry the first real scenario until it returns well-formed JSON.
 # (No GET /healthz exists; a successful uc01 POST proves gateway up + seeded + routing —
-# see gateway/engine/originate.go's handleScenario / gateway/engine/originate_routes.go's
+# see gateway/engine/module1_originate.go's handleScenario / gateway/engine/module1_originate_routes.go's
 # route declarations, which mount ONLY POST /scenario/ucNN.)
 ready=0
+req0=$(body uc01 0 '{"branch":"covered"}')
 for i in $(seq 1 90); do
   if curl -fsS -X POST localhost:8080/scenario/uc01 -H 'Content-Type: application/json' \
-       -d "$(body uc01 0 '{"branch":"covered"}')" | jq -e '.covered==true' >/dev/null 2>&1; then ready=1; break; fi
+       -H "X-Holder-Assertion: $(sign uc01 "$req0")" --data-raw "$req0" | jq -e '.covered==true' >/dev/null 2>&1; then ready=1; break; fi
   sleep 10
 done
 [ "$ready" = 1 ] || { echo "gateway never became ready"; exit 1; }
 
 fail=0
 check() { # route  descriptor-scenario  amend(0|1)  route-keys  jq-predicate
-  # Guard the assignment: under set -e a failing curl (a 4xx/5xx from a regressed UC, or a
-  # connection error) would otherwise abort the whole script here — skipping the remaining
+  # Guard the assignment: under set -e a failing curl (a connection error; a 4xx/5xx is an
+  # answer, read below) would otherwise abort the whole script here — skipping the remaining
   # UCs AND the mandatory conformant-lane cert checks below. Record it and keep going.
   local req
   if ! req=$(body "$2" "$3" "$4"); then echo "✗ $2: the descriptor states no persona facts"; fail=1; return; fi
-  if ! out=$(curl -fsS -X POST "localhost:8080/scenario/$1" -H 'Content-Type: application/json' -d "$req"); then
-    echo "✗ $2: request failed"; fail=1; return
+  # A payer's pend is its answer; the reference payer pends these families on submit and decides
+  # later. ?wait=30 asks the gateway to follow the decision for up to 30 s (its own bound, through
+  # Claim/$inquire) before it answers, so the route answers the decision when the payer has made
+  # one, and the pend with its continuation when it has not. The signature binds the query too.
+  # The status is read separately so a refusal's body, which says why, is printed with it.
+  if ! out=$(curl -sS -w '\n%{http_code}' -X POST "localhost:8080/scenario/$1?wait=30" -H 'Content-Type: application/json' \
+       -H "X-Holder-Assertion: $(sign "$1?wait=30" "$req")" --data-raw "$req"); then
+    echo "✗ $2: request failed (no answer)"; fail=1; return
   fi
-  if echo "$out" | jq -e "$5" >/dev/null 2>&1; then echo "✓ $2"; else echo "✗ $2: $out"; fail=1; fi
+  code=${out##*$'\n'}; out=${out%$'\n'*}
+  case "$code" in
+    2??) ;;
+    *) echo "✗ $2: HTTP $code: $out"; fail=1; return ;;
+  esac
+  if echo "$out" | jq -e "$5" >/dev/null 2>&1; then echo "✓ $2"
+  elif cont=$(echo "$out" | jq -er 'select(.decision=="pended") | .continuation' 2>/dev/null); then
+    # The evaluation payer decides within the wait; a pend still open after it means something is
+    # wrong, so it fails this gate, said as what it is, with the continuation to resume it.
+    echo "✗ $2: pended, not decided within 30 s (continuation $cont): $out"; fail=1
+  else echo "✗ $2: $out"; fail=1; fi
 }
-# Assertions against the REAL structs (engine/originate*.go / originate_resume.go).
+# Assertions against the REAL structs (engine/module1_originate*.go).
 # Branch-body keys verified against the real handlers: handleScenario
-# (uc01) switches on req.Branch == "covered"/"notcovered" (originate.go:151-159); handleUC05
-# switches on "", "consent", "noconsent" (originate.go:1181-1187). uc02/03/04/06/07/08 don't
+# (uc01) switches on req.Branch == "covered"/"notcovered" (module1_originate.go:151-159); handleUC05
+# switches on "", "consent", "noconsent" (module1_originate.go:1181-1187). uc02/03/04/06/07/08 don't
 # read the body at all, so "{}" is inert.
 check uc01 uc01            0 '{"branch":"covered"}'    '.covered==true'
 check uc01 uc01-notcovered 0 '{"branch":"notcovered"}' '.covered==false'

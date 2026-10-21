@@ -54,10 +54,12 @@ func TestEveryEgressAdaptSiteAnswersThroughAdaptFailureStatus(t *testing.T) {
 			t.Fatal(err)
 		}
 		lines := strings.Split(string(src), "\n")
-		inAdapt := false // egressAdapt's own body passes the walk's errors to its callers
+		// egressAdapt's and egressBuild's own bodies pass the walk's errors to
+		// their callers.
+		inAdapt := false
 		for i, line := range lines {
 			if strings.HasPrefix(line, "func ") {
-				inAdapt = strings.HasPrefix(line, "func (g *Gateway) egressAdapt(")
+				inAdapt = strings.HasPrefix(line, "func (g *Gateway) egressAdapt(") || strings.HasPrefix(line, "func (g *Gateway) egressBuild(")
 			}
 			if inAdapt {
 				continue
@@ -68,23 +70,46 @@ func TestEveryEgressAdaptSiteAnswersThroughAdaptFailureStatus(t *testing.T) {
 					t.Errorf("%s:%d: the egressWalk record failure is not answered through adaptFailureStatus:\n%s", f, i+1, window)
 				}
 			}
-			if !strings.Contains(line, "g.egressAdapt(") && !strings.Contains(line, "g.egressWalk(") {
+			send := strings.Contains(line, "g.sendLeg(")
+			if !send && !strings.Contains(line, "g.egressAdapt(") && !strings.Contains(line, "g.egressWalk(") && !strings.Contains(line, "g.egressBuild(") {
+				continue
+			}
+			// An egressBuild or sendLeg call spans its literal: the window
+			// starts after the call's closing line.
+			end := i
+			if strings.HasSuffix(line, "moduleBuild{") || strings.HasSuffix(line, "legSend{") {
+				indent := line[:len(line)-len(strings.TrimLeft(line, "\t"))]
+				for end+1 < len(lines) && lines[end] != indent+"})" {
+					end++
+				}
+			}
+			// A sendLeg site walks only what it built (Build); a sealed
+			// request is not walked.
+			if send && !strings.Contains(strings.Join(lines[i:end+1], "\n"), "Build:") {
 				continue
 			}
 			sites++
-			window := strings.Join(lines[i+1:min(i+5, len(lines))], "\n")
+			window := strings.Join(lines[end+1:min(end+5, len(lines))], "\n")
 			switch {
 			case strings.Contains(window, "bridgeRefusalText("):
 				bridged++
+			case send:
+				// sendLeg answers a walk's failure through adaptFailureStatus
+				// (its own egressBuild site, below); its sites answer with that
+				// status.
+				if !strings.Contains(window, "writeLegFailure(") && !strings.Contains(window, "failed.Status") {
+					t.Errorf("%s:%d: the sendLeg failure is not answered with its status:\n%s", f, i+1, window)
+				}
 			case !strings.Contains(window, "adaptFailureStatus("):
 				t.Errorf("%s:%d: the egressAdapt failure is not answered through adaptFailureStatus:\n%s", f, i+1, window)
 			}
 		}
 	}
-	// The scan must be able to match: the engine has 19 call sites today, four
-	// of them egressWalk sites that record their walk only when they apply it.
-	if sites < 19 {
-		t.Fatalf("found %d egressAdapt and egressWalk call sites, want the engine's full set (19 or more)", sites)
+	// The scan must be able to match: the engine has 20 call sites today, four
+	// of them egressWalk sites that record their walk only when they apply it,
+	// sendLeg's one egressBuild, and fifteen module 1 sendLeg sites that build.
+	if sites < 20 {
+		t.Fatalf("found %d egressBuild, egressWalk and building sendLeg call sites, want the engine's full set (20 or more)", sites)
 	}
 	if records < 4 {
 		t.Fatalf("found %d egressWalk record calls, want one per egressWalk site (4 or more)", records)

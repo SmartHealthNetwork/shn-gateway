@@ -15,11 +15,12 @@ import (
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
-// optInEnrichment sets g's enrichment opt-in after New, and installs the hook
-// as New does at boot.
+// optInEnrichment sets g's enrichment opt-in after New (or on a gateway
+// assembled without it), and builds the workstreams' states as New does at
+// boot, the hook installed (or not) in PA's.
 func optInEnrichment(g *Gateway, on bool) {
 	g.cfg.EnrichNativeRequests = on
-	g.installEnrichment()
+	g.states = workstreamGatewayStates(g)
 }
 
 // countingEnrichment is a hook that records every call and hands it to inner,
@@ -57,8 +58,8 @@ func (c *countingEnrichment) dtrPatient(ctx context.Context, member string, fenc
 // opt-in: with it off the core holds no hook and runs no enrichment code.
 func TestEnrichmentHook_InstalledOnlyUnderTheOptIn(t *testing.T) {
 	env := newInProcessExchange(t)
-	if env.originator.enrich != nil {
-		t.Fatalf("a gateway booted without the opt-in holds the hook %T", env.originator.enrich)
+	if env.originator.paState().enrich != nil {
+		t.Fatalf("a gateway booted without the opt-in holds the hook %T", env.originator.paState().enrich)
 	}
 	on, err := New(func() Config { c := env.originator.cfg; c.EnrichNativeRequests = true; return c }())
 	if err != nil {
@@ -80,11 +81,11 @@ func countedCRDIngress(t *testing.T, set func(*countingEnrichment)) (*inProcessE
 	env := newInProcessExchange(t)
 	env.originator.cfg.SoR = newPrefetchSoR().sor()
 	optInEnrichment(env.originator, true)
-	hook := &countingEnrichment{inner: env.originator.enrich}
+	hook := &countingEnrichment{inner: env.originator.paState().enrich}
 	if set != nil {
 		set(hook)
 	}
-	env.originator.enrich = hook
+	env.originator.paState().enrich = hook
 	rec := httptest.NewRecorder()
 	env.originator.handleCRDIngress(rec, crdIngressPost(ehrRequest(`"coverage":`+ehrCoverage)))
 	return env, rec, hook
@@ -132,11 +133,11 @@ func countedDTRIngress(t *testing.T, carriesCoverage bool, set func(*countingEnr
 	sor.answer(t, "Coverage", page("", "", sorEntry(sorCoverage("cov-1", shnsdk.CMSPayerIdentity.Value)), includeEntry(`{"resourceType":"Organization","id":"org-1","name":"Payer"}`)))
 	env.originator.cfg.SoR = recordSoR{searchingPrefetchSoR{sor}}
 	optInEnrichment(env.originator, true)
-	hook := &countingEnrichment{inner: env.originator.enrich}
+	hook := &countingEnrichment{inner: env.originator.paState().enrich}
 	if set != nil {
 		set(hook)
 	}
-	env.originator.enrich = hook
+	env.originator.paState().enrich = hook
 	declareFramedDTR(t, env, true)
 	env.payerReturns(LegResult{Response: testResponse(packageAnswer)})
 	params := []string{ehrOrderParam("sr1", prefetchMember)}
@@ -173,7 +174,7 @@ func TestEnrichmentHook_DTRAsksOncePerRead(t *testing.T) {
 //     only by installEnrichment;
 //   - the reads behind the hook (obtainPrefetch, obtainDTRPatient) are named,
 //     called or not, only in on-behalf building's own files: the hook's
-//     (enrich_native.go) and its origination (originate*.go).
+//     (module1_enrich_native.go) and module 1's other files (module1_*.go).
 func TestEnrichmentHook_TheCoreReachesEnrichmentOnlyThroughIt(t *testing.T) {
 	fset := token.NewFileSet()
 	entries, err := os.ReadDir(".")
@@ -181,7 +182,7 @@ func TestEnrichmentHook_TheCoreReachesEnrichmentOnlyThroughIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	moduleOne := func(name string) bool {
-		return name == "enrich_native.go" || strings.HasPrefix(name, "originate")
+		return strings.HasPrefix(name, "module1_")
 	}
 	isInstaller := func(fn *ast.FuncDecl) bool {
 		if fn == nil || fn.Name.Name != "installEnrichment" || fn.Recv == nil || len(fn.Recv.List) != 1 {
@@ -230,7 +231,7 @@ func TestEnrichmentHook_TheCoreReachesEnrichmentOnlyThroughIt(t *testing.T) {
 						}
 					}
 				case *ast.Ident:
-					if n.Name == "onBehalfEnrichment" && name != "enrich.go" && name != "enrich_native.go" {
+					if n.Name == "onBehalfEnrichment" && name != "workstream_pa_enrich.go" && name != "module1_enrich_native.go" {
 						t.Errorf("%s: onBehalfEnrichment is named outside the hook's files", fset.Position(n.Pos()))
 					}
 				}

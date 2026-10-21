@@ -86,8 +86,8 @@ func TestLevelPayerPASSubmit_DependentAnswerRelayed(t *testing.T) {
 			if got.status != http.StatusOK || !bytes.Equal(got.body, approved) {
 				t.Fatalf("answer %d %s", got.status, got.body)
 			}
-			if rec, found := p.pendOf(t, got.corr); !found || rec.State != PendStateDecided || rec.Outcome != PendOutcomeApproved || p.eobCount() != 1 {
-				t.Fatalf("the decision and its EOB must be written, got found=%v %+v, %d EOB(s)", found, rec, p.eobCount())
+			if rec, found := p.pendOf(t, got.corr); !found || rec.State != PendStateDecided || rec.Outcome != PendOutcomeApproved {
+				t.Fatalf("the decision must be written, got found=%v %+v", found, rec)
 			}
 			if len(p.skipped) != 0 || len(p.content()) != 0 {
 				t.Fatalf("a readable answer records and skips nothing: %+v %+v", findingsText(p.content()), p.skipped)
@@ -107,8 +107,8 @@ func TestLevelPayerPASSubmit_DependentAnswerPatientLinkage(t *testing.T) {
 				got := p.send(t, "pas-claim", "", request)
 				p.wantAnswerRow(t, "pas-claim", got, pasSubmitPath, answer, RulePatientAnswer, http.StatusForbidden, "PAS response has inconsistent patient linkage")
 				p.wantSkipped(t, "pas-claim", got.corr, RulePatientAnswer)
-				if _, found := p.pendOf(t, got.corr); found || p.eobCount() != 0 {
-					t.Fatalf("nothing may be written from this answer: pend found=%v, %d EOB(s)", found, p.eobCount())
+				if _, found := p.pendOf(t, got.corr); found {
+					t.Fatalf("nothing may be written from this answer: pend found=%v", found)
 				}
 			})
 		}
@@ -127,8 +127,8 @@ func TestLevelPayerInquire_DependentAnswerDecides(t *testing.T) {
 			if got.status != http.StatusOK || !bytes.Equal(got.body, answer) {
 				t.Fatalf("answer %d %s", got.status, got.body)
 			}
-			if rec, _ := p.pendOf(t, "corr-submit-1"); rec.State != PendStateDecided || p.eobCount() != 1 || len(p.skipped) != 0 || len(p.content()) != 0 {
-				t.Fatalf("a readable answer decides: %+v, %d EOB(s), skipped %+v, findings %v", rec, p.eobCount(), p.skipped, findingsText(p.content()))
+			if rec, _ := p.pendOf(t, "corr-submit-1"); rec.State != PendStateDecided || len(p.skipped) != 0 || len(p.content()) != 0 {
+				t.Fatalf("a readable answer decides: %+v, skipped %+v, findings %v", rec, p.skipped, findingsText(p.content()))
 			}
 		})
 	}
@@ -146,8 +146,8 @@ func TestLevelPayerInquire_DependentAnswerPatientLinkage(t *testing.T) {
 				got := p.send(t, "pas-claim-inquire", "", request)
 				p.wantAnswerRow(t, "pas-claim-inquire", got, pasInquirePath, answer, RulePatientAnswer, http.StatusForbidden, "PAS inquiry answer has inconsistent patient linkage")
 				p.wantSkipped(t, "pas-claim-inquire", got.corr, RulePatientAnswer)
-				if rec, found := p.pendOf(t, "corr-submit-1"); !found || rec.State != PendStatePended || p.eobCount() != 0 {
-					t.Fatalf("nothing may be written from this answer: %+v, %d EOB(s)", rec, p.eobCount())
+				if rec, found := p.pendOf(t, "corr-submit-1"); !found || rec.State != PendStatePended || rec.Outcome != "" {
+					t.Fatalf("nothing may be written from this answer: %+v", rec)
 				}
 			})
 		}

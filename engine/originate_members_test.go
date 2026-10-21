@@ -32,7 +32,7 @@ func TestSceneMember_ProfileDispatch(t *testing.T) {
 // handleUC04 must thread sceneMember so provider-data reads its own seeded G0151 order
 // (OpenOrder is keyed on member) while the default arm stays on MBR-UC04.
 func TestHandleUC04_ThreadsSceneMember(t *testing.T) {
-	src, err := os.ReadFile("originate.go")
+	src, err := os.ReadFile("module1_originate.go")
 	if err != nil {
 		t.Fatalf("read source: %v", err)
 	}
@@ -62,7 +62,7 @@ func TestHandleUC04_ThreadsSceneMember(t *testing.T) {
 // handleUC08 must thread sceneMember so provider-data reads its own seeded J3490 order
 // (OpenOrder is keyed on member) while the default arm stays on MBR-UC08.
 func TestHandleUC08_ThreadsSceneMember(t *testing.T) {
-	src, err := os.ReadFile("originate.go")
+	src, err := os.ReadFile("module1_originate.go")
 	if err != nil {
 		t.Fatalf("read source: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestIsDemoProfile(t *testing.T) {
 // fire for demo the same way it fires for provider-data — both target br-payer's J3490
 // NOT-COVERED family — while every other lane keeps the generic FR-G25/AI-1 stop.
 func TestHandleUC08_ProceedOnNotCovered_DemoOptIn(t *testing.T) {
-	src, err := os.ReadFile("originate.go")
+	src, err := os.ReadFile("module1_originate.go")
 	if err != nil {
 		t.Fatalf("read source: %v", err)
 	}

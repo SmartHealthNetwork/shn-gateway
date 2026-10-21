@@ -71,7 +71,6 @@ def terminology_error(diagnostic):
             "x12278requestedservicetype",
             "x12278locationtype",
             "place_of_service_code_set",
-            "pdexpainstitutionalprocedurecodesvs",
             "x12claimadjustmentreasoncodes",
         )
     )

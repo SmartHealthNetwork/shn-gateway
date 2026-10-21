@@ -1,0 +1,327 @@
+// workstream_pa_pasleg.go — what the engine knows about a PAS exchange that the payer content
+// seam does not take, and the pend-ledger effects the submit and update legs
+// derive from the payer's own answer.
+//
+// WHY A CONTEXT CARRIER. `LegResponder` takes the leg, the correlation and the
+// subject: the authority outputs a content occupant needs to build and to key its
+// own writes. The pend ledger needs one more — the VERIFIED requester holder, the
+// envelope Sender the inbound handler authenticated — because every lookup key is
+// namespaced by the requester that submitted the claim, and a key in no namespace
+// would match in all of them. That fact is the engine's, never the connector's, so
+// it travels beside the exchange on the context rather than through the content
+// seam, exactly as the native certification capture does. Nothing outside this
+// package can set it, and an injected `LegResponder` that never reads it keeps
+// working unchanged.
+//
+// The same carrier collects the leg's OBSERVER NOTES. A payer gateway's legs raise
+// facts an operator needs — an amendment that reached the payer without binding a
+// local pend, a ledger transition the payer's later word forced, a pend no
+// follow-up can name —
+// and the responder has no observer of its own. It appends the event kinds here;
+// the inbound handler emits them once the exchange is sealed, tied to its
+// correlation.
+package engine
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"log"
+	"strings"
+	"time"
+)
+
+// pasLegKey is the context key for the per-exchange carrier.
+type pasLegKey struct{}
+
+// pasLeg carries the verified requester holder and the notes the leg raised.
+type pasLeg struct {
+	requester string
+	notes     []string
+	// detailed are the notes raised with a detail (noteDetail).
+	detailed []pasLegNote
+	// unread is the rule the payer's answer broke when the responder relayed
+	// it below strict without reading it for this gateway's own records
+	// (skipWrite); "" when the answer was read.
+	unread string
+	// payerAnswered is set once the payer's own system answered the forward:
+	// from then on the payer may have acted on the request.
+	payerAnswered bool
+}
+
+// answered records that the payer's own system answered this exchange's
+// forward. A nil carrier drops it, as note does.
+func (l *pasLeg) answered() {
+	if l != nil {
+		l.payerAnswered = true
+	}
+}
+
+// afterPayerAnswered reports whether the payer's own system has answered.
+func (l *pasLeg) afterPayerAnswered() bool { return l != nil && l.payerAnswered }
+
+// withPASLeg attaches a carrier for this exchange, returning the context and the
+// carrier the caller reads its notes back from. requester is the VERIFIED
+// envelope Sender.
+func withPASLeg(ctx context.Context, requester string) (context.Context, *pasLeg) {
+	leg := &pasLeg{requester: strings.TrimSpace(requester)}
+	return context.WithValue(ctx, pasLegKey{}, leg), leg
+}
+
+// pasLegOf reads the carrier, or nil when the caller attached none (an injected
+// responder, or a test driving the leg directly).
+func pasLegOf(ctx context.Context) *pasLeg {
+	leg, _ := ctx.Value(pasLegKey{}).(*pasLeg)
+	return leg
+}
+
+// requesterHolderOf is the verified requester this exchange came from, or "".
+func requesterHolderOf(ctx context.Context) string {
+	if leg := pasLegOf(ctx); leg != nil {
+		return leg.requester
+	}
+	return ""
+}
+
+// note records one observer event kind for the inbound handler to emit. A nil
+// carrier drops it: a leg driven without one has no exchange to tie it to.
+func (l *pasLeg) note(kind string) {
+	if l == nil || kind == "" {
+		return
+	}
+	l.notes = append(l.notes, kind)
+}
+
+// noteOn is note on the carrier this context holds.
+func noteOn(ctx context.Context, kind string) { pasLegOf(ctx).note(kind) }
+
+// pasLegNote is an observer event the leg raised with a detail: what an
+// operator needs to know about it beyond its kind (metadata only, never a
+// payload value).
+type pasLegNote struct{ kind, detail string }
+
+// noteDetail records one observer event with its detail for the inbound
+// handler to emit. A nil carrier drops it, as note does.
+func (l *pasLeg) noteDetail(kind, detail string) {
+	if l == nil || kind == "" {
+		return
+	}
+	l.detailed = append(l.detailed, pasLegNote{kind: kind, detail: detail})
+}
+
+// noteDetailOn is noteDetail on the carrier this context holds.
+func noteDetailOn(ctx context.Context, kind, detail string) { pasLegOf(ctx).noteDetail(kind, detail) }
+
+// skipWrite records that the responder relayed the payer's answer, which broke
+// rule, without reading it for this gateway's own records, so the inbound
+// handler neither judges the answer again nor writes anything from it. A nil
+// carrier drops it, as note does.
+func (l *pasLeg) skipWrite(rule string) {
+	if l == nil || l.unread != "" {
+		return
+	}
+	l.unread = rule
+}
+
+// unreadRule is the rule the responder skipped the local write for, or "".
+func (l *pasLeg) unreadRule() string {
+	if l == nil {
+		return ""
+	}
+	return l.unread
+}
+
+// payerLocalWriteSkipped is the payer-side sibling of localWriteSkipped: the
+// payer gateway relayed its participant's answer on leg, which broke rule,
+// below strict, so it wrote nothing from it for its own records — no pend and
+// no decision. The order of the writes an answer that is read makes is
+// unchanged; this one simply makes none. Metadata only: a log line and an
+// observer event (LocalWriteSkippedEvent), no payload.
+func (g *Gateway) payerLocalWriteSkipped(leg, correlationID, rule string) {
+	detail := "answer not read for the local record (" + rule + "); no pend or decision written"
+	log.Printf("gateway: %s: leg %s correlation %s: %s", LocalWriteSkippedEvent, leg, correlationID, detail)
+	g.observe(ObserverEvent{
+		Kind: LocalWriteSkippedEvent, Direction: "ingress", LegType: leg,
+		CorrelationID: correlationID, Detail: detail,
+	})
+}
+
+// LocalWriteFailedEvent is emitted when a payer gateway relayed its participant's
+// answer but could not record it for its own records: the pend or the decision
+// was not written. The ledger records and never gates, so the
+// answer reaches the requester either way. It carries the leg, the correlation
+// id and the kind of failure; never the answer and never the store's own text.
+const LocalWriteFailedEvent = "pa.local-write-failed"
+
+// payerLocalWriteFailed reports a record write that failed after the payer's
+// answer was sealed for the requester. Metadata only: a log line and an observer
+// event (LocalWriteFailedEvent).
+func (g *Gateway) payerLocalWriteFailed(leg, correlationID string, err error) {
+	detail := "the payer's answer was relayed but not recorded here: " + localWriteFailure(err)
+	log.Printf("gateway: %s: leg %s correlation %s: %s", LocalWriteFailedEvent, leg, correlationID, detail)
+	g.observe(ObserverEvent{
+		Kind: LocalWriteFailedEvent, Direction: "ingress", LegType: leg,
+		CorrelationID: correlationID, Detail: detail,
+	})
+}
+
+// localWriteFailure names why a record write failed, in the ledger's own terms.
+// A store's error text is not repeated: it can carry the values it refused.
+func localWriteFailure(err error) string {
+	switch {
+	case errors.Is(err, ErrPendKeyTooLong):
+		return "an identifier in the answer is longer than the ledger keeps"
+	case errors.Is(err, ErrPendRequesterMismatch):
+		return "the authorization is recorded under another requester"
+	case errors.Is(err, ErrPendRequesterRequired):
+		return "no requester to record the authorization under"
+	default:
+		return "the store did not accept the write"
+	}
+}
+
+// pasAnswerKeys reads the lookup keys and the payer's own date out of a PAS
+// response Bundle: the payer's `ClaimResponse.identifier`s, the submitted
+// `Claim.identifier` it echoed in `request.identifier`, the pre-authorization
+// reference and the item trace numbers. It is the SAME reader the inquiry leg
+// uses, so a pend recorded at submit and a decision learned at inquiry can never
+// be keyed differently.
+func pasAnswerKeys(requesterHolder string, answer []byte) (PendKeys, time.Time) {
+	keys := PendKeys{RequesterHolder: requesterHolder}
+	var created time.Time
+	for _, a := range readPASInquiryAnswers(requesterHolder, answer) {
+		keys.RequestIDs = append(keys.RequestIDs, a.keys.RequestIDs...)
+		keys.ClaimResponseIDs = append(keys.ClaimResponseIDs, a.keys.ClaimResponseIDs...)
+		keys.ItemTraceNumbers = append(keys.ItemTraceNumbers, a.keys.ItemTraceNumbers...)
+		if keys.PreAuthRef == "" {
+			keys.PreAuthRef = a.keys.PreAuthRef
+		}
+		if created.IsZero() {
+			created = a.created
+		}
+	}
+	return keys, created
+}
+
+// pasRequestKeys reads the identifiers the REQUESTER put on its own submission:
+// the `Claim.identifier` values and the item trace numbers. They belong in the
+// index because a follow-up is made by the requester from its own records, so an
+// authorization stays findable by what the requester retained even when the payer
+// echoed none of it. Nothing here is minted: every value is read from the message
+// that was actually sent.
+func pasRequestKeys(requestFHIR []byte) PendKeys {
+	var b struct {
+		Entry []struct {
+			Resource struct {
+				ResourceType string `json:"resourceType"`
+				Identifier   []struct {
+					System string `json:"system"`
+					Value  string `json:"value"`
+				} `json:"identifier"`
+				Item []struct {
+					Extension []json.RawMessage `json:"extension"`
+				} `json:"item"`
+			} `json:"resource"`
+		} `json:"entry"`
+	}
+	var keys PendKeys
+	if decodeMessage(requestFHIR, &b) != nil {
+		return keys
+	}
+	for _, e := range b.Entry {
+		if e.Resource.ResourceType != "Claim" {
+			continue
+		}
+		for _, id := range e.Resource.Identifier {
+			if k := identifierKey(id.System, id.Value); k != "" {
+				keys.RequestIDs = append(keys.RequestIDs, k)
+			}
+		}
+		for _, it := range e.Resource.Item {
+			if k := identifierExtensionKey(it.Extension, pasExtItemTraceNumberURL); k != "" {
+				keys.ItemTraceNumbers = append(keys.ItemTraceNumbers, k)
+			}
+		}
+	}
+	return keys
+}
+
+// decisionKeys are the keys a payer DECISION is recorded under: the ones a pend
+// would be (the payer's answer and the requester's own submission, under the
+// requester), with the decision's authorization number as its preAuthRef. The
+// ledger indexes them all only for an authorization it had no row for.
+func decisionKeys(requester string, answerKeys PendKeys, requestFHIR []byte, authorizationNumber string) PendKeys {
+	keys := mergePendKeys(requester, answerKeys, pasRequestKeys(requestFHIR))
+	if authorizationNumber != "" {
+		keys.PreAuthRef = authorizationNumber
+	}
+	return keys
+}
+
+// mergePendKeys unions two key sets under one requester namespace.
+func mergePendKeys(requesterHolder string, a, b PendKeys) PendKeys {
+	out := PendKeys{RequesterHolder: requesterHolder, PreAuthRef: a.PreAuthRef}
+	if out.PreAuthRef == "" {
+		out.PreAuthRef = b.PreAuthRef
+	}
+	out.RequestIDs = append(append([]string{}, a.RequestIDs...), b.RequestIDs...)
+	out.ClaimResponseIDs = append(append([]string{}, a.ClaimResponseIDs...), b.ClaimResponseIDs...)
+	out.ItemTraceNumbers = append(append([]string{}, a.ItemTraceNumbers...), b.ItemTraceNumbers...)
+	return out
+}
+
+// recordPASPend is the ledger effect of a payer PEND: the authorization is
+// recorded (or re-pended) under the union of the keys the payer's answer and the
+// requester's own submission state. A Store with no pend ledger, or an exchange
+// with no verified requester to namespace the keys under, falls back to the
+// keyless Store pend: the claim is still recorded so an amendment on the same
+// correlation binds, and only discoverability by a later inquiry is limited.
+func recordPASPend(ctx context.Context, store Store, subjectPCI, corrID string, keys PendKeys, created time.Time) func() error {
+	ledger, hasLedger := LedgerOf(store)
+	requester := requesterHolderOf(ctx)
+	if !hasLedger || requester == "" {
+		return func() error { return store.RecordPendedClaim(subjectPCI, corrID) }
+	}
+	leg := pasLegOf(ctx)
+	return func() error {
+		tr, err := ledger.RecordPendedKeyed(subjectPCI, corrID, created, keys)
+		if err != nil {
+			return err
+		}
+		if tr.Event != "" {
+			leg.note(tr.Event)
+		}
+		if tr.Keys == 0 {
+			// Nothing any follow-up can name this authorization by. The payer's
+			// bytes still relayed and the pend is still recorded, so an amendment on
+			// the same correlation still binds; only discoverability by a later
+			// inquiry is limited. An operator sees it here rather than at that
+			// inquiry, and closing it can only ever ADD discoverability.
+			leg.note(PendNoLookupKeysEvent)
+		}
+		return nil
+	}
+}
+
+// recordPASDecision is the ledger effect of a payer DECISION: the outcome the
+// payer stated, dated as the payer dated it. `decided` is absorbing, so a denial
+// finalizes exactly as an approval does and the authorization is never
+// re-pended by anything but a later payer re-pend. A Store with no ledger
+// follows FallbackDecision.
+func recordPASDecision(ctx context.Context, store Store, subjectPCI, corrID, outcome string, decidedAt time.Time, keys PendKeys) func() error {
+	ledger, hasLedger := LedgerOf(store)
+	if !hasLedger {
+		return func() error { return FallbackDecision(store, subjectPCI, corrID) }
+	}
+	leg := pasLegOf(ctx)
+	return func() error {
+		tr, err := ledger.RecordDecision(subjectPCI, corrID, outcome, decidedAt, keys)
+		if err != nil {
+			return err
+		}
+		if tr.Event != "" {
+			leg.note(tr.Event)
+		}
+		return nil
+	}
+}

@@ -288,6 +288,9 @@ func TestCertificationRetainsAllVerdicts(t *testing.T) {
 		{"valid", &shnsdk.FakeValidator{}, "valid", "2.1"},
 		{"invalid", &shnsdk.FakeValidator{RejectIfContains: "Claim"}, "invalid", ""},
 		{"unavailable", &shnsdk.FakeValidator{Err: errors.New("execution error\nwith spaces")}, "unavailable", ""},
+		{"no verdict", certificationValidatorFunc(func(context.Context, []byte, string) (shnsdk.Result, error) {
+			return invalid(errIssue("", nil, hapi0389)), nil
+		}), "unavailable", ""},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			g := certificationGateway(t, row.v, nil)
@@ -298,7 +301,7 @@ func TestCertificationRetainsAllVerdicts(t *testing.T) {
 				t.Fatalf("%+v", e)
 			}
 			for _, v := range e[0].Verdicts {
-				if v.State != row.state {
+				if v.State != row.state || row.name == "no verdict" && v.Error != "certification validator did not judge the payload" {
 					t.Fatal(v)
 				}
 			}
@@ -503,7 +506,7 @@ func TestCertificationRealLaneValidAnswerCertifies(t *testing.T) {
 
 // recordedClaimResponseRow loads the lane of line's recorded readiness corpus
 // (../internal/lanequalify/testdata/recordings/lane-<line>-warm.json) with
-// Subset, and returns its row 5 request (the versioned approved ClaimResponse)
+// Subset, and returns its row 4 request (the versioned approved ClaimResponse)
 // as a certification payload and profile, with every answer recorded for it in
 // order. The request is the one the certification client sends for that
 // payload and profile (the profile is the one the collector derives for a
@@ -512,18 +515,18 @@ func TestCertificationRealLaneValidAnswerCertifies(t *testing.T) {
 func recordedClaimResponseRow(t *testing.T, line string) (*testrecord.Recording, []byte, string, []testrecord.Exchange) {
 	t.Helper()
 	rec := testrecord.Load(t, filepath.Join("..", "internal", "lanequalify", "testdata", "recordings", "lane-"+line+"-warm.json"))
-	rec.Subset() // one request of the 42-row corpus is asked
+	rec.Subset() // one request of the 41-row corpus is asked
 	profile, ok := profileFor("ClaimResponse", line, "pas-claim")
 	if !ok {
 		t.Fatal("no ClaimResponse certification profile")
 	}
-	row5 := rec.Exchanges[4] // rows 1-4 are distinct initialization requests
-	if row5.Request.Method != http.MethodPost || row5.Request.Path != "/fhir/ClaimResponse/$validate" || !slices.Equal(row5.Request.Query["profile"], []string{profile}) || row5.Request.Headers["Content-Type"] != "application/fhir+json" {
-		t.Fatalf("recorded row 5 is %s %s %v %v, not the versioned ClaimResponse at %s", row5.Request.Method, row5.Request.Path, row5.Request.Query, row5.Request.Headers, profile)
+	row4 := rec.Exchanges[3] // rows 1-3 are distinct initialization requests
+	if row4.Request.Method != http.MethodPost || row4.Request.Path != "/fhir/ClaimResponse/$validate" || !slices.Equal(row4.Request.Query["profile"], []string{profile}) || row4.Request.Headers["Content-Type"] != "application/fhir+json" {
+		t.Fatalf("recorded row 4 is %s %s %v %v, not the versioned ClaimResponse at %s", row4.Request.Method, row4.Request.Path, row4.Request.Query, row4.Request.Headers, profile)
 	}
 	var answers []testrecord.Exchange
 	for _, ex := range rec.Exchanges {
-		if ex.Request.Path == row5.Request.Path && slices.Equal(ex.Request.Query["profile"], []string{profile}) && jsonEqualForTest(ex.Request.Body, row5.Request.Body) {
+		if ex.Request.Path == row4.Request.Path && slices.Equal(ex.Request.Query["profile"], []string{profile}) && jsonEqualForTest(ex.Request.Body, row4.Request.Body) {
 			answers = append(answers, ex)
 		}
 	}
@@ -531,7 +534,7 @@ func recordedClaimResponseRow(t *testing.T, line string) (*testrecord.Recording,
 	if answers[len(answers)-1].Response.Status != http.StatusOK || !bytes.Contains(settled, []byte(`"severity":"warning"`)) || bytes.Contains(settled, []byte(`"severity":"error"`)) || bytes.Contains(settled, []byte(`"severity":"fatal"`)) {
 		t.Fatal("the recorded settled answer is no longer a 200 with warnings and no error")
 	}
-	return rec, []byte(row5.Request.Body), profile, answers
+	return rec, []byte(row4.Request.Body), profile, answers
 }
 
 // x12ServiceType is the code system every synthetic PAS request bundle codes
@@ -764,7 +767,7 @@ func TestCertificationMarkersOnlyReorder(t *testing.T) {
 
 func TestCertificationCannotChangeRoutingReadiness(t *testing.T) {
 	g := certificationGateway(t, &shnsdk.FakeValidator{Err: errors.New("evidence unavailable")}, nil)
-	g.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"2.0": &shnsdk.FakeValidator{}}
+	g.cfg.ValidatorsByContractLine = contractLanes(map[string]shnsdk.Validator{"2.0": &shnsdk.FakeValidator{}})
 	before := g.ValidatorReadinessForTest()
 	certificationSubmit(g, "first")
 	certificationFlush(t, g)

@@ -34,28 +34,6 @@ import (
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
-// oswestryLinkID is the questionnaire linkId for the Oswestry functional-status
-// item, shared across handleUC07Pending, completePatient, and the UC-06 path.
-// These sites must agree: the patient's answer is validated against this exact
-// linkId, so it is hoisted to a single const.
-const oswestryLinkID = "functional-status-oswestry"
-
-// hhaFunctionalStatusLinkID is the HomeHealthAssessment questionnaire's free-text functional-status
-// item (the Oswestry analog), the clinician-entered manual item for provider-data UC-06 — linkId
-// "3.2" "Functional limitations" (type text, 0-CQL), confirmed against br-payer's live
-// $questionnaire-package.
-const hhaFunctionalStatusLinkID = "3.2"
-
-// defaultHHAFunctionalLimitations is the operator-supplied free-text functional-status narrative for
-// the provider-data UC-06 clinician attestation when none is provided (the free-text analog of the
-// retired stub's Oswestry "42"; D-2RI-1 — operator-supplied, NOT derived from a clinical SoR fact).
-const defaultHHAFunctionalLimitations = "Impaired ambulation and reduced lower-extremity strength limiting independent mobility; skilled physical therapy indicated."
-
-// defaultHHAFunctionalLimitationsPatient is the operator-supplied free-text functional-status narrative
-// for provider-data UC-07 when the patient provides none (the patient analog of the clinician default;
-// D-2RI-1 — operator-supplied, NOT a real patient's authored value, which is DEF-9/OIDC-LOCAL).
-const defaultHHAFunctionalLimitationsPatient = "I have trouble walking and standing without help and need physical therapy to regain my strength and mobility."
-
 // Per-message FHIR validation: the payload-blind Hub cannot validate payloads
 // (AI-2), so validation lives at the gateways on egress and ingress. Every
 // Validate call passes an EMPTY profile = base-R4 validation via $validate
@@ -89,8 +67,8 @@ type Config struct {
 	// before anything is read, built or sent (requireOriginationProfile).
 	OriginationProfile string
 	// Identity is the gateway's substrate identity: its holder signing key (used to
-	// sign holder assertions and patient-access audit records) plus its envelope-
-	// encryption keypair (used to open inbound sealed payloads and seal responses).
+	// sign holder assertions) plus its envelope-encryption keypair (used to open
+	// inbound sealed payloads and seal responses).
 	Identity shnsdk.Identity
 	AuthzURL string
 	AuthzPub ed25519.PublicKey
@@ -112,6 +90,23 @@ type Config struct {
 	// Validator is the CANONICAL-lane FHIR $validate client (FR-36). It stays the
 	// only required validator: a deployment that speaks one line needs one lane.
 	Validator shnsdk.Validator
+	// ValidatorsByContractLine are the $validate lanes, by contract-version
+	// token ("pa.pas@2.0"): the validator that resolves that contract's IG
+	// packages at that line. A value may be a *DiscoveredLane, which serves
+	// only once it has qualified. A single-line contract's line may name the
+	// canonical validator; a multi-line contract's never borrows it.
+	//
+	// EMPTY map = an un-laned deployment: every contract line falls back to
+	// Validator. NON-EMPTY map = the deployment is AUTHORITATIVE about which
+	// contract lines it can validate, so one absent from it is UNLANED and
+	// fails closed (see validatorForContractLine). ContractLineLanes derives it
+	// from per-line lanes.
+	ValidatorsByContractLine map[string]shnsdk.Validator
+	// Deprecated: set ValidatorsByContractLine (ContractLineLanes derives it
+	// from per-line lanes). New derives it from ValidatorsByLine,
+	// CanonicalFallbackLines and DefaultValidatorsByLine when it is unset;
+	// these stay until v1.0.0.
+	//
 	// ValidatorsByLine are the per-contract-LINE $validate lanes:
 	// "2.0"/"2.1"/"2.2" → the validator that resolves THAT line's IG
 	// packages. A HAPI instance can host exactly one version of an IG, so a tri-line
@@ -128,8 +123,12 @@ type Config struct {
 	CertificationValidatorsByLine map[string]shnsdk.Validator
 	certificationDisabled         bool
 	// DefaultValidatorsByLine are lifecycle-managed candidates, admitted only after qualification.
+	//
+	// Deprecated: see ValidatorsByContractLine.
 	DefaultValidatorsByLine map[string]*DiscoveredLane
 	// CanonicalFallbackLines identifies single-native-contract compatibility aliases.
+	//
+	// Deprecated: see ValidatorsByContractLine.
 	CanonicalFallbackLines map[string]bool
 	// DeclaredContractVersions is the operator-declared exchange-contract token set
 	// (SHN_CONTRACT_VERSIONS, boot-validated in gateway/app: grammar + ⊆
@@ -146,13 +145,13 @@ type Config struct {
 	// places: tests (the cross-line pair suite), and the loudly-named demo env
 	// SHN_DEMO_EGRESS_NATIVE_LINES (gateway/app) — the SHN Kit's bridging demo
 	// simulates "a build that predates the newer lines" with it. Never read
-	// outside selectNativeReachRoute/nativeLinesView/selectResumeRoute.
+	// outside nativeLinesView (linereach.go).
 	EgressNativeLines []string
 	// StrictPeerForTest (per-peer strict extensions, FR-G52) is a TEST-ONLY
 	// seam (EgressNativeLines' naming precedent) that forces
 	// g.strictPeer's answer to true for every consult. PRODUCTION default
 	// (false, the zero value, never set from env): strictPeer is dormant —
-	// see its comment in originate.go for why arm (3)'s per-peer
+	// see its comment in linereach.go for why arm (3)'s per-peer
 	// gated-overlay input stays hardwired false today. Never read outside
 	// strictPeer; never wired from env/config in app.go.
 	StrictPeerForTest bool
@@ -176,6 +175,16 @@ type Config struct {
 	// the leg routed. It never changes which line is chosen when the pair
 	// shares one. Set from REQUIRE_SHARED_LINE (gateway/app).
 	RequireSharedLine bool
+	// TranslateIGLines is the participant's opt-in to module 2, the IG-line
+	// bridge: translating a message it builds to a peer's IG line through the
+	// registered compatibility steps where a certified translation exists
+	// (arm (3)), and carrying a questionnaire package answer into its own DTR
+	// line's parameter names (E-08). The default (false, the zero value)
+	// translates nothing: a pair that shares no line is built natively at a
+	// line the peer declares where this build can (arm (2)), else carried as
+	// sent, and an answer reaches the participant's system exactly as it
+	// arrived. Set from TRANSLATE_IG_LINES (gateway/app).
+	TranslateIGLines bool
 	// EnrichNativeRequests is the participant's opt-in to having its gateway add
 	// what a Da Vinci-native request leaves out, from the participant's own system
 	// of record. It gates the three native-ingress enrichments: the CDS
@@ -187,13 +196,14 @@ type Config struct {
 	// request does not carry is still read from the system of record to choose
 	// the payer, and is not inserted. Requests the gateway builds itself (origination) are
 	// unaffected. Set from ENRICH_NATIVE_REQUESTS (gateway/app). New installs
-	// the enrichment hook (enrich.go) only when it is set.
+	// the enrichment hook (workstream_pa_enrich.go), in the PA workstream's
+	// state, only when it is set.
 	EnrichNativeRequests bool
 	// FHIRServerRead (CDS_FHIR_SERVER_READ) is how a provider gateway reads a
 	// CRD request's Coverage through the request's own fhirServer, to route
 	// by, when the request carries none for a member its system of record
 	// does not hold (or cannot name); what routing used is then carried as
-	// prefetch.coverage (E-07, fhirserver_carry.go): FHIRServerReadPrivate
+	// prefetch.coverage (E-07, workstream_pa_fhirserver_carry.go): FHIRServerReadPrivate
 	// ("" too, the default: the zero value reads), FHIRServerReadPublic, or
 	// FHIRServerReadOff, which never reads and carries nothing
 	// (fhirserver_read.go).
@@ -208,8 +218,8 @@ type Config struct {
 	// fhirServerBudget, when set, replaces the time every read for one
 	// request shares (fhirServerReadTimeout) in tests.
 	fhirServerBudget time.Duration
-	// Store is the gateway's own business state (auth numbers, pended-claim ledger,
-	// issued EOBs). Required: New panics without one. The published gateway (gateway/app)
+	// Store is the gateway's own business state (auth numbers, pended-claim ledger).
+	// Required: New panics without one. The published gateway (gateway/app)
 	// sets NewMemStore, or gateway/connectors/pgstore when SHN_STORE_DATABASE_URL is set.
 	Store Store
 	// Adjudicator is the partner's decision surface (order-select/questionnaire/
@@ -248,18 +258,19 @@ type Config struct {
 	// ingressAuthBypass (real inbound UDAP auth is a planned future enhancement), so
 	// enabling them in prod is safe — they reject every call.
 	IngressEnabled bool
-	// PatientAccessOff leaves the payer role's Patient Access API unmounted:
-	// GET /metadata and GET /ExplanationOfBenefit[/{id}] are not served, and
-	// nothing else changes. Set from PATIENT_ACCESS_API=off by app.go. It is a
-	// temporary seam: the Patient Access API is being removed, and that removal
-	// deletes these routes and this field together. A gateway's liveness is
-	// GET /health, served on every role whatever this is set to.
-	PatientAccessOff bool
 	// IngressBaseURL is the gateway's CONFIG-PINNED public base URL: the SMART
 	// Backend Services aud (assertion + bearer) and the advertised token endpoint.
 	// Never request-derived (no Host-header spoof). Required when IngressEnabled and
 	// not bypassed. Set from PROVIDER_DAVINCI_INGRESS_BASE_URL by app.go.
 	IngressBaseURL string
+	// ScenarioCallers are the callers this gateway's /scenario operator routes
+	// admit, by label: each request must carry the caller's own
+	// assertion (gateway/scenarioauth), verified before the route runs. An
+	// empty set admits nothing. nil leaves the routes unauthenticated, as they
+	// were: a temporary default, until every stack configures its callers,
+	// that becomes refuse. Set from SCENARIO_CALLERS_FILE (gateway/app).
+	ScenarioCallers map[string]ed25519.PublicKey
+
 	// IngressClients are the config-registered inbound clients (client_id →
 	// public key + scopes). Required (>=1) when IngressEnabled and not bypassed.
 	IngressClients map[string]IngressClientRegistration
@@ -279,18 +290,6 @@ type Config struct {
 	// before releasing any records. When empty the backstop fails closed (no consent
 	// service ⇒ no disclosure).
 	ConsentURL string
-	// AuditURL is the Audit Plane's base URL. Used by the payer to append a
-	// patient-access-read record (FR-29/FR-33) when it serves a Patient Access API
-	// read. The Patient Access read path is FAIL-CLOSED: a gateway with no AuditURL
-	// has no audit capability, so serveEOB disables the read (502) rather than
-	// serving it unaudited, and a failed audit append also blocks the read (502).
-	AuditURL string
-	// PHGURL is the Trust-operated PHG base URL. Used by the provider scenario for
-	// UC-08 demo orchestration: after the PAS denial, the provider queries the PHG
-	// denial view (GET /denial?pci=<pci>) to surface the patient-rendered reason.
-	// This stands in for the patient app in the Connectathon demo (provider→PHG
-	// call is orchestration only, not a substrate leg). Empty → skip the PHG query.
-	PHGURL string
 	// Observer, when non-nil, receives a structured ObserverEvent at each
 	// gateway-edge seam (origination legs, Da Vinci ingress, $validate calls).
 	// PAYLOADS INCLUDED — cleartext FHIR as seen at this edge. nil (the
@@ -329,8 +328,8 @@ type Config struct {
 	// never block. A panic in it is recovered. nil (the default) records
 	// nothing. Additive instrumentation only: it never changes an answer.
 	ExchangeObserved func(ExchangeRecord)
-	// Replay is the one-time-use record behind the Hub-assertion jti, ingress
-	// client_assertion jti and patient-access correlationId guards. Nil selects a
+	// Replay is the one-time-use record behind the Hub-assertion jti and ingress
+	// client_assertion jti guards. Nil selects a
 	// process-local record, correct only at one replica; a shared store makes the
 	// guards hold across replicas.
 	Replay ReplayStore
@@ -348,10 +347,9 @@ type Config struct {
 	// StoreErrorMetric, when set, is called once per shared-state store failure with
 	// the failing store's name. It is how a database outage becomes visible to an
 	// operator, so EVERY path that refuses or degrades on a store error reports here:
-	//   "replay"     — the one-time-use record could not be consulted, on all three
+	//   "replay"     — the one-time-use record could not be consulted, on both
 	//                  scopes: the ingress client_assertion jti (/oauth/token answers
-	//                  503), the Hub assertion (/substrate/inbound answers 503) and the
-	//                  patient-access correlation (the read answers 503).
+	//                  503) and the Hub assertion (/substrate/inbound answers 503).
 	//   "ingresskey" — the signing key could not be resolved, so no bearer can be
 	//                  issued (/oauth/token answers 503).
 	//   "exchange"   — the best-effort correlation seam failed (the request itself is
@@ -408,13 +406,14 @@ type Config struct {
 
 // Gateway is a constructed holder gateway.
 type Gateway struct {
-	cfg     Config
-	mu      sync.Mutex
-	pending map[string]pendState
+	cfg Config
+	// pending is module 1's in-flight pend state (module1_pending.go).
+	pending moduleOnePending
 
-	// enrich is the enrichment hook, installed at boot only under the
-	// participant's opt-in (installEnrichment); nil otherwise.
-	enrich nativeEnrichment
+	// states is each compiled-in workstream's own state on this gateway, by
+	// workstream id, built once by New (workstream.newGatewayState). A
+	// Gateway assembled without New holds none.
+	states map[string]gatewayState
 
 	// regRefresh runs Config.RegistryRefresh single-flight for the inbound
 	// requester guard; regRefreshBudget overrides registryRefreshBudget (tests).
@@ -429,8 +428,7 @@ type Gateway struct {
 	exchanges ExchangeStore
 
 	// replay is the shared one-time-use record for every replay guard: the
-	// patient-access correlationId (paReplayWindow, consume-once on the direct
-	// Patient Access read), the Hub's X-Hub-Assertion jti (window
+	// Hub's X-Hub-Assertion jti (window
 	// shnsdk.MaxAssertionTTL, the assertion's maximum lifetime) and the ingress
 	// client_assertion jti (ingressJTIWindow).
 	replay ReplayStore
@@ -455,15 +453,19 @@ type Gateway struct {
 	edgeCapture   atomic.Pointer[edgeCaptureStore]
 	certification *certificationWorker
 	operations    operationTracker
+	// explicitLanes are the explicitly configured lanes whose reachability
+	// module 2 reads (lanehealth.go), stopped by Close.
+	explicitLanes []*explicitLane
 
 	// observeOnce/observeChecks: observe-level checks run off the request path
 	// (observe_async.go), started on first use.
 	observeOnce   sync.Once
 	observeChecks atomic.Pointer[observeChecks]
 
-	// fallbackContinuations is the in-memory prior-authorization continuation
-	// store used when the configured Store does not ship one (continuation.go).
-	// Every Store this repository ships does, so this is the seam for a
+	// fallbackStore is the in-memory Store whose workstream state a request
+	// falls back to when the configured Store keeps none of its own: today the
+	// prior-authorization continuation store (workstream_pa_continuation.go).
+	// Every Store this repository ships keeps one, so this is the seam for a
 	// participant's own Store written before continuations existed — it keeps
 	// such a deployment working, and it reports itself as non-durable, which is
 	// the fact the Kit's notice and CONFIGURATION state.
@@ -472,7 +474,7 @@ type Gateway struct {
 	// edgeCapture above is: a Gateway assembled directly (bypassing New, a common
 	// test pattern in this package) must still have one, and two requests may
 	// reach for it at once.
-	fallbackContinuations atomic.Pointer[MemContinuations]
+	fallbackStore atomic.Pointer[MemStore]
 }
 
 // New constructs a Gateway. The clock defaults to time.Now and the client to
@@ -485,12 +487,12 @@ type Gateway struct {
 // checks stay panics: they fire only on a caller that omitted a required field, which is
 // a programming error, not a deployment one.
 //
-// Caveat: the observer decoration below (Config.Validator/ValidatorsByLine ->
-// observingValidator) only wraps whatever the two fields hold AT construction
-// time. A handful of test sites assign to g.cfg.ValidatorsByLine directly
+// Caveat: the observer decoration below (Config.Validator/ValidatorsByContractLine
+// -> observingValidator) only wraps whatever the two fields hold AT construction
+// time. A handful of test sites assign to g.cfg.ValidatorsByContractLine directly
 // AFTER New returns (test-only pattern — production code never does this,
-// since app.go always builds the full ValidatorsByLine map before calling
-// New) — those post-construction lanes bypass decoration and never emit
+// since app.go always builds the full ValidatorsByContractLine map before
+// calling New) — those post-construction lanes bypass decoration and never emit
 // validate.result even with Observer set. Harmless where it happens (those
 // tests don't assert on the observer stream for that lane), but worth
 // knowing before adding a new one that does.
@@ -513,15 +515,25 @@ func New(cfg Config) (*Gateway, error) {
 	if cfg.Store == nil {
 		panic("gateway: Config.Store is required")
 	}
-	// Every role signs holder assertions (and the payer signs patient-access audit
-	// appends), so a gateway with no signing key is never valid. Fail fast at
+	if err := workstreamStoreFault(cfg.Store); err != nil {
+		return nil, fmt.Errorf("gateway: %w", err)
+	}
+	// Every role signs holder assertions, so a gateway with no signing key is
+	// never valid. Fail fast at
 	// construction: the Config→Identity reshape made a forgotten Identity a
 	// single omitted field that leaves all key material nil and panics deep in
 	// Seal/Open at first use — this turns that into a clear construction error.
-	// (EncPub/EncPriv are intentionally NOT checked here: a patient-access-only
-	// gateway legitimately runs SignPriv-only and never seals/opens an envelope.)
 	if cfg.Identity.SignPriv == nil {
-		panic("gateway: Config.Identity.SignPriv is required (holder assertions + audit signing)")
+		panic("gateway: Config.Identity.SignPriv is required (holder assertions)")
+	}
+	deriveContractLanes(&cfg)
+	// With module 2 on, each explicitly configured lane says whether it can
+	// be reached, from its own failures, so a chain is planned only to a lane
+	// that can certify it (lanehealth.go). A fresh map: the caller's is never
+	// mutated.
+	var explicit []*explicitLane
+	if cfg.TranslateIGLines && len(cfg.ValidatorsByContractLine) > 0 {
+		cfg.ValidatorsByContractLine, explicit = explicitLanes(cfg.ValidatorsByContractLine)
 	}
 	switch cfg.Role {
 	case "payer", "facility", "phg":
@@ -560,10 +572,10 @@ func New(cfg Config) (*Gateway, error) {
 		cfg.Populator = newManagedPopulator(cfg.SoR)
 	}
 	g := &Gateway{
-		cfg:     cfg,
-		pending: map[string]pendState{},
+		cfg:           cfg,
+		explicitLanes: explicit,
 	}
-	g.installEnrichment()
+	g.states = workstreamGatewayStates(g)
 	g.exchanges = cfg.Exchanges
 	if g.exchanges == nil {
 		g.exchanges = NewInMemoryExchangeStore(cfg.ExchangeTTL, cfg.Clock)
@@ -577,10 +589,10 @@ func New(cfg Config) (*Gateway, error) {
 	// validator untouched. Idempotence guard: never double-wrap (double
 	// emission) if a caller passes an already-observed cfg back through New.
 	//
-	// The PER-LINE lanes must be decorated too, and for the same reason: once
-	// ValidatorsByLine is non-empty, validatorForLine resolves EVERY
-	// line-scoped $validate through that map (gateway.go's validatorForLine)
-	// and never through cfg.Validator — so wrapping only cfg.Validator left the
+	// The contract-line lanes must be decorated too, and for the same reason:
+	// once ValidatorsByContractLine is non-empty, validatorForContractLine
+	// resolves EVERY line-scoped $validate through that map (lanes.go) and
+	// never through cfg.Validator — so wrapping only cfg.Validator left the
 	// observer stream silently missing the validate.result for every
 	// version-bearing leg, which is exactly the class of honesty gap the
 	// observer exists to close. Found by regenerating ui/kit's captured
@@ -592,18 +604,20 @@ func New(cfg Config) (*Gateway, error) {
 				g.cfg.Validator = observingValidator{inner: g.cfg.Validator, g: g}
 			}
 		}
-		if len(g.cfg.ValidatorsByLine) > 0 {
+		if len(g.cfg.ValidatorsByContractLine) > 0 {
 			// A fresh map: the caller's (gateway/app builds one per boot, and a test
 			// may share one across gateways) must never be mutated from in here.
-			lanes := make(map[string]shnsdk.Validator, len(g.cfg.ValidatorsByLine))
-			for line, v := range g.cfg.ValidatorsByLine {
-				if _, already := v.(observingValidator); already || v == nil {
-					lanes[line] = v
+			// A discovered lane is observed when it serves (readyLane), not here.
+			lanes := make(map[string]shnsdk.Validator, len(g.cfg.ValidatorsByContractLine))
+			for key, v := range g.cfg.ValidatorsByContractLine {
+				_, discovered := v.(*DiscoveredLane)
+				if _, already := v.(observingValidator); already || discovered || v == nil {
+					lanes[key] = v
 					continue
 				}
-				lanes[line] = observingValidator{inner: v, g: g}
+				lanes[key] = observingValidator{inner: v, g: g}
 			}
-			g.cfg.ValidatorsByLine = lanes
+			g.cfg.ValidatorsByContractLine = lanes
 		}
 	}
 	// Build the inbound auth server only for a real-auth ingress (not under the
@@ -680,138 +694,14 @@ func (g *Gateway) recipientFor(ctx context.Context, coverageJSON []byte) (holder
 	return holder, status, msg
 }
 
-// pendState is the provider's own in-flight PA workflow state for a PENDED
-// attestation scenario (UC-06/UC-07), held under an opaque resume token between
-// the run-to-PENDED step and the resume-to-APPROVED step. It is the provider's
-// orchestration state, never substrate state; the browser only ever holds the
-// opaque token. The store is in-memory, Reset-cleared, no TTL — a documented
-// single-operator demo simplification (a production EHR would persist + expire).
-type pendState struct {
-	qrSource   *dtrBuildSource
-	pasDTRLine string // DTR generation paired with the pinned PAS target.
-	dtrLine    string // DTR line selected before population, retained through completion.
-	scenario   string // "uc06" or "uc07"
-	qrJSON     []byte
-	// questionnaireJSON is the bare Questionnaire the pended QR answers (extracted
-	// from the fetched $questionnaire-package at origination). The resume legs amend
-	// qrJSON with the attested item through shnsdk.AmendQRWithItemIn, which needs it
-	// to place that item where the questionnaire puts it — inside its group, or
-	// under its parent question's answer — rather than at the top level. In-memory
-	// like the rest of pendState.
-	questionnaireJSON []byte
-	srJSON            []byte
-	patientRef        string
-	coverageRef       string
-	// coverage is the member's OWN Coverage record the pended submit named, pinned
-	// at run-to-PENDED: the resume ClaimUpdate is made under the SAME policy, and a
-	// payer that stored the authorization under one coverage and is amended under
-	// another has two requests rather than one. In-memory like the rest of pendState.
-	coverage []byte
-	// insurer is the payer's own Organization record the pended submit named, pinned
-	// for the same reason the coverage is: the resume ClaimUpdate names the payer the
-	// submission named, and the payer scopes an inquiry's search by the insurer.
-	insurer []byte
-	// member is the BARE member id the pended submit named; the resume ClaimUpdate
-	// names the SAME member, so it is pinned here beside coverageRef (which stays
-	// the Reference-shaped value the QR-context / native-lane roles need).
-	// In-memory like the rest of pendState.
-	member string
-	// memberSystem is the namespace the participant's own system names that
-	// member under, pinned at run-to-PENDED beside member itself: the resume
-	// ClaimUpdate names the member exactly as the submission did, so the payer
-	// matching an inquiry finds one authorization rather than none.
-	memberSystem string
-	pci          string
-	pasCorr      string
-	filled       []FilledItem
-	needed       []string
-	qrAnswers    map[string]string      // provider-data UC-06: the org-attested base answer trace (1.1/3.1), surfaced in the response as FR-17 mixed-provenance evidence
-	payer        shnsdk.PayerIdentifier // the member's REAL payer identity (parsed from OpenCoverage at run-to-PENDED) — threads to the resume ClaimUpdate builders so the payload's payer derives from the patient's real Coverage (FR-G40)
-	recipient    string                 // the payer HOLDER id the resume legs route to, resolved from the member's real Coverage at run-to-PENDED (recipientFor) — no default (FR-G40 / AI-G11 / OWD-G10)
-	pasToken     string                 // the pa.pas contract token selected at run-to-PENDED — the PENDED-LINE PIN. Threads to the resume pas-claim-update legs as Content.ProfileID so a pended exchange finishes on the line it started on, regardless of registry drift. Lives HERE by settled decision (AI-1: never ExchangeStore); in-memory/Reset-cleared like the recipient pin beside it — a durable pend store inherits it.
-	// carriedEntries is the pended pas-claim leg's own declared CARRY record
-	// (the multi-version spec's verifyCarryPresent obligation) — the
-	// Carried LossEntries the pend's transform chain reported, pinned beside
-	// the routed-token pin above and for the same reason: it is cross-leg
-	// state that must survive the pend window verbatim, and the ONLY seam
-	// that holds any across the strip window. It gives the resume leg's
-	// RESTORING chain an independent record to verify the payload against
-	// (verifyPendCarryIntact), which a payload-only comparison cannot supply
-	// — pasRestoreCarriedExtensions cannot itself tell "never carried" from
-	// "carried, then stripped". Additive: empty for every flow this build
-	// originates today (no SHN builder emits a 2.2-only top-level Claim
-	// extension — transform_pas.go's pas22OnlyClaimExtensions note), so the
-	// guard is a no-op with zero cost on every existing path.
-	carriedEntries []shnsdk.LossEntry
-	// claimFacts are the request facts the pended submission's request stated
-	// (originationClaimInput), and submitted is that submission as it was
-	// built (recordPASSubmission). The resume amendment states the facts its
-	// own request states, or — when that request states none — these, the
-	// requester's own earlier statement; it restates the submission's own
-	// type, priority and created. Its certificationType is always the resume
-	// request's. In-memory like the rest of pendState.
-	claimFacts shnsdk.PASClaimFacts
-	submitted  pasSubmissionRecord
-}
-
-// storePending saves st under a fresh opaque resume token and returns it.
-func (g *Gateway) storePending(st pendState) string {
-	token := newCorrelationID() // crypto-random hex (16 bytes)
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.pending[token] = st
-	return token
-}
-
-// loadPending returns the state for token, if present.
-func (g *Gateway) loadPending(token string) (pendState, bool) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	st, ok := g.pending[token]
-	return st, ok
-}
-
-// dropPending deletes token's state (idempotent).
-func (g *Gateway) dropPending(token string) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	delete(g.pending, token)
-}
-
-// Reset clears the pending-scenario store (called by the devstack admin reset so
-// a fresh demo run starts with no stale in-flight PAs).
-//
-// The two halves have different reach, by design. The pending map is per-process demo
-// session state (the two-phase /scenario/* routes), so a reset clears it at the replica
-// that received the call and at no other; the exchange Reset below is holder-wide on a
-// shared store, so it clears the holder's records everywhere.
-//
-// That asymmetry is acceptable because of WHERE this is reachable from. The route that
-// calls it, POST /scenario/reset, is mounted on the provider role only — beside the rest
-// of the /scenario/* demo surface, on a gateway that is never given a public host — and
-// the demo session is meant to be driven against one instance anyway (DEPLOYMENT.md says
-// so). It is deliberately NOT mounted on the payer role: that mux is the public FHIR
-// front door, and an unauthenticated route whose store half is holder-wide has no
-// business there. Nothing on the substrate exchange path reads the pending map.
-//
-// Reset returns the store half's error. A reset that could not clear the holder's
-// exchange records is a FAILED reset: reporting success while they are still there is
-// how a fresh demo run starts on stale state with nobody told. The caller answers 503.
-// The pending map is cleared first and stays cleared either way — clearing it cannot
-// fail, it is what the demo session needs, and leaving it stale would add a second
-// failure to the one being reported; a retry re-runs both halves.
-func (g *Gateway) Reset() error {
-	g.mu.Lock()
-	g.pending = map[string]pendState{}
-	g.mu.Unlock()
-	// The store reset runs OUTSIDE g.mu: g.mu guards only the pending map, g.exchanges is
-	// write-once in New, and a durable store's Reset is a bounded DB round trip — holding
-	// the mutex across it would stall every in-flight pend/resolve for its duration.
-	//
-	// A fresh demo run starts with no stale exchanges, consistent with the pending map.
-	// The Exchange store holds only metadata-only LegRecords. Reset the CONFIGURED
-	// store in place — never reassign it, or a shared/durable store silently reverts
-	// to a process-local one for the rest of the process's life.
+// resetExchanges clears the holder's exchange records in the configured store,
+// in place: never reassigned, or a shared or durable store would silently
+// revert to a process-local one for the rest of the process's life. The store
+// holds only metadata-only LegRecords. A store with no Reset keeps its
+// records, and that is logged; a store whose Reset fails returns the error,
+// counted. The store is write-once in New, and a durable store's Reset is a
+// bounded DB round trip, so no lock is held.
+func (g *Gateway) resetExchanges() error {
 	rs, ok := g.exchanges.(resettableStore)
 	if !ok {
 		log.Printf("gateway: exchange store: configured store has no Reset; exchanges retained")
@@ -863,76 +753,6 @@ func (g *Gateway) ExchangeSnapshot() []Exchange {
 	return nil
 }
 
-// pendingForPatient returns the resume token of a pended scenario for (scenario,
-// pci), if any. Read-only over the same store the two-phase start/complete use.
-func (g *Gateway) pendingForPatient(scenario, pci string) (string, bool) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	// Assumes at most one in-flight pend per (scenario, pci); returns an arbitrary match otherwise (map iteration order).
-	for token, st := range g.pending {
-		if st.scenario == scenario && st.pci == pci {
-			return token, true
-		}
-	}
-	return "", false
-}
-
-// uc07PendingResp is the patient-facing pending-questionnaire descriptor: the
-// Oswestry functional-status item + the opaque resume token (internal — phgsvc
-// re-resolves it server-side and never exposes it to the patient app).
-//
-// Member and Order are the pended request's own: the member it was made for and
-// the order its claim facts were stated for, read from this gateway's own pend
-// record (the pendState the start stored), never from a request or a default.
-// A completer that holds only the patient (the PHG) echoes them back on
-// /scenario/uc07/complete — so the completion's member and order are this
-// gateway's own record, not a statement the PHG makes — and the route still
-// refuses a member or order that is not the pend's.
-type uc07PendingResp struct {
-	LinkID      string       `json:"linkId"`
-	Text        string       `json:"text"`
-	ResumeToken string       `json:"resumeToken"`
-	Member      string       `json:"member,omitempty"`
-	Order       *statedOrder `json:"order,omitempty"`
-}
-
-// handleUC07Pending is the read-only by-patient lookup of a pended UC-07 awaiting
-// the patient's functional-status attestation. Returns the Oswestry item + resume
-// token, or {} when this patient has none. Internal (provider-gw is not public).
-func (g *Gateway) handleUC07Pending(w http.ResponseWriter, r *http.Request) {
-	pci := r.URL.Query().Get("patient")
-	token, ok := g.pendingForPatient("uc07", pci)
-	if !ok {
-		writeJSON(w, http.StatusOK, map[string]string{})
-		return
-	}
-	resp := uc07PendingResp{
-		LinkID:      oswestryLinkID,
-		Text:        "What is your current Oswestry Disability Index score (0–100)?",
-		ResumeToken: token,
-	}
-	if st, found := g.loadPending(token); found {
-		resp.Member = st.member
-		if system, code, _, err := shnsdk.ParseOrderProductCoding(st.srJSON); err == nil {
-			resp.Order = &statedOrder{System: system, Code: code}
-		}
-	}
-	writeJSON(w, http.StatusOK, resp)
-}
-
-// handleScenarioReset clears the provider's in-memory pended-scenario store and the
-// holder's exchange records so a fresh demo run starts with no stale in-flight PAs.
-// Idempotent. A store half that failed answers 503: the caller (the console's reset
-// fan-out) shows a failed reset instead of starting a run on records that are still
-// there. The body names the store and nothing else — never the database's own error.
-func (g *Gateway) handleScenarioReset(w http.ResponseWriter, r *http.Request) {
-	if err := g.Reset(); err != nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "exchange store reset failed"})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
-}
-
 // Handler returns the role-appropriate HTTP routes.
 func (g *Gateway) Handler() http.Handler {
 	mux := g.routes()
@@ -946,25 +766,34 @@ func (g *Gateway) Handler() http.Handler {
 // mountedRoute is one route a piece of the gateway declares for its role.
 // originates marks a route that builds and sends a request of this gateway's
 // own (on-behalf building): it is mounted behind requireOriginationProfile,
-// so it refuses while Config.OriginationProfile is unset.
+// so it refuses while Config.OriginationProfile is unset. operator marks a
+// route of the gateway's operator surface (/scenario): it is mounted behind
+// requireScenarioCaller, outermost, so an unauthenticated caller is refused
+// before anything else runs.
 type mountedRoute struct {
 	pattern    string
 	handler    http.HandlerFunc
 	originates bool
+	operator   bool
 }
 
 // routes mounts what each piece of this gateway declares for its role
-// (AI-G10): the core's own routes, the workstream adapter's, and on-behalf
-// building's. It is the only place a route is mounted, and the only place an
-// originating route is put behind requireOriginationProfile.
+// (AI-G10): the core's own routes, every compiled-in workstream adapter's
+// (workstreamRoutes), and on-behalf building's. It is the only place a route
+// is mounted, the only place an originating route is put behind
+// requireOriginationProfile, and the only place an operator route is put
+// behind requireScenarioCaller.
 func (g *Gateway) routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	role := g.cfg.Role
-	for _, declared := range [][]mountedRoute{g.coreRoutes(role), g.paRoutes(role), g.originationRoutes(role)} {
+	for _, declared := range [][]mountedRoute{g.coreRoutes(role), g.workstreamRoutes(role), g.originationRoutes(role)} {
 		for _, rt := range declared {
 			h := rt.handler
 			if rt.originates {
 				h = g.requireOriginationProfile(h)
+			}
+			if rt.operator {
+				h = g.requireScenarioCaller(h)
 			}
 			mux.HandleFunc(rt.pattern, h)
 		}
@@ -998,11 +827,19 @@ func EnableIngressForTest(cfg *Config) {
 // a well-formed kid), which the route answers with 503 instead of a 401 — see
 // ingressAuthRefused.
 func (g *Gateway) ingressAuthOK(r *http.Request) (ok bool, unavailable bool) {
+	_, ok, unavailable = g.ingressAuthClient(r)
+	return ok, unavailable
+}
+
+// ingressAuthClient is ingressAuthOK and the client it verified: the
+// client_id of the bearer this gateway issued, or the iss of a registered
+// client's direct bearer. "" under the test bypass, which verifies no client.
+func (g *Gateway) ingressAuthClient(r *http.Request) (client string, ok bool, unavailable bool) {
 	if g.cfg.ingressAuthBypass {
-		return true, false
+		return "", true, false
 	}
 	if g.ingressAuth == nil {
-		return false, false // fail-closed: no inbound auth configured
+		return "", false, false // fail-closed: no inbound auth configured
 	}
 	// SMART Backend Services issued bearer (token-exchange) OR a UDAP B2B direct bearer
 	// (a registered client's self-signed private_key_jwt, the form br-provider sends).
@@ -1011,12 +848,12 @@ func (g *Gateway) ingressAuthOK(r *http.Request) (ok bool, unavailable bool) {
 	// ORDER IS LOAD-BEARING: verifyBearer is the only arm that touches the ingress key
 	// store, and the direct-bearer arm keeps answering through a key-store outage — so a
 	// store outage is reported only when NEITHER arm admitted the caller.
-	if ok, unavailable := g.ingressAuth.verifyBearer(r); ok {
-		return true, false
-	} else if g.ingressAuth.verifyDirectBearer(r) {
-		return true, false
+	if client, ok, unavailable := g.ingressAuth.verifyBearer(r); ok {
+		return client, true, false
+	} else if client, ok := g.ingressAuth.verifyDirectBearer(r); ok {
+		return client, true, false
 	} else {
-		return false, unavailable
+		return "", false, unavailable
 	}
 }
 
@@ -1027,8 +864,9 @@ func (g *Gateway) ingressAuthOK(r *http.Request) (ok bool, unavailable bool) {
 // credential is bad. The ingress client is the one that decides to retry; this call is
 // refused.
 func (g *Gateway) ingressAuthRefused(w http.ResponseWriter, r *http.Request) bool {
-	ok, unavailable := g.ingressAuthOK(r)
+	client, ok, unavailable := g.ingressAuthClient(r)
 	if ok {
+		noteIngressCaller(r.Context(), client)
 		return false
 	}
 	if unavailable {
@@ -1057,7 +895,7 @@ func (g *Gateway) requireOriginationProfile(h http.HandlerFunc) http.HandlerFunc
 			writeUnavailable(w, originationProfileNotSet)
 			return
 		}
-		// The Claim facts the request states (claimfacts.go), read before any
+		// The Claim facts the request states (module1_claimfacts.go), read before any
 		// handler decodes the body for its own keys.
 		h(w, withOriginationClaimInput(r))
 	}
@@ -1127,7 +965,7 @@ type authorizeReq struct {
 	CorrelationID string `json:"correlationId,omitempty"`
 	// PayloadHash is sha256hex(envelope ciphertext): the gateway seals the payload
 	// FIRST, then authorizes against that exact ciphertext so the minted token binds
-	// THIS payload (AI-2). Empty for non-envelope ops (patient-access-read).
+	// THIS payload (AI-2). Empty for non-envelope ops.
 	PayloadHash string `json:"payloadHash,omitempty"`
 	// Involvement asks for a token for another patient the leg involves
 	// (shnsdk.Involvement*), carried in the envelope's involved list. Empty for
@@ -1492,7 +1330,7 @@ func (g *Gateway) roundTrip(ctx context.Context, r *http.Request, recipient, req
 	if g.cfg.Diagnostic != nil {
 		ctx = context.WithValue(ctx, diagnosticLegKey{}, &diagnosticLeg{sender: g.cfg.HolderID, recipient: recipient, correlation: correlationID})
 	}
-	requestBytes, err := g.admit(content.Payload, requestKey(txType, content.Carried))
+	requestBytes, err := g.admit(content.Payload, contentRequestKey(txType, content))
 	if err != nil {
 		g.diagnosticStage(ctx, "relay.ownership-refused", txType, nil, 500, err.Error())
 	}
@@ -1558,6 +1396,11 @@ func (g *Gateway) roundTrip(ctx context.Context, r *http.Request, recipient, req
 	return respPayload, nil
 }
 
+// errFramedDTRUnsupported refuses a framed DTR operation to a recipient that
+// has not declared shnsdk.RequestFrameV1Op: such a recipient drops the
+// operation header and would misread the body.
+var errFramedDTRUnsupported = shnsdk.ErrFramedDTRUnsupported
+
 // roundTripInner performs one authorized sealed exchange with the counterpart holder
 // through the Hub: authorize(op) → seal(txType/reqFrame) → POST hub
 // /route with a holder assertion → verify the response leg (VerifyBound respOp
@@ -1577,7 +1420,7 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 	// The request is checked against the leg's ownership row at the boundary
 	// itself (content.ProfileID is read below to verify the response frame's
 	// stamp).
-	reqKey := requestKey(txType, content.Carried)
+	reqKey := contentRequestKey(txType, content)
 	payload, err := relay.Transmit(content.Payload, relay.Check(reqKey))
 	if err != nil {
 		g.ownershipRefused(reqKey, err)
@@ -1726,7 +1569,7 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 	var sent *hubSentError
 	wasSent := errors.As(err, &sent)
 	if err == nil || errors.As(err, &refused) || errors.As(err, &lost) || wasSent {
-		exchangeOf(ctx).edits(edits)
+		exchangeOf(ctx).sent(content.Payload)
 	}
 	if err == nil {
 		exchangeOf(ctx).responseHash(sha256hex(respEnv.Ciphertext))
@@ -1804,6 +1647,11 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 		if hdr.Status/100 != 2 {
 			return nil, &RelayError{Status: hdr.Status, Body: body, ContentType: hdr.Headers["Content-Type"], leg: txType}
 		}
+		// A 204 answer has no body to write, so a frame stating 204 with
+		// one says two things and is not read.
+		if hdr.Status == http.StatusNoContent && len(body) > 0 {
+			return nil, &answerLostError{cause: "response frame states 204 No Content and carries a body"}
+		}
 		// Version-stamp verification: a 2xx framed answer
 		// declaring a DIFFERENT contract line than this leg routed is rejected
 		// before the body reaches any parser or validator — tamper or skew,
@@ -1829,8 +1677,10 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 				})
 			}
 		}
-		// The answer's stated media type, for a caller that relays it on.
+		// The answer's stated media type and status, for a caller that
+		// relays it on.
 		noteAnswerMediaType(ctx, hdr.Headers["Content-Type"])
+		noteAnswerStatus(ctx, hdr.Status)
 		return body, nil
 	}
 	if shnsdk.SupportsMessageFrameV1(recipientHolder.MessageFrames) {
@@ -1847,6 +1697,15 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 	return respPayload, nil
 }
 
+// contentRequestKey is the transmit content's request on leg is checked
+// against: carried when the participant's system sent it as its own message;
+// originated when it is the gateway's own, built by its workflow or by a
+// registered module ingress client (OnBehalf), even when it arrived at the
+// ingress.
+func contentRequestKey(leg string, content Content) relay.Key {
+	return requestKey(leg, content.Carried && !content.OnBehalf)
+}
+
 // requestKey is the transmit a requester's request on leg is checked against:
 // carried from its participant's system, or originated by its own workflow.
 func requestKey(leg string, carried bool) relay.Key {
@@ -1859,25 +1718,25 @@ func requestKey(leg string, carried bool) relay.Key {
 
 // OriginateLeg is the origination leg-primitive: it runs one authorized, sealed,
 // Hub-routed exchange for legType, reading the authority frames / operations / scope
-// from `paCatalog` (the PA Layer-3 module) instead of taking them as positional
+// from the catalog of the workstream content is tagged with (catalogFor; the PA
+// Layer-3 module's paCatalog today) instead of taking them as positional
 // literals. recipient stays a parameter (payer legs derive it from the patient's Coverage
 // via recipientFor — no default; facility/phg legs target a LookupByRole result). An
 // unknown legType is a caller bug (the Originator
 // only passes catalog legTypes) and fails closed with an error.
 //
-// The content.WorkstreamType guard is the SELECTION SEAM in embryo: today exactly one
-// module exists, so it fail-closes anything not tagged workstreamPA; when a second
-// workstream lands this becomes `catalogFor(content.WorkstreamType)`. So the catalog is
-// single-source-of-truth across both edges NOW (origination + the handleInbound
-// FulfillLeg dispatch read the same `paCatalog`, hence "cannot drift"), and
-// module-neutral LATER — this seam is reserved but not yet code-enforced (the primitive
-// still names `paCatalog`). This is the origination MIRROR of the payer-side FulfillLeg
-// pattern.
+// The content.WorkstreamType lookup is the SELECTION SEAM: content tagged with a
+// workstream this build does not compile in is refused before anything is sent. The
+// catalog is single-source-of-truth across both edges (origination and the
+// handleInbound FulfillLeg dispatch, which resolves the same catalogs by transaction
+// type through legSpecFor, hence "cannot drift"). This is the origination MIRROR of the
+// payer-side FulfillLeg pattern.
 func (g *Gateway) OriginateLeg(ctx context.Context, r *http.Request, recipient, legType, pci, correlationID, custodian string, content Content) ([]byte, error) {
-	if content.WorkstreamType != workstreamPA {
+	catalog, served := catalogFor(content.WorkstreamType)
+	if !served {
 		return nil, fmt.Errorf("OriginateLeg: content workstream %q not served by this gateway", content.WorkstreamType)
 	}
-	spec, ok := paCatalog[legType]
+	spec, ok := catalog[legType]
 	if !ok {
 		return nil, fmt.Errorf("OriginateLeg: unknown legType %q", legType)
 	}
@@ -1892,7 +1751,7 @@ func (g *Gateway) OriginateLeg(ctx context.Context, r *http.Request, recipient, 
 	// intersection-only) BY CONSTRUCTION — callers reaching here already built
 	// their payload at SOME line with no egress-adapt run, so an arm-2/3 token
 	// would mis-stamp bytes built at another line. selectLegLine (the
-	// select-before-build primitive, originate.go) is where the reachability
+	// select-before-build primitive, lineselect.go) is where the reachability
 	// arms live; this legacy/neutral-caller path never routes through it.
 	if content.ProfileID == "" {
 		tok, err := g.selectLegToken(recipient, legType)
@@ -1917,62 +1776,40 @@ func (g *Gateway) OriginateLeg(ctx context.Context, r *http.Request, recipient, 
 		// OriginateLeg, so there is no route story to synthesize after the fact.
 		// roundTrip's leg.originated therefore carries Route: nil on this path.
 	}
-	g.noteRequestLine(ctx, recipient, legType, correlationID, content.ProfileID)
+	if content.Route != nil && content.Route.Pinned != "" {
+		g.notePinCarried(ctx, recipient, legType, correlationID, content.Route.Pinned, content.ProfileID)
+	} else {
+		g.noteRequestLine(ctx, recipient, legType, correlationID, content.ProfileID)
+	}
 	if target, ok := ctx.Value(certificationTargetKey{}).(*string); ok {
 		*target = content.ProfileID
 	}
 	answer, err := g.roundTrip(ctx, r, recipient, spec.ReqFrame, spec.RespFrame, spec.Op, spec.RespOp, legType, spec.Scope, pci, correlationID, custodian, content)
-	if err != nil || content.Carried || !originatedCRDLegs[legType] {
+	check := originatedAnswerCheckFor(legType)
+	if err != nil || content.Carried || check == nil {
 		return answer, err
 	}
-	// A CRD answer to a leg this gateway originates is certified against the CDS
-	// Hooks response rules at the routed line and this gateway's own level, as a
-	// relayed one is (crdAnswerOutcome), before anything reads it. A carried leg
-	// (the Da Vinci ingress) certifies the answer itself, so it is not checked
-	// twice.
+	// An answer to a leg this gateway originates is certified by the check its
+	// workstream declares (originatedAnswerCheck), at the routed line and this
+	// gateway's own level, before anything reads it. A carried leg (an ingress)
+	// certifies the answer itself, so it is not checked twice.
 	actx := withFindingContext(ctx, findingContext{LegType: legType, CorrelationID: correlationID, Seam: "originate", Whose: "peer"})
-	if refused := certifyCDSHooksAnswer(actx, g.policy(), g.emitFinding, answer, shnsdk.LineOf(content.ProfileID), "peer"); refused.Status != 0 {
+	if refused := check(actx, g.conformance(), g.emitFinding, answer, shnsdk.LineOf(content.ProfileID), "peer"); refused.Status != 0 {
 		return nil, errors.New(refused.Message)
 	}
 	return answer, nil
 }
 
-// originatedCRDLegs are the CRD legs whose originated answer OriginateLeg
-// certifies.
-var originatedCRDLegs = map[string]bool{"crd-order-select": true, "crd-order-dispatch": true}
-
-// validatorForLine resolves the $validate lane for a contract LINE ("2.0", "2.1",
-// "2.2"; "" = no line in play — a version-neutral leg or a non-contract resource).
-// A HAPI instance hosts exactly ONE version of an IG, so per-line validation
-// needs per-line lanes, never one lane reused.
-//
-// Resolution order, and why:
-//   - an explicitly configured lane for the line always wins;
-//   - a deployment with NO lanes configured (ValidatorsByLine empty) serves every
-//     line from Config.Validator — this is the pre-multi-line wiring every in-process
-//     test and the scenario harness use, and it must keep behaving identically;
-//   - a deployment WITH lanes configured is authoritative: a line it did not
-//     configure is UNLANED and resolves to nil, so callers fail closed rather than
-//     validating 2.2 bytes against a 2.0 IG (which would pass or fail for reasons
-//     unrelated to the payload). Absence of a lane is a configuration fact, never
-//     a licence to guess.
+// validatorForLine is the validator for a check that names no contract
+// line (line "": a version-neutral leg or a non-contract resource): the
+// deployment's canonical Validator. A check that names a line resolves its
+// lane by contract (validatorForContractLine); a line without its contract
+// has no lane, and fails closed.
 func (g *Gateway) validatorForLine(line string) shnsdk.Validator {
 	if line == "" {
 		return g.cfg.Validator
 	}
-	if v := g.cfg.ValidatorsByLine[line]; v != nil && !g.cfg.CanonicalFallbackLines[line] {
-		return v
-	}
-	if v := g.qualifiedDefault(line); v != nil {
-		return v
-	}
-	if len(g.cfg.ValidatorsByLine) > 0 {
-		return g.cfg.ValidatorsByLine[line]
-	}
-	if len(g.cfg.DefaultValidatorsByLine) > 0 {
-		return nil
-	}
-	return g.cfg.Validator
+	return nil
 }
 
 // validateFHIR runs the line's configured validator over a FHIR resource on the
@@ -1994,40 +1831,6 @@ func (g *Gateway) validateFHIR(ctx context.Context, resourceJSON []byte, dir, li
 	return g.validateFHIRAtProfile(ctx, resourceJSON, dir, line, "")
 }
 
-// validateFHIRDecisionEOB checks a payer's decision ExplanationOfBenefit, this
-// gateway's own side record of the decision, never sent on the wire. It never
-// refuses the payer's decision, at any level: strict governs a participant's
-// own payload and SHN's edits on the wire, and the EOB is neither. It reports
-// whether the EOB may be written, and when not, why: it failed its own
-// validation (named by its first issue), or, where the level requires a
-// verdict, its validation could not run. The leg acts on the verdict, so the
-// check stays on the request path at every level; at observe the leg's whole
-// loop of them shares one bounded budget (validateDecisionEOBs), past which a
-// check is unavailable and its decision written.
-func (g *Gateway) validateFHIRDecisionEOB(ctx context.Context, eobJSON []byte) (notWritten bool, detail string) {
-	gr := g.validateGoverned(withSideRecordCheck(withJudgedInline(ctx)), findingContextFrom(ctx), g.validatorForLine(""), eobJSON, "egress", "", "", false)
-	switch {
-	case gr.Recorded:
-		return true, "decision EOB not written: it fails its own validation (" + gr.First + ")"
-	case gr.Status != 0:
-		return true, "decision EOB not written: its validation could not run (" + gr.Msg + ")"
-	}
-	return false, ""
-}
-
-// sideRecordCheckKey marks a check of this gateway's own side record (the
-// decision EOB): its invalid verdict is recorded, never refused.
-type sideRecordCheckKey struct{}
-
-func withSideRecordCheck(ctx context.Context) context.Context {
-	return context.WithValue(ctx, sideRecordCheckKey{}, true)
-}
-
-func sideRecordCheck(ctx context.Context) bool {
-	v, _ := ctx.Value(sideRecordCheckKey{}).(bool)
-	return v
-}
-
 // validateFHIRAtProfile preserves the selected lane and all validation refusals.
 func (g *Gateway) validateFHIRAtProfile(ctx context.Context, resourceJSON []byte, dir, line, profile string) (int, string) {
 	return g.validateGoverned(ctx, findingContextFrom(ctx), g.validatorForLine(line), resourceJSON, dir, line, profile, false).refusal()
@@ -2035,23 +1838,6 @@ func (g *Gateway) validateFHIRAtProfile(ctx context.Context, resourceJSON []byte
 
 func (g *Gateway) validateFHIRForContract(ctx context.Context, resourceJSON []byte, dir, contract, line, profile string) (int, string) {
 	return g.validateGoverned(ctx, findingContextFrom(ctx), g.validatorForContractLine(contract, line), resourceJSON, dir, line, profile, false).refusal()
-}
-
-// validateFHIREgressOrBridged is the target-line egress check that follows
-// egressAdapt. bridged says whether the payload actually went through a
-// transform chain (len(route.Chain) > 0 at the call site): if it did, these
-// bytes are SHN's own registered edit and the check refuses at every level;
-// if it did not, they are the participant's own and the level governs.
-//
-// This is the ONE exception to "the validateFHIR* call lines keep their
-// signatures": the eleven PAS-bundle sites each pass the flag, and
-// conformance_sources_test.go lists exactly those eleven. The adaptive-DTR
-// site is deliberately NOT among them: its leg is an envelope leg, so
-// egressAdapt transforms nothing there, and a check that cannot see an SHN
-// edit has nothing to verify.
-func (g *Gateway) validateFHIREgressOrBridged(ctx context.Context, resourceJSON []byte, contract, targetLine string, bridged bool) (int, string) {
-	return g.validateGoverned(ctx, findingContextFrom(ctx), g.validatorForContractLine(contract, targetLine),
-		resourceJSON, "egress", targetLine, "", bridged).refusal()
 }
 
 // govResult is what one governed check produced: the refusal (zero Status when
@@ -2064,35 +1850,6 @@ type govResult struct {
 	// NoLane marks a refusal because no validator lane serves the line, so a
 	// call site with its own missing-lane status and text keeps them.
 	NoLane bool
-	// Recorded marks an invalid verdict that was recorded and let through
-	// (the policy decided Record): the message proceeds, but what failed is
-	// known to the caller.
-	Recorded bool
-	// First names an invalid verdict's first error: its issue code, the
-	// validator's message id and its expression — never the diagnostics text,
-	// which can echo the checked values. "" for any other outcome.
-	First string
-}
-
-// firstIssue names a result's first error or fatal issue by code, message id
-// and expression, for a caller that reports what failed without the payload.
-func firstIssue(res shnsdk.Result) string {
-	for _, d := range res.Details {
-		if d.Severity != "error" && d.Severity != "fatal" {
-			continue
-		}
-		out := d.Code
-		if d.MessageID != "" {
-			out += " " + d.MessageID
-		}
-		if len(d.Expression) > 0 {
-			out += " at " + strings.Join(d.Expression, ", ")
-		}
-		if out != "" {
-			return out
-		}
-	}
-	return "an unclassified issue"
 }
 
 // refusal flattens a govResult for the 42 wrapper call lines that write
@@ -2105,19 +1862,13 @@ func (r govResult) refusal() (int, string) {
 	return r.Status, r.Msg + ": " + strings.Join(r.Issues, "; ")
 }
 
-// policy is the gateway's conformance policy, built from the configured level.
-// It is configuration, never request-scoped.
-func (g *Gateway) policy() ConformancePolicy {
-	return NewConformancePolicy(g.cfg.ConformanceEnforcement)
-}
-
 // ConformanceLevelForTest exposes this Gateway's own effective conformance
 // enforcement level — test-only introspection (the ValidatorReadinessForTest/
 // RecordEdgeCaptureForTest pattern) proving that a level set through
 // Config.ConformanceEnforcement actually reached the constructed Gateway,
 // not just whatever struct a caller assembled.
 func (g *Gateway) ConformanceLevelForTest() ConformanceEnforcement {
-	return g.policy().Level()
+	return g.conformance().Level()
 }
 
 // ResponderForTest exposes this Gateway's own configured Responder (a payer's
@@ -2130,18 +1881,15 @@ func (g *Gateway) ResponderForTest() LegResponder {
 	return g.cfg.Responder
 }
 
-// kindForDirection names the governed check kind. A bridged payload — one this
-// gateway transformed between IG lines — is SHN's own registered edit, never
-// the participant's data, and is refused at every level (§2).
-func kindForDirection(dir string, bridged bool) CheckKind {
-	switch {
-	case bridged:
-		return KindFHIRBridged
-	case dir == "egress":
+// kindForDirection names the governed check kind of a participant's payload.
+// A bridged payload, one this gateway transformed between IG lines, is
+// KindFHIRBridged, named by judgeLines: SHN's own registered edit, never the
+// participant's data, decided by module 2's bridgedDecision (§2).
+func kindForDirection(dir string) CheckKind {
+	if dir == "egress" {
 		return KindFHIREgress
-	default:
-		return KindFHIRIngress
 	}
+	return KindFHIRIngress
 }
 
 // lineLane is one IG line a governed check certifies against, and the validator
@@ -2194,29 +1942,44 @@ func (g *Gateway) validateGoverned(ctx context.Context, fc findingContext, v shn
 // finding's Line names the line that verdict came from.
 func (g *Gateway) validateGovernedLines(ctx context.Context, fc findingContext, lanes []lineLane, resourceJSON []byte, dir, line, profile string, bridged, candidates bool) govResult {
 	defer exchangeOf(ctx).validation()()
-	// At observe the check can only record, so the leg does not wait for it: it
-	// is queued and its finding emitted when the validator answers. A bridged
-	// payload refuses at every level and stays here.
-	if !bridged && g.policy().Level() == EnforcementObserve && !judgedInline(ctx) {
-		g.enqueueObserveCheck(observeCheck{fc: fc, lanes: lanes, payload: resourceJSON, dir: dir, line: line, profile: profile, candidates: candidates,
+	// A bridged payload is SHN's own edit, module 2's, refused at every level
+	// ahead of module 3. A participant's payload is module 3's check.
+	if bridged {
+		return g.judgeLines(ctx, g.conformance(), fc, lanes, resourceJSON, dir, line, profile, bridged, candidates)
+	}
+	return g.conformance().fhir(ctx, fc, lanes, resourceJSON, dir, line, profile, candidates)
+}
+
+// fhir is module 3's governed check of a participant's payload. At observe the
+// check can only record, so the leg does not wait for it: it is queued and its
+// finding emitted when the validator answers (observe_async.go). At every
+// other level it is judged now.
+func (m gatewayConformance) fhir(ctx context.Context, fc findingContext, lanes []lineLane, resourceJSON []byte, dir, line, profile string, candidates bool) govResult {
+	if m.Level() == EnforcementObserve {
+		m.g.enqueueObserveCheck(observeCheck{fc: fc, lanes: lanes, payload: resourceJSON, dir: dir, line: line, profile: profile, candidates: candidates,
 			binding: findingBindingFrom(ctx), tally: legTallyFrom(ctx)})
 		return govResult{}
 	}
-	return g.judgeLines(ctx, fc, lanes, resourceJSON, dir, line, profile, bridged, candidates)
+	return m.g.judgeLines(ctx, m, fc, lanes, resourceJSON, dir, line, profile, false, candidates)
 }
 
 // judgeLines runs a governed check and acts on its verdict: on the request path
 // for every level that can refuse, and on an observe worker for a check that can
-// only record (observe_async.go).
-func (g *Gateway) judgeLines(ctx context.Context, fc findingContext, lanes []lineLane, resourceJSON []byte, dir, line, profile string, bridged, candidates bool) govResult {
-	kind := kindForDirection(dir, bridged)
-	pol := g.policy()
-	if !pol.Runs(kind, "") {
+// only record (observe_async.go). mod is module 3, which decides a
+// participant's payload and names the level a finding records; a bridged
+// check is decided by module 2's bridgedDecision.
+func (g *Gateway) judgeLines(ctx context.Context, mod conformanceModule, fc findingContext, lanes []lineLane, resourceJSON []byte, dir, line, profile string, bridged, candidates bool) govResult {
+	kind := kindForDirection(dir)
+	whose := fc.Whose
+	switch {
+	case bridged:
+		kind, whose = KindFHIRBridged, "network"
+	case !mod.Runs(kind, ""):
 		return govResult{}
 	}
-	whose := fc.Whose
+	decide := func(v Verdict) Decision { return mod.Decide(kind, "", v) }
 	if bridged {
-		whose = "network"
+		decide = bridgedDecision
 	}
 	var tried []LineVerdictSummary
 	// spent is the time this check's validator calls took, the lanes tried
@@ -2232,26 +1995,16 @@ func (g *Gateway) judgeLines(ctx context.Context, fc findingContext, lanes []lin
 		}
 	}
 	unavailable := func(refused govResult, at string) govResult {
-		recordUnavailable := func() {
-			g.emitFindingIn(ctx, ConformanceFinding{
-				Kind: string(kind), Direction: dir, LegType: fc.LegType, CorrelationID: fc.CorrelationID,
-				Seam: fc.Seam, Whose: whose, Line: at, Profile: profile,
-				Level: pol.Level().String(), Verdict: "unavailable", Decision: Record.String(),
-				PayloadSHA256: sha256hex(resourceJSON), DeclaredLine: declaredLine, Lines: tried,
-				ValidatorMs: spent.Milliseconds(),
-			})
-		}
-		if pol.Decide(kind, "", VerdictUnavailable) == Refuse {
-			// This gateway's own side record (the decision EOB) is never
-			// refused: where the level requires a verdict it is not written,
-			// and the check that could not run is still recorded as a
-			// finding, as at every other level.
-			if sideRecordCheck(ctx) {
-				recordUnavailable()
-			}
+		if decide(VerdictUnavailable) == Refuse {
 			return refused
 		}
-		recordUnavailable()
+		g.emitFindingIn(ctx, ConformanceFinding{
+			Kind: string(kind), Direction: dir, LegType: fc.LegType, CorrelationID: fc.CorrelationID,
+			Seam: fc.Seam, Whose: whose, Line: at, Profile: profile,
+			Level: mod.Level().String(), Verdict: "unavailable", Decision: Record.String(),
+			PayloadSHA256: sha256hex(resourceJSON), DeclaredLine: declaredLine, Lines: tried,
+			ValidatorMs: spent.Milliseconds(),
+		})
 		return govResult{}
 	}
 	var (
@@ -2296,7 +2049,7 @@ func (g *Gateway) judgeLines(ctx context.Context, fc findingContext, lanes []lin
 				g.emitFindingIn(ctx, ConformanceFinding{
 					Kind: string(kind), Direction: dir, LegType: fc.LegType, CorrelationID: fc.CorrelationID,
 					Seam: fc.Seam, Whose: whose, Line: lane.Line, Profile: profile,
-					Level: pol.Level().String(), Verdict: findingVerdict(VerdictValid), Decision: Record.String(),
+					Level: mod.Level().String(), Verdict: findingVerdict(VerdictValid), Decision: Record.String(),
 					PayloadSHA256: sha256hex(resourceJSON), DeclaredLine: declaredLine, Lines: tried,
 					ValidatorMs: spent.Milliseconds(),
 				})
@@ -2326,13 +2079,7 @@ func (g *Gateway) judgeLines(ctx context.Context, fc findingContext, lanes []lin
 		}
 		return unavailable(govResult{Status: http.StatusInternalServerError, Msg: "validator unavailable"}, line)
 	}
-	decision := pol.Decide(kind, "", bestVerdict)
-	if sideRecordCheck(ctx) {
-		// This gateway's own side record (the decision EOB) is never on the
-		// wire and never a participant's payload: its verdict decides only
-		// whether it is written, never the leg, at any level.
-		decision = Record
-	}
+	decision := decide(bestVerdict)
 	g.emitFindingIn(ctx, ConformanceFinding{
 		Kind:          string(kind),
 		Direction:     dir,
@@ -2342,7 +2089,7 @@ func (g *Gateway) judgeLines(ctx context.Context, fc findingContext, lanes []lin
 		Whose:         whose,
 		Line:          bestLine,
 		Profile:       profile,
-		Level:         pol.Level().String(),
+		Level:         mod.Level().String(),
 		Decision:      decision.String(),
 		PayloadSHA256: sha256hex(resourceJSON),
 		Issues:        best.Issues,
@@ -2351,9 +2098,9 @@ func (g *Gateway) judgeLines(ctx context.Context, fc findingContext, lanes []lin
 		ValidatorMs:   spent.Milliseconds(),
 	})
 	if decision == Record {
-		return govResult{Recorded: true, First: firstIssue(best)}
+		return govResult{}
 	}
-	return govResult{Status: http.StatusUnprocessableEntity, Msg: dir + " validation failed", Issues: boundIssues(best.Issues), First: firstIssue(best)}
+	return govResult{Status: http.StatusUnprocessableEntity, Msg: dir + " validation failed", Issues: boundIssues(best.Issues)}
 }
 
 // validateFHIRPayerIngress is the ingress check of a payer's answer on the legs a
@@ -2401,6 +2148,16 @@ func (g *Gateway) validateFHIRPayerIngress(ctx context.Context, resourceJSON []b
 	if relaysReferencePayerBytes(g.cfg.OriginationProfile) && isReferencePayer(payer) {
 		return 0, ""
 	}
+	return g.validatePayerAnswerAtCandidates(ctx, resourceJSON, line, contract)
+}
+
+// validatePayerAnswerAtCandidates certifies a payer's answer against the candidate
+// lines, as validateFHIRPayerIngress describes, for every payer: it has no
+// reference-payer skip. The provider ingress calls it directly for the answers it
+// carries for its own participant's system (carriedAnswerRefused), a path that never
+// had the skip; the tolerance it would extend is to leave the core, as a participant's
+// opt-in.
+func (g *Gateway) validatePayerAnswerAtCandidates(ctx context.Context, resourceJSON []byte, line, contract string) (int, string) {
 	lanes := g.candidateLanes(contract, line, resourceJSON)
 	if !anyLaned(lanes) {
 		// No lane serves any line: the routed line alone, which reports the missing
@@ -2411,7 +2168,7 @@ func (g *Gateway) validateFHIRPayerIngress(ctx context.Context, resourceJSON []b
 }
 
 // candidateLanes is the ordered set of lines a payer's answer is certified against:
-// routed first, then candidateLineOrder's order over the answer, each of the
+// routed first, then the contract's workstream's order over the answer (answerLineClaims), each of the
 // contract's lines once. A line with no validator lane is left out, unless it is
 // decisive (routed, or claimed by the answer), when it stays in with no validator so
 // that it is recorded as unavailable. A validator that already serves an earlier line
@@ -2434,7 +2191,7 @@ func (g *Gateway) candidateLanes(contract, routed string, payload []byte) []line
 
 // answerCandidates is the order and set of lines a payer's answer is judged at
 // (FR-G29), one list for every check that reads an answer by its line: the
-// routed line first, then candidateLineOrder's order over the answer, each of
+// routed line first, then the contract's workstream's order over the answer (answerLineClaims), each of
 // the contract's lines once, a line with no validator lane left out unless it
 // is decisive (routed, or claimed by the answer). candidateLanes certifies by
 // it; answer.shape reads the answer's graph by it (answerGraphLine).
@@ -2443,7 +2200,7 @@ func (g *Gateway) answerCandidates(contract, routed string, payload []byte) []li
 	for _, l := range nativeLinesForContract(contract) {
 		native[l] = true
 	}
-	order, claimed := answerLineClaims(payload)
+	order, claimed := answerLineClaims(contract, payload)
 	seen := map[string]bool{}
 	var out []lineLane
 	for _, l := range append([]string{routed}, order...) {
@@ -2503,61 +2260,6 @@ func servesAlready(used []shnsdk.Validator, v shnsdk.Validator) (same bool) {
 	return false
 }
 
-// envelopeEgressLegs is the DTR-fetch-ONLY non-FHIR carve-out (the
-// multi-version spec's recorded DTR-fetch known-gap obligation, discharged).
-// Membership means egressAdapt walks
-// route.Chain for the routing/observer story but never hands the bytes to a
-// step function — safe only because dtr-questionnaire-fetch's payload is
-// the operation's own input, carried to the payer's line unchanged: the
-// ingress and the originator refuse a walk that would change a byte of it
-// (handleDTRIngress, carryUnchanged), so no pa.dtr compat-manifest step
-// ever rewrites it.
-//
-// CRD legs (crd-order-select, crd-order-dispatch) must NEVER join this set:
-// their arm-3 byte-identity rests on the identity chain genuinely RUNNING
-// (TestD7CRDArm3IdentityChainIsBytePreserving) — a CDS Hooks payload IS FHIR
-// content the pa.crd manifest models, so carving it out here would misname
-// it as an envelope, would be redundant (applyChain's nil-func identity path
-// is already a byte-pure pass-through with identical reports, transform.go's
-// applyChain), and would silently bypass any FUTURE real CRD module instead
-// of making it run or refuse honestly. TestCRDLegsNeverJoinEnvelopeCarveOut
-// pins the set's exact membership.
-//
-// Terminology note: the commit that discharged it calls this "proven
-// safe by byte-identity guard" — there is no RUNTIME guard (no equality
-// check anywhere in egressAdapt below; out is never a copy, so one would be
-// structurally unreachable). "Guard" there means
-// TestEnvelopeLegChainIsByteIdenticalPassThrough, the test-time pin that
-// enforces byte-identity by construction, not a production code path.
-var envelopeEgressLegs = map[string]bool{"dtr-questionnaire-fetch": true}
-
-// verbatimChainLegs are legs whose payload the compat chain WALKS — so the
-// routing and observer story stays honest — and never rewrites.
-//
-// pas-claim-inquire is one, for two reasons that both have to hold.
-//
-// FIRST, the chain has nothing to do to it. Every pa.pas step models a
-// difference between the SUBMIT/AMENDMENT profiles (profile-claim,
-// profile-claim-update) or the response profile: the Claim.item line detail and
-// the related-claim relationship, and ClaimResponse.request. An inquiry's Claim
-// is profile-claim-inquiry, a third profile that states none of them — the same
-// distinction the certification layer draws (species.go) and the validator lane
-// scopes (linefake.go). Measured: running the chain over an inquiry changed not
-// one fact, only the key order of the re-marshalled JSON.
-//
-// SECOND, that re-marshal is exactly what an inquiry must not suffer. Its
-// payload CARRIES the participant's own Patient, Coverage, provider and payer
-// records as verbatim spans, sealed as embeds — that is what makes the bytes on
-// the wire provably the participant's records rather than a rendering of them.
-// A step that re-serialized them would reorder their keys and leave the seal
-// describing a message that no longer exists.
-//
-// inquireContinuation keeps the runtime byte-equality check, so a future
-// inquiry-aware step that DID change the bytes is never sent under a broken
-// seal: the inquiry is sent as built, at its build line, or refused under the
-// participant's REQUIRE_SHARED_LINE.
-var verbatimChainLegs = map[string]bool{"pas-claim-inquire": true}
-
 // egressAdapt applies route's transform chain (if any) to payload before it
 // is sent, builds the transform Provenance from the
 // chain's LossReports, and emits leg.transformed. Arms (1)/(2) carry
@@ -2565,10 +2267,10 @@ var verbatimChainLegs = map[string]bool{"pas-claim-inquire": true}
 // production mesh today (arm (3), the only path that reaches applyChain, is
 // production-dormant within {2.0,2.1,2.2} per the recorded route-selection
 // consequence — every
-// published line is native). The caller's EXISTING
-// validateFHIR(ctx, bytes, "egress", LineOf(route.Token)) call certifies the
-// returned bytes at the TARGET lane before sealing — transformed-output-
-// invalid is a hard failure THERE, never silently swallowed here.
+// published line is native). Its caller, egressBuild, certifies the
+// returned bytes at the TARGET lane before sealing (module 2's Certify when
+// the route has a chain) — transformed-output-invalid is a hard failure
+// THERE, never silently swallowed here.
 func (g *Gateway) egressAdapt(route legRoute, payload []byte, x ExchangeIdentity) ([]byte, []LossReport, error) {
 	out, reports, record, err := g.egressWalk(route, payload, x)
 	if err != nil {
@@ -2585,66 +2287,30 @@ func (g *Gateway) egressAdapt(route legRoute, payload []byte, x ExchangeIdentity
 // transform Provenance for that walk. A caller that may not apply the walk
 // (a request carried as sent when the walk would change it) calls record only
 // when it does, so no transform is recorded for bytes never sent. record is
-// never nil.
+// never nil. A route with no chain (arms (1) and (2), and every carry) is a
+// pass-through; a chain is module 2's, walked by its AdaptRequest.
 func (g *Gateway) egressWalk(route legRoute, payload []byte, x ExchangeIdentity) ([]byte, []LossReport, func() error, error) {
 	noRecord := func() error { return nil }
 	if len(route.Chain) == 0 {
 		return payload, nil, noRecord, nil
 	}
-
-	var out []byte
-	var reports []LossReport
-	var err error
-	if envelopeEgressLegs[x.LegType] || verbatimChainLegs[x.LegType] {
-		// Non-FHIR carve-out (obligation discharged — see
-		// envelopeEgressLegs's own doc comment and the multi-version spec's
-		// recorded DTR-fetch known-gap entry): envelope legs are
-		// safe BY CONSTRUCTION — the chain is walked (envelopeChainReports
-		// mirrors applyChain's own walk-direction switch, below) so the
-		// routing/observer story stays honest, but the step funcs never see
-		// the bytes, so they can never re-marshal (and therefore never
-		// reorder) the envelope's JSON. No runtime byte-equality guard
-		// follows this assignment — it would be structurally unreachable
-		// (out IS payload, never a copy that could diverge), the exact
-		// anti-pattern obligation 2 exists to eliminate.
-		// TestEnvelopeLegChainIsByteIdenticalPassThrough is the enforcement
-		// fence in place of the impossible envelope $validate.
-		out, reports = payload, envelopeChainReports(route.Chain, route.BuildLine)
-	} else {
-		out, reports, err = applyChain(route.Chain, route.BuildLine, payload, x)
+	b := g.bridge()
+	if b == nil {
+		return nil, nil, noRecord, errBridgeOff
 	}
-	if err != nil {
-		// Observer honesty: a transform-chain refusal used to be observer-SILENT (every
-		// egressAdapt call site precedes roundTrip, at the time the only
-		// other leg.failed producer; guardPendCarry now emits on this same
-		// seam too — observer.go's kinds table names all three) — a §6-grade
-		// honesty gap the observer stream must not have. Route carries the
-		// attempted chain (routeInfoFor) so the refusal is legible on the
-		// SAME seam leg.transformed/leg.originated use, not just a bare
-		// error string.
-		g.observe(ObserverEvent{
-			Kind: "leg.failed", Direction: "originate",
-			LegType: x.LegType, CorrelationID: x.CorrelationID,
-			Counterpart: x.Counterpart, Detail: err.Error(),
-			Route: routeInfoFor(route),
-		})
-		return nil, nil, noRecord, err
-	}
-	contract := route.Chain[0].Contract
-	targetLine := shnsdk.LineOf(route.Token)
+	return b.AdaptRequest(route, payload, x)
+}
 
-	ev := transformedObserverEvent(reports)
-	ev.Direction = "originate"
-	ev.CorrelationID = x.CorrelationID
-	ev.LegType = x.LegType
-	ev.Counterpart = x.Counterpart
-	if spec, ok := paCatalog[x.LegType]; ok { // same lookup OriginateLeg uses
-		ev.AuthorityFrame = spec.ReqFrame
+// adaptAnswer is the payload this gateway gives its participant's system for
+// answer, the answer on key to a leg routed at routed: module 2's
+// (AdaptAnswer) when it is on, else the answer exactly as it arrived, written
+// in the line it was routed at. wrote, status and msg are AdaptAnswer's.
+func (g *Gateway) adaptAnswer(ctx context.Context, key relay.Key, answer []byte, contentType, routed string, x ExchangeIdentity) (relay.Payload, string, int, string) {
+	b := g.bridge()
+	if b == nil {
+		return relay.Exact(relay.NewBody(answer, relay.OriginPeerFrame), contentType), routed, 0, ""
 	}
-
-	return out, reports, func() error {
-		return g.recordTransformed(ev, x, contract, route.BuildLine, targetLine, route.Chain, reports, payload, out)
-	}, nil
+	return b.AdaptAnswer(ctx, key, answer, contentType, routed, g.declaredContractVersions(), x)
 }
 
 // recordTransformed records a transform chain a gateway ran over a payload
@@ -2652,8 +2318,9 @@ func (g *Gateway) egressWalk(route legRoute, payload []byte, x ExchangeIdentity)
 // Provenance (module ids, source and target lines, the loss report), checked
 // to round-trip to the same reports, on the observer stream, and, when the
 // demonstration capture is on, the before/after pair. The edges that run a
-// chain share it: egressAdapt, and the provider's carry of a questionnaire
-// package answer across DTR lines (carryDTRAnswer).
+// chain share it: module 2's request walk (AdaptRequest, through egressWalk),
+// and the provider's carry of a questionnaire package answer across DTR lines
+// (carryDTRAnswer).
 func (g *Gateway) recordTransformed(ev ObserverEvent, x ExchangeIdentity, contract, fromLine, targetLine string, chain []CompatStep, reports []LossReport, before, after []byte) error {
 	// The transform Provenance (module id, source->target lines,
 	// the shn-loss-report extension) rides INSIDE the transformed payload
@@ -3085,7 +2752,7 @@ func (g *Gateway) readRequestFrame(legType string, payload []byte) (body []byte,
 			" (it speaks " + strings.Join(sortedTokens(contract, contractLineSet(NativeContractVersions(), contract)), ",") + ")", 0, ""
 	}
 	line := shnsdk.LineOf(claimed)
-	if g.validatorForContractLine(contract, line) == nil {
+	if !g.servesLine(contract, line) {
 		return body, claimed, "request declares contract version " + claimed + " but this gateway has no FHIR validator lane for line " + line +
 			" — refusing to answer at an unvalidatable line", 0, ""
 	}
@@ -3099,7 +2766,8 @@ func (g *Gateway) readRequestFrame(legType string, payload []byte) (body []byte,
 // build answers at that line iff the token is BOTH:
 //   - native-buildable (a member of NativeContractVersions() for THIS leg's
 //     contract) — we can actually produce the answer at that line; and
-//   - laned (validatorForLine resolves) — we can actually VALIDATE at that line.
+//   - served (servesLine): laned, so we can actually VALIDATE at that line, or,
+//     at none, which validates nothing, a line this gateway declares.
 //
 // The predicate is native∩laned rather than the routing rule's "declared" — a
 // RECORDED deviation: it is what makes the declaration-change window benign,
@@ -3206,9 +2874,10 @@ func RequestFrameOperation(ctx context.Context) string {
 }
 
 // inboundFrameOperation reads the operation header of an inbound request
-// frame. The header is defined only for dtr-questionnaire-fetch: a frame that
-// names an operation on any other leg is refused (400). Which operation values
-// are served is the leg's decision. A payload that is not a frame names none.
+// frame. The header is defined only for a leg whose taxonomy declares frame
+// operations (legSpec.OperationHeader): a frame that names an operation on any
+// other leg is refused (400). Which operation values are served is the leg's
+// decision. A payload that is not a frame names none.
 func inboundFrameOperation(legType string, payload []byte) (string, int, string) {
 	if !shnsdk.IsFramed(payload) {
 		return "", 0, ""
@@ -3218,7 +2887,7 @@ func inboundFrameOperation(legType string, payload []byte) (string, int, string)
 		return "", http.StatusBadRequest, "request frame decode failed"
 	}
 	op := hdr.Headers[shnsdk.FrameHeaderOperation]
-	if op != "" && legType != "dtr-questionnaire-fetch" {
+	if spec, _ := legSpecFor(legType); op != "" && !spec.OperationHeader {
 		return "", http.StatusBadRequest, "operation header is not defined for this transaction type"
 	}
 	return op, 0, ""
@@ -3396,6 +3065,7 @@ func (g *Gateway) buildResponseLeg(r *http.Request, respFrame, respOp, txType, i
 	x := exchangeOf(r.Context())
 	x.responseHash(sha256hex(respEnv.Ciphertext))
 	x.decided(answerOutcome(k.Outcome), "", "")
+	x.answered(p)
 	return out, 0, ""
 }
 
@@ -3430,23 +3100,36 @@ func (g *Gateway) frameNegotiated(requester string) bool {
 // means an out-of-range status literal (caller bug) — fall back to bare so the
 // exchange still answers.
 func (g *Gateway) framePayload(requester string, status int, contentType, contractToken string, payload []byte) []byte {
+	out, _ := g.frameAnswer(requester, status, contentType, contractToken, payload)
+	return out
+}
+
+// frameAnswer is framePayload, reporting whether the answer was framed.
+func (g *Gateway) frameAnswer(requester string, status int, contentType, contractToken string, payload []byte) ([]byte, bool) {
 	if !g.frameNegotiated(requester) {
-		return payload
+		return payload, false
 	}
 	framed, err := shnsdk.EncodeHTTPFrameHeaders(status, map[string]string{
 		"Content-Type":                    contentType,
 		shnsdk.FrameHeaderContractVersion: contractToken, // "" is omitted by the encoder
 	}, payload)
 	if err != nil {
-		return payload
+		return payload, false
 	}
-	return framed
+	return framed, true
 }
 
-// successFrame is the buildResponseLeg frame for a 2xx answer (framePayload).
-func (g *Gateway) successFrame(requester, contentType, contractToken string) func([]byte) ([]byte, error) {
+// successFrame is the buildResponseLeg frame for a 2xx answer (framePayload),
+// framed with status (LegResult.answerStatus), which the leg's record keeps.
+// A requester that negotiated no frame gets the answer bare, which it reads
+// as the 200 the leg is answered to the Hub with, and the record keeps that.
+func (g *Gateway) successFrame(ctx context.Context, requester string, status int, contentType, contractToken string) func([]byte) ([]byte, error) {
 	return func(payload []byte) ([]byte, error) {
-		return g.framePayload(requester, http.StatusOK, contentType, contractToken, payload), nil
+		out, framed := g.frameAnswer(requester, status, contentType, contractToken, payload)
+		if framed {
+			exchangeOf(ctx).answer(status)
+		}
+		return out, nil
 	}
 }
 
@@ -3465,8 +3148,10 @@ func successMediaType(p relay.Payload) string {
 // do NOT commit holder state between build and write (eligibility, CRD, DTR,
 // federated query). The PAS legs call buildResponseLeg/writeLeg explicitly so
 // they can commit state ONLY after a successful build. The
-// success payload is sealed as a v1 frame(200, successMediaType) for a
-// frame-negotiated requester, bare legacy otherwise.
+// success payload is sealed as a v1 frame(answerStatus, successMediaType) for a
+// frame-negotiated requester, bare legacy otherwise. answerStatus is
+// LegResult.answerStatus for a responder's answer, 200 for one this gateway
+// built.
 //
 // builtToken is the contract-version token this answer's payload was BUILT at —
 // the honored/recomputed answer line — and becomes the frame's contractVersion
@@ -3478,7 +3163,7 @@ func successMediaType(p relay.Payload) string {
 // an answer is left UNSTAMPED — the stamp is content-descriptive, and SHN cannot
 // vouch for the contract line of a partner's bytes; absence is tolerated by
 // design, a wrong claim is not.
-func (g *Gateway) respondLeg(w http.ResponseWriter, r *http.Request, respFrame, respOp, txType, inboundCorrID string, p relay.Payload, subjectPCI, requester, consentRef, builtToken string) {
+func (g *Gateway) respondLeg(w http.ResponseWriter, r *http.Request, respFrame, respOp, txType, inboundCorrID string, p relay.Payload, answerStatus int, subjectPCI, requester, consentRef, builtToken string) {
 	ct := successMediaType(p)
 	stamp, terr := g.contractTokenForLeg(txType, builtToken)
 	if terr != nil {
@@ -3489,7 +3174,7 @@ func (g *Gateway) respondLeg(w http.ResponseWriter, r *http.Request, respFrame, 
 		stamp = "" // stamp honesty: never stamp bytes this build did not produce (the encoder omits "")
 	}
 	out, status, msg := g.buildResponseLeg(r, respFrame, respOp, txType, inboundCorrID, p, answerKey(txType, relay.OutcomeAnswered),
-		g.successFrame(requester, ct, stamp), subjectPCI, requester, consentRef)
+		g.successFrame(r.Context(), requester, answerStatus, ct, stamp), subjectPCI, requester, consentRef)
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
@@ -3535,7 +3220,7 @@ func legibleLegErrorMessage(txType string, status int, msg string) string {
 // parameter by stamping error frames.
 func (g *Gateway) respondLegError(w http.ResponseWriter, r *http.Request, respFrame, respOp, txType, corrID string, result LegResult, subjectPCI, requester, consentRef, builtToken string) {
 	if result.Status/100 == 2 { // connector misuse guard: a 2xx belongs on the success seal
-		g.respondLeg(w, r, respFrame, respOp, txType, corrID, result.Response, subjectPCI, requester, consentRef, builtToken)
+		g.respondLeg(w, r, respFrame, respOp, txType, corrID, result.Response, result.answerStatus(), subjectPCI, requester, consentRef, builtToken)
 		return
 	}
 	// A connector/responder can answer non-2xx with NO body and NO LegResult.Message at

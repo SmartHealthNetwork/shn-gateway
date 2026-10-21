@@ -144,7 +144,7 @@ func TestEligibility_RecordsUnknownMemberIsThePayersAnswer(t *testing.T) {
 func sendConsented(t *testing.T, p *levelPayer, leg string, body []byte, subject, consentRef string) payerAnswer {
 	t.Helper()
 	p.seq++
-	spec := paCatalog[leg]
+	spec, _ := legSpecFor(leg)
 	corr := fmt.Sprintf("corr-%s-%d", leg, p.seq)
 	clock := p.g.cfg.Clock()
 	env, err := shnsdk.Seal(shnsdk.Metadata{

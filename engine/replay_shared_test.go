@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -80,43 +79,13 @@ func TestHubAssertion_SharedReplayRejectsAtOtherReplica(t *testing.T) {
 	}
 }
 
-func TestPatientAccess_SharedReplayRejectsAtOtherReplica(t *testing.T) {
-	authzPub, authzPriv, _ := ed25519.GenerateKey(rand.Reader)
-	hubPub, _, _ := ed25519.GenerateKey(rand.Reader)
-	clock := func() time.Time { return time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC) }
-	a, b := sharedReplayPair(t, authzPub, hubPub, clock)
-
-	// Field set copied from the passing patient-access token in
-	// test/adversarial (mintToken): the bindings patientAccessToken asserts are
-	// Frame "patient-access", Operation "patient-access-read", Holder "phg".
-	tok := signTestToken(shnsdk.Token{
-		Operation: "patient-access-read", Scope: "patient-access-only", Subject: "p-1",
-		Frame: "patient-access", Holder: "phg", CorrelationID: "corr-1",
-		Expiry: clock().Add(time.Hour),
-	}, authzPriv)
-	raw, _ := json.Marshal(tok)
-	req := func() *http.Request {
-		r := httptest.NewRequest(http.MethodGet, "/patient-access/Patient/p-1", nil)
-		r.Header.Set("Authorization", "Bearer "+base64.StdEncoding.EncodeToString(raw))
-		return r
-	}
-	if _, ok, _ := a.patientAccessToken(req()); !ok {
-		t.Fatal("first presentation at A must verify")
-	}
-	if _, ok, _ := b.patientAccessToken(req()); ok {
-		t.Fatal("same correlationId presented at B must be rejected (shared record)")
-	}
-}
-
-// A store that cannot tell must refuse: neither gate may admit an unrecorded jti or
-// correlation. The stand-in answers (replay=false, err) — a store that did NOT claim a
+// A store that cannot tell must refuse: the gate may not admit an unrecorded jti. The stand-in answers (replay=false, err) — a store that did NOT claim a
 // replay but could not tell — which is precisely the shape a caller reading only the
 // bool would let through. The refusal is REPORTED as an outage (unavailable=true), which
 // is what turns it into a 503 at the route instead of a denial; the rows below pin both
-// halves. One row per scope; both legs run through the SAME store outage a DSN
-// deployment sees.
-func TestReplayStoreOutage_HubAssertionAndPatientAccessFailClosed(t *testing.T) {
-	authzPub, authzPriv, _ := ed25519.GenerateKey(rand.Reader)
+// halves, through the SAME store outage a DSN deployment sees.
+func TestReplayStoreOutage_HubAssertionFailsClosed(t *testing.T) {
+	authzPub, _, _ := ed25519.GenerateKey(rand.Reader)
 	hubPub, hubPriv, _ := ed25519.GenerateKey(rand.Reader)
 	clock := func() time.Time { return time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC) }
 	id, err := shnsdk.GenerateIdentity("payer")
@@ -150,45 +119,18 @@ func TestReplayStoreOutage_HubAssertionAndPatientAccessFailClosed(t *testing.T) 
 		}
 	})
 
-	t.Run("patient access read", func(t *testing.T) {
-		tok := signTestToken(shnsdk.Token{
-			Operation: "patient-access-read", Scope: "patient-access-only", Subject: "p-1",
-			Frame: "patient-access", Holder: "phg", CorrelationID: "corr-1",
-			Expiry: clock().Add(time.Hour),
-		}, authzPriv)
-		raw, _ := json.Marshal(tok)
-		req := func() *http.Request {
-			r := httptest.NewRequest(http.MethodGet, "/patient-access/Patient/p-1", nil)
-			r.Header.Set("Authorization", "Bearer "+base64.StdEncoding.EncodeToString(raw))
-			return r
-		}
-		if _, ok, unavailable := replayGateway(t, id, authzPub, hubPub, clock, NewInMemoryReplayStore()).patientAccessToken(req()); !ok || unavailable {
-			t.Fatalf("control: a valid token must verify against a healthy record (ok=%v unavailable=%v)", ok, unavailable)
-		}
-		down := &stubReplayStore{err: errors.New("store down")}
-		_, ok, unavailable := replayGateway(t, id, authzPub, hubPub, clock, down).patientAccessToken(req())
-		if ok {
-			t.Fatal("a patient-access read must be refused while the one-time-use record is unavailable")
-		}
-		if !unavailable {
-			t.Fatal("the refusal must be reported as a store outage, not as a bad token (the route answers 503, not 401)")
-		}
-		if down.calls != 1 {
-			t.Fatalf("record consulted %d times, want 1", down.calls)
-		}
-	})
 }
 
 // An outage refusal that names its cause, driven through the REAL handlers. During a
-// database failover every in-flight Hub-authenticated delivery and every patient-access
-// read reaches the one-time-use record as an error; answering the ordinary denial
-// (403/401) tells an honest caller its credential is bad. Both routes must answer the
-// same 503 shape the token endpoint answers, and only for a store error — a replay keeps
-// its denial. Neither request survives (the Hub has no retry and reports a non-2xx here
-// as a failed forward); what 503 fixes is the CAUSE the sender records. Each row also pins the store-error
-// metric: an outage is only visible to an operator if every refusing path counts it.
-func TestReplayStoreOutage_InboundAndPatientAccessAnswer503(t *testing.T) {
-	authzPub, authzPriv, _ := ed25519.GenerateKey(rand.Reader)
+// database failover every in-flight Hub-authenticated delivery reaches the one-time-use
+// record as an error; answering the ordinary denial (403) tells an honest caller its
+// credential is bad. The route must answer the same 503 shape the token endpoint
+// answers, and only for a store error — a replay keeps its denial. The request does not
+// survive (the Hub has no retry and reports a non-2xx here as a failed forward); what
+// 503 fixes is the CAUSE the sender records. The row also pins the store-error metric:
+// an outage is only visible to an operator if every refusing path counts it.
+func TestReplayStoreOutage_InboundAnswers503(t *testing.T) {
+	authzPub, _, _ := ed25519.GenerateKey(rand.Reader)
 	hubPub, hubPriv, _ := ed25519.GenerateKey(rand.Reader)
 	clock := func() time.Time { return time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC) }
 	id, err := shnsdk.GenerateIdentity("payer")
@@ -254,65 +196,6 @@ func TestReplayStoreOutage_InboundAndPatientAccessAnswer503(t *testing.T) {
 		}
 	})
 
-	t.Run("patient-access read", func(t *testing.T) {
-		// An Audit Plane that accepts the append, and one EOB for the subject: the
-		// healthy row must reach a real 200, so the 503 below is the record and not a
-		// half-wired fixture.
-		audit := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			_, _ = w.Write([]byte(`{"ok":true}`))
-		}))
-		t.Cleanup(audit.Close)
-		withEOB := func(c *Config) {
-			c.AuditURL = audit.URL
-			c.Client = audit.Client()
-			if err := c.Store.RecordEOB("p-1", "eob-1", []byte(`{"resourceType":"ExplanationOfBenefit","id":"eob-1"}`)); err != nil {
-				t.Fatal(err)
-			}
-		}
-		corr := 0
-		req := func() *http.Request {
-			corr++
-			tok := signTestToken(shnsdk.Token{
-				Operation: "patient-access-read", Scope: "patient-access-only", Subject: "p-1",
-				Frame: "patient-access", Holder: "phg", CorrelationID: fmt.Sprintf("corr-%d", corr),
-				Expiry: clock().Add(time.Hour),
-			}, authzPriv)
-			raw, _ := json.Marshal(tok)
-			r := httptest.NewRequest(http.MethodGet, "/ExplanationOfBenefit?patient=p-1", nil)
-			r.Header.Set("Authorization", "Bearer "+base64.StdEncoding.EncodeToString(raw))
-			return r
-		}
-		rec, stores := serve(t, &stubReplayStore{err: errors.New("store down")}, req(), withEOB)
-		if rec.Code != http.StatusServiceUnavailable {
-			t.Fatalf("store outage = %d, want 503 (a database outage must not read as a bad token); body=%s", rec.Code, rec.Body.String())
-		}
-		if !strings.Contains(rec.Body.String(), "one-time-use record unavailable") {
-			t.Fatalf("body = %s, want the one-time-use record named", rec.Body.String())
-		}
-		if rec.Header().Get("Cache-Control") != "no-store" {
-			t.Fatalf("Cache-Control = %q, want no-store", rec.Header().Get("Cache-Control"))
-		}
-		if strings.Contains(rec.Body.String(), "ExplanationOfBenefit") {
-			t.Fatalf("the refusal disclosed EOB content: %s", rec.Body.String())
-		}
-		if len(stores) != 1 || stores[0] != storeErrReplay {
-			t.Fatalf("store-error metric calls = %v, want exactly [%s]", stores, storeErrReplay)
-		}
-		rec, stores = serve(t, &stubReplayStore{replay: true}, req(), withEOB)
-		if rec.Code != http.StatusUnauthorized {
-			t.Fatalf("replayed correlation = %d, want 401", rec.Code)
-		}
-		if len(stores) != 0 {
-			t.Fatalf("a replay is not a store error, but the metric fired %v", stores)
-		}
-		rec, stores = serve(t, NewInMemoryReplayStore(), req(), withEOB)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("healthy record = %d, want 200; body=%s", rec.Code, rec.Body.String())
-		}
-		if len(stores) != 0 {
-			t.Fatalf("healthy record fired the store-error metric %v", stores)
-		}
-	})
 }
 
 // countingReplayStore records every key it is asked about, so a row can prove a caller
@@ -328,7 +211,7 @@ func (c *countingReplayStore) CheckAndRecord(scope, clientID, key string, now, e
 }
 
 // TestReplayKeyLengthBound_RefusedByEveryCallerBeforeTheStore: the one-time-use key is
-// caller-supplied (a jti, a correlationId) and is part of the durable record's primary
+// caller-supplied (a jti) and is part of the durable record's primary
 // key, so a multi-kilobyte value overflows the btree index row on a HEALTHY database —
 // which the store reports as a failure and the route answers as a 503 with a counted
 // store error. An oversized credential field must instead be refused as what it is: a bad
@@ -337,7 +220,7 @@ func (c *countingReplayStore) CheckAndRecord(scope, clientID, key string, now, e
 // One row per caller, driven through the real handlers, plus the in-memory store's own
 // refusal (its Postgres twin is TestReplayPg's parity table).
 func TestReplayKeyLengthBound_RefusedByEveryCallerBeforeTheStore(t *testing.T) {
-	authzPub, authzPriv, _ := ed25519.GenerateKey(rand.Reader)
+	authzPub, _, _ := ed25519.GenerateKey(rand.Reader)
 	hubPub, hubPriv, _ := ed25519.GenerateKey(rand.Reader)
 	clock := func() time.Time { return time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC) }
 	id, err := shnsdk.GenerateIdentity("payer")
@@ -380,27 +263,6 @@ func TestReplayKeyLengthBound_RefusedByEveryCallerBeforeTheStore(t *testing.T) {
 		}
 		if len(stores) != 0 {
 			t.Fatalf("an oversized jti counted a store error %v — it is a bad credential, not an outage", stores)
-		}
-	})
-
-	t.Run("patient access read", func(t *testing.T) {
-		tok := signTestToken(shnsdk.Token{
-			Operation: "patient-access-read", Scope: "patient-access-only", Subject: "p-1",
-			Frame: "patient-access", Holder: "phg", CorrelationID: oversized,
-			Expiry: clock().Add(time.Hour),
-		}, authzPriv)
-		raw, _ := json.Marshal(tok)
-		r := httptest.NewRequest(http.MethodGet, "/ExplanationOfBenefit", nil)
-		r.Header.Set("Authorization", "Bearer "+base64.StdEncoding.EncodeToString(raw))
-		w, rec, stores := serve(t, r)
-		if w.Code != http.StatusUnauthorized {
-			t.Fatalf("oversized correlationId = %d, want 401 (the ordinary denial); body=%s", w.Code, w.Body.String())
-		}
-		if len(rec.keys) != 0 {
-			t.Fatalf("the one-time-use record was consulted with %d oversized keys, want 0", len(rec.keys))
-		}
-		if len(stores) != 0 {
-			t.Fatalf("an oversized correlationId counted a store error %v", stores)
 		}
 	})
 

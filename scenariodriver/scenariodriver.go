@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -19,8 +18,11 @@ import (
 )
 
 // Config wires a Driver to a running SHN Kit deployment: the Da Vinci ingress it
-// authenticates against (UDAP B2B direct bearer), plus the unauthenticated
-// gateway-edge surfaces (provider-data origination, patient surface).
+// authenticates against (UDAP B2B direct bearer), plus the gateway-edge
+// surfaces that take no bearer (provider-data origination, patient surface).
+// A provider gateway that names its /scenario callers authenticates each
+// request to those routes: give HTTP a scenarioauth.Client for an admitted
+// caller.
 type Config struct {
 	IngressURL      string          // host-published Da Vinci ingress, e.g. http://localhost:8091
 	IngressBase     string          // config-pinned IngressBaseURL — every minted aud must be under it
@@ -35,7 +37,7 @@ type Config struct {
 	// RunProviderDataScenario instead. ConsoleURL is removed in v1.0.0.
 	ConsoleURL string
 	PHGURL     string           // patient surface base (optional)
-	HTTP       *http.Client     // nil → http.DefaultClient
+	HTTP       *http.Client     // nil → http.DefaultClient (signs nothing)
 	Now        func() time.Time // nil → time.Now (bearer iat/exp + jti)
 }
 
@@ -116,9 +118,9 @@ func (d *Driver) postBearer(path string, body []byte) (HTTPResult, error) {
 	return HTTPResult{Status: resp.StatusCode, Body: respBody}, nil
 }
 
-// postJSON is the bare unauthenticated POST used by the provider-data/console
-// scenario routes (they are internal, un-auth'd surfaces — the same way the ops
-// console addresses any provider gateway).
+// postJSON is the bearer-less POST used by the provider gateway's provider-data
+// and scenario routes. It signs nothing itself; a scenarioauth.Client in
+// Config.HTTP signs its /scenario requests under the caller's label.
 func (d *Driver) postJSON(base, path, jsonBody string) (HTTPResult, error) {
 	req, err := http.NewRequest(http.MethodPost, base+path, strings.NewReader(jsonBody))
 	if err != nil {
@@ -193,14 +195,15 @@ type PASOutcome struct {
 // a holder BFF would after relaying the ingress's response — a bare ClaimResponse
 // is parsed for the approved outcome + preAuthRef, a Bundle for the pended shape.
 // Parse errors are swallowed here: the fields stay zero and the caller asserts on
-// Status/Body directly when the shape is unexpected.
+// Status/Body directly when the shape is unexpected. Any 2xx is the payer's
+// answer: the gateway writes it with the status the payer gave.
 func (d *Driver) SubmitPAS(bundle []byte) (PASOutcome, error) {
 	res, err := d.postBearer("/Claim/$submit", bundle)
 	if err != nil {
 		return PASOutcome{}, err
 	}
 	out := PASOutcome{Status: res.Status, Body: res.Body}
-	if res.Status == http.StatusOK {
+	if res.Status/100 == 2 {
 		if pr, err := shnsdk.ParseClaimResponse(res.Body); err == nil {
 			out.Approved = pr.Outcome == "approved"
 			out.PreAuthRef = pr.PreAuthRef
@@ -220,6 +223,14 @@ func (d *Driver) InquirePAS(bundle []byte) (HTTPResult, error) {
 	return d.postBearer("/Claim/$inquire", bundle)
 }
 
+// SendFederatedQuery POSTs a CDex data-request Task to the provider ingress's
+// POST /Task, as a participant's own system sends a consented federated query,
+// and returns the gateway's answer: the facility's fulfilled Task, or a
+// refusal.
+func (d *Driver) SendFederatedQuery(task []byte) (HTTPResult, error) {
+	return d.postBearer("/Task", task)
+}
+
 // ScenarioWaitSeconds is the patience this driver states when it runs a scenario.
 //
 // An originator route waits for NOTHING unless its caller says otherwise: a
@@ -234,7 +245,8 @@ func (d *Driver) InquirePAS(bundle []byte) (HTTPResult, error) {
 const ScenarioWaitSeconds = 30
 
 // RunProviderDataScenario POSTs to a provider-data origination gateway's /scenario/*
-// route (an internal, un-auth'd surface — no direct bearer involved).
+// route. No direct bearer is involved; a gateway that names its /scenario
+// callers admits only a request Config.HTTP signs under one of their labels.
 //
 // It states this driver's wait (ScenarioWaitSeconds) unless the caller's path
 // already states one of its own — a row that wants the payer's first answer
@@ -264,8 +276,8 @@ func withScenarioWait(path string) string {
 //
 // It states no wait of its own: the body says how long this caller is willing to
 // keep asking, because that is the caller's to state and nobody else's. The route
-// is on the same internal, un-auth'd /scenario/* surface as the origination
-// routes, so no bearer is involved.
+// is on the same /scenario/* surface as the origination routes: no bearer is
+// involved, and the same caller authentication applies.
 func (d *Driver) ContinuePA(jsonBody string) (HTTPResult, error) {
 	return d.postJSON(d.cfg.ProviderDataURL, "/scenario/pa/inquire", jsonBody)
 }
@@ -277,18 +289,6 @@ func (d *Driver) ContinuePA(jsonBody string) (HTTPResult, error) {
 // RunConsoleScenario is removed in v1.0.0.
 func (d *Driver) RunConsoleScenario(jsonBody string) (HTTPResult, error) {
 	return d.postJSON(d.cfg.ConsoleURL, "/api/run", jsonBody)
-}
-
-// AuthorizationView is one row of the patient-surface /authorizations render.
-// Status is "approved" | "denied" — a pended/failed authorization renders as
-// not-approved with Error set describing why, never a literal "pended" status.
-type AuthorizationView struct {
-	// EOBId is the decision ExplanationOfBenefit's id, which a payer gateway
-	// names after the authorization's correlation ("eob-<correlation>").
-	EOBId  string `json:"eobId"`
-	Status string `json:"status"`
-	Title  string `json:"title"`
-	Error  string `json:"error"`
 }
 
 // ResolvePersonaPCI resolves a persona's live PCI off the patient-surface
@@ -324,23 +324,4 @@ func (d *Driver) ResolvePersonaPCI(substrs ...string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("scenariodriver: no persona label contains all of %v in %s/personas: %s", substrs, d.cfg.PHGURL, body)
-}
-
-// GetAuthorizations reads the patient-surface Patient-Access render for a PCI.
-func (d *Driver) GetAuthorizations(pci string) ([]AuthorizationView, error) {
-	q := url.Values{"pci": []string{pci}}
-	resp, err := d.cfg.HTTP.Get(d.cfg.PHGURL + "/authorizations?" + q.Encode())
-	if err != nil {
-		return nil, fmt.Errorf("scenariodriver: GET %s/authorizations?pci=%s: %w", d.cfg.PHGURL, pci, err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("scenariodriver: read /authorizations body: %w", err)
-	}
-	var views []AuthorizationView
-	if err := json.Unmarshal(body, &views); err != nil {
-		return nil, fmt.Errorf("scenariodriver: decode /authorizations: %w body=%s", err, body)
-	}
-	return views, nil
 }

@@ -254,6 +254,12 @@ func TestAuthzUnreachable_FHIROperationRoutes(t *testing.T) {
 		{RoutePASInquire, func(t *testing.T) *http.Request {
 			return httptest.NewRequest(http.MethodPost, "/Claim/$inquire", strings.NewReader(levelInquiry(t, "MBR-COVERED", "")))
 		}, false},
+		{RouteEligibility, func(t *testing.T) *http.Request {
+			return eligibilityIngressPost(eligibilityRequest(t, "MBR-COVERED"))
+		}, false},
+		{RouteFederatedQuery, func(t *testing.T) *http.Request {
+			return fqIngressPost(fqTask(t, "MBR-UC05", "facility"))
+		}, false},
 		{RouteDTR, func(t *testing.T) *http.Request {
 			req := httptest.NewRequest(http.MethodPost, "/Questionnaire/$questionnaire-package", bytes.NewReader(dtrFixture(t, "dtr-package-params-2.0.json")))
 			req.Header.Set("Content-Type", "application/fhir+json")
@@ -265,6 +271,9 @@ func TestAuthzUnreachable_FHIROperationRoutes(t *testing.T) {
 			if row.sor {
 				env.originator.cfg.SoR = newPrefetchSoR().sor()
 				declareFramedDTR(t, env, true)
+			}
+			if row.route == RouteFederatedQuery { // its Task names a facility
+				env = newFQExchange(t, EnforcementObserve)
 			}
 			var got exchangeRecords
 			env.originator.cfg.ExchangeObserved = got.observe

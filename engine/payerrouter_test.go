@@ -9,7 +9,7 @@ import (
 )
 
 // payerRouterFor builds the one-entry test payer router (CMSPayerIdentity → holderID), matching the
-// single mapping the devstack/harness/compose provider directories carry (FR-G40; no default).
+// single mapping the harness/compose provider directories carry (FR-G40; no default).
 func payerRouterFor(t *testing.T, holderID string) PayerRouter {
 	t.Helper()
 	r, err := NewConfigPayerRouter([]PayerDirectoryEntry{

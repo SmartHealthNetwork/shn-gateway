@@ -4,10 +4,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -214,23 +220,103 @@ func TestNativeForwardVersionFilter(t *testing.T) {
 // nativeResponder has no Observer seam and Handle never references
 // the transform machinery at all — grepped here, not merely inferred from the
 // byte-identical-forward assertion, which would hold even if a call existed
-// but happened to be a no-op for THIS fixture's inputs. If native.go ever
-// grows an egressAdapt call (the transform-at-the-forward-edge deferral going
+// but happened to be a no-op for THIS fixture's inputs. If the native
+// responder or a forward it sends through ever grows an egressAdapt call (the
+// transform-at-the-forward-edge deferral going
 // live — the strictExtensions flag goes live together with it), this guard
 // fails LOUDLY and both this test and TestNativeForwardStaysArm1 need a
 // deliberate update, not a silent pass.
 func TestNativeForward_NeverCallsEgressAdapt(t *testing.T) {
-	src, err := os.ReadFile("native.go")
-	if err != nil {
-		t.Fatalf("read source: %v", err)
-	}
-	for _, forbidden := range []string{"egressAdapt", "legTransformedKind", "transformedObserverEvent"} {
-		if strings.Contains(string(src), forbidden) {
-			t.Fatalf("native.go now references %q — the native-forward arm-1-only pin appears to "+
-				"have been widened; this is only safe as the deliberate transform-at-the-forward-edge deferral "+
-				"going live (update this guard + TestNativeForwardStaysArm1 together), never an accidental slip", forbidden)
+	forbidden := []string{"egressAdapt", "legTransformedKind", "transformedObserverEvent"}
+	// The native responder's own files and the files the PA forwards moved to
+	// from native.go are read whole, as native.go was before they left it.
+	for _, name := range []string{"native.go", "native_conformance.go", "workstream_pa_forward.go", "workstream_pa_crd_forward.go", "workstream_pa_native_forward.go"} {
+		src, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read source: %v", err)
+		}
+		for _, f := range forbidden {
+			if strings.Contains(string(src), f) {
+				t.Fatalf("%s now references %q — the native-forward arm-1-only pin appears to "+
+					"have been widened; this is only safe as the deliberate transform-at-the-forward-edge deferral "+
+					"going live (update this guard + TestNativeForwardStaysArm1 together), never an accidental slip", name, f)
+			}
 		}
 	}
+	// The forwards that live in other files (the PAS and inquiry forwards) are
+	// read wherever they are declared, and every one must be found, so the
+	// check never passes over a forward it did not see.
+	found, faults := nativeForwardBodiesReference(t, forbidden)
+	if missing := slices.DeleteFunc(slices.Clone(nativeForwardFuncs), func(n string) bool { return found[n] }); len(missing) > 0 {
+		t.Fatalf("no declaration of the native forwards %v in this package: name the forwards the native responder runs now", missing)
+	}
+	for _, f := range faults {
+		t.Error(f)
+	}
+}
+
+// nativeForwardFuncs are the functions the native responder sends a leg
+// through after Handle's version rule: the PA adapter's forwards and what they
+// post with.
+var nativeForwardFuncs = []string{
+	"nativeResponder.Handle", "nativeResponder.post", "paWorkstream.forward",
+	"forwardDTRQuestionnaireFetch", "nativeResponder.forwardCRD", "nativeResponder.forwardDTROperation",
+	"nativeResponder.forwardEligibility", "nativeResponder.handlePASClaimNative",
+	"nativeResponder.handlePASClaimUpdateNative", "nativeResponder.handlePASInquireNative",
+}
+
+// nativeForwardBodiesReference reads every non-test file of this package and
+// reports which nativeForwardFuncs it declares and which of their bodies name a
+// forbidden identifier.
+func nativeForwardBodiesReference(t *testing.T, forbidden []string) (map[string]bool, []string) {
+	t.Helper()
+	want := map[string]bool{}
+	for _, n := range nativeForwardFuncs {
+		want[n] = true
+	}
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := map[string]bool{}
+	var faults []string
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, name, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, d := range f.Decls {
+			fn, ok := d.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			key := fn.Name.Name
+			if fn.Recv != nil && len(fn.Recv.List) == 1 {
+				rt := fn.Recv.List[0].Type
+				if s, ok := rt.(*ast.StarExpr); ok {
+					rt = s.X
+				}
+				if id, ok := rt.(*ast.Ident); ok {
+					key = id.Name + "." + key
+				}
+			}
+			if !want[key] {
+				continue
+			}
+			found[key] = true
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				if id, ok := n.(*ast.Ident); ok && slices.Contains(forbidden, id.Name) {
+					faults = append(faults, fmt.Sprintf("%s: %s names %s: the native forward stays arm 1 only (TestNativeForwardStaysArm1)", fset.Position(id.Pos()), key, id.Name))
+				}
+				return true
+			})
+		}
+	}
+	return found, faults
 }
 
 // TestNativeForwardStaysArm1 pins the native-forward row of the caller×arm

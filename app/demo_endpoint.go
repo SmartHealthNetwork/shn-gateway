@@ -97,7 +97,7 @@ var exchangeIdentityForDemo = engine.ExchangeIdentity{CorrelationID: "demo"}
 
 func handleDemoTransform(w http.ResponseWriter, r *http.Request) {
 	// Bounded exactly like every other inbound handler in this codebase
-	// (gateway/engine/observer.go's observeIngress, ingress.go, inbound.go,
+	// (gateway/engine/observer.go's observeIngress, workstream_pa_ingress.go, inbound.go,
 	// sdk/responder.go — shnsdk.MaxRequestBytes, 8 MiB): SHN Kit proxies
 	// partner-facing traffic to this endpoint, so an unbounded Decode would be
 	// a memory-exhaustion vector fed by attacker-controlled bytes.

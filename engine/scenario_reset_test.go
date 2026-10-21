@@ -48,13 +48,13 @@ func TestScenarioResetRoute(t *testing.T) {
 func TestScenarioReset_PayerRefusalPreservesState(t *testing.T) {
 	fake := &fakeExchangeStore{mem: NewInMemoryExchangeStore(time.Hour, time.Now)}
 	g := &Gateway{cfg: Config{Role: "payer", PayerDavinciNative: true}, exchanges: fake}
-	g.pending = map[string]pendState{"tok": {scenario: "uc06"}}
+	g.pending.byToken = map[string]pendState{"tok": {scenario: "uc06"}}
 	rec := httptest.NewRecorder()
 	g.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/scenario/reset", nil))
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("payer reset: got %d, want 404", rec.Code)
 	}
-	if fake.resets != 0 || len(g.pending) != 1 {
+	if fake.resets != 0 || len(g.pending.byToken) != 1 {
 		t.Fatal("refused payer reset changed state")
 	}
 }
@@ -75,11 +75,11 @@ func TestGatewayReset_StoreFailureIs503AndCounted(t *testing.T) {
 		cfg:       Config{Role: "provider", StoreErrorMetric: func(s string) { stores = append(stores, s) }},
 		exchanges: fake,
 	}
-	g.pending = map[string]pendState{"tok": {scenario: "uc06"}}
+	g.pending.byToken = map[string]pendState{"tok": {scenario: "uc06"}}
 	if err := g.Reset(); err == nil {
 		t.Fatal("Reset must return the store's error, not log it and report success")
 	}
-	if len(g.pending) != 0 {
+	if len(g.pending.byToken) != 0 {
 		t.Fatal("the pending map must still be cleared when the store half fails")
 	}
 	if len(stores) != 1 || stores[0] != storeErrExchange {
@@ -97,7 +97,7 @@ func TestGatewayReset_StoreFailureIs503AndCounted(t *testing.T) {
 	if len(stores) != 2 {
 		t.Fatalf("StoreErrorMetric calls after the route = %d, want 2 (one per Reset)", len(stores))
 	}
-	// A healthy store answers 200 {"ok":true} — the shape the console has always read.
+	// A healthy store answers 200 {"ok":true} — the shape the reset caller (tools/cloudsmoke) reads.
 	fake.failReset = nil
 	rec = httptest.NewRecorder()
 	g.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/scenario/reset", nil))

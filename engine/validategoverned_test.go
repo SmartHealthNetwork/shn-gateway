@@ -495,19 +495,23 @@ func TestValidateGovernedAtNoneMakesNoCall(t *testing.T) {
 	}
 }
 
-// SHN's own bridged edit is checked and refused at none too.
+// SHN's own bridged edit is checked and refused at every level, none included:
+// it is decided by module 2's bridgedDecision, never by the level, and never
+// queued to the observe worker.
 func TestValidateGovernedBridgedRunsAtNone(t *testing.T) {
-	v := &countingValidator{}
-	g, _, _ := findingGateway(t, v)
-	g.cfg.ConformanceEnforcement = EnforcementNone
-	if gr := g.validateGoverned(context.Background(), findingContext{LegType: "pas-claim"}, v, []byte(`{}`), "egress", "2.1", "", true); gr.Status != http.StatusUnprocessableEntity {
-		t.Fatalf("a bridged payload must be refused at none, got %+v", gr)
-	}
-	if v.calls != 1 {
-		t.Fatalf("a bridged payload must be validated at none, got %d calls", v.calls)
-	}
-	if gr := g.validateGoverned(context.Background(), findingContext{LegType: "pas-claim"}, nil, []byte(`{}`), "egress", "2.1", "", true); gr.Status != http.StatusInternalServerError || !gr.NoLane {
-		t.Fatalf("a bridged payload with no lane must be refused at none, got %+v", gr)
+	for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve, EnforcementStructural, EnforcementStrict} {
+		v := &countingValidator{}
+		g, _, _ := findingGateway(t, v)
+		g.cfg.ConformanceEnforcement = level
+		if gr := g.validateGoverned(context.Background(), findingContext{LegType: "pas-claim"}, v, []byte(`{}`), "egress", "2.1", "", true); gr.Status != http.StatusUnprocessableEntity {
+			t.Fatalf("a bridged payload must be refused at %s, got %+v", level, gr)
+		}
+		if v.calls != 1 {
+			t.Fatalf("a bridged payload must be validated at %s on the request path, got %d calls", level, v.calls)
+		}
+		if gr := g.validateGoverned(context.Background(), findingContext{LegType: "pas-claim"}, nil, []byte(`{}`), "egress", "2.1", "", true); gr.Status != http.StatusInternalServerError || !gr.NoLane {
+			t.Fatalf("a bridged payload with no lane must be refused at %s, got %+v", level, gr)
+		}
 	}
 }
 
@@ -522,7 +526,7 @@ func TestValidateGovernedBridgedRunsAtNone(t *testing.T) {
 // configured-versus-observed disagreement badge, and the compensating control
 // for hosted tenants the invariant cannot see, both rest on finding.Level
 // being the RUNNING gateway's real level, not a constant. Whose is second: the
-// operator console's Whose column must never label SHN's own bridged edit
+// cloud console's Whose column must never label SHN's own bridged edit
 // (prime directive 3) as the peer's data.
 //
 // Case 1 pins an ordinary (unbridged) strict-level finding's full field set,
@@ -531,7 +535,7 @@ func TestValidateGovernedBridgedRunsAtNone(t *testing.T) {
 // test happens to run at. Case 2 pins a bridged finding's full field set at
 // EnforcementNone specifically: it proves (a) Level still reads the true
 // running level ("none", not hardwired) and (b) Whose reads "network"
-// because kindForDirection/the bridged override fired, not because the
+// because judgeLines' bridged arm fired, not because the
 // level forced a refusal — a bridged check refuses at every level, so this
 // case is never able to piggyback strict's own refusal behaviour to look
 // right by accident.
@@ -557,9 +561,8 @@ func TestValidateGovernedFindingPinsFullFieldSet(t *testing.T) {
 		},
 		{
 			name: "none, bridged check", level: EnforcementNone, bridged: true,
-			// dir/line/profile mirror validateFHIREgressOrBridged's own call shape
-			// (gateway.go:1445-1448): every real bridged check is "egress" with no
-			// profile.
+			// dir/line/profile mirror Certify's call from egressBuild: a walked
+			// request's bridged check is "egress" with no profile.
 			dir: "egress", line: "2.1", profile: "",
 			wantKind: "fhir-bridged", wantWhose: "network",
 		},

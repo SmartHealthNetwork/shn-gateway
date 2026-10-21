@@ -49,7 +49,7 @@ func TestOriginationCodes_Demo(t *testing.T) {
 	// R3: uc07hcpcs DECOUPLES from uc03 — they used to be pinned equal (a happenstance of
 	// the retired stub's L8000 reuse), but uc03 now rides a different family/hook shape
 	// (order-DISPATCH E1390) while uc07hcpcs keeps its OWN order-SELECT L8000 exhibit
-	// (the L8000 approve + Patient Access read-back proof) unchanged. Asserting they now
+	// (the L8000 approve proof) unchanged. Asserting they now
 	// DIFFER, not match, is the row this decoupling replaces.
 	if d.uc07hcpcs == d.uc03 {
 		t.Fatalf("demo uc07hcpcs must NOT equal uc03's tuple any more (R3 decouples them): uc07hcpcs=%+v uc03=%+v", d.uc07hcpcs, d.uc03)

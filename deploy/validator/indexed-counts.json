@@ -1,8 +1,8 @@
 {
   "comment": "Generated from the network's IG manifest; do not edit. Per line, the number of StructureDefinitions the engine's package cache indexes at boot with the declared composition. verify.sh counts the booted lane's 'Indexing StructureDefinition' log lines and fails on any other number: a composition change re-measures and re-declares, never re-spends the cold budget silently.",
   "lines": {
-    "2.0": 311,
-    "2.1": 329,
-    "2.2": 1067
+    "2.0": 274,
+    "2.1": 292,
+    "2.2": 1030
   }
 }

@@ -3,7 +3,6 @@ package engine
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,30 +13,8 @@ import (
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
-// fixedClock is the deterministic clock the native-PAS tests inject for the
-// gateway-projected EOB `created`.
+// fixedClock is the deterministic clock the native-PAS tests inject.
 var fixedClock = func() time.Time { return time.Unix(1700000000, 0).UTC() }
-
-// eobProcedureSystemBytes returns item[0].productOrService.coding[0].system of an EOB JSON.
-func eobProcedureSystemBytes(t *testing.T, eobJSON []byte) string {
-	t.Helper()
-	var eob struct {
-		Item []struct {
-			ProductOrService struct {
-				Coding []struct {
-					System string `json:"system"`
-				} `json:"coding"`
-			} `json:"productOrService"`
-		} `json:"item"`
-	}
-	if err := json.Unmarshal(eobJSON, &eob); err != nil {
-		t.Fatalf("unmarshal EOB: %v", err)
-	}
-	if len(eob.Item) == 0 || len(eob.Item[0].ProductOrService.Coding) == 0 {
-		t.Fatalf("EOB has no productOrService coding: %s", eobJSON)
-	}
-	return eob.Item[0].ProductOrService.Coding[0].System
-}
 
 // stubPartnerSrv is a partner $submit endpoint returning a fixed status + body.
 // (Named distinctly from the native_test.go stubPartner struct, same package.)
@@ -52,46 +29,59 @@ func stubPartnerSrv(t *testing.T, code int, body []byte) *httptest.Server {
 	return srv
 }
 
-// TestNativeSubmit_ConformantRecordsEOB: the conformant PAS submit leg's native-forward
-// (handlePASClaimNative) relays the partner's decision verbatim AND projects the Store side-effects —
-// on approval the PDex EOB single-sourced from the decision (AuthNumber = the partner's preAuthRef,
-// CPT from the conformant Claim's ServiceRequest = F2 72148, patientRef = the BOUND member per R-7),
-// on a pend the RecordPendedClaim ledger write. This re-points the earlier pure-relay assertion now
-// that the conformant submit carries the EOB/ledger (the minimized leg's side-effects, relocated).
-// Mirrors TestNativePAS_Submit for the conformant
-// shape (read by parseConformantPASSubjects, not the strict ParseClaimBundle).
-func TestNativeSubmit_ConformantRecordsEOB(t *testing.T) {
+// TestNativeSubmit_ConformantRecordsTheDecision: the conformant PAS submit leg's native-forward
+// (handlePASClaimNative) relays the partner's answer verbatim AND records the pend-ledger write
+// derived from it — on a decision the decision itself, on a pend the RecordPendedClaim write —
+// whatever system the order is coded in. Nothing is built from the decision. Mirrors
+// TestNativePAS_Submit for the conformant shape (read by parseConformantPASSubjects, not the
+// strict ParseClaimBundle).
+func TestNativeSubmit_ConformantRecordsTheDecision(t *testing.T) {
 	conformant := originatorBuiltConformantBundle(t, "MBR-COVERED") // CPT 72148, binds to MBR-COVERED
+	claim := func(system, code string) string {
+		return `{"resourceType":"Claim","use":"preauthorization","patient":{"reference":"Patient/MBR-COVERED"},` +
+			`"item":[{"sequence":1,"productOrService":{"coding":[{"system":"` + system + `","code":"` + code + `"}]}}]}`
+	}
+	order := func(system, code, display string) []byte {
+		return []byte(`{"resourceType":"Bundle","type":"collection","entry":[
+			{"resource":` + claim(system, code) + `},
+			{"resource":{"resourceType":"ServiceRequest","subject":{"reference":"Patient/MBR-COVERED"},"code":{"coding":[{"system":"` + system + `","code":"` + code + `","display":"` + display + `"}]}}},
+			{"resource":{"resourceType":"Coverage","beneficiary":{"reference":"Patient/MBR-COVERED"}}},
+			{"resource":{"resourceType":"QuestionnaireResponse","subject":{"reference":"Patient/MBR-COVERED"}}}
+		]}`)
+	}
+	approved := fixturePASResponse(t, []byte(`{"resourceType":"ClaimResponse","outcome":"complete","preAuthRef":"PARTNER-REF-CONF","preAuthPeriod":{"end":"2030-01-01"}}`), true)
+	for _, tc := range []struct {
+		name    string
+		request []byte
+	}{
+		{"CPT order", conformant},
+		{"HCPCS-coded order", order("http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets", "E0424", "Stationary Oxygen System")},
+		{"order in an unrecognized system", order("http://snomed.info/sct", "12345", "x")},
+	} {
+		t.Run("approved, "+tc.name+": verbatim + decision recorded", func(t *testing.T) {
+			srv := stubPartnerSrv(t, http.StatusOK, approved)
+			store := newCensusSoR()
+			n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", store, fixedClock)
+			res, err := n.Handle(context.Background(), "pas-claim", "corr-conf", "PCI-1", tc.request)
+			if err != nil || res.Status != 0 {
+				t.Fatalf("approved conformant submit: err=%v status=%d msg=%s", err, res.Status, res.Message)
+			}
+			if !bytes.Equal(responseBytes(res), approved) {
+				t.Fatalf("Response not forwarded verbatim")
+			}
+			if res.Commit == nil {
+				t.Fatal("the payer's decision must be recorded")
+			}
+			if err := res.Commit(); err != nil {
+				t.Fatalf("commit: %v", err)
+			}
+			if rec := ledgerState(t, store, "PCI-1", "corr-conf"); rec.State != PendStateDecided || rec.Outcome != PendOutcomeApproved {
+				t.Fatalf("ledger = %q/%q, want decided/approved", rec.State, rec.Outcome)
+			}
+		})
+	}
 
-	t.Run("approved: verbatim + EOB carries partner preAuthRef and claim CPT", func(t *testing.T) {
-		const partnerRef = "PARTNER-REF-CONF"
-		body := []byte(`{"resourceType":"ClaimResponse","outcome":"complete","preAuthRef":"` + partnerRef + `","preAuthPeriod":{"end":"2030-01-01"}}`)
-		body = fixturePASResponse(t, body, true)
-		srv := stubPartnerSrv(t, http.StatusOK, body)
-		store := newCensusSoR()
-		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", store, fixedClock)
-		res, err := n.Handle(context.Background(), "pas-claim", "corr-conf", "PCI-1", conformant)
-		if err != nil || res.Status != 0 {
-			t.Fatalf("approved conformant submit: err=%v status=%d msg=%s", err, res.Status, res.Message)
-		}
-		if !bytes.Equal(responseBytes(res), body) {
-			t.Fatalf("Response not forwarded verbatim")
-		}
-		if len(res.SideEffectFHIR) != 1 {
-			t.Fatalf("want 1 EOB side-effect, got %d", len(res.SideEffectFHIR))
-		}
-		if !bytes.Contains(res.SideEffectFHIR[0], []byte(partnerRef)) {
-			t.Fatalf("EOB AuthNumber is not the partner preAuthRef (provenance):\n%s", res.SideEffectFHIR[0])
-		}
-		if !bytes.Contains(res.SideEffectFHIR[0], []byte("72148")) {
-			t.Fatalf("EOB CPT not sourced from the conformant Claim's ServiceRequest (provenance, F2)")
-		}
-		if res.Commit == nil {
-			t.Fatalf("approved must carry a RecordEOB Commit")
-		}
-	})
-
-	t.Run("pended: verbatim Bundle + RecordPendedClaim, no EOB", func(t *testing.T) {
+	t.Run("pended: verbatim Bundle + RecordPendedClaim", func(t *testing.T) {
 		body := []byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"ClaimResponse","outcome":"queued"}},{"resource":{"resourceType":"Task","status":"requested"}}]}`)
 		body = fixturePASResponse(t, body, true)
 		srv := stubPartnerSrv(t, http.StatusOK, body)
@@ -103,72 +93,8 @@ func TestNativeSubmit_ConformantRecordsEOB(t *testing.T) {
 		if !bytes.Equal(responseBytes(res), body) {
 			t.Fatalf("pended Bundle not forwarded verbatim")
 		}
-		if res.Commit == nil || len(res.SideEffectFHIR) != 0 {
-			t.Fatalf("pended must RecordPendedClaim and emit NO EOB")
-		}
-	})
-
-	t.Run("HCPCS-coded ServiceRequest (http): forwards AND builds an EOB with the HCPCS system (DEF-14)", func(t *testing.T) {
-		// DEF-14: a real partner codes the order in HCPCS Level II (E0424 home-oxygen, L8000).
-		// The pinned systemHCPCS is http:// (the br-provider wire value) — note this fixture is
-		// normalized from the prior https:// (a behavior-update, not s/https/http/). The EOB is now
-		// built and carries coding.system == HCPCS (no longer the "soft" no-EOB).
-		hcpcs := []byte(`{"resourceType":"Bundle","type":"collection","entry":[
-			{"resource":` + eobSourceClaim("MBR-COVERED", "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets", "E0424") + `},
-			{"resource":{"resourceType":"ServiceRequest","subject":{"reference":"Patient/MBR-COVERED"},"code":{"coding":[{"system":"http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets","code":"E0424","display":"Stationary Oxygen System"}]}}},
-			{"resource":{"resourceType":"Coverage","beneficiary":{"reference":"Patient/MBR-COVERED"}}},
-			{"resource":{"resourceType":"QuestionnaireResponse","subject":{"reference":"Patient/MBR-COVERED"}}}
-		]}`)
-		body := []byte(`{"resourceType":"ClaimResponse","outcome":"complete","preAuthRef":"P-HCPCS"}`)
-		body = fixturePASResponse(t, body, true)
-		srv := stubPartnerSrv(t, http.StatusOK, body)
-		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", newCensusSoR(), fixedClock)
-		res, err := n.Handle(context.Background(), "pas-claim", "corr-hcpcs", "PCI-1", hcpcs)
-		if err != nil {
-			t.Fatalf("HCPCS conformant submit: unexpected error: %v", err)
-		}
-		if res.Status != 0 {
-			t.Fatalf("HCPCS submit must FORWARD (status 0), got %d msg=%s", res.Status, res.Message)
-		}
-		if !bytes.Equal(responseBytes(res), body) {
-			t.Fatalf("HCPCS submit response not relayed verbatim")
-		}
-		if len(res.SideEffectFHIR) != 1 || res.Commit == nil {
-			t.Fatalf("HCPCS submit must now build ONE EOB side-effect + Commit; got side-effects=%d commit=%v", len(res.SideEffectFHIR), res.Commit != nil)
-		}
-		if got := eobProcedureSystemBytes(t, res.SideEffectFHIR[0]); got != "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets" {
-			t.Fatalf("EOB procedure system = %q, want HCPCS (the half-fix CPT-lock is forbidden)", got)
-		}
-	})
-
-	t.Run("unrecognized procedure system: forwards, NO EOB (honest soft fallback)", func(t *testing.T) {
-		// An order whose only coding is a non-{CPT,HCPCS} system yields no product coding → honest
-		// no-EOB (the relay still completes). This preserves the soft fallback the allowlist guarantees.
-		other := []byte(`{"resourceType":"Bundle","type":"collection","entry":[
-			{"resource":{"resourceType":"Claim","patient":{"reference":"Patient/MBR-COVERED"}}},
-			{"resource":{"resourceType":"ServiceRequest","subject":{"reference":"Patient/MBR-COVERED"},"code":{"coding":[{"system":"http://snomed.info/sct","code":"12345","display":"x"}]}}},
-			{"resource":{"resourceType":"Coverage","beneficiary":{"reference":"Patient/MBR-COVERED"}}},
-			{"resource":{"resourceType":"QuestionnaireResponse","subject":{"reference":"Patient/MBR-COVERED"}}}
-		]}`)
-		body := []byte(`{"resourceType":"ClaimResponse","outcome":"complete","preAuthRef":"P-OTHER"}`)
-		body = fixturePASResponse(t, body, true)
-		srv := stubPartnerSrv(t, http.StatusOK, body)
-		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", newCensusSoR(), fixedClock)
-		res, err := n.Handle(context.Background(), "pas-claim", "corr-other", "PCI-1", other)
-		if err != nil {
-			t.Fatalf("unrecognized-system submit: unexpected error: %v", err)
-		}
-		if res.Status != 0 || !bytes.Equal(responseBytes(res), body) {
-			t.Fatalf("unrecognized-system submit must forward verbatim; status=%d", res.Status)
-		}
-		// No EOB, but the payer's decision is still recorded: the soft fallback
-		// drops the projection this gateway could not state, never the fact that
-		// the payer decided.
-		if len(res.SideEffectFHIR) != 0 {
-			t.Fatalf("unrecognized-system submit must emit NO EOB (soft); got side-effects=%d", len(res.SideEffectFHIR))
-		}
 		if res.Commit == nil {
-			t.Fatal("the payer's decision must still be recorded")
+			t.Fatalf("pended must RecordPendedClaim")
 		}
 	})
 }
@@ -190,37 +116,6 @@ func serviceRequestSubmitBundle(t *testing.T, infoChanged bool) []byte {
 		t.Fatalf("serviceRequestSubmitBundle (infoChanged=%v): %v", infoChanged, err)
 	}
 	return b
-}
-
-// TestNativePAS_EOBSystemTracksOrder is the DEF-14 no-wrong-EOB guard: the EOB's
-// procedure system must equal the ORDER's system for every recognized procedure
-// system — never the hardcoded CPT. A regression that re-hardcodes the system (the
-// half-fix the DEF-14 entry calls worse than the honest no-EOB) fails the HCPCS row.
-func TestNativePAS_EOBSystemTracksOrder(t *testing.T) {
-	for _, tc := range []struct{ name, system, code, display string }{
-		{"cpt", "http://www.ama-assn.org/go/cpt", "72148", "MRI lumbar spine w/o contrast"},
-		{"hcpcs", "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets", "L8000", "Breast prosthesis, mastectomy bra"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			bundle := []byte(`{"resourceType":"Bundle","type":"collection","entry":[
-				{"resource":` + eobSourceClaim("MBR-COVERED", tc.system, tc.code) + `},
-				{"resource":{"resourceType":"ServiceRequest","subject":{"reference":"Patient/MBR-COVERED"},"code":{"coding":[{"system":"` + tc.system + `","code":"` + tc.code + `","display":"` + tc.display + `"}]}}},
-				{"resource":{"resourceType":"Coverage","beneficiary":{"reference":"Patient/MBR-COVERED"}}},
-				{"resource":{"resourceType":"QuestionnaireResponse","subject":{"reference":"Patient/MBR-COVERED"}}}
-			]}`)
-			body := []byte(`{"resourceType":"ClaimResponse","outcome":"complete","preAuthRef":"P-1"}`)
-			body = fixturePASResponse(t, body, true)
-			srv := stubPartnerSrv(t, http.StatusOK, body)
-			n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", newCensusSoR(), fixedClock)
-			res, err := n.Handle(context.Background(), "pas-claim", "corr-"+tc.name, "PCI-1", bundle)
-			if err != nil || res.Status != 0 || len(res.SideEffectFHIR) != 1 {
-				t.Fatalf("%s: want forward + 1 EOB; err=%v status=%d sideeffects=%d", tc.name, err, res.Status, len(res.SideEffectFHIR))
-			}
-			if got := eobProcedureSystemBytes(t, res.SideEffectFHIR[0]); got != tc.system {
-				t.Fatalf("%s: EOB system = %q, want the ORDER's system %q (no hardcode)", tc.name, got, tc.system)
-			}
-		})
-	}
 }
 
 // stripInfoChangedExtension removes the Da Vinci PAS infoChanged item extension from every
@@ -276,7 +171,7 @@ func loadDeniedClaimResponseBytes(t *testing.T) []byte {
 // NOT the strict ParseClaimBundle the minimized leg uses) through the native-forward path and
 // proves the shadow FinalizeClaimUpdate survived the convergence: approved → verbatim + Finalize
 // Commit + armed Rollback; partner-500-after-Begin → relayed + Rollback (no strand); no prior
-// pend → forwarded anyway, owning no row. NO EOB on the update leg.
+// pend → forwarded anyway, owning no row.
 func TestNativeUpdate_ApprovedFinalizes(t *testing.T) {
 	// The conformant update bundle's Claim.related[0].claim.identifier.value is the original
 	// submit's correlation id (convergence-pas-submit-0001), which is the BeginClaimUpdate key.
@@ -290,7 +185,7 @@ func TestNativeUpdate_ApprovedFinalizes(t *testing.T) {
 		return s
 	}
 
-	t.Run("approved -> verbatim + Finalize, Rollback armed, no EOB", func(t *testing.T) {
+	t.Run("approved -> verbatim + Finalize, Rollback armed", func(t *testing.T) {
 		body := []byte(`{"resourceType":"ClaimResponse","outcome":"complete","preAuthRef":"P-1","preAuthPeriod":{"end":"2030-01-01"}}`)
 		body = fixturePASResponse(t, body, true)
 		srv := stubPartnerSrv(t, http.StatusOK, body)
@@ -302,9 +197,6 @@ func TestNativeUpdate_ApprovedFinalizes(t *testing.T) {
 		}
 		if !bytes.Equal(responseBytes(res), body) || res.Commit == nil || res.Rollback == nil {
 			t.Fatalf("approved conformant update must forward verbatim + Finalize Commit + armed Rollback")
-		}
-		if len(res.SideEffectFHIR) != 0 {
-			t.Fatalf("conformant update leg must emit NO EOB; got %d", len(res.SideEffectFHIR))
 		}
 	})
 
@@ -330,7 +222,7 @@ func TestNativeUpdate_ApprovedFinalizes(t *testing.T) {
 	// A TRUE no-response fault (dial failure, distinct from the relayed-partner-500 case above)
 	// must still carry Rollback: n.post's fault branch returns (nil, LegResult{}, err), and
 	// handlePASClaimUpdateNative's `if err != nil { return LegResult{Rollback: release}, err }`
-	// (nativepas.go ~line 51) is the ONLY place that attaches Rollback on that path — post()
+	// (workstream_pa_pas_forward.go ~line 51) is the ONLY place that attaches Rollback on that path — post()
 	// itself never does. If that branch regressed to a bare `return LegResult{}, err`, this
 	// subtest's Rollback assertion goes red.
 	t.Run("partner UNREACHABLE after Begin -> error return still carries Rollback (no strand)", func(t *testing.T) {
@@ -441,15 +333,11 @@ func TestNativeUpdate_AmendAfterResolution(t *testing.T) {
 			if res.Commit == nil {
 				t.Fatal("a re-pend must return the authorization to pended")
 			}
-			admitDecisionEOBs(&res)
 			if err := res.Commit(); err != nil {
 				t.Fatalf("commit: %v", err)
 			}
-			if rec, found, rerr := s.PendRecordOf(pci, origCorr); rerr != nil || !found || rec.State != PendStatePended {
+			if rec, found, rerr := testLedger(s).PendRecordOf(pci, origCorr); rerr != nil || !found || rec.State != PendStatePended {
 				t.Fatalf("the authorization did not return to pended (found=%v state=%q err=%v)", found, rec.State, rerr)
-			}
-			if len(res.SideEffectFHIR) != 0 {
-				t.Fatalf("update leg must emit NO EOB; got %d", len(res.SideEffectFHIR))
 			}
 		})
 	}

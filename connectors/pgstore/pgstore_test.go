@@ -139,35 +139,6 @@ func TestHolderIsolation(t *testing.T) {
 	}
 }
 
-func TestEOB_RecordReadDedupe(t *testing.T) {
-	s := freshStore(t, "payer")
-	if _, ok := s.EOBsForPatient("pciX"); ok {
-		t.Fatal("EOBsForPatient on empty = ok=true")
-	}
-	if err := s.RecordEOB("pciX", "eob-1", []byte(`{"a":1}`)); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.RecordEOB("pciX", "eob-2", []byte(`{"a":2}`)); err != nil {
-		t.Fatal(err)
-	}
-	got, ok := s.EOBsForPatient("pciX")
-	if !ok || len(got) != 2 {
-		t.Fatalf("EOBsForPatient = %d rows, ok=%v; want 2,true", len(got), ok)
-	}
-	if b, ok := s.EOBByID("eob-1"); !ok || string(b) != `{"a":1}` {
-		t.Fatalf("EOBByID(eob-1) = %q,%v", b, ok)
-	}
-	// replayed same eob_id → still ONE row for the patient (dedupe; a
-	// deliberate more-correct divergence from the stub's duplicate-append).
-	if err := s.RecordEOB("pciX", "eob-1", []byte(`{"a":1}`)); err != nil {
-		t.Fatal(err)
-	}
-	got2, _ := s.EOBsForPatient("pciX")
-	if len(got2) != 2 {
-		t.Fatalf("after replay EOBsForPatient = %d rows; want 2 (deduped, not 3)", len(got2))
-	}
-}
-
 func TestEnsureSchema_Idempotent(t *testing.T) {
 	pool := openTestPool(t)
 	ctx := context.Background()

@@ -148,16 +148,29 @@ func e08RowWith(t *testing.T, level ConformanceEnforcement, declared []string, a
 // observe, and, when payerLines is set, the payer's registry entry declaring them.
 func e08RowFull(t *testing.T, level ConformanceEnforcement, declared []string, answer []byte, lanes func(map[string]shnsdk.Validator), observe func(ObserverEvent), payerLines []string) e08Result {
 	t.Helper()
+	return e08RowTuned(t, level, declared, answer, lanes, observe, payerLines, nil)
+}
+
+// e08RowTuned is e08RowFull with the provider's gateway adjusted by tune before
+// the request.
+func e08RowTuned(t *testing.T, level ConformanceEnforcement, declared []string, answer []byte, lanes func(map[string]shnsdk.Validator), observe func(ObserverEvent), payerLines []string, tune func(*Gateway)) e08Result {
+	t.Helper()
 	env := newInProcessExchange(t)
+	// E-08 is module 2's: these rows run with it on unless tune turns it off.
+	env.originator.cfg.TranslateIGLines = true
+	if tune != nil {
+		tune(env.originator)
+	}
 	env.originator.cfg.SoR = newPrefetchSoR().sor()
 	env.originator.cfg.ConformanceEnforcement = level
 	env.originator.cfg.DeclaredContractVersions = declared
-	env.originator.cfg.ValidatorsByLine = map[string]shnsdk.Validator{
+	byLine := map[string]shnsdk.Validator{
 		"2.0": NewLineFakeValidator("2.0"), "2.1": NewLineFakeValidator("2.1"), "2.2": NewLineFakeValidator("2.2"),
 	}
 	if lanes != nil {
-		lanes(env.originator.cfg.ValidatorsByLine)
+		lanes(byLine)
 	}
+	env.originator.cfg.ValidatorsByContractLine = contractLanes(byLine)
 	r := e08Result{env: env}
 	env.originator.cfg.Observer = func(e ObserverEvent) {
 		if observe != nil {
@@ -214,6 +227,27 @@ func (r e08Result) wantAnswered(t *testing.T, want []byte, edited bool) {
 	}
 	if got := slices.Contains(r.recordedEdits(), string(relay.EditDTRAnswerLineNames)); got != edited {
 		t.Fatalf("E-08 recorded=%v, want %v (edits %v)", got, edited, r.recordedEdits())
+	}
+	// E-08 is an edit to the answer: it is the answer's, never the request's,
+	// and the answer the EHR received is the payer's, edited only by it.
+	wantOwn := relay.OwnershipRelayed.String()
+	if edited {
+		wantOwn = relay.OwnershipEdited.String()
+	}
+	var answers []string
+	for _, x := range r.records {
+		if slices.Contains(x.RequestEdits, string(relay.EditDTRAnswerLineNames)) {
+			t.Fatalf("E-08 recorded as an edit to the request: %v", x.RequestEdits)
+		}
+		if x.Direction == DirectionIngress {
+			answers = append(answers, x.AnswerOwnership)
+			if got := slices.Contains(x.AnswerEdits, string(relay.EditDTRAnswerLineNames)); got != edited || x.AnswerBuilder != "" {
+				t.Fatalf("answer edits %v builder %q, want E-08 %v and no builder", x.AnswerEdits, x.AnswerBuilder, edited)
+			}
+		}
+	}
+	if !slices.Equal(answers, []string{wantOwn}) {
+		t.Fatalf("ingress answer ownership %v, want [%s]", answers, wantOwn)
 	}
 }
 
@@ -488,14 +522,16 @@ func TestDTRAnswerBridge_ValidationCopiesNeverLeave(t *testing.T) {
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			env := newInProcessExchange(t)
+			env.originator.cfg.TranslateIGLines = true
 			env.originator.cfg.SoR = newPrefetchSoR().sor()
 			env.originator.cfg.DeclaredContractVersions = declares22
 			rec := map[string]*e08RecordingValidator{}
-			env.originator.cfg.ValidatorsByLine = map[string]shnsdk.Validator{}
+			byLine := map[string]shnsdk.Validator{}
 			for _, l := range []string{"2.0", "2.1", "2.2"} {
 				rec[l] = &e08RecordingValidator{inner: NewLineFakeValidator(l)}
-				env.originator.cfg.ValidatorsByLine[l] = rec[l]
+				byLine[l] = rec[l]
 			}
+			env.originator.cfg.ValidatorsByContractLine = contractLanes(byLine)
 			var findings []ConformanceFinding
 			env.originator.cfg.Observer = func(e ObserverEvent) {
 				var f ConformanceFinding
@@ -675,8 +711,13 @@ func TestDTRAnswerBridge_AQuestionnaireOfAnotherLineIsRefused(t *testing.T) {
 }
 
 // A target check that could not run (no lane for the provider's line) refuses
-// at every level, and says so: the answer was never judged, so the refusal
-// does not call it invalid.
+// at every level whose payload checks consume lanes, and says so: the answer
+// was never judged, so the refusal does not call it invalid. At none, where no
+// payload check consumes a lane and a declared line may have none, the answer is
+// never renamed: it is carried exactly, with no E-08 edit, though the source
+// line's lane would have let it cross. Both halves are the level-scoped edge of
+// payloadChecksConsumeLanes: a lane missing where checks consume lanes is
+// refused, not carried.
 func TestDTRAnswerBridge_AnUnjudgedTargetRefusesAndSaysSo(t *testing.T) {
 	answer := e08Answer("PackageBundle", []string{"Questionnaire", "QuestionnaireResponse"}, false)
 	for _, level := range allLevels {
@@ -684,6 +725,10 @@ func TestDTRAnswerBridge_AnUnjudgedTargetRefusesAndSaysSo(t *testing.T) {
 			r := e08RowWith(t, level, declares22, answer, func(lanes map[string]shnsdk.Validator) {
 				delete(lanes, "2.2")
 			})
+			if level == EnforcementNone {
+				r.wantAnswered(t, answer, false)
+				return
+			}
 			body := r.rec.Body.String()
 			if r.rec.Code == http.StatusOK || !strings.Contains(body, "the payer answered") ||
 				!strings.Contains(body, "could not run") || strings.Contains(body, "not valid at that line") {

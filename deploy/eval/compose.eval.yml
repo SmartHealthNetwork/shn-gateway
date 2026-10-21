@@ -13,6 +13,8 @@ services:
   hapi:
     build: { context: .., dockerfile: eval/hapi/Dockerfile }
     environment:
+      # The HAPI starter serves an MCP server by default (/mcp/messages, /sse); it stays off.
+      SPRING_AI_MCP_SERVER_ENABLED: "false"
       hapi.fhir.implementationguides.uscore.packageUrl: file:///packages/hl7.fhir.us.core-6.1.0.tgz
       hapi.fhir.implementationguides.uscore.name: hl7.fhir.us.core
       hapi.fhir.implementationguides.uscore.version: "6.1.0"
@@ -25,6 +27,20 @@ services:
       hapi.fhir.implementationguides.pas.packageUrl: file:///packages/hl7.fhir.us.davinci-pas-2.0.1.tgz
       hapi.fhir.implementationguides.pas.name: hl7.fhir.us.davinci-pas
       hapi.fhir.implementationguides.pas.version: "2.0.1"
+      # CRD, DTR and SDC at the 2.0 line: the gateway validates the QuestionnaireResponse it
+      # sends here against the DTR profile it declares (dtr-questionnaireresponse|2.0.1).
+      hapi.fhir.implementationguides.crd.packageUrl: file:///packages/hl7.fhir.us.davinci-crd-2.0.1.tgz
+      hapi.fhir.implementationguides.crd.name: hl7.fhir.us.davinci-crd
+      hapi.fhir.implementationguides.crd.version: "2.0.1"
+      hapi.fhir.implementationguides.dtr.packageUrl: file:///packages/hl7.fhir.us.davinci-dtr-2.0.1.tgz
+      hapi.fhir.implementationguides.dtr.name: hl7.fhir.us.davinci-dtr
+      hapi.fhir.implementationguides.dtr.version: "2.0.1"
+      hapi.fhir.implementationguides.sdc.packageUrl: file:///packages/hl7.fhir.uv.sdc-3.0.0.tgz
+      hapi.fhir.implementationguides.sdc.name: hl7.fhir.uv.sdc
+      hapi.fhir.implementationguides.sdc.version: "3.0.0"
+      hapi.fhir.implementationguides.validationsupport.packageUrl: file:///packages/shn.fhir.validation-support-1.5.0.tgz
+      hapi.fhir.implementationguides.validationsupport.name: shn.fhir.validation-support
+      hapi.fhir.implementationguides.validationsupport.version: "1.5.0"
       hapi.fhir.tenant_identification_strategy: URL_BASED
       hapi.fhir.partitioning.partitioning_include_in_search_hashes: "false"
       hapi.fhir.partitioning.allow_references_across_partitions: "false"
@@ -79,6 +95,12 @@ services:
       PROVIDER_DAVINCI_INGRESS: "1"
       PROVIDER_DAVINCI_INGRESS_BASE_URL: http://gateway:8080
       INGRESS_CLIENTS_FILE: /secrets/ingress-clients.json
+      # The callers the /scenario routes admit: `shn scenario-key --bundle
+      # <your bundle>` writes this file into the bundle mounted below, beside
+      # your gateway's keys, and the caller's own key outside it (README, step
+      # 0). Every other /scenario request is refused 401, and a bundle without
+      # the file stops the gateway at boot, naming it.
+      SCENARIO_CALLERS_FILE: /etc/shn/scenario-callers.json
       # Supplied by whoever runs this file, because this file has two audiences
       # and they want opposite answers. It is SHN's own Definition-of-Done gate
       # (../eval/smoke.sh, which exports strict below) AND the bundle a partner
@@ -107,6 +129,8 @@ services:
   br-provider:
     image: br-provider:43a4806          # built by brprovider/build.sh FIRST (image:, not build:)
     environment:
+      # The HAPI starter serves an MCP server by default (/mcp/messages, /sse); it stays off.
+      SPRING_AI_MCP_SERVER_ENABLED: "false"
       APP_PAYER_SERVERS_0_CDS_URL: http://gateway:8080/cds-services   # container port, not host
       APP_PAYER_SERVERS_0_FHIR_URL: http://gateway:8080
       # SSRF allowlist: br-provider's BFF OutboundTargetValidator blocks Docker site-local

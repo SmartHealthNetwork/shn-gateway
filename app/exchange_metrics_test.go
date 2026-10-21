@@ -42,7 +42,6 @@ func TestBuiltPayerReportsInboundExchanges(t *testing.T) {
 			"SHN_SECRETS":            dir,
 			"SHN_DISCOVERY_URL":      disc.URL,
 			"SHN_FAKE_VALIDATOR":     "1",
-			"AUDIT_URL":              "http://127.0.0.1:1",
 			"FHIR_DATA_URL":          "http://127.0.0.1:1/fhir",
 			"PAYER_DAVINCI_BASE_URL": "http://127.0.0.1:1/fhir",
 		}

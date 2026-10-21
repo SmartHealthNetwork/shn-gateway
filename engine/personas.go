@@ -3,7 +3,7 @@ package engine
 // CanaryTwins maps each scenario member to its dedicated canary twin
 // (observability Phase 3, settled decision #1): the monitor's scenario canary
 // drives ONLY these members, so continuous canary runs never mutate the shared
-// demo personas' state (EOB accumulation, auth-number overwrites) and canary
+// demo personas' state (ledger rows, auth-number overwrites) and canary
 // audit records are attributable by PCI. Twins share the original's birthDate
 // and take family "<orig>-Canary" — the member id alone makes the PCI distinct.
 // internal/fhirseed mirrors this table (census-pinned by its canary_test.go) and
@@ -23,7 +23,7 @@ package engine
 // members the handlers actually resolve.
 //
 // It stays engine-side (unlike the persona census, which lives in
-// internal/fhirseed) because originate.go's canary scenario route resolves the
+// internal/fhirseed) because module1_originate.go's canary scenario route resolves the
 // twin from it on every canary origination — a gateway-internal read no
 // substrate package can serve.
 var CanaryTwins = map[string]string{

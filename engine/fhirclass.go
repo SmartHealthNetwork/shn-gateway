@@ -15,8 +15,9 @@ import (
 // classified, VerdictDeeper when every one is a deeper rule's, and
 // VerdictUnavailable when the validator did not judge the payload at all. A
 // fatal issue is always structural, whatever its message id, except a call
-// the validator answered without reading the payload (HAPI-0992), which is
-// unavailable at either severity.
+// the validator answered without reading the payload (HAPI-0992) or a
+// validation it stopped without a verdict (HAPI-0389), which are unavailable
+// at either severity (validatorDidNotJudge).
 //
 // A HAPI validator reports issue.code "processing" for nearly every issue, so
 // the kind of issue is read from its message id (shnsdk.Issue.MessageID), never
@@ -38,13 +39,7 @@ func classifyFHIR(res shnsdk.Result, body []byte, line, profile string) Verdict 
 	if len(errs) == 0 {
 		return VerdictInvalid
 	}
-	invocation := 0
-	for _, e := range errs {
-		if e.MessageID == "" && hapiNoResourceSupplied.MatchString(e.Diagnostics) {
-			invocation++
-		}
-	}
-	if invocation == len(errs) {
+	if validatorDidNotJudge(errs) {
 		return VerdictUnavailable
 	}
 	for i := range errs {
@@ -79,12 +74,13 @@ func fhirErrors(res shnsdk.Result) []fhirIssue {
 	return errs
 }
 
-// allExcused extends the issues a reading has excused to the summaries and
-// PAS slice-match consequences that follow from them (rescuePASClaimSliceMatch,
-// refineSummaries), and reports whether every issue is then excused. The two
-// readings share it, so a summary follows from the same evidence in both.
+// allExcused extends the issues a reading has excused to the workstreams'
+// known validator consequences (certificationExcuse) and the summaries that
+// follow from them (refineSummaries), and reports whether every issue is then
+// excused. The two readings share it, so a summary follows from the same
+// evidence in both.
 func allExcused(errs []fhirIssue, body []byte, line, profile string) bool {
-	rescuePASClaimSliceMatch(errs, body, line, profile)
+	certificationExcuse(errs, body, line, profile)
 	refineSummaries(errs)
 	for _, e := range errs {
 		if !e.excused {
@@ -101,6 +97,29 @@ func allExcused(errs []fhirIssue, body []byte, line, profile string) bool {
 // validator being unavailable. The wording is pinned from the real validator
 // lanes.
 var hapiNoResourceSupplied = regexp.MustCompile(`^HAPI-0992: No resource supplied for \$validate operation \(resource is required unless mode is "delete"\)$`)
+
+// hapiDidNotFinish is HAPI's answer when its validator stopped without a
+// verdict: matching a Bundle entry against the profiles its slice allows
+// failed with no error to report, and the validation ended there, with no
+// other entry checked. It is seen on PAS 2.1 and 2.2 request Bundles that
+// declare their profile. The issue's text goes on to list what the validator
+// had found, so only its opening is matched. The wording is pinned from the
+// real validator lanes.
+var hapiDidNotFinish = regexp.MustCompile(`^HAPI-0389: Failed to call access method: java\.lang\.Error: failed to validate, but no errors\.`)
+
+// validatorDidNotJudge reports whether every error issue says the validator
+// never judged the payload: it answered without reading it (HAPI-0992), or
+// stopped without a verdict (HAPI-0389). Such a result is the validator being
+// unavailable, never a defect of the message, and never a sign it is valid.
+// One issue of any other kind beside them is read as usual.
+func validatorDidNotJudge(errs []fhirIssue) bool {
+	for _, e := range errs {
+		if e.MessageID != "" || !hapiNoResourceSupplied.MatchString(e.Diagnostics) && !hapiDidNotFinish.MatchString(e.Diagnostics) {
+			return false
+		}
+	}
+	return len(errs) > 0
+}
 
 // invariantMessageID is the message id HAPI gives a failed invariant: the
 // constraint's canonical, "<StructureDefinition url>#<key>" (for example
@@ -194,172 +213,6 @@ func refineSummaries(errs []fhirIssue) {
 		}
 		errs[i].excused = others > 0 && allExcused
 	}
-}
-
-// The PAS request Bundle's Claim entry allows two candidate profiles, and
-// PAS 2.1 and 2.2 validate the Claim against both. When a deeper rule fails
-// the Claim's own profile (licensed X12 terminology the validator cannot load,
-// on every real request), the Claim matches neither, and HAPI adds the two
-// no-match summaries and the other candidate's own requirements: a submit's
-// Claim is reported against profile-claim-update (Claim.related minimum 1), an
-// update's against profile-claim (Claim.related maximum 0). None of that is a
-// defect in the message; the IG's own example bundles fail the same way.
-const (
-	pasRequestBundleCanonical = "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-pas-request-bundle"
-	pasClaimCanonical         = "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claim"
-	pasClaimUpdateCanonical   = "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claim-update"
-)
-
-// validatingAgainst is HAPI's attribution of an issue to the profile it was
-// checking: "(validating against <canonical>[|<version>] [<Name>])". An issue
-// can carry more than one.
-var validatingAgainst = regexp.MustCompile(`\(validating against (\S+) \[[^\]]*\]\)`)
-
-// canonicalReference is any http(s) canonical a summary names, with its
-// "|version" if it carries one.
-var canonicalReference = regexp.MustCompile(`https?://[^\s,()\[\]]+`)
-
-// rescuePASClaimSliceMatch excuses the slice-match consequences on a PAS 2.1
-// or 2.2 request Bundle's Claim entries. It applies to one Claim entry
-// only when at least one no-match summary sits on that entry (the cascade is
-// present), and every error issue on that entry is one of:
-//   - a no-match summary naming exactly the two candidate profiles;
-//   - the sibling candidate's own cardinality requirement
-//     (Validation_VAL_Profile_Minimum or _Maximum) attributed only to that
-//     sibling, the candidate the Claim is not;
-//   - an issue the reading already excused, whatever it is attributed to: the
-//     validator checks a Claim that declares its own profile against it
-//     directly, and those issues carry no attribution.
-//
-// Attribution matters only for the sibling's requirement. Any other issue on
-// the entry that is not excused, attributed or not, leaves the whole entry to
-// the ordinary reading, where the sibling's requirement counts.
-// Scope is closed: nothing outside this Bundle profile, these lines and this
-// slice is touched.
-func rescuePASClaimSliceMatch(errs []fhirIssue, body []byte, line, profile string) {
-	if line != "2.1" && line != "2.2" {
-		return
-	}
-	var bundle struct {
-		ResourceType string `json:"resourceType"`
-		Meta         struct {
-			Profile []string `json:"profile"`
-		} `json:"meta"`
-		Entry []struct {
-			Resource json.RawMessage `json:"resource"`
-		} `json:"entry"`
-	}
-	if json.Unmarshal(body, &bundle) != nil || bundle.ResourceType != "Bundle" ||
-		!declaresProfile(append([]string{profile}, bundle.Meta.Profile...), pasRequestBundleCanonical) {
-		return
-	}
-	for n, e := range bundle.Entry {
-		declared, ok := declaredPASClaimProfile(e.Resource)
-		if !ok {
-			continue
-		}
-		sibling := pasClaimUpdateCanonical
-		if declared == pasClaimUpdateCanonical {
-			sibling = pasClaimCanonical
-		}
-		var onEntry []int
-		rescuable, summarized := true, false
-		for i, iss := range errs {
-			if iss.entry != n {
-				continue
-			}
-			onEntry = append(onEntry, i)
-			summarized = summarized || isNoMatchSummary(iss.MessageID)
-			if !sliceMatchConsequence(iss, sibling) {
-				rescuable = false
-			}
-		}
-		if !rescuable || !summarized {
-			continue
-		}
-		for _, i := range onEntry {
-			errs[i].excused = true
-		}
-	}
-}
-
-// sliceMatchConsequence is one issue's test for rescuePASClaimSliceMatch. A
-// fatal issue is never a consequence.
-func sliceMatchConsequence(iss fhirIssue, sibling string) bool {
-	if iss.Severity != "error" {
-		return false
-	}
-	if isNoMatchSummary(iss.MessageID) {
-		named := map[string]bool{}
-		for _, m := range canonicalReference.FindAllString(iss.Diagnostics, -1) {
-			named[canonicalOf(m)] = true
-		}
-		return len(named) == 2 && named[pasClaimCanonical] && named[pasClaimUpdateCanonical]
-	}
-	if iss.excused {
-		return true
-	}
-	if iss.MessageID != siblingMinimum && iss.MessageID != siblingMaximum {
-		return false
-	}
-	// Every "(validating against" must be one the attribution pattern reads:
-	// an attribution in any other shape could name the Claim's own profile.
-	matches := validatingAgainst.FindAllStringSubmatch(iss.Diagnostics, -1)
-	if strings.Count(iss.Diagnostics, "(validating against ") != len(matches) {
-		return false
-	}
-	attributed := map[string]bool{}
-	for _, m := range matches {
-		attributed[canonicalOf(m[1])] = true
-	}
-	return len(attributed) == 1 && attributed[sibling]
-}
-
-// The sibling candidate's own cardinality requirements HAPI reports on a PAS
-// Claim that matches neither candidate: Claim.related minimum 1 (a submit
-// checked against profile-claim-update) or maximum 0 (an update checked
-// against profile-claim).
-const (
-	siblingMinimum = "Validation_VAL_Profile_Minimum"
-	siblingMaximum = "Validation_VAL_Profile_Maximum"
-)
-
-// declaredPASClaimProfile is the candidate profile a Claim entry is built to:
-// its meta.profile when that names exactly one candidate, else Claim.related
-// (present on an update, absent on a submit). ok is false when the resource is
-// not a Claim, when meta.profile names both candidates, or when it names one
-// that contradicts Claim.related: the entry is then read without the rescue.
-func declaredPASClaimProfile(raw json.RawMessage) (string, bool) {
-	var claim struct {
-		ResourceType string `json:"resourceType"`
-		Meta         struct {
-			Profile []string `json:"profile"`
-		} `json:"meta"`
-		Related []json.RawMessage `json:"related"`
-	}
-	if json.Unmarshal(raw, &claim) != nil || claim.ResourceType != "Claim" {
-		return "", false
-	}
-	byRelated := pasClaimCanonical
-	if len(claim.Related) > 0 {
-		byRelated = pasClaimUpdateCanonical
-	}
-	names := map[string]bool{}
-	for _, p := range claim.Meta.Profile {
-		if c := canonicalOf(p); c == pasClaimCanonical || c == pasClaimUpdateCanonical {
-			names[c] = true
-		}
-	}
-	switch len(names) {
-	case 0:
-		return byRelated, true
-	case 1:
-		if !names[byRelated] {
-			return "", false
-		}
-		return byRelated, true
-	}
-	return "", false
 }
 
 // declaresProfile reports whether profiles names canonical, with or without a

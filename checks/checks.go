@@ -111,8 +111,8 @@ const capabilityListCap = 32
 // inverse of gateway/engine's hrexCodeForContract; extend BOTH sides together
 // for any new contract. Deliberately asymmetric on pa.pdex: this reverse/
 // probe side includes it because probing reads any peer's own publication,
-// while no gateway declares or publishes a pa.pdex line of its own (its
-// decision EOB is base FHIR R4, not PDex). driftAgainstDeclared compares only
+// while no gateway declares or publishes a pa.pdex line of its own (it serves
+// no Patient Access API and builds no PDex resource). driftAgainstDeclared compares only
 // contracts both sides name, so a peer's PDex publication against a
 // declaration with no pa.pdex line is attribution, never drift.
 var davinciContractByIG = map[string]string{

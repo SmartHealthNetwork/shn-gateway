@@ -1,0 +1,838 @@
+// workstream_pa_pasgraph_test.go — the rejection rows of the PAS response-graph closure rule
+// (workstream_pa_pasgraph.go). Each row is a valid graph with ONE mutation, refused: a
+// reference the graph does not carry, an identity two entries disagree on, a
+// containment scope crossed, a budget exceeded, a JSON document whose meaning is
+// ambiguous.
+//
+// The rule is held to bytes a real reference payer emitted by
+// test/adversarial/payer_graph_capture_test.go; these rows are the other half —
+// hand-built graphs that prove each clause is implemented, mutation by mutation.
+package engine
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"strings"
+	"testing"
+)
+
+// pasBundleWithResponse returns bundleJSON with its ClaimResponse entry replaced
+// by claimResponse. Test-local JSON surgery: it builds the fixtures a graph row
+// needs and is NOT a product path — this gateway never rewrites a payer's answer.
+func pasBundleWithResponse(t *testing.T, bundleJSON, claimResponse []byte) []byte {
+	t.Helper()
+	var b map[string]any
+	if err := json.Unmarshal(bundleJSON, &b); err != nil {
+		t.Fatal(err)
+	}
+	var cr map[string]any
+	if err := json.Unmarshal(claimResponse, &cr); err != nil {
+		t.Fatal(err)
+	}
+	replaced := false
+	for _, v := range b["entry"].([]any) {
+		e := v.(map[string]any)
+		if e["resource"].(map[string]any)["resourceType"] == "ClaimResponse" {
+			e["resource"] = cr
+			replaced = true
+		}
+	}
+	if !replaced {
+		t.Fatal("fixture bundle carries no ClaimResponse to replace")
+	}
+	out, err := json.Marshal(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// TestPASGraphSignedResponseRelayable: a payer that SIGNS its response Bundle is
+// relayed like any other. The closure rule reads the graph; it does not refuse a
+// signature, and nothing downstream carries that signature onto different content
+// because nothing rewrites the content.
+func TestPASGraphSignedResponseRelayable(t *testing.T) {
+	var pending map[string]any
+	if err := json.Unmarshal([]byte(assemblyRealPending), &pending); err != nil {
+		t.Fatal(err)
+	}
+	pending["signature"] = map[string]any{"who": map[string]any{"reference": "http://localhost:8081/fhir/Organization/example"}, "data": "c2lnbmF0dXJl"}
+	raw, err := json.Marshal(pending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, bad := validateNativePASResponse(raw)
+	if bad.Status != 0 {
+		t.Fatalf("a signed payer graph must stay eligible for verbatim relay: %d %s", bad.Status, bad.Message)
+	}
+	if !bytes.Equal(body, raw) {
+		t.Fatal("the payer's bytes were altered on the way through")
+	}
+}
+
+// TestPASGraphAcceptsHighPrecisionNumbers: the bounded decoder reads a decimal no
+// float can hold without reshaping it, so a graph carrying one is read (and
+// relayed) rather than refused or quietly rounded.
+func TestPASGraphAcceptsHighPrecisionNumbers(t *testing.T) {
+	raw := strings.Replace(assemblyRealPending, `"type":"collection"`, `"type":"collection","extension":[{"url":"urn:test:decimal","valueDecimal":9007199254740993.125}]`, 1)
+	if err := validatePASBundleGraph([]byte(raw)); err != nil {
+		t.Fatalf("a graph carrying a high-precision decimal was refused: %v", err)
+	}
+	body, bad := validateNativePASResponse([]byte(raw))
+	if bad.Status != 0 || !bytes.Contains(body, []byte("9007199254740993.125")) {
+		t.Fatalf("the decimal did not survive the read (status=%d)", bad.Status)
+	}
+}
+
+const assemblyRealPending = `{"resourceType":"Bundle","meta":{"profile":["http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-pas-response-bundle"]},"identifier":{"system":"http://example.org/SUBMITTER_TRANSACTION_IDENTIFIER","value":"26e95525-758c-487c-a377-3f159acac6c8"},"type":"collection","timestamp":"2026-09-10T16:08:47.765+00:00","entry":[{"fullUrl":"http://localhost:8081/fhir/ClaimResponse/1770","resource":{"resourceType":"ClaimResponse","id":"1770","meta":{"versionId":"2","lastUpdated":"2026-09-10T16:08:47.769+00:00","profile":["http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claimresponse"],"tag":[{"system":"http://example.org/fhir/us/davinci-pas/internal-tags","code":"pended-resolution","display":"Pended Resolution"}]},"extension":[{"url":"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-TransmissionIdentifiers","extension":[{"url":"applicationSenderCode","valueString":"1234567893"},{"url":"applicationReceiverCode","valueString":"8189991234"}]},{"url":"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-administrationReferenceNumber","valueString":"AUTH-PEND0001"}],"identifier":[{"system":"http://example.org/PATIENT_EVENT_TRACE_NUMBER","value":"2ca2e10c-e924-4e12-9d69-5b71e4e91c31"}],"status":"active","type":{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/claim-type","code":"professional","display":"Professional"}]},"use":"preauthorization","patient":{"reference":"Patient/SubscriberExample"},"created":"2026-09-10T16:08:47+00:00","insurer":{"reference":"Organization/example"},"requestor":{"reference":"Organization/UMOExample"},"request":{"reference":"Claim/1768"},"outcome":"queued","item":[{"extension":[{"url":"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-itemTraceNumber","valueIdentifier":{"system":"http://example.org/ITEM_TRACE_NUMBER","value":"prior-auth-required-trace"}}],"itemSequence":1,"adjudication":[{"extension":[{"url":"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewAction","extension":[{"url":"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewActionCode","valueCodeableConcept":{"coding":[{"system":"https://codesystem.x12.org/005010/306","code":"A4","display":"Pending"}]}}]}],"category":{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/adjudication","code":"submitted","display":"Submitted Amount"}]}}]}]}},{"fullUrl":"urn:uuid:b2882a29-4ac4-4b3b-a8d2-8b7288c5a175","resource":{"resourceType":"Task","id":"b2882a29-4ac4-4b3b-a8d2-8b7288c5a175","meta":{"profile":["http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-task"]},"identifier":[{"system":"urn:ietf:rfc:3986","value":"urn:uuid:b2882a29-4ac4-4b3b-a8d2-8b7288c5a175"}],"status":"requested","intent":"order","code":{"coding":[{"system":"http://hl7.org/fhir/us/davinci-pas/CodeSystem/PASTempCodes","code":"attachment-request-questionnaire","display":"Questionnaire Attachment Request"}]},"for":{"reference":"http://localhost:8081/fhir/Patient/SubscriberExample"},"requester":{"reference":"http://localhost:8081/fhir/Organization/example","identifier":{"system":"http://hl7.org/fhir/sid/us-npi","value":"1234567893"}},"owner":{"reference":"http://localhost:8081/fhir/Organization/example","identifier":{"system":"http://hl7.org/fhir/sid/us-npi","value":"1234567893"}},"reasonCode":{"coding":[{"system":"http://hl7.org/fhir/us/davinci-pas/CodeSystem/PASTempCodes","code":"priorAuthorization","display":"Prior Authorization Information Request"}]},"reasonReference":{"reference":"http://localhost:8081/fhir/Claim/1768"},"input":[{"type":{"coding":[{"system":"http://hl7.org/fhir/us/davinci-pas/CodeSystem/PASTempCodes","code":"payer-url","display":"Payer URL"}]},"valueUrl":"http://localhost:8081/fhir"},{"extension":[{"url":"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-paLineNumber","valueInteger":1}],"type":{"coding":[{"system":"http://hl7.org/fhir/us/davinci-pas/CodeSystem/PASTempCodes","code":"questionnaires-needed","display":"Questionnaires Needed"}]},"valueIdentifier":{"system":"urn:ietf:rfc:3986","value":"http://example.org/fhir/Questionnaire/HomeOxygenDispatch"}}]}},{"fullUrl":"http://localhost:8081/fhir/Patient/SubscriberExample","resource":{"resourceType":"Patient","id":"SubscriberExample","meta":{"versionId":"1","lastUpdated":"2026-09-10T16:08:39.549+00:00","profile":["http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-subscriber"]},"language":"en","text":{"status":"generated","div":"<div xml:lang=\"en\" xmlns=\"http://www.w3.org/1999/xhtml\" lang=\"en\"><p class=\"res-header-id\"><b>Generated Narrative: Patient SubscriberExample</b></p><a name=\"SubscriberExample\"> </a><a name=\"hcSubscriberExample\"> </a><div style=\"display: inline-block; background-color: #d9e0e7; padding: 6px; margin: 4px; border: 1px solid #8da1b4; border-radius: 5px; line-height: 60%\"><p style=\"margin-bottom: 0px\">Language: en</p><p style=\"margin-bottom: 0px\">Profile: <a href=\"StructureDefinition-profile-subscriber.html\">PAS Subscriber Patient</a></p></div><p style=\"border: 1px #661aff solid; background-color: #e6e6ff; padding: 10px;\">JOE SMITH  Male, DoB Unknown ( http://example.org/MIN:12345678901)</p><hr/><table class=\"grid\"><tr><td style=\"background-color: #f3f5da\" title=\"A patient's military status.\"><a href=\"StructureDefinition-extension-militaryStatus.html\">Military Status</a></td><td colspan=\"3\"><span title=\"Codes:{https://codesystem.x12.org/005010/584 RU}\">RU</span></td></tr></table></div>"},"extension":[{"url":"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-militaryStatus","valueCodeableConcept":{"coding":[{"system":"https://codesystem.x12.org/005010/584","code":"RU"}]}}],"identifier":[{"system":"http://example.org/MIN","value":"12345678901"}],"name":[{"family":"SMITH","given":["JOE"]}],"gender":"male"}},{"fullUrl":"http://localhost:8081/fhir/Organization/example","resource":{"resourceType":"Organization","id":"example","meta":{"versionId":"1","lastUpdated":"2026-09-10T16:08:39.313+00:00"},"language":"en","text":{"status":"generated","div":"<div xml:lang=\"en\" xmlns=\"http://www.w3.org/1999/xhtml\" lang=\"en\"><p class=\"res-header-id\"><b>Generated Narrative: Organization example</b></p><a name=\"example\"> </a><a name=\"hcexample\"> </a><div style=\"display: inline-block; background-color: #d9e0e7; padding: 6px; margin: 4px; border: 1px solid #8da1b4; border-radius: 5px; line-height: 60%\"><p style=\"margin-bottom: 0px\">Language: en</p></div><p><b>identifier</b>: <a href=\"http://terminology.hl7.org/6.2.0/NamingSystem-npi.html\" title=\"National Provider Identifier\">United States National Provider Identifier</a>/1234567893</p><p><b>active</b>: true</p><p><b>name</b>: University Medical Center</p><p><b>telecom</b>: <a href=\"tel:+15552343523\">+1 555 234 3523</a>, <a href=\"mailto:info@acme.org\">info@acme.org</a></p><p><b>address</b>: Galapagosweg 91 San Francisco CA 94107 US (work)</p></div>"},"identifier":[{"system":"http://hl7.org/fhir/sid/us-npi","value":"1234567893"}],"active":true,"name":"University Medical Center","telecom":[{"system":"phone","value":"+1 555 234 3523","use":"work"},{"system":"email","value":"info@acme.org","use":"work"}],"address":[{"use":"work","line":["Galapagosweg 91"],"city":"San Francisco","state":"CA","postalCode":"94107","country":"US"}]}},{"fullUrl":"http://localhost:8081/fhir/Organization/UMOExample","resource":{"resourceType":"Organization","id":"UMOExample","meta":{"versionId":"1","lastUpdated":"2026-09-10T16:08:39.543+00:00","profile":["http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-requestor"]},"language":"en","text":{"status":"generated","div":"<div xml:lang=\"en\" xmlns=\"http://www.w3.org/1999/xhtml\" lang=\"en\"><p class=\"res-header-id\"><b>Generated Narrative: Organization UMOExample</b></p><a name=\"UMOExample\"> </a><a name=\"hcUMOExample\"> </a><div style=\"display: inline-block; background-color: #d9e0e7; padding: 6px; margin: 4px; border: 1px solid #8da1b4; border-radius: 5px; line-height: 60%\"><p style=\"margin-bottom: 0px\">Language: en</p><p style=\"margin-bottom: 0px\">Profile: <a href=\"StructureDefinition-profile-requestor.html\">PAS Requestor Organization</a></p></div><p><b>identifier</b>: <a href=\"http://terminology.hl7.org/5.3.0/NamingSystem-npi.html\" title=\"National Provider Identifier\">United States National Provider Identifier</a>/8189991234</p><p><b>active</b>: true</p><p><b>type</b>: <span title=\"Codes:{https://codesystem.x12.org/005010/98 X3}\">X3</span></p><p><b>name</b>: DR. JOE SMITH CORPORATION</p><p><b>address</b>: 111 1ST STREET SAN DIEGO CA 92101 US </p></div>"},"identifier":[{"system":"http://hl7.org/fhir/sid/us-npi","value":"8189991234"}],"active":true,"type":[{"coding":[{"system":"https://codesystem.x12.org/005010/98","code":"X3"}]}],"name":"DR. JOE SMITH CORPORATION","address":[{"line":["111 1ST STREET"],"city":"SAN DIEGO","state":"CA","postalCode":"92101","country":"US"}]}},{"fullUrl":"http://localhost:8081/fhir/Claim/1768","resource":{"resourceType":"Claim","id":"1768","meta":{"versionId":"1","lastUpdated":"2026-09-10T16:08:47.759+00:00","profile":["http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claim"]},"extension":[{"url":"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-TransmissionIdentifiers","extension":[{"url":"applicationSenderCode","valueString":"8189991234"},{"url":"applicationReceiverCode","valueString":"1234567893"}]}],"identifier":[{"system":"http://example.org/PATIENT_EVENT_TRACE_NUMBER","value":"67ef3222-0c7b-4332-b976-42e9a5f0c79b"}],"status":"active","type":{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/claim-type","code":"professional","display":"Professional"}]},"use":"preauthorization","patient":{"reference":"Patient/SubscriberExample"},"created":"2026-06-19T21:54:38+00:00","insurer":{"reference":"Organization/example"},"provider":{"reference":"Organization/UMOExample"},"priority":{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/processpriority","code":"normal","display":"Normal"}]},"careTeam":[{"extension":[{"url":"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-careTeamClaimScope","valueBoolean":true}],"sequence":1,"provider":{"reference":"http://example.org/fhir/PractitionerRole/ReferralPractitionerRoleExample"}}],"insurance":[{"sequence":1,"focal":true,"coverage":{"reference":"Coverage/InsuranceExample"}}],"item":[{"extension":[{"url":"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-certificationType","valueCodeableConcept":{"coding":[{"system":"https://codesystem.x12.org/005010/1322","code":"I","display":"Initial"}]}},{"url":"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceItemRequestType","valueCodeableConcept":{"coding":[{"system":"https://codesystem.x12.org/005010/1525","code":"HS","display":"Health Services Review"}]}},{"url":"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-itemTraceNumber","valueIdentifier":{"system":"http://example.org/ITEM_TRACE_NUMBER","value":"prior-auth-required-trace"}},{"url":"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService","valueReference":{"reference":"http://example.org/fhir/ServiceRequest/prior-auth-required-service-request"}}],"sequence":1,"careTeamSequence":[1],"category":{"coding":[{"system":"https://codesystem.x12.org/005010/1365","code":"3","display":"Consultation"}]},"productOrService":{"coding":[{"system":"http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets","code":"E0424"}]},"locationCodeableConcept":{"coding":[{"system":"https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set","code":"11","display":"Office"}]}}]}},{"fullUrl":"http://example.org/fhir/PractitionerRole/ReferralPractitionerRoleExample","resource":{"resourceType":"PractitionerRole","id":"ReferralPractitionerRoleExample","meta":{"profile":["http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-practitionerrole"]},"practitioner":{"reference":"http://example.org/fhir/Practitioner/ReferralPractitionerExample"},"telecom":[{"system":"phone","value":"4029993456"}]}},{"fullUrl":"http://localhost:8081/fhir/Coverage/InsuranceExample","resource":{"resourceType":"Coverage","id":"InsuranceExample","meta":{"versionId":"2","lastUpdated":"2026-09-10T16:08:47.523+00:00","profile":["http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-coverage"]},"identifier":[{"type":{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/v2-0203","code":"MB","display":"Member Number"},{"system":"http://terminology.hl7.org/CodeSystem/v2-0203","code":"MR","display":"Medical record number"}]},"system":"http://example.org/MIN","value":"1122334455"}],"status":"active","subscriber":{"reference":"Patient/SubscriberExample"},"subscriberId":"1122334455","beneficiary":{"reference":"Patient/SubscriberExample"},"relationship":{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/subscriber-relationship","code":"self","display":"Self"}]},"period":{"start":"2026-06-19T21:54:38+00:00"},"payor":[{"reference":"Organization/example","identifier":{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00001"}}],"class":[{"type":{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/coverage-class","code":"group","display":"Group"}]},"value":"GRP-001"},{"type":{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/coverage-class","code":"plan","display":"Plan"}]},"value":"PLAN-001"}]}},{"fullUrl":"http://example.org/fhir/ServiceRequest/prior-auth-required-service-request","resource":{"resourceType":"ServiceRequest","id":"prior-auth-required-service-request","meta":{"profile":["http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-servicerequest"]},"status":"active","intent":"order","code":{"coding":[{"system":"http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets","code":"E0424"}]},"subject":{"reference":"http://localhost:8081/fhir/Patient/SubscriberExample"}}},{"fullUrl":"http://example.org/fhir/Practitioner/ReferralPractitionerExample","resource":{"resourceType":"Practitioner","id":"ReferralPractitionerExample","meta":{"profile":["http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-practitioner"]},"identifier":[{"system":"http://hl7.org/fhir/sid/us-npi","value":"1234567893"}],"name":[{"family":"WATSON","given":["SUSAN"]}]}}]}`
+const assemblyRealTerminal = `{"resourceType":"ClaimResponse","id":"1770","meta":{"versionId":"3","lastUpdated":"2026-09-10T16:08:50.783+00:00","profile":["http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claimresponse"]},"extension":[{"url":"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-TransmissionIdentifiers","extension":[{"url":"applicationSenderCode","valueString":"1234567893"},{"url":"applicationReceiverCode","valueString":"8189991234"}]}],"identifier":[{"system":"http://example.org/PATIENT_EVENT_TRACE_NUMBER","value":"2ca2e10c-e924-4e12-9d69-5b71e4e91c31"}],"status":"active","type":{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/claim-type","code":"professional","display":"Professional"}]},"use":"preauthorization","patient":{"reference":"Patient/SubscriberExample"},"created":"2026-09-10T16:08:47+00:00","insurer":{"reference":"Organization/example"},"requestor":{"reference":"Organization/UMOExample"},"request":{"reference":"Claim/1768"},"outcome":"complete","item":[{"extension":[{"url":"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-itemTraceNumber","valueIdentifier":{"system":"http://example.org/ITEM_TRACE_NUMBER","value":"prior-auth-required-trace"}},{"url":"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-itemPreAuthPeriod","valuePeriod":{"start":"2026-09-10T16:08:50+00:00","end":"2026-10-10T16:08:50+00:00"}}],"itemSequence":1,"adjudication":[{"extension":[{"url":"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewAction","extension":[{"url":"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewActionCode","valueCodeableConcept":{"coding":[{"system":"https://codesystem.x12.org/005010/306","code":"A1","display":"Certified in total"}]}},{"url":"number","valueString":"AUTH-0002"}]}],"category":{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/adjudication","code":"submitted","display":"Submitted Amount"}]}}]}]}`
+
+func assemblySmallGraph() map[string]any {
+	return map[string]any{"resourceType": "Bundle", "type": "collection", "entry": []any{
+		map[string]any{"fullUrl": "https://payer.test/fhir/ClaimResponse/cr", "resource": map[string]any{"resourceType": "ClaimResponse", "id": "cr", "patient": map[string]any{"reference": "Patient/p"}, "request": map[string]any{"reference": "Claim/c"}}},
+		map[string]any{"fullUrl": "https://payer.test/fhir/Patient/p", "resource": map[string]any{"resourceType": "Patient", "id": "p", "link": []any{map[string]any{"other": map[string]any{"reference": "Patient/p"}}}}},
+		map[string]any{"fullUrl": "https://payer.test/fhir/Claim/c", "resource": map[string]any{"resourceType": "Claim", "id": "c", "patient": map[string]any{"reference": "Patient/p"}}},
+	}}
+}
+
+// TestPASGraphRealPayerFixtureMutations drives the graph rule over the REAL
+// reference-payer answer, one mutation at a time.
+//
+// The small hand-built graph below exercises the same rules on a graph this test
+// file owns; these rows exercise them on a payer's own bytes, which is where a
+// rule that quietly stopped applying to real-world shapes would hide. They came
+// across from the assembly path's own rejection table when that path was deleted
+// — the mutations are about the RETAINED GRAPH, which is exactly what the graph
+// rule still governs.
+func TestPASGraphRealPayerFixtureMutations(t *testing.T) {
+	for _, row := range []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{"duplicate entry", func(b map[string]any) { e := b["entry"].([]any); b["entry"] = append(e, e[0]) }},
+		{"missing reference target", func(b map[string]any) { b["entry"] = b["entry"].([]any)[:1] }},
+		{"absolute foreign reference", func(b map[string]any) {
+			e := b["entry"].([]any)[0].(map[string]any)
+			e["resource"].(map[string]any)["insurer"] = map[string]any{"reference": "https://foreign.invalid/fhir/Organization/example"}
+		}},
+		{"contained Bundle", func(b map[string]any) {
+			e := b["entry"].([]any)[1].(map[string]any)
+			e["resource"].(map[string]any)["contained"] = []any{map[string]any{"resourceType": "Bundle", "id": "nested"}}
+		}},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			var b map[string]any
+			if err := json.Unmarshal([]byte(assemblyRealPending), &b); err != nil {
+				t.Fatalf("decode the reference-payer answer: %v", err)
+			}
+			// The unmutated fixture is relayable — without this the rows could
+			// pass because the fixture itself stopped parsing.
+			clean, err := json.Marshal(b)
+			if err != nil {
+				t.Fatalf("re-encode: %v", err)
+			}
+			if err := validatePASBundleGraph(clean); err != nil {
+				t.Fatalf("the reference-payer answer must be relayable before the mutation: %v", err)
+			}
+			row.mutate(b)
+			raw, err := json.Marshal(b)
+			if err != nil {
+				t.Fatalf("re-encode the mutation: %v", err)
+			}
+			if err := validatePASBundleGraph(raw); err == nil {
+				t.Fatal("accepted a payer answer whose graph does not close")
+			}
+		})
+	}
+}
+
+func TestPASGraphReferenceScopes(t *testing.T) {
+	cases := []struct {
+		name   string
+		good   bool
+		mutate func(map[string]any, map[string]any, map[string]any)
+	}{
+		{"identity cycle", true, func(b, cr, p map[string]any) {}},
+		{"exact absolute", true, func(b, cr, p map[string]any) {
+			cr["patient"] = map[string]any{"reference": "https://payer.test/fhir/Patient/p"}
+		}},
+		{"exact version", true, func(b, cr, p map[string]any) {
+			p["meta"] = map[string]any{"versionId": "2"}
+			cr["patient"] = map[string]any{"reference": "Patient/p/_history/2"}
+		}},
+		{"wrong version", false, func(b, cr, p map[string]any) {
+			p["meta"] = map[string]any{"versionId": "3"}
+			cr["patient"] = map[string]any{"reference": "Patient/p/_history/2"}
+		}},
+		{"missing version", false, func(b, cr, p map[string]any) { cr["patient"] = map[string]any{"reference": "Patient/p/_history/2"} }},
+		{"exact URN", true, func(b, cr, p map[string]any) {
+			b["entry"].([]any)[1].(map[string]any)["fullUrl"] = "urn:uuid:10000000-0000-4000-8000-000000000001"
+			p["link"] = nil
+			cr["patient"] = map[string]any{"reference": "urn:uuid:10000000-0000-4000-8000-000000000001"}
+			b["entry"].([]any)[2].(map[string]any)["resource"].(map[string]any)["patient"] = cr["patient"]
+		}},
+		// FHIR R4 defines no base for a relative reference under a URN-identified
+		// entry; the rule reads it as the one entry whose RESTful identity ends in
+		// it, and nothing when that is not unique.
+		{"URN relative resolves by unique identity", true, func(b, cr, p map[string]any) {
+			b["entry"].([]any)[0].(map[string]any)["fullUrl"] = "urn:uuid:10000000-0000-4000-8000-000000000001"
+		}},
+		{"URN relative ambiguous", false, func(b, cr, p map[string]any) {
+			b["entry"].([]any)[0].(map[string]any)["fullUrl"] = "urn:uuid:10000000-0000-4000-8000-000000000001"
+			b["entry"] = append(b["entry"].([]any), map[string]any{"fullUrl": "https://other.test/fhir/Patient/p", "resource": map[string]any{"resourceType": "Patient", "id": "p"}})
+		}},
+		{"contained", true, func(b, cr, p map[string]any) {
+			p["contained"] = []any{map[string]any{"resourceType": "Organization", "id": "local"}}
+			p["managingOrganization"] = map[string]any{"reference": "#local"}
+		}},
+		{"missing contained", false, func(b, cr, p map[string]any) { p["managingOrganization"] = map[string]any{"reference": "#absent"} }},
+		{"contained scope", false, func(b, cr, p map[string]any) {
+			p["contained"] = []any{map[string]any{"resourceType": "Organization", "id": "local"}}
+			cr["insurer"] = map[string]any{"reference": "#local"}
+		}},
+		{"duplicate contained", false, func(b, cr, p map[string]any) {
+			p["contained"] = []any{map[string]any{"resourceType": "Organization", "id": "local"}, map[string]any{"resourceType": "Organization", "id": "local"}}
+		}},
+		{"conflicting fullUrl identity", false, func(b, cr, p map[string]any) { p["id"] = "other" }},
+		{"duplicate entry", false, func(b, cr, p map[string]any) { b["entry"] = append(b["entry"].([]any), b["entry"].([]any)[1]) }},
+		{"no CR", false, func(b, cr, p map[string]any) { b["entry"] = b["entry"].([]any)[1:] }},
+		{"rooted relative", false, func(b, cr, p map[string]any) { cr["patient"] = map[string]any{"reference": "/Patient/p"} }},
+		{"query", false, func(b, cr, p map[string]any) { cr["patient"] = map[string]any{"reference": "Patient/p?x=1"} }},
+		{"fragment", false, func(b, cr, p map[string]any) { cr["patient"] = map[string]any{"reference": "Patient/p#x"} }},
+		{"new terminal target", false, func(b, cr, p map[string]any) { cr["insurer"] = map[string]any{"reference": "Organization/new"} }},
+		{"deep JSON", false, func(b, cr, p map[string]any) {
+			var child any = "leaf"
+			for i := 0; i < 70; i++ {
+				child = map[string]any{"extension": child}
+			}
+			p["extension"] = child
+		}},
+		{"edge budget", false, func(b, cr, p map[string]any) {
+			refs := make([]any, pasGraphMaxReferences+1)
+			for i := range refs {
+				refs[i] = map[string]any{"reference": "Patient/p"}
+			}
+			p["link"] = refs
+		}},
+		{"resource budget", false, func(b, cr, p map[string]any) {
+			for i := 0; i < pasGraphMaxResources; i++ {
+				b["entry"] = append(b["entry"].([]any), b["entry"].([]any)[1])
+			}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := assemblySmallGraph()
+			es := b["entry"].([]any)
+			cr := es[0].(map[string]any)["resource"].(map[string]any)
+			p := es[1].(map[string]any)["resource"].(map[string]any)
+			tc.mutate(b, cr, p)
+			raw, _ := json.Marshal(b)
+			err := validatePASBundleGraph(raw)
+			if (err == nil) != tc.good {
+				t.Fatalf("valid=%v, error=%v", tc.good, err)
+			}
+		})
+	}
+}
+
+func TestPASGraphRejectsAmbiguousJSON(t *testing.T) {
+	raw := strings.Replace(assemblyRealPending, `"resourceType":"Bundle"`, `"resourceType":"Patient","resourceType":"Bundle"`, 1)
+	if validatePASBundleGraph([]byte(raw)) == nil {
+		t.Fatal("accepted duplicate JSON member")
+	}
+}
+func TestPASGraphContainerBackReference(t *testing.T) {
+	b := assemblySmallGraph()
+	p := b["entry"].([]any)[1].(map[string]any)["resource"].(map[string]any)
+	p["managingOrganization"] = map[string]any{"reference": "#"}
+	raw, _ := json.Marshal(b)
+	if validatePASBundleGraph(raw) == nil {
+		t.Fatal("root resource has no containing resource")
+	}
+	delete(p, "managingOrganization")
+	p["contained"] = []any{map[string]any{"resourceType": "Organization", "id": "local", "partOf": map[string]any{"reference": "#"}}}
+	raw, _ = json.Marshal(b)
+	if err := validatePASBundleGraph(raw); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPASGraphMalformedInputs(t *testing.T) {
+	for _, raw := range []string{"null", "[]", "{}", `{"resourceType":"Bundle","type":"collection","entry":[null]}`, assemblyRealPending + ` {}`, strings.Repeat(" ", pasGraphMaxBytes+1)} {
+		if err := validatePASBundleGraph([]byte(raw)); err == nil {
+			t.Fatal("accepted malformed graph")
+		}
+	}
+}
+
+func TestPASGraphResourceAndIdentityGuards(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(map[string]any, map[string]any)
+	}{
+		{"missing fullUrl", func(e, r map[string]any) { delete(e, "fullUrl") }},
+		{"relative fullUrl", func(e, r map[string]any) { e["fullUrl"] = "Patient/p" }},
+		{"versioned fullUrl", func(e, r map[string]any) { e["fullUrl"] = "https://payer.test/fhir/Patient/p/_history/2" }},
+		{"missing id", func(e, r map[string]any) { delete(r, "id") }},
+		{"missing type", func(e, r map[string]any) { delete(r, "resourceType") }},
+		{"invalid id", func(e, r map[string]any) { r["id"] = "p/invalid" }},
+		{"malformed reference", func(e, r map[string]any) { r["managingOrganization"] = map[string]any{"reference": 42} }},
+		{"empty reference", func(e, r map[string]any) { r["managingOrganization"] = map[string]any{"reference": ""} }},
+		{"non-array contained", func(e, r map[string]any) { r["contained"] = true }},
+		{"invalid contained", func(e, r map[string]any) { r["contained"] = []any{true} }},
+		{"anonymous contained", func(e, r map[string]any) { r["contained"] = []any{map[string]any{"resourceType": "Organization"}} }},
+		{"nested containment", func(e, r map[string]any) {
+			r["contained"] = []any{map[string]any{"resourceType": "Organization", "id": "a", "contained": []any{map[string]any{"resourceType": "Organization", "id": "b"}}}}
+		}},
+		{"nested Parameters", func(e, r map[string]any) {
+			r["contained"] = []any{map[string]any{"resourceType": "Parameters", "id": "a"}}
+		}},
+		{"contained resource budget", func(e, r map[string]any) {
+			rs := []any{}
+			for i := 0; i < pasGraphMaxResources; i++ {
+				rs = append(rs, map[string]any{"resourceType": "Organization", "id": fmt.Sprint(i)})
+			}
+			r["contained"] = rs
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := assemblySmallGraph()
+			e := b["entry"].([]any)[1].(map[string]any)
+			r := e["resource"].(map[string]any)
+			tc.mutate(e, r)
+			raw, _ := json.Marshal(b)
+			if err := validatePASBundleGraph(raw); err == nil {
+				t.Fatal("accepted malformed identity")
+			}
+		})
+	}
+}
+
+// TestPASGraphIDLessEntryIdentity: an entry whose fullUrl is a URN is identified by
+// that URN and need not carry a resource id (FHIR R4 Bundle: a resource with no id
+// is placed under a urn:uuid fullUrl). The same resource under an http(s) fullUrl
+// must carry the id its RESTful address ends in. A stated-but-unusable id is
+// refused under either. Measured 2026-09-20: a hosted payer platform answers
+// Claim/$submit with its ClaimResponse under urn:uuid and no id, which the rule
+// refused as malformed and the requester received as 502.
+func TestPASGraphIDLessEntryIdentity(t *testing.T) {
+	const urn = "urn:uuid:10000000-0000-4000-8000-000000000001"
+	rows := []struct {
+		name   string
+		mutate func(b map[string]any)
+		accept bool
+		names  string // what the refusal must name, when refused
+	}{
+		{"id-less ClaimResponse under urn:uuid", func(b map[string]any) {
+			e := b["entry"].([]any)[0].(map[string]any)
+			e["fullUrl"] = urn
+			r := e["resource"].(map[string]any)
+			delete(r, "id")
+			r["patient"] = map[string]any{"reference": "https://payer.test/fhir/Patient/p"}
+			r["request"] = map[string]any{"reference": "https://payer.test/fhir/Claim/c"}
+		}, true, ""},
+		{"id-less Patient under urn:uuid named by its fullUrl", func(b map[string]any) {
+			e := b["entry"].([]any)[1].(map[string]any)
+			e["fullUrl"] = urn
+			r := e["resource"].(map[string]any)
+			delete(r, "id")
+			r["link"] = []any{map[string]any{"other": map[string]any{"reference": urn}}}
+			b["entry"].([]any)[0].(map[string]any)["resource"].(map[string]any)["patient"] = map[string]any{"reference": urn}
+			b["entry"].([]any)[2].(map[string]any)["resource"].(map[string]any)["patient"] = map[string]any{"reference": urn}
+		}, true, ""},
+		{"id-less ClaimResponse under https", func(b map[string]any) {
+			delete(b["entry"].([]any)[0].(map[string]any)["resource"].(map[string]any), "id")
+		}, false, "without a usable resourceType and id"},
+		{"empty id under urn:uuid", func(b map[string]any) {
+			e := b["entry"].([]any)[0].(map[string]any)
+			e["fullUrl"] = urn
+			r := e["resource"].(map[string]any)
+			r["id"] = ""
+			r["patient"] = map[string]any{"reference": "https://payer.test/fhir/Patient/p"}
+			r["request"] = map[string]any{"reference": "https://payer.test/fhir/Claim/c"}
+		}, false, "without a usable resourceType and id"},
+		// A [type]/[id] reference under a URN-identified entry has no RESTful base;
+		// it resolves to the one entry whose RESTful identity ends in it, and to
+		// nothing when none or more than one does.
+		{"relative references under urn:uuid resolve to the one entry ending in them", func(b map[string]any) {
+			e := b["entry"].([]any)[0].(map[string]any)
+			e["fullUrl"] = urn
+			delete(e["resource"].(map[string]any), "id")
+		}, true, ""},
+		{"relative reference under urn:uuid names no entry", func(b map[string]any) {
+			e := b["entry"].([]any)[0].(map[string]any)
+			e["fullUrl"] = urn
+			delete(e["resource"].(map[string]any), "id")
+			e["resource"].(map[string]any)["patient"] = map[string]any{"reference": "Patient/absent"}
+		}, false, "entry 0 (ClaimResponse " + urn + ") /patient references Patient \"Patient/absent\", which is relative under entry 0 (ClaimResponse " + urn + "), which is identified by a URN, and no entry of the Bundle has a RESTful identity ending in Patient/absent"},
+		{"relative reference under urn:uuid names two entries", func(b map[string]any) {
+			e := b["entry"].([]any)[0].(map[string]any)
+			e["fullUrl"] = urn
+			delete(e["resource"].(map[string]any), "id")
+			b["entry"] = append(b["entry"].([]any), map[string]any{"fullUrl": "https://other.test/fhir/Patient/p", "resource": map[string]any{"resourceType": "Patient", "id": "p"}})
+		}, false, "which is relative under entry 0 (ClaimResponse " + urn + "), which is identified by a URN, and 2 entries have a RESTful identity ending in Patient/p (https://payer.test/fhir/Patient/p, https://other.test/fhir/Patient/p)"},
+		{"relative reference under urn:uuid is not [type]/[id]", func(b map[string]any) {
+			e := b["entry"].([]any)[0].(map[string]any)
+			e["fullUrl"] = urn
+			delete(e["resource"].(map[string]any), "id")
+			e["resource"].(map[string]any)["patient"] = map[string]any{"reference": "fhir/Patient/p"}
+		}, false, "is not of the form [type]/[id]"},
+		{"versioned relative reference under urn:uuid checks the version held", func(b map[string]any) {
+			e := b["entry"].([]any)[0].(map[string]any)
+			e["fullUrl"] = urn
+			delete(e["resource"].(map[string]any), "id")
+			e["resource"].(map[string]any)["patient"] = map[string]any{"reference": "Patient/p/_history/2"}
+		}, false, "names version 2, which entry 1 (Patient/p) does not hold"},
+		{"relative reference under an http(s) owner still resolves against its base only", func(b map[string]any) {
+			b["entry"].([]any)[0].(map[string]any)["fullUrl"] = "https://elsewhere.test/fhir/ClaimResponse/cr"
+		}, false, "resolves to https://elsewhere.test/fhir/Patient/p, which is no entry of the Bundle"},
+		// The suffix match is on whole path segments: a RESTful identity ending in
+		// "RelatedPerson/p" is not one ending in "Person/p", and "Patient/112" is
+		// not "Patient/12".
+		{"type segment boundary", func(b map[string]any) {
+			e := b["entry"].([]any)[0].(map[string]any)
+			e["fullUrl"] = urn
+			delete(e["resource"].(map[string]any), "id")
+			b["entry"] = append(b["entry"].([]any), map[string]any{"fullUrl": "https://payer.test/fhir/RelatedPerson/p", "resource": map[string]any{"resourceType": "RelatedPerson", "id": "p"}})
+			e["resource"].(map[string]any)["patient"] = map[string]any{"reference": "Person/p"}
+		}, false, "no entry of the Bundle has a RESTful identity ending in Person/p"},
+		{"id segment boundary", func(b map[string]any) {
+			e := b["entry"].([]any)[0].(map[string]any)
+			e["fullUrl"] = urn
+			delete(e["resource"].(map[string]any), "id")
+			p := b["entry"].([]any)[1].(map[string]any)
+			p["fullUrl"] = "https://payer.test/fhir/Patient/112"
+			p["resource"].(map[string]any)["id"] = "112"
+			p["resource"].(map[string]any)["link"] = nil
+			b["entry"].([]any)[2].(map[string]any)["resource"].(map[string]any)["patient"] = map[string]any{"reference": "Patient/112"}
+			e["resource"].(map[string]any)["patient"] = map[string]any{"reference": "Patient/12"}
+		}, false, "no entry of the Bundle has a RESTful identity ending in Patient/12"},
+		// A resource type is letters only (FHIR resource names); one carrying a
+		// slash would let "Patient/12" resolve to a "Foo/Patient" at …/Foo/Patient/12.
+		{"resourceType with a slash", func(b map[string]any) {
+			p := b["entry"].([]any)[1].(map[string]any)
+			p["fullUrl"] = "https://payer.test/fhir/Foo/Patient/p"
+			p["resource"].(map[string]any)["resourceType"] = "Foo/Patient"
+		}, false, "without a usable resourceType and id"},
+		{"contained resourceType with a slash", func(b map[string]any) {
+			p := b["entry"].([]any)[1].(map[string]any)["resource"].(map[string]any)
+			p["contained"] = []any{map[string]any{"resourceType": "Foo/Organization", "id": "local"}}
+		}, false, "contains a resource without a unique, usable resourceType and id"},
+		// Any URN identifies an entry the same way; urn:oid is FHIR's other one.
+		{"id-less under urn:oid resolves relative references by identity too", func(b map[string]any) {
+			e := b["entry"].([]any)[0].(map[string]any)
+			e["fullUrl"] = "urn:oid:2.16.840.1.113883.19.5.99999.1"
+			delete(e["resource"].(map[string]any), "id")
+		}, true, ""},
+		// A refusal names at most 16 candidates, then how many more: an answer
+		// with hundreds of colliding identities cannot make each refusal huge.
+		{"ambiguity names at most sixteen candidates", func(b map[string]any) {
+			e := b["entry"].([]any)[0].(map[string]any)
+			e["fullUrl"] = urn
+			delete(e["resource"].(map[string]any), "id")
+			for i := 0; i < 20; i++ {
+				b["entry"] = append(b["entry"].([]any), map[string]any{"fullUrl": fmt.Sprintf("https://h%02d.test/fhir/Patient/p", i), "resource": map[string]any{"resourceType": "Patient", "id": "p"}})
+			}
+		}, false, "21 entries have a RESTful identity ending in Patient/p (https://payer.test/fhir/Patient/p, https://h00.test/fhir/Patient/p, https://h01.test/fhir/Patient/p, https://h02.test/fhir/Patient/p, https://h03.test/fhir/Patient/p, https://h04.test/fhir/Patient/p, https://h05.test/fhir/Patient/p, https://h06.test/fhir/Patient/p, https://h07.test/fhir/Patient/p, https://h08.test/fhir/Patient/p, https://h09.test/fhir/Patient/p, https://h10.test/fhir/Patient/p, https://h11.test/fhir/Patient/p, https://h12.test/fhir/Patient/p, https://h13.test/fhir/Patient/p, https://h14.test/fhir/Patient/p, +5 more)"},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			b := assemblySmallGraph()
+			row.mutate(b)
+			raw, _ := json.Marshal(b)
+			err := validatePASBundleGraph(raw)
+			if row.accept {
+				if err != nil {
+					t.Fatalf("refused: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("accepted")
+			}
+			if !strings.Contains(err.Error(), row.names) {
+				t.Fatalf("refusal %q does not name %q", err, row.names)
+			}
+		})
+	}
+}
+
+func TestPASGraphRetainedMetadataAndExactURIs(t *testing.T) {
+	for _, row := range []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{"bundle reference", func(b map[string]any) {
+			b["signature"] = map[string]any{"who": map[string]any{"reference": "https://foreign.test/Practitioner/missing"}}
+		}},
+		{"entry reference", func(b map[string]any) {
+			b["entry"].([]any)[0].(map[string]any)["extension"] = []any{map[string]any{"url": "urn:test", "valueReference": map[string]any{"reference": "Patient/p"}}}
+		}},
+		{"encoded slash", func(b map[string]any) {
+			b["entry"].([]any)[0].(map[string]any)["resource"].(map[string]any)["patient"] = map[string]any{"reference": "Patient%2Fp"}
+		}},
+		{"empty query", func(b map[string]any) {
+			b["entry"].([]any)[0].(map[string]any)["resource"].(map[string]any)["patient"] = map[string]any{"reference": "Patient/p?"}
+		}},
+		{"contained type absent", func(b map[string]any) {
+			r := b["entry"].([]any)[0].(map[string]any)["resource"].(map[string]any)
+			r["contained"] = []any{map[string]any{"id": "local"}}
+			r["insurer"] = map[string]any{"reference": "#local"}
+		}},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			b := assemblySmallGraph()
+			row.mutate(b)
+			raw, _ := json.Marshal(b)
+			if validatePASBundleGraph(raw) == nil {
+				t.Fatal("accepted invalid retained reference")
+			}
+		})
+	}
+}
+
+func TestPASGraphRejectsUnsafeResourceIDs(t *testing.T) {
+	for _, id := range []string{"encoded%2Fpath", "back\\slash", "..", ".", strings.Repeat("x", 65), "space id"} {
+		t.Run(id, func(t *testing.T) {
+			b := assemblySmallGraph()
+			e := b["entry"].([]any)[0].(map[string]any)
+			e["fullUrl"] = "urn:uuid:10000000-0000-4000-8000-000000000001"
+			e["resource"].(map[string]any)["id"] = id
+			e["resource"].(map[string]any)["patient"] = map[string]any{"reference": "https://payer.test/fhir/Patient/p"}
+			e["resource"].(map[string]any)["request"] = map[string]any{"reference": "https://payer.test/fhir/Claim/c"}
+			raw, _ := json.Marshal(b)
+			if validatePASBundleGraph(raw) == nil {
+				t.Fatal("accepted unsafe resource identity")
+			}
+		})
+	}
+}
+
+func TestPASGraphRejectsUnusableRESTBases(t *testing.T) {
+	for _, full := range []string{"http:/fhir/ClaimResponse/cr", "https://payer.test/f%68ir/ClaimResponse/cr"} {
+		t.Run(full, func(t *testing.T) {
+			b := assemblySmallGraph()
+			b["entry"].([]any)[0].(map[string]any)["fullUrl"] = full
+			if strings.HasPrefix(full, "http:/fhir") {
+				for _, v := range b["entry"].([]any) {
+					e := v.(map[string]any)
+					e["fullUrl"] = strings.Replace(e["fullUrl"].(string), "https://payer.test/fhir", "http:/fhir", 1)
+				}
+			}
+			raw, _ := json.Marshal(b)
+			if validatePASBundleGraph(raw) == nil {
+				t.Fatal("accepted undefined or normalized REST base")
+			}
+		})
+	}
+}
+
+// TestPASGraphRefusalNamesTheReference: the rows above prove each clause refuses;
+// these prove the refusal SAYS WHAT IT REFUSED. A payer whose answer names a record
+// it does not carry, and a rule that is wrong about a record the answer does
+// carry, produce the same 502 unless the refusal names the entry, the element,
+// the reference as written and why it does not resolve. Measured 2026-09-19:
+// three of four submissions to the 2.2 reference payer were refused with a fixed
+// text and nothing on the refusing node said which reference dangled.
+func TestPASGraphRefusalNamesTheReference(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(b, cr, p map[string]any)
+		want   pasGraphRefusal
+		holder string
+	}{
+		{"relative to no entry", func(b, cr, p map[string]any) {
+			cr["insurer"] = map[string]any{"reference": "Organization/new"}
+		}, pasGraphRefusal{Owner: "entry 0 (ClaimResponse/cr)", Path: "/insurer", Target: "Organization", Reference: "Organization/new", Why: "resolves to https://payer.test/fhir/Organization/new, which is no entry of the Bundle"}, "ClaimResponse"},
+		{"absolute foreign", func(b, cr, p map[string]any) {
+			cr["patient"] = map[string]any{"reference": "https://shn.example/fhir/Patient/MBR-COVERED"}
+		}, pasGraphRefusal{Owner: "entry 0 (ClaimResponse/cr)", Path: "/patient", Target: "Patient", Reference: "https://shn.example/fhir/Patient/MBR-COVERED", Why: "is no entry of the Bundle"}, "ClaimResponse"},
+		{"nested element", func(b, cr, p map[string]any) {
+			cr["item"] = []any{map[string]any{"extension": []any{map[string]any{"url": "x", "valueReference": map[string]any{"reference": "ServiceRequest/9"}}}}}
+		}, pasGraphRefusal{Owner: "entry 0 (ClaimResponse/cr)", Path: "/item/0/extension/0/valueReference", Target: "ServiceRequest", Reference: "ServiceRequest/9", Why: "resolves to https://payer.test/fhir/ServiceRequest/9, which is no entry of the Bundle"}, "ClaimResponse"},
+		{"missing contained", func(b, cr, p map[string]any) {
+			p["managingOrganization"] = map[string]any{"reference": "#absent"}
+		}, pasGraphRefusal{Owner: "entry 1 (Patient/p)", Path: "/managingOrganization", Target: "contained resource", Reference: "#absent", Why: "names no resource contained in entry 1 (Patient/p)"}, "Patient"},
+		{"wrong version", func(b, cr, p map[string]any) {
+			p["meta"] = map[string]any{"versionId": "3"}
+			cr["patient"] = map[string]any{"reference": "Patient/p/_history/2"}
+		}, pasGraphRefusal{Owner: "entry 0 (ClaimResponse/cr)", Path: "/patient", Target: "Patient", Reference: "Patient/p/_history/2", Why: "names version 2, which entry 1 (Patient/p) does not hold"}, "ClaimResponse"},
+		{"a base whose path contains /_history/", func(b, cr, p map[string]any) {
+			cr["patient"] = map[string]any{"reference": "https://payer.test/_history/fhir/Patient/p"}
+		}, pasGraphRefusal{Owner: "entry 0 (ClaimResponse/cr)", Path: "/patient", Target: "Patient", Reference: "https://payer.test/_history/fhir/Patient/p", Why: "is no entry of the Bundle"}, "ClaimResponse"},
+		{"a malformed version", func(b, cr, p map[string]any) {
+			cr["patient"] = map[string]any{"reference": "Patient/p/_history/2/x"}
+		}, pasGraphRefusal{Owner: "entry 0 (ClaimResponse/cr)", Path: "/patient", Target: "resource", Reference: "Patient/p/_history/2/x", Why: "resolves to https://payer.test/fhir/Patient/p/_history/2/x, which is no entry of the Bundle"}, "ClaimResponse"},
+		{"Bundle metadata", func(b, cr, p map[string]any) {
+			b["signature"] = map[string]any{"who": map[string]any{"reference": "Organization/signer"}, "data": "c2lnbmF0dXJl"}
+		}, pasGraphRefusal{Owner: "Bundle", Path: "/signature/who", Target: "Organization", Reference: "Organization/signer", Why: "is relative, and Bundle metadata has no base to resolve it against"}, "Bundle"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := assemblySmallGraph()
+			es := b["entry"].([]any)
+			cr := es[0].(map[string]any)["resource"].(map[string]any)
+			p := es[1].(map[string]any)["resource"].(map[string]any)
+			tc.mutate(b, cr, p)
+			raw, _ := json.Marshal(b)
+			err := validatePASBundleGraph(raw)
+			got := pasGraphRefusalOf(err)
+			if got == nil {
+				t.Fatalf("refusal names no reference: %v", err)
+			}
+			if got.Owner != tc.want.Owner || got.Path != tc.want.Path || got.Target != tc.want.Target || got.Reference != tc.want.Reference || got.Why != tc.want.Why || got.Holder() != tc.holder {
+				t.Fatalf("refusal\n got %+v (holder %q)\nwant %+v (holder %q)", *got, got.Holder(), tc.want, tc.holder)
+			}
+			for _, part := range []string{tc.want.Owner, tc.want.Path, tc.want.Target, tc.want.Reference, tc.want.Why} {
+				if !strings.Contains(err.Error(), part) {
+					t.Fatalf("error text %q does not carry %q", err.Error(), part)
+				}
+			}
+			// The same bytes name the same reference on every run: the walk is in
+			// Bundle order over sorted members, not map order.
+			for i := 0; i < 20; i++ {
+				again := pasGraphRefusalOf(validatePASBundleGraph(raw))
+				if again == nil || *again != *got {
+					t.Fatalf("run %d named a different reference: %+v", i, again)
+				}
+			}
+		})
+	}
+}
+
+// TestPASGraphRefusalNamesTheFirstReference: with two dangling references the
+// one named is the first in the Bundle's own order — the lower entry, then the
+// earlier member — so an operator reading two refusals of the same answer reads
+// the same fact twice.
+func TestPASGraphRefusalNamesTheFirstReference(t *testing.T) {
+	b := assemblySmallGraph()
+	es := b["entry"].([]any)
+	es[0].(map[string]any)["resource"].(map[string]any)["requestor"] = map[string]any{"reference": "Organization/later-member"}
+	es[0].(map[string]any)["resource"].(map[string]any)["insurer"] = map[string]any{"reference": "Organization/earlier-member"}
+	es[2].(map[string]any)["resource"].(map[string]any)["provider"] = map[string]any{"reference": "Organization/later-entry"}
+	raw, _ := json.Marshal(b)
+	got := pasGraphRefusalOf(validatePASBundleGraph(raw))
+	if got == nil || got.Reference != "Organization/earlier-member" || got.Path != "/insurer" {
+		t.Fatalf("named %+v, want the ClaimResponse's insurer", got)
+	}
+}
+
+// TestPASGraphStructuralRefusalsSayWhatWasSeen: a refusal that names no reference
+// still says what it saw, and never the bytes.
+func TestPASGraphStructuralRefusalsSayWhatWasSeen(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(b map[string]any)
+		want   string
+	}{
+		{"no ClaimResponse", func(b map[string]any) { b["entry"] = b["entry"].([]any)[1:] }, "carries no ClaimResponse"},
+		{"two ClaimResponses", func(b map[string]any) {
+			e := b["entry"].([]any)
+			dup := map[string]any{"fullUrl": "https://payer.test/fhir/ClaimResponse/cr2", "resource": map[string]any{"resourceType": "ClaimResponse", "id": "cr2"}}
+			b["entry"] = append(e, dup)
+		}, "more than one ClaimResponse (https://payer.test/fhir/ClaimResponse/cr and https://payer.test/fhir/ClaimResponse/cr2)"},
+		{"relative fullUrl", func(b map[string]any) { b["entry"].([]any)[1].(map[string]any)["fullUrl"] = "Patient/p" }, `entry 1 fullUrl "Patient/p" is not an absolute, versionless identity`},
+		{"identity mismatch", func(b map[string]any) {
+			b["entry"].([]any)[1].(map[string]any)["resource"].(map[string]any)["id"] = "other"
+		}, "does not end in its resource's identity Patient/other"},
+		{"repeated identity", func(b map[string]any) { e := b["entry"].([]any); b["entry"] = append(e, e[1]) }, "entry 3 repeats the identity https://payer.test/fhir/Patient/p"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := assemblySmallGraph()
+			tc.mutate(b)
+			raw, _ := json.Marshal(b)
+			err := validatePASBundleGraph(raw)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("got %v, want a refusal saying %q", err, tc.want)
+			}
+			if pasGraphRefusalOf(err) != nil {
+				t.Fatalf("a structural refusal named a reference: %v", err)
+			}
+		})
+	}
+}
+
+// TestNativePASResponseRefusalIsObservable: the framed 502 a requester receives
+// names the reference, the refusing node logs it with the correlation id, a
+// closed graph passes byte for byte and logs nothing, and the log never carries
+// the payer's bytes.
+func TestNativePASResponseRefusalIsObservable(t *testing.T) {
+	// The reference payer's own pended answer, closed: relayed byte for byte.
+	closed := []byte(assemblyRealPending)
+	var b map[string]any
+	if err := json.Unmarshal(closed, &b); err != nil {
+		t.Fatal(err)
+	}
+	// The measured shape: the order the payer echoes names the requester's own
+	// Patient URL, which the payer never stored and the Bundle does not carry.
+	order := b["entry"].([]any)[8].(map[string]any)["resource"].(map[string]any)
+	if order["resourceType"] != "ServiceRequest" {
+		t.Fatalf("fixture entry 8 is a %v, not the order", order["resourceType"])
+	}
+	order["subject"] = map[string]any{"reference": "https://shn.example/fhir/Patient/MBR-COVERED"}
+	open, err := json.Marshal(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var logged bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&logged)
+	defer log.SetOutput(prev)
+
+	kept, lr := validateRelayedPASResponse("corr-closed", "pas-claim", "", closed)
+	if lr.Status != 0 || !bytes.Equal(kept, closed) {
+		t.Fatalf("closed graph refused or altered: %+v", lr)
+	}
+	if logged.Len() != 0 {
+		t.Fatalf("a relayed answer was logged as refused: %s", logged.String())
+	}
+
+	kept, lr = validateRelayedPASResponse("corr-open", "pas-claim", "", open)
+	if kept != nil || lr.Status != http.StatusBadGateway {
+		t.Fatalf("open graph relayed: %+v", lr)
+	}
+	for _, part := range []string{"invalid native PAS response Bundle", "entry 8 (ServiceRequest/prior-auth-required-service-request)", "/subject", `Patient "https://shn.example/fhir/Patient/MBR-COVERED"`, "is no entry of the Bundle"} {
+		if !strings.Contains(lr.Message, part) {
+			t.Fatalf("framed error %q does not carry %q", lr.Message, part)
+		}
+	}
+	line := logged.String()
+	if !strings.Contains(line, "gateway: pas response refused: {") {
+		t.Fatalf("refusal not logged at the refusing node: %q", line)
+	}
+	var rec pasResponseRefusal
+	if err := json.Unmarshal([]byte(line[strings.Index(line, "{"):]), &rec); err != nil {
+		t.Fatalf("refusal record is not JSON: %v: %q", err, line)
+	}
+	if rec.CorrelationID != "corr-open" || rec.LegType != "pas-claim" || rec.Status != http.StatusBadGateway || rec.Entries != 10 || rec.Bytes != len(open) {
+		t.Fatalf("refusal record misstates the exchange: %+v", rec)
+	}
+	if rec.Reference == nil || rec.Reference.Reference != "https://shn.example/fhir/Patient/MBR-COVERED" || rec.Reference.Owner != "entry 8 (ServiceRequest/prior-auth-required-service-request)" || rec.Reference.Path != "/subject" || rec.Reference.Target != "Patient" {
+		t.Fatalf("refusal record does not name the dangling reference: %+v", rec.Reference)
+	}
+	// The payer's bytes stay out of the log: the member's name, present in the
+	// answer's Patient entry, must not be.
+	if strings.Contains(line, "SMITH") || strings.Contains(line, "Generated Narrative") {
+		t.Fatalf("the payer's bytes reached the log: %q", line)
+	}
+}
+
+// TestValidatePASBundleGraphAt drives the per-line answer graph rule (FR-G28):
+// 2.0.1 requires every reference to resolve; 2.1.0 requires only that
+// ClaimResponse.request names the request Claim; 2.2.1 lets the request Claim,
+// and only it, go unresolved when ClaimResponse.request names it. An unknown
+// line reads as 2.0.1. The structural rules hold at every line.
+func TestValidatePASBundleGraphAt(t *testing.T) {
+	dropEntry := func(typ string) func(b map[string]any) {
+		return func(b map[string]any) {
+			var kept []any
+			for _, e := range b["entry"].([]any) {
+				if e.(map[string]any)["resource"].(map[string]any)["resourceType"] != typ {
+					kept = append(kept, e)
+				}
+			}
+			b["entry"] = kept
+		}
+	}
+	response := func(b map[string]any) map[string]any {
+		return b["entry"].([]any)[0].(map[string]any)["resource"].(map[string]any)
+	}
+	addTask := func(reason string) func(b map[string]any) {
+		return func(b map[string]any) {
+			b["entry"] = append(b["entry"].([]any), map[string]any{"fullUrl": "https://payer.test/fhir/Task/t", "resource": map[string]any{
+				"resourceType": "Task", "id": "t", "status": "requested", "intent": "order",
+				"for": map[string]any{"reference": "Patient/p"}, "reasonReference": map[string]any{"reference": reason}}})
+		}
+	}
+	both := func(fs ...func(map[string]any)) func(map[string]any) {
+		return func(b map[string]any) {
+			for _, f := range fs {
+				f(b)
+			}
+		}
+	}
+	type want struct{ v20, v21, v22 bool } // true: the graph is read
+	for _, row := range []struct {
+		name   string
+		mutate func(map[string]any)
+		want   want
+	}{
+		{"complete", func(map[string]any) {}, want{true, true, true}},
+		{"the request Claim omitted", dropEntry("Claim"), want{false, true, true}},
+		{"the request Claim omitted, request by an absolute reference", both(dropEntry("Claim"), func(b map[string]any) {
+			response(b)["request"] = map[string]any{"reference": "https://payer.test/fhir/Claim/c"}
+		}), want{false, true, true}},
+		{"the request Claim omitted, request by identifier only", both(dropEntry("Claim"), func(b map[string]any) {
+			response(b)["request"] = map[string]any{"identifier": map[string]any{"system": "urn:example:claims", "value": "c-1"}}
+		}), want{true, true, true}},
+		{"request names no Claim", func(b map[string]any) { delete(response(b), "request") }, want{true, false, false}},
+		{"request's identifier has no value", func(b map[string]any) {
+			response(b)["request"] = map[string]any{"identifier": map[string]any{"system": "urn:example:claims"}}
+		}, want{true, false, false}},
+		{"the Patient omitted", dropEntry("Patient"), want{false, true, false}},
+		{"the request Claim omitted, a Task naming the same Claim", both(dropEntry("Claim"), addTask("Claim/c")), want{false, true, true}},
+		{"the request Claim omitted, a Task naming it absolutely", both(dropEntry("Claim"), addTask("https://payer.test/fhir/Claim/c/_history/1")), want{false, true, true}},
+		{"a Task naming another Claim", addTask("Claim/other"), want{false, true, false}},
+		{"an empty reference", func(b map[string]any) { response(b)["insurer"] = map[string]any{"reference": ""} }, want{false, false, false}},
+		// ClaimResponse.request names a Claim or nothing: naming another
+		// resource exempts nothing, and names no request Claim.
+		{"request names an Organization the Bundle does not carry", func(b map[string]any) {
+			response(b)["request"] = map[string]any{"reference": "Organization/ins"}
+			response(b)["insurer"] = map[string]any{"reference": "Organization/ins"}
+		}, want{false, false, false}},
+		// A urn:uuid reference carries no type: it names a Claim when the
+		// entry it names is one.
+		{"request names the Claim by its urn:uuid fullUrl", func(b map[string]any) {
+			for _, e := range b["entry"].([]any) {
+				if em := e.(map[string]any); em["resource"].(map[string]any)["resourceType"] == "Claim" {
+					em["fullUrl"] = "urn:uuid:20000000-0000-4000-8000-000000000002"
+					delete(em["resource"].(map[string]any), "id")
+				}
+			}
+			response(b)["request"] = map[string]any{"reference": "urn:uuid:20000000-0000-4000-8000-000000000002"}
+		}, want{true, true, true}},
+		{"request names a urn:uuid entry that is an Organization", func(b map[string]any) {
+			b["entry"] = append(b["entry"].([]any), map[string]any{"fullUrl": "urn:uuid:20000000-0000-4000-8000-000000000003", "resource": map[string]any{"resourceType": "Organization", "name": "x"}})
+			response(b)["request"] = map[string]any{"reference": "urn:uuid:20000000-0000-4000-8000-000000000003"}
+		}, want{true, false, false}},
+		// An identifier names the Claim beside a reference to something else;
+		// that reference is exempted from nothing.
+		{"request names an Organization by reference and the Claim by identifier", func(b map[string]any) {
+			response(b)["request"] = map[string]any{"reference": "Organization/ins", "identifier": map[string]any{"system": "urn:example:claims", "value": "c-1"}}
+		}, want{false, true, false}},
+		{"request's identifier is blank", func(b map[string]any) {
+			response(b)["request"] = map[string]any{"identifier": map[string]any{"system": "urn:example:claims", "value": " "}}
+		}, want{true, false, false}},
+	} {
+		b := assemblySmallGraph()
+		row.mutate(b)
+		raw, err := json.Marshal(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for line, read := range map[string]bool{"2.0": row.want.v20, "2.1": row.want.v21, "2.2": row.want.v22, "": row.want.v20, "9.9": row.want.v20} {
+			t.Run(row.name+"/"+line, func(t *testing.T) {
+				err := validatePASBundleGraphAt(raw, line)
+				if read && err != nil {
+					t.Fatalf("refused: %v", err)
+				}
+				if !read && err == nil {
+					t.Fatal("read a graph the line refuses")
+				}
+			})
+		}
+	}
+	// The line-less rule is 2.0.1's.
+	b := assemblySmallGraph()
+	dropEntry("Claim")(b)
+	raw, _ := json.Marshal(b)
+	if validatePASBundleGraph(raw) == nil {
+		t.Fatal("the line-less rule read a graph missing its request Claim")
+	}
+}

@@ -29,8 +29,8 @@ func TestFacilityCDexEvidence_AndFederatedRePOST(t *testing.T) {
 			t.Fatalf("federated amend bundle missing %s", want)
 		}
 	}
-	if got := countClaims(t, out); got != 2 {
-		t.Fatalf("claims = %d, want 2", got)
+	if got := countClaims(t, out); got != 1 {
+		t.Fatalf("claims = %d, want 1 (the update alone)", got)
 	}
 }
 

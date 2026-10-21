@@ -1119,7 +1119,7 @@ func TestDTRStep2122_CapturedRIRefusalAndQRTraverses(t *testing.T) {
 	// feeding raw straight to the step transforms would leave them looking at a
 	// single opaque "Parameters" resource and never reach the QuestionnaireResponse
 	// at all. Unwrap it the same way the real pipeline does before any step
-	// transform ever sees it (davincimap.go's unwrapQuestionnairePackage).
+	// transform ever sees it (workstream_pa_davincimap.go's unwrapQuestionnairePackage).
 	bundle := unwrapQuestionnairePackage(raw)
 
 	// Precondition: locate the QuestionnaireResponse the transform actually

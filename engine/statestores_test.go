@@ -95,7 +95,7 @@ func TestMemReplayStore_ScopesAndClientsAreStructural(t *testing.T) {
 	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
 	exp := now.Add(5 * time.Minute)
 	// same key, different scope → two first uses
-	if memCheck(t, s, ReplayScopeHubJTI, "", "k", now, exp) || memCheck(t, s, ReplayScopePatientAccess, "", "k", now, exp) {
+	if memCheck(t, s, ReplayScopeHubJTI, "", "k", now, exp) || memCheck(t, s, ReplayScopeIngressJTI, "", "k", now, exp) {
 		t.Fatal("scopes must not share records")
 	}
 	// same jti, two clients → two first uses (RFC 7523 §3)
@@ -172,7 +172,7 @@ func TestMemReplayStore_ShippedCeilingAndScopes(t *testing.T) {
 	if !ok {
 		t.Fatalf("NewInMemoryReplayStore returned %T, not the in-memory mirror", NewInMemoryReplayStore())
 	}
-	for _, scope := range []string{ReplayScopeIngressJTI, ReplayScopeHubJTI, ReplayScopePatientAccess} {
+	for _, scope := range []string{ReplayScopeIngressJTI, ReplayScopeHubJTI, ReplayScopeScenarioJTI} {
 		sc, ok := s.scopes[scope]
 		if !ok {
 			t.Fatalf("scope %q has no record set", scope)

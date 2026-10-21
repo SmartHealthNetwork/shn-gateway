@@ -55,11 +55,13 @@ func routingCoverageChoice(coverages [][]byte) []int {
 // routingCoverageChoice picks (the active ones, else all of them) and the
 // records the search included, in the server's order, less an included record
 // that only a Coverage not chosen references (the payor of a stale coverage).
-// Whether the chosen Coverages name one payer is the router's to decide. It is
-// recorded and returns as obtainPrefetch does.
-func (g *Gateway) obtainRoutingCoverage(ctx context.Context, leg, sorID string, fence patientFence) ([]byte, SearchOutcome, int, string) {
+// Whether the chosen Coverages name one payer is the router's to decide.
+// observe is handed the search as run, before anything is decided from it, so
+// the caller records it as its workstream does; the read returns as
+// obtainPrefetch does.
+func (g *Gateway) obtainRoutingCoverage(ctx context.Context, sorID string, fence patientFence, observe func(sorSearchset)) ([]byte, SearchOutcome, int, string) {
 	s := runSoRSearch(ctx, g.cfg.SoR, "Coverage", sorID, true)
-	g.recordPrefetch(leg, prefetchObtained{Key: "coverage", Query: s.Query, Outcome: s.Outcome, Reason: s.Reason, Count: s.Count, Pages: s.Pages})
+	observe(s)
 	switch s.Outcome {
 	case SearchOK:
 	case SearchZero:

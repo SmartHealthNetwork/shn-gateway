@@ -540,12 +540,13 @@ func TestOriginator_PendThenInquireApproved(t *testing.T) {
 }
 
 // TestOriginator_InquiryRunsAtTheLineTheSubmissionRanAt: the continuation pins
-// the line, and the inquiry is selected against that pin rather than
-// re-negotiated.
+// the line, and the inquiry is selected against that pin.
 //
-// The rejection row is what proves it: move the continuation's line to one this
-// gateway cannot build, and the inquiry is REFUSED. A gateway that re-negotiated
-// would quietly run at its own line and pass.
+// A pin nothing reaches any more (here the continuation's line moved to one this
+// gateway cannot build) is a version difference, not a refusal: by default the
+// inquiry is carried at this gateway's own line, naming the pin, and only
+// REQUIRE_SHARED_LINE refuses it, naming the pinned line and sending nothing.
+// resumecarry_test.go drives the restart triggers themselves.
 func TestOriginator_InquiryRunsAtTheLineTheSubmissionRanAt(t *testing.T) {
 	gw, stub := pasFollowSystem(t, "pended")
 	req := httptest.NewRequest(http.MethodPost, "/scenario/uc03", strings.NewReader(testOrderBody(pasFollowSubmit(0).orderJSON, "")))
@@ -567,13 +568,23 @@ func TestOriginator_InquiryRunsAtTheLineTheSubmissionRanAt(t *testing.T) {
 		t.Fatal("the control row did not reach the payer")
 	}
 
-	// The rejection: a pin this gateway cannot build refuses, and sends nothing.
+	// A pin this gateway cannot reach is carried at its own line by default.
 	stub.sawInquiry = false
 	moved := cont
 	moved.Line = "2.2"
+	if _, status, msg, _ := gw.inquireContinuation(req.Context(), req, moved); status != 0 {
+		t.Fatalf("an inquiry pinned to a line nothing reaches must be carried by default: %d %q", status, msg)
+	}
+	if !stub.sawInquiry {
+		t.Fatal("the carried inquiry never reached the payer")
+	}
+
+	// The rejection: under REQUIRE_SHARED_LINE it refuses, and sends nothing.
+	stub.sawInquiry = false
+	gw.cfg.RequireSharedLine = true
 	_, status, msg, _ = gw.inquireContinuation(req.Context(), req, moved)
 	if status == 0 {
-		t.Fatal("an inquiry pinned to a line this gateway cannot build must be refused, not re-negotiated onto another line")
+		t.Fatal("under REQUIRE_SHARED_LINE an inquiry pinned to a line nothing reaches must be refused")
 	}
 	if stub.sawInquiry {
 		t.Fatal("the refused inquiry was sent anyway")
@@ -1441,15 +1452,15 @@ func pasFollowSystemWithSoR(t *testing.T, submitAnswer string, sor SystemOfRecor
 		Reg:             reg,
 		Validator:       shnsdk.NewFakeValidator(),
 		// One laned line. A non-empty map makes the deployment AUTHORITATIVE about
-		// which lines it can validate, which is what lets the line-pin row below
-		// have a real rejection: a continuation pinned to an unlaned line is
-		// refused rather than quietly re-negotiated onto this one.
-		ValidatorsByLine: map[string]shnsdk.Validator{"2.0": shnsdk.NewFakeValidator()},
-		SoR:              sor,
-		Store:            store,
-		Clock:            clock,
-		NPI:              pasFollowNPI,
-		Client:           &http.Client{Transport: stub},
+		// which lines it can validate, which is what lets the line-pin rows reach a
+		// pin nothing reaches: carried at this line by default, refused under
+		// REQUIRE_SHARED_LINE.
+		ValidatorsByContractLine: contractLanes(map[string]shnsdk.Validator{"2.0": shnsdk.NewFakeValidator()}),
+		SoR:                      sor,
+		Store:                    store,
+		Clock:                    clock,
+		NPI:                      pasFollowNPI,
+		Client:                   &http.Client{Transport: stub},
 	})
 	return gw, stub
 }

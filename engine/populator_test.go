@@ -114,7 +114,7 @@ func TestManagedPopulatorBuildsAtLine(t *testing.T) {
 }
 
 // wrapDemoLumbarPackage builds the one-entry $questionnaire-package around the
-// demo lumbar Questionnaire (the shape originate.go receives on the DTR-fetch leg).
+// demo lumbar Questionnaire (the shape module1_originate.go receives on the DTR-fetch leg).
 func wrapDemoLumbarPackage(t *testing.T) []byte {
 	t.Helper()
 	q := fhirseed.DemoLumbarQuestionnaire()

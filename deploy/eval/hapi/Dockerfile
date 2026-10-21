@@ -1,8 +1,10 @@
-# Offline-bake the 4 IGs (US Core + CDex + HRex + PAS) the separated-stack data-HAPI validates
-# against, so a Simplifier outage during a separated-stack boot can't fail IG load
-# (the UC-05 422 hardening). Mirrors gateway/deploy/validator/Dockerfile's igs stage. The
-# data-HAPI's multitenancy + operated-CQL (cr.enabled) config lives in compose.multiprocess.yml;
-# this Dockerfile only bakes the tgz and points file:/// at them.
+# Offline-bake the IGs this bundle's data-HAPI validates against (US Core, CDex, HRex, and
+# PAS, CRD, DTR and SDC at the 2.0 line, plus SHN's validation-support package), so a Simplifier
+# outage during a boot can't fail IG load. The gateway validates what it sends here
+# (FHIR_VALIDATE_URL), the QuestionnaireResponse it declares DTR's profile on included; it is the
+# same set the platform's own data-HAPI loads, and the validator image's (../validator/Dockerfile)
+# 2.0 lane. The data-HAPI's IG list, multitenancy and operated-CQL (cr.enabled) settings live in
+# compose.eval.yml; this Dockerfile only bakes the tgz files the list points at (file:///).
 FROM hapiproject/hapi@sha256:0ff86aac4c7bd13a1ee226444a70263bb46ed1c28ef543c30a44f865b80ca04e AS backport-engine
 FROM eclipse-temurin:21.0.11_10-jdk-jammy@sha256:dbfd085220ae632a0830166e443747d1ee89e9038d92e3b48c3e5e9d8292b9a7 AS backport
 ARG TARGETPLATFORM
@@ -24,15 +26,25 @@ RUN curl --retry 5 --retry-delay 5 --retry-all-errors -fLSso hl7.fhir.us.core-6.
  && curl --retry 5 --retry-delay 5 --retry-all-errors -fLSso hl7.fhir.us.davinci-hrex-1.1.0.tgz https://packages.simplifier.net/hl7.fhir.us.davinci-hrex/1.1.0 \
  && echo "a122c031bc7d285a7aff18e18462728e499043e47f3675f43d4b359884287359  hl7.fhir.us.davinci-hrex-1.1.0.tgz" | sha256sum -c \
  && curl --retry 5 --retry-delay 5 --retry-all-errors -fLSso hl7.fhir.us.davinci-pas-2.0.1.tgz  https://packages.simplifier.net/hl7.fhir.us.davinci-pas/2.0.1 \
- && echo "1ba4159f2a1ea000dfb1685601bfc902c603a1c59ce2127118ee0a7aec694218  hl7.fhir.us.davinci-pas-2.0.1.tgz" | sha256sum -c
+ && echo "1ba4159f2a1ea000dfb1685601bfc902c603a1c59ce2127118ee0a7aec694218  hl7.fhir.us.davinci-pas-2.0.1.tgz" | sha256sum -c \
+ && curl --retry 5 --retry-delay 5 --retry-all-errors -fLSso hl7.fhir.us.davinci-crd-2.0.1.tgz https://packages.simplifier.net/hl7.fhir.us.davinci-crd/2.0.1 \
+ && echo "977ac1841346de0d9b50896dddd4834175ab41c6e25a58ca12e266f95a1c17fe  hl7.fhir.us.davinci-crd-2.0.1.tgz" | sha256sum -c \
+ && curl --retry 5 --retry-delay 5 --retry-all-errors -fLSso hl7.fhir.us.davinci-dtr-2.0.1.tgz https://packages.simplifier.net/hl7.fhir.us.davinci-dtr/2.0.1 \
+ && echo "a2840c31da3277d7b78c74baf65bcbeee97ddfe4f956810bffd79d9cfe5c64f0  hl7.fhir.us.davinci-dtr-2.0.1.tgz" | sha256sum -c \
+ && curl --retry 5 --retry-delay 5 --retry-all-errors -fLSso hl7.fhir.uv.sdc-3.0.0.tgz https://packages.simplifier.net/hl7.fhir.uv.sdc/3.0.0 \
+ && echo "be5c3f0a7f82e072b40739e05fb68f3e58e44c9bd040cd901b1b55c62f23dca2  hl7.fhir.uv.sdc-3.0.0.tgz" | sha256sum -c
 
 # The backported WAR on the pinned distroless Java base upstream builds HAPI on
 # (same JRE and env), without upstream's unused bundled jars.
 FROM gcr.io/distroless/java21-debian13:nonroot@sha256:0a1f5a75661918de9c0813f287f651c3bf2d6dd752eada5f084eb0c1f14ced9e
 USER 65532:65532
 WORKDIR /app
+# The HAPI starter serves an MCP server by default (/mcp/messages, /sse), a second way into
+# the FHIR server that nothing here uses: it stays off.
+ENV SPRING_AI_MCP_SERVER_ENABLED=false
 ENTRYPOINT ["java", "--class-path", "/app/main.war", "-Dloader.path=main.war!/WEB-INF/classes/,main.war!/WEB-INF/,/app/extra-classes", "org.springframework.boot.loader.PropertiesLauncher"]
 COPY --from=backport /out/main.war /app/main.war
 COPY --from=backport /out/provenance.json /app/backport-provenance.json
 LABEL org.shn.validator.backport.class="51c76b59364b8927a40efb29232945289974ff540b53b623adc9031886bb47f5"
 COPY --from=igs /packages /packages
+COPY validator/support/shn.fhir.validation-support-1.5.0.tgz /packages/shn.fhir.validation-support-1.5.0.tgz

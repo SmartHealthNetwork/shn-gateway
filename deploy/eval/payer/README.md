@@ -139,7 +139,7 @@ Originate from a provider: run the **provider** evaluation bundle with `PAYER_HO
 set to this payer's holder id (see [`../README.md`](../README.md) →
 "Point it at your own payer"). That bundle needs its own `--role provider` registration —
 a payer bundle can't originate, so you can't reuse this bundle's credentials to generate
-the traffic.
+the traffic — and its own `/scenario` caller, which its step 0 creates (`shn scenario-key`).
 
 ## Decisioning options
 

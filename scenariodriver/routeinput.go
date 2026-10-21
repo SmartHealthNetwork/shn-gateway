@@ -94,7 +94,7 @@ var defaultBranches = map[string]bool{"": true, "covered": true, "consent": true
 // its body selects: the route's path segment for the default branch
 // ("/scenario/uc04" → "uc04"; a resume route "/scenario/uc06/complete" →
 // "uc06"), and "<segment>-<branch>" for a branch that selects another persona
-// ("uc01-notcovered", "uc05-noconsent", "uc03-bridge-refuse"; the keys of engine.ScenarioRoster). amend reports
+// ("uc01-notcovered", "uc05-noconsent", "uc03-line-carry"; the keys of engine.ScenarioRoster). amend reports
 // whether the route sends an amendment.
 func ScenarioKey(path, branch string) (scenario string, amend bool) {
 	seg := strings.TrimPrefix(path, "/scenario/")

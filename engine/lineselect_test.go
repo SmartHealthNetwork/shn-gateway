@@ -106,31 +106,45 @@ func TestDeclaredContractVersionsAccessor(t *testing.T) {
 
 func TestValidatorForLine(t *testing.T) {
 	canonical := shnsdk.NewFakeValidator()
-	// Legacy wiring (Validator only, no per-line map): every line uses it.
-	g := &Gateway{cfg: Config{Validator: canonical}}
-	if g.validatorForLine("2.2") == nil {
-		t.Fatal("a deployment that declares no per-line lanes must serve every line from Validator")
+	// A check that names no line uses the canonical Validator, laned or not;
+	// one that names a line without its contract has no lane.
+	for name, cfg := range map[string]Config{
+		"unlaned": {Validator: canonical},
+		"laned":   {Validator: canonical, ValidatorsByContractLine: contractLanes(map[string]shnsdk.Validator{"2.0": canonical})},
+	} {
+		g := &Gateway{cfg: cfg}
+		if g.validatorForLine("") != canonical {
+			t.Errorf("%s: validatorForLine(\"\") is not the canonical Validator", name)
+		}
+		if g.validatorForLine("2.0") != nil {
+			t.Errorf("%s: a line without its contract resolved a lane", name)
+		}
 	}
-	// Explicitly-laned deployment: a line with no lane is UNLANED (nil), never
-	// silently validated against the canonical lane.
+	// Legacy wiring (Validator only, no lanes): every contract line uses it.
+	g := &Gateway{cfg: Config{Validator: canonical}}
+	if g.validatorForContractLine("pa.pas", "2.2") == nil {
+		t.Fatal("a deployment that declares no lanes must serve every contract line from Validator")
+	}
+	// Explicitly-laned deployment: a contract line with no lane is UNLANED (nil),
+	// never silently validated against the canonical lane.
 	laned := &Gateway{cfg: Config{
-		Validator:        canonical,
-		ValidatorsByLine: map[string]shnsdk.Validator{"2.0": canonical},
+		Validator:                canonical,
+		ValidatorsByContractLine: contractLanes(map[string]shnsdk.Validator{"2.0": canonical}),
 	}}
-	if laned.validatorForLine("2.0") == nil {
+	if laned.validatorForContractLine("pa.pas", "2.0") == nil {
 		t.Fatal("configured lane must resolve")
 	}
-	if laned.validatorForLine("2.2") != nil {
+	if laned.validatorForContractLine("pa.pas", "2.2") != nil {
 		t.Fatal("unconfigured lane must be nil (fail-closed, FR-36/FR-G29)")
 	}
 }
 
 func TestValidateFHIRUnlanedFailsClosed(t *testing.T) {
 	g := &Gateway{cfg: Config{
-		Validator:        shnsdk.NewFakeValidator(),
-		ValidatorsByLine: map[string]shnsdk.Validator{"2.0": shnsdk.NewFakeValidator()},
+		Validator:                shnsdk.NewFakeValidator(),
+		ValidatorsByContractLine: contractLanes(map[string]shnsdk.Validator{"2.0": shnsdk.NewFakeValidator()}),
 	}}
-	status, msg := g.validateFHIR(context.Background(), []byte(`{"resourceType":"Patient"}`), "egress", "2.2")
+	status, msg := g.validateFHIRForContract(context.Background(), []byte(`{"resourceType":"Patient"}`), "egress", "pa.pas", "2.2", "")
 	if status != http.StatusInternalServerError || !strings.Contains(msg, "2.2") {
 		t.Fatalf("unlaned validate = (%d,%q), want 500 naming the line", status, msg)
 	}
@@ -144,9 +158,9 @@ func d9Gateway(lanes map[string]shnsdk.Validator, senderDeclared []string) *Gate
 	reg := shnsdk.NewRegistry()
 	reg.Set("requester", shnsdk.RegistryEntry{ID: "requester", Role: "provider", ContractVersions: senderDeclared})
 	return &Gateway{cfg: Config{
-		Reg:              reg,
-		Validator:        shnsdk.NewFakeValidator(),
-		ValidatorsByLine: lanes,
+		Reg:                      reg,
+		Validator:                shnsdk.NewFakeValidator(),
+		ValidatorsByContractLine: contractLanes(lanes),
 	}}
 }
 
@@ -442,7 +456,7 @@ func TestDTRRelayedPackageUnstamped(t *testing.T) {
 // $questionnaire-package at the ANSWER LINE, so the egress $validate must run on
 // THAT line's lane. This gateway has only a 2.0 lane, so an answer at 2.2 must fail
 // closed on the missing lane rather than being silently checked against the 2.0 IG.
-// If payer.go regresses to passing "" the validate lands on the canonical lane and
+// If workstream_pa_dtr_inbound.go regresses to passing "" the validate lands on the canonical lane and
 // this test goes green-when-it-should-not — hence the paired 2.0 control.
 func TestDTREgressValidatesOnAnswerLine(t *testing.T) {
 	pkg := []byte(`{"resourceType":"Bundle","type":"collection","entry":[]}`)
@@ -451,7 +465,7 @@ func TestDTREgressValidatesOnAnswerLine(t *testing.T) {
 		g, requester := newInboundTestGateway(t, true)
 		g.cfg.Responder = dtrRelayResponder{body: pkg} // SHN-produced ⇒ egress-validated
 		// Explicitly laned: 2.0 only. 2.2 is therefore UNLANED (fail-closed).
-		g.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"2.0": shnsdk.NewFakeValidator()}
+		g.cfg.ValidatorsByContractLine = contractLanes(map[string]shnsdk.Validator{"2.0": shnsdk.NewFakeValidator()})
 		env, err := shnsdk.Seal(shnsdk.Metadata{
 			Sender: requester.ID, Recipient: "payer", TransactionType: "dtr-questionnaire-fetch",
 			AuthorityFrame: "payer-coverage", Timestamp: g.cfg.Clock().Format(time.RFC3339),

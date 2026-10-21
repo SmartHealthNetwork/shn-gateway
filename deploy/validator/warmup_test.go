@@ -183,7 +183,7 @@ func probeSchedule(t *testing.T, base, path, key string, ticks ...int) {
 func TestWorkerSequentialAcrossIndependentObservers(t *testing.T) {
 	lane := newFakeLane(t, "2.2")
 	release := make(chan struct{})
-	entered := make(chan string, 42)
+	entered := make(chan string, 41)
 	var active, maxActive atomic.Int32
 	lane.validate = func(w http.ResponseWriter, r *http.Request) bool {
 		n := active.Add(1)
@@ -219,7 +219,7 @@ func TestWorkerSequentialAcrossIndependentObservers(t *testing.T) {
 	for _, p := range lane.recorded() {
 		got = append(got, p.path)
 	}
-	want := make([]string, 0, 42)
+	want := make([]string, 0, 41)
 	for _, row := range readinessRows("2.2") {
 		want = append(want, "/fhir/"+row.resourceType+"/$validate")
 	}
@@ -233,7 +233,7 @@ func TestWorkerSequentialAcrossIndependentObservers(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		observerProcess(t, lane.base(), path, sameJVM(), 0)
 	}
-	if len(lane.recorded()) != 42 || maxActive.Load() != 1 {
+	if len(lane.recorded()) != 41 || maxActive.Load() != 1 {
 		t.Fatal("ready observers repeated validation")
 	}
 	for i, row := range readinessRows("2.2") {
@@ -270,7 +270,7 @@ func TestVerdictReadinessRejectsPermanentPASSlicingFailure(t *testing.T) {
 		t.Fatalf("false verdict health exit = %d, want 1", got)
 	}
 	posts := lane.recorded()
-	if len(posts) != 14 || posts[len(posts)-1].path != "/fhir/ClaimResponse/$validate" {
+	if len(posts) != 13 || posts[len(posts)-1].path != "/fhir/ClaimResponse/$validate" {
 		t.Fatalf("worker did not stop at failing qualification row: %+v", posts)
 	}
 }
@@ -717,7 +717,7 @@ func TestWorkerMetadataPollingRecoversWithoutEarlyPost(t *testing.T) {
 	if err := finishWorker(t, done); err != nil {
 		t.Fatal(err)
 	}
-	if gets.Load() != 2 || len(lane.recorded()) != 42 {
+	if gets.Load() != 2 || len(lane.recorded()) != 41 {
 		t.Fatalf("gets=%d posts=%d", gets.Load(), len(lane.recorded()))
 	}
 }
@@ -791,7 +791,7 @@ func TestLoadedLaneMetadataAllowsWarmupAndReadiness(t *testing.T) {
 		}
 	})
 	t.Run("worker", func(t *testing.T) {
-		// This checks the complete 42-row worker after large metadata,
+		// This checks the complete 41-row worker after large metadata,
 		// not subsecond throughput on a contended image-build runner.
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
@@ -799,7 +799,7 @@ func TestLoadedLaneMetadataAllowsWarmupAndReadiness(t *testing.T) {
 		if err := finishWorker(t, startWorker(t, ctx, base, path, sameJVM())); err != nil {
 			t.Fatalf("measured metadata prevented warm-up: %v; posts=%d", err, len(lane.recorded()))
 		}
-		if len(lane.recorded()) != 42 || readTestState(t, path).State != "ready" {
+		if len(lane.recorded()) != 41 || readTestState(t, path).State != "ready" {
 			t.Fatalf("metadata did not unlock readiness rows: posts=%d", len(lane.recorded()))
 		}
 	})

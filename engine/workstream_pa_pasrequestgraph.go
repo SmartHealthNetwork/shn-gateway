@@ -1,0 +1,206 @@
+package engine
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/url"
+	"sort"
+	"strconv"
+	"strings"
+)
+
+// completePASRequest retains only clinical evidence selected by the request. Reads
+// use the configured holder-local SoR authority, never a reference URL transport.
+// The complete graph then follows the existing transform and validation path.
+func (g *Gateway) completePASRequest(ctx context.Context, body []byte) ([]byte, error) {
+	if g.cfg.OriginationProfile != "provider-data" {
+		return body, nil
+	}
+	if g.cfg.SoR == nil {
+		return nil, errors.New("PAS evidence unavailable")
+	}
+	return retainPASRequestEvidence(ctx, body, ReadSystemOfRecord(g.cfg.SoR).ResolveByReferenceContext)
+}
+
+func retainPASRequestEvidence(ctx context.Context, body []byte, read func(context.Context, string) ([]byte, bool, error)) ([]byte, error) {
+	return retainPASRequestEvidenceWithPolicy(ctx, body, read, nil)
+}
+
+func (g *Gateway) completeAuthoredPASRequest(ctx context.Context, body, sourceQR, sourceOrder []byte, coverageRef string, absolute bool) ([]byte, error) {
+	if len(sourceQR) == 0 || g.cfg.OriginationProfile != "provider-data" {
+		return g.completePASRequest(ctx, body)
+	}
+	if g.cfg.SoR == nil {
+		return nil, errors.New("PAS evidence unavailable")
+	}
+	policy, err := authoredPASReferencePolicyFor(body, sourceQR, sourceOrder, coverageRef, absolute)
+	if err != nil {
+		return nil, err
+	}
+	return retainPASRequestEvidenceWithPolicy(ctx, body, ReadSystemOfRecord(g.cfg.SoR).ResolveByReferenceContext, policy)
+}
+
+func retainPASRequestEvidenceWithPolicy(ctx context.Context, body []byte, read func(context.Context, string) ([]byte, bool, error), policy *authoredPASReferencePolicy) ([]byte, error) {
+	fail := func() ([]byte, error) { return nil, errors.New("invalid or incomplete PAS request evidence") }
+	if len(body) > pasGraphMaxBytes {
+		return fail()
+	}
+	var bundle map[string]any
+	if decodePASObject(body, &bundle) != nil || bundle["resourceType"] != "Bundle" || bundle["type"] != "collection" {
+		return fail()
+	}
+	entries, ok := bundle["entry"].([]any)
+	if !ok || len(entries) == 0 || len(entries) > pasGraphMaxResources {
+		return fail()
+	}
+	graph := &pasGraph{Bundle: bundle, Entries: entries, ByURL: map[string]*pasGraphEntry{}}
+	patient := ""
+	add := func(index int, v any) bool {
+		e, ok := v.(map[string]any)
+		if !ok {
+			return false
+		}
+		r, ok := e["resource"].(map[string]any)
+		if !ok {
+			return false
+		}
+		full, ok := e["fullUrl"].(string)
+		if !ok {
+			return false
+		}
+		typ, tok := r["resourceType"].(string)
+		id, iok := r["id"].(string)
+		u, err := url.Parse(full)
+		if err != nil || !tok || !iok || !pasSafeResourceID(id) || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") || u.User != nil || u.RawPath != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || !strings.HasSuffix(u.Path, "/"+typ+"/"+id) || graph.ByURL[full] != nil {
+			return false
+		}
+		graph.ByURL[full] = &pasGraphEntry{FullURL: full, Resource: r, Index: index}
+		if typ == "Patient" {
+			if patient != "" && patient != full {
+				return false
+			}
+			patient = full
+		}
+		return true
+	}
+	for i, e := range entries {
+		if !add(i, e) {
+			return fail()
+		}
+	}
+	if patient == "" || !policy.Matches(graph) {
+		return fail()
+	}
+	refs := 0
+	total := len(body)
+	for i := 0; i < len(entries); i++ {
+		entry := entries[i].(map[string]any)
+		owner := graph.ByURL[entry["fullUrl"].(string)]
+		var selected []string
+		var walk func(any, int, string) bool
+		walk = func(v any, depth int, path string) bool {
+			if depth > pasGraphMaxDepth {
+				return false
+			}
+			switch x := v.(type) {
+			case map[string]any:
+				if ref, exists := x["reference"]; exists {
+					s, ok := ref.(string)
+					refs++
+					if !ok || refs > pasGraphMaxReferences {
+						return false
+					}
+					if !policy.Allows(owner, path, x) {
+						selected = append(selected, s)
+					}
+				}
+				keys := make([]string, 0, len(x))
+				for k := range x {
+					keys = append(keys, k)
+				}
+				sort.Strings(keys)
+				for _, k := range keys {
+					if !walk(x[k], depth+1, pasReferencePath(path, k)) {
+						return false
+					}
+				}
+			case []any:
+				for n, c := range x {
+					if !walk(c, depth+1, pasReferencePath(path, strconv.Itoa(n))) {
+						return false
+					}
+				}
+			}
+			return true
+		}
+		if !walk(owner.Resource, 0, "") {
+			return fail()
+		}
+		for _, ref := range selected {
+			if strings.HasPrefix(ref, "#") {
+				continue
+			}
+			if graph.Resolve(ref, owner, nil, false) == "" {
+				continue
+			}
+			// Only unversioned relative clinical identities are eligible for local lookup.
+			// Absolute references stay exact and are never reduced to a different authority.
+			parts := strings.Split(ref, "/")
+			if len(parts) != 2 || !pasSafeResourceID(parts[1]) {
+				return fail()
+			}
+			switch parts[0] {
+			case "Condition", "ClinicalImpression", "Goal", "Observation", "DiagnosticReport":
+			default:
+				return fail()
+			}
+			base := strings.TrimSuffix(owner.FullURL, "/"+owner.Resource["resourceType"].(string)+"/"+owner.Resource["id"].(string))
+			full := base + "/" + ref
+			if len(entries) >= pasGraphMaxResources {
+				return fail()
+			}
+			if err := ctx.Err(); err != nil {
+				return nil, safeSoRError(err)
+			}
+			raw, found, err := read(ctx, ref)
+			if err != nil {
+				return nil, safeSoRError(err)
+			}
+			total += len(raw)
+			if !found || total > pasGraphMaxBytes {
+				return fail()
+			}
+			var r map[string]any
+			if decodePASObject(raw, &r) != nil || r["resourceType"] != parts[0] || r["id"] != parts[1] {
+				return fail()
+			}
+			subject, ok := r["subject"].(map[string]any)
+			if !ok {
+				return fail()
+			}
+			s, ok := subject["reference"].(string)
+			if !ok {
+				return fail()
+			}
+			if s != patient && base+"/"+s != patient {
+				return fail()
+			}
+			e := map[string]any{"fullUrl": full, "resource": r}
+			if !add(len(entries), e) {
+				return fail()
+			}
+			entries = append(entries, e)
+		}
+	}
+	graph.Entries = entries
+	bundle["entry"] = entries
+	if graph.ValidateWithReferencePolicy(policy) != nil || !consistentPASGraphSubjects(graph, patient) {
+		return fail()
+	}
+	result, err := json.Marshal(bundle)
+	if err != nil || len(result) > pasGraphMaxBytes {
+		return fail()
+	}
+	return result, nil
+}

@@ -43,16 +43,39 @@ func env(m map[string]string) func(string) string {
 // so an empty-env call never reaches it). The INTEGRATED fail-closed assertion lives in the
 // boot gate, which supplies a real bundle + a validator-less /discovery.
 
-// No validator URL + no fake opt-in ⇒ error (FR-36 fail-closed).
+// No validator URL + no fake opt-in ⇒ error (FR-36 fail-closed) at every level
+// that checks, the unset default (observe) included; the refusal names both
+// remedies, a validator or the level that checks nothing.
 func TestSelectValidator_FailsClosed(t *testing.T) {
-	if _, err := selectValidator(env(map[string]string{}), ""); err == nil {
-		t.Fatal("selectValidator(no url, no fake) = nil error, want fail-closed error")
+	for _, level := range []engine.ConformanceEnforcement{engine.EnforcementObserve, engine.EnforcementStructural, engine.EnforcementStrict} {
+		_, err := selectValidator(env(map[string]string{}), "", level)
+		if err == nil {
+			t.Fatalf("%v: selectValidator(no url, no fake) = nil error, want fail-closed error", level)
+		}
+		if !strings.Contains(err.Error(), "set FHIR_VALIDATE_URL") || !strings.Contains(err.Error(), "or set CONFORMANCE_ENFORCEMENT=none") {
+			t.Fatalf("%v: refusal %q names neither the validator nor the none level", level, err)
+		}
+		if strings.Contains(err.Error(), "SHN_FAKE_VALIDATOR") {
+			t.Fatalf("%v: refusal hands the operator the test double: %v", level, err)
+		}
+	}
+}
+
+// At none a gateway checks no payload, so no validator URL boots with no
+// validator; a URL is still used when one is configured.
+func TestSelectValidator_NoneNeedsNoValidator(t *testing.T) {
+	v, err := selectValidator(env(map[string]string{}), "", engine.EnforcementNone)
+	if err != nil || v != nil {
+		t.Fatalf("none, no url: v=%v err=%v, want no validator and no error", v, err)
+	}
+	if v, err := selectValidator(env(map[string]string{}), "http://validator.example/fhir", engine.EnforcementNone); err != nil || v == nil {
+		t.Fatalf("none, url: v=%v err=%v, want the configured validator", v, err)
 	}
 }
 
 // Explicit fake opt-in ⇒ fake validator, no error.
 func TestSelectValidator_FakeOptIn(t *testing.T) {
-	v, err := selectValidator(env(map[string]string{"SHN_FAKE_VALIDATOR": "1"}), "")
+	v, err := selectValidator(env(map[string]string{"SHN_FAKE_VALIDATOR": "1"}), "", engine.EnforcementObserve)
 	if err != nil || v == nil {
 		t.Fatalf("fake opt-in: v=%v err=%v, want non-nil validator, nil error", v, err)
 	}
@@ -60,7 +83,7 @@ func TestSelectValidator_FakeOptIn(t *testing.T) {
 
 // Resolved URL ⇒ real operation-level validator.
 func TestSelectValidator_RealWhenURL(t *testing.T) {
-	v, err := selectValidator(env(map[string]string{}), "http://validator.example/fhir")
+	v, err := selectValidator(env(map[string]string{}), "http://validator.example/fhir", engine.EnforcementObserve)
 	if err != nil || v == nil {
 		t.Fatalf("real url: v=%v err=%v, want non-nil validator, nil error", v, err)
 	}
@@ -401,6 +424,54 @@ func TestBuildWiresSharedLineOptInToGateway(t *testing.T) {
 	}
 }
 
+// TestBuildWiresTranslationOptInToGateway proves TRANSLATE_IG_LINES reaches the
+// engine.Config build() hands to engine.New, that translating nothing between
+// IG lines is the default, and that the boot log states the opt-in only when
+// it is on. Deleting the "gwCfg.TranslateIGLines = cfg.TranslateIGLines" line,
+// or the env read in loadConfig, leaves the "true" row red. That the engine
+// honors the field is proven by the engine's linebridge_test.go rows. A value
+// outside true/false refuses to boot.
+func TestBuildWiresTranslationOptInToGateway(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		env     map[string]string
+		want    bool
+		wantErr string
+	}{
+		{name: "unset translates nothing"},
+		{name: "false translates nothing", env: map[string]string{"TRANSLATE_IG_LINES": "false"}},
+		{name: "true opts in", env: map[string]string{"TRANSLATE_IG_LINES": "true"}, want: true},
+		{name: "other value refuses to boot", env: map[string]string{"TRANSLATE_IG_LINES": "1"}, wantErr: "TRANSLATE_IG_LINES must be true or false"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			extra := map[string]string{"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate"}
+			for k, v := range tc.env {
+				extra[k] = v
+			}
+			var output bytes.Buffer
+			previous := log.Writer()
+			log.SetOutput(&output)
+			defer log.SetOutput(previous)
+			b, _, err := buildProviderForPopulate(t, extra)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("build err = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("build: %v", err)
+			}
+			if got := b.translateIGLines; got != tc.want {
+				t.Errorf("Gateway translates between IG lines = %v, want %v", got, tc.want)
+			}
+			if got := strings.Contains(output.String(), "TRANSLATE_IG_LINES=true"); got != tc.want {
+				t.Errorf("boot log states the opt-in = %v, want %v: %s", got, tc.want, output.String())
+			}
+		})
+	}
+}
+
 // TestBuildWiresEnrichmentOptInToGateway proves ENRICH_NATIVE_REQUESTS reaches
 // the engine.Config build() hands to engine.New, and that carrying a native
 // request as sent is the default. Deleting the
@@ -629,7 +700,8 @@ func TestResolveDiscovery_AnchorKeyURLOverride(t *testing.T) {
 }
 
 func TestResolveDiscovery_ResolvesTrustPlanes(t *testing.T) {
-	// /discovery advertises consent/audit/phg; the gateway resolves them WITHOUT env.
+	// /discovery advertises consent (and the audit and phg planes the gateway no
+	// longer reads); the gateway resolves consent WITHOUT env.
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
 	keyBody := fmt.Sprintf(`{"pubkey":%q}`, base64.StdEncoding.EncodeToString(pub))
 	keys := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -641,13 +713,13 @@ func TestResolveDiscovery_ResolvesTrustPlanes(t *testing.T) {
 	}))
 	defer disc.Close()
 
-	cfg := config{DiscoveryURL: disc.URL} // NO CONSENT_URL/AUDIT_URL/PHG_URL env
+	cfg := config{DiscoveryURL: disc.URL} // NO CONSENT_URL env
 	_, ep, err := resolveDiscovery(context.Background(), shnsdk.NewClient(), cfg)
 	if err != nil {
 		t.Fatalf("resolveDiscovery: %v", err)
 	}
-	if ep.Consent != "http://consent.invalid" || ep.Audit != "http://audit.invalid" || ep.PHG != "http://phg.invalid" {
-		t.Fatalf("planes not resolved from discovery: consent=%q audit=%q phg=%q", ep.Consent, ep.Audit, ep.PHG)
+	if ep.Consent != "http://consent.invalid" {
+		t.Fatalf("consent not resolved from discovery: consent=%q", ep.Consent)
 	}
 }
 
@@ -1895,7 +1967,7 @@ func TestServerFor_PlainWhenNoCert(t *testing.T) {
 // seam checks.Handler is spliced into, app.go build()). Asserts: an
 // unauthenticated request is refused; a bearer-authenticated POST runs the
 // probes and surfaces a CapabilityStatement result for FHIR_DATA_URL; and
-// /health stays healthy even though AUDIT_URL — a well-formed but
+// /health stays healthy even though CONSENT_URL — a well-formed but
 // unreachable target, probed as plain "reachable" per checkTargets'
 // kind overlay — fails its probe, because checks are never registered as a
 // health.Check.
@@ -1937,7 +2009,7 @@ func TestApp_ChecksEndpoint_TokenGatedAndHealthUnaffected(t *testing.T) {
 		"SHN_FAKE_VALIDATOR":        "1",
 		"FHIR_DATA_URL":             fhirSrv.URL,
 		"CHECKS_TOKEN":              "t",
-		"AUDIT_URL":                 "http://127.0.0.1:1",                               // well-formed, unreachable
+		"CONSENT_URL":               "http://127.0.0.1:1",                               // well-formed, unreachable
 		"PROVIDER_DTR_POPULATE_URL": "https://127.0.0.1:1/fhir/Questionnaire/$populate", // probed: unreachable, never resolved
 	}
 	getenv := func(k string) string { return env[k] }
@@ -1983,7 +2055,7 @@ func TestApp_ChecksEndpoint_TokenGatedAndHealthUnaffected(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	var sawFHIR, sawAudit bool
+	var sawFHIR, sawConsent bool
 	for _, r := range body.Results {
 		switch r.ID {
 		case "FHIR_DATA_URL":
@@ -1991,18 +2063,18 @@ func TestApp_ChecksEndpoint_TokenGatedAndHealthUnaffected(t *testing.T) {
 			if !r.OK || !strings.Contains(r.Detail, "CapabilityStatement") {
 				t.Errorf("FHIR_DATA_URL result = %+v, want OK with a CapabilityStatement detail", r)
 			}
-		case "AUDIT_URL":
-			sawAudit = true
+		case "CONSENT_URL":
+			sawConsent = true
 			if r.OK {
-				t.Errorf("AUDIT_URL result = %+v, want !OK (unreachable target)", r)
+				t.Errorf("CONSENT_URL result = %+v, want !OK (unreachable target)", r)
 			}
 		}
 	}
 	if !sawFHIR {
 		t.Fatalf("no FHIR_DATA_URL result in %+v", body.Results)
 	}
-	if !sawAudit {
-		t.Fatalf("no AUDIT_URL result in %+v", body.Results)
+	if !sawConsent {
+		t.Fatalf("no CONSENT_URL result in %+v", body.Results)
 	}
 
 	healthResp, err := http.Get(srv.URL + "/health")
@@ -2011,7 +2083,7 @@ func TestApp_ChecksEndpoint_TokenGatedAndHealthUnaffected(t *testing.T) {
 	}
 	defer healthResp.Body.Close()
 	if healthResp.StatusCode != http.StatusOK {
-		t.Fatalf("/health status = %d, want 200 (healthy) despite the failing AUDIT_URL probe", healthResp.StatusCode)
+		t.Fatalf("/health status = %d, want 200 (healthy) despite the failing CONSENT_URL probe", healthResp.StatusCode)
 	}
 }
 
@@ -2876,49 +2948,12 @@ func TestLoadConfig_PayerDavinciBackendTimeout(t *testing.T) {
 	}
 }
 
-// TestLoadConfig_PatientAccessAPI: a payer's Patient Access API is mounted
-// unless PATIENT_ACCESS_API=off; any other value, or the setting on a gateway
-// that is not a payer, refuses to boot.
-func TestLoadConfig_PatientAccessAPI(t *testing.T) {
-	load := func(extra map[string]string) (config, error) {
-		env := map[string]string{"ROLE": "payer", "SHN_SECRETS": "/x", "SHN_DISCOVERY_URL": "https://d", "PAYER_DAVINCI_BASE_URL": "https://payer.example"}
-		for k, v := range extra {
-			env[k] = v
-		}
-		return loadConfig(func(k string) string { return env[k] })
-	}
-	for value, off := range map[string]bool{"": false, "on": false, "off": true} {
-		cfg, err := load(map[string]string{"PATIENT_ACCESS_API": value})
-		if err != nil || cfg.PatientAccessOff != off {
-			t.Errorf("%q: off=%v err=%v, want off=%v", value, cfg.PatientAccessOff, err, off)
-		}
-	}
-	for name, tc := range map[string]struct {
-		env     map[string]string
-		wantErr string
-	}{
-		"not on or off": {map[string]string{"PATIENT_ACCESS_API": "false"}, "must be on or off"},
-		"off on a provider gateway": {map[string]string{
-			"ROLE": "provider", "PAYER_DAVINCI_BASE_URL": "", "PATIENT_ACCESS_API": "off",
-			"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate",
-		}, "payer gateway setting"},
-		"on on a provider gateway": {map[string]string{
-			"ROLE": "provider", "PAYER_DAVINCI_BASE_URL": "", "PATIENT_ACCESS_API": "on",
-			"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate",
-		}, "payer gateway setting"},
-	} {
-		if _, err := load(tc.env); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-			t.Errorf("%s: err = %v, want %q", name, err, tc.wantErr)
-		}
-	}
-}
-
-// TestBuildPatientAccessOffKeepsHealth proves, on the handler build() serves,
-// that PATIENT_ACCESS_API=off leaves the payer's Patient Access routes
-// unmounted while GET /health still answers: liveness never depends on
-// Patient Access. Deleting the gwCfg.PatientAccessOff wiring, or the
-// engine's guard around the routes, leaves the off row red.
-func TestBuildPatientAccessOffKeepsHealth(t *testing.T) {
+// TestPayer_ServesNoPatientAccessRoutes proves, on the handler build() serves a
+// payer gateway, that the removed Patient Access API answers nowhere: GET
+// /metadata and GET /ExplanationOfBenefit[/{id}] reach no handler (the mux's
+// 404, no CapabilityStatement or Bundle), while GET /health still answers. A
+// leftover PATIENT_ACCESS_API setting changes nothing but one boot warning.
+func TestPayer_ServesNoPatientAccessRoutes(t *testing.T) {
 	payer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -2933,17 +2968,10 @@ func TestBuildPatientAccessOffKeepsHealth(t *testing.T) {
 		fmt.Fprintf(w, `{"endpoints":{},"authzPublicKeyURL":%q,"hubTransportKeyURL":%q}`, keys.URL, keys.URL)
 	}))
 	defer disc.Close()
-	for _, tc := range []struct {
-		name, value string
-		off         bool
-	}{
-		{"unset mounts Patient Access", "", false},
-		{"on mounts Patient Access", "on", false},
-		{"off leaves it unmounted", "off", true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
+	for _, leftover := range []string{"", "on", "off"} {
+		t.Run("PATIENT_ACCESS_API="+leftover, func(t *testing.T) {
 			dir := t.TempDir()
-			id, err := shnsdk.GenerateIdentity("h-test-payer-patient-access")
+			id, err := shnsdk.GenerateIdentity("h-test-payer-no-patient-access")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -2953,15 +2981,23 @@ func TestBuildPatientAccessOffKeepsHealth(t *testing.T) {
 			env := map[string]string{
 				"ROLE": "payer", "SHN_SECRETS": dir, "SHN_DISCOVERY_URL": disc.URL, "SHN_FAKE_VALIDATOR": "1",
 				"FHIR_DATA_URL": "https://sor.example/fhir", "PAYER_DAVINCI_BASE_URL": payer.URL,
-				"PAYER_DAVINCI_CRD_SERVICE_ID": "svc", "PATIENT_ACCESS_API": tc.value,
+				"PAYER_DAVINCI_CRD_SERVICE_ID": "svc", "PATIENT_ACCESS_API": leftover,
 			}
-			var out bytes.Buffer
+			var boot bytes.Buffer
 			previous := log.Writer()
-			log.SetOutput(&out)
+			log.SetOutput(&boot)
 			defer log.SetOutput(previous)
-			b, err := build(context.Background(), func(k string) string { return env[k] }, &out, nil)
+			b, err := build(context.Background(), func(k string) string { return env[k] }, io.Discard, nil)
+			log.SetOutput(previous)
 			if err != nil {
 				t.Fatalf("build: %v", err)
+			}
+			want := 0
+			if leftover != "" {
+				want = 1
+			}
+			if got := strings.Count(boot.String(), patientAccessLeftoverLine); got != want {
+				t.Errorf("boot log carries the leftover-setting warning %d times, want %d:\n%s", got, want, boot.String())
 			}
 			t.Cleanup(func() {
 				if b.gateway != nil {
@@ -2980,30 +3016,75 @@ func TestBuildPatientAccessOffKeepsHealth(t *testing.T) {
 			if health.Code != http.StatusOK || json.Unmarshal(health.Body.Bytes(), &payload) != nil || payload.Status != "ok" {
 				t.Fatalf("GET /health = %d %s, want 200 with status ok", health.Code, health.Body.String())
 			}
-			metadata := get("/metadata")
-			eob := get("/ExplanationOfBenefit?patient=pci:00")
-			eobByID := get("/ExplanationOfBenefit/eob-1")
-			if tc.off {
-				for path, rec := range map[string]*httptest.ResponseRecorder{"/metadata": metadata, "/ExplanationOfBenefit": eob, "/ExplanationOfBenefit/{id}": eobByID} {
-					if rec.Code != http.StatusNotFound {
-						t.Errorf("GET %s = %d with Patient Access off, want 404", path, rec.Code)
+			for _, path := range []string{"/metadata", "/ExplanationOfBenefit?patient=x", "/ExplanationOfBenefit/x"} {
+				rec := get(path)
+				if rec.Code != http.StatusNotFound {
+					t.Errorf("GET %s = %d %s, want the mux's 404", path, rec.Code, rec.Body.String())
+				}
+				for _, served := range []string{"CapabilityStatement", "Bundle", "resourceType"} {
+					if strings.Contains(rec.Body.String(), served) {
+						t.Errorf("GET %s answered %s: a Patient Access handler served it", path, rec.Body.String())
 					}
 				}
-				if !strings.Contains(out.String(), "PATIENT_ACCESS_API=off") {
-					t.Errorf("boot log does not state Patient Access is off: %s", out.String())
+			}
+		})
+	}
+}
+
+// The boot warnings for the settings shn-gateway v0.63.0 stopped reading
+// (ignoredSettings): one per setting still set, on a gateway of any role.
+const (
+	patientAccessLeftoverLine = "gateway: WARNING: PATIENT_ACCESS_API is set but no longer read: shn-gateway v0.63.0 removed the Patient Access API\n"
+	auditURLLeftoverLine      = "gateway: WARNING: AUDIT_URL is set but no longer read: shn-gateway v0.63.0 removed the Patient Access API's audit record\n"
+	phgURLLeftoverLine        = "gateway: WARNING: PHG_URL is set but no longer read: shn-gateway v0.63.0 removed the provider gateway's read of the PHG's denial view\n"
+)
+
+// TestProvider_IgnoredSettingsWarnOnceEach: the warnings are not the payer's
+// alone. A provider gateway boots with any of the settings left over and logs
+// each one's line once, in a fixed order, and no line for a setting not set.
+func TestProvider_IgnoredSettingsWarnOnceEach(t *testing.T) {
+	all := []string{patientAccessLeftoverLine, auditURLLeftoverLine, phgURLLeftoverLine}
+	for _, tc := range []struct {
+		name string
+		set  map[string]string
+		want []string // the lines expected, in order; every other line must be absent
+	}{
+		{"none set", nil, nil},
+		{"PATIENT_ACCESS_API", map[string]string{"PATIENT_ACCESS_API": "on"}, []string{patientAccessLeftoverLine}},
+		{"AUDIT_URL", map[string]string{"AUDIT_URL": "http://audit:8082"}, []string{auditURLLeftoverLine}},
+		{"PHG_URL", map[string]string{"PHG_URL": "http://phg:8084"}, []string{phgURLLeftoverLine}},
+		{"all three", map[string]string{"PATIENT_ACCESS_API": "off", "AUDIT_URL": "http://audit:8082", "PHG_URL": "http://phg:8084"}, all},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			extra := map[string]string{"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate"}
+			for k, v := range tc.set {
+				extra[k] = v
+			}
+			var boot bytes.Buffer
+			previous := log.Writer()
+			log.SetOutput(&boot)
+			defer log.SetOutput(previous)
+			_, _, err := buildProviderForPopulate(t, extra)
+			log.SetOutput(previous)
+			if err != nil {
+				t.Fatalf("build: %v", err)
+			}
+			got := boot.String()
+			for _, line := range all {
+				want := 0
+				for _, w := range tc.want {
+					if w == line {
+						want = 1
+					}
 				}
-				return
-			}
-			if metadata.Code != http.StatusOK || !strings.Contains(metadata.Body.String(), `"resourceType":"CapabilityStatement"`) {
-				t.Errorf("GET /metadata = %d %s, want the Patient Access CapabilityStatement", metadata.Code, metadata.Body.String())
-			}
-			for path, rec := range map[string]*httptest.ResponseRecorder{"/ExplanationOfBenefit": eob, "/ExplanationOfBenefit/{id}": eobByID} {
-				if rec.Code == http.StatusNotFound && !strings.Contains(rec.Body.String(), "resourceType") {
-					t.Errorf("GET %s = 404 from the router with Patient Access on, want the token-gated read", path)
+				if n := strings.Count(got, line); n != want {
+					t.Errorf("boot log carries %q %d times, want %d:\n%s", strings.TrimSpace(line), n, want, got)
 				}
 			}
-			if strings.Contains(out.String(), "PATIENT_ACCESS_API=off") {
-				t.Errorf("boot log claims Patient Access is off: %s", out.String())
+			for i := 1; i < len(tc.want); i++ {
+				if strings.Index(got, tc.want[i-1]) > strings.Index(got, tc.want[i]) {
+					t.Errorf("boot warnings out of order: %q after %q:\n%s", strings.TrimSpace(tc.want[i-1]), strings.TrimSpace(tc.want[i]), got)
+				}
 			}
 		})
 	}

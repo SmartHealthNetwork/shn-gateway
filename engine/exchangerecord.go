@@ -38,6 +38,7 @@ import (
 
 	"github.com/SmartHealthNetwork/shn-gateway/connectors/smartauth"
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
+	vocab "github.com/SmartHealthNetwork/shn-gateway/recording"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -94,7 +95,8 @@ type ExchangeRecord struct {
 	// RefusedBy and Rule say who refused and on which network rule
 	// (RefusalParties, RefusalRules); empty unless Outcome is ExchangeRefused.
 	// A facility's or a PHG's gateway refusing an inbound leg is recorded as
-	// ExchangeOther. RefusalLimit is reserved, and from v0.58.0 the gateway records an
+	// ExchangeOther. RefusalLimit is recorded for a coverage-eligibility batch
+	// over its bound (maxEligibilityBatch), and from v0.58.0 the gateway records an
 	// Authorization Framework denial as RefusalAuthority, whatever its reason.
 	RefusedBy, Rule string
 	// Status is the status the requester received: the HTTP status of an
@@ -127,13 +129,50 @@ type ExchangeRecord struct {
 	// answered, with anything, or the connection failed after the request was
 	// written): a request refused before it was sent, or whose connection or
 	// bearer could not be obtained, names none, nor does one carried exactly.
-	// Metadata only (never a value an edit removed or wrote); not a metric
-	// dimension.
+	// It also names the edits to the answer this gateway wrote (E-08):
+	// RequestEdits and AnswerEdits are the same ids by body. Metadata only
+	// (never a value an edit removed or wrote); not a metric dimension.
 	Edits []string
+	// Ownership is whose message the request this gateway sent on the leg is
+	// (ExchangeOwnerships): on an ingress call, the request it sealed for the
+	// network; on an inbound leg, its forward to its participant's own system.
+	// relayed, the participant's own byte for byte; edited, the participant's
+	// with registered edits; authored, this gateway's own, from a registered
+	// builder (Builder), as a registered module ingress client's request is;
+	// edited with Builder set, this gateway's own carried to the peer's IG line
+	// by the registered transform (E-09 in Edits).
+	// Set once that request is sent, empty when none was. It says nothing of
+	// the answer, which AnswerOwnership describes: Edits may also name an edit
+	// to the answer (E-08). Content-free; Evolving until the Audit Plane
+	// carries it.
+	Ownership string
+	// Builder is the registered builder (relay.Builders) of this gateway's own
+	// message: authored, or edited by the registered transform (E-09); empty
+	// otherwise.
+	Builder string
+	// RequestEdits are the Edits this gateway applied to the request
+	// Ownership describes, in transmit order, each once; AnswerEdits are those
+	// it applied to the answer it wrote. Edits is the two together. Evolving.
+	RequestEdits, AnswerEdits []string
+	// AnswerOwnership is whose message the answer this gateway wrote on the
+	// call is (ExchangeOwnerships): on an ingress call, the answer it wrote to
+	// its participant's system; on an inbound leg, the answer it sealed for
+	// the network, or wrote bare to a requester without a message frame.
+	// relayed, the participant's (or the peer's) own byte for byte; edited,
+	// theirs with registered edits (AnswerEdits); authored, this gateway's
+	// own, from a registered builder (AnswerBuilder), as every refusal it
+	// writes is, one written before a leg was opened included. Set once that
+	// answer is written, empty when none was. Content-free; Evolving until the
+	// Audit Plane carries it.
+	AnswerOwnership string
+	// AnswerBuilder is the registered builder of the answer when it is this
+	// gateway's own, as Builder is of the request; empty otherwise.
+	AnswerBuilder string
 	// LineCarried says where the leg was carried between two IG lines with
 	// nothing translated, the network's default (LineCarriedValues, each at
 	// most once): LineCarriedRequest when the request went to, or came from,
-	// a participant that shares no declared line with this one;
+	// a participant that shares no declared line with this one, or a pend's
+	// follow-up was carried at another line than the pend is pinned at;
 	// LineCarriedAnswer when the answer was stamped with another line than
 	// the leg routed. Empty when it was not. Not a metric dimension.
 	LineCarried []string
@@ -199,97 +238,117 @@ type FindingSummary struct {
 }
 
 // ExchangeOther is the value recorded for anything a closed list does not name.
-const ExchangeOther = "other"
+//
+// Deprecated: use recording.ExchangeOther, which this is; it goes at the engine package split.
+const ExchangeOther = vocab.ExchangeOther
 
 // Directions.
+//
+// Deprecated: use package recording's names, which these are; they go at the engine package split.
 const (
-	DirectionIngress = "ingress"
-	DirectionInbound = "inbound"
+	DirectionIngress = vocab.DirectionIngress
+	DirectionInbound = vocab.DirectionInbound
 )
 
-// Routes.
-const (
-	RouteCRD              = "crd"
-	RouteDTR              = "dtr"
-	RoutePAS              = "pas"
-	RoutePASInquire       = "pas-inquire"
-	RouteSubstrateInbound = "substrate-inbound"
-)
+// RouteSubstrateInbound is the route the network delivers every leg to. A
+// workstream's own ingress routes are its adapter's (the PA workstream's in
+// workstream_pa.go).
+const RouteSubstrateInbound = "substrate-inbound"
 
 // Outcomes.
+//
+// Deprecated: use package recording's names, which these are; they go at the engine package split.
 const (
-	ExchangeAnswered      = "answered"
-	ExchangeRefused       = "refused"
-	ExchangeUnreachable   = "unreachable"
-	ExchangeUpstreamError = "upstream-error"
+	ExchangeAnswered      = vocab.ExchangeAnswered
+	ExchangeRefused       = vocab.ExchangeRefused
+	ExchangeUnreachable   = vocab.ExchangeUnreachable
+	ExchangeUpstreamError = vocab.ExchangeUpstreamError
 )
 
 // Refusing parties.
+//
+// Deprecated: use package recording's names, which these are; they go at the engine package split.
 const (
-	RefusedByProviderGateway        = "provider-gateway"
-	RefusedByHub                    = "hub"
-	RefusedByAuthorizationFramework = "authorization-framework"
-	RefusedByPayerGateway           = "payer-gateway"
+	RefusedByProviderGateway        = vocab.RefusedByProviderGateway
+	RefusedByHub                    = vocab.RefusedByHub
+	RefusedByAuthorizationFramework = vocab.RefusedByAuthorizationFramework
+	RefusedByPayerGateway           = vocab.RefusedByPayerGateway
 )
 
-// Refusal rules: the network's own primitives, and conformance for a check a
-// participant opted into.
+// Refusal rules.
+//
+// Deprecated: use package recording's names, which these are; they go at the engine package split.
 const (
-	RefusalAuthentication = "authentication"
-	RefusalAuthority      = "authority"
-	RefusalConsent        = "consent"
-	RefusalRouting        = "routing"
-	RefusalReplay         = "replay"
-	RefusalIntegrity      = "integrity"
-	RefusalAudit          = "audit"
-	RefusalFidelity       = "fidelity"
-	RefusalConformance    = "conformance"
-	RefusalLimit          = "limit"
+	RefusalAuthentication = vocab.RefusalAuthentication
+	RefusalAuthority      = vocab.RefusalAuthority
+	RefusalConsent        = vocab.RefusalConsent
+	RefusalRouting        = vocab.RefusalRouting
+	RefusalReplay         = vocab.RefusalReplay
+	RefusalIntegrity      = vocab.RefusalIntegrity
+	RefusalAudit          = vocab.RefusalAudit
+	RefusalFidelity       = vocab.RefusalFidelity
+	RefusalConformance    = vocab.RefusalConformance
+	RefusalLimit          = vocab.RefusalLimit
 )
 
 // Backend error classes.
+//
+// Deprecated: use package recording's names, which these are; they go at the engine package split.
 const (
-	BackendTimeout   = "timeout"
-	BackendConnect   = "connect"
-	BackendTLS       = "tls"
-	BackendAuth      = "auth"
-	BackendHTTP3xx   = "http-3xx"
-	BackendHTTP4xx   = "http-4xx"
-	BackendHTTP5xx   = "http-5xx"
-	BackendRead      = "read"
-	BackendMalformed = "malformed"
-	// BackendCancelled is a call cut short because the request it served
-	// ended: the requester stopped waiting or went away. A system slower
-	// than the responder's own deadline (WithBackendDeadline) is its
-	// timeout instead. The exchange is not recorded as an upstream error.
-	BackendCancelled = "cancelled"
+	BackendTimeout   = vocab.BackendTimeout
+	BackendConnect   = vocab.BackendConnect
+	BackendTLS       = vocab.BackendTLS
+	BackendAuth      = vocab.BackendAuth
+	BackendHTTP3xx   = vocab.BackendHTTP3xx
+	BackendHTTP4xx   = vocab.BackendHTTP4xx
+	BackendHTTP5xx   = vocab.BackendHTTP5xx
+	BackendRead      = vocab.BackendRead
+	BackendMalformed = vocab.BackendMalformed
+	BackendCancelled = vocab.BackendCancelled
 )
 
-// The closed lists. Each ends in ExchangeOther.
+// The closed lists. Each ends in ExchangeOther. The directions, outcomes,
+// refusing parties, rules and error classes are package recording's, each
+// deprecated here; the routes, kinds and operations are the compiled-in
+// workstreams'.
 var (
-	ExchangeDirections = []string{DirectionIngress, DirectionInbound, ExchangeOther}
-	ExchangeRoutes     = []string{RouteCRD, RouteDTR, RoutePAS, RoutePASInquire, RouteSubstrateInbound, ExchangeOther}
-	// ExchangeKinds is every leg of the PA catalog (paCatalog), pinned equal
-	// by TestExchangeKindsAreThePACatalog.
-	ExchangeKinds = []string{
-		"coverage-eligibility", "dtr-questionnaire-fetch", "federated-query", "patient-dtr",
-		"crd-order-select", "crd-order-dispatch", "pas-claim", "pas-claim-update", "pas-claim-inquire",
-		ExchangeOther,
-	}
+	// Deprecated: use recording.ExchangeDirections, which this is; it goes at the engine package split.
+	ExchangeDirections = vocab.ExchangeDirections
+	// ExchangeRoutes are the ingress routes the compiled-in workstreams
+	// declare, and the core's inbound route (set in init).
+	ExchangeRoutes []string
+	// ExchangeKinds is every leg of the compiled-in workstreams' catalogs
+	// (set in init).
+	ExchangeKinds []string
 	// ExchangeOperations are the CDS hooks the CRD legs carry and the DTR
 	// operations a request frame names.
-	ExchangeOperations  = []string{"order-select", "order-sign", "order-dispatch", shnsdk.FrameOperationQuestionnairePackage, shnsdk.FrameOperationNextQuestion, ExchangeOther}
-	ExchangeOutcomes    = []string{ExchangeAnswered, ExchangeRefused, ExchangeUnreachable, ExchangeUpstreamError, ExchangeOther}
-	RefusalParties      = []string{RefusedByProviderGateway, RefusedByHub, RefusedByAuthorizationFramework, RefusedByPayerGateway, ExchangeOther}
-	RefusalRules        = []string{RefusalAuthentication, RefusalAuthority, RefusalConsent, RefusalRouting, RefusalReplay, RefusalIntegrity, RefusalAudit, RefusalFidelity, RefusalConformance, RefusalLimit, ExchangeOther}
-	BackendErrorClasses = []string{BackendTimeout, BackendConnect, BackendTLS, BackendAuth, BackendHTTP3xx, BackendHTTP4xx, BackendHTTP5xx, BackendRead, BackendMalformed, BackendCancelled, ExchangeOther}
+	ExchangeOperations = []string{"order-select", "order-sign", "order-dispatch", shnsdk.FrameOperationQuestionnairePackage, shnsdk.FrameOperationNextQuestion, ExchangeOther}
+	// Deprecated: use recording.ExchangeOutcomes, which this is; it goes at the engine package split.
+	ExchangeOutcomes = vocab.ExchangeOutcomes
+	// Deprecated: use recording.RefusalParties, which this is; it goes at the engine package split.
+	RefusalParties = vocab.RefusalParties
+	// Deprecated: use recording.RefusalRules, which this is; it goes at the engine package split.
+	RefusalRules = vocab.RefusalRules
+	// Deprecated: use recording.BackendErrorClasses, which this is; it goes at the engine package split.
+	BackendErrorClasses = vocab.BackendErrorClasses
 	// AnswerErrorClasses say why an inbound leg's answer could not be
 	// authorized: the request ended before it (cancelled: the requester was
 	// gone), the authorize call ran out of time (timeout), the Authorization
 	// Framework denied it (auth) or never answered it (unreachable), or
 	// another failure (other).
-	AnswerErrorClasses = []string{BackendCancelled, BackendTimeout, BackendAuth, ExchangeUnreachable, ExchangeOther}
+	//
+	// Deprecated: use recording.AnswerErrorClasses, which this is; it goes at the engine package split.
+	AnswerErrorClasses = vocab.AnswerErrorClasses
 )
+
+// init derives ExchangeRoutes and ExchangeKinds from the compiled-in
+// workstreams. It runs after every package-level variable is set: the
+// workstreams' ingress handlers record exchanges against these lists, so the
+// lists cannot be initializers of their own without an initialization cycle.
+func init() {
+	ExchangeRoutes = append(workstreamIngressRouteNames(), RouteSubstrateInbound, ExchangeOther)
+	ExchangeKinds = append(workstreamKinds(), ExchangeOther)
+}
 
 // closed returns v when list names it, else ExchangeOther.
 func closed(list []string, v string) string {
@@ -400,25 +459,66 @@ func (x *exchangeRecorder) decided(outcome, by, rule string) {
 	})
 }
 
-// edits notes the registered edits applied to bytes this gateway sent on the
-// leg, once they were sent: an id the registry does not hold
-// is never recorded, and one already recorded is not recorded again.
 // answerLine records the line the answer the gateway wrote back is written in.
 func (x *exchangeRecorder) answerLine(token string) {
 	x.with(func() { x.rec.AnswerLine = token })
 }
 
-func (x *exchangeRecorder) edits(ids []relay.EditID) {
-	if len(ids) == 0 {
-		return
+// ExchangeOwnerships is the closed list ExchangeRecord.Ownership draws from:
+// relay.Ownership's names for the three kinds of message a gateway sends.
+var ExchangeOwnerships = []string{relay.OwnershipRelayed.String(), relay.OwnershipEdited.String(), relay.OwnershipAuthored.String()}
+
+// sent records the message this gateway sent on the leg: whose it is, its
+// builder when it is the gateway's own, and the edits it carries.
+func (x *exchangeRecorder) sent(p relay.Payload) {
+	if own, builder, ok := ownedBy(p); ok {
+		x.with(func() {
+			x.rec.Ownership, x.rec.Builder = own, builder
+			x.rec.RequestEdits = addEdits(x.rec.RequestEdits, p.Edits())
+			x.rec.Edits = addEdits(x.rec.Edits, p.Edits())
+		})
 	}
-	x.with(func() {
-		for _, id := range ids {
-			if slices.Contains(relay.EditIDs(), id) && !slices.Contains(x.rec.Edits, string(id)) {
-				x.rec.Edits = append(x.rec.Edits, string(id))
-			}
+}
+
+// answered records the answer this gateway wrote on the call, once the
+// transmit check admitted it: whose it is, its builder when it is the
+// gateway's own, and the edits it carries. A call writes one answer, so it
+// replaces any answer recorded before. Every writer of an answer calls it
+// (TestEveryAnswerTransmitRecordsTheAnswer).
+func (x *exchangeRecorder) answered(p relay.Payload) {
+	if own, builder, ok := ownedBy(p); ok {
+		x.with(func() {
+			x.rec.AnswerOwnership, x.rec.AnswerBuilder = own, builder
+			x.rec.AnswerEdits = addEdits(nil, p.Edits())
+			x.rec.Edits = addEdits(x.rec.Edits, p.Edits())
+		})
+	}
+}
+
+// ownedBy names whose message p is and, when it is the gateway's own, its
+// builder: as built (authored), or carried to another IG line by the
+// registered transform (edited, E-09). ok is false for a payload with no
+// ownership the closed list names.
+func ownedBy(p relay.Payload) (own, builder string, ok bool) {
+	own = p.Ownership().String()
+	if !slices.Contains(ExchangeOwnerships, own) {
+		return "", "", false
+	}
+	if slices.Contains(relay.Builders(), p.Builder()) {
+		builder = string(p.Builder())
+	}
+	return own, builder, true
+}
+
+// addEdits appends to list each registered id in ids it does not yet hold,
+// in order.
+func addEdits(list []string, ids []relay.EditID) []string {
+	for _, id := range ids {
+		if slices.Contains(relay.EditIDs(), id) && !slices.Contains(list, string(id)) {
+			list = append(list, string(id))
 		}
-	})
+	}
+	return list
 }
 
 // routed notes a payer-routing answer: the 422 a request is answered when its
@@ -970,23 +1070,14 @@ func (w *exchangeWriter) Write(b []byte) (int, error) {
 
 func (w *exchangeWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
-// ingressRoutes are the Da Vinci ingress handlers, with the observer tag each
-// route has always carried.
-var ingressRoutes = map[string]struct {
-	tag     string
-	handler func(*Gateway) http.HandlerFunc
-}{
-	RouteCRD:        {"crd-ingress", func(g *Gateway) http.HandlerFunc { return g.handleCRDIngress }},
-	RouteDTR:        {"dtr-ingress", func(g *Gateway) http.HandlerFunc { return g.handleDTRIngress }},
-	RoutePAS:        {"pas-ingress", func(g *Gateway) http.HandlerFunc { return g.handlePASIngress }},
-	RoutePASInquire: {"pas-inquire-ingress", func(g *Gateway) http.HandlerFunc { return g.handlePASInquireIngress }},
-}
-
 // ingressRoute is the handler a Da Vinci ingress route is mounted with: the
 // exchange record outermost, so it sees every answer the others write.
 func (g *Gateway) ingressRoute(route string) http.HandlerFunc {
-	r := ingressRoutes[route]
-	return g.recordExchange(route, DirectionIngress, g.observeIngress(r.tag, g.withIngressCorrelation(r.handler(g))))
+	r, ok := workstreamIngressRoute(route)
+	if !ok {
+		panic("engine: no compiled-in workstream declares ingress route " + route)
+	}
+	return g.recordExchange(route, DirectionIngress, g.observeIngress(r.tag, g.withIngressCorrelation(withIngressCaller(r.handler(g)))))
 }
 
 // inboundRoute is the handler /substrate/inbound is mounted with.
@@ -1002,7 +1093,7 @@ func (g *Gateway) recordExchange(route, direction string, h http.HandlerFunc) ht
 			return
 		}
 		x := &exchangeRecorder{self: g.exchangeParty(direction), now: g.exchangeClock}
-		if g.policy().Level() == EnforcementObserve {
+		if g.conformance().Level() == EnforcementObserve {
 			x.tally = &legTally{}
 		}
 		x.rec.Start = g.exchangeClock()
@@ -1056,9 +1147,11 @@ func (g *Gateway) emitExchange(x *exchangeRecorder, w *exchangeWriter, panicked 
 	rec := x.rec
 	rec.Findings.Kinds = slices.Clone(rec.Findings.Kinds)
 	rec.Edits = slices.Clone(rec.Edits)
+	rec.RequestEdits = slices.Clone(rec.RequestEdits)
+	rec.AnswerEdits = slices.Clone(rec.AnswerEdits)
 	// At observe the count and kinds are deferred (checks run off the request
 	// path), but a check that refuses is always judged inline, so Refused is known.
-	if g.policy().Level() == EnforcementObserve {
+	if g.conformance().Level() == EnforcementObserve {
 		rec.Findings = FindingSummary{Deferred: true, Refused: rec.Findings.Refused}
 	}
 	tally := x.tally

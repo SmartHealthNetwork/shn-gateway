@@ -264,13 +264,13 @@ func TestDefaultLaneMetadataIsOnlyAStartingGate(t *testing.T) {
 				return http.StatusOK, []byte(`<html>not found</html>`)
 			}
 			return status, answer
-		}, "row 1/42"},
+		}, "row 1/41"},
 		{"invalid outcome", func(r *http.Request, _ []byte, status int, answer []byte) (int, []byte) {
 			if r.Method == http.MethodPost {
 				return http.StatusOK, []byte(`{`)
 			}
 			return status, answer
-		}, "row 1/42"},
+		}, "row 1/41"},
 		// The lane's own answers to the negative controls, their targeted
 		// rejection removed: a lane that accepts the type mutation.
 		{"negative control accidentally passes", func(r *http.Request, body []byte, status int, answer []byte) (int, []byte) {
@@ -283,7 +283,7 @@ func TestDefaultLaneMetadataIsOnlyAStartingGate(t *testing.T) {
 			}
 			negativeEdits.Add(1)
 			return status, edited
-		}, "row 32/42 negative-versioned"},
+		}, "row 31/41 negative-versioned"},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			lane := newRecordedLane(t, row.edit, "lane-2.1-metadata", "lane-2.1-warm")
@@ -305,11 +305,11 @@ func TestDefaultLaneMetadataIsOnlyAStartingGate(t *testing.T) {
 		t.Run("lane "+pair[0]+" qualified as "+pair[1], func(t *testing.T) {
 			lane := newRecordedLane(t, nil, "lane-"+pair[0]+"-metadata", "lane-"+pair[0]+"-asked-"+pair[1])
 			err := qualifyDefaultLane(context.Background(), lane.URL+"/fhir", pair[1])
-			if !errors.Is(err, lanequalify.ErrCorpus) || !strings.Contains(err.Error(), "row 5/42 prime-versioned-approved: unexpected verdict") || !strings.Contains(err.Error(), "error/processing: ") {
-				t.Fatalf("a lane of %s qualified as %s: %v, want the corpus refused at row 5/42", pair[0], pair[1], err)
+			if !errors.Is(err, lanequalify.ErrCorpus) || !strings.Contains(err.Error(), "row 4/41 prime-versioned-approved: unexpected verdict") || !strings.Contains(err.Error(), "error/processing: ") {
+				t.Fatalf("a lane of %s qualified as %s: %v, want the corpus refused at row 4/41", pair[0], pair[1], err)
 			}
-			if lane.gets.Load() != 1 || lane.posts.Load() != 5 {
-				t.Fatalf("metadata=%d rows=%d, want 1 and 5", lane.gets.Load(), lane.posts.Load())
+			if lane.gets.Load() != 1 || lane.posts.Load() != 4 {
+				t.Fatalf("metadata=%d rows=%d, want 1 and 4", lane.gets.Load(), lane.posts.Load())
 			}
 		})
 	}

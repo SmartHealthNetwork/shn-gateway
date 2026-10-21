@@ -71,7 +71,7 @@ func FacilityCDexEvidence(member string, now time.Time) (drJSON, provJSON []byte
 		return nil, nil, fmt.Errorf("build CDex query result: %w", err)
 	}
 
-	// Pull the evidence back out the way the originating engine does (engine/originate.go).
+	// Pull the evidence back out the way the originating engine does (engine/module1_originate.go).
 	drOut, provOut, err := shnsdk.ExtractCDexEvidence(completedTask)
 	if err != nil {
 		return nil, nil, fmt.Errorf("extract CDex evidence: %w", err)

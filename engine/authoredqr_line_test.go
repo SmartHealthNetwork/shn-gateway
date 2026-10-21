@@ -1,7 +1,7 @@
 // authoredqr_line_test.go — proves the selected pa.dtr line threads through
 // the THREE authored-QR build sites (closes an earlier KNOWN GAP
-// recorded at handleUC04's attestation refill (originate.go), scenarioToPend's
-// UC-06 attestation refill (originate_resume.go), and populator.go's
+// recorded at handleUC04's attestation refill (module1_originate.go), scenarioToPend's
+// UC-06 attestation refill (module1_originate_resume.go), and populator.go's
 // managedPopulator.Populate — the UC-03 silent wrong-line pass).
 // TestManagedPopulatorBuildsAtLine (populator_test.go) proves the
 // managedPopulator.Populate site directly at the unit level; THIS file proves
@@ -434,8 +434,8 @@ func assert22WireMarkers(t *testing.T, label string, payload []byte) {
 }
 
 // TestAuthoredQRBuiltAtSelectedLine drives the two provider-data attestation
-// sites — scenarioToPend's UC-06 refill (originate_resume.go) and handleUC04's
-// refill (originate.go) — each against its own 2.2-pinned fixture, and asserts
+// sites — scenarioToPend's UC-06 refill (module1_originate_resume.go) and handleUC04's
+// refill (module1_originate.go) — each against its own 2.2-pinned fixture, and asserts
 // the QuestionnaireResponse embedded in the ACTUAL submitted pas-claim /
 // pas-claim-update bundle carries the 2.2 wire markers. Before the fix both
 // sites called the frozen (line-invariant) FillQuestionnaireFromAnswers, so
@@ -498,7 +498,7 @@ func TestAuthoredQRBuiltAtSelectedLine(t *testing.T) {
 // (Step 1c): an unknown selected DTR line must fail the build closed, asserted
 // at the ONE site easiest to drive directly (the managedPopulator seam plus the
 // exact status mapping runCRDThenDTROrder's Populate call site uses,
-// statusForPopulateErr — originate.go:669) — driving the full HTTP surface
+// statusForPopulateErr — module1_originate.go:669) — driving the full HTTP surface
 // through a bogus REGISTRY-declared line would require corrupting shnsdk's own
 // line grammar, which is disproportionate here. All three authored-QR sites
 // share this fail-closed behavior verbatim (Step 3: none special-cases an
@@ -514,7 +514,7 @@ func TestRunCRDThenDTROrder_UnknownLineFailsAtAuthoredQRSite(t *testing.T) {
 	if err == nil {
 		t.Fatal("Populate at unknown line 9.9: want error (fail-closed), got nil")
 	}
-	// The exact mapping the Populate call site (runCRDThenDTROrder, originate.go:669)
+	// The exact mapping the Populate call site (runCRDThenDTROrder, module1_originate.go:669)
 	// applies to ANY non-sentinel Populate error: this build's own fault → 500. An
 	// unknown-line error is not one of the sentinel data/partner faults
 	// (errNoClinicalContext / errPopulateUpstream / errPopulateForeignSubject), so it

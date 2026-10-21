@@ -36,7 +36,12 @@ type Content struct {
 	// Carried marks a request the participant's own system sent to this
 	// gateway, carried on to the network (the Da Vinci ingress).
 	Carried bool
-	Route   *RouteInfo
+	// OnBehalf marks a request that came to the ingress (Carried) from a
+	// registered module ingress client (moduleclient.go): the gateway's own
+	// message, relay.Authored by the builder the client declared, so it is
+	// checked against the leg's originated row, not the carried one.
+	OnBehalf bool
+	Route    *RouteInfo
 	// Operation names the DTR operation whose own input Payload is
 	// (shnsdk.FrameOperationQuestionnairePackage or
 	// shnsdk.FrameOperationNextQuestion); "" for every other request. A
@@ -121,4 +126,12 @@ type Exchange struct {
 	ID         string
 	Workstream string
 	Legs       []LegRecord
+}
+
+// subjectsOf returns a 1-element subjects slice for a non-empty pci, else nil.
+func subjectsOf(pci string) []string {
+	if pci == "" {
+		return nil
+	}
+	return []string{pci}
 }

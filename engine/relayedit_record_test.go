@@ -118,8 +118,12 @@ func TestExchangeRecord_RequesterEdits(t *testing.T) {
 			t.Fatalf("answer %d %s", rec.Code, rec.Body.String())
 		}
 		want := editStrings(relay.EditCDSCallbackStrip)
-		if r := got.only(t); !slices.Equal(r.Edits, want) {
-			t.Fatalf("edits %v, want %v", r.Edits, want)
+		r := got.only(t)
+		if !slices.Equal(r.Edits, want) || !slices.Equal(r.RequestEdits, want) || len(r.AnswerEdits) != 0 {
+			t.Fatalf("edits %v (request %v, answer %v), want %v, all the request's", r.Edits, r.RequestEdits, r.AnswerEdits, want)
+		}
+		if r.Ownership != "edited" || r.AnswerOwnership != "relayed" || r.AnswerBuilder != "" {
+			t.Fatalf("request %q, answer %q by %q: want the request edited and the payer's answer relayed", r.Ownership, r.AnswerOwnership, r.AnswerBuilder)
 		}
 		wantEventEdits(t, events, "leg.sealed", want)
 	})
@@ -340,8 +344,11 @@ func TestExchangeRecord_RecipientEdits(t *testing.T) {
 			}
 		}
 		r := got.only(t)
-		if r.Direction != DirectionInbound || !slices.Equal(r.Edits, want) {
-			t.Fatalf("mapped %v: %s record edits %v, want %v", mapped, r.Direction, r.Edits, want)
+		if r.Direction != DirectionInbound || !slices.Equal(r.Edits, want) || !slices.Equal(r.RequestEdits, want) || len(r.AnswerEdits) != 0 {
+			t.Fatalf("mapped %v: %s record edits %v (forward %v, answer %v), want %v, all the forward's", mapped, r.Direction, r.Edits, r.RequestEdits, r.AnswerEdits, want)
+		}
+		if r.AnswerOwnership != "relayed" || r.AnswerBuilder != "" {
+			t.Fatalf("mapped %v: answer %q by %q, want the payer's answer relayed", mapped, r.AnswerOwnership, r.AnswerBuilder)
 		}
 		wantEventEdits(t, &events, "native.request", want)
 	}
@@ -350,19 +357,19 @@ func TestExchangeRecord_RecipientEdits(t *testing.T) {
 // The recorder keeps the closed set: only registered ids, each once, in the
 // order first transmitted; a nil recorder records nothing.
 func TestExchangeRecorder_EditsClosedSet(t *testing.T) {
-	x := &exchangeRecorder{}
-	x.edits([]relay.EditID{relay.EditCDSCallbackStrip, "E-99", relay.EditCDSCoverageCarry})
-	x.edits([]relay.EditID{relay.EditCDSCoverageCarry, "", "e-01", relay.EditCDSCallbackStrip, relay.EditPayorEdgeRestamp})
+	list := addEdits(nil, []relay.EditID{relay.EditCDSCallbackStrip, "E-99", relay.EditCDSCoverageCarry})
+	list = addEdits(list, []relay.EditID{relay.EditCDSCoverageCarry, "", "e-01", relay.EditCDSCallbackStrip, relay.EditPayorEdgeRestamp})
 	want := editStrings(relay.EditCDSCallbackStrip, relay.EditCDSCoverageCarry, relay.EditPayorEdgeRestamp)
-	if !slices.Equal(x.rec.Edits, want) {
-		t.Fatalf("edits %v, want %v", x.rec.Edits, want)
+	if !slices.Equal(list, want) {
+		t.Fatalf("edits %v, want %v", list, want)
 	}
-	x.edits(nil)
-	if !slices.Equal(x.rec.Edits, want) {
-		t.Fatalf("no edits changed the record: %v", x.rec.Edits)
+	if got := addEdits(list, nil); !slices.Equal(got, want) {
+		t.Fatalf("no edits changed the list: %v", got)
 	}
 	var none *exchangeRecorder
-	none.edits([]relay.EditID{relay.EditCDSCallbackStrip}) // must not panic
+	p := relay.ForTest([]byte(`{}`), "application/json")
+	none.sent(p) // must not panic
+	none.answered(p)
 }
 
 // The record handed to the observer owns its edits: a later note never
@@ -372,11 +379,16 @@ func TestExchangeRecord_EditsAreCloned(t *testing.T) {
 	var emitted ExchangeRecord
 	g.cfg.ExchangeObserved = func(r ExchangeRecord) { emitted = r }
 	x := &exchangeRecorder{}
-	x.edits([]relay.EditID{relay.EditCDSCallbackStrip})
+	strip := editStrings(relay.EditCDSCallbackStrip)
+	x.rec.Edits, x.rec.RequestEdits, x.rec.AnswerEdits = slices.Clone(strip), slices.Clone(strip), slices.Clone(strip)
 	g.emitExchange(x, &exchangeWriter{ResponseWriter: httptest.NewRecorder(), x: x}, false)
 	x.rec.Edits[0] = string(relay.EditPayorEdgeRestamp)
-	if !slices.Equal(emitted.Edits, editStrings(relay.EditCDSCallbackStrip)) {
-		t.Fatalf("the emitted record's edits changed after it was emitted: %v", emitted.Edits)
+	x.rec.RequestEdits[0] = string(relay.EditPayorEdgeRestamp)
+	x.rec.AnswerEdits[0] = string(relay.EditPayorEdgeRestamp)
+	for name, got := range map[string][]string{"Edits": emitted.Edits, "RequestEdits": emitted.RequestEdits, "AnswerEdits": emitted.AnswerEdits} {
+		if !slices.Equal(got, strip) {
+			t.Fatalf("the emitted record's %s changed after it was emitted: %v", name, got)
+		}
 	}
 }
 
@@ -397,6 +409,7 @@ func TestRelayEditReceivedByTable(t *testing.T) {
 		relay.EditEvidenceSubjectRekey: {"evidence-subject-rekey", relay.RoleRecipient},
 		relay.EditCDSCoverageCarry:     {"cds-callback-coverage-carry", relay.RoleRecipient},
 		relay.EditDTRAnswerLineNames:   {"dtr-answer-line-names", 0},
+		relay.EditRegisteredTransform:  {"registered-transform", relay.RoleRecipient},
 	}
 	ids := relay.EditIDs()
 	if len(ids) != len(want) {

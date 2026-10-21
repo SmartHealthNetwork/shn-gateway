@@ -222,7 +222,7 @@ func (g *Gateway) emitFinding(f ConformanceFinding) {
 }
 
 // findingIssuesShown bounds the issue list a strict refusal body echoes, the
-// same bound the CDS Hooks certifier already applies (native.go).
+// same bound the CDS Hooks certifier already applies (workstream_pa_crd_forward.go).
 const findingIssuesShown = 5
 
 // boundIssues is the ONLY path by which validator diagnostic text leaves this

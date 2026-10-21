@@ -1,7 +1,7 @@
 // conformance_findingvalues_test.go — pins the ACTUAL findingContext value a
 // real handler or helper hands validateGoverned, one representative
 // ingress/egress pair per leg family (CRD, DTR incl. the adaptive path, PAS,
-// federated query, patient access, inbound). The AST census in
+// federated query, inbound). The AST census in
 // conformance_sources_test.go can only see that a handler CALLS
 // withFindingContext somewhere in its body — it cannot see ordering, value
 // truth, or a helper's own internal retagging. This file is the guard two
@@ -20,14 +20,12 @@ package engine
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
@@ -103,8 +101,8 @@ func assertTag(t *testing.T, label string, got findingContext, want wantTag) {
 // (the standing pattern this package's own inbound tests already use — see
 // native_crd_relay_test.go's TestHandleCRDNativeInbound_ValidatorRunsOnBoth
 // family) with the request context pre-tagged EXACTLY as the real
-// handleInbound dispatcher sets it (inboundSeamFor("crd-order-select"), Whose
-// "peer") before the call, so the check under test is the inner handler's OWN
+// handleInbound dispatcher sets it (the catalog row's Seam, Whose "peer")
+// before the call, so the check under test is the inner handler's OWN
 // use of that tag, not a hand-built substitute for it.
 func TestPinnedFindingContext_CRDIngress(t *testing.T) {
 	g, requester := newInboundTestGateway(t, true)
@@ -122,7 +120,7 @@ func TestPinnedFindingContext_CRDIngress(t *testing.T) {
 	r := newSignedInboundRequest(t, g, requester.ID)
 	r = r.WithContext(withFindingContext(r.Context(), findingContext{
 		LegType: "crd-order-select", CorrelationID: env.Metadata.CorrelationID,
-		Seam: inboundSeamFor("crd-order-select"), Whose: "peer",
+		Seam: paCatalog["crd-order-select"].Seam, Whose: "peer",
 	}))
 	rec := httptest.NewRecorder()
 	g.handleCRDNativeInbound(rec, r, env, shnsdk.Token{Subject: pci}, req, "")
@@ -226,7 +224,7 @@ func TestPinnedFindingContext_InboundEgress(t *testing.T) {
 	r := newSignedInboundRequest(t, g, requester.ID)
 	r = r.WithContext(withFindingContext(r.Context(), findingContext{
 		LegType: "pas-claim", CorrelationID: env.Metadata.CorrelationID,
-		Seam: inboundSeamFor("pas-claim"), Whose: "peer",
+		Seam: paCatalog["pas-claim"].Seam, Whose: "peer",
 	}))
 	rec := httptest.NewRecorder()
 	g.handlePASNativeInbound(rec, r, env, tok, req, "pa.pas@2.0")
@@ -242,9 +240,9 @@ func TestPinnedFindingContext_InboundEgress(t *testing.T) {
 }
 
 // TestPinnedFindingContext_PayerDTREgress drives handleDTRInbound
-// (payer.go) directly, pre-tagged exactly as handleInbound sets it for an
+// (workstream_pa_dtr_inbound.go) directly, pre-tagged exactly as handleInbound sets it for an
 // inbound dtr-questionnaire-fetch leg — proving the direction-flip retag at
-// payer.go:92-94 (after g.admit, before the payer's own $questionnaire-package
+// workstream_pa_dtr_inbound.go:92-94 (after g.admit, before the payer's own $questionnaire-package
 // answer is validated) actually reaches the check as Whose "own". This is
 // the row that closes the gap the re-review found: this exact retag had no
 // test at all.
@@ -254,7 +252,7 @@ func TestPinnedFindingContext_PayerDTREgress(t *testing.T) {
 	g.cfg.Validator = spy
 	// An authored (not relayed) package: ResponseRelayed() must be false or
 	// the egress check under test is skipped by the R-8 near-relay rule
-	// (payer.go's own comment on this exact call site).
+	// (workstream_pa_dtr_inbound.go's own comment on this exact call site).
 	pkg := []byte(`{"resourceType":"Bundle","type":"collection","entry":[]}`)
 	g.cfg.Responder = pasResultResponder{result: LegResult{Response: testResponse(pkg)}}
 	pci, _, _ := g.cfg.SoR.ResolvePatient("MBR-COVERED")
@@ -269,7 +267,7 @@ func TestPinnedFindingContext_PayerDTREgress(t *testing.T) {
 	r = r.WithContext(withRequestFrameOperation(r.Context(), shnsdk.FrameOperationQuestionnairePackage))
 	r = r.WithContext(withFindingContext(r.Context(), findingContext{
 		LegType: "dtr-questionnaire-fetch", CorrelationID: env.Metadata.CorrelationID,
-		Seam: inboundSeamFor("dtr-questionnaire-fetch"), Whose: "peer",
+		Seam: paCatalog["dtr-questionnaire-fetch"].Seam, Whose: "peer",
 	}))
 	rec := httptest.NewRecorder()
 	g.handleDTRInbound(rec, r, env, shnsdk.Token{Subject: pci}, req, "pa.dtr@2.0")
@@ -286,7 +284,7 @@ func TestPinnedFindingContext_PayerDTREgress(t *testing.T) {
 // TestPinnedFindingContext_InboundUpdateEgress drives
 // handlePASUpdateNativeInbound directly, pre-tagged exactly as handleInbound
 // sets it for an inbound pas-claim-update leg — proving the direction-flip
-// retag at pas_native.go:413-415 actually reaches the check as Whose "own".
+// retag at workstream_pa_pas_inbound.go:413-415 actually reaches the check as Whose "own".
 // The other unguarded row the re-review found; mirrors
 // TestPinnedFindingContext_InboundEgress's pattern on the amendment leg —
 // the check under test is validatePASResult's validateFHIRForContract call,
@@ -313,7 +311,7 @@ func TestPinnedFindingContext_InboundUpdateEgress(t *testing.T) {
 	r := newSignedInboundRequest(t, g, requester.ID)
 	r = r.WithContext(withFindingContext(r.Context(), findingContext{
 		LegType: "pas-claim-update", CorrelationID: env.Metadata.CorrelationID,
-		Seam: inboundSeamFor("pas-claim-update"), Whose: "peer",
+		Seam: paCatalog["pas-claim-update"].Seam, Whose: "peer",
 	}))
 	rec := httptest.NewRecorder()
 	g.handlePASUpdateNativeInbound(rec, r, env, tok, req, "pa.pas@2.0")
@@ -329,7 +327,7 @@ func TestPinnedFindingContext_InboundUpdateEgress(t *testing.T) {
 
 // TestPinnedFindingContext_InboundInquireEgress drives handlePASInquireInbound
 // directly, pre-tagged exactly as handleInbound sets it for an inbound
-// pas-claim-inquire leg — proving the direction-flip retag in inquire.go
+// pas-claim-inquire leg — proving the direction-flip retag in workstream_pa_inquire.go
 // actually reaches the check as Whose "own". The third PAS leg, and the last
 // one to get its flip: the inquiry leg arrived after the submit and amendment
 // legs, so the flip was written without a row of its own and a later edit
@@ -369,7 +367,7 @@ func TestPinnedFindingContext_InboundInquireEgress(t *testing.T) {
 	r := newSignedInboundRequest(t, g, requester.ID)
 	r = r.WithContext(withFindingContext(r.Context(), findingContext{
 		LegType: "pas-claim-inquire", CorrelationID: env.Metadata.CorrelationID,
-		Seam: inboundSeamFor("pas-claim-inquire"), Whose: "peer",
+		Seam: paCatalog["pas-claim-inquire"].Seam, Whose: "peer",
 	}))
 	rec := httptest.NewRecorder()
 	g.handlePASInquireInbound(rec, r, env, tok, req, "pa.pas@2.0")
@@ -386,62 +384,6 @@ func TestPinnedFindingContext_InboundInquireEgress(t *testing.T) {
 		t.Errorf("%s: CorrelationID = %q, want the envelope's own %q — the flip must carry handleInbound's id, not re-derive it",
 			label, call.fc.CorrelationID, env.Metadata.CorrelationID)
 	}
-}
-
-// ---- Patient access family (own/egress only — a REST read has no ingress leg) ----
-
-// TestPinnedFindingContext_PatientAccessEgress drives the real router
-// (g.Handler()) into handlePatientAccessEOB -> serveEOB with a valid
-// patient-access bearer token and one seeded EOB.
-func TestPinnedFindingContext_PatientAccessEgress(t *testing.T) {
-	authzPub, authzPriv := genED25519(t)
-	payEncPub, payEncPriv := genKeyPair(t)
-	_, paySignPriv := genED25519(t)
-	audit := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"ok":true}`))
-	}))
-	t.Cleanup(audit.Close)
-
-	sor := newCensusSoR()
-	if err := sor.RecordEOB("p-1", "eob-1", []byte(`{"resourceType":"ExplanationOfBenefit","id":"eob-1"}`)); err != nil {
-		t.Fatal(err)
-	}
-	spy := &findingSpyValidator{}
-	g := mustNew(t, Config{
-		Role:            "payer",
-		HolderID:        "payer",
-		Identity:        shnsdk.Identity{HolderID: "payer", SignPriv: paySignPriv, EncPub: payEncPub, EncPriv: payEncPriv},
-		AuthzURL:        "http://stub.test",
-		AuthzPub:        authzPub,
-		HubTransportPub: authzPub,
-		Reg:             shnsdk.NewRegistry(),
-		Validator:       spy,
-		SoR:             sor,
-		Store:           sor,
-		Responder:       unusedResponder{},
-		Clock:           fixedClock,
-		Client:          audit.Client(),
-		AuditURL:        audit.URL,
-	})
-
-	tok := signTestToken(shnsdk.Token{
-		Operation: "patient-access-read", Scope: "patient-access-only", Subject: "p-1",
-		Frame: "patient-access", Holder: "phg", CorrelationID: "corr-pa-1",
-		Expiry: fixedClock().Add(time.Hour),
-	}, authzPriv)
-	raw, _ := json.Marshal(tok)
-	req := httptest.NewRequest(http.MethodGet, "/ExplanationOfBenefit?patient=p-1", nil)
-	req.Header.Set("Authorization", "Bearer "+base64.StdEncoding.EncodeToString(raw))
-	rec := httptest.NewRecorder()
-	g.Handler().ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("want 200, got %d body=%s", rec.Code, rec.Body.String())
-	}
-	call := spy.nth(t, 1, "Bundle")
-	assertTag(t, "patient access egress (this payer's own EOB searchset)", call.fc, wantTag{
-		legType: "patient-access-read", whose: "own", seam: "originate", corrPresent: true,
-	})
 }
 
 // ---- DTR family (including the adaptive path) + PAS family ----
@@ -657,7 +599,7 @@ func TestPinnedFindingContext_FederatedQueryEgress(t *testing.T) {
 	r := httptest.NewRequest(http.MethodPost, "/", nil).WithContext(context.Background())
 	r = r.WithContext(withFindingContext(r.Context(), findingContext{
 		LegType: "federated-query", CorrelationID: env.Metadata.CorrelationID,
-		Seam: inboundSeamFor("federated-query"), Whose: "peer",
+		Seam: fqsAdapter.catalog()["federated-query"].Seam, Whose: "peer",
 	}))
 	rec := httptest.NewRecorder()
 	g.handleFederatedQueryInbound(rec, r, env, shnsdk.Token{Subject: pci}, query, "")
@@ -667,7 +609,7 @@ func TestPinnedFindingContext_FederatedQueryEgress(t *testing.T) {
 	}
 	// facilityRecordsBundle validates the disclosed DiagnosticReport, the
 	// authored Patient identity binding and the authored Provenance
-	// separately (cdexrecords.go:132/141/160); handleFederatedQueryInbound
+	// separately (workstream_fqs_records.go); handleFederatedQueryInbound
 	// then validates the sealed fulfillment (a Task) once more
 	// (inbound.go:469). All four must show the SAME post-direction-flip tag.
 	for _, resourceType := range []string{"DiagnosticReport", "Patient", "Provenance", "Task"} {

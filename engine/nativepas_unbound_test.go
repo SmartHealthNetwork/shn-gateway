@@ -20,8 +20,12 @@ import (
 	"time"
 )
 
-// beginFailsStore is a ledger whose amendment check cannot be read.
-type beginFailsStore struct{ *censusSoR }
+// beginFailsStore is a ledger whose amendment check cannot be read. It holds
+// the whole ledger, so the check that fails is its own.
+type beginFailsStore struct {
+	*censusSoR
+	PendLedger
+}
 
 func (beginFailsStore) BeginClaimUpdateReason(string, string) (bool, PendRefusal, error) {
 	return false, PendRefusalNone, errors.New("ledger unavailable")
@@ -56,7 +60,7 @@ func TestNativeUpdate_ReachesThePayerWhateverTheLedgerHolds(t *testing.T) {
 	states := []ledgerState{
 		{"no pend here", PendRefusalNotPended, plain(func(*censusSoR) {})},
 		{"already decided", PendRefusalDecided, plain(func(s *censusSoR) {
-			if _, err := s.RecordDecision(pci, origCorr, PendOutcomeDenied, time.Unix(1000, 0).UTC(), PendKeys{}, nil); err != nil {
+			if _, err := testLedger(s).RecordDecision(pci, origCorr, PendOutcomeDenied, time.Unix(1000, 0).UTC(), PendKeys{}); err != nil {
 				t.Fatal(err)
 			}
 		})},
@@ -69,7 +73,7 @@ func TestNativeUpdate_ReachesThePayerWhateverTheLedgerHolds(t *testing.T) {
 		{"ledger unreadable", pendRefusalLedgerUnavailable, func(t *testing.T) (Store, *censusSoR) {
 			s := newCensusSoR()
 			_ = s.RecordPendedClaim(pci, origCorr)
-			return beginFailsStore{s}, s
+			return beginFailsStore{s, testLedger(s)}, s
 		}},
 	}
 	for _, st := range states {
@@ -86,7 +90,7 @@ func TestNativeUpdate_ReachesThePayerWhateverTheLedgerHolds(t *testing.T) {
 				}))
 				defer srv.Close()
 				store, mem := st.store(t)
-				before, hadRow, _ := mem.PendRecordOf(pci, origCorr)
+				before, hadRow, _ := testLedger(mem).PendRecordOf(pci, origCorr)
 				n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", store, fixedClock)
 				ctx, leg := withPASLeg(context.Background(), "provider")
 				res, err := n.Handle(ctx, "pas-claim-update", "corr-1", pci, originatorBuiltConformantUpdateBundle(t))
@@ -110,7 +114,7 @@ func TestNativeUpdate_ReachesThePayerWhateverTheLedgerHolds(t *testing.T) {
 					if res.Commit != nil {
 						t.Fatal("an amendment with no pend here must record nothing")
 					}
-					if _, found, _ := mem.PendRecordOf(pci, origCorr); found {
+					if _, found, _ := testLedger(mem).PendRecordOf(pci, origCorr); found {
 						t.Fatal("a row was created")
 					}
 					return
@@ -121,7 +125,7 @@ func TestNativeUpdate_ReachesThePayerWhateverTheLedgerHolds(t *testing.T) {
 				if err := res.Commit(); err != nil {
 					t.Fatalf("commit: %v", err)
 				}
-				after, _, _ := mem.PendRecordOf(pci, origCorr)
+				after, _, _ := testLedger(mem).PendRecordOf(pci, origCorr)
 				switch {
 				case ans.name == "approval":
 					if after.State != PendStateDecided {
@@ -182,7 +186,7 @@ func TestNativeUpdate_NoPriorClaimNamedRecordsNothing(t *testing.T) {
 	if !hasNote(leg.notes, PendAmendmentUnboundEvent+":"+string(pendRefusalNoPriorClaim)) {
 		t.Fatalf("notes %v", leg.notes)
 	}
-	if _, found, _ := s.PendRecordOf("PCI-CONF-UPD", ""); found {
+	if _, found, _ := testLedger(s).PendRecordOf("PCI-CONF-UPD", ""); found {
 		t.Fatal("a record was written under an empty key")
 	}
 }
@@ -200,13 +204,13 @@ func TestNativeUpdate_UnboundAmendmentRecordsOnlyOntoItsOwnAuthorization(t *test
 	defer srv.Close()
 	t.Run("another requester's authorization", func(t *testing.T) {
 		s := newCensusSoR()
-		if _, err := s.RecordDecision("PCI-CONF-UPD", origCorr, PendOutcomeDenied, time.Unix(1000, 0).UTC(), PendKeys{}, nil); err != nil {
+		if _, err := testLedger(s).RecordDecision("PCI-CONF-UPD", origCorr, PendOutcomeDenied, time.Unix(1000, 0).UTC(), PendKeys{}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.RecordPendedKeyed("PCI-CONF-UPD", origCorr, time.Unix(2000, 0).UTC(), PendKeys{RequesterHolder: "provider-a", PreAuthRef: "PA-1"}); err != nil {
+		if _, err := testLedger(s).RecordPendedKeyed("PCI-CONF-UPD", origCorr, time.Unix(2000, 0).UTC(), PendKeys{RequesterHolder: "provider-a", PreAuthRef: "PA-1"}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.RecordDecision("PCI-CONF-UPD", origCorr, PendOutcomeDenied, time.Unix(3000, 0).UTC(), PendKeys{}, nil); err != nil {
+		if _, err := testLedger(s).RecordDecision("PCI-CONF-UPD", origCorr, PendOutcomeDenied, time.Unix(3000, 0).UTC(), PendKeys{}); err != nil {
 			t.Fatal(err)
 		}
 		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", s, fixedClock)
@@ -221,7 +225,7 @@ func TestNativeUpdate_UnboundAmendmentRecordsOnlyOntoItsOwnAuthorization(t *test
 	})
 	t.Run("another requester's pended authorization is not bound", func(t *testing.T) {
 		s := newCensusSoR()
-		if _, err := s.RecordPendedKeyed("PCI-CONF-UPD", origCorr, time.Unix(2000, 0).UTC(), PendKeys{RequesterHolder: "provider-a", PreAuthRef: "PA-1"}); err != nil {
+		if _, err := testLedger(s).RecordPendedKeyed("PCI-CONF-UPD", origCorr, time.Unix(2000, 0).UTC(), PendKeys{RequesterHolder: "provider-a", PreAuthRef: "PA-1"}); err != nil {
 			t.Fatal(err)
 		}
 		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", s, fixedClock)
@@ -236,13 +240,13 @@ func TestNativeUpdate_UnboundAmendmentRecordsOnlyOntoItsOwnAuthorization(t *test
 		if !hasNote(leg.notes, PendAmendmentUnboundEvent+":"+string(pendRefusalOtherRequester)) {
 			t.Fatalf("notes %v", leg.notes)
 		}
-		if rec, _, _ := s.PendRecordOf("PCI-CONF-UPD", origCorr); rec.State != PendStatePended {
+		if rec, _, _ := testLedger(s).PendRecordOf("PCI-CONF-UPD", origCorr); rec.State != PendStatePended {
 			t.Fatalf("provider-a's authorization moved: %+v", rec)
 		}
 	})
 	t.Run("another patient's authorization under the correlation", func(t *testing.T) {
 		s := newCensusSoR()
-		if _, err := s.RecordPendedKeyed("PCI-OTHER", origCorr, time.Unix(2000, 0).UTC(), PendKeys{RequesterHolder: "provider", PreAuthRef: "PA-1"}); err != nil {
+		if _, err := testLedger(s).RecordPendedKeyed("PCI-OTHER", origCorr, time.Unix(2000, 0).UTC(), PendKeys{RequesterHolder: "provider", PreAuthRef: "PA-1"}); err != nil {
 			t.Fatal(err)
 		}
 		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", s, fixedClock)
@@ -254,15 +258,17 @@ func TestNativeUpdate_UnboundAmendmentRecordsOnlyOntoItsOwnAuthorization(t *test
 		if res.Commit != nil {
 			t.Fatal("an unbound amendment must not create a second authorization under the correlation")
 		}
-		if _, found, _ := s.PendRecordOf("PCI-CONF-UPD", origCorr); found {
+		if _, found, _ := testLedger(s).PendRecordOf("PCI-CONF-UPD", origCorr); found {
 			t.Fatal("a row was created for the second patient")
 		}
 	})
 }
 
-// releaseCountingStore counts releases and fails every keyed pend write.
+// releaseCountingStore counts releases and fails every keyed pend write. It
+// holds the whole ledger, so the write that fails is its own.
 type releaseCountingStore struct {
 	*censusSoR
+	PendLedger
 	releases int
 }
 
@@ -290,7 +296,8 @@ func TestNativeUpdate_TheClaimIsReleasedOnce(t *testing.T) {
 		_, _ = w.Write(rePend)
 	}))
 	defer srv.Close()
-	s := &releaseCountingStore{censusSoR: newCensusSoR()}
+	sor := newCensusSoR()
+	s := &releaseCountingStore{censusSoR: sor, PendLedger: testLedger(sor)}
 	_ = s.RecordPendedClaim("PCI-CONF-UPD", origCorr)
 	n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", s, fixedClock)
 	ctx, _ := withPASLeg(context.Background(), "provider")

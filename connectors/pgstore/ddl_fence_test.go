@@ -56,7 +56,7 @@ var contentBearingTypes = map[string]bool{"BYTEA": true, "JSON": true, "JSONB": 
 // "gw_ingress_key.<column>" entry here, reviewed on its own terms — not a standing
 // blanket pass on the table.
 var ddlContentExceptions = map[string]string{
-	"gw_eob.eob_json": "pre-existing business Store column (not shared replica state): the holder's own PA-decision EOB resource, stored as BYTEA since the E-mid Store slice",
+	"gw_eob.eob_json": "pre-existing business Store column (not shared replica state): the holder's own PA-decision EOB resource, stored as BYTEA since the E-mid Store slice; written and read by nothing since v0.63.0, until the table is dropped",
 }
 
 // legRecordColumns maps every persisted engine.LegRecord field path (LegPhysics

@@ -48,7 +48,7 @@ func TestIngressBearerSchemeIsCaseInsensitive(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			r, _ := http.NewRequest(http.MethodPost, testIngressBaseURL+"/cds-services/order-sign-crd", nil)
 			r.Header.Set("Authorization", c.header)
-			if ok, unavailable := s.verifyBearer(r); ok != c.ok || unavailable {
+			if _, ok, unavailable := s.verifyBearer(r); ok != c.ok || unavailable {
 				t.Fatalf("verifyBearer(%q): ok=%v unavailable=%v, want ok=%v", c.name, ok, unavailable, c.ok)
 			}
 		})
@@ -72,7 +72,7 @@ func TestDirectBearerSchemeIsCaseInsensitive(t *testing.T) {
 			}
 			r, _ := http.NewRequest(http.MethodPost, aud, nil)
 			r.Header.Set("Authorization", header)
-			if got := s.verifyDirectBearer(r); got != c.ok {
+			if _, got := s.verifyDirectBearer(r); got != c.ok {
 				t.Fatalf("verifyDirectBearer(%q): %v, want %v", c.name, got, c.ok)
 			}
 		})

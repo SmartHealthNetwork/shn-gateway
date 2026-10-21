@@ -182,8 +182,8 @@ func TestLevelPayer_AnswerDuplicateKeyRefusesAtEveryLevel(t *testing.T) {
 				if _, found := p.pendOf(t, got.corr); found {
 					t.Fatal("nothing may be written from a refused answer")
 				}
-				if rec, _ := p.pendOf(t, "corr-submit-1"); rec.State != PendStatePended || p.eobCount() != 0 {
-					t.Fatalf("nothing may be decided from a refused answer: %+v, %d EOB(s)", rec, p.eobCount())
+				if rec, _ := p.pendOf(t, "corr-submit-1"); rec.State != PendStatePended || rec.Outcome != "" {
+					t.Fatalf("nothing may be decided from a refused answer: %+v", rec)
 				}
 			})
 		}

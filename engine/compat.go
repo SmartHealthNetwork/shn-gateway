@@ -195,7 +195,7 @@ var compatManifest = []CompatStep{
 	{Contract: "pa.pas", From: "2.1", To: "2.2", Class: StepCarry, Up: pasStep2122Up, Down: pasStep2122Down},
 
 	// No other contract is native: pa.pdex is not declared by any gateway
-	// (its Patient Access decision EOB is base FHIR R4, not PDex).
+	// (none serves a Patient Access API or builds a PDex resource).
 }
 
 // nativeContracts returns the distinct contract names (the part before "@")

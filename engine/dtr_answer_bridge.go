@@ -18,11 +18,11 @@ import (
 // names and cardinalities.
 const dtrOutputParametersProfile = "http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/dtr-qpackage-output-parameters"
 
-// declaredDTRLines are the DTR lines this gateway declares, in its declared
-// order.
-func (g *Gateway) declaredDTRLines() []string {
+// dtrLines are the DTR lines among declared, the tokens a gateway declares, in
+// their declared order.
+func dtrLines(declared []string) []string {
 	var lines []string
-	for _, tok := range g.declaredContractVersions() {
+	for _, tok := range declared {
 		contract, version, ok := strings.Cut(tok, "@")
 		if ok && contract == "pa.dtr" && !slices.Contains(lines, version) {
 			lines = append(lines, version)
@@ -61,6 +61,17 @@ func (g *Gateway) dtrAnswerSourceLine(ctx context.Context, answer []byte, family
 	return lines[0], false
 }
 
+// AdaptAnswer carries a payer's questionnaire package answer to the requester's
+// system into this gateway's DTR line (E-08, carryDTRAnswer). Every other
+// answer is carried exactly as it arrived: E-08 is the one answer module 2
+// edits.
+func (b chainBridge) AdaptAnswer(ctx context.Context, key relay.Key, answer []byte, contentType, routed string, declared []string, x ExchangeIdentity) (relay.Payload, string, int, string) {
+	if key != dtrAnswerKey {
+		return relay.Exact(relay.NewBody(answer, relay.OriginPeerFrame), contentType), routed, 0, ""
+	}
+	return b.carryDTRAnswer(ctx, answer, routed, declared, x)
+}
+
 // carryDTRAnswer is the payload the provider's gateway gives its participant's
 // system for a payer's questionnaire package answer (E-08, the DTR answer's
 // line-specific parameter names):
@@ -75,21 +86,33 @@ func (g *Gateway) dtrAnswerSourceLine(ctx context.Context, answer []byte, family
 //     carried as sent, and the governed check the gateway's own DTR fetch
 //     applies to a payer's package answer reports it (no finding at none,
 //     recorded at observe and structural, refused at strict).
+//   - At none, with no lane for this gateway's DTR line (only none boots so),
+//     nothing is renamed: the answer is carried exactly as it arrived.
 //   - Every other answer is carried exactly as it arrived.
 //
-// routed is the contract token the leg ran at; wrote is the token of the line
-// the answer is written in (routed when carried as sent, this gateway's line
-// when carried across, empty on a refusal). status is non-zero for a refusal,
-// with its message.
-func (g *Gateway) carryDTRAnswer(ctx context.Context, answer []byte, routed string, x ExchangeIdentity) (carried relay.Payload, wrote string, status int, msg string) {
+// routed is the contract token the leg ran at, and declared the tokens this
+// gateway declares; wrote is the token of the line the answer is written in
+// (routed when carried as sent, this gateway's line when carried across, empty
+// on a refusal). status is non-zero for a refusal, with its message.
+func (b chainBridge) carryDTRAnswer(ctx context.Context, answer []byte, routed string, declared []string, x ExchangeIdentity) (carried relay.Payload, wrote string, status int, msg string) {
 	const contentType = "application/fhir+json"
+	g := b.g
 	payerLine := shnsdk.LineOf(routed)
 	exact := relay.Exact(relay.NewBody(answer, relay.OriginPeerFrame), contentType)
-	lines := g.declaredDTRLines()
+	lines := dtrLines(declared)
 	if len(lines) != 1 {
 		return exact, routed, 0, ""
 	}
 	target := lines[0]
+	// A gateway whose payload checks consume no lane boots without a lane for a
+	// line it declares. With none for this line it could not certify a renamed
+	// answer, so it never renames one: the answer is carried as sent. Where
+	// payload checks consume lanes, a declared line always has its lane, and one
+	// that has not yet qualified is renamed and then refused by Certify, which
+	// cannot run without it.
+	if !payloadChecksConsumeLanes(g.cfg.ConformanceEnforcement) && g.validatorForContractLine("pa.dtr", target) == nil {
+		return exact, routed, 0, ""
+	}
 	plan := planDTRAnswerNames(answer, target)
 	if len(plan.Renames) == 0 {
 		return exact, routed, 0, ""
@@ -131,14 +154,13 @@ func (g *Gateway) carryDTRAnswer(ctx context.Context, answer []byte, routed stri
 		}
 		return noDTRAnswer, "", http.StatusBadGateway, dtrAnswerNotCarried(target, "its parameter names could not be read")
 	}
-	b, err := relay.Transmit(renamed, relay.Check(dtrAnswerKey))
+	sent, err := relay.Transmit(renamed, relay.Check(dtrAnswerKey))
 	if err != nil {
 		return noDTRAnswer, "", http.StatusBadGateway, dtrAnswerNotCarried(target, "its parameter names could not be read")
 	}
 	fc.Edit = relay.EditDTRAnswerLineNames
 	fc.SourceSHA256 = sha256hex(answer)
-	r := g.validateGoverned(withFindingContext(ctx, fc), fc, g.validatorForContractLine("pa.dtr", target),
-		b, "egress", target, dtrOutputParametersProfile, true)
+	r := b.Certify(withFindingContext(ctx, fc), "pa.dtr", target, dtrOutputParametersProfile, sent)
 	if r.Status != 0 {
 		// A check that judged the answer invalid gives its issues; one that could
 		// not run (no lane for the line, a lane not ready, a validator that did not
@@ -155,7 +177,7 @@ func (g *Gateway) carryDTRAnswer(ctx context.Context, answer []byte, routed stri
 	if len(reports) > 0 {
 		ev := transformedObserverEvent(reports)
 		ev.Direction, ev.CorrelationID, ev.LegType, ev.Counterpart = "answer", x.CorrelationID, x.LegType, x.Counterpart
-		if err := g.recordTransformed(ev, x, "pa.dtr", source, target, steps, reports, answer, b); err != nil {
+		if err := g.recordTransformed(ev, x, "pa.dtr", source, target, steps, reports, answer, sent); err != nil {
 			return noDTRAnswer, "", http.StatusBadGateway, dtrAnswerNotCarried(target, err.Error())
 		}
 	}

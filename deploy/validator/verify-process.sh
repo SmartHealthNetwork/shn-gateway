@@ -43,7 +43,7 @@ start() {
 request() { docker exec "${C}" /process-child request "$1"; }
 public_request() { docker exec "${C}" /process-child request-public "$1"; }
 assert_complete_posts() {
-  request status | python3 -c 'import json,sys;s=json.load(sys.stdin);assert s["posts"]==["Bundle","QuestionnaireResponse","ExplanationOfBenefit","Task"]+["ClaimResponse"]*30+["Bundle"]*4+["Claim"]*2+["ClaimResponse"]*2 and s["maximum"]==1;assert len(s["profiles"])==len(s["posts"]);assert s["profiles"][-2:]==["http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claimresponse|9.9.9","https://example.org/fhir/StructureDefinition/unavailable-profile"]'
+  request status | python3 -c 'import json,sys;s=json.load(sys.stdin);assert s["posts"]==["Bundle","QuestionnaireResponse","Task"]+["ClaimResponse"]*30+["Bundle"]*4+["Claim"]*2+["ClaimResponse"]*2 and s["maximum"]==1;assert len(s["profiles"])==len(s["posts"]);assert s["profiles"][-2:]==["http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claimresponse|9.9.9","https://example.org/fhir/StructureDefinition/unavailable-profile"]'
 }
 await_status() {
   local i

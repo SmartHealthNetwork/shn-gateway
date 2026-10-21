@@ -334,7 +334,7 @@ func names(ms []member) []string {
 // carryGateway is the participant's default, which fills nothing.
 func prefetchGateway(s *prefetchSoR) *Gateway {
 	g := &Gateway{cfg: Config{SoR: s.sor(), PayerRouter: nil, EnrichNativeRequests: true}}
-	g.installEnrichment()
+	g.states = workstreamGatewayStates(g)
 	return g
 }
 
@@ -939,6 +939,100 @@ func TestPrefetchProvenanceEmitted(t *testing.T) {
 			})
 		}
 	})
+}
+
+// TestPrefetch_RoutingCoverageRecordedWhateverItsOutcome: the coverage a CRD
+// request is routed by (when the EHR sent none) is recorded as the search the
+// gateway ran before anything is decided from it, so a read that found nothing,
+// could not run or came back malformed is recorded as such.
+func TestPrefetch_RoutingCoverageRecordedWhateverItsOutcome(t *testing.T) {
+	query := "Coverage?patient=Patient%2Fexample&_include=Coverage%3Apayor"
+	for _, row := range []struct {
+		name   string
+		answer *searchAnswer
+		want   prefetchObtained
+	}{
+		{"found", &searchAnswer{res: resultOf(t, "Coverage", searchPage(sorCoverage("cov-1", shnsdk.CMSPayerIdentity.Value)))}, prefetchObtained{Outcome: SearchOK, Count: 1, Pages: 1}},
+		{"none", nil, prefetchObtained{Outcome: SearchZero, Pages: 1}},
+		{"unavailable", &searchAnswer{err: &SearchError{Outcome: SearchUnavailable, Reason: "down"}}, prefetchObtained{Outcome: SearchUnavailable, Reason: "down"}},
+		{"malformed", &searchAnswer{err: &SearchError{Outcome: SearchMalformed, Reason: "not a searchset"}}, prefetchObtained{Outcome: SearchMalformed, Reason: "not a searchset"}},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			s := newPrefetchSoR()
+			if row.answer != nil {
+				s.searches["Coverage"] = *row.answer
+			}
+			obs := &observed{}
+			g := carryGateway(s)
+			g.cfg.Observer = obs.observe
+			g.cfg.Clock = fixedClock
+			_, _, _, _ = prepare(t, g, ehrRequest("-"))
+			got := obs.prefetch(t)
+			w := row.want
+			w.Key, w.Source, w.Query, w.RetrievedAt = "coverage", "system-of-record", query, fixedClock().UTC()
+			if got["coverage"] != w {
+				t.Fatalf("coverage event %+v\nwant %+v", got["coverage"], w)
+			}
+		})
+	}
+}
+
+// routingReadsRecorded are the coverage prefetch events, on any leg, that
+// record the routing read (routingCoverageQuery).
+func (o *observed) routingReadsRecorded(t *testing.T) []prefetchObtained {
+	t.Helper()
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	var out []prefetchObtained
+	for _, e := range o.events {
+		if e.Kind != PrefetchObtainedEvent {
+			continue
+		}
+		var p prefetchObtained
+		if err := json.Unmarshal([]byte(e.Detail), &p); err != nil {
+			t.Fatalf("event detail %q: %v", e.Detail, err)
+		}
+		if p.Key == "coverage" && p.Query == routingCoverageQuery {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// TestPrefetch_EnrichedFallbackRoutingReadRecorded: under the opt-in, the
+// routing read a CRD request falls back to is recorded as the search it ran,
+// whether the coverage template's search found no active Coverage or the
+// system refused it.
+func TestPrefetch_EnrichedFallbackRoutingReadRecorded(t *testing.T) {
+	routing := func(t *testing.T) searchAnswer {
+		return searchAnswer{res: resultOf(t, "Coverage", page("", "", sorEntry(sorPayorCoverage("cov-a", "cancelled", "pay-a")), includedPayer("pay-a", "00001")))}
+	}
+	for _, row := range []struct {
+		name     string
+		template func(t *testing.T) searchAnswer
+	}{
+		{"no active coverage", func(t *testing.T) searchAnswer { return searchAnswer{res: resultOf(t, "Coverage", page("", ""))} }},
+		{"template refused", func(*testing.T) searchAnswer {
+			return searchAnswer{err: &SearchError{Outcome: SearchUnsupported, Reason: "status filter not supported"}}
+		}},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			s := newPrefetchSoR()
+			s.byQuery[enrichedCoverageQuery] = row.template(t)
+			s.byQuery[routingCoverageQuery] = routing(t)
+			obs := &observed{}
+			g := prefetchGateway(s)
+			g.cfg.Observer = obs.observe
+			g.cfg.Clock = fixedClock
+			if _, _, status, msg := prepare(t, g, ehrRequest("-")); status != 0 {
+				t.Fatalf("prepare: %d %s", status, msg)
+			}
+			want := prefetchObtained{Key: "coverage", Source: "system-of-record", Query: routingCoverageQuery, Outcome: SearchOK, Count: 1, Pages: 1, RetrievedAt: fixedClock().UTC()}
+			if got := obs.routingReadsRecorded(t); len(got) != 1 || got[0] != want {
+				t.Fatalf("routing reads recorded %+v\nwant [%+v]", got, want)
+			}
+		})
+	}
 }
 
 func TestPrefetch_NoEditInsideSignedBundle(t *testing.T) {

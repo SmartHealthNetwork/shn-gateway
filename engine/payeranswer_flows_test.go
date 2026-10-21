@@ -164,7 +164,7 @@ func nextQuestion(t *testing.T, profile string, payer shnsdk.PayerIdentifier, le
 	env.originator.cfg.OriginationProfile, env.originator.cfg.ConformanceEnforcement = profile, level
 	env.originator.cfg.Validator, env.originator.cfg.Observer = v, observe
 	defer env.originator.drainObserveChecks()
-	route, err := env.originator.selectLegLine(env.payerID, "dtr-questionnaire-fetch", "corr-0")
+	route, err := env.originator.selectLegLine(env.payerID, "dtr-questionnaire-fetch", "corr-0", "")
 	if err != nil {
 		t.Fatal(err)
 	}

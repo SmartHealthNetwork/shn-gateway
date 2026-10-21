@@ -2,11 +2,10 @@ package engine
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -14,8 +13,9 @@ import (
 )
 
 // An exchange that involves more than one patient is recorded under each of
-// them: a prior-authorization leg carries, in its envelope's
-// involved list, a token for every other patient it involves, and the Hub
+// them: a leg whose workstream says it names involved patients
+// (legInvolvement) carries, in its envelope's involved list, a token for
+// every other patient it involves, and the Hub
 // records the exchange under each of them as well as the leg token's patient.
 // It is recording only. Nothing here refuses a leg, judges its content or
 // changes its bytes: a patient that cannot be named is left out, with an
@@ -91,10 +91,10 @@ func (g *Gateway) involvedBudget() time.Duration {
 // involvedForRequest is the requester side's involved list for one leg:
 // every other patient the request carries (requestNamedPatients), each with
 // its token (involvedList), all within the leg's budget. It reads and requests
-// nothing unless the Hub reads the list and the leg is a prior-authorization
-// leg.
+// nothing unless the Hub reads the list and the leg's request names the other
+// patients it carries (legInvolvement).
 func (g *Gateway) involvedForRequest(ctx context.Context, r *http.Request, leg, frame, op, corrID, payloadHash string, payload []byte, legSubject string) string {
-	if !g.cfg.HubAcceptsInvolved || !involvedLegs[leg] {
+	if request, _ := legInvolvement(leg); !g.cfg.HubAcceptsInvolved || !request {
 		return ""
 	}
 	bctx, cancel := context.WithTimeout(ctx, g.involvedBudget())
@@ -117,17 +117,6 @@ func (g *Gateway) involvedForAnswer(r *http.Request, leg, frame, op, corrID, pay
 	bctx, cancel := context.WithTimeout(r.Context(), g.involvedBudget())
 	defer cancel()
 	return g.involvedList(r.WithContext(bctx), "ingress", leg, frame, op, corrID, payloadHash, legSubject, entries)
-}
-
-// involvedLegs are the prior-authorization legs whose request names the
-// other patients it carries and whose answer names the payer's own binding.
-var involvedLegs = map[string]bool{
-	"crd-order-select":        true,
-	"crd-order-dispatch":      true,
-	"dtr-questionnaire-fetch": true,
-	"pas-claim":               true,
-	"pas-claim-update":        true,
-	"pas-claim-inquire":       true,
 }
 
 // involvedPatient is one other patient a leg involves.
@@ -239,18 +228,18 @@ func (g *Gateway) mintInvolved(r *http.Request, frame, op, corrID, payloadHash s
 
 // requestNamedPatients identifies every other patient a request carries, for
 // the requester side of the involved list. Each distinct member the request
-// names (carriedMembers) is identified through this holder's own system of
+// names (namedMembers) is identified through this holder's own system of
 // record exactly as the leg's subject is (resolveSubjectPCI, over the same
 // member string the subject binding reads from a reference), so every
 // reference to the leg's own patient resolves to legSubject and is not named.
 // Each other patient is named request-named; one that cannot be identified is
-// left out. It reads nothing unless the Hub reads the list and the leg is a
-// prior-authorization request leg.
+// left out. It reads nothing unless the Hub reads the list and the leg's
+// request names the other patients it carries (legInvolvement).
 func (g *Gateway) requestNamedPatients(ctx context.Context, leg, corrID string, payload []byte, legSubject string) []involvedPatient {
-	if !g.cfg.HubAcceptsInvolved || !involvedLegs[leg] {
+	if request, _ := legInvolvement(leg); !g.cfg.HubAcceptsInvolved || !request {
 		return nil
 	}
-	members := carriedMembers(payload, leg)
+	members := namedMembers(payload, leg)
 	if len(members) > maxInvolvedMembers {
 		for range members[maxInvolvedMembers:] {
 			g.omitInvolved("originate", leg, corrID, involvedOmitOverflow)
@@ -263,10 +252,15 @@ func (g *Gateway) requestNamedPatients(ctx context.Context, leg, corrID string, 
 			g.omitInvolved("originate", leg, corrID, involvedOmitBudget)
 			continue
 		}
-		pci, found, err := g.resolveSubjectPCI(ctx, m, payload)
+		pci, found, err := g.resolveInvolvedPCI(ctx, m.member, m.scope)
 		switch {
 		case err != nil && ctx.Err() != nil:
 			g.omitInvolved("originate", leg, corrID, involvedOmitBudget)
+			continue
+		case errors.Is(err, errPatientUnidentifiable):
+			// A member the request cannot identify is named under no
+			// identifier, never another person's.
+			g.omitInvolved("originate", leg, corrID, involvedOmitUnknown)
 			continue
 		case err != nil:
 			g.omitInvolved("originate", leg, corrID, involvedOmitUnreadable)
@@ -274,7 +268,7 @@ func (g *Gateway) requestNamedPatients(ctx context.Context, leg, corrID string, 
 		case !found || pci == "":
 			g.omitInvolved("originate", leg, corrID, involvedOmitUnknown)
 			continue
-		case pci == legSubject:
+		case pci == legSubject, slices.ContainsFunc(out, func(p involvedPatient) bool { return p.pci == pci }):
 			continue
 		}
 		out = append(out, involvedPatient{pci: pci, involvement: shnsdk.InvolvementRequestNamed})
@@ -282,126 +276,23 @@ func (g *Gateway) requestNamedPatients(ctx context.Context, leg, corrID string, 
 	return out
 }
 
-// carriedMembers is every member a request on leg names, sorted and each
-// once, each read exactly as that leg's subject binding reads the member a
-// reference names, so every reference to the leg's own patient reads as the
-// subject does:
-//   - a reference with "Patient/" names what the leg's reader returns, the id
-//     without a version suffix: on the DTR package the id after it
-//     (patientMember); on every other leg the id after the last "Patient/"
-//     (pasMemberFromRef, the PAS and inquiry readers agreeing). A versioned
-//     reference names the patient it versions, so a version suffix neither
-//     hides another member nor names the leg's own patient a second time;
-//   - a carried Patient names what the leg binds it by: on PAS submit and
-//     update, which bind a Patient only through the reference to it, its
-//     entry's fullUrl read as a reference, "#<id>" when contained, else its
-//     id; on every other leg (CRD, the DTR package, the inquiry), its id;
-//   - a urn:uuid: or #contained reference names a Patient only when the
-//     request carries it, and then names what that Patient names; a
-//     Coverage's party (a contained Patient its subscriber or policyHolder
-//     names, shnsdk.CoverageParty) is no member.
-//
-// A Patient's member identifier is never read: the subject is bound by the id
-// its request uses. An unreadable request names none.
-func carriedMembers(payload []byte, leg string) []string {
-	var doc any
-	if len(payload) == 0 || json.Unmarshal(payload, &doc) != nil {
+// namedMember is a member a request names, with the bytes its patient is
+// bound from.
+type namedMember struct {
+	member string
+	scope  []byte
+}
+
+// namedMembers is every member a request on leg names, with the bytes its
+// patient is bound from, as the workstream that declares the leg reads them
+// (its adapter's requestMembers); none for a leg no compiled-in workstream
+// declares.
+func namedMembers(payload []byte, leg string) []namedMember {
+	w, ok := workstreamFor(leg)
+	if !ok {
 		return nil
 	}
-	read := func(ref string) (string, bool) {
-		if !strings.Contains(ref, "Patient/") {
-			return "", false
-		}
-		return pasMemberFromRef(ref), true
-	}
-	if leg == "dtr-questionnaire-fetch" {
-		read = patientMember
-	}
-	// Only the PAS binding names a carried Patient by the reference to it; the
-	// others (CRD, the DTR package, the inquiry) name it by its id.
-	byReference := leg == "pas-claim" || leg == "pas-claim-update"
-	set := map[string]bool{}
-	pointers := map[string]string{} // a carried Patient's fullUrl or #id → what it names
-	var refs []string
-	var walk func(node any, fullURL string, contained bool)
-	walk = func(node any, fullURL string, contained bool) {
-		switch v := node.(type) {
-		case map[string]any:
-			if v["resourceType"] == "Patient" {
-				id, _ := v["id"].(string)
-				names := id
-				switch {
-				case byReference && fullURL != "":
-					names = fullURL
-					if m, ok := read(fullURL); ok {
-						names = m
-					}
-				case byReference && contained && id != "":
-					names = "#" + id
-				}
-				if fullURL != "" {
-					pointers[fullURL] = names
-				}
-				if contained && id != "" {
-					pointers["#"+id] = names
-				}
-				if names != "" {
-					set[names] = true
-				}
-			}
-			if ref, ok := v["reference"].(string); ok {
-				refs = append(refs, ref)
-			}
-			entryURL, _ := v["fullUrl"].(string)
-			for k, child := range v {
-				switch {
-				case k == "resource" && entryURL != "":
-					walk(child, entryURL, false)
-				case k == "contained":
-					// A Coverage's party (shnsdk.CoverageParty, which answers
-					// for a Coverage only) is another person the Coverage
-					// names, never a member of the request: neither it nor a
-					// reference to it names one. A contained that is not a
-					// list is walked whole.
-					list, ok := child.([]any)
-					if !ok {
-						walk(child, "", true)
-						continue
-					}
-					for _, c := range list {
-						if cr, ok := c.(map[string]any); ok && shnsdk.CoverageParty(v, cr) {
-							continue
-						}
-						walk(c, "", true)
-					}
-				default:
-					walk(child, "", false)
-				}
-			}
-		case []any:
-			for _, child := range v {
-				walk(child, "", contained)
-			}
-		}
-	}
-	walk(doc, "", false)
-	for _, ref := range refs {
-		if m, ok := read(ref); ok {
-			if m != "" {
-				set[m] = true
-			}
-			continue
-		}
-		if m, ok := pointers[ref]; ok {
-			set[m] = true
-		}
-	}
-	out := make([]string, 0, len(set))
-	for m := range set {
-		out = append(out, m)
-	}
-	sort.Strings(out)
-	return out
+	return w.requestMembers(leg, payload)
 }
 
 // involvedCollector gathers, while a payer leg is handled, its own binding of
@@ -416,23 +307,11 @@ type involvedCollector struct {
 
 type involvedCollectorKey struct{}
 
-// answerInvolvedLegs are the legs whose answer names the payer's own binding
-// of the member when it differs from the leg token's patient: the
-// prior-authorization legs, and eligibility, whose request names only the
-// leg's own patient.
-var answerInvolvedLegs = func() map[string]bool {
-	m := map[string]bool{"coverage-eligibility": true}
-	for leg := range involvedLegs {
-		m[leg] = true
-	}
-	return m
-}()
-
-// withInvolvedCollector gives a payer leg that names its own binding a
-// collector when the Hub reads the involved list; otherwise ctx is returned
-// as is.
+// withInvolvedCollector gives a leg whose answer names the responder's own
+// binding (legInvolvement) a collector when the Hub reads the involved list;
+// otherwise ctx is returned as is.
 func (g *Gateway) withInvolvedCollector(ctx context.Context, leg string) context.Context {
-	if !g.cfg.HubAcceptsInvolved || !answerInvolvedLegs[leg] {
+	if _, answer := legInvolvement(leg); !g.cfg.HubAcceptsInvolved || !answer {
 		return ctx
 	}
 	return context.WithValue(ctx, involvedCollectorKey{}, &involvedCollector{held: map[string]bool{}})

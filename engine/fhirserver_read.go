@@ -33,7 +33,7 @@ import (
 // request is routed the records routing used (the chosen Coverages and their
 // payor Organization) are carried as prefetch.coverage, in a searchset the
 // gateway writes with none of the server's addresses (E-07,
-// fhirserver_carry.go): the payer has no other way to read them.
+// workstream_pa_fhirserver_carry.go): the payer has no other way to read them.
 //
 // The read goes to a URL a request names, so it is fenced in every mode: an
 // https base with no query, fragment or credentials; an address the mode
@@ -84,7 +84,7 @@ const (
 // needs, whatever stopped it: CDS Hooks' 412 for a service that cannot obtain
 // the data a request left out. Only an answer that contradicts the request
 // (another patient's coverage, another Organization than asked for) is a 502,
-// and routing ambiguity a 422 (ingress_crd.go).
+// and routing ambiguity a 422 (workstream_pa_crd_ingress.go).
 const fhirServerRefused = http.StatusPreconditionFailed
 
 // The refusals of the fhirServer read, each its own reason.

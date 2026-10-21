@@ -19,12 +19,3 @@ func testRequest(b []byte) relay.Payload { return relay.ForTest(b, "application/
 
 // peerBody seals b as a body that arrived from the network.
 func peerBody(b []byte) relay.Body { return relay.NewBody(b, relay.OriginPeerFrame) }
-
-// admitDecisionEOBs stands in for the gateway's decision EOB gate
-// (gateDecisionEOBs) in a test that drives a leg's effect directly: every
-// decision EOB the effect built is admitted, as a passing validation would.
-func admitDecisionEOBs(r *LegResult) {
-	for _, e := range r.decisionEOBs {
-		e.admitted = true
-	}
-}

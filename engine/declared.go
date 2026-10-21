@@ -10,11 +10,12 @@ import (
 // responder carries to the payer's own system (PAYER_DAVINCI_BASE_URL): every
 // contract in the PA leg catalog. A contract a gateway declares outside the
 // catalog would be answered by the gateway itself, whatever the payer's system
-// speaks; none is native today (pa.pdex is declared by no gateway: its
-// Patient Access decision EOB is base FHIR R4, not PDex).
+// speaks; none is native today (pa.pdex is declared by no gateway: none
+// serves a Patient Access API or builds a PDex resource).
 func forwardedContracts() map[string]bool {
 	out := map[string]bool{}
-	for _, spec := range paCatalog {
+	pa, _ := catalogFor(workstreamPA) // PA is always compiled in (workstreams)
+	for _, spec := range pa {
 		if spec.Contract != "" {
 			out[spec.Contract] = true
 		}

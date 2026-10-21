@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"mime"
+	"net/http"
 	"strings"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
@@ -118,19 +119,31 @@ func noteAnswerMediaType(ctx context.Context, ct string) {
 	}
 }
 
-// cdsAnswerMediaType is the media type a CDS Hooks answer is written to the
-// EHR with: the one the payer's system stated. A payer gateway before
-// v0.57.0 framed every success as application/fhir+json whatever the payer
-// sent, and a CDS Hooks answer is never a FHIR resource, so that stamp, or
-// none, is read as unstated and written as application/json, as before. A
-// stated type that does not parse as a media type is not written as a header
-// either; it is written as application/json the same way.
-func cdsAnswerMediaType(stated string) string {
-	if stated == "" {
-		return mediaJSON
+// answerStatusKey carries a sink for the 2xx status a recipient's framed
+// answer states, for a caller that relays that answer to its own participant.
+type answerStatusKey struct{}
+
+// withAnswerStatusSink returns ctx carrying sink: the origination that
+// decodes a framed 2xx answer stores the answer's status in it. A bare
+// answer leaves it unset.
+func withAnswerStatusSink(ctx context.Context, sink *int) context.Context {
+	return context.WithValue(ctx, answerStatusKey{}, sink)
+}
+
+// noteAnswerStatus stores status in ctx's answer status sink, if any.
+func noteAnswerStatus(ctx context.Context, status int) {
+	if sink, ok := ctx.Value(answerStatusKey{}).(*int); ok && sink != nil {
+		*sink = status
 	}
-	if mt, _, err := mime.ParseMediaType(stated); err != nil || mt == mediaFHIRJSON {
-		return mediaJSON
+}
+
+// relayedAnswerStatus is the status a relayed answer is written to the
+// participant's system with: stated, the 2xx a framed answer states (a peer
+// gateway before v0.63.0 framed every success as 200), or 200 for a bare
+// answer, which states none.
+func relayedAnswerStatus(stated int) int {
+	if stated == 0 {
+		return http.StatusOK
 	}
 	return stated
 }

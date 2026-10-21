@@ -13,9 +13,8 @@ import (
 func TestGuardTable(t *testing.T) {
 	for rule := range networkRules {
 		for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve, EnforcementStructural, EnforcementStrict} {
-			p := NewConformancePolicy(level)
-			if !p.Runs(KindNetwork, rule) || p.Decide(KindNetwork, rule, VerdictInvalid) != Refuse {
-				t.Errorf("network rule %q must run and refuse at %s", rule, level)
+			if !guardDefect(context.Background(), NewConformancePolicy(level), nil, KindNetwork, rule, VerdictInvalid, nil) {
+				t.Errorf("network rule %q must refuse at %s", rule, level)
 			}
 		}
 	}
@@ -121,9 +120,13 @@ func TestGuardUnavailable(t *testing.T) {
 	}
 }
 
-// Moving a content rule into networkRules is the whole of changing its level
-// behavior: call sites that name it as content then refuse at every level and
-// record nothing, with no other edit.
+// Moving a content rule into networkRules is the whole of changing what the
+// guard decides for it: a guard call that names it as content then refuses at
+// every level and records nothing, with no other edit. ConformancePolicy does
+// not follow the move (it knows no network rule): Runs answers as before, and
+// Decide refuses the rule at structural only because it is no longer a content
+// rule (fail closed). A site that gates its check on Runs, or decides with
+// Decide itself, would have to ask networkRefusal too.
 func TestGuardRuleMovesByTableAlone(t *testing.T) {
 	delete(contentRules, RulePatientMixed)
 	networkRules[RulePatientMixed] = true
@@ -134,14 +137,21 @@ func TestGuardRuleMovesByTableAlone(t *testing.T) {
 	for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve, EnforcementStructural, EnforcementStrict} {
 		var findings []ConformanceFinding
 		p := NewConformancePolicy(level)
-		if !p.Runs(KindContent, RulePatientMixed) {
-			t.Errorf("%s: a network rule must run at every level", level)
-		}
 		if !guardDefect(context.Background(), p, func(f ConformanceFinding) { findings = append(findings, f) }, KindContent, RulePatientMixed, VerdictInvalid, nil) {
 			t.Errorf("%s: a network rule must refuse at every level", level)
 		}
 		if len(findings) != 0 {
 			t.Errorf("%s: a network rule records no finding, got %+v", level, findings)
+		}
+	}
+	if NewConformancePolicy(EnforcementNone).Runs(KindContent, RulePatientMixed) {
+		t.Error("ConformancePolicy must not follow a move into networkRules: the policy knows no network rule")
+	}
+	for level, want := range map[ConformanceEnforcement]Decision{
+		EnforcementNone: Record, EnforcementObserve: Record, EnforcementStructural: Refuse, EnforcementStrict: Refuse,
+	} {
+		if got := NewConformancePolicy(level).Decide(KindContent, RulePatientMixed, VerdictInvalid); got != want {
+			t.Errorf("%s: Decide of a rule moved out of contentRules = %v, want %v (fail closed at structural only)", level, got, want)
 		}
 	}
 }

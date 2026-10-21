@@ -36,24 +36,16 @@ func TestFenceResponseSubject_DTR(t *testing.T) {
 }
 
 // claimResponseFor returns a minimal bare ClaimResponse JSON whose patient.reference is ref —
-// the shape ParsePASResponsePatients reads (fhirread.go).
+// the shape ParsePASResponsePatients reads (workstream_pa_fhirread.go).
 func claimResponseFor(t *testing.T, ref string) []byte {
 	t.Helper()
 	return []byte(`{"resourceType":"ClaimResponse","patient":{"reference":"` + ref + `"}}`)
 }
 
-// eobFor returns a minimal ExplanationOfBenefit JSON whose patient.reference is ref — the shape
-// parseEOBPatient reads (fhirread.go).
-func eobFor(t *testing.T, ref string) []byte {
-	t.Helper()
-	return []byte(`{"resourceType":"ExplanationOfBenefit","patient":{"reference":"` + ref + `"}}`)
-}
-
 // The converged conformant PAS legs (pas-claim / pas-claim-update) carry the (C)
-// outbound fence under TWO independent flags: member-fence the
-// ClaimResponse iff !ResponseSubjectForeign (R-7), and the SHN-produced EOB side-effect is fenced
-// UNCONDITIONALLY. SHN-produced posture = both flags false = strict (fail-closed). Native posture =
-// both set explicitly for unchanged bytes (the payer answers in its own namespace).
+// outbound fence: member-fence the ClaimResponse iff !ResponseSubjectForeign (R-7). SHN-produced
+// posture = the flag false = strict (fail-closed). Native posture = set explicitly for unchanged
+// bytes (the payer answers in its own namespace).
 
 func TestFenceConformantPAS_SubjectSwap_Rejected(t *testing.T) {
 	g := &Gateway{} // fenceResponseSubject reads no Gateway state for the PAS arm
@@ -70,19 +62,6 @@ func TestFenceConformantPAS_ForeignRelay_StandsDown(t *testing.T) {
 	res := LegResult{Response: relayedResponse([]byte(assemblyRealPending)), ResponseSubjectForeign: true}
 	if status, msg := g.fenceResponseSubject("pas-claim", "Patient/MBR-COVERED", "", res); status != 0 {
 		t.Fatalf("foreign relay stand-down: status=%d msg=%q, want 0", status, msg)
-	}
-}
-
-func TestFenceConformantPAS_ForeignRelay_WrongEOB_Rejected(t *testing.T) {
-	g := &Gateway{}
-	// Even under a foreign relay, the SHN-produced EOB side-effect is fenced UNCONDITIONALLY.
-	res := LegResult{
-		Response:               relayedResponse([]byte(assemblyRealPending)),
-		SideEffectFHIR:         [][]byte{eobFor(t, "Patient/MBR-OTHER")},
-		ResponseSubjectForeign: true,
-	}
-	if status, _ := g.fenceResponseSubject("pas-claim", "Patient/MBR-COVERED", "", res); status != http.StatusForbidden {
-		t.Fatalf("wrong-member EOB under relay: status=%d, want 403", status)
 	}
 }
 

@@ -87,7 +87,7 @@ func sortedTokens(contract string, lines map[string]bool) []string {
 //   - declared, no shared line  → this function stops HERE, refused=true
 //     (INTERSECTION-ONLY, deliberately). The
 //     reachability arms (native-reach, then a transform chain) live ONE
-//     LAYER UP, in the route layer (legRoute / selectLegRoute, originate.go),
+//     LAYER UP, in the route layer (legRoute / selectLegRoute, lineselect.go),
 //     never inside this function — two verified callers (OriginateLeg's
 //     empty-ProfileID fallback, gateway.go, and native.go's foreign-forward
 //     filter) must keep intersection-only semantics (the caller×arm
@@ -139,10 +139,12 @@ type RouteRefusalError struct {
 	// BridgeIssue names the specific reachability-arm ingredient that was
 	// missing (arm (4)): empty when arm (1) never even attempted
 	// arms (2)/(3) (a catalog/library mismatch — this build does not speak
-	// Contract at all); otherwise a short legible phrase naming why arms
-	// (2)/(3) also failed ("no configured validator lane for line …", "no
-	// transform chain bridges to line …", "chain to line … refused for this
-	// peer (gated overlay …)"). Appended parenthetically so the base message
+	// Contract at all), and when module 2 is off (TranslateIGLines unset) and
+	// native reach missed, since no chain was looked for; otherwise a short
+	// legible phrase naming why arms (2)/(3) also failed ("no configured
+	// validator lane for line …", "no transform chain bridges to line …",
+	// "no certified translation to line … (its chain needs the gated … step)",
+	// "chain to line … refused for this peer (gated overlay …)"). Appended parenthetically so the base message
 	// (and every existing exact-substring assertion against it) stays
 	// unchanged when BridgeIssue is empty.
 	BridgeIssue string
@@ -208,7 +210,7 @@ func (g *Gateway) selectLegToken(recipient, legType string) (string, error) {
 // stamp for a typo'd or future legType; it now closes loudly (the
 // catalog ok-guards). "" with nil error = a genuinely version-neutral leg.
 func legContract(legType string) (string, error) {
-	spec, ok := paCatalog[legType]
+	spec, ok := legSpecFor(legType)
 	if !ok {
 		return "", fmt.Errorf("engine: unknown legType %q (not in the PA catalog) — cannot resolve its contract", legType)
 	}

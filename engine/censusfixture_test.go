@@ -473,8 +473,8 @@ var censusPersonas = map[string]censusPersona{
 	// solely so gateway/engine/payerrouting_test.go (and test/adversarial) can prove/disprove
 	// coverage-derived payer routing without standing up a real multi-payer FHIR SoR. They carry
 	// no clinical context (routing tests never reach CRD/DTR content). Deliberately NOT in
-	// PersonaRefs (personas.go): never live-seeded, never console-exposed, never driven by any UC
-	// scenario handler's sceneMember (unlike MBR-BRIDGE-DEMO/MBR-BRIDGE-REFUSE above, which the
+	// PersonaRefs (personas.go): never live-seeded, never driven by any UC scenario
+	// handler's sceneMember (unlike MBR-BRIDGE-DEMO/MBR-BRIDGE-REFUSE above, which the
 	// Kit's runner now drives) — see censusPayerOverrides below, which is what actually
 	// gives them a non-default payer identity.
 	"MBR-PAYERB": {
@@ -488,11 +488,11 @@ var censusPersonas = map[string]censusPersona{
 	// MBR-OX / MBR-PD-UC03 — the two provider-data ORDER-DISPATCH personas:
 	// HomeOxygen (E0431) and its UC-03 HomeOxygenDispatch analog (E1390). Their
 	// PROVIDER-side facts (Patient/DeviceRequest/Coverage) come from a real or bring-your-own
-	// FHIR SoR (originate_homeoxygen.go's originateDispatch reads OpenOrder/OpenCoverage off
+	// FHIR SoR (module1_originate_homeoxygen.go's originateDispatch reads OpenOrder/OpenCoverage off
 	// g.cfg.SoR, never a literal) — but the PAYER-side inbound bind for the crd-order-dispatch
-	// leg (conformantCRDDispatchBind, crd_dispatch_native.go) resolves the member against
+	// leg (conformantCRDDispatchBind, workstream_pa_crd_dispatch_inbound.go) resolves the member against
 	// THIS stub when the payer gateway boots on the memstub default (no FHIR_DATA_URL), which
-	// is what every internal/devstack / test/harness.go / in-process payer wiring does — the
+	// is what every test/harness / in-process payer wiring does — the
 	// in-process payer must cover the same demo personas the seeded fixtures define, or
 	// payer- and provider-side census drifts apart. Before
 	// this fix the stub had no entry for either member, so that bind 400'd "unknown member"

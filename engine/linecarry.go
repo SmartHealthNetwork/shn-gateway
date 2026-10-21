@@ -28,7 +28,8 @@ const LineCarriedEvent = "contract.line-carried"
 // Where a leg was carried between two lines (ExchangeRecord.LineCarried).
 const (
 	// LineCarriedRequest: the request went to, or came from, a participant
-	// that shares no declared line with this one.
+	// that shares no declared line with this one, or, a pend's follow-up, was
+	// carried at another line than the pend is pinned at.
 	LineCarriedRequest = "request"
 	// LineCarriedAnswer: the answer is stamped with another line than the leg
 	// routed.
@@ -91,7 +92,7 @@ func carriedRoute(own []string, contract string) (legRoute, bool) {
 // line would change bytes no certified translation can seal.
 func (r legRoute) asSent() legRoute {
 	contract, _, _ := strings.Cut(r.Token, "@")
-	return legRoute{Token: contract + "@" + r.BuildLine, BuildLine: r.BuildLine}
+	return legRoute{Token: contract + "@" + r.BuildLine, BuildLine: r.BuildLine, Pinned: r.Pinned}
 }
 
 // carriedDetail is the event's Detail for a request carried at token to a
@@ -128,6 +129,16 @@ func (g *Gateway) noteRequestLine(ctx context.Context, recipient, legType, corre
 	g.noteLineCarried(ctx, LineCarriedRequest, ObserverEvent{
 		Direction: "originate", LegType: legType, CorrelationID: correlationID, Counterpart: recipient,
 		Detail: carriedDetail(token, recipient, sortedTokens(contract, peer)),
+	})
+}
+
+// notePinCarried records a follow-up to a pend (an amendment or an inquiry)
+// carried at token instead of the line the pend is pinned at, which nothing
+// reaches any more (selectResumeRoute).
+func (g *Gateway) notePinCarried(ctx context.Context, recipient, legType, correlationID, pinned, token string) {
+	g.noteLineCarried(ctx, LineCarriedRequest, ObserverEvent{
+		Direction: "originate", LegType: legType, CorrelationID: correlationID, Counterpart: recipient,
+		Detail: "carried at " + token + "; the pend it follows up is pinned at " + pinned + ", which no lane or chain reaches",
 	})
 }
 

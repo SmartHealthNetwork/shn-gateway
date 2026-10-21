@@ -10,11 +10,16 @@ const (
 	editInsertMember relayEditKind = "insert-member"
 	editReplaceValue relayEditKind = "replace-value"
 	editArrayAppend  relayEditKind = "array-append"
+	// editRegisteredTransform rewrites the whole body of the gateway's own
+	// message through the registered compatibility steps, verified by running
+	// them again (relay.Transformed), never by spans.
+	editRegisteredTransform relayEditKind = "registered-transform"
 )
 
 // relayEdit declares one registered edit: the only changes a gateway may
-// make to a participant's message it relays. Anything not declared here is
-// not an edit and is never made to a relayed message.
+// make to a participant's message it relays, and the one transform it makes
+// to a message it built itself to carry it to the peer's IG line (E-09).
+// Anything not declared here is not an edit and is never made.
 type relayEdit struct {
 	ID   relay.EditID
 	Name string
@@ -207,6 +212,27 @@ var relayEdits = []relayEdit{
 			"QuestionnaireResponse in the package across the lines through the network's registered DTR steps (the " +
 			"Coverage context's place and the intended-use code system); every other byte is the payer's. An answer " +
 			"that cannot be valid at the provider's line is refused, never filled.",
+	},
+	{
+		ID:        relay.EditRegisteredTransform,
+		Name:      "registered-transform",
+		Legs:      []string{"pas-claim", "pas-claim-update"},
+		Role:      relay.RoleRequester,
+		Direction: relay.DirectionRequest,
+		Paths:     []string{"$ (the whole Bundle)"},
+		Kind:      editRegisteredTransform,
+		Precondition: "Only on a prior-authorization submission or update the gateway built itself, on behalf of a " +
+			"participant whose system does not build it, at one of the gateway's own lines, when the payer declares " +
+			"only another line, this gateway translates between IG lines, and the compat manifest's registered pa.pas " +
+			"steps chain the two. The steps are run again on the message as built and must make the same bytes twice; " +
+			"the result must then validate at the payer's line, at every level, or nothing is sent.",
+		Authority: "The registered pa.pas compatibility steps between the two lines, each reported under its own module " +
+			"with its loss report. The message is the builder's, from the participant's own records; nothing is read from " +
+			"any other participant.",
+		Disclosure: "When the provider's gateway builds a prior-authorization submission or update for its participant " +
+			"and the payer declares another PAS line, the gateway may carry it to the payer's line through the network's " +
+			"registered PAS steps. The message stays the builder's, recorded as built by that builder and then edited by " +
+			"this transform; it must validate at the payer's line, or it is refused, never sent.",
 	},
 }
 

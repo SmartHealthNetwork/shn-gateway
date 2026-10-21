@@ -13,12 +13,11 @@ package pgstore_test
 //
 // Retention (the bounded lazy purge) and the ledger-less fallback are backend-local
 // rows: they need the store's injected clock and an in-package type, so they live in
-// gateway/engine/pendledger_test.go and pendledger_pg_test.go.
+// gateway/engine/workstream_pa_pendledger_test.go and pendledger_pg_test.go.
 
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
 	"time"
 
@@ -33,9 +32,28 @@ type ledgerUnderTest interface {
 	engine.PendLedger
 }
 
+// memLedger is the in-memory Store with its pend ledger, which it keeps as the
+// PA workstream's state (engine.LedgerOf), not on itself. Its claim-update
+// methods and the ledger write the same rows.
+type memLedger struct {
+	engine.Store
+	engine.PendLedger
+}
+
+// ledgerMem is a new in-memory Store under the table's contract.
+func ledgerMem(t *testing.T) ledgerUnderTest {
+	t.Helper()
+	s := engine.NewMemStore()
+	l, ok := engine.LedgerOf(s)
+	if !ok {
+		t.Fatal("LedgerOf(MemStore) = false: the in-memory Store keeps no pend ledger")
+	}
+	return memLedger{Store: s, PendLedger: l}
+}
+
 // Compile-time proof that both backends are in the table's contract.
 var (
-	_ ledgerUnderTest = (*engine.MemStore)(nil)
+	_ ledgerUnderTest = memLedger{}
 	_ ledgerUnderTest = (*pgstore.PgStore)(nil)
 )
 
@@ -68,11 +86,6 @@ func keys(requesterHolder string) engine.PendKeys {
 	}
 }
 
-// eob is a synthetic PA-decision EOB record for pciA.
-func eob(id string) *engine.EOBRecord {
-	return &engine.EOBRecord{SubjectPCI: pciA, EOBID: id, JSON: []byte(`{"resourceType":"ExplanationOfBenefit","id":"` + id + `"}`)}
-}
-
 func ledgerPg(t *testing.T) ledgerUnderTest {
 	t.Helper()
 	pool := pgstore.TestPool(t)
@@ -84,7 +97,7 @@ func ledgerPg(t *testing.T) ledgerUnderTest {
 }
 
 func TestPendLedgerParity_Mem(t *testing.T) {
-	pendLedgerChecks(t, func(t *testing.T) ledgerUnderTest { t.Helper(); return engine.NewMemStore() })
+	pendLedgerChecks(t, ledgerMem)
 }
 
 func TestPendLedgerParity_Pg(t *testing.T) {
@@ -136,7 +149,7 @@ func pend(t *testing.T, l ledgerUnderTest, subject, corr string, created time.Ti
 // lookup runs LookupPended and fails the row on a store error.
 func lookup(t *testing.T, l ledgerUnderTest, requesterHolder string, k engine.PendKeys) engine.PendMatch {
 	t.Helper()
-	m, err := l.LookupPended(requesterHolder, k, nil)
+	m, err := l.LookupPended(requesterHolder, k)
 	if err != nil {
 		t.Fatalf("LookupPended: %v", err)
 	}
@@ -162,33 +175,19 @@ func wantVerdict(t *testing.T, m engine.PendMatch, want engine.PendMatchVerdict)
 	}
 }
 
-// wantEOBGone asserts a removed EOB is gone from every read: by id, from the
-// patient's list, and as an owned id.
-func wantEOBGone(t *testing.T, l ledgerUnderTest, eobID string) {
-	t.Helper()
-	if got, ok := l.EOBsForPatient(pciA); ok && len(got) > 0 {
-		t.Fatalf("the removed EOB is still in the patient's list: %d EOB(s)", len(got))
-	}
-	if owner, ok := l.(engine.EOBOwnerLookup); ok {
-		if who, found, err := owner.EOBOwner(eobID); err != nil || found {
-			t.Fatalf("the removed EOB id is still owned: %q,%v,%v", who, found, err)
-		}
-	}
-}
-
 // decideN is decide with the decision's authorization number.
-func decideN(t *testing.T, l ledgerUnderTest, subject, corr, outcome string, at time.Time, authorizationNumber string, e *engine.EOBRecord) engine.PendTransition {
+func decideN(t *testing.T, l ledgerUnderTest, subject, corr, outcome string, at time.Time, authorizationNumber string) engine.PendTransition {
 	t.Helper()
-	tr, err := l.RecordDecision(subject, corr, outcome, at, engine.PendKeys{RequesterHolder: requester, PreAuthRef: authorizationNumber}, e)
+	tr, err := l.RecordDecision(subject, corr, outcome, at, engine.PendKeys{RequesterHolder: requester, PreAuthRef: authorizationNumber})
 	if err != nil {
 		t.Fatalf("RecordDecision(%s,%s,%s): %v", subject, corr, outcome, err)
 	}
 	return tr
 }
 
-func decide(t *testing.T, l ledgerUnderTest, subject, corr, outcome string, at time.Time, e *engine.EOBRecord) engine.PendTransition {
+func decide(t *testing.T, l ledgerUnderTest, subject, corr, outcome string, at time.Time) engine.PendTransition {
 	t.Helper()
-	tr, err := l.RecordDecision(subject, corr, outcome, at, engine.PendKeys{}, e)
+	tr, err := l.RecordDecision(subject, corr, outcome, at, engine.PendKeys{})
 	if err != nil {
 		t.Fatalf("RecordDecision(%s,%s,%s): %v", subject, corr, outcome, err)
 	}
@@ -231,7 +230,7 @@ func pendLedgerChecks(t *testing.T, newLedger func(*testing.T) ledgerUnderTest) 
 		if ok, _, _ := l.BeginClaimUpdateReason(pciA, corrA); !ok {
 			t.Fatal("begin after release = false")
 		}
-		tr = decide(t, l, pciA, corrA, engine.PendOutcomeApproved, tDecided, eob("eob-1"))
+		tr = decide(t, l, pciA, corrA, engine.PendOutcomeApproved, tDecided)
 		if tr.From != engine.PendStateInProgress || tr.To != engine.PendStateDecided || tr.Event != "" || !tr.Changed {
 			t.Fatalf("decision transition = %+v", tr)
 		}
@@ -279,7 +278,7 @@ func pendLedgerChecks(t *testing.T, newLedger func(*testing.T) ledgerUnderTest) 
 	// "never pended".
 	t.Run("decision without a prior pend", func(t *testing.T) {
 		l := newLedger(t)
-		tr := decide(t, l, pciA, corrA, engine.PendOutcomeDenied, tDecided, eob("eob-1"))
+		tr := decide(t, l, pciA, corrA, engine.PendOutcomeDenied, tDecided)
 		if tr.From != "" || tr.To != engine.PendStateDecided {
 			t.Fatalf("transition = %+v", tr)
 		}
@@ -290,7 +289,7 @@ func pendLedgerChecks(t *testing.T, newLedger func(*testing.T) ledgerUnderTest) 
 	t.Run("decided is absorbing", func(t *testing.T) {
 		l := newLedger(t)
 		pend(t, l, pciA, corrA, tPend, keys(requester))
-		decide(t, l, pciA, corrA, engine.PendOutcomeApproved, tDecided, eob("eob-1"))
+		decide(t, l, pciA, corrA, engine.PendOutcomeApproved, tDecided)
 
 		if ok, err := l.BeginClaimUpdate(pciA, corrA); ok || err != nil {
 			t.Fatalf("Store.BeginClaimUpdate on decided = %v,%v", ok, err)
@@ -312,7 +311,7 @@ func pendLedgerChecks(t *testing.T, newLedger func(*testing.T) ledgerUnderTest) 
 	t.Run("release and finalize on decided are no-ops", func(t *testing.T) {
 		l := newLedger(t)
 		pend(t, l, pciA, corrA, tPend, keys(requester))
-		decide(t, l, pciA, corrA, engine.PendOutcomeDenied, tDecided, eob("eob-1"))
+		decide(t, l, pciA, corrA, engine.PendOutcomeDenied, tDecided)
 		for _, step := range []struct {
 			name string
 			call func() error
@@ -339,7 +338,7 @@ func pendLedgerChecks(t *testing.T, newLedger func(*testing.T) ledgerUnderTest) 
 			t.Fatalf("begin on a never-pended claim = %v,%q,%v", ok, why, err)
 		}
 		pend(t, l, pciA, corrA, tPend, keys(requester))
-		decide(t, l, pciA, corrA, engine.PendOutcomeApproved, tDecided, eob("eob-1"))
+		decide(t, l, pciA, corrA, engine.PendOutcomeApproved, tDecided)
 		ok, why, err := l.BeginClaimUpdateReason(pciA, corrA)
 		if ok || err != nil {
 			t.Fatalf("begin on decided = %v,%v", ok, err)
@@ -352,43 +351,31 @@ func pendLedgerChecks(t *testing.T, newLedger func(*testing.T) ledgerUnderTest) 
 		}
 	})
 
-	// The same outcome twice is idempotent: one decision, one EOB, no event.
+	// The same outcome twice is idempotent: one decision, no event.
 	t.Run("record decision is idempotent", func(t *testing.T) {
 		l := newLedger(t)
 		pend(t, l, pciA, corrA, tPend, keys(requester))
-		decide(t, l, pciA, corrA, engine.PendOutcomeApproved, tDecided, eob("eob-1"))
-		tr := decide(t, l, pciA, corrA, engine.PendOutcomeApproved, tDecided, eob("eob-1"))
+		decide(t, l, pciA, corrA, engine.PendOutcomeApproved, tDecided)
+		tr := decide(t, l, pciA, corrA, engine.PendOutcomeApproved, tDecided)
 		if tr.Changed || tr.Event != "" {
 			t.Fatalf("repeat decision transition = %+v", tr)
 		}
 		wantDecision(t, wantState(t, l, pciA, corrA, engine.PendStateDecided), engine.PendOutcomeApproved, tDecided)
 	})
 
-	// Duplicate terminal inquiries (the same answer relayed twice) write ONE EOB.
-	t.Run("duplicate terminal decisions write one EOB", func(t *testing.T) {
-		l := newLedger(t)
-		pend(t, l, pciA, corrA, tPend, keys(requester))
-		decide(t, l, pciA, corrA, engine.PendOutcomeApproved, tDecided, eob("eob-1"))
-		decide(t, l, pciA, corrA, engine.PendOutcomeApproved, tDecided, eob("eob-1"))
-		got, ok := l.EOBsForPatient(pciA)
-		if !ok || len(got) != 1 {
-			t.Fatalf("EOBsForPatient = %d,%v — want exactly one EOB", len(got), ok)
-		}
-	})
-
 	// A conflicting outcome keeps the decision the payer dated LATER, and says so.
 	t.Run("conflicting outcome keeps the later-dated decision", func(t *testing.T) {
 		l := newLedger(t)
 		pend(t, l, pciA, corrA, tPend, keys(requester))
-		decide(t, l, pciA, corrA, engine.PendOutcomeApproved, tDecided, eob("eob-1"))
+		decide(t, l, pciA, corrA, engine.PendOutcomeApproved, tDecided)
 
-		tr := decide(t, l, pciA, corrA, engine.PendOutcomeDenied, tLater, eob("eob-2"))
+		tr := decide(t, l, pciA, corrA, engine.PendOutcomeDenied, tLater)
 		if tr.Event != engine.DecisionConflictEvent || !tr.Changed {
 			t.Fatalf("later conflicting decision = %+v, want %s", tr, engine.DecisionConflictEvent)
 		}
 		wantDecision(t, wantState(t, l, pciA, corrA, engine.PendStateDecided), engine.PendOutcomeDenied, tLater)
 
-		tr = decide(t, l, pciA, corrA, engine.PendOutcomeApproved, tEarly, eob("eob-3"))
+		tr = decide(t, l, pciA, corrA, engine.PendOutcomeApproved, tEarly)
 		if tr.Event != engine.DecisionConflictEvent {
 			t.Fatalf("earlier conflicting decision = %+v, want %s", tr, engine.DecisionConflictEvent)
 		}
@@ -400,7 +387,7 @@ func pendLedgerChecks(t *testing.T, newLedger func(*testing.T) ledgerUnderTest) 
 		// An UNDATED conflicting decision is "not later" as well — the same
 		// meaning the re-pend rule gives an absent date — so it does not displace
 		// the recorded one either.
-		tr = decide(t, l, pciA, corrA, engine.PendOutcomeApproved, time.Time{}, eob("eob-4"))
+		tr = decide(t, l, pciA, corrA, engine.PendOutcomeApproved, time.Time{})
 		if tr.Event != engine.DecisionConflictEvent || tr.Changed {
 			t.Fatalf("undated conflicting decision = %+v", tr)
 		}
@@ -411,7 +398,7 @@ func pendLedgerChecks(t *testing.T, newLedger func(*testing.T) ledgerUnderTest) 
 	t.Run("re-pend after decided supersedes only when later", func(t *testing.T) {
 		l := newLedger(t)
 		pend(t, l, pciA, corrA, tPend, keys(requester))
-		decide(t, l, pciA, corrA, engine.PendOutcomeApproved, tDecided, eob("eob-1"))
+		decide(t, l, pciA, corrA, engine.PendOutcomeApproved, tDecided)
 
 		// Fixture 1: the re-pend is dated BEFORE the decision — a stale answer.
 		tr := pend(t, l, pciA, corrA, tEarly, keys(requester))
@@ -461,7 +448,7 @@ func pendLedgerChecks(t *testing.T, newLedger func(*testing.T) ledgerUnderTest) 
 		if ok, _, _ := l.BeginClaimUpdateReason(pciA, corrA); !ok {
 			t.Fatal("begin = false")
 		}
-		decide(t, l, pciA, corrA, engine.PendOutcomeDenied, tDecided, eob("eob-1"))
+		decide(t, l, pciA, corrA, engine.PendOutcomeDenied, tDecided)
 		if err := l.ReleaseClaimUpdate(pciA, corrA); err != nil { // the deferred Rollback
 			t.Fatal(err)
 		}
@@ -506,7 +493,7 @@ func pendLedgerChecks(t *testing.T, newLedger func(*testing.T) ledgerUnderTest) 
 	t.Run("lookup finds a decided claim", func(t *testing.T) {
 		l := newLedger(t)
 		pend(t, l, pciA, corrA, tPend, keys(requester))
-		decide(t, l, pciA, corrA, engine.PendOutcomeApproved, tDecided, eob("eob-1"))
+		decide(t, l, pciA, corrA, engine.PendOutcomeApproved, tDecided)
 		wantFound(t, lookup(t, l, requester, keys(requester)), pciA, corrA)
 	})
 
@@ -600,168 +587,64 @@ func pendLedgerChecks(t *testing.T, newLedger func(*testing.T) ledgerUnderTest) 
 			engine.PendMatchNoStrongKey)
 	})
 
-	// The EOB states the decision the ledger keeps, so it is written only when
-	// the decision is. The real legs always reuse one EOB id per
-	// authorization (eob-<corr>), so a losing or repeated decision writing its EOB
-	// would leave the ledger saying one thing and Patient Access serving another.
-	t.Run("a losing or repeated decision keeps the recorded decision's EOB", func(t *testing.T) {
+	// Only the decision the ledger keeps indexes its authorization number
+	// (engine.PendDecisionKept): a decision first recorded without one gets it
+	// from a later restatement of the kept decision, while an older restatement,
+	// or a losing outcome, never adds one.
+	t.Run("a restatement of the kept decision supplies its authorization number", func(t *testing.T) {
 		l := newLedger(t)
-		pend(t, l, pciA, corrA, tPend, keys(requester))
-		eobOf := func(body string) *engine.EOBRecord {
-			return &engine.EOBRecord{SubjectPCI: pciA, EOBID: "eob-" + corrA, JSON: []byte(body)}
-		}
-		const approved = `{"resourceType":"ExplanationOfBenefit","id":"eob-corr-A","outcome":"approved"}`
-		decide(t, l, pciA, corrA, engine.PendOutcomeApproved, tLater, eobOf(approved))
-		for _, tc := range []struct {
-			name, outcome string
-			at            time.Time
-		}{
-			{"an earlier-dated denial", engine.PendOutcomeDenied, tEarly},
-			{"the same approval again", engine.PendOutcomeApproved, tDecided},
-		} {
-			tr := decide(t, l, pciA, corrA, tc.outcome, tc.at, eobOf(`{"resourceType":"ExplanationOfBenefit","id":"eob-corr-A","outcome":"`+tc.name+`"}`))
-			if tr.Changed {
-				t.Fatalf("%s changed the decision: %+v", tc.name, tr)
-			}
-			if got, ok := l.EOBByID("eob-" + corrA); !ok || string(got) != approved {
-				t.Fatalf("%s replaced the kept decision's EOB: %s", tc.name, got)
-			}
-		}
-		wantDecision(t, wantState(t, l, pciA, corrA, engine.PendStateDecided), engine.PendOutcomeApproved, tLater)
-		// A decision that DOES change it writes its EOB with it.
-		decide(t, l, pciA, corrA, engine.PendOutcomeDenied, tLater.Add(time.Hour), eobOf(`{"resourceType":"ExplanationOfBenefit","id":"eob-corr-A","outcome":"denied"}`))
-		if got, _ := l.EOBByID("eob-" + corrA); !strings.Contains(string(got), `"denied"`) {
-			t.Fatalf("the winning decision's EOB was not written: %s", got)
-		}
-	})
-
-	// A follow-up's own keys (its lines' trace numbers and authorization numbers)
-	// never search; they only say whether the match is the authorization the
-	// follow-up was about: it holds every one of them, and no other authorization
-	// in the requester's namespace holds any.
-	t.Run("a follow-up's own keys say whether it is about the match", func(t *testing.T) {
-		l := newLedger(t)
-		const traceA, traceB, shared = "urn:shn:trace|A-1", "urn:shn:trace|B-1", "urn:shn:trace|SHARED"
-		pend(t, l, pciA, corrA, tPend, engine.PendKeys{RequesterHolder: requester,
-			ClaimResponseIDs: []string{"urn:payer:claimresponse|CR-A"}, ItemTraceNumbers: []string{traceA, shared}})
-		pend(t, l, pciA, corrB, tPend, engine.PendKeys{RequesterHolder: requester,
-			ClaimResponseIDs: []string{"urn:payer:claimresponse|CR-B"}, ItemTraceNumbers: []string{traceB, shared}})
-		answerA := engine.PendKeys{RequesterHolder: requester, ClaimResponseIDs: []string{"urn:payer:claimresponse|CR-A"}}
-		about := func(traces ...string) []engine.PendKeyRef { return engine.PendAboutKeys(traces, nil) }
-		for _, tc := range []struct {
-			name  string
-			about []engine.PendKeyRef
-			want  bool
-		}{
-			{"none stated", nil, false},
-			{"held by the match alone", about(traceA), true},
-			{"an authorization number the match holds alone", engine.PendAboutKeys(nil, []string{"PA-A"}), false},
-			{"held by the match and another", about(shared), false},
-			{"one held by the match, one by another", about(traceA, traceB), false},
-			{"one the match does not hold", about(traceA, "urn:shn:trace|NOWHERE"), false},
-			{"held only by another", about(traceB), false},
-		} {
-			m, err := l.LookupPended(requester, answerA, tc.about)
-			if err != nil {
-				t.Fatal(err)
-			}
-			wantFound(t, m, pciA, corrA)
-			if m.About != tc.want {
-				t.Fatalf("%s: About = %v, want %v", tc.name, m.About, tc.want)
-			}
-		}
-		// An authorization number is a preAuthRef key: one the match holds alone
-		// names it.
-		pend(t, l, pciA, corrA, tLater, engine.PendKeys{RequesterHolder: requester, PreAuthRef: "PA-A"})
-		if m := lookup(t, l, requester, answerA); m.About {
-			t.Fatalf("no follow-up keys, yet About: %+v", m)
-		}
-		m, err := l.LookupPended(requester, answerA, engine.PendAboutKeys(nil, []string{"PA-A"}))
-		if err != nil || !m.About {
-			t.Fatalf("an authorization number the match holds alone: %+v, %v", m, err)
-		}
-	})
-
-	// A decision first recorded without its EOB gets it from a later restatement
-	// of the kept decision; an older restatement never replaces the kept EOB.
-	t.Run("a later restatement of the kept decision supplies its EOB", func(t *testing.T) {
-		l := newLedger(t)
-		pend(t, l, pciA, corrA, tPend, keys(requester))
-		eobOf := func(body string) *engine.EOBRecord {
-			return &engine.EOBRecord{SubjectPCI: pciA, EOBID: "eob-" + corrA, JSON: []byte(body)}
-		}
-		decide(t, l, pciA, corrA, engine.PendOutcomeApproved, tDecided, nil)
-		if _, ok := l.EOBByID("eob-" + corrA); ok {
-			t.Fatal("a decision recorded without an EOB has one")
-		}
-		const supplied = `{"resourceType":"ExplanationOfBenefit","id":"eob-corr-A","n":"supplied"}`
-		if tr := decide(t, l, pciA, corrA, engine.PendOutcomeApproved, tDecided, eobOf(supplied)); tr.Changed {
+		pend(t, l, pciA, corrA, tPend, engine.PendKeys{RequesterHolder: requester, ClaimResponseIDs: []string{"urn:payer:claimresponse|CR-1"}})
+		decideN(t, l, pciA, corrA, engine.PendOutcomeApproved, tDecided, "")
+		if tr := decideN(t, l, pciA, corrA, engine.PendOutcomeApproved, tDecided, "AUTH-SUPPLIED"); tr.Changed {
 			t.Fatalf("restating the kept decision changed it: %+v", tr)
 		}
-		if got, ok := l.EOBByID("eob-" + corrA); !ok || string(got) != supplied {
-			t.Fatalf("the restatement did not supply the kept decision's EOB: %s", got)
-		}
-		decide(t, l, pciA, corrA, engine.PendOutcomeApproved, tEarly, eobOf(`{"resourceType":"ExplanationOfBenefit","id":"eob-corr-A","n":"older"}`))
-		if got, _ := l.EOBByID("eob-" + corrA); string(got) != supplied {
-			t.Fatalf("an older restatement replaced the kept EOB: %s", got)
+		wantFound(t, lookup(t, l, requester, engine.PendKeys{RequesterHolder: requester, PreAuthRef: "AUTH-SUPPLIED"}), pciA, corrA)
+		for _, tc := range []struct {
+			name, outcome, number string
+			at                    time.Time
+		}{
+			{"an older restatement", engine.PendOutcomeApproved, "AUTH-OLDER", tEarly},
+			{"an earlier-dated denial", engine.PendOutcomeDenied, "AUTH-LOSING", tEarly},
+		} {
+			if tr := decideN(t, l, pciA, corrA, tc.outcome, tc.at, tc.number); tr.Changed {
+				t.Fatalf("%s changed the decision: %+v", tc.name, tr)
+			}
+			wantVerdict(t, lookup(t, l, requester, engine.PendKeys{RequesterHolder: requester, PreAuthRef: tc.number}), engine.PendMatchNone)
 		}
 		wantDecision(t, wantState(t, l, pciA, corrA, engine.PendStateDecided), engine.PendOutcomeApproved, tDecided)
 	})
 
-	// Patient Access never serves an EOB that contradicts the ledger: when the
-	// kept outcome changes and the new decision brings no EOB of its own, the
-	// old decision's EOB is removed in the same write, and the write says so.
-	t.Run("an outcome that changes without its EOB removes the old one", func(t *testing.T) {
+	// An outcome change keeps the decision the payer dated later, with nothing
+	// else to remove: the ledger row is the whole record of the decision. A
+	// losing answer changes nothing.
+	t.Run("an outcome change records the later decision alone", func(t *testing.T) {
 		l := newLedger(t)
 		pend(t, l, pciA, corrA, tPend, keys(requester))
-		denied := &engine.EOBRecord{SubjectPCI: pciA, EOBID: engine.DecisionEOBID(corrA), JSON: []byte(`{"resourceType":"ExplanationOfBenefit","outcome":"denied"}`)}
-		decideN(t, l, pciA, corrA, engine.PendOutcomeDenied, tDecided, "", denied)
-		tr := decideN(t, l, pciA, corrA, engine.PendOutcomeApproved, tLater, "", nil)
-		if !tr.Changed || !tr.EOBRemoved {
-			t.Fatalf("a later approval with no EOB = %+v, want the outcome changed and the denial's EOB removed", tr)
+		decideN(t, l, pciA, corrA, engine.PendOutcomeDenied, tDecided, "")
+		if tr := decideN(t, l, pciA, corrA, engine.PendOutcomeApproved, tLater, ""); !tr.Changed || tr.Event != engine.DecisionConflictEvent {
+			t.Fatalf("a later approval = %+v, want the outcome changed with %s", tr, engine.DecisionConflictEvent)
 		}
-		if got, ok := l.EOBByID(engine.DecisionEOBID(corrA)); ok {
-			t.Fatalf("the denial's EOB still stands after the approval: %s", got)
-		}
-		wantEOBGone(t, l, engine.DecisionEOBID(corrA))
 		wantDecision(t, wantState(t, l, pciA, corrA, engine.PendStateDecided), engine.PendOutcomeApproved, tLater)
-		// The approval's own EOB, when it arrives, is written.
-		approved := &engine.EOBRecord{SubjectPCI: pciA, EOBID: engine.DecisionEOBID(corrA), JSON: []byte(`{"resourceType":"ExplanationOfBenefit","outcome":"approved"}`)}
-		if tr := decideN(t, l, pciA, corrA, engine.PendOutcomeApproved, tLater, "", approved); tr.EOBRemoved {
-			t.Fatalf("restating the kept decision removed an EOB: %+v", tr)
+		if tr := decideN(t, l, pciA, corrA, engine.PendOutcomeDenied, tEarly, ""); tr.Changed {
+			t.Fatalf("an earlier denial = %+v, want no change", tr)
 		}
-		if got, ok := l.EOBByID(engine.DecisionEOBID(corrA)); !ok || string(got) != string(approved.JSON) {
-			t.Fatalf("the kept decision's EOB = %s,%v", got, ok)
-		}
-		// A losing answer removes nothing.
-		if tr := decideN(t, l, pciA, corrA, engine.PendOutcomeDenied, tEarly, "", nil); tr.EOBRemoved || tr.Changed {
-			t.Fatalf("an earlier denial = %+v, want no change and nothing removed", tr)
-		}
-		if _, ok := l.EOBByID(engine.DecisionEOBID(corrA)); !ok {
-			t.Fatal("a losing answer removed the kept decision's EOB")
-		}
+		wantDecision(t, wantState(t, l, pciA, corrA, engine.PendStateDecided), engine.PendOutcomeApproved, tLater)
 	})
 
-	// A later-dated re-pend reopens a decided authorization; the decision's EOB
-	// no longer states what the ledger keeps, so it is removed with it. A stale
-	// re-pend leaves the decision, and its EOB, as they are.
-	t.Run("a superseding re-pend removes the decision's EOB", func(t *testing.T) {
+	// A later-dated re-pend reopens a decided authorization; a stale re-pend
+	// leaves the decision as it is.
+	t.Run("a superseding re-pend reopens the decision", func(t *testing.T) {
 		l := newLedger(t)
 		pend(t, l, pciA, corrA, tPend, keys(requester))
-		decideN(t, l, pciA, corrA, engine.PendOutcomeApproved, tDecided, "", &engine.EOBRecord{SubjectPCI: pciA, EOBID: engine.DecisionEOBID(corrA), JSON: []byte(`{"resourceType":"ExplanationOfBenefit"}`)})
-		if tr := pend(t, l, pciA, corrA, tEarly, keys(requester)); tr.EOBRemoved {
-			t.Fatalf("a stale re-pend removed the EOB: %+v", tr)
+		decideN(t, l, pciA, corrA, engine.PendOutcomeApproved, tDecided, "")
+		if tr := pend(t, l, pciA, corrA, tEarly, keys(requester)); tr.Changed || tr.Event != engine.DecisionStaleAnswerEvent {
+			t.Fatalf("a stale re-pend = %+v, want no change with %s", tr, engine.DecisionStaleAnswerEvent)
 		}
-		if _, ok := l.EOBByID(engine.DecisionEOBID(corrA)); !ok {
-			t.Fatal("a stale re-pend removed the decision's EOB")
+		wantDecision(t, wantState(t, l, pciA, corrA, engine.PendStateDecided), engine.PendOutcomeApproved, tDecided)
+		if tr := pend(t, l, pciA, corrA, tLater, keys(requester)); tr.Event != engine.DecisionSupersededEvent || !tr.Changed {
+			t.Fatalf("a superseding re-pend = %+v, want %s", tr, engine.DecisionSupersededEvent)
 		}
-		if tr := pend(t, l, pciA, corrA, tLater, keys(requester)); tr.Event != engine.DecisionSupersededEvent || !tr.EOBRemoved {
-			t.Fatalf("a superseding re-pend = %+v, want %s with the EOB removed", tr, engine.DecisionSupersededEvent)
-		}
-		if got, ok := l.EOBByID(engine.DecisionEOBID(corrA)); ok {
-			t.Fatalf("the superseded decision's EOB still stands: %s", got)
-		}
-		wantEOBGone(t, l, engine.DecisionEOBID(corrA))
+		wantState(t, l, pciA, corrA, engine.PendStatePended)
 	})
 
 	// A ClaimResponse identifier the authorization also holds as one of its own
@@ -775,7 +658,7 @@ func pendLedgerChecks(t *testing.T, newLedger func(*testing.T) ledgerUnderTest) 
 			ClaimResponseIDs: []string{echoed}, RequestIDs: []string{echoed}})
 		answer := engine.PendKeys{RequesterHolder: requester, ClaimResponseIDs: []string{echoed}, RequestIDs: []string{echoed}}
 		wantVerdict(t, lookup(t, l, requester, answer), engine.PendMatchRequesterKeyOnly)
-		decideN(t, l, pciA, corrA, engine.PendOutcomeApproved, tDecided, "AUTH-A", nil)
+		decideN(t, l, pciA, corrA, engine.PendOutcomeApproved, tDecided, "AUTH-A")
 		answer.PreAuthRef = "AUTH-A"
 		wantFound(t, lookup(t, l, requester, answer), pciA, corrA)
 	})
@@ -795,30 +678,27 @@ func pendLedgerChecks(t *testing.T, newLedger func(*testing.T) ledgerUnderTest) 
 		wantVerdict(t, lookup(t, l, requester, engine.PendKeys{RequesterHolder: requester, ClaimResponseIDs: []string{echoedOwnSystem}}),
 			engine.PendMatchRequesterKeyOnly)
 		// B's authorization number names B alone, the shared echo notwithstanding.
-		decideN(t, l, pciA, corrB, engine.PendOutcomeApproved, tDecided, "AUTH-B", nil)
+		decideN(t, l, pciA, corrB, engine.PendOutcomeApproved, tDecided, "AUTH-B")
 		wantFound(t, lookup(t, l, requester, engine.PendKeys{RequesterHolder: requester,
 			ClaimResponseIDs: []string{echoedOwnSystem}, PreAuthRef: "AUTH-B"}), pciA, corrB)
 	})
 
 	// A decision with no ledger row before it (the payer decided at submit) is
 	// filed under its requester with every key of the submission, so a later
-	// follow-up finds it and judges whether it is about it like any other claim.
+	// follow-up finds it like any other claim.
 	t.Run("a decision with no prior row is filed under its keys", func(t *testing.T) {
 		l := newLedger(t)
 		const trace = "urn:shn:trace|SUBMIT-1"
 		tr, err := l.RecordDecision(pciA, corrA, engine.PendOutcomeDenied, tDecided, engine.PendKeys{RequesterHolder: requester,
-			ClaimResponseIDs: []string{"urn:payer:claimresponse|CR-D"}, ItemTraceNumbers: []string{trace}, PreAuthRef: "AUTH-D"}, nil)
+			ClaimResponseIDs: []string{"urn:payer:claimresponse|CR-D"}, ItemTraceNumbers: []string{trace}, PreAuthRef: "AUTH-D"})
 		if err != nil || !tr.Changed {
 			t.Fatalf("RecordDecision = %+v,%v", tr, err)
 		}
 		if rec := mustRecord(t, l, pciA, corrA); rec.RequesterHolder != requester {
 			t.Fatalf("the decided row has requester %q, want %q", rec.RequesterHolder, requester)
 		}
-		m, err := l.LookupPended(requester, engine.PendKeys{RequesterHolder: requester, ClaimResponseIDs: []string{"urn:payer:claimresponse|CR-D"}},
-			engine.PendAboutKeys([]string{trace}, nil))
-		if err != nil || m.Verdict != engine.PendMatchFound || m.CorrelationID != corrA || !m.About {
-			t.Fatalf("lookup of the decided-at-submit claim = %+v,%v, want found and About", m, err)
-		}
+		wantFound(t, lookup(t, l, requester, engine.PendKeys{RequesterHolder: requester, ClaimResponseIDs: []string{"urn:payer:claimresponse|CR-D"},
+			ItemTraceNumbers: []string{trace}}), pciA, corrA)
 		wantFound(t, lookup(t, l, requester, engine.PendKeys{RequesterHolder: requester, PreAuthRef: "AUTH-D"}), pciA, corrA)
 		// Another requester's namespace holds nothing of it.
 		wantVerdict(t, lookup(t, l, other, engine.PendKeys{RequesterHolder: other, PreAuthRef: "AUTH-D"}), engine.PendMatchNone)
@@ -848,209 +728,36 @@ func pendLedgerChecks(t *testing.T, newLedger func(*testing.T) ledgerUnderTest) 
 	})
 
 	// The kept decision's authorization number names the authorization from
-	// then on, so a later follow-up that states it finds the authorization, and
-	// can be about it. A losing decision's number is not indexed.
+	// then on, so a later follow-up that states it finds the authorization. A
+	// losing decision's number is not indexed.
 	t.Run("the kept decision's authorization number is indexed", func(t *testing.T) {
 		l := newLedger(t)
 		pend(t, l, pciA, corrA, tPend, engine.PendKeys{RequesterHolder: requester, ClaimResponseIDs: []string{"urn:payer:claimresponse|CR-1"}})
-		decideN(t, l, pciA, corrA, engine.PendOutcomeApproved, tLater, "AUTH-0001", nil)
+		decideN(t, l, pciA, corrA, engine.PendOutcomeApproved, tLater, "AUTH-0001")
 		byNumber := engine.PendKeys{RequesterHolder: requester, PreAuthRef: "AUTH-0001"}
 		wantFound(t, lookup(t, l, requester, byNumber), pciA, corrA)
-		m, err := l.LookupPended(requester, byNumber, engine.PendAboutKeys(nil, []string{"AUTH-0001"}))
-		if err != nil || !m.About {
-			t.Fatalf("a follow-up naming the authorization number = %+v,%v, want About", m, err)
-		}
-		decideN(t, l, pciA, corrA, engine.PendOutcomeDenied, tEarly, "AUTH-LOSING", nil)
+		decideN(t, l, pciA, corrA, engine.PendOutcomeDenied, tEarly, "AUTH-LOSING")
 		wantVerdict(t, lookup(t, l, requester, engine.PendKeys{RequesterHolder: requester, PreAuthRef: "AUTH-LOSING"}), engine.PendMatchNone)
 		// Another authorization decided under the same number makes it ambiguous.
 		pend(t, l, pciA, corrB, tPend, engine.PendKeys{RequesterHolder: requester, ClaimResponseIDs: []string{"urn:payer:claimresponse|CR-B"}})
-		decideN(t, l, pciA, corrB, engine.PendOutcomeApproved, tLater, "AUTH-0001", nil)
+		decideN(t, l, pciA, corrB, engine.PendOutcomeApproved, tLater, "AUTH-0001")
 		wantVerdict(t, lookup(t, l, requester, byNumber), engine.PendMatchAmbiguous)
 	})
 
 	// A later-dated restatement of the kept decision advances the date it is
-	// kept by, so an older restatement can never be its latest word.
+	// kept by, so an older restatement can never be its latest word: one dated
+	// between the two is not the kept decision, and indexes no authorization
+	// number (engine.PendDecisionKept).
 	t.Run("a later restatement advances the kept decision's date", func(t *testing.T) {
 		l := newLedger(t)
 		pend(t, l, pciA, corrA, tPend, keys(requester))
-		decideN(t, l, pciA, corrA, engine.PendOutcomeApproved, tEarly, "", nil)
-		decideN(t, l, pciA, corrA, engine.PendOutcomeApproved, tLater, "", &engine.EOBRecord{SubjectPCI: pciA, EOBID: engine.DecisionEOBID(corrA), JSON: []byte(`{"n":"later"}`)})
+		decideN(t, l, pciA, corrA, engine.PendOutcomeApproved, tEarly, "")
+		decideN(t, l, pciA, corrA, engine.PendOutcomeApproved, tLater, "AUTH-LATER")
 		wantDecision(t, wantState(t, l, pciA, corrA, engine.PendStateDecided), engine.PendOutcomeApproved, tLater)
-		decideN(t, l, pciA, corrA, engine.PendOutcomeApproved, tDecided, "", &engine.EOBRecord{SubjectPCI: pciA, EOBID: engine.DecisionEOBID(corrA), JSON: []byte(`{"n":"between"}`)})
-		if got, _ := l.EOBByID(engine.DecisionEOBID(corrA)); string(got) != `{"n":"later"}` {
-			t.Fatalf("a restatement dated between replaced the later one's EOB: %s", got)
-		}
-	})
-
-	// The decision and its EOB are ONE write: a refused EOB leaves no decision.
-	t.Run("a refused EOB leaves no decision", func(t *testing.T) {
-		l := newLedger(t)
-		pend(t, l, pciA, corrA, tPend, keys(requester))
-		for _, bad := range []struct {
-			name string
-			eob  *engine.EOBRecord
-		}{
-			{"no id", &engine.EOBRecord{SubjectPCI: pciA, JSON: []byte(`{"resourceType":"ExplanationOfBenefit"}`)}},
-			{"no bytes", &engine.EOBRecord{SubjectPCI: pciA, EOBID: "eob-1"}},
-			{"another subject", &engine.EOBRecord{SubjectPCI: "PCI-OTHER", EOBID: "eob-1", JSON: []byte(`{}`)}},
-		} {
-			_, err := l.RecordDecision(pciA, corrA, engine.PendOutcomeApproved, tDecided, engine.PendKeys{}, bad.eob)
-			if !errors.Is(err, engine.ErrPendEOBInvalid) {
-				t.Fatalf("%s: err = %v, want ErrPendEOBInvalid", bad.name, err)
-			}
-			wantState(t, l, pciA, corrA, engine.PendStatePended)
-			if got, ok := l.EOBsForPatient(pciA); ok || len(got) != 0 {
-				t.Fatalf("%s: %d EOBs were written by a refused decision", bad.name, len(got))
-			}
-		}
-	})
-
-	// An EOB id is the payer's "eob-" + the exchange's correlation id, and a
-	// requester can choose its correlation id. A second patient's exchange that
-	// reuses the first's correlation id — the SAME correlation id, under two
-	// patients, which is the collision a requester can actually cause — must not
-	// move its EOB into the first patient's Patient Access list, and the refused
-	// EOB leaves its decision pended.
-	t.Run("an EOB id owned by another patient is refused on decision", func(t *testing.T) {
-		l := newLedger(t)
-		const (
-			shared = "corr-shared"
-			eobID  = "eob-" + shared
-			pciB   = "PCI-B"
-		)
-		first := []byte(`{"resourceType":"ExplanationOfBenefit","id":"shared","patient":{"reference":"Patient/A"}}`)
-		pend(t, l, pciA, shared, tPend, keys(requester))
-		decide(t, l, pciA, shared, engine.PendOutcomeApproved, tDecided, &engine.EOBRecord{SubjectPCI: pciA, EOBID: eobID, JSON: first})
-		pend(t, l, pciB, shared, tPend, engine.PendKeys{RequesterHolder: requester, RequestIDs: []string{"urn:shn:claim|CLM-B"}})
-		_, err := l.RecordDecision(pciB, shared, engine.PendOutcomeApproved, tDecided, engine.PendKeys{},
-			&engine.EOBRecord{SubjectPCI: pciB, EOBID: eobID, JSON: []byte(`{"resourceType":"ExplanationOfBenefit","id":"shared","patient":{"reference":"Patient/B"}}`)})
-		if !errors.Is(err, engine.ErrEOBSubjectMismatch) {
-			t.Fatalf("err = %v, want ErrEOBSubjectMismatch", err)
-		}
-		wantState(t, l, pciB, shared, engine.PendStatePended)
-		wantDecision(t, wantState(t, l, pciA, shared, engine.PendStateDecided), engine.PendOutcomeApproved, tDecided)
-		if got, ok := l.EOBsForPatient(pciA); !ok || len(got) != 1 || string(got[0]) != string(first) {
-			t.Fatalf("the first patient's EOB changed: %s, found=%v", got, ok)
-		}
-		if got, ok := l.EOBsForPatient(pciB); ok || len(got) != 0 {
-			t.Fatalf("the refused EOB became visible to the second patient: %s, found=%v", got, ok)
-		}
-	})
-
-	// The owner of an EOB id re-recording it through a decision replaces its
-	// bytes and stays ONE EOB: the guard is about the patient, not the id.
-	t.Run("the owning patient re-records its EOB id on decision", func(t *testing.T) {
-		l := newLedger(t)
-		pend(t, l, pciA, corrA, tPend, keys(requester))
-		decide(t, l, pciA, corrA, engine.PendOutcomeApproved, tDecided, eob("eob-"+corrA))
-		again := &engine.EOBRecord{SubjectPCI: pciA, EOBID: "eob-" + corrA, JSON: []byte(`{"resourceType":"ExplanationOfBenefit","id":"again"}`)}
-		decide(t, l, pciA, corrA, engine.PendOutcomeDenied, tLater, again)
-		wantDecision(t, wantState(t, l, pciA, corrA, engine.PendStateDecided), engine.PendOutcomeDenied, tLater)
-		if got, ok := l.EOBsForPatient(pciA); !ok || len(got) != 1 || string(got[0]) != string(again.JSON) {
-			t.Fatalf("re-recorded EOB = %s, found=%v, want the one re-recorded", got, ok)
-		}
-	})
-
-	// The pre-forward check's first question (engine.EOBOwnerLookup): which
-	// patient an EOB id is filed for — and "none" is not an error.
-	t.Run("EOB owner lookup", func(t *testing.T) {
-		l := newLedger(t)
-		lookup, ok := l.(engine.EOBOwnerLookup)
-		if !ok {
-			t.Fatal("the backend does not answer EOBOwner")
-		}
-		if owner, found, err := lookup.EOBOwner("eob-" + corrA); err != nil || found || owner != "" {
-			t.Fatalf("an unfiled id = %q,%v,%v, want not found", owner, found, err)
-		}
-		if err := l.RecordEOB(pciA, "eob-"+corrA, []byte(`{"resourceType":"ExplanationOfBenefit"}`)); err != nil {
-			t.Fatal(err)
-		}
-		if owner, found, err := lookup.EOBOwner("eob-" + corrA); err != nil || !found || owner != pciA {
-			t.Fatalf("a filed id = %q,%v,%v, want %q", owner, found, err, pciA)
-		}
-		// The same id refused for another patient leaves the owner as it was.
-		_ = l.RecordEOB("PCI-B", "eob-"+corrA, []byte(`{"resourceType":"ExplanationOfBenefit"}`))
-		if owner, _, _ := lookup.EOBOwner("eob-" + corrA); owner != pciA {
-			t.Fatalf("owner after a refused write = %q, want %q", owner, pciA)
-		}
-	})
-
-	// The pre-forward check's second question (engine.PendCorrelationLookup):
-	// whether another patient's authorization is still awaiting its decision
-	// under a correlation id. The asking patient's own row, a decided row and a
-	// row under another correlation id are not.
-	t.Run("pended-for-another-patient lookup", func(t *testing.T) {
-		l := newLedger(t)
-		lookup, ok := l.(engine.PendCorrelationLookup)
-		if !ok {
-			t.Fatal("the backend does not answer PendedForOtherSubject")
-		}
-		const pciB, pciC = "PCI-B", "PCI-C"
-		want := func(t *testing.T, corr, asking, wantPCI string, wantFound bool) {
-			t.Helper()
-			other, found, err := lookup.PendedForOtherSubject(corr, asking)
-			if err != nil || found != wantFound || other != wantPCI {
-				t.Fatalf("PendedForOtherSubject(%s,%s) = %q,%v,%v, want %q,%v", corr, asking, other, found, err, wantPCI, wantFound)
-			}
-		}
-		want(t, corrA, pciA, "", false)
-		pend(t, l, pciA, corrA, tPend, keys(requester))
-		want(t, corrA, pciA, "", false) // one's own pend is not another patient's
-		want(t, corrA, pciB, pciA, true)
-		want(t, corrB, pciB, "", false) // another correlation id
-		// An amendment in progress is still awaiting its decision.
-		if claimed, _, err := l.BeginClaimUpdateReason(pciA, corrA); err != nil || !claimed {
-			t.Fatalf("begin = %v,%v", claimed, err)
-		}
-		want(t, corrA, pciB, pciA, true)
-		// A decided authorization still holds its correlation id, with or
-		// without its decision EOB.
-		decide(t, l, pciA, corrA, engine.PendOutcomeApproved, tDecided, nil)
-		want(t, corrA, pciB, pciA, true)
-		// With two others under the id, the least PCI answers, on every backend.
-		pend(t, l, pciC, corrA, tPend, engine.PendKeys{RequesterHolder: requester, RequestIDs: []string{"urn:shn:claim|CLM-C"}})
-		pend(t, l, pciB, corrA, tPend, engine.PendKeys{RequesterHolder: requester, RequestIDs: []string{"urn:shn:claim|CLM-B"}})
-		want(t, corrA, pciA, pciB, true)
-		want(t, corrA, pciB, pciA, true)
-		want(t, corrA, pciC, pciA, true)
-	})
-
-	// The same guard on the EOB write that has no ledger decision.
-	t.Run("an EOB id owned by another patient is refused on record", func(t *testing.T) {
-		l := newLedger(t)
-		first := []byte(`{"resourceType":"ExplanationOfBenefit","id":"a"}`)
-		if err := l.RecordEOB(pciA, "eob-corr-shared", first); err != nil {
-			t.Fatal(err)
-		}
-		if err := l.RecordEOB("PCI-B", "eob-corr-shared", []byte(`{"resourceType":"ExplanationOfBenefit","id":"b"}`)); !errors.Is(err, engine.ErrEOBSubjectMismatch) {
-			t.Fatalf("err = %v, want ErrEOBSubjectMismatch", err)
-		}
-		if got, ok := l.EOBsForPatient(pciA); !ok || len(got) != 1 || string(got[0]) != string(first) {
-			t.Fatalf("the first patient's EOB changed: %s, found=%v", got, ok)
-		}
-		if got, ok := l.EOBsForPatient("PCI-B"); ok || len(got) != 0 {
-			t.Fatalf("the refused EOB became visible: %s, found=%v", got, ok)
-		}
-		// The same patient re-recording its own EOB id replaces it, as before.
-		again := []byte(`{"resourceType":"ExplanationOfBenefit","id":"a","status":"active"}`)
-		if err := l.RecordEOB(pciA, "eob-corr-shared", again); err != nil {
-			t.Fatalf("re-recording one's own EOB id: %v", err)
-		}
-		if got, _ := l.EOBsForPatient(pciA); len(got) != 1 || string(got[0]) != string(again) {
-			t.Fatalf("re-recorded EOB = %s", got)
-		}
-	})
-
-	// A decision needs no EOB (the update leg records one without) — a nil EOB is
-	// the decision alone.
-	t.Run("a decision without an EOB", func(t *testing.T) {
-		l := newLedger(t)
-		pend(t, l, pciA, corrA, tPend, keys(requester))
-		decide(t, l, pciA, corrA, engine.PendOutcomeApproved, tDecided, nil)
-		wantDecision(t, wantState(t, l, pciA, corrA, engine.PendStateDecided), engine.PendOutcomeApproved, tDecided)
-		if got, ok := l.EOBsForPatient(pciA); ok || len(got) != 0 {
-			t.Fatalf("%d EOBs from an EOB-less decision", len(got))
-		}
+		decideN(t, l, pciA, corrA, engine.PendOutcomeApproved, tDecided, "AUTH-BETWEEN")
+		wantDecision(t, wantState(t, l, pciA, corrA, engine.PendStateDecided), engine.PendOutcomeApproved, tLater)
+		wantFound(t, lookup(t, l, requester, engine.PendKeys{RequesterHolder: requester, PreAuthRef: "AUTH-LATER"}), pciA, corrA)
+		wantVerdict(t, lookup(t, l, requester, engine.PendKeys{RequesterHolder: requester, PreAuthRef: "AUTH-BETWEEN"}), engine.PendMatchNone)
 	})
 
 	// --- the guards, each with its rejection row ---
@@ -1064,7 +771,7 @@ func pendLedgerChecks(t *testing.T, newLedger func(*testing.T) ledgerUnderTest) 
 		if _, ok, err := l.PendRecordOf(pciA, corrA); ok || err != nil {
 			t.Fatalf("a refused pend wrote a row: %v,%v", ok, err)
 		}
-		if _, err := l.LookupPended("", keys(requester), nil); !errors.Is(err, engine.ErrPendRequesterRequired) {
+		if _, err := l.LookupPended("", keys(requester)); !errors.Is(err, engine.ErrPendRequesterRequired) {
 			t.Fatalf("lookup err = %v, want ErrPendRequesterRequired", err)
 		}
 	})
@@ -1089,7 +796,7 @@ func pendLedgerChecks(t *testing.T, newLedger func(*testing.T) ledgerUnderTest) 
 		l := newLedger(t)
 		pend(t, l, pciA, corrA, tPend, keys(requester))
 		for _, outcome := range []string{"", "pended", "PENDED", string(engine.PendStateInProgress)} {
-			if _, err := l.RecordDecision(pciA, corrA, outcome, tDecided, engine.PendKeys{}, nil); !errors.Is(err, engine.ErrPendOutcomeInvalid) {
+			if _, err := l.RecordDecision(pciA, corrA, outcome, tDecided, engine.PendKeys{}); !errors.Is(err, engine.ErrPendOutcomeInvalid) {
 				t.Fatalf("outcome %q: err = %v, want ErrPendOutcomeInvalid", outcome, err)
 			}
 			wantState(t, l, pciA, corrA, engine.PendStatePended)
@@ -1102,17 +809,13 @@ func pendLedgerChecks(t *testing.T, newLedger func(*testing.T) ledgerUnderTest) 
 	t.Run("a decision from another requester is refused", func(t *testing.T) {
 		l := newLedger(t)
 		pend(t, l, pciA, corrA, tPend, keys(requester))
-		denied := &engine.EOBRecord{SubjectPCI: pciA, EOBID: engine.DecisionEOBID(corrA), JSON: []byte(`{"resourceType":"ExplanationOfBenefit"}`)}
-		if _, err := l.RecordDecision(pciA, corrA, engine.PendOutcomeDenied, tDecided, engine.PendKeys{RequesterHolder: other, PreAuthRef: "AUTH-OTHER"}, denied); !errors.Is(err, engine.ErrPendRequesterMismatch) {
+		if _, err := l.RecordDecision(pciA, corrA, engine.PendOutcomeDenied, tDecided, engine.PendKeys{RequesterHolder: other, PreAuthRef: "AUTH-OTHER"}); !errors.Is(err, engine.ErrPendRequesterMismatch) {
 			t.Fatalf("err = %v, want ErrPendRequesterMismatch", err)
 		}
 		wantState(t, l, pciA, corrA, engine.PendStatePended)
-		if _, ok := l.EOBByID(engine.DecisionEOBID(corrA)); ok {
-			t.Fatal("the refused decision wrote its EOB")
-		}
 		wantVerdict(t, lookup(t, l, requester, engine.PendKeys{RequesterHolder: requester, PreAuthRef: "AUTH-OTHER"}), engine.PendMatchNone)
 		// The authorization's own requester still decides it.
-		decideN(t, l, pciA, corrA, engine.PendOutcomeApproved, tDecided, "AUTH-OWN", nil)
+		decideN(t, l, pciA, corrA, engine.PendOutcomeApproved, tDecided, "AUTH-OWN")
 		wantState(t, l, pciA, corrA, engine.PendStateDecided)
 	})
 

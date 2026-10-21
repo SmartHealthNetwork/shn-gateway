@@ -1,7 +1,7 @@
 // Package pgstore is the durable (Postgres) implementation of the gateway's
-// Store seam — the holder's OWN business state: issued authorization numbers, the
-// pended-claim ledger, and PA-decision EOBs (AI-1: metadata/decision only, never a
-// cross-holder clinical record). It mirrors internal/auditstore (NewPgStore +
+// Store seam — the holder's OWN business state: issued authorization numbers and
+// the pended-claim ledger (AI-1: metadata/decision only, never a cross-holder
+// clinical record). It mirrors internal/auditstore (NewPgStore +
 // EnsureSchema over pgxpool) and satisfies engine.Store (the public seam); the
 // compile-time conformance assertion lives in-package (var _ engine.Store below).
 //
@@ -12,8 +12,8 @@
 //
 // Read-error seam: gateway.Store's read methods return (zero, bool) with no error
 // channel, so a read here collapses any failure to "not found". A genuine DB outage
-// would otherwise be indistinguishable from absence (e.g. the Patient Access API
-// reporting "no EOBs" during a Postgres blip), so non-pgx.ErrNoRows read errors are
+// would otherwise be indistinguishable from absence (e.g. an authorization-number
+// lookup reporting "none issued" during a Postgres blip), so non-pgx.ErrNoRows read errors are
 // LOGGED (notFound) to stay observable. The writes (which DO return error) are the
 // durability-critical path. A future gateway.Store interface that carries read errors
 // would close this seam (return the error instead of logging); out of scope for E-mid.
@@ -216,6 +216,8 @@ CREATE TABLE IF NOT EXISTS gw_pa_continuation_item (
     FOREIGN KEY (holder_id, continuation_id)
         REFERENCES gw_pa_continuation (holder_id, continuation_id) ON DELETE CASCADE
 );
+-- gw_eob held the decision ExplanationOfBenefit an earlier release wrote. Nothing
+-- writes or reads it any more; a later change drops it.
 CREATE TABLE IF NOT EXISTS gw_eob (
     holder_id   TEXT NOT NULL,
     eob_id      TEXT NOT NULL,
@@ -276,9 +278,9 @@ CREATE TABLE IF NOT EXISTS gw_exchange_leg (
 
 // EnsureSchema creates the gateway tables (business Store: gw_auth_number,
 // gw_pended_claim with the pend ledger's gw_pended_claim_key, the continuation
-// store's gw_pa_continuation with gw_pa_continuation_item, gw_eob; shared
-// replica state: gw_ingress_key, gw_replay,
-// gw_exchange, gw_exchange_leg) if absent (idempotent; plain DDL, no
+// store's gw_pa_continuation with gw_pa_continuation_item, and gw_eob, which
+// nothing writes or reads any more; shared replica state: gw_ingress_key,
+// gw_replay, gw_exchange, gw_exchange_leg) if absent (idempotent; plain DDL, no
 // CREATE ROLE — least-privilege-friendly). Safe to call repeatedly AND concurrently:
 // `CREATE TABLE/INDEX IF NOT EXISTS` is NOT concurrency-safe on its own (concurrent
 // callers race in pg_type/pg_class and one fails with SQLSTATE 23505), and the four
@@ -397,111 +399,4 @@ WHERE holder_id=$1 AND subject_pci=$2 AND correlation_id=$3 AND state <> 'decide
 		return fmt.Errorf("pgstore: FinalizeClaimUpdate: %w", err)
 	}
 	return nil
-}
-
-// --- EOBs (Patient Access API surface) ---
-
-func (s *PgStore) RecordEOB(subjectPCI, eobID string, eobJSON []byte) error {
-	var recordedID string
-	err := s.pool.QueryRow(context.Background(), `
-INSERT INTO gw_eob (holder_id, eob_id, subject_pci, eob_json)
-VALUES ($1, $2, $3, $4)
-ON CONFLICT (holder_id, eob_id) DO UPDATE SET eob_json = EXCLUDED.eob_json
-WHERE gw_eob.subject_pci = EXCLUDED.subject_pci
-RETURNING eob_id`,
-		s.holderID, eobID, subjectPCI, eobJSON).Scan(&recordedID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return engine.ErrEOBSubjectMismatch
-	}
-	if err != nil {
-		return fmt.Errorf("pgstore: RecordEOB: %w", err)
-	}
-	return nil
-}
-
-// The durable Store answers the pre-forward correlation checks (engine/eobowner.go).
-var (
-	_ engine.EOBOwnerLookup        = (*PgStore)(nil)
-	_ engine.PendCorrelationLookup = (*PgStore)(nil)
-)
-
-// EOBOwner reports the patient an EOB id is filed for. See engine.EOBOwnerLookup.
-// Unlike the Store's read methods it returns the store's error, so an outage is
-// not mistaken for "no such EOB".
-func (s *PgStore) EOBOwner(eobID string) (string, bool, error) {
-	ctx, cancel := storeCtx()
-	defer cancel()
-	var owner string
-	err := s.pool.QueryRow(ctx,
-		`SELECT subject_pci FROM gw_eob WHERE holder_id=$1 AND eob_id=$2`,
-		s.holderID, eobID).Scan(&owner)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return "", false, nil
-	}
-	if err != nil {
-		return "", false, fmt.Errorf("pgstore: EOBOwner: %w", err)
-	}
-	return owner, true, nil
-}
-
-// PendedForOtherSubject reports a patient other than subjectPCI with an
-// authorization under corrID, in any state. See engine.PendCorrelationLookup. The
-// least PCI is reported when more than one qualifies, as the in-memory store does.
-func (s *PgStore) PendedForOtherSubject(corrID, subjectPCI string) (string, bool, error) {
-	ctx, cancel := storeCtx()
-	defer cancel()
-	var other string
-	err := s.pool.QueryRow(ctx, `
-SELECT subject_pci FROM gw_pended_claim
- WHERE holder_id=$1 AND correlation_id=$2 AND subject_pci <> $3
- ORDER BY subject_pci
- LIMIT 1`, s.holderID, corrID, subjectPCI).Scan(&other)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return "", false, nil
-	}
-	if err != nil {
-		return "", false, fmt.Errorf("pgstore: PendedForOtherSubject: %w", err)
-	}
-	return other, true, nil
-}
-
-func (s *PgStore) EOBsForPatient(subjectPCI string) ([][]byte, bool) {
-	// Ordered by created_at, eob_id — chronological, not the stub's slice-insertion order
-	// (a second, benign divergence from MemStore: no caller asserts EOB order; the
-	// Patient Access response is a searchset and the _id filter is order-independent).
-	// eob_id is the deterministic tiebreaker when two EOBs share a created_at (same-
-	// transaction inserts tie on now()).
-	rows, err := s.pool.Query(context.Background(),
-		`SELECT eob_json FROM gw_eob WHERE holder_id=$1 AND subject_pci=$2 ORDER BY created_at, eob_id`,
-		s.holderID, subjectPCI)
-	if err != nil {
-		return nil, notFound("EOBsForPatient", err)
-	}
-	defer rows.Close()
-	var out [][]byte
-	for rows.Next() {
-		var b []byte
-		if err := rows.Scan(&b); err != nil {
-			return nil, notFound("EOBsForPatient", err)
-		}
-		out = append(out, b) // pgx allocates a fresh slice per Scan → naturally a defensive copy
-	}
-	if err := rows.Err(); err != nil {
-		return nil, notFound("EOBsForPatient", err)
-	}
-	if len(out) == 0 {
-		return nil, false
-	}
-	return out, true
-}
-
-func (s *PgStore) EOBByID(eobID string) ([]byte, bool) {
-	var b []byte
-	err := s.pool.QueryRow(context.Background(),
-		`SELECT eob_json FROM gw_eob WHERE holder_id=$1 AND eob_id=$2`,
-		s.holderID, eobID).Scan(&b)
-	if err != nil {
-		return nil, notFound("EOBByID", err)
-	}
-	return b, true
 }

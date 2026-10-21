@@ -7,7 +7,6 @@ import sys
 ROWS = [
     "init-pas-request-bundle",
     "init-dtr-questionnaireresponse",
-    "init-pdex-explanationofbenefit",
     "init-cdex-task",
     "prime-versioned-approved",
     "prime-versioned-denied",

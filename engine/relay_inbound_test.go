@@ -20,7 +20,7 @@ import (
 
 // inboundTestRequester bundles the requester holder id (respondLegError's `requester`
 // arg — a plain string, matching the real inbound-handler call sites, e.g.
-// crd_native.go's env.Metadata.Sender) with the X25519 key pair the test needs to
+// workstream_pa_crd_inbound.go's env.Metadata.Sender) with the X25519 key pair the test needs to
 // Open the sealed response leg. A real peer Registry carries only PUBLIC keys
 // (EncPub); the requester's PRIVATE key is kept here, out-of-band, purely so the
 // test can decrypt what buildResponseLeg sealed TO it.
@@ -385,7 +385,7 @@ func TestRespondLegFramesSuccessForCapableRequester(t *testing.T) {
 	rec := httptest.NewRecorder()
 	r := newSignedInboundRequest(t, g, requester.ID)
 	g.respondLeg(rec, r, "payer-coverage", "crd-cards", "crd-order-select",
-		"corr-1", testResponse(fhir), "pci-1", requester.ID, "", "")
+		"corr-1", testResponse(fhir), http.StatusOK, "pci-1", requester.ID, "", "")
 	if rec.Code != 200 {
 		t.Fatalf("to-Hub status = %d, want 200", rec.Code)
 	}
@@ -411,7 +411,7 @@ func TestRespondLegBareSuccessForLegacyRequester(t *testing.T) {
 	rec := httptest.NewRecorder()
 	r := newSignedInboundRequest(t, g, requester.ID)
 	g.respondLeg(rec, r, "payer-coverage", "crd-cards", "crd-order-select",
-		"corr-1", testResponse(fhir), "pci-1", requester.ID, "", "")
+		"corr-1", testResponse(fhir), http.StatusOK, "pci-1", requester.ID, "", "")
 	if rec.Code != 200 {
 		t.Fatalf("to-Hub status = %d, want 200", rec.Code)
 	}
@@ -470,7 +470,7 @@ func TestFramePayloadStampsContractVersion(t *testing.T) {
 
 // TestPASNativeSuccessFramedForCapableRequester drives the conformant PAS submit
 // handler (handlePASNativeInbound) — whose response leg is built at the direct
-// buildResponseLeg site (pas_native.go:277) — end to end for a frame-capable
+// buildResponseLeg site (workstream_pa_pas_inbound.go:277) — end to end for a frame-capable
 // requester, and proves that direct site frames too: the sealed response leg decodes
 // to frame(200, application/fhir+json, ClaimResponse) — stamped pa.pas@2.0 (this
 // build's own native line), the content-descriptive frame stamp.

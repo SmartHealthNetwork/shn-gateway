@@ -11,12 +11,25 @@ set -euo pipefail
 : "${SHN_SECRETS_PROVIDER:?set SHN_SECRETS_PROVIDER to a provisioned role=provider bundle dir}"
 : "${PAYER_HOLDER_ID:?set PAYER_HOLDER_ID to your DEPLOYED+registered payer holder id (shn clients)}"
 
+# The provider gateway's /scenario routes admit only the callers its bundle's
+# scenario-callers.json names (compose.eval.yml's SCENARIO_CALLERS_FILE). Make this run's caller
+# the way the provider README's step 0 does, `shn scenario-key --bundle`, on a copy of your
+# provider bundle, so your bundle itself is never written; every request below is signed.
+work=$(mktemp -d)
+# The copy holds the bundle's private keys: remove it on every exit from here on.
+trap 'rm -rf "$work"' EXIT
+mkdir "$work/bundle" && cp -R "$SHN_SECRETS_PROVIDER"/. "$work/bundle"
+if [ -d sdk ]; then ( cd sdk && go build -o "$work/shn" ./cmd/shn ); else cp "$(command -v shn)" "$work/shn"; fi
+"$work/shn" scenario-key --bundle "$work/bundle" --out "$work"
+SHN_SECRETS_PROVIDER="$work/bundle"
+key="$work/scenario-caller-send-test.sign"
+
 prov="docker compose -p evalprov -f gateway/deploy/eval/compose.eval.yml"
 # The teardown must carry SHN_SECRETS too: compose.eval.yml interpolates it as a required
 # variable on EVERY compose invocation (down included, not just up), so a bare `down -v`
 # here would die on interpolation before removing anything — and a silenced trap would
 # leave the whole eval stack running after a green run. Same value the `up` below uses.
-trap 'SHN_SECRETS="$SHN_SECRETS_PROVIDER" $prov down -v' EXIT
+trap 'SHN_SECRETS="$SHN_SECRETS_PROVIDER" $prov down -v; rm -rf "$work"' EXIT
 
 # compose.eval.yml references br-provider:43a4806 as an `image:` (not a build:) service, and that
 # reference RI is never published — so `up --build` would try to PULL it and abort unless it's
@@ -38,10 +51,12 @@ curl -fsS "$disc_url" -o "$desc"
 
 # Readiness: the provider gateway (uc01 POST) — folds in seed + routing.
 ready=0
+req0=$(gateway/deploy/eval/persona_body.sh "$desc" uc01 provider-data 0 '{"branch":"covered"}')
 for _ in $(seq 1 90); do
+  # Each request needs its own assertion (one use), so each retry signs again.
   if curl -fsS -X POST localhost:8080/scenario/uc01 -H 'Content-Type: application/json' \
-       -d "$(gateway/deploy/eval/persona_body.sh "$desc" uc01 provider-data 0 '{"branch":"covered"}')" \
-       | jq -e '.covered==true' >/dev/null 2>&1; then ready=1; break; fi
+       -H "X-Holder-Assertion: $("$work/shn" scenario-sign --key "$key" --bundle "$SHN_SECRETS_PROVIDER" POST /scenario/uc01 "$req0")" \
+       --data-raw "$req0" | jq -e '.covered==true' >/dev/null 2>&1; then ready=1; break; fi
   sleep 10
 done
 [ "$ready" = 1 ] || { echo "uc01 never succeeded — the provider originator didn't come up, OR your deployed payer holder ($PAYER_HOLDER_ID) isn't reachable/registered"; exit 1; }
@@ -51,9 +66,11 @@ if [ -d sdk ]; then
   # A checkout with the SDK's source beside it: build send-test from the sibling sdk/ module (its
   # own Go module, so it must run from inside it — a module-boundary crossing fails from the
   # checkout's root).
-  ( cd sdk && go run ./cmd/shn send-test --gateway http://127.0.0.1:8080 --discovery "${disc_url%/discovery}" )
+  ( cd sdk && go run ./cmd/shn send-test --gateway http://127.0.0.1:8080 --discovery "${disc_url%/discovery}" \
+      --scenario-key "$key" --bundle "$SHN_SECRETS_PROVIDER" )
 else
   # Standalone gateway bundle: use the installed shn CLI
   # (go install github.com/SmartHealthNetwork/shn-sdk/cmd/shn@latest).
-  shn send-test --gateway http://127.0.0.1:8080 --discovery "${disc_url%/discovery}"
+  shn send-test --gateway http://127.0.0.1:8080 --discovery "${disc_url%/discovery}" \
+    --scenario-key "$key" --bundle "$SHN_SECRETS_PROVIDER"
 fi

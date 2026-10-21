@@ -253,7 +253,7 @@ func TestDiagnosticIngressCollectorContract(t *testing.T) {
 	now := time.Unix(1700000000, 0)
 	key := []byte("synthetic-trace-verification-key")
 	var events []diagnostics.Event
-	g := &Gateway{cfg: Config{HolderID: "provider-holder", Clock: func() time.Time { return now }, DiagnosticTraceKey: key, Diagnostic: func(e diagnostics.Event) bool { events = append(events, e); return true }}}
+	g := &Gateway{cfg: Config{Role: "provider", HolderID: "provider-holder", Clock: func() time.Time { return now }, DiagnosticTraceKey: key, Diagnostic: func(e diagnostics.Event) bool { events = append(events, e); return true }}}
 	r := httptest.NewRequest("POST", "/Claim/$submit", strings.NewReader(`{"raw":1.00}`))
 	r.Header.Set("X-SHN-Test-Trace", diagnostics.TraceProof(key, "call-one", "POST", "/Claim/$submit", now))
 	g.observeIngress("pas-ingress", func(w http.ResponseWriter, r *http.Request) {

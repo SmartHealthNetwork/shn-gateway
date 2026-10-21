@@ -2,9 +2,7 @@ package engine
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
-	"log"
 	"net/http"
 	"strings"
 	"testing"
@@ -21,17 +19,11 @@ import (
 // pendOf reads this gateway's ledger row for (pci, corr).
 func (p *levelPayer) pendOf(t *testing.T, corr string) (PendRecord, bool) {
 	t.Helper()
-	rec, found, err := p.store.PendRecordOf(p.pci, corr)
+	rec, found, err := testLedger(p.store).PendRecordOf(p.pci, corr)
 	if err != nil {
 		t.Fatalf("read ledger: %v", err)
 	}
 	return rec, found
-}
-
-// eobCount is how many EOBs this gateway holds for the covered member.
-func (p *levelPayer) eobCount() int {
-	eobs, _ := p.store.EOBsForPatient(p.pci)
-	return len(eobs)
 }
 
 // wantSkipped asserts the local-write-skipped record for a row: one event on
@@ -341,28 +333,27 @@ func TestLevelPayerPASSubmit_AnswerContent(t *testing.T) {
 				got := p.send(t, "pas-claim", "", request)
 				p.wantAnswerRow(t, "pas-claim", got, pasSubmitPath, row.answer, row.rule, row.status, row.msg)
 				p.wantSkipped(t, "pas-claim", got.corr, row.rule)
-				if _, found := p.pendOf(t, got.corr); found || p.eobCount() != 0 {
-					t.Fatalf("nothing may be written from this answer: pend found=%v, %d EOB(s)", found, p.eobCount())
+				if _, found := p.pendOf(t, got.corr); found {
+					t.Fatalf("nothing may be written from this answer: pend found=%v", found)
 				}
 			})
 		}
 	}
 }
 
-// TestLevelPayerPAS_DecisionTheSideRecordCannotHold: a payer
-// decision this gateway's own record cannot hold is relayed exactly at every
-// level, never refused, and the operator is told which detail. A decision read
-// as a denial yet stating preAuthRef writes nothing (no decision, no EOB) on
-// $submit and on the amended re-POST; a note typed outside NoteType records
-// the decision with no EOB.
-func TestLevelPayerPAS_DecisionTheSideRecordCannotHold(t *testing.T) {
+// TestLevelPayerPAS_DecisionTheLedgerCannotHold: a payer decision this
+// gateway's own record cannot hold is relayed exactly at every level, never
+// refused, and the operator is told why. A decision read as a denial yet
+// stating preAuthRef writes no decision on $submit or on the amended re-POST.
+// (A note typed outside NoteType is recorded like any decision:
+// TestPASDecision_NoteOutsideNoteTypeIsRecorded.)
+func TestLevelPayerPAS_DecisionTheLedgerCannotHold(t *testing.T) {
 	// Still open (the decision reader): the reference payer's own denial shape (A2
 	// "Not Certified" on its submitted entry, testdata/brpayer-current/
 	// known-member-graph2/repeat-submission.response.json) with a top-level
 	// preAuthRef. The reader still takes A2 without a number as a denial, so
 	// the gateway relays it and writes nothing, which is honest.
 	denialWithNumber := fixturePASResponse(t, withPreAuthRef(deniedClaimResponse(reviewActionExt("A2", "Not Certified", "", ""), nil), "PA-PARTIAL"), true)
-	uncarriable := fixturePASResponse(t, withNote(deniedClaimResponse(reviewActionExt("A3", "Not Certified", "", ""), nil), "email", "Reply by email."), true)
 	request := originatorBuiltConformantBundle(t, "MBR-COVERED")
 	updateReq, related := updateBundle(t)
 	for _, level := range allLevels {
@@ -375,8 +366,8 @@ func TestLevelPayerPAS_DecisionTheSideRecordCannotHold(t *testing.T) {
 			}
 			p.wantSkippedWhen(t, "pas-claim", got.corr, RuleEOBDecision, false)
 			p.wantSideRecord(t, "pas-claim", pendDecisionNotRecordedEvent, decisionReadAsDenialWithAuthNumber)
-			if _, found := p.pendOf(t, got.corr); found || p.eobCount() != 0 {
-				t.Fatalf("nothing may be written from this answer: pend found=%v, %d EOB(s)", found, p.eobCount())
+			if _, found := p.pendOf(t, got.corr); found {
+				t.Fatalf("nothing may be written from this answer: pend found=%v", found)
 			}
 		})
 		t.Run("update, denial with number/"+level.String(), func(t *testing.T) {
@@ -391,18 +382,6 @@ func TestLevelPayerPAS_DecisionTheSideRecordCannotHold(t *testing.T) {
 			p.wantSideRecord(t, "pas-claim-update", pendDecisionNotRecordedEvent, decisionReadAsDenialWithAuthNumber)
 			if rec, found := p.pendOf(t, related); !found || rec.State != PendStatePended {
 				t.Fatalf("the prior authorization must stay pended, got found=%v %+v", found, rec)
-			}
-		})
-		t.Run("submit, note outside NoteType/"+level.String(), func(t *testing.T) {
-			p := newLevelPayer(t, level)
-			p.partner.respByPath[pasSubmitPath] = uncarriable
-			got := p.send(t, "pas-claim", "", request)
-			if got.status != http.StatusOK || !bytes.Equal(got.body, uncarriable) {
-				t.Fatalf("the payer's decision must be relayed exactly, got %d %s", got.status, got.body)
-			}
-			p.wantSideRecord(t, "pas-claim", DecisionEOBNotWrittenEvent, "decision EOB not written: process note 1 type is not display, print or printoper")
-			if rec, found := p.pendOf(t, got.corr); !found || rec.State != PendStateDecided || p.eobCount() != 0 {
-				t.Fatalf("the decision must be recorded with no EOB: found=%v %+v, %d EOB(s)", found, rec, p.eobCount())
 			}
 		})
 	}
@@ -437,7 +416,7 @@ func TestLevelPayerPASUpdate_AnswerContent(t *testing.T) {
 				if !found || rec.State != PendStatePended || rec.Outcome != "" {
 					t.Fatalf("the prior authorization must stay pended and released, got found=%v %+v", found, rec)
 				}
-				if claimed, why, err := p.store.BeginClaimUpdateReason(p.pci, related); err != nil || !claimed {
+				if claimed, why, err := testLedger(p.store).BeginClaimUpdateReason(p.pci, related); err != nil || !claimed {
 					t.Fatalf("the amendment's claim was not released: claimed=%v why=%v err=%v", claimed, why, err)
 				}
 			})
@@ -446,10 +425,10 @@ func TestLevelPayerPASUpdate_AnswerContent(t *testing.T) {
 }
 
 // A DECIDED answer relayed unread below strict writes nothing: the answer
-// approves, and read it would decide the authorization and write its EOB
+// approves, and read it would decide the authorization
 // (TestLevelPayerPAS_ReadableAnswerIsWritten), but it also carries another
 // patient's record, so below strict the payer's bytes are relayed exactly and
-// no decision or EOB is written. On the amended re-POST the seeded prior
+// no decision is written. On the amended re-POST the seeded prior
 // authorization stays pended. A later amended re-POST of a $submit whose
 // answer was relayed unread finds no pend, since none was written, and reaches
 // the payer all the same: the ledger records and never gates.
@@ -471,8 +450,8 @@ func TestLevelPayerPAS_DecidedAnswerRelayedUnreadWritesNothing(t *testing.T) {
 				t.Fatalf("the payer's answer must be relayed exactly: %d %s", got.status, got.body)
 			}
 			p.wantSkipped(t, "pas-claim", got.corr, RulePatientAnswer)
-			if rec, found := p.pendOf(t, got.corr); found || p.eobCount() != 0 {
-				t.Fatalf("no decision or EOB may be written: found=%v %+v, %d EOB(s)", found, rec, p.eobCount())
+			if rec, found := p.pendOf(t, got.corr); found {
+				t.Fatalf("no decision may be written: found=%v %+v", found, rec)
 			}
 			request, related := updateBundle(t)
 			update := p.send(t, "pas-claim-update", "", request)
@@ -493,8 +472,8 @@ func TestLevelPayerPAS_DecidedAnswerRelayedUnreadWritesNothing(t *testing.T) {
 				t.Fatalf("the payer's answer must be relayed exactly: %d %s", got.status, got.body)
 			}
 			p.wantSkipped(t, "pas-claim-update", got.corr, RulePatientAnswer)
-			if rec, found := p.pendOf(t, related); !found || rec.State != PendStatePended || rec.Outcome != "" || p.eobCount() != 0 {
-				t.Fatalf("the prior authorization must stay pended with no EOB: found=%v %+v, %d EOB(s)", found, rec, p.eobCount())
+			if rec, found := p.pendOf(t, related); !found || rec.State != PendStatePended || rec.Outcome != "" {
+				t.Fatalf("the prior authorization must stay pended: found=%v %+v", found, rec)
 			}
 		})
 	}
@@ -525,8 +504,8 @@ func TestLevelPayerPAS_ReadableAnswerIsWritten(t *testing.T) {
 			if got.status != http.StatusOK || !bytes.Equal(got.body, approved) {
 				t.Fatalf("answer %d %s", got.status, got.body)
 			}
-			if rec, found := p.pendOf(t, got.corr); !found || rec.State != PendStateDecided || rec.Outcome != PendOutcomeApproved || p.eobCount() != 1 {
-				t.Fatalf("the decision and its EOB must be written, got found=%v %+v, %d EOB(s)", found, rec, p.eobCount())
+			if rec, found := p.pendOf(t, got.corr); !found || rec.State != PendStateDecided || rec.Outcome != PendOutcomeApproved {
+				t.Fatalf("the decision must be written, got found=%v %+v", found, rec)
 			}
 			if len(p.skipped) != 0 {
 				t.Fatalf("a readable answer skips nothing: %+v", p.skipped)
@@ -547,9 +526,6 @@ func TestLevelPayerPAS_ReadableAnswerIsWritten(t *testing.T) {
 	}
 }
 
-// A decision EOB that fails its own validation: decisioneob_gate_test.go
-// (TestDecisionEOBGate_InvalidNeverWritten), for relayed and produced answers.
-
 // Strict is not weakened by the rows above: on the same leg, a participant's
 // own non-conformant payload (the payer's PAS answer, checked under the
 // participant's opt-in) is still refused at strict, as it is today.
@@ -562,84 +538,6 @@ func TestLevelPayerPASSubmit_StrictStillRefusesThePayload(t *testing.T) {
 	p.wantAnswerRow(t, "pas-claim", got, pasSubmitPath, row.answer, row.rule, row.status, row.msg)
 	if got.status != row.status {
 		t.Fatalf("strict must still refuse the participant's non-conformant answer with %d, got %d", row.status, got.status)
-	}
-}
-
-// At structural the kind of FHIR issue decides. A decision EOB whose only
-// issue is a deeper one (a code outside its code list) is recorded, not
-// refused: the payer's answer is relayed exactly, and, as for any decision
-// whose own EOB failed, the decision is recorded without the EOB.
-func TestLevelPayerPASSubmit_DeeperEOBAtStructural(t *testing.T) {
-	approved := fixturePASResponse(t, approvedClaimResponse(nil), true)
-	p := newLevelPayer(t, EnforcementStructural)
-	p.g.cfg.Validator = &shnsdk.FakeValidator{RejectIfContains: `"ExplanationOfBenefit"`,
-		RejectIssue: &shnsdk.Issue{Severity: "error", Code: "processing", MessageID: "Terminology_TX_NoValid_1_CC"}}
-	p.partner.respByPath[pasSubmitPath] = approved
-	got := p.send(t, "pas-claim", "", originatorBuiltConformantBundle(t, "MBR-COVERED"))
-	if got.status != http.StatusOK || !bytes.Equal(got.body, approved) {
-		t.Fatalf("a deeper EOB issue is recorded and the payer's answer relayed exactly: %d %s", got.status, got.body)
-	}
-	var eobFindings []ConformanceFinding
-	for _, f := range p.findings {
-		if f.Kind == string(KindFHIREgress) {
-			eobFindings = append(eobFindings, f)
-		}
-	}
-	if len(eobFindings) != 1 || eobFindings[0].Decision != "relayed" || eobFindings[0].Level != "structural" || eobFindings[0].LegType != "pas-claim" {
-		t.Fatalf("want one relayed EOB finding at structural on pas-claim, got %+v", eobFindings)
-	}
-	if rec, found := p.pendOf(t, got.corr); !found || rec.State != PendStateDecided || p.eobCount() != 0 || len(p.skipped) != 0 {
-		t.Fatalf("the decision is recorded without its failed EOB: found=%v %+v, %d EOB(s), skipped %+v", found, rec, p.eobCount(), p.skipped)
-	}
-}
-
-// The validator cannot answer for the decision EOB this gateway builds. At
-// observe and structural a check that could not run is recorded as unavailable
-// and does not gate, as everywhere else: the payer's answer is relayed and the
-// decision and its EOB are written, as at none. At strict, where a verdict is
-// required before the EOB is written, the EOB is not written — the payer's
-// decision is still relayed exactly and recorded, never refused over this side
-// record (decisioneob_gate_test.go pins strict's finding and payload check).
-func TestLevelPayerPASSubmit_EOBValidatorOutage(t *testing.T) {
-	approved := fixturePASResponse(t, approvedClaimResponse(nil), true)
-	for _, level := range []ConformanceEnforcement{EnforcementObserve, EnforcementStructural, EnforcementStrict} {
-		t.Run(level.String(), func(t *testing.T) {
-			p := newLevelPayer(t, level)
-			p.g.cfg.Validator = validatorFunc(func(b []byte) (shnsdk.Result, error) {
-				if bytes.Contains(b, []byte(`"ExplanationOfBenefit"`)) {
-					return shnsdk.Result{}, context.DeadlineExceeded
-				}
-				return shnsdk.Result{Valid: true}, nil
-			})
-			p.partner.respByPath[pasSubmitPath] = approved
-			got := p.send(t, "pas-claim", "", originatorBuiltConformantBundle(t, "MBR-COVERED"))
-			var eobFindings []ConformanceFinding
-			for _, f := range p.findings {
-				if f.Kind == string(KindFHIREgress) {
-					eobFindings = append(eobFindings, f)
-				}
-			}
-			rec, found := p.pendOf(t, got.corr)
-			if level == EnforcementStrict {
-				if got.status != http.StatusOK || !bytes.Equal(got.body, approved) {
-					t.Fatalf("the payer's decision must be relayed exactly: %d %s", got.status, got.body)
-				}
-				if !found || rec.State != PendStateDecided || p.eobCount() != 0 {
-					t.Fatalf("an EOB whose validation could not run at strict is not written; its decision is: found=%v %+v, %d EOB(s)", found, rec, p.eobCount())
-				}
-				p.wantSideRecord(t, "pas-claim", DecisionEOBNotWrittenEvent, "decision EOB not written: its validation could not run (validator unavailable)")
-				return
-			}
-			if got.status != http.StatusOK || !bytes.Equal(got.body, approved) {
-				t.Fatalf("the payer's answer must be relayed exactly: %d %s", got.status, got.body)
-			}
-			if len(eobFindings) != 1 || eobFindings[0].Verdict != "unavailable" || eobFindings[0].Decision != "relayed" {
-				t.Fatalf("want one unavailable EOB finding, got %+v", eobFindings)
-			}
-			if !found || rec.State != PendStateDecided || p.eobCount() != 1 || len(p.skipped) != 0 {
-				t.Fatalf("the decision and its EOB are written: found=%v %+v, %d EOB(s), skipped %+v", found, rec, p.eobCount(), p.skipped)
-			}
-		})
 	}
 }
 
@@ -684,16 +582,14 @@ func TestLevelPayerInquire_RequestContent(t *testing.T) {
 // payer's requester, so an inquiry answer read for the ledger decides it.
 func (p *levelPayer) seedInquiryPend(t *testing.T, corr string) {
 	t.Helper()
-	if _, err := p.store.RecordPendedKeyed(p.pci, corr, fixedClock(), PendKeys{RequesterHolder: p.requester.ID, ClaimResponseIDs: []string{inquiryCRKey}, ItemTraceNumbers: []string{inquiryTraceKey}}); err != nil {
+	if _, err := testLedger(p.store).RecordPendedKeyed(p.pci, corr, fixedClock(), PendKeys{RequesterHolder: p.requester.ID, ClaimResponseIDs: []string{inquiryCRKey}, ItemTraceNumbers: []string{inquiryTraceKey}}); err != nil {
 		t.Fatal(err)
 	}
 }
 
-// An inquiry answer this gateway cannot read, whose subjects do
-// not bind, or whose decision EOB fails validation. Each answer decides the
-// seeded authorization if read, so an unchanged ledger below strict is the
-// skip, not an answer that decided nothing. A failed decision EOB skips
-// nothing: the decision is recorded without it.
+// An inquiry answer this gateway cannot read, or whose subjects do not bind.
+// Each answer decides the seeded authorization if read, so an unchanged ledger
+// below strict is the skip, not an answer that decided nothing.
 func TestLevelPayerInquire_AnswerContent(t *testing.T) {
 	decided := decidedAnswer(t)
 	var b map[string]any
@@ -706,55 +602,26 @@ func TestLevelPayerInquire_AnswerContent(t *testing.T) {
 		t.Fatal("fixture: want a readable answer naming two patients")
 	}
 	rows := map[string]struct {
-		answer    []byte
-		rule      string
-		status    int
-		msg       string
-		validator *shnsdk.FakeValidator
+		answer []byte
+		rule   string
+		status int
+		msg    string
 	}{
-		"unreadable answer": {[]byte(`{"resourceType":"Patient","id":"x"}`), RuleAnswerShape, http.StatusBadGateway, "invalid prior-authorization inquiry answer", nil},
-		"patient linkage":   {twoPatients, RulePatientAnswer, http.StatusForbidden, "PAS inquiry answer has inconsistent patient linkage", nil},
-		"invalid EOB":       {decided, RuleEOBDecision, http.StatusOK, "", &shnsdk.FakeValidator{RejectIfContains: `"ExplanationOfBenefit"`}},
+		"unreadable answer": {[]byte(`{"resourceType":"Patient","id":"x"}`), RuleAnswerShape, http.StatusBadGateway, "invalid prior-authorization inquiry answer"},
+		"patient linkage":   {twoPatients, RulePatientAnswer, http.StatusForbidden, "PAS inquiry answer has inconsistent patient linkage"},
 	}
 	for name, row := range rows {
 		for _, level := range allLevels {
 			t.Run(name+"/"+level.String(), func(t *testing.T) {
 				p := newLevelPayer(t, level)
-				if row.validator != nil {
-					p.g.cfg.Validator = row.validator
-				}
 				p.seedInquiryPend(t, "corr-submit-1")
 				p.partner.respByPath[pasInquirePath] = row.answer
 				got := p.send(t, "pas-claim-inquire", "", inquiryBundle("MBR-COVERED", "", "TRN-1", "72148"))
 				refused := refusesAt(level, row.rule)
-				if row.rule == RuleEOBDecision {
-					// The EOB is this gateway's side record: its failed
-					// validation never refuses the payer's decision, at any
-					// level. Its own validation finding is the record.
-					refused = false
-					if level == EnforcementNone {
-						if rec, _ := p.pendOf(t, "corr-submit-1"); got.status != http.StatusOK || rec.State != PendStateDecided || p.eobCount() != 1 {
-							t.Fatalf("at none nothing is checked and the decision is written as before: %d, %+v, %d EOB(s)", got.status, rec, p.eobCount())
-						}
-						return
-					}
-					if got.status != http.StatusOK || !bytes.Equal(got.body, row.answer) {
-						t.Fatalf("the payer's answer must be relayed exactly: %d %s", got.status, got.body)
-					}
-					p.wantSideRecord(t, "pas-claim-inquire", DecisionEOBNotWrittenEvent, "authorization corr-submit-1: decision EOB not written: it fails its own validation (an unclassified issue)")
-				} else {
-					p.wantAnswerRow(t, "pas-claim-inquire", got, pasInquirePath, row.answer, row.rule, row.status, row.msg)
-				}
-				if row.rule == RuleEOBDecision {
-					// The decision is recorded without its failed EOB.
-					if rec, found := p.pendOf(t, "corr-submit-1"); !found || rec.State != PendStateDecided || p.eobCount() != 0 || len(p.skipped) != 0 {
-						t.Fatalf("the decision is recorded without its failed EOB: %+v, %d EOB(s), skipped %+v", rec, p.eobCount(), p.skipped)
-					}
-					return
-				}
+				p.wantAnswerRow(t, "pas-claim-inquire", got, pasInquirePath, row.answer, row.rule, row.status, row.msg)
 				p.wantSkippedWhen(t, "pas-claim-inquire", got.corr, row.rule, refused)
-				if rec, found := p.pendOf(t, "corr-submit-1"); !found || rec.State != PendStatePended || p.eobCount() != 0 {
-					t.Fatalf("nothing may be written from this answer: %+v, %d EOB(s)", rec, p.eobCount())
+				if rec, found := p.pendOf(t, "corr-submit-1"); !found || rec.State != PendStatePended || rec.Outcome != "" {
+					t.Fatalf("nothing may be written from this answer: %+v", rec)
 				}
 			})
 		}
@@ -772,8 +639,8 @@ func TestLevelPayerInquire_ReadableAnswerIsWritten(t *testing.T) {
 			if got.status != http.StatusOK || !bytes.Equal(got.body, decidedAnswer(t)) {
 				t.Fatalf("answer %d %s", got.status, got.body)
 			}
-			if rec, _ := p.pendOf(t, "corr-submit-1"); rec.State != PendStateDecided || p.eobCount() != 1 || len(p.skipped) != 0 {
-				t.Fatalf("a readable answer decides: %+v, %d EOB(s), skipped %+v", rec, p.eobCount(), p.skipped)
+			if rec, _ := p.pendOf(t, "corr-submit-1"); rec.State != PendStateDecided || len(p.skipped) != 0 {
+				t.Fatalf("a readable answer decides: %+v, skipped %+v", rec, p.skipped)
 			}
 		})
 	}
@@ -840,13 +707,13 @@ func TestLevelPayerInquire_AfterSkippedSubmit(t *testing.T) {
 			}
 			rec, found := p.pendOf(t, submit.corr)
 			if tc.decision {
-				if !found || rec.State != PendStateDecided || p.eobCount() != 1 {
-					t.Fatalf("control: the inquiry must decide the pend, got found=%v %+v, %d EOB(s)", found, rec, p.eobCount())
+				if !found || rec.State != PendStateDecided {
+					t.Fatalf("control: the inquiry must decide the pend, got found=%v %+v", found, rec)
 				}
 				return
 			}
-			if found || p.eobCount() != 0 {
-				t.Fatalf("nothing may be recorded for a skipped exchange: found=%v %+v, %d EOB(s)", found, rec, p.eobCount())
+			if found {
+				t.Fatalf("nothing may be recorded for a skipped exchange: found=%v %+v", found, rec)
 			}
 		})
 	}
@@ -949,9 +816,9 @@ func TestLevelPayerInquire_AnswerNamesNoClaim(t *testing.T) {
 				p.g.cfg.DeclaredContractVersions = []string{"pa.pas@2.2"}
 				switch lanes {
 				case "2.2 only":
-					p.g.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"2.2": p.g.cfg.Validator}
+					p.g.cfg.ValidatorsByContractLine = contractLanes(map[string]shnsdk.Validator{"2.2": p.g.cfg.Validator})
 				case "a validator for each line":
-					p.g.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"2.0": NewLineFakeValidator("2.0"), "2.1": NewLineFakeValidator("2.1"), "2.2": NewLineFakeValidator("2.2")}
+					p.g.cfg.ValidatorsByContractLine = contractLanes(map[string]shnsdk.Validator{"2.0": NewLineFakeValidator("2.0"), "2.1": NewLineFakeValidator("2.1"), "2.2": NewLineFakeValidator("2.2")})
 				}
 				p.seedInquiryPend(t, "corr-submit-1")
 				p.partner.respByPath[pasInquirePath] = noClaim
@@ -983,93 +850,5 @@ func TestLevelPayerInquire_AnswerNamesNoClaim(t *testing.T) {
 				}
 			})
 		}
-	}
-}
-
-// TestLevelPayerPAS_EOBNotWrittenEchoesNoPayload: what a payer
-// stated is never echoed into a finding, an observer event or a log line
-// about the decision EOB not written: the detail names the element and its
-// position only. A marker planted in a note type and in an unmapped review
-// action sub-extension appears nowhere this gateway reports.
-func TestLevelPayerPAS_EOBNotWrittenEchoesNoPayload(t *testing.T) {
-	const marker = "PLANTED-MARKER-X9"
-	unmapped := `[{"url":"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewAction","extension":[` +
-		`{"url":"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewActionCode","valueCodeableConcept":{"coding":[{"system":"` + shnsdk.X12ReviewDecisionSystem + `","code":"A3"}]}},` +
-		`{"url":"http://payer.example/` + marker + `","valueString":"` + marker + `"}]}]`
-	rows := map[string]struct {
-		answer []byte
-		detail string
-	}{
-		"note type": {fixturePASResponse(t, withNote(deniedClaimResponse(reviewActionExt("A3", "Not Certified", "", ""), nil), marker, "Reply."), true),
-			"decision EOB not written: process note 1 type is not display, print or printoper"},
-		"unmapped sub-extension": {fixturePASResponse(t, deniedClaimResponse(unmapped, nil), true),
-			"decision EOB not written: review action sub-extension 2 has no counterpart in the EOB review action"},
-	}
-	for name, row := range rows {
-		for _, level := range allLevels {
-			t.Run(name+"/"+level.String(), func(t *testing.T) {
-				var logs bytes.Buffer
-				prev := log.Writer()
-				log.SetOutput(&logs)
-				defer log.SetOutput(prev)
-				p := newLevelPayer(t, level)
-				p.partner.respByPath[pasSubmitPath] = row.answer
-				got := p.send(t, "pas-claim", "", originatorBuiltConformantBundle(t, "MBR-COVERED"))
-				if got.status != http.StatusOK || !bytes.Equal(got.body, row.answer) {
-					t.Fatalf("the payer's decision must be relayed exactly: %d %s", got.status, got.body)
-				}
-				p.wantSideRecord(t, "pas-claim", DecisionEOBNotWrittenEvent, row.detail)
-				p.mu.Lock()
-				reported, err := json.Marshal(struct {
-					F []ConformanceFinding
-					S []ObserverEvent
-					K []ObserverEvent
-				}{p.findings, p.sideRecord, p.skipped})
-				p.mu.Unlock()
-				if err != nil {
-					t.Fatal(err)
-				}
-				if bytes.Contains(reported, []byte(marker)) || bytes.Contains(logs.Bytes(), []byte(marker)) {
-					t.Fatalf("a payer value is echoed:\nreported %s\nlogs %s", reported, logs.Bytes())
-				}
-			})
-		}
-	}
-}
-
-// TestLevelPayerPASSubmit_NoPayerItemAnswersTheRequestItemWritesNoEOB: on
-// submit, a payer whose answer decides the authorization on an item that
-// answers none of the request item's sequence (here its one item answers
-// sequence 2; the request's order line is sequence 1) states its decision on
-// no adjudication the EOB could carry. At every level the decision is relayed
-// exactly and recorded, no EOB is written, and the gateway records
-// pa.decision-eob-not-written naming the position only.
-func TestLevelPayerPASSubmit_NoPayerItemAnswersTheRequestItemWritesNoEOB(t *testing.T) {
-	var cr map[string]any
-	if err := json.Unmarshal(approvedClaimResponse(nil), &cr); err != nil {
-		t.Fatal(err)
-	}
-	cr["item"].([]any)[0].(map[string]any)["itemSequence"] = 2
-	decision, err := json.Marshal(cr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	answer := fixturePASResponse(t, decision, true)
-	for _, level := range allLevels {
-		t.Run(level.String(), func(t *testing.T) {
-			p := newLevelPayer(t, level)
-			p.partner.respByPath[pasSubmitPath] = answer
-			got := p.send(t, "pas-claim", "", originatorBuiltConformantBundle(t, "MBR-COVERED"))
-			if got.status != http.StatusOK || !bytes.Equal(got.body, answer) {
-				t.Fatalf("the payer's decision must be relayed exactly: %d %s", got.status, got.body)
-			}
-			if rec, found := p.pendOf(t, got.corr); !found || rec.State != PendStateDecided || rec.Outcome != PendOutcomeApproved {
-				t.Fatalf("the decision was not recorded: found=%v %+v", found, rec)
-			}
-			if n := p.eobCount(); n != 0 {
-				t.Fatalf("%d EOB(s) written that carry none of the payer's decision on the request item", n)
-			}
-			p.wantSideRecord(t, "pas-claim", DecisionEOBNotWrittenEvent, "decision EOB not written: "+eobNoSubmitItemAnswered)
-		})
 	}
 }

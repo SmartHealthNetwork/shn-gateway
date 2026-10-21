@@ -95,7 +95,7 @@ func TestScenarioKey(t *testing.T) {
 		{"/scenario/uc01", "covered", "uc01", false},
 		{"/scenario/uc01", "notcovered", "uc01-notcovered", false},
 		{"/scenario/uc05?wait=30", "noconsent", "uc05-noconsent", true},
-		{"/scenario/uc03", "bridge-refuse", "uc03-bridge-refuse", false},
+		{"/scenario/uc03", "line-carry", "uc03-line-carry", false},
 		{"/scenario/uc06/start", "", "uc06", false},
 		{"/scenario/uc06/complete", "", "uc06", true},
 		{"/scenario/uc04", "", "uc04", true},

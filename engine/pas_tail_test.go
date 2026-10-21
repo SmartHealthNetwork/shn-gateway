@@ -176,11 +176,12 @@ func TestSubmitClaimAndResolve_BridgedEgressRefusesAtNone(t *testing.T) {
 	declareRecipientVersions(t, env, []string{"pa.pas@2.2"})
 	env.originator.cfg.DeclaredContractVersions = []string{"pa.pas@2.1"}
 	env.originator.cfg.EgressNativeLines = []string{"2.1"}
+	env.originator.cfg.TranslateIGLines = true
 	env.originator.cfg.ConformanceEnforcement = EnforcementNone
-	env.originator.cfg.ValidatorsByLine = map[string]shnsdk.Validator{
+	env.originator.cfg.ValidatorsByContractLine = contractLanes(map[string]shnsdk.Validator{
 		"2.1": shnsdk.NewFakeValidator(),
 		"2.2": &shnsdk.FakeValidator{RejectIfContains: `"resourceType":"Bundle"`},
-	}
+	})
 
 	// A member the participant's own system actually holds, with that system's
 	// own Coverage, payer Organization and member namespace read off it exactly

@@ -507,6 +507,9 @@ const (
 	laneDown
 	laneServerError
 	laneHeld
+	// laneSlow holds every $validate, as laneHeld does, and answers its
+	// metadata at once: a lane that is busy, not stopped.
+	laneSlow
 )
 
 // faultLane answers each request as mode says; hits counts every request.
@@ -525,7 +528,12 @@ func faultLane(t *testing.T, rec *testrecord.Recording, invalid []byte, hits, mo
 			_ = conn.Close()
 		case laneServerError:
 			w.WriteHeader(http.StatusServiceUnavailable)
-		case laneHeld:
+		case laneSlow, laneHeld:
+			if atomic.LoadInt32(mode) == laneSlow && r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/metadata") {
+				w.Header().Set("Content-Type", "application/fhir+json")
+				_, _ = io.WriteString(w, `{"resourceType":"CapabilityStatement"}`)
+				return
+			}
 			// The body is read first: only then does the server notice the
 			// caller closing the connection.
 			_, _ = io.Copy(io.Discard, r.Body)
@@ -684,6 +692,14 @@ func TestGatedCertificationRequalifiesARoutingLaneAfterAFailure(t *testing.T) {
 // the row.
 func qualifiedFaultLane(t *testing.T, client func(url string) *shnsdk.OperationValidator, minRequalify time.Duration) (v *GatedCertificationValidator, payload, profile []byte, hits, mode, attempts *int32, gate chan struct{}) {
 	t.Helper()
+	return qualifiedFaultLaneWith(t, client, minRequalify, nil)
+}
+
+// qualifiedFaultLaneWith is qualifiedFaultLane, with setup run on the client
+// before it starts: a row replaces its clock or its check there, before any
+// goroutine of the client's reads them.
+func qualifiedFaultLaneWith(t *testing.T, client func(url string) *shnsdk.OperationValidator, minRequalify time.Duration, setup func(*GatedCertificationValidator)) (v *GatedCertificationValidator, payload, profile []byte, hits, mode, attempts *int32, gate chan struct{}) {
+	t.Helper()
 	rec, body, prof, _ := recordedClaimResponseRow(t, "2.1")
 	hits, mode, attempts = new(int32), new(int32), new(int32)
 	lane := faultLane(t, rec, nil, hits, mode)
@@ -699,6 +715,9 @@ func qualifiedFaultLane(t *testing.T, client func(url string) *shnsdk.OperationV
 		}
 	})
 	v.minRequalify = minRequalify // set before Start: no loop runs yet
+	if setup != nil {
+		setup(v)
+	}
 	t.Cleanup(v.Close)
 	v.Start()
 	waitQualified(t, v)
@@ -737,14 +756,44 @@ func TestQualifiedCertificationKeepsQualificationWhenTheLaneAnswers(t *testing.T
 }
 
 // A lane that does not answer in time while the collection is still waiting
-// has stopped, like one that refuses. Production timings throughout: the
-// certification client's own limits (NewCertificationOperationValidator) and
-// the collector's candidate and collection contexts, against a qualified lane
-// that holds every request. The candidate's time runs out first, with the
-// collection still live: the verdict is expired, the lane re-qualifies, and
-// the next certification reads "re-qualifying" without dialing.
-func TestQualifiedCertificationRequalifiesALaneThatTimesOut(t *testing.T) {
-	v, payload, _, hits, mode, attempts, _ := qualifiedFaultLane(t, NewCertificationOperationValidator, time.Hour)
+// may only be busy. Production timings throughout: the certification
+// client's own limits (NewCertificationOperationValidator) and the
+// collector's candidate and collection contexts, against a qualified lane
+// that holds every $validate and answers its metadata. The candidate's time
+// runs out first, with the collection still live: the verdict is expired,
+// the lane is asked for its metadata, answers, and stays qualified, and the
+// next payload certifies.
+func TestQualifiedCertificationChecksALaneThatTimesOut(t *testing.T) {
+	v, payload, _, _, mode, attempts, _ := qualifiedFaultLane(t, NewCertificationOperationValidator, time.Hour)
+	g := certificationGatewayByLine(t, map[string]shnsdk.Validator{"2.1": v}, nil)
+	atomic.StoreInt32(mode, laneSlow)
+	certificationSubmitPayload(g, "held", payload)
+	certificationFlush(t, g)
+	if got := laneVerdict(t, g.CertificationEvidenceForTest()[0], "2.1"); got.State != "expired" {
+		t.Fatalf("a held request: %+v, want expired", got)
+	}
+	eventually(t, "a timeout was never checked", func() bool { v.mu.Lock(); defer v.mu.Unlock(); return !v.checked.IsZero() && !v.checking })
+	v.mu.Lock()
+	stale, ready := v.stale, v.ready
+	v.mu.Unlock()
+	if stale || !ready || atomic.LoadInt32(attempts) != 1 {
+		t.Fatalf("stale=%v ready=%v attempts=%d: a lane that answered its metadata lost its qualification", stale, ready, *attempts)
+	}
+	atomic.StoreInt32(mode, laneRecorded)
+	certificationSubmitPayload(g, "next", payload)
+	certificationFlush(t, g)
+	if got := laneVerdict(t, g.CertificationEvidenceForTest()[1], "2.1"); got.State != "valid" {
+		t.Fatalf("the next payload: %+v, want the lane's clean answer", got)
+	}
+}
+
+// A lane that did not answer in time, and then does not answer its metadata,
+// has stopped: the lane re-qualifies, and the next certification reads
+// "re-qualifying" without dialing.
+func TestQualifiedCertificationRequalifiesALaneThatTimesOutAndDoesNotAnswer(t *testing.T) {
+	v, payload, _, hits, mode, attempts, _ := qualifiedFaultLaneWith(t, NewCertificationOperationValidator, time.Hour, func(v *GatedCertificationValidator) {
+		v.probe = func(context.Context) error { return errors.New("i/o timeout") }
+	})
 	g := certificationGatewayByLine(t, map[string]shnsdk.Validator{"2.1": v}, nil)
 	atomic.StoreInt32(mode, laneHeld)
 	certificationSubmitPayload(g, "held", payload)
@@ -752,13 +801,7 @@ func TestQualifiedCertificationRequalifiesALaneThatTimesOut(t *testing.T) {
 	if got := laneVerdict(t, g.CertificationEvidenceForTest()[0], "2.1"); got.State != "expired" {
 		t.Fatalf("a held request: %+v, want expired", got)
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for atomic.LoadInt32(attempts) < 2 {
-		if time.Now().After(deadline) {
-			t.Fatal("a lane that did not answer within the candidate's time started no qualification")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	eventually(t, "a lane that did not answer its metadata started no qualification", func() bool { return atomic.LoadInt32(attempts) >= 2 })
 	before := atomic.LoadInt32(hits)
 	certificationSubmitPayload(g, "requalifying", payload)
 	certificationFlush(t, g)
@@ -767,6 +810,147 @@ func TestQualifiedCertificationRequalifiesALaneThatTimesOut(t *testing.T) {
 	}
 	if atomic.LoadInt32(hits) != before {
 		t.Fatal("a lane being re-qualified was dialed")
+	}
+}
+
+// candidateContext is a certification candidate's context: its own time
+// runs out after d while its collection is still live.
+func candidateContext(d time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithValue(context.Background(), certificationCollectionKey{}, context.Background()), d)
+}
+
+// A timeout is checked at most once per minRequalify: a second inside it asks
+// nothing more, and one after it asks again.
+func TestQualifiedCertificationChecksATimeoutAtMostOncePerInterval(t *testing.T) {
+	const interval = time.Hour
+	var probes atomic.Int32
+	answer := atomic.Pointer[error]{}
+	var none error
+	answer.Store(&none)
+	clock := time.Date(2026, 10, 19, 0, 0, 0, 0, time.UTC)
+	var mu sync.Mutex
+	v, payload, profile, _, mode, _, _ := qualifiedFaultLaneWith(t, NewCertificationOperationValidator, interval, func(v *GatedCertificationValidator) {
+		v.now = func() time.Time { mu.Lock(); defer mu.Unlock(); return clock }
+		v.probe = func(context.Context) error { probes.Add(1); return *answer.Load() }
+	})
+	atomic.StoreInt32(mode, laneSlow)
+	timeout := func() {
+		t.Helper()
+		ctx, cancel := candidateContext(100 * time.Millisecond)
+		defer cancel()
+		if _, err := v.Validate(ctx, payload, string(profile)); err == nil {
+			t.Fatal("a held request answered")
+		}
+		eventually(t, "the check is still running", func() bool { v.mu.Lock(); defer v.mu.Unlock(); return !v.checking })
+	}
+	timeout()
+	if probes.Load() != 1 {
+		t.Fatalf("%d checks after a timeout, want 1", probes.Load())
+	}
+	timeout()
+	if probes.Load() != 1 {
+		t.Fatalf("%d checks after a second timeout inside %s, want 1", probes.Load(), interval)
+	}
+	mu.Lock()
+	clock = clock.Add(interval)
+	mu.Unlock()
+	failed := errors.New("i/o timeout")
+	answer.Store(&failed)
+	timeout()
+	if probes.Load() != 2 {
+		t.Fatalf("%d checks after a timeout past %s, want 2", probes.Load(), interval)
+	}
+	v.mu.Lock()
+	stale := v.stale
+	v.mu.Unlock()
+	if !stale {
+		t.Fatal("a lane that did not answer its metadata kept its qualification")
+	}
+}
+
+// The check runs on a connection of its own: it answers within a second while
+// a certification holds the client's one connection to the lane. The held
+// request goes through the client's own transport, which holds it for its
+// response-header limit (certificationClientTimeout, 2.5 s), so a check
+// sharing that connection could not answer inside the second.
+func TestQualifiedCertificationCheckDoesNotWaitBehindTheClient(t *testing.T) {
+	v, payload, _, hits, mode, _, _ := qualifiedFaultLane(t, NewCertificationOperationValidator, time.Hour)
+	atomic.StoreInt32(mode, laneSlow)
+	before := atomic.LoadInt32(hits)
+	held, release := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		req, err := http.NewRequestWithContext(held, http.MethodPost, v.client.BaseURL+"/ClaimResponse/$validate", bytes.NewReader(payload))
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		if resp, err := (&http.Client{Transport: v.client.Client.Transport}).Do(req); err == nil {
+			_ = resp.Body.Close()
+		}
+	}()
+	defer func() { release(); <-done }()
+	eventually(t, "the held certification never reached the lane", func() bool { return atomic.LoadInt32(hits) > before })
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := v.probe(ctx); err != nil {
+		t.Fatalf("the check waited behind the client's connection: %v", err)
+	}
+}
+
+// A check that a re-qualification overtook says nothing about the lane that
+// qualified since: the lane times out and is checked, then fails at the
+// connection and re-qualifies, and the check, failing only after that, leaves
+// the qualified lane alone.
+func TestQualifiedCertificationIgnoresAnOvertakenCheck(t *testing.T) {
+	checking, proceed := make(chan struct{}), make(chan struct{})
+	v, payload, profile, _, mode, attempts, gate := qualifiedFaultLaneWith(t, NewCertificationOperationValidator, time.Hour, func(v *GatedCertificationValidator) {
+		v.probe = func(context.Context) error { close(checking); <-proceed; return errors.New("i/o timeout") }
+	})
+	atomic.StoreInt32(mode, laneSlow)
+	ctx, cancel := candidateContext(100 * time.Millisecond)
+	defer cancel()
+	if _, err := v.Validate(ctx, payload, string(profile)); err == nil {
+		t.Fatal("a held request answered")
+	}
+	<-checking
+	atomic.StoreInt32(mode, laneDown)
+	var unavailable *CertificationLaneUnavailable
+	if _, err := v.Validate(context.Background(), payload, string(profile)); !errors.As(err, &unavailable) {
+		t.Fatalf("a closed connection: %v, want re-qualifying", err)
+	}
+	gate <- struct{}{}
+	waitQualified(t, v)
+	close(proceed)
+	eventually(t, "the check is still running", func() bool { v.mu.Lock(); defer v.mu.Unlock(); return !v.checking })
+	v.mu.Lock()
+	stale := v.stale
+	v.mu.Unlock()
+	if stale || atomic.LoadInt32(attempts) != 2 {
+		t.Fatalf("stale=%v attempts=%d: an overtaken check re-qualified the lane", stale, *attempts)
+	}
+}
+
+// Closing the client during a check stops it, and a check cut short by the
+// close does not re-qualify the lane.
+func TestQualifiedCertificationCloseStopsACheck(t *testing.T) {
+	checking := make(chan struct{})
+	v, payload, profile, _, mode, _, _ := qualifiedFaultLaneWith(t, NewCertificationOperationValidator, time.Hour, func(v *GatedCertificationValidator) {
+		v.probe = func(ctx context.Context) error { close(checking); <-ctx.Done(); return ctx.Err() }
+	})
+	atomic.StoreInt32(mode, laneSlow)
+	ctx, cancel := candidateContext(100 * time.Millisecond)
+	defer cancel()
+	if _, err := v.Validate(ctx, payload, string(profile)); err == nil {
+		t.Fatal("a held request answered")
+	}
+	<-checking
+	v.Close()
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.stale || v.checking {
+		t.Fatalf("stale=%v checking=%v after a close cut the check short", v.stale, v.checking)
 	}
 }
 

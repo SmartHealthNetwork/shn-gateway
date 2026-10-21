@@ -6,7 +6,7 @@
 # same binary from the workspace instead (deploy/multiprocess/Dockerfile, gateway-ws).
 # The builder runs on the build's own platform and compiles for the target one, so one build
 # makes the linux/amd64 and linux/arm64 images of the published release without emulation.
-FROM --platform=$BUILDPLATFORM golang:1.26.9@sha256:f1f0bcc2c524a3ced375fcb4d1ecb7aa371aa7070e112599aaca45cc02d0101b AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26.10@sha256:5c3f3f28a273c9b61698b2d34f18375929790ab1f1d3835d032d21e2b31eae0c AS builder
 ARG TARGETOS TARGETARCH
 WORKDIR /src
 COPY go.mod go.sum ./

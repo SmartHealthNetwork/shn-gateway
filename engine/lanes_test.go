@@ -69,11 +69,11 @@ func TestUnavailableDefaultsCannotRouteOrHonorFrames(t *testing.T) {
 	defer server.Close()
 	canonical := shnsdk.NewFakeValidator()
 	d := NewDiscoveredLane("2.1", server.URL, shnsdk.NewOperationValidator(server.URL))
-	g := d9Gateway(map[string]shnsdk.Validator{"2.0": canonical, "2.1": canonical}, nil)
-	g.cfg.CanonicalFallbackLines = map[string]bool{"2.1": true}
-	g.cfg.DefaultValidatorsByLine = map[string]*DiscoveredLane{"2.1": d}
+	g := d9Gateway(nil, nil)
+	g.cfg.ValidatorsByContractLine = ContractLineLanes(map[string]shnsdk.Validator{"2.0": canonical, "2.1": canonical},
+		map[string]*DiscoveredLane{"2.1": d}, map[string]bool{"2.1": true}, nil)
 	for i := 0; i < 100; i++ {
-		if _, ok := g.selectNativeReachRoute("pa.dtr", map[string]bool{"2.1": true}); ok {
+		if _, ok := g.selectNativeReachRoute("pa.dtr", map[string]bool{"2.1": true}, ""); ok {
 			t.Fatal("unavailable default entered routing")
 		}
 		// An unqualified lane is never answered at: the claim is carried as
@@ -93,26 +93,36 @@ func TestUnavailableDefaultsCannotRouteOrHonorFrames(t *testing.T) {
 	if err := d.Qualify(context.Background(), func(context.Context, string, string) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := g.selectNativeReachRoute("pa.dtr", map[string]bool{"2.1": true}); !ok {
+	if _, ok := g.selectNativeReachRoute("pa.dtr", map[string]bool{"2.1": true}, ""); !ok {
 		t.Fatal("qualified default not routable")
 	}
 }
 
+// singleLineStandIn is a contract declared at one line and built natively at
+// none: no native contract is single-line, so the single-line rule is pinned
+// through ContractLineLanes's declared argument.
+const singleLineStandIn = "x.single@2.1"
+
 func TestContractLaneFallbackCollision(t *testing.T) {
 	canonical, explicit := shnsdk.NewFakeValidator(), shnsdk.NewFakeValidator()
 	d := NewDiscoveredLane("2.1", "http://unused.invalid/fhir", explicit)
-	g := &Gateway{cfg: Config{Validator: canonical, ValidatorsByLine: map[string]shnsdk.Validator{"2.0": canonical, "2.1": canonical}, CanonicalFallbackLines: map[string]bool{"2.1": true}, DefaultValidatorsByLine: map[string]*DiscoveredLane{"2.1": d}}}
+	g := &Gateway{cfg: Config{Validator: canonical, ValidatorsByContractLine: ContractLineLanes(map[string]shnsdk.Validator{"2.0": canonical, "2.1": canonical},
+		map[string]*DiscoveredLane{"2.1": d}, map[string]bool{"2.1": true}, []string{singleLineStandIn})}}
 	if g.validatorForContractLine("pa.dtr", "2.1") != nil {
 		t.Fatal("PA borrowed the single-contract fallback")
 	}
 	if status, _ := g.validateFHIRForContract(context.Background(), []byte(`{"resourceType":"Patient"}`), "egress", "pa.dtr", "2.1", ""); status != http.StatusInternalServerError {
-		t.Fatal("PA validated through PDex compatibility fallback")
+		t.Fatal("PA validated through the single-line contract's fallback")
 	}
-	if status, _ := g.validateFHIRForContract(context.Background(), []byte(`{"resourceType":"Patient"}`), "egress", "pa.pdex", "2.1", ""); status != 0 {
-		t.Fatal("PDex canonical validation refused")
+	if status, _ := g.validateFHIRForContract(context.Background(), []byte(`{"resourceType":"Patient"}`), "egress", "x.single", "2.1", ""); status != 0 {
+		t.Fatal("single-line canonical validation refused")
 	}
-	if g.validatorForContractLine("pa.pdex", "2.1") != canonical {
-		t.Fatal("PDex canonical compatibility lost")
+	if g.validatorForContractLine("x.single", "2.1") != canonical {
+		t.Fatal("single-line canonical alias lost")
+	}
+	// pa.pdex is no contract this gateway builds: it has no lane, alias or not.
+	if g.validatorForContractLine("pa.pdex", "2.1") != nil {
+		t.Fatal("pa.pdex resolved a lane")
 	}
 	if g.validatorForContractLine("pa.pas", "2.0") != canonical {
 		t.Fatal("configured canonical unavailable")
@@ -120,15 +130,16 @@ func TestContractLaneFallbackCollision(t *testing.T) {
 	if err := d.Qualify(context.Background(), func(context.Context, string, string) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
-	if g.validatorForContractLine("pa.dtr", "2.1") != d || g.validatorForLine("2.1") != d {
+	if g.validatorForContractLine("pa.dtr", "2.1") != d {
 		t.Fatal("qualified default missing")
 	}
-	if g.validatorForContractLine("pa.pdex", "2.1") != canonical {
-		t.Fatal("qualified PA default replaced PDex fallback")
+	if g.validatorForContractLine("x.single", "2.1") != canonical {
+		t.Fatal("qualified PA default replaced the single-line fallback")
 	}
-	g.cfg.CanonicalFallbackLines = nil
-	g.cfg.ValidatorsByLine["2.1"] = explicit
-	if g.validatorForContractLine("pa.dtr", "2.1") != explicit || g.validatorForContractLine("pa.pdex", "2.1") != explicit {
+	// An explicit 2.1 lane, with no alias, serves every contract at 2.1.
+	g.cfg.ValidatorsByContractLine = ContractLineLanes(map[string]shnsdk.Validator{"2.0": canonical, "2.1": explicit},
+		map[string]*DiscoveredLane{"2.1": d}, nil, []string{singleLineStandIn})
+	if g.validatorForContractLine("pa.dtr", "2.1") != explicit || g.validatorForContractLine("x.single", "2.1") != explicit {
 		t.Fatal("override did not win")
 	}
 }
@@ -161,9 +172,9 @@ func TestValidationVerdictDoesNotChangeDefaultReadiness(t *testing.T) {
 
 func TestDTRContextCannotUseSingleContractFallback(t *testing.T) {
 	canonical := shnsdk.NewFakeValidator()
-	g := &Gateway{cfg: Config{Validator: canonical, ValidatorsByLine: map[string]shnsdk.Validator{"2.0": canonical, "2.1": canonical}, CanonicalFallbackLines: map[string]bool{"2.1": true}}}
+	g := &Gateway{cfg: Config{Validator: canonical, ValidatorsByContractLine: ContractLineLanes(map[string]shnsdk.Validator{"2.0": canonical, "2.1": canonical}, nil, map[string]bool{"2.1": true}, nil)}}
 	if status, _ := g.validateDTRQuestionnaireResponse(context.Background(), []byte(`{"resourceType":"QuestionnaireResponse"}`), "2.1"); status != http.StatusInternalServerError {
-		t.Fatalf("DTR context status=%d; unavailable PA lane borrowed PDex fallback", status)
+		t.Fatalf("DTR context status=%d; unavailable PA lane borrowed the single-line fallback", status)
 	}
 	// A payer's DTR answer routed at 2.1 is not certified on the borrowed fallback
 	// either: 2.1 is no candidate line, and the answer is judged on the one DTR lane
@@ -175,9 +186,9 @@ func TestDTRContextCannotUseSingleContractFallback(t *testing.T) {
 	// At the call: the borrowed 2.1 fallback is never called, and with the routed
 	// line unserved and 2.0 failing, the answer is refused as the missing lane.
 	reg := shnsdk.NewRegistry()
-	g2 := &Gateway{cfg: Config{Reg: reg, ValidatorsByLine: map[string]shnsdk.Validator{
+	g2 := &Gateway{cfg: Config{Reg: reg, ValidatorsByContractLine: ContractLineLanes(map[string]shnsdk.Validator{
 		"2.0": &recordingValidator{valid: false}, "2.1": failIfCalledValidator{t},
-	}, CanonicalFallbackLines: map[string]bool{"2.1": true}}}
+	}, nil, map[string]bool{"2.1": true}, nil)}}
 	status, msg := g2.validateFHIRPayerIngress(context.Background(), []byte(`{"resourceType":"Patient"}`), "2.1", "pa.dtr",
 		shnsdk.PayerIdentifier{System: shnsdk.CMSPayerIdentity.System, Value: "00002"})
 	if status != http.StatusInternalServerError || !strings.Contains(msg, "no FHIR validator lane configured for contract line 2.1") {
@@ -188,13 +199,14 @@ func TestDTRContextCannotUseSingleContractFallback(t *testing.T) {
 	}
 }
 
-// The lane shape a gateway with no default validator lanes has under the
-// build's default declaration: 2.0 on the canonical validator, and 2.1 on it
-// only as the single-line PDex contract's fallback alias. PA traffic at 2.1
-// has no lane and is never answered at it; PDex at 2.1 keeps its alias.
+// The lane shape a gateway with no default validator lanes has with a
+// single-line contract declared: 2.0 on the canonical validator, and 2.1 on it
+// only as the single-line contract's fallback alias. PA traffic at 2.1 has no
+// lane and is never answered at it; the single-line contract at 2.1 keeps its
+// alias.
 func TestNoDefaultLanesShapeRefusesPAAtTheAliasedLine(t *testing.T) {
 	canonical := shnsdk.NewFakeValidator()
-	g := &Gateway{cfg: Config{Reg: shnsdk.NewRegistry(), Validator: canonical, ValidatorsByLine: map[string]shnsdk.Validator{"2.0": canonical, "2.1": canonical}, CanonicalFallbackLines: map[string]bool{"2.1": true}}}
+	g := &Gateway{cfg: Config{Reg: shnsdk.NewRegistry(), Validator: canonical, ValidatorsByContractLine: ContractLineLanes(map[string]shnsdk.Validator{"2.0": canonical, "2.1": canonical}, nil, map[string]bool{"2.1": true}, []string{singleLineStandIn})}}
 	for _, leg := range []struct{ legType, token string }{{"pas-claim", "pa.pas@2.1"}, {"crd-order-select", "pa.crd@2.1"}} {
 		if _, tok, carried, _, _ := g.unframeRequestFrom("requester", leg.legType, framedRequest(t, leg.token, []byte(`{}`))); tok == leg.token || carried != leg.token {
 			t.Errorf("%s frame answered at %q (carried %q); a line with only an alias has no PA lane", leg.token, tok, carried)
@@ -205,7 +217,7 @@ func TestNoDefaultLanesShapeRefusesPAAtTheAliasedLine(t *testing.T) {
 			t.Errorf("%s@2.1 borrowed the canonical alias", contract)
 		}
 	}
-	if g.validatorForContractLine("pa.pdex", "2.1") == nil {
-		t.Error("pa.pdex@2.1 lost its canonical alias")
+	if g.validatorForContractLine("x.single", "2.1") == nil {
+		t.Error("the single-line contract lost its canonical alias")
 	}
 }

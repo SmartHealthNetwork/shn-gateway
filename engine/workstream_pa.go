@@ -1,125 +1,121 @@
-// workstream_pa.go — the Layer-3 Prior-Authorization workstream module.
-// It NAMES AND RELOCATES what was inlined in the fused engine: the per-leg-type
-// authority frames, operations, transaction types, scopes, and leg-physics. The
-// Layer-2 primitives (OriginateLeg, handleInbound's FulfillLeg dispatch) read this
-// catalog instead of carrying the literals inline, so the origination and inbound
-// sides can no longer drift. A future workstream (X12/EDI, payer-to-payer) is a
-// sibling module with its own catalog; Layers 1-2 do not change.
+// workstream_pa.go — the Prior Authorization workstream's adapter (design
+// §4.2): its leg catalog, derived from the gateway's copy of the network's leg
+// taxonomy, its participant-facing routes, its ownership rows
+// (workstream_pa_ownership.go) and which legs name involved patients
+// (workstream_pa_involved.go). The core reads them only through
+// the workstream registry (workstreams.go). A second workstream is a sibling
+// adapter with its own taxonomy; the core does not change.
 package engine
 
-import "net/http"
+import (
+	"net/http"
 
-// legSpec is the per-leg-type contract: the authority/transport literals that were
-// formerly passed positionally at each roundTrip call site (origination) and held
-// in the now-deleted inboundReqOp map (fulfillment). ReqFrame is the originator's authority frame
-// ("provider-tpo" for every PA leg today); RespFrame is the responder's. Op/RespOp
-// are the request/response authority operations. Scope is the policy-derived
-// min-necessary scope label (documentary; authz derives the real scope, and the
-// network's lockstep conformance check pins this label to it). Physics is
-// the Layer-2 leg classification — recorded now, load-bearing later
-// (notification/async are headroom; no PA scenario exercises them).
-type legSpec struct {
-	ReqFrame  string
-	RespFrame string
-	Op        string
-	RespOp    string
-	Scope     string
-	Physics   LegPhysics
-	// Contract is the contract-version family this legType's payload belongs to
-	// ("pa.pas"), consumed by the OriginateLeg version
-	// filter and the response-frame stamp. "" = version-neutral: the leg's
-	// payload is not governed by any declared contract line (base-R4 CER, CDex,
-	// bespoke patient-dtr JSON) and is never filtered or stamped. Every catalog
-	// row states it explicitly (pinned by TestPACatalog_Contracts).
-	Contract string
+	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
+	"github.com/SmartHealthNetwork/shn-gateway/internal/legtaxonomy"
+	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
+)
+
+// paWorkstream is the Prior Authorization workstream's adapter: its catalog,
+// its participant-facing routes, its ownership rows and its legs'
+// involvement.
+type paWorkstream struct {
+	legs map[string]legSpec
+}
+
+// paAdapter is the adapter the registry compiles in (workstreams.go).
+var paAdapter = paWorkstream{legs: paCatalog}
+
+func (paWorkstream) id() string                    { return workstreamPA }
+func (w paWorkstream) catalog() map[string]legSpec { return w.legs }
+func (paWorkstream) routes(g *Gateway, role string) []mountedRoute {
+	return g.paRoutes(role)
+}
+func (paWorkstream) ownershipRows() map[relay.Key]relay.Rule  { return paLegOwnership }
+func (paWorkstream) ingressRoutes() map[string]ingressHandler { return paIngressRoutes }
+
+// canonicalContractVersion: the canonical validator resolves PAS at 2.0, the
+// line every deployment's FHIR_VALIDATE_URL serves.
+func (paWorkstream) canonicalContractVersion() string { return shnsdk.ContractPAPAS20 }
+
+// The PA workstream's ingress routes, as exchange records name them.
+const (
+	RouteCRD         = "crd"
+	RouteDTR         = "dtr"
+	RoutePAS         = "pas"
+	RoutePASInquire  = "pas-inquire"
+	RouteEligibility = "eligibility"
+)
+
+// contractVersions: PA's contract lines are the SDK's, without pa.pdex@2.1
+// (sdkContractVersions).
+func (paWorkstream) contractVersions() (native, defaults []string) {
+	return sdkContractVersions()
+}
+
+// paIngressRoutes are the PA workstream's Da Vinci ingress handlers, with the
+// observer tag each route has always carried.
+var paIngressRoutes = map[string]ingressHandler{
+	RouteCRD:         {"crd-ingress", func(g *Gateway) http.HandlerFunc { return g.handleCRDIngress }},
+	RouteDTR:         {"dtr-ingress", func(g *Gateway) http.HandlerFunc { return g.handleDTRIngress }},
+	RoutePAS:         {"pas-ingress", func(g *Gateway) http.HandlerFunc { return g.handlePASIngress }},
+	RoutePASInquire:  {"pas-inquire-ingress", func(g *Gateway) http.HandlerFunc { return g.handlePASInquireIngress }},
+	RouteEligibility: {"eligibility-ingress", func(g *Gateway) http.HandlerFunc { return g.handleEligibilityIngress }},
 }
 
 // paCatalog is the PA workstream's leg catalog, keyed by legType (= envelope
-// TransactionType). Every entry is the EXACT literal set today's call sites pass
-// (verified byte-for-byte by workstream_pa_test.go). The recipient is NOT a catalog
-// property: payer legs derive the recipient from the patient's Coverage via recipientFor (no
-// default), facility/phg legs target a registry LookupByRole result, so the recipient stays a
-// call-time argument.
-var paCatalog = map[string]legSpec{
-	"coverage-eligibility": {
-		ReqFrame: "provider-tpo", RespFrame: "payer-coverage",
-		Op: "eligibility-inquiry", RespOp: "eligibility-response", Scope: "eligibility-only",
-		Physics:  LegPhysics{Kind: KindRequestResponse, Effect: EffectReadOnly, Timing: TimingSync, Locality: LocalitySubstrate},
-		Contract: "",
-	},
-	"dtr-questionnaire-fetch": {
-		ReqFrame: "provider-tpo", RespFrame: "payer-coverage",
-		Op: "dtr-questionnaire-fetch", RespOp: "dtr-questionnaire", Scope: "questionnaire-only",
-		Physics:  LegPhysics{Kind: KindRequestResponse, Effect: EffectReadOnly, Timing: TimingSync, Locality: LocalitySubstrate},
-		Contract: "pa.dtr",
-	},
-	"federated-query": {
-		ReqFrame: "provider-tpo", RespFrame: "facility-disclosure",
-		Op: "federated-query-submit", RespOp: "federated-query-response", Scope: "named-docs-only",
-		Physics:  LegPhysics{Kind: KindRequestResponse, Effect: EffectReadOnly, Timing: TimingSync, Locality: LocalitySubstrate},
-		Contract: "",
-	},
-	"patient-dtr": {
-		ReqFrame: "provider-tpo", RespFrame: "patient-authorship",
-		Op: "patient-dtr-request", RespOp: "patient-dtr-response", Scope: "patient-authorship-only",
-		Physics:  LegPhysics{Kind: KindRequestResponse, Effect: EffectReadOnly, Timing: TimingSync, Locality: LocalitySubstrate},
-		Contract: "",
-	},
-	"crd-order-select": {
-		ReqFrame: "provider-tpo", RespFrame: "payer-coverage",
-		Op: "crd-order-select", RespOp: "crd-cards", Scope: "crd-context",
-		Physics:  LegPhysics{Kind: KindRequestResponse, Effect: EffectReadOnly, Timing: TimingSync, Locality: LocalitySubstrate},
-		Contract: "pa.crd",
-	},
-	// crd-order-dispatch: the order-dispatch sibling of crd-order-select.
-	// A DISTINCT Op is load-bearing: handleInbound pins spec.Op per TransactionType into
-	// VerifyBound; sharing the Op with crd-order-select would let an order-select token
-	// be lifted onto an order-dispatch envelope — an AI-11/C2 regression.
-	"crd-order-dispatch": {
-		ReqFrame: "provider-tpo", RespFrame: "payer-coverage",
-		Op: "crd-order-dispatch", RespOp: "crd-dispatch-cards", Scope: "crd-context",
-		Physics:  LegPhysics{Kind: KindRequestResponse, Effect: EffectReadOnly, Timing: TimingSync, Locality: LocalitySubstrate},
-		Contract: "pa.crd",
-	},
-	"pas-claim": {
-		ReqFrame: "provider-tpo", RespFrame: "payer-coverage",
-		Op: "pas-submit", RespOp: "pas-response", Scope: "pas-bundle",
-		Physics:  LegPhysics{Kind: KindRequestResponse, Effect: EffectMutating, Timing: TimingSync, Locality: LocalitySubstrate},
-		Contract: "pa.pas",
-	},
-	// F-B1: the conformant amended re-POST leg — the UPDATE-family analog of pas-claim
-	// (which is the conformant SUBMIT leg). It carries the update op-family (Op
-	// pas-update-submit; RespOp pas-update-response; Scope pas-update-bundle — NOT pas-bundle),
-	// reusing the update resp-op exactly as pas-claim reuses pas-response. Keeping it in the
-	// pas-update-bundle scope preserves the pas-bundle ∥ pas-update-bundle min-necessary
-	// distinction (FR-34/C12).
-	"pas-claim-update": {
-		ReqFrame: "provider-tpo", RespFrame: "payer-coverage",
-		Op: "pas-update-submit", RespOp: "pas-update-response", Scope: "pas-update-bundle",
-		Physics:  LegPhysics{Kind: KindRequestResponse, Effect: EffectMutating, Timing: TimingSync, Locality: LocalitySubstrate},
-		Contract: "pa.pas",
-	},
-	// pas-claim-inquire: the Da Vinci prior-authorization inquiry (Claim/$inquire) —
-	// how a requester asks the payer for the decision on an authorization the payer
-	// pended. It READS the payer's own record (EffectReadOnly: the inquiry itself
-	// decides nothing; the payer's answer may report a decision the payer already
-	// made), so it carries its own min-necessary scope (pas-inquire-bundle), distinct
-	// from both pas-bundle and pas-update-bundle.
-	//
-	// A DISTINCT Op is load-bearing, exactly as it is for crd-order-dispatch:
-	// handleInbound pins spec.Op per TransactionType into VerifyBound, so sharing
-	// pas-submit would let a submit token be lifted onto an inquiry envelope (AI-11).
-	"pas-claim-inquire": {
-		ReqFrame: "provider-tpo", RespFrame: "payer-coverage",
-		Op: "pas-inquire", RespOp: "pas-inquire-response", Scope: "pas-inquire-bundle",
-		Physics:  LegPhysics{Kind: KindRequestResponse, Effect: EffectReadOnly, Timing: TimingSync, Locality: LocalitySubstrate},
-		Contract: "pa.pas",
-	},
+// TransactionType), derived from the gateway's copy of the network's leg
+// taxonomy (legtaxonomy.PA) and paLegs. The recipient is NOT a catalog
+// property: payer legs derive the recipient from the patient's Coverage via
+// recipientFor (no default), facility/phg legs target a registry LookupByRole
+// result, so the recipient stays a call-time argument.
+var paCatalog = mustCatalog(legtaxonomy.PA(), "pa", paLegs)
+
+var (
+	paReadOnly = LegPhysics{Kind: KindRequestResponse, Effect: EffectReadOnly, Timing: TimingSync, Locality: LocalitySubstrate}
+	paMutating = LegPhysics{Kind: KindRequestResponse, Effect: EffectMutating, Timing: TimingSync, Locality: LocalitySubstrate}
+)
+
+// paLegs is what the PA adapter adds to each routable leg of its taxonomy:
+// the leg's physics and its contract family. Every row states its contract
+// explicitly; "" is a leg whose payload no declared contract line governs
+// (base-R4 CER, bespoke patient-dtr JSON). The frames, operations and
+// scopes are the taxonomy's, which keeps every operation distinct (a token
+// bound to one leg's operation cannot be lifted onto another's, AI-11) and
+// gives the amended re-POST its own scope (pas-update-bundle beside
+// pas-bundle, FR-34).
+var paLegs = map[string]legDetail{
+	"coverage-eligibility":    {Physics: paReadOnly, Contract: "", Seam: paSeamPayer},
+	"dtr-questionnaire-fetch": {Physics: paReadOnly, Contract: "pa.dtr", Seam: paSeamPayer},
+	"patient-dtr":             {Physics: paReadOnly, Contract: "", Seam: "phg-inbound"},
+	"crd-order-select":        {Physics: paReadOnly, Contract: "pa.crd", Seam: paSeamPayer},
+	"crd-order-dispatch":      {Physics: paReadOnly, Contract: "pa.crd", Seam: paSeamPayer},
+	// The submit and the amended re-POST (F-B1) change the payer's record.
+	"pas-claim":        {Physics: paMutating, Contract: "pa.pas", Seam: paSeamPayer},
+	"pas-claim-update": {Physics: paMutating, Contract: "pa.pas", Seam: paSeamPayer},
+	// The inquiry (Claim/$inquire) reads the payer's own record: the inquiry
+	// itself decides nothing, though the answer may report a decision the payer
+	// already made.
+	"pas-claim-inquire": {Physics: paReadOnly, Contract: "pa.pas", Seam: paSeamPayer},
+}
+
+// paSeamPayer is the seam a payer's inbound PA request is judged at.
+const paSeamPayer = "payer-native"
+
+// originatedAnswerCheck: an answer to a CRD leg this gateway originates is
+// certified against the CDS Hooks response rules, as a relayed one is
+// (crdAnswerOutcome). A carried leg (the Da Vinci ingress) certifies the
+// answer itself.
+func (paWorkstream) originatedAnswerCheck(leg string) legAnswerCheck {
+	switch leg {
+	case "crd-order-select", "crd-order-dispatch":
+		return certifyCDSHooksAnswer
+	}
+	return nil
 }
 
 // paRoutes are the PA workstream's participant-facing routes for role: the
-// provider's Da Vinci ingress, which carries its participant's own requests,
-// and the payer's Patient Access API.
+// provider's Da Vinci ingress, which carries its participant's own requests.
+// The payer serves no participant-facing PA route of its own.
 func (g *Gateway) paRoutes(role string) []mountedRoute {
 	var out []mountedRoute
 	route := func(pattern string, h http.HandlerFunc) {
@@ -138,8 +134,10 @@ func (g *Gateway) paRoutes(role string) []mountedRoute {
 		route("POST /Questionnaire/$questionnaire-package", g.ingressRoute(RouteDTR))
 		route("POST /Claim/$submit", g.ingressRoute(RoutePAS))
 		route("POST /Claim/$inquire", g.ingressRoute(RoutePASInquire))
-		// FR-37: the ingress edge's own CapabilityStatement (per-role
-		// statements — the payer's /metadata precedent).
+		// The base R4 operation a system submits a coverage eligibility
+		// request with (IHE FAIS ITI-124).
+		route("POST /CoverageEligibilityRequest/$submit", g.ingressRoute(RouteEligibility))
+		// FR-37: the ingress edge's own CapabilityStatement.
 		route("GET /metadata", g.handleIngressMetadata)
 		if g.ingressAuth != nil {
 			route("POST /oauth/token", g.ingressAuth.handleToken)
@@ -150,17 +148,6 @@ func (g *Gateway) paRoutes(role string) []mountedRoute {
 			// version-specific endpoint codes for the Da Vinci-facing edge.
 			route("GET /.well-known/davinci-configuration", g.handleDavinciConfiguration)
 		}
-	case "payer":
-		if g.cfg.PatientAccessOff {
-			return nil
-		}
-		// FR-28: CMS-0057 Patient Access API — conformant FHIR search + instance read
-		// over the decision EOB, gated by a patient-access authority token. Distinct
-		// from the sealed substrate legs. FR-37: the CapabilityStatement for this
-		// surface is published at the standard FHIR /metadata endpoint.
-		route("GET /metadata", g.handlePatientAccessMetadata)
-		route("GET /ExplanationOfBenefit", g.handlePatientAccessEOB)
-		route("GET /ExplanationOfBenefit/{id}", g.handlePatientAccessEOBByID)
 	}
 	return out
 }

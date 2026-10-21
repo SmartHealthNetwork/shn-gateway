@@ -194,7 +194,7 @@ func routedToken(t *testing.T, env *inProcessExchange, leg string) string {
 		}
 		return tok
 	}
-	route, err := env.originator.selectLegRoute(env.payerID, leg)
+	route, err := env.originator.selectLegRoute(env.payerID, leg, "")
 	if err != nil {
 		t.Fatal(err)
 	}

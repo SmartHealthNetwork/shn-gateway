@@ -19,7 +19,7 @@ type warmup struct {
 	line            string
 }
 
-// warmups returns the original four profile-resolution rows. Its legacy helper
+// warmups returns the three profile-resolution rows. Its legacy helper
 // default remains 2.0, while readinessRows and supervisor admission reject an
 // unknown lane before any request.
 func warmups(line string) []warmup {
@@ -31,7 +31,6 @@ func warmups(line string) []warmup {
 	return []warmup{
 		{identity: "init-pas-request-bundle", file: dir + "/claim-bundle.json", resourceType: "Bundle", profile: "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-pas-request-bundle", mode: verdictInitialize, line: line},
 		{identity: "init-dtr-questionnaireresponse", file: dir + "/questionnaireresponse-autofill.json", resourceType: "QuestionnaireResponse", profile: "http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/dtr-questionnaireresponse", mode: verdictInitialize, line: line},
-		{identity: "init-pdex-explanationofbenefit", file: "testdata/eob-approved.json", resourceType: "ExplanationOfBenefit", profile: "http://hl7.org/fhir/us/davinci-pdex/StructureDefinition/pdex-priorauthorization", mode: verdictInitialize, line: line},
 		{identity: "init-cdex-task", file: "testdata/cdex-task-data-request.json", resourceType: "Task", profile: "http://hl7.org/fhir/us/davinci-cdex/StructureDefinition/cdex-task-data-request", mode: verdictInitialize, line: line},
 	}
 }

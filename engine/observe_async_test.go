@@ -173,9 +173,10 @@ func TestRefusingLevelsStillWaitForTheVerdict(t *testing.T) {
 func TestBridgedCheckStaysSynchronousAtObserve(t *testing.T) {
 	v := newBlockingValidator(invalidResult)
 	g, _ := observeGateway(t, EnforcementObserve, v)
+	g.cfg.TranslateIGLines = true
 	done := make(chan int, 1)
 	go func() {
-		status, _ := g.validateFHIREgressOrBridged(ingressCtx("corr-bridged"), []byte(coverageJSON), "", "", true)
+		status, _ := g.bridge().Certify(ingressCtx("corr-bridged"), "", "", "", []byte(coverageJSON)).refusal()
 		done <- status
 	}()
 	select {
@@ -186,109 +187,6 @@ func TestBridgedCheckStaysSynchronousAtObserve(t *testing.T) {
 	close(v.release)
 	if status := <-done; status == 0 {
 		t.Fatal("an invalid bridged payload refuses at observe")
-	}
-}
-
-// The decision EOB a payer builds stays on the request path, because whether
-// it is written depends on its verdict; at observe its wait is bounded by
-// decisionEOBObserveDeadline, and a validator that misses it is unavailable:
-// the answer is relayed and the decision written (as for any validator outage).
-func TestDecisionEOBCheckIsBoundedAtObserve(t *testing.T) {
-	saved := decisionEOBObserveDeadline
-	decisionEOBObserveDeadline = 150 * time.Millisecond
-	t.Cleanup(func() { decisionEOBObserveDeadline = saved })
-
-	v := newBlockingValidator(invalidResult)
-	t.Cleanup(func() { close(v.release) })
-	g, events := observeGateway(t, EnforcementObserve, v)
-	ctx := withFindingContext(context.Background(), findingContext{LegType: "pas-claim", CorrelationID: "corr-eob", Seam: "payer-native", Whose: "self"})
-
-	var detail string
-	var invalid bool
-	start := time.Now()
-	within(t, 5*time.Second, "the decision-EOB check at observe", func() {
-		detail = g.validateDecisionEOBs(ctx, [][]byte{[]byte(`{"resourceType":"ExplanationOfBenefit"}`)})[0]
-		invalid = detail != ""
-	})
-	took := time.Since(start)
-	if took < decisionEOBObserveDeadline || took > decisionEOBObserveDeadline+time.Second {
-		t.Fatalf("the decision-EOB check waits for its deadline and no longer, took %s", took)
-	}
-	if invalid {
-		t.Fatalf("a missed deadline is unavailable: relayed and written, got not written (%q)", detail)
-	}
-	got := observedFindings(events, "corr-eob")
-	if len(got) != 1 || !strings.Contains(got[0], `"verdict":"unavailable"`) {
-		t.Fatalf("a missed deadline records one unavailable finding at once, got %v", got)
-	}
-}
-
-// One budget covers all of a leg's decision EOBs at observe: an inquiry answer
-// carrying hundreds of decisions, with the validator stuck, adds no more than the
-// budget once, and every EOB past it is recorded unavailable, never skipped.
-func TestDecisionEOBBudgetIsPerLegAtObserve(t *testing.T) {
-	saved := decisionEOBObserveDeadline
-	decisionEOBObserveDeadline = 150 * time.Millisecond
-	t.Cleanup(func() { decisionEOBObserveDeadline = saved })
-	v := newBlockingValidator(invalidResult)
-	t.Cleanup(func() { close(v.release) })
-	g, events := observeGateway(t, EnforcementObserve, v)
-	ctx := withFindingContext(context.Background(), findingContext{LegType: "pas-claim-inquire", CorrelationID: "corr-many", Seam: "payer-native", Whose: "self"})
-	eobs := make([][]byte, 300)
-	for i := range eobs {
-		eobs[i] = []byte(`{"resourceType":"ExplanationOfBenefit"}`)
-	}
-	var invalid bool
-	start := time.Now()
-	within(t, 5*time.Second, "300 decision-EOB checks at observe", func() {
-		for _, d := range g.validateDecisionEOBs(ctx, eobs) {
-			invalid = invalid || d != ""
-		}
-	})
-	if took := time.Since(start); took > decisionEOBObserveDeadline+time.Second {
-		t.Fatalf("300 decision EOBs took %s; the leg's budget is %s once", took, decisionEOBObserveDeadline)
-	}
-	if invalid {
-		t.Fatal("decisions past the budget are relayed and written, got not written")
-	}
-	got := observedFindings(events, "corr-many")
-	if len(got) != len(eobs) {
-		t.Fatalf("recorded %d findings, want one per decision EOB (%d)", len(got), len(eobs))
-	}
-	for _, f := range got {
-		if !strings.Contains(f, `"verdict":"unavailable"`) {
-			t.Fatalf("a decision past the budget is recorded unavailable, got %s", f)
-		}
-	}
-}
-
-// The budget is observe's alone: at strict and structural the decision EOB still
-// waits for the validator's verdict, however long it takes, and an invalid one
-// is not written (it never refuses the decision).
-func TestDecisionEOBIsUnboundedWhereItIsDecisive(t *testing.T) {
-	saved := decisionEOBObserveDeadline
-	decisionEOBObserveDeadline = 50 * time.Millisecond
-	t.Cleanup(func() { decisionEOBObserveDeadline = saved })
-	for _, level := range []ConformanceEnforcement{EnforcementStrict, EnforcementStructural} {
-		t.Run(level.String(), func(t *testing.T) {
-			// It honours its context, as the real client does, so a deadline
-			// applied here would cut it short.
-			slow := ctxValidator(func(ctx context.Context) (shnsdk.Result, error) {
-				select {
-				case <-time.After(250 * time.Millisecond):
-					return shnsdk.Result{Valid: false, Issues: []string{"error: ExplanationOfBenefit.status: minimum required = 1, but only found 0"}}, nil
-				case <-ctx.Done():
-					return shnsdk.Result{}, ctx.Err()
-				}
-			})
-			g, _ := observeGateway(t, level, slow)
-			ctx := withFindingContext(context.Background(), findingContext{LegType: "pas-claim", CorrelationID: "corr-strict-eob", Seam: "payer-native", Whose: "self"})
-			detail := g.validateDecisionEOBs(ctx, [][]byte{[]byte(`{"resourceType":"ExplanationOfBenefit"}`)})[0]
-			invalid := detail != ""
-			if !invalid || !strings.HasPrefix(detail, "decision EOB not written: it fails its own validation") {
-				t.Fatalf("at %s a slow validator's invalid verdict is waited for and the EOB not written, not a deadline's unavailable; got %v %q", level, invalid, detail)
-			}
-		})
 	}
 }
 
@@ -315,20 +213,6 @@ func TestObserverCompletionWaitsForQueuedChecks(t *testing.T) {
 	defer cancel2()
 	if err := g.WaitObserverCompletion(ctx2); err != nil {
 		t.Fatalf("the barrier must return once the queued check has run: %v", err)
-	}
-}
-
-// At observe an invalid decision EOB the validator does judge in time is still
-// recorded and not written (the decision-EOB rule), synchronously.
-func TestDecisionEOBInvalidInTimeIsNotWrittenAtObserve(t *testing.T) {
-	g, events := observeGateway(t, EnforcementObserve, &shnsdk.FakeValidator{RejectIfContains: "ExplanationOfBenefit"})
-	ctx := withFindingContext(context.Background(), findingContext{LegType: "pas-claim", CorrelationID: "corr-eob2", Seam: "payer-native", Whose: "self"})
-	notWritten, detail := g.validateFHIRDecisionEOB(ctx, []byte(`{"resourceType":"ExplanationOfBenefit"}`))
-	if !notWritten || !strings.HasPrefix(detail, "decision EOB not written: it fails its own validation") {
-		t.Fatalf("an invalid decision EOB at observe is not written and named, got %v %q", notWritten, detail)
-	}
-	if got := observedFindings(events, "corr-eob2"); len(got) != 1 {
-		t.Fatalf("its finding is emitted before the answer, got %v", got)
 	}
 }
 

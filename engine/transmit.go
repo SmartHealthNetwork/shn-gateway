@@ -6,8 +6,8 @@
 //
 // Every JSON answer the gateway writes itself goes through writeJSON: an error
 // answer (status >= 400) is sealed as this gateway's own refusal and checked
-// like any other payload; a success answer is a local API summary (scenario
-// and console endpoints), which is not an exchange message.
+// like any other payload; a success answer is a local API summary (the
+// scenario endpoints), which is not an exchange message.
 package engine
 
 import (
@@ -118,6 +118,7 @@ func (g *Gateway) writePayload(w http.ResponseWriter, status int, contentType st
 		writeOwnershipFault(w)
 		return
 	}
+	exchangeOfWriter(w).answered(p)
 	if k.Role == relay.RoleRecipient && k.Direction == relay.DirectionResponse {
 		// An answer to a requester without a message frame: its outcome is
 		// the one it was checked against.
@@ -160,12 +161,13 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
+	exchangeOfWriter(w).answered(p)
 	w.Header().Set("Content-Type", contentType)
 	w.WriteHeader(status)
 	_, _ = w.Write(b)
 }
 
-// writeLocalJSON writes a successful local API answer (a scenario or console
+// writeLocalJSON writes a successful local API answer (a scenario route's
 // summary built from decoded values). Such an answer is not an exchange
 // message, so it has no row in the ownership table.
 func writeLocalJSON(w http.ResponseWriter, status int, contentType string, b []byte) {

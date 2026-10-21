@@ -252,8 +252,9 @@ func TestRecordLeg_StoreFailureIsLoggedCountedNotFatal(t *testing.T) {
 	gw2 := mustNew(t, cfg)
 
 	// Swaps the process-global logger: relies on gateway/engine having no t.Parallel()
-	// test (true today) — a parallel test in this package would race this buffer.
-	var logBuf bytes.Buffer
+	// test (true today). The buffer is locked because the gateway's certification
+	// worker may log from its own goroutine while the test reads it.
+	var logBuf lockedBuffer
 	log.SetOutput(&logBuf)
 	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 
@@ -263,7 +264,7 @@ func TestRecordLeg_StoreFailureIsLoggedCountedNotFatal(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("CRD with a failing exchange store = %d, want 200 (best-effort seam); body=%s", rec.Code, rec.Body.String())
 	}
-	// The CRD 200 path records exactly one leg (ingress.go: the AppendLeg after wrapCards).
+	// The CRD 200 path records exactly one leg (workstream_pa_ingress.go: the AppendLeg after wrapCards).
 	if n := strings.Count(logBuf.String(), "gateway: exchange store: append leg"); n != 1 {
 		t.Fatalf("exchange store error logged %d times, want 1:\n%s", n, logBuf.String())
 	}

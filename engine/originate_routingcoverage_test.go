@@ -99,6 +99,13 @@ func originDrive(t *testing.T, sor SystemOfRecord) (selectRec, signRec *httptest
 // answer and the requests the payer received.
 func dispatchDrive(t *testing.T, sor coveragesOriginSoR) (*httptest.ResponseRecorder, *originPayer) {
 	t.Helper()
+	return dispatchDriveObserved(t, sor, nil)
+}
+
+// dispatchDriveObserved is dispatchDrive with observer as the gateway's
+// Observer.
+func dispatchDriveObserved(t *testing.T, sor coveragesOriginSoR, observer func(ObserverEvent)) (*httptest.ResponseRecorder, *originPayer) {
+	t.Helper()
 	const performer = "Organization/org-dme-ox"
 	order, err := buildHomeOxygenDeviceRequest("dr-ox", "Patient/"+prefetchMember, performer)
 	if err != nil {
@@ -112,10 +119,25 @@ func dispatchDrive(t *testing.T, sor coveragesOriginSoR) (*httptest.ResponseReco
 	g, payer := originGateway(t, "provider-data", sor, &capturePopulator{}, func(string, []byte) (int, []byte) {
 		return 0, []byte(`{"cards":[]}`)
 	})
+	g.cfg.Observer = observer
 	rec := httptest.NewRecorder()
 	g.runCRDDispatch(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(testOrderBody(order, ""))), prefetchMember,
 		dispatchOrder{orderJSON: order, supplierJSON: supplier, orderRef: "DeviceRequest/dr-ox", performerRef: performer})
 	return rec, payer
+}
+
+// TestOriginatedCRD_RoutingReadRecorded: the routing read an originated CRD
+// request is built under is recorded as the search it ran.
+func TestOriginatedCRD_RoutingReadRecorded(t *testing.T) {
+	obs := &observed{}
+	_, payer := dispatchDriveObserved(t, coveragesSystem(t, originCoverage("cov-1", "active", "pay-1")), obs.observe)
+	if n := len(payer.sent("crd-order-dispatch")); n != 1 {
+		t.Fatalf("%d order-dispatch requests", n)
+	}
+	got := obs.routingReadsRecorded(t)
+	if len(got) != 1 || got[0].Outcome != SearchOK || got[0].Count != 1 || got[0].Source != "system-of-record" {
+		t.Fatalf("routing reads recorded %+v, want the one routing read, found", got)
+	}
 }
 
 func TestOriginatedCRD_RoutesAndCarriesTheRoutingChoice(t *testing.T) {

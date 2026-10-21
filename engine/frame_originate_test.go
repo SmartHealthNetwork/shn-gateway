@@ -219,7 +219,7 @@ func advertiseFixturePayerFrameV1(t *testing.T, gw *Gateway) {
 }
 
 // TestDispatchRelaysFramedRecipientError drives the free-form /scenario/dispatch handler
-// (originate_homeoxygen.go crd-order-dispatch site): a recipient that frames a 400
+// (module1_originate_homeoxygen.go crd-order-dispatch site): a recipient that frames a 400
 // OperationOutcome on the FIRST leg must surface at the HTTP caller byte-identically, not as
 // {"error":"recipient answered 400 (N bytes)"}.
 func TestDispatchRelaysFramedRecipientError(t *testing.T) {
@@ -252,7 +252,7 @@ func TestScenarioRelaysFramedRecipientError(t *testing.T) {
 }
 
 // TestPASTailRelaysFramedRecipientError drives the full order-dispatch chain through to the shared
-// lean PAS tail (pas_tail.go submitClaimAndResolve → the pas-claim site): the crd-order-dispatch +
+// lean PAS tail (module1_pas_tail.go submitClaimAndResolve → the pas-claim site): the crd-order-dispatch +
 // dtr-questionnaire-fetch legs succeed, and the recipient frames a 400 ONLY on pas-claim. The %w
 // audit is load-bearing here — submitClaimAndResolve must PROPAGATE the *RelayError (not collapse it
 // to err.Error()) so handleHomeOxygen can relay it verbatim.
@@ -487,7 +487,7 @@ func TestLegOriginatedCarriesRoute(t *testing.T) {
 	var events []ObserverEvent
 	env.originator.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
 
-	route, err := env.originator.selectLegLine(env.payerID, "crd-order-select", "corr-1")
+	route, err := env.originator.selectLegLine(env.payerID, "crd-order-select", "corr-1", "")
 	if err != nil {
 		t.Fatalf("selectLegLine: %v", err)
 	}
@@ -644,100 +644,68 @@ func TestLegOriginatedRouteChainOnArm3(t *testing.T) {
 	}
 }
 
-// TestTransformRefusalZeroBytes: the end-to-end zero-bytes pin — a
-// full origination whose route resolves to a gated transform chain must
-// refuse at egressAdapt BEFORE ever reaching the Hub (routeHitCount stays 0,
-// refuse-before-forward), observing exactly the leg.failed event this task
-// adds. Forces arm (3): own narrows its DeclaredContractVersions to
-// pa.pas@2.0 only, the peer declares pa.pas@2.2 only (declareRecipientVersions),
-// and D1c's EgressNativeLines={"2.0"} holds arm (2)'s native-reach view away
-// from 2.1/2.2 — so selectLegRoute has no arm-1/2 escape and must pick
-// chainFor("pa.pas","2.0","2.2"), the same gated,carry chain
-// TestEgressAdaptRefusalEmitsLegFailed pins directly. Drives the REAL
-// pas_tail.go submitClaimAndResolve (build the conformant Claim Bundle at
-// route.BuildLine -> egressAdapt -> [refuses here; OriginateLeg/roundTrip,
-// the only path that ever calls the fake Hub's /route, is never reached])
-// rather than a hand-rolled site call, so the zero-bytes property is
-// asserted against the genuine origination path, not a stub. The refusal
-// answers 422 (adaptFailureStatus).
-func TestTransformRefusalZeroBytes(t *testing.T) {
-	env := newInProcessExchange(t)
-	declareRecipientVersions(t, env, []string{"pa.pas@2.2"})
-	env.originator.cfg.DeclaredContractVersions = []string{"pa.pas@2.0"}
-	env.originator.cfg.EgressNativeLines = []string{"2.0"}
-	env.originator.cfg.ValidatorsByLine = map[string]shnsdk.Validator{
-		"2.0": shnsdk.NewFakeValidator(), "2.1": shnsdk.NewFakeValidator(), "2.2": shnsdk.NewFakeValidator(),
-	}
+// A chain that takes a gated row upward can only refuse (pa.pas 2.0->2.1 has
+// no honest source for what 2.1 requires), so module 2 does not plan it. With
+// module 2 on and no other reach to the payer's 2.2, the submission the
+// gateway builds at its own 2.0 is carried as built and the carry recorded,
+// as for any pair that shares no line; nothing refuses for want of a
+// translation. Only the participant's own REQUIRE_SHARED_LINE refuses the
+// pair, as routing, before anything reaches the Hub. Drives the REAL
+// module1_pas_tail.go submitClaimAndResolve. An apply-time refusal of a walk (one a
+// route can no longer take on SHN's own builds) still sends nothing; that is
+// TestEgressAdaptRefusalEmitsLegFailed's at the walk itself.
+func TestAGatedChainIsNotPlanned_TheSubmissionIsCarried(t *testing.T) {
+	for _, require := range []bool{false, true} {
+		t.Run(map[bool]string{false: "default", true: "REQUIRE_SHARED_LINE"}[require], func(t *testing.T) {
+			env := newInProcessExchange(t)
+			declareRecipientVersions(t, env, []string{"pa.pas@2.2"})
+			env.originator.cfg.DeclaredContractVersions = []string{"pa.pas@2.0"}
+			env.originator.cfg.EgressNativeLines = []string{"2.0"}
+			env.originator.cfg.TranslateIGLines = true
+			env.originator.cfg.RequireSharedLine = require
+			env.originator.cfg.ValidatorsByContractLine = contractLanes(map[string]shnsdk.Validator{
+				"2.0": shnsdk.NewFakeValidator(), "2.1": shnsdk.NewFakeValidator(), "2.2": shnsdk.NewFakeValidator(),
+			})
+			var events []ObserverEvent
+			env.originator.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
+			// The payer approves what it receives.
+			env.payerReturns(LegResult{Response: testResponse(pasGolden(t, "claimresponse-approved.json"))})
 
-	var events []ObserverEvent
-	env.originator.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
-
-	const (
-		member      = "MBR-COVERED"
-		patientRef  = "Patient/" + member
-		coverageRef = "Coverage/" + member
-	)
-	order := pasTailServiceRequest()
-	qr := []byte(`{"resourceType":"QuestionnaireResponse","id":"qr-t4","status":"completed","subject":{"reference":"` + patientRef + `"}}`)
-
-	orderRef, _ := resourceRef(order)
-	source := newRawDTRBuildSource(qr, nil, shnsdk.QRContext{PatientRef: patientRef, CoverageRef: coverageRef, OrderRef: orderRef})
-	decision, status, msg, err := env.originator.submitClaimAndFollow(env.ctx, env.req, pasFollowInputs{
-		pci: "pci-1", orderJSON: order, source: source, patientRef: patientRef, memberSystem: shnsdk.MemberSystem,
-		coverageRef: coverageRef, coverage: testMemberCoverage(member), insurer: testPayerOrganization(shnsdk.CMSPayerIdentity),
-		member: member, payer: shnsdk.CMSPayerIdentity, recipient: env.payerID,
-	})
-	respJSON := decision.PayerResponse
-	if err == nil {
-		t.Fatal("want an error — the gated chain must refuse before any leg is routed")
-	}
-	var sce *SemanticChangeError
-	if !errors.As(err, &sce) {
-		t.Fatalf("want a *SemanticChangeError, got %T: %v", err, err)
-	}
-	// A bridging refusal is the legible 422 the compatibility matrix states,
-	// never the 502 a gateway fault answers.
-	if status != http.StatusUnprocessableEntity {
-		t.Fatalf("status = %d, want %d", status, http.StatusUnprocessableEntity)
-	}
-	if msg == "" {
-		t.Fatal("want a non-empty refusal message")
-	}
-	if respJSON != nil {
-		t.Fatalf("respJSON must be nil (no leg was ever routed), got %q", respJSON)
-	}
-
-	// THE ROW: the fake Hub's /route was never hit — the refusal happened
-	// strictly before the Hub round-trip, not after a wasted send.
-	if got := env.routeHitCount(); got != 0 {
-		t.Fatalf("fake Hub /route was called %d times — a transform refusal must never reach the Hub", got)
-	}
-
-	var failed int
-	var ev ObserverEvent
-	for _, e := range events {
-		if e.Kind == "leg.failed" {
-			failed++
-			ev = e
-		}
-	}
-	if failed != 1 {
-		t.Fatalf("want exactly one leg.failed event, got %d (events: %+v)", failed, events)
-	}
-	if ev.LegType != "pas-claim" || ev.Counterpart != env.payerID {
-		t.Fatalf("leg.failed fields = %+v, want LegType=pas-claim Counterpart=%s", ev, env.payerID)
-	}
-	if !strings.Contains(ev.Detail, "semantic-change refusal") {
-		t.Fatalf("leg.failed Detail = %q, want it to contain %q", ev.Detail, "semantic-change refusal")
-	}
-	if ev.Route == nil || len(ev.Route.Chain) != 2 {
-		t.Fatalf("leg.failed Route = %+v, want the attempted 2-step chain", ev.Route)
-	}
-	wantSteps := []ChainStep{
-		{Module: "pa.pas 2.0->2.1", From: "2.0", To: "2.1", Class: "gated"},
-		{Module: "pa.pas 2.1->2.2", From: "2.1", To: "2.2", Class: "carry"},
-	}
-	if !reflect.DeepEqual(ev.Route.Chain, wantSteps) {
-		t.Fatalf("leg.failed Route.Chain = %+v, want %+v", ev.Route.Chain, wantSteps)
+			const (
+				member      = "MBR-COVERED"
+				patientRef  = "Patient/" + member
+				coverageRef = "Coverage/" + member
+			)
+			order := pasTailServiceRequest()
+			qr := []byte(`{"resourceType":"QuestionnaireResponse","id":"qr-t4","status":"completed","subject":{"reference":"` + patientRef + `"}}`)
+			orderRef, _ := resourceRef(order)
+			source := newRawDTRBuildSource(qr, nil, shnsdk.QRContext{PatientRef: patientRef, CoverageRef: coverageRef, OrderRef: orderRef})
+			_, status, msg, err := env.originator.submitClaimAndFollow(env.ctx, env.req, pasFollowInputs{
+				pci: "pci-1", orderJSON: order, source: source, patientRef: patientRef, memberSystem: shnsdk.MemberSystem,
+				coverageRef: coverageRef, coverage: testMemberCoverage(member), insurer: testPayerOrganization(shnsdk.CMSPayerIdentity),
+				member: member, payer: shnsdk.CMSPayerIdentity, recipient: env.payerID,
+			})
+			var sce *SemanticChangeError
+			if errors.As(err, &sce) {
+				t.Fatalf("a gated chain was planned and refused: %v", err)
+			}
+			kinds := map[string]int{}
+			for _, e := range events {
+				kinds[e.Kind]++
+			}
+			if kinds[legTransformedKind] != 0 {
+				t.Fatalf("a chain ran: %v", kinds)
+			}
+			if require {
+				var rre *RouteRefusalError
+				if !errors.As(err, &rre) || env.routeHitCount() != 0 {
+					t.Fatalf("REQUIRE_SHARED_LINE: %d %q %v, %d Hub hits; want the routing refusal before anything is sent", status, msg, err, env.routeHitCount())
+				}
+				return
+			}
+			if err != nil || status != 0 || env.routeHitCount() != 1 || kinds[LineCarriedEvent] == 0 {
+				t.Fatalf("default: %d %q %v, %d Hub hits, events %v; want the submission carried at 2.0 and the carry recorded", status, msg, err, env.routeHitCount(), kinds)
+			}
+		})
 	}
 }

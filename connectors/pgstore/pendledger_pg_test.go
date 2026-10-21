@@ -2,9 +2,9 @@ package pgstore
 
 // pendledger_pg_test.go holds the ledger rows that only the DURABLE backend can
 // answer, and that need in-package access: the injected clock behind the bounded
-// retention sweep, and a genuine mid-transaction EOB failure — the one thing an
-// in-memory store cannot produce, and the whole point of "the EOB is written in the
-// same transaction as the decision".
+// retention sweep, and a genuine mid-transaction key-write failure — the one thing
+// an in-memory store cannot produce, and the whole point of "the decision's keys
+// are written in the same transaction as the decision".
 //
 // Every row here is pg-gated (testPool skips without SHN_TEST_DATABASE_URL) and
 // runs in the serial `pg` job.
@@ -12,6 +12,7 @@ package pgstore
 import (
 	"context"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -182,47 +183,51 @@ func TestPgPendLedger_PurgeTakesTheKeysWithTheRow(t *testing.T) {
 	if keys != 0 {
 		t.Fatalf("%d lookup keys outlived their purged claim", keys)
 	}
-	m, err := s.LookupPended("provider-a", engine.PendKeys{RequesterHolder: "provider-a", PreAuthRef: "PA-1"}, nil)
+	m, err := s.LookupPended("provider-a", engine.PendKeys{RequesterHolder: "provider-a", PreAuthRef: "PA-1"})
 	if err != nil || m.Verdict != engine.PendMatchNone {
 		t.Fatalf("a purged claim is still findable: %+v,%v", m, err)
 	}
 }
 
-// TestPgPendLedger_DecisionAndEOBAreOneTransaction injects a REAL failure into the
-// EOB write — a trigger that raises inside the transaction, after the decision row
-// has already been written — and asserts the decision rolled back with it. This is
-// the atomicity claim itself: an in-memory store's EOB write cannot fail, so only
-// the durable backend can answer this row.
-func TestPgPendLedger_DecisionAndEOBAreOneTransaction(t *testing.T) {
+// TestPgPendLedger_DecisionAndItsKeysAreOneTransaction injects a REAL failure into
+// the write of the decision's authorization number — a trigger on
+// gw_pended_claim_key that raises inside the transaction, after the decision row
+// has already been written — and asserts the decision rolled back with it. This
+// is the atomicity claim itself: an in-memory store's key write cannot fail, so
+// only the durable backend can answer this row.
+func TestPgPendLedger_DecisionAndItsKeysAreOneTransaction(t *testing.T) {
 	at := time.Date(2026, 9, 17, 11, 0, 0, 0, time.UTC)
 	s := ledgerStore(t, func() time.Time { return at })
 	ctx := context.Background()
+	const requester, number = "provider-a", "AUTH-DECIDED"
 	if _, err := s.RecordPendedKeyed("PCI-A", "corr-A", at, engine.PendKeys{
-		RequesterHolder: "provider-a",
+		RequesterHolder: requester,
 		PreAuthRef:      "PA-1",
 	}); err != nil {
 		t.Fatal(err)
 	}
+	// The decision states its authorization number, and a follow-up names the
+	// authorization by it.
+	byNumber := engine.PendKeys{RequesterHolder: requester, PreAuthRef: number}
 
 	for _, stmt := range []string{
-		`CREATE OR REPLACE FUNCTION gw_eob_injected_failure() RETURNS trigger AS $$
-BEGIN RAISE EXCEPTION 'injected EOB write failure'; END; $$ LANGUAGE plpgsql`,
-		`CREATE TRIGGER gw_eob_injected_failure BEFORE INSERT ON gw_eob
-FOR EACH ROW EXECUTE FUNCTION gw_eob_injected_failure()`,
+		`CREATE OR REPLACE FUNCTION gw_pended_claim_key_injected_failure() RETURNS trigger AS $$
+BEGIN RAISE EXCEPTION 'injected key write failure'; END; $$ LANGUAGE plpgsql`,
+		`CREATE TRIGGER gw_pended_claim_key_injected_failure BEFORE INSERT ON gw_pended_claim_key
+FOR EACH ROW EXECUTE FUNCTION gw_pended_claim_key_injected_failure()`,
 	} {
 		if _, err := s.pool.Exec(ctx, stmt); err != nil {
 			t.Fatalf("arm the injected failure: %v", err)
 		}
 	}
 	t.Cleanup(func() {
-		_, _ = s.pool.Exec(ctx, `DROP TRIGGER IF EXISTS gw_eob_injected_failure ON gw_eob`)
-		_, _ = s.pool.Exec(ctx, `DROP FUNCTION IF EXISTS gw_eob_injected_failure()`)
+		_, _ = s.pool.Exec(ctx, `DROP TRIGGER IF EXISTS gw_pended_claim_key_injected_failure ON gw_pended_claim_key`)
+		_, _ = s.pool.Exec(ctx, `DROP FUNCTION IF EXISTS gw_pended_claim_key_injected_failure()`)
 	})
 
-	_, err := s.RecordDecision("PCI-A", "corr-A", engine.PendOutcomeApproved, at, engine.PendKeys{},
-		&engine.EOBRecord{SubjectPCI: "PCI-A", EOBID: "eob-1", JSON: []byte(`{"resourceType":"ExplanationOfBenefit"}`)})
-	if err == nil {
-		t.Fatal("RecordDecision returned nil with the EOB write failing")
+	_, err := s.RecordDecision("PCI-A", "corr-A", engine.PendOutcomeApproved, at, byNumber)
+	if err == nil || !strings.Contains(err.Error(), "injected key write failure") {
+		t.Fatalf("RecordDecision = %v, want the injected key write failure", err)
 	}
 
 	// No decision: the claim is still pended, and an amendment can still bind it.
@@ -231,27 +236,26 @@ FOR EACH ROW EXECUTE FUNCTION gw_eob_injected_failure()`,
 		t.Fatalf("PendRecordOf = %v,%v", ok, recErr)
 	}
 	if rec.State != engine.PendStatePended || rec.Outcome != "" || !rec.DecidedAt.IsZero() {
-		t.Fatalf("a failed EOB write left a decision behind: %+v", rec)
+		t.Fatalf("a failed key write left a decision behind: %+v", rec)
 	}
-	if got, found := s.EOBsForPatient("PCI-A"); found || len(got) != 0 {
-		t.Fatalf("%d EOBs were written by the failed transaction", len(got))
+	if m, err := s.LookupPended(requester, byNumber); err != nil || m.Verdict != engine.PendMatchNone {
+		t.Fatalf("the failed transaction indexed the authorization number: %+v,%v", m, err)
 	}
 
 	// With the failure removed the same call decides cleanly — the rollback left
-	// nothing wedged.
-	if _, err := s.pool.Exec(ctx, `DROP TRIGGER gw_eob_injected_failure ON gw_eob`); err != nil {
+	// nothing wedged — and indexes the authorization number with the decision.
+	if _, err := s.pool.Exec(ctx, `DROP TRIGGER gw_pended_claim_key_injected_failure ON gw_pended_claim_key`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.RecordDecision("PCI-A", "corr-A", engine.PendOutcomeApproved, at, engine.PendKeys{},
-		&engine.EOBRecord{SubjectPCI: "PCI-A", EOBID: "eob-1", JSON: []byte(`{"resourceType":"ExplanationOfBenefit"}`)}); err != nil {
+	if _, err := s.RecordDecision("PCI-A", "corr-A", engine.PendOutcomeApproved, at, byNumber); err != nil {
 		t.Fatalf("RecordDecision after the failure was removed: %v", err)
 	}
 	rec, _, _ = s.PendRecordOf("PCI-A", "corr-A")
 	if rec.State != engine.PendStateDecided || rec.Outcome != engine.PendOutcomeApproved {
 		t.Fatalf("the retried decision = %+v", rec)
 	}
-	if got, found := s.EOBsForPatient("PCI-A"); !found || len(got) != 1 {
-		t.Fatalf("EOBsForPatient = %d,%v, want one EOB", len(got), found)
+	if m, err := s.LookupPended(requester, byNumber); err != nil || m.Verdict != engine.PendMatchFound || m.CorrelationID != "corr-A" {
+		t.Fatalf("the retried decision's authorization number = %+v,%v, want it found", m, err)
 	}
 }
 
@@ -365,10 +369,10 @@ func TestPgPendLedger_OpenPendsListsOnlyUndecided(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := s.RecordDecision("PCI-done", "corr-done", "approved", now, engine.PendKeys{}, nil); err != nil {
+	if _, err := s.RecordDecision("PCI-done", "corr-done", "approved", now, engine.PendKeys{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.RecordDecision("PCI-undated", "corr-undated", "denied", time.Time{}, engine.PendKeys{}, nil); err != nil {
+	if _, err := s.RecordDecision("PCI-undated", "corr-undated", "denied", time.Time{}, engine.PendKeys{}); err != nil {
 		t.Fatal(err)
 	}
 	var decidedAt *time.Time

@@ -42,7 +42,7 @@ type SystemOfRecord interface {
 }
 
 // Store is the gateway's own durable business state (metadata/decision only —
-// AI-1-compatible: the payer tracking its own claims/EOBs/auth-numbers, never a
+// AI-1-compatible: the payer tracking its own claims/auth-numbers, never a
 // cross-holder clinical record). The partner does not implement this. Config.Store is
 // required (New panics without one); the published gateway (gateway/app) sets
 // NewMemStore, or the Postgres store in gateway/connectors/pgstore when
@@ -55,10 +55,6 @@ type Store interface {
 	BeginClaimUpdate(subjectPCI, correlationID string) (bool, error)
 	ReleaseClaimUpdate(subjectPCI, correlationID string) error
 	FinalizeClaimUpdate(subjectPCI, correlationID string) error
-
-	RecordEOB(subjectPCI, eobID string, eobJSON []byte) error
-	EOBsForPatient(subjectPCI string) ([][]byte, bool)
-	EOBByID(eobID string) ([]byte, bool)
 }
 
 // The in-memory Store is the shipped default behind the Store seam; every

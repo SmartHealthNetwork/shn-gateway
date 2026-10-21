@@ -1,0 +1,19 @@
+{
+  "workstream": "fqs",
+  "taxonomyVersion": 1,
+  "legs": [
+    {
+      "transactionType": "federated-query",
+      "stagedName": "fqs.federated-query",
+      "physics": "request-response",
+      "request": {"frame": "provider-tpo", "roles": ["provider"], "operation": "federated-query-submit"},
+      "response": {"frame": "facility-disclosure", "roles": ["facility"], "operation": "federated-query-response"},
+      "scope": "named-docs-only",
+      "payloadBinding": "required",
+      "consent": {"purpose": "TREAT", "custodianFrom": "request"},
+      "observe": false,
+      "frameOperations": [],
+      "advertise": true
+    }
+  ]
+}

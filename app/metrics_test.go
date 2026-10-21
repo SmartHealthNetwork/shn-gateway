@@ -409,8 +409,9 @@ func TestExchangeMetricBound(t *testing.T) {
 	if len(series) != exchangeSeriesBound {
 		t.Fatalf("distinct series=%d, exchangeSeriesBound=%d", len(series), exchangeSeriesBound)
 	}
-	// The count RUNNING.md states for today's lists.
-	if exchangeSeriesBound != 311 {
+	// The count RUNNING.md states for today's lists, in a release build (a
+	// test profile's legs add their own series).
+	if !toyProfileBuild && exchangeSeriesBound != 311 {
 		t.Fatalf("exchangeSeriesBound=%d; update the bound in docs/RUNNING.md \"Hosted tenant exchange metrics\" and this pin", exchangeSeriesBound)
 	}
 }

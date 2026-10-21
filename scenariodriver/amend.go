@@ -5,14 +5,14 @@ import (
 	"fmt"
 )
 
-// BuildAmendedRePOST builds a conformant amended re-POST bundle from the home-oxygen pended
-// golden (order code E0424 unchanged from the submit, no order-shaping). The bundle carries:
+// BuildAmendedRePOST builds a conformant PAS 2.0.1 amended re-POST bundle from the home-oxygen
+// pended golden (order code E0424 unchanged from the submit, no order-shaping). The bundle
+// carries one Claim, the update (asPAS201Update):
 //   - Claim.identifier[urn:shn:correlation] = amendCorr (the amend's own correlation)
-//   - Claim.related[0].claim: both reference="Claim/<priorID>" (for br-payer's bundle-inclusion
-//     validation per Da Vinci PAS) and identifier[urn:shn:correlation]=submitCorr (for SHN's
-//     parseConformantPASUpdateFacts to key BeginClaimUpdate on the partner-supplied corr)
-//   - The prior Claim resource (a clone of the golden Claim with id="…-prior") physically
-//     included in the bundle (br-payer PAS bundle validator requires the prior Claim be included)
+//   - Claim.related[0].claim.identifier[urn:shn:correlation] = submitCorr: the prior, named by
+//     its identifier alone. PAS 2.0.1's request Bundle allows one Claim (entry:Claim 1..1), so
+//     the prior is not carried; the reference payer looks it up in its own records
+//   - meta.profile profile-claim-update, the profile a PAS 2.0.1 update Claim is
 //   - A minimal QuestionnaireResponse (subject→Patient/member) as supplemental data (FR-32)
 //   - A Provenance targeting the QR (agent identified by provider holder identity) (FR-32 QR-variant)
 //
@@ -34,70 +34,8 @@ func BuildAmendedRePOST(member, submitCorr, amendCorr string) ([]byte, error) {
 	}
 	entries, _ := b["entry"].([]any)
 	const qrID = "amend-qr-1"
-	const priorClaimID = "home-oxygen-therapy-claim-prior"
-
-	// Clone the original Claim as the "prior" resource (br-payer requires the prior Claim to be
-	// physically included in the amendment bundle). The clone gets a -prior id suffix so the bundle
-	// contains two distinct Claim entries without id collision.
-	var priorClaimResource map[string]any
-	var priorClaimFullURL string
-	for _, e := range entries {
-		emap, _ := e.(map[string]any)
-		res, _ := emap["resource"].(map[string]any)
-		if res != nil && res["resourceType"] == "Claim" {
-			// Deep-copy via JSON round-trip.
-			raw2, _ := json.Marshal(res)
-			var clone map[string]any
-			_ = json.Unmarshal(raw2, &clone)
-			clone["id"] = priorClaimID
-			priorClaimResource = clone
-			priorClaimFullURL = "http://example.org/fhir/Claim/" + priorClaimID
-			break
-		}
-	}
-	if priorClaimResource == nil {
-		return nil, fmt.Errorf("golden has no Claim resource to clone as prior")
-	}
-
-	// Mutate the amend Claim:
-	//   - add amendCorr as own urn:shn:correlation (SHN ingress corr-threading for the amend leg)
-	//   - set related[prior] with BOTH reference (br-payer bundle-inclusion check) and identifier
-	//     (SHN parseConformantPASUpdateFacts reads identifier.value for BeginClaimUpdate lookup)
-	//   - add a relationship coding (Da Vinci PAS convention)
-	for _, e := range entries {
-		emap, _ := e.(map[string]any)
-		res, _ := emap["resource"].(map[string]any)
-		if res != nil && res["resourceType"] == "Claim" {
-			existing, _ := res["identifier"].([]any)
-			res["identifier"] = append(existing, map[string]any{
-				"system": "urn:shn:correlation",
-				"value":  amendCorr,
-			})
-			res["related"] = []any{map[string]any{
-				"relationship": map[string]any{
-					"coding": []any{map[string]any{
-						"system": "http://terminology.hl7.org/CodeSystem/ex-relatedclaimrelationship",
-						"code":   "prior",
-					}},
-				},
-				"claim": map[string]any{
-					// reference: satisfies br-payer's "prior Claim must be included in Bundle" check.
-					"reference": "Claim/" + priorClaimID,
-					// identifier: SHN's parseConformantPASUpdateFacts reads this value for BeginClaimUpdate.
-					"identifier": map[string]any{
-						"system": "urn:shn:correlation",
-						"value":  submitCorr,
-					},
-				},
-			}}
-			break
-		}
-	}
-
-	// Include the prior Claim resource in the bundle (required by br-payer).
-	priorClaimEntry := map[string]any{
-		"fullUrl":  priorClaimFullURL,
-		"resource": priorClaimResource,
+	if err := asPAS201Update(entries, submitCorr, amendCorr); err != nil {
+		return nil, err
 	}
 
 	// Inject a minimal QuestionnaireResponse (subject→member) as the supplemental resource.
@@ -116,16 +54,21 @@ func BuildAmendedRePOST(member, submitCorr, amendCorr string) ([]byte, error) {
 	// qrID != "" && hasDR=false → wantTarget="QuestionnaireResponse/"+qrID.
 	// fullUrl required by the Da Vinci PAS Bundle spec (br-payer validates it).
 	const provID = "amend-prov-1"
+	recorded, err := bundleTimestamp(b)
+	if err != nil {
+		return nil, err
+	}
 	provEntry := map[string]any{
 		"fullUrl": "http://example.org/fhir/Provenance/" + provID,
 		"resource": map[string]any{
 			"resourceType": "Provenance",
 			"id":           provID,
 			"target":       []any{map[string]any{"reference": "QuestionnaireResponse/" + qrID}},
+			"recorded":     recorded,
 			"agent":        []any{map[string]any{"who": map[string]any{"identifier": map[string]any{"system": "http://smarthealth.network/ids/holder", "value": "provider"}}}},
 		},
 	}
-	b["entry"] = append(entries, priorClaimEntry, qrEntry, provEntry)
+	b["entry"] = append(entries, qrEntry, provEntry)
 
 	out, err := json.Marshal(b)
 	if err != nil {
@@ -138,12 +81,13 @@ func BuildAmendedRePOST(member, submitCorr, amendCorr string) ([]byte, error) {
 	return AddRoutablePayor(out)
 }
 
-// BuildFederatedAmendedRePOST builds a conformant amended re-POST from the home-oxygen pended
-// golden (order code E0424 unchanged from the submit, persona-selection-only, no order-shaping),
-// carrying the CDex-middle evidence: the federated DiagnosticReport + a Provenance targeting it
-// (FR-32 DR-variant). This mirrors BuildAmendedRePOST but swaps the QR-variant supplemental for
-// the DiagnosticReport-variant — the federated evidence UC-05 retrieves, which the orchestration
-// carries onto the ClaimUpdate. br-payer requires the prior Claim to be physically included.
+// BuildFederatedAmendedRePOST builds a conformant PAS 2.0.1 amended re-POST from the home-oxygen
+// pended golden (order code E0424 unchanged from the submit, persona-selection-only, no
+// order-shaping), carrying the CDex-middle evidence: the federated DiagnosticReport + a
+// Provenance targeting it (FR-32 DR-variant). This mirrors BuildAmendedRePOST, one Claim naming
+// its prior by identifier (asPAS201Update), but swaps the QR-variant supplemental for the
+// DiagnosticReport-variant — the federated evidence UC-05 retrieves, which the orchestration
+// carries onto the ClaimUpdate.
 func BuildFederatedAmendedRePOST(member, submitCorr, amendCorr string, drJSON []byte) ([]byte, error) {
 	// Start from the pend golden: rebind + routable payor FIRST (preserving pasBundleFromGolden order).
 	rebound, err := RebindPASPatient(PASPendGolden(), member)
@@ -160,56 +104,11 @@ func BuildFederatedAmendedRePOST(member, submitCorr, amendCorr string, drJSON []
 		return nil, fmt.Errorf("parse bundle: %w", err)
 	}
 	entries, _ := b["entry"].([]any)
-	const priorClaimID = "home-oxygen-therapy-claim-prior"
 	const drID = "dr-uc05-operative" // the facility's operative DiagnosticReport id
 	const provID = "uc05-prov-1"     // Provenance targeting the federated DR (FR-32 DR-variant)
-
-	// Clone the original Claim as the "prior" resource (br-payer requires the prior Claim to be
-	// physically included in the amendment bundle), suffixing the id to avoid a collision.
-	var priorClaimResource map[string]any
-	var priorClaimFullURL string
-	for _, e := range entries {
-		res, _ := e.(map[string]any)["resource"].(map[string]any)
-		if res != nil && res["resourceType"] == "Claim" {
-			raw, _ := json.Marshal(res)
-			var clone map[string]any
-			_ = json.Unmarshal(raw, &clone)
-			clone["id"] = priorClaimID
-			priorClaimResource = clone
-			priorClaimFullURL = "http://example.org/fhir/Claim/" + priorClaimID
-			break
-		}
+	if err := asPAS201Update(entries, submitCorr, amendCorr); err != nil {
+		return nil, err
 	}
-	if priorClaimResource == nil {
-		return nil, fmt.Errorf("golden has no Claim resource to clone as prior")
-	}
-
-	// Mutate the amend Claim: own urn:shn:correlation=amendCorr + related[prior] carrying BOTH a
-	// reference (br-payer's bundle-inclusion check) and identifier (SHN's BeginClaimUpdate lookup).
-	for _, e := range entries {
-		res, _ := e.(map[string]any)["resource"].(map[string]any)
-		if res != nil && res["resourceType"] == "Claim" {
-			existing, _ := res["identifier"].([]any)
-			res["identifier"] = append(existing, map[string]any{
-				"system": "urn:shn:correlation", "value": amendCorr,
-			})
-			res["related"] = []any{map[string]any{
-				"relationship": map[string]any{
-					"coding": []any{map[string]any{
-						"system": "http://terminology.hl7.org/CodeSystem/ex-relatedclaimrelationship",
-						"code":   "prior",
-					}},
-				},
-				"claim": map[string]any{
-					"reference":  "Claim/" + priorClaimID,
-					"identifier": map[string]any{"system": "urn:shn:correlation", "value": submitCorr},
-				},
-			}}
-			break
-		}
-	}
-
-	priorClaimEntry := map[string]any{"fullUrl": priorClaimFullURL, "resource": priorClaimResource}
 
 	// The federated DiagnosticReport (rebound onto the submit's member so the FR-32 subject-bind
 	// holds — br-payer keys on the order code, the bundle's Patient is member). Its id is
@@ -227,21 +126,71 @@ func BuildFederatedAmendedRePOST(member, submitCorr, amendCorr string, drJSON []
 
 	// Provenance targeting the federated DiagnosticReport, agent → the provider (FR-32 DR-variant:
 	// hasDR=true → wantTarget = "DiagnosticReport/"+drID).
+	recorded, err := bundleTimestamp(b)
+	if err != nil {
+		return nil, err
+	}
 	provEntry := map[string]any{
 		"fullUrl": "http://example.org/fhir/Provenance/" + provID,
 		"resource": map[string]any{
 			"resourceType": "Provenance",
 			"id":           provID,
 			"target":       []any{map[string]any{"reference": "DiagnosticReport/" + drID}},
+			"recorded":     recorded,
 			"agent":        []any{map[string]any{"who": map[string]any{"identifier": map[string]any{"system": "http://smarthealth.network/ids/holder", "value": "provider"}}}},
 		},
 	}
 
-	b["entry"] = append(entries, priorClaimEntry, drEntry, provEntry)
+	b["entry"] = append(entries, drEntry, provEntry)
 
 	out, err := json.Marshal(b)
 	if err != nil {
 		return nil, fmt.Errorf("marshal: %w", err)
 	}
 	return out, nil
+}
+
+// pasProfileClaimUpdate is the profile a PAS 2.0.1 update Claim declares. The golden's Claim
+// declares profile-claim, the submission's profile.
+const pasProfileClaimUpdate = "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claim-update"
+
+// asPAS201Update turns the golden's one Claim into the PAS 2.0.1 update of the submission
+// submitCorr names: its one identifier is amendCorr (a PAS 2.0.1 Claim carries exactly one,
+// replacing the golden's); it declares profile-claim-update; and related[0] names the prior by
+// identifier alone (relationship prior), the identifier the submission carried
+// (InjectShnCorrelation) and the one parseConformantPASUpdateFacts keys the update on. The prior
+// itself is not added: PAS 2.0.1's request Bundle allows one Claim.
+func asPAS201Update(entries []any, submitCorr, amendCorr string) error {
+	for _, e := range entries {
+		res, _ := e.(map[string]any)["resource"].(map[string]any)
+		if res == nil || res["resourceType"] != "Claim" {
+			continue
+		}
+		res["identifier"] = []any{map[string]any{"system": "urn:shn:correlation", "value": amendCorr}}
+		res["meta"] = map[string]any{"profile": []any{pasProfileClaimUpdate}}
+		res["related"] = []any{map[string]any{
+			"relationship": map[string]any{
+				"coding": []any{map[string]any{
+					"system": "http://terminology.hl7.org/CodeSystem/ex-relatedclaimrelationship",
+					"code":   "prior",
+				}},
+			},
+			"claim": map[string]any{
+				"identifier": map[string]any{"system": "urn:shn:correlation", "value": submitCorr},
+			},
+		}}
+		return nil
+	}
+	return fmt.Errorf("golden has no Claim resource to make the update")
+}
+
+// bundleTimestamp returns the Bundle's own timestamp, the instant an amendment's
+// Provenance records (Provenance.recorded is 1..1 in base R4): read from the golden
+// the Bundle is built from, so the driver's Bundles stay deterministic.
+func bundleTimestamp(b map[string]any) (string, error) {
+	ts, _ := b["timestamp"].(string)
+	if ts == "" {
+		return "", fmt.Errorf("the golden Bundle carries no timestamp for its Provenance to record")
+	}
+	return ts, nil
 }

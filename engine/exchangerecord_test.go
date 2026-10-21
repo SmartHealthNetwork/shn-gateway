@@ -129,20 +129,14 @@ func TestExchangeKindsAreThePACatalog(t *testing.T) {
 			seen[v] = true
 		}
 	}
-	var legs []string
-	for leg := range paCatalog {
-		legs = append(legs, leg)
-	}
+	legs := catalogLegs()
 	kinds := slices.Clone(ExchangeKinds[:len(ExchangeKinds)-1])
-	slices.Sort(legs)
 	slices.Sort(kinds)
 	if !slices.Equal(legs, kinds) {
-		t.Fatalf("ExchangeKinds %v, want the PA catalog's legs %v", kinds, legs)
+		t.Fatalf("ExchangeKinds %v, want the compiled-in catalogs' legs %v", kinds, legs)
 	}
-	for route := range ingressRoutes {
-		if !slices.Contains(ExchangeRoutes, route) {
-			t.Errorf("ingress route %q is not in ExchangeRoutes", route)
-		}
+	if want := append(workstreamIngressRouteNames(), RouteSubstrateInbound, ExchangeOther); !slices.Equal(ExchangeRoutes, want) {
+		t.Errorf("ExchangeRoutes %v, want the workstreams' ingress routes and the inbound route %v", ExchangeRoutes, want)
 	}
 }
 
@@ -196,7 +190,7 @@ func TestExchangeRecord_IngressAnsweredAndUpstreamError(t *testing.T) {
 func TestExchangeRecord_IngressAuthenticationRefusal(t *testing.T) {
 	var got exchangeRecords
 	g := &Gateway{cfg: Config{CorrelationGen: func() string { return "minted-401" }, ExchangeObserved: got.observe, HolderID: "provider"}}
-	for route := range ingressRoutes {
+	for _, route := range workstreamIngressRouteNames() {
 		t.Run(route, func(t *testing.T) {
 			r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader("{}"))
 			r.SetPathValue("id", "shn-order-sign")
@@ -613,7 +607,7 @@ func inboundRequest(t *testing.T, p *levelPayer, leg string, mutate func(*levelP
 // inboundRequestWith is inboundRequest sealing inboundPayload.
 func inboundRequestWith(t *testing.T, p *levelPayer, leg string, inboundPayload []byte, mutate func(*levelPayer, *shnsdk.Envelope), body []byte) *http.Request {
 	t.Helper()
-	spec := paCatalog[leg]
+	spec, _ := legSpecFor(leg)
 	clock := p.g.cfg.Clock()
 	env, err := shnsdk.Seal(shnsdk.Metadata{
 		Sender: p.requester.ID, Recipient: p.g.cfg.HolderID, TransactionType: leg,
@@ -809,6 +803,11 @@ func TestExchangeRecord_InboundLegacyRequester(t *testing.T) {
 	if ans.framed || rec.Outcome != ExchangeUpstreamError || rec.Status != ans.status ||
 		rec.Backend == nil || rec.Backend.ErrorClass != BackendHTTP5xx {
 		t.Fatalf("answer %d framed=%v; record %+v backend %+v", ans.status, ans.framed, rec, rec.Backend)
+	}
+	// What the requester received is the gateway's refusal, not the payer's
+	// answer: the record says whose it is.
+	if rec.Ownership != "relayed" || rec.AnswerOwnership != "authored" || rec.AnswerBuilder != string(relay.BuilderGatewayRefusal) {
+		t.Fatalf("forward %q, answer %q by %q: want the forward relayed and the gateway's own refusal", rec.Ownership, rec.AnswerOwnership, rec.AnswerBuilder)
 	}
 }
 
@@ -1039,6 +1038,9 @@ func TestExchangeRecord_InboundOwnershipFault(t *testing.T) {
 	rec := got.only(t)
 	if rec.Outcome != ExchangeRefused || rec.Rule != RefusalFidelity {
 		t.Fatalf("record %s %s/%s", rec.Outcome, rec.RefusedBy, rec.Rule)
+	}
+	if rec.AnswerOwnership != "authored" || rec.AnswerBuilder != string(relay.BuilderGatewayRefusal) || len(rec.AnswerEdits) != 0 {
+		t.Fatalf("answer %q by %q edits %v, want the gateway's own refusal", rec.AnswerOwnership, rec.AnswerBuilder, rec.AnswerEdits)
 	}
 }
 
@@ -1286,7 +1288,7 @@ func TestExchangeRecord_InboundOwnershipFaults(t *testing.T) {
 		return got.only(t)
 	}
 	rec := run(func(w http.ResponseWriter, r *http.Request) {
-		p.g.respondLeg(w, r, spec.RespFrame, spec.RespOp, "crd-order-select", env.Metadata.CorrelationID, LegResult{}.Response, tok.Subject, p.requester.ID, "", "")
+		p.g.respondLeg(w, r, spec.RespFrame, spec.RespOp, "crd-order-select", env.Metadata.CorrelationID, LegResult{}.Response, http.StatusOK, tok.Subject, p.requester.ID, "", "")
 	})
 	if rec.Outcome != ExchangeRefused || rec.Rule != RefusalFidelity {
 		t.Fatalf("answer build: %s %s/%s", rec.Outcome, rec.RefusedBy, rec.Rule)
@@ -2180,5 +2182,32 @@ func TestExchangeRecord_EligibilityAnswerRepeatingAMember(t *testing.T) {
 		if rec := got.only(t); rec.Outcome != ExchangeRefused || rec.Rule != RefusalIntegrity || rec.Backend == nil || rec.Backend.ErrorClass != BackendMalformed {
 			t.Errorf("%s: %s %s/%s backend %+v", level, rec.Outcome, rec.RefusedBy, rec.Rule, rec.Backend)
 		}
+	}
+}
+
+// TestExchangeClosedLists_Pinned: the exchange kinds and routes a PA gateway
+// records, as sets, and the observer kinds its ingress emits. Deriving them
+// from the registered workstreams changes none of them.
+func TestExchangeClosedLists_Pinned(t *testing.T) {
+	asSet := func(list []string) []string {
+		out := slices.Clone(list)
+		slices.Sort(out)
+		return out
+	}
+	wantKinds := []string{"coverage-eligibility", "dtr-questionnaire-fetch", "federated-query", "patient-dtr",
+		"crd-order-select", "crd-order-dispatch", "pas-claim", "pas-claim-update", "pas-claim-inquire", ExchangeOther}
+	wantKinds = append(wantKinds, profileLegs()...)
+	if got := asSet(ExchangeKinds); !slices.Equal(got, asSet(wantKinds)) {
+		t.Errorf("ExchangeKinds %v, want %v", got, asSet(wantKinds))
+	}
+	wantRoutes := []string{RouteCRD, RouteDTR, RoutePAS, RoutePASInquire, RouteEligibility, RouteFederatedQuery, RouteSubstrateInbound, ExchangeOther}
+	if got := asSet(ExchangeRoutes); !slices.Equal(got, asSet(wantRoutes)) {
+		t.Errorf("ExchangeRoutes %v, want %v", got, asSet(wantRoutes))
+	}
+	if got := ingressDiagnosticKind("provider", true); got != "provider.ingress.request" {
+		t.Errorf("a provider's ingress request kind %q, want provider.ingress.request", got)
+	}
+	if got := ingressDiagnosticKind("provider", false); got != "provider.ingress.response" {
+		t.Errorf("a provider's ingress response kind %q, want provider.ingress.response", got)
 	}
 }

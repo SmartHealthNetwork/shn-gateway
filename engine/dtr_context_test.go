@@ -179,7 +179,7 @@ func TestDTRValidationTransportAndRefusals(t *testing.T) {
 				io.WriteString(w, `{"resourceType":"OperationOutcome","issue":[{"severity":"information","code":"informational"}]}`)
 			}))
 			defer server.Close()
-			g := &Gateway{cfg: Config{Validator: failIfCalledValidator{}, ValidatorsByLine: map[string]shnsdk.Validator{line: shnsdk.NewOperationValidator(server.URL)}}}
+			g := &Gateway{cfg: Config{Validator: failIfCalledValidator{}, ValidatorsByContractLine: contractLanes(map[string]shnsdk.Validator{line: shnsdk.NewOperationValidator(server.URL)})}}
 			if status, msg := g.validateDTRQuestionnaireResponse(context.Background(), []byte(contextQR), line); status != 0 {
 				t.Fatalf("%d %s", status, msg)
 			}
@@ -189,16 +189,16 @@ func TestDTRValidationTransportAndRefusals(t *testing.T) {
 			if status, _ := g.validateDTRQuestionnaireResponse(context.Background(), []byte(contextQR), "9.9"); status != 500 {
 				t.Fatalf("unknown line status=%d", status)
 			}
-			g.cfg.ValidatorsByLine = map[string]shnsdk.Validator{"missing": shnsdk.NewFakeValidator()}
+			g.cfg.ValidatorsByContractLine = contractLanes(map[string]shnsdk.Validator{"missing": shnsdk.NewFakeValidator()})
 			if status, _ := g.validateDTRQuestionnaireResponse(context.Background(), []byte(contextQR), line); status != 500 {
 				t.Fatalf("unlaned status=%d", status)
 			}
-			g.cfg.ValidatorsByLine = map[string]shnsdk.Validator{line: NewLineFakeValidator(line)}
+			g.cfg.ValidatorsByContractLine = contractLanes(map[string]shnsdk.Validator{line: NewLineFakeValidator(line)})
 			if status, _ := g.validateDTRQuestionnaireResponse(context.Background(), []byte(contextQR), line); status != 422 {
 				t.Fatalf("invalid final status=%d", status)
 			}
 			outage := &shnsdk.OperationValidator{BaseURL: "http://validator.test/fhir", Client: unreachableClient(t, http.MethodPost, "/fhir/QuestionnaireResponse/$validate")}
-			g.cfg.ValidatorsByLine = map[string]shnsdk.Validator{line: outage}
+			g.cfg.ValidatorsByContractLine = contractLanes(map[string]shnsdk.Validator{line: outage})
 			if status, msg := g.validateDTRQuestionnaireResponse(context.Background(), []byte(contextQR), line); status != 500 || msg != "validator unavailable" {
 				t.Fatalf("outage = %d %q, want 500 %q", status, msg, "validator unavailable")
 			}

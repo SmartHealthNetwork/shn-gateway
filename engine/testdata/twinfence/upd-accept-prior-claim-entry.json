@@ -1,7 +1,7 @@
 {
   "name": "upd-accept-prior-claim-entry",
   "family": "update-bind",
-  "description": "Every amendment appends the prior Claim as a resolvable bundle entry after the operative update Claim; the member binds from the operative (first) Claim, and the patient-less prior entry must not clobber it (here the QR-targeted variant with absolute references).",
+  "description": "An amendment may carry the prior Claim as a resolvable bundle entry after the operative update Claim (the PAS 2.1+ shape, which a payer may still accept at 2.0.1); the member binds from the operative (first) Claim, and the prior entry must not clobber it (here the QR-targeted variant with absolute references).",
   "expect": "accept",
   "tokenMember": "MBR-COVERED",
   "originalCorr": "twinfence-sub-0001",
@@ -125,7 +125,7 @@
                   "system": "urn:shn:correlation",
                   "value": "twinfence-sub-0001"
                 },
-                "reference": "https://shn.example/fhir/Claim/convergence-claim"
+                "reference": "https://shn.example/fhir/Claim/convergence-claim-update-prior"
               }
             }
           ],
@@ -207,9 +207,9 @@
           "code": {
             "coding": [
               {
-                "system": "http://www.ama-assn.org/go/cpt",
                 "code": "72148",
-                "display": "MRI lumbar spine w/o contrast"
+                "display": "MRI lumbar spine w/o contrast",
+                "system": "http://www.ama-assn.org/go/cpt"
               }
             ]
           },
@@ -219,8 +219,8 @@
             {
               "coding": [
                 {
-                  "system": "http://hl7.org/fhir/sid/icd-10-cm",
-                  "code": "M51.16"
+                  "code": "M51.16",
+                  "system": "http://hl7.org/fhir/sid/icd-10-cm"
                 }
               ]
             }
@@ -368,10 +368,10 @@
         }
       },
       {
-        "fullUrl": "https://shn.example/fhir/Claim/convergence-claim",
+        "fullUrl": "https://shn.example/fhir/Claim/convergence-claim-update-prior",
         "resource": {
-          "created": "2026-06-01T12:00:00Z",
-          "id": "convergence-claim",
+          "created": "2026-06-04T00:00:00Z",
+          "id": "convergence-claim-update-prior",
           "identifier": [
             {
               "system": "urn:shn:correlation",
@@ -390,6 +390,80 @@
           "insurer": {
             "reference": "https://shn.example/fhir/Organization/org-cms-payer"
           },
+          "item": [
+            {
+              "category": {
+                "coding": [
+                  {
+                    "code": "1",
+                    "display": "Medical Care",
+                    "system": "https://codesystem.x12.org/005010/1365"
+                  }
+                ]
+              },
+              "extension": [
+                {
+                  "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService",
+                  "valueReference": {
+                    "reference": "https://shn.example/fhir/ServiceRequest/convergence-sr"
+                  }
+                },
+                {
+                  "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-certificationType",
+                  "valueCodeableConcept": {
+                    "coding": [
+                      {
+                        "code": "I",
+                        "display": "Initial",
+                        "system": "https://codesystem.x12.org/005010/1322"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceItemRequestType",
+                  "valueCodeableConcept": {
+                    "coding": [
+                      {
+                        "code": "IN",
+                        "display": "Initial Medical Services Reservation",
+                        "system": "https://codesystem.x12.org/005010/1525"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-infoChanged",
+                  "valueCode": "changed"
+                },
+                {
+                  "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-itemTraceNumber",
+                  "valueIdentifier": {
+                    "system": "urn:shn:pas:item-trace",
+                    "value": "twinfence-sub-0001.1"
+                  }
+                }
+              ],
+              "locationCodeableConcept": {
+                "coding": [
+                  {
+                    "code": "11",
+                    "system": "https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set"
+                  }
+                ]
+              },
+              "productOrService": {
+                "coding": [
+                  {
+                    "code": "72148",
+                    "display": "MRI lumbar spine w/o contrast",
+                    "system": "http://www.ama-assn.org/go/cpt"
+                  }
+                ]
+              },
+              "sequence": 1
+            }
+          ],
           "patient": {
             "reference": "https://shn.example/fhir/Patient/MBR-COVERED"
           },

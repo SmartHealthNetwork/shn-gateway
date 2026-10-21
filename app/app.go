@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"math"
 	"net"
 	"net/http"
@@ -43,6 +44,7 @@ import (
 	"github.com/SmartHealthNetwork/shn-gateway/diagnostics"
 	engine "github.com/SmartHealthNetwork/shn-gateway/engine"
 	observer "github.com/SmartHealthNetwork/shn-gateway/observer"
+	"github.com/SmartHealthNetwork/shn-gateway/scenarioauth"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 	health "github.com/SmartHealthNetwork/shn-sdk/health"
 	metrics "github.com/SmartHealthNetwork/shn-sdk/metrics"
@@ -99,8 +101,6 @@ type config struct {
 	AuthzURL        string
 	HubURL          string
 	ConsentURL      string
-	AuditURL        string
-	PHGURL          string
 	RegistrarURL    string
 	FHIRValidateURL string
 	// FHIRValidateURL21 / FHIRValidateURL22 are the per-LINE $validate lanes
@@ -108,14 +108,14 @@ type config struct {
 	// A HAPI instance can host exactly ONE version of an IG, so a deployment that
 	// DECLARES a 2.1 or 2.2 contract line must run a validator for that line;
 	// FHIR_VALIDATE_URL remains the canonical (2.0) lane. Boot fails closed when a
-	// declared non-canonical line has no lane (FR-36/FR-G29) — see
-	// validatorLanesForDeclared.
+	// declared non-canonical line has no lane (FR-36/FR-G29), at every level but
+	// none — see validatorLanesForDeclared.
 	FHIRValidateURL21 string
 	FHIRValidateURL22 string
 	// FHIRCertifyURL21 / FHIRCertifyURL22 (FHIR_CERTIFY_URL_2_1 / _2_2) are
 	// $validate addresses used ONLY by the certification evidence for that line.
 	// They are never routing lanes: a certify-only address does not enter
-	// ValidatorsByLine, so it neither honours an inbound frame at that line nor
+	// ValidatorsByContractLine, so it neither honours an inbound frame at that line nor
 	// lets origination target it. For evidence the precedence is
 	// FHIR_CERTIFY_URL_<line>, then FHIR_VALIDATE_URL_<line>, then the default
 	// lane once routing has qualified it (certificationValidators).
@@ -270,7 +270,7 @@ type config struct {
 	// native responder — nativeResponder.strictExtensions, DORMANT plumbing
 	// (no Handle-filter consult, no behavior delta; see that field's
 	// comment in gateway/engine/native.go and g.strictPeer's comment in
-	// originate.go for why this flag has NO live routing effect anywhere
+	// linereach.go for why this flag has NO live routing effect anywhere
 	// today).
 	PayerDavinciStrictExtensions bool
 
@@ -287,11 +287,6 @@ type config struct {
 	// for a system that validates that header its own way. Default: sent.
 	PayerDavinciBackendCorrelationOff bool
 	payerDavinciBackendCorrelationRaw string
-	// PatientAccessOff leaves the payer's Patient Access API unmounted
-	// (PATIENT_ACCESS_API=off; unset or "on" mounts it). A temporary seam: the
-	// Patient Access API is being removed, and its removal deletes this setting
-	// with it. engine.Config.PatientAccessOff.
-	PatientAccessOff bool
 	// PayerDavinciBackendTimeout bounds each call to the payer's own system
 	// (PAYER_DAVINCI_BACKEND_TIMEOUT, default defaultPayerBackendTimeout): a
 	// system slower than that is answered this gateway's framed 504 while the
@@ -363,6 +358,13 @@ type config struct {
 	// a pair's messages are carried as sent and recorded. Set by
 	// REQUIRE_SHARED_LINE ("true" or "false").
 	RequireSharedLine bool
+	// TranslateIGLines is the participant's opt-in to translating between IG
+	// lines (module 2): a message the gateway builds is carried to a peer's
+	// line where a certified translation exists, and a questionnaire package
+	// answer reaches its system under its own DTR line's names. By default
+	// (unset or "false") nothing is translated. Set by TRANSLATE_IG_LINES
+	// ("true" or "false").
+	TranslateIGLines bool
 	// EnrichNativeRequests is the participant's opt-in to having its gateway add
 	// what a Da Vinci-native request leaves out, from its own system of record:
 	// the CDS Hooks prefetch fill (E-02) and the questionnaire-package Coverage
@@ -384,11 +386,24 @@ type config struct {
 	// or "false", together with REQUIRE_KNOWN_MEMBERS=true it contradicts it, and
 	// loadConfig refuses to boot.
 	acceptUnknownMembersAlias string
+	// ignoredSettingLines holds a boot warning for each of ignoredSettings still
+	// set: nothing reads them any more, so they only warn.
+	ignoredSettingLines []string
 
 	// IngressBaseURL and IngressClients are resolved from ProviderDavinciIngressBaseURL
 	// + IngressClientsFile by loadConfig and passed directly into engine.Config.
 	IngressBaseURL string
 	IngressClients map[string]engine.IngressClientRegistration
+
+	// ScenarioCallersFile names the callers a provider gateway's /scenario
+	// routes admit: a JSON array of {label, public_key}, the key a
+	// base64 Ed25519 public key. Set by SCENARIO_CALLERS_FILE. A malformed file
+	// refuses boot; an empty array admits no caller. Unset leaves the routes
+	// unauthenticated, as they were: a temporary default, until every stack
+	// sets it, that becomes refuse. ScenarioCallers is what loadConfig reads
+	// from it.
+	ScenarioCallersFile string
+	ScenarioCallers     map[string]ed25519.PublicKey
 
 	// ChecksToken gates the operator connectivity-probe surface at
 	// /internal/checks. Set by CHECKS_TOKEN. Empty (the default)
@@ -497,6 +512,28 @@ var removedSettings = []struct{ key, replacedBy string }{
 	{"PAYER_DAVINCI_DISPATCH_HOOK", "the request's hook is never changed; the payer's CDS service is chosen by the request's hook (PAYER_DAVINCI_DISPATCH_SERVICE_ID still names one)"},
 }
 
+// ignoredSettings are settings shn-gateway v0.63.0 stopped reading, each with
+// what it served. Unlike removedSettings, a deployment that still sets one
+// starts as before (the setting switched nothing it relays or refuses) and logs
+// one warning per setting, so the leftover is never silent either.
+var ignoredSettings = []struct{ key, served string }{
+	{"PATIENT_ACCESS_API", "the Patient Access API"},
+	{"AUDIT_URL", "the Patient Access API's audit record"},
+	{"PHG_URL", "the provider gateway's read of the PHG's denial view"},
+}
+
+// ignoredSettingLines returns the boot warning for each of ignoredSettings that
+// getenv sets, in ignoredSettings order.
+func ignoredSettingLines(getenv func(string) string) []string {
+	var lines []string
+	for _, ignored := range ignoredSettings {
+		if getenv(ignored.key) != "" {
+			lines = append(lines, fmt.Sprintf("gateway: WARNING: %s is set but no longer read: shn-gateway v0.63.0 removed %s", ignored.key, ignored.served))
+		}
+	}
+	return lines
+}
+
 // errNoSystemOfRecord refuses a gateway with no FHIR_DATA_URL that must read
 // its members from one: every role but a payer that forwards natively.
 var errNoSystemOfRecord = fmt.Errorf("gateway: FHIR_DATA_URL is required — the gateway reads its members, coverage and " +
@@ -546,6 +583,12 @@ func loadConfig(getenv func(string) string) (config, error) {
 			return config{}, fmt.Errorf("gateway: %s was removed and must be unset: %s", removed.key, removed.replacedBy)
 		}
 	}
+	// Before any level or lane is read: a released build refuses the validator test
+	// double whatever else is configured, a validator URL and level none included
+	// (testdouble.go).
+	if getenv("SHN_FAKE_VALIDATOR") != "" && !testDoubleAvailable() {
+		return config{}, errors.New(testDoubleRefusal)
+	}
 
 	secretsDir := getenv("SHN_SECRETS")
 	if secretsDir == "" {
@@ -564,8 +607,6 @@ func loadConfig(getenv func(string) string) (config, error) {
 		AuthzURL:              getenv("AUTHZ_URL"),
 		HubURL:                getenv("HUB_URL"),
 		ConsentURL:            getenv("CONSENT_URL"),
-		AuditURL:              getenv("AUDIT_URL"),
-		PHGURL:                getenv("PHG_URL"),
 		RegistrarURL:          getenv("REGISTRAR_URL"),
 		FHIRValidateURL:       getenv("FHIR_VALIDATE_URL"),
 		FHIRValidateURL21:     getenv("FHIR_VALIDATE_URL_2_1"),
@@ -623,8 +664,10 @@ func loadConfig(getenv func(string) string) (config, error) {
 
 		ProviderDavinciIngressBaseURL:     getenv("PROVIDER_DAVINCI_INGRESS_BASE_URL"),
 		ProviderDavinciIngressClientsFile: getenv("INGRESS_CLIENTS_FILE"),
+		ScenarioCallersFile:               getenv("SCENARIO_CALLERS_FILE"),
 
 		acceptUnknownMembersAlias: getenv("SHN_ACCEPT_UNKNOWN_MEMBERS"),
+		ignoredSettingLines:       ignoredSettingLines(getenv),
 
 		AuthzPubkeyURL:     getenv("AUTHZ_PUBKEY_URL"),
 		HubTransportKeyURL: getenv("HUB_TRANSPORT_KEY_URL"),
@@ -763,6 +806,16 @@ func loadConfig(getenv func(string) string) (config, error) {
 		cfg.RequireSharedLine = true
 	default:
 		return config{}, fmt.Errorf("gateway: REQUIRE_SHARED_LINE must be true or false, got %q", raw)
+	}
+
+	// Nothing is translated between IG lines unless the participant opts in.
+	// Only "true" and "false" are values.
+	switch raw := getenv("TRANSLATE_IG_LINES"); raw {
+	case "", "false":
+	case "true":
+		cfg.TranslateIGLines = true
+	default:
+		return config{}, fmt.Errorf("gateway: TRANSLATE_IG_LINES must be true or false, got %q", raw)
 	}
 
 	// A Da Vinci-native request is carried as sent unless the participant opts
@@ -912,19 +965,6 @@ func loadConfig(getenv func(string) string) (config, error) {
 		}
 	}
 
-	// The payer's Patient Access API is mounted unless the payer turns it off.
-	// Only "on" and "off" are values, and only a payer gateway serves it.
-	switch raw := getenv("PATIENT_ACCESS_API"); raw {
-	case "":
-	case "on", "off":
-		if cfg.Role != "payer" {
-			return config{}, fmt.Errorf("gateway: PATIENT_ACCESS_API is a payer gateway setting; this gateway's ROLE is %q", cfg.Role)
-		}
-		cfg.PatientAccessOff = raw == "off"
-	default:
-		return config{}, fmt.Errorf("gateway: PATIENT_ACCESS_API must be on or off, got %q", raw)
-	}
-
 	// A payer's own eligibility endpoint: an absolute http(s) URL, on a payer
 	// gateway that forwards to its payer's system (PAYER_DAVINCI_BASE_URL).
 	if u := cfg.PayerEligibilityURL; u != "" {
@@ -995,6 +1035,16 @@ func loadConfig(getenv func(string) string) (config, error) {
 		}
 		cfg.IngressBaseURL = cfg.ProviderDavinciIngressBaseURL
 		cfg.IngressClients = clients
+	}
+	if cfg.ScenarioCallersFile != "" {
+		if role != "provider" {
+			return config{}, fmt.Errorf("gateway: SCENARIO_CALLERS_FILE is provider-only (role=%q): no other role serves /scenario", role)
+		}
+		callers, err := loadScenarioCallers(cfg.ScenarioCallersFile)
+		if err != nil {
+			return config{}, fmt.Errorf("gateway: scenario callers: %w", err)
+		}
+		cfg.ScenarioCallers = callers
 	}
 
 	// Observer stream: off unless OBSERVER_ADDR is set, and REFUSED unless the
@@ -1075,9 +1125,28 @@ func loadConfig(getenv func(string) string) (config, error) {
 	return cfg, nil
 }
 
+// loadScenarioCallers reads the callers a provider gateway's /scenario routes
+// admit: a JSON array of {label, public_key}, the key base64 Ed25519. An empty
+// array is an empty, non-nil set: no caller is admitted. An empty or repeated
+// label, or a key that is not an Ed25519 public key, refuses the file.
+func loadScenarioCallers(path string) (map[string]ed25519.PublicKey, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	callers, err := scenarioauth.ParseCallers(raw)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return callers, nil
+}
+
 // loadIngressClients parses the inbound-client registration file: a JSON array of
-// {client_id, alg, public_key_pem, scopes}. alg must be ES384|RS384 and the PEM must
+// {client_id, alg, public_key_pem, scopes, module}. alg must be ES384|RS384 and the PEM must
 // parse — a malformed entry is a hard boot error (the FR-G13 all-or-nothing posture).
+// module, when set, registers the client as a module ingress client of that compiled-in
+// module (engine.ModuleIDs; the engine refuses another); the builders such a client may
+// declare are its module's, so an entry that lists builders is refused.
 // Returns nil (not error) when path is empty — the caller then enforces the
 // must-have->=1-client invariant.
 func loadIngressClients(path string) (map[string]engine.IngressClientRegistration, error) {
@@ -1093,9 +1162,19 @@ func loadIngressClients(path string) (map[string]engine.IngressClientRegistratio
 		Alg          string   `json:"alg"`
 		PublicKeyPEM string   `json:"public_key_pem"`
 		Scopes       []string `json:"scopes"`
+		Module       string   `json:"module"`
 	}
 	if err := json.Unmarshal(raw, &arr); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	var keys []map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &keys); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	for i, k := range keys {
+		if _, listed := k["builders"]; listed {
+			return nil, fmt.Errorf("entry %d: builders is not configurable: a module client may declare its module's builders (engine.ModuleBuilders), set by the build", i)
+		}
 	}
 	out := map[string]engine.IngressClientRegistration{}
 	for i, c := range arr {
@@ -1123,7 +1202,7 @@ func loadIngressClients(path string) (map[string]engine.IngressClientRegistratio
 		if len(scopes) == 0 {
 			scopes = []string{"system/Davinci.write"}
 		}
-		out[c.ClientID] = engine.IngressClientRegistration{Alg: c.Alg, PublicKeyPEM: pemBytes, Scopes: scopes}
+		out[c.ClientID] = engine.IngressClientRegistration{Alg: c.Alg, PublicKeyPEM: pemBytes, Scopes: scopes, Module: c.Module}
 	}
 	return out, nil
 }
@@ -1155,8 +1234,6 @@ func optionalURLs(cfg config) [][2]string {
 		{"AUTHZ_URL", cfg.AuthzURL},
 		{"HUB_URL", cfg.HubURL},
 		{"CONSENT_URL", cfg.ConsentURL},
-		{"AUDIT_URL", cfg.AuditURL},
-		{"PHG_URL", cfg.PHGURL},
 		{"FHIR_VALIDATE_URL", cfg.FHIRValidateURL},
 		{"FHIR_VALIDATE_URL_2_1", cfg.FHIRValidateURL21},
 		{"FHIR_VALIDATE_URL_2_2", cfg.FHIRValidateURL22},
@@ -1440,11 +1517,9 @@ type resolvedEndpoints struct {
 	Hub          string
 	Registrar    string
 	FHIRValidate string
-	// Consent/Audit/PHG are discovery-advertised; explicit env still
-	// wins via firstNonEmpty in build (same pattern as Authz/Hub).
+	// Consent is discovery-advertised; explicit env still wins via
+	// firstNonEmpty in build (same pattern as Authz/Hub).
 	Consent string
-	Audit   string
-	PHG     string
 	// HubAcceptsInvolved: the network's Hub reads an envelope's involved list
 	// (the descriptor lists it in hubAccepts). Read once, at start.
 	HubAcceptsInvolved bool
@@ -1485,8 +1560,6 @@ func resolveDiscoveryWaiting(ctx context.Context, c *http.Client, cfg config) (t
 		Registrar:    disc.Endpoints.Registrar,
 		FHIRValidate: disc.FHIRValidateURL,
 		Consent:      disc.Endpoints.Consent,
-		Audit:        disc.Endpoints.Audit,
-		PHG:          disc.Endpoints.PHG,
 
 		HubAcceptsInvolved: disc.HubAcceptsField(shnsdk.HubAcceptsInvolved),
 	}
@@ -1556,6 +1629,9 @@ type built struct {
 	// requireSharedLine is the shared-line opt-in exactly as build() handed it
 	// to engine.New, recorded for the same reason.
 	requireSharedLine bool
+	// translateIGLines is the module 2 opt-in exactly as build() handed it to
+	// engine.New, recorded for the same reason.
+	translateIGLines bool
 	// enrichNativeRequests is the enrichment opt-in exactly as build() handed it
 	// to engine.New, recorded for the same reason.
 	enrichNativeRequests bool
@@ -1722,9 +1798,12 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	registrarURL := firstNonEmpty(cfg.RegistrarURL, endpoints.Registrar)
 
 	// Validator: REAL operation-level, FAIL-CLOSED. Fake only on explicit opt-in. (pure helper, unit-tested)
-	validator, err := selectValidator(getenv, firstNonEmpty(cfg.FHIRValidateURL, endpoints.FHIRValidate))
+	validator, err := selectValidator(getenv, firstNonEmpty(cfg.FHIRValidateURL, endpoints.FHIRValidate), cfg.ConformanceEnforcement)
 	if err != nil {
 		return b, err
+	}
+	if fakeValidator(getenv) {
+		log.Printf("gateway: WARNING: SHN_FAKE_VALIDATOR=1 — every validator lane is the test double, which checks a few PAS/DTR cardinalities and bindings and accepts everything else: nothing this gateway reports as validated was checked against its IG. Test builds only; a released gateway refuses to boot with it set")
 	}
 	// Default declared lanes qualify before traffic admission. Explicit per-line
 	// URLs retain their existing startup semantics; undeclared defaults qualify
@@ -1732,6 +1811,9 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	validatorLanes, lanes, err := discoverValidatorLanes(ctx, getenv, cfg.ContractVersions, validator, cfg, engine.DefaultLaneURL, qualifyDefaultLane)
 	if err != nil {
 		return b, err
+	}
+	if validator == nil && len(validatorLanes) == 0 && len(lanes.defaults) == 0 {
+		fmt.Fprintln(stdout, noValidatorLog)
 	}
 
 	admitted := false
@@ -1777,7 +1859,7 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		}
 		sor = fhirsor.NewFromURL(cfg.FHIRDataURL, hc)
 	}
-	// Store: the gateway's OWN business state (auth numbers, pended-claim ledger, EOBs).
+	// Store: the gateway's OWN business state (auth numbers, pended-claim ledger).
 	// In-memory by default; the SHN_STORE_DATABASE_URL override below swaps in pgstore.
 	var store engine.Store = engine.NewMemStore()
 
@@ -1834,8 +1916,8 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		// PROVIDER_DAVINCI_INGRESS unset no /oauth/token and no ingress route is mounted,
 		// so persisting (and rotating daily, and reloading every 30 s) a signing key for
 		// this holder would be key material and database traffic no request can use.
-		// Replay and exchange stay unconditional — the Hub-assertion and patient-access
-		// guards and the exchange seam run on every role.
+		// Replay and exchange stay unconditional — the Hub-assertion guard and the
+		// exchange seam run on every role.
 		ingressKey := "off"
 		if cfg.ProviderDavinciIngress {
 			ks := pgstore.NewIngressKeyStore(p, bundle.Identity.HolderID, clock)
@@ -1890,20 +1972,18 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	}
 
 	gwCfg := engine.Config{
-		Role:                    cfg.Role,
-		HolderID:                bundle.Identity.HolderID,
-		PayerRouter:             payerRouter,
-		Identity:                bundle.Identity,
-		AuthzURL:                firstNonEmpty(cfg.AuthzURL, endpoints.Authz),
-		AuthzPub:                trust.AuthzPub,
-		HubTransportPub:         trust.HubTransportPub,
-		HubURL:                  firstNonEmpty(cfg.HubURL, endpoints.Hub),
-		Reg:                     reg, // populated by the snapshot above
-		RegistryRefresh:         registryRefresh(client, registrarURL, reg),
-		Validator:               validator,
-		ValidatorsByLine:        validatorLanes,
-		DefaultValidatorsByLine: lanes.defaults,
-		CanonicalFallbackLines:  lanes.fallbacks,
+		Role:                     cfg.Role,
+		HolderID:                 bundle.Identity.HolderID,
+		PayerRouter:              payerRouter,
+		Identity:                 bundle.Identity,
+		AuthzURL:                 firstNonEmpty(cfg.AuthzURL, endpoints.Authz),
+		AuthzPub:                 trust.AuthzPub,
+		HubTransportPub:          trust.HubTransportPub,
+		HubURL:                   firstNonEmpty(cfg.HubURL, endpoints.Hub),
+		Reg:                      reg, // populated by the snapshot above
+		RegistryRefresh:          registryRefresh(client, registrarURL, reg),
+		Validator:                validator,
+		ValidatorsByContractLine: engine.ContractLineLanes(validatorLanes, lanes.defaults, lanes.fallbacks, cfg.ContractVersions),
 		// D1a: the boot-validated declared set — read by leg selection, the published
 		// CapabilityStatements / davinci-configuration, and (through the registrar
 		// registration) the declaration peers select this holder against.
@@ -1926,12 +2006,10 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		Client:                 client,
 		NPI:                    cfg.NPI,
 		ConsentURL:             firstNonEmpty(cfg.ConsentURL, endpoints.Consent),
-		AuditURL:               firstNonEmpty(cfg.AuditURL, endpoints.Audit),
-		PHGURL:                 firstNonEmpty(cfg.PHGURL, endpoints.PHG),
 
 		OriginationProfile: cfg.OriginationProfile,
 		// Strict extensions (FR-G52): g.strictPeer is production-dormant BY DESIGN (always false —
-		// see its comment, gateway/engine/originate.go) — there is
+		// see its comment, gateway/engine/linereach.go) — there is
 		// deliberately no engine.Config field here feeding it from env.
 	}
 	// Shared-state seams: nil on every field unless the store DSN selected the
@@ -1979,7 +2057,7 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 			fmt.Fprintln(stdout, "gateway: PAYER_DAVINCI_PAS_NATIVE is set but is no longer a switch — PAS submit and update always forward to the payer's own system, like every other Da Vinci leg (the in-process payer is retired); remove it")
 		}
 		// FR-G26: the partner's CDS services are chosen per request by the request's hook
-		// (engine/crdservice.go). The listing is read here once, best effort, to report which
+		// (engine/workstream_pa_cds_services.go). The listing is read here once, best effort, to report which
 		// hook each configured service answers; a listing that cannot be read yet does not
 		// stop boot — CRD requests are refused (502) until it can be read. CDS Hooks may
 		// live on a different base than the FHIR ops (e.g. br-payer: CDS at root, FHIR
@@ -2106,13 +2184,11 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	gwCfg.IngressEnabled = cfg.ProviderDavinciIngress
 	gwCfg.IngressBaseURL = cfg.IngressBaseURL
 	gwCfg.IngressClients = cfg.IngressClients
+	gwCfg.ScenarioCallers = cfg.ScenarioCallers
 	gwCfg.RequireKnownMembers = cfg.RequireKnownMembers
 	gwCfg.RequireSharedLine = cfg.RequireSharedLine
+	gwCfg.TranslateIGLines = cfg.TranslateIGLines
 	gwCfg.EnrichNativeRequests = cfg.EnrichNativeRequests
-	gwCfg.PatientAccessOff = cfg.PatientAccessOff
-	if cfg.PatientAccessOff {
-		log.Printf("gateway: PATIENT_ACCESS_API=off — GET /metadata and GET /ExplanationOfBenefit are not served; liveness is GET /health")
-	}
 	gwCfg.FHIRServerRead = cfg.FHIRServerRead
 	gwCfg.HubAcceptsInvolved = endpoints.HubAcceptsInvolved
 	// Stated in both states: whether this gateway names the other patients a
@@ -2122,6 +2198,11 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		log.Printf("gateway: the network's Hub reads involved patients — each prior-authorization leg names the other patients it involves, identified through this participant's system of record, so the exchange is recorded under each of them")
 	} else {
 		log.Printf("gateway: the network's Hub does not list involved patients in hubAccepts — legs carry no involved list; restart the gateway after the network starts listing it")
+	}
+	// Stated in every state, so whether a provider gateway authenticates its
+	// /scenario callers, and whom it admits, can be read from its boot line.
+	if gwCfg.Role == "provider" {
+		log.Printf("gateway: %s", scenarioCallersLine(gwCfg.ScenarioCallers))
 	}
 	// Stated in both states, so a deployment's enrichment posture can be read
 	// from its boot line.
@@ -2143,11 +2224,17 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	if cfg.acceptUnknownMembersAlias != "" {
 		log.Printf("gateway: WARNING: SHN_ACCEPT_UNKNOWN_MEMBERS is deprecated and will be removed: carrying members the system of record does not hold is now the default; remove the variable (REQUIRE_KNOWN_MEMBERS=true opts in to refusing them)")
 	}
+	for _, line := range cfg.ignoredSettingLines {
+		log.Print(line)
+	}
 	if cfg.RequireKnownMembers {
 		log.Printf("gateway: REQUIRE_KNOWN_MEMBERS=true — a Da Vinci CRD/DTR/PAS subject the system of record does not hold is refused")
 	}
 	if cfg.RequireSharedLine {
 		log.Printf("gateway: REQUIRE_SHARED_LINE=true — a pair that shares no declared IG line is refused as routing")
+	}
+	if cfg.TranslateIGLines {
+		log.Printf("gateway: TRANSLATE_IG_LINES=true — a message this gateway builds is translated to a peer's IG line where a certified translation exists, and a questionnaire package answer is carried into this gateway's DTR line's names")
 	}
 
 	var accessEmit func(diagnostics.Event) bool
@@ -2285,6 +2372,7 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	b = built{
 		requireKnownMembers:  gwCfg.RequireKnownMembers,
 		requireSharedLine:    gwCfg.RequireSharedLine,
+		translateIGLines:     gwCfg.TranslateIGLines,
 		enrichNativeRequests: gwCfg.EnrichNativeRequests,
 		fhirServerRead:       gwCfg.FHIRServerRead,
 		responder:            gwCfg.Responder,
@@ -2307,10 +2395,10 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		lanes:           lanes,
 		poolStats:       poolStats,
 		certification:   gwCfg.CertificationValidatorsByLine,
-		// Certification evidence is collected at every level but none (the
-		// engine starts no certification worker there), so only then is there
-		// anything to warm.
-		warmCertification: gwCfg.ConformanceEnforcement != engine.EnforcementNone,
+		// Certification evidence is collected only where payload checks consume
+		// lanes (the engine starts no certification worker otherwise), so only
+		// then is there anything to warm.
+		warmCertification: payloadChecksConsumeLanes(gwCfg.ConformanceEnforcement),
 	}
 	admitted = true
 	return b, nil
@@ -2548,7 +2636,7 @@ func Handler(ctx context.Context, getenv func(string) string, stdout io.Writer) 
 }
 
 // validatorLanesForDeclared builds the per-LINE $validate lane map and
-// FAILS CLOSED when a declared line has no lane.
+// FAILS CLOSED when a declared line has no lane, at every level but none.
 //
 // The rule, and why it is fail-closed: a HAPI instance can host exactly one
 // version of an IG, so validating a 2.2 payload against a 2.0 lane does not
@@ -2556,10 +2644,11 @@ func Handler(ctx context.Context, getenv func(string) string, stdout io.Writer) 
 // payload. A deployment that DECLARES a line is telling peers it can produce and
 // answer at that line; FR-36 says everything it produces is validated. Without a
 // lane those two promises cannot both hold, so the gateway refuses to start
-// rather than quietly validate against the wrong IG (FR-36/FR-G29).
+// rather than quietly validate against the wrong IG (FR-36/FR-G29). At none
+// it validates nothing, so the line is served unlaned instead.
 //
 // canonical is the already-resolved canonical-lane validator (selectValidator's
-// result). Under SHN_FAKE_VALIDATOR=1 each line gets its own structural fake
+// result; nil at none with no FHIR_VALIDATE_URL). Under SHN_FAKE_VALIDATOR=1 each line gets its own structural fake
 // validator with the line-specific cardinality and binding checks.
 // Scope: only MULTI-LINE contracts (pa.crd/pa.dtr/pa.pas — those whose native set
 // carries more than one line) can produce line-varying payloads and therefore need
@@ -2570,10 +2659,10 @@ func Handler(ctx context.Context, getenv func(string) string, stdout io.Writer) 
 // NativeContractVersions(), not hardcoded, so a contract that gains a second line
 // automatically starts demanding lanes.
 func validatorLanesForDeclared(getenv func(string) string, declared []string, canonical shnsdk.Validator, cfg config) (map[string]shnsdk.Validator, error) {
-	fake := getenv("SHN_FAKE_VALIDATOR") == "1"
+	fake := fakeValidator(getenv)
 	// The canonical line — the one FHIR_VALIDATE_URL has always served — is the line
 	// this build DEFAULT-declares for its multi-line contracts.
-	canonicalLine := shnsdk.LineOf(shnsdk.ContractPAPAS20)
+	canonicalLine := shnsdk.LineOf(engine.CanonicalContractVersion())
 	urlForLine := map[string]string{"2.1": cfg.FHIRValidateURL21, "2.2": cfg.FHIRValidateURL22}
 
 	linesPerContract := map[string]map[string]bool{}
@@ -2600,20 +2689,26 @@ func validatorLanesForDeclared(getenv func(string) string, declared []string, ca
 		switch {
 		case fake:
 			lanes[line] = engine.NewLineFakeValidator(line)
-		case line == canonicalLine:
+		case line == canonicalLine && canonical != nil:
 			lanes[line] = canonical
 		case urlForLine[line] != "":
 			lanes[line] = shnsdk.NewOperationValidator(urlForLine[line])
+		case !payloadChecksConsumeLanes(cfg.ConformanceEnforcement):
+			// No payload check consumes a lane, so a declared line needs none to
+			// be built and answered at: it is served unlaned (the engine's
+			// servesLine), and no IG line is bridged to or from it without one.
+			continue
 		default:
-			// The refusal names the env to SET, never a way to turn validation OFF:
-			// SHN_FAKE_VALIDATOR is a hermetic-test opt-in, and an operator reading a
-			// production boot failure must not be handed "disable FR-36" as a remedy.
+			// The refusal names the env to SET, or the level that checks nothing
+			// (FR-G29), never the test double: SHN_FAKE_VALIDATOR is a hermetic-test
+			// opt-in, and an operator reading a production boot failure must not be
+			// handed a validator that only appears to validate.
 			envName := "FHIR_VALIDATE_URL_" + strings.ReplaceAll(line, ".", "_")
 			source := "SHN_CONTRACT_VERSIONS"
 			if cfg.ContractVersionsDerived {
 				source = "the declaration derived from PAYER_DAVINCI_CONTRACT_VERSIONS (SHN_CONTRACT_VERSIONS is unset)"
 			}
-			return nil, fmt.Errorf("gateway: %s declares %s but no FHIR validator lane is configured for line %s: set %s to a $validate endpoint hosting that line's IG packages (one HAPI hosts exactly one version of an IG) — refusing to declare a line this gateway cannot validate (FR-36/FR-G29)", source, tok, line, envName)
+			return nil, fmt.Errorf("gateway: %s declares %s but no FHIR validator lane is configured for line %s: set %s to a $validate endpoint hosting that line's IG packages (one HAPI hosts exactly one version of an IG) — refusing to declare a line this gateway cannot validate (FR-36/FR-G29); "+noneRemedy, source, tok, line, envName)
 		}
 	}
 	// Lane map: widen beyond DECLARED — any NATIVE line of a multi-line contract with
@@ -2625,7 +2720,7 @@ func validatorLanesForDeclared(getenv func(string) string, declared []string, ca
 	// SAME map — so the opt-in is bidirectional (CONFIGURATION.md states both
 	// consequences). This block only ADDS lines; the declared-without-
 	// lane fail-closed check above is unaffected — a declared line with no
-	// configured lane still refuses boot.
+	// configured lane still refuses boot at every level but none.
 	for _, lines := range linesPerContract {
 		if len(lines) < 2 {
 			continue // single-line contract: rides the canonical lane, unchanged
@@ -2637,43 +2732,68 @@ func validatorLanesForDeclared(getenv func(string) string, declared []string, ca
 			switch {
 			case fake:
 				lanes[line] = engine.NewLineFakeValidator(line)
-			case line == canonicalLine:
+			case line == canonicalLine && canonical != nil:
 				lanes[line] = canonical
 			case urlForLine[line] != "":
 				lanes[line] = shnsdk.NewOperationValidator(urlForLine[line])
 			default:
 				// No env configured for this undeclared native line — stays
-				// absent from the map (validatorForLine resolves it to
-				// unlaned, exactly as before D1a). This is an OPT-IN, never a
+				// absent from the map (its contract lines resolve unlaned,
+				// exactly as before D1a). This is an OPT-IN, never a
 				// requirement to lane every native line.
 			}
 		}
 	}
 	// A single-line contract's line may be absent from lanes (a line not otherwise
-	// declared; no native contract is single-line today). engine.validatorForLine treats an ABSENT line in a
+	// declared; no native contract is single-line today). The engine treats an ABSENT contract line in a
 	// non-empty lane map as unlaned, so map it to the canonical lane explicitly.
 	for _, tok := range declared {
 		contract, line, ok := strings.Cut(tok, "@")
-		if ok && line != "" && len(linesPerContract[contract]) < 2 && lanes[line] == nil {
+		if ok && line != "" && len(linesPerContract[contract]) < 2 && lanes[line] == nil && canonical != nil {
 			lanes[line] = canonical
 		}
 	}
 	return lanes, nil
 }
 
+// payloadChecksConsumeLanes reports whether the gateway's payload conformance
+// checks use validator lanes at all: every level but none, which checks no
+// payload. Boot reads it wherever a missing lane is refused, waited for or
+// warmed. It answers as the engine's own predicate of the same name does
+// (TestPayloadChecksConsumeLanes in both packages pins the same table).
+func payloadChecksConsumeLanes(level engine.ConformanceEnforcement) bool {
+	return level != engine.EnforcementNone
+}
+
 // selectValidator is the FAIL-CLOSED validator decision (pure, unit-tested
-// directly): explicit fake opt-in → fake; else a resolved URL → real $validate;
-// else ERROR (never a silent fake fallback — FR-36).
-func selectValidator(getenv func(string) string, validatorURL string) (shnsdk.Validator, error) {
+// directly): explicit fake opt-in in a test build (testdouble.go) → fake; else a
+// resolved URL → real $validate; else, where no payload check consumes a lane
+// (none), no validator (nil, nil): such a gateway checks no payload and bridges
+// no line it has no lane for (FR-G29); else ERROR (never a silent fake
+// fallback — FR-36).
+func selectValidator(getenv func(string) string, validatorURL string, level engine.ConformanceEnforcement) (shnsdk.Validator, error) {
 	switch {
-	case getenv("SHN_FAKE_VALIDATOR") == "1":
-		return engine.NewLineFakeValidator(shnsdk.LineOf(shnsdk.ContractPAPAS20)), nil
+	case fakeValidator(getenv):
+		return engine.NewLineFakeValidator(shnsdk.LineOf(engine.CanonicalContractVersion())), nil
 	case validatorURL != "":
 		return shnsdk.NewOperationValidator(validatorURL), nil // $validate wrapper (NOT a thin HTTP validator)
+	case !payloadChecksConsumeLanes(level):
+		return nil, nil
 	default:
-		return nil, fmt.Errorf("no FHIR validator URL (not in /discovery, not in env) and SHN_FAKE_VALIDATOR not set: refusing to run without per-message validation (FR-36)")
+		return nil, errors.New("no FHIR validator URL (not in /discovery, not in env): refusing to run without per-message validation (FR-36); set FHIR_VALIDATE_URL to an IG-loaded $validate endpoint, " + noneRemedy)
 	}
 }
+
+// noneRemedy ends every boot refusal for a missing validator: the one level that
+// needs none. A gateway at none checks no payload, certifies nothing it builds
+// and bridges no IG line without a lane, so it claims nothing a validator would
+// have to back.
+const noneRemedy = "or set CONFORMANCE_ENFORCEMENT=none to check no payload (this gateway then needs no validator)"
+
+// noValidatorLog is the boot line of a gateway with no validator anywhere: no
+// canonical validator, no per-line lane and no default lane. Only none boots so.
+const noValidatorLog = "gateway: no FHIR validator: CONFORMANCE_ENFORCEMENT=none, and no FHIR_VALIDATE_URL (env or /discovery), FHIR_VALIDATE_URL_<line> or default validator lane is configured: " +
+	"no payload is checked, each declared line is served unlaned, and no IG line is bridged"
 
 // convergeRegistry snapshots the /holders feed into reg (Holder → RegistryEntry).
 // The engine reads EncPub from reg to seal to a recipient; a malformed/missing
@@ -2897,7 +3017,7 @@ func certificationValidators(getenv func(string) string, cfg config, canonical s
 	}
 	out := make(map[string]shnsdk.Validator, len(endpoints))
 	for line, endpoint := range endpoints {
-		if getenv("SHN_FAKE_VALIDATOR") == "1" {
+		if fakeValidator(getenv) {
 			out[line] = engine.NewLineFakeValidator(line)
 			continue
 		}
@@ -3020,4 +3140,18 @@ type unconfiguredCertification struct{ reason string }
 
 func (u unconfiguredCertification) Validate(context.Context, []byte, string) (shnsdk.Result, error) {
 	return shnsdk.Result{}, &engine.CertificationLaneUnavailable{Reason: u.reason}
+}
+
+// scenarioCallersLine is the boot line about a provider gateway's /scenario
+// callers: whom it admits, none, or a warning that it does not authenticate
+// them.
+func scenarioCallersLine(callers map[string]ed25519.PublicKey) string {
+	switch {
+	case callers == nil:
+		return "WARNING: SCENARIO_CALLERS_FILE unset — the /scenario routes do not authenticate their caller"
+	case len(callers) == 0:
+		return "/scenario admits no caller (SCENARIO_CALLERS_FILE lists none)"
+	}
+	labels := slices.Sorted(maps.Keys(callers))
+	return "/scenario admits only its callers: " + strings.Join(labels, ", ")
 }

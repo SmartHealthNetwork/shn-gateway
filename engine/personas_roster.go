@@ -30,8 +30,8 @@ type ScenarioPersona struct {
 	// uc06 and uc07 start, complete and full routes all resolve "uc06" or
 	// "uc07"), plus the body branch where a route has one: "uc01" and
 	// "uc01-notcovered" (/scenario/uc01, {"branch":"covered"|"notcovered"}),
-	// "uc03-bridge-demo" and "uc03-bridge-refuse" (/scenario/uc03,
-	// {"branch":"bridge-demo"|"bridge-refuse"}), "uc05-noconsent"
+	// "uc03-bridge-demo" and "uc03-line-carry" (/scenario/uc03,
+	// {"branch":"bridge-demo"|"line-carry"}), "uc05-noconsent"
 	// (/scenario/uc05, {"branch":"noconsent"}). /scenario/dispatch is not here:
 	// it takes any member its request names.
 	Scenario string
@@ -58,18 +58,18 @@ var scenarioMembers = map[string]struct {
 	// The unknown-payer persona's system holds no order (cmd/fhirseed seeds its
 	// Patient and Coverage only): its route fails closed on routing, before any
 	// order is read, so its statement names none.
-	"uc02-unknownpayer":  {"MBR-UNKNOWN-PAYER", "MBR-UNKNOWN-PAYER", "MBR-UNKNOWN-PAYER", nil},
-	"uc03":               {"MBR-COVERED", "MBR-PD-UC03", "MBR-D-UC03", func() orderTuple { return originationCodes().uc03 }},
-	"uc03-bridge-demo":   {"MBR-BRIDGE-DEMO", "MBR-BRIDGE-DEMO", "MBR-BRIDGE-DEMO", func() orderTuple { return uc03BridgeCode }},
-	"uc03-bridge-refuse": {"MBR-BRIDGE-REFUSE", "MBR-BRIDGE-REFUSE", "MBR-BRIDGE-REFUSE", func() orderTuple { return uc03BridgeCode }},
-	"uc04":               {"MBR-UC04", "MBR-PD-UC04", "MBR-D-UC04", func() orderTuple { return originationCodes().uc04 }},
-	"uc05":               {"MBR-UC05", "MBR-PD-UC05", "MBR-D-UC05", func() orderTuple { return originationCodes().uc05 }},
-	"uc05-noconsent":     {"MBR-UC05-NOCONSENT", "MBR-PD-UC05-NC", "MBR-D-UC05-NC", func() orderTuple { return originationCodes().uc05 }},
-	"uc06":               {"MBR-UC06", "MBR-PD-UC06", "MBR-D-UC06", func() orderTuple { return originationCodes().uc06 }},
-	"uc07":               {"MBR-UC07", "MBR-PD-UC07", "MBR-D-UC07", func() orderTuple { return originationCodes().uc07 }},
-	"uc07hcpcs":          {"MBR-UC07HCPCS", "MBR-UC07HCPCS", "MBR-UC07HCPCS", func() orderTuple { return originationCodes().uc07hcpcs }},
-	"uc08":               {"MBR-UC08", "MBR-PD-UC08", "MBR-D-UC08", func() orderTuple { return originationCodes().uc08 }},
-	"homeoxygen":         {homeOxygenMember, homeOxygenMember, homeOxygenMember, func() orderTuple { return homeOxygenOrder }},
+	"uc02-unknownpayer": {"MBR-UNKNOWN-PAYER", "MBR-UNKNOWN-PAYER", "MBR-UNKNOWN-PAYER", nil},
+	"uc03":              {"MBR-COVERED", "MBR-PD-UC03", "MBR-D-UC03", func() orderTuple { return originationCodes().uc03 }},
+	"uc03-bridge-demo":  {"MBR-BRIDGE-DEMO", "MBR-BRIDGE-DEMO", "MBR-BRIDGE-DEMO", func() orderTuple { return uc03BridgeCode }},
+	"uc03-line-carry":   {"MBR-BRIDGE-REFUSE", "MBR-BRIDGE-REFUSE", "MBR-BRIDGE-REFUSE", func() orderTuple { return uc03BridgeCode }},
+	"uc04":              {"MBR-UC04", "MBR-PD-UC04", "MBR-D-UC04", func() orderTuple { return originationCodes().uc04 }},
+	"uc05":              {"MBR-UC05", "MBR-PD-UC05", "MBR-D-UC05", func() orderTuple { return originationCodes().uc05 }},
+	"uc05-noconsent":    {"MBR-UC05-NOCONSENT", "MBR-PD-UC05-NC", "MBR-D-UC05-NC", func() orderTuple { return originationCodes().uc05 }},
+	"uc06":              {"MBR-UC06", "MBR-PD-UC06", "MBR-D-UC06", func() orderTuple { return originationCodes().uc06 }},
+	"uc07":              {"MBR-UC07", "MBR-PD-UC07", "MBR-D-UC07", func() orderTuple { return originationCodes().uc07 }},
+	"uc07hcpcs":         {"MBR-UC07HCPCS", "MBR-UC07HCPCS", "MBR-UC07HCPCS", func() orderTuple { return originationCodes().uc07hcpcs }},
+	"uc08":              {"MBR-UC08", "MBR-PD-UC08", "MBR-D-UC08", func() orderTuple { return originationCodes().uc08 }},
+	"homeoxygen":        {homeOxygenMember, homeOxygenMember, homeOxygenMember, func() orderTuple { return homeOxygenOrder }},
 }
 
 // ScenarioRoster is every (scenario, lane, persona set) a /scenario/* route
